@@ -1194,6 +1194,37 @@ fn register_autoplug_candidates(reg: &mut Registry) {
         },
         || Box::new(crate::sck::ScreenCaptureSrc::new(u64::MAX)),
     ));
+    // Windows capture / render (M943): registered so the device monitor's
+    // `Device::create` can build what it discovered, and so a launch line can
+    // name them. The registered caps are nominal; each element reports the real
+    // endpoint / camera shape at negotiation.
+    #[cfg(all(target_os = "windows", feature = "mf-video-src"))]
+    reg.register_source(SourceFactory::new(
+        "mfvideosrc",
+        Caps::RawVideo {
+            format: RawVideoFormat::Nv12,
+            width: Dim::Fixed(640),
+            height: Dim::Fixed(480),
+            framerate: Rate::Fixed(30 << 16),
+            interlace: g2g_core::Interlace::Any,
+        },
+        || Box::new(crate::mfvideosrc::MfVideoSrc::new()),
+    ));
+    #[cfg(all(target_os = "windows", feature = "wasapi-src"))]
+    reg.register_source(SourceFactory::new(
+        "wasapisrc",
+        Caps::Audio {
+            format: AudioFormat::PcmF32Le,
+            channels: 2,
+            sample_rate: 48_000,
+        },
+        || Box::new(crate::wasapisrc::WasapiSrc::new(u64::MAX)),
+    ));
+    #[cfg(all(target_os = "windows", feature = "wasapi-sink"))]
+    reg.register_launch(LaunchFactory::of::<crate::wasapisink::WasapiSink>(
+        "wasapisink",
+        || Box::new(crate::wasapisink::WasapiSink::new()),
+    ));
 }
 
 /// Register gst-canonical-name aliases (M192) so pasted `gst-launch` lines using
@@ -1210,7 +1241,13 @@ fn register_aliases(reg: &mut Registry) {
     );
     reg.register_alias(
         "autoaudiosink",
-        &["alsasink", "pulsesink", "coreaudiosink", "fakesink"],
+        &[
+            "alsasink",
+            "pulsesink",
+            "coreaudiosink",
+            "wasapisink",
+            "fakesink",
+        ],
     );
     // gst's name for the DVD subpicture decoder.
     reg.register_alias("dvdsubdec", &["vobsubdec"]);

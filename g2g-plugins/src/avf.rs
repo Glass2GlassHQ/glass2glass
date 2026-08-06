@@ -58,6 +58,7 @@ use crate::cvnv12::{
 };
 
 use alloc::boxed::Box;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 /// How long the run loop waits for the delegate before checking liveness.
@@ -181,18 +182,25 @@ impl<D> core::fmt::Debug for SessionState<D> {
     }
 }
 
-/// Build the session skeleton shared by both sources: default device of
-/// `media_type` -> device input -> session. `None` device (absent hardware or
-/// denied TCC permission) surfaces as the structured hardware error the CI
-/// probe asserts.
+/// Build the session skeleton shared by both sources: the device
+/// `unique_id` names (empty = the default device of `media_type`) -> device
+/// input -> session. `None` device (absent hardware, a stale id, or denied TCC
+/// permission) surfaces as the structured hardware error the CI probe asserts.
 unsafe fn open_session(
     media_type: Option<&'static objc2_av_foundation::AVMediaType>,
+    unique_id: &str,
 ) -> Result<Retained<AVCaptureSession>, G2gError> {
     let media_type = media_type.ok_or_else(hw)?;
-    // SAFETY: the media type is a valid static; a nil default device is the
-    // no-hardware / no-permission case.
-    let device =
-        unsafe { AVCaptureDevice::defaultDeviceWithMediaType(media_type) }.ok_or_else(hw)?;
+    // SAFETY: the media type is a valid static; a nil device is the
+    // no-hardware / no-permission / unknown-id case.
+    let device = unsafe {
+        if unique_id.is_empty() {
+            AVCaptureDevice::defaultDeviceWithMediaType(media_type)
+        } else {
+            AVCaptureDevice::deviceWithUniqueID(&NSString::from_str(unique_id))
+        }
+    }
+    .ok_or_else(hw)?;
     // SAFETY: the device is live; a deny (TCC) or busy device errors here.
     let input =
         unsafe { AVCaptureDeviceInput::deviceInputWithDevice_error(&device) }.map_err(|_| hw())?;
@@ -215,6 +223,8 @@ unsafe fn open_session(
 /// Captures NV12 frames from the default camera (VGA preset).
 #[derive(Debug)]
 pub struct AvfVideoSrc {
+    /// `AVCaptureDevice` unique id to open; empty takes the default camera.
+    device: String,
     target_buffers: u64,
     /// Emit retained IOSurface-backed `CVPixelBuffer`s (the M735 zero-copy
     /// domain) instead of packing NV12 to system memory.
@@ -234,12 +244,21 @@ impl AvfVideoSrc {
     /// (`u64::MAX` = capture until stopped).
     pub fn new(target_buffers: u64) -> Self {
         Self {
+            device: String::new(),
             target_buffers,
             cv_output: false,
             state: None,
             shared: Arc::new(Shared::default()),
             configured: false,
         }
+    }
+
+    /// Open the camera with this `AVCaptureDevice` unique id (what the device
+    /// monitor reports as the persistent id) instead of the default one. Also
+    /// settable as the `device` property.
+    pub fn with_device(mut self, unique_id: impl Into<String>) -> Self {
+        self.device = unique_id.into();
+        self
     }
 
     /// Emit zero-copy `CvPixelBuffer` frames (camera -> Metal with no CPU
@@ -266,7 +285,7 @@ impl AvfVideoSrc {
             return Ok(());
         }
         // SAFETY: static access; open_session validates everything else.
-        let session = unsafe { open_session(AVMediaTypeVideo)? };
+        let session = unsafe { open_session(AVMediaTypeVideo, &self.device)? };
         // SAFETY: fresh session; VGA is universally supported.
         unsafe { session.setSessionPreset(AVCaptureSessionPreset640x480) };
 
@@ -335,17 +354,28 @@ impl SourceLoop for AvfVideoSrc {
     }
 
     fn properties(&self) -> &'static [PropertySpec] {
-        const PROPS: &[PropertySpec] = &[PropertySpec::new(
-            "cv-output",
-            PropKind::Bool,
-            "emit retained IOSurface-backed CVPixelBuffers (zero-copy) instead of packed NV12",
-        )
-        .with_default("false")];
+        const PROPS: &[PropertySpec] = &[
+            PropertySpec::new(
+                "device",
+                PropKind::Str,
+                "AVCaptureDevice unique id, the persistent id (empty = default camera)",
+            ),
+            PropertySpec::new(
+                "cv-output",
+                PropKind::Bool,
+                "emit retained IOSurface-backed CVPixelBuffers (zero-copy) instead of packed NV12",
+            )
+            .with_default("false"),
+        ];
         PROPS
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
         match name {
+            "device" => {
+                self.device = value.as_str().ok_or(PropError::Type)?.to_string();
+                Ok(())
+            }
             "cv-output" => {
                 self.cv_output = value.as_bool().ok_or(PropError::Type)?;
                 Ok(())
@@ -356,6 +386,7 @@ impl SourceLoop for AvfVideoSrc {
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
+            "device" => Some(PropValue::Str(self.device.clone())),
             "cv-output" => Some(PropValue::Bool(self.cv_output)),
             _ => None,
         }
@@ -443,6 +474,8 @@ impl SourceLoop for AvfVideoSrc {
 /// Captures interleaved S16 PCM from the default microphone.
 #[derive(Debug)]
 pub struct AvfAudioSrc {
+    /// `AVCaptureDevice` unique id to open; empty takes the default mic.
+    device: String,
     sample_rate: u32,
     channels: u8,
     target_buffers: u64,
@@ -459,6 +492,7 @@ impl AvfAudioSrc {
     /// `target_buffers` buffers then EOS (`u64::MAX` = capture until stopped).
     pub fn new(sample_rate: u32, channels: u8, target_buffers: u64) -> Self {
         Self {
+            device: String::new(),
             sample_rate: sample_rate.max(1),
             channels: channels.max(1),
             target_buffers,
@@ -466,6 +500,13 @@ impl AvfAudioSrc {
             shared: Arc::new(Shared::default()),
             configured: false,
         }
+    }
+
+    /// Open the mic with this `AVCaptureDevice` unique id instead of the
+    /// default one. Also settable as the `device` property.
+    pub fn with_device(mut self, unique_id: impl Into<String>) -> Self {
+        self.device = unique_id.into();
+        self
     }
 
     fn caps(&self) -> Caps {
@@ -481,7 +522,7 @@ impl AvfAudioSrc {
             return Ok(());
         }
         // SAFETY: static access; open_session validates everything else.
-        let session = unsafe { open_session(AVMediaTypeAudio)? };
+        let session = unsafe { open_session(AVMediaTypeAudio, &self.device)? };
 
         // SAFETY: plain object creation.
         let output = unsafe { AVCaptureAudioDataOutput::new() };

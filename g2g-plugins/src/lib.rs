@@ -667,6 +667,11 @@ pub mod metalvideosink;
 // macOS Core Audio render + capture via AudioToolbox AudioQueue (M737).
 #[cfg(all(target_os = "macos", feature = "coreaudio"))]
 pub mod coreaudio;
+
+// Core Audio device discovery: the HAL's input / output devices, for the
+// device monitor.
+#[cfg(all(target_os = "macos", feature = "coreaudio"))]
+pub mod coreaudiodevice;
 // Shared CVPixelBuffer helpers (NV12 pack + zero-copy keep-alive + the capture
 // delegate handoff) for the macOS video elements.
 #[cfg(all(
@@ -681,6 +686,11 @@ pub(crate) mod cvnv12;
 // AVFoundation camera + mic capture (M738).
 #[cfg(all(target_os = "macos", feature = "avfoundation"))]
 pub mod avf;
+
+// AVFoundation camera discovery: the cameras a discovery session lists, for
+// the device monitor.
+#[cfg(all(target_os = "macos", feature = "avfoundation"))]
+pub mod avfdevice;
 // ScreenCaptureKit display capture (M739).
 #[cfg(all(target_os = "macos", feature = "screencapture"))]
 pub mod sck;
@@ -864,20 +874,41 @@ mod yuv420;
 #[cfg(all(target_os = "windows", feature = "d3d11-sink"))]
 pub mod d3d11sink;
 
-// WASAPI render sink: plays PCM on the default audio endpoint (shared mode).
+// WASAPI render sink: plays PCM on the selected audio endpoint (shared mode).
 // Windows-only; the audible-output end of the M25 audio path.
 #[cfg(all(target_os = "windows", feature = "wasapi-sink"))]
 pub mod wasapisink;
 
-// WASAPI capture source: captures PCM from the default audio endpoint.
+// WASAPI capture source: captures PCM from the selected audio endpoint.
 // Windows-only; the input mirror of WasapiSink.
 #[cfg(all(target_os = "windows", feature = "wasapi-src"))]
 pub mod wasapisrc;
+
+// Endpoint selection + mix-format mapping shared by the two WASAPI elements
+// and the endpoint provider.
+#[cfg(all(
+    target_os = "windows",
+    any(feature = "wasapi-src", feature = "wasapi-sink")
+))]
+mod wasapipcm;
+
+// WASAPI endpoint discovery: the active render / capture endpoints, with
+// IMMNotificationClient hotplug.
+#[cfg(all(
+    target_os = "windows",
+    any(feature = "wasapi-src", feature = "wasapi-sink")
+))]
+pub mod wasapidevice;
 
 // Media Foundation camera capture source: drains frames from a video capture
 // device via an IMFSourceReader. Windows-only; the video sibling of WasapiSrc.
 #[cfg(all(target_os = "windows", feature = "mf-video-src"))]
 pub mod mfvideosrc;
+
+// Media Foundation camera discovery: the video capture devices MF enumerates,
+// with the native modes mfvideosrc can deliver.
+#[cfg(all(target_os = "windows", feature = "mf-video-src"))]
+pub mod mfdevice;
 
 // VAAPI H.264 decode via cros-codecs is Linux-only. The dependency is
 // target-gated; enabling the feature on other platforms is a no-op.

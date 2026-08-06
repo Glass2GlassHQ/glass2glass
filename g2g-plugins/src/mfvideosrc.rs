@@ -35,14 +35,18 @@ use alloc::vec::Vec;
 
 use tokio::sync::mpsc;
 
-use windows::core::GUID;
+use alloc::string::{String, ToString};
+
+use windows::core::{GUID, PWSTR};
 use windows::Win32::Media::MediaFoundation::{
     IMFActivate, IMFMediaSource, IMFSourceReader, MFCreateAttributes, MFCreateMediaType,
     MFCreateSourceReaderFromMediaSource, MFEnumDeviceSources, MFMediaType_Video, MFShutdown,
     MFStartup, MFVideoFormat_NV12, MFVideoFormat_YUY2, MFSTARTUP_FULL,
-    MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE, MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID,
-    MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE,
-    MF_SOURCE_READERF_ENDOFSTREAM, MF_SOURCE_READER_FIRST_VIDEO_STREAM, MF_VERSION,
+    MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME, MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE,
+    MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID,
+    MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE,
+    MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_SOURCE_READERF_ENDOFSTREAM,
+    MF_SOURCE_READER_FIRST_VIDEO_STREAM, MF_VERSION,
 };
 use windows::Win32::System::Com::{
     CoInitializeEx, CoTaskMemFree, CoUninitialize, COINIT_MULTITHREADED,
@@ -52,9 +56,9 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
-    Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError, HardwareError,
-    Interlace, LatencyReport, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
-    Rate, RawVideoFormat,
+    Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, FrameTiming, G2gError,
+    HardwareError, Interlace, LatencyReport, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
+    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat,
 };
 
 /// First video stream index for the Source Reader, as a `u32` (the constant is
@@ -80,7 +84,35 @@ impl MfPixelFormat {
         }
     }
 
-    fn raw_format(self) -> RawVideoFormat {
+    /// The property / launch spelling, matching the MF subtype names.
+    fn as_str(self) -> &'static str {
+        match self {
+            MfPixelFormat::Nv12 => "NV12",
+            MfPixelFormat::Yuy2 => "YUY2",
+        }
+    }
+
+    fn parse(text: &str) -> Option<Self> {
+        match text.to_ascii_uppercase().as_str() {
+            "NV12" => Some(MfPixelFormat::Nv12),
+            "YUY2" | "YUYV" => Some(MfPixelFormat::Yuy2),
+            _ => None,
+        }
+    }
+
+    /// The element's format for an MF subtype, `None` for one it cannot
+    /// deliver (MJPG and the rest stay off the advertised caps).
+    fn from_subtype(subtype: &GUID) -> Option<Self> {
+        if *subtype == MFVideoFormat_NV12 {
+            Some(MfPixelFormat::Nv12)
+        } else if *subtype == MFVideoFormat_YUY2 {
+            Some(MfPixelFormat::Yuy2)
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn raw_format(self) -> RawVideoFormat {
         match self {
             MfPixelFormat::Nv12 => RawVideoFormat::Nv12,
             MfPixelFormat::Yuy2 => RawVideoFormat::Yuyv,
@@ -99,23 +131,35 @@ impl MfPixelFormat {
 
 /// Geometry probed from the device's chosen media type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct VideoConfig {
-    format: MfPixelFormat,
-    width: u32,
-    height: u32,
-    fps_num: u32,
-    fps_den: u32,
+pub(crate) struct VideoConfig {
+    pub(crate) format: MfPixelFormat,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) fps_num: u32,
+    pub(crate) fps_den: u32,
 }
 
 impl VideoConfig {
-    fn fps(&self) -> u32 {
+    pub(crate) fn fps(&self) -> u32 {
         self.fps_num.checked_div(self.fps_den).unwrap_or(0)
     }
+}
+
+/// Which enumerated capture device to open.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DeviceSelector {
+    /// Position in the enumeration, which a replug can renumber.
+    Index(u32),
+    /// The device's MF symbolic link: the id `MfDeviceProvider` reports, and
+    /// the one that survives a replug into the same port.
+    SymbolicLink(String),
 }
 
 #[derive(Debug)]
 pub struct MfVideoSrc {
     device_index: u32,
+    /// Symbolic link, empty when the device is chosen by index.
+    device_path: String,
     format: MfPixelFormat,
     /// 0 = run until error or downstream shutdown; else stop after N frames.
     frame_limit: u64,
@@ -134,6 +178,7 @@ impl MfVideoSrc {
     pub fn new() -> Self {
         Self {
             device_index: 0,
+            device_path: String::new(),
             format: MfPixelFormat::Nv12,
             frame_limit: 0,
             config: None,
@@ -145,6 +190,21 @@ impl MfVideoSrc {
     pub fn with_device_index(mut self, index: u32) -> Self {
         self.device_index = index;
         self
+    }
+
+    /// Select the device by its MF symbolic link (what the device monitor
+    /// reports as the persistent id), which outranks the index.
+    pub fn with_device_path(mut self, path: impl Into<String>) -> Self {
+        self.device_path = path.into();
+        self
+    }
+
+    fn selector(&self) -> DeviceSelector {
+        if self.device_path.is_empty() {
+            DeviceSelector::Index(self.device_index)
+        } else {
+            DeviceSelector::SymbolicLink(self.device_path.clone())
+        }
     }
 
     /// Request a pixel format (NV12 default, or YUY2 for cheaper webcams).
@@ -162,7 +222,7 @@ impl MfVideoSrc {
 
     fn probe(&mut self) -> Result<Caps, G2gError> {
         if self.config.is_none() {
-            self.config = Some(probe_device(self.device_index, self.format)?);
+            self.config = Some(probe_device(self.selector(), self.format)?);
         }
         let c = self.config.expect("just probed");
         Ok(Caps::RawVideo {
@@ -209,6 +269,52 @@ impl SourceLoop for MfVideoSrc {
         Ok(ConfigureOutcome::Accepted)
     }
 
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "Media Foundation camera source",
+            "Source/Video",
+            "Captures video from a Media Foundation capture device (NV12 / YUY2)",
+            "g2g",
+        )
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        MFVIDEOSRC_PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            "device-index" => self.device_index = value.as_uint().ok_or(PropError::Type)? as u32,
+            "device-path" => self.device_path = value.as_str().ok_or(PropError::Type)?.to_string(),
+            "format" => {
+                let text = value.as_str().ok_or(PropError::Type)?;
+                self.format = MfPixelFormat::parse(text).ok_or(PropError::Value)?;
+            }
+            "num-buffers" => {
+                let n = value.as_int().ok_or(PropError::Type)?;
+                self.frame_limit = if n < 0 { 0 } else { n as u64 };
+            }
+            _ => return Err(PropError::Unknown),
+        }
+        // the device changed under a completed probe; re-probe on next use.
+        self.config = None;
+        Ok(())
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "device-index" => Some(PropValue::Uint(u64::from(self.device_index))),
+            "device-path" => Some(PropValue::Str(self.device_path.clone())),
+            "format" => Some(PropValue::Str(self.format.as_str().into())),
+            "num-buffers" => Some(PropValue::Int(if self.frame_limit == 0 {
+                -1
+            } else {
+                self.frame_limit as i64
+            })),
+            _ => None,
+        }
+    }
+
     /// Live source: one frame period of latency so the sink keeps a frame in hand.
     fn latency(&self) -> LatencyReport {
         let fps = self.config.map(|c| c.fps()).unwrap_or(30);
@@ -226,7 +332,7 @@ impl SourceLoop for MfVideoSrc {
                 return Err(G2gError::NotConfigured);
             }
             let config = self.config.ok_or(G2gError::NotConfigured)?;
-            let index = self.device_index;
+            let selector = self.selector();
             let limit = self.frame_limit;
 
             // Worker captures and streams frame payloads here; a ready signal
@@ -235,7 +341,7 @@ impl SourceLoop for MfVideoSrc {
             let (ready_tx, ready_rx) = std_mpsc::sync_channel::<Result<(), i32>>(1);
             let worker = thread::Builder::new()
                 .name(alloc::string::String::from("g2g-mfvideosrc"))
-                .spawn(move || capture_worker(index, config, limit, frame_tx, ready_tx))
+                .spawn(move || capture_worker(selector, config, limit, frame_tx, ready_tx))
                 .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
 
             match ready_rx.recv_timeout(Duration::from_secs(5)) {
@@ -324,19 +430,52 @@ fn mf_err(e: windows::core::Error) -> G2gError {
     G2gError::Hardware(HardwareError::MediaFoundation(e.code().0))
 }
 
+/// `MfVideoSrc`'s settable properties. `device-index` / `device-path` /
+/// `num-buffers` match gst `mfvideosrc`; the symbolic link in `device-path` is
+/// what the device monitor reports as this camera's persistent id.
+static MFVIDEOSRC_PROPS: &[PropertySpec] = &[
+    PropertySpec::new(
+        "device-index",
+        PropKind::Uint,
+        "position in the enumeration of capture devices",
+    )
+    .with_default("0"),
+    PropertySpec::new(
+        "device-path",
+        PropKind::Str,
+        "device symbolic link, the persistent id; outranks device-index",
+    ),
+    PropertySpec::new("format", PropKind::Str, "pixel format: NV12 | YUY2").with_default("NV12"),
+    PropertySpec::new(
+        "num-buffers",
+        PropKind::Int,
+        "frames to capture then EOS (-1 = forever)",
+    )
+    .with_default("-1"),
+];
+
+/// The MF attributes describing one enumerated capture device.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MfDeviceInfo {
+    /// `MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME`, empty when the driver omits it.
+    pub(crate) friendly_name: String,
+    /// `MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK`.
+    pub(crate) symbolic_link: String,
+}
+
 /// Open the device on a short-lived COM/MF thread, read the negotiated media
 /// type, and map it to a [`VideoConfig`].
-fn probe_device(index: u32, format: MfPixelFormat) -> Result<VideoConfig, G2gError> {
+fn probe_device(selector: DeviceSelector, format: MfPixelFormat) -> Result<VideoConfig, G2gError> {
     let (tx, rx) = std_mpsc::sync_channel::<Result<VideoConfig, G2gError>>(1);
     thread::Builder::new()
-        .name(alloc::string::String::from("g2g-mfvideosrc-probe"))
+        .name(String::from("g2g-mfvideosrc-probe"))
         .spawn(move || {
             // SAFETY: COM + MF init on this worker thread, balanced before exit.
             let result = unsafe {
                 let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
                 let r = MFStartup(MF_VERSION, MFSTARTUP_FULL)
                     .map_err(mf_err)
-                    .and_then(|()| open_reader(index, format).map(|(_, cfg)| cfg));
+                    .and_then(|()| open_reader(&selector, format).map(|(_, cfg)| cfg));
                 let _ = MFShutdown();
                 CoUninitialize();
                 r
@@ -348,16 +487,64 @@ fn probe_device(index: u32, format: MfPixelFormat) -> Result<VideoConfig, G2gErr
         .map_err(|_| G2gError::Hardware(HardwareError::Other))?
 }
 
-/// Enumerate capture devices, activate device `index`, build a Source Reader,
-/// pin the requested subtype, and read back the chosen geometry.
+/// A string attribute of an activation object, or `None` when it is absent.
+/// The value is allocated by MF, so it is copied out and freed here.
 ///
 /// # Safety
 /// Must run on a COM-initialised, MF-started thread.
-unsafe fn open_reader(
-    index: u32,
-    format: MfPixelFormat,
-) -> Result<(IMFSourceReader, VideoConfig), G2gError> {
-    // SAFETY: MF object creation/queries on the owning thread.
+pub(crate) unsafe fn activate_string(activate: &IMFActivate, key: &GUID) -> Option<String> {
+    // SAFETY: MF attribute read on the owning thread; the out pointer is only
+    // read (and freed) when the call succeeded and left it non-null.
+    unsafe {
+        let mut value = PWSTR::null();
+        let mut len = 0u32;
+        activate
+            .GetAllocatedString(key, &mut value, &mut len)
+            .ok()?;
+        if value.is_null() {
+            return None;
+        }
+        let text = value.to_string().ok();
+        CoTaskMemFree(Some(value.as_ptr().cast()));
+        text
+    }
+}
+
+/// Enumerate the video capture devices MF can see, in enumeration order.
+///
+/// # Safety
+/// Must run on a COM-initialised, MF-started thread.
+pub(crate) unsafe fn enumerate_devices() -> Result<Vec<MfDeviceInfo>, G2gError> {
+    // SAFETY: MF enumeration on the owning thread; the array and each element
+    // are released before returning.
+    unsafe {
+        with_activates(|activates| {
+            Ok(activates
+                .iter()
+                .flatten()
+                .map(|activate| MfDeviceInfo {
+                    friendly_name: activate_string(activate, &MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME)
+                        .unwrap_or_default(),
+                    symbolic_link: activate_string(
+                        activate,
+                        &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK,
+                    )
+                    .unwrap_or_default(),
+                })
+                .collect())
+        })
+    }
+}
+
+/// Run `use_them` over the enumerated capture activation objects, releasing
+/// the array (and every element) whatever the closure returns.
+///
+/// # Safety
+/// Must run on a COM-initialised, MF-started thread.
+unsafe fn with_activates<T>(
+    use_them: impl FnOnce(&[Option<IMFActivate>]) -> Result<T, G2gError>,
+) -> Result<T, G2gError> {
+    // SAFETY: the enumeration allocates the array; it is freed on every path.
     unsafe {
         let mut attrs = None;
         MFCreateAttributes(&mut attrs, 1).map_err(mf_err)?;
@@ -372,22 +559,104 @@ unsafe fn open_reader(
         let mut devices: *mut Option<IMFActivate> = core::ptr::null_mut();
         let mut count: u32 = 0;
         MFEnumDeviceSources(&attrs, &mut devices, &mut count).map_err(mf_err)?;
-
-        if index >= count {
-            // Release whatever was returned before bailing.
-            free_activates(devices, count);
-            return Err(G2gError::Hardware(HardwareError::MediaFoundation(0)));
-        }
-
-        let activate = (*devices.add(index as usize))
-            .clone()
-            .ok_or(G2gError::Hardware(HardwareError::MediaFoundation(0)));
-        let source: Result<IMFMediaSource, G2gError> =
-            activate.and_then(|a| a.ActivateObject().map_err(mf_err));
-        // Release the enumeration array regardless of the activation outcome.
+        let slice: &[Option<IMFActivate>] = if devices.is_null() {
+            &[]
+        } else {
+            core::slice::from_raw_parts(devices, count as usize)
+        };
+        let result = use_them(slice);
         free_activates(devices, count);
-        let source = source?;
+        result
+    }
+}
 
+/// Every native mode of the device at `link` this element could deliver, in
+/// the driver's own preference order. Activating the device is the only way MF
+/// offers to read its modes, so a camera already in use reports nothing.
+///
+/// # Safety
+/// Must run on a COM-initialised, MF-started thread.
+pub(crate) unsafe fn native_modes(link: &str) -> Result<Vec<VideoConfig>, G2gError> {
+    // SAFETY: activation + media-type reads on the owning thread.
+    unsafe {
+        let selector = DeviceSelector::SymbolicLink(String::from(link));
+        let source = activate_source(&selector)?;
+        let reader = MFCreateSourceReaderFromMediaSource(&source, None).map_err(mf_err)?;
+        let stream = first_video_stream();
+        let mut modes = Vec::new();
+        for index in 0..MAX_NATIVE_MODES {
+            let media_type = match reader.GetNativeMediaType(stream, index) {
+                Ok(t) => t,
+                // the enumeration ended (or the driver refused it); either way
+                // what was collected so far is the answer.
+                Err(_) => break,
+            };
+            let Ok(subtype) = media_type.GetGUID(&MF_MT_SUBTYPE) else {
+                continue;
+            };
+            let Some(format) = MfPixelFormat::from_subtype(&subtype) else {
+                continue;
+            };
+            let (Ok(size), Ok(rate)) = (
+                media_type.GetUINT64(&MF_MT_FRAME_SIZE),
+                media_type.GetUINT64(&MF_MT_FRAME_RATE),
+            ) else {
+                continue;
+            };
+            modes.push(VideoConfig {
+                format,
+                width: (size >> 32) as u32,
+                height: (size & 0xFFFF_FFFF) as u32,
+                fps_num: (rate >> 32) as u32,
+                fps_den: (rate & 0xFFFF_FFFF) as u32,
+            });
+        }
+        Ok(modes)
+    }
+}
+
+/// Upper bound on the native modes read from one device: a UVC camera can
+/// report hundreds, and the caps set they feed is capped anyway.
+const MAX_NATIVE_MODES: u32 = 64;
+
+/// Activate the media source the selector names.
+///
+/// # Safety
+/// Must run on a COM-initialised, MF-started thread.
+unsafe fn activate_source(selector: &DeviceSelector) -> Result<IMFMediaSource, G2gError> {
+    // SAFETY: enumeration + activation on the owning thread.
+    unsafe {
+        with_activates(|activates| {
+            let chosen = match selector {
+                DeviceSelector::Index(index) => {
+                    activates.get(*index as usize).and_then(|a| a.as_ref())
+                }
+                DeviceSelector::SymbolicLink(link) => activates.iter().flatten().find(|a| {
+                    activate_string(a, &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK)
+                        .as_deref()
+                        == Some(link.as_str())
+                }),
+            };
+            chosen
+                .ok_or(G2gError::Hardware(HardwareError::MediaFoundation(0)))?
+                .ActivateObject()
+                .map_err(mf_err)
+        })
+    }
+}
+
+/// Enumerate capture devices, activate the selected one, build a Source
+/// Reader, pin the requested subtype, and read back the chosen geometry.
+///
+/// # Safety
+/// Must run on a COM-initialised, MF-started thread.
+unsafe fn open_reader(
+    selector: &DeviceSelector,
+    format: MfPixelFormat,
+) -> Result<(IMFSourceReader, VideoConfig), G2gError> {
+    // SAFETY: MF object creation/queries on the owning thread.
+    unsafe {
+        let source = activate_source(selector)?;
         let reader = MFCreateSourceReaderFromMediaSource(&source, None).map_err(mf_err)?;
 
         // Pin the major type + requested subtype; the device picks the rest.
@@ -439,7 +708,7 @@ unsafe fn free_activates(devices: *mut Option<IMFActivate>, count: u32) {
 /// Capture worker: open the device, then pump frames to `frame_tx` until the
 /// limit is reached, end-of-stream, or capture fails.
 fn capture_worker(
-    index: u32,
+    selector: DeviceSelector,
     config: VideoConfig,
     limit: u64,
     frame_tx: mpsc::UnboundedSender<Vec<u8>>,
@@ -450,7 +719,7 @@ fn capture_worker(
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         let r = MFStartup(MF_VERSION, MFSTARTUP_FULL)
             .map_err(mf_err)
-            .and_then(|()| run_capture(index, config, limit, &frame_tx, &ready_tx));
+            .and_then(|()| run_capture(&selector, config, limit, &frame_tx, &ready_tx));
         let _ = MFShutdown();
         CoUninitialize();
         r
@@ -466,7 +735,7 @@ fn capture_worker(
 /// # Safety
 /// Must run on a COM-initialised, MF-started thread.
 unsafe fn run_capture(
-    index: u32,
+    selector: &DeviceSelector,
     config: VideoConfig,
     limit: u64,
     frame_tx: &mpsc::UnboundedSender<Vec<u8>>,
@@ -474,7 +743,7 @@ unsafe fn run_capture(
 ) -> Result<(), G2gError> {
     // SAFETY: reader setup + read loop on the owning thread.
     unsafe {
-        let (reader, _cfg) = open_reader(index, config.format)?;
+        let (reader, _cfg) = open_reader(selector, config.format)?;
         let _ = ready_tx.try_send(Ok(()));
 
         let stream = first_video_stream();
@@ -554,5 +823,68 @@ mod tests {
     fn pixel_format_maps_to_raw() {
         assert_eq!(MfPixelFormat::Nv12.raw_format(), RawVideoFormat::Nv12);
         assert_eq!(MfPixelFormat::Yuy2.raw_format(), RawVideoFormat::Yuyv);
+        assert_eq!(
+            MfPixelFormat::from_subtype(&MFVideoFormat_NV12),
+            Some(MfPixelFormat::Nv12)
+        );
+        // a subtype the element cannot deliver stays off the caps.
+        assert_eq!(
+            MfPixelFormat::from_subtype(
+                &windows::Win32::Media::MediaFoundation::MFVideoFormat_MJPG
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn device_path_outranks_the_index() {
+        let mut src = MfVideoSrc::new().with_device_index(2);
+        assert_eq!(src.selector(), DeviceSelector::Index(2));
+        SourceLoop::set_property(
+            &mut src,
+            "device-path",
+            PropValue::Str(r"\\?\usb#vid".into()),
+        )
+        .expect("device-path");
+        assert_eq!(
+            src.selector(),
+            DeviceSelector::SymbolicLink(r"\\?\usb#vid".to_string())
+        );
+        // the index is still readable, so a get after a set round-trips.
+        assert_eq!(
+            SourceLoop::get_property(&src, "device-index"),
+            Some(PropValue::Uint(2))
+        );
+    }
+
+    #[test]
+    fn properties_round_trip() {
+        let mut src = MfVideoSrc::new();
+        SourceLoop::set_property(&mut src, "format", PropValue::Str("yuy2".into()))
+            .expect("format");
+        assert_eq!(src.format, MfPixelFormat::Yuy2);
+        assert_eq!(
+            SourceLoop::get_property(&src, "format"),
+            Some(PropValue::Str("YUY2".to_string()))
+        );
+        assert_eq!(
+            SourceLoop::set_property(&mut src, "format", PropValue::Str("mjpg".into())),
+            Err(PropError::Value)
+        );
+        // gst's -1 spelling for "capture forever".
+        assert_eq!(
+            SourceLoop::get_property(&src, "num-buffers"),
+            Some(PropValue::Int(-1))
+        );
+        SourceLoop::set_property(&mut src, "num-buffers", PropValue::Int(12)).expect("num-buffers");
+        assert_eq!(src.frame_limit, 12);
+        // every declared property is handled by both halves.
+        for spec in MFVIDEOSRC_PROPS {
+            assert!(
+                SourceLoop::get_property(&src, spec.name).is_some(),
+                "{} is declared but not readable",
+                spec.name
+            );
+        }
     }
 }

@@ -29,25 +29,28 @@ use std::sync::{Condvar, Mutex};
 use std::time::Duration;
 
 use objc2_audio_toolbox::{
-    AudioQueueAllocateBuffer, AudioQueueBufferRef, AudioQueueDispose, AudioQueueEnqueueBuffer,
-    AudioQueueFlush, AudioQueueNewInput, AudioQueueNewOutput, AudioQueueRef, AudioQueueStart,
-    AudioQueueStop,
+    kAudioQueueProperty_CurrentDevice, AudioQueueAllocateBuffer, AudioQueueBufferRef,
+    AudioQueueDispose, AudioQueueEnqueueBuffer, AudioQueueFlush, AudioQueueNewInput,
+    AudioQueueNewOutput, AudioQueueRef, AudioQueueSetProperty, AudioQueueStart, AudioQueueStop,
 };
 use objc2_core_audio_types::{
     kAudioFormatFlagIsFloat, kAudioFormatFlagIsPacked, kAudioFormatFlagIsSignedInteger,
     kAudioFormatLinearPCM, AudioStreamBasicDescription, AudioStreamPacketDescription,
     AudioTimeStamp,
 };
+use objc2_core_foundation::CFString;
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
-    AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, FrameTiming,
-    G2gError, HardwareError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
+    FrameTiming, G2gError, HardwareError, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
+    PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
 
 use alloc::boxed::Box;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 /// Render buffers in flight; the sink blocks when all are queued (device-paced
@@ -177,9 +180,54 @@ impl core::fmt::Debug for SinkState {
     }
 }
 
+/// The one property each Core Audio element takes: the device UID the device
+/// monitor reports, empty for the system default.
+static DEVICE_PROP_RENDER: &[PropertySpec] = &[PropertySpec::new(
+    "device",
+    PropKind::Str,
+    "Core Audio device UID to render on (empty = system default)",
+)];
+
+static DEVICE_PROP_CAPTURE: &[PropertySpec] = &[PropertySpec::new(
+    "device",
+    PropKind::Str,
+    "Core Audio device UID to capture from (empty = system default)",
+)];
+
+/// Point a freshly created queue at the device with this UID. Empty leaves it
+/// on the system default. Fails loud: a UID nothing carries would otherwise
+/// play (or record) on the wrong device.
+///
+/// # Safety
+/// `queue` must be a live `AudioQueueRef` that has not been started.
+unsafe fn bind_device(queue: AudioQueueRef, uid: &str) -> Result<(), G2gError> {
+    if uid.is_empty() {
+        return Ok(());
+    }
+    let cf = CFString::from_str(uid);
+    // the property value is the CFStringRef itself, so what is passed is a
+    // pointer to the pointer.
+    let mut raw: *const CFString = &*cf;
+    // SAFETY: live queue; the value outlives the call.
+    let st = unsafe {
+        AudioQueueSetProperty(
+            queue,
+            kAudioQueueProperty_CurrentDevice,
+            NonNull::from(&mut raw).cast::<c_void>(),
+            core::mem::size_of::<*const CFString>() as u32,
+        )
+    };
+    if st != 0 {
+        return Err(hw());
+    }
+    Ok(())
+}
+
 /// Renders interleaved PCM to the default Core Audio output device.
 #[derive(Debug)]
 pub struct CoreAudioSink {
+    /// Core Audio device UID to render on; empty takes the system default.
+    device: String,
     state: Option<SinkState>,
     format: AudioFormat,
     channels: u8,
@@ -202,6 +250,7 @@ impl Default for CoreAudioSink {
 impl CoreAudioSink {
     pub fn new() -> Self {
         Self {
+            device: String::new(),
             state: None,
             format: AudioFormat::PcmS16Le,
             channels: 2,
@@ -209,6 +258,14 @@ impl CoreAudioSink {
             configured: false,
             rendered: 0,
         }
+    }
+
+    /// Render on the device with this UID (what the device monitor reports as
+    /// the persistent id) instead of the system default. Also settable as the
+    /// `device` property.
+    pub fn with_device(mut self, uid: impl Into<String>) -> Self {
+        self.device = uid.into();
+        self
     }
 
     /// Whether the default output device opens (tests probe with this and
@@ -243,6 +300,12 @@ impl CoreAudioSink {
         };
         if st != 0 || queue.is_null() {
             return Err(hw());
+        }
+        // SAFETY: the queue is live and not started yet.
+        if let Err(e) = unsafe { bind_device(queue, &self.device) } {
+            // SAFETY: dispose the queue we just made before bailing.
+            unsafe { AudioQueueDispose(queue, true) };
+            return Err(e);
         }
         // Pre-allocate the buffer pool; every buffer starts on the free list.
         {
@@ -366,6 +429,36 @@ impl AsyncElement for CoreAudioSink {
         Ok(ConfigureOutcome::Accepted)
     }
 
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "Core Audio sink",
+            "Sink/Audio",
+            "Renders PCM on a Core Audio output device (AudioQueue)",
+            "g2g",
+        )
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        DEVICE_PROP_RENDER
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            "device" => {
+                self.device = value.as_str().ok_or(PropError::Type)?.to_string();
+                Ok(())
+            }
+            _ => Err(PropError::Unknown),
+        }
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "device" => Some(PropValue::Str(self.device.clone())),
+            _ => None,
+        }
+    }
+
     fn process<'a>(
         &'a mut self,
         packet: PipelinePacket,
@@ -487,6 +580,8 @@ impl core::fmt::Debug for SrcState {
 /// Captures interleaved PCM from the default Core Audio input device.
 #[derive(Debug)]
 pub struct CoreAudioSrc {
+    /// Core Audio device UID to capture from; empty takes the system default.
+    device: String,
     sample_rate: u32,
     channels: u8,
     target_buffers: u64,
@@ -502,12 +597,20 @@ impl CoreAudioSrc {
     /// `target_buffers` buffers then EOS (`u64::MAX` = capture until stopped).
     pub fn new(sample_rate: u32, channels: u8, target_buffers: u64) -> Self {
         Self {
+            device: String::new(),
             sample_rate: sample_rate.max(1),
             channels: channels.max(1),
             target_buffers,
             state: None,
             configured: false,
         }
+    }
+
+    /// Capture from the device with this UID instead of the system default.
+    /// Also settable as the `device` property.
+    pub fn with_device(mut self, uid: impl Into<String>) -> Self {
+        self.device = uid.into();
+        self
     }
 
     fn caps(&self) -> Caps {
@@ -540,6 +643,12 @@ impl CoreAudioSrc {
         };
         if st != 0 || queue.is_null() {
             return Err(hw());
+        }
+        // SAFETY: the queue is live and not started yet.
+        if let Err(e) = unsafe { bind_device(queue, &self.device) } {
+            // SAFETY: dispose the queue we just made before bailing.
+            unsafe { AudioQueueDispose(queue, true) };
+            return Err(e);
         }
         for _ in 0..SRC_BUFFERS {
             let mut buf: AudioQueueBufferRef = ptr::null_mut();
@@ -595,6 +704,36 @@ impl SourceLoop for CoreAudioSrc {
         }
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
+    }
+
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "Core Audio source",
+            "Source/Audio",
+            "Captures PCM from a Core Audio input device (AudioQueue)",
+            "g2g",
+        )
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        DEVICE_PROP_CAPTURE
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            "device" => {
+                self.device = value.as_str().ok_or(PropError::Type)?.to_string();
+                Ok(())
+            }
+            _ => Err(PropError::Unknown),
+        }
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "device" => Some(PropValue::Str(self.device.clone())),
+            _ => None,
+        }
     }
 
     fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a> {

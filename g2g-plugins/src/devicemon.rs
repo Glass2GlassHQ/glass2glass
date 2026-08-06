@@ -23,6 +23,25 @@ pub fn default_device_monitor() -> DeviceMonitor {
     monitor.register(alloc::boxed::Box::new(
         crate::pwdevice::PipeWireDeviceProvider::new(),
     ));
+    #[cfg(all(target_os = "macos", feature = "avfoundation"))]
+    monitor.register(alloc::boxed::Box::new(
+        crate::avfdevice::AvfDeviceProvider::new(),
+    ));
+    #[cfg(all(target_os = "macos", feature = "coreaudio"))]
+    monitor.register(alloc::boxed::Box::new(
+        crate::coreaudiodevice::CoreAudioDeviceProvider::new(),
+    ));
+    #[cfg(all(target_os = "windows", feature = "mf-video-src"))]
+    monitor.register(alloc::boxed::Box::new(
+        crate::mfdevice::MfDeviceProvider::new(),
+    ));
+    #[cfg(all(
+        target_os = "windows",
+        any(feature = "wasapi-src", feature = "wasapi-sink")
+    ))]
+    monitor.register(alloc::boxed::Box::new(
+        crate::wasapidevice::WasapiDeviceProvider::new(),
+    ));
     #[cfg(any(feature = "wgpu-sink", feature = "cuda", feature = "vaapi"))]
     monitor.register(alloc::boxed::Box::new(
         crate::gpudevice::GpuDeviceProvider::new(),

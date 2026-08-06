@@ -8,10 +8,12 @@
 //!   g2g-device-monitor --json [class]     # machine-readable one-shot dump
 //!
 //! Backed by [`g2g_plugins::devicemon::default_device_monitor`] (M939). Which
-//! providers exist depends on the build features, so run it with a broad set,
-//! e.g. `--features v4l2,alsa-src,pipewire,wgpu-sink`. A provider that fails to
-//! probe (no PipeWire daemon, no GPU) is reported on stderr and does not fail
-//! the run.
+//! providers exist depends on the build features, so run it with a broad set:
+//! `--features v4l2,alsa-src,pipewire,wgpu-sink` on Linux,
+//! `--features mf-video-src,wasapi-src,wasapi-sink,wgpu-sink` on Windows,
+//! `--features avfoundation,coreaudio,wgpu-sink` on macOS. A provider that
+//! fails to probe (no PipeWire daemon, no GPU) is reported on stderr and does
+//! not fail the run.
 
 use std::process;
 

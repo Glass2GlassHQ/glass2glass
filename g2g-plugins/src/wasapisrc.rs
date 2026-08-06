@@ -29,46 +29,37 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use alloc::boxed::Box;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use tokio::sync::mpsc;
 
 use windows::Win32::Media::Audio::{
-    eCapture, eConsole, eRender, IAudioCaptureClient, IAudioClient, IMMDeviceEnumerator,
-    MMDeviceEnumerator, AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED,
-    AUDCLNT_STREAMFLAGS_LOOPBACK, WAVEFORMATEX,
+    eCapture, eRender, IAudioCaptureClient, IAudioClient, AUDCLNT_BUFFERFLAGS_SILENT,
+    AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK,
 };
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_ALL,
-    CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
+    CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_ALL, COINIT_MULTITHREADED,
 };
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
-    AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, FrameTiming, G2gError,
-    HardwareError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, FrameTiming,
+    G2gError, HardwareError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    PropError, PropKind, PropValue, PropertySpec,
 };
 
-use crate::audio::{WAVE_FORMAT_IEEE_FLOAT, WAVE_FORMAT_PCM};
-
-const WAVE_FORMAT_EXTENSIBLE: u16 = 0xFFFE;
+use crate::wasapipcm::{audio_config_from_format, audio_err, open_endpoint, AudioConfig};
 
 /// Shared-mode endpoint buffer span (100-ns units), 200 ms.
 const BUFFER_DURATION_HNS: i64 = 2_000_000;
 
-/// The endpoint's PCM shape, probed from the mix format.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct AudioConfig {
-    format: AudioFormat,
-    channels: u8,
-    sample_rate: u32,
-    block_align: usize,
-}
-
 #[derive(Debug)]
 pub struct WasapiSrc {
+    /// Endpoint id to capture from; empty opens the default endpoint.
+    device: String,
     /// Number of captured buffers to emit before `Eos`.
     target_buffers: u64,
     /// Capture the default render endpoint's output (system audio) instead of a
@@ -82,11 +73,20 @@ impl WasapiSrc {
     /// Capture `target_buffers` buffers from the default endpoint, then end.
     pub fn new(target_buffers: u64) -> Self {
         Self {
+            device: String::new(),
             target_buffers,
             loopback: false,
             config: None,
             configured: false,
         }
+    }
+
+    /// Capture from the endpoint with this id (what the device monitor reports
+    /// as the persistent id) instead of the default one.
+    pub fn with_device(mut self, id: impl Into<String>) -> Self {
+        self.device = id.into();
+        self.config = None;
+        self
     }
 
     /// Capture the default render endpoint's output (what the system is
@@ -104,7 +104,7 @@ impl WasapiSrc {
 
     fn probe(&mut self) -> Result<Caps, G2gError> {
         if self.config.is_none() {
-            self.config = Some(probe_endpoint_format(self.loopback)?);
+            self.config = Some(probe_endpoint_format(&self.device, self.loopback)?);
         }
         let c = self.config.expect("just probed");
         Ok(Caps::Audio {
@@ -144,6 +144,52 @@ impl SourceLoop for WasapiSrc {
         Ok(ConfigureOutcome::Accepted)
     }
 
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "WASAPI audio capture",
+            "Source/Audio",
+            "Captures PCM from a WASAPI endpoint (shared mode)",
+            "g2g",
+        )
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        WASAPISRC_PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            "device" => {
+                self.device = value.as_str().ok_or(PropError::Type)?.to_string();
+                // the endpoint changed under a completed probe.
+                self.config = None;
+            }
+            "loopback" => {
+                self.loopback = value.as_bool().ok_or(PropError::Type)?;
+                self.config = None;
+            }
+            "num-buffers" => {
+                let n = value.as_int().ok_or(PropError::Type)?;
+                self.target_buffers = if n < 0 { u64::MAX } else { n as u64 };
+            }
+            _ => return Err(PropError::Unknown),
+        }
+        Ok(())
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "device" => Some(PropValue::Str(self.device.clone())),
+            "loopback" => Some(PropValue::Bool(self.loopback)),
+            "num-buffers" => Some(PropValue::Int(if self.target_buffers == u64::MAX {
+                -1
+            } else {
+                self.target_buffers as i64
+            })),
+            _ => None,
+        }
+    }
+
     fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a> {
         Box::pin(async move {
             if !self.configured {
@@ -152,14 +198,17 @@ impl SourceLoop for WasapiSrc {
             let config = self.config.ok_or(G2gError::NotConfigured)?;
             let target = self.target_buffers;
             let loopback = self.loopback;
+            let device = self.device.clone();
 
             // Worker captures from the endpoint and streams PCM chunks here;
             // a ready signal reports whether the endpoint opened.
             let (chunk_tx, mut chunk_rx) = mpsc::unbounded_channel::<Vec<u8>>();
             let (ready_tx, ready_rx) = std_mpsc::sync_channel::<Result<(), ()>>(1);
             let worker = thread::Builder::new()
-                .name(alloc::string::String::from("g2g-wasapisrc"))
-                .spawn(move || capture_worker(config, target, loopback, chunk_tx, ready_tx))
+                .name(String::from("g2g-wasapisrc"))
+                .spawn(move || {
+                    capture_worker(&device, config, target, loopback, chunk_tx, ready_tx)
+                })
                 .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
 
             match ready_rx.recv_timeout(Duration::from_secs(5)) {
@@ -202,6 +251,29 @@ impl SourceLoop for WasapiSrc {
     }
 }
 
+/// `WasapiSrc`'s settable properties. `device` takes the endpoint id the
+/// device monitor reports (empty = the default endpoint); `loopback` matches
+/// gst `wasapisrc`, `num-buffers` gst `basesrc`.
+static WASAPISRC_PROPS: &[PropertySpec] = &[
+    PropertySpec::new(
+        "device",
+        PropKind::Str,
+        "endpoint id to capture from (empty = default endpoint)",
+    ),
+    PropertySpec::new(
+        "loopback",
+        PropKind::Bool,
+        "capture a render endpoint's output (system audio) instead of a capture endpoint",
+    )
+    .with_default("false"),
+    PropertySpec::new(
+        "num-buffers",
+        PropKind::Int,
+        "buffers to capture then EOS (-1 = forever)",
+    )
+    .with_default("-1"),
+];
+
 impl PadTemplates for WasapiSrc {
     /// PCM source pad. `Caps::Audio` has no open dims, so the template pins the
     /// common shapes per PCM format, as in `AudioTestSrc` / `WavSink`.
@@ -221,18 +293,19 @@ impl PadTemplates for WasapiSrc {
 // COM-thread probe + capture worker
 // =================================================================
 
-/// Open the default endpoint (capture, or render for loopback), read its mix
+/// Open the selected endpoint (capture, or render for loopback), read its mix
 /// format, and map it to an [`AudioConfig`]. Runs on a short-lived COM thread.
-fn probe_endpoint_format(loopback: bool) -> Result<AudioConfig, G2gError> {
+fn probe_endpoint_format(device: &str, loopback: bool) -> Result<AudioConfig, G2gError> {
     let (tx, rx) = std_mpsc::sync_channel::<Result<AudioConfig, G2gError>>(1);
+    let device = device.to_string();
     thread::Builder::new()
-        .name(alloc::string::String::from("g2g-wasapisrc-probe"))
+        .name(String::from("g2g-wasapisrc-probe"))
         .spawn(move || {
             // SAFETY: COM init + WASAPI queries on this worker thread, balanced
             // by CoUninitialize before it exits.
             let result = unsafe {
                 let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-                let r = read_mix_format(loopback);
+                let r = read_mix_format(&device, loopback);
                 CoUninitialize();
                 r
             };
@@ -243,21 +316,17 @@ fn probe_endpoint_format(loopback: bool) -> Result<AudioConfig, G2gError> {
         .map_err(|_| G2gError::Hardware(HardwareError::Other))?
 }
 
-/// Read the endpoint's mix format into an [`AudioConfig`]. Loopback reads the
-/// default render endpoint; otherwise the default capture endpoint.
+/// Read the endpoint's mix format into an [`AudioConfig`]. Loopback reads a
+/// render endpoint; otherwise a capture endpoint.
 ///
 /// # Safety
 /// Must run on a COM-initialised thread.
-unsafe fn read_mix_format(loopback: bool) -> Result<AudioConfig, G2gError> {
+unsafe fn read_mix_format(device: &str, loopback: bool) -> Result<AudioConfig, G2gError> {
     let dataflow = if loopback { eRender } else { eCapture };
     // SAFETY: WASAPI object creation/queries on the owning thread.
     unsafe {
-        let enumerator: IMMDeviceEnumerator =
-            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_INPROC_SERVER).map_err(audio_err)?;
-        let device = enumerator
-            .GetDefaultAudioEndpoint(dataflow, eConsole)
-            .map_err(audio_err)?;
-        let client: IAudioClient = device.Activate(CLSCTX_ALL, None).map_err(audio_err)?;
+        let endpoint = open_endpoint(dataflow, device)?;
+        let client: IAudioClient = endpoint.Activate(CLSCTX_ALL, None).map_err(audio_err)?;
         let fmt_ptr = client.GetMixFormat().map_err(audio_err)?;
         let config = audio_config_from_format(&*fmt_ptr);
         CoTaskMemFree(Some(fmt_ptr.cast()));
@@ -265,32 +334,10 @@ unsafe fn read_mix_format(loopback: bool) -> Result<AudioConfig, G2gError> {
     }
 }
 
-/// Map a `WAVEFORMATEX` to an [`AudioConfig`]. 32-bit samples are reported as
-/// float (the shared-mode mix format), 16-bit as signed PCM; other depths are
-/// unsupported.
-fn audio_config_from_format(fmt: &WAVEFORMATEX) -> Result<AudioConfig, G2gError> {
-    let bits = fmt.wBitsPerSample;
-    let tag = fmt.wFormatTag;
-    let format = match (tag, bits) {
-        (WAVE_FORMAT_PCM, 16) => AudioFormat::PcmS16Le,
-        (WAVE_FORMAT_IEEE_FLOAT, 32) => AudioFormat::PcmF32Le,
-        // EXTENSIBLE wraps the real subtype; the mix format is in practice
-        // 32-bit float or 16-bit PCM, so map by bit depth.
-        (WAVE_FORMAT_EXTENSIBLE, 32) => AudioFormat::PcmF32Le,
-        (WAVE_FORMAT_EXTENSIBLE, 16) => AudioFormat::PcmS16Le,
-        _ => return Err(G2gError::CapsMismatch),
-    };
-    Ok(AudioConfig {
-        format,
-        channels: fmt.nChannels as u8,
-        sample_rate: fmt.nSamplesPerSec,
-        block_align: fmt.nBlockAlign as usize,
-    })
-}
-
 /// Capture worker: open + start the endpoint, then pump captured packets to
 /// `chunk_tx` until `target` buffers are sent or capture fails.
 fn capture_worker(
+    device: &str,
     config: AudioConfig,
     target: u64,
     loopback: bool,
@@ -300,7 +347,7 @@ fn capture_worker(
     // SAFETY: COM init + capture on this worker thread, balanced below.
     let captured = unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-        let r = run_capture(config, target, loopback, &chunk_tx, &ready_tx);
+        let r = run_capture(device, config, target, loopback, &chunk_tx, &ready_tx);
         CoUninitialize();
         r
     };
@@ -313,6 +360,7 @@ fn capture_worker(
 /// # Safety
 /// Must run on a COM-initialised thread.
 unsafe fn run_capture(
+    device: &str,
     config: AudioConfig,
     target: u64,
     loopback: bool,
@@ -327,12 +375,8 @@ unsafe fn run_capture(
     };
     // SAFETY: WASAPI setup on the owning thread.
     let (client, capture) = unsafe {
-        let enumerator: IMMDeviceEnumerator =
-            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_INPROC_SERVER).map_err(audio_err)?;
-        let device = enumerator
-            .GetDefaultAudioEndpoint(dataflow, eConsole)
-            .map_err(audio_err)?;
-        let client: IAudioClient = device.Activate(CLSCTX_ALL, None).map_err(audio_err)?;
+        let endpoint = open_endpoint(dataflow, device)?;
+        let client: IAudioClient = endpoint.Activate(CLSCTX_ALL, None).map_err(audio_err)?;
         let fmt_ptr = client.GetMixFormat().map_err(audio_err)?;
         client
             .Initialize(
@@ -407,60 +451,35 @@ unsafe fn run_capture(
     Ok(())
 }
 
-fn audio_err(e: windows::core::Error) -> G2gError {
-    G2gError::Hardware(HardwareError::MediaFoundation(e.code().0))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn maps_mix_formats_to_audio_config() {
-        let f32 = WAVEFORMATEX {
-            wFormatTag: WAVE_FORMAT_IEEE_FLOAT,
-            nChannels: 2,
-            nSamplesPerSec: 48_000,
-            nAvgBytesPerSec: 48_000 * 8,
-            nBlockAlign: 8,
-            wBitsPerSample: 32,
-            cbSize: 0,
-        };
-        let c = audio_config_from_format(&f32).unwrap();
-        assert_eq!(c.format, AudioFormat::PcmF32Le);
-        assert_eq!(c.channels, 2);
-        assert_eq!(c.sample_rate, 48_000);
-        assert_eq!(c.block_align, 8);
-
-        let s16 = WAVEFORMATEX {
-            wFormatTag: WAVE_FORMAT_PCM,
-            nChannels: 1,
-            nSamplesPerSec: 44_100,
-            nAvgBytesPerSec: 44_100 * 2,
-            nBlockAlign: 2,
-            wBitsPerSample: 16,
-            cbSize: 0,
-        };
-        let c = audio_config_from_format(&s16).unwrap();
-        assert_eq!(c.format, AudioFormat::PcmS16Le);
-        assert_eq!(c.block_align, 2);
-    }
-
-    #[test]
-    fn rejects_unsupported_bit_depth() {
-        let weird = WAVEFORMATEX {
-            wFormatTag: WAVE_FORMAT_PCM,
-            nChannels: 2,
-            nSamplesPerSec: 48_000,
-            nAvgBytesPerSec: 48_000 * 6,
-            nBlockAlign: 6,
-            wBitsPerSample: 24,
-            cbSize: 0,
-        };
+    fn properties_round_trip() {
+        let mut src = WasapiSrc::new(5);
+        // the default endpoint is the empty id, as gst spells it.
         assert_eq!(
-            audio_config_from_format(&weird),
-            Err(G2gError::CapsMismatch)
+            SourceLoop::get_property(&src, "device"),
+            Some(PropValue::Str(String::new()))
         );
+        SourceLoop::set_property(&mut src, "device", PropValue::Str("{0.0.1.0}".into()))
+            .expect("device");
+        SourceLoop::set_property(&mut src, "loopback", PropValue::Bool(true)).expect("loopback");
+        assert!(src.is_loopback());
+        assert_eq!(
+            SourceLoop::get_property(&src, "device"),
+            Some(PropValue::Str("{0.0.1.0}".to_string()))
+        );
+        SourceLoop::set_property(&mut src, "num-buffers", PropValue::Int(-1)).expect("num-buffers");
+        assert_eq!(src.target_buffers, u64::MAX);
+        for spec in WASAPISRC_PROPS {
+            assert!(
+                SourceLoop::get_property(&src, spec.name).is_some(),
+                "{} is declared but not readable",
+                spec.name
+            );
+        }
     }
 
     #[test]
