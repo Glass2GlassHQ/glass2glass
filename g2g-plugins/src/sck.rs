@@ -39,8 +39,8 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError, HardwareError,
-    MemoryDomain, OutputSink, OwnedCvPixelBuffer, PipelinePacket, PropError, PropKind, PropValue,
-    PropertySpec, Rate, RawVideoFormat,
+    Interlace, MemoryDomain, OutputSink, OwnedCvPixelBuffer, PipelinePacket, PropError, PropKind,
+    PropValue, PropertySpec, Rate, RawVideoFormat,
 };
 
 use crate::cvnv12::{
@@ -262,6 +262,7 @@ fn nv12_caps(w: u32, h: u32) -> Caps {
         width: Dim::Fixed(w),
         height: Dim::Fixed(h),
         framerate: Rate::Fixed(30 << 16),
+        interlace: Interlace::Any,
     }
 }
 

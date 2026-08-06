@@ -1093,6 +1093,7 @@ impl PadTemplates for TextOverlay {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         };
         let set = CapsSet::one(any);
         Vec::from([PadTemplate::sink(set.clone()), PadTemplate::source(set)])
@@ -1369,6 +1370,7 @@ impl MultiInputElement for TextOverlayN {
                 width: Dim::Any,
                 height: Dim::Any,
                 framerate: Rate::Any,
+                interlace: g2g_core::Interlace::Any,
             })),
         }
     }
@@ -1504,6 +1506,7 @@ mod tests {
             width: Dim::Fixed(w),
             height: Dim::Fixed(h),
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         }
     }
 
@@ -1926,6 +1929,7 @@ mod tests {
             width: Dim::Fixed(8),
             height: Dim::Fixed(8),
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         };
         assert!(ov.intercept_caps(&nv12).is_err());
         assert!(ov.intercept_caps(&rgba_caps(16, 16)).is_ok());

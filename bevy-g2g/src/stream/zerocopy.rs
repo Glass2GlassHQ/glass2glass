@@ -12,7 +12,7 @@ use bevy::render::{
     settings::{RenderCreation, RenderResources},
 };
 use g2g_core::{
-    AsyncElement, Caps, Dim, G2gError, OutputSink, PipelinePacket, PushOutcome, Rate,
+    AsyncElement, Caps, Dim, G2gError, Interlace, OutputSink, PipelinePacket, PushOutcome, Rate,
     RawVideoFormat,
 };
 use g2g_plugins::cudawgpu::{create_interop_device_full, WgpuToCuda};
@@ -73,6 +73,7 @@ impl EncodeState {
             width: Dim::Fixed(settings.width),
             height: Dim::Fixed(settings.height),
             framerate: Rate::Fixed(settings.fps << 16),
+            interlace: Interlace::Any,
         };
         AsyncElement::configure_pipeline(&mut nvenc, &caps)?;
         Ok(Self {

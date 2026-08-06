@@ -114,6 +114,7 @@ fn demuxer_then_decoder_is_a_two_hop_chain() {
         width: Dim::Any,
         height: Dim::Any,
         framerate: Rate::Any,
+        interlace: g2g_core::Interlace::Any,
     };
     reg.register(ElementFactory::new(
         "stubdec",

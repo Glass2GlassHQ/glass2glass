@@ -8,8 +8,8 @@
 //! runner's backward-feasibility sweep and stay `std`-gated.
 
 use crate::caps::{
-    intersect_channels, intersect_sample_rate, AudioFormat, Caps, CapsSet, Dim, PassthroughFields,
-    Rate, RawVideoFormat, VideoCodec,
+    intersect_channels, intersect_sample_rate, AudioFormat, Caps, CapsSet, Dim, Interlace,
+    PassthroughFields, Rate, RawVideoFormat, VideoCodec,
 };
 // Only the std-gated `project_passthrough` widens sample_rate back to ANY.
 #[cfg(feature = "std")]
@@ -34,12 +34,14 @@ pub(crate) fn couple_passthrough(
                 width: wi,
                 height: hi,
                 framerate: ri,
+                interlace: ii,
             },
             Caps::RawVideo {
                 format: fp,
                 width: wp,
                 height: hp,
                 framerate: rp,
+                ..
             },
         ) => {
             let format = if mask.format {
@@ -70,6 +72,10 @@ pub(crate) fn couple_passthrough(
                 width,
                 height,
                 framerate,
+                // Interlace is a runtime-refined hint, not a maskable field:
+                // coupling it backward could only kill a link over a value the
+                // decoder has not produced yet, so the input keeps its own.
+                interlace: *ii,
             })
         }
         (
@@ -199,11 +205,14 @@ pub(crate) fn couple_passthrough_derived(
         ri.clone()
     };
     match input {
-        Caps::RawVideo { format, .. } => Some(Caps::RawVideo {
+        Caps::RawVideo {
+            format, interlace, ..
+        } => Some(Caps::RawVideo {
             format: *format,
             width,
             height,
             framerate,
+            interlace: *interlace,
         }),
         Caps::CompressedVideo { codec, .. } => Some(Caps::CompressedVideo {
             codec: *codec,
@@ -231,6 +240,7 @@ pub(crate) fn project_passthrough(out: &Caps, mask: PassthroughFields) -> Option
             width,
             height,
             framerate,
+            ..
         } => {
             if !mask.format {
                 return None; // retargeted format has no wildcard
@@ -248,6 +258,8 @@ pub(crate) fn project_passthrough(out: &Caps, mask: PassthroughFields) -> Option
                 } else {
                     Rate::Any
                 },
+                // A feasibility projection imposes no scan constraint upstream.
+                interlace: Interlace::Any,
             })
         }
         Caps::CompressedVideo {
@@ -340,6 +352,7 @@ pub(crate) fn project_passthrough_derived(
             width,
             height,
             framerate,
+            interlace: Interlace::Any,
         }),
         Caps::CompressedVideo { codec, .. } => Some(Caps::CompressedVideo {
             codec: *codec,
@@ -415,6 +428,7 @@ fn concrete_probe_base(sample: &Caps) -> Caps {
             width: Dim::Fixed(64),
             height: Dim::Fixed(64),
             framerate: Rate::Fixed(30 << 16),
+            interlace: Interlace::Any,
         },
         Caps::CompressedVideo { codec, .. } => Caps::CompressedVideo {
             codec: *codec,
@@ -569,6 +583,7 @@ mod tests {
             width,
             height,
             framerate,
+            interlace: crate::Interlace::Any,
         }
     }
 
@@ -586,6 +601,7 @@ mod tests {
                 width: width.clone(),
                 height: height.clone(),
                 framerate: framerate.clone(),
+                interlace: crate::Interlace::Any,
             }),
             _ => CapsSet::from_alternatives(Vec::new()),
         };
@@ -612,6 +628,7 @@ mod tests {
                 width: Dim::Fixed(640),
                 height: Dim::Fixed(480),
                 framerate: Rate::Fixed(30 << 16),
+                interlace: crate::Interlace::Any,
             })
         };
         let sample = Caps::CompressedVideo {
@@ -643,6 +660,7 @@ mod tests {
                 width: Dim::Fixed(320),
                 height: Dim::Fixed(240),
                 framerate: framerate.clone(),
+                interlace: crate::Interlace::Any,
             }),
             _ => CapsSet::from_alternatives(Vec::new()),
         };
@@ -670,6 +688,7 @@ mod tests {
                 width,
                 height,
                 framerate,
+                interlace: _,
             } = input
             {
                 if from.contains(format) {
@@ -678,6 +697,7 @@ mod tests {
                         width: width.clone(),
                         height: height.clone(),
                         framerate: framerate.clone(),
+                        interlace: crate::Interlace::Any,
                     });
                 }
             }
@@ -688,6 +708,7 @@ mod tests {
             width: Dim::Fixed(640),
             height: Dim::Fixed(480),
             framerate: Rate::Fixed(30 << 16),
+            interlace: crate::Interlace::Any,
         };
         assert_eq!(
             discover_passthrough(&conv, &sample),

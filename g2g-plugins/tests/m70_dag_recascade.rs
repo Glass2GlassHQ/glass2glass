@@ -31,6 +31,7 @@ fn nv12(w: u32, h: u32) -> Caps {
         width: Dim::Fixed(w),
         height: Dim::Fixed(h),
         framerate: Rate::Fixed(30 << 16),
+        interlace: g2g_core::Interlace::Any,
     }
 }
 
@@ -40,6 +41,7 @@ fn nv12_any() -> Caps {
         width: Dim::Any,
         height: Dim::Any,
         framerate: Rate::Any,
+        interlace: g2g_core::Interlace::Any,
     }
 }
 
@@ -49,6 +51,7 @@ fn rgba(w: u32, h: u32) -> Caps {
         width: Dim::Fixed(w),
         height: Dim::Fixed(h),
         framerate: Rate::Fixed(30 << 16),
+        interlace: g2g_core::Interlace::Any,
     }
 }
 
@@ -402,6 +405,7 @@ async fn rejecting_branch_fails_loud() {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         },
     }));
     let nv12_only = g.add_sink(GraphNode::element(PoolSink { accept: nv12_any() }));

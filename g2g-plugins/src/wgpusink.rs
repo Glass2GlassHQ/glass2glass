@@ -622,6 +622,7 @@ mod tests {
             width: g2g_core::Dim::Fixed(w),
             height: g2g_core::Dim::Fixed(h),
             framerate: g2g_core::Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         })
         .unwrap();
         let frame = wgpu_frame(&ctx, w, h, src, 0);
@@ -678,6 +679,7 @@ mod tests {
             width: g2g_core::Dim::Fixed(w),
             height: g2g_core::Dim::Fixed(h),
             framerate: g2g_core::Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         };
 
         // The play anchor stamped at clock 0 makes each frame's deadline its PTS.
@@ -763,6 +765,7 @@ mod tests {
             width: Dim::Fixed(w),
             height: Dim::Fixed(h),
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         };
         overlay.configure_pipeline(&rgba_caps).unwrap();
         let mut sink = WgpuSink::offscreen(ctx.clone(), w, h);

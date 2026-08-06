@@ -48,6 +48,7 @@ fn raw_video() -> Caps {
         width: Dim::Any,
         height: Dim::Any,
         framerate: Rate::Any,
+        interlace: g2g_core::Interlace::Any,
     }
 }
 fn raw_audio() -> Caps {
@@ -325,17 +326,18 @@ async fn playbin_fans_out_a_transport_stream() {
     let graph = parse_launch(&reg, &format!("playbin uri={uri}")).expect("ts playbin fans out");
     std::fs::remove_file(&path).ok();
 
-    // FileSrc -> TsDemuxN(2). Video: demux -> decoder -> sink. Audio: demux ->
-    // decoder -> audioconvert -> audioresample -> sink (the M422+ audio branch).
+    // FileSrc -> TsDemuxN(2). Video: demux -> decoder -> auto deinterlace
+    // (M935) -> sink. Audio: demux -> decoder -> audioconvert -> audioresample
+    // -> sink (the M422+ audio branch).
     assert_eq!(
         graph.node_count(),
-        8,
-        "source, demux, video decode+sink, audio decode+convert+resample+sink"
+        9,
+        "source, demux, video decode+deinterlace+sink, audio decode+convert+resample+sink"
     );
     assert_eq!(
         graph.edges().len(),
-        7,
-        "video branch (2) + audio branch (4) + src->demux"
+        8,
+        "video branch (3) + audio branch (4) + src->demux"
     );
 }
 
@@ -349,8 +351,8 @@ async fn the_right_hook_handles_each_container() {
     std::fs::remove_file(&ts_path).ok();
     assert_eq!(
         ts_graph.node_count(),
-        8,
-        "TS fans out via ts_playbin (audio branch adds convert+resample)"
+        9,
+        "TS fans out via ts_playbin (audio branch adds convert+resample, video the auto deinterlace)"
     );
 
     // An MKV file is handled by mkv_playbin (ts_playbin declines it).
@@ -359,7 +361,7 @@ async fn the_right_hook_handles_each_container() {
     std::fs::remove_file(&mkv_path).ok();
     assert_eq!(
         mkv_graph.node_count(),
-        8,
-        "MKV fans out via mkv_playbin (audio branch adds convert+resample)"
+        9,
+        "MKV fans out via mkv_playbin (audio branch adds convert+resample, video the auto deinterlace)"
     );
 }

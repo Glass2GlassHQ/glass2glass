@@ -68,6 +68,7 @@ fn rgba_caps() -> Caps {
         width: Dim::Fixed(W),
         height: Dim::Fixed(H),
         framerate: Rate::Fixed(25 << 16),
+        interlace: g2g_core::Interlace::Any,
     }
 }
 

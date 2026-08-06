@@ -30,7 +30,8 @@ use alloc::vec::Vec;
 use g2g_core::frame::Frame;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError, HardwareError,
-    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, Rate, RawVideoFormat,
+    Interlace, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, Rate,
+    RawVideoFormat,
 };
 
 use js_sys::JsOption;
@@ -511,6 +512,7 @@ fn rgba_any() -> Caps {
         width: Dim::Any,
         height: Dim::Any,
         framerate: Rate::Any,
+        interlace: Interlace::Any,
     }
 }
 

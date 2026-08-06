@@ -34,8 +34,8 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError,
-    HardwareError, MemoryDomain, OutputSink, OwnedWebGPUExternalTexture, PadTemplate, PadTemplates,
-    PipelinePacket, Rate, RawVideoFormat, VideoCodec, WebGPUKeepAlive,
+    HardwareError, Interlace, MemoryDomain, OutputSink, OwnedWebGPUExternalTexture, PadTemplate,
+    PadTemplates, PipelinePacket, Rate, RawVideoFormat, VideoCodec, WebGPUKeepAlive,
 };
 
 use wasm_bindgen::prelude::*;
@@ -384,6 +384,7 @@ impl PadTemplates for WebCodecsDecode {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            interlace: Interlace::Any,
         };
         Vec::from([
             PadTemplate::sink(CapsSet::one(h264)),
@@ -457,6 +458,7 @@ fn rgba_caps(w: u32, h: u32) -> Caps {
         width: Dim::Fixed(w),
         height: Dim::Fixed(h),
         framerate: Rate::Any,
+        interlace: Interlace::Any,
     }
 }
 
@@ -475,6 +477,7 @@ fn derive_output_caps(codec: VideoCodec, input: &Caps) -> CapsSet {
             width: width.clone(),
             height: height.clone(),
             framerate: framerate.clone(),
+            interlace: Interlace::Any,
         }),
         _ => CapsSet::from_alternatives(Vec::new()),
     }

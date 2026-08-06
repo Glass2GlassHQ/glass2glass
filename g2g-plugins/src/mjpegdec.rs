@@ -114,6 +114,7 @@ impl MjpegDec {
             width: Dim::Fixed(w),
             height: Dim::Fixed(h),
             framerate: self.framerate.clone(),
+            interlace: g2g_core::Interlace::Any,
         }
     }
 
@@ -286,6 +287,7 @@ impl AsyncElement for MjpegDec {
                 width: width.clone(),
                 height: height.clone(),
                 framerate: framerate.clone(),
+                interlace: g2g_core::Interlace::Any,
             }),
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
@@ -431,6 +433,7 @@ impl PadTemplates for MjpegDec {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         };
         Vec::from([
             PadTemplate::sink(CapsSet::one(Self::input_template())),

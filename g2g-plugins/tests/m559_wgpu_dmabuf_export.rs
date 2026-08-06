@@ -46,6 +46,7 @@ fn caps(format: RawVideoFormat, w: u32, h: u32) -> Caps {
         width: Dim::Fixed(w),
         height: Dim::Fixed(h),
         framerate: Rate::Fixed(30 << 16),
+        interlace: g2g_core::Interlace::Any,
     }
 }
 

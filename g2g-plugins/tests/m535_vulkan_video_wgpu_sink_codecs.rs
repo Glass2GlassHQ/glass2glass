@@ -113,6 +113,7 @@ fn drive_wedge(codec: VideoCodec, clip: &[u8]) {
         width: Dim::Fixed(W),
         height: Dim::Fixed(H),
         framerate: Rate::Fixed(30 << 16),
+        interlace: g2g_core::Interlace::Any,
     };
     sink.configure_pipeline(&rgba_caps).expect("sink configure");
 

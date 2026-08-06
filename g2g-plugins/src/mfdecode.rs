@@ -65,7 +65,7 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AllocationParams, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
-    D3D11KeepAlive, Dim, FrameTiming, G2gError, HardwareError, MemoryDomain, OutputSink,
+    D3D11KeepAlive, Dim, FrameTiming, G2gError, HardwareError, Interlace, MemoryDomain, OutputSink,
     OwnedD3D11Texture, PadTemplate, PadTemplates, PipelinePacket, Rate, RawVideoFormat, VideoCodec,
 };
 
@@ -590,6 +590,7 @@ impl PadTemplates for MfDecode {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            interlace: Interlace::Any,
         };
         Vec::from([
             PadTemplate::sink(CapsSet::from_alternatives(Vec::from([
@@ -944,6 +945,7 @@ fn nv12_caps(w: u32, h: u32, framerate: Rate) -> Caps {
         width: Dim::Fixed(w),
         height: Dim::Fixed(h),
         framerate,
+        interlace: Interlace::Any,
     }
 }
 
@@ -964,6 +966,7 @@ fn derive_output_caps(codec: VideoCodec, input: &Caps) -> CapsSet {
             width: width.clone(),
             height: height.clone(),
             framerate: framerate.clone(),
+            interlace: Interlace::Any,
         }),
         _ => CapsSet::from_alternatives(Vec::new()),
     }
@@ -1009,6 +1012,7 @@ mod tests {
                 width: Dim::Fixed(640),
                 height: Dim::Fixed(480),
                 framerate: Rate::Fixed(30 << 16),
+                interlace: Interlace::Any,
             }
         );
     }
@@ -1183,6 +1187,7 @@ mod tests {
             width: Dim::Fixed(1920),
             height: Dim::Fixed(1080),
             framerate: Rate::Any,
+            interlace: Interlace::Any,
         };
         assert!(matches!(sink.caps, g2g_core::PadCaps::Fixed(ref s) if s.accepts(&h264)));
         assert!(matches!(source.caps, g2g_core::PadCaps::Fixed(ref s) if s.accepts(&nv12)));
@@ -1210,6 +1215,7 @@ mod tests {
                 width: Dim::Fixed(1920),
                 height: Dim::Fixed(1080),
                 framerate: Rate::Fixed(30 << 16),
+                interlace: Interlace::Any,
             }]
         );
 

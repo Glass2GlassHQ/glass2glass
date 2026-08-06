@@ -26,7 +26,7 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError, HardwareError,
-    MemoryDomain, OutputSink, PipelinePacket, Rate, RawVideoFormat,
+    Interlace, MemoryDomain, OutputSink, PipelinePacket, Rate, RawVideoFormat,
 };
 
 use wasm_bindgen::prelude::*;
@@ -71,6 +71,7 @@ impl WebCameraSrc {
             // negotiation): the true capture rate is not known until frames arrive,
             // and the paired encoder just needs a sane rate to configure with.
             framerate: Rate::Fixed(30 << 16),
+            interlace: Interlace::Any,
         }
     }
 
@@ -84,6 +85,7 @@ impl WebCameraSrc {
                 width: Dim::Fixed(w),
                 height: Dim::Fixed(h),
                 framerate: Rate::Fixed(30 << 16),
+                interlace: Interlace::Any,
             };
             out.push(PipelinePacket::CapsChanged(caps)).await?;
             self.last_dims = Some((w, h));

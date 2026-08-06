@@ -115,9 +115,9 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::{OwnedCudaBuffer, SystemSlice};
 use g2g_core::{
     AllocationParams, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, CudaKeepAlive,
-    Dim, ElementMetadata, FrameTiming, G2gError, HardwareError, MemoryDomain, OutputSink,
-    PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate,
-    RawVideoFormat, VideoCodec,
+    Dim, ElementMetadata, FrameTiming, G2gError, HardwareError, Interlace, MemoryDomain,
+    OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue,
+    PropertySpec, Rate, RawVideoFormat, VideoCodec,
 };
 
 /// Cap on pending input-pts -> arrival entries, so frames the decoder drops
@@ -317,6 +317,9 @@ struct DecodedPicture {
     /// format for a fixed choice; for `Auto` it is the source's native chroma
     /// resolved at decode, so the emitted output caps match the payload.
     format: OutputFormat,
+    /// libavcodec's per-picture interlaced flag (M935), read before the frame
+    /// is packed / moved so every backend reports it.
+    interlaced: bool,
 }
 
 /// Where a decoded picture's pixels live.
@@ -383,6 +386,11 @@ pub struct FfmpegVideoDec {
     /// lazily on the first access unit so its parameter sets can seed the decoder
     /// as `extradata` (see [`Self::open_decoder`]).
     codec_kind: Option<VideoCodec>,
+    /// Sticky "this stream has shown an interlaced picture" (M935). Telecine /
+    /// mixed streams flip the per-picture flag frame to frame; latching keeps
+    /// the output caps stable (one `CapsChanged` to `Interleaved`) instead of
+    /// flapping, which would reset the downstream deinterlacer's window.
+    saw_interlaced: bool,
 }
 
 /// Back-compat alias from when this element decoded only H.264. The struct is
@@ -429,6 +437,7 @@ impl FfmpegVideoDec {
             requested_alloc: None,
             vaapi_device: None,
             codec_kind: None,
+            saw_interlaced: false,
         }
     }
 
@@ -705,6 +714,8 @@ fn drain_frames_into(
                 };
                 let width = frame.width();
                 let height = frame.height();
+                // Read before the CUDA path moves the frame into its keep-alive.
+                let interlaced = frame.is_interlaced();
                 // `Auto` resolves to each frame's native chroma (a fixed
                 // request passes through), so the packed payload and the
                 // emitted caps agree. Resolved per backend against the real
@@ -741,6 +752,7 @@ fn drain_frames_into(
                     format: resolved,
                     pts_ns,
                     arrival_ns,
+                    interlaced,
                 });
             }
             Err(FfError::Other { errno }) if errno == ffmpeg::error::EAGAIN => {
@@ -982,6 +994,7 @@ impl PadTemplates for FfmpegVideoDec {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         };
         let any_codec = |codec| Caps::CompressedVideo {
             codec,
@@ -1352,9 +1365,25 @@ impl AsyncElement for FfmpegVideoDec {
                 _ => Rate::Fixed(30 << 16),
             };
             for d in decoded {
+                self.saw_interlaced |= d.interlaced;
+                // `Any` (not `Progressive`) until the latch trips: it equals the
+                // runner's pre-fixed output caps, so a progressive stream causes
+                // no spurious mid-stream CapsChanged. `Interleaved` is the one
+                // positive signal `deinterlace mode=auto` needs.
+                let interlace = if self.saw_interlaced {
+                    Interlace::Interleaved
+                } else {
+                    Interlace::Any
+                };
                 // Use the picture's *resolved* format (native chroma under Auto),
                 // so the emitted caps match the packed payload.
-                let new_caps = yuv420_caps(d.format, d.width, d.height, out_framerate.clone());
+                let new_caps = yuv420_caps(
+                    d.format,
+                    d.width,
+                    d.height,
+                    out_framerate.clone(),
+                    interlace,
+                );
                 if self.last_caps.as_ref() != Some(&new_caps) {
                     // M16 workaround #3 Phase A debug assertion: the
                     // decode-time output caps must be consistent with
@@ -1551,6 +1580,7 @@ fn derive_output_caps(input: &Caps, out: OutputFormat) -> CapsSet {
                 width: width.clone(),
                 height: height.clone(),
                 framerate: framerate.clone(),
+                interlace: g2g_core::Interlace::Any,
             };
             match out {
                 // Auto emits whichever chroma / depth the stream carries;
@@ -1578,12 +1608,19 @@ fn derive_output_caps(input: &Caps, out: OutputFormat) -> CapsSet {
     }
 }
 
-fn yuv420_caps(format: OutputFormat, w: u32, h: u32, framerate: Rate) -> Caps {
+fn yuv420_caps(
+    format: OutputFormat,
+    w: u32,
+    h: u32,
+    framerate: Rate,
+    interlace: Interlace,
+) -> Caps {
     Caps::RawVideo {
         format: format.raw_format(),
         width: Dim::Fixed(w),
         height: Dim::Fixed(h),
         framerate,
+        interlace,
     }
 }
 
@@ -2457,6 +2494,7 @@ mod tests {
                 width: Dim::Fixed(16),
                 height: Dim::Fixed(16),
                 framerate: Rate::Fixed(30 << 16),
+                interlace: g2g_core::Interlace::Any,
             });
             assert!(!set.intersect(&one).is_empty(), "Auto advertises {fmt:?}");
         }
@@ -2499,6 +2537,7 @@ mod tests {
                 width: Dim::Fixed(1920),
                 height: Dim::Fixed(1080),
                 framerate: Rate::Fixed(30 << 16),
+                interlace: g2g_core::Interlace::Any,
             }]
         );
 
@@ -2516,6 +2555,7 @@ mod tests {
                 width: Dim::Fixed(1920),
                 height: Dim::Fixed(1080),
                 framerate: Rate::Fixed(30 << 16),
+                interlace: g2g_core::Interlace::Any,
             }]
         );
         // A non-compressed input has no codec to decode → empty CapsSet.
@@ -2524,6 +2564,7 @@ mod tests {
             width: Dim::Fixed(64),
             height: Dim::Fixed(64),
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         };
         assert!(f(&raw).is_empty());
     }
@@ -2531,12 +2572,19 @@ mod tests {
     #[test]
     fn i420_caps_are_fixed() {
         assert_eq!(
-            yuv420_caps(OutputFormat::I420, 640, 480, Rate::Fixed(30 << 16)),
+            yuv420_caps(
+                OutputFormat::I420,
+                640,
+                480,
+                Rate::Fixed(30 << 16),
+                Interlace::Progressive
+            ),
             Caps::RawVideo {
                 format: RawVideoFormat::I420,
                 width: Dim::Fixed(640),
                 height: Dim::Fixed(480),
                 framerate: Rate::Fixed(30 << 16),
+                interlace: Interlace::Progressive,
             }
         );
     }
@@ -2544,12 +2592,19 @@ mod tests {
     #[test]
     fn nv12_caps_advertise_nv12_format() {
         assert_eq!(
-            yuv420_caps(OutputFormat::Nv12, 1280, 720, Rate::Fixed(30 << 16)),
+            yuv420_caps(
+                OutputFormat::Nv12,
+                1280,
+                720,
+                Rate::Fixed(30 << 16),
+                Interlace::Progressive
+            ),
             Caps::RawVideo {
                 format: RawVideoFormat::Nv12,
                 width: Dim::Fixed(1280),
                 height: Dim::Fixed(720),
                 framerate: Rate::Fixed(30 << 16),
+                interlace: Interlace::Progressive,
             }
         );
     }
@@ -2589,6 +2644,7 @@ mod tests {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         };
         assert_eq!(dec.intercept_caps(&raw), Err(G2gError::CapsMismatch));
     }
@@ -2831,6 +2887,7 @@ mod tests {
                 width: Dim::Fixed(1920),
                 height: Dim::Fixed(1080),
                 framerate: Rate::Fixed(30 << 16),
+                interlace: g2g_core::Interlace::Any,
             }]
         );
     }
@@ -2900,6 +2957,7 @@ mod tests {
             width: Dim::Fixed(1280),
             height: Dim::Fixed(720),
             framerate: Rate::Fixed(30 << 16),
+            interlace: g2g_core::Interlace::Any,
         };
         let log = core::cell::RefCell::new(Vec::new());
         let mut rec = RecSink(&log);
@@ -2953,6 +3011,7 @@ mod tests {
             width: Dim::Fixed(640),
             height: Dim::Fixed(480),
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         };
         let log = core::cell::RefCell::new(Vec::new());
         let mut rec = RecSink(&log);

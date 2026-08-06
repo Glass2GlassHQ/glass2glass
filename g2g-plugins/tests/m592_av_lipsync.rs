@@ -69,6 +69,7 @@ const VIDEO: fn() -> Caps = || Caps::RawVideo {
     width: Dim::Fixed(8),
     height: Dim::Fixed(8),
     framerate: Rate::Fixed(30 << 16),
+    interlace: g2g_core::Interlace::Any,
 };
 
 const AUDIO: fn() -> Caps = || Caps::Audio {

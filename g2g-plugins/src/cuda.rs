@@ -77,6 +77,7 @@ fn nv12_any() -> CapsSet {
         width: Dim::Any,
         height: Dim::Any,
         framerate: Rate::Any,
+        interlace: g2g_core::Interlace::Any,
     })
 }
 
@@ -1024,6 +1025,7 @@ mod tests {
             width: Dim::Fixed(w),
             height: Dim::Fixed(h),
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         }
     }
 
@@ -1049,6 +1051,7 @@ mod tests {
             width: Dim::Fixed(1280),
             height: Dim::Fixed(720),
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         };
         assert_eq!(
             e.configure_pipeline(&i420).err(),
@@ -1066,6 +1069,7 @@ mod tests {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         };
         assert_eq!(d.intercept_caps(&i420), Err(G2gError::CapsMismatch));
     }

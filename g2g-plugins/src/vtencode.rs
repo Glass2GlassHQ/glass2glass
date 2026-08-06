@@ -53,8 +53,9 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError,
-    HardwareError, MemoryDomain, OutputSink, OwnedCvPixelBuffer, PadTemplate, PadTemplates,
-    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat, VideoCodec,
+    HardwareError, Interlace, MemoryDomain, OutputSink, OwnedCvPixelBuffer, PadTemplate,
+    PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate,
+    RawVideoFormat, VideoCodec,
 };
 
 use crate::annexb::{au_is_keyframe, avcc_to_annexb};
@@ -188,6 +189,7 @@ impl VtEncode {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            interlace: Interlace::Any,
         }
     }
 
@@ -341,6 +343,7 @@ impl AsyncElement for VtEncode {
                 width: Dim::Fixed(w),
                 height: Dim::Fixed(h),
                 framerate,
+                interlace: _,
             } if *w % 2 == 0 && *h % 2 == 0 => (*w, *h, framerate.clone()),
             _ => return Err(G2gError::CapsMismatch),
         };
@@ -448,6 +451,7 @@ impl PadTemplates for VtEncode {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            interlace: Interlace::Any,
         };
         let compressed = |codec| Caps::CompressedVideo {
             codec,
@@ -481,6 +485,7 @@ fn derive_output_caps(codec: VideoCodec, input: &Caps) -> CapsSet {
             width,
             height,
             framerate,
+            interlace: _,
         } => CapsSet::one(Caps::CompressedVideo {
             codec,
             width: width.clone(),

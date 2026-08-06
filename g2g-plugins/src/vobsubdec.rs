@@ -118,6 +118,7 @@ impl VobSubDec {
             width: Dim::Fixed(self.width),
             height: Dim::Fixed(self.height),
             framerate: Rate::Fixed(self.framerate_q16),
+            interlace: g2g_core::Interlace::Any,
         }
     }
 
@@ -361,6 +362,7 @@ impl PadTemplates for VobSubDec {
                 width: Dim::Fixed(DEFAULT_WIDTH),
                 height: Dim::Fixed(DEFAULT_HEIGHT),
                 framerate: Rate::Fixed(25 << 16),
+                interlace: g2g_core::Interlace::Any,
             })),
         ])
     }
@@ -489,6 +491,7 @@ mod tests {
                 width: Dim::Fixed(32),
                 height: Dim::Fixed(16),
                 framerate: Rate::Fixed(25 << 16),
+                interlace: g2g_core::Interlace::Any,
             }],
             "the .idx size: line refines the output geometry once"
         );

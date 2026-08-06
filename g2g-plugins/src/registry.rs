@@ -240,6 +240,7 @@ pub fn default_registry() -> Registry {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         },
         // num-buffers defaults to forever (the property's documented `-1`),
         // matching gst videotestsrc; a launch line bounds it with `num-buffers=N`.
@@ -278,6 +279,7 @@ pub fn default_registry() -> Registry {
             width: Dim::Fixed(640),
             height: Dim::Fixed(480),
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         },
         || Box::new(Camera2Src::new(640, 480, u64::MAX)),
     ));
@@ -626,6 +628,7 @@ pub fn default_registry() -> Registry {
                 width: Dim::Fixed(320),
                 height: Dim::Fixed(240),
                 framerate: Rate::Fixed(30 << 16),
+                interlace: g2g_core::Interlace::Any,
             },
         ))
     }));
@@ -1161,6 +1164,7 @@ fn register_autoplug_candidates(reg: &mut Registry) {
             width: Dim::Fixed(640),
             height: Dim::Fixed(480),
             framerate: Rate::Fixed(30 << 16),
+            interlace: g2g_core::Interlace::Any,
         },
         || Box::new(crate::avf::AvfVideoSrc::new(u64::MAX)),
     ));
@@ -1186,6 +1190,7 @@ fn register_autoplug_candidates(reg: &mut Registry) {
             width: Dim::Fixed(1920),
             height: Dim::Fixed(1080),
             framerate: Rate::Fixed(30 << 16),
+            interlace: g2g_core::Interlace::Any,
         },
         || Box::new(crate::sck::ScreenCaptureSrc::new(u64::MAX)),
     ));
@@ -1440,6 +1445,7 @@ fn register_feature_gated(reg: &mut Registry) {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         },
         || Box::new(RemoteSrc::new("0.0.0.0:9600".parse().unwrap())),
     ));
@@ -1458,6 +1464,7 @@ fn register_feature_gated(reg: &mut Registry) {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         },
         || Box::new(RemoteWsSrc::new("0.0.0.0:9601".parse().unwrap())),
     ));
@@ -1483,6 +1490,7 @@ fn register_feature_gated(reg: &mut Registry) {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         },
         || Box::new(RemoteWtSrc::new("0.0.0.0:9603".parse().unwrap())),
     ));
@@ -1535,6 +1543,7 @@ fn register_feature_gated(reg: &mut Registry) {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         },
         || Box::new(LocalCudaSrc::new("/tmp/g2g-localcuda.sock")),
     ));
@@ -1550,6 +1559,7 @@ fn register_feature_gated(reg: &mut Registry) {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         },
         || Box::new(DmaBufSrc::new("/tmp/g2g-dmabuf.sock")),
     ));
@@ -1606,6 +1616,7 @@ fn register_feature_gated(reg: &mut Registry) {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         },
         || Box::new(V4l2Src::new("/dev/video0")),
     ));
@@ -1619,6 +1630,7 @@ fn register_feature_gated(reg: &mut Registry) {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         },
         || Box::new(LibCameraSrc::new()),
     ));
@@ -1814,6 +1826,7 @@ fn register_feature_gated(reg: &mut Registry) {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         },
         || Box::new(PipeWireVideoSrc::new()),
     ));

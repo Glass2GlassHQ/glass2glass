@@ -402,6 +402,15 @@ pub fn parse_caps_set(desc: &str) -> Option<CapsSet> {
                 expand_dim(fv("height"))?,
                 expand_rate(fv("framerate"))?,
             );
+            // An absent `interlace-mode` is the wildcard (a filter should not
+            // constrain what it does not name), matching `to_gst_string`, which
+            // prints the field only for `interleaved`.
+            let interlace = match fv("interlace-mode") {
+                None => g2g_core::Interlace::Any,
+                Some(FieldVal::One(s)) if *s == "progressive" => g2g_core::Interlace::Progressive,
+                Some(FieldVal::One(s)) if *s == "interleaved" => g2g_core::Interlace::Interleaved,
+                Some(_) => return None,
+            };
             let mut alts = Vec::new();
             for &format in &formats {
                 for w in &widths {
@@ -412,6 +421,7 @@ pub fn parse_caps_set(desc: &str) -> Option<CapsSet> {
                                 width: w.clone(),
                                 height: h.clone(),
                                 framerate: r.clone(),
+                                interlace,
                             });
                         }
                     }
@@ -532,6 +542,7 @@ mod tests {
             width: Dim::Fixed(w),
             height: Dim::Fixed(h),
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         }
     }
 
@@ -571,6 +582,7 @@ mod tests {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         });
         assert_eq!(f.intercept_caps(&nv12(1280, 720)), Ok(nv12(1280, 720)));
 
@@ -604,6 +616,7 @@ mod tests {
                 width: Dim::Fixed(320),
                 height: Dim::Fixed(240),
                 framerate: Rate::Fixed(30 << 16),
+                interlace: g2g_core::Interlace::Any,
             })
         );
         // Omitted dims default to Any; a missing format is rejected.
@@ -614,6 +627,7 @@ mod tests {
                 width: Dim::Any,
                 height: Dim::Any,
                 framerate: Rate::Any,
+                interlace: g2g_core::Interlace::Any,
             })
         );
         // `parse_caps` yields a single Caps, so a format-less (multi-format) raw

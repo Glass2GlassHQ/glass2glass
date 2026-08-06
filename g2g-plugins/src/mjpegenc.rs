@@ -98,6 +98,7 @@ impl MjpegEnc {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         };
         Vec::from([
             raw(RawVideoFormat::Rgba8),
@@ -226,6 +227,7 @@ impl AsyncElement for MjpegEnc {
                 width,
                 height,
                 framerate,
+                interlace: _,
             } => CapsSet::one(Caps::CompressedVideo {
                 codec: VideoCodec::Mjpeg,
                 width: width.clone(),
@@ -242,6 +244,7 @@ impl AsyncElement for MjpegEnc {
             width,
             height,
             framerate,
+            interlace: _,
         } = absolute_caps
         else {
             return Err(G2gError::CapsMismatch);

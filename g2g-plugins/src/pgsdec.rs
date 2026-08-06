@@ -123,6 +123,7 @@ impl PgsDec {
             width: Dim::Fixed(self.width),
             height: Dim::Fixed(self.height),
             framerate: Rate::Fixed(self.framerate_q16),
+            interlace: g2g_core::Interlace::Any,
         }
     }
 
@@ -351,6 +352,7 @@ impl PadTemplates for PgsDec {
                 width: Dim::Fixed(DEFAULT_VIDEO_WIDTH),
                 height: Dim::Fixed(DEFAULT_VIDEO_HEIGHT),
                 framerate: Rate::Fixed(25 << 16),
+                interlace: g2g_core::Interlace::Any,
             })),
         ])
     }
@@ -470,6 +472,7 @@ mod tests {
                 width: Dim::Fixed(32),
                 height: Dim::Fixed(16),
                 framerate: Rate::Fixed(25 << 16),
+                interlace: g2g_core::Interlace::Any,
             }],
             "the presentation composition refines the output geometry once"
         );

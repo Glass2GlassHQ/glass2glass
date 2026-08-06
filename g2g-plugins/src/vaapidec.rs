@@ -282,6 +282,7 @@ impl PadTemplates for VaapiH264Dec {
                 width: Dim::Any,
                 height: Dim::Any,
                 framerate: Rate::Any,
+                interlace: g2g_core::Interlace::Any,
             })),
         ])
     }
@@ -482,6 +483,7 @@ fn derive_output_caps(input: &Caps) -> CapsSet {
             width: width.clone(),
             height: height.clone(),
             framerate: framerate.clone(),
+            interlace: g2g_core::Interlace::Any,
         }),
         _ => CapsSet::from_alternatives(Vec::new()),
     }
@@ -493,6 +495,7 @@ fn nv12_caps(w: u32, h: u32) -> Caps {
         width: Dim::Fixed(w),
         height: Dim::Fixed(h),
         framerate: Rate::Any,
+        interlace: g2g_core::Interlace::Any,
     }
 }
 
@@ -553,6 +556,7 @@ mod tests {
                 width: Dim::Fixed(640),
                 height: Dim::Fixed(480),
                 framerate: Rate::Any,
+                interlace: g2g_core::Interlace::Any,
             }
         );
     }
@@ -608,6 +612,7 @@ mod tests {
                 width: Dim::Fixed(1920),
                 height: Dim::Fixed(1080),
                 framerate: Rate::Fixed(30 << 16),
+                interlace: g2g_core::Interlace::Any,
             }]
         );
 

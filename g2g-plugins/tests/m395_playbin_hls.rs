@@ -42,6 +42,7 @@ fn raw_video() -> Caps {
         width: Dim::Any,
         height: Dim::Any,
         framerate: Rate::Any,
+        interlace: g2g_core::Interlace::Any,
     }
 }
 fn raw_audio() -> Caps {
@@ -142,13 +143,13 @@ fn discovers_renditions_and_fans_out_a_muxed_ts_variant() {
         .expect("two muxed streams fan out");
     assert_eq!(
         graph.node_count(),
-        8,
-        "source, demux, video decode+sink, audio decode+convert+resample+sink"
+        9,
+        "source, demux, video decode+deinterlace+sink, audio decode+convert+resample+sink"
     );
     assert_eq!(
         graph.edges().len(),
-        7,
-        "video branch (2) + audio branch (4) + src->demux"
+        8,
+        "video branch (3, with the M935 auto deinterlace) + audio branch (4) + src->demux"
     );
 }
 
@@ -213,15 +214,16 @@ fn separate_audio_rendition_builds_two_source_chains() {
     )
     .expect("separate fan-out builds")
     .expect("video + audio chains");
-    // Two chains: video = HlsSrc -> TsDemuxN -> decoder -> sink (4 nodes, 3 edges);
-    // audio = HlsSrc -> TsDemuxN -> decoder -> audioconvert -> audioresample -> sink
-    // (6 nodes, 5 edges, the M422+ audio branch). Total 10 nodes, 8 edges.
+    // Two chains: video = HlsSrc -> TsDemuxN -> decoder -> deinterlace -> sink
+    // (5 nodes, 4 edges, with the M935 auto deinterlace); audio = HlsSrc ->
+    // TsDemuxN -> decoder -> audioconvert -> audioresample -> sink (6 nodes,
+    // 5 edges, the M422+ audio branch). Total 11 nodes, 9 edges.
     assert_eq!(
         graph.node_count(),
-        10,
-        "video chain (4) + audio chain (6, with convert+resample)"
+        11,
+        "video chain (5, with deinterlace) + audio chain (6, with convert+resample)"
     );
-    assert_eq!(graph.edges().len(), 8);
+    assert_eq!(graph.edges().len(), 9);
 }
 
 /// An fMP4 / CMAF HLS variant fans out via `Mp4DemuxN`, its tracks discovered from
@@ -326,12 +328,13 @@ fn fmp4_variant_fans_out_via_mp4demuxn() {
     let graph = build_hls_fmp4_fanout(&reg, "https://example.com/master.m3u8", &init)
         .expect("fmp4 fan-out builds")
         .expect("two tracks fan out");
-    // Audio track goes through the M422+ branch (decoder+convert+resample+sink):
-    // source + demux + video(decoder+sink) + audio(decoder+convert+resample+sink).
+    // Audio track goes through the M422+ branch (decoder+convert+resample+sink),
+    // the video one through the M935 auto deinterlace: source + demux +
+    // video(decoder+deinterlace+sink) + audio(decoder+convert+resample+sink).
     assert_eq!(
         graph.node_count(),
-        8,
-        "source, demux, video decode+sink, audio decode+convert+resample+sink"
+        9,
+        "source, demux, video decode+deinterlace+sink, audio decode+convert+resample+sink"
     );
-    assert_eq!(graph.edges().len(), 7);
+    assert_eq!(graph.edges().len(), 8);
 }

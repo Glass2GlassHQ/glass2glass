@@ -42,8 +42,8 @@ mod demo {
     use g2g_core::memory::{MemoryDomain, OwnedCvPixelBuffer, SystemSlice};
     use g2g_core::runtime::block_on;
     use g2g_core::{
-        AsyncElement, Caps, Dim, G2gError, OutputSink, PushOutcome, Rate, RawVideoFormat,
-        VideoCodec,
+        AsyncElement, Caps, Dim, G2gError, Interlace, OutputSink, PushOutcome, Rate,
+        RawVideoFormat, VideoCodec,
     };
     use g2g_plugins::h264parse::H264Parse;
     use g2g_plugins::metalvideosink::MetalVideoSink;
@@ -266,6 +266,7 @@ mod demo {
                 width: Dim::Fixed(self.width),
                 height: Dim::Fixed(self.height),
                 framerate: Rate::Fixed(30 << 16),
+                interlace: Interlace::Any,
             };
             sink.configure_pipeline(&caps).expect("sink configure");
             self.sink = Some(sink);

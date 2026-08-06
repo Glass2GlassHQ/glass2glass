@@ -49,8 +49,8 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError,
-    HardwareError, MemoryDomain, OutputSink, OwnedCvPixelBuffer, PipelinePacket, PropError,
-    PropKind, PropValue, PropertySpec, Rate, RawVideoFormat,
+    HardwareError, Interlace, MemoryDomain, OutputSink, OwnedCvPixelBuffer, PipelinePacket,
+    PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat,
 };
 
 use crate::cvnv12::{
@@ -257,6 +257,7 @@ impl AvfVideoSrc {
             width: Dim::Fixed(640),
             height: Dim::Fixed(480),
             framerate: Rate::Fixed(30 << 16),
+            interlace: Interlace::Any,
         }
     }
 

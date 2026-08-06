@@ -211,7 +211,7 @@ fn av_ts_with_ac3_still_plugs_video_decoder() {
     ));
     std::fs::remove_file(&path).ok();
     assert!(
-        names.iter().any(|n| n.contains("H264Dec")),
+        names.iter().any(|n| n == "FfmpegVideoDec"),
         "video decoder plugged: {names:?}"
     );
     assert!(

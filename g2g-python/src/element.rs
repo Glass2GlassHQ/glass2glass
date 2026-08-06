@@ -67,6 +67,7 @@ impl PyTransform {
                 width: Dim::Any,
                 height: Dim::Any,
                 framerate: Rate::Any,
+                interlace: g2g_core::Interlace::Any,
             },
             draw_label: false,
             params: Vec::new(),
@@ -274,6 +275,7 @@ impl PadTemplates for PyTransform {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         };
         let set = CapsSet::one(rgba);
         Vec::from([PadTemplate::sink(set.clone()), PadTemplate::source(set)])

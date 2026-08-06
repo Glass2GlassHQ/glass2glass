@@ -44,6 +44,7 @@ fn raw_video() -> Caps {
         width: Dim::Any,
         height: Dim::Any,
         framerate: Rate::Any,
+        interlace: g2g_core::Interlace::Any,
     }
 }
 fn raw_audio() -> Caps {
@@ -223,17 +224,18 @@ async fn playbin_fans_out_a_fragmented_mp4() {
     let graph = parse_launch(&reg, &format!("playbin uri={uri}")).expect("mp4 playbin fans out");
     std::fs::remove_file(&path).ok();
 
-    // FileSrc -> Mp4DemuxN(2). Video: demux -> decoder -> sink. Audio: demux ->
-    // decoder -> audioconvert -> audioresample -> sink (the M422+ audio branch).
+    // FileSrc -> Mp4DemuxN(2). Video: demux -> decoder -> auto deinterlace
+    // (M935) -> sink. Audio: demux -> decoder -> audioconvert -> audioresample
+    // -> sink (the M422+ audio branch).
     assert_eq!(
         graph.node_count(),
-        8,
-        "source, demux, video decode+sink, audio decode+convert+resample+sink"
+        9,
+        "source, demux, video decode+deinterlace+sink, audio decode+convert+resample+sink"
     );
     assert_eq!(
         graph.edges().len(),
-        7,
-        "video branch (2) + audio branch (4) + src->demux"
+        8,
+        "video branch (3) + audio branch (4) + src->demux"
     );
 }
 
@@ -247,7 +249,7 @@ async fn the_mp4_hook_handles_mp4_only() {
     std::fs::remove_file(&mp4_path).ok();
     assert_eq!(
         mp4_graph.node_count(),
-        8,
-        "MP4 fans out via mp4_playbin (audio branch adds convert+resample)"
+        9,
+        "MP4 fans out via mp4_playbin (audio branch adds convert+resample, video the auto deinterlace)"
     );
 }

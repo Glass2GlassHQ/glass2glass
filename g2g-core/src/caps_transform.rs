@@ -153,6 +153,7 @@ impl CapsTransform {
                     width,
                     height,
                     framerate,
+                    interlace,
                 },
             ) => {
                 if !accept.is_empty() && !accept.contains(format) {
@@ -170,6 +171,8 @@ impl CapsTransform {
                             width: s.width.apply(width),
                             height: s.height.apply(height),
                             framerate: s.framerate.apply(framerate),
+                            // A format/geometry reshape leaves scan structure alone.
+                            interlace: *interlace,
                         },
                     );
                 }
@@ -254,6 +257,7 @@ mod tests {
             width: Dim::Fixed(w),
             height: Dim::Fixed(h),
             framerate: Rate::Fixed(fps << 16),
+            interlace: crate::Interlace::Any,
         }
     }
 

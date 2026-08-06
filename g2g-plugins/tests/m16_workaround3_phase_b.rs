@@ -44,6 +44,7 @@ fn nv12_caps(w: u32, h: u32) -> Caps {
         width: Dim::Fixed(w),
         height: Dim::Fixed(h),
         framerate: Rate::Fixed(30 << 16),
+        interlace: g2g_core::Interlace::Any,
     }
 }
 
@@ -53,6 +54,7 @@ fn rgba_caps(w: u32, h: u32) -> Caps {
         width: Dim::Fixed(w),
         height: Dim::Fixed(h),
         framerate: Rate::Fixed(30 << 16),
+        interlace: g2g_core::Interlace::Any,
     }
 }
 
@@ -308,6 +310,7 @@ async fn matching_mid_stream_capschanged_still_propagates() {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         },
         inner: Arc::clone(&inner),
     };

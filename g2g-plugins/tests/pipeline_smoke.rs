@@ -240,6 +240,7 @@ async fn format_changing_transform_receives_input_side_caps() {
                     width: width.clone(),
                     height: height.clone(),
                     framerate: framerate.clone(),
+                    interlace: g2g_core::Interlace::Any,
                 },
                 other => other.clone(),
             }
@@ -286,6 +287,7 @@ async fn capsfilter_passes_matching_format_in_native_chain() {
         width: Dim::Any,
         height: Dim::Any,
         framerate: Rate::Any,
+        interlace: g2g_core::Interlace::Any,
     });
     let mut snk = FakeSink::new();
     let clock = ZeroClock;
@@ -313,6 +315,7 @@ async fn capsfilter_rejects_incompatible_format() {
         width: Dim::Any,
         height: Dim::Any,
         framerate: Rate::Any,
+        interlace: g2g_core::Interlace::Any,
     });
     let mut snk = FakeSink::new();
     let clock = ZeroClock;

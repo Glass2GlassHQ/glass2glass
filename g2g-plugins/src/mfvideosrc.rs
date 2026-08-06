@@ -53,8 +53,8 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError, HardwareError,
-    LatencyReport, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, Rate,
-    RawVideoFormat,
+    Interlace, LatencyReport, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    Rate, RawVideoFormat,
 };
 
 /// First video stream index for the Source Reader, as a `u32` (the constant is
@@ -170,6 +170,7 @@ impl MfVideoSrc {
             width: Dim::Fixed(c.width),
             height: Dim::Fixed(c.height),
             framerate: Rate::Fixed(c.fps() << 16),
+            interlace: Interlace::Any,
         })
     }
 }
@@ -307,6 +308,7 @@ impl PadTemplates for MfVideoSrc {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            interlace: Interlace::Any,
         };
         Vec::from([PadTemplate::source(CapsSet::from_alternatives(Vec::from(
             [raw(RawVideoFormat::Nv12), raw(RawVideoFormat::Yuyv)],

@@ -81,10 +81,10 @@ use g2g_core::frame::Frame;
 use g2g_core::metrics::{monotonic_ns, LatencyHistogram, LatencySnapshot};
 use g2g_core::{
     AllocationParams, AsyncElement, BusHandle, Caps, CapsConstraint, CapsSet, ClockCandidate,
-    ClockPriority, ClockSync, ConfigureOutcome, Dim, G2gError, HardwareError, MemoryDomain,
-    OutputSink, OwnedD3D11Texture, PadTemplate, PadTemplates, PipelineClock, PipelinePacket,
-    PresentationPacer, PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat,
-    MAX_LATENESS_PROPERTY, QOS_INTERVAL_PROPERTY,
+    ClockPriority, ClockSync, ConfigureOutcome, Dim, G2gError, HardwareError, Interlace,
+    MemoryDomain, OutputSink, OwnedD3D11Texture, PadTemplate, PadTemplates, PipelineClock,
+    PipelinePacket, PresentationPacer, PropError, PropKind, PropValue, PropertySpec, Rate,
+    RawVideoFormat, MAX_LATENESS_PROPERTY, QOS_INTERVAL_PROPERTY,
 };
 
 use crate::clock::wait_to_present;
@@ -295,6 +295,7 @@ impl AsyncElement for D3D11Sink {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            interlace: Interlace::Any,
         }))
     }
 
@@ -429,6 +430,7 @@ impl PadTemplates for D3D11Sink {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            interlace: Interlace::Any,
         };
         Vec::from([PadTemplate::sink(CapsSet::one(nv12))])
     }
@@ -733,6 +735,7 @@ mod tests {
             width: Dim::Fixed(w),
             height: Dim::Fixed(h),
             framerate: Rate::Any,
+            interlace: Interlace::Any,
         }
     }
 
@@ -764,6 +767,7 @@ mod tests {
                 width: Dim::Any,
                 height: Dim::Any,
                 framerate: Rate::Any,
+                interlace: Interlace::Any,
             }]
         );
     }
@@ -776,6 +780,7 @@ mod tests {
             width: Dim::Fixed(640),
             height: Dim::Fixed(480),
             framerate: Rate::Any,
+            interlace: Interlace::Any,
         };
         assert_eq!(
             sink.configure_pipeline(&i420).err(),
@@ -812,6 +817,7 @@ mod tests {
                     width: Dim::Any,
                     height: Dim::Any,
                     framerate: Rate::Any,
+                    interlace: Interlace::Any,
                 }))])
             }
         }
@@ -823,6 +829,7 @@ mod tests {
                     width: Dim::Any,
                     height: Dim::Any,
                     framerate: Rate::Any,
+                    interlace: Interlace::Any,
                 }))])
             }
         }

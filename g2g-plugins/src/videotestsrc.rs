@@ -163,6 +163,7 @@ impl VideoTestSrc {
             width: Dim::Fixed(self.width),
             height: Dim::Fixed(self.height),
             framerate: Rate::Fixed(self.framerate_q16),
+            interlace: g2g_core::Interlace::Any,
         }
     }
 }
@@ -561,6 +562,7 @@ impl PadTemplates for VideoTestSrc {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         }))])
     }
 }

@@ -126,12 +126,14 @@ impl OutKind {
                 width,
                 height,
                 framerate,
+                interlace: g2g_core::Interlace::Any,
             },
             OutKind::Yuyv => Caps::RawVideo {
                 format: RawVideoFormat::Yuyv,
                 width,
                 height,
                 framerate,
+                interlace: g2g_core::Interlace::Any,
             },
             OutKind::Mjpeg => Caps::CompressedVideo {
                 codec: VideoCodec::Mjpeg,

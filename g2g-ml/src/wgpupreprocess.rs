@@ -281,6 +281,7 @@ impl WgpuPreprocess {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         }
     }
 
@@ -819,6 +820,7 @@ impl AsyncElement for WgpuPreprocess {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         }) {
             return Ok(rgba);
         }
@@ -1009,6 +1011,7 @@ impl g2g_core::PadTemplates for WgpuPreprocess {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         }))])
     }
 }
@@ -1336,12 +1339,14 @@ mod tests {
             width: Dim::Fixed(640),
             height: Dim::Fixed(480),
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         };
         let rgba = Caps::RawVideo {
             format: RawVideoFormat::Rgba8,
             width: Dim::Fixed(640),
             height: Dim::Fixed(480),
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         };
         assert!(e.intercept_caps(&nv12).is_ok());
         assert_eq!(e.intercept_caps(&rgba), Err(G2gError::CapsMismatch));
@@ -1355,6 +1360,7 @@ mod tests {
             width: Dim::Fixed(3),
             height: Dim::Fixed(2),
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         };
         assert_eq!(
             e.configure_pipeline(&odd).err(),

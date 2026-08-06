@@ -243,6 +243,7 @@ impl FfmpegH264Enc {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         }
     }
 
@@ -535,6 +536,7 @@ impl AsyncElement for FfmpegH264Enc {
                 width,
                 height,
                 framerate,
+                interlace: _,
             } if pixel_for(*format).is_some() => CapsSet::one(Caps::CompressedVideo {
                 codec: VideoCodec::H264,
                 width: width.clone(),
@@ -551,6 +553,7 @@ impl AsyncElement for FfmpegH264Enc {
             width,
             height,
             framerate,
+            interlace: _,
         } = absolute_caps
         else {
             return Err(G2gError::CapsMismatch);
@@ -781,6 +784,7 @@ mod tests {
             width: Dim::Fixed(w),
             height: Dim::Fixed(h),
             framerate: Rate::Fixed(30 << 16),
+            interlace: g2g_core::Interlace::Any,
         }
     }
 

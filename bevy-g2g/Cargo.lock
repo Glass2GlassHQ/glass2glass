@@ -3201,6 +3201,7 @@ dependencies = [
  "g2g-core",
  "hmac",
  "md-5",
+ "miniz_oxide",
  "pkg-config",
  "reqwest",
  "sha1",

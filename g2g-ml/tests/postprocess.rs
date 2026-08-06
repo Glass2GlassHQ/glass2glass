@@ -154,6 +154,7 @@ async fn real_inference_into_argmax_finds_the_peak() {
         width: g2g_core::Dim::Fixed(2),
         height: g2g_core::Dim::Fixed(2),
         framerate: g2g_core::Rate::Any,
+        interlace: g2g_core::Interlace::Any,
     };
     inf.configure_pipeline(&rgba).expect("configure inference");
 

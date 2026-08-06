@@ -107,6 +107,7 @@ impl App {
                     width: Dim::Fixed(W),
                     height: Dim::Fixed(H),
                     framerate: Rate::Fixed(15 << 16),
+                    interlace: g2g_core::Interlace::Any,
                 })
                 .expect("sink configure");
                 block_on(sink.process(PipelinePacket::Segment(Segment::new()), &mut NullSink))

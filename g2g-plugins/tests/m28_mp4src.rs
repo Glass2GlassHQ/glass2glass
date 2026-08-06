@@ -673,6 +673,7 @@ async fn encode_mux_demux_decode_full_circle() {
         width: Dim::Fixed(W),
         height: Dim::Fixed(H),
         framerate: Rate::Fixed(30 << 16),
+        interlace: g2g_core::Interlace::Any,
     };
     enc.configure_pipeline(&nv12).expect("encoder init");
     let mut encoded = Collect::default();

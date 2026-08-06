@@ -66,8 +66,8 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AllocationParams, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
-    FrameTiming, G2gError, HardwareError, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
-    PipelinePacket, Rate, RawVideoFormat, VideoCodec,
+    FrameTiming, G2gError, HardwareError, Interlace, MemoryDomain, OutputSink, PadTemplate,
+    PadTemplates, PipelinePacket, Rate, RawVideoFormat, VideoCodec,
 };
 
 /// Default target bitrate (bits/s) when the caller doesn't override it.
@@ -510,6 +510,7 @@ impl AsyncElement for MfEncode {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            interlace: Interlace::Any,
         };
         upstream_caps.intersect(&supported)
     }
@@ -541,6 +542,7 @@ impl AsyncElement for MfEncode {
                 width: Dim::Fixed(w),
                 height: Dim::Fixed(h),
                 framerate,
+                interlace: _,
             } => (*w, *h, framerate.clone()),
             _ => return Err(G2gError::CapsMismatch),
         };
@@ -602,6 +604,7 @@ impl AsyncElement for MfEncode {
                             width: Dim::Fixed(w),
                             height: Dim::Fixed(h),
                             framerate,
+                            interlace: _,
                         } => (*w, *h, framerate.clone()),
                         _ => return Err(G2gError::CapsMismatch),
                     };
@@ -716,6 +719,7 @@ impl PadTemplates for MfEncode {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            interlace: Interlace::Any,
         };
         let compressed = |codec| Caps::CompressedVideo {
             codec,
@@ -1075,6 +1079,7 @@ fn derive_output_caps(codec: VideoCodec, input: &Caps) -> CapsSet {
             width,
             height,
             framerate,
+            interlace: _,
         } => CapsSet::one(Caps::CompressedVideo {
             codec,
             width: width.clone(),
@@ -1148,6 +1153,7 @@ mod tests {
             width: Dim::Fixed(1280),
             height: Dim::Fixed(720),
             framerate: Rate::Any,
+            interlace: Interlace::Any,
         };
         assert_eq!(enc.intercept_caps(&proposal), Ok(proposal));
     }
@@ -1163,6 +1169,7 @@ mod tests {
             width: Dim::Fixed(1920),
             height: Dim::Fixed(1080),
             framerate: Rate::Fixed(30 << 16),
+            interlace: Interlace::Any,
         };
         assert_eq!(
             f(&nv12).alternatives(),
@@ -1179,6 +1186,7 @@ mod tests {
             width: Dim::Fixed(1920),
             height: Dim::Fixed(1080),
             framerate: Rate::Fixed(30 << 16),
+            interlace: Interlace::Any,
         };
         assert!(f(&rgba).is_empty());
     }
@@ -1193,6 +1201,7 @@ mod tests {
             width: Dim::Fixed(1920),
             height: Dim::Fixed(1080),
             framerate: Rate::Any,
+            interlace: Interlace::Any,
         };
         let h264 = Caps::CompressedVideo {
             codec: VideoCodec::H264,
@@ -1254,6 +1263,7 @@ mod tests {
             width: Dim::Fixed(1280),
             height: Dim::Fixed(720),
             framerate: Rate::Fixed(30 << 16),
+            interlace: Interlace::Any,
         };
         assert_eq!(
             f(&nv12).alternatives(),

@@ -264,6 +264,7 @@ mod tests {
             width: Dim::Fixed(4),
             height: Dim::Fixed(2),
             framerate: Rate::Fixed(30 << 16),
+            interlace: g2g_core::Interlace::Any,
         };
         let buf = [255u8, 0, 0, 255].repeat(4 * 2);
         let v = packet_preview(&frame(buf), &caps).unwrap();
@@ -283,6 +284,7 @@ mod tests {
             width: Dim::Fixed(1),
             height: Dim::Fixed(1),
             framerate: Rate::Fixed(30 << 16),
+            interlace: g2g_core::Interlace::Any,
         };
         // One BGRA pixel: B=10 G=20 R=30 A=40 -> preview RGBA 30,20,10,40.
         let v = packet_preview(&frame(vec![10, 20, 30, 40]), &caps).unwrap();
@@ -300,6 +302,7 @@ mod tests {
             width: Dim::Fixed(64),
             height: Dim::Fixed(64),
             framerate: Rate::Fixed(30 << 16),
+            interlace: g2g_core::Interlace::Any,
         };
         let v = packet_preview(&frame(vec![1, 2, 3, 4]), &caps).unwrap();
         assert_eq!(v["kind"], "hex");
@@ -335,6 +338,7 @@ mod tests {
             width: Dim::Fixed(w),
             height: Dim::Fixed(h),
             framerate: Rate::Fixed(30 << 16),
+            interlace: g2g_core::Interlace::Any,
         };
         // luma + U + V planes = w*h*3/2 bytes, mid-gray chroma.
         let mut buf = vec![128u8; (w * h) as usize];
@@ -354,6 +358,7 @@ mod tests {
             width: Dim::Fixed(w),
             height: Dim::Fixed(h),
             framerate: Rate::Fixed(30 << 16),
+            interlace: g2g_core::Interlace::Any,
         };
         let mut buf = vec![128u8; (w * h) as usize];
         buf.extend(vec![128u8; (w * h) as usize / 2]);
@@ -370,6 +375,7 @@ mod tests {
             width: Dim::Fixed(64),
             height: Dim::Fixed(64),
             framerate: Rate::Fixed(30 << 16),
+            interlace: g2g_core::Interlace::Any,
         };
         let v = packet_preview(&frame(vec![1, 2, 3, 4]), &caps).unwrap();
         assert_eq!(v["kind"], "hex");

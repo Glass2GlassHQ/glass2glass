@@ -204,6 +204,7 @@ async fn decode_to_nv12(mut dec: MediaCodecDec, stream: &[u8], codec: VideoCodec
         width: Dim::Fixed(w),
         height: Dim::Fixed(h),
         framerate: Rate::Fixed(30 << 16),
+        interlace: g2g_core::Interlace::Any,
     };
     dec.process(PipelinePacket::CapsChanged(prefixed_out.clone()), &mut sink)
         .await

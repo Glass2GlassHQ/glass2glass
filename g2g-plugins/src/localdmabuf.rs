@@ -248,6 +248,7 @@ fn any_dmabuf_caps() -> CapsSet {
         width: Dim::Any,
         height: Dim::Any,
         framerate: Rate::Any,
+        interlace: g2g_core::Interlace::Any,
     };
     CapsSet::from_alternatives(FORMATS.map(any).to_vec())
 }
@@ -261,6 +262,7 @@ fn caps_of(format: RawVideoFormat, width: u32, height: u32) -> Caps {
         // Rate::Any. Per-frame timing crosses in the record; this nominal rate
         // only satisfies fixation (the transport is rate-agnostic).
         framerate: Rate::Fixed(30 << 16),
+        interlace: g2g_core::Interlace::Any,
     }
 }
 

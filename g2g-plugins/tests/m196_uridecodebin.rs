@@ -30,6 +30,7 @@ fn registry_with_h264_stub() -> Registry {
         width: Dim::Any,
         height: Dim::Any,
         framerate: Rate::Any,
+        interlace: g2g_core::Interlace::Any,
     };
     reg.register(ElementFactory::new(
         "h264stub",

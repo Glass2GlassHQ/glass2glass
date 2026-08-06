@@ -66,6 +66,7 @@ fn python_writes_into_frame_memory_in_place() {
         width: Dim::Fixed(2),
         height: Dim::Fixed(1),
         framerate: Rate::Fixed(30),
+        interlace: g2g_core::Interlace::Any,
     };
     // Instantiates the Python class under the GIL.
     el.configure_pipeline(&caps).unwrap();
@@ -102,6 +103,7 @@ fn worker_is_reused_across_frames() {
         width: Dim::Fixed(2),
         height: Dim::Fixed(1),
         framerate: Rate::Fixed(30),
+        interlace: g2g_core::Interlace::Any,
     };
     el.configure_pipeline(&caps).unwrap();
 

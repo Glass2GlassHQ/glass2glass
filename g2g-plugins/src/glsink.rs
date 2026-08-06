@@ -212,6 +212,7 @@ fn any_geometry(format: RawVideoFormat) -> Caps {
         width: Dim::Any,
         height: Dim::Any,
         framerate: Rate::Any,
+        interlace: g2g_core::Interlace::Any,
     }
 }
 
@@ -465,6 +466,7 @@ mod tests {
             width: Dim::Fixed(w),
             height: Dim::Fixed(h),
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         }
     }
 

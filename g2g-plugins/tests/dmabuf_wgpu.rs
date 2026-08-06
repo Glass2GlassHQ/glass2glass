@@ -149,6 +149,7 @@ fn imports_a_gpu_dmabuf_into_a_wgpu_buffer() {
         width: Dim::Fixed(width),
         height: Dim::Fixed(height),
         framerate: Rate::Fixed(30 << 16),
+        interlace: g2g_core::Interlace::Any,
     };
     let mut elem = DmaBufToWgpu::new();
     elem.configure_pipeline(&caps)

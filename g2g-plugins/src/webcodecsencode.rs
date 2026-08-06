@@ -23,8 +23,8 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError,
-    HardwareError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, Rate,
-    RawVideoFormat, VideoCodec,
+    HardwareError, Interlace, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    Rate, RawVideoFormat, VideoCodec,
 };
 
 use wasm_bindgen::prelude::*;
@@ -148,6 +148,7 @@ impl AsyncElement for WebCodecsEncode {
                 width,
                 height,
                 framerate,
+                interlace: _,
             } => (
                 fixed_or_zero(width),
                 fixed_or_zero(height),
@@ -293,6 +294,7 @@ fn derive_output_caps(input: &Caps) -> CapsSet {
             width,
             height,
             framerate,
+            interlace: _,
         } => CapsSet::one(Caps::CompressedVideo {
             codec: VideoCodec::H264,
             width: width.clone(),
@@ -309,6 +311,7 @@ fn rgba_any() -> Caps {
         width: Dim::Any,
         height: Dim::Any,
         framerate: Rate::Any,
+        interlace: Interlace::Any,
     }
 }
 

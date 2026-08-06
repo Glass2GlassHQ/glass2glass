@@ -1923,6 +1923,7 @@ mod tests {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            interlace: crate::Interlace::Any,
         }
     }
 

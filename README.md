@@ -519,8 +519,11 @@ run_source_transform_sink(src, parse, sink, &clock, LatencyProfile::Live).await?
 The container demuxers (`tsdemux`, `matroskademux`, `flvdemux`, `oggdemux`,
 `fmp4demux`, `mpegpsdemux`) accept a `Caps::ByteStream` and split out elementary
 streams. `mpegpsdemux` reads `.mpg` / `.vob` program streams, including their DVD
-subpicture tracks; an interlaced disc gets a `deinterlace` (yadif) in the video
-branch automatically.
+subpicture tracks. Every `playbin` video branch carries a `deinterlace
+mode=auto` (yadif): the decoder declares interlaced streams in its output caps
+(`interlace-mode=interleaved`) and the filter weaves only those, so interlaced
+MPEG-2 or H.264 plays clean from any container while progressive content passes
+through untouched.
 
 ```rust
 let src   = FileSrc::new("clip.ts", Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs });

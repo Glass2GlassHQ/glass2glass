@@ -229,6 +229,7 @@ mod tests {
             width: w,
             height: h,
             framerate: r,
+            interlace: crate::Interlace::Any,
         }
     }
 
@@ -296,6 +297,7 @@ mod tests {
                     width: width.clone(),
                     height: height.clone(),
                     framerate: framerate.clone(),
+                    interlace: crate::Interlace::Any,
                 }),
                 _ => CapsSet::from_alternatives(Vec::new()),
             }))
@@ -494,6 +496,7 @@ mod tests {
                         width: width.clone(),
                         height: height.clone(),
                         framerate: framerate.clone(),
+                        interlace: crate::Interlace::Any,
                     },
                     other => other.clone(),
                 }

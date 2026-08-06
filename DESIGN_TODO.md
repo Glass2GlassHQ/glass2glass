@@ -247,14 +247,6 @@ Phased plan:
 - Richer auto-plug factory construction params (geometry / device / file path).
 - A hardware-backed end-to-end decode-through-`decodebin` run (current tests
   read templates / assert splicing, decode no real media).
-- **Interlace signaling + universal playbin deinterlace** (gst parity: playbin's
-  default flags include `deinterlace`, its element no-ops on progressive input
-  via `mode=auto`). Two steps: an interlace field on `Caps::RawVideo` set by
-  parsers / decoders (libavcodec reports it per frame; `mpegvideoparse`-style
-  from the MPEG-2 sequence extension), then every playbin video branch inserts
-  `deinterlace` with an `auto` mode that passes progressive frames through
-  untouched. Covers interlaced MPEG-2 over TS / mkv and interlaced H.264,
-  which play combed today (only the PS path decides, from the container).
 
 ## Platform: macOS
 

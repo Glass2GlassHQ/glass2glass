@@ -14,8 +14,8 @@ use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::{parse_launch, run_graph};
 use g2g_core::{
-    AsyncElement, Caps, ConfigureOutcome, Dim, G2gError, OutputSink, PipelineClock, PushOutcome,
-    Rate, RawVideoFormat, VideoCodec,
+    AsyncElement, Caps, ConfigureOutcome, Dim, G2gError, Interlace, OutputSink, PipelineClock,
+    PushOutcome, Rate, RawVideoFormat, VideoCodec,
 };
 use g2g_plugins::metalvideosink::MetalVideoSink;
 use g2g_plugins::registry::default_registry;
@@ -125,6 +125,7 @@ async fn present_and_check(frames: Vec<Frame>) -> u64 {
         width: Dim::Fixed(640),
         height: Dim::Fixed(480),
         framerate: Rate::Fixed(30 << 16),
+        interlace: Interlace::Any,
     };
     let narrowed = sink.intercept_caps(&caps).expect("intercept NV12");
     assert!(matches!(

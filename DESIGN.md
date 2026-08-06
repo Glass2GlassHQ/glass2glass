@@ -2168,13 +2168,28 @@ built from the previous and next frames), plus the cheaper `linear` and `blend`
 methods, over I420 / NV12 / RGBA / BGRA at unchanged format and geometry, one
 frame out per frame in. It is bit-exact against ffmpeg's `yadif=0` on the same
 raw frames, including the 3-column border where ffmpeg drops the directional
-search. `ps_playbin` inserts it into the video branch (both the plain fan-out and
-the subpicture-overlay one) when `progressive_sequence` in the MPEG-2 sequence
-extension (`00 00 01 B5`, identifier `0001`) says the stream is interlaced;
-MPEG-1 carries no such extension and is treated as progressive, as is any stream
-whose extension is missing or malformed, so an unreadable header never costs a
-filter pass. Field order is assumed top-field-first: g2g's frames carry no
-interlace flag, which is also why the element has no `auto` mode.
+search. Field order is assumed top-field-first (ffmpeg's default for a stream
+that declares nothing).
+
+Interlacing is signalled in the caps (M935): `Caps::RawVideo` carries an
+`Interlace` field (`Any` / `Progressive` / `Interleaved`), where the `Any`
+wildcard intersects with anything, survives `fixate`, and reads as "progressive
+unless declared", so the field never blocks a solve and nearly every caps site
+just states `Any`. `FfmpegVideoDec` reads libavcodec's per-picture interlaced
+flag and latches `Interleaved` output caps on the first interlaced picture
+(sticky for the stream, so telecine content cannot flap `CapsChanged`), covering
+interlaced MPEG-2 over any container and interlaced H.264 alike. The element's
+`mode` property acts on that declaration: `interlaced` (the default) always
+weaves, the pre-M935 contract for hand-written lines whose upstreams declare
+nothing; `auto` weaves only a caps-declared `Interleaved` stream in a format the
+kernels handle and otherwise forwards packets untouched, with negotiation kept
+transparent (any raw video passes) so inserting it never narrows a branch; and
+`disabled` is a pure passthrough. Every `playbin` video branch (mkv / mp4 / TS /
+PS / HLS, plain fan-out and the subtitle / closed-caption / DVD-subpicture
+overlay variants) inserts `deinterlace mode=auto` after the decoder, GStreamer's
+playbin `deinterlace` flag parity: a progressive stream pays only a forwarding
+hop, and the M932 container-probe decision (`progressive_sequence` in the MPEG-2
+sequence extension) is superseded by the decoder's own per-picture report.
 
 Adaptive streaming sits one layer above these demuxers: an HTTP byte source feeds
 a playlist/manifest-driven source that fetches media segments and hands them to

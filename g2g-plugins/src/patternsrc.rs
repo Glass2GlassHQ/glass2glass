@@ -19,8 +19,8 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
-    Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError, MemoryDomain,
-    OutputSink, PipelinePacket, Rate, RawVideoFormat,
+    Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError, Interlace,
+    MemoryDomain, OutputSink, PipelinePacket, Rate, RawVideoFormat,
 };
 
 use wasm_bindgen::prelude::*;
@@ -56,6 +56,7 @@ impl PatternSrc {
             width: Dim::Fixed(self.width),
             height: Dim::Fixed(self.height),
             framerate: Rate::Fixed(self.fps << 16),
+            interlace: Interlace::Any,
         }
     }
 }

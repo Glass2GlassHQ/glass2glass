@@ -35,6 +35,7 @@ fn caps() -> Caps {
         width: Dim::Fixed(64),
         height: Dim::Fixed(64),
         framerate: Rate::Fixed(30 << 16),
+        interlace: g2g_core::Interlace::Any,
     }
 }
 

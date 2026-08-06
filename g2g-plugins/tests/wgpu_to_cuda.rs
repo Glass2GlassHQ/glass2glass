@@ -98,6 +98,7 @@ async fn wgpu_rgba_texture_encodes_through_nvenc_no_readback() {
         width: Dim::Fixed(W),
         height: Dim::Fixed(H),
         framerate: Rate::Fixed(30 << 16),
+        interlace: g2g_core::Interlace::Any,
     };
     let mut enc = NvEnc::new();
     enc.configure_pipeline(&caps)
@@ -243,6 +244,7 @@ async fn wgpu_to_cuda_element_bridges_and_recycles() {
         width: Dim::Fixed(W),
         height: Dim::Fixed(H),
         framerate: Rate::Fixed(30 << 16),
+        interlace: g2g_core::Interlace::Any,
     };
     bridge.configure_pipeline(&caps).expect("configure bridge");
     let mut enc = NvEnc::new();

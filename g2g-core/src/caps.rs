@@ -68,6 +68,7 @@ pub enum Caps {
         width: Dim,
         height: Dim,
         framerate: Rate,
+        interlace: Interlace,
     },
     Audio {
         format: AudioFormat,
@@ -178,18 +179,21 @@ impl Caps {
                     width: wa,
                     height: ha,
                     framerate: ra,
+                    interlace: ia,
                 },
                 Caps::RawVideo {
                     format: fb,
                     width: wb,
                     height: hb,
                     framerate: rb,
+                    interlace: ib,
                 },
             ) if fa == fb => Ok(Caps::RawVideo {
                 format: *fa,
                 width: wa.intersect(wb).ok_or(G2gError::CapsMismatch)?,
                 height: ha.intersect(hb).ok_or(G2gError::CapsMismatch)?,
                 framerate: ra.intersect(rb).ok_or(G2gError::CapsMismatch)?,
+                interlace: ia.intersect(ib).ok_or(G2gError::CapsMismatch)?,
             }),
             (
                 Caps::Audio {
@@ -300,11 +304,16 @@ impl Caps {
                 width,
                 height,
                 framerate,
+                interlace,
             } => Ok(Caps::RawVideo {
                 format: *format,
                 width: width.fixate().ok_or(G2gError::CapsMismatch)?,
                 height: height.fixate().ok_or(G2gError::CapsMismatch)?,
                 framerate: framerate.fixate().ok_or(G2gError::CapsMismatch)?,
+                // `Interlace::Any` already means "progressive unless declared"
+                // (GStreamer's absent field), so it is concrete enough to keep:
+                // collapsing it would only churn solved-caps equalities.
+                interlace: *interlace,
             }),
             // A raw-PCM "any" sample rate carries no value to fixate against
             // (M187); compressed audio's nominal `0` fixates as-is.
@@ -376,11 +385,17 @@ impl Caps {
                 width,
                 height,
                 framerate,
+                interlace,
             } => {
                 let mut s = format!("video/x-raw,format={}", raw_format_gst_name(*format));
                 push_dim(&mut s, "width", width);
                 push_dim(&mut s, "height", height);
                 push_rate(&mut s, framerate);
+                // Progressive is GStreamer's default for an absent field and
+                // `Any` is the wildcard (absence), so only interleaved prints.
+                if *interlace == Interlace::Interleaved {
+                    s.push_str(",interlace-mode=interleaved");
+                }
                 s
             }
             Caps::CompressedVideo {
@@ -682,6 +697,34 @@ impl Rate {
                 min_q16: lo,
                 max_q16: hi,
             },
+        }
+    }
+}
+
+/// Scan structure of raw video (M935). `Any` is the unconstrained default
+/// nearly every caps site uses, and it reads as "progressive unless declared"
+/// (GStreamer's meaning for an absent `interlace-mode`): a decoder that sees
+/// interlaced pictures refines it to `Interleaved` via `CapsChanged`, which is
+/// what `deinterlace mode=auto` acts on. Unlike `Dim::Any` / `Rate::Any` the
+/// wildcard survives `fixate` and counts as fixed, so the field never blocks a
+/// solve and pre-M935 negotiations are unchanged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Interlace {
+    Any,
+    Progressive,
+    /// Both fields woven into one frame, top field first (ffmpeg's default
+    /// for a stream that declares no field order).
+    Interleaved,
+}
+
+impl Interlace {
+    /// Intersect two scan constraints: `Any` is the identity, equal values
+    /// pass, `Progressive` vs `Interleaved` is an empty overlap.
+    pub fn intersect(&self, other: &Interlace) -> Option<Interlace> {
+        match (self, other) {
+            (Interlace::Any, x) | (x, Interlace::Any) => Some(*x),
+            (a, b) if a == b => Some(*a),
+            _ => None,
         }
     }
 }
@@ -1357,6 +1400,7 @@ mod tests {
             width,
             height,
             framerate,
+            interlace: crate::Interlace::Any,
         }
     }
 
@@ -1674,6 +1718,7 @@ mod tests {
             width: w,
             height: Dim::Any,
             framerate: Rate::Any,
+            interlace: crate::Interlace::Any,
         };
         let h264 = |w| Caps::CompressedVideo {
             codec: VideoCodec::H264,

@@ -86,6 +86,7 @@ impl VideoCrop {
             width: Dim::Fixed(w),
             height: Dim::Fixed(h),
             framerate,
+            interlace: _,
         } = caps
         else {
             return Err(G2gError::CapsMismatch);
@@ -157,6 +158,7 @@ impl AsyncElement for VideoCrop {
                 width: Dim::Any,
                 height: Dim::Any,
                 framerate: Rate::Any,
+                interlace: g2g_core::Interlace::Any,
             };
             if let Ok(narrowed) = upstream_caps.intersect(&candidate) {
                 return Ok(narrowed);
@@ -178,6 +180,7 @@ impl AsyncElement for VideoCrop {
                 width,
                 height,
                 framerate,
+                interlace: _,
             } if FORMATS.contains(format) && even_insets_ok(*format) => {
                 match (shrink(width, lr), shrink(height, tb)) {
                     (Some(w), Some(h)) => CapsSet::one(Caps::RawVideo {
@@ -185,6 +188,7 @@ impl AsyncElement for VideoCrop {
                         width: w,
                         height: h,
                         framerate: framerate.clone(),
+                        interlace: g2g_core::Interlace::Any,
                     }),
                     _ => CapsSet::from_alternatives(Vec::new()),
                 }
@@ -235,6 +239,7 @@ impl AsyncElement for VideoCrop {
                         width: Dim::Fixed(w),
                         height: Dim::Fixed(h),
                         framerate: rate,
+                        interlace: g2g_core::Interlace::Any,
                     };
                     if self.last_caps.as_ref() != Some(&new_caps) {
                         out.push(PipelinePacket::CapsChanged(new_caps.clone()))
@@ -335,6 +340,7 @@ impl PadTemplates for VideoCrop {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         };
         let set = CapsSet::from_alternatives(FORMATS.map(any_geometry).to_vec());
         Vec::from([PadTemplate::sink(set.clone()), PadTemplate::source(set)])
@@ -446,6 +452,7 @@ mod tests {
             width: Dim::Fixed(w),
             height: Dim::Fixed(h),
             framerate: Rate::Fixed(30 << 16),
+            interlace: g2g_core::Interlace::Any,
         }
     }
 
@@ -455,6 +462,7 @@ mod tests {
             width: Dim::Fixed(w),
             height: Dim::Fixed(h),
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         }
     }
 
@@ -541,6 +549,7 @@ mod tests {
                 width: Dim::Fixed(4),
                 height: Dim::Fixed(4),
                 framerate: Rate::Fixed(30 << 16),
+                interlace: g2g_core::Interlace::Any,
             }]
         );
         let h264 = Caps::CompressedVideo {

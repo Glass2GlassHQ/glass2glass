@@ -1065,6 +1065,7 @@ mod tests {
             width: Dim::Fixed(2),
             height: Dim::Fixed(2),
             framerate: g2g_core::Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         };
         assert!(mux.intercept_caps(0, &raw).is_err());
         assert!(mux.intercept_caps(0, &video_caps()).is_ok());

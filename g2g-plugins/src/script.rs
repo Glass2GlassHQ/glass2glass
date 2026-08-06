@@ -272,6 +272,7 @@ impl ScriptElement {
                 width: Dim::Any,
                 height: Dim::Any,
                 framerate: Rate::Any,
+                interlace: g2g_core::Interlace::Any,
             },
             fixed: None,
             configured: false,
@@ -696,6 +697,7 @@ impl PadTemplates for ScriptElement {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         };
         let set = CapsSet::one(rgba);
         std::vec::Vec::from([PadTemplate::sink(set.clone()), PadTemplate::source(set)])
@@ -1198,6 +1200,7 @@ mod tests {
             width: Dim::Fixed(w),
             height: Dim::Fixed(h),
             framerate: Rate::Fixed(30),
+            interlace: g2g_core::Interlace::Any,
         }
     }
 

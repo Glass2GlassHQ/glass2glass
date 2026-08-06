@@ -57,6 +57,7 @@ fn nv12() -> Caps {
         width: Dim::Fixed(W),
         height: Dim::Fixed(H),
         framerate: Rate::Fixed(30 << 16),
+        interlace: g2g_core::Interlace::Any,
     }
 }
 
@@ -108,10 +109,7 @@ fn create_udmabuf(size: usize) -> OwnedFd {
     // SAFETY: standard libc sequence; every fd is checked and ownership is
     // transferred into an `OwnedFd` at the end (or the process aborts on failure).
     unsafe {
-        let memfd = memfd_create(
-            b"g2g-udmabuf\0".as_ptr() as *const c_char,
-            MFD_CLOEXEC | MFD_ALLOW_SEALING,
-        );
+        let memfd = memfd_create(c"g2g-udmabuf".as_ptr(), MFD_CLOEXEC | MFD_ALLOW_SEALING);
         assert!(memfd >= 0, "memfd_create failed");
         assert_eq!(ftruncate(memfd, size as i64), 0, "ftruncate failed");
         assert_eq!(
@@ -119,7 +117,7 @@ fn create_udmabuf(size: usize) -> OwnedFd {
             0,
             "F_SEAL_SHRINK failed"
         );
-        let dev = open(b"/dev/udmabuf\0".as_ptr() as *const c_char, O_RDWR);
+        let dev = open(c"/dev/udmabuf".as_ptr(), O_RDWR);
         assert!(
             dev >= 0,
             "open /dev/udmabuf failed (need access; user in the right group?)"

@@ -40,6 +40,7 @@ fn rgba(w: u32, h: u32) -> Caps {
         width: Dim::Fixed(w),
         height: Dim::Fixed(h),
         framerate: Rate::Fixed(30 << 16),
+        interlace: g2g_core::Interlace::Any,
     }
 }
 
@@ -116,6 +117,7 @@ impl AsyncElement for Nv12Sink {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         }))
     }
 
@@ -181,6 +183,7 @@ async fn successful_negotiation_posts_nothing() {
                 width: Dim::Fixed(640),
                 height: Dim::Fixed(480),
                 framerate: Rate::Fixed(30 << 16),
+                interlace: g2g_core::Interlace::Any,
             }))
         }
         fn configure_pipeline(&mut self, _: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -216,6 +219,7 @@ fn nv12(w: u32, h: u32) -> Caps {
         width: Dim::Fixed(w),
         height: Dim::Fixed(h),
         framerate: Rate::Fixed(30 << 16),
+        interlace: g2g_core::Interlace::Any,
     }
 }
 
@@ -288,6 +292,7 @@ impl AsyncElement for RgbaInjector {
                             width: Dim::Fixed(640),
                             height: Dim::Fixed(480),
                             framerate: Rate::Fixed(30 << 16),
+                            interlace: g2g_core::Interlace::Any,
                         }))
                         .await?;
                     }

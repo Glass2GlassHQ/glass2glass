@@ -559,6 +559,7 @@ impl PadTemplates for SvtJpegXsEnc {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         })
         .to_vec();
         Vec::from([
@@ -660,6 +661,7 @@ impl AsyncElement for SvtJpegXsDec {
                     width: width.clone(),
                     height: height.clone(),
                     framerate: Rate::Any,
+                    interlace: g2g_core::Interlace::Any,
                 })
             }
             _ => Err(G2gError::CapsMismatch),
@@ -706,6 +708,7 @@ impl AsyncElement for SvtJpegXsDec {
                             width: Dim::Fixed(self.width),
                             height: Dim::Fixed(self.height),
                             framerate: Rate::Any,
+                            interlace: g2g_core::Interlace::Any,
                         }))
                         .await?;
                         self.caps_sent = true;
@@ -827,6 +830,7 @@ impl PadTemplates for SvtJpegXsDec {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         })
         .to_vec();
         Vec::from([
@@ -910,6 +914,7 @@ mod tests {
             width: Dim::Fixed(w as u32),
             height: Dim::Fixed(h as u32),
             framerate: Rate::Fixed(60 << 16),
+            interlace: g2g_core::Interlace::Any,
         };
         let input = i422p10_ramp(w, h);
 
@@ -950,6 +955,7 @@ mod tests {
                 width: Dim::Fixed(w as u32),
                 height: Dim::Fixed(h as u32),
                 framerate: Rate::Any,
+                interlace: g2g_core::Interlace::Any,
             }
         );
 

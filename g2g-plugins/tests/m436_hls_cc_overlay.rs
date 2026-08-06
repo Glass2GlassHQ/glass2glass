@@ -44,6 +44,7 @@ fn raw_video() -> Caps {
         width: Dim::Any,
         height: Dim::Any,
         framerate: Rate::Any,
+        interlace: g2g_core::Interlace::Any,
     }
 }
 fn raw_audio() -> Caps {
@@ -165,13 +166,14 @@ fn muxed_ts_variant_overlays_in_sei_captions() {
     .expect("builds")
     .expect("a routable muxed video yields a caption-overlay graph");
 
-    // HlsSrc, TsDemuxN, tee, display decoder, videoconvert(RGBA8), TextOverlayN,
-    // videoconvert(NV12), autovideosink, H264Parse(reframe), CcExtract, plus the
-    // audio branch (decoder, audioconvert, audioresample, autoaudiosink) = 14.
+    // HlsSrc, TsDemuxN, tee, display decoder, deinterlace (M935),
+    // videoconvert(RGBA8), TextOverlayN, videoconvert(NV12), autovideosink,
+    // H264Parse(reframe), CcExtract, plus the audio branch (decoder,
+    // audioconvert, audioresample, autoaudiosink) = 15.
     assert_eq!(
         graph.node_count(),
-        14,
-        "video caption overlay + audio fan-out"
+        15,
+        "video caption overlay (with deinterlace) + audio fan-out"
     );
 
     // The video is teed (one copy decodes for display, one feeds the captions): a

@@ -19,7 +19,7 @@ use g2g_core::element::QosMessage;
 use g2g_core::frame::Frame;
 use g2g_core::{
     AsyncElement, BusHandle, Caps, CapsConstraint, CapsSet, ClockSync, ConfigureOutcome, Dim,
-    G2gError, HardwareError, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    G2gError, HardwareError, Interlace, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
     PresentationPacer, PropError, PropValue, PropertySpec, Rate, RawVideoFormat, PACING_PROPERTIES,
 };
 
@@ -225,6 +225,7 @@ fn rgba_any() -> Caps {
         width: Dim::Any,
         height: Dim::Any,
         framerate: Rate::Any,
+        interlace: Interlace::Any,
     }
 }
 

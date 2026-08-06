@@ -171,6 +171,7 @@ impl PipeWireVideoSrc {
             width: Dim::Fixed(self.req_width),
             height: Dim::Fixed(self.req_height),
             framerate: Rate::Fixed(rate_q16(self.req_fps, 1)),
+            interlace: g2g_core::Interlace::Any,
         })
     }
 }
@@ -452,6 +453,7 @@ impl PadTemplates for PipeWireVideoSrc {
                 width: Dim::Any,
                 height: Dim::Any,
                 framerate: Rate::Any,
+                interlace: g2g_core::Interlace::Any,
             })
             .collect();
         Vec::from([PadTemplate::source(CapsSet::from_alternatives(
@@ -678,6 +680,7 @@ mod tests {
                 width: Dim::Fixed(320),
                 height: Dim::Fixed(240),
                 framerate: Rate::Fixed(25 << 16),
+                interlace: g2g_core::Interlace::Any,
             })
         );
         // never advertise Dim::Any / a zero dimension: fixate has to be a no-op
@@ -750,6 +753,7 @@ mod tests {
                 width: Dim::Fixed(320),
                 height: Dim::Fixed(240),
                 framerate: Rate::Fixed(30 << 16),
+                interlace: g2g_core::Interlace::Any,
             })
         );
 

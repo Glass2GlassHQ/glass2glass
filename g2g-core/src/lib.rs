@@ -143,8 +143,8 @@ pub mod slot;
 #[cfg(feature = "alloc")]
 pub use aggregator::InputAggregator;
 pub use caps::{
-    AudioFormat, ByteStreamEncoding, Caps, ClosedCaptionFormat, Dim, PassthroughFields, Rate,
-    RawVideoFormat, SubPictureFormat, TensorDType, TensorLayout, TensorShape, TextFormat,
+    AudioFormat, ByteStreamEncoding, Caps, ClosedCaptionFormat, Dim, Interlace, PassthroughFields,
+    Rate, RawVideoFormat, SubPictureFormat, TensorDType, TensorLayout, TensorShape, TextFormat,
     VideoCodec, ANY_CHANNELS, ANY_SAMPLE_RATE,
 };
 pub use channels::{ChannelLayout, ChannelPosition};

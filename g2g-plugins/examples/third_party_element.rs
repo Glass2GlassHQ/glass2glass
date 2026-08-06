@@ -83,6 +83,7 @@ impl PadTemplates for FrameCounter {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         });
         Vec::from([PadTemplate::sink(any.clone()), PadTemplate::source(any)])
     }

@@ -113,6 +113,7 @@ impl VpxEnc {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         }
     }
 
@@ -255,6 +256,7 @@ impl AsyncElement for VpxEnc {
                 width,
                 height,
                 framerate,
+                interlace: _,
             } => CapsSet::one(Caps::CompressedVideo {
                 codec,
                 width: width.clone(),
@@ -271,6 +273,7 @@ impl AsyncElement for VpxEnc {
             width,
             height,
             framerate,
+            interlace: _,
         } = absolute_caps
         else {
             return Err(G2gError::CapsMismatch);
@@ -412,6 +415,7 @@ mod tests {
             width: Dim::Fixed(w),
             height: Dim::Fixed(h),
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         }
     }
 

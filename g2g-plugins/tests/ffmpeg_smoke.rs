@@ -276,6 +276,7 @@ async fn autoplug_builds_nv12_decoder_for_strict_nv12_sink() {
         width: Dim::Fixed(640),
         height: Dim::Fixed(480),
         framerate: Rate::Fixed(30 << 16),
+        interlace: g2g_core::Interlace::Any,
     };
     let mut sink = Collect::default();
     DynAsyncElement::process(dec, PipelinePacket::CapsChanged(nv12), &mut sink)
