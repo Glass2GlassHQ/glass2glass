@@ -364,11 +364,16 @@ pub fn ps_playbin(reg: &Registry, uri: &str) -> Result<Option<Graph<GraphNode>>,
             return build_ps_subpicture_overlay(reg, &path, &infos, geometry).map(Some);
         }
     }
-    build_av_fanout(
+    // An interlaced disc combs on motion unless the fields are woven back
+    // together, so the sequence extension's `progressive_sequence` decides
+    // whether the video branch pays for a `deinterlace` (M932).
+    let interlaced = demux.sequence().is_some_and(|s| !s.progressive);
+    build_av_fanout_with(
         reg,
         Box::new(source),
         crate::psdemux::PsDemuxN::new(streams),
         &av,
+        interlaced,
     )
     .map(Some)
 }
@@ -485,10 +490,17 @@ fn build_ps_subpicture_overlay(
                 height: g2g_core::Dim::Fixed(geometry.height),
                 framerate: g2g_core::Rate::Fixed(geometry.framerate_q16),
             };
+            // Deinterlace on the decoder's own planar output, before the RGBA
+            // convert the compositor needs (M932).
+            let head = if geometry.progressive {
+                to_rgba
+            } else {
+                deinterlace_into(&mut graph, to_rgba)?
+            };
             reg.decodebin(
                 &mut graph,
                 demux.out(i as u8),
-                to_rgba,
+                head,
                 &video_caps,
                 &is_raw_video,
                 PLAYBIN_MAX_DEPTH,
@@ -701,11 +713,27 @@ fn build_av_fanout<D>(
 where
     D: g2g_core::MultiOutputElement + 'static,
 {
+    build_av_fanout_with(reg, source, demux, av, false)
+}
+
+/// [`build_av_fanout`] with `deinterlace` optionally spliced into each video
+/// branch, for a container whose probe found the stream interlaced.
+#[cfg(feature = "std")]
+fn build_av_fanout_with<D>(
+    reg: &Registry,
+    source: Box<dyn DynSourceLoop>,
+    demux: D,
+    av: &[(Caps, bool)],
+    deinterlace: bool,
+) -> Result<Graph<GraphNode>, ParseError>
+where
+    D: g2g_core::MultiOutputElement + 'static,
+{
     let mut graph: Graph<GraphNode> = Graph::new();
     let src = graph.add_source(GraphNodeRef::Source(source));
     let demux = graph.add_demux(GraphNodeRef::demux(demux), av.len() as u8);
     graph.link(src, demux.input()).map_err(ParseError::Graph)?;
-    wire_av_fanout(reg, &mut graph, demux, av)?;
+    wire_av_fanout(reg, &mut graph, demux, av, deinterlace)?;
     Ok(graph)
 }
 
@@ -718,6 +746,7 @@ fn wire_av_fanout(
     graph: &mut Graph<GraphNode>,
     demux: g2g_core::graph::Demux,
     av: &[(Caps, bool)],
+    deinterlace: bool,
 ) -> Result<(), ParseError> {
     for (i, (caps, video)) in av.iter().enumerate() {
         if *video {
@@ -725,10 +754,15 @@ fn wire_av_fanout(
                 .make_element("autovideosink")
                 .ok_or_else(|| ParseError::UnknownElement("autovideosink".to_string()))?;
             let vsnk = graph.add_sink(GraphNodeRef::Element(sink));
+            let head = if deinterlace {
+                deinterlace_into(graph, vsnk)?
+            } else {
+                vsnk
+            };
             reg.decodebin(
                 graph,
                 demux.out(i as u8),
-                vsnk,
+                head,
                 caps,
                 &is_raw_video,
                 PLAYBIN_MAX_DEPTH,
@@ -739,6 +773,18 @@ fn wire_av_fanout(
         }
     }
     Ok(())
+}
+
+/// Add a `deinterlace` feeding `to` and return it, so the decode chain plugs into
+/// the deinterlacer instead of directly into what follows.
+#[cfg(feature = "std")]
+fn deinterlace_into(
+    graph: &mut Graph<GraphNode>,
+    to: g2g_core::graph::NodeId,
+) -> Result<g2g_core::graph::NodeId, ParseError> {
+    let node = graph.add_transform(GraphNodeRef::element(crate::deinterlace::Deinterlace::new()));
+    graph.link(node, to).map_err(ParseError::Graph)?;
+    Ok(node)
 }
 
 #[cfg(feature = "std")]

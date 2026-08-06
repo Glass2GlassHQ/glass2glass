@@ -1,13 +1,24 @@
-//! Deinterlace (`deinterlace`). Removes interlacing combs from a packed RGBA /
-//! BGRA frame by vertical interpolation, preserving format and geometry. CPU-only
-//! `no_std`.
+//! Deinterlace (`deinterlace`). Removes interlacing combs from a raw video frame,
+//! preserving format and geometry, one frame out per frame in (single rate: no
+//! field doubling). CPU-only `no_std`. Packed RGBA / BGRA and planar I420 / NV12.
 //!
-//! Two methods (a subset of GStreamer's `deinterlace`):
-//! - `linear` (default): keep the even (top-field) lines, replace each odd line
-//!   with the average of the even lines above and below it, so the bottom field's
-//!   comb is discarded and interpolated.
+//! Three methods (a subset of GStreamer's `deinterlace`):
+//! - `yadif` (default): the ffmpeg / GStreamer yadif kernel, single-rate. Each
+//!   line of the discarded field is rebuilt from a spatial edge-directed
+//!   interpolation clamped to a temporal window, so static areas keep full
+//!   vertical detail and moving ones lose the comb. Needs the previous and next
+//!   frames, so it runs one frame behind the input.
+//! - `linear`: keep the top field's lines, replace each bottom-field line with the
+//!   average of the lines above and below it. No temporal state.
 //! - `blend`: each output line is the average of it and the line below, a soft
 //!   vertical blur that suppresses combing without dropping a field.
+//!
+//! Field order is assumed top-field-first, matching ffmpeg's default for a stream
+//! that declares nothing. There is deliberately no `mode` property: g2g carries no
+//! per-frame interlace flag, so an `auto` mode could not tell an interlaced frame
+//! from a progressive one and would be a property the element accepts and ignores.
+//! Whether to insert this element is decided upstream (`ps_playbin` reads the MPEG
+//! sequence extension's `progressive_sequence`).
 
 use core::future::Future;
 use core::pin::Pin;
@@ -16,7 +27,7 @@ use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use g2g_core::frame::Frame;
+use g2g_core::frame::{Frame, FrameTiming};
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
@@ -24,10 +35,18 @@ use g2g_core::{
     PropValue, PropertySpec, Rate, RawVideoFormat,
 };
 
-const FORMATS: [RawVideoFormat; 2] = [RawVideoFormat::Rgba8, RawVideoFormat::Bgra8];
+use crate::pixel::{even_dims_required, frame_byte_size, planar_planes};
+
+const FORMATS: [RawVideoFormat; 4] = [
+    RawVideoFormat::Rgba8,
+    RawVideoFormat::Bgra8,
+    RawVideoFormat::Nv12,
+    RawVideoFormat::I420,
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeinterlaceMethod {
+    Yadif,
     Linear,
     Blend,
 }
@@ -35,6 +54,7 @@ pub enum DeinterlaceMethod {
 impl DeinterlaceMethod {
     fn from_str(s: &str) -> Option<Self> {
         match s {
+            "yadif" => Some(Self::Yadif),
             "linear" => Some(Self::Linear),
             "blend" => Some(Self::Blend),
             _ => None,
@@ -43,19 +63,113 @@ impl DeinterlaceMethod {
 
     fn as_str(self) -> &'static str {
         match self {
+            Self::Yadif => "yadif",
             Self::Linear => "linear",
             Self::Blend => "blend",
         }
     }
 }
 
+/// One deinterlaceable component of a frame: a 2D grid of samples addressed
+/// inside the packed buffer. `step` is the byte distance between horizontally
+/// adjacent samples, so an interleaved component (one RGBA channel, one half of
+/// an NV12 chroma pair) is filtered on its own samples instead of smearing its
+/// neighbour's into the prediction.
+#[derive(Debug, Clone, Copy)]
+struct Component {
+    base: usize,
+    /// Bytes per row.
+    stride: usize,
+    /// Bytes between horizontally adjacent samples.
+    step: usize,
+    /// Samples per row.
+    width: usize,
+    rows: usize,
+}
+
+impl Component {
+    #[inline]
+    fn at(&self, y: usize, x: usize) -> usize {
+        self.base + y * self.stride + x * self.step
+    }
+}
+
+/// The component grid of one `w x h` frame in `format`. Only the four formats
+/// `FORMATS` admits reach here.
+fn components(format: RawVideoFormat, w: usize, h: usize) -> Vec<Component> {
+    match format {
+        RawVideoFormat::Rgba8 | RawVideoFormat::Bgra8 => (0..4)
+            .map(|c| Component {
+                base: c,
+                stride: w * 4,
+                step: 4,
+                width: w,
+                rows: h,
+            })
+            .collect(),
+        RawVideoFormat::Nv12 => {
+            let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
+            let luma = w * h;
+            Vec::from([
+                Component {
+                    base: 0,
+                    stride: w,
+                    step: 1,
+                    width: w,
+                    rows: h,
+                },
+                Component {
+                    base: luma,
+                    stride: cw * 2,
+                    step: 2,
+                    width: cw,
+                    rows: ch,
+                },
+                Component {
+                    base: luma + 1,
+                    stride: cw * 2,
+                    step: 2,
+                    width: cw,
+                    rows: ch,
+                },
+            ])
+        }
+        // Fully planar (I420 here): one component per plane.
+        _ => planar_planes(format, w, h)
+            .into_iter()
+            .map(|(base, pw, ph)| Component {
+                base,
+                stride: pw,
+                step: 1,
+                width: pw,
+                rows: ph,
+            })
+            .collect(),
+    }
+}
+
+/// A held input frame: yadif predicts from the previous and next frames, so the
+/// element keeps its own copy of three of them.
+#[derive(Debug)]
+struct Held {
+    data: Vec<u8>,
+    timing: FrameTiming,
+}
+
 #[derive(Debug)]
 pub struct Deinterlace {
     method: DeinterlaceMethod,
     input: Option<(RawVideoFormat, u32, u32, Rate)>,
+    layout: Vec<Component>,
+    frame_bytes: usize,
     configured: bool,
     last_caps: Option<Caps>,
     emitted: u64,
+    /// yadif's rolling window, mirroring ffmpeg's: `cur` is the frame being
+    /// emitted, `prev` / `next` bracket it in time.
+    prev: Option<Held>,
+    cur: Option<Held>,
+    next: Option<Held>,
 }
 
 impl Default for Deinterlace {
@@ -67,11 +181,16 @@ impl Default for Deinterlace {
 impl Deinterlace {
     pub fn new() -> Self {
         Self {
-            method: DeinterlaceMethod::Linear,
+            method: DeinterlaceMethod::Yadif,
             input: None,
+            layout: Vec::new(),
+            frame_bytes: 0,
             configured: false,
             last_caps: None,
             emitted: 0,
+            prev: None,
+            cur: None,
+            next: None,
         }
     }
 
@@ -93,7 +212,71 @@ impl Deinterlace {
         if !FORMATS.contains(format) || *w == 0 || *h == 0 {
             return Err(G2gError::CapsMismatch);
         }
+        // A subsampled format at an odd dimension has no whole chroma grid, so
+        // the plane layout below would not describe the buffer it is given.
+        let (even_w, even_h) = even_dims_required(*format);
+        if (even_w && *w % 2 != 0) || (even_h && *h % 2 != 0) {
+            return Err(G2gError::CapsMismatch);
+        }
         Ok((*format, *w, *h, framerate.clone()))
+    }
+
+    fn reconfigure(&mut self, caps: &Caps) -> Result<(), G2gError> {
+        let (format, w, h, rate) = self.accept_input(caps)?;
+        // A geometry change invalidates the held window: its frames are the old
+        // size and cannot be combined with the new ones.
+        if self.input.as_ref().map(|(f, w, h, _)| (*f, *w, *h)) != Some((format, w, h)) {
+            self.prev = None;
+            self.cur = None;
+            self.next = None;
+        }
+        self.layout = components(format, w as usize, h as usize);
+        self.frame_bytes = frame_byte_size(format, w, h);
+        self.input = Some((format, w, h, rate));
+        Ok(())
+    }
+
+    fn out_caps(&self) -> Option<Caps> {
+        let (format, w, h, rate) = self.input.as_ref()?;
+        Some(Caps::RawVideo {
+            format: *format,
+            width: Dim::Fixed(*w),
+            height: Dim::Fixed(*h),
+            framerate: rate.clone(),
+        })
+    }
+
+    async fn emit(
+        &mut self,
+        data: Vec<u8>,
+        timing: FrameTiming,
+        out: &mut dyn OutputSink,
+    ) -> Result<(), G2gError> {
+        if let Some(caps) = self.out_caps() {
+            if self.last_caps.as_ref() != Some(&caps) {
+                out.push(PipelinePacket::CapsChanged(caps.clone())).await?;
+                self.last_caps = Some(caps);
+            }
+        }
+        let frame = Frame {
+            domain: MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
+            timing,
+            sequence: self.emitted,
+            meta: Default::default(),
+        };
+        self.emitted += 1;
+        out.push(PipelinePacket::DataFrame(frame)).await?;
+        Ok(())
+    }
+
+    /// Run yadif over the held window and emit the result for `cur`.
+    fn yadif_current(&self) -> Option<(Vec<u8>, FrameTiming)> {
+        let (prev, cur, next) = (self.prev.as_ref()?, self.cur.as_ref()?, self.next.as_ref()?);
+        let mut dst = cur.data.clone();
+        for c in &self.layout {
+            yadif_component(&prev.data, &cur.data, &next.data, &mut dst, *c);
+        }
+        Some((dst, cur.timing))
     }
 }
 
@@ -128,7 +311,7 @@ impl AsyncElement for Deinterlace {
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        self.input = Some(self.accept_input(absolute_caps)?);
+        self.reconfigure(absolute_caps)?;
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
     }
@@ -144,51 +327,73 @@ impl AsyncElement for Deinterlace {
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let (format, w, h, rate) = match &self.input {
-                        Some((f, w, h, r)) => (*f, *w, *h, r.clone()),
-                        None => return Err(G2gError::NotConfigured),
-                    };
+                    if self.input.is_none() {
+                        return Err(G2gError::NotConfigured);
+                    }
                     let Some(src) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
-                    let bytes = (w as usize) * (h as usize) * 4;
-                    if src.len() < bytes {
+                    let n = self.frame_bytes;
+                    if src.len() < n {
                         return Err(G2gError::CapsMismatch);
                     }
-                    let mut dst = vec![0u8; bytes].into_boxed_slice();
-                    deinterlace(&src[..bytes], &mut dst, w as usize, h as usize, self.method);
-
-                    let new_caps = Caps::RawVideo {
-                        format,
-                        width: Dim::Fixed(w),
-                        height: Dim::Fixed(h),
-                        framerate: rate,
-                    };
-                    if self.last_caps.as_ref() != Some(&new_caps) {
-                        out.push(PipelinePacket::CapsChanged(new_caps.clone()))
-                            .await?;
-                        self.last_caps = Some(new_caps);
+                    if self.method == DeinterlaceMethod::Yadif {
+                        // ffmpeg's window shift: the first frame stands in for its
+                        // own predecessor, so nothing is emitted until a second
+                        // one arrives and the element runs one frame behind.
+                        self.prev = self.cur.take();
+                        self.cur = self.next.take();
+                        self.next = Some(Held {
+                            data: src[..n].to_vec(),
+                            timing: frame.timing,
+                        });
+                        if self.cur.is_none() {
+                            self.cur = self.next.as_ref().map(|f| Held {
+                                data: f.data.clone(),
+                                timing: f.timing,
+                            });
+                        }
+                        if let Some((data, timing)) = self.yadif_current() {
+                            self.emit(data, timing, out).await?;
+                        }
+                    } else {
+                        let mut dst = vec![0u8; n];
+                        dst.copy_from_slice(&src[..n]);
+                        for c in &self.layout {
+                            blend_component(&src[..n], &mut dst, *c, self.method);
+                        }
+                        self.emit(dst, frame.timing, out).await?;
                     }
-                    let out_frame = Frame {
-                        domain: MemoryDomain::System(SystemSlice::from_boxed(dst)),
-                        timing: frame.timing,
-                        sequence: self.emitted,
-                        meta: Default::default(),
-                    };
-                    self.emitted += 1;
-                    out.push(PipelinePacket::DataFrame(out_frame)).await?;
                 }
                 PipelinePacket::CapsChanged(c) => {
-                    self.input = Some(self.accept_input(&c)?);
+                    self.reconfigure(&c)?;
                 }
                 PipelinePacket::Flush => {
                     self.last_caps = None;
+                    self.prev = None;
+                    self.cur = None;
+                    self.next = None;
                     out.push(PipelinePacket::Flush).await?;
                 }
                 PipelinePacket::Segment(seg) => {
                     out.push(PipelinePacket::Segment(seg)).await?;
                 }
-                PipelinePacket::Eos => {}
+                PipelinePacket::Eos => {
+                    // ffmpeg feeds a copy of the last frame so the real one still
+                    // gets a `next` to predict from: N in, N out.
+                    self.prev = self.cur.take();
+                    self.cur = self.next.take();
+                    self.next = self.cur.as_ref().map(|f| Held {
+                        data: f.data.clone(),
+                        timing: f.timing,
+                    });
+                    if let Some((data, timing)) = self.yadif_current() {
+                        self.emit(data, timing, out).await?;
+                    }
+                    self.prev = None;
+                    self.cur = None;
+                    self.next = None;
+                }
                 other => {
                     out.push(other).await?;
                 }
@@ -232,9 +437,9 @@ impl AsyncElement for Deinterlace {
 static DEINTERLACE_PROPS: &[PropertySpec] = &[PropertySpec::new(
     "method",
     PropKind::Str,
-    "deinterlace method: linear | blend",
+    "deinterlace method: yadif | linear | blend",
 )
-.with_enum_values("linear | blend")];
+.with_enum_values("yadif | linear | blend")];
 
 impl PadTemplates for Deinterlace {
     fn pad_templates() -> Vec<PadTemplate> {
@@ -253,40 +458,113 @@ fn avg(a: u8, b: u8) -> u8 {
     ((a as u16 + b as u16) / 2) as u8
 }
 
-/// Deinterlace one packed 4-channel frame. `linear` interpolates odd lines from
-/// the even lines above / below; `blend` averages each line with the one below.
-fn deinterlace(src: &[u8], dst: &mut [u8], w: usize, h: usize, method: DeinterlaceMethod) {
-    let stride = w * 4;
-    let line = |y: usize| &src[y * stride..y * stride + stride];
+/// The `linear` / `blend` methods over one component. `dst` already holds a copy
+/// of `src`, so a row either method leaves alone needs no write.
+fn blend_component(src: &[u8], dst: &mut [u8], c: Component, method: DeinterlaceMethod) {
     match method {
         DeinterlaceMethod::Linear => {
-            for y in 0..h {
-                let out = &mut dst[y * stride..y * stride + stride];
-                if y % 2 == 0 || y + 1 >= h {
-                    // even line (top field) or last row: passthrough.
-                    out.copy_from_slice(line(y));
-                } else {
-                    let above = line(y - 1);
-                    let below = line(y + 1);
-                    for i in 0..stride {
-                        out[i] = avg(above[i], below[i]);
-                    }
+            // Odd rows (the bottom field) are rebuilt from their neighbours; the
+            // last row has no row below, so it stays.
+            let mut y = 1;
+            while y + 1 < c.rows {
+                for x in 0..c.width {
+                    dst[c.at(y, x)] = avg(src[c.at(y - 1, x)], src[c.at(y + 1, x)]);
                 }
+                y += 2;
             }
         }
         DeinterlaceMethod::Blend => {
-            for y in 0..h {
-                let out = &mut dst[y * stride..y * stride + stride];
-                let cur = line(y);
-                if y + 1 >= h {
-                    out.copy_from_slice(cur);
-                } else {
-                    let below = line(y + 1);
-                    for i in 0..stride {
-                        out[i] = avg(cur[i], below[i]);
+            for y in 0..c.rows.saturating_sub(1) {
+                for x in 0..c.width {
+                    dst[c.at(y, x)] = avg(src[c.at(y, x)], src[c.at(y + 1, x)]);
+                }
+            }
+        }
+        DeinterlaceMethod::Yadif => unreachable!("yadif runs on the held window"),
+    }
+}
+
+/// yadif over one component, single-rate and top-field-first, a port of ffmpeg's
+/// `vf_yadif.c` `FILTER` / `CHECK` kernel.
+///
+/// Single-rate is ffmpeg's `mode=0`, which always passes `parity ^ tff == 1` down
+/// to the line filter, so the temporal pair is `(prev, cur)`: the two samples of
+/// the discarded field that bracket the kept field in time. `dst` already holds a
+/// copy of `cur`, so the kept field's rows need no write.
+///
+/// The first and last three columns take the plain `(above + below) / 2` spatial
+/// predictor instead of the edge-directed search, exactly as ffmpeg's
+/// `filter_edges` does, because the search reads three samples to either side.
+fn yadif_component(prev: &[u8], cur: &[u8], next: &[u8], dst: &mut [u8], c: Component) {
+    // Two rows are the minimum the row mirroring below is defined for.
+    if c.rows < 2 {
+        return;
+    }
+    // Top field first: only the odd rows are rebuilt, and `y >= 1` is what makes
+    // every neighbour index below non-negative.
+    for y in (1..c.rows).step_by(2) {
+        // ffmpeg mirrors at the bottom edge: prefs is -1 row on the last row.
+        let above = y - 1;
+        let below = if y + 1 < c.rows { y + 1 } else { y - 1 };
+        // ffmpeg forces mode 2 on the rows whose second-order neighbours would
+        // fall outside the frame, which drops the b / f interval check. That is
+        // also what keeps `above2` / `below2` inside the component.
+        let interval = y != 1 && y + 2 != c.rows;
+        let (above2, below2) = (y.saturating_sub(2), if below > y { y + 2 } else { y - 2 });
+        for x in 0..c.width {
+            let s = |buf: &[u8], yy: usize, xx: usize| buf[c.at(yy, xx)] as i32;
+            let cc = s(cur, above, x);
+            let e = s(cur, below, x);
+            // Single-rate yadif reads its temporal pair from prev and cur: the
+            // two samples of the discarded field bracketing this field in time.
+            let (p0, n0) = (s(prev, y, x), s(cur, y, x));
+            let d = (p0 + n0) >> 1;
+            let td0 = (p0 - n0).abs();
+            let td1 = ((s(prev, above, x) - cc).abs() + (s(prev, below, x) - e).abs()) >> 1;
+            let td2 = ((s(next, above, x) - cc).abs() + (s(next, below, x) - e).abs()) >> 1;
+            let mut diff = (td0 >> 1).max(td1).max(td2);
+            let mut pred = (cc + e) >> 1;
+
+            if x >= 3 && x + 3 < c.width {
+                let xi = x as isize;
+                let sx = |yy: usize, xx: isize| cur[c.at(yy, xx as usize)] as i32;
+                let score = |j: isize| -> i32 {
+                    (sx(above, xi - 1 + j) - sx(below, xi - 1 - j)).abs()
+                        + (sx(above, xi + j) - sx(below, xi - j)).abs()
+                        + (sx(above, xi + 1 + j) - sx(below, xi + 1 - j)).abs()
+                };
+                let interp = |j: isize| (sx(above, xi + j) + sx(below, xi - j)) >> 1;
+                let mut best = score(0) - 1;
+                // The +/-2 offset is only considered when the +/-1 one improved,
+                // matching the nesting of ffmpeg's CHECK macro.
+                for dir in [-1isize, 1] {
+                    let one = score(dir);
+                    if one < best {
+                        best = one;
+                        pred = interp(dir);
+                        let two = score(dir * 2);
+                        if two < best {
+                            best = two;
+                            pred = interp(dir * 2);
+                        }
                     }
                 }
             }
+
+            if interval {
+                let b = (s(prev, above2, x) + s(cur, above2, x)) >> 1;
+                let f = (s(prev, below2, x) + s(cur, below2, x)) >> 1;
+                let max = (d - e).max(d - cc).max((b - cc).min(f - e));
+                let min = (d - e).min(d - cc).min((b - cc).max(f - e));
+                diff = diff.max(min).max(-max);
+            }
+
+            if pred > d + diff {
+                pred = d + diff;
+            } else if pred < d - diff {
+                pred = d - diff;
+            }
+            dst[c.at(y, x)] = pred.clamp(0, 255) as u8;
         }
     }
 }
@@ -294,6 +572,16 @@ fn deinterlace(src: &[u8], dst: &mut [u8], w: usize, h: usize, method: Deinterla
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn rgba(w: usize, h: usize) -> Component {
+        Component {
+            base: 0,
+            stride: w * 4,
+            step: 4,
+            width: w,
+            rows: h,
+        }
+    }
 
     // 1px-wide, 4px-tall RGBA frame with alternating black/white lines (a comb).
     fn comb() -> Vec<u8> {
@@ -305,11 +593,17 @@ mod tests {
         v
     }
 
+    fn run(src: &[u8], w: usize, h: usize, method: DeinterlaceMethod) -> Vec<u8> {
+        let mut dst = src.to_vec();
+        for c in components(RawVideoFormat::Rgba8, w, h) {
+            blend_component(src, &mut dst, c, method);
+        }
+        dst
+    }
+
     #[test]
     fn linear_interpolates_odd_lines() {
-        let src = comb();
-        let mut dst = vec![0u8; src.len()];
-        deinterlace(&src, &mut dst, 1, 4, DeinterlaceMethod::Linear);
+        let dst = run(&comb(), 1, 4, DeinterlaceMethod::Linear);
         // even lines (0,2) stay 0; odd line 1 = avg(0,0)=0; line 3 is last -> passthrough 255.
         assert_eq!(dst[0..4], [0, 0, 0, 255]);
         assert_eq!(dst[4..8], [0, 0, 0, 255]);
@@ -319,17 +613,37 @@ mod tests {
 
     #[test]
     fn blend_softens_edges() {
-        let src = comb();
-        let mut dst = vec![0u8; src.len()];
-        deinterlace(&src, &mut dst, 1, 4, DeinterlaceMethod::Blend);
+        let dst = run(&comb(), 1, 4, DeinterlaceMethod::Blend);
         // line 0 = avg(0,255)=127; the comb is reduced (no full 0/255 jump).
         assert_eq!(dst[0], 127);
         assert_eq!(dst[4], 127);
     }
 
+    /// A static scene: yadif's temporal window agrees with the spatial predictor,
+    /// so the kept field passes through and the rebuilt field matches its
+    /// neighbours rather than inventing detail.
+    #[test]
+    fn yadif_static_scene_is_stable() {
+        let (w, h) = (8usize, 8usize);
+        let mut src = vec![0u8; w * h * 4];
+        for y in 0..h {
+            for x in 0..w {
+                let v = (x * 16 + y) as u8;
+                src[(y * w + x) * 4..][..4].copy_from_slice(&[v, v, v, 255]);
+            }
+        }
+        let mut dst = src.clone();
+        yadif_component(&src, &src, &src, &mut dst, rgba(w, h));
+        assert_eq!(dst, src, "a frame identical to its neighbours is unchanged");
+    }
+
     #[test]
     fn method_property_round_trips() {
         let mut d = Deinterlace::new();
+        assert_eq!(
+            d.get_property("method"),
+            Some(PropValue::Str("yadif".into()))
+        );
         d.set_property("method", PropValue::Str("blend".into()))
             .unwrap();
         assert_eq!(

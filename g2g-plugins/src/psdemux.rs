@@ -122,6 +122,12 @@ pub struct SequenceHeader {
     pub height: u32,
     /// Frame rate as a Q16 fixed-point value, matching [`Rate::Fixed`].
     pub framerate_q16: u32,
+    /// `progressive_sequence` from the MPEG-2 sequence extension: false means the
+    /// stream is interlaced and wants deinterlacing before display. True for
+    /// MPEG-1 (which has no such signalling) and whenever the extension is
+    /// missing or malformed, so an unreadable stream plays untouched rather than
+    /// being filtered on a guess.
+    pub progressive: bool,
 }
 
 /// The MPEG frame_rate_code table (ISO 13818-2 Table 6-4), as exact
@@ -140,7 +146,8 @@ const FRAME_RATES: [(u32, u32); 9] = [
 
 /// Parse the first MPEG sequence header (`00 00 01 B3`) in an access unit: the
 /// 12-bit horizontal and vertical sizes and the 4-bit frame_rate_code that
-/// follow it. Returns `None` when the unit carries no sequence header, when it
+/// follow it, plus `progressive_sequence` from the MPEG-2 sequence extension
+/// after it. Returns `None` when the unit carries no sequence header, when it
 /// is truncated, or when a field is out of range (a zero dimension, a reserved
 /// frame rate), so a malformed header leaves the placeholder caps standing
 /// rather than fixating on nonsense.
@@ -163,7 +170,46 @@ pub fn parse_sequence_header(au: &[u8]) -> Option<SequenceHeader> {
         width,
         height,
         framerate_q16,
+        progressive: parse_progressive_sequence(au, body),
     })
+}
+
+/// `progressive_sequence` from the MPEG-2 sequence extension (ISO 13818-2
+/// 6.2.2.3), the extension that must directly follow a sequence header. `body` is
+/// the first byte after the sequence header's start code.
+///
+/// The header's own length is variable (either quantiser matrix may be present,
+/// and the second one is not byte aligned), so the extension is found by scanning
+/// for the next start code past the 8-byte fixed part instead of computing an
+/// offset. No start code can be emulated inside the header: its marker bit
+/// forbids the pattern in the fixed part, and quantiser matrix values are never
+/// zero. Anything unexpected (truncation, a different extension, MPEG-1's absent
+/// one) reads as progressive, so the stream plays unfiltered.
+fn parse_progressive_sequence(au: &[u8], body: usize) -> bool {
+    let Some(from) = body.checked_add(8) else {
+        return true;
+    };
+    let Some(rest) = au.get(from..) else {
+        return true;
+    };
+    let Some(at) = rest.windows(4).position(|w| w[..3] == [0x00, 0x00, 0x01]) else {
+        return true;
+    };
+    if rest[at + 3] != 0xB5 {
+        return true;
+    }
+    // extension_start_code_identifier (4 bits) then profile_and_level_indication
+    // (8 bits), so progressive_sequence is bit 3 of the second payload byte.
+    let Some(id) = rest.get(at + 4) else {
+        return true;
+    };
+    if id >> 4 != 0b0001 {
+        return true;
+    }
+    match rest.get(at + 5) {
+        Some(b) => b & 0x08 != 0,
+        None => true,
+    }
 }
 
 /// Split a PES packet into its timestamps and elementary-stream bytes, for

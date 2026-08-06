@@ -53,7 +53,7 @@ fn declared_nicks_and_their_aliases_all_parse() {
         ))
         .unwrap_or_else(|e| panic!("alpha method={method}: {e}"));
     }
-    for method in ["linear", "blend"] {
+    for method in ["yadif", "linear", "blend"] {
         parse(&format!(
             "videotestsrc num-buffers=1 ! deinterlace method={method} ! fakesink"
         ))
@@ -69,8 +69,7 @@ fn declared_nicks_and_their_aliases_all_parse() {
 
 #[test]
 fn unknown_deinterlace_method_names_the_choices() {
-    let err =
-        parse("videotestsrc num-buffers=1 ! deinterlace method=yadif ! fakesink").unwrap_err();
+    let err = parse("videotestsrc num-buffers=1 ! deinterlace method=bob ! fakesink").unwrap_err();
     let ParseError::BadEnumValue {
         element,
         key,
@@ -82,7 +81,7 @@ fn unknown_deinterlace_method_names_the_choices() {
     };
     assert_eq!(
         (element.as_str(), key.as_str(), value.as_str()),
-        ("deinterlace", "method", "yadif")
+        ("deinterlace", "method", "bob")
     );
     assert!(values.contains("blend"), "declared choices: {values}");
 }

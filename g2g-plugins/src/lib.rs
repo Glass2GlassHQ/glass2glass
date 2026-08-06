@@ -180,7 +180,8 @@ pub mod ccinsert;
 // MISB ST 0604 MISP time stamps in H.264 / H.265 SEI (STANAG 4609): codec +
 // misptimeinsert / misptimeextract elements (no_std).
 pub mod misptime;
-// Shared pixel-format helpers for the packed-RGBA elements (videobalance, alpha).
+// Shared pixel-format helpers: packed-RGBA layout (videobalance, alpha) and the
+// planar plane / frame sizing the format-agnostic filters need (deinterlace).
 mod pixel;
 // Sans-IO RFC 4566 SDP: the shared media-section scanner plus the RTP/AVP
 // mapping from a media description to Caps (payload type, codec, clock rate,

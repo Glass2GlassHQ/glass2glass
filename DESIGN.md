@@ -2150,6 +2150,21 @@ DTS substreams, the program stream map, a PS muxer, and seeking.
 through `TsStream::Mpeg2`, and `au_is_keyframe` reads its sync points (an
 I-picture, or a sequence / GOP header).
 
+Disc content is usually interlaced, and presenting its woven frames as-is combs
+on motion. `deinterlace` (M932) is the CPU filter that undoes it: a single-rate
+yadif port (an edge-directed spatial interpolation clamped to a temporal window
+built from the previous and next frames), plus the cheaper `linear` and `blend`
+methods, over I420 / NV12 / RGBA / BGRA at unchanged format and geometry, one
+frame out per frame in. It is bit-exact against ffmpeg's `yadif=0` on the same
+raw frames, including the 3-column border where ffmpeg drops the directional
+search. `ps_playbin` inserts it into the video branch (both the plain fan-out and
+the subpicture-overlay one) when `progressive_sequence` in the MPEG-2 sequence
+extension (`00 00 01 B5`, identifier `0001`) says the stream is interlaced;
+MPEG-1 carries no such extension and is treated as progressive, as is any stream
+whose extension is missing or malformed, so an unreadable header never costs a
+filter pass. Field order is assumed top-field-first: g2g's frames carry no
+interlace flag, which is also why the element has no `auto` mode.
+
 Adaptive streaming sits one layer above these demuxers: an HTTP byte source feeds
 a playlist/manifest-driven source that fetches media segments and hands them to
 the matching byte-stream demuxer. `g2g-plugins::httpsrc::HttpSrc` (the `http-src`

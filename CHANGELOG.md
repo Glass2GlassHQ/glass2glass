@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M932: `deinterlace` gains a yadif method and planar YUV support, and `playbin uri=file.vob` inserts it when the MPEG-2 sequence extension says the stream is interlaced.
+
 - M931: `playbin uri=file.vob` composites a DVD's subpicture cues over the video, and a fan-in element now sees the `Segment` that maps its output to running time.
 
 - M930: every demuxer opens with a stream-start segment, and launch lines accept gst-style parallel chains.

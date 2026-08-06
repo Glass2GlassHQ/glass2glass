@@ -519,7 +519,8 @@ run_source_transform_sink(src, parse, sink, &clock, LatencyProfile::Live).await?
 The container demuxers (`tsdemux`, `matroskademux`, `flvdemux`, `oggdemux`,
 `fmp4demux`, `mpegpsdemux`) accept a `Caps::ByteStream` and split out elementary
 streams. `mpegpsdemux` reads `.mpg` / `.vob` program streams, including their DVD
-subpicture tracks.
+subpicture tracks; an interlaced disc gets a `deinterlace` (yadif) in the video
+branch automatically.
 
 ```rust
 let src   = FileSrc::new("clip.ts", Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs });
