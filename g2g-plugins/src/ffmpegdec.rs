@@ -4,7 +4,7 @@
 //! negotiated caps name (H.264 / H.265 / VP8 / VP9 / AV1), so the MKV / TS
 //! demuxers' VP9 / AV1 elementary streams decode. Construction is unchanged: the
 //! codec is read from the input caps at `configure_pipeline` and the matching
-//! decoder opened. `FfmpegVideoDec` is the preferred name now (`FfmpegH264Dec`
+//! decoder opened. `FfmpegVideoDec` is the struct's name (`FfmpegH264Dec`
 //! remains a back-compat alias).
 //!
 //! M13 (Linux production path): consumes Annex-B `DataFrame`s (the
@@ -39,7 +39,7 @@
 //! software path. Unlike `VaapiH264Dec` (cros-codecs, blocked on Mesa
 //! `radeonsi` GBM surface allocation), it uses libavcodec's own hwframe pool,
 //! so it works on AMD desktop / iGPU. Pin the render node with
-//! [`FfmpegH264Dec::with_vaapi_device`] on multi-GPU hosts.
+//! [`FfmpegVideoDec::with_vaapi_device`] on multi-GPU hosts.
 //!
 //! [`Backend::NvdecCuda`] (C3) is that true-hwaccel path for NVIDIA: instead
 //! of the standalone `h264_cuvid` codec (which copies NV12 back to system
@@ -58,7 +58,7 @@
 //! Pipeline:
 //!
 //! ```text
-//! RtspSrc ─► H264Parse ─► FfmpegH264Dec ─► [downstream sink / ML]
+//! RtspSrc ─► H264Parse ─► FfmpegVideoDec ─► [downstream sink / ML]
 //!  (System/H264 Annex-B)        (System/I420)
 //! ```
 //!
@@ -70,7 +70,7 @@
 //! aliasing.
 //!
 //! Output format: I420 by default; NV12 selectable via
-//! [`FfmpegH264Dec::with_output_format`]. NV12 is what KMS overlay planes
+//! [`FfmpegVideoDec::with_output_format`]. NV12 is what KMS overlay planes
 //! prefer, so the `KmsSink` path opts into it. The conversion is a direct
 //! interleave of the U/V planes after the YUV420P decode (no swscale).
 //!
@@ -296,7 +296,7 @@ pub enum Backend {
     /// Intel hardware path: unlike `VaapiH264Dec` (cros-codecs), it allocates
     /// surfaces through libavcodec's hwframe pool rather than GBM, so it works
     /// on Mesa `radeonsi` where cros-codecs 0.0.6 cannot. Pin the render node
-    /// with [`FfmpegH264Dec::with_vaapi_device`] on multi-GPU hosts. Requires
+    /// with [`FfmpegVideoDec::with_vaapi_device`] on multi-GPU hosts. Requires
     /// libavcodec built with the VAAPI hwaccel and a libva-capable render node.
     Vaapi,
 }
@@ -328,7 +328,7 @@ enum DecodedPayload {
     Cuda(OwnedCudaBuffer),
 }
 
-pub struct FfmpegH264Dec {
+pub struct FfmpegVideoDec {
     decoder: Option<ffmpeg::decoder::Video>,
     last_caps: Option<Caps>,
     configured: bool,
@@ -340,7 +340,7 @@ pub struct FfmpegH264Dec {
     /// ~25 frames of in-decoder latency). The `NvdecCuvid` constructor
     /// path defaults this to `Some(4)` for low-latency live use; callers
     /// who need throughput at the cost of latency can override via
-    /// [`FfmpegH264Dec::with_cuvid_surfaces`]. Ignored on the software
+    /// [`FfmpegVideoDec::with_cuvid_surfaces`]. Ignored on the software
     /// backend.
     cuvid_surfaces: Option<u32>,
     /// Set `AV_CODEC_FLAG_LOW_DELAY` at codec-open time. Tells the
@@ -385,33 +385,34 @@ pub struct FfmpegH264Dec {
     codec_kind: Option<VideoCodec>,
 }
 
-/// Preferred name now that this element decodes more than H.264 (also H.265 /
-/// VP8 / VP9 / AV1). The struct keeps its original name as a back-compat alias.
-pub type FfmpegVideoDec = FfmpegH264Dec;
+/// Back-compat alias from when this element decoded only H.264. The struct is
+/// named for what it does now (any libavcodec video codec), so logs and the run
+/// summary label its instances `FfmpegVideoDec`.
+pub type FfmpegH264Dec = FfmpegVideoDec;
 
 // SAFETY: `ffmpeg::decoder::Video` wraps a raw `*mut AVCodecContext` and is
 // `!Send` by default. The multi-thread runner requires `Send` so it can move
 // the element between worker tasks. We uphold that by construction: the
 // runner drives the element through `&mut self` (never concurrently), so the
 // context is owned and moved, never aliased.
-unsafe impl Send for FfmpegH264Dec {}
+unsafe impl Send for FfmpegVideoDec {}
 
-impl core::fmt::Debug for FfmpegH264Dec {
+impl core::fmt::Debug for FfmpegVideoDec {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("FfmpegH264Dec")
+        f.debug_struct("FfmpegVideoDec")
             .field("configured", &self.configured)
             .field("emitted", &self.emitted)
             .finish()
     }
 }
 
-impl Default for FfmpegH264Dec {
+impl Default for FfmpegVideoDec {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl FfmpegH264Dec {
+impl FfmpegVideoDec {
     pub fn new() -> Self {
         Self {
             decoder: None,
@@ -752,7 +753,7 @@ fn drain_frames_into(
     }
 }
 
-impl FfmpegH264Dec {
+impl FfmpegVideoDec {
     fn drain_eos(&mut self, decoded: &mut Vec<DecodedPicture>) -> Result<(), G2gError> {
         if let Some(d) = self.decoder.as_mut() {
             d.send_eof()
@@ -967,7 +968,7 @@ impl FfmpegH264Dec {
     }
 }
 
-impl PadTemplates for FfmpegH264Dec {
+impl PadTemplates for FfmpegVideoDec {
     /// Static superset for auto-plug: any supported codec in (any geometry), raw
     /// NV12 / I420 / I422 / I444 out. A constructed instance narrows the source
     /// pad to its configured `OutputFormat` via `caps_constraint_as_transform`
@@ -1016,7 +1017,7 @@ impl PadTemplates for FfmpegH264Dec {
     }
 }
 
-impl AsyncElement for FfmpegH264Dec {
+impl AsyncElement for FfmpegVideoDec {
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
@@ -2410,7 +2411,7 @@ mod tests {
     /// takes every name `get_property` reports plus the GStreamer spelling.
     #[test]
     fn output_format_property_takes_the_10_bit_names() {
-        let mut dec = FfmpegH264Dec::new();
+        let mut dec = FfmpegVideoDec::new();
         for (name, expected) in [
             ("p010", OutputFormat::P010),
             ("P010_10LE", OutputFormat::P010),
@@ -2433,7 +2434,7 @@ mod tests {
 
     #[test]
     fn auto_advertises_all_three_chromas() {
-        let dec = FfmpegH264Dec::new().with_output_format(OutputFormat::Auto);
+        let dec = FfmpegVideoDec::new().with_output_format(OutputFormat::Auto);
         let CapsConstraint::DerivedOutput(f) = dec.caps_constraint_as_transform() else {
             panic!("expected DerivedOutput");
         };
@@ -2479,7 +2480,7 @@ mod tests {
     fn caps_constraint_derives_output_for_supported_codecs() {
         // M16 step 5k: DerivedOutput closure validates a supported codec input
         // and emits the configured output format at the same dims/rate.
-        let dec = FfmpegH264Dec::new().with_output_format(OutputFormat::Nv12);
+        let dec = FfmpegVideoDec::new().with_output_format(OutputFormat::Nv12);
         let c = dec.caps_constraint_as_transform();
         let CapsConstraint::DerivedOutput(f) = c else {
             panic!("expected DerivedOutput");
@@ -2555,18 +2556,18 @@ mod tests {
 
     #[test]
     fn default_output_format_is_i420() {
-        assert_eq!(FfmpegH264Dec::new().output_format(), OutputFormat::I420);
+        assert_eq!(FfmpegVideoDec::new().output_format(), OutputFormat::I420);
     }
 
     #[test]
     fn with_output_format_overrides_default() {
-        let dec = FfmpegH264Dec::new().with_output_format(OutputFormat::Nv12);
+        let dec = FfmpegVideoDec::new().with_output_format(OutputFormat::Nv12);
         assert_eq!(dec.output_format(), OutputFormat::Nv12);
     }
 
     #[test]
     fn intercept_accepts_supported_codecs_rejects_raw() {
-        let dec = FfmpegH264Dec::new();
+        let dec = FfmpegVideoDec::new();
         // VP9 / AV1 / H.265 are accepted now (M111), each narrowed to itself.
         for codec in [
             VideoCodec::Vp9,
@@ -2594,7 +2595,7 @@ mod tests {
 
     #[test]
     fn intercept_narrows_h264_geometry() {
-        let dec = FfmpegH264Dec::new();
+        let dec = FfmpegVideoDec::new();
         let proposal = Caps::CompressedVideo {
             codec: VideoCodec::H264,
             width: Dim::Fixed(1280),
@@ -2618,12 +2619,12 @@ mod tests {
 
     #[test]
     fn default_backend_is_software() {
-        assert_eq!(FfmpegH264Dec::new().backend(), Backend::Software);
+        assert_eq!(FfmpegVideoDec::new().backend(), Backend::Software);
     }
 
     #[test]
     fn with_backend_overrides_default() {
-        let dec = FfmpegH264Dec::new().with_backend(Backend::NvdecCuvid);
+        let dec = FfmpegVideoDec::new().with_backend(Backend::NvdecCuvid);
         assert_eq!(dec.backend(), Backend::NvdecCuvid);
     }
 
@@ -2631,7 +2632,7 @@ mod tests {
     fn vaapi_backend_selectable_and_keeps_output_format() {
         // Unlike NvdecCuda, the VAAPI path downloads to system memory and packs
         // via copy_yuv, so it honours either output layout (no forced NV12).
-        let dec = FfmpegH264Dec::new()
+        let dec = FfmpegVideoDec::new()
             .with_output_format(OutputFormat::I420)
             .with_backend(Backend::Vaapi);
         assert_eq!(dec.backend(), Backend::Vaapi);
@@ -2644,17 +2645,17 @@ mod tests {
 
     #[test]
     fn with_vaapi_device_stores_render_node() {
-        let dec = FfmpegH264Dec::new()
+        let dec = FfmpegVideoDec::new()
             .with_backend(Backend::Vaapi)
             .with_vaapi_device(Some("/dev/dri/renderD128"));
         assert_eq!(dec.vaapi_device(), Some("/dev/dri/renderD128"));
         // Default is None (libva picks its default device).
-        assert_eq!(FfmpegH264Dec::new().vaapi_device(), None);
+        assert_eq!(FfmpegVideoDec::new().vaapi_device(), None);
     }
 
     #[test]
     fn device_property_sets_and_reads_vaapi_render_node() {
-        let mut dec = FfmpegH264Dec::new().with_backend(Backend::Vaapi);
+        let mut dec = FfmpegVideoDec::new().with_backend(Backend::Vaapi);
         // Unset reads back as the empty string (= libva default).
         assert_eq!(
             dec.get_property("device"),
@@ -2675,7 +2676,7 @@ mod tests {
 
     #[test]
     fn output_format_property_round_trips_and_rejects_bad_value() {
-        let mut dec = FfmpegH264Dec::new();
+        let mut dec = FfmpegVideoDec::new();
         assert_eq!(
             dec.get_property("output-format"),
             Some(PropValue::Str("i420".into()))
@@ -2700,7 +2701,7 @@ mod tests {
 
     #[test]
     fn declares_device_and_output_format_properties() {
-        let names: Vec<&str> = FfmpegH264Dec::new()
+        let names: Vec<&str> = FfmpegVideoDec::new()
             .properties()
             .iter()
             .map(|p| p.name)
@@ -2721,8 +2722,8 @@ mod tests {
         // not the negotiation surface: input is still H.264, output is
         // still the configured OutputFormat at the same geometry. Solver
         // sees no difference, so chains compose identically.
-        let sw = FfmpegH264Dec::new().with_output_format(OutputFormat::Nv12);
-        let nv = FfmpegH264Dec::new()
+        let sw = FfmpegVideoDec::new().with_output_format(OutputFormat::Nv12);
+        let nv = FfmpegVideoDec::new()
             .with_output_format(OutputFormat::Nv12)
             .with_backend(Backend::NvdecCuvid);
         let h264 = Caps::CompressedVideo {
@@ -2745,7 +2746,7 @@ mod tests {
         // The latency tuning only makes sense for NVDEC; the software
         // path keeps libavcodec's defaults so existing behavior and
         // existing CHANGELOG entries are unchanged.
-        let dec = FfmpegH264Dec::new();
+        let dec = FfmpegVideoDec::new();
         assert!(!dec.low_delay());
         assert_eq!(dec.cuvid_surfaces(), None);
     }
@@ -2756,14 +2757,14 @@ mod tests {
         // are the two settings that recover the ~80 ms of in-decoder
         // buffering otherwise visible in glass-to-glass numbers. Locking
         // the defaults here so a refactor can't silently revert.
-        let dec = FfmpegH264Dec::new().with_backend(Backend::NvdecCuvid);
+        let dec = FfmpegVideoDec::new().with_backend(Backend::NvdecCuvid);
         assert!(dec.low_delay());
         assert_eq!(dec.cuvid_surfaces(), Some(4));
     }
 
     #[test]
     fn switching_back_to_software_clears_nvdec_tuning() {
-        let dec = FfmpegH264Dec::new()
+        let dec = FfmpegVideoDec::new()
             .with_backend(Backend::NvdecCuvid)
             .with_backend(Backend::Software);
         assert!(!dec.low_delay());
@@ -2774,7 +2775,7 @@ mod tests {
     fn cuvid_surfaces_override_survives_after_with_backend() {
         // Override order: with_backend first, then with_cuvid_surfaces
         // (so the override wins over the NVDEC default).
-        let dec = FfmpegH264Dec::new()
+        let dec = FfmpegVideoDec::new()
             .with_backend(Backend::NvdecCuvid)
             .with_cuvid_surfaces(Some(2));
         assert_eq!(dec.cuvid_surfaces(), Some(2));
@@ -2782,7 +2783,7 @@ mod tests {
 
     #[test]
     fn unconfigured_decoder_reports_zero_decoded() {
-        let dec = FfmpegH264Dec::new();
+        let dec = FfmpegVideoDec::new();
         assert_eq!(dec.decoded_count(), 0);
     }
 
@@ -2791,7 +2792,7 @@ mod tests {
         // The CUDA device frame is NV12, so the backend pins the output
         // layout to match what it emits and enables low-delay release. It
         // does not use the cuvid-private `surfaces` knob.
-        let dec = FfmpegH264Dec::new().with_backend(Backend::NvdecCuda);
+        let dec = FfmpegVideoDec::new().with_backend(Backend::NvdecCuda);
         assert_eq!(dec.backend(), Backend::NvdecCuda);
         assert_eq!(dec.output_format(), OutputFormat::Nv12);
         assert!(dec.low_delay());
@@ -2802,7 +2803,7 @@ mod tests {
     fn nvdec_cuda_backend_overrides_prior_i420() {
         // with_backend after a with_output_format(I420) still lands on NV12
         // (the backend's requirement wins), so the common build order is safe.
-        let dec = FfmpegH264Dec::new()
+        let dec = FfmpegVideoDec::new()
             .with_output_format(OutputFormat::I420)
             .with_backend(Backend::NvdecCuda);
         assert_eq!(dec.output_format(), OutputFormat::Nv12);
@@ -2813,7 +2814,7 @@ mod tests {
         // Negotiation surface is unchanged from the other backends: H.264 in,
         // NV12 out at the same geometry. Only the memory domain of the emitted
         // frame differs, which caps do not encode.
-        let dec = FfmpegH264Dec::new().with_backend(Backend::NvdecCuda);
+        let dec = FfmpegVideoDec::new().with_backend(Backend::NvdecCuda);
         let CapsConstraint::DerivedOutput(f) = dec.caps_constraint_as_transform() else {
             panic!("expected DerivedOutput");
         };
@@ -2842,7 +2843,7 @@ mod tests {
         // construction; here we assert the proposal is recorded (the handshake
         // the GPU path's allocation query depends on).
         use g2g_core::MemoryDomainKind;
-        let mut dec = FfmpegH264Dec::new().with_backend(Backend::NvdecCuda);
+        let mut dec = FfmpegVideoDec::new().with_backend(Backend::NvdecCuda);
         assert_eq!(dec.requested_alloc(), None);
         let proposal = AllocationParams::cuda(1920 * 1080 * 3 / 2, 3, 256);
         AsyncElement::configure_allocation(&mut dec, &proposal);
@@ -2890,7 +2891,7 @@ mod tests {
     /// caps before the first decoded frame.
     #[tokio::test]
     async fn process_caps_changed_with_output_format_forwards_to_downstream() {
-        let mut dec = FfmpegH264Dec::new().with_output_format(OutputFormat::Nv12);
+        let mut dec = FfmpegVideoDec::new().with_output_format(OutputFormat::Nv12);
         dec.configure_pipeline(&h264_caps(1280, 720))
             .expect("configure H.264 input");
 
@@ -2920,7 +2921,7 @@ mod tests {
     /// breaking the ordering invariant §3).
     #[tokio::test]
     async fn process_caps_changed_with_h264_input_records_but_does_not_forward() {
-        let mut dec = FfmpegH264Dec::new().with_output_format(OutputFormat::Nv12);
+        let mut dec = FfmpegVideoDec::new().with_output_format(OutputFormat::Nv12);
         dec.configure_pipeline(&h264_caps(640, 480))
             .expect("configure H.264 input");
 
@@ -2943,7 +2944,7 @@ mod tests {
     /// where the decoder silently accepts any RawVideo caps.
     #[tokio::test]
     async fn process_caps_changed_with_wrong_raw_format_rejects() {
-        let mut dec = FfmpegH264Dec::new().with_output_format(OutputFormat::Nv12);
+        let mut dec = FfmpegVideoDec::new().with_output_format(OutputFormat::Nv12);
         dec.configure_pipeline(&h264_caps(640, 480))
             .expect("configure H.264 input");
 
