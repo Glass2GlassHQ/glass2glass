@@ -330,10 +330,12 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # wgpu-sink also compiles the device-discovery assembly (devicemon +
+      # gpudevice) on a real Windows toolchain.
       - name: check g2g-plugins (windows feature set)
         run: >
           cargo check -p g2g-plugins --locked --all-targets --features
-          mf-decode,mf-encode,mf-aac,wasapi-sink,wasapi-src,d3d11-sink,mf-video-src
+          mf-decode,mf-encode,mf-aac,wasapi-sink,wasapi-src,d3d11-sink,mf-video-src,wgpu-sink
 
   # macOS platform build: VideoToolbox H.264 decode (VtDecode) plus the wgpu/burn
   # ML path on the Metal backend. The objc2 crates link the system frameworks
@@ -346,10 +348,12 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # wgpu-sink also compiles the device-discovery assembly (devicemon +
+      # gpudevice) on a real macOS toolchain.
       - name: check g2g-plugins (macos platform features)
         run: >
           cargo check -p g2g-plugins --locked --all-targets
-          --features vtdecode,vtencode,metal-sink,coreaudio,avfoundation,screencapture
+          --features vtdecode,vtencode,metal-sink,coreaudio,avfoundation,screencapture,wgpu-sink
       # M731+: run the VideoToolbox / Metal / Core Audio / AVFoundation /
       # ScreenCaptureKit elements for real (decode the reference fixtures,
       # encode round trip, CAMetalLayer present, AudioQueue render + capture;

@@ -1145,6 +1145,10 @@ required-features = ["std"]
 name = "g2g-docgen"
 required-features = ["std"]
 
+[[bin]]
+name = "g2g-device-monitor"
+required-features = ["std"]
+
 # MCP server for agent-driven dev; needs serde_json (registry dump / results).
 [[bin]]
 name = "g2g-mcp"

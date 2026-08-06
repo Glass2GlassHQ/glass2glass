@@ -399,6 +399,13 @@ Phased plan:
 - `mfvideosrc`: first Windows build + camera smoke test; D3D11 zero-copy;
   size/rate request beyond device default.
 - Screen capture: Windows DXGI Desktop Duplication.
+- Device discovery beyond Linux: Windows (MFEnumDeviceSources + WASAPI
+  endpoints + IMMNotificationClient hotplug), macOS (AVCaptureDevice +
+  CoreAudio), Android (Camera2 id list), web (enumerateDevices) providers.
+- `device-id=<persistent-id>` on the capture elements, resolved through the
+  device monitor at configure time (saved pipelines survive a replug).
+- Camera controls (exposure, focus, white balance) as element properties:
+  V4L2 controls, AVCaptureDevice, Camera2.
 
 ## Sinks
 

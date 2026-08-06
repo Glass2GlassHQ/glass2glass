@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M940: `g2g-device-monitor` binary (the `gst-device-monitor-1.0` analog): one-shot listing, class filter, `--json`, and `--follow` hotplug; device discovery is compile-checked on Windows and macOS in CI.
+
 - M939: standard device providers: v4l2 cameras (probed YUYV modes), ALSA PCM devices, PipeWire nodes with native hotplug watch and `target-object` selection, and GPU/compute devices (wgpu adapters, CUDA ordinals, VAAPI render nodes) under `default_device_monitor`.
 
 - M938: device discovery core: `Device` / `DeviceProvider` / `DeviceMonitor` (the `GstDeviceMonitor` analog) with class + caps filters, registry-backed element construction, and hotplug via native watch or poll-and-diff.

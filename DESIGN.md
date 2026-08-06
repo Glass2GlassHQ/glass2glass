@@ -1192,6 +1192,50 @@ the oldest bytes, the `LinkPolicy::DropOldest` analog for an external clock). Al
 accept interleaved `PcmS16Le` / `PcmF32Le` and reject compressed audio
 structurally. Errors surface as `HardwareError::{Alsa,PulseAudio,PipeWire}`.
 
+### 4.12aa Device Discovery
+
+The `GstDeviceProvider` / `GstDeviceMonitor` analog (M938/M939,
+`g2g-core/src/runtime/device.rs` + `g2g-plugins/src/devicemon.rs`). A
+`DeviceProvider` probes one backend for the devices it can see; a
+`DeviceMonitor` aggregates providers behind class + caps filters
+(`gst_device_has_classes` semantics: `Video/Source` requires both parts,
+`Source` matches any source) and, once started, watches for hotplug. Events
+arrive on the monitor's own channel, not the pipeline bus: a monitor is
+application-side, not part of a running graph.
+
+A `Device` does not own an element factory. It carries the launch **name** of
+the element that drives it plus the textual `key=value` properties that select
+it, so construction rides the same `Registry` + `PropertySpec::parse_value`
+path as `parse_launch`: `Device::create` builds and configures the element,
+`Device::launch_fragment` prints the `v4l2src device=/dev/video0` fragment a
+text pipeline would use. `persistent_id` is the monitor's hotplug diff key and
+is chosen per backend for cross-reboot stability (USB/PCI bus info for v4l2,
+the direction-prefixed hint name for ALSA, `node.name` for PipeWire, which
+survives daemon restarts where `object.serial` does not).
+
+Hotplug has two paths. A provider with a native event source implements
+`watch()`: PipeWire registers a registry listener on a dedicated loop thread,
+relies on the daemon replaying existing globals for the initial `Added` set,
+and posts through a filter-applying `DeviceSink` (a try-send retry loop, so N
+watcher threads never depend on the channel's single send waker; shutdown
+closes the receiver first, so a watcher blocked on a full queue exits instead
+of deadlocking the join). Providers without events (v4l2, ALSA, GPU) are
+covered by the monitor's poll-and-diff fallback thread keyed on
+`persistent_id`.
+
+Standard providers (`default_device_monitor`, mirroring `default_registry`'s
+per-feature gating): **v4l2** (capture nodes with YUYV modes probed into real
+caps alternatives; other fourccs listed in `detail`), **ALSA** (PCM hints in
+both directions, formats probed via `HwParams`, busy devices still listed with
+empty caps), **PipeWire** (media-class nodes mapped to
+`pipewiresrc`/`pipewiresink`/`pipewirevideosrc`, selected via their
+`target-object` property), and **GPU** (`Compute/GPU`, a g2g extension beyond
+GStreamer's capture/render model: wgpu adapters, CUDA ordinals, VAAPI render
+nodes; only the render nodes name a driving element, the rest are
+informational). The `g2g-device-monitor` binary is the CLI over all of this
+(`gst-device-monitor-1.0` analog): one-shot listing, class filter, `--json`,
+and `--follow` for live hotplug.
+
 ### 4.12b Live Ingress (UDP / RTP)
 
 `UdpSrc` (`udpsrc.rs`, `udp-ingress` feature) is the receive-side inverse of

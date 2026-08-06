@@ -83,6 +83,7 @@ parse error: unknown element: theoraenc
 
 - **`g2g-launch -v ...`** prints each link's negotiated caps + memory domain (the `gst-launch -v` analog); **`--dot`** dumps a Graphviz graph.
 - **`g2g-inspect`** is `gst-inspect-1.0`: list elements, dump one's properties/pads, or map a GStreamer name with `g2g-inspect --gst x264enc`. Scan an app's source with `--gst-scan app.c`.
+- **`g2g-device-monitor`** is `gst-device-monitor-1.0`: list cameras, audio devices, PipeWire nodes, and (a g2g extension) `Compute/GPU` devices, with probed caps and the launch fragment that opens each (`v4l2src device=/dev/video0`). Filter by class (`g2g-device-monitor Video/Source`), `--json` for tooling, `--follow` for live hotplug (native PipeWire events, poll-and-diff elsewhere).
 - Migrate incrementally in either direction: `g2g-bridge` embeds a g2g sub-graph inside a GStreamer pipeline; `gstwrap` hosts an un-ported GStreamer element inside a g2g graph.
 
 Full guide, including the equivalence cookbook and application/element porting:
