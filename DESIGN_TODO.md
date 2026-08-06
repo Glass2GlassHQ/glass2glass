@@ -279,9 +279,6 @@ Phased plan:
 - **WebTransport residuals:** the `web-transport-quinn = "=0.11.12"` pin and
   the `idna_adapter` 1.1.0 hold in `Cargo.lock` can both drop once the
   workspace MSRV moves past 1.91.
-- **MoQ Transport:** a wall-clock pacing element for live-shaped demo
-  publishers (the unpaced demo needs half-second fragments to keep the
-  browser's append queue sane; a `clocksync`-style element is the fix).
 - **RTP over QUIC (RoQ):** blocked on the spec. draft-ietf-avtcore-rtp-over-quic
   expired at -14 (its ALPN is forbidden until an RFC exists) and the WG missed
   its milestone; revisit only if the draft revives. Peers if it does:

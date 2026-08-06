@@ -589,6 +589,10 @@ pub fn default_registry() -> Registry {
     reg.register_launch(LaunchFactory::new("identity", Vec::new(), || {
         Box::new(IdentityTransform::new())
     }));
+    // Wall-clock pacing (M945): `sync=false` makes it an identity again.
+    reg.register_launch(LaunchFactory::new("clocksync", Vec::new(), || {
+        Box::new(crate::clocksync::ClockSyncTransform::new())
+    }));
     // Reverse playback (M897): re-emits each decoded GOP in descending PTS, so a
     // `rate < 0` seek plays backwards through a forward-only decoder.
     reg.register_launch(LaunchFactory::new("gopreverse", Vec::new(), || {

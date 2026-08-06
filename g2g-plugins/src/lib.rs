@@ -396,6 +396,10 @@ extern crate std;
 
 #[cfg(feature = "std")]
 pub mod clock;
+// Wall-clock pacing transform: holds each buffer until its PTS is due, turning
+// an as-fast-as-possible upstream into a live-paced stream.
+#[cfg(feature = "std")]
+pub mod clocksync;
 #[cfg(feature = "std")]
 pub mod filesink;
 #[cfg(feature = "std")]

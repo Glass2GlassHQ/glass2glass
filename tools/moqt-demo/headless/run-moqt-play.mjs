@@ -1,8 +1,8 @@
 // Headless validation that a browser plays a g2g MoQ Transport broadcast (M904).
 //
 // Starts a local `moq-relay-ietf`, publishes video and audio into it with
-// `videotestsrc ! x264enc ! mux.  audiotestsrc ! avenc_aac ! mux.  mp4mux
-// name=mux ! moqtsink`, and drives a real Chromium through
+// `videotestsrc ! clocksync ! x264enc ! mux.  audiotestsrc ! clocksync !
+// avenc_aac ! mux.  mp4mux name=mux ! moqtsink`, and drives a real Chromium through
 // tools/moqt-demo/index.html, whose MoQT client is the third-party MOQtail
 // draft-16 implementation. Nothing in the browser shares code with g2g's Rust
 // wire layer, so a successful play is an independent decode of our bytes.
@@ -15,9 +15,10 @@
 //   - the audio track was subscribed, appended and decoded (Chromium's
 //     `webkitAudioDecodedByteCount` past zero).
 //
-// This is the MSE path only, on the unpaced test publisher. The WebCodecs path
-// and the latency both decode modes report are run by run-moqt-latency.mjs,
-// which needs a paced publisher to measure anything meaningful.
+// The publisher is paced to the wall clock by `clocksync`, so it is a live 30
+// fps broadcast and each access unit is its own MOQT object. This is the MSE
+// path only; the WebCodecs path and the latency both decode modes report are run
+// by run-moqt-latency.mjs.
 //
 // Prereqs: `pnpm install` in tools/moqt-demo (playwright + moqtail), a full
 // Chromium (headless_shell has no H.264 or AAC), a `moq-relay-ietf` build, and

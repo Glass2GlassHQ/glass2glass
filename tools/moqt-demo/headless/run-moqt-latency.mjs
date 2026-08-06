@@ -16,10 +16,9 @@
 // `prft` against the moment the frame reached the screen, both read on this one
 // machine, so the two clocks are one clock.
 //
-// A live-paced publisher is the whole reason this is a separate run. The plain
-// `videotestsrc ! x264enc` pipeline the other headless run uses encodes hundreds
-// of frames a second, so a player is handed minutes of media per minute of wall
-// clock and whatever latency it measures describes that, not the player.
+// Replaying a recording is the whole reason this is a separate run: the two
+// passes then measure the same bytes, and no encoder competes with the browser
+// for the CPU while the numbers are being taken.
 //
 // Prereqs: the same as run-moqt-play.mjs. Prints SKIP and exits 0 without them.
 //

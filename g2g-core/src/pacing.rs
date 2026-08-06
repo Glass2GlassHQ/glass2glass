@@ -125,6 +125,18 @@ impl PresentationPacer {
         }
     }
 
+    /// Clock time a frame's PTS is due at: the anchor (latched here on the first
+    /// frame) plus its running time. `None` when there is nothing to wait for,
+    /// either because no clock is elected or because the frame is clipped
+    /// outside the segment. A caller that wants the wait, the QoS verdict and
+    /// the drop counted wants [`judge`](PresentationPacer::judge) instead; this
+    /// is for one that shifts the deadline itself (`clocksync`'s `ts-offset`).
+    pub fn deadline_ns(&mut self, pts_ns: u64) -> Option<u64> {
+        let sync = self.clock_sync.clone()?;
+        let rt = self.running_time(pts_ns)?;
+        Some(self.presentation_anchor(&sync, rt).saturating_add(rt))
+    }
+
     /// Verdict for one frame: how long to hold it, or that it is not to be
     /// presented. `presented` is the sink's running presented count, reported
     /// in [`BusMessage::Qos`](crate::BusMessage::Qos).
@@ -132,11 +144,9 @@ impl PresentationPacer {
         let Some(sync) = self.clock_sync.clone() else {
             return Pace::Now;
         };
-        let Some(rt) = self.running_time(pts_ns) else {
+        let Some(deadline) = self.deadline_ns(pts_ns) else {
             return Pace::Drop;
         };
-        let anchor = self.presentation_anchor(&sync, rt);
-        let deadline = anchor.saturating_add(rt);
         let now = sync.now_ns();
         // A frame already late beyond the bound is dropped, not presented late,
         // so the sink catches up instead of accumulating lag. The same call

@@ -26,11 +26,13 @@ the current value and a running median over the last 120 frames. Producer and
 player are the same machine here, so the two clocks are one clock and no offset
 estimation is involved.
 
-The number only means something against a live-paced source (a camera, the bevy
-render loop, the paced clip the latency check below publishes). The plain
-`videotestsrc ! x264enc` pipeline encodes hundreds of frames a second, so the
-media timeline runs ahead of the wall clock and the HUD reads whatever that
-implies, including a negative figure.
+The number only means something against a live-paced source. Every publisher
+here is one: a camera and the bevy render loop are paced by their own capture,
+the test pattern by `clocksync`, which holds each frame until its PTS is due on
+the clock, and the recorded clip the latency check replays by `replaysrc
+sync=true`. Drop the `clocksync` out of the test-pattern line and it encodes
+hundreds of frames a second, the media timeline runs ahead of the wall clock,
+and the HUD reads whatever that implies, including a negative figure.
 
 ## Prerequisites
 
@@ -67,22 +69,22 @@ that, `G2G_CAMERA_SIZE=1280x720` changes the capture size.
 
 ```sh
 node headless/run-moqt-play.mjs      # MSE, video + audio
-node headless/run-moqt-latency.mjs   # MSE against WebCodecs, on a paced source
+node headless/run-moqt-latency.mjs   # MSE against WebCodecs, two decode modes
 ```
 
-The first publishes the SMPTE pattern and the tone, drives the page in headless
-Chromium, and asserts on what the browser's own decoders produced: at least 10
-decoded frames, a decoded size of 320x240, the seven SMPTE bars in order sampled
-off a canvas the `<video>` was drawn into, and audio fragments both appended and
-decoded (`webkitAudioDecodedByteCount` past zero).
+The first publishes the SMPTE pattern and the tone, both paced by `clocksync`,
+drives the page in headless Chromium, and asserts on what the browser's own
+decoders produced: at least 10 decoded frames, a decoded size of 320x240, the
+seven SMPTE bars in order sampled off a canvas the `<video>` was drawn into, and
+audio fragments both appended and decoded (`webkitAudioDecodedByteCount` past
+zero).
 
 The second plays one broadcast twice, once per decode mode, asserting the frames
 and the bars for each (WebCodecs samples them straight off the canvas it drew
-to) and reporting the median end-to-end latency of both. Its publisher is a
-recorded clip replayed at its captured 30 fps (`replaysrc sync=true`), muxed one
-MOQT object per access unit with a `prft` per fragment: a live-paced source, the
-only kind against which a latency comparison says anything. Measured here, MSE
-sits around 190 ms and WebCodecs around 30 ms.
+to) and reporting the median end-to-end latency of both. It replays a recorded
+clip (`replaysrc sync=true`) rather than encoding live, so both passes measure
+the same bytes with no encoder competing for the CPU. Measured here, MSE sits
+around 45 ms and WebCodecs around 1 ms.
 
 Both print `SKIP` and exit 0 when the relay, the launcher, Chromium or the npm
 deps are missing. `G2G_MOQT_DEBUG=1` logs every MoQT control message the page
@@ -119,9 +121,13 @@ takes that init segment and then both tracks' fragments. Two SourceBuffers would
 each need an init segment describing only their own track, and the broadcast
 carries no such thing.
 
-The publisher is not paced to a clock, so it outruns real time by a wide margin;
-the muxer's `fragment-duration=500` keeps that a manageable number of objects for
-the browser's append queue.
+## Fragment size
+
+One MOQT object per access unit, everywhere. That is the low-latency shape and
+the only one a WebCodecs player can exploit: a fragment holding half a second of
+media cannot be decoded before all of it has arrived, whatever the decoder. It
+is viable because every publisher is paced to the wall clock, so the objects
+arrive at the rate the browser consumes them.
 
 ## Known interop note
 

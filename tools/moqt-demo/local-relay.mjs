@@ -239,13 +239,15 @@ export function hasCamera() {
   return existsSync("/dev/video0");
 }
 
+// `videotestsrc` encodes as fast as the CPU allows, so `clocksync` holds each
+// frame until its PTS is due and the broadcast leaves at the 30 fps the caps
+// describe. Without it the media timeline outruns the wall clock by orders of
+// magnitude and nothing downstream (the fragment size, the latency HUD) means
+// what it says.
 export const SMPTE_PIPELINE =
-  "videotestsrc width=320 height=240 pattern=smpte ! videoconvert ! x264enc";
+  "videotestsrc width=320 height=240 pattern=smpte ! clocksync ! videoconvert ! x264enc";
 export const CAMERA_PIPELINE =
   "libcamerasrc width=640 height=480 framerate=30 ! videoconvert ! x264enc";
-
-// One MOQT object per this many milliseconds of each track.
-const FRAGMENT_MS = 500;
 
 // A producer reference time box ahead of each fragment, mapping its decode time
 // to the muxer's wall clock. That is what the page's latency HUD measures
@@ -253,20 +255,22 @@ const FRAGMENT_MS = 500;
 const PRFT = "write-prft=true";
 
 // The audio half of the broadcast: a 440 Hz tone encoded as AAC-LC, which is
-// what MSE plays as `mp4a.40.2`.
-export const AUDIO_PIPELINE = "audiotestsrc ! avenc_aac";
+// what MSE plays as `mp4a.40.2`. Paced like the video branch, so the two reach
+// the muxer at the same rate.
+export const AUDIO_PIPELINE = "audiotestsrc ! clocksync ! avenc_aac";
 
 // Complete a source+encoder prefix into a publishing pipeline. With audio the
 // two branches meet in the fan-in `mp4mux`, so one `moov` names both tracks and
 // `moqtsink` publishes a track each.
+//
+// One MOQT object per access unit, the low-latency shape: every source here is
+// live-paced, so the browser's append queue keeps up with the objects as they
+// arrive and there is nothing to be gained by batching half a second of media
+// into one.
 export function publishPipeline(prefix, relayPort, namespace, hashHex, { audio = true } = {}) {
   const sink = moqtSink(relayPort, namespace, hashHex);
-  // Half-second fragments: one MOQT object per half second of each track
-  // rather than one per access unit, which is what a CMAF broadcast looks like
-  // and what keeps a browser's append queue ahead of an unpaced publisher.
-  const mux = `mp4mux name=mux fragment-duration=${FRAGMENT_MS} ${PRFT}`;
-  if (!audio) return `${prefix} ! mp4mux fragment-duration=${FRAGMENT_MS} ${PRFT} ! ${sink}`;
-  return `${prefix} ! mux.   ${AUDIO_PIPELINE} ! mux.   ${mux} ! ${sink}`;
+  if (!audio) return `${prefix} ! mp4mux ${PRFT} ! ${sink}`;
+  return `${prefix} ! mux.   ${AUDIO_PIPELINE} ! mux.   mp4mux name=mux ${PRFT} ! ${sink}`;
 }
 
 function moqtSink(relayPort, namespace, hashHex) {
@@ -276,14 +280,13 @@ function moqtSink(relayPort, namespace, hashHex) {
   );
 }
 
-// --- the paced low-latency broadcast --------------------------------------
+// --- the recorded clip the latency run replays -----------------------------
 //
-// `videotestsrc ! x264enc` runs as fast as the CPU allows, hundreds of frames a
-// second, so a player joining it is fed hours of media per minute and any
-// latency it measures is a statement about that, not about the player. A
-// recording replayed with `replaysrc sync=true` is paced to the recorded PTS
-// instead, which is a live 30 fps source, and it costs a fraction of a second
-// to make.
+// The latency comparison plays one broadcast twice, once per decode mode, and
+// the two numbers only compare if both passes saw the same media. A clip
+// recorded once and replayed with `replaysrc sync=true` gives that: identical
+// bytes, paced to the recorded 30 fps, and no encoder competing with the
+// browser for the CPU while the measurement runs.
 
 const PACED_FPS = 30;
 export const PACED_WIDTH = 320;
