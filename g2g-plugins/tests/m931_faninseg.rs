@@ -426,3 +426,159 @@ mod muxers {
         "mp4mux"
     );
 }
+
+// ---- overlay inputs advance by timestamp, not arrival ----
+
+/// A compositor's overlay inputs must apply by *timestamp*: the canvas in force
+/// for an input-0 frame at pts T is the newest overlay canvas whose pts is at or
+/// before T, held until a successor comes due.
+///
+/// Taking the latest-arrived instead only looks right when nothing paces. Live,
+/// the display sink paces input 0 to real time while the subtitle branch runs
+/// flat out, so every cue and its clearing canvas arrive within the first
+/// moments and the last to land (a clear) is what every visible frame
+/// composites with: video and audio play, no subtitles ever appear. Dumped
+/// headless to a file, nothing paces, arrival order matches the file interleave
+/// and the cues land correctly by accident.
+mod overlay_timing {
+    use super::*;
+
+    const MS: u64 = 1_000_000;
+
+    /// A canvas filled with one value, so "which overlay is in force" is a
+    /// single byte to read back.
+    fn canvas(fill: u8, pts_ms: u64) -> PipelinePacket {
+        let px = [fill, fill, fill, 255];
+        let mut buf = Vec::with_capacity((W * H * 4) as usize);
+        for _ in 0..W * H {
+            buf.extend_from_slice(&px);
+        }
+        let pts = pts_ms * MS;
+        PipelinePacket::DataFrame(Frame::new(
+            MemoryDomain::System(SystemSlice::from_boxed(buf.into_boxed_slice())),
+            FrameTiming {
+                pts_ns: pts,
+                dts_ns: pts,
+                ..FrameTiming::default()
+            },
+            0,
+        ))
+    }
+
+    /// A fully transparent canvas: the "clear" a cue ends with. Alpha 0, so
+    /// compositing it leaves the video underneath untouched (an opaque black
+    /// canvas would blank the picture instead).
+    fn clear(pts_ms: u64) -> PipelinePacket {
+        let pts = pts_ms * MS;
+        PipelinePacket::DataFrame(Frame::new(
+            MemoryDomain::System(SystemSlice::from_boxed(
+                vec![0u8; (W * H * 4) as usize].into_boxed_slice(),
+            )),
+            FrameTiming {
+                pts_ns: pts,
+                dts_ns: pts,
+                ..FrameTiming::default()
+            },
+            0,
+        ))
+    }
+
+    /// Top-left pixel of each composited output, paired with its pts in ms.
+    fn composited(sink: &Collect) -> Vec<(u64, [u8; 4])> {
+        sink.frames()
+            .iter()
+            .map(|f| {
+                let px = f.domain.as_system_slice().expect("system frame");
+                (f.timing.pts_ns / MS, [px[0], px[1], px[2], px[3]])
+            })
+            .collect()
+    }
+
+    async fn configured() -> Compositor {
+        let mut c = Compositor::new(W, H, vec![CompositorPad::at(0, 0), CompositorPad::at(0, 0)]);
+        for pad in 0..2 {
+            c.configure_pipeline(pad, &rgba_caps()).expect("configure");
+        }
+        c
+    }
+
+    /// The screen race, exactly: every overlay canvas is delivered before the
+    /// second input-0 frame. Arrival order says "the clear is in force for all
+    /// of them"; timestamps say the cue covers pts 2..5.
+    #[tokio::test]
+    async fn overlay_canvases_delivered_early_still_apply_at_their_own_pts() {
+        let mut c = configured().await;
+        let mut sink = Collect::default();
+
+        // Input 0 opens the stream.
+        c.process(0, canvas(10, 0), &mut sink).await.unwrap();
+        // The whole subtitle branch lands at once, ahead of the video.
+        c.process(1, canvas(200, 2), &mut sink).await.unwrap();
+        c.process(1, clear(5), &mut sink).await.unwrap();
+        // Then the video frames arrive, paced.
+        for pts in 1..=7u64 {
+            c.process(0, canvas(10, pts), &mut sink).await.unwrap();
+        }
+
+        let out = composited(&sink);
+        let at = |ms: u64| {
+            out.iter()
+                .find(|(p, _)| *p == ms)
+                .unwrap_or_else(|| panic!("an output at {ms} ms: {out:?}"))
+                .1
+        };
+        // Before the cue's pts: no cue.
+        assert_eq!(at(1)[0], 10, "pts 1 is before the cue");
+        // Inside the cue's window: the cue is composited (it is opaque white
+        // over the video, so the pixel is the cue's).
+        assert_eq!(at(3)[0], 200, "pts 3 carries the cue");
+        assert_eq!(at(4)[0], 200, "and it is held until the clear is due");
+        // After the clear's pts: the cue is gone.
+        assert_eq!(at(6)[0], 10, "pts 6 is after the clear");
+    }
+
+    /// The same rule with the overlays interleaved in timestamp order, which is
+    /// how a headless (unpaced) run happens to deliver them.
+    #[tokio::test]
+    async fn overlay_canvases_delivered_interleaved_apply_at_their_own_pts() {
+        let mut c = configured().await;
+        let mut sink = Collect::default();
+
+        c.process(0, canvas(10, 0), &mut sink).await.unwrap();
+        c.process(1, canvas(200, 2), &mut sink).await.unwrap();
+        for pts in 1..=4u64 {
+            c.process(0, canvas(10, pts), &mut sink).await.unwrap();
+        }
+        c.process(1, clear(5), &mut sink).await.unwrap();
+        for pts in 5..=7u64 {
+            c.process(0, canvas(10, pts), &mut sink).await.unwrap();
+        }
+
+        let out = composited(&sink);
+        let at = |ms: u64| {
+            out.iter()
+                .find(|(p, _)| *p == ms)
+                .unwrap_or_else(|| panic!("an output at {ms} ms: {out:?}"))
+                .1
+        };
+        assert_eq!(at(1)[0], 10, "before the cue");
+        assert_eq!(at(3)[0], 200, "inside the cue window");
+        assert_eq!(at(6)[0], 10, "after the clear");
+    }
+
+    /// A cue whose pts is still ahead of every video frame never composites: it
+    /// is queued, not applied early.
+    #[tokio::test]
+    async fn a_future_cue_does_not_apply_early() {
+        let mut c = configured().await;
+        let mut sink = Collect::default();
+        c.process(0, canvas(10, 0), &mut sink).await.unwrap();
+        c.process(1, canvas(200, 900), &mut sink).await.unwrap();
+        for pts in 1..=4u64 {
+            c.process(0, canvas(10, pts), &mut sink).await.unwrap();
+        }
+        for (pts, px) in composited(&sink) {
+            assert_eq!(px[0], 10, "no cue is due yet at {pts} ms");
+        }
+    }
+}
