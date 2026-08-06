@@ -6,16 +6,30 @@
 //
 // The shape it expects is what `moqtsink` publishes: a `.catalog` object naming
 // the tracks, an init track holding `ftyp`+`moov`, and one media track per
-// track of that `moov`, whose objects are `moof`+`mdat` pairs. Everything goes
-// to one MSE SourceBuffer unchanged, so the browser's own demuxer and decoders
-// do the work.
+// track of that `moov`, whose objects are `moof`+`mdat` pairs.
 //
-// One buffer rather than one per track, because the broadcast has a single init
-// segment: its `moov` names every track, which is exactly what a SourceBuffer
-// opened with both codecs expects. Two SourceBuffers would each need an init
-// segment describing only their own track, and no such thing is published.
+// Two decode paths (M942), chosen by the caller:
+//
+//   `mse`        everything goes to one MSE SourceBuffer unchanged, so the
+//                browser's own demuxer and decoders do the work, audio
+//                included. One buffer rather than one per track, because the
+//                broadcast has a single init segment: its `moov` names every
+//                track, which is what a SourceBuffer opened with both codecs
+//                expects. Two SourceBuffers would each need an init segment
+//                describing only their own track, and no such thing is
+//                published. MSE holds a few hundred ms of buffer of its own.
+//   `webcodecs`  the page demuxes (see mp4-parse.js) and feeds access units to
+//                a `VideoDecoder` one at a time, drawing each `VideoFrame` on a
+//                canvas as it comes out. No buffer beyond the decoder's own, so
+//                latency is a frame or two rather than a fill level. Video
+//                only: there is no `AudioDecoder` here, and pairing one with
+//                the video would mean building the A/V sync MSE gives for free.
+//
+// Both paths measure their own end-to-end latency from the `prft` the muxer
+// writes ahead of each fragment; see `LatencyTracker`.
 import { FilterType, FullTrackName, GroupOrder, Location, MOQtailClient, RequestError }
   from "./node_modules/moqtail/dist/index.js";
+import { parseFragment, parseInit } from "./mp4-parse.js";
 
 // The catalog and init tracks each hold exactly one object, published in group
 // 0 before any subscriber exists. A "latest object" filter therefore delivers
@@ -152,9 +166,151 @@ class AppendQueue {
   }
 }
 
-// Connect, discover the tracks, and play the first video track into `video`.
-// Resolves with a handle carrying the live counters the caller asserts on.
-export async function play({ url, namespace, certHash, video, timeoutMs = 15000, debug = false }) {
+// End-to-end latency, measured the way DASH-IF low-latency players do it.
+//
+// `mp4mux write-prft=true` writes a producer reference time box ahead of each
+// fragment, pinning one decode time to the producer's wall clock. Those pairs
+// are the anchors here: the time a frame at any decode time was produced is the
+// bracketing anchor's wall clock plus how far past it that frame sits in the
+// media timeline. Latency is then the difference between now and that, sampled
+// when the frame is put on screen.
+//
+// The anchor has to be the last one *at or before* the frame, not the newest
+// one: extrapolating backwards from a later anchor would assume the producer
+// generated media at exactly wall-clock rate, which an unpaced publisher (the
+// SMPTE test pipeline outruns real time by a wide margin) does not.
+//
+// Producer and player are the same machine in this demo, so their clocks are
+// the same clock and no offset estimation is needed.
+export class LatencyTracker {
+  constructor(timescale, windowSize = 120) {
+    this.timescale = timescale;
+    this.windowSize = windowSize;
+    this.anchors = [];
+    this.samples = [];
+    this.last = null;
+    this.count = 0;
+  }
+  // A `prft`: media time `mediaTime` (in the track timescale) was produced at
+  // `epochMs`.
+  anchor(mediaTime, epochMs) {
+    const top = this.anchors[this.anchors.length - 1];
+    if (top && mediaTime <= top.mediaTime) return;
+    this.anchors.push({ mediaTime, epochMs });
+    // A long run must not grow this without bound; an hour of per-GOP anchors
+    // fits well inside this.
+    if (this.anchors.length > 4096) this.anchors.splice(0, 2048);
+  }
+  producedAtMs(mediaTime) {
+    if (!this.anchors.length) return null;
+    let lo = 0;
+    let hi = this.anchors.length - 1;
+    if (mediaTime < this.anchors[0].mediaTime) return null;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (this.anchors[mid].mediaTime <= mediaTime) lo = mid;
+      else hi = mid - 1;
+    }
+    const a = this.anchors[lo];
+    return a.epochMs + ((mediaTime - a.mediaTime) / this.timescale) * 1000;
+  }
+  // Record that the frame at `mediaTime` reached the screen at `nowMs`.
+  observe(mediaTime, nowMs) {
+    const produced = this.producedAtMs(mediaTime);
+    if (produced === null) return;
+    this.last = nowMs - produced;
+    this.count += 1;
+    this.samples.push(this.last);
+    if (this.samples.length > this.windowSize) this.samples.shift();
+  }
+  medianMs() {
+    if (!this.samples.length) return null;
+    const sorted = [...this.samples].sort((a, b) => a - b);
+    return sorted[sorted.length >> 1];
+  }
+}
+
+// Decode each fragment's access units straight into a `VideoDecoder`, drawing
+// every frame as it comes out. Resolves once the subscription is running.
+async function playWebCodecs(client, namespace, track, initSegment, canvas, state) {
+  if (typeof VideoDecoder === "undefined") throw new Error("browser has no WebCodecs VideoDecoder");
+  const init = parseInit(initSegment);
+  const codec = track.selectionParams?.codec || "avc1.64001e";
+  state.width = init.width;
+  state.height = init.height;
+  state.latency = new LatencyTracker(init.timescale);
+  canvas.width = init.width;
+  canvas.height = init.height;
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  log(`webcodecs: ${codec} ${init.width}x${init.height}, ${init.description.length}-byte avcC, ` +
+    `timescale ${init.timescale}`);
+
+  const decoder = new VideoDecoder({
+    output: (frame) => {
+      try {
+        ctx.drawImage(frame, 0, 0);
+        state.decodedFrames += 1;
+        if (state.decodedFrames === 1) log("first frame decoded and drawn");
+        // The frame's own timestamp back in media units. Measured at the draw
+        // rather than after the compositor picks the canvas up, which is under
+        // a frame early and the same order of error as the MSE path's
+        // post-presentation callback.
+        const mediaTime = Math.round((frame.timestamp * init.timescale) / 1e6);
+        state.latency.observe(mediaTime, Date.now());
+      } finally {
+        frame.close();
+      }
+    },
+    error: (e) => log(`decoder error: ${e}`),
+  });
+  // `optimizeForLatency` tells the decoder to emit each frame as soon as it can
+  // rather than filling a reorder buffer first, which is the whole point here.
+  decoder.configure({ codec, description: init.description, optimizeForLatency: true });
+
+  // A decoder handed a delta frame before any keyframe errors out. The
+  // subscription starts at a group boundary, so this only bites if the relay
+  // hands us a partial group after a reconnect.
+  let started = false;
+  await subscribeTrack(client, namespace, track.name, (payload) => {
+    state.fragments += 1;
+    const frag = parseFragment(payload);
+    if (frag.prft) state.latency.anchor(frag.prft.mediaTime, frag.prft.epochMs);
+    for (const s of frag.samples) {
+      if (!started && !s.isSync) continue;
+      started = true;
+      decoder.decode(new EncodedVideoChunk({
+        type: s.isSync ? "key" : "delta",
+        timestamp: Math.round((s.pts / init.timescale) * 1e6),
+        duration: Math.round((s.duration / init.timescale) * 1e6),
+        // AVCC length-prefixed, exactly as it sits in the mdat: what a decoder
+        // configured with an avcC `description` expects.
+        data: s.data,
+      }));
+    }
+  }, FROM_NEXT_GROUP);
+}
+
+// Sample the video track's `prft` for the MSE path, which otherwise never looks
+// inside a fragment, and report latency once per presented frame.
+function trackMseLatency(video, state) {
+  if (!video.requestVideoFrameCallback) {
+    log("no requestVideoFrameCallback: MSE latency not measured");
+    return;
+  }
+  const tick = (_now, meta) => {
+    state.latency.observe(Math.round(meta.mediaTime * state.latency.timescale), Date.now());
+    video.requestVideoFrameCallback(tick);
+  };
+  video.requestVideoFrameCallback(tick);
+}
+
+// Connect, discover the tracks, and play the first video track: into `video`
+// through MSE, or into `canvas` through WebCodecs when `decoder` is
+// `"webcodecs"`. Resolves with a handle carrying the live counters and the
+// latency tracker the caller reports on.
+export async function play({
+  url, namespace, certHash, video, canvas, decoder = "mse", timeoutMs = 15000, debug = false,
+}) {
   const transportOptions = {};
   if (certHash) {
     transportOptions.serverCertificateHashes = [
@@ -182,8 +338,20 @@ export async function play({ url, namespace, certHash, video, timeoutMs = 15000,
   const codecs = [track.selectionParams?.codec || "avc1.64001e"];
   if (audio) codecs.push(audio.selectionParams?.codec || "mp4a.40.2");
   const mime = `video/mp4; codecs="${codecs.join(", ").toLowerCase()}"`;
-  if (!MediaSource.isTypeSupported(mime)) throw new Error(`browser cannot play ${mime}`);
 
+  const state = {
+    mode: decoder, fragments: 0, audioFragments: 0, decodedFrames: 0,
+    width: 0, height: 0, latency: new LatencyTracker(90000),
+  };
+
+  if (decoder === "webcodecs") {
+    const initSegment = await firstObject(client, namespace, initTrack, timeoutMs);
+    log(`init segment ${initSegment.length} bytes, decoding with WebCodecs (video only)`);
+    await playWebCodecs(client, namespace, track, initSegment, canvas, state);
+    return state;
+  }
+
+  if (!MediaSource.isTypeSupported(mime)) throw new Error(`browser cannot play ${mime}`);
   const initSegment = await firstObject(client, namespace, initTrack, timeoutMs);
   log(`init segment ${initSegment.length} bytes, mime ${mime}`);
 
@@ -199,11 +367,14 @@ export async function play({ url, namespace, certHash, video, timeoutMs = 15000,
     }, { once: true });
   });
 
-  const state = { fragments: 0, audioFragments: 0 };
+  state.latency = new LatencyTracker(parseInit(initSegment).timescale);
   const queue = new AppendQueue(sourceBuffer, video);
   queue.push(initSegment);
+  trackMseLatency(video, state);
   await subscribeTrack(client, namespace, track.name, (payload) => {
     state.fragments += 1;
+    const prft = parseFragment(payload).prft;
+    if (prft) state.latency.anchor(prft.mediaTime, prft.epochMs);
     queue.push(payload);
     if (state.fragments === 1) log("first video fragment appended");
   }, FROM_NEXT_GROUP);
@@ -223,11 +394,43 @@ export async function play({ url, namespace, certHash, video, timeoutMs = 15000,
   return state;
 }
 
-// Read back what the decoder actually produced: dimensions, the frame count
-// the pipeline reports, and the pixels on screen.
-export function playbackReport(video, canvas) {
+// Seven columns across the top of whatever is on the canvas: the SMPTE bar
+// centres.
+function sampleBars(canvas) {
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  const y = Math.floor(canvas.height * 0.15);
+  const bars = [];
+  for (let i = 0; i < 7; i++) {
+    const x = Math.floor((canvas.width * (i + 0.5)) / 7);
+    const [r, g, b] = ctx.getImageData(x, y, 1, 1).data;
+    bars.push([r, g, b]);
+  }
+  return bars;
+}
+
+// Read back what the decoder actually produced: dimensions, the frame count,
+// the measured latency, and the pixels on screen. In WebCodecs mode the canvas
+// *is* the display, so the bars come straight off it; in MSE mode the video
+// element is drawn into it first.
+export function playbackReport(state, video, canvas) {
+  if (state.mode === "webcodecs") {
+    return {
+      mode: state.mode,
+      width: canvas.width,
+      height: canvas.height,
+      currentTime: null,
+      totalVideoFrames: state.decodedFrames,
+      droppedVideoFrames: 0,
+      audioDecodedBytes: null,
+      latencyMedianMs: state.latency.medianMs(),
+      latencyLastMs: state.latency.last,
+      latencySamples: state.latency.count,
+      bars: state.decodedFrames ? sampleBars(canvas) : null,
+    };
+  }
   const q = video.getVideoPlaybackQuality?.() || { totalVideoFrames: 0, droppedVideoFrames: 0 };
   const report = {
+    mode: state.mode,
     width: video.videoWidth,
     height: video.videoHeight,
     currentTime: video.currentTime,
@@ -240,21 +443,16 @@ export function playbackReport(video, canvas) {
       typeof video.webkitAudioDecodedByteCount === "number"
         ? video.webkitAudioDecodedByteCount
         : null,
+    latencyMedianMs: state.latency.medianMs(),
+    latencyLastMs: state.latency.last,
+    latencySamples: state.latency.count,
     bars: null,
   };
   if (canvas && video.videoWidth) {
     canvas.width = video.videoWidth;
     canvas.height = video.videoHeight;
-    const ctx = canvas.getContext("2d", { willReadFrequently: true });
-    ctx.drawImage(video, 0, 0);
-    // Seven columns across the top of the frame: the SMPTE bar centres.
-    const y = Math.floor(canvas.height * 0.15);
-    report.bars = [];
-    for (let i = 0; i < 7; i++) {
-      const x = Math.floor((canvas.width * (i + 0.5)) / 7);
-      const [r, g, b] = ctx.getImageData(x, y, 1, 1).data;
-      report.bars.push([r, g, b]);
-    }
+    canvas.getContext("2d", { willReadFrequently: true }).drawImage(video, 0, 0);
+    report.bars = sampleBars(canvas);
   }
   return report;
 }

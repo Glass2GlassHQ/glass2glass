@@ -225,6 +225,15 @@ export function pageUrl(httpPort, relayPort, namespace, hashHex, extra = {}) {
   return `http://127.0.0.1:${httpPort}/?${q}`;
 }
 
+// The query parameters the watch scripts open the page with: autostart, plus
+// whatever the environment asks for.
+export function playerParams() {
+  const extra = { autostart: "1" };
+  if (process.env.G2G_MOQT_WEBCODECS) extra.decoder = "webcodecs";
+  if (process.env.G2G_MOQT_DEBUG) extra.debug = "1";
+  return extra;
+}
+
 // True when this host has a camera libcamerasrc could open.
 export function hasCamera() {
   return existsSync("/dev/video0");
@@ -238,6 +247,11 @@ export const CAMERA_PIPELINE =
 // One MOQT object per this many milliseconds of each track.
 const FRAGMENT_MS = 500;
 
+// A producer reference time box ahead of each fragment, mapping its decode time
+// to the muxer's wall clock. That is what the page's latency HUD measures
+// against; one 32-byte box per fragment, so it is always on here.
+const PRFT = "write-prft=true";
+
 // The audio half of the broadcast: a 440 Hz tone encoded as AAC-LC, which is
 // what MSE plays as `mp4a.40.2`.
 export const AUDIO_PIPELINE = "audiotestsrc ! avenc_aac";
@@ -246,13 +260,61 @@ export const AUDIO_PIPELINE = "audiotestsrc ! avenc_aac";
 // two branches meet in the fan-in `mp4mux`, so one `moov` names both tracks and
 // `moqtsink` publishes a track each.
 export function publishPipeline(prefix, relayPort, namespace, hashHex, { audio = true } = {}) {
-  const sink =
-    `moqtsink location=https://127.0.0.1:${relayPort}/ ` +
-    `namespace=${namespace} server-certificate-hashes=${hashHex}`;
+  const sink = moqtSink(relayPort, namespace, hashHex);
   // Half-second fragments: one MOQT object per half second of each track
   // rather than one per access unit, which is what a CMAF broadcast looks like
   // and what keeps a browser's append queue ahead of an unpaced publisher.
-  const mux = `mp4mux name=mux fragment-duration=${FRAGMENT_MS}`;
-  if (!audio) return `${prefix} ! mp4mux fragment-duration=${FRAGMENT_MS} ! ${sink}`;
+  const mux = `mp4mux name=mux fragment-duration=${FRAGMENT_MS} ${PRFT}`;
+  if (!audio) return `${prefix} ! mp4mux fragment-duration=${FRAGMENT_MS} ${PRFT} ! ${sink}`;
   return `${prefix} ! mux.   ${AUDIO_PIPELINE} ! mux.   ${mux} ! ${sink}`;
+}
+
+function moqtSink(relayPort, namespace, hashHex) {
+  return (
+    `moqtsink location=https://127.0.0.1:${relayPort}/ ` +
+    `namespace=${namespace} server-certificate-hashes=${hashHex}`
+  );
+}
+
+// --- the paced low-latency broadcast --------------------------------------
+//
+// `videotestsrc ! x264enc` runs as fast as the CPU allows, hundreds of frames a
+// second, so a player joining it is fed hours of media per minute and any
+// latency it measures is a statement about that, not about the player. A
+// recording replayed with `replaysrc sync=true` is paced to the recorded PTS
+// instead, which is a live 30 fps source, and it costs a fraction of a second
+// to make.
+
+const PACED_FPS = 30;
+export const PACED_WIDTH = 320;
+export const PACED_HEIGHT = 240;
+
+// Record `seconds` of encoded SMPTE bars into `dir`, returning the clip path.
+// Encoding happens here, once and unpaced, so the live run only replays.
+export function recordPacedClip(launchBin, dir, seconds) {
+  const clip = join(dir, "smpte.g2g");
+  const pipeline =
+    `videotestsrc width=${PACED_WIDTH} height=${PACED_HEIGHT} pattern=smpte ` +
+    `framerate=${PACED_FPS}/1 num-buffers=${Math.round(seconds * PACED_FPS)} ` +
+    `! videoconvert ! x264enc ! recordsink location=${clip}`;
+  const r = spawnSync(launchBin, [pipeline], { encoding: "utf8" });
+  if (r.status !== 0) throw new Error(`recording the paced clip failed: ${r.stderr || r.stdout}`);
+  return clip;
+}
+
+// Publish a recorded clip at its captured pacing, one MOQT object per access
+// unit: the low-latency shape, and the one a WebCodecs player can actually
+// exploit (a fragment holding half a second of media cannot be decoded before
+// all of it has arrived, whatever the decoder).
+//
+// `fragment-duration` + `chunk-duration` rather than the muxer's default
+// per-access-unit mode, which emits the same one-frame objects but writes no
+// `prft` at all: chunking keeps one object per frame and gives each fragment
+// (here, each GOP) the producer reference time the latency HUD needs.
+export function pacedPublishPipeline(clip, relayPort, namespace, hashHex) {
+  return (
+    `replaysrc location=${clip} sync=true ` +
+    `! mp4mux fragment-duration=1 chunk-duration=1 ${PRFT} ` +
+    `! ${moqtSink(relayPort, namespace, hashHex)}`
+  );
 }

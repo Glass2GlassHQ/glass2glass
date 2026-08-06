@@ -8,13 +8,22 @@
   video { width: 100%; background: #111; margin-top: 1rem; }
   #log { font-family: monospace; white-space: pre-wrap; font-size: 12px; color: #444; }
   canvas { display: none; }
+  body.webcodecs video { display: none; }
+  body.webcodecs canvas { display: block; width: 100%; background: #111; margin-top: 1rem; }
+  #hud {
+    position: fixed; top: .5rem; right: .5rem; z-index: 1;
+    font: 12px/1.4 ui-monospace, monospace; color: #eee;
+    background: rgba(0, 0, 0, .72); padding: .3rem .5rem; border-radius: 4px;
+    white-space: pre; pointer-events: none;
+  }
 </style>
 
 <h1>g2g MoQ Transport player</h1>
 <p>Subscribes to a broadcast <code>moqtsink</code> is publishing to a local
 <code>moq-relay-ietf</code>, using the third-party
 <a href="https://github.com/moqtail/moqtail">MOQtail</a> draft-16 client, and
-plays the fragmented MP4 through Media Source Extensions.</p>
+plays the fragmented MP4 through Media Source Extensions, or through WebCodecs
+with <code>?decoder=webcodecs</code> (video only, near-zero buffering).</p>
 
 <label>relay <input id="url" value="https://127.0.0.1:4443/"></label>
 <label>namespace <input id="namespace" value="demo"></label>
@@ -24,6 +33,7 @@ plays the fragmented MP4 through Media Source Extensions.</p>
 
 <video id="view" muted playsinline controls></video>
 <canvas id="frame"></canvas>
+<div id="hud"></div>
 <div id="log"></div>
 
 <script type="module">
@@ -34,6 +44,8 @@ plays the fragmented MP4 through Media Source Extensions.</p>
   for (const key of ["url", "namespace", "cert"]) {
     if (params.get(key)) $(key).value = params.get(key);
   }
+  const decoder = params.get("decoder") === "webcodecs" ? "webcodecs" : "mse";
+  if (decoder === "webcodecs") document.body.classList.add("webcodecs");
 
   const logEl = $("log");
   const origLog = console.log;
@@ -41,8 +53,21 @@ plays the fragmented MP4 through Media Source Extensions.</p>
 
   // The headless driver reads these off the page rather than the console, so a
   // count is never lost to log truncation.
-  window.g2gState = { started: false, error: null, fragments: 0, audioFragments: 0 };
-  window.g2gReport = () => playbackReport($("view"), $("frame"));
+  window.g2gState = {
+    started: false, error: null, mode: decoder,
+    fragments: 0, audioFragments: 0, latencyMedianMs: null, latencySamples: 0,
+  };
+  window.g2gReport = () => playbackReport(window.g2gPlayer, $("view"), $("frame"));
+
+  // End-to-end latency: the wall clock the muxer stamped into the fragment's
+  // prft against the moment the frame reached the screen.
+  function showHud(state) {
+    const median = state.latency.medianMs();
+    const last = state.latency.last;
+    const fmt = (v) => (v === null ? "-" : `${Math.round(v)} ms`);
+    $("hud").textContent =
+      `${decoder}\nlatency ${fmt(last)}\nmedian  ${fmt(median)}\nn=${state.latency.count}`;
+  }
 
   async function start() {
     $("start").disabled = true;
@@ -53,14 +78,20 @@ plays the fragmented MP4 through Media Source Extensions.</p>
         namespace: $("namespace").value,
         certHash: $("cert").value.trim(),
         video: $("view"),
+        canvas: $("frame"),
+        decoder,
         debug: params.has("debug"),
       });
+      window.g2gPlayer = state;
       window.g2gState.started = true;
       $("status").textContent = "playing";
       setInterval(() => {
         window.g2gState.fragments = state.fragments;
         window.g2gState.audioFragments = state.audioFragments;
-      }, 100);
+        window.g2gState.latencyMedianMs = state.latency.medianMs();
+        window.g2gState.latencySamples = state.latency.count;
+        showHud(state);
+      }, 200);
     } catch (e) {
       window.g2gState.error = String(e);
       $("status").textContent = "failed";

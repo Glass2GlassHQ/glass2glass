@@ -138,6 +138,10 @@ groups starting at keyframes. `G2G_MOQT_NAMESPACE` names the broadcast
 (default `bevy`) and `G2G_MOQT_CERT_HASHES` takes comma-separated hex SHA-256
 digests of relay certificates to accept, which a self-signed local relay needs.
 
+The muxer writes a producer reference time box per fragment, so a player can
+measure end-to-end latency against the wall clock the frame was muxed at; the
+demo page shows it in a corner HUD.
+
 ```sh
 G2G_MOQT_URL=https://127.0.0.1:4443/ G2G_MOQT_NAMESPACE=bevy G2G_FRAMES=0 \
   cargo run --release --example stream

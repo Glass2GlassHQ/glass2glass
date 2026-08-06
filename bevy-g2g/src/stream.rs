@@ -718,7 +718,11 @@ fn sink_pipeline(settings: StreamSettings, encoded: bool) -> Result<u64, G2gErro
     let mut enc = FfmpegH264Enc::new()
         .with_backend(Backend::Software)
         .with_bitrate(settings.bitrate as usize);
-    let mut mux = Mp4Mux::new();
+    // MoQT egress only (see the arm below for the fragment shape).
+    let mut mux = Mp4Mux::new()
+        .with_prft(true)
+        .with_fragment_duration_ms(1)
+        .with_chunk_duration_ms(1);
     let mut transforms: Vec<&mut dyn DynAsyncElement> = if encoded {
         vec![]
     } else {
@@ -743,8 +747,11 @@ fn sink_pipeline(settings: StreamSettings, encoded: bool) -> Result<u64, G2gErro
         } => {
             info!("publishing to MoQT relay {url} under namespace {namespace}");
             // The sink takes fragmented MP4, so the muxer is the last transform.
-            // Its default is one fragment per access unit: one MOQT object per
-            // frame, which is the low-latency shape this stream wants.
+            // One MOQT object per access unit, the low-latency shape this stream
+            // wants, plus a producer reference time box per fragment so the
+            // viewer can measure its own end-to-end latency. Chunking at 1 ms is
+            // how it gets both: the muxer's per-access-unit mode emits the same
+            // one-frame objects but writes no prft at all.
             transforms.push(&mut mux);
             let mut sink =
                 MoqtSink::new(url, namespace).with_server_certificate_hashes(cert_hashes);

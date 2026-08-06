@@ -13,14 +13,21 @@
 // two tracks to play; `G2G_MOQT_NO_AUDIO=1` publishes video only. The player
 // starts muted (browsers block unmuted autoplay), so unmute it to hear the tone.
 //
+// `G2G_MOQT_WEBCODECS=1` decodes with WebCodecs instead of MSE: video only, and
+// the page's latency HUD then reads the frame it just drew rather than the
+// playhead of a buffered <video>. The camera is live-paced so that number means
+// something; the SMPTE fallback encodes as fast as the CPU allows, and against
+// a source running ahead of real time the HUD reads whatever that implies.
+//
 // Run from tools/moqt-demo:  node watch-live.mjs
 // Env: MOQ_RS_BIN, G2G_LAUNCH, G2G_CHROME, G2G_MOQT_PATTERN=1 (force the
-// test pattern), G2G_MOQT_NO_AUDIO=1, G2G_CAMERA_SIZE=1280x720.
+// test pattern), G2G_MOQT_NO_AUDIO=1, G2G_MOQT_WEBCODECS=1,
+// G2G_CAMERA_SIZE=1280x720.
 import { spawn } from "node:child_process";
 import {
   CAMERA_PIPELINE, SMPTE_PIPELINE, chromeBinary, freeUdpPort, hasCamera,
-  launchBinary, mintCertificate, pageUrl, publishPipeline, relayBinary,
-  spawnPublisher, spawnRelay, startHttp, whenPublishing,
+  launchBinary, mintCertificate, pageUrl, playerParams, publishPipeline,
+  relayBinary, spawnPublisher, spawnRelay, startHttp, whenPublishing,
 } from "./local-relay.mjs";
 
 const HTTP_PORT = 8196;
@@ -86,7 +93,7 @@ async function main() {
   children.push(publisher);
 
   http = await startHttp(HTTP_PORT);
-  const url = pageUrl(HTTP_PORT, relayPort, NAMESPACE, tls.hashHex, { autostart: "1" });
+  const url = pageUrl(HTTP_PORT, relayPort, NAMESPACE, tls.hashHex, playerParams());
   log("player:", url);
 
   log("waiting for the first frames (a camera takes a moment to start)...");

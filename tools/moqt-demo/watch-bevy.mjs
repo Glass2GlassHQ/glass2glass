@@ -13,15 +13,20 @@
 // Prereqs: a `moq-relay-ietf` build, `npm install` here, and a cargo toolchain
 // (the example is built on first run, which takes a few minutes).
 //
+// The stream is live-paced at the render framerate and carries a `prft` per
+// fragment, so the page's latency HUD reads a real end-to-end number here.
+// `G2G_MOQT_WEBCODECS=1` decodes with WebCodecs instead of MSE, which is the
+// interesting comparison: same broadcast, a few hundred ms less latency.
+//
 // Run from tools/moqt-demo:  node watch-bevy.mjs
 // Env: MOQ_RS_BIN, G2G_CHROME, G2G_MOQT_DEBUG=1 (player debug output),
-// G2G_FRAMES (default 0, run until Ctrl-C), plus `--features nvenc` through
-// G2G_BEVY_FEATURES for the zero-copy encode path.
+// G2G_MOQT_WEBCODECS=1, G2G_FRAMES (default 0, run until Ctrl-C), plus
+// `--features nvenc` through G2G_BEVY_FEATURES for the zero-copy encode path.
 import { spawn } from "node:child_process";
 import { resolve } from "node:path";
 import {
-  Reaped, chromeBinary, freeUdpPort, mintCertificate, pageUrl, relayBinary,
-  spawnRelay, startHttp, ROOT,
+  Reaped, chromeBinary, freeUdpPort, mintCertificate, pageUrl, playerParams,
+  relayBinary, spawnRelay, startHttp, ROOT,
 } from "./local-relay.mjs";
 
 const HTTP_PORT = 8198;
@@ -112,9 +117,7 @@ async function main() {
   children.push(publisher);
 
   http = await startHttp(HTTP_PORT);
-  const extra = { autostart: "1" };
-  if (process.env.G2G_MOQT_DEBUG) extra.debug = "1";
-  const url = pageUrl(HTTP_PORT, relayPort, NAMESPACE, tls.hashHex, extra);
+  const url = pageUrl(HTTP_PORT, relayPort, NAMESPACE, tls.hashHex, playerParams());
   log("player:", url);
 
   log("waiting for the first rendered frame (a cold cargo build takes minutes)...");
