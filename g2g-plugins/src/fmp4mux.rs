@@ -217,6 +217,9 @@ impl Fmp4Muxer {
         // Default: one access unit per fragment. CMAF mode always batches instead,
         // because a fragment there may only start at a sync sample.
         if self.fragment_duration_ns == 0 && !self.cmaf {
+            if let Some(now) = self.producer_clock {
+                out.extend_from_slice(&prft(1, now(), self.decode_time));
+            }
             let frag = fragment(
                 self.sequence + 1,
                 self.decode_time,
@@ -759,6 +762,35 @@ mod tests {
         assert_eq!(&out[p + 4..p + 8], &1u32.to_be_bytes(), "reference track");
         assert_eq!(&out[p + 8..p + 16], &NTP.to_be_bytes());
         assert_eq!(&out[p + 16..p + 24], &0u64.to_be_bytes(), "media time");
+    }
+
+    /// The default per-access-unit mode takes the early path in `push_au`, so
+    /// it writes the `prft` there: one per fragment, i.e. one per sample.
+    #[test]
+    fn per_au_fragments_carry_a_prft_each() {
+        const NTP: u64 = 0x0102_0304_0506_0708;
+        let mut key = Vec::new();
+        for n in [
+            &[0x67, 0x42, 0x00, 0x1e, 0x88][..],
+            &[0x68, 0xce, 0x3c, 0x80],
+            &[0x65, 0x88, 0x84, 0x00],
+        ] {
+            key.extend_from_slice(&[0, 0, 0, 1]);
+            key.extend_from_slice(n);
+        }
+        let mut m = Fmp4Muxer::new(VideoCodec::H264, 320, 240, TagList::new())
+            .with_producer_clock(Some(|| NTP));
+        let mut out = Vec::new();
+        for i in 0..3u64 {
+            out.extend_from_slice(&m.push_au(&key, i * 40_000_000, 40_000_000).unwrap());
+        }
+        out.extend_from_slice(&m.flush());
+
+        let count = |four: &[u8; 4]| out.windows(4).filter(|w| *w == four).count();
+        assert_eq!(count(b"moof"), 3, "one fragment per access unit");
+        assert_eq!(count(b"prft"), 3, "a prft ahead of every fragment");
+        let p = out.windows(4).position(|w| w == b"prft").unwrap() + 4;
+        assert_eq!(&out[p + 8..p + 16], &NTP.to_be_bytes());
     }
 
     #[test]

@@ -10,7 +10,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 - M943: device discovery on Windows (Media Foundation cameras, WASAPI endpoints with hotplug) and macOS (AVFoundation cameras, Core Audio devices), with each platform's capture elements selectable by the id the provider reports.
 
-- M942: the MoQT browser demo gains a WebCodecs decode mode (`?decoder=webcodecs`) and a `prft` end-to-end latency HUD; median latency drops from 216 ms (MSE) to 24 ms.
+- M942: the MoQT browser demo gains a WebCodecs decode mode (`?decoder=webcodecs`) and a `prft` end-to-end latency HUD (median 46 ms MSE, 1 ms WebCodecs); `mp4mux` now writes the `prft` in its default per-access-unit mode too.
 
 - M941: `bevy-g2g` streams to an IETF MoQ Transport relay (`StreamOutput::Moqt`, `G2G_MOQT_URL`), with `tools/moqt-demo/watch-bevy.mjs` running the relay, the render and the browser player from one command.
 

@@ -306,15 +306,10 @@ export function recordPacedClip(launchBin, dir, seconds) {
 // unit: the low-latency shape, and the one a WebCodecs player can actually
 // exploit (a fragment holding half a second of media cannot be decoded before
 // all of it has arrived, whatever the decoder).
-//
-// `fragment-duration` + `chunk-duration` rather than the muxer's default
-// per-access-unit mode, which emits the same one-frame objects but writes no
-// `prft` at all: chunking keeps one object per frame and gives each fragment
-// (here, each GOP) the producer reference time the latency HUD needs.
 export function pacedPublishPipeline(clip, relayPort, namespace, hashHex) {
   return (
     `replaysrc location=${clip} sync=true ` +
-    `! mp4mux fragment-duration=1 chunk-duration=1 ${PRFT} ` +
+    `! mp4mux ${PRFT} ` +
     `! ${moqtSink(relayPort, namespace, hashHex)}`
   );
 }
