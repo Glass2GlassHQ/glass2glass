@@ -503,8 +503,9 @@ fn packed_bytes<T>(frame: &FfAudio, samples: usize, channels: usize) -> Result<&
 /// `PcmS16Le`. Handles the layouts libavcodec emits for the codecs we decode:
 /// planar / packed 32-bit float (AAC / AC-3's native `FLTP`), planar / packed S16
 /// (FLAC <= 16-bit), and planar / packed S32 (FLAC 24-bit, high bits kept). Float
-/// samples are clamped to [-1, 1] and scaled; an unsupported layout is a loud
-/// `CapsMismatch` rather than silent noise.
+/// samples convert like swresample (round to nearest at 1<<15 scale, clipped) so
+/// the PCM matches ffmpeg's own decode of the same stream; an unsupported layout
+/// is a loud `CapsMismatch` rather than silent noise.
 fn to_s16_interleaved(frame: &FfAudio) -> Result<DecodedAudio, G2gError> {
     let channels = frame.channels() as usize;
     let samples = frame.samples();
@@ -512,7 +513,10 @@ fn to_s16_interleaved(frame: &FfAudio) -> Result<DecodedAudio, G2gError> {
         return Err(G2gError::CapsMismatch);
     }
     let mut out = alloc::vec![0i16; samples * channels];
-    let f32_to_i16 = |v: f32| (v.clamp(-1.0, 1.0) * 32767.0) as i16;
+    // match swresample's float->s16 (lrintf at 1<<15 scale, clipped): every
+    // other libavcodec consumer converts this way, so a differential decode
+    // against ffmpeg stays bit-exact
+    let f32_to_i16 = |v: f32| (v * 32768.0).round_ties_even().clamp(-32768.0, 32767.0) as i16;
     match frame.format() {
         Sample::F32(Type::Planar) => {
             for (c, slot) in (0..channels).zip(0..) {
