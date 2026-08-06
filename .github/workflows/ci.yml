@@ -139,6 +139,17 @@ jobs:
       # the property/registry surface. The two aioquic legs skip without `uv`.
       - name: test g2g-plugins (webtransport)
         run: cargo test -p g2g-plugins --locked --features webtransport --test m901_webtransport
+      # Device discovery (M938-M944): the v4l2 unit tests, the provider battery
+      # and the v4l2src device-id + control properties. Live-camera legs skip
+      # without /dev/video0.
+      - name: test g2g-plugins (device discovery)
+        run: >
+          cargo test -p g2g-plugins --locked --features v4l2,alsa-src,wgpu-sink
+          --lib -- v4l2
+      - name: test g2g-plugins (device providers + device-id)
+        run: >
+          cargo test -p g2g-plugins --locked --features v4l2,alsa-src,wgpu-sink
+          --test m939_device_providers --test m944_device_id_controls
       # downloadbuffer acceptance (M861): a moov-at-end MP4 pushed over local
       # HTTP spills to disk and demuxes identically to a direct file read.
       - name: test g2g-plugins (downloadbuffer)

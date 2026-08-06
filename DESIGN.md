@@ -1229,12 +1229,58 @@ caps alternatives; other fourccs listed in `detail`), **ALSA** (PCM hints in
 both directions, formats probed via `HwParams`, busy devices still listed with
 empty caps), **PipeWire** (media-class nodes mapped to
 `pipewiresrc`/`pipewiresink`/`pipewirevideosrc`, selected via their
-`target-object` property), and **GPU** (`Compute/GPU`, a g2g extension beyond
+`target-object` property), **GPU** (`Compute/GPU`, a g2g extension beyond
 GStreamer's capture/render model: wgpu adapters, CUDA ordinals, VAAPI render
 nodes; only the render nodes name a driving element, the rest are
-informational). The `g2g-device-monitor` binary is the CLI over all of this
-(`gst-device-monitor-1.0` analog): one-shot listing, class filter, `--json`,
-and `--follow` for live hotplug.
+informational), **MF** and **WASAPI** on Windows, and **AVF** and **CoreAudio**
+on macOS (M943, below). The `g2g-device-monitor` binary is the CLI over all of
+this (`gst-device-monitor-1.0` analog): one-shot listing, class filter,
+`--json`, and `--follow` for live hotplug.
+
+**Windows / macOS (M943).** `mfdevice` lists the `MFEnumDeviceSources` video
+capture devices with the NV12 / YUY2 native modes `mfvideosrc` can deliver
+(reading them activates the source, so a camera another application holds open
+lists with empty caps); `wasapidevice` lists the active `IMMDeviceEnumerator`
+render / capture endpoints with their shared-mode mix format as caps.
+`avfdevice` lists cameras from an `AVCaptureDeviceDiscoverySession`, and
+`coreaudiodevice` the HAL's `kAudioHardwarePropertyDevices` entries, one device
+record per direction a duplex device carries. WASAPI is the one non-Linux
+backend with a native watch (an `IMMNotificationClient` whose callbacks wake a
+re-probe on the watch thread, since the callback carries only an id and must
+not block); the other three are polled, because MF has no hotplug callback
+short of a `WM_DEVICECHANGE` window and the AVFoundation / CoreAudio listeners
+need a run loop a library has no business owning.
+
+On these platforms the selection property **is** the persistent id, so no
+separate `device-id` is needed: `mfvideosrc device-path=` takes the MF symbolic
+link, `wasapisrc` / `wasapisink device=` the endpoint id, `avfvideosrc` /
+`avfaudiosrc device=` the `AVCaptureDevice` unique id, and `coreaudiosrc` /
+`coreaudiosink device=` the Core Audio device UID (the `AudioDeviceID` is
+reassigned every boot, the UID is not). Each element gained that selector as
+part of M943, sharing one open-by-id helper with its provider (`wasapipcm` on
+Windows) so the id a listing reports and the id `device=` accepts cannot drift.
+
+**`v4l2src device-id` (M944).** V4L2 is the exception: its selection handle is
+the node path, which the kernel renumbers across a replug, so `v4l2src` takes a
+separate `device-id` carrying the provider's `bus_info:card:path` id and
+resolves it against a fresh probe at negotiation. The exact id wins; failing
+that, the hardware half (bus + card) matches, which is what survives a replug
+into the same port, and the lowest-numbered node of a multi-node camera is
+chosen (the capture node on every UVC device). An id nothing carries fails the
+negotiation with `HardwareError::V4l2(ENODEV)` rather than silently falling
+back to `device`.
+
+**V4L2 camera controls (M944).** `v4l2src` exposes exposure, focus and white
+balance as runtime properties under the names `v4l2-ctl` uses
+(`exposure-auto`, `exposure-absolute`, `focus-auto`, `focus-absolute`,
+`white-balance-temperature-auto`, `white-balance-temperature`; GStreamer's
+analog is the `extra-controls` structure). One table drives both the property
+specs and the `VIDIOC_S_EXT_CTRLS` ids, and its order is the apply order: an
+auto switch precedes the manual value it gates, because a driver rejects a
+manual exposure while auto exposure is on. Each is applied with its own ioctl,
+since a batch may not span the user and camera control classes. Only a control
+that was set is touched, and one the camera does not implement fails the
+negotiation instead of being quietly ignored.
 
 ### 4.12b Live Ingress (UDP / RTP)
 

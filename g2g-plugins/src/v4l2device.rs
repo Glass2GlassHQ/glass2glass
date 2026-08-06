@@ -11,6 +11,9 @@
 //!
 //! The mapping half (frame sizes / intervals / capabilities to caps and ids)
 //! is pure, so it is unit-tested without a camera attached.
+//!
+//! [`resolve_device_id`] is the reverse direction, for `v4l2src device-id=`:
+//! an id this provider minted earlier back to the node path carrying it now.
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -147,6 +150,48 @@ fn persistent_id(caps: Option<&Capabilities>, path: &str) -> String {
     }
 }
 
+/// The node path a saved `device-id` names now, or `None` when no attached
+/// camera carries it. Probes the same list [`V4l2DeviceProvider`] reports, so
+/// an id copied out of `g2g-device-monitor` resolves here.
+pub fn resolve_device_id(id: &str) -> Option<String> {
+    let devices = V4l2DeviceProvider::new().probe().ok()?;
+    match_device_id(&devices, id).map(String::from)
+}
+
+/// The node path of the device `id` names: the exact id first, then the
+/// hardware half of it (bus + card, dropping the node path the id ends with).
+/// The fallback is what survives a replug: the same USB port reports the same
+/// bus_info, but the kernel may hand the camera a different `/dev/videoN`.
+/// Devices arrive sorted by path, so the lowest-numbered node of a multi-node
+/// camera wins, which is the capture node on every UVC device.
+fn match_device_id<'a>(devices: &'a [Device], id: &str) -> Option<&'a str> {
+    if let Some(device) = devices.iter().find(|d| d.persistent_id == id) {
+        return node_path(device);
+    }
+    let wanted = hardware_prefix(id)?;
+    devices
+        .iter()
+        .find(|d| hardware_prefix(&d.persistent_id) == Some(wanted))
+        .and_then(node_path)
+}
+
+/// The `bus_info:card` half of a [`persistent_id`], or `None` for the bare-path
+/// form (which has no hardware identity to match on).
+fn hardware_prefix(id: &str) -> Option<&str> {
+    let (prefix, tail) = id.rsplit_once(':')?;
+    tail.starts_with("/dev/").then_some(prefix)
+}
+
+/// The node path a probed device opens, from the `device` property the provider
+/// put there.
+fn node_path(device: &Device) -> Option<&str> {
+    device
+        .props
+        .iter()
+        .find(|(key, _)| key == "device")
+        .map(|(_, value)| value.as_str())
+}
+
 /// Frame sizes plus the intervals reported for each, as YUYV caps
 /// alternatives in driver order.
 fn yuyv_caps(modes: &[(FrameSizeEnum, Vec<FrameIntervalEnum>)]) -> CapsSet {
@@ -243,6 +288,7 @@ fn rate_q16(interval: &Fraction) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::format;
     use v4l::frameinterval::Stepwise as IntervalStepwise;
     use v4l::framesize::{Discrete, Stepwise as SizeStepwise};
 
@@ -392,6 +438,52 @@ mod tests {
         };
         assert_eq!(persistent_id(Some(&no_bus), "/dev/video0"), "/dev/video0");
         assert_eq!(persistent_id(None, "/dev/video2"), "/dev/video2");
+    }
+
+    fn probed(bus: &str, card: &str, path: &str) -> Device {
+        Device {
+            display_name: card.to_string(),
+            klass: "Video/Source".to_string(),
+            persistent_id: format!("{bus}:{card}:{path}"),
+            caps: CapsSet::from_alternatives(Vec::new()),
+            element: "v4l2src",
+            props: Vec::from([("device".to_string(), path.to_string())]),
+            detail: Vec::new(),
+            provider: "v4l2",
+        }
+    }
+
+    #[test]
+    fn device_id_resolves_exactly_and_across_a_replug() {
+        let devices = Vec::from([
+            probed("usb-0000:00:14.0-8", "Integrated Camera", "/dev/video0"),
+            probed("usb-0000:00:14.0-8", "Integrated Camera", "/dev/video2"),
+            probed("usb-0000:00:14.0-3", "HD Webcam", "/dev/video4"),
+        ]);
+        // the exact id wins even when a sibling node shares its hardware.
+        assert_eq!(
+            match_device_id(&devices, "usb-0000:00:14.0-8:Integrated Camera:/dev/video2"),
+            Some("/dev/video2")
+        );
+        // the saved node moved: the same port + card still resolves, to the
+        // lowest-numbered node of that camera.
+        assert_eq!(
+            match_device_id(&devices, "usb-0000:00:14.0-8:Integrated Camera:/dev/video6"),
+            Some("/dev/video0")
+        );
+        // a camera that is not attached resolves to nothing rather than to
+        // whatever else happens to be plugged in.
+        assert_eq!(
+            match_device_id(&devices, "usb-0000:00:14.0-1:Other Camera:/dev/video0"),
+            None
+        );
+        // the bare-path id form has no hardware half, so it matches only itself.
+        let bare = Vec::from([Device {
+            persistent_id: "/dev/video0".to_string(),
+            ..probed("", "", "/dev/video0")
+        }]);
+        assert_eq!(match_device_id(&bare, "/dev/video0"), Some("/dev/video0"));
+        assert_eq!(match_device_id(&bare, "/dev/video1"), None);
     }
 
     #[test]

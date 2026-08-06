@@ -6,6 +6,10 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M944: `v4l2src` selects its camera by the device monitor's persistent id (`device-id=`, survives a replug) and exposes exposure, focus and white-balance controls as runtime properties.
+
+- M943: device discovery on Windows (Media Foundation cameras, WASAPI endpoints with hotplug) and macOS (AVFoundation cameras, Core Audio devices), with each platform's capture elements selectable by the id the provider reports.
+
 - M942: the MoQT browser demo gains a WebCodecs decode mode (`?decoder=webcodecs`) and a `prft` end-to-end latency HUD; median latency drops from 216 ms (MSE) to 24 ms.
 
 - M941: `bevy-g2g` streams to an IETF MoQ Transport relay (`StreamOutput::Moqt`, `G2G_MOQT_URL`), with `tools/moqt-demo/watch-bevy.mjs` running the relay, the render and the browser player from one command.
