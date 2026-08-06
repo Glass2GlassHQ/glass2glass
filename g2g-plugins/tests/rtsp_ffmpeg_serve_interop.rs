@@ -170,4 +170,17 @@ async fn ffmpeg_plays_interleaved_from_rtspserversink() {
         "ffmpeg decoded the interleaved RTSP stream (exit {status:?})"
     );
     assert!(frames_sent > 0, "sink served frames after PLAY");
+
+    // A reference RTSP client handshook, depayloaded, and decoded the served
+    // stream: persist peer-tagged `Oracle` evidence so `--maturity` derives
+    // rtspserversink as InteropTested.
+    use g2g_core::conformance::{ConformanceDimension, Evidence};
+    g2g_plugins::conformance::persist::record_evidence(
+        "rtspserversink",
+        &Evidence::new(ConformanceDimension::Oracle)
+            .peer("ffmpeg")
+            .codec("h264")
+            .detail("ffmpeg plays and decodes the TCP-interleaved RTSP stream"),
+    )
+    .expect("record oracle evidence");
 }

@@ -40,16 +40,12 @@ derived maturity (`conformance`, M614, evidence-derived `MaturityLevel` with
 honesty guards, batteries in `g2g-plugins::conformance`, `g2g-inspect --maturity`).
 Sequenced next:
 
-- **Grow the conformance matrix (M615 + M619 + M621).** The persisted-evidence
-  mechanism, two native-muxer oracles (`mp4mux`, `mpegtsmux` vs `ffprobe`), the
-  ffmpeg-interop transports (`udpsrc` RTP / `rtmpsrc` / `srtsrc` / `srtsink` as
-  peer-tagged `Oracle` rows), the Vulkan Video GPU decode tests (`vulkanvideo`
-  H.264 / H.265 / AV1 as `Hardware` rows tagged with the GPU), and the CI
-  `conformance` job (sets `$G2G_CONFORMANCE_LOG`, runs the oracles, publishes
-  `--maturity` to the job summary) are done. The muxer oracles respect an
-  externally-set log so they aggregate in CI. Remaining (optional): persist
-  evidence from the other resource-owning tests as they are validated (RTSP interop,
-  `wgpu`-export, native NVENC/NVDEC), plus more in-process batteries.
+- **Grow the conformance matrix.** Persist evidence from the resource-owning
+  tests still uncovered as they are validated (`vaapi` / `v4l2` decode, the
+  Android and macOS device paths, `libcamera` capture), and add in-process
+  batteries for further sans-IO cores. Get the GPU-tagged `Hardware` rows into CI
+  by wiring a runner that has the hardware: a `Hardware` row can only come from a
+  run on the device, so a GPU-less runner will never produce one.
 - **Whole-graph zero-alloc (M616 + M620).** The single-stage (M616) and multi-stage
   concrete-link (M620, source -> transform -> sink) data paths are proven zero-alloc.
   Remaining (larger, deferred): a fully zero-alloc *dyn* runner, monomorphized arms

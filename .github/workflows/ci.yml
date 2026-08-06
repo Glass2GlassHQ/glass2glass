@@ -561,16 +561,19 @@ jobs:
       # Oracle evidence. Self-skips without ffmpeg like the muxer oracles.
       - name: MCU codec oracles (g2g-mcu vs ffmpeg)
         run: cargo test -p g2g-mcu --locked --test m638_g711 --test m639_adpcm -- --nocapture
-      # Live-transport interop (best-effort): the depayloader / SRT / RTMP paths
-      # driven by a real ffmpeg peer over a local socket. Timing-sensitive
+      # Live-transport interop (best-effort): the depayloader / SRT / RTMP / RTSP
+      # paths driven by a real ffmpeg peer over a local socket. Timing-sensitive
       # (ffmpeg's caller/publisher races the g2g listener), so a miss must not fail
-      # the job; when they pass they append peer-tagged Oracle evidence.
+      # the job; when they pass they append peer-tagged Oracle evidence. The RTSP
+      # legs cover both directions: ffmpeg PLAYs from `rtspserversink` and ffmpeg
+      # RECORDs into `rtspserversrc` (UDP and TCP-interleaved).
       - name: transport interop vs ffmpeg (best-effort)
         continue-on-error: true
         run: |
           cargo test -p g2g-plugins --locked --features udp-ingress --test udp_ffmpeg_rtp_interop -- --ignored
           cargo test -p g2g-plugins --locked --features rtmp --test rtmp_ffmpeg_interop -- --ignored
           cargo test -p g2g-plugins --locked --features srt --test srt_ffmpeg_interop -- --ignored
+          cargo test -p g2g-plugins --locked --features rtsp-server --test rtsp_ffmpeg_serve_interop --test rtsp_ffmpeg_record_interop -- --ignored
           cargo test -p g2g-mcu --locked --test m643_rtp -- --ignored
       # Publish the derived maturity: fold the accumulated Oracle evidence into the
       # in-process batteries and render the table to the job summary + an artifact.

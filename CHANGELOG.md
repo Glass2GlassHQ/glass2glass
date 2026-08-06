@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M946: conformance evidence from the RTSP, dma-buf export and NVENC/NVDEC tests, plus RTP payload/jitter batteries.
+
 - M944: `v4l2src` selects its camera by the device monitor's persistent id (`device-id=`, survives a replug) and exposes exposure, focus and white-balance controls as runtime properties.
 
 - M943: device discovery on Windows (Media Foundation cameras, WASAPI endpoints with hotplug) and macOS (AVFoundation cameras, Core Audio devices), with each platform's capture elements selectable by the id the provider reports.

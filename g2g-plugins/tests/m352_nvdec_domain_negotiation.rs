@@ -277,6 +277,23 @@ async fn nvdec_keeps_frames_on_gpu_for_cuda_sink() {
         domains.iter().all(|&d| d == MemoryDomainKind::Cuda),
         "a CUDA-accepting sink keeps NVDEC frames on the GPU: {domains:?}",
     );
+
+    record_hardware_evidence("NVDEC decodes H.264 and keeps every frame CUDA-resident");
+}
+
+/// NVDEC decoded a real stream on real hardware: persist GPU-tagged `Hardware`
+/// evidence so `g2g-inspect --maturity` derives nvdec as HardwareValidated.
+fn record_hardware_evidence(detail: &str) {
+    use g2g_core::conformance::{ConformanceDimension, Evidence};
+    use g2g_plugins::conformance::persist;
+    persist::record_evidence(
+        "nvdec",
+        &Evidence::new(ConformanceDimension::Hardware)
+            .platform(persist::cuda_platform_tag())
+            .codec("h264")
+            .detail(detail),
+    )
+    .expect("record hardware evidence");
 }
 
 /// NVDEC -> System-only sink: the negotiation settles on System, so the same
@@ -304,6 +321,8 @@ async fn nvdec_downloads_for_system_sink() {
         domains.iter().all(|&d| d == MemoryDomainKind::System),
         "a System-only sink makes NVDEC download every frame: {domains:?}",
     );
+
+    record_hardware_evidence("NVDEC downloads decoded frames for a System-only sink");
 }
 
 /// Diamond, GPU outcome: NVDEC -> tee -> {accepts both, accepts CUDA only}. The

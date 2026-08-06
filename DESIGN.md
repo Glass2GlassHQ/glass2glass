@@ -392,6 +392,8 @@ A free-running source feeding a sync sink is paced automatically by upstream bac
 
 A pipeline runs against one elected clock (`elect_clock` over `ClockPriority`: a PTP grandmaster-disciplined clock (`PtpGrandmaster`) outranks a live source's hardware clock (`LiveSource`), which outranks an audio sink's DAC clock (`AudioProvider`), which outranks a plain monotonic provider such as a video display sink (`Provider`), which outranks the system fallback). The runner samples the elected clock's `now_ns()` once at startup as the **base time** (the clock reading at running-time zero) and hands both to each sink via `set_clock_sync(ClockSync { clock, base_time_ns })`, called once after election. Both the linear runners and the DAG runner `run_graph` deliver it (the latter walks its sink nodes after election), so a display sink PTS-paces in any topology. A sink that synchronises presents a frame when the elected clock reaches `base_time_ns + running_time`, where running time is the frame's `pts_ns` mapped through the active `Segment`; a sink that ignores the hook presents as fast as backpressure allows.
 
+**Pacing mid-graph (`clocksync`).** Presentation is not the only place a stream needs to run at real time: a publisher muxing to a live transport (the MoQ Transport demo's `videotestsrc ! x264enc ! mp4mux ! moqtsink`) has no sync sink at all, so nothing stops it producing minutes of media per minute of wall clock. `ClockSyncTransform` (`clocksync`) is the sink's pacing as a pass-through transform: it holds each buffer until its PTS, anchored on the first one, is due on the clock, and forwards everything else unchanged. It shares the display sinks' `PresentationPacer`, so the anchor, the segment mapping and the seek re-anchor behave identically, and differs in two ways. It never drops: a late or segment-clipped buffer is forwarded immediately, because a hole in a transform's output is one downstream cannot recover. And it supplies its own monotonic clock when none was handed to it, which is both GStreamer's fallback to the pipeline system clock and a necessity here, since the runners deliver `ClockSync` to sink nodes only, and a `clocksync` sits mid-graph. `sync=false` reduces it to an identity; `ts-offset` shifts the whole schedule.
+
 **Audio as the sync master.** For playback the audio sink should drive timing, because samples leave the DAC at the hardware's real rate, which drifts from wall time by tens to hundreds of ppm. `DriftClock` (`g2g-core`) turns that into a usable pipeline clock: it is fed `(local_ns, master_ns)` observations (`local_ns` from a monotonic reference, `master_ns` the true playout position) and fits `master ≈ slope·local + offset` by least squares over a sliding window, so `now_ns()` projects the current reference time through the fit, both estimating the playout rate and smoothing the coarse, jittery per-observation readings. `AlsaSink`'s worker samples `frames_written − snd_pcm_delay()` after each blocking `writei` and feeds the clock, offering it to election at the `AudioProvider` tier (gated by a `provide-clock` property). A video sink then slaves to it: because the elected clock is the disciplined audio timeline rather than raw wall time, video presentation follows audio, giving true A/V sync. A `LiveSource` capture clock still wins when present, so a live pipeline paces to capture.
 
 **Networked sync (PTP).** For facility-wide sync (Pro AV / SMPTE ST 2110), the shared reference is a PTP grandmaster, and every device slaves to it, so a `PtpGrandmaster` clock outranks all of the above. `PtpServo` (`g2g-core::ptp`) is the servo: fed the four timestamps of each PTP delay request-response, it computes the standard `offset` / `mean_path_delay` and folds `(local, master)` into the same `DriftClock` machinery, disciplining the local monotonic reference to the grandmaster's TAI timeline with lock / holdover / outlier-rejection state. `PtpClock` wraps it (interior-mutable, so one worker drives it while sinks read `now_ns` through a shared `Arc`) and offers itself to election only once locked. Because the elected timeline is grandmaster-derived, two machines locked to the same grandmaster read the same clock, so the A/V pacing above holds *across* devices, not just within one process. Two sources feed the servo: raw PTP message timestamps (`sync_exchange`), or a direct absolute-time observation (`observe_master`). Two backends supply them: `PtpSystemClock` (`g2g-plugins`, Linux) delegates to an OS PTP-disciplined `CLOCK_TAI` (from `linuxptp` / `phc2sys`), sampled on a worker; `PtpClient` (`g2g-plugins`) is a from-scratch software PTP SLAVE that speaks PTP over UDP itself (the `ptp::wire` message parser + the `ptp::slave` delay-request-response state machine + a UDP transport), so an endpoint with no OS PTP daemon can still lock. The wire parser and slave state machine are `no_std` and CI-tested end to end (parse -> slave -> servo) without sockets.
@@ -3238,7 +3240,13 @@ which is the "not interop-validated against reference gear" caveat expressed as 
 rather than prose. The conformance batteries (`g2g-plugins::conformance`) exercise a
 *real* element (never a mock) with cheap in-process checks and add evidence only on a
 pass, so the level is computed from behavior observed this run, not asserted: a
-regression that breaks a round-trip drops the level. `g2g-inspect --maturity` runs
+regression that breaks a round-trip drops the level. They cover the sans-IO cores
+several transports share: the ST 2110-20 / -30 packetizer pairs (including the -7
+seamless merge through per-path loss), the RFC 6184 H.264 payload core
+(`rtph264`: FU-A fragmentation reassembled byte-exact, and a dropped fragment
+costing only its own access unit rather than welding two together), and the RTP
+jitter buffer (`rtpjitter`: reordered arrival released in sequence order, a hole
+reported for NACK then skipped rather than stalling). `g2g-inspect --maturity` runs
 the battery live and renders the matrix. `Oracle` / `Hardware` evidence, which the
 in-process battery cannot produce (it has no ffmpeg / GPU), comes from the
 resource-owning integration tests: they append it to a tab-separated evidence log
@@ -3248,10 +3256,20 @@ resource-owning integration tests: they append it to a tab-separated evidence lo
 `Mp4MuxN` fMP4 / a `TsMux` transport stream and have `ffprobe` demux them back,
 recording peer-tagged `Oracle` evidence deriving `mp4mux` / `mpegtsmux` as
 `InteropTested`; the ffmpeg-interop transports carry this further, `udpsrc` (RTP),
-`rtmpsrc`, and `srtsrc` / `srtsink` (libsrt, incl. the AES variants) each derive
-`InteropTested` against a named reference peer, and the Vulkan Video decode tests
+`rtmpsrc`, `srtsrc` / `srtsink` (libsrt, incl. the AES variants), and both RTSP
+directions (`rtspserversink` played by ffmpeg, `rtspserversrc` published into by
+ffmpeg over UDP and TCP-interleaved) each derive `InteropTested` against a named
+reference peer, and the Vulkan Video decode tests
 persist GPU-tagged `Hardware` evidence (via `VulkanVideoDevice::device_name`) so
-`vulkanvideo` derives `HardwareValidated` across H.264 / H.265 / AV1. A CI
+`vulkanvideo` derives `HardwareValidated` across H.264 / H.265 / AV1. The rest of
+the GPU stack persists the same tier from the tests that own the device: the
+native NVIDIA codecs (`nvenc` encoding a CUDA-resident surface, `nvdec` decoding
+into one and downloading for a System-only sink) and the `cudawgpu` bridge tag
+their evidence with the CUDA device the driver names
+(`persist::cuda_platform_tag`, sourced from the GPU device provider rather than
+hardcoded), while the dma-buf export pair (`wgputodmabuf` / `dmabuftowgpu`) tags
+the subsystem, since each element opens its own high-performance Vulkan adapter
+and so cannot honestly name which card ran it. A CI
 `conformance` job runs the deterministic ffprobe oracles plus the (best-effort)
 transport interop against a real ffmpeg, aggregating into one `$G2G_CONFORMANCE_LOG`
 (the muxer oracles honor an externally-set log so they append rather than truncate)
