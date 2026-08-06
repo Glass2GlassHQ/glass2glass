@@ -99,7 +99,7 @@ use smithay_client_toolkit::{
 
 use crate::clock::wait_to_present;
 use crate::worker_ready::Handshake;
-use g2g_core::element::QosMessage;
+use g2g_core::element::{PresentationStats, QosMessage};
 use g2g_core::frame::Frame;
 use g2g_core::metrics::{monotonic_ns, LatencyHistogram, LatencySnapshot};
 use g2g_core::{
@@ -328,6 +328,14 @@ impl AsyncElement for WaylandSink {
     /// can shed load so the sink stops running behind.
     fn take_qos(&mut self) -> Option<QosMessage> {
         self.pacer.take_qos()
+    }
+
+    fn presentation_stats(&self) -> Option<PresentationStats> {
+        Some(PresentationStats {
+            presented: self.frames_presented(),
+            dropped: self.frames_dropped(),
+            late_dropped: self.late_dropped(),
+        })
     }
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {

@@ -365,6 +365,7 @@ mod tests {
                         },
                         fill_mean_pct: 30,
                         fill_max_pct: 50,
+                        presentation: None,
                     }),
                 },
             ],

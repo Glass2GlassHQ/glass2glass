@@ -434,6 +434,16 @@ impl RunStats {
                 }
             }
         }
+        // What a paced sink actually put on the display, vs what it shed: a
+        // stalling presentation shows up here even when `consumed` looks healthy.
+        for e in &self.per_element {
+            if let Some(p) = e.presentation {
+                s.push_str(&format!(
+                    "  present: {:<16} {} presented, {} dropped, {} late-dropped\n",
+                    e.name, p.presented, p.dropped, p.late_dropped
+                ));
+            }
+        }
         s
     }
 }

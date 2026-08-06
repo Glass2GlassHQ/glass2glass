@@ -22,6 +22,7 @@ use alloc::vec::Vec;
 use portable_atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 
+use crate::element::PresentationStats;
 use crate::metrics::{LatencyHistogram, LatencySnapshot};
 
 /// How many recent frame visits a journey-recording probe keeps. Bounded and
@@ -52,6 +53,10 @@ pub struct ElementProbe {
     /// time. `None` unless an observer is attached (the aggregate histograms
     /// above serve the end-of-run report on their own).
     journeys: Option<Mutex<VecDeque<StageVisit>>>,
+    /// A paced sink's cumulative presented / dropped counters, stored once by
+    /// the sink arm as it ends (from
+    /// [`presentation_stats`](crate::AsyncElement::presentation_stats)).
+    presentation: Mutex<Option<PresentationStats>>,
 }
 
 impl ElementProbe {
@@ -62,6 +67,7 @@ impl ElementProbe {
             transit_ns: LatencyHistogram::new(),
             fill: FillGauge::default(),
             journeys: None,
+            presentation: Mutex::new(None),
         })
     }
 
@@ -75,6 +81,7 @@ impl ElementProbe {
             transit_ns: LatencyHistogram::new(),
             fill: FillGauge::default(),
             journeys: Some(Mutex::new(VecDeque::with_capacity(JOURNEY_RING))),
+            presentation: Mutex::new(None),
         })
     }
 
@@ -171,6 +178,13 @@ impl ElementProbe {
         }
     }
 
+    /// Store a paced sink's end-of-run presentation counters. Called by the
+    /// sink arm as it ends, so `snapshot` (taken after every arm joined) sees a
+    /// settled value.
+    pub fn set_presentation(&self, stats: PresentationStats) {
+        *self.presentation.lock() = Some(stats);
+    }
+
     pub fn snapshot(&self) -> ElementLatency {
         ElementLatency {
             name: self.name.clone(),
@@ -178,6 +192,7 @@ impl ElementProbe {
             transit: self.transit_ns.snapshot(),
             fill_mean_pct: self.fill.mean(),
             fill_max_pct: self.fill.max(),
+            presentation: *self.presentation.lock(),
         }
     }
 }
@@ -258,6 +273,9 @@ pub struct ElementLatency {
     /// Peak input-link fill percent (0-100); 100 means the element's input was
     /// saturated at least once, i.e. it back-pressured its upstream.
     pub fill_max_pct: u8,
+    /// A paced sink's cumulative presented / dropped counters, `None` for
+    /// elements that don't present.
+    pub presentation: Option<PresentationStats>,
 }
 
 /// Per-edge live traffic counters (M846), shared between a link's

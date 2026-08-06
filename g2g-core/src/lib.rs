@@ -179,7 +179,8 @@ pub use copyplan::{
 pub use dot::DotAnnotations;
 #[cfg(feature = "alloc")]
 pub use element::{
-    AsyncElement, ConfigureOutcome, ElementBound, OutputSink, PushOutcome, QosMessage, Reconfigure,
+    AsyncElement, ConfigureOutcome, ElementBound, OutputSink, PresentationStats, PushOutcome,
+    QosMessage, Reconfigure,
 };
 pub use error::{G2gError, HardwareError};
 #[cfg(feature = "alloc")]

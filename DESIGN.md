@@ -2971,6 +2971,15 @@ compiles out (the table is then empty) so the `no_std` baseline pays nothing.
 Sources have no `process()` and so do not appear, their cost surfaces as the
 downstream element's input fill.
 
+A paced display sink also reports what it actually put on screen (M933): the
+element overrides `presentation_stats()` (frames presented, frames overwritten
+before paint under `DropOldest`, frames shed by QoS late-drop), the graph
+runner's sink arm stores it on the probe as the arm ends, and `report()` prints
+one `present:` line per presenting sink. `frames_consumed` alone cannot
+distinguish a healthy display from one silently shedding or stalling;
+`g2g-launch` divides the presented count by wall time into a presented-fps
+figure next to the pipeline throughput.
+
 The `process()` timing is the "work" half of a stage's latency; the "wait" half
 is queue residency, added as measured per-link transit. When an observer is
 attached, the graph runner builds `Block` edges into transform/sink arms with a

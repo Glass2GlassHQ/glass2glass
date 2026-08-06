@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M933: the run summary reports each display sink's presented / dropped frame counters, and `g2g-launch` prints a presented-fps figure.
+
 - M932: `deinterlace` gains a yadif method and planar YUV support, and `playbin uri=file.vob` inserts it when the MPEG-2 sequence extension says the stream is interlaced.
 
 - M931: `playbin uri=file.vob` composites a DVD's subpicture cues over the video, and a fan-in element now sees the `Segment` that maps its output to running time.

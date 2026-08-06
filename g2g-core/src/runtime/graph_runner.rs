@@ -2900,6 +2900,43 @@ async fn sink_arm<'a>(
     probe: Probe,
     control: Option<ArmController>,
 ) -> Result<u64, G2gError> {
+    let result = sink_arm_loop(
+        &mut *elem,
+        in_rx,
+        arm_rx,
+        coord,
+        node,
+        mode,
+        bus,
+        state,
+        progress,
+        probe.clone(),
+        control,
+    )
+    .await;
+    // A paced sink's presented / dropped counters, read here (after the loop
+    // ended, on any exit) so the snapshot taken once every arm joined sees a
+    // settled value.
+    if let (Some(p), Some(stats)) = (&probe, elem.presentation_stats()) {
+        p.set_presentation(stats);
+    }
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn sink_arm_loop<'a>(
+    elem: &'a mut (dyn DynAsyncElement + 'a),
+    in_rx: LinkReceiver,
+    arm_rx: Receiver<ArmDirective>,
+    coord: GraphCoordHandle,
+    node: NodeId,
+    mode: BranchMode,
+    bus: Option<BusHandle>,
+    state: Option<StateController>,
+    progress: Option<PipelineProgress>,
+    probe: Probe,
+    control: Option<ArmController>,
+) -> Result<u64, G2gError> {
     let mut null = NullSink;
     let mut consumed = 0u64;
     let mut prerolled_self = false;
