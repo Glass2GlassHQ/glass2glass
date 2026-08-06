@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M938: device discovery core: `Device` / `DeviceProvider` / `DeviceMonitor` (the `GstDeviceMonitor` analog) with class + caps filters, registry-backed element construction, and hotplug via native watch or poll-and-diff.
+
 - M937: the ffmpeg audio decoder converts float samples to s16 like swresample (round to nearest at 1<<15 scale), so AC-3 / AAC decode is bit-exact with ffmpeg's.
 
 - M936: `decodebin` on MPEG-TS selects the PMT's actual video codec instead of assuming the demuxer's H.264 default, so MPEG-2 and H.265 transport streams decode.
