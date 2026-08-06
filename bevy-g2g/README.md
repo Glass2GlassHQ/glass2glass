@@ -12,9 +12,9 @@ decode, with no pipeline code in the app.
 ## Remote rendering (`RemoteRenderPlugins`)
 
 The app renders headless (no window) and every frame is encoded to H.264 and
-published to a WHIP endpoint over WebRTC, or written to a file. The app adds
-one plugin group and spawns its scene; the camera is retargeted onto the
-stream texture automatically.
+published to a WHIP endpoint over WebRTC, to a MoQ Transport relay, or written
+to a file. The app adds one plugin group and spawns its scene; the camera is
+retargeted onto the stream texture automatically.
 
 ```rust
 use bevy::prelude::*;
@@ -29,7 +29,10 @@ fn main() {
 
 `StreamSettings` carries every knob (resolution, fps, bitrate, keyframe
 interval, output, frame cap); `from_env` reads the demo-run convention
-(`G2G_WHIP_URL`, `G2G_FRAMES`).
+(`G2G_WHIP_URL`, `G2G_MOQT_URL`, `G2G_FRAMES`).
+
+`StreamOutput` picks the egress: `Whip` ends the pipeline in `webrtcsink`,
+`Moqt` in `mp4mux → moqtsink`, and `File` (the default) in `filesink`.
 
 Two encode paths, chosen automatically:
 
@@ -126,6 +129,28 @@ G2G_WHIP_URL=http://127.0.0.1:8889/g2gbevy/whip G2G_FRAMES=0 \
 
 and open `../g2g-plugins/examples/whep-player.html` with the WHEP URL
 `http://127.0.0.1:8889/g2gbevy/whep`. `G2G_FRAMES=0` runs until Ctrl-C.
+
+### MoQ Transport egress
+
+`G2G_MOQT_URL` publishes to an IETF MoQT relay instead: the encoded H.264 goes
+through `mp4mux` and `moqtsink` ships each `moof`+`mdat` as one MOQT object,
+groups starting at keyframes. `G2G_MOQT_NAMESPACE` names the broadcast
+(default `bevy`) and `G2G_MOQT_CERT_HASHES` takes comma-separated hex SHA-256
+digests of relay certificates to accept, which a self-signed local relay needs.
+
+```sh
+G2G_MOQT_URL=https://127.0.0.1:4443/ G2G_MOQT_NAMESPACE=bevy G2G_FRAMES=0 \
+  cargo run --release --example stream
+```
+
+The whole thing from one command, relay and browser included:
+
+```sh
+cd ../tools/moqt-demo && node watch-bevy.mjs
+```
+
+That mints a certificate, starts a local `moq-relay-ietf`, runs this example
+against it, serves the MoQT player page and opens a browser on it.
 
 ## Video playback (`--features decode`, `VideoPlayerPlugin`)
 

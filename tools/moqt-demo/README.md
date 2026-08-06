@@ -69,6 +69,7 @@ certificate used directly as the leaf is rejected (`CaUsedAsEndEntity`), so
 | `moqt-player.js` | subscribe via MOQtail, catalog + init + video + audio into one MSE SourceBuffer |
 | `local-relay.mjs` | certificate minting, relay and publisher startup, static server |
 | `watch-live.mjs` | the live camera demo, one command |
+| `watch-bevy.mjs` | the bevy-g2g remote-render demo, one command |
 | `headless/run-moqt-play.mjs` | the headless run and its assertions |
 
 ## Why one SourceBuffer

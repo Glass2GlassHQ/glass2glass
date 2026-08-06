@@ -3,9 +3,10 @@
 //! feature on an NVIDIA GPU the frames are encoded without ever leaving the
 //! GPU; otherwise they are read back and encoded with libx264.
 //!
-//! `G2G_WHIP_URL` streams to a WHIP endpoint (e.g. MediaMTX); unset, the
-//! H.264 goes to `bevy_g2g.h264`. `G2G_FRAMES` caps the run (default 900 (15 s),
-//! `0` = forever).
+//! `G2G_WHIP_URL` streams to a WHIP endpoint (e.g. MediaMTX) and `G2G_MOQT_URL`
+//! to a MoQ Transport relay (`G2G_MOQT_NAMESPACE`, `G2G_MOQT_CERT_HASHES`);
+//! with neither, the H.264 goes to `bevy_g2g.h264`. `G2G_FRAMES` caps the run
+//! (default 900 (15 s), `0` = forever).
 
 use bevy::prelude::*;
 
