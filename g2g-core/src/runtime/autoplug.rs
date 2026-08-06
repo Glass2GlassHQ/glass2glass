@@ -980,8 +980,11 @@ mod factory {
     /// A bare-`decodebin` primary-stream hook (M746): given the upstream file
     /// location and the container caps, sniff the container and return the
     /// single-stream demux + stream selection for its primary decodable stream, or
-    /// `None` when the default video port is correct (a video track is present), the
-    /// file is unreadable, or the hook does not parse the container. Registered via
+    /// `None` when the default video port is correct (the container derives its
+    /// output caps from the file, or the sniffed video codec matches the port
+    /// default), the file is unreadable, or the hook does not parse the container.
+    /// A demux whose port caps are fixed before parsing (TsDemux, M936) must name
+    /// the stream even when a video track is present. Registered via
     /// [`Registry::register_primary_stream`].
     pub type PrimaryStreamHook = fn(location: &str, caps: &Caps) -> Option<PrimaryStream>;
 

@@ -1364,12 +1364,15 @@ pub fn ts_decodebin_select(
 }
 
 /// Bare-`decodebin` primary-stream hook for MPEG-TS (M746): a `filesrc
-/// location=X.ts ! decodebin` on an audio-only transport stream needs the
-/// single-stream [`TsDemux`](crate::tsdemux::TsDemux) to select its audio stream
-/// (the default is a video port, so the auto-plug would pick a video decoder).
-/// Sniff the PMT; decline (`None`) a non-TS file, an empty PMT, or one that carries
-/// a video track (the default video path is correct), else return `tsdemux` with the
-/// `stream=<codec>` selection and the audio elementary caps for the decoder search.
+/// location=X.ts ! decodebin` needs the single-stream
+/// [`TsDemux`](crate::tsdemux::TsDemux) to select the stream the PMT actually
+/// carries. Unlike the container demuxers, `TsDemux` cannot derive its output
+/// caps from the file (its port is fixed before parsing a byte, defaulting to
+/// H.264), so a non-H.264 video stream (MPEG-2, H.265) would negotiate an
+/// H.264 decoder and fail. Sniff the PMT; decline (`None`) a non-TS file or an
+/// empty PMT, else return `tsdemux` with the `stream=<codec>` selection (the
+/// first video stream, or the first audio stream of an audio-only file) and
+/// its elementary caps for the decoder search.
 #[cfg(feature = "std")]
 pub fn ts_primary_stream(location: &str, caps: &Caps) -> Option<PrimaryStream> {
     if !matches!(
@@ -1390,18 +1393,16 @@ pub fn ts_primary_stream(location: &str, caps: &Caps) -> Option<PrimaryStream> {
         off += 188;
     }
     let infos = crate::tsdemux::forwardable_streams(&demux);
-    // A video track present: the demux's default video port is right, decline.
-    if infos.is_empty() || infos.iter().any(|i| i.video) {
-        return None;
-    }
-    let audio = infos.into_iter().find(|i| !i.video)?;
+    // prefer the video stream (naming its codec, the port default is h264
+    // regardless of the PMT), else the first audio stream
+    let primary = infos.iter().find(|i| i.video).or_else(|| infos.first())?;
     Some(PrimaryStream {
         demux: "tsdemux",
         props: alloc::vec![(
             "stream".to_string(),
-            crate::tsdemux::ts_stream_to_str(audio.stream).to_string(),
+            crate::tsdemux::ts_stream_to_str(primary.stream).to_string(),
         )],
-        caps: audio.caps,
+        caps: primary.caps.clone(),
     })
 }
 

@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M936: `decodebin` on MPEG-TS selects the PMT's actual video codec instead of assuming the demuxer's H.264 default, so MPEG-2 and H.265 transport streams decode.
+
 - M935: `Caps::RawVideo` carries an interlace field the ffmpeg decoder sets from the per-picture flag, and every playbin video branch inserts `deinterlace mode=auto`, so interlaced streams play clean from any container.
 
 - M934: the PS demuxer synthesizes per-picture video PTS between PES stamps, fixing DVD playback stuttering in half-second bursts.
