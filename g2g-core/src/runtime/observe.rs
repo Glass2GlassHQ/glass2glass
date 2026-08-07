@@ -321,7 +321,11 @@ fn assemble_journey(state: &State) -> Option<FrameJourney> {
                 node: *node,
                 name: state.names.get(*node).cloned().unwrap_or_default(),
                 wait_ns: v.wait_ns,
-                work_ns: v.exit_ns.saturating_sub(v.enter_ns),
+                work_ns: v
+                    .exit_ns
+                    .saturating_sub(v.enter_ns)
+                    .saturating_sub(v.push_wait_ns),
+                blocked_ns: v.push_wait_ns,
             })
             .collect();
         return Some(FrameJourney {
@@ -458,8 +462,8 @@ pub struct TelemetrySnapshot {
 }
 
 /// One frame's measured path through the graph's linear prefix (M851): the
-/// per-stage wait + work of a *single* frame, as opposed to the per-stage
-/// distributions the aggregate waterfall stacks.
+/// per-stage wait + work + blocked of a *single* frame, as opposed to the
+/// per-stage distributions the aggregate waterfall stacks.
 ///
 /// Stages are joined on [`Frame::sequence`](crate::Frame), so the journey only
 /// spans elements that carry the id through. It stops at a fan node (a tee,
@@ -498,8 +502,13 @@ pub struct JourneyStage {
     /// How long this frame sat on the element's input link. `0` on an
     /// uninstrumented (leaky) edge.
     pub wait_ns: u64,
-    /// How long the element's `process()` took on this frame.
+    /// How long the element computed on this frame: its `process()` span with
+    /// `blocked_ns` taken out.
     pub work_ns: u64,
+    /// How long that same `process()` call sat blocked pushing this frame into
+    /// the output link, i.e. downstream backpressure rather than work. `0` for a
+    /// sink, which pushes nowhere.
+    pub blocked_ns: u64,
 }
 
 /// Per-node live telemetry.
@@ -668,28 +677,36 @@ mod tests {
                 wait_ns: 100,
                 enter_ns: base,
                 exit_ns: base + 200,
+                push_wait_ns: 60,
             });
             sink.push_visit(StageVisit {
                 sequence: seq,
                 wait_ns: 50,
                 enter_ns: base + 250,
                 exit_ns: base + 400,
+                push_wait_ns: 0,
             });
         }
 
         let j = obs.snapshot().journey.expect("journey assembles");
         assert_eq!(j.sequence, 1, "newest fully-crossed frame");
         assert!(!j.truncated, "chain reached the sink");
+        // The transform's 200 ns span held 60 ns of downstream backpressure, so
+        // its work segment is the remaining 140 ns.
         assert_eq!(
             j.stages
                 .iter()
-                .map(|s| (s.node, s.name.as_str(), s.wait_ns, s.work_ns))
+                .map(|s| (s.node, s.name.as_str(), s.wait_ns, s.work_ns, s.blocked_ns))
                 .collect::<Vec<_>>(),
-            alloc::vec![(1, "scale0", 100, 200), (2, "fakesink0", 50, 150)],
+            alloc::vec![(1, "scale0", 100, 140, 60), (2, "fakesink0", 50, 150, 0)],
         );
         // Queued for the transform at 11_000-100, done at the sink at 11_400.
         assert_eq!(j.total_ns, 500);
-        let stage_sum: u64 = j.stages.iter().map(|s| s.wait_ns + s.work_ns).sum();
+        let stage_sum: u64 = j
+            .stages
+            .iter()
+            .map(|s| s.wait_ns + s.work_ns + s.blocked_ns)
+            .sum();
         assert!(j.total_ns >= stage_sum, "{} >= {}", j.total_ns, stage_sum);
         assert_eq!(j.frame_period_ns, 1_000, "measured inter-frame spacing");
         assert_eq!(j.capacity, 4);
@@ -730,12 +747,14 @@ mod tests {
             wait_ns: 0,
             enter_ns: 5_000,
             exit_ns: 5_100,
+            push_wait_ns: 0,
         });
         sink.push_visit(StageVisit {
             sequence: 0,
             wait_ns: 0,
             enter_ns: 1_000,
             exit_ns: 1_100,
+            push_wait_ns: 0,
         });
         assert!(obs.snapshot().journey.is_none());
     }
@@ -783,6 +802,7 @@ mod tests {
             wait_ns: 10,
             enter_ns: 900,
             exit_ns: 1_000,
+            push_wait_ns: 0,
         });
         let j = obs.snapshot().journey.expect("prefix assembles");
         assert_eq!(j.stages.len(), 1, "only the pre-tee stage");

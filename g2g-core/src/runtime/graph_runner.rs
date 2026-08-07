@@ -2872,10 +2872,12 @@ async fn transform_arm<'a>(
                 let t0 = ElementProbe::mark();
                 elem.process(packet, &mut adapter).await?;
                 if let (Some(p), Some(seq)) = (timed, seq) {
-                    p.record_proc_since(t0);
+                    let push_wait_ns = p.record_proc_since(t0);
                     // M851: this frame's own wait + work, joined across stages
-                    // by sequence id at snapshot time.
-                    p.record_visit(seq, wait_ns, t0);
+                    // by sequence id at snapshot time. M951: the push-wait the
+                    // call just banked is charged to this visit too, so the
+                    // journey's work segment is compute.
+                    p.record_visit(seq, wait_ns, t0, push_wait_ns);
                 }
             }
             None => return Ok(0),
@@ -3100,9 +3102,10 @@ async fn sink_arm_loop<'a>(
                 let t0 = ElementProbe::mark();
                 elem.process(packet, &mut null).await?;
                 if let (Some(p), Some(seq)) = (timed, seq) {
-                    p.record_proc_since(t0);
-                    // M851: the last hop of a frame's journey.
-                    p.record_visit(seq, wait_ns, t0);
+                    let push_wait_ns = p.record_proc_since(t0);
+                    // M851: the last hop of a frame's journey. A sink pushes
+                    // nowhere, so the banked wait is always 0 here.
+                    p.record_visit(seq, wait_ns, t0, push_wait_ns);
                 }
                 // M175 upstream QoS: a sink that dropped a late frame asks to
                 // shed load; store its report on this sink's input link, where

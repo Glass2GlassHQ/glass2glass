@@ -3145,8 +3145,10 @@ assembles a single frame's journey: observed probes keep a bounded ring of
 `{sequence, wait, enter, exit}` visits, joined at snapshot time along the
 linear prefix on the newest sequence id consistent with one frame moving
 downstream (restamping elements fail the join rather than fabricate one; fan
-nodes truncate it), shown as stacked wait/work bars with the end-to-end total
-against the `2 * capacity * frame_period` floor. It binds loopback by default;
+nodes truncate it), shown as stacked wait/work/blocked bars with the end-to-end
+total against the `2 * capacity * frame_period` floor. A journey stage's
+`work_ns` is compute and `blocked_ns` is downstream backpressure, both drawn
+from the same push-wait bank as the aggregate `push_wait` percentiles. It binds loopback by default;
 `--observe-host <addr>` (e.g. `0.0.0.0`) exposes it to other hosts, gated behind a
 no-auth warning since telemetry + edge previews carry frame content. The JSON is
 built in the transport, so `g2g-core` stays serde-free, consistent with the

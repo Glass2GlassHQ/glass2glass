@@ -19,10 +19,12 @@
 //!   The same message carries `"journey"`: one frame's measured path, or `null`
 //!   when none assembles. Its shape is `{"sequence":N,"total_ns":N,
 //!   "frame_period_ns":N,"capacity":N,"floor_ns":N,"truncated":bool,
-//!   "stages":[{"node":i,"name":"...","wait_ns":N,"work_ns":N}]}`, where the
-//!   stages are upstream-first for that one sequence id, `total_ns` is the
-//!   measured end to end, and `floor_ns` is `2 * capacity * frame_period_ns`,
-//!   the queueing floor to compare it against.
+//!   "stages":[{"node":i,"name":"...","wait_ns":N,"work_ns":N,
+//!   "blocked_ns":N}]}`, where the stages are upstream-first for that one
+//!   sequence id, `work_ns` is compute with `blocked_ns` (that frame's
+//!   downstream backpressure) taken out, `total_ns` is the measured end to end,
+//!   and `floor_ns` is `2 * capacity * frame_period_ns`, the queueing floor to
+//!   compare it against.
 //! - `{"type":"event","kind":"eos"|"error"|...,...}` (see [`event_json`]).
 
 use std::collections::HashMap;
@@ -426,12 +428,14 @@ mod tests {
                         name: String::from("videoscale0"),
                         wait_ns: 300,
                         work_ns: 1_200,
+                        blocked_ns: 900,
                     },
                     JourneyStage {
                         node: 2,
                         name: String::from("fakesink0"),
                         wait_ns: 100,
                         work_ns: 400,
+                        blocked_ns: 0,
                     },
                 ],
                 total_ns: 2_000,
@@ -454,7 +458,12 @@ mod tests {
         assert_eq!(stages[0]["node"], 1);
         assert_eq!(stages[0]["name"], "videoscale0");
         assert_eq!(stages[0]["wait_ns"], 300);
+        assert_eq!(
+            stages[0]["blocked_ns"], 900,
+            "backpressure is its own segment"
+        );
         assert_eq!(stages[1]["work_ns"], 400);
+        assert_eq!(stages[1]["blocked_ns"], 0, "a sink pushes nowhere");
     }
 
     #[test]

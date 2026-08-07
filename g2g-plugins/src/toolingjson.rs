@@ -351,6 +351,7 @@ pub fn telemetry_json(snap: &TelemetrySnapshot) -> Value {
                     "name": s.name,
                     "wait_ns": s.wait_ns,
                     "work_ns": s.work_ns,
+                    "blocked_ns": s.blocked_ns,
                 })
             })
             .collect();

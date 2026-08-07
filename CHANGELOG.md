@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M951: the per-frame journey splits each stage's push-wait out of its work segment.
+
 - M950: crates.io publish prep: versioned intra-workspace deps, per-crate LICENSE / README / docs.rs metadata, MSRV 1.86.
 
 - M949: `v4l2src` and `libcamerasrc` persist camera-tagged `Hardware` conformance evidence from their host-validated capture tests.

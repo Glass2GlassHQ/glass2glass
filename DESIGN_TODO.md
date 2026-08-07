@@ -693,9 +693,6 @@ Outstanding developer-tooling tasks, highest leverage first.
 
 - **Per-element / per-link telemetry gaps.** Remaining `Observer` coverage:
   validate the dashboard live against an RTSP source.
-- **Per-frame journey push-wait.** `StageVisit` stamps raw enter/exit around
-  `process()`, so the per-frame journey's work segment includes time blocked on
-  downstream backpressure; time the push-await separately there.
 - **gst-parity differ.** Same launch line through real GStreamer and g2g;
   diff the negotiated caps per edge, the element set after autoplug, and the
   output (checksum, PSNR for lossy). Calliope already does differential output

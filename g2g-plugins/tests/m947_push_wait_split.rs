@@ -10,6 +10,10 @@
 //! sink that consumes slowly (the transform must read as blocked, not busy) and
 //! once with a slow transform and a fast sink (the transform must read as busy,
 //! not blocked).
+//!
+//! M951 carries the same split down to the per-frame journey: an observed run
+//! over the same shape must show the stall as one stage's blocked segment rather
+//! than inflating its work segment.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -17,7 +21,10 @@ use core::time::Duration;
 
 use g2g_core::frame::{Frame, FrameTiming};
 use g2g_core::memory::SystemSlice;
-use g2g_core::runtime::{run_graph, ElementLatency, GraphNode, RunStats, SourceLoop};
+use g2g_core::runtime::{
+    run_graph, run_graph_observed, ElementLatency, GraphNode, JourneyStage, Observer, RunStats,
+    SourceLoop,
+};
 use g2g_core::{
     AsyncElement, Caps, ConfigureOutcome, Dim, G2gError, Graph, MemoryDomain, OutputSink,
     PipelineClock, PipelinePacket, Rate, RawVideoFormat,
@@ -172,9 +179,8 @@ impl AsyncElement for DelaySink {
     }
 }
 
-/// source -> transform -> sink over the real graph runner, with the given
-/// per-frame delays.
-async fn run_chain(transform_delay_ms: u64, sink_delay_ms: u64) -> RunStats {
+/// source -> transform -> sink with the given per-frame delays.
+fn chain(transform_delay_ms: u64, sink_delay_ms: u64) -> Graph<GraphNode> {
     let mut g: Graph<GraphNode> = Graph::new();
     let src = g.add_source(GraphNode::source(FrameSrc { frames: FRAMES }));
     let tx = g.add_transform(GraphNode::element(DelayTransform {
@@ -185,9 +191,39 @@ async fn run_chain(transform_delay_ms: u64, sink_delay_ms: u64) -> RunStats {
     }));
     g.link(src, tx).unwrap();
     g.link(tx, sink).unwrap();
-    run_graph(g, &ZeroClock, LINK_CAPACITY)
-        .await
-        .expect("graph runs")
+    g
+}
+
+/// The chain over the real graph runner.
+async fn run_chain(transform_delay_ms: u64, sink_delay_ms: u64) -> RunStats {
+    run_graph(
+        chain(transform_delay_ms, sink_delay_ms),
+        &ZeroClock,
+        LINK_CAPACITY,
+    )
+    .await
+    .expect("graph runs")
+}
+
+/// The same chain under an observer, which mints journey-recording probes, so
+/// the snapshot carries one frame's per-stage path.
+async fn run_chain_observed(transform_delay_ms: u64, sink_delay_ms: u64, obs: &Observer) {
+    run_graph_observed(
+        chain(transform_delay_ms, sink_delay_ms),
+        &ZeroClock,
+        LINK_CAPACITY,
+        obs,
+        None,
+    )
+    .await
+    .expect("observed graph runs");
+}
+
+fn stage<'a>(stages: &'a [JourneyStage], name: &str) -> &'a JourneyStage {
+    stages
+        .iter()
+        .find(|s| s.name == name)
+        .unwrap_or_else(|| panic!("no journey stage named {name}"))
 }
 
 fn row<'a>(stats: &'a RunStats, name: &str) -> &'a ElementLatency {
@@ -260,5 +296,59 @@ async fn a_fast_sink_leaves_the_slow_transform_reading_as_busy() {
         "compute {} ns must dominate wait {} ns on an unpaced graph",
         tx_row.proc.p50_ns,
         tx_row.push_wait.p50_ns
+    );
+}
+
+/// M951: the per-frame journey splits the same way. The transform does no work
+/// of its own, so the frame's time at that stage belongs to `blocked_ns`; the
+/// sink pushes nowhere, so all of its time is work.
+#[tokio::test]
+async fn a_journey_stage_reads_a_paced_sink_as_blocked_not_work() {
+    let obs = Observer::new();
+    run_chain_observed(0, SINK_DELAY_MS, &obs).await;
+
+    let j = obs.snapshot().journey.expect("a frame crossed every stage");
+    assert!(!j.truncated, "the chain is linear all the way to the sink");
+    let tx = stage(&j.stages, "DelayTransform0");
+    let sink = stage(&j.stages, "DelaySink0");
+
+    assert!(
+        tx.blocked_ns >= 4 * MS,
+        "transform blocked {} ns on frame {}, expected the sink's pace",
+        tx.blocked_ns,
+        j.sequence
+    );
+    assert!(
+        tx.work_ns < MS,
+        "transform work {} ns, backpressure leaked into the work segment",
+        tx.work_ns
+    );
+    assert_eq!(sink.blocked_ns, 0, "a sink pushes nowhere");
+    assert!(
+        sink.work_ns >= MS,
+        "sink work {} ns, its own pacing is its own cost",
+        sink.work_ns
+    );
+}
+
+/// The mirror case: nothing back-pressures the transform, so its journey stage
+/// keeps its whole span as work.
+#[tokio::test]
+async fn a_journey_stage_keeps_unblocked_time_as_work() {
+    let obs = Observer::new();
+    run_chain_observed(TRANSFORM_DELAY_MS, 0, &obs).await;
+
+    let j = obs.snapshot().journey.expect("a frame crossed every stage");
+    let tx = stage(&j.stages, "DelayTransform0");
+    assert!(
+        tx.work_ns >= MS,
+        "transform work {} ns, its sleep should dominate",
+        tx.work_ns
+    );
+    assert!(
+        tx.work_ns > tx.blocked_ns,
+        "work {} ns must dominate blocked {} ns on an unpaced graph",
+        tx.work_ns,
+        tx.blocked_ns
     );
 }
