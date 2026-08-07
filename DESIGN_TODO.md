@@ -420,11 +420,10 @@ Phased plan:
 - **Matroska `ContentEncoding`:** chained encodings, bzip2 / lzo, and
   `ContentEncryption` stay refused (blocks forward as stored, flagged
   `unsupported_encoding`); zlib and header stripping are undone at demux.
-- **TS video PTS synthesis residue:** an unstamped MPEG-2 access unit in a
-  transport stream still falls back to `pts = 0`, and an H.264 / H.265 stream
-  whose SPS leaves reordering open is forwarded unstamped. Closing the latter
-  needs picture order count outside the Vulkan decoder, which means lifting the
-  slice-header and parameter-set parses out of `vulkanvideo` into the baseline.
+- **Reordering-stream PTS from a single stamp:** an H.264 / H.265 transport
+  stream that reorders stays unstamped until its second PES timestamp, since
+  the picture-order-count step per frame is not declared anywhere and has to be
+  measured across two stamps.
 
 ## Codecs
 

@@ -66,6 +66,7 @@ pub mod nalparse;
 pub mod offload;
 pub mod opusparse;
 pub mod outputselector;
+pub mod poc;
 pub mod progressreport;
 pub mod spectrum;
 pub mod streamdemux;
@@ -335,6 +336,7 @@ pub mod tsdemux;
 pub mod tsmux;
 // MPEG program stream demuxer (no_std): Caps::ByteStream{MpegPs} -> one
 // elementary stream, the `.mpg` / `.vob` sibling of tsdemux.
+pub mod mpeg2video;
 pub mod psdemux;
 // Frame lengths of the self-syncing audio bitstreams (AC-3, MPEG audio), shared
 // by the audio decoder's frame splitting and psdemux's frame realignment.

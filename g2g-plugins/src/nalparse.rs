@@ -55,6 +55,10 @@ pub struct SpsGeometry {
     /// per-codec parses, which spell out which one); `false` means "may
     /// reorder", including when the parse could not tell.
     pub presents_in_decode_order: bool,
+    /// The fields picture order count derives from, for a consumer that has to
+    /// put a reordering stream's access units back in display order. `None` when
+    /// the parse could not read them (the geometry is still valid).
+    pub poc: Option<crate::poc::SpsPocParams>,
 }
 
 /// Codec-specific hooks for [`NalParse`]. Implemented by zero-sized markers.

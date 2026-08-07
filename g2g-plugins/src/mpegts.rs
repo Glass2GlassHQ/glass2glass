@@ -20,6 +20,9 @@ use alloc::vec::Vec;
 
 use g2g_core::VideoCodec;
 
+use crate::mpeg2video::Mpeg2TimestampSynth;
+use crate::poc::AccessUnitPoc;
+
 /// MPEG-TS packet size in bytes (the standard 188; M2TS 192 with a 4-byte
 /// timestamp prefix is not handled).
 pub const TS_PACKET_LEN: usize = 188;
@@ -243,18 +246,18 @@ const MAX_VIDEO_PTS_STREAMS: usize = 16;
 /// leave most access units unstamped, and forwarding those unstamped lands them
 /// all at 0: a pacing sink plays that as a burst then a freeze.
 ///
-/// An unstamped unit gets `last + frame_period`, which is the picture's display
-/// time only when the stream presents pictures in the order it codes them. So
-/// synthesis stays off until an SPS proves that (H.264 POC type 2, H.265
-/// `sps_max_num_reorder_pics` 0) and a reordering stream is left alone rather
-/// than stamped wrong: with B-frames the coded order is not the display order,
-/// and getting that right needs the picture order count, which lives with the
-/// decoder. Every real stamp re-anchors, so a period that is slightly off never
-/// drifts past one stamping interval.
+/// An unstamped unit gets `last + frame_period` when the stream presents
+/// pictures in the order it codes them, which an SPS proves (H.264 POC type 2,
+/// H.265 `sps_max_num_reorder_pics` 0). Every real stamp re-anchors, so a period
+/// that is slightly off never drifts past one stamping interval.
+///
+/// A stream that may reorder takes the display order from the picture order
+/// count instead (M952), and MPEG-2 from the picture header's
+/// `temporal_reference`. Both anchor on the real stamps the same way.
 #[derive(Debug, Default)]
 struct VideoPtsSynth {
     /// Whether the SPS proved coded order is display order. `None` until one
-    /// parses; synthesis runs only on `Some(true)`.
+    /// parses; the per-unit period path runs only on `Some(true)`.
     presents_in_decode_order: Option<bool>,
     /// Frame period in 90 kHz ticks.
     period_90: Option<u64>,
@@ -270,17 +273,37 @@ struct VideoPtsSynth {
     /// period from the two nearest real stamps when the SPS declares none.
     last_real_pts_90: Option<u64>,
     units_since_last_real: u64,
+    /// Picture order count per access unit, for a stream that may reorder.
+    poc: AccessUnitPoc,
+    /// Where those counts sit on the presentation timeline.
+    reorder: ReorderPts,
+    /// MPEG-2 display-order synthesis, shared with the program-stream demuxer.
+    mpeg2: Mpeg2TimestampSynth,
 }
 
 impl VideoPtsSynth {
-    /// Stamp one access unit, filling `pts_90khz` in place when it is unstamped
-    /// and this stream qualifies. Coded order is display order here, so the
-    /// decode timestamp equals the presentation one and needs no separate
-    /// synthesis (the element already falls back to the PTS for a missing DTS).
-    fn stamp(&mut self, codec: VideoCodec, au: &[u8], pts_90khz: &mut Option<u64>) {
+    /// Stamp one access unit, filling `pts_90khz` (and, for MPEG-2, `dts_90khz`)
+    /// in place when it is unstamped and this stream qualifies. On the
+    /// coded-order path the decode timestamp equals the presentation one and
+    /// needs no synthesis (the element falls back to the PTS for a missing DTS).
+    fn stamp(
+        &mut self,
+        codec: VideoCodec,
+        au: &[u8],
+        pts_90khz: &mut Option<u64>,
+        dts_90khz: &mut Option<u64>,
+    ) {
+        if codec == VideoCodec::Mpeg2 {
+            self.stamp_mpeg2(au, pts_90khz, dts_90khz);
+            return;
+        }
         self.units_since_last_pts = self.units_since_last_pts.saturating_add(1);
         self.units_since_last_real = self.units_since_last_real.saturating_add(1);
         self.read_sps(codec, au);
+        if self.presents_in_decode_order == Some(false) {
+            self.stamp_by_poc(codec, au, pts_90khz);
+            return;
+        }
 
         if let Some(real) = *pts_90khz {
             self.measure_period(real);
@@ -331,19 +354,121 @@ impl VideoPtsSynth {
             return;
         };
         self.presents_in_decode_order = Some(info.presents_in_decode_order);
-        // fps arrives as Q16, so the period is (90000 << 16) / q16, rounded.
-        let Some(period) = info
-            .framerate
-            .map(u64::from)
-            .filter(|q16| *q16 > 0)
-            .map(|q16| ((90_000u64 << 16) + q16 / 2) / q16)
-            .filter(|p| *p > 0)
-        else {
+        if let Some(poc) = info.poc {
+            self.poc.set_sps(poc);
+        }
+        let Some(period) = info.framerate.and_then(frame_period_90khz) else {
             return;
         };
         self.period_90 = Some(period);
         self.period_from_sps = true;
     }
+
+    /// Stamp an access unit of a stream that may reorder, by its picture order
+    /// count. A real stamp re-anchors the timeline (and, with a second one,
+    /// measures how many ticks a count unit spans); an unstamped unit lands at
+    /// its own distance from that anchor, which is behind it for a picture the
+    /// stream coded ahead of its display slot.
+    fn stamp_by_poc(&mut self, codec: VideoCodec, au: &[u8], pts_90khz: &mut Option<u64>) {
+        let Some(poc) = self.poc.push_access_unit(codec, au).map(i64::from) else {
+            return;
+        };
+        let declared_period = self.period_90.filter(|_| self.period_from_sps);
+        match *pts_90khz {
+            Some(real) => self.reorder.anchor(poc, real, declared_period),
+            None => *pts_90khz = self.reorder.synthesize(poc),
+        }
+    }
+
+    /// Stamp an MPEG-2 access unit from its picture header, on the frame period
+    /// the sequence header in effect declares.
+    fn stamp_mpeg2(&mut self, au: &[u8], pts_90khz: &mut Option<u64>, dts_90khz: &mut Option<u64>) {
+        if let Some(period) = crate::mpeg2video::parse_sequence_header(au)
+            .and_then(|seq| frame_period_90khz(seq.framerate_q16))
+        {
+            self.period_90 = Some(period);
+        }
+        let Some(period) = self.period_90 else {
+            return;
+        };
+        self.mpeg2.stamp(au, pts_90khz, dts_90khz, period);
+    }
+}
+
+/// Largest picture-order-count step per coded frame [`ReorderPts`] will snap a
+/// declared frame period onto: H.265 counts pictures (1), H.264 counts fields
+/// (2, or 4 across a field pair). A measurement implying more than that is a
+/// count this synthesis cannot read as a frame grid, so the measured ratio
+/// stands instead.
+const MAX_POC_STEP_PER_FRAME: u64 = 4;
+
+/// Where a reordering stream's picture order counts sit on the presentation
+/// timeline (M952). Presentation time is linear in the count, so two real PES
+/// stamps fix the line exactly, whatever reorder depth the stream codes at: the
+/// later of the two anchors it and the pair measures its slope.
+#[derive(Debug, Default)]
+struct ReorderPts {
+    /// The last real stamp and the count it named.
+    anchor: Option<(i64, u64)>,
+    /// Ticks per count, as the exact ratio `(ticks, counts)`.
+    scale: Option<(u64, u64)>,
+}
+
+impl ReorderPts {
+    /// Take a real stamp: re-anchor on it, and measure the slope against the
+    /// previous anchor. A declared frame period replaces the measured slope
+    /// when it divides into it a whole number of counts per frame, so the grid
+    /// follows the rate the stream declares rather than a rounded span.
+    fn anchor(&mut self, poc: i64, pts_90khz: u64, declared_period_90: Option<u64>) {
+        if let Some((previous_poc, previous_pts)) = self.anchor {
+            let counts = poc.abs_diff(previous_poc);
+            let ticks = pts_90khz.abs_diff(previous_pts);
+            if counts > 0 && ticks > 0 {
+                self.scale = Some(snap_to_declared_period(ticks, counts, declared_period_90));
+            }
+        }
+        self.anchor = Some((poc, pts_90khz));
+    }
+
+    /// The presentation time of an unstamped unit whose count is `poc`, once an
+    /// anchor and a slope are both known.
+    fn synthesize(&self, poc: i64) -> Option<u64> {
+        let (anchor_poc, anchor_pts) = self.anchor?;
+        let (ticks, counts) = self.scale?;
+        let distance = poc - anchor_poc;
+        let offset = distance.unsigned_abs().checked_mul(ticks)? / counts;
+        Some(if distance >= 0 {
+            anchor_pts.saturating_add(offset)
+        } else {
+            anchor_pts.saturating_sub(offset)
+        })
+    }
+}
+
+/// Express a measured `ticks` per `counts` slope as the declared frame period
+/// over a whole count step per frame, when the measurement implies a plausible
+/// one. Otherwise the measurement stands.
+fn snap_to_declared_period(ticks: u64, counts: u64, declared_period_90: Option<u64>) -> (u64, u64) {
+    let Some(period) = declared_period_90 else {
+        return (ticks, counts);
+    };
+    let step = (period.saturating_mul(counts).saturating_add(ticks / 2)) / ticks;
+    if (1..=MAX_POC_STEP_PER_FRAME).contains(&step) {
+        (period, step)
+    } else {
+        (ticks, counts)
+    }
+}
+
+/// The frame period in 90 kHz units for a Q16 fixed-point frame rate, rounded
+/// to the nearest tick. `None` for a rate of zero, or one so high the period
+/// rounds away.
+pub(crate) fn frame_period_90khz(framerate_q16: u32) -> Option<u64> {
+    let q16 = u64::from(framerate_q16);
+    if q16 == 0 {
+        return None;
+    }
+    Some(((90_000u64 << 16) + q16 / 2) / q16).filter(|period| *period > 0)
 }
 
 /// A PES packet being reassembled across TS packets for one PID.
@@ -541,6 +666,7 @@ impl TsDemuxer {
         let codec = match unit.stream_type {
             STREAM_TYPE_H264 => VideoCodec::H264,
             STREAM_TYPE_H265 => VideoCodec::H265,
+            STREAM_TYPE_MPEG1_VIDEO | STREAM_TYPE_MPEG2_VIDEO => VideoCodec::Mpeg2,
             _ => return,
         };
         let slot = match self.video_pts.iter().position(|(pid, _)| *pid == unit.pid) {
@@ -553,7 +679,7 @@ impl TsDemuxer {
         };
         self.video_pts[slot]
             .1
-            .stamp(codec, &unit.data, &mut unit.pts_90khz);
+            .stamp(codec, &unit.data, &mut unit.pts_90khz, &mut unit.dts_90khz);
     }
 
     /// Finalize any PES still being reassembled (call at end of stream). The

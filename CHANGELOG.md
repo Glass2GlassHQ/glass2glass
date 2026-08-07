@@ -8,6 +8,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 - M953: the thread-per-arm runner takes its fan-in deadline tick from the pipeline clock.
 
+- M952: `tsdemux` synthesizes per-picture PTS for MPEG-2 and for H.264 / H.265 streams that reorder, on shared POC machinery the Vulkan decoders now consume too.
+
 - M951: the per-frame journey splits each stage's push-wait out of its work segment.
 
 - M950: crates.io publish prep: versioned intra-workspace deps, per-crate LICENSE / README / docs.rs metadata, MSRV 1.86.

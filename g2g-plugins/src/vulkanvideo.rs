@@ -374,6 +374,8 @@ pub struct H264Sps {
     pub log2_max_frame_num_minus4: u8,
     pub pic_order_cnt_type: u8,
     pub log2_max_pic_order_cnt_lsb_minus4: u8,
+    /// POC type 1 only: when set, the slice header codes no `delta_pic_order_cnt`.
+    pub delta_pic_order_always_zero_flag: u8,
     pub max_num_ref_frames: u8,
     pub pic_width_in_mbs_minus1: u32,
     pub pic_height_in_map_units_minus1: u32,
@@ -572,20 +574,17 @@ pub fn parse_h264_sps(rbsp: &[u8]) -> Option<H264Sps> {
     }
 
     let log2_max_frame_num_minus4 = br.read_ue()?;
-    let pic_order_cnt_type = br.read_ue()?;
-    let mut log2_max_pic_order_cnt_lsb_minus4 = 0u32;
-    if pic_order_cnt_type == 0 {
-        log2_max_pic_order_cnt_lsb_minus4 = br.read_ue()?;
-    } else if pic_order_cnt_type == 1 {
-        let _delta_pic_order_always_zero_flag = br.read_bit()?;
-        let _offset_for_non_ref_pic = br.read_se()?;
-        let _offset_for_top_to_bottom_field = br.read_se()?;
-        let n = br.read_ue()?;
-        // POC type 1 with a ref-frame offset cycle needs pOffsetForRefFrame; we
-        // do not carry it, so reject rather than mis-decode.
-        if n != 0 {
-            return None;
-        }
+    if log2_max_frame_num_minus4 > crate::poc::MAX_LOG2_MINUS4 {
+        return None;
+    }
+    let mut poc = crate::poc::SpsPocParams::default();
+    crate::poc::read_h264_poc_block(&mut br, &mut poc)?;
+    let pic_order_cnt_type = u32::from(poc.pic_order_cnt_type);
+    let log2_max_pic_order_cnt_lsb_minus4 = poc.log2_max_pic_order_cnt_lsb.saturating_sub(4);
+    // POC type 1 with a ref-frame offset cycle needs pOffsetForRefFrame; we
+    // do not carry it, so reject rather than mis-decode.
+    if !poc.offsets_for_ref_frame.is_empty() {
+        return None;
     }
     let max_num_ref_frames = br.read_ue()?;
     let gaps_in_frame_num_value_allowed_flag = br.read_bit()?;
@@ -633,6 +632,7 @@ pub fn parse_h264_sps(rbsp: &[u8]) -> Option<H264Sps> {
         log2_max_frame_num_minus4: log2_max_frame_num_minus4 as u8,
         pic_order_cnt_type: pic_order_cnt_type as u8,
         log2_max_pic_order_cnt_lsb_minus4: log2_max_pic_order_cnt_lsb_minus4 as u8,
+        delta_pic_order_always_zero_flag: u8::from(poc.delta_pic_order_always_zero_flag),
         max_num_ref_frames: max_num_ref_frames as u8,
         pic_width_in_mbs_minus1,
         pic_height_in_map_units_minus1,
@@ -657,15 +657,15 @@ pub fn parse_h264_sps(rbsp: &[u8]) -> Option<H264Sps> {
 /// truncation or an unsupported feature (slice groups).
 pub fn parse_h264_pps(rbsp: &[u8]) -> Option<H264Pps> {
     let mut br = BitReader::new(rbsp);
-    let pic_parameter_set_id = br.read_ue()?;
-    let seq_parameter_set_id = br.read_ue()?;
-    let entropy_coding_mode_flag = br.read_bit()?;
-    let bottom_field_pic_order_in_frame_present_flag = br.read_bit()?;
-    let num_slice_groups_minus1 = br.read_ue()?;
+    let (poc, seq_parameter_set_id, entropy_coding_mode_flag, num_slice_groups_minus1) =
+        crate::poc::parse_h264_pps_poc_bits(&mut br)?;
     // FMO (slice groups) is not carried into the Std PPS here; reject.
     if num_slice_groups_minus1 != 0 {
         return None;
     }
+    let pic_parameter_set_id = u32::from(poc.pic_parameter_set_id);
+    let bottom_field_pic_order_in_frame_present_flag =
+        u32::from(poc.bottom_field_pic_order_in_frame_present_flag);
     let num_ref_idx_l0_default_active_minus1 = br.read_ue()?;
     let num_ref_idx_l1_default_active_minus1 = br.read_ue()?;
     let weighted_pred_flag = br.read_bit()?;
@@ -1257,11 +1257,13 @@ pub fn parse_h265_sps(rbsp: &[u8]) -> Option<H265Sps> {
 /// scaling lists).
 pub fn parse_h265_pps(rbsp: &[u8]) -> Option<H265Pps> {
     let mut br = BitReader::new(rbsp);
-    let pps_pic_parameter_set_id = br.read_ue()? as u8;
-    let pps_seq_parameter_set_id = br.read_ue()? as u8;
-    let dependent_slice_segments_enabled_flag = br.read_bit()? as u8;
-    let output_flag_present_flag = br.read_bit()? as u8;
-    let num_extra_slice_header_bits = br.read_bits(3)? as u8;
+    let (poc, pps_seq_parameter_set_id, dependent_slice_segments_enabled_flag) =
+        crate::poc::parse_h265_pps_poc_bits(&mut br)?;
+    let pps_pic_parameter_set_id = poc.pps_pic_parameter_set_id;
+    let pps_seq_parameter_set_id = pps_seq_parameter_set_id as u8;
+    let dependent_slice_segments_enabled_flag = dependent_slice_segments_enabled_flag as u8;
+    let output_flag_present_flag = u8::from(poc.output_flag_present_flag);
+    let num_extra_slice_header_bits = poc.num_extra_slice_header_bits;
     let sign_data_hiding_enabled_flag = br.read_bit()? as u8;
     let cabac_init_present_flag = br.read_bit()? as u8;
     let num_ref_idx_l0_default_active_minus1 = br.read_ue()? as u8;
@@ -4973,31 +4975,24 @@ pub fn to_std_av1_picture_info(
 // unsupported tool (field pictures) returns `None`.
 // ============================================================================
 
-/// The H.264 slice-header prefix the DPB loop keys on. Plain data.
-#[derive(Debug, Clone)]
-pub struct H264SliceHeader {
-    pub first_mb_in_slice: u32,
-    /// Raw `slice_type` (0..=9); `% 5` gives P/B/I/SP/SI.
-    pub slice_type: u32,
-    pub pic_parameter_set_id: u8,
-    pub frame_num: u32,
-    /// `nal_ref_idc` from the NAL header: 0 means the picture is not used as a
-    /// reference (it never enters the DPB as a reference slot).
-    pub nal_ref_idc: u8,
-    /// `nal_unit_type == 5`: an IDR that resets the reference state.
-    pub is_idr: bool,
-    /// Only meaningful for an IDR.
-    pub idr_pic_id: u32,
-    /// `pic_order_cnt_lsb` (POC type 0 only; 0 otherwise).
-    pub pic_order_cnt_lsb: u32,
-    /// `delta_pic_order_cnt_bottom` (POC type 0 with bottom-field POC present).
-    pub delta_pic_order_cnt_bottom: i32,
-}
+/// The H.264 slice-header prefix the DPB loop keys on: the shared picture
+/// order count prefix, which carries every field this decoder reads.
+pub type H264SliceHeader = crate::poc::H264SlicePoc;
 
-impl H264SliceHeader {
-    /// Whether this is an I (intra) slice: `slice_type % 5 == 2`.
-    pub fn is_intra_slice(&self) -> bool {
-        self.slice_type % 5 == 2
+/// The parameter-set view the shared slice parse and POC derivation take of an
+/// [`H264Sps`]. The fields this SPS parse rejects (separate colour planes, a
+/// POC-type-1 offset cycle) are fixed at their absent values.
+fn h264_poc_context(sps: &H264Sps) -> crate::poc::H264PocContext<'static> {
+    crate::poc::H264PocContext {
+        separate_colour_plane_flag: false,
+        log2_max_frame_num: u32::from(sps.log2_max_frame_num_minus4) + 4,
+        frame_mbs_only_flag: sps.frame_mbs_only_flag == 1,
+        pic_order_cnt_type: sps.pic_order_cnt_type,
+        log2_max_pic_order_cnt_lsb: u32::from(sps.log2_max_pic_order_cnt_lsb_minus4) + 4,
+        delta_pic_order_always_zero_flag: sps.delta_pic_order_always_zero_flag == 1,
+        offset_for_non_ref_pic: 0,
+        offset_for_top_to_bottom_field: 0,
+        offsets_for_ref_frame: &[],
     }
 }
 
@@ -5009,56 +5004,19 @@ pub fn parse_h264_slice_header(
     sps: &H264Sps,
     pps: &H264Pps,
 ) -> Option<H264SliceHeader> {
-    if nal.is_empty() {
-        return None;
-    }
-    let nal_ref_idc = (nal[0] >> 5) & 0x3;
-    let nal_unit_type = nal[0] & 0x1F;
-    if nal_unit_type != 1 && nal_unit_type != 5 {
-        return None;
-    }
-    let is_idr = nal_unit_type == 5;
-    let rbsp = strip_emulation_prevention(&nal[1..]);
-    let mut br = BitReader::new(&rbsp);
-
-    let first_mb_in_slice = br.read_ue()?;
-    let slice_type = br.read_ue()?;
-    let pic_parameter_set_id = br.read_ue()?;
-    // separate_colour_plane_flag (chroma_format_idc == 3) is rejected at SPS
-    // parse, so there is no colour_plane_id to skip here.
-    let frame_num = br.read_bits(sps.log2_max_frame_num_minus4 as u32 + 4)?;
+    let pps_poc = [crate::poc::H264PpsPoc {
+        pic_parameter_set_id: pps.pic_parameter_set_id,
+        bottom_field_pic_order_in_frame_present_flag: pps
+            .bottom_field_pic_order_in_frame_present_flag
+            == 1,
+    }];
+    let slice = crate::poc::parse_h264_slice_poc(nal, &h264_poc_context(sps), &pps_poc)?;
     // Only progressive frame pictures are supported; a field picture (only
     // possible when frame_mbs_only_flag == 0) is rejected rather than mis-run.
-    if sps.frame_mbs_only_flag == 0 {
-        let field_pic_flag = br.read_bit()?;
-        if field_pic_flag == 1 {
-            return None;
-        }
+    if slice.field_pic_flag {
+        return None;
     }
-    let idr_pic_id = if is_idr { br.read_ue()? } else { 0 };
-
-    let mut pic_order_cnt_lsb = 0;
-    let mut delta_pic_order_cnt_bottom = 0;
-    if sps.pic_order_cnt_type == 0 {
-        pic_order_cnt_lsb = br.read_bits(sps.log2_max_pic_order_cnt_lsb_minus4 as u32 + 4)?;
-        if pps.bottom_field_pic_order_in_frame_present_flag == 1 {
-            delta_pic_order_cnt_bottom = br.read_se()?;
-        }
-    }
-    // pic_order_cnt_type == 1 carries delta_pic_order_cnt[] here, but the DPB
-    // decoder rejects that POC type at creation, so it is never reached.
-
-    Some(H264SliceHeader {
-        first_mb_in_slice,
-        slice_type,
-        pic_parameter_set_id: pic_parameter_set_id as u8,
-        frame_num,
-        nal_ref_idc,
-        is_idr,
-        idr_pic_id,
-        pic_order_cnt_lsb,
-        delta_pic_order_cnt_bottom,
-    })
+    Some(slice)
 }
 
 // ============================================================================
@@ -5143,14 +5101,24 @@ impl H265SliceHeader {
     }
 }
 
-/// Whether an H.265 VCL `nal_unit_type` marks a reference picture: the `_R`
-/// (odd, < 16) trailing/leading types and every IRAP (16..=23) are references;
-/// the `_N` (even, < 16) sub-layer-non-reference types are not.
-fn h265_is_reference(nal_unit_type: u8) -> bool {
-    if nal_unit_type >= 16 {
-        nal_unit_type <= 23
-    } else {
-        nal_unit_type % 2 == 1
+use crate::poc::h265_nal_is_reference as h265_is_reference;
+
+/// The parameter-set view the shared slice parse and POC derivation take of an
+/// [`H265Sps`]. Separate colour planes are rejected at SPS parse, so the flag is
+/// fixed at its absent value.
+fn h265_poc_context(sps: &H265Sps) -> crate::poc::H265PocContext {
+    crate::poc::H265PocContext {
+        log2_max_pic_order_cnt_lsb: u32::from(sps.log2_max_pic_order_cnt_lsb_minus4) + 4,
+        separate_colour_plane_flag: false,
+    }
+}
+
+/// The picture-parameter-set fields the shared slice parse reads.
+fn h265_pps_poc(pps: &H265Pps) -> crate::poc::H265PpsPoc {
+    crate::poc::H265PpsPoc {
+        pps_pic_parameter_set_id: pps.pps_pic_parameter_set_id,
+        num_extra_slice_header_bits: pps.num_extra_slice_header_bits,
+        output_flag_present_flag: pps.output_flag_present_flag == 1,
     }
 }
 
@@ -5180,15 +5148,19 @@ pub fn parse_h265_slice_header(
     if nal_unit_type > 31 {
         return None; // not a VCL NAL
     }
-    let is_irap = (16..=23).contains(&nal_unit_type);
-    let is_idr = nal_unit_type == 19 || nal_unit_type == 20;
     let rbsp = strip_emulation_prevention(&nal[2..]);
     let mut br = BitReader::new(&rbsp);
-
-    let first_slice_segment_in_pic_flag = br.read_bit()? == 1;
+    let pps_poc = [h265_pps_poc(pps)];
+    let prefix = crate::poc::parse_h265_slice_poc_bits(
+        &mut br,
+        nal_unit_type,
+        &h265_poc_context(sps),
+        &pps_poc,
+    )?;
+    let (is_irap, is_idr) = (prefix.is_irap, prefix.is_idr);
     // Non-first slice segments of a picture carry no POC / RPS the DPB needs (it
     // keys on the first slice); return early with the flag only.
-    if !first_slice_segment_in_pic_flag {
+    if !prefix.first_slice_segment_in_pic_flag {
         return Some(H265SliceHeader {
             first_slice_segment_in_pic_flag: false,
             nal_unit_type,
@@ -5204,29 +5176,16 @@ pub fn parse_h265_slice_header(
             lt: alloc::vec::Vec::new(),
         });
     }
-    if is_irap {
-        let _no_output_of_prior_pics_flag = br.read_bit()?;
-    }
-    let slice_pic_parameter_set_id = br.read_ue()? as u8;
-    // dependent_slice_segment_flag / slice_segment_address only appear when this
-    // is not the first slice segment, which we returned early on above.
-    for _ in 0..pps.num_extra_slice_header_bits {
-        br.read_bit()?; // slice_reserved_flag[i]
-    }
-    let slice_type = br.read_ue()?;
-    if pps.output_flag_present_flag == 1 {
-        let _pic_output_flag = br.read_bit()?;
-    }
-    // separate_colour_plane_flag is rejected at SPS parse, so no colour_plane_id.
+    let slice_pic_parameter_set_id = prefix.slice_pic_parameter_set_id;
+    let slice_type = prefix.slice_type;
 
-    let mut slice_pic_order_cnt_lsb = 0u32;
+    let slice_pic_order_cnt_lsb = prefix.slice_pic_order_cnt_lsb;
     let mut short_term_ref_pic_set_sps_flag = false;
     let mut st_rps = H265ShortTermRps::default();
     let mut num_bits_for_st_rps = 0u16;
     let mut num_delta_pocs_of_ref_rps_idx = 0u8;
     let mut lt: alloc::vec::Vec<H265LtEntry> = alloc::vec::Vec::new();
     if !is_idr {
-        slice_pic_order_cnt_lsb = br.read_bits(sps.log2_max_pic_order_cnt_lsb_minus4 as u32 + 4)?;
         short_term_ref_pic_set_sps_flag = br.read_bit()? == 1;
         if !short_term_ref_pic_set_sps_flag {
             // Inline RPS: st_ref_pic_set(num_short_term_ref_pic_sets). Measure the
@@ -5298,7 +5257,7 @@ pub fn parse_h265_slice_header(
     }
 
     Some(H265SliceHeader {
-        first_slice_segment_in_pic_flag,
+        first_slice_segment_in_pic_flag: true,
         nal_unit_type,
         slice_pic_parameter_set_id,
         slice_type,
@@ -8714,13 +8673,8 @@ impl VulkanVideoDevice {
             max_num_ref_frames,
             sps: ps.sps.clone(),
             pps: ps.pps.clone(),
-            poc_type: ps.sps.pic_order_cnt_type,
-            log2_max_pic_order_cnt_lsb: ps.sps.log2_max_pic_order_cnt_lsb_minus4 as u32 + 4,
             max_frame_num: 1 << (ps.sps.log2_max_frame_num_minus4 as u32 + 4),
-            prev_poc_msb: 0,
-            prev_poc_lsb: 0,
-            prev_frame_num: 0,
-            prev_frame_num_offset: 0,
+            poc: crate::poc::H264PocState::default(),
         })
     }
 
@@ -8838,9 +8792,7 @@ impl VulkanVideoDevice {
             refs: alloc::vec![None; num_slots],
             sps: ps.sps.clone(),
             pps: ps.pps.clone(),
-            log2_max_pic_order_cnt_lsb: ps.sps.log2_max_pic_order_cnt_lsb_minus4 as u32 + 4,
-            prev_poc_msb: 0,
-            prev_poc_lsb: 0,
+            poc: crate::poc::H265PocState::default(),
             seen_picture: false,
             skip_rasl: false,
         })
@@ -8998,14 +8950,9 @@ pub struct H264DpbDecoder {
     max_num_ref_frames: usize,
     sps: H264Sps,
     pps: H264Pps,
-    poc_type: u8,
-    log2_max_pic_order_cnt_lsb: u32,
     max_frame_num: i32,
-    // POC / frame-num tracking, carried across pictures in decoding order.
-    prev_poc_msb: i32,
-    prev_poc_lsb: i32,
-    prev_frame_num: i32,
-    prev_frame_num_offset: i32,
+    /// Picture-order-count derivation, carried across pictures in decoding order.
+    poc: crate::poc::H264PocState,
 }
 
 /// Pictures split out of a stream: each is a first-slice header plus the slice
@@ -9922,7 +9869,7 @@ impl core::fmt::Debug for H264DpbDecoder {
             .field("coded_extent", &self.core.coded_extent)
             .field("dpb_slots", &self.core.slots.len())
             .field("max_num_ref_frames", &self.max_num_ref_frames)
-            .field("poc_type", &self.poc_type)
+            .field("poc_type", &self.sps.pic_order_cnt_type)
             .finish_non_exhaustive()
     }
 }
@@ -10090,10 +10037,7 @@ impl H264DpbDecoder {
         for r in &mut self.refs {
             *r = None;
         }
-        self.prev_poc_msb = 0;
-        self.prev_poc_lsb = 0;
-        self.prev_frame_num = 0;
-        self.prev_frame_num_offset = 0;
+        self.poc = crate::poc::H264PocState::default();
         // Re-issue the session RESET control on the next decode (a discontinuity).
         self.core.first = true;
     }
@@ -10223,54 +10167,7 @@ impl H264DpbDecoder {
     /// Compute the picture-order-count for the current picture and advance the
     /// POC tracking state (POC types 0 and 2; type 1 is rejected at creation).
     fn compute_poc(&mut self, hdr: &H264SliceHeader) -> i32 {
-        match self.poc_type {
-            0 => {
-                if hdr.is_idr {
-                    self.prev_poc_msb = 0;
-                    self.prev_poc_lsb = 0;
-                }
-                let max_lsb = 1i32 << self.log2_max_pic_order_cnt_lsb;
-                let lsb = hdr.pic_order_cnt_lsb as i32;
-                let poc_msb = if lsb < self.prev_poc_lsb && (self.prev_poc_lsb - lsb) >= max_lsb / 2
-                {
-                    self.prev_poc_msb + max_lsb
-                } else if lsb > self.prev_poc_lsb && (lsb - self.prev_poc_lsb) > max_lsb / 2 {
-                    self.prev_poc_msb - max_lsb
-                } else {
-                    self.prev_poc_msb
-                };
-                let top = poc_msb + lsb;
-                let bottom = top + hdr.delta_pic_order_cnt_bottom;
-                // Reference pictures update the prev-POC state (per 8.2.1.1);
-                // non-reference pictures leave it unchanged.
-                if hdr.nal_ref_idc != 0 {
-                    self.prev_poc_msb = poc_msb;
-                    self.prev_poc_lsb = lsb;
-                }
-                top.min(bottom)
-            }
-            // POC type 2: derived from frame_num alone (8.2.1.3).
-            _ => {
-                let frame_num = hdr.frame_num as i32;
-                let frame_num_offset = if hdr.is_idr {
-                    0
-                } else if self.prev_frame_num > frame_num {
-                    self.prev_frame_num_offset + self.max_frame_num
-                } else {
-                    self.prev_frame_num_offset
-                };
-                let poc = if hdr.is_idr {
-                    0
-                } else if hdr.nal_ref_idc == 0 {
-                    2 * (frame_num_offset + frame_num) - 1
-                } else {
-                    2 * (frame_num_offset + frame_num)
-                };
-                self.prev_frame_num_offset = frame_num_offset;
-                self.prev_frame_num = frame_num;
-                poc
-            }
-        }
+        self.poc.compute(&h264_poc_context(&self.sps), hdr)
     }
 
     /// H.264 sliding-window reference marking: evict the short-term reference
@@ -10607,10 +10504,8 @@ pub struct H265DpbDecoder {
     refs: alloc::vec::Vec<Option<H265RefPic>>,
     sps: H265Sps,
     pps: H265Pps,
-    log2_max_pic_order_cnt_lsb: u32,
-    // POC tracking, carried across pictures in decoding order.
-    prev_poc_msb: i32,
-    prev_poc_lsb: i32,
+    /// Picture-order-count derivation, carried across pictures in decoding order.
+    poc: crate::poc::H265PocState,
     /// Whether any picture has been decoded since creation / [`reset`]. A CRA has
     /// `NoRaslOutputFlag == 1` (a hard reference reset) only when it is the first
     /// picture; a later CRA keeps its predecessors for its RASL followers.
@@ -10650,8 +10545,7 @@ impl H265DpbDecoder {
         for r in &mut self.refs {
             *r = None;
         }
-        self.prev_poc_msb = 0;
-        self.prev_poc_lsb = 0;
+        self.poc = crate::poc::H265PocState::default();
         self.seen_picture = false;
         // The next IRAP sets this; a stray RASL before any IRAP is not skipped.
         self.skip_rasl = false;
@@ -10892,28 +10786,18 @@ impl H265DpbDecoder {
     /// Compute the picture-order-count for the current picture and advance the POC
     /// tracking state (H.265 8.3.1, the same MSB/LSB scheme as H.264 POC type 0).
     fn compute_poc(&mut self, hdr: &H265SliceHeader) -> i32 {
-        if hdr.is_idr {
-            self.prev_poc_msb = 0;
-            self.prev_poc_lsb = 0;
-            return 0;
-        }
-        let max_lsb = 1i32 << self.log2_max_pic_order_cnt_lsb;
-        let lsb = hdr.slice_pic_order_cnt_lsb as i32;
-        let poc_msb = if lsb < self.prev_poc_lsb && (self.prev_poc_lsb - lsb) >= max_lsb / 2 {
-            self.prev_poc_msb + max_lsb
-        } else if lsb > self.prev_poc_lsb && (lsb - self.prev_poc_lsb) > max_lsb / 2 {
-            self.prev_poc_msb - max_lsb
-        } else {
-            self.prev_poc_msb
-        };
-        let poc = poc_msb + lsb;
-        // A TemporalId-0 reference picture (not RASL/RADL/SLNR) updates the prev
-        // state; our streams are all TemporalId-0, so update on any reference.
-        if h265_is_reference(hdr.nal_unit_type) {
-            self.prev_poc_msb = poc_msb;
-            self.prev_poc_lsb = lsb;
-        }
-        poc
+        self.poc.compute(
+            &h265_poc_context(&self.sps),
+            &crate::poc::H265SlicePoc {
+                first_slice_segment_in_pic_flag: hdr.first_slice_segment_in_pic_flag,
+                nal_unit_type: hdr.nal_unit_type,
+                slice_pic_parameter_set_id: hdr.slice_pic_parameter_set_id,
+                slice_type: hdr.slice_type,
+                slice_pic_order_cnt_lsb: hdr.slice_pic_order_cnt_lsb,
+                is_irap: hdr.is_irap,
+                is_idr: hdr.is_idr,
+            },
+        )
     }
 
     /// The DPB slot holding the reference picture with this POC, if any.
@@ -10976,7 +10860,7 @@ impl H265DpbDecoder {
         // one without matches on POC lsb alone. A resolved slot is (re)marked
         // long-term, so the driver's reference info (and its MV scaling) mirrors
         // the slice's classification; the marking is re-derived per picture.
-        let max_lsb = 1i32 << self.log2_max_pic_order_cnt_lsb;
+        let max_lsb = 1i32 << (u32::from(self.sps.log2_max_pic_order_cnt_lsb_minus4) + 4);
         for r in self.refs.iter_mut().flatten() {
             r.is_long_term = false;
         }
