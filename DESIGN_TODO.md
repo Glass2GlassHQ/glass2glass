@@ -237,6 +237,10 @@ Phased plan:
   needs a real competing-constraint scenario to drive it.
 - **Hardware `tee -> {decode, mux}` integration test** on real Linux
   (`rtsp ffmpeg wayland-sink`); only fake-element coverage today.
+- **A source's produce set in the fan-in runners.** `run_fan_in` and the duplex
+  runners take each branch's preferred `Caps` from `intercept_caps`, so a
+  multi-format source cannot have its format negotiated on a merged branch the
+  way the linear and DAG runners do.
 
 ## Seek and auto-plug
 
@@ -381,8 +385,9 @@ Phased plan:
 
 ## Capture sources
 
-- `v4l2src`: MMAP DMABUF output (`MemoryDomain::DmaBuf`); format-flexible
-  negotiation (MJPEG-mode UVC, other fourccs) vs fixed YUYV.
+- `v4l2src`: MMAP DMABUF output (`MemoryDomain::DmaBuf`).
+- V4L2 device discovery reports YUYV modes as caps only; the other formats
+  `v4l2src` can carry stay in `detail`.
 - PipeWire capture: DMABUF output; an xdg-desktop-portal screen-capture
   handshake (a portal-granted node id already reaches `pipewirevideosrc` via
   `target-object`).

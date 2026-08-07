@@ -1100,11 +1100,11 @@ and a thin sink does the UDP I/O.
 ### 4.12a Live Capture (V4L2, libcamera)
 
 `V4l2Src` (`v4l2src.rs`, `v4l2` feature, Linux-only) is the first real capture
-source: it streams packed **YUYV** (4:2:2, the near-universal UVC output) off a
-`/dev/videoN` device via V4L2 mmap streaming I/O, wrapping the pure-Rust `v4l`
-crate (no libv4l C dependency). `VideoConvert` unpacks YUYV to a planar / RGB
-target (§3.1 raw formats), so the canonical chain is
-`V4l2Src -> VideoConvert(Yuyv -> Nv12) -> sink`.
+source: it streams frames off a `/dev/videoN` device via V4L2 mmap streaming
+I/O, wrapping the pure-Rust `v4l` crate (no libv4l C dependency). Packed
+**YUYV** (4:2:2, the near-universal UVC output) is the preferred format, and
+`VideoConvert` unpacks it to a planar / RGB target (§3.1 raw formats), so the
+canonical chain is `V4l2Src -> VideoConvert(Yuyv -> Nv12) -> sink`.
 
 Two design points carry the element:
 
@@ -1115,13 +1115,26 @@ Two design points carry the element:
   `DataFrame`s. The channel bound (`BUFFER_COUNT`) applies backpressure: the
   capture thread blocks rather than growing memory when the pipeline falls
   behind. The source reports a live `LatencyReport` of one frame period.
-- **Up-front format negotiation, re-open for capture.** `intercept_caps` opens
-  the device, sets YUYV at the requested geometry, and reads back what the
-  driver actually chose (it may snap to a supported mode); the probe device is
-  then dropped. The capture thread re-opens the device under that exact format.
-  Keeping no device handle in the struct between negotiation and `run`
-  sidesteps `Send` / borrow entanglement with the stream. Errors surface as
+- **Up-front format negotiation, re-open for capture.** The probe opens the
+  device, enumerates its pixel formats, and for each one it can carry sets that
+  format at the requested geometry and reads back what the driver actually chose
+  (it may snap to a supported mode); the probe device is then dropped. The
+  capture thread re-opens the device under the negotiated format. Keeping no
+  device handle in the struct between negotiation and `run` sidesteps `Send` /
+  borrow entanglement with the stream. Errors surface as
   `G2gError::Hardware(HardwareError::V4l2(errno))`.
+- **The device offers, negotiation decides (M954).** Every confirmed format
+  becomes one alternative of the source's `CapsConstraint::Produces` set, in a
+  fixed preference order: YUYV, NV12, I420, then MJPEG last (it needs a
+  decoder). A chain that constrains nothing therefore takes YUYV, exactly as
+  before; a downstream `MjpegDec` (or a pinned `image/jpeg` link) drops the raw
+  alternatives during arc consistency and the camera runs in its MJPEG mode
+  instead, which is what fits 1080p over USB. `configure_pipeline` reads the
+  solved caps back to learn which mode the capture thread runs, and MJPEG's
+  per-frame length comes from the buffer's `bytesused` rather than the format's
+  `sizeimage`. What a pixel format means on a link (its `Caps`, its frame size)
+  lives in `capturepixelformat.rs`, shared with `LibCameraSrc`, which sits on a
+  different fourcc registry but agrees on the meaning.
 
 `LibCameraSrc` (`libcamerasrc.rs`, `libcamera` feature, Linux-only) is the
 second capture source and the modern Linux camera path: it captures through the

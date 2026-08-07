@@ -49,6 +49,9 @@ pub mod audiotestsrc;
 pub mod av1parse;
 pub mod avoffset;
 pub mod capsfilter;
+// What a capture source's pixel format means on a link, shared by the capture
+// sources so their fourcc tables map to one set of caps.
+pub mod capturepixelformat;
 pub mod concat;
 pub mod cutter;
 pub mod equalizer;

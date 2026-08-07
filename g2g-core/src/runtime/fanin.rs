@@ -20,7 +20,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 use super::autoplug::PadRequest;
 use crate::bus::BusHandle;
-use crate::caps::Caps;
+use crate::caps::{Caps, CapsSet};
 use crate::clock::{ClockCandidate, ClockPriority};
 use crate::clock::{DynAsyncClock, PipelineClock};
 use crate::element::{
@@ -53,6 +53,15 @@ use crate::runtime::{NodeRole, Observer};
 /// of different concrete types.
 pub trait DynSourceLoop: ElementBound {
     fn intercept_caps<'a>(&'a mut self) -> BoxFuture<'a, Result<Caps, G2gError>>;
+
+    /// Dyn-safe mirror of the produce set behind
+    /// [`SourceLoop::caps_constraint`], so the DAG runner negotiates a source
+    /// that offers alternatives (a camera's pixel formats) instead of only its
+    /// preferred one. The default is the single-caps answer; the blanket impl
+    /// reads the constraint the source declares.
+    fn produced_caps<'a>(&'a mut self) -> BoxFuture<'a, Result<CapsSet, G2gError>> {
+        Box::pin(async move { Ok(CapsSet::one(self.intercept_caps().await?)) })
+    }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError>;
 
@@ -148,6 +157,20 @@ impl<T: SourceLoop> DynSourceLoop for T {
         Box::pin(SourceLoop::intercept_caps(self))
     }
 
+    /// A source shape is `Produces` (native) or `LegacySource` (the migration
+    /// bridge). Any other variant means a sink / transform constraint on a source
+    /// slot, which is an element bug, so it fails loud rather than negotiating
+    /// something the source never offered.
+    fn produced_caps<'a>(&'a mut self) -> BoxFuture<'a, Result<CapsSet, G2gError>> {
+        Box::pin(async move {
+            match SourceLoop::caps_constraint(self).await? {
+                CapsConstraint::Produces(set) => Ok(set),
+                CapsConstraint::LegacySource(caps) => Ok(CapsSet::one(caps)),
+                _ => Err(G2gError::CapsMismatch),
+            }
+        })
+    }
+
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         SourceLoop::configure_pipeline(self, absolute_caps)
     }
@@ -228,6 +251,10 @@ impl<T: SourceLoop> DynSourceLoop for T {
 impl<'b> DynSourceLoop for &'b mut (dyn DynSourceLoop + 'b) {
     fn intercept_caps<'a>(&'a mut self) -> BoxFuture<'a, Result<Caps, G2gError>> {
         (**self).intercept_caps()
+    }
+
+    fn produced_caps<'a>(&'a mut self) -> BoxFuture<'a, Result<CapsSet, G2gError>> {
+        (**self).produced_caps()
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {

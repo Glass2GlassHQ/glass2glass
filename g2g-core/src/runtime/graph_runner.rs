@@ -1119,16 +1119,18 @@ async fn prepare_graph<'a>(
         obs.register(names, roles, probes.clone(), edges);
     }
 
-    // Phase 1: probe each source's caps (async) into an owned map, releasing
-    // the mutable borrow before the constraint phase borrows every node.
-    let mut source_caps: Vec<Option<Caps>> = (0..n).map(|_| None).collect();
+    // Phase 1: probe each source's produce set (async) into an owned map,
+    // releasing the mutable borrow before the constraint phase borrows every
+    // node. A source that offers alternatives (a camera's pixel formats) hands
+    // over all of them, so the solve picks the one downstream can take.
+    let mut source_caps: Vec<Option<CapsSet>> = (0..n).map(|_| None).collect();
     for &node in topo {
         if matches!(vg.kind(node), NodeKind::Source) {
             let GraphNodeRef::Source(src) = vg.element_mut(node).ok_or(G2gError::CapsMismatch)?
             else {
                 return Err(G2gError::CapsMismatch);
             };
-            source_caps[node.0 as usize] = Some(src.intercept_caps().await?);
+            source_caps[node.0 as usize] = Some(src.produced_caps().await?);
         }
     }
 
@@ -2289,21 +2291,21 @@ fn element_ref<'g, 'a>(
 }
 
 /// Build the per-node solver constraints for a validated graph, given each
-/// source's probed caps (indexed by node id, `None` for non-sources). The
+/// source's probed produce set (indexed by node id, `None` for non-sources). The
 /// constraints borrow their elements immutably, so the returned vec must be
 /// dropped before any `&mut` borrow (configure). Shared by the runner's Phase 2
 /// and the negotiate-only tooling path ([`negotiate_graph`]).
 fn build_node_constraints<'g, 'a>(
     vg: &'g ValidatedGraph<GraphNodeRef<'a>>,
-    source_caps: &[Option<Caps>],
+    source_caps: &[Option<CapsSet>],
 ) -> Result<Vec<NodeConstraint<'g>>, G2gError> {
     let mut constraints: Vec<NodeConstraint<'g>> = Vec::with_capacity(vg.node_count());
     for (i, src_caps) in source_caps.iter().enumerate() {
         let node = NodeId(i as u32);
         let nc = match vg.kind(node) {
             NodeKind::Source => {
-                let caps = src_caps.clone().ok_or(G2gError::CapsMismatch)?;
-                NodeConstraint::Element(CapsConstraint::Produces(CapsSet::one(caps)))
+                let set = src_caps.clone().ok_or(G2gError::CapsMismatch)?;
+                NodeConstraint::Element(CapsConstraint::Produces(set))
             }
             NodeKind::Transform => {
                 let elem = element_ref(vg, node).ok_or(G2gError::CapsMismatch)?;
@@ -2476,9 +2478,9 @@ pub async fn negotiate_graph_explained<'a>(
     }
     let topo = vg.topo().to_vec();
 
-    // Phase 1: probe each source's caps (async), releasing the mutable borrow
-    // before the constraint phase borrows every node immutably.
-    let mut source_caps: Vec<Option<Caps>> = (0..n).map(|_| None).collect();
+    // Phase 1: probe each source's produce set (async), releasing the mutable
+    // borrow before the constraint phase borrows every node immutably.
+    let mut source_caps: Vec<Option<CapsSet>> = (0..n).map(|_| None).collect();
     for &node in &topo {
         if matches!(vg.kind(node), NodeKind::Source) {
             let GraphNodeRef::Source(src) = vg
@@ -2488,7 +2490,7 @@ pub async fn negotiate_graph_explained<'a>(
                 return Err(NegotiateError::Setup(G2gError::CapsMismatch));
             };
             source_caps[node.0 as usize] =
-                Some(src.intercept_caps().await.map_err(NegotiateError::Setup)?);
+                Some(src.produced_caps().await.map_err(NegotiateError::Setup)?);
         }
     }
 

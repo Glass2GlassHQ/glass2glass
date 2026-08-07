@@ -173,6 +173,16 @@ so an optional branch (a preview that can't follow a format switch) does not kil
 the essential ones. A genuine downstream error still surfaces through that branch
 arm's own result, so swallowing the closed channel at the tee is safe.
 
+Negotiation phase 1 asks each source for its **produce set**
+(`DynSourceLoop::produced_caps`, the erased view of `SourceLoop::caps_constraint`),
+not its preferred caps alone, so a source that offers alternatives (`v4l2src`'s
+pixel formats, §4.12a) has the choice settled by the solve like any other element:
+arc consistency drops the alternatives downstream cannot take, the fixation picks
+the highest-preference survivor, and the source reads the outcome in
+`configure_pipeline`. A source still on the legacy bridge yields the single
+`LegacySource` caps, so it negotiates exactly as before. The fan-in runners take
+each branch's preferred caps only.
+
 `run_graph` consumes the elements it runs (it `take()`s the boxed payloads), so a
 graph runs only once. Re-running (seek-and-replay after a flushing seek, retry,
 A/B benchmarking) needs *fresh* elements, because real ones carry state a rewind

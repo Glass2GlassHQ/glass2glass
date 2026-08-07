@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M954: `v4l2src` advertises every pixel format the device reports and captures in whichever one negotiation picks, now that the graph runner negotiates a source's full produce set: a downstream `mjpegdec` selects a camera's MJPEG mode.
+
 - M953: the thread-per-arm runner takes its fan-in deadline tick from the pipeline clock.
 
 - M952: `tsdemux` synthesizes per-picture PTS for MPEG-2 and for H.264 / H.265 streams that reorder, on shared POC machinery the Vulkan decoders now consume too.

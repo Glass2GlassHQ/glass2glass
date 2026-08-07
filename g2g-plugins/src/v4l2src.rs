@@ -1,14 +1,20 @@
-//! V4L2 capture source. Streams packed YUYV (4:2:2) frames off a UVC
-//! `/dev/videoN` device via mmap streaming I/O. Linux-only (`v4l2` feature).
+//! V4L2 capture source. Streams frames off a `/dev/videoN` device via mmap
+//! streaming I/O. Linux-only (`v4l2` feature).
 //!
-//! Pipeline shape: `V4l2Src -> VideoConvert(Yuyv -> Nv12/I420/Rgba8) -> sink`.
-//! YUYV is the near-universal UVC output; `VideoConvert` unpacks it (M89).
+//! The device decides which formats exist and negotiation decides which one is
+//! used: the probe enumerates the device's pixel formats, advertises every one
+//! [`CapturePixelFormat`] covers, and the capture thread runs whichever the
+//! solver fixed. Packed YUYV comes first in that set, so a chain that accepts
+//! anything (`V4l2Src -> VideoConvert -> sink`, M89) still gets the raw UVC
+//! output it always did. Pinning the link to `image/jpeg` instead selects the
+//! camera's MJPEG mode, which fits resolutions and frame rates over USB that
+//! uncompressed YUYV cannot; `MjpegDec` decodes it downstream.
 //!
 //! V4L2's ioctls are blocking, so the capture loop runs on a dedicated std
-//! thread that feeds the async `run` loop over a bounded channel. The format
-//! is negotiated up front in [`intercept_caps`](V4l2Src::intercept_caps) (the
-//! driver may adjust the requested geometry and frame rate), and the capture
-//! thread re-opens the device under that exact format. Keeping the device out
+//! thread that feeds the async `run` loop over a bounded channel. The formats
+//! are probed in [`intercept_caps`](V4l2Src::intercept_caps) (the driver may
+//! adjust the requested geometry and frame rate per format), and the capture
+//! thread re-opens the device under the negotiated one. Keeping the device out
 //! of the struct between negotiation and `run` sidesteps `Send`/borrow
 //! entanglement with the mmap stream, which borrows the device.
 
@@ -25,8 +31,10 @@ use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, FrameTiming, G2gError,
     HardwareError, LatencyReport, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
-    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat,
+    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate,
 };
+
+use crate::capturepixelformat::CapturePixelFormat;
 
 use v4l::buffer::Type;
 use v4l::control::{Control, Value as ControlValue};
@@ -48,8 +56,43 @@ const DEFAULT_FPS: u32 = 30;
 /// channel bound, so the capture thread blocks (backpressure) rather than
 /// outrunning the pipeline.
 const BUFFER_COUNT: u32 = 4;
-/// The only fourcc we negotiate. UVC cameras universally support it.
-const YUYV: &[u8; 4] = b"YUYV";
+
+/// The V4L2 fourccs this element carries, in the order they are advertised.
+/// Packed YUYV leads: it is the near-universal UVC raw output, and a chain that
+/// pins nothing takes the first alternative. MJPEG comes last because it needs
+/// a decoder downstream. A device format missing from this table is skipped,
+/// since there is no `Caps` to carry it on.
+const FOURCCS: [(&[u8; 4], CapturePixelFormat); 4] = [
+    (b"YUYV", CapturePixelFormat::Yuyv),
+    (b"NV12", CapturePixelFormat::Nv12),
+    (b"YU12", CapturePixelFormat::I420),
+    (b"MJPG", CapturePixelFormat::Mjpeg),
+];
+
+/// The format a V4L2 fourcc carries, `None` for one no `Caps` covers.
+pub fn format_for_fourcc(fourcc: &[u8; 4]) -> Option<CapturePixelFormat> {
+    FOURCCS
+        .iter()
+        .find(|(code, _)| *code == fourcc)
+        .map(|(_, format)| *format)
+}
+
+/// One capture mode the device confirmed: the fourcc to set plus the geometry
+/// and rate the driver reported back for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Mode {
+    fourcc: [u8; 4],
+    format: CapturePixelFormat,
+    width: u32,
+    height: u32,
+    fps: u32,
+}
+
+impl Mode {
+    fn caps(&self) -> Caps {
+        self.format.caps(self.width, self.height, self.fps)
+    }
+}
 
 /// Map a V4L2 / OS error to the reserved `G2gError::V4l2` arm, preserving the
 /// errno where one exists.
@@ -202,10 +245,13 @@ pub struct V4l2Src {
     /// 0 means run until error or downstream shutdown; otherwise stop after
     /// this many frames and emit EOS (the test / bounded-capture path).
     frame_limit: u64,
-    /// Driver-chosen `(width, height, fps)`, filled by `intercept_caps`. The
-    /// driver may snap the request to a supported mode, so these are the real
-    /// numbers the capture thread and the emitted caps use.
-    negotiated: Option<(u32, u32, u32)>,
+    /// Every mode the device confirmed during the probe, in advertised
+    /// preference order. Cached: negotiation runs more than once, and each
+    /// probe is a round of ioctls. Cleared when a property changes the request.
+    modes: Vec<Mode>,
+    /// The mode negotiation settled on, filled by `configure_pipeline` from the
+    /// caps the solver fixed. The capture thread runs exactly this.
+    chosen: Option<Mode>,
     configured: bool,
 }
 
@@ -221,7 +267,8 @@ impl V4l2Src {
             req_height: DEFAULT_HEIGHT,
             req_fps: DEFAULT_FPS,
             frame_limit: 0,
-            negotiated: None,
+            modes: Vec::new(),
+            chosen: None,
             configured: false,
         }
     }
@@ -231,6 +278,7 @@ impl V4l2Src {
     pub fn with_size(mut self, width: u32, height: u32) -> Self {
         self.req_width = width;
         self.req_height = height;
+        self.modes.clear();
         self
     }
 
@@ -240,6 +288,7 @@ impl V4l2Src {
     /// feeds the advertised caps, the latency report, and the fallback period.
     pub fn with_fps(mut self, fps: u32) -> Self {
         self.req_fps = fps;
+        self.modes.clear();
         self
     }
 
@@ -256,6 +305,7 @@ impl V4l2Src {
     pub fn with_device_id(mut self, id: impl Into<String>) -> Self {
         self.device_id = id.into();
         self.device_resolved = false;
+        self.modes.clear();
         self
     }
 
@@ -273,36 +323,74 @@ impl V4l2Src {
         Ok(())
     }
 
-    /// Open the device, set YUYV at the requested geometry, and read back what
-    /// the driver actually chose. The probe device is dropped before `run`.
-    fn negotiate(&mut self) -> Result<Caps, G2gError> {
+    /// Probe the device: for every fourcc it reports that [`FOURCCS`] covers,
+    /// set that format at the requested geometry and read back what the driver
+    /// actually chose. Caches the confirmed modes in preference order; the
+    /// probe device is dropped before `run`.
+    fn probe_modes(&mut self) -> Result<&[Mode], G2gError> {
+        if !self.modes.is_empty() {
+            return Ok(&self.modes);
+        }
         self.resolve_device()?;
         let dev = Device::with_path(&self.device).map_err(|e| v4l2_err(&e))?;
         // Controls are device state, not per-fd, so applying them on the probe
         // handle holds for the capture thread's own open.
         apply_controls(&dev, &self.controls)?;
-        let fmt = Format::new(self.req_width, self.req_height, FourCC::new(YUYV));
-        let actual = dev.set_format(&fmt).map_err(|e| v4l2_err(&e))?;
-        if &actual.fourcc.repr != YUYV {
-            // The device cannot produce YUYV (it snapped to MJPEG or similar).
-            // A format-flexible source / decode-through-MJPEG path is future
-            // work; for now this is an unsupported configuration.
-            return Err(G2gError::CapsMismatch);
+        let reported = dev.enum_formats().map_err(|e| v4l2_err(&e))?;
+
+        // Kept so a probe that confirms nothing reports why (a camera already
+        // streaming in another process refuses every set_format with EBUSY)
+        // instead of a bare caps mismatch.
+        let mut refusal: Option<G2gError> = None;
+        for (fourcc, format) in FOURCCS {
+            if !reported.iter().any(|d| &d.fourcc.repr == fourcc) {
+                continue;
+            }
+            let fmt = Format::new(self.req_width, self.req_height, FourCC::new(fourcc));
+            // A driver that rejects one format, substitutes another, or reports
+            // a degenerate geometry leaves that format out rather than failing
+            // the whole probe: the remaining formats may still work.
+            let actual = match dev.set_format(&fmt) {
+                Ok(actual) => actual,
+                Err(e) => {
+                    refusal.get_or_insert_with(|| v4l2_err(&e));
+                    continue;
+                }
+            };
+            if &actual.fourcc.repr != fourcc || actual.width == 0 || actual.height == 0 {
+                continue;
+            }
+            // Frame rate is per format and best-effort: many UVC cams ignore
+            // set_params for some modes, so fall back to the request when the
+            // read-back is unusable.
+            let fps = match dev.set_params(&Parameters::with_fps(self.req_fps)) {
+                Ok(p) if p.interval.numerator > 0 => p.interval.denominator / p.interval.numerator,
+                _ => self.req_fps,
+            };
+            self.modes.push(Mode {
+                fourcc: *fourcc,
+                format,
+                width: actual.width,
+                height: actual.height,
+                fps,
+            });
         }
-        // Frame rate is best-effort: many UVC cams ignore set_params for some
-        // modes, so fall back to the request when the read-back is unusable.
-        let fps = match dev.set_params(&Parameters::with_fps(self.req_fps)) {
-            Ok(p) if p.interval.numerator > 0 => p.interval.denominator / p.interval.numerator,
-            _ => self.req_fps,
-        };
-        self.negotiated = Some((actual.width, actual.height, fps));
-        Ok(Caps::RawVideo {
-            format: RawVideoFormat::Yuyv,
-            width: Dim::Fixed(actual.width),
-            height: Dim::Fixed(actual.height),
-            framerate: Rate::Fixed(fps << 16),
-            interlace: g2g_core::Interlace::Any,
-        })
+
+        if self.modes.is_empty() {
+            // Either the device refused every format, or it offers nothing this
+            // element can carry (a greyscale or bayer-only sensor, say).
+            return Err(refusal.unwrap_or(G2gError::CapsMismatch));
+        }
+        Ok(&self.modes)
+    }
+
+    /// Every format the device confirmed, in preference order, as the set the
+    /// solver picks from.
+    fn produced_caps(&mut self) -> Result<CapsSet, G2gError> {
+        let modes = self.probe_modes()?;
+        Ok(CapsSet::from_alternatives(
+            modes.iter().map(Mode::caps).collect(),
+        ))
     }
 }
 
@@ -319,25 +407,38 @@ impl SourceLoop for V4l2Src {
 
     fn intercept_caps<'a>(&'a mut self) -> Self::CapsFuture<'a> {
         // The probe ioctls are quick and synchronous; no need for an async body.
-        core::future::ready(self.negotiate())
-    }
-
-    /// Produces the YUYV caps the driver settles on during the ioctl probe, so a
-    /// chain built on the camera takes the native arc-consistency path. Mirrors
-    /// `UdpSrc`; the probe is synchronous, so no async body is needed.
-    fn caps_constraint<'a>(
-        &'a mut self,
-    ) -> impl Future<Output = Result<CapsConstraint<'a>, G2gError>> + 'a {
+        // Single-caps callers get the preferred format (YUYV where the device
+        // has it); the whole set travels through `caps_constraint`.
         core::future::ready(
-            self.negotiate()
-                .map(|caps| CapsConstraint::Produces(CapsSet::one(caps))),
+            self.probe_modes()
+                .and_then(|modes| modes.first().map(Mode::caps).ok_or(G2gError::CapsMismatch)),
         )
     }
 
-    fn configure_pipeline(&mut self, _absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        if self.negotiated.is_none() {
+    /// Produces every format the device confirmed during the ioctl probe, in
+    /// preference order, so the solver settles the link on the one downstream
+    /// wants (raw for a convert / display chain, `image/jpeg` for a decode
+    /// chain) and the chain takes the native arc-consistency path. The probe is
+    /// synchronous, so no async body is needed.
+    fn caps_constraint<'a>(
+        &'a mut self,
+    ) -> impl Future<Output = Result<CapsConstraint<'a>, G2gError>> + 'a {
+        core::future::ready(self.produced_caps().map(CapsConstraint::Produces))
+    }
+
+    /// Records which advertised mode the solver fixed, which is what the
+    /// capture thread then runs.
+    fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        if self.modes.is_empty() {
             return Err(G2gError::NotConfigured);
         }
+        let chosen = self
+            .modes
+            .iter()
+            .find(|m| m.caps().intersect(absolute_caps).is_ok())
+            .copied()
+            .ok_or(G2gError::CapsMismatch)?;
+        self.chosen = Some(chosen);
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
     }
@@ -346,7 +447,7 @@ impl SourceLoop for V4l2Src {
         ElementMetadata::new(
             "V4L2 camera source",
             "Source/Video",
-            "Captures video from a V4L2 device (YUYV)",
+            "Captures video from a V4L2 device (YUYV / NV12 / I420 / MJPEG)",
             "g2g",
         )
     }
@@ -380,6 +481,12 @@ impl SourceLoop for V4l2Src {
                 PropKind::Uint,
                 "requested capture rate, fps (best effort)",
             ),
+            PropertySpec::new(
+                "num-buffers",
+                PropKind::Int,
+                "frames to emit then EOS (-1 = forever)",
+            )
+            .with_default("-1"),
             control_prop(0),
             control_prop(1),
             control_prop(2),
@@ -391,6 +498,9 @@ impl SourceLoop for V4l2Src {
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        // Every property here feeds the probe (which device, which geometry and
+        // rate, which controls), so the cached modes no longer describe it.
+        self.modes.clear();
         if let Some(index) = CONTROLS.iter().position(|c| c.name == name) {
             self.controls[index] = Some(match CONTROLS[index].kind {
                 ControlKind::Switch => i64::from(value.as_bool().ok_or(PropError::Type)?),
@@ -421,6 +531,11 @@ impl SourceLoop for V4l2Src {
                 self.req_fps = value.as_uint().ok_or(PropError::Type)? as u32;
                 Ok(())
             }
+            "num-buffers" => {
+                let n = value.as_int().ok_or(PropError::Type)?;
+                self.frame_limit = if n < 0 { 0 } else { n as u64 };
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -439,6 +554,11 @@ impl SourceLoop for V4l2Src {
             "width" => Some(PropValue::Uint(self.req_width as u64)),
             "height" => Some(PropValue::Uint(self.req_height as u64)),
             "framerate" => Some(PropValue::Uint(self.req_fps as u64)),
+            "num-buffers" => Some(PropValue::Int(if self.frame_limit == 0 {
+                -1
+            } else {
+                self.frame_limit as i64
+            })),
             _ => None,
         }
     }
@@ -446,7 +566,11 @@ impl SourceLoop for V4l2Src {
     /// Live source: contributes one frame period of latency so the sink keeps a
     /// frame in hand and never runs dry waiting on capture.
     fn latency(&self) -> LatencyReport {
-        let fps = self.negotiated.map(|(_, _, f)| f).unwrap_or(self.req_fps);
+        let fps = self
+            .chosen
+            .or_else(|| self.modes.first().copied())
+            .map(|m| m.fps)
+            .unwrap_or(self.req_fps);
         let period_ns = if fps > 0 {
             1_000_000_000 / fps as u64
         } else {
@@ -460,10 +584,14 @@ impl SourceLoop for V4l2Src {
             if !self.configured {
                 return Err(G2gError::NotConfigured);
             }
-            let (w, h, fps) = self.negotiated.ok_or(G2gError::NotConfigured)?;
+            let mode = self.chosen.ok_or(G2gError::NotConfigured)?;
+            let (w, h, fps) = (mode.width, mode.height, mode.fps);
             let limit = self.frame_limit;
             let device = self.device.clone();
-            let expected = (w as usize) * (h as usize) * 2;
+            // A fixed-size format's short frame (a driver hiccup) cannot be
+            // unpacked, so it is dropped. MJPEG's length varies per frame, so
+            // only an empty buffer is dropped there.
+            let min_bytes = mode.format.frame_bytes(w, h).unwrap_or(1);
 
             // Bounded channel: the capture thread blocks once the pipeline is
             // BUFFER_COUNT frames behind, so we don't grow memory unboundedly.
@@ -474,7 +602,7 @@ impl SourceLoop for V4l2Src {
             // payload out of the mmap buffer, and hands it to the async side.
             let handle = std::thread::spawn(move || -> Result<(), G2gError> {
                 let dev = Device::with_path(&device).map_err(|e| v4l2_err(&e))?;
-                dev.set_format(&Format::new(w, h, FourCC::new(YUYV)))
+                dev.set_format(&Format::new(w, h, FourCC::new(&mode.fourcc)))
                     .map_err(|e| v4l2_err(&e))?;
                 let _ = dev.set_params(&Parameters::with_fps(fps));
                 let mut stream = MmapStream::with_buffers(&dev, Type::VideoCapture, BUFFER_COUNT)
@@ -513,9 +641,9 @@ impl SourceLoop for V4l2Src {
             let mut prev_pts = 0u64;
             let mut seq = 0u64;
             while let Some(captured) = rx.recv().await {
-                // A short frame (driver hiccup) can't be unpacked safely; skip
-                // it rather than push a malformed buffer downstream.
-                if captured.bytes.len() < expected {
+                // Skip a short frame rather than push a malformed buffer
+                // downstream.
+                if captured.bytes.len() < min_bytes {
                     continue;
                 }
                 // Source-side wall-clock stamp for glass-to-glass latency, same
@@ -541,7 +669,9 @@ impl SourceLoop for V4l2Src {
                         duration_ns,
                         capture_ns: pts,
                         arrival_ns,
-                        keyframe: true, // raw frames are each independently presentable
+                        // raw frames and MJPEG's per-frame JPEGs are each
+                        // independently decodable
+                        keyframe: true,
                     },
                     sequence: seq,
                     meta: Default::default(),
@@ -576,17 +706,30 @@ impl SourceLoop for V4l2Src {
 }
 
 impl PadTemplates for V4l2Src {
-    /// Always produces packed YUYV; a constructed instance fixes the geometry
-    /// and rate during `intercept_caps`.
+    /// Every format the element can carry, in preference order. Which of them a
+    /// given device offers, and at what geometry and rate, is decided by the
+    /// probe in `intercept_caps`.
     fn pad_templates() -> Vec<PadTemplate> {
-        Vec::from([PadTemplate::source(g2g_core::CapsSet::one(
-            Caps::RawVideo {
-                format: RawVideoFormat::Yuyv,
-                width: Dim::Any,
-                height: Dim::Any,
-                framerate: Rate::Any,
-                interlace: g2g_core::Interlace::Any,
-            },
+        let alternatives = FOURCCS
+            .iter()
+            .map(|(_, format)| match format.raw_format() {
+                Some(raw) => Caps::RawVideo {
+                    format: raw,
+                    width: Dim::Any,
+                    height: Dim::Any,
+                    framerate: Rate::Any,
+                    interlace: g2g_core::Interlace::Any,
+                },
+                None => Caps::CompressedVideo {
+                    codec: g2g_core::VideoCodec::Mjpeg,
+                    width: Dim::Any,
+                    height: Dim::Any,
+                    framerate: Rate::Any,
+                },
+            })
+            .collect();
+        Vec::from([PadTemplate::source(CapsSet::from_alternatives(
+            alternatives,
         ))])
     }
 }
@@ -785,14 +928,34 @@ mod tests {
         // capture thread is never spawned against an un-negotiated device.
         let mut src = V4l2Src::new("/dev/video0");
         let err = src
-            .configure_pipeline(&Caps::RawVideo {
-                format: RawVideoFormat::Yuyv,
-                width: Dim::Fixed(640),
-                height: Dim::Fixed(480),
-                framerate: Rate::Fixed(30 << 16),
-                interlace: g2g_core::Interlace::Any,
-            })
+            .configure_pipeline(&CapturePixelFormat::Yuyv.caps(640, 480, 30))
             .expect_err("configure without negotiate must fail");
         assert_eq!(err, G2gError::NotConfigured);
+    }
+
+    #[test]
+    fn yuyv_leads_the_advertised_formats_and_mjpeg_trails() {
+        // A chain that pins nothing takes the first alternative, so raw YUYV
+        // must stay the default and MJPEG (needs a decoder) must come last.
+        let order: Vec<CapturePixelFormat> = FOURCCS.iter().map(|(_, f)| *f).collect();
+        assert_eq!(order.first(), Some(&CapturePixelFormat::Yuyv));
+        assert_eq!(order.last(), Some(&CapturePixelFormat::Mjpeg));
+        // the fourcc table is the only place a code is written, and no code
+        // may appear twice (one format would shadow the other).
+        for (i, (code, _)) in FOURCCS.iter().enumerate() {
+            assert!(!FOURCCS[..i].iter().any(|(c, _)| c == code));
+            assert_eq!(format_for_fourcc(code), Some(FOURCCS[i].1));
+        }
+        assert_eq!(format_for_fourcc(b"GREY"), None);
+    }
+
+    /// The whole advertised set must fixate, or a chain that pins one of the
+    /// formats fails negotiation instead of selecting it.
+    #[test]
+    fn every_advertised_format_fixates() {
+        for (_, format) in FOURCCS {
+            let caps = format.caps(1280, 720, 30);
+            assert_eq!(caps.fixate().expect("fixates"), caps);
+        }
     }
 }

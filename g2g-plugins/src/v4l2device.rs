@@ -2,9 +2,11 @@
 //! [`Device`] records so a [`DeviceMonitor`](g2g_core::runtime::DeviceMonitor)
 //! lists cameras with the modes their driver actually reports.
 //!
-//! Only the YUYV fourcc becomes caps, because YUYV is all `v4l2src` can
-//! deliver. The other fourccs the node advertises are kept in `detail` so the
-//! information is not lost when a decode-through-MJPEG path arrives.
+//! Only the YUYV fourcc becomes caps, though `v4l2src` itself negotiates more
+//! (M954): a node's whole size / rate grid for one format already runs into
+//! [`MAX_ALTERNATIVES`], so listing every format needs a per-format budget
+//! first. The other fourccs the node advertises are kept in `detail` so the
+//! information is not lost.
 //!
 //! V4L2 has no hotplug event source here (udev would be a separate backend),
 //! so the provider offers no native watch and the monitor polls and diffs.
