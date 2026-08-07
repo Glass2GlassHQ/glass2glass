@@ -237,10 +237,6 @@ Phased plan:
   needs a real competing-constraint scenario to drive it.
 - **Hardware `tee -> {decode, mux}` integration test** on real Linux
   (`rtsp ffmpeg wayland-sink`); only fake-element coverage today.
-- **A source's produce set in the fan-in runners.** `run_fan_in` and the duplex
-  runners take each branch's preferred `Caps` from `intercept_caps`, so a
-  multi-format source cannot have its format negotiated on a merged branch the
-  way the linear and DAG runners do.
 
 ## Seek and auto-plug
 

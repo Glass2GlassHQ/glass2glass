@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M955: the fan-in and duplex runners select each branch's format from the source's produce set, per input pad.
+
 - M954: `v4l2src` advertises every pixel format the device reports and captures in whichever one negotiation picks, now that the graph runner negotiates a source's full produce set: a downstream `mjpegdec` selects a camera's MJPEG mode.
 
 - M953: the thread-per-arm runner takes its fan-in deadline tick from the pipeline clock.

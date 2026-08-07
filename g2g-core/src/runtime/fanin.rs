@@ -326,6 +326,26 @@ impl<'b> DynSourceLoop for &'b mut (dyn DynSourceLoop + 'b) {
     }
 }
 
+/// The caps one fan-in branch runs: the highest-preference alternative of the
+/// source's produce set that the pad it feeds accepts (M955). A source offering
+/// several formats (a camera's pixel formats) is therefore selected by what the
+/// merge point takes, the way the DAG runner selects it by what downstream takes.
+///
+/// When the pad accepts none of them the preferred alternative is returned
+/// anyway, leaving the rejection to that pad's `configure_pipeline`, which is
+/// where it was raised before a source had a set to choose from.
+fn select_branch_caps(produced: &CapsSet, pad: &CapsConstraint<'_>) -> Result<Caps, G2gError> {
+    let accepted = produced
+        .alternatives()
+        .iter()
+        .filter_map(|alt| alt.fixate().ok())
+        .find(|fixed| pad.accepts(fixed));
+    match accepted {
+        Some(caps) => Ok(caps),
+        None => produced.fixate().ok_or(G2gError::CapsMismatch),
+    }
+}
+
 /// Dyn-safe mirror of [`MultiInputElement`] for a fan-in muxer node in the DAG
 /// runner (`run_graph`). Boxes `process`'s future and forwards the
 /// `Self: Sized` constraint methods, the same shape as [`DynSourceLoop`] /
@@ -670,13 +690,16 @@ where
     let sink_probe = ElementProbe::new(sink_name);
 
     // Phase 1 + 2: fixate each source's caps and configure it; the sink is
-    // configured against input 0's fixated caps (the merged-output caps).
-    // This is not routed through `solve_linear` because each source
-    // self-fixates with no peer narrowing — there's no chain to solve.
+    // configured against input 0's fixated caps (the merged-output caps). This
+    // is not routed through `solve_linear` because the branches do not form a
+    // chain: each is narrowed against the one peer they share, the sink.
     let mut fixated_caps: Vec<Caps> = Vec::with_capacity(input_count);
     for source in sources.iter_mut() {
-        let proposal = source.intercept_caps().await?;
-        let fixated = proposal.fixate()?;
+        let produced = source.produced_caps().await?;
+        let fixated = {
+            let sink_constraint = sink.caps_constraint_as_sink();
+            select_branch_caps(&produced, &sink_constraint)?
+        };
         source.configure_pipeline(&fixated)?.reject_refixate()?;
         fixated_caps.push(fixated);
     }
@@ -893,8 +916,9 @@ impl OutputSink for TaggingSink {
 /// [`run_muxer_sink`], the [`MultiInputElement`] here produces no merged output,
 /// so there is no trailing sink to wire.
 ///
-/// Each source self-fixates (no peer narrowing, like [`run_fanin_sink`]) and its
-/// fixated caps configure the matching session input pad. Every source pushes
+/// Each source is narrowed against the session input pad it feeds (like
+/// [`run_fanin_sink`], which narrows every branch against the merged sink), and
+/// the resulting caps configure both the source and that pad. Every source pushes
 /// into one shared `(input, packet)` channel; a single session task drains it and
 /// calls `session.process(input, ..)` serially, so the session keeps `&mut` state
 /// without aliasing. A per-input `Eos` is delivered to the session (so it can
@@ -965,13 +989,16 @@ where
     }
     let session_probe = ElementProbe::new(namer.add(crate::log::short_type_name::<Sess>(), None));
 
-    // Phase 1 + 2 per input: each source self-fixates; the fixated caps configure
-    // both the source and the matching session input pad (the session decides the
-    // track kind, e.g. H.264 video vs Opus audio, from these caps).
+    // Phase 1 + 2 per input: each source is narrowed against the session input
+    // pad it feeds; the fixated caps configure both the source and that pad (the
+    // session decides the track kind, e.g. H.264 video vs Opus audio, from them).
     let mut fixated_caps: Vec<Caps> = Vec::with_capacity(input_count);
     for (i, source) in sources.iter_mut().enumerate() {
-        let proposal = source.intercept_caps().await?;
-        let fixated = proposal.fixate()?;
+        let produced = source.produced_caps().await?;
+        let fixated = {
+            let pad_constraint = MultiInputElement::caps_constraint_as_input(session, i);
+            select_branch_caps(&produced, &pad_constraint)?
+        };
         source.configure_pipeline(&fixated)?.reject_refixate()?;
         MultiInputElement::configure_pipeline(session, i, &fixated)?.reject_refixate()?;
         fixated_caps.push(fixated);
@@ -1136,8 +1163,8 @@ impl DuplexInbound for InboundReceiver {
 /// that is at once a sink (for its inputs) and a source (for its outputs), which
 /// neither the fan-in nor fan-out session runner could.
 ///
-/// Negotiation mirrors both halves: each source self-fixates and configures the
-/// matching session input pad (send side, like [`run_fanin_session`]); each
+/// Negotiation mirrors both halves: each source is narrowed against the session
+/// input pad it feeds and configures it (send side, like [`run_fanin_session`]); each
 /// recv-side output's caps configure the matching sink (like
 /// [`run_fanout_session`](crate::runtime::run_fanout_session)). At runtime the
 /// sources push `(input, packet)` into one shared tagged channel; the single
@@ -1244,12 +1271,16 @@ where
         sink_probes.push(ElementProbe::new(name));
     }
 
-    // Negotiate the send inputs (like run_fanin_session): each source self-fixates
-    // and the fixated caps configure both the source and its session input pad.
+    // Negotiate the send inputs (like run_fanin_session): each source is narrowed
+    // against the send input pad it feeds, and the fixated caps configure both
+    // the source and that pad.
     let mut input_caps: Vec<Caps> = Vec::with_capacity(input_count);
     for (i, source) in sources.iter_mut().enumerate() {
-        let proposal = source.intercept_caps().await?;
-        let fixated = proposal.fixate()?;
+        let produced = source.produced_caps().await?;
+        let fixated = {
+            let pad_constraint = MultiDuplexSession::caps_constraint_as_input(session, i);
+            select_branch_caps(&produced, &pad_constraint)?
+        };
         source.configure_pipeline(&fixated)?.reject_refixate()?;
         session.configure_input(i, &fixated)?.reject_refixate()?;
         input_caps.push(fixated);
@@ -1630,9 +1661,9 @@ impl<'a> DynamicFaninHandle<'a> {
 /// The aggregator is **terminal** (it consumes its inputs and produces no merged
 /// downstream output, like [`run_fanin_session`]): a multi-stream batching sink,
 /// a compositor-to-display, a WebRTC publisher. A source attaches via
-/// [`DynamicFaninHandle::add_input`]; on attach the source self-fixates (no peer
-/// narrowing) and its fixated caps configure the matching aggregator input pad,
-/// so a late input is negotiated without a global re-solve. Each input's packets
+/// [`DynamicFaninHandle::add_input`]; on attach the source is narrowed against
+/// the aggregator input pad it feeds and the resulting caps configure both, so a
+/// late input is negotiated without a global re-solve. Each input's packets
 /// are tagged with its pad index and drained by a single aggregator arm that owns
 /// `&mut aggregator`, so the aggregator keeps its state without aliasing. A
 /// per-input `Eos` is delivered to the aggregator (so it can flush that pad's
@@ -2117,10 +2148,13 @@ async fn attach_input<'a>(
     new_arm_tx: &Sender<BoxFuture<'a, Result<FaninArmOut, G2gError>>>,
     tap: &mut FaninTap,
 ) -> Result<(), G2gError> {
-    // Each source self-fixates (no peer narrowing, like run_fanin_session); the
-    // fixated caps configure both the source and its aggregator input pad.
-    let proposal = source.intercept_caps().await?;
-    let fixated = proposal.fixate()?;
+    // Narrowed against the aggregator pad it feeds (like run_fanin_session); the
+    // fixated caps configure both the source and that pad.
+    let produced = source.produced_caps().await?;
+    let fixated = {
+        let pad_constraint = aggregator.caps_constraint_as_input(pad);
+        select_branch_caps(&produced, &pad_constraint)?
+    };
     source.configure_pipeline(&fixated)?.reject_refixate()?;
     aggregator
         .configure_pipeline(pad, &fixated)?

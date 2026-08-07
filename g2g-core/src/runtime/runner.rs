@@ -1758,7 +1758,7 @@ where
     }
 
     // Negotiate per output: the session self-fixates each output's caps and
-    // configures the matching sink (no peer narrowing, like run_fanin_session).
+    // configures the matching sink (the sink's own constraint is not consulted).
     let mut output_caps: Vec<Caps> = Vec::with_capacity(branch_count);
     for (i, sink) in sinks.iter_mut().enumerate() {
         let fixated = session.output_caps(i)?.fixate()?;
