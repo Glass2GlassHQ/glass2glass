@@ -10,7 +10,7 @@ repository.workspace = true
 
 [features]
 default = ["std"]
-std = ["g2g-core/std"]
+std = ["g2g-core/std", "g2g-core/runtime"]
 # Launch-line registration (`g2g_ml::register`): pad templates and a Registry,
 # both of which live behind g2g-core's `runtime` feature. Off by default so the
 # plain library build stays free of the runtime layer; an app that parses text
