@@ -90,6 +90,7 @@ async fn decodes_mjpeg_to_rgba8_with_recovered_geometry() {
             width: Dim::Fixed(16),
             height: Dim::Fixed(16),
             framerate: Rate::Fixed(30 << 16),
+            interlace: g2g_core::Interlace::Any,
         }],
         "one CapsChanged with the decoded 16x16 RGBA geometry"
     );
@@ -128,6 +129,7 @@ async fn decodes_mjpeg_to_i420() {
             width: Dim::Fixed(16),
             height: Dim::Fixed(16),
             framerate: Rate::Fixed(30 << 16),
+            interlace: g2g_core::Interlace::Any,
         }],
         "CapsChanged announces the I420 output format"
     );
@@ -214,6 +216,7 @@ async fn gradient_jpeg(w: u32, h: u32) -> Vec<u8> {
         width: Dim::Fixed(w),
         height: Dim::Fixed(h),
         framerate: Rate::Fixed(30 << 16),
+        interlace: g2g_core::Interlace::Any,
     })
     .unwrap();
     let mut sink = CaptureSink::default();

@@ -27,6 +27,7 @@ fn introspects_pad_templates_without_constructing() {
                 width: Dim::Any,
                 height: Dim::Any,
                 framerate: Rate::Any,
+                interlace: g2g_core::Interlace::Any,
             }
         ),
         other => panic!("expected fixed RGBA caps, got {other:?}"),

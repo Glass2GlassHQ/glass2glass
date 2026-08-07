@@ -21,7 +21,7 @@
 use g2g_core::element::{AsyncElement, BoxFuture, OutputSink, PushOutcome};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
-use g2g_core::{Caps, Dim, G2gError, Rate, RawVideoFormat};
+use g2g_core::{Caps, Dim, G2gError, Interlace, Rate, RawVideoFormat};
 use g2g_ml::ortinfer::OrtInference;
 
 // Shared hand-encoded ONNX fixture builder (tests/util/onnx_fixture.rs): a single
@@ -93,6 +93,7 @@ fn rgba_caps(w: u32, h: u32) -> Caps {
         width: Dim::Fixed(w),
         height: Dim::Fixed(h),
         framerate: Rate::Any,
+        interlace: Interlace::Any,
     }
 }
 

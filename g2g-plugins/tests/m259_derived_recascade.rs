@@ -39,6 +39,7 @@ fn raw(fmt: RawVideoFormat, w: u32, h: u32) -> Caps {
         width: Dim::Fixed(w),
         height: Dim::Fixed(h),
         framerate: Rate::Fixed(30 << 16),
+        interlace: g2g_core::Interlace::Any,
     }
 }
 
@@ -48,6 +49,7 @@ fn i420_any() -> Caps {
         width: Dim::Any,
         height: Dim::Any,
         framerate: Rate::Any,
+        interlace: g2g_core::Interlace::Any,
     }
 }
 
@@ -126,6 +128,7 @@ impl AsyncElement for Converter {
                 width: width.clone(),
                 height: height.clone(),
                 framerate: framerate.clone(),
+                interlace: g2g_core::Interlace::Any,
             }),
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
@@ -164,11 +167,13 @@ impl AsyncElement for Halver {
                 width: Dim::Fixed(w),
                 height: Dim::Fixed(h),
                 framerate,
+                interlace: _,
             } => CapsSet::one(Caps::RawVideo {
                 format: *format,
                 width: Dim::Fixed(w / 2),
                 height: Dim::Fixed(h / 2),
                 framerate: framerate.clone(),
+                interlace: g2g_core::Interlace::Any,
             }),
             _ => CapsSet::from_alternatives(Vec::new()),
         }))

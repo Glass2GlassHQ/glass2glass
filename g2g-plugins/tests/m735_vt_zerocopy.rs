@@ -14,8 +14,8 @@ use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::{parse_launch, run_graph};
 use g2g_core::{
-    AsyncElement, Caps, ConfigureOutcome, Dim, G2gError, OutputSink, PipelineClock, PushOutcome,
-    Rate, RawVideoFormat, VideoCodec,
+    AsyncElement, Caps, ConfigureOutcome, Dim, G2gError, Interlace, OutputSink, PipelineClock,
+    PushOutcome, Rate, RawVideoFormat, VideoCodec,
 };
 use g2g_plugins::registry::default_registry;
 use g2g_plugins::vtdecode::VtDecode;
@@ -149,6 +149,7 @@ async fn cv_output_transcode_never_touches_system_memory() {
         width: Dim::Fixed(640),
         height: Dim::Fixed(480),
         framerate: Rate::Fixed(30 << 16),
+        interlace: Interlace::Any,
     };
     let narrowed = enc.intercept_caps(&nv12).expect("intercept NV12");
     enc.configure_pipeline(&narrowed).expect("encoder session");

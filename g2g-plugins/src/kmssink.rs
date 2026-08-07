@@ -522,6 +522,7 @@ impl AsyncElement for KmsSink {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         }))
     }
 
@@ -741,6 +742,7 @@ mod tests {
             width: Dim::Fixed(1280),
             height: Dim::Fixed(720),
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         };
         assert_eq!(sink.intercept_caps(&nv12), Ok(nv12));
     }
@@ -761,6 +763,7 @@ mod tests {
                 width: Dim::Any,
                 height: Dim::Any,
                 framerate: Rate::Any,
+                interlace: g2g_core::Interlace::Any,
             }]
         );
     }
@@ -795,6 +798,7 @@ mod tests {
             width: Dim::Fixed(641),
             height: Dim::Fixed(480),
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         };
         // `ConfigureOutcome` doesn't implement `PartialEq`, so match the
         // Err arm explicitly rather than using assert_eq!.

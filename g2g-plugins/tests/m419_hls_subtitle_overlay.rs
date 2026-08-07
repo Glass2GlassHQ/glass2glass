@@ -33,6 +33,7 @@ fn raw_video() -> Caps {
         width: Dim::Any,
         height: Dim::Any,
         framerate: Rate::Any,
+        interlace: g2g_core::Interlace::Any,
     }
 }
 
@@ -119,12 +120,13 @@ fn builds_a_cross_source_subtitle_overlay() {
     .expect("builds")
     .expect("a routable muxed video yields a graph");
 
-    // HlsSrc(video), TsDemuxN, h264 stub, videoconvert(RGBA8), TextOverlayN,
-    // videoconvert(NV12), autovideosink, HlsSrc(subtitle), SubParse = 9 nodes.
+    // HlsSrc(video), TsDemuxN, h264 stub, deinterlace (M935),
+    // videoconvert(RGBA8), TextOverlayN, videoconvert(NV12), autovideosink,
+    // HlsSrc(subtitle), SubParse = 10 nodes.
     assert_eq!(
         graph.node_count(),
-        9,
-        "video chain + overlay + sink + subtitle source + subparse"
+        10,
+        "video chain (with deinterlace) + overlay + sink + subtitle source + subparse"
     );
 
     // Exactly one fan-in (the overlay), fed by the video convert and the subtitle

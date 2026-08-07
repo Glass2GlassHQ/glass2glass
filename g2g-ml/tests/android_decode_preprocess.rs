@@ -198,6 +198,7 @@ async fn decode_gpu_to_preprocess_tensor() {
         width: Dim::Fixed(w),
         height: Dim::Fixed(h),
         framerate: Rate::Any,
+        interlace: g2g_core::Interlace::Any,
     };
     // Negotiation (#3): WgpuPreprocess accepts RGBA input.
     assert_eq!(

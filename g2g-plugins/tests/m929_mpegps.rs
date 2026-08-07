@@ -1339,6 +1339,7 @@ async fn composited_frames_carry_the_cue_only_inside_its_window_and_rectangle() 
         width: Dim::Fixed(VOB_W),
         height: Dim::Fixed(VOB_H),
         framerate: Rate::Fixed(25 << 16),
+        interlace: g2g_core::Interlace::Any,
     };
     for pad in 0..2 {
         comp.configure_pipeline(pad, &rgba).expect("configure");

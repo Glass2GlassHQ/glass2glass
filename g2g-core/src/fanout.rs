@@ -963,6 +963,7 @@ mod tests {
             width: Dim::Fixed(16),
             height: Dim::Fixed(16),
             framerate: Rate::Fixed(30 << 16),
+            interlace: crate::Interlace::Any,
         }
     }
 

@@ -97,6 +97,9 @@ pub mod analyticsoverlay;
     feature = "mediacodec-wgpu"
 ))]
 pub mod gpu;
+// GPU / compute device discovery (M939): wgpu adapters, CUDA devices, VAAPI nodes.
+#[cfg(any(feature = "wgpu-sink", feature = "cuda", feature = "vaapi"))]
+pub mod gpudevice;
 // Re-export wgpu so a downstream consumer (a viewer wiring g2g's GPU-texture
 // decode into its renderer) can name `wgpu::Texture` / build on a shared device
 // with the EXACT wgpu version g2g's textures are bound to. A version mismatch
@@ -288,6 +291,10 @@ pub mod uridecodebin;
 // gst-inspect (M107). std (the Registry is std).
 #[cfg(feature = "std")]
 pub mod registry;
+// The device-provider analog of `registry` (M939): the standard
+// `DeviceMonitor` assembly.
+#[cfg(feature = "std")]
+pub mod devicemon;
 // GStreamer porting helpers: gst->g2g element map + launch linter (M200). std
 // (uses the Registry + parse_launch).
 #[cfg(feature = "std")]
@@ -389,6 +396,10 @@ extern crate std;
 
 #[cfg(feature = "std")]
 pub mod clock;
+// Wall-clock pacing transform: holds each buffer until its PTS is due, turning
+// an as-fast-as-possible upstream into a live-paced stream.
+#[cfg(feature = "std")]
+pub mod clocksync;
 #[cfg(feature = "std")]
 pub mod filesink;
 #[cfg(feature = "std")]
@@ -660,6 +671,11 @@ pub mod metalvideosink;
 // macOS Core Audio render + capture via AudioToolbox AudioQueue (M737).
 #[cfg(all(target_os = "macos", feature = "coreaudio"))]
 pub mod coreaudio;
+
+// Core Audio device discovery: the HAL's input / output devices, for the
+// device monitor.
+#[cfg(all(target_os = "macos", feature = "coreaudio"))]
+pub mod coreaudiodevice;
 // Shared CVPixelBuffer helpers (NV12 pack + zero-copy keep-alive + the capture
 // delegate handoff) for the macOS video elements.
 #[cfg(all(
@@ -674,6 +690,11 @@ pub(crate) mod cvnv12;
 // AVFoundation camera + mic capture (M738).
 #[cfg(all(target_os = "macos", feature = "avfoundation"))]
 pub mod avf;
+
+// AVFoundation camera discovery: the cameras a discovery session lists, for
+// the device monitor.
+#[cfg(all(target_os = "macos", feature = "avfoundation"))]
+pub mod avfdevice;
 // ScreenCaptureKit display capture (M739).
 #[cfg(all(target_os = "macos", feature = "screencapture"))]
 pub mod sck;
@@ -857,20 +878,41 @@ mod yuv420;
 #[cfg(all(target_os = "windows", feature = "d3d11-sink"))]
 pub mod d3d11sink;
 
-// WASAPI render sink: plays PCM on the default audio endpoint (shared mode).
+// WASAPI render sink: plays PCM on the selected audio endpoint (shared mode).
 // Windows-only; the audible-output end of the M25 audio path.
 #[cfg(all(target_os = "windows", feature = "wasapi-sink"))]
 pub mod wasapisink;
 
-// WASAPI capture source: captures PCM from the default audio endpoint.
+// WASAPI capture source: captures PCM from the selected audio endpoint.
 // Windows-only; the input mirror of WasapiSink.
 #[cfg(all(target_os = "windows", feature = "wasapi-src"))]
 pub mod wasapisrc;
+
+// Endpoint selection + mix-format mapping shared by the two WASAPI elements
+// and the endpoint provider.
+#[cfg(all(
+    target_os = "windows",
+    any(feature = "wasapi-src", feature = "wasapi-sink")
+))]
+mod wasapipcm;
+
+// WASAPI endpoint discovery: the active render / capture endpoints, with
+// IMMNotificationClient hotplug.
+#[cfg(all(
+    target_os = "windows",
+    any(feature = "wasapi-src", feature = "wasapi-sink")
+))]
+pub mod wasapidevice;
 
 // Media Foundation camera capture source: drains frames from a video capture
 // device via an IMFSourceReader. Windows-only; the video sibling of WasapiSrc.
 #[cfg(all(target_os = "windows", feature = "mf-video-src"))]
 pub mod mfvideosrc;
+
+// Media Foundation camera discovery: the video capture devices MF enumerates,
+// with the native modes mfvideosrc can deliver.
+#[cfg(all(target_os = "windows", feature = "mf-video-src"))]
+pub mod mfdevice;
 
 // VAAPI H.264 decode via cros-codecs is Linux-only. The dependency is
 // target-gated; enabling the feature on other platforms is a no-op.
@@ -926,6 +968,11 @@ pub mod ptpclient;
 // docs.
 #[cfg(all(target_os = "linux", feature = "v4l2"))]
 pub mod v4l2src;
+
+// V4L2 device discovery: enumerates /dev/videoN capture nodes with their
+// probed YUYV modes for the device monitor.
+#[cfg(all(target_os = "linux", feature = "v4l2"))]
+pub mod v4l2device;
 
 // libcamera capture source (NV12 / YUYV) via the system libcamera stack. The
 // modern Linux camera path: covers UVC webcams plus CSI/ISP cameras. Linux-only.
@@ -996,6 +1043,9 @@ mod alsapcm;
 pub mod alsasink;
 #[cfg(all(target_os = "linux", feature = "alsa-src"))]
 pub mod alsasrc;
+// ALSA device discovery: the PCM hint list as capture / playback devices.
+#[cfg(all(target_os = "linux", any(feature = "alsa-sink", feature = "alsa-src")))]
+pub mod alsadevice;
 // PulseAudio / PipeWire-pulse via the blocking libpulse "simple" API.
 #[cfg(all(
     target_os = "linux",
@@ -1020,6 +1070,10 @@ pub mod pipewirevideosrc;
 mod pwaudio;
 #[cfg(all(target_os = "linux", feature = "pipewire"))]
 mod pwvideo;
+// Device discovery over the PipeWire graph, the one Linux backend with native
+// hotplug events (M939).
+#[cfg(all(target_os = "linux", feature = "pipewire"))]
+pub mod pwdevice;
 
 // CUDA device-memory consumers (C3 Phase 3). `CudaDownload` copies a
 // `MemoryDomain::Cuda` NV12 frame back to system memory so a `NvdecCuda`

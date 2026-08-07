@@ -13,7 +13,7 @@ use g2g_core::conformance::{ConformanceDimension, Evidence};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{
-    AsyncElement, Caps, ConfigureOutcome, Dim, G2gError, OutputSink, PushOutcome, Rate,
+    AsyncElement, Caps, ConfigureOutcome, Dim, G2gError, Interlace, OutputSink, PushOutcome, Rate,
     RawVideoFormat, VideoCodec,
 };
 use g2g_plugins::vtdecode::VtDecode;
@@ -262,6 +262,7 @@ mod encode {
             width: Dim::Fixed(WIDTH),
             height: Dim::Fixed(HEIGHT),
             framerate: Rate::Fixed(FPS_Q16),
+            interlace: Interlace::Any,
         }
     }
 

@@ -38,6 +38,7 @@ fn i420_caps(w: u32, h: u32) -> Caps {
         width: Dim::Fixed(w),
         height: Dim::Fixed(h),
         framerate: Rate::Any,
+        interlace: g2g_core::Interlace::Any,
     }
 }
 
@@ -115,6 +116,7 @@ async fn av1_encode_then_rav1d_decode_round_trips_i420() {
             width: Dim::Fixed(W),
             height: Dim::Fixed(H),
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         }),
         "rav1d announced the 64x64 I420 geometry, got {:?}",
         decoded.caps,
@@ -160,6 +162,7 @@ fn raw_caps(format: RawVideoFormat, w: u32, h: u32) -> Caps {
         width: Dim::Fixed(w),
         height: Dim::Fixed(h),
         framerate: Rate::Any,
+        interlace: g2g_core::Interlace::Any,
     }
 }
 

@@ -35,8 +35,7 @@ async fn rotates_rgba_source_swapping_geometry() {
                 format: RawVideoFormat::Rgba8,
                 width: Dim::Fixed(4),
                 height: Dim::Fixed(8),
-                framerate: Rate::Fixed(r),
-            } if *r == 30 << 16
+                framerate: Rate::Fixed(r), interlace: _ } if *r == 30 << 16
         )),
         "sink saw RGBA at the swapped 4x8 geometry with framerate preserved, got {changes:?}"
     );

@@ -33,6 +33,7 @@ fn raw_video() -> Caps {
         width: Dim::Any,
         height: Dim::Any,
         framerate: Rate::Any,
+        interlace: g2g_core::Interlace::Any,
     }
 }
 
@@ -181,17 +182,17 @@ fn subtitle_track_routes_through_a_text_overlay() {
     let graph = parse_launch(&reg, &format!("playbin uri={uri}")).expect("mkv+subs playbin builds");
     std::fs::remove_file(&path).ok();
 
-    // FileSrc, MkvDemuxN, h264 stub, videoconvert(RGBA8), TextOverlayN,
-    // videoconvert(NV12), autovideosink.
+    // FileSrc, MkvDemuxN, h264 stub, deinterlace (M935), videoconvert(RGBA8),
+    // TextOverlayN, videoconvert(NV12), autovideosink.
     assert_eq!(
         graph.node_count(),
-        7,
-        "source + demux + decode + 2 converts + overlay + sink"
+        8,
+        "source + demux + decode + deinterlace + 2 converts + overlay + sink"
     );
     assert_eq!(
         graph.edges().len(),
-        7,
-        "video decode path + text join + sink path"
+        8,
+        "video decode path (with deinterlace) + text join + sink path"
     );
 
     // Exactly one node is a fan-in (the overlay), fed by the video convert and the
@@ -213,11 +214,12 @@ fn an_mkv_without_subtitles_keeps_the_plain_fanout() {
         parse_launch(&reg, &format!("playbin uri={uri}")).expect("video-only playbin builds");
     std::fs::remove_file(&path).ok();
 
-    // FileSrc -> MkvDemuxN -> h264 stub -> autovideosink: no overlay inserted.
+    // FileSrc -> MkvDemuxN -> h264 stub -> deinterlace -> autovideosink:
+    // no overlay inserted (the M935 auto deinterlace rides every video branch).
     assert_eq!(
         graph.node_count(),
-        4,
-        "source + demux + decode + sink, no overlay"
+        5,
+        "source + demux + decode + deinterlace + sink, no overlay"
     );
     let counts = inbound_counts(&graph);
     assert!(

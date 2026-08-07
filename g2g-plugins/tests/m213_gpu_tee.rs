@@ -33,6 +33,7 @@ fn nv12() -> Caps {
         width: Dim::Fixed(1920),
         height: Dim::Fixed(1080),
         framerate: Rate::Fixed(30 << 16),
+        interlace: g2g_core::Interlace::Any,
     }
 }
 

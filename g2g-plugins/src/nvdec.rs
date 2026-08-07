@@ -277,6 +277,7 @@ impl NvDec {
             width: Dim::Fixed(w),
             height: Dim::Fixed(h),
             framerate: self.framerate.clone(),
+            interlace: g2g_core::Interlace::Any,
         }
     }
 
@@ -812,6 +813,7 @@ impl AsyncElement for NvDec {
                         width: width.clone(),
                         height: height.clone(),
                         framerate: framerate.clone(),
+                        interlace: g2g_core::Interlace::Any,
                     })
                     .collect(),
             ),
@@ -948,6 +950,7 @@ impl PadTemplates for NvDec {
                     width: Dim::Any,
                     height: Dim::Any,
                     framerate: Rate::Any,
+                    interlace: g2g_core::Interlace::Any,
                 })
                 .collect(),
         );
@@ -1236,6 +1239,7 @@ mod tests {
                 width: Dim::Fixed(1920),
                 height: Dim::Fixed(1080),
                 framerate: Rate::Fixed(30 << 16),
+                interlace: g2g_core::Interlace::Any,
             }));
         }
         // AV1 decodes too (Ampere+).
@@ -1267,6 +1271,7 @@ mod tests {
                 width: Dim::Fixed(1280),
                 height: Dim::Fixed(720),
                 framerate: Rate::Fixed(30 << 16),
+                interlace: g2g_core::Interlace::Any,
             }
         );
         // A 10-bit stream announces the semi-planar 16-bit surface instead.
@@ -1582,6 +1587,7 @@ mod tests {
                 width: Dim::Fixed(640),
                 height: Dim::Fixed(480),
                 framerate: Rate::Fixed(30 << 16),
+                interlace: g2g_core::Interlace::Any,
             }],
             "a 10-bit stream announces the P010 surface"
         );
@@ -1639,6 +1645,7 @@ mod tests {
                 width: Dim::Fixed(640),
                 height: Dim::Fixed(480),
                 framerate: Rate::Fixed(30 << 16),
+                interlace: g2g_core::Interlace::Any,
             }]
         );
         let head = sink.luma_head.expect("luma read back");
@@ -1872,6 +1879,7 @@ mod tests {
             width: Dim::Fixed(W),
             height: Dim::Fixed(H),
             framerate: Rate::Fixed(30 << 16),
+            interlace: g2g_core::Interlace::Any,
         };
         let mut enc = NvEnc::new().with_codec(codec);
         enc.configure_pipeline(&nv12_caps).unwrap();
@@ -1987,6 +1995,7 @@ mod tests {
                 width: Dim::Fixed(W),
                 height: Dim::Fixed(H),
                 framerate: Rate::Fixed(30 << 16),
+                interlace: g2g_core::Interlace::Any,
             }],
             "NV12 output caps announced once at the decoded geometry"
         );

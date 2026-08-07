@@ -88,6 +88,7 @@ impl VideoBalance {
             width: Dim::Fixed(w),
             height: Dim::Fixed(h),
             framerate,
+            interlace: _,
         } = caps
         else {
             return Err(G2gError::CapsMismatch);
@@ -120,6 +121,7 @@ impl AsyncElement for VideoBalance {
                 width: Dim::Any,
                 height: Dim::Any,
                 framerate: Rate::Any,
+                interlace: g2g_core::Interlace::Any,
             };
             if let Ok(narrowed) = upstream_caps.intersect(&candidate) {
                 return Ok(narrowed);
@@ -178,6 +180,7 @@ impl AsyncElement for VideoBalance {
                         width: Dim::Fixed(w),
                         height: Dim::Fixed(h),
                         framerate: rate,
+                        interlace: g2g_core::Interlace::Any,
                     };
                     if self.last_caps.as_ref() != Some(&new_caps) {
                         out.push(PipelinePacket::CapsChanged(new_caps.clone()))
@@ -270,6 +273,7 @@ impl PadTemplates for VideoBalance {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         };
         let set = CapsSet::from_alternatives(FORMATS.map(any_geometry).to_vec());
         Vec::from([PadTemplate::sink(set.clone()), PadTemplate::source(set)])

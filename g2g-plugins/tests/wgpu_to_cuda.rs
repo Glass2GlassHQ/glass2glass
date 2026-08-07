@@ -98,6 +98,7 @@ async fn wgpu_rgba_texture_encodes_through_nvenc_no_readback() {
         width: Dim::Fixed(W),
         height: Dim::Fixed(H),
         framerate: Rate::Fixed(30 << 16),
+        interlace: g2g_core::Interlace::Any,
     };
     let mut enc = NvEnc::new();
     enc.configure_pipeline(&caps)
@@ -187,6 +188,29 @@ async fn wgpu_rgba_texture_encodes_through_nvenc_no_readback() {
         "encoded {} H.264 access units from a GPU RGBA texture, no read-back",
         sink.aus.len()
     );
+
+    // The bridge and the native encoder both ran on real hardware, device to
+    // device: persist GPU-tagged `Hardware` evidence so `g2g-inspect --maturity`
+    // derives them as HardwareValidated.
+    use g2g_core::conformance::{ConformanceDimension, Evidence};
+    use g2g_plugins::conformance::persist;
+    let platform = persist::cuda_platform_tag();
+    persist::record_evidence(
+        "cudawgpu",
+        &Evidence::new(ConformanceDimension::Hardware)
+            .platform(platform.clone())
+            .codec("rgba8")
+            .detail("wgpu texture bridged to a CUDA frame device-to-device"),
+    )
+    .expect("record hardware evidence");
+    persist::record_evidence(
+        "nvenc",
+        &Evidence::new(ConformanceDimension::Hardware)
+            .platform(platform)
+            .codec("h264")
+            .detail("NVENC encodes a CUDA-resident surface to Annex-B, no read-back"),
+    )
+    .expect("record hardware evidence");
 }
 
 /// Captures a single bridged frame, to relay the bridge's `process` output into
@@ -243,6 +267,7 @@ async fn wgpu_to_cuda_element_bridges_and_recycles() {
         width: Dim::Fixed(W),
         height: Dim::Fixed(H),
         framerate: Rate::Fixed(30 << 16),
+        interlace: g2g_core::Interlace::Any,
     };
     bridge.configure_pipeline(&caps).expect("configure bridge");
     let mut enc = NvEnc::new();

@@ -13425,6 +13425,7 @@ impl VulkanVideoDec {
             width: Dim::Fixed(f.width),
             height: Dim::Fixed(f.height),
             framerate: self.framerate.clone(),
+            interlace: g2g_core::Interlace::Any,
         };
         if self.last_caps.as_ref() != Some(&caps) {
             out.push(PipelinePacket::CapsChanged(caps.clone())).await?;
@@ -13521,6 +13522,7 @@ impl VulkanVideoDec {
                 width: Dim::Fixed(w),
                 height: Dim::Fixed(h),
                 framerate: self.framerate.clone(),
+                interlace: g2g_core::Interlace::Any,
             };
             if self.last_caps.as_ref() != Some(&caps) {
                 out.push(PipelinePacket::CapsChanged(caps.clone())).await?;
@@ -13547,6 +13549,7 @@ impl PadTemplates for VulkanVideoDec {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         };
         alloc::vec::Vec::from([
             // Any of the codecs this element decodes (H.264 / H.265 / AV1).
@@ -13620,6 +13623,7 @@ impl AsyncElement for VulkanVideoDec {
                 width: width.clone(),
                 height: height.clone(),
                 framerate: framerate.clone(),
+                interlace: g2g_core::Interlace::Any,
             }),
             _ => CapsSet::from_alternatives(alloc::vec::Vec::new()),
         }))
@@ -14354,7 +14358,10 @@ mod tests {
     fn std_av1_mapping_preserves_geometry_and_wires_color_pointer() {
         let seq = extract_av1_sequence_header(AV1_CLIP).unwrap();
         let std = to_std_av1_seq_header(&seq);
-        assert_eq!(std.seq_header.seq_profile, seq.seq_profile as _);
+        assert_eq!(
+            std.seq_header.seq_profile,
+            seq.seq_profile as vk::native::StdVideoAV1Profile
+        );
         assert_eq!(
             std.seq_header.max_frame_width_minus_1,
             seq.max_frame_width_minus_1 as u16

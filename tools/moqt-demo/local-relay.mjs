@@ -225,34 +225,94 @@ export function pageUrl(httpPort, relayPort, namespace, hashHex, extra = {}) {
   return `http://127.0.0.1:${httpPort}/?${q}`;
 }
 
+// The query parameters the watch scripts open the page with: autostart, plus
+// whatever the environment asks for.
+export function playerParams() {
+  const extra = { autostart: "1" };
+  if (process.env.G2G_MOQT_WEBCODECS) extra.decoder = "webcodecs";
+  if (process.env.G2G_MOQT_DEBUG) extra.debug = "1";
+  return extra;
+}
+
 // True when this host has a camera libcamerasrc could open.
 export function hasCamera() {
   return existsSync("/dev/video0");
 }
 
+// `videotestsrc` encodes as fast as the CPU allows, so `clocksync` holds each
+// frame until its PTS is due and the broadcast leaves at the 30 fps the caps
+// describe. Without it the media timeline outruns the wall clock by orders of
+// magnitude and nothing downstream (the fragment size, the latency HUD) means
+// what it says.
 export const SMPTE_PIPELINE =
-  "videotestsrc width=320 height=240 pattern=smpte ! videoconvert ! x264enc";
+  "videotestsrc width=320 height=240 pattern=smpte ! clocksync ! videoconvert ! x264enc";
 export const CAMERA_PIPELINE =
   "libcamerasrc width=640 height=480 framerate=30 ! videoconvert ! x264enc";
 
-// One MOQT object per this many milliseconds of each track.
-const FRAGMENT_MS = 500;
+// A producer reference time box ahead of each fragment, mapping its decode time
+// to the muxer's wall clock. That is what the page's latency HUD measures
+// against; one 32-byte box per fragment, so it is always on here.
+const PRFT = "write-prft=true";
 
 // The audio half of the broadcast: a 440 Hz tone encoded as AAC-LC, which is
-// what MSE plays as `mp4a.40.2`.
-export const AUDIO_PIPELINE = "audiotestsrc ! avenc_aac";
+// what MSE plays as `mp4a.40.2`. Paced like the video branch, so the two reach
+// the muxer at the same rate.
+export const AUDIO_PIPELINE = "audiotestsrc ! clocksync ! avenc_aac";
 
 // Complete a source+encoder prefix into a publishing pipeline. With audio the
 // two branches meet in the fan-in `mp4mux`, so one `moov` names both tracks and
 // `moqtsink` publishes a track each.
+//
+// One MOQT object per access unit, the low-latency shape: every source here is
+// live-paced, so the browser's append queue keeps up with the objects as they
+// arrive and there is nothing to be gained by batching half a second of media
+// into one.
 export function publishPipeline(prefix, relayPort, namespace, hashHex, { audio = true } = {}) {
-  const sink =
+  const sink = moqtSink(relayPort, namespace, hashHex);
+  if (!audio) return `${prefix} ! mp4mux ${PRFT} ! ${sink}`;
+  return `${prefix} ! mux.   ${AUDIO_PIPELINE} ! mux.   mp4mux name=mux ${PRFT} ! ${sink}`;
+}
+
+function moqtSink(relayPort, namespace, hashHex) {
+  return (
     `moqtsink location=https://127.0.0.1:${relayPort}/ ` +
-    `namespace=${namespace} server-certificate-hashes=${hashHex}`;
-  // Half-second fragments: one MOQT object per half second of each track
-  // rather than one per access unit, which is what a CMAF broadcast looks like
-  // and what keeps a browser's append queue ahead of an unpaced publisher.
-  const mux = `mp4mux name=mux fragment-duration=${FRAGMENT_MS}`;
-  if (!audio) return `${prefix} ! mp4mux fragment-duration=${FRAGMENT_MS} ! ${sink}`;
-  return `${prefix} ! mux.   ${AUDIO_PIPELINE} ! mux.   ${mux} ! ${sink}`;
+    `namespace=${namespace} server-certificate-hashes=${hashHex}`
+  );
+}
+
+// --- the recorded clip the latency run replays -----------------------------
+//
+// The latency comparison plays one broadcast twice, once per decode mode, and
+// the two numbers only compare if both passes saw the same media. A clip
+// recorded once and replayed with `replaysrc sync=true` gives that: identical
+// bytes, paced to the recorded 30 fps, and no encoder competing with the
+// browser for the CPU while the measurement runs.
+
+const PACED_FPS = 30;
+export const PACED_WIDTH = 320;
+export const PACED_HEIGHT = 240;
+
+// Record `seconds` of encoded SMPTE bars into `dir`, returning the clip path.
+// Encoding happens here, once and unpaced, so the live run only replays.
+export function recordPacedClip(launchBin, dir, seconds) {
+  const clip = join(dir, "smpte.g2g");
+  const pipeline =
+    `videotestsrc width=${PACED_WIDTH} height=${PACED_HEIGHT} pattern=smpte ` +
+    `framerate=${PACED_FPS}/1 num-buffers=${Math.round(seconds * PACED_FPS)} ` +
+    `! videoconvert ! x264enc ! recordsink location=${clip}`;
+  const r = spawnSync(launchBin, [pipeline], { encoding: "utf8" });
+  if (r.status !== 0) throw new Error(`recording the paced clip failed: ${r.stderr || r.stdout}`);
+  return clip;
+}
+
+// Publish a recorded clip at its captured pacing, one MOQT object per access
+// unit: the low-latency shape, and the one a WebCodecs player can actually
+// exploit (a fragment holding half a second of media cannot be decoded before
+// all of it has arrived, whatever the decoder).
+export function pacedPublishPipeline(clip, relayPort, namespace, hashHex) {
+  return (
+    `replaysrc location=${clip} sync=true ` +
+    `! mp4mux ${PRFT} ` +
+    `! ${moqtSink(relayPort, namespace, hashHex)}`
+  );
 }

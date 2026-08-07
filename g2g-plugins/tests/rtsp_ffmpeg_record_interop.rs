@@ -114,6 +114,22 @@ async fn ffmpeg_rtsp_publisher_records_into_rtspserversrc() {
         sink.aus.iter().any(|(_, _, kf)| *kf),
         "at least one keyframe among the RTSP-ingested access units"
     );
+
+    record_ingest_evidence("ffmpeg RECORDs over UDP RTP, depayloaded to Annex-B");
+}
+
+/// Persist the peer-tagged `Oracle` evidence both ingest directions earn, so
+/// `--maturity` derives rtspserversrc as InteropTested against ffmpeg.
+fn record_ingest_evidence(detail: &str) {
+    use g2g_core::conformance::{ConformanceDimension, Evidence};
+    g2g_plugins::conformance::persist::record_evidence(
+        "rtspserversrc",
+        &Evidence::new(ConformanceDimension::Oracle)
+            .peer("ffmpeg")
+            .codec("h264")
+            .detail(detail),
+    )
+    .expect("record oracle evidence");
 }
 
 /// M532: the same interop over **TCP-interleaved** transport
@@ -182,4 +198,6 @@ async fn ffmpeg_rtsp_publisher_records_interleaved_into_rtspserversrc() {
         sink.aus.iter().any(|(_, _, kf)| *kf),
         "at least one keyframe among the interleaved RTSP-ingested access units"
     );
+
+    record_ingest_evidence("ffmpeg RECORDs over TCP-interleaved RTP, depayloaded to Annex-B");
 }

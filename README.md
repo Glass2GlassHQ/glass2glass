@@ -83,6 +83,7 @@ parse error: unknown element: theoraenc
 
 - **`g2g-launch -v ...`** prints each link's negotiated caps + memory domain (the `gst-launch -v` analog); **`--dot`** dumps a Graphviz graph.
 - **`g2g-inspect`** is `gst-inspect-1.0`: list elements, dump one's properties/pads, or map a GStreamer name with `g2g-inspect --gst x264enc`. Scan an app's source with `--gst-scan app.c`.
+- **`g2g-device-monitor`** is `gst-device-monitor-1.0`: list cameras, audio devices, PipeWire nodes, and (a g2g extension) `Compute/GPU` devices, with probed caps and the launch fragment that opens each (`v4l2src device=/dev/video0`). Filter by class (`g2g-device-monitor Video/Source`), `--json` for tooling, `--follow` for live hotplug (native PipeWire and WASAPI events, poll-and-diff elsewhere). Backends: V4L2 / ALSA / PipeWire / GPU on Linux, Media Foundation + WASAPI on Windows, AVFoundation + Core Audio on macOS. Every device's id is what its element's selection property takes, so a saved launch line reopens the same hardware after a replug (`v4l2src` takes the id as `device-id=`, since a `/dev/videoN` path is not stable).
 - Migrate incrementally in either direction: `g2g-bridge` embeds a g2g sub-graph inside a GStreamer pipeline; `gstwrap` hosts an un-ported GStreamer element inside a g2g graph.
 
 Full guide, including the equivalence cookbook and application/element porting:
@@ -519,8 +520,11 @@ run_source_transform_sink(src, parse, sink, &clock, LatencyProfile::Live).await?
 The container demuxers (`tsdemux`, `matroskademux`, `flvdemux`, `oggdemux`,
 `fmp4demux`, `mpegpsdemux`) accept a `Caps::ByteStream` and split out elementary
 streams. `mpegpsdemux` reads `.mpg` / `.vob` program streams, including their DVD
-subpicture tracks; an interlaced disc gets a `deinterlace` (yadif) in the video
-branch automatically.
+subpicture tracks. Every `playbin` video branch carries a `deinterlace
+mode=auto` (yadif): the decoder declares interlaced streams in its output caps
+(`interlace-mode=interleaved`) and the filter weaves only those, so interlaced
+MPEG-2 or H.264 plays clean from any container while progressive content passes
+through untouched.
 
 ```rust
 let src   = FileSrc::new("clip.ts", Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs });

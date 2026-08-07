@@ -45,6 +45,7 @@ fn raw_video() -> Caps {
         width: Dim::Any,
         height: Dim::Any,
         framerate: Rate::Any,
+        interlace: g2g_core::Interlace::Any,
     }
 }
 fn raw_audio() -> Caps {
@@ -234,21 +235,23 @@ async fn playbin_uri_auto_fans_out_a_matroska_file() {
     let graph = parse_launch(&reg, &format!("playbin uri={uri}")).expect("playbin fans out");
     std::fs::remove_file(&path).ok();
 
-    // FileSrc -> MkvDemuxN(2). Video port: demux -> decoder -> auto video sink.
-    // Audio port: demux -> decoder -> audioconvert -> audioresample -> auto audio
-    // sink (the M422+ audio branch, so the sink sees a fixed PCM format while the
-    // converters absorb the stream's real channels / rate).
-    // Nodes: source + demux + video(decoder+sink) + audio(decoder+convert+resample+sink) = 8.
-    // Edges: src->demux(1) + video branch(2) + audio branch(4) = 7.
+    // FileSrc -> MkvDemuxN(2). Video port: demux -> decoder -> auto deinterlace
+    // (M935) -> auto video sink. Audio port: demux -> decoder -> audioconvert ->
+    // audioresample -> auto audio sink (the M422+ audio branch, so the sink sees
+    // a fixed PCM format while the converters absorb the stream's real channels
+    // / rate).
+    // Nodes: source + demux + video(decoder+deinterlace+sink)
+    //   + audio(decoder+convert+resample+sink) = 9.
+    // Edges: src->demux(1) + video branch(3) + audio branch(4) = 8.
     assert_eq!(
         graph.node_count(),
-        8,
-        "source, demux, video decode+sink, audio decode+convert+resample+sink"
+        9,
+        "source, demux, video decode+deinterlace+sink, audio decode+convert+resample+sink"
     );
     assert_eq!(
         graph.edges().len(),
-        7,
-        "video branch (2 edges) + audio branch (4 edges) + src->demux"
+        8,
+        "video branch (3 edges) + audio branch (4 edges) + src->demux"
     );
 }
 

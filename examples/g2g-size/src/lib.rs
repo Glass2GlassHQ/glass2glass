@@ -10,7 +10,9 @@ use core::alloc::{GlobalAlloc, Layout};
 use core::hint::black_box;
 
 use g2g_core::runtime::bounded;
-use g2g_core::{Caps, Dim, Frame, FrameTiming, MemoryDomain, Rate, RawVideoFormat, StaticLendRing};
+use g2g_core::{
+    Caps, Dim, Frame, FrameTiming, Interlace, MemoryDomain, Rate, RawVideoFormat, StaticLendRing,
+};
 
 // A non-allocating global allocator: this harness is built and measured, never
 // run, so the allocator only needs to exist for the link. The code paths that
@@ -43,12 +45,14 @@ pub extern "C" fn g2g_min() -> u64 {
         width: Dim::Fixed(640),
         height: Dim::Fixed(480),
         framerate: Rate::Any,
+        interlace: Interlace::Any,
     };
     let b = Caps::RawVideo {
         format: RawVideoFormat::Rgba8,
         width: Dim::Fixed(640),
         height: Dim::Fixed(480),
         framerate: Rate::Fixed(30 << 16),
+        interlace: Interlace::Any,
     };
     let narrowed = black_box(&a).intersect(black_box(&b)).is_ok();
 

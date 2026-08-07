@@ -1,8 +1,8 @@
 // Headless validation that a browser plays a g2g MoQ Transport broadcast (M904).
 //
 // Starts a local `moq-relay-ietf`, publishes video and audio into it with
-// `videotestsrc ! x264enc ! mux.  audiotestsrc ! avenc_aac ! mux.  mp4mux
-// name=mux ! moqtsink`, and drives a real Chromium through
+// `videotestsrc ! clocksync ! x264enc ! mux.  audiotestsrc ! clocksync !
+// avenc_aac ! mux.  mp4mux name=mux ! moqtsink`, and drives a real Chromium through
 // tools/moqt-demo/index.html, whose MoQT client is the third-party MOQtail
 // draft-16 implementation. Nothing in the browser shares code with g2g's Rust
 // wire layer, so a successful play is an independent decode of our bytes.
@@ -15,6 +15,11 @@
 //   - the audio track was subscribed, appended and decoded (Chromium's
 //     `webkitAudioDecodedByteCount` past zero).
 //
+// The publisher is paced to the wall clock by `clocksync`, so it is a live 30
+// fps broadcast and each access unit is its own MOQT object. This is the MSE
+// path only; the WebCodecs path and the latency both decode modes report are run
+// by run-moqt-latency.mjs.
+//
 // Prereqs: `pnpm install` in tools/moqt-demo (playwright + moqtail), a full
 // Chromium (headless_shell has no H.264 or AAC), a `moq-relay-ietf` build, and
 // `cargo build --release -p g2g-plugins --features moqt,ffmpeg --bin g2g-launch`.
@@ -22,29 +27,16 @@
 //
 // Run from tools/moqt-demo:  node headless/run-moqt-play.mjs
 // Env: MOQ_RS_BIN, G2G_LAUNCH, G2G_CHROME, G2G_PLAYWRIGHT, G2G_HEADFUL=1.
-import { existsSync } from "node:fs";
-import { pathToFileURL } from "node:url";
-import { join } from "node:path";
 import {
-  ROOT, chromeBinary, freeUdpPort, launchBinary, mintCertificate, pageUrl,
-  publishPipeline, relayBinary, spawnPublisher, spawnRelay, startHttp, whenPublishing,
-  SMPTE_PIPELINE,
+  freeUdpPort, mintCertificate, pageUrl, publishPipeline, spawnPublisher, spawnRelay,
+  startHttp, whenPublishing, SMPTE_PIPELINE,
 } from "../local-relay.mjs";
+import { launchBrowser, openPlayer, prereqs, waitForReport, wrongBars } from "./common.mjs";
 
 const HTTP_PORT = 8197;
 const NAMESPACE = "g2gdemo";
 const NEED_FRAMES = 10;
 const TIMEOUT_MS = 60000;
-// 75% SMPTE bars, in order, as which channels are lit. `videotestsrc
-// pattern=smpte` draws rgb(192,...) / rgb(0,...); asserting per-channel high
-// or low rather than the exact value keeps this independent of the YUV matrix
-// the browser's decoder happens to use.
-const BARS = [
-  ["gray", 1, 1, 1], ["yellow", 1, 1, 0], ["cyan", 0, 1, 1], ["green", 0, 1, 0],
-  ["magenta", 1, 0, 1], ["red", 1, 0, 0], ["blue", 0, 0, 1],
-];
-const LIT = 128;
-const DARK = 96;
 
 function log(...a) { console.log("[harness]", ...a); }
 
@@ -70,28 +62,8 @@ function skip(msg) {
 }
 
 async function main() {
-  const relayBin = relayBinary();
-  if (!relayBin) {
-    skip("moq-relay-ietf not found. Build it with `cargo build --release -p moq-relay-ietf` " +
-      "in a cloudflare/moq-rs checkout, or point $MOQ_RS_BIN at its directory.");
-  }
-  const launchBin = launchBinary();
-  if (!launchBin) {
-    skip("g2g-launch not built. Run `cargo build --release -p g2g-plugins " +
-      "--features moqt,ffmpeg --bin g2g-launch`, or set $G2G_LAUNCH.");
-  }
-  const chrome = chromeBinary();
-  if (!chrome) {
-    skip("no full Chromium found (headless_shell cannot decode H.264). " +
-      "Run `npx playwright install chromium`, or set $G2G_CHROME.");
-  }
-  if (!existsSync(join(ROOT, "node_modules/moqtail/dist/index.js"))) {
-    skip("moqtail not installed. Run `pnpm install` in tools/moqt-demo.");
-  }
-  const pwPath = process.env.G2G_PLAYWRIGHT || join(ROOT, "node_modules/playwright/index.js");
-  if (!existsSync(pwPath)) {
-    skip("playwright not installed. Run `pnpm install` in tools/moqt-demo, or set $G2G_PLAYWRIGHT.");
-  }
+  const { relayBin, launchBin, chrome, pwPath, skip: missing } = prereqs();
+  if (missing) skip(missing);
 
   tls = await mintCertificate();
   const relayPort = await freeUdpPort();
@@ -114,47 +86,25 @@ async function main() {
   if (!(await whenPublishing(publisher))) fail("the publisher produced no frames");
 
   http = await startHttp(HTTP_PORT);
-  const pw = await import(pathToFileURL(pwPath).href);
-  const { chromium } = pw.default || pw;
-  browser = await chromium.launch({
-    headless: !process.env.G2G_HEADFUL,
-    executablePath: chrome,
-    args: ["--no-sandbox", "--autoplay-policy=no-user-gesture-required",
-      "--use-gl=angle", "--use-angle=swiftshader"],
-  });
-  const page = await browser.newPage();
-  page.on("console", (m) => { if (m.text().startsWith("g2g[")) log("page:", m.text()); });
-  page.on("pageerror", (e) => log("page error:", String(e)));
+  browser = await launchBrowser(pwPath, chrome);
 
   const extra = { autostart: "1" };
   if (process.env.G2G_MOQT_DEBUG) extra.debug = "1";
   const url = pageUrl(HTTP_PORT, relayPort, NAMESPACE, tls.hashHex, extra);
-  log("navigating", url);
-  await page.goto(url);
-  if (!(await page.evaluate(() => typeof WebTransport !== "undefined"))) {
-    fail("browser has no WebTransport");
-  }
+  const page = await openPlayer(browser, url, log);
 
   // Wait for enough decoded frames, or the page reporting it could not start.
-  const t0 = Date.now();
-  let report = null;
-  while (Date.now() - t0 < TIMEOUT_MS) {
-    const state = await page.evaluate(() => window.g2gState);
-    if (state.error) fail(`player failed: ${state.error}`);
-    if (state.started) {
-      report = await page.evaluate(() => window.g2gReport());
-      report.audioFragments = state.audioFragments;
-      const audioReady = state.audioFragments > 0 && (report.audioDecodedBytes ?? 1) > 0;
-      if (report.totalVideoFrames >= NEED_FRAMES && report.bars && audioReady) break;
-    }
-    await page.waitForTimeout(250);
-  }
-  if (!report) fail("the player never reached playback");
+  const report = await waitForReport(page, {
+    timeoutMs: TIMEOUT_MS,
+    ready: (r) =>
+      r.totalVideoFrames >= NEED_FRAMES && r.bars &&
+      r.audioFragments > 0 && (r.audioDecodedBytes ?? 1) > 0,
+  });
   log("report:", JSON.stringify(report));
 
   if (report.totalVideoFrames < NEED_FRAMES) {
     fail(`only ${report.totalVideoFrames}/${NEED_FRAMES} frames decoded ` +
-      `(${(await page.evaluate(() => window.g2gState)).fragments} fragments received)`);
+      `(${report.fragments} fragments received)`);
   }
   if (report.width !== 320 || report.height !== 240) {
     fail(`decoded ${report.width}x${report.height}, expected 320x240`);
@@ -166,11 +116,7 @@ async function main() {
     fail("the audio track was appended but the browser decoded none of it");
   }
 
-  const wrong = BARS.map(([name, ...want], i) => {
-    const px = report.bars[i];
-    const ok = want.every((lit, c) => (lit ? px[c] >= LIT : px[c] <= DARK));
-    return ok ? null : `${name} bar reads rgb(${px})`;
-  }).filter(Boolean);
+  const wrong = wrongBars(report.bars);
   if (wrong.length) fail(`SMPTE bars wrong: ${wrong.join("; ")}`);
 
   log(`PASS: ${report.totalVideoFrames} frames decoded at ${report.width}x${report.height}, ` +

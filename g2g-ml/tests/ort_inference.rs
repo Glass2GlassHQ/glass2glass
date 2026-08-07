@@ -52,6 +52,7 @@ fn rgba_caps(w: u32, h: u32) -> Caps {
         width: Dim::Fixed(w),
         height: Dim::Fixed(h),
         framerate: Rate::Any,
+        interlace: g2g_core::Interlace::Any,
     }
 }
 
@@ -109,9 +110,7 @@ async fn directml_session_infers_identically() {
         .iter()
         .find_map(|p| match p {
             PipelinePacket::DataFrame(f) => {
-                let Some(slice) = f.domain.as_system_slice() else {
-                    return None;
-                };
+                let slice = f.domain.as_system_slice()?;
                 Some(
                     slice
                         .chunks_exact(4)
@@ -154,9 +153,7 @@ async fn cuda_session_infers_identically() {
         .iter()
         .find_map(|p| match p {
             PipelinePacket::DataFrame(f) => {
-                let Some(slice) = f.domain.as_system_slice() else {
-                    return None;
-                };
+                let slice = f.domain.as_system_slice()?;
                 Some(
                     slice
                         .chunks_exact(4)
@@ -287,9 +284,7 @@ async fn tensor_input_mode_feeds_preprocessed_tensor_directly() {
         .iter()
         .find_map(|p| match p {
             PipelinePacket::DataFrame(f) => {
-                let Some(slice) = f.domain.as_system_slice() else {
-                    return None;
-                };
+                let slice = f.domain.as_system_slice()?;
                 Some(
                     slice
                         .chunks_exact(4)
@@ -342,9 +337,7 @@ async fn uint8_tensor_input_runs_a_quantized_model() {
         .iter()
         .find_map(|p| match p {
             PipelinePacket::DataFrame(f) => {
-                let Some(slice) = f.domain.as_system_slice() else {
-                    return None;
-                };
+                let slice = f.domain.as_system_slice()?;
                 Some(
                     slice
                         .chunks_exact(4)

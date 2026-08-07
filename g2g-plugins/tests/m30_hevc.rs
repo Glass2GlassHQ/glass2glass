@@ -18,7 +18,7 @@
 use g2g_core::element::{AsyncElement, BoxFuture, OutputSink, PushOutcome};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
-use g2g_core::{Caps, Dim, G2gError, Rate, RawVideoFormat, VideoCodec};
+use g2g_core::{Caps, Dim, G2gError, Interlace, Rate, RawVideoFormat, VideoCodec};
 use g2g_plugins::mfdecode::MfDecode;
 use g2g_plugins::mfencode::MfEncode;
 
@@ -100,6 +100,7 @@ fn nv12_caps() -> Caps {
         width: Dim::Fixed(WIDTH),
         height: Dim::Fixed(HEIGHT),
         framerate: Rate::Fixed(FPS_Q16),
+        interlace: Interlace::Any,
     }
 }
 

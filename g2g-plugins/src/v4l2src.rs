@@ -29,8 +29,13 @@ use g2g_core::{
 };
 
 use v4l::buffer::Type;
+use v4l::control::{Control, Value as ControlValue};
 use v4l::io::traits::CaptureStream;
 use v4l::prelude::{Device, MmapStream};
+use v4l::v4l_sys::{
+    V4L2_CID_AUTO_WHITE_BALANCE, V4L2_CID_EXPOSURE_ABSOLUTE, V4L2_CID_EXPOSURE_AUTO,
+    V4L2_CID_FOCUS_ABSOLUTE, V4L2_CID_FOCUS_AUTO, V4L2_CID_WHITE_BALANCE_TEMPERATURE,
+};
 use v4l::video::capture::Parameters;
 use v4l::video::Capture;
 use v4l::{Format, FourCC};
@@ -50,6 +55,113 @@ const YUYV: &[u8; 4] = b"YUYV";
 /// errno where one exists.
 fn v4l2_err(e: &std::io::Error) -> G2gError {
     G2gError::Hardware(HardwareError::V4l2(e.raw_os_error().unwrap_or(-1)))
+}
+
+/// ENODEV, reported when `device-id` names a camera that is not attached.
+const ENODEV: i32 = 19;
+
+/// How a camera control's value is carried, which decides both the property
+/// kind and the V4L2 control payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ControlKind {
+    Switch,
+    Amount,
+}
+
+impl ControlKind {
+    const fn prop_kind(self) -> PropKind {
+        match self {
+            ControlKind::Switch => PropKind::Bool,
+            ControlKind::Amount => PropKind::Uint,
+        }
+    }
+}
+
+/// One camera control this element drives, exposed under the name `v4l2-ctl`
+/// uses for it.
+#[derive(Debug, Clone, Copy)]
+struct ControlSpec {
+    name: &'static str,
+    id: u32,
+    kind: ControlKind,
+    blurb: &'static str,
+}
+
+/// The controls, in the order they are applied: an auto switch comes before
+/// the manual value it gates, because a driver rejects a manual exposure or
+/// focus while its automatic mode is still on.
+///
+/// `exposure-auto` is a menu, not a switch: 0 auto, 1 manual, 2 shutter
+/// priority, 3 aperture priority (`V4L2_EXPOSURE_*`), and most UVC cameras
+/// implement only 1 and 3.
+const CONTROLS: [ControlSpec; 6] = [
+    ControlSpec {
+        name: "white-balance-temperature-auto",
+        id: V4L2_CID_AUTO_WHITE_BALANCE,
+        kind: ControlKind::Switch,
+        blurb: "automatic white balance",
+    },
+    ControlSpec {
+        name: "exposure-auto",
+        id: V4L2_CID_EXPOSURE_AUTO,
+        kind: ControlKind::Amount,
+        blurb: "exposure mode: 0 auto, 1 manual, 2 shutter priority, 3 aperture priority",
+    },
+    ControlSpec {
+        name: "focus-auto",
+        id: V4L2_CID_FOCUS_AUTO,
+        kind: ControlKind::Switch,
+        blurb: "continuous auto focus",
+    },
+    ControlSpec {
+        name: "white-balance-temperature",
+        id: V4L2_CID_WHITE_BALANCE_TEMPERATURE,
+        kind: ControlKind::Amount,
+        blurb: "white balance colour temperature, kelvin (needs auto off)",
+    },
+    ControlSpec {
+        name: "exposure-absolute",
+        id: V4L2_CID_EXPOSURE_ABSOLUTE,
+        kind: ControlKind::Amount,
+        blurb: "exposure time in 100 us units (needs exposure-auto=1)",
+    },
+    ControlSpec {
+        name: "focus-absolute",
+        id: V4L2_CID_FOCUS_ABSOLUTE,
+        kind: ControlKind::Amount,
+        blurb: "focus distance, driver-defined units (needs focus-auto=false)",
+    },
+];
+
+/// The property spec of control `index`, so the table above is the only place
+/// a control's name / kind / description is written.
+const fn control_prop(index: usize) -> PropertySpec {
+    PropertySpec::new(
+        CONTROLS[index].name,
+        CONTROLS[index].kind.prop_kind(),
+        CONTROLS[index].blurb,
+    )
+}
+
+/// The values set on this element, `None` for a control left alone. Indexed
+/// like [`CONTROLS`].
+type ControlValues = [Option<i64>; CONTROLS.len()];
+
+/// Apply every set control in table order, one ioctl each (`set_controls`
+/// refuses a batch spanning two control classes, and these span the user and
+/// camera classes). A driver that rejects one fails the negotiation: the
+/// caller asked for a control this camera does not have.
+fn apply_controls(dev: &Device, values: &ControlValues) -> Result<(), G2gError> {
+    for (spec, value) in CONTROLS.iter().zip(values) {
+        let Some(value) = *value else { continue };
+        let value = match spec.kind {
+            ControlKind::Switch => ControlValue::Boolean(value != 0),
+            ControlKind::Amount => ControlValue::Integer(value),
+        };
+        dev.set_control(Control { id: spec.id, value })
+            .map_err(|e| v4l2_err(&e))?;
+    }
+    Ok(())
 }
 
 /// One completed capture handed to the async loop: the payload bytes plus the
@@ -78,6 +190,12 @@ fn buffer_timestamp_ns(ts: &v4l::timestamp::Timestamp) -> Option<u64> {
 #[derive(Debug)]
 pub struct V4l2Src {
     device: String,
+    /// Persistent id from the device monitor; when set it decides `device` at
+    /// negotiation instead of the node path, so a saved pipeline survives a
+    /// replug that renumbered `/dev/videoN`.
+    device_id: String,
+    device_resolved: bool,
+    controls: ControlValues,
     req_width: u32,
     req_height: u32,
     req_fps: u32,
@@ -96,6 +214,9 @@ impl V4l2Src {
     pub fn new(device: impl Into<String>) -> Self {
         Self {
             device: device.into(),
+            device_id: String::new(),
+            device_resolved: false,
+            controls: [None; CONTROLS.len()],
             req_width: DEFAULT_WIDTH,
             req_height: DEFAULT_HEIGHT,
             req_fps: DEFAULT_FPS,
@@ -129,10 +250,37 @@ impl V4l2Src {
         self
     }
 
+    /// Select the camera by the persistent id the device monitor reports for
+    /// it, resolved to a node path at negotiation. Overrides
+    /// [`new`](Self::new)'s path.
+    pub fn with_device_id(mut self, id: impl Into<String>) -> Self {
+        self.device_id = id.into();
+        self.device_resolved = false;
+        self
+    }
+
+    /// Point `device` at whatever node carries `device-id` now. Once per
+    /// instance: the resolution is a full enumeration, and negotiation runs
+    /// more than once.
+    fn resolve_device(&mut self) -> Result<(), G2gError> {
+        if self.device_id.is_empty() || self.device_resolved {
+            return Ok(());
+        }
+        let path = crate::v4l2device::resolve_device_id(&self.device_id)
+            .ok_or(G2gError::Hardware(HardwareError::V4l2(ENODEV)))?;
+        self.device = path;
+        self.device_resolved = true;
+        Ok(())
+    }
+
     /// Open the device, set YUYV at the requested geometry, and read back what
     /// the driver actually chose. The probe device is dropped before `run`.
     fn negotiate(&mut self) -> Result<Caps, G2gError> {
+        self.resolve_device()?;
         let dev = Device::with_path(&self.device).map_err(|e| v4l2_err(&e))?;
+        // Controls are device state, not per-fd, so applying them on the probe
+        // handle holds for the capture thread's own open.
+        apply_controls(&dev, &self.controls)?;
         let fmt = Format::new(self.req_width, self.req_height, FourCC::new(YUYV));
         let actual = dev.set_format(&fmt).map_err(|e| v4l2_err(&e))?;
         if &actual.fourcc.repr != YUYV {
@@ -153,6 +301,7 @@ impl V4l2Src {
             width: Dim::Fixed(actual.width),
             height: Dim::Fixed(actual.height),
             framerate: Rate::Fixed(fps << 16),
+            interlace: g2g_core::Interlace::Any,
         })
     }
 }
@@ -211,6 +360,12 @@ impl SourceLoop for V4l2Src {
             )
             .with_default("/dev/video0"),
             PropertySpec::new(
+                "device-id",
+                PropKind::Str,
+                "persistent device id from the device monitor; resolved to a node path at \
+                 negotiation, so a saved pipeline survives a replug",
+            ),
+            PropertySpec::new(
                 "width",
                 PropKind::Uint,
                 "requested capture width (driver may snap)",
@@ -225,14 +380,33 @@ impl SourceLoop for V4l2Src {
                 PropKind::Uint,
                 "requested capture rate, fps (best effort)",
             ),
+            control_prop(0),
+            control_prop(1),
+            control_prop(2),
+            control_prop(3),
+            control_prop(4),
+            control_prop(5),
         ];
         PROPS
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        if let Some(index) = CONTROLS.iter().position(|c| c.name == name) {
+            self.controls[index] = Some(match CONTROLS[index].kind {
+                ControlKind::Switch => i64::from(value.as_bool().ok_or(PropError::Type)?),
+                ControlKind::Amount => i64::try_from(value.as_uint().ok_or(PropError::Type)?)
+                    .map_err(|_| PropError::Value)?,
+            });
+            return Ok(());
+        }
         match name {
             "device" => {
                 self.device = value.as_str().ok_or(PropError::Type)?.to_string();
+                Ok(())
+            }
+            "device-id" => {
+                self.device_id = value.as_str().ok_or(PropError::Type)?.to_string();
+                self.device_resolved = false;
                 Ok(())
             }
             "width" => {
@@ -252,8 +426,16 @@ impl SourceLoop for V4l2Src {
     }
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
+        if let Some(index) = CONTROLS.iter().position(|c| c.name == name) {
+            let value = self.controls[index]?;
+            return Some(match CONTROLS[index].kind {
+                ControlKind::Switch => PropValue::Bool(value != 0),
+                ControlKind::Amount => PropValue::Uint(value as u64),
+            });
+        }
         match name {
             "device" => Some(PropValue::Str(self.device.clone())),
+            "device-id" => Some(PropValue::Str(self.device_id.clone())),
             "width" => Some(PropValue::Uint(self.req_width as u64)),
             "height" => Some(PropValue::Uint(self.req_height as u64)),
             "framerate" => Some(PropValue::Uint(self.req_fps as u64)),
@@ -395,6 +577,7 @@ impl PadTemplates for V4l2Src {
                 width: Dim::Any,
                 height: Dim::Any,
                 framerate: Rate::Any,
+                interlace: g2g_core::Interlace::Any,
             },
         ))])
     }
@@ -416,6 +599,163 @@ mod tests {
             (1280, 720, 60)
         );
         assert_eq!(src.frame_limit, 10);
+    }
+
+    #[test]
+    fn every_control_is_a_declared_property() {
+        let src = V4l2Src::new("/dev/video0");
+        let specs = SourceLoop::properties(&src);
+        for spec in CONTROLS {
+            let declared = specs
+                .iter()
+                .find(|p| p.name == spec.name)
+                .unwrap_or_else(|| panic!("{} is not declared", spec.name));
+            assert_eq!(declared.kind, spec.kind.prop_kind());
+        }
+        // ids must be distinct, or one control silently overwrites another.
+        for (i, a) in CONTROLS.iter().enumerate() {
+            assert!(!CONTROLS[..i].iter().any(|b| b.id == a.id), "{}", a.name);
+        }
+    }
+
+    #[test]
+    fn control_properties_round_trip_through_their_kind() {
+        let mut src = V4l2Src::new("/dev/video0");
+        // unset controls report nothing, so nothing is applied to the driver.
+        assert!(SourceLoop::get_property(&src, "exposure-absolute").is_none());
+        assert!(src.controls.iter().all(Option::is_none));
+
+        SourceLoop::set_property(&mut src, "exposure-auto", PropValue::Uint(1)).expect("menu");
+        SourceLoop::set_property(&mut src, "exposure-absolute", PropValue::Uint(250))
+            .expect("amount");
+        SourceLoop::set_property(&mut src, "focus-auto", PropValue::Bool(false)).expect("switch");
+        assert_eq!(
+            SourceLoop::get_property(&src, "exposure-absolute"),
+            Some(PropValue::Uint(250))
+        );
+        assert_eq!(
+            SourceLoop::get_property(&src, "focus-auto"),
+            Some(PropValue::Bool(false))
+        );
+        // a switch set from a number (or the reverse) is a type error, not a
+        // silently coerced control value.
+        assert_eq!(
+            SourceLoop::set_property(&mut src, "focus-auto", PropValue::Uint(1)),
+            Err(PropError::Type)
+        );
+
+        // the auto switches precede the manual values they gate.
+        let order: Vec<&str> = CONTROLS.iter().map(|c| c.name).collect();
+        for (auto, manual) in [
+            ("exposure-auto", "exposure-absolute"),
+            ("focus-auto", "focus-absolute"),
+            (
+                "white-balance-temperature-auto",
+                "white-balance-temperature",
+            ),
+        ] {
+            let auto_at = order.iter().position(|n| *n == auto).expect("auto");
+            let manual_at = order.iter().position(|n| *n == manual).expect("manual");
+            assert!(auto_at < manual_at, "{auto} must precede {manual}");
+        }
+    }
+
+    #[test]
+    fn device_id_overrides_the_node_path_and_fails_loud_when_absent() {
+        let mut src =
+            V4l2Src::new("/dev/video0").with_device_id("no-such-bus:No Camera:/dev/video9");
+        assert_eq!(
+            SourceLoop::get_property(&src, "device-id"),
+            Some(PropValue::Str(
+                "no-such-bus:No Camera:/dev/video9".to_string()
+            ))
+        );
+        // an id nothing carries must not silently fall back to `device`.
+        assert_eq!(
+            src.resolve_device(),
+            Err(G2gError::Hardware(HardwareError::V4l2(ENODEV)))
+        );
+        assert_eq!(src.device, "/dev/video0");
+
+        // set through the property path, an attached camera's own id resolves
+        // to its node. Skipped where no camera is present (CI).
+        use g2g_core::runtime::DeviceProvider;
+        let devices = crate::v4l2device::V4l2DeviceProvider::new()
+            .probe()
+            .unwrap_or_default();
+        let Some(first) = devices.first() else { return };
+        let mut src = V4l2Src::new("/dev/null");
+        SourceLoop::set_property(
+            &mut src,
+            "device-id",
+            PropValue::Str(first.persistent_id.clone()),
+        )
+        .expect("device-id");
+        src.resolve_device().expect("resolve an attached camera");
+        assert_eq!(
+            SourceLoop::get_property(&src, "device"),
+            Some(PropValue::Str(first.props[0].1.clone()))
+        );
+    }
+
+    /// The whole M944 path against a real camera: an id the provider minted
+    /// selects the node, and a control set through a property reaches the
+    /// driver. Self-skips where no camera (CI) or none with a switch control.
+    #[test]
+    fn live_camera_resolves_its_id_and_applies_a_control() {
+        use g2g_core::runtime::DeviceProvider;
+        let devices = crate::v4l2device::V4l2DeviceProvider::new()
+            .probe()
+            .unwrap_or_default();
+        let Some(camera) = devices.first() else {
+            return;
+        };
+        let path = camera.props[0].1.clone();
+        let dev = Device::with_path(&path).expect("open the probed camera");
+
+        // the first switch control this camera reports; its current value is
+        // restored at the end, so the test leaves the camera as it found it.
+        let Some((spec, before)) = CONTROLS
+            .iter()
+            .filter(|c| c.kind == ControlKind::Switch)
+            .find_map(|c| match dev.control(c.id) {
+                Ok(Control {
+                    value: ControlValue::Boolean(on),
+                    ..
+                }) => Some((c, on)),
+                _ => None,
+            })
+        else {
+            return;
+        };
+
+        let mut src = V4l2Src::new("/dev/null");
+        SourceLoop::set_property(
+            &mut src,
+            "device-id",
+            PropValue::Str(camera.persistent_id.clone()),
+        )
+        .expect("device-id");
+        SourceLoop::set_property(&mut src, spec.name, PropValue::Bool(!before)).expect("control");
+        let caps = g2g_core::runtime::block_on(SourceLoop::intercept_caps(&mut src))
+            .expect("negotiate the resolved camera");
+        assert!(matches!(caps, Caps::RawVideo { .. }));
+        assert_eq!(
+            SourceLoop::get_property(&src, "device"),
+            Some(PropValue::Str(path.clone()))
+        );
+        assert_eq!(
+            dev.control(spec.id).expect("read back").value,
+            ControlValue::Boolean(!before),
+            "{} did not reach the driver",
+            spec.name
+        );
+
+        dev.set_control(Control {
+            id: spec.id,
+            value: ControlValue::Boolean(before),
+        })
+        .expect("restore");
     }
 
     #[test]
@@ -442,6 +782,7 @@ mod tests {
                 width: Dim::Fixed(640),
                 height: Dim::Fixed(480),
                 framerate: Rate::Fixed(30 << 16),
+                interlace: g2g_core::Interlace::Any,
             })
             .expect_err("configure without negotiate must fail");
         assert_eq!(err, G2gError::NotConfigured);

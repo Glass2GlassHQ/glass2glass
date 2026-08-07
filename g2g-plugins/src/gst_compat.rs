@@ -334,6 +334,7 @@ mod tests {
             width: Dim::Fixed(640),
             height: Dim::Fixed(480),
             framerate: Rate::Fixed(30 << 16),
+            interlace: g2g_core::Interlace::Any,
         };
         assert_eq!(parse_caps(&c.to_gst_string()), Some(c));
     }

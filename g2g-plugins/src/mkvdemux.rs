@@ -1678,6 +1678,7 @@ mod tests {
             width: Dim::Fixed(2),
             height: Dim::Fixed(2),
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         };
         assert!(d.intercept_caps(&raw).is_err());
         // A TS byte stream is the wrong container.

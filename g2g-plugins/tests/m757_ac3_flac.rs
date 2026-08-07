@@ -4,8 +4,8 @@
 //! extradata). Both decode via the generalized `FfmpegAudioDec`.
 //!
 //! Asserts the parse-time WIRING (the right decoder in the chain); the PCM output
-//! is live-validated with `g2g-launch` (FLAC bit-exact vs ffmpeg, AC-3 within the
-//! documented 1-LSB float rounding). Needs the ffmpeg decoder pool.
+//! is live-validated with `g2g-launch` (FLAC and, since M937's swresample-matching
+//! s16 rounding, AC-3 both bit-exact vs ffmpeg). Needs the ffmpeg decoder pool.
 
 #![cfg(all(feature = "std", feature = "ffmpeg"))]
 
@@ -211,7 +211,7 @@ fn av_ts_with_ac3_still_plugs_video_decoder() {
     ));
     std::fs::remove_file(&path).ok();
     assert!(
-        names.iter().any(|n| n.contains("H264Dec")),
+        names.iter().any(|n| n == "FfmpegVideoDec"),
         "video decoder plugged: {names:?}"
     );
     assert!(

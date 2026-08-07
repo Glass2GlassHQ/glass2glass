@@ -80,6 +80,7 @@ async fn each_source_posts_its_own_stream_start() {
         width: Dim::Fixed(8),
         height: Dim::Fixed(8),
         framerate: Rate::Fixed(30 << 16),
+        interlace: g2g_core::Interlace::Any,
     };
     let (bus, handle) = Bus::new(64);
     let mut a = VideoTestSrc::new(8, 8, 30, 3);

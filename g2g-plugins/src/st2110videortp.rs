@@ -340,6 +340,7 @@ impl PadTemplates for St2110VideoSink {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         })
         .to_vec();
         Vec::from([PadTemplate::sink(CapsSet::from_alternatives(alts))])
@@ -485,6 +486,7 @@ impl St2110VideoSrc {
             width: Dim::Fixed(self.width as u32),
             height: Dim::Fixed(self.height as u32),
             framerate: Rate::Fixed(self.framerate_fps << 16),
+            interlace: g2g_core::Interlace::Any,
         }
     }
 }
@@ -603,6 +605,7 @@ impl PadTemplates for St2110VideoSrc {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         })
         .to_vec();
         Vec::from([PadTemplate::source(CapsSet::from_alternatives(alts))])
@@ -755,6 +758,7 @@ mod tests {
             width: Dim::Fixed(w as u32),
             height: Dim::Fixed(h as u32),
             framerate: Rate::Fixed(30 << 16),
+            interlace: g2g_core::Interlace::Any,
         };
 
         let mut src = St2110VideoSrc::new();
@@ -806,6 +810,7 @@ mod tests {
             width: Dim::Fixed(w as u32),
             height: Dim::Fixed(h as u32),
             framerate: Rate::Fixed(60 << 16),
+            interlace: g2g_core::Interlace::Any,
         };
 
         let mut src = St2110VideoSrc::new();
@@ -857,6 +862,7 @@ mod tests {
             width: Dim::Fixed(w as u32),
             height: Dim::Fixed(h as u32),
             framerate: Rate::Fixed(30 << 16),
+            interlace: g2g_core::Interlace::Any,
         };
 
         let mut src = St2110VideoSrc::new();
@@ -968,6 +974,7 @@ mod tests {
             width: Dim::Fixed(1920),
             height: Dim::Fixed(1080),
             framerate: Rate::Fixed(60 << 16),
+            interlace: g2g_core::Interlace::Any,
         };
         let mut sink = St2110VideoSink::new();
         sink.host = String::from("239.20.30.40");
@@ -1051,6 +1058,7 @@ mod tests {
             width: Dim::Fixed(w as u32),
             height: Dim::Fixed(h as u32),
             framerate: Rate::Fixed(50 << 16), // 20 ms period
+            interlace: g2g_core::Interlace::Any,
         };
         // A receiver to count the packets that actually arrive.
         let rx = UdpSocket::bind(("127.0.0.1", 0)).unwrap();

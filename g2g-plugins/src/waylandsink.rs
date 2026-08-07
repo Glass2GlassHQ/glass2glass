@@ -368,6 +368,7 @@ impl AsyncElement for WaylandSink {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         }))
     }
 
@@ -977,6 +978,7 @@ mod tests {
             width: Dim::Fixed(1280),
             height: Dim::Fixed(720),
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         };
         assert_eq!(sink.intercept_caps(&nv12), Ok(nv12));
     }
@@ -997,6 +999,7 @@ mod tests {
                 width: Dim::Any,
                 height: Dim::Any,
                 framerate: Rate::Any,
+                interlace: g2g_core::Interlace::Any,
             }]
         );
     }
@@ -1226,6 +1229,7 @@ mod tests {
             width: Dim::Fixed(641),
             height: Dim::Fixed(480),
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         };
         match sink.configure_pipeline(&odd) {
             Err(G2gError::CapsMismatch) => {}

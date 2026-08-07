@@ -36,8 +36,7 @@ async fn upscales_rgba_source_to_target_dims() {
                 format: RawVideoFormat::Rgba8,
                 width: Dim::Fixed(64),
                 height: Dim::Fixed(32),
-                framerate: Rate::Fixed(r),
-            } if *r == 30 << 16
+                framerate: Rate::Fixed(r), interlace: _ } if *r == 30 << 16
         )),
         "sink saw RGBA at the target geometry with framerate preserved, got {changes:?}"
     );

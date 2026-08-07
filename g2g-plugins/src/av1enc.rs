@@ -453,6 +453,7 @@ impl AsyncElement for Av1Enc {
                     width: Dim::Any,
                     height: Dim::Any,
                     framerate: Rate::Any,
+                    interlace: g2g_core::Interlace::Any,
                 });
             }
         }
@@ -466,6 +467,7 @@ impl AsyncElement for Av1Enc {
                 width,
                 height,
                 framerate,
+                interlace: _,
             } if chroma_for(*format).is_some() => CapsSet::one(Caps::CompressedVideo {
                 codec: VideoCodec::Av1,
                 width: width.clone(),
@@ -482,6 +484,7 @@ impl AsyncElement for Av1Enc {
             width,
             height,
             framerate,
+            interlace: _,
         } = absolute_caps
         else {
             return Err(G2gError::CapsMismatch);
@@ -624,6 +627,7 @@ impl PadTemplates for Av1Enc {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         };
         let sink = CapsSet::from_alternatives(Vec::from([
             any(RawVideoFormat::I420),
@@ -674,6 +678,7 @@ mod tests {
             width: Dim::Fixed(w),
             height: Dim::Fixed(h),
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         }
     }
 

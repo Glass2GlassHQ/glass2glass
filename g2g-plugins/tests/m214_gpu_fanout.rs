@@ -45,6 +45,7 @@ fn rgba() -> Caps {
         // Fixed (not Any): the runner fixates source caps before run, and the
         // overlay is caps-identity so this rate flows through to the sinks.
         framerate: Rate::Fixed(30 << 16),
+        interlace: g2g_core::Interlace::Any,
     }
 }
 

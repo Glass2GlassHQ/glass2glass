@@ -6,6 +6,30 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M946: conformance evidence from the RTSP, dma-buf export and NVENC/NVDEC tests, plus RTP payload/jitter batteries.
+
+- M945: `clocksync` paces a stream to the pipeline clock mid-graph, and the MoQT demo publisher is live-paced with per-access-unit objects.
+
+- M944: `v4l2src` selects its camera by the device monitor's persistent id (`device-id=`, survives a replug) and exposes exposure, focus and white-balance controls as runtime properties.
+
+- M943: device discovery on Windows (Media Foundation cameras, WASAPI endpoints with hotplug) and macOS (AVFoundation cameras, Core Audio devices), with each platform's capture elements selectable by the id the provider reports.
+
+- M942: the MoQT browser demo gains a WebCodecs decode mode (`?decoder=webcodecs`) and a `prft` end-to-end latency HUD (median 46 ms MSE, 1 ms WebCodecs); `mp4mux` now writes the `prft` in its default per-access-unit mode too.
+
+- M941: `bevy-g2g` streams to an IETF MoQ Transport relay (`StreamOutput::Moqt`, `G2G_MOQT_URL`), with `tools/moqt-demo/watch-bevy.mjs` running the relay, the render and the browser player from one command.
+
+- M940: `g2g-device-monitor` binary (the `gst-device-monitor-1.0` analog): one-shot listing, class filter, `--json`, and `--follow` hotplug; device discovery is compile-checked on Windows and macOS in CI.
+
+- M939: standard device providers: v4l2 cameras (probed YUYV modes), ALSA PCM devices, PipeWire nodes with native hotplug watch and `target-object` selection, and GPU/compute devices (wgpu adapters, CUDA ordinals, VAAPI render nodes) under `default_device_monitor`.
+
+- M938: device discovery core: `Device` / `DeviceProvider` / `DeviceMonitor` (the `GstDeviceMonitor` analog) with class + caps filters, registry-backed element construction, and hotplug via native watch or poll-and-diff.
+
+- M937: the ffmpeg audio decoder converts float samples to s16 like swresample (round to nearest at 1<<15 scale), so AC-3 / AAC decode is bit-exact with ffmpeg's.
+
+- M936: `decodebin` on MPEG-TS selects the PMT's actual video codec instead of assuming the demuxer's H.264 default, so MPEG-2 and H.265 transport streams decode.
+
+- M935: `Caps::RawVideo` carries an interlace field the ffmpeg decoder sets from the per-picture flag, and every playbin video branch inserts `deinterlace mode=auto`, so interlaced streams play clean from any container.
+
 - M934: the PS demuxer synthesizes per-picture video PTS between PES stamps, fixing DVD playback stuttering in half-second bursts.
 
 - M933: the run summary reports each display sink's presented / dropped frame counters, and `g2g-launch` prints a presented-fps figure.

@@ -35,6 +35,7 @@ fn raw_video() -> Caps {
         width: Dim::Any,
         height: Dim::Any,
         framerate: Rate::Any,
+        interlace: g2g_core::Interlace::Any,
     }
 }
 
@@ -184,17 +185,18 @@ fn outbound_counts(graph: &Graph<GraphNode>) -> std::collections::HashMap<u32, u
 /// two outgoing edges) and the overlay joins the decoded video with the caption
 /// text (one fan-in node with two incoming edges).
 fn assert_cc_overlay(graph: &Graph<GraphNode>) {
-    // FileSrc, MkvDemuxN, Tee, h264 stub, videoconvert(RGBA8), TextOverlayN,
-    // videoconvert(NV12), autovideosink, h264parse (caption reframer), CcExtract.
+    // FileSrc, MkvDemuxN, Tee, h264 stub, deinterlace (M935),
+    // videoconvert(RGBA8), TextOverlayN, videoconvert(NV12), autovideosink,
+    // h264parse (caption reframer), CcExtract.
     assert_eq!(
         graph.node_count(),
-        10,
-        "source+demux+tee+decode+2 converts+overlay+sink+parse+ccextract"
+        11,
+        "source+demux+tee+decode+deinterlace+2 converts+overlay+sink+parse+ccextract"
     );
     assert_eq!(
         graph.edges().len(),
-        10,
-        "src, tee in, 2 tee outs, decode chain, caption chain, overlay join, sink"
+        11,
+        "src, tee in, 2 tee outs, decode chain (with deinterlace), caption chain, overlay join, sink"
     );
 
     let fan_ins: Vec<_> = inbound_counts(graph)
@@ -253,8 +255,8 @@ fn without_the_fragment_no_caption_path_is_added() {
 
     assert_eq!(
         graph.node_count(),
-        4,
-        "source + demux + decode + sink, no caption path"
+        5,
+        "source + demux + decode + deinterlace + sink, no caption path"
     );
     assert!(
         inbound_counts(&graph).values().all(|&n| n <= 1),

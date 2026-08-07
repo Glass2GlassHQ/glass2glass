@@ -32,6 +32,7 @@ fn nv12() -> Caps {
         width: Dim::Fixed(8),
         height: Dim::Fixed(8),
         framerate: Rate::Fixed(30 << 16),
+        interlace: g2g_core::Interlace::Any,
     }
 }
 
@@ -41,6 +42,7 @@ fn nv12_any() -> CapsSet {
         width: Dim::Any,
         height: Dim::Any,
         framerate: Rate::Any,
+        interlace: g2g_core::Interlace::Any,
     })
 }
 
@@ -277,6 +279,7 @@ async fn auto_plugs_cuda_upload_before_nvenc() {
             width: Dim::Fixed(W),
             height: Dim::Fixed(H),
             framerate: Rate::Fixed(30 << 16),
+            interlace: g2g_core::Interlace::Any,
         }
     }
 

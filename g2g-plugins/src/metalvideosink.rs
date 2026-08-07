@@ -42,9 +42,9 @@ use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
 use g2g_core::element::QosMessage;
 use g2g_core::{
     AsyncElement, BusHandle, Caps, CapsSet, ClockSync, ConfigureOutcome, Dim, DomainSet, G2gError,
-    HardwareError, MemoryDomain, MemoryDomainKind, OutputSink, PadTemplate, PadTemplates,
-    PipelinePacket, PresentationPacer, PropError, PropValue, PropertySpec, Rate, RawVideoFormat,
-    PACING_PROPERTIES,
+    HardwareError, Interlace, MemoryDomain, MemoryDomainKind, OutputSink, PadTemplate,
+    PadTemplates, PipelinePacket, PresentationPacer, PropError, PropValue, PropertySpec, Rate,
+    RawVideoFormat, PACING_PROPERTIES,
 };
 
 use crate::clock::wait_to_present;
@@ -478,6 +478,7 @@ impl AsyncElement for MetalVideoSink {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            interlace: Interlace::Any,
         })
     }
 
@@ -597,6 +598,7 @@ impl PadTemplates for MetalVideoSink {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            interlace: Interlace::Any,
         }))])
     }
 }

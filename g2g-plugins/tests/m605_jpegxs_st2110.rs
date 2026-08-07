@@ -83,6 +83,7 @@ fn raw_jpegxs_st2110_22_roundtrip() {
         width: Dim::Fixed(w as u32),
         height: Dim::Fixed(h as u32),
         framerate: Rate::Fixed(60 << 16),
+        interlace: g2g_core::Interlace::Any,
     };
     let jxs_caps = Caps::CompressedVideo {
         codec: g2g_core::VideoCodec::JpegXs,

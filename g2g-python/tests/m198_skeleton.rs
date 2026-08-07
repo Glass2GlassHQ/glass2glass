@@ -21,6 +21,7 @@ fn rgba(w: u32, h: u32, fps: u32) -> Caps {
         width: Dim::Fixed(w),
         height: Dim::Fixed(h),
         framerate: Rate::Fixed(fps),
+        interlace: g2g_core::Interlace::Any,
     }
 }
 
@@ -57,6 +58,7 @@ fn rejects_a_format_outside_the_accepted_set() {
         width: Dim::Fixed(640),
         height: Dim::Fixed(480),
         framerate: Rate::Fixed(30),
+        interlace: g2g_core::Interlace::Any,
     };
     assert!(el.intercept_caps(&nv12).is_err());
 }
@@ -68,6 +70,7 @@ fn with_accept_hosts_a_different_format() {
         width: Dim::Any,
         height: Dim::Any,
         framerate: Rate::Any,
+        interlace: g2g_core::Interlace::Any,
     };
     let el = PyTransform::new("action", "ActionTransform").with_accept(nv12);
     let upstream = Caps::RawVideo {
@@ -75,6 +78,7 @@ fn with_accept_hosts_a_different_format() {
         width: Dim::Fixed(1280),
         height: Dim::Fixed(720),
         framerate: Rate::Fixed(25),
+        interlace: g2g_core::Interlace::Any,
     };
     assert_eq!(el.intercept_caps(&upstream).unwrap(), upstream);
 }

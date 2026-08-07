@@ -738,6 +738,7 @@ impl PadTemplates for MediaCodecDec {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         };
         // The source advertises both the default NV12 (CPU) output and the M304
         // RGBA WgpuTexture output (GPU mode); `caps_constraint_as_transform`
@@ -747,6 +748,7 @@ impl PadTemplates for MediaCodecDec {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         };
         Vec::from([
             PadTemplate::sink(CapsSet::one(h264)),
@@ -784,6 +786,7 @@ fn nv12_caps(w: u32, h: u32, framerate: Rate) -> Caps {
         width: Dim::Fixed(w),
         height: Dim::Fixed(h),
         framerate,
+        interlace: g2g_core::Interlace::Any,
     }
 }
 
@@ -796,6 +799,7 @@ fn rgba_caps(w: u32, h: u32, framerate: Rate) -> Caps {
         width: Dim::Fixed(w),
         height: Dim::Fixed(h),
         framerate,
+        interlace: g2g_core::Interlace::Any,
     }
 }
 
@@ -816,6 +820,7 @@ fn derive_output_caps(codec: VideoCodec, rgba: bool, input: &Caps) -> CapsSet {
             width: width.clone(),
             height: height.clone(),
             framerate: framerate.clone(),
+            interlace: g2g_core::Interlace::Any,
         }),
         _ => CapsSet::from_alternatives(Vec::new()),
     }

@@ -156,6 +156,7 @@ fn rejects_non_h26x_caps() {
         width: Dim::Fixed(64),
         height: Dim::Fixed(48),
         framerate: Rate::Fixed(30 << 16),
+        interlace: g2g_core::Interlace::Any,
     };
     assert!(
         Mp4Mux::new().configure_pipeline(&raw).is_err(),

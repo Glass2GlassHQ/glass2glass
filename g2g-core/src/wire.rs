@@ -42,8 +42,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::caps::{
-    AudioFormat, ByteStreamEncoding, Caps, ClosedCaptionFormat, Dim, Rate, RawVideoFormat,
-    SubPictureFormat, TensorDType, TensorLayout, TensorShape, TextFormat, VideoCodec,
+    AudioFormat, ByteStreamEncoding, Caps, ClosedCaptionFormat, Dim, Interlace, Rate,
+    RawVideoFormat, SubPictureFormat, TensorDType, TensorLayout, TensorShape, TextFormat,
+    VideoCodec,
 };
 use crate::frame::{Frame, FrameTiming, PipelinePacket};
 use crate::memory::{MemoryDomain, SystemSlice};
@@ -472,6 +473,22 @@ fn get_rate(r: &mut Reader) -> Result<Rate, WireError> {
     })
 }
 
+fn interlace_to_u8(i: Interlace) -> u8 {
+    match i {
+        Interlace::Any => 0,
+        Interlace::Progressive => 1,
+        Interlace::Interleaved => 2,
+    }
+}
+fn interlace_from_u8(v: u8) -> Result<Interlace, WireError> {
+    Ok(match v {
+        0 => Interlace::Any,
+        1 => Interlace::Progressive,
+        2 => Interlace::Interleaved,
+        _ => return Err(WireError::BadTag),
+    })
+}
+
 // ---- Caps ----
 
 fn put_caps(w: &mut Writer, c: &Caps) {
@@ -493,12 +510,14 @@ fn put_caps(w: &mut Writer, c: &Caps) {
             width,
             height,
             framerate,
+            interlace,
         } => {
             w.u8(1);
             w.u8(raw_format_to_u8(*format));
             put_dim(w, width);
             put_dim(w, height);
             put_rate(w, framerate);
+            w.u8(interlace_to_u8(*interlace));
         }
         Caps::Audio {
             format,
@@ -556,6 +575,7 @@ fn get_caps(r: &mut Reader) -> Result<Caps, WireError> {
             width: get_dim(r)?,
             height: get_dim(r)?,
             framerate: get_rate(r)?,
+            interlace: interlace_from_u8(r.u8()?)?,
         },
         2 => Caps::Audio {
             format: audio_format_from_u8(r.u8()?)?,
@@ -1160,6 +1180,7 @@ mod tests {
                 width: Dim::Fixed(640),
                 height: Dim::Fixed(480),
                 framerate: Rate::Any,
+                interlace: crate::Interlace::Any,
             },
             Caps::Audio {
                 format: AudioFormat::Opus,

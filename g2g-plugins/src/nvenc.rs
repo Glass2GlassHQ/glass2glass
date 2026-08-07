@@ -290,6 +290,7 @@ impl NvEnc {
                     width: Dim::Any,
                     height: Dim::Any,
                     framerate: Rate::Any,
+                    interlace: g2g_core::Interlace::Any,
                 })
                 .collect(),
         )
@@ -895,6 +896,7 @@ impl AsyncElement for NvEnc {
                 width,
                 height,
                 framerate,
+                interlace: _,
             } => CapsSet::one(Caps::CompressedVideo {
                 codec,
                 width: width.clone(),
@@ -918,6 +920,7 @@ impl AsyncElement for NvEnc {
             width,
             height,
             framerate,
+            interlace: _,
         } = absolute_caps
         else {
             return Err(G2gError::CapsMismatch);
@@ -1587,6 +1590,7 @@ pub(crate) mod tests {
             width: Dim::Fixed(w),
             height: Dim::Fixed(h),
             framerate: Rate::Fixed(30 << 16),
+            interlace: g2g_core::Interlace::Any,
         }
     }
 
@@ -1639,6 +1643,7 @@ pub(crate) mod tests {
             width: Dim::Fixed(640),
             height: Dim::Fixed(480),
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         };
         assert!(derive(&i420).alternatives().is_empty());
     }
@@ -1717,6 +1722,7 @@ pub(crate) mod tests {
             width: Dim::Fixed(640),
             height: Dim::Fixed(480),
             framerate: Rate::Fixed(30 << 16),
+            interlace: g2g_core::Interlace::Any,
         };
         e.configure_pipeline(&p010).unwrap();
         assert_eq!(e.nv_buffer_format(), ffi::NV_ENC_BUFFER_FORMAT_YUV420_10BIT);
@@ -1757,6 +1763,7 @@ pub(crate) mod tests {
             width: Dim::Fixed(1280),
             height: Dim::Fixed(720),
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         };
         assert_eq!(
             bad.configure_pipeline(&i420).err(),
@@ -2227,6 +2234,7 @@ pub(crate) mod tests {
             width: Dim::Fixed(W),
             height: Dim::Fixed(H),
             framerate: Rate::Fixed(30 << 16),
+            interlace: g2g_core::Interlace::Any,
         };
         // 10-bit is HEVC-only on NVENC.
         assert_eq!(
@@ -2320,6 +2328,7 @@ pub(crate) mod tests {
                 width: Dim::Fixed(W),
                 height: Dim::Fixed(H),
                 framerate: Rate::Fixed(30 << 16),
+                interlace: g2g_core::Interlace::Any,
             }],
             "the encoded stream is 10-bit end to end"
         );

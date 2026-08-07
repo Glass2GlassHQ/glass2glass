@@ -112,6 +112,7 @@ pub fn v4l2_handler() -> UriSourceFactory {
                 width: Dim::Any,
                 height: Dim::Any,
                 framerate: Rate::Any,
+                interlace: g2g_core::Interlace::Any,
             },
         ))
     })
@@ -364,16 +365,14 @@ pub fn ps_playbin(reg: &Registry, uri: &str) -> Result<Option<Graph<GraphNode>>,
             return build_ps_subpicture_overlay(reg, &path, &infos, geometry).map(Some);
         }
     }
-    // An interlaced disc combs on motion unless the fields are woven back
-    // together, so the sequence extension's `progressive_sequence` decides
-    // whether the video branch pays for a `deinterlace` (M932).
-    let interlaced = demux.sequence().is_some_and(|s| !s.progressive);
-    build_av_fanout_with(
+    // Every video branch carries a `deinterlace mode=auto` (M935), so an
+    // interlaced disc weaves from the decoder's own caps declaration rather
+    // than the container probe deciding up front (the M932 mechanism).
+    build_av_fanout(
         reg,
         Box::new(source),
         crate::psdemux::PsDemuxN::new(streams),
         &av,
-        interlaced,
     )
     .map(Some)
 }
@@ -491,12 +490,9 @@ fn build_ps_subpicture_overlay(
                 framerate: g2g_core::Rate::Fixed(geometry.framerate_q16),
             };
             // Deinterlace on the decoder's own planar output, before the RGBA
-            // convert the compositor needs (M932).
-            let head = if geometry.progressive {
-                to_rgba
-            } else {
-                deinterlace_into(&mut graph, to_rgba)?
-            };
+            // convert the compositor needs (M932; `auto` since M935, weaving
+            // only when the decoder declares the stream interleaved).
+            let head = deinterlace_into(&mut graph, to_rgba)?;
             reg.decodebin(
                 &mut graph,
                 demux.out(i as u8),
@@ -713,27 +709,11 @@ fn build_av_fanout<D>(
 where
     D: g2g_core::MultiOutputElement + 'static,
 {
-    build_av_fanout_with(reg, source, demux, av, false)
-}
-
-/// [`build_av_fanout`] with `deinterlace` optionally spliced into each video
-/// branch, for a container whose probe found the stream interlaced.
-#[cfg(feature = "std")]
-fn build_av_fanout_with<D>(
-    reg: &Registry,
-    source: Box<dyn DynSourceLoop>,
-    demux: D,
-    av: &[(Caps, bool)],
-    deinterlace: bool,
-) -> Result<Graph<GraphNode>, ParseError>
-where
-    D: g2g_core::MultiOutputElement + 'static,
-{
     let mut graph: Graph<GraphNode> = Graph::new();
     let src = graph.add_source(GraphNodeRef::Source(source));
     let demux = graph.add_demux(GraphNodeRef::demux(demux), av.len() as u8);
     graph.link(src, demux.input()).map_err(ParseError::Graph)?;
-    wire_av_fanout(reg, &mut graph, demux, av, deinterlace)?;
+    wire_av_fanout(reg, &mut graph, demux, av)?;
     Ok(graph)
 }
 
@@ -746,7 +726,6 @@ fn wire_av_fanout(
     graph: &mut Graph<GraphNode>,
     demux: g2g_core::graph::Demux,
     av: &[(Caps, bool)],
-    deinterlace: bool,
 ) -> Result<(), ParseError> {
     for (i, (caps, video)) in av.iter().enumerate() {
         if *video {
@@ -754,11 +733,7 @@ fn wire_av_fanout(
                 .make_element("autovideosink")
                 .ok_or_else(|| ParseError::UnknownElement("autovideosink".to_string()))?;
             let vsnk = graph.add_sink(GraphNodeRef::Element(sink));
-            let head = if deinterlace {
-                deinterlace_into(graph, vsnk)?
-            } else {
-                vsnk
-            };
+            let head = deinterlace_into(graph, vsnk)?;
             reg.decodebin(
                 graph,
                 demux.out(i as u8),
@@ -775,14 +750,19 @@ fn wire_av_fanout(
     Ok(())
 }
 
-/// Add a `deinterlace` feeding `to` and return it, so the decode chain plugs into
-/// the deinterlacer instead of directly into what follows.
+/// Add a `deinterlace mode=auto` feeding `to` and return it, so the decode chain
+/// plugs into the deinterlacer instead of directly into what follows. Every
+/// playbin video branch gets one (M935, gst parity with playbin's `deinterlace`
+/// flag): under `auto` it weaves only when the decoder's caps declare
+/// `Interlace::Interleaved` and forwards progressive frames untouched.
 #[cfg(feature = "std")]
 fn deinterlace_into(
     graph: &mut Graph<GraphNode>,
     to: g2g_core::graph::NodeId,
 ) -> Result<g2g_core::graph::NodeId, ParseError> {
-    let node = graph.add_transform(GraphNodeRef::element(crate::deinterlace::Deinterlace::new()));
+    let node = graph.add_transform(GraphNodeRef::element(
+        crate::deinterlace::Deinterlace::new().with_mode(crate::deinterlace::DeinterlaceMode::Auto),
+    ));
     graph.link(node, to).map_err(ParseError::Graph)?;
     Ok(node)
 }
@@ -819,14 +799,16 @@ fn wire_overlay_av(
     let vsnk = graph.add_sink(GraphNodeRef::Element(vsink));
     graph.link(to_nv12, vsnk).map_err(ParseError::Graph)?;
 
-    // Each A/V track: the video one decodes into the overlay's RGBA8 convert, the
-    // rest fan out to their own auto sinks through the audio decode/convert chain.
+    // Each A/V track: the video one decodes into the overlay's RGBA8 convert
+    // (through the auto deinterlacer, M935), the rest fan out to their own auto
+    // sinks through the audio decode/convert chain.
     for (i, (caps, _video)) in av.iter().enumerate() {
         if i == video_idx {
+            let head = deinterlace_into(graph, to_rgba)?;
             reg.decodebin(
                 graph,
                 demux.out(i as u8),
-                to_rgba,
+                head,
                 caps,
                 &is_raw_video,
                 PLAYBIN_MAX_DEPTH,
@@ -907,15 +889,17 @@ fn wire_cc_overlay(
     graph.link(to_nv12, vsnk).map_err(ParseError::Graph)?;
 
     let video_caps = &av[video_idx].0;
-    // Tee the compressed video: branch 0 decodes for display, branch 1 captions.
+    // Tee the compressed video: branch 0 decodes for display (through the auto
+    // deinterlacer, M935), branch 1 captions.
     let tee = graph.add_tee(2);
     graph
         .link(demux.out(video_idx as u8), tee.input())
         .map_err(ParseError::Graph)?;
+    let display_head = deinterlace_into(graph, to_rgba)?;
     reg.decodebin(
         graph,
         tee.out(0),
-        to_rgba,
+        display_head,
         video_caps,
         &is_raw_video,
         PLAYBIN_MAX_DEPTH,
@@ -1380,12 +1364,15 @@ pub fn ts_decodebin_select(
 }
 
 /// Bare-`decodebin` primary-stream hook for MPEG-TS (M746): a `filesrc
-/// location=X.ts ! decodebin` on an audio-only transport stream needs the
-/// single-stream [`TsDemux`](crate::tsdemux::TsDemux) to select its audio stream
-/// (the default is a video port, so the auto-plug would pick a video decoder).
-/// Sniff the PMT; decline (`None`) a non-TS file, an empty PMT, or one that carries
-/// a video track (the default video path is correct), else return `tsdemux` with the
-/// `stream=<codec>` selection and the audio elementary caps for the decoder search.
+/// location=X.ts ! decodebin` needs the single-stream
+/// [`TsDemux`](crate::tsdemux::TsDemux) to select the stream the PMT actually
+/// carries. Unlike the container demuxers, `TsDemux` cannot derive its output
+/// caps from the file (its port is fixed before parsing a byte, defaulting to
+/// H.264), so a non-H.264 video stream (MPEG-2, H.265) would negotiate an
+/// H.264 decoder and fail. Sniff the PMT; decline (`None`) a non-TS file or an
+/// empty PMT, else return `tsdemux` with the `stream=<codec>` selection (the
+/// first video stream, or the first audio stream of an audio-only file) and
+/// its elementary caps for the decoder search.
 #[cfg(feature = "std")]
 pub fn ts_primary_stream(location: &str, caps: &Caps) -> Option<PrimaryStream> {
     if !matches!(
@@ -1406,18 +1393,16 @@ pub fn ts_primary_stream(location: &str, caps: &Caps) -> Option<PrimaryStream> {
         off += 188;
     }
     let infos = crate::tsdemux::forwardable_streams(&demux);
-    // A video track present: the demux's default video port is right, decline.
-    if infos.is_empty() || infos.iter().any(|i| i.video) {
-        return None;
-    }
-    let audio = infos.into_iter().find(|i| !i.video)?;
+    // prefer the video stream (naming its codec, the port default is h264
+    // regardless of the PMT), else the first audio stream
+    let primary = infos.iter().find(|i| i.video).or_else(|| infos.first())?;
     Some(PrimaryStream {
         demux: "tsdemux",
         props: alloc::vec![(
             "stream".to_string(),
-            crate::tsdemux::ts_stream_to_str(audio.stream).to_string(),
+            crate::tsdemux::ts_stream_to_str(primary.stream).to_string(),
         )],
-        caps: audio.caps,
+        caps: primary.caps.clone(),
     })
 }
 

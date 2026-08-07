@@ -14,8 +14,8 @@ use core::future::Future;
 use core::pin::Pin;
 
 use g2g_core::{
-    AsyncElement, Caps, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError, OutputSink,
-    PadTemplate, PadTemplates, PipelinePacket, Rate, RawVideoFormat,
+    AsyncElement, Caps, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError, Interlace,
+    OutputSink, PadTemplate, PadTemplates, PipelinePacket, Rate, RawVideoFormat,
 };
 
 /// A trivial pass-through video transform that counts the frames it sees. The
@@ -77,6 +77,7 @@ impl PadTemplates for ExampleFilter {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            interlace: Interlace::Any,
         });
         Vec::from([PadTemplate::sink(any.clone()), PadTemplate::source(any)])
     }

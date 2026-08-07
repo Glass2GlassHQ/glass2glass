@@ -62,6 +62,7 @@ fn rgba_caps() -> Caps {
         width: Dim::Fixed(W),
         height: Dim::Fixed(H),
         framerate: Rate::Fixed(30 << 16),
+        interlace: g2g_core::Interlace::Any,
     }
 }
 
@@ -163,6 +164,7 @@ async fn encodes_i420_to_mjpeg_that_roundtrips_to_blue() {
         width: Dim::Fixed(W),
         height: Dim::Fixed(H),
         framerate: Rate::Fixed(30 << 16),
+        interlace: g2g_core::Interlace::Any,
     })
     .unwrap();
     let mut esink = CaptureSink::default();
@@ -222,6 +224,7 @@ async fn encode_rgba(mut enc: MjpegEnc, pixels: Vec<u8>, w: u32, h: u32) -> Vec<
         width: Dim::Fixed(w),
         height: Dim::Fixed(h),
         framerate: Rate::Fixed(30 << 16),
+        interlace: g2g_core::Interlace::Any,
     })
     .unwrap();
     let mut sink = CaptureSink::default();
@@ -279,6 +282,7 @@ async fn mozjpeg_backend_encodes_a_decodable_jpeg_honouring_quality() {
             width: Dim::Fixed(W),
             height: Dim::Fixed(H),
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         }],
         "decoded geometry matches the mozjpeg-encoded source"
     );

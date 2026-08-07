@@ -40,16 +40,12 @@ derived maturity (`conformance`, M614, evidence-derived `MaturityLevel` with
 honesty guards, batteries in `g2g-plugins::conformance`, `g2g-inspect --maturity`).
 Sequenced next:
 
-- **Grow the conformance matrix (M615 + M619 + M621).** The persisted-evidence
-  mechanism, two native-muxer oracles (`mp4mux`, `mpegtsmux` vs `ffprobe`), the
-  ffmpeg-interop transports (`udpsrc` RTP / `rtmpsrc` / `srtsrc` / `srtsink` as
-  peer-tagged `Oracle` rows), the Vulkan Video GPU decode tests (`vulkanvideo`
-  H.264 / H.265 / AV1 as `Hardware` rows tagged with the GPU), and the CI
-  `conformance` job (sets `$G2G_CONFORMANCE_LOG`, runs the oracles, publishes
-  `--maturity` to the job summary) are done. The muxer oracles respect an
-  externally-set log so they aggregate in CI. Remaining (optional): persist
-  evidence from the other resource-owning tests as they are validated (RTSP interop,
-  `wgpu`-export, native NVENC/NVDEC), plus more in-process batteries.
+- **Grow the conformance matrix.** Persist evidence from the resource-owning
+  tests still uncovered as they are validated (`vaapi` / `v4l2` decode, the
+  Android and macOS device paths, `libcamera` capture), and add in-process
+  batteries for further sans-IO cores. Get the GPU-tagged `Hardware` rows into CI
+  by wiring a runner that has the hardware: a `Hardware` row can only come from a
+  run on the device, so a GPU-less runner will never produce one.
 - **Whole-graph zero-alloc (M616 + M620).** The single-stage (M616) and multi-stage
   concrete-link (M620, source -> transform -> sink) data paths are proven zero-alloc.
   Remaining (larger, deferred): a fully zero-alloc *dyn* runner, monomorphized arms
@@ -247,14 +243,6 @@ Phased plan:
 - Richer auto-plug factory construction params (geometry / device / file path).
 - A hardware-backed end-to-end decode-through-`decodebin` run (current tests
   read templates / assert splicing, decode no real media).
-- **Interlace signaling + universal playbin deinterlace** (gst parity: playbin's
-  default flags include `deinterlace`, its element no-ops on progressive input
-  via `mode=auto`). Two steps: an interlace field on `Caps::RawVideo` set by
-  parsers / decoders (libavcodec reports it per frame; `mpegvideoparse`-style
-  from the MPEG-2 sequence extension), then every playbin video branch inserts
-  `deinterlace` with an `auto` mode that passes progressive frames through
-  untouched. Covers interlaced MPEG-2 over TS / mkv and interlaced H.264,
-  which play combed today (only the PS path decides, from the container).
 
 ## Platform: macOS
 
@@ -291,9 +279,6 @@ Phased plan:
 - **WebTransport residuals:** the `web-transport-quinn = "=0.11.12"` pin and
   the `idna_adapter` 1.1.0 hold in `Cargo.lock` can both drop once the
   workspace MSRV moves past 1.91.
-- **MoQ Transport:** a wall-clock pacing element for live-shaped demo
-  publishers (the unpaced demo needs half-second fragments to keep the
-  browser's append queue sane; a `clocksync`-style element is the fix).
 - **RTP over QUIC (RoQ):** blocked on the spec. draft-ietf-avtcore-rtp-over-quic
   expired at -14 (its ALPN is forbidden until an RFC exists) and the WG missed
   its milestone; revisit only if the draft revives. Peers if it does:
@@ -407,6 +392,16 @@ Phased plan:
 - `mfvideosrc`: first Windows build + camera smoke test; D3D11 zero-copy;
   size/rate request beyond device default.
 - Screen capture: Windows DXGI Desktop Duplication.
+- Device discovery on Android (Camera2 id list) and web (enumerateDevices)
+  providers.
+- Camera controls (exposure, focus, white balance) as element properties on
+  AVCaptureDevice and Camera2.
+- Run the Windows (`mfdevice` / `wasapidevice`) and macOS (`avfdevice` /
+  `coreaudiodevice`) device providers on a real host: enumeration against
+  attached hardware, endpoint selection by id through each element's `device`
+  property, and the `IMMNotificationClient` hotplug path. Both are
+  compile-checked only (CI cross-compiles them; the runners have no camera and
+  no way to replug one).
 
 ## Sinks
 
@@ -701,6 +696,13 @@ Outstanding developer-tooling tasks, highest leverage first.
 
 - **Per-element / per-link telemetry gaps.** Remaining `Observer` coverage:
   validate the dashboard live against an RTSP source.
+- **Split compute from blocked-on-downstream time in the run summary.** On a
+  paced graph the `proc` percentiles time the whole `process()` future, so an
+  element awaiting a full downstream link reports frame-period-scale numbers (a
+  demuxer at ~127 ms p50, the whole video chain pinned at one 67 ms histogram
+  bucket) that read as compute cost; the same graph unpaced shows ~2 ms. Time
+  the push-await separately (or subtract it) so the summary distinguishes "busy"
+  from "waiting on back-pressure".
 - **gst-parity differ.** Same launch line through real GStreamer and g2g;
   diff the negotiated caps per edge, the element set after autoplug, and the
   output (checksum, PSNR for lossy). Calliope already does differential output

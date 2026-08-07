@@ -747,6 +747,7 @@ mod tests {
             width: Dim::Fixed(640),
             height: Dim::Fixed(480),
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         };
         assert_eq!(sink.intercept_caps(&rgba), Err(G2gError::CapsMismatch));
     }
@@ -761,6 +762,7 @@ mod tests {
             width: Dim::Fixed(2),
             height: Dim::Fixed(2),
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         };
         assert!(matches!(
             sink2.configure_pipeline(&raw),

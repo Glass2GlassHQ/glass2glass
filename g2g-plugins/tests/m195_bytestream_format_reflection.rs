@@ -102,6 +102,7 @@ fn registry_with_vp9_stub() -> Registry {
         width: Dim::Any,
         height: Dim::Any,
         framerate: Rate::Any,
+        interlace: g2g_core::Interlace::Any,
     };
     reg.register(ElementFactory::new(
         "vp9stub",

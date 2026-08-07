@@ -46,6 +46,7 @@ fn caps(format: RawVideoFormat, w: u32, h: u32) -> Caps {
         width: Dim::Fixed(w),
         height: Dim::Fixed(h),
         framerate: Rate::Fixed(30 << 16),
+        interlace: g2g_core::Interlace::Any,
     }
 }
 
@@ -155,6 +156,31 @@ async fn roundtrip(format: RawVideoFormat, w: u32, h: u32, size: usize) -> Optio
     Some(got)
 }
 
+/// The export round trip ran on a real GPU (Vulkan external-memory-fd on this
+/// driver) and the pixels matched: persist `Hardware` evidence for both halves,
+/// so `g2g-inspect --maturity` derives them as HardwareValidated. The tag names
+/// the subsystem, not a card: each element opens its own high-performance
+/// Vulkan adapter, so the test cannot honestly claim which GPU that was.
+fn record_hardware_evidence(codec: &str) {
+    use g2g_core::conformance::{ConformanceDimension, Evidence};
+    use g2g_plugins::conformance::persist;
+    let platform = format!(
+        "{} {} Vulkan dma-buf",
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    );
+    for element in ["wgputodmabuf", "dmabuftowgpu"] {
+        persist::record_evidence(
+            element,
+            &Evidence::new(ConformanceDimension::Hardware)
+                .platform(platform.clone())
+                .codec(codec)
+                .detail("GPU buffer exported as a dma-buf and re-imported on a second device"),
+        )
+        .expect("record hardware evidence");
+    }
+}
+
 #[tokio::test]
 async fn roundtrip_rgba8() {
     const W: u32 = 8;
@@ -162,6 +188,7 @@ async fn roundtrip_rgba8() {
     const SIZE: usize = (W * H * 4) as usize; // packed 4bpp
     if roundtrip(RawVideoFormat::Rgba8, W, H, SIZE).await.is_some() {
         eprintln!("PASS rgba8: {SIZE} bytes exported + re-imported on a 2nd device, exact");
+        record_hardware_evidence("rgba8");
     }
 }
 
@@ -172,5 +199,6 @@ async fn roundtrip_nv12() {
     const SIZE: usize = (W * H + W * H / 2) as usize; // luma + interleaved chroma
     if roundtrip(RawVideoFormat::Nv12, W, H, SIZE).await.is_some() {
         eprintln!("PASS nv12: {SIZE} bytes (plane-aware) exported + re-imported, exact");
+        record_hardware_evidence("nv12");
     }
 }

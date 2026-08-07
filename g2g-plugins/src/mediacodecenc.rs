@@ -337,6 +337,7 @@ impl AsyncElement for MediaCodecEnc {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         };
         upstream_caps.intersect(&supported)
     }
@@ -355,6 +356,7 @@ impl AsyncElement for MediaCodecEnc {
                 width: Dim::Fixed(w),
                 height: Dim::Fixed(h),
                 framerate,
+                interlace: _,
             } => (*w, *h, framerate.clone()),
             _ => return Err(G2gError::CapsMismatch),
         };
@@ -512,6 +514,7 @@ impl PadTemplates for MediaCodecEnc {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         };
         let compressed = |codec| Caps::CompressedVideo {
             codec,
@@ -565,6 +568,7 @@ fn derive_output_caps(codec: VideoCodec, input: &Caps) -> CapsSet {
             width,
             height,
             framerate,
+            interlace: _,
         } => CapsSet::one(Caps::CompressedVideo {
             codec,
             width: width.clone(),

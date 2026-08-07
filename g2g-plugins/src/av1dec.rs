@@ -80,7 +80,7 @@ macro_rules! av1_decoder {
                     width: Dim::Fixed(w),
                     height: Dim::Fixed(h),
                     framerate: self.framerate.clone(),
-                }
+                 interlace: g2g_core::Interlace::Any, }
             }
 
             /// Feed one AV1 temporal unit and collect every picture now decodable,
@@ -184,7 +184,7 @@ macro_rules! av1_decoder {
                             width: width.clone(),
                             height: height.clone(),
                             framerate: framerate.clone(),
-                        })
+                         interlace: g2g_core::Interlace::Any, })
                     }
                     _ => CapsSet::from_alternatives(Vec::new()),
                 }))
@@ -262,7 +262,7 @@ macro_rules! av1_decoder {
                     width: Dim::Any,
                     height: Dim::Any,
                     framerate: Rate::Any,
-                };
+                 interlace: g2g_core::Interlace::Any, };
                 Vec::from([
                     PadTemplate::sink(CapsSet::one(av1)),
                     PadTemplate::source(CapsSet::one(raw)),

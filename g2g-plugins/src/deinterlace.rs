@@ -14,11 +14,19 @@
 //!   vertical blur that suppresses combing without dropping a field.
 //!
 //! Field order is assumed top-field-first, matching ffmpeg's default for a stream
-//! that declares nothing. There is deliberately no `mode` property: g2g carries no
-//! per-frame interlace flag, so an `auto` mode could not tell an interlaced frame
-//! from a progressive one and would be a property the element accepts and ignores.
-//! Whether to insert this element is decided upstream (`ps_playbin` reads the MPEG
-//! sequence extension's `progressive_sequence`).
+//! that declares nothing. The `mode` property (M935) mirrors GStreamer's:
+//! `interlaced` (default) always weaves, `auto` weaves only when the incoming
+//! caps say `Interlace::Interleaved` (the ffmpeg decoder latches that from the
+//! per-picture flag) and passes everything else through untouched, `disabled` is
+//! a pure passthrough. The default deviates from GStreamer's `auto` on purpose:
+//! most g2g upstreams do not declare interlacing, so a hand-inserted
+//! `deinterlace` under `auto` would silently do nothing. `playbin` inserts this
+//! element with `auto` on every video branch.
+//!
+//! In `auto` mode negotiation is transparent (any raw video is accepted and
+//! passed through, including formats the kernels cannot process, e.g. 10-bit
+//! planar), so inserting the element never narrows what a branch can play; an
+//! interleaved stream in an unsupported format stays combed rather than failing.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -66,6 +74,38 @@ impl DeinterlaceMethod {
             Self::Yadif => "yadif",
             Self::Linear => "linear",
             Self::Blend => "blend",
+        }
+    }
+}
+
+/// When the element weaves vs passes through (M935). See the module docs for
+/// why the default is `Interlaced`, not GStreamer's `auto`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeinterlaceMode {
+    /// Weave only when the incoming caps say `Interlace::Interleaved` (and the
+    /// format is one the kernels handle); otherwise forward untouched.
+    Auto,
+    /// Always weave (the pre-M935 behavior).
+    Interlaced,
+    /// Never weave; pure passthrough.
+    Disabled,
+}
+
+impl DeinterlaceMode {
+    fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "auto" => Some(Self::Auto),
+            "interlaced" => Some(Self::Interlaced),
+            "disabled" => Some(Self::Disabled),
+            _ => None,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Interlaced => "interlaced",
+            Self::Disabled => "disabled",
         }
     }
 }
@@ -159,6 +199,13 @@ struct Held {
 #[derive(Debug)]
 pub struct Deinterlace {
     method: DeinterlaceMethod,
+    mode: DeinterlaceMode,
+    /// Whether the current caps get woven (vs forwarded untouched). Decided at
+    /// every (re)configure from `mode` and the incoming `Interlace` field.
+    active: bool,
+    /// The caps as the upstream declared them, forwarded verbatim in
+    /// passthrough and re-stamped `Progressive` when weaving.
+    incoming_caps: Option<Caps>,
     input: Option<(RawVideoFormat, u32, u32, Rate)>,
     layout: Vec<Component>,
     frame_bytes: usize,
@@ -182,6 +229,9 @@ impl Deinterlace {
     pub fn new() -> Self {
         Self {
             method: DeinterlaceMethod::Yadif,
+            mode: DeinterlaceMode::Interlaced,
+            active: false,
+            incoming_caps: None,
             input: None,
             layout: Vec::new(),
             frame_bytes: 0,
@@ -199,51 +249,101 @@ impl Deinterlace {
         self
     }
 
-    fn accept_input(&self, caps: &Caps) -> Result<(RawVideoFormat, u32, u32, Rate), G2gError> {
+    pub fn with_mode(mut self, mode: DeinterlaceMode) -> Self {
+        self.mode = mode;
+        self
+    }
+
+    /// The weave path's input contract: a fixed, even geometry in one of the
+    /// four kernel formats. `None` when the caps are raw video the kernels
+    /// cannot process (only an error for the modes that must process).
+    fn weavable(caps: &Caps) -> Option<(RawVideoFormat, u32, u32, Rate)> {
         let Caps::RawVideo {
             format,
             width: Dim::Fixed(w),
             height: Dim::Fixed(h),
             framerate,
+            ..
         } = caps
         else {
-            return Err(G2gError::CapsMismatch);
+            return None;
         };
         if !FORMATS.contains(format) || *w == 0 || *h == 0 {
-            return Err(G2gError::CapsMismatch);
+            return None;
         }
         // A subsampled format at an odd dimension has no whole chroma grid, so
         // the plane layout below would not describe the buffer it is given.
         let (even_w, even_h) = even_dims_required(*format);
         if (even_w && *w % 2 != 0) || (even_h && *h % 2 != 0) {
-            return Err(G2gError::CapsMismatch);
+            return None;
         }
-        Ok((*format, *w, *h, framerate.clone()))
+        Some((*format, *w, *h, framerate.clone()))
     }
 
     fn reconfigure(&mut self, caps: &Caps) -> Result<(), G2gError> {
-        let (format, w, h, rate) = self.accept_input(caps)?;
-        // A geometry change invalidates the held window: its frames are the old
-        // size and cannot be combined with the new ones.
-        if self.input.as_ref().map(|(f, w, h, _)| (*f, *w, *h)) != Some((format, w, h)) {
+        let Caps::RawVideo { interlace, .. } = caps else {
+            return Err(G2gError::CapsMismatch);
+        };
+        let weavable = Self::weavable(caps);
+        let active = match self.mode {
+            DeinterlaceMode::Disabled => false,
+            // The pre-M935 contract: an explicit always-on deinterlace rejects
+            // caps it cannot process, loud.
+            DeinterlaceMode::Interlaced => {
+                if weavable.is_none() {
+                    return Err(G2gError::CapsMismatch);
+                }
+                true
+            }
+            // Auto: weave only a declared-interleaved stream in a format the
+            // kernels handle; anything else (progressive, undeclared, 10-bit)
+            // forwards untouched.
+            DeinterlaceMode::Auto => {
+                *interlace == g2g_core::Interlace::Interleaved && weavable.is_some()
+            }
+        };
+        if active {
+            let (format, w, h, rate) = weavable.ok_or(G2gError::CapsMismatch)?;
+            // A geometry change invalidates the held window: its frames are the
+            // old size and cannot be combined with the new ones.
+            if self.input.as_ref().map(|(f, w, h, _)| (*f, *w, *h)) != Some((format, w, h)) {
+                self.prev = None;
+                self.cur = None;
+                self.next = None;
+            }
+            self.layout = components(format, w as usize, h as usize);
+            self.frame_bytes = frame_byte_size(format, w, h);
+            self.input = Some((format, w, h, rate));
+        } else {
             self.prev = None;
             self.cur = None;
             self.next = None;
+            self.input = None;
         }
-        self.layout = components(format, w as usize, h as usize);
-        self.frame_bytes = frame_byte_size(format, w, h);
-        self.input = Some((format, w, h, rate));
+        if active != self.active {
+            g2g_core::g2g_debug!(
+                self,
+                "{}: {}",
+                self.mode.as_str(),
+                if active { "weaving" } else { "passthrough" }
+            );
+        }
+        self.active = active;
+        self.incoming_caps = Some(caps.clone());
         Ok(())
     }
 
     fn out_caps(&self) -> Option<Caps> {
-        let (format, w, h, rate) = self.input.as_ref()?;
-        Some(Caps::RawVideo {
-            format: *format,
-            width: Dim::Fixed(*w),
-            height: Dim::Fixed(*h),
-            framerate: rate.clone(),
-        })
+        let incoming = self.incoming_caps.as_ref()?;
+        if !self.active {
+            // Passthrough forwards the upstream declaration verbatim.
+            return Some(incoming.clone());
+        }
+        let mut caps = incoming.clone();
+        if let Caps::RawVideo { interlace, .. } = &mut caps {
+            *interlace = g2g_core::Interlace::Progressive;
+        }
+        Some(caps)
     }
 
     async fn emit(
@@ -280,6 +380,12 @@ impl Deinterlace {
     }
 }
 
+impl g2g_core::log::LogSource for Deinterlace {
+    fn log_category(&self) -> &'static str {
+        g2g_core::log::short_type_name::<Self>()
+    }
+}
+
 impl AsyncElement for Deinterlace {
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
@@ -287,12 +393,21 @@ impl AsyncElement for Deinterlace {
         Self: 'a;
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
+        // Auto / disabled pass anything raw through, so negotiation must not
+        // narrow the branch to the kernel formats.
+        if self.mode != DeinterlaceMode::Interlaced {
+            return match upstream_caps {
+                Caps::RawVideo { .. } => Ok(upstream_caps.clone()),
+                _ => Err(G2gError::CapsMismatch),
+            };
+        }
         for format in FORMATS {
             let candidate = Caps::RawVideo {
                 format,
                 width: Dim::Any,
                 height: Dim::Any,
                 framerate: Rate::Any,
+                interlace: g2g_core::Interlace::Any,
             };
             if let Ok(narrowed) = upstream_caps.intersect(&candidate) {
                 return Ok(narrowed);
@@ -302,9 +417,24 @@ impl AsyncElement for Deinterlace {
     }
 
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
-        CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
+        let mode = self.mode;
+        CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| match input {
+            // The output never declares interlacing: weaving produces
+            // progressive frames, and a passthrough of an unweavable stream is
+            // the runtime exception the mid-stream CapsChanged corrects.
+            Caps::RawVideo { .. } if mode != DeinterlaceMode::Interlaced => {
+                let mut out = input.clone();
+                if let Caps::RawVideo { interlace, .. } = &mut out {
+                    *interlace = g2g_core::Interlace::Progressive;
+                }
+                CapsSet::one(out)
+            }
             Caps::RawVideo { format, .. } if FORMATS.contains(format) => {
-                CapsSet::one(input.clone())
+                let mut out = input.clone();
+                if let Caps::RawVideo { interlace, .. } = &mut out {
+                    *interlace = g2g_core::Interlace::Progressive;
+                }
+                CapsSet::one(out)
             }
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
@@ -327,6 +457,18 @@ impl AsyncElement for Deinterlace {
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
+                    if !self.active {
+                        // Passthrough: forward the frame untouched (any format,
+                        // any memory domain), declaring caps first if needed.
+                        if let Some(caps) = self.out_caps() {
+                            if self.last_caps.as_ref() != Some(&caps) {
+                                out.push(PipelinePacket::CapsChanged(caps.clone())).await?;
+                                self.last_caps = Some(caps);
+                            }
+                        }
+                        out.push(PipelinePacket::DataFrame(frame)).await?;
+                        return Ok(());
+                    }
                     if self.input.is_none() {
                         return Err(G2gError::NotConfigured);
                     }
@@ -366,7 +508,16 @@ impl AsyncElement for Deinterlace {
                     }
                 }
                 PipelinePacket::CapsChanged(c) => {
-                    self.reconfigure(&c)?;
+                    // The runner calls `configure_pipeline` (input) before
+                    // pushing this packet, whose caps are the pre-fixed forward
+                    // *output*, not a new input (both sides are `RawVideo`, so
+                    // they cannot be told apart by variant; see `VideoConvert`).
+                    // Adopting it as input would read our own Progressive-stamped
+                    // output as "the stream went progressive" and flip auto mode
+                    // back to passthrough right after the decoder declared
+                    // interleaved. Forward it and record it for the emit dedup.
+                    out.push(PipelinePacket::CapsChanged(c.clone())).await?;
+                    self.last_caps = Some(c);
                 }
                 PipelinePacket::Flush => {
                     self.last_caps = None;
@@ -421,6 +572,10 @@ impl AsyncElement for Deinterlace {
                 let s = value.as_str().ok_or(PropError::Type)?;
                 self.method = DeinterlaceMethod::from_str(s).ok_or(PropError::Value)?;
             }
+            "mode" => {
+                let s = value.as_str().ok_or(PropError::Type)?;
+                self.mode = DeinterlaceMode::from_str(s).ok_or(PropError::Value)?;
+            }
             _ => return Err(PropError::Unknown),
         }
         Ok(())
@@ -429,17 +584,26 @@ impl AsyncElement for Deinterlace {
     fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
             "method" => Some(PropValue::Str(self.method.as_str().into())),
+            "mode" => Some(PropValue::Str(self.mode.as_str().into())),
             _ => None,
         }
     }
 }
 
-static DEINTERLACE_PROPS: &[PropertySpec] = &[PropertySpec::new(
-    "method",
-    PropKind::Str,
-    "deinterlace method: yadif | linear | blend",
-)
-.with_enum_values("yadif | linear | blend")];
+static DEINTERLACE_PROPS: &[PropertySpec] = &[
+    PropertySpec::new(
+        "method",
+        PropKind::Str,
+        "deinterlace method: yadif | linear | blend",
+    )
+    .with_enum_values("yadif | linear | blend"),
+    PropertySpec::new(
+        "mode",
+        PropKind::Str,
+        "when to deinterlace: auto (only caps-declared interleaved) | interlaced (always) | disabled",
+    )
+    .with_enum_values("auto | interlaced | disabled"),
+];
 
 impl PadTemplates for Deinterlace {
     fn pad_templates() -> Vec<PadTemplate> {
@@ -448,6 +612,7 @@ impl PadTemplates for Deinterlace {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         };
         let set = CapsSet::from_alternatives(FORMATS.map(any_geometry).to_vec());
         Vec::from([PadTemplate::sink(set.clone()), PadTemplate::source(set)])

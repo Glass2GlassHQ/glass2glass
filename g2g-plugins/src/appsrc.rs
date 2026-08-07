@@ -154,6 +154,7 @@ fn nominal_caps() -> Caps {
         width: Dim::Fixed(320),
         height: Dim::Fixed(240),
         framerate: Rate::Fixed(30 << 16),
+        interlace: g2g_core::Interlace::Any,
     }
 }
 

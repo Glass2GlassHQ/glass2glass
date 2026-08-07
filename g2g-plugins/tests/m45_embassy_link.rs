@@ -19,6 +19,7 @@ fn source_streams_through_embassy_sync_channel_to_consumer() {
         width: Dim::Fixed(16),
         height: Dim::Fixed(8),
         framerate: Rate::Fixed(30 << 16),
+        interlace: g2g_core::Interlace::Any,
     })
     .expect("configure");
 

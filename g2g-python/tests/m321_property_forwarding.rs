@@ -71,6 +71,7 @@ fn element_properties_reach_the_python_instance() {
         width: Dim::Fixed(2),
         height: Dim::Fixed(1),
         framerate: Rate::Fixed(30),
+        interlace: g2g_core::Interlace::Any,
     };
     el.configure_pipeline(&caps).unwrap();
 

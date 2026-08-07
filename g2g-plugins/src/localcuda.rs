@@ -205,6 +205,7 @@ fn nv12(width: u32, height: u32) -> Caps {
         // Rate::Any. Per-frame timing crosses in the descriptor; this nominal
         // framerate only satisfies fixation (the transport is rate-agnostic).
         framerate: Rate::Fixed(30 << 16),
+        interlace: g2g_core::Interlace::Any,
     }
 }
 
@@ -770,6 +771,7 @@ fn nv12_any() -> Caps {
         width: Dim::Any,
         height: Dim::Any,
         framerate: Rate::Any,
+        interlace: g2g_core::Interlace::Any,
     }
 }
 

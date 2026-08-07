@@ -127,7 +127,7 @@ mod pymod {
 
         /// True once the run thread has finished (EOS or error).
         fn is_done(&self) -> bool {
-            self.join.as_ref().map_or(true, |j| j.is_finished())
+            self.join.as_ref().is_none_or(|j| j.is_finished())
         }
 
         /// Block until the pipeline ends; returns `(emitted, consumed, dropped)`.

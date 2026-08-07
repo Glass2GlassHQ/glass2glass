@@ -1184,6 +1184,7 @@ mod tests {
             width: g2g_core::Dim::Fixed(w),
             height: g2g_core::Dim::Fixed(h),
             framerate: g2g_core::Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         }
     }
 

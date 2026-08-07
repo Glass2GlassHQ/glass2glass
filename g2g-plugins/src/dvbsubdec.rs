@@ -133,6 +133,7 @@ impl DvbSubDec {
             width: Dim::Fixed(self.width),
             height: Dim::Fixed(self.height),
             framerate: Rate::Fixed(self.framerate_q16),
+            interlace: g2g_core::Interlace::Any,
         }
     }
 
@@ -409,6 +410,7 @@ impl PadTemplates for DvbSubDec {
                 width: Dim::Fixed(DEFAULT_DISPLAY_WIDTH),
                 height: Dim::Fixed(DEFAULT_DISPLAY_HEIGHT),
                 framerate: Rate::Fixed(25 << 16),
+                interlace: g2g_core::Interlace::Any,
             })),
         ])
     }
@@ -682,6 +684,7 @@ mod tests {
                 width: Dim::Fixed(1920),
                 height: Dim::Fixed(1080),
                 framerate: Rate::Fixed(25 << 16),
+                interlace: g2g_core::Interlace::Any,
             }],
             "the display definition segment refines the geometry once"
         );

@@ -139,6 +139,7 @@ impl VideoRate {
             width: Dim::Fixed(w),
             height: Dim::Fixed(h),
             framerate: Rate::Fixed(self.rate_q16),
+            interlace: g2g_core::Interlace::Any,
         }
     }
 
@@ -545,6 +546,7 @@ mod tests {
             width: Dim::Fixed(64),
             height: Dim::Fixed(32),
             framerate: Rate::Fixed(30 << 16),
+            interlace: g2g_core::Interlace::Any,
         };
         assert_eq!(
             bad.configure_pipeline(&caps).expect_err("zero fps"),
@@ -571,6 +573,7 @@ mod tests {
             width: Dim::Fixed(320),
             height: Dim::Fixed(240),
             framerate: rate,
+            interlace: g2g_core::Interlace::Any,
         }
     }
 

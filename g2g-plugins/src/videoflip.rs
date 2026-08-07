@@ -97,6 +97,7 @@ impl VideoFlip {
             width: Dim::Fixed(w),
             height: Dim::Fixed(h),
             framerate,
+            interlace: _,
         } = caps
         else {
             return Err(G2gError::CapsMismatch);
@@ -146,6 +147,7 @@ impl AsyncElement for VideoFlip {
                 width: Dim::Any,
                 height: Dim::Any,
                 framerate: Rate::Any,
+                interlace: g2g_core::Interlace::Any,
             };
             if let Ok(narrowed) = upstream_caps.intersect(&candidate) {
                 return Ok(narrowed);
@@ -166,6 +168,7 @@ impl AsyncElement for VideoFlip {
                 width,
                 height,
                 framerate,
+                interlace: _,
             } if FORMATS.contains(format) => {
                 let (out_w, out_h) = if swaps {
                     (height.clone(), width.clone())
@@ -177,6 +180,7 @@ impl AsyncElement for VideoFlip {
                     width: out_w,
                     height: out_h,
                     framerate: framerate.clone(),
+                    interlace: g2g_core::Interlace::Any,
                 })
             }
             _ => CapsSet::from_alternatives(Vec::new()),
@@ -228,6 +232,7 @@ impl AsyncElement for VideoFlip {
                         width: Dim::Fixed(out_w),
                         height: Dim::Fixed(out_h),
                         framerate: rate,
+                        interlace: g2g_core::Interlace::Any,
                     };
                     if self.last_caps.as_ref() != Some(&new_caps) {
                         out.push(PipelinePacket::CapsChanged(new_caps.clone()))
@@ -411,6 +416,7 @@ impl PadTemplates for VideoFlip {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         };
         let set = CapsSet::from_alternatives(FORMATS.map(any_geometry).to_vec());
         Vec::from([PadTemplate::sink(set.clone()), PadTemplate::source(set)])
@@ -540,6 +546,7 @@ mod tests {
             width: Dim::Fixed(w),
             height: Dim::Fixed(h),
             framerate: Rate::Fixed(30 << 16),
+            interlace: g2g_core::Interlace::Any,
         }
     }
 
@@ -549,6 +556,7 @@ mod tests {
             width: Dim::Fixed(w),
             height: Dim::Fixed(h),
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         }
     }
 
@@ -627,6 +635,7 @@ mod tests {
             width: Dim::Fixed(320),
             height: Dim::Fixed(240),
             framerate: Rate::Fixed(30 << 16),
+            interlace: g2g_core::Interlace::Any,
         });
         assert_eq!(
             out.alternatives(),
@@ -635,6 +644,7 @@ mod tests {
                 width: Dim::Fixed(240),
                 height: Dim::Fixed(320),
                 framerate: Rate::Fixed(30 << 16),
+                interlace: g2g_core::Interlace::Any,
             }]
         );
     }
@@ -653,6 +663,7 @@ mod tests {
                 width: Dim::Fixed(320),
                 height: Dim::Fixed(240),
                 framerate: Rate::Fixed(30 << 16),
+                interlace: g2g_core::Interlace::Any,
             }]
         );
         let h264 = Caps::CompressedVideo {
@@ -687,6 +698,7 @@ mod tests {
             width: Dim::Fixed(w),
             height: Dim::Fixed(h),
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         }
     }
 

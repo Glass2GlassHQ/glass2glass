@@ -373,6 +373,7 @@ mod tests {
             width: Dim::Fixed(w),
             height: Dim::Fixed(h),
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         }
     }
 
@@ -472,6 +473,7 @@ mod tests {
             width: Dim::Fixed(8),
             height: Dim::Fixed(8),
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         };
         assert!(ov.intercept_caps(&nv12).is_err());
         assert!(ov.intercept_caps(&rgba_caps(8, 8)).is_ok());

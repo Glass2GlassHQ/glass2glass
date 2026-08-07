@@ -27,6 +27,9 @@ mod stream_select;
 mod blocking;
 
 #[cfg(feature = "std")]
+mod device;
+
+#[cfg(feature = "std")]
 mod fanin;
 
 #[cfg(feature = "std")]
@@ -67,6 +70,11 @@ pub use stream_select::StreamSelectController;
 
 #[cfg(feature = "std")]
 pub use blocking::block_on;
+#[cfg(feature = "std")]
+pub use device::{
+    Device, DeviceElement, DeviceEvent, DeviceMonitor, DeviceProvider, DeviceSink, ProbeOutcome,
+    RunningMonitor, WatchGuard,
+};
 
 #[cfg(feature = "std")]
 pub use runner::{

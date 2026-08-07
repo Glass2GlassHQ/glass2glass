@@ -289,6 +289,7 @@ impl OrtInference {
                 width: Dim::Fixed(m.width),
                 height: Dim::Fixed(m.height),
                 framerate: Rate::Any,
+                interlace: g2g_core::Interlace::Any,
             }
         })
     }
@@ -613,6 +614,7 @@ impl g2g_core::PadTemplates for OrtInference {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         }))])
     }
 }

@@ -392,6 +392,8 @@ A free-running source feeding a sync sink is paced automatically by upstream bac
 
 A pipeline runs against one elected clock (`elect_clock` over `ClockPriority`: a PTP grandmaster-disciplined clock (`PtpGrandmaster`) outranks a live source's hardware clock (`LiveSource`), which outranks an audio sink's DAC clock (`AudioProvider`), which outranks a plain monotonic provider such as a video display sink (`Provider`), which outranks the system fallback). The runner samples the elected clock's `now_ns()` once at startup as the **base time** (the clock reading at running-time zero) and hands both to each sink via `set_clock_sync(ClockSync { clock, base_time_ns })`, called once after election. Both the linear runners and the DAG runner `run_graph` deliver it (the latter walks its sink nodes after election), so a display sink PTS-paces in any topology. A sink that synchronises presents a frame when the elected clock reaches `base_time_ns + running_time`, where running time is the frame's `pts_ns` mapped through the active `Segment`; a sink that ignores the hook presents as fast as backpressure allows.
 
+**Pacing mid-graph (`clocksync`).** Presentation is not the only place a stream needs to run at real time: a publisher muxing to a live transport (the MoQ Transport demo's `videotestsrc ! x264enc ! mp4mux ! moqtsink`) has no sync sink at all, so nothing stops it producing minutes of media per minute of wall clock. `ClockSyncTransform` (`clocksync`) is the sink's pacing as a pass-through transform: it holds each buffer until its PTS, anchored on the first one, is due on the clock, and forwards everything else unchanged. It shares the display sinks' `PresentationPacer`, so the anchor, the segment mapping and the seek re-anchor behave identically, and differs in two ways. It never drops: a late or segment-clipped buffer is forwarded immediately, because a hole in a transform's output is one downstream cannot recover. And it supplies its own monotonic clock when none was handed to it, which is both GStreamer's fallback to the pipeline system clock and a necessity here, since the runners deliver `ClockSync` to sink nodes only, and a `clocksync` sits mid-graph. `sync=false` reduces it to an identity; `ts-offset` shifts the whole schedule.
+
 **Audio as the sync master.** For playback the audio sink should drive timing, because samples leave the DAC at the hardware's real rate, which drifts from wall time by tens to hundreds of ppm. `DriftClock` (`g2g-core`) turns that into a usable pipeline clock: it is fed `(local_ns, master_ns)` observations (`local_ns` from a monotonic reference, `master_ns` the true playout position) and fits `master ≈ slope·local + offset` by least squares over a sliding window, so `now_ns()` projects the current reference time through the fit, both estimating the playout rate and smoothing the coarse, jittery per-observation readings. `AlsaSink`'s worker samples `frames_written − snd_pcm_delay()` after each blocking `writei` and feeds the clock, offering it to election at the `AudioProvider` tier (gated by a `provide-clock` property). A video sink then slaves to it: because the elected clock is the disciplined audio timeline rather than raw wall time, video presentation follows audio, giving true A/V sync. A `LiveSource` capture clock still wins when present, so a live pipeline paces to capture.
 
 **Networked sync (PTP).** For facility-wide sync (Pro AV / SMPTE ST 2110), the shared reference is a PTP grandmaster, and every device slaves to it, so a `PtpGrandmaster` clock outranks all of the above. `PtpServo` (`g2g-core::ptp`) is the servo: fed the four timestamps of each PTP delay request-response, it computes the standard `offset` / `mean_path_delay` and folds `(local, master)` into the same `DriftClock` machinery, disciplining the local monotonic reference to the grandmaster's TAI timeline with lock / holdover / outlier-rejection state. `PtpClock` wraps it (interior-mutable, so one worker drives it while sinks read `now_ns` through a shared `Arc`) and offers itself to election only once locked. Because the elected timeline is grandmaster-derived, two machines locked to the same grandmaster read the same clock, so the A/V pacing above holds *across* devices, not just within one process. Two sources feed the servo: raw PTP message timestamps (`sync_exchange`), or a direct absolute-time observation (`observe_master`). Two backends supply them: `PtpSystemClock` (`g2g-plugins`, Linux) delegates to an OS PTP-disciplined `CLOCK_TAI` (from `linuxptp` / `phc2sys`), sampled on a worker; `PtpClient` (`g2g-plugins`) is a from-scratch software PTP SLAVE that speaks PTP over UDP itself (the `ptp::wire` message parser + the `ptp::slave` delay-request-response state machine + a UDP transport), so an endpoint with no OS PTP daemon can still lock. The wire parser and slave state machine are `no_std` and CI-tested end to end (parse -> slave -> servo) without sockets.
@@ -1191,6 +1193,96 @@ backpressure, so that sink's hand-off queue is leaky (bounded to ~1 s, dropping
 the oldest bytes, the `LinkPolicy::DropOldest` analog for an external clock). All
 accept interleaved `PcmS16Le` / `PcmF32Le` and reject compressed audio
 structurally. Errors surface as `HardwareError::{Alsa,PulseAudio,PipeWire}`.
+
+### 4.12aa Device Discovery
+
+The `GstDeviceProvider` / `GstDeviceMonitor` analog (M938/M939,
+`g2g-core/src/runtime/device.rs` + `g2g-plugins/src/devicemon.rs`). A
+`DeviceProvider` probes one backend for the devices it can see; a
+`DeviceMonitor` aggregates providers behind class + caps filters
+(`gst_device_has_classes` semantics: `Video/Source` requires both parts,
+`Source` matches any source) and, once started, watches for hotplug. Events
+arrive on the monitor's own channel, not the pipeline bus: a monitor is
+application-side, not part of a running graph.
+
+A `Device` does not own an element factory. It carries the launch **name** of
+the element that drives it plus the textual `key=value` properties that select
+it, so construction rides the same `Registry` + `PropertySpec::parse_value`
+path as `parse_launch`: `Device::create` builds and configures the element,
+`Device::launch_fragment` prints the `v4l2src device=/dev/video0` fragment a
+text pipeline would use. `persistent_id` is the monitor's hotplug diff key and
+is chosen per backend for cross-reboot stability (USB/PCI bus info for v4l2,
+the direction-prefixed hint name for ALSA, `node.name` for PipeWire, which
+survives daemon restarts where `object.serial` does not).
+
+Hotplug has two paths. A provider with a native event source implements
+`watch()`: PipeWire registers a registry listener on a dedicated loop thread,
+relies on the daemon replaying existing globals for the initial `Added` set,
+and posts through a filter-applying `DeviceSink` (a try-send retry loop, so N
+watcher threads never depend on the channel's single send waker; shutdown
+closes the receiver first, so a watcher blocked on a full queue exits instead
+of deadlocking the join). Providers without events (v4l2, ALSA, GPU) are
+covered by the monitor's poll-and-diff fallback thread keyed on
+`persistent_id`.
+
+Standard providers (`default_device_monitor`, mirroring `default_registry`'s
+per-feature gating): **v4l2** (capture nodes with YUYV modes probed into real
+caps alternatives; other fourccs listed in `detail`), **ALSA** (PCM hints in
+both directions, formats probed via `HwParams`, busy devices still listed with
+empty caps), **PipeWire** (media-class nodes mapped to
+`pipewiresrc`/`pipewiresink`/`pipewirevideosrc`, selected via their
+`target-object` property), **GPU** (`Compute/GPU`, a g2g extension beyond
+GStreamer's capture/render model: wgpu adapters, CUDA ordinals, VAAPI render
+nodes; only the render nodes name a driving element, the rest are
+informational), **MF** and **WASAPI** on Windows, and **AVF** and **CoreAudio**
+on macOS (M943, below). The `g2g-device-monitor` binary is the CLI over all of
+this (`gst-device-monitor-1.0` analog): one-shot listing, class filter,
+`--json`, and `--follow` for live hotplug.
+
+**Windows / macOS (M943).** `mfdevice` lists the `MFEnumDeviceSources` video
+capture devices with the NV12 / YUY2 native modes `mfvideosrc` can deliver
+(reading them activates the source, so a camera another application holds open
+lists with empty caps); `wasapidevice` lists the active `IMMDeviceEnumerator`
+render / capture endpoints with their shared-mode mix format as caps.
+`avfdevice` lists cameras from an `AVCaptureDeviceDiscoverySession`, and
+`coreaudiodevice` the HAL's `kAudioHardwarePropertyDevices` entries, one device
+record per direction a duplex device carries. WASAPI is the one non-Linux
+backend with a native watch (an `IMMNotificationClient` whose callbacks wake a
+re-probe on the watch thread, since the callback carries only an id and must
+not block); the other three are polled, because MF has no hotplug callback
+short of a `WM_DEVICECHANGE` window and the AVFoundation / CoreAudio listeners
+need a run loop a library has no business owning.
+
+On these platforms the selection property **is** the persistent id, so no
+separate `device-id` is needed: `mfvideosrc device-path=` takes the MF symbolic
+link, `wasapisrc` / `wasapisink device=` the endpoint id, `avfvideosrc` /
+`avfaudiosrc device=` the `AVCaptureDevice` unique id, and `coreaudiosrc` /
+`coreaudiosink device=` the Core Audio device UID (the `AudioDeviceID` is
+reassigned every boot, the UID is not). Each element gained that selector as
+part of M943, sharing one open-by-id helper with its provider (`wasapipcm` on
+Windows) so the id a listing reports and the id `device=` accepts cannot drift.
+
+**`v4l2src device-id` (M944).** V4L2 is the exception: its selection handle is
+the node path, which the kernel renumbers across a replug, so `v4l2src` takes a
+separate `device-id` carrying the provider's `bus_info:card:path` id and
+resolves it against a fresh probe at negotiation. The exact id wins; failing
+that, the hardware half (bus + card) matches, which is what survives a replug
+into the same port, and the lowest-numbered node of a multi-node camera is
+chosen (the capture node on every UVC device). An id nothing carries fails the
+negotiation with `HardwareError::V4l2(ENODEV)` rather than silently falling
+back to `device`.
+
+**V4L2 camera controls (M944).** `v4l2src` exposes exposure, focus and white
+balance as runtime properties under the names `v4l2-ctl` uses
+(`exposure-auto`, `exposure-absolute`, `focus-auto`, `focus-absolute`,
+`white-balance-temperature-auto`, `white-balance-temperature`; GStreamer's
+analog is the `extra-controls` structure). One table drives both the property
+specs and the `VIDIOC_S_EXT_CTRLS` ids, and its order is the apply order: an
+auto switch precedes the manual value it gates, because a driver rejects a
+manual exposure while auto exposure is on. Each is applied with its own ioctl,
+since a batch may not span the user and camera control classes. Only a control
+that was set is touched, and one the camera does not implement fails the
+negotiation instead of being quietly ignored.
 
 ### 4.12b Live Ingress (UDP / RTP)
 
@@ -2168,13 +2260,28 @@ built from the previous and next frames), plus the cheaper `linear` and `blend`
 methods, over I420 / NV12 / RGBA / BGRA at unchanged format and geometry, one
 frame out per frame in. It is bit-exact against ffmpeg's `yadif=0` on the same
 raw frames, including the 3-column border where ffmpeg drops the directional
-search. `ps_playbin` inserts it into the video branch (both the plain fan-out and
-the subpicture-overlay one) when `progressive_sequence` in the MPEG-2 sequence
-extension (`00 00 01 B5`, identifier `0001`) says the stream is interlaced;
-MPEG-1 carries no such extension and is treated as progressive, as is any stream
-whose extension is missing or malformed, so an unreadable header never costs a
-filter pass. Field order is assumed top-field-first: g2g's frames carry no
-interlace flag, which is also why the element has no `auto` mode.
+search. Field order is assumed top-field-first (ffmpeg's default for a stream
+that declares nothing).
+
+Interlacing is signalled in the caps (M935): `Caps::RawVideo` carries an
+`Interlace` field (`Any` / `Progressive` / `Interleaved`), where the `Any`
+wildcard intersects with anything, survives `fixate`, and reads as "progressive
+unless declared", so the field never blocks a solve and nearly every caps site
+just states `Any`. `FfmpegVideoDec` reads libavcodec's per-picture interlaced
+flag and latches `Interleaved` output caps on the first interlaced picture
+(sticky for the stream, so telecine content cannot flap `CapsChanged`), covering
+interlaced MPEG-2 over any container and interlaced H.264 alike. The element's
+`mode` property acts on that declaration: `interlaced` (the default) always
+weaves, the pre-M935 contract for hand-written lines whose upstreams declare
+nothing; `auto` weaves only a caps-declared `Interleaved` stream in a format the
+kernels handle and otherwise forwards packets untouched, with negotiation kept
+transparent (any raw video passes) so inserting it never narrows a branch; and
+`disabled` is a pure passthrough. Every `playbin` video branch (mkv / mp4 / TS /
+PS / HLS, plain fan-out and the subtitle / closed-caption / DVD-subpicture
+overlay variants) inserts `deinterlace mode=auto` after the decoder, GStreamer's
+playbin `deinterlace` flag parity: a progressive stream pays only a forwarding
+hop, and the M932 container-probe decision (`progressive_sequence` in the MPEG-2
+sequence extension) is superseded by the decoder's own per-picture report.
 
 Adaptive streaming sits one layer above these demuxers: an HTTP byte source feeds
 a playlist/manifest-driven source that fetches media segments and hands them to
@@ -3133,7 +3240,13 @@ which is the "not interop-validated against reference gear" caveat expressed as 
 rather than prose. The conformance batteries (`g2g-plugins::conformance`) exercise a
 *real* element (never a mock) with cheap in-process checks and add evidence only on a
 pass, so the level is computed from behavior observed this run, not asserted: a
-regression that breaks a round-trip drops the level. `g2g-inspect --maturity` runs
+regression that breaks a round-trip drops the level. They cover the sans-IO cores
+several transports share: the ST 2110-20 / -30 packetizer pairs (including the -7
+seamless merge through per-path loss), the RFC 6184 H.264 payload core
+(`rtph264`: FU-A fragmentation reassembled byte-exact, and a dropped fragment
+costing only its own access unit rather than welding two together), and the RTP
+jitter buffer (`rtpjitter`: reordered arrival released in sequence order, a hole
+reported for NACK then skipped rather than stalling). `g2g-inspect --maturity` runs
 the battery live and renders the matrix. `Oracle` / `Hardware` evidence, which the
 in-process battery cannot produce (it has no ffmpeg / GPU), comes from the
 resource-owning integration tests: they append it to a tab-separated evidence log
@@ -3143,10 +3256,20 @@ resource-owning integration tests: they append it to a tab-separated evidence lo
 `Mp4MuxN` fMP4 / a `TsMux` transport stream and have `ffprobe` demux them back,
 recording peer-tagged `Oracle` evidence deriving `mp4mux` / `mpegtsmux` as
 `InteropTested`; the ffmpeg-interop transports carry this further, `udpsrc` (RTP),
-`rtmpsrc`, and `srtsrc` / `srtsink` (libsrt, incl. the AES variants) each derive
-`InteropTested` against a named reference peer, and the Vulkan Video decode tests
+`rtmpsrc`, `srtsrc` / `srtsink` (libsrt, incl. the AES variants), and both RTSP
+directions (`rtspserversink` played by ffmpeg, `rtspserversrc` published into by
+ffmpeg over UDP and TCP-interleaved) each derive `InteropTested` against a named
+reference peer, and the Vulkan Video decode tests
 persist GPU-tagged `Hardware` evidence (via `VulkanVideoDevice::device_name`) so
-`vulkanvideo` derives `HardwareValidated` across H.264 / H.265 / AV1. A CI
+`vulkanvideo` derives `HardwareValidated` across H.264 / H.265 / AV1. The rest of
+the GPU stack persists the same tier from the tests that own the device: the
+native NVIDIA codecs (`nvenc` encoding a CUDA-resident surface, `nvdec` decoding
+into one and downloading for a System-only sink) and the `cudawgpu` bridge tag
+their evidence with the CUDA device the driver names
+(`persist::cuda_platform_tag`, sourced from the GPU device provider rather than
+hardcoded), while the dma-buf export pair (`wgputodmabuf` / `dmabuftowgpu`) tags
+the subsystem, since each element opens its own high-performance Vulkan adapter
+and so cannot honestly name which card ran it. A CI
 `conformance` job runs the deterministic ffprobe oracles plus the (best-effort)
 transport interop against a real ffmpeg, aggregating into one `$G2G_CONFORMANCE_LOG`
 (the muxer oracles honor an externally-set log so they append rather than truncate)

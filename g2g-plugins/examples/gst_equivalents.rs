@@ -91,6 +91,7 @@ fn main() {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         };
         let mut g: Graph<GraphNode> = Graph::new();
         let src = g.add_source(GraphNode::source(VideoTestSrc::new(320, 240, 30, 3)));

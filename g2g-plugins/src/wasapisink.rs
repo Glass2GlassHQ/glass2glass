@@ -31,23 +31,24 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use alloc::boxed::Box;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use windows::Win32::Media::Audio::{
-    eConsole, eRender, IAudioClient, IAudioRenderClient, IMMDeviceEnumerator, MMDeviceEnumerator,
-    AUDCLNT_SHAREMODE_SHARED, WAVEFORMATEX,
+    eRender, IAudioClient, IAudioRenderClient, AUDCLNT_SHAREMODE_SHARED, WAVEFORMATEX,
 };
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, CLSCTX_INPROC_SERVER,
-    COINIT_MULTITHREADED,
+    CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_MULTITHREADED,
 };
 
 use g2g_core::{
-    AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, G2gError,
-    HardwareError, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
+    G2gError, HardwareError, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
+    PropKind, PropValue, PropertySpec,
 };
 
 use crate::audio::pcm_params;
+use crate::wasapipcm::{audio_err, open_endpoint};
 
 /// Shared-mode endpoint buffer span (100-ns units), 200 ms. Large enough that
 /// the worker's top-up cadence never starves the engine, small enough that the
@@ -70,6 +71,8 @@ enum WorkerCmd {
 }
 
 pub struct WasapiSink {
+    /// Endpoint id to render on; empty opens the default endpoint.
+    device: String,
     cmd_tx: Option<Sender<WorkerCmd>>,
     worker: Option<JoinHandle<()>>,
     caps: Option<Caps>,
@@ -97,11 +100,19 @@ impl Default for WasapiSink {
 impl WasapiSink {
     pub fn new() -> Self {
         Self {
+            device: String::new(),
             cmd_tx: None,
             worker: None,
             caps: None,
             frames_rendered: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// Render on the endpoint with this id (what the device monitor reports as
+    /// the persistent id) instead of the default one.
+    pub fn with_device(mut self, id: impl Into<String>) -> Self {
+        self.device = id.into();
+        self
     }
 
     /// Count of sample frames written to the endpoint. Useful in tests.
@@ -173,11 +184,12 @@ impl AsyncElement for WasapiSink {
         let (ready_tx, ready_rx) = mpsc::sync_channel::<Result<(), ()>>(1);
         let rendered = Arc::clone(&self.frames_rendered);
         let format = wave_format(tag, bits, channels, rate);
+        let device = self.device.clone();
 
         let join = thread::Builder::new()
-            .name(alloc::string::String::from("g2g-wasapisink"))
+            .name(String::from("g2g-wasapisink"))
             .spawn(move || {
-                if let Err(e) = worker_main(format, rx, rendered, ready_tx) {
+                if let Err(e) = worker_main(&device, format, rx, rendered, ready_tx) {
                     std::eprintln!("g2g-wasapisink worker error: {e:?}");
                 }
             })
@@ -198,6 +210,36 @@ impl AsyncElement for WasapiSink {
         self.worker = Some(join);
         self.caps = Some(absolute_caps.clone());
         Ok(ConfigureOutcome::Accepted)
+    }
+
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "WASAPI audio sink",
+            "Sink/Audio",
+            "Renders PCM on a WASAPI endpoint (shared mode)",
+            "g2g",
+        )
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        WASAPISINK_PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            "device" => {
+                self.device = value.as_str().ok_or(PropError::Type)?.to_string();
+                Ok(())
+            }
+            _ => Err(PropError::Unknown),
+        }
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "device" => Some(PropValue::Str(self.device.clone())),
+            _ => None,
+        }
     }
 
     fn process<'a>(
@@ -234,6 +276,15 @@ impl AsyncElement for WasapiSink {
     }
 }
 
+/// `WasapiSink`'s settable properties: the endpoint id the device monitor
+/// reports, empty for the default endpoint (gst `wasapisink` spells it the
+/// same way).
+static WASAPISINK_PROPS: &[PropertySpec] = &[PropertySpec::new(
+    "device",
+    PropKind::Str,
+    "endpoint id to render on (empty = default endpoint)",
+)];
+
 impl PadTemplates for WasapiSink {
     /// Terminal PCM sink pad. `Caps::Audio` has no open dims, so the template
     /// pins the common shapes per PCM format, as in `WavSink`.
@@ -255,6 +306,7 @@ impl PadTemplates for WasapiSink {
 // =================================================================
 
 fn worker_main(
+    device: &str,
     format: WAVEFORMATEX,
     rx: Receiver<WorkerCmd>,
     rendered: Arc<AtomicU64>,
@@ -262,7 +314,7 @@ fn worker_main(
 ) -> Result<(), G2gError> {
     // SAFETY: COM is initialised MTA on this worker thread; every later WASAPI
     // call lands on the same thread. S_FALSE (already initialised) is fine.
-    let render = match unsafe { open_endpoint(&format) } {
+    let render = match unsafe { open_render(device, &format) } {
         Ok(state) => {
             let _ = ready.send(Ok(()));
             state
@@ -302,22 +354,18 @@ struct RenderState {
     block_align: usize,
 }
 
-/// Open the default render endpoint in shared mode and start it. Initialises
+/// Open the selected render endpoint in shared mode and start it. Initialises
 /// COM on the calling (worker) thread.
 ///
 /// # Safety
 /// Must run on the worker thread that owns every subsequent WASAPI call.
-unsafe fn open_endpoint(format: &WAVEFORMATEX) -> Result<RenderState, G2gError> {
+unsafe fn open_render(device: &str, format: &WAVEFORMATEX) -> Result<RenderState, G2gError> {
     // SAFETY: COM/WASAPI object creation and configuration on the owning thread.
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
 
-        let enumerator: IMMDeviceEnumerator =
-            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_INPROC_SERVER).map_err(audio_err)?;
-        let device = enumerator
-            .GetDefaultAudioEndpoint(eRender, eConsole)
-            .map_err(audio_err)?;
-        let client: IAudioClient = device.Activate(CLSCTX_ALL, None).map_err(audio_err)?;
+        let endpoint = open_endpoint(eRender, device)?;
+        let client: IAudioClient = endpoint.Activate(CLSCTX_ALL, None).map_err(audio_err)?;
 
         client
             .Initialize(
@@ -421,11 +469,6 @@ fn top_up(
     }
     rendered.fetch_add(frames as u64, Ordering::Relaxed);
     Ok(frames)
-}
-
-fn audio_err(e: windows::core::Error) -> G2gError {
-    // WASAPI errors are COM HRESULTs, the same carrier as the MF path.
-    G2gError::Hardware(HardwareError::MediaFoundation(e.code().0))
 }
 
 #[cfg(test)]

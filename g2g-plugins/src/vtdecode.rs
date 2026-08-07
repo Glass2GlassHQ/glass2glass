@@ -57,8 +57,8 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError,
-    HardwareError, MemoryDomain, MemoryDomainKind, OutputSink, OwnedCvPixelBuffer, PadTemplate,
-    PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate,
+    HardwareError, Interlace, MemoryDomain, MemoryDomainKind, OutputSink, OwnedCvPixelBuffer,
+    PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate,
     RawVideoFormat, VideoCodec,
 };
 
@@ -558,6 +558,7 @@ impl PadTemplates for VtDecode {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            interlace: Interlace::Any,
         };
         Vec::from([
             PadTemplate::sink(CapsSet::from_alternatives(Vec::from([
@@ -575,6 +576,7 @@ fn nv12_caps(w: u32, h: u32, framerate: Rate) -> Caps {
         width: Dim::Fixed(w),
         height: Dim::Fixed(h),
         framerate,
+        interlace: Interlace::Any,
     }
 }
 
@@ -590,6 +592,7 @@ fn derive_output_caps(codec: VideoCodec, input: &Caps) -> CapsSet {
             width: width.clone(),
             height: height.clone(),
             framerate: framerate.clone(),
+            interlace: Interlace::Any,
         }),
         _ => CapsSet::from_alternatives(Vec::new()),
     }

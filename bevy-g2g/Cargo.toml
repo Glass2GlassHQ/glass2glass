@@ -30,9 +30,10 @@ bevy = "0.19"
 wgpu = "29"
 
 g2g-core = { path = "../g2g-core", features = ["std", "runtime"] }
-# webrtc: WebRtcSink (WHIP egress). ffmpeg: the software H.264 encoder for the
-# readback fallback path and the decoder for the `decode` feature.
-g2g-plugins = { path = "../g2g-plugins", features = ["std", "webrtc", "ffmpeg"] }
+# webrtc: WebRtcSink (WHIP egress). moqt: MoqtSink (MoQ Transport egress, fed by
+# mp4mux). ffmpeg: the software H.264 encoder for the readback fallback path and
+# the decoder for the `decode` feature.
+g2g-plugins = { path = "../g2g-plugins", features = ["std", "webrtc", "moqt", "ffmpeg"] }
 
 # block_on for the render-world encode (no tokio reactor needed there).
 pollster = "0.4"

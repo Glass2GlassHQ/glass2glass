@@ -95,6 +95,7 @@ fn drive_codec(codec: VideoCodec, clip: &[u8]) {
             width: Dim::Fixed(640),
             height: Dim::Fixed(480),
             framerate: Rate::Fixed(30 << 16),
+            interlace: g2g_core::Interlace::Any,
         },
         "{codec:?}: emits NV12 640x480 at the input framerate"
     );

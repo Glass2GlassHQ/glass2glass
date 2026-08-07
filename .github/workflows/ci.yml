@@ -139,6 +139,17 @@ jobs:
       # the property/registry surface. The two aioquic legs skip without `uv`.
       - name: test g2g-plugins (webtransport)
         run: cargo test -p g2g-plugins --locked --features webtransport --test m901_webtransport
+      # Device discovery (M938-M944): the v4l2 unit tests, the provider battery
+      # and the v4l2src device-id + control properties. Live-camera legs skip
+      # without /dev/video0.
+      - name: test g2g-plugins (device discovery)
+        run: >
+          cargo test -p g2g-plugins --locked --features v4l2,alsa-src,wgpu-sink
+          --lib -- v4l2
+      - name: test g2g-plugins (device providers + device-id)
+        run: >
+          cargo test -p g2g-plugins --locked --features v4l2,alsa-src,wgpu-sink
+          --test m939_device_providers --test m944_device_id_controls
       # downloadbuffer acceptance (M861): a moov-at-end MP4 pushed over local
       # HTTP spills to disk and demuxes identically to a direct file read.
       - name: test g2g-plugins (downloadbuffer)
@@ -330,10 +341,12 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # wgpu-sink also compiles the device-discovery assembly (devicemon +
+      # gpudevice) on a real Windows toolchain.
       - name: check g2g-plugins (windows feature set)
         run: >
           cargo check -p g2g-plugins --locked --all-targets --features
-          mf-decode,mf-encode,mf-aac,wasapi-sink,wasapi-src,d3d11-sink,mf-video-src
+          mf-decode,mf-encode,mf-aac,wasapi-sink,wasapi-src,d3d11-sink,mf-video-src,wgpu-sink
 
   # macOS platform build: VideoToolbox H.264 decode (VtDecode) plus the wgpu/burn
   # ML path on the Metal backend. The objc2 crates link the system frameworks
@@ -346,10 +359,12 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # wgpu-sink also compiles the device-discovery assembly (devicemon +
+      # gpudevice) on a real macOS toolchain.
       - name: check g2g-plugins (macos platform features)
         run: >
           cargo check -p g2g-plugins --locked --all-targets
-          --features vtdecode,vtencode,metal-sink,coreaudio,avfoundation,screencapture
+          --features vtdecode,vtencode,metal-sink,coreaudio,avfoundation,screencapture,wgpu-sink
       # M731+: run the VideoToolbox / Metal / Core Audio / AVFoundation /
       # ScreenCaptureKit elements for real (decode the reference fixtures,
       # encode round trip, CAMetalLayer present, AudioQueue render + capture;
@@ -546,16 +561,19 @@ jobs:
       # Oracle evidence. Self-skips without ffmpeg like the muxer oracles.
       - name: MCU codec oracles (g2g-mcu vs ffmpeg)
         run: cargo test -p g2g-mcu --locked --test m638_g711 --test m639_adpcm -- --nocapture
-      # Live-transport interop (best-effort): the depayloader / SRT / RTMP paths
-      # driven by a real ffmpeg peer over a local socket. Timing-sensitive
+      # Live-transport interop (best-effort): the depayloader / SRT / RTMP / RTSP
+      # paths driven by a real ffmpeg peer over a local socket. Timing-sensitive
       # (ffmpeg's caller/publisher races the g2g listener), so a miss must not fail
-      # the job; when they pass they append peer-tagged Oracle evidence.
+      # the job; when they pass they append peer-tagged Oracle evidence. The RTSP
+      # legs cover both directions: ffmpeg PLAYs from `rtspserversink` and ffmpeg
+      # RECORDs into `rtspserversrc` (UDP and TCP-interleaved).
       - name: transport interop vs ffmpeg (best-effort)
         continue-on-error: true
         run: |
           cargo test -p g2g-plugins --locked --features udp-ingress --test udp_ffmpeg_rtp_interop -- --ignored
           cargo test -p g2g-plugins --locked --features rtmp --test rtmp_ffmpeg_interop -- --ignored
           cargo test -p g2g-plugins --locked --features srt --test srt_ffmpeg_interop -- --ignored
+          cargo test -p g2g-plugins --locked --features rtsp-server --test rtsp_ffmpeg_serve_interop --test rtsp_ffmpeg_record_interop -- --ignored
           cargo test -p g2g-mcu --locked --test m643_rtp -- --ignored
       # Publish the derived maturity: fold the accumulated Oracle evidence into the
       # in-process batteries and render the table to the job summary + an artifact.

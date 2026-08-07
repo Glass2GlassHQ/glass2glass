@@ -77,8 +77,13 @@ jobs:
       - name: bench base
         if: steps.base.outputs.sha != ''
         run: |
+          # The head bench may have rewritten g2g-bench/Cargo.lock (its own
+          # cargo resolving differently than the committed refresh); drop any
+          # such churn so the base checkout cannot abort on a dirty tree.
+          git checkout --quiet -- .
           git checkout --quiet ${{ steps.base.outputs.sha }}
           cargo bench --manifest-path g2g-bench/Cargo.toml -- --save-baseline base $CRIT_ARGS
+          git checkout --quiet -- .
           git checkout --quiet -
 
       # Fail if any benchmark's head mean regressed > 50% vs base. The threshold

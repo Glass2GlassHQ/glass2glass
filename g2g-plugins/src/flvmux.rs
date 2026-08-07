@@ -326,6 +326,7 @@ mod tests {
             width: Dim::Fixed(2),
             height: Dim::Fixed(2),
             framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
         };
         assert!(m.intercept_caps(&raw).is_err());
 

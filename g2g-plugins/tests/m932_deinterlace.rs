@@ -1,5 +1,6 @@
-//! M932: the CPU `deinterlace` element, and the MPEG-2 sequence extension that
-//! tells `ps_playbin` when to insert it.
+//! M932: the CPU `deinterlace` element, and the MPEG-2 sequence extension's
+//! `progressive_sequence` flag (which decided the `ps_playbin` insertion until
+//! M935 made the insertion universal and the decision the element's `auto` mode).
 //!
 //! The yadif kernel is checked against ffmpeg's own `yadif` rather than against
 //! itself: both filter the same raw interlaced I420 frames, so a mismatch is a
@@ -71,6 +72,7 @@ fn caps(format: RawVideoFormat, w: usize, h: usize) -> Caps {
         width: Dim::Fixed(w as u32),
         height: Dim::Fixed(h as u32),
         framerate: Rate::Fixed(25 << 16),
+        interlace: g2g_core::Interlace::Any,
     }
 }
 
@@ -450,12 +452,15 @@ fn a_missing_or_malformed_extension_stays_progressive() {
 
 // ---- playbin topology ----
 
-/// `ps_playbin` on the interlaced DVD-style fixture must place a `deinterlace`
-/// in the video branch, and must not on a progressive one. Needs a real MPEG-2
-/// decoder in the pool, so it runs under the `ffmpeg` feature.
+/// Every playbin video branch carries a `deinterlace mode=auto` since M935, so
+/// both the interlaced and the progressive DVD-style fixtures build with one in
+/// the graph (the auto mode no-ops on the progressive stream at runtime, so the
+/// progressive disc no longer pays for weaving, only for the passthrough hop).
+/// Needs a real MPEG-2 decoder in the pool, so it runs under the `ffmpeg`
+/// feature.
 #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
 #[test]
-fn ps_playbin_inserts_deinterlace_only_for_interlaced_content() {
+fn ps_playbin_always_inserts_the_auto_deinterlace() {
     if !have_ffmpeg() {
         eprintln!("ffmpeg not present: skipping");
         return;
@@ -510,8 +515,8 @@ fn ps_playbin_inserts_deinterlace_only_for_interlaced_content() {
     );
     let dot = graph_dot(&progressive);
     assert!(
-        !dot.contains("label=\"Deinterlace\""),
-        "progressive program stream should not pay for a deinterlacer: {dot}"
+        dot.contains("label=\"Deinterlace\""),
+        "the auto deinterlacer belongs on every video branch (M935): {dot}"
     );
 
     let _ = std::fs::remove_file(&interlaced);

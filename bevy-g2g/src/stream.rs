@@ -16,8 +16,8 @@
 //! Layout mirrors the validated bevy-g2g-stream demo (M267 -> M278): a
 //! render-world system produces frames after `RenderSystems::Render`, a
 //! main-world system pushes them into a g2g `AppSrc` feed, and the sink
-//! pipeline (`appsrc -> [convert -> encode] -> filesink | webrtcsink`) runs on
-//! its own thread.
+//! pipeline (`appsrc -> [convert -> encode] -> filesink | webrtcsink |
+//! mp4mux -> moqtsink`) runs on its own thread.
 
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -49,6 +49,8 @@ use g2g_core::{G2gError, HardwareError, PipelineClock, PropValue, RawVideoFormat
 use g2g_plugins::appsrc::{register_appsrc, AppSrc, AppSrcFeed};
 use g2g_plugins::ffmpegenc::{Backend, FfmpegH264Enc};
 use g2g_plugins::filesink::FileSink;
+use g2g_plugins::moqtsink::MoqtSink;
+use g2g_plugins::mp4mux::Mp4Mux;
 use g2g_plugins::videoconvert::VideoConvert;
 use g2g_plugins::webrtcsink::WebRtcSink;
 
@@ -81,6 +83,16 @@ pub struct StreamSettings {
 pub enum StreamOutput {
     /// Publish to a WHIP endpoint (e.g. MediaMTX) over WebRTC.
     Whip(String),
+    /// Publish to an IETF MoQ Transport relay, fragmented-MP4 over WebTransport.
+    Moqt {
+        /// Relay URL, e.g. `https://127.0.0.1:4443/`.
+        url: String,
+        /// Namespace the broadcast is published under (`/`-separated path).
+        namespace: String,
+        /// Comma-separated hex SHA-256 digests of relay certificates to accept;
+        /// empty requires a system root, which a self-signed demo relay has not.
+        cert_hashes: String,
+    },
     /// Write the H.264 Annex-B stream to a file.
     File(String),
 }
@@ -102,12 +114,21 @@ impl Default for StreamSettings {
 
 impl StreamSettings {
     /// The demo-run environment convention: `G2G_WHIP_URL` selects WHIP egress
-    /// (else a file), `G2G_FRAMES` caps the run (default 900, a 15 s clip; `0` = forever),
+    /// and `G2G_MOQT_URL` a MoQ Transport relay (with `G2G_MOQT_NAMESPACE`,
+    /// default `bevy`, and `G2G_MOQT_CERT_HASHES`); with neither, a file.
+    /// `G2G_FRAMES` caps the run (default 900, a 15 s clip; `0` = forever),
     /// `G2G_INPUT_PORT` enables the viewer-input backchannel.
     pub fn from_env() -> Self {
         let mut s = Self::default();
         if let Ok(url) = std::env::var("G2G_WHIP_URL") {
             s.output = StreamOutput::Whip(url);
+        }
+        if let Ok(url) = std::env::var("G2G_MOQT_URL") {
+            s.output = StreamOutput::Moqt {
+                url,
+                namespace: std::env::var("G2G_MOQT_NAMESPACE").unwrap_or_else(|_| "bevy".into()),
+                cert_hashes: std::env::var("G2G_MOQT_CERT_HASHES").unwrap_or_default(),
+            };
         }
         s.max_frames = std::env::var("G2G_FRAMES")
             .ok()
@@ -327,6 +348,9 @@ struct MirrorCamera;
 
 impl Plugin for StreamPlugin {
     fn build(&self, app: &mut App) {
+        // g2g logs through its own stderr sink, not Bevy's tracing subscriber,
+        // so G2G_DEBUG only reaches the pipeline elements once this runs.
+        g2g_core::log::init_from_env();
         let (tx, rx) = crossbeam_channel::unbounded::<RenderMessage>();
         // The sink pipeline runs on its own thread, fed frames through this
         // push handle (claimed by the AppSrc in the chain by matching channel
@@ -672,8 +696,8 @@ impl ReadbackState {
 /// Drives the sink chain to completion on its own thread. Zero-copy path:
 /// `AppSrc(H.264) -> sink` (the GPU already encoded). Readback path:
 /// `AppSrc(RGBA) -> videoconvert(I420) -> ffmpegenc(libx264) -> sink`. The
-/// sink is `WebRtcSink` (WHIP) or `FileSink` per the settings. Returns the
-/// number of frames consumed.
+/// sink is `WebRtcSink` (WHIP), `MoqtSink` (behind an `mp4mux`) or `FileSink`
+/// per the settings. Returns the number of frames consumed.
 ///
 /// Runs inside a tokio runtime: `WebRtcSink`'s WHIP handshake (reqwest) and
 /// session (tokio::spawn) need a reactor. `FileSink` is happy under it too.
@@ -694,7 +718,9 @@ fn sink_pipeline(settings: StreamSettings, encoded: bool) -> Result<u64, G2gErro
     let mut enc = FfmpegH264Enc::new()
         .with_backend(Backend::Software)
         .with_bitrate(settings.bitrate as usize);
-    let transforms: Vec<&mut dyn DynAsyncElement> = if encoded {
+    // MoQT egress only (see the arm below for the fragment shape).
+    let mut mux = Mp4Mux::new().with_prft(true);
+    let mut transforms: Vec<&mut dyn DynAsyncElement> = if encoded {
         vec![]
     } else {
         vec![&mut convert, &mut enc]
@@ -709,6 +735,22 @@ fn sink_pipeline(settings: StreamSettings, encoded: bool) -> Result<u64, G2gErro
         StreamOutput::Whip(url) => {
             info!("streaming H.264 to WHIP endpoint: {url}");
             let mut sink = WebRtcSink::new(url);
+            rt.block_on(run_linear_chain(&mut src, transforms, &mut sink, &clock, 4))?
+        }
+        StreamOutput::Moqt {
+            url,
+            namespace,
+            cert_hashes,
+        } => {
+            info!("publishing to MoQT relay {url} under namespace {namespace}");
+            // The sink takes fragmented MP4, so the muxer is the last transform.
+            // Its default is one fragment per access unit: one MOQT object per
+            // frame, the low-latency shape this stream wants, with a producer
+            // reference time box per fragment so the viewer can measure its own
+            // end-to-end latency.
+            transforms.push(&mut mux);
+            let mut sink =
+                MoqtSink::new(url, namespace).with_server_certificate_hashes(cert_hashes);
             rt.block_on(run_linear_chain(&mut src, transforms, &mut sink, &clock, 4))?
         }
         StreamOutput::File(path) => {

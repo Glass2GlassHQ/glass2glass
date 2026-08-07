@@ -138,6 +138,156 @@ pub fn st2110_audio() -> MaturityRecord {
     rec
 }
 
+/// An Annex-B access unit: a 4-byte start code, `header` as the NAL header byte,
+/// then `body` bytes of a repeating pattern (so a truncated reassembly shows up).
+fn annexb_nal(header: u8, body: usize) -> Vec<u8> {
+    let mut au = alloc::vec![0, 0, 0, 1, header];
+    au.extend((0..body).map(|i| (i * 31 + 7) as u8));
+    au
+}
+
+/// Conformance of the H.264 RTP payload core (RFC 6184): the `rtppay`
+/// packetizer and the `rtpdepay` depayloader that `udpsink` / `udpsrc`, the RTSP
+/// server, and the WebRTC path all share.
+///
+/// Verifies it constructs (`Instantiate`), round-trips an access unit whose slice
+/// NAL exceeds the MTU through FU-A fragmentation and reassembly byte-exact
+/// (`RoundTrip`), and that a dropped fragment costs only its own access unit: the
+/// sequence gap discards the damaged one instead of welding it to the next, which
+/// still depayloads intact (`LossResilience`). No `Oracle` evidence: the
+/// ffmpeg-peer check for this path is `udpsrc`'s, not this core's.
+pub fn rtp_h264() -> MaturityRecord {
+    use crate::rtpdepay::RtpH264Depayloader;
+    use crate::rtppay::RtpH264Packetizer;
+
+    let mut rec = MaturityRecord::new("rtph264");
+    rec.add(Evidence::new(D::Instantiate));
+
+    // A parameter-set NAL plus a slice far past the 200-byte MTU, so the access
+    // unit spans a single-NAL packet and a run of FU-A fragments.
+    let mut au = annexb_nal(0x67, 8);
+    au.extend(annexb_nal(0x65, 900));
+    let mut tx = RtpH264Packetizer::new(96, 0x5EED).with_max_payload(200);
+    let packets = tx.packetize(&au, 9000);
+    let mut rx = RtpH264Depayloader::new();
+    let mut out = None;
+    for p in &packets {
+        if let Some(unit) = rx.depacketize(p) {
+            out = Some(unit);
+        }
+    }
+    if out.as_ref().map(|u| u.data.as_slice()) == Some(au.as_slice()) {
+        rec.add(
+            Evidence::new(D::RoundTrip)
+                .codec("h264")
+                .detail("FU-A fragmented access unit reassembled byte-exact"),
+        );
+    }
+
+    if survives_a_dropped_fragment(&au) {
+        rec.add(
+            Evidence::new(D::LossResilience)
+                .codec("h264")
+                .detail("dropped FU-A fragment discards only its own access unit"),
+        );
+    }
+
+    rec
+}
+
+/// Payloadize `au` twice (two access units on one sequence run), drop a fragment
+/// of the first, and report whether exactly the second comes out intact.
+fn survives_a_dropped_fragment(au: &[u8]) -> bool {
+    use crate::rtpdepay::RtpH264Depayloader;
+    use crate::rtppay::RtpH264Packetizer;
+
+    let mut tx = RtpH264Packetizer::new(96, 0x5EED).with_max_payload(200);
+    let first = tx.packetize(au, 9000);
+    let second = tx.packetize(au, 12000);
+    if first.len() < 4 {
+        return false; // no fragment run to damage
+    }
+    let mut rx = RtpH264Depayloader::new();
+    let mut units = Vec::new();
+    for (i, p) in first.iter().enumerate() {
+        if i == 2 {
+            continue; // the lost fragment
+        }
+        if let Some(u) = rx.depacketize(p) {
+            units.push(u.data);
+        }
+    }
+    for p in &second {
+        if let Some(u) = rx.depacketize(p) {
+            units.push(u.data);
+        }
+    }
+    units.len() == 1 && units[0] == au
+}
+
+/// Conformance of the RTP jitter buffer (`rtpjitter`), the receive-side reorder
+/// stage shared by `udpsrc`, `rtspsrc`, and the RTSP server.
+///
+/// Verifies it constructs (`Instantiate`) and that a wire which reorders packets
+/// and loses one still yields intact access units (`LossResilience`): the
+/// reordered packets are released in sequence order, the hole is reported for NACK
+/// and then declared lost once it is overdue rather than stalling the stream.
+pub fn rtp_jitter() -> MaturityRecord {
+    use crate::rtpdepay::RtpH264Depayloader;
+    use crate::rtpjitter::{JitterConfig, RtpJitterBuffer};
+    use crate::rtppay::RtpH264Packetizer;
+
+    let mut rec = MaturityRecord::new("rtpjitter");
+    let config = JitterConfig::new(50, 64);
+    rec.add(Evidence::new(D::Instantiate));
+
+    let mut au = annexb_nal(0x67, 8);
+    au.extend(annexb_nal(0x65, 900));
+    let mut tx = RtpH264Packetizer::new(96, 0x1EAF).with_max_payload(200);
+    let mut wire = tx.packetize(&au, 9000);
+    let first_len = wire.len();
+    wire.extend(tx.packetize(&au, 12000));
+    if first_len < 4 {
+        return rec;
+    }
+
+    // Arrival order: swap two adjacent pairs (reorder) and drop one packet of the
+    // first access unit (loss).
+    let lost_seq = 1u16;
+    let mut jb = RtpJitterBuffer::new(config);
+    let mut arrival: Vec<&Vec<u8>> = wire.iter().collect();
+    arrival.swap(2, 3);
+    arrival.swap(first_len, first_len + 1);
+    for (i, p) in arrival.into_iter().enumerate() {
+        if u16::from_be_bytes([p[2], p[3]]) == lost_seq {
+            continue;
+        }
+        jb.push(p, i as u64 * 1_000_000);
+    }
+    let hole_seen = jb.missing_seqs().contains(&lost_seq);
+
+    // Drain past the hold bound: the missing head is declared lost and the rest
+    // releases in sequence order.
+    let mut rx = RtpH264Depayloader::new();
+    let mut units = Vec::new();
+    let now = 10 * config.max_hold_ns;
+    while let Some(p) = jb.pop(now) {
+        if let Some(u) = rx.depacketize(&p) {
+            units.push(u.data);
+        }
+    }
+    let stats = jb.stats();
+    if hole_seen && stats.reordered > 0 && stats.lost > 0 && units == alloc::vec![au] {
+        rec.add(
+            Evidence::new(D::LossResilience)
+                .codec("h264")
+                .detail("reordered arrival released in sequence order, lost packet skipped"),
+        );
+    }
+
+    rec
+}
+
 /// The in-process conformance report: run every always-on battery and collect its
 /// derived [`MaturityRecord`]. These are the checks that run anywhere (no ffmpeg, no
 /// GPU), so they top out at `UnitTested`.
@@ -145,6 +295,8 @@ pub fn report() -> ConformanceReport {
     let mut report = ConformanceReport::new();
     report.push(st2110_video());
     report.push(st2110_audio());
+    report.push(rtp_h264());
+    report.push(rtp_jitter());
     report
 }
 
@@ -244,6 +396,33 @@ pub mod persist {
         report.absorb(load_persisted());
         report
     }
+
+    /// The platform tag a CUDA-bound test should put on its `Hardware` evidence:
+    /// `$G2G_CONFORMANCE_PLATFORM` when the runner names itself, else the name
+    /// the driver gives CUDA device 0 (the device the CUDA elements bind), else
+    /// the host os / arch. Named per family rather than "the first GPU": a box
+    /// with an integrated and a discrete GPU would otherwise tag a CUDA run with
+    /// whichever adapter enumerated first.
+    ///
+    /// A test that already holds its own device name (Vulkan Video, a wgpu
+    /// adapter it opened itself) passes that instead.
+    #[cfg(all(target_os = "linux", feature = "cuda"))]
+    pub fn cuda_platform_tag() -> String {
+        use g2g_core::runtime::DeviceProvider;
+        if let Some(name) = std::env::var_os("G2G_CONFORMANCE_PLATFORM") {
+            return name.to_string_lossy().into_owned();
+        }
+        let found = crate::gpudevice::GpuDeviceProvider::new()
+            .probe()
+            .ok()
+            .and_then(|devices| {
+                devices
+                    .into_iter()
+                    .find(|d| d.persistent_id.starts_with("cuda:0:"))
+                    .map(|d| d.display_name)
+            });
+        found.unwrap_or_else(|| format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH))
+    }
 }
 
 #[cfg(test)]
@@ -271,11 +450,35 @@ mod tests {
     }
 
     #[test]
+    fn rtp_h264_battery_round_trips_and_survives_loss() {
+        let rec = rtp_h264();
+        assert!(rec.has(D::RoundTrip), "FU-A reassembly is byte-exact");
+        assert!(
+            rec.has(D::LossResilience),
+            "a dropped fragment costs only its own access unit"
+        );
+        assert_eq!(rec.level(), MaturityLevel::UnitTested);
+        assert!(!rec.has(D::Oracle), "no peer validated this core");
+    }
+
+    #[test]
+    fn rtp_jitter_battery_reorders_and_skips_a_hole() {
+        let rec = rtp_jitter();
+        assert!(
+            rec.has(D::LossResilience),
+            "reordered arrival reconstructs, the hole is skipped not stalled"
+        );
+        assert_eq!(rec.level(), MaturityLevel::UnitTested);
+    }
+
+    #[test]
     fn report_renders_every_battery() {
         let report = report();
         let table = report.to_table();
         assert!(table.contains("st2110video"), "video row:\n{table}");
         assert!(table.contains("st2110audio"), "audio row:\n{table}");
+        assert!(table.contains("rtph264"), "rtp payload row:\n{table}");
+        assert!(table.contains("rtpjitter"), "jitter row:\n{table}");
         assert!(
             table.contains("unit-tested"),
             "derived levels shown:\n{table}"

@@ -3677,6 +3677,7 @@ dependencies = [
  "objc2-audio-toolbox",
  "objc2-av-foundation",
  "objc2-avf-audio",
+ "objc2-core-audio",
  "objc2-core-audio-types",
  "objc2-core-foundation",
  "objc2-core-media",
@@ -3723,6 +3724,7 @@ dependencies = [
  "wgpu",
  "wgpu-hal",
  "windows",
+ "windows-core",
  "winit",
  "zune-jpeg",
 ]

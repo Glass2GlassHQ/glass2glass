@@ -211,7 +211,9 @@ screencapture = [
 coreaudio = [
     "std",
     "dep:objc2-audio-toolbox",
+    "dep:objc2-core-audio",
     "dep:objc2-core-audio-types",
+    "dep:objc2-core-foundation",
 ]
 # macOS Metal present sink (M736): renders NV12 (System bytes or the M735
 # zero-copy CVPixelBuffer domain, imported via CVMetalTextureCache) to a
@@ -265,11 +267,11 @@ mf-aac = ["std", "dep:windows"]
 # Windows WASAPI render sink (M29): plays interleaved PCM (PcmS16Le/PcmF32Le)
 # on the default audio endpoint via WASAPI shared mode. The audible-output end
 # of the M25 audio path. Pulls the windows crate; Windows-only, implies std.
-wasapi-sink = ["std", "dep:windows"]
+wasapi-sink = ["std", "dep:windows", "dep:windows-core"]
 # Windows WASAPI capture source (M32): captures interleaved PCM from the
 # default audio capture endpoint (shared mode), the input mirror of
 # WasapiSink. Pulls the windows crate; Windows-only, implies std.
-wasapi-src = ["std", "dep:windows"]
+wasapi-src = ["std", "dep:windows", "dep:windows-core"]
 # Windows D3D11 present sink (W1 Phase 4): displays MemoryDomain::D3D11Texture
 # frames in a Win32 window via a DXGI swapchain + D3D11 video processor
 # (NV12->RGB on the GPU). The Windows analog of CudaGlSink. Windows-only,
@@ -836,6 +838,11 @@ mozjpeg = { version = "0.10.13", optional = true, features = ["with_simd", "nasm
 # Media Foundation bindings are Windows-only; target-gate so other platforms
 # never attempt to resolve or build the windows crate.
 [target.'cfg(windows)'.dependencies]
+# The `implement` macro (wasapidevice's IMMNotificationClient) expands to
+# absolute `::windows_core::` paths, so that crate has to be a direct
+# dependency, not only the `windows::core` re-export. Same 0.62 line, so cargo
+# unifies it with the one `windows` links.
+windows-core = { version = "0.62", optional = true }
 windows = { version = "0.62", optional = true, features = [
     "Win32_Foundation",
     "Win32_System_Com",
@@ -847,6 +854,11 @@ windows = { version = "0.62", optional = true, features = [
     "Win32_Media_Audio",
     "Win32_System_Com_StructuredStorage",
     "Win32_System_Variant",
+    # Endpoint discovery (wasapidevice): the friendly-name property key lives
+    # in FunctionDiscovery, and the property store it comes from in the shell
+    # properties module.
+    "Win32_Devices_FunctionDiscovery",
+    "Win32_UI_Shell_PropertiesSystem",
     # DXVA / D3D11 zero-copy decode output (W1): D3D11 device + texture types,
     # the D3D_DRIVER_TYPE enum, and DXGI (adapter type in D3D11CreateDevice's
     # signature; DXGI_FORMAT for the texture domain).
@@ -1009,6 +1021,14 @@ objc2-core-audio-types = { version = "0.3", optional = true, default-features = 
     "std",
     "CoreAudioBaseTypes",
 ] }
+# Core Audio HAL device enumeration (coreaudiodevice): AudioObjectGetPropertyData
+# over kAudioHardwarePropertyDevices. Only the AudioHardware header is needed;
+# the deprecated / plug-in / host-time ones stay off.
+objc2-core-audio = { version = "0.3", optional = true, default-features = false, features = [
+    "std",
+    "AudioHardware",
+    "objc2-core-audio-types",
+] }
 
 # NDK MediaCodec bindings are Android-only; target-gate so other platforms never
 # attempt to resolve the ndk crate. Drives the `mediacodec` element. The `media`
@@ -1143,6 +1163,10 @@ required-features = ["std"]
 
 [[bin]]
 name = "g2g-docgen"
+required-features = ["std"]
+
+[[bin]]
+name = "g2g-device-monitor"
 required-features = ["std"]
 
 # MCP server for agent-driven dev; needs serde_json (registry dump / results).

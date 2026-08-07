@@ -11,7 +11,7 @@ use g2g_core::caps::{Caps, CapsSet};
 use g2g_core::format_element::CapsConstraint;
 use g2g_core::graph::Graph;
 use g2g_core::runtime::solver::{solve_graph, solve_linear, NodeConstraint};
-use g2g_core::{Dim, RawVideoFormat, Rate, VideoCodec};
+use g2g_core::{Dim, Interlace, Rate, RawVideoFormat, VideoCodec};
 
 fn raw(fmt: RawVideoFormat, w: u32, h: u32) -> Caps {
     Caps::RawVideo {
@@ -19,6 +19,7 @@ fn raw(fmt: RawVideoFormat, w: u32, h: u32) -> Caps {
         width: Dim::Fixed(w),
         height: Dim::Fixed(h),
         framerate: Rate::Fixed(30 << 16),
+        interlace: Interlace::Any,
     }
 }
 
@@ -28,6 +29,7 @@ fn raw_ranged(fmt: RawVideoFormat) -> Caps {
         width: Dim::Range { min: 16, max: 8192 },
         height: Dim::Range { min: 16, max: 8192 },
         framerate: Rate::Any,
+        interlace: Interlace::Any,
     }
 }
 

@@ -27,7 +27,7 @@
 use g2g_core::element::{AsyncElement, BoxFuture, OutputSink, PushOutcome};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
-use g2g_core::{Caps, Dim, G2gError, Rate, RawVideoFormat};
+use g2g_core::{Caps, Dim, G2gError, Interlace, Rate, RawVideoFormat};
 use g2g_ml::ortinfer::OrtInference;
 
 use ::ort::ep::{NNAPI, XNNPACK};
@@ -137,6 +137,7 @@ async fn conv_runs_through_android_ep_stack() {
         width: Dim::Fixed(4),
         height: Dim::Fixed(4),
         framerate: Rate::Any,
+        interlace: Interlace::Any,
     };
     let narrowed = inf.intercept_caps(&caps).expect("4x4 accepted");
     inf.configure_pipeline(&narrowed).expect("configure");
