@@ -1,6 +1,6 @@
-//! Live interop tests for the PipeWire capture elements (M890, M894): capture
-//! from a node published by GStreamer's `pipewiresink`, the reference PipeWire
-//! peer.
+//! Live interop tests for the PipeWire capture elements (M890, M894, M957):
+//! capture from a node published by GStreamer's `pipewiresink`, the reference
+//! PipeWire peer.
 //!
 //! Needs a running user PipeWire daemon (plus its session manager, which makes
 //! the link), `gst-launch-1.0` with the `pipewire` plugin, and `pw-dump`. Each
@@ -11,7 +11,10 @@
 //!
 //! M894 adds the property paths: a pinned video `format` (honoured, or a loud
 //! failure when the node cannot produce it) and an audio capture driven entirely
-//! through `PipeWireSrc`'s runtime properties.
+//! through `PipeWireSrc`'s runtime properties. M957 checks `io-mode=dmabuf`
+//! against a producer that has only mapped memory to give; a node that really
+//! serves dma-buf needs hardware (a portal screen-cast or a GPU-fed node), so the
+//! zero-copy path is validated by hand, not here.
 //!
 //! ```sh
 //! cargo test -p g2g-plugins --features pipewire \
@@ -170,13 +173,13 @@ fn host_can_run() -> bool {
     true
 }
 
-/// Capture `limit` frames from `node` with the requested geometry / rate, with
-/// the format left open (`None`) or pinned through the `format` property.
+/// Capture `limit` frames from `node` with the requested geometry / rate, plus
+/// whatever else `props` sets (a pinned `format`, an `io-mode`).
 async fn capture(
     node: &str,
     req: (u32, u32, u32),
     limit: u64,
-    pin: Option<&str>,
+    props: &[(&str, &str)],
 ) -> (Vec<PipelinePacket>, Result<u64, G2gError>) {
     let (w, h, fps) = req;
     let mut src = PipeWireVideoSrc::new()
@@ -184,9 +187,9 @@ async fn capture(
         .with_size(w, h)
         .with_fps(fps)
         .with_frame_limit(limit);
-    if let Some(format) = pin {
-        src.set_property("format", PropValue::Str(format.to_string()))
-            .expect("format is a known property");
+    for (name, value) in props {
+        src.set_property(name, PropValue::Str(value.to_string()))
+            .unwrap_or_else(|e| panic!("{name} is a known property: {e:?}"));
     }
     let advertised = src.intercept_caps().await.expect("advertised caps");
     src.configure_pipeline(&advertised).expect("configure");
@@ -252,7 +255,7 @@ async fn captures_i420_frames_from_a_gstreamer_node() {
         "publisher node never reached the registry"
     );
 
-    let (packets, result) = capture(&pub_.node, (320, 240, 30), 12, None).await;
+    let (packets, result) = capture(&pub_.node, (320, 240, 30), 12, &[]).await;
     let frames = frame_sizes(&packets);
     eprintln!(
         "captured {} frames, sizes {:?}, caps change {:?}",
@@ -291,7 +294,7 @@ async fn node_geometry_arrives_as_caps_changed() {
     assert!(pub_.wait_until_registered().await, "node never registered");
 
     // ask for something the node will not produce
-    let (packets, result) = capture(&pub_.node, (640, 480, 15), 8, None).await;
+    let (packets, result) = capture(&pub_.node, (640, 480, 15), 8, &[]).await;
     let frames = frame_sizes(&packets);
     let change = first_caps_change(&packets);
     eprintln!("caps change {:?}, first frame {:?}", change, frames.first());
@@ -318,7 +321,7 @@ async fn a_yuy2_node_negotiates_the_packed_format() {
     };
     assert!(pub_.wait_until_registered().await, "node never registered");
 
-    let (packets, result) = capture(&pub_.node, (320, 240, 30), 8, None).await;
+    let (packets, result) = capture(&pub_.node, (320, 240, 30), 8, &[]).await;
     let frames = frame_sizes(&packets);
     eprintln!(
         "caps change {:?}, first frame {:?}",
@@ -347,7 +350,7 @@ async fn a_pinned_format_negotiates_without_a_caps_change() {
     };
     assert!(pub_.wait_until_registered().await, "node never registered");
 
-    let (packets, result) = capture(&pub_.node, (320, 240, 30), 8, Some("yuy2")).await;
+    let (packets, result) = capture(&pub_.node, (320, 240, 30), 8, &[("format", "yuy2")]).await;
     let frames = frame_sizes(&packets);
     eprintln!(
         "pinned yuy2: caps change {:?}, first frame {:?}",
@@ -381,7 +384,7 @@ async fn a_pinned_format_the_node_cannot_produce_fails_loud() {
     assert!(pub_.wait_until_registered().await, "node never registered");
 
     // `capture` bounds the run, so a hang fails the test rather than blocking it
-    let (packets, result) = capture(&pub_.node, (320, 240, 30), 8, Some("rgba")).await;
+    let (packets, result) = capture(&pub_.node, (320, 240, 30), 8, &[("format", "rgba")]).await;
     eprintln!("pinned rgba against an I420 node: {result:?}");
     assert!(
         result.is_err(),
@@ -390,6 +393,34 @@ async fn a_pinned_format_the_node_cannot_produce_fails_loud() {
     assert!(
         frame_sizes(&packets).is_empty(),
         "no frames are pushed under a format the node never agreed to"
+    );
+}
+
+/// `io-mode=dmabuf` against a node whose frames live in system memory (M957): the
+/// `Buffers` param accepts dma-buf alone, so the capture fails instead of quietly
+/// copying, and no frame is pushed under a domain the element promised not to use.
+#[tokio::test]
+async fn dmabuf_mode_fails_against_a_node_with_no_dmabuf_to_give() {
+    if !host_can_run() {
+        return;
+    }
+    let pub_ = match Publisher::spawn("dmabuf-mismatch", "BGRA", 320, 240, 30) {
+        Some(p) => p,
+        None => return,
+    };
+    assert!(pub_.wait_until_registered().await, "node never registered");
+
+    let (packets, result) = capture(&pub_.node, (320, 240, 30), 8, &[("io-mode", "dmabuf")]).await;
+    eprintln!("dmabuf mode against a system-memory node: {result:?}");
+    assert!(
+        result.is_err(),
+        "a producer with no dma-buf must fail the capture: {result:?}"
+    );
+    assert!(
+        !packets
+            .iter()
+            .any(|p| matches!(p, PipelinePacket::DataFrame(_))),
+        "no frame is pushed when the dma-buf negotiation fails"
     );
 }
 

@@ -17,46 +17,105 @@
 //! first frame. A format outside the table fails the capture instead of being
 //! reinterpreted.
 //!
+//! ## Buffers
+//!
+//! `io-mode` picks how frames leave the node. `mmap` (the default) connects with
+//! `MAP_BUFFERS` and copies each frame out of the mapped block, de-striding
+//! padded rows, into `System` memory. `dmabuf` asks the producer for dma-buf
+//! memory (a `Buffers` param whose only accepted data type is `SPA_DATA_DmaBuf`)
+//! and shares the descriptor downstream as `MemoryDomain::DmaBuf`, no copy: a
+//! producer with no dma-buf to give fails the negotiation instead. Because the
+//! domain is part of negotiation the mode is a property, not something picked per
+//! buffer (GStreamer's `pipewiresrc` gets it from a caps feature instead).
+//!
+//! The dma-buf path only offers the single-plane formats: a planar frame arrives
+//! as one SPA block per plane and `OwnedDmaBuf` carries one fd. The element holds
+//! each buffer until every share of its frame is gone, so the producer never
+//! overwrites a frame downstream is still reading, and it connects without
+//! `RT_PROCESS` so the recycling (a timer plus each `process`) and the dequeue all
+//! run on the one loop thread that owns the stream's buffer queues.
+//!
 //! ## Scope
 //!
-//! System memory only: the stream connects with `MAP_BUFFERS` and copies each
-//! frame out of the mapped block, de-striding padded rows. DMABUF import is not
-//! wired up. There is no xdg-desktop-portal integration either, so screen
-//! capture means driving the portal elsewhere and naming the node it opens in
-//! `target-object`, which takes either form PipeWire's `target.object` resolves:
-//! a node name or an object serial.
+//! There is no xdg-desktop-portal integration, so screen capture means driving
+//! the portal elsewhere and naming the node it opens in `target-object`, which
+//! takes either form PipeWire's `target.object` resolves: a node name or an
+//! object serial.
 
+use core::cell::RefCell;
 use core::future::Future;
 use core::pin::Pin;
 
 use alloc::boxed::Box;
+use alloc::rc::Rc;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
+use g2g_core::memory::{OwnedDmaBuf, SystemSlice};
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, FrameTiming, G2gError,
-    HardwareError, LatencyReport, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
-    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat,
+    HardwareError, LatencyReport, MemoryDomain, MemoryDomainKind, OutputSink, PadTemplate,
+    PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate,
+    RawVideoFormat,
 };
 
 use pipewire as pw;
 use pw::spa;
+use pw::sys as pw_sys;
 
 use crate::videoconvert::{raw_format_from_str, raw_format_to_str};
 
 use crate::pwvideo::{
-    format_pod_bytes, rate_q16, spa_format, supported_formats, PlaneLayout, VideoInfo, MAX_DIM,
+    dmabuf_buffers_pod_bytes, dmabuf_frame, format_pod_bytes, rate_q16, single_plane_row_bytes,
+    spa_format, supported_formats, DataBlock, DmaBufFrame, FormatOffer, PlaneLayout, VideoInfo,
+    MAX_DIM,
 };
 
 /// Requested capture geometry / rate when the caller does not specify one.
 const DEFAULT_WIDTH: u32 = 640;
 const DEFAULT_HEIGHT: u32 = 480;
 const DEFAULT_FPS: u32 = 30;
-/// The format the advertised caps carry and the connect pod prefers.
+/// The format the advertised caps carry and the connect pod prefers, per mode.
+/// The dma-buf path leads with a single-plane format because that is all its
+/// buffers can be (see [`FormatOffer::SinglePlane`]).
 const PREFERRED_FORMAT: RawVideoFormat = RawVideoFormat::I420;
+const PREFERRED_DMABUF_FORMAT: RawVideoFormat = RawVideoFormat::Bgra8;
+/// How often the dma-buf path hands the producer back the buffers downstream has
+/// released. A frame in flight blocks the buffer it came in, and `process` only
+/// runs when the producer has a buffer to fill, so recycling cannot wait for it.
+const RECYCLE_INTERVAL: core::time::Duration = core::time::Duration::from_millis(2);
+/// Blocks read from a dequeued buffer. Only a single-block buffer is usable, so a
+/// buffer claiming more is read far enough to reject it and no further.
+const MAX_BLOCKS: usize = 4;
+
+/// Where a captured frame lands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum IoMode {
+    /// Copy each frame out of the producer's mapped buffer into system memory.
+    #[default]
+    MemoryMap,
+    /// Share the producer's dma-buf downstream, no copy.
+    DmaBuf,
+}
+
+impl IoMode {
+    fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "mmap" => Some(Self::MemoryMap),
+            "dmabuf" => Some(Self::DmaBuf),
+            _ => None,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::MemoryMap => "mmap",
+            Self::DmaBuf => "dmabuf",
+        }
+    }
+}
 
 /// Control message to the loop thread (quit on teardown).
 enum Ctrl {
@@ -67,8 +126,11 @@ enum Ctrl {
 enum FromWorker {
     /// The negotiated format, sent on every change (so before the first frame).
     Format(VideoInfo),
-    /// One tightly packed frame.
+    /// One tightly packed frame, copied out of a mapped buffer.
     Frame(Vec<u8>),
+    /// One frame still in the producer's dma-buf. The loop thread keeps a share of
+    /// its own and recycles the buffer once this one is dropped.
+    DmaBuf(OwnedDmaBuf),
     /// The stream negotiated something we cannot carry, handed us a buffer that
     /// disagrees with the negotiated geometry, or went to the error state (a
     /// pinned format the node cannot produce lands here).
@@ -87,6 +149,7 @@ pub struct PipeWireVideoSrc {
     /// node either produces it or negotiation fails. `None` = offer the whole
     /// table and take what the node settles on.
     pin_format: Option<RawVideoFormat>,
+    io_mode: IoMode,
     /// `None` = run until error or downstream shutdown; else stop after N frames
     /// and emit EOS. The bounded-capture / test path.
     frame_limit: Option<u64>,
@@ -108,6 +171,7 @@ impl PipeWireVideoSrc {
             req_height: DEFAULT_HEIGHT,
             req_fps: DEFAULT_FPS,
             pin_format: None,
+            io_mode: IoMode::MemoryMap,
             frame_limit: None,
             configured: false,
         }
@@ -148,12 +212,37 @@ impl PipeWireVideoSrc {
         self
     }
 
+    /// Take the producer's dma-buf instead of copying out of a mapped buffer.
+    /// The frames then carry [`MemoryDomain::DmaBuf`] and only the single-plane
+    /// formats are on offer, so a pinned planar format is rejected.
+    pub fn with_io_mode(mut self, mode: IoMode) -> Self {
+        self.io_mode = mode;
+        self
+    }
+
     /// The format the caps advertise and the connect pod leads with: the pinned
-    /// one, or the default preference. A pin the element cannot map fails here.
+    /// one, or the mode's default preference. A pin the element cannot map, or one
+    /// the mode cannot carry, fails here.
     fn format(&self) -> Result<RawVideoFormat, G2gError> {
-        let format = self.pin_format.unwrap_or(PREFERRED_FORMAT);
+        let preferred = match self.io_mode {
+            IoMode::MemoryMap => PREFERRED_FORMAT,
+            IoMode::DmaBuf => PREFERRED_DMABUF_FORMAT,
+        };
+        let format = self.pin_format.unwrap_or(preferred);
         spa_format(format).ok_or(G2gError::CapsMismatch)?;
+        if self.io_mode == IoMode::DmaBuf && single_plane_row_bytes(format, 1).is_none() {
+            return Err(G2gError::CapsMismatch);
+        }
         Ok(format)
+    }
+
+    /// The formats the connect pod offers behind the preferred one.
+    fn format_offer(&self) -> FormatOffer {
+        match (self.pin_format, self.io_mode) {
+            (Some(_), _) => FormatOffer::PreferredOnly,
+            (None, IoMode::DmaBuf) => FormatOffer::SinglePlane,
+            (None, IoMode::MemoryMap) => FormatOffer::All,
+        }
     }
 
     /// The caps the element advertises before the node has answered. Fixed, so
@@ -249,6 +338,12 @@ impl SourceLoop for PipeWireVideoSrc {
             )
             .with_default(""),
             PropertySpec::new(
+                "io-mode",
+                PropKind::Str,
+                "where frames land: mmap (copy into system memory) | dmabuf (share the producer's buffer)",
+            )
+            .with_default("mmap"),
+            PropertySpec::new(
                 "num-buffers",
                 PropKind::Int,
                 "frames to capture then EOS (-1 = forever)",
@@ -289,6 +384,11 @@ impl SourceLoop for PipeWireVideoSrc {
                 };
                 Ok(())
             }
+            "io-mode" => {
+                let name = value.as_str().ok_or(PropError::Type)?;
+                self.io_mode = IoMode::from_name(name).ok_or(PropError::Value)?;
+                Ok(())
+            }
             "num-buffers" => {
                 let n = value.as_int().ok_or(PropError::Type)?;
                 self.frame_limit = (n >= 0).then_some(n as u64);
@@ -307,8 +407,18 @@ impl SourceLoop for PipeWireVideoSrc {
             "format" => Some(PropValue::Str(
                 self.pin_format.map_or("", raw_format_to_str).into(),
             )),
+            "io-mode" => Some(PropValue::Str(self.io_mode.as_str().into())),
             "num-buffers" => Some(PropValue::Int(self.frame_limit.map_or(-1, |n| n as i64))),
             _ => None,
+        }
+    }
+
+    /// The domain the frames carry: negotiated up front from `io-mode`, so a
+    /// downstream stage sees one domain for the whole capture.
+    fn output_memory(&self) -> MemoryDomainKind {
+        match self.io_mode {
+            IoMode::MemoryMap => MemoryDomainKind::System,
+            IoMode::DmaBuf => MemoryDomainKind::DmaBuf,
         }
     }
 
@@ -331,13 +441,14 @@ impl SourceLoop for PipeWireVideoSrc {
             let mut advertised = self.caps()?;
             let pod = format_pod_bytes(
                 self.format()?,
-                self.pin_format.is_some(),
+                self.format_offer(),
                 self.req_width,
                 self.req_height,
                 self.req_fps,
             )?;
             let target = self.target.clone();
             let limit = self.frame_limit;
+            let io_mode = self.io_mode;
 
             // Frames and format changes cross from the loop thread to here.
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<FromWorker>();
@@ -348,7 +459,8 @@ impl SourceLoop for PipeWireVideoSrc {
             let handle = std::thread::Builder::new()
                 .name(String::from("g2g-pipewirevideosrc"))
                 .spawn(move || {
-                    if let Err(code) = build_and_run(&target, &pod, tx, ctrl_rx, &ready_tx) {
+                    if let Err(code) = build_and_run(&target, &pod, io_mode, tx, ctrl_rx, &ready_tx)
+                    {
                         let _ = ready_tx.send(Err(code));
                     }
                 })
@@ -380,7 +492,7 @@ impl SourceLoop for PipeWireVideoSrc {
                 let Some(msg) = rx.recv().await else {
                     break; // worker ended
                 };
-                match msg {
+                let domain = match msg {
                     FromWorker::Failed(e) => {
                         failure = Some(e);
                         break;
@@ -399,33 +511,34 @@ impl SourceLoop for PipeWireVideoSrc {
                             }
                             advertised = caps;
                         }
+                        continue;
                     }
                     FromWorker::Frame(bytes) => {
-                        let arrival_ns = g2g_core::metrics::monotonic_ns();
-                        let frame = Frame {
-                            domain: MemoryDomain::System(SystemSlice::from_boxed(
-                                bytes.into_boxed_slice(),
-                            )),
-                            timing: FrameTiming {
-                                pts_ns: pts,
-                                dts_ns: pts,
-                                duration_ns: period_ns,
-                                capture_ns: pts,
-                                arrival_ns,
-                                // raw frames are each independently presentable
-                                keyframe: true,
-                            },
-                            sequence: seq,
-                            meta: Default::default(),
-                        };
-                        if out.push(PipelinePacket::DataFrame(frame)).await.is_err() {
-                            downstream_open = false;
-                            break;
-                        }
-                        pts += period_ns;
-                        seq += 1;
+                        MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice()))
                     }
+                    FromWorker::DmaBuf(dmabuf) => MemoryDomain::DmaBuf(dmabuf),
+                };
+                let arrival_ns = g2g_core::metrics::monotonic_ns();
+                let frame = Frame {
+                    domain,
+                    timing: FrameTiming {
+                        pts_ns: pts,
+                        dts_ns: pts,
+                        duration_ns: period_ns,
+                        capture_ns: pts,
+                        arrival_ns,
+                        // raw frames are each independently presentable
+                        keyframe: true,
+                    },
+                    sequence: seq,
+                    meta: Default::default(),
+                };
+                if out.push(PipelinePacket::DataFrame(frame)).await.is_err() {
+                    downstream_open = false;
+                    break;
                 }
+                pts += period_ns;
+                seq += 1;
             }
 
             // Stop the loop and reap the worker.
@@ -474,14 +587,31 @@ struct Negotiated {
     layout: PlaneLayout,
 }
 
+/// A dequeued dma-buf buffer, lent out as a frame. `frame` is the loop thread's
+/// own share of the descriptor downstream got: while it is not the last one, the
+/// buffer stays out of the producer's hands.
+#[derive(Debug)]
+struct HeldBuffer {
+    buffer: *mut pw_sys::pw_buffer,
+    frame: OwnedDmaBuf,
+}
+
+/// Buffers lent out on the dma-buf path, shared by the `process` callback and the
+/// recycling timer. Both run on the loop thread, which is also the only thread
+/// allowed to touch the stream's buffer queues.
+type HeldBuffers = Rc<RefCell<Vec<HeldBuffer>>>;
+
 struct UserData {
     negotiated: Option<Negotiated>,
     tx: tokio::sync::mpsc::UnboundedSender<FromWorker>,
+    io_mode: IoMode,
+    held: HeldBuffers,
 }
 
 fn build_and_run(
     target: &str,
     pod: &[u8],
+    io_mode: IoMode,
     tx: tokio::sync::mpsc::UnboundedSender<FromWorker>,
     ctrl_rx: pw::channel::Receiver<Ctrl>,
     ready: &std::sync::mpsc::SyncSender<Result<(), i32>>,
@@ -503,11 +633,16 @@ fn build_and_run(
         // behind a crate feature this build does not enable
         props.insert("target.object", target);
     }
-    let stream = pw::stream::Stream::new(&core, "g2g-pipewirevideosrc", props).map_err(|_| -1)?;
+    // Rc so the recycling timer can reach the stream the listener is built on.
+    let stream =
+        Rc::new(pw::stream::Stream::new(&core, "g2g-pipewirevideosrc", props).map_err(|_| -1)?);
 
+    let held: HeldBuffers = Rc::new(RefCell::new(Vec::new()));
     let user_data = UserData {
         negotiated: None,
         tx,
+        io_mode,
+        held: Rc::clone(&held),
     };
 
     let _listener = stream
@@ -524,7 +659,7 @@ fn build_and_run(
                     )));
             }
         })
-        .param_changed(|_, user_data, id, param| {
+        .param_changed(|stream, user_data, id, param| {
             if id != spa::param::ParamType::Format.as_raw() {
                 return;
             }
@@ -545,6 +680,14 @@ fn build_and_run(
                         return;
                     };
                     user_data.negotiated = Some(Negotiated { info, layout });
+                    // The buffers are allocated after this callback, so this is
+                    // where the dma-buf demand has to be announced.
+                    if user_data.io_mode == IoMode::DmaBuf {
+                        let bytes = dmabuf_buffers_pod_bytes();
+                        if let Some(pod) = spa::pod::Pod::from_bytes(&bytes) {
+                            let _ = stream.update_params(&mut [pod]);
+                        }
+                    }
                     if changed {
                         let _ = user_data.tx.send(FromWorker::Format(info));
                     }
@@ -555,68 +698,47 @@ fn build_and_run(
                 }
             }
         })
-        .process(|stream, user_data| {
-            let Some(negotiated) = user_data.negotiated.as_ref() else {
-                return; // no usable format: drop the buffer rather than guess
-            };
-            let Some(mut buffer) = stream.dequeue_buffer() else {
-                return;
-            };
-            let datas = buffer.datas_mut();
-            if datas.is_empty() {
-                return;
-            }
-            let data = &mut datas[0];
-            let (offset, size, stride) = {
-                let chunk = data.chunk();
-                (
-                    chunk.offset() as usize,
-                    chunk.size() as usize,
-                    usize::try_from(chunk.stride()).unwrap_or(0),
-                )
-            };
-            // An empty chunk is a normal tick (the node produced nothing), not a
-            // malformed buffer.
-            if size == 0 {
-                return;
-            }
-            let Some(mapped) = data.data() else {
-                return;
-            };
-            let fits = offset
-                .checked_add(size)
-                .is_some_and(|end| end <= mapped.len());
-            let mut frame = Vec::with_capacity(negotiated.layout.frame_bytes());
-            if !fits
-                || negotiated
-                    .layout
-                    .copy_tight(&mapped[offset..offset + size], stride, &mut frame)
-                    .is_none()
-            {
-                // The buffer disagrees with the negotiated geometry: fail the
-                // capture instead of pushing a malformed frame downstream.
-                let _ = user_data
-                    .tx
-                    .send(FromWorker::Failed(G2gError::CapsMismatch));
-                user_data.negotiated = None;
-                return;
-            }
-            let _ = user_data.tx.send(FromWorker::Frame(frame));
+        .process(|stream, user_data| match user_data.io_mode {
+            IoMode::MemoryMap => copy_mapped_frame(stream, user_data),
+            IoMode::DmaBuf => share_dmabuf_frame(stream, user_data),
         })
         .register()
         .map_err(|_| -1)?;
 
-    let mut params = [spa::pod::Pod::from_bytes(pod).ok_or(-1)?];
-    stream
-        .connect(
-            spa::utils::Direction::Input,
-            None,
+    // The dma-buf path holds buffers, so it must not run `process` on the realtime
+    // thread: the dequeue and the recycling below have to share one thread. It also
+    // wants no mapping (`MAP_BUFFERS` skips dma-buf anyway).
+    let flags = match io_mode {
+        IoMode::MemoryMap => {
             pw::stream::StreamFlags::AUTOCONNECT
                 | pw::stream::StreamFlags::MAP_BUFFERS
-                | pw::stream::StreamFlags::RT_PROCESS,
-            &mut params,
-        )
+                | pw::stream::StreamFlags::RT_PROCESS
+        }
+        IoMode::DmaBuf => pw::stream::StreamFlags::AUTOCONNECT,
+    };
+    let mut params = [spa::pod::Pod::from_bytes(pod).ok_or(-1)?];
+    stream
+        .connect(spa::utils::Direction::Input, None, flags, &mut params)
         .map_err(|_| -1)?;
+
+    // `process` only runs when the producer has a buffer to fill, so a stream whose
+    // buffers are all downstream would never be called again: recycle on a timer
+    // too, or a slow consumer stalls the capture for good.
+    let _recycle_timer = match io_mode {
+        IoMode::MemoryMap => None,
+        IoMode::DmaBuf => {
+            let recycle_stream = Rc::clone(&stream);
+            let recycle_held = Rc::clone(&held);
+            let timer = mainloop.loop_().add_timer(move |_| {
+                requeue_released(&recycle_stream, &mut recycle_held.borrow_mut());
+            });
+            timer
+                .update_timer(Some(RECYCLE_INTERVAL), Some(RECYCLE_INTERVAL))
+                .into_sync_result()
+                .map_err(|_| -1)?;
+            Some(timer)
+        }
+    };
 
     let weak = mainloop.downgrade();
     let _recv = ctrl_rx.attach(mainloop.loop_(), move |_ctrl| {
@@ -628,6 +750,172 @@ fn build_and_run(
     let _ = ready.send(Ok(()));
     mainloop.run();
     Ok(())
+}
+
+/// Copy one mapped buffer out, tightly packed: the `mmap` path's frame.
+fn copy_mapped_frame(stream: &pw::stream::StreamRef, user_data: &mut UserData) {
+    let Some(negotiated) = user_data.negotiated.as_ref() else {
+        return; // no usable format: drop the buffer rather than guess
+    };
+    let Some(mut buffer) = stream.dequeue_buffer() else {
+        return;
+    };
+    let datas = buffer.datas_mut();
+    if datas.is_empty() {
+        return;
+    }
+    let data = &mut datas[0];
+    let (offset, size, stride) = {
+        let chunk = data.chunk();
+        (
+            chunk.offset() as usize,
+            chunk.size() as usize,
+            usize::try_from(chunk.stride()).unwrap_or(0),
+        )
+    };
+    // An empty chunk is a normal tick (the node produced nothing), not a
+    // malformed buffer.
+    if size == 0 {
+        return;
+    }
+    let Some(mapped) = data.data() else {
+        return;
+    };
+    let fits = offset
+        .checked_add(size)
+        .is_some_and(|end| end <= mapped.len());
+    let mut frame = Vec::with_capacity(negotiated.layout.frame_bytes());
+    if !fits
+        || negotiated
+            .layout
+            .copy_tight(&mapped[offset..offset + size], stride, &mut frame)
+            .is_none()
+    {
+        // The buffer disagrees with the negotiated geometry: fail the
+        // capture instead of pushing a malformed frame downstream.
+        let _ = user_data
+            .tx
+            .send(FromWorker::Failed(G2gError::CapsMismatch));
+        user_data.negotiated = None;
+        return;
+    }
+    let _ = user_data.tx.send(FromWorker::Frame(frame));
+}
+
+/// Share one dma-buf buffer downstream and hold it until every share of the frame
+/// is gone. The descriptor handed on is a `dup` of the producer's, so downstream
+/// owns what its [`OwnedDmaBuf`] closes while the buffer itself is only recycled
+/// here.
+fn share_dmabuf_frame(stream: &pw::stream::StreamRef, user_data: &mut UserData) {
+    // Take back whatever downstream finished with, so the producer keeps buffers
+    // even when this callback goes on to hold one.
+    requeue_released(stream, &mut user_data.held.borrow_mut());
+    let Some(negotiated) = user_data.negotiated.as_ref() else {
+        return;
+    };
+    // SAFETY: the raw dequeue is what lets a buffer outlive this callback (the safe
+    // wrapper requeues on drop). The pointer is null-checked, and every path below
+    // either queues it back exactly once or hands it to `held`, which does.
+    let buffer = unsafe { stream.dequeue_raw_buffer() };
+    if buffer.is_null() {
+        return;
+    }
+    // SAFETY: `buffer` is a live buffer of this stream, so its `spa_buffer` and the
+    // `datas` array it points at are valid for the length it reports.
+    let blocks = unsafe { read_blocks(buffer) };
+    let requeue = |buffer| {
+        // SAFETY: `buffer` was just dequeued from `stream` and is queued back once.
+        unsafe { stream.queue_raw_buffer(buffer) };
+    };
+    let fail = |user_data: &mut UserData, error| {
+        requeue(buffer);
+        let _ = user_data.tx.send(FromWorker::Failed(error));
+        user_data.negotiated = None;
+    };
+    match dmabuf_frame(&blocks, &negotiated.info) {
+        DmaBufFrame::Empty => requeue(buffer),
+        DmaBufFrame::Unusable => fail(user_data, G2gError::CapsMismatch),
+        DmaBufFrame::Ready { fd, stride, offset } => {
+            extern "C" {
+                fn dup(fd: i32) -> i32;
+            }
+            // SAFETY: `fd` is the producer's live dma-buf descriptor; `dup` either
+            // returns a fresh descriptor for the same buffer or fails.
+            let shared_fd = unsafe { dup(fd) };
+            if shared_fd < 0 {
+                fail(user_data, G2gError::Hardware(HardwareError::Other));
+                return;
+            }
+            // SAFETY: `shared_fd` is a fresh descriptor nobody else owns, so
+            // `OwnedDmaBuf` closing it on its last drop is correct.
+            let frame = unsafe { OwnedDmaBuf::from_raw(shared_fd, stride, offset) };
+            user_data.held.borrow_mut().push(HeldBuffer {
+                buffer,
+                frame: frame.clone(),
+            });
+            let _ = user_data.tx.send(FromWorker::DmaBuf(frame));
+        }
+    }
+}
+
+/// The `spa_data` blocks of a dequeued buffer, as much of each as the dma-buf path
+/// reads. Stops at [`MAX_BLOCKS`]: only a single-block buffer is usable, so a
+/// longer one is read far enough to be rejected and no further.
+///
+/// # Safety
+/// `buffer` must be a buffer this stream handed out and has not taken back.
+unsafe fn read_blocks(buffer: *mut pw_sys::pw_buffer) -> Vec<DataBlock> {
+    // SAFETY: the caller certifies `buffer` is live, so `spa_buffer` is its own
+    // valid buffer description and `datas` covers `n_datas` entries.
+    unsafe {
+        let spa_buffer = (*buffer).buffer;
+        if spa_buffer.is_null() || (*spa_buffer).datas.is_null() {
+            return Vec::new();
+        }
+        let count = ((*spa_buffer).n_datas as usize).min(MAX_BLOCKS);
+        let datas = (*spa_buffer).datas;
+        let mut blocks = Vec::with_capacity(count);
+        for index in 0..count {
+            let data = &*datas.add(index);
+            let (offset, size, stride) = if data.chunk.is_null() {
+                (0, 0, 0)
+            } else {
+                let chunk = &*data.chunk;
+                (chunk.offset, chunk.size, chunk.stride)
+            };
+            blocks.push(DataBlock {
+                data_type: data.type_,
+                fd: data.fd,
+                offset,
+                size,
+                stride,
+                maxsize: data.maxsize,
+            });
+        }
+        blocks
+    }
+}
+
+/// Hand the producer back every held buffer whose frame downstream has released.
+fn requeue_released(stream: &pw::stream::StreamRef, held: &mut Vec<HeldBuffer>) {
+    retire_released(held, |buffer| {
+        // SAFETY: `buffer` came from this stream's dequeue and has not been queued
+        // back yet; the frame's last share is gone, so nothing is reading it.
+        unsafe { stream.queue_raw_buffer(buffer) };
+    });
+}
+
+/// Drop the held buffers whose frame has no share left but the held one, passing
+/// each to `requeue`. Split from the stream call so the lend / release bookkeeping
+/// can be tested without a live node.
+fn retire_released(held: &mut Vec<HeldBuffer>, mut requeue: impl FnMut(*mut pw_sys::pw_buffer)) {
+    held.retain(|entry| {
+        if entry.frame.share_count() > 1 {
+            return true;
+        }
+        requeue(entry.buffer);
+        false
+    });
 }
 
 /// Parse a fixated `Format` param into the negotiated geometry / format.
@@ -668,6 +956,106 @@ mod tests {
             PipeWireVideoSrc::new().with_frame_limit(0).frame_limit,
             None
         );
+        // mapped buffers unless the caller asks for dma-buf
+        assert_eq!(src.io_mode, IoMode::MemoryMap);
+        assert_eq!(
+            PipeWireVideoSrc::new().with_io_mode(IoMode::DmaBuf).io_mode,
+            IoMode::DmaBuf
+        );
+    }
+
+    /// `io-mode` decides the output domain, the formats on offer and the leading
+    /// format, all before the stream connects: the domain is part of negotiation,
+    /// so it cannot be picked per buffer.
+    #[test]
+    fn the_dmabuf_mode_fixes_the_domain_and_the_format_offer() {
+        let mut src = PipeWireVideoSrc::new();
+        assert_eq!(src.output_memory(), MemoryDomainKind::System);
+        assert_eq!(src.format_offer(), FormatOffer::All);
+        assert_eq!(src.format(), Ok(RawVideoFormat::I420));
+
+        src.set_property("io-mode", PropValue::Str("dmabuf".to_string()))
+            .expect("known prop");
+        assert_eq!(src.io_mode, IoMode::DmaBuf);
+        assert_eq!(
+            src.get_property("io-mode"),
+            Some(PropValue::Str("dmabuf".to_string()))
+        );
+        assert_eq!(src.output_memory(), MemoryDomainKind::DmaBuf);
+        assert_eq!(src.format_offer(), FormatOffer::SinglePlane);
+        // a single-plane format leads, because one dma-buf block is all a frame gets
+        assert_eq!(src.format(), Ok(RawVideoFormat::Bgra8));
+        assert!(matches!(
+            src.caps(),
+            Ok(Caps::RawVideo {
+                format: RawVideoFormat::Bgra8,
+                ..
+            })
+        ));
+
+        // a planar pin has no single-block form: rejected up front, not at the
+        // first buffer
+        src.set_property("format", PropValue::Str("NV12".to_string()))
+            .expect("known prop");
+        assert_eq!(src.format(), Err(G2gError::CapsMismatch));
+        assert_eq!(src.caps(), Err(G2gError::CapsMismatch));
+        // and the same pin is fine once frames are copied out again
+        src.set_property("io-mode", PropValue::Str("mmap".to_string()))
+            .expect("known prop");
+        assert_eq!(src.format(), Ok(RawVideoFormat::Nv12));
+        // a mode the element does not have is never silently ignored
+        assert_eq!(
+            src.set_property("io-mode", PropValue::Str("userptr".to_string())),
+            Err(PropError::Value)
+        );
+        assert_eq!(src.io_mode, IoMode::MemoryMap);
+    }
+
+    /// The dma-buf path lends the producer's buffer out with the frame: it goes
+    /// back only once every share of that frame is gone, so the producer cannot
+    /// overwrite a frame downstream is still reading.
+    #[test]
+    fn a_held_buffer_goes_back_when_its_frame_is_released() {
+        use std::os::fd::IntoRawFd;
+
+        let lend = |address: usize| {
+            let fd = std::fs::File::open("/dev/null")
+                .expect("/dev/null opens")
+                .into_raw_fd();
+            // SAFETY: a fresh descriptor owned by this test alone, which the
+            // `OwnedDmaBuf` closes once on its last drop.
+            let frame = unsafe { OwnedDmaBuf::from_raw(fd, 64, 0) };
+            let held = HeldBuffer {
+                buffer: core::ptr::without_provenance_mut(address),
+                frame: frame.clone(),
+            };
+            (held, frame)
+        };
+        // the pointers stand in for the producer's buffers: passed back to the
+        // requeue, never read
+        let (first_held, first_frame) = lend(1);
+        let (second_held, second_frame) = lend(2);
+        let mut held = Vec::from([first_held, second_held]);
+
+        let mut recycled = Vec::new();
+        retire_released(&mut held, |buffer| recycled.push(buffer.addr()));
+        assert!(recycled.is_empty(), "both frames are still downstream");
+        assert_eq!(held.len(), 2);
+
+        drop(first_frame);
+        retire_released(&mut held, |buffer| recycled.push(buffer.addr()));
+        assert_eq!(recycled, [1]);
+        assert_eq!(held.len(), 1);
+
+        // a second share of the same frame keeps its buffer out (a tee branch)
+        let branch = second_frame.clone();
+        drop(second_frame);
+        retire_released(&mut held, |buffer| recycled.push(buffer.addr()));
+        assert_eq!(recycled, [1]);
+        drop(branch);
+        retire_released(&mut held, |buffer| recycled.push(buffer.addr()));
+        assert_eq!(recycled, [1, 2]);
+        assert!(held.is_empty());
     }
 
     #[test]
@@ -703,6 +1091,7 @@ mod tests {
             ("framerate", PropValue::Uint(50)),
             ("target-object", PropValue::Str("cam0".to_string())),
             ("format", PropValue::Str("YUY2".to_string())),
+            ("io-mode", PropValue::Str("dmabuf".to_string())),
             ("num-buffers", PropValue::Int(30)),
         ] {
             src.set_property(name, value.clone()).expect("known prop");
@@ -757,7 +1146,8 @@ mod tests {
             })
         );
 
-        let bytes = format_pod_bytes(src.format().unwrap(), true, 320, 240, 30).expect("pod");
+        let bytes =
+            format_pod_bytes(src.format().unwrap(), src.format_offer(), 320, 240, 30).expect("pod");
         let (_, value) = PodDeserializer::deserialize_any_from(&bytes).expect("pod deserializes");
         let Value::Object(obj) = value else {
             panic!("expected an object pod");

@@ -365,6 +365,7 @@ OS-coupled elements live behind cargo features:
 | `AlsaSink` | `alsa-sink` | Linux + libasound |
 | `PulseSink` | `pulse-sink` | Linux + libpulse |
 | `PipeWireSink` / `PipeWireSrc` (audio) | `pipewire` | Linux + libpipewire |
+| `PipeWireVideoSrc` (video capture, `io-mode=mmap` or `dmabuf`) | `pipewire` | Linux + libpipewire |
 | `MfVideoSrc` (camera) | `mf-video-src` | Windows + Media Foundation |
 | `Av1Enc` (pure-Rust `rav1e`) | `av1-encode` | — |
 | `VpxEnc` (VP8 / VP9 via libvpx) | `vpx` | libvpx |

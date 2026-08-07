@@ -667,11 +667,10 @@ impl OwnedDmaBuf {
         self.fd.0
     }
 
-    /// How many shares of this buffer exist; 1 means nobody else holds it. A
-    /// producer that owns the memory behind the fd and reuses it (a V4L2 capture
-    /// source re-queueing an exported MMAP buffer) keeps its own share and waits
-    /// for the count to fall back to 1 before handing the buffer back to the
-    /// driver, so a frame downstream is never overwritten.
+    /// How many shares of this buffer are alive, this one counted. A producer
+    /// that lends out a buffer it must recycle (a capture element handing back a
+    /// driver's buffer) keeps one share of its own and recycles when the count
+    /// falls to 1: downstream, and every tee branch, has released the frame.
     pub fn share_count(&self) -> usize {
         Arc::strong_count(&self.fd)
     }

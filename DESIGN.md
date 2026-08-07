@@ -1203,7 +1203,14 @@ Two more capture sources follow the same blocking-work-off-the-async-path shape:
 PipeWire graph (the modern Linux media layer) by running a `pw::stream` input on
 a dedicated main-loop worker thread feeding the `run` loop over a channel; it
 requests a fixed PCM format the PipeWire adapter converts to, so the produced
-caps are deterministic. `MfVideoSrc`
+caps are deterministic. Its video sibling `PipeWireVideoSrc` captures raw frames
+from any PipeWire video node (camera, another client, a portal-opened screen-cast
+node named through `target-object`) and its `io-mode` property picks the buffer
+path: `mmap` copies each frame out of the mapped block into `System` memory, while
+`dmabuf` negotiates a `Buffers` param accepting `SPA_DATA_DmaBuf` alone and hands
+the descriptor on as `MemoryDomain::DmaBuf`, holding each buffer until every share
+of its frame is released (the domain is fixed by negotiation, hence a property
+rather than GStreamer's per-caps feature). `MfVideoSrc`
 (`mf-video-src`, Windows) is the camera sibling of `WasapiSrc`: it enumerates
 video capture devices and drains NV12 / YUY2 frames via an `IMFSourceReader` on a
 COM/MTA worker thread.
