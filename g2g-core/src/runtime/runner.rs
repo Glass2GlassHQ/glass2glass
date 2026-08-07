@@ -417,8 +417,21 @@ impl RunStats {
                     } else {
                         alloc::string::String::new()
                     };
+                    // M947: what the element spent parked on a full output link.
+                    // `proc` excludes it, so a back-pressured element reads as
+                    // blocked rather than as expensive. Absent for an element the
+                    // runner does not attribute output pushes to (every sink).
+                    let blocked = if e.push_wait.max_ns > 0 {
+                        format!(
+                            ", blocked p50 {:.2} ms / p99 {:.2} ms",
+                            ms(e.push_wait.p50_ns),
+                            ms(e.push_wait.p99_ns)
+                        )
+                    } else {
+                        alloc::string::String::new()
+                    };
                     s.push_str(&format!(
-                        "    {:<16} proc p50 {:.2} ms / p99 {:.2} ms (n={}){transit}, in-fill {}%/{}% avg/max\n",
+                        "    {:<16} proc p50 {:.2} ms / p99 {:.2} ms (n={}){blocked}{transit}, in-fill {}%/{}% avg/max\n",
                         e.name,
                         ms(e.proc.p50_ns),
                         ms(e.proc.p99_ns),
@@ -1051,6 +1064,8 @@ where
     let probe_for_fanout = fanout_probe.clone();
     let router_fut: BoxFuture<'_, Result<u64, G2gError>> = Box::pin(async move {
         let mut multi = MultiSenderSink::new(branch_senders);
+        // M947: a slow branch backs this router up; count that as push-wait.
+        multi.set_push_wait_probe(Some(probe_for_fanout.clone()));
         loop {
             match src_rx.recv().await {
                 Some(PipelinePacket::Eos) => {
@@ -2127,6 +2142,8 @@ where
         let ctrl_rx = transform_ctrl_rx;
         let probe_for_transform = probe_for_transform;
         let mut adapter = SenderSink::new(link2_tx);
+        // M947: the sink's backpressure is the transform's push-wait, not its work.
+        adapter.set_push_wait_probe(Some(probe_for_transform.clone()));
         // M175: relay a QoS report from the sink (seen on the transform's output
         // link) onto the transform's input link, so the source observes it as
         // `PushOutcome::Qos` and sheds load. Without this the report dies at the

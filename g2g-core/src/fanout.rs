@@ -123,6 +123,18 @@ impl MultiSenderSink {
     pub fn new(ports: Vec<SenderSink>) -> Self {
         Self { ports }
     }
+
+    /// Bank every port's push-wait on the producing element's probe (M947), so a
+    /// fan-out element's `proc` percentiles exclude the backpressure of whichever
+    /// branch is slowest.
+    // Only the std fan-out / demux runners build a probed multi-sink, so without
+    // std this would be dead code (which the workspace denies).
+    #[cfg(feature = "std")]
+    pub(crate) fn set_push_wait_probe(&mut self, probe: crate::runtime::Probe) {
+        for port in self.ports.iter_mut() {
+            port.set_push_wait_probe(probe.clone());
+        }
+    }
 }
 
 impl MultiOutputSink for MultiSenderSink {

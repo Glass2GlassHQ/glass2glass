@@ -12,10 +12,10 @@
 //! - `{"type":"telemetry","uptime_ns":N,"nodes":[..],"edges":[{"from":i,"to":j,
 //!   "caps":"<gst-string>"|null,"packets":N,"bytes":N,"drops":N,"blocked_ns":N}]}`
 //!   where each node is `{"id","name","role","proc":{..}|null,
-//!   "transit":{..}|null,"fill_mean_pct","fill_max_pct"}`, `caps` is the edge's
-//!   negotiated caps, and the counters are that edge's live traffic (packets and
-//!   payload bytes that crossed, frames dropped by a leaky link, and nanoseconds
-//!   the producer spent blocked on a full link).
+//!   "push_wait":{..}|null,"transit":{..}|null,"fill_mean_pct","fill_max_pct"}`,
+//!   `caps` is the edge's negotiated caps, and the counters are that edge's live
+//!   traffic (packets and payload bytes that crossed, frames dropped by a leaky
+//!   link, and nanoseconds the producer spent blocked on a full link).
 //!   The same message carries `"journey"`: one frame's measured path, or `null`
 //!   when none assembles. Its shape is `{"sequence":N,"total_ns":N,
 //!   "frame_period_ns":N,"capacity":N,"floor_ns":N,"truncated":bool,
@@ -348,6 +348,14 @@ mod tests {
                     latency: Some(ElementLatency {
                         name: String::from("decode0"),
                         proc: LatencySnapshot {
+                            count: 0,
+                            mean_ns: 0,
+                            max_ns: 0,
+                            p50_ns: 0,
+                            p95_ns: 0,
+                            p99_ns: 0,
+                        },
+                        push_wait: LatencySnapshot {
                             count: 0,
                             mean_ns: 0,
                             max_ns: 0,

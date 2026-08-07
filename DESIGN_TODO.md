@@ -693,13 +693,9 @@ Outstanding developer-tooling tasks, highest leverage first.
 
 - **Per-element / per-link telemetry gaps.** Remaining `Observer` coverage:
   validate the dashboard live against an RTSP source.
-- **Split compute from blocked-on-downstream time in the run summary.** On a
-  paced graph the `proc` percentiles time the whole `process()` future, so an
-  element awaiting a full downstream link reports frame-period-scale numbers (a
-  demuxer at ~127 ms p50, the whole video chain pinned at one 67 ms histogram
-  bucket) that read as compute cost; the same graph unpaced shows ~2 ms. Time
-  the push-await separately (or subtract it) so the summary distinguishes "busy"
-  from "waiting on back-pressure".
+- **Per-frame journey push-wait.** `StageVisit` stamps raw enter/exit around
+  `process()`, so the per-frame journey's work segment includes time blocked on
+  downstream backpressure; time the push-await separately there.
 - **gst-parity differ.** Same launch line through real GStreamer and g2g;
   diff the negotiated caps per edge, the element set after autoplug, and the
   output (checksum, PSNR for lossy). Calliope already does differential output

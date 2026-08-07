@@ -2693,6 +2693,9 @@ async fn transform_arm<'a>(
     control: Option<ArmController>,
 ) -> Result<u64, G2gError> {
     let mut adapter = SenderSink::new(out_tx);
+    // M947: charge time spent blocked on the downstream link to this element's
+    // push-wait, not to its `process()` compute.
+    adapter.set_push_wait_probe(probe.clone());
     // M175: relay a downstream QoS report (seen on this transform's output link)
     // onto its input link, so it reaches the source/decoder one hop at a time
     // through any number of generic transforms, not just the sink's direct
@@ -3213,6 +3216,7 @@ async fn demux_arm<'a>(
     let branch_count = out_txs.len();
     let senders: Vec<SenderSink> = out_txs.into_iter().map(SenderSink::new).collect();
     let mut multi = MultiSenderSink::new(senders);
+    multi.set_push_wait_probe(probe.clone());
     loop {
         match in_rx.recv().await {
             Some(PipelinePacket::Eos) => {
@@ -3797,6 +3801,7 @@ async fn muxer_arm<'a>(
     control: Option<ArmController>,
 ) -> Result<u64, G2gError> {
     let mut adapter = SenderSink::new(out_tx);
+    adapter.set_push_wait_probe(probe.clone());
     let mut open = alloc::vec![true; input_count];
     let mut ended = 0usize;
     // Cursor for round-robin fairness across both the try-drain and block paths.
@@ -3950,6 +3955,7 @@ async fn muxer_arm_pts<'a>(
     control: Option<ArmController>,
 ) -> Result<u64, G2gError> {
     let mut adapter = SenderSink::new(out_tx);
+    adapter.set_push_wait_probe(probe.clone());
     let mut open = alloc::vec![true; input_count];
     let mut agg: InputAggregator<Frame> = InputAggregator::new(input_count);
     // Round-robin wake cursor, so a fast input does not bias the block path.

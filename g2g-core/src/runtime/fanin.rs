@@ -1966,6 +1966,8 @@ where
         let muxer_arm: BoxFuture<'a, Result<FaninArmOut, G2gError>> = Box::pin(async move {
             let mux: &mut dyn DynMultiInputElement = mux;
             let mut out = SenderSink::new(out_tx);
+            // M947: downstream backpressure is push-wait, not muxing work.
+            out.set_push_wait_probe(Some(probe_for_mux.clone()));
             let mut merged_tap = Some(out_tap);
             let mut current_output: Option<Caps> = None;
             let mut consumed = 0u64;

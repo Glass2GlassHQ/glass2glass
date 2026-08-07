@@ -36,8 +36,21 @@ const JOURNEY_RING: usize = 64;
 #[derive(Debug)]
 pub struct ElementProbe {
     name: String,
-    /// Wall-clock cost of each `DataFrame` `process()` call, in nanoseconds.
+    /// Compute cost of each `DataFrame` `process()` call, in nanoseconds: the
+    /// wall-clock span of the call minus the `push_wait_ns` below, so an element
+    /// parked on a full downstream link reports its own work rather than the
+    /// pacing of whatever is consuming it.
     proc_ns: LatencyHistogram,
+    /// Time each `process()` call spent awaiting capacity on this element's
+    /// output link(s): downstream backpressure, not work. Empty unless the arm
+    /// attached this probe to its output adapter (sinks have no output, sources
+    /// are not `process()`-timed at all), or under `no_std`.
+    push_wait_ns: LatencyHistogram,
+    /// Push-wait banked by the output adapter since the last
+    /// [`record_proc_since`](Self::record_proc_since), which drains it. An arm's
+    /// own control push between two `process()` calls (a muxer forwarding a
+    /// mid-stream `CapsChanged`) lands on the next call.
+    push_wait_accum: AtomicU64,
     /// Queue-residency (transit) time of each `DataFrame` on this element's input
     /// link: how long the frame sat queued between the producer sending it and
     /// this element pulling it. The per-stage "wait" half of a latency waterfall
@@ -64,6 +77,8 @@ impl ElementProbe {
         Arc::new(Self {
             name,
             proc_ns: LatencyHistogram::new(),
+            push_wait_ns: LatencyHistogram::new(),
+            push_wait_accum: AtomicU64::new(0),
             transit_ns: LatencyHistogram::new(),
             fill: FillGauge::default(),
             journeys: None,
@@ -78,6 +93,8 @@ impl ElementProbe {
         Arc::new(Self {
             name,
             proc_ns: LatencyHistogram::new(),
+            push_wait_ns: LatencyHistogram::new(),
+            push_wait_accum: AtomicU64::new(0),
             transit_ns: LatencyHistogram::new(),
             fill: FillGauge::default(),
             journeys: Some(Mutex::new(VecDeque::with_capacity(JOURNEY_RING))),
@@ -104,17 +121,32 @@ impl ElementProbe {
         }
     }
 
-    /// Record the elapsed `process()` cost since `start` (from [`mark`](Self::mark)).
-    /// A no-op under `no_std` or when `start` is `None`.
+    /// Bank `ns` spent awaiting capacity on this element's output link, charged
+    /// to the `process()` call that is running. Called by the
+    /// [`SenderSink`](crate::runtime::SenderSink) the arm handed this probe to.
+    #[inline]
+    pub fn add_push_wait(&self, ns: u64) {
+        self.push_wait_accum.fetch_add(ns, Ordering::Relaxed);
+    }
+
+    /// Record the `process()` call that started at `start` (from
+    /// [`mark`](Self::mark)), split into the push-wait banked by
+    /// [`add_push_wait`](Self::add_push_wait) and the compute time that is what
+    /// is left of the elapsed span. A no-op under `no_std` or when `start` is
+    /// `None`; the banked wait is drained either way, so it never carries into a
+    /// later call.
     #[inline]
     pub fn record_proc_since(&self, start: Option<u64>) {
+        let waited = self.push_wait_accum.swap(0, Ordering::Relaxed);
         #[cfg(feature = "std")]
         if let Some(t0) = start {
             let now = crate::metrics::monotonic_ns();
-            self.proc_ns.record(now.saturating_sub(t0));
+            let elapsed = now.saturating_sub(t0);
+            self.proc_ns.record(elapsed.saturating_sub(waited));
+            self.push_wait_ns.record(waited);
         }
         #[cfg(not(feature = "std"))]
-        let _ = start;
+        let _ = (start, waited);
     }
 
     /// Sample the element's input-link fill (0-100) for this pull.
@@ -189,6 +221,7 @@ impl ElementProbe {
         ElementLatency {
             name: self.name.clone(),
             proc: self.proc_ns.snapshot(),
+            push_wait: self.push_wait_ns.snapshot(),
             transit: self.transit_ns.snapshot(),
             fill_mean_pct: self.fill.mean(),
             fill_max_pct: self.fill.max(),
@@ -260,9 +293,16 @@ pub struct ElementLatency {
     /// Instance name (`<category>N` from the graph runner, the element's log
     /// category for the linear runners).
     pub name: String,
-    /// Measured `process()` latency distribution (count, p50/p95/p99, mean, max
-    /// in ns). `count == 0` under `no_std` (no clock to measure with).
+    /// Measured `process()` compute distribution (count, p50/p95/p99, mean, max
+    /// in ns), with `push_wait` already taken out, so this is what the element
+    /// cost rather than how fast downstream drained it. `count == 0` under
+    /// `no_std` (no clock to measure with).
     pub proc: LatencySnapshot,
+    /// Per-`process()` time blocked pushing into this element's output link
+    /// (downstream backpressure). `max_ns == 0` when the runner did not
+    /// attribute output pushes to this element (a sink, an untimed source) or
+    /// under `no_std`.
+    pub push_wait: LatencySnapshot,
     /// Input-link queue-residency (transit) distribution: how long each
     /// `DataFrame` waited queued before this element pulled it. `count == 0` when
     /// the edge is not instrumented (only the graph runner enables it, on edges
