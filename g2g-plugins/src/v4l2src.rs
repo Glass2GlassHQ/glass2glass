@@ -480,8 +480,7 @@ impl SourceLoop for V4l2Src {
                 let mut stream = MmapStream::with_buffers(&dev, Type::VideoCapture, BUFFER_COUNT)
                     .map_err(|e| v4l2_err(&e))?;
 
-                let mut count = 0u64;
-                while limit == 0 || count < limit {
+                loop {
                     let (buf, meta) = stream.next().map_err(|e| v4l2_err(&e))?;
                     let n = (meta.bytesused as usize).min(buf.len());
                     let mut payload = Vec::with_capacity(n);
@@ -490,11 +489,11 @@ impl SourceLoop for V4l2Src {
                         bytes: payload,
                         timestamp_ns: buffer_timestamp_ns(&meta.timestamp),
                     };
-                    // Err means the receiver was dropped (pipeline shut down).
+                    // Err means the receiver was dropped (limit reached or the
+                    // pipeline shut down).
                     if tx.blocking_send(captured).is_err() {
                         break;
                     }
-                    count += 1;
                 }
                 Ok(())
             });
@@ -550,7 +549,16 @@ impl SourceLoop for V4l2Src {
                 out.push(PipelinePacket::DataFrame(frame)).await?;
                 prev_pts = pts;
                 seq += 1;
+                // The limit counts emitted frames, so a skipped short buffer
+                // is captured again rather than lost from the count.
+                if limit > 0 && seq >= limit {
+                    break;
+                }
             }
+
+            // Drop the receiver first: a capture thread blocked in send must
+            // fail out of it before the join below can succeed.
+            drop(rx);
 
             // Surface a capture-thread failure that produced nothing, rather
             // than masking it as a clean EOS.
