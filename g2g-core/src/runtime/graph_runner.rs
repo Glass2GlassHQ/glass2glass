@@ -1887,6 +1887,11 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
     ticker: Option<alloc::sync::Arc<dyn DynAsyncClock + Send + Sync>>,
     spawner: &S,
 ) -> Result<RunStats, G2gError> {
+    // Same rule as the cooperative runner (M880), through the shared handle the
+    // arm threads can own: a pipeline clock that can sleep on a deadline is the
+    // fan-in tick timer, so every threaded entry point ticks without one of its
+    // own. An explicit `ticker` still wins.
+    let ticker = ticker.or_else(|| clock.shared_ticker());
     let link_capacity: usize = link_capacity.into().get();
     let mut vg = graph.finish().map_err(|_| G2gError::CapsMismatch)?;
     let n = vg.node_count();
@@ -2128,6 +2133,12 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
 /// GStreamer streaming-thread model). Cooperative [`run_graph`] stays the default
 /// for lowest latency and the `no_std` / wasm executors; this trades a per-stage
 /// thread handoff for CPU-bound stages overlapping across cores.
+///
+/// Fan-in arms tick exactly as they do cooperatively (M953): when `clock` hands
+/// out a shared timer ([`PipelineClock::shared_ticker`](crate::PipelineClock::shared_ticker),
+/// which the wall clock does), an element declaring a
+/// [`tick_interval_ns`](crate::MultiInputElement::tick_interval_ns) receives
+/// [`PipelinePacket::Tick`] on that period while its inputs are silent.
 #[cfg(all(feature = "std", feature = "multi-thread"))]
 pub async fn run_graph_threaded<Clk: PipelineClock, S: GraphSpawner>(
     graph: Graph<GraphNode>,
@@ -2149,19 +2160,18 @@ pub async fn run_graph_threaded<Clk: PipelineClock, S: GraphSpawner>(
     .await
 }
 
-/// As [`run_graph_threaded`], but every fan-in arm also gets a **deadline tick**
-/// (M879): `clock` is both the pipeline clock and the timer the arms sleep on, so a
-/// fan-in element declaring a
+/// As [`run_graph_threaded`], but takes the arms' **deadline tick** timer
+/// explicitly (M879): `clock` is both the pipeline clock and the timer the arms
+/// sleep on, so a fan-in element declaring a
 /// [`tick_interval_ns`](crate::MultiInputElement::tick_interval_ns) receives
 /// [`PipelinePacket::Tick`] on that period even while its inputs are silent.
 ///
 /// The clock arrives as a shared handle rather than a borrow because each arm's
 /// builder closure moves onto its own OS thread: `Arc::new(my_clock)` (any
-/// [`AsyncClock`](crate::AsyncClock) that is `Send + Sync`) coerces to it. That
-/// ownership is also why this entry exists at all: the cooperative runners derive
-/// the timer from the clock they already hold
-/// ([`PipelineClock::as_ticker`](crate::PipelineClock::as_ticker) yields a borrow,
-/// M880), and a borrow cannot cross onto the arm threads.
+/// [`AsyncClock`](crate::AsyncClock) that is `Send + Sync`) coerces to it. This is
+/// the entry for a clock that cannot hand out such a handle from `&self`, which is
+/// what [`run_graph_threaded`] reads
+/// ([`PipelineClock::shared_ticker`](crate::PipelineClock::shared_ticker)).
 #[cfg(all(feature = "std", feature = "multi-thread"))]
 pub async fn run_graph_threaded_ticked<S: GraphSpawner>(
     graph: Graph<GraphNode>,

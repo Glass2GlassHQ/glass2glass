@@ -30,6 +30,20 @@ pub trait PipelineClock {
     fn as_ticker(&self) -> Option<&dyn DynAsyncClock> {
         None
     }
+
+    /// The same timer as [`as_ticker`](Self::as_ticker), as an owned shared
+    /// handle. The thread-per-arm runner builds each arm's future on its own OS
+    /// thread, which a borrow cannot cross, so that is where it reads the tick
+    /// from instead.
+    ///
+    /// Override it on any sleepable clock that is `Send + Sync` and cheap to
+    /// clone (`Some(Arc::new(self.clone()))`); a clock with state to share puts
+    /// that state behind its own handle so the copy reads the same timeline.
+    /// `None` (the default) leaves the threaded arms untimed unless the caller
+    /// passes a ticker itself.
+    fn shared_ticker(&self) -> Option<Arc<dyn DynAsyncClock + Send + Sync>> {
+        None
+    }
 }
 
 /// Pipeline clock with async sleep capability. Used by elements that
@@ -73,6 +87,10 @@ impl<T: PipelineClock + ?Sized> PipelineClock for Arc<T> {
 
     fn as_ticker(&self) -> Option<&dyn DynAsyncClock> {
         (**self).as_ticker()
+    }
+
+    fn shared_ticker(&self) -> Option<Arc<dyn DynAsyncClock + Send + Sync>> {
+        (**self).shared_ticker()
     }
 }
 

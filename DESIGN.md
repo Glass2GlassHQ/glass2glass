@@ -106,6 +106,9 @@ pub enum PipelinePacket {
     /// per period even while its inputs stall, so it can emit on its own
     /// cadence (the compositors' zero-order-hold). May fire spuriously, and
     /// never crosses a link: the runner's arm originates and consumes it.
+    /// Both runners derive the ticker from the pipeline clock (`as_ticker`
+    /// cooperative, `shared_ticker` thread-per-arm; a clock with interior
+    /// state reaches the arms via `run_graph_threaded_ticked`).
     Tick,
 }
 

@@ -8,6 +8,7 @@ use core::pin::Pin;
 use std::time::{Duration, Instant};
 
 use alloc::boxed::Box;
+use alloc::sync::Arc;
 
 use g2g_core::{AsyncClock, DynAsyncClock, Pace, PipelineClock};
 
@@ -59,6 +60,12 @@ impl PipelineClock for WallClock {
     fn as_ticker(&self) -> Option<&dyn DynAsyncClock> {
         Some(self)
     }
+
+    fn shared_ticker(&self) -> Option<Arc<dyn DynAsyncClock + Send + Sync>> {
+        // Copy: every handle measures from the same epoch, so an arm thread's
+        // copy is on the timeline the rest of the pipeline reads.
+        Some(Arc::new(*self))
+    }
 }
 
 impl AsyncClock for WallClock {
@@ -102,5 +109,24 @@ mod tests {
         let clock = WallClock::new();
         let ticker = PipelineClock::as_ticker(&clock).expect("WallClock can sleep on a deadline");
         assert!(ticker.now_ns() <= clock.now_ns(), "same timeline");
+    }
+
+    /// The thread-per-arm runner reads the same timer as an owned handle (M953),
+    /// since a borrow cannot cross onto the arm threads. The copy has to measure
+    /// from the clock's own epoch, not a fresh one.
+    #[test]
+    fn the_wall_clock_shares_that_ticker_with_arm_threads() {
+        let clock = WallClock::new();
+        std::thread::sleep(Duration::from_millis(2));
+        let shared = clock.shared_ticker().expect("WallClock can be shared");
+        let (shared_ns, own_ns) = (shared.now_ns(), clock.now_ns());
+        assert!(
+            shared_ns >= Duration::from_millis(2).as_nanos() as u64,
+            "a fresh epoch would report near zero"
+        );
+        assert!(
+            own_ns - shared_ns < Duration::from_millis(50).as_nanos() as u64,
+            "the two handles read the same timeline"
+        );
     }
 }
