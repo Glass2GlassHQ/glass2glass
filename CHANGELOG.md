@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M949: `v4l2src` and `libcamerasrc` persist camera-tagged `Hardware` conformance evidence from their host-validated capture tests.
+
 - M946: conformance evidence from the RTSP, dma-buf export and NVENC/NVDEC tests, plus RTP payload/jitter batteries.
 
 - M945: `clocksync` paces a stream to the pipeline clock mid-graph, and the MoQT demo publisher is live-paced with per-access-unit objects.

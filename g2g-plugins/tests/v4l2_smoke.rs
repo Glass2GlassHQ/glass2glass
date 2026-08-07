@@ -38,6 +38,21 @@ fn device() -> String {
     std::env::var("G2G_V4L2_DEVICE").unwrap_or_else(|_| "/dev/video0".to_string())
 }
 
+/// The capture ran against a real camera: persist camera-tagged `Hardware`
+/// evidence so `g2g-inspect --maturity` derives v4l2src as HardwareValidated.
+fn record_hardware_evidence(device: &str, detail: &str) {
+    use g2g_core::conformance::{ConformanceDimension, Evidence};
+    use g2g_plugins::conformance::persist;
+    persist::record_evidence(
+        "v4l2src",
+        &Evidence::new(ConformanceDimension::Hardware)
+            .platform(persist::v4l2_platform_tag(device))
+            .codec("yuyv")
+            .detail(detail),
+    )
+    .expect("record hardware evidence");
+}
+
 #[tokio::test]
 #[ignore = "needs a real /dev/videoN device (set G2G_V4L2_DEVICE)"]
 async fn v4l2_capture_to_fakesink_yields_frames() {
@@ -45,7 +60,7 @@ async fn v4l2_capture_to_fakesink_yields_frames() {
     eprintln!("capturing from {dev}");
 
     let target: u64 = 30;
-    let mut src = V4l2Src::new(dev)
+    let mut src = V4l2Src::new(dev.clone())
         .with_size(640, 480)
         .with_fps(30)
         .with_frame_limit(target);
@@ -84,6 +99,11 @@ async fn v4l2_capture_to_fakesink_yields_frames() {
         sink.last_sequence(),
         Some(target - 1),
         "frames arrive in order"
+    );
+
+    record_hardware_evidence(
+        &dev,
+        "captured YUYV frames converted to NV12 and delivered in order",
     );
 }
 
@@ -156,6 +176,11 @@ async fn v4l2_pts_span_tracks_wall_clock() {
     assert!(
         (pts_span - wall_span).abs() < wall_span * 0.25 + 0.1,
         "media timeline ({pts_span:.2}s) does not track the wall clock ({wall_span:.2}s)"
+    );
+
+    record_hardware_evidence(
+        &device(),
+        "PTS stamped from the driver timestamps tracks the wall clock",
     );
 }
 

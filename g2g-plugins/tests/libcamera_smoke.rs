@@ -86,6 +86,22 @@ fn camera_index() -> usize {
         .unwrap_or(0)
 }
 
+/// The capture ran against a real camera: persist camera-tagged `Hardware`
+/// evidence so `g2g-inspect --maturity` derives libcamerasrc as
+/// HardwareValidated.
+fn record_hardware_evidence(codec: &str, detail: &str) {
+    use g2g_core::conformance::{ConformanceDimension, Evidence};
+    use g2g_plugins::conformance::persist;
+    persist::record_evidence(
+        "libcamerasrc",
+        &Evidence::new(ConformanceDimension::Hardware)
+            .platform(persist::libcamera_platform_tag(camera_index()))
+            .codec(codec)
+            .detail(detail),
+    )
+    .expect("record hardware evidence");
+}
+
 /// Whether the camera advertises `FrameDurationLimits`, the only control that
 /// can hold a frame rate. Without it the requested rate is advisory and the
 /// camera free-runs, so a rate assertion would be testing the hardware's mood.
@@ -142,6 +158,8 @@ async fn libcamera_capture_to_fakesink_yields_frames() {
         Some(target - 1),
         "frames arrive in order"
     );
+
+    record_hardware_evidence("yuyv", "captured frames delivered in order");
 }
 
 /// Prove `FrameDurationLimits` actually throttles: at a forced 8 fps (below the
@@ -280,6 +298,11 @@ async fn libcamera_brightness_changes_luma() {
     assert!(
         bright > dark + 5.0,
         "brightness control had no visible effect: dark={dark:.1} bright={bright:.1}"
+    );
+
+    record_hardware_evidence(
+        "yuyv",
+        "the brightness control changes the pixels at a fixed exposure",
     );
 }
 
@@ -451,6 +474,8 @@ async fn libcamera_mjpeg_capture_decodes() {
     );
     assert_eq!(stats.frames_emitted, target, "all MJPEG frames captured");
     assert_eq!(sink.received(), target, "all frames decoded to the sink");
+
+    record_hardware_evidence("mjpeg", "the camera's own JPEGs captured and decoded");
 }
 
 #[cfg(feature = "wayland-sink")]
@@ -582,5 +607,10 @@ async fn libcamera_pts_span_tracks_wall_clock() {
     assert!(
         (pts_span - wall_span).abs() < wall_span * 0.25 + 0.1,
         "media timeline ({pts_span:.2}s) does not track the wall clock ({wall_span:.2}s)"
+    );
+
+    record_hardware_evidence(
+        "yuyv",
+        "PTS stamped from the sensor timestamps tracks the wall clock",
     );
 }

@@ -41,11 +41,11 @@ honesty guards, batteries in `g2g-plugins::conformance`, `g2g-inspect --maturity
 Sequenced next:
 
 - **Grow the conformance matrix.** Persist evidence from the resource-owning
-  tests still uncovered as they are validated (`vaapi` / `v4l2` decode, the
-  Android and macOS device paths, `libcamera` capture), and add in-process
-  batteries for further sans-IO cores. Get the GPU-tagged `Hardware` rows into CI
-  by wiring a runner that has the hardware: a `Hardware` row can only come from a
-  run on the device, so a GPU-less runner will never produce one.
+  tests still uncovered as they are validated (`vaapi` decode, the Android and
+  macOS device paths), and add in-process batteries for further sans-IO cores.
+  Get the device-tagged `Hardware` rows into CI by wiring a runner that has the
+  hardware: a `Hardware` row can only come from a run on the device, so a runner
+  without a GPU or a camera will never produce one.
 - **Whole-graph zero-alloc (M616 + M620).** The single-stage (M616) and multi-stage
   concrete-link (M620, source -> transform -> sink) data paths are proven zero-alloc.
   Remaining (larger, deferred): a fully zero-alloc *dyn* runner, monomorphized arms

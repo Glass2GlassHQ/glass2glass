@@ -119,7 +119,7 @@ async fn webcam_branch_delivers_distinct_frames() {
 
     let mut g: Graph<GraphNode> = Graph::new();
     let cam = g.add_source(GraphNode::source(
-        V4l2Src::new(device)
+        V4l2Src::new(device.clone())
             .with_size(640, 480)
             .with_fps(30)
             .with_frame_limit(frames),
@@ -180,6 +180,22 @@ async fn webcam_branch_delivers_distinct_frames() {
         "every frame byte-identical across {} frames (repeated buffer)",
         means.len()
     );
+
+    // The camera delivered live, changing pixels rather than one latched buffer:
+    // persist camera-tagged `Hardware` evidence for `g2g-inspect --maturity`.
+    use g2g_core::conformance::{ConformanceDimension, Evidence};
+    use g2g_plugins::conformance::persist;
+    persist::record_evidence(
+        "v4l2src",
+        &Evidence::new(ConformanceDimension::Hardware)
+            .platform(persist::v4l2_platform_tag(&device))
+            .codec("yuyv")
+            .detail(format!(
+                "{distinct_hashes} distinct frame contents across {} frames, {stages} stages",
+                means.len()
+            )),
+    )
+    .expect("record hardware evidence");
 }
 
 /// Hashes a rectangular sub-region (the PiP inset) of each RGBA output frame, so
