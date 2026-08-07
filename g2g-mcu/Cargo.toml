@@ -7,6 +7,9 @@
 name = "g2g-mcu"
 description = "MCU peripheral elements (SPI display, capture seams) for the glass2glass multimedia framework."
 license = "MPL-2.0"
+readme = "README.md"
+keywords = ["embedded", "no-std", "mcu", "multimedia", "embedded-hal"]
+categories = ["embedded", "no-std", "no-std::no-alloc", "multimedia", "hardware-support"]
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -16,7 +19,7 @@ repository.workspace = true
 [dependencies]
 # The heap-free data-plane subset only: no `alloc`, so these elements stay
 # linkable on targets with no allocator (the g2g-noalloc guarantee).
-g2g-core = { path = "../g2g-core", default-features = false }
+g2g-core = { workspace = true, default-features = false }
 # The portable peripheral trait seam (SpiDevice / OutputPin / DelayNs); a pure
 # trait crate, `no_std`.
 embedded-hal = "1"
@@ -24,7 +27,10 @@ embedded-hal = "1"
 [dev-dependencies]
 # Host-test only (the ffmpeg conformance oracle persists Oracle evidence via
 # the shared mechanism); does not touch the no-alloc claim above.
-g2g-plugins = { path = "../g2g-plugins", features = ["std"] }
+g2g-plugins = { workspace = true, features = ["std"] }
 
 [lints]
 workspace = true
+
+[package.metadata.docs.rs]
+all-features = true

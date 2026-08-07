@@ -321,7 +321,7 @@ catalogs, `tools/mcugen-check.sh`).
 
 ## Build
 
-Stable Rust, MSRV 1.85, `resolver = "2"`.
+Stable Rust, MSRV 1.86, `resolver = "2"`.
 
 ```sh
 cargo check --workspace          # no_std baseline

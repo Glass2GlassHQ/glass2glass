@@ -2,6 +2,9 @@
 name = "g2g-capi"
 description = "C ABI for driving glass2glass pipelines from any language (parse_launch + run + bus)."
 license = "MPL-2.0"
+readme = "README.md"
+keywords = ["multimedia", "ffi", "video", "pipeline", "bindings"]
+categories = ["multimedia", "external-ffi-bindings", "api-bindings"]
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -17,10 +20,13 @@ crate-type = ["lib", "cdylib", "staticlib"]
 # `multi-thread` makes the boxed graph elements `Send`, so the parsed graph can
 # move to the background run thread the C API drives. This crate is inherently
 # OS-coupled (threads + C ABI), so it is off the no_std baseline by design.
-g2g-core = { path = "../g2g-core", features = ["std", "runtime", "multi-thread"] }
-g2g-plugins = { path = "../g2g-plugins", features = ["std"] }
+g2g-core = { workspace = true, features = ["std", "runtime", "multi-thread"] }
+g2g-plugins = { workspace = true, features = ["std"] }
 # Mirrors g2g-launch: drive the run future on a single-thread runtime.
 tokio = { version = "1", features = ["rt", "macros", "time"] }
 
 [lints]
 workspace = true
+
+[package.metadata.docs.rs]
+all-features = true

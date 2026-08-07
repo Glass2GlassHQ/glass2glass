@@ -444,7 +444,7 @@ _(No open parser items.)_
   horizontal + vertical) with an explicit Latin+CJK fallback chain, so OpenType-CFF
   `.otf` fonts render, not only glyf `.ttf`s. Still open: a `vello` GPU backend;
   font-variation axes beyond `wght` on the shaped horizontal path (cosmic-text
-  0.17 exposes only weight, and 0.17.1+ needs rustc 1.89, above the 1.85 MSRV,
+  0.17 exposes only weight, and 0.17.1+ needs rustc 1.89, above the 1.86 MSRV,
   so the upgrade waits on an MSRV bump); vertical-mode shaping if cosmic-text
   ever grows writing modes.
 - **Text / subtitle pipeline depth.** The foundation is in: `Caps::Text` +

@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M950: crates.io publish prep: versioned intra-workspace deps, per-crate LICENSE / README / docs.rs metadata, MSRV 1.86.
+
 - M949: `v4l2src` and `libcamerasrc` persist camera-tagged `Hardware` conformance evidence from their host-validated capture tests.
 
 - M948: `tsdemux` synthesizes per-frame PTS for sparsely stamped H.264 / H.265 video that provably cannot reorder.

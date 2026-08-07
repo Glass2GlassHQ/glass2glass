@@ -2,6 +2,9 @@
 name = "g2g-python"
 description = "Host gst-python-ml elements as first-class glass2glass elements (embedded CPython via pyo3)."
 license = "MPL-2.0"
+readme = "README.md"
+keywords = ["multimedia", "python", "pyo3", "inference", "video"]
+categories = ["multimedia", "api-bindings"]
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -46,7 +49,7 @@ name = "g2g-launch-py"
 required-features = ["launch"]
 
 [dependencies]
-g2g-core = { path = "../g2g-core" }
+g2g-core = { workspace = true }
 # Embedded CPython bridge (python feature). `auto-initialize` starts the
 # interpreter on first GIL acquisition. 0.26+ supports CPython 3.14 (the Fedora
 # 43 system Python). Zero-copy frame access uses the Python buffer protocol, so
@@ -57,14 +60,19 @@ pyo3 = { version = "0.26", optional = true, features = ["auto-initialize"] }
 # `default_registry` + `WallClock`; tokio drives the run loop. Both optional so
 # the library / host build keeps its lean dependency set.
 tokio = { version = "1", features = ["rt", "macros", "time"], optional = true }
-g2g-plugins = { path = "../g2g-plugins", optional = true }
+g2g-plugins = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros"] }
 # `default_registry` + the videotestsrc / videoconvert / fakesink elements the
 # `pyelement` launch-registry test parses a pipeline around. g2g-plugins does not
 # depend on g2g-python, so this dev-only edge is acyclic (same pattern as g2g-ml).
-g2g-plugins = { path = "../g2g-plugins", features = ["std"] }
+g2g-plugins = { workspace = true, features = ["std"] }
 
 [lints]
 workspace = true
+
+# Default features only: `python` embeds CPython (libpython at build time) and
+# `launch` pulls the host media features (ffmpeg, V4L2, Wayland).
+[package.metadata.docs.rs]
+features = ["std"]

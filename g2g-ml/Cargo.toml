@@ -2,6 +2,9 @@
 name = "g2g-ml"
 description = "ML inference elements for glass2glass: burn (embedded/Wasm) and ort (server) backends."
 license = "MPL-2.0"
+readme = "README.md"
+keywords = ["multimedia", "inference", "onnx", "gpu", "video"]
+categories = ["multimedia::video", "multimedia", "science"]
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -96,7 +99,7 @@ detect-overlay-live = ["ort", "analytics", "dep:g2g-plugins", "g2g-plugins/wayla
 cuda-wgpu-e2e = ["cuda-wgpu", "g2g-plugins/cuda", "g2g-plugins/ffmpeg"]
 
 [dependencies]
-g2g-core = { path = "../g2g-core" }
+g2g-core = { workspace = true }
 ort = { version = "2.0.0-rc.12", optional = true }
 # Inline GPU preprocessing (wgpu feature, §5.1). Default features pull the
 # native backend per platform (dx12 on Windows).
@@ -107,20 +110,20 @@ burn = { version = "0.21", optional = true, default-features = false, features =
 # (acyclic: g2g-plugins does not depend on g2g-ml) so the CudaToWgpu element can
 # reach g2g_plugins::cudawgpu. The [dev-dependencies] entry below additionally
 # pulls it (default features) for the end-to-end tests.
-g2g-plugins = { path = "../g2g-plugins", optional = true }
+g2g-plugins = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros", "time", "sync"] }
 # The TensorBatcher integration test (tests/batcher.rs) drives the real
 # run_muxer_sink runner.
-g2g-core = { path = "../g2g-core", features = ["runtime", "std"] }
+g2g-core = { workspace = true, features = ["runtime", "std"] }
 # Native end-to-end ML pipeline test (M61): the source/transform/sink elements
 # (VideoTestSrc, VideoConvert, VideoScale, FakeSink) that the g2g-ml preprocess
 # and inference elements compose with. g2g-plugins does not depend on g2g-ml,
 # so this is dev-only and acyclic. `analytics` exposes AnalyticsOverlay for the
 # detect_overlay example's still (PPM) path, `std` the `default_registry` the
 # launch-line test parses against.
-g2g-plugins = { path = "../g2g-plugins", features = ["analytics", "std"] }
+g2g-plugins = { workspace = true, features = ["analytics", "std"] }
 
 [lints]
 workspace = true
@@ -132,3 +135,9 @@ workspace = true
 [[example]]
 name = "detect_overlay"
 required-features = ["ort", "analytics"]
+
+# `ort` downloads the ONNX Runtime binaries at build time, so it can never build
+# in the docs.rs sandbox; `burn` and the execution-provider features need a GPU /
+# NPU toolchain. This is the crates.io-only subset.
+[package.metadata.docs.rs]
+features = ["std", "launch", "analytics", "wgpu"]

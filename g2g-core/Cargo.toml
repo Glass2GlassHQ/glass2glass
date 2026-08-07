@@ -2,6 +2,9 @@
 name = "g2g-core"
 description = "Core traits, frame types, caps, and clock model for the glass2glass multimedia framework."
 license = "MPL-2.0"
+readme = "../README.md"
+keywords = ["multimedia", "video", "pipeline", "streaming", "no-std"]
+categories = ["multimedia", "multimedia::video", "no-std", "embedded"]
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -75,3 +78,10 @@ loom = "0.7"
 
 [lints]
 workspace = true
+
+# The full host-side surface: the dynamic graph / negotiation / launch layer
+# (`alloc` via `runtime`), the `dyn` element traits (`dyn-slot`) and the typed
+# frame metadata. The default (`[]`) build is the heap-free MCU subset, which
+# documents almost nothing.
+[package.metadata.docs.rs]
+features = ["std", "runtime", "dyn-slot", "metadata"]

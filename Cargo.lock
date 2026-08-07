@@ -803,7 +803,7 @@ dependencies = [
  "num-traits",
  "parking_lot",
  "portable-atomic",
- "spin 0.10.0",
+ "spin 0.10.1",
 ]
 
 [[package]]
@@ -823,7 +823,7 @@ dependencies = [
  "rand 0.10.1",
  "rand_distr 0.6.0",
  "serde",
- "spin 0.10.0",
+ "spin 0.10.1",
  "thiserror 2.0.18",
 ]
 
@@ -864,7 +864,7 @@ dependencies = [
  "rmp-serde",
  "serde",
  "serde_json",
- "spin 0.10.0",
+ "spin 0.10.1",
  "uuid",
 ]
 
@@ -914,7 +914,7 @@ dependencies = [
  "derive-new",
  "hashbrown 0.16.1",
  "serde",
- "spin 0.10.0",
+ "spin 0.10.1",
 ]
 
 [[package]]
@@ -988,7 +988,7 @@ dependencies = [
  "log",
  "serde",
  "smallvec",
- "spin 0.10.0",
+ "spin 0.10.1",
  "tracing",
 ]
 
@@ -1072,7 +1072,7 @@ dependencies = [
  "burn-std",
  "hashbrown 0.16.1",
  "log",
- "spin 0.10.0",
+ "spin 0.10.1",
 ]
 
 [[package]]
@@ -1090,7 +1090,7 @@ dependencies = [
  "num-traits",
  "serde",
  "smallvec",
- "spin 0.10.0",
+ "spin 0.10.1",
 ]
 
 [[package]]
@@ -1954,7 +1954,7 @@ dependencies = [
  "serde",
  "serde_bytes",
  "serde_json",
- "spin 0.10.0",
+ "spin 0.10.1",
  "toml 1.1.2+spec-1.1.0",
  "tracing",
  "tynm",
@@ -2171,7 +2171,7 @@ dependencies = [
  "md5",
  "serde",
  "serde_json",
- "spin 0.10.0",
+ "spin 0.10.1",
  "thiserror 2.0.18",
  "toml 1.1.2+spec-1.1.0",
  "tracing",
@@ -2192,7 +2192,7 @@ dependencies = [
  "num-traits",
  "paste",
  "serde",
- "spin 0.10.0",
+ "spin 0.10.1",
  "variadics_please",
 ]
 
@@ -3584,7 +3584,7 @@ dependencies = [
  "arc-swap",
  "loom",
  "portable-atomic",
- "spin 0.9.8",
+ "spin 0.9.9",
  "tracing",
  "web-time",
 ]
@@ -3705,7 +3705,7 @@ dependencies = [
  "sha1",
  "sha2",
  "smithay-client-toolkit 0.20.0",
- "spin 0.9.8",
+ "spin 0.9.9",
  "str0m",
  "symphonia-codec-vorbis",
  "symphonia-core",
@@ -8021,15 +8021,15 @@ checksum = "6e63cff320ae2c57904679ba7cb63280a3dc4613885beafb148ee7bf9aa9042d"
 
 [[package]]
 name = "spin"
-version = "0.9.8"
+version = "0.9.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6980e8d7511241f8acf4aebddbb1ff938df5eebe98691418c4468d0b72a96a67"
+checksum = "3763264f6b73151db08c50ff20d7d8a0b8796e021cdea7ceedad07b80155fa0e"
 
 [[package]]
 name = "spin"
-version = "0.10.0"
+version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d5fe4ccb98d9c292d56fec89a5e07da7fc4cf0dc11e156b41793132775d3e591"
+checksum = "023a211cb3138dbc438680b32560ad89f699977624c9f8dbb95a47d5b4c07dd3"
 dependencies = [
  "lock_api",
  "portable-atomic",

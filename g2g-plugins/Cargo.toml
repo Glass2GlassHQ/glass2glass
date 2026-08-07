@@ -2,6 +2,9 @@
 name = "g2g-plugins"
 description = "Standard source, sink, and transform elements for the glass2glass framework."
 license = "MPL-2.0"
+readme = "README.md"
+keywords = ["multimedia", "video", "audio", "streaming", "gstreamer"]
+categories = ["multimedia", "multimedia::video", "multimedia::audio", "multimedia::encoding"]
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -130,8 +133,9 @@ observe = ["tooling-json", "tokio/net", "tokio/io-util", "tokio/rt", "tokio/time
 # sans-IO WebRTC stack; we drive its handle_input / poll_output loop on a tokio
 # UDP socket, using its pure-Rust `rust-crypto` backend so there is no OpenSSL
 # system dep. WHIP signaling (HTTP offer/answer) reuses reqwest. Implies std +
-# tokio. str0m 0.20 requires rustc 1.85, which is the workspace MSRV; the feature
-# is off by default, so the no_std baseline is unaffected.
+# tokio. str0m 0.20 requires rustc 1.85, within the workspace MSRV; the feature
+# is off by default, so the no_std baseline is unaffected. See the str0m
+# dependency entry for the `[patch.crates-io]` fork this workspace builds against.
 webrtc = ["std", "tokio/net", "tokio/time", "tokio/macros", "tokio/io-util", "dep:str0m", "dep:reqwest", "dep:sha1", "dep:hmac", "dep:md-5", "dep:tokio-native-tls"]
 # Native LiveKit publisher (LiveKitSink, T4): joins a LiveKit room and publishes
 # H.264 (+ optional Opus) over the str0m PeerConnection, with a hand-rolled
@@ -572,7 +576,7 @@ dav1d = ["std", "dep:dav1d"]
 # to Rust. default-features = false drops its NASM asm and pulls only bitdepth_8 /
 # bitdepth_16, so it builds with no system deps and reaches pure-Rust / wasm targets
 # the libdav1d path cannot. Implies std; the decoder needs alloc + threads.
-# re_rav1d's MSRV is 1.79, within the workspace 1.85.
+# re_rav1d's MSRV is 1.79, within the workspace 1.86.
 rav1d = ["std", "dep:re_rav1d"]
 # VP8 / VP9 encode via libvpx through the `vpx-encode` crate (FFI), the GStreamer
 # vp8enc/vp9enc analog. NOT pure Rust: it links the system `libvpx` and runs
@@ -676,7 +680,7 @@ pipewire = ["std", "dep:pipewire"]
 mf-video-src = ["std", "dep:windows"]
 
 [dependencies]
-g2g-core = { path = "../g2g-core", features = ["runtime"] }
+g2g-core = { workspace = true, features = ["runtime"] }
 # no_std mutex for the appsrc/appsink named-channel globals (the app<->element
 # bridge). Same crate the core's runtime channel uses.
 spin = { version = "0.9", default-features = false, features = ["mutex", "spin_mutex"] }
@@ -706,7 +710,7 @@ serde_yaml = { version = "0.9", optional = true }
 rhai = { version = "1", optional = true, default-features = false, features = ["std", "sync"] }
 # Pure-Rust AV1 encoder (av1-encode feature). default-features = false drops the
 # NASM assembly, the CLI `binaries` deps, and `threading`: a portable software
-# encoder with no system dependencies. MSRV 1.74 (within the workspace 1.85).
+# encoder with no system dependencies. MSRV 1.74 (within the workspace 1.86).
 rav1e = { version = "0.8", optional = true, default-features = false }
 # libdav1d AV1 decoder bindings (dav1d feature). Safe Rust wrapper over dav1d-sys,
 # which links the system libdav1d (pkg-config) at build.
@@ -747,6 +751,12 @@ reqwest = { version = "0.12", optional = true }
 # str0m: sans-IO WebRTC stack (ICE / DTLS / SRTP / SCTP / RTP). `rust-crypto` is
 # the pure-Rust crypto backend (RustCrypto ecosystem), so no OpenSSL system dep.
 # Drives the native WebRtcSink (the `webrtc` feature).
+#
+# In-workspace builds resolve str0m through the root `[patch.crates-io]` fork,
+# which drops the SRTP block padding on media sends (LiveKit's forwarder mangles
+# it for browser subscribers). A downstream crate depending on g2g-plugins gets
+# stock str0m 0.20 instead: it compiles and publishes fine, but LiveKit browser
+# subscribers see the mangled stream until that peer applies the same patch.
 str0m = { version = "0.20", optional = true, default-features = false, features = ["rust-crypto"] }
 # Read-only XML DOM for the DASH MPD parser (dash feature). Pure Rust (only
 # xmlparser), no system deps.
@@ -786,7 +796,7 @@ futures-util = { version = "0.3", optional = true, default-features = false, fea
 tokio-tungstenite = { version = "0.24", optional = true }
 # WebTransport (HTTP/3 over QUIC) transport for the distributed-graph primitive
 # (webtransport feature). Pinned exactly: 0.11.13 pulls `kio`, whose MSRV is 1.91,
-# above this workspace's 1.85. `ring` rather than the default aws-lc-rs backend:
+# above this workspace's 1.86. `ring` rather than the default aws-lc-rs backend:
 # rustls already resolves on ring here, and aws-lc-sys needs cmake at build time.
 web-transport-quinn = { version = "=0.11.12", optional = true, default-features = false, features = ["ring"] }
 # TLS for TURN-over-TLS (`turns:`) and the LiveKit `wss://` signalling: the same
@@ -1119,7 +1129,7 @@ pkg-config = "0.3"
 tokio = { version = "1", features = ["rt", "macros", "time", "sync", "net"] }
 # Enables the dynamic-slot path (ElementSlot/SwapHandle) for the m8_slot_swap
 # integration test only. Feature unification keeps the lib build at `runtime`.
-g2g-core = { path = "../g2g-core", features = ["dyn-slot"] }
+g2g-core = { workspace = true, features = ["dyn-slot"] }
 embassy-futures = "0.1.2"
 # AES-128-CBC encryptor as the ciphertext fixture for the m161 HLS decryption
 # test (the integration crate can't reach g2g-plugins's optional aes/cbc deps).
@@ -1300,3 +1310,9 @@ harness = false
 
 [lints]
 workspace = true
+
+# The pure-Rust subset: everything here builds from crates.io alone. Never
+# `all-features`, which would need ffmpeg, ALSA, Wayland, libcamera, libvpx,
+# libopus and the NVIDIA SDK installed.
+[package.metadata.docs.rs]
+features = ["std", "declarative-yaml", "script-rhai", "plugin-loader", "tooling-json"]
