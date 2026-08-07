@@ -190,10 +190,15 @@ fn parse_sps(rbsp: &[u8]) -> Option<SpsGeometry> {
     // adversarial values cannot overflow before the subtract.
     let width = pic_width.saturating_sub(left.saturating_add(right).saturating_mul(sub_width_c));
     let height = pic_height.saturating_sub(top.saturating_add(bottom).saturating_mul(sub_height_c));
-    // The framerate is best-effort: the VUI sits past the scaling-list / RPS /
+    // The rest of the walk is best-effort: it sits past the scaling-list / RPS /
     // long-term-ref blocks, and a stream this walk cannot cross still has valid
-    // geometry, so a failure downgrades to `None` instead of failing the parse.
-    let framerate = parse_vui_framerate(&mut br, sps_max_sub_layers_minus1);
+    // geometry, so a failure downgrades its fields instead of failing the parse.
+    let mut max_num_reorder_pics = None;
+    let framerate = parse_vui_framerate(
+        &mut br,
+        sps_max_sub_layers_minus1,
+        &mut max_num_reorder_pics,
+    );
     Some(SpsGeometry {
         width,
         height,
@@ -201,15 +206,26 @@ fn parse_sps(rbsp: &[u8]) -> Option<SpsGeometry> {
         // H.265 codes the `time_code` SEI self-contained, so nothing from the
         // SPS is needed to read it.
         pic_timing: None,
+        // sps_max_num_reorder_pics bounds how many pictures may precede a
+        // picture in decode order and follow it in output order, so 0 forbids
+        // reordering outright. Unlike H.264's optional VUI restriction this is a
+        // normative SPS field the output process is specified against (C.5.2.2).
+        presents_in_decode_order: max_num_reorder_pics == Some(0),
     })
 }
 
 /// Continue the SPS walk past the conformance window down to the VUI
 /// `timing_info` (M663), returning the framerate as Q16 fixed-point fps
 /// (`vui_time_scale / vui_num_units_in_tick`; H.265 ticks are per picture, so
-/// there is no H.264-style field factor of 2). `None` when the VUI omits
-/// timing or a block on the way ends early / is out of range.
-fn parse_vui_framerate(br: &mut BitReader, sps_max_sub_layers_minus1: u32) -> Option<u32> {
+/// there is no H.264-style field factor of 2). `None` when the VUI omits timing
+/// or a block on the way ends early / is out of range. `max_num_reorder_pics` is
+/// written on the way past `sps_sub_layer_ordering_info`, which sits far ahead
+/// of the VUI, so a stream this walk cannot cross still yields it.
+fn parse_vui_framerate(
+    br: &mut BitReader,
+    sps_max_sub_layers_minus1: u32,
+    max_num_reorder_pics: &mut Option<u32>,
+) -> Option<u32> {
     br.read_ue()?; // bit_depth_luma_minus8
     br.read_ue()?; // bit_depth_chroma_minus8
     let log2_max_pic_order_cnt_lsb_minus4 = br.read_ue()?;
@@ -217,7 +233,8 @@ fn parse_vui_framerate(br: &mut BitReader, sps_max_sub_layers_minus1: u32) -> Op
         return None;
     }
     // sps_sub_layer_ordering_info_present_flag selects one triple or one per
-    // sub-layer.
+    // sub-layer. The last iteration is the highest sub-layer, the one the
+    // reorder bound is read from.
     let start = if br.read_bit()? == 1 {
         0
     } else {
@@ -225,7 +242,7 @@ fn parse_vui_framerate(br: &mut BitReader, sps_max_sub_layers_minus1: u32) -> Op
     };
     for _ in start..=sps_max_sub_layers_minus1 {
         br.read_ue()?; // sps_max_dec_pic_buffering_minus1
-        br.read_ue()?; // sps_max_num_reorder_pics
+        *max_num_reorder_pics = Some(br.read_ue()?);
         br.read_ue()?; // sps_max_latency_increase_plus1
     }
     br.read_ue()?; // log2_min_luma_coding_block_size_minus3

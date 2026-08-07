@@ -242,6 +242,12 @@ fn parse_sps(rbsp: &[u8]) -> Option<SpsGeometry> {
         height,
         framerate: vui.framerate,
         pic_timing: vui.pic_timing,
+        // POC type 2 derives the picture order count from frame_num alone
+        // (H.264 8.2.1.3), so coded order is display order by construction. The
+        // VUI's max_num_reorder_frames is deliberately not read here: streams
+        // declare 0 and reorder anyway (see `sps_reorder_frames`), and this flag
+        // has to be a proof, not a hint.
+        presents_in_decode_order: pic_order_cnt_type == 2,
     })
 }
 

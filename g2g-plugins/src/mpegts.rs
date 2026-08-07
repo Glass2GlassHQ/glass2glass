@@ -18,6 +18,8 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use g2g_core::VideoCodec;
+
 /// MPEG-TS packet size in bytes (the standard 188; M2TS 192 with a 4-byte
 /// timestamp prefix is not handled).
 pub const TS_PACKET_LEN: usize = 188;
@@ -231,6 +233,119 @@ pub struct EsUnit {
     pub data: Vec<u8>,
 }
 
+/// Cap on the per-PID [`VideoPtsSynth`] table. PIDs come from the PMT, so a real
+/// multiplex has a handful; the cap keeps a stream that churns PMT video PIDs
+/// from growing the table without bound. Past it, later PIDs go unsynthesized.
+const MAX_VIDEO_PTS_STREAMS: usize = 16;
+
+/// Per-frame video PTS synthesis for one elementary stream (M948). A transport
+/// stream need only carry a PES timestamp every 700 ms, so a conforming mux may
+/// leave most access units unstamped, and forwarding those unstamped lands them
+/// all at 0: a pacing sink plays that as a burst then a freeze.
+///
+/// An unstamped unit gets `last + frame_period`, which is the picture's display
+/// time only when the stream presents pictures in the order it codes them. So
+/// synthesis stays off until an SPS proves that (H.264 POC type 2, H.265
+/// `sps_max_num_reorder_pics` 0) and a reordering stream is left alone rather
+/// than stamped wrong: with B-frames the coded order is not the display order,
+/// and getting that right needs the picture order count, which lives with the
+/// decoder. Every real stamp re-anchors, so a period that is slightly off never
+/// drifts past one stamping interval.
+#[derive(Debug, Default)]
+struct VideoPtsSynth {
+    /// Whether the SPS proved coded order is display order. `None` until one
+    /// parses; synthesis runs only on `Some(true)`.
+    presents_in_decode_order: Option<bool>,
+    /// Frame period in 90 kHz ticks.
+    period_90: Option<u64>,
+    /// Whether `period_90` came from the SPS VUI timing info. A measured period
+    /// keeps being refined; a declared one is not overridden.
+    period_from_sps: bool,
+    /// The last PTS this stream carried, real or synthesized.
+    last_pts_90: Option<u64>,
+    /// Units seen since `last_pts_90` was set, so a unit that could not be
+    /// stamped still costs its display slot.
+    units_since_last_pts: u64,
+    /// The last real PES stamp, and the units seen since, for measuring the
+    /// period from the two nearest real stamps when the SPS declares none.
+    last_real_pts_90: Option<u64>,
+    units_since_last_real: u64,
+}
+
+impl VideoPtsSynth {
+    /// Stamp one access unit, filling `pts_90khz` in place when it is unstamped
+    /// and this stream qualifies. Coded order is display order here, so the
+    /// decode timestamp equals the presentation one and needs no separate
+    /// synthesis (the element already falls back to the PTS for a missing DTS).
+    fn stamp(&mut self, codec: VideoCodec, au: &[u8], pts_90khz: &mut Option<u64>) {
+        self.units_since_last_pts = self.units_since_last_pts.saturating_add(1);
+        self.units_since_last_real = self.units_since_last_real.saturating_add(1);
+        self.read_sps(codec, au);
+
+        if let Some(real) = *pts_90khz {
+            self.measure_period(real);
+            self.last_pts_90 = Some(real);
+            self.units_since_last_pts = 0;
+            return;
+        }
+        if self.presents_in_decode_order != Some(true) {
+            return;
+        }
+        let (Some(last), Some(period)) = (self.last_pts_90, self.period_90) else {
+            return;
+        };
+        let synthesized = last.saturating_add(period.saturating_mul(self.units_since_last_pts));
+        *pts_90khz = Some(synthesized);
+        self.last_pts_90 = Some(synthesized);
+        self.units_since_last_pts = 0;
+    }
+
+    /// Take the frame period from the span between this real stamp and the
+    /// previous one, divided by the units in between. Only for a stream whose
+    /// SPS declared no timing info; a backwards or repeated stamp yields nothing.
+    fn measure_period(&mut self, real: u64) {
+        if !self.period_from_sps {
+            if let Some(previous) = self.last_real_pts_90 {
+                let span = real.saturating_sub(previous);
+                if let Some(measured) = span
+                    .checked_div(self.units_since_last_real)
+                    .filter(|period| *period > 0)
+                {
+                    self.period_90 = Some(measured);
+                }
+            }
+        }
+        self.last_real_pts_90 = Some(real);
+        self.units_since_last_real = 0;
+    }
+
+    /// Re-read the SPS this access unit carries, if any. Every unit is scanned,
+    /// since parameter sets travel in band and may change mid-stream.
+    fn read_sps(&mut self, codec: VideoCodec, au: &[u8]) {
+        use crate::nalparse::NalCodec;
+        let info = match codec {
+            VideoCodec::H265 => crate::h265parse::H265Codec::extract_sps_info(au),
+            _ => crate::h264parse::H264Codec::extract_sps_info(au),
+        };
+        let Some(info) = info else {
+            return;
+        };
+        self.presents_in_decode_order = Some(info.presents_in_decode_order);
+        // fps arrives as Q16, so the period is (90000 << 16) / q16, rounded.
+        let Some(period) = info
+            .framerate
+            .map(u64::from)
+            .filter(|q16| *q16 > 0)
+            .map(|q16| ((90_000u64 << 16) + q16 / 2) / q16)
+            .filter(|p| *p > 0)
+        else {
+            return;
+        };
+        self.period_90 = Some(period);
+        self.period_from_sps = true;
+    }
+}
+
 /// A PES packet being reassembled across TS packets for one PID.
 #[derive(Debug)]
 struct PendingPes {
@@ -263,6 +378,8 @@ pub struct TsDemuxer {
     services: Vec<(u16, ServiceInfo)>,
     pending: Vec<PendingPes>,
     completed: Vec<EsUnit>,
+    /// Video PTS synthesis state, one entry per video PID (M948).
+    video_pts: Vec<(u16, VideoPtsSynth)>,
 }
 
 impl TsDemuxer {
@@ -408,9 +525,35 @@ impl TsDemuxer {
         }
     }
 
-    /// Drain the access units completed so far.
+    /// Drain the access units completed so far, synthesizing a PTS for each
+    /// unstamped video unit that qualifies (see [`VideoPtsSynth`]).
     pub fn take_units(&mut self) -> Vec<EsUnit> {
-        core::mem::take(&mut self.completed)
+        let mut units = core::mem::take(&mut self.completed);
+        for unit in units.iter_mut() {
+            self.synthesize_video_pts(unit);
+        }
+        units
+    }
+
+    /// Run one unit through its stream's [`VideoPtsSynth`]. A non-video unit,
+    /// and any video PID past [`MAX_VIDEO_PTS_STREAMS`], passes through.
+    fn synthesize_video_pts(&mut self, unit: &mut EsUnit) {
+        let codec = match unit.stream_type {
+            STREAM_TYPE_H264 => VideoCodec::H264,
+            STREAM_TYPE_H265 => VideoCodec::H265,
+            _ => return,
+        };
+        let slot = match self.video_pts.iter().position(|(pid, _)| *pid == unit.pid) {
+            Some(slot) => slot,
+            None if self.video_pts.len() < MAX_VIDEO_PTS_STREAMS => {
+                self.video_pts.push((unit.pid, VideoPtsSynth::default()));
+                self.video_pts.len() - 1
+            }
+            None => return,
+        };
+        self.video_pts[slot]
+            .1
+            .stamp(codec, &unit.data, &mut unit.pts_90khz);
     }
 
     /// Finalize any PES still being reassembled (call at end of stream). The

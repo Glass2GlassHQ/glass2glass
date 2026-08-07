@@ -49,6 +49,12 @@ pub struct SpsGeometry {
     /// SPS VUI context an H.264 `pic_timing` SEI needs to be parseable. `None`
     /// for H.265, whose `time_code` SEI is self-contained.
     pub pic_timing: Option<crate::sei::PicTimingContext>,
+    /// Whether the SPS proves the stream presents pictures in the order it
+    /// codes them, so a consumer may treat coded order as display order. Set
+    /// only from a normative field that forbids reordering outright (see the
+    /// per-codec parses, which spell out which one); `false` means "may
+    /// reorder", including when the parse could not tell.
+    pub presents_in_decode_order: bool,
 }
 
 /// Codec-specific hooks for [`NalParse`]. Implemented by zero-sized markers.
