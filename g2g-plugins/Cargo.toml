@@ -293,8 +293,9 @@ ffmpeg = ["std", "dep:ffmpeg-next"]
 # V4L2 capture source (M90): V4l2Src streams YUYV (4:2:2) frames off a
 # /dev/videoN UVC device via mmap. Pulls the pure-Rust `v4l` crate (no libv4l C
 # dep); Linux-only, implies std. Blocking ioctls run on a dedicated capture
-# thread feeding the async run loop over a channel.
-v4l2 = ["std", "dep:v4l"]
+# thread feeding the async run loop over a channel. libc is for the poll(2) the
+# dmabuf-export io-mode waits on (the device is opened non-blocking).
+v4l2 = ["std", "dep:v4l", "dep:libc"]
 # libcamera capture source (LibCameraSrc): captures NV12 (else YUYV) frames from
 # a camera via the libcamera stack, the modern Linux camera path (handles UVC
 # webcams through libcamera's uvcvideo pipeline handler, plus CSI/ISP cameras
@@ -1137,6 +1138,9 @@ aes = "0.8"
 cbc = { version = "0.1", features = ["alloc"] }
 # AES-CTR encrypt oracle for the m835 Common Encryption (`cenc` scheme) test.
 ctr = "0.9"
+# mmap(2) for the m956 test that reads a v4l2src-exported dma-buf fd on the CPU,
+# the only way to look at a dma-buf's bytes (it has no read(2)).
+libc = "0.2"
 # critical-section impl for host tests of embassy-sync (embassy-link): it calls
 # critical_section::with, which needs an impl at link. The std impl suffices.
 critical-section = { version = "1", features = ["std"] }

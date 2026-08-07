@@ -1135,6 +1135,17 @@ Two design points carry the element:
   `sizeimage`. What a pixel format means on a link (its `Caps`, its frame size)
   lives in `capturepixelformat.rs`, shared with `LibCameraSrc`, which sits on a
   different fourcc registry but agrees on the meaning.
+- **DMABUF output (M956).** The `io-mode` property selects how a buffer leaves
+  the element: `auto` / `mmap` copy as above, `dmabuf` exports each MMAP buffer
+  once (`VIDIOC_EXPBUF`, at stream start) and emits frames in
+  `MemoryDomain::DmaBuf` carrying a share of the fd their buffer was filled into,
+  so a GPU consumer imports the camera buffer with no copy. The buffer *is* the
+  frame there, so the invariant is that a buffer goes back to the driver only
+  once every share of its fd has dropped (the element keeps one share per buffer
+  for the whole stream and re-queues on the count falling back to it); the
+  in-flight bound stays below `BUFFER_COUNT` so the driver always has a buffer to
+  fill. An exported fd carries no payload length, so dmabuf mode advertises only
+  the raw formats and MJPEG stays on the copy path.
 
 `LibCameraSrc` (`libcamerasrc.rs`, `libcamera` feature, Linux-only) is the
 second capture source and the modern Linux camera path: it captures through the

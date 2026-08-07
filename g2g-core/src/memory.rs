@@ -667,6 +667,15 @@ impl OwnedDmaBuf {
         self.fd.0
     }
 
+    /// How many shares of this buffer exist; 1 means nobody else holds it. A
+    /// producer that owns the memory behind the fd and reuses it (a V4L2 capture
+    /// source re-queueing an exported MMAP buffer) keeps its own share and waits
+    /// for the count to fall back to 1 before handing the buffer back to the
+    /// driver, so a frame downstream is never overwritten.
+    pub fn share_count(&self) -> usize {
+        Arc::strong_count(&self.fd)
+    }
+
     /// Attach a GPU-completion [`SyncFd`] and the timeline `value` this frame's
     /// producer work signals. A consumer host-waits `value` on the imported
     /// semaphore before reading the buffer. Safe: [`SyncFd`] already owns the fd.

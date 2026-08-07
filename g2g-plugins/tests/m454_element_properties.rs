@@ -945,3 +945,29 @@ fn wgpucompositor_shares_the_compositor_properties() {
         "two pads, so pad 3 does not exist"
     );
 }
+
+/// M956: the dmabuf-export io-mode is settable from a launch line, and a V4L2
+/// streaming method the element does not implement is refused.
+#[cfg(all(target_os = "linux", feature = "v4l2"))]
+#[test]
+fn v4l2src_io_mode() {
+    use g2g_core::runtime::SourceLoop;
+    use g2g_core::{MemoryDomainKind, PropError};
+    use g2g_plugins::v4l2src::V4l2Src;
+    let mut s = V4l2Src::new("/dev/video0");
+    assert!(declares(s.properties(), "io-mode"));
+    s.set_property("io-mode", PropValue::Str("dmabuf".into()))
+        .unwrap();
+    assert_eq!(
+        s.get_property("io-mode"),
+        Some(PropValue::Str("dmabuf".into()))
+    );
+    // the declared output domain follows the mode, so the solver and the DOT
+    // dump show what a consumer will really be handed.
+    assert_eq!(s.output_memory(), MemoryDomainKind::DmaBuf);
+    assert_eq!(
+        s.set_property("io-mode", PropValue::Str("userptr".into())),
+        Err(PropError::Value),
+        "userptr is not implemented, so it must not be accepted"
+    );
+}

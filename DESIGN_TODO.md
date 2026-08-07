@@ -381,7 +381,6 @@ Phased plan:
 
 ## Capture sources
 
-- `v4l2src`: MMAP DMABUF output (`MemoryDomain::DmaBuf`).
 - V4L2 device discovery reports YUYV modes as caps only; the other formats
   `v4l2src` can carry stay in `detail`.
 - PipeWire capture: DMABUF output; an xdg-desktop-portal screen-capture
