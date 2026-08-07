@@ -406,6 +406,9 @@ fn host_launch_features(c: &Capabilities) -> Vec<LaunchFeature> {
         lf("alsa-sink", c.alsa, "needs alsa-lib-devel"),
         lf("pulse-sink", c.pulse, "needs pulseaudio-libs-devel"),
         lf("pipewire", c.pipewire, "needs pipewire-devel + clang"),
+        // Screen capture through xdg-desktop-portal: same build deps as
+        // `pipewire` (zbus is pure Rust), the portal service is a runtime one.
+        lf("portal", c.pipewire, "needs pipewire-devel + clang"),
         // Display.
         lf("wayland-sink", c.wayland, "needs wayland-devel"),
         lf("kms-sink", c.gpu_drm, "needs a DRM render node (/dev/dri)"),

@@ -30,7 +30,7 @@ linux-full = [
     "http-src", "hls", "dash",
     "ffmpeg", "vaapi", "v4l2",
     "opus", "vorbis", "vpx", "av1-encode", "mjpeg", "mjpeg-encode",
-    "alsa-sink", "alsa-src", "pulse-sink", "pulse-src", "pipewire",
+    "alsa-sink", "alsa-src", "pulse-sink", "pulse-src", "pipewire", "portal",
     "wayland-sink", "kms-sink", "wgpu-sink", "vello-overlay", "analytics",
     "declarative-yaml", "script-rhai", "observe",
 ]
@@ -674,6 +674,13 @@ pulse-src = ["std", "dep:libpulse-binding", "dep:libpulse-simple-binding"]
 # + libspa via bindgen; needs clang). Linux-only, implies std. Video / screen
 # capture is a follow-up on the same elements.
 pipewire = ["std", "dep:pipewire"]
+# xdg-desktop-portal ScreenCast handshake for `pipewirevideosrc` (`portal=true`):
+# CreateSession / SelectSources / Start over the session bus, then
+# OpenPipeWireRemote for a private PipeWire remote fd plus the granted node id.
+# Lets a launch line capture the screen on a stock Wayland desktop with no
+# out-of-band D-Bus. Pulls zbus (its blocking API, so the element's existing
+# sync worker drives it). Linux-only, implies `pipewire` and so std.
+portal = ["pipewire", "dep:zbus", "dep:zbus_macros"]
 # Windows Media Foundation camera capture source (MfVideoSrc): enumerates video
 # capture devices and drains frames via an IMFSourceReader (NV12 / YUY2 to system
 # memory), the video sibling of WasapiSrc. Pulls the windows crate; Windows-only,
@@ -1092,6 +1099,20 @@ libpulse-simple-binding = { version = "2", optional = true, default-features = f
 # PipeWire src/sink (pipewire): the high-level pipewire-rs crate (re-exports spa
 # as pipewire::spa). Links libpipewire-0.3 + libspa via bindgen (needs clang).
 pipewire = { version = "0.8", optional = true }
+# D-Bus client for the xdg-desktop-portal handshake (portal). Held at 5.13.2
+# because 5.14 raised its MSRV to 1.87, past this workspace's 1.86. The default
+# features are what we want: `async-io` supplies zbus's own executor (no tokio
+# runtime needed on the capture worker thread) and `blocking-api` the sync
+# `zbus::blocking` surface that thread uses. Its zvariant / zbus_names
+# dependencies are caret ranges whose newest members also want 1.87, so
+# Cargo.lock holds them at zvariant 5.9.2 / zbus_names 4.3.1; a blanket
+# `cargo update` re-raises them and breaks the MSRV build.
+zbus = { version = "=5.13.2", optional = true }
+# Not used directly: zbus 5.13.2 asks for `zbus_macros = "5.13.2"` (caret), and
+# the 5.18 that satisfies it emits code 5.13's runtime does not have, so the
+# generated `#[interface]` impls fail to compile. Pinning the macro crate here
+# is the only way to hold the pair together.
+zbus_macros = { version = "=5.13.2", optional = true }
 
 # Browser / WebAssembly bindings (web feature). wasm32-only target gate so
 # native builds never resolve them. wasm-bindgen-futures drives the runner

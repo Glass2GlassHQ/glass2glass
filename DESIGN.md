@@ -1210,7 +1210,16 @@ path: `mmap` copies each frame out of the mapped block into `System` memory, whi
 `dmabuf` negotiates a `Buffers` param accepting `SPA_DATA_DmaBuf` alone and hands
 the descriptor on as `MemoryDomain::DmaBuf`, holding each buffer until every share
 of its frame is released (the domain is fixed by negotiation, hence a property
-rather than GStreamer's per-caps feature). `MfVideoSrc`
+rather than GStreamer's per-caps feature). Screen capture on a Wayland desktop
+goes through `portal=true` (`portal` feature) instead of `target-object`, which
+only reaches the session's own PipeWire remote: the element runs the
+xdg-desktop-portal `ScreenCast` handshake (`CreateSession` / `SelectSources` /
+`Start`, each answered on an `org.freedesktop.portal.Request` object, then
+`OpenPipeWireRemote`) on the capture worker thread over a blocking zbus
+connection, and connects the stream to the granted node id on the private remote
+fd the portal returns. Every step is bounded by `portal-timeout`, so an
+unattended consent dialog fails the capture instead of hanging, and
+`portal-restore-token` re-opens an earlier grant without asking. `MfVideoSrc`
 (`mf-video-src`, Windows) is the camera sibling of `WasapiSrc`: it enumerates
 video capture devices and drains NV12 / YUY2 frames via an `IMFSourceReader` on a
 COM/MTA worker thread.

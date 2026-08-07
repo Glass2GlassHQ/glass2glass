@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M958: `pipewirevideosrc portal=true` runs the xdg-desktop-portal ScreenCast handshake and captures the granted node on the PipeWire remote the portal hands back.
+
 - M957: `pipewirevideosrc` gained `io-mode=dmabuf`, which takes the producer's dma-buf as `MemoryDomain::DmaBuf` instead of copying out of a mapped buffer.
 
 - M956: `v4l2src io-mode=dmabuf` exports the driver's capture buffers as dma-buf fds and emits them in `MemoryDomain::DmaBuf` without a copy.

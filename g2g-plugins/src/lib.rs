@@ -1075,6 +1075,10 @@ pub mod pipewirevideosrc;
 mod pwaudio;
 #[cfg(all(target_os = "linux", feature = "pipewire"))]
 mod pwvideo;
+// The xdg-desktop-portal ScreenCast handshake `pipewirevideosrc portal=true`
+// runs to get a screen-capture node on a Wayland desktop.
+#[cfg(all(target_os = "linux", feature = "portal"))]
+pub mod screencastportal;
 // Device discovery over the PipeWire graph, the one Linux backend with native
 // hotplug events (M939).
 #[cfg(all(target_os = "linux", feature = "pipewire"))]
