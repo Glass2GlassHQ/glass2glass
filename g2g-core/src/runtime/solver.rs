@@ -617,8 +617,12 @@ fn backward_feasible(
 /// its scalar identity (format / codec / channels) carries over and only the
 /// re-derived geometry / rate changes, so a downstream the snapshot could not
 /// see (feasibility is inexpressible through a retargeting converter) is not
-/// handed the element's *input* caps. Only when the previous shape is no
-/// longer producible does it defer to the element's own `process`.
+/// handed the element's *input* caps. The kept shape is forwarded only when
+/// its re-derived fields **equal the input's** (a converter's copied
+/// geometry / rate, unfixed values included); a value the input does not
+/// carry (a nominal rate baked into a decoder's produce set) must not be
+/// forwarded as if produced, so that case, and a previous shape no longer
+/// producible, defer to the element's own `process`.
 pub(crate) fn resolve_forward_output(
     constraint: &CapsConstraint<'_>,
     input: &Caps,
@@ -627,9 +631,20 @@ pub(crate) fn resolve_forward_output(
 ) -> ForwardResolve {
     // Index 1 is a placeholder: the link position is meaningful only inside
     // a full-chain solve. Mid-stream the failure is link-local to this arm.
-    let candidates = match forward_propagate(constraint, &CapsSet::one(input.clone()), 1) {
-        Ok(c) => c,
-        Err(_) => return ForwardResolve::Defer,
+    // `forward_propagate` fixates the input first (the startup contract), which
+    // rejects a mid-stream caps carrying a field the element never learned (a
+    // Matroska track with no DefaultDuration flows framerate `Any`); the
+    // Derived closures take the caps as-is, so probe them directly then.
+    let candidates = forward_propagate(constraint, &CapsSet::one(input.clone()), 1)
+        .ok()
+        .or_else(|| match constraint {
+            CapsConstraint::DerivedOutput(f) => Some(f(input)),
+            CapsConstraint::DerivedFields(t) => Some(t.derive(input)),
+            _ => None,
+        })
+        .filter(|c| !c.is_empty());
+    let Some(candidates) = candidates else {
+        return ForwardResolve::Defer;
     };
     // The previous output's scalar identity with geometry / rate widened: the
     // shape to prefer among ambiguous candidates. `project_passthrough` keeps
@@ -638,14 +653,49 @@ pub(crate) fn resolve_forward_output(
     let keep_shape = prev_output.and_then(|p| {
         project_passthrough(p, PassthroughFields::NONE.with_format().with_channels())
     });
+    // A kept-shape survivor is forwardable only when its re-derived fields
+    // EQUAL the new input's (a converter's copied geometry / rate, unfixed
+    // values included: a decoder emitting no framerate stays that way through
+    // the converter). A nominal fixate-fallback alternative in a decoder's
+    // produce set (vorbisdec's 48 kHz against a 44.1 kHz input) is not
+    // input-derived, and forwarding it would announce a value the element
+    // never produces.
+    fn tracks_input(survivor: &Caps, input: &Caps) -> bool {
+        match (survivor.dims(), input.dims()) {
+            (Some(s), Some(i)) => s == i,
+            _ => match (survivor, input) {
+                (
+                    Caps::Audio {
+                        channels: s_ch,
+                        sample_rate: s_rate,
+                        ..
+                    },
+                    Caps::Audio {
+                        channels: i_ch,
+                        sample_rate: i_rate,
+                        ..
+                    },
+                ) => s_rate == i_rate && s_ch == i_ch,
+                _ => false,
+            },
+        }
+    }
     let fixate_kept_shape = |set: &CapsSet| -> Option<Caps> {
         let shape = keep_shape.as_ref()?;
-        set.intersect(&CapsSet::one(shape.clone())).fixate()
+        set.intersect(&CapsSet::one(shape.clone()))
+            .alternatives()
+            .iter()
+            .find(|c| tracks_input(c, input))
+            .cloned()
     };
     let Some(d) = downstream_feasible else {
         return match candidates.alternatives() {
-            [_one] => match candidates.fixate() {
+            // Unambiguous: forward the one output, fixated, or as-is when an
+            // unlearned input field (Any rate) blocks fixation but the output
+            // tracks the input.
+            [one] => match candidates.fixate() {
                 Some(c) => ForwardResolve::Fixed(c),
+                None if tracks_input(one, input) => ForwardResolve::Fixed(one.clone()),
                 None => ForwardResolve::Defer,
             },
             // Ambiguous with nothing to steer by: keep the previous output
@@ -2741,6 +2791,31 @@ mod tests {
         let prev_gone = fixed_video(RawVideoFormat::Bgra8, 16, 16, 1);
         assert_eq!(
             resolve_forward_output(&conv, &i420_big, None, Some(&prev_gone)),
+            ForwardResolve::Defer
+        );
+
+        // A field the candidates leave open must not be invented: a decoder
+        // whose produce set carries no framerate (the vorbisdec regression, an
+        // unpinned sample rate steered to a default 48000) defers so the
+        // element's own `process` emits the real value.
+        let open_rate = CapsConstraint::DerivedOutput(Box::new(|_input: &Caps| {
+            CapsSet::from_alternatives(vec![
+                video(
+                    RawVideoFormat::Nv12,
+                    Dim::Fixed(1920),
+                    Dim::Fixed(1080),
+                    Rate::Any,
+                ),
+                video(
+                    RawVideoFormat::I420,
+                    Dim::Fixed(1920),
+                    Dim::Fixed(1080),
+                    Rate::Any,
+                ),
+            ])
+        }));
+        assert_eq!(
+            resolve_forward_output(&open_rate, &i420_big, None, Some(&prev)),
             ForwardResolve::Defer
         );
 

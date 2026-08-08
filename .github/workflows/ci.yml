@@ -502,6 +502,12 @@ jobs:
       # vorbisdec PCM vs ffmpeg's own decode (pure Rust, no libav linkage).
       - name: Vorbis oracles (oggdemux + vorbisdec vs ffmpeg)
         run: cargo test -p g2g-plugins --locked --features std,vorbis --test m777_vorbis -- --nocapture
+      # Real-file playback (M959): an ffmpeg-authored AV1 webm demuxed, decoded
+      # (pure-Rust rav1d) and overlaid; the demuxed placeholder caps refine
+      # mid-stream into the strict RGBA overlay, the path synthetic-source
+      # tests never exercise.
+      - name: real-file overlay chain (mid-stream caps refinement)
+        run: cargo test -p g2g-plugins --locked --features rav1d --test m959_realfile_overlay -- --nocapture
       # Ogg mux (M789): ffmpeg decodes a g2g-muxed Opus / Vorbis / Ogg-FLAC
       # stream to the source's samples bit for bit.
       - name: Ogg muxer oracle (oggmux vs ffmpeg)

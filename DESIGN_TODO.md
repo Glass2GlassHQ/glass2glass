@@ -243,6 +243,10 @@ Phased plan:
 - Richer auto-plug factory construction params (geometry / device / file path).
 - A hardware-backed end-to-end decode-through-`decodebin` run (current tests
   read templates / assert splicing, decode no real media).
+- `decodebin` should set the demuxer's `stream=` selection to the sniffed
+  codec: a webm AV1 file with only `rav1d` compiled in plugs `rav1ddec`
+  against the demux port's VP9 default and fails negotiation (masked when the
+  multi-codec ffmpeg decoder is available).
 
 ## Platform: macOS
 
