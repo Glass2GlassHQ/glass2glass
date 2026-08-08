@@ -5,9 +5,9 @@
 //! whole chain re-solves at PLAYING; the regression is the caps-driven
 //! converter forwarding its raw INPUT caps to the overlay instead of the
 //! RGBA it already produces (CapsMismatch). ffmpeg authors the fixture; the
-//! test self-skips without it. The demux + decoder are named explicitly:
-//! `decodebin` on a webm picks the AV1 decoder but leaves the demux port on
-//! its VP9 default, a separate auto-plug gap (DESIGN_TODO).
+//! test self-skips without it. The demux + decoder are named explicitly to
+//! pin this test to the re-solve; the bare-`decodebin` form of the same chain
+//! is m960's.
 #![cfg(feature = "rav1d")]
 
 use std::process::Command;

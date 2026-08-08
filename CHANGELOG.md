@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M960: a bare `decodebin` selects the Matroska demuxer's `stream=` from the file's actual video track, so a codec-specific decoder negotiates against truthful startup caps.
+
 - M959: a mid-stream caps re-solve keeps the element's negotiated output shape, runner arms log caps rejections and forward resolutions, and vertical cues pull a covering system face for scripts the default font lacks.
 
 - M958: `pipewirevideosrc portal=true` runs the xdg-desktop-portal ScreenCast handshake and captures the granted node on the PipeWire remote the portal hands back.
