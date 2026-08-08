@@ -11,7 +11,8 @@
 //! whole-file demuxer for it, and the fragmented `fmp4demux` still serves the
 //! streaming `IsoBmff` that HLS / DASH produce. Multi-track fan-out (video, audio,
 //! text) stays on [`Mp4DemuxN`](crate::mp4demuxn) via `qtdemux name=d ...`; this
-//! element emits one stream, the video track by default, or the audio track when
+//! element emits one stream, the video track by default (`stream=av1` etc. names
+//! its codec for truthful startup caps, M961), or the audio track when
 //! `stream=aac` (M748), the one stream a linear `decodebin` chain decodes.
 
 use alloc::boxed::Box;
@@ -35,13 +36,41 @@ use crate::fmp4::{
 };
 
 /// Which track the single-output demux emits (M748): the video track (the
-/// default, so `filesrc ! qtdemux ! ...` is unchanged) or the audio track, which
-/// a bare `decodebin` on an audio-only file selects via the primary-stream hook
-/// (`stream=aac`). MP4 audio is AAC in g2g, so the audio case carries no codec.
+/// default, so `filesrc ! qtdemux ! ...` is unchanged), the video track with its
+/// codec named (M961, `stream=av1` etc., so a codec-specific decoder negotiates
+/// truthful startup caps instead of the nominal H.264), or the audio track,
+/// which a bare `decodebin` on an audio-only file selects via the primary-stream
+/// hook (`stream=aac`). MP4 audio is AAC in g2g, so the audio case carries no codec.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum StreamSelect {
     Video,
+    VideoNamed(VideoCodec),
     Audio,
+}
+
+/// The `stream=` names for a codec-named video selection (M961), the set
+/// [`parse_header`](crate::fmp4) can read from a `moov` sample entry. Shared
+/// with the bare-`decodebin` primary-stream hook, which names the file's actual
+/// codec through this table.
+const VIDEO_STREAM_NAMES: &[(&str, VideoCodec)] = &[
+    ("h264", VideoCodec::H264),
+    ("h265", VideoCodec::H265),
+    ("av1", VideoCodec::Av1),
+    ("mpeg4part2", VideoCodec::Mpeg4Part2),
+];
+
+pub(crate) fn mp4_video_stream_str(codec: VideoCodec) -> Option<&'static str> {
+    VIDEO_STREAM_NAMES
+        .iter()
+        .find(|(_, c)| *c == codec)
+        .map(|(name, _)| *name)
+}
+
+fn mp4_video_stream_from_str(name: &str) -> Option<VideoCodec> {
+    VIDEO_STREAM_NAMES
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, c)| *c)
 }
 
 #[derive(Debug)]
@@ -134,7 +163,7 @@ impl Mp4Demux {
         }
         self.drained = true;
         match self.select {
-            StreamSelect::Video => self.drain_video(out).await,
+            StreamSelect::Video | StreamSelect::VideoNamed(_) => self.drain_video(out).await,
             StreamSelect::Audio => self.drain_audio(out).await,
         }
     }
@@ -265,17 +294,18 @@ impl AsyncElement for Mp4Demux {
 
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         // ByteStream{Mp4} in -> the selected track out. Video defaults to H.264 and
-        // is refined from the moov via CapsChanged at Eos (like fmp4demux); audio
-        // is AAC with a wildcard layout, refined the same way.
-        let codec = self.out_codec;
-        let select = self.select;
+        // is refined from the moov via CapsChanged at Eos (like fmp4demux); a
+        // codec-named selection (M961) negotiates that codec up front; audio is
+        // AAC with a wildcard layout, refined the same way.
+        let nego = match self.select {
+            StreamSelect::Video => Self::nego_caps(self.out_codec),
+            StreamSelect::VideoNamed(codec) => Self::nego_caps(codec),
+            StreamSelect::Audio => Self::audio_nego_caps(),
+        };
         CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| match input {
             Caps::ByteStream {
                 encoding: ByteStreamEncoding::Mp4,
-            } => match select {
-                StreamSelect::Video => CapsSet::one(Self::nego_caps(codec)),
-                StreamSelect::Audio => CapsSet::one(Self::audio_nego_caps()),
-            },
+            } => CapsSet::one(nego.clone()),
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
     }
@@ -312,7 +342,9 @@ impl AsyncElement for Mp4Demux {
                 self.select = match value.as_str().ok_or(PropError::Type)? {
                     "video" => StreamSelect::Video,
                     "aac" => StreamSelect::Audio,
-                    _ => return Err(PropError::Value),
+                    name => StreamSelect::VideoNamed(
+                        mp4_video_stream_from_str(name).ok_or(PropError::Value)?,
+                    ),
                 };
                 Ok(())
             }
@@ -325,6 +357,10 @@ impl AsyncElement for Mp4Demux {
             "stream" => Some(PropValue::Str(
                 match self.select {
                     StreamSelect::Video => "video",
+                    // constructed from the same table, so the name is always there
+                    StreamSelect::VideoNamed(codec) => {
+                        mp4_video_stream_str(codec).unwrap_or("video")
+                    }
                     StreamSelect::Audio => "aac",
                 }
                 .into(),
@@ -368,7 +404,7 @@ impl AsyncElement for Mp4Demux {
 static MP4DEMUX_PROPS: &[PropertySpec] = &[PropertySpec::new(
     "stream",
     PropKind::Str,
-    "track to emit: video (the default) | aac (the audio track)",
+    "track to emit: video (the default) | h264 | h265 | av1 | mpeg4part2 (the video track by codec) | aac (the audio track)",
 )];
 
 impl PadTemplates for Mp4Demux {
@@ -379,6 +415,8 @@ impl PadTemplates for Mp4Demux {
             PadTemplate::source(CapsSet::from_alternatives(Vec::from([
                 video(VideoCodec::H264),
                 video(VideoCodec::H265),
+                video(VideoCodec::Av1),
+                video(VideoCodec::Mpeg4Part2),
                 Self::audio_nego_caps(),
             ]))),
         ])

@@ -243,10 +243,6 @@ Phased plan:
 - Richer auto-plug factory construction params (geometry / device / file path).
 - A hardware-backed end-to-end decode-through-`decodebin` run (current tests
   read templates / assert splicing, decode no real media).
-- The MP4 analog of the Matroska primary-stream video selection: `qtdemux`'s
-  `stream=` knows only `video` / `aac`, and the progressive `Mp4Src` path
-  assumes H.264, so an AV1-in-MP4 file has no bare-`decodebin` chain without
-  the multi-codec ffmpeg decoder.
 
 ## Platform: macOS
 

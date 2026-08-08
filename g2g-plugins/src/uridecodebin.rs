@@ -1407,13 +1407,14 @@ pub fn ts_primary_stream(location: &str, caps: &Caps) -> Option<PrimaryStream> {
 }
 
 /// Bare-`decodebin` primary-stream hook for MP4 (M748): the MP4 sibling of
-/// [`ts_primary_stream`]. A `filesrc location=X.m4a ! decodebin` on an audio-only
-/// MP4 needs the single-stream [`Mp4Demux`](crate::mp4demux::Mp4Demux) to select
-/// its audio track (the default is the video port, so the auto-plug would pick a
-/// video decoder and fail "no caps overlap"). Sniff the `moov`; decline (`None`) a
-/// non-MP4 file, a `moov` past the probe window, an empty track set, or a file that
-/// carries a video track (the default video path is right), else return `qtdemux`
-/// with `stream=aac` and the audio elementary caps for the decoder search.
+/// [`ts_primary_stream`]. Selects the file's actual primary stream on the
+/// single-stream [`Mp4Demux`](crate::mp4demux::Mp4Demux): the first video track
+/// with its codec named (M961: the demux port's nominal default is H.264, so a
+/// codec-specific decoder like `rav1ddec` against an AV1 mp4 would otherwise
+/// fail startup negotiation), else the audio track (`stream=aac`, which an
+/// audio-only `.m4a` needs because the default video port would plug a video
+/// decoder and fail "no caps overlap"). Declines a non-MP4 file, a `moov` past
+/// the probe window, an empty track set, or a video codec the demux cannot name.
 #[cfg(feature = "std")]
 pub fn mp4_primary_stream(location: &str, caps: &Caps) -> Option<PrimaryStream> {
     if !matches!(
@@ -1426,15 +1427,19 @@ pub fn mp4_primary_stream(location: &str, caps: &Caps) -> Option<PrimaryStream> 
     }
     let prefix = read_prefix(location)?;
     let infos = crate::mp4demuxn::forwardable_streams(&prefix);
-    // A video track present: the demux's default video port is right, decline.
-    if infos.is_empty() || infos.iter().any(|i| i.video) {
-        return None;
-    }
-    let audio = infos.into_iter().find(|i| !i.video)?;
+    let selected = infos.iter().find(|i| i.video).or_else(|| infos.first())?;
+    let stream = if selected.video {
+        let Caps::CompressedVideo { codec, .. } = selected.caps else {
+            return None;
+        };
+        crate::mp4demux::mp4_video_stream_str(codec)?
+    } else {
+        "aac"
+    };
     Some(PrimaryStream {
         demux: "qtdemux",
-        props: alloc::vec![("stream".to_string(), "aac".to_string())],
-        caps: audio.caps,
+        props: alloc::vec![("stream".to_string(), stream.to_string())],
+        caps: selected.caps.clone(),
     })
 }
 

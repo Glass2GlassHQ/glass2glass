@@ -514,6 +514,9 @@ jobs:
       # ffmpeg, the decode run authors a clip with it.
       - name: decodebin stream selection (matroska primary stream)
         run: cargo test -p g2g-plugins --locked --features rav1d --test m960_decodebin_stream_select -- --nocapture
+      # The MP4 analog (M961): `qtdemux stream=` names the video codec.
+      - name: decodebin stream selection (mp4 primary stream)
+        run: cargo test -p g2g-plugins --locked --features rav1d --test m961_mp4_stream_select -- --nocapture
       # Ogg mux (M789): ffmpeg decodes a g2g-muxed Opus / Vorbis / Ogg-FLAC
       # stream to the source's samples bit for bit.
       - name: Ogg muxer oracle (oggmux vs ffmpeg)
