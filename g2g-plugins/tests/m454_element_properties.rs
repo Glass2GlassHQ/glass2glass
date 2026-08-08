@@ -745,6 +745,156 @@ fn compositor_canvas_and_flattened_pad_placement() {
     );
 }
 
+#[cfg(all(target_os = "linux", feature = "pipewire"))]
+#[tokio::test]
+async fn pipewiresrc_format_rate_and_channels() {
+    use g2g_core::runtime::SourceLoop;
+    use g2g_core::{AudioFormat, Caps, PropError};
+    use g2g_plugins::pipewiresrc::PipeWireSrc;
+    let mut e = PipeWireSrc::new();
+    for name in [
+        "target-object",
+        "format",
+        "samplerate",
+        "channels",
+        "num-buffers",
+    ] {
+        assert!(declares(e.properties(), name), "{name} is declared");
+    }
+    e.set_property("format", PropValue::Str("F32LE".into()))
+        .unwrap();
+    e.set_property("samplerate", PropValue::Uint(44_100))
+        .unwrap();
+    e.set_property("channels", PropValue::Uint(1)).unwrap();
+    assert_eq!(
+        e.get_property("format"),
+        Some(PropValue::Str("F32LE".into()))
+    );
+    assert_eq!(e.get_property("samplerate"), Some(PropValue::Uint(44_100)));
+    assert_eq!(e.get_property("channels"), Some(PropValue::Uint(1)));
+    // all three land on the caps the element opens the stream with
+    assert_eq!(
+        e.intercept_caps().await,
+        Ok(Caps::Audio {
+            format: AudioFormat::PcmF32Le,
+            channels: 1,
+            sample_rate: 44_100,
+        })
+    );
+    // a format with no PCM stream behind it is rejected, never silently kept
+    assert_eq!(
+        e.set_property("format", PropValue::Str("AAC".into())),
+        Err(PropError::Value)
+    );
+}
+
+/// The sink takes its format, rate and channels from the negotiated caps, so it
+/// declares none of them rather than knobs it would have to ignore (same shape
+/// as `alsasink` / `pulsesink`).
+#[cfg(all(target_os = "linux", feature = "pipewire"))]
+#[test]
+fn pipewiresink_declares_only_the_node_target() {
+    use g2g_core::PropError;
+    use g2g_plugins::pipewiresink::PipeWireSink;
+    let mut e = PipeWireSink::new();
+    assert!(declares(e.properties(), "target-object"));
+    for name in ["format", "samplerate", "channels"] {
+        assert!(!declares(e.properties(), name), "{name} is not a sink knob");
+        assert_eq!(
+            e.set_property(name, PropValue::Uint(1)),
+            Err(PropError::Unknown)
+        );
+    }
+    e.set_property("target-object", PropValue::Str("spk0".into()))
+        .unwrap();
+    assert_eq!(
+        e.get_property("target-object"),
+        Some(PropValue::Str("spk0".into()))
+    );
+}
+
+#[cfg(all(target_os = "linux", feature = "pipewire"))]
+#[tokio::test]
+async fn pipewirevideosrc_format_pin_and_geometry() {
+    use g2g_core::runtime::SourceLoop;
+    use g2g_core::{Caps, Dim, Interlace, PropError, Rate, RawVideoFormat};
+    use g2g_plugins::pipewirevideosrc::PipeWireVideoSrc;
+    let mut e = PipeWireVideoSrc::new();
+    for name in [
+        "target-object",
+        "width",
+        "height",
+        "framerate",
+        "format",
+        "num-buffers",
+    ] {
+        assert!(declares(e.properties(), name), "{name} is declared");
+    }
+    e.set_property("width", PropValue::Uint(1280)).unwrap();
+    e.set_property("height", PropValue::Uint(720)).unwrap();
+    e.set_property("framerate", PropValue::Uint(60)).unwrap();
+    e.set_property("format", PropValue::Str("NV12".into()))
+        .unwrap();
+    assert_eq!(
+        e.get_property("format"),
+        Some(PropValue::Str("NV12".into()))
+    );
+    // the pin is what the element advertises, so negotiation commits to the
+    // format up front instead of waiting for a CapsChanged
+    assert_eq!(
+        e.intercept_caps().await,
+        Ok(Caps::RawVideo {
+            format: RawVideoFormat::Nv12,
+            width: Dim::Fixed(1280),
+            height: Dim::Fixed(720),
+            framerate: Rate::Fixed(60 << 16),
+            interlace: Interlace::Any,
+        })
+    );
+    // an empty pin is the open negotiation the element defaults to
+    e.set_property("format", PropValue::Str(String::new()))
+        .unwrap();
+    assert_eq!(
+        e.get_property("format"),
+        Some(PropValue::Str(String::new()))
+    );
+    assert_eq!(
+        e.set_property("format", PropValue::Str("nonsense".into())),
+        Err(PropError::Value)
+    );
+}
+
+/// The other half of the contract: `parse_launch` looks each name up in
+/// `properties()` for its `PropKind` and hands the parsed value to
+/// `set_property`, so a launch line sets every one of them and a value the
+/// element rejects fails the parse instead of being dropped.
+#[cfg(all(target_os = "linux", feature = "pipewire"))]
+#[test]
+fn pipewire_launch_lines_set_every_property() {
+    use g2g_core::runtime::parse_launch;
+    use g2g_plugins::registry::default_registry;
+    let reg = default_registry();
+    for line in [
+        "pipewiresrc target-object=mic0 format=F32LE samplerate=44100 channels=1 num-buffers=2 ! fakesink",
+        "pipewirevideosrc target-object=cam0 format=NV12 width=1280 height=720 framerate=60 num-buffers=2 ! fakesink",
+        "audiotestsrc num-buffers=2 ! pipewiresink target-object=spk0",
+    ] {
+        assert!(
+            parse_launch(&reg, line).is_ok(),
+            "launch line should build a graph: {line}"
+        );
+    }
+    for line in [
+        "pipewiresrc format=AAC ! fakesink",
+        "pipewirevideosrc format=nonsense ! fakesink",
+    ] {
+        assert!(
+            parse_launch(&reg, line).is_err(),
+            "a format the element cannot open must fail the parse: {line}"
+        );
+    }
+}
+
 #[cfg(feature = "wgpu-sink")]
 #[test]
 fn wgpucompositor_shares_the_compositor_properties() {
@@ -793,5 +943,31 @@ fn wgpucompositor_shares_the_compositor_properties() {
         e.set_property("sink3-xpos", PropValue::Int(0)),
         Err(PropError::Value),
         "two pads, so pad 3 does not exist"
+    );
+}
+
+/// M956: the dmabuf-export io-mode is settable from a launch line, and a V4L2
+/// streaming method the element does not implement is refused.
+#[cfg(all(target_os = "linux", feature = "v4l2"))]
+#[test]
+fn v4l2src_io_mode() {
+    use g2g_core::runtime::SourceLoop;
+    use g2g_core::{MemoryDomainKind, PropError};
+    use g2g_plugins::v4l2src::V4l2Src;
+    let mut s = V4l2Src::new("/dev/video0");
+    assert!(declares(s.properties(), "io-mode"));
+    s.set_property("io-mode", PropValue::Str("dmabuf".into()))
+        .unwrap();
+    assert_eq!(
+        s.get_property("io-mode"),
+        Some(PropValue::Str("dmabuf".into()))
+    );
+    // the declared output domain follows the mode, so the solver and the DOT
+    // dump show what a consumer will really be handed.
+    assert_eq!(s.output_memory(), MemoryDomainKind::DmaBuf);
+    assert_eq!(
+        s.set_property("io-mode", PropValue::Str("userptr".into())),
+        Err(PropError::Value),
+        "userptr is not implemented, so it must not be accepted"
     );
 }

@@ -2,6 +2,9 @@
 name = "g2g-bridge"
 description = "C-FFI bridge that embeds glass2glass sub-graphs inside legacy GStreamer pipelines."
 license = "MPL-2.0"
+readme = "README.md"
+keywords = ["gstreamer", "multimedia", "ffi", "bridge", "video"]
+categories = ["multimedia", "external-ffi-bindings"]
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -25,8 +28,8 @@ std = ["g2g-core/std", "g2g-core/runtime", "g2g-core/multi-thread", "g2g-plugins
 gstreamer = ["std"]
 
 [dependencies]
-g2g-core = { path = "../g2g-core" }
-g2g-plugins = { path = "../g2g-plugins" }
+g2g-core = { workspace = true }
+g2g-plugins = { workspace = true }
 tokio = { version = "1", features = ["rt", "time"], optional = true }
 
 [build-dependencies]
@@ -35,3 +38,8 @@ pkg-config = "0.3"
 
 [lints]
 workspace = true
+
+# Default features only: the `gstreamer` feature builds the C shell against the
+# system gstreamer-1.0 dev package, which the docs.rs sandbox does not have.
+[package.metadata.docs.rs]
+features = ["std"]

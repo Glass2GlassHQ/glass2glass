@@ -667,6 +667,14 @@ impl OwnedDmaBuf {
         self.fd.0
     }
 
+    /// How many shares of this buffer are alive, this one counted. A producer
+    /// that lends out a buffer it must recycle (a capture element handing back a
+    /// driver's buffer) keeps one share of its own and recycles when the count
+    /// falls to 1: downstream, and every tee branch, has released the frame.
+    pub fn share_count(&self) -> usize {
+        Arc::strong_count(&self.fd)
+    }
+
     /// Attach a GPU-completion [`SyncFd`] and the timeline `value` this frame's
     /// producer work signals. A consumer host-waits `value` on the imported
     /// semaphore before reading the buffer. Safe: [`SyncFd`] already owns the fd.

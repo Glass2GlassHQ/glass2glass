@@ -1,12 +1,15 @@
 //! Shared PipeWire video helpers for
 //! [`PipeWireVideoSrc`](crate::pipewirevideosrc): the SPA <-> `RawVideoFormat`
-//! mapping, the `EnumFormat` pod a video stream connects with, and the tight
-//! plane layout used to size and de-stride a captured buffer. The video sibling
-//! of [`pwaudio`](crate::pwaudio). Linux-only (`pipewire` feature).
+//! mapping, the `EnumFormat` pod a video stream connects with, the `Buffers` pod
+//! the dma-buf path asks for (plus the block validation that path needs), and the
+//! tight plane layout used to size and de-stride a mapped buffer. The video
+//! sibling of [`pwaudio`](crate::pwaudio). Linux-only (`pipewire` feature).
 
 use alloc::vec::Vec;
 
 use pipewire::spa;
+use spa::sys as spa_sys;
+
 use spa::param::format::{FormatProperties, MediaSubtype, MediaType};
 use spa::param::video::{VideoFormat, VideoInfoRaw};
 use spa::param::ParamType;
@@ -36,6 +39,21 @@ pub(crate) const MAX_DIM: u32 = 16_384;
 /// The formats a `PipeWireVideoSrc` pad template advertises.
 pub(crate) fn supported_formats() -> impl Iterator<Item = RawVideoFormat> {
     FORMATS.iter().map(|(g2g, _)| *g2g)
+}
+
+/// The formats that arrive as a single plane, so a dma-buf carrying one is one
+/// block: the only shape [`MemoryDomain::DmaBuf`](g2g_core::MemoryDomain) carries
+/// (one fd, one stride, one offset).
+pub(crate) fn single_plane_formats() -> impl Iterator<Item = RawVideoFormat> {
+    supported_formats().filter(|f| single_plane_row_bytes(*f, 1).is_some())
+}
+
+/// Row bytes of `format` at `width` when the format is a single plane, else
+/// `None`. Derived from [`PlaneLayout`] so the two cannot disagree on which
+/// formats are planar.
+pub(crate) fn single_plane_row_bytes(format: RawVideoFormat, width: u32) -> Option<usize> {
+    let layout = PlaneLayout::new(format, width, 1)?;
+    (layout.count == 1).then_some(layout.planes[0].0)
 }
 
 /// The SPA format for one of our raw formats, or `None` when the element cannot
@@ -115,19 +133,38 @@ pub(crate) fn rate_q16(num: u32, denom: u32) -> u32 {
     u32::try_from((u64::from(num) << 16) / u64::from(denom)).unwrap_or(u32::MAX)
 }
 
-/// Serialize the `EnumFormat` pod a capture stream connects with: our formats as
-/// an enum choice with `preferred` first, and the requested geometry / rate as
-/// the default of an open range so a node with its own fixed mode still
+/// Which formats a connect pod offers behind its preferred one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FormatOffer {
+    /// Every format the element can carry.
+    All,
+    /// Only the single-plane ones (the dma-buf capture path).
+    SinglePlane,
+    /// None: the caller pinned the preferred format, so a node that cannot
+    /// produce it fails the negotiation.
+    PreferredOnly,
+}
+
+impl FormatOffer {
+    fn includes(self, format: VideoFormat) -> bool {
+        match self {
+            Self::All => true,
+            Self::SinglePlane => single_plane_formats().any(|f| spa_format(f) == Some(format)),
+            Self::PreferredOnly => false,
+        }
+    }
+}
+
+/// Serialize the `EnumFormat` pod a capture stream connects with: the `offer`
+/// formats as an enum choice with `preferred` first, and the requested geometry /
+/// rate as the default of an open range so a node with its own fixed mode still
 /// negotiates (the result arrives via `param_changed`).
-///
-/// With `pinned` the choice offers `preferred` alone, so a node that cannot
-/// produce it fails the negotiation instead of settling on another format.
 ///
 /// The returned bytes back a `Pod::from_bytes` at the call site (kept there so
 /// the borrow lives as long as the `connect` call needs it).
 pub(crate) fn format_pod_bytes(
     preferred: RawVideoFormat,
-    pinned: bool,
+    offer: FormatOffer,
     width: u32,
     height: u32,
     fps: u32,
@@ -138,7 +175,7 @@ pub(crate) fn format_pod_bytes(
         ParamType::EnumFormat,
         property!(FormatProperties::MediaType, Id, MediaType::Video),
         property!(FormatProperties::MediaSubtype, Id, MediaSubtype::Raw),
-        format_choice(preferred, pinned),
+        format_choice(preferred, offer),
         property!(
             FormatProperties::VideoSize,
             Choice,
@@ -204,20 +241,17 @@ pub(crate) fn fixed_format_pod_bytes(
 }
 
 /// The `VideoFormat` enum choice, `preferred` first (it doubles as the choice
-/// default) then the rest of [`FORMATS`], or `preferred` alone when `pinned`.
-/// Built by hand rather than with `property!` because the alternatives come from
-/// the table.
-fn format_choice(preferred: VideoFormat, pinned: bool) -> Property {
+/// default) then whichever of [`FORMATS`] the `offer` includes. Built by hand
+/// rather than with `property!` because the alternatives come from the table.
+fn format_choice(preferred: VideoFormat, offer: FormatOffer) -> Property {
     let mut alternatives = Vec::with_capacity(FORMATS.len());
     alternatives.push(Id(preferred.as_raw()));
-    if !pinned {
-        alternatives.extend(
-            FORMATS
-                .iter()
-                .filter(|(_, spa)| *spa != preferred)
-                .map(|(_, spa)| Id(spa.as_raw())),
-        );
-    }
+    alternatives.extend(
+        FORMATS
+            .iter()
+            .filter(|(_, spa)| *spa != preferred && offer.includes(*spa))
+            .map(|(_, spa)| Id(spa.as_raw())),
+    );
     Property::new(
         FormatProperties::VideoFormat.as_raw(),
         Value::Choice(ChoiceValue::Id(Choice(
@@ -228,6 +262,110 @@ fn format_choice(preferred: VideoFormat, pinned: bool) -> Property {
             },
         ))),
     )
+}
+
+/// Buffer count asked for on the dma-buf path: the element holds a buffer for as
+/// long as downstream references the frame, so a handful of spares keeps the
+/// producer from running dry while a frame is in flight.
+const DMABUF_BUFFERS: (i32, i32, i32) = (8, 2, 16);
+
+/// Serialize the `Buffers` param that asks the producer for dma-buf memory: one
+/// block per buffer (all [`MemoryDomain::DmaBuf`](g2g_core::MemoryDomain) carries
+/// is a single fd) and dma-buf as the only accepted data type, so a producer that
+/// has no dma-buf to give fails the negotiation instead of handing back mapped
+/// memory the element would have to copy. Announced from `param_changed`, before
+/// the buffers are allocated.
+pub(crate) fn dmabuf_buffers_pod_bytes() -> Vec<u8> {
+    let (default, min, max) = DMABUF_BUFFERS;
+    let obj = object! {
+        SpaTypes::ObjectParamBuffers,
+        ParamType::Buffers,
+        Property::new(
+            spa_sys::SPA_PARAM_BUFFERS_dataType,
+            Value::Choice(ChoiceValue::Int(Choice(
+                ChoiceFlags::empty(),
+                ChoiceEnum::Flags {
+                    default: 1 << spa_sys::SPA_DATA_DmaBuf,
+                    flags: Vec::new(),
+                },
+            ))),
+        ),
+        Property::new(spa_sys::SPA_PARAM_BUFFERS_blocks, Value::Int(1)),
+        Property::new(
+            spa_sys::SPA_PARAM_BUFFERS_buffers,
+            Value::Choice(ChoiceValue::Int(Choice(
+                ChoiceFlags::empty(),
+                ChoiceEnum::Range { default, min, max },
+            ))),
+        ),
+    };
+    PodSerializer::serialize(std::io::Cursor::new(Vec::new()), &Value::Object(obj))
+        .expect("serialize SPA dma-buf buffers pod")
+        .0
+        .into_inner()
+}
+
+/// The part of an `spa_data` block the dma-buf path reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DataBlock {
+    pub data_type: u32,
+    pub fd: i64,
+    pub offset: u32,
+    pub size: u32,
+    pub stride: i32,
+    pub maxsize: u32,
+}
+
+/// What the dma-buf capture path makes of a dequeued buffer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DmaBufFrame {
+    /// The descriptor to share downstream.
+    Ready { fd: i32, stride: u32, offset: u32 },
+    /// The node produced nothing this tick (an empty chunk), not an error.
+    Empty,
+    /// Not one dma-buf block holding a frame of the negotiated format, so the
+    /// capture fails instead of handing downstream a descriptor it cannot read.
+    Unusable,
+}
+
+/// Reduce a dequeued buffer's blocks to the descriptor
+/// [`MemoryDomain::DmaBuf`](g2g_core::MemoryDomain) carries.
+pub(crate) fn dmabuf_frame(blocks: &[DataBlock], info: &VideoInfo) -> DmaBufFrame {
+    let [block] = blocks else {
+        return DmaBufFrame::Unusable;
+    };
+    if block.data_type != spa_sys::SPA_DATA_DmaBuf {
+        return DmaBufFrame::Unusable;
+    }
+    if block.size == 0 {
+        return DmaBufFrame::Empty;
+    }
+    match dmabuf_descriptor(block, info) {
+        Some((fd, stride, offset)) => DmaBufFrame::Ready { fd, stride, offset },
+        None => DmaBufFrame::Unusable,
+    }
+}
+
+/// The `(fd, stride, offset)` of a dma-buf block, or `None` when it does not hold
+/// a whole frame of the negotiated format. The daemon's numbers are not trusted:
+/// the fd has to be a real descriptor and the block has to cover the frame at the
+/// stride it reports.
+fn dmabuf_descriptor(block: &DataBlock, info: &VideoInfo) -> Option<(i32, u32, u32)> {
+    let fd = i32::try_from(block.fd).ok()?;
+    if fd < 0 {
+        return None;
+    }
+    let row_bytes = u32::try_from(single_plane_row_bytes(info.format, info.width)?).ok()?;
+    // a producer that reports no stride packs its rows tightly
+    let stride = match block.stride {
+        0 => row_bytes,
+        s => u32::try_from(s).ok()?,
+    };
+    if stride < row_bytes {
+        return None;
+    }
+    let end = stride.checked_mul(info.height)?.checked_add(block.offset)?;
+    (end <= block.maxsize).then_some((fd, stride, block.offset))
 }
 
 /// Tight plane geometry of a captured frame: `(row bytes, rows, stride shift)`
@@ -340,7 +478,8 @@ mod tests {
     #[test]
     fn a_pinned_format_is_the_only_alternative() {
         for (g2g, spa_fmt) in FORMATS {
-            let bytes = format_pod_bytes(g2g, true, 320, 240, 30).expect("supported format");
+            let bytes = format_pod_bytes(g2g, FormatOffer::PreferredOnly, 320, 240, 30)
+                .expect("supported format");
             let (default, alternatives) = pod_format_alternatives(&bytes);
             assert_eq!(default, Id(spa_fmt.as_raw()));
             assert_eq!(alternatives, Vec::from([Id(spa_fmt.as_raw())]));
@@ -350,7 +489,8 @@ mod tests {
     #[test]
     fn enum_format_pod_round_trips() {
         for (g2g, spa_fmt) in FORMATS {
-            let bytes = format_pod_bytes(g2g, false, 320, 240, 30).expect("supported format");
+            let bytes =
+                format_pod_bytes(g2g, FormatOffer::All, 320, 240, 30).expect("supported format");
             let (_, value) =
                 PodDeserializer::deserialize_any_from(&bytes).expect("our pod deserializes");
             let Value::Object(obj) = value else {
@@ -469,8 +609,177 @@ mod tests {
     #[test]
     fn a_format_the_element_cannot_carry_has_no_pod() {
         assert_eq!(
-            format_pod_bytes(RawVideoFormat::P010, false, 320, 240, 30),
+            format_pod_bytes(RawVideoFormat::P010, FormatOffer::All, 320, 240, 30),
             Err(G2gError::CapsMismatch)
+        );
+    }
+
+    /// The dma-buf path offers single-plane formats alone: a planar frame arrives
+    /// as one SPA block per plane, and the `DmaBuf` domain carries a single fd.
+    #[test]
+    fn the_single_plane_offer_drops_the_planar_formats() {
+        assert_eq!(
+            single_plane_formats().collect::<Vec<_>>(),
+            Vec::from([
+                RawVideoFormat::Yuyv,
+                RawVideoFormat::Rgba8,
+                RawVideoFormat::Bgra8
+            ])
+        );
+        let bytes = format_pod_bytes(
+            RawVideoFormat::Bgra8,
+            FormatOffer::SinglePlane,
+            320,
+            240,
+            30,
+        )
+        .expect("supported format");
+        let (default, alternatives) = pod_format_alternatives(&bytes);
+        assert_eq!(default, Id(VideoFormat::BGRA.as_raw()));
+        assert_eq!(
+            alternatives,
+            Vec::from([
+                Id(VideoFormat::BGRA.as_raw()),
+                Id(VideoFormat::YUY2.as_raw()),
+                Id(VideoFormat::RGBA.as_raw()),
+            ])
+        );
+        assert_eq!(
+            single_plane_row_bytes(RawVideoFormat::Bgra8, 320),
+            Some(1280)
+        );
+        assert_eq!(single_plane_row_bytes(RawVideoFormat::Yuyv, 320), Some(640));
+        assert_eq!(single_plane_row_bytes(RawVideoFormat::Nv12, 320), None);
+    }
+
+    /// The `Buffers` param the dma-buf path announces: dma-buf as the only
+    /// accepted memory type, one block per buffer.
+    #[test]
+    fn the_dmabuf_buffers_pod_demands_dmabuf_memory() {
+        let bytes = dmabuf_buffers_pod_bytes();
+        let (_, value) =
+            PodDeserializer::deserialize_any_from(&bytes).expect("our pod deserializes");
+        let Value::Object(obj) = value else {
+            panic!("expected an object pod");
+        };
+        assert_eq!(obj.type_, SpaTypes::ObjectParamBuffers.as_raw());
+        assert_eq!(obj.id, ParamType::Buffers.as_raw());
+        let prop = |key: u32| {
+            obj.properties
+                .iter()
+                .find(|p| p.key == key)
+                .map(|p| p.value.clone())
+                .unwrap_or_else(|| panic!("pod carries {key}"))
+        };
+        let Value::Choice(ChoiceValue::Int(Choice(_, ChoiceEnum::Flags { default, .. }))) =
+            prop(spa_sys::SPA_PARAM_BUFFERS_dataType)
+        else {
+            panic!("dataType is a flags choice");
+        };
+        assert_eq!(default, 1 << spa_sys::SPA_DATA_DmaBuf);
+        // mapped memory is not on offer: no silent copy path
+        assert_eq!(default & (1 << spa_sys::SPA_DATA_MemPtr), 0);
+        assert_eq!(default & (1 << spa_sys::SPA_DATA_MemFd), 0);
+        assert_eq!(prop(spa_sys::SPA_PARAM_BUFFERS_blocks), Value::Int(1));
+        let Value::Choice(ChoiceValue::Int(Choice(_, ChoiceEnum::Range { default, min, .. }))) =
+            prop(spa_sys::SPA_PARAM_BUFFERS_buffers)
+        else {
+            panic!("buffers is a range choice");
+        };
+        assert_eq!((default, min), (DMABUF_BUFFERS.0, DMABUF_BUFFERS.1));
+    }
+
+    /// A dequeued dma-buf buffer yields the descriptor to share downstream, and
+    /// anything that is not one dma-buf block covering the frame is rejected
+    /// instead of being handed on.
+    #[test]
+    fn a_dmabuf_block_is_validated_against_the_negotiated_format() {
+        let info = VideoInfo {
+            format: RawVideoFormat::Bgra8,
+            width: 4,
+            height: 2,
+            fps_num: 30,
+            fps_denom: 1,
+        };
+        let good = DataBlock {
+            data_type: spa_sys::SPA_DATA_DmaBuf,
+            fd: 7,
+            offset: 0,
+            size: 32,
+            stride: 16,
+            maxsize: 32,
+        };
+        assert_eq!(
+            dmabuf_frame(&[good], &info),
+            DmaBufFrame::Ready {
+                fd: 7,
+                stride: 16,
+                offset: 0
+            }
+        );
+        // a padded stride is honoured as long as the block covers it
+        assert_eq!(
+            dmabuf_frame(
+                &[DataBlock {
+                    stride: 24,
+                    maxsize: 64,
+                    offset: 8,
+                    ..good
+                }],
+                &info
+            ),
+            DmaBufFrame::Ready {
+                fd: 7,
+                stride: 24,
+                offset: 8
+            }
+        );
+        // no stride reported means tight rows
+        assert_eq!(
+            dmabuf_frame(&[DataBlock { stride: 0, ..good }], &info),
+            DmaBufFrame::Ready {
+                fd: 7,
+                stride: 16,
+                offset: 0
+            }
+        );
+        // an empty chunk is a tick, not a failure
+        assert_eq!(
+            dmabuf_frame(&[DataBlock { size: 0, ..good }], &info),
+            DmaBufFrame::Empty
+        );
+        // mapped memory, a missing fd, a stride narrower than a row, a block that
+        // does not cover the frame, and a planar format all fail loudly
+        for bad in [
+            DataBlock {
+                data_type: spa_sys::SPA_DATA_MemFd,
+                ..good
+            },
+            DataBlock { fd: -1, ..good },
+            DataBlock { stride: 8, ..good },
+            DataBlock {
+                maxsize: 31,
+                ..good
+            },
+            DataBlock { offset: 8, ..good },
+        ] {
+            assert_eq!(
+                dmabuf_frame(&[bad], &info),
+                DmaBufFrame::Unusable,
+                "{bad:?}"
+            );
+        }
+        assert_eq!(dmabuf_frame(&[], &info), DmaBufFrame::Unusable);
+        assert_eq!(dmabuf_frame(&[good, good], &info), DmaBufFrame::Unusable);
+        assert_eq!(
+            dmabuf_frame(
+                &[good],
+                &VideoInfo {
+                    format: RawVideoFormat::Nv12,
+                    ..info
+                }
+            ),
+            DmaBufFrame::Unusable
         );
     }
 

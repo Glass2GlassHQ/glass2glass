@@ -1,16 +1,28 @@
-//! V4L2 capture source. Streams packed YUYV (4:2:2) frames off a UVC
-//! `/dev/videoN` device via mmap streaming I/O. Linux-only (`v4l2` feature).
+//! V4L2 capture source. Streams frames off a `/dev/videoN` device via mmap
+//! streaming I/O. Linux-only (`v4l2` feature).
 //!
-//! Pipeline shape: `V4l2Src -> VideoConvert(Yuyv -> Nv12/I420/Rgba8) -> sink`.
-//! YUYV is the near-universal UVC output; `VideoConvert` unpacks it (M89).
+//! The device decides which formats exist and negotiation decides which one is
+//! used: the probe enumerates the device's pixel formats, advertises every one
+//! [`CapturePixelFormat`] covers, and the capture thread runs whichever the
+//! solver fixed. Packed YUYV comes first in that set, so a chain that accepts
+//! anything (`V4l2Src -> VideoConvert -> sink`, M89) still gets the raw UVC
+//! output it always did. Pinning the link to `image/jpeg` instead selects the
+//! camera's MJPEG mode, which fits resolutions and frame rates over USB that
+//! uncompressed YUYV cannot; `MjpegDec` decodes it downstream.
 //!
 //! V4L2's ioctls are blocking, so the capture loop runs on a dedicated std
-//! thread that feeds the async `run` loop over a bounded channel. The format
-//! is negotiated up front in [`intercept_caps`](V4l2Src::intercept_caps) (the
-//! driver may adjust the requested geometry and frame rate), and the capture
-//! thread re-opens the device under that exact format. Keeping the device out
+//! thread that feeds the async `run` loop over a bounded channel. The formats
+//! are probed in [`intercept_caps`](V4l2Src::intercept_caps) (the driver may
+//! adjust the requested geometry and frame rate per format), and the capture
+//! thread re-opens the device under the negotiated one. Keeping the device out
 //! of the struct between negotiation and `run` sidesteps `Send`/borrow
 //! entanglement with the mmap stream, which borrows the device.
+//!
+//! `io-mode=dmabuf` replaces that copy with an export: the driver's MMAP buffers
+//! are exported once (`VIDIOC_EXPBUF`) as dma-buf fds and each frame carries a
+//! share of the fd its buffer was filled into, so a GPU consumer imports the
+//! camera buffer directly. The buffer is the frame, so it goes back to the
+//! driver only once every share of it has dropped; see [`ExportedQueue`].
 
 use core::future::Future;
 use core::pin::Pin;
@@ -20,21 +32,30 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
+use g2g_core::memory::{OwnedDmaBuf, SystemSlice};
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, FrameTiming, G2gError,
-    HardwareError, LatencyReport, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
-    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat,
+    HardwareError, LatencyReport, MemoryDomain, MemoryDomainKind, OutputSink, PadTemplate,
+    PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate,
 };
+
+use crate::capturepixelformat::CapturePixelFormat;
+
+use std::sync::Arc;
 
 use v4l::buffer::Type;
 use v4l::control::{Control, Value as ControlValue};
+use v4l::device::Handle;
 use v4l::io::traits::CaptureStream;
+use v4l::memory::Memory;
 use v4l::prelude::{Device, MmapStream};
+use v4l::timestamp::Timestamp;
+use v4l::v4l2::vidioc;
 use v4l::v4l_sys::{
-    V4L2_CID_AUTO_WHITE_BALANCE, V4L2_CID_EXPOSURE_ABSOLUTE, V4L2_CID_EXPOSURE_AUTO,
-    V4L2_CID_FOCUS_ABSOLUTE, V4L2_CID_FOCUS_AUTO, V4L2_CID_WHITE_BALANCE_TEMPERATURE,
+    v4l2_buffer, v4l2_exportbuffer, v4l2_requestbuffers, V4L2_CID_AUTO_WHITE_BALANCE,
+    V4L2_CID_EXPOSURE_ABSOLUTE, V4L2_CID_EXPOSURE_AUTO, V4L2_CID_FOCUS_ABSOLUTE,
+    V4L2_CID_FOCUS_AUTO, V4L2_CID_WHITE_BALANCE_TEMPERATURE,
 };
 use v4l::video::capture::Parameters;
 use v4l::video::Capture;
@@ -48,8 +69,93 @@ const DEFAULT_FPS: u32 = 30;
 /// channel bound, so the capture thread blocks (backpressure) rather than
 /// outrunning the pipeline.
 const BUFFER_COUNT: u32 = 4;
-/// The only fourcc we negotiate. UVC cameras universally support it.
-const YUYV: &[u8; 4] = b"YUYV";
+/// Frames the dmabuf path lets sit in the channel. A dmabuf frame *is* the
+/// driver's buffer until it drops, so this stays below [`BUFFER_COUNT`]: the
+/// queued channel plus the one frame the pipeline is working on still leaves the
+/// driver a buffer to fill.
+const DMABUF_INFLIGHT: usize = BUFFER_COUNT as usize - 2;
+/// How long the dmabuf capture loop waits before re-checking for a released
+/// buffer when every one of them is still downstream. Well under a frame period,
+/// so a release is picked up promptly.
+const DMABUF_RELEASE_POLL: core::time::Duration = core::time::Duration::from_millis(1);
+
+/// The V4L2 fourccs this element carries, in the order they are advertised.
+/// Packed YUYV leads: it is the near-universal UVC raw output, and a chain that
+/// pins nothing takes the first alternative. MJPEG comes last because it needs
+/// a decoder downstream. A device format missing from this table is skipped,
+/// since there is no `Caps` to carry it on.
+const FOURCCS: [(&[u8; 4], CapturePixelFormat); 4] = [
+    (b"YUYV", CapturePixelFormat::Yuyv),
+    (b"NV12", CapturePixelFormat::Nv12),
+    (b"YU12", CapturePixelFormat::I420),
+    (b"MJPG", CapturePixelFormat::Mjpeg),
+];
+
+/// The format a V4L2 fourcc carries, `None` for one no `Caps` covers.
+pub fn format_for_fourcc(fourcc: &[u8; 4]) -> Option<CapturePixelFormat> {
+    FOURCCS
+        .iter()
+        .find(|(code, _)| *code == fourcc)
+        .map(|(_, format)| *format)
+}
+
+/// How a captured buffer leaves the element, the `io-mode` property's values.
+/// `Auto` and `Mmap` both copy the mmap'd buffer into system memory (`Auto` is
+/// what a driver-chosen default would pick, and MMAP is the only streaming
+/// method this element implements).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum IoMode {
+    #[default]
+    Auto,
+    Mmap,
+    /// Export the MMAP buffers as dma-buf fds and emit frames in
+    /// [`MemoryDomain::DmaBuf`], no copy.
+    DmaBuf,
+}
+
+/// The `io-mode` values this element accepts, and the only place their names are
+/// written. The V4L2 methods it does not implement (`rw`, `userptr`,
+/// `dmabuf-import`) are absent, so asking for one is refused.
+const IO_MODES: [(&str, IoMode); 3] = [
+    ("auto", IoMode::Auto),
+    ("mmap", IoMode::Mmap),
+    ("dmabuf", IoMode::DmaBuf),
+];
+
+impl IoMode {
+    fn name(self) -> &'static str {
+        IO_MODES
+            .iter()
+            .find(|(_, mode)| *mode == self)
+            .map(|(name, _)| *name)
+            .unwrap_or("auto")
+    }
+
+    /// Whether a capture format can be carried in this mode. An exported dma-buf
+    /// describes no payload length, so a compressed format's variable-length
+    /// access unit (MJPEG) cannot be read out of the fd alone: only raw formats
+    /// are offered for dmabuf export.
+    fn carries(self, format: CapturePixelFormat) -> bool {
+        self != IoMode::DmaBuf || format.raw_format().is_some()
+    }
+}
+
+/// One capture mode the device confirmed: the fourcc to set plus the geometry
+/// and rate the driver reported back for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Mode {
+    fourcc: [u8; 4],
+    format: CapturePixelFormat,
+    width: u32,
+    height: u32,
+    fps: u32,
+}
+
+impl Mode {
+    fn caps(&self) -> Caps {
+        self.format.caps(self.width, self.height, self.fps)
+    }
+}
 
 /// Map a V4L2 / OS error to the reserved `G2gError::V4l2` arm, preserving the
 /// errno where one exists.
@@ -164,12 +270,20 @@ fn apply_controls(dev: &Device, values: &ControlValues) -> Result<(), G2gError> 
     Ok(())
 }
 
-/// One completed capture handed to the async loop: the payload bytes plus the
-/// driver's buffer timestamp in nanoseconds (`None` when the driver left it at
-/// zero, which is how an absent timestamp shows up).
+/// What a completed capture carries: bytes copied out of the mmap'd buffer, or a
+/// share of the dma-buf fd the driver filled (no copy).
+#[derive(Debug)]
+enum CapturedPayload {
+    Bytes(Vec<u8>),
+    DmaBuf(OwnedDmaBuf),
+}
+
+/// One completed capture handed to the async loop: the payload plus the driver's
+/// buffer timestamp in nanoseconds (`None` when the driver left it at zero, which
+/// is how an absent timestamp shows up).
 #[derive(Debug)]
 struct Captured {
-    bytes: Vec<u8>,
+    payload: CapturedPayload,
     timestamp_ns: Option<u64>,
 }
 
@@ -187,6 +301,234 @@ fn buffer_timestamp_ns(ts: &v4l::timestamp::Timestamp) -> Option<u64> {
     )
 }
 
+/// One ioctl on the capture fd, with the errno kept in the reserved V4L2 error
+/// arm.
+///
+/// # Safety
+/// `arg` must be the argument struct `request` is defined over (the
+/// `vidioc::VIDIOC_*` constant names it), since the kernel reads and writes it
+/// through the pointer.
+unsafe fn capture_ioctl<T>(
+    fd: core::ffi::c_int,
+    request: vidioc::_IOC_TYPE,
+    arg: &mut T,
+) -> Result<(), G2gError> {
+    // SAFETY: the argument type is this function's contract, and `arg` is a live
+    // exclusive borrow for the whole call.
+    unsafe { v4l::v4l2::ioctl(fd, request, arg as *mut T as *mut core::ffi::c_void) }
+        .map_err(|e| v4l2_err(&e))
+}
+
+/// A zeroed V4L2 ioctl argument. Every one of these is plain kernel-ABI data
+/// whose reserved fields must be zero.
+fn zeroed_arg<T>() -> T {
+    // SAFETY: the V4L2 argument structs are `repr(C)` plain data (integers and
+    // unions of integers) for which all-zero is the "nothing requested" value.
+    unsafe { core::mem::zeroed() }
+}
+
+/// A capture-buffer descriptor for the MMAP queue, pre-filled for `index`.
+fn mmap_buffer_arg(index: u32) -> v4l2_buffer {
+    let mut buf: v4l2_buffer = zeroed_arg();
+    buf.type_ = Type::VideoCapture as u32;
+    buf.memory = Memory::Mmap as u32;
+    buf.index = index;
+    buf
+}
+
+/// The driver's MMAP buffers, exported once as dma-buf fds and handed downstream
+/// without a copy.
+///
+/// The invariant this type exists to hold: a dequeued buffer is the frame, so it
+/// must not go back to the driver while any share of its fd is alive. The element
+/// keeps its own share of every buffer for the whole stream (so an fd is never
+/// closed mid-stream and `VIDIOC_EXPBUF` runs once per buffer, not once per
+/// frame), and [`refill`](Self::refill) re-queues exactly those buffers whose
+/// share count is back to that one reference. With all [`BUFFER_COUNT`] buffers
+/// held downstream there is nothing to dequeue and the capture loop waits, which
+/// is backpressure rather than a deadlock: [`DMABUF_INFLIGHT`] bounds the
+/// pipeline below `BUFFER_COUNT` so it cannot hold them all.
+struct ExportedQueue {
+    /// The device handle the ioctls go to, kept so the fd outlives the queue.
+    handle: Arc<Handle>,
+    /// The element's own share of each exported buffer, indexed by V4L2 buffer
+    /// index.
+    buffers: Vec<OwnedDmaBuf>,
+    /// Whether the driver currently owns buffer `i`.
+    queued: Vec<bool>,
+    streaming: bool,
+}
+
+/// Hand-written because the `v4l` crate's device `Handle` is not `Debug`.
+impl core::fmt::Debug for ExportedQueue {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ExportedQueue")
+            .field("fd", &self.handle.fd())
+            .field("buffers", &self.buffers)
+            .field("queued", &self.queued)
+            .field("streaming", &self.streaming)
+            .finish()
+    }
+}
+
+impl ExportedQueue {
+    /// Allocate the MMAP buffers and export each one as a dma-buf fd. `stride` is
+    /// the driver's `bytesperline` for the negotiated format, carried on every
+    /// exported buffer so a consumer can address rows.
+    fn new(dev: &Device, stride: u32) -> Result<Self, G2gError> {
+        let handle = dev.handle();
+        let fd = handle.fd();
+
+        let mut request: v4l2_requestbuffers = zeroed_arg();
+        request.count = BUFFER_COUNT;
+        request.type_ = Type::VideoCapture as u32;
+        request.memory = Memory::Mmap as u32;
+        // SAFETY: `v4l2_requestbuffers` is VIDIOC_REQBUFS's argument type.
+        unsafe { capture_ioctl(fd, vidioc::VIDIOC_REQBUFS, &mut request) }?;
+        // A driver may grant fewer buffers than asked for, but none at all leaves
+        // nothing to capture into.
+        if request.count == 0 {
+            return Err(G2gError::Hardware(HardwareError::V4l2(-1)));
+        }
+
+        let mut buffers = Vec::with_capacity(request.count as usize);
+        for index in 0..request.count {
+            let mut export: v4l2_exportbuffer = zeroed_arg();
+            export.type_ = Type::VideoCapture as u32;
+            export.index = index;
+            // SAFETY: `v4l2_exportbuffer` is VIDIOC_EXPBUF's argument type.
+            unsafe { capture_ioctl(fd, vidioc::VIDIOC_EXPBUF, &mut export) }?;
+            if export.fd < 0 {
+                return Err(G2gError::Hardware(HardwareError::V4l2(-1)));
+            }
+            // SAFETY: VIDIOC_EXPBUF just minted this fd for this process and
+            // nothing else owns it; `OwnedDmaBuf` closes it on the last share.
+            buffers.push(unsafe { OwnedDmaBuf::from_raw(export.fd, stride, 0) });
+        }
+
+        let queued = buffers.iter().map(|_| false).collect();
+        Ok(Self {
+            handle,
+            buffers,
+            queued,
+            streaming: false,
+        })
+    }
+
+    fn queue(&mut self, index: usize) -> Result<(), G2gError> {
+        let mut buf = mmap_buffer_arg(index as u32);
+        // SAFETY: `v4l2_buffer` is VIDIOC_QBUF's argument type.
+        unsafe { capture_ioctl(self.handle.fd(), vidioc::VIDIOC_QBUF, &mut buf) }?;
+        self.queued[index] = true;
+        Ok(())
+    }
+
+    /// Queue every buffer and start streaming.
+    fn start(&mut self) -> Result<(), G2gError> {
+        for index in 0..self.buffers.len() {
+            self.queue(index)?;
+        }
+        let mut buf_type = Type::VideoCapture as core::ffi::c_int;
+        // SAFETY: VIDIOC_STREAMON takes a buffer-type int.
+        unsafe { capture_ioctl(self.handle.fd(), vidioc::VIDIOC_STREAMON, &mut buf_type) }?;
+        self.streaming = true;
+        Ok(())
+    }
+
+    /// Hand back every buffer whose frame downstream has dropped, and report how
+    /// many the driver now holds. Zero means every buffer is still in flight, so
+    /// there is nothing to dequeue until a consumer releases one.
+    fn refill(&mut self) -> Result<usize, G2gError> {
+        for index in 0..self.buffers.len() {
+            if !self.queued[index] && self.buffers[index].share_count() == 1 {
+                self.queue(index)?;
+            }
+        }
+        Ok(self.queued.iter().filter(|queued| **queued).count())
+    }
+
+    /// Block until the driver has filled a buffer, then take that buffer out of
+    /// the queue. Returns its index, the bytes the driver wrote, and its capture
+    /// timestamp.
+    fn dequeue(&mut self) -> Result<(usize, u32, Option<u64>), G2gError> {
+        self.handle
+            .poll(libc::POLLIN, -1)
+            .map_err(|e| v4l2_err(&e))?;
+        let mut buf = mmap_buffer_arg(0);
+        // SAFETY: `v4l2_buffer` is VIDIOC_DQBUF's argument type.
+        unsafe { capture_ioctl(self.handle.fd(), vidioc::VIDIOC_DQBUF, &mut buf) }?;
+        let index = buf.index as usize;
+        // The index comes from the driver, and indexing on it would panic if a
+        // buggy one reported a buffer outside the queue it allocated.
+        if index >= self.buffers.len() {
+            return Err(G2gError::Hardware(HardwareError::V4l2(-1)));
+        }
+        self.queued[index] = false;
+        Ok((
+            index,
+            buf.bytesused,
+            buffer_timestamp_ns(&Timestamp::from(buf.timestamp)),
+        ))
+    }
+}
+
+impl Drop for ExportedQueue {
+    fn drop(&mut self) {
+        if self.streaming {
+            let mut buf_type = Type::VideoCapture as core::ffi::c_int;
+            // SAFETY: VIDIOC_STREAMOFF takes a buffer-type int. A teardown error
+            // has nowhere to go: closing the device fd releases the queue anyway.
+            let _ =
+                unsafe { capture_ioctl(self.handle.fd(), vidioc::VIDIOC_STREAMOFF, &mut buf_type) };
+        }
+        // No REQBUFS(0) here: a driver refuses to free buffers while an exported
+        // dma-buf fd is still open, and a frame may well outlive the stream. The
+        // queue is released when the device fd closes, and the buffer memory when
+        // the last share of its fd drops.
+    }
+}
+
+/// The dmabuf capture loop, run on the capture thread. Exports the MMAP buffers
+/// once, then hands each dequeued buffer downstream as a share of its fd.
+fn capture_dmabuf(
+    device: &str,
+    mode: Mode,
+    min_bytes: usize,
+    tx: &tokio::sync::mpsc::Sender<Captured>,
+) -> Result<(), G2gError> {
+    let dev = Device::with_path(device).map_err(|e| v4l2_err(&e))?;
+    let format = Format::new(mode.width, mode.height, FourCC::new(&mode.fourcc));
+    // The driver's own bytesperline for the format it accepted, not a computed
+    // one: a device may pad rows.
+    let actual = dev.set_format(&format).map_err(|e| v4l2_err(&e))?;
+    let _ = dev.set_params(&Parameters::with_fps(mode.fps));
+
+    let mut queue = ExportedQueue::new(&dev, actual.stride)?;
+    queue.start()?;
+    loop {
+        while queue.refill()? == 0 {
+            std::thread::sleep(DMABUF_RELEASE_POLL);
+        }
+        let (index, bytesused, timestamp_ns) = queue.dequeue()?;
+        // A short frame (a driver hiccup) cannot be unpacked. Leaving it unsent
+        // re-queues its buffer on the next pass instead of pushing a malformed
+        // frame down the pipeline.
+        if (bytesused as usize) < min_bytes {
+            continue;
+        }
+        let captured = Captured {
+            payload: CapturedPayload::DmaBuf(queue.buffers[index].clone()),
+            timestamp_ns,
+        };
+        // Err means the receiver was dropped (limit reached or the pipeline shut
+        // down).
+        if tx.blocking_send(captured).is_err() {
+            break;
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug)]
 pub struct V4l2Src {
     device: String,
@@ -199,13 +541,17 @@ pub struct V4l2Src {
     req_width: u32,
     req_height: u32,
     req_fps: u32,
+    io_mode: IoMode,
     /// 0 means run until error or downstream shutdown; otherwise stop after
     /// this many frames and emit EOS (the test / bounded-capture path).
     frame_limit: u64,
-    /// Driver-chosen `(width, height, fps)`, filled by `intercept_caps`. The
-    /// driver may snap the request to a supported mode, so these are the real
-    /// numbers the capture thread and the emitted caps use.
-    negotiated: Option<(u32, u32, u32)>,
+    /// Every mode the device confirmed during the probe, in advertised
+    /// preference order. Cached: negotiation runs more than once, and each
+    /// probe is a round of ioctls. Cleared when a property changes the request.
+    modes: Vec<Mode>,
+    /// The mode negotiation settled on, filled by `configure_pipeline` from the
+    /// caps the solver fixed. The capture thread runs exactly this.
+    chosen: Option<Mode>,
     configured: bool,
 }
 
@@ -220,8 +566,10 @@ impl V4l2Src {
             req_width: DEFAULT_WIDTH,
             req_height: DEFAULT_HEIGHT,
             req_fps: DEFAULT_FPS,
+            io_mode: IoMode::default(),
             frame_limit: 0,
-            negotiated: None,
+            modes: Vec::new(),
+            chosen: None,
             configured: false,
         }
     }
@@ -231,6 +579,7 @@ impl V4l2Src {
     pub fn with_size(mut self, width: u32, height: u32) -> Self {
         self.req_width = width;
         self.req_height = height;
+        self.modes.clear();
         self
     }
 
@@ -240,6 +589,7 @@ impl V4l2Src {
     /// feeds the advertised caps, the latency report, and the fallback period.
     pub fn with_fps(mut self, fps: u32) -> Self {
         self.req_fps = fps;
+        self.modes.clear();
         self
     }
 
@@ -250,12 +600,23 @@ impl V4l2Src {
         self
     }
 
+    /// Choose how buffers leave the element. [`IoMode::DmaBuf`] exports the
+    /// driver's capture buffers and emits them in [`MemoryDomain::DmaBuf`]
+    /// without a copy, which restricts the advertised formats to the raw ones
+    /// (an exported fd carries no payload length, so MJPEG cannot travel that
+    /// way).
+    pub fn with_io_mode(mut self, mode: IoMode) -> Self {
+        self.io_mode = mode;
+        self
+    }
+
     /// Select the camera by the persistent id the device monitor reports for
     /// it, resolved to a node path at negotiation. Overrides
     /// [`new`](Self::new)'s path.
     pub fn with_device_id(mut self, id: impl Into<String>) -> Self {
         self.device_id = id.into();
         self.device_resolved = false;
+        self.modes.clear();
         self
     }
 
@@ -273,36 +634,91 @@ impl V4l2Src {
         Ok(())
     }
 
-    /// Open the device, set YUYV at the requested geometry, and read back what
-    /// the driver actually chose. The probe device is dropped before `run`.
-    fn negotiate(&mut self) -> Result<Caps, G2gError> {
+    /// Probe the device: for every fourcc it reports that [`FOURCCS`] covers,
+    /// set that format at the requested geometry and read back what the driver
+    /// actually chose. Caches the confirmed modes in preference order; the
+    /// probe device is dropped before `run`.
+    fn probe_modes(&mut self) -> Result<&[Mode], G2gError> {
+        if !self.modes.is_empty() {
+            return Ok(&self.modes);
+        }
         self.resolve_device()?;
         let dev = Device::with_path(&self.device).map_err(|e| v4l2_err(&e))?;
         // Controls are device state, not per-fd, so applying them on the probe
         // handle holds for the capture thread's own open.
         apply_controls(&dev, &self.controls)?;
-        let fmt = Format::new(self.req_width, self.req_height, FourCC::new(YUYV));
-        let actual = dev.set_format(&fmt).map_err(|e| v4l2_err(&e))?;
-        if &actual.fourcc.repr != YUYV {
-            // The device cannot produce YUYV (it snapped to MJPEG or similar).
-            // A format-flexible source / decode-through-MJPEG path is future
-            // work; for now this is an unsupported configuration.
+        let reported = dev.enum_formats().map_err(|e| v4l2_err(&e))?;
+
+        // Kept so a probe that confirms nothing reports why (a camera already
+        // streaming in another process refuses every set_format with EBUSY)
+        // instead of a bare caps mismatch.
+        let mut refusal: Option<G2gError> = None;
+        for (fourcc, format) in FOURCCS {
+            if !reported.iter().any(|d| &d.fourcc.repr == fourcc) {
+                continue;
+            }
+            let fmt = Format::new(self.req_width, self.req_height, FourCC::new(fourcc));
+            // A driver that rejects one format, substitutes another, or reports
+            // a degenerate geometry leaves that format out rather than failing
+            // the whole probe: the remaining formats may still work.
+            let actual = match dev.set_format(&fmt) {
+                Ok(actual) => actual,
+                Err(e) => {
+                    refusal.get_or_insert_with(|| v4l2_err(&e));
+                    continue;
+                }
+            };
+            if &actual.fourcc.repr != fourcc || actual.width == 0 || actual.height == 0 {
+                continue;
+            }
+            // Frame rate is per format and best-effort: many UVC cams ignore
+            // set_params for some modes, so fall back to the request when the
+            // read-back is unusable.
+            let fps = match dev.set_params(&Parameters::with_fps(self.req_fps)) {
+                Ok(p) if p.interval.numerator > 0 => p.interval.denominator / p.interval.numerator,
+                _ => self.req_fps,
+            };
+            self.modes.push(Mode {
+                fourcc: *fourcc,
+                format,
+                width: actual.width,
+                height: actual.height,
+                fps,
+            });
+        }
+
+        if self.modes.is_empty() {
+            // Either the device refused every format, or it offers nothing this
+            // element can carry (a greyscale or bayer-only sensor, say).
+            return Err(refusal.unwrap_or(G2gError::CapsMismatch));
+        }
+        Ok(&self.modes)
+    }
+
+    /// The confirmed modes negotiation may settle on, in preference order: every
+    /// one the device offers, less those the current `io-mode` cannot carry.
+    fn advertised_modes(&mut self) -> Result<Vec<Mode>, G2gError> {
+        let io_mode = self.io_mode;
+        let modes: Vec<Mode> = self
+            .probe_modes()?
+            .iter()
+            .copied()
+            .filter(|mode| io_mode.carries(mode.format))
+            .collect();
+        // A camera with nothing but an MJPEG mode has no format to export, so
+        // dmabuf capture fails negotiation rather than silently copying.
+        if modes.is_empty() {
             return Err(G2gError::CapsMismatch);
         }
-        // Frame rate is best-effort: many UVC cams ignore set_params for some
-        // modes, so fall back to the request when the read-back is unusable.
-        let fps = match dev.set_params(&Parameters::with_fps(self.req_fps)) {
-            Ok(p) if p.interval.numerator > 0 => p.interval.denominator / p.interval.numerator,
-            _ => self.req_fps,
-        };
-        self.negotiated = Some((actual.width, actual.height, fps));
-        Ok(Caps::RawVideo {
-            format: RawVideoFormat::Yuyv,
-            width: Dim::Fixed(actual.width),
-            height: Dim::Fixed(actual.height),
-            framerate: Rate::Fixed(fps << 16),
-            interlace: g2g_core::Interlace::Any,
-        })
+        Ok(modes)
+    }
+
+    /// Every format the device confirmed, in preference order, as the set the
+    /// solver picks from.
+    fn produced_caps(&mut self) -> Result<CapsSet, G2gError> {
+        Ok(CapsSet::from_alternatives(
+            self.advertised_modes()?.iter().map(Mode::caps).collect(),
+        ))
     }
 }
 
@@ -319,25 +735,39 @@ impl SourceLoop for V4l2Src {
 
     fn intercept_caps<'a>(&'a mut self) -> Self::CapsFuture<'a> {
         // The probe ioctls are quick and synchronous; no need for an async body.
-        core::future::ready(self.negotiate())
-    }
-
-    /// Produces the YUYV caps the driver settles on during the ioctl probe, so a
-    /// chain built on the camera takes the native arc-consistency path. Mirrors
-    /// `UdpSrc`; the probe is synchronous, so no async body is needed.
-    fn caps_constraint<'a>(
-        &'a mut self,
-    ) -> impl Future<Output = Result<CapsConstraint<'a>, G2gError>> + 'a {
+        // Single-caps callers get the preferred format (YUYV where the device
+        // has it); the whole set travels through `caps_constraint`.
         core::future::ready(
-            self.negotiate()
-                .map(|caps| CapsConstraint::Produces(CapsSet::one(caps))),
+            self.advertised_modes()
+                .and_then(|modes| modes.first().map(Mode::caps).ok_or(G2gError::CapsMismatch)),
         )
     }
 
-    fn configure_pipeline(&mut self, _absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        if self.negotiated.is_none() {
+    /// Produces every format the device confirmed during the ioctl probe, in
+    /// preference order, so the solver settles the link on the one downstream
+    /// wants (raw for a convert / display chain, `image/jpeg` for a decode
+    /// chain) and the chain takes the native arc-consistency path. The probe is
+    /// synchronous, so no async body is needed.
+    fn caps_constraint<'a>(
+        &'a mut self,
+    ) -> impl Future<Output = Result<CapsConstraint<'a>, G2gError>> + 'a {
+        core::future::ready(self.produced_caps().map(CapsConstraint::Produces))
+    }
+
+    /// Records which advertised mode the solver fixed, which is what the
+    /// capture thread then runs.
+    fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        if self.modes.is_empty() {
             return Err(G2gError::NotConfigured);
         }
+        let chosen = self
+            .modes
+            .iter()
+            .filter(|m| self.io_mode.carries(m.format))
+            .find(|m| m.caps().intersect(absolute_caps).is_ok())
+            .copied()
+            .ok_or(G2gError::CapsMismatch)?;
+        self.chosen = Some(chosen);
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
     }
@@ -346,7 +776,7 @@ impl SourceLoop for V4l2Src {
         ElementMetadata::new(
             "V4L2 camera source",
             "Source/Video",
-            "Captures video from a V4L2 device (YUYV)",
+            "Captures video from a V4L2 device (YUYV / NV12 / I420 / MJPEG)",
             "g2g",
         )
     }
@@ -380,6 +810,20 @@ impl SourceLoop for V4l2Src {
                 PropKind::Uint,
                 "requested capture rate, fps (best effort)",
             ),
+            PropertySpec::new(
+                "num-buffers",
+                PropKind::Int,
+                "frames to emit then EOS (-1 = forever)",
+            )
+            .with_default("-1"),
+            PropertySpec::new(
+                "io-mode",
+                PropKind::Str,
+                "how buffers leave the element: auto | mmap (copy to system memory) | dmabuf \
+                 (export the capture buffer, raw formats only)",
+            )
+            .with_default("auto")
+            .with_enum_values("auto | mmap | dmabuf"),
             control_prop(0),
             control_prop(1),
             control_prop(2),
@@ -391,6 +835,9 @@ impl SourceLoop for V4l2Src {
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        // Every property here feeds the probe (which device, which geometry and
+        // rate, which controls), so the cached modes no longer describe it.
+        self.modes.clear();
         if let Some(index) = CONTROLS.iter().position(|c| c.name == name) {
             self.controls[index] = Some(match CONTROLS[index].kind {
                 ControlKind::Switch => i64::from(value.as_bool().ok_or(PropError::Type)?),
@@ -421,6 +868,22 @@ impl SourceLoop for V4l2Src {
                 self.req_fps = value.as_uint().ok_or(PropError::Type)? as u32;
                 Ok(())
             }
+            "num-buffers" => {
+                let n = value.as_int().ok_or(PropError::Type)?;
+                self.frame_limit = if n < 0 { 0 } else { n as u64 };
+                Ok(())
+            }
+            "io-mode" => {
+                let name = value.as_str().ok_or(PropError::Type)?;
+                // A V4L2 method this element does not implement is refused, not
+                // quietly treated as the default.
+                self.io_mode = IO_MODES
+                    .iter()
+                    .find(|(nick, _)| *nick == name)
+                    .map(|(_, mode)| *mode)
+                    .ok_or(PropError::Value)?;
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -439,14 +902,33 @@ impl SourceLoop for V4l2Src {
             "width" => Some(PropValue::Uint(self.req_width as u64)),
             "height" => Some(PropValue::Uint(self.req_height as u64)),
             "framerate" => Some(PropValue::Uint(self.req_fps as u64)),
+            "num-buffers" => Some(PropValue::Int(if self.frame_limit == 0 {
+                -1
+            } else {
+                self.frame_limit as i64
+            })),
+            "io-mode" => Some(PropValue::Str(self.io_mode.name().to_string())),
             _ => None,
+        }
+    }
+
+    /// `io-mode=dmabuf` hands the driver's capture buffer downstream as a dma-buf
+    /// fd; every other mode copies it into system memory.
+    fn output_memory(&self) -> MemoryDomainKind {
+        match self.io_mode {
+            IoMode::DmaBuf => MemoryDomainKind::DmaBuf,
+            IoMode::Auto | IoMode::Mmap => MemoryDomainKind::System,
         }
     }
 
     /// Live source: contributes one frame period of latency so the sink keeps a
     /// frame in hand and never runs dry waiting on capture.
     fn latency(&self) -> LatencyReport {
-        let fps = self.negotiated.map(|(_, _, f)| f).unwrap_or(self.req_fps);
+        let fps = self
+            .chosen
+            .or_else(|| self.modes.first().copied())
+            .map(|m| m.fps)
+            .unwrap_or(self.req_fps);
         let period_ns = if fps > 0 {
             1_000_000_000 / fps as u64
         } else {
@@ -460,41 +942,55 @@ impl SourceLoop for V4l2Src {
             if !self.configured {
                 return Err(G2gError::NotConfigured);
             }
-            let (w, h, fps) = self.negotiated.ok_or(G2gError::NotConfigured)?;
+            let mode = self.chosen.ok_or(G2gError::NotConfigured)?;
+            let (w, h, fps) = (mode.width, mode.height, mode.fps);
             let limit = self.frame_limit;
             let device = self.device.clone();
-            let expected = (w as usize) * (h as usize) * 2;
+            // A fixed-size format's short frame (a driver hiccup) cannot be
+            // unpacked, so it is dropped. MJPEG's length varies per frame, so
+            // only an empty buffer is dropped there.
+            let min_bytes = mode.format.frame_bytes(w, h).unwrap_or(1);
 
             // Bounded channel: the capture thread blocks once the pipeline is
             // BUFFER_COUNT frames behind, so we don't grow memory unboundedly.
-            let (tx, mut rx) = tokio::sync::mpsc::channel::<Captured>(BUFFER_COUNT as usize);
+            // The dmabuf path bounds it lower, since a queued frame there holds a
+            // capture buffer the driver still needs.
+            let io_mode = self.io_mode;
+            let queued_frames = match io_mode {
+                IoMode::DmaBuf => DMABUF_INFLIGHT,
+                IoMode::Auto | IoMode::Mmap => BUFFER_COUNT as usize,
+            };
+            let (tx, mut rx) = tokio::sync::mpsc::channel::<Captured>(queued_frames);
 
             // Blocking V4L2 capture on its own thread. It owns the device and
             // the mmap stream (which borrows the device), copies each frame's
             // payload out of the mmap buffer, and hands it to the async side.
+            // In dmabuf mode it exports the buffers instead and copies nothing.
             let handle = std::thread::spawn(move || -> Result<(), G2gError> {
+                if io_mode == IoMode::DmaBuf {
+                    return capture_dmabuf(&device, mode, min_bytes, &tx);
+                }
                 let dev = Device::with_path(&device).map_err(|e| v4l2_err(&e))?;
-                dev.set_format(&Format::new(w, h, FourCC::new(YUYV)))
+                dev.set_format(&Format::new(w, h, FourCC::new(&mode.fourcc)))
                     .map_err(|e| v4l2_err(&e))?;
                 let _ = dev.set_params(&Parameters::with_fps(fps));
                 let mut stream = MmapStream::with_buffers(&dev, Type::VideoCapture, BUFFER_COUNT)
                     .map_err(|e| v4l2_err(&e))?;
 
-                let mut count = 0u64;
-                while limit == 0 || count < limit {
+                loop {
                     let (buf, meta) = stream.next().map_err(|e| v4l2_err(&e))?;
                     let n = (meta.bytesused as usize).min(buf.len());
                     let mut payload = Vec::with_capacity(n);
                     payload.extend_from_slice(&buf[..n]);
                     let captured = Captured {
-                        bytes: payload,
+                        payload: CapturedPayload::Bytes(payload),
                         timestamp_ns: buffer_timestamp_ns(&meta.timestamp),
                     };
-                    // Err means the receiver was dropped (pipeline shut down).
+                    // Err means the receiver was dropped (limit reached or the
+                    // pipeline shut down).
                     if tx.blocking_send(captured).is_err() {
                         break;
                     }
-                    count += 1;
                 }
                 Ok(())
             });
@@ -514,10 +1010,14 @@ impl SourceLoop for V4l2Src {
             let mut prev_pts = 0u64;
             let mut seq = 0u64;
             while let Some(captured) = rx.recv().await {
-                // A short frame (driver hiccup) can't be unpacked safely; skip
-                // it rather than push a malformed buffer downstream.
-                if captured.bytes.len() < expected {
-                    continue;
+                // Skip a short frame rather than push a malformed buffer
+                // downstream. The dmabuf path checks the driver's byte count on
+                // the capture thread instead, where the buffer can still be
+                // re-queued.
+                if let CapturedPayload::Bytes(bytes) = &captured.payload {
+                    if bytes.len() < min_bytes {
+                        continue;
+                    }
                 }
                 // Source-side wall-clock stamp for glass-to-glass latency, same
                 // convention as VideoTestSrc / RtspSrc.
@@ -532,17 +1032,23 @@ impl SourceLoop for V4l2Src {
                     Some(d) if seq > 0 && d > 0 => d,
                     _ => pts_step_ns,
                 };
+                let domain = match captured.payload {
+                    CapturedPayload::Bytes(bytes) => {
+                        MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice()))
+                    }
+                    CapturedPayload::DmaBuf(buffer) => MemoryDomain::DmaBuf(buffer),
+                };
                 let frame = Frame {
-                    domain: MemoryDomain::System(SystemSlice::from_boxed(
-                        captured.bytes.into_boxed_slice(),
-                    )),
+                    domain,
                     timing: FrameTiming {
                         pts_ns: pts,
                         dts_ns: pts,
                         duration_ns,
                         capture_ns: pts,
                         arrival_ns,
-                        keyframe: true, // raw frames are each independently presentable
+                        // raw frames and MJPEG's per-frame JPEGs are each
+                        // independently decodable
+                        keyframe: true,
                     },
                     sequence: seq,
                     meta: Default::default(),
@@ -550,7 +1056,16 @@ impl SourceLoop for V4l2Src {
                 out.push(PipelinePacket::DataFrame(frame)).await?;
                 prev_pts = pts;
                 seq += 1;
+                // The limit counts emitted frames, so a skipped short buffer
+                // is captured again rather than lost from the count.
+                if limit > 0 && seq >= limit {
+                    break;
+                }
             }
+
+            // Drop the receiver first: a capture thread blocked in send must
+            // fail out of it before the join below can succeed.
+            drop(rx);
 
             // Surface a capture-thread failure that produced nothing, rather
             // than masking it as a clean EOS.
@@ -568,17 +1083,30 @@ impl SourceLoop for V4l2Src {
 }
 
 impl PadTemplates for V4l2Src {
-    /// Always produces packed YUYV; a constructed instance fixes the geometry
-    /// and rate during `intercept_caps`.
+    /// Every format the element can carry, in preference order. Which of them a
+    /// given device offers, and at what geometry and rate, is decided by the
+    /// probe in `intercept_caps`.
     fn pad_templates() -> Vec<PadTemplate> {
-        Vec::from([PadTemplate::source(g2g_core::CapsSet::one(
-            Caps::RawVideo {
-                format: RawVideoFormat::Yuyv,
-                width: Dim::Any,
-                height: Dim::Any,
-                framerate: Rate::Any,
-                interlace: g2g_core::Interlace::Any,
-            },
+        let alternatives = FOURCCS
+            .iter()
+            .map(|(_, format)| match format.raw_format() {
+                Some(raw) => Caps::RawVideo {
+                    format: raw,
+                    width: Dim::Any,
+                    height: Dim::Any,
+                    framerate: Rate::Any,
+                    interlace: g2g_core::Interlace::Any,
+                },
+                None => Caps::CompressedVideo {
+                    codec: g2g_core::VideoCodec::Mjpeg,
+                    width: Dim::Any,
+                    height: Dim::Any,
+                    framerate: Rate::Any,
+                },
+            })
+            .collect();
+        Vec::from([PadTemplate::source(CapsSet::from_alternatives(
+            alternatives,
         ))])
     }
 }
@@ -759,6 +1287,67 @@ mod tests {
     }
 
     #[test]
+    fn io_mode_round_trips_and_refuses_the_methods_it_does_not_implement() {
+        let mut src = V4l2Src::new("/dev/video0");
+        // the default copies into system memory, as it always did.
+        assert_eq!(
+            SourceLoop::get_property(&src, "io-mode"),
+            Some(PropValue::Str("auto".to_string()))
+        );
+        assert_eq!(SourceLoop::output_memory(&src), MemoryDomainKind::System);
+
+        SourceLoop::set_property(&mut src, "io-mode", PropValue::Str("dmabuf".to_string()))
+            .expect("dmabuf");
+        assert_eq!(
+            SourceLoop::get_property(&src, "io-mode"),
+            Some(PropValue::Str("dmabuf".to_string()))
+        );
+        // the output domain follows the mode, so a downstream GPU consumer sees
+        // what it will actually be handed.
+        assert_eq!(SourceLoop::output_memory(&src), MemoryDomainKind::DmaBuf);
+
+        // a V4L2 method this element does not implement must be refused, not
+        // accepted and then ignored.
+        for unsupported in ["userptr", "dmabuf-import", "rw", ""] {
+            assert_eq!(
+                SourceLoop::set_property(
+                    &mut src,
+                    "io-mode",
+                    PropValue::Str(unsupported.to_string())
+                ),
+                Err(PropError::Value),
+                "{unsupported} must not be accepted"
+            );
+        }
+        // the refusals left the mode alone.
+        assert_eq!(SourceLoop::output_memory(&src), MemoryDomainKind::DmaBuf);
+        assert_eq!(
+            V4l2Src::new("/dev/video0")
+                .with_io_mode(IoMode::DmaBuf)
+                .io_mode,
+            IoMode::DmaBuf
+        );
+    }
+
+    #[test]
+    fn dmabuf_export_carries_only_the_raw_formats() {
+        // an exported fd describes no payload length, so MJPEG's variable-length
+        // access unit must not be advertised for dmabuf capture. Every raw
+        // format still is, in both modes.
+        for (_, format) in FOURCCS {
+            let raw = format.raw_format().is_some();
+            assert_eq!(IoMode::DmaBuf.carries(format), raw, "{format:?}");
+            assert!(IoMode::Auto.carries(format), "{format:?}");
+            assert!(IoMode::Mmap.carries(format), "{format:?}");
+        }
+        // every accepted nick maps back to the name it was set with, or
+        // get_property would report a different mode than was asked for.
+        for (name, mode) in IO_MODES {
+            assert_eq!(mode.name(), name);
+        }
+    }
+
+    #[test]
     fn buffer_timestamp_converts_and_detects_absence() {
         use v4l::timestamp::Timestamp;
         assert_eq!(
@@ -777,14 +1366,34 @@ mod tests {
         // capture thread is never spawned against an un-negotiated device.
         let mut src = V4l2Src::new("/dev/video0");
         let err = src
-            .configure_pipeline(&Caps::RawVideo {
-                format: RawVideoFormat::Yuyv,
-                width: Dim::Fixed(640),
-                height: Dim::Fixed(480),
-                framerate: Rate::Fixed(30 << 16),
-                interlace: g2g_core::Interlace::Any,
-            })
+            .configure_pipeline(&CapturePixelFormat::Yuyv.caps(640, 480, 30))
             .expect_err("configure without negotiate must fail");
         assert_eq!(err, G2gError::NotConfigured);
+    }
+
+    #[test]
+    fn yuyv_leads_the_advertised_formats_and_mjpeg_trails() {
+        // A chain that pins nothing takes the first alternative, so raw YUYV
+        // must stay the default and MJPEG (needs a decoder) must come last.
+        let order: Vec<CapturePixelFormat> = FOURCCS.iter().map(|(_, f)| *f).collect();
+        assert_eq!(order.first(), Some(&CapturePixelFormat::Yuyv));
+        assert_eq!(order.last(), Some(&CapturePixelFormat::Mjpeg));
+        // the fourcc table is the only place a code is written, and no code
+        // may appear twice (one format would shadow the other).
+        for (i, (code, _)) in FOURCCS.iter().enumerate() {
+            assert!(!FOURCCS[..i].iter().any(|(c, _)| c == code));
+            assert_eq!(format_for_fourcc(code), Some(FOURCCS[i].1));
+        }
+        assert_eq!(format_for_fourcc(b"GREY"), None);
+    }
+
+    /// The whole advertised set must fixate, or a chain that pins one of the
+    /// formats fails negotiation instead of selecting it.
+    #[test]
+    fn every_advertised_format_fixates() {
+        for (_, format) in FOURCCS {
+            let caps = format.caps(1280, 720, 30);
+            assert_eq!(caps.fixate().expect("fixates"), caps);
+        }
     }
 }

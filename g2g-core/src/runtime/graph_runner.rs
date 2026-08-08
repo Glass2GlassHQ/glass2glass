@@ -1119,16 +1119,18 @@ async fn prepare_graph<'a>(
         obs.register(names, roles, probes.clone(), edges);
     }
 
-    // Phase 1: probe each source's caps (async) into an owned map, releasing
-    // the mutable borrow before the constraint phase borrows every node.
-    let mut source_caps: Vec<Option<Caps>> = (0..n).map(|_| None).collect();
+    // Phase 1: probe each source's produce set (async) into an owned map,
+    // releasing the mutable borrow before the constraint phase borrows every
+    // node. A source that offers alternatives (a camera's pixel formats) hands
+    // over all of them, so the solve picks the one downstream can take.
+    let mut source_caps: Vec<Option<CapsSet>> = (0..n).map(|_| None).collect();
     for &node in topo {
         if matches!(vg.kind(node), NodeKind::Source) {
             let GraphNodeRef::Source(src) = vg.element_mut(node).ok_or(G2gError::CapsMismatch)?
             else {
                 return Err(G2gError::CapsMismatch);
             };
-            source_caps[node.0 as usize] = Some(src.intercept_caps().await?);
+            source_caps[node.0 as usize] = Some(src.produced_caps().await?);
         }
     }
 
@@ -1887,6 +1889,11 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
     ticker: Option<alloc::sync::Arc<dyn DynAsyncClock + Send + Sync>>,
     spawner: &S,
 ) -> Result<RunStats, G2gError> {
+    // Same rule as the cooperative runner (M880), through the shared handle the
+    // arm threads can own: a pipeline clock that can sleep on a deadline is the
+    // fan-in tick timer, so every threaded entry point ticks without one of its
+    // own. An explicit `ticker` still wins.
+    let ticker = ticker.or_else(|| clock.shared_ticker());
     let link_capacity: usize = link_capacity.into().get();
     let mut vg = graph.finish().map_err(|_| G2gError::CapsMismatch)?;
     let n = vg.node_count();
@@ -2128,6 +2135,12 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
 /// GStreamer streaming-thread model). Cooperative [`run_graph`] stays the default
 /// for lowest latency and the `no_std` / wasm executors; this trades a per-stage
 /// thread handoff for CPU-bound stages overlapping across cores.
+///
+/// Fan-in arms tick exactly as they do cooperatively (M953): when `clock` hands
+/// out a shared timer ([`PipelineClock::shared_ticker`](crate::PipelineClock::shared_ticker),
+/// which the wall clock does), an element declaring a
+/// [`tick_interval_ns`](crate::MultiInputElement::tick_interval_ns) receives
+/// [`PipelinePacket::Tick`] on that period while its inputs are silent.
 #[cfg(all(feature = "std", feature = "multi-thread"))]
 pub async fn run_graph_threaded<Clk: PipelineClock, S: GraphSpawner>(
     graph: Graph<GraphNode>,
@@ -2149,19 +2162,18 @@ pub async fn run_graph_threaded<Clk: PipelineClock, S: GraphSpawner>(
     .await
 }
 
-/// As [`run_graph_threaded`], but every fan-in arm also gets a **deadline tick**
-/// (M879): `clock` is both the pipeline clock and the timer the arms sleep on, so a
-/// fan-in element declaring a
+/// As [`run_graph_threaded`], but takes the arms' **deadline tick** timer
+/// explicitly (M879): `clock` is both the pipeline clock and the timer the arms
+/// sleep on, so a fan-in element declaring a
 /// [`tick_interval_ns`](crate::MultiInputElement::tick_interval_ns) receives
 /// [`PipelinePacket::Tick`] on that period even while its inputs are silent.
 ///
 /// The clock arrives as a shared handle rather than a borrow because each arm's
 /// builder closure moves onto its own OS thread: `Arc::new(my_clock)` (any
-/// [`AsyncClock`](crate::AsyncClock) that is `Send + Sync`) coerces to it. That
-/// ownership is also why this entry exists at all: the cooperative runners derive
-/// the timer from the clock they already hold
-/// ([`PipelineClock::as_ticker`](crate::PipelineClock::as_ticker) yields a borrow,
-/// M880), and a borrow cannot cross onto the arm threads.
+/// [`AsyncClock`](crate::AsyncClock) that is `Send + Sync`) coerces to it. This is
+/// the entry for a clock that cannot hand out such a handle from `&self`, which is
+/// what [`run_graph_threaded`] reads
+/// ([`PipelineClock::shared_ticker`](crate::PipelineClock::shared_ticker)).
 #[cfg(all(feature = "std", feature = "multi-thread"))]
 pub async fn run_graph_threaded_ticked<S: GraphSpawner>(
     graph: Graph<GraphNode>,
@@ -2279,21 +2291,21 @@ fn element_ref<'g, 'a>(
 }
 
 /// Build the per-node solver constraints for a validated graph, given each
-/// source's probed caps (indexed by node id, `None` for non-sources). The
+/// source's probed produce set (indexed by node id, `None` for non-sources). The
 /// constraints borrow their elements immutably, so the returned vec must be
 /// dropped before any `&mut` borrow (configure). Shared by the runner's Phase 2
 /// and the negotiate-only tooling path ([`negotiate_graph`]).
 fn build_node_constraints<'g, 'a>(
     vg: &'g ValidatedGraph<GraphNodeRef<'a>>,
-    source_caps: &[Option<Caps>],
+    source_caps: &[Option<CapsSet>],
 ) -> Result<Vec<NodeConstraint<'g>>, G2gError> {
     let mut constraints: Vec<NodeConstraint<'g>> = Vec::with_capacity(vg.node_count());
     for (i, src_caps) in source_caps.iter().enumerate() {
         let node = NodeId(i as u32);
         let nc = match vg.kind(node) {
             NodeKind::Source => {
-                let caps = src_caps.clone().ok_or(G2gError::CapsMismatch)?;
-                NodeConstraint::Element(CapsConstraint::Produces(CapsSet::one(caps)))
+                let set = src_caps.clone().ok_or(G2gError::CapsMismatch)?;
+                NodeConstraint::Element(CapsConstraint::Produces(set))
             }
             NodeKind::Transform => {
                 let elem = element_ref(vg, node).ok_or(G2gError::CapsMismatch)?;
@@ -2466,9 +2478,9 @@ pub async fn negotiate_graph_explained<'a>(
     }
     let topo = vg.topo().to_vec();
 
-    // Phase 1: probe each source's caps (async), releasing the mutable borrow
-    // before the constraint phase borrows every node immutably.
-    let mut source_caps: Vec<Option<Caps>> = (0..n).map(|_| None).collect();
+    // Phase 1: probe each source's produce set (async), releasing the mutable
+    // borrow before the constraint phase borrows every node immutably.
+    let mut source_caps: Vec<Option<CapsSet>> = (0..n).map(|_| None).collect();
     for &node in &topo {
         if matches!(vg.kind(node), NodeKind::Source) {
             let GraphNodeRef::Source(src) = vg
@@ -2478,7 +2490,7 @@ pub async fn negotiate_graph_explained<'a>(
                 return Err(NegotiateError::Setup(G2gError::CapsMismatch));
             };
             source_caps[node.0 as usize] =
-                Some(src.intercept_caps().await.map_err(NegotiateError::Setup)?);
+                Some(src.produced_caps().await.map_err(NegotiateError::Setup)?);
         }
     }
 
@@ -2693,6 +2705,9 @@ async fn transform_arm<'a>(
     control: Option<ArmController>,
 ) -> Result<u64, G2gError> {
     let mut adapter = SenderSink::new(out_tx);
+    // M947: charge time spent blocked on the downstream link to this element's
+    // push-wait, not to its `process()` compute.
+    adapter.set_push_wait_probe(probe.clone());
     // M175: relay a downstream QoS report (seen on this transform's output link)
     // onto its input link, so it reaches the source/decoder one hop at a time
     // through any number of generic transforms, not just the sink's direct
@@ -2869,10 +2884,12 @@ async fn transform_arm<'a>(
                 let t0 = ElementProbe::mark();
                 elem.process(packet, &mut adapter).await?;
                 if let (Some(p), Some(seq)) = (timed, seq) {
-                    p.record_proc_since(t0);
+                    let push_wait_ns = p.record_proc_since(t0);
                     // M851: this frame's own wait + work, joined across stages
-                    // by sequence id at snapshot time.
-                    p.record_visit(seq, wait_ns, t0);
+                    // by sequence id at snapshot time. M951: the push-wait the
+                    // call just banked is charged to this visit too, so the
+                    // journey's work segment is compute.
+                    p.record_visit(seq, wait_ns, t0, push_wait_ns);
                 }
             }
             None => return Ok(0),
@@ -3097,9 +3114,10 @@ async fn sink_arm_loop<'a>(
                 let t0 = ElementProbe::mark();
                 elem.process(packet, &mut null).await?;
                 if let (Some(p), Some(seq)) = (timed, seq) {
-                    p.record_proc_since(t0);
-                    // M851: the last hop of a frame's journey.
-                    p.record_visit(seq, wait_ns, t0);
+                    let push_wait_ns = p.record_proc_since(t0);
+                    // M851: the last hop of a frame's journey. A sink pushes
+                    // nowhere, so the banked wait is always 0 here.
+                    p.record_visit(seq, wait_ns, t0, push_wait_ns);
                 }
                 // M175 upstream QoS: a sink that dropped a late frame asks to
                 // shed load; store its report on this sink's input link, where
@@ -3213,6 +3231,7 @@ async fn demux_arm<'a>(
     let branch_count = out_txs.len();
     let senders: Vec<SenderSink> = out_txs.into_iter().map(SenderSink::new).collect();
     let mut multi = MultiSenderSink::new(senders);
+    multi.set_push_wait_probe(probe.clone());
     loop {
         match in_rx.recv().await {
             Some(PipelinePacket::Eos) => {
@@ -3797,6 +3816,7 @@ async fn muxer_arm<'a>(
     control: Option<ArmController>,
 ) -> Result<u64, G2gError> {
     let mut adapter = SenderSink::new(out_tx);
+    adapter.set_push_wait_probe(probe.clone());
     let mut open = alloc::vec![true; input_count];
     let mut ended = 0usize;
     // Cursor for round-robin fairness across both the try-drain and block paths.
@@ -3950,6 +3970,7 @@ async fn muxer_arm_pts<'a>(
     control: Option<ArmController>,
 ) -> Result<u64, G2gError> {
     let mut adapter = SenderSink::new(out_tx);
+    adapter.set_push_wait_probe(probe.clone());
     let mut open = alloc::vec![true; input_count];
     let mut agg: InputAggregator<Frame> = InputAggregator::new(input_count);
     // Round-robin wake cursor, so a fast input does not bias the block path.

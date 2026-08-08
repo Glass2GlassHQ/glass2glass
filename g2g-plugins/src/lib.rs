@@ -49,6 +49,9 @@ pub mod audiotestsrc;
 pub mod av1parse;
 pub mod avoffset;
 pub mod capsfilter;
+// What a capture source's pixel format means on a link, shared by the capture
+// sources so their fourcc tables map to one set of caps.
+pub mod capturepixelformat;
 pub mod concat;
 pub mod cutter;
 pub mod equalizer;
@@ -66,6 +69,7 @@ pub mod nalparse;
 pub mod offload;
 pub mod opusparse;
 pub mod outputselector;
+pub mod poc;
 pub mod progressreport;
 pub mod spectrum;
 pub mod streamdemux;
@@ -335,6 +339,7 @@ pub mod tsdemux;
 pub mod tsmux;
 // MPEG program stream demuxer (no_std): Caps::ByteStream{MpegPs} -> one
 // elementary stream, the `.mpg` / `.vob` sibling of tsdemux.
+pub mod mpeg2video;
 pub mod psdemux;
 // Frame lengths of the self-syncing audio bitstreams (AC-3, MPEG audio), shared
 // by the audio decoder's frame splitting and psdemux's frame realignment.
@@ -1070,6 +1075,10 @@ pub mod pipewirevideosrc;
 mod pwaudio;
 #[cfg(all(target_os = "linux", feature = "pipewire"))]
 mod pwvideo;
+// The xdg-desktop-portal ScreenCast handshake `pipewirevideosrc portal=true`
+// runs to get a screen-capture node on a Wayland desktop.
+#[cfg(all(target_os = "linux", feature = "portal"))]
+pub mod screencastportal;
 // Device discovery over the PipeWire graph, the one Linux backend with native
 // hotplug events (M939).
 #[cfg(all(target_os = "linux", feature = "pipewire"))]

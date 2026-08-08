@@ -282,6 +282,21 @@ pub fn telemetry_json(snap: &TelemetrySnapshot) -> Value {
                     "max_ns": l.proc.max_ns,
                 })
             });
+            // Time blocked pushing into the output link (M947), already out of
+            // `proc`. Null for a node the runner attributes no output push to
+            // (every sink).
+            let push_wait = n
+                .latency
+                .as_ref()
+                .filter(|l| l.push_wait.max_ns > 0)
+                .map(|l| {
+                    json!({
+                        "count": l.push_wait.count,
+                        "p50_ns": l.push_wait.p50_ns,
+                        "p99_ns": l.push_wait.p99_ns,
+                        "max_ns": l.push_wait.max_ns,
+                    })
+                });
             // Input-link queue-residency (the "wait" half of the latency
             // waterfall). Null when the node's input edge is not instrumented.
             let transit = n.latency.as_ref().filter(|l| l.transit.count > 0).map(|l| {
@@ -302,6 +317,7 @@ pub fn telemetry_json(snap: &TelemetrySnapshot) -> Value {
                 "name": n.name,
                 "role": role_str(n.role),
                 "proc": proc,
+                "push_wait": push_wait,
                 "transit": transit,
                 "fill_mean_pct": fill_mean,
                 "fill_max_pct": fill_max,
@@ -335,6 +351,7 @@ pub fn telemetry_json(snap: &TelemetrySnapshot) -> Value {
                     "name": s.name,
                     "wait_ns": s.wait_ns,
                     "work_ns": s.work_ns,
+                    "blocked_ns": s.blocked_ns,
                 })
             })
             .collect();

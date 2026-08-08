@@ -190,10 +190,19 @@ fn parse_sps(rbsp: &[u8]) -> Option<SpsGeometry> {
     // adversarial values cannot overflow before the subtract.
     let width = pic_width.saturating_sub(left.saturating_add(right).saturating_mul(sub_width_c));
     let height = pic_height.saturating_sub(top.saturating_add(bottom).saturating_mul(sub_height_c));
-    // The framerate is best-effort: the VUI sits past the scaling-list / RPS /
+    // The rest of the walk is best-effort: it sits past the scaling-list / RPS /
     // long-term-ref blocks, and a stream this walk cannot cross still has valid
-    // geometry, so a failure downgrades to `None` instead of failing the parse.
-    let framerate = parse_vui_framerate(&mut br, sps_max_sub_layers_minus1);
+    // geometry, so a failure downgrades its fields instead of failing the parse.
+    let mut tail = SpsTail::default();
+    let framerate = parse_vui_framerate(&mut br, sps_max_sub_layers_minus1, &mut tail);
+    let max_num_reorder_pics = tail.max_num_reorder_pics;
+    let poc = tail
+        .log2_max_pic_order_cnt_lsb
+        .map(|log2_max_pic_order_cnt_lsb| crate::poc::SpsPocParams {
+            log2_max_pic_order_cnt_lsb,
+            separate_colour_plane_flag: separate_colour_plane_flag == 1,
+            ..crate::poc::SpsPocParams::default()
+        });
     Some(SpsGeometry {
         width,
         height,
@@ -201,23 +210,48 @@ fn parse_sps(rbsp: &[u8]) -> Option<SpsGeometry> {
         // H.265 codes the `time_code` SEI self-contained, so nothing from the
         // SPS is needed to read it.
         pic_timing: None,
+        // sps_max_num_reorder_pics bounds how many pictures may precede a
+        // picture in decode order and follow it in output order, so 0 forbids
+        // reordering outright. Unlike H.264's optional VUI restriction this is a
+        // normative SPS field the output process is specified against (C.5.2.2).
+        presents_in_decode_order: max_num_reorder_pics == Some(0),
+        poc,
     })
+}
+
+/// What the best-effort walk past the conformance window recovers on its way to
+/// the VUI: fields that sit far ahead of it, so a stream the walk cannot cross
+/// all the way still yields them.
+#[derive(Debug, Default)]
+struct SpsTail {
+    max_num_reorder_pics: Option<u32>,
+    /// `log2_max_pic_order_cnt_lsb_minus4 + 4`, the width of the slice header's
+    /// order-count lsb.
+    log2_max_pic_order_cnt_lsb: Option<u32>,
 }
 
 /// Continue the SPS walk past the conformance window down to the VUI
 /// `timing_info` (M663), returning the framerate as Q16 fixed-point fps
 /// (`vui_time_scale / vui_num_units_in_tick`; H.265 ticks are per picture, so
-/// there is no H.264-style field factor of 2). `None` when the VUI omits
-/// timing or a block on the way ends early / is out of range.
-fn parse_vui_framerate(br: &mut BitReader, sps_max_sub_layers_minus1: u32) -> Option<u32> {
+/// there is no H.264-style field factor of 2). `None` when the VUI omits timing
+/// or a block on the way ends early / is out of range. The [`SpsTail`] fields are
+/// written on the way past the blocks that carry them, which sit far ahead of the
+/// VUI, so a stream this walk cannot cross all the way still yields them.
+fn parse_vui_framerate(
+    br: &mut BitReader,
+    sps_max_sub_layers_minus1: u32,
+    tail: &mut SpsTail,
+) -> Option<u32> {
     br.read_ue()?; // bit_depth_luma_minus8
     br.read_ue()?; // bit_depth_chroma_minus8
     let log2_max_pic_order_cnt_lsb_minus4 = br.read_ue()?;
-    if log2_max_pic_order_cnt_lsb_minus4 > 12 {
+    if log2_max_pic_order_cnt_lsb_minus4 > crate::poc::MAX_LOG2_MINUS4 {
         return None;
     }
+    tail.log2_max_pic_order_cnt_lsb = Some(log2_max_pic_order_cnt_lsb_minus4 + 4);
     // sps_sub_layer_ordering_info_present_flag selects one triple or one per
-    // sub-layer.
+    // sub-layer. The last iteration is the highest sub-layer, the one the
+    // reorder bound is read from.
     let start = if br.read_bit()? == 1 {
         0
     } else {
@@ -225,7 +259,7 @@ fn parse_vui_framerate(br: &mut BitReader, sps_max_sub_layers_minus1: u32) -> Op
     };
     for _ in start..=sps_max_sub_layers_minus1 {
         br.read_ue()?; // sps_max_dec_pic_buffering_minus1
-        br.read_ue()?; // sps_max_num_reorder_pics
+        tail.max_num_reorder_pics = Some(br.read_ue()?);
         br.read_ue()?; // sps_max_latency_increase_plus1
     }
     br.read_ue()?; // log2_min_luma_coding_block_size_minus3

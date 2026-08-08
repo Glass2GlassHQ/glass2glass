@@ -6,6 +6,30 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M958: `pipewirevideosrc portal=true` runs the xdg-desktop-portal ScreenCast handshake and captures the granted node on the PipeWire remote the portal hands back.
+
+- M957: `pipewirevideosrc` gained `io-mode=dmabuf`, which takes the producer's dma-buf as `MemoryDomain::DmaBuf` instead of copying out of a mapped buffer.
+
+- M956: `v4l2src io-mode=dmabuf` exports the driver's capture buffers as dma-buf fds and emits them in `MemoryDomain::DmaBuf` without a copy.
+
+- M955: the fan-in and duplex runners select each branch's format from the source's produce set, per input pad.
+
+- M954: `v4l2src` advertises every pixel format the device reports and captures in whichever one negotiation picks, now that the graph runner negotiates a source's full produce set: a downstream `mjpegdec` selects a camera's MJPEG mode.
+
+- M953: the thread-per-arm runner takes its fan-in deadline tick from the pipeline clock.
+
+- M952: `tsdemux` synthesizes per-picture PTS for MPEG-2 and for H.264 / H.265 streams that reorder, on shared POC machinery the Vulkan decoders now consume too.
+
+- M951: the per-frame journey splits each stage's push-wait out of its work segment.
+
+- M950: crates.io publish prep: versioned intra-workspace deps, per-crate LICENSE / README / docs.rs metadata, MSRV 1.86.
+
+- M949: `v4l2src` and `libcamerasrc` persist camera-tagged `Hardware` conformance evidence from their host-validated capture tests.
+
+- M948: `tsdemux` synthesizes per-frame PTS for sparsely stamped H.264 / H.265 video that provably cannot reorder.
+
+- M947: the run summary splits per-element compute time from time blocked on downstream backpressure.
+
 - M946: conformance evidence from the RTSP, dma-buf export and NVENC/NVDEC tests, plus RTP payload/jitter batteries.
 
 - M945: `clocksync` paces a stream to the pipeline clock mid-graph, and the MoQT demo publisher is live-paced with per-access-unit objects.

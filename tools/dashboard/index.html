@@ -41,6 +41,7 @@
   #waterfall .bar { height: 12px; display: flex; border-radius: 3px; overflow: hidden; background: #10131a; }
   #waterfall .wait { background: var(--warn); }
   #waterfall .work { background: var(--xform); }
+  #waterfall .blocked { background: var(--err); }
   #waterfall .total { color: var(--muted); font-size: 11px; margin-top: 4px; }
   #journey { padding: 8px 12px; border-bottom: 1px solid var(--edge); }
   #journey .row { margin: 4px 0; }
@@ -48,6 +49,7 @@
   #journey .bar { height: 12px; display: flex; border-radius: 3px; overflow: hidden; background: #10131a; }
   #journey .wait { background: var(--warn); }
   #journey .work { background: var(--xform); }
+  #journey .blocked { background: var(--err); }
   #journey .total { color: var(--text); font-size: 11px; margin-top: 6px; }
   #journey .floor { color: var(--muted); font-size: 11px; }
   #journey .over { color: var(--err); }
@@ -288,9 +290,9 @@ function render(msg) {
   applyView();
 }
 
-// Per-stage latency breakdown: input-link wait (transit p50) + process p50,
-// stacked and scaled to the slowest stage. Only nodes with a process() probe
-// appear (sources have none).
+// Per-stage latency breakdown: input-link wait (transit p50) + process p50 +
+// output-link blocked p50, stacked and scaled to the slowest stage. Only nodes
+// with a process() probe appear (sources have none).
 function renderWaterfall(nodes) {
   const stages = nodes
     .filter(n => n.proc && n.proc.count > 0)
@@ -298,35 +300,38 @@ function renderWaterfall(nodes) {
       name: n.name || n.role,
       wait: n.transit ? n.transit.p50_ns : 0,
       work: n.proc.p50_ns,
+      blocked: n.push_wait ? n.push_wait.p50_ns : 0,
     }));
   if (!stages.length) return;
-  const max = Math.max(...stages.map(s => s.wait + s.work), 1);
+  const max = Math.max(...stages.map(s => s.wait + s.work + s.blocked), 1);
   waterfallEl.innerHTML = "";
   stages.forEach(s => {
     const row = document.createElement("div");
     row.className = "row";
-    const total = s.wait + s.work;
+    const total = s.wait + s.work + s.blocked;
     row.innerHTML =
       `<div class="lbl"><span>${s.name}</span><span>${fmtNs(total)}</span></div>` +
       `<div class="bar">` +
         `<div class="wait" style="width:${(s.wait / max * 100).toFixed(1)}%"></div>` +
         `<div class="work" style="width:${(s.work / max * 100).toFixed(1)}%"></div>` +
+        `<div class="blocked" style="width:${(s.blocked / max * 100).toFixed(1)}%"></div>` +
       `</div>`;
     waterfallEl.appendChild(row);
   });
   const legend = document.createElement("div");
   legend.className = "total";
   legend.innerHTML = `<span style="color:var(--warn)">■</span> input wait ` +
-    `<span style="color:var(--xform)">■</span> process`;
+    `<span style="color:var(--xform)">■</span> process ` +
+    `<span style="color:var(--err)">■</span> blocked downstream`;
   waterfallEl.appendChild(legend);
 }
 
 // One frame's actual path, in contrast to the p50 waterfall above: the same
-// stacked wait+work bars but for a single sequence id, with the measured total
-// against the 2*capacity*frame_period queueing floor.
+// stacked wait+work+blocked bars but for a single sequence id, with the measured
+// total against the 2*capacity*frame_period queueing floor.
 function renderJourney(j) {
   if (!j) return;
-  const max = Math.max(...j.stages.map(s => s.wait_ns + s.work_ns), 1);
+  const max = Math.max(...j.stages.map(s => s.wait_ns + s.work_ns + s.blocked_ns), 1);
   journeyEl.innerHTML = "";
   const head = document.createElement("div");
   head.className = "lbl";
@@ -337,13 +342,20 @@ function renderJourney(j) {
     const row = document.createElement("div");
     row.className = "row";
     row.innerHTML =
-      `<div class="lbl"><span>${s.name}</span><span>${fmtNs(s.wait_ns + s.work_ns)}</span></div>` +
+      `<div class="lbl"><span>${s.name}</span><span>${fmtNs(s.wait_ns + s.work_ns + s.blocked_ns)}</span></div>` +
       `<div class="bar">` +
         `<div class="wait" style="width:${(s.wait_ns / max * 100).toFixed(1)}%"></div>` +
         `<div class="work" style="width:${(s.work_ns / max * 100).toFixed(1)}%"></div>` +
+        `<div class="blocked" style="width:${(s.blocked_ns / max * 100).toFixed(1)}%"></div>` +
       `</div>`;
     journeyEl.appendChild(row);
   });
+  const legend = document.createElement("div");
+  legend.className = "total";
+  legend.innerHTML = `<span style="color:var(--warn)">■</span> input wait ` +
+    `<span style="color:var(--xform)">■</span> process ` +
+    `<span style="color:var(--err)">■</span> blocked downstream`;
+  journeyEl.appendChild(legend);
   const total = document.createElement("div");
   total.className = "total";
   total.textContent = `end to end ${fmtNs(j.total_ns)}`;

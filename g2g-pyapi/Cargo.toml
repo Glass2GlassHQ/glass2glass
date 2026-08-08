@@ -7,6 +7,9 @@ edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 repository.workspace = true
+# The shipping artifact is the maturin-built abi3 wheel, not a Rust library: the
+# rlib is empty without the `python` feature and useless as a crates.io dep.
+publish = false
 
 # `cdylib` is the importable Python extension module; `lib` (rlib) lets the
 # workspace build / test it. Without the `python` feature the lib is empty, so
@@ -28,8 +31,8 @@ python = [
 ]
 
 [dependencies]
-g2g-core = { path = "../g2g-core" }
-g2g-plugins = { path = "../g2g-plugins", features = ["std"] }
+g2g-core = { workspace = true }
+g2g-plugins = { workspace = true, features = ["std"] }
 pyo3 = { version = "0.26", optional = true, features = ["auto-initialize"] }
 # Drive the run future on a single-thread runtime, like g2g-launch / g2g-capi.
 tokio = { version = "1", optional = true, features = ["rt", "time"] }

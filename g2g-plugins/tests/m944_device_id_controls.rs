@@ -28,12 +28,14 @@ fn a_saved_line_selects_the_camera_by_id_and_sets_controls() {
     );
 
     let line = format!(
-        "v4l2src device-id=\"{}\" white-balance-temperature-auto=true num-buffers=1 ! fakesink",
+        "v4l2src device-id=\"{}\" white-balance-temperature-auto=true \
+         pixel-aspect-ratio=1/1 ! fakesink",
         camera.persistent_id
     );
     let registry = default_registry();
-    // `num-buffers` is not a v4l2src property, so this doubles as the check
-    // that an unknown property is rejected rather than silently dropped.
+    // `pixel-aspect-ratio` is a gst v4l2src property this element does not
+    // implement, so this doubles as the check that an unknown property is
+    // rejected rather than silently dropped.
     assert!(parse_launch(&registry, &line).is_err());
 
     let line = format!(

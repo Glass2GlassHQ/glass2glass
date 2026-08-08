@@ -106,6 +106,9 @@ pub enum PipelinePacket {
     /// per period even while its inputs stall, so it can emit on its own
     /// cadence (the compositors' zero-order-hold). May fire spuriously, and
     /// never crosses a link: the runner's arm originates and consumes it.
+    /// Both runners derive the ticker from the pipeline clock (`as_ticker`
+    /// cooperative, `shared_ticker` thread-per-arm; a clock with interior
+    /// state reaches the arms via `run_graph_threaded_ticked`).
     Tick,
 }
 
@@ -1097,11 +1100,11 @@ and a thin sink does the UDP I/O.
 ### 4.12a Live Capture (V4L2, libcamera)
 
 `V4l2Src` (`v4l2src.rs`, `v4l2` feature, Linux-only) is the first real capture
-source: it streams packed **YUYV** (4:2:2, the near-universal UVC output) off a
-`/dev/videoN` device via V4L2 mmap streaming I/O, wrapping the pure-Rust `v4l`
-crate (no libv4l C dependency). `VideoConvert` unpacks YUYV to a planar / RGB
-target (§3.1 raw formats), so the canonical chain is
-`V4l2Src -> VideoConvert(Yuyv -> Nv12) -> sink`.
+source: it streams frames off a `/dev/videoN` device via V4L2 mmap streaming
+I/O, wrapping the pure-Rust `v4l` crate (no libv4l C dependency). Packed
+**YUYV** (4:2:2, the near-universal UVC output) is the preferred format, and
+`VideoConvert` unpacks it to a planar / RGB target (§3.1 raw formats), so the
+canonical chain is `V4l2Src -> VideoConvert(Yuyv -> Nv12) -> sink`.
 
 Two design points carry the element:
 
@@ -1112,13 +1115,37 @@ Two design points carry the element:
   `DataFrame`s. The channel bound (`BUFFER_COUNT`) applies backpressure: the
   capture thread blocks rather than growing memory when the pipeline falls
   behind. The source reports a live `LatencyReport` of one frame period.
-- **Up-front format negotiation, re-open for capture.** `intercept_caps` opens
-  the device, sets YUYV at the requested geometry, and reads back what the
-  driver actually chose (it may snap to a supported mode); the probe device is
-  then dropped. The capture thread re-opens the device under that exact format.
-  Keeping no device handle in the struct between negotiation and `run`
-  sidesteps `Send` / borrow entanglement with the stream. Errors surface as
+- **Up-front format negotiation, re-open for capture.** The probe opens the
+  device, enumerates its pixel formats, and for each one it can carry sets that
+  format at the requested geometry and reads back what the driver actually chose
+  (it may snap to a supported mode); the probe device is then dropped. The
+  capture thread re-opens the device under the negotiated format. Keeping no
+  device handle in the struct between negotiation and `run` sidesteps `Send` /
+  borrow entanglement with the stream. Errors surface as
   `G2gError::Hardware(HardwareError::V4l2(errno))`.
+- **The device offers, negotiation decides (M954).** Every confirmed format
+  becomes one alternative of the source's `CapsConstraint::Produces` set, in a
+  fixed preference order: YUYV, NV12, I420, then MJPEG last (it needs a
+  decoder). A chain that constrains nothing therefore takes YUYV, exactly as
+  before; a downstream `MjpegDec` (or a pinned `image/jpeg` link) drops the raw
+  alternatives during arc consistency and the camera runs in its MJPEG mode
+  instead, which is what fits 1080p over USB. `configure_pipeline` reads the
+  solved caps back to learn which mode the capture thread runs, and MJPEG's
+  per-frame length comes from the buffer's `bytesused` rather than the format's
+  `sizeimage`. What a pixel format means on a link (its `Caps`, its frame size)
+  lives in `capturepixelformat.rs`, shared with `LibCameraSrc`, which sits on a
+  different fourcc registry but agrees on the meaning.
+- **DMABUF output (M956).** The `io-mode` property selects how a buffer leaves
+  the element: `auto` / `mmap` copy as above, `dmabuf` exports each MMAP buffer
+  once (`VIDIOC_EXPBUF`, at stream start) and emits frames in
+  `MemoryDomain::DmaBuf` carrying a share of the fd their buffer was filled into,
+  so a GPU consumer imports the camera buffer with no copy. The buffer *is* the
+  frame there, so the invariant is that a buffer goes back to the driver only
+  once every share of its fd has dropped (the element keeps one share per buffer
+  for the whole stream and re-queues on the count falling back to it); the
+  in-flight bound stays below `BUFFER_COUNT` so the driver always has a buffer to
+  fill. An exported fd carries no payload length, so dmabuf mode advertises only
+  the raw formats and MJPEG stays on the copy path.
 
 `LibCameraSrc` (`libcamerasrc.rs`, `libcamera` feature, Linux-only) is the
 second capture source and the modern Linux camera path: it captures through the
@@ -1176,7 +1203,23 @@ Two more capture sources follow the same blocking-work-off-the-async-path shape:
 PipeWire graph (the modern Linux media layer) by running a `pw::stream` input on
 a dedicated main-loop worker thread feeding the `run` loop over a channel; it
 requests a fixed PCM format the PipeWire adapter converts to, so the produced
-caps are deterministic. `MfVideoSrc`
+caps are deterministic. Its video sibling `PipeWireVideoSrc` captures raw frames
+from any PipeWire video node (camera, another client, a portal-opened screen-cast
+node named through `target-object`) and its `io-mode` property picks the buffer
+path: `mmap` copies each frame out of the mapped block into `System` memory, while
+`dmabuf` negotiates a `Buffers` param accepting `SPA_DATA_DmaBuf` alone and hands
+the descriptor on as `MemoryDomain::DmaBuf`, holding each buffer until every share
+of its frame is released (the domain is fixed by negotiation, hence a property
+rather than GStreamer's per-caps feature). Screen capture on a Wayland desktop
+goes through `portal=true` (`portal` feature) instead of `target-object`, which
+only reaches the session's own PipeWire remote: the element runs the
+xdg-desktop-portal `ScreenCast` handshake (`CreateSession` / `SelectSources` /
+`Start`, each answered on an `org.freedesktop.portal.Request` object, then
+`OpenPipeWireRemote`) on the capture worker thread over a blocking zbus
+connection, and connects the stream to the granted node id on the private remote
+fd the portal returns. Every step is bounded by `portal-timeout`, so an
+unattended consent dialog fails the capture instead of hanging, and
+`portal-restore-token` re-opens an earlier grant without asking. `MfVideoSrc`
 (`mf-video-src`, Windows) is the camera sibling of `WasapiSrc`: it enumerates
 video capture devices and drains NV12 / YUY2 frames via an `IMFSourceReader` on a
 COM/MTA worker thread.
@@ -3145,8 +3188,10 @@ assembles a single frame's journey: observed probes keep a bounded ring of
 `{sequence, wait, enter, exit}` visits, joined at snapshot time along the
 linear prefix on the newest sequence id consistent with one frame moving
 downstream (restamping elements fail the join rather than fabricate one; fan
-nodes truncate it), shown as stacked wait/work bars with the end-to-end total
-against the `2 * capacity * frame_period` floor. It binds loopback by default;
+nodes truncate it), shown as stacked wait/work/blocked bars with the end-to-end
+total against the `2 * capacity * frame_period` floor. A journey stage's
+`work_ns` is compute and `blocked_ns` is downstream backpressure, both drawn
+from the same push-wait bank as the aggregate `push_wait` percentiles. It binds loopback by default;
 `--observe-host <addr>` (e.g. `0.0.0.0`) exposes it to other hosts, gated behind a
 no-auth warning since telemetry + edge previews carry frame content. The JSON is
 built in the transport, so `g2g-core` stays serde-free, consistent with the

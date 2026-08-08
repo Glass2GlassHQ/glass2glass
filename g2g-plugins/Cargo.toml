@@ -2,6 +2,9 @@
 name = "g2g-plugins"
 description = "Standard source, sink, and transform elements for the glass2glass framework."
 license = "MPL-2.0"
+readme = "README.md"
+keywords = ["multimedia", "video", "audio", "streaming", "gstreamer"]
+categories = ["multimedia", "multimedia::video", "multimedia::audio", "multimedia::encoding"]
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -27,7 +30,7 @@ linux-full = [
     "http-src", "hls", "dash",
     "ffmpeg", "vaapi", "v4l2",
     "opus", "vorbis", "vpx", "av1-encode", "mjpeg", "mjpeg-encode",
-    "alsa-sink", "alsa-src", "pulse-sink", "pulse-src", "pipewire",
+    "alsa-sink", "alsa-src", "pulse-sink", "pulse-src", "pipewire", "portal",
     "wayland-sink", "kms-sink", "wgpu-sink", "vello-overlay", "analytics",
     "declarative-yaml", "script-rhai", "observe",
 ]
@@ -130,8 +133,9 @@ observe = ["tooling-json", "tokio/net", "tokio/io-util", "tokio/rt", "tokio/time
 # sans-IO WebRTC stack; we drive its handle_input / poll_output loop on a tokio
 # UDP socket, using its pure-Rust `rust-crypto` backend so there is no OpenSSL
 # system dep. WHIP signaling (HTTP offer/answer) reuses reqwest. Implies std +
-# tokio. str0m 0.20 requires rustc 1.85, which is the workspace MSRV; the feature
-# is off by default, so the no_std baseline is unaffected.
+# tokio. str0m 0.20 requires rustc 1.85, within the workspace MSRV; the feature
+# is off by default, so the no_std baseline is unaffected. See the str0m
+# dependency entry for the `[patch.crates-io]` fork this workspace builds against.
 webrtc = ["std", "tokio/net", "tokio/time", "tokio/macros", "tokio/io-util", "dep:str0m", "dep:reqwest", "dep:sha1", "dep:hmac", "dep:md-5", "dep:tokio-native-tls"]
 # Native LiveKit publisher (LiveKitSink, T4): joins a LiveKit room and publishes
 # H.264 (+ optional Opus) over the str0m PeerConnection, with a hand-rolled
@@ -289,8 +293,9 @@ ffmpeg = ["std", "dep:ffmpeg-next"]
 # V4L2 capture source (M90): V4l2Src streams YUYV (4:2:2) frames off a
 # /dev/videoN UVC device via mmap. Pulls the pure-Rust `v4l` crate (no libv4l C
 # dep); Linux-only, implies std. Blocking ioctls run on a dedicated capture
-# thread feeding the async run loop over a channel.
-v4l2 = ["std", "dep:v4l"]
+# thread feeding the async run loop over a channel. libc is for the poll(2) the
+# dmabuf-export io-mode waits on (the device is opened non-blocking).
+v4l2 = ["std", "dep:v4l", "dep:libc"]
 # libcamera capture source (LibCameraSrc): captures NV12 (else YUYV) frames from
 # a camera via the libcamera stack, the modern Linux camera path (handles UVC
 # webcams through libcamera's uvcvideo pipeline handler, plus CSI/ISP cameras
@@ -572,7 +577,7 @@ dav1d = ["std", "dep:dav1d"]
 # to Rust. default-features = false drops its NASM asm and pulls only bitdepth_8 /
 # bitdepth_16, so it builds with no system deps and reaches pure-Rust / wasm targets
 # the libdav1d path cannot. Implies std; the decoder needs alloc + threads.
-# re_rav1d's MSRV is 1.79, within the workspace 1.85.
+# re_rav1d's MSRV is 1.79, within the workspace 1.86.
 rav1d = ["std", "dep:re_rav1d"]
 # VP8 / VP9 encode via libvpx through the `vpx-encode` crate (FFI), the GStreamer
 # vp8enc/vp9enc analog. NOT pure Rust: it links the system `libvpx` and runs
@@ -669,6 +674,13 @@ pulse-src = ["std", "dep:libpulse-binding", "dep:libpulse-simple-binding"]
 # + libspa via bindgen; needs clang). Linux-only, implies std. Video / screen
 # capture is a follow-up on the same elements.
 pipewire = ["std", "dep:pipewire"]
+# xdg-desktop-portal ScreenCast handshake for `pipewirevideosrc` (`portal=true`):
+# CreateSession / SelectSources / Start over the session bus, then
+# OpenPipeWireRemote for a private PipeWire remote fd plus the granted node id.
+# Lets a launch line capture the screen on a stock Wayland desktop with no
+# out-of-band D-Bus. Pulls zbus (its blocking API, so the element's existing
+# sync worker drives it). Linux-only, implies `pipewire` and so std.
+portal = ["pipewire", "dep:zbus", "dep:zbus_macros"]
 # Windows Media Foundation camera capture source (MfVideoSrc): enumerates video
 # capture devices and drains frames via an IMFSourceReader (NV12 / YUY2 to system
 # memory), the video sibling of WasapiSrc. Pulls the windows crate; Windows-only,
@@ -676,7 +688,7 @@ pipewire = ["std", "dep:pipewire"]
 mf-video-src = ["std", "dep:windows"]
 
 [dependencies]
-g2g-core = { path = "../g2g-core", features = ["runtime"] }
+g2g-core = { workspace = true, features = ["runtime"] }
 # no_std mutex for the appsrc/appsink named-channel globals (the app<->element
 # bridge). Same crate the core's runtime channel uses.
 spin = { version = "0.9", default-features = false, features = ["mutex", "spin_mutex"] }
@@ -706,7 +718,7 @@ serde_yaml = { version = "0.9", optional = true }
 rhai = { version = "1", optional = true, default-features = false, features = ["std", "sync"] }
 # Pure-Rust AV1 encoder (av1-encode feature). default-features = false drops the
 # NASM assembly, the CLI `binaries` deps, and `threading`: a portable software
-# encoder with no system dependencies. MSRV 1.74 (within the workspace 1.85).
+# encoder with no system dependencies. MSRV 1.74 (within the workspace 1.86).
 rav1e = { version = "0.8", optional = true, default-features = false }
 # libdav1d AV1 decoder bindings (dav1d feature). Safe Rust wrapper over dav1d-sys,
 # which links the system libdav1d (pkg-config) at build.
@@ -747,6 +759,12 @@ reqwest = { version = "0.12", optional = true }
 # str0m: sans-IO WebRTC stack (ICE / DTLS / SRTP / SCTP / RTP). `rust-crypto` is
 # the pure-Rust crypto backend (RustCrypto ecosystem), so no OpenSSL system dep.
 # Drives the native WebRtcSink (the `webrtc` feature).
+#
+# In-workspace builds resolve str0m through the root `[patch.crates-io]` fork,
+# which drops the SRTP block padding on media sends (LiveKit's forwarder mangles
+# it for browser subscribers). A downstream crate depending on g2g-plugins gets
+# stock str0m 0.20 instead: it compiles and publishes fine, but LiveKit browser
+# subscribers see the mangled stream until that peer applies the same patch.
 str0m = { version = "0.20", optional = true, default-features = false, features = ["rust-crypto"] }
 # Read-only XML DOM for the DASH MPD parser (dash feature). Pure Rust (only
 # xmlparser), no system deps.
@@ -786,7 +804,7 @@ futures-util = { version = "0.3", optional = true, default-features = false, fea
 tokio-tungstenite = { version = "0.24", optional = true }
 # WebTransport (HTTP/3 over QUIC) transport for the distributed-graph primitive
 # (webtransport feature). Pinned exactly: 0.11.13 pulls `kio`, whose MSRV is 1.91,
-# above this workspace's 1.85. `ring` rather than the default aws-lc-rs backend:
+# above this workspace's 1.86. `ring` rather than the default aws-lc-rs backend:
 # rustls already resolves on ring here, and aws-lc-sys needs cmake at build time.
 web-transport-quinn = { version = "=0.11.12", optional = true, default-features = false, features = ["ring"] }
 # TLS for TURN-over-TLS (`turns:`) and the LiveKit `wss://` signalling: the same
@@ -1081,6 +1099,20 @@ libpulse-simple-binding = { version = "2", optional = true, default-features = f
 # PipeWire src/sink (pipewire): the high-level pipewire-rs crate (re-exports spa
 # as pipewire::spa). Links libpipewire-0.3 + libspa via bindgen (needs clang).
 pipewire = { version = "0.8", optional = true }
+# D-Bus client for the xdg-desktop-portal handshake (portal). Held at 5.13.2
+# because 5.14 raised its MSRV to 1.87, past this workspace's 1.86. The default
+# features are what we want: `async-io` supplies zbus's own executor (no tokio
+# runtime needed on the capture worker thread) and `blocking-api` the sync
+# `zbus::blocking` surface that thread uses. Its zvariant / zbus_names
+# dependencies are caret ranges whose newest members also want 1.87, so
+# Cargo.lock holds them at zvariant 5.9.2 / zbus_names 4.3.1; a blanket
+# `cargo update` re-raises them and breaks the MSRV build.
+zbus = { version = "=5.13.2", optional = true }
+# Not used directly: zbus 5.13.2 asks for `zbus_macros = "5.13.2"` (caret), and
+# the 5.18 that satisfies it emits code 5.13's runtime does not have, so the
+# generated `#[interface]` impls fail to compile. Pinning the macro crate here
+# is the only way to hold the pair together.
+zbus_macros = { version = "=5.13.2", optional = true }
 
 # Browser / WebAssembly bindings (web feature). wasm32-only target gate so
 # native builds never resolve them. wasm-bindgen-futures drives the runner
@@ -1119,7 +1151,7 @@ pkg-config = "0.3"
 tokio = { version = "1", features = ["rt", "macros", "time", "sync", "net"] }
 # Enables the dynamic-slot path (ElementSlot/SwapHandle) for the m8_slot_swap
 # integration test only. Feature unification keeps the lib build at `runtime`.
-g2g-core = { path = "../g2g-core", features = ["dyn-slot"] }
+g2g-core = { workspace = true, features = ["dyn-slot"] }
 embassy-futures = "0.1.2"
 # AES-128-CBC encryptor as the ciphertext fixture for the m161 HLS decryption
 # test (the integration crate can't reach g2g-plugins's optional aes/cbc deps).
@@ -1127,6 +1159,9 @@ aes = "0.8"
 cbc = { version = "0.1", features = ["alloc"] }
 # AES-CTR encrypt oracle for the m835 Common Encryption (`cenc` scheme) test.
 ctr = "0.9"
+# mmap(2) for the m956 test that reads a v4l2src-exported dma-buf fd on the CPU,
+# the only way to look at a dma-buf's bytes (it has no read(2)).
+libc = "0.2"
 # critical-section impl for host tests of embassy-sync (embassy-link): it calls
 # critical_section::with, which needs an impl at link. The std impl suffices.
 critical-section = { version = "1", features = ["std"] }
@@ -1300,3 +1335,9 @@ harness = false
 
 [lints]
 workspace = true
+
+# The pure-Rust subset: everything here builds from crates.io alone. Never
+# `all-features`, which would need ffmpeg, ALSA, Wayland, libcamera, libvpx,
+# libopus and the NVIDIA SDK installed.
+[package.metadata.docs.rs]
+features = ["std", "declarative-yaml", "script-rhai", "plugin-loader", "tooling-json"]

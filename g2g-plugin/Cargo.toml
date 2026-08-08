@@ -2,6 +2,9 @@
 name = "g2g-plugin"
 description = "SDK for building dynamically loadable glass2glass plugins (the declare_plugin! macro + ABI tag)."
 license = "MPL-2.0"
+readme = "README.md"
+keywords = ["multimedia", "plugin", "sdk", "pipeline", "video"]
+categories = ["multimedia", "development-tools"]
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,7 +16,10 @@ repository.workspace = true
 # A plugin author depends on this crate (for `declare_plugin!`) and on g2g-core
 # (for the element traits) against the same published versions the host uses.
 [dependencies]
-g2g-core = { path = "../g2g-core", features = ["std", "runtime"] }
+g2g-core = { workspace = true, features = ["std", "runtime"] }
 
 [lints]
 workspace = true
+
+[package.metadata.docs.rs]
+all-features = true

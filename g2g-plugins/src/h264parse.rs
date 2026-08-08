@@ -156,32 +156,31 @@ fn parse_sps(rbsp: &[u8]) -> Option<SpsGeometry> {
         let _qpprime_y_zero_transform_bypass_flag = br.read_bit()?;
         let seq_scaling_matrix_present_flag = br.read_bit()?;
         if seq_scaling_matrix_present_flag == 1 {
-            // We don't decode the (optional) scaling lists. M6 test fixtures
-            // never set this flag; live streams that do will leave dims
-            // unknown until M7 lands a full SPS parser.
-            return None;
+            // The lists are not used here, but they are variable length, so the
+            // walk has to cross them to reach the fields after.
+            let lists = if chroma_format_idc == 3 { 12 } else { 8 };
+            crate::poc::skip_h264_scaling_lists(&mut br, lists)?;
         }
     }
 
-    let _log2_max_frame_num_minus4 = br.read_ue()?;
-    let pic_order_cnt_type = br.read_ue()?;
-    if pic_order_cnt_type == 0 {
-        let _log2_max_pic_order_cnt_lsb_minus4 = br.read_ue()?;
-    } else if pic_order_cnt_type == 1 {
-        let _delta_pic_order_always_zero_flag = br.read_bit()?;
-        let _offset_for_non_ref_pic = br.read_se()?;
-        let _offset_for_top_to_bottom_field = br.read_se()?;
-        let num_ref_frames_in_pic_order_cnt_cycle = br.read_ue()?;
-        for _ in 0..num_ref_frames_in_pic_order_cnt_cycle {
-            let _offset = br.read_se()?;
-        }
+    let mut poc = crate::poc::SpsPocParams {
+        separate_colour_plane_flag: separate_colour_plane_flag == 1,
+        ..crate::poc::SpsPocParams::default()
+    };
+    let log2_max_frame_num_minus4 = br.read_ue()?;
+    if log2_max_frame_num_minus4 > crate::poc::MAX_LOG2_MINUS4 {
+        return None;
     }
+    poc.log2_max_frame_num = log2_max_frame_num_minus4 + 4;
+    crate::poc::read_h264_poc_block(&mut br, &mut poc)?;
+    let pic_order_cnt_type = u32::from(poc.pic_order_cnt_type);
     let _max_num_ref_frames = br.read_ue()?;
     let _gaps_in_frame_num_value_allowed_flag = br.read_bit()?;
 
     let pic_width_in_mbs_minus1 = br.read_ue()?;
     let pic_height_in_map_units_minus1 = br.read_ue()?;
     let frame_mbs_only_flag = br.read_bit()?;
+    poc.frame_mbs_only_flag = frame_mbs_only_flag == 1;
     if frame_mbs_only_flag == 0 {
         let _mb_adaptive_frame_field_flag = br.read_bit()?;
     }
@@ -242,6 +241,13 @@ fn parse_sps(rbsp: &[u8]) -> Option<SpsGeometry> {
         height,
         framerate: vui.framerate,
         pic_timing: vui.pic_timing,
+        // POC type 2 derives the picture order count from frame_num alone
+        // (H.264 8.2.1.3), so coded order is display order by construction. The
+        // VUI's max_num_reorder_frames is deliberately not read here: streams
+        // declare 0 and reorder anyway (see `sps_reorder_frames`), and this flag
+        // has to be a proof, not a hint.
+        presents_in_decode_order: pic_order_cnt_type == 2,
+        poc: Some(poc),
     })
 }
 

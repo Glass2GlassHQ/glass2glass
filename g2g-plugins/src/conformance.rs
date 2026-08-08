@@ -397,11 +397,26 @@ pub mod persist {
         report
     }
 
+    /// The platform tag for a `Hardware` evidence row: `$G2G_CONFORMANCE_PLATFORM`
+    /// when the runner names itself, else the device name `name_device` finds,
+    /// else the host os / arch (which names no device, so it cannot pass for a
+    /// device claim).
+    #[cfg(all(
+        target_os = "linux",
+        any(feature = "cuda", feature = "v4l2", feature = "libcamera")
+    ))]
+    fn platform_tag(name_device: impl FnOnce() -> Option<String>) -> String {
+        if let Some(name) = std::env::var_os("G2G_CONFORMANCE_PLATFORM") {
+            return name.to_string_lossy().into_owned();
+        }
+        name_device()
+            .unwrap_or_else(|| format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH))
+    }
+
     /// The platform tag a CUDA-bound test should put on its `Hardware` evidence:
-    /// `$G2G_CONFORMANCE_PLATFORM` when the runner names itself, else the name
-    /// the driver gives CUDA device 0 (the device the CUDA elements bind), else
-    /// the host os / arch. Named per family rather than "the first GPU": a box
-    /// with an integrated and a discrete GPU would otherwise tag a CUDA run with
+    /// the name the driver gives CUDA device 0 (the device the CUDA elements
+    /// bind). Named per family rather than "the first GPU": a box with an
+    /// integrated and a discrete GPU would otherwise tag a CUDA run with
     /// whichever adapter enumerated first.
     ///
     /// A test that already holds its own device name (Vulkan Video, a wgpu
@@ -409,19 +424,43 @@ pub mod persist {
     #[cfg(all(target_os = "linux", feature = "cuda"))]
     pub fn cuda_platform_tag() -> String {
         use g2g_core::runtime::DeviceProvider;
-        if let Some(name) = std::env::var_os("G2G_CONFORMANCE_PLATFORM") {
-            return name.to_string_lossy().into_owned();
-        }
-        let found = crate::gpudevice::GpuDeviceProvider::new()
-            .probe()
-            .ok()
-            .and_then(|devices| {
-                devices
-                    .into_iter()
-                    .find(|d| d.persistent_id.starts_with("cuda:0:"))
-                    .map(|d| d.display_name)
-            });
-        found.unwrap_or_else(|| format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH))
+        platform_tag(|| {
+            crate::gpudevice::GpuDeviceProvider::new()
+                .probe()
+                .ok()?
+                .into_iter()
+                .find(|d| d.persistent_id.starts_with("cuda:0:"))
+                .map(|d| d.display_name)
+        })
+    }
+
+    /// The platform tag a V4L2 capture test should put on its `Hardware`
+    /// evidence: the card name the driver reports for the node it captured from
+    /// (the camera model), which says which camera the evidence came from where
+    /// `/dev/videoN` alone would not survive a replug.
+    #[cfg(all(target_os = "linux", feature = "v4l2"))]
+    pub fn v4l2_platform_tag(device: &str) -> String {
+        use g2g_core::runtime::DeviceProvider;
+        platform_tag(|| {
+            crate::v4l2device::V4l2DeviceProvider::new()
+                .probe()
+                .ok()?
+                .into_iter()
+                .find(|d| d.props.iter().any(|(k, v)| k == "device" && v == device))
+                .map(|d| d.display_name)
+        })
+    }
+
+    /// The platform tag a libcamera capture test should put on its `Hardware`
+    /// evidence: the id libcamera gives the camera at `index`, which identifies
+    /// the physical device (bus path plus USB vendor / product).
+    #[cfg(all(target_os = "linux", feature = "libcamera"))]
+    pub fn libcamera_platform_tag(index: usize) -> String {
+        platform_tag(|| {
+            let manager = libcamera::camera_manager::CameraManager::new().ok()?;
+            let cameras = manager.cameras();
+            cameras.get(index).map(|camera| camera.id().to_string())
+        })
     }
 }
 

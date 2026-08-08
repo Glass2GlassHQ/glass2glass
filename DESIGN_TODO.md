@@ -41,11 +41,11 @@ honesty guards, batteries in `g2g-plugins::conformance`, `g2g-inspect --maturity
 Sequenced next:
 
 - **Grow the conformance matrix.** Persist evidence from the resource-owning
-  tests still uncovered as they are validated (`vaapi` / `v4l2` decode, the
-  Android and macOS device paths, `libcamera` capture), and add in-process
-  batteries for further sans-IO cores. Get the GPU-tagged `Hardware` rows into CI
-  by wiring a runner that has the hardware: a `Hardware` row can only come from a
-  run on the device, so a GPU-less runner will never produce one.
+  tests still uncovered as they are validated (`vaapi` decode, the Android and
+  macOS device paths), and add in-process batteries for further sans-IO cores.
+  Get the device-tagged `Hardware` rows into CI by wiring a runner that has the
+  hardware: a `Hardware` row can only come from a run on the device, so a runner
+  without a GPU or a camera will never produce one.
 - **Whole-graph zero-alloc (M616 + M620).** The single-stage (M616) and multi-stage
   concrete-link (M620, source -> transform -> sink) data paths are proven zero-alloc.
   Remaining (larger, deferred): a fully zero-alloc *dyn* runner, monomorphized arms
@@ -381,14 +381,8 @@ Phased plan:
 
 ## Capture sources
 
-- `v4l2src`: MMAP DMABUF output (`MemoryDomain::DmaBuf`); format-flexible
-  negotiation (MJPEG-mode UVC, other fourccs) vs fixed YUYV.
-- PipeWire capture: DMABUF output; an xdg-desktop-portal screen-capture
-  handshake (a portal-granted node id already reaches `pipewirevideosrc` via
-  `target-object`); runtime properties on the audio `pipewiresrc` /
-  `pipewiresink` (rate / channels / format are builder-only); a format-pin
-  property on `pipewirevideosrc` (the advertised caps are I420, the real
-  format arrives as `CapsChanged`).
+- V4L2 device discovery reports YUYV modes as caps only; the other formats
+  `v4l2src` can carry stay in `detail`.
 - `mfvideosrc`: first Windows build + camera smoke test; D3D11 zero-copy;
   size/rate request beyond device default.
 - Screen capture: Windows DXGI Desktop Duplication.
@@ -423,11 +417,10 @@ Phased plan:
 - **Matroska `ContentEncoding`:** chained encodings, bzip2 / lzo, and
   `ContentEncryption` stay refused (blocks forward as stored, flagged
   `unsupported_encoding`); zlib and header stripping are undone at demux.
-- **TS video PTS synthesis:** a TS video access unit whose PES carries no PTS
-  falls back to `pts = 0` in `tsdemux` (the spec only mandates a stamp every
-  700 ms; broadcast muxers stamp every AU, so it rarely shows). Synthesize from
-  picture timing: MPEG-2 via `temporal_reference`, H.264/H.265 need POC or
-  frame-duration interpolation.
+- **Reordering-stream PTS from a single stamp:** an H.264 / H.265 transport
+  stream that reorders stays unstamped until its second PES timestamp, since
+  the picture-order-count step per frame is not declared anywhere and has to be
+  measured across two stamps.
 
 ## Codecs
 
@@ -447,7 +440,7 @@ _(No open parser items.)_
   horizontal + vertical) with an explicit Latin+CJK fallback chain, so OpenType-CFF
   `.otf` fonts render, not only glyf `.ttf`s. Still open: a `vello` GPU backend;
   font-variation axes beyond `wght` on the shaped horizontal path (cosmic-text
-  0.17 exposes only weight, and 0.17.1+ needs rustc 1.89, above the 1.85 MSRV,
+  0.17 exposes only weight, and 0.17.1+ needs rustc 1.89, above the 1.86 MSRV,
   so the upgrade waits on an MSRV bump); vertical-mode shaping if cosmic-text
   ever grows writing modes.
 - **Text / subtitle pipeline depth.** The foundation is in: `Caps::Text` +
@@ -696,13 +689,6 @@ Outstanding developer-tooling tasks, highest leverage first.
 
 - **Per-element / per-link telemetry gaps.** Remaining `Observer` coverage:
   validate the dashboard live against an RTSP source.
-- **Split compute from blocked-on-downstream time in the run summary.** On a
-  paced graph the `proc` percentiles time the whole `process()` future, so an
-  element awaiting a full downstream link reports frame-period-scale numbers (a
-  demuxer at ~127 ms p50, the whole video chain pinned at one 67 ms histogram
-  bucket) that read as compute cost; the same graph unpaced shows ~2 ms. Time
-  the push-await separately (or subtract it) so the summary distinguishes "busy"
-  from "waiting on back-pressure".
 - **gst-parity differ.** Same launch line through real GStreamer and g2g;
   diff the negotiated caps per edge, the element set after autoplug, and the
   output (checksum, PSNR for lossy). Calliope already does differential output

@@ -11,7 +11,7 @@ use crate::element::{BoxFuture, OutputSink, PushOutcome, QosMessage, Reconfigure
 use crate::error::G2gError;
 use crate::frame::PipelinePacket;
 use crate::link::LinkPolicy;
-use crate::runtime::instrument::EdgeCounters;
+use crate::runtime::instrument::{EdgeCounters, Probe};
 
 pub fn bounded<T>(capacity: usize) -> (Sender<T>, Receiver<T>) {
     assert!(capacity > 0, "channel capacity must be > 0");
@@ -618,6 +618,12 @@ pub struct SenderSink {
     /// so an element that already forwarded one (typically via a catch-all
     /// `other => out.push(other)` arm) does not emit a second.
     eos_forwarded: bool,
+    /// M947: the probe of the element pushing through this adapter, when the arm
+    /// instruments it. Time spent awaiting capacity here is banked on that probe
+    /// so the element's `process()` timing separates its own work from
+    /// downstream backpressure. `None` on an uninstrumented adapter (no cost:
+    /// the blocking send then takes no extra clock read).
+    push_wait_probe: Probe,
 }
 
 impl SenderSink {
@@ -635,7 +641,31 @@ impl SenderSink {
             #[cfg(feature = "metadata")]
             meta_stash: None,
             eos_forwarded: false,
+            push_wait_probe: None,
         }
+    }
+
+    /// Bank this adapter's push-wait on `probe`, the producing element's (M947).
+    /// The arm calls this right after building the adapter, so the element's
+    /// `proc` percentiles report compute and its `push_wait` percentiles report
+    /// the backpressure it served.
+    pub(crate) fn set_push_wait_probe(&mut self, probe: Probe) {
+        self.push_wait_probe = probe;
+    }
+
+    /// Charge the time this push spent awaiting capacity to the producing
+    /// element's probe. `since` is the pre-send stamp, `None` when neither the
+    /// probe nor the edge counters asked for one.
+    fn record_push_wait(&self, since: Option<u64>) {
+        if let (Some(probe), Some(t0)) = (&self.push_wait_probe, since) {
+            probe.add_push_wait(stamp_now_ns().saturating_sub(t0));
+        }
+    }
+
+    /// Whether a blocking send through this adapter needs a pre-send stamp,
+    /// which the edge counters and the producer's probe each ask for.
+    fn wants_blocked_stamp(&self) -> bool {
+        self.link.counters.is_some() || self.push_wait_probe.is_some()
     }
 
     /// Whether an `Eos` has already been enqueued through this adapter (M909).
@@ -791,13 +821,14 @@ impl OutputSink for SenderSink {
                                     }
                                 }
                             } else {
-                                let t0 = self.link.counters.as_ref().map(|_| stamp_now_ns());
+                                let t0 = self.wants_blocked_stamp().then(stamp_now_ns);
                                 self.link
                                     .data
                                     .send(returned)
                                     .await
                                     .map_err(|_| G2gError::Shutdown)?;
                                 self.link.record_sent(bytes, t0);
+                                self.record_push_wait(t0);
                             }
                         }
                         Err((_v, SendError::Closed)) => return Err(G2gError::Shutdown),
@@ -815,14 +846,16 @@ impl OutputSink for SenderSink {
                 }
             }
             // Stamp before the blocking send so the counters carry how long the
-            // producer was held up by a full link (M846).
-            let blocked_since = self.link.counters.as_ref().map(|_| stamp_now_ns());
+            // producer was held up by a full link (M846), and the producing
+            // element's probe can take that wait out of its `process()` timing.
+            let blocked_since = self.wants_blocked_stamp().then(stamp_now_ns);
             match self.link.data.send(packet).await {
                 // Post-send check covers the "request fired while we were
                 // awaiting capacity" window; the packet is already in the link
                 // under old caps.
                 Ok(()) => {
                     self.link.record_sent(bytes, blocked_since);
+                    self.record_push_wait(blocked_since);
                     Ok(self.post_send_outcome())
                 }
                 Err(SendError::Closed) => {

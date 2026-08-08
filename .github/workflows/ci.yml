@@ -313,8 +313,8 @@ jobs:
           cargo test -p g2g-plugins --locked --features observe,declarative-yaml --lib -- dashboard:: preview:: toolingjson::
           cargo test -p g2g-plugins --locked --features observe,declarative-yaml --test m677_observe --test m846_live_edge_counters --test m849_fanin_edge_preview
           cargo test -p g2g-plugins --locked --features observe,declarative-yaml --test m681_mcp
-      # Native WebRTC (str0m sans-IO stack): needs rustc 1.85 (the workspace MSRV),
-      # so it stays out of the default suite. Compile the feature, then run the
+      # Native WebRTC (str0m sans-IO stack): needs rustc 1.85 (within the
+      # workspace MSRV), so it stays out of the default suite. Compile the feature, then run the
       # deterministic + localhost-only tests: the webrtc element/util/turn lib
       # units, the duplex session runner, and the synthetic lossy-relay NACK/RTX
       # resilience test. The WHIP/WHEP + P2P loopback harness is #[ignore] (needs

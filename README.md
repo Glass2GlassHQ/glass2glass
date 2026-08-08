@@ -321,7 +321,7 @@ catalogs, `tools/mcugen-check.sh`).
 
 ## Build
 
-Stable Rust, MSRV 1.85, `resolver = "2"`.
+Stable Rust, MSRV 1.86, `resolver = "2"`.
 
 ```sh
 cargo check --workspace          # no_std baseline
@@ -365,6 +365,8 @@ OS-coupled elements live behind cargo features:
 | `AlsaSink` | `alsa-sink` | Linux + libasound |
 | `PulseSink` | `pulse-sink` | Linux + libpulse |
 | `PipeWireSink` / `PipeWireSrc` (audio) | `pipewire` | Linux + libpipewire |
+| `PipeWireVideoSrc` (video capture, `io-mode=mmap` or `dmabuf`) | `pipewire` | Linux + libpipewire |
+| `PipeWireVideoSrc portal=true` (screen capture via xdg-desktop-portal) | `portal` | Linux + libpipewire + a desktop portal |
 | `MfVideoSrc` (camera) | `mf-video-src` | Windows + Media Foundation |
 | `Av1Enc` (pure-Rust `rav1e`) | `av1-encode` | — |
 | `VpxEnc` (VP8 / VP9 via libvpx) | `vpx` | libvpx |

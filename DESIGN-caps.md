@@ -173,6 +173,26 @@ so an optional branch (a preview that can't follow a format switch) does not kil
 the essential ones. A genuine downstream error still surfaces through that branch
 arm's own result, so swallowing the closed channel at the tee is safe.
 
+Negotiation phase 1 asks each source for its **produce set**
+(`DynSourceLoop::produced_caps`, the erased view of `SourceLoop::caps_constraint`),
+not its preferred caps alone, so a source that offers alternatives (`v4l2src`'s
+pixel formats, §4.12a) has the choice settled by the solve like any other element:
+arc consistency drops the alternatives downstream cannot take, the fixation picks
+the highest-preference survivor, and the source reads the outcome in
+`configure_pipeline`. A source still on the legacy bridge yields the single
+`LegacySource` caps, so it negotiates exactly as before.
+
+The fan-in and duplex runners read the same produce set (M955). Their branches do
+not form a chain to solve, so each is narrowed on its own: `select_branch_caps`
+walks the set in preference order and takes the first alternative the pad that
+branch feeds accepts (`ACCEPT_CAPS`, §4.13.8) — the merged sink for
+`run_fanin_sink`, the per-input pad for a fan-in session, a duplex send side, or a
+runtime-attached input. Per-pad accept sets therefore let one run carry a
+different format per branch out of identical sources. When a pad accepts none of
+the alternatives the preferred one is passed anyway, so that pad's
+`configure_pipeline` raises the rejection, where it was raised before a source had
+a set to choose from.
+
 `run_graph` consumes the elements it runs (it `take()`s the boxed payloads), so a
 graph runs only once. Re-running (seek-and-replay after a flushing seek, retry,
 A/B benchmarking) needs *fresh* elements, because real ones carry state a rewind

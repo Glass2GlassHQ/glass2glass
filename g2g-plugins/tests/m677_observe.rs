@@ -106,7 +106,7 @@ async fn observed_run_assembles_one_frames_journey() {
     let widest = j
         .stages
         .iter()
-        .map(|s| s.wait_ns + s.work_ns)
+        .map(|s| s.wait_ns + s.work_ns + s.blocked_ns)
         .max()
         .unwrap();
     assert!(

@@ -36,8 +36,21 @@ const JOURNEY_RING: usize = 64;
 #[derive(Debug)]
 pub struct ElementProbe {
     name: String,
-    /// Wall-clock cost of each `DataFrame` `process()` call, in nanoseconds.
+    /// Compute cost of each `DataFrame` `process()` call, in nanoseconds: the
+    /// wall-clock span of the call minus the `push_wait_ns` below, so an element
+    /// parked on a full downstream link reports its own work rather than the
+    /// pacing of whatever is consuming it.
     proc_ns: LatencyHistogram,
+    /// Time each `process()` call spent awaiting capacity on this element's
+    /// output link(s): downstream backpressure, not work. Empty unless the arm
+    /// attached this probe to its output adapter (sinks have no output, sources
+    /// are not `process()`-timed at all), or under `no_std`.
+    push_wait_ns: LatencyHistogram,
+    /// Push-wait banked by the output adapter since the last
+    /// [`record_proc_since`](Self::record_proc_since), which drains it. An arm's
+    /// own control push between two `process()` calls (a muxer forwarding a
+    /// mid-stream `CapsChanged`) lands on the next call.
+    push_wait_accum: AtomicU64,
     /// Queue-residency (transit) time of each `DataFrame` on this element's input
     /// link: how long the frame sat queued between the producer sending it and
     /// this element pulling it. The per-stage "wait" half of a latency waterfall
@@ -64,6 +77,8 @@ impl ElementProbe {
         Arc::new(Self {
             name,
             proc_ns: LatencyHistogram::new(),
+            push_wait_ns: LatencyHistogram::new(),
+            push_wait_accum: AtomicU64::new(0),
             transit_ns: LatencyHistogram::new(),
             fill: FillGauge::default(),
             journeys: None,
@@ -78,6 +93,8 @@ impl ElementProbe {
         Arc::new(Self {
             name,
             proc_ns: LatencyHistogram::new(),
+            push_wait_ns: LatencyHistogram::new(),
+            push_wait_accum: AtomicU64::new(0),
             transit_ns: LatencyHistogram::new(),
             fill: FillGauge::default(),
             journeys: Some(Mutex::new(VecDeque::with_capacity(JOURNEY_RING))),
@@ -104,17 +121,34 @@ impl ElementProbe {
         }
     }
 
-    /// Record the elapsed `process()` cost since `start` (from [`mark`](Self::mark)).
-    /// A no-op under `no_std` or when `start` is `None`.
+    /// Bank `ns` spent awaiting capacity on this element's output link, charged
+    /// to the `process()` call that is running. Called by the
+    /// [`SenderSink`](crate::runtime::SenderSink) the arm handed this probe to.
     #[inline]
-    pub fn record_proc_since(&self, start: Option<u64>) {
+    pub fn add_push_wait(&self, ns: u64) {
+        self.push_wait_accum.fetch_add(ns, Ordering::Relaxed);
+    }
+
+    /// Record the `process()` call that started at `start` (from
+    /// [`mark`](Self::mark)), split into the push-wait banked by
+    /// [`add_push_wait`](Self::add_push_wait) and the compute time that is what
+    /// is left of the elapsed span. A no-op under `no_std` or when `start` is
+    /// `None`; the banked wait is drained either way, so it never carries into a
+    /// later call. Returns the drained wait, so the caller can charge the same
+    /// nanoseconds to this call's [`record_visit`](Self::record_visit).
+    #[inline]
+    pub fn record_proc_since(&self, start: Option<u64>) -> u64 {
+        let waited = self.push_wait_accum.swap(0, Ordering::Relaxed);
         #[cfg(feature = "std")]
         if let Some(t0) = start {
             let now = crate::metrics::monotonic_ns();
-            self.proc_ns.record(now.saturating_sub(t0));
+            let elapsed = now.saturating_sub(t0);
+            self.proc_ns.record(elapsed.saturating_sub(waited));
+            self.push_wait_ns.record(waited);
         }
         #[cfg(not(feature = "std"))]
         let _ = start;
+        waited
     }
 
     /// Sample the element's input-link fill (0-100) for this pull.
@@ -131,12 +165,14 @@ impl ElementProbe {
     }
 
     /// Record this element's visit by one frame: its `sequence` id, the
-    /// `wait_ns` it spent queued on the input link, and the `enter` stamp from
-    /// [`mark`](Self::mark) taken just before `process()` (exit is stamped here).
-    /// A no-op when the probe records no journeys, under `no_std`, or when
-    /// `enter` is `None`.
+    /// `wait_ns` it spent queued on the input link, the `enter` stamp from
+    /// [`mark`](Self::mark) taken just before `process()` (exit is stamped here),
+    /// and the `push_wait_ns` that call spent blocked pushing downstream (what
+    /// [`record_proc_since`](Self::record_proc_since) returned for it). A no-op
+    /// when the probe records no journeys, under `no_std`, or when `enter` is
+    /// `None`.
     #[inline]
-    pub fn record_visit(&self, sequence: u64, wait_ns: u64, enter: Option<u64>) {
+    pub fn record_visit(&self, sequence: u64, wait_ns: u64, enter: Option<u64>, push_wait_ns: u64) {
         #[cfg(feature = "std")]
         if let (Some(ring), Some(enter_ns)) = (self.journeys.as_ref(), enter) {
             let exit_ns = crate::metrics::monotonic_ns();
@@ -149,10 +185,11 @@ impl ElementProbe {
                 wait_ns,
                 enter_ns,
                 exit_ns,
+                push_wait_ns,
             });
         }
         #[cfg(not(feature = "std"))]
-        let _ = (sequence, wait_ns, enter);
+        let _ = (sequence, wait_ns, enter, push_wait_ns);
     }
 
     /// Push a fully-stamped visit, so a test can build a deterministic journey
@@ -189,6 +226,7 @@ impl ElementProbe {
         ElementLatency {
             name: self.name.clone(),
             proc: self.proc_ns.snapshot(),
+            push_wait: self.push_wait_ns.snapshot(),
             transit: self.transit_ns.snapshot(),
             fill_mean_pct: self.fill.mean(),
             fill_max_pct: self.fill.max(),
@@ -236,8 +274,10 @@ impl FillGauge {
 }
 
 /// One frame's passage through one element: the wait it served on the input
-/// link plus the wall-clock window of the `process()` call that consumed it.
-/// The per-frame counterpart of the aggregated `transit` / `proc` histograms.
+/// link plus the wall-clock window of the `process()` call that consumed it,
+/// with the part of that window spent blocked pushing downstream broken out.
+/// The per-frame counterpart of the aggregated `transit` / `proc` / `push_wait`
+/// histograms.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StageVisit {
     /// The frame's [`Frame::sequence`](crate::Frame). Sources stamp it and
@@ -252,6 +292,12 @@ pub struct StageVisit {
     pub enter_ns: u64,
     /// Monotonic stamp taken immediately after `process()` returned.
     pub exit_ns: u64,
+    /// How much of `exit_ns - enter_ns` this call spent blocked pushing into the
+    /// output link, so compute is the rest. `0` for a sink (nothing to push
+    /// into) and on an arm whose output adapter carries no probe. Same banking
+    /// as the aggregate `push_wait`: a push made outside `process()` (an arm
+    /// forwarding a mid-stream `CapsChanged`) lands on the next visit.
+    pub push_wait_ns: u64,
 }
 
 /// A measured per-element summary, one row of [`RunStats::per_element`].
@@ -260,9 +306,16 @@ pub struct ElementLatency {
     /// Instance name (`<category>N` from the graph runner, the element's log
     /// category for the linear runners).
     pub name: String,
-    /// Measured `process()` latency distribution (count, p50/p95/p99, mean, max
-    /// in ns). `count == 0` under `no_std` (no clock to measure with).
+    /// Measured `process()` compute distribution (count, p50/p95/p99, mean, max
+    /// in ns), with `push_wait` already taken out, so this is what the element
+    /// cost rather than how fast downstream drained it. `count == 0` under
+    /// `no_std` (no clock to measure with).
     pub proc: LatencySnapshot,
+    /// Per-`process()` time blocked pushing into this element's output link
+    /// (downstream backpressure). `max_ns == 0` when the runner did not
+    /// attribute output pushes to this element (a sink, an untimed source) or
+    /// under `no_std`.
+    pub push_wait: LatencySnapshot,
     /// Input-link queue-residency (transit) distribution: how long each
     /// `DataFrame` waited queued before this element pulled it. `count == 0` when
     /// the edge is not instrumented (only the graph runner enables it, on edges
@@ -408,7 +461,7 @@ mod tests {
         // nothing per frame.
         let p = ElementProbe::new(String::from("x0"));
         for i in 0..4 {
-            p.record_visit(i, 10, Some(100 + i));
+            p.record_visit(i, 10, Some(100 + i), 0);
         }
         assert!(p.visits().is_empty());
     }
@@ -418,7 +471,7 @@ mod tests {
     fn journey_ring_keeps_the_newest_and_stays_bounded() {
         let p = ElementProbe::with_journeys(String::from("x0"));
         for i in 0..(JOURNEY_RING as u64 * 2) {
-            p.record_visit(i, i, Some(1_000 + i));
+            p.record_visit(i, i, Some(1_000 + i), 0);
         }
         let v = p.visits();
         assert_eq!(v.len(), JOURNEY_RING, "ring is bounded");
@@ -427,6 +480,28 @@ mod tests {
         let last = v[v.len() - 1];
         assert_eq!(last.enter_ns, 1_000 + last.sequence);
         assert!(last.exit_ns >= last.enter_ns, "exit is stamped after enter");
+    }
+
+    /// M951: the wait `record_proc_since` drains is handed back, so the visit it
+    /// pairs with charges the same nanoseconds to blocked rather than work.
+    #[cfg(feature = "std")]
+    #[test]
+    fn a_visit_carries_the_push_wait_of_its_own_call() {
+        let p = ElementProbe::with_journeys(String::from("x0"));
+        let t0 = ElementProbe::mark();
+        p.add_push_wait(700);
+        assert_eq!(p.record_proc_since(t0), 700, "the drained bank comes back");
+        p.record_visit(1, 10, t0, 700);
+        // A second call banks nothing, so its visit reads as pure compute.
+        let t1 = ElementProbe::mark();
+        let waited = p.record_proc_since(t1);
+        assert_eq!(waited, 0, "the bank was drained by the first call");
+        p.record_visit(2, 10, t1, waited);
+
+        let v = p.visits();
+        assert_eq!(v.len(), 2);
+        assert_eq!(v[0].push_wait_ns, 700);
+        assert_eq!(v[1].push_wait_ns, 0);
     }
 
     #[test]

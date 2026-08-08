@@ -61,9 +61,9 @@ use crate::gpu::{gpu_err, texture_of, GpuContext, WgpuTextureKeepAlive};
 use g2g_core::frame::Frame;
 use g2g_core::memory::{OwnedWgpuTexture, SystemSlice};
 use g2g_core::{
-    Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError, MemoryDomain,
-    MultiInputElement, OutputSink, PipelinePacket, PropError, PropValue, PropertySpec, Rate,
-    RawVideoFormat,
+    Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, FrameTiming, G2gError,
+    MemoryDomain, MultiInputElement, OutputSink, PipelinePacket, PropError, PropValue,
+    PropertySpec, Rate, RawVideoFormat,
 };
 
 /// Largest input / canvas edge the shader's fixed-point resize stays exact for
@@ -856,6 +856,14 @@ impl WgpuCompositor {
 }
 
 impl MultiInputElement for WgpuCompositor {
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "GPU video compositor",
+            "Filter/Editing/Video",
+            "Composites several video inputs onto one timed output canvas on the GPU",
+            "g2g",
+        )
+    }
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
