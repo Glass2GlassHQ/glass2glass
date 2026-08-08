@@ -3,17 +3,15 @@
 //! unchanged (`PassthroughFields`); these functions couple those fields across a
 //! link (`couple_*`), project a feasible input from an output (`project_*`), and
 //! discover a mask by probing an element's caps closure (`discover_*`) where the
-//! element declares none. Solver-only, so they live under the runtime tree rather than in
-//! the data-plane `caps.rs`; the two `project_*` functions serve the std graph
-//! runner's backward-feasibility sweep and stay `std`-gated.
+//! element declares none. Solver-only, so they live under the runtime tree rather
+//! than in the data-plane `caps.rs`. `project_passthrough` also serves every
+//! runner's mid-stream forward resolve; `project_passthrough_derived` serves only
+//! the std graph runner's backward-feasibility sweep and stays `std`-gated.
 
 use crate::caps::{
     intersect_channels, intersect_sample_rate, AudioFormat, Caps, CapsSet, Dim, Interlace,
-    PassthroughFields, Rate, RawVideoFormat, VideoCodec,
+    PassthroughFields, Rate, RawVideoFormat, VideoCodec, ANY_SAMPLE_RATE,
 };
-// Only the std-gated `project_passthrough` widens sample_rate back to ANY.
-#[cfg(feature = "std")]
-use crate::caps::ANY_SAMPLE_RATE;
 
 /// Narrow `input` by intersecting each *passthrough* field against the
 /// corresponding field of `pin` (the field-level backward coupling: e.g.
@@ -231,8 +229,8 @@ pub(crate) fn couple_passthrough_derived(
 /// is a non-rangeable scalar (`format` / `codec` / `channels`) with no wildcard,
 /// i.e. the input feasibility can't be expressed as a single `Caps` (the solver
 /// then imposes no upstream feasibility constraint, the status quo). Used by
-/// `backward_feasible` for the mid-stream snapshot.
-#[cfg(feature = "std")]
+/// `backward_feasible` for the mid-stream snapshot and by
+/// `resolve_forward_output` to widen a previous output into the shape to keep.
 pub(crate) fn project_passthrough(out: &Caps, mask: PassthroughFields) -> Option<Caps> {
     match out {
         Caps::RawVideo {

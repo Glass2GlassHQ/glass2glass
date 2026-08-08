@@ -76,7 +76,9 @@ use crate::runtime::channel::{
     bounded, link, link_with_transit, LinkReceiver, LinkSender, Receiver, RecvFuture, Sender,
     SenderSink,
 };
-use crate::runtime::coordinator::{realloc_local_dyn, report_nego_failure, ArmDirective};
+use crate::runtime::coordinator::{
+    log_caps_forward, log_caps_rejected, realloc_local_dyn, report_nego_failure, ArmDirective,
+};
 use crate::runtime::fanin::{DynMultiInputElement, DynSourceLoop};
 use crate::runtime::instrument::{snapshot_all, ElementProbe, Probe};
 use crate::runtime::join::{join_all, select2, Either};
@@ -2791,6 +2793,7 @@ async fn transform_arm<'a>(
                         &constraint,
                         &new_caps,
                         downstream_feasible.as_ref(),
+                        Some(&out_caps),
                     ) {
                         ForwardResolve::Fixed(caps) => (caps, true),
                         ForwardResolve::Defer => (new_caps.clone(), false),
@@ -2817,7 +2820,9 @@ async fn transform_arm<'a>(
                         }
                     }
                 };
-                match elem.configure_pipeline(&new_caps)? {
+                let instance = probe.as_deref().map(|p| p.name());
+                log_caps_forward(instance, &new_caps, &forward_caps, output_resolved);
+                match log_caps_rejected(instance, &new_caps, elem.configure_pipeline(&new_caps))? {
                     ConfigureOutcome::Accepted => {
                         // M188: re-resolve a caps-driven transform's output target
                         // on the mid-stream change too (matches startup, line ~421
@@ -2828,10 +2833,19 @@ async fn transform_arm<'a>(
                         // output caps only (a strict transform rightly rejects
                         // an input-shaped set, e.g. OpusDec fed `audio/x-opus`).
                         if output_resolved {
-                            elem.configure_output(&forward_caps)?;
+                            log_caps_rejected(
+                                instance,
+                                &forward_caps,
+                                elem.configure_output(&forward_caps),
+                            )?;
                         }
                         realloc_local_dyn(&mut *elem, &forward_caps);
-                        out_caps = forward_caps.clone();
+                        // On a Defer `forward_caps` is the incoming INPUT caps:
+                        // keep the last known real output as the shape to steer
+                        // future re-solves (and allocation proposals) by.
+                        if output_resolved {
+                            out_caps = forward_caps.clone();
+                        }
                         elem.process(PipelinePacket::CapsChanged(forward_caps), &mut adapter)
                             .await?;
                     }
@@ -3044,7 +3058,10 @@ async fn sink_arm_loop<'a>(
                         }
                     },
                 };
-                match elem.configure_pipeline(&sink_caps)? {
+                let instance = probe.as_deref().map(|p| p.name());
+                log_caps_forward(instance, &new_caps, &sink_caps, true);
+                match log_caps_rejected(instance, &sink_caps, elem.configure_pipeline(&sink_caps))?
+                {
                     ConfigureOutcome::Accepted => {
                         let proposal = elem.propose_allocation(&sink_caps);
                         if let Some(p) = &proposal {
@@ -3512,7 +3529,12 @@ async fn fanin_sink_arm<'a>(
                 // Mid-stream re-solve (M724): re-configure the changed pad
                 // before the session sees the new caps. A counter-fixation
                 // travels back up this pad's edge like a sink's would.
-                match session.configure_pipeline(pad, &new_caps)? {
+                let instance = probe.as_deref().map(|p| p.name());
+                match log_caps_rejected(
+                    instance,
+                    &new_caps,
+                    session.configure_pipeline(pad, &new_caps),
+                )? {
                     ConfigureOutcome::Accepted => {
                         session
                             .process(pad, PipelinePacket::CapsChanged(new_caps), &mut null)
@@ -3904,8 +3926,12 @@ async fn muxer_arm<'a>(
                 // reconfigure the pad; the input-side `CapsChanged` is consumed,
                 // not forwarded as if it were the merged output.
                 let input_caps = solve_mux_input_dyn(&new_caps, &*mux, pad)?;
-                mux.configure_pipeline(pad, &input_caps)?
-                    .reject_refixate()?;
+                log_caps_rejected(
+                    probe.as_deref().map(|p| p.name()),
+                    &input_caps,
+                    mux.configure_pipeline(pad, &input_caps),
+                )?
+                .reject_refixate()?;
                 // MX-2: the per-input change may shift the merged output. Emit one
                 // downstream `CapsChanged` only when it actually changed.
                 let new_output = solve_mux_output_dyn(&*mux)?;
@@ -4051,8 +4077,12 @@ async fn muxer_arm_pts<'a>(
                 // merged output actually shifts, and walk the allocation change
                 // through the boundary.
                 let input_caps = solve_mux_input_dyn(&new_caps, &*mux, pad)?;
-                mux.configure_pipeline(pad, &input_caps)?
-                    .reject_refixate()?;
+                log_caps_rejected(
+                    probe.as_deref().map(|p| p.name()),
+                    &input_caps,
+                    mux.configure_pipeline(pad, &input_caps),
+                )?
+                .reject_refixate()?;
                 let new_output = solve_mux_output_dyn(&*mux)?;
                 if new_output != current_output {
                     current_output = new_output.clone();

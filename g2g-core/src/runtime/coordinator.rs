@@ -42,6 +42,46 @@ pub(crate) fn report_nego_failure(bus: Option<&BusHandle>, failure: NegotiationF
     }
 }
 
+/// Wrap an arm's mid-stream `configure_pipeline` / `configure_output` result:
+/// a rejection is logged under the `caps` category (ERROR, so it prints by
+/// default) naming the element instance and the caps it rejected, before the
+/// error unwinds the arm as an otherwise-bare `CapsMismatch`.
+pub(crate) fn log_caps_rejected<T>(
+    instance: Option<&str>,
+    caps: &Caps,
+    result: Result<T, G2gError>,
+) -> Result<T, G2gError> {
+    if let Err(err) = &result {
+        crate::g2g_error!(
+            crate::log::Target {
+                category: crate::log::CAPS_CATEGORY,
+                instance,
+            },
+            "rejected mid-stream caps {}: {err:?}",
+            caps.to_gst_string()
+        );
+    }
+    result
+}
+
+/// Narrate an arm's mid-stream forward resolution under the `caps` category
+/// (DEBUG, visible via `G2G_CAPS_TRACE=1`): the incoming caps and what the arm
+/// forwards downstream, marking whether the output was steered (re-fixated
+/// against the downstream feasibility snapshot) or deferred (input forwarded
+/// unchanged, the element's own `process` re-emits its real output).
+pub(crate) fn log_caps_forward(instance: Option<&str>, input: &Caps, forward: &Caps, fixed: bool) {
+    crate::g2g_debug!(
+        crate::log::Target {
+            category: crate::log::CAPS_CATEGORY,
+            instance,
+        },
+        "mid-stream caps {} -> forwarding {} ({})",
+        input.to_gst_string(),
+        forward.to_gst_string(),
+        if fixed { "steered" } else { "deferred" }
+    );
+}
+
 /// Solve a linear constraint chain and return its final (sink-side) link caps,
 /// posting a structured failure to the bus on conflict. Collapses the
 /// `solve_linear(..).map_err(report_nego_failure)?; links.last().cloned()` block
@@ -272,11 +312,10 @@ pub(crate) struct LinearNegotiation {
     /// structure the negotiation produces.
     #[allow(dead_code)]
     pub(crate) source_link: Caps,
-    /// Caps on the transform-output / sink-input link. Retained for β's
-    /// re-cascade (Session E), the same as `source_link`; the M12 allocation
-    /// query that used to read it now runs inside negotiation against the
-    /// per-link caps directly.
-    #[allow(dead_code)]
+    /// Caps on the transform-output / sink-input link: the transform arm's
+    /// initial "previous output" for the Caps-α mid-stream re-solve; the M12
+    /// allocation query that used to read it now runs inside negotiation
+    /// against the per-link caps directly.
     pub(crate) sink_link: Caps,
     /// The folded M12 allocation proposal handed to the source (the
     /// most-demanding of the sink's and transform's requirements), or `None`

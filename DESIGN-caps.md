@@ -295,15 +295,22 @@ correctly downstream-aware:
 
 When `downstream_feasible[i]` is `None` (no backward snapshot reached this edge,
 e.g. a strict `DerivedOutput` downstream whose input the backward sweep cannot
-invert), the arm still forwards the element's output **when the constraint pins
-it to a single producible caps** (a property-driven `videoconvert`, an identity
-passthrough); only a genuinely ambiguous output (a caps-driven converter with
-several producible formats and nothing to choose between them) defers to the
-element's own `process`. This keeps the "`c` is the output" contract below
-intact for the common `... ! avdec ! videoconvert ! textoverlay ! ...` shape:
-the decoder's mid-stream `CapsChanged` (its framerate settling from a negotiated
-`Range` to a fixed value) would otherwise make the converter forward its *input*
-(NV12) to the strict overlay, which rejects it.
+invert, or a retargeting converter below whose input feasibility is not
+expressible as a single `Caps`), the arm still forwards the element's output
+**when the constraint pins it to a single producible caps** (a property-driven
+`videoconvert`, an identity passthrough). An ambiguous producible set (a
+caps-driven converter with several formats) is resolved by preferring the
+**output shape the element already produces**: the startup-solved (then
+arm-tracked) output with geometry / rate widened, intersected with the
+candidates, so a mid-stream geometry refinement keeps the negotiated format and
+only the geometry changes. The same preference orders the fixation when a
+snapshot *is* present. Only when the previous shape is no longer producible
+(a real format change) does the arm defer to the element's own `process`. This
+keeps the "`c` is the output" contract below intact for the common
+`... ! avdec ! videoconvert ! textoverlay ! ...` shape: the decoder's
+mid-stream `CapsChanged` (its 16x16 `Range` placeholders settling to the real
+geometry) would otherwise make the converter forward its *input* (I420) to the
+strict overlay, which rejects it.
 
 The **runner**, not `process(CapsChanged)`, owns the forwarded output. A
 format-changing element moves its derivation into the declared constraint
