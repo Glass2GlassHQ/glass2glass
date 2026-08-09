@@ -2532,6 +2532,18 @@ variable Noto Sans CJK) yields empty glyphs and is one of the reasons the richer
 `cosmic-text` backend (shaping, bidi, CFF, system fallback) is the planned
 upgrade. The no_std baseline keeps the bitmap font (no font file or rasterizer).
 
+`vellooverlay::VelloTextOverlay` (`vello-text-overlay`) is the GPU backend for
+the same cues, for a pipeline that keeps frames on the GPU: RGBA8 in,
+`MemoryDomain::WgpuTexture` out, like `VelloAnalyticsOverlay` beside it. It holds
+a `TextOverlay` rather than its own state, so cue selection, `CueSettings`
+placement, colours, font chain and shaping are one implementation: the shared
+step lays each active cue out into canvas-absolute glyph positions, which the CPU
+element blits as swash rasters and this one hands to Vello as glyph runs (drawn
+from the very face cosmic-text's per-codepoint fallback resolved, so a mixed
+Latin + CJK cue uses the same faces on both backends). Vertical cues are the one
+gap: they never reach the shaper, so only the CPU element's column renderer
+draws them.
+
 `SubParse` feeds that renderer as a stream rather than from a file: it parses a
 structured subtitle document arriving on its sink pad and emits each cue as a
 timed `Text{Utf8}` frame (PTS + duration = the cue window). Parsing is

@@ -372,6 +372,7 @@ OS-coupled elements live behind cargo features:
 | `VpxEnc` (VP8 / VP9 via libvpx) | `vpx` | libvpx |
 | `MjpegDec` / `MjpegEnc` (pure Rust) | `mjpeg`, `mjpeg-encode` | — |
 | `AnalyticsOverlay` (CPU) / `VelloAnalyticsOverlay` (GPU) / `WgpuSink` | `analytics`, `vello-overlay`, `wgpu-sink` | wgpu (GPU variants) |
+| `VelloTextOverlay` (subtitle cues drawn on the GPU, `WgpuTexture` out) | `vello-text-overlay` | wgpu |
 | `OrtInference` (+ CUDA / DirectML EPs) | `ort`, `cuda`, `directml` (in `g2g-ml`) | onnxruntime |
 | `BurnInference` | `burn` (in `g2g-ml`) | wgpu (Vulkan / Metal / DX12) |
 | `WgpuPreprocess` (NV12 or Android RGBA GPU texture in, NCHW tensor out) | `wgpu`, `mediacodec-wgpu` (in `g2g-ml`) | wgpu |

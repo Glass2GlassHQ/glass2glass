@@ -15,6 +15,10 @@
 //!
 //! `vello-overlay` feature (implies `std` + `analytics`). The CPU overlay remains
 //! the `no_std` baseline; this element is never on the RTOS path.
+//!
+//! [`VelloTextOverlay`] (the `vello-text-overlay` feature) is the same trick for
+//! subtitle cues: it shares the renderer and the frame-image background with the
+//! analytics overlay, and draws the cue's glyph outlines as Vello glyph runs.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -31,9 +35,23 @@ use g2g_core::{
 
 use crate::gpu::{gpu_err, GpuContext, WgpuTextureKeepAlive};
 use vello::kurbo::{Affine, Rect, Stroke};
-use vello::peniko::{Blob, Color, ImageAlphaType, ImageData, ImageFormat};
+use vello::peniko::{Blob, Color, Fill, ImageAlphaType, ImageData, ImageFormat};
 use vello::wgpu;
 use vello::{AaConfig, AaSupport, RenderParams, Renderer, RendererOptions, Scene};
+
+#[cfg(feature = "vello-text-overlay")]
+use g2g_core::{ElementMetadata, PropError, PropValue, PropertySpec};
+#[cfg(feature = "vello-text-overlay")]
+use vello::peniko::FontData;
+#[cfg(feature = "vello-text-overlay")]
+use vello::Glyph;
+
+#[cfg(feature = "vello-text-overlay")]
+use crate::subparse::Cue;
+#[cfg(feature = "vello-text-overlay")]
+use crate::textoverlay::TextOverlay;
+#[cfg(feature = "vello-text-overlay")]
+use crate::textshape::FontId;
 
 /// Renders detection bounding boxes from an attached [`AnalyticsMeta`] onto an
 /// RGBA8 frame with Vello, emitting a GPU-resident [`MemoryDomain::WgpuTexture`].
@@ -54,8 +72,8 @@ pub struct VelloAnalyticsOverlay {
     drawn: u64,
     /// A shared device to render on, set via [`with_context`](Self::with_context)
     /// (eg the same context the downstream `WgpuSink` presents on, so the texture
-    /// handoff is copy-free). When unset, [`ensure_gpu`](Self::ensure_gpu) opens
-    /// its own device on the first frame.
+    /// handoff is copy-free). When unset, [`ensure_gpu`] opens its own device on
+    /// the first frame.
     ctx: Option<GpuContext>,
     gpu: Option<Gpu>,
 }
@@ -65,6 +83,109 @@ struct Gpu {
     device: wgpu::Device,
     queue: wgpu::Queue,
     renderer: Renderer,
+}
+
+impl Gpu {
+    /// Render `scene` into a fresh `w` x `h` RGBA8 texture, returned for an
+    /// output frame to own.
+    fn render_scene(&mut self, scene: &Scene, w: u32, h: u32) -> Result<wgpu::Texture, G2gError> {
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("vello-overlay-target"),
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            // STORAGE_BINDING: Vello's fine stage writes the image as a storage
+            // texture. COPY_SRC: lets a sink (or a test) read it back.
+            // TEXTURE_BINDING: lets a GPU sink sample it for presentation.
+            usage: wgpu::TextureUsages::STORAGE_BINDING
+                | wgpu::TextureUsages::COPY_SRC
+                | wgpu::TextureUsages::TEXTURE_BINDING,
+            // The pixels are sRGB-encoded video; an embedder sampling the frame
+            // in a lit/tonemapped scene needs an sRGB view for correct gamma.
+            view_formats: &[wgpu::TextureFormat::Rgba8UnormSrgb],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        self.renderer
+            .render_to_texture(
+                &self.device,
+                &self.queue,
+                scene,
+                &view,
+                &RenderParams {
+                    // Transparent base: the image fill covers the frame, so the
+                    // clear colour is only visible where the image does not draw.
+                    base_color: Color::from_rgba8(0, 0, 0, 0),
+                    width: w,
+                    height: h,
+                    antialiasing_method: AaConfig::Area,
+                },
+            )
+            .map_err(gpu_err)?;
+        Ok(texture)
+    }
+}
+
+/// Build the wgpu device/queue and Vello renderer on the first frame, on the
+/// shared `ctx` if one was given, else on a private headless device. Maps a
+/// missing adapter / device to a structured hardware error so a host without a
+/// GPU fails cleanly (and tests skip).
+async fn ensure_gpu(gpu: &mut Option<Gpu>, ctx: &Option<GpuContext>) -> Result<(), G2gError> {
+    if gpu.is_some() {
+        return Ok(());
+    }
+    let ctx = match ctx.clone() {
+        Some(ctx) => ctx,
+        None => GpuContext::headless().await?,
+    };
+    let device = ctx.device;
+    let queue = ctx.queue;
+    let renderer = Renderer::new(
+        &device,
+        RendererOptions {
+            use_cpu: false,
+            // Area AA only: we never request MSAA, so do not compile those
+            // pipeline permutations.
+            antialiasing_support: AaSupport {
+                area: true,
+                msaa8: false,
+                msaa16: false,
+            },
+            num_init_threads: None,
+            pipeline_cache: None,
+        },
+    )
+    .map_err(gpu_err)?;
+    *gpu = Some(Gpu {
+        device,
+        queue,
+        renderer,
+    });
+    Ok(())
+}
+
+/// Draw `rgba` (a full-frame `w` x `h` picture, consumed) as the scene's
+/// background, so what is drawn after it composites over the actual frame on the
+/// GPU (Vello clears the target first).
+fn draw_frame_image(scene: &mut Scene, rgba: Vec<u8>, w: u32, h: u32) {
+    let image = ImageData {
+        data: Blob::from(rgba),
+        format: ImageFormat::Rgba8,
+        alpha_type: ImageAlphaType::Alpha,
+        width: w,
+        height: h,
+    };
+    scene.draw_image(&image, Affine::IDENTITY);
+}
+
+/// An opaque-or-translucent RGBA colour as a Vello brush colour.
+fn brush_color(rgba: [u8; 4]) -> Color {
+    Color::from_rgba8(rgba[0], rgba[1], rgba[2], rgba[3])
 }
 
 impl core::fmt::Debug for VelloAnalyticsOverlay {
@@ -144,44 +265,6 @@ impl VelloAnalyticsOverlay {
         )
     }
 
-    /// Build the wgpu device/queue and Vello renderer on the first frame. Maps a
-    /// missing adapter / device to a structured hardware error so a host without
-    /// a GPU fails cleanly (and tests skip).
-    async fn ensure_gpu(&mut self) -> Result<(), G2gError> {
-        if self.gpu.is_some() {
-            return Ok(());
-        }
-        // Use the shared context if one was provided, else open a private device.
-        let ctx = match self.ctx.clone() {
-            Some(ctx) => ctx,
-            None => GpuContext::headless().await?,
-        };
-        let device = ctx.device;
-        let queue = ctx.queue;
-        let renderer = Renderer::new(
-            &device,
-            RendererOptions {
-                use_cpu: false,
-                // Area AA only: we never request MSAA, so do not compile those
-                // pipeline permutations.
-                antialiasing_support: AaSupport {
-                    area: true,
-                    msaa8: false,
-                    msaa16: false,
-                },
-                num_init_threads: None,
-                pipeline_cache: None,
-            },
-        )
-        .map_err(gpu_err)?;
-        self.gpu = Some(Gpu {
-            device,
-            queue,
-            renderer,
-        });
-        Ok(())
-    }
-
     /// Render `rgba` (full-frame image, consumed) with `detections` stroked over
     /// it into a fresh `wgpu::Texture`, returned for the output frame to own.
     fn render(
@@ -194,17 +277,8 @@ impl VelloAnalyticsOverlay {
         let gpu = self.gpu.as_mut().ok_or(G2gError::NotConfigured)?;
 
         let mut scene = Scene::new();
-        // The input picture as a full-frame image fill, so the boxes composite
-        // over the actual frame on the GPU (Vello clears the target first). The
-        // caller already owns this buffer, so move it into the blob.
-        let image = ImageData {
-            data: Blob::from(rgba),
-            format: ImageFormat::Rgba8,
-            alpha_type: ImageAlphaType::Alpha,
-            width: w,
-            height: h,
-        };
-        scene.draw_image(&image, Affine::IDENTITY);
+        // The caller already owns this buffer, so move it into the blob.
+        draw_frame_image(&mut scene, rgba, w, h);
 
         let stroke = Stroke::new(thickness);
         for d in detections {
@@ -220,45 +294,7 @@ impl VelloAnalyticsOverlay {
             scene.stroke(&stroke, Affine::IDENTITY, class_color(d.label), None, &rect);
         }
 
-        let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("vello-overlay-target"),
-            size: wgpu::Extent3d {
-                width: w,
-                height: h,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            // STORAGE_BINDING: Vello's fine stage writes the image as a storage
-            // texture. COPY_SRC: lets a sink (or a test) read it back.
-            // TEXTURE_BINDING: lets a GPU sink sample it for presentation.
-            usage: wgpu::TextureUsages::STORAGE_BINDING
-                | wgpu::TextureUsages::COPY_SRC
-                | wgpu::TextureUsages::TEXTURE_BINDING,
-            // The pixels are sRGB-encoded video; an embedder sampling the frame
-            // in a lit/tonemapped scene needs an sRGB view for correct gamma.
-            view_formats: &[wgpu::TextureFormat::Rgba8UnormSrgb],
-        });
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        gpu.renderer
-            .render_to_texture(
-                &gpu.device,
-                &gpu.queue,
-                &scene,
-                &view,
-                &RenderParams {
-                    // Transparent base: the image fill covers the frame, so the
-                    // clear colour is only visible where the image does not draw.
-                    base_color: Color::from_rgba8(0, 0, 0, 0),
-                    width: w,
-                    height: h,
-                    antialiasing_method: AaConfig::Area,
-                },
-            )
-            .map_err(gpu_err)?;
-        Ok(texture)
+        gpu.render_scene(&scene, w, h)
     }
 }
 
@@ -328,7 +364,7 @@ impl AsyncElement for VelloAnalyticsOverlay {
                     }
                     let rgba = slice[..need].to_vec();
 
-                    self.ensure_gpu().await?;
+                    ensure_gpu(&mut self.gpu, &self.ctx).await?;
                     let texture = self.render(rgba, &detections)?;
 
                     let domain = MemoryDomain::WgpuTexture(OwnedWgpuTexture::new(
@@ -358,6 +394,329 @@ impl AsyncElement for VelloAnalyticsOverlay {
             }
             Ok(())
         })
+    }
+}
+
+/// Renders the subtitle cues active at the frame's PTS with Vello, emitting a
+/// GPU-resident [`MemoryDomain::WgpuTexture`]: the GPU companion to the CPU
+/// [`TextOverlay`](crate::textoverlay), for a pipeline that keeps frames on the
+/// GPU (decode -> overlay -> present) and must not round-trip text through
+/// system memory.
+///
+/// Cues, fonts, colours, cue selection and placement are the CPU overlay's
+/// (`location=` / `font=` / `color=` / `font-size=` / `font-variations=` behave
+/// the same, and cosmic-text shapes and picks fallback faces the same way, so a
+/// Latin cue with CJK in it uses the same faces here). Only the drawing differs:
+/// the glyph outlines of the face the shaper chose go to Vello as glyph runs,
+/// and the backing box is a filled rect, both composited over the frame image on
+/// the GPU.
+///
+/// Two limits against the CPU element. `vertical:rl` / `lr` cues draw nothing
+/// here: vertical writing is a shaping limit (cosmic-text is horizontal-only)
+/// and the CPU element covers it with its own column renderer, which has no
+/// glyph runs to hand over. And there is no bitmap-font fallback, so a host
+/// where neither `font=` nor font discovery yields a usable face renders no
+/// text rather than the 8x8 ASCII baseline.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::subparse::parse_srt;
+/// use g2g_plugins::vellooverlay::VelloTextOverlay;
+///
+/// let element = VelloTextOverlay::new()
+///     .with_cues(parse_srt("1\n00:00:00,000 --> 00:00:02,000\nhello\n"));
+/// assert_eq!(element.cue_count(), 1);
+/// ```
+#[cfg(feature = "vello-text-overlay")]
+pub struct VelloTextOverlay {
+    width: u32,
+    height: u32,
+    configured: bool,
+    /// The cue list, fonts, colours and shaper. Holding the CPU element rather
+    /// than a second copy of that state is what keeps the two backends drawing
+    /// the same cue in the same place.
+    text: TextOverlay,
+    /// Faces already handed to Vello, keyed by the shaper's face id. A face's
+    /// bytes are copied once here, never per frame.
+    fonts: Vec<(FontId, FontData)>,
+    ctx: Option<GpuContext>,
+    gpu: Option<Gpu>,
+    drawn: u64,
+}
+
+#[cfg(feature = "vello-text-overlay")]
+impl core::fmt::Debug for VelloTextOverlay {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("VelloTextOverlay")
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .field("configured", &self.configured)
+            .field("cues", &self.text.cue_count())
+            .field("drawn", &self.drawn)
+            .field("gpu_ready", &self.gpu.is_some())
+            .finish()
+    }
+}
+
+#[cfg(feature = "vello-text-overlay")]
+impl Default for VelloTextOverlay {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(feature = "vello-text-overlay")]
+impl VelloTextOverlay {
+    /// An overlay with no cues. Geometry and GPU are set lazily.
+    pub fn new() -> Self {
+        Self {
+            width: 0,
+            height: 0,
+            configured: false,
+            text: TextOverlay::new(),
+            fonts: Vec::new(),
+            ctx: None,
+            gpu: None,
+            drawn: 0,
+        }
+    }
+
+    /// Render on a shared [`GpuContext`] instead of opening a private device, so
+    /// the texture presents on the downstream sink's device with no copy.
+    pub fn with_context(mut self, ctx: GpuContext) -> Self {
+        self.ctx = Some(ctx);
+        self
+    }
+
+    /// Use a preparsed cue list (`subparse::parse_srt` and friends).
+    pub fn with_cues(mut self, cues: Vec<Cue>) -> Self {
+        self.text = self.text.with_cues(cues);
+        self
+    }
+
+    /// Append a font from a `.ttf` / `.otf` / `.ttc` file to the fallback chain.
+    /// Without one the shaper renders from the discovered system fonts.
+    pub fn with_font(mut self, path: impl AsRef<str>) -> Result<Self, G2gError> {
+        self.text = self.text.with_font(path)?;
+        Ok(self)
+    }
+
+    /// Append a font from in-memory face bytes to the fallback chain;
+    /// `collection_index` selects a face in a `.ttc`.
+    pub fn with_font_bytes(
+        mut self,
+        bytes: &[u8],
+        collection_index: u32,
+    ) -> Result<Self, G2gError> {
+        self.text = self.text.with_font_bytes(bytes, collection_index)?;
+        Ok(self)
+    }
+
+    /// Set the text height in pixels; 0 derives it from the frame height.
+    pub fn with_font_size(mut self, px: u32) -> Self {
+        self.text = self.text.with_font_size(px);
+        self
+    }
+
+    /// Set the opaque text colour.
+    pub fn with_text_color(mut self, rgb: [u8; 3]) -> Self {
+        self.text = self.text.with_text_color(rgb);
+        self
+    }
+
+    /// Number of loaded cues.
+    pub fn cue_count(&self) -> usize {
+        self.text.cue_count()
+    }
+
+    /// Count of frames rendered (whether or not a cue was active).
+    pub fn drawn_count(&self) -> u64 {
+        self.drawn
+    }
+
+    /// Render `rgba` (full-frame image, consumed) with the cues active at `t_ns`
+    /// drawn over it, into a fresh `wgpu::Texture` for the output frame to own.
+    fn render(&mut self, rgba: Vec<u8>, t_ns: u64) -> Result<wgpu::Texture, G2gError> {
+        let (w, h) = (self.width, self.height);
+        let mut scene = Scene::new();
+        draw_frame_image(&mut scene, rgba, w, h);
+        // Only touch the shaper when something is on screen: building it scans
+        // the system font directories.
+        if self.text.has_cue_at(t_ns) {
+            self.draw_cues(&mut scene, t_ns);
+        }
+        let gpu = self.gpu.as_mut().ok_or(G2gError::NotConfigured)?;
+        gpu.render_scene(&scene, w, h)
+    }
+
+    /// Draw each active cue's backing box and glyphs, batching the glyphs into
+    /// runs of one face and one colour (a `::cue(.class)` span or a fallback
+    /// face starts a new run).
+    fn draw_cues(&mut self, scene: &mut Scene, t_ns: u64) {
+        let px = self.text.ttf_px();
+        let placed = self.text.place_shaped_cues(t_ns);
+        for cue in placed {
+            let (x, y, box_w, box_h) = cue.background;
+            if box_w > 0 && box_h > 0 {
+                scene.fill(
+                    Fill::NonZero,
+                    Affine::IDENTITY,
+                    brush_color(cue.background_color),
+                    None,
+                    &Rect::new(x as f64, y as f64, (x + box_w) as f64, (y + box_h) as f64),
+                );
+            }
+            let mut start = 0;
+            while start < cue.glyphs.len() {
+                let font_id = cue.glyphs[start].key.font_id;
+                let color = cue.glyphs[start].color;
+                let end = cue.glyphs[start..]
+                    .iter()
+                    .position(|g| g.key.font_id != font_id || g.color != color)
+                    .map_or(cue.glyphs.len(), |n| start + n);
+                let run = cue.glyphs[start..end].iter().map(|g| Glyph {
+                    id: g.key.glyph_id as u32,
+                    x: g.x as f32,
+                    y: g.y as f32,
+                });
+                if let Some(font) = font_handle(&mut self.fonts, &mut self.text, font_id) {
+                    scene
+                        .draw_glyphs(font)
+                        .font_size(px)
+                        .brush(brush_color(color))
+                        .draw(Fill::NonZero, run);
+                }
+                start = end;
+            }
+        }
+    }
+}
+
+/// The Vello handle for the shaper face `id`, copying the face bytes into the
+/// cache on first use. A free function so the cache and the shaper are borrowed
+/// separately from the element.
+#[cfg(feature = "vello-text-overlay")]
+fn font_handle<'a>(
+    cache: &'a mut Vec<(FontId, FontData)>,
+    text: &mut TextOverlay,
+    id: FontId,
+) -> Option<&'a FontData> {
+    if let Some(pos) = cache.iter().position(|(cached, _)| *cached == id) {
+        return Some(&cache[pos].1);
+    }
+    let (bytes, index) = text.face_data(id)?;
+    cache.push((id, FontData::new(Blob::from(bytes), index)));
+    cache.last().map(|(_, font)| font)
+}
+
+#[cfg(feature = "vello-text-overlay")]
+impl AsyncElement for VelloTextOverlay {
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    where
+        Self: 'a;
+
+    fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
+        if TextOverlay::accepts(upstream_caps) {
+            Ok(upstream_caps.clone())
+        } else {
+            Err(G2gError::CapsMismatch)
+        }
+    }
+
+    fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
+        // Identity on caps: same RGBA8 format and geometry; only the memory
+        // domain changes (System -> WgpuTexture), which caps do not describe.
+        CapsConstraint::DerivedOutput(Box::new(|input: &Caps| {
+            if TextOverlay::accepts(input) {
+                CapsSet::one(input.clone())
+            } else {
+                CapsSet::from_alternatives(Vec::new())
+            }
+        }))
+    }
+
+    fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        let (w, h) = TextOverlay::dims(absolute_caps).ok_or(G2gError::CapsMismatch)?;
+        // The cue placement is the CPU element's, so it needs the geometry too.
+        self.text.configure_pipeline(absolute_caps)?;
+        self.width = w;
+        self.height = h;
+        self.configured = true;
+        Ok(ConfigureOutcome::Accepted)
+    }
+
+    fn process<'a>(
+        &'a mut self,
+        packet: PipelinePacket,
+        out: &'a mut dyn OutputSink,
+    ) -> Self::ProcessFuture<'a> {
+        Box::pin(async move {
+            if !self.configured {
+                return Err(G2gError::NotConfigured);
+            }
+            match packet {
+                PipelinePacket::DataFrame(frame) => {
+                    let Some(slice) = frame.domain.as_system_slice() else {
+                        return Err(G2gError::UnsupportedDomain);
+                    };
+                    let need = self.width as usize * self.height as usize * 4;
+                    if slice.len() < need {
+                        return Err(G2gError::CapsMismatch);
+                    }
+                    let rgba = slice[..need].to_vec();
+
+                    ensure_gpu(&mut self.gpu, &self.ctx).await?;
+                    let texture = self.render(rgba, frame.timing.pts_ns)?;
+
+                    let domain = MemoryDomain::WgpuTexture(OwnedWgpuTexture::new(
+                        self.width,
+                        self.height,
+                        alloc::sync::Arc::new(WgpuTextureKeepAlive(texture)),
+                    ));
+                    let mut out_frame = Frame::new(domain, frame.timing, frame.sequence);
+                    out_frame.meta = frame.meta;
+                    self.drawn += 1;
+                    out.push(PipelinePacket::DataFrame(out_frame)).await?;
+                }
+                PipelinePacket::CapsChanged(caps) => {
+                    if let Some((w, h)) = TextOverlay::dims(&caps) {
+                        self.text.configure_pipeline(&caps)?;
+                        self.width = w;
+                        self.height = h;
+                    }
+                    out.push(PipelinePacket::CapsChanged(caps)).await?;
+                }
+                // The runner's transform arm forwards EOS; don't double it.
+                PipelinePacket::Eos => {}
+                other => {
+                    out.push(other).await?;
+                }
+            }
+            Ok(())
+        })
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        crate::textoverlay::TEXTOVERLAY_PROPS
+    }
+
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "Vello text overlay",
+            "Filter/Editor/Video",
+            "Renders subtitle cues over video on the GPU, output as a wgpu texture",
+            "g2g",
+        )
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        self.text.set_property(name, value)
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        self.text.get_property(name)
     }
 }
 

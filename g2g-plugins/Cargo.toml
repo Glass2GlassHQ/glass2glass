@@ -550,6 +550,12 @@ analytics = ["metadata"]
 # the no_std baseline; this is the HD / many-box GPU companion. Pulls wgpu
 # directly too (the same crate vello uses) so it shares the GpuContext / sink.
 vello-overlay = ["std", "analytics", "dep:vello", "dep:wgpu"]
+# Vello GPU text overlay (M981): VelloTextOverlay renders subtitle cues with the
+# Vello GPU 2D renderer into a wgpu texture (MemoryDomain::WgpuTexture), so a
+# keep-on-GPU pipeline overlays text with no CPU round trip. Cue selection,
+# placement and font fallback are the CPU TextOverlay's, shaped by cosmic-text;
+# only the glyph outlines are drawn on the GPU, hence both features.
+vello-text-overlay = ["vello-overlay", "text-shaping"]
 # GPU presentation sink (M103): WgpuSink presents MemoryDomain::WgpuTexture
 # frames (eg from VelloAnalyticsOverlay) by blitting onto a target on the *same*
 # shared wgpu device (a wgpu texture is device-bound, so producer and sink must

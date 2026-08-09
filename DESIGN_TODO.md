@@ -433,7 +433,7 @@ _(No open parser items.)_
 - **`textoverlay` font backend:** the `truetype-overlay` feature (M409, `ab_glyph`
   since M668) renders both glyf and CFF/CFF2 outlines (CJK / accented / mixed-case,
   horizontal + vertical) with an explicit Latin+CJK fallback chain, so OpenType-CFF
-  `.otf` fonts render, not only glyf `.ttf`s. Still open: a `vello` GPU backend;
+  `.otf` fonts render, not only glyf `.ttf`s. Still open:
   font-variation axes beyond `wght` on the shaped horizontal path (cosmic-text
   0.17 exposes only weight, and 0.17.1+ needs rustc 1.89, above the 1.86 MSRV,
   so the upgrade waits on an MSRV bump); vertical-mode shaping if cosmic-text

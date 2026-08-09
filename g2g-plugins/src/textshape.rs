@@ -16,16 +16,24 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use cosmic_text::{
-    Attrs, Buffer, CacheKey, Family, FontSystem, Metrics, Shaping, SwashCache, SwashContent,
-    Weight, Wrap,
+    Attrs, Buffer, Family, FontSystem, Metrics, Shaping, SwashCache, SwashContent, Weight, Wrap,
 };
+
+/// Identifies one rasterized glyph (face, glyph index, size, subpixel bin).
+pub use cosmic_text::CacheKey as GlyphKey;
+
+/// Identifies a face in the shaper's font database. Every shaped glyph names the
+/// face fallback picked for it, so a backend that draws outlines itself (rather
+/// than blitting [`TextShaper::image`]) can fetch that face with
+/// [`TextShaper::face_data`].
+pub type FontId = cosmic_text::fontdb::ID;
 
 /// One positioned, rasterizable glyph. `x` / `y` are the swash pixel origin
 /// relative to the block's top-left; the placement offsets in
 /// [`GlyphImage`] still apply on top.
 #[derive(Debug)]
 pub struct ShapedGlyph {
-    pub key: CacheKey,
+    pub key: GlyphKey,
     pub x: i32,
     pub y: i32,
     /// Byte offset of this glyph's cluster in its logical line. In a
@@ -140,6 +148,16 @@ impl TextShaper {
         None
     }
 
+    /// Bytes + collection index of the face `id` names (the one a shaped glyph
+    /// was resolved to), so a GPU backend can draw that glyph's outlines from
+    /// the same face this shaper picked. Copies the whole font file, so callers
+    /// keep the result rather than asking per frame.
+    pub fn face_data(&self, id: FontId) -> Option<(Vec<u8>, u32)> {
+        let db = self.fonts.db();
+        let index = db.face(id)?.index;
+        db.with_face_data(id, |data, _| (data.to_vec(), index))
+    }
+
     /// Shape and lay out `text` at `px` (one visual line per logical line, no
     /// wrapping), optionally at variable-font weight `wght`. Line positions are
     /// relative to the block's top-left.
@@ -202,7 +220,7 @@ impl TextShaper {
     /// Rasterize (or fetch from the cache) one shaped glyph. `None` for a glyph
     /// with no bitmap (a space) or a subpixel mask, which this path never asks
     /// for.
-    pub fn image(&mut self, key: CacheKey) -> Option<GlyphImage<'_>> {
+    pub fn image(&mut self, key: GlyphKey) -> Option<GlyphImage<'_>> {
         let image = self.cache.get_image(&mut self.fonts, key).as_ref()?;
         let color = match image.content {
             SwashContent::Mask => false,
