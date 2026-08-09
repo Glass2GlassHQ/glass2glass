@@ -19,6 +19,13 @@ use g2g_core::{
     OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::concat::Concat;
+///
+/// let element = Concat::new(2);
+/// ```
 #[derive(Debug)]
 pub struct Concat {
     inputs: usize,

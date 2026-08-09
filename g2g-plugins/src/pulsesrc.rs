@@ -70,6 +70,16 @@ struct StreamConfig {
     fragment_bytes: usize,
 }
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::pulsesrc::PulseSrc;
+///
+/// let element = PulseSrc::new()
+///     .with_device("alsa_input.pci-0000_00_1f.3.analog-stereo")
+///     .with_rate(44_100)
+///     .with_channels(1);
+/// ```
 #[derive(Debug)]
 pub struct PulseSrc {
     /// Empty = the default server (`PULSE_SERVER` / the local socket).

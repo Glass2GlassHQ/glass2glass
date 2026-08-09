@@ -10,6 +10,8 @@
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
     <style>
         :root {
+            /* declared dark so Chrome's forced dark mode never inverts the inline SVGs */
+            color-scheme: dark;
             --bg-primary: #0A0E14;
             --bg-secondary: #11161E;
             --bg-tertiary: #161C26;
@@ -427,6 +429,34 @@
         }
         .footer-links a:hover { color: var(--accent); }
 
+        /* ── DIAGRAMS ── */
+        .diagram { margin: 0 auto 56px; }
+        .diagram-top { margin: 48px auto 0; }
+        .diagram-span { grid-column: 1 / -1; margin: 24px auto; }
+        .diagram svg { display: block; width: 100%; height: auto; margin: 0 auto; }
+        .diagram svg.diagram-narrow { display: none; }
+        .diagram figcaption {
+            font-size: 0.85rem; color: var(--text-tertiary);
+            line-height: 1.6; text-align: center;
+            max-width: 720px; margin: 16px auto 0;
+        }
+        .diagram figcaption code { color: var(--text-secondary); }
+        .d-panel { fill: var(--bg-secondary); stroke: var(--border); }
+        .d-box   { fill: var(--bg-card); stroke: var(--border); }
+        .d-core  { fill: var(--accent-dim); stroke: var(--accent); }
+        .d-title { fill: var(--text-primary); font-weight: 600; }
+        .d-name  { fill: var(--text-primary); font-family: 'JetBrains Mono', monospace; }
+        .d-caps  { fill: var(--text-secondary); font-family: 'JetBrains Mono', monospace; }
+        .d-sub   { fill: var(--text-tertiary); }
+        .d-acc   { fill: var(--accent); font-family: 'JetBrains Mono', monospace; }
+        .d-line  { stroke: var(--border-hover); fill: none; stroke-width: 1.4; }
+        .d-line-acc { stroke: var(--accent); fill: none; stroke-width: 1.6; }
+        .d-dash  { stroke-dasharray: 5 4; }
+        @media (max-width: 1000px) {
+            .diagram svg.diagram-wide { display: none; }
+            .diagram svg.diagram-narrow { display: block; }
+        }
+
         /* ── RESPONSIVE ── */
         @media (max-width: 1024px) {
             .features-grid, .crates-grid, .targets-grid { grid-template-columns: repeat(2, 1fr); }
@@ -574,6 +604,100 @@
                 <p>Tensor allocation, reshaping, and pipeline batching are part of graph orchestration. ML elements negotiate <code>Caps::Tensor</code> the same way video elements negotiate <code>Caps::RawVideo</code>.</p>
             </div>
         </div>
+
+        <figure class="diagram diagram-top">
+            <svg viewBox="0 0 360 416" role="img" aria-label="The same three-stage graph shown on five target profiles: bare-metal MCU, RTOS, Linux desktop, GPU and browser WASM." style="max-width: 520px;">
+                <defs>
+                    <marker id="d3-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+                        <path d="M0,0 L10,5 L0,10 z" fill="#38445A"/>
+                    </marker>
+                </defs>
+
+                <text x="8" y="18" font-size="14" class="d-title">One graph definition, five deployment shells.</text>
+                <text x="8" y="34" font-size="13" class="d-sub">The pipeline is identical on every row.</text>
+
+                <g>
+                    <rect x="4" y="44" width="352" height="68" rx="8" class="d-panel"/>
+                    <rect x="4" y="52" width="3" height="52" rx="1.5" fill="#22D3EE"/>
+                    <text x="16" y="64" font-size="14" class="d-title">Bare-metal MCU</text>
+                    <rect x="16" y="72" width="96" height="24" rx="6" class="d-box"/>
+                    <rect x="128" y="72" width="96" height="24" rx="6" class="d-box"/>
+                    <rect x="240" y="72" width="96" height="24" rx="6" class="d-box"/>
+                    <text x="64" y="89" font-size="13" text-anchor="middle" class="d-name">capture</text>
+                    <text x="176" y="89" font-size="13" text-anchor="middle" class="d-name">process</text>
+                    <text x="288" y="89" font-size="13" text-anchor="middle" class="d-name">present</text>
+                    <line x1="112" y1="84" x2="126" y2="84" class="d-line" marker-end="url(#d3-arrow)"/>
+                    <line x1="224" y1="84" x2="238" y2="84" class="d-line" marker-end="url(#d3-arrow)"/>
+                    <text x="16" y="107" font-size="13" class="d-sub">no heap, no allocator, wfi loop</text>
+                </g>
+
+                <g>
+                    <rect x="4" y="118" width="352" height="68" rx="8" class="d-panel"/>
+                    <rect x="4" y="126" width="3" height="52" rx="1.5" fill="#22D3EE"/>
+                    <text x="16" y="138" font-size="14" class="d-title">RTOS</text>
+                    <rect x="16" y="146" width="96" height="24" rx="6" class="d-box"/>
+                    <rect x="128" y="146" width="96" height="24" rx="6" class="d-box"/>
+                    <rect x="240" y="146" width="96" height="24" rx="6" class="d-box"/>
+                    <text x="64" y="163" font-size="13" text-anchor="middle" class="d-name">capture</text>
+                    <text x="176" y="163" font-size="13" text-anchor="middle" class="d-name">process</text>
+                    <text x="288" y="163" font-size="13" text-anchor="middle" class="d-name">present</text>
+                    <line x1="112" y1="158" x2="126" y2="158" class="d-line" marker-end="url(#d3-arrow)"/>
+                    <line x1="224" y1="158" x2="238" y2="158" class="d-line" marker-end="url(#d3-arrow)"/>
+                    <text x="16" y="181" font-size="13" class="d-sub">Embassy / FreeRTOS / Zephyr task</text>
+                </g>
+
+                <g>
+                    <rect x="4" y="192" width="352" height="68" rx="8" class="d-panel"/>
+                    <rect x="4" y="200" width="3" height="52" rx="1.5" fill="#22D3EE"/>
+                    <text x="16" y="212" font-size="14" class="d-title">Linux / desktop</text>
+                    <rect x="16" y="220" width="96" height="24" rx="6" class="d-box"/>
+                    <rect x="128" y="220" width="96" height="24" rx="6" class="d-box"/>
+                    <rect x="240" y="220" width="96" height="24" rx="6" class="d-box"/>
+                    <text x="64" y="237" font-size="13" text-anchor="middle" class="d-name">capture</text>
+                    <text x="176" y="237" font-size="13" text-anchor="middle" class="d-name">process</text>
+                    <text x="288" y="237" font-size="13" text-anchor="middle" class="d-name">present</text>
+                    <line x1="112" y1="232" x2="126" y2="232" class="d-line" marker-end="url(#d3-arrow)"/>
+                    <line x1="224" y1="232" x2="238" y2="232" class="d-line" marker-end="url(#d3-arrow)"/>
+                    <text x="16" y="255" font-size="13" class="d-sub">Tokio, std, system memory</text>
+                </g>
+
+                <g>
+                    <rect x="4" y="266" width="352" height="68" rx="8" class="d-panel"/>
+                    <rect x="4" y="274" width="3" height="52" rx="1.5" fill="#22D3EE"/>
+                    <text x="16" y="286" font-size="14" class="d-title">GPU</text>
+                    <rect x="16" y="294" width="96" height="24" rx="6" class="d-box"/>
+                    <rect x="128" y="294" width="96" height="24" rx="6" class="d-box"/>
+                    <rect x="240" y="294" width="96" height="24" rx="6" class="d-box"/>
+                    <text x="64" y="311" font-size="13" text-anchor="middle" class="d-name">capture</text>
+                    <text x="176" y="311" font-size="13" text-anchor="middle" class="d-name">process</text>
+                    <text x="288" y="311" font-size="13" text-anchor="middle" class="d-name">present</text>
+                    <line x1="112" y1="306" x2="126" y2="306" class="d-line" marker-end="url(#d3-arrow)"/>
+                    <line x1="224" y1="306" x2="238" y2="306" class="d-line" marker-end="url(#d3-arrow)"/>
+                    <text x="16" y="329" font-size="13" class="d-sub">wgpu / Vulkan / CUDA domains, zero-copy</text>
+                </g>
+
+                <g>
+                    <rect x="4" y="340" width="352" height="68" rx="8" class="d-panel"/>
+                    <rect x="4" y="348" width="3" height="52" rx="1.5" fill="#22D3EE"/>
+                    <text x="16" y="360" font-size="14" class="d-title">Browser (wasm32)</text>
+                    <rect x="16" y="368" width="96" height="24" rx="6" class="d-box"/>
+                    <rect x="128" y="368" width="96" height="24" rx="6" class="d-box"/>
+                    <rect x="240" y="368" width="96" height="24" rx="6" class="d-box"/>
+                    <text x="64" y="385" font-size="13" text-anchor="middle" class="d-name">capture</text>
+                    <text x="176" y="385" font-size="13" text-anchor="middle" class="d-name">process</text>
+                    <text x="288" y="385" font-size="13" text-anchor="middle" class="d-name">present</text>
+                    <line x1="112" y1="380" x2="126" y2="380" class="d-line" marker-end="url(#d3-arrow)"/>
+                    <line x1="224" y1="380" x2="238" y2="380" class="d-line" marker-end="url(#d3-arrow)"/>
+                    <text x="16" y="403" font-size="13" class="d-sub">wasm-bindgen-futures, WebCodecs</text>
+                </g>
+            </svg>
+            <figcaption>
+                One graph, every target. The statically-typed graph API is the same on all
+                five profiles; only the deployment shell changes &mdash; which executor drives
+                the futures, which hardware elements fill the stages, and which memory
+                domain the frames live in.
+            </figcaption>
+        </figure>
     </div>
 </section>
 
@@ -587,6 +711,66 @@
             behind cargo features so the baseline compiles for bare-metal targets.
             A C ABI and Python bindings drive the same graphs from any language.
         </p>
+
+        <figure class="diagram">
+            <svg viewBox="0 0 400 400" role="img" aria-label="Crate map: bindings and ML crates depend on g2g-plugins, which with g2g-plugin and g2g-mcu depends on g2g-core; g2g-mcugen is a standalone host tool." style="max-width: 540px;">
+                <defs>
+                    <marker id="d2-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+                        <path d="M0,0 L10,5 L0,10 z" fill="#38445A"/>
+                    </marker>
+                </defs>
+
+                <text x="8" y="24" font-size="14" class="d-sub">bindings, interop, ML</text>
+                <rect x="8" y="40" width="120" height="42" rx="8" class="d-box"/>
+                <rect x="140" y="40" width="120" height="42" rx="8" class="d-box"/>
+                <rect x="272" y="40" width="120" height="42" rx="8" class="d-box"/>
+                <text x="68" y="66" font-size="15" text-anchor="middle" class="d-name">g2g-capi</text>
+                <text x="200" y="66" font-size="15" text-anchor="middle" class="d-name">g2g-pyapi</text>
+                <text x="332" y="66" font-size="15" text-anchor="middle" class="d-name">g2g-bridge</text>
+                <rect x="74" y="90" width="120" height="42" rx="8" class="d-box"/>
+                <rect x="206" y="90" width="120" height="42" rx="8" class="d-box"/>
+                <text x="134" y="116" font-size="15" text-anchor="middle" class="d-name">g2g-python</text>
+                <text x="266" y="116" font-size="15" text-anchor="middle" class="d-name">g2g-ml</text>
+
+                <line x1="68" y1="82" x2="68" y2="146" class="d-line"/>
+                <line x1="200" y1="82" x2="200" y2="146" class="d-line"/>
+                <line x1="332" y1="82" x2="332" y2="146" class="d-line"/>
+                <line x1="134" y1="132" x2="134" y2="146" class="d-line d-dash"/>
+                <line x1="266" y1="132" x2="266" y2="146" class="d-line d-dash"/>
+                <line x1="68" y1="146" x2="332" y2="146" class="d-line"/>
+                <line x1="200" y1="146" x2="200" y2="170" class="d-line" marker-end="url(#d2-arrow)"/>
+
+                <text x="8" y="166" font-size="14" class="d-sub">elements and peripherals</text>
+                <rect x="8" y="172" width="120" height="42" rx="8" class="d-box"/>
+                <rect x="140" y="172" width="120" height="42" rx="8" class="d-box"/>
+                <rect x="272" y="172" width="120" height="42" rx="8" class="d-box"/>
+                <text x="68" y="198" font-size="15" text-anchor="middle" class="d-name">g2g-plugin</text>
+                <text x="200" y="198" font-size="15" text-anchor="middle" class="d-name">g2g-plugins</text>
+                <text x="332" y="198" font-size="15" text-anchor="middle" class="d-name">g2g-mcu</text>
+
+                <line x1="68" y1="214" x2="68" y2="248" class="d-line"/>
+                <line x1="200" y1="214" x2="200" y2="248" class="d-line"/>
+                <line x1="332" y1="214" x2="332" y2="248" class="d-line"/>
+                <line x1="68" y1="248" x2="332" y2="248" class="d-line"/>
+                <line x1="200" y1="248" x2="200" y2="270" class="d-line" marker-end="url(#d2-arrow)"/>
+
+                <rect x="8" y="272" width="384" height="58" rx="10" class="d-core"/>
+                <text x="200" y="298" font-size="16" text-anchor="middle" class="d-acc">g2g-core</text>
+                <text x="200" y="318" font-size="14" text-anchor="middle" class="d-sub">no_std + alloc-optional</text>
+
+                <rect x="8" y="348" width="384" height="42" rx="8" class="d-box d-dash"/>
+                <text x="20" y="374" font-size="15" class="d-name">g2g-mcugen</text>
+                <text x="118" y="374" font-size="14" class="d-sub">host tool, no g2g dependencies</text>
+            </svg>
+            <figcaption>
+                The crate map. Every element and binding crate compiles against
+                <code>g2g-core</code>; the bindings and interop crates sit on top of
+                <code>g2g-plugins</code>, dashed where the edge is an optional cargo
+                feature (<code>g2g-ml</code>, <code>g2g-python</code>).
+                <code>g2g-mcugen</code> is a host-side graph compiler and depends on
+                no g2g crate at all.
+            </figcaption>
+        </figure>
 
         <div class="crates-grid">
             <div class="crate-card">
@@ -630,7 +814,7 @@
             <div class="crate-card">
                 <div class="crate-name">g2g-ml</div>
                 <div class="crate-tag">std</div>
-                <p>ONNX Runtime inference (<code>OrtInference</code>) with CUDA + DirectML EPs, pure-Rust Burn inference (<code>BurnInference</code>) on wgpu, the keep-on-GPU wgpu branch (<code>WgpuPreprocess</code> + <code>WgpuInference</code>, GPU-resident tensors end to end), classification head, and the lock-free multi-stream <code>TensorBatcher</code> (fans N streams into one GPU tensor array). <code>g2g_ml::register</code> puts <code>ortinfer</code> / <code>wgpupreprocess</code> / <code>detectionpostprocess</code> in a <code>gst-launch</code> line. MPL-2.0.</p>
+                <p>ONNX Runtime inference (<code>OrtInference</code>) with CUDA + DirectML EPs, pure-Rust Burn inference (<code>BurnInference</code>) on wgpu, running a linear layer or an ONNX topology imported by <code>burn-onnx</code> build-time codegen, the keep-on-GPU wgpu branch (<code>WgpuPreprocess</code> + <code>WgpuInference</code>, GPU-resident tensors end to end), classification head, instance segmentation (<code>OrtSegmentation</code>, a YOLO <code>-seg</code> model's masks and ROIs attached to the frame), and the lock-free multi-stream <code>TensorBatcher</code> (fans N streams into one GPU tensor array). <code>g2g_ml::register</code> puts <code>ortinfer</code> / <code>wgpupreprocess</code> / <code>detectionpostprocess</code> / <code>ortsegment</code> in a <code>gst-launch</code> line. MPL-2.0.</p>
             </div>
             <div class="crate-card">
                 <div class="crate-name">g2g-bridge</div>
@@ -853,7 +1037,7 @@ g2g-launch <span class="flag">--script</span> build.rhai</div>
                 <p class="f-lead">Typed <code>FrameMeta</code>&nbsp;/&nbsp;<code>AnalyticsMeta</code> relation graph (detection / classification / tracking) survives tee fan-out copy-on-write.</p>
                 <div class="chip-group">
                     <span class="chip-label">Produce</span>
-                    <div class="chip-row"><span class="chip">DetectionPostprocess</span></div>
+                    <div class="chip-row"><span class="chip">DetectionPostprocess</span><span class="chip">OrtSegmentation</span></div>
                 </div>
                 <div class="chip-group">
                     <span class="chip-label">Draw</span>
@@ -888,6 +1072,106 @@ g2g-launch <span class="flag">--script</span> build.rhai</div>
                 </div>
                 <span class="feature-tag tag-core">Core</span>
             </div>
+
+            <figure class="diagram diagram-span">
+                <svg class="diagram-wide" viewBox="0 0 1080 210" role="img" aria-label="A negotiated pipeline: RtspSrc to H264Parse to VulkanVideoDec to WgpuCompositor to WgpuSink, with the solved caps and memory domain on each link." style="max-width: 1080px;">
+                    <defs>
+                        <marker id="d1w-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+                            <path d="M0,0 L10,5 L0,10 z" fill="#38445A"/>
+                        </marker>
+                        <marker id="d1w-arrow-acc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+                            <path d="M0,0 L10,5 L0,10 z" fill="#22D3EE"/>
+                        </marker>
+                    </defs>
+
+                    <rect x="6" y="64" width="128" height="54" rx="10" class="d-box"/>
+                    <rect x="242" y="64" width="128" height="54" rx="10" class="d-box"/>
+                    <rect x="478" y="64" width="128" height="54" rx="10" class="d-box"/>
+                    <rect x="714" y="64" width="128" height="54" rx="10" class="d-box"/>
+                    <rect x="950" y="64" width="128" height="54" rx="10" class="d-box"/>
+                    <text x="70" y="96" font-size="13" text-anchor="middle" class="d-name">RtspSrc</text>
+                    <text x="306" y="96" font-size="13" text-anchor="middle" class="d-name">H264Parse</text>
+                    <text x="542" y="96" font-size="13" text-anchor="middle" class="d-name">VulkanVideoDec</text>
+                    <text x="778" y="96" font-size="13" text-anchor="middle" class="d-name">WgpuCompositor</text>
+                    <text x="1014" y="96" font-size="13" text-anchor="middle" class="d-name">WgpuSink</text>
+                    <text x="70" y="136" font-size="13" text-anchor="middle" class="d-sub">source</text>
+                    <text x="306" y="136" font-size="13" text-anchor="middle" class="d-sub">parser</text>
+                    <text x="542" y="136" font-size="13" text-anchor="middle" class="d-sub">decoder</text>
+                    <text x="778" y="136" font-size="13" text-anchor="middle" class="d-sub">compositor</text>
+                    <text x="1014" y="136" font-size="13" text-anchor="middle" class="d-sub">sink</text>
+
+                    <line x1="134" y1="91" x2="240" y2="91" class="d-line" marker-end="url(#d1w-arrow)"/>
+                    <text x="188" y="78" font-size="13" text-anchor="middle" class="d-caps">H.264 annex-b</text>
+                    <text x="188" y="112" font-size="13" text-anchor="middle" class="d-sub">System</text>
+
+                    <line x1="370" y1="91" x2="476" y2="91" class="d-line" marker-end="url(#d1w-arrow)"/>
+                    <text x="424" y="78" font-size="13" text-anchor="middle" class="d-caps">H.264 AU-aligned</text>
+                    <text x="424" y="112" font-size="13" text-anchor="middle" class="d-sub">System</text>
+
+                    <line x1="606" y1="91" x2="712" y2="91" class="d-line-acc" marker-end="url(#d1w-arrow-acc)"/>
+                    <text x="660" y="78" font-size="13" text-anchor="middle" class="d-caps">RGBA8 1920x1080</text>
+                    <text x="660" y="112" font-size="13" text-anchor="middle" class="d-acc">WgpuTexture</text>
+
+                    <line x1="842" y1="91" x2="948" y2="91" class="d-line-acc" marker-end="url(#d1w-arrow-acc)"/>
+                    <text x="896" y="78" font-size="13" text-anchor="middle" class="d-caps">RGBA8 1920x1080</text>
+                    <text x="896" y="112" font-size="13" text-anchor="middle" class="d-acc">WgpuTexture</text>
+
+                    <line x1="6" y1="180" x2="40" y2="180" class="d-line"/>
+                    <text x="48" y="185" font-size="13" class="d-sub">system memory</text>
+                    <line x1="200" y1="180" x2="234" y2="180" class="d-line-acc"/>
+                    <text x="242" y="185" font-size="13" class="d-sub">GPU zero-copy, the frame never touches the CPU</text>
+                </svg>
+
+                <svg class="diagram-narrow" viewBox="0 0 360 492" role="img" aria-label="A negotiated pipeline: RtspSrc to H264Parse to VulkanVideoDec to WgpuCompositor to WgpuSink, with the solved caps and memory domain on each link." style="max-width: 420px;">
+                    <defs>
+                        <marker id="d1n-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+                            <path d="M0,0 L10,5 L0,10 z" fill="#38445A"/>
+                        </marker>
+                        <marker id="d1n-arrow-acc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+                            <path d="M0,0 L10,5 L0,10 z" fill="#22D3EE"/>
+                        </marker>
+                    </defs>
+
+                    <rect x="8" y="6" width="170" height="42" rx="8" class="d-box"/>
+                    <rect x="8" y="104" width="170" height="42" rx="8" class="d-box"/>
+                    <rect x="8" y="202" width="170" height="42" rx="8" class="d-box"/>
+                    <rect x="8" y="300" width="170" height="42" rx="8" class="d-box"/>
+                    <rect x="8" y="398" width="170" height="42" rx="8" class="d-box"/>
+                    <text x="93" y="32" font-size="13" text-anchor="middle" class="d-name">RtspSrc</text>
+                    <text x="93" y="130" font-size="13" text-anchor="middle" class="d-name">H264Parse</text>
+                    <text x="93" y="228" font-size="13" text-anchor="middle" class="d-name">VulkanVideoDec</text>
+                    <text x="93" y="326" font-size="13" text-anchor="middle" class="d-name">WgpuCompositor</text>
+                    <text x="93" y="424" font-size="13" text-anchor="middle" class="d-name">WgpuSink</text>
+
+                    <line x1="93" y1="48" x2="93" y2="102" class="d-line" marker-end="url(#d1n-arrow)"/>
+                    <text x="190" y="70" font-size="13" class="d-caps">H.264 annex-b</text>
+                    <text x="190" y="88" font-size="13" class="d-sub">System</text>
+
+                    <line x1="93" y1="146" x2="93" y2="200" class="d-line" marker-end="url(#d1n-arrow)"/>
+                    <text x="190" y="168" font-size="13" class="d-caps">H.264 AU-aligned</text>
+                    <text x="190" y="186" font-size="13" class="d-sub">System</text>
+
+                    <line x1="93" y1="244" x2="93" y2="298" class="d-line-acc" marker-end="url(#d1n-arrow-acc)"/>
+                    <text x="190" y="266" font-size="13" class="d-caps">RGBA8 1920x1080</text>
+                    <text x="190" y="284" font-size="13" class="d-acc">WgpuTexture</text>
+
+                    <line x1="93" y1="342" x2="93" y2="396" class="d-line-acc" marker-end="url(#d1n-arrow-acc)"/>
+                    <text x="190" y="364" font-size="13" class="d-caps">RGBA8 1920x1080</text>
+                    <text x="190" y="382" font-size="13" class="d-acc">WgpuTexture</text>
+
+                    <line x1="8" y1="456" x2="36" y2="456" class="d-line"/>
+                    <text x="44" y="461" font-size="13" class="d-sub">system memory</text>
+                    <line x1="8" y1="478" x2="36" y2="478" class="d-line-acc"/>
+                    <text x="44" y="483" font-size="13" class="d-sub">GPU zero-copy</text>
+                </svg>
+
+                <figcaption>
+                    A negotiated pipeline. The solver fixes one caps and one memory domain
+                    per link: the parser hands access units through system memory, and from
+                    the decoder on, the Vulkan decode image is imported into wgpu and
+                    composited and presented where it already is.
+                </figcaption>
+            </figure>
             <div class="feature-card">
                 <span class="f-icon">&#9889;</span>
                 <h3>Mid-stream allocation cascade</h3>

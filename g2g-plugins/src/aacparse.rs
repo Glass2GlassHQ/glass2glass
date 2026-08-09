@@ -100,6 +100,14 @@ pub(crate) fn adts_from_asc(asc: &[u8], au: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::aacparse::AacParse;
+///
+/// let parse = AacParse::new();
+/// assert_eq!(parse.caps_changes_emitted(), 0);
+/// ```
 #[derive(Debug, Default)]
 pub struct AacParse {
     configured: bool,

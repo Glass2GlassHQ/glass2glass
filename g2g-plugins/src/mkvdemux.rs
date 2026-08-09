@@ -102,6 +102,14 @@ enum CuePrefetch {
 }
 
 /// Demuxes a Matroska / WebM byte stream into one selected elementary stream.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::mkvdemux::{MkvDemux, MkvStream};
+///
+/// let demux = MkvDemux::new().with_stream(MkvStream::H264);
+/// ```
 #[derive(Debug)]
 pub struct MkvDemux {
     demux: MatroskaDemuxer,
@@ -1213,6 +1221,14 @@ impl PadTemplates for MkvDemux {
 /// The app picks the per-port streams from the announced
 /// [`StreamCollection`](BusMessage::StreamCollection) (M376); wiring a `demux`
 /// node into the `gst-launch` text DSL and a `playbin` element are the follow-ups.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::mkvdemux::{MkvDemuxN, MkvStream};
+///
+/// let demux = MkvDemuxN::new(vec![MkvStream::H264, MkvStream::Opus]);
+/// ```
 #[derive(Debug)]
 pub struct MkvDemuxN {
     demux: MatroskaDemuxer,

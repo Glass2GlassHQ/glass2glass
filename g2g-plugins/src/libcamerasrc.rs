@@ -141,6 +141,16 @@ fn set_if_supported<C: Control>(ctrls: &mut ControlList, infos: &ControlInfoMap,
     }
 }
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::libcamerasrc::LibCameraSrc;
+///
+/// let source = LibCameraSrc::new()
+///     .with_camera(0)
+///     .with_size(1280, 720)
+///     .with_fps(30);
+/// ```
 #[derive(Debug)]
 pub struct LibCameraSrc {
     /// Index into libcamera's enumerated camera list (default 0). Ignored when

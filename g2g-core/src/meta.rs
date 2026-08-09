@@ -32,6 +32,42 @@ impl FrameMetaSet {
     }
 }
 
+/// The metadata types a downstream element asks its producers to attach
+/// (feature `metadata` **off**): a zero-sized always-empty set. The plumbing
+/// that carries it ([`AllocationParams`](crate::AllocationParams)) compiles
+/// either way; `request` / `wants` exist only with the feature on.
+#[cfg(not(feature = "metadata"))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MetaRequests;
+
+#[cfg(not(feature = "metadata"))]
+impl MetaRequests {
+    /// An empty request set.
+    #[inline]
+    pub const fn new() -> Self {
+        MetaRequests
+    }
+
+    /// Always true: without the feature nothing can be requested.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        true
+    }
+
+    /// The demand two sibling consumers put on their shared producer, i.e. still
+    /// nothing.
+    #[inline]
+    pub fn join_branches(self, _other: Self) -> Self {
+        self
+    }
+
+    /// The demand this element passes to its producer, i.e. still nothing.
+    #[inline]
+    pub fn carry_upstream(self, _downstream: Self) -> Self {
+        self
+    }
+}
+
 // ---- feature on: the real typed container + analytics graph ----
 
 #[cfg(feature = "metadata")]
@@ -43,7 +79,7 @@ mod on {
     use alloc::string::String;
     use alloc::sync::Arc;
     use alloc::vec::Vec;
-    use core::any::Any;
+    use core::any::{Any, TypeId};
 
     /// How a piece of metadata survives a transform, the GstMeta
     /// `transform_func` analog. Reported by [`FrameMeta::propagate`].
@@ -104,17 +140,28 @@ mod on {
             FrameMetaSet(Vec::new())
         }
 
-        /// Attach one piece of metadata.
+        /// Attach one piece of metadata, replacing any entry of the same type
+        /// (in place, so the order of the other entries is unchanged).
+        ///
+        /// A set holds at most one meta per type: [`get`](Self::get) /
+        /// [`get_mut`](Self::get_mut) key by type, so a second entry of a type
+        /// would be unreachable, and an empty one already on the frame would
+        /// hide what an element attaches later.
         pub fn attach<T: FrameMeta + 'static>(&mut self, meta: T) {
-            self.0.push(Arc::new(meta));
+            match self.0.iter().position(|m| m.as_any().is::<T>()) {
+                Some(idx) => self.0[idx] = Arc::new(meta),
+                None => self.0.push(Arc::new(meta)),
+            }
         }
 
-        /// The first attached meta of type `T`, if any.
+        /// The attached meta of type `T`, if any. At most one is ever attached
+        /// (see [`attach`](Self::attach)).
         pub fn get<T: FrameMeta + 'static>(&self) -> Option<&T> {
             self.0.iter().find_map(|m| m.as_any().downcast_ref::<T>())
         }
 
-        /// Mutable access to the first attached meta of type `T`, if any.
+        /// Mutable access to the attached meta of type `T`, if any (at most one
+        /// is ever attached, see [`attach`](Self::attach)).
         ///
         /// Copy-on-write: if the entry is shared with another frame (a tee
         /// branch holds the same [`Arc`]), it is first deep-copied via
@@ -151,6 +198,165 @@ mod on {
         pub fn propagate(&mut self, transform: Transform) {
             self.0
                 .retain(|m| m.propagate(transform) == Propagation::Keep);
+        }
+    }
+
+    /// How many distinct meta types one [`MetaRequests`] carries. Requests past
+    /// this are dropped, which costs an optimization, never correctness: a
+    /// producer that sees no request just produces what it always did.
+    pub const MAX_META_REQUESTS: usize = 4;
+
+    /// What one request needs of the *other* consumers reading the same frames,
+    /// which decides how it survives a fan-out or an intermediate hop.
+    ///
+    /// `Ord` ranks [`EveryConsumer`](Self::EveryConsumer) above
+    /// [`AnyConsumer`](Self::AnyConsumer): when two elements request one meta
+    /// under different policies the stricter one stands, since it is the one
+    /// that can be misread.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    pub enum RequestPolicy {
+        /// One asking consumer is enough. Attaching the meta costs a consumer
+        /// that did not ask nothing: it reads the same frame it always did and
+        /// ignores the extra ([`AnalyticsMeta`], [`CaptionMeta`],
+        /// [`TimecodeMeta`]).
+        AnyConsumer,
+        /// Every consumer must ask. Honouring the request changes the *buffer*,
+        /// so a consumer that did not ask would misread it: a frame whose rows
+        /// were left padded, read as tightly packed, is corruption rather than a
+        /// missed optimization.
+        EveryConsumer,
+    }
+
+    /// The metadata types a downstream element wants attached to the frames it
+    /// receives, each keyed by [`TypeId`] and carrying its [`RequestPolicy`].
+    /// The pull half of the metadata system (the GStreamer allocation-query
+    /// `add_meta` analog): a consumer declares its requests from
+    /// [`AsyncElement::meta_requests`](crate::AsyncElement::meta_requests), the
+    /// runner carries them up the allocation cascade on
+    /// [`AllocationParams`](crate::AllocationParams), and a producer asks
+    /// [`wants`](Self::wants) when it configures, so optional metadata is
+    /// produced only where somebody reads it.
+    ///
+    /// A small fixed-capacity set, so it rides the `Copy` allocation params
+    /// without an allocation. Entries are kept sorted, so two sets built in
+    /// different orders compare equal (the cascade suppresses a re-propose when
+    /// the params are unchanged).
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    pub struct MetaRequests {
+        entries: [Option<(TypeId, RequestPolicy)>; MAX_META_REQUESTS],
+    }
+
+    impl MetaRequests {
+        /// An empty request set: the element wants no optional metadata.
+        pub const fn new() -> Self {
+            MetaRequests {
+                entries: [None; MAX_META_REQUESTS],
+            }
+        }
+
+        /// This set plus a request for meta `T` that one consumer asking is
+        /// enough for ([`RequestPolicy::AnyConsumer`]). Builder form, since a
+        /// request set is usually written inline:
+        /// `MetaRequests::new().request::<AnalyticsMeta>()`.
+        pub fn request<T: FrameMeta + 'static>(self) -> Self {
+            self.with(TypeId::of::<T>(), RequestPolicy::AnyConsumer)
+        }
+
+        /// This set plus a request for meta `T` that is only honoured when every
+        /// consumer sharing the producer asks for it too
+        /// ([`RequestPolicy::EveryConsumer`]). For a meta whose presence changes
+        /// the buffer, which a consumer that did not ask would misread.
+        pub fn request_from_every_consumer<T: FrameMeta + 'static>(self) -> Self {
+            self.with(TypeId::of::<T>(), RequestPolicy::EveryConsumer)
+        }
+
+        /// Whether meta `T` was requested, under either policy.
+        pub fn wants<T: FrameMeta + 'static>(&self) -> bool {
+            self.policy_of(TypeId::of::<T>()).is_some()
+        }
+
+        /// The policy meta `T` was requested under, `None` if it was not.
+        pub fn policy<T: FrameMeta + 'static>(&self) -> Option<RequestPolicy> {
+            self.policy_of(TypeId::of::<T>())
+        }
+
+        /// The demand two *sibling* consumers put on the one producer they share
+        /// (the branches of a tee). An [`AnyConsumer`](RequestPolicy::AnyConsumer)
+        /// request survives from either side; an
+        /// [`EveryConsumer`](RequestPolicy::EveryConsumer) one only when the
+        /// other branch asks for that meta too, so a branch that would misread
+        /// the changed buffer vetoes it.
+        pub fn join_branches(self, other: Self) -> Self {
+            let mut out = Self::new();
+            for (id, policy) in self.iter().chain(other.iter()) {
+                if policy == RequestPolicy::AnyConsumer
+                    || (self.policy_of(id).is_some() && other.policy_of(id).is_some())
+                {
+                    out = out.with(id, policy);
+                }
+            }
+            out
+        }
+
+        /// The demand this element (`self`, its own requests) passes on to its
+        /// producer, given what arrived from `downstream`. Its own requests
+        /// always travel: it reads the producer's frames itself. A downstream
+        /// [`EveryConsumer`](RequestPolicy::EveryConsumer) request travels only
+        /// when this element asks for that meta too, since the producer's frames
+        /// pass through here first and a hop that cannot read the changed buffer
+        /// vetoes it just as a sibling branch does.
+        pub fn carry_upstream(self, downstream: Self) -> Self {
+            let mut out = self;
+            for (id, policy) in downstream.iter() {
+                if policy == RequestPolicy::AnyConsumer || self.policy_of(id).is_some() {
+                    out = out.with(id, policy);
+                }
+            }
+            out
+        }
+
+        pub fn is_empty(&self) -> bool {
+            self.entries[0].is_none()
+        }
+
+        pub fn len(&self) -> usize {
+            self.entries.iter().flatten().count()
+        }
+
+        fn iter(&self) -> impl Iterator<Item = (TypeId, RequestPolicy)> + '_ {
+            self.entries.iter().flatten().copied()
+        }
+
+        fn policy_of(&self, id: TypeId) -> Option<RequestPolicy> {
+            self.iter().find(|(i, _)| *i == id).map(|(_, p)| p)
+        }
+
+        fn with(mut self, id: TypeId, policy: RequestPolicy) -> Self {
+            let mut free = MAX_META_REQUESTS;
+            for (i, slot) in self.entries.iter_mut().enumerate() {
+                match slot {
+                    Some((present, held)) if *present == id => {
+                        // Two elements asking for one meta under different
+                        // policies: the stricter one is the one that can be
+                        // misread, so it stands.
+                        *held = (*held).max(policy);
+                        return self;
+                    }
+                    Some(_) => {}
+                    None => {
+                        free = i;
+                        break;
+                    }
+                }
+            }
+            if free == MAX_META_REQUESTS {
+                return self;
+            }
+            self.entries[free] = Some((id, policy));
+            // The occupied prefix is packed at the front, so sorting it keeps it
+            // packed and makes the set order-independent under `PartialEq`.
+            self.entries[..=free].sort_unstable();
+            self
         }
     }
 
@@ -683,6 +889,118 @@ mod on {
             Propagation::Keep
         }
     }
+
+    /// How many planes a [`PlaneLayout`] describes. Four covers every format in
+    /// the workspace (planar YUV with alpha is the widest).
+    pub const MAX_PLANES: usize = 4;
+
+    /// Where one plane's rows sit in the frame's buffer.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct Plane {
+        /// Byte offset of the plane's first row from the start of the buffer.
+        pub offset: usize,
+        /// Bytes from the start of one row to the start of the next. At least
+        /// the row's own byte width; more when the rows are padded.
+        pub stride: usize,
+    }
+
+    /// Where each plane's rows really sit in a raw video frame's buffer (the
+    /// `GstVideoMeta` analog). Without it a raw frame is assumed tightly packed:
+    /// every row exactly `width * bytes_per_pixel` and every plane immediately
+    /// after the last. A producer whose rows are padded (a GPU readback at the
+    /// API's 256-byte row alignment, a capture driver's `bytesperline`) has to
+    /// repack them into that shape, row by row, before pushing the frame.
+    ///
+    /// A consumer that asks for this meta
+    /// ([`MetaRequests`](crate::meta::MetaRequests)) says it will read rows where
+    /// they lie, so the producer can hand over the padded buffer as it is and the
+    /// repack disappears.
+    ///
+    /// Only the geometry of the *buffer* is described here, never the picture:
+    /// width, height and format stay in the caps.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct PlaneLayout {
+        planes: [Plane; MAX_PLANES],
+        count: usize,
+    }
+
+    impl PlaneLayout {
+        /// Describe `planes` (1 to [`MAX_PLANES`] of them), or `None` for an
+        /// empty / oversized list.
+        pub fn new(planes: &[Plane]) -> Option<Self> {
+            if planes.is_empty() || planes.len() > MAX_PLANES {
+                return None;
+            }
+            let mut slots = [Plane {
+                offset: 0,
+                stride: 0,
+            }; MAX_PLANES];
+            slots[..planes.len()].copy_from_slice(planes);
+            Some(PlaneLayout {
+                planes: slots,
+                count: planes.len(),
+            })
+        }
+
+        /// One plane at `offset` 0 with row pitch `stride`: the packed-format
+        /// case (RGBA, YUYV), which is most of what pads rows in practice.
+        pub fn single(stride: usize) -> Self {
+            PlaneLayout {
+                planes: [Plane { offset: 0, stride }; MAX_PLANES],
+                count: 1,
+            }
+        }
+
+        pub fn count(&self) -> usize {
+            self.count
+        }
+
+        /// Plane `index`, or `None` past the described ones.
+        pub fn plane(&self, index: usize) -> Option<Plane> {
+            (index < self.count).then(|| self.planes[index])
+        }
+
+        /// Byte range of row `row` of plane `index`, `row_bytes` wide. `None`
+        /// when the plane does not exist, the stride cannot hold the row, or the
+        /// arithmetic overflows: a layout can come off a wire or a driver, so
+        /// every offset derived from it is checked here once and a caller can
+        /// then slice with what it gets back.
+        pub fn row_range(
+            &self,
+            index: usize,
+            row: usize,
+            row_bytes: usize,
+        ) -> Option<core::ops::Range<usize>> {
+            let plane = self.plane(index)?;
+            if plane.stride < row_bytes {
+                return None;
+            }
+            let start = plane.offset.checked_add(row.checked_mul(plane.stride)?)?;
+            let end = start.checked_add(row_bytes)?;
+            Some(start..end)
+        }
+    }
+
+    impl FrameMeta for PlaneLayout {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+        fn as_any_mut(&mut self) -> &mut dyn Any {
+            self
+        }
+        fn clone_box(&self) -> Box<dyn FrameMeta> {
+            Box::new(*self)
+        }
+        /// Dropped by every transform: it describes one specific buffer, and an
+        /// element only declares a [`Transform`] when it writes a *new* one (a
+        /// videoconvert says `Copy` and still emits its own tightly-packed
+        /// frame). A tee branch, which shares the very buffer this describes,
+        /// clones the meta set without applying a transform, so the layout
+        /// survives a fan-out.
+        fn propagate(&self, _transform: Transform) -> Propagation {
+            Propagation::Drop
+        }
+    }
 }
 
 #[cfg(all(test, feature = "metadata"))]
@@ -708,6 +1026,28 @@ mod tests {
         let got = set.get::<AnalyticsMeta>().expect("AnalyticsMeta attached");
         assert_eq!(got.detections().count(), 1);
         assert_eq!(got.detections().next().unwrap().label, 7);
+    }
+
+    #[test]
+    fn attach_replaces_the_same_type_and_keeps_other_types() {
+        let mut set = FrameMetaSet::new();
+        set.attach(AnalyticsMeta::new());
+        set.attach(BlobMeta::new());
+
+        let mut second = AnalyticsMeta::new();
+        second.add_detection(det(0.1, 0.1, 0.2, 0.2, 7, 0.9));
+        set.attach(second);
+
+        assert_eq!(set.len(), 2, "the replacement is not a second entry");
+        assert_eq!(
+            set.get::<AnalyticsMeta>().unwrap().detections().count(),
+            1,
+            "the meta attached last is the one that can be read back"
+        );
+        assert!(
+            set.get::<BlobMeta>().is_some(),
+            "another type is untouched by the replacement"
+        );
     }
 
     #[test]

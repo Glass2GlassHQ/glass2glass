@@ -182,7 +182,7 @@ fn element_streaming_output(codec: VideoCodec, aus: Vec<Vec<u8>>, gpu: bool) -> 
         dec.configure_allocation(&AllocationParams {
             domain: MemoryDomainKind::WgpuTexture,
             accepts: DomainSet::only(MemoryDomainKind::WgpuTexture),
-            ..Default::default()
+            ..Default::default()..Default::default()
         });
     }
     let in_caps = Caps::CompressedVideo {

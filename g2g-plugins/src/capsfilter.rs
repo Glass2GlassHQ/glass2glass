@@ -24,6 +24,15 @@ use g2g_core::{
     PropertySpec, Rate, RawVideoFormat, SubPictureFormat, VideoCodec,
 };
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_core::{AudioFormat, Caps};
+/// use g2g_plugins::capsfilter::CapsFilter;
+///
+/// let format = AudioFormat::PcmS16Le;
+/// let element = CapsFilter::new(Caps::Audio { format, channels: 2, sample_rate: 48_000 });
+/// ```
 #[derive(Debug)]
 pub struct CapsFilter {
     filter: CapsSet,

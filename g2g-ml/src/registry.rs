@@ -44,5 +44,11 @@ pub fn register(reg: &mut Registry) -> &mut Registry {
         // `iou-threshold` override them.
         || Box::new(crate::detect::DetectionPostprocess::new(0.25, 0.45)),
     ));
+    #[cfg(all(feature = "ort", feature = "analytics"))]
+    reg.register_launch(LaunchFactory::of::<crate::ortsegment::OrtSegmentation>(
+        "ortsegment",
+        // Model-less: the `model` property loads the session.
+        || Box::new(crate::ortsegment::OrtSegmentation::new()),
+    ));
     reg
 }

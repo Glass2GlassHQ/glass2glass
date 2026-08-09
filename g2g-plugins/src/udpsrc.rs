@@ -46,6 +46,15 @@ const DEFAULT_WIDTH: u32 = 1280;
 const DEFAULT_HEIGHT: u32 = 720;
 const DEFAULT_FPS: u32 = 30;
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::udpsrc::UdpSrc;
+///
+/// let src = UdpSrc::new("0.0.0.0:5004".parse().unwrap())
+///     .with_video_size(1920, 1080)
+///     .with_framerate(30);
+/// ```
 #[derive(Debug)]
 pub struct UdpSrc {
     bind: SocketAddr,

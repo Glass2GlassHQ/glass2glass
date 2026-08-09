@@ -54,6 +54,15 @@ pub enum JpegDecodeBackend {
 }
 
 /// Decodes a Motion-JPEG stream into raw video (RGBA8 or I420).
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_core::RawVideoFormat;
+/// use g2g_plugins::mjpegdec::MjpegDec;
+///
+/// let element = MjpegDec::new().with_output_format(RawVideoFormat::I420);
+/// ```
 #[derive(Debug)]
 pub struct MjpegDec {
     out_format: RawVideoFormat,

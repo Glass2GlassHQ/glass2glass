@@ -161,12 +161,62 @@ impl CapsConstraint<'_> {
     }
 }
 
-/// Optional preference data for tie-breaking. Reserved for the solver's
-/// scoring pass; the concrete algebra is unspecified (DESIGN.md §4.13.2).
-/// The empty value is meaningful: "use the constraint's own preference
-/// order."
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct CapsPreferences;
+/// What one element is willing to pay for each of its advertised
+/// alternatives: a cost per alternative, aligned index-for-index with the
+/// [`CapsSet`] its [`CapsConstraint`] advertises (with the pair list for
+/// [`Mapping`](CapsConstraint::Mapping)). Lower is more preferred. The solver
+/// picks, among the consistent assignments of a linear chain, the one whose
+/// per-element costs sum to the least.
+///
+/// An element that declares nothing keeps the implicit rule "cost =
+/// alternative index", which is the set's own order. Costs buy the two things
+/// that order cannot say: *equal* cost between alternatives, meaning this
+/// element does not care and a neighbour's preference should decide, and a
+/// large gap, meaning a fallback is much worse than the first choice so a
+/// neighbour's mild preference must not pull the chain onto it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CapsPreferences {
+    costs: Vec<u32>,
+}
+
+impl CapsPreferences {
+    /// Declare one cost per advertised alternative, in the same order.
+    pub fn new(costs: Vec<u32>) -> Self {
+        Self { costs }
+    }
+
+    /// The implicit default stated explicitly: alternative `i` costs `i`.
+    pub fn by_order(count: usize) -> Self {
+        Self {
+            costs: (0..count as u32).collect(),
+        }
+    }
+
+    /// Every alternative equally acceptable, so neighbours decide.
+    pub fn indifferent(count: usize) -> Self {
+        Self {
+            costs: alloc::vec![0; count],
+        }
+    }
+
+    /// The declared costs, in alternative order.
+    pub fn costs(&self) -> &[u32] {
+        &self.costs
+    }
+
+    /// True when nothing is declared, which the solver reads the same as
+    /// no preferences at all.
+    pub fn is_empty(&self) -> bool {
+        self.costs.is_empty()
+    }
+
+    /// Cost of alternative `index`. An index past the declared costs falls
+    /// back to the implicit "cost = index", so a short list still describes
+    /// the alternatives it covers.
+    pub fn cost(&self, index: usize) -> u32 {
+        self.costs.get(index).copied().unwrap_or(index as u32)
+    }
+}
 
 /// Negotiation-time view of an element. The runtime side
 /// (`AsyncElement::process`) is unchanged; this trait carries the
@@ -177,8 +227,9 @@ pub trait FormatElement: ElementBound {
     /// links. Read by the solver during negotiation.
     fn caps_constraint(&self) -> CapsConstraint<'_>;
 
-    /// Optional preferences for tie-breaking. Defaults to `None`,
-    /// meaning the solver uses the constraint's own preference order.
+    /// Optional per-alternative costs for this element's advertised
+    /// constraint. Defaults to `None`, meaning the solver uses the
+    /// constraint's own preference order (cost = alternative index).
     fn caps_preferences(&self) -> Option<CapsPreferences> {
         None
     }

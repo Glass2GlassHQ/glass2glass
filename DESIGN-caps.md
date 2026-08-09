@@ -124,6 +124,14 @@ becomes a type-level error rather than a runtime `not-negotiated`.
 (`Produces ∩ Accepts ∩ Identity ∩ Mapping ∩ DerivedOutput`), backward sweep
 to propagate narrowing, fixate each link to its highest-preference concrete
 `Caps`, then call `configure_pipeline` per element with its side of the link.
+`CapsPreferences` (M965) refines the fixation: an element may declare a cost
+per advertised alternative (`AsyncElement::caps_preferences`), buying what set
+order cannot say, equal cost (indifference, a neighbour decides) or a large
+gap (a mild neighbour preference must not pull the chain onto a bad fallback).
+When some element on a linear chain declares costs, `solve_linear_preferred` /
+`solve_graph_preferred` pick the consistent assignment of least total cost by
+a per-link DP, ties breaking to the greedy first-fixable pick; undeclared
+chains and non-linear graphs fixate exactly as before.
 
 ```rust
 pub enum NegotiationFailure {
@@ -658,7 +666,13 @@ solver. `g2g-core::runtime::autoplug` is two layers split by what they need:
   `from → to` directly), returning a sub-graph onto `run_graph`. Real element
   types publish templates via the `PadTemplates` trait (`FfmpegH264Dec`:
   H.264 → NV12 / I420), so a real decoder is registered and auto-plugged, not
-  just synthetic descriptors.
+  just synthetic descriptors. The `*_with_params` variants (`autoplug` /
+  `decodebin` / `build_playbin` / `build_playbin_graph`) take `AutoplugParams`,
+  property assignments keyed by factory name applied right after construction
+  (M964): geometry, a device index, or a file path reaches an auto-plugged
+  element as the property it already exposes, an assignment a selected element
+  rejects is an `AutoplugError::Property`, and one addressing an unselected
+  factory goes unused.
 
 Source-side `typefind` is not needed: a g2g source declares its output caps via
 its source pad template / `caps_constraint`, so the caps feeding `decodebin` are
@@ -840,6 +854,20 @@ forwarded in-band ahead of the first frame as decoder extradata).
   remain as the memory-only special case. Ranking matters *only* on the auto-plug
   path; an explicit typed graph names its element, so the descriptor never touches
   the core.
+
+  The preference is not the caller's to state: `Registry::decodebin` reads it off
+  the graph it is splicing into (`Registry::derived_memory_preference`). The
+  element behind the `to` pad already declares what memory it accepts
+  (`input_domains`, §4.13.5), so its most-preferred domain (GPU-resident before
+  `System`, `DomainSet`'s order) becomes `preferred_memory`: a Cuda-only consumer
+  gets `NvDec`, a `WgpuTexture` one gets `vulkanvideodec`, and a consumer that
+  declares nothing (`DomainSet::ALL`, the default) derives `System`, leaving an
+  ordinary graph's selection alone. Only the *immediate* consumer is consulted:
+  `ALL` means "imposes no requirement", not "passes any domain through", and a CPU
+  element never declares, so looking past one would hand it a GPU frame.
+  `decodebin_preferring(.., domain)` overrides the derivation, and the resulting
+  domain gap (an explicit `System` decode into a Cuda consumer) is closed by the
+  converter auto-plug as usual.
 
 #### 4.13.10 Current limits
 

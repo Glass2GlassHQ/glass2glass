@@ -399,15 +399,17 @@ A pipeline runs against one elected clock (`elect_clock` over `ClockPriority`: a
 
 **Audio as the sync master.** For playback the audio sink should drive timing, because samples leave the DAC at the hardware's real rate, which drifts from wall time by tens to hundreds of ppm. `DriftClock` (`g2g-core`) turns that into a usable pipeline clock: it is fed `(local_ns, master_ns)` observations (`local_ns` from a monotonic reference, `master_ns` the true playout position) and fits `master ≈ slope·local + offset` by least squares over a sliding window, so `now_ns()` projects the current reference time through the fit, both estimating the playout rate and smoothing the coarse, jittery per-observation readings. `AlsaSink`'s worker samples `frames_written − snd_pcm_delay()` after each blocking `writei` and feeds the clock, offering it to election at the `AudioProvider` tier (gated by a `provide-clock` property). A video sink then slaves to it: because the elected clock is the disciplined audio timeline rather than raw wall time, video presentation follows audio, giving true A/V sync. A `LiveSource` capture clock still wins when present, so a live pipeline paces to capture.
 
-**Networked sync (PTP).** For facility-wide sync (Pro AV / SMPTE ST 2110), the shared reference is a PTP grandmaster, and every device slaves to it, so a `PtpGrandmaster` clock outranks all of the above. `PtpServo` (`g2g-core::ptp`) is the servo: fed the four timestamps of each PTP delay request-response, it computes the standard `offset` / `mean_path_delay` and folds `(local, master)` into the same `DriftClock` machinery, disciplining the local monotonic reference to the grandmaster's TAI timeline with lock / holdover / outlier-rejection state. `PtpClock` wraps it (interior-mutable, so one worker drives it while sinks read `now_ns` through a shared `Arc`) and offers itself to election only once locked. Because the elected timeline is grandmaster-derived, two machines locked to the same grandmaster read the same clock, so the A/V pacing above holds *across* devices, not just within one process. Two sources feed the servo: raw PTP message timestamps (`sync_exchange`), or a direct absolute-time observation (`observe_master`). Two backends supply them: `PtpSystemClock` (`g2g-plugins`, Linux) delegates to an OS PTP-disciplined `CLOCK_TAI` (from `linuxptp` / `phc2sys`), sampled on a worker; `PtpClient` (`g2g-plugins`) is a from-scratch software PTP SLAVE that speaks PTP over UDP itself (the `ptp::wire` message parser + the `ptp::slave` delay-request-response state machine + a UDP transport), so an endpoint with no OS PTP daemon can still lock. The wire parser and slave state machine are `no_std` and CI-tested end to end (parse -> slave -> servo) without sockets.
+**Networked sync (PTP).** For facility-wide sync (Pro AV / SMPTE ST 2110), the shared reference is a PTP grandmaster, and every device slaves to it, so a `PtpGrandmaster` clock outranks all of the above. `PtpServo` (`g2g-core::ptp`) is the servo: fed the four timestamps of each PTP delay request-response, it computes the standard `offset` / `mean_path_delay` and folds `(local, master)` into the same `DriftClock` machinery, disciplining the local monotonic reference to the grandmaster's TAI timeline with lock / holdover / outlier-rejection state. `PtpClock` wraps it (interior-mutable, so one worker drives it while sinks read `now_ns` through a shared `Arc`) and offers itself to election only once locked. Because the elected timeline is grandmaster-derived, two machines locked to the same grandmaster read the same clock, so the A/V pacing above holds *across* devices, not just within one process. Two sources feed the servo: raw PTP message timestamps (`sync_exchange`), or a direct absolute-time observation (`observe_master`). Two backends supply them: `PtpSystemClock` (`g2g-plugins`, Linux) delegates to an OS PTP-disciplined `CLOCK_TAI` (from `linuxptp` / `phc2sys`), sampled on a worker; `PtpClient` (`g2g-plugins`) is a from-scratch software PTP SLAVE that speaks PTP over UDP itself (the `ptp::wire` message parser + the `ptp::slave` delay-request-response state machine + a UDP transport), so an endpoint with no OS PTP daemon can still lock. The wire parser and slave state machine are `no_std` and CI-tested end to end (parse -> slave -> servo) without sockets. Both backends coexist with a host `ptp4l`: `PtpClient`'s sockets take `SO_REUSEADDR` + `SO_REUSEPORT` so the daemon keeps receiving its own copy of each multicast message, and `PtpSystemClock` polls the daemon over its management socket (`ptp::management` builds the same GET `pmc` sends; `g2g-plugins::ptp4l` carries it over the Unix datagram socket) so `grandmaster_locked` reports the port state behind `CLOCK_TAI` rather than trusting a clock that is readable either way.
 
 **ST 2110 media transport** rides on this shared clock. Distinct time newtypes guard the seam where three "just an integer" times meet: `TaiNs` (PTP/TAI nanoseconds, absolute), `RtpTs` (the 32-bit wrapping RTP media-clock timestamp on the wire), and `RefNs` (the pipeline's monotonic reference nanoseconds, a relative timeline with an arbitrary epoch). `MediaClock` takes a `TaiNs` and returns an `RtpTs`, so the compiler rejects handing it the wrong clock (the confusion the PTP servo work hit: a monotonic reference minus a TAI master is meaningless); the PTP servo's own seam is typed the same way, `PtpServo` / `PtpClock` `sync_exchange` take `(TaiNs, RefNs, RefNs, TaiNs)` and `observe_master` takes `(RefNs, TaiNs)`, so master and reference can no longer be swapped. Durations stay a plain `u64`. `MediaClock` (`g2g-core`, ST 2110-10) maps a PTP/TAI time to a 32-bit wrapping RTP timestamp and back (a media clock counting at 90 kHz for video / the sample rate for audio from the PTP epoch), so two receivers on the same grandmaster compute the same timestamp for the same sampling instant. `st2110audio` (`g2g-plugins`, ST 2110-30) is the sans-IO PCM payloader/depayloader (L16 / L24 big-endian in the RTP payload, timestamps off the media clock), and `st2110anc` (ST 2110-40 / RFC 8331) carries SMPTE ST 291 ancillary data (closed captions, timecode) as bit-packed 10-bit words with parity + checksum validation, so the caption stack can ride 2110. The sans-IO cores get network element wrappers: `st2110audiortp` (`St2110AudioSink` / `St2110AudioSrc`, behind the `st2110` feature) puts -30 audio on the wire over UDP, the sink mapping each frame's PTS through the elected (PTP) clock to the media-clock timestamp and the source reconstructing PTS from it, so a receiver on the same grandmaster stays in sync. `st2110ancrtp` does the same for -40 captions: `St2110AncSink` taps a compressed H.264 / H.265 stream (a teed branch leaf like `CcExtract`), mines each access unit's caption triples, wraps them in a Caption Distribution Packet (CDP, CEA-708 / SMPTE ST 334-2) carried in a DID 0x61 ANC packet, and sends the RFC 8331 RTP timestamped at the frame's PTP time; `St2110AncSrc` depacketizes -40 back into triples and, through the shared `CaptionDecoder` (the decode core factored out of `CcExtract`, driving the same CEA-608/708 state machines from triples mined from SEI or carried in a CDP), emits timed `Caps::Text{Utf8}` cues. So captions travel end to end over 2110 and stay frame-aligned on a common grandmaster. `st2110video` (ST 2110-20 / RFC 4175) carries uncompressed active video: the packetizer slices a packed frame into Sample Row Data (SRD) line runs (an Extended Sequence Number then per-run headers giving scan line, pixel offset, octet length) sized to the MTU, and the depacketizer writes each run back into the frame, completing it on the RTP marker bit; `st2110videortp` (`St2110VideoSink` / `St2110VideoSrc`) puts it on UDP with the 90 kHz media-clock timestamp shared by every packet of a frame. Each sampling is a `Layout` reading / writing one pgroup at a time, so the packetizer / depacketizer stay layout-agnostic across three mappings: RGBA 8-bit (packed, byte-identical), YCbCr-4:2:2 8-bit (packed `Yuyv`, luma / chroma bytes swapped to the wire), and YCbCr-4:2:2 10-bit (the broadcast norm, from the planar `I422p10` buffer: the four 10-bit samples Cb0 Y0 Cr0 Y1 are MSB-first bit-packed into a 5-octet pgroup, crossing both a planar-to-packed and a byte-to-bit boundary). The source's geometry comes from properties, or from the stream's SDP: `st2110sdp` (RFC 4566 + SMPTE ST 2110-10/-20/-30/-40) is the sans-IO generator / parser for the out-of-band description a receiver configures from, carrying the essence (video sampling / size / rate, audio depth / rate / channels / ptime, or ancillary), the payload type, the multicast group and port, and the `a=ts-refclk` PTP grandmaster all the streams share. every sink has an `sdp()` that publishes its stream and every source an `apply_sdp()` that auto-configures from a parsed one, so a stream self-describes end to end across video, audio, and ancillary. On the audio side `PcmS16Le` rides as L16 and `PcmF32Le` as L24 (float scaled to the 24-bit wire). `st2110jxs` (ST 2110-22 / RFC 9134) carries the compressed mezzanine essence, JPEG XS: the packetizer slices an opaque codestream into codestream-mode packets (the 4-octet RFC 9134 payload header carrying transmode / packetmode / last-packet / frame counter / packet counter), the marker bit ending the frame, every packet on the same 90 kHz media clock; `st2110jxsrtp` (`St2110JxsSink` / `St2110JxsSrc`) puts it on UDP, taking / emitting `Caps::CompressedVideo{JpegXs}` frames. The JPEG XS codec itself is `SvtJpegXsEnc` / `SvtJpegXsDec` (`jpegxs` feature): hand-rolled FFI to Intel SVT-JPEG-XS (ISO/IEC 21122, no libavcodec), planar 4:2:0 / 4:2:2 8-bit and 4:2:2 10-bit, the encoder targeting a bits-per-pixel budget and the decoder discovering geometry from the first codestream. So a plant can move visually lossless video at a fraction of -20's bandwidth with sub-frame latency, end to end (raw -> encode -> -22 -> decode). SDP covers all essences, including -22 (`jxsv`), and `St2110Session` bundles video + audio + ancillary into one multi-section session document (each media tagged with `a=mid`, a shared `a=ts-refclk`), so a whole program self-describes. `AudioFormat::PcmS24Le` (integer 24-bit) rides the -30 L24 wire directly, alongside the float path. `st2110dup` implements ST 2110-7 seamless protection: a receive-side sequence-number merge of two identical redundant streams (first arrival wins, so a loss on one path is filled by the other), with `a=group:DUP` in the session SDP. Its `SeamlessDedup` is the sans-IO core; `RedundantRtpReceiver` (behind the `st2110` feature) is the socket-bound sibling that binds several receive paths, polls them round-robin so two in-order streams merge back into sequence order, and yields deduplicated packets. `St2110VideoSrc` adopts it behind a `redundant` property (a second "blue" path); being essence-agnostic it can serve the other essences the same way. `st2110pacing` implements ST 2110-21 sender pacing: a schedule spreading a frame's packets across the frame period (linear or gapped), which both `St2110VideoSink` and the -22 `St2110JxsSink` realize over the tokio timer (through a shared `pace_send`) so the network sees a smooth flow instead of a burst. `VrxValidator` is the full per-format -21 compliance check: the leaky-bucket virtual-receive-buffer model (a receiver draining one packet every `TRS` after a `TR_OFFSET` head start) that, over a run of actual emission offsets, reports the peak buffer occupancy, whether a packet arrived late (starving the receiver), and whether it stays within the profile's `Cmax`. What is built (from the RFCs, loopback-tested, not yet interop-validated against reference gear) now spans -10/-20/-21/-22/-30/-40/-7 plus SDP; multicast interop remains.
 
 `WaylandSink` is the first display sink to use it: it holds each frame until its running-time deadline, tracking the `Segment` (clipping pre-target frames after an accurate seek) and re-anchoring on `Flush`. It also does **QoS late-drop** (matching `SyncSink`): a frame already past its deadline by more than a configurable `max_lateness` bound is dropped instead of presented late, so the sink catches up instead of accumulating lag, posting a `BusMessage::Qos` (running time, jitter, cumulative processed/dropped) per drop.
 
+`SyncSink` is the same sink without a display, so clock slaving is CI-testable with no hardware: it paces through the shared `PresentationPacer` and adopts the elected `ClockSync`, so in an A/V graph its deadlines land on the audio master's `DriftClock` timeline. Its own clock stays the timer (the only thing that can sleep in `no_std`), and the pacer's wait is relative so the two can be different timelines. Until a clock is elected it paces on its own clock with the anchor pinned at zero (`PresentationPacer::set_anchor_ns`), which makes a frame's deadline its running time and the recorded drift a real end-to-end latency reading; adopting an elected clock drops the pin, since that clock's epoch is its own.
+
 **Playing-transition anchoring.** The startup base time is sampled before the data plane and before the application presses play. For a non-live, prerolled pipeline that sits in `Paused` for a while, that is the wrong epoch: the preroll frame is consumed during `Paused`, so a sink that anchored on the startup base (or on that first frame) then rushes/drops once `Playing` finally arrives. So when a `StateController` drives the run, the runner arms a `PlayAnchor` (a shared cell) on the elected clock and hands each sink `ClockSync::with_play_anchor`; `set_state(Playing)` stamps the anchor with `clock.now_ns()` at the exact play edge (and a transition down to `Ready`/`Null` clears it, so a replay re-bases). `ClockSync::base_time()` then resolves to the play-edge stamp once armed, else the eager startup base time. `WaylandSink` reads it per frame: it first-frame-anchors a preroll frame consumed during `Paused` (presented immediately), then re-bases onto the play edge once `Playing` stamps it; a seek `Flush` forces a first-frame re-anchor so the seek target presents immediately rather than against the stale play base. The non-stateful runners keep the eager base time (no `StateController`, no play edge to anchor to).
 
-**Upstream QoS** carries that lateness back to the producer so it sheds load too, not just the sink. It rides the same per-link reverse channel as `Reconfigure`: a sink returns a `QosMessage` from `AsyncElement::take_qos`, the runner stores it into the incoming link's reverse `QosSlot`, and the producer observes it as `PushOutcome::Qos` on its next push (reconfigure wins when both are pending; QoS is advisory and never holds the packet back). `SyncSink` originates it on a late-drop and `VideoTestSrc` reacts by skipping ~`jitter / frame_period` frames (advancing PTS without generating them). **Relay through a transform** carries the report the rest of the way to the source in a multi-element pipeline. A transform observes a downstream QoS as a `PushOutcome::Qos` inside `process`, but that outcome is discarded by a generic transform, and the runner (not the element) owns the reverse slots, so the relay is runner-mediated: the runner wires the transform's *output* `SenderSink` with a relay handle to its *input* link's `QosSlot` (`relay_qos_to`). When the output adapter then sees a downstream QoS it stores it onto the input link instead of surfacing it, so the upstream neighbour observes it on its next push, and across N transforms the report walks one hop at a time back to the source. The element's `process` is unaffected; a QoS-aware transform that wants to act on the report itself is a later refinement. This is the same shape as the reverse `Reconfigure` path. Wired in the bespoke `run_source_transform_sink` runner and in the DAG runner (`run_graph` / `run_linear_chain`, which the `WaylandSink` demo uses), so the sink's own load-shed reaches the source through interior transforms (overlay, convert).
+**Upstream QoS** carries that lateness back to the producer so it sheds load too, not just the sink. It rides the same per-link reverse channel as `Reconfigure`: a sink returns a `QosMessage` from `AsyncElement::take_qos`, the runner stores it into the incoming link's reverse `QosSlot`, and the producer observes it as `PushOutcome::Qos` on its next push (reconfigure wins when both are pending; QoS is advisory and never holds the packet back). `SyncSink` originates it on a late-drop and `VideoTestSrc` reacts by skipping ~`jitter / frame_period` frames (advancing PTS without generating them). **Relay through a transform** carries the report the rest of the way to the source in a multi-element pipeline. A transform observes a downstream QoS as a `PushOutcome::Qos` inside `process`, but that outcome is discarded by a generic transform, and the runner (not the element) owns the reverse slots, so the relay is runner-mediated: the runner wires the transform's *output* `SenderSink` with a relay handle to its *input* link's `QosSlot` (`relay_qos_to`). When the output adapter then sees a downstream QoS it stores it onto the input link instead of surfacing it, so the upstream neighbour observes it on its next push, and across N transforms the report walks one hop at a time back to the source. The element's `process` is unaffected. **Acting on the report** is the other half: an element that returns `true` from `AsyncElement::handles_qos` is not relayed past, so it observes the report as `PushOutcome::Qos` from its own `push` and sheds work itself, the same opt-out `handles_keyframe_requests` / `handles_bitrate_requests` give an encoder. `FfmpegVideoDec` does that under its `qos` property: a report arms a skip budget of `jitter / frame_period` pictures (capped by `max-skip-frames`), during which the codec context runs with `AVDISCARD_NONREF`, so libavcodec stops decoding the pictures nothing references. Decode cost drops without touching a reference chain, so every frame still emitted is bit-identical to a full decode, and the budget counting down to zero is the recovery. This is the same shape as the reverse `Reconfigure` path. Wired in the bespoke `run_source_transform_sink` runner and in the DAG runner (`run_graph` / `run_linear_chain`, which the `WaylandSink` demo uses), so the sink's own load-shed reaches the source through interior transforms (overlay, convert).
 
 ### 4.5 Backpressure & Scheduling
 Every link between elements has an explicit `LinkPolicy`, configured at graph construction time. The choice is per-link because a single pipeline may have lossy preview branches and lossless recording branches sharing an upstream source.
@@ -525,6 +527,9 @@ Static-graph users at the embedded layer never instantiate `BranchSlot` and don'
 
 #### 4.8.4 Router, Gate, Merger Primitives
 A `Router` is a 1-to-N transform that reads an atomic discriminator per frame and pushes the frame to exactly one of its outputs. A `Gate` is a 1-to-1 transform that reads an atomic boolean and either forwards or discards each frame. A `Merger` is an N-to-1 transform that reads from one of its inputs, switching on a discriminator. Together they cover branch enable/disable, A/B switching, and the routing + cutover halves of `ShadowWarm`. These primitives form the foundation of the dynamic-graph layer.
+
+#### 4.8.5 Runtime Request Pads
+The request-pad analog is a pair of handles over a running graph. `DynamicFanoutHandle::add_branch` (M310) attaches an output branch mid-run, round-robin or broadcast (`FanOutMode`, M319; broadcast duplicates via `Frame::share`, replaying sticky caps to the late branch). `DynamicFaninHandle::add_input` (M320) attaches a source as a new input of a running aggregator/muxer. An input add is a negotiation, not a grant (M975): the runner reserves the pad, validates the source's caps against the pad constraint, then asks the element via `MultiInputElement::accepts_runtime_input` — its veto for what pad count and caps cannot express (no spare pad of that media kind, a container that cannot carry a second track). The caller holds a `PendingInput` whose `accepted()` resolves to the verdict; a refused input fails alone (`InputRefused`, logged under the `fanin` category) and the run continues on the inputs it has.
 
 ### 4.9 GStreamer Dynamic-Feature Mapping
 `g2g`'s dynamic surface is intended to be a superset of GStreamer's dynamic capabilities, achieved through a different set of primitives.
@@ -1821,6 +1826,101 @@ rejected (it loses the ergonomic Rust trait). The whole path is exercised
 out-of-tree by `g2g-plugins/tests/fixtures/example-plugin` +
 `tests/plugin_loader_dlopen.rs`.
 
+**Hosted Python elements (`pyelement` / `pysrc` / `pyaggregator`, `g2g-python`).**
+A gst-python-ml element shell runs as a first-class g2g element: `g2g-python`
+embeds CPython (pyo3, `auto-initialize`), exposes a native `g2g` module the
+`backend/g2g` package imports, and negotiates as a same-format passthrough. Each
+hosted instance owns a dedicated GIL-holding OS thread; the element hands it the
+frame and awaits the reply over a Waker channel, so the cooperative executor keeps
+polling other arms while Python runs. A frame reaches Python without a copy on
+either of two paths:
+
+- **System memory.** `g2g_process(buf, width, height, fmt, meta)` gets a writable
+  buffer-protocol object over the frame's own bytes, so `memoryview` / numpy read
+  and overwrite pixels in place. The host counts outstanding buffer exports and
+  fails the frame if the element kept a view past return (its pointer would dangle
+  once the frame is freed downstream). `g2g_process_batch` and `g2g_produce` are
+  the aggregator / source shapes of the same contract.
+- **CUDA device memory (M984).** A `MemoryDomain::Cuda` frame has no CPU bytes, so
+  its two semi-planar planes are described to
+  `g2g_process_cuda(luma, chroma, width, height, meta)` as `g2g.CudaPlane` objects
+  exposing `__cuda_array_interface__` v3: luma `(height, width)` and interleaved
+  chroma `(height/2, width/2, 2)`, byte strides carrying the producer's row pitch
+  (so pitch != width is described, not repacked), `|u1` for NV12 and `<u2` for
+  P010, `stream: None` (the CUDA domain carries no stream; a producer hands the
+  frame over once the decode into it completed). `cupy.asarray(luma)` then aliases
+  the decoder's surface with no PCIe round-trip. The `data` flag is read-only: the
+  device memory belongs to the producer and a teed frame shares it under a
+  read-only guarantee, with no copy-on-write to fall back on as the System path
+  has. CAI carries no CUDA context, so the pointers are valid only in the context
+  the producer decoded into, exposed as the plane's `cuda_context` property for a
+  consumer that must push it (cupy and torch use the device's primary context).
+  Plane lifetime is the call, enforced by a refcount check after it (a retained
+  plane, including one a cupy array holds as its base or a consumed DLPack tensor
+  holds as its manager context, fails the frame). An element that defines no hook
+  for its shape gets `UnsupportedDomain` for a GPU frame rather than a silent
+  readback: `g2g-python` links no CUDA, so a CPU-only element needs an explicit
+  `cudadownload` upstream.
+- **The batch and produce shapes (M986).** A GPU batch reaches a hosted aggregator
+  as `g2g_process_cuda_batch(planes, width, height, meta)`, one `(luma, chroma)`
+  pair per contributing input, so a batched detector reads every stream's decoded
+  surface in place; the anchor flows on device-resident. A hosted *source* runs the
+  handoff backwards: `g2g_produce_cuda(width, height, meta)` returns the two planes
+  as any CAI-exporting objects (a cupy or torch allocation) or `None` for end of
+  stream, because this crate links no CUDA and cannot allocate device memory
+  itself. The returned planes are validated against the negotiated caps (shape,
+  sample type, packed within each row, only the row pitch free, non-null pointer)
+  before they become a frame, and the frame's keep-alive holds the Python objects
+  so the memory outlives it; the source stamps timing, and reports its
+  `cuda_context` through an optional attribute for a downstream consumer that must
+  push it.
+- **DLPack (M986).** The same plane also answers `__dlpack__` /
+  `__dlpack_device__`, for the frameworks that prefer it (`torch.from_dlpack`,
+  `cupy.from_dlpack`). It carries a device and stream contract CAI does not: the
+  device is `(kDLCUDA, 0)`, since the CUDA domain carries the producing context but
+  no device ordinal. A consumer asking for 1.0 or newer through `max_version` gets
+  a `DLManagedTensorVersioned` capsule with the read-only flag set, one asking for
+  nothing gets the pre-1.0 `DLManagedTensor`; `copy=True` or another `dl_device` is
+  refused rather than silently ignored, and `stream` is ignored because the domain
+  carries no stream. DLPack strides count elements rather than bytes, so a row
+  pitch that is not a whole number of samples is refused instead of rounded. The
+  capsule's destructor frees the tensor only while the capsule still carries the
+  unconsumed name, since a consumer that takes ownership renames it and calls the
+  deleter itself.
+
+The frame is read where it lies and forwarded untouched, so a hosted transform
+carries one memory domain on both pads (M985): System, or CUDA under
+`cuda-frames=true`, the property that says the hosted class reads device memory.
+Declaring the same domain on input and output keeps the relation honest, since the
+domain a frame leaves in is the one it arrived in. Two things follow. The
+domain-converter auto-plug splices a download / upload on the edge *into* the
+element when upstream cannot deliver what the hosted code reads, and never after
+it (previously a hosted element always claimed System output, so a GPU frame
+passing through it drew a needless upload before a GPU consumer). And
+`propose_allocation` names that domain upstream, so a multi-domain producer (an
+NVDEC that can keep frames on the device or download them) settles on it and no
+converter node is needed at all; the proposal constrains only the domain and the
+frame size, since the element allocates nothing itself. `format` is a property
+too, so a launch-built `pyelement` can accept the NV12 a decoder emits rather than
+only its RGBA default.
+
+One worker thread per element is the free-threading unit, and that is measured
+rather than assumed (M988, the ignored `m988_gil_offload` test, whose module docs
+carry the invocation for each interpreter). Four hosted elements each running one
+compute-bound pure-Python callback recover 3.6x of the ideal 4x on free-threaded
+CPython 3.14 (`sys._is_gil_enabled()` false in-process) and 0.9x on stock 3.14,
+with no code change between the two: pyo3 picks the interpreter up at build time
+(`PYO3_PYTHON`), free-threaded rules out `abi3`, and the whole crate's test suite
+passes on both. The native `g2g` module declares `gil_used = false`, which is
+load-bearing rather than decorative: CPython re-enables the GIL process-wide when
+it imports a module that has not declared it, so without the declaration the
+`import g2g` inside a hosted element drops the same measurement back to 0.9x. The
+sizing consequence on a stock interpreter is that N hosted elements do not overlap,
+so a chain's Python cost is the sum of their per-frame times rather than the slowest
+one, and `link_capacity` on those links has to absorb the wait while the other
+elements hold the GIL (see the `g2g-python` `host` module docs, next to the worker
+design it follows from).
+
 **Runtime scripting (`scriptelement`, `script-rhai` feature, M580).** The
 construction scripts above run once to emit a graph; `scriptelement` is the
 per-frame complement: a raw-video transform whose `process(frame)` is a Rhai
@@ -2117,6 +2217,16 @@ oversized pre-skip trims a frame to nothing, an underflowing granule drops it).
 A stream with no `OpusHead` and no per-frame duration (the RTP path) decodes
 untrimmed, matching gstreamer's SDP-less default.
 
+Vorbis carries the same two facts without a header field: its playable length is
+the final page's granule position, and its head trim is the first audio packet,
+which primes the overlap window and decodes to nothing. `OggDemux` clips that
+priming block off the front and clamps the tail to the end granule, so a decode
+yields exactly the granule's worth of samples. The size of the clip comes from
+the first audio page's granule (its shortfall against the natural packet
+durations, which also covers a stream joined mid-file), except when that page is
+also the last: its granule is then the end of the stream and says nothing about
+the head, so the clip is the priming packet's own `blocksize / 2`.
+
 MP4 carries the same two facts in its own spelling, and both directions convert
 to the in-band convention (M791). The `dOps` OpusSpecificBox holds an
 `OpusHead`'s fields big-endian, so the demuxers rebuild one from it and forward
@@ -2143,7 +2253,11 @@ the `moov` goes out). Progressive is the two-pass one, the shape `matroskamux`'s
 `seekable` mode has: every sample is buffered, then `ftyp` + a single `mdat` +
 a `moov` are emitted together at EOS, with real `stts` / `ctts` / `stss` /
 `stsc` / `stsz` / `stco` tables (one sample per chunk, ordered by decode
-timestamp) and real `mvhd`/`tkhd`/`mdhd` durations. That is enough for ffmpeg to
+timestamp) and real `mvhd`/`tkhd`/`mdhd` durations. That decode timestamp is the
+frame's own: `Mp4DemuxN` reads the source's `ctts` and carries `dts_ns` beside
+`pts_ns`, so a reordered (B-frame) stream's composition offsets survive a remux
+(M972). A frame with no decode timestamp of its own, or one past its PTS, which
+`ctts` version 0 cannot express, decodes when it presents. That is enough for ffmpeg to
 apply the edit, so the reported duration is the trimmed presentation length
 exactly. The cost is holding the movie in memory, so a live or long capture
 wants the fragmented default. GStreamer spells this choice `fragment-duration =
@@ -2515,6 +2629,18 @@ variable Noto Sans CJK) yields empty glyphs and is one of the reasons the richer
 `cosmic-text` backend (shaping, bidi, CFF, system fallback) is the planned
 upgrade. The no_std baseline keeps the bitmap font (no font file or rasterizer).
 
+`vellooverlay::VelloTextOverlay` (`vello-text-overlay`) is the GPU backend for
+the same cues, for a pipeline that keeps frames on the GPU: RGBA8 in,
+`MemoryDomain::WgpuTexture` out, like `VelloAnalyticsOverlay` beside it. It holds
+a `TextOverlay` rather than its own state, so cue selection, `CueSettings`
+placement, colours, font chain and shaping are one implementation: the shared
+step lays each active cue out into canvas-absolute glyph positions, which the CPU
+element blits as swash rasters and this one hands to Vello as glyph runs (drawn
+from the very face cosmic-text's per-codepoint fallback resolved, so a mixed
+Latin + CJK cue uses the same faces on both backends). Vertical cues are the one
+gap: they never reach the shaper, so only the CPU element's column renderer
+draws them.
+
 `SubParse` feeds that renderer as a stream rather than from a file: it parses a
 structured subtitle document arriving on its sink pad and emits each cue as a
 timed `Text{Utf8}` frame (PTS + duration = the cue window). Parsing is
@@ -2557,7 +2683,9 @@ the path is a track, not a `SubParse`-style drop-in. The `cea` module (`no_std`)
 holds the decoders. `extract_cc_data` mines the `(cc_type, b0, b1)` caption
 triples from an access unit's SEI `user_data_registered_itu_t_t35` (ATSC A/53
 `GA94` `cc_data`) messages for H.264 (NAL type 6) and H.265 (prefix/suffix SEI),
-every count / length / offset bounds-checked so a malformed SEI yields no triples.
+and from picture `user_data` blocks (`00 00 01 B2`) for MPEG-1 / MPEG-2, the same
+ATSC block without the T.35 prefix (M963); every count / length / offset
+bounds-checked so a malformed block yields no triples.
 `Cea608` decodes the legacy line-21 path (`cc_type` 0/1): a 15x32 character grid
 with pop-on / roll-up / paint-on modes, PAC row + indent positioning, the
 basic / special / extended-Western-European character sets, and channel selection
@@ -3266,6 +3394,15 @@ upstream produce vs downstream accept, `Option`al since some sites hold only
 one side), and `validate_json` renders them as gst caps strings
 (`upstream_caps` / `downstream_caps`).
 
+`toolingjson::observed_graph_json` (`g2g-launch --run-json`) reports the same
+graph after running it instead of before: every link's `SenderSink` records the
+last `CapsChanged` that entered it on the edge's `EdgeCounters`, so an
+`Observer` snapshot carries both the solved caps and the observed ones
+(`EdgeInfo::observed_caps`). The dump prefers the observed reading and tags each
+edge `caps_source` `runtime` or `negotiated`, which is what makes a
+placeholder-then-refine stream (a demuxed file) comparable against an engine
+that only reports post-run caps.
+
 ### 4.20c Developer Tooling: Conformance and Derived Maturity
 
 Because g2g grows fast under agent-driven development, "how validated is this
@@ -3766,12 +3903,13 @@ via `gpu()` / `wrap_buffer`). By default the element waits for the copy to finis
 semaphore (see the synchronisation paragraph below). Validated on the RTX
 3060: a buffer exported to a dma-buf and re-imported by `DmaBufToWgpu` on a
 *separate* wgpu device reads back byte-exact (`m559_wgpu_dmabuf_export`), which
-also confirms dma-buf export+import work on this NVIDIA driver. Both packed
-RGBA/BGRA and 8-bit NV12 are supported; the plane-aware frame size (RGBA is one
-plane, NV12 / I420 add the half-height chroma region) is the shared
-`dmabuf_frame_bytes` helper that both the export and the `DmaBufToWgpu` import use,
-so they always agree on the buffer size (this also fixed the importer, which
-previously imported only the luma plane of a planar frame).
+also confirms dma-buf export+import work on this NVIDIA driver. Packed
+RGBA/BGRA/YUYV and 8-bit NV12 are supported; the plane-aware frame size (a packed
+format is one plane, NV12 / I420 add the half-height chroma region) and the row
+stride are `RawVideoFormat::frame_bytes` / `row_stride`, which both the export and
+the `DmaBufToWgpu` import use, so they always agree on the buffer size (this also
+fixed the importer, which previously imported only the luma plane of a planar
+frame).
 
 The whole GPU-egress stack composes end-to-end across a process boundary:
 `WgpuToDmaBuf -> DmaBufSink -> [process] -> DmaBufSrc -> DmaBufToWgpu` moves a
@@ -3822,15 +3960,15 @@ The ML element sits in the same memory domain context as the hardware decoder. W
 2. An inline compute shader converts color spaces (e.g. NV12 → planar RGB) and performs normalization scales directly in graphics memory.
 3. The resulting tensor handle is emitted as a `Frame { domain: VulkanTexture(...), caps: Caps::Tensor { .. }, .. }`, submitted straight to the inference backend.
 
-`WgpuPreprocess` (`g2g-ml/src/wgpupreprocess.rs`, `wgpu` feature) is the compute-shader half: an NV12 frame is converted and normalized in a wgpu compute shader to a `Caps::Tensor { F32, [1,3,H,W], Nchw }`, the same contract `OrtInference` builds on the CPU. The default system-memory variant uploads NV12 to a storage buffer and reads the f32 tensor back to `MemoryDomain::System`. **GPU-output mode (`with_gpu_output`)** instead leaves the tensor in a `wgpu::Buffer` and emits `MemoryDomain::WgpuBuffer` (an on-device GPU->GPU copy into a fresh per-frame buffer, no map / read-back in the element), so a downstream GPU consumer reads it on-device; a CPU consumer pays the deferred read-back via the buffer owner. This removes the output-side GPU->CPU copy; `WgpuInference` (§5.2) is the consumer that binds the resulting buffer on-device, so `preprocess -> infer` keeps the tensor on the GPU. **Surface-import input** closes the other end: when the NV12 frame arrives already GPU-resident as a `MemoryDomain::WgpuTexture` (a `WgpuNv12Texture` keep-alive wrapping an R8Uint texture of `width x height*3/2` in standard NV12 byte layout), the element adopts that texture's device and samples it with `textureLoad` straight into the compute pass, with no CPU upload, bit-identical to the storage-buffer path. With both ends GPU-resident, `surface -> WgpuPreprocess -> WgpuInference` runs with the pixels never touching the CPU. **CUDA<->wgpu interop (`CudaToWgpu`, `g2g-plugins/src/cudawgpu.rs`)** joins the NVDEC decode side to this surface-import path: there is no portable "share this CUDA pointer with wgpu" call, so the bridge allocates an exportable Vulkan image (`VK_KHR_external_memory_fd`, wrapped as a `wgpu::Texture` via wgpu-hal), CUDA imports the same memory by FD (`cuImportExternalMemory`) and copies the NVDEC NV12 planes into it device->device, and the wgpu device travels on the frame's keep-alive so `WgpuPreprocess` adopts it (the device-identity pattern). The whole `NVDEC -> CudaToWgpu -> WgpuPreprocess -> WgpuInference` chain is validated on an RTX 3060, matching a CPU reference with no PCIe download. Shared images are recycled from a reuse pool: the Vulkan image, its CUDA import, and the `wgpu::Texture` are allocated once and returned to a free list when the downstream frame is released (a drop guard on the emitted keep-alive), so per frame only the two device->device plane copies and a sync run; a recycled entry is drained (`Device::poll`) before reuse since a wgpu submission may still sample it. The pool cut the bridge step ~2.6x at 1080p (p50 0.38 ms pooled vs 0.98 ms per-frame-allocated). **The reverse direction (`WgpuToCuda`)** closes the *encode* side: a renderer writes a packed-RGBA `wgpu::Texture` on FD-exportable Vulkan memory (`export_rgba_image` / `wrap_rgba_as_texture`, the `R8G8B8A8` mirror), CUDA imports it as a 4-channel array, and `to_cuda_frame` copies it device->device into a linear `CUdeviceptr` emitted as a `MemoryDomain::Cuda` `Rgba8` frame that `NvEnc` registers as `ABGR` (§4.11.3). So a GPU render reaches the H.264 encoder with no device->host read-back, validated on an RTX 3060 (`wgpu_to_cuda` test). This is the zero-copy egress for server-side rendering / cloud-gaming, and the `bevy-g2g` crate's `RemoteRenderPlugins` is the packaged Bevy proof (M796): Bevy renders on the interop device, g2g copies the target through `WgpuToCuda`, and `NvEnc` emits H.264 without a full-frame download, egressing to WHIP/WebRTC or a file; without an NVIDIA GPU the plugin falls back to a GPU->CPU readback + libx264 encode so the same app streams on any adapter. The crate completes the remote-rendering loop with a WebSocket input backchannel (M797: viewer keyboard/mouse injected as ordinary Bevy input messages; a WebRTC data channel cannot reach the publisher through a WHIP/WHEP server, the viewer being a separate peer connection) and a windowed mode (M798: the scene camera renders to the stream texture and the window shows it through a fullscreen UI mirror, so desktop view and stream are the same pixels). The bridge retains its own CUDA primary context (the GPU the interop device selects) and owns the exportable render-target texture.
+`WgpuPreprocess` (`g2g-ml/src/wgpupreprocess.rs`, `wgpu` feature) is the compute-shader half: an NV12 frame is converted and normalized in a wgpu compute shader to a `Caps::Tensor { F32, [1,3,H,W], Nchw }`, the same contract `OrtInference` builds on the CPU. The default system-memory variant uploads NV12 to a storage buffer and reads the f32 tensor back to `MemoryDomain::System`. **GPU-output mode (`with_gpu_output`)** instead leaves the tensor in a `wgpu::Buffer` and emits `MemoryDomain::WgpuBuffer` (an on-device GPU->GPU copy into a fresh per-frame buffer, no map / read-back in the element), so a downstream GPU consumer reads it on-device; a CPU consumer pays the deferred read-back via the buffer owner. This removes the output-side GPU->CPU copy; `WgpuInference` (§5.2) is the consumer that binds the resulting buffer on-device, so `preprocess -> infer` keeps the tensor on the GPU. **Surface-import input** closes the other end: when the NV12 frame arrives already GPU-resident as a `MemoryDomain::WgpuTexture` (a `WgpuNv12Texture` keep-alive wrapping an R8Uint texture of `width x height*3/2` in standard NV12 byte layout), the element adopts that texture's device and samples it with `textureLoad` straight into the compute pass, with no CPU upload, bit-identical to the storage-buffer path. **DMA-BUF import input** (`dmabuf-wgpu` feature, Linux) is the same idea for a `MemoryDomain::DmaBuf` frame from a capture or decode path: the element opens a device carrying `VK_KHR_external_memory_fd` + `VK_EXT_external_memory_dma_buf` on the first such frame and binds the imported buffer as the compute pass's input, sharing the importer (`g2g_plugins::dmabufwgpu::DmaBufImporter`, which also honours a producer's timeline semaphore) with the `dmabuftowgpu` element rather than repeating the handshake. The frame's row stride and plane offset reach the shader in the dims uniform, so a padded capture buffer is read in place with no repack, and the tensor is bit-identical to the same pixels uploaded from system memory (validated on an RTX 3060, including a padded stride). NV12 and packed YUYV both have a compute shader (they share every line but the fetch of one pixel's Y, Cb, Cr), YUYV because that is what a UVC webcam captures, so a camera reaches the tensor with no `videoconvert` in front. Which GPU the import opens on is a real choice, not a default: a discrete GPU binds only GPU-visible dma-bufs, while a CPU-backed one (udmabuf, a USB webcam's capture buffer) binds on an integrated GPU, whose memory is the same system RAM. `ImportAdapter` (the `import-adapter` property on both `wgpupreprocess` and `dmabuftowgpu`) picks between them, `high-performance` by default because that is what a GPU-exported dma-buf needs; `integrated` searches the enumerated Vulkan adapters by device type. Either way an fd the driver cannot bind reports `UnsupportedDomain` and the caller falls back to the upload path. The live camera case is validated on this host (`m993_camera_dmabuf_preprocess`): `v4l2src io-mode=dmabuf` at 640x480 YUYV into `WgpuPreprocess` on the AMD integrated GPU gives the same tensor as that same captured frame taken through the copy path, and the same frame on the RTX 3060 refuses the fd, which is the choice being real. With both ends GPU-resident, `capture / decode -> WgpuPreprocess -> WgpuInference` runs with the pixels never touching the CPU. **CUDA<->wgpu interop (`CudaToWgpu`, `g2g-plugins/src/cudawgpu.rs`)** joins the NVDEC decode side to this surface-import path: there is no portable "share this CUDA pointer with wgpu" call, so the bridge allocates an exportable Vulkan image (`VK_KHR_external_memory_fd`, wrapped as a `wgpu::Texture` via wgpu-hal), CUDA imports the same memory by FD (`cuImportExternalMemory`) and copies the NVDEC NV12 planes into it device->device, and the wgpu device travels on the frame's keep-alive so `WgpuPreprocess` adopts it (the device-identity pattern). The whole `NVDEC -> CudaToWgpu -> WgpuPreprocess -> WgpuInference` chain is validated on an RTX 3060, matching a CPU reference with no PCIe download. Shared images are recycled from a reuse pool: the Vulkan image, its CUDA import, and the `wgpu::Texture` are allocated once and returned to a free list when the downstream frame is released (a drop guard on the emitted keep-alive), so per frame only the two device->device plane copies and a sync run; a recycled entry is drained (`Device::poll`) before reuse since a wgpu submission may still sample it. The pool cut the bridge step ~2.6x at 1080p (p50 0.38 ms pooled vs 0.98 ms per-frame-allocated). **The reverse direction (`WgpuToCuda`)** closes the *encode* side: a renderer writes a packed-RGBA `wgpu::Texture` on FD-exportable Vulkan memory (`export_rgba_image` / `wrap_rgba_as_texture`, the `R8G8B8A8` mirror), CUDA imports it as a 4-channel array, and `to_cuda_frame` copies it device->device into a linear `CUdeviceptr` emitted as a `MemoryDomain::Cuda` `Rgba8` frame that `NvEnc` registers as `ABGR` (§4.11.3). So a GPU render reaches the H.264 encoder with no device->host read-back, validated on an RTX 3060 (`wgpu_to_cuda` test). This is the zero-copy egress for server-side rendering / cloud-gaming, and the `bevy-g2g` crate's `RemoteRenderPlugins` is the packaged Bevy proof (M796): Bevy renders on the interop device, g2g copies the target through `WgpuToCuda`, and `NvEnc` emits H.264 without a full-frame download, egressing to WHIP/WebRTC or a file; without an NVIDIA GPU the plugin falls back to a GPU->CPU readback + libx264 encode so the same app streams on any adapter. The crate completes the remote-rendering loop with a WebSocket input backchannel (M797: viewer keyboard/mouse injected as ordinary Bevy input messages; a WebRTC data channel cannot reach the publisher through a WHIP/WHEP server, the viewer being a separate peer connection) and a windowed mode (M798: the scene camera renders to the stream texture and the window shows it through a fullscreen UI mirror, so desktop view and stream are the same pixels). The bridge retains its own CUDA primary context (the GPU the interop device selects) and owns the exportable render-target texture.
 
 ### 5.2 Unified Pure-Rust Inference Backends
 `g2g` avoids bundling heavy, unsafe proprietary C++ engines. The `g2g-ml` crate provides wrapper elements targeting two execution paradigms:
 
-- **`g2g-ml::burn`** (Embedded / Wasm / RTOS): leverages the pure-Rust Burn framework with a `wgpu` backend, compiling ONNX workflows into type-safe, compile-time Rust graphics shaders. `BurnInference` (`g2g-ml/src/burninfer.rs`, `burn` feature) is the wgpu-backend inference element over the `RawVideo` → `Tensor` contract, driving an `input · W + b` linear layer on any Vulkan / Metal / DX12 / WebGPU adapter.
+- **`g2g-ml::burn`** (Embedded / Wasm / RTOS): leverages the pure-Rust Burn framework with a `wgpu` backend, compiling ONNX workflows into type-safe, compile-time Rust graphics shaders. `BurnInference` (`g2g-ml/src/burninfer.rs`, `burn` feature) is the wgpu-backend inference element over the `RawVideo` → `Tensor` contract, driving an `input · W + b` linear layer on any Vulkan / Metal / DX12 / WebGPU adapter. **An ONNX topology runs through the same element**, but the import is build-time: `burn-onnx` (what `burn-import` 0.21 forwards to) generates a burn `Module` plus an embedded burnpack weight blob from the `.onnx` at compile time, so there is no runtime graph loader to hand the file to. The seam is the `BurnModule` trait: one forward pass from the `[1, 3, H, W]` NCHW f32 tensor the element normalizes to `[1, N]` logits. The importing crate implements it over its generated `Model<Wgpu>` and passes it to `BurnInference::module`, which then drives it frame by frame exactly like the built-in linear layer (a forward pass whose output is not the declared `num_outputs` fails the frame, so the emitted `Caps::Tensor` cannot lie). Because the codegen crate carries burn's own rustc 1.92 MSRV, the worked case is a workspace-excluded standalone crate, `examples/g2g-onnx-import`: a `Conv2d -> BatchNorm -> ReLU -> global average pool -> linear` graph whose logits match the ONNX Runtime reference for the same frame on the RTX 3060. Attention imports through the same seam: the standard-domain ONNX `Attention` op (opset 23, one node for a whole multi-head block) is lowered by `burn-onnx` onto `burn::tensor::module::attention`, so the GPU runs burn's own attention kernel rather than a hand-unrolled matmul / softmax chain, validated on the 3060 by a second fixture in that crate (pixels as a token sequence -> multi-head self-attention -> mean pool -> linear). Because that node is opaque in the graph, the fixture generator folds the attention formula in numpy and asserts ONNX Runtime agrees before emitting the reference logits, so the reference is not ORT agreeing with itself. This is the topology half of the Burn story, the counterpart of the runtime `safetensors` weight import below.
 - **`g2g-ml::ort`** (High-Performance Enterprise Server): wraps ONNX Runtime bindings to pass underlying memory domains to hardware-specific execution paths (CUDA / TensorRT / DirectML / Apple CoreML) natively. Each execution provider is a constructor variant on `OrtInference` that registers the EP ahead of the CPU fallback; registration is best-effort, so the session keeps running (on CPU) when the device is absent. Desktop: `from_memory_with_cuda`, `from_memory_with_directml`. **Android edge**: `from_memory_with_nnapi` (the system NeuralNetworks API: NPU / GPU / DSP), `from_memory_with_xnnpack` (ARM-optimized CPU), and `from_memory_for_android`, which registers NNAPI then XNNPACK then the default CPU EP in one call so ORT assigns each node to the first provider that supports it, the MediaPipe delegate-with-fallback shape. The `nnapi` / `xnnpack` features link symbols only the Android ONNX Runtime build carries, so they are Android-target features (a host build / CI never enables them); the EP stack is validated on a device (`tools/android-nnapi-smoke.sh` runs `g2g-ml/tests/android_nnapi_probe.rs` from `/data/local/tmp`, a binder-threadpool shim for the vendor NNAPI HAL, output byte-exact with the CPU reference). **Edge TPU offload is proven**: an int8 QDQ Conv->ReLU fixture run through `from_memory_for_android` is placed on `NnapiExecutionProvider` (read from ORT's profiling JSON), and on a Pixel 10a (Tensor G4) the DarwiNN HAL log confirms the Edge TPU compiled and executed it (`/dev/edgetpu core0` firmware load); the float-typed input-boundary `QuantizeLinear` is the one op the TPU declines, correctly delegated to CPU (`tools/android-nnapi-conv-smoke.sh`, which also greps the `darwinn` logcat to disambiguate the TPU from other NNAPI accelerators). **Full-graph offload**: a uint8-input variant of the model (the boundary `QuantizeLinear` removed, the graph input retyped to uint8) runs *entirely* on the TPU, every node on `NnapiExecutionProvider` with nothing on the CPU, and the DarwiNN log confirms `Ops supported = ..., not supported = 0` / `compilation finished successfully on google-edgetpu`. The f32->uint8 quantization that feeds such a model is `TensorConvert` (`g2g-plugins`), the tensor-domain sibling of `VideoConvert`: it quantizes an f32 tensor to int8 / uint8 (`q = round(x / scale) + zero_point`, clamped) or dequantizes the inverse, shape and layout passing through. So `preprocess -> TensorConvert(quantize) -> inference` keeps the boundary quantize *out* of the model, leaving the whole inference graph accelerator-eligible. `TensorConvert` also transposes NCHW<->NHWC and narrows / widens f32<->F16 in the same pass, so a model that wants `NHWC uint8` (NNAPI / TFLite) is fed straight from an `NCHW f32` source. `OrtInference` itself accepts the integer input: `from_session` reads the model's input element type and `with_tensor_input` on a u8 / i8 model feeds the quantized tensor straight to the session (RGBA mode stays f32-only). **The whole chain is validated live on the device**: `Camera2Src -> TensorConvert(quantize) -> OrtInference(uint8) ` runs a real camera frame onto the Edge TPU (`tools/android-camera-tpu-smoke.sh`; on a Pixel 10a the logcat shows `accelerator name: EDGETPU` and `compilation finished successfully on google-edgetpu`), the g2g answer to "an edge framework that moves inference between CPU and accelerator" demonstrated end to end on real hardware. The same constructor shape extends to the other vendor accelerators: `from_memory_with_qnn` (Qualcomm AI Engine Direct, the Hexagon NPU / Adreno GPU on Snapdragon, the alternative to reaching the Hexagon through NNAPI) and `from_memory_with_coreml` (the Apple Neural Engine / GPU on macOS / iOS), each behind a target-only feature like `nnapi` (a host build never links them); both are validated to compile for their target, with on-device runtime validation pending the hardware (no Snapdragon / Apple device in CI, like the CUDA EP). This is the heterogeneous-device story (a desktop NVIDIA box, a Windows D3D12 GPU, an Android phone NPU, and the Qualcomm / Apple NPUs all run the same element, the EP picked per platform), the architectural answer to MediaPipe's runtime CPU/GPU delegate switch.
 
-`WgpuInference` (`g2g-ml/src/wgpuinfer.rs`, `wgpu` feature) is the GPU-resident counterpart of `BurnInference`: a raw wgpu compute pass that binds the GPU-resident tensor `WgpuPreprocess::with_gpu_output` (§5.1) produced **directly**, rather than taking `RawVideo` / `System` and uploading. It runs one of a small op zoo on that tensor, selected at construction (each its own WGSL shader behind the shared device-adopt / dispatch / read-back machinery): the original `input · W + b` linear matmul (`linear`); a same-padding stride-1 2D convolution (`conv2d`) over the `[1, Cin, H, W]` NCHW tensor with `[Cout, Cin, KH, KW]` weights, leaving a `[1, Cout, H, W]` feature map; the elementwise activations `relu` / `sigmoid`; and `maxpool2d` / `avgpool2d` spatial pooling. The weighted ops (linear, conv2d) bind a 5-entry group (meta, input, weights, bias, out); the weightless ops (activation, pooling) bind a 3-entry group (meta, input, out), the bind-group layout following the active shader. The conv is the keystone that lets the chain run an actual CNN layer, not just a final classifier; the activation is the nonlinearity that keeps stacked convs from collapsing to one linear map, and the pool the spatial downsampler. Chained GPU-resident (`conv2d -> relu -> maxpool`, each in `with_gpu_output` mode so the data never leaves the device between layers), they are a real small-CNN body, validated on the RTX 3060 against a CPU reference folding the same ops (`conv2d_reference` / `relu_reference` / `maxpool2d_reference`) over the exact tensor the GPU preprocess produced. **Trained weights are imported at runtime** from a `safetensors` file via a dependency-free reader (`g2g-ml::safetensors`, a focused parser for the format's `u64` length + JSON-subset header + raw tensor bytes, no `serde` / no `safetensors` crate): `conv2d_from_safetensors` reads the `[Cout, Cin, KH, KW]` weight and `[Cout]` bias by name and infers the kernel dims, so picking a different trained checkpoint is "parse a different file" while the layer topology stays this compiled element. This is the weights half; the architecture stays Rust (truly dynamic *graphs* at runtime are the `ort` backend's job, and `burn-import` build-time codegen is the Burn-side topology path). It owns no device: because a `wgpu::Buffer` is bindable only on the device that created it, the element adopts the producer's device / queue (carried by the incoming `WgpuBufferOwner`) on the first frame and submits its compute on the producer's queue, which orders it after the producer's work with no fence or read-back. The logits are read back to `MemoryDomain::System` by default or left GPU-resident (`with_gpu_output`) for a downstream GPU consumer. A burn / ort consumer cannot do this zero-copy: their tensor handles are opaque (no foreign-buffer adopt) and run on their own device, so they would force the GPU->CPU->GPU round-trip the GPU-resident preprocess and inference paths exist to delete.
+`WgpuInference` (`g2g-ml/src/wgpuinfer.rs`, `wgpu` feature) is the GPU-resident counterpart of `BurnInference`: a raw wgpu compute pass that binds the GPU-resident tensor `WgpuPreprocess::with_gpu_output` (§5.1) produced **directly**, rather than taking `RawVideo` / `System` and uploading. It runs one of a small op zoo on that tensor, selected at construction (each its own WGSL shader behind the shared device-adopt / dispatch / read-back machinery): the original `input · W + b` linear matmul (`linear`); a same-padding stride-1 2D convolution (`conv2d`) over the `[1, Cin, H, W]` NCHW tensor with `[Cout, Cin, KH, KW]` weights, leaving a `[1, Cout, H, W]` feature map; the elementwise activations `relu` / `sigmoid`; and `maxpool2d` / `avgpool2d` spatial pooling. The weighted ops (linear, conv2d) bind a 5-entry group (meta, input, weights, bias, out); the weightless ops (activation, pooling) bind a 3-entry group (meta, input, out), the bind-group layout following the active shader. The conv is the keystone that lets the chain run an actual CNN layer, not just a final classifier; the activation is the nonlinearity that keeps stacked convs from collapsing to one linear map, and the pool the spatial downsampler. Chained GPU-resident (`conv2d -> relu -> maxpool`, each in `with_gpu_output` mode so the data never leaves the device between layers), they are a real small-CNN body, validated on the RTX 3060 against a CPU reference folding the same ops (`conv2d_reference` / `relu_reference` / `maxpool2d_reference`) over the exact tensor the GPU preprocess produced. **Trained weights are imported at runtime** from a `safetensors` file via a dependency-free reader (`g2g-ml::safetensors`, a focused parser for the format's `u64` length + JSON-subset header + raw tensor bytes, no `serde` / no `safetensors` crate): `conv2d_from_safetensors` reads the `[Cout, Cin, KH, KW]` weight and `[Cout]` bias by name and infers the kernel dims, so picking a different trained checkpoint is "parse a different file" while the layer topology stays this compiled element. This is the weights half; the architecture stays Rust (truly dynamic *graphs* at runtime are the `ort` backend's job, and `burn-onnx` build-time codegen is the Burn-side topology path, above). It owns no device: because a `wgpu::Buffer` is bindable only on the device that created it, the element adopts the producer's device / queue (carried by the incoming `WgpuBufferOwner`) on the first frame and submits its compute on the producer's queue, which orders it after the producer's work with no fence or read-back. The logits are read back to `MemoryDomain::System` by default or left GPU-resident (`with_gpu_output`) for a downstream GPU consumer. A burn / ort consumer cannot do this zero-copy: their tensor handles are opaque (no foreign-buffer adopt) and run on their own device, so they would force the GPU->CPU->GPU round-trip the GPU-resident preprocess and inference paths exist to delete.
 
 ### 5.3 Native Async Batching Engine
 `g2g-ml::batcher` provides a lock-free, multi-channel execution sink that groups separate asynchronous video input streams into a single hardware tensor execution array:
@@ -3863,6 +4001,21 @@ picture. Two pieces, both `no_std`-friendly:
   per-class NMS) into `ObjectDetection`s, attaches an `AnalyticsMeta`, and
   forwards the frame. A real client shaping the metadata API (rather than
   speculation) is why the system was deferred to this point.
+- **The mask producer (`g2g-ml::OrtSegmentation`, `ort` + `analytics`).** Runs a
+  YOLO `-seg` export (Ultralytics YOLOv8-seg / YOLO11-seg) and attaches
+  `Segmentation` plus `Roi` nodes to the frame it forwards: an identity transform
+  that adds metadata, so the picture and its masks reach an overlay together.
+  Both of the model's outputs stay inside the element, unlike the detection split
+  (`OrtInference -> DetectionPostprocess`): a tensor frame carries one tensor and
+  a mask needs both the box-plus-coefficient output `[1, 4+C+M, A]` and the
+  prototype planes `[1, M, mh, mw]`. An instance's mask is the
+  coefficient-weighted prototype sum through a sigmoid, read over the instance's
+  box at prototype resolution, so a consumer places sample `i` of
+  `mask.width()` at `bbox.x + (i + 0.5) / mask.width() * bbox.w` and needs
+  nothing else; the `Roi` is the mask-tight sub-box, the region an encoder or
+  tracker should treat specially, related to its `Segmentation` by `Contains`.
+  The decode is pure Rust (`g2g-ml::segmentation`), so an `ort-web` caller in the
+  browser that already holds both outputs reuses it without an element.
 - **Metadata through fan-out.** `FrameMetaSet` holds each `FrameMeta` as
   an `Arc<dyn FrameMeta>` and is `Clone`, so a tee clone shares the analytics
   graph by refcount rather than dropping it: the graph runner's
@@ -3889,14 +4042,71 @@ picture. Two pieces, both `no_std`-friendly:
   videocrop `Crop`, the software video encoders (av1enc, vpxenc, ffmpegenc,
   mjpegenc) `Encode`. Still a no-op when the `metadata` feature is off (the
   method and stash are cfg'd out, so the baseline build is byte-identical).
+- **Metadata on demand (the pull half).** `meta_transform` moves metadata that
+  already exists; `AsyncElement::meta_requests() -> MetaRequests` is how a
+  consumer says which metadata it wants to exist in the first place (the
+  GStreamer allocation-query `add_meta` analog). `MetaRequests` is a
+  fixed-capacity `Copy` set of `(TypeId, RequestPolicy)` entries (four, sorted so
+  equality is order-independent), carried as a field of `AllocationParams`, so
+  the demand travels on the allocation cascade that already runs sink → source.
+  A producer reads `params.meta_requests.wants::<T>()` in `configure_allocation`
+  and can then skip work nobody reads. Downstream demand also crosses a fan-in's
+  *output* boundary, where its pool parameters deliberately do not: a compositor
+  writes the frames the demand describes. An element with no pool requirement of
+  its own still forwards the demand (as `AllocationParams::meta_demand`, which
+  accepts every memory domain, and which the source-side reconciliation skips so
+  a metadata request can never decide a producer's memory domain). A request is a
+  hint, never a guarantee, so a consumer still handles a frame arriving without
+  the meta. With nothing declared the cascade is byte-identical to before, and
+  without the `metadata` feature `MetaRequests` is a ZST empty set.
+- **Demand policy: what a request needs of the other consumers.** Every request
+  carries a `RequestPolicy`, because two kinds of metadata combine differently
+  when several consumers read one producer's frames. `AnyConsumer` (the default,
+  `request::<T>()`): attaching the meta costs a consumer that did not ask
+  nothing, so one asking consumer is enough and the demands union
+  (`AnalyticsMeta`, `CaptionMeta`, `TimecodeMeta`). `EveryConsumer`
+  (`request_from_every_consumer::<T>()`): honouring it changes the *buffer*, so a
+  consumer that did not ask would misread it, and the demand only stands where
+  every consumer asked. Two folds implement this: `join_branches` at a tee (a
+  branch that proposed nothing is still a branch that asked for nothing, and
+  vetoes) and `carry_upstream` at each hop (the producer's frames pass through
+  that element first, so a hop that does not share the request vetoes it exactly
+  as a sibling branch does). The strictest policy wins when two elements ask for
+  one meta differently. A demand that dies leaves the cascade as it found it: a
+  proposal carrying neither pool constraints nor demand collapses back to none.
+- **The buffer's own shape (`PlaneLayout`).** The first meta produced on demand,
+  and the `GstVideoMeta` analog: per-plane byte offset and row stride (up to four
+  planes, every derived offset checked) for a raw frame whose rows are padded.
+  Without it a raw frame is assumed tightly packed, so a producer whose rows are
+  not (a GPU readback at the API's 256-byte row alignment, a capture driver's
+  `bytesperline`) has to repack them row by row. `WgpuCompositor` asks
+  `wants::<PlaneLayout>()` when the cascade configures its output: when a
+  consumer downstream requested one it hands over the canvas as the GPU wrote it
+  and declares the pitch, and the per-frame repack disappears. `VideoConvert` is
+  that consumer: it requests the layout and reads a packed RGBA / BGRA input's
+  rows where they lie (a padded planar input it packs out first, which is correct
+  and costs what the producer skipped). It is the `EveryConsumer` request the
+  policy above exists for: `VideoConvert` asks with
+  `request_from_every_consumer`, so any consumer or hop that would take the
+  padded rows for tightly packed ones vetoes the padding and the producer repacks
+  as it always did. The meta is dropped by every `meta_transform`, since an
+  element only declares one when it writes a new buffer; a tee's clone shares the
+  described buffer and keeps it.
 - **The overlay.** The visible end of the detector chain reads the
   `AnalyticsMeta` carried onto the *display* frame (via the fan-out path) and
-  draws each box, so `decode -> tee -> {detect, video} -> overlay -> display`
-  works. Two backends with a shared per-class palette: the CPU
+  draws it, so `decode -> tee -> {detect, video} -> overlay -> display`
+  works. Three shapes, in one shared palette: a detection box as a solid outline
+  in its class colour, an instance segmentation as a translucent fill of its mask
+  (`mask-alpha`), and a region of interest as a dashed rectangle. A mask spans
+  exactly its instance's box at the model's own grid resolution, which is the
+  whole placement rule either backend needs, and an ROI takes the palette slot of
+  the segmentation that `Contains` it, so a mask and its tight box read as one
+  instance rather than two findings. Two backends: the CPU
   `g2g-plugins::analyticsoverlay::AnalyticsOverlay` (`analytics` feature) paints
-  box outlines onto RGBA8 with the compositor's integer source-over blend (the
+  onto RGBA8 with the compositor's integer source-over blend (the
   `no_std` baseline), and the GPU `vellooverlay::VelloAnalyticsOverlay`
-  (`vello-overlay` feature) strokes antialiased boxes over a full-frame image
+  (`vello-overlay` feature) strokes antialiased boxes and scales each mask on as
+  an alpha image fill over a full-frame image
   with the Vello GPU 2D renderer, emitting the result in the new
   `MemoryDomain::WgpuTexture` domain. That domain (an `OwnedWgpuTexture` whose
   `wgpu::Texture` lives in a `WgpuKeepAlive` owner, since `g2g-core` never links
@@ -3916,7 +4126,11 @@ picture. Two pieces, both `no_std`-friendly:
   on the GPU reaching the display with no system-memory round-trip. Window and
   event-loop ownership stay with the application (wgpu surfaces are built from a
   window handle and must drive the app's event loop), so the sink presents to a
-  surface the app supplies rather than opening its own window.
+  surface the app supplies rather than opening its own window. The app also owns
+  the resize event, and forwards it as `WgpuSink::resize(width, height)`, which
+  reconfigures the swapchain (or reallocates the offscreen texture) at the new
+  size; the frame's negotiated geometry is untouched, the blit just scales it to
+  whatever the target now is.
 
 - **Bring-your-own-device.** The same `GpuContext` sharing extends one
   step further out, to an embedding application that *already owns* a
@@ -4047,10 +4261,13 @@ the single browser thread via `run_linear_chain`. Validated headless
 a committed deterministic fixture (`tools/wasm-demo/fixtures/tiny-detect.onnx`,
 generated by `gen-tiny-detect.py`) that plants two detections per frame: the model
 loads, each frame yields exactly two decoded detections, and the overlay boxes
-render to the canvas. A finite source runs clean end to end; an unbounded source
-that keeps feeding while every frame awaits ort-web trips a wasm async-runtime
-reentrancy (a `spawn_local` re-entry on the per-frame JS-promise await, tracked in
-`DESIGN_TODO.md`).
+render to the canvas. Finite and unbounded sources both run clean end to end. (An
+unbounded source used to throw `closure invoked recursively or after being
+dropped` once a downstream error crossed the backpressured source loop: the
+failed `push` returned early past `WebSocketSrc`'s callback detach, so the
+still-open socket kept calling a freed `onmessage` closure. Fixed M967, the
+detach now runs on every exit; `tools/wasm-demo/headless/repro-unbounded.mjs` is
+the repro harness.)
 
 ---
 

@@ -6,6 +6,42 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M997: `FfmpegVideoDec` sheds non-reference pictures on a downstream QoS report instead of relaying it.
+- M996: `SyncSink` paces through the shared `PresentationPacer` and adopts the elected `ClockSync`.
+- M998: `PtpClient` shares UDP 319 / 320 with a running `ptp4l`, and `PtpSystemClock` reports the daemon's port state.
+- M995: `FrameMetaSet::attach` replaces the entry of the same type instead of adding an unreachable second one.
+- M994: both analytics overlays draw segmentation masks as a translucent fill and ROIs as dashed rectangles.
+- M993: `WgpuPreprocess` takes a webcam's YUYV dma-buf, importing on a GPU chosen by `import-adapter`.
+- M992: `OrtSegmentation` runs a YOLO `-seg` model and attaches `Segmentation` / `Roi` masks to the frame.
+- M990: `WgpuPreprocess` binds a dma-buf NV12 frame into its compute pass by Vulkan import, no CPU upload.
+- M991: `WgpuSink::resize` follows the window, reconfiguring its surface swapchain.
+- M989: `decodebin` takes its memory-domain preference from the consumer's declared input domains.
+- M988: hosted Python elements run in parallel on a free-threaded interpreter, measured against stock.
+- M986: hosted Python aggregators and sources take GPU frames too, and every CUDA plane exports DLPack.
+- M985: `pyelement` declares the memory domain its frames arrive and leave in, and asks upstream for it.
+- M984: a hosted Python element reads a CUDA frame's NV12 planes through `__cuda_array_interface__`.
+- M987: `BurnInference` runs a multi-head attention topology imported from ONNX.
+- M983: `BurnInference` runs an ONNX topology imported by `burn-onnx` build-time codegen.
+- M981: `VelloTextOverlay` renders text cues on the GPU from the shared placement path.
+- M982: the ffmpeg decoder keeps a mid-stream framerate refinement instead of its 30/1 fallback.
+- M980: `g2g-launch --run-json` dumps per-edge caps observed at runtime.
+- M977: `PlaneLayout` meta lets the wgpu readback skip its row repack under demand.
+- M976: consumers declare meta demand on the allocation cascade, with per-meta policy.
+- M979: `g2g-launch --validate-json` dumps the negotiated graph (nodes + per-edge caps).
+- M972: MP4 demux carries DTS so a progressive B-frame remux keeps composition times.
+- M971: single-page Vorbis streams no longer lose their tail to the end-granule clamp.
+- M975: fan-in elements consent to a runtime input add; a refused add fails alone.
+- M974: broadcast-tee late-branch and payload-sharing assertions.
+- M978: windowed winit example driving `VelloAnalyticsOverlay -> WgpuSink`.
+- M973: architecture diagrams on the docs site.
+- M970: sources declare `CapsPreferences` costs over their produce set.
+- M969: `typefind` element sniffs a byte stream mid-graph and retypes its output.
+- M968: every public element type carries a rustdoc example block.
+- M967: `WebSocketSrc` detaches its socket callbacks on a failed push (freed-closure throw).
+- M966: V4L2 device discovery lists caps for every format `v4l2src` carries.
+- M965: `CapsPreferences` costs steer fixation to the least-cost chain assignment.
+- M964: `AutoplugParams` sets properties on auto-plugged elements by factory name.
+- M963: MPEG-2 picture user-data captions (ATSC A/53) feed `CcExtract`.
 - M962: str0m 0.22 (upstream now sends media unpadded), dropping the M709 `[patch.crates-io]` fork.
 
 - M961: `qtdemux stream=` names the video codec and a bare `decodebin` selects it from the file's `moov`, the MP4 analog of M960.

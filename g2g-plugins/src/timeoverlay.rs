@@ -608,6 +608,15 @@ pub(crate) const SHADED_PROP: PropertySpec = PropertySpec::new(
 )
 .with_default("true");
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::timeoverlay::{TimeMode, TimeOverlay};
+///
+/// let overlay = TimeOverlay::new()
+///     .with_time_mode(TimeMode::RunningTime)
+///     .with_scale(2);
+/// ```
 #[derive(Debug)]
 pub struct TimeOverlay {
     core: OverlayCore,

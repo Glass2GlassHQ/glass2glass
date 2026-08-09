@@ -149,6 +149,16 @@ pub enum PacingPolicy {
 /// What the sink-side struct holds between `process()` calls. We keep
 /// only `Send + Sync` handles here so the multi-thread runner can move
 /// us between executor tasks.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::waylandsink::{PacingPolicy, WaylandSink};
+///
+/// let sink = WaylandSink::new()
+///     .with_title("preview")
+///     .with_pacing(PacingPolicy::DropOldest);
+/// ```
 pub struct WaylandSink {
     title: String,
     app_id: String,

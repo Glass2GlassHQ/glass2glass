@@ -66,12 +66,13 @@ use crate::fanout::{
     DynMultiOutputSource, MultiInputElement, MultiOutputElement, MultiOutputSink,
     MultiOutputSource, MultiSenderSink, ReverseChannel,
 };
-use crate::format_element::CapsConstraint;
+use crate::format_element::{CapsConstraint, CapsPreferences};
 use crate::frame::{Frame, PipelinePacket};
 use crate::graph::{FanOutPolicy, Graph, NodeId, NodeKind, ValidatedGraph};
 use crate::memory::{DomainSet, MemoryDomainKind};
+use crate::meta::MetaRequests;
 use crate::property::{PropError, PropValue, PropertySpec};
-use crate::query::{AllocationParams, LatencyReport};
+use crate::query::{with_meta_demand, AllocationParams, LatencyReport};
 use crate::runtime::channel::{
     bounded, link, link_with_transit, LinkReceiver, LinkSender, Receiver, RecvFuture, Sender,
     SenderSink,
@@ -87,7 +88,7 @@ use crate::runtime::runner::{
     re_solve_downstream_dyn_sink, LinkCapacity, NullSink, RunStats, SourceLoop,
 };
 use crate::runtime::solver::{
-    graph_downstream_feasibility, resolve_forward_output, solve_graph_labeled, solve_linear,
+    graph_downstream_feasibility, resolve_forward_output, solve_graph_preferred, solve_linear,
     ForwardResolve, NegotiationFailure, NodeConstraint,
 };
 use crate::runtime::state::{Flow, StateController};
@@ -1142,11 +1143,13 @@ async fn prepare_graph<'a>(
     // so both are computed and the borrows released before configure.
     let (solution, feasibility): (Vec<Caps>, Vec<Option<CapsSet>>) = {
         let constraints = build_node_constraints(vg, &source_caps)?;
-        let solution = solve_graph_labeled(vg, &constraints, &|node| caps_label(vg, node))
-            .map_err(|f| {
-                report_nego_failure(bus, f);
-                G2gError::CapsMismatch
-            })?;
+        let preferences = build_node_preferences(vg);
+        let solution =
+            solve_graph_preferred(vg, &constraints, &preferences, &|node| caps_label(vg, node))
+                .map_err(|f| {
+                    report_nego_failure(bus, f);
+                    G2gError::CapsMismatch
+                })?;
         let feasibility = graph_downstream_feasibility(vg, &constraints, &solution);
         (solution, feasibility)
     };
@@ -1240,7 +1243,7 @@ async fn prepare_graph<'a>(
             NodeKind::Sink => {
                 let in_e = vg.in_edges(node)[0];
                 let caps = solution[in_e].clone();
-                edge_proposal[in_e] = element_propose(vg, node, &caps);
+                edge_proposal[in_e] = element_propose(vg, node, &caps, MetaRequests::new());
             }
             NodeKind::Transform => {
                 let in_e = vg.in_edges(node)[0];
@@ -1255,13 +1258,20 @@ async fn prepare_graph<'a>(
                     element_configure_alloc(vg, node, &p);
                 }
                 let caps = solution[out_e].clone();
-                edge_proposal[in_e] = element_propose(vg, node, &caps);
+                let downstream = edge_meta_requests(edge_proposal[out_e]);
+                edge_proposal[in_e] = element_propose(vg, node, &caps, downstream);
             }
             NodeKind::Tee(_) => {
                 let in_e = vg.in_edges(node)[0];
+                // The first branch seeds the join: a `None` from there on means a
+                // branch that asked for nothing, which is not the same as no
+                // branch yet (it vetoes a demand needing every consumer).
                 let mut joined: Option<AllocationParams> = None;
-                for &oe in vg.out_edges(node) {
-                    joined = join_alloc(joined, edge_proposal[oe])?;
+                for (i, &oe) in vg.out_edges(node).iter().enumerate() {
+                    joined = match i {
+                        0 => edge_proposal[oe],
+                        _ => join_alloc(joined, edge_proposal[oe])?,
+                    };
                 }
                 edge_proposal[in_e] = joined;
             }
@@ -1273,7 +1283,13 @@ async fn prepare_graph<'a>(
                     // proposal is what the source allocates and what `RunStats`
                     // reports.
                     let can = node_output_domains(vg, node);
-                    let resolved = p.resolve_for_producer(can)?;
+                    // A proposal carrying only metadata demand accepts every
+                    // domain, so reconciling it would let a metadata request pick
+                    // the source's memory domain: pass it through untouched.
+                    let resolved = match p.constrains_pool() {
+                        true => p.resolve_for_producer(can)?,
+                        false => p,
+                    };
                     if let GraphNodeRef::Source(src) =
                         vg.element_mut(node).ok_or(G2gError::CapsMismatch)?
                     {
@@ -1293,6 +1309,23 @@ async fn prepare_graph<'a>(
                 // muxer's own output edge proposal is not absorbed here: a container
                 // muxer's byte output has no memory-domain tie to its inputs, and a
                 // terminal fan-in has no output at all.
+                //
+                // M976: downstream *metadata* demand does cross the output, on its
+                // own, because it describes the frames the fan-in writes (a GPU
+                // compositor deciding whether to declare its row padding). Nothing
+                // is called when no demand was declared.
+                let out_demand = vg
+                    .out_edges(node)
+                    .first()
+                    .map(|&out_e| edge_meta_requests(edge_proposal[out_e]))
+                    .unwrap_or_default();
+                if !out_demand.is_empty() {
+                    if let Some(GraphNodeRef::Muxer(mux)) = vg.element_mut(node) {
+                        mux.configure_allocation_for_output(&AllocationParams::meta_demand(
+                            out_demand,
+                        ));
+                    }
+                }
                 if let Some(GraphNodeRef::Muxer(mux)) = vg.element(node) {
                     for &in_e in vg.in_edges(node) {
                         let pad = vg.edge(in_e).dst.index as usize;
@@ -2277,6 +2310,40 @@ impl GraphSpawner for ThreadSpawner {
     }
 }
 
+/// Each node's declared per-alternative costs, indexed by node id, for the
+/// solver's minimum-cost fixation. Source, transform and sink nodes declare
+/// them; a muxer / demux node is not part of a linear chain, which is the only
+/// topology the cost minimization covers. A source's costs index its produce
+/// set, which without them is read in its own order.
+fn build_node_preferences(vg: &ValidatedGraph<GraphNodeRef<'_>>) -> Vec<Option<CapsPreferences>> {
+    (0..vg.node_count())
+        .map(|i| {
+            let node = NodeId(i as u32);
+            match vg.kind(node) {
+                NodeKind::Source => source_ref(vg, node).and_then(|s| s.caps_preferences()),
+                NodeKind::Transform | NodeKind::Sink => {
+                    element_ref(vg, node).and_then(|e| e.caps_preferences())
+                }
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+/// View a node's payload as a source. `None` for any other node kind.
+fn source_ref<'g, 'a>(
+    vg: &'g ValidatedGraph<GraphNodeRef<'a>>,
+    node: NodeId,
+) -> Option<&'g (dyn DynSourceLoop + 'a)> {
+    match vg.element(node)? {
+        GraphNodeRef::Source(src) => Some(&**src),
+        GraphNodeRef::Element(_)
+        | GraphNodeRef::Muxer(_)
+        | GraphNodeRef::FanoutSource(_)
+        | GraphNodeRef::Demux(_) => None,
+    }
+}
+
 /// View a node's payload as a transform/sink element. `None` for a source or a
 /// muxer (whose constraints the runner builds from their own trait methods).
 fn element_ref<'g, 'a>(
@@ -2501,8 +2568,11 @@ pub async fn negotiate_graph_explained<'a>(
     let solution = {
         let constraints =
             build_node_constraints(&vg, &source_caps).map_err(NegotiateError::Setup)?;
-        solve_graph_labeled(&vg, &constraints, &|node| caps_label(&vg, node))
-            .map_err(NegotiateError::Solve)?
+        let preferences = build_node_preferences(&vg);
+        solve_graph_preferred(&vg, &constraints, &preferences, &|node| {
+            caps_label(&vg, node)
+        })
+        .map_err(NegotiateError::Solve)?
     };
 
     // Per-edge memory domain: the domain of the node producing onto that edge.
@@ -2556,16 +2626,28 @@ pub fn copy_plan(
 }
 
 /// A transform/sink node's allocation proposal from `caps` (its output-link caps
-/// for a transform, its input-link caps for a sink). `None` for other kinds.
+/// for a transform, its input-link caps for a sink), carrying the node's own meta
+/// requests plus `downstream`'s onward up the cascade (M976). `None` for other
+/// kinds.
 fn element_propose(
     vg: &ValidatedGraph<GraphNodeRef<'_>>,
     node: NodeId,
     caps: &Caps,
+    downstream: MetaRequests,
 ) -> Option<AllocationParams> {
     match vg.element(node) {
-        Some(GraphNodeRef::Element(elem)) => elem.propose_allocation(caps),
+        Some(GraphNodeRef::Element(elem)) => with_meta_demand(
+            elem.propose_allocation(caps),
+            elem.meta_requests().carry_upstream(downstream),
+        ),
         _ => None,
     }
+}
+
+/// The metadata demand an edge's stored proposal carries, empty when there is
+/// none.
+fn edge_meta_requests(proposal: Option<AllocationParams>) -> MetaRequests {
+    proposal.map(|p| p.meta_requests).unwrap_or_default()
 }
 
 /// The set of memory domains a node can emit (M351), for reconciling a
@@ -2617,15 +2699,25 @@ fn element_clock(vg: &ValidatedGraph<GraphNodeRef<'_>>, node: NodeId) -> Option<
 /// alignment, with a matching memory domain. Divergent domains are an empty
 /// intersection and fail loud with [`G2gError::AllocationConflict`] (no single
 /// pool can satisfy, say, a CUDA branch and a D3D11 branch at once).
+/// M976: a branch that proposes nothing still counts as a branch that requested
+/// nothing, so a demand needing every consumer dies against it; and a join left
+/// carrying neither pool constraints nor demand collapses back to `None`, so a
+/// died-out request leaves the cascade exactly as it found it.
 fn join_alloc(
     a: Option<AllocationParams>,
     b: Option<AllocationParams>,
 ) -> Result<Option<AllocationParams>, G2gError> {
-    match (a, b) {
-        (Some(x), Some(y)) => x.join(y).map(Some),
-        (Some(x), None) => Ok(Some(x)),
-        (None, b) => Ok(b),
-    }
+    let joined = match (a, b) {
+        (Some(x), Some(y)) => Some(x.join(y)?),
+        (Some(x), None) => {
+            Some(x.with_meta_requests(x.meta_requests.join_branches(MetaRequests::new())))
+        }
+        (None, Some(y)) => {
+            Some(y.with_meta_requests(y.meta_requests.join_branches(MetaRequests::new())))
+        }
+        (None, None) => None,
+    };
+    Ok(joined.filter(|p| p.constrains_pool() || !p.meta_requests.is_empty()))
 }
 
 /// Re-solve one muxer input pad against the boundary's new caps (MX-1).
@@ -2716,8 +2808,12 @@ async fn transform_arm<'a>(
     // upstream. The element's `process` is unaffected. M720 extends the same
     // hop to keyframe requests and bitrate targets when the element does not
     // consume them itself, so a PLI / BWE estimate crosses a parser between
-    // the encoder and a WebRTC sink.
-    adapter.relay_qos_to(in_rx.qos_slot());
+    // the encoder and a WebRTC sink. M997 does the same for QoS: an element
+    // that sheds work on a report (a decoder skipping non-reference frames)
+    // observes it instead.
+    if !elem.handles_qos() {
+        adapter.relay_qos_to(in_rx.qos_slot());
+    }
     if !elem.handles_keyframe_requests() {
         adapter.relay_reconfigure_to(in_rx.reconfigure_slot());
     }
@@ -2737,7 +2833,10 @@ async fn transform_arm<'a>(
                     // our output caps, and report it so the cascade continues to
                     // our upstream neighbour.
                     elem.configure_allocation(&params);
-                    let proposal = elem.propose_allocation(&out_caps);
+                    let proposal = with_meta_demand(
+                        elem.propose_allocation(&out_caps),
+                        elem.meta_requests().carry_upstream(params.meta_requests),
+                    );
                     coord
                         .report(Recascade {
                             node,
@@ -3063,7 +3162,10 @@ async fn sink_arm_loop<'a>(
                 match log_caps_rejected(instance, &sink_caps, elem.configure_pipeline(&sink_caps))?
                 {
                     ConfigureOutcome::Accepted => {
-                        let proposal = elem.propose_allocation(&sink_caps);
+                        let proposal = with_meta_demand(
+                            elem.propose_allocation(&sink_caps),
+                            elem.meta_requests(),
+                        );
                         if let Some(p) = &proposal {
                             elem.configure_allocation(p);
                         }

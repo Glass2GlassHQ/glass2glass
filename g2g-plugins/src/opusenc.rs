@@ -179,6 +179,16 @@ impl OpusAudioType {
 }
 
 /// Encodes raw interleaved S16LE PCM into an Opus elementary stream.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::opusenc::{OpusEnc, OpusFrameSize};
+///
+/// let encoder = OpusEnc::new()
+///     .with_bitrate(64_000)
+///     .with_frame_size(OpusFrameSize::Ms20);
+/// ```
 pub struct OpusEnc {
     channels: u8,
     bitrate: Bitrate,

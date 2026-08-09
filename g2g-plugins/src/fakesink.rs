@@ -27,6 +27,15 @@ pub struct CapsChange {
     pub frames_before: u64,
 }
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::fakesink::FakeSink;
+///
+/// let sink = FakeSink::new();
+/// assert_eq!(sink.received(), 0);
+/// assert!(!sink.eos_seen());
+/// ```
 #[derive(Debug, Default)]
 pub struct FakeSink {
     received: u64,

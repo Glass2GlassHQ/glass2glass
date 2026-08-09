@@ -122,6 +122,7 @@ fn decode_to_texture_then_present_zero_copy() {
         align: 1,
         domain: MemoryDomainKind::WgpuTexture,
         accepts: DomainSet::only(MemoryDomainKind::WgpuTexture),
+        ..Default::default()
     });
     let in_caps = Caps::CompressedVideo {
         codec: VideoCodec::H264,

@@ -18,52 +18,69 @@
 //! QoS (M85): when given a max-lateness bound, a frame whose deadline is
 //! already past by more than that bound is dropped rather than presented late,
 //! so the sink catches up instead of compounding the lag. The decision and its
-//! reporting live in the shared [`QosTracker`]: each drop posts a
+//! reporting live in the shared [`PresentationPacer`]: each drop posts a
 //! [`BusMessage::Qos`] to the pipeline bus if one was attached (the GStreamer
 //! `GST_MESSAGE_QOS` analog), and a report interval adds the same running stats
 //! periodically. Default behaviour is unchanged (no bound, no bus): every frame
 //! is presented after its deadline.
+//!
+//! Clock (M996): the sink is a display sink without a display, so it paces
+//! through the same [`PresentationPacer`] the real ones use and adopts the
+//! elected [`ClockSync`] when the runner hands one over: in an A/V graph whose
+//! audio sink provides the master `DriftClock`, presentation follows the audio
+//! timeline rather than this sink's own clock. Until then it paces on its own
+//! clock with the anchor pinned at zero, so a frame's deadline is its running
+//! time and the recorded drift is a real end-to-end latency reading. The own
+//! clock stays the timer either way (it is the only thing that can sleep in
+//! `no_std`); the elected clock only decides *when* each frame is due.
 
 use core::future::Future;
 use core::pin::Pin;
 
 use alloc::boxed::Box;
+use alloc::sync::Arc;
 
 use g2g_core::{
-    AsyncClock, AsyncElement, BusHandle, Caps, CapsConstraint, ConfigureOutcome, ElementBound,
-    G2gError, OutputSink, PipelinePacket, QosMessage, QosTracker, Segment,
+    AsyncClock, AsyncElement, BusHandle, Caps, CapsConstraint, ClockSync, ConfigureOutcome,
+    ElementBound, G2gError, OutputSink, Pace, PipelineClock, PipelinePacket, PresentationPacer,
+    PropError, PropValue, PropertySpec, QosMessage, PACING_PROPERTIES,
 };
 
 #[derive(Debug)]
 pub struct SyncSink<C: AsyncClock> {
-    clock: C,
+    /// The sink's own clock: the timer every frame is held on, and the timeline
+    /// deadlines are measured against until an elected clock replaces it.
+    clock: Arc<C>,
     received: u64,
     last_sequence: Option<u64>,
     eos_seen: bool,
     configured: bool,
     max_drift_ns: u64,
     total_drift_ns: u128,
-    /// QoS: the lateness bound, the drop count, and the bus reporting. The
-    /// default bound never drops, so the sink presents every frame however late,
-    /// preserving the pre-QoS behaviour.
-    qos: QosTracker,
-    /// The current playback segment, set from `PipelinePacket::Segment`. Maps a
-    /// frame's PTS to running time and clips frames outside it (the
-    /// decode-to-target frames after an accurate seek). `None` before any segment
-    /// arrives, where PTS is used directly as running time.
-    segment: Option<Segment>,
+    /// Deadline, segment mapping and QoS verdict, shared with the display sinks.
+    /// The default lateness bound never drops, so the sink presents every frame
+    /// however late, preserving the pre-QoS behaviour.
+    pacer: PresentationPacer,
+    /// Set once the runner hands over an elected [`ClockSync`]. On our own clock
+    /// deadlines are absolute (anchor pinned at zero) and a flush has nothing to
+    /// re-anchor; on an elected one they are anchored from the first frame, so a
+    /// seek must re-anchor or the target lands in the past.
+    elected_clock_adopted: bool,
     /// Frames dropped because they fell outside the segment (accurate-seek clip).
     clipped: u64,
     /// Non-keyframe frames dropped under a trick-mode (`key_units_only`) segment.
     trick_dropped: u64,
-    /// QoS signal pending delivery upstream (M174): set when a late frame is
-    /// dropped, consumed by the runner via [`take_qos`](AsyncElement::take_qos)
-    /// and forwarded onto the incoming link so the source can shed load.
-    pending_qos: Option<QosMessage>,
 }
 
-impl<C: AsyncClock> SyncSink<C> {
+impl<C: AsyncClock + Send + Sync + 'static> SyncSink<C> {
     pub fn new(clock: C) -> Self {
+        let clock = Arc::new(clock);
+        let mut pacer = PresentationPacer::new();
+        // Pace on our own clock until election says otherwise, with deadlines
+        // absolute from running-time zero rather than anchored on the first
+        // frame: that is what makes the drift readings end-to-end latency.
+        pacer.set_clock_sync(ClockSync::new(clock.clone(), 0));
+        pacer.set_anchor_ns(0);
         Self {
             clock,
             received: 0,
@@ -72,11 +89,10 @@ impl<C: AsyncClock> SyncSink<C> {
             configured: false,
             max_drift_ns: 0,
             total_drift_ns: 0,
-            qos: QosTracker::new(),
-            segment: None,
+            pacer,
+            elected_clock_adopted: false,
             clipped: 0,
             trick_dropped: 0,
-            pending_qos: None,
         }
     }
 
@@ -84,7 +100,7 @@ impl<C: AsyncClock> SyncSink<C> {
     /// `ns` is dropped instead of presented late. `0` drops any frame that
     /// arrives after its deadline.
     pub fn with_max_lateness_ns(mut self, ns: u64) -> Self {
-        self.qos.set_max_lateness_ns(ns);
+        self.pacer.set_max_lateness_ns(ns);
         self
     }
 
@@ -92,13 +108,13 @@ impl<C: AsyncClock> SyncSink<C> {
     /// flow, on top of the per-drop reports. `0` (the default) reports only
     /// drops.
     pub fn with_qos_interval_ns(mut self, ns: u64) -> Self {
-        self.qos.set_report_interval_ns(ns);
+        self.pacer.set_report_interval_ns(ns);
         self
     }
 
     /// Attach the pipeline bus so QoS reports reach the application.
     pub fn with_bus(mut self, bus: BusHandle) -> Self {
-        self.qos.set_bus(bus);
+        self.pacer.set_bus(bus);
         self
     }
 
@@ -106,9 +122,23 @@ impl<C: AsyncClock> SyncSink<C> {
         self.received
     }
 
+    /// The clock + base time presentation is paced against: the elected
+    /// [`ClockSync`] once the runner hands one over, otherwise this sink's own
+    /// clock at base time zero.
+    pub fn clock_sync(&self) -> Option<&ClockSync> {
+        self.pacer.clock_sync()
+    }
+
+    /// Whether the runner handed over an elected clock, so presentation follows
+    /// the pipeline's master timeline (the audio `DriftClock` in an A/V graph)
+    /// rather than this sink's own clock.
+    pub fn slaved_to_elected_clock(&self) -> bool {
+        self.elected_clock_adopted
+    }
+
     /// Frames dropped because they arrived too late under the QoS bound.
     pub fn dropped(&self) -> u64 {
-        self.qos.dropped()
+        self.pacer.late_dropped()
     }
 
     /// Non-keyframe frames dropped under a trick-mode (`key_units_only`) segment.
@@ -146,11 +176,20 @@ impl<C: AsyncClock> SyncSink<C> {
                 .unwrap_or(u64::MAX)
         }
     }
+
+    /// Current time on the timeline deadlines are measured against: the elected
+    /// clock once adopted, otherwise our own.
+    fn timeline_now_ns(&self) -> u64 {
+        match self.pacer.clock_sync() {
+            Some(sync) => sync.now_ns(),
+            None => self.clock.now_ns(),
+        }
+    }
 }
 
 impl<C> AsyncElement for SyncSink<C>
 where
-    C: AsyncClock + ElementBound,
+    C: AsyncClock + ElementBound + Send + Sync + 'static,
 {
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
@@ -186,38 +225,39 @@ where
                     // Trick-mode KEY_UNIT: under a `key_units_only` segment, present
                     // only keyframes (fast scrub), dropping dependent frames before
                     // the deadline math so they are never scheduled.
-                    if self.segment.as_ref().is_some_and(|s| s.key_units_only) && !f.timing.keyframe
+                    if self
+                        .pacer
+                        .segment()
+                        .is_some_and(|seg| seg.key_units_only && !f.timing.keyframe)
                     {
                         self.trick_dropped += 1;
                         return Ok(());
                     }
-                    // Map PTS to running time through the segment; a frame outside
-                    // it (the decoded frames before an accurate-seek target) is
-                    // clipped. Without a segment, PTS is the running time directly.
-                    let deadline = match &self.segment {
-                        Some(seg) => match seg.to_running_time(pts) {
-                            Some(rt) => rt,
-                            None => {
-                                self.clipped += 1;
-                                return Ok(());
-                            }
-                        },
-                        None => pts,
+                    // The deadline maps PTS to running time through the segment
+                    // (PTS directly when there is none) and adds the anchor. `None`
+                    // means the frame is outside the segment, ie one of the decoded
+                    // frames before an accurate-seek target: clip it.
+                    let Some(deadline) = self.pacer.deadline_ns(pts) else {
+                        self.clipped += 1;
+                        return Ok(());
                     };
                     // QoS: a frame already past its deadline by more than the
                     // bound is dropped, not presented late, so the sink catches
-                    // up. The same call posts the periodic running-stats report
-                    // when a frame is on time and the interval has elapsed.
-                    let now = self.clock.now_ns();
-                    if let Some(q) = self.qos.judge_frame(deadline, now, self.received) {
-                        // M174: signal the same lateness upstream so the source /
-                        // decoder sheds load. The runner picks this up via
-                        // `take_qos` after `process` and forwards it.
-                        self.pending_qos = Some(q);
-                        return Ok(());
-                    }
-                    self.clock.sleep_until_ns(deadline).await;
-                    let drift = self.clock.now_ns().saturating_sub(deadline);
+                    // up, and the same lateness travels upstream via `take_qos`
+                    // so the source / decoder sheds load (M174). The same call
+                    // posts the periodic running-stats report when a frame is on
+                    // time and the interval has elapsed.
+                    let wait_ns = match self.pacer.judge(pts, self.received) {
+                        Pace::Now => 0,
+                        Pace::Wait(ns) => ns,
+                        Pace::Drop => return Ok(()),
+                    };
+                    // The wait is relative because the deadline may be on the
+                    // elected clock, while our own clock is the timer.
+                    self.clock
+                        .sleep_until_ns(self.clock.now_ns().saturating_add(wait_ns))
+                        .await;
+                    let drift = self.timeline_now_ns().saturating_sub(deadline);
                     self.max_drift_ns = self.max_drift_ns.max(drift);
                     self.total_drift_ns = self.total_drift_ns.saturating_add(u128::from(drift));
                     self.last_sequence = Some(f.sequence);
@@ -231,10 +271,13 @@ where
                     // cleanly at the post-seek timeline. The post-flush Segment
                     // that follows installs the new running-time mapping.
                     self.last_sequence = None;
+                    if self.elected_clock_adopted {
+                        self.pacer.flush();
+                    }
                 }
                 PipelinePacket::CapsChanged(_) => {}
                 PipelinePacket::Segment(seg) => {
-                    self.segment = Some(seg);
+                    self.pacer.set_segment(seg);
                 }
                 // future PipelinePacket variants: no-op (terminal sink).
                 _ => {}
@@ -243,8 +286,30 @@ where
         })
     }
 
+    /// Adopt the elected clock + base time, so presentation follows the
+    /// pipeline's master timeline (in an A/V graph, the audio sink's
+    /// `DriftClock`) instead of this sink's own clock.
+    fn set_clock_sync(&mut self, sync: ClockSync) {
+        self.pacer.set_clock_sync(sync);
+        self.elected_clock_adopted = true;
+    }
+
     fn take_qos(&mut self) -> Option<QosMessage> {
-        self.pending_qos.take()
+        self.pacer.take_qos()
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        PACING_PROPERTIES
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        self.pacer
+            .set_property(name, &value)
+            .unwrap_or(Err(PropError::Unknown))
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        self.pacer.get_property(name)
     }
 }
 
@@ -252,9 +317,10 @@ where
 mod tests {
     use super::*;
     use core::future::Ready;
+    use core::sync::atomic::{AtomicU64, Ordering};
     use g2g_core::frame::Frame;
     use g2g_core::memory::SystemSlice;
-    use g2g_core::{FrameTiming, MemoryDomain, PushOutcome, Seek, SeekFlags, SeekType};
+    use g2g_core::{FrameTiming, MemoryDomain, PushOutcome, Seek, SeekFlags, SeekType, Segment};
 
     /// A clock fixed at 0 whose sleep resolves immediately (the deadline is in the
     /// future of `now == 0`, so no QoS drop fires and no real wait happens).
@@ -368,6 +434,53 @@ mod tests {
         assert_eq!(sink.received(), 2, "only the two keyframes are presented");
         assert_eq!(sink.trick_dropped(), 2, "the dependent frames are dropped");
         assert_eq!(sink.last_sequence(), Some(3));
+    }
+
+    /// The pipeline's elected master clock, moved by hand (an audio `DriftClock`
+    /// in a real A/V graph).
+    #[derive(Debug)]
+    struct ElectedClock(Arc<AtomicU64>);
+    impl g2g_core::PipelineClock for ElectedClock {
+        fn now_ns(&self) -> u64 {
+            self.0.load(Ordering::Relaxed)
+        }
+    }
+
+    /// M996: once the runner hands over the elected `ClockSync`, deadlines are
+    /// measured on *that* timeline. The sink's own clock is stuck at 0, so
+    /// nothing could ever be late on it; the late drop below can only come from
+    /// the elected clock's reading.
+    #[tokio::test]
+    async fn adopting_the_elected_clock_moves_deadlines_onto_its_timeline() {
+        let elected = Arc::new(AtomicU64::new(5_000_000_000));
+        let mut sink = SyncSink::new(InstantClock).with_max_lateness_ns(0);
+        sink.configure_pipeline(&Caps::ByteStream {
+            encoding: g2g_core::ByteStreamEncoding::Ogg,
+        })
+        .unwrap();
+        AsyncElement::set_clock_sync(
+            &mut sink,
+            ClockSync::new(Arc::new(ElectedClock(elected.clone())), 5_000_000_000),
+        );
+        assert!(sink.slaved_to_elected_clock());
+        let mut out = NullSink;
+
+        // First frame anchors on the elected clock's epoch, so it is on time.
+        sink.process(frame(0, 0), &mut out).await.unwrap();
+        // 40 ms of PTS later with the elected clock 40 ms on: still on time.
+        elected.store(5_040_000_000, Ordering::Relaxed);
+        sink.process(frame(40_000_000, 1), &mut out).await.unwrap();
+        // The elected clock jumps 120 ms past the next frame's deadline.
+        elected.store(5_200_000_000, Ordering::Relaxed);
+        sink.process(frame(80_000_000, 2), &mut out).await.unwrap();
+
+        assert_eq!(sink.received(), 2, "the two on-time frames presented");
+        assert_eq!(sink.dropped(), 1, "the late one dropped");
+        assert_eq!(
+            AsyncElement::take_qos(&mut sink).map(|q| q.jitter_ns),
+            Some(120_000_000),
+            "lateness measured on the elected timeline travels upstream"
+        );
     }
 
     #[tokio::test]

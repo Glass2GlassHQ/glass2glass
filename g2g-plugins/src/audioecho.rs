@@ -77,6 +77,15 @@ fn delay_frames(delay_ns: u64, sample_rate: u32) -> usize {
     ((delay_ns as u128 * sample_rate as u128) / 1_000_000_000u128) as usize
 }
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::audioecho::AudioEcho;
+///
+/// let echo = AudioEcho::new()
+///     .with_delay(200_000_000)
+///     .with_intensity(0.4);
+/// ```
 #[derive(Debug)]
 pub struct AudioEcho {
     delay_ns: u64,

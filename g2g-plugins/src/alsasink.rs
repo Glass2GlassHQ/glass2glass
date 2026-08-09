@@ -61,6 +61,15 @@ enum WorkerCmd {
     Shutdown,
 }
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::alsasink::AlsaSink;
+///
+/// // gst-launch equivalent: alsasink device=hw:0,0
+/// let sink = AlsaSink::with_device("hw:0,0");
+/// assert_eq!(sink.frames_rendered(), 0);
+/// ```
 pub struct AlsaSink {
     device: String,
     /// Bounded, non-blocking link to the device thread. The executor is

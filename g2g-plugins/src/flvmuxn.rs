@@ -59,6 +59,15 @@ enum TrackInit {
 }
 
 /// Muxes a video + audio stream into one FLV byte stream, PTS-ordered.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::flvmuxn::FlvMuxN;
+///
+/// let mux = FlvMuxN::new(2);
+/// assert_eq!(mux.emitted(), 0);
+/// ```
 #[derive(Debug)]
 pub struct FlvMuxN {
     inputs: usize,

@@ -61,6 +61,13 @@ impl CutterState {
     }
 }
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::cutter::Cutter;
+///
+/// let element = Cutter::new().with_threshold(0.01);
+/// ```
 #[derive(Debug)]
 pub struct Cutter {
     threshold: f64,

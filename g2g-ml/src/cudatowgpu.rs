@@ -50,6 +50,15 @@ fn nv12_any() -> CapsSet {
 }
 
 /// CUDA NV12 -> wgpu external-memory texture bridge. See the module docs.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_ml::cudatowgpu::CudaToWgpu;
+///
+/// let bridge = CudaToWgpu::new();
+/// assert_eq!(bridge.converted(), 0);
+/// ```
 #[derive(Debug, Default)]
 pub struct CudaToWgpu {
     configured: bool,

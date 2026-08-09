@@ -62,6 +62,13 @@ impl FlipMethod {
     }
 }
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::videoflip::{FlipMethod, VideoFlip};
+///
+/// let flip = VideoFlip::new(FlipMethod::Rotate90Cw);
+/// ```
 #[derive(Debug)]
 pub struct VideoFlip {
     method: FlipMethod,

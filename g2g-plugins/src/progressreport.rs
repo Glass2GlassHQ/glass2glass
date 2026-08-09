@@ -19,6 +19,14 @@ use g2g_core::{
     OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::progressreport::ProgressReport;
+///
+/// let report = ProgressReport::new();
+/// assert_eq!(report.frames(), 0);
+/// ```
 #[derive(Debug)]
 pub struct ProgressReport {
     update_freq_s: i64,

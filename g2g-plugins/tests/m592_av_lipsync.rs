@@ -6,8 +6,8 @@
 //!
 //! 1. `audio_clock_is_elected_and_handed_to_the_video_sink` runs a real two-arm
 //!    graph through `run_graph` (an audio arm whose sink provides a disciplined
-//!    `DriftClock` at `AudioProvider`, a video arm whose sink provides a plain
-//!    `Provider` and adopts whatever `ClockSync` the runner delivers) and asserts
+//!    `DriftClock` at `AudioProvider`, a video arm whose source provides a plain
+//!    `Provider` clock and whose sink is the real headless `SyncSink`) and asserts
 //!    the runner elects the audio clock and hands *that* clock to the video sink,
 //!    so the video sink is slaved to the audio timeline, not wall time.
 //!
@@ -22,16 +22,17 @@ use core::future::{ready, Ready};
 use core::pin::Pin;
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use g2g_core::frame::{Frame, FrameTiming};
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{run_graph, GraphNodeRef, SourceLoop};
 use g2g_core::{
-    graph::Graph, AsyncElement, AudioFormat, Caps, ClockCandidate, ClockPriority, ClockSync,
+    graph::Graph, AsyncClock, AsyncElement, AudioFormat, Caps, ClockCandidate, ClockPriority,
     ConfigureOutcome, Dim, DriftClock, G2gError, MemoryDomain, MonotonicClock, OutputSink,
     PipelineClock, PipelinePacket, Rate, RawVideoFormat,
 };
+use g2g_plugins::syncsink::SyncSink;
 
 /// A monotonic clock the test advances by hand, standing in for the system
 /// clock the audio DAC (and the drift fit) are measured against.
@@ -78,9 +79,29 @@ const AUDIO: fn() -> Caps = || Caps::Audio {
     sample_rate: 48_000,
 };
 
-/// Source: emit two frames of `caps` then EOS.
+/// The timer the video sink holds frames on: reads zero and never really
+/// sleeps, so the graph completes instantly. Presentation deadlines come from
+/// the elected clock, not from this.
+#[derive(Debug)]
+struct InstantClock;
+impl PipelineClock for InstantClock {
+    fn now_ns(&self) -> u64 {
+        0
+    }
+}
+impl AsyncClock for InstantClock {
+    type SleepFuture<'a> = Ready<()>;
+    fn sleep_until_ns(&self, _deadline_ns: u64) -> Ready<()> {
+        ready(())
+    }
+}
+
+/// Source: emit two frames of `caps` then EOS. `clock_priority` offers a plain
+/// monotonic clock to election at that tier, so the video arm has a contender
+/// the audio master has to beat.
 struct EmitSrc {
     caps: Caps,
+    clock_priority: Option<ClockPriority>,
 }
 impl SourceLoop for EmitSrc {
     type RunFuture<'a>
@@ -97,6 +118,11 @@ impl SourceLoop for EmitSrc {
     }
     fn configure_pipeline(&mut self, _caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         Ok(ConfigureOutcome::Accepted)
+    }
+    fn provide_clock(&self) -> Option<ClockCandidate> {
+        let clock: Arc<dyn PipelineClock + Send + Sync> = Arc::new(MonotonicClock);
+        self.clock_priority
+            .map(|priority| ClockCandidate::new(priority, clock))
     }
     fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a> {
         Box::pin(async move {
@@ -144,43 +170,6 @@ impl AsyncElement for AudioMasterSink {
     }
 }
 
-/// The elected clock and base time a sink was handed, captured for the test.
-type ElectedClock = (Arc<dyn PipelineClock + Send + Sync>, u64);
-
-/// Video sink standing in for a display sink: offers its own monotonic clock at
-/// the plain `Provider` tier (which must lose to audio), and adopts whatever
-/// `ClockSync` the runner elects, stashing the elected clock + base time so the
-/// test can confirm it was slaved to the audio master.
-struct RecordingVideoSink {
-    got: Arc<Mutex<Option<ElectedClock>>>,
-}
-impl AsyncElement for RecordingVideoSink {
-    type ProcessFuture<'a>
-        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
-    where
-        Self: 'a;
-    fn intercept_caps(&self, upstream: &Caps) -> Result<Caps, G2gError> {
-        Ok(upstream.clone())
-    }
-    fn configure_pipeline(&mut self, _caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        Ok(ConfigureOutcome::Accepted)
-    }
-    fn provide_clock(&self) -> Option<ClockCandidate> {
-        let clock: Arc<dyn PipelineClock + Send + Sync> = Arc::new(MonotonicClock);
-        Some(ClockCandidate::new(ClockPriority::Provider, clock))
-    }
-    fn set_clock_sync(&mut self, sync: ClockSync) {
-        *self.got.lock().unwrap() = Some((sync.clock.clone(), sync.base_time_ns));
-    }
-    fn process<'a>(
-        &'a mut self,
-        _packet: PipelinePacket,
-        _out: &'a mut dyn OutputSink,
-    ) -> Self::ProcessFuture<'a> {
-        Box::pin(async { Ok(()) })
-    }
-}
-
 #[tokio::test]
 async fn audio_clock_is_elected_and_handed_to_the_video_sink() {
     let (audio_clock, manual) = disciplined_drift_clock(1.001);
@@ -188,41 +177,56 @@ async fn audio_clock_is_elected_and_handed_to_the_video_sink() {
     manual.set(2_000_000_000);
     let expected_base = audio_clock.now_ns();
 
-    let got = Arc::new(Mutex::new(None));
-    let mut g: Graph<GraphNodeRef<'static>> = Graph::new();
+    // The real headless presentation sink on the video arm: it holds its own
+    // clock as a timer but adopts whatever the pipeline elects for deadlines.
+    let mut vsink = SyncSink::new(InstantClock);
+    assert!(
+        !vsink.slaved_to_elected_clock(),
+        "before the run it paces on its own clock"
+    );
 
-    // Audio arm: source -> clock-providing sink (the master).
-    let asrc = g.add_source(GraphNodeRef::source(EmitSrc { caps: AUDIO() }));
-    let asink = g.add_sink(GraphNodeRef::element(AudioMasterSink {
-        clock: audio_clock.clone(),
-    }));
-    g.link(asrc, asink).unwrap();
+    let stats = {
+        let mut g: Graph<GraphNodeRef> = Graph::new();
 
-    // Video arm: source -> recording sink that adopts the elected clock.
-    let vsrc = g.add_source(GraphNodeRef::source(EmitSrc { caps: VIDEO() }));
-    let vsink = g.add_sink(GraphNodeRef::element(RecordingVideoSink {
-        got: got.clone(),
-    }));
-    g.link(vsrc, vsink).unwrap();
+        // Audio arm: source -> clock-providing sink (the master).
+        let asrc = g.add_source(GraphNodeRef::source(EmitSrc {
+            caps: AUDIO(),
+            clock_priority: None,
+        }));
+        let asink = g.add_sink(GraphNodeRef::element(AudioMasterSink {
+            clock: audio_clock.clone(),
+        }));
+        g.link(asrc, asink).unwrap();
 
-    let stats = run_graph(g, &ManualClock::default(), 4)
-        .await
-        .expect("graph runs");
+        // Video arm: a source offering a plain `Provider` clock (which must lose
+        // to audio) -> the sink that adopts the elected one.
+        let vsrc = g.add_source(GraphNodeRef::source(EmitSrc {
+            caps: VIDEO(),
+            clock_priority: Some(ClockPriority::Provider),
+        }));
+        let vnode = g.add_sink(GraphNodeRef::element_ref(&mut vsink));
+        g.link(vsrc, vnode).unwrap();
 
-    // Audio outranks the video sink's Provider clock.
+        run_graph(g, &ManualClock::default(), 4)
+            .await
+            .expect("graph runs")
+    };
+
+    // Audio outranks the video arm's Provider clock.
     assert_eq!(
         stats.clock_priority,
         ClockPriority::AudioProvider,
         "the audio sink's clock is elected master"
     );
 
-    let (elected, base) = got
-        .lock()
-        .unwrap()
-        .clone()
-        .expect("video sink got a ClockSync");
+    assert_eq!(vsink.received(), 2, "the video sink presented both frames");
+    assert!(
+        vsink.slaved_to_elected_clock(),
+        "the runner handed the video sink the elected clock"
+    );
+    let sync = vsink.clock_sync().expect("video sink got a ClockSync");
     assert_eq!(
-        base, expected_base,
+        sync.base_time_ns, expected_base,
         "video sink's base time is the audio clock's reading"
     );
 
@@ -231,12 +235,12 @@ async fn audio_clock_is_elected_and_handed_to_the_video_sink() {
     // audio timeline (drifted), not raw wall time.
     manual.set(5_000_000_000);
     assert_eq!(
-        elected.now_ns(),
+        sync.now_ns(),
         audio_clock.now_ns(),
         "video sink is slaved to the audio drift clock",
     );
     assert_ne!(
-        elected.now_ns(),
+        sync.now_ns(),
         manual.now_ns(),
         "and that timeline is the drifted audio one, not wall time",
     );

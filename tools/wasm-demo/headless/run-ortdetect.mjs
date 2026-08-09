@@ -131,9 +131,7 @@ async function main() {
   if (!hasWebCodecs) fail("browser lacks WebCodecs (use a full Chromium, not headless_shell)");
 
   // Finite source: stop feeding after one fixture pass so the chain reaches EOS
-  // and finishes cleanly. (An unbounded source that keeps feeding while every
-  // frame awaits ort-web trips a separate wasm async-runtime reentrancy; see the
-  // Browser/Wasm follow-up in DESIGN_TODO.)
+  // and finishes cleanly. (repro-unbounded.mjs covers the unbounded case.)
   setTimeout(() => { try { wsProc?.kill("SIGKILL"); } catch {} log("finite source: stopped ws feed"); }, 1100);
 
   const t0 = Date.now();

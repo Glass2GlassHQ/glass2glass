@@ -17,20 +17,32 @@
 //!
 //! PTP uses privileged ports (319 / 320), so this needs `CAP_NET_BIND_SERVICE`
 //! (typically root) and a reachable grandmaster (`ptp4l -m` or a hardware GM) on
-//! the network. It binds the ports exclusively, so it replaces `ptp4l` rather
-//! than co-existing with it (co-running on one host would need `SO_REUSEPORT`, a
-//! later enhancement). Not in scope: BMCA / Announce (it follows whatever master
-//! sends Sync on its domain), peer-delay, unicast, hardware timestamping.
+//! the network. Not in scope: BMCA / Announce (it follows whatever master sends
+//! Sync on its domain), peer-delay, unicast, hardware timestamping.
+//!
+//! ## Sharing the ports with `ptp4l`
+//!
+//! The sockets set `SO_REUSEADDR` + `SO_REUSEPORT`, so this can run alongside a
+//! `ptp4l` (which sets `SO_REUSEADDR`) or a second `PtpClient` on the same host.
+//! Every socket sharing a port gets its own copy of each multicast datagram, so
+//! both stacks see the master's Sync / Follow_Up / Delay_Resp. A *unicast*
+//! datagram is delivered to only one of them, so against a master that answers
+//! Delay_Req by unicast (hybrid E2E) the reply can land in the other stack and
+//! this client never completes an exchange. The kernel also only shares a port
+//! between `SO_REUSEPORT` sockets of the same effective UID, which holds here
+//! since both stacks need root for 319 / 320.
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use std::io;
-use std::net::{Ipv4Addr, UdpSocket};
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use alloc::vec::Vec;
+
+use socket2::{Domain, Protocol, Socket, Type};
 
 use g2g_core::metrics::monotonic_ns;
 use g2g_core::ptp::wire;
@@ -148,13 +160,20 @@ impl Drop for PtpClient {
     }
 }
 
-/// Bind `0.0.0.0:port`, join the PTP multicast group, and set a read timeout so
-/// the reader loop can poll the stop flag.
+/// Bind `0.0.0.0:port` sharing the port with any other PTP stack on the host,
+/// join the PTP multicast group, and set a read timeout so the reader loop can
+/// poll the stop flag. Both reuse options have to be set before the bind, which
+/// is why this goes through `socket2` rather than `UdpSocket::bind`.
 fn bind_multicast(port: u16) -> io::Result<UdpSocket> {
-    let sock = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, port))?;
+    let sock = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
+    // SO_REUSEADDR is the one ptp4l sets, SO_REUSEPORT the one another PtpClient
+    // sets; a bind only shares the port when every socket agrees.
+    sock.set_reuse_address(true)?;
+    sock.set_reuse_port(true)?;
+    sock.bind(&SocketAddr::from(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port)).into())?;
     sock.join_multicast_v4(&PTP_PRIMARY, &Ipv4Addr::UNSPECIFIED)?;
     sock.set_read_timeout(Some(Duration::from_millis(200)))?;
-    Ok(sock)
+    Ok(sock.into())
 }
 
 /// Receive-and-dispatch loop for one socket. `recv` is the socket to read;
@@ -202,8 +221,40 @@ fn reader_loop(
 
 /// A locally-administered clock identity for this process. Not a real
 /// EUI-64/MAC-derived id (that needs an interface query); unique enough for a
-/// SLAVE, which only needs the master to echo it back in Delay_Resp.
-fn local_clock_id() -> [u8; 8] {
+/// SLAVE, which only needs the master to echo it back in Delay_Resp, and for the
+/// management client in `ptp4l`, which only echoes it in a response header.
+pub(crate) fn local_clock_id() -> [u8; 8] {
     let pid = std::process::id().to_be_bytes();
     [0xfe, 0xff, 0x00, pid[0], pid[1], pid[2], pid[3], 0x01]
+}
+
+#[cfg(test)]
+mod tests {
+    use std::eprintln;
+
+    use super::*;
+
+    /// Unprivileged stand-in for 319 / 320: the reuse behaviour is a socket
+    /// property, so it does not depend on the PTP port numbers.
+    const SHARED_BIND_TEST_PORT: u16 = 31_988;
+
+    /// Two PTP sockets share one port (this is what lets a `PtpClient` run next to
+    /// `ptp4l`), and a socket without the reuse options still cannot take it.
+    #[test]
+    fn ptp_sockets_share_a_port() {
+        let Ok(first) = bind_multicast(SHARED_BIND_TEST_PORT) else {
+            eprintln!("skip: cannot bind / join multicast on this host");
+            return;
+        };
+        let second = bind_multicast(SHARED_BIND_TEST_PORT)
+            .expect("a second PTP socket should share the port");
+        assert_eq!(
+            first.local_addr().unwrap().port(),
+            second.local_addr().unwrap().port()
+        );
+        assert!(
+            UdpSocket::bind((Ipv4Addr::UNSPECIFIED, SHARED_BIND_TEST_PORT)).is_err(),
+            "sharing takes the reuse options, a plain bind must still be refused"
+        );
+    }
 }

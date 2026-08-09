@@ -64,6 +64,14 @@ const DEFAULT_LATENCY_US: u32 = 10_000;
 /// frames is ~21 s at 48 kHz, far past any real period.
 const MAX_PERIOD_FRAMES: usize = 1 << 20;
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::alsasrc::AlsaSrc;
+///
+/// // gst-launch equivalent: alsasrc device=hw:0 ! ...
+/// let source = AlsaSrc::new().with_device("hw:0").with_rate(48_000);
+/// ```
 #[derive(Debug)]
 pub struct AlsaSrc {
     device: String,

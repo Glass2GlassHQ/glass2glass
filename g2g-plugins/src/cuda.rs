@@ -43,6 +43,15 @@ use g2g_core::{
 
 /// Pass-through transform that copies CUDA device-memory NV12 frames to
 /// system memory. See the module docs.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::cuda::CudaDownload;
+///
+/// let download = CudaDownload::new();
+/// assert_eq!(download.downloaded(), 0);
+/// ```
 #[derive(Debug, Default)]
 pub struct CudaDownload {
     configured: bool,
@@ -226,6 +235,15 @@ impl CudaKeepAlive for DevAlloc {}
 /// upload's System input has no context, so this element creates and owns its
 /// own CUDA context at configure and tears it down once every uploaded frame is
 /// released.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::cuda::CudaUpload;
+///
+/// let upload = CudaUpload::new();
+/// assert_eq!(upload.uploaded(), 0);
+/// ```
 #[derive(Debug, Default)]
 pub struct CudaUpload {
     configured: bool,

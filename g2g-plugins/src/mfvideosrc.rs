@@ -155,6 +155,16 @@ enum DeviceSelector {
     SymbolicLink(String),
 }
 
+/// # Example
+///
+/// ```ignore
+/// use g2g_plugins::mfvideosrc::{MfPixelFormat, MfVideoSrc};
+///
+/// let source = MfVideoSrc::new()
+///     .with_device_index(0)
+///     .with_format(MfPixelFormat::Nv12)
+///     .with_frame_limit(300);
+/// ```
 #[derive(Debug)]
 pub struct MfVideoSrc {
     device_index: u32,

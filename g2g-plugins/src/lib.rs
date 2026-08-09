@@ -961,6 +961,12 @@ pub mod kmssink;
 #[cfg(all(target_os = "linux", feature = "ptp"))]
 pub mod ptpsystemclock;
 
+// ptp4l management-socket query (M998): asks a local linuxptp for its port states
+// and offset from master, so PtpSystemClock can tell real grandmaster lock from a
+// readable CLOCK_TAI. Linux-only, `ptp` feature.
+#[cfg(all(target_os = "linux", feature = "ptp"))]
+pub mod ptp4l;
+
 // In-process software PTP client (M594): speaks PTP over UDP (SLAVE mode) and
 // disciplines a g2g-core PtpClock itself, so an endpoint without an OS PTP
 // daemon can lock to a grandmaster. Needs privileged ports + a grandmaster; see
@@ -974,8 +980,8 @@ pub mod ptpclient;
 #[cfg(all(target_os = "linux", feature = "v4l2"))]
 pub mod v4l2src;
 
-// V4L2 device discovery: enumerates /dev/videoN capture nodes with their
-// probed YUYV modes for the device monitor.
+// V4L2 device discovery: enumerates /dev/videoN capture nodes with the probed
+// modes of every format v4l2src carries, for the device monitor.
 #[cfg(all(target_os = "linux", feature = "v4l2"))]
 pub mod v4l2device;
 

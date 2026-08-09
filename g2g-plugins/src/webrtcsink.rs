@@ -131,6 +131,16 @@ impl Track {
 }
 
 /// WHIP-publishing WebRTC egress sink. See the module docs.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::webrtcsink::WebRtcSink;
+///
+/// let sink = WebRtcSink::new("http://localhost:8889/mystream/whip")
+///     .with_bearer("secret-token")
+///     .with_stun_server("stun.l.google.com:19302");
+/// ```
 pub struct WebRtcSink {
     whip_url: String,
     bearer: Option<String>,

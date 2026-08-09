@@ -108,6 +108,7 @@ impl MultiDomainSink {
             align: 1,
             domain: self.prefer,
             accepts: self.accepts,
+            ..Default::default()
         }
     }
 }

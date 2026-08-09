@@ -262,6 +262,14 @@ fn video_alternatives() -> CapsSet {
 ///
 /// Frame timestamps are stream-relative, MISP time is absolute, so
 /// `epoch-offset` supplies the UNIX-epoch microsecond that PTS 0 maps to.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::misptime::MispTimeInsert;
+///
+/// let insert = MispTimeInsert::new().with_epoch_offset_us(1_700_000_000_000_000);
+/// ```
 #[derive(Debug)]
 pub struct MispTimeInsert {
     /// Input codec, fixed at `configure_pipeline`; selects the SEI framing.
@@ -436,6 +444,14 @@ impl PadTemplates for MispTimeInsert {
 /// video and telemetry branches read alike. A branch leaf like
 /// [`CcExtract`](crate::ccextract::CcExtract): tee the parser output, one branch
 /// to the decoder and the other here.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::misptime::MispTimeExtract;
+///
+/// let extract = MispTimeExtract::new();
+/// ```
 #[derive(Debug)]
 pub struct MispTimeExtract {
     codec: Option<VideoCodec>,

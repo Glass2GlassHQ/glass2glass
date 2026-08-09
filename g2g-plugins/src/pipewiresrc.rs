@@ -50,6 +50,16 @@ enum FromWorker {
     Failed(G2gError),
 }
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_core::AudioFormat;
+/// use g2g_plugins::pipewiresrc::PipeWireSrc;
+///
+/// let element = PipeWireSrc::new()
+///     .with_format(AudioFormat::PcmF32Le)
+///     .with_rate(48_000);
+/// ```
 #[derive(Debug)]
 pub struct PipeWireSrc {
     /// Node to capture from (`node.name` or object serial); empty = the default

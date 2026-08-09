@@ -188,6 +188,19 @@ fn analyticsoverlay_thickness() {
     assert_eq!(e.get_property("thickness"), Some(PropValue::Uint(1)));
 }
 
+#[cfg(feature = "analytics")]
+#[test]
+fn analyticsoverlay_mask_alpha() {
+    use g2g_plugins::analyticsoverlay::AnalyticsOverlay;
+    let mut e = AnalyticsOverlay::new();
+    assert!(declares(e.properties(), "mask-alpha"));
+    e.set_property("mask-alpha", PropValue::Uint(140)).unwrap();
+    assert_eq!(e.get_property("mask-alpha"), Some(PropValue::Uint(140)));
+    // Clamped to a byte.
+    e.set_property("mask-alpha", PropValue::Uint(4000)).unwrap();
+    assert_eq!(e.get_property("mask-alpha"), Some(PropValue::Uint(255)));
+}
+
 #[test]
 fn textoverlay_color_packs_argb() {
     use g2g_plugins::textoverlay::TextOverlay;

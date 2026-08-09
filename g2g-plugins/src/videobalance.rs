@@ -28,6 +28,15 @@ use g2g_core::{
 
 const FORMATS: [RawVideoFormat; 2] = [RawVideoFormat::Rgba8, RawVideoFormat::Bgra8];
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::videobalance::VideoBalance;
+///
+/// let balance = VideoBalance::new()
+///     .with_brightness(0.1)
+///     .with_saturation(1.2);
+/// ```
 #[derive(Debug)]
 pub struct VideoBalance {
     brightness: f64,

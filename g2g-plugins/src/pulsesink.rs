@@ -86,6 +86,13 @@ enum WorkerCmd {
     Shutdown,
 }
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::pulsesink::PulseSink;
+///
+/// let sink = PulseSink::with_app_name("my-player");
+/// ```
 pub struct PulseSink {
     app_name: String,
     /// Bounded, non-blocking link to the device thread. The executor is

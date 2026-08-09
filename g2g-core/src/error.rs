@@ -29,6 +29,11 @@ pub enum G2gError {
     /// zero-copy refuses to start rather than paying the copy at runtime. Inspect
     /// [`copy_plan`](crate::runtime::copy_plan) for the offending transfers.
     CopyBudget,
+    /// A fan-in element refused an input added at runtime
+    /// ([`MultiInputElement::accepts_runtime_input`](crate::MultiInputElement::accepts_runtime_input)):
+    /// it has no pad for that source, so the add fails and the run continues on
+    /// the inputs it already has.
+    InputRefused,
     /// An animated property binding (M882) does not fit the element it was
     /// attached to: an unknown or non-animatable property name (raised at
     /// startup, before any frame flows), or a sampled value the element refused

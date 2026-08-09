@@ -43,6 +43,13 @@ use web_sys::{Event, WebSocket};
 use crate::remotewire::map_wire;
 use crate::webutil::Inbox;
 
+/// # Example
+///
+/// ```ignore
+/// use g2g_plugins::wswiresink::WsWireSink;
+///
+/// let sink = WsWireSink::new("ws://127.0.0.1:9000");
+/// ```
 pub struct WsWireSink {
     url: String,
     socket: Option<WebSocket>,

@@ -18,7 +18,9 @@ use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::pixel::{even_dims_required, frame_byte_size, planar_planes};
+#[cfg(feature = "metadata")]
+use crate::pixel::plane_shapes;
+use crate::pixel::{even_dims_required, frame_byte_size, planar_planes, row_bytes};
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
@@ -64,6 +66,15 @@ const INPUT_FORMATS: [RawVideoFormat; 13] = [
     RawVideoFormat::Yuyv,
 ];
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_core::RawVideoFormat;
+/// use g2g_plugins::videoconvert::VideoConvert;
+///
+/// let convert = VideoConvert::new(RawVideoFormat::I420);
+/// let caps_driven = VideoConvert::auto();
+/// ```
 #[derive(Debug)]
 pub struct VideoConvert {
     /// Target output format from the `format` property. `None` means "auto":
@@ -187,6 +198,17 @@ impl AsyncElement for VideoConvert {
         Some(g2g_core::meta::Transform::Copy)
     }
 
+    /// M977: this element reads its input's rows wherever a `PlaneLayout` says
+    /// they are, so an upstream producer with padded rows (a GPU readback) can
+    /// hand them over as they are instead of repacking every frame. Requested
+    /// from every consumer: the padded buffer is only safe where nothing else
+    /// reading the producer's frames would take them for tightly packed.
+    #[cfg(feature = "metadata")]
+    fn meta_requests(&self) -> g2g_core::meta::MetaRequests {
+        g2g_core::meta::MetaRequests::new()
+            .request_from_every_consumer::<g2g_core::meta::PlaneLayout>()
+    }
+
     /// Native `DerivedFields`: any supported raw input maps to the target
     /// format at the same dims/framerate, so geometry + framerate are the
     /// coupled fields and a downstream geometry pin couples back through this
@@ -259,15 +281,44 @@ impl AsyncElement for VideoConvert {
                     let Some(src) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
-                    let needed = frame_byte_size(format, w, h);
-                    if src.len() < needed {
-                        return Err(G2gError::CapsMismatch);
-                    }
                     // Effective output format: property, or caps-resolved (auto).
                     // Auto without a delivered output caps (a runner that doesn't
                     // call configure_output) is unfixed.
                     let out_fmt = self.out_format().ok_or(G2gError::NotConfigured)?;
                     let (wu, hu) = (w as usize, h as usize);
+                    let tight = row_bytes(format, wu);
+                    // M977: a producer that was asked for a `PlaneLayout` hands
+                    // its rows over where they lie rather than repacking them.
+                    // Read them there when this convert can; pack them out first
+                    // when it cannot (a multi-plane layout), which is correct and
+                    // costs what the producer skipped.
+                    #[cfg(feature = "metadata")]
+                    let layout = frame.meta.get::<g2g_core::meta::PlaneLayout>().copied();
+                    #[cfg(feature = "metadata")]
+                    let packed: Option<Box<[u8]>> = match layout {
+                        Some(l) if !reads_in_place(format, wu, hu, &l) => Some(
+                            pack_planes(src, format, wu, hu, &l).ok_or(G2gError::CapsMismatch)?,
+                        ),
+                        _ => None,
+                    };
+                    #[cfg(feature = "metadata")]
+                    let src: &[u8] = packed.as_deref().unwrap_or(src);
+                    #[cfg(feature = "metadata")]
+                    let src_stride = match (packed.is_none(), layout) {
+                        (true, Some(l)) => l.plane(0).map_or(tight, |p| p.stride),
+                        _ => tight,
+                    };
+                    #[cfg(not(feature = "metadata"))]
+                    let src_stride = tight;
+                    // What the convert reads: the packed frame, or the end of the
+                    // last padded row.
+                    let needed = match src_stride == tight {
+                        true => frame_byte_size(format, w, h),
+                        false => hu.saturating_sub(1) * src_stride + tight,
+                    };
+                    if src.len() < needed {
+                        return Err(G2gError::CapsMismatch);
+                    }
                     // M760: offload the pixel convert onto tokio's blocking pool so
                     // the cooperative runner keeps servicing sibling arms while it
                     // runs. Own the input bytes (Frame is not Send: it can hold a
@@ -277,12 +328,12 @@ impl AsyncElement for VideoConvert {
                     let converted = {
                         let owned: Vec<u8> = src[..needed].to_vec();
                         crate::offload::run_blocking(move || {
-                            convert(&owned, format, out_fmt, wu, hu)
+                            convert_strided(&owned, format, out_fmt, wu, hu, src_stride)
                         })
                         .await
                     };
                     #[cfg(not(feature = "offload"))]
-                    let converted = convert(src, format, out_fmt, wu, hu);
+                    let converted = convert_strided(src, format, out_fmt, wu, hu, src_stride);
 
                     // A convert changes format/geometry but not rate: carry the
                     // input framerate so a fixating downstream peer (e.g. a
@@ -451,16 +502,44 @@ pub fn convert(
     w: usize,
     h: usize,
 ) -> Box<[u8]> {
+    convert_strided(src, from, to, w, h, row_bytes(from, w))
+}
+
+/// [`convert`] reading the input's rows `src_stride` bytes apart instead of
+/// tightly packed (M977). Only a packed RGBA / BGRA input can carry a pitch of
+/// its own: every other format arrives packed, so `src_stride` is then its tight
+/// row size and this is exactly [`convert`].
+fn convert_strided(
+    src: &[u8],
+    from: RawVideoFormat,
+    to: RawVideoFormat,
+    w: usize,
+    h: usize,
+    src_stride: usize,
+) -> Box<[u8]> {
     use RawVideoFormat::*;
     match (from, to) {
-        (a, b) if a == b => src[..frame_byte_size(a, w as u32, h as u32)].into(),
-        (Rgba8, Bgra8) | (Bgra8, Rgba8) => swizzle_rb(src, w, h),
+        (a, b) if a == b && src_stride == row_bytes(a, w) => {
+            src[..frame_byte_size(a, w as u32, h as u32)].into()
+        }
+        // The pairs that read their input where it lies, whatever its pitch.
+        (Rgba8, Bgra8) | (Bgra8, Rgba8) => swizzle_rb(src, w, h, src_stride),
+        (Rgba8, Nv12) => rgb_to_yuv420(src, w, h, 0, 2, true, src_stride),
+        (Rgba8, I420) => rgb_to_yuv420(src, w, h, 0, 2, false, src_stride),
+        (Bgra8, Nv12) => rgb_to_yuv420(src, w, h, 2, 0, true, src_stride),
+        (Bgra8, I420) => rgb_to_yuv420(src, w, h, 2, 0, false, src_stride),
+        // Every remaining path reads a tightly-packed input, so padded rows are
+        // packed out first: correct, at the cost the producer skipped. Must sit
+        // above them, or a padded buffer reaches one of them as if it were tight.
+        _ if src_stride != row_bytes(from, w) => convert(
+            &pack_rows(src, h, src_stride, row_bytes(from, w)),
+            from,
+            to,
+            w,
+            h,
+        ),
         (Nv12, I420) => nv12_to_i420(src, w, h),
         (I420, Nv12) => i420_to_nv12(src, w, h),
-        (Rgba8, Nv12) => rgb_to_yuv420(src, w, h, 0, 2, true),
-        (Rgba8, I420) => rgb_to_yuv420(src, w, h, 0, 2, false),
-        (Bgra8, Nv12) => rgb_to_yuv420(src, w, h, 2, 0, true),
-        (Bgra8, I420) => rgb_to_yuv420(src, w, h, 2, 0, false),
         (Nv12, Rgba8) => yuv420_to_rgb(src, w, h, true, 0, 2),
         (I420, Rgba8) => yuv420_to_rgb(src, w, h, false, 0, 2),
         (Nv12, Bgra8) => yuv420_to_rgb(src, w, h, true, 2, 0),
@@ -475,6 +554,59 @@ pub fn convert(
         // unpack to 4:4:4 YUV at a working depth, then repack to the target.
         _ => convert_via_hub(src, from, to, w, h),
     }
+}
+
+/// Whether a declared [`PlaneLayout`] can be read where it lies: one plane, of a
+/// format that has one plane, starting at the front of the buffer. Anything else
+/// (a padded planar frame) is packed out by [`pack_planes`] first.
+#[cfg(feature = "metadata")]
+fn reads_in_place(
+    format: RawVideoFormat,
+    w: usize,
+    h: usize,
+    layout: &g2g_core::meta::PlaneLayout,
+) -> bool {
+    layout.count() == 1
+        && plane_shapes(format, w, h).len() == 1
+        && layout
+            .plane(0)
+            .is_some_and(|p| p.offset == 0 && p.stride >= row_bytes(format, w))
+}
+
+/// Copy a frame whose planes sit where `layout` says into its tightly-packed
+/// form. `None` when the layout does not describe this format's planes, or the
+/// buffer does not hold what it claims: a layout can come from any producer, so
+/// a bad one fails the frame instead of reading out of bounds.
+#[cfg(feature = "metadata")]
+fn pack_planes(
+    src: &[u8],
+    format: RawVideoFormat,
+    w: usize,
+    h: usize,
+    layout: &g2g_core::meta::PlaneLayout,
+) -> Option<Box<[u8]>> {
+    let shapes = plane_shapes(format, w, h);
+    if layout.count() != shapes.len() {
+        return None;
+    }
+    let mut out = Vec::with_capacity(frame_byte_size(format, w as u32, h as u32));
+    for (plane, &(row_bytes, rows)) in shapes.iter().enumerate() {
+        for row in 0..rows {
+            out.extend_from_slice(src.get(layout.row_range(plane, row, row_bytes)?)?);
+        }
+    }
+    Some(out.into_boxed_slice())
+}
+
+/// Copy `rows` rows of `row_bytes` sitting `src_stride` apart into one tightly
+/// packed buffer.
+fn pack_rows(src: &[u8], rows: usize, src_stride: usize, row_bytes: usize) -> Box<[u8]> {
+    let mut dst = Vec::with_capacity(rows * row_bytes);
+    for y in 0..rows {
+        let start = y * src_stride;
+        dst.extend_from_slice(&src[start..start + row_bytes]);
+    }
+    dst.into_boxed_slice()
 }
 
 /// General conversion for any format pair, used for everything the fast 8-bit
@@ -786,9 +918,14 @@ fn yuyv_to_rgb(src: &[u8], w: usize, h: usize, r_off: usize, b_off: usize) -> Bo
     dst.into_boxed_slice()
 }
 
-/// RGBA<->BGRA: swap the R and B channels.
-fn swizzle_rb(src: &[u8], w: usize, h: usize) -> Box<[u8]> {
-    let mut dst = src[..w * h * 4].to_vec();
+/// RGBA<->BGRA: swap the R and B channels. `src_stride` is the input's row
+/// pitch, `w * 4` unless a `PlaneLayout` declared padded rows.
+fn swizzle_rb(src: &[u8], w: usize, h: usize, src_stride: usize) -> Box<[u8]> {
+    let mut dst = Vec::with_capacity(w * h * 4);
+    for y in 0..h {
+        let row = y * src_stride;
+        dst.extend_from_slice(&src[row..row + w * 4]);
+    }
     for px in dst.chunks_exact_mut(4) {
         px.swap(0, 2);
     }
@@ -832,12 +969,13 @@ fn rgb_to_yuv420(
     r_off: usize,
     b_off: usize,
     interleaved: bool,
+    src_stride: usize,
 ) -> Box<[u8]> {
     let luma = w * h;
     let mut dst = vec![0u8; luma + luma / 2];
     for y in 0..h {
         for x in 0..w {
-            let p = (y * w + x) * 4;
+            let p = y * src_stride + x * 4;
             let (r, g, b) = (
                 src[p + r_off] as i32,
                 src[p + 1] as i32,
@@ -853,7 +991,7 @@ fn rgb_to_yuv420(
             let (mut r, mut g, mut b) = (0i32, 0i32, 0i32);
             for dy in 0..2 {
                 for dx in 0..2 {
-                    let p = ((cy * 2 + dy) * w + cx * 2 + dx) * 4;
+                    let p = (cy * 2 + dy) * src_stride + (cx * 2 + dx) * 4;
                     r += src[p + r_off] as i32;
                     g += src[p + 1] as i32;
                     b += src[p + b_off] as i32;
@@ -975,7 +1113,7 @@ mod tests {
     #[test]
     fn swizzle_swaps_r_and_b() {
         let src = [1u8, 2, 3, 4, 5, 6, 7, 8];
-        let out = swizzle_rb(&src, 2, 1);
+        let out = swizzle_rb(&src, 2, 1, 8);
         assert_eq!(&out[..], &[3, 2, 1, 4, 7, 6, 5, 8]);
     }
 
@@ -1006,7 +1144,7 @@ mod tests {
             (128, 64, 32),
         ] {
             let src: Vec<u8> = (0..4).flat_map(|_| [r, g, b, 255]).collect();
-            let nv12 = rgb_to_yuv420(&src, 2, 2, 0, 2, true);
+            let nv12 = rgb_to_yuv420(&src, 2, 2, 0, 2, true, 8);
             let rgba = yuv420_to_rgb(&nv12, 2, 2, true, 0, 2);
             for px in rgba.chunks_exact(4) {
                 assert!(
@@ -1027,7 +1165,7 @@ mod tests {
     fn grey_maps_to_neutral_chroma() {
         // pure grey has no chroma: U = V = 128 exactly in BT.601.
         let src: Vec<u8> = (0..4).flat_map(|_| [128u8, 128, 128, 255]).collect();
-        let nv12 = rgb_to_yuv420(&src, 2, 2, 0, 2, true);
+        let nv12 = rgb_to_yuv420(&src, 2, 2, 0, 2, true, 8);
         assert_eq!(&nv12[4..], &[128, 128], "neutral chroma for grey");
     }
 

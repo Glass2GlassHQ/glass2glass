@@ -92,6 +92,12 @@
 //! high-depth source stays a loud `CapsMismatch` (no depth conversion here; put a
 //! `videoconvert` downstream, which handles the planar 10-bit family).
 //!
+//! QoS (M997): with the `qos` property set, a downstream lateness report makes
+//! the decoder skip the pictures nothing references (`AVDISCARD_NONREF`) for
+//! roughly as many pictures as the sink is behind, so decode cost drops without
+//! breaking a reference chain. Off by default, and while off the runner relays
+//! reports past this element to the source as before.
+//!
 //! Deferred:
 //! - Packed formats.
 
@@ -117,12 +123,23 @@ use g2g_core::{
     AllocationParams, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, CudaKeepAlive,
     Dim, ElementMetadata, FrameTiming, G2gError, HardwareError, Interlace, MemoryDomain,
     OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue,
-    PropertySpec, Rate, RawVideoFormat, VideoCodec,
+    PropertySpec, PushOutcome, QosMessage, Rate, RawVideoFormat, VideoCodec,
 };
 
 /// Cap on pending input-pts -> arrival entries, so frames the decoder drops
 /// (never echoing their pts back) can't grow the map without bound.
 const MAX_PENDING_ARRIVALS: usize = 1024;
+
+/// Default cap on the pictures one QoS report can put into non-reference skip
+/// mode: a second at 30 fps, long enough to absorb a stall, short enough that
+/// the picture is whole again quickly.
+const DEFAULT_MAX_SKIP_FRAMES: u64 = 30;
+
+/// Framerate assumed when the input caps carry none, for turning a QoS report's
+/// lateness into a count of pictures. Q16 fixed-point, as `Rate::Fixed`.
+const DEFAULT_FRAMERATE_Q16: u32 = 30 << 16;
+
+const NS_PER_SECOND: u64 = 1_000_000_000;
 
 /// Pixel layout emitted on the decoder's output side.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -331,6 +348,15 @@ enum DecodedPayload {
     Cuda(OwnedCudaBuffer),
 }
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::ffmpegdec::{Backend, FfmpegVideoDec, OutputFormat};
+///
+/// let dec = FfmpegVideoDec::new()
+///     .with_output_format(OutputFormat::Nv12)
+///     .with_backend(Backend::Software);
+/// ```
 pub struct FfmpegVideoDec {
     decoder: Option<ffmpeg::decoder::Video>,
     last_caps: Option<Caps>,
@@ -352,8 +378,9 @@ pub struct FfmpegVideoDec {
     /// happily pipelines several frames before releasing the first), off
     /// for software (correctness on B-frame streams).
     low_delay: bool,
-    /// M16 workaround #3 Phase A: most recent input caps received via
-    /// `PipelinePacket::CapsChanged`. Used to validate the format on
+    /// M16 workaround #3 Phase A: most recent input caps, from
+    /// `PipelinePacket::CapsChanged` or from a mid-stream
+    /// `configure_pipeline`. Used to validate the format on
     /// mid-stream changes and to debug-assert that the decode-time
     /// output geometry agrees with the declared `DerivedOutput`
     /// closure. Phase B will use this as the input to a runner-side
@@ -391,6 +418,23 @@ pub struct FfmpegVideoDec {
     /// the output caps stable (one `CapsChanged` to `Interleaved`) instead of
     /// flapping, which would reset the downstream deinterlacer's window.
     saw_interlaced: bool,
+    /// M997: act on a downstream QoS report by skipping non-reference pictures
+    /// (`AVDISCARD_NONREF`) until the reported lateness is made up. Off by
+    /// default, and while off the runner relays reports past this element to the
+    /// source as before.
+    qos: bool,
+    /// Upper bound on the pictures one QoS report can put into skip mode, so a
+    /// wildly late report cannot leave the decoder shedding for a whole GOP.
+    max_skip_frames: u64,
+    /// Access units still to be fed under `AVDISCARD_NONREF`. Counts down to
+    /// zero, which restores full decoding: the recovery.
+    skip_budget: u64,
+    /// Whether `AVDISCARD_NONREF` is currently set on the codec context, so the
+    /// field is written only when the state changes.
+    skipping_nonref: bool,
+    /// Access units fed while skipping. The non-reference pictures among them are
+    /// the work shed.
+    qos_skipped: u64,
 }
 
 /// Back-compat alias from when this element decoded only H.264. The struct is
@@ -438,6 +482,11 @@ impl FfmpegVideoDec {
             vaapi_device: None,
             codec_kind: None,
             saw_interlaced: false,
+            qos: false,
+            max_skip_frames: DEFAULT_MAX_SKIP_FRAMES,
+            skip_budget: 0,
+            skipping_nonref: false,
+            qos_skipped: 0,
         }
     }
 
@@ -560,6 +609,113 @@ impl FfmpegVideoDec {
 
     pub fn low_delay(&self) -> bool {
         self.low_delay
+    }
+
+    /// Act on a downstream QoS report by skipping non-reference pictures until
+    /// the reported lateness is made up (M997). Nothing else references those
+    /// pictures, so the frames that are still emitted decode exactly as they
+    /// would have. While this is off the runner relays reports past the decoder
+    /// to the source instead.
+    pub fn with_qos(mut self, on: bool) -> Self {
+        self.qos = on;
+        self
+    }
+
+    pub fn qos(&self) -> bool {
+        self.qos
+    }
+
+    /// Cap the pictures one QoS report can put into skip mode, so a wildly late
+    /// report cannot leave the decoder shedding for a whole GOP. A later report
+    /// re-arms the budget.
+    pub fn with_max_skip_frames(mut self, frames: u64) -> Self {
+        self.max_skip_frames = frames;
+        self
+    }
+
+    pub fn max_skip_frames(&self) -> u64 {
+        self.max_skip_frames
+    }
+
+    /// Whether the decoder is currently skipping non-reference pictures, ie it
+    /// is working through the budget a QoS report armed.
+    pub fn skipping_nonref(&self) -> bool {
+        self.skipping_nonref
+    }
+
+    /// Access units fed while skipping non-reference pictures. The non-reference
+    /// ones among them are the decode work shed.
+    pub fn qos_skipped(&self) -> u64 {
+        self.qos_skipped
+    }
+
+    /// Push one packet downstream, arming the non-reference skip if the outcome
+    /// carried a QoS report (M997). Every push goes through here, so a report is
+    /// acted on whichever packet it rides back on.
+    async fn push_downstream(
+        &mut self,
+        out: &mut dyn OutputSink,
+        packet: PipelinePacket,
+    ) -> Result<(), G2gError> {
+        if let PushOutcome::Qos(report) = out.push(packet).await? {
+            self.arm_nonref_skip(&report);
+        }
+        Ok(())
+    }
+
+    /// Arm the skip budget from a downstream QoS report: skip roughly as many
+    /// pictures as the sink is behind, the same `jitter / frame_period` rule
+    /// `VideoTestSrc` sheds by. Latest report wins when it asks for more.
+    fn arm_nonref_skip(&mut self, report: &QosMessage) {
+        if !self.qos || report.jitter_ns <= 0 {
+            return;
+        }
+        let behind = report.jitter_ns as u64 / self.frame_period_ns();
+        self.skip_budget = self.skip_budget.max(behind.min(self.max_skip_frames));
+    }
+
+    /// Nominal picture duration from the negotiated input caps, used to turn a
+    /// lateness in ns into a count of pictures.
+    fn frame_period_ns(&self) -> u64 {
+        let q16 = match &self.input_caps {
+            Some(Caps::CompressedVideo {
+                framerate: Rate::Fixed(q16),
+                ..
+            }) => *q16,
+            _ => DEFAULT_FRAMERATE_Q16,
+        };
+        if q16 == 0 {
+            return NS_PER_SECOND / (DEFAULT_FRAMERATE_Q16 as u64 >> 16);
+        }
+        (NS_PER_SECOND * 65536 / u64::from(q16)).max(1)
+    }
+
+    /// Point the codec context's `skip_frame` at the state the budget asks for
+    /// and spend one unit of it. Called per access unit, before it is fed:
+    /// libavcodec copies `skip_frame` per packet, so this decides that packet's
+    /// picture.
+    fn apply_nonref_skip(&mut self) {
+        let want = self.skip_budget > 0;
+        if want != self.skipping_nonref {
+            if let Some(decoder) = self.decoder.as_mut() {
+                let level = if want {
+                    ffmpeg::ffi::AVDiscard::AVDISCARD_NONREF
+                } else {
+                    ffmpeg::ffi::AVDiscard::AVDISCARD_DEFAULT
+                };
+                // SAFETY: the open codec context this element exclusively owns
+                // (`&mut self`, never aliased). `skip_frame` is a plain field
+                // libavcodec reads when a packet is decoded.
+                unsafe {
+                    (*decoder.as_mut_ptr()).skip_frame = level;
+                }
+                self.skipping_nonref = want;
+            }
+        }
+        if self.skip_budget > 0 {
+            self.skip_budget -= 1;
+            self.qos_skipped += 1;
+        }
     }
 
     /// Count of decoded `DataFrame`s pushed downstream. Useful in tests.
@@ -1096,6 +1252,15 @@ impl AsyncElement for FfmpegVideoDec {
             return Err(G2gError::CapsMismatch);
         }
 
+        // A mid-stream refinement (the parser recovering the real geometry and
+        // framerate from the SPS) only reaches this element here: the runner
+        // steers it and hands `process` our own output caps instead. The first
+        // call carries the solve's placeholder geometry rather than anything the
+        // stream said, so it stays unrecorded.
+        if self.configured {
+            self.input_caps = Some(absolute_caps.clone());
+        }
+
         // Defer the libavcodec open to the first access unit (see `open_decoder`),
         // so the stream's parameter sets can seed the decoder as `extradata` and
         // it learns the reorder depth before emitting its first picture.
@@ -1115,6 +1280,12 @@ impl AsyncElement for FfmpegVideoDec {
 
     fn properties(&self) -> &'static [PropertySpec] {
         FFMPEGDEC_PROPS
+    }
+
+    /// With `qos` set the decoder sheds work on a report itself, so the runner
+    /// hands it to `process` instead of relaying it to the source.
+    fn handles_qos(&self) -> bool {
+        self.qos
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
@@ -1175,6 +1346,14 @@ impl AsyncElement for FfmpegVideoDec {
                 self.low_delay = value.as_bool().ok_or(PropError::Type)?;
                 Ok(())
             }
+            "qos" => {
+                self.qos = value.as_bool().ok_or(PropError::Type)?;
+                Ok(())
+            }
+            "max-skip-frames" => {
+                self.max_skip_frames = value.as_uint().ok_or(PropError::Type)?;
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -1214,6 +1393,8 @@ impl AsyncElement for FfmpegVideoDec {
             )),
             "cuvid-surfaces" => Some(PropValue::Uint(self.cuvid_surfaces.unwrap_or(0) as u64)),
             "low-delay" => Some(PropValue::Bool(self.low_delay)),
+            "qos" => Some(PropValue::Bool(self.qos)),
+            "max-skip-frames" => Some(PropValue::Uint(self.max_skip_frames)),
             _ => None,
         }
     }
@@ -1247,6 +1428,10 @@ impl AsyncElement for FfmpegVideoDec {
                         };
                         self.open_decoder(codec_kind, extradata.as_deref(), reorder)?;
                     }
+                    // M997: shed this picture if a QoS report left budget, and
+                    // spend one unit of it. Before the feed, since libavcodec
+                    // takes `skip_frame` from the context per packet.
+                    self.apply_nonref_skip();
                     // M760: offload the per-frame decode onto tokio's blocking
                     // pool so the cooperative runner keeps servicing sibling arms
                     // (the sink renders) while decode runs. Move the decoder + pts
@@ -1321,7 +1506,8 @@ impl AsyncElement for FfmpegVideoDec {
                         Caps::RawVideo { format, .. }
                             if accepts_output(self.output_format, *format) =>
                         {
-                            out.push(PipelinePacket::CapsChanged(c.clone())).await?;
+                            self.push_downstream(out, PipelinePacket::CapsChanged(c.clone()))
+                                .await?;
                             self.last_caps = Some(c);
                         }
                         _ => return Err(G2gError::CapsMismatch),
@@ -1333,17 +1519,18 @@ impl AsyncElement for FfmpegVideoDec {
                     }
                     self.pts_to_arrival.clear();
                     self.last_caps = None;
-                    out.push(PipelinePacket::Flush).await?;
+                    self.push_downstream(out, PipelinePacket::Flush).await?;
                     return Ok(());
                 }
                 PipelinePacket::Eos => {
                     self.drain_eos(&mut decoded)?;
                 }
                 PipelinePacket::Segment(seg) => {
-                    out.push(PipelinePacket::Segment(seg)).await?;
+                    self.push_downstream(out, PipelinePacket::Segment(seg))
+                        .await?;
                 }
                 other => {
-                    out.push(other).await?;
+                    self.push_downstream(out, other).await?;
                     return Ok(());
                 }
             }
@@ -1416,7 +1603,7 @@ impl AsyncElement for FfmpegVideoDec {
                             );
                         }
                     }
-                    out.push(PipelinePacket::CapsChanged(new_caps.clone()))
+                    self.push_downstream(out, PipelinePacket::CapsChanged(new_caps.clone()))
                         .await?;
                     self.last_caps = Some(new_caps.clone());
                 }
@@ -1440,7 +1627,12 @@ impl AsyncElement for FfmpegVideoDec {
                     meta: Default::default(),
                 };
                 self.emitted += 1;
-                out.push(PipelinePacket::DataFrame(frame)).await?;
+                // M997: with `qos` on the runner leaves the report here instead
+                // of relaying it upstream, so this is where it is acted on: the
+                // next access units decode without their non-reference pictures
+                // until the sink has caught up.
+                self.push_downstream(out, PipelinePacket::DataFrame(frame))
+                    .await?;
             }
             Ok(())
         })
@@ -1511,6 +1703,18 @@ static FFMPEGDEC_PROPS: &[PropertySpec] = &[
         "set AV_CODEC_FLAG_LOW_DELAY (release each picture as soon as decoded)",
     )
     .with_default("false"),
+    PropertySpec::new(
+        "qos",
+        PropKind::Bool,
+        "act on downstream QoS reports by skipping non-reference pictures",
+    )
+    .with_default("false"),
+    PropertySpec::new(
+        "max-skip-frames",
+        PropKind::Uint,
+        "most non-reference pictures one QoS report can skip",
+    )
+    .with_default("30"),
 ];
 
 /// The libavcodec `AVCodecID` for a g2g codec (generic + CUDA-hwaccel path).

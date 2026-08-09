@@ -43,6 +43,14 @@ pub(crate) const PCM_FORMATS: [AudioFormat; 5] = [
     AudioFormat::PcmU8,
 ];
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_core::AudioFormat;
+/// use g2g_plugins::audioconvert::AudioConvert;
+///
+/// let element = AudioConvert::new(AudioFormat::PcmS16Le, 2);
+/// ```
 #[derive(Debug)]
 pub struct AudioConvert {
     /// Target sample format, or `None` for caps-driven (take it from a downstream

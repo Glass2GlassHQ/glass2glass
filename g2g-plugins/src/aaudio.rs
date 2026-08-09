@@ -112,6 +112,14 @@ fn pcm_params(caps: &Caps) -> Result<(AudioFormat, u8, u32), G2gError> {
 // ---------------------------------------------------------------------------
 
 /// Renders interleaved PCM to the default AAudio output device.
+///
+/// # Example
+///
+/// ```ignore
+/// use g2g_plugins::aaudio::AAudioSink;
+///
+/// let sink = AAudioSink::new();
+/// ```
 pub struct AAudioSink {
     stream: Option<AudioStream>,
     format: AudioFormat,
@@ -298,6 +306,15 @@ impl PadTemplates for AAudioSink {
 // ---------------------------------------------------------------------------
 
 /// Captures interleaved PCM from the default AAudio input device (the mic).
+///
+/// # Example
+///
+/// ```ignore
+/// use g2g_plugins::aaudio::AAudioSrc;
+///
+/// // 48 kHz stereo, capture until stopped.
+/// let src = AAudioSrc::new(48_000, 2, u64::MAX);
+/// ```
 pub struct AAudioSrc {
     /// Requested rate / channels; the opened stream's actuals (which the device
     /// may pick differently) are reported as the caps.

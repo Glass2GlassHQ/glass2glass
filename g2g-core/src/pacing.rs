@@ -92,9 +92,18 @@ impl PresentationPacer {
     }
 
     /// Adopt the elected clock + base time, engaging PTS pacing. The runner
-    /// calls this once per element after clock election.
+    /// calls this once per element after clock election. Any anchor latched
+    /// against the previous clock is dropped: the new clock has its own epoch,
+    /// so the next frame re-anchors on it.
     pub fn set_clock_sync(&mut self, sync: ClockSync) {
         self.clock_sync = Some(sync);
+        self.anchor_ns = None;
+        self.anchor_pre_play = false;
+    }
+
+    /// The clock + base time being paced against, `None` until one is adopted.
+    pub fn clock_sync(&self) -> Option<&ClockSync> {
+        self.clock_sync.as_ref()
     }
 
     /// Whether PTS pacing is engaged (a clock was elected and handed over).
@@ -102,9 +111,26 @@ impl PresentationPacer {
         self.clock_sync.is_some()
     }
 
+    /// Pin the anchor instead of latching it on the first frame, so a frame's
+    /// deadline is `anchor_ns + running_time` from the outset. A sink whose PTS
+    /// deadlines are absolute on its own clock pins `0` (deadline == running
+    /// time); [`set_clock_sync`](Self::set_clock_sync) drops the pin, since an
+    /// elected clock brings its own epoch.
+    pub fn set_anchor_ns(&mut self, anchor_ns: u64) {
+        self.anchor_ns = Some(anchor_ns);
+        self.anchor_pre_play = false;
+    }
+
     /// Install the active playback segment (from `PipelinePacket::Segment`).
     pub fn set_segment(&mut self, segment: Segment) {
         self.segment = Some(segment);
+    }
+
+    /// The active playback segment, `None` before any arrives. A sink reads it
+    /// for the parts of presentation the pacer does not decide, eg trick-mode
+    /// `key_units_only` frame selection.
+    pub fn segment(&self) -> Option<Segment> {
+        self.segment
     }
 
     /// Seek flush: drop the anchor so the next frame presents the seek target

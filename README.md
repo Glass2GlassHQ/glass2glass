@@ -371,10 +371,11 @@ OS-coupled elements live behind cargo features:
 | `Av1Enc` (pure-Rust `rav1e`) | `av1-encode` | — |
 | `VpxEnc` (VP8 / VP9 via libvpx) | `vpx` | libvpx |
 | `MjpegDec` / `MjpegEnc` (pure Rust) | `mjpeg`, `mjpeg-encode` | — |
-| `AnalyticsOverlay` (CPU) / `VelloAnalyticsOverlay` (GPU) / `WgpuSink` | `analytics`, `vello-overlay`, `wgpu-sink` | wgpu (GPU variants) |
+| `AnalyticsOverlay` (CPU) / `VelloAnalyticsOverlay` (GPU) (detection boxes, segmentation masks, ROIs) / `WgpuSink` | `analytics`, `vello-overlay`, `wgpu-sink` | wgpu (GPU variants) |
+| `VelloTextOverlay` (subtitle cues drawn on the GPU, `WgpuTexture` out) | `vello-text-overlay` | wgpu |
 | `OrtInference` (+ CUDA / DirectML EPs) | `ort`, `cuda`, `directml` (in `g2g-ml`) | onnxruntime |
-| `BurnInference` | `burn` (in `g2g-ml`) | wgpu (Vulkan / Metal / DX12) |
-| `WgpuPreprocess` (NV12 or Android RGBA GPU texture in, NCHW tensor out) | `wgpu`, `mediacodec-wgpu` (in `g2g-ml`) | wgpu |
+| `BurnInference` (linear layer, or an ONNX topology imported by `burn-onnx` codegen) | `burn` (in `g2g-ml`) | wgpu (Vulkan / Metal / DX12) |
+| `WgpuPreprocess` (NV12 / YUYV system bytes, a dma-buf, or a GPU texture in, NCHW tensor out) | `wgpu`, `dmabuf-wgpu`, `mediacodec-wgpu` (in `g2g-ml`) | wgpu (Vulkan for the dma-buf import) |
 | Embassy / RTOS pool + clock | `embassy`, `embassy-link` | — |
 | Browser elements | `web`, `web-codecs` | `wasm32-unknown-unknown` |
 
@@ -615,7 +616,8 @@ elements still need explicit Rust construction.
 
 The ML elements live in a separate crate, so an app opts them in after building
 the registry: `g2g_ml::register(&mut reg)` (the `launch` feature) adds
-`ortinfer`, `wgpupreprocess`, and `detectionpostprocess`, making
+`ortinfer`, `wgpupreprocess`, `detectionpostprocess`, and `ortsegment` (instance
+segmentation), making
 `... ! ortinfer model=yolov8n.onnx ! detectionpostprocess conf-threshold=0.3 !
 ...` parse.
 
@@ -776,6 +778,10 @@ cargo test -p g2g-ml --features cuda --test ort_inference -- --nocapture
 
 # Pure-Rust Burn over wgpu (any Vulkan/Metal/DX12 adapter):
 cargo test -p g2g-ml --features burn --test burn_inference -- --nocapture
+
+# An ONNX topology imported into that element by build-time codegen. Standalone
+# (workspace-excluded): burn-onnx carries burn's own rustc 1.92 MSRV.
+cd examples/g2g-onnx-import && cargo test
 ```
 
 ### UDP egress (loopback, no network)

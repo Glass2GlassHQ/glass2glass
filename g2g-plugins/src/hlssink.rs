@@ -51,6 +51,16 @@ use crate::hls::{write_media, MediaPlaylist, Segment};
 use crate::mp4box::{be32, boxes, find_box, find_path};
 use crate::multifilesink::expand;
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::hlssink::HlsSink;
+///
+/// // ... ! tsmux ! hlssink location=seg%05d.ts playlist-location=out.m3u8
+/// let sink = HlsSink::new("seg%05d.ts")
+///     .with_playlist_location("out.m3u8")
+///     .with_target_duration(4);
+/// ```
 pub struct HlsSink {
     location: String,
     playlist_location: String,

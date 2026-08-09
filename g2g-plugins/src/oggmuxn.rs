@@ -42,6 +42,15 @@ use g2g_core::{
 use crate::oggmux::{format_of, ogg_caps, OggStreamMux, DEFAULT_SERIAL};
 
 /// Muxes N audio elementary streams into one grouped Ogg byte stream.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::oggmuxn::OggMuxN;
+///
+/// let mux = OggMuxN::new(2).with_serial(0x1234);
+/// assert_eq!(mux.emitted(), 0);
+/// ```
 #[derive(Debug)]
 pub struct OggMuxN {
     inputs: usize,

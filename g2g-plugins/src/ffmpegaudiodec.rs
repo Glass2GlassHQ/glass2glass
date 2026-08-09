@@ -57,6 +57,13 @@ struct DecodedAudio {
     rate: u32,
 }
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::ffmpegaudiodec::FfmpegAudioDec;
+///
+/// let element = FfmpegAudioDec::new();
+/// ```
 pub struct FfmpegAudioDec {
     decoder: Option<ffmpeg::decoder::Audio>,
     /// The compressed input format this instance decodes, set at configure.

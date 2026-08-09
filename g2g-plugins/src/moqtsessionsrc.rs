@@ -38,6 +38,16 @@ use crate::moqt::subscriber::{byte_frame, connect, session_err, Pumped, Subscrib
 
 /// Subscribes to several tracks of one MoQ Transport broadcast and emits each
 /// on its own output pad.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::moqtsessionsrc::MoqtSessionSrc;
+///
+/// let source = MoqtSessionSrc::new("https://127.0.0.1:4443/", "g2g")
+///     .with_outputs(2)
+///     .with_tracks("video,audio");
+/// ```
 #[derive(Debug)]
 pub struct MoqtSessionSrc {
     cfg: SubscriberConfig,

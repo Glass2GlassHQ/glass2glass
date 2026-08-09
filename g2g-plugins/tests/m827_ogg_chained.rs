@@ -269,8 +269,18 @@ async fn run_line(line: &str) -> u64 {
 /// Every sample within 1 LSB of the reference, same length.
 fn assert_pcm_matches(pcm: &[u8], reference: &[u8]) {
     assert_eq!(pcm.len(), reference.len(), "decoded length");
+    assert_samples_agree(pcm, reference);
+}
+
+#[cfg(any(feature = "opus", feature = "vorbis"))]
+/// Every sample the two decodes share is within 1 LSB of the reference.
+fn assert_samples_agree(pcm: &[u8], reference: &[u8]) {
+    let shared = pcm.len().min(reference.len());
     let mut max_diff = 0i32;
-    for (a, b) in pcm.chunks_exact(2).zip(reference.chunks_exact(2)) {
+    for (a, b) in pcm[..shared]
+        .chunks_exact(2)
+        .zip(reference[..shared].chunks_exact(2))
+    {
         let x = i16::from_le_bytes([a[0], a[1]]) as i32;
         let y = i16::from_le_bytes([b[0], b[1]]) as i32;
         max_diff = max_diff.max((x - y).abs());
@@ -629,9 +639,11 @@ async fn only_a_segment_makes_a_repeated_opus_head_rebuild_the_decoder() {
 }
 
 /// The Vorbis chain likewise, and exactly: the second chain's ident + setup
-/// headers rebuild the decoder, so each chain decodes as it does alone.
+/// headers rebuild the decoder, so each chain decodes as it does alone, whole.
 /// (ffmpeg's own decode of a chained Vorbis file is longer, it re-primes
-/// neither the window nor the granule anchor at the boundary.)
+/// neither the window nor the granule anchor at the boundary; its decode of a
+/// single link is a priming block short, so the length here comes from the
+/// tones the links encode, see `m971_vorbis_granule`.)
 #[cfg(feature = "vorbis")]
 #[tokio::test]
 async fn chained_vorbis_decodes_to_the_concatenated_pcm() {
@@ -639,9 +651,6 @@ async fn chained_vorbis_decodes_to_the_concatenated_pcm() {
         eprintln!("skipping: no ffmpeg");
         return;
     };
-    let mut reference = ffmpeg_pcm(&vector.first);
-    reference.extend_from_slice(&ffmpeg_pcm(&vector.second));
-
     let out = temp_path("vorbis-decode-out", "raw");
     let _ = std::fs::remove_file(&out);
     let line = format!(
@@ -653,5 +662,10 @@ async fn chained_vorbis_decodes_to_the_concatenated_pcm() {
     assert!(run_line(&line).await > 0, "{line}");
     let pcm = std::fs::read(&out).expect("pcm written");
     let _ = std::fs::remove_file(&out);
-    assert_pcm_matches(&pcm, &reference);
+    // Two 1 s stereo tones at 44.1 kHz, both whole, each matching ffmpeg's
+    // decode of its own link over the samples that decode shares.
+    let per_link = 44_100 * 2 * 2;
+    assert_eq!(pcm.len(), 2 * per_link, "both chains decoded whole");
+    assert_samples_agree(&pcm[..per_link], &ffmpeg_pcm(&vector.first));
+    assert_samples_agree(&pcm[per_link..], &ffmpeg_pcm(&vector.second));
 }

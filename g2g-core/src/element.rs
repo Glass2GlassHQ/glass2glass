@@ -6,7 +6,9 @@ use alloc::boxed::Box;
 use crate::caps::Caps;
 use crate::clock::{ClockCandidate, ClockSync};
 use crate::error::G2gError;
-use crate::format_element::{legacy_sink_constraint, legacy_transform_constraint, CapsConstraint};
+use crate::format_element::{
+    legacy_sink_constraint, legacy_transform_constraint, CapsConstraint, CapsPreferences,
+};
 use crate::frame::PipelinePacket;
 use crate::memory::{DomainSet, MemoryDomainKind};
 use crate::property::{ElementMetadata, PropError, PropValue, PropertySpec};
@@ -286,6 +288,16 @@ pub trait AsyncElement: ElementBound {
         false
     }
 
+    /// Whether this element acts on a downstream QoS report itself, ie it sheds
+    /// work when the sink is behind (a decoder skipping non-reference frames).
+    /// Default `false`: the runner relays the report onto the element's input
+    /// link (M175) so it reaches the source, and `process` never sees it.
+    /// `true` surfaces it as [`PushOutcome::Qos`] from the element's own `push`
+    /// instead, and the relay stops here.
+    fn handles_qos(&self) -> bool {
+        false
+    }
+
     /// Declares that this element changes the caps "domain" between its
     /// input and output: a decoder turns compressed bitstream into raw
     /// pixels, an encoder turns raw pixels into compressed bitstream, a
@@ -340,6 +352,24 @@ pub trait AsyncElement: ElementBound {
         None
     }
 
+    /// The per-frame metadata this element wants attached to the frames it
+    /// receives (M976), the pull half of `meta_transform`'s push half. The
+    /// runner unions the declaration into the allocation cascade travelling
+    /// upstream, so a producer any number of hops away can ask
+    /// [`MetaRequests::wants`](crate::meta::MetaRequests::wants) in
+    /// [`configure_allocation`](Self::configure_allocation) and skip work nobody
+    /// downstream reads. Default: nothing requested, and a graph where every
+    /// element defaults cascades exactly as it did before the hook existed.
+    ///
+    /// Requesting a meta is a hint, never a guarantee: a consumer must still
+    /// handle a frame arriving without it (no producer upstream may be able to
+    /// attach one). Without the `metadata` feature
+    /// [`MetaRequests`](crate::meta::MetaRequests) is a zero-sized empty set, so
+    /// overriding this can only return the default.
+    fn meta_requests(&self) -> crate::meta::MetaRequests {
+        crate::meta::MetaRequests::new()
+    }
+
     /// M16 step 5b: declare this element's negotiation-time constraint
     /// when used as the **sink** of a chain. The default returns the
     /// legacy bridge (`LegacySink` wrapping today's `intercept_caps`).
@@ -357,6 +387,16 @@ pub trait AsyncElement: ElementBound {
     /// `DerivedOutput`.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         legacy_transform_constraint(self)
+    }
+
+    /// What this element is willing to pay for each alternative of the set its
+    /// `caps_constraint_as_*` advertises. Default `None`: the alternatives are
+    /// already in preference order and cost their index. An element overrides
+    /// this to declare *equal* cost between alternatives it does not care
+    /// about (so a neighbour's preference decides) or a gap wide enough that a
+    /// neighbour's preference cannot pull the chain onto its fallback.
+    fn caps_preferences(&self) -> Option<CapsPreferences> {
+        None
     }
 
     /// The runtime properties this element type exposes (M104), the GObject
@@ -435,6 +475,13 @@ pub trait DynAsyncElement: ElementBound {
     /// declares its transform constraint to the solver while erased.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_>;
 
+    /// Dyn-safe mirror of [`AsyncElement::caps_preferences`], so an erased
+    /// element's declared per-alternative costs reach the solver. Defaults to
+    /// `None` (cost = alternative index), matching `AsyncElement`.
+    fn caps_preferences(&self) -> Option<CapsPreferences> {
+        None
+    }
+
     /// Dyn-safe mirror of [`AsyncElement::propose_allocation`], so a
     /// `Box`-erased branch sink can re-derive its own pool on a mid-stream
     /// caps change (fan-out element-local α).
@@ -472,6 +519,12 @@ pub trait DynAsyncElement: ElementBound {
     #[cfg(feature = "metadata")]
     fn meta_transform(&self) -> Option<crate::meta::Transform> {
         None
+    }
+
+    /// Dyn-safe mirror of [`AsyncElement::meta_requests`]. Default: nothing
+    /// requested.
+    fn meta_requests(&self) -> crate::meta::MetaRequests {
+        crate::meta::MetaRequests::new()
     }
 
     /// Dyn-safe mirror of [`AsyncElement::provide_clock`], so an interior
@@ -516,6 +569,11 @@ pub trait DynAsyncElement: ElementBound {
 
     /// Dyn-safe mirror of [`AsyncElement::handles_bitrate_requests`] (M720).
     fn handles_bitrate_requests(&self) -> bool {
+        false
+    }
+
+    /// Dyn-safe mirror of [`AsyncElement::handles_qos`] (M997).
+    fn handles_qos(&self) -> bool {
         false
     }
 
@@ -594,6 +652,10 @@ impl<T: AsyncElement> DynAsyncElement for T {
         AsyncElement::caps_constraint_as_transform(self)
     }
 
+    fn caps_preferences(&self) -> Option<CapsPreferences> {
+        AsyncElement::caps_preferences(self)
+    }
+
     fn propose_allocation(&self, caps: &Caps) -> Option<AllocationParams> {
         AsyncElement::propose_allocation(self, caps)
     }
@@ -621,6 +683,10 @@ impl<T: AsyncElement> DynAsyncElement for T {
     #[cfg(feature = "metadata")]
     fn meta_transform(&self) -> Option<crate::meta::Transform> {
         AsyncElement::meta_transform(self)
+    }
+
+    fn meta_requests(&self) -> crate::meta::MetaRequests {
+        AsyncElement::meta_requests(self)
     }
 
     fn provide_clock(&self) -> Option<ClockCandidate> {
@@ -653,6 +719,10 @@ impl<T: AsyncElement> DynAsyncElement for T {
 
     fn handles_bitrate_requests(&self) -> bool {
         AsyncElement::handles_bitrate_requests(self)
+    }
+
+    fn handles_qos(&self) -> bool {
+        AsyncElement::handles_qos(self)
     }
 
     fn properties(&self) -> &'static [PropertySpec] {
@@ -719,6 +789,10 @@ impl<'b> DynAsyncElement for &'b mut (dyn DynAsyncElement + 'b) {
         (**self).caps_constraint_as_transform()
     }
 
+    fn caps_preferences(&self) -> Option<CapsPreferences> {
+        (**self).caps_preferences()
+    }
+
     fn propose_allocation(&self, caps: &Caps) -> Option<AllocationParams> {
         (**self).propose_allocation(caps)
     }
@@ -746,6 +820,10 @@ impl<'b> DynAsyncElement for &'b mut (dyn DynAsyncElement + 'b) {
     #[cfg(feature = "metadata")]
     fn meta_transform(&self) -> Option<crate::meta::Transform> {
         (**self).meta_transform()
+    }
+
+    fn meta_requests(&self) -> crate::meta::MetaRequests {
+        (**self).meta_requests()
     }
 
     fn provide_clock(&self) -> Option<ClockCandidate> {
@@ -778,6 +856,10 @@ impl<'b> DynAsyncElement for &'b mut (dyn DynAsyncElement + 'b) {
 
     fn handles_bitrate_requests(&self) -> bool {
         (**self).handles_bitrate_requests()
+    }
+
+    fn handles_qos(&self) -> bool {
+        (**self).handles_qos()
     }
 
     fn properties(&self) -> &'static [PropertySpec] {

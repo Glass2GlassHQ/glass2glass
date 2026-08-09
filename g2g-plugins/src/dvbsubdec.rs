@@ -45,6 +45,16 @@ use crate::dvbsub::{
 };
 
 /// Decodes DVB subtitle display sets into full-frame RGBA canvases.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::dvbsubdec::DvbSubDec;
+///
+/// let element = DvbSubDec::new()
+///     .with_size(1920, 1080)
+///     .with_page_id(1);
+/// ```
 #[derive(Debug)]
 pub struct DvbSubDec {
     dec: DvbSubDecoder,

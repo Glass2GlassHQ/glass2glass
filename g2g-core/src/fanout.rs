@@ -566,6 +566,25 @@ pub trait MultiInputElement: ElementBound {
         }
     }
 
+    /// Whether this element takes another input at runtime (M975), asked before a
+    /// source added through
+    /// [`DynamicFaninHandle::add_input`](crate::runtime::DynamicFaninHandle::add_input)
+    /// is attached to `pad`, with the caps that source would arrive with. The
+    /// runner has already checked `pad` against the declared
+    /// [`input_count`](Self::input_count) and the pad's own
+    /// [`caps_constraint_as_input`](Self::caps_constraint_as_input); this is the
+    /// element's veto for what neither expresses: a session with no spare pad of
+    /// that media kind, a container that cannot carry a second video track.
+    /// Refusing fails that one add ([`G2gError::InputRefused`] reaches the
+    /// caller), and the run continues on the inputs it already has.
+    ///
+    /// Default `true`: pad capacity is the only limit, the fixed-arity behavior.
+    /// The pad is not live until [`configure_pipeline`](Self::configure_pipeline)
+    /// runs for it, so do not commit pad state here.
+    fn accepts_runtime_input(&self, _pad: usize, _caps: &Caps) -> bool {
+        true
+    }
+
     /// Combine one packet from `input` into the merged output.
     ///
     /// M22: a per-input `Eos` is delivered here when that input ends, so a
@@ -704,6 +723,16 @@ pub trait MultiInputElement: ElementBound {
 /// `DataFrame` only while open; `Eos` is forwarded by the runner, never by
 /// the element (the transform contract). Drops dropped frames silently —
 /// observability of gate drops is a tracing concern for a later milestone.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_core::fanout::Gate;
+///
+/// let gate = Gate::new(true);
+/// let handle = gate.handle();
+/// handle.set_open(false);
+/// ```
 #[derive(Debug)]
 pub struct Gate {
     open: Arc<AtomicBool>,
@@ -791,6 +820,16 @@ impl AsyncElement for Gate {
 /// 1→N router. Each `DataFrame` goes to the single port named by an atomic
 /// discriminator; `CapsChanged` is broadcast to every port so all branches
 /// stay configured. `Eos` is broadcast by the runner.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_core::fanout::Router;
+///
+/// let router = Router::new(3);
+/// let handle = router.handle();
+/// handle.select(2);
+/// ```
 #[derive(Debug)]
 pub struct Router {
     selected: Arc<AtomicUsize>,
@@ -910,6 +949,16 @@ impl MultiOutputElement for Router {
 /// that input's frames and drains/discards the rest. The merged stream ends
 /// only once every input has reached EOS (see `run_fanin_sink`). `Merger`
 /// holds just the selector; the forwarding lives in the runner.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_core::fanout::Merger;
+///
+/// let merger = Merger::new(2);
+/// let handle = merger.handle();
+/// handle.select(1);
+/// ```
 #[derive(Debug)]
 pub struct Merger {
     selected: Arc<AtomicUsize>,

@@ -51,6 +51,13 @@ struct DecoderState {
     provides_samples: bool,
 }
 
+/// # Example
+///
+/// ```ignore
+/// use g2g_plugins::mfaacdecode::MfAacDecode;
+///
+/// let decode = MfAacDecode::new().with_audio_specific_config(vec![0x12, 0x10]);
+/// ```
 #[derive(Debug)]
 pub struct MfAacDecode {
     state: Option<DecoderState>,

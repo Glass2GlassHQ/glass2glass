@@ -85,6 +85,17 @@ fn parse_sampling(s: &str) -> Option<Sampling> {
 
 /// ST 2110-22 JPEG XS sink: `CompressedVideo{JpegXs}` `DataFrame`s -> RFC 9134 RTP
 /// over UDP.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_core::{AsyncElement, PropValue};
+/// use g2g_plugins::st2110jxsrtp::St2110JxsSink;
+///
+/// let mut sink = St2110JxsSink::new();
+/// sink.set_property("host", PropValue::Str("239.0.0.1".into())).unwrap();
+/// sink.set_property("port", PropValue::Uint(5010)).unwrap();
+/// ```
 pub struct St2110JxsSink {
     host: String,
     port: u16,
@@ -364,6 +375,17 @@ impl PadTemplates for St2110JxsSink {
 
 /// ST 2110-22 JPEG XS source: RFC 9134 RTP over UDP -> `CompressedVideo{JpegXs}`
 /// `DataFrame`s.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_core::PropValue;
+/// use g2g_plugins::st2110jxsrtp::St2110JxsSrc;
+///
+/// let mut src = St2110JxsSrc::new();
+/// src.set_property("address", PropValue::Str("239.0.0.1".into())).unwrap();
+/// src.set_property("port", PropValue::Uint(5010)).unwrap();
+/// ```
 pub struct St2110JxsSrc {
     address: String,
     port: u16,

@@ -9,7 +9,7 @@ use crate::element::{
     AsyncElement, BoxFuture, ConfigureOutcome, ElementBound, OutputSink, PushOutcome, Reconfigure,
 };
 use crate::error::G2gError;
-use crate::format_element::CapsConstraint;
+use crate::format_element::{CapsConstraint, CapsPreferences};
 use crate::frame::PipelinePacket;
 use crate::memory::{DomainSet, MemoryDomainKind};
 use crate::property::{ElementMetadata, PropError, PropValue, PropertySpec};
@@ -177,6 +177,17 @@ pub trait SourceLoop: ElementBound {
         &'a mut self,
     ) -> impl Future<Output = Result<CapsConstraint<'a>, G2gError>> + 'a {
         async move { Ok(CapsConstraint::LegacySource(self.intercept_caps().await?)) }
+    }
+
+    /// What this source is willing to pay for each alternative of the produce
+    /// set its [`caps_constraint`](Self::caps_constraint) advertises. Default
+    /// `None`: the alternatives are already in preference order and cost their
+    /// index. A source overrides this to declare *equal* cost between formats it
+    /// does not care about (so a downstream element's preference decides) or a
+    /// gap wide enough that a downstream preference cannot pull the chain onto
+    /// its fallback.
+    fn caps_preferences(&self) -> Option<CapsPreferences> {
+        None
     }
 
     /// The fixed output caps this source already knows from its properties,
@@ -662,9 +673,19 @@ where
     // (a two-sided negotiation), so a multi-domain sink/source pair settles on a
     // shared domain (GPU-preferred) instead of the sink dictating unilaterally;
     // no shared domain is a loud conflict rather than a silent mismatch.
-    let allocation = match sink.propose_allocation(&negotiated_caps) {
-        Some(p) => Some(p.resolve_for_producer(SourceLoop::output_domains(source))?),
-        None => None,
+    // M976: the sink's meta requests ride the same proposal, so the source can
+    // ask what anyone downstream wants attached before it produces a frame.
+    let proposed = crate::query::with_meta_demand(
+        sink.propose_allocation(&negotiated_caps),
+        AsyncElement::meta_requests(sink),
+    );
+    // A demand-only proposal accepts every domain, so reconciling it would let a
+    // metadata request pick the source's memory domain: pass it through as is.
+    let allocation = match proposed {
+        Some(p) if p.constrains_pool() => {
+            Some(p.resolve_for_producer(SourceLoop::output_domains(source))?)
+        }
+        other => other,
     };
     if let Some(p) = &allocation {
         source.configure_allocation(p);
@@ -2169,8 +2190,11 @@ where
         // `PushOutcome::Qos` and sheds load. Without this the report dies at the
         // transform (its `process` push outcome is discarded). M720 extends the
         // same hop to keyframe requests / bitrate targets the transform does
-        // not consume itself.
-        adapter.relay_qos_to(link1_rx.qos_slot());
+        // not consume itself; M997 does the same for QoS, so a decoder that
+        // sheds work itself observes the report instead of relaying it.
+        if !transform.handles_qos() {
+            adapter.relay_qos_to(link1_rx.qos_slot());
+        }
         if !transform.handles_keyframe_requests() {
             adapter.relay_reconfigure_to(link1_rx.reconfigure_slot());
         }

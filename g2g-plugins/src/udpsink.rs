@@ -139,6 +139,17 @@ fn h264_any() -> Caps {
     }
 }
 
+/// # Example
+///
+/// ```no_run
+/// use std::net::SocketAddr;
+///
+/// use g2g_plugins::udpsink::UdpSink;
+///
+/// let sink = UdpSink::new("127.0.0.1:5004".parse::<SocketAddr>().unwrap())
+///     .with_rtp(96, 0x1234_5678)
+///     .with_max_payload(1200);
+/// ```
 #[derive(Debug)]
 pub struct UdpSink {
     dest: SocketAddr,

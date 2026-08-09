@@ -12,15 +12,22 @@
 //! format-changing variant (e.g. raw-video in, `Caps::Tensor` out) would set
 //! [`AsyncElement::is_format_boundary`] and a `DerivedOutput` constraint, like
 //! `g2g-ml`'s `OrtInference`.
+//!
+//! Memory-domain model (M985): the frame is read where it lies and forwarded
+//! untouched, so both pads carry the one domain the hosted code reads, System or
+//! (under `cuda-frames`) CUDA. See [`AsyncElement::input_domains`] below.
 
 use core::future::Future;
 use core::pin::Pin;
 
+use g2g_core::memory::{DomainSet, MemoryDomainKind};
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, Frame,
-    G2gError, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
-    PropValue, PropertySpec, Rate, RawVideoFormat,
+    AllocationParams, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
+    ElementMetadata, Frame, G2gError, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat,
 };
+
+use crate::format::{format_from_py, format_to_py, frame_bytes};
 
 /// A gst-python-ml element hosted as a first-class g2g transform.
 #[derive(Debug)]
@@ -37,6 +44,11 @@ pub struct PyTransform {
     /// Overlay flag bridged to the Python task (an example backend-declared
     /// property; `ActionTask` reads `self.draw_label`).
     draw_label: bool,
+    /// Whether the hosted element works on GPU-resident CUDA frames, which it
+    /// reads through `g2g_process_cuda` and passes through untouched. It decides
+    /// both halves of this element's memory-domain declaration: the frame arrives
+    /// and leaves in the one domain, so the two cannot disagree.
+    cuda_frames: bool,
     /// Element properties forwarded verbatim to the hosted Python instance at
     /// construction (e.g. `model-name`, `engine-name`, `device`): the gst-python
     /// GObject-property analog. The Python class declares these (via the g2g
@@ -70,6 +82,7 @@ impl PyTransform {
                 interlace: g2g_core::Interlace::Any,
             },
             draw_label: false,
+            cuda_frames: false,
             params: Vec::new(),
             configured: false,
             fixed: None,
@@ -91,6 +104,25 @@ impl PyTransform {
     pub fn with_draw_label(mut self, on: bool) -> Self {
         self.draw_label = on;
         self
+    }
+
+    /// Host an element that works on GPU-resident CUDA frames: they reach it as
+    /// `__cuda_array_interface__` planes through `g2g_process_cuda` and flow on
+    /// still device-resident. Sets this element's whole memory-domain story (see
+    /// [`AsyncElement::input_domains`]); the hosted class must define
+    /// `g2g_process_cuda` and the caps must be semi-planar (NV12 / P010).
+    pub fn with_cuda_frames(mut self, on: bool) -> Self {
+        self.cuda_frames = on;
+        self
+    }
+
+    /// The one memory domain frames arrive and leave in.
+    fn domain(&self) -> MemoryDomainKind {
+        if self.cuda_frames {
+            MemoryDomainKind::Cuda
+        } else {
+            MemoryDomainKind::System
+        }
     }
 
     /// Count of frames pushed downstream. Useful in tests.
@@ -140,6 +172,45 @@ impl AsyncElement for PyTransform {
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
         upstream_caps.intersect(&self.accept)
+    }
+
+    /// The hosted element reads the frame where it already is and forwards it
+    /// untouched, so the domain it emits is the domain it consumes: System bytes
+    /// over the buffer protocol, or CUDA device memory over
+    /// `__cuda_array_interface__` under `cuda-frames`. Declaring one domain on
+    /// both pads keeps that relation honest, so the domain-converter auto-plug
+    /// splices a download / upload *ahead* of this element when upstream cannot
+    /// deliver what the hosted code reads, and splices nothing after it (the
+    /// frame really does leave in the declared domain).
+    fn input_domains(&self) -> DomainSet {
+        DomainSet::only(self.domain())
+    }
+
+    fn output_memory(&self) -> MemoryDomainKind {
+        self.domain()
+    }
+
+    /// Ask upstream to allocate in the domain the hosted code can read, so a
+    /// multi-domain producer (an NVDEC that can keep frames on the device or
+    /// download them) settles on it rather than needing a converter node. Only
+    /// the domain is constrained: this element allocates nothing of its own, so
+    /// it imposes no buffer count or alignment, and the size is one frame.
+    fn propose_allocation(&self, caps: &Caps) -> Option<AllocationParams> {
+        let Caps::RawVideo {
+            format,
+            width: Dim::Fixed(width),
+            height: Dim::Fixed(height),
+            ..
+        } = caps
+        else {
+            return None;
+        };
+        let size = frame_bytes(*format, *width, *height);
+        Some(if self.cuda_frames {
+            AllocationParams::cuda(size, 1, 1)
+        } else {
+            AllocationParams::system(size, 1)
+        })
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -234,6 +305,19 @@ impl AsyncElement for PyTransform {
                 self.draw_label = value.as_bool().ok_or(PropError::Type)?;
                 Ok(())
             }
+            "cuda-frames" => {
+                self.cuda_frames = value.as_bool().ok_or(PropError::Type)?;
+                Ok(())
+            }
+            "format" => {
+                let parsed = format_from_py(value.as_str().ok_or(PropError::Type)?)
+                    .ok_or(PropError::Value)?;
+                let Caps::RawVideo { format, .. } = &mut self.accept else {
+                    return Err(PropError::Value);
+                };
+                *format = parsed;
+                Ok(())
+            }
             // Any other *declared* property is forwarded to the hosted Python
             // instance (a gst-python-ml element's own GObject property, e.g.
             // model-name / engine-name). Stored in order; re-setting replaces.
@@ -255,6 +339,13 @@ impl AsyncElement for PyTransform {
             "module" => Some(PropValue::Str(self.module.clone())),
             "class" => Some(PropValue::Str(self.class.clone())),
             "draw-label" => Some(PropValue::Bool(self.draw_label)),
+            "cuda-frames" => Some(PropValue::Bool(self.cuda_frames)),
+            "format" => match &self.accept {
+                Caps::RawVideo { format, .. } => {
+                    Some(PropValue::Str(format_to_py(*format).to_string()))
+                }
+                _ => None,
+            },
             other => self
                 .params
                 .iter()
@@ -298,6 +389,18 @@ static PYTRANSFORM_PROPS: &[PropertySpec] = &[
         "draw-label",
         PropKind::Bool,
         "overlay the inferred label on the frame",
+    )
+    .with_default("false"),
+    PropertySpec::new(
+        "format",
+        PropKind::Str,
+        "pixel format the hosted element accepts (RGBA | BGRA | NV12 | I420 | YUY2 | P010_10LE)",
+    )
+    .with_default("RGBA"),
+    PropertySpec::new(
+        "cuda-frames",
+        PropKind::Bool,
+        "host an element that reads GPU-resident CUDA frames (needs g2g_process_cuda, NV12 / P010)",
     )
     .with_default("false"),
     // Common ML tunables declared by the gst-python-ml backend BaseTransform.

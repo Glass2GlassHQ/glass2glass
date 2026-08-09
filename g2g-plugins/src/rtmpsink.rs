@@ -81,6 +81,13 @@ fn parse_rtmp_url(url: &str) -> Result<RtmpTarget, G2gError> {
     })
 }
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::rtmpsink::RtmpSink;
+///
+/// let sink = RtmpSink::new("rtmp://localhost/live/streamkey").with_complex_handshake(true);
+/// ```
 #[derive(Debug)]
 pub struct RtmpSink {
     url: String,

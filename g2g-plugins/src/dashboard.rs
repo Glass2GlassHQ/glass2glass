@@ -383,6 +383,7 @@ mod tests {
                 from: 0,
                 to: 1,
                 caps: None,
+                observed_caps: None,
                 counts: EdgeCounts {
                     packets: 12,
                     bytes: 480,

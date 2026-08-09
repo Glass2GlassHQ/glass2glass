@@ -808,6 +808,18 @@ impl Drop for VulkanHdrSink {
 /// QoS properties, and the packet handling. The app keeps driving it from its
 /// winit thread (`block_on(sink.process(..))`) and forwards resize events through
 /// [`resize`](Self::resize).
+///
+/// # Example
+///
+/// ```ignore
+/// use g2g_plugins::vulkanhdrsink::{HdrMasteringDisplay, VulkanHdrPresentSink, VulkanHdrSink};
+///
+/// // `device`, `display` and `window` come from the app's decode device and window
+/// let raw = unsafe {
+///     VulkanHdrSink::new(&device, display, window, 1920, 1080, HdrMasteringDisplay::default())?
+/// };
+/// let sink = unsafe { VulkanHdrPresentSink::new(raw) }.with_max_lateness_ns(20_000_000);
+/// ```
 #[derive(Debug)]
 pub struct VulkanHdrPresentSink {
     sink: VulkanHdrSink,

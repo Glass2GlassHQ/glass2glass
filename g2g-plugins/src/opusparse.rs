@@ -198,6 +198,13 @@ pub(crate) fn dops_from_opus_head(head: &[u8]) -> Option<Vec<u8>> {
     Some(dops)
 }
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::opusparse::OpusParse;
+///
+/// let parse = OpusParse::new();
+/// ```
 #[derive(Debug, Default)]
 pub struct OpusParse {
     configured: bool,

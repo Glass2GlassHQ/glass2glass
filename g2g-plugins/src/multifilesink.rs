@@ -50,6 +50,14 @@ impl NextFile {
     }
 }
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::multifilesink::MultiFileSink;
+///
+/// let sink = MultiFileSink::new("frame%05d.raw");
+/// assert_eq!(sink.files_written(), 0);
+/// ```
 #[derive(Debug)]
 pub struct MultiFileSink {
     location: String,

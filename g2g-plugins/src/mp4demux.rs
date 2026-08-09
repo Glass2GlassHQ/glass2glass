@@ -73,6 +73,14 @@ fn mp4_video_stream_from_str(name: &str) -> Option<VideoCodec> {
         .map(|(_, c)| *c)
 }
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::mp4demux::Mp4Demux;
+///
+/// // gst-launch equivalent: filesrc location=clip.mp4 ! mp4demux ! decodebin
+/// let demux = Mp4Demux::new();
+/// ```
 #[derive(Debug)]
 pub struct Mp4Demux {
     /// The whole file, accumulated across chunks; parsed once at `Eos` (the `moov`

@@ -30,6 +30,20 @@ use web_sys::{BinaryType, CloseEvent, Event, MessageEvent, WebSocket};
 
 use crate::webutil::Inbox;
 
+/// # Example
+///
+/// ```ignore
+/// use g2g_core::{Caps, Dim, Rate, VideoCodec};
+/// use g2g_plugins::websocketsrc::WebSocketSrc;
+///
+/// let caps = Caps::CompressedVideo {
+///     codec: VideoCodec::H264,
+///     width: Dim::Fixed(1280),
+///     height: Dim::Fixed(720),
+///     framerate: Rate::Fixed(30 << 16),
+/// };
+/// let src = WebSocketSrc::new("ws://localhost:8080/stream", caps);
+/// ```
 #[derive(Debug)]
 pub struct WebSocketSrc {
     url: String,
@@ -121,6 +135,10 @@ impl SourceLoop for WebSocketSrc {
             ws.set_onerror(Some(on_error.as_ref().unchecked_ref()));
 
             let mut sequence = 0u64;
+            // A failed push must not return early: the callbacks below are
+            // still installed on the socket, and dropping them while the
+            // socket keeps delivering messages calls a freed Rust closure.
+            let mut push_result = Ok(());
             while let Some(bytes) = inbox.next().await {
                 let frame = Frame {
                     domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
@@ -131,7 +149,10 @@ impl SourceLoop for WebSocketSrc {
                     meta: Default::default(),
                 };
                 sequence += 1;
-                out.push(PipelinePacket::DataFrame(frame)).await?;
+                if let Err(e) = out.push(PipelinePacket::DataFrame(frame)).await {
+                    push_result = Err(e);
+                    break;
+                }
             }
 
             // Detach the callbacks before dropping them so JS holds no
@@ -145,6 +166,7 @@ impl SourceLoop for WebSocketSrc {
             drop(on_error);
             let _ = ws.close();
 
+            push_result?;
             out.push(PipelinePacket::Eos).await?;
             Ok(sequence)
         })

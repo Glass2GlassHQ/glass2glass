@@ -12968,6 +12968,13 @@ fn parameter_set_fingerprint(codec: VideoCodec, au: &[u8]) -> alloc::vec::Vec<u8
     fp
 }
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::vulkanvideo::VulkanVideoDec;
+///
+/// let element = VulkanVideoDec::new();
+/// ```
 pub struct VulkanVideoDec {
     decoder: Option<DpbDecoderKind>,
     session: Option<DecodeSessionKind>,

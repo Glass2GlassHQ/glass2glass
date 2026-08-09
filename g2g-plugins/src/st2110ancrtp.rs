@@ -66,6 +66,15 @@ fn video_codec(caps: &Caps) -> Result<VideoCodec, G2gError> {
 
 /// ST 2110-40 caption sink: compressed H.264 / H.265 video in, CEA-608/708 captions
 /// out as RFC 8331 ANC RTP over UDP.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::st2110ancrtp::St2110AncSink;
+///
+/// let sink = St2110AncSink::new();
+/// let _sdp = sink.sdp();
+/// ```
 pub struct St2110AncSink {
     host: String,
     port: u16,
@@ -290,6 +299,15 @@ impl PadTemplates for St2110AncSink {
 
 /// ST 2110-40 caption source: RFC 8331 ANC RTP over UDP -> timed `Caps::Text{Utf8}`
 /// cue frames for the selected caption service.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::cea::CcSource;
+/// use g2g_plugins::st2110ancrtp::St2110AncSrc;
+///
+/// let source = St2110AncSrc::for_source(CcSource::Cea708(1));
+/// ```
 pub struct St2110AncSrc {
     address: String,
     port: u16,

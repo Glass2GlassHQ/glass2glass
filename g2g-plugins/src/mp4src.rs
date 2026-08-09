@@ -39,6 +39,14 @@ use crate::fmp4::{
 };
 use crate::mp4box::{find_box, parse_ilst_tags};
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_core::runtime::SeekController;
+/// use g2g_plugins::mp4src::Mp4Src;
+///
+/// let src = Mp4Src::new("recording.mp4").with_seek(SeekController::new());
+/// ```
 #[derive(Debug)]
 pub struct Mp4Src {
     path: PathBuf,

@@ -102,6 +102,15 @@ impl core::fmt::Debug for RenderState {
     }
 }
 
+/// # Example
+///
+/// ```ignore
+/// use g2g_plugins::metalvideosink::MetalVideoSink;
+///
+/// let sink = MetalVideoSink::new()
+///     .with_max_lateness_ns(20_000_000)
+///     .with_qos_interval_ns(1_000_000_000);
+/// ```
 #[derive(Debug)]
 pub struct MetalVideoSink {
     configured: bool,

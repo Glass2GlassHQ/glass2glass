@@ -589,6 +589,13 @@ pub fn default_registry() -> Registry {
     reg.register_launch(LaunchFactory::new("identity", Vec::new(), || {
         Box::new(IdentityTransform::new())
     }));
+    // Mid-graph content sniffing: re-declares the caps of a byte stream from its
+    // own leading bytes, for a source that could only guess (`srtsrc ! typefind !
+    // decodebin`). No pad templates, like `identity`: it passes data through and
+    // only the sniff decides the type.
+    reg.register_launch(LaunchFactory::new("typefind", Vec::new(), || {
+        Box::new(crate::typefind::TypeFind::new())
+    }));
     // Wall-clock pacing (M945): `sync=false` makes it an identity again.
     reg.register_launch(LaunchFactory::new("clocksync", Vec::new(), || {
         Box::new(crate::clocksync::ClockSyncTransform::new())
@@ -1045,8 +1052,9 @@ fn register_autoplug_candidates(reg: &mut Registry) {
     // still picks a CPU decoder: `NvDec` emits NV12 in CUDA device memory, which
     // caps geometry / format does not encode. M276 makes that domain a first-class
     // auto-plug feature: the factory is tagged `produces(Cuda)`, so the
-    // domain-aware search (`decodebin_preferring(.., Cuda)`) prefers `NvDec` for a
-    // GPU consumer, while a plain `decodebin` (preference `System`) is unchanged.
+    // domain-aware search prefers `NvDec` for a GPU consumer (M989 reads that
+    // preference off the consumer's declared `input_domains`), while a consumer
+    // that declares no domain requirement keeps the CPU decoder.
     #[cfg(all(target_os = "linux", feature = "nvdec"))]
     reg.register(
         ElementFactory::of::<NvDec>("nvdec", |_| Box::new(NvDec::new()))

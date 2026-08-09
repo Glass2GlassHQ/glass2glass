@@ -550,6 +550,12 @@ analytics = ["metadata"]
 # the no_std baseline; this is the HD / many-box GPU companion. Pulls wgpu
 # directly too (the same crate vello uses) so it shares the GpuContext / sink.
 vello-overlay = ["std", "analytics", "dep:vello", "dep:wgpu"]
+# Vello GPU text overlay (M981): VelloTextOverlay renders subtitle cues with the
+# Vello GPU 2D renderer into a wgpu texture (MemoryDomain::WgpuTexture), so a
+# keep-on-GPU pipeline overlays text with no CPU round trip. Cue selection,
+# placement and font fallback are the CPU TextOverlay's, shaped by cosmic-text;
+# only the glyph outlines are drawn on the GPU, hence both features.
+vello-text-overlay = ["vello-overlay", "text-shaping"]
 # GPU presentation sink (M103): WgpuSink presents MemoryDomain::WgpuTexture
 # frames (eg from VelloAnalyticsOverlay) by blitting onto a target on the *same*
 # shared wgpu device (a wgpu texture is device-bound, so producer and sink must
@@ -654,9 +660,11 @@ st2110 = ["std"]
 jpegxs = ["std"]
 # PTP system clock (PtpSystemClock, M593 phase C): reads the OS PTP-disciplined
 # CLOCK_TAI (disciplined by linuxptp / phc2sys) on a worker thread and feeds a
-# g2g-core PtpClock, so a PTP-synced host offers a grandmaster clock to election.
-# Linux-only (CLOCK_TAI); implies std; pulls libc for clock_gettime.
-ptp = ["std", "dep:libc"]
+# g2g-core PtpClock, so a PTP-synced host offers a grandmaster clock to election,
+# and queries a local ptp4l for the state behind that clock. Also the software PTP
+# client (PtpClient), which speaks PTP over UDP itself. Linux-only (CLOCK_TAI);
+# implies std; pulls libc for clock_gettime and socket2 for the shared port bind.
+ptp = ["std", "dep:libc", "dep:socket2"]
 # Linux PulseAudio render sink (PulseSink): plays interleaved PCM on the default
 # PulseAudio / PipeWire-pulse server via the blocking libpulse "simple" API on a
 # worker thread. Pulls libpulse-binding + libpulse-simple-binding (link libpulse).
@@ -698,6 +706,10 @@ miniz_oxide = { version = "0.8", default-features = false, features = ["with-all
 # CLOCK_TAI via clock_gettime for the `ptp` feature (PtpSystemClock). Top-level
 # optional (builds on all platforms); the module using it is Linux + `ptp` gated.
 libc = { version = "0.2", optional = true }
+# SO_REUSEADDR / SO_REUSEPORT before bind for the `ptp` feature (PtpClient), so it
+# can share UDP 319 / 320 with a running ptp4l. std's UdpSocket binds first.
+# (its `all` feature is what exposes set_reuse_port).
+socket2 = { version = "0.6", features = ["all"], optional = true }
 # Dynamic plugin loader (plugin-loader feature): cross-platform `dlopen`/`dlsym`
 # over the loaded `cdylib`. The host keeps each `Library` alive for the process
 # lifetime (dropping it unmaps the code the registered elements run from).
@@ -1278,6 +1290,12 @@ required-features = ["vulkan-video"]
 [[example]]
 name = "metal_video_on_screen"
 required-features = ["vtdecode", "metal-sink"]
+
+# M978: turnkey windowed runner for WgpuSink (videotestsrc -> synthetic detection
+# metadata -> Vello overlay -> on-screen sink). No media file or codec hardware.
+[[example]]
+name = "wgpu_overlay_on_screen"
+required-features = ["vello-overlay", "wgpu-sink"]
 
 # M495: zero-copy VulkanVideoDec -> WgpuSink (decoded texture presented, no readback).
 [[test]]

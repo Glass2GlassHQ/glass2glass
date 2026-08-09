@@ -284,9 +284,9 @@ fn has_encoder(name: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// ffmpeg-authored 1.0 s A/V MP4. B-frames are off: g2g's MP4 demux carries
-/// only PTS, so a reordered stream would not survive the round trip in decode
-/// order (a demux-side limit, not a layout one).
+/// ffmpeg-authored 1.0 s A/V MP4. B-frames are off, so these layout checks read
+/// a straight timeline where presentation and decode order agree; the reordered
+/// case is `m972_progressive_bframes`.
 fn author_av(path: &PathBuf, vcodec: &str, acodec: &str) -> Option<Vec<u8>> {
     if !has_encoder(vcodec) || !has_encoder(acodec) {
         eprintln!("skipping: this ffmpeg has no {vcodec} / {acodec} encoder");

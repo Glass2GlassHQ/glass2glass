@@ -76,16 +76,18 @@ use g2g_core::{
     OutputSink, PipelinePacket, Rate, RawVideoFormat,
 };
 
-use crate::dmabufwgpu::{dmabuf_frame_bytes, dmabuf_row_stride, DmaBufWgpuBuffer};
+use crate::dmabufwgpu::DmaBufWgpuBuffer;
 
-/// Formats this element exports: packed RGBA/BGRA (one plane) and 8-bit NV12 (a
-/// packed luma + interleaved-chroma buffer, luma stride). The frame byte size and
-/// row stride come from the shared [`dmabuf_frame_bytes`] / [`dmabuf_row_stride`]
-/// helpers so the export and the [`DmaBufToWgpu`] import agree.
-const FORMATS: [RawVideoFormat; 3] = [
+/// Formats this element exports: packed RGBA/BGRA/YUYV (one plane) and 8-bit NV12
+/// (a packed luma + interleaved-chroma buffer, luma stride). The frame byte size
+/// and row stride come from `RawVideoFormat`'s `frame_bytes` / `row_stride`, so
+/// the export and the [`DmaBufToWgpu`](crate::dmabufwgpu::DmaBufToWgpu) import
+/// agree.
+const FORMATS: [RawVideoFormat; 4] = [
     RawVideoFormat::Rgba8,
     RawVideoFormat::Bgra8,
     RawVideoFormat::Nv12,
+    RawVideoFormat::Yuyv,
 ];
 
 fn gpu_err() -> G2gError {
@@ -134,13 +136,21 @@ fn input_buffer(owned: &OwnedWgpuBuffer) -> Option<&wgpu::Buffer> {
 }
 
 /// GPU -> DMABUF export element. See the module docs.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::wgpudmabuf::WgpuToDmaBuf;
+///
+/// let export = WgpuToDmaBuf::new().with_external_semaphore(true);
+/// ```
 #[derive(Debug)]
 pub struct WgpuToDmaBuf {
     device: Option<wgpu::Device>,
     queue: Option<wgpu::Queue>,
     configured: bool,
     /// Pixel format, luma/packed row stride, and height from the negotiated caps;
-    /// the exported buffer is `dmabuf_frame_bytes(format, stride, height)` bytes.
+    /// the exported buffer is `format.frame_bytes(stride, height)` bytes.
     format: RawVideoFormat,
     stride: u32,
     height: u32,
@@ -351,7 +361,7 @@ impl AsyncElement for WgpuToDmaBuf {
             } => (*format, *w, *h),
             _ => return Err(G2gError::CapsMismatch),
         };
-        self.stride = dmabuf_row_stride(format, w).ok_or(G2gError::CapsMismatch)?;
+        self.stride = format.row_stride(w).ok_or(G2gError::CapsMismatch)?;
         self.format = format;
         self.height = h;
         self.configured = true;
@@ -376,12 +386,10 @@ impl AsyncElement for WgpuToDmaBuf {
                     let src = input_buffer(owned).ok_or(G2gError::UnsupportedDomain)?;
                     self.gpu().await?;
 
-                    let size = dmabuf_frame_bytes(
-                        self.format,
-                        u64::from(self.stride),
-                        u64::from(self.height),
-                    )
-                    .ok_or(G2gError::CapsMismatch)?;
+                    let size = self
+                        .format
+                        .frame_bytes(u64::from(self.stride), u64::from(self.height))
+                        .ok_or(G2gError::CapsMismatch)?;
                     if size == 0 || (owned.len as u64) < size {
                         return Err(G2gError::CapsMismatch);
                     }

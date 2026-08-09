@@ -51,6 +51,13 @@ impl Fill {
     }
 }
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::videobox::{Fill, VideoBox};
+///
+/// let element = VideoBox::new().with_borders(8, 8, 16, 16, Fill::Black);
+/// ```
 #[derive(Debug)]
 pub struct VideoBox {
     /// Signed edge counts (GStreamer `videobox` model): positive crops that

@@ -41,6 +41,15 @@ use crate::annexb::{avcc_record, avcc_sample, is_keyframe_nal, parameter_sets, s
 use crate::flv::{FlvCodec, FlvMuxer};
 
 /// Muxes one elementary stream into an FLV byte stream.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_core::TagList;
+/// use g2g_plugins::flvmux::FlvMux;
+///
+/// let mux = FlvMux::new().with_tags(TagList::new());
+/// ```
 #[derive(Debug)]
 pub struct FlvMux {
     /// Built at configure, once the input track is known.

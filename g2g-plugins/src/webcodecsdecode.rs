@@ -49,6 +49,13 @@ use web_sys::{
 use crate::h264util::{h264_au_is_keyframe, h264_codec_string};
 use crate::webutil::Inbox;
 
+/// # Example
+///
+/// ```ignore
+/// use g2g_plugins::webcodecsdecode::WebCodecsDecode;
+///
+/// let decoder = WebCodecsDecode::new().with_gpu_output();
+/// ```
 pub struct WebCodecsDecode {
     codec: VideoCodec,
     /// When set, hand the `VideoFrame` forward as a GPU-resident external

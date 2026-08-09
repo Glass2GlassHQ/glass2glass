@@ -17,7 +17,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use crate::caps::{Caps, CapsSet, PassthroughFields};
-use crate::format_element::CapsConstraint;
+use crate::format_element::{CapsConstraint, CapsPreferences};
 use crate::graph::{NodeId, NodeKind, ValidatedGraph};
 use crate::log::{self, LogLevel, Target, CAPS_CATEGORY};
 #[cfg(feature = "std")]
@@ -126,6 +126,18 @@ impl NegotiationFailure {
 pub fn solve_linear<'a>(
     constraints: &[&CapsConstraint<'a>],
 ) -> Result<LinkSolution, NegotiationFailure> {
+    solve_linear_preferred(constraints, &[])
+}
+
+/// [`solve_linear`] with per-element [`CapsPreferences`], indexed the same way
+/// as `constraints` (a shorter slice, or a `None` entry, means that element
+/// declared none). When some element declares costs the chain fixates to the
+/// least-total-cost consistent assignment instead of each link's own first
+/// choice; when none does, this is [`solve_linear`] exactly.
+pub fn solve_linear_preferred<'a>(
+    constraints: &[&CapsConstraint<'a>],
+    preferences: &[Option<CapsPreferences>],
+) -> Result<LinkSolution, NegotiationFailure> {
     if constraints.len() < 2 {
         return Err(NegotiationFailure::Degenerate);
     }
@@ -200,7 +212,7 @@ pub fn solve_linear<'a>(
     }
 
     // Validate and fixate.
-    let mut out = Vec::with_capacity(n_links);
+    let mut domains = Vec::with_capacity(n_links);
     for (li, slot) in links.iter().enumerate() {
         let set = slot
             .as_ref()
@@ -208,13 +220,32 @@ pub fn solve_linear<'a>(
         if set.is_empty() {
             return Err(NegotiationFailure::empty_link(li, li + 1));
         }
-        let fixed = set.fixate().ok_or(NegotiationFailure::Unfixable {
-            upstream: li,
-            downstream: li + 1,
-        })?;
-        out.push(fixed);
+        let candidates = fixated_candidates(set);
+        if candidates.is_empty() {
+            return Err(NegotiationFailure::Unfixable {
+                upstream: li,
+                downstream: li + 1,
+            });
+        }
+        domains.push(candidates);
     }
-    Ok(out)
+
+    // Each link's first candidate is what `CapsSet::fixate` would have picked,
+    // so a chain where nobody declared costs keeps its per-link choice. With
+    // costs declared, the chain-wide minimum can prefer a later candidate.
+    let chain: Vec<ChainNode<'_, '_>> = constraints
+        .iter()
+        .enumerate()
+        .map(|(i, c)| ChainNode::new(c, preference_at(preferences, i)))
+        .collect();
+    if let Some(pick) = min_cost_chain(&chain, &domains) {
+        return Ok(pick
+            .iter()
+            .zip(&domains)
+            .map(|(&j, d)| d[j].clone())
+            .collect());
+    }
+    Ok(domains.into_iter().map(|mut d| d.remove(0)).collect())
 }
 
 fn is_legacy(c: &CapsConstraint<'_>) -> bool {
@@ -967,6 +998,21 @@ pub fn solve_graph_labeled<E>(
     constraints: &[NodeConstraint<'_>],
     label: &dyn Fn(NodeId) -> String,
 ) -> Result<Vec<Caps>, NegotiationFailure> {
+    solve_graph_preferred(graph, constraints, &[], label)
+}
+
+/// [`solve_graph_labeled`] with each node's declared [`CapsPreferences`],
+/// indexed by node id (a shorter slice, or a `None` entry, means that element
+/// declared none). On a linear chain, and only when some element declares
+/// costs, fixation picks the consistent assignment of least total cost rather
+/// than the first the greedy backtrack finds; every other graph, and every
+/// chain with nothing declared, fixates exactly as [`solve_graph_labeled`].
+pub fn solve_graph_preferred<E>(
+    graph: &ValidatedGraph<E>,
+    constraints: &[NodeConstraint<'_>],
+    preferences: &[Option<CapsPreferences>],
+    label: &dyn Fn(NodeId) -> String,
+) -> Result<Vec<Caps>, NegotiationFailure> {
     let n = graph.node_count();
     if n < 2 || constraints.len() != n {
         return Err(NegotiationFailure::Degenerate);
@@ -1064,14 +1110,7 @@ pub fn solve_graph_labeled<E>(
                 return Err(f);
             }
         };
-        let mut doms: Vec<Caps> = Vec::new();
-        for alt in set.alternatives() {
-            if let Ok(c) = alt.fixate() {
-                if !doms.contains(&c) {
-                    doms.push(c);
-                }
-            }
-        }
+        let doms = fixated_candidates(set);
         if doms.is_empty() {
             crate::g2g_error!(
                 t,
@@ -1089,7 +1128,9 @@ pub fn solve_graph_labeled<E>(
     }
 
     let mut assign: Vec<Option<Caps>> = alloc::vec![None; ne];
-    if !fixate_backtrack(graph, constraints, &domains, &mut assign, 0) {
+    if let Some(chosen) = preferred_chain_assignment(graph, constraints, preferences, &domains) {
+        assign = chosen;
+    } else if !fixate_backtrack(graph, constraints, &domains, &mut assign, 0) {
         let f = NegotiationFailure::NoConsistentFixation;
         report(&f, &edges);
         return Err(f);
@@ -1112,6 +1153,243 @@ pub fn solve_graph_labeled<E>(
         }
     }
     Ok(out)
+}
+
+/// Every alternative of `set` that collapses to a concrete `Caps`, deduped and
+/// in the set's own preference order, so the first entry is exactly what
+/// [`CapsSet::fixate`] would return and an empty result means the same as its
+/// `None`.
+fn fixated_candidates(set: &CapsSet) -> Vec<Caps> {
+    let mut out: Vec<Caps> = Vec::new();
+    for alt in set.alternatives() {
+        if let Ok(c) = alt.fixate() {
+            if !out.contains(&c) {
+                out.push(c);
+            }
+        }
+    }
+    out
+}
+
+/// `preferences[i]`, tolerating a slice shorter than the chain.
+fn preference_at(
+    preferences: &[Option<CapsPreferences>],
+    index: usize,
+) -> Option<&CapsPreferences> {
+    preferences.get(index).and_then(Option::as_ref)
+}
+
+/// One element of a linear chain, paired with what it is willing to pay for
+/// each of its advertised alternatives.
+struct ChainNode<'c, 'a> {
+    constraint: &'c CapsConstraint<'a>,
+    preferences: Option<&'c CapsPreferences>,
+}
+
+impl<'c, 'a> ChainNode<'c, 'a> {
+    fn new(constraint: &'c CapsConstraint<'a>, preferences: Option<&'c CapsPreferences>) -> Self {
+        let preferences = preferences.filter(|p| !p.is_empty());
+        Self {
+            constraint,
+            preferences,
+        }
+    }
+
+    /// What this element pays for carrying `input` on its input link and
+    /// `output` on its output link. A constraint with no alternative list to
+    /// index (a wildcard, a derived transform, a legacy bridge) is free, so it
+    /// neither steers the chain nor blocks a neighbour that does.
+    fn cost(&self, input: Option<&Caps>, output: Option<&Caps>) -> u64 {
+        match alternative_index(self.constraint, input, output) {
+            Some(i) => self.preferences.map_or(i as u64, |p| p.cost(i) as u64),
+            None => 0,
+        }
+    }
+}
+
+/// Which advertised alternative of `c` the pair `(input, output)` selects: the
+/// first one compatible with the chosen caps. `None` when the constraint
+/// advertises no indexable list.
+fn alternative_index(
+    c: &CapsConstraint<'_>,
+    input: Option<&Caps>,
+    output: Option<&Caps>,
+) -> Option<usize> {
+    let position = |set: &CapsSet, caps: &Caps| {
+        set.alternatives()
+            .iter()
+            .position(|a| a.intersect(caps).is_ok())
+    };
+    match c {
+        CapsConstraint::Produces(set) => position(set, output?),
+        CapsConstraint::Accepts(set) => position(set, input?),
+        CapsConstraint::Identity(set) => position(set, input.or(output)?),
+        CapsConstraint::Mapping(pairs) => {
+            let (input, output) = (input?, output?);
+            pairs
+                .iter()
+                .position(|(i, o)| i.accepts(input) && o.accepts(output))
+        }
+        _ => None,
+    }
+}
+
+/// Least-total-cost consistent assignment for a linear chain: one candidate
+/// index per link. `nodes` are the chain's elements in order and `domains[i]`
+/// the fixated candidates on the link between node `i` and node `i + 1`, in
+/// that link's own preference order.
+///
+/// Dynamic programming over adjacent pairs: the state is the candidate chosen
+/// on one link, the transition is the element between two links (its
+/// input/output relation must hold, and it charges its cost for that pair).
+/// Ties break toward the lexicographically first candidate sequence, which is
+/// the greedy first-fixable pick, so an all-equal-cost chain resolves exactly
+/// as it does with no preferences at all.
+///
+/// `None` when no element declared costs (the caller keeps its existing
+/// fixation untouched) or when no assignment satisfies every element.
+fn min_cost_chain(nodes: &[ChainNode<'_, '_>], domains: &[Vec<Caps>]) -> Option<Vec<usize>> {
+    if domains.is_empty() || nodes.len() != domains.len() + 1 {
+        return None;
+    }
+    if !nodes.iter().any(|n| n.preferences.is_some()) {
+        return None;
+    }
+
+    // best[j]: the cheapest prefix ending with `domains[link][j]` on the link
+    // under consideration, and the candidate indices that reached it.
+    let mut best: Vec<Option<(u64, Vec<usize>)>> = domains[0]
+        .iter()
+        .enumerate()
+        .map(|(j, caps)| Some((nodes[0].cost(None, Some(caps)), alloc::vec![j])))
+        .collect();
+
+    for link in 1..domains.len() {
+        let middle = &nodes[link];
+        let mut next: Vec<Option<(u64, Vec<usize>)>> = alloc::vec![None; domains[link].len()];
+        for (b, output) in domains[link].iter().enumerate() {
+            for (a, input) in domains[link - 1].iter().enumerate() {
+                let Some((so_far, path)) = best[a].as_ref() else {
+                    continue;
+                };
+                if !transform_pair_consistent(middle.constraint, input, output) {
+                    continue;
+                }
+                let total = so_far.saturating_add(middle.cost(Some(input), Some(output)));
+                let mut candidate = path.clone();
+                candidate.push(b);
+                if is_better(next[b].as_ref(), total, &candidate) {
+                    next[b] = Some((total, candidate));
+                }
+            }
+        }
+        best = next;
+    }
+
+    let last = nodes.last()?;
+    let mut winner: Option<(u64, Vec<usize>)> = None;
+    for (j, caps) in domains[domains.len() - 1].iter().enumerate() {
+        let Some((so_far, path)) = best[j].as_ref() else {
+            continue;
+        };
+        let total = so_far.saturating_add(last.cost(Some(caps), None));
+        if is_better(winner.as_ref(), total, path) {
+            winner = Some((total, path.clone()));
+        }
+    }
+    winner.map(|(_, path)| path)
+}
+
+/// Whether `(cost, path)` beats the incumbent: cheaper, or equally cheap with a
+/// lexicographically earlier candidate sequence.
+fn is_better(current: Option<&(u64, Vec<usize>)>, cost: u64, path: &[usize]) -> bool {
+    match current {
+        None => true,
+        Some((c, p)) => (cost, path) < (*c, p.as_slice()),
+    }
+}
+
+/// Preference-driven fixation for a graph that is a plain linear chain: the
+/// same DP as [`min_cost_chain`], mapped onto edge ids. `None` (so the caller
+/// keeps its greedy backtracking) when the graph is not a chain, when no
+/// element declared costs, or when the DP finds no consistent assignment.
+fn preferred_chain_assignment<E>(
+    graph: &ValidatedGraph<E>,
+    constraints: &[NodeConstraint<'_>],
+    preferences: &[Option<CapsPreferences>],
+    domains: &[Vec<Caps>],
+) -> Option<Vec<Option<Caps>>> {
+    if !preferences.iter().any(Option::is_some) {
+        return None;
+    }
+    let (nodes, edges) = chain_order(graph, constraints)?;
+    let chain: Vec<ChainNode<'_, '_>> = nodes
+        .iter()
+        .map(|&node| {
+            let index = node.0 as usize;
+            let NodeConstraint::Element(c) = &constraints[index] else {
+                unreachable!("chain_order admits Element nodes only")
+            };
+            ChainNode::new(c, preference_at(preferences, index))
+        })
+        .collect();
+    let chain_domains: Vec<Vec<Caps>> = edges.iter().map(|&e| domains[e].clone()).collect();
+    let pick = min_cost_chain(&chain, &chain_domains)?;
+
+    let mut assign: Vec<Option<Caps>> = alloc::vec![None; domains.len()];
+    for ((&edge, candidates), &j) in edges.iter().zip(&chain_domains).zip(&pick) {
+        assign[edge] = Some(candidates[j].clone());
+    }
+    Some(assign)
+}
+
+/// The graph as a linear chain: its nodes in source-to-sink order and the edge
+/// ids between them. `None` unless every node has at most one input and one
+/// output edge, the edges form a single path over all of them, and every node
+/// carries a plain [`NodeConstraint::Element`] (a demux or muxer node couples
+/// edges the chain DP does not model).
+fn chain_order<E>(
+    graph: &ValidatedGraph<E>,
+    constraints: &[NodeConstraint<'_>],
+) -> Option<(Vec<NodeId>, Vec<usize>)> {
+    let n = graph.node_count();
+    if n < 2 || graph.edge_count() + 1 != n {
+        return None;
+    }
+    if !constraints
+        .iter()
+        .all(|c| matches!(c, NodeConstraint::Element(_)))
+    {
+        return None;
+    }
+    let mut head = None;
+    for i in 0..n {
+        let node = NodeId(i as u32);
+        if graph.in_edges(node).len() > 1 || graph.out_edges(node).len() > 1 {
+            return None;
+        }
+        if graph.in_edges(node).is_empty() {
+            if head.is_some() {
+                return None;
+            }
+            head = Some(node);
+        }
+    }
+
+    let mut nodes = Vec::with_capacity(n);
+    let mut edges = Vec::with_capacity(n - 1);
+    let mut current = head?;
+    loop {
+        nodes.push(current);
+        match graph.out_edges(current).first() {
+            Some(&edge) => {
+                edges.push(edge);
+                current = graph.edge(edge).dst.node;
+            }
+            None => break,
+        }
+    }
+    (nodes.len() == n).then_some((nodes, edges))
 }
 
 /// Backtracking search for a globally-consistent edge assignment, run after arc

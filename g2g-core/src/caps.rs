@@ -1200,6 +1200,35 @@ impl RawVideoFormat {
     pub const fn is_planar_yuv(self) -> bool {
         self.chroma_shift().is_some()
     }
+
+    /// Row stride in bytes of the luma / packed plane at `width`: 4 bytes per
+    /// pixel for packed RGBA / BGRA, 2 for packed YUYV, 1 for 8-bit NV12 / I420
+    /// luma. `None` for a format with no single-stride byte layout.
+    pub fn row_stride(self, width: u32) -> Option<u32> {
+        match self {
+            RawVideoFormat::Rgba8 | RawVideoFormat::Bgra8 => width.checked_mul(4),
+            RawVideoFormat::Yuyv => width.checked_mul(2),
+            RawVideoFormat::Nv12 | RawVideoFormat::I420 => Some(width),
+            _ => None,
+        }
+    }
+
+    /// Bytes one frame occupies when every row is `stride` bytes, the layout a
+    /// dma-buf or a V4L2 capture buffer uses. Packed RGBA / BGRA / YUYV are a
+    /// single plane (`stride * height`); 8-bit NV12 / I420 add the half-height
+    /// chroma region, which is the same total whether the chroma is interleaved
+    /// (NV12) or split (I420) as long as the luma stride is used. `None` for a
+    /// format with no single-stride byte layout.
+    pub fn frame_bytes(self, stride: u64, height: u64) -> Option<u64> {
+        let luma = stride.checked_mul(height)?;
+        match self {
+            RawVideoFormat::Rgba8 | RawVideoFormat::Bgra8 | RawVideoFormat::Yuyv => Some(luma),
+            RawVideoFormat::Nv12 | RawVideoFormat::I420 => {
+                luma.checked_add(stride.checked_mul(height.div_ceil(2))?)
+            }
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -1847,6 +1876,28 @@ mod tests {
         assert_eq!(P010.bit_depth(), 10);
         assert_eq!(P010.bytes_per_sample(), 2);
         assert!(!P010.is_planar_yuv());
+    }
+
+    #[test]
+    fn single_stride_frame_size_covers_packed_and_semi_planar() {
+        use RawVideoFormat::*;
+        // Packed: one plane. YUYV is two bytes per pixel, RGBA four.
+        assert_eq!(Yuyv.row_stride(640), Some(1280));
+        assert_eq!(Yuyv.frame_bytes(1280, 480), Some(1280 * 480));
+        assert_eq!(Rgba8.row_stride(640), Some(2560));
+        assert_eq!(Rgba8.frame_bytes(2560, 480), Some(2560 * 480));
+        // NV12 luma is one byte per pixel plus the half-height chroma region, and
+        // a padded stride pads every row of both.
+        assert_eq!(Nv12.row_stride(640), Some(640));
+        assert_eq!(Nv12.frame_bytes(640, 480), Some(640 * 480 * 3 / 2));
+        assert_eq!(Nv12.frame_bytes(704, 480), Some(704 * 480 * 3 / 2));
+        // Odd height still rounds the chroma rows up.
+        assert_eq!(Nv12.frame_bytes(4, 3), Some(4 * 3 + 4 * 2));
+        // A bogus stride/height cannot overflow into a small allocation.
+        assert_eq!(Nv12.frame_bytes(u64::MAX, 4), None);
+        // Formats with no single-stride layout report nothing rather than a guess.
+        assert_eq!(I420p10.frame_bytes(640, 480), None);
+        assert_eq!(P010.row_stride(640), None);
     }
 
     #[test]

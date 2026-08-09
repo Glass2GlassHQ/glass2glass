@@ -63,6 +63,15 @@ pub use crate::cenc::ContentKey as SampleAesKey;
 /// caller from configuring the key by hand.
 pub use crate::cenc::{new_key_handle, CencKeyHandle as SampleAesKeyHandle};
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::sampleaesdecrypt::SampleAesDecrypt;
+///
+/// let key = [0u8; 16];
+/// let iv = [0u8; 16];
+/// let decrypt = SampleAesDecrypt::new(key, iv);
+/// ```
 pub struct SampleAesDecrypt {
     /// Directly configured key (the [`new`](Self::new) path).
     key: Option<SampleAesKey>,

@@ -78,6 +78,18 @@ const DEFAULT_GOP_SIZE: i32 = -1;
 
 /// Native H.264 encoder over the NVIDIA Video Codec SDK. NV12 CUDA surfaces in,
 /// H.264 Annex-B out. See the module docs.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_core::VideoCodec;
+/// use g2g_plugins::nvenc::NvEnc;
+///
+/// let encoder = NvEnc::new()
+///     .with_codec(VideoCodec::H265)
+///     .with_bitrate(6_000_000)
+///     .with_gop_size(60);
+/// ```
 pub struct NvEnc {
     width: u32,
     height: u32,

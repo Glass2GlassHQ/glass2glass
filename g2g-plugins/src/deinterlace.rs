@@ -196,6 +196,15 @@ struct Held {
     timing: FrameTiming,
 }
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::deinterlace::{Deinterlace, DeinterlaceMethod, DeinterlaceMode};
+///
+/// let deinterlace = Deinterlace::new()
+///     .with_method(DeinterlaceMethod::Yadif)
+///     .with_mode(DeinterlaceMode::Auto);
+/// ```
 #[derive(Debug)]
 pub struct Deinterlace {
     method: DeinterlaceMethod,

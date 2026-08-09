@@ -27,6 +27,13 @@ use crate::filesink::io_err;
 /// Byte offset of the RIFF running size (constant across header layouts).
 const RIFF_SIZE_OFFSET: u64 = 4;
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::wavsink::WavSink;
+///
+/// let sink = WavSink::new("capture.wav");
+/// ```
 #[derive(Debug)]
 pub struct WavSink {
     path: PathBuf,

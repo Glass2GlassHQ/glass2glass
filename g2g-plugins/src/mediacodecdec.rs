@@ -118,6 +118,14 @@ impl core::fmt::Debug for CodecState {
     }
 }
 
+/// # Example
+///
+/// ```ignore
+/// use g2g_plugins::mediacodecdec::MediaCodecDec;
+///
+/// let h264 = MediaCodecDec::h264();
+/// let h265 = MediaCodecDec::h265();
+/// ```
 #[derive(Debug)]
 pub struct MediaCodecDec {
     codec: VideoCodec,

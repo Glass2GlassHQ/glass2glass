@@ -298,6 +298,15 @@ fn derive_output_caps(
     })
 }
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_core::{TensorDType, TensorLayout};
+/// use g2g_plugins::tensorconvert::TensorConvert;
+///
+/// let convert = TensorConvert::quantize(TensorDType::U8, 0.5, 0)
+///     .to_layout(TensorLayout::Nhwc);
+/// ```
 #[derive(Debug)]
 pub struct TensorConvert {
     /// Output dtype. `None` preserves the input dtype (a layout-only transpose).

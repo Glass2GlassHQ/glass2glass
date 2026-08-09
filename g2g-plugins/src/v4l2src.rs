@@ -84,7 +84,7 @@ const DMABUF_RELEASE_POLL: core::time::Duration = core::time::Duration::from_mil
 /// pins nothing takes the first alternative. MJPEG comes last because it needs
 /// a decoder downstream. A device format missing from this table is skipped,
 /// since there is no `Caps` to carry it on.
-const FOURCCS: [(&[u8; 4], CapturePixelFormat); 4] = [
+pub(crate) const FOURCCS: [(&[u8; 4], CapturePixelFormat); 4] = [
     (b"YUYV", CapturePixelFormat::Yuyv),
     (b"NV12", CapturePixelFormat::Nv12),
     (b"YU12", CapturePixelFormat::I420),
@@ -529,6 +529,16 @@ fn capture_dmabuf(
     Ok(())
 }
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::v4l2src::{IoMode, V4l2Src};
+///
+/// let src = V4l2Src::new("/dev/video0")
+///     .with_size(1280, 720)
+///     .with_fps(30)
+///     .with_io_mode(IoMode::DmaBuf);
+/// ```
 #[derive(Debug)]
 pub struct V4l2Src {
     device: String,

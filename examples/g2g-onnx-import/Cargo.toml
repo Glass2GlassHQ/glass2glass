@@ -1,0 +1,27 @@
+# ONNX topology import for the Burn backend (M983): `burn-onnx` (the crate
+# `burn-import` 0.21 now forwards to) turns model/tiny_classifier.onnx into a
+# burn `Module` at build time, and the module is handed to `BurnInference` as
+# its `BurnModule`. Workspace-excluded because the codegen crate needs rustc
+# 1.92 (burn 0.21's own MSRV) while the publishable workspace is pinned at 1.86.
+# Standalone: own Cargo.lock, path-deps g2g. See README.md.
+[workspace]
+
+[package]
+name = "g2g-onnx-import"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+g2g-core = { path = "../../g2g-core", features = ["std", "runtime"] }
+g2g-ml = { path = "../../g2g-ml", features = ["burn"] }
+burn = { version = "0.21", default-features = false, features = ["std", "wgpu"] }
+# The generated model's weight loader: burn-onnx writes the weights as a
+# burnpack blob and emits `BurnpackStore` / `ModuleSnapshot` calls to read it.
+burn-store = { version = "0.21", default-features = false, features = ["std", "burnpack"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros", "sync"] }
+
+[build-dependencies]
+burn-onnx = "0.21"

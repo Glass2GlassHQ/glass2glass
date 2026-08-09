@@ -75,6 +75,15 @@ fn video_geometry(caps: &Caps) -> Result<(RawVideoFormat, usize, usize), G2gErro
 // ================================================================
 
 /// ST 2110-20 video sink: packed raw-video `DataFrame`s -> RFC 4175 RTP over UDP.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::st2110videortp::St2110VideoSink;
+///
+/// let sink = St2110VideoSink::new();
+/// assert!(sink.sdp((60, 1)).is_none());
+/// ```
 pub struct St2110VideoSink {
     host: String,
     port: u16,
@@ -352,6 +361,15 @@ impl PadTemplates for St2110VideoSink {
 // ================================================================
 
 /// ST 2110-20 video source: RFC 4175 RTP over UDP -> packed raw-video `DataFrame`s.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::st2110videortp::St2110VideoSrc;
+///
+/// let src = St2110VideoSrc::new();
+/// assert_eq!(src.local_port(), None);
+/// ```
 pub struct St2110VideoSrc {
     address: String,
     port: u16,

@@ -153,6 +153,16 @@ impl Buffer for GbmFb {
 
 /// Sink-side handle set. Only `Send + Sync` state lives here so the multi-thread
 /// runner can move the sink between tasks.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::cudakmssink::CudaKmsSink;
+///
+/// let sink = CudaKmsSink::new()
+///     .with_device("/dev/dri/card0")
+///     .with_max_lateness_ns(20_000_000);
+/// ```
 pub struct CudaKmsSink {
     device_path: PathBuf,
     cmd_tx: Option<Sender<WorkerCmd>>,

@@ -74,6 +74,16 @@ const WORKER_NAME: &str = "g2g-glsink";
 /// Sink-side handle set. Only `Send + Sync` state lives here so the multi-thread
 /// runner can move the sink between tasks; the worker's frame payload is the
 /// packed frame bytes in the negotiated layout.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::glsink::GlSink;
+///
+/// let sink = GlSink::new()
+///     .with_title("g2g preview")
+///     .with_max_lateness_ns(20_000_000);
+/// ```
 pub struct GlSink {
     title: String,
     app_id: String,

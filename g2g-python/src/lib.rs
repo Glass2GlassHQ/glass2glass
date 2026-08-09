@@ -20,12 +20,12 @@
 //! - **`python`**: pulls pyo3 + numpy, embeds CPython, and runs the hosted
 //!   element for real. OS-coupled, off the no_std / RTOS baseline.
 //!
-//! Roadmap (M198 = the skeleton; later steps flesh it out):
-//! 1. crate + feature + interpreter bootstrap  (this milestone)
-//! 2. `PyTransform` + `g2g` module `FrameIO`, zero-copy over System memory
-//! 3. `AnalyticsBackend` -> build out [`g2g_core::FrameMetaSet`] (the M88 defer)
-//! 4. launch-registry factory; then aggregator / source variants; then the
-//!    GPU zero-copy (DLPack / `__cuda_array_interface__`) path.
+//! Two zero-copy frame paths reach the hosted element: System memory over the
+//! Python buffer protocol (`g2g_process`), and a GPU-resident CUDA frame over
+//! `__cuda_array_interface__` / `__dlpack__`, one `g2g.CudaPlane` per NV12 plane
+//! handed to `g2g_process_cuda` (or its batch and produce siblings). The `host`
+//! and `cuda_plane` modules carry the contracts, the plane layout, and the
+//! CUDA-context caveat.
 //!
 //! This crate links `std` unconditionally (embedding CPython is the most
 //! OS-coupled thing in the tree). The `std` feature only forwards to
@@ -79,6 +79,8 @@ pub fn register(registry: &mut g2g_core::runtime::Registry) {
     }));
 }
 
+#[cfg(feature = "python")]
+mod cuda_plane;
 #[cfg(feature = "python")]
 mod host;
 #[cfg(feature = "python")]

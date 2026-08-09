@@ -109,6 +109,14 @@ impl OutputSink for SegmentSink {
     }
 }
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::splitmuxsink::SplitMuxSink;
+///
+/// // a new clip every 10 seconds: clip000.mp4, clip001.mp4, ...
+/// let sink = SplitMuxSink::new("clip%03d.mp4").with_max_size_time(10_000_000_000);
+/// ```
 pub struct SplitMuxSink {
     location: String,
     muxer: MuxerKind,

@@ -21,6 +21,14 @@ use g2g_core::{
     PropValue, PropertySpec,
 };
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::level::Level;
+///
+/// let level = Level::new();
+/// assert!(level.last_peak().is_empty());
+/// ```
 #[derive(Debug)]
 pub struct Level {
     post_messages: bool,

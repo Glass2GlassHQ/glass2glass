@@ -182,6 +182,16 @@ pub enum TsStream {
 }
 
 /// Demuxes an MPEG-TS byte stream into one selected elementary stream.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::tsdemux::{TsDemux, TsStream};
+///
+/// let element = TsDemux::new()
+///     .with_stream(TsStream::Aac)
+///     .with_program_number(Some(1));
+/// ```
 #[derive(Debug)]
 pub struct TsDemux {
     demux: TsDemuxer,
@@ -987,6 +997,15 @@ impl PadTemplates for TsDemux {
 /// stream no port carries is dropped, and a port whose stream the multiplex lacks
 /// stays dark. With a bus, announces the same `StreamCollection` (M386) as
 /// [`TsDemux`]. The `playbin uri=*.ts` fan-out (M389) builds this.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::tsdemux::{TsDemuxN, TsStream};
+///
+/// let element = TsDemuxN::new(vec![TsStream::H264, TsStream::Aac])
+///     .with_program_number(Some(1));
+/// ```
 #[derive(Debug)]
 pub struct TsDemuxN {
     demux: TsDemuxer,

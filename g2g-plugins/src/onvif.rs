@@ -139,6 +139,15 @@ pub async fn resolve_stream_uri(
 /// [`RtspSrc`] (credentials threaded through). Set the camera by
 /// `device-service-url` plus `user` / `password`, either via the constructor or
 /// the `gst-launch`-style properties.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::onvif::OnvifSrc;
+///
+/// let element = OnvifSrc::new("http://192.168.1.64/onvif/device_service")
+///     .with_credentials("admin", "secret");
+/// ```
 #[allow(missing_debug_implementations)]
 pub struct OnvifSrc {
     device_url: String,

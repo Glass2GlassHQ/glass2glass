@@ -1885,6 +1885,14 @@ fn push_stripped(line: &str, out: &mut String) {
 /// batch: its cues are parsed at `Eos`. WebVTT cue positioning ([`CueSettings`])
 /// is parsed but not yet carried on the frame (no text frame-meta); the payload
 /// is the plain cue text.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::subparse::SubParse;
+///
+/// let parser = SubParse::new();
+/// ```
 #[derive(Debug, Default)]
 pub struct SubParse {
     /// Input subtitle format, fixed at `configure_pipeline`.

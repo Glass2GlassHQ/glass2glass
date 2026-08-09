@@ -134,6 +134,16 @@ impl AppSinkPull {
 }
 
 /// Application pull/callback sink. Accepts any caps.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::appsink::{register_appsink_pull, AppSink};
+///
+/// let pull = register_appsink_pull("frames");
+/// let sink = AppSink::new().with_channel("frames");
+/// let next = pull.try_pull();
+/// ```
 #[derive(Debug, Default)]
 pub struct AppSink {
     channel: String,

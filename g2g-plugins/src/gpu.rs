@@ -309,6 +309,23 @@ pub(crate) unsafe fn import_vk_image_as_wgpu_texture(
     }
 }
 
+/// Guards every device open in the test binary: opening several wgpu devices
+/// concurrently crashes some drivers (seen as a SIGSEGV inside the NVIDIA driver
+/// when GPU tests each opened their own). Holds the shared context once built.
+#[cfg(test)]
+static SHARED_CTX: tokio::sync::Mutex<Option<GpuContext>> = tokio::sync::Mutex::const_new(None);
+
+/// One device for the whole test binary, built under [`SHARED_CTX`]. `None` when
+/// the host has no adapter (CI), so every GPU test skips.
+#[cfg(test)]
+pub(crate) async fn shared_ctx() -> Option<GpuContext> {
+    let mut slot = SHARED_CTX.lock().await;
+    if slot.is_none() {
+        *slot = GpuContext::headless().await.ok();
+    }
+    slot.clone()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -462,6 +479,10 @@ mod tests {
     /// to a different device and this read-back would be a validation error.
     #[tokio::test]
     async fn from_wgpu_texture_is_usable_on_the_embedders_own_device() {
+        // The test needs a device g2g did not open, so it cannot take the shared
+        // one, but it must still not open a device while another test is opening
+        // theirs.
+        let _open_lock = SHARED_CTX.lock().await;
         let Some((instance, adapter, device, queue)) = embedder_device().await else {
             std::eprintln!("no wgpu adapter; skipping bring-your-own-device test");
             return;

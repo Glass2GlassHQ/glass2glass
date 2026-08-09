@@ -44,6 +44,13 @@ use web_sys::{BinaryType, CloseEvent, Event, MessageEvent, WebSocket};
 use crate::remotewire::map_wire;
 use crate::webutil::Inbox;
 
+/// # Example
+///
+/// ```ignore
+/// use g2g_plugins::wswiretransform::WsWireTransform;
+///
+/// let offload = WsWireTransform::new("ws://127.0.0.1:9000/wire");
+/// ```
 pub struct WsWireTransform {
     url: String,
     socket: Option<WebSocket>,

@@ -45,9 +45,16 @@ impl CapturePixelFormat {
     /// The caps this format produces at a negotiated geometry and rate. Raw
     /// layouts map to [`Caps::RawVideo`], MJPEG to `CompressedVideo{Mjpeg}`.
     pub fn caps(self, width: u32, height: u32, fps: u32) -> Caps {
-        let width = Dim::Fixed(width);
-        let height = Dim::Fixed(height);
-        let framerate = Rate::Fixed(fps << 16);
+        self.caps_with_dims(
+            Dim::Fixed(width),
+            Dim::Fixed(height),
+            Rate::Fixed(fps << 16),
+        )
+    }
+
+    /// The same mapping over caps-level geometry, so a device listing can carry
+    /// the ranges a driver reports instead of one fixed mode.
+    pub fn caps_with_dims(self, width: Dim, height: Dim, framerate: Rate) -> Caps {
         match self.raw_format() {
             Some(format) => Caps::RawVideo {
                 format,

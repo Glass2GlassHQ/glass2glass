@@ -171,6 +171,15 @@ impl DuplexControl {
 const RENEGO_OFFER: &str = "offer\n";
 const RENEGO_ANSWER: &str = "answer\n";
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::webrtcduplex::{SdpChannel, SignalRole, WebRtcDuplexSession};
+///
+/// let (offerer_channel, _answerer_channel) = SdpChannel::pair();
+/// let session = WebRtcDuplexSession::new(SignalRole::Offerer, offerer_channel, 2)
+///     .with_stun_server("stun.example.com:3478");
+/// ```
 pub struct WebRtcDuplexSession {
     role: SignalRole,
     sig: Option<SdpChannel>,

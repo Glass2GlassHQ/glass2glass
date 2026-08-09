@@ -39,6 +39,19 @@ use g2g_core::{
 
 /// A source that plays a playlist of sources back-to-back as one gapless stream.
 /// See the module docs. Driven by any runner that accepts a [`SourceLoop`].
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_core::runtime::GaplessController;
+/// use g2g_plugins::gaplesssrc::GaplessSrc;
+/// use g2g_plugins::videotestsrc::VideoTestSrc;
+///
+/// let ctl = GaplessController::new();
+/// let source = GaplessSrc::new(Box::new(VideoTestSrc::new(320, 240, 30, 60)), ctl.clone());
+/// ctl.enqueue(Box::new(VideoTestSrc::new(320, 240, 30, 60)));
+/// ctl.finish();
+/// ```
 pub struct GaplessSrc {
     /// The item currently negotiated / about to play. The first item is set at
     /// construction (and configured by [`configure_pipeline`](SourceLoop::configure_pipeline));

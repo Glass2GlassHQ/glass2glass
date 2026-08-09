@@ -26,6 +26,14 @@ use g2g_core::{
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 
+/// # Example
+///
+/// ```ignore
+/// use g2g_plugins::patternsrc::PatternSrc;
+///
+/// // 640x480 at 30 fps, 300 frames then EOS.
+/// let src = PatternSrc::new(640, 480, 30, 300);
+/// ```
 #[derive(Debug)]
 pub struct PatternSrc {
     width: u32,

@@ -182,6 +182,16 @@ pub(crate) fn language_from_tags(tags: &TagList) -> Option<&str> {
 }
 
 /// Muxes one elementary stream into an MPEG-TS byte stream.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::tsmux::TsMux;
+///
+/// let mux = TsMux::new()
+///     .with_table_interval_ms(100)
+///     .with_pcr_interval(3600);
+/// ```
 #[derive(Debug)]
 pub struct TsMux {
     /// Built at configure, once the input codec (and so the PMT stream type) is

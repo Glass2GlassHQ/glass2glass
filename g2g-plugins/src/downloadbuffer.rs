@@ -61,6 +61,15 @@ const TEMPLATE_MARK: &str = "XXXXXX";
 /// processes, and `create_new` catches any residual collision.
 static INSTANCE: AtomicU64 = AtomicU64::new(0);
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::downloadbuffer::DownloadBuffer;
+///
+/// let buffer = DownloadBuffer::new()
+///     .with_temp_template("/var/tmp/g2g-downloadXXXXXX")
+///     .with_max_size_bytes(4 * 1024 * 1024);
+/// ```
 #[derive(Debug)]
 pub struct DownloadBuffer {
     temp_template: String,

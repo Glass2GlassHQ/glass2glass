@@ -94,6 +94,7 @@ fn drive_wedge(codec: VideoCodec, clip: &[u8]) {
         align: 1,
         domain: MemoryDomainKind::WgpuTexture,
         accepts: DomainSet::only(MemoryDomainKind::WgpuTexture),
+        ..Default::default()
     });
     let in_caps = Caps::CompressedVideo {
         codec,

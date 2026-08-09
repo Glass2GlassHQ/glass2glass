@@ -61,6 +61,15 @@ fn bad_even_dims(format: RawVideoFormat, w: u32, h: u32) -> bool {
 /// concrete dim within it.
 const MAX_DIM: u32 = 32768;
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::videoscale::VideoScale;
+///
+/// // gst-launch equivalent: videoscale ! video/x-raw,width=1280,height=720
+/// let scale = VideoScale::new(1280, 720);
+/// assert_eq!(scale.target_dims(), (1280, 720));
+/// ```
 #[derive(Debug)]
 pub struct VideoScale {
     /// Target geometry from the `width`/`height` properties. Zero on either axis

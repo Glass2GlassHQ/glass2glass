@@ -163,9 +163,14 @@ async fn assert_timing_matches(source: &str, tag: &str) {
     );
 }
 
+/// Long enough that the audio spans several pages, so ffmpeg anchors its own
+/// timeline on the first audio page's granule (a negative first pts) the way
+/// the g2g timeline does. On a stream small enough to fit one page ffmpeg has
+/// no such anchor and its list sits a priming block later, which is
+/// `m971_vorbis_granule`'s subject.
 #[tokio::test]
 async fn tone_timing_matches_ffprobe() {
-    assert_timing_matches("sine=frequency=440:duration=0.5:sample_rate=44100", "tone").await;
+    assert_timing_matches("sine=frequency=440:duration=2:sample_rate=44100", "tone").await;
 }
 
 /// Noise forces frequent short/long window switches, exercising the mode

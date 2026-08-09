@@ -41,6 +41,16 @@ use g2g_core::{
 use crate::pgs::{PgsDecoder, DEFAULT_VIDEO_HEIGHT, DEFAULT_VIDEO_WIDTH, MAX_VIDEO_DIM};
 
 /// Decodes PGS display sets into full-frame RGBA canvases.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::pgsdec::PgsDec;
+///
+/// let dec = PgsDec::new()
+///     .with_size(1920, 1080)
+///     .with_forced_only(true);
+/// ```
 #[derive(Debug)]
 pub struct PgsDec {
     dec: PgsDecoder,

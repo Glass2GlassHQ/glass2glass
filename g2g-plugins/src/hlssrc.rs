@@ -204,6 +204,15 @@ pub fn variant_streams(master: &MasterPlaylist, variant: &Variant) -> Vec<HlsStr
     out
 }
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::hlssrc::HlsSrc;
+///
+/// let element = HlsSrc::new("https://example.com/master.m3u8")
+///     .with_max_bandwidth(4_000_000)
+///     .with_prebuffer_ms(2_000);
+/// ```
 #[derive(Debug)]
 pub struct HlsSrc {
     url: String,

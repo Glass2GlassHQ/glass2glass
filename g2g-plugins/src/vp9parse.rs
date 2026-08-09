@@ -32,6 +32,13 @@ use crate::annexb::BitReader;
 /// the `color_range` bit the YUV spaces carry.
 const CS_RGB: u32 = 7;
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::vp9parse::Vp9Parse;
+///
+/// let parse = Vp9Parse::new();
+/// ```
 #[derive(Debug, Default)]
 pub struct Vp9Parse {
     configured: bool,

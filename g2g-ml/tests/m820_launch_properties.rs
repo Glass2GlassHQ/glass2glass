@@ -289,6 +289,17 @@ fn register_adds_the_ml_elements_by_name() {
         };
         assert!((iou - 0.45).abs() < 1e-6);
     }
+    #[cfg(all(feature = "ort", feature = "analytics"))]
+    {
+        let e = reg
+            .make_element("ortsegment")
+            .expect("ortsegment builds bare");
+        assert_eq!(e.get_property("model"), Some(PropValue::Str(String::new())));
+        let Some(PropValue::Double(mask)) = e.get_property("mask-threshold") else {
+            panic!("mask-threshold reads back");
+        };
+        assert!((mask - 0.5).abs() < 1e-6);
+    }
     // WgpuInference is not text-constructible (it takes weight tensors).
     assert!(reg.inspect("wgpuinference").is_none());
 }

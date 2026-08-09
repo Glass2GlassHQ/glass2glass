@@ -21,8 +21,8 @@ leverage first:
    libvpx-FFI `VpxDec` stays deferred: it would only duplicate the ffmpeg
    path), and the one complete pure-Rust Opus, `opus-rs` 0.1.26, fails the
    RFC 8251 vectors (re-run `tools/opus-rs-gate` to revisit on a new release).
-   `VulkanVideoDec` residuals: AMD / Intel validation runs and runtime
-   properties (see "Receive / decode").
+   `VulkanVideoDec` residuals: AMD / Intel validation runs (see "Receive /
+   decode").
 4. **Browser demo (speculative product path).** A deployed reference app for the
    in-browser `ort-web` ONNX chain, plus a native sibling running the same graph.
    The GPU-resident in-browser chain is not achievable from idiomatic Rust (wgpu
@@ -233,14 +233,11 @@ Phased plan:
 
 ## Negotiation
 
-- **Preference algebra.** `CapsPreferences` is a placeholder (sum-of-indices);
-  needs a real competing-constraint scenario to drive it.
 - **Hardware `tee -> {decode, mux}` integration test** on real Linux
   (`rtsp ffmpeg wayland-sink`); only fake-element coverage today.
 
 ## Seek and auto-plug
 
-- Richer auto-plug factory construction params (geometry / device / file path).
 - A hardware-backed end-to-end decode-through-`decodebin` run (current tests
   read templates / assert splicing, decode no real media).
 
@@ -381,8 +378,6 @@ Phased plan:
 
 ## Capture sources
 
-- V4L2 device discovery reports YUYV modes as caps only; the other formats
-  `v4l2src` can carry stay in `detail`.
 - `mfvideosrc`: first Windows build + camera smoke test; D3D11 zero-copy;
   size/rate request beyond device default.
 - Screen capture: Windows DXGI Desktop Duplication.
@@ -438,7 +433,7 @@ _(No open parser items.)_
 - **`textoverlay` font backend:** the `truetype-overlay` feature (M409, `ab_glyph`
   since M668) renders both glyf and CFF/CFF2 outlines (CJK / accented / mixed-case,
   horizontal + vertical) with an explicit Latin+CJK fallback chain, so OpenType-CFF
-  `.otf` fonts render, not only glyf `.ttf`s. Still open: a `vello` GPU backend;
+  `.otf` fonts render, not only glyf `.ttf`s. Still open:
   font-variation axes beyond `wght` on the shaped horizontal path (cosmic-text
   0.17 exposes only weight, and 0.17.1+ needs rustc 1.89, above the 1.86 MSRV,
   so the upgrade waits on an MSRV bump); vertical-mode shaping if cosmic-text
@@ -503,10 +498,6 @@ _(No open parser items.)_
   all three render paths and an `AttrsList` API in `textshape`), `text-shadow`
   and further properties, and a span-scoped `background-color` (a cue has one
   backing box today).
-- **Closed captions: remaining carriers + authoring.** The H.264 / H.265 SEI
-  decode path (`cea` decoders + `CcExtract` + file- and HLS-`playbin` auto-plug)
-  and the CEA-608 encode path (`Cc608Enc` + `CcInsert`) are done (DESIGN.md
-  §4.18). Still open: MPEG-2 user-data caption extraction.
 - **Tensor substrate orientation descriptor (M181).** A deferred
   rotate/mirror descriptor the sink can absorb in hardware (DRM/KMS, Wayland
   `set_buffer_transform`, VAAPI VPP, D3D11 VideoProcessor), with eager strided /
@@ -520,15 +511,13 @@ _(No open parser items.)_
 
 ## Metadata (FrameMeta / AnalyticsMeta)
 
-- A `GstVideoMeta`-style stride / plane-layout meta.
-- A real ML producer for the `Segmentation` / `Roi` analytics nodes (no in-tree
-  model emits masks or ROIs yet).
-- `pull`-based metadata propagation across transforms (push is auto-applied).
-- A turnkey windowed runner for `WgpuSink` (a winit/SCTK example that opens a
-  window and drives the overlay -> sink graph; validate on a real display).
+- Further `PlaneLayout` producers (v4l2 `bytesperline` padding, decoder DMA-BUF
+  pitches); only the wgpu compositor readback emits it today.
 - `NvEnc` AV1 encode (needs RTX 40-series hardware).
-- Derive the `decodebin_preferring(.., Cuda)` preference automatically from a
-  downstream consumer's accepted input memory.
+- Memory-domain preference for a `decodebin` in a launch line, where the
+  downstream consumer is a factory name and not yet a built element: needs a
+  factory-level declaration of accepted input memory, so nothing has to be
+  constructed to ask.
 
 ## Clock-synchronised presentation
 
@@ -540,11 +529,9 @@ _(No open parser items.)_
   the lip-sync payoff are done and CI-validated (M590/M591/M592). Still owed:
   extend the same clock discipline to `PipeWireSink` (blocked on the pinned
   `pipewire` 0.8 binding lacking `pw_stream_get_time`, plus playout accounting
-  in its leaky realtime callback); a headless display sink that adopts the
-  elected `ClockSync` (today `SyncSink` uses its own clock and `WaylandSink`
-  needs a display, so the M592 lip-sync test uses a harness sink); an on-display
-  lip-sync soak on real hardware; and optionally a tighter drift model (outlier
-  rejection on a glitchy `delay()`, faster convergence).
+  in its leaky realtime callback); an on-display lip-sync soak on real hardware;
+  and optionally a tighter drift model (outlier rejection on a glitchy
+  `delay()`, faster convergence).
 - **PTP clock (`PtpClock`)** DONE (M593 A/B/C + M594): `PtpServo`
   (offset/delay -> `DriftClock`, lock/holdover/outlier), `PtpClock` +
   `ClockPriority::PtpGrandmaster` (elected over audio/video, slaved to sinks via
@@ -553,10 +540,9 @@ _(No open parser items.)_
   `ptp::slave` state machine, both CI-tested, + the `g2g-plugins` UDP transport).
   The pipeline can now be PTP-mastered by either backend. Remaining polish (not
   blocking): a live multi-machine / `ptp4l`-grandmaster soak of `PtpClient`
-  (host/root/reference-gear gated); `SO_REUSEPORT` so `PtpClient` co-exists with
-  `ptp4l` on one host; querying `ptp4l` state so `PtpSystemClock` confirms *true*
-  grandmaster lock; a direct PHC (`/dev/ptpN`) read; hardware RX/TX timestamping
-  for uncompressed ST 2110-20 timing; BMCA/Announce, peer-delay, unicast.
+  (host/root/reference-gear gated); a direct PHC (`/dev/ptpN`) read; hardware
+  RX/TX timestamping for uncompressed ST 2110-20 timing; BMCA/Announce,
+  peer-delay, unicast.
 - **ST 2110 media transport** (the layer above the PTP clock). Started: `MediaClock`
   (-10 PTP<->RTP-timestamp mapping, M595), `st2110audio` (-30 PCM L16/L24, M595),
   `st2110anc` (-40 ancillary/captions per RFC 8331, 10-bit-word parity+checksum,
@@ -586,10 +572,6 @@ _(No open parser items.)_
   receiver-buffer model, M612). Remaining: wire compliance of -20/-22/-30/-40 +
   multicast should be validated against reference gear (built from the RFCs, not yet
   interop-tested).
-- **A QoS-aware transform** that acts on a relayed report (a decoder dropping
-  non-reference frames) rather than only forwarding it. CI-testable; gated on a
-  decoder that can cheaply drop frames being the bottleneck.
-
 ## Bus and logging
 
 - Remaining bus messages, each gated on a subsystem not present: `segment-done`
@@ -609,16 +591,11 @@ _(No open tag items.)_
 
 ## Python-element host (M198+)
 
-- **GPU zero-copy (Step 4f, designed, not implemented).** Hand a GPU-resident
-  frame to Python without the PCIe round-trip via `__cuda_array_interface__`
-  (CAI v3): two CAI objects for the NV12 luma / chroma planes, a
-  `g2g_process_cuda(luma, chroma, w, h, meta)` contract over `g2g.CudaPlane`
-  pyclasses. Document the CUDA-context caveat (CAI carries none). DLPack is the
-  cross-framework alternative. Verify on the RTX 3060 host (install cupy/torch,
-  assert a `cupy` array aliases the decoder's device pointer, no copy) before
-  presenting the layout as working.
-- Verify GIL offload on a free-threaded (PEP 703) interpreter (none installed)
-  + a `link_capacity` note for the GIL-serialized case.
+- Carry the CUDA device ordinal on the Cuda memory domain, so a GPU plane can
+  report the device it really lives on (DLPack has to say device 0 today) and a
+  multi-GPU graph is describable.
+- Verify the GPU planes against torch (`torch.from_dlpack`,
+  `torch.as_tensor(plane)`); only cupy has been run against them.
 
 ## Dynamic plugin loading (M201+)
 
@@ -639,10 +616,6 @@ _(No open tag items.)_
 
 ## Browser / Wasm
 
-- An unbounded source feeding an `ort-web` chain faster than inference drains it
-  trips a wasm async-runtime reentrancy (`closure invoked recursively`) once
-  backpressure crosses a source loop; a finite source runs clean. Pin down the
-  `spawn_local` re-entrancy on a per-frame JS-promise `await`.
 - WebGPU-texture zero-copy sink (`MemoryDomain::WebGPUBuffer` into a
   `GPUTexture`; needs the async device handshake in the keepalive).
 - Web Workers executor (off-main-thread; needs JS bootstrap).
@@ -675,13 +648,8 @@ _(No open tag items.)_
   fly (M531), so real half-precision checkpoints load. Remaining: masked /
   causal attention + KV cache, if an autoregressive use case ever appears
   (unmasked full attention is in).
-- ONNX import via `burn-import` (build-time codegen) for the Burn backend, the
-  graph-topology counterpart (safetensors carries weights, not the architecture).
-- A trained-weight `Module` path for `BurnInference` (conv, attention) once the
-  codegen lands.
-- Decoder DMA-BUF / D3D11 surface import into `WgpuPreprocess` (binds the
-  surface directly into the compute pass; needs the surface-import handshake + a
-  GPU tensor output domain).
+- D3D11 decoder surface import into `WgpuPreprocess` (bind the surface directly
+  into the compute pass, the Windows counterpart of the dma-buf import).
 
 ## Developer tooling
 
@@ -689,11 +657,10 @@ Outstanding developer-tooling tasks, highest leverage first.
 
 - **Per-element / per-link telemetry gaps.** Remaining `Observer` coverage:
   validate the dashboard live against an RTSP source.
-- **gst-parity differ.** Same launch line through real GStreamer and g2g;
-  diff the negotiated caps per edge, the element set after autoplug, and the
-  output (checksum, PSNR for lossy). Calliope already does differential output
-  QA in its own repo, so decide first whether this lives there (adding the
-  caps / topology diff) or in-repo; don't build both.
+- **gst-parity differ residual.** Elements g2g names differently than
+  GStreamer (`NalParse` vs `h264parse0`) go unmatched in calliope's parity
+  diff, so their link caps compare nothing without an explicit `name=`; feed
+  the `g2g-inspect --gst` mapping into calliope's matcher as a synonym table.
 - Longer tail: a live pipeline TUI (a ratatui consumer of the same telemetry
   tap); a codec golden-fixture / PSNR conformance harness.
 
@@ -716,5 +683,4 @@ differential); AAC is not, so it wants a golden / determinism check instead.
 
 ## Documentation
 
-- Architecture diagrams in [docs/](docs/) (the Pages site is text-only).
-- Per-element rustdoc pass: every public element type gets an example block.
+_(No open documentation items.)_

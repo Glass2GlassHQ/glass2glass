@@ -32,6 +32,17 @@ const DEFAULT_BITRATE_KBPS: u32 = 1024;
 const TIMEBASE_DEN: i32 = 1000;
 
 /// Encodes raw I420 video into a VP8 or VP9 elementary stream via libvpx.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_core::VideoCodec;
+/// use g2g_plugins::vpxenc::VpxEnc;
+///
+/// let encoder = VpxEnc::new()
+///     .with_codec(VideoCodec::Vp8)
+///     .with_bitrate_kbps(2_048);
+/// ```
 pub struct VpxEnc {
     codec: VideoCodec,
     bitrate_kbps: u32,

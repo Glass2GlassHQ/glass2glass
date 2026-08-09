@@ -87,6 +87,15 @@ const MAX_PLC_SAMPLES: u64 = (OPUS_RATE_HZ as u64 * 200) / 1000;
 const DEFAULT_PLC_CHUNK_SAMPLES: u64 = (OPUS_RATE_HZ as u64 * 20) / 1000;
 
 /// Decodes an Opus elementary stream into raw interleaved S16LE PCM.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::opusdec::OpusDec;
+///
+/// let decoder = OpusDec::new().with_plc(true).with_inband_fec(true);
+/// assert!(decoder.plc());
+/// ```
 pub struct OpusDec {
     channels: u8,
     /// Negotiated output sample format: `PcmS16Le` (default) or `PcmF32Le`

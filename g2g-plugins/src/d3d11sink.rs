@@ -112,6 +112,16 @@ enum WorkerCmd {
 
 /// Sink-side handle set. Only `Send` state lives here so the runner can move
 /// the sink between executor tasks.
+///
+/// # Example
+///
+/// ```ignore
+/// use g2g_plugins::d3d11sink::D3D11Sink;
+///
+/// let sink = D3D11Sink::new()
+///     .with_title("preview")
+///     .with_max_lateness_ns(20_000_000);
+/// ```
 pub struct D3D11Sink {
     title: String,
     cmd_tx: Option<Sender<WorkerCmd>>,

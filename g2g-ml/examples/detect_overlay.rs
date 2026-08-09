@@ -14,12 +14,21 @@
 //! pattern (meta carried on the frame, the overlay draws it) but with a real
 //! detector and a desktop sink instead of a hard-coded box and a fake sink.
 //!
+//! A leading `segment` argument swaps the detector for `OrtSegmentation` on the
+//! segmentation fixture, so the same overlay draws real instance masks and their
+//! ROIs instead of boxes (M994).
+//!
 //!   # Still: write the annotated frame as a PPM (no display, headless-safe)
 //!   tools/detect-fixture.sh   # fetch the gitignored YOLO model + sample tensor
 //!   cargo run -p g2g-ml --features "ort analytics" --example detect_overlay -- /tmp/detect.ppm
 //!
 //!   # Live: loop the annotated frame into a Wayland window (Fedora Wayland session)
 //!   cargo run -p g2g-ml --features detect-overlay-live --example detect_overlay -- 600
+//!
+//!   # Masks: the same two paths on the segmentation fixture
+//!   tools/segment-fixture.sh
+//!   cargo run -p g2g-ml --features "ort analytics" --example detect_overlay -- segment /tmp/segment.ppm
+//!   cargo run -p g2g-ml --features detect-overlay-live --example detect_overlay -- segment 600
 //!
 //! Skips with a message when the fixtures are absent (the "validated locally, not
 //! CI" pattern of the GPU / Android probes).
@@ -38,12 +47,17 @@ use g2g_core::{
 };
 use g2g_ml::detect::DetectionPostprocess;
 use g2g_ml::ortinfer::OrtInference;
+use g2g_ml::ortsegment::OrtSegmentation;
 use g2g_plugins::analyticsoverlay::AnalyticsOverlay;
 
 const SIZE: u32 = 640;
 
 fn detect_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/detect")
+}
+
+fn segment_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/segmentation")
 }
 
 /// COCO-80 class names, indexed by the label the YOLO model emits, so the demo
@@ -266,6 +280,28 @@ async fn run_detection(model: &[u8], input: Vec<u8>) -> AnalyticsMeta {
     run_linear_chain(&mut src, transforms, &mut sink, &NullClock, 4)
         .await
         .expect("detector chain runs");
+    sink.meta.unwrap_or_default()
+}
+
+/// Run the real `ImageSource -> OrtSegmentation` chain on an RGBA8 frame and
+/// return the instance graph it attaches: a `Segmentation` per instance plus the
+/// mask-tight `Roi` each one contains.
+async fn run_segmentation(model_path: &str, rgba: Vec<u8>) -> AnalyticsMeta {
+    let mut src = ImageSource {
+        rgba,
+        meta: AnalyticsMeta::new(),
+        width: SIZE,
+        height: SIZE,
+        fps: 30,
+        frames: 1,
+    };
+    let mut segment = OrtSegmentation::from_file(model_path).expect("model loads");
+    let mut sink = MetaSink::default();
+
+    let transforms: Vec<&mut dyn DynAsyncElement> = vec![&mut segment];
+    run_linear_chain(&mut src, transforms, &mut sink, &NullClock, 4)
+        .await
+        .expect("segmentation chain runs");
     sink.meta.unwrap_or_default()
 }
 
@@ -498,7 +534,8 @@ fn render_live(rgba: Vec<u8>, meta: AnalyticsMeta, frames: u64) {
     }
 }
 
-fn main() {
+/// The detector fixture's frame and the boxes the real model found on it.
+fn detected_frame(rt: &tokio::runtime::Runtime) -> Option<(Vec<u8>, AnalyticsMeta)> {
     let dir = detect_dir();
     let model_path = dir.join("model.onnx");
     let input_path = dir.join("input_f32.bin");
@@ -507,15 +544,10 @@ fn main() {
             "detect fixtures absent ({}); run tools/detect-fixture.sh. skipping.",
             dir.display()
         );
-        return;
+        return None;
     }
     let model = std::fs::read(&model_path).expect("read model");
     let input = std::fs::read(&input_path).expect("read input");
-
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("rt");
     let meta = rt.block_on(run_detection(&model, input.clone()));
 
     println!("detector found {} object(s):", meta.detections().count());
@@ -525,9 +557,65 @@ fn main() {
     if meta.detections().count() == 0 {
         eprintln!("no detections; overlay would be a no-op. check the model / fixture.");
     }
+    Some((reconstruct_rgba(&input, SIZE), meta))
+}
 
-    let rgba = reconstruct_rgba(&input, SIZE);
-    let arg = std::env::args().nth(1);
+/// The segmentation fixture's frame (already RGBA8) and the instance graph the
+/// real `-seg` model found on it.
+fn segmented_frame(rt: &tokio::runtime::Runtime) -> Option<(Vec<u8>, AnalyticsMeta)> {
+    let dir = segment_dir();
+    let model_path = dir.join("model.onnx");
+    let input_path = dir.join("input_rgba.bin");
+    if !model_path.exists() || !input_path.exists() {
+        eprintln!(
+            "segmentation fixtures absent ({}); run tools/segment-fixture.sh. skipping.",
+            dir.display()
+        );
+        return None;
+    }
+    let rgba = std::fs::read(&input_path).expect("read input");
+    let meta = rt.block_on(run_segmentation(
+        model_path.to_str().expect("model path"),
+        rgba.clone(),
+    ));
+
+    println!("model found {} instance(s):", meta.segmentations().count());
+    for s in meta.segmentations() {
+        println!(
+            "  {:<14} {:.3}  mask {}x{}",
+            label_name(s.label),
+            s.confidence,
+            s.mask.width(),
+            s.mask.height()
+        );
+    }
+    if meta.segmentations().count() == 0 {
+        eprintln!("no instances; overlay would be a no-op. check the model / fixture.");
+    }
+    Some((rgba, meta))
+}
+
+fn main() {
+    // A leading `segment` selects the mask fixture; the rest of the arguments are
+    // the same either way (a path writes a PPM, a number presents that many frames).
+    let mut args = std::env::args().skip(1);
+    let first = args.next();
+    let segmenting = first.as_deref() == Some("segment");
+    let arg = if segmenting { args.next() } else { first };
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("rt");
+    let loaded = if segmenting {
+        segmented_frame(&rt)
+    } else {
+        detected_frame(&rt)
+    };
+    let Some((rgba, meta)) = loaded else {
+        return;
+    };
+    drop(rt);
 
     #[cfg(feature = "detect-overlay-live")]
     {

@@ -65,6 +65,15 @@ const DEFAULT_WIDTH: u32 = 1280;
 const DEFAULT_HEIGHT: u32 = 720;
 const DEFAULT_FPS: u32 = 30;
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::rtspserversrc::RtspServerSrc;
+///
+/// let src = RtspServerSrc::new("0.0.0.0:8554".parse().unwrap())
+///     .with_video_size(1920, 1080)
+///     .with_framerate(30);
+/// ```
 #[derive(Debug)]
 pub struct RtspServerSrc {
     rtsp_addr: SocketAddr,

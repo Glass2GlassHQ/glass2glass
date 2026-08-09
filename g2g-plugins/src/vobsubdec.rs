@@ -50,6 +50,14 @@ const DEFAULT_PALETTE: [u32; 16] = [
 ];
 
 /// Decodes VobSub cues into full-frame RGBA canvases.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::vobsubdec::VobSubDec;
+///
+/// let decoder = VobSubDec::new().with_size(720, 576).with_framerate(25);
+/// ```
 #[derive(Debug)]
 pub struct VobSubDec {
     width: u32,

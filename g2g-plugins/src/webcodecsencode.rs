@@ -37,6 +37,13 @@ use web_sys::{
 
 use crate::webutil::Inbox;
 
+/// # Example
+///
+/// ```ignore
+/// use g2g_plugins::webcodecsencode::WebCodecsEncode;
+///
+/// let element = WebCodecsEncode::new();
+/// ```
 pub struct WebCodecsEncode {
     width: u32,
     height: u32,

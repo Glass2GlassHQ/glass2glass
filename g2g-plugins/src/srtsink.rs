@@ -65,6 +65,15 @@ fn ts_bytestream() -> Caps {
     }
 }
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::srtsink::SrtSink;
+///
+/// let element = SrtSink::new("127.0.0.1:9000".parse().unwrap())
+///     .with_stream_id("live")
+///     .with_latency(200);
+/// ```
 #[derive(Debug)]
 pub struct SrtSink {
     dest: SocketAddr,

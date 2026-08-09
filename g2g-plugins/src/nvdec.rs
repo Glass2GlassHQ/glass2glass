@@ -74,6 +74,14 @@ const DEFAULT_MAX_DISPLAY_DELAY: u32 = 1;
 const MAX_DISPLAY_DELAY_LIMIT: u32 = 16;
 
 /// Native NVDEC H.264 decoder. Annex-B in, CUDA NV12 out. See the module docs.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::nvdec::NvDec;
+///
+/// let dec = NvDec::new().with_max_display_delay(2);
+/// ```
 pub struct NvDec {
     width: u32,
     height: u32,

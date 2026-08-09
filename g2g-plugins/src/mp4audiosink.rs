@@ -31,6 +31,14 @@ use crate::filesink::io_err;
 /// Samples per AAC-LC access unit (the fragment sample duration in media-time).
 const AAC_FRAME_SAMPLES: u32 = 1024;
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::mp4audiosink::Mp4AudioSink;
+///
+/// // AudioSpecificConfig for 48 kHz stereo AAC-LC
+/// let sink = Mp4AudioSink::new("out.mp4").with_audio_specific_config([0x11, 0x90]);
+/// ```
 #[derive(Debug)]
 pub struct Mp4AudioSink {
     path: PathBuf,

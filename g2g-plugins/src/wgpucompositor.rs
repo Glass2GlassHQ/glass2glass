@@ -353,6 +353,18 @@ fn build_bind_group(
 }
 
 /// GPU compositor: N RGBA8 inputs blended into one canvas by a compute shader.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::compositor::CompositorPad;
+/// use g2g_plugins::wgpucompositor::WgpuCompositor;
+///
+/// let pads = vec![CompositorPad::at(0, 0), CompositorPad::at(640, 0)];
+/// let comp = WgpuCompositor::new(1280, 720, pads)
+///     .with_framerate(60)
+///     .with_background([0, 0, 0, 255]);
+/// ```
 #[derive(Debug)]
 pub struct WgpuCompositor {
     out_w: u32,
@@ -375,6 +387,11 @@ pub struct WgpuCompositor {
     ctx: Option<GpuContext>,
     gpu: Option<Gpu>,
     gpu_output: bool,
+    /// M977: a downstream consumer asked for a `PlaneLayout`, so the canvas
+    /// readback hands over the GPU's own padded rows and declares their pitch
+    /// instead of repacking them tight.
+    #[cfg(feature = "metadata")]
+    keep_row_padding: bool,
 }
 
 impl WgpuCompositor {
@@ -395,6 +412,8 @@ impl WgpuCompositor {
             ctx: None,
             gpu: None,
             gpu_output: false,
+            #[cfg(feature = "metadata")]
+            keep_row_padding: false,
         }
     }
 
@@ -726,7 +745,22 @@ impl WgpuCompositor {
         Ok(())
     }
 
-    /// Read the composited canvas back to tightly-packed system memory.
+    /// Whether the readback keeps the GPU's row padding (M977). Always false
+    /// without the `metadata` feature, since nothing can then declare the layout.
+    fn keeps_row_padding(&self) -> bool {
+        #[cfg(feature = "metadata")]
+        {
+            self.keep_row_padding
+        }
+        #[cfg(not(feature = "metadata"))]
+        {
+            false
+        }
+    }
+
+    /// Read the composited canvas back to system memory: tightly packed, or with
+    /// the GPU's own row padding left in place when a downstream consumer asked
+    /// for the [`PlaneLayout`](g2g_core::meta::PlaneLayout) that describes it.
     fn read_canvas(&self) -> Result<Box<[u8]>, G2gError> {
         let gpu = self.gpu.as_ref().ok_or(G2gError::NotConfigured)?;
         let bytes = gpu.row_bytes * self.out_h as usize;
@@ -751,11 +785,17 @@ impl WgpuCompositor {
 
         let mapped = slice.get_mapped_range();
         let tight = self.out_w as usize * 4;
-        let mut out = Vec::with_capacity(tight * self.out_h as usize);
-        for row in 0..self.out_h as usize {
-            let start = row * gpu.row_bytes;
-            out.extend_from_slice(&mapped[start..start + tight]);
-        }
+        let out = match self.keeps_row_padding() {
+            true => mapped.to_vec(),
+            false => {
+                let mut packed = Vec::with_capacity(tight * self.out_h as usize);
+                for row in 0..self.out_h as usize {
+                    let start = row * gpu.row_bytes;
+                    packed.extend_from_slice(&mapped[start..start + tight]);
+                }
+                packed
+            }
+        };
         drop(mapped);
         gpu.staging.unmap();
         Ok(out.into_boxed_slice())
@@ -851,7 +891,16 @@ impl WgpuCompositor {
         } else {
             MemoryDomain::System(SystemSlice::from_boxed(self.read_canvas()?))
         };
-        Ok(Frame::new(domain, timing, self.state.next_sequence()))
+        #[allow(unused_mut)]
+        let mut frame = Frame::new(domain, timing, self.state.next_sequence());
+        #[cfg(feature = "metadata")]
+        if self.keep_row_padding && !self.gpu_output {
+            let row_bytes = self.gpu.as_ref().ok_or(G2gError::NotConfigured)?.row_bytes;
+            frame
+                .meta
+                .attach(g2g_core::meta::PlaneLayout::single(row_bytes));
+        }
+        Ok(frame)
     }
 }
 
@@ -963,6 +1012,15 @@ impl MultiInputElement for WgpuCompositor {
         Ok(self.output())
     }
 
+    /// M977: the readback repacks the GPU's 256-byte-aligned rows into tight ones
+    /// for every frame. When a consumer downstream has asked for a `PlaneLayout`,
+    /// that pass is pure waste: hand over the padded buffer and say where the
+    /// rows are.
+    #[cfg(feature = "metadata")]
+    fn configure_allocation_for_output(&mut self, params: &g2g_core::AllocationParams) {
+        self.keep_row_padding = params.meta_requests.wants::<g2g_core::meta::PlaneLayout>();
+    }
+
     fn process<'a>(
         &'a mut self,
         input: usize,
@@ -1050,18 +1108,7 @@ mod tests {
     use crate::compositor::{Compositor, PENDING_CAP};
     use g2g_core::PushOutcome;
 
-    /// One device for the whole test binary, built under a lock: opening several
-    /// wgpu devices concurrently crashes some drivers (seen as a SIGSEGV inside
-    /// the NVIDIA driver when these tests each opened their own). `None` when the
-    /// host has no adapter (CI), so every GPU test skips.
-    async fn shared_ctx() -> Option<GpuContext> {
-        static CTX: tokio::sync::Mutex<Option<GpuContext>> = tokio::sync::Mutex::const_new(None);
-        let mut slot = CTX.lock().await;
-        if slot.is_none() {
-            *slot = GpuContext::headless().await.ok();
-        }
-        slot.clone()
-    }
+    use crate::gpu::shared_ctx;
 
     fn rgba_caps(w: u32, h: u32) -> Caps {
         Caps::RawVideo {

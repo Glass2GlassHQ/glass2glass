@@ -2,11 +2,12 @@
 //! [`Device`] records so a [`DeviceMonitor`](g2g_core::runtime::DeviceMonitor)
 //! lists cameras with the modes their driver actually reports.
 //!
-//! Only the YUYV fourcc becomes caps, though `v4l2src` itself negotiates more
-//! (M954): a node's whole size / rate grid for one format already runs into
-//! [`MAX_ALTERNATIVES`], so listing every format needs a per-format budget
-//! first. The other fourccs the node advertises are kept in `detail` so the
-//! information is not lost.
+//! Every fourcc `v4l2src` can carry becomes caps, in that element's preference
+//! order. A single format's size / rate grid can already fill
+//! [`MAX_ALTERNATIVES`] on its own, so the budget is handed out round-robin:
+//! each format keeps its leading modes and no one of them starves the rest.
+//! Fourccs the node advertises that no `Caps` covers are kept in `detail` so
+//! the information is not lost.
 //!
 //! V4L2 has no hotplug event source here (udev would be a separate backend),
 //! so the provider offers no native watch and the monitor polls and diffs.
@@ -21,7 +22,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use g2g_core::runtime::{Device, DeviceProvider};
-use g2g_core::{Caps, CapsSet, Dim, G2gError, Interlace, Rate, RawVideoFormat};
+use g2g_core::{Caps, CapsSet, Dim, G2gError, Rate};
 
 use v4l::capability::Capabilities;
 use v4l::fraction::Fraction;
@@ -30,8 +31,14 @@ use v4l::framesize::FrameSizeEnum;
 use v4l::video::Capture;
 use v4l::FourCC;
 
-/// The one fourcc `v4l2src` negotiates.
-const YUYV: &[u8; 4] = b"YUYV";
+use crate::capturepixelformat::CapturePixelFormat;
+use crate::v4l2src::FOURCCS;
+
+/// The size / rate grid a driver reports for one pixel format.
+type FormatModes = (
+    CapturePixelFormat,
+    Vec<(FrameSizeEnum, Vec<FrameIntervalEnum>)>,
+);
 
 /// Upper bound on the caps alternatives one device carries. A driver can
 /// report hundreds of size/rate combinations (UVC cameras with many modes,
@@ -94,23 +101,10 @@ fn probe_node(path: &str) -> Option<Device> {
         .map(|f| f.fourcc.str().unwrap_or("????").to_string())
         .collect();
 
-    let yuyv = FourCC::new(YUYV);
-    let mut modes = Vec::new();
-    if formats.iter().any(|f| f.fourcc.repr == *YUYV) {
-        for size in dev.enum_framesizes(yuyv).unwrap_or_default() {
-            let (probe_w, probe_h) = match &size.size {
-                FrameSizeEnum::Discrete(d) => (d.width, d.height),
-                FrameSizeEnum::Stepwise(s) => (s.min_width, s.min_height),
-            };
-            let intervals = dev
-                .enum_frameintervals(yuyv, probe_w, probe_h)
-                .unwrap_or_default()
-                .into_iter()
-                .map(|i| i.interval)
-                .collect();
-            modes.push((size.size, intervals));
-        }
-    }
+    let carried: Vec<FormatModes> = carried_formats(&formats)
+        .into_iter()
+        .map(|(fourcc, format)| (format, enum_modes(&dev, fourcc)))
+        .collect();
 
     let display_name = if caps.card.is_empty() {
         path.to_string()
@@ -122,7 +116,7 @@ fn probe_node(path: &str) -> Option<Device> {
         display_name,
         klass: "Video/Source".to_string(),
         persistent_id: persistent_id(Some(&caps), path),
-        caps: yuyv_caps(&modes),
+        caps: device_caps(&carried),
         element: "v4l2src",
         props: Vec::from([("device".to_string(), path.to_string())]),
         detail: Vec::from([
@@ -194,9 +188,85 @@ fn node_path(device: &Device) -> Option<&str> {
         .map(|(_, value)| value.as_str())
 }
 
-/// Frame sizes plus the intervals reported for each, as YUYV caps
-/// alternatives in driver order.
-fn yuyv_caps(modes: &[(FrameSizeEnum, Vec<FrameIntervalEnum>)]) -> CapsSet {
+/// The advertised fourccs `v4l2src` can carry, in that element's preference
+/// order rather than the driver's. A fourcc no [`Caps`] covers (greyscale,
+/// bayer, a vendor format) is left out here and survives only in the node's
+/// `formats` detail.
+fn carried_formats(formats: &[v4l::format::Description]) -> Vec<(FourCC, CapturePixelFormat)> {
+    FOURCCS
+        .iter()
+        .filter(|(fourcc, _)| formats.iter().any(|f| f.fourcc.repr == **fourcc))
+        .map(|(fourcc, format)| (FourCC::new(fourcc), *format))
+        .collect()
+}
+
+/// The sizes one format offers, each with the intervals reported for it. An
+/// enumeration the driver refuses reads as no modes rather than failing the
+/// node, so the remaining formats are still described.
+fn enum_modes(dev: &v4l::Device, fourcc: FourCC) -> Vec<(FrameSizeEnum, Vec<FrameIntervalEnum>)> {
+    let mut modes = Vec::new();
+    for size in dev.enum_framesizes(fourcc).unwrap_or_default() {
+        let (probe_width, probe_height) = match &size.size {
+            FrameSizeEnum::Discrete(d) => (d.width, d.height),
+            FrameSizeEnum::Stepwise(s) => (s.min_width, s.min_height),
+        };
+        let intervals = dev
+            .enum_frameintervals(fourcc, probe_width, probe_height)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|i| i.interval)
+            .collect();
+        modes.push((size.size, intervals));
+    }
+    modes
+}
+
+/// Every carried format's modes as one caps set, formats in [`FOURCCS`]
+/// preference order and the [`MAX_ALTERNATIVES`] budget shared between them.
+fn device_caps(carried: &[FormatModes]) -> CapsSet {
+    let per_format: Vec<Vec<Caps>> = carried
+        .iter()
+        .map(|(format, modes)| format_caps(*format, modes))
+        .collect();
+    let quotas = share_budget(&per_format);
+    let mut alternatives = Vec::new();
+    for (caps, quota) in per_format.iter().zip(quotas) {
+        alternatives.extend_from_slice(&caps[..quota]);
+    }
+    CapsSet::from_alternatives(alternatives)
+}
+
+/// How many alternatives each format keeps: one slot at a time round-robin
+/// until the budget runs out, so a format with hundreds of modes cannot spend
+/// the whole of it before the next one is reached. A format that runs out of
+/// modes leaves its share to the others.
+fn share_budget(per_format: &[Vec<Caps>]) -> Vec<usize> {
+    let mut quotas: Vec<usize> = per_format.iter().map(|_| 0).collect();
+    let mut total = 0;
+    let mut granted = true;
+    while total < MAX_ALTERNATIVES && granted {
+        granted = false;
+        for (quota, caps) in quotas.iter_mut().zip(per_format) {
+            if total == MAX_ALTERNATIVES {
+                break;
+            }
+            if *quota < caps.len() {
+                *quota += 1;
+                total += 1;
+                granted = true;
+            }
+        }
+    }
+    quotas
+}
+
+/// Frame sizes plus the intervals reported for each, as caps alternatives for
+/// one format in driver order. Capped at [`MAX_ALTERNATIVES`]: no format can
+/// use more than that even when it is the only one.
+fn format_caps(
+    format: CapturePixelFormat,
+    modes: &[(FrameSizeEnum, Vec<FrameIntervalEnum>)],
+) -> Vec<Caps> {
     let mut alternatives = Vec::new();
     for (size, intervals) in modes {
         let Some((width, height)) = size_dims(size) else {
@@ -210,18 +280,12 @@ fn yuyv_caps(modes: &[(FrameSizeEnum, Vec<FrameIntervalEnum>)]) -> CapsSet {
         }
         for framerate in rates {
             if alternatives.len() >= MAX_ALTERNATIVES {
-                return CapsSet::from_alternatives(alternatives);
+                return alternatives;
             }
-            alternatives.push(Caps::RawVideo {
-                format: RawVideoFormat::Yuyv,
-                width: width.clone(),
-                height: height.clone(),
-                framerate,
-                interlace: Interlace::Any,
-            });
+            alternatives.push(format.caps_with_dims(width.clone(), height.clone(), framerate));
         }
     }
-    CapsSet::from_alternatives(alternatives)
+    alternatives
 }
 
 /// One enumerated frame size as caps dimensions. `None` for a degenerate
@@ -291,6 +355,7 @@ fn rate_q16(interval: &Fraction) -> Option<u32> {
 mod tests {
     use super::*;
     use alloc::format;
+    use g2g_core::RawVideoFormat;
     use v4l::frameinterval::Stepwise as IntervalStepwise;
     use v4l::framesize::{Discrete, Stepwise as SizeStepwise};
 
@@ -300,6 +365,14 @@ mod tests {
 
     fn fps(n: u32) -> FrameIntervalEnum {
         FrameIntervalEnum::Discrete(Fraction::new(1, n))
+    }
+
+    fn yuyv_caps(modes: &[(FrameSizeEnum, Vec<FrameIntervalEnum>)]) -> Vec<Caps> {
+        format_caps(CapturePixelFormat::Yuyv, modes)
+    }
+
+    fn format_of(caps: &Caps) -> CapturePixelFormat {
+        CapturePixelFormat::from_caps(caps).expect("a carried capture format")
     }
 
     fn caps_of(caps: &Caps) -> (Dim, Dim, Rate) {
@@ -324,8 +397,7 @@ mod tests {
             (discrete(640, 480), Vec::from([fps(30), fps(15)])),
             (discrete(1280, 720), Vec::from([fps(10)])),
         ]);
-        let set = yuyv_caps(&modes);
-        let alts = set.alternatives();
+        let alts = yuyv_caps(&modes);
         assert_eq!(alts.len(), 3);
         assert_eq!(
             caps_of(&alts[0]),
@@ -357,7 +429,7 @@ mod tests {
             step: Fraction::new(1, 1000),
         });
         let modes = Vec::from([(size, Vec::from([interval]))]);
-        let alts = yuyv_caps(&modes).alternatives().to_vec();
+        let alts = yuyv_caps(&modes);
         assert_eq!(alts.len(), 1);
         assert_eq!(
             caps_of(&alts[0]),
@@ -398,7 +470,7 @@ mod tests {
                 Vec::from([FrameIntervalEnum::Discrete(Fraction::new(0, 30))]),
             ),
         ]);
-        let alts = yuyv_caps(&modes).alternatives().to_vec();
+        let alts = yuyv_caps(&modes);
         // only the last mode survives, with an unknown rate.
         assert_eq!(alts.len(), 1);
         assert_eq!(
@@ -412,7 +484,98 @@ mod tests {
         let modes: Vec<_> = (0..100)
             .map(|i| (discrete(640 + i, 480), Vec::from([fps(30), fps(15)])))
             .collect();
-        assert_eq!(yuyv_caps(&modes).alternatives().len(), MAX_ALTERNATIVES);
+        assert_eq!(yuyv_caps(&modes).len(), MAX_ALTERNATIVES);
+        let carried = Vec::from([(CapturePixelFormat::Yuyv, modes)]);
+        assert_eq!(device_caps(&carried).alternatives().len(), MAX_ALTERNATIVES);
+    }
+
+    fn described(fourcc: &[u8; 4]) -> v4l::format::Description {
+        v4l::format::Description {
+            index: 0,
+            typ: 1,
+            flags: v4l::format::description::Flags::empty(),
+            description: String::new(),
+            fourcc: FourCC::new(fourcc),
+        }
+    }
+
+    #[test]
+    fn only_the_fourccs_v4l2src_carries_become_formats() {
+        // driver order deliberately differs from the element's preference.
+        let advertised = Vec::from([
+            described(b"MJPG"),
+            described(b"GREY"),
+            described(b"YUYV"),
+            described(b"BA81"),
+        ]);
+        let carried = carried_formats(&advertised);
+        assert_eq!(
+            carried.iter().map(|(_, f)| *f).collect::<Vec<_>>(),
+            Vec::from([CapturePixelFormat::Yuyv, CapturePixelFormat::Mjpeg])
+        );
+        // a node offering nothing carriable describes no caps at all.
+        assert!(carried_formats(&Vec::from([described(b"GREY")])).is_empty());
+    }
+
+    #[test]
+    fn every_carried_format_gets_caps_in_preference_order() {
+        let one_mode = || Vec::from([(discrete(1280, 720), Vec::from([fps(30)]))]);
+        let carried = Vec::from([
+            (CapturePixelFormat::Yuyv, one_mode()),
+            (CapturePixelFormat::Nv12, one_mode()),
+            (CapturePixelFormat::Mjpeg, one_mode()),
+        ]);
+        let alts = device_caps(&carried).alternatives().to_vec();
+        assert_eq!(alts.len(), 3);
+        assert_eq!(
+            alts.iter().map(format_of).collect::<Vec<_>>(),
+            Vec::from([
+                CapturePixelFormat::Yuyv,
+                CapturePixelFormat::Nv12,
+                CapturePixelFormat::Mjpeg
+            ])
+        );
+        // the compressed format keeps its own caps shape, not a raw one.
+        assert_eq!(alts[2], CapturePixelFormat::Mjpeg.caps(1280, 720, 30));
+        assert_eq!(
+            caps_of(&alts[0]),
+            (Dim::Fixed(1280), Dim::Fixed(720), Rate::Fixed(30 << 16))
+        );
+    }
+
+    #[test]
+    fn one_format_cannot_spend_the_whole_budget() {
+        let many = || -> Vec<(FrameSizeEnum, Vec<FrameIntervalEnum>)> {
+            (0..100)
+                .map(|i| (discrete(640 + i, 480), Vec::from([fps(30)])))
+                .collect()
+        };
+        let few = Vec::from([(discrete(320, 240), Vec::from([fps(15)]))]);
+        let carried = Vec::from([
+            (CapturePixelFormat::Yuyv, many()),
+            (CapturePixelFormat::Nv12, many()),
+            (CapturePixelFormat::Mjpeg, few),
+        ]);
+        let alts = device_caps(&carried).alternatives().to_vec();
+        assert_eq!(alts.len(), MAX_ALTERNATIVES);
+        let mjpeg = alts
+            .iter()
+            .filter(|c| format_of(c) == CapturePixelFormat::Mjpeg)
+            .count();
+        let nv12 = alts
+            .iter()
+            .filter(|c| format_of(c) == CapturePixelFormat::Nv12)
+            .count();
+        // the one MJPEG mode survives the two greedy formats, which split what
+        // it leaves.
+        assert_eq!(mjpeg, 1);
+        assert_eq!(nv12, (MAX_ALTERNATIVES - 1) / 2);
+        // preference order still groups the formats, YUYV first.
+        assert_eq!(format_of(&alts[0]), CapturePixelFormat::Yuyv);
+        assert_eq!(
+            format_of(&alts[MAX_ALTERNATIVES - 1]),
+            CapturePixelFormat::Mjpeg
+        );
     }
 
     #[test]

@@ -106,6 +106,39 @@ fn parse_progressive_sequence(au: &[u8], body: usize) -> bool {
     }
 }
 
+/// The start-code prefix every MPEG header is introduced by.
+const START_CODE_PREFIX: [u8; 3] = [0x00, 0x00, 0x01];
+/// `user_data_start_code` (ISO 13818-2 6.2.2.2), the block ATSC A/53 carries
+/// closed captions in.
+const USER_DATA_START_CODE: u8 = 0xB2;
+
+/// Call `f` with the payload of every `user_data` block (`00 00 01 B2`) in one
+/// MPEG-1 / MPEG-2 access unit, in bitstream order. The block carries no length:
+/// its payload ends at the next start code, or at the end of the unit. The
+/// standard forbids the start-code pattern inside user data, so a payload that
+/// emulates one is cut there rather than read past.
+pub(crate) fn for_each_user_data(au: &[u8], mut f: impl FnMut(&[u8])) {
+    let mut i = 0usize;
+    while i + 4 <= au.len() {
+        if au[i..i + 3] != START_CODE_PREFIX {
+            i += 1;
+            continue;
+        }
+        if au[i + 3] != USER_DATA_START_CODE {
+            i += 4;
+            continue;
+        }
+        let start = i + 4;
+        let end = au[start..]
+            .windows(3)
+            .position(|w| w == START_CODE_PREFIX)
+            .map_or(au.len(), |at| start + at);
+        f(&au[start..end]);
+        // end >= start > i, so the scan always advances.
+        i = end;
+    }
+}
+
 /// The picture header's `temporal_reference` (the picture's display index
 /// within its GOP, ISO 13818-2 6.3.9) and whether a GOP header precedes it in
 /// this access unit. Headers come before slice data in an access unit, so the

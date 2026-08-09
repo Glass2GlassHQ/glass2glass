@@ -82,6 +82,14 @@ impl BiquadState {
     }
 }
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::equalizer::Equalizer3Bands;
+///
+/// // boost the low band, cut the high band.
+/// let equalizer = Equalizer3Bands::new().with_band(0, 6.0).with_band(2, -3.0);
+/// ```
 #[derive(Debug)]
 pub struct Equalizer3Bands {
     gains_db: [f64; 3],

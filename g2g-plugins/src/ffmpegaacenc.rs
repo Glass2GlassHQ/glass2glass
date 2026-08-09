@@ -57,6 +57,13 @@ fn sample_rate_index(rate: u32) -> Option<u8> {
         .map(|i| i as u8)
 }
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::ffmpegaacenc::FfmpegAacEnc;
+///
+/// let encoder = FfmpegAacEnc::new().with_bitrate(128_000);
+/// ```
 pub struct FfmpegAacEnc {
     sample_rate: u32,
     channels: u8,

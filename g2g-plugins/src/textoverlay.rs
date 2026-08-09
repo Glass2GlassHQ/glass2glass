@@ -84,6 +84,34 @@ struct LineMetrics {
 #[cfg(feature = "truetype-overlay")]
 type FontAxis = ([u8; 4], f32);
 
+/// One shaped glyph placed on the canvas: `(x, y)` is the pen origin on the
+/// baseline in frame pixels, before the rasterizer's own bitmap offsets.
+#[cfg(feature = "text-shaping")]
+#[derive(Debug)]
+pub(crate) struct PlacedGlyph {
+    /// Rasterizer key: the face and glyph index the shaper resolved to, plus the
+    /// size and subpixel bin. A backend that draws outlines itself reads the face
+    /// and glyph out of it instead of blitting a raster.
+    pub key: crate::textshape::GlyphKey,
+    pub x: i32,
+    pub y: i32,
+    /// Text colour, resolved per glyph so a `::cue(.class)` span recolours only
+    /// its own run.
+    pub color: [u8; 4],
+}
+
+/// One cue laid out on the canvas: the backing box as `(x, y, width, height)`
+/// in frame pixels, and every glyph in it. Produced by
+/// [`TextOverlay::place_shaped_cues`] so the CPU blitter and the Vello GPU
+/// backend place the same cue in the same pixels.
+#[cfg(feature = "text-shaping")]
+#[derive(Debug)]
+pub(crate) struct PlacedCue {
+    pub background: (i32, i32, i32, i32),
+    pub background_color: [u8; 4],
+    pub glyphs: Vec<PlacedGlyph>,
+}
+
 #[cfg(feature = "truetype-overlay")]
 impl FontFace {
     /// Move this face to `value` on the `tag` axis. `false` if the face has no
@@ -177,6 +205,17 @@ use crate::subparse::parse_auto;
 /// Renders the active subtitle cue's text onto an RGBA8 frame. Cue selection is
 /// by the frame's `pts_ns`; a frame with no covering cue passes through
 /// untouched.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::textoverlay::TextOverlay;
+///
+/// let overlay = TextOverlay::from_srt("1\n00:00:00,000 --> 00:00:02,000\nhello\n")
+///     .with_font_size(32)
+///     .with_text_color([0xFF, 0xE0, 0x40]);
+/// assert_eq!(overlay.cue_count(), 1);
+/// ```
 #[derive(Debug)]
 pub struct TextOverlay {
     width: u32,
@@ -418,8 +457,14 @@ impl TextOverlay {
         self.cues.iter().filter(|c| c.covers(t_ns)).collect()
     }
 
+    /// Whether any cue covers `t_ns`: a frame with none needs no render pass
+    /// (and no font discovery).
+    pub(crate) fn has_cue_at(&self, t_ns: u64) -> bool {
+        self.cues.iter().any(|c| c.covers(t_ns))
+    }
+
     /// RGBA8 at fixed geometry, the only format this element draws on.
-    fn dims(caps: &Caps) -> Option<(u32, u32)> {
+    pub(crate) fn dims(caps: &Caps) -> Option<(u32, u32)> {
         if let Caps::RawVideo {
             format: RawVideoFormat::Rgba8,
             width: Dim::Fixed(w),
@@ -434,7 +479,7 @@ impl TextOverlay {
     }
 
     /// Whether `caps` is RGBA8 (geometry may still be unfixed at negotiation).
-    fn accepts(caps: &Caps) -> bool {
+    pub(crate) fn accepts(caps: &Caps) -> bool {
         matches!(
             caps,
             Caps::RawVideo {
@@ -583,7 +628,7 @@ impl TextOverlay {
     /// height, with a floor so small frames stay legible, or the explicit
     /// `font-size` when one is set.
     #[cfg(feature = "truetype-overlay")]
-    fn ttf_px(&self) -> f32 {
+    pub(crate) fn ttf_px(&self) -> f32 {
         if self.font_px > 0 {
             return self.font_px as f32;
         }
@@ -860,6 +905,15 @@ impl TextOverlay {
         }
     }
 
+    /// Bytes + collection index of the face a [`PlacedGlyph`] resolved to, so a
+    /// backend that draws outlines itself can load the very face the shaper
+    /// picked (including a fallback face it pulled in for CJK).
+    #[cfg(feature = "vello-text-overlay")]
+    pub(crate) fn face_data(&mut self, id: crate::textshape::FontId) -> Option<(Vec<u8>, u32)> {
+        self.ensure_shaper();
+        self.shaper.as_ref()?.face_data(id)
+    }
+
     /// The `wght` variable-font axis position, if `font-variations=` set one: the
     /// one axis the shaped path can apply (it selects a weight, which swash turns
     /// into a `wght` variation). Other axes reach only the `ab_glyph` path.
@@ -871,22 +925,26 @@ impl TextOverlay {
             .map(|(_, v)| *v)
     }
 
-    /// Shaped render path (the `text-shaping` feature): lay each horizontal cue
-    /// out through cosmic-text, so runs are shaped (joining, kerning, ligatures),
+    /// Lay the horizontal cues active at `t_ns` out through cosmic-text (the
+    /// `text-shaping` feature), so runs are shaped (joining, kerning, ligatures),
     /// reordered by the bidi algorithm, and filled from the system fonts where
     /// the primary lacks a codepoint. Placement (`position` / `line` / `align`,
     /// auto-`line` stacking) and colours are the same as the `ab_glyph` path;
     /// only the glyphs and their advances come from the shaper. Vertical cues are
     /// left to [`render_active_ttf`](Self::render_active_ttf) (cosmic-text has no
     /// vertical writing mode).
+    ///
+    /// Returns canvas-absolute placements rather than drawing, so the CPU
+    /// blitter and the Vello GPU backend put the same cue in the same pixels.
     #[cfg(feature = "text-shaping")]
-    fn render_active_shaped(&mut self, buf: &mut [u8], t_ns: u64) {
+    pub(crate) fn place_shaped_cues(&mut self, t_ns: u64) -> Vec<PlacedCue> {
         self.ensure_shaper();
-        // Out of the field for the render: laying out needs `&mut` shaper while
-        // the cue list and the blitters are borrowed from `&self`.
+        // Out of the field for the layout: it needs `&mut` shaper while the cue
+        // list is borrowed from `&self`.
         let Some(mut shaper) = self.shaper.take() else {
-            return;
+            return Vec::new();
         };
+        let mut placed = Vec::new();
         let w = self.width as f32;
         let h = self.height as f32;
         let px = self.ttf_px();
@@ -932,15 +990,7 @@ impl TextOverlay {
                     t
                 }
             };
-            self.fill_rect(
-                buf,
-                (block_left - pad) as i32,
-                (block_top - pad) as i32,
-                (block_w + 2.0 * pad) as i32,
-                (block_h + 2.0 * pad) as i32,
-                bg,
-            );
-
+            let mut glyphs = Vec::new();
             for (row, line) in block.lines.iter().enumerate() {
                 let x0 = match s.align {
                     TextAlign::Center => block_left + (block_w - line.width) / 2.0,
@@ -949,17 +999,53 @@ impl TextOverlay {
                 };
                 let base = bases.get(row).copied().unwrap_or(0);
                 for g in &line.glyphs {
-                    let Some(img) = shaper.image(g.key) else {
-                        continue;
-                    };
-                    let gx = x0 as i32 + g.x + img.left;
-                    let gy = block_top as i32 + g.y - img.top;
-                    if img.color {
-                        self.blit_rgba(buf, gx, gy, (img.width, img.height), img.data);
-                    } else {
-                        let fg = fg_at(base + g.start);
-                        self.blit_coverage(buf, gx, gy, (img.width, img.height), img.data, fg);
-                    }
+                    glyphs.push(PlacedGlyph {
+                        key: g.key,
+                        x: x0 as i32 + g.x,
+                        y: block_top as i32 + g.y,
+                        color: fg_at(base + g.start),
+                    });
+                }
+            }
+            placed.push(PlacedCue {
+                background: (
+                    (block_left - pad) as i32,
+                    (block_top - pad) as i32,
+                    (block_w + 2.0 * pad) as i32,
+                    (block_h + 2.0 * pad) as i32,
+                ),
+                background_color: bg,
+                glyphs,
+            });
+        }
+        self.shaper = Some(shaper);
+        placed
+    }
+
+    /// Blit the cues [`place_shaped_cues`](Self::place_shaped_cues) laid out:
+    /// the backing box, then each glyph's rasterized coverage (or its colour
+    /// bitmap for an emoji face).
+    #[cfg(feature = "text-shaping")]
+    fn render_active_shaped(&mut self, buf: &mut [u8], t_ns: u64) {
+        let placed = self.place_shaped_cues(t_ns);
+        // Out of the field again: rasterizing needs `&mut` shaper while the
+        // blitters are borrowed from `&self`.
+        let Some(mut shaper) = self.shaper.take() else {
+            return;
+        };
+        for cue in &placed {
+            let (bx, by, bw, bh) = cue.background;
+            self.fill_rect(buf, bx, by, bw, bh, cue.background_color);
+            for g in &cue.glyphs {
+                let Some(img) = shaper.image(g.key) else {
+                    continue;
+                };
+                let gx = g.x + img.left;
+                let gy = g.y - img.top;
+                if img.color {
+                    self.blit_rgba(buf, gx, gy, (img.width, img.height), img.data);
+                } else {
+                    self.blit_coverage(buf, gx, gy, (img.width, img.height), img.data, g.color);
                 }
             }
         }
@@ -1202,7 +1288,7 @@ impl AsyncElement for TextOverlay {
                     let t_ns = frame.timing.pts_ns;
                     // Draw only when a cue is showing; overlapping cues each get
                     // their own placement (see `render_active`).
-                    if self.cues.iter().any(|c| c.covers(t_ns)) {
+                    if self.has_cue_at(t_ns) {
                         let MemoryDomain::System(slice) = &mut frame.domain else {
                             return Err(G2gError::UnsupportedDomain);
                         };
@@ -1321,6 +1407,15 @@ impl AsyncElement for TextOverlay {
 /// rides the stream as [`TextCueMeta`](crate::subparse::TextCueMeta) frame-meta
 /// under the `metadata` feature (M406), so a placed cue renders where it asks; on
 /// the ZST baseline (no meta) every cue draws at the renderer default (bottom-centre).
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::textoverlay::TextOverlayN;
+///
+/// let overlay = TextOverlayN::new();
+/// assert_eq!(overlay.cue_count(), 0);
+/// ```
 #[derive(Debug, Default)]
 pub struct TextOverlayN {
     /// Owns the cue list + geometry + rendering.
@@ -1514,7 +1609,7 @@ impl MultiInputElement for TextOverlayN {
 }
 
 /// `TextOverlay`'s settable properties (M171).
-static TEXTOVERLAY_PROPS: &[PropertySpec] = &[
+pub(crate) static TEXTOVERLAY_PROPS: &[PropertySpec] = &[
     PropertySpec::new(
         "location",
         PropKind::Str,

@@ -223,6 +223,13 @@ fn dims_of(caps: &Caps) -> Option<(u32, u32)> {
 
 // ---- sink (client) ----
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::localcuda::LocalCudaSink;
+///
+/// let sink = LocalCudaSink::new("/tmp/g2g-cuda.sock");
+/// ```
 #[derive(Debug)]
 pub struct LocalCudaSink {
     path: String,
@@ -467,6 +474,13 @@ impl Drop for IpcMapping {
 
 impl CudaKeepAlive for IpcMapping {}
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::localcuda::LocalCudaSrc;
+///
+/// let src = LocalCudaSrc::new("/tmp/g2g-cuda.sock").with_frame_limit(300);
+/// ```
 #[derive(Debug)]
 pub struct LocalCudaSrc {
     path: String,

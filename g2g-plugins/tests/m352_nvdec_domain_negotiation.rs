@@ -217,6 +217,7 @@ fn proposal(prefer: MemoryDomainKind, accepts: DomainSet) -> AllocationParams {
         align: 256,
         domain: prefer,
         accepts,
+        ..Default::default()
     }
 }
 
