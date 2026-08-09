@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M982: the ffmpeg decoder keeps a mid-stream framerate refinement instead of its 30/1 fallback.
 - M980: `g2g-launch --run-json` dumps per-edge caps observed at runtime.
 - M977: `PlaneLayout` meta lets the wgpu readback skip its row repack under demand.
 - M976: consumers declare meta demand on the allocation cascade, with per-meta policy.

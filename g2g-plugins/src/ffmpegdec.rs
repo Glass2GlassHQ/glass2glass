@@ -361,8 +361,9 @@ pub struct FfmpegVideoDec {
     /// happily pipelines several frames before releasing the first), off
     /// for software (correctness on B-frame streams).
     low_delay: bool,
-    /// M16 workaround #3 Phase A: most recent input caps received via
-    /// `PipelinePacket::CapsChanged`. Used to validate the format on
+    /// M16 workaround #3 Phase A: most recent input caps, from
+    /// `PipelinePacket::CapsChanged` or from a mid-stream
+    /// `configure_pipeline`. Used to validate the format on
     /// mid-stream changes and to debug-assert that the decode-time
     /// output geometry agrees with the declared `DerivedOutput`
     /// closure. Phase B will use this as the input to a runner-side
@@ -1103,6 +1104,15 @@ impl AsyncElement for FfmpegVideoDec {
         // an I420 request loud rather than silently emit mismatched caps.
         if self.backend == Backend::NvdecCuda && self.output_format != OutputFormat::Nv12 {
             return Err(G2gError::CapsMismatch);
+        }
+
+        // A mid-stream refinement (the parser recovering the real geometry and
+        // framerate from the SPS) only reaches this element here: the runner
+        // steers it and hands `process` our own output caps instead. The first
+        // call carries the solve's placeholder geometry rather than anything the
+        // stream said, so it stays unrecorded.
+        if self.configured {
+            self.input_caps = Some(absolute_caps.clone());
         }
 
         // Defer the libavcodec open to the first access unit (see `open_decoder`),
