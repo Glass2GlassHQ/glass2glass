@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M978: windowed winit example driving `VelloAnalyticsOverlay -> WgpuSink`.
 - M973: architecture diagrams on the docs site.
 - M970: sources declare `CapsPreferences` costs over their produce set.
 - M969: `typefind` element sniffs a byte stream mid-graph and retypes its output.

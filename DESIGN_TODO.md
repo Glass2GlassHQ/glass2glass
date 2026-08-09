@@ -515,8 +515,8 @@ _(No open parser items.)_
 - A real ML producer for the `Segmentation` / `Roi` analytics nodes (no in-tree
   model emits masks or ROIs yet).
 - `pull`-based metadata propagation across transforms (push is auto-applied).
-- A turnkey windowed runner for `WgpuSink` (a winit/SCTK example that opens a
-  window and drives the overlay -> sink graph; validate on a real display).
+- A `WgpuSink` API to reconfigure its surface on window resize (the swapchain
+  keeps its original size today; the `wgpu_overlay_on_screen` example hits it).
 - `NvEnc` AV1 encode (needs RTX 40-series hardware).
 - Derive the `decodebin_preferring(.., Cuda)` preference automatically from a
   downstream consumer's accepted input memory.

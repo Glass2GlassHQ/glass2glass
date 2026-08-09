@@ -1279,6 +1279,12 @@ required-features = ["vulkan-video"]
 name = "metal_video_on_screen"
 required-features = ["vtdecode", "metal-sink"]
 
+# M978: turnkey windowed runner for WgpuSink (videotestsrc -> synthetic detection
+# metadata -> Vello overlay -> on-screen sink). No media file or codec hardware.
+[[example]]
+name = "wgpu_overlay_on_screen"
+required-features = ["vello-overlay", "wgpu-sink"]
+
 # M495: zero-copy VulkanVideoDec -> WgpuSink (decoded texture presented, no readback).
 [[test]]
 name = "m495_vulkan_video_wgpu_sink"
