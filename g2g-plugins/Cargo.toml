@@ -133,9 +133,8 @@ observe = ["tooling-json", "tokio/net", "tokio/io-util", "tokio/rt", "tokio/time
 # sans-IO WebRTC stack; we drive its handle_input / poll_output loop on a tokio
 # UDP socket, using its pure-Rust `rust-crypto` backend so there is no OpenSSL
 # system dep. WHIP signaling (HTTP offer/answer) reuses reqwest. Implies std +
-# tokio. str0m 0.20 requires rustc 1.85, within the workspace MSRV; the feature
-# is off by default, so the no_std baseline is unaffected. See the str0m
-# dependency entry for the `[patch.crates-io]` fork this workspace builds against.
+# tokio. str0m 0.22 requires rustc 1.85, within the workspace MSRV; the feature
+# is off by default, so the no_std baseline is unaffected.
 webrtc = ["std", "tokio/net", "tokio/time", "tokio/macros", "tokio/io-util", "dep:str0m", "dep:reqwest", "dep:sha1", "dep:hmac", "dep:md-5", "dep:tokio-native-tls"]
 # Native LiveKit publisher (LiveKitSink, T4): joins a LiveKit room and publishes
 # H.264 (+ optional Opus) over the str0m PeerConnection, with a hand-rolled
@@ -758,14 +757,10 @@ symphonia-codec-vorbis = { version = "0.6", optional = true }
 reqwest = { version = "0.12", optional = true }
 # str0m: sans-IO WebRTC stack (ICE / DTLS / SRTP / SCTP / RTP). `rust-crypto` is
 # the pure-Rust crypto backend (RustCrypto ecosystem), so no OpenSSL system dep.
-# Drives the native WebRtcSink (the `webrtc` feature).
-#
-# In-workspace builds resolve str0m through the root `[patch.crates-io]` fork,
-# which drops the SRTP block padding on media sends (LiveKit's forwarder mangles
-# it for browser subscribers). A downstream crate depending on g2g-plugins gets
-# stock str0m 0.20 instead: it compiles and publishes fine, but LiveKit browser
-# subscribers see the mangled stream until that peer applies the same patch.
-str0m = { version = "0.20", optional = true, default-features = false, features = ["rust-crypto"] }
+# Drives the native WebRtcSink (the `webrtc` feature). 0.22 is the first release
+# that sends media packets unpadded (LiveKit's forwarder mangled the padding for
+# browser subscribers).
+str0m = { version = "0.22", optional = true, default-features = false, features = ["rust-crypto"] }
 # Read-only XML DOM for the DASH MPD parser (dash feature). Pure Rust (only
 # xmlparser), no system deps.
 roxmltree = { version = "0.21", optional = true }
