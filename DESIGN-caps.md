@@ -658,7 +658,13 @@ solver. `g2g-core::runtime::autoplug` is two layers split by what they need:
   `from → to` directly), returning a sub-graph onto `run_graph`. Real element
   types publish templates via the `PadTemplates` trait (`FfmpegH264Dec`:
   H.264 → NV12 / I420), so a real decoder is registered and auto-plugged, not
-  just synthetic descriptors.
+  just synthetic descriptors. The `*_with_params` variants (`autoplug` /
+  `decodebin` / `build_playbin` / `build_playbin_graph`) take `AutoplugParams`,
+  property assignments keyed by factory name applied right after construction
+  (M964): geometry, a device index, or a file path reaches an auto-plugged
+  element as the property it already exposes, an assignment a selected element
+  rejects is an `AutoplugError::Property`, and one addressing an unselected
+  factory goes unused.
 
 Source-side `typefind` is not needed: a g2g source declares its output caps via
 its source pad template / `caps_constraint`, so the caps feeding `decodebin` are

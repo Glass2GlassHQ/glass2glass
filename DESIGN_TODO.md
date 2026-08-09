@@ -240,7 +240,6 @@ Phased plan:
 
 ## Seek and auto-plug
 
-- Richer auto-plug factory construction params (geometry / device / file path).
 - A hardware-backed end-to-end decode-through-`decodebin` run (current tests
   read templates / assert splicing, decode no real media).
 

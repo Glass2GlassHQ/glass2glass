@@ -124,10 +124,10 @@ pub use autoplug::{PadKind, PadRequest};
 
 #[cfg(feature = "std")]
 pub use autoplug::{
-    declared_source_caps, DecodebinError, DecodebinSelectHook, DemuxFactory, DemuxSelectHook,
-    ElementDoc, ElementFactory, FanoutSrcFactory, LaunchFactory, MuxerFactory, PlaybinError,
-    PlaybinGraphError, PlaybinHook, PlaybinPort, PrimaryStream, PrimaryStreamHook, PropertyDoc,
-    Registry, SourceFactory, Uri, UriError, UriSourceFactory,
+    declared_source_caps, AutoplugError, AutoplugParams, DecodebinError, DecodebinSelectHook,
+    DemuxFactory, DemuxSelectHook, ElementDoc, ElementFactory, FanoutSrcFactory, LaunchFactory,
+    MuxerFactory, PlaybinError, PlaybinGraphError, PlaybinHook, PlaybinPort, PrimaryStream,
+    PrimaryStreamHook, PropertyDoc, Registry, SourceFactory, Uri, UriError, UriSourceFactory,
 };
 
 #[cfg(feature = "std")]

@@ -377,7 +377,7 @@ mod factory {
     use crate::fanout::MultiOutputElement;
     use crate::graph::{Graph, GraphError, NodeId, PadId};
     use crate::pad_template::{PadCaps, PadDirection, PadTemplate, PadTemplates};
-    use crate::property::format_specs;
+    use crate::property::{format_specs, PropError, PropValue};
     use crate::runtime::launch::ParseError;
     use crate::runtime::{
         DynMultiInputElement, DynMultiOutputElement, DynSourceLoop, GraphNode, GraphNodeRef,
@@ -913,6 +913,110 @@ mod factory {
         }
     }
 
+    /// Property assignments for the elements an auto-plug search selects, keyed
+    /// by factory name: the auto-plug counterpart of a launch line's `key=value`.
+    /// A caller that never names the chain's elements (that is the point of
+    /// auto-plug) still needs to reach into them, e.g. `("videoscale", "width",
+    /// 640)` or `("filesink", "location", "out.mp4")`, so geometry, a device
+    /// index, or a file path is just a property name, not a special-cased
+    /// construction parameter.
+    ///
+    /// Applied by the `*_with_params` entry points right after the factory builds
+    /// the element, through the element's
+    /// [`set_property`](crate::AsyncElement::set_property), so an element only has
+    /// to expose the knob it already exposes to `gst-launch`. An assignment
+    /// addressing a factory the search did not select goes unused (the search
+    /// legitimately picks a different chain); one a *selected* element rejects is
+    /// an [`AutoplugError::Property`].
+    #[derive(Debug, Clone, Default)]
+    pub struct AutoplugParams {
+        assignments: Vec<(String, String, PropValue)>,
+    }
+
+    impl AutoplugParams {
+        /// No assignments (auto-plug behaves exactly as the paramless entry points).
+        pub fn new() -> Self {
+            Self::default()
+        }
+
+        /// Assign `property = value` on the element built from the factory named
+        /// `element`. Builder form; assignments apply in the order given.
+        pub fn set(mut self, element: &str, property: &str, value: PropValue) -> Self {
+            self.assignments
+                .push((element.to_string(), property.to_string(), value));
+            self
+        }
+
+        /// Apply every assignment addressed to the factory named `element` to a
+        /// just-built instance of it.
+        fn apply(
+            &self,
+            element: &str,
+            target: &mut dyn DynAsyncElement,
+        ) -> Result<(), AutoplugError> {
+            for (name, property, value) in &self.assignments {
+                if name != element {
+                    continue;
+                }
+                target
+                    .set_property(property, value.clone())
+                    .map_err(|source| AutoplugError::Property {
+                        element: name.clone(),
+                        property: property.clone(),
+                        source,
+                    })?;
+            }
+            Ok(())
+        }
+    }
+
+    /// Why a params-carrying auto-plug entry point
+    /// ([`Registry::decodebin_with_params`], [`Registry::build_playbin_with_params`],
+    /// [`Registry::build_playbin_graph_with_params`]) failed. One type across the
+    /// three, since they share every failure but the entry-specific first step.
+    #[derive(Debug)]
+    pub enum AutoplugError {
+        /// No source is registered under the requested name.
+        UnknownSource,
+        /// No output ports were given (a `playbin` needs at least one stream).
+        NoPorts,
+        /// No chain of registered elements converts the input caps to the target
+        /// within the depth bound.
+        NoChain,
+        /// The URI could not be dispatched to a source.
+        Uri(UriError),
+        /// A graph link failed.
+        Graph(GraphError),
+        /// A selected element rejected an [`AutoplugParams`] assignment: an
+        /// unknown property name, a type mismatch, or an out-of-range value.
+        Property {
+            element: String,
+            property: String,
+            source: PropError,
+        },
+    }
+
+    impl From<GraphError> for AutoplugError {
+        fn from(e: GraphError) -> Self {
+            AutoplugError::Graph(e)
+        }
+    }
+
+    impl From<UriError> for AutoplugError {
+        fn from(e: UriError) -> Self {
+            AutoplugError::Uri(e)
+        }
+    }
+
+    impl From<DecodebinError> for AutoplugError {
+        fn from(e: DecodebinError) -> Self {
+            match e {
+                DecodebinError::NoChain => AutoplugError::NoChain,
+                DecodebinError::Graph(e) => AutoplugError::Graph(e),
+            }
+        }
+    }
+
     /// A `playbin uri=X` auto-fan-out hook (M382): given the registry and the
     /// URI, probe the container and assemble a complete multi-stream
     /// `source -> demux -> per-stream decode -> auto sink` graph, the auto
@@ -1213,16 +1317,20 @@ mod factory {
         /// Prepend the [`parser_provider`](Self::set_parser_provider)'s parser to a
         /// just-autoplugged decode chain, when one is configured and the chain is a
         /// real decode (non-empty: an already-satisfied input needs no parser).
-        fn maybe_prepend_parser(&self, input: &Caps, elements: &mut Vec<Box<dyn DynAsyncElement>>) {
+        /// Returns the launch name of the parser it prepended, so a caller with
+        /// [`AutoplugParams`] can address it like any other auto-plugged element.
+        fn maybe_prepend_parser(
+            &self,
+            input: &Caps,
+            elements: &mut Vec<Box<dyn DynAsyncElement>>,
+        ) -> Option<&'static str> {
             if elements.is_empty() {
-                return;
+                return None;
             }
-            if let Some(parser) = self
-                .parser_name(input)
-                .and_then(|name| self.make_element(name))
-            {
-                elements.insert(0, parser);
-            }
+            let name = self.parser_name(input)?;
+            let parser = self.make_element(name)?;
+            elements.insert(0, parser);
+            Some(name)
         }
 
         /// The registered [`PlaybinHook`]s, in registration order (empty if none,
@@ -1577,12 +1685,28 @@ mod factory {
         ) -> Option<Vec<Box<dyn DynAsyncElement>>> {
             let descs = self.descs();
             let chain = find_chain(&descs, input, target, max_depth)?;
-            Some(
-                chain
-                    .into_iter()
-                    .map(|link| self.factories[link.index].build(&link.output))
-                    .collect(),
-            )
+            self.instantiate(chain, &AutoplugParams::new()).ok()
+        }
+
+        /// Build every element of a found chain, each configured to produce the
+        /// caps the search chose for it, then apply the [`AutoplugParams`]
+        /// assignments addressed to its factory. With no assignments this cannot
+        /// fail, which is why the [`Option`]-returning entry points can drop the
+        /// error.
+        fn instantiate(
+            &self,
+            chain: Vec<ChainLink>,
+            params: &AutoplugParams,
+        ) -> Result<Vec<Box<dyn DynAsyncElement>>, AutoplugError> {
+            chain
+                .into_iter()
+                .map(|link| {
+                    let factory = &self.factories[link.index];
+                    let mut element = factory.build(&link.output);
+                    params.apply(factory.desc.name, element.as_mut())?;
+                    Ok(element)
+                })
+                .collect()
         }
 
         /// `decodebin`-equivalent: auto-plug a decode chain and splice it into
@@ -1607,8 +1731,36 @@ mod factory {
             let mut elements = self
                 .autoplug(input, target, max_depth)
                 .ok_or(DecodebinError::NoChain)?;
-            self.maybe_prepend_parser(input, &mut elements);
+            let _ = self.maybe_prepend_parser(input, &mut elements);
             Self::splice_chain(graph, from, to, elements)
+        }
+
+        /// [`decodebin`](Self::decodebin) with per-element property assignments
+        /// (see [`AutoplugParams`]): each element the search selects, plus the
+        /// injected parser, gets the assignments addressed to its factory name
+        /// applied before it is spliced into the graph.
+        #[allow(clippy::too_many_arguments)]
+        pub fn decodebin_with_params(
+            &self,
+            graph: &mut Graph<GraphNode>,
+            from: impl Into<PadId>,
+            to: impl Into<PadId>,
+            input: &Caps,
+            target: &dyn Fn(&Caps) -> bool,
+            max_depth: usize,
+            params: &AutoplugParams,
+        ) -> Result<Vec<NodeId>, AutoplugError> {
+            let mut elements = self.autoplug_with_params(
+                input,
+                target,
+                max_depth,
+                SelectionContext::default(),
+                params,
+            )?;
+            if let Some(parser) = self.maybe_prepend_parser(input, &mut elements) {
+                params.apply(parser, elements[0].as_mut())?;
+            }
+            Ok(Self::splice_chain(graph, from, to, elements)?)
         }
 
         /// Insert `elements` as a run of transforms between output pad `from` and
@@ -1667,12 +1819,7 @@ mod factory {
         ) -> Option<Vec<Box<dyn DynAsyncElement>>> {
             let descs = self.descs();
             let chain = find_chain_preferring(&descs, input, target, max_depth, preferred)?;
-            Some(
-                chain
-                    .into_iter()
-                    .map(|link| self.factories[link.index].build(&link.output))
-                    .collect(),
-            )
+            self.instantiate(chain, &AutoplugParams::new()).ok()
         }
 
         /// Capability-aware [`autoplug_names`](Self::autoplug_names): score
@@ -1710,12 +1857,24 @@ mod factory {
         ) -> Option<Vec<Box<dyn DynAsyncElement>>> {
             let descs = self.descs();
             let chain = find_chain_with(&descs, input, target, max_depth, ctx)?;
-            Some(
-                chain
-                    .into_iter()
-                    .map(|link| self.factories[link.index].build(&link.output))
-                    .collect(),
-            )
+            self.instantiate(chain, &AutoplugParams::new()).ok()
+        }
+
+        /// Capability-aware [`autoplug`](Self::autoplug) that also applies
+        /// `params` to each element it builds (see [`AutoplugParams`]). The
+        /// instantiation half of [`decodebin_with_params`](Self::decodebin_with_params).
+        pub fn autoplug_with_params(
+            &self,
+            input: &Caps,
+            target: &dyn Fn(&Caps) -> bool,
+            max_depth: usize,
+            ctx: SelectionContext,
+            params: &AutoplugParams,
+        ) -> Result<Vec<Box<dyn DynAsyncElement>>, AutoplugError> {
+            let descs = self.descs();
+            let chain = find_chain_with(&descs, input, target, max_depth, ctx)
+                .ok_or(AutoplugError::NoChain)?;
+            self.instantiate(chain, params)
         }
 
         /// Domain-aware [`decodebin`](Self::decodebin): splice in the chain the
@@ -1735,7 +1894,7 @@ mod factory {
             let mut elements = self
                 .autoplug_preferring(input, target, max_depth, preferred)
                 .ok_or(DecodebinError::NoChain)?;
-            self.maybe_prepend_parser(input, &mut elements);
+            let _ = self.maybe_prepend_parser(input, &mut elements);
             Self::splice_chain(graph, from, to, elements)
         }
 
@@ -1762,6 +1921,36 @@ mod factory {
             let src = graph.add_source(GraphNodeRef::Source((source.build)()));
             let snk = graph.add_sink(GraphNodeRef::element(sink));
             self.decodebin(&mut graph, src, snk, &source.output, target, max_depth)?;
+            Ok(graph)
+        }
+
+        /// [`build_playbin`](Self::build_playbin) with per-element property
+        /// assignments for the auto-plugged chain (see [`AutoplugParams`]).
+        pub fn build_playbin_with_params<Sk: AsyncElement + 'static>(
+            &self,
+            source_name: &str,
+            sink: Sk,
+            target: &dyn Fn(&Caps) -> bool,
+            max_depth: usize,
+            params: &AutoplugParams,
+        ) -> Result<Graph<GraphNode>, AutoplugError> {
+            let source = self
+                .sources
+                .iter()
+                .find(|s| s.name == source_name)
+                .ok_or(AutoplugError::UnknownSource)?;
+            let mut graph: Graph<GraphNode> = Graph::new();
+            let src = graph.add_source(GraphNodeRef::Source((source.build)()));
+            let snk = graph.add_sink(GraphNodeRef::element(sink));
+            self.decodebin_with_params(
+                &mut graph,
+                src,
+                snk,
+                &source.output,
+                target,
+                max_depth,
+                params,
+            )?;
             Ok(graph)
         }
 
@@ -1859,6 +2048,42 @@ mod factory {
             self.build_playbin_graph_with_source(source, demux, ports, max_depth)
         }
 
+        /// [`build_playbin_graph`](Self::build_playbin_graph) with per-element
+        /// property assignments applied to every branch's auto-plugged chain (see
+        /// [`AutoplugParams`]). The same assignments are offered to each branch, so
+        /// a factory selected on two branches is configured identically.
+        pub fn build_playbin_graph_with_params<D: MultiOutputElement + 'static>(
+            &self,
+            uri: &str,
+            demux: D,
+            ports: Vec<PlaybinPort>,
+            max_depth: usize,
+            params: &AutoplugParams,
+        ) -> Result<Graph<GraphNode>, AutoplugError> {
+            if ports.is_empty() {
+                return Err(AutoplugError::NoPorts);
+            }
+            let (source, _byte_caps) = self.build_uri_source(uri)?;
+            let mut graph: Graph<GraphNode> = Graph::new();
+            let src = graph.add_source(GraphNodeRef::Source(source));
+            let outputs = ports.len() as u8;
+            let demux = graph.add_demux(GraphNode::demux(demux), outputs);
+            graph.link(src, demux.input())?;
+            for (i, port) in ports.into_iter().enumerate() {
+                let snk = graph.add_sink(GraphNodeRef::Element(port.sink));
+                self.decodebin_with_params(
+                    &mut graph,
+                    demux.out(i as u8),
+                    snk,
+                    &port.input_caps,
+                    &*port.target,
+                    max_depth,
+                    params,
+                )?;
+            }
+            Ok(graph)
+        }
+
         /// Like [`build_playbin_graph`](Self::build_playbin_graph) but with a
         /// pre-built byte source instead of one derived from the URI's scheme
         /// handler. The `playbin uri=` auto-fan-out hook (M382) uses this: having
@@ -1900,10 +2125,10 @@ mod factory {
 
 #[cfg(feature = "std")]
 pub use factory::{
-    declared_source_caps, DecodebinError, DecodebinSelectHook, DemuxFactory, DemuxSelectHook,
-    ElementDoc, ElementFactory, FanoutSrcFactory, LaunchFactory, MuxerFactory, PlaybinError,
-    PlaybinGraphError, PlaybinHook, PlaybinPort, PrimaryStream, PrimaryStreamHook, PropertyDoc,
-    Registry, SourceFactory, Uri, UriError, UriSourceFactory,
+    declared_source_caps, AutoplugError, AutoplugParams, DecodebinError, DecodebinSelectHook,
+    DemuxFactory, DemuxSelectHook, ElementDoc, ElementFactory, FanoutSrcFactory, LaunchFactory,
+    MuxerFactory, PlaybinError, PlaybinGraphError, PlaybinHook, PlaybinPort, PrimaryStream,
+    PrimaryStreamHook, PropertyDoc, Registry, SourceFactory, Uri, UriError, UriSourceFactory,
 };
 
 #[cfg(test)]
