@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M966: V4L2 device discovery lists caps for every format `v4l2src` carries.
 - M963: MPEG-2 picture user-data captions (ATSC A/53) feed `CcExtract`.
 - M962: str0m 0.22 (upstream now sends media unpadded), dropping the M709 `[patch.crates-io]` fork.
 

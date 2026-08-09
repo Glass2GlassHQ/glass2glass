@@ -381,8 +381,6 @@ Phased plan:
 
 ## Capture sources
 
-- V4L2 device discovery reports YUYV modes as caps only; the other formats
-  `v4l2src` can carry stay in `detail`.
 - `mfvideosrc`: first Windows build + camera smoke test; D3D11 zero-copy;
   size/rate request beyond device default.
 - Screen capture: Windows DXGI Desktop Duplication.

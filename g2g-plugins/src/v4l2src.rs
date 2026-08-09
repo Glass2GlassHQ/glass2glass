@@ -84,7 +84,7 @@ const DMABUF_RELEASE_POLL: core::time::Duration = core::time::Duration::from_mil
 /// pins nothing takes the first alternative. MJPEG comes last because it needs
 /// a decoder downstream. A device format missing from this table is skipped,
 /// since there is no `Caps` to carry it on.
-const FOURCCS: [(&[u8; 4], CapturePixelFormat); 4] = [
+pub(crate) const FOURCCS: [(&[u8; 4], CapturePixelFormat); 4] = [
     (b"YUYV", CapturePixelFormat::Yuyv),
     (b"NV12", CapturePixelFormat::Nv12),
     (b"YU12", CapturePixelFormat::I420),

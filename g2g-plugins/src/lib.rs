@@ -974,8 +974,8 @@ pub mod ptpclient;
 #[cfg(all(target_os = "linux", feature = "v4l2"))]
 pub mod v4l2src;
 
-// V4L2 device discovery: enumerates /dev/videoN capture nodes with their
-// probed YUYV modes for the device monitor.
+// V4L2 device discovery: enumerates /dev/videoN capture nodes with the probed
+// modes of every format v4l2src carries, for the device monitor.
 #[cfg(all(target_os = "linux", feature = "v4l2"))]
 pub mod v4l2device;
 
