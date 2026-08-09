@@ -3940,6 +3940,24 @@ picture. Two pieces, both `no_std`-friendly:
   as a sibling branch does). The strictest policy wins when two elements ask for
   one meta differently. A demand that dies leaves the cascade as it found it: a
   proposal carrying neither pool constraints nor demand collapses back to none.
+- **The buffer's own shape (`PlaneLayout`).** The first meta produced on demand,
+  and the `GstVideoMeta` analog: per-plane byte offset and row stride (up to four
+  planes, every derived offset checked) for a raw frame whose rows are padded.
+  Without it a raw frame is assumed tightly packed, so a producer whose rows are
+  not (a GPU readback at the API's 256-byte row alignment, a capture driver's
+  `bytesperline`) has to repack them row by row. `WgpuCompositor` asks
+  `wants::<PlaneLayout>()` when the cascade configures its output: when a
+  consumer downstream requested one it hands over the canvas as the GPU wrote it
+  and declares the pitch, and the per-frame repack disappears. `VideoConvert` is
+  that consumer: it requests the layout and reads a packed RGBA / BGRA input's
+  rows where they lie (a padded planar input it packs out first, which is correct
+  and costs what the producer skipped). It is the `EveryConsumer` request the
+  policy above exists for: `VideoConvert` asks with
+  `request_from_every_consumer`, so any consumer or hop that would take the
+  padded rows for tightly packed ones vetoes the padding and the producer repacks
+  as it always did. The meta is dropped by every `meta_transform`, since an
+  element only declares one when it writes a new buffer; a tee's clone shares the
+  described buffer and keeps it.
 - **The overlay.** The visible end of the detector chain reads the
   `AnalyticsMeta` carried onto the *display* frame (via the fan-out path) and
   draws each box, so `decode -> tee -> {detect, video} -> overlay -> display`

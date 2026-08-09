@@ -879,6 +879,117 @@ mod on {
         }
     }
 
+    /// How many planes a [`PlaneLayout`] describes. Four covers every format in
+    /// the workspace (planar YUV with alpha is the widest).
+    pub const MAX_PLANES: usize = 4;
+
+    /// Where one plane's rows sit in the frame's buffer.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct Plane {
+        /// Byte offset of the plane's first row from the start of the buffer.
+        pub offset: usize,
+        /// Bytes from the start of one row to the start of the next. At least
+        /// the row's own byte width; more when the rows are padded.
+        pub stride: usize,
+    }
+
+    /// Where each plane's rows really sit in a raw video frame's buffer (the
+    /// `GstVideoMeta` analog). Without it a raw frame is assumed tightly packed:
+    /// every row exactly `width * bytes_per_pixel` and every plane immediately
+    /// after the last. A producer whose rows are padded (a GPU readback at the
+    /// API's 256-byte row alignment, a capture driver's `bytesperline`) has to
+    /// repack them into that shape, row by row, before pushing the frame.
+    ///
+    /// A consumer that asks for this meta
+    /// ([`MetaRequests`](crate::meta::MetaRequests)) says it will read rows where
+    /// they lie, so the producer can hand over the padded buffer as it is and the
+    /// repack disappears.
+    ///
+    /// Only the geometry of the *buffer* is described here, never the picture:
+    /// width, height and format stay in the caps.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct PlaneLayout {
+        planes: [Plane; MAX_PLANES],
+        count: usize,
+    }
+
+    impl PlaneLayout {
+        /// Describe `planes` (1 to [`MAX_PLANES`] of them), or `None` for an
+        /// empty / oversized list.
+        pub fn new(planes: &[Plane]) -> Option<Self> {
+            if planes.is_empty() || planes.len() > MAX_PLANES {
+                return None;
+            }
+            let mut slots = [Plane {
+                offset: 0,
+                stride: 0,
+            }; MAX_PLANES];
+            slots[..planes.len()].copy_from_slice(planes);
+            Some(PlaneLayout {
+                planes: slots,
+                count: planes.len(),
+            })
+        }
+
+        /// One plane at `offset` 0 with row pitch `stride`: the packed-format
+        /// case (RGBA, YUYV), which is most of what pads rows in practice.
+        pub fn single(stride: usize) -> Self {
+            PlaneLayout {
+                planes: [Plane { offset: 0, stride }; MAX_PLANES],
+                count: 1,
+            }
+        }
+
+        pub fn count(&self) -> usize {
+            self.count
+        }
+
+        /// Plane `index`, or `None` past the described ones.
+        pub fn plane(&self, index: usize) -> Option<Plane> {
+            (index < self.count).then(|| self.planes[index])
+        }
+
+        /// Byte range of row `row` of plane `index`, `row_bytes` wide. `None`
+        /// when the plane does not exist, the stride cannot hold the row, or the
+        /// arithmetic overflows: a layout can come off a wire or a driver, so
+        /// every offset derived from it is checked here once and a caller can
+        /// then slice with what it gets back.
+        pub fn row_range(
+            &self,
+            index: usize,
+            row: usize,
+            row_bytes: usize,
+        ) -> Option<core::ops::Range<usize>> {
+            let plane = self.plane(index)?;
+            if plane.stride < row_bytes {
+                return None;
+            }
+            let start = plane.offset.checked_add(row.checked_mul(plane.stride)?)?;
+            let end = start.checked_add(row_bytes)?;
+            Some(start..end)
+        }
+    }
+
+    impl FrameMeta for PlaneLayout {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+        fn as_any_mut(&mut self) -> &mut dyn Any {
+            self
+        }
+        fn clone_box(&self) -> Box<dyn FrameMeta> {
+            Box::new(*self)
+        }
+        /// Dropped by every transform: it describes one specific buffer, and an
+        /// element only declares a [`Transform`] when it writes a *new* one (a
+        /// videoconvert says `Copy` and still emits its own tightly-packed
+        /// frame). A tee branch, which shares the very buffer this describes,
+        /// clones the meta set without applying a transform, so the layout
+        /// survives a fan-out.
+        fn propagate(&self, _transform: Transform) -> Propagation {
+            Propagation::Drop
+        }
+    }
 }
 
 #[cfg(all(test, feature = "metadata"))]

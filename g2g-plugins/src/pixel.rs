@@ -46,6 +46,41 @@ pub(crate) fn planar_planes(
     [(0, w, h), (luma, cw, ch), (luma + chroma, cw, ch)]
 }
 
+/// Per-plane `(row bytes, rows)` of one `w x h` frame in `format`, in plane
+/// order: the shape a [`PlaneLayout`](g2g_core::meta::PlaneLayout) puts offsets
+/// and strides on. A tightly-packed frame is exactly these rows back to back;
+/// a padded one differs only in where each row starts.
+#[cfg(feature = "metadata")]
+pub(crate) fn plane_shapes(
+    format: RawVideoFormat,
+    w: usize,
+    h: usize,
+) -> alloc::vec::Vec<(usize, usize)> {
+    let bps = format.bytes_per_sample();
+    if let Some((hs, vs)) = format.chroma_shift() {
+        let (cw, ch) = (w.div_ceil(1 << hs), h.div_ceil(1 << vs));
+        return alloc::vec![(w * bps, h), (cw * bps, ch), (cw * bps, ch)];
+    }
+    match format {
+        // Semi-planar: luma, then one interleaved Cb,Cr plane at half height and
+        // the same byte width (half the samples, two of them per position).
+        RawVideoFormat::Nv12 => alloc::vec![(w, h), (w, h.div_ceil(2))],
+        RawVideoFormat::P010 => alloc::vec![(w * 2, h), (w * 2, h.div_ceil(2))],
+        // Everything else is one packed plane.
+        _ => alloc::vec![(row_bytes(format, w), h)],
+    }
+}
+
+/// Byte width of one row of `format`'s **first** plane at `w` pixels: the row
+/// pitch of a tightly-packed frame.
+pub(crate) fn row_bytes(format: RawVideoFormat, w: usize) -> usize {
+    match format {
+        RawVideoFormat::Rgba8 | RawVideoFormat::Bgra8 => w * 4,
+        RawVideoFormat::Yuyv => w * 2,
+        _ => w * format.bytes_per_sample(),
+    }
+}
+
 /// Tightly-packed byte size of one `w x h` frame in `format` (no row padding).
 pub(crate) fn frame_byte_size(format: RawVideoFormat, w: u32, h: u32) -> usize {
     // Fully-planar YUV (I420/I422/I444 at 8/10/12-bit): Y plus two chroma planes,

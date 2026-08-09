@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M977: `PlaneLayout` meta lets the wgpu readback skip its row repack under demand.
+- M976: consumers declare meta demand on the allocation cascade, with per-meta policy.
 - M979: `g2g-launch --validate-json` dumps the negotiated graph (nodes + per-edge caps).
 - M972: MP4 demux carries DTS so a progressive B-frame remux keeps composition times.
 - M971: single-page Vorbis streams no longer lose their tail to the end-granule clamp.
