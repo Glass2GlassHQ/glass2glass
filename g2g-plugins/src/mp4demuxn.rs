@@ -714,7 +714,7 @@ impl Mp4DemuxN {
                 data,
                 FrameTiming {
                     pts_ns: sample.pts_ns,
-                    dts_ns: sample.pts_ns,
+                    dts_ns: sample.dts_ns,
                     duration_ns: sample.duration_ns,
                     capture_ns: sample.pts_ns,
                     arrival_ns: g2g_core::metrics::monotonic_ns(),

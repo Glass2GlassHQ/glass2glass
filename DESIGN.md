@@ -2156,7 +2156,11 @@ the `moov` goes out). Progressive is the two-pass one, the shape `matroskamux`'s
 `seekable` mode has: every sample is buffered, then `ftyp` + a single `mdat` +
 a `moov` are emitted together at EOS, with real `stts` / `ctts` / `stss` /
 `stsc` / `stsz` / `stco` tables (one sample per chunk, ordered by decode
-timestamp) and real `mvhd`/`tkhd`/`mdhd` durations. That is enough for ffmpeg to
+timestamp) and real `mvhd`/`tkhd`/`mdhd` durations. That decode timestamp is the
+frame's own: `Mp4DemuxN` reads the source's `ctts` and carries `dts_ns` beside
+`pts_ns`, so a reordered (B-frame) stream's composition offsets survive a remux
+(M972). A frame with no decode timestamp of its own, or one past its PTS, which
+`ctts` version 0 cannot express, decodes when it presents. That is enough for ffmpeg to
 apply the edit, so the reported duration is the trimmed presentation length
 exactly. The cost is holding the movie in memory, so a live or long capture
 wants the fragmented default. GStreamer spells this choice `fragment-duration =

@@ -54,6 +54,11 @@ pub(crate) type SampleDecrypt<'a> =
 pub(crate) struct Sample {
     pub(crate) annexb: Vec<u8>,
     pub(crate) pts_ns: u64,
+    /// When the sample decodes, which a reordered (B-frame) stream places ahead
+    /// of its `pts_ns`. Equal to it for the fragment parsers, which take their
+    /// timeline from `tfdt` + decode-order durations and leave the reorder to
+    /// the decoder.
+    pub(crate) dts_ns: u64,
     pub(crate) duration_ns: u64,
     /// Whether the access unit carries an IDR picture (a seek snap point).
     pub(crate) keyframe: bool,
@@ -809,6 +814,7 @@ pub(crate) fn parse_fragments_multi(
                         Sample {
                             annexb,
                             pts_ns: *pts_ns,
+                            dts_ns: *pts_ns,
                             duration_ns: durations[i],
                             keyframe,
                         },
@@ -924,6 +930,7 @@ pub(crate) fn parse_fragments(
                     samples.push(Sample {
                         annexb,
                         pts_ns: *pts_ns,
+                        dts_ns: *pts_ns,
                         duration_ns: durations[i],
                         keyframe,
                     });
@@ -1168,6 +1175,7 @@ fn parse_progressive_track(
         samples.push(Sample {
             annexb,
             pts_ns: timescale_to_ns(pts, timescale),
+            dts_ns: timescale_to_ns(dts, timescale),
             duration_ns: timescale_to_ns(durations[i] as u64, timescale),
             keyframe,
         });

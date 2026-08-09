@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M972: MP4 demux carries DTS so a progressive B-frame remux keeps composition times.
+- M971: single-page Vorbis streams no longer lose their tail to the end-granule clamp.
 - M975: fan-in elements consent to a runtime input add; a refused add fails alone.
 - M974: broadcast-tee late-branch and payload-sharing assertions.
 - M978: windowed winit example driving `VelloAnalyticsOverlay -> WgpuSink`.

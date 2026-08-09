@@ -643,6 +643,7 @@ impl Mp4MuxN {
             Some(PadKind::Audio { rate, .. }) => 1024 * 1_000_000_000 / rate.max(1) as u64,
             _ => DEFAULT_VIDEO_DURATION_NS,
         };
+        let first_sample = self.prev_pts_ns[input].is_none();
         // The frame's own duration when upstream timed it (a demuxer knows the
         // container's end-of-stream trim, which no PTS delta shows), else the
         // delta from the previous sample, else the codec's nominal frame length.
@@ -675,8 +676,12 @@ impl Mp4MuxN {
             self.text_end_ns[input] = pts_ns.saturating_add(dur_ns);
         }
 
+        // A zero `dts_ns` means upstream is not timing decode order, except on a
+        // track's first sample, where it is also where a reordered stream really
+        // starts. A DTS past the PTS is not expressible in `ctts` version 0, so
+        // such a sample decodes when it presents.
         let dts_ns = match frame.timing.dts_ns {
-            d if d > 0 && d <= pts_ns => d,
+            d if d <= pts_ns && (d > 0 || first_sample) => d,
             _ => pts_ns,
         };
         let timed = TimedSample {
