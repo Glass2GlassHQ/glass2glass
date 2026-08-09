@@ -2557,7 +2557,9 @@ the path is a track, not a `SubParse`-style drop-in. The `cea` module (`no_std`)
 holds the decoders. `extract_cc_data` mines the `(cc_type, b0, b1)` caption
 triples from an access unit's SEI `user_data_registered_itu_t_t35` (ATSC A/53
 `GA94` `cc_data`) messages for H.264 (NAL type 6) and H.265 (prefix/suffix SEI),
-every count / length / offset bounds-checked so a malformed SEI yields no triples.
+and from picture `user_data` blocks (`00 00 01 B2`) for MPEG-1 / MPEG-2, the same
+ATSC block without the T.35 prefix (M963); every count / length / offset
+bounds-checked so a malformed block yields no triples.
 `Cea608` decodes the legacy line-21 path (`cc_type` 0/1): a 15x32 character grid
 with pop-on / roll-up / paint-on modes, PAC row + indent positioning, the
 basic / special / extended-Western-European character sets, and channel selection

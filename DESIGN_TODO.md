@@ -503,10 +503,6 @@ _(No open parser items.)_
   all three render paths and an `AttrsList` API in `textshape`), `text-shadow`
   and further properties, and a span-scoped `background-color` (a cue has one
   backing box today).
-- **Closed captions: remaining carriers + authoring.** The H.264 / H.265 SEI
-  decode path (`cea` decoders + `CcExtract` + file- and HLS-`playbin` auto-plug)
-  and the CEA-608 encode path (`Cc608Enc` + `CcInsert`) are done (DESIGN.md
-  §4.18). Still open: MPEG-2 user-data caption extraction.
 - **Tensor substrate orientation descriptor (M181).** A deferred
   rotate/mirror descriptor the sink can absorb in hardware (DRM/KMS, Wayland
   `set_buffer_transform`, VAAPI VPP, D3D11 VideoProcessor), with eager strided /

@@ -1,13 +1,15 @@
 //! CEA-608 / CEA-708 closed-caption decoding (M426, `no_std`): mine the
 //! `cc_data` byte triples from H.264 / H.265 SEI `user_data_registered_itu_t_t35`
-//! messages, then decode them into timed [`Cue`]s the existing overlay path
+//! messages (or MPEG-1 / MPEG-2 picture `user_data`, M963), then decode them into
+//! timed [`Cue`]s the existing overlay path
 //! renders (`crate::textoverlay`). Pure byte / bit work with no OS dependency, so
 //! it sits on the `no_std + alloc` baseline alongside `crate::subparse`; the
 //! `crate::ccextract` element wraps it as a pipeline node.
 //!
 //! Closed captions ride *inside* the compressed video bitstream, not in a
-//! container text track: each coded picture may carry an SEI message whose payload
-//! (ATSC A/53 / SCTE-128) is a `cc_data` block of `(cc_type, cc_data_1,
+//! container text track: each coded picture may carry an SEI message (or an
+//! MPEG-2 `user_data` block) whose payload (ATSC A/53 / SCTE-128) is a `cc_data`
+//! block of `(cc_type, cc_data_1,
 //! cc_data_2)` triples. `cc_type` 0/1 are the two fields of legacy CEA-608
 //! line-21 captions; 2/3 are CEA-708 DTVCC packet bytes. This module decodes the
 //! CEA-608 field-1 path (M426: pop-on captions, the basic North-American
@@ -72,13 +74,28 @@ const USER_IDENTIFIER_GA94: u32 = 0x4741_3934;
 /// `user_data_type_code` selecting `cc_data` within an ATSC1 user-data block.
 const USER_DATA_TYPE_CC: u8 = 0x03;
 
-/// Extract every valid `cc_data` triple carried in the SEI messages of one access
-/// unit (`au`, either Annex-B or AVCC framed) for `codec`. Walks the NAL units,
-/// parses each SEI NAL's messages, and decodes the ATSC1 `cc_data` payload of any
-/// `user_data_registered_itu_t_t35` (payload type 4) message tagged `GA94`.
-/// Returns triples in transmission order; a malformed message is skipped.
+/// Extract every valid `cc_data` triple one access unit (`au`) of `codec` carries
+/// in band. H.264 / H.265 (Annex-B or AVCC framed) carry it in a
+/// `user_data_registered_itu_t_t35` SEI message tagged `GA94`; MPEG-1 / MPEG-2
+/// carry the same ATSC block in picture `user_data`. Returns triples in
+/// transmission order; a malformed block is skipped.
 pub fn extract_cc_data(au: &[u8], codec: VideoCodec) -> Vec<CcTriple> {
+    if codec == VideoCodec::Mpeg2 {
+        return extract_mpeg2_cc_data(au);
+    }
     crate::sei::parse_au(au, codec, crate::sei::PicTimingContext::default()).captions
+}
+
+/// Extract every valid `cc_data` triple carried in the `user_data` blocks
+/// (`00 00 01 B2`) of one MPEG-1 / MPEG-2 video access unit, the ATSC A/53 Part 4
+/// caption carrier. Each block is an `ATSC_identifier` (`GA94`) then the same
+/// `cc_data` structure the H.264 / H.265 SEI path parses, so only the wrapper
+/// differs: the SEI form prefixes an ITU-T T.35 country / provider code, this one
+/// starts at the identifier.
+pub fn extract_mpeg2_cc_data(au: &[u8]) -> Vec<CcTriple> {
+    let mut out = Vec::new();
+    crate::mpeg2video::for_each_user_data(au, |block| parse_atsc_user_data(block, &mut out));
+    out
 }
 
 /// Build an Annex-B SEI NAL carrying `triples` as an ATSC A/53 `GA94` `cc_data`
@@ -139,65 +156,72 @@ pub fn write_cc_data(triples: &[CcTriple]) -> Vec<u8> {
 /// keeping the triples whose `cc_valid` bit is set. A trailing partial triple is
 /// ignored, so a truncated payload yields the complete triples it held.
 pub fn parse_cc_data(data: &[u8]) -> Vec<CcTriple> {
-    data.chunks_exact(3)
-        .filter(|t| t[0] & 0x04 != 0)
-        .map(|t| CcTriple {
-            cc_type: t[0] & 0x03,
-            b0: t[1],
-            b1: t[2],
-        })
-        .collect()
+    let mut out = Vec::with_capacity(data.len() / 3);
+    append_cc_data(data, &mut out);
+    out
+}
+
+/// Append the valid triples of a packed `cc_data` byte stream to `out`; the
+/// allocation-free core of [`parse_cc_data`], shared with the ATSC user-data
+/// parser.
+fn append_cc_data(data: &[u8], out: &mut Vec<CcTriple>) {
+    for t in data.chunks_exact(3) {
+        if t[0] & 0x04 != 0 {
+            out.push(CcTriple {
+                cc_type: t[0] & 0x03,
+                b0: t[1],
+                b1: t[2],
+            });
+        }
+    }
 }
 
 /// Parse a `user_data_registered_itu_t_t35` payload, appending `cc_data` triples
 /// when it is an ATSC1 `GA94` caption block. Layout: `itu_t_t35_country_code`
-/// (0xB5 USA, with a 0xFF escape), `provider_code` (16 bits), `user_identifier`
-/// (32 bits, `GA94`), `user_data_type_code` (8 bits, 0x03), a flags byte holding
-/// `cc_count`, an `em_data` byte, then `cc_count` triples.
+/// (0xB5 USA, with a 0xFF escape), `provider_code` (16 bits), then the ATSC
+/// user-data block [`parse_atsc_user_data`] reads.
 pub(crate) fn parse_caption_payload(p: &[u8], out: &mut Vec<CcTriple>) {
-    let mut i = 0usize;
-    let country = *p.first().unwrap_or(&0);
-    i += 1;
-    if country == 0xFF {
-        // A 0xFF country code is followed by an extension byte (T.35 escape).
-        i += 1;
-    }
-    // provider_code (16) + user_identifier (32) = 6 bytes after the country code.
-    let Some(window) = p.get(i..i + 6) else {
+    // A 0xFF country code is followed by an extension byte (T.35 escape).
+    let country_len = if p.first() == Some(&0xFF) { 2usize } else { 1 };
+    // provider_code (16 bits) sits between the country code and the identifier.
+    let Some(block) = country_len.checked_add(2).and_then(|off| p.get(off..)) else {
         return;
     };
-    let user_identifier = u32::from_be_bytes([window[2], window[3], window[4], window[5]]);
-    if user_identifier != USER_IDENTIFIER_GA94 {
+    parse_atsc_user_data(block, out);
+}
+
+/// Parse an ATSC A/53 user-data block from its `user_identifier` on, appending the
+/// `cc_data` triples it carries. Layout: `user_identifier` (32 bits, `GA94`),
+/// `user_data_type_code` (8 bits, 0x03 = `cc_data`), a flags byte holding
+/// `process_cc_data_flag` and `cc_count`, an `em_data` byte, then `cc_count`
+/// triples. Shared by the two wrappers that carry the block: an H.264 / H.265 SEI
+/// (ITU-T T.35 prefixed) and MPEG-2 picture `user_data` (bare). A block whose
+/// `cc_count` outruns the bytes present is malformed, so it yields no triples
+/// rather than a partial read.
+pub(crate) fn parse_atsc_user_data(p: &[u8], out: &mut Vec<CcTriple>) {
+    let Some(id) = p.get(..4) else { return };
+    if u32::from_be_bytes([id[0], id[1], id[2], id[3]]) != USER_IDENTIFIER_GA94 {
         return;
     }
-    i += 6;
-    let Some(&type_code) = p.get(i) else { return };
-    i += 1;
-    if type_code != USER_DATA_TYPE_CC {
+    if p.get(4) != Some(&USER_DATA_TYPE_CC) {
         return;
     }
-    let Some(&flags) = p.get(i) else { return };
-    i += 1;
+    let Some(&flags) = p.get(5) else { return };
     // process_cc_data_flag (bit 6) must be set; cc_count is the low 5 bits.
     if flags & 0x40 == 0 {
         return;
     }
     let cc_count = (flags & 0x1F) as usize;
-    i += 1; // em_data
-    for _ in 0..cc_count {
-        let Some(triple) = p.get(i..i + 3) else { break };
-        i += 3;
-        let marker = triple[0];
-        let cc_valid = marker & 0x04 != 0;
-        let cc_type = marker & 0x03;
-        if cc_valid {
-            out.push(CcTriple {
-                cc_type,
-                b0: triple[1],
-                b1: triple[2],
-            });
-        }
-    }
+    // identifier (4) + type code (1) + flags (1) + em_data (1).
+    const TRIPLES_OFFSET: usize = 7;
+    let Some(triples) = cc_count
+        .checked_mul(3)
+        .and_then(|len| TRIPLES_OFFSET.checked_add(len))
+        .and_then(|end| p.get(TRIPLES_OFFSET..end))
+    else {
+        return;
+    };
+    append_cc_data(triples, out);
 }
 
 /// The visible row count of a CEA-608 caption grid (rows 1..=15).
