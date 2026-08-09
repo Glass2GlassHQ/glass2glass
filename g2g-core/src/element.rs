@@ -6,7 +6,9 @@ use alloc::boxed::Box;
 use crate::caps::Caps;
 use crate::clock::{ClockCandidate, ClockSync};
 use crate::error::G2gError;
-use crate::format_element::{legacy_sink_constraint, legacy_transform_constraint, CapsConstraint};
+use crate::format_element::{
+    legacy_sink_constraint, legacy_transform_constraint, CapsConstraint, CapsPreferences,
+};
 use crate::frame::PipelinePacket;
 use crate::memory::{DomainSet, MemoryDomainKind};
 use crate::property::{ElementMetadata, PropError, PropValue, PropertySpec};
@@ -359,6 +361,16 @@ pub trait AsyncElement: ElementBound {
         legacy_transform_constraint(self)
     }
 
+    /// What this element is willing to pay for each alternative of the set its
+    /// `caps_constraint_as_*` advertises. Default `None`: the alternatives are
+    /// already in preference order and cost their index. An element overrides
+    /// this to declare *equal* cost between alternatives it does not care
+    /// about (so a neighbour's preference decides) or a gap wide enough that a
+    /// neighbour's preference cannot pull the chain onto its fallback.
+    fn caps_preferences(&self) -> Option<CapsPreferences> {
+        None
+    }
+
     /// The runtime properties this element type exposes (M104), the GObject
     /// property-spec analog. Default: none. An element overrides this (and
     /// [`set_property`](Self::set_property) / [`get_property`](Self::get_property))
@@ -434,6 +446,13 @@ pub trait DynAsyncElement: ElementBound {
     /// an interior element of an N-element linear chain (`run_linear_chain`)
     /// declares its transform constraint to the solver while erased.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_>;
+
+    /// Dyn-safe mirror of [`AsyncElement::caps_preferences`], so an erased
+    /// element's declared per-alternative costs reach the solver. Defaults to
+    /// `None` (cost = alternative index), matching `AsyncElement`.
+    fn caps_preferences(&self) -> Option<CapsPreferences> {
+        None
+    }
 
     /// Dyn-safe mirror of [`AsyncElement::propose_allocation`], so a
     /// `Box`-erased branch sink can re-derive its own pool on a mid-stream
@@ -594,6 +613,10 @@ impl<T: AsyncElement> DynAsyncElement for T {
         AsyncElement::caps_constraint_as_transform(self)
     }
 
+    fn caps_preferences(&self) -> Option<CapsPreferences> {
+        AsyncElement::caps_preferences(self)
+    }
+
     fn propose_allocation(&self, caps: &Caps) -> Option<AllocationParams> {
         AsyncElement::propose_allocation(self, caps)
     }
@@ -717,6 +740,10 @@ impl<'b> DynAsyncElement for &'b mut (dyn DynAsyncElement + 'b) {
 
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         (**self).caps_constraint_as_transform()
+    }
+
+    fn caps_preferences(&self) -> Option<CapsPreferences> {
+        (**self).caps_preferences()
     }
 
     fn propose_allocation(&self, caps: &Caps) -> Option<AllocationParams> {

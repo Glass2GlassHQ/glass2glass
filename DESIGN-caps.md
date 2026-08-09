@@ -124,6 +124,14 @@ becomes a type-level error rather than a runtime `not-negotiated`.
 (`Produces ∩ Accepts ∩ Identity ∩ Mapping ∩ DerivedOutput`), backward sweep
 to propagate narrowing, fixate each link to its highest-preference concrete
 `Caps`, then call `configure_pipeline` per element with its side of the link.
+`CapsPreferences` (M965) refines the fixation: an element may declare a cost
+per advertised alternative (`AsyncElement::caps_preferences`), buying what set
+order cannot say, equal cost (indifference, a neighbour decides) or a large
+gap (a mild neighbour preference must not pull the chain onto a bad fallback).
+When some element on a linear chain declares costs, `solve_linear_preferred` /
+`solve_graph_preferred` pick the consistent assignment of least total cost by
+a per-link DP, ties breaking to the greedy first-fixable pick; undeclared
+chains and non-linear graphs fixate exactly as before.
 
 ```rust
 pub enum NegotiationFailure {

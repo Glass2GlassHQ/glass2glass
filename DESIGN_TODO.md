@@ -233,8 +233,10 @@ Phased plan:
 
 ## Negotiation
 
-- **Preference algebra.** `CapsPreferences` is a placeholder (sum-of-indices);
-  needs a real competing-constraint scenario to drive it.
+- **Preference algebra follow-up.** Sources negotiate through `SourceLoop`,
+  which has no `caps_preferences` hook, so a source still expresses preference
+  only through produce-set order; add the hook when a source needs to declare
+  indifference.
 - **Hardware `tee -> {decode, mux}` integration test** on real Linux
   (`rtsp ffmpeg wayland-sink`); only fake-element coverage today.
 

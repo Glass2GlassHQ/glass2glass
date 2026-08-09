@@ -66,7 +66,7 @@ use crate::fanout::{
     DynMultiOutputSource, MultiInputElement, MultiOutputElement, MultiOutputSink,
     MultiOutputSource, MultiSenderSink, ReverseChannel,
 };
-use crate::format_element::CapsConstraint;
+use crate::format_element::{CapsConstraint, CapsPreferences};
 use crate::frame::{Frame, PipelinePacket};
 use crate::graph::{FanOutPolicy, Graph, NodeId, NodeKind, ValidatedGraph};
 use crate::memory::{DomainSet, MemoryDomainKind};
@@ -87,7 +87,7 @@ use crate::runtime::runner::{
     re_solve_downstream_dyn_sink, LinkCapacity, NullSink, RunStats, SourceLoop,
 };
 use crate::runtime::solver::{
-    graph_downstream_feasibility, resolve_forward_output, solve_graph_labeled, solve_linear,
+    graph_downstream_feasibility, resolve_forward_output, solve_graph_preferred, solve_linear,
     ForwardResolve, NegotiationFailure, NodeConstraint,
 };
 use crate::runtime::state::{Flow, StateController};
@@ -1142,11 +1142,13 @@ async fn prepare_graph<'a>(
     // so both are computed and the borrows released before configure.
     let (solution, feasibility): (Vec<Caps>, Vec<Option<CapsSet>>) = {
         let constraints = build_node_constraints(vg, &source_caps)?;
-        let solution = solve_graph_labeled(vg, &constraints, &|node| caps_label(vg, node))
-            .map_err(|f| {
-                report_nego_failure(bus, f);
-                G2gError::CapsMismatch
-            })?;
+        let preferences = build_node_preferences(vg);
+        let solution =
+            solve_graph_preferred(vg, &constraints, &preferences, &|node| caps_label(vg, node))
+                .map_err(|f| {
+                    report_nego_failure(bus, f);
+                    G2gError::CapsMismatch
+                })?;
         let feasibility = graph_downstream_feasibility(vg, &constraints, &solution);
         (solution, feasibility)
     };
@@ -2277,6 +2279,25 @@ impl GraphSpawner for ThreadSpawner {
     }
 }
 
+/// Each node's declared per-alternative costs, indexed by node id, for the
+/// solver's minimum-cost fixation. Only transform / sink nodes declare any: a
+/// source's produce set is already in its own preference order, and a muxer /
+/// demux node is not part of a linear chain, which is the only topology the
+/// cost minimization covers.
+fn build_node_preferences(vg: &ValidatedGraph<GraphNodeRef<'_>>) -> Vec<Option<CapsPreferences>> {
+    (0..vg.node_count())
+        .map(|i| {
+            let node = NodeId(i as u32);
+            match vg.kind(node) {
+                NodeKind::Transform | NodeKind::Sink => {
+                    element_ref(vg, node).and_then(|e| e.caps_preferences())
+                }
+                _ => None,
+            }
+        })
+        .collect()
+}
+
 /// View a node's payload as a transform/sink element. `None` for a source or a
 /// muxer (whose constraints the runner builds from their own trait methods).
 fn element_ref<'g, 'a>(
@@ -2501,8 +2522,11 @@ pub async fn negotiate_graph_explained<'a>(
     let solution = {
         let constraints =
             build_node_constraints(&vg, &source_caps).map_err(NegotiateError::Setup)?;
-        solve_graph_labeled(&vg, &constraints, &|node| caps_label(&vg, node))
-            .map_err(NegotiateError::Solve)?
+        let preferences = build_node_preferences(&vg);
+        solve_graph_preferred(&vg, &constraints, &preferences, &|node| {
+            caps_label(&vg, node)
+        })
+        .map_err(NegotiateError::Solve)?
     };
 
     // Per-edge memory domain: the domain of the node producing onto that edge.
