@@ -18,8 +18,9 @@ use crate::runtime::channel::{link, SenderSink};
 #[cfg(feature = "std")]
 use crate::runtime::coordinator::realloc_local_dyn;
 use crate::runtime::coordinator::{
-    coordinator_with_recascade, negotiate_source_transform_sink, realloc_local,
-    report_nego_failure, solve_last_link, CoordinatorEvent, MAX_FIXATION_ATTEMPTS,
+    coordinator_with_recascade, log_caps_forward, log_caps_rejected,
+    negotiate_source_transform_sink, realloc_local, report_nego_failure, solve_last_link,
+    CoordinatorEvent, MAX_FIXATION_ATTEMPTS,
 };
 use crate::runtime::instrument::ElementProbe;
 use crate::runtime::join::{select2, Either, Join2};
@@ -785,7 +786,11 @@ where
                     // through configure_pipeline before the element sees
                     // the notification packet. Guarantees DataFrames with
                     // the new caps never reach a stale element.
-                    match sink.configure_pipeline(&sink_caps)? {
+                    match log_caps_rejected(
+                        Some(probe_for_sink.name()),
+                        &sink_caps,
+                        sink.configure_pipeline(&sink_caps),
+                    )? {
                         ConfigureOutcome::Accepted => {
                             // M18 α: element-local re-allocation under the
                             // new caps before the sink sees the packet.
@@ -1126,7 +1131,11 @@ where
                                 report_nego_failure(bus_for_branch.as_ref(), f);
                                 G2gError::CapsMismatch
                             })?;
-                        match sink.configure_pipeline(&branch_caps)? {
+                        match log_caps_rejected(
+                            Some(probe.name()),
+                            &branch_caps,
+                            sink.configure_pipeline(&branch_caps),
+                        )? {
                             ConfigureOutcome::Accepted => {
                                 // M18 α: element-local re-allocation of this
                                 // branch under its re-solved caps.
@@ -1657,7 +1666,11 @@ async fn dyn_branch_loop(
             Some(PipelinePacket::CapsChanged(caps)) => {
                 let branch_caps = re_solve_downstream_dyn_sink(&caps, &*sink)
                     .map_err(|_| G2gError::CapsMismatch)?;
-                match sink.configure_pipeline(&branch_caps)? {
+                match log_caps_rejected(
+                    Some(probe.name()),
+                    &branch_caps,
+                    sink.configure_pipeline(&branch_caps),
+                )? {
                     ConfigureOutcome::Accepted => {
                         sink.process(PipelinePacket::CapsChanged(branch_caps), &mut null)
                             .await?;
@@ -1819,7 +1832,11 @@ where
                         return Ok::<u64, G2gError>(consumed);
                     }
                     Some(PipelinePacket::CapsChanged(new_caps)) => {
-                        match sink.configure_pipeline(&new_caps)? {
+                        match log_caps_rejected(
+                            Some(probe.name()),
+                            &new_caps,
+                            sink.configure_pipeline(&new_caps),
+                        )? {
                             ConfigureOutcome::Accepted => {
                                 sink.process(PipelinePacket::CapsChanged(new_caps), &mut null)
                                     .await?;
@@ -2138,6 +2155,9 @@ where
     };
 
     let bus_for_transform = bus.cloned();
+    // Caps-α: the transform's startup-solved output, tracked across applied
+    // mid-stream changes so the re-solve can keep the shape it already produces.
+    let mut transform_out_caps = negotiation.sink_link.clone();
     let transform_fut = async move {
         let ctrl_rx = transform_ctrl_rx;
         let probe_for_transform = probe_for_transform;
@@ -2219,6 +2239,7 @@ where
                             &constraint,
                             &new_caps,
                             downstream_feasible.as_ref(),
+                            Some(&transform_out_caps),
                         ) {
                             ForwardResolve::Fixed(caps) => (caps, true),
                             ForwardResolve::Defer => (new_caps.clone(), false),
@@ -2229,7 +2250,13 @@ where
                             }
                         }
                     };
-                    match transform.configure_pipeline(&new_caps)? {
+                    let instance = Some(probe_for_transform.name());
+                    log_caps_forward(instance, &new_caps, &forward_caps, output_resolved);
+                    match log_caps_rejected(
+                        instance,
+                        &new_caps,
+                        transform.configure_pipeline(&new_caps),
+                    )? {
                         ConfigureOutcome::Accepted => {
                             // M188: a caps-driven transform re-resolves its output
                             // target on the mid-stream change too, not just at
@@ -2240,11 +2267,18 @@ where
                             // incoming INPUT caps, not this element's output
                             // (the contract is output caps only).
                             if output_resolved {
-                                AsyncElement::configure_output(transform, &forward_caps)?;
+                                log_caps_rejected(
+                                    instance,
+                                    &forward_caps,
+                                    AsyncElement::configure_output(transform, &forward_caps),
+                                )?;
                             }
                             // M18 α: element-local re-allocation under the
                             // re-fixated output caps before forwarding.
                             realloc_local(transform, &forward_caps);
+                            if output_resolved {
+                                transform_out_caps = forward_caps.clone();
+                            }
                             transform
                                 .process(PipelinePacket::CapsChanged(forward_caps), &mut adapter)
                                 .await?;
@@ -2311,7 +2345,11 @@ where
                             continue;
                         }
                     };
-                    match sink.configure_pipeline(&sink_caps)? {
+                    match log_caps_rejected(
+                        Some(probe_for_sink.name()),
+                        &sink_caps,
+                        sink.configure_pipeline(&sink_caps),
+                    )? {
                         ConfigureOutcome::Accepted => {
                             // M18 α: element-local re-allocation under the
                             // new caps before the sink sees the packet. The

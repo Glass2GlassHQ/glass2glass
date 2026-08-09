@@ -502,6 +502,21 @@ jobs:
       # vorbisdec PCM vs ffmpeg's own decode (pure Rust, no libav linkage).
       - name: Vorbis oracles (oggdemux + vorbisdec vs ffmpeg)
         run: cargo test -p g2g-plugins --locked --features std,vorbis --test m777_vorbis -- --nocapture
+      # Real-file playback (M959): an ffmpeg-authored AV1 webm demuxed, decoded
+      # (pure-Rust rav1d) and overlaid; the demuxed placeholder caps refine
+      # mid-stream into the strict RGBA overlay, the path synthetic-source
+      # tests never exercise.
+      - name: real-file overlay chain (mid-stream caps refinement)
+        run: cargo test -p g2g-plugins --locked --features rav1d --test m959_realfile_overlay -- --nocapture
+      # Primary-stream selection (M960): a bare `decodebin` names the Matroska
+      # demuxer's stream= from the file's actual track, so the codec-specific
+      # rav1d decoder negotiates an AV1 webm; header-only tests parse without
+      # ffmpeg, the decode run authors a clip with it.
+      - name: decodebin stream selection (matroska primary stream)
+        run: cargo test -p g2g-plugins --locked --features rav1d --test m960_decodebin_stream_select -- --nocapture
+      # The MP4 analog (M961): `qtdemux stream=` names the video codec.
+      - name: decodebin stream selection (mp4 primary stream)
+        run: cargo test -p g2g-plugins --locked --features rav1d --test m961_mp4_stream_select -- --nocapture
       # Ogg mux (M789): ffmpeg decodes a g2g-muxed Opus / Vorbis / Ogg-FLAC
       # stream to the source's samples bit for bit.
       - name: Ogg muxer oracle (oggmux vs ffmpeg)

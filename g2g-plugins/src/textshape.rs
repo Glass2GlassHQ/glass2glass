@@ -119,6 +119,27 @@ impl TextShaper {
         db.with_face_data(id, |data, _| (data.to_vec(), index))
     }
 
+    /// Bytes + collection index of a discovered face with a real glyph for `c`,
+    /// so the `ab_glyph` chain (vertical cues) can extend its fallback chain for
+    /// a script the seeded sans-serif face lacks (CJK on a Latin default). Scans
+    /// the database; the caller caches the hit by appending the face to its
+    /// chain and remembers misses, so a codepoint is scanned at most once.
+    pub fn face_for_char(&self, c: char) -> Option<(Vec<u8>, u32)> {
+        use ab_glyph::Font;
+        let db = self.fonts.db();
+        for info in db.faces() {
+            let covered = db.with_face_data(info.id, |data, index| {
+                ab_glyph::FontRef::try_from_slice_and_index(data, index)
+                    .map(|f| f.glyph_id(c).0 != 0)
+                    .unwrap_or(false)
+            });
+            if covered == Some(true) {
+                return db.with_face_data(info.id, |data, index| (data.to_vec(), index));
+            }
+        }
+        None
+    }
+
     /// Shape and lay out `text` at `px` (one visual line per logical line, no
     /// wrapping), optionally at variable-font weight `wght`. Line positions are
     /// relative to the block's top-left.

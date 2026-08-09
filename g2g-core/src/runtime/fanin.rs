@@ -40,6 +40,7 @@ use crate::query::{AllocationParams, LatencyReport};
 use crate::runtime::channel::{
     bounded, packet_bytes, ProbeAction, ProbeSlot, Receiver, SendError, Sender, SenderSink,
 };
+use crate::runtime::coordinator::log_caps_rejected;
 use crate::runtime::graph_runner::{run_graph_inner, GraphNodeRef};
 use crate::runtime::instrument::{EdgeCounters, ElementProbe};
 use crate::runtime::join::{dynamic_join, join_all, select2, Either};
@@ -802,7 +803,11 @@ where
                     return Ok::<u64, G2gError>(consumed);
                 }
                 Some(PipelinePacket::CapsChanged(new_caps)) => {
-                    match sink.configure_pipeline(&new_caps)? {
+                    match log_caps_rejected(
+                        Some(probe_for_sink.name()),
+                        &new_caps,
+                        sink.configure_pipeline(&new_caps),
+                    )? {
                         ConfigureOutcome::Accepted => {
                             sink.process(PipelinePacket::CapsChanged(new_caps), &mut null)
                                 .await?;
@@ -1409,7 +1414,11 @@ where
                         return Ok::<u64, G2gError>(consumed);
                     }
                     Some(PipelinePacket::CapsChanged(new_caps)) => {
-                        match sink.configure_pipeline(&new_caps)? {
+                        match log_caps_rejected(
+                            Some(probe.name()),
+                            &new_caps,
+                            sink.configure_pipeline(&new_caps),
+                        )? {
                             ConfigureOutcome::Accepted => {
                                 sink.process(PipelinePacket::CapsChanged(new_caps), &mut null)
                                     .await?;
@@ -1999,7 +2008,12 @@ where
             while let Some(pkt) = out_rx.recv().await {
                 match pkt {
                     PipelinePacket::CapsChanged(caps) => {
-                        sink.configure_pipeline(&caps)?.reject_refixate()?;
+                        log_caps_rejected(
+                            Some(probe_for_sink.name()),
+                            &caps,
+                            sink.configure_pipeline(&caps),
+                        )?
+                        .reject_refixate()?;
                         sink.process(PipelinePacket::CapsChanged(caps), &mut null)
                             .await?;
                     }

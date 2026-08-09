@@ -6,6 +6,14 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M962: str0m 0.22 (upstream now sends media unpadded), dropping the M709 `[patch.crates-io]` fork.
+
+- M961: `qtdemux stream=` names the video codec and a bare `decodebin` selects it from the file's `moov`, the MP4 analog of M960.
+
+- M960: a bare `decodebin` selects the Matroska demuxer's `stream=` from the file's actual video track, so a codec-specific decoder negotiates against truthful startup caps.
+
+- M959: a mid-stream caps re-solve keeps the element's negotiated output shape, runner arms log caps rejections and forward resolutions, and vertical cues pull a covering system face for scripts the default font lacks.
+
 - M958: `pipewirevideosrc portal=true` runs the xdg-desktop-portal ScreenCast handshake and captures the granted node on the PipeWire remote the portal hands back.
 
 - M957: `pipewirevideosrc` gained `io-mode=dmabuf`, which takes the producer's dma-buf as `MemoryDomain::DmaBuf` instead of copying out of a mapped buffer.

@@ -218,6 +218,10 @@ pub struct TextOverlay {
     /// whenever the font set changes so it picks the new faces up.
     #[cfg(feature = "text-shaping")]
     shaper: Option<crate::textshape::TextShaper>,
+    /// Codepoints no discovered face covers, so a vertical cue's per-frame
+    /// coverage pass scans the font database at most once per codepoint.
+    #[cfg(feature = "text-shaping")]
+    uncovered_chars: Vec<char>,
     drawn: u64,
 }
 
@@ -252,6 +256,8 @@ impl TextOverlay {
             font_data: Vec::new(),
             #[cfg(feature = "text-shaping")]
             shaper: None,
+            #[cfg(feature = "text-shaping")]
+            uncovered_chars: Vec::new(),
             drawn: 0,
         }
     }
@@ -806,6 +812,54 @@ impl TextOverlay {
         self.shaper = Some(shaper);
     }
 
+    /// Extend the `ab_glyph` fallback chain for the vertical cues active at
+    /// `t_ns`: cosmic-text falls back per glyph on the horizontal path, but the
+    /// column renderer draws only from this chain, so a codepoint the seeded
+    /// sans-serif face lacks (CJK on a Latin default) pulls a covering face out
+    /// of the shaper's discovery. Misses are remembered, so a codepoint costs
+    /// at most one database scan.
+    #[cfg(feature = "text-shaping")]
+    fn extend_chain_for_vertical(&mut self, t_ns: u64) {
+        let mut missing: Vec<char> = Vec::new();
+        for cue in self.active(t_ns) {
+            if !matches!(
+                cue.settings.vertical,
+                WritingMode::VerticalRl | WritingMode::VerticalLr
+            ) {
+                continue;
+            }
+            for c in cue.text.chars() {
+                if c.is_whitespace()
+                    || missing.contains(&c)
+                    || self.uncovered_chars.contains(&c)
+                    || self.fonts.iter().any(|f| f.has_glyph(c))
+                {
+                    continue;
+                }
+                missing.push(c);
+            }
+        }
+        for c in missing {
+            // a face appended for an earlier codepoint may cover this one too
+            if self.fonts.iter().any(|f| f.has_glyph(c)) {
+                continue;
+            }
+            let Some((bytes, index)) = self.shaper.as_ref().and_then(|s| s.face_for_char(c)) else {
+                self.uncovered_chars.push(c);
+                continue;
+            };
+            let Ok(font) = ab_glyph::FontVec::try_from_vec_and_index(bytes, index) else {
+                self.uncovered_chars.push(c);
+                continue;
+            };
+            let mut face = FontFace(font);
+            for axis in &self.axes {
+                face.set_axis(*axis);
+            }
+            self.fonts.push(face);
+        }
+    }
+
     /// The `wght` variable-font axis position, if `font-variations=` set one: the
     /// one axis the shaped path can apply (it selects a weight, which swash turns
     /// into a `wght` variation). Other axes reach only the `ab_glyph` path.
@@ -948,6 +1002,7 @@ impl TextOverlay {
         #[cfg(feature = "text-shaping")]
         {
             self.ensure_shaper();
+            self.extend_chain_for_vertical(t_ns);
             if self.fonts.is_empty() {
                 self.render_active(buf, t_ns);
             } else {
@@ -2363,6 +2418,44 @@ mod tests {
         assert!(y0 > h / 2, "auto line stacks at the bottom ({y0})");
         assert!(x1 - x0 > w / 8, "a full word's worth of ink");
         assert!(x1 < w && y1 < h, "inside the canvas");
+    }
+
+    #[test]
+    #[cfg(feature = "text-shaping")]
+    fn vertical_cue_pulls_a_covering_face_for_cjk() {
+        use crate::subparse::CueSettings;
+        // A vertical:rl Japanese cue with no font= : the column renderer draws
+        // from the ab_glyph chain, so the chain must be extended with a
+        // CJK-covering discovered face (the seeded sans-serif is Latin-only on
+        // most hosts) instead of painting .notdef boxes.
+        let (w, h) = (320usize, 240usize);
+        let mut ov = sized(
+            TextOverlay::new().with_cues(vec![Cue {
+                start_ns: 0,
+                end_ns: u64::MAX,
+                text: "あなたが望む".into(),
+                settings: CueSettings {
+                    vertical: WritingMode::VerticalRl,
+                    ..CueSettings::default()
+                },
+            }]),
+            w as u32,
+            h as u32,
+        );
+        let mut buf = black(w, h);
+        ov.render_cues(&mut buf, 0);
+        if ov.uncovered_chars.contains(&'あ') {
+            std::eprintln!("skip: no CJK-covering system font discovered");
+            return;
+        }
+        assert!(
+            ov.fonts.iter().any(|f| f.has_glyph('あ')),
+            "the fallback chain gained a CJK face"
+        );
+        let (x0, y0, x1, y1) = drawn_bounds(&buf, w, h).expect("vertical cue painted");
+        std::eprintln!("vertical ink bounds ({x0},{y0})-({x1},{y1})");
+        assert!(y1 - y0 > x1 - x0, "a column: taller than wide");
+        assert!(x0 > w / 2, "vertical:rl lays out at the right edge");
     }
 
     #[test]
