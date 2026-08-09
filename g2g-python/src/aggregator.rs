@@ -7,7 +7,10 @@
 //!
 //! The Python contract is `g2g_process_batch(buffers, width, height, fmt, meta)`
 //! where `buffers` is a list of writable buffer-protocol views (one per
-//! contributing input), `meta` is the analytics sink. Because `MultiInputElement`
+//! contributing input), `meta` is the analytics sink. GPU-resident inputs take the
+//! CUDA shape instead (M986): `g2g_process_cuda_batch(planes, width, height, meta)`
+//! with one `(luma, chroma)` `__cuda_array_interface__` pair per input, so a
+//! batched detector reads every stream's decoded surface with no readback. Because `MultiInputElement`
 //! is N-in-1-out, only the anchor (input-0) frame is emitted; the aggregate
 //! result travels as the anchor's `AnalyticsMeta` (the batched-inference-attaches
 //! -detections use). Per-stream results would need a demux, which the trait does
@@ -32,6 +35,9 @@ pub struct PyAggregator {
     class: String,
     #[cfg_attr(not(feature = "python"), allow(dead_code))]
     draw_label: bool,
+    /// Whether the hosted element batches GPU-resident CUDA frames, read through
+    /// `g2g_process_cuda_batch` and passed through untouched.
+    cuda_frames: bool,
     inputs: usize,
     /// Caps accepted on every input pad (and produced on the output).
     accept: Caps,
@@ -53,6 +59,7 @@ impl PyAggregator {
             module: module.into(),
             class: class.into(),
             draw_label: false,
+            cuda_frames: false,
             inputs,
             accept: Caps::RawVideo {
                 format: RawVideoFormat::Rgba8,
@@ -78,6 +85,16 @@ impl PyAggregator {
     /// Set the `draw-label` flag forwarded to the Python element.
     pub fn with_draw_label(mut self, on: bool) -> Self {
         self.draw_label = on;
+        self
+    }
+
+    /// Batch GPU-resident CUDA frames: they reach the hosted element as
+    /// `__cuda_array_interface__` planes through `g2g_process_cuda_batch`, and the
+    /// anchor flows on still device-resident. Also drives what this element asks
+    /// each input branch to allocate
+    /// (see [`MultiInputElement::propose_allocation_for_input`]).
+    pub fn with_cuda_frames(mut self, on: bool) -> Self {
+        self.cuda_frames = on;
         self
     }
 
@@ -193,6 +210,33 @@ impl MultiInputElement for PyAggregator {
         })
     }
 
+    /// Ask every input's branch to allocate in the domain the hosted code reads,
+    /// so a decoder that can do either keeps its frames device-resident for a
+    /// `cuda-frames` batch (the per-pad form of what `PyTransform` proposes). Only
+    /// the domain and the frame size are constrained: this element allocates
+    /// nothing of its own.
+    fn propose_allocation_for_input(
+        &self,
+        _input: usize,
+        caps: &Caps,
+    ) -> Option<g2g_core::AllocationParams> {
+        let Caps::RawVideo {
+            format,
+            width: Dim::Fixed(width),
+            height: Dim::Fixed(height),
+            ..
+        } = caps
+        else {
+            return None;
+        };
+        let size = crate::format::frame_bytes(*format, *width, *height);
+        Some(if self.cuda_frames {
+            g2g_core::AllocationParams::cuda(size, 1, 1)
+        } else {
+            g2g_core::AllocationParams::system(size, 1)
+        })
+    }
+
     fn properties(&self) -> &'static [PropertySpec] {
         PYAGGREGATOR_PROPS
     }
@@ -211,6 +255,10 @@ impl MultiInputElement for PyAggregator {
                 self.draw_label = value.as_bool().ok_or(PropError::Type)?;
                 Ok(())
             }
+            "cuda-frames" => {
+                self.cuda_frames = value.as_bool().ok_or(PropError::Type)?;
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -220,6 +268,7 @@ impl MultiInputElement for PyAggregator {
             "module" => Some(PropValue::Str(self.module.clone())),
             "class" => Some(PropValue::Str(self.class.clone())),
             "draw-label" => Some(PropValue::Bool(self.draw_label)),
+            "cuda-frames" => Some(PropValue::Bool(self.cuda_frames)),
             _ => None,
         }
     }
@@ -242,6 +291,12 @@ static PYAGGREGATOR_PROPS: &[PropertySpec] = &[
         "draw-label",
         PropKind::Bool,
         "overlay the inferred label on the anchor frame",
+    )
+    .with_default("false"),
+    PropertySpec::new(
+        "cuda-frames",
+        PropKind::Bool,
+        "batch GPU-resident CUDA frames (needs g2g_process_cuda_batch, NV12 / P010)",
     )
     .with_default("false"),
 ];

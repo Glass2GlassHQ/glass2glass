@@ -1854,11 +1854,37 @@ either of two paths:
   the producer decoded into, exposed as the plane's `cuda_context` property for a
   consumer that must push it (cupy and torch use the device's primary context).
   Plane lifetime is the call, enforced by a refcount check after it (a retained
-  plane, including one a cupy array holds as its base, fails the frame). DLPack is
-  the cross-framework alternative that does carry a device/stream contract; it is
-  not implemented. An element that defines no `g2g_process_cuda` gets
-  `UnsupportedDomain` for a GPU frame rather than a silent readback: `g2g-python`
-  links no CUDA, so a CPU-only element needs an explicit `cudadownload` upstream.
+  plane, including one a cupy array holds as its base or a consumed DLPack tensor
+  holds as its manager context, fails the frame). An element that defines no hook
+  for its shape gets `UnsupportedDomain` for a GPU frame rather than a silent
+  readback: `g2g-python` links no CUDA, so a CPU-only element needs an explicit
+  `cudadownload` upstream.
+- **The batch and produce shapes (M986).** A GPU batch reaches a hosted aggregator
+  as `g2g_process_cuda_batch(planes, width, height, meta)`, one `(luma, chroma)`
+  pair per contributing input, so a batched detector reads every stream's decoded
+  surface in place; the anchor flows on device-resident. A hosted *source* runs the
+  handoff backwards: `g2g_produce_cuda(width, height, meta)` returns the two planes
+  as any CAI-exporting objects (a cupy or torch allocation) or `None` for end of
+  stream, because this crate links no CUDA and cannot allocate device memory
+  itself. The returned planes are validated against the negotiated caps (shape,
+  sample type, packed within each row, only the row pitch free, non-null pointer)
+  before they become a frame, and the frame's keep-alive holds the Python objects
+  so the memory outlives it; the source stamps timing, and reports its
+  `cuda_context` through an optional attribute for a downstream consumer that must
+  push it.
+- **DLPack (M986).** The same plane also answers `__dlpack__` /
+  `__dlpack_device__`, for the frameworks that prefer it (`torch.from_dlpack`,
+  `cupy.from_dlpack`). It carries a device and stream contract CAI does not: the
+  device is `(kDLCUDA, 0)`, since the CUDA domain carries the producing context but
+  no device ordinal. A consumer asking for 1.0 or newer through `max_version` gets
+  a `DLManagedTensorVersioned` capsule with the read-only flag set, one asking for
+  nothing gets the pre-1.0 `DLManagedTensor`; `copy=True` or another `dl_device` is
+  refused rather than silently ignored, and `stream` is ignored because the domain
+  carries no stream. DLPack strides count elements rather than bytes, so a row
+  pitch that is not a whole number of samples is refused instead of rounded. The
+  capsule's destructor frees the tensor only while the capsule still carries the
+  unconsumed name, since a consumer that takes ownership renames it and calls the
+  deleter itself.
 
 The frame is read where it lies and forwarded untouched, so a hosted transform
 carries one memory domain on both pads (M985): System, or CUDA under

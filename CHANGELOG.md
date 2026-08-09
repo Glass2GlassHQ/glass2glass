@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M986: hosted Python aggregators and sources take GPU frames too, and every CUDA plane exports DLPack.
 - M985: `pyelement` declares the memory domain its frames arrive and leave in, and asks upstream for it.
 - M984: a hosted Python element reads a CUDA frame's NV12 planes through `__cuda_array_interface__`.
 - M983: `BurnInference` runs an ONNX topology imported by `burn-onnx` build-time codegen.

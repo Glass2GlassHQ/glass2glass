@@ -6,6 +6,13 @@
 //! caps are fixed by the source's properties, so negotiation is synchronous
 //! (`intercept_caps` returns them with no I/O). The same GIL-owning worker
 //! thread as the other hosts runs the calls.
+//!
+//! Under `cuda-frames` the source produces GPU-resident frames instead (M986):
+//! `g2g_produce_cuda(width, height, meta)` returns the two semi-planar planes as
+//! `__cuda_array_interface__` objects (a cupy / torch allocation), since this
+//! crate links no CUDA and cannot allocate device memory itself. The frame carries
+//! those objects as its keep-alive, so the memory outlives it, and this source
+//! stamps the timing on the way out either way.
 
 use core::future::{Future, Ready};
 use core::pin::Pin;
@@ -28,6 +35,9 @@ pub struct PySource {
     caps: Caps,
     /// Optional cap on frames produced; `None` runs until Python signals EOS.
     num_buffers: Option<u64>,
+    /// Whether the hosted source produces GPU-resident CUDA surfaces
+    /// (`g2g_produce_cuda`) rather than filling blank System frames.
+    cuda_frames: bool,
     configured: bool,
     emitted: u64,
     #[cfg(feature = "python")]
@@ -50,6 +60,7 @@ impl PySource {
                 interlace: g2g_core::Interlace::Any,
             },
             num_buffers: None,
+            cuda_frames: false,
             configured: false,
             emitted: 0,
             #[cfg(feature = "python")]
@@ -66,6 +77,14 @@ impl PySource {
     /// Stop after `n` frames (otherwise run until the Python source returns EOS).
     pub fn with_num_buffers(mut self, n: u64) -> Self {
         self.num_buffers = Some(n);
+        self
+    }
+
+    /// Host a source that produces GPU-resident CUDA surfaces through
+    /// `g2g_produce_cuda`, so the frames leave in the Cuda memory domain and the
+    /// caps must be semi-planar (NV12 / P010).
+    pub fn with_cuda_frames(mut self, on: bool) -> Self {
+        self.cuda_frames = on;
         self
     }
 
@@ -88,22 +107,34 @@ impl PySource {
         }
     }
 
+    /// Ask the hosted source for its next frame: a blank System frame to fill, or
+    /// (under `cuda-frames`) a surface the Python side allocates itself.
     #[cfg(feature = "python")]
-    async fn produce_one(&self, frame: Frame) -> Result<Option<Frame>, G2gError> {
-        self.worker
-            .as_ref()
-            .ok_or(G2gError::NotConfigured)?
-            .run_produce(frame, &self.caps)
-            .await
+    async fn produce_one(&self, seq: u64, step: u64) -> Result<Option<Frame>, G2gError> {
+        let worker = self.worker.as_ref().ok_or(G2gError::NotConfigured)?;
+        let mut produced = if self.cuda_frames {
+            worker.run_produce_cuda(&self.caps).await?
+        } else {
+            worker
+                .run_produce(self.blank_frame(seq, step)?, &self.caps)
+                .await?
+        };
+        if let Some(frame) = &mut produced {
+            frame.timing = timing(seq, step);
+            frame.sequence = seq;
+        }
+        Ok(produced)
     }
 
     #[cfg(not(feature = "python"))]
-    async fn produce_one(&self, _frame: Frame) -> Result<Option<Frame>, G2gError> {
+    async fn produce_one(&self, _seq: u64, _step: u64) -> Result<Option<Frame>, G2gError> {
         Err(G2gError::UnsupportedDomain)
     }
 
     /// Allocate a zeroed frame of the output geometry, stamped at `seq` /
-    /// `pts_step_ns`, for the Python source to fill.
+    /// `pts_step_ns`, for the Python source to fill. Only the interpreter build
+    /// has anything to hand it to.
+    #[cfg_attr(not(feature = "python"), allow(dead_code))]
     fn blank_frame(&self, seq: u64, pts_step_ns: u64) -> Result<Frame, G2gError> {
         let Caps::RawVideo {
             format,
@@ -115,20 +146,26 @@ impl PySource {
             return Err(G2gError::FixationFailed);
         };
         let bytes = vec![0u8; frame_bytes(*format, *w, *h)].into_boxed_slice();
-        let pts = seq.saturating_mul(pts_step_ns);
         Ok(Frame {
             domain: MemoryDomain::System(SystemSlice::from_boxed(bytes)),
-            timing: FrameTiming {
-                pts_ns: pts,
-                dts_ns: pts,
-                duration_ns: pts_step_ns,
-                capture_ns: pts,
-                arrival_ns: 0,
-                keyframe: false,
-            },
+            timing: timing(seq, pts_step_ns),
             sequence: seq,
             meta: Default::default(),
         })
+    }
+}
+
+/// Timing for frame `seq` at `pts_step_ns` per frame.
+#[cfg_attr(not(feature = "python"), allow(dead_code))]
+fn timing(seq: u64, pts_step_ns: u64) -> FrameTiming {
+    let pts = seq.saturating_mul(pts_step_ns);
+    FrameTiming {
+        pts_ns: pts,
+        dts_ns: pts,
+        duration_ns: pts_step_ns,
+        capture_ns: pts,
+        arrival_ns: 0,
+        keyframe: false,
     }
 }
 
@@ -193,8 +230,7 @@ impl SourceLoop for PySource {
                         break;
                     }
                 }
-                let blank = self.blank_frame(produced, step)?;
-                match self.produce_one(blank).await? {
+                match self.produce_one(produced, step).await? {
                     Some(frame) => {
                         out.push(PipelinePacket::DataFrame(frame)).await?;
                         produced += 1;
@@ -215,6 +251,16 @@ impl SourceLoop for PySource {
         Some(self.caps.clone())
     }
 
+    /// A GPU source emits into the Cuda domain, so a downstream GPU consumer takes
+    /// the frames with no upload and a CPU consumer gets a download spliced (M985).
+    fn output_memory(&self) -> g2g_core::memory::MemoryDomainKind {
+        if self.cuda_frames {
+            g2g_core::memory::MemoryDomainKind::Cuda
+        } else {
+            g2g_core::memory::MemoryDomainKind::System
+        }
+    }
+
     fn properties(&self) -> &'static [PropertySpec] {
         PYSOURCE_PROPS
     }
@@ -232,6 +278,10 @@ impl SourceLoop for PySource {
             "num-buffers" => {
                 let n = value.as_int().ok_or(PropError::Type)?;
                 self.num_buffers = if n < 0 { None } else { Some(n as u64) };
+                Ok(())
+            }
+            "cuda-frames" => {
+                self.cuda_frames = value.as_bool().ok_or(PropError::Type)?;
                 Ok(())
             }
             "format" => {
@@ -278,6 +328,7 @@ impl SourceLoop for PySource {
             "module" => Some(PropValue::Str(self.module.clone())),
             "class" => Some(PropValue::Str(self.class.clone())),
             "num-buffers" => Some(PropValue::Int(self.num_buffers.map_or(-1, |n| n as i64))),
+            "cuda-frames" => Some(PropValue::Bool(self.cuda_frames)),
             "format" => raw.map(|(f, _, _, _)| PropValue::Str(format_to_py(*f).to_string())),
             "width" => raw.and_then(|(_, w, _, _)| match w {
                 Dim::Fixed(v) => Some(PropValue::Uint(u64::from(*v))),
@@ -323,4 +374,10 @@ static PYSOURCE_PROPS: &[PropertySpec] = &[
         "frames to produce, or -1 until EOS",
     )
     .with_default("-1"),
+    PropertySpec::new(
+        "cuda-frames",
+        PropKind::Bool,
+        "host a source that produces GPU-resident CUDA surfaces (needs g2g_produce_cuda, NV12 / P010)",
+    )
+    .with_default("false"),
 ];

@@ -600,10 +600,11 @@ _(No open tag items.)_
 
 ## Python-element host (M198+)
 
-- GPU-plane contracts for the batch (`pyaggregator`) and source (`pysrc`)
-  shapes; only the transform path takes a Cuda-domain frame.
-- DLPack alongside `__cuda_array_interface__`, for the frameworks that prefer
-  it (it carries a device / stream contract CAI does not).
+- Carry the CUDA device ordinal on the Cuda memory domain, so a GPU plane can
+  report the device it really lives on (DLPack has to say device 0 today) and a
+  multi-GPU graph is describable.
+- Verify the GPU planes against torch (`torch.from_dlpack`,
+  `torch.as_tensor(plane)`); only cupy has been run against them.
 - Verify GIL offload on a free-threaded (PEP 703) interpreter (none installed)
   + a `link_capacity` note for the GIL-serialized case.
 

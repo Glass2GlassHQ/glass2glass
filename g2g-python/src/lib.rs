@@ -22,9 +22,10 @@
 //!
 //! Two zero-copy frame paths reach the hosted element: System memory over the
 //! Python buffer protocol (`g2g_process`), and a GPU-resident CUDA frame over
-//! `__cuda_array_interface__`, one `g2g.CudaPlane` per NV12 plane handed to
-//! `g2g_process_cuda`. The `host` and `cuda_plane` modules carry both contracts,
-//! the plane layout, and the CUDA-context caveat.
+//! `__cuda_array_interface__` / `__dlpack__`, one `g2g.CudaPlane` per NV12 plane
+//! handed to `g2g_process_cuda` (or its batch and produce siblings). The `host`
+//! and `cuda_plane` modules carry the contracts, the plane layout, and the
+//! CUDA-context caveat.
 //!
 //! This crate links `std` unconditionally (embedding CPython is the most
 //! OS-coupled thing in the tree). The `std` feature only forwards to

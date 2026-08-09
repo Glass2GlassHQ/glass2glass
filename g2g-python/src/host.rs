@@ -19,18 +19,25 @@
 //! metadata blobs. This is the `backend/gst` `GstFrameIO` shape on a g2g
 //! [`Frame`]. Step 3 routes the blob list into [`g2g_core::FrameMetaSet`].
 //!
-//! GPU-resident frames take a second entry point (M984). A
+//! GPU-resident frames take their own entry points (M984, M986). A
 //! [`MemoryDomain::Cuda`] frame has no CPU bytes to wrap, so its two semi-planar
-//! planes are handed over as [`CudaPlane`]s instead:
+//! planes are handed over as [`CudaPlane`]s instead, one hook per shape:
 //!
 //! ```text
 //! g2g_process_cuda(luma, chroma, width: int, height: int, meta)
+//! g2g_process_cuda_batch([(luma, chroma), ...], width: int, height: int, meta)
+//! g2g_produce_cuda(width: int, height: int, meta) -> (luma, chroma) | None
 //! ```
 //!
-//! where each plane exposes `__cuda_array_interface__` (CAI v3), so
-//! `cupy.asarray(luma)` aliases the decoder's device memory with no PCIe
-//! round-trip. See [`crate::cuda_plane`] for the layout and the CUDA-context
-//! caveat. An element that does not define `g2g_process_cuda` cannot take such a
+//! Each plane exposes `__cuda_array_interface__` (CAI v3) and `__dlpack__`, so
+//! `cupy.asarray(luma)` / `torch.from_dlpack(luma)` alias the decoder's device
+//! memory with no PCIe round-trip. See [`crate::cuda_plane`] for the layout and
+//! the CUDA-context caveat. The produce hook runs the other way: this crate links
+//! no CUDA and cannot allocate device memory, so the Python source allocates the
+//! surface and hands back two CAI-exporting objects, which the frame holds as its
+//! keep-alive.
+//!
+//! An element that does not define the hook for its shape cannot take such a
 //! frame: the host fails it with [`G2gError::UnsupportedDomain`] (it links no
 //! CUDA, so it cannot read the frame back itself), and the pipeline needs an
 //! explicit `cudadownload` ahead of the element. A plane is valid only for the
@@ -66,11 +73,17 @@ use g2g_core::{
     g2g_warn, Caps, Dim, Frame, G2gError, HardwareError, MemoryDomain, PropValue, RawVideoFormat,
 };
 
-use crate::cuda_plane::{nv12_planes, CudaPlane};
+use crate::cuda_plane::{nv12_planes, produced_cuda_buffer, CudaPlane};
 use crate::format::format_to_py;
 
-/// The Python entry point for a GPU-resident frame (M984).
+/// The Python entry points for GPU-resident frames (M984, M986). An element that
+/// works on device memory defines the one matching its shape.
 const CUDA_HOOK: &str = "g2g_process_cuda";
+const CUDA_BATCH_HOOK: &str = "g2g_process_cuda_batch";
+const CUDA_PRODUCE_HOOK: &str = "g2g_produce_cuda";
+/// Optional attribute a hosted GPU source sets to report the `CUcontext` its
+/// surfaces live in, for a downstream consumer that has to push it.
+const CUDA_CONTEXT_ATTR: &str = "cuda_context";
 
 static INIT: Once = Once::new();
 
@@ -84,6 +97,11 @@ enum JobKind {
     /// `g2g_produce(buf, w, h, fmt, meta) -> bool` — fill a blank frame; a
     /// `False` return signals end of stream.
     Produce,
+    /// `g2g_produce_cuda(w, h, meta) -> (luma, chroma) | None` — the source
+    /// allocates the device memory itself (g2g-python links no CUDA) and hands
+    /// back the two planes as CAI-exporting objects; `None` signals end of
+    /// stream. Carries no input frame.
+    ProduceCuda,
 }
 
 struct Job {
@@ -355,6 +373,24 @@ impl PyWorker {
         .await
     }
 
+    /// Ask a GPU source for its next surface: it allocates the device memory and
+    /// hands back the planes, so there is no blank frame to fill. `None` when the
+    /// source signalled EOS. The returned frame carries no timing; the source
+    /// stamps it. Used by `PySource` under `cuda-frames`.
+    pub(crate) async fn run_produce_cuda(&self, caps: &Caps) -> Result<Option<Frame>, G2gError> {
+        let (width, height, fmt) = raw_video_dims(caps)?;
+        let mut out = self
+            .dispatch(Job {
+                frames: Vec::new(),
+                width,
+                height,
+                fmt,
+                kind: JobKind::ProduceCuda,
+            })
+            .await?;
+        Ok(out.pop())
+    }
+
     /// Hand a blank frame to the Python source to fill. Returns the produced
     /// frame, or `None` when the source signalled EOS. Used by `PySource`.
     pub(crate) async fn run_produce(
@@ -483,36 +519,54 @@ fn propvalue_to_py(py: Python<'_>, value: &PropValue) -> PyResult<Py<PyAny>> {
 }
 
 /// How a job's frames reach Python: writable CPU bytes over the buffer protocol,
-/// or a GPU frame's two device-pointer planes over CAI.
+/// or GPU frames' device-pointer planes over CAI.
 enum Handoff {
     /// One `(pointer, length)` per frame's System slice.
     System(Vec<(*mut u8, usize)>),
     /// Luma and interleaved chroma of a single Cuda-domain frame.
     Cuda(CudaPlane, CudaPlane),
+    /// One plane pair per contributing input of a Cuda-domain batch.
+    CudaBatch(Vec<(CudaPlane, CudaPlane)>),
+    /// Nothing to hand over: a GPU source allocates its own surface and returns
+    /// the planes.
+    ProduceCuda,
 }
 
 /// Decide how this job's frames reach Python, and reject a frame the hosted
 /// element cannot take. The System pointers are gathered here so the `&mut`
 /// borrows end before the frames are moved into the reply.
 fn handoff(py: Python<'_>, instance: &Py<PyAny>, job: &mut Job) -> Result<Handoff, G2gError> {
-    if let Some(MemoryDomain::Cuda(buf)) = job.frames.first().map(|f| &f.domain) {
-        // Batching / producing over GPU planes has no Python contract yet.
-        if !matches!(job.kind, JobKind::Transform) {
-            return Err(G2gError::UnsupportedDomain);
+    if matches!(job.kind, JobKind::ProduceCuda) {
+        require_hook(py, instance, CUDA_PRODUCE_HOOK)?;
+        return Ok(Handoff::ProduceCuda);
+    }
+
+    if matches!(
+        job.frames.first().map(|f| &f.domain),
+        Some(MemoryDomain::Cuda(_))
+    ) {
+        let mut planes = Vec::with_capacity(job.frames.len());
+        for frame in &job.frames {
+            let MemoryDomain::Cuda(buf) = &frame.domain else {
+                // A batch mixing GPU and CPU frames has no single contract.
+                return Err(G2gError::UnsupportedDomain);
+            };
+            planes.push(nv12_planes(job.fmt, buf).ok_or(G2gError::UnsupportedDomain)?);
         }
-        let (luma, chroma) = nv12_planes(job.fmt, buf).ok_or(G2gError::UnsupportedDomain)?;
-        let defines_hook = instance
-            .bind(py)
-            .hasattr(CUDA_HOOK)
-            .map_err(|e| py_fail(py, e))?;
-        if !defines_hook {
-            g2g_warn!(
-                Target::category("pyelement"),
-                "hosted element defines no {CUDA_HOOK}, so a GPU-resident frame cannot reach it: insert cudadownload upstream"
-            );
-            return Err(G2gError::UnsupportedDomain);
-        }
-        return Ok(Handoff::Cuda(luma, chroma));
+        return match job.kind {
+            JobKind::Transform => {
+                require_hook(py, instance, CUDA_HOOK)?;
+                let (luma, chroma) = planes.pop().ok_or(G2gError::UnsupportedDomain)?;
+                Ok(Handoff::Cuda(luma, chroma))
+            }
+            JobKind::Batch => {
+                require_hook(py, instance, CUDA_BATCH_HOOK)?;
+                Ok(Handoff::CudaBatch(planes))
+            }
+            // A GPU frame handed to the System produce path (or a kind that
+            // cannot arise) has nowhere to go.
+            JobKind::Produce | JobKind::ProduceCuda => Err(G2gError::UnsupportedDomain),
+        };
     }
 
     let mut spans = Vec::with_capacity(job.frames.len());
@@ -524,6 +578,24 @@ fn handoff(py: Python<'_>, instance: &Py<PyAny>, job: &mut Job) -> Result<Handof
         spans.push((bytes.as_mut_ptr(), bytes.len()));
     }
     Ok(Handoff::System(spans))
+}
+
+/// Refuse the frame unless the hosted element defines `hook`. There is no
+/// readback fallback: `g2g-python` links no CUDA, so a CPU-only element needs an
+/// explicit `cudadownload` ahead of it.
+fn require_hook(py: Python<'_>, instance: &Py<PyAny>, hook: &str) -> Result<(), G2gError> {
+    let defined = instance
+        .bind(py)
+        .hasattr(hook)
+        .map_err(|e| py_fail(py, e))?;
+    if !defined {
+        g2g_warn!(
+            Target::category("pyelement"),
+            "hosted element defines no {hook}, so a GPU-resident frame cannot reach it: insert cudadownload upstream"
+        );
+        return Err(G2gError::UnsupportedDomain);
+    }
+    Ok(())
 }
 
 /// Run a job (one frame for a transform, a batch for an aggregator) through the
@@ -543,6 +615,8 @@ fn process_job(py: Python<'_>, instance: &Py<PyAny>, mut job: Job) -> Reply {
     let produced = match handoff {
         Handoff::System(spans) => call_system(py, instance, &spans, &job, &sink),
         Handoff::Cuda(luma, chroma) => call_cuda(py, instance, luma, chroma, &job, &sink),
+        Handoff::CudaBatch(planes) => call_cuda_batch(py, instance, planes, &job, &sink),
+        Handoff::ProduceCuda => call_produce_cuda(py, instance, &mut job, &sink),
     };
 
     // Drain the staged results regardless (so the field is always read);
@@ -616,6 +690,8 @@ fn call_system(
             let ret = bound.call_method1("g2g_produce", (buffer, w, h, fmt, sink.clone_ref(py)))?;
             ret.extract::<bool>()?
         }
+        // Routed to `call_produce_cuda`, which never builds System views.
+        JobKind::ProduceCuda => unreachable!("a GPU produce job carries no System frame"),
     };
     // The zero-copy views must not outlive the call: a retained `memoryview` /
     // numpy view holds a pointer that dangles once the frame is freed
@@ -651,15 +727,87 @@ fn call_cuda(
             sink.clone_ref(py),
         ),
     )?;
-    // The device pointers are the producer's, freed once the frame is released
-    // downstream, so a plane (or a cupy array built over one, which keeps the
-    // plane alive as its base) must not survive the call. Our own handle is the
-    // only reference left if the element dropped it, so a higher count means it
-    // was retained: fail the frame loud rather than let a later kernel read freed
-    // device memory.
-    if planes.iter().any(|p| p.get_refcnt(py) > 1) {
+    planes_released(py, &planes)
+}
+
+/// Call the hosted aggregator with one plane pair per contributing input, as a
+/// list of `(luma, chroma)` tuples: the GPU shape of `g2g_process_batch`.
+fn call_cuda_batch(
+    py: Python<'_>,
+    instance: &Py<PyAny>,
+    planes: Vec<(CudaPlane, CudaPlane)>,
+    job: &Job,
+    sink: &Py<MetaSink>,
+) -> PyResult<bool> {
+    let mut handles = Vec::with_capacity(planes.len() * 2);
+    let mut pairs = Vec::with_capacity(planes.len());
+    for (luma, chroma) in planes {
+        let (luma, chroma) = (Py::new(py, luma)?, Py::new(py, chroma)?);
+        pairs.push((luma.clone_ref(py), chroma.clone_ref(py)));
+        handles.push(luma);
+        handles.push(chroma);
+    }
+    let list = pyo3::types::PyList::new(py, pairs)?;
+    instance.bind(py).call_method1(
+        CUDA_BATCH_HOOK,
+        (list.clone(), job.width, job.height, sink.clone_ref(py)),
+    )?;
+    // Release the list's own references before counting, so only what the element
+    // kept is left.
+    drop(list);
+    planes_released(py, &handles)
+}
+
+/// Ask a hosted GPU source for its next surface. It allocates the device memory
+/// itself (this crate links no CUDA) and returns the two planes as CAI-exporting
+/// objects, which become the frame's CUDA buffer with those objects held as its
+/// keep-alive. A falsy return is end of stream.
+fn call_produce_cuda(
+    py: Python<'_>,
+    instance: &Py<PyAny>,
+    job: &mut Job,
+    sink: &Py<MetaSink>,
+) -> PyResult<bool> {
+    let bound = instance.bind(py);
+    let returned = bound.call_method1(
+        CUDA_PRODUCE_HOOK,
+        (job.width, job.height, sink.clone_ref(py)),
+    )?;
+    if !returned.is_truthy()? {
+        return Ok(false);
+    }
+    let (luma, chroma): (Bound<'_, PyAny>, Bound<'_, PyAny>) = returned.extract()?;
+    let context = reported_cuda_context(bound)?;
+    let buffer = produced_cuda_buffer(&luma, &chroma, job.fmt, job.width, job.height, context)?;
+    job.frames.push(Frame {
+        domain: MemoryDomain::Cuda(buffer),
+        // The source stamps timing and sequence on the way out; it owns the clock.
+        timing: g2g_core::FrameTiming::default(),
+        sequence: 0,
+        meta: Default::default(),
+    });
+    Ok(true)
+}
+
+/// The `CUcontext` a hosted GPU source reports through its optional
+/// `cuda_context` attribute, or zero when it reports none.
+fn reported_cuda_context(instance: &Bound<'_, PyAny>) -> PyResult<u64> {
+    match instance.getattr(CUDA_CONTEXT_ATTR) {
+        Ok(value) if !value.is_none() => value.extract(),
+        _ => Ok(0),
+    }
+}
+
+/// The device pointers belong to the producer and are freed once the frame is
+/// released downstream, so nothing built over a plane may outlive the call: a
+/// retained cupy array holds its plane as the array's base, and a consumed DLPack
+/// capsule holds it through the tensor's manager context. Our own handle is the
+/// only reference left if the element let go, so a higher count means it kept one:
+/// fail the frame loud rather than let a later kernel read freed device memory.
+fn planes_released(py: Python<'_>, planes: &[Py<CudaPlane>]) -> PyResult<bool> {
+    if planes.iter().any(|plane| plane.get_refcnt(py) > 1) {
         return Err(PyRuntimeError::new_err(
-            "g2g_process_cuda retained a CudaPlane past return (use-after-free risk)",
+            "a hosted element retained a CudaPlane past return (use-after-free risk)",
         ));
     }
     Ok(true)
