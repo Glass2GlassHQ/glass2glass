@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M967: `WebSocketSrc` detaches its socket callbacks on a failed push (freed-closure throw).
 - M966: V4L2 device discovery lists caps for every format `v4l2src` carries.
 - M965: `CapsPreferences` costs steer fixation to the least-cost chain assignment.
 - M964: `AutoplugParams` sets properties on auto-plugged elements by factory name.

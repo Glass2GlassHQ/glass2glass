@@ -634,10 +634,6 @@ _(No open tag items.)_
 
 ## Browser / Wasm
 
-- An unbounded source feeding an `ort-web` chain faster than inference drains it
-  trips a wasm async-runtime reentrancy (`closure invoked recursively`) once
-  backpressure crosses a source loop; a finite source runs clean. Pin down the
-  `spawn_local` re-entrancy on a per-frame JS-promise `await`.
 - WebGPU-texture zero-copy sink (`MemoryDomain::WebGPUBuffer` into a
   `GPUTexture`; needs the async device handshake in the keepalive).
 - Web Workers executor (off-main-thread; needs JS bootstrap).

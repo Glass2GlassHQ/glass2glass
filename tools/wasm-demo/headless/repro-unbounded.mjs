@@ -1,22 +1,19 @@
-// Headless validation for the browser ONNX MVP (M762).
+// Unbounded-source variant of run-ortdetect.mjs: the ws feed is never stopped,
+// so the source keeps producing while the chain runs. Asserts nothing; it prints
+// every console message and every page error with its stack, for diagnosing
+// browser-side failures under sustained ingest.
 //
-// Drives the real in-browser chain WebSocketSrc -> WebCodecsDecode -> WebOrtDetect
-// (onnxruntime-web CPU inference) -> AnalyticsOverlay -> CanvasSink in a
-// WebCodecs-capable Chromium, against:
-//   - the committed H.264 fixture, streamed by ws-fixture-server (one AU/message);
-//   - the committed tiny-detect.onnx served over plain static HTTP (no COOP/COEP).
+// The WebSocketSrc callback-leak repro (a source that keeps receiving after the
+// run loop returned early) is:
+//   G2G_MODEL=/models/nope.onnx G2G_KEEP_RUNNING=1 node headless/repro-unbounded.mjs
+// The 404 model fails WebOrtDetect, which closes the link under the source; with
+// the feed still live, each later message hits the onmessage closure.
 //
-// tiny-detect.onnx is deterministic: it plants exactly two detections (one per
-// class) every frame, so a real ort-web run must log "frame N -> 2 detections".
-// Asserts: the module inits, ort-web loads and creates a session, several frames
-// each yield exactly 2 detections, the canvas shows decoded (non-blank) video,
-// and no pipeline error is logged.
-//
-// Prereqs: `npm i -D playwright` (or run with NODE_PATH pointing at a playwright
-// install) and a full (WebCodecs-capable) Chromium. Run from tools/wasm-demo:
-//   node headless/run-ortdetect.mjs
-// Env overrides: G2G_CHROME (chrome executable), G2G_WS_SERVER_BIN (prebuilt
-// ws-fixture-server, else `cargo run`), G2G_FIXTURE (.h264), G2G_HEADFUL=1.
+// Prereqs: `npm i -D playwright` (or G2G_PLAYWRIGHT pointing at an out-of-tree
+// install) and a full (WebCodecs-capable) Chromium. Run from tools/wasm-demo.
+// Env: G2G_CHROME, G2G_WS_SERVER_BIN, G2G_FIXTURE, G2G_HEADFUL=1, G2G_FPS
+// (feed rate), G2G_MODEL (.onnx url), G2G_RUN_MS, G2G_KEEP_RUNNING (do not stop
+// at the first pipeline error).
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
 import { readFile } from "node:fs/promises";
@@ -69,10 +66,11 @@ function startHttp() {
 function startWsServer() {
   const bin = process.env.G2G_WS_SERVER_BIN;
   const addr = `127.0.0.1:${WS_PORT}`;
+  const fps = process.env.G2G_FPS || "10";
   const [cmd, args] = bin && existsSync(bin)
-    ? [bin, [addr, FIXTURE, "10"]]
+    ? [bin, [addr, FIXTURE, fps]]
     : ["cargo", ["run", "--release", "--manifest-path",
-        resolve(ROOT, "ws-fixture-server/Cargo.toml"), "--", addr, FIXTURE, "10"]];
+        resolve(ROOT, "ws-fixture-server/Cargo.toml"), "--", addr, FIXTURE, fps]];
   log("ws server:", cmd, args.join(" "));
   wsProc = spawn(cmd, args, { stdio: ["ignore", "pipe", "pipe"] });
   wsProc.stdout.on("data", (d) => process.stdout.write("[ws] " + d));
@@ -111,18 +109,21 @@ async function main() {
   let sessionReady = false, finishedOk = false, pipelineError = null;
   page.on("console", (m) => {
     const t = m.text();
-    if (t.startsWith("g2g[")) log("page:", t);
+    log("page[" + m.type() + "]:", t);
     if (t.includes("session ready")) sessionReady = true;
     const fm = t.match(/frame \d+ -> (\d+) detections/);
     if (fm) counts.push(Number(fm[1]));
     if (t.includes("finished ok")) finishedOk = true;
     if (t.includes("pipeline error")) pipelineError = t;
   });
-  page.on("pageerror", (e) => { pipelineError = String(e); });
+  page.on("pageerror", (e) => {
+    console.error("[harness] PAGEERROR:", e && e.stack ? e.stack : String(e));
+    pipelineError = String(e);
+  });
 
   const url = `http://127.0.0.1:${HTTP_PORT}/headless/ortdetect.html`
     + `?ws=${encodeURIComponent(`ws://127.0.0.1:${WS_PORT}`)}`
-    + `&model=${encodeURIComponent("/fixtures/tiny-detect.onnx")}`;
+    + `&model=${encodeURIComponent(process.env.G2G_MODEL || "/fixtures/tiny-detect.onnx")}`;
   log("navigating", url);
   await page.goto(url);
 
@@ -130,16 +131,17 @@ async function main() {
   const hasWebCodecs = await page.evaluate(() => typeof VideoDecoder !== "undefined");
   if (!hasWebCodecs) fail("browser lacks WebCodecs (use a full Chromium, not headless_shell)");
 
-  // Finite source: stop feeding after one fixture pass so the chain reaches EOS
-  // and finishes cleanly. (repro-unbounded.mjs covers the unbounded case.)
-  setTimeout(() => { try { wsProc?.kill("SIGKILL"); } catch {} log("finite source: stopped ws feed"); }, 1100);
-
+  // UNBOUNDED: the ws feed is never stopped, so the source keeps producing while
+  // every frame awaits ort-web. This is the repro.
+  const RUN_MS = Number(process.env.G2G_RUN_MS || 25000);
   const t0 = Date.now();
-  while (Date.now() - t0 < TIMEOUT_MS) {
-    if (pipelineError) fail("pipeline error before EOS: " + pipelineError);
-    if (finishedOk) break;
+  while (Date.now() - t0 < RUN_MS) {
+    if (pipelineError && !process.env.G2G_KEEP_RUNNING) { log("saw error after", Date.now() - t0, "ms:", pipelineError); break; }
+    if (finishedOk && !process.env.G2G_KEEP_RUNNING) break;
     await page.waitForTimeout(200);
   }
+  log("frames with detections:", counts.length, "error:", pipelineError);
+  shutdown(pipelineError ? 1 : 0);
   if (!sessionReady) fail("ort-web session never became ready (CDN load / model fetch failed?)");
   if (!finishedOk) fail(`chain did not finish (session=${sessionReady}, frames=${counts.length})`);
   if (counts.length < NEED_FRAMES) fail(`only ${counts.length}/${NEED_FRAMES} inference frames`);
