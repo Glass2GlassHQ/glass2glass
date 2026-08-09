@@ -19,6 +19,23 @@
 //! metadata blobs. This is the `backend/gst` `GstFrameIO` shape on a g2g
 //! [`Frame`]. Step 3 routes the blob list into [`g2g_core::FrameMetaSet`].
 //!
+//! GPU-resident frames take a second entry point (M984). A
+//! [`MemoryDomain::Cuda`] frame has no CPU bytes to wrap, so its two semi-planar
+//! planes are handed over as [`CudaPlane`]s instead:
+//!
+//! ```text
+//! g2g_process_cuda(luma, chroma, width: int, height: int, meta)
+//! ```
+//!
+//! where each plane exposes `__cuda_array_interface__` (CAI v3), so
+//! `cupy.asarray(luma)` aliases the decoder's device memory with no PCIe
+//! round-trip. See [`crate::cuda_plane`] for the layout and the CUDA-context
+//! caveat. An element that does not define `g2g_process_cuda` cannot take such a
+//! frame: the host fails it with [`G2gError::UnsupportedDomain`] (it links no
+//! CUDA, so it cannot read the frame back itself), and the pipeline needs an
+//! explicit `cudadownload` ahead of the element. A plane is valid only for the
+//! duration of the call, enforced like the System path's buffer views.
+//!
 //! GIL / threading (step 2b): CPython is single-interpreter and GIL-serialized,
 //! and g2g's runtime is a custom cooperative executor (`runtime::join`, not
 //! tokio) that polls every node arm on one thread, so an inline `Python::attach`
@@ -39,16 +56,21 @@ use std::sync::mpsc;
 use std::sync::{Mutex, Once};
 use std::thread::{self, JoinHandle};
 
-use pyo3::exceptions::PyBufferError;
+use pyo3::exceptions::{PyBufferError, PyRuntimeError};
 use pyo3::ffi;
 use pyo3::prelude::*;
 
+use g2g_core::log::Target;
 use g2g_core::runtime::{bounded, Receiver};
 use g2g_core::{
-    Caps, Dim, Frame, G2gError, HardwareError, MemoryDomain, PropValue, RawVideoFormat,
+    g2g_warn, Caps, Dim, Frame, G2gError, HardwareError, MemoryDomain, PropValue, RawVideoFormat,
 };
 
+use crate::cuda_plane::{nv12_planes, CudaPlane};
 use crate::format::format_to_py;
+
+/// The Python entry point for a GPU-resident frame (M984).
+const CUDA_HOOK: &str = "g2g_process_cuda";
 
 static INIT: Once = Once::new();
 
@@ -228,6 +250,7 @@ impl MetaSink {
 #[pymodule]
 fn g2g(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<MetaSink>()?;
+    m.add_class::<CudaPlane>()?;
     Ok(())
 }
 
@@ -459,13 +482,39 @@ fn propvalue_to_py(py: Python<'_>, value: &PropValue) -> PyResult<Py<PyAny>> {
     }
 }
 
-/// Run a job (one frame for a transform, a batch for an aggregator) through the
-/// hosted element. Python reads / overwrites each frame's System memory in place
-/// via the buffer protocol; the frames flow back, timing and sequence preserved.
-fn process_job(py: Python<'_>, instance: &Py<PyAny>, mut job: Job) -> Reply {
-    // Gather a raw pointer into every frame's System slice first, so the `&mut`
-    // borrows end before the frames are moved into the reply. System memory
-    // only; GPU / DMABUF domains need the download (step 4) before Python.
+/// How a job's frames reach Python: writable CPU bytes over the buffer protocol,
+/// or a GPU frame's two device-pointer planes over CAI.
+enum Handoff {
+    /// One `(pointer, length)` per frame's System slice.
+    System(Vec<(*mut u8, usize)>),
+    /// Luma and interleaved chroma of a single Cuda-domain frame.
+    Cuda(CudaPlane, CudaPlane),
+}
+
+/// Decide how this job's frames reach Python, and reject a frame the hosted
+/// element cannot take. The System pointers are gathered here so the `&mut`
+/// borrows end before the frames are moved into the reply.
+fn handoff(py: Python<'_>, instance: &Py<PyAny>, job: &mut Job) -> Result<Handoff, G2gError> {
+    if let Some(MemoryDomain::Cuda(buf)) = job.frames.first().map(|f| &f.domain) {
+        // Batching / producing over GPU planes has no Python contract yet.
+        if !matches!(job.kind, JobKind::Transform) {
+            return Err(G2gError::UnsupportedDomain);
+        }
+        let (luma, chroma) = nv12_planes(job.fmt, buf).ok_or(G2gError::UnsupportedDomain)?;
+        let defines_hook = instance
+            .bind(py)
+            .hasattr(CUDA_HOOK)
+            .map_err(|e| py_fail(py, e))?;
+        if !defines_hook {
+            g2g_warn!(
+                Target::category("pyelement"),
+                "hosted element defines no {CUDA_HOOK}, so a GPU-resident frame cannot reach it: insert cudadownload upstream"
+            );
+            return Err(G2gError::UnsupportedDomain);
+        }
+        return Ok(Handoff::Cuda(luma, chroma));
+    }
+
     let mut spans = Vec::with_capacity(job.frames.len());
     for frame in &mut job.frames {
         let MemoryDomain::System(slice) = &mut frame.domain else {
@@ -474,67 +523,27 @@ fn process_job(py: Python<'_>, instance: &Py<PyAny>, mut job: Job) -> Reply {
         let bytes = slice.as_mut_slice();
         spans.push((bytes.as_mut_ptr(), bytes.len()));
     }
+    Ok(Handoff::System(spans))
+}
+
+/// Run a job (one frame for a transform, a batch for an aggregator) through the
+/// hosted element. Python reads / overwrites each frame's System memory in place
+/// via the buffer protocol, or reads a GPU frame's planes through CAI; the frames
+/// flow back, timing and sequence preserved.
+fn process_job(py: Python<'_>, instance: &Py<PyAny>, mut job: Job) -> Reply {
+    let handoff = handoff(py, instance, &mut job)?;
 
     let sink = match Py::new(py, MetaSink::default()) {
         Ok(s) => s,
         Err(e) => return Err(py_fail(py, e)),
     };
 
-    // Returns whether a frame was produced: always true for transform / batch;
-    // a `Produce` job returns the Python source's bool (false = EOS).
-    let produced = (|| -> PyResult<bool> {
-        let buffers: Vec<Py<FrameBuffer>> = spans
-            .iter()
-            .map(|&(ptr, len)| {
-                Py::new(
-                    py,
-                    FrameBuffer {
-                        ptr,
-                        len,
-                        exports: core::cell::Cell::new(0),
-                    },
-                )
-            })
-            .collect::<PyResult<_>>()?;
-        let bound = instance.bind(py);
-        let (w, h, fmt) = (job.width, job.height, format_to_py(job.fmt));
-        // Pass cloned handles into the call and keep `buffers` so the export
-        // counters can be inspected after it returns.
-        let produced = match job.kind {
-            JobKind::Batch => {
-                let list = pyo3::types::PyList::new(py, buffers.iter().map(|b| b.clone_ref(py)))?;
-                bound.call_method1("g2g_process_batch", (list, w, h, fmt, sink.clone_ref(py)))?;
-                true
-            }
-            JobKind::Transform => {
-                let buffer = buffers
-                    .first()
-                    .expect("single job has one frame")
-                    .clone_ref(py);
-                bound.call_method1("g2g_process", (buffer, w, h, fmt, sink.clone_ref(py)))?;
-                true
-            }
-            JobKind::Produce => {
-                let buffer = buffers
-                    .first()
-                    .expect("produce job has one frame")
-                    .clone_ref(py);
-                let ret =
-                    bound.call_method1("g2g_produce", (buffer, w, h, fmt, sink.clone_ref(py)))?;
-                ret.extract::<bool>()?
-            }
-        };
-        // The zero-copy views must not outlive the call: a retained
-        // `memoryview` / numpy view holds a pointer that dangles once the frame
-        // is freed downstream. A nonzero export count means the element kept one,
-        // so fail this frame loud rather than risk a use-after-free next frame.
-        if buffers.iter().any(|b| b.borrow(py).exports.get() != 0) {
-            return Err(PyBufferError::new_err(
-                "g2g_process retained a frame buffer view past return (use-after-free risk)",
-            ));
-        }
-        Ok(produced)
-    })();
+    // Whether a frame was produced: always true for transform / batch; a
+    // `Produce` job returns the Python source's bool (false = EOS).
+    let produced = match handoff {
+        Handoff::System(spans) => call_system(py, instance, &spans, &job, &sink),
+        Handoff::Cuda(luma, chroma) => call_cuda(py, instance, luma, chroma, &job, &sink),
+    };
 
     // Drain the staged results regardless (so the field is always read);
     // materialize onto the anchor frame (frame 0) only under `analytics`.
@@ -558,6 +567,102 @@ fn process_job(py: Python<'_>, instance: &Py<PyAny>, mut job: Job) -> Reply {
         Ok(false) => Ok(Vec::new()),
         Err(e) => Err(py_fail(py, e)),
     }
+}
+
+/// Call the hosted element with writable views over the frames' System bytes.
+fn call_system(
+    py: Python<'_>,
+    instance: &Py<PyAny>,
+    spans: &[(*mut u8, usize)],
+    job: &Job,
+    sink: &Py<MetaSink>,
+) -> PyResult<bool> {
+    let buffers: Vec<Py<FrameBuffer>> = spans
+        .iter()
+        .map(|&(ptr, len)| {
+            Py::new(
+                py,
+                FrameBuffer {
+                    ptr,
+                    len,
+                    exports: core::cell::Cell::new(0),
+                },
+            )
+        })
+        .collect::<PyResult<_>>()?;
+    let bound = instance.bind(py);
+    let (w, h, fmt) = (job.width, job.height, format_to_py(job.fmt));
+    // Pass cloned handles into the call and keep `buffers` so the export
+    // counters can be inspected after it returns.
+    let produced = match job.kind {
+        JobKind::Batch => {
+            let list = pyo3::types::PyList::new(py, buffers.iter().map(|b| b.clone_ref(py)))?;
+            bound.call_method1("g2g_process_batch", (list, w, h, fmt, sink.clone_ref(py)))?;
+            true
+        }
+        JobKind::Transform => {
+            let buffer = buffers
+                .first()
+                .expect("single job has one frame")
+                .clone_ref(py);
+            bound.call_method1("g2g_process", (buffer, w, h, fmt, sink.clone_ref(py)))?;
+            true
+        }
+        JobKind::Produce => {
+            let buffer = buffers
+                .first()
+                .expect("produce job has one frame")
+                .clone_ref(py);
+            let ret = bound.call_method1("g2g_produce", (buffer, w, h, fmt, sink.clone_ref(py)))?;
+            ret.extract::<bool>()?
+        }
+    };
+    // The zero-copy views must not outlive the call: a retained `memoryview` /
+    // numpy view holds a pointer that dangles once the frame is freed
+    // downstream. A nonzero export count means the element kept one, so fail
+    // this frame loud rather than risk a use-after-free next frame.
+    if buffers.iter().any(|b| b.borrow(py).exports.get() != 0) {
+        return Err(PyBufferError::new_err(
+            "g2g_process retained a frame buffer view past return (use-after-free risk)",
+        ));
+    }
+    Ok(produced)
+}
+
+/// Call the hosted element with the GPU frame's two planes described by CAI, so
+/// the Python side maps them into cupy / torch without a device->host copy.
+fn call_cuda(
+    py: Python<'_>,
+    instance: &Py<PyAny>,
+    luma: CudaPlane,
+    chroma: CudaPlane,
+    job: &Job,
+    sink: &Py<MetaSink>,
+) -> PyResult<bool> {
+    let planes = [Py::new(py, luma)?, Py::new(py, chroma)?];
+    let (w, h) = (job.width, job.height);
+    instance.bind(py).call_method1(
+        CUDA_HOOK,
+        (
+            planes[0].clone_ref(py),
+            planes[1].clone_ref(py),
+            w,
+            h,
+            sink.clone_ref(py),
+        ),
+    )?;
+    // The device pointers are the producer's, freed once the frame is released
+    // downstream, so a plane (or a cupy array built over one, which keeps the
+    // plane alive as its base) must not survive the call. Our own handle is the
+    // only reference left if the element dropped it, so a higher count means it
+    // was retained: fail the frame loud rather than let a later kernel read freed
+    // device memory.
+    if planes.iter().any(|p| p.get_refcnt(py) > 1) {
+        return Err(PyRuntimeError::new_err(
+            "g2g_process_cuda retained a CudaPlane past return (use-after-free risk)",
+        ));
+    }
+    Ok(true)
 }
 
 /// Materialize staged results onto the frame: detections / classifications into

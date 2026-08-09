@@ -1824,6 +1824,42 @@ rejected (it loses the ergonomic Rust trait). The whole path is exercised
 out-of-tree by `g2g-plugins/tests/fixtures/example-plugin` +
 `tests/plugin_loader_dlopen.rs`.
 
+**Hosted Python elements (`pyelement` / `pysrc` / `pyaggregator`, `g2g-python`).**
+A gst-python-ml element shell runs as a first-class g2g element: `g2g-python`
+embeds CPython (pyo3, `auto-initialize`), exposes a native `g2g` module the
+`backend/g2g` package imports, and negotiates as a same-format passthrough. Each
+hosted instance owns a dedicated GIL-holding OS thread; the element hands it the
+frame and awaits the reply over a Waker channel, so the cooperative executor keeps
+polling other arms while Python runs. A frame reaches Python without a copy on
+either of two paths:
+
+- **System memory.** `g2g_process(buf, width, height, fmt, meta)` gets a writable
+  buffer-protocol object over the frame's own bytes, so `memoryview` / numpy read
+  and overwrite pixels in place. The host counts outstanding buffer exports and
+  fails the frame if the element kept a view past return (its pointer would dangle
+  once the frame is freed downstream). `g2g_process_batch` and `g2g_produce` are
+  the aggregator / source shapes of the same contract.
+- **CUDA device memory (M984).** A `MemoryDomain::Cuda` frame has no CPU bytes, so
+  its two semi-planar planes are described to
+  `g2g_process_cuda(luma, chroma, width, height, meta)` as `g2g.CudaPlane` objects
+  exposing `__cuda_array_interface__` v3: luma `(height, width)` and interleaved
+  chroma `(height/2, width/2, 2)`, byte strides carrying the producer's row pitch
+  (so pitch != width is described, not repacked), `|u1` for NV12 and `<u2` for
+  P010, `stream: None` (the CUDA domain carries no stream; a producer hands the
+  frame over once the decode into it completed). `cupy.asarray(luma)` then aliases
+  the decoder's surface with no PCIe round-trip. The `data` flag is read-only: the
+  device memory belongs to the producer and a teed frame shares it under a
+  read-only guarantee, with no copy-on-write to fall back on as the System path
+  has. CAI carries no CUDA context, so the pointers are valid only in the context
+  the producer decoded into, exposed as the plane's `cuda_context` property for a
+  consumer that must push it (cupy and torch use the device's primary context).
+  Plane lifetime is the call, enforced by a refcount check after it (a retained
+  plane, including one a cupy array holds as its base, fails the frame). DLPack is
+  the cross-framework alternative that does carry a device/stream contract; it is
+  not implemented. An element that defines no `g2g_process_cuda` gets
+  `UnsupportedDomain` for a GPU frame rather than a silent readback: `g2g-python`
+  links no CUDA, so a CPU-only element needs an explicit `cudadownload` upstream.
+
 **Runtime scripting (`scriptelement`, `script-rhai` feature, M580).** The
 construction scripts above run once to emit a graph; `scriptelement` is the
 per-frame complement: a raw-video transform whose `process(frame)` is a Rhai

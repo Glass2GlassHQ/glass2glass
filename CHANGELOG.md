@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M984: a hosted Python element reads a CUDA frame's NV12 planes through `__cuda_array_interface__`.
 - M981: `VelloTextOverlay` renders text cues on the GPU from the shared placement path.
 - M982: the ffmpeg decoder keeps a mid-stream framerate refinement instead of its 30/1 fallback.
 - M980: `g2g-launch --run-json` dumps per-edge caps observed at runtime.

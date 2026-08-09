@@ -600,14 +600,13 @@ _(No open tag items.)_
 
 ## Python-element host (M198+)
 
-- **GPU zero-copy (Step 4f, designed, not implemented).** Hand a GPU-resident
-  frame to Python without the PCIe round-trip via `__cuda_array_interface__`
-  (CAI v3): two CAI objects for the NV12 luma / chroma planes, a
-  `g2g_process_cuda(luma, chroma, w, h, meta)` contract over `g2g.CudaPlane`
-  pyclasses. Document the CUDA-context caveat (CAI carries none). DLPack is the
-  cross-framework alternative. Verify on the RTX 3060 host (install cupy/torch,
-  assert a `cupy` array aliases the decoder's device pointer, no copy) before
-  presenting the layout as working.
+- A hosted element passes a GPU frame through unchanged yet declares its output
+  memory as System, so the domain-converter auto-plug can splice a needless
+  upload after `pyelement`: report the domain the frame actually leaves in.
+- GPU-plane contracts for the batch (`pyaggregator`) and source (`pysrc`)
+  shapes; only the transform path takes a Cuda-domain frame.
+- DLPack alongside `__cuda_array_interface__`, for the frameworks that prefer
+  it (it carries a device / stream contract CAI does not).
 - Verify GIL offload on a free-threaded (PEP 703) interpreter (none installed)
   + a `link_capacity` note for the GIL-serialized case.
 
