@@ -31,7 +31,7 @@ use crate::error::G2gError;
 use crate::fanout::{
     DuplexInbound, Merger, MultiDuplexSession, MultiInputElement, MultiSenderSink,
 };
-use crate::format_element::CapsConstraint;
+use crate::format_element::{CapsConstraint, CapsPreferences};
 use crate::frame::PipelinePacket;
 use crate::graph::Graph;
 use crate::memory::{DomainSet, MemoryDomainKind};
@@ -62,6 +62,13 @@ pub trait DynSourceLoop: ElementBound {
     /// reads the constraint the source declares.
     fn produced_caps<'a>(&'a mut self) -> BoxFuture<'a, Result<CapsSet, G2gError>> {
         Box::pin(async move { Ok(CapsSet::one(self.intercept_caps().await?)) })
+    }
+
+    /// Dyn-safe mirror of [`SourceLoop::caps_preferences`], so an erased
+    /// source's declared per-alternative costs reach the solver. Defaults to
+    /// `None` (cost = alternative index), matching `SourceLoop`.
+    fn caps_preferences(&self) -> Option<CapsPreferences> {
+        None
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError>;
@@ -172,6 +179,10 @@ impl<T: SourceLoop> DynSourceLoop for T {
         })
     }
 
+    fn caps_preferences(&self) -> Option<CapsPreferences> {
+        SourceLoop::caps_preferences(self)
+    }
+
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         SourceLoop::configure_pipeline(self, absolute_caps)
     }
@@ -256,6 +267,10 @@ impl<'b> DynSourceLoop for &'b mut (dyn DynSourceLoop + 'b) {
 
     fn produced_caps<'a>(&'a mut self) -> BoxFuture<'a, Result<CapsSet, G2gError>> {
         (**self).produced_caps()
+    }
+
+    fn caps_preferences(&self) -> Option<CapsPreferences> {
+        (**self).caps_preferences()
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {

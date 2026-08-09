@@ -2280,15 +2280,16 @@ impl GraphSpawner for ThreadSpawner {
 }
 
 /// Each node's declared per-alternative costs, indexed by node id, for the
-/// solver's minimum-cost fixation. Only transform / sink nodes declare any: a
-/// source's produce set is already in its own preference order, and a muxer /
-/// demux node is not part of a linear chain, which is the only topology the
-/// cost minimization covers.
+/// solver's minimum-cost fixation. Source, transform and sink nodes declare
+/// them; a muxer / demux node is not part of a linear chain, which is the only
+/// topology the cost minimization covers. A source's costs index its produce
+/// set, which without them is read in its own order.
 fn build_node_preferences(vg: &ValidatedGraph<GraphNodeRef<'_>>) -> Vec<Option<CapsPreferences>> {
     (0..vg.node_count())
         .map(|i| {
             let node = NodeId(i as u32);
             match vg.kind(node) {
+                NodeKind::Source => source_ref(vg, node).and_then(|s| s.caps_preferences()),
                 NodeKind::Transform | NodeKind::Sink => {
                     element_ref(vg, node).and_then(|e| e.caps_preferences())
                 }
@@ -2296,6 +2297,20 @@ fn build_node_preferences(vg: &ValidatedGraph<GraphNodeRef<'_>>) -> Vec<Option<C
             }
         })
         .collect()
+}
+
+/// View a node's payload as a source. `None` for any other node kind.
+fn source_ref<'g, 'a>(
+    vg: &'g ValidatedGraph<GraphNodeRef<'a>>,
+    node: NodeId,
+) -> Option<&'g (dyn DynSourceLoop + 'a)> {
+    match vg.element(node)? {
+        GraphNodeRef::Source(src) => Some(&**src),
+        GraphNodeRef::Element(_)
+        | GraphNodeRef::Muxer(_)
+        | GraphNodeRef::FanoutSource(_)
+        | GraphNodeRef::Demux(_) => None,
+    }
 }
 
 /// View a node's payload as a transform/sink element. `None` for a source or a

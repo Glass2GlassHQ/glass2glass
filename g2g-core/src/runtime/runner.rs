@@ -9,7 +9,7 @@ use crate::element::{
     AsyncElement, BoxFuture, ConfigureOutcome, ElementBound, OutputSink, PushOutcome, Reconfigure,
 };
 use crate::error::G2gError;
-use crate::format_element::CapsConstraint;
+use crate::format_element::{CapsConstraint, CapsPreferences};
 use crate::frame::PipelinePacket;
 use crate::memory::{DomainSet, MemoryDomainKind};
 use crate::property::{ElementMetadata, PropError, PropValue, PropertySpec};
@@ -177,6 +177,17 @@ pub trait SourceLoop: ElementBound {
         &'a mut self,
     ) -> impl Future<Output = Result<CapsConstraint<'a>, G2gError>> + 'a {
         async move { Ok(CapsConstraint::LegacySource(self.intercept_caps().await?)) }
+    }
+
+    /// What this source is willing to pay for each alternative of the produce
+    /// set its [`caps_constraint`](Self::caps_constraint) advertises. Default
+    /// `None`: the alternatives are already in preference order and cost their
+    /// index. A source overrides this to declare *equal* cost between formats it
+    /// does not care about (so a downstream element's preference decides) or a
+    /// gap wide enough that a downstream preference cannot pull the chain onto
+    /// its fallback.
+    fn caps_preferences(&self) -> Option<CapsPreferences> {
+        None
     }
 
     /// The fixed output caps this source already knows from its properties,
