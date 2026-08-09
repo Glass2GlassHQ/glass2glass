@@ -1,20 +1,28 @@
-# g2g-onnx-import: an ONNX topology running in `BurnInference`
+# g2g-onnx-import: ONNX topologies running in `BurnInference`
 
 The Burn backend's graph-topology import. `safetensors` (`WgpuInference`) carries
 trained weights into a topology that stays compiled Rust; this brings the
 topology itself in from an ONNX file.
 
-`build.rs` runs `burn-onnx`'s `ModelGen` over
-[`model/tiny_classifier.onnx`](model/tiny_classifier.onnx), which generates a
-burn `Module` plus a burnpack weight blob embedded in the binary. `burn-onnx` is
-build-time codegen, not a runtime loader, so the generated `Model<Wgpu>` reaches
-the pipeline through `g2g_ml::burninfer::BurnModule`: [`TinyClassifier`](src/lib.rs)
-implements that trait and `BurnInference::module` drives it per frame, exactly
-like the element's built-in linear layer.
+`build.rs` runs `burn-onnx`'s `ModelGen` over each fixture in [`model/`](model),
+which generates a burn `Module` plus a burnpack weight blob embedded in the
+binary. `burn-onnx` is build-time codegen, not a runtime loader, so the generated
+`Model<Wgpu>` reaches the pipeline through `g2g_ml::burninfer::BurnModule`: the
+wrappers in [`src/lib.rs`](src/lib.rs) implement that trait and
+`BurnInference::module` drives them per frame, exactly like the element's built-in
+linear layer.
 
-The imported graph is `Conv2d -> BatchNorm -> ReLU -> global average pool ->
-linear`, 4x4 RGB in, 2 logits out. Attention topologies are not validated through
-this path yet.
+Two topologies, both 4x4 RGB in and 2 logits out:
+
+| Fixture | Graph |
+| :--- | :--- |
+| `tiny_classifier.onnx` | `Conv2d -> BatchNorm -> ReLU -> global average pool -> linear` |
+| `tiny_attention.onnx` | the 16 pixels as a token sequence -> multi-head self-attention -> mean pool -> linear |
+
+The attention model is one standard-domain ONNX `Attention` node (opset 23) for
+the whole multi-head block, which `burn-onnx` lowers onto
+`burn::tensor::module::attention`, so the GPU runs burn's own attention kernel
+rather than a hand-unrolled matmul/softmax chain.
 
 ## Why it is workspace-excluded
 
@@ -29,17 +37,20 @@ its own `Cargo.lock` and path-deps back to `g2g-ml`. Build, test, `fmt` and
 cargo test
 ```
 
-Needs a wgpu adapter; the test skips itself when none is found. It runs the
+Needs a wgpu adapter; the tests skip themselves when none is found. Each runs its
 imported model through the real element and asserts the logits match the ONNX
-Runtime reference for the same frame (tolerance 1e-3, f32 GPU conv/BN drift).
+Runtime reference for the same frame (tolerance 1e-3, f32 GPU drift).
 
-## Regenerate the fixture
+## Regenerate a fixture
 
 ```sh
 uv run --with onnx --with onnxruntime --with numpy ../../tools/onnx-fixture.py \
-    model/tiny_classifier.onnx
+    classifier model/tiny_classifier.onnx
+uv run --with onnx --with onnxruntime --with numpy ../../tools/onnx-fixture.py \
+    attention model/tiny_attention.onnx
 ```
 
 Deterministic (fixed seed): it rewrites the `.onnx` and prints the `RGBA_FRAME`
-and `EXPECTED_LOGITS` constants to paste into
-[`tests/onnx_import.rs`](tests/onnx_import.rs).
+and logits constants to paste into [`tests/onnx_import.rs`](tests/onnx_import.rs).
+For the attention model it also folds the attention formula in numpy and asserts
+ONNX Runtime agrees, so the reference logits do not rest on ORT alone.

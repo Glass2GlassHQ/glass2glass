@@ -16,8 +16,8 @@
 //! is how a topology imported from ONNX runs here, since `burn-onnx` (the crate
 //! `burn-import` forwards to) is build-time codegen rather than a runtime
 //! loader: the generated `Model<Wgpu>` implements [`BurnModule`] in the
-//! importing crate. `examples/g2g-onnx-import` is the worked conv / BN / ReLU
-//! case; attention topologies are not validated through this path yet.
+//! importing crate. `examples/g2g-onnx-import` is the worked case, both a
+//! conv / BN / ReLU classifier and a multi-head self-attention model.
 
 use core::future::Future;
 use core::pin::Pin;

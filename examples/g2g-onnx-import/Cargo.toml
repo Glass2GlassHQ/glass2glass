@@ -21,7 +21,7 @@ burn = { version = "0.21", default-features = false, features = ["std", "wgpu"] 
 burn-store = { version = "0.21", default-features = false, features = ["std", "burnpack"] }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["rt", "macros"] }
+tokio = { version = "1", features = ["rt", "macros", "sync"] }
 
 [build-dependencies]
 burn-onnx = "0.21"

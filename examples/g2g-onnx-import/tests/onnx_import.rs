@@ -1,12 +1,14 @@
-//! The ONNX-imported topology runs through `BurnInference` on the real GPU and
-//! matches the ONNX Runtime reference for the same input.
+//! The ONNX-imported topologies run through `BurnInference` on the real GPU and
+//! match the ONNX Runtime reference for the same input.
 //!
-//! `RGBA_FRAME` and `EXPECTED_LOGITS` are the output of the fixture script, run
-//! from the repository root as:
+//! `RGBA_FRAME` and the `*_LOGITS` constants are the output of the fixture
+//! script, run from the repository root as:
 //!
 //! ```text
 //! uv run --with onnx --with onnxruntime --with numpy tools/onnx-fixture.py \
-//!     examples/g2g-onnx-import/model/tiny_classifier.onnx
+//!     classifier examples/g2g-onnx-import/model/tiny_classifier.onnx
+//! uv run --with onnx --with onnxruntime --with numpy tools/onnx-fixture.py \
+//!     attention examples/g2g-onnx-import/model/tiny_attention.onnx
 //! ```
 //!
 //! Skips when burn's wgpu backend finds no adapter. There is no ndarray-backend
@@ -19,8 +21,8 @@ use g2g_core::{
     AsyncElement, Caps, Dim, G2gError, OutputSink, Rate, RawVideoFormat, TensorDType, TensorLayout,
     TensorShape,
 };
-use g2g_ml::burninfer::gpu_available;
-use g2g_onnx_import::{inference_element, HEIGHT, NUM_CLASSES, WIDTH};
+use g2g_ml::burninfer::{gpu_available, BurnInference};
+use g2g_onnx_import::{attention_element, classifier_element, HEIGHT, NUM_CLASSES, WIDTH};
 
 const RGBA_FRAME: [u8; 64] = [
     11, 48, 85, 122, 159, 196, 233, 19, 56, 93, 130, 167, 204, 241, 27, 64, 101, 138, 175, 212,
@@ -29,11 +31,24 @@ const RGBA_FRAME: [u8; 64] = [
     46, 83,
 ];
 
-const EXPECTED_LOGITS: [f32; 2] = [4.43818, -0.9364319];
+/// `Conv2d -> BatchNorm -> ReLU -> global average pool -> linear`.
+const CLASSIFIER_LOGITS: [f32; 2] = [4.43818, -0.9364319];
 
-/// f32 GPU execution of a conv / batch-norm chain, so a few ulps of drift from
-/// the ONNX Runtime reference is expected.
+/// Multi-head self-attention over the 16 pixels as a token sequence, mean-pooled
+/// into a linear head. The fixture script cross-checks these against a numpy fold
+/// of the attention formula, so they are not just ORT agreeing with itself.
+const ATTENTION_LOGITS: [f32; 2] = [-6.184183, 1.546977];
+
+/// f32 GPU execution of conv / batch-norm and softmax chains, so a few ulps of
+/// drift from the ONNX Runtime reference is expected.
 const TOLERANCE: f32 = 1e-3;
+
+const PTS_NS: u64 = 4242;
+const SEQUENCE: u64 = 7;
+
+/// burn builds its wgpu device lazily on first use, so keep the two model runs
+/// off each other's device setup.
+static GPU_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[derive(Default)]
 struct Collect {
@@ -72,14 +87,9 @@ fn frame_f32(f: &Frame) -> Vec<f32> {
         .collect()
 }
 
-#[tokio::test]
-async fn imported_onnx_model_matches_onnxruntime_reference() {
-    if !gpu_available() {
-        eprintln!("skipping: no burn wgpu adapter on this host");
-        return;
-    }
-
-    let mut element = inference_element().expect("imported model element");
+/// Push `RGBA_FRAME` through the element, assert the tensor caps / timing
+/// contract both imported models share, and return the logits.
+async fn logits_from(mut element: BurnInference) -> Vec<f32> {
     element.configure_pipeline(&rgba_caps()).expect("configure");
 
     let frame = Frame {
@@ -87,11 +97,11 @@ async fn imported_onnx_model_matches_onnxruntime_reference() {
             RGBA_FRAME.to_vec().into_boxed_slice(),
         )),
         timing: FrameTiming {
-            pts_ns: 4242,
-            dts_ns: 4242,
+            pts_ns: PTS_NS,
+            dts_ns: PTS_NS,
             ..FrameTiming::default()
         },
-        sequence: 7,
+        sequence: SEQUENCE,
         meta: Default::default(),
     };
 
@@ -128,15 +138,41 @@ async fn imported_onnx_model_matches_onnxruntime_reference() {
         }
     );
     assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0].timing.pts_ns, PTS_NS);
+    assert_eq!(element.inferred_count(), 1);
 
-    let got = frame_f32(frames[0]);
-    assert_eq!(got.len(), NUM_CLASSES);
-    for (i, (g, e)) in got.iter().zip(&EXPECTED_LOGITS).enumerate() {
+    let logits = frame_f32(frames[0]);
+    assert_eq!(logits.len(), NUM_CLASSES);
+    logits
+}
+
+fn assert_matches_reference(got: &[f32], expected: &[f32]) {
+    for (i, (g, e)) in got.iter().zip(expected).enumerate() {
         assert!(
             (g - e).abs() < TOLERANCE,
             "logit {i}: imported model {g} vs onnxruntime reference {e}"
         );
     }
-    assert_eq!(frames[0].timing.pts_ns, 4242);
-    assert_eq!(element.inferred_count(), 1);
+}
+
+#[tokio::test]
+async fn imported_onnx_classifier_matches_onnxruntime_reference() {
+    if !gpu_available() {
+        eprintln!("skipping: no burn wgpu adapter on this host");
+        return;
+    }
+    let _gpu = GPU_LOCK.lock().await;
+    let logits = logits_from(classifier_element().expect("imported classifier element")).await;
+    assert_matches_reference(&logits, &CLASSIFIER_LOGITS);
+}
+
+#[tokio::test]
+async fn imported_onnx_attention_matches_onnxruntime_reference() {
+    if !gpu_available() {
+        eprintln!("skipping: no burn wgpu adapter on this host");
+        return;
+    }
+    let _gpu = GPU_LOCK.lock().await;
+    let logits = logits_from(attention_element().expect("imported attention element")).await;
+    assert_matches_reference(&logits, &ATTENTION_LOGITS);
 }
