@@ -159,8 +159,10 @@ fn render(
     s
 }
 
-/// Default node label when the caller has no name: the structural kind.
-fn kind_label(kind: NodeKind) -> &'static str {
+/// Default node label when the caller has no name: the structural kind. Public
+/// so any tooling that names nodes (the DOT dump, the JSON validate dump) falls
+/// back to the same word.
+pub fn kind_label(kind: NodeKind) -> &'static str {
     match kind {
         NodeKind::Source => "source",
         NodeKind::Transform => "transform",

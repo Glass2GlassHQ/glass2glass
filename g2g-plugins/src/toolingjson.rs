@@ -13,11 +13,12 @@ use core::time::Duration;
 use serde_json::{json, Value};
 
 use g2g_core::caps::CapsSet;
+use g2g_core::dot::kind_label;
 use g2g_core::runtime::{
     negotiate_graph_explained, parse_launch, run_graph, run_graph_observed, ElementDoc, GraphNode,
     NegotiateError, NegotiationFailure, NodeRole, Observer, Registry, RunStats, TelemetrySnapshot,
 };
-use g2g_core::{G2gError, Graph};
+use g2g_core::{G2gError, Graph, NodeId};
 
 use crate::clock::WallClock;
 
@@ -70,9 +71,10 @@ pub fn registry_json(reg: &Registry, name: Option<&str>) -> Result<Value, String
     Ok(json!({ "elements": elements }))
 }
 
-/// Parse + negotiate a launch line without running it. On success reports the
-/// negotiated caps per edge (with the edge's endpoint node indices); on a solve
-/// conflict, the structured failure naming the offending link.
+/// Parse + negotiate a launch line without running it. On success reports every
+/// node (index + name) and the negotiated caps per edge (with the edge's
+/// endpoint node indices); on a solve conflict, the structured failure naming
+/// the offending link.
 pub async fn validate_json(reg: &Registry, line: &str) -> Value {
     let graph = match parse_launch(reg, line) {
         Ok(g) => g,
@@ -80,6 +82,16 @@ pub async fn validate_json(reg: &Registry, line: &str) -> Value {
     };
     match negotiate_graph_explained(graph).await {
         Ok((vg, edge_caps, _mem)) => {
+            let nodes: Vec<Value> = (0..vg.node_count())
+                .map(|i| {
+                    let node = NodeId(i as u32);
+                    let name = vg
+                        .element(node)
+                        .map(|e| e.log_category())
+                        .unwrap_or_else(|| kind_label(vg.kind(node)));
+                    json!({ "index": i, "name": name })
+                })
+                .collect();
             let edges: Vec<Value> = vg
                 .edges()
                 .iter()
@@ -92,7 +104,7 @@ pub async fn validate_json(reg: &Registry, line: &str) -> Value {
                     })
                 })
                 .collect();
-            json!({ "ok": true, "edges": edges })
+            json!({ "ok": true, "nodes": nodes, "edges": edges })
         }
         Err(NegotiateError::Setup(e)) => {
             json!({ "ok": false, "stage": "setup", "error": format!("{e:?}") })
@@ -443,6 +455,20 @@ mod tests {
         // Each edge names its endpoints and the negotiated caps.
         assert!(edges[0]["from"].is_number() && edges[0]["to"].is_number());
         assert!(edges[0]["caps"].as_str().unwrap().contains("video"));
+    }
+
+    #[tokio::test]
+    async fn validate_ok_names_every_node() {
+        let reg = default_registry();
+        let ok = validate_json(&reg, "videotestsrc ! videoconvert ! fakesink").await;
+        let nodes = ok["nodes"].as_array().unwrap();
+        assert_eq!(nodes.len(), 3);
+        // Indices are the same ones the edges reference, and each carries a name.
+        let names: Vec<&str> = nodes.iter().map(|n| n["name"].as_str().unwrap()).collect();
+        assert_eq!(names, ["VideoTestSrc", "VideoConvert", "FakeSink"]);
+        for (i, n) in nodes.iter().enumerate() {
+            assert_eq!(n["index"], i);
+        }
     }
 
     #[tokio::test]

@@ -19,6 +19,9 @@
 //!                       (pipe to `dot -Tsvg`); does not run the pipeline
 //!   --copy-plan         negotiate and print the memory-domain copy plan (per-hop
 //!                       domain trace + transfers + zero-copy verdict), then exit
+//!   --validate-json     negotiate and print the result as JSON (every node and
+//!                       each edge's negotiated caps, or the structured failure),
+//!                       then exit; does not run the pipeline
 //!   --plugin <path>     load a third-party plugin `.so` before parsing
 //!                       (repeatable; needs the `plugin-loader` build feature)
 //!   --graph <file>      build the graph from a declarative JSON / YAML document
@@ -74,7 +77,7 @@ use g2g_plugins::TokioThreadSpawner;
 // link_capacity dominating glass-to-glass latency).
 const LINK_CAPACITY: usize = 4;
 
-const USAGE: &str = "usage: g2g-launch [-v] [-q] [--dot] [--copy-plan] [--threads] [--observe <port>] [--observe-host <addr>] [--plugin <path>] [-e] [-m] [-h] \
+const USAGE: &str = "usage: g2g-launch [-v] [-q] [--dot] [--copy-plan] [--validate-json] [--threads] [--observe <port>] [--observe-host <addr>] [--plugin <path>] [-e] [-m] [-h] \
 <element> [key=value ...] ! <element> ! ...\n       \
 g2g-launch [OPTIONS] --graph <file.json|.yaml>   # declarative graph (M578)\n       \
 g2g-launch [OPTIONS] --script <file.rhai>         # Rhai graph-building script (M579)";
@@ -104,6 +107,10 @@ struct Opts {
     /// without running (`--copy-plan`): the per-hop domain trace, the transfers,
     /// and whether the graph is zero-copy.
     copy_plan: bool,
+    /// Negotiate and print the JSON validate dump (`--validate-json`): every
+    /// node and each edge's negotiated caps, or the structured failure. The
+    /// machine-readable sibling of `--dot`, for a tool that diffs pipelines.
+    validate_json: bool,
     /// Plugin `.so` paths from `--plugin` (repeatable), loaded before parsing.
     plugins: Vec<String>,
     /// Build the graph from a declarative JSON / YAML file (`--graph <path>`,
@@ -186,6 +193,7 @@ fn parse_opts(args: impl Iterator<Item = String>) -> (Opts, Vec<String>) {
             "-h" | "--help" => opts.help = true,
             "--dot" => opts.dot = true,
             "--copy-plan" => opts.copy_plan = true,
+            "--validate-json" => opts.validate_json = true,
             "--threads" => opts.threads = true,
             "--plugin" => match args.next() {
                 Some(path) => opts.plugins.push(path),
@@ -308,6 +316,30 @@ fn load_script_file(_reg: &Registry, _path: &str) -> Result<Graph<GraphNode>, St
     Err("g2g-launch: --script needs the `script-rhai` build feature".into())
 }
 
+/// Print the `--validate-json` dump (negotiate without running) and return the
+/// process exit code: 0 when the pipeline negotiates, 1 when it does not (the
+/// JSON still describes the failure).
+#[cfg(feature = "tooling-json")]
+fn print_validate_json(reg: &Registry, pipeline: &str) -> i32 {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("build tokio runtime");
+    let value = rt.block_on(g2g_plugins::toolingjson::validate_json(reg, pipeline));
+    println!("{value}");
+    if value["ok"].as_bool().unwrap_or(false) {
+        0
+    } else {
+        1
+    }
+}
+
+#[cfg(not(feature = "tooling-json"))]
+fn print_validate_json(_reg: &Registry, _pipeline: &str) -> i32 {
+    eprintln!("g2g-launch: --validate-json needs the `tooling-json` build feature");
+    2
+}
+
 fn main() {
     // Honor G2G_DEBUG (the GST_DEBUG analog): install the stderr log sink and
     // apply the category thresholds before the pipeline runs.
@@ -341,6 +373,15 @@ fn main() {
 
     let mut reg = default_registry();
     load_plugins(&mut reg, &opts.plugins);
+
+    if opts.validate_json {
+        if use_file {
+            eprintln!("g2g-launch: --validate-json takes a text pipeline, not --graph / --script");
+            process::exit(2);
+        }
+        process::exit(print_validate_json(&reg, &pipeline));
+    }
+
     let graph = match build_graph(&reg, &opts, &pipeline) {
         Ok(graph) => graph,
         Err(err) => {

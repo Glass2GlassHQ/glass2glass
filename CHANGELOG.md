@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M979: `g2g-launch --validate-json` dumps the negotiated graph (nodes + per-edge caps).
 - M972: MP4 demux carries DTS so a progressive B-frame remux keeps composition times.
 - M971: single-page Vorbis streams no longer lose their tail to the end-granule clamp.
 - M975: fan-in elements consent to a runtime input add; a refused add fails alone.

@@ -89,6 +89,17 @@ g2g-launch -v videotestsrc ! videoconvert ! video/x-raw,format=NV12 ! fakesink
 #   [1] VideoConvert -> CapsFilter   : video/x-raw,format=NV12,...  mem=System policy=Block
 ```
 
+For a machine-readable form of the same thing, `g2g-launch --validate-json` prints
+every node and each edge's negotiated caps as JSON (or, when the pipeline cannot
+negotiate, the structured failure naming the offending link), and exits without
+running. Needs the `tooling-json` build feature:
+
+```sh
+g2g-launch --validate-json videotestsrc ! videoconvert ! fakesink
+# {"edges":[{"caps":"video/x-raw,format=RGBA,...","from":0,"to":1},...],
+#  "nodes":[{"index":0,"name":"VideoTestSrc"},...],"ok":true}
+```
+
 In code, `Graph::to_dot` / `ValidatedGraph::to_dot` (in `g2g_core::dot`) render
 any graph; `g2g_core::runtime::negotiate_graph` runs the caps solve without
 running the pipeline and returns the per-edge caps + memory domains both the DOT

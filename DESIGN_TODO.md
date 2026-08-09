@@ -676,11 +676,10 @@ Outstanding developer-tooling tasks, highest leverage first.
 
 - **Per-element / per-link telemetry gaps.** Remaining `Observer` coverage:
   validate the dashboard live against an RTSP source.
-- **gst-parity differ.** Same launch line through real GStreamer and g2g;
-  diff the negotiated caps per edge, the element set after autoplug, and the
-  output (checksum, PSNR for lossy). Calliope already does differential output
-  QA in its own repo, so decide first whether this lives there (adding the
-  caps / topology diff) or in-repo; don't build both.
+- **gst-parity differ residual.** g2g's side of calliope's `gst-parity` diff
+  reports solve-time caps while GStreamer reports post-run caps, so demuxed
+  streams show a placeholder geometry against gst's real one; a runtime caps
+  dump from `g2g-launch` would close it.
 - Longer tail: a live pipeline TUI (a ratatui consumer of the same telemetry
   tap); a codec golden-fixture / PSNR conformance harness.
 
