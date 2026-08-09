@@ -10,10 +10,14 @@
 //! f32 `Caps::Tensor`. The weights are caller-supplied and deterministic, so the
 //! output is exactly verifiable on the CPU.
 //!
-//! This is the backend foundation, not a model zoo. ONNX import (burn-import is
-//! build-time codegen, not a runtime loader) and richer layers (conv, the burn
-//! `Module` path with trained weights) are follow-ups; the `AsyncElement` /
-//! caps contract here is what they slot into.
+//! `BurnInference::module` takes any burn `Module` instead, through the
+//! [`BurnModule`] trait: the same normalized pixels are reshaped to a
+//! `[1, 3, H, W]` NCHW tensor and pushed through the caller's forward pass. That
+//! is how a topology imported from ONNX runs here, since `burn-onnx` (the crate
+//! `burn-import` forwards to) is build-time codegen rather than a runtime
+//! loader: the generated `Model<Wgpu>` implements [`BurnModule`] in the
+//! importing crate. `examples/g2g-onnx-import` is the worked conv / BN / ReLU
+//! case; attention topologies are not validated through this path yet.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -47,6 +51,52 @@ pub fn normalize_rgba_nchw(rgba: &[u8], width: usize, height: usize) -> Vec<f32>
     flat
 }
 
+/// A burn `Module` this element can drive: one forward pass from a
+/// `[1, 3, height, width]` NCHW f32 tensor of normalized RGB to `[1, N]` logits.
+///
+/// Implement it over a module built by hand or generated from an ONNX file by
+/// `burn-onnx` build-time codegen, then hand it to [`BurnInference::module`].
+///
+/// # Example
+///
+/// ```no_run
+/// use burn::backend::Wgpu;
+/// use burn::tensor::Tensor;
+/// use g2g_ml::burninfer::BurnModule;
+///
+/// #[derive(Debug)]
+/// struct FlattenPixels;
+///
+/// impl BurnModule for FlattenPixels {
+///     fn forward(&self, input: Tensor<Wgpu, 4>) -> Tensor<Wgpu, 2> {
+///         input.flatten(1, 3)
+///     }
+/// }
+/// ```
+pub trait BurnModule: core::fmt::Debug + Send {
+    /// Run the model's forward pass on one `[1, 3, height, width]` batch.
+    fn forward(&self, input: Tensor<B, 4>) -> Tensor<B, 2>;
+}
+
+/// `output = input . W + b`. `weights` is row-major `[K, N]` (`K = 3 * W * H`)
+/// and `bias` is `[N]`; both stay on the CPU until `configure_pipeline` uploads
+/// them.
+#[derive(Debug)]
+struct LinearLayer {
+    weights: Vec<f32>,
+    bias: Vec<f32>,
+    weight_t: Option<Tensor<B, 2>>,
+    bias_t: Option<Tensor<B, 2>>,
+}
+
+/// What the element runs per frame: the built-in linear layer, or a caller-supplied
+/// burn `Module`. Both variants are boxed so neither pays for the other's size.
+#[derive(Debug)]
+enum Model {
+    Linear(Box<LinearLayer>),
+    Module(Box<dyn BurnModule>),
+}
+
 /// # Example
 ///
 /// ```no_run
@@ -61,13 +111,8 @@ pub struct BurnInference {
     width: u32,
     height: u32,
     num_outputs: usize,
-    /// Row-major `[K, N]` weight matrix, `K = 3 * W * H`.
-    weights: Vec<f32>,
-    /// `[N]` bias.
-    bias: Vec<f32>,
+    model: Model,
     device: WgpuDevice,
-    weight_t: Option<Tensor<B, 2>>,
-    bias_t: Option<Tensor<B, 2>>,
     configured: bool,
     last_caps: Option<Caps>,
     emitted: u64,
@@ -95,19 +140,47 @@ impl BurnInference {
         if num_outputs == 0 || k == Some(0) || Some(weights.len()) != expected {
             return Err(G2gError::CapsMismatch);
         }
-        Ok(Self {
+        Ok(Self::new(
             width,
             height,
             num_outputs,
-            weights,
-            bias,
+            Model::Linear(Box::new(LinearLayer {
+                weights,
+                bias,
+                weight_t: None,
+                bias_t: None,
+            })),
+        ))
+    }
+
+    /// A caller-supplied burn `Module` over RGBA frames of `width x height`,
+    /// emitting `num_outputs` logits. Each frame becomes the `[1, 3, height,
+    /// width]` NCHW input of [`BurnModule::forward`]; a forward pass whose
+    /// output is not `num_outputs` values fails the frame, since the declared
+    /// tensor caps would otherwise lie to downstream.
+    pub fn module(
+        width: u32,
+        height: u32,
+        num_outputs: usize,
+        model: Box<dyn BurnModule>,
+    ) -> Result<Self, G2gError> {
+        if width == 0 || height == 0 || num_outputs == 0 {
+            return Err(G2gError::CapsMismatch);
+        }
+        Ok(Self::new(width, height, num_outputs, Model::Module(model)))
+    }
+
+    fn new(width: u32, height: u32, num_outputs: usize, model: Model) -> Self {
+        Self {
+            width,
+            height,
+            num_outputs,
+            model,
             device: WgpuDevice::default(),
-            weight_t: None,
-            bias_t: None,
             configured: false,
             last_caps: None,
             emitted: 0,
-        })
+        }
     }
 
     /// Count of tensor `DataFrame`s pushed downstream. Useful in tests.
@@ -133,25 +206,36 @@ impl BurnInference {
         }
     }
 
-    /// Normalize RGBA, run `input . W + b` on the GPU, return the `[1, N]`
-    /// logits as little-endian f32 bytes (the `OrtInference` output format).
+    /// Normalize RGBA, run the model on the GPU, return the `[1, N]` logits as
+    /// little-endian f32 bytes (the `OrtInference` output format).
     fn infer(&self, rgba: &[u8]) -> Result<Box<[u8]>, G2gError> {
         let (w, h) = (self.width as usize, self.height as usize);
         if rgba.len() < w * h * 4 {
             return Err(G2gError::CapsMismatch);
         }
-        let weight = self.weight_t.as_ref().ok_or(G2gError::NotConfigured)?;
-        let bias = self.bias_t.as_ref().ok_or(G2gError::NotConfigured)?;
-
         let flat = normalize_rgba_nchw(rgba, w, h);
-        let k = flat.len();
-        let input = Tensor::<B, 2>::from_data(TensorData::new(flat, [1, k]), &self.device);
-        let logits = input.matmul(weight.clone()).add(bias.clone());
+        let logits = match &self.model {
+            Model::Linear(layer) => {
+                let weight = layer.weight_t.as_ref().ok_or(G2gError::NotConfigured)?;
+                let bias = layer.bias_t.as_ref().ok_or(G2gError::NotConfigured)?;
+                let k = flat.len();
+                let input = Tensor::<B, 2>::from_data(TensorData::new(flat, [1, k]), &self.device);
+                input.matmul(weight.clone()).add(bias.clone())
+            }
+            Model::Module(model) => {
+                let input =
+                    Tensor::<B, 4>::from_data(TensorData::new(flat, [1, 3, h, w]), &self.device);
+                model.forward(input)
+            }
+        };
 
         let values = logits
             .into_data()
             .to_vec::<f32>()
             .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+        if values.len() != self.num_outputs {
+            return Err(G2gError::CapsMismatch);
+        }
         let mut bytes = Vec::with_capacity(values.len() * 4);
         for v in values {
             bytes.extend_from_slice(&v.to_le_bytes());
@@ -188,14 +272,18 @@ impl AsyncElement for BurnInference {
         // Validate caps before touching the GPU so a mismatch fails cheaply.
         absolute_caps.intersect(&self.supported_input())?;
         let k = 3 * self.width as usize * self.height as usize;
-        self.weight_t = Some(Tensor::<B, 2>::from_data(
-            TensorData::new(self.weights.clone(), [k, self.num_outputs]),
-            &self.device,
-        ));
-        self.bias_t = Some(Tensor::<B, 2>::from_data(
-            TensorData::new(self.bias.clone(), [1, self.num_outputs]),
-            &self.device,
-        ));
+        let num_outputs = self.num_outputs;
+        let device = self.device.clone();
+        if let Model::Linear(layer) = &mut self.model {
+            layer.weight_t = Some(Tensor::<B, 2>::from_data(
+                TensorData::new(layer.weights.clone(), [k, num_outputs]),
+                &device,
+            ));
+            layer.bias_t = Some(Tensor::<B, 2>::from_data(
+                TensorData::new(layer.bias.clone(), [1, num_outputs]),
+                &device,
+            ));
+        }
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
     }
@@ -323,9 +411,35 @@ mod tests {
             e.configure_pipeline(&nv12(2, 2)).err(),
             Some(G2gError::CapsMismatch)
         );
+        let Model::Linear(layer) = &e.model else {
+            panic!("linear constructor must build a linear model");
+        };
         assert!(
-            e.weight_t.is_none(),
+            layer.weight_t.is_none(),
             "no GPU tensors built on rejected caps"
+        );
+    }
+
+    #[test]
+    fn module_validates_geometry_and_output_count() {
+        #[derive(Debug)]
+        struct Never;
+
+        impl BurnModule for Never {
+            fn forward(&self, _input: Tensor<B, 4>) -> Tensor<B, 2> {
+                unreachable!("construction-time validation never runs the model");
+            }
+        }
+
+        assert!(BurnInference::module(2, 2, 3, Box::new(Never)).is_ok());
+        assert_eq!(
+            BurnInference::module(0, 2, 3, Box::new(Never)).err(),
+            Some(G2gError::CapsMismatch)
+        );
+        assert_eq!(
+            BurnInference::module(2, 2, 0, Box::new(Never)).err(),
+            Some(G2gError::CapsMismatch),
+            "needs at least one output"
         );
     }
 }

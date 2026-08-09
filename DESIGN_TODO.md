@@ -661,10 +661,7 @@ _(No open tag items.)_
   fly (M531), so real half-precision checkpoints load. Remaining: masked /
   causal attention + KV cache, if an autoregressive use case ever appears
   (unmasked full attention is in).
-- ONNX import via `burn-import` (build-time codegen) for the Burn backend, the
-  graph-topology counterpart (safetensors carries weights, not the architecture).
-- A trained-weight `Module` path for `BurnInference` (conv, attention) once the
-  codegen lands.
+- An attention topology through `BurnInference`'s `Module` path.
 - Decoder DMA-BUF / D3D11 surface import into `WgpuPreprocess` (binds the
   surface directly into the compute pass; needs the surface-import handshake + a
   GPU tensor output domain).

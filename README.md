@@ -374,7 +374,7 @@ OS-coupled elements live behind cargo features:
 | `AnalyticsOverlay` (CPU) / `VelloAnalyticsOverlay` (GPU) / `WgpuSink` | `analytics`, `vello-overlay`, `wgpu-sink` | wgpu (GPU variants) |
 | `VelloTextOverlay` (subtitle cues drawn on the GPU, `WgpuTexture` out) | `vello-text-overlay` | wgpu |
 | `OrtInference` (+ CUDA / DirectML EPs) | `ort`, `cuda`, `directml` (in `g2g-ml`) | onnxruntime |
-| `BurnInference` | `burn` (in `g2g-ml`) | wgpu (Vulkan / Metal / DX12) |
+| `BurnInference` (linear layer, or an ONNX topology imported by `burn-onnx` codegen) | `burn` (in `g2g-ml`) | wgpu (Vulkan / Metal / DX12) |
 | `WgpuPreprocess` (NV12 or Android RGBA GPU texture in, NCHW tensor out) | `wgpu`, `mediacodec-wgpu` (in `g2g-ml`) | wgpu |
 | Embassy / RTOS pool + clock | `embassy`, `embassy-link` | — |
 | Browser elements | `web`, `web-codecs` | `wasm32-unknown-unknown` |
@@ -777,6 +777,10 @@ cargo test -p g2g-ml --features cuda --test ort_inference -- --nocapture
 
 # Pure-Rust Burn over wgpu (any Vulkan/Metal/DX12 adapter):
 cargo test -p g2g-ml --features burn --test burn_inference -- --nocapture
+
+# An ONNX topology imported into that element by build-time codegen. Standalone
+# (workspace-excluded): burn-onnx carries burn's own rustc 1.92 MSRV.
+cd examples/g2g-onnx-import && cargo test
 ```
 
 ### UDP egress (loopback, no network)
