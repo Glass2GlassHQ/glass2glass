@@ -90,7 +90,7 @@ pub use fanin::{
     run_duplex_session_observed, run_fanin_session, run_fanin_session_observed, run_fanin_sink,
     run_fanin_sink_observed, run_muxer_sink, run_muxer_sink_dynamic,
     run_muxer_sink_dynamic_observed, run_muxer_sink_with_bus, DynMultiInputElement, DynSourceLoop,
-    DynamicFaninHandle,
+    DynamicFaninHandle, PendingInput,
 };
 
 #[cfg(feature = "std")]

@@ -566,6 +566,25 @@ pub trait MultiInputElement: ElementBound {
         }
     }
 
+    /// Whether this element takes another input at runtime (M975), asked before a
+    /// source added through
+    /// [`DynamicFaninHandle::add_input`](crate::runtime::DynamicFaninHandle::add_input)
+    /// is attached to `pad`, with the caps that source would arrive with. The
+    /// runner has already checked `pad` against the declared
+    /// [`input_count`](Self::input_count) and the pad's own
+    /// [`caps_constraint_as_input`](Self::caps_constraint_as_input); this is the
+    /// element's veto for what neither expresses: a session with no spare pad of
+    /// that media kind, a container that cannot carry a second video track.
+    /// Refusing fails that one add ([`G2gError::InputRefused`] reaches the
+    /// caller), and the run continues on the inputs it already has.
+    ///
+    /// Default `true`: pad capacity is the only limit, the fixed-arity behavior.
+    /// The pad is not live until [`configure_pipeline`](Self::configure_pipeline)
+    /// runs for it, so do not commit pad state here.
+    fn accepts_runtime_input(&self, _pad: usize, _caps: &Caps) -> bool {
+        true
+    }
+
     /// Combine one packet from `input` into the merged output.
     ///
     /// M22: a per-input `Eos` is delivered here when that input ends, so a

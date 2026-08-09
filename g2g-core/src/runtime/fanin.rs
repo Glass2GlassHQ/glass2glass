@@ -424,6 +424,12 @@ pub trait DynMultiInputElement: ElementBound {
         false
     }
 
+    /// Dyn-safe mirror of [`MultiInputElement::accepts_runtime_input`]: whether
+    /// this element takes an input added at runtime on `pad` with `caps`.
+    fn accepts_runtime_input(&self, _pad: usize, _caps: &Caps) -> bool {
+        true
+    }
+
     /// Dyn-safe mirror of [`MultiInputElement::set_instance_name`], so the runner
     /// can name an erased muxer instance for logging.
     fn set_instance_name(&mut self, _name: alloc::string::String) {}
@@ -516,6 +522,10 @@ impl<T: MultiInputElement> DynMultiInputElement for T {
 
     fn is_terminal(&self) -> bool {
         MultiInputElement::is_terminal(self)
+    }
+
+    fn accepts_runtime_input(&self, pad: usize, caps: &Caps) -> bool {
+        MultiInputElement::accepts_runtime_input(self, pad, caps)
     }
 
     fn set_instance_name(&mut self, name: alloc::string::String) {
@@ -615,6 +625,10 @@ impl<'b> DynMultiInputElement for &'b mut (dyn DynMultiInputElement + 'b) {
 
     fn is_terminal(&self) -> bool {
         (**self).is_terminal()
+    }
+
+    fn accepts_runtime_input(&self, pad: usize, caps: &Caps) -> bool {
+        (**self).accepts_runtime_input(pad, caps)
     }
 
     fn set_instance_name(&mut self, name: alloc::string::String) {
@@ -1614,6 +1628,49 @@ struct FaninTap {
     namer: crate::log::InstanceNamer,
 }
 
+/// The log category a refused runtime input is reported on, so
+/// `G2G_DEBUG=fanin:debug` follows request-pad decisions independently of element
+/// logging (as [`CAPS_CATEGORY`](crate::log::CAPS_CATEGORY) does for the solver).
+#[cfg(feature = "std")]
+const FANIN_CATEGORY: &str = "fanin";
+
+/// One runtime input-add in flight: the source, the pad reserved for it, and the
+/// channel the fan-in arm answers on once it has negotiated the input.
+#[cfg(feature = "std")]
+struct InputRequest<'a> {
+    pad: usize,
+    source: Box<dyn DynSourceLoop + 'a>,
+    verdict: Sender<Result<(), G2gError>>,
+}
+
+/// The pending outcome of a [`DynamicFaninHandle::add_input`] (M975). The request
+/// is queued; whether the element takes the input is only known once its arm has
+/// negotiated it, so [`accepted`](Self::accepted) resolves to the verdict (drive
+/// the run future while awaiting it, since that arm is what answers). Dropping
+/// this is fire-and-forget: a refused input is then only logged.
+#[cfg(feature = "std")]
+#[derive(Debug)]
+pub struct PendingInput {
+    pad: usize,
+    verdict: Receiver<Result<(), G2gError>>,
+}
+
+#[cfg(feature = "std")]
+impl PendingInput {
+    /// The input pad this request reserved.
+    pub fn pad(&self) -> usize {
+        self.pad
+    }
+
+    /// Resolve once the element has accepted or refused the input:
+    /// [`G2gError::InputRefused`] if the element declined the pad,
+    /// [`G2gError::CapsMismatch`] if the pad does not accept the source's caps,
+    /// [`G2gError::Shutdown`] if the run ended before the request was handled.
+    pub async fn accepted(self) -> Result<(), G2gError> {
+        self.verdict.recv().await.unwrap_or(Err(G2gError::Shutdown))
+    }
+}
+
 /// A handle to add inputs to a *running* dynamic aggregator (M320): the fan-in
 /// dual of [`DynamicFanoutHandle`](crate::runtime::DynamicFanoutHandle), the
 /// runtime equivalent of GStreamer's aggregator/muxer request **sink** pads. Each
@@ -1631,7 +1688,7 @@ struct FaninTap {
 #[derive(Clone)]
 #[allow(missing_debug_implementations)]
 pub struct DynamicFaninHandle<'a> {
-    new_input_tx: Sender<(usize, Box<dyn DynSourceLoop + 'a>)>,
+    new_input_tx: Sender<InputRequest<'a>>,
     /// Next free input pad index, reserved atomically so concurrent callers get
     /// distinct pads. The aggregator's `process(pad, ..)` indexes a fixed pad set,
     /// so a pad is only handed out while `< max_inputs`.
@@ -1643,12 +1700,17 @@ pub struct DynamicFaninHandle<'a> {
 impl<'a> DynamicFaninHandle<'a> {
     /// Request a new sink pad: attach `source` as a new input of the running
     /// aggregator. Reserves the next pad index atomically and hands the source to
-    /// the aggregator arm, which fixates it and configures the pad before its
-    /// first frame. Returns [`G2gError::Shutdown`] if every declared pad is
-    /// already in use or the aggregator has already finished, and
-    /// [`G2gError::PoolExhausted`] if the add channel is transiently full (the
-    /// aggregator has not drained pending adds yet); retry the latter.
-    pub fn add_input(&self, source: Box<dyn DynSourceLoop + 'a>) -> Result<(), G2gError> {
+    /// the aggregator arm, which fixates it, asks the element to
+    /// [accept it](MultiInputElement::accepts_runtime_input), and configures the
+    /// pad before its first frame. That answer arrives on the returned
+    /// [`PendingInput`]; a refused input costs its reserved pad but leaves the run
+    /// on its existing inputs.
+    ///
+    /// Returns [`G2gError::Shutdown`] if every declared pad is already in use or
+    /// the aggregator has already finished, and [`G2gError::PoolExhausted`] if the
+    /// add channel is transiently full (the aggregator has not drained pending
+    /// adds yet); retry the latter.
+    pub fn add_input(&self, source: Box<dyn DynSourceLoop + 'a>) -> Result<PendingInput, G2gError> {
         // Reserve a pad. fetch_add can overshoot past capacity under contention,
         // but that only makes later calls also see `>= max_inputs` and fail, which
         // is the intended "no free pad" outcome.
@@ -1656,8 +1718,16 @@ impl<'a> DynamicFaninHandle<'a> {
         if pad >= self.max_inputs {
             return Err(G2gError::Shutdown);
         }
-        match self.new_input_tx.try_send((pad, source)) {
-            Ok(()) => Ok(()),
+        let (verdict_tx, verdict_rx) = bounded::<Result<(), G2gError>>(1);
+        match self.new_input_tx.try_send(InputRequest {
+            pad,
+            source,
+            verdict: verdict_tx,
+        }) {
+            Ok(()) => Ok(PendingInput {
+                pad,
+                verdict: verdict_rx,
+            }),
             Err((_, SendError::Closed)) => Err(G2gError::Shutdown),
             Err((_, SendError::Full)) => {
                 // Transient backpressure, not a teardown. Roll back the pad we
@@ -1747,8 +1817,7 @@ where
     let max_inputs = aggregator.input_count();
 
     // Control channel: handle -> aggregator arm (new (pad, source) inputs).
-    let (new_input_tx, new_input_rx) =
-        bounded::<(usize, Box<dyn DynSourceLoop + 'a>)>(link_capacity);
+    let (new_input_tx, new_input_rx) = bounded::<InputRequest<'a>>(link_capacity);
     // Arm channel: aggregator arm -> join (the attached source-run futures).
     let (new_arm_tx, new_arm_rx) =
         bounded::<BoxFuture<'a, Result<FaninArmOut, G2gError>>>(link_capacity);
@@ -1800,9 +1869,9 @@ where
                 // so an input requested before a frame is never missed (select2
                 // below is left-biased toward the data channel; mirrors the M310
                 // fan-out drain-first gotcha).
-                while let Some((pad, source)) = new_input_rx.try_recv() {
+                while let Some(request) = new_input_rx.try_recv() {
                     let tx = keepalive.as_ref().expect("keepalive held while accepting");
-                    attach_input(pad, source, aggregator, tx, &new_arm_tx, &mut tap).await?;
+                    attach_input(request, aggregator, tx, &new_arm_tx, &mut tap).await?;
                 }
 
                 if accepting {
@@ -1829,10 +1898,9 @@ where
                         // Unreachable while `keepalive` is held (a live sender keeps
                         // the channel open), but folded into the end path for safety.
                         Either::Left(None) => return Ok(FaninArmOut::Aggregator(consumed)),
-                        Either::Right(Some((pad, source))) => {
+                        Either::Right(Some(request)) => {
                             let tx = keepalive.as_ref().expect("keepalive held while accepting");
-                            attach_input(pad, source, aggregator, tx, &new_arm_tx, &mut tap)
-                                .await?;
+                            attach_input(request, aggregator, tx, &new_arm_tx, &mut tap).await?;
                         }
                         // Handle dropped: stop accepting and release the keepalive
                         // so the tagged channel can close once every attached input
@@ -1968,8 +2036,7 @@ where
     let link_capacity: usize = link_capacity.into().get();
     let max_inputs = mux.input_count();
 
-    let (new_input_tx, new_input_rx) =
-        bounded::<(usize, Box<dyn DynSourceLoop + 'a>)>(link_capacity);
+    let (new_input_tx, new_input_rx) = bounded::<InputRequest<'a>>(link_capacity);
     let (new_arm_tx, new_arm_rx) =
         bounded::<BoxFuture<'a, Result<FaninArmOut, G2gError>>>(link_capacity);
 
@@ -2061,17 +2128,17 @@ where
             let mut accepting = true;
             let mut keepalive: Option<Sender<(usize, PipelinePacket)>> = Some(tagged_tx);
             loop {
-                while let Some((pad, source)) = new_input_rx.try_recv() {
+                while let Some(request) = new_input_rx.try_recv() {
                     let tx = keepalive.as_ref().expect("keepalive held while accepting");
-                    attach_input(pad, source, mux, tx, &new_arm_tx, &mut tap).await?;
+                    attach_input(request, mux, tx, &new_arm_tx, &mut tap).await?;
                 }
 
                 let next = if accepting {
                     match select2(tagged_rx.recv(), new_input_rx.recv()).await {
                         Either::Left(packet) => packet,
-                        Either::Right(Some((pad, source))) => {
+                        Either::Right(Some(request)) => {
                             let tx = keepalive.as_ref().expect("keepalive held while accepting");
-                            attach_input(pad, source, mux, tx, &new_arm_tx, &mut tap).await?;
+                            attach_input(request, mux, tx, &new_arm_tx, &mut tap).await?;
                             continue;
                         }
                         Either::Right(None) => {
@@ -2163,31 +2230,69 @@ where
     (handle, run)
 }
 
-/// Attach a runtime-requested input: fixate the new `source`, configure the
-/// aggregator's `pad` against its fixated caps, then hand the source's run loop
-/// (feeding a [`TaggingSink`] tagged with `pad`) to the dynamic join. Mirrors
+/// Negotiate a runtime-requested input before any of its frames can flow (M975):
+/// fixate the source against the pad it would feed, hold the pad's own constraint
+/// as the last word on those caps, ask the element to accept the input, then
+/// configure both. Every failure here is the *add's*, not the run's.
+#[cfg(feature = "std")]
+async fn negotiate_new_input(
+    pad: usize,
+    source: &mut dyn DynSourceLoop,
+    aggregator: &mut dyn DynMultiInputElement,
+) -> Result<Caps, G2gError> {
+    let produced = source.produced_caps().await?;
+    let fixated = {
+        let pad_constraint = aggregator.caps_constraint_as_input(pad);
+        let fixated = select_branch_caps(&produced, &pad_constraint)?;
+        // select_branch_caps falls back to the source's own caps when the pad
+        // accepts none of its alternatives, so check the pad again.
+        if !pad_constraint.accepts(&fixated) {
+            return Err(G2gError::CapsMismatch);
+        }
+        fixated
+    };
+    if !aggregator.accepts_runtime_input(pad, &fixated) {
+        return Err(G2gError::InputRefused);
+    }
+    source.configure_pipeline(&fixated)?.reject_refixate()?;
+    aggregator
+        .configure_pipeline(pad, &fixated)?
+        .reject_refixate()?;
+    Ok(fixated)
+}
+
+/// Attach a runtime-requested input: negotiate it, then hand the source's run
+/// loop (feeding a [`TaggingSink`] tagged with `pad`) to the dynamic join. Mirrors
 /// [`run_source_router_dynamic`](crate::runtime::run_source_router_dynamic)'s
 /// `attach_branch`, transposed to the input side.
+///
+/// A refused or unnegotiable input answers the requester and leaves the run alone
+/// (`Ok`); only losing the arm channel, which would strand an accepted input, ends
+/// the run.
 #[cfg(feature = "std")]
 async fn attach_input<'a>(
-    pad: usize,
-    mut source: Box<dyn DynSourceLoop + 'a>,
+    request: InputRequest<'a>,
     aggregator: &mut dyn DynMultiInputElement,
     tagged_tx: &Sender<(usize, PipelinePacket)>,
     new_arm_tx: &Sender<BoxFuture<'a, Result<FaninArmOut, G2gError>>>,
     tap: &mut FaninTap,
 ) -> Result<(), G2gError> {
-    // Narrowed against the aggregator pad it feeds (like run_fanin_session); the
-    // fixated caps configure both the source and that pad.
-    let produced = source.produced_caps().await?;
-    let fixated = {
-        let pad_constraint = aggregator.caps_constraint_as_input(pad);
-        select_branch_caps(&produced, &pad_constraint)?
+    let InputRequest {
+        pad,
+        mut source,
+        verdict,
+    } = request;
+    let fixated = match negotiate_new_input(pad, source.as_mut(), aggregator).await {
+        Ok(caps) => caps,
+        Err(e) => {
+            crate::g2g_error!(
+                crate::log::Target::category(FANIN_CATEGORY),
+                "runtime input on pad {pad} rejected: {e:?}"
+            );
+            let _ = verdict.try_send(Err(e));
+            return Ok(());
+        }
     };
-    source.configure_pipeline(&fixated)?.reject_refixate()?;
-    aggregator
-        .configure_pipeline(pad, &fixated)?
-        .reject_refixate()?;
 
     // Named like an input the static fan-in was built with, and registered before
     // the arm runs, so the topology holds it before its first frame. The tagged
@@ -2226,5 +2331,7 @@ async fn attach_input<'a>(
         let mut source = source;
         source.run(&mut sink).await.map(FaninArmOut::Source)
     });
-    new_arm_tx.try_send(arm).map_err(|_| G2gError::Shutdown)
+    new_arm_tx.try_send(arm).map_err(|_| G2gError::Shutdown)?;
+    let _ = verdict.try_send(Ok(()));
+    Ok(())
 }

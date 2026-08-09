@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M975: fan-in elements consent to a runtime input add; a refused add fails alone.
+- M974: broadcast-tee late-branch and payload-sharing assertions.
 - M978: windowed winit example driving `VelloAnalyticsOverlay -> WgpuSink`.
 - M973: architecture diagrams on the docs site.
 - M970: sources declare `CapsPreferences` costs over their produce set.

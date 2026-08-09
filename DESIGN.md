@@ -526,6 +526,9 @@ Static-graph users at the embedded layer never instantiate `BranchSlot` and don'
 #### 4.8.4 Router, Gate, Merger Primitives
 A `Router` is a 1-to-N transform that reads an atomic discriminator per frame and pushes the frame to exactly one of its outputs. A `Gate` is a 1-to-1 transform that reads an atomic boolean and either forwards or discards each frame. A `Merger` is an N-to-1 transform that reads from one of its inputs, switching on a discriminator. Together they cover branch enable/disable, A/B switching, and the routing + cutover halves of `ShadowWarm`. These primitives form the foundation of the dynamic-graph layer.
 
+#### 4.8.5 Runtime Request Pads
+The request-pad analog is a pair of handles over a running graph. `DynamicFanoutHandle::add_branch` (M310) attaches an output branch mid-run, round-robin or broadcast (`FanOutMode`, M319; broadcast duplicates via `Frame::share`, replaying sticky caps to the late branch). `DynamicFaninHandle::add_input` (M320) attaches a source as a new input of a running aggregator/muxer. An input add is a negotiation, not a grant (M975): the runner reserves the pad, validates the source's caps against the pad constraint, then asks the element via `MultiInputElement::accepts_runtime_input` — its veto for what pad count and caps cannot express (no spare pad of that media kind, a container that cannot carry a second track). The caller holds a `PendingInput` whose `accepted()` resolves to the verdict; a refused input fails alone (`InputRefused`, logged under the `fanin` category) and the run continues on the inputs it has.
+
 ### 4.9 GStreamer Dynamic-Feature Mapping
 `g2g`'s dynamic surface is intended to be a superset of GStreamer's dynamic capabilities, achieved through a different set of primitives.
 
