@@ -7,6 +7,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 ## Unreleased
 
 - M970: sources declare `CapsPreferences` costs over their produce set.
+- M969: `typefind` element sniffs a byte stream mid-graph and retypes its output.
 - M968: every public element type carries a rustdoc example block.
 - M967: `WebSocketSrc` detaches its socket callbacks on a failed push (freed-closure throw).
 - M966: V4L2 device discovery lists caps for every format `v4l2src` carries.

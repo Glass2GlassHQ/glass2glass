@@ -10,9 +10,26 @@
 //! yields a `Caps::CompressedVideo{..}` (so `filesrc ! decodebin` types a bare
 //! `.264` / `.jsv` recording by content); a subtitle document yields a
 //! `Caps::Text{format}` (so `filesrc ! subparse` types without an explicit
-//! source). Pure `no_std`, no allocation.
+//! source). The sniff functions themselves are pure `no_std`, no allocation.
+//!
+//! [`TypeFind`] is the same sniff as a mid-graph element, for a byte stream that
+//! did not come from a file: it holds back the leading frames, sniffs them, and
+//! re-declares its output caps with a `CapsChanged` before letting the data
+//! through, so a source that could only guess its type is corrected downstream.
 
-use g2g_core::{ByteStreamEncoding, Caps, Dim, Rate, TextFormat, VideoCodec};
+use core::future::Future;
+use core::pin::Pin;
+
+use alloc::boxed::Box;
+use alloc::string::String;
+use alloc::vec::Vec;
+
+use g2g_core::frame::Frame;
+use g2g_core::log::{short_type_name, LogName, LogSource};
+use g2g_core::{
+    g2g_error, g2g_info, AsyncElement, ByteStreamEncoding, Caps, CapsConstraint, ConfigureOutcome,
+    Dim, ElementMetadata, G2gError, OutputSink, PipelinePacket, Rate, TextFormat, VideoCodec,
+};
 
 /// MPEG-TS packet stride; the sync byte recurs at this interval.
 const TS_PACKET_LEN: usize = 188;
@@ -236,6 +253,199 @@ fn find_start_code(data: &[u8], from: usize) -> Option<usize> {
         i += 1;
     }
     None
+}
+
+/// Leading bytes held for the sniff before it is declared a failure. Every
+/// signature [`sniff_caps`] matches decides well inside this, and the stream is
+/// attacker-controlled, so the buffer is capped rather than growing with it.
+const HEADER_BUDGET: usize = 8192;
+
+/// Frames held back while sniffing. Every CPU-readable byte counts against the
+/// budget above, so this only has to bound a stream of frames that contribute no
+/// bytes at all (empty, or a device-domain handle nothing can sniff).
+const MAX_HELD_FRAMES: usize = 1024;
+
+/// Mid-graph content sniffing (`typefind`): re-declares the caps of a byte stream
+/// from the bytes themselves.
+///
+/// A byte source that cannot know what it carries (a socket, an application push,
+/// a mis-named file) still has to declare something to negotiate. This element
+/// holds back the leading frames, runs [`sniff_caps`] over them, and emits a
+/// `CapsChanged` with the sniffed type before releasing the held data, so the
+/// downstream demuxer / parser sees the real type. The frames themselves are
+/// forwarded unchanged. Caps equal to what is already declared are not re-emitted.
+///
+/// A stream that has not sniffed by the end of the header budget, or that ends
+/// before it does, fails with [`G2gError::CapsMismatch`]: untyped bytes are never
+/// forwarded as if they had been typed.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::typefind::TypeFind;
+///
+/// let element = TypeFind::new();
+/// assert_eq!(element.sniffed_caps(), None);
+/// ```
+#[derive(Debug, Default)]
+pub struct TypeFind {
+    header: Vec<u8>,
+    held: Vec<Frame>,
+    /// Caps currently declared on the output link: the negotiated ones until a
+    /// sniff replaces them. Emission is suppressed while the sniff agrees.
+    declared: Option<Caps>,
+    sniffed: Option<Caps>,
+    configured: bool,
+    log_name: LogName,
+}
+
+impl TypeFind {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The caps the content sniffed to, or `None` before enough bytes flowed.
+    pub fn sniffed_caps(&self) -> Option<&Caps> {
+        self.sniffed.as_ref()
+    }
+
+    /// Append a frame's system-memory bytes to the sniff buffer, up to the budget.
+    /// A device-domain frame contributes nothing (its bytes are not CPU-readable),
+    /// which the held-frame bound then turns into a sniff failure.
+    fn accumulate(&mut self, frame: &Frame) {
+        let Some(bytes) = frame.domain.as_system_slice() else {
+            return;
+        };
+        let room = HEADER_BUDGET.saturating_sub(self.header.len());
+        self.header
+            .extend_from_slice(&bytes[..bytes.len().min(room)]);
+    }
+
+    fn out_of_budget(&self) -> bool {
+        self.header.len() >= HEADER_BUDGET || self.held.len() >= MAX_HELD_FRAMES
+    }
+}
+
+impl AsyncElement for TypeFind {
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "TypeFind",
+            "Generic",
+            "Sniffs the media type of a byte stream and re-declares its caps",
+            "g2g",
+        )
+    }
+
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    where
+        Self: 'a;
+
+    /// Pass-through at negotiation: the type is only known once bytes flow, so the
+    /// element starts on whatever the source declared and refines it at runtime.
+    fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
+        Ok(upstream_caps.clone())
+    }
+
+    fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
+        CapsConstraint::IdentityAny
+    }
+
+    fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        self.declared = Some(absolute_caps.clone());
+        self.configured = true;
+        Ok(ConfigureOutcome::Accepted)
+    }
+
+    fn process<'a>(
+        &'a mut self,
+        packet: PipelinePacket,
+        out: &'a mut dyn OutputSink,
+    ) -> Self::ProcessFuture<'a> {
+        Box::pin(async move {
+            if !self.configured {
+                return Err(G2gError::NotConfigured);
+            }
+            match packet {
+                PipelinePacket::DataFrame(frame) if self.sniffed.is_some() => {
+                    out.push(PipelinePacket::DataFrame(frame)).await?;
+                }
+                PipelinePacket::DataFrame(frame) => {
+                    self.accumulate(&frame);
+                    self.held.push(frame);
+                    let Some(caps) = sniff_caps(&self.header) else {
+                        if self.out_of_budget() {
+                            g2g_error!(
+                                self,
+                                "no media type in the first {} bytes ({} frames): the stream is not one we sniff",
+                                self.header.len(),
+                                self.held.len()
+                            );
+                            return Err(G2gError::CapsMismatch);
+                        }
+                        return Ok(());
+                    };
+                    g2g_info!(self, "sniffed {:?} from {} bytes", caps, self.header.len());
+                    self.sniffed = Some(caps.clone());
+                    self.header = Vec::new();
+                    if self.declared.as_ref() != Some(&caps) {
+                        out.push(PipelinePacket::CapsChanged(caps.clone())).await?;
+                        self.declared = Some(caps);
+                    }
+                    for held in core::mem::take(&mut self.held) {
+                        out.push(PipelinePacket::DataFrame(held)).await?;
+                    }
+                }
+                PipelinePacket::CapsChanged(caps) => {
+                    self.declared = Some(caps.clone());
+                    out.push(PipelinePacket::CapsChanged(caps)).await?;
+                }
+                // A flushing seek restarts the byte stream, so the bytes held for
+                // an unfinished sniff are stale; the type already found still holds.
+                PipelinePacket::Flush => {
+                    self.header = Vec::new();
+                    self.held = Vec::new();
+                    out.push(PipelinePacket::Flush).await?;
+                }
+                // The runner forwards the EOS sentinel itself; a stream that ended
+                // mid-sniff never got a type, and its held frames must not vanish.
+                PipelinePacket::Eos => {
+                    if !self.held.is_empty() {
+                        g2g_error!(
+                            self,
+                            "stream ended after {} bytes with no media type sniffed",
+                            self.header.len()
+                        );
+                        return Err(G2gError::CapsMismatch);
+                    }
+                }
+                other => {
+                    out.push(other).await?;
+                }
+            }
+            Ok(())
+        })
+    }
+
+    fn set_instance_name(&mut self, name: String) {
+        self.log_name.set_instance(name);
+    }
+
+    fn set_log_category(&mut self, category: String) {
+        self.log_name.set_category(category);
+    }
+}
+
+impl LogSource for TypeFind {
+    fn log_category(&self) -> &'static str {
+        short_type_name::<Self>()
+    }
+    fn log_instance(&self) -> Option<&str> {
+        self.log_name.instance()
+    }
+    fn log_category_override(&self) -> Option<&str> {
+        self.log_name.category()
+    }
 }
 
 #[cfg(test)]

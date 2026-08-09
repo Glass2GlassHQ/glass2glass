@@ -589,6 +589,13 @@ pub fn default_registry() -> Registry {
     reg.register_launch(LaunchFactory::new("identity", Vec::new(), || {
         Box::new(IdentityTransform::new())
     }));
+    // Mid-graph content sniffing: re-declares the caps of a byte stream from its
+    // own leading bytes, for a source that could only guess (`srtsrc ! typefind !
+    // decodebin`). No pad templates, like `identity`: it passes data through and
+    // only the sniff decides the type.
+    reg.register_launch(LaunchFactory::new("typefind", Vec::new(), || {
+        Box::new(crate::typefind::TypeFind::new())
+    }));
     // Wall-clock pacing (M945): `sync=false` makes it an identity again.
     reg.register_launch(LaunchFactory::new("clocksync", Vec::new(), || {
         Box::new(crate::clocksync::ClockSyncTransform::new())
