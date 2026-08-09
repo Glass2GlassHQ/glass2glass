@@ -22,6 +22,9 @@
 //!   --validate-json     negotiate and print the result as JSON (every node and
 //!                       each edge's negotiated caps, or the structured failure),
 //!                       then exit; does not run the pipeline
+//!   --run-json          run the pipeline to EOS and print the same JSON with
+//!                       each edge's caps as observed while it ran, so a stream
+//!                       that refines mid-run reports its real geometry
 //!   --plugin <path>     load a third-party plugin `.so` before parsing
 //!                       (repeatable; needs the `plugin-loader` build feature)
 //!   --graph <file>      build the graph from a declarative JSON / YAML document
@@ -77,7 +80,7 @@ use g2g_plugins::TokioThreadSpawner;
 // link_capacity dominating glass-to-glass latency).
 const LINK_CAPACITY: usize = 4;
 
-const USAGE: &str = "usage: g2g-launch [-v] [-q] [--dot] [--copy-plan] [--validate-json] [--threads] [--observe <port>] [--observe-host <addr>] [--plugin <path>] [-e] [-m] [-h] \
+const USAGE: &str = "usage: g2g-launch [-v] [-q] [--dot] [--copy-plan] [--validate-json] [--run-json] [--threads] [--observe <port>] [--observe-host <addr>] [--plugin <path>] [-e] [-m] [-h] \
 <element> [key=value ...] ! <element> ! ...\n       \
 g2g-launch [OPTIONS] --graph <file.json|.yaml>   # declarative graph (M578)\n       \
 g2g-launch [OPTIONS] --script <file.rhai>         # Rhai graph-building script (M579)";
@@ -111,6 +114,10 @@ struct Opts {
     /// node and each edge's negotiated caps, or the structured failure. The
     /// machine-readable sibling of `--dot`, for a tool that diffs pipelines.
     validate_json: bool,
+    /// Run the pipeline to EOS and print the validate dump with each edge's
+    /// caps as observed while it ran (`--run-json`), so a stream whose geometry
+    /// only arrives with the data reports what it really carried.
+    run_json: bool,
     /// Plugin `.so` paths from `--plugin` (repeatable), loaded before parsing.
     plugins: Vec<String>,
     /// Build the graph from a declarative JSON / YAML file (`--graph <path>`,
@@ -194,6 +201,7 @@ fn parse_opts(args: impl Iterator<Item = String>) -> (Opts, Vec<String>) {
             "--dot" => opts.dot = true,
             "--copy-plan" => opts.copy_plan = true,
             "--validate-json" => opts.validate_json = true,
+            "--run-json" => opts.run_json = true,
             "--threads" => opts.threads = true,
             "--plugin" => match args.next() {
                 Some(path) => opts.plugins.push(path),
@@ -340,6 +348,29 @@ fn print_validate_json(_reg: &Registry, _pipeline: &str) -> i32 {
     2
 }
 
+/// Print the `--run-json` dump: the same shape as `--validate-json`, but the
+/// pipeline is run to EOS first and each edge reports the caps that crossed it.
+#[cfg(feature = "tooling-json")]
+fn print_run_json(reg: &Registry, pipeline: &str) -> i32 {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("build tokio runtime");
+    let value = rt.block_on(g2g_plugins::toolingjson::observed_graph_json(reg, pipeline));
+    println!("{value}");
+    if value["ok"].as_bool().unwrap_or(false) {
+        0
+    } else {
+        1
+    }
+}
+
+#[cfg(not(feature = "tooling-json"))]
+fn print_run_json(_reg: &Registry, _pipeline: &str) -> i32 {
+    eprintln!("g2g-launch: --run-json needs the `tooling-json` build feature");
+    2
+}
+
 fn main() {
     // Honor G2G_DEBUG (the GST_DEBUG analog): install the stderr log sink and
     // apply the category thresholds before the pipeline runs.
@@ -380,6 +411,14 @@ fn main() {
             process::exit(2);
         }
         process::exit(print_validate_json(&reg, &pipeline));
+    }
+
+    if opts.run_json {
+        if use_file {
+            eprintln!("g2g-launch: --run-json takes a text pipeline, not --graph / --script");
+            process::exit(2);
+        }
+        process::exit(print_run_json(&reg, &pipeline));
     }
 
     let graph = match build_graph(&reg, &opts, &pipeline) {

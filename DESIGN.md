@@ -3285,6 +3285,15 @@ upstream produce vs downstream accept, `Option`al since some sites hold only
 one side), and `validate_json` renders them as gst caps strings
 (`upstream_caps` / `downstream_caps`).
 
+`toolingjson::observed_graph_json` (`g2g-launch --run-json`) reports the same
+graph after running it instead of before: every link's `SenderSink` records the
+last `CapsChanged` that entered it on the edge's `EdgeCounters`, so an
+`Observer` snapshot carries both the solved caps and the observed ones
+(`EdgeInfo::observed_caps`). The dump prefers the observed reading and tags each
+edge `caps_source` `runtime` or `negotiated`, which is what makes a
+placeholder-then-refine stream (a demuxed file) comparable against an engine
+that only reports post-run caps.
+
 ### 4.20c Developer Tooling: Conformance and Derived Maturity
 
 Because g2g grows fast under agent-driven development, "how validated is this

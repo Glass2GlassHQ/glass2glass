@@ -785,6 +785,11 @@ impl OutputSink for SenderSink {
             if matches!(packet, PipelinePacket::Eos) {
                 self.eos_forwarded = true;
             }
+            // M980: keep the caps this link is carrying, so an observer reads the
+            // shape data actually flows under, not just the solved one.
+            if let (PipelinePacket::CapsChanged(caps), Some(c)) = (&packet, &self.link.counters) {
+                c.record_caps(caps);
+            }
             // Leaky links drop *data frames* under a full channel rather than
             // applying backpressure; control packets (caps / segment / flush /
             // eos) are never dropped, they always block so the stream stays

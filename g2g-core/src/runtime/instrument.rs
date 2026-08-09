@@ -331,10 +331,11 @@ pub struct ElementLatency {
     pub presentation: Option<PresentationStats>,
 }
 
-/// Per-edge live traffic counters (M846), shared between a link's
-/// [`SenderSink`](crate::runtime::SenderSink) (the writer) and the observer tap
-/// (the reader). Writes are wait-free (three relaxed `fetch_add`s), so an
-/// instrumented link pays a few atomics per packet.
+/// Per-edge live traffic counters (M846) plus the last caps that crossed
+/// (M980), shared between a link's [`SenderSink`](crate::runtime::SenderSink)
+/// (the writer) and the observer tap (the reader). Counter writes are wait-free
+/// (three relaxed `fetch_add`s), so an instrumented link pays a few atomics per
+/// packet; the caps slot is only touched on a `CapsChanged`.
 ///
 /// The end-of-run [`RunStats::frames_dropped`](crate::runtime::RunStats) folds
 /// every leaky link's drops into one number; these counters keep the same events
@@ -345,6 +346,10 @@ pub struct EdgeCounters {
     bytes: AtomicU64,
     drops: AtomicU64,
     blocked_ns: AtomicU64,
+    /// The most recent `CapsChanged` that entered this link, so a reader sees
+    /// the shape data is flowing under rather than the one the solver picked
+    /// before the stream refined it. `None` until one crosses.
+    last_caps: Mutex<Option<crate::caps::Caps>>,
 }
 
 impl EdgeCounters {
@@ -363,6 +368,16 @@ impl EdgeCounters {
     #[inline]
     pub(crate) fn record_drop(&self) {
         self.drops.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record the caps of a `CapsChanged` entering this link.
+    pub(crate) fn record_caps(&self, caps: &crate::caps::Caps) {
+        *self.last_caps.lock() = Some(caps.clone());
+    }
+
+    /// The last caps that crossed this link, or `None` if none has yet.
+    pub fn last_caps(&self) -> Option<crate::caps::Caps> {
+        self.last_caps.lock().clone()
     }
 
     pub fn snapshot(&self) -> EdgeCounts {

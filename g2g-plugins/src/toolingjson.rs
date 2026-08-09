@@ -1,8 +1,9 @@
 //! JSON tooling shared by `g2g-inspect --json` and the `g2g-mcp` server: the
-//! registry dump, a launch-line negotiation check, and a bounded pipeline run
-//! (optionally streaming live telemetry while it runs). Kept in one place so the
-//! two front-ends serialize the same shapes. serde_json only (no `g2g-core`
-//! serde), matching the dashboard's split.
+//! registry dump, a launch-line negotiation check, the same graph with the caps
+//! a finished run observed, and a bounded pipeline run (optionally streaming
+//! live telemetry while it runs). Kept in one place so the two front-ends
+//! serialize the same shapes. serde_json only (no `g2g-core` serde), matching
+//! the dashboard's split.
 
 use alloc::format;
 use alloc::string::String;
@@ -113,6 +114,60 @@ pub async fn validate_json(reg: &Registry, line: &str) -> Value {
             json!({ "ok": false, "stage": "negotiate", "failure": failure_json(&nf) })
         }
     }
+}
+
+/// Run a launch line to EOS and report the graph it ran as, in the shape
+/// [`validate_json`] prints: every node, and every edge with the caps that
+/// crossed it. A stream whose geometry only arrives with the data (a demuxed
+/// file) negotiates a placeholder and refines mid-run, so each edge says which
+/// of the two its caps are with `caps_source` (`runtime` once a `CapsChanged`
+/// crossed, else `negotiated`).
+pub async fn observed_graph_json(reg: &Registry, line: &str) -> Value {
+    let graph = match parse_launch(reg, line) {
+        Ok(g) => g,
+        Err(e) => return json!({ "ok": false, "stage": "parse", "error": format!("{e}") }),
+    };
+    let clock = WallClock::new();
+    let observer = Observer::new();
+    match run_graph_observed(graph, &clock, LINK_CAPACITY, &observer, None).await {
+        Ok(_) => observed_graph(&observer.snapshot()),
+        Err(e) => json!({ "ok": false, "stage": "run", "error": format!("{e:?}") }),
+    }
+}
+
+/// The finished run's topology and per-edge caps as JSON.
+fn observed_graph(snap: &TelemetrySnapshot) -> Value {
+    let nodes: Vec<Value> = snap
+        .nodes
+        .iter()
+        .map(|n| {
+            // A plain broadcast tee has no element to name, so it falls back to
+            // its role, as the solve-time dump falls back to the node kind.
+            let name = if n.name.is_empty() {
+                role_str(n.role)
+            } else {
+                n.name.as_str()
+            };
+            json!({ "index": n.id, "name": name })
+        })
+        .collect();
+    let edges: Vec<Value> = snap
+        .edges
+        .iter()
+        .map(|e| {
+            let (caps, source) = match &e.observed_caps {
+                Some(caps) => (Some(caps.clone()), "runtime"),
+                None => (e.caps.clone(), "negotiated"),
+            };
+            json!({
+                "from": e.from,
+                "to": e.to,
+                "caps": caps,
+                "caps_source": source,
+            })
+        })
+        .collect();
+    json!({ "ok": true, "nodes": nodes, "edges": edges })
 }
 
 /// Structured form of a [`NegotiationFailure`]: the conflict kind plus the node
@@ -516,6 +571,32 @@ mod tests {
                 .all(|c| c.as_str().unwrap().starts_with("audio/x-raw")),
             "capsfilter demands raw audio, got {down:?}"
         );
+    }
+
+    /// A source with fixed caps refines nothing, so no `CapsChanged` ever
+    /// crosses: the dump falls back to the negotiated caps and says so rather
+    /// than passing them off as a runtime reading. (The refining case is
+    /// `m980_runtime_caps_dump`, which needs a stream fixture.)
+    #[tokio::test]
+    async fn observed_run_falls_back_when_nothing_refines() {
+        let reg = default_registry();
+        let out = observed_graph_json(&reg, "videotestsrc num-buffers=4 ! fakesink").await;
+        assert_eq!(out["ok"], true, "{out}");
+        let nodes = out["nodes"].as_array().unwrap();
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(nodes[0]["name"], "VideoTestSrc0");
+        let edges = out["edges"].as_array().unwrap();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0]["caps_source"], "negotiated");
+        assert!(edges[0]["caps"].as_str().unwrap().contains("video/x-raw"));
+    }
+
+    #[tokio::test]
+    async fn observed_run_parse_error_is_reported() {
+        let reg = default_registry();
+        let bad = observed_graph_json(&reg, "nosuchelement ! fakesink").await;
+        assert_eq!(bad["ok"], false);
+        assert_eq!(bad["stage"], "parse");
     }
 
     #[tokio::test]

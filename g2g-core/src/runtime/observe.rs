@@ -214,16 +214,17 @@ impl Observer {
             .edges
             .iter()
             .enumerate()
-            .map(|(i, e)| EdgeInfo {
-                from: e.from,
-                to: e.to,
-                caps: s.edge_caps.get(i).map(|c| c.to_gst_string()),
-                counts: s
-                    .edge_counters
-                    .get(i)
-                    .and_then(|c| c.as_ref())
-                    .map(|c| c.snapshot())
-                    .unwrap_or_default(),
+            .map(|(i, e)| {
+                let counters = s.edge_counters.get(i).and_then(|c| c.as_ref());
+                EdgeInfo {
+                    from: e.from,
+                    to: e.to,
+                    caps: s.edge_caps.get(i).map(|c| c.to_gst_string()),
+                    observed_caps: counters
+                        .and_then(|c| c.last_caps())
+                        .map(|c| c.to_gst_string()),
+                    counts: counters.map(|c| c.snapshot()).unwrap_or_default(),
+                }
             })
             .collect();
         TelemetrySnapshot {
@@ -535,6 +536,11 @@ pub struct EdgeInfo {
     pub from: usize,
     pub to: usize,
     pub caps: Option<alloc::string::String>,
+    /// The last `CapsChanged` that crossed this link (M980). A stream whose
+    /// geometry only arrives with the data (a demuxed file) negotiates a
+    /// placeholder and refines here, so this is the shape the frames really
+    /// carried. `None` until one crosses, and on an uninstrumented edge.
+    pub observed_caps: Option<alloc::string::String>,
     pub counts: EdgeCounts,
 }
 

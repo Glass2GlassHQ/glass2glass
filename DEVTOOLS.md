@@ -100,6 +100,19 @@ g2g-launch --validate-json videotestsrc ! videoconvert ! fakesink
 #  "nodes":[{"index":0,"name":"VideoTestSrc"},...],"ok":true}
 ```
 
+Those caps are the solver's, chosen before any data flowed, so a stream whose
+geometry only arrives with the data (a demuxed file, a parsed elementary stream)
+shows the startup placeholder. `--run-json` runs the line to EOS and prints the
+same shape with the caps each edge actually carried, tagging every edge
+`runtime` (a `CapsChanged` crossed it) or `negotiated` (none did):
+
+```sh
+g2g-launch --run-json filesrc location=clip.h264 ! h264parse ! fakesink
+# {"edges":[{"caps":"video/x-h264,width=16,height=16,...","caps_source":"negotiated","from":0,"to":1},
+#           {"caps":"video/x-h264,width=320,height=240,...","caps_source":"runtime","from":1,"to":2}],
+#  "nodes":[{"index":0,"name":"FileSrc0"},...],"ok":true}
+```
+
 In code, `Graph::to_dot` / `ValidatedGraph::to_dot` (in `g2g_core::dot`) render
 any graph; `g2g_core::runtime::negotiate_graph` runs the caps solve without
 running the pipeline and returns the per-edge caps + memory domains both the DOT
