@@ -600,9 +600,6 @@ _(No open tag items.)_
 
 ## Python-element host (M198+)
 
-- A hosted element passes a GPU frame through unchanged yet declares its output
-  memory as System, so the domain-converter auto-plug can splice a needless
-  upload after `pyelement`: report the domain the frame actually leaves in.
 - GPU-plane contracts for the batch (`pyaggregator`) and source (`pysrc`)
   shapes; only the transform path takes a Cuda-domain frame.
 - DLPack alongside `__cuda_array_interface__`, for the frameworks that prefer

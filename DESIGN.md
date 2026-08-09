@@ -1860,6 +1860,22 @@ either of two paths:
   `UnsupportedDomain` for a GPU frame rather than a silent readback: `g2g-python`
   links no CUDA, so a CPU-only element needs an explicit `cudadownload` upstream.
 
+The frame is read where it lies and forwarded untouched, so a hosted transform
+carries one memory domain on both pads (M985): System, or CUDA under
+`cuda-frames=true`, the property that says the hosted class reads device memory.
+Declaring the same domain on input and output keeps the relation honest, since the
+domain a frame leaves in is the one it arrived in. Two things follow. The
+domain-converter auto-plug splices a download / upload on the edge *into* the
+element when upstream cannot deliver what the hosted code reads, and never after
+it (previously a hosted element always claimed System output, so a GPU frame
+passing through it drew a needless upload before a GPU consumer). And
+`propose_allocation` names that domain upstream, so a multi-domain producer (an
+NVDEC that can keep frames on the device or download them) settles on it and no
+converter node is needed at all; the proposal constrains only the domain and the
+frame size, since the element allocates nothing itself. `format` is a property
+too, so a launch-built `pyelement` can accept the NV12 a decoder emits rather than
+only its RGBA default.
+
 **Runtime scripting (`scriptelement`, `script-rhai` feature, M580).** The
 construction scripts above run once to emit a graph; `scriptelement` is the
 per-frame complement: a raw-video transform whose `process(frame)` is a Rhai
