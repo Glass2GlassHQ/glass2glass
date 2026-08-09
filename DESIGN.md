@@ -2120,6 +2120,16 @@ oversized pre-skip trims a frame to nothing, an underflowing granule drops it).
 A stream with no `OpusHead` and no per-frame duration (the RTP path) decodes
 untrimmed, matching gstreamer's SDP-less default.
 
+Vorbis carries the same two facts without a header field: its playable length is
+the final page's granule position, and its head trim is the first audio packet,
+which primes the overlap window and decodes to nothing. `OggDemux` clips that
+priming block off the front and clamps the tail to the end granule, so a decode
+yields exactly the granule's worth of samples. The size of the clip comes from
+the first audio page's granule (its shortfall against the natural packet
+durations, which also covers a stream joined mid-file), except when that page is
+also the last: its granule is then the end of the stream and says nothing about
+the head, so the clip is the priming packet's own `blocksize / 2`.
+
 MP4 carries the same two facts in its own spelling, and both directions convert
 to the in-band convention (M791). The `dOps` OpusSpecificBox holds an
 `OpusHead`'s fields big-endian, so the demuxers rebuild one from it and forward

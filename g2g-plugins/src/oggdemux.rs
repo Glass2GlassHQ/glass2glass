@@ -733,15 +733,24 @@ impl StreamEmitter {
         // Vorbis timeline anchor (M778): the first audio page's granule names
         // the timeline position after its last packet, so the excess of the
         // natural durations over it is initial priming, clipped off the front
-        // (ffmpeg anchors the same way, as a negative first pts). An EOS first
-        // page is an end clamp instead: anchor at zero.
+        // (ffmpeg anchors the same way, as a negative first pts).
         if codec == OggCodec::Vorbis && self.anchor_offset.is_none() {
             if let (Some(t), Some((gp, n, eos))) =
                 (self.vorbis.as_ref(), stream.first_data_granule())
             {
-                self.anchor_offset = if eos || self.decoded_samples > 0 {
+                self.anchor_offset = if self.decoded_samples > 0 {
                     // Already streaming (a headerless mid-join): no anchor.
                     Some(0)
+                } else if eos {
+                    // The whole stream fits on one audio page, so that page's
+                    // granule is the end of the stream and says nothing about
+                    // the head: the only clip is the priming packet's own
+                    // `blocksize / 2`, which decodes to nothing (M971).
+                    let priming = packets
+                        .first()
+                        .and_then(|p| t.packet_blocksize(p))
+                        .unwrap_or(0);
+                    Some(u64::from(priming / 2))
                 } else {
                     // Lapped natural durations over the first page's packets.
                     let mut prev: Option<u32> = None;

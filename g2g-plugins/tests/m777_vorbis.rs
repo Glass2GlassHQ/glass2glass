@@ -3,9 +3,11 @@
 //! (symphonia) stashes ident + setup, decodes, and stamps PCM from decoded
 //! sample counts. Oracles: ffprobe's packet list for the demux framing, and
 //! ffmpeg's own decode for the PCM (lossy codec, same bitstream: samples must
-//! agree within 1 LSB of int16 rounding, and M778's end-granule clamp makes
-//! the lengths equal exactly). Auto paths: bare `decodebin` sniffs the codec,
-//! `playbin uri=` plays a `.ogg` end to end.
+//! agree within 1 LSB of int16 rounding). The decode's length is checked against
+//! the tone the fixture encodes rather than against ffmpeg's, whose Ogg reader
+//! comes up a block short on a stream this small (see `m971_vorbis_granule`).
+//! Auto paths: bare `decodebin` sniffs the codec, `playbin uri=` plays a `.ogg`
+//! end to end.
 #![cfg(all(feature = "std", feature = "vorbis"))]
 
 use core::future::Future;
@@ -87,6 +89,9 @@ fn temp_path(tag: &str, ext: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("g2g-m777-{tag}-{}.{ext}", std::process::id()))
 }
 
+/// Samples per channel the fixture encodes: 0.5 s at 44.1 kHz.
+const FIXTURE_SAMPLES: usize = 22_050;
+
 /// A real 0.5 s 44.1 kHz stereo tone encoded by ffmpeg (libvorbis) into Ogg,
 /// plus ffprobe's packet sizes as the framing oracle, or `None` when the host
 /// cannot.
@@ -151,17 +156,21 @@ fn ffmpeg_pcm(path: &std::path::Path) -> Option<Vec<u8>> {
     out.status.success().then_some(out.stdout)
 }
 
-/// Assert `pcm` matches the ffmpeg reference: the same length (M778 clamps the
-/// timeline to the end granule and the decoder trims to it) and every sample
-/// within 1 LSB (independent float->int rounding).
-fn assert_pcm_matches(pcm: &[u8], reference: &[u8], _channels: usize) {
+/// Assert `pcm` is the fixture's whole tone (the end-granule clamp keeps every
+/// encoded sample and no padding) and that every sample ffmpeg also decoded is
+/// within 1 LSB of it (independent float->int rounding).
+fn assert_pcm_matches(pcm: &[u8], reference: &[u8], channels: usize) {
     assert_eq!(
         pcm.len(),
-        reference.len(),
-        "g2g decode length equals ffmpeg's"
+        FIXTURE_SAMPLES * 2 * channels,
+        "g2g decodes the whole encoded tone"
     );
+    let shared = pcm.len().min(reference.len());
     let mut max_diff = 0i32;
-    for (a, b) in pcm.chunks_exact(2).zip(reference.chunks_exact(2)) {
+    for (a, b) in pcm[..shared]
+        .chunks_exact(2)
+        .zip(reference[..shared].chunks_exact(2))
+    {
         let x = i16::from_le_bytes([a[0], a[1]]) as i32;
         let y = i16::from_le_bytes([b[0], b[1]]) as i32;
         max_diff = max_diff.max((x - y).abs());
