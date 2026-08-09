@@ -118,6 +118,14 @@ enum TrackInit {
 }
 
 /// Muxes N elementary streams into one Matroska byte stream, PTS-ordered.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::mkvmuxn::MkvMuxN;
+///
+/// let element = MkvMuxN::new(2).with_streamable(true);
+/// ```
 #[derive(Debug)]
 pub struct MkvMuxN {
     inputs: usize,

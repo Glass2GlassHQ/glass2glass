@@ -35,6 +35,16 @@ use g2g_core::{
 use crate::fmp4mux::Fmp4Muxer;
 
 /// Muxes one H.264 / H.265 elementary stream into a fragmented-MP4 byte stream.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::mp4mux::Mp4Mux;
+///
+/// let mux = Mp4Mux::new()
+///     .with_fragment_duration_ms(2000)
+///     .with_cmaf(true);
+/// ```
 #[derive(Debug)]
 pub struct Mp4Mux {
     /// Codec + geometry from the input caps, refined by `CapsChanged` until the

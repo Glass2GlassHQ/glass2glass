@@ -172,6 +172,13 @@ struct GpuState {
     bind_group_layout: GpuBindGroupLayout,
 }
 
+/// # Example
+///
+/// ```ignore
+/// use g2g_plugins::webgpucanvassink::WebGpuCanvasSink;
+///
+/// let sink = WebGpuCanvasSink::new("video-canvas").with_cnn();
+/// ```
 pub struct WebGpuCanvasSink {
     canvas_id: String,
     canvas: Option<HtmlCanvasElement>,

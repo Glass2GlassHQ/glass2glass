@@ -34,6 +34,14 @@ struct IvfHeader {
 }
 
 /// Demuxes an IVF byte stream into its single video elementary stream.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::ivfdemux::IvfDemux;
+///
+/// let demux = IvfDemux::new();
+/// ```
 #[derive(Debug, Default)]
 pub struct IvfDemux {
     configured: bool,

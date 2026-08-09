@@ -160,6 +160,18 @@ fn nominal_caps() -> Caps {
 
 /// Application push source. Set its `caps` (fully fixed, `gst-launch` syntax) and
 /// `channel` properties; buffers arrive from the matching [`register_appsrc`].
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::appsrc::{register_appsrc, AppSrc};
+///
+/// // gst-launch: appsrc channel=cam caps=video/x-raw,format=RGBA,width=320,height=240,framerate=30/1 ! fakesink
+/// let feed = register_appsrc("cam");
+/// let src = AppSrc::new();
+/// let rgba = vec![0u8; 320 * 240 * 4];
+/// feed.push(&rgba, 0);
+/// ```
 #[derive(Debug, Default)]
 pub struct AppSrc {
     channel: String,

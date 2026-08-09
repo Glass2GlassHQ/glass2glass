@@ -704,6 +704,16 @@ pub trait MultiInputElement: ElementBound {
 /// `DataFrame` only while open; `Eos` is forwarded by the runner, never by
 /// the element (the transform contract). Drops dropped frames silently —
 /// observability of gate drops is a tracing concern for a later milestone.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_core::fanout::Gate;
+///
+/// let gate = Gate::new(true);
+/// let handle = gate.handle();
+/// handle.set_open(false);
+/// ```
 #[derive(Debug)]
 pub struct Gate {
     open: Arc<AtomicBool>,
@@ -791,6 +801,16 @@ impl AsyncElement for Gate {
 /// 1→N router. Each `DataFrame` goes to the single port named by an atomic
 /// discriminator; `CapsChanged` is broadcast to every port so all branches
 /// stay configured. `Eos` is broadcast by the runner.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_core::fanout::Router;
+///
+/// let router = Router::new(3);
+/// let handle = router.handle();
+/// handle.select(2);
+/// ```
 #[derive(Debug)]
 pub struct Router {
     selected: Arc<AtomicUsize>,
@@ -910,6 +930,16 @@ impl MultiOutputElement for Router {
 /// that input's frames and drains/discards the rest. The merged stream ends
 /// only once every input has reached EOS (see `run_fanin_sink`). `Merger`
 /// holds just the selector; the forwarding lives in the runner.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_core::fanout::Merger;
+///
+/// let merger = Merger::new(2);
+/// let handle = merger.handle();
+/// handle.select(1);
+/// ```
 #[derive(Debug)]
 pub struct Merger {
     selected: Arc<AtomicUsize>,

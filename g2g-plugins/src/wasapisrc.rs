@@ -56,6 +56,13 @@ use crate::wasapipcm::{audio_config_from_format, audio_err, open_endpoint, Audio
 /// Shared-mode endpoint buffer span (100-ns units), 200 ms.
 const BUFFER_DURATION_HNS: i64 = 2_000_000;
 
+/// # Example
+///
+/// ```ignore
+/// use g2g_plugins::wasapisrc::WasapiSrc;
+///
+/// let source = WasapiSrc::new(500).with_loopback();
+/// ```
 #[derive(Debug)]
 pub struct WasapiSrc {
     /// Endpoint id to capture from; empty opens the default endpoint.

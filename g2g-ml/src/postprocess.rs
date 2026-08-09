@@ -27,6 +27,14 @@ enum Op {
     ArgMax,
 }
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_ml::postprocess::TensorPostprocess;
+///
+/// let softmax = TensorPostprocess::softmax();
+/// let argmax = TensorPostprocess::argmax();
+/// ```
 #[derive(Debug)]
 pub struct TensorPostprocess {
     op: Op,

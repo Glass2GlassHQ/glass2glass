@@ -28,6 +28,13 @@ use g2g_core::{
 /// VP8 key-frame start code following the 3-byte frame tag (RFC 6386 §9.1).
 const VP8_START_CODE: [u8; 3] = [0x9d, 0x01, 0x2a];
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::vp8parse::Vp8Parse;
+///
+/// let element = Vp8Parse::new();
+/// ```
 #[derive(Debug, Default)]
 pub struct Vp8Parse {
     configured: bool,

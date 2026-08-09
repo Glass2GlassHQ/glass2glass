@@ -105,6 +105,16 @@ struct PadSink {
 }
 
 /// LiveKit publisher sink. See the module docs.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::livekitsink::LiveKitSink;
+///
+/// let sink = LiveKitSink::new("ws://localhost:7880", "demo-room", "publisher")
+///     .with_api_key("devkey", "secret")
+///     .with_simulcast(2);
+/// ```
 pub struct LiveKitSink {
     /// LiveKit signalling base URL, e.g. `ws://localhost:7880`.
     url: String,

@@ -40,6 +40,13 @@ struct HeldFrame {
     capture_ns: u64,
 }
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::videorate::VideoRate;
+///
+/// let element = VideoRate::new(29.97);
+/// ```
 #[derive(Debug)]
 pub struct VideoRate {
     /// Target framerate in Q16 fps and the matching output inter-frame

@@ -43,6 +43,14 @@ pub(crate) struct FrameHeader {
     pub(crate) block_size: u32,
 }
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::flacparse::FlacParse;
+///
+/// let parser = FlacParse::new();
+/// assert_eq!(parser.frames_emitted(), 0);
+/// ```
 pub struct FlacParse {
     configured: bool,
     /// Unconsumed input bytes (the header until complete, then frame data from

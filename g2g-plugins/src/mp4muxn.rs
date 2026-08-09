@@ -124,6 +124,16 @@ impl TrackInit {
 }
 
 /// Muxes N elementary streams into one ISO-BMFF byte stream, PTS-ordered.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::mp4muxn::Mp4MuxN;
+///
+/// let mux = Mp4MuxN::new(2)
+///     .with_fragmented(true)
+///     .with_fragment_duration_ms(2000);
+/// ```
 #[derive(Debug)]
 pub struct Mp4MuxN {
     inputs: usize,

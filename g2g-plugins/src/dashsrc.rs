@@ -219,6 +219,15 @@ fn period_span_ns(mpd: &Mpd, idx: usize, played_ns: u64) -> u64 {
     }
 }
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::dashsrc::DashSrc;
+///
+/// let source = DashSrc::new("https://example.com/live/manifest.mpd")
+///     .with_low_latency()
+///     .with_max_bandwidth(6_000_000);
+/// ```
 #[derive(Debug)]
 pub struct DashSrc {
     url: String,

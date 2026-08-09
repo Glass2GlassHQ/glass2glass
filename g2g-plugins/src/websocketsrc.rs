@@ -30,6 +30,20 @@ use web_sys::{BinaryType, CloseEvent, Event, MessageEvent, WebSocket};
 
 use crate::webutil::Inbox;
 
+/// # Example
+///
+/// ```ignore
+/// use g2g_core::{Caps, Dim, Rate, VideoCodec};
+/// use g2g_plugins::websocketsrc::WebSocketSrc;
+///
+/// let caps = Caps::CompressedVideo {
+///     codec: VideoCodec::H264,
+///     width: Dim::Fixed(1280),
+///     height: Dim::Fixed(720),
+///     framerate: Rate::Fixed(30 << 16),
+/// };
+/// let src = WebSocketSrc::new("ws://localhost:8080/stream", caps);
+/// ```
 #[derive(Debug)]
 pub struct WebSocketSrc {
     url: String,

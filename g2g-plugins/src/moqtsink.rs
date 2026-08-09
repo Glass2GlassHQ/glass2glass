@@ -373,6 +373,16 @@ struct Core {
 }
 
 /// Publishes an fMP4 byte stream to an IETF MoQ Transport relay.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::moqtsink::MoqtSink;
+///
+/// let sink = MoqtSink::new("https://127.0.0.1:4443/", "live/cam1")
+///     .with_priority(1)
+///     .with_datagrams(true);
+/// ```
 #[derive(Debug)]
 pub struct MoqtSink {
     location: String,

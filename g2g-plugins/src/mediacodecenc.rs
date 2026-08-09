@@ -91,6 +91,16 @@ impl core::fmt::Debug for CodecState {
 }
 
 /// Android hardware video encoder: NV12 in, Annex-B H.264 / H.265 out.
+///
+/// # Example
+///
+/// ```ignore
+/// use g2g_plugins::mediacodecenc::MediaCodecEnc;
+///
+/// let encoder = MediaCodecEnc::h264()
+///     .with_bitrate(4_000_000)
+///     .with_keyframe_interval(2);
+/// ```
 #[derive(Debug)]
 pub struct MediaCodecEnc {
     codec: VideoCodec,

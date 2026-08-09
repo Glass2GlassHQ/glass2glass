@@ -55,6 +55,16 @@ const VIDEO_PORT: usize = 0;
 const AUDIO_PORT: usize = 1;
 
 /// Multi-track WHEP-subscribing WebRTC ingest session. See the module docs.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::webrtcwhepsession::WebRtcWhepSessionSrc;
+///
+/// let source = WebRtcWhepSessionSrc::new("https://example.com/whep")
+///     .with_bearer("token")
+///     .with_stun_server("stun.example.com:3478");
+/// ```
 pub struct WebRtcWhepSessionSrc {
     whep_url: String,
     bearer: Option<String>,

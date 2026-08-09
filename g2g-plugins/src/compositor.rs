@@ -128,6 +128,17 @@ impl CompositorPad {
     }
 }
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::compositor::{Compositor, CompositorPad};
+///
+/// let pads = vec![
+///     CompositorPad::at(0, 0),
+///     CompositorPad::at(960, 540).with_size(320, 180).with_zorder(1),
+/// ];
+/// let compositor = Compositor::new(1280, 720, pads).with_framerate(30);
+/// ```
 #[derive(Debug)]
 pub struct Compositor {
     out_w: u32,

@@ -38,6 +38,14 @@ use g2g_core::{
 use crate::teletext::{parse_page_config, TeletextCue, TeletextDecoder};
 
 /// Decodes teletext subtitle pages into plain-text cues.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::teletextdec::TeletextDec;
+///
+/// let decoder = TeletextDec::new().with_page(888);
+/// ```
 #[derive(Debug)]
 pub struct TeletextDec {
     dec: TeletextDecoder,

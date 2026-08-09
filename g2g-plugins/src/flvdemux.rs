@@ -81,6 +81,14 @@ struct VideoInit {
 }
 
 /// Demuxes an FLV byte stream into one selected elementary stream.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::flvdemux::{FlvDemux, FlvStream};
+///
+/// let demux = FlvDemux::new().with_stream(FlvStream::Aac);
+/// ```
 #[derive(Debug)]
 pub struct FlvDemux {
     demux: FlvDemuxer,

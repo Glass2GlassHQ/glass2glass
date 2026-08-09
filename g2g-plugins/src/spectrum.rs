@@ -64,6 +64,14 @@ fn fft(re: &mut [f64], im: &mut [f64]) {
     }
 }
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::spectrum::Spectrum;
+///
+/// let spectrum = Spectrum::new().with_bands(64);
+/// assert!(spectrum.last_magnitudes().is_empty());
+/// ```
 #[derive(Debug)]
 pub struct Spectrum {
     bands: usize,

@@ -37,6 +37,14 @@ use vello::{AaConfig, AaSupport, RenderParams, Renderer, RendererOptions, Scene}
 
 /// Renders detection bounding boxes from an attached [`AnalyticsMeta`] onto an
 /// RGBA8 frame with Vello, emitting a GPU-resident [`MemoryDomain::WgpuTexture`].
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::vellooverlay::VelloAnalyticsOverlay;
+///
+/// let element = VelloAnalyticsOverlay::new().with_thickness(2.0);
+/// ```
 pub struct VelloAnalyticsOverlay {
     width: u32,
     height: u32,

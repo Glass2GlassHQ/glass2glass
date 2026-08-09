@@ -152,6 +152,14 @@ struct GuessedSeek {
 }
 
 /// Demuxes an Ogg byte stream into its Opus audio elementary stream.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::oggdemux::OggDemux;
+///
+/// let demux = OggDemux::new();
+/// ```
 #[derive(Debug)]
 pub struct OggDemux {
     demux: OggDemuxer,
@@ -1119,6 +1127,18 @@ impl OggPort {
 /// The container's per-stream metadata posts as
 /// [`BusMessage::StreamTag`] under the same ids as the announced
 /// [`StreamCollection`](BusMessage::StreamCollection).
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::ogg::OggCodec;
+/// use g2g_plugins::oggdemux::{OggDemuxN, OggPort};
+///
+/// let demux = OggDemuxN::new(vec![
+///     OggPort::new(0, OggCodec::Opus),
+///     OggPort::new(1, OggCodec::Vorbis),
+/// ]);
+/// ```
 #[derive(Debug)]
 pub struct OggDemuxN {
     demux: OggDemuxer,

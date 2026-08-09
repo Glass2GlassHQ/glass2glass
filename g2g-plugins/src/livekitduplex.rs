@@ -62,6 +62,16 @@ const PLI_INTERVAL: Duration = Duration::from_secs(1);
 const TOKEN_TTL_SECS: u64 = 3600;
 
 /// Bidirectional LiveKit participant. See the module docs.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::livekitduplex::LiveKitDuplex;
+///
+/// let duplex = LiveKitDuplex::new("ws://127.0.0.1:7880", "demo-room", "g2g")
+///     .with_api_key("devkey", "devsecret")
+///     .with_frame_limit(300);
+/// ```
 pub struct LiveKitDuplex {
     url: String,
     room: String,

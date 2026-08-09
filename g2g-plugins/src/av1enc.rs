@@ -60,6 +60,15 @@ const DEFAULT_SPEED: u8 = 9;
 const DEFAULT_QUANTIZER: usize = 100;
 
 /// Encodes raw planar-YUV video into an AV1 elementary stream.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::av1enc::Av1Enc;
+///
+/// let encoder = Av1Enc::new().with_speed(9).with_quantizer(100);
+/// assert_eq!(encoder.emitted(), 0);
+/// ```
 pub struct Av1Enc {
     speed: u8,
     width: u32,

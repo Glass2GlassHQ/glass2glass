@@ -150,6 +150,15 @@ impl core::fmt::Debug for CameraSession {
 }
 
 /// Android camera capture source: `YUV_420_888` in, tight NV12 out.
+///
+/// # Example
+///
+/// ```ignore
+/// use g2g_plugins::camera2src::Camera2Src;
+///
+/// let src = Camera2Src::new(1280, 720, 300).with_camera_id("0");
+/// assert_eq!(src.emitted(), 0);
+/// ```
 #[derive(Debug)]
 pub struct Camera2Src {
     width: u32,

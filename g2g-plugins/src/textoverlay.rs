@@ -177,6 +177,17 @@ use crate::subparse::parse_auto;
 /// Renders the active subtitle cue's text onto an RGBA8 frame. Cue selection is
 /// by the frame's `pts_ns`; a frame with no covering cue passes through
 /// untouched.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::textoverlay::TextOverlay;
+///
+/// let overlay = TextOverlay::from_srt("1\n00:00:00,000 --> 00:00:02,000\nhello\n")
+///     .with_font_size(32)
+///     .with_text_color([0xFF, 0xE0, 0x40]);
+/// assert_eq!(overlay.cue_count(), 1);
+/// ```
 #[derive(Debug)]
 pub struct TextOverlay {
     width: u32,
@@ -1321,6 +1332,15 @@ impl AsyncElement for TextOverlay {
 /// rides the stream as [`TextCueMeta`](crate::subparse::TextCueMeta) frame-meta
 /// under the `metadata` feature (M406), so a placed cue renders where it asks; on
 /// the ZST baseline (no meta) every cue draws at the renderer default (bottom-centre).
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::textoverlay::TextOverlayN;
+///
+/// let overlay = TextOverlayN::new();
+/// assert_eq!(overlay.cue_count(), 0);
+/// ```
 #[derive(Debug, Default)]
 pub struct TextOverlayN {
     /// Owns the cue list + geometry + rendering.

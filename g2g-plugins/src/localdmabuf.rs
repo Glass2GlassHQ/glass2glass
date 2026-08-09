@@ -280,6 +280,13 @@ fn dims_of(caps: &Caps) -> Option<(RawVideoFormat, u32, u32)> {
 
 // ---- sink (client) ----
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::localdmabuf::DmaBufSink;
+///
+/// let element = DmaBufSink::new("/tmp/g2g-dmabuf.sock");
+/// ```
 #[derive(Debug)]
 pub struct DmaBufSink {
     path: String,
@@ -471,6 +478,13 @@ impl AsyncElement for DmaBufSink {
 
 // ---- source (server) ----
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::localdmabuf::DmaBufSrc;
+///
+/// let element = DmaBufSrc::new("/tmp/g2g-dmabuf.sock").with_frame_limit(300);
+/// ```
 #[derive(Debug)]
 pub struct DmaBufSrc {
     path: String,

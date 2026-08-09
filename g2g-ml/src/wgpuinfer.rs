@@ -716,6 +716,14 @@ struct Gpu {
     bias_buf: Option<wgpu::Buffer>,
 }
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_ml::wgpuinfer::WgpuInference;
+///
+/// let activation = WgpuInference::relu(3, 224, 224).unwrap().with_gpu_output();
+/// assert_eq!(activation.inferred_count(), 0);
+/// ```
 #[derive(Debug)]
 pub struct WgpuInference {
     /// Input tensor shape (`[1, 3, H, W]` for a linear layer, `[1, Cin, H, W]`

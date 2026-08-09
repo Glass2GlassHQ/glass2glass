@@ -76,6 +76,15 @@ struct WrapPtr(*mut c_void);
 unsafe impl Send for WrapPtr {}
 
 /// Hosts an unported GStreamer element inside a g2g graph. See the module docs.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::gstwrap::GstWrap;
+///
+/// // gst-launch: ... ! gstwrap element="x264enc bitrate=4000" ! ...
+/// let wrap = GstWrap::new();
+/// ```
 #[derive(Debug)]
 pub struct GstWrap {
     /// GStreamer element description, e.g. `"x264enc bitrate=4000"`.

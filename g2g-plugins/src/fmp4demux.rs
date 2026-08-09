@@ -36,6 +36,13 @@ use crate::fmp4::{
 };
 use crate::mp4box::next_box_len;
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::fmp4demux::Fmp4Demux;
+///
+/// let element = Fmp4Demux::new();
+/// ```
 #[derive(Debug)]
 pub struct Fmp4Demux {
     buffer: Vec<u8>,

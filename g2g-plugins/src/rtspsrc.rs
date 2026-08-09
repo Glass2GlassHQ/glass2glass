@@ -91,6 +91,15 @@ impl core::fmt::Debug for StashedSession {
     }
 }
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::rtspsrc::RtspSrc;
+///
+/// let element = RtspSrc::new("rtsp://192.168.1.10:554/stream1")
+///     .with_credentials("admin", "secret")
+///     .with_expected_dims(1920, 1080);
+/// ```
 #[derive(Debug)]
 pub struct RtspSrc {
     url: String,

@@ -41,6 +41,14 @@ pub enum Wave {
     Silence,
 }
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::audiotestsrc::{AudioTestSrc, Wave};
+///
+/// // 48 kHz stereo 440 Hz square wave, 100 buffers then EOS.
+/// let src = AudioTestSrc::new(48_000, 2, 440, 100).with_wave(Wave::Square);
+/// ```
 #[derive(Debug)]
 pub struct AudioTestSrc {
     sample_rate: u32,

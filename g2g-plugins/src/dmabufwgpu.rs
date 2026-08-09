@@ -108,6 +108,14 @@ impl WgpuBufferKeepAlive for DmaBufWgpuBuffer {
 }
 
 /// DMABUF -> `wgpu::Buffer` import element. See the module docs.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::dmabufwgpu::DmaBufToWgpu;
+///
+/// let import = DmaBufToWgpu::new();
+/// ```
 #[derive(Debug)]
 pub struct DmaBufToWgpu {
     configured: bool,

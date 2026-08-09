@@ -54,6 +54,16 @@ use crate::moqt::subscriber::{
 };
 
 /// Subscribes to a MoQ Transport broadcast and emits its fMP4 byte stream.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::moqtsrc::MoqtSrc;
+///
+/// let src = MoqtSrc::new("https://127.0.0.1:4443/", "g2g")
+///     .with_track_name("video")
+///     .with_catchup_groups(2);
+/// ```
 #[derive(Debug)]
 pub struct MoqtSrc {
     cfg: SubscriberConfig,

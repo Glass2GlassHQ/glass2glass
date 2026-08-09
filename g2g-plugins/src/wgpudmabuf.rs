@@ -134,6 +134,14 @@ fn input_buffer(owned: &OwnedWgpuBuffer) -> Option<&wgpu::Buffer> {
 }
 
 /// GPU -> DMABUF export element. See the module docs.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::wgpudmabuf::WgpuToDmaBuf;
+///
+/// let export = WgpuToDmaBuf::new().with_external_semaphore(true);
+/// ```
 #[derive(Debug)]
 pub struct WgpuToDmaBuf {
     device: Option<wgpu::Device>,

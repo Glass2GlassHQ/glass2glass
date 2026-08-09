@@ -91,6 +91,13 @@ struct DecodedNv12 {
     pts_ns: u64,
 }
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::vaapidec::VaapiH264Dec;
+///
+/// let decoder = VaapiH264Dec::with_render_node("/dev/dri/renderD128");
+/// ```
 pub struct VaapiH264Dec {
     render_node: PathBuf,
     gbm: Option<std::sync::Arc<GbmDevice>>,

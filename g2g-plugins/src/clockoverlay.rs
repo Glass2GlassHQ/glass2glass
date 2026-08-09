@@ -39,6 +39,13 @@ use crate::timeoverlay::{
 
 const DEFAULT_TIME_FORMAT: &str = "%H:%M:%S";
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::clockoverlay::ClockOverlay;
+///
+/// let overlay = ClockOverlay::new().with_time_format("%H:%M:%S").with_scale(2);
+/// ```
 pub struct ClockOverlay {
     core: OverlayCore,
     time_format: String,

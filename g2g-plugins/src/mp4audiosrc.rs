@@ -34,6 +34,13 @@ struct Header {
     asc: Vec<u8>,
 }
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::mp4audiosrc::Mp4AudioSrc;
+///
+/// let element = Mp4AudioSrc::new("recording.mp4");
+/// ```
 #[derive(Debug)]
 pub struct Mp4AudioSrc {
     path: PathBuf,

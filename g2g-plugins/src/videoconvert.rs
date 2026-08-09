@@ -64,6 +64,15 @@ const INPUT_FORMATS: [RawVideoFormat; 13] = [
     RawVideoFormat::Yuyv,
 ];
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_core::RawVideoFormat;
+/// use g2g_plugins::videoconvert::VideoConvert;
+///
+/// let convert = VideoConvert::new(RawVideoFormat::I420);
+/// let caps_driven = VideoConvert::auto();
+/// ```
 #[derive(Debug)]
 pub struct VideoConvert {
     /// Target output format from the `format` property. `None` means "auto":

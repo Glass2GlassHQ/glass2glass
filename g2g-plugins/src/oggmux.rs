@@ -387,6 +387,14 @@ impl OggStreamMux {
 const RECENT_SERIALS: usize = 16;
 
 /// Muxes one audio elementary stream into an Ogg byte stream.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::oggmux::OggMux;
+///
+/// let mux = OggMux::new().with_serial(0x1234_5678);
+/// ```
 #[derive(Debug)]
 pub struct OggMux {
     stream: OggStreamMux,

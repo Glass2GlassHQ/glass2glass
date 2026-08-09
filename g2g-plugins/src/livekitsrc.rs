@@ -68,6 +68,16 @@ const PLI_INTERVAL: Duration = Duration::from_secs(1);
 const TOKEN_TTL_SECS: u64 = 3600;
 
 /// Native LiveKit room subscriber. See the module docs.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::livekitsrc::LiveKitSrc;
+///
+/// let src = LiveKitSrc::new("ws://127.0.0.1:7880", "room", "g2g-subscriber")
+///     .with_api_key("devkey", "secret")
+///     .with_frame_limit(300);
+/// ```
 pub struct LiveKitSrc {
     url: String,
     room: String,

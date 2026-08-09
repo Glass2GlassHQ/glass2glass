@@ -63,6 +63,14 @@ fn read_records(buf: &[u8]) -> Result<Vec<PipelinePacket>, G2gError> {
 
 // --- recordsink ---------------------------------------------------------
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::record::RecordSink;
+///
+/// let sink = RecordSink::new("/tmp/capture.g2grec");
+/// assert_eq!(sink.frames_recorded(), 0);
+/// ```
 #[derive(Debug)]
 pub struct RecordSink {
     path: PathBuf,
@@ -178,6 +186,13 @@ impl PadTemplates for RecordSink {
 
 // --- replaysrc ----------------------------------------------------------
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::record::ReplaySrc;
+///
+/// let source = ReplaySrc::new("/tmp/capture.g2grec");
+/// ```
 #[derive(Debug)]
 pub struct ReplaySrc {
     path: PathBuf,

@@ -159,6 +159,14 @@ impl core::fmt::Debug for DecoderState {
     }
 }
 
+/// # Example
+///
+/// ```ignore
+/// use g2g_plugins::vtdecode::VtDecode;
+///
+/// let decode = VtDecode::h264().with_cv_output();
+/// let hevc = VtDecode::h265();
+/// ```
 #[derive(Debug)]
 pub struct VtDecode {
     codec: VideoCodec,

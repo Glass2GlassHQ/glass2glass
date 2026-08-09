@@ -45,6 +45,16 @@ use core::pin::Pin;
 /// `Caps::Text{Utf8}` cue frames out. See the module docs for the teed-branch
 /// topology. The service selection ([`CcSource`]) and decode are the shared
 /// [`CaptionDecoder`].
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::cea::Cea608Channel;
+/// use g2g_plugins::ccextract::CcExtract;
+///
+/// let cc1 = CcExtract::cea608(Cea608Channel::Cc1);
+/// let service1 = CcExtract::cea708(1);
+/// ```
 #[derive(Debug)]
 pub struct CcExtract {
     decoder: CaptionDecoder,

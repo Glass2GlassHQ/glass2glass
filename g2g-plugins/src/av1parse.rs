@@ -34,6 +34,14 @@ use crate::annexb::BitReader;
 /// `OBU_SEQUENCE_HEADER` type, the only OBU carrying frame geometry.
 const OBU_SEQUENCE_HEADER: u8 = 1;
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::av1parse::Av1Parse;
+///
+/// let parser = Av1Parse::new();
+/// assert_eq!(parser.caps_changes_emitted(), 0);
+/// ```
 #[derive(Debug, Default)]
 pub struct Av1Parse {
     configured: bool,

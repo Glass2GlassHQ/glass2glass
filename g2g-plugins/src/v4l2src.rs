@@ -529,6 +529,16 @@ fn capture_dmabuf(
     Ok(())
 }
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::v4l2src::{IoMode, V4l2Src};
+///
+/// let src = V4l2Src::new("/dev/video0")
+///     .with_size(1280, 720)
+///     .with_fps(30)
+///     .with_io_mode(IoMode::DmaBuf);
+/// ```
 #[derive(Debug)]
 pub struct V4l2Src {
     device: String,

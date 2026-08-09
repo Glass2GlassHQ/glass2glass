@@ -331,6 +331,15 @@ enum DecodedPayload {
     Cuda(OwnedCudaBuffer),
 }
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::ffmpegdec::{Backend, FfmpegVideoDec, OutputFormat};
+///
+/// let dec = FfmpegVideoDec::new()
+///     .with_output_format(OutputFormat::Nv12)
+///     .with_backend(Backend::Software);
+/// ```
 pub struct FfmpegVideoDec {
     decoder: Option<ffmpeg::decoder::Video>,
     last_caps: Option<Caps>,

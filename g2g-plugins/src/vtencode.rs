@@ -113,6 +113,15 @@ impl core::fmt::Debug for EncoderState {
     }
 }
 
+/// # Example
+///
+/// ```ignore
+/// use g2g_plugins::vtencode::VtEncode;
+///
+/// let encode = VtEncode::h264()
+///     .with_bitrate(6_000_000)
+///     .with_keyframe_interval(30);
+/// ```
 #[derive(Debug)]
 pub struct VtEncode {
     codec: VideoCodec,

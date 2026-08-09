@@ -80,6 +80,15 @@ impl CcEncoder {
 /// video access units (and the merged output), input 1 the timed text cues.
 /// Encodes CEA-608 by default ([`new`](CcInsert::new)) or CEA-708
 /// ([`cea708`](CcInsert::cea708)).
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::ccinsert::CcInsert;
+///
+/// let cea608 = CcInsert::new();
+/// let cea708 = CcInsert::cea708(1);
+/// ```
 #[derive(Debug)]
 pub struct CcInsert {
     enc: CcEncoder,

@@ -278,6 +278,15 @@ mod element {
     }
 
     /// Sink that turns each ST 0601 local set into a CoT event on the wire.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use g2g_plugins::cotsink::CotSink;
+    ///
+    /// let dest = "239.2.3.1:6969".parse().unwrap();
+    /// let sink = CotSink::new(dest).with_uid("g2g-uav-1").with_stale_secs(30);
+    /// ```
     #[derive(Debug)]
     pub struct CotSink {
         dest: SocketAddr,

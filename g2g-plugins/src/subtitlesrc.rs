@@ -30,6 +30,16 @@ use crate::filesink::io_err;
 
 /// A subtitle / text file source. Emits the file's bytes as a single
 /// [`Caps::Text`] `format` frame, then `Eos`.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_core::TextFormat;
+/// use g2g_plugins::subtitlesrc::SubtitleSrc;
+///
+/// let element = SubtitleSrc::new("captions.srt", TextFormat::Srt);
+/// let sniffed = SubtitleSrc::from_location("captions.vtt");
+/// ```
 #[derive(Debug)]
 pub struct SubtitleSrc {
     path: PathBuf,

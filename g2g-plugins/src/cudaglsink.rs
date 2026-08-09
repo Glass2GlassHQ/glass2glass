@@ -96,6 +96,16 @@ const WORKER_NAME: &str = "g2g-cudaglsink";
 /// Sink-side handle set. Only `Send + Sync` state lives here so the
 /// multi-thread runner can move the sink between tasks. The worker's frame
 /// payload is the decoded CUDA buffer, still device-resident.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::cudaglsink::CudaGlSink;
+///
+/// let sink = CudaGlSink::new()
+///     .with_title("g2g preview")
+///     .with_max_lateness_ns(20_000_000);
+/// ```
 pub struct CudaGlSink {
     title: String,
     app_id: String,

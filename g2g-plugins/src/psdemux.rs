@@ -933,6 +933,15 @@ pub enum PsStream {
 }
 
 /// Demuxes an MPEG program stream into one selected elementary stream.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::psdemux::{PsDemux, PsStream};
+///
+/// let demux = PsDemux::new().with_stream(PsStream::Ac3);
+/// assert_eq!(demux.stream(), PsStream::Ac3);
+/// ```
 #[derive(Debug)]
 pub struct PsDemux {
     demux: PsDemuxer,
@@ -1438,6 +1447,15 @@ pub fn subpicture_streams(demux: &PsDemuxer) -> Vec<PsElementaryStream> {
 /// streams out, one selected [`PsStream`] per output port. The program stream
 /// sibling of [`TsDemuxN`](crate::tsdemux::TsDemuxN), driven by
 /// [`run_source_fanout`](g2g_core::runtime::run_source_fanout).
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::psdemux::{PsDemuxN, PsStream};
+///
+/// let demux = PsDemuxN::new(vec![PsStream::Mpeg2, PsStream::Ac3]);
+/// assert_eq!(demux.port_count(), 2);
+/// ```
 #[derive(Debug)]
 pub struct PsDemuxN {
     demux: PsDemuxer,

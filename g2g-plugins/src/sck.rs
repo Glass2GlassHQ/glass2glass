@@ -156,6 +156,14 @@ fn shareable_content() -> Option<Retained<SCShareableContent>> {
 }
 
 /// Captures the main display as NV12 frames.
+///
+/// # Example
+///
+/// ```ignore
+/// use g2g_plugins::sck::ScreenCaptureSrc;
+///
+/// let source = ScreenCaptureSrc::new(120).with_cv_output();
+/// ```
 #[derive(Debug)]
 pub struct ScreenCaptureSrc {
     target_buffers: u64,

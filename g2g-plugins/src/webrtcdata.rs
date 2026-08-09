@@ -276,6 +276,18 @@ fn feed(rtc: &mut Rtc, local: SocketAddr, source: SocketAddr, contents: &[u8]) -
 }
 
 /// Native P2P WebRTC data-channel ingest. See the module docs.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_core::ByteStreamEncoding;
+/// use g2g_plugins::webrtcdata::WebRtcDataSrc;
+/// use g2g_plugins::webrtcduplex::{SdpChannel, SignalRole};
+///
+/// let (local, _remote) = SdpChannel::pair();
+/// let source = WebRtcDataSrc::new(SignalRole::Answerer, local)
+///     .with_encoding(ByteStreamEncoding::MpegTs);
+/// ```
 #[derive(Debug)]
 pub struct WebRtcDataSrc {
     role: SignalRole,
@@ -451,6 +463,18 @@ impl SourceLoop for WebRtcDataSrc {
 }
 
 /// Native P2P WebRTC data-channel egress. See the module docs.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::webrtcdata::WebRtcDataSink;
+/// use g2g_plugins::webrtcduplex::{SdpChannel, SignalRole};
+///
+/// let (local, _remote) = SdpChannel::pair();
+/// let sink = WebRtcDataSink::new(SignalRole::Offerer, local)
+///     .with_label("g2g-data")
+///     .with_ordered(true);
+/// ```
 pub struct WebRtcDataSink {
     role: SignalRole,
     sig: Option<SdpChannel>,

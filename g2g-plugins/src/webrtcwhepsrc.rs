@@ -107,6 +107,16 @@ impl Media {
 }
 
 /// WHEP-subscribing WebRTC ingest source. See the module docs.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::webrtcwhepsrc::WebRtcWhepSrc;
+///
+/// let source = WebRtcWhepSrc::new("http://localhost:8889/mystream/whep")
+///     .with_stun_server("stun.l.google.com:19302")
+///     .with_frame_limit(300);
+/// ```
 pub struct WebRtcWhepSrc {
     whep_url: String,
     bearer: Option<String>,

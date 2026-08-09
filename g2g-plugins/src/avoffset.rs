@@ -24,6 +24,15 @@ use g2g_core::{
 };
 
 /// Shifts frame timestamps by a signed offset. See the module docs.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::avoffset::AvOffset;
+///
+/// // ... ! avoffset offset=40000000 ! audiosink
+/// let element = AvOffset::new(40_000_000);
+/// ```
 #[derive(Debug, Default)]
 pub struct AvOffset {
     /// Signed nanosecond shift applied to PTS/DTS. Positive delays, negative

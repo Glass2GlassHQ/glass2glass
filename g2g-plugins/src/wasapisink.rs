@@ -70,6 +70,14 @@ enum WorkerCmd {
     Shutdown,
 }
 
+/// # Example
+///
+/// ```ignore
+/// use g2g_plugins::wasapisink::WasapiSink;
+///
+/// let sink = WasapiSink::new().with_device("{0.0.0.00000000}.{endpoint-id}");
+/// assert_eq!(sink.frames_rendered(), 0);
+/// ```
 pub struct WasapiSink {
     /// Endpoint id to render on; empty opens the default endpoint.
     device: String,

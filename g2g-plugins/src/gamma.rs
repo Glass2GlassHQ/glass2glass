@@ -43,6 +43,14 @@ fn build_lut(gamma: f64) -> [u8; 256] {
     lut
 }
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::gamma::Gamma;
+///
+/// // gst-launch equivalent: gamma gamma=2.2
+/// let gamma = Gamma::new().with_gamma(2.2);
+/// ```
 #[derive(Debug)]
 pub struct Gamma {
     gamma: f64,

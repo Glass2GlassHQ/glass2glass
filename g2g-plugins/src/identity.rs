@@ -16,6 +16,14 @@ use g2g_core::{
     PipelinePacket,
 };
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::identity::IdentityTransform;
+///
+/// let element = IdentityTransform::new();
+/// assert_eq!(element.forwarded(), 0);
+/// ```
 #[derive(Debug, Default)]
 pub struct IdentityTransform {
     forwarded: u64,

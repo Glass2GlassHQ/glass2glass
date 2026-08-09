@@ -38,6 +38,15 @@ use crate::filesink::io_err;
 use crate::vobsub::{parse_idx_index, read_spu_packet, spu_timing, IdxStream};
 
 /// A VobSub `.idx` / `.sub` sidecar source.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::vobsubsrc::VobSubSrc;
+///
+/// // vobsubsrc location=movie.idx ! vobsubdec ! compositor.
+/// let src = VobSubSrc::new("movie.idx").with_language("en");
+/// ```
 #[derive(Debug)]
 pub struct VobSubSrc {
     idx_path: PathBuf,

@@ -39,6 +39,13 @@ use web_sys::{
 
 use crate::webcodecsdecode::copy_out_rgba;
 
+/// # Example
+///
+/// ```ignore
+/// use g2g_plugins::webcamerasrc::WebCameraSrc;
+///
+/// let src = WebCameraSrc::new(640, 480, 300);
+/// ```
 #[derive(Debug)]
 pub struct WebCameraSrc {
     width: u32,

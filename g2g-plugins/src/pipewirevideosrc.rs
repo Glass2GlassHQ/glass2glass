@@ -168,6 +168,16 @@ enum FromWorker {
     Failed(G2gError),
 }
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::pipewirevideosrc::{IoMode, PipeWireVideoSrc};
+///
+/// let src = PipeWireVideoSrc::new()
+///     .with_size(1920, 1080)
+///     .with_fps(30)
+///     .with_io_mode(IoMode::DmaBuf);
+/// ```
 #[derive(Debug)]
 pub struct PipeWireVideoSrc {
     /// Node to capture from (`node.name` or object serial); empty = the default

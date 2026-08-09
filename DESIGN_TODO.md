@@ -708,4 +708,3 @@ differential); AAC is not, so it wants a golden / determinism check instead.
 ## Documentation
 
 - Architecture diagrams in [docs/](docs/) (the Pages site is text-only).
-- Per-element rustdoc pass: every public element type gets an example block.

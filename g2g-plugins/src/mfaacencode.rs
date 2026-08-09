@@ -65,6 +65,14 @@ struct EncoderState {
     provides_samples: bool,
 }
 
+/// # Example
+///
+/// ```ignore
+/// use g2g_plugins::mfaacencode::MfAacEncode;
+///
+/// // 160 kbps AAC-LC
+/// let encode = MfAacEncode::new().with_bytes_per_second(20_000);
+/// ```
 #[derive(Debug)]
 pub struct MfAacEncode {
     state: Option<EncoderState>,

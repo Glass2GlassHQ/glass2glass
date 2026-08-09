@@ -43,6 +43,15 @@ const FORMATS: [RawVideoFormat; 12] = [
     RawVideoFormat::I444p12,
 ];
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::videocrop::VideoCrop;
+///
+/// // videocrop top=8 bottom=8 left=16 right=16
+/// let crop = VideoCrop::new(8, 8, 16, 16);
+/// assert_eq!(crop.insets(), (8, 8, 16, 16));
+/// ```
 #[derive(Debug)]
 pub struct VideoCrop {
     /// Pixels cropped from each edge (GStreamer `videocrop` model). Output

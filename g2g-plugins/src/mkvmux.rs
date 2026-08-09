@@ -54,6 +54,15 @@ use crate::matroska::{
 use crate::subparse::frame_subtitle_block;
 
 /// Muxes one elementary stream into a Matroska / WebM byte stream.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::mkvmux::MkvMux;
+///
+/// // gst-launch equivalent: ... ! mkvmux streamable=true ! filesink location=out.mkv
+/// let mux = MkvMux::new().with_streamable(true);
+/// ```
 #[derive(Debug)]
 pub struct MkvMux {
     /// Current input caps, set at configure and refined by `CapsChanged` until the

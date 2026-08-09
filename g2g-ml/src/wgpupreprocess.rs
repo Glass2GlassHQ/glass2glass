@@ -215,6 +215,13 @@ struct TexGpu {
     out_bytes: usize,
 }
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_ml::wgpupreprocess::WgpuPreprocess;
+///
+/// let preprocess = WgpuPreprocess::new().with_gpu_output();
+/// ```
 #[derive(Debug)]
 pub struct WgpuPreprocess {
     width: u32,

@@ -27,6 +27,18 @@ use web_sys::{CloseEvent, MessageEvent, RtcDataChannel, RtcDataChannelType};
 
 use crate::webutil::Inbox;
 
+/// # Example
+///
+/// ```ignore
+/// use g2g_core::Caps;
+/// use g2g_plugins::webrtcsrc::WebRtcSrc;
+/// use web_sys::RtcDataChannel;
+///
+/// // `channel` comes from the app's own signaling handshake.
+/// fn build(channel: RtcDataChannel, caps: Caps) -> WebRtcSrc {
+///     WebRtcSrc::new(channel, caps)
+/// }
+/// ```
 #[derive(Debug)]
 pub struct WebRtcSrc {
     channel: RtcDataChannel,

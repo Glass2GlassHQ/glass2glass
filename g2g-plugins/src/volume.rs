@@ -21,6 +21,13 @@ use g2g_core::{
     PropKind, PropValue, PropertySpec,
 };
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::volume::Volume;
+///
+/// let vol = Volume::new().with_volume(0.5).with_mute(false);
+/// ```
 #[derive(Debug)]
 pub struct Volume {
     volume: f64,

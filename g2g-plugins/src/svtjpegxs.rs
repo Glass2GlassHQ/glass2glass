@@ -259,6 +259,14 @@ fn raw_geometry(caps: &Caps) -> Result<(RawVideoFormat, u32, u32), G2gError> {
 
 /// Encodes planar YUV `RawVideo` into a `CompressedVideo{JpegXs}` codestream via
 /// SVT-JPEG-XS (one codestream per frame, RFC 9134 codestream packetization mode).
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::svtjpegxs::SvtJpegXsEnc;
+///
+/// let enc = SvtJpegXsEnc::new();
+/// ```
 pub struct SvtJpegXsEnc {
     width: u32,
     height: u32,
@@ -580,6 +588,14 @@ impl PadTemplates for SvtJpegXsEnc {
 
 /// Decodes a `CompressedVideo{JpegXs}` codestream into planar YUV `RawVideo` via
 /// SVT-JPEG-XS. Geometry / format are discovered from the first codestream.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::svtjpegxs::SvtJpegXsDec;
+///
+/// let dec = SvtJpegXsDec::new();
+/// ```
 pub struct SvtJpegXsDec {
     /// Boxed for a stable C `private_ptr` address; `None` until the first frame.
     dec: Option<Box<ffi::DecoderApi>>,

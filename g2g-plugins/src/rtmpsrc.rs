@@ -35,6 +35,15 @@ use crate::rtmp::RtmpSession;
 /// well under this.
 const READ_BUF: usize = 65_536;
 
+/// # Example
+///
+/// ```no_run
+/// use std::net::SocketAddr;
+///
+/// use g2g_plugins::rtmpsrc::RtmpSrc;
+///
+/// let src = RtmpSrc::new("0.0.0.0:1935".parse::<SocketAddr>().unwrap());
+/// ```
 #[derive(Debug)]
 pub struct RtmpSrc {
     bind: SocketAddr,

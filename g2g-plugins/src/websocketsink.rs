@@ -25,6 +25,13 @@ use web_sys::{Event, WebSocket};
 
 use crate::webutil::Inbox;
 
+/// # Example
+///
+/// ```ignore
+/// use g2g_plugins::websocketsink::WebSocketSink;
+///
+/// let sink = WebSocketSink::new("ws://127.0.0.1:8080");
+/// ```
 pub struct WebSocketSink {
     url: String,
     socket: Option<WebSocket>,

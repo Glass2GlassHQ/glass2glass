@@ -18,6 +18,13 @@ use g2g_core::{
     OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::inputselector::InputSelector;
+///
+/// let selector = InputSelector::new(2).with_active(1);
+/// ```
 #[derive(Debug)]
 pub struct InputSelector {
     inputs: usize,

@@ -28,6 +28,15 @@ use g2g_core::{
 
 use crate::clock::WallClock;
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::clocksync::ClockSyncTransform;
+///
+/// let sync = ClockSyncTransform::new()
+///     .with_sync(true)
+///     .with_ts_offset_ns(20_000_000);
+/// ```
 #[derive(Debug)]
 pub struct ClockSyncTransform {
     /// The PTS -> clock deadline, first-buffer anchor and segment mapping.

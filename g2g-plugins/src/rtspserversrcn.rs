@@ -64,6 +64,15 @@ const DEFAULT_FPS: u32 = 30;
 /// so a stalled branch backs its own publisher up rather than the others.
 const PAD_QUEUE: usize = 4;
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::rtspserversrcn::RtspServerSrcN;
+///
+/// let src = RtspServerSrcN::new("0.0.0.0:8554".parse().unwrap(), 4)
+///     .with_video_size(1920, 1080)
+///     .with_framerate(30);
+/// ```
 #[derive(Debug)]
 pub struct RtspServerSrcN {
     rtsp_addr: SocketAddr,

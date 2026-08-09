@@ -138,6 +138,17 @@ enum PumpResult {
     DrainComplete,
 }
 
+/// # Example
+///
+/// ```ignore
+/// use g2g_core::VideoCodec;
+/// use g2g_plugins::mfencode::MfEncode;
+///
+/// let encoder = MfEncode::new()
+///     .with_codec(VideoCodec::H265)
+///     .with_bitrate(4_000_000)
+///     .with_hardware();
+/// ```
 #[derive(Debug)]
 pub struct MfEncode {
     /// Output codec the MFT produces (`H264` default, or `H265`). Selects the

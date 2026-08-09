@@ -76,6 +76,17 @@ struct MediaUnit {
 }
 
 /// Multi-track WHIP-publishing WebRTC egress session. See the module docs.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::webrtcsession::WebRtcSessionSink;
+///
+/// let sink = WebRtcSessionSink::new("http://127.0.0.1:8889/live/whip")
+///     .with_bearer("secret-token")
+///     .with_stun_server("stun.l.google.com:19302");
+/// assert_eq!(sink.frames_sent(), 0);
+/// ```
 pub struct WebRtcSessionSink {
     whip_url: String,
     bearer: Option<String>,

@@ -43,6 +43,14 @@ pub enum JpegEncodeBackend {
 }
 
 /// Encodes packed RGBA/BGRA raw video into a Motion-JPEG stream.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::mjpegenc::MjpegEnc;
+///
+/// let enc = MjpegEnc::new().with_quality(90);
+/// ```
 #[derive(Debug)]
 pub struct MjpegEnc {
     quality: u8,

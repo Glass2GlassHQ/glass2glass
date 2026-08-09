@@ -51,6 +51,14 @@ pub enum Pattern {
     ZonePlate,
 }
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::videotestsrc::{Pattern, VideoTestSrc};
+///
+/// // gst-launch equivalent: videotestsrc pattern=ball num-buffers=300 ! ...
+/// let source = VideoTestSrc::new(1280, 720, 30, 300).with_pattern(Pattern::Ball);
+/// ```
 #[derive(Debug)]
 pub struct VideoTestSrc {
     width: u32,

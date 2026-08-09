@@ -48,6 +48,18 @@ use crate::tsmux::{
 };
 
 /// Muxes N elementary streams into one MPEG-TS byte stream, PTS-ordered.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::tsmuxn::TsMux;
+///
+/// // two elementary streams in one program, PAT/PMT every 100 ms.
+/// let mux = TsMux::new(2)
+///     .with_program_numbers(&[1, 1])
+///     .with_table_interval_ms(100);
+/// assert_eq!(mux.emitted(), 0);
+/// ```
 #[derive(Debug)]
 pub struct TsMux {
     inputs: usize,

@@ -1189,6 +1189,18 @@ pub unsafe fn import_rgba_into_cuda(
 ///
 /// `mapping` is declared before `texture` so the CUDA import is destroyed before
 /// the texture's drop frees the Vulkan memory it aliased.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::cudawgpu::{create_interop_device, WgpuToCuda};
+///
+/// async fn bridge() -> Result<WgpuToCuda, g2g_core::G2gError> {
+///     let interop = create_interop_device().await?;
+///     // SAFETY: the device is opened with VK_KHR_external_memory_fd.
+///     unsafe { WgpuToCuda::new(interop.device, interop.queue, 1920, 1080) }
+/// }
+/// ```
 pub struct WgpuToCuda {
     device: wgpu::Device,
     queue: wgpu::Queue,

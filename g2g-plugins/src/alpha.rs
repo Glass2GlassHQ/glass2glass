@@ -41,6 +41,15 @@ pub enum AlphaMethod {
     Blue,
 }
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::alpha::{Alpha, AlphaMethod};
+///
+/// let element = Alpha::new()
+///     .with_method(AlphaMethod::Green)
+///     .with_alpha(0.5);
+/// ```
 #[derive(Debug)]
 pub struct Alpha {
     method: AlphaMethod,

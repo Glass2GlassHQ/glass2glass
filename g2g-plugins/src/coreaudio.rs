@@ -224,6 +224,15 @@ unsafe fn bind_device(queue: AudioQueueRef, uid: &str) -> Result<(), G2gError> {
 }
 
 /// Renders interleaved PCM to the default Core Audio output device.
+///
+/// # Example
+///
+/// ```ignore
+/// use g2g_plugins::coreaudio::CoreAudioSink;
+///
+/// let sink = CoreAudioSink::new().with_device("BuiltInSpeakerDevice");
+/// assert_eq!(sink.rendered(), 0);
+/// ```
 #[derive(Debug)]
 pub struct CoreAudioSink {
     /// Core Audio device UID to render on; empty takes the system default.
@@ -578,6 +587,15 @@ impl core::fmt::Debug for SrcState {
 }
 
 /// Captures interleaved PCM from the default Core Audio input device.
+///
+/// # Example
+///
+/// ```ignore
+/// use g2g_plugins::coreaudio::CoreAudioSrc;
+///
+/// // 48 kHz stereo, 100 buffers then EOS.
+/// let source = CoreAudioSrc::new(48_000, 2, 100).with_device("BuiltInMicrophoneDevice");
+/// ```
 #[derive(Debug)]
 pub struct CoreAudioSrc {
     /// Core Audio device UID to capture from; empty takes the system default.

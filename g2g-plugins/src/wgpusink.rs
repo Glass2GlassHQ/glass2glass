@@ -86,6 +86,19 @@ enum Target {
 }
 
 /// Presents `MemoryDomain::WgpuTexture` frames to a target by GPU blit.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_core::G2gError;
+/// use g2g_plugins::gpu::GpuContext;
+/// use g2g_plugins::wgpusink::WgpuSink;
+///
+/// async fn build() -> Result<WgpuSink, G2gError> {
+///     let ctx = GpuContext::headless().await?;
+///     Ok(WgpuSink::offscreen(ctx, 1920, 1080).with_max_lateness_ns(20_000_000))
+/// }
+/// ```
 pub struct WgpuSink {
     ctx: GpuContext,
     pipeline: wgpu::RenderPipeline,

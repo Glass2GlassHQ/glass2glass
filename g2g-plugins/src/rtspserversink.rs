@@ -280,6 +280,16 @@ impl Client {
     }
 }
 
+/// # Example
+///
+/// ```no_run
+/// use core::time::Duration;
+/// use g2g_plugins::rtspserversink::RtspServerSink;
+///
+/// let sink = RtspServerSink::new("0.0.0.0:8554".parse().unwrap())
+///     .with_rtp(96, 0x1234_5678)
+///     .with_rtcp_sr_interval(Duration::from_secs(5));
+/// ```
 #[derive(Debug)]
 pub struct RtspServerSink {
     rtsp_addr: SocketAddr,

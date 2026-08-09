@@ -48,6 +48,15 @@ fn ts_bytestream() -> Caps {
     }
 }
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::srtsrc::SrtSrc;
+///
+/// let source = SrtSrc::new("0.0.0.0:9000".parse().unwrap())
+///     .with_passphrase("hunter2hunter2")
+///     .with_frame_limit(100);
+/// ```
 #[derive(Debug)]
 pub struct SrtSrc {
     bind: SocketAddr,

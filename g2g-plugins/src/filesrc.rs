@@ -43,6 +43,19 @@ const DEFAULT_CHUNK_SIZE: usize = 64 * 1024;
 /// confirm an MPEG-TS sync byte across several 188-byte packets.
 const SNIFF_LEN: usize = 4 * 188;
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_core::{ByteStreamEncoding, Caps};
+/// use g2g_plugins::filesrc::FileSrc;
+///
+/// // gst-launch equivalent: filesrc location=clip.ts
+/// let src = FileSrc::new(
+///     "clip.ts",
+///     Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs },
+/// )
+/// .with_chunk_size(32 * 1024);
+/// ```
 #[derive(Debug)]
 pub struct FileSrc {
     path: PathBuf,

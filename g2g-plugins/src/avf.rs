@@ -221,6 +221,14 @@ unsafe fn open_session(
 // ---------------------------------------------------------------------------
 
 /// Captures NV12 frames from the default camera (VGA preset).
+///
+/// # Example
+///
+/// ```ignore
+/// use g2g_plugins::avf::AvfVideoSrc;
+///
+/// let src = AvfVideoSrc::new(300).with_cv_output();
+/// ```
 #[derive(Debug)]
 pub struct AvfVideoSrc {
     /// `AVCaptureDevice` unique id to open; empty takes the default camera.
@@ -472,6 +480,14 @@ impl SourceLoop for AvfVideoSrc {
 // ---------------------------------------------------------------------------
 
 /// Captures interleaved S16 PCM from the default microphone.
+///
+/// # Example
+///
+/// ```ignore
+/// use g2g_plugins::avf::AvfAudioSrc;
+///
+/// let src = AvfAudioSrc::new(48_000, 2, 100);
+/// ```
 #[derive(Debug)]
 pub struct AvfAudioSrc {
     /// `AVCaptureDevice` unique id to open; empty takes the default mic.

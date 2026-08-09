@@ -983,6 +983,15 @@ impl UasDatalink {
 /// not a valid ST 0601 set (wrong UL, bad checksum) is dropped, not forwarded;
 /// `verify-checksum=false` tolerates a wrong checksum (encoders get it wrong,
 /// see [`UasDatalink::parse_lenient`]).
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::klv::KlvDecode;
+///
+/// // tolerate encoders that get the ST 0601 checksum wrong
+/// let decode = KlvDecode::new().with_verify_checksum(false);
+/// ```
 #[derive(Debug)]
 pub struct KlvDecode {
     configured: bool,

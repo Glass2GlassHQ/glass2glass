@@ -30,6 +30,19 @@ use g2g_core::{
     MultiInputElement, OutputSink, PipelinePacket, TensorDType,
 };
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_core::{Caps, TensorDType, TensorLayout, TensorShape};
+/// use g2g_ml::batcher::TensorBatcher;
+///
+/// let slot = Caps::Tensor {
+///     dtype: TensorDType::U8,
+///     shape: TensorShape::from_slice(&[1, 3, 224, 224]).unwrap(),
+///     layout: TensorLayout::Nchw,
+/// };
+/// let batcher = TensorBatcher::new(4, slot).unwrap();
+/// ```
 #[derive(Debug)]
 pub struct TensorBatcher {
     /// Per-input caps: a tensor with leading batch dim 1.

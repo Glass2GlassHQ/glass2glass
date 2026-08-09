@@ -28,6 +28,13 @@ use g2g_core::{
     PipelinePacket,
 };
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::gopreverse::GopReverse;
+///
+/// let element = GopReverse::new();
+/// ```
 #[derive(Debug, Default)]
 pub struct GopReverse {
     /// Frames of the GOP being collected, in the order the decoder emitted them.

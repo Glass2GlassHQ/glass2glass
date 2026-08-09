@@ -47,6 +47,14 @@ fn floor_isize(x: f64) -> isize {
     }
 }
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::audioresample::AudioResample;
+///
+/// // audioresample samplerate=48000
+/// let resample = AudioResample::new(48_000);
+/// ```
 #[derive(Debug)]
 pub struct AudioResample {
     /// Target output rate from the `samplerate` property. `0` means "auto": take

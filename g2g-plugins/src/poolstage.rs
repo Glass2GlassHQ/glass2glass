@@ -31,6 +31,15 @@ use g2g_core::{
 
 /// Passthrough transform whose buffer pool tracks the downstream allocation
 /// proposal. See the module docs.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::poolstage::PoolStage;
+///
+/// let stage = PoolStage::new();
+/// assert_eq!(stage.pool_shape(), None);
+/// ```
 #[derive(Debug, Default)]
 pub struct PoolStage {
     /// Pool sized to the last allocation proposal; rebuilt when it changes.

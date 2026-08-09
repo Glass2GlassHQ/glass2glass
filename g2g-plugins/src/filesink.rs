@@ -30,6 +30,13 @@ pub(crate) fn io_err(e: std::io::Error) -> G2gError {
     G2gError::Hardware(HardwareError::Io(e.raw_os_error().unwrap_or(0)))
 }
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::filesink::FileSink;
+///
+/// let element = FileSink::new("out.h264");
+/// ```
 #[derive(Debug)]
 pub struct FileSink {
     path: PathBuf,

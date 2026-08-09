@@ -36,6 +36,14 @@ use symphonia_core::packet::PacketRef;
 use symphonia_core::units::{Duration, Timestamp};
 
 /// Decodes a Vorbis elementary stream into raw interleaved S16LE PCM.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::vorbisdec::VorbisDec;
+///
+/// let decoder = VorbisDec::new();
+/// ```
 pub struct VorbisDec {
     /// The identification header (`\x01vorbis`), held until setup arrives.
     ident: Option<Vec<u8>>,

@@ -151,6 +151,15 @@ impl PlanarBuffer for Nv12Planar {
 /// the simple flip cadence v1 uses.
 const POOL_SIZE: usize = 2;
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::kmssink::KmsSink;
+///
+/// let element = KmsSink::new()
+///     .with_device("/dev/dri/card1")
+///     .with_max_lateness_ns(20_000_000);
+/// ```
 pub struct KmsSink {
     device_path: PathBuf,
     card: Option<Card>,

@@ -21,6 +21,13 @@ use g2g_core::{
     PropKind, PropValue, PropertySpec,
 };
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::audiopanorama::AudioPanorama;
+///
+/// let pan = AudioPanorama::new().with_panorama(-0.5);
+/// ```
 #[derive(Debug)]
 pub struct AudioPanorama {
     panorama: f64,

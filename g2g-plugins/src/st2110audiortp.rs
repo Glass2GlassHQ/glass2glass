@@ -133,6 +133,17 @@ fn frames_per_packet(sample_rate: u32, ptime_us: u32) -> usize {
 // ================================================================
 
 /// ST 2110-30 audio sink: PCM `DataFrame`s -> RTP over UDP.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_core::{AsyncElement, PropValue};
+/// use g2g_plugins::st2110audiortp::St2110AudioSink;
+///
+/// let mut sink = St2110AudioSink::new();
+/// sink.set_property("host", PropValue::Str("239.0.0.1".into())).unwrap();
+/// sink.set_property("ptime-us", PropValue::Uint(1000)).unwrap();
+/// ```
 pub struct St2110AudioSink {
     host: String,
     port: u16,
@@ -362,6 +373,14 @@ impl PadTemplates for St2110AudioSink {
 // ================================================================
 
 /// ST 2110-30 audio source: RTP over UDP -> PCM `DataFrame`s.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::st2110audiortp::St2110AudioSrc;
+///
+/// let src = St2110AudioSrc::new();
+/// ```
 pub struct St2110AudioSrc {
     address: String,
     port: u16,

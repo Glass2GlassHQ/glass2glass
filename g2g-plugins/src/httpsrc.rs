@@ -41,6 +41,18 @@ use g2g_core::{
     PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_core::{ByteStreamEncoding, Caps};
+/// use g2g_plugins::httpsrc::HttpSrc;
+///
+/// let src = HttpSrc::new(
+///     "https://example.com/segment.ts",
+///     Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs },
+/// )
+/// .with_prebuffer_bytes(64 * 1024);
+/// ```
 #[derive(Debug)]
 pub struct HttpSrc {
     url: String,

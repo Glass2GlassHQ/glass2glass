@@ -40,6 +40,17 @@ type SlotCell = Arc<ArcSwap<Mutex<Box<dyn DynAsyncElement + Send>>>>;
 /// Atomically swappable container for a `Box<dyn DynAsyncElement>`.
 /// Implements `AsyncElement` so it can sit inside a typed pipeline runner
 /// unchanged — the swap behavior is invisible to the runner.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_core::fanout::Gate;
+/// use g2g_core::slot::ElementSlot;
+///
+/// let slot = ElementSlot::new(Box::new(Gate::new(true)));
+/// let handle = slot.handle();
+/// handle.swap(Box::new(Gate::new(false)));
+/// ```
 pub struct ElementSlot {
     inner: SlotCell,
 }

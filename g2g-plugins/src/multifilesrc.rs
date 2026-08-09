@@ -28,6 +28,14 @@ use g2g_core::{
 
 use crate::filesink::io_err;
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::multifilesrc::MultiFileSrc;
+///
+/// // multifilesrc location=img%05d.jpg ! mjpegdec ! ...
+/// let src = MultiFileSrc::new("img%05d.jpg");
+/// ```
 #[derive(Debug)]
 pub struct MultiFileSrc {
     location: String,

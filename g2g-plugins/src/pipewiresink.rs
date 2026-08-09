@@ -60,6 +60,13 @@ enum Ctrl {
 /// Shared PCM queue between the element and the realtime `process` callback.
 type SharedQueue = Arc<Mutex<VecDeque<u8>>>;
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::pipewiresink::PipeWireSink;
+///
+/// let sink = PipeWireSink::new().with_target("alsa_output.pci-0000_00_1f.3.analog-stereo");
+/// ```
 pub struct PipeWireSink {
     /// Node to play to (`node.name` or object serial); empty = the default sink
     /// the session manager picks.

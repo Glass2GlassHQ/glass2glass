@@ -47,6 +47,15 @@ pub fn normalize_rgba_nchw(rgba: &[u8], width: usize, height: usize) -> Vec<f32>
     flat
 }
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_ml::burninfer::BurnInference;
+///
+/// // 4x4 RGBA in, 2 logits out: K = 3 * 4 * 4.
+/// let weights = vec![0.0f32; 3 * 4 * 4 * 2];
+/// let element = BurnInference::linear(4, 4, weights, vec![0.0; 2]).unwrap();
+/// ```
 #[derive(Debug)]
 pub struct BurnInference {
     width: u32,

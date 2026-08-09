@@ -353,6 +353,18 @@ fn build_bind_group(
 }
 
 /// GPU compositor: N RGBA8 inputs blended into one canvas by a compute shader.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::compositor::CompositorPad;
+/// use g2g_plugins::wgpucompositor::WgpuCompositor;
+///
+/// let pads = vec![CompositorPad::at(0, 0), CompositorPad::at(640, 0)];
+/// let comp = WgpuCompositor::new(1280, 720, pads)
+///     .with_framerate(60)
+///     .with_background([0, 0, 0, 255]);
+/// ```
 #[derive(Debug)]
 pub struct WgpuCompositor {
     out_w: u32,

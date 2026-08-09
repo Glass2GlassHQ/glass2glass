@@ -130,6 +130,16 @@ fn plane_layout(format: RawVideoFormat, w: usize, h: usize) -> Option<Vec<(usize
 
 /// Encodes raw I420 / NV12 / I420_10LE video into an H.264 Annex-B elementary
 /// stream.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::ffmpegenc::{Backend, FfmpegH264Enc};
+///
+/// let encoder = FfmpegH264Enc::new()
+///     .with_backend(Backend::Software)
+///     .with_bitrate(4_000_000);
+/// ```
 pub struct FfmpegH264Enc {
     backend: Backend,
     width: u32,

@@ -28,6 +28,13 @@ use crate::wasmclock::wait_to_present;
 use wasm_bindgen::{Clamped, JsCast};
 use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement, ImageData};
 
+/// # Example
+///
+/// ```ignore
+/// use g2g_plugins::canvassink::CanvasSink;
+///
+/// let sink = CanvasSink::new("video-canvas").with_max_lateness_ns(20_000_000);
+/// ```
 #[derive(Debug)]
 pub struct CanvasSink {
     canvas_id: String,

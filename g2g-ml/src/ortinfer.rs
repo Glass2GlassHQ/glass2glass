@@ -66,6 +66,17 @@ struct Model {
     input_dtype: TensorDType,
 }
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_ml::ortinfer::OrtInference;
+///
+/// // gst-launch style: ortinfer model=yolov8n.onnx
+/// let element = OrtInference::from_file("yolov8n.onnx").unwrap();
+/// let tensor_fed = OrtInference::from_file("yolov8n.onnx")
+///     .unwrap()
+///     .with_tensor_input();
+/// ```
 #[derive(Debug)]
 pub struct OrtInference {
     /// `None` until a model is loaded; negotiation and `process` fail with

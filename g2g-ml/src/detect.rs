@@ -26,6 +26,13 @@ use g2g_core::{
 /// Default model input resolution used to normalize box coordinates.
 const DEFAULT_INPUT_SIZE: f32 = 640.0;
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_ml::detect::DetectionPostprocess;
+///
+/// let postprocess = DetectionPostprocess::new(0.25, 0.45).with_input_size(640, 640);
+/// ```
 #[derive(Debug)]
 pub struct DetectionPostprocess {
     /// Minimum class score to emit a detection.

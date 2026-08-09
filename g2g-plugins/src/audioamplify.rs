@@ -53,6 +53,15 @@ impl AmplifyMethod {
     }
 }
 
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::audioamplify::{AmplifyMethod, AudioAmplify};
+///
+/// let amplify = AudioAmplify::new()
+///     .with_amplification(2.0)
+///     .with_method(AmplifyMethod::Clip);
+/// ```
 #[derive(Debug)]
 pub struct AudioAmplify {
     amplification: f64,

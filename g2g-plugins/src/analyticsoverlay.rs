@@ -32,6 +32,14 @@ use crate::paint::blend_px;
 /// Draws detection bounding boxes from an attached [`AnalyticsMeta`] onto an
 /// RGBA8 frame. Box outline thickness is configurable; the colour is chosen per
 /// class label from a fixed palette so different classes are distinguishable.
+///
+/// # Example
+///
+/// ```no_run
+/// use g2g_plugins::analyticsoverlay::AnalyticsOverlay;
+///
+/// let overlay = AnalyticsOverlay::new().with_thickness(3);
+/// ```
 #[derive(Debug)]
 pub struct AnalyticsOverlay {
     width: u32,
