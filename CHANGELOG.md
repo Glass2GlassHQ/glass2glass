@@ -9,6 +9,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M986: hosted Python aggregators and sources take GPU frames too, and every CUDA plane exports DLPack.
 - M985: `pyelement` declares the memory domain its frames arrive and leave in, and asks upstream for it.
 - M984: a hosted Python element reads a CUDA frame's NV12 planes through `__cuda_array_interface__`.
+- M987: `BurnInference` runs a multi-head attention topology imported from ONNX.
 - M983: `BurnInference` runs an ONNX topology imported by `burn-onnx` build-time codegen.
 - M981: `VelloTextOverlay` renders text cues on the GPU from the shared placement path.
 - M982: the ffmpeg decoder keeps a mid-stream framerate refinement instead of its 30/1 fallback.
