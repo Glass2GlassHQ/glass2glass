@@ -21,8 +21,8 @@ leverage first:
    libvpx-FFI `VpxDec` stays deferred: it would only duplicate the ffmpeg
    path), and the one complete pure-Rust Opus, `opus-rs` 0.1.26, fails the
    RFC 8251 vectors (re-run `tools/opus-rs-gate` to revisit on a new release).
-   `VulkanVideoDec` residuals: AMD / Intel validation runs and runtime
-   properties (see "Receive / decode").
+   `VulkanVideoDec` residuals: AMD / Intel validation runs (see "Receive /
+   decode").
 4. **Browser demo (speculative product path).** A deployed reference app for the
    in-browser `ort-web` ONNX chain, plus a native sibling running the same graph.
    The GPU-resident in-browser chain is not achievable from idiomatic Rust (wgpu
