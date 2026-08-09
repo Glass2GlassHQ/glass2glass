@@ -891,6 +891,7 @@ impl WgpuCompositor {
         } else {
             MemoryDomain::System(SystemSlice::from_boxed(self.read_canvas()?))
         };
+        #[allow(unused_mut)]
         let mut frame = Frame::new(domain, timing, self.state.next_sequence());
         #[cfg(feature = "metadata")]
         if self.keep_row_padding && !self.gpu_output {
