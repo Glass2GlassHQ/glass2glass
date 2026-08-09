@@ -35,14 +35,14 @@ use g2g_core::{
 
 use crate::gpu::{gpu_err, GpuContext, WgpuTextureKeepAlive};
 use vello::kurbo::{Affine, Rect, Stroke};
-use vello::peniko::{Blob, Color, Fill, ImageAlphaType, ImageData, ImageFormat};
+use vello::peniko::{Blob, Color, ImageAlphaType, ImageData, ImageFormat};
 use vello::wgpu;
 use vello::{AaConfig, AaSupport, RenderParams, Renderer, RendererOptions, Scene};
 
 #[cfg(feature = "vello-text-overlay")]
 use g2g_core::{ElementMetadata, PropError, PropValue, PropertySpec};
 #[cfg(feature = "vello-text-overlay")]
-use vello::peniko::FontData;
+use vello::peniko::{Fill, FontData};
 #[cfg(feature = "vello-text-overlay")]
 use vello::Glyph;
 
@@ -184,6 +184,7 @@ fn draw_frame_image(scene: &mut Scene, rgba: Vec<u8>, w: u32, h: u32) {
 }
 
 /// An opaque-or-translucent RGBA colour as a Vello brush colour.
+#[cfg(feature = "vello-text-overlay")]
 fn brush_color(rgba: [u8; 4]) -> Color {
     Color::from_rgba8(rgba[0], rgba[1], rgba[2], rgba[3])
 }
