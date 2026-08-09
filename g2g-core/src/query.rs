@@ -9,6 +9,7 @@
 //! once after negotiation and expose it on `RunStats`.
 
 use crate::memory::{DomainSet, MemoryDomainKind};
+use crate::meta::MetaRequests;
 
 /// Downstream-proposed buffer allocation parameters (M12 ALLOCATION query).
 ///
@@ -38,6 +39,12 @@ pub struct AllocationParams {
     /// the frame copy-free when it is able to. The producer reconciles this
     /// against what it can emit ([`resolve_for_producer`](Self::resolve_for_producer)).
     pub accepts: DomainSet,
+    /// Per-frame metadata every consumer downstream of this link asked for
+    /// (M976). Rides the same cascade as the buffer parameters, unioned at each
+    /// hop, so a producer several elements upstream can ask
+    /// [`MetaRequests::wants`] before it decides whether to attach optional
+    /// metadata. Empty unless some element declared a request.
+    pub meta_requests: MetaRequests,
 }
 
 impl Default for AllocationParams {
@@ -48,6 +55,7 @@ impl Default for AllocationParams {
             align: 1,
             domain: MemoryDomainKind::System,
             accepts: DomainSet::only(MemoryDomainKind::System),
+            meta_requests: MetaRequests::new(),
         }
     }
 }
@@ -62,6 +70,23 @@ impl AllocationParams {
             align: 1,
             domain: MemoryDomainKind::System,
             accepts: DomainSet::only(MemoryDomainKind::System),
+            meta_requests: MetaRequests::new(),
+        }
+    }
+
+    /// A proposal that constrains nothing about the buffers and carries only
+    /// downstream metadata demand (M976), for a consumer that wants a meta but
+    /// has no pool requirement. It accepts every memory domain, so folding it
+    /// into the cascade cannot turn a producer's own domain choice into a
+    /// conflict.
+    pub const fn meta_demand(meta_requests: MetaRequests) -> Self {
+        Self {
+            size_bytes: 0,
+            min_buffers: 1,
+            align: 1,
+            domain: MemoryDomainKind::System,
+            accepts: DomainSet::ALL,
+            meta_requests,
         }
     }
 
@@ -75,6 +100,7 @@ impl AllocationParams {
             align,
             domain: MemoryDomainKind::Cuda,
             accepts: DomainSet::only(MemoryDomainKind::Cuda),
+            meta_requests: MetaRequests::new(),
         }
     }
 
@@ -88,6 +114,7 @@ impl AllocationParams {
             align,
             domain: MemoryDomainKind::D3D11Texture,
             accepts: DomainSet::only(MemoryDomainKind::D3D11Texture),
+            meta_requests: MetaRequests::new(),
         }
     }
 
@@ -103,6 +130,9 @@ impl AllocationParams {
             // The consumer-most side dictates the domain, so its acceptance set
             // carries forward unchanged.
             accepts: self.accepts,
+            // `upstream` is the folding element's own demand and `self` what came
+            // from downstream of it, which is exactly the cascade hop.
+            meta_requests: upstream.meta_requests.carry_upstream(self.meta_requests),
         }
     }
 
@@ -131,7 +161,28 @@ impl AllocationParams {
             align: self.align.max(other.align),
             domain,
             accepts,
+            // Both branches read the producer's frames, so a demand that changes
+            // those frames needs both branches to have asked.
+            meta_requests: self.meta_requests.join_branches(other.meta_requests),
         })
+    }
+
+    /// This proposal carrying `meta_requests` instead of its own.
+    pub fn with_meta_requests(self, meta_requests: MetaRequests) -> Self {
+        Self {
+            meta_requests,
+            ..self
+        }
+    }
+
+    /// Whether this proposal says anything about the buffers themselves, as
+    /// opposed to carrying only downstream metadata demand. A demand-only
+    /// proposal must not be reconciled against a producer's domains
+    /// ([`resolve_for_producer`](Self::resolve_for_producer)): it accepts every
+    /// domain, so doing so would let a request for metadata decide which memory
+    /// domain the producer allocates in.
+    pub fn constrains_pool(&self) -> bool {
+        *self != Self::meta_demand(self.meta_requests)
     }
 
     /// Reconcile this downstream proposal against what the producer can actually
@@ -157,6 +208,28 @@ impl AllocationParams {
             ..self
         })
     }
+}
+
+/// The proposal an element hands its upstream peer once metadata demand is
+/// folded in (M976). `proposal` is what the element asked for itself, `requests`
+/// what its hop passes on ([`MetaRequests::carry_upstream`]).
+///
+/// An element with no pool requirement of its own still passes the demand on, as
+/// a [`AllocationParams::meta_demand`]. With nothing requested the proposal is
+/// returned untouched, so a graph that declares no requests cascades exactly as
+/// it did before.
+#[cfg(feature = "runtime")]
+pub(crate) fn with_meta_demand(
+    proposal: Option<AllocationParams>,
+    requests: MetaRequests,
+) -> Option<AllocationParams> {
+    if requests.is_empty() {
+        return proposal;
+    }
+    Some(match proposal {
+        Some(p) => p.with_meta_requests(requests),
+        None => AllocationParams::meta_demand(requests),
+    })
 }
 
 /// One element's contribution to a path's latency, plus the aggregate of a
@@ -294,6 +367,7 @@ mod tests {
             align: 64,
             domain: MemoryDomainKind::DmaBuf,
             accepts: DomainSet::only(MemoryDomainKind::DmaBuf),
+            meta_requests: MetaRequests::new(),
         };
         let upstream = AllocationParams::system(4096, 2);
         let merged = downstream.merge(upstream);

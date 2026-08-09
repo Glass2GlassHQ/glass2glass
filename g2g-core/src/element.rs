@@ -342,6 +342,24 @@ pub trait AsyncElement: ElementBound {
         None
     }
 
+    /// The per-frame metadata this element wants attached to the frames it
+    /// receives (M976), the pull half of `meta_transform`'s push half. The
+    /// runner unions the declaration into the allocation cascade travelling
+    /// upstream, so a producer any number of hops away can ask
+    /// [`MetaRequests::wants`](crate::meta::MetaRequests::wants) in
+    /// [`configure_allocation`](Self::configure_allocation) and skip work nobody
+    /// downstream reads. Default: nothing requested, and a graph where every
+    /// element defaults cascades exactly as it did before the hook existed.
+    ///
+    /// Requesting a meta is a hint, never a guarantee: a consumer must still
+    /// handle a frame arriving without it (no producer upstream may be able to
+    /// attach one). Without the `metadata` feature
+    /// [`MetaRequests`](crate::meta::MetaRequests) is a zero-sized empty set, so
+    /// overriding this can only return the default.
+    fn meta_requests(&self) -> crate::meta::MetaRequests {
+        crate::meta::MetaRequests::new()
+    }
+
     /// M16 step 5b: declare this element's negotiation-time constraint
     /// when used as the **sink** of a chain. The default returns the
     /// legacy bridge (`LegacySink` wrapping today's `intercept_caps`).
@@ -491,6 +509,12 @@ pub trait DynAsyncElement: ElementBound {
     #[cfg(feature = "metadata")]
     fn meta_transform(&self) -> Option<crate::meta::Transform> {
         None
+    }
+
+    /// Dyn-safe mirror of [`AsyncElement::meta_requests`]. Default: nothing
+    /// requested.
+    fn meta_requests(&self) -> crate::meta::MetaRequests {
+        crate::meta::MetaRequests::new()
     }
 
     /// Dyn-safe mirror of [`AsyncElement::provide_clock`], so an interior
@@ -646,6 +670,10 @@ impl<T: AsyncElement> DynAsyncElement for T {
         AsyncElement::meta_transform(self)
     }
 
+    fn meta_requests(&self) -> crate::meta::MetaRequests {
+        AsyncElement::meta_requests(self)
+    }
+
     fn provide_clock(&self) -> Option<ClockCandidate> {
         AsyncElement::provide_clock(self)
     }
@@ -773,6 +801,10 @@ impl<'b> DynAsyncElement for &'b mut (dyn DynAsyncElement + 'b) {
     #[cfg(feature = "metadata")]
     fn meta_transform(&self) -> Option<crate::meta::Transform> {
         (**self).meta_transform()
+    }
+
+    fn meta_requests(&self) -> crate::meta::MetaRequests {
+        (**self).meta_requests()
     }
 
     fn provide_clock(&self) -> Option<ClockCandidate> {

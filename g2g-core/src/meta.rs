@@ -32,6 +32,42 @@ impl FrameMetaSet {
     }
 }
 
+/// The metadata types a downstream element asks its producers to attach
+/// (feature `metadata` **off**): a zero-sized always-empty set. The plumbing
+/// that carries it ([`AllocationParams`](crate::AllocationParams)) compiles
+/// either way; `request` / `wants` exist only with the feature on.
+#[cfg(not(feature = "metadata"))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MetaRequests;
+
+#[cfg(not(feature = "metadata"))]
+impl MetaRequests {
+    /// An empty request set.
+    #[inline]
+    pub const fn new() -> Self {
+        MetaRequests
+    }
+
+    /// Always true: without the feature nothing can be requested.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        true
+    }
+
+    /// The demand two sibling consumers put on their shared producer, i.e. still
+    /// nothing.
+    #[inline]
+    pub fn join_branches(self, _other: Self) -> Self {
+        self
+    }
+
+    /// The demand this element passes to its producer, i.e. still nothing.
+    #[inline]
+    pub fn carry_upstream(self, _downstream: Self) -> Self {
+        self
+    }
+}
+
 // ---- feature on: the real typed container + analytics graph ----
 
 #[cfg(feature = "metadata")]
@@ -43,7 +79,7 @@ mod on {
     use alloc::string::String;
     use alloc::sync::Arc;
     use alloc::vec::Vec;
-    use core::any::Any;
+    use core::any::{Any, TypeId};
 
     /// How a piece of metadata survives a transform, the GstMeta
     /// `transform_func` analog. Reported by [`FrameMeta::propagate`].
@@ -151,6 +187,165 @@ mod on {
         pub fn propagate(&mut self, transform: Transform) {
             self.0
                 .retain(|m| m.propagate(transform) == Propagation::Keep);
+        }
+    }
+
+    /// How many distinct meta types one [`MetaRequests`] carries. Requests past
+    /// this are dropped, which costs an optimization, never correctness: a
+    /// producer that sees no request just produces what it always did.
+    pub const MAX_META_REQUESTS: usize = 4;
+
+    /// What one request needs of the *other* consumers reading the same frames,
+    /// which decides how it survives a fan-out or an intermediate hop.
+    ///
+    /// `Ord` ranks [`EveryConsumer`](Self::EveryConsumer) above
+    /// [`AnyConsumer`](Self::AnyConsumer): when two elements request one meta
+    /// under different policies the stricter one stands, since it is the one
+    /// that can be misread.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    pub enum RequestPolicy {
+        /// One asking consumer is enough. Attaching the meta costs a consumer
+        /// that did not ask nothing: it reads the same frame it always did and
+        /// ignores the extra ([`AnalyticsMeta`], [`CaptionMeta`],
+        /// [`TimecodeMeta`]).
+        AnyConsumer,
+        /// Every consumer must ask. Honouring the request changes the *buffer*,
+        /// so a consumer that did not ask would misread it: a frame whose rows
+        /// were left padded, read as tightly packed, is corruption rather than a
+        /// missed optimization.
+        EveryConsumer,
+    }
+
+    /// The metadata types a downstream element wants attached to the frames it
+    /// receives, each keyed by [`TypeId`] and carrying its [`RequestPolicy`].
+    /// The pull half of the metadata system (the GStreamer allocation-query
+    /// `add_meta` analog): a consumer declares its requests from
+    /// [`AsyncElement::meta_requests`](crate::AsyncElement::meta_requests), the
+    /// runner carries them up the allocation cascade on
+    /// [`AllocationParams`](crate::AllocationParams), and a producer asks
+    /// [`wants`](Self::wants) when it configures, so optional metadata is
+    /// produced only where somebody reads it.
+    ///
+    /// A small fixed-capacity set, so it rides the `Copy` allocation params
+    /// without an allocation. Entries are kept sorted, so two sets built in
+    /// different orders compare equal (the cascade suppresses a re-propose when
+    /// the params are unchanged).
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    pub struct MetaRequests {
+        entries: [Option<(TypeId, RequestPolicy)>; MAX_META_REQUESTS],
+    }
+
+    impl MetaRequests {
+        /// An empty request set: the element wants no optional metadata.
+        pub const fn new() -> Self {
+            MetaRequests {
+                entries: [None; MAX_META_REQUESTS],
+            }
+        }
+
+        /// This set plus a request for meta `T` that one consumer asking is
+        /// enough for ([`RequestPolicy::AnyConsumer`]). Builder form, since a
+        /// request set is usually written inline:
+        /// `MetaRequests::new().request::<AnalyticsMeta>()`.
+        pub fn request<T: FrameMeta + 'static>(self) -> Self {
+            self.with(TypeId::of::<T>(), RequestPolicy::AnyConsumer)
+        }
+
+        /// This set plus a request for meta `T` that is only honoured when every
+        /// consumer sharing the producer asks for it too
+        /// ([`RequestPolicy::EveryConsumer`]). For a meta whose presence changes
+        /// the buffer, which a consumer that did not ask would misread.
+        pub fn request_from_every_consumer<T: FrameMeta + 'static>(self) -> Self {
+            self.with(TypeId::of::<T>(), RequestPolicy::EveryConsumer)
+        }
+
+        /// Whether meta `T` was requested, under either policy.
+        pub fn wants<T: FrameMeta + 'static>(&self) -> bool {
+            self.policy_of(TypeId::of::<T>()).is_some()
+        }
+
+        /// The policy meta `T` was requested under, `None` if it was not.
+        pub fn policy<T: FrameMeta + 'static>(&self) -> Option<RequestPolicy> {
+            self.policy_of(TypeId::of::<T>())
+        }
+
+        /// The demand two *sibling* consumers put on the one producer they share
+        /// (the branches of a tee). An [`AnyConsumer`](RequestPolicy::AnyConsumer)
+        /// request survives from either side; an
+        /// [`EveryConsumer`](RequestPolicy::EveryConsumer) one only when the
+        /// other branch asks for that meta too, so a branch that would misread
+        /// the changed buffer vetoes it.
+        pub fn join_branches(self, other: Self) -> Self {
+            let mut out = Self::new();
+            for (id, policy) in self.iter().chain(other.iter()) {
+                if policy == RequestPolicy::AnyConsumer
+                    || (self.policy_of(id).is_some() && other.policy_of(id).is_some())
+                {
+                    out = out.with(id, policy);
+                }
+            }
+            out
+        }
+
+        /// The demand this element (`self`, its own requests) passes on to its
+        /// producer, given what arrived from `downstream`. Its own requests
+        /// always travel: it reads the producer's frames itself. A downstream
+        /// [`EveryConsumer`](RequestPolicy::EveryConsumer) request travels only
+        /// when this element asks for that meta too, since the producer's frames
+        /// pass through here first and a hop that cannot read the changed buffer
+        /// vetoes it just as a sibling branch does.
+        pub fn carry_upstream(self, downstream: Self) -> Self {
+            let mut out = self;
+            for (id, policy) in downstream.iter() {
+                if policy == RequestPolicy::AnyConsumer || self.policy_of(id).is_some() {
+                    out = out.with(id, policy);
+                }
+            }
+            out
+        }
+
+        pub fn is_empty(&self) -> bool {
+            self.entries[0].is_none()
+        }
+
+        pub fn len(&self) -> usize {
+            self.entries.iter().flatten().count()
+        }
+
+        fn iter(&self) -> impl Iterator<Item = (TypeId, RequestPolicy)> + '_ {
+            self.entries.iter().flatten().copied()
+        }
+
+        fn policy_of(&self, id: TypeId) -> Option<RequestPolicy> {
+            self.iter().find(|(i, _)| *i == id).map(|(_, p)| p)
+        }
+
+        fn with(mut self, id: TypeId, policy: RequestPolicy) -> Self {
+            let mut free = MAX_META_REQUESTS;
+            for (i, slot) in self.entries.iter_mut().enumerate() {
+                match slot {
+                    Some((present, held)) if *present == id => {
+                        // Two elements asking for one meta under different
+                        // policies: the stricter one is the one that can be
+                        // misread, so it stands.
+                        *held = (*held).max(policy);
+                        return self;
+                    }
+                    Some(_) => {}
+                    None => {
+                        free = i;
+                        break;
+                    }
+                }
+            }
+            if free == MAX_META_REQUESTS {
+                return self;
+            }
+            self.entries[free] = Some((id, policy));
+            // The occupied prefix is packed at the front, so sorting it keeps it
+            // packed and makes the set order-independent under `PartialEq`.
+            self.entries[..=free].sort_unstable();
+            self
         }
     }
 
@@ -683,6 +878,7 @@ mod on {
             Propagation::Keep
         }
     }
+
 }
 
 #[cfg(all(test, feature = "metadata"))]

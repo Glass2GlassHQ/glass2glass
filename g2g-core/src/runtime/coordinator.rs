@@ -396,10 +396,23 @@ where
         // requirement into the proposal it answers to the source. (Previously
         // this ran in the runner *after* negotiation, i.e. after the decoder
         // had already opened with a fixed default.)
-        if let Some(p) = sink.propose_allocation(&sink_caps) {
-            transform.configure_allocation(&p);
+        // M976: the sink's meta requests ride its proposal to the transform, and
+        // the transform passes them (plus its own) on to the source.
+        let sink_proposal = crate::query::with_meta_demand(
+            sink.propose_allocation(&sink_caps),
+            AsyncElement::meta_requests(sink),
+        );
+        let downstream_requests = match &sink_proposal {
+            Some(p) => p.meta_requests,
+            None => crate::meta::MetaRequests::new(),
+        };
+        if let Some(p) = &sink_proposal {
+            transform.configure_allocation(p);
         }
-        let allocation = transform.propose_allocation(&sink_caps);
+        let allocation = crate::query::with_meta_demand(
+            transform.propose_allocation(&sink_caps),
+            AsyncElement::meta_requests(transform).carry_upstream(downstream_requests),
+        );
         if let Some(p) = &allocation {
             source.configure_allocation(p);
         }
@@ -460,7 +473,8 @@ pub(crate) fn realloc_local<E>(element: &mut E, caps: &Caps) -> Option<Allocatio
 where
     E: AsyncElement,
 {
-    let params = element.propose_allocation(caps);
+    let params =
+        crate::query::with_meta_demand(element.propose_allocation(caps), element.meta_requests());
     if let Some(p) = &params {
         element.configure_allocation(p);
     }

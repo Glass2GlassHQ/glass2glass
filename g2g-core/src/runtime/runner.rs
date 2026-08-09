@@ -673,9 +673,19 @@ where
     // (a two-sided negotiation), so a multi-domain sink/source pair settles on a
     // shared domain (GPU-preferred) instead of the sink dictating unilaterally;
     // no shared domain is a loud conflict rather than a silent mismatch.
-    let allocation = match sink.propose_allocation(&negotiated_caps) {
-        Some(p) => Some(p.resolve_for_producer(SourceLoop::output_domains(source))?),
-        None => None,
+    // M976: the sink's meta requests ride the same proposal, so the source can
+    // ask what anyone downstream wants attached before it produces a frame.
+    let proposed = crate::query::with_meta_demand(
+        sink.propose_allocation(&negotiated_caps),
+        AsyncElement::meta_requests(sink),
+    );
+    // A demand-only proposal accepts every domain, so reconciling it would let a
+    // metadata request pick the source's memory domain: pass it through as is.
+    let allocation = match proposed {
+        Some(p) if p.constrains_pool() => {
+            Some(p.resolve_for_producer(SourceLoop::output_domains(source))?)
+        }
+        other => other,
     };
     if let Some(p) = &allocation {
         source.configure_allocation(p);

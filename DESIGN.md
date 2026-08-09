@@ -3908,6 +3908,38 @@ picture. Two pieces, both `no_std`-friendly:
   videocrop `Crop`, the software video encoders (av1enc, vpxenc, ffmpegenc,
   mjpegenc) `Encode`. Still a no-op when the `metadata` feature is off (the
   method and stash are cfg'd out, so the baseline build is byte-identical).
+- **Metadata on demand (the pull half).** `meta_transform` moves metadata that
+  already exists; `AsyncElement::meta_requests() -> MetaRequests` is how a
+  consumer says which metadata it wants to exist in the first place (the
+  GStreamer allocation-query `add_meta` analog). `MetaRequests` is a
+  fixed-capacity `Copy` set of `(TypeId, RequestPolicy)` entries (four, sorted so
+  equality is order-independent), carried as a field of `AllocationParams`, so
+  the demand travels on the allocation cascade that already runs sink → source.
+  A producer reads `params.meta_requests.wants::<T>()` in `configure_allocation`
+  and can then skip work nobody reads. Downstream demand also crosses a fan-in's
+  *output* boundary, where its pool parameters deliberately do not: a compositor
+  writes the frames the demand describes. An element with no pool requirement of
+  its own still forwards the demand (as `AllocationParams::meta_demand`, which
+  accepts every memory domain, and which the source-side reconciliation skips so
+  a metadata request can never decide a producer's memory domain). A request is a
+  hint, never a guarantee, so a consumer still handles a frame arriving without
+  the meta. With nothing declared the cascade is byte-identical to before, and
+  without the `metadata` feature `MetaRequests` is a ZST empty set.
+- **Demand policy: what a request needs of the other consumers.** Every request
+  carries a `RequestPolicy`, because two kinds of metadata combine differently
+  when several consumers read one producer's frames. `AnyConsumer` (the default,
+  `request::<T>()`): attaching the meta costs a consumer that did not ask
+  nothing, so one asking consumer is enough and the demands union
+  (`AnalyticsMeta`, `CaptionMeta`, `TimecodeMeta`). `EveryConsumer`
+  (`request_from_every_consumer::<T>()`): honouring it changes the *buffer*, so a
+  consumer that did not ask would misread it, and the demand only stands where
+  every consumer asked. Two folds implement this: `join_branches` at a tee (a
+  branch that proposed nothing is still a branch that asked for nothing, and
+  vetoes) and `carry_upstream` at each hop (the producer's frames pass through
+  that element first, so a hop that does not share the request vetoes it exactly
+  as a sibling branch does). The strictest policy wins when two elements ask for
+  one meta differently. A demand that dies leaves the cascade as it found it: a
+  proposal carrying neither pool constraints nor demand collapses back to none.
 - **The overlay.** The visible end of the detector chain reads the
   `AnalyticsMeta` carried onto the *display* frame (via the fan-out path) and
   draws each box, so `decode -> tee -> {detect, video} -> overlay -> display`
