@@ -44,6 +44,10 @@ pub enum ConformanceDimension {
     /// The element recovers from lost / reordered / duplicated input (e.g. a
     /// depacketizer through dropped packets, a -7 seamless merge).
     LossResilience,
+    /// The pixels / samples themselves were measured: decoded output matches a
+    /// committed golden digest, or clears a PSNR floor against a reference. A
+    /// structural round-trip says data survived; this says it is still correct.
+    Quality,
     /// A graph built around the element is proven zero-copy by the copy plan
     /// (`crate::copyplan`): no host round-trip of a raw frame.
     ZeroCopy,
@@ -60,11 +64,12 @@ pub enum ConformanceDimension {
 
 impl ConformanceDimension {
     /// Every dimension, in reporting order.
-    pub const ALL: [ConformanceDimension; 8] = [
+    pub const ALL: [ConformanceDimension; 9] = [
         ConformanceDimension::Instantiate,
         ConformanceDimension::Properties,
         ConformanceDimension::RoundTrip,
         ConformanceDimension::LossResilience,
+        ConformanceDimension::Quality,
         ConformanceDimension::ZeroCopy,
         ConformanceDimension::Latency,
         ConformanceDimension::Oracle,
@@ -78,6 +83,7 @@ impl ConformanceDimension {
             ConformanceDimension::Properties => "properties",
             ConformanceDimension::RoundTrip => "round-trip",
             ConformanceDimension::LossResilience => "loss-resilience",
+            ConformanceDimension::Quality => "quality",
             ConformanceDimension::ZeroCopy => "zero-copy",
             ConformanceDimension::Latency => "latency",
             ConformanceDimension::Oracle => "oracle",
@@ -260,8 +266,10 @@ impl MaturityRecord {
             .evidence
             .iter()
             .any(|e| e.dimension == D::Oracle && e.peer.is_some());
-        let behavioral =
-            self.has(D::RoundTrip) || self.has(D::LossResilience) || self.has(D::ZeroCopy);
+        let behavioral = self.has(D::RoundTrip)
+            || self.has(D::LossResilience)
+            || self.has(D::Quality)
+            || self.has(D::ZeroCopy);
         let advertised = self.has(D::Instantiate) || self.has(D::Properties);
         if has_hardware {
             MaturityLevel::HardwareValidated
@@ -404,6 +412,16 @@ mod tests {
             .with(Evidence::new(ConformanceDimension::RoundTrip).codec("rgba8"));
         assert_eq!(r.level(), MaturityLevel::UnitTested);
         assert!(!r.has(ConformanceDimension::Oracle), "no interop claim");
+    }
+
+    #[test]
+    fn a_golden_quality_check_reaches_unit_tested_but_not_interop() {
+        // A committed golden digest proves the decoder still produces the same
+        // pixels, which is behavioral evidence, but nothing external looked at it.
+        let r = MaturityRecord::new("rav1ddec")
+            .with(Evidence::new(ConformanceDimension::Quality).codec("av1"));
+        assert_eq!(r.level(), MaturityLevel::UnitTested);
+        assert!(!r.has(ConformanceDimension::Oracle));
     }
 
     #[test]

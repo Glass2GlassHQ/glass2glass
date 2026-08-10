@@ -3462,6 +3462,50 @@ the validation-first posture: the framework states hard, checkable properties (t
 graph is zero-copy; this element is unit-tested but not interop-validated) rather
 than leaving them to prose and trust.
 
+### 4.20d Developer Tooling: Codec Goldens and PSNR
+
+The conformance dimensions above say whether data *survived* an element. For a
+codec that is not enough: a decoder that starts producing different pixels after a
+dependency bump, or an encoder that quietly stops applying its bitrate, still
+round-trips frames of the right size and shape. `ConformanceDimension::Quality` is
+the dimension for the pixels and samples themselves, and it counts as behavioral
+evidence (a `Quality`-only element derives `UnitTested`, and with a peer-tagged
+`Oracle` alongside it, `InteropTested`). Its measurement helpers live next to the
+batteries in `g2g-plugins::conformance`, dependency-free like the rest: `fnv1a_64`
+(a stable digest for a committed golden), `i420_planes`, and `psnr_db` /
+`pooled_psnr_db` (per-plane and sample-count-pooled peak signal-to-noise ratio,
+infinite for identical input, `std`-gated only because `no_std` has no `log10`).
+
+Three battery kinds produce that evidence, in `g2g-plugins/tests/m1001_*`. The
+**decoder goldens** decode a committed fixture with the in-repo decoder and hash
+the raw output against a value recorded in the test: `rav1ddec` over
+`av1_640x480.obu`, `mjpegdec` over the two 16x16 JPEGs, `opusdec` and `vorbisdec`
+over their Ogg fixtures, and behind the `ffmpeg` feature `ffmpegdec` over
+`h264_640x480.h264`. Each of those codecs decodes bit-exactly by its specification,
+so a mismatch means g2g changed rather than the reference moved; AAC is the
+exception (libavcodec decodes it in float and is not bit-exact across versions), so
+its leg checks determinism and frame alignment instead of a digest. The
+**encode / decode PSNR** batteries encode a synthetic source generated in-test (a
+gradient with a checkerboard and a walking bar, so there is both smooth and
+hard-edged content) and decode it back with the matching in-repo decoder, requiring
+the pooled PSNR and the worst single plane to clear a per-codec floor set a few dB
+under the figure observed when the battery was written: AV1 (`av1enc` / `rav1ddec`),
+MJPEG (`mjpegenc` / `mjpegdec`, measured in packed RGBA because through I420 the
+pair converts colorspace twice and the score stops tracking encode quality), and
+H.264 (`ffmpegenc` / `ffmpegdec` at a bitrate that keeps libx264 off its quality
+ceiling). The **reference-decoder oracle** closes the loop the goldens cannot: it
+has the ffmpeg CLI decode the same fixture and measures g2g's decode against it, so
+a pass is evidence about correctness rather than stability, and it persists a
+peer-tagged `Oracle` row next to the `Quality` one. AV1 must agree sample for
+sample there; JPEG agrees to within each decoder's own IDCT and colorspace
+rounding. It self-skips where ffmpeg is absent, like the muxer oracles.
+
+The batteries are codec-feature-gated, so unlike the always-on ST 2110 / RTP
+batteries they cannot run inside `g2g-inspect --maturity`; they persist their rows
+to `$G2G_CONFORMANCE_LOG` and `full_report` folds them in, the same path the
+`Hardware` rows take. CI runs the goldens and the PSNR floors in the Linux feature
+job and the ffmpeg oracle in the conformance job.
+
 ### 4.20 Distributed Graphs (`remotesink` / `remotesrc`)
 
 A graph is normally one process, but a pipeline stage is not bound to the

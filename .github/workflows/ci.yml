@@ -193,6 +193,14 @@ jobs:
       # feature set above is only checked, so the opus-gated tests run here.
       - name: test g2g-plugins (opus codec + properties)
         run: cargo test -p g2g-plugins --locked --features std,opus --test m454_element_properties --test m177_opus_codec
+      # Codec quality harness (M1001): the decoder goldens over the committed
+      # fixtures, and the encode / decode PSNR floors for the encoders that need
+      # no special hardware. Both persist `Quality` conformance evidence.
+      - name: test g2g-plugins (codec goldens + PSNR)
+        run: >
+          cargo test -p g2g-plugins --locked --features
+          std,rav1d,mjpeg,mjpeg-encode,av1-encode,opus,vorbis
+          --test m1001_golden_decode --test m1001_encode_psnr -- --nocapture
       # CENC decrypt shapes (M164 / M835 / M867): hand-built fixtures run
       # everywhere; the ffmpeg-authored oracle cases skip without ffmpeg.
       - name: test g2g-plugins (cenc decrypt)
@@ -528,6 +536,11 @@ jobs:
       # absent, so a green run here means real interop evidence was produced.
       - name: native-muxer oracles (mp4mux + mpegtsmux vs ffprobe)
         run: cargo test -p g2g-plugins --locked --features std --test m615_conformance_oracle --test m619_conformance_ts_oracle -- --nocapture
+      # Reference-decoder PSNR (M1001): ffmpeg's own decode of the AV1 and JPEG
+      # fixtures measured against g2g's, appending peer-tagged Oracle evidence.
+      # AV1 decode is bit-exact by spec, so that leg must agree sample for sample.
+      - name: decode PSNR oracle (rav1ddec + mjpegdec vs ffmpeg)
+        run: cargo test -p g2g-plugins --locked --features std,rav1d,mjpeg --test m1001_psnr_oracle -- --nocapture
       # MPEG-TS PSI metadata (M783/M872/M878): ffprobe reads the multi-program PAT
       # / PMT layout, the SDT service text (one entry per program) and the
       # per-stream ISO-639 languages g2g writes, and g2g demuxes an ffmpeg-authored
