@@ -317,7 +317,7 @@ static SHARED_CTX: tokio::sync::Mutex<Option<GpuContext>> = tokio::sync::Mutex::
 
 /// One device for the whole test binary, built under [`SHARED_CTX`]. `None` when
 /// the host has no adapter (CI), so every GPU test skips.
-#[cfg(all(test, feature = "wgpu-sink"))]
+#[cfg(all(test, any(feature = "wgpu-sink", feature = "vello-overlay")))]
 pub(crate) async fn shared_ctx() -> Option<GpuContext> {
     let mut slot = SHARED_CTX.lock().await;
     if slot.is_none() {
