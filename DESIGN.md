@@ -1841,12 +1841,91 @@ refuses a mismatch with a clear `AbiMismatch` error rather than risk passing a
 differently-laid-out `Frame` or trait object across the boundary (undefined
 behavior). Each loaded `libloading::Library` is held for the life of the process:
 the registered factories are `fn` pointers into its mapped code, so dropping it
-would be a use-after-free with no back-pointer to catch it. This version+toolchain
-lock is the v1 design; an `abi_stable`/`stabby` facade over the element traits is
-the later upgrade for cross-toolchain binary plugins, and a pure C-ABI shim was
-rejected (it loses the ergonomic Rust trait). The whole path is exercised
-out-of-tree by `g2g-plugins/tests/fixtures/example-plugin` +
+would be a use-after-free with no back-pointer to catch it. The whole path is
+exercised out-of-tree by `g2g-plugins/tests/fixtures/example-plugin` +
 `tests/plugin_loader_dlopen.rs`.
+
+**Plugin ABI v2: the cross-toolchain tier (M1010).** The version lock above is
+the price of passing Rust types across `dlopen`. v2 is the other trade: a frozen
+`repr(C)` boundary (`g2g-plugin::abi`, header `g2g-plugin/include/g2g_plugin_v2.h`)
+that carries a smaller surface but loads into a host built by a different
+compiler, and can be written in C. The model is GStreamer's `gst_plugin_desc`: a
+versioned descriptor plus vtables, hand-rolled rather than taken from
+`abi_stable` (dormant) or `stabby` (a leaked heap vtable registry on stable
+Rust). `async-ffi` supplies the one thing a hand-rolled C ABI cannot express, an
+FFI-safe `Future` (`FfiPoll` / `FfiContext` / a three-pointer future struct), so
+`process` stays backpressure-aware across the boundary.
+
+- **The descriptor is data, not code.** A v2 plugin exports one *data* symbol,
+  `g2g_plugin_v2_descriptor`, holding a magic, an ABI generation, and the list of
+  element names and kinds it will register. The host reads and validates it with
+  `dlsym` before calling any plugin function, which is what makes the capability
+  gate meaningful: `load_plugin_with_policy` hands the declaration to a
+  caller-supplied policy *before* the plugin gets control, and the default policy
+  refuses a declaration carrying a capability kind this host does not understand.
+  The declaration is then binding. The registrar stages elements rather than
+  writing them into the `Registry`, checks each against the declaration, and
+  commits only if every one matched: a plugin that registers three declared
+  elements and one undeclared one contributes nothing.
+- **What crosses.** `configure_pipeline`, `configure_output`, `process`,
+  `set_property`, `get_property`, `destroy`, plus a `create` on the registration.
+  Caps cross as a `repr(C)` tagged union over a frozen numeric code table (the
+  host's caps enums are `#[non_exhaustive]`, so their discriminants can never be
+  an ABI); property values likewise. Frames cross as pointer + length + an
+  owner-side `free`, which maps exactly onto `SystemSlice::from_foreign`, so a
+  frame moves in either direction without a copy.
+- **What does not.** v2 elements are **System memory only**: the wrapper narrows
+  `input_domains` to `System`, so a GPU-resident producer upstream gets a domain
+  converter spliced in rather than a frame the plugin cannot read. GPU domains,
+  and the ~50 exotic `AsyncElement` hooks (clock election, QoS, metadata
+  propagation, the allocation cascade, the reverse-channel signals), stay v1 and
+  host-native: the host-side wrapper element answers them with the trait
+  defaults. The flag-set property kind and the tensor / KLV / closed-caption /
+  sub-picture caps kinds do not cross either, and a registration that names one
+  is refused rather than approximated.
+- **Growing it.** Two mechanisms. `abi_version` gates the whole surface: a
+  semantic change to an existing field bumps it. Inside one generation, every
+  versioned struct carries its own `struct_size` and the host reads
+  `min(plugin, host)` bytes into a zeroed local, so an older plugin's shorter
+  vtable simply leaves the host's newer entries absent and the host uses its
+  defaults; and trailing reserved fn-pointer slots let a future entry appear
+  without the size changing, which an older host ignores.
+- **Where v1 stays.** The loader probes the v2 symbol first and falls back to the
+  v1 pair, so existing v1 plugins load unchanged. v1 remains the path for a
+  plugin that needs the whole trait surface or GPU memory and ships alongside the
+  host build it was compiled against.
+- **The `fn()` slot table.** `LaunchFactory` builds an element from a
+  context-free `fn()` pointer, and a v2 element's constructor needs to know
+  *which* plugin vtable it belongs to. The host therefore keeps a fixed table of
+  64 const-generic trampolines (`MAX_V2_ELEMENT_SLOTS`); past that a load is
+  refused rather than silently dropping an element. Slots are never freed,
+  matching the loaded-forever library.
+
+**Security posture of the loader.** It defends against a *malformed* plugin, not
+a *malicious* one, and the difference is worth stating plainly. `dlopen` runs the
+library's initialisers before the loader reads a single field, and a loaded
+plugin shares the host's address space with no boundary at all: it can make any
+syscall the host can, read the host's memory, and ignore every rule in the ABI.
+The capability gate decides whether to load a file and what it may register; it
+cannot constrain what loaded code does. It is policy, not sandboxing. Anything
+stronger (a separate process, seccomp, signature verification) is out of scope
+and deliberately has no half-built stubs. What the loader *does* do is treat
+every byte reachable from the descriptor as untrusted input, on the same rules as
+a bitstream parser: bound every count before using it as a length, null-check
+before dereferencing, UTF-8 check before a byte range becomes a `str`, restrict
+element and property names to a `gst-launch`-safe character set, and refuse any
+unknown discriminant instead of reinterpreting it. Two things it cannot check and
+takes on the plugin's contract: that a pointer+length pair really addresses that
+many readable bytes, and that a `struct_size` really matches what the plugin
+wrote. The wrapper also asserts `Send` for a plugin instance under a documented
+contract (the runner owns an element exclusively but may move it between
+threads), so a thread-affine plugin is outside the ABI.
+
+Exercised by `g2g-plugins/tests/plugin_loader_v2.rs` (a Rust plugin built with a
+deliberately mismatched `g2g-core` feature set, which v1 refuses and v2 does not
+care about) and `tests/plugin_c_abi.rs` (a plugin written in C, compiled against
+the hand-written header, including a `sizeof` comparison of every ABI struct
+against its Rust type so the two cannot drift).
 
 **Hosted Python elements (`pyelement` / `pysrc` / `pyaggregator`, `g2g-python`).**
 A gst-python-ml element shell runs as a first-class g2g element: `g2g-python`

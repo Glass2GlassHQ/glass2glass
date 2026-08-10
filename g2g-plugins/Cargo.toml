@@ -1321,6 +1321,16 @@ required-features = ["declarative-yaml"]
 name = "plugin_loader_dlopen"
 required-features = ["plugin-loader"]
 
+# M1010: the same for the v2 (cross-toolchain repr(C)) plugin ABI, and for a
+# plugin written in C against the hand-written header.
+[[test]]
+name = "plugin_loader_v2"
+required-features = ["plugin-loader"]
+
+[[test]]
+name = "plugin_c_abi"
+required-features = ["plugin-loader"]
+
 # M214: zero-copy GPU fan-out (overlay -> tee -> {sink, sink}) on a real wgpu
 # device. Needs the overlay producer and the wgpu present sink.
 [[test]]
