@@ -17,6 +17,8 @@
 //!     -- --ignored --nocapture
 //! ```
 
+use core::future::Future;
+use core::pin::Pin;
 use g2g_ml::wgpupreprocess::{gpu_available, yuyv_to_rgb_tensor};
 
 include!("util/dmabuf_preprocess.rs");

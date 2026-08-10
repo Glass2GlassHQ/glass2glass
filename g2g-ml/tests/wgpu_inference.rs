@@ -6,7 +6,7 @@
 //! back only at the very end, match a full CPU reference and the burn / ort
 //! linear contract. Skips when no wgpu adapter is present.
 
-use g2g_core::element::{BoxFuture, PushOutcome};
+use g2g_core::element::PushOutcome;
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{

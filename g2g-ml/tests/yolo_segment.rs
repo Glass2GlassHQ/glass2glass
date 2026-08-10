@@ -21,7 +21,7 @@
 
 use std::path::PathBuf;
 
-use g2g_core::element::{AsyncElement, BoxFuture, OutputSink, PushOutcome};
+use g2g_core::element::{AsyncElement, OutputSink, PushOutcome};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{AnalyticsMeta, Caps, Dim, G2gError, Rate, RawVideoFormat, Segmentation};

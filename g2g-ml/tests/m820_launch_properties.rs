@@ -177,7 +177,7 @@ fn detectionpostprocess_thresholds_and_input_size_round_trip() {
 #[cfg(feature = "analytics")]
 #[tokio::test]
 async fn conf_threshold_property_changes_what_is_detected() {
-    use g2g_core::element::{BoxFuture, OutputSink, PushOutcome};
+    use g2g_core::element::{OutputSink, PushOutcome};
     use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
     use g2g_core::memory::{MemoryDomain, SystemSlice};
     use g2g_core::{AnalyticsMeta, Caps, G2gError, TensorDType, TensorLayout, TensorShape};

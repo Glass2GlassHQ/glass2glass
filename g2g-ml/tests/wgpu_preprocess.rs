@@ -6,7 +6,7 @@
 //! within float tolerance, with the tensor caps emitted once. Skips when no
 //! wgpu adapter is present, like the other hardware-gated elements.
 
-use g2g_core::element::{BoxFuture, PushOutcome};
+use g2g_core::element::PushOutcome;
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{
