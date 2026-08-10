@@ -55,9 +55,9 @@ use vello::peniko::{Fill, FontData};
 use vello::Glyph;
 
 #[cfg(feature = "vello-text-overlay")]
-use crate::subparse::Cue;
+use crate::subparse::{Cue, TextShadow};
 #[cfg(feature = "vello-text-overlay")]
-use crate::textoverlay::TextOverlay;
+use crate::textoverlay::{PlacedGlyph, TextOverlay};
 #[cfg(feature = "vello-text-overlay")]
 use crate::textshape::FontId;
 
@@ -710,6 +710,15 @@ impl VelloTextOverlay {
                     let batch = &cue.glyphs[start..end];
                     start = end;
                     let (offset, brush) = match (drawing_shadows, shadow) {
+                        // Vello has no filter that blurs a glyph run, so a
+                        // blurred shadow goes down as one tinted mask image per
+                        // glyph, blurred by the same code as the CPU paths.
+                        (true, Some(shadow)) if shadow.blur > 0 => {
+                            for glyph in batch {
+                                draw_blurred_shadow(scene, &mut self.text, glyph, shadow);
+                            }
+                            continue;
+                        }
                         (true, Some(shadow)) => (
                             (shadow.offset_x as f32, shadow.offset_y as f32),
                             shadow.color,
@@ -733,6 +742,37 @@ impl VelloTextOverlay {
             }
         }
     }
+}
+
+/// Draw one glyph's blurred drop shadow as an image: the blurred coverage mask
+/// tinted with the shadow colour, placed at the glyph's shadow offset.
+#[cfg(feature = "vello-text-overlay")]
+fn draw_blurred_shadow(
+    scene: &mut Scene,
+    text: &mut TextOverlay,
+    glyph: &PlacedGlyph,
+    shadow: TextShadow,
+) {
+    let Some(mask) = text.blurred_shadow_mask(glyph.key, shadow.blur) else {
+        return;
+    };
+    let [r, g, b, a] = shadow.color;
+    let mut data = Vec::with_capacity(mask.coverage.len() * 4);
+    for coverage in mask.coverage {
+        // Every sample carries the shadow colour, covered or not, so the sampler
+        // cannot blend a covered edge sample toward black.
+        data.extend_from_slice(&[r, g, b, (coverage as u32 * a as u32 / 255) as u8]);
+    }
+    let image = ImageData {
+        data: Blob::from(data),
+        format: ImageFormat::Rgba8,
+        alpha_type: ImageAlphaType::Alpha,
+        width: mask.width as u32,
+        height: mask.height as u32,
+    };
+    let x = glyph.x + shadow.offset_x + mask.left;
+    let y = glyph.y + shadow.offset_y + mask.top;
+    scene.draw_image(&image, Affine::translate((x as f64, y as f64)));
 }
 
 /// Fill one `(x, y, width, height)` rectangle in frame pixels.

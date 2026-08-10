@@ -88,14 +88,15 @@ impl CueFontSize {
 }
 
 /// A `text-shadow` a `::cue` rule asked for: one offset copy of the text drawn
-/// under it. `blur` is parsed but the overlays draw a hard-edged shadow.
+/// under it, blurred when the rule gave a radius.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TextShadow {
     /// Rightward offset of the shadow copy, in pixels (negative goes left).
     pub offset_x: i32,
     /// Downward offset of the shadow copy, in pixels (negative goes up).
     pub offset_y: i32,
-    /// Blur radius in pixels, kept from the stylesheet but not applied.
+    /// Gaussian blur radius in pixels, 0 for a hard-edged shadow. CSS puts the
+    /// standard deviation at half of this.
     pub blur: u32,
     /// Shadow RGBA; CSS defaults it to the text colour, we default it to black.
     pub color: [u8; 4],
@@ -2774,7 +2775,6 @@ mod tests {
     #[test]
     fn webvtt_cue_text_shadow_is_parsed() {
         // The `offset-x offset-y [blur] [colour]` forms, cue-wide and per span.
-        // A blur radius is kept but the overlays draw a hard shadow.
         let input = "WEBVTT\n\n\
             STYLE\n\
             ::cue { text-shadow: 2px 3px; }\n\
