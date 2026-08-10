@@ -559,9 +559,7 @@ _(No open parser items.)_
   interop-tested).
 ## Bus and logging
 
-- Remaining bus messages, each gated on a subsystem not present: `segment-done`
-  (segment seeks), `stream-status` (thread pool), `clock-lost` (clock
-  re-election).
+_(No open bus items.)_
 ## Properties / introspection / DSL
 
 - Properties on the platform capture sources (`aaudiosrc` / `camera2src` /

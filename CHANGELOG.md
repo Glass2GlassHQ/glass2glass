@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1004: bus gains `SegmentDone`, `StreamStatus` (threaded-runner thread enter/leave), and `ClockLost` with mid-run re-election onto a swappable elected clock.
 - M1003: the AV1 decoders drain their reorder tail on `Eos` instead of dropping the stream's last pictures.
 - M1002: WebVTT cue CSS gains per-span `font-size`, `text-shadow`, and span-scoped `background-color` in all three overlay renderers.
 - M1001: codec quality harness: decoder goldens, encode/decode PSNR floors, and ffmpeg-oracle PSNR recorded as `Quality` conformance evidence.
