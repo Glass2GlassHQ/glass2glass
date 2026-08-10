@@ -605,8 +605,6 @@ _(No open tag items.)_
   multi-GPU graph is describable.
 - Verify the GPU planes against torch (`torch.from_dlpack`,
   `torch.as_tensor(plane)`); only cupy has been run against them.
-- Verify GIL offload on a free-threaded (PEP 703) interpreter (none installed)
-  + a `link_capacity` note for the GIL-serialized case.
 
 ## Dynamic plugin loading (M201+)
 

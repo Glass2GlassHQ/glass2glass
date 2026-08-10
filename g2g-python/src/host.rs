@@ -50,13 +50,24 @@
 //! [`PyWorker`] owns a dedicated OS thread that holds the instance and does all
 //! GIL work; [`PyWorker::run`] hands it the owned [`Frame`] over a std channel
 //! and awaits the reply over g2g-core's Waker-based channel, so the executor
-//! thread is free to poll other arms while Python runs. Multiple hosted elements
-//! still serialize on the one GIL (expected) on a standard build. This
+//! thread is free to poll other arms while Python runs. This
 //! one-thread-per-element shape is deliberately the free-threaded (PEP 703,
-//! `python3.x` `--disable-gil`) unit: on a free-threaded interpreter the workers
-//! run truly in parallel with no code change (the `Python::attach` API is the
-//! no-GIL model, not "acquire the GIL"). Per-interpreter-GIL sub-interpreters
-//! were rejected: numpy / torch / cv2 are not reliably sub-interpreter-safe.
+//! `python3.14t`) unit: on a free-threaded interpreter the workers run truly in
+//! parallel with no code change (the `Python::attach` API is the no-GIL model, not
+//! "acquire the GIL"). Measured on both (M988, `tests/m988_gil_offload.rs`): four
+//! hosted elements running one compute-bound Python callback each recover 3.6x of
+//! the ideal 4x on free-threaded 3.14, and 0.9x on stock 3.14.
+//! Per-interpreter-GIL sub-interpreters were rejected: numpy / torch / cv2 are not
+//! reliably sub-interpreter-safe.
+//!
+//! Sizing consequence on a stock interpreter: N hosted elements do not overlap, so
+//! the *graph's* Python cost is the sum of their per-frame times, not the slowest
+//! one. A `link_capacity` chosen for a parallel chain therefore under-buffers a
+//! chain with several hosted elements in it: each link's queue has to absorb the
+//! wait while the other elements hold the GIL, so raise capacity on those links
+//! (or accept the latency, which grows with the sum) rather than assuming the
+//! elements pipeline. On a free-threaded interpreter the parallel assumption holds
+//! and the usual live-latency sizing applies.
 
 use std::os::raw::c_int;
 use std::sync::mpsc;
@@ -263,9 +274,16 @@ impl MetaSink {
 }
 
 /// Native `g2g` module visible to the embedded interpreter, so the `import g2g`
-/// in a `backend/g2g` package resolves. Exposes the analytics sink type; the
-/// FrameIO read/write helpers (M198 step 4) hang off here later.
-#[pymodule]
+/// in a `backend/g2g` package resolves. Exposes the analytics sink type and the
+/// GPU plane type.
+///
+/// `gil_used = false` declares the module safe to use without the GIL, which is
+/// what keeps a free-threaded interpreter free-threaded: CPython re-enables the
+/// GIL for the whole process when a module that does not declare this is imported,
+/// and the `import g2g` in a hosted element would do exactly that. The types here
+/// hold that claim up: `MetaSink` serializes its staging behind a `Mutex` and
+/// `CudaPlane` is frozen and immutable.
+#[pymodule(gil_used = false)]
 fn g2g(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<MetaSink>()?;
     m.add_class::<CudaPlane>()?;

@@ -1902,6 +1902,23 @@ frame size, since the element allocates nothing itself. `format` is a property
 too, so a launch-built `pyelement` can accept the NV12 a decoder emits rather than
 only its RGBA default.
 
+One worker thread per element is the free-threading unit, and that is measured
+rather than assumed (M988, the ignored `m988_gil_offload` test, whose module docs
+carry the invocation for each interpreter). Four hosted elements each running one
+compute-bound pure-Python callback recover 3.6x of the ideal 4x on free-threaded
+CPython 3.14 (`sys._is_gil_enabled()` false in-process) and 0.9x on stock 3.14,
+with no code change between the two: pyo3 picks the interpreter up at build time
+(`PYO3_PYTHON`), free-threaded rules out `abi3`, and the whole crate's test suite
+passes on both. The native `g2g` module declares `gil_used = false`, which is
+load-bearing rather than decorative: CPython re-enables the GIL process-wide when
+it imports a module that has not declared it, so without the declaration the
+`import g2g` inside a hosted element drops the same measurement back to 0.9x. The
+sizing consequence on a stock interpreter is that N hosted elements do not overlap,
+so a chain's Python cost is the sum of their per-frame times rather than the slowest
+one, and `link_capacity` on those links has to absorb the wait while the other
+elements hold the GIL (see the `g2g-python` `host` module docs, next to the worker
+design it follows from).
+
 **Runtime scripting (`scriptelement`, `script-rhai` feature, M580).** The
 construction scripts above run once to emit a graph; `scriptelement` is the
 per-frame complement: a raw-video transform whose `process(frame)` is a Rhai
