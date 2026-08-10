@@ -515,8 +515,6 @@ _(No open parser items.)_
   model emits masks or ROIs yet).
 - Further `PlaneLayout` producers (v4l2 `bytesperline` padding, decoder DMA-BUF
   pitches); only the wgpu compositor readback emits it today.
-- A `WgpuSink` API to reconfigure its surface on window resize (the swapchain
-  keeps its original size today; the `wgpu_overlay_on_screen` example hits it).
 - `NvEnc` AV1 encode (needs RTX 40-series hardware).
 - Memory-domain preference for a `decodebin` in a launch line, where the
   downstream consumer is a factory name and not yet a built element: needs a

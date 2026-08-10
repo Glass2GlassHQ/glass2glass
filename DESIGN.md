@@ -4101,7 +4101,11 @@ picture. Two pieces, both `no_std`-friendly:
   on the GPU reaching the display with no system-memory round-trip. Window and
   event-loop ownership stay with the application (wgpu surfaces are built from a
   window handle and must drive the app's event loop), so the sink presents to a
-  surface the app supplies rather than opening its own window.
+  surface the app supplies rather than opening its own window. The app also owns
+  the resize event, and forwards it as `WgpuSink::resize(width, height)`, which
+  reconfigures the swapchain (or reallocates the offscreen texture) at the new
+  size; the frame's negotiated geometry is untouched, the blit just scales it to
+  whatever the target now is.
 
 - **Bring-your-own-device.** The same `GpuContext` sharing extends one
   step further out, to an embedding application that *already owns* a

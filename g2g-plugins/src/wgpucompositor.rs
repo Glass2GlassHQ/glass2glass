@@ -1108,18 +1108,7 @@ mod tests {
     use crate::compositor::{Compositor, PENDING_CAP};
     use g2g_core::PushOutcome;
 
-    /// One device for the whole test binary, built under a lock: opening several
-    /// wgpu devices concurrently crashes some drivers (seen as a SIGSEGV inside
-    /// the NVIDIA driver when these tests each opened their own). `None` when the
-    /// host has no adapter (CI), so every GPU test skips.
-    async fn shared_ctx() -> Option<GpuContext> {
-        static CTX: tokio::sync::Mutex<Option<GpuContext>> = tokio::sync::Mutex::const_new(None);
-        let mut slot = CTX.lock().await;
-        if slot.is_none() {
-            *slot = GpuContext::headless().await.ok();
-        }
-        slot.clone()
-    }
+    use crate::gpu::shared_ctx;
 
     fn rgba_caps(w: u32, h: u32) -> Caps {
         Caps::RawVideo {

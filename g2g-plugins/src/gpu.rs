@@ -309,6 +309,20 @@ pub(crate) unsafe fn import_vk_image_as_wgpu_texture(
     }
 }
 
+/// One device for the whole test binary, built under a lock: opening several
+/// wgpu devices concurrently crashes some drivers (seen as a SIGSEGV inside the
+/// NVIDIA driver when GPU tests each opened their own). `None` when the host has
+/// no adapter (CI), so every GPU test skips.
+#[cfg(test)]
+pub(crate) async fn shared_ctx() -> Option<GpuContext> {
+    static CTX: tokio::sync::Mutex<Option<GpuContext>> = tokio::sync::Mutex::const_new(None);
+    let mut slot = CTX.lock().await;
+    if slot.is_none() {
+        *slot = GpuContext::headless().await.ok();
+    }
+    slot.clone()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

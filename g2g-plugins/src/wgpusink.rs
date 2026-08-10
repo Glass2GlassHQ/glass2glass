@@ -18,7 +18,8 @@
 //!   `wgpu::Surface`. The on-screen path. Window + event-loop ownership belongs
 //!   to the application (wgpu surfaces are created from a window handle and must
 //!   integrate with the app's event loop), so the app creates the surface and
-//!   hands it in; the sink only presents to it.
+//!   hands it in; the sink presents to it and, on the app's resize event,
+//!   reconfigures it via [`WgpuSink::resize`].
 //!
 //! `wgpu-sink` feature (implies `std`).
 
@@ -69,6 +70,27 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
     return textureSample(src_tex, src_smp, in.uv);
 }
 "#;
+
+/// The offscreen target texture: a render attachment the blit writes, readable
+/// (`COPY_SRC`) and re-samplable.
+fn offscreen_texture(ctx: &GpuContext, width: u32, height: u32) -> wgpu::Texture {
+    ctx.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("wgpu-sink-offscreen"),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: WgpuSink::OFFSCREEN_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::COPY_SRC
+            | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    })
+}
 
 /// Where a [`WgpuSink`] presents.
 enum Target {
@@ -135,22 +157,7 @@ impl WgpuSink {
     /// A sink that presents into an internal `width` x `height` texture (read it
     /// back with [`read_target`](Self::read_target)). The render-to-texture path.
     pub fn offscreen(ctx: GpuContext, width: u32, height: u32) -> Self {
-        let texture = ctx.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("wgpu-sink-offscreen"),
-            size: wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: Self::OFFSCREEN_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                | wgpu::TextureUsages::COPY_SRC
-                | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
+        let texture = offscreen_texture(&ctx, width, height);
         Self::build(
             ctx,
             Self::OFFSCREEN_FORMAT,
@@ -164,7 +171,8 @@ impl WgpuSink {
 
     /// A sink that presents to a caller-built, already-`configure`d surface (an
     /// on-screen window). The application owns the window + event loop and the
-    /// surface's lifetime.
+    /// surface's lifetime, and forwards window resizes through
+    /// [`resize`](Self::resize).
     pub fn with_surface(
         ctx: GpuContext,
         surface: wgpu::Surface<'static>,
@@ -252,6 +260,47 @@ impl WgpuSink {
     /// Count of frames presented.
     pub fn presented_count(&self) -> u64 {
         self.presented
+    }
+
+    /// Current target size: the surface's swapchain size, or the offscreen
+    /// texture's.
+    pub fn target_size(&self) -> (u32, u32) {
+        match &self.target {
+            Target::Offscreen { width, height, .. } => (*width, *height),
+            Target::Surface { config, .. } => (config.width, config.height),
+        }
+    }
+
+    /// Follow the window to a new size: reconfigure the surface's swapchain (or
+    /// reallocate the offscreen texture) to `width` x `height`. The application
+    /// owns the window, so it calls this from its resize event.
+    ///
+    /// The incoming frame keeps its negotiated geometry: the blit scales it to
+    /// fill the target, at the new size as it did at the old one.
+    ///
+    /// A size that already matches, or a zero dimension (a minimised or
+    /// not-yet-mapped window), is ignored, so calling this on every resize event
+    /// is fine.
+    pub fn resize(&mut self, width: u32, height: u32) {
+        if (width, height) == self.target_size() || width == 0 || height == 0 {
+            return;
+        }
+        match &mut self.target {
+            Target::Offscreen {
+                texture,
+                width: target_width,
+                height: target_height,
+            } => {
+                *texture = offscreen_texture(&self.ctx, width, height);
+                *target_width = width;
+                *target_height = height;
+            }
+            Target::Surface { surface, config } => {
+                config.width = width;
+                config.height = height;
+                surface.configure(&self.ctx.device, config);
+            }
+        }
     }
 
     /// QoS late-drop bound: once PTS pacing is engaged, a frame past its
@@ -531,16 +580,10 @@ impl AsyncElement for WgpuSink {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gpu::shared_ctx;
     use g2g_core::frame::Frame;
     use g2g_core::memory::OwnedWgpuTexture;
     use g2g_core::{FrameTiming, PushOutcome};
-
-    async fn gpu_available() -> bool {
-        wgpu::Instance::default()
-            .request_adapter(&wgpu::RequestAdapterOptions::default())
-            .await
-            .is_ok()
-    }
 
     /// A source texture filled with `pixels` (RGBA8, top-left origin), usable as a
     /// blit source (sampled) on `ctx`'s device.
@@ -610,11 +653,10 @@ mod tests {
 
     #[tokio::test]
     async fn offscreen_blit_reproduces_source_orientation() {
-        if !gpu_available().await {
+        let Some(ctx) = shared_ctx().await else {
             std::eprintln!("no wgpu adapter; skipping WgpuSink blit test");
             return;
-        }
-        let ctx = GpuContext::headless().await.unwrap();
+        };
         let (w, h) = (4u32, 4u32);
         // Top two rows red, bottom two rows blue.
         let mut pixels = Vec::new();
@@ -662,6 +704,60 @@ mod tests {
         assert_eq!(sink.presented_count(), 1);
     }
 
+    /// Resize follows the window on the headlessly-testable target: the target
+    /// grows, the next blit fills it at the new size, and a zero or unchanged
+    /// size leaves it alone.
+    #[tokio::test]
+    async fn resize_retargets_the_sink_and_the_blit_fills_the_new_size() {
+        let Some(ctx) = shared_ctx().await else {
+            std::eprintln!("no wgpu adapter; skipping WgpuSink resize test");
+            return;
+        };
+        let (w, h) = (4u32, 4u32);
+        let caps = Caps::RawVideo {
+            format: g2g_core::RawVideoFormat::Rgba8,
+            width: g2g_core::Dim::Fixed(w),
+            height: g2g_core::Dim::Fixed(h),
+            framerate: g2g_core::Rate::Any,
+            interlace: g2g_core::Interlace::Any,
+        };
+        let mut sink = WgpuSink::offscreen(ctx.clone(), w, h);
+        sink.configure_pipeline(&caps).unwrap();
+        assert_eq!(sink.target_size(), (w, h));
+
+        // Ignored: already this size, and a minimised window.
+        sink.resize(w, h);
+        sink.resize(0, 200);
+        sink.resize(200, 0);
+        assert_eq!(sink.target_size(), (w, h));
+
+        // The frame geometry stays 4x4; only the target follows the "window".
+        let (new_w, new_h) = (16u32, 10u32);
+        sink.resize(new_w, new_h);
+        assert_eq!(sink.target_size(), (new_w, new_h));
+
+        let pixels = alloc::vec![0u8, 255, 0, 255].repeat((w * h) as usize);
+        let frame = wgpu_frame(&ctx, w, h, source_texture(&ctx, w, h, &pixels), 0);
+        sink.process(PipelinePacket::DataFrame(frame), &mut NullSink)
+            .await
+            .unwrap();
+
+        let out = sink.read_target().unwrap();
+        assert_eq!(
+            out.len(),
+            (new_w * new_h * 4) as usize,
+            "readback is the resized target"
+        );
+        // Scaled to fill: every pixel of the larger target is the source green.
+        for (i, px) in out.chunks_exact(4).enumerate() {
+            assert!(
+                px[1] > 200 && px[0] < 50,
+                "pixel {i} of the resized target is the blitted source: {px:?}"
+            );
+        }
+        assert_eq!(sink.presented_count(), 1);
+    }
+
     /// A clock whose `now_ns` the test drives by hand.
     #[derive(Debug)]
     struct ManualClock(alloc::sync::Arc<core::sync::atomic::AtomicU64>);
@@ -680,11 +776,10 @@ mod tests {
         use g2g_core::clock::PlayAnchor;
         use std::time::Instant;
 
-        if !gpu_available().await {
+        let Some(ctx) = shared_ctx().await else {
             std::eprintln!("no wgpu adapter; skipping WgpuSink pacing test");
             return;
-        }
-        let ctx = GpuContext::headless().await.unwrap();
+        };
         let (w, h) = (4u32, 4u32);
         let pixels = alloc::vec![255u8; (w * h * 4) as usize];
         let rgba = Caps::RawVideo {
@@ -761,11 +856,10 @@ mod tests {
         use g2g_core::memory::SystemSlice;
         use g2g_core::{AnalyticsMeta, BBox, Dim, ObjectDetection, Rate, RawVideoFormat};
 
-        if !gpu_available().await {
+        let Some(ctx) = shared_ctx().await else {
             std::eprintln!("no wgpu adapter; skipping overlay->sink test");
             return;
-        }
-        let ctx = GpuContext::headless().await.unwrap();
+        };
         let (w, h) = (64u32, 64u32);
 
         // Overlay and sink share ONE device: the overlay's texture is presentable

@@ -215,9 +215,12 @@ impl ApplicationHandler for App {
             }
             WindowEvent::Resized(new) => {
                 // Build once, the first time we learn a non-zero size (Wayland
-                // often reports 0x0 at creation). Later resizes are handled by the
-                // sink's own surface-reconfigure on the next present.
+                // often reports 0x0 at creation), then keep the swapchain on the
+                // window's size (a no-op for the build-time size).
                 self.ensure_present(new.width, new.height);
+                if let Some(present) = self.present.as_mut() {
+                    present.sink.resize(new.width, new.height);
+                }
             }
             WindowEvent::RedrawRequested => {
                 self.present_next();

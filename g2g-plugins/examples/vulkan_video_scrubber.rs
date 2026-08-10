@@ -369,7 +369,12 @@ impl ApplicationHandler for App {
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::Resized(new) => self.ensure_present(new.width, new.height),
+            WindowEvent::Resized(new) => {
+                self.ensure_present(new.width, new.height);
+                if let Some(present) = self.present.as_mut() {
+                    present.sink.resize(new.width, new.height);
+                }
+            }
             WindowEvent::KeyboardInput {
                 event:
                     KeyEvent {
