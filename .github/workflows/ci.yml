@@ -72,8 +72,10 @@ jobs:
     runs-on: ubuntu-latest
     # rust-toolchain.toml (channel = stable) otherwise wins over the toolchain
     # the action makes default, and the job silently checks stable instead.
+    # The exact name the action installs ("1.86" would be a separate rustup
+    # toolchain, auto-installed without the thumb target).
     env:
-      RUSTUP_TOOLCHAIN: "1.86"
+      RUSTUP_TOOLCHAIN: "1.86.0"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.86
