@@ -72,6 +72,9 @@ const NUM_OUTPUT_SURFACES: u32 = 8;
 const DEFAULT_MAX_DISPLAY_DELAY: u32 = 1;
 /// Upper bound the `max-display-delay` property accepts, as gst-nvcodec's.
 const MAX_DISPLAY_DELAY_LIMIT: u32 = 16;
+/// CUDA device this decoder opens. Carried onto every emitted frame so a
+/// consumer knows which GPU the surface lives on.
+const DECODE_DEVICE_ORDINAL: i32 = 0;
 
 /// Native NVDEC H.264 decoder. Annex-B in, CUDA NV12 out. See the module docs.
 ///
@@ -298,7 +301,7 @@ impl NvDec {
         let context = unsafe {
             cuchk(ffi::cu_init(0))?;
             let mut dev = 0i32;
-            cuchk(ffi::cu_device_get(&mut dev, 0))?;
+            cuchk(ffi::cu_device_get(&mut dev, DECODE_DEVICE_ORDINAL))?;
             let mut ctx: *mut core::ffi::c_void = core::ptr::null_mut();
             cuchk(ffi::cu_ctx_create(&mut ctx, 0, dev))?;
             if ctx.is_null() {
@@ -318,7 +321,11 @@ impl NvDec {
             ))?;
             lock
         };
-        self.state.cuda = Some(Arc::new(CuvidContext { ctx_lock, context }));
+        self.state.cuda = Some(Arc::new(CuvidContext {
+            ctx_lock,
+            context,
+            device_ordinal: DECODE_DEVICE_ORDINAL,
+        }));
 
         // Create the parser, pointing it at the heap `DecoderState` as user-data.
         let user = self.state.as_mut() as *mut DecoderState as *mut core::ffi::c_void;
@@ -441,6 +448,9 @@ impl Drop for NvDec {
 struct CuvidContext {
     ctx_lock: *mut core::ffi::c_void,
     context: u64,
+    /// Ordinal of the device the context was created on, carried onto every
+    /// frame's `OwnedCudaBuffer` so a consumer can name the device.
+    device_ordinal: i32,
 }
 
 // SAFETY: the handles are owned and inert; see `CuvidDecoder` below for the
@@ -730,6 +740,7 @@ extern "C" fn handle_display(user: *mut core::ffi::c_void, disp: *mut ffi::Parse
     // at 8 or 16 bits per sample.
     let chroma_ptr = dev_ptr + (pitch as u64) * (state.target_height as u64);
     let context = owner.ctx.context;
+    let device_ordinal = owner.ctx.device_ordinal;
     let buffer = OwnedCudaBuffer::new(
         dev_ptr,
         chroma_ptr,
@@ -738,6 +749,7 @@ extern "C" fn handle_display(user: *mut core::ffi::c_void, disp: *mut ffi::Parse
         state.target_width,
         state.target_height,
         context,
+        device_ordinal,
         Arc::new(CuvidMappedFrame { owner, dev_ptr }),
     );
     state.ready.push(ReadyFrame {
@@ -1848,6 +1860,7 @@ mod tests {
                         W,
                         H,
                         ctx,
+                        DECODE_DEVICE_ORDINAL,
                         Arc::new(DevAlloc { dptr, ctx }),
                     )),
                     FrameTiming {

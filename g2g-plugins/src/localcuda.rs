@@ -69,6 +69,10 @@ const TAG_CAPS: u8 = 0;
 const TAG_FRAME: u8 = 1;
 const TAG_EOS: u8 = 2;
 
+/// CUDA device both ends work on. Carried onto every received frame so a
+/// consumer knows which GPU the mapped surface lives on.
+const IPC_DEVICE_ORDINAL: i32 = 0;
+
 /// Fixed length of a serialized frame descriptor (see `encode_desc`).
 const DESC_LEN: usize = 8 * 3      // alloc_size, luma_off, chroma_off
     + 4 * 4                        // luma_pitch, chroma_pitch, width, height
@@ -587,7 +591,7 @@ impl SourceLoop for LocalCudaSrc {
         // Our own CUDA context on device 0 (same device as the sender). Created
         // on this executor thread; the context is thread-affine, so the runner
         // must be single-thread (documented).
-        let ctx = localipc::init_context(0)?;
+        let ctx = localipc::init_context(IPC_DEVICE_ORDINAL)?;
         self.ctx = Some(Arc::new(SrcCtx(ctx)));
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
@@ -679,6 +683,7 @@ impl SourceLoop for LocalCudaSrc {
                                 desc.width,
                                 desc.height,
                                 ctx.0,
+                                IPC_DEVICE_ORDINAL,
                                 Arc::new(IpcMapping {
                                     base,
                                     _ctx: Arc::clone(&ctx),
@@ -750,6 +755,7 @@ impl SourceLoop for LocalCudaSrc {
                                 desc.width,
                                 desc.height,
                                 ctx.0,
+                                IPC_DEVICE_ORDINAL,
                                 Arc::new(DestAlloc {
                                     dptr: dest,
                                     _ctx: Arc::clone(&ctx),

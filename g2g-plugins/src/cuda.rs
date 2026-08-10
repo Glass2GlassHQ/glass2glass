@@ -41,6 +41,10 @@ use g2g_core::{
     HardwareError, MemoryDomain, OutputSink, PipelinePacket, Rate, RawVideoFormat, SystemSlice,
 };
 
+/// CUDA device the upload context is created on, carried onto every uploaded
+/// frame so a consumer knows which GPU the surface lives on.
+const UPLOAD_DEVICE_ORDINAL: i32 = 0;
+
 /// Pass-through transform that copies CUDA device-memory NV12 frames to
 /// system memory. See the module docs.
 ///
@@ -312,7 +316,7 @@ impl AsyncElement for CudaUpload {
         let ctx = unsafe {
             check(ffi::cu_init(0))?;
             let mut dev: ffi::CuDevice = 0;
-            check(ffi::cu_device_get(&mut dev, 0))?;
+            check(ffi::cu_device_get(&mut dev, UPLOAD_DEVICE_ORDINAL))?;
             let mut ctx: ffi::CuContext = core::ptr::null_mut();
             check(ffi::cu_ctx_create(&mut ctx, 0, dev))?;
             // `cu_ctx_create` leaves the new context current on this thread; pop
@@ -457,6 +461,7 @@ unsafe fn upload_nv12(
             width,
             height,
             ctx.0,
+            UPLOAD_DEVICE_ORDINAL,
             Arc::new(DevAlloc {
                 dptr,
                 ctx: Arc::clone(ctx),

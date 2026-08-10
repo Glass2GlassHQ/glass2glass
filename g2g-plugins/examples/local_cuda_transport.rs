@@ -156,6 +156,7 @@ fn run_parent() {
             W,
             H,
             ctx.0,
+            0,
             Arc::new(ParentAlloc {
                 dptr: base,
                 _ctx: Arc::clone(&ctx),

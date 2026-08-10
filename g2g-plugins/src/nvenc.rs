@@ -1961,6 +1961,7 @@ pub(crate) mod tests {
                     w,
                     h,
                     ctx,
+                    0,
                     alloc::sync::Arc::new(DevAlloc { dptr, ctx }),
                 )),
                 g2g_core::FrameTiming {

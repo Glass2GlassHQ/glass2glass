@@ -569,11 +569,11 @@ _(No open tag items.)_
 
 ## Python-element host (M198+)
 
-- Carry the CUDA device ordinal on the Cuda memory domain, so a GPU plane can
-  report the device it really lives on (DLPack has to say device 0 today) and a
-  multi-GPU graph is describable.
-- Verify the GPU planes against torch (`torch.from_dlpack`,
-  `torch.as_tensor(plane)`); only cupy has been run against them.
+- Decide whether the CUDA-array-interface export drops its advisory read-only
+  flag: torch's `torch.as_tensor` rejects `data[1] = True` outright (cupy
+  ignores it), and clearing it licenses writes into tee-shared GPU surfaces.
+- Device selection to go with the carried ordinal: a `cuda-device` property on
+  the CUDA producers feeding the ordinal they open.
 
 ## Dynamic plugin loading (M201+)
 

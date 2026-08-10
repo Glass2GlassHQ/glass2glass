@@ -1207,6 +1207,9 @@ pub struct WgpuToCuda {
     mapping: CudaImageMapping,
     texture: wgpu::Texture,
     context: u64,
+    /// Ordinal of the device the context was retained on, carried onto every
+    /// bridged frame so a consumer can name the device.
+    device_ordinal: i32,
     width: u32,
     height: u32,
     /// Free list of linear output buffers, recycled across frames.
@@ -1290,6 +1293,7 @@ impl WgpuToCuda {
                 mapping,
                 texture,
                 context,
+                device_ordinal,
                 width,
                 height,
                 pool: LinearBufferPool::new(),
@@ -1390,6 +1394,7 @@ impl WgpuToCuda {
             self.width,
             self.height,
             self.context,
+            self.device_ordinal,
             keep_alive,
         );
         self.frames

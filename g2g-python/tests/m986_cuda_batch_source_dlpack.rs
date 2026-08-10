@@ -72,6 +72,7 @@ fn cuda_frame(luma_ptr: u64, pitch: u32, sequence: u64) -> Frame {
             WIDTH,
             HEIGHT,
             0,
+            0,
             Arc::new(NoOwner),
         )),
         timing: FrameTiming::default(),

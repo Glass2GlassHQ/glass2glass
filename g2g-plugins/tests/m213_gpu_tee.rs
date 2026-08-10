@@ -76,6 +76,7 @@ impl SourceLoop for CudaSrc {
                 1920,
                 1080,
                 0xC0FFEE,
+                0,
                 Arc::new(MockCudaFrame(self.drops.clone())),
             );
             let frame = Frame::new(MemoryDomain::Cuda(buf), FrameTiming::default(), 0);
