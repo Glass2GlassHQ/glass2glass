@@ -164,6 +164,22 @@ pub enum BusMessage {
         /// Stream-time position (ns) where the segment ended.
         position_ns: u64,
     },
+    /// A streaming thread started or finished (the GStreamer
+    /// `GST_MESSAGE_STREAM_STATUS` enter / leave analog). Only the thread-per-arm
+    /// runner ([`run_graph_threaded`](crate::runtime::run_graph_threaded)) posts
+    /// it, one `entered: true` before an arm's future first polls on its own OS
+    /// thread and one `entered: false` when that future finishes, so an
+    /// application can see how many threads the graph is really spread over and
+    /// when each ends. The cooperative runner multiplexes every arm on the
+    /// caller's executor and posts nothing.
+    StreamStatus {
+        /// `true` for the thread's enter, `false` for its leave.
+        entered: bool,
+        /// Identifies the OS thread the arm runs on: a hash of its
+        /// `std::thread::ThreadId`, since the id itself has no stable numeric
+        /// form. Only equality is meaningful, so an enter pairs with its leave.
+        thread_id: u64,
+    },
     /// Application-defined signal carrying an opaque code.
     Custom(u64),
 }

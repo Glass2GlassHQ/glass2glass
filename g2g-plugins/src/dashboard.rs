@@ -138,6 +138,9 @@ pub fn event_json(msg: &BusMessage) -> Option<String> {
         BusMessage::SegmentDone { position_ns } => {
             json!({"kind": "segment-done", "position_ns": position_ns})
         }
+        BusMessage::StreamStatus { entered, thread_id } => {
+            json!({"kind": "stream-status", "entered": entered, "thread_id": thread_id})
+        }
         BusMessage::Custom(code) => json!({"kind": "custom", "code": code}),
         // Skip the large structured payloads the dashboard has no view for.
         BusMessage::Tag { .. } | BusMessage::StreamTag { .. } | BusMessage::StreamCollection(_) => {

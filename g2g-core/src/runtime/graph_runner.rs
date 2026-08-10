@@ -1898,6 +1898,49 @@ pub trait GraphSpawner {
     ) -> BoxFuture<'static, Result<u64, G2gError>>;
 }
 
+/// Identifies the calling OS thread for
+/// [`BusMessage::StreamStatus`](crate::BusMessage::StreamStatus). `ThreadId` has
+/// no stable numeric form on the MSRV (`as_u64` is unstable), so hash it: only
+/// equality between an enter and its leave is meaningful.
+#[cfg(all(feature = "std", feature = "multi-thread"))]
+fn current_thread_id() -> u64 {
+    use core::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    std::thread::current().id().hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Bracket one arm's builder with its [`BusMessage::StreamStatus`](crate::BusMessage::StreamStatus)
+/// enter / leave pair. The builder itself runs on the worker thread, so posting
+/// there names the thread the arm will be driven on; the leave rides on the
+/// arm's own future so it lands when that arm finishes. Without a bus the
+/// builder is returned untouched.
+#[cfg(all(feature = "std", feature = "multi-thread"))]
+fn with_stream_status(
+    bus: Option<BusHandle>,
+    build: alloc::boxed::Box<dyn FnOnce() -> LocalArmFuture + Send>,
+) -> alloc::boxed::Box<dyn FnOnce() -> LocalArmFuture + Send> {
+    let Some(bus) = bus else {
+        return build;
+    };
+    alloc::boxed::Box::new(move || -> LocalArmFuture {
+        let thread_id = current_thread_id();
+        bus.try_post(BusMessage::StreamStatus {
+            entered: true,
+            thread_id,
+        });
+        let arm = build();
+        Box::pin(async move {
+            let result = arm.await;
+            bus.try_post(BusMessage::StreamStatus {
+                entered: false,
+                thread_id,
+            });
+            result
+        })
+    })
+}
+
 /// Thread-per-arm sibling of [`run_graph_inner`]: negotiates the graph
 /// identically (shared [`prepare_graph`] / [`build_channels`] / [`fold_run_stats`]),
 /// then hands each arm to `spawner` to run on its own OS thread rather than
@@ -2005,7 +2048,7 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
                     alloc::boxed::Box::new(move || -> LocalArmFuture {
                         Box::pin(muxer_forwarder(in_rx, pad_tx))
                     });
-                handles.push(spawner.spawn_arm(build));
+                handles.push(spawner.spawn_arm(with_stream_status(bus.cloned(), build)));
                 arm_kinds.push(kind);
                 pad_rxs.push((pad, pad_rx));
             }
@@ -2029,7 +2072,7 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
                         mux_control,
                     ))
                 });
-            handles.push(spawner.spawn_arm(build));
+            handles.push(spawner.spawn_arm(with_stream_status(bus.cloned(), build)));
             arm_kinds.push(kind);
             continue;
         }
@@ -2144,7 +2187,7 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
             }
             NodeKind::Muxer(_) => unreachable!("muxer handled above"),
         };
-        handles.push(spawner.spawn_arm(build));
+        handles.push(spawner.spawn_arm(with_stream_status(bus.cloned(), build)));
         arm_kinds.push(kind);
     }
 
@@ -2152,11 +2195,12 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
     // drops; append the coordinator as the final arm on its own thread.
     drop(coord_handle);
     let coord_arm_index = handles.len();
-    handles.push(
-        spawner.spawn_arm(alloc::boxed::Box::new(move || -> LocalArmFuture {
+    handles.push(spawner.spawn_arm(with_stream_status(
+        bus.cloned(),
+        alloc::boxed::Box::new(move || -> LocalArmFuture {
             Box::pin(async move { Ok(coordinator.run().await) })
-        })),
-    );
+        }),
+    )));
 
     let results = join_all(handles).await;
     fold_run_stats(
@@ -2231,6 +2275,32 @@ pub async fn run_graph_threaded_ticked<S: GraphSpawner>(
         None,
         None,
         Some(clock.clone()),
+        spawner,
+    )
+    .await
+}
+
+/// As [`run_graph_threaded`], but posts pipeline messages to `bus` (the
+/// thread-per-arm analog of [`run_graph_with_bus`]). This runner adds the
+/// [`StreamStatus`](crate::BusMessage::StreamStatus) enter / leave pair per arm
+/// thread, which the cooperative runner has no equivalent of.
+#[cfg(all(feature = "std", feature = "multi-thread"))]
+pub async fn run_graph_threaded_with_bus<Clk: PipelineClock, S: GraphSpawner>(
+    graph: Graph<GraphNode>,
+    clock: &Clk,
+    link_capacity: impl Into<LinkCapacity>,
+    bus: &BusHandle,
+    spawner: &S,
+) -> Result<RunStats, G2gError> {
+    run_graph_threaded_inner(
+        graph,
+        clock,
+        link_capacity,
+        Some(bus),
+        None,
+        None,
+        None,
+        None,
         spawner,
     )
     .await
