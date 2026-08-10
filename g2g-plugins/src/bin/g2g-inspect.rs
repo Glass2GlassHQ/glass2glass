@@ -8,6 +8,7 @@
 //!   g2g-inspect --json [name]    # machine-readable registry dump (all or one)
 //!   g2g-inspect --maturity       # derived conformance maturity per element
 //!   g2g-inspect --gst <name>     # what a GStreamer element name maps to in g2g
+//!   g2g-inspect --gst-map        # gst-name/g2g-runtime-name pairs, TSV
 //!   g2g-inspect --plugin <path>  # load a plugin first, so its elements list
 //!
 //! Backed by [`g2g_plugins::registry::default_registry`] and
@@ -18,7 +19,7 @@
 
 use std::process;
 
-use g2g_plugins::gst_compat::{gst_equivalent, GstEquivalent};
+use g2g_plugins::gst_compat::{gst_equivalent, gst_name_synonyms, GstEquivalent};
 use g2g_plugins::registry::default_registry;
 
 /// Pull every `--plugin <path>` / `--plugin=<path>` out of `raw`, returning the
@@ -157,6 +158,14 @@ fn main() {
                     println!("{gst_name}: unknown to g2g; no known equivalent. List elements with `g2g-inspect`.");
                     process::exit(1);
                 }
+            }
+        }
+        // `--gst-map`: every gst element name g2g's runtime reports differently,
+        // one `gst-name<TAB>g2g-runtime-name` per line, for a tool pairing the
+        // two engines' graph dumps element by element.
+        Some(flag) if flag == "--gst-map" => {
+            for (gst_name, g2g_name) in gst_name_synonyms(&reg) {
+                println!("{gst_name}\t{g2g_name}");
             }
         }
         // `--gst-scan <file>`: scan a GStreamer application source file (C or
