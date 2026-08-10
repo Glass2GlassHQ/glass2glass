@@ -104,11 +104,19 @@ pub use graph_runner::{
     NegotiateError,
 };
 
-// The monomorphized-arm seam (M1000): `DynAsyncElement`'s drive hooks name
-// these, so they must be reachable, but they are runner plumbing, not API.
+// The monomorphized-arm seam (M1000, extended to the fan-in / fan-out arms in
+// M1009): the drive hooks on `DynAsyncElement` / `DynMultiInputElement` /
+// `DynMultiOutputElement` name these, so they must be reachable, but they are
+// runner plumbing, not API.
 #[cfg(feature = "std")]
 #[doc(hidden)]
-pub use graph_runner::{sink_arm, transform_arm, SinkArmIo, TransformArmIo};
+pub use graph_runner::{
+    sink_arm, transform_arm, DemuxArmIo, FaninSinkArmIo, MuxerArmIo, SinkArmIo, TransformArmIo,
+};
+
+#[cfg(all(feature = "std", feature = "multi-thread"))]
+#[doc(hidden)]
+pub use graph_runner::MuxerArmOwnedTickIo;
 
 #[cfg(feature = "std")]
 pub use observe::{
