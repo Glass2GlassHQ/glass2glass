@@ -188,6 +188,109 @@ mod av1 {
     }
 }
 
+// -- VP8 / VP9 (libvpx encode, libavcodec decode) ----------------------------
+
+#[cfg(all(feature = "vpx", feature = "ffmpeg"))]
+mod vpx {
+    use super::*;
+    use g2g_core::{AsyncElement, PipelinePacket, VideoCodec};
+    use g2g_plugins::ffmpegdec::{FfmpegVideoDec, OutputFormat};
+    use g2g_plugins::vpxenc::VpxEnc;
+    use m1001_common::{data_frame, CaptureSink};
+
+    /// Same figure as the H.264 battery, for the same reason: high enough to code
+    /// this geometry cleanly, low enough that the measurement still tracks the
+    /// bitrate setting instead of pinning at the encoder's quality ceiling.
+    const BITRATE_KBPS: u32 = 500;
+
+    /// Observed 50.50 dB pooled, 47.27 dB worst (libvpx 1.15). Dropping the target
+    /// to 100 kbps costs VP8 8 dB, so the figure still tracks the rate setting.
+    const VP8_FLOOR_DB: f64 = 45.0;
+
+    /// Observed 47.46 dB pooled, 45.58 dB worst (libvpx 1.15). VP9 scores under VP8
+    /// here because the wrapper drives it at cpu-used 6 with the realtime deadline.
+    const VP9_FLOOR_DB: f64 = 42.0;
+
+    /// Encode the synthetic source with libvpx and decode it back with libavcodec:
+    /// there is no in-repo VP8 / VP9 decoder by design, so the pair is asymmetric.
+    async fn vpx_psnr(codec: VideoCodec) -> Psnr {
+        let source = source_frames();
+
+        let mut encoder = VpxEnc::new()
+            .with_codec(codec)
+            .with_bitrate_kbps(BITRATE_KBPS);
+        encoder
+            .configure_pipeline(&i420_caps())
+            .expect("libvpx configures for I420");
+        let mut encoded = CaptureSink::default();
+        for (i, frame) in source.iter().enumerate() {
+            encoder
+                .process(
+                    data_frame(frame.clone(), i as u64 * 33_000_000, i as u64),
+                    &mut encoded,
+                )
+                .await
+                .expect("encode a frame");
+        }
+        encoder
+            .process(PipelinePacket::Eos, &mut encoded)
+            .await
+            .expect("flush the encoder");
+        assert_eq!(encoded.frames.len(), source.len(), "one packet per frame");
+
+        let mut decoder = FfmpegVideoDec::new().with_output_format(OutputFormat::I420);
+        let narrowed = decoder
+            .intercept_caps(&encoded.caps[0])
+            .expect("vp8 / vp9 supported");
+        decoder
+            .configure_pipeline(&narrowed)
+            .expect("libavcodec opens the decoder");
+        let mut decoded = CaptureSink::default();
+        for (i, unit) in encoded.frames.iter().enumerate() {
+            decoder
+                .process(
+                    data_frame(unit.clone(), i as u64 * 33_000_000, i as u64),
+                    &mut decoded,
+                )
+                .await
+                .expect("decode a frame");
+        }
+        decoder
+            .process(PipelinePacket::Eos, &mut decoded)
+            .await
+            .expect("drain");
+        assert_eq!(
+            decoded.frames.len(),
+            source.len(),
+            "every encoded frame decoded back"
+        );
+
+        i420_psnr(&source, &decoded.frames)
+    }
+
+    #[tokio::test]
+    async fn vp8_encode_decode_holds_its_psnr_floor() {
+        let log = EvidenceLog::scoped(LOG);
+        let psnr = vpx_psnr(VideoCodec::Vp8).await;
+        assert!(
+            psnr.clears(VP8_FLOOR_DB),
+            "VP8 encode/decode PSNR fell: {psnr:?}"
+        );
+        record_psnr(&log, &["vpxenc", "ffmpegdec"], "vp8", psnr, VP8_FLOOR_DB);
+    }
+
+    #[tokio::test]
+    async fn vp9_encode_decode_holds_its_psnr_floor() {
+        let log = EvidenceLog::scoped(LOG);
+        let psnr = vpx_psnr(VideoCodec::Vp9).await;
+        assert!(
+            psnr.clears(VP9_FLOOR_DB),
+            "VP9 encode/decode PSNR fell: {psnr:?}"
+        );
+        record_psnr(&log, &["vpxenc", "ffmpegdec"], "vp9", psnr, VP9_FLOOR_DB);
+    }
+}
+
 // -- Motion JPEG -------------------------------------------------------------
 
 #[cfg(all(feature = "mjpeg", feature = "mjpeg-encode"))]

@@ -403,7 +403,6 @@ Phased plan:
 
 ## Codecs
 
-- **VP8 / VP9 encode** (`VpxEnc`): validate on a libvpx host (compile-unverified).
 - **Pure-Rust / wasm decode** to drop the ffmpeg FFI: AV1 done (`Rav1dDec`, emits
   4:2:0 / 4:2:2 / 4:4:4 at 8/10/12-bit, round-trip tested end to end); still
   VP8 / VP9 decode and a pure-Rust Opus path.
