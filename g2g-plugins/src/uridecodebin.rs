@@ -631,6 +631,11 @@ fn map_decode_err(input: &Caps, e: DecodebinError) -> ParseError {
 /// `videoconvert`s around the overlay are wired explicitly: they are caps-driven
 /// `register_launch` elements outside the auto-plug pool, and the overlay requires
 /// RGBA8 in / out while the display sink requires NV12.
+///
+/// A *bitmap*-subtitle track (DVD / DVB / PGS) takes the other overlay: its cues
+/// are palette-indexed pixels with no text to render, so the port decodes to RGBA
+/// cue canvases and a [`SubPictureOverlay`](crate::subpictureoverlay::SubPictureOverlay)
+/// blends them onto the video (M1005).
 #[cfg(feature = "std")]
 fn wire_subtitle_overlay(
     reg: &Registry,
@@ -641,14 +646,59 @@ fn wire_subtitle_overlay(
     text_port: u8,
     text_caps: &Caps,
 ) -> Result<(), ParseError> {
-    let overlay = wire_overlay_av(reg, graph, demux, av, video_idx)?;
+    if matches!(text_caps, Caps::SubPicture { .. }) {
+        let decoder = subpicture_decoder(text_caps)
+            .ok_or_else(|| ParseError::NoDecodeChain(alloc::format!("{text_caps:?}")))?;
+        let overlay = wire_overlay_av(
+            reg,
+            graph,
+            demux,
+            av,
+            video_idx,
+            GraphNodeRef::muxer(crate::subpictureoverlay::SubPictureOverlay::new()),
+        )?;
+        let decoder = graph.add_transform(decoder);
+        graph
+            .link(demux.out(text_port), decoder)
+            .map_err(ParseError::Graph)?;
+        return graph
+            .link(decoder, overlay.input(1))
+            .map_err(ParseError::Graph);
+    }
+    let overlay = wire_overlay_av(
+        reg,
+        graph,
+        demux,
+        av,
+        video_idx,
+        GraphNodeRef::muxer(crate::textoverlay::TextOverlayN::new()),
+    )?;
     // The text pad is fed from a port of the *same* demux (single-container case).
     link_text_into_overlay(graph, overlay, demux.out(text_port), text_caps)
 }
 
-/// Build the video half of a subtitle overlay onto `demux`'s A/V ports and return
-/// the [`TextOverlayN`] muxer (its `input(1)` is the still-open text pad). The
-/// video track (`av[video_idx]`) decodes and converts to RGBA8 into `overlay.video`;
+/// The decoder that renders a bitmap-subtitle track's cues to RGBA canvases, or
+/// `None` for caps that are not a subpicture stream.
+#[cfg(feature = "std")]
+fn subpicture_decoder(caps: &Caps) -> Option<GraphNode> {
+    let Caps::SubPicture { format } = caps else {
+        return None;
+    };
+    Some(match format {
+        g2g_core::SubPictureFormat::VobSub => {
+            GraphNodeRef::element(crate::vobsubdec::VobSubDec::new())
+        }
+        g2g_core::SubPictureFormat::DvbSub => {
+            GraphNodeRef::element(crate::dvbsubdec::DvbSubDec::new())
+        }
+        g2g_core::SubPictureFormat::Pgs => GraphNodeRef::element(crate::pgsdec::PgsDec::new()),
+        _ => return None,
+    })
+}
+
+/// Build the video half of a subtitle overlay onto `demux`'s A/V ports around the
+/// `overlay` muxer and return it (its `input(1)` is the still-open subtitle pad).
+/// The video track (`av[video_idx]`) decodes and converts to RGBA8 into `overlay.video`;
 /// the overlay output converts back to NV12 for the auto video sink; the other A/V
 /// tracks fan out to their own auto sinks. The decoder is auto-plugged; the
 /// `videoconvert`s are wired explicitly (caps-driven `register_launch` elements
@@ -774,13 +824,11 @@ fn wire_overlay_av(
     demux: g2g_core::graph::Demux,
     av: &[(Caps, bool)],
     video_idx: usize,
+    overlay: GraphNode,
 ) -> Result<g2g_core::graph::Muxer, ParseError> {
     use g2g_core::RawVideoFormat;
 
-    let overlay = graph.add_muxer(
-        GraphNodeRef::muxer(crate::textoverlay::TextOverlayN::new()),
-        2,
-    );
+    let overlay = graph.add_muxer(overlay, 2);
     let to_rgba = graph.add_transform(GraphNodeRef::element(
         crate::videoconvert::VideoConvert::new(RawVideoFormat::Rgba8),
     ));
@@ -1864,7 +1912,14 @@ pub fn build_hls_subtitle_overlay(
     let demux = graph.add_demux(GraphNodeRef::demux(TsDemuxN::new(ts_streams)), outputs);
     graph.link(src, demux.input()).map_err(ParseError::Graph)?;
 
-    let overlay = wire_overlay_av(reg, &mut graph, demux, &av, video_idx)?;
+    let overlay = wire_overlay_av(
+        reg,
+        &mut graph,
+        demux,
+        &av,
+        video_idx,
+        GraphNodeRef::muxer(crate::textoverlay::TextOverlayN::new()),
+    )?;
 
     // The subtitle rendition is a separate source: its WebVTT text flows through
     // SubParse into the overlay's text pad.
@@ -1919,7 +1974,14 @@ pub fn build_hls_separate_subtitle_overlay(
 
     // A video-only variant: one A/V entry, the video, at index 0.
     let av = [(video.caps.clone(), true)];
-    let overlay = wire_overlay_av(reg, &mut graph, demux, &av, 0)?;
+    let overlay = wire_overlay_av(
+        reg,
+        &mut graph,
+        demux,
+        &av,
+        0,
+        GraphNodeRef::muxer(crate::textoverlay::TextOverlayN::new()),
+    )?;
 
     // The separate audio rendition: its own source -> demux -> decode -> auto sink.
     let audio_src = graph.add_source(GraphNodeRef::source(crate::hlssrc::HlsSrc::new(audio_url)));

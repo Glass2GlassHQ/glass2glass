@@ -668,6 +668,15 @@ pub fn default_registry() -> Registry {
     reg.register_muxer(MuxerFactory::new("textoverlay", |_inputs| {
         Box::new(crate::textoverlay::TextOverlayN::new())
     }));
+    // Bitmap-subtitle overlay fan-in (M1005): the same shape for cues that are
+    // pixels rather than text. An RGBA8 video pad (input 0) and the RGBA8
+    // canvases a subpicture decoder paints (input 1), merged by PTS:
+    // `d.video_0 ! avdec_h264 ! videoconvert ! o.video   d.text_0 ! vobsubdec !
+    // o.text   subpictureoverlay name=o ! videoconvert ! autovideosink`. Always
+    // 2-input, so link exactly the video and subpicture branches.
+    reg.register_muxer(MuxerFactory::new("subpictureoverlay", |_inputs| {
+        Box::new(crate::subpictureoverlay::SubPictureOverlay::new())
+    }));
     // Picture-in-picture / grid video fan-in (M876): the gst `compositor` analog,
     // built by link degree like the muxers above (one pad per branch linked in,
     // input 0 the timing driver and backmost layer). The canvas is a nominal
