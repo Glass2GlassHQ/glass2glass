@@ -518,8 +518,10 @@ _(No open parser items.)_
 - A `WgpuSink` API to reconfigure its surface on window resize (the swapchain
   keeps its original size today; the `wgpu_overlay_on_screen` example hits it).
 - `NvEnc` AV1 encode (needs RTX 40-series hardware).
-- Derive the `decodebin_preferring(.., Cuda)` preference automatically from a
-  downstream consumer's accepted input memory.
+- Memory-domain preference for a `decodebin` in a launch line, where the
+  downstream consumer is a factory name and not yet a built element: needs a
+  factory-level declaration of accepted input memory, so nothing has to be
+  constructed to ask.
 
 ## Clock-synchronised presentation
 

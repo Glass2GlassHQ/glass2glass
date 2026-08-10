@@ -855,6 +855,20 @@ forwarded in-band ahead of the first frame as decoder extradata).
   path; an explicit typed graph names its element, so the descriptor never touches
   the core.
 
+  The preference is not the caller's to state: `Registry::decodebin` reads it off
+  the graph it is splicing into (`Registry::derived_memory_preference`). The
+  element behind the `to` pad already declares what memory it accepts
+  (`input_domains`, §4.13.5), so its most-preferred domain (GPU-resident before
+  `System`, `DomainSet`'s order) becomes `preferred_memory`: a Cuda-only consumer
+  gets `NvDec`, a `WgpuTexture` one gets `vulkanvideodec`, and a consumer that
+  declares nothing (`DomainSet::ALL`, the default) derives `System`, leaving an
+  ordinary graph's selection alone. Only the *immediate* consumer is consulted:
+  `ALL` means "imposes no requirement", not "passes any domain through", and a CPU
+  element never declares, so looking past one would hand it a GPU frame.
+  `decodebin_preferring(.., domain)` overrides the derivation, and the resulting
+  domain gap (an explicit `System` decode into a Cuda consumer) is closed by the
+  converter auto-plug as usual.
+
 #### 4.13.10 Current limits
 
 The solver is **arc consistency** (constraint propagation over per-link caps),

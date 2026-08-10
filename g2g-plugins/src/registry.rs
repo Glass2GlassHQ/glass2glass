@@ -1052,8 +1052,9 @@ fn register_autoplug_candidates(reg: &mut Registry) {
     // still picks a CPU decoder: `NvDec` emits NV12 in CUDA device memory, which
     // caps geometry / format does not encode. M276 makes that domain a first-class
     // auto-plug feature: the factory is tagged `produces(Cuda)`, so the
-    // domain-aware search (`decodebin_preferring(.., Cuda)`) prefers `NvDec` for a
-    // GPU consumer, while a plain `decodebin` (preference `System`) is unchanged.
+    // domain-aware search prefers `NvDec` for a GPU consumer (M989 reads that
+    // preference off the consumer's declared `input_domains`), while a consumer
+    // that declares no domain requirement keeps the CPU decoder.
     #[cfg(all(target_os = "linux", feature = "nvdec"))]
     reg.register(
         ElementFactory::of::<NvDec>("nvdec", |_| Box::new(NvDec::new()))

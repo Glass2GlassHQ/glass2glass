@@ -376,6 +376,7 @@ mod factory {
     use crate::element::{AsyncElement, DynAsyncElement};
     use crate::fanout::MultiOutputElement;
     use crate::graph::{Graph, GraphError, NodeId, PadId};
+    use crate::memory::DomainSet;
     use crate::pad_template::{PadCaps, PadDirection, PadTemplate, PadTemplates};
     use crate::property::{format_specs, PropError, PropValue};
     use crate::runtime::launch::ParseError;
@@ -1719,6 +1720,14 @@ mod factory {
         /// ([`is_raw_video`] for playback), and the registry fills the middle. An
         /// empty chain (input already satisfies `target`) links `from` straight
         /// to `to`.
+        ///
+        /// The memory-domain preference comes from the graph itself (M989): the
+        /// element behind `to` declares what memory it accepts
+        /// ([`input_domains`](crate::AsyncElement::input_domains)), so a
+        /// Cuda-only consumer gets the `Cuda`-producing decoder without the
+        /// caller naming a domain (see
+        /// [`derived_memory_preference`](Self::derived_memory_preference)).
+        /// [`decodebin_preferring`](Self::decodebin_preferring) overrides it.
         pub fn decodebin(
             &self,
             graph: &mut Graph<GraphNode>,
@@ -1728,17 +1737,43 @@ mod factory {
             target: &dyn Fn(&Caps) -> bool,
             max_depth: usize,
         ) -> Result<Vec<NodeId>, DecodebinError> {
+            let to: PadId = to.into();
+            let preferred = Self::derived_memory_preference(graph, to);
             let mut elements = self
-                .autoplug(input, target, max_depth)
+                .autoplug_preferring(input, target, max_depth, preferred)
                 .ok_or(DecodebinError::NoChain)?;
             let _ = self.maybe_prepend_parser(input, &mut elements);
             Self::splice_chain(graph, from, to, elements)
         }
 
+        /// The memory domain the decode chain's consumer wants, read off the
+        /// element behind the `to` pad: the most-preferred domain of its declared
+        /// [`input_domains`](crate::AsyncElement::input_domains) (GPU-resident
+        /// before `System`, per `DomainSet`). An element that declares no
+        /// requirement ([`DomainSet::ALL`], the default) or a pad with no element
+        /// behind it (a tee) derives `System`, the plain selection, so an ordinary
+        /// graph is unaffected.
+        ///
+        /// Only the immediate consumer is consulted, never a chain of them: a
+        /// default `ALL` means "declares no requirement", not "passes any domain
+        /// through", and most CPU elements never declare, so walking past them
+        /// would hand a GPU frame to an element that can only read host bytes.
+        pub fn derived_memory_preference(graph: &Graph<GraphNode>, to: PadId) -> MemoryDomainKind {
+            let accepted = graph
+                .element(to.node)
+                .map(|node| node.input_domains())
+                .unwrap_or(DomainSet::ALL);
+            if accepted == DomainSet::ALL {
+                return MemoryDomainKind::System;
+            }
+            accepted.preferred().unwrap_or(MemoryDomainKind::System)
+        }
+
         /// [`decodebin`](Self::decodebin) with per-element property assignments
         /// (see [`AutoplugParams`]): each element the search selects, plus the
         /// injected parser, gets the assignments addressed to its factory name
-        /// applied before it is spliced into the graph.
+        /// applied before it is spliced into the graph. The consumer's memory
+        /// domain is derived the same way as in [`decodebin`](Self::decodebin).
         #[allow(clippy::too_many_arguments)]
         pub fn decodebin_with_params(
             &self,
@@ -1750,11 +1785,15 @@ mod factory {
             max_depth: usize,
             params: &AutoplugParams,
         ) -> Result<Vec<NodeId>, AutoplugError> {
+            let to: PadId = to.into();
             let mut elements = self.autoplug_with_params(
                 input,
                 target,
                 max_depth,
-                SelectionContext::default(),
+                SelectionContext {
+                    preferred_memory: Self::derived_memory_preference(graph, to),
+                    prefer_hardware: false,
+                },
                 params,
             )?;
             if let Some(parser) = self.maybe_prepend_parser(input, &mut elements) {
@@ -1880,6 +1919,11 @@ mod factory {
         /// Domain-aware [`decodebin`](Self::decodebin): splice in the chain the
         /// domain-aware search picks, biased toward `preferred` memory (e.g. `Cuda`
         /// to prefer `NvDec` when the downstream consumer is GPU-resident).
+        ///
+        /// `preferred` wins over what `decodebin` would derive from the consumer's
+        /// declared input domains, so this is the caller's override (ask for
+        /// `System` and a Cuda-accepting consumer still gets the CPU decoder, with
+        /// the converter auto-plug uploading on the edge).
         #[allow(clippy::too_many_arguments)]
         pub fn decodebin_preferring(
             &self,
