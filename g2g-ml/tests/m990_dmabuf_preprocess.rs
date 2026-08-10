@@ -2,25 +2,20 @@
 //! M990: a `MemoryDomain::DmaBuf` NV12 frame binds into `WgpuPreprocess`'s compute
 //! pass through a Vulkan external-memory import, with no CPU round trip.
 //!
-//! `WgpuToDmaBuf` stands in for the capture / decode producer: a discrete GPU can
-//! bind only a GPU-visible dma-buf (not a udmabuf or a USB webcam's), so a
-//! GPU-exported one is the producer available on a machine without a VAAPI
-//! decoder. The tensor must match the host BT.601 reference and, bit for bit, the
-//! same pixels through the System upload path. The third case gives the dma-buf a
-//! padded row stride (what a v4l2 capture produces) and asserts the shader reads
-//! it in place, with no repack.
+//! `WgpuToDmaBuf` stands in for the capture / decode producer, so the import is
+//! exercised on a machine with no VAAPI decoder, and it is the only producer whose
+//! dma-buf a *discrete* GPU will bind (a CPU-backed one needs an integrated GPU:
+//! `m993_camera_dmabuf_preprocess` is the live-camera case). The tensor must match
+//! the host BT.601 reference and, bit for bit, the same pixels through the System
+//! upload path. The third case gives the dma-buf a padded row stride (what a v4l2
+//! capture produces) and asserts the shader reads it in place, with no repack.
 //!
 //! Needs a GPU with Vulkan dma-buf export + import; CI-excluded.
 //!   cargo test -p g2g-ml --features dmabuf-wgpu --test m990_dmabuf_preprocess -- --nocapture
 
-use core::future::Future;
-use core::pin::Pin;
+use g2g_ml::wgpupreprocess::{gpu_available, nv12_to_rgb_tensor, WgpuBufferOwner};
 
-use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
-use g2g_core::memory::{MemoryDomain, SystemSlice};
-use g2g_core::{AsyncElement, Caps, Dim, G2gError, OutputSink, PushOutcome, Rate, RawVideoFormat};
-use g2g_ml::wgpupreprocess::{gpu_available, nv12_to_rgb_tensor, WgpuBufferOwner, WgpuPreprocess};
-use g2g_plugins::wgpudmabuf::WgpuToDmaBuf;
+include!("util/dmabuf_preprocess.rs");
 
 /// Frame geometry the tensor is built at.
 const WIDTH: u32 = 8;
@@ -28,47 +23,8 @@ const HEIGHT: u32 = 8;
 /// Extra bytes per row for the padded-stride case.
 const ROW_PADDING: u32 = 6;
 
-/// parallel per-test device creation intermittently segfaults in the NVIDIA driver
-/// (the recorded wgpu gotcha), so each GPU test takes this for its whole body.
-static GPU_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-#[derive(Default)]
-struct Collect {
-    packets: Vec<PipelinePacket>,
-}
-
-impl OutputSink for Collect {
-    fn push<'a>(
-        &'a mut self,
-        packet: PipelinePacket,
-    ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
-        Box::pin(async move {
-            self.packets.push(packet);
-            Ok(PushOutcome::Accepted)
-        })
-    }
-}
-
-impl Collect {
-    fn frame(&mut self) -> Frame {
-        self.packets
-            .drain(..)
-            .find_map(|p| match p {
-                PipelinePacket::DataFrame(f) => Some(f),
-                _ => None,
-            })
-            .expect("element pushed a tensor frame")
-    }
-}
-
 fn nv12_caps(w: u32, h: u32) -> Caps {
-    Caps::RawVideo {
-        format: RawVideoFormat::Nv12,
-        width: Dim::Fixed(w),
-        height: Dim::Fixed(h),
-        framerate: Rate::Fixed(30 << 16),
-        interlace: g2g_core::Interlace::Any,
-    }
+    raw_caps(RawVideoFormat::Nv12, w, h)
 }
 
 /// An NV12 frame laid out with row stride `stride`: `height` luma rows, then
@@ -97,120 +53,8 @@ fn padded_nv12(stride: u32, width: u32, height: u32) -> Vec<u8> {
 /// The same pixels repacked at `stride == width`, the layout the host reference
 /// and the System upload path take.
 fn tight_nv12(padded: &[u8], stride: u32, width: u32, height: u32) -> Vec<u8> {
-    let (stride, width, height) = (stride as usize, width as usize, height as usize);
-    let mut out = Vec::with_capacity(width * (height + height / 2));
-    for row in 0..height + height / 2 {
-        out.extend_from_slice(&padded[row * stride..row * stride + width]);
-    }
-    out
-}
-
-fn frame_f32(frame: &Frame) -> Vec<f32> {
-    let slice = frame
-        .domain
-        .as_system_slice()
-        .expect("tensor frame is System memory");
-    slice
-        .chunks_exact(4)
-        .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
-        .collect()
-}
-
-/// Export `bytes` as a GPU-allocated dma-buf NV12 frame: the stand-in producer.
-/// The export element derives the row stride from the caps width, so passing
-/// `width + padding` yields a padded frame. `None` when no GPU can export.
-async fn export_nv12_dmabuf(bytes: &[u8], stride_width: u32, height: u32) -> Option<Frame> {
-    let mut export = WgpuToDmaBuf::new();
-    let (device, queue) = export.gpu().await.ok()?;
-    let source = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("nv12-export-src"),
-        size: bytes.len() as u64,
-        usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-    queue.write_buffer(&source, 0, bytes);
-
-    export
-        .configure_pipeline(&nv12_caps(stride_width, height))
-        .expect("export configure");
-    let mut sink = Collect::default();
-    export
-        .process(
-            PipelinePacket::DataFrame(Frame {
-                domain: MemoryDomain::WgpuBuffer(WgpuToDmaBuf::wrap_buffer(
-                    &device,
-                    source,
-                    bytes.len(),
-                )),
-                timing: FrameTiming {
-                    pts_ns: 7_000,
-                    ..FrameTiming::default()
-                },
-                sequence: 3,
-                meta: Default::default(),
-            }),
-            &mut sink,
-        )
-        .await
-        .expect("export process");
-    let frame = sink.frame();
-    let MemoryDomain::DmaBuf(dmabuf) = &frame.domain else {
-        panic!("export produced a dma-buf frame");
-    };
-    assert_eq!(dmabuf.stride, stride_width, "export used the caps stride");
-    Some(frame)
-}
-
-/// Run a dma-buf frame through `WgpuPreprocess` at `WIDTH x HEIGHT`. `None` when
-/// the driver cannot bind the fd (skip), which the element reports as
-/// `UnsupportedDomain`.
-async fn preprocess_dmabuf(frame: Frame, gpu_output: bool) -> Option<Frame> {
-    let mut element = if gpu_output {
-        WgpuPreprocess::new().with_gpu_output()
-    } else {
-        WgpuPreprocess::new()
-    };
-    element
-        .configure_pipeline(&nv12_caps(WIDTH, HEIGHT))
-        .expect("preprocess configure");
-    let mut sink = Collect::default();
-    match element
-        .process(PipelinePacket::DataFrame(frame), &mut sink)
-        .await
-    {
-        Ok(()) => {}
-        Err(G2gError::UnsupportedDomain) => {
-            eprintln!("SKIP: dma-buf import unsupported on this driver (export succeeded)");
-            return None;
-        }
-        Err(e) => panic!("dma-buf preprocess failed: {e:?}"),
-    }
-    assert_eq!(element.emitted(), 1, "one tensor per frame");
-    Some(sink.frame())
-}
-
-/// The same NV12 bytes through the System upload path, for a bit-exact comparison
-/// against the import path (same shader, same GPU, so any difference is the
-/// import's).
-async fn preprocess_system(nv12: Vec<u8>) -> Vec<f32> {
-    let mut element = WgpuPreprocess::new();
-    element
-        .configure_pipeline(&nv12_caps(WIDTH, HEIGHT))
-        .expect("preprocess configure");
-    let mut sink = Collect::default();
-    element
-        .process(
-            PipelinePacket::DataFrame(Frame {
-                domain: MemoryDomain::System(SystemSlice::from_boxed(nv12.into_boxed_slice())),
-                timing: FrameTiming::default(),
-                sequence: 0,
-                meta: Default::default(),
-            }),
-            &mut sink,
-        )
-        .await
-        .expect("system preprocess");
-    frame_f32(&sink.frame())
+    let rows = (height + height / 2) as usize;
+    repack_tight(padded, stride as usize, width as usize, rows)
 }
 
 /// The tensor must match the host BT.601 reference (float tolerance) and be
@@ -238,13 +82,15 @@ async fn dmabuf_import_matches_system_upload() {
         eprintln!("skipping: no wgpu adapter on this host");
         return;
     }
+    let caps = nv12_caps(WIDTH, HEIGHT);
     let nv12 = padded_nv12(WIDTH, WIDTH, HEIGHT);
-    let Some(frame) = export_nv12_dmabuf(&nv12, WIDTH, HEIGHT).await else {
+    let Some(frame) = export_dmabuf(&nv12, &caps).await else {
         eprintln!("skipping: no GPU dma-buf export on this host");
         return;
     };
     assert_eq!(frame.timing.pts_ns, 7_000);
-    let Some(tensor) = preprocess_dmabuf(frame, false).await else {
+    let Some(tensor) = preprocess_dmabuf(frame, &caps, ImportAdapter::default(), false).await
+    else {
         return;
     };
     assert_eq!(tensor.timing.pts_ns, 7_000, "tensor inherits source timing");
@@ -253,7 +99,7 @@ async fn dmabuf_import_matches_system_upload() {
     assert_matches_reference(&got, &nv12);
     assert_eq!(
         got,
-        preprocess_system(nv12).await,
+        preprocess_system(&caps, nv12).await,
         "imported dma-buf and uploaded system memory give the same tensor, bit for bit"
     );
     eprintln!(
@@ -269,12 +115,13 @@ async fn dmabuf_import_with_gpu_output_stays_resident() {
         eprintln!("skipping: no wgpu adapter on this host");
         return;
     }
+    let caps = nv12_caps(WIDTH, HEIGHT);
     let nv12 = padded_nv12(WIDTH, WIDTH, HEIGHT);
-    let Some(frame) = export_nv12_dmabuf(&nv12, WIDTH, HEIGHT).await else {
+    let Some(frame) = export_dmabuf(&nv12, &caps).await else {
         eprintln!("skipping: no GPU dma-buf export on this host");
         return;
     };
-    let Some(tensor) = preprocess_dmabuf(frame, true).await else {
+    let Some(tensor) = preprocess_dmabuf(frame, &caps, ImportAdapter::default(), true).await else {
         return;
     };
 
@@ -305,11 +152,15 @@ async fn padded_stride_dmabuf_needs_no_repack() {
     }
     let stride = WIDTH + ROW_PADDING;
     let padded = padded_nv12(stride, WIDTH, HEIGHT);
-    let Some(frame) = export_nv12_dmabuf(&padded, stride, HEIGHT).await else {
+    // The export derives the stride from the caps width, so a wider caps pads
+    // every row; the preprocess still runs at the real WIDTH x HEIGHT.
+    let Some(frame) = export_dmabuf(&padded, &nv12_caps(stride, HEIGHT)).await else {
         eprintln!("skipping: no GPU dma-buf export on this host");
         return;
     };
-    let Some(tensor) = preprocess_dmabuf(frame, false).await else {
+    let caps = nv12_caps(WIDTH, HEIGHT);
+    let Some(tensor) = preprocess_dmabuf(frame, &caps, ImportAdapter::default(), false).await
+    else {
         return;
     };
 
@@ -318,7 +169,7 @@ async fn padded_stride_dmabuf_needs_no_repack() {
     assert_matches_reference(&got, &tight);
     assert_eq!(
         got,
-        preprocess_system(tight).await,
+        preprocess_system(&caps, tight).await,
         "a padded dma-buf gives the same tensor as the repacked pixels"
     );
     eprintln!("PASS: stride {stride} for width {WIDTH} read in place, no repack");

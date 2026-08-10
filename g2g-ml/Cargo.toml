@@ -52,6 +52,11 @@ mediacodec-wgpu = ["wgpu", "dep:g2g-plugins", "g2g-plugins/mediacodec-wgpu"]
 # on the GPU. Pulls g2g-plugins/libcamera (needs libcamera-devel + libclang).
 # Linux only. Implies wgpu.
 libcamera-wgpu = ["wgpu", "dep:g2g-plugins", "g2g-plugins/libcamera"]
+# Live webcam dma-buf capture -> GPU preprocess (M993): `v4l2src io-mode=dmabuf`
+# exports the driver's capture buffers and WgpuPreprocess imports one straight
+# into its YUYV compute pass. Adds V4l2Src to the dmabuf-wgpu path so the
+# camera-side proof can run. Linux only.
+v4l2-dmabuf-wgpu = ["dmabuf-wgpu", "g2g-plugins/v4l2"]
 # ONNX Runtime bindings for server-class CUDA / TensorRT / CoreML paths.
 # ort's default features download the platform's ONNX Runtime binaries at
 # build time (network required on the first build).
@@ -129,6 +134,9 @@ g2g-core = { workspace = true, features = ["runtime", "std"] }
 # detect_overlay example's still (PPM) path, `std` the `default_registry` the
 # launch-line test parses against.
 g2g-plugins = { workspace = true, features = ["analytics", "std"] }
+# The live-camera dma-buf test (M993) reads a capture buffer back through mmap(2),
+# the only way to look at a dma-buf from the CPU.
+libc = "0.2"
 
 [lints]
 workspace = true

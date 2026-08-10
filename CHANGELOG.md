@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M993: `WgpuPreprocess` takes a webcam's YUYV dma-buf, importing on a GPU chosen by `import-adapter`.
 - M992: `OrtSegmentation` runs a YOLO `-seg` model and attaches `Segmentation` / `Roi` masks to the frame.
 - M990: `WgpuPreprocess` binds a dma-buf NV12 frame into its compute pass by Vulkan import, no CPU upload.
 - M991: `WgpuSink::resize` follows the window, reconfiguring its surface swapchain.

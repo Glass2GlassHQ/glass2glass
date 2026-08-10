@@ -1,12 +1,14 @@
 //! Inline GPU tensor preprocessing via wgpu compute (DESIGN.md §5.1).
 //!
 //! `WgpuPreprocess` is the hardware-first preprocessing pillar: an
-//! `AsyncElement` that takes an NV12 video frame and emits a normalized f32
-//! NCHW RGB tensor (`Caps::RawVideo{Nv12} -> Caps::Tensor{F32,[1,3,H,W],Nchw}`),
-//! doing the BT.601 colour conversion and the `value / 255` normalization in a
-//! wgpu compute shader rather than on the CPU. It produces the same tensor
-//! contract `OrtInference` builds on the CPU, so it composes with the existing
-//! tensor graph (`-> TensorBatcher -> inference -> TensorPostprocess`).
+//! `AsyncElement` that takes an NV12 or packed-YUYV video frame and emits a
+//! normalized f32 NCHW RGB tensor (`Caps::RawVideo -> Caps::Tensor{F32,
+//! [1,3,H,W],Nchw}`), doing the BT.601 colour conversion and the `value / 255`
+//! normalization in a wgpu compute shader rather than on the CPU. It produces the
+//! same tensor contract `OrtInference` builds on the CPU, so it composes with the
+//! existing tensor graph (`-> TensorBatcher -> inference -> TensorPostprocess`).
+//! YUYV is what a UVC webcam captures, so a camera reaches the tensor with no
+//! `videoconvert` in front.
 //!
 //! Both ends of the compute can now stay on the GPU:
 //! - **Output (M215, [`with_gpu_output`](WgpuPreprocess::with_gpu_output)):** the
@@ -19,11 +21,14 @@
 //!   default `MemoryDomain::System` path (upload NV12 bytes to a storage buffer)
 //!   is unchanged.
 //! - **Input (M990, dma-buf import, `dmabuf-wgpu` feature, Linux):** a
-//!   `MemoryDomain::DmaBuf` NV12 frame from a capture / decode path is imported
+//!   `MemoryDomain::DmaBuf` frame from a capture / decode path is imported
 //!   with Vulkan external memory into a buffer aliasing the same pixels and bound
 //!   into the compute pass. The frame's row stride and plane offset reach the
-//!   shader in the dims uniform, so a padded capture buffer needs no repack.
-//!   Windows D3D11 surface import is the remaining input path.
+//!   shader in the dims uniform, so a padded capture buffer needs no repack. A
+//!   webcam's capture buffer is CPU-backed, which only an integrated GPU can bind,
+//!   so [`with_import_adapter`](WgpuPreprocess::with_import_adapter) picks the GPU
+//!   the import opens on (M993). Windows D3D11 surface import is the remaining
+//!   input path.
 //!
 //! With both ends GPU-resident, `capture / decode -> WgpuPreprocess ->
 //! WgpuInference` runs with the pixels never touching the CPU.
@@ -46,23 +51,31 @@ use g2g_core::{
 /// 8x8 invocations per workgroup; the dispatch covers ceil(W/8) x ceil(H/8).
 const WORKGROUP: u32 = 8;
 
-/// NV12 -> normalized planar RGB (BT.601 limited range), in a compute pass.
-/// The NV12 bytes arrive as a packed `array<u32>`; `out` is the f32 NCHW
-/// tensor (R plane, then G, then B), each value in `[0, 1]`.
+/// YUV bytes -> normalized planar RGB (BT.601 limited range), in a compute pass.
+/// The frame bytes arrive as a packed `array<u32>`; `out` is the f32 NCHW tensor
+/// (R plane, then G, then B), each value in `[0, 1]`.
+///
+/// `$sample` is the only part that differs per pixel format: it reads `yv`, `cb`,
+/// `cr` for pixel `(x, y)`, whose row starts at byte `row`. Everything else, the
+/// bindings and the colour math, is shared, hence a macro rather than a const:
+/// `concat!` splices the sample step in at compile time.
 ///
 /// `dims.stride` / `dims.base` locate the pixels inside the input buffer: a
-/// system-memory frame is tightly packed from byte 0 (`stride == width`,
-/// `base == 0`), an imported dma-buf can have a padded row stride and a nonzero
-/// plane offset (M990). The output tensor is always tightly packed.
-const SHADER: &str = r#"
+/// system-memory frame is tightly packed from byte 0 (`stride` = the format's tight
+/// row bytes, `base == 0`), an imported dma-buf can have a padded row stride and a
+/// nonzero plane offset (M990). The output tensor is always tightly packed.
+macro_rules! yuv_shader {
+    ($sample:expr) => {
+        concat!(
+            r#"
 struct Dims { width: u32, height: u32, stride: u32, base: u32 };
 
 @group(0) @binding(0) var<uniform> dims: Dims;
-@group(0) @binding(1) var<storage, read> nv12: array<u32>;
+@group(0) @binding(1) var<storage, read> pixels: array<u32>;
 @group(0) @binding(2) var<storage, read_write> out: array<f32>;
 
 fn load_byte(i: u32) -> f32 {
-    let word = nv12[i / 4u];
+    let word = pixels[i / 4u];
     let shift = (i % 4u) * 8u;
     return f32((word >> shift) & 0xFFu);
 }
@@ -75,13 +88,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let h = dims.height;
     let stride = dims.stride;
     if (x >= w || y >= h) { return; }
-
-    let yv = load_byte(dims.base + y * stride + x);
-    // NV12: h luma rows, then interleaved Cb,Cr rows at half height, same stride.
-    let uv_index = dims.base + stride * h + (y / 2u) * stride + (x / 2u) * 2u;
-    let cb = load_byte(uv_index) - 128.0;
-    let cr = load_byte(uv_index + 1u) - 128.0;
-
+    let row = dims.base + y * stride;
+"#,
+            $sample,
+            r#"
     let yy = (yv - 16.0) * 1.164383;
     let r = yy + 1.596027 * cr;
     let g = yy - 0.391762 * cb - 0.812968 * cr;
@@ -93,7 +103,33 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     out[area + li] = clamp(g, 0.0, 255.0) / 255.0;
     out[2u * area + li] = clamp(b, 0.0, 255.0) / 255.0;
 }
-"#;
+"#
+        )
+    };
+}
+
+/// NV12 input: `h` luma rows, then interleaved Cb,Cr rows at half height, all at
+/// the same row stride.
+const SHADER: &str = yuv_shader!(
+    r#"
+    let yv = load_byte(row + x);
+    let uv_index = dims.base + stride * h + (y / 2u) * stride + (x / 2u) * 2u;
+    let cb = load_byte(uv_index) - 128.0;
+    let cr = load_byte(uv_index + 1u) - 128.0;
+"#
+);
+
+/// Packed YUYV (4:2:2) input, what a UVC webcam captures: four bytes
+/// `Y0 Cb Y1 Cr` per pixel pair, one row after another, so a pixel's chroma is
+/// its pair's and only the luma byte differs between the pair's two pixels.
+const YUYV_SHADER: &str = yuv_shader!(
+    r#"
+    let pair = row + (x / 2u) * 4u;
+    let yv = load_byte(pair + (x % 2u) * 2u);
+    let cb = load_byte(pair + 1u) - 128.0;
+    let cr = load_byte(pair + 3u) - 128.0;
+"#
+);
 
 /// Surface-import variant of `SHADER` (M217): the NV12 frame arrives as an
 /// R8Uint texture of size `width x (height * 3/2)` holding the bytes in the
@@ -168,9 +204,27 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 "#;
 
+/// One pixel's BT.601 limited-range conversion, the host mirror of the shaders'
+/// colour math (`cb` / `cr` already centred on 0). Returns normalized R, G, B.
+fn bt601_rgb(yv: f32, cb: f32, cr: f32) -> [f32; 3] {
+    let yy = (yv - 16.0) * 1.164383;
+    [
+        (yy + 1.596027 * cr).clamp(0.0, 255.0) / 255.0,
+        (yy - 0.391762 * cb - 0.812968 * cr).clamp(0.0, 255.0) / 255.0,
+        (yy + 2.017232 * cb).clamp(0.0, 255.0) / 255.0,
+    ]
+}
+
+/// Write one pixel's RGB into the NCHW tensor's three planes.
+fn write_pixel(out: &mut [f32], area: usize, index: usize, rgb: [f32; 3]) {
+    out[index] = rgb[0];
+    out[area + index] = rgb[1];
+    out[2 * area + index] = rgb[2];
+}
+
 /// The host BT.601 reference matching `SHADER`, kept public so the test (and a
 /// CPU-fallback caller) can compare against the GPU output. Returns the f32
-/// NCHW RGB tensor for one NV12 frame.
+/// NCHW RGB tensor for one tightly-packed NV12 frame.
 pub fn nv12_to_rgb_tensor(nv12: &[u8], width: usize, height: usize) -> Vec<f32> {
     let area = width * height;
     let uv_base = area;
@@ -179,34 +233,97 @@ pub fn nv12_to_rgb_tensor(nv12: &[u8], width: usize, height: usize) -> Vec<f32> 
     for y in 0..height {
         for x in 0..width {
             let li = y * width + x;
-            let yv = byte(li);
             let uvi = uv_base + (y / 2) * width + (x / 2) * 2;
-            let cb = byte(uvi) - 128.0;
-            let cr = byte(uvi + 1) - 128.0;
-            let yy = (yv - 16.0) * 1.164383;
-            let r = (yy + 1.596027 * cr).clamp(0.0, 255.0) / 255.0;
-            let g = (yy - 0.391762 * cb - 0.812968 * cr).clamp(0.0, 255.0) / 255.0;
-            let b = (yy + 2.017232 * cb).clamp(0.0, 255.0) / 255.0;
-            out[li] = r;
-            out[area + li] = g;
-            out[2 * area + li] = b;
+            let rgb = bt601_rgb(byte(li), byte(uvi) - 128.0, byte(uvi + 1) - 128.0);
+            write_pixel(&mut out, area, li, rgb);
         }
     }
     out
 }
 
-/// GPU resources sized to a fixed `W x H`, built lazily on the first frame.
+/// The host reference matching `YUYV_SHADER`, the packed-4:2:2 counterpart of
+/// [`nv12_to_rgb_tensor`]: one tightly-packed YUYV frame (`Y0 Cb Y1 Cr` per pixel
+/// pair, `2 * width` bytes per row) to the same f32 NCHW RGB tensor.
+pub fn yuyv_to_rgb_tensor(yuyv: &[u8], width: usize, height: usize) -> Vec<f32> {
+    let area = width * height;
+    let byte = |i: usize| yuyv[i] as f32;
+    let mut out = vec![0f32; 3 * area];
+    for y in 0..height {
+        for x in 0..width {
+            let li = y * width + x;
+            let pair = y * width * 2 + (x / 2) * 4;
+            let rgb = bt601_rgb(
+                byte(pair + (x % 2) * 2),
+                byte(pair + 1) - 128.0,
+                byte(pair + 3) - 128.0,
+            );
+            write_pixel(&mut out, area, li, rgb);
+        }
+    }
+    out
+}
+
+/// The raw formats the element reads, in preference order: NV12 and packed YUYV
+/// through a compute shader, plus already-converted RGBA where a GPU decoder hands
+/// it over as a texture (M304).
+fn input_formats() -> &'static [RawVideoFormat] {
+    #[cfg(all(target_os = "android", feature = "mediacodec-wgpu"))]
+    return &[
+        RawVideoFormat::Rgba8,
+        RawVideoFormat::Nv12,
+        RawVideoFormat::Yuyv,
+    ];
+    #[cfg(not(all(target_os = "android", feature = "mediacodec-wgpu")))]
+    return &[RawVideoFormat::Nv12, RawVideoFormat::Yuyv];
+}
+
+/// `format` at any geometry: what the element advertises and intersects upstream
+/// caps against.
+fn any_geometry(format: RawVideoFormat) -> Caps {
+    Caps::RawVideo {
+        format,
+        width: Dim::Any,
+        height: Dim::Any,
+        framerate: Rate::Any,
+        interlace: g2g_core::Interlace::Any,
+    }
+}
+
+/// Whether the compute pass can read `format` at this geometry: 4:2:0 chroma
+/// needs both dimensions even, packed 4:2:2 only an even width.
+fn geometry_ok(format: RawVideoFormat, width: u32, height: u32) -> bool {
+    match format {
+        RawVideoFormat::Nv12 => width % 2 == 0 && height % 2 == 0,
+        RawVideoFormat::Yuyv => width % 2 == 0,
+        #[cfg(all(target_os = "android", feature = "mediacodec-wgpu"))]
+        RawVideoFormat::Rgba8 => true,
+        _ => false,
+    }
+}
+
+/// The storage-buffer compute shader that reads `format`'s bytes. `None` for a
+/// format with no such path (RGBA input arrives as a texture, never as bytes).
+fn shader_for(format: RawVideoFormat) -> Option<&'static str> {
+    match format {
+        RawVideoFormat::Nv12 => Some(SHADER),
+        RawVideoFormat::Yuyv => Some(YUYV_SHADER),
+        _ => None,
+    }
+}
+
+/// GPU resources sized to a fixed `W x H` and pixel format, built lazily on the
+/// first frame.
 #[derive(Debug)]
 struct Gpu {
     device: wgpu::Device,
     queue: wgpu::Queue,
     pipeline: wgpu::ComputePipeline,
     bind_group: wgpu::BindGroup,
-    nv12_buf: wgpu::Buffer,
+    input_buf: wgpu::Buffer,
     out_buf: wgpu::Buffer,
     staging: wgpu::Buffer,
-    nv12_len: usize,
-    nv12_padded: usize,
+    input_len: usize,
+    input_padded: usize,
     out_bytes: usize,
 }
 
@@ -239,6 +356,9 @@ struct ImportGpu {
 pub struct WgpuPreprocess {
     width: u32,
     height: u32,
+    /// Input pixel format from the negotiated caps: which compute shader runs and
+    /// how many bytes a frame is.
+    format: RawVideoFormat,
     configured: bool,
     gpu: Option<Gpu>,
     /// Surface-import resources, built on the first GPU-texture frame from that
@@ -259,6 +379,10 @@ pub struct WgpuPreprocess {
     /// frames (M990).
     #[cfg(all(target_os = "linux", feature = "dmabuf-wgpu"))]
     dmabuf_importer: g2g_plugins::dmabufwgpu::DmaBufImporter,
+    /// Which GPU the dma-buf import opens on (M993): a webcam's CPU-backed
+    /// capture buffer binds only on an integrated one.
+    #[cfg(all(target_os = "linux", feature = "dmabuf-wgpu"))]
+    import_adapter: g2g_plugins::dmabufwgpu::ImportAdapter,
     last_caps: Option<Caps>,
     emitted: u64,
     /// When set, emit the tensor as a GPU-resident `MemoryDomain::WgpuBuffer`
@@ -278,6 +402,7 @@ impl WgpuPreprocess {
         Self {
             width: 0,
             height: 0,
+            format: RawVideoFormat::Nv12,
             configured: false,
             gpu: None,
             tex_gpu: None,
@@ -287,6 +412,8 @@ impl WgpuPreprocess {
             dmabuf_gpu: None,
             #[cfg(all(target_os = "linux", feature = "dmabuf-wgpu"))]
             dmabuf_importer: g2g_plugins::dmabufwgpu::DmaBufImporter::new(),
+            #[cfg(all(target_os = "linux", feature = "dmabuf-wgpu"))]
+            import_adapter: g2g_plugins::dmabufwgpu::ImportAdapter::default(),
             last_caps: None,
             emitted: 0,
             gpu_output: false,
@@ -303,19 +430,20 @@ impl WgpuPreprocess {
         self
     }
 
+    /// Import dma-buf frames on a chosen GPU instead of the most capable one
+    /// (M993): a capture buffer from a USB webcam is CPU-backed, which a discrete
+    /// GPU refuses to bind and an integrated one accepts. Same knob as the
+    /// `import-adapter` property; the default is unchanged, which is what a
+    /// GPU-exported dma-buf needs.
+    #[cfg(all(target_os = "linux", feature = "dmabuf-wgpu"))]
+    pub fn with_import_adapter(mut self, adapter: g2g_plugins::dmabufwgpu::ImportAdapter) -> Self {
+        self.import_adapter = adapter;
+        self
+    }
+
     /// Count of tensor `DataFrame`s pushed downstream. Useful in tests.
     pub fn emitted(&self) -> u64 {
         self.emitted
-    }
-
-    fn supported_input(&self) -> Caps {
-        Caps::RawVideo {
-            format: RawVideoFormat::Nv12,
-            width: Dim::Any,
-            height: Dim::Any,
-            framerate: Rate::Any,
-            interlace: g2g_core::Interlace::Any,
-        }
     }
 
     fn tensor_caps(&self) -> Caps {
@@ -330,22 +458,22 @@ impl WgpuPreprocess {
         if self.gpu.is_some() {
             return Ok(());
         }
-        self.gpu = Some(build_gpu(self.width, self.height).await?);
+        self.gpu = Some(build_gpu(self.width, self.height, self.format).await?);
         Ok(())
     }
 
-    /// Upload the NV12 frame, run the compute pass, and read the f32 tensor
+    /// Upload the frame, run the compute pass, and read the f32 tensor
     /// back as little-endian bytes (the `OrtInference` output byte format).
     /// Blocks the calling task on `poll(Wait)`; offloading the GPU round-trip
     /// to a blocking pool is a follow-up.
-    fn dispatch(&self, nv12: &[u8]) -> Result<Box<[u8]>, G2gError> {
+    fn dispatch(&self, pixels: &[u8]) -> Result<Box<[u8]>, G2gError> {
         let gpu = self.gpu.as_ref().ok_or(G2gError::NotConfigured)?;
-        if nv12.len() < gpu.nv12_len {
+        if pixels.len() < gpu.input_len {
             return Err(G2gError::CapsMismatch);
         }
-        let mut padded = vec![0u8; gpu.nv12_padded];
-        padded[..gpu.nv12_len].copy_from_slice(&nv12[..gpu.nv12_len]);
-        gpu.queue.write_buffer(&gpu.nv12_buf, 0, &padded);
+        let mut padded = vec![0u8; gpu.input_padded];
+        padded[..gpu.input_len].copy_from_slice(&pixels[..gpu.input_len]);
+        gpu.queue.write_buffer(&gpu.input_buf, 0, &padded);
 
         let mut encoder = gpu
             .device
@@ -391,14 +519,14 @@ impl WgpuPreprocess {
     /// consumer can bind it, or read it back via the owner. A per-frame buffer
     /// (not the shared `out_buf`) so the next frame's compute does not clobber a
     /// buffer still in flight downstream.
-    fn dispatch_gpu(&self, nv12: &[u8]) -> Result<OwnedWgpuBuffer, G2gError> {
+    fn dispatch_gpu(&self, pixels: &[u8]) -> Result<OwnedWgpuBuffer, G2gError> {
         let gpu = self.gpu.as_ref().ok_or(G2gError::NotConfigured)?;
-        if nv12.len() < gpu.nv12_len {
+        if pixels.len() < gpu.input_len {
             return Err(G2gError::CapsMismatch);
         }
-        let mut padded = vec![0u8; gpu.nv12_padded];
-        padded[..gpu.nv12_len].copy_from_slice(&nv12[..gpu.nv12_len]);
-        gpu.queue.write_buffer(&gpu.nv12_buf, 0, &padded);
+        let mut padded = vec![0u8; gpu.input_padded];
+        padded[..gpu.input_len].copy_from_slice(&pixels[..gpu.input_len]);
+        gpu.queue.write_buffer(&gpu.input_buf, 0, &padded);
 
         let frame_buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("preprocess-tensor"),
@@ -602,24 +730,23 @@ impl WgpuPreprocess {
     }
 
     /// dma-buf import dispatch (M990): import the frame's dma-buf as a Vulkan
-    /// buffer aliasing the same memory and bind it straight into the NV12 compute
+    /// buffer aliasing the same memory and bind it straight into the compute
     /// pass, no CPU upload. The frame's row stride and plane offset go to the
     /// shader in the dims uniform, so a padded capture buffer needs no repack.
     /// Returns `UnsupportedDomain` when the driver cannot bind the fd (a CPU-backed
-    /// dma-buf on a discrete GPU).
+    /// dma-buf on a discrete GPU: see `with_import_adapter`).
     #[cfg(all(target_os = "linux", feature = "dmabuf-wgpu"))]
     async fn dispatch_dmabuf(
         &mut self,
         dmabuf: &g2g_core::memory::OwnedDmaBuf,
     ) -> Result<MemoryDomain, G2gError> {
-        use g2g_plugins::dmabufwgpu::{create_import_device, dmabuf_frame_bytes};
+        use g2g_plugins::dmabufwgpu::create_import_device_on;
 
-        let plane_bytes = dmabuf_frame_bytes(
-            RawVideoFormat::Nv12,
-            u64::from(dmabuf.stride),
-            u64::from(self.height),
-        )
-        .ok_or(G2gError::CapsMismatch)?;
+        let shader = shader_for(self.format).ok_or(G2gError::CapsMismatch)?;
+        let plane_bytes = self
+            .format
+            .frame_bytes(u64::from(dmabuf.stride), u64::from(self.height))
+            .ok_or(G2gError::CapsMismatch)?;
         // The shader reads the plane as `array<u32>`, so the binding must be a
         // whole number of words. dma-buf memory is page granular, so rounding up
         // stays inside the allocation. The stride and offset come from the
@@ -632,14 +759,14 @@ impl WgpuPreprocess {
             return Err(G2gError::CapsMismatch);
         }
         if self.dmabuf_gpu.is_none() {
-            let (device, queue) = create_import_device().await?;
+            let (device, queue) = create_import_device_on(self.import_adapter).await?;
             self.dmabuf_gpu = Some(build_import_gpu(
                 &device,
                 &queue,
                 self.width,
                 self.height,
-                SHADER,
-                "nv12-dmabuf-rgb-normalize",
+                shader,
+                "dmabuf-rgb-normalize",
             ));
         }
         let device = self
@@ -671,7 +798,7 @@ impl WgpuPreprocess {
         );
         let layout = ig.pipeline.get_bind_group_layout(0);
         let bind_group = ig.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("nv12-dmabuf-binding"),
+            label: Some("dmabuf-binding"),
             layout: &layout,
             entries: &[
                 wgpu::BindGroupEntry {
@@ -694,7 +821,7 @@ impl WgpuPreprocess {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("nv12-dmabuf->rgb"),
+                label: Some("dmabuf->rgb"),
                 timestamp_writes: None,
             });
             pass.set_pipeline(&ig.pipeline);
@@ -937,44 +1064,23 @@ impl AsyncElement for WgpuPreprocess {
         Self: 'a;
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
-        // M304: also accept an already-RGB GPU texture (from the Android decode
-        // path); fall back to the NV12 input otherwise.
-        #[cfg(all(target_os = "android", feature = "mediacodec-wgpu"))]
-        if let Ok(rgba) = upstream_caps.intersect(&Caps::RawVideo {
-            format: RawVideoFormat::Rgba8,
-            width: Dim::Any,
-            height: Dim::Any,
-            framerate: Rate::Any,
-            interlace: g2g_core::Interlace::Any,
-        }) {
-            return Ok(rgba);
-        }
-        upstream_caps.intersect(&self.supported_input())
+        input_formats()
+            .iter()
+            .find_map(|format| upstream_caps.intersect(&any_geometry(*format)).ok())
+            .ok_or(G2gError::CapsMismatch)
     }
 
-    /// Native `DerivedOutput`: NV12 at fixed even geometry in, the matching
+    /// Native `DerivedOutput`: a readable format at fixed geometry in, the matching
     /// `[1, 3, H, W]` f32 tensor out. Other input yields an empty set, so the
     /// solver rejects it at negotiation time.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
             Caps::RawVideo {
-                format: RawVideoFormat::Nv12,
+                format,
                 width: Dim::Fixed(w),
                 height: Dim::Fixed(h),
                 ..
-            } if w % 2 == 0 && h % 2 == 0 => CapsSet::one(Caps::Tensor {
-                dtype: TensorDType::F32,
-                shape: TensorShape::new([1, 3, *h, *w]),
-                layout: TensorLayout::Nchw,
-            }),
-            // M304: already-RGB GPU texture input maps to the same NCHW tensor.
-            #[cfg(all(target_os = "android", feature = "mediacodec-wgpu"))]
-            Caps::RawVideo {
-                format: RawVideoFormat::Rgba8,
-                width: Dim::Fixed(w),
-                height: Dim::Fixed(h),
-                ..
-            } => CapsSet::one(Caps::Tensor {
+            } if geometry_ok(*format, *w, *h) => CapsSet::one(Caps::Tensor {
                 dtype: TensorDType::F32,
                 shape: TensorShape::new([1, 3, *h, *w]),
                 layout: TensorLayout::Nchw,
@@ -984,34 +1090,23 @@ impl AsyncElement for WgpuPreprocess {
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        match absolute_caps {
-            Caps::RawVideo {
-                format: RawVideoFormat::Nv12,
-                width: Dim::Fixed(w),
-                height: Dim::Fixed(h),
-                ..
-            } if w % 2 == 0 && h % 2 == 0 => {
-                self.width = *w;
-                self.height = *h;
-                self.configured = true;
-                Ok(ConfigureOutcome::Accepted)
-            }
-            // M304: already-RGB GPU texture input (no chroma subsampling, so any
-            // fixed geometry is fine).
-            #[cfg(all(target_os = "android", feature = "mediacodec-wgpu"))]
-            Caps::RawVideo {
-                format: RawVideoFormat::Rgba8,
-                width: Dim::Fixed(w),
-                height: Dim::Fixed(h),
-                ..
-            } => {
-                self.width = *w;
-                self.height = *h;
-                self.configured = true;
-                Ok(ConfigureOutcome::Accepted)
-            }
-            _ => Err(G2gError::CapsMismatch),
+        let Caps::RawVideo {
+            format,
+            width: Dim::Fixed(w),
+            height: Dim::Fixed(h),
+            ..
+        } = absolute_caps
+        else {
+            return Err(G2gError::CapsMismatch);
+        };
+        if !geometry_ok(*format, *w, *h) {
+            return Err(G2gError::CapsMismatch);
         }
+        self.width = *w;
+        self.height = *h;
+        self.format = *format;
+        self.configured = true;
+        Ok(ConfigureOutcome::Accepted)
     }
 
     fn properties(&self) -> &'static [PropertySpec] {
@@ -1024,6 +1119,13 @@ impl AsyncElement for WgpuPreprocess {
                 self.gpu_output = value.as_bool().ok_or(PropError::Type)?;
                 Ok(())
             }
+            #[cfg(all(target_os = "linux", feature = "dmabuf-wgpu"))]
+            "import-adapter" => {
+                let text = value.as_str().ok_or(PropError::Type)?;
+                self.import_adapter = g2g_plugins::dmabufwgpu::ImportAdapter::from_name(text)
+                    .ok_or(PropError::Value)?;
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -1031,6 +1133,8 @@ impl AsyncElement for WgpuPreprocess {
     fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
             "gpu-output" => Some(PropValue::Bool(self.gpu_output)),
+            #[cfg(all(target_os = "linux", feature = "dmabuf-wgpu"))]
+            "import-adapter" => Some(PropValue::Str(self.import_adapter.name().into())),
             _ => None,
         }
     }
@@ -1101,9 +1205,9 @@ impl AsyncElement for WgpuPreprocess {
                     out.push(PipelinePacket::DataFrame(tensor)).await?;
                 }
                 PipelinePacket::CapsChanged(c) => {
-                    // geometry is pinned at configure; a mid-stream change to
-                    // anything but NV12 is a hard error.
-                    c.intersect(&self.supported_input())?;
+                    // geometry and format are pinned at configure; a mid-stream
+                    // change to another format is a hard error.
+                    c.intersect(&any_geometry(self.format))?;
                 }
                 PipelinePacket::Flush => {
                     out.push(PipelinePacket::Flush).await?;
@@ -1123,26 +1227,32 @@ impl AsyncElement for WgpuPreprocess {
     }
 }
 
-/// Settable properties: whether the tensor stays GPU-resident, so a
-/// `gst-launch` line can pick the keep-on-GPU path without the builder.
-static WGPU_PREPROCESS_PROPS: &[PropertySpec] = &[PropertySpec::new(
+/// Whether the tensor stays GPU-resident, so a `gst-launch` line can pick the
+/// keep-on-GPU path without the builder.
+const GPU_OUTPUT_PROP: PropertySpec = PropertySpec::new(
     "gpu-output",
     PropKind::Bool,
     "emit the tensor as a GPU buffer instead of reading it back to system memory",
-)];
+);
 
-/// NV12 at any geometry in; no source template, because the output tensor's
-/// shape follows the negotiated input geometry.
+#[cfg(all(target_os = "linux", feature = "dmabuf-wgpu"))]
+static WGPU_PREPROCESS_PROPS: &[PropertySpec] = &[
+    GPU_OUTPUT_PROP,
+    g2g_plugins::dmabufwgpu::IMPORT_ADAPTER_PROP,
+];
+
+#[cfg(not(all(target_os = "linux", feature = "dmabuf-wgpu")))]
+static WGPU_PREPROCESS_PROPS: &[PropertySpec] = &[GPU_OUTPUT_PROP];
+
+/// Every readable raw format at any geometry in; no source template, because the
+/// output tensor's shape follows the negotiated input geometry.
 #[cfg(feature = "launch")]
 impl g2g_core::PadTemplates for WgpuPreprocess {
     fn pad_templates() -> Vec<g2g_core::PadTemplate> {
-        Vec::from([g2g_core::PadTemplate::sink(CapsSet::one(Caps::RawVideo {
-            format: RawVideoFormat::Nv12,
-            width: Dim::Any,
-            height: Dim::Any,
-            framerate: Rate::Any,
-            interlace: g2g_core::Interlace::Any,
-        }))])
+        let formats = input_formats().iter().copied().map(any_geometry).collect();
+        Vec::from([g2g_core::PadTemplate::sink(CapsSet::from_alternatives(
+            formats,
+        ))])
     }
 }
 
@@ -1160,7 +1270,13 @@ fn gpu_err<E>(_e: E) -> G2gError {
     G2gError::Hardware(HardwareError::Other)
 }
 
-async fn build_gpu(width: u32, height: u32) -> Result<Gpu, G2gError> {
+async fn build_gpu(width: u32, height: u32, format: RawVideoFormat) -> Result<Gpu, G2gError> {
+    let source = shader_for(format).ok_or(G2gError::CapsMismatch)?;
+    let stride = format.row_stride(width).ok_or(G2gError::CapsMismatch)?;
+    let input_len = format
+        .frame_bytes(u64::from(stride), u64::from(height))
+        .ok_or(G2gError::CapsMismatch)? as usize;
+
     let instance = wgpu::Instance::default();
     let adapter = instance
         .request_adapter(&wgpu::RequestAdapterOptions::default())
@@ -1172,13 +1288,14 @@ async fn build_gpu(width: u32, height: u32) -> Result<Gpu, G2gError> {
         .map_err(gpu_err)?;
 
     let area = width as usize * height as usize;
-    let nv12_len = area * 3 / 2;
-    let nv12_padded = nv12_len.div_ceil(4) * 4;
+    // The shader reads the frame as `array<u32>`, so the buffer is a whole
+    // number of words.
+    let input_padded = input_len.div_ceil(4) * 4;
     let out_bytes = 3 * area * 4;
 
-    let nv12_buf = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("nv12-in"),
-        size: nv12_padded as u64,
+    let input_buf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("pixels-in"),
+        size: input_padded as u64,
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
@@ -1201,14 +1318,14 @@ async fn build_gpu(width: u32, height: u32) -> Result<Gpu, G2gError> {
         mapped_at_creation: false,
     });
     // System memory is tightly packed from byte 0.
-    queue.write_buffer(&dims_buf, 0, &dims_bytes(width, height, width, 0));
+    queue.write_buffer(&dims_buf, 0, &dims_bytes(width, height, stride, 0));
 
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("nv12-rgb-normalize"),
-        source: wgpu::ShaderSource::Wgsl(SHADER.into()),
+        label: Some("yuv-rgb-normalize"),
+        source: wgpu::ShaderSource::Wgsl(source.into()),
     });
     let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some("nv12-rgb-normalize"),
+        label: Some("yuv-rgb-normalize"),
         layout: None,
         module: &shader,
         entry_point: Some("main"),
@@ -1217,7 +1334,7 @@ async fn build_gpu(width: u32, height: u32) -> Result<Gpu, G2gError> {
     });
     let layout = pipeline.get_bind_group_layout(0);
     let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("nv12-rgb-binding"),
+        label: Some("yuv-rgb-binding"),
         layout: &layout,
         entries: &[
             wgpu::BindGroupEntry {
@@ -1226,7 +1343,7 @@ async fn build_gpu(width: u32, height: u32) -> Result<Gpu, G2gError> {
             },
             wgpu::BindGroupEntry {
                 binding: 1,
-                resource: nv12_buf.as_entire_binding(),
+                resource: input_buf.as_entire_binding(),
             },
             wgpu::BindGroupEntry {
                 binding: 2,
@@ -1240,11 +1357,11 @@ async fn build_gpu(width: u32, height: u32) -> Result<Gpu, G2gError> {
         queue,
         pipeline,
         bind_group,
-        nv12_buf,
+        input_buf,
         out_buf,
         staging,
-        nv12_len,
-        nv12_padded,
+        input_len,
+        input_padded,
         out_bytes,
     })
 }
@@ -1266,9 +1383,9 @@ fn dims_bytes(width: u32, height: u32, stride: u32, base: u32) -> [u8; 16] {
 /// frame's GPU memory lives on (a texture) or the one that can import its fd (a
 /// dma-buf). Unlike [`build_gpu`] it requests no adapter / device, and allocates
 /// no input buffer, because the input arrives with the frame. `shader` picks what
-/// that input is: `TEX_SHADER` for an NV12 texture (M217), `SHADER` for an
-/// imported dma-buf storage buffer (M990), `TEX_SHADER_RGBA` for an already-RGB
-/// texture (M304).
+/// that input is: `TEX_SHADER` for an NV12 texture (M217), the imported dma-buf
+/// buffer's format shader (M990, see [`shader_for`]), `TEX_SHADER_RGBA` for an
+/// already-RGB texture (M304).
 fn build_import_gpu(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -1421,24 +1538,99 @@ mod tests {
     }
 
     #[test]
-    fn intercept_narrows_nv12_and_rejects_rgba() {
+    fn yuyv_reference_grayscale_is_linear_luma() {
+        // one pixel pair with neutral chroma: Y0=16 -> 0, Y1=235 -> 1, R=G=B.
+        let yuyv = [16u8, 128, 235, 128];
+        let t = yuyv_to_rgb_tensor(&yuyv, 2, 1);
+        assert!((t[0] - 0.0).abs() < 1e-4, "Y=16 -> 0");
+        assert!((t[1] - 1.0).abs() < 1e-4, "Y=235 -> 1");
+        for plane in 0..3 {
+            for px in 0..2 {
+                assert!(
+                    (t[plane * 2 + px] - t[px]).abs() < 1e-6,
+                    "grayscale planes equal"
+                );
+            }
+        }
+        // The same picture as NV12 gives the same tensor, so the two references
+        // agree on the colour math and only differ in where the bytes sit.
+        let nv12 = [16u8, 235, 128, 128];
+        assert_eq!(t, nv12_to_rgb_tensor(&nv12, 2, 1));
+    }
+
+    #[test]
+    fn intercept_narrows_the_readable_formats_and_rejects_others() {
         let e = WgpuPreprocess::new();
-        let nv12 = Caps::RawVideo {
-            format: RawVideoFormat::Nv12,
+        let raw = |format| Caps::RawVideo {
+            format,
             width: Dim::Fixed(640),
             height: Dim::Fixed(480),
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
         };
-        let rgba = Caps::RawVideo {
-            format: RawVideoFormat::Rgba8,
-            width: Dim::Fixed(640),
-            height: Dim::Fixed(480),
+        assert_eq!(
+            e.intercept_caps(&raw(RawVideoFormat::Nv12)),
+            Ok(raw(RawVideoFormat::Nv12))
+        );
+        assert_eq!(
+            e.intercept_caps(&raw(RawVideoFormat::Yuyv)),
+            Ok(raw(RawVideoFormat::Yuyv))
+        );
+        assert_eq!(
+            e.intercept_caps(&raw(RawVideoFormat::Rgba8)),
+            Err(G2gError::CapsMismatch)
+        );
+        assert_eq!(
+            e.intercept_caps(&raw(RawVideoFormat::I420)),
+            Err(G2gError::CapsMismatch)
+        );
+    }
+
+    #[test]
+    fn configure_takes_yuyv_at_odd_height_but_not_odd_width() {
+        let yuyv = |w, h| Caps::RawVideo {
+            format: RawVideoFormat::Yuyv,
+            width: Dim::Fixed(w),
+            height: Dim::Fixed(h),
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
         };
-        assert!(e.intercept_caps(&nv12).is_ok());
-        assert_eq!(e.intercept_caps(&rgba), Err(G2gError::CapsMismatch));
+        let mut e = WgpuPreprocess::new();
+        // 4:2:2 subsamples horizontally only, so an odd row count is fine.
+        assert!(e.configure_pipeline(&yuyv(640, 481)).is_ok());
+        assert_eq!(e.format, RawVideoFormat::Yuyv);
+        assert_eq!(
+            WgpuPreprocess::new()
+                .configure_pipeline(&yuyv(641, 480))
+                .err(),
+            Some(G2gError::CapsMismatch),
+            "an odd width has no complete pixel pair"
+        );
+    }
+
+    /// M993: the import-adapter knob is settable by name, defaults to the choice a
+    /// GPU-exported dma-buf needs, and refuses an unknown value.
+    #[cfg(all(target_os = "linux", feature = "dmabuf-wgpu"))]
+    #[test]
+    fn import_adapter_property_round_trips() {
+        let mut e = WgpuPreprocess::new();
+        assert!(WGPU_PREPROCESS_PROPS
+            .iter()
+            .any(|p| p.name == "import-adapter"));
+        assert_eq!(
+            e.get_property("import-adapter"),
+            Some(PropValue::Str("high-performance".into()))
+        );
+        e.set_property("import-adapter", PropValue::Str("integrated".into()))
+            .expect("integrated is a valid choice");
+        assert_eq!(
+            e.import_adapter,
+            g2g_plugins::dmabufwgpu::ImportAdapter::Integrated
+        );
+        assert_eq!(
+            e.set_property("import-adapter", PropValue::Str("magic".into())),
+            Err(PropError::Value)
+        );
     }
 
     #[test]

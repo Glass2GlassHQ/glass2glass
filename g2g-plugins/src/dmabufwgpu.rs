@@ -13,9 +13,12 @@
 //!
 //! Hardware note (measured, see also `libcamera_dmabuf`): a discrete GPU imports
 //! only *GPU-visible* dma-bufs (allocated by a GPU / CSI-ISP, or GPU-exported),
-//! not a CPU/vmalloc-backed one (a USB webcam, a udmabuf). The import reports a
-//! clear error (`UnsupportedDomain`) when the driver cannot bind the fd, so the
-//! caller can fall back to a CPU download path.
+//! not a CPU/vmalloc-backed one (a USB webcam, a udmabuf). An integrated GPU
+//! binds those too, its memory being the same system RAM, so which GPU the import
+//! opens is a real choice: [`ImportAdapter`] (the `import-adapter` property).
+//! Whichever is picked, the import reports a clear error (`UnsupportedDomain`)
+//! when the driver cannot bind the fd, so the caller can fall back to a CPU
+//! download path.
 
 use core::any::Any;
 use core::future::Future;
@@ -35,50 +38,23 @@ use g2g_core::memory::{
 use g2g_core::pad_template::{PadTemplate, PadTemplates};
 use g2g_core::{
     AsyncElement, Caps, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError, HardwareError,
-    OutputSink, PipelinePacket, Rate, RawVideoFormat,
+    OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat,
 };
 
 /// Raw formats the import accepts (the pixel caps pass through unchanged; only
-/// the memory domain changes from dma-buf to a GPU buffer).
-const FORMATS: [RawVideoFormat; 4] = [
+/// the memory domain changes from dma-buf to a GPU buffer). `RawVideoFormat`'s
+/// `frame_bytes` / `row_stride` give each one's single-stride byte layout, so the
+/// import and the export ([`crate::wgpudmabuf::WgpuToDmaBuf`]) agree on the size.
+const FORMATS: [RawVideoFormat; 5] = [
     RawVideoFormat::Rgba8,
     RawVideoFormat::Bgra8,
     RawVideoFormat::Nv12,
     RawVideoFormat::I420,
+    RawVideoFormat::Yuyv,
 ];
 
 fn gpu_err() -> G2gError {
     G2gError::Hardware(HardwareError::Other)
-}
-
-/// Total packed byte size of one frame for a dma-buf laid out with luma row
-/// stride `stride` and `height` rows. Packed RGBA/BGRA is one plane
-/// (`stride * height`); 8-bit NV12 / I420 add a half-height chroma region
-/// (`stride * ceil(height/2)`), which is the same total (`stride * height * 3/2`)
-/// whether the chroma is interleaved (NV12) or split (I420) as long as the luma
-/// stride is used. Shared by the import ([`DmaBufToWgpu`]) and export
-/// ([`crate::wgpudmabuf::WgpuToDmaBuf`]) so both agree on the buffer size.
-/// Returns `None` for a format this element does not carry.
-pub fn dmabuf_frame_bytes(format: RawVideoFormat, stride: u64, height: u64) -> Option<u64> {
-    let luma = stride.checked_mul(height)?;
-    match format {
-        RawVideoFormat::Rgba8 | RawVideoFormat::Bgra8 => Some(luma),
-        RawVideoFormat::Nv12 | RawVideoFormat::I420 => {
-            let chroma = stride.checked_mul(height.div_ceil(2))?;
-            luma.checked_add(chroma)
-        }
-        _ => None,
-    }
-}
-
-/// Row stride (bytes) for the luma / packed plane of `format` at `width`. RGBA is
-/// 4 bytes/pixel; 8-bit NV12 / I420 luma is 1 byte/pixel.
-pub(crate) fn dmabuf_row_stride(format: RawVideoFormat, width: u32) -> Option<u32> {
-    match format {
-        RawVideoFormat::Rgba8 | RawVideoFormat::Bgra8 => width.checked_mul(4),
-        RawVideoFormat::Nv12 | RawVideoFormat::I420 => Some(width),
-        _ => None,
-    }
 }
 
 /// Keep-alive owner for a [`MemoryDomain::WgpuBuffer`] backed by an imported
@@ -113,7 +89,7 @@ impl WgpuBufferKeepAlive for DmaBufWgpuBuffer {
 /// Shared by both consumers of the import path: the [`DmaBufToWgpu`] element,
 /// which hands the buffer downstream as a [`MemoryDomain::WgpuBuffer`], and
 /// `g2g_ml::wgpupreprocess::WgpuPreprocess`, which binds it straight into its
-/// NV12 compute pass.
+/// YUV compute pass.
 #[derive(Debug, Default)]
 pub struct DmaBufImporter {
     /// The producer's timeline semaphore, imported from the first frame that
@@ -233,12 +209,14 @@ pub struct DmaBufToWgpu {
     device: Option<wgpu::Device>,
     queue: Option<wgpu::Queue>,
     /// Frame height, from the negotiated caps: the imported buffer size is
-    /// `offset + dmabuf_frame_bytes(format, stride, height)`.
+    /// `offset + format.frame_bytes(stride, height)`.
     height: u32,
     /// Pixel format, from the negotiated caps (drives the plane-aware size).
     format: RawVideoFormat,
     /// Frames imported so far.
     imported: u64,
+    /// Which GPU the import device opens on (M993).
+    adapter: ImportAdapter,
     /// The import itself, plus the producer-sync state it keeps across frames.
     importer: DmaBufImporter,
 }
@@ -258,8 +236,17 @@ impl DmaBufToWgpu {
             height: 0,
             format: RawVideoFormat::Rgba8,
             imported: 0,
+            adapter: ImportAdapter::default(),
             importer: DmaBufImporter::new(),
         }
+    }
+
+    /// Import on a chosen GPU instead of the most capable one: a CPU-backed
+    /// dma-buf (a USB webcam's capture buffer) binds only on an integrated GPU.
+    /// Same knob as the `import-adapter` property.
+    pub fn with_import_adapter(mut self, adapter: ImportAdapter) -> Self {
+        self.adapter = adapter;
+        self
     }
 
     /// Frames imported so far. Useful in tests.
@@ -327,6 +314,28 @@ impl AsyncElement for DmaBufToWgpu {
         Ok(ConfigureOutcome::Accepted)
     }
 
+    fn properties(&self) -> &'static [PropertySpec] {
+        IMPORT_PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            "import-adapter" => {
+                let text = value.as_str().ok_or(PropError::Type)?;
+                self.adapter = ImportAdapter::from_name(text).ok_or(PropError::Value)?;
+                Ok(())
+            }
+            _ => Err(PropError::Unknown),
+        }
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "import-adapter" => Some(PropValue::Str(self.adapter.name().into())),
+            _ => None,
+        }
+    }
+
     /// Input pad accepts only dma-buf frames (M354 domain nego); the auto-plug
     /// splices this element where an upstream produces a dma-buf.
     fn input_domains(&self) -> DomainSet {
@@ -353,7 +362,7 @@ impl AsyncElement for DmaBufToWgpu {
                         return Err(G2gError::UnsupportedDomain);
                     };
                     if self.device.is_none() {
-                        let (device, queue) = create_import_device().await?;
+                        let (device, queue) = create_import_device_on(self.adapter).await?;
                         self.device = Some(device);
                         self.queue = Some(queue);
                     }
@@ -363,9 +372,10 @@ impl AsyncElement for DmaBufToWgpu {
                     // Plane-aware size: RGBA is one plane, NV12 / I420 add the
                     // half-height chroma region (a bare stride*height would import
                     // only the luma plane of a planar frame).
-                    let plane_bytes =
-                        dmabuf_frame_bytes(self.format, stride, u64::from(self.height))
-                            .ok_or(G2gError::CapsMismatch)?;
+                    let plane_bytes = self
+                        .format
+                        .frame_bytes(stride, u64::from(self.height))
+                        .ok_or(G2gError::CapsMismatch)?;
                     let size = u64::from(dmabuf.offset) + plane_bytes;
                     if size == 0 {
                         return Err(G2gError::CapsMismatch);
@@ -392,10 +402,70 @@ impl AsyncElement for DmaBufToWgpu {
     }
 }
 
+/// The [`ImportAdapter`] choice as a property, declared once and reused by every
+/// element with a dma-buf input path (this one and `wgpupreprocess`).
+pub const IMPORT_ADAPTER_PROP: PropertySpec = PropertySpec::new(
+    "import-adapter",
+    PropKind::Str,
+    "which GPU to import on: high-performance | integrated (the only kind that \
+     binds a CPU-backed dma-buf, e.g. a USB webcam's capture buffer)",
+)
+.with_default("high-performance")
+.with_enum_values("high-performance | integrated");
+
+static IMPORT_PROPS: &[PropertySpec] = &[IMPORT_ADAPTER_PROP];
+
+/// Which GPU a dma-buf import opens its device on.
+///
+/// The two kinds of producer disagree about which GPU can bind their memory. A
+/// GPU-exported dma-buf must be imported on the GPU that allocated it, so the
+/// most capable one is right. A CPU-backed dma-buf (a USB webcam's capture
+/// buffer, a udmabuf) is refused by a discrete GPU and bound by an integrated
+/// one, whose memory is the same system RAM.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ImportAdapter {
+    /// The most capable GPU (the default): what a GPU-exported dma-buf, and the
+    /// rest of a GPU-resident graph, want.
+    #[default]
+    HighPerformance,
+    /// An integrated GPU, the only kind that binds a CPU-backed dma-buf. Falls
+    /// back to the low-power pick on a host with no integrated GPU.
+    Integrated,
+}
+
+impl ImportAdapter {
+    /// Parse an `import-adapter` property value.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "high-performance" => Some(Self::HighPerformance),
+            "integrated" => Some(Self::Integrated),
+            _ => None,
+        }
+    }
+
+    /// The property value naming this choice.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::HighPerformance => "high-performance",
+            Self::Integrated => "integrated",
+        }
+    }
+}
+
 /// Build a Vulkan wgpu device with the dma-buf import extensions, the device a
-/// [`DmaBufImporter`] needs. Async because adapter/device creation is; build it
-/// once on the first dma-buf frame and reuse it.
+/// [`DmaBufImporter`] needs, on the most capable GPU. Async because
+/// adapter/device creation is; build it once on the first dma-buf frame and reuse
+/// it. Use [`create_import_device_on`] to import a CPU-backed dma-buf.
 pub async fn create_import_device() -> Result<(wgpu::Device, wgpu::Queue), G2gError> {
+    create_import_device_on(ImportAdapter::default()).await
+}
+
+/// [`create_import_device`] on a chosen GPU: `ImportAdapter::Integrated` is what a
+/// CPU-backed dma-buf (a webcam capture buffer) needs, since a discrete GPU
+/// refuses to bind one.
+pub async fn create_import_device_on(
+    choice: ImportAdapter,
+) -> Result<(wgpu::Device, wgpu::Queue), G2gError> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::VULKAN,
         flags: wgpu::InstanceFlags::default(),
@@ -403,13 +473,7 @@ pub async fn create_import_device() -> Result<(wgpu::Device, wgpu::Queue), G2gEr
         backend_options: Default::default(),
         display: None,
     });
-    let adapter = instance
-        .request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            ..Default::default()
-        })
-        .await
-        .map_err(|_| gpu_err())?;
+    let adapter = import_adapter(&instance, choice).await?;
     // SAFETY: read the hal adapter only to open a device carrying the dma-buf
     // import extensions; the guard outlives the open call.
     let open = unsafe {
@@ -444,6 +508,37 @@ pub async fn create_import_device() -> Result<(wgpu::Device, wgpu::Queue), G2gEr
     }
     .map_err(|_| gpu_err())?;
     Ok((device, queue))
+}
+
+/// The Vulkan adapter `choice` names. `Integrated` searches the enumerated
+/// adapters by device type rather than trusting a power preference, because
+/// "shared CPU/GPU memory" is the property that decides whether a CPU-backed
+/// dma-buf binds at all.
+async fn import_adapter(
+    instance: &wgpu::Instance,
+    choice: ImportAdapter,
+) -> Result<wgpu::Adapter, G2gError> {
+    if choice == ImportAdapter::Integrated {
+        let integrated = instance
+            .enumerate_adapters(wgpu::Backends::VULKAN)
+            .await
+            .into_iter()
+            .find(|adapter| adapter.get_info().device_type == wgpu::DeviceType::IntegratedGpu);
+        if let Some(adapter) = integrated {
+            return Ok(adapter);
+        }
+    }
+    let power_preference = match choice {
+        ImportAdapter::HighPerformance => wgpu::PowerPreference::HighPerformance,
+        ImportAdapter::Integrated => wgpu::PowerPreference::LowPower,
+    };
+    instance
+        .request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference,
+            ..Default::default()
+        })
+        .await
+        .map_err(|_| gpu_err())
 }
 
 /// Import an exported timeline-semaphore `fd` (from the producer's
@@ -623,4 +718,52 @@ unsafe fn import_dmabuf(
         )
     };
     Ok(buffer)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// M993: which GPU to import on is settable by name (a launch line's
+    /// `import-adapter=`), defaults to the choice a GPU-exported dma-buf needs, and
+    /// refuses an unknown value rather than silently importing on the wrong GPU.
+    #[test]
+    fn import_adapter_property_round_trips() {
+        let mut element = DmaBufToWgpu::new();
+        assert_eq!(element.adapter, ImportAdapter::HighPerformance);
+        assert_eq!(
+            element.get_property("import-adapter"),
+            Some(PropValue::Str("high-performance".into()))
+        );
+        element
+            .set_property("import-adapter", PropValue::Str("integrated".into()))
+            .expect("integrated is a valid choice");
+        assert_eq!(element.adapter, ImportAdapter::Integrated);
+        assert_eq!(
+            element.get_property("import-adapter"),
+            Some(PropValue::Str("integrated".into()))
+        );
+        assert_eq!(
+            element.set_property("import-adapter", PropValue::Str("cpu".into())),
+            Err(PropError::Value)
+        );
+        assert_eq!(
+            DmaBufToWgpu::new()
+                .with_import_adapter(ImportAdapter::Integrated)
+                .adapter,
+            ImportAdapter::Integrated,
+            "the builder and the property set the same knob"
+        );
+    }
+
+    /// The import size for a webcam's YUYV capture buffer is the packed plane at the
+    /// driver's stride: a short size would bind less than the picture.
+    #[test]
+    fn yuyv_import_size_is_the_packed_plane() {
+        assert!(FORMATS.contains(&RawVideoFormat::Yuyv));
+        assert_eq!(
+            RawVideoFormat::Yuyv.frame_bytes(1280, 480),
+            Some(1280 * 480)
+        );
+    }
 }

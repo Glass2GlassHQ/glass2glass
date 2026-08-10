@@ -3773,6 +3773,7 @@ dependencies = [
  "burn",
  "g2g-core",
  "g2g-plugins",
+ "libc",
  "ort",
  "tokio",
  "wgpu",

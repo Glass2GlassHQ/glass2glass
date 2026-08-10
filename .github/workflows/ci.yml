@@ -191,6 +191,7 @@ jobs:
       - name: check dmabuf-wgpu (g2g-ml + g2g-plugins)
         run: |
           cargo check -p g2g-ml --locked --all-targets --features dmabuf-wgpu
+          cargo check -p g2g-ml --locked --all-targets --features v4l2-dmabuf-wgpu
           cargo check -p g2g-plugins --locked --all-targets --features dmabuf-wgpu,local-dmabuf
       # Embedded / no_std path: the embassy-sync stack channel, the no-alloc
       # StaticLendRing DMA capture ring, and a 3-task pipeline on a real Embassy

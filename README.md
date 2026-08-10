@@ -375,7 +375,7 @@ OS-coupled elements live behind cargo features:
 | `VelloTextOverlay` (subtitle cues drawn on the GPU, `WgpuTexture` out) | `vello-text-overlay` | wgpu |
 | `OrtInference` (+ CUDA / DirectML EPs) | `ort`, `cuda`, `directml` (in `g2g-ml`) | onnxruntime |
 | `BurnInference` (linear layer, or an ONNX topology imported by `burn-onnx` codegen) | `burn` (in `g2g-ml`) | wgpu (Vulkan / Metal / DX12) |
-| `WgpuPreprocess` (NV12 system bytes, a dma-buf, or a GPU texture in, NCHW tensor out) | `wgpu`, `dmabuf-wgpu`, `mediacodec-wgpu` (in `g2g-ml`) | wgpu (Vulkan for the dma-buf import) |
+| `WgpuPreprocess` (NV12 / YUYV system bytes, a dma-buf, or a GPU texture in, NCHW tensor out) | `wgpu`, `dmabuf-wgpu`, `mediacodec-wgpu` (in `g2g-ml`) | wgpu (Vulkan for the dma-buf import) |
 | Embassy / RTOS pool + clock | `embassy`, `embassy-link` | — |
 | Browser elements | `web`, `web-codecs` | `wasm32-unknown-unknown` |
 
