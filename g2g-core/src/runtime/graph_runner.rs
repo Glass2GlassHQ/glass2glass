@@ -2808,8 +2808,12 @@ async fn transform_arm<'a>(
     // upstream. The element's `process` is unaffected. M720 extends the same
     // hop to keyframe requests and bitrate targets when the element does not
     // consume them itself, so a PLI / BWE estimate crosses a parser between
-    // the encoder and a WebRTC sink.
-    adapter.relay_qos_to(in_rx.qos_slot());
+    // the encoder and a WebRTC sink. M997 does the same for QoS: an element
+    // that sheds work on a report (a decoder skipping non-reference frames)
+    // observes it instead.
+    if !elem.handles_qos() {
+        adapter.relay_qos_to(in_rx.qos_slot());
+    }
     if !elem.handles_keyframe_requests() {
         adapter.relay_reconfigure_to(in_rx.reconfigure_slot());
     }

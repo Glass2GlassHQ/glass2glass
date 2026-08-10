@@ -288,6 +288,16 @@ pub trait AsyncElement: ElementBound {
         false
     }
 
+    /// Whether this element acts on a downstream QoS report itself, ie it sheds
+    /// work when the sink is behind (a decoder skipping non-reference frames).
+    /// Default `false`: the runner relays the report onto the element's input
+    /// link (M175) so it reaches the source, and `process` never sees it.
+    /// `true` surfaces it as [`PushOutcome::Qos`] from the element's own `push`
+    /// instead, and the relay stops here.
+    fn handles_qos(&self) -> bool {
+        false
+    }
+
     /// Declares that this element changes the caps "domain" between its
     /// input and output: a decoder turns compressed bitstream into raw
     /// pixels, an encoder turns raw pixels into compressed bitstream, a
@@ -562,6 +572,11 @@ pub trait DynAsyncElement: ElementBound {
         false
     }
 
+    /// Dyn-safe mirror of [`AsyncElement::handles_qos`] (M997).
+    fn handles_qos(&self) -> bool {
+        false
+    }
+
     /// Dyn-safe mirror of [`AsyncElement::properties`], so a `gst-inspect` dump
     /// and the `gst-launch` parser can introspect / set an erased element.
     fn properties(&self) -> &'static [PropertySpec] {
@@ -706,6 +721,10 @@ impl<T: AsyncElement> DynAsyncElement for T {
         AsyncElement::handles_bitrate_requests(self)
     }
 
+    fn handles_qos(&self) -> bool {
+        AsyncElement::handles_qos(self)
+    }
+
     fn properties(&self) -> &'static [PropertySpec] {
         AsyncElement::properties(self)
     }
@@ -837,6 +856,10 @@ impl<'b> DynAsyncElement for &'b mut (dyn DynAsyncElement + 'b) {
 
     fn handles_bitrate_requests(&self) -> bool {
         (**self).handles_bitrate_requests()
+    }
+
+    fn handles_qos(&self) -> bool {
+        (**self).handles_qos()
     }
 
     fn properties(&self) -> &'static [PropertySpec] {

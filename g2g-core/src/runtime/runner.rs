@@ -2190,8 +2190,11 @@ where
         // `PushOutcome::Qos` and sheds load. Without this the report dies at the
         // transform (its `process` push outcome is discarded). M720 extends the
         // same hop to keyframe requests / bitrate targets the transform does
-        // not consume itself.
-        adapter.relay_qos_to(link1_rx.qos_slot());
+        // not consume itself; M997 does the same for QoS, so a decoder that
+        // sheds work itself observes the report instead of relaying it.
+        if !transform.handles_qos() {
+            adapter.relay_qos_to(link1_rx.qos_slot());
+        }
         if !transform.handles_keyframe_requests() {
             adapter.relay_reconfigure_to(link1_rx.reconfigure_slot());
         }

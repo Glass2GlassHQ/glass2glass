@@ -572,10 +572,6 @@ _(No open parser items.)_
   receiver-buffer model, M612). Remaining: wire compliance of -20/-22/-30/-40 +
   multicast should be validated against reference gear (built from the RFCs, not yet
   interop-tested).
-- **A QoS-aware transform** that acts on a relayed report (a decoder dropping
-  non-reference frames) rather than only forwarding it. CI-testable; gated on a
-  decoder that can cheaply drop frames being the bottleneck.
-
 ## Bus and logging
 
 - Remaining bus messages, each gated on a subsystem not present: `segment-done`
