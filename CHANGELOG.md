@@ -6,6 +6,9 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1008: `g2g-inspect --gst-map` dumps the gst-name synonym table and calliope's parity differ consumes it.
+- M1007: the `portal` feature moves off the `=5.13.2` zbus pins onto the 5.19 line.
+- M1006: a cue's `text-shadow` blur radius renders as a real gaussian-matched blur on all three overlay paths.
 - M1005: `SubPictureOverlay` composites decoded VobSub/PGS/DVB bitmap cues onto the video, auto-plugged by the playbins.
 - M1004: bus gains `SegmentDone`, `StreamStatus` (threaded-runner thread enter/leave), and `ClockLost` with mid-run re-election onto a swappable elected clock.
 - M1003: the AV1 decoders drain their reorder tail on `Eos` instead of dropping the stream's last pictures.

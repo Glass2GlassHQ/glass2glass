@@ -375,9 +375,6 @@ Phased plan:
   property, and the `IMMNotificationClient` hotplug path. Both are
   compile-checked only (CI cross-compiles them; the runners have no camera and
   no way to replug one).
-- Move the `portal` feature off the `zbus` / `zbus_macros` `=5.13.2` pins: run
-  the xdg-desktop-portal handshake against the 5.14+ line and drop both pins if
-  it holds.
 
 ## Sinks
 
@@ -480,9 +477,8 @@ _(No open parser items.)_
     the per-count `ChannelLayout` convention) once a real source needs one.
   Glyph
   rendering (incl. `vertical:rl` / `lr` layout) is the `truetype-overlay` feature
-  above. Still open in cue CSS: a real blur on `text-shadow` (the radius parses but
-  renders hard-edged) and further properties beyond per-span `font-size` /
-  `text-shadow` / `background-color`.
+  above. Still open in cue CSS: further properties beyond per-span `font-size` /
+  `text-shadow` (blurred) / `background-color`.
 - **Tensor substrate orientation descriptor (M181).** A deferred
   rotate/mirror descriptor the sink can absorb in hardware (DRM/KMS, Wayland
   `set_buffer_transform`, VAAPI VPP, D3D11 VideoProcessor), with eager strided /
@@ -640,10 +636,6 @@ Outstanding developer-tooling tasks, highest leverage first.
 
 - **Per-element / per-link telemetry gaps.** Remaining `Observer` coverage:
   validate the dashboard live against an RTSP source.
-- **gst-parity differ residual.** Elements g2g names differently than
-  GStreamer (`NalParse` vs `h264parse0`) go unmatched in calliope's parity
-  diff, so their link caps compare nothing without an explicit `name=`; feed
-  the `g2g-inspect --gst` mapping into calliope's matcher as a synonym table.
 - Longer tail: a live pipeline TUI (a ratatui consumer of the same telemetry
   tap).
 
