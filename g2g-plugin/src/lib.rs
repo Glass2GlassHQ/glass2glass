@@ -34,6 +34,8 @@
 // The SDK itself is std (it emits `std::panic::catch_unwind` and builds a
 // `CString`); it is not part of the no_std baseline.
 
+pub mod abi;
+
 use std::ffi::CString;
 use std::sync::OnceLock;
 
