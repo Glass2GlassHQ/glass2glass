@@ -2629,6 +2629,24 @@ variable Noto Sans CJK) yields empty glyphs and is one of the reasons the richer
 `cosmic-text` backend (shaping, bidi, CFF, system fallback) is the planned
 upgrade. The no_std baseline keeps the bitmap font (no font file or rasterizer).
 
+A WebVTT `STYLE` block reaches the pixels. `parse_cue_styles` resolves `::cue`,
+`::cue(#id)` and `::cue(.class)` rules onto each cue's `CueSettings`, and a
+span-scoped rule lands as a `SpanStyle` run over the byte range its `<c.class>`
+tag covers, so nested spans resolve per property (the innermost run that sets one
+wins). Beyond `color` the properties honoured are `font-size` (`px`, or a percent
+of the size the cue itself draws at), `text-shadow` and `background-color`, and
+all three render paths apply them. On the shaped path the sized runs become
+cosmic-text `Metrics` overrides on the line's `AttrsList`, so a line mixing sizes
+is still one shaped, bidi-reordered run and takes the tallest span's line height;
+the `ab_glyph` renderer rasterizes each character at its own size on a shared
+baseline. A shadow is one offset copy of the glyphs in the shadow colour, drawn
+under every glyph of the cue so a neighbour's shadow never lands on top of one (a
+blur radius is parsed but not applied: the shadow is hard-edged). A whole-cue
+`background-color` is the backing box; a span-scoped one fills the line box
+behind that span's own glyphs, over the box and under the text. Sizes and offsets
+are clamped at parse time, because a stylesheet is as untrusted as the rest of
+the subtitle file and the size becomes a glyph raster.
+
 `vellooverlay::VelloTextOverlay` (`vello-text-overlay`) is the GPU backend for
 the same cues, for a pipeline that keeps frames on the GPU: RGBA8 in,
 `MemoryDomain::WgpuTexture` out, like `VelloAnalyticsOverlay` beside it. It holds
