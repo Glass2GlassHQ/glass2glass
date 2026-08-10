@@ -30,7 +30,7 @@ use std::time::{Duration, Instant};
 use ash::vk;
 
 use g2g_core::memory::{
-    DomainSet, MemoryDomain, MemoryDomainKind, OwnedWgpuBuffer, WgpuBufferKeepAlive,
+    DomainSet, MemoryDomain, MemoryDomainKind, OwnedDmaBuf, OwnedWgpuBuffer, WgpuBufferKeepAlive,
 };
 use g2g_core::pad_template::{PadTemplate, PadTemplates};
 use g2g_core::{
@@ -59,7 +59,7 @@ fn gpu_err() -> G2gError {
 /// stride is used. Shared by the import ([`DmaBufToWgpu`]) and export
 /// ([`crate::wgpudmabuf::WgpuToDmaBuf`]) so both agree on the buffer size.
 /// Returns `None` for a format this element does not carry.
-pub(crate) fn dmabuf_frame_bytes(format: RawVideoFormat, stride: u64, height: u64) -> Option<u64> {
+pub fn dmabuf_frame_bytes(format: RawVideoFormat, stride: u64, height: u64) -> Option<u64> {
     let luma = stride.checked_mul(height)?;
     match format {
         RawVideoFormat::Rgba8 | RawVideoFormat::Bgra8 => Some(luma),
@@ -107,6 +107,115 @@ impl WgpuBufferKeepAlive for DmaBufWgpuBuffer {
     }
 }
 
+/// Imports dma-buf frames as GPU buffers on a wgpu device, holding the state the
+/// import needs across frames (the producer's timeline semaphore, imported once).
+///
+/// Shared by both consumers of the import path: the [`DmaBufToWgpu`] element,
+/// which hands the buffer downstream as a [`MemoryDomain::WgpuBuffer`], and
+/// `g2g_ml::wgpupreprocess::WgpuPreprocess`, which binds it straight into its
+/// NV12 compute pass.
+#[derive(Debug, Default)]
+pub struct DmaBufImporter {
+    /// The producer's timeline semaphore, imported from the first frame that
+    /// carries a sync fd (see [`OwnedDmaBuf::sync_fd`]) and reused, with the
+    /// device it lives on so it can be destroyed on drop.
+    semaphore: Option<(vk::Semaphore, wgpu::Device)>,
+}
+
+impl DmaBufImporter {
+    pub const fn new() -> Self {
+        Self { semaphore: None }
+    }
+
+    /// Import the first `size` bytes of `dmabuf` into a `wgpu::Buffer` on `device`
+    /// that aliases the same memory, no copy. When the frame carries a sync fd the
+    /// producer's completion value is awaited first, so the buffer holds finished
+    /// pixels.
+    ///
+    /// `device` must carry the dma-buf import extensions (build it with
+    /// [`create_import_device`]). Returns `UnsupportedDomain` when the driver
+    /// cannot bind the fd (a CPU-backed dma-buf on a discrete GPU), so the caller
+    /// can fall back to a CPU download path.
+    pub async fn import(
+        &mut self,
+        device: &wgpu::Device,
+        dmabuf: &OwnedDmaBuf,
+        size: u64,
+    ) -> Result<wgpu::Buffer, G2gError> {
+        self.await_producer(device, dmabuf).await?;
+        // SAFETY: `device` carries VK_EXT_external_memory_dma_buf; the fd is a
+        // live dma-buf owned by `dmabuf` for this call and is duplicated before
+        // Vulkan takes ownership.
+        unsafe { import_dmabuf(device, dmabuf.as_raw(), size) }
+    }
+
+    /// Cross-process GPU sync: if the producer attached a timeline semaphore
+    /// (zero-stall [`WgpuToDmaBuf`](crate::wgpudmabuf::WgpuToDmaBuf)), import it
+    /// once and wait for this frame's value before the memory is read. Without a
+    /// sync fd the buffer is assumed complete (the producer synchronised itself).
+    async fn await_producer(
+        &mut self,
+        device: &wgpu::Device,
+        dmabuf: &OwnedDmaBuf,
+    ) -> Result<(), G2gError> {
+        let Some((fd, value)) = dmabuf.sync_fd().zip(dmabuf.sync_value()) else {
+            return Ok(());
+        };
+        let sem = match &self.semaphore {
+            Some((sem, _)) => *sem,
+            None => {
+                // SAFETY: `device` carries VK_KHR_external_semaphore_fd; `fd` is a
+                // live exported timeline-semaphore fd owned by the frame
+                // (duplicated before import).
+                let sem = unsafe { import_timeline(device, fd)? };
+                self.semaphore = Some((sem, device.clone()));
+                sem
+            }
+        };
+        // Cooperative wait for the producer's copy: poll the timeline counter and
+        // yield to the executor between polls, rather than a blocking
+        // `vkWaitSemaphores` that would stall the whole runtime (and any sibling
+        // task, e.g. the source pulling the next frame) while the copy is in
+        // flight. The common case - the copy already finished by the time the fd
+        // crossed the socket - passes on the first poll with no yield. A 5 s
+        // deadline guards a producer that never signals. (wgpu-hal 29 exposes no
+        // wait-semaphore injection, so a GPU-queue wait is not available; this
+        // keeps the CPU wait off the hot path.)
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            // SAFETY: `sem` is a live imported timeline on `device`.
+            if unsafe { timeline_counter(device, sem)? } >= value {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(gpu_err());
+            }
+            tokio::task::yield_now().await;
+        }
+    }
+}
+
+impl Drop for DmaBufImporter {
+    fn drop(&mut self) {
+        let Some((sem, device)) = self.semaphore.take() else {
+            return;
+        };
+        // The waits above already blocked until each signalled value was reached,
+        // so no submission still references the semaphore; destroying it is legal.
+        // A device poll first is belt-and-braces for shutdown.
+        let _ = device.poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        });
+        // SAFETY: `sem` was imported on this device and is no longer in use.
+        unsafe {
+            if let Some(hal) = device.as_hal::<wgpu_hal::api::Vulkan>() {
+                hal.raw_device().destroy_semaphore(sem, None);
+            }
+        }
+    }
+}
+
 /// DMABUF -> `wgpu::Buffer` import element. See the module docs.
 ///
 /// # Example
@@ -130,12 +239,8 @@ pub struct DmaBufToWgpu {
     format: RawVideoFormat,
     /// Frames imported so far.
     imported: u64,
-    /// The producer's timeline semaphore, imported once from the first frame that
-    /// carries a sync fd (see [`OwnedDmaBuf::sync_fd`]) and reused. When present,
-    /// each synced frame's completion value is polled (yielding cooperatively
-    /// between polls) before the buffer is handed downstream, so the producer never
-    /// blocks on the copy and the consumer never blocks the runtime.
-    semaphore: Option<vk::Semaphore>,
+    /// The import itself, plus the producer-sync state it keeps across frames.
+    importer: DmaBufImporter,
 }
 
 impl Default for DmaBufToWgpu {
@@ -153,7 +258,7 @@ impl DmaBufToWgpu {
             height: 0,
             format: RawVideoFormat::Rgba8,
             imported: 0,
-            semaphore: None,
+            importer: DmaBufImporter::new(),
         }
     }
 
@@ -171,26 +276,6 @@ impl DmaBufToWgpu {
     /// The import queue, once built.
     pub fn queue(&self) -> Option<&wgpu::Queue> {
         self.queue.as_ref()
-    }
-}
-
-impl Drop for DmaBufToWgpu {
-    fn drop(&mut self) {
-        if let (Some(sem), Some(device)) = (self.semaphore.take(), self.device.as_ref()) {
-            // The host waits above already blocked until each signalled value was
-            // reached, so no submission still references the semaphore; destroying
-            // it is legal. A device poll first is belt-and-braces for shutdown.
-            let _ = device.poll(wgpu::PollType::Wait {
-                submission_index: None,
-                timeout: None,
-            });
-            // SAFETY: `sem` was imported on this device and is no longer in use.
-            unsafe {
-                if let Some(hal) = device.as_hal::<wgpu_hal::api::Vulkan>() {
-                    hal.raw_device().destroy_semaphore(sem, None);
-                }
-            }
-        }
     }
 }
 
@@ -285,46 +370,7 @@ impl AsyncElement for DmaBufToWgpu {
                     if size == 0 {
                         return Err(G2gError::CapsMismatch);
                     }
-                    // Cross-process GPU sync: if the producer attached a timeline
-                    // semaphore (zero-stall `WgpuToDmaBuf`), import it once and
-                    // host-wait this frame's value before the buffer is read
-                    // downstream. Without a sync fd the buffer is assumed complete
-                    // (the producer synchronised itself).
-                    let sync = dmabuf.sync_fd().zip(dmabuf.sync_value());
-                    if let Some((fd, value)) = sync {
-                        if self.semaphore.is_none() {
-                            // SAFETY: `device` carries VK_KHR_external_semaphore_fd;
-                            // `fd` is a live exported timeline-semaphore fd owned by
-                            // `frame` (duplicated before import).
-                            self.semaphore = Some(unsafe { import_timeline(&device, fd)? });
-                        }
-                        let sem = self.semaphore.unwrap();
-                        // Cooperative wait for the producer's copy: poll the timeline
-                        // counter and yield to the executor between polls, rather than
-                        // a blocking `vkWaitSemaphores` that would stall the whole
-                        // runtime (and any sibling task, e.g. the source pulling the
-                        // next frame) while the copy is in flight. The common case -
-                        // the copy already finished by the time the fd crossed the
-                        // socket - passes on the first poll with no yield. A 5 s
-                        // deadline guards a producer that never signals. (wgpu-hal 29
-                        // exposes no wait-semaphore injection, so a GPU-queue wait is
-                        // not available; this keeps the CPU wait off the hot path.)
-                        let deadline = Instant::now() + Duration::from_secs(5);
-                        loop {
-                            // SAFETY: `sem` is a live imported timeline on `device`.
-                            if unsafe { timeline_counter(&device, sem)? } >= value {
-                                break;
-                            }
-                            if Instant::now() >= deadline {
-                                return Err(gpu_err());
-                            }
-                            tokio::task::yield_now().await;
-                        }
-                    }
-                    // SAFETY: `device` carries VK_EXT_external_memory_dma_buf; the
-                    // fd is a live dma-buf owned by `frame` for this call and is
-                    // duplicated before Vulkan takes ownership.
-                    let buffer = unsafe { import_dmabuf(&device, dmabuf.as_raw(), size)? };
+                    let buffer = self.importer.import(&device, dmabuf, size).await?;
                     let owner = DmaBufWgpuBuffer {
                         buffer,
                         _device: device.clone(),
@@ -346,9 +392,10 @@ impl AsyncElement for DmaBufToWgpu {
     }
 }
 
-/// Build a Vulkan wgpu device with the dma-buf import extensions. Async because
-/// adapter/device creation is; called once and the device reused.
-async fn create_import_device() -> Result<(wgpu::Device, wgpu::Queue), G2gError> {
+/// Build a Vulkan wgpu device with the dma-buf import extensions, the device a
+/// [`DmaBufImporter`] needs. Async because adapter/device creation is; build it
+/// once on the first dma-buf frame and reuse it.
+pub async fn create_import_device() -> Result<(wgpu::Device, wgpu::Queue), G2gError> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::VULKAN,
         flags: wgpu::InstanceFlags::default(),

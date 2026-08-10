@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M990: `WgpuPreprocess` binds a dma-buf NV12 frame into its compute pass by Vulkan import, no CPU upload.
 - M991: `WgpuSink::resize` follows the window, reconfiguring its surface swapchain.
 - M989: `decodebin` takes its memory-domain preference from the consumer's declared input domains.
 - M988: hosted Python elements run in parallel on a free-threaded interpreter, measured against stock.

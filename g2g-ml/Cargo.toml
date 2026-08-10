@@ -36,6 +36,11 @@ wgpu = ["std", "dep:wgpu"]
 # external-memory interop, no PCIe round-trip. Implies wgpu; pulls
 # g2g-plugins/cuda-wgpu (wgpu-hal + ash + libcuda FFI). Linux + NVIDIA only.
 cuda-wgpu = ["wgpu", "dep:g2g-plugins", "g2g-plugins/cuda-wgpu"]
+# DMABUF zero-copy capture/decode -> preprocess (M990): WgpuPreprocess imports a
+# MemoryDomain::DmaBuf NV12 frame with Vulkan external memory and binds it
+# straight into its compute pass, no CPU upload. The Linux analog of cuda-wgpu;
+# pulls g2g-plugins/dmabuf-wgpu for the shared importer. Linux only. Implies wgpu.
+dmabuf-wgpu = ["wgpu", "dep:g2g-plugins", "g2g-plugins/dmabuf-wgpu"]
 # Android zero-copy decode -> preprocess (M304): WgpuPreprocess consumes the RGBA
 # MemoryDomain::WgpuTexture that MediaCodecDec emits in GPU-output mode, sampling
 # it straight into the tensor with no CPU round-trip. The Android analog of

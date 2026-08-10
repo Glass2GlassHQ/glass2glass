@@ -657,9 +657,8 @@ _(No open tag items.)_
   fly (M531), so real half-precision checkpoints load. Remaining: masked /
   causal attention + KV cache, if an autoregressive use case ever appears
   (unmasked full attention is in).
-- Decoder DMA-BUF / D3D11 surface import into `WgpuPreprocess` (binds the
-  surface directly into the compute pass; needs the surface-import handshake + a
-  GPU tensor output domain).
+- D3D11 decoder surface import into `WgpuPreprocess` (bind the surface directly
+  into the compute pass, the Windows counterpart of the dma-buf import).
 
 ## Developer tooling
 

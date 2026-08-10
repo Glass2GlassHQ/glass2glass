@@ -18,12 +18,18 @@
 //!   the compute pass on the producer's own device, with no CPU upload. The
 //!   default `MemoryDomain::System` path (upload NV12 bytes to a storage buffer)
 //!   is unchanged.
+//! - **Input (M990, dma-buf import, `dmabuf-wgpu` feature, Linux):** a
+//!   `MemoryDomain::DmaBuf` NV12 frame from a capture / decode path is imported
+//!   with Vulkan external memory into a buffer aliasing the same pixels and bound
+//!   into the compute pass. The frame's row stride and plane offset reach the
+//!   shader in the dims uniform, so a padded capture buffer needs no repack.
+//!   Windows D3D11 surface import is the remaining input path.
 //!
-//! With both ends GPU-resident, `surface -> WgpuPreprocess -> WgpuInference` runs
-//! with the pixels never touching the CPU. A real GPU NV12 decoder
-//! (`DmaBuf`/`D3D11Texture`/CUDA import into a wgpu texture) is the producer that
-//! slots in upstream; until one lands, [`nv12_to_gpu_texture`] stands in for it.
-//! RGBA input (normalize only, no colour convert) is a small follow-up.
+//! With both ends GPU-resident, `capture / decode -> WgpuPreprocess ->
+//! WgpuInference` runs with the pixels never touching the CPU.
+//! [`nv12_to_gpu_texture`] builds a GPU-texture frame from system bytes for the
+//! surface-import path when no GPU producer is in the graph. RGBA input (normalize
+//! only, no colour convert) is a small follow-up.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -43,8 +49,13 @@ const WORKGROUP: u32 = 8;
 /// NV12 -> normalized planar RGB (BT.601 limited range), in a compute pass.
 /// The NV12 bytes arrive as a packed `array<u32>`; `out` is the f32 NCHW
 /// tensor (R plane, then G, then B), each value in `[0, 1]`.
+///
+/// `dims.stride` / `dims.base` locate the pixels inside the input buffer: a
+/// system-memory frame is tightly packed from byte 0 (`stride == width`,
+/// `base == 0`), an imported dma-buf can have a padded row stride and a nonzero
+/// plane offset (M990). The output tensor is always tightly packed.
 const SHADER: &str = r#"
-struct Dims { width: u32, height: u32, _pad0: u32, _pad1: u32 };
+struct Dims { width: u32, height: u32, stride: u32, base: u32 };
 
 @group(0) @binding(0) var<uniform> dims: Dims;
 @group(0) @binding(1) var<storage, read> nv12: array<u32>;
@@ -62,13 +73,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let y = gid.y;
     let w = dims.width;
     let h = dims.height;
+    let stride = dims.stride;
     if (x >= w || y >= h) { return; }
 
-    let luma_index = y * w + x;
-    let yv = load_byte(luma_index);
-    // NV12: w*h luma bytes, then interleaved Cb,Cr at half resolution.
-    let uv_base = w * h;
-    let uv_index = uv_base + (y / 2u) * w + (x / 2u) * 2u;
+    let yv = load_byte(dims.base + y * stride + x);
+    // NV12: h luma rows, then interleaved Cb,Cr rows at half height, same stride.
+    let uv_index = dims.base + stride * h + (y / 2u) * stride + (x / 2u) * 2u;
     let cb = load_byte(uv_index) - 128.0;
     let cr = load_byte(uv_index + 1u) - 128.0;
 
@@ -78,9 +88,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let b = yy + 2.017232 * cb;
 
     let area = w * h;
-    out[luma_index] = clamp(r, 0.0, 255.0) / 255.0;
-    out[area + luma_index] = clamp(g, 0.0, 255.0) / 255.0;
-    out[2u * area + luma_index] = clamp(b, 0.0, 255.0) / 255.0;
+    let li = y * w + x;
+    out[li] = clamp(r, 0.0, 255.0) / 255.0;
+    out[area + li] = clamp(g, 0.0, 255.0) / 255.0;
+    out[2u * area + li] = clamp(b, 0.0, 255.0) / 255.0;
 }
 "#;
 
@@ -199,13 +210,15 @@ struct Gpu {
     out_bytes: usize,
 }
 
-/// Surface-import GPU resources (M217): the texture-sampling pipeline and the
-/// output buffers, built lazily on the first GPU-texture frame, on the device
-/// that frame's texture lives on (a texture is bindable only on its own device).
-/// No input buffer: the input is the incoming texture, bound per frame, so the
-/// bind group is rebuilt per dispatch.
+/// GPU resources for an import path: the pipeline and the output buffers, with no
+/// input buffer of their own, because the input arrives with the frame and is
+/// bound per dispatch. Built lazily on the first such frame, on the device that
+/// frame's memory lives on (a texture or imported buffer is bindable only on its
+/// own device), so the bind group is rebuilt per dispatch.
+///
+/// Serves the GPU-texture surface-import (M217) and the dma-buf import (M990).
 #[derive(Debug)]
-struct TexGpu {
+struct ImportGpu {
     device: wgpu::Device,
     queue: wgpu::Queue,
     pipeline: wgpu::ComputePipeline,
@@ -231,12 +244,21 @@ pub struct WgpuPreprocess {
     /// Surface-import resources, built on the first GPU-texture frame from that
     /// frame's device (M217). Separate from `gpu` because the texture path binds
     /// a sampled texture, not a storage buffer, and adopts the producer's device.
-    tex_gpu: Option<TexGpu>,
+    tex_gpu: Option<ImportGpu>,
     /// RGBA surface-import resources (M304), built on the first RGBA GPU-texture
     /// frame. Separate pipeline from `tex_gpu` (samples `texture_2d<f32>`, no
     /// YCbCr math); the input is already-converted RGBA from `MediaCodecDec`.
     #[cfg(all(target_os = "android", feature = "mediacodec-wgpu"))]
-    tex_rgba_gpu: Option<TexGpu>,
+    tex_rgba_gpu: Option<ImportGpu>,
+    /// dma-buf import resources (M990), built on the first dma-buf frame. Separate
+    /// from `gpu` because the import needs a device carrying the Vulkan
+    /// external-memory extensions, which the element's own device does not have.
+    #[cfg(all(target_os = "linux", feature = "dmabuf-wgpu"))]
+    dmabuf_gpu: Option<ImportGpu>,
+    /// The dma-buf import itself, holding the producer-sync state it keeps across
+    /// frames (M990).
+    #[cfg(all(target_os = "linux", feature = "dmabuf-wgpu"))]
+    dmabuf_importer: g2g_plugins::dmabufwgpu::DmaBufImporter,
     last_caps: Option<Caps>,
     emitted: u64,
     /// When set, emit the tensor as a GPU-resident `MemoryDomain::WgpuBuffer`
@@ -261,6 +283,10 @@ impl WgpuPreprocess {
             tex_gpu: None,
             #[cfg(all(target_os = "android", feature = "mediacodec-wgpu"))]
             tex_rgba_gpu: None,
+            #[cfg(all(target_os = "linux", feature = "dmabuf-wgpu"))]
+            dmabuf_gpu: None,
+            #[cfg(all(target_os = "linux", feature = "dmabuf-wgpu"))]
+            dmabuf_importer: g2g_plugins::dmabufwgpu::DmaBufImporter::new(),
             last_caps: None,
             emitted: 0,
             gpu_output: false,
@@ -420,7 +446,14 @@ impl WgpuPreprocess {
         if self.tex_gpu.is_some() {
             return;
         }
-        self.tex_gpu = Some(build_tex_gpu(device, queue, self.width, self.height));
+        self.tex_gpu = Some(build_import_gpu(
+            device,
+            queue,
+            self.width,
+            self.height,
+            TEX_SHADER,
+            "nv12-tex-rgb-normalize",
+        ));
     }
 
     /// Surface-import dispatch (M217): sample the incoming NV12 texture straight
@@ -472,46 +505,7 @@ impl WgpuPreprocess {
             pass.dispatch_workgroups(gx, gy, 1);
         }
 
-        if self.gpu_output {
-            // Fresh per-frame buffer, like dispatch_gpu, so the next frame's
-            // compute can't clobber one still in flight downstream.
-            let frame_buf = tg.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("preprocess-tensor"),
-                size: tg.out_bytes as u64,
-                usage: wgpu::BufferUsages::STORAGE
-                    | wgpu::BufferUsages::COPY_SRC
-                    | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            encoder.copy_buffer_to_buffer(&tg.out_buf, 0, &frame_buf, 0, tg.out_bytes as u64);
-            tg.queue.submit([encoder.finish()]);
-            let owner =
-                WgpuBufferOwner::new(tg.device.clone(), tg.queue.clone(), frame_buf, tg.out_bytes);
-            Ok(MemoryDomain::WgpuBuffer(OwnedWgpuBuffer::new(
-                tg.out_bytes,
-                std::sync::Arc::new(owner),
-            )))
-        } else {
-            encoder.copy_buffer_to_buffer(&tg.out_buf, 0, &tg.staging, 0, tg.out_bytes as u64);
-            tg.queue.submit([encoder.finish()]);
-            let slice = tg.staging.slice(..);
-            let (tx, rx) = std::sync::mpsc::channel();
-            slice.map_async(wgpu::MapMode::Read, move |r| {
-                let _ = tx.send(r);
-            });
-            tg.device
-                .poll(wgpu::PollType::Wait {
-                    submission_index: None,
-                    timeout: None,
-                })
-                .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
-            rx.recv()
-                .map_err(|_| G2gError::Hardware(HardwareError::Other))?
-                .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
-            let bytes = slice.get_mapped_range().to_vec().into_boxed_slice();
-            tg.staging.unmap();
-            Ok(MemoryDomain::System(SystemSlice::from_boxed(bytes)))
-        }
+        finish_import(tg, encoder, self.gpu_output)
     }
 
     /// Try to consume the GPU texture as an already-RGB `WgpuRgbaTexture` (the
@@ -544,7 +538,14 @@ impl WgpuPreprocess {
         if self.tex_rgba_gpu.is_some() {
             return;
         }
-        self.tex_rgba_gpu = Some(build_tex_rgba_gpu(device, queue, self.width, self.height));
+        self.tex_rgba_gpu = Some(build_import_gpu(
+            device,
+            queue,
+            self.width,
+            self.height,
+            TEX_SHADER_RGBA,
+            "rgba-tex-tensor",
+        ));
     }
 
     /// RGBA surface-import dispatch (M304): sample the already-converted RGBA
@@ -597,45 +598,162 @@ impl WgpuPreprocess {
             pass.dispatch_workgroups(gx, gy, 1);
         }
 
-        if self.gpu_output {
-            let frame_buf = tg.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("preprocess-tensor"),
-                size: tg.out_bytes as u64,
-                usage: wgpu::BufferUsages::STORAGE
-                    | wgpu::BufferUsages::COPY_SRC
-                    | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            encoder.copy_buffer_to_buffer(&tg.out_buf, 0, &frame_buf, 0, tg.out_bytes as u64);
-            tg.queue.submit([encoder.finish()]);
-            let owner =
-                WgpuBufferOwner::new(tg.device.clone(), tg.queue.clone(), frame_buf, tg.out_bytes);
-            Ok(MemoryDomain::WgpuBuffer(OwnedWgpuBuffer::new(
-                tg.out_bytes,
-                std::sync::Arc::new(owner),
-            )))
-        } else {
-            encoder.copy_buffer_to_buffer(&tg.out_buf, 0, &tg.staging, 0, tg.out_bytes as u64);
-            tg.queue.submit([encoder.finish()]);
-            let slice = tg.staging.slice(..);
-            let (tx, rx) = std::sync::mpsc::channel();
-            slice.map_async(wgpu::MapMode::Read, move |r| {
-                let _ = tx.send(r);
-            });
-            tg.device
-                .poll(wgpu::PollType::Wait {
-                    submission_index: None,
-                    timeout: None,
-                })
-                .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
-            rx.recv()
-                .map_err(|_| G2gError::Hardware(HardwareError::Other))?
-                .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
-            let bytes = slice.get_mapped_range().to_vec().into_boxed_slice();
-            tg.staging.unmap();
-            Ok(MemoryDomain::System(SystemSlice::from_boxed(bytes)))
-        }
+        finish_import(tg, encoder, self.gpu_output)
     }
+
+    /// dma-buf import dispatch (M990): import the frame's dma-buf as a Vulkan
+    /// buffer aliasing the same memory and bind it straight into the NV12 compute
+    /// pass, no CPU upload. The frame's row stride and plane offset go to the
+    /// shader in the dims uniform, so a padded capture buffer needs no repack.
+    /// Returns `UnsupportedDomain` when the driver cannot bind the fd (a CPU-backed
+    /// dma-buf on a discrete GPU).
+    #[cfg(all(target_os = "linux", feature = "dmabuf-wgpu"))]
+    async fn dispatch_dmabuf(
+        &mut self,
+        dmabuf: &g2g_core::memory::OwnedDmaBuf,
+    ) -> Result<MemoryDomain, G2gError> {
+        use g2g_plugins::dmabufwgpu::{create_import_device, dmabuf_frame_bytes};
+
+        let plane_bytes = dmabuf_frame_bytes(
+            RawVideoFormat::Nv12,
+            u64::from(dmabuf.stride),
+            u64::from(self.height),
+        )
+        .ok_or(G2gError::CapsMismatch)?;
+        // The shader reads the plane as `array<u32>`, so the binding must be a
+        // whole number of words. dma-buf memory is page granular, so rounding up
+        // stays inside the allocation. The stride and offset come from the
+        // producer, so fold them with checked ops.
+        let size = u64::from(dmabuf.offset)
+            .checked_add(plane_bytes)
+            .and_then(|s| s.checked_next_multiple_of(4))
+            .ok_or(G2gError::CapsMismatch)?;
+        if size == 0 {
+            return Err(G2gError::CapsMismatch);
+        }
+        if self.dmabuf_gpu.is_none() {
+            let (device, queue) = create_import_device().await?;
+            self.dmabuf_gpu = Some(build_import_gpu(
+                &device,
+                &queue,
+                self.width,
+                self.height,
+                SHADER,
+                "nv12-dmabuf-rgb-normalize",
+            ));
+        }
+        let device = self
+            .dmabuf_gpu
+            .as_ref()
+            .ok_or(G2gError::NotConfigured)?
+            .device
+            .clone();
+        let input = self.dmabuf_importer.import(&device, dmabuf, size).await?;
+        self.run_dmabuf_pass(&input, dmabuf.stride, dmabuf.offset)
+    }
+
+    /// Run the compute pass over an imported dma-buf buffer. Split from
+    /// [`dispatch_dmabuf`](Self::dispatch_dmabuf) so the import (which needs
+    /// `&mut self` for the cached producer semaphore) is done before the resources
+    /// are borrowed.
+    #[cfg(all(target_os = "linux", feature = "dmabuf-wgpu"))]
+    fn run_dmabuf_pass(
+        &self,
+        input: &wgpu::Buffer,
+        stride: u32,
+        base: u32,
+    ) -> Result<MemoryDomain, G2gError> {
+        let ig = self.dmabuf_gpu.as_ref().ok_or(G2gError::NotConfigured)?;
+        ig.queue.write_buffer(
+            &ig.dims_buf,
+            0,
+            &dims_bytes(self.width, self.height, stride, base),
+        );
+        let layout = ig.pipeline.get_bind_group_layout(0);
+        let bind_group = ig.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("nv12-dmabuf-binding"),
+            layout: &layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: ig.dims_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: input.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: ig.out_buf.as_entire_binding(),
+                },
+            ],
+        });
+
+        let mut encoder = ig
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("nv12-dmabuf->rgb"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&ig.pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            let gx = self.width.div_ceil(WORKGROUP);
+            let gy = self.height.div_ceil(WORKGROUP);
+            pass.dispatch_workgroups(gx, gy, 1);
+        }
+        finish_import(ig, encoder, self.gpu_output)
+    }
+}
+
+/// Finish an import dispatch: submit `encoder` and return the tensor, either
+/// GPU-resident in a fresh per-frame buffer (`gpu_output`, so the next frame's
+/// compute cannot clobber one still in flight downstream) or read back to system
+/// memory. Shared by every import path, whose only difference is how the input
+/// was bound.
+fn finish_import(
+    ig: &ImportGpu,
+    mut encoder: wgpu::CommandEncoder,
+    gpu_output: bool,
+) -> Result<MemoryDomain, G2gError> {
+    if gpu_output {
+        let frame_buf = ig.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("preprocess-tensor"),
+            size: ig.out_bytes as u64,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        encoder.copy_buffer_to_buffer(&ig.out_buf, 0, &frame_buf, 0, ig.out_bytes as u64);
+        ig.queue.submit([encoder.finish()]);
+        let owner =
+            WgpuBufferOwner::new(ig.device.clone(), ig.queue.clone(), frame_buf, ig.out_bytes);
+        return Ok(MemoryDomain::WgpuBuffer(OwnedWgpuBuffer::new(
+            ig.out_bytes,
+            std::sync::Arc::new(owner),
+        )));
+    }
+    encoder.copy_buffer_to_buffer(&ig.out_buf, 0, &ig.staging, 0, ig.out_bytes as u64);
+    ig.queue.submit([encoder.finish()]);
+    let slice = ig.staging.slice(..);
+    let (tx, rx) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |r| {
+        let _ = tx.send(r);
+    });
+    ig.device
+        .poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        })
+        .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+    rx.recv()
+        .map_err(|_| G2gError::Hardware(HardwareError::Other))?
+        .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+    let bytes = slice.get_mapped_range().to_vec().into_boxed_slice();
+    ig.staging.unmap();
+    Ok(MemoryDomain::System(SystemSlice::from_boxed(bytes)))
 }
 
 /// Owns a GPU-resident linear tensor buffer: the `wgpu::Buffer` holding an f32
@@ -958,6 +1076,11 @@ impl AsyncElement for WgpuPreprocess {
                                 return Err(G2gError::UnsupportedDomain);
                             }
                         }
+                        // dma-buf import (M990): the NV12 frame is a dma-buf from a
+                        // capture / decode path. Import it into a Vulkan buffer that
+                        // aliases the same memory and bind that, no CPU upload.
+                        #[cfg(all(target_os = "linux", feature = "dmabuf-wgpu"))]
+                        MemoryDomain::DmaBuf(dmabuf) => self.dispatch_dmabuf(dmabuf).await?,
                         _ => return Err(G2gError::UnsupportedDomain),
                     };
                     let new_caps = self.tensor_caps();
@@ -1077,10 +1200,8 @@ async fn build_gpu(width: u32, height: u32) -> Result<Gpu, G2gError> {
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
-    let mut dims = [0u8; 16];
-    dims[0..4].copy_from_slice(&width.to_le_bytes());
-    dims[4..8].copy_from_slice(&height.to_le_bytes());
-    queue.write_buffer(&dims_buf, 0, &dims);
+    // System memory is tightly packed from byte 0.
+    queue.write_buffer(&dims_buf, 0, &dims_bytes(width, height, width, 0));
 
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("nv12-rgb-normalize"),
@@ -1128,71 +1249,34 @@ async fn build_gpu(width: u32, height: u32) -> Result<Gpu, G2gError> {
     })
 }
 
-/// Build the surface-import resources on an already-existing device (the one the
-/// incoming NV12 texture lives on), M217. Unlike [`build_gpu`] it requests no
-/// adapter / device: a texture is bindable only on its own device, so the
-/// importer adopts the producer's rather than creating its own.
-fn build_tex_gpu(device: &wgpu::Device, queue: &wgpu::Queue, width: u32, height: u32) -> TexGpu {
-    let area = width as usize * height as usize;
-    let out_bytes = 3 * area * 4;
-
-    let out_buf = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("rgb-tensor-out"),
-        size: out_bytes as u64,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-        mapped_at_creation: false,
-    });
-    let staging = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("readback"),
-        size: out_bytes as u64,
-        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-    let dims_buf = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("dims"),
-        size: 16,
-        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
+/// The 16-byte `Dims` uniform every pipeline binds: the frame geometry, plus
+/// where the input pixels sit in their buffer (`stride` = input row stride,
+/// `base` = byte offset of the first luma byte). The texture pipelines read only
+/// the geometry.
+fn dims_bytes(width: u32, height: u32, stride: u32, base: u32) -> [u8; 16] {
     let mut dims = [0u8; 16];
     dims[0..4].copy_from_slice(&width.to_le_bytes());
     dims[4..8].copy_from_slice(&height.to_le_bytes());
-    queue.write_buffer(&dims_buf, 0, &dims);
-
-    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("nv12-tex-rgb-normalize"),
-        source: wgpu::ShaderSource::Wgsl(TEX_SHADER.into()),
-    });
-    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some("nv12-tex-rgb-normalize"),
-        layout: None,
-        module: &shader,
-        entry_point: Some("main"),
-        compilation_options: Default::default(),
-        cache: None,
-    });
-
-    TexGpu {
-        device: device.clone(),
-        queue: queue.clone(),
-        pipeline,
-        dims_buf,
-        out_buf,
-        staging,
-        out_bytes,
-    }
+    dims[8..12].copy_from_slice(&stride.to_le_bytes());
+    dims[12..16].copy_from_slice(&base.to_le_bytes());
+    dims
 }
 
-/// Build the RGBA surface-import resources (M304): same output buffers + dims as
-/// [`build_tex_gpu`], but the `TEX_SHADER_RGBA` pipeline that samples an
-/// `Rgba8Unorm` texture (no YCbCr math). The input texture is `width x height`.
-#[cfg(all(target_os = "android", feature = "mediacodec-wgpu"))]
-fn build_tex_rgba_gpu(
+/// Build the import resources on an already-existing device: the one the incoming
+/// frame's GPU memory lives on (a texture) or the one that can import its fd (a
+/// dma-buf). Unlike [`build_gpu`] it requests no adapter / device, and allocates
+/// no input buffer, because the input arrives with the frame. `shader` picks what
+/// that input is: `TEX_SHADER` for an NV12 texture (M217), `SHADER` for an
+/// imported dma-buf storage buffer (M990), `TEX_SHADER_RGBA` for an already-RGB
+/// texture (M304).
+fn build_import_gpu(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     width: u32,
     height: u32,
-) -> TexGpu {
+    shader: &str,
+    label: &str,
+) -> ImportGpu {
     let area = width as usize * height as usize;
     let out_bytes = 3 * area * 4;
 
@@ -1214,25 +1298,23 @@ fn build_tex_rgba_gpu(
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
-    let mut dims = [0u8; 16];
-    dims[0..4].copy_from_slice(&width.to_le_bytes());
-    dims[4..8].copy_from_slice(&height.to_le_bytes());
-    queue.write_buffer(&dims_buf, 0, &dims);
+    // A dma-buf frame rewrites this per dispatch with its own stride / offset.
+    queue.write_buffer(&dims_buf, 0, &dims_bytes(width, height, width, 0));
 
-    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("rgba-tex-tensor"),
-        source: wgpu::ShaderSource::Wgsl(TEX_SHADER_RGBA.into()),
+    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some(label),
+        source: wgpu::ShaderSource::Wgsl(shader.into()),
     });
     let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some("rgba-tex-tensor"),
+        label: Some(label),
         layout: None,
-        module: &shader,
+        module: &module,
         entry_point: Some("main"),
         compilation_options: Default::default(),
         cache: None,
     });
 
-    TexGpu {
+    ImportGpu {
         device: device.clone(),
         queue: queue.clone(),
         pipeline,
