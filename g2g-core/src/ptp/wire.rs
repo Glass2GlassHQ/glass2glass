@@ -3,8 +3,9 @@
 //!
 //! Only the subset a delay-request-response (E2E) slave uses: the common 34-byte
 //! header, plus Sync / Follow_Up / Delay_Resp bodies, plus a Delay_Req builder.
-//! Announce (BMCA), peer-delay (P2P), management and unicast are out of scope
-//! (a SLAVE that just follows whatever master is sending on its domain).
+//! Announce (BMCA), peer-delay (P2P) and unicast are out of scope (a SLAVE that
+//! just follows whatever master is sending on its domain); management messages
+//! live in the sibling `management` module.
 //!
 //! Every field is read from the network, so parsing is bounds-checked and returns
 //! `None` on a short or malformed buffer rather than panicking, per the parser
@@ -30,6 +31,7 @@ pub enum PtpMessageType {
     FollowUp,
     DelayResp,
     Announce,
+    Management,
     Other(u8),
 }
 
@@ -41,17 +43,19 @@ impl PtpMessageType {
             0x8 => Self::FollowUp,
             0x9 => Self::DelayResp,
             0xb => Self::Announce,
+            0xd => Self::Management,
             other => Self::Other(other),
         }
     }
 
-    fn nibble(self) -> u8 {
+    pub(crate) fn nibble(self) -> u8 {
         match self {
             Self::Sync => 0x0,
             Self::DelayReq => 0x1,
             Self::FollowUp => 0x8,
             Self::DelayResp => 0x9,
             Self::Announce => 0xb,
+            Self::Management => 0xd,
             Self::Other(o) => o & 0x0f,
         }
     }

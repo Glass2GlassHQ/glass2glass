@@ -3865,6 +3865,7 @@ dependencies = [
  "sha1",
  "sha2",
  "smithay-client-toolkit 0.20.0",
+ "socket2",
  "spin 0.9.9",
  "str0m",
  "symphonia-codec-vorbis",

@@ -542,10 +542,9 @@ _(No open parser items.)_
   `ptp::slave` state machine, both CI-tested, + the `g2g-plugins` UDP transport).
   The pipeline can now be PTP-mastered by either backend. Remaining polish (not
   blocking): a live multi-machine / `ptp4l`-grandmaster soak of `PtpClient`
-  (host/root/reference-gear gated); `SO_REUSEPORT` so `PtpClient` co-exists with
-  `ptp4l` on one host; querying `ptp4l` state so `PtpSystemClock` confirms *true*
-  grandmaster lock; a direct PHC (`/dev/ptpN`) read; hardware RX/TX timestamping
-  for uncompressed ST 2110-20 timing; BMCA/Announce, peer-delay, unicast.
+  (host/root/reference-gear gated); a direct PHC (`/dev/ptpN`) read; hardware
+  RX/TX timestamping for uncompressed ST 2110-20 timing; BMCA/Announce,
+  peer-delay, unicast.
 - **ST 2110 media transport** (the layer above the PTP clock). Started: `MediaClock`
   (-10 PTP<->RTP-timestamp mapping, M595), `st2110audio` (-30 PCM L16/L24, M595),
   `st2110anc` (-40 ancillary/captions per RFC 8331, 10-bit-word parity+checksum,

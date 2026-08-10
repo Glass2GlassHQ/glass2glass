@@ -56,6 +56,9 @@ pub mod wire;
 // SLAVE-mode delay request-response state machine (M594): assembles a
 // (t1,t2,t3,t4) exchange from the message stream, transport-agnostic.
 pub mod slave;
+// PTP management GET / RESPONSE (M998): read another clock's port state and
+// offset from master, the wire half of querying a local `ptp4l`.
+pub mod management;
 
 pub use slave::{PtpSlave, SlaveAction};
 pub use wire::{PtpHeader, PtpMessageType};

@@ -961,6 +961,12 @@ pub mod kmssink;
 #[cfg(all(target_os = "linux", feature = "ptp"))]
 pub mod ptpsystemclock;
 
+// ptp4l management-socket query (M998): asks a local linuxptp for its port states
+// and offset from master, so PtpSystemClock can tell real grandmaster lock from a
+// readable CLOCK_TAI. Linux-only, `ptp` feature.
+#[cfg(all(target_os = "linux", feature = "ptp"))]
+pub mod ptp4l;
+
 // In-process software PTP client (M594): speaks PTP over UDP (SLAVE mode) and
 // disciplines a g2g-core PtpClock itself, so an endpoint without an OS PTP
 // daemon can lock to a grandmaster. Needs privileged ports + a grandmaster; see

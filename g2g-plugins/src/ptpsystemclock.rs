@@ -15,32 +15,40 @@
 //!
 //! ## Honesty about "lock"
 //!
-//! This delegates to the OS clock and cannot itself confirm the grandmaster is
-//! actually synced: `CLOCK_TAI` is always readable and advances smoothly whether
-//! or not `ptp4l` is running (absent it, it is `CLOCK_REALTIME` plus the kernel
-//! TAI offset). So "locked" here means the servo is tracking the OS clock
-//! consistently, which under a real `ptp4l` / `phc2sys` deployment *is*
-//! grandmaster time. Confirming true grandmaster lock independently needs either
-//! the in-process software PTP client (M593 phase D) or querying `ptp4l`'s state,
-//! a later refinement. Linux-only (`CLOCK_TAI`).
+//! [`is_locked`](PtpSystemClock::is_locked) is about the servo only: `CLOCK_TAI`
+//! is always readable and advances smoothly whether or not `ptp4l` is running
+//! (absent it, it is `CLOCK_REALTIME` plus the kernel TAI offset), so the servo
+//! locks either way. Whether that timeline really comes from a grandmaster is a
+//! separate question, answered by
+//! [`grandmaster_locked`](PtpSystemClock::grandmaster_locked): a second worker
+//! asks the local `ptp4l` over its management socket (see [`crate::ptp4l`]) and
+//! reports the port state behind the clock, or `None` on a host with no daemon to
+//! ask. Election is left on the servo's lock, so a host whose `CLOCK_TAI` is
+//! disciplined by something other than `ptp4l` still offers its clock; a caller
+//! that needs proof reads `grandmaster_locked` itself. Linux-only (`CLOCK_TAI`).
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use alloc::string::String;
+use alloc::vec::Vec;
 
 use g2g_core::metrics::monotonic_ns;
 use g2g_core::{ClockCandidate, MonotonicClock, PipelineClock, PtpClock, PtpState, RefNs, TaiNs};
 
+use crate::ptp4l::{self, Ptp4lStatus};
+
 /// A [`PtpClock`] disciplined from the OS PTP-synced `CLOCK_TAI` by a background
-/// worker. Drop stops the worker.
+/// worker, plus a second worker polling the local `ptp4l` for the sync state
+/// behind that clock. Drop stops both.
 pub struct PtpSystemClock {
     clock: Arc<PtpClock>,
     stop: Arc<AtomicBool>,
-    worker: Option<JoinHandle<()>>,
+    ptp4l_status: Arc<Mutex<Option<Ptp4lStatus>>>,
+    workers: Vec<JoinHandle<()>>,
 }
 
 impl core::fmt::Debug for PtpSystemClock {
@@ -48,6 +56,7 @@ impl core::fmt::Debug for PtpSystemClock {
         f.debug_struct("PtpSystemClock")
             .field("state", &self.state())
             .field("now_ns", &self.now_ns())
+            .field("grandmaster_locked", &self.grandmaster_locked())
             .finish()
     }
 }
@@ -55,6 +64,10 @@ impl core::fmt::Debug for PtpSystemClock {
 impl PtpSystemClock {
     /// Default sampling interval (~16 Hz), so a lock forms within ~1 s.
     pub const DEFAULT_INTERVAL: Duration = Duration::from_millis(62);
+
+    /// How often the `ptp4l` state is re-read. Port states change on the scale of
+    /// announce timeouts (seconds), so this is deliberately slow.
+    pub const PTP4L_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
     /// Start disciplining from `CLOCK_TAI` at [`DEFAULT_INTERVAL`](Self::DEFAULT_INTERVAL).
     pub fn new() -> Self {
@@ -71,7 +84,9 @@ impl PtpSystemClock {
 
         let worker_clock = clock.clone();
         let worker_stop = stop.clone();
-        let worker = thread::Builder::new()
+        // A spawn failure leaves the clock free-running (never elected), and the
+        // ptp4l state unknown.
+        let sampler = thread::Builder::new()
             .name(String::from("g2g-ptpsysclock"))
             .spawn(move || {
                 while !worker_stop.load(Ordering::Relaxed) {
@@ -82,12 +97,27 @@ impl PtpSystemClock {
                     thread::sleep(interval);
                 }
             })
-            .ok(); // spawn failure leaves the clock free-running (never elected).
+            .ok();
+
+        let ptp4l_status = Arc::new(Mutex::new(None));
+        let poll_status = ptp4l_status.clone();
+        let poll_stop = stop.clone();
+        let poller = thread::Builder::new()
+            .name(String::from("g2g-ptp4lstate"))
+            .spawn(move || {
+                while !poll_stop.load(Ordering::Relaxed) {
+                    let status = ptp4l::query_local_ptp4l();
+                    *poll_status.lock().unwrap() = status;
+                    sleep_watching_stop(&poll_stop, Self::PTP4L_POLL_INTERVAL);
+                }
+            })
+            .ok();
 
         Self {
             clock,
             stop,
-            worker,
+            ptp4l_status,
+            workers: [sampler, poller].into_iter().flatten().collect(),
         }
     }
 
@@ -105,6 +135,19 @@ impl PtpSystemClock {
     /// Whether the servo has locked onto the OS clock.
     pub fn is_locked(&self) -> bool {
         self.clock.is_locked()
+    }
+
+    /// Whether the local `ptp4l` reports a port following a grandmaster, so the
+    /// `CLOCK_TAI` this clock reads really is grandmaster time. `None` while no
+    /// `ptp4l` answered (none running, or the first poll has not finished).
+    pub fn grandmaster_locked(&self) -> Option<bool> {
+        Some(self.ptp4l_status()?.locked_to_grandmaster())
+    }
+
+    /// The last state the local `ptp4l` reported (its port states and offset from
+    /// master), `None` if it has not answered.
+    pub fn ptp4l_status(&self) -> Option<Ptp4lStatus> {
+        self.ptp4l_status.lock().unwrap().clone()
     }
 
     /// Current servo state.
@@ -132,9 +175,19 @@ impl Default for PtpSystemClock {
 impl Drop for PtpSystemClock {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
-        if let Some(join) = self.worker.take() {
-            let _ = join.join();
+        for worker in self.workers.drain(..) {
+            let _ = worker.join();
         }
+    }
+}
+
+/// Sleep for `total`, waking often enough that a stopped worker exits promptly.
+fn sleep_watching_stop(stop: &AtomicBool, total: Duration) {
+    const TICK: Duration = Duration::from_millis(100);
+    let mut slept = Duration::ZERO;
+    while slept < total && !stop.load(Ordering::Relaxed) {
+        thread::sleep(TICK);
+        slept += TICK;
     }
 }
 
