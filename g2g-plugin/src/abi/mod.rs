@@ -54,11 +54,16 @@ use core::ffi::c_void;
 use g2g_core::G2gError;
 
 mod caps;
+mod convert;
 mod validate;
 
 pub use caps::{
     caps_from_ffi, caps_into_ffi, caps_set_from_ffi, CapsCodeError, AUDIO_FORMAT_CODES,
     BYTE_STREAM_ENCODING_CODES, RAW_VIDEO_FORMAT_CODES, TEXT_FORMAT_CODES, VIDEO_CODEC_CODES,
+};
+pub use convert::{
+    packet_from_ffi, packet_into_ffi, prop_from_ffi, prop_into_ffi, prop_kind_code, release_packet,
+    spec_into_ffi,
 };
 pub use validate::{
     check_against_declaration, validate_descriptor, validate_element, ElementKind,

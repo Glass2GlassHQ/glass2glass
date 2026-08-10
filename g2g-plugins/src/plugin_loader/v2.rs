@@ -25,20 +25,18 @@ use async_ffi::{FfiContext, FfiPoll};
 
 use g2g_core::caps::{Caps, CapsSet};
 use g2g_core::element::{AsyncElement, BoxFuture, ConfigureOutcome, DynAsyncElement, OutputSink};
-use g2g_core::memory::{DomainSet, MemoryDomain, MemoryDomainKind, SystemSlice};
+use g2g_core::memory::{DomainSet, MemoryDomainKind};
 use g2g_core::pad_template::PadTemplate;
 use g2g_core::property::{ElementMetadata, PropError, PropValue, PropertySpec};
 use g2g_core::runtime::{LaunchFactory, Registry};
-use g2g_core::{Frame, FrameTiming, G2gError, PipelinePacket};
+use g2g_core::{G2gError, PipelinePacket};
 
 use g2g_plugin::abi::{
-    caps_from_ffi, caps_into_ffi, check_against_declaration, validate_element, ElementKind,
-    FfiCaps, FfiElementRegistration, FfiElementVtable, FfiFrame, FfiOutputSink,
-    FfiOutputSinkVtable, FfiPacket, FfiPropStr, FfiPropValue, FfiPropValueBody, FfiRegistrar,
+    caps_from_ffi, caps_into_ffi, check_against_declaration, packet_from_ffi, packet_into_ffi,
+    prop_from_ffi, prop_into_ffi, validate_element, ElementKind, FfiCaps, FfiElementRegistration,
+    FfiElementVtable, FfiOutputSink, FfiOutputSinkVtable, FfiPacket, FfiPropValue, FfiRegistrar,
     FfiStatus, FfiStr, PluginDeclaration, ValidatedElement, ValidationError, CAPS_NONE,
-    MAX_FRAME_BYTES, PACKET_CAPS_CHANGED, PACKET_DATA_FRAME, PACKET_EOS, PACKET_FLUSH, PACKET_NONE,
-    PROP_BOOL, PROP_DOUBLE, PROP_FRACTION, PROP_INT, PROP_NONE, PROP_STR, PROP_UINT, STATUS_ERROR,
-    STATUS_OK, STATUS_PROPERTY_UNKNOWN, STATUS_PROPERTY_VALUE,
+    PACKET_NONE, STATUS_ERROR, STATUS_OK, STATUS_PROPERTY_UNKNOWN, STATUS_PROPERTY_VALUE,
 };
 
 /// How many v2 elements one process can register.
@@ -363,218 +361,6 @@ impl AsyncElement for V2Element {
         // its `kind`; `prop_from_ffi` reads only the member that tag selects and
         // releases an owned string before returning.
         unsafe { prop_from_ffi(&out) }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Packet and property conversion
-// ---------------------------------------------------------------------------
-
-/// Release a `SystemSlice` the host lent to a plugin.
-///
-/// # Safety
-/// `user` must be a pointer produced by `Box::into_raw` on a `SystemSlice`, and
-/// this must run exactly once for it.
-unsafe extern "C" fn drop_lent_slice(user: *mut c_void) {
-    if user.is_null() {
-        return;
-    }
-    // SAFETY: forwarded from this function's contract.
-    drop(unsafe { Box::from_raw(user.cast::<SystemSlice>()) });
-}
-
-/// Convert a host packet into its ABI form, transferring payload ownership.
-fn packet_into_ffi(packet: PipelinePacket) -> Result<FfiPacket, G2gError> {
-    match packet {
-        PipelinePacket::CapsChanged(caps) => {
-            let caps = caps_into_ffi(&caps).map_err(|_| G2gError::CapsMismatch)?;
-            Ok(FfiPacket {
-                tag: PACKET_CAPS_CHANGED,
-                caps,
-                ..FfiPacket::NONE
-            })
-        }
-        PipelinePacket::DataFrame(frame) => {
-            let MemoryDomain::System(slice) = frame.domain else {
-                return Err(G2gError::UnsupportedDomain);
-            };
-            let boxed = Box::new(slice);
-            let bytes = boxed.as_slice();
-            let data = bytes.as_ptr();
-            let len = bytes.len();
-            let free_user = Box::into_raw(boxed).cast::<c_void>();
-            Ok(FfiPacket {
-                tag: PACKET_DATA_FRAME,
-                frame: FfiFrame {
-                    data,
-                    len,
-                    free: Some(drop_lent_slice),
-                    free_user,
-                    pts_ns: frame.timing.pts_ns,
-                    dts_ns: frame.timing.dts_ns,
-                    duration_ns: frame.timing.duration_ns,
-                    capture_ns: frame.timing.capture_ns,
-                    arrival_ns: frame.timing.arrival_ns,
-                    sequence: frame.sequence,
-                    keyframe: u32::from(frame.timing.keyframe),
-                    reserved: 0,
-                },
-                ..FfiPacket::NONE
-            })
-        }
-        PipelinePacket::Eos => Ok(FfiPacket {
-            tag: PACKET_EOS,
-            ..FfiPacket::NONE
-        }),
-        PipelinePacket::Flush => Ok(FfiPacket {
-            tag: PACKET_FLUSH,
-            ..FfiPacket::NONE
-        }),
-        // The wrapper handles these before ever reaching here.
-        _ => Err(G2gError::UnsupportedDomain),
-    }
-}
-
-/// Convert a packet a plugin pushed into a host packet, taking ownership of any
-/// payload. On failure the payload is released here, since the plugin has
-/// already handed it over.
-///
-/// # Safety
-/// `packet` must be a value the plugin filled in, whose `data` / `len` describe
-/// readable bytes for as long as the frame lives. That is the one thing the
-/// host cannot verify and must take from the plugin's contract.
-unsafe fn packet_from_ffi(packet: FfiPacket) -> Result<PipelinePacket, FfiStatus> {
-    match packet.tag {
-        PACKET_CAPS_CHANGED => {
-            let caps = caps_from_ffi(&packet.caps).map_err(|_| STATUS_ERROR)?;
-            Ok(PipelinePacket::CapsChanged(caps))
-        }
-        PACKET_DATA_FRAME => {
-            let f = packet.frame;
-            let malformed = f.len > MAX_FRAME_BYTES || (f.len > 0 && f.data.is_null());
-            if malformed {
-                if let Some(free) = f.free {
-                    // SAFETY: the plugin handed ownership over with the packet;
-                    // releasing it is the only way not to leak a payload we are
-                    // about to reject.
-                    unsafe { free(f.free_user) };
-                }
-                return Err(STATUS_ERROR);
-            }
-            // SAFETY: forwarded from this function's contract; `free` /
-            // `free_user` are the release pair the ABI requires alongside them.
-            let slice = unsafe { SystemSlice::from_foreign(f.data, f.len, f.free, f.free_user) };
-            let frame = Frame::new(
-                MemoryDomain::System(slice),
-                FrameTiming {
-                    pts_ns: f.pts_ns,
-                    dts_ns: f.dts_ns,
-                    duration_ns: f.duration_ns,
-                    capture_ns: f.capture_ns,
-                    arrival_ns: f.arrival_ns,
-                    keyframe: f.keyframe != 0,
-                },
-                f.sequence,
-            );
-            Ok(PipelinePacket::DataFrame(frame))
-        }
-        PACKET_EOS => Ok(PipelinePacket::Eos),
-        PACKET_FLUSH => Ok(PipelinePacket::Flush),
-        _ => Err(STATUS_ERROR),
-    }
-}
-
-fn prop_into_ffi(value: &PropValue) -> Option<FfiPropValue> {
-    let (kind, body) = match value {
-        PropValue::Bool(b) => (
-            PROP_BOOL,
-            FfiPropValueBody {
-                boolean: u32::from(*b),
-            },
-        ),
-        PropValue::Int(v) => (PROP_INT, FfiPropValueBody { int: *v }),
-        PropValue::Uint(v) => (PROP_UINT, FfiPropValueBody { uint: *v }),
-        PropValue::Double(v) => (PROP_DOUBLE, FfiPropValueBody { double: *v }),
-        PropValue::Fraction(num, den) => (
-            PROP_FRACTION,
-            FfiPropValueBody {
-                fraction: g2g_plugin::abi::FfiFraction {
-                    num: *num,
-                    den: *den,
-                },
-            },
-        ),
-        PropValue::Str(s) => (
-            PROP_STR,
-            FfiPropValueBody {
-                string: FfiPropStr {
-                    ptr: s.as_ptr(),
-                    len: s.len(),
-                    free: None,
-                    free_user: core::ptr::null_mut(),
-                },
-            },
-        ),
-        // The flag-set kind does not cross v2, and validation refuses an
-        // element that declares one, so no live element can reach this.
-        _ => return None,
-    };
-    Some(FfiPropValue {
-        kind,
-        reserved: 0,
-        body,
-    })
-}
-
-/// # Safety
-/// `value`'s `kind` must correctly name the live union member, and a string
-/// payload with a non-null `free` must be one this call may release.
-unsafe fn prop_from_ffi(value: &FfiPropValue) -> Option<PropValue> {
-    match value.kind {
-        PROP_BOOL => {
-            // SAFETY: the kind tag is the ABI's sole authority on which union
-            // member is live.
-            Some(PropValue::Bool(unsafe { value.body.boolean } != 0))
-        }
-        PROP_INT => {
-            // SAFETY: as above.
-            Some(PropValue::Int(unsafe { value.body.int }))
-        }
-        PROP_UINT => {
-            // SAFETY: as above.
-            Some(PropValue::Uint(unsafe { value.body.uint }))
-        }
-        PROP_DOUBLE => {
-            // SAFETY: as above.
-            Some(PropValue::Double(unsafe { value.body.double }))
-        }
-        PROP_FRACTION => {
-            // SAFETY: as above.
-            let f = unsafe { value.body.fraction };
-            (f.den != 0).then_some(PropValue::Fraction(f.num, f.den))
-        }
-        PROP_STR => {
-            // SAFETY: as above.
-            let s = unsafe { value.body.string };
-            let text = if s.len == 0 {
-                Some(String::new())
-            } else if s.ptr.is_null() || s.len > g2g_plugin::abi::MAX_STRING_LEN {
-                None
-            } else {
-                // SAFETY: the pointer is non-null and the length is bounded;
-                // the plugin's contract is that they describe its string.
-                let bytes = unsafe { core::slice::from_raw_parts(s.ptr, s.len) };
-                core::str::from_utf8(bytes).ok().map(ToString::to_string)
-            };
-            if let Some(free) = s.free {
-                // SAFETY: a non-null `free` means the plugin transferred
-                // ownership to this call, which releases it exactly once.
-                unsafe { free(s.free_user) };
-            }
-            text.map(PropValue::Str)
-        }
-        PROP_NONE => None,
-        _ => None,
     }
 }
 

@@ -1,277 +1,198 @@
-//! An out-of-tree third-party g2g plugin written directly against the **v2**
-//! plugin ABI: a `repr(C)` descriptor, a `repr(C)` element vtable, and nothing
-//! else crossing the boundary.
+//! An out-of-tree third-party g2g plugin on the **v2** ABI.
 //!
-//! Written by hand, without the SDK macro, because that is the property under
-//! test: the boundary has to be writable by something that is not this
-//! workspace's `rustc`. The same shape in C lives in `tests/fixtures/c-plugin`.
+//! The whole author workflow: write a plain `AsyncElement`, add one
+//! [`declare_plugin_v2!`](g2g_plugin::declare_plugin_v2) invocation, build a
+//! `cdylib`. Nothing but `repr(C)` data crosses the boundary, so the result
+//! loads into a host built by a different `rustc` against a different
+//! `g2g-core` build. (Writing that boundary *by hand*, in C, is what
+//! `tests/fixtures/c-plugin` shows.)
 //!
-//! The element is `v2counter`: it counts data frames and forwards them
-//! unchanged, and exposes `count` (read-only) and `enabled` (drops frames when
-//! false) as runtime properties.
+//! The element is `v2counter`: it counts data frames and forwards them, and
+//! exposes `count` (read-only) and `enabled` (drops frames when false).
 
-use core::ffi::c_void;
 use core::future::Future;
 use core::pin::Pin;
-use core::task::{Context, Poll};
 
-use async_ffi::{ContextExt, LocalFfiFuture};
-
-use g2g_plugin::abi::{
-    AbiStatic, FfiCapability, FfiCapsSet, FfiElementMetadata, FfiElementRegistration,
-    FfiElementVtable, FfiOutputSink, FfiPacket, FfiPluginDescriptor, FfiPropValue,
-    FfiPropValueBody, FfiPropertySpec, FfiRegistrar, FfiStatus, FfiStr, ELEMENT_TRANSFORM,
-    PACKET_DATA_FRAME, PACKET_EOS, PROP_BOOL, PROP_UINT, STATUS_ERROR, STATUS_OK,
-    STATUS_PROPERTY_UNKNOWN, STATUS_PROPERTY_VALUE, V2_ABI_VERSION, V2_MAGIC,
+use g2g_core::{
+    AsyncElement, Caps, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError, Interlace,
+    OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue,
+    PropertySpec, Rate, RawVideoFormat,
 };
 
-/// Per-instance state.
-#[derive(Debug, Default)]
-struct Counter {
+/// Counts data frames and forwards them unchanged.
+#[derive(Debug)]
+pub struct V2Counter {
     seen: u64,
     enabled: bool,
 }
 
-/// # Safety
-/// Called by the host to build one instance; the host pairs it with `destroy`.
-unsafe extern "C" fn create() -> *mut c_void {
-    Box::into_raw(Box::new(Counter {
-        seen: 0,
-        enabled: true,
-    }))
-    .cast()
+impl Default for V2Counter {
+    fn default() -> Self {
+        V2Counter {
+            seen: 0,
+            enabled: true,
+        }
+    }
 }
 
-/// # Safety
-/// `elem` must be a pointer `create` returned, destroyed exactly once.
-unsafe extern "C" fn destroy(elem: *mut c_void) {
-    drop(unsafe { Box::from_raw(elem.cast::<Counter>()) });
+const PROPERTIES: &[PropertySpec] = &[
+    PropertySpec::new("count", PropKind::Uint, "data frames seen so far").read_only(),
+    PropertySpec::new(
+        "enabled",
+        PropKind::Bool,
+        "forward frames; drop them when false",
+    )
+    .with_default("true"),
+];
+
+impl AsyncElement for V2Counter {
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    where
+        Self: 'a;
+
+    fn intercept_caps(&self, upstream: &Caps) -> Result<Caps, G2gError> {
+        Ok(upstream.clone())
+    }
+
+    fn configure_pipeline(&mut self, _caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        Ok(ConfigureOutcome::Accepted)
+    }
+
+    fn process<'a>(
+        &'a mut self,
+        packet: PipelinePacket,
+        out: &'a mut dyn OutputSink,
+    ) -> Self::ProcessFuture<'a> {
+        Box::pin(async move {
+            match packet {
+                PipelinePacket::DataFrame(frame) => {
+                    self.seen += 1;
+                    if self.enabled {
+                        out.push(PipelinePacket::DataFrame(frame)).await?;
+                    }
+                }
+                // The runner emits the single EOS; a transform must not forward it.
+                PipelinePacket::Eos => {}
+                other => {
+                    out.push(other).await?;
+                }
+            }
+            Ok(())
+        })
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        PROPERTIES
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            "enabled" => {
+                self.enabled = value.as_bool().ok_or(PropError::Type)?;
+                Ok(())
+            }
+            "count" => Err(PropError::ReadOnly),
+            _ => Err(PropError::Unknown),
+        }
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "count" => Some(PropValue::Uint(self.seen)),
+            "enabled" => Some(PropValue::Bool(self.enabled)),
+            _ => None,
+        }
+    }
+
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "v2 counting filter",
+            "Filter/Effect/Video",
+            "Counts data frames and forwards them unchanged (v2 plugin ABI demo).",
+            "third-party",
+        )
+    }
 }
 
-/// One in-flight push toward the host's downstream, in the poll form the ABI
-/// uses. This is the whole shape a v2 plugin needs to be backpressure-aware.
-struct Push {
-    sink: FfiOutputSink,
-    packet: FfiPacket,
-}
-
-impl Future for Push {
-    type Output = FfiStatus;
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<FfiStatus> {
-        let this = self.get_mut();
-        let poll = cx.with_ffi_context(|ffi_cx| {
-            // SAFETY: the host's sink vtable is valid for as long as the future
-            // this push lives in, which the host guarantees by outliving it.
-            unsafe { ((*this.sink.vtable).poll_push)(this.sink.ctx, ffi_cx, &mut this.packet) }
+impl PadTemplates for V2Counter {
+    fn pad_templates() -> Vec<PadTemplate> {
+        let any = CapsSet::one(Caps::RawVideo {
+            format: RawVideoFormat::Rgba8,
+            width: Dim::Any,
+            height: Dim::Any,
+            framerate: Rate::Any,
+            interlace: Interlace::Any,
         });
-        poll.try_into_poll().unwrap_or(Poll::Ready(STATUS_ERROR))
+        Vec::from([PadTemplate::sink(any.clone()), PadTemplate::source(any)])
     }
 }
 
-/// # Safety
-/// `elem` must be a live instance and `out` a sink the host keeps valid until
-/// the returned future is dropped.
-unsafe extern "C" fn process(
-    elem: *mut c_void,
-    packet: FfiPacket,
-    out: FfiOutputSink,
-) -> LocalFfiFuture<FfiStatus> {
-    // SAFETY: the host calls `process` with exclusive access to the instance.
-    let counter = unsafe { &mut *elem.cast::<Counter>() };
-    let is_frame = packet.tag == PACKET_DATA_FRAME;
-    if is_frame {
-        counter.seen += 1;
-    }
-    // The runner emits the pipeline's single EOS, so a transform must not push
-    // one of its own. A disabled counter drops frames instead of forwarding.
-    let drop_it = packet.tag == PACKET_EOS || (is_frame && !counter.enabled);
+#[cfg(not(feature = "undeclared"))]
+g2g_plugin::declare_plugin_v2! {
+    name: "g2g-v2-example-plugin",
+    version: "0.1.0",
+    elements: [
+        ("v2counter", V2Counter, transform),
+    ]
+}
 
-    LocalFfiFuture::new(async move {
-        if drop_it {
-            // Releasing the payload is the plugin's job once it owns the packet.
-            if let Some(free) = packet.frame.free {
-                // SAFETY: ownership of the payload came with the packet, and
-                // this releases it exactly once.
-                unsafe { free(packet.frame.free_user) };
-            }
-            return STATUS_OK;
+/// A plugin that breaks its own declaration, for the loader's capability gate
+/// to catch: the descriptor declares `v2counter`, and `register` then adds a
+/// second element under a name nobody was told about. Hand-written, because the
+/// macro cannot generate a registration that disagrees with its own capability
+/// list.
+#[cfg(feature = "undeclared")]
+mod undeclared {
+    use super::V2Counter;
+    use g2g_plugin::abi::{
+        AbiStatic, FfiCapability, FfiPluginDescriptor, FfiRegistrar, FfiStatus, FfiStr,
+        ELEMENT_TRANSFORM, STATUS_ERROR, V2_ABI_VERSION, V2_MAGIC,
+    };
+
+    /// # Safety
+    /// `registrar` is the host-owned object, valid for this call.
+    unsafe extern "C" fn register(registrar: *const FfiRegistrar) -> FfiStatus {
+        if registrar.is_null() {
+            return STATUS_ERROR;
         }
-        Push { sink: out, packet }.await
-    })
-}
-
-/// # Safety
-/// `elem` is a live instance; `value` is borrowed for the call.
-unsafe extern "C" fn set_property(
-    elem: *mut c_void,
-    name: FfiStr,
-    value: *const FfiPropValue,
-) -> FfiStatus {
-    // SAFETY: the host passes a name it owns for the duration of the call.
-    let Ok(name) = (unsafe { name.as_str() }) else {
-        return STATUS_PROPERTY_UNKNOWN;
-    };
-    if value.is_null() {
-        return STATUS_PROPERTY_VALUE;
-    }
-    // SAFETY: the host passes a live value for the duration of the call.
-    let value = unsafe { &*value };
-    // SAFETY: the host calls with exclusive access to the instance.
-    let counter = unsafe { &mut *elem.cast::<Counter>() };
-    match name {
-        "enabled" => {
-            if value.kind != PROP_BOOL {
-                return STATUS_PROPERTY_VALUE;
-            }
-            // SAFETY: the kind tag says the boolean member is live.
-            counter.enabled = unsafe { value.body.boolean } != 0;
-            STATUS_OK
-        }
-        "count" => STATUS_PROPERTY_VALUE,
-        _ => STATUS_PROPERTY_UNKNOWN,
-    }
-}
-
-/// # Safety
-/// `elem` is a live instance; `out` is a slot the host owns.
-unsafe extern "C" fn get_property(
-    elem: *mut c_void,
-    name: FfiStr,
-    out: *mut FfiPropValue,
-) -> FfiStatus {
-    // SAFETY: as in `set_property`.
-    let Ok(name) = (unsafe { name.as_str() }) else {
-        return STATUS_PROPERTY_UNKNOWN;
-    };
-    if out.is_null() {
-        return STATUS_ERROR;
-    }
-    // SAFETY: the host calls with exclusive access to the instance.
-    let counter = unsafe { &*elem.cast::<Counter>() };
-    let value = match name {
-        "count" => FfiPropValue {
-            kind: PROP_UINT,
-            reserved: 0,
-            body: FfiPropValueBody { uint: counter.seen },
-        },
-        "enabled" => FfiPropValue {
-            kind: PROP_BOOL,
-            reserved: 0,
-            body: FfiPropValueBody {
-                boolean: u32::from(counter.enabled),
-            },
-        },
-        _ => return STATUS_PROPERTY_UNKNOWN,
-    };
-    // SAFETY: `out` is a live slot the host provided for this write.
-    unsafe { *out = value };
-    STATUS_OK
-}
-
-static PROPERTIES: AbiStatic<[FfiPropertySpec; 2]> = AbiStatic([
-    FfiPropertySpec {
-        name: FfiStr::borrowed("count"),
-        kind: PROP_UINT,
-        readable: 1,
-        writable: 0,
-        reserved: 0,
-        blurb: FfiStr::borrowed("data frames seen so far"),
-        default_value: FfiStr::EMPTY,
-    },
-    FfiPropertySpec {
-        name: FfiStr::borrowed("enabled"),
-        kind: PROP_BOOL,
-        readable: 1,
-        writable: 1,
-        reserved: 0,
-        blurb: FfiStr::borrowed("forward frames; drop them when false"),
-        default_value: FfiStr::borrowed("true"),
-    },
-]);
-
-static VTABLE: AbiStatic<FfiElementVtable> = AbiStatic(FfiElementVtable {
-    struct_size: core::mem::size_of::<FfiElementVtable>() as u32,
-    version: 1,
-    configure_pipeline: None,
-    configure_output: None,
-    process: Some(process),
-    set_property: Some(set_property),
-    get_property: Some(get_property),
-    destroy: Some(destroy),
-    reserved: [None; 6],
-});
-
-/// # Safety
-/// `registrar` is the host-owned object, valid for the duration of this call.
-unsafe extern "C" fn register(registrar: *const FfiRegistrar) -> FfiStatus {
-    if registrar.is_null() {
-        return STATUS_ERROR;
-    }
-    // SAFETY: the host passes a live registrar for the duration of the call.
-    let registrar = unsafe { &*registrar };
-    let element = FfiElementRegistration {
-        struct_size: core::mem::size_of::<FfiElementRegistration>() as u32,
-        kind: ELEMENT_TRANSFORM,
-        name: FfiStr::borrowed("v2counter"),
-        metadata: FfiElementMetadata {
-            long_name: FfiStr::borrowed("v2 counting filter"),
-            klass: FfiStr::borrowed("Filter/Effect/Video"),
-            description: FfiStr::borrowed("Counts data frames and forwards them unchanged."),
-            author: FfiStr::borrowed("third-party"),
-        },
-        // Empty sets: accepts anything, produces what it was given. A
-        // pass-through element declares no caps of its own.
-        sink_caps: FfiCapsSet::EMPTY,
-        source_caps: FfiCapsSet::EMPTY,
-        properties: PROPERTIES.0.as_ptr(),
-        property_count: PROPERTIES.0.len(),
-        vtable: &VTABLE.0,
-        create: Some(create),
-        reserved: [None; 4],
-    };
-    // SAFETY: `element` is a live local valid for the duration of the call, and
-    // every pointer in it addresses a `static` in this library.
-    let status = unsafe { (registrar.register_element)(registrar.ctx, &element) };
-    if !status.is_ok() {
-        return status;
-    }
-
-    // A plugin that breaks its own declaration, for the loader's gate to catch.
-    // Enabled only by the `undeclared` feature, which the test turns on.
-    #[cfg(feature = "undeclared")]
-    {
-        let sneaky = FfiElementRegistration {
-            name: FfiStr::borrowed("sneaky"),
-            ..element
+        // SAFETY: the host passes a live registrar for the duration of the call.
+        let registrar = unsafe { &*registrar };
+        // SAFETY: the SDK builds a registration whose pointers it leaks.
+        let status = unsafe {
+            g2g_plugin::v2::register_element::<V2Counter>(
+                registrar,
+                "v2counter",
+                ELEMENT_TRANSFORM,
+            )
         };
-        // SAFETY: as above.
-        return unsafe { (registrar.register_element)(registrar.ctx, &sneaky) };
+        if !status.is_ok() {
+            return status;
+        }
+        // SAFETY: as above. This name was never declared.
+        unsafe {
+            g2g_plugin::v2::register_element::<V2Counter>(registrar, "sneaky", ELEMENT_TRANSFORM)
+        }
     }
-    #[cfg(not(feature = "undeclared"))]
-    status
+
+    static CAPABILITIES: AbiStatic<[FfiCapability; 1]> = AbiStatic([FfiCapability {
+        kind: ELEMENT_TRANSFORM,
+        reserved: 0,
+        name: FfiStr::borrowed("v2counter"),
+    }]);
+
+    #[no_mangle]
+    #[allow(non_upper_case_globals)]
+    pub static g2g_plugin_v2_descriptor: AbiStatic<FfiPluginDescriptor> =
+        AbiStatic(FfiPluginDescriptor {
+            magic: V2_MAGIC,
+            abi_version: V2_ABI_VERSION,
+            struct_size: core::mem::size_of::<FfiPluginDescriptor>() as u32,
+            name: FfiStr::borrowed("g2g-v2-example-plugin"),
+            version: FfiStr::borrowed("0.1.0"),
+            capabilities: CAPABILITIES.0.as_ptr(),
+            capability_count: CAPABILITIES.0.len(),
+            register: Some(register),
+            reserved: [None; 4],
+        });
 }
-
-static CAPABILITIES: AbiStatic<[FfiCapability; 1]> = AbiStatic([FfiCapability {
-    kind: ELEMENT_TRANSFORM,
-    reserved: 0,
-    name: FfiStr::borrowed("v2counter"),
-}]);
-
-/// The one symbol the host looks up. A `static`, not a function: the host reads
-/// and validates it, and decides whether to allow the declared capabilities,
-/// before any code in this library runs.
-#[no_mangle]
-#[allow(non_upper_case_globals)]
-pub static g2g_plugin_v2_descriptor: AbiStatic<FfiPluginDescriptor> =
-    AbiStatic(FfiPluginDescriptor {
-        magic: V2_MAGIC,
-        abi_version: V2_ABI_VERSION,
-        struct_size: core::mem::size_of::<FfiPluginDescriptor>() as u32,
-        name: FfiStr::borrowed("g2g-v2-example-plugin"),
-        version: FfiStr::borrowed("0.1.0"),
-        capabilities: CAPABILITIES.0.as_ptr(),
-        capability_count: CAPABILITIES.0.len(),
-        register: Some(register),
-        reserved: [None; 4],
-    });

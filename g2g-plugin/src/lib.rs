@@ -27,14 +27,19 @@
 //! / `Box<dyn ...>` across the boundary is UB. [`g2g_core::ABI_VERSION`] folds
 //! all three into the tag; the loader compares it loudly rather than risk that.
 //!
-//! This version-lock path is the v1 design (DESIGN_TODO "Dynamic plugin loading
-//! via cargo"); a future `abi_stable`/`stabby` facade would relax the
-//! same-toolchain requirement for cross-compiler binary plugins.
+//! **v1 or v2.** This version-locked path is v1. [`abi`] is the v2 tier: a
+//! frozen `repr(C)` boundary, declared with [`declare_plugin_v2!`], that loads
+//! into a host built by a different toolchain and can be written in C. It
+//! carries a smaller surface (System-memory frames, six vtable entries), so v1
+//! stays the path for a plugin that needs the whole `AsyncElement` trait and
+//! ships alongside the host it was built against. The loader probes v2 first
+//! and falls back to v1, so both keep working.
 
 // The SDK itself is std (it emits `std::panic::catch_unwind` and builds a
 // `CString`); it is not part of the no_std baseline.
 
 pub mod abi;
+pub mod v2;
 
 use std::ffi::CString;
 use std::sync::OnceLock;

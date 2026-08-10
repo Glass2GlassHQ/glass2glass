@@ -145,6 +145,33 @@ fn a_property_set_from_the_launch_line_reaches_the_plugin() {
 }
 
 #[test]
+fn the_registry_publishes_the_plugin_element_metadata_and_properties() {
+    // The macro builds these from the element type's own `properties()` and
+    // `metadata()`, so a `gst-inspect` dump sees a v2 element exactly as it sees
+    // a built-in one. Reading `count` back also exercises get_property.
+    let so = build_fixture();
+    let mut reg = default_registry();
+    plugin_loader::load_plugin(&so, &mut reg).expect("the v2 plugin loads");
+
+    let element = reg
+        .make_element("v2counter")
+        .expect("the registry builds it");
+    assert_eq!(element.metadata().long_name, "v2 counting filter");
+    let names: Vec<&str> = element.properties().iter().map(|p| p.name).collect();
+    assert_eq!(names, ["count", "enabled"]);
+    assert!(
+        !element.properties()[0].flags.writable,
+        "`count` crossed as read-only"
+    );
+    assert_eq!(
+        element.get_property("count"),
+        Some(g2g_core::property::PropValue::Uint(0)),
+        "a fresh instance has seen nothing"
+    );
+    assert_eq!(element.get_property("nonesuch"), None);
+}
+
+#[test]
 fn the_capability_policy_can_refuse_a_plugin_before_it_runs() {
     // The gate: the descriptor declares `v2counter` as a static the host reads
     // with dlsym, so a caller can refuse it without the plugin ever getting

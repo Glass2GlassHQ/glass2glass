@@ -19,14 +19,13 @@ crate-type = ["cdylib"]
 [features]
 metadata = ["g2g-core/metadata"]
 multi-thread = ["g2g-core/multi-thread"]
-# Make `register` also try to register an element the descriptor never
-# declared, so the loader's capability gate has something to catch.
+# Swap the macro-generated descriptor for a hand-written one whose `register`
+# adds an element the declaration never mentioned, so the loader's capability
+# gate has something to catch.
 undeclared = []
 
-# `g2g-plugin` is the whole dependency: the v2 ABI type set lives there. The
-# explicit `g2g-core` entry only exists so the passthrough features above have
-# something to switch, which is what the ABI-independence test needs.
+# Path deps stand in for the published `g2g-core` (element traits) + `g2g-plugin`
+# (the v2 ABI + `declare_plugin_v2!`) a `g2g-devel` package would provide.
 [dependencies]
 g2g-core = { path = "../../../../g2g-core", features = ["std", "runtime"] }
 g2g-plugin = { path = "../../../../g2g-plugin" }
-async-ffi = "0.5"
