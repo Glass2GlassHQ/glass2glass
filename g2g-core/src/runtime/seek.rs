@@ -27,7 +27,9 @@
 //! already exists: the source calls [`notify_segment_done`](Self::notify_segment_done)
 //! at `stop`, the app observes [`segment_done_count`](Self::segment_done_count) /
 //! [`take_segment_done`](Self::take_segment_done) and either re-arms a loop seek
-//! or calls [`shutdown`](Self::shutdown) to end the loop. A segment-looping
+//! or calls [`shutdown`](Self::shutdown) to end the loop. An app that attached a
+//! bus ([`set_bus`](Self::set_bus)) also gets each completion as
+//! [`BusMessage::SegmentDone`] at the same moment. A segment-looping
 //! source that is idle between loops polls [`is_shutdown`](Self::is_shutdown) so
 //! it can emit `Eos` and terminate (the poll-model analog of pausing the source
 //! task; a wakeful wait is a follow-up).
@@ -41,6 +43,7 @@ use alloc::sync::Arc;
 
 use spin::Mutex;
 
+use crate::bus::{BusHandle, BusMessage};
 use crate::segment::Seek;
 
 /// Source -> app segment-done state. `count` is monotonic so the app can detect
@@ -67,6 +70,10 @@ struct SeekInner {
     /// Total length of the stream the seek positions address, once the source
     /// knows it. Latest-set wins.
     stream_len: Mutex<Option<u64>>,
+    /// Pipeline bus, when the app attached one, so a segment-done also reaches
+    /// it as [`BusMessage::SegmentDone`]. `None` leaves the back-channel the
+    /// only route.
+    bus: Mutex<Option<BusHandle>>,
     /// Waker a source parked in [`SeekController::wait_event`] registered, woken
     /// by `seek` / `shutdown` so an idle segment-looping source resumes without
     /// busy-polling. `None` when no source is parked.
@@ -118,14 +125,28 @@ impl SeekController {
         *self.inner.stream_len.lock()
     }
 
+    /// Application side: attach the pipeline bus, so every segment-done is also
+    /// posted as [`BusMessage::SegmentDone`]. The app that owns both the
+    /// controller and the bus wires them together; the back-channel works the
+    /// same either way.
+    pub fn set_bus(&self, bus: BusHandle) {
+        *self.inner.bus.lock() = Some(bus);
+    }
+
     /// Source side: report that a `SEGMENT` segment finished at stream-time
-    /// `position_ns` (the `SEGMENT_DONE` signal). Bumps the completion count and
-    /// arms [`take_segment_done`](Self::take_segment_done).
+    /// `position_ns` (the `SEGMENT_DONE` signal). Bumps the completion count,
+    /// arms [`take_segment_done`](Self::take_segment_done), and posts
+    /// [`BusMessage::SegmentDone`] when a bus is attached.
     pub fn notify_segment_done(&self, position_ns: u64) {
-        let mut d = self.inner.segment_done.lock();
-        d.count = d.count.saturating_add(1);
-        d.position_ns = position_ns;
-        d.fresh = true;
+        {
+            let mut d = self.inner.segment_done.lock();
+            d.count = d.count.saturating_add(1);
+            d.position_ns = position_ns;
+            d.fresh = true;
+        }
+        if let Some(bus) = self.inner.bus.lock().as_ref() {
+            bus.try_post(BusMessage::SegmentDone { position_ns });
+        }
     }
 
     /// Application side: take the stream-time position of the most recent
@@ -285,6 +306,33 @@ mod tests {
         src.notify_segment_done(10_000);
         assert_eq!(app.segment_done_count(), 2);
         assert_eq!(app.take_segment_done(), Some(10_000));
+    }
+
+    #[test]
+    fn segment_done_posts_to_an_attached_bus_only() {
+        use crate::bus::{Bus, BusMessage};
+
+        // No bus attached: the back-channel still works, nothing is posted.
+        let unattached = SeekController::new();
+        unattached.notify_segment_done(1_000);
+        assert_eq!(unattached.segment_done_count(), 1);
+
+        let (bus, handle) = Bus::new(4);
+        let app = SeekController::new();
+        app.set_bus(handle);
+        let src = app.clone();
+
+        src.notify_segment_done(5_000);
+        src.notify_segment_done(9_000);
+        assert_eq!(
+            bus.try_recv(),
+            Some(BusMessage::SegmentDone { position_ns: 5_000 })
+        );
+        assert_eq!(
+            bus.try_recv(),
+            Some(BusMessage::SegmentDone { position_ns: 9_000 })
+        );
+        assert_eq!(bus.try_recv(), None, "one message per completed segment");
     }
 
     #[test]

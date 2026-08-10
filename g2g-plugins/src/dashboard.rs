@@ -135,6 +135,9 @@ pub fn event_json(msg: &BusMessage) -> Option<String> {
             json!({"kind": "duration-changed", "duration_ns": duration_ns})
         }
         BusMessage::StreamsSelected { ids } => json!({"kind": "streams-selected", "ids": ids}),
+        BusMessage::SegmentDone { position_ns } => {
+            json!({"kind": "segment-done", "position_ns": position_ns})
+        }
         BusMessage::Custom(code) => json!({"kind": "custom", "code": code}),
         // Skip the large structured payloads the dashboard has no view for.
         BusMessage::Tag { .. } | BusMessage::StreamTag { .. } | BusMessage::StreamCollection(_) => {

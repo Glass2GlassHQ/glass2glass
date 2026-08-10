@@ -153,6 +153,17 @@ pub enum BusMessage {
         /// The new total duration in nanoseconds.
         duration_ns: u64,
     },
+    /// A [`SeekFlags::SEGMENT`](crate::segment::SeekFlags::SEGMENT) seek reached
+    /// its `stop` (the GStreamer `GST_MESSAGE_SEGMENT_DONE` analog). Posted by
+    /// [`SeekController::notify_segment_done`](crate::runtime::SeekController::notify_segment_done)
+    /// when a bus is attached to the controller, at the same moment the source
+    /// arms the take-once back-channel, so an application that loops a segment
+    /// can drive the next loop seek from the bus instead of polling
+    /// [`segment_done_count`](crate::runtime::SeekController::segment_done_count).
+    SegmentDone {
+        /// Stream-time position (ns) where the segment ended.
+        position_ns: u64,
+    },
     /// Application-defined signal carrying an opaque code.
     Custom(u64),
 }
