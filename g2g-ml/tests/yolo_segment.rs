@@ -4,9 +4,10 @@
 //! against the picture itself, not against the model: the sample dog is white on
 //! grass, so the white pixels are an oracle the model never saw.
 //!
-//! Three cases: the sample image (mask agrees with the white pixels), a flat frame
-//! of the grass colour (nothing found), and the dog shrunk into the top-left
-//! quadrant (mask and ROI follow it there).
+//! Four cases: the sample image (mask agrees with the white pixels), a flat frame
+//! of the grass colour (nothing found), the dog shrunk into the top-left quadrant
+//! (mask and ROI follow it there), and the emitted graph through the CPU
+//! `AnalyticsOverlay` (the mask's pixels are the ones that change).
 //!
 //! The model is ~11 MB so it is not committed (repo fixtures are KB-scale);
 //! `tools/segment-fixture.sh` / `fixtures/segmentation/gen.py` obtain it on demand
@@ -25,6 +26,7 @@ use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{AnalyticsMeta, Caps, Dim, G2gError, Rate, RawVideoFormat, Segmentation};
 use g2g_ml::ortsegment::OrtSegmentation;
+use g2g_plugins::analyticsoverlay::AnalyticsOverlay;
 
 const SIZE: u32 = 640;
 /// The prototype grid of a 640-input YOLO `-seg` export: a quarter of the input.
@@ -328,5 +330,67 @@ async fn the_mask_follows_the_dog_into_a_corner() {
     assert!(
         roi.x + roi.w < 0.6 && roi.y + roi.h < 0.6,
         "the ROI moved too: {roi:?}"
+    );
+}
+
+/// M994: the same real graph through the CPU overlay, so what the model found is
+/// what the picture shows. The oracle is the mask itself: the pixels it covers have
+/// to change and the rest of its box has to survive.
+#[tokio::test]
+async fn the_overlay_paints_the_real_mask_onto_the_frame() {
+    let Some((mut element, input)) = producer_and_input() else {
+        return;
+    };
+    let analytics = segment(&mut element, input.clone())
+        .await
+        .analytics
+        .expect("frame carries AnalyticsMeta");
+    let segmentation = animal(&analytics).expect("an animal instance").clone();
+
+    let mut overlay = AnalyticsOverlay::new().with_thickness(2);
+    overlay
+        .configure_pipeline(&rgba_caps())
+        .expect("the overlay configures");
+    let mut painted_frame = Frame {
+        domain: MemoryDomain::System(SystemSlice::from_boxed(input.clone().into_boxed_slice())),
+        timing: FrameTiming::default(),
+        sequence: 0,
+        meta: Default::default(),
+    };
+    painted_frame.meta.attach(analytics);
+    let mut sink = MetaSink::default();
+    overlay
+        .process(PipelinePacket::DataFrame(painted_frame), &mut sink)
+        .await
+        .expect("the overlay runs");
+    let painted = sink.forwarded.expect("the overlay forwards the frame");
+
+    let mask = &segmentation.mask;
+    let (mut covered, mut covered_changed) = (0u32, 0u32);
+    let (mut clear, mut clear_changed) = (0u32, 0u32);
+    for j in 0..mask.height() {
+        for i in 0..mask.width() {
+            let (x, y) = mask_sample_pixel(&segmentation, i, j);
+            let px = (y * SIZE as usize + x) * 4;
+            let changed = painted[px..px + 3] != input[px..px + 3];
+            if mask.sample(i, j) == Some(u8::MAX) {
+                covered += 1;
+                covered_changed += u32::from(changed);
+            } else {
+                clear += 1;
+                clear_changed += u32::from(changed);
+            }
+        }
+    }
+    let covered_rate = covered_changed as f32 / covered as f32;
+    let clear_rate = clear_changed as f32 / clear as f32;
+    eprintln!(">> painted {covered_rate:.3} of covered samples, {clear_rate:.3} of clear ones");
+    assert!(
+        covered_rate > 0.9,
+        "the mask's pixels should carry the fill, got {covered_rate}"
+    );
+    assert!(
+        clear_rate < 0.3,
+        "the rest of the box should survive, got {clear_rate}"
     );
 }

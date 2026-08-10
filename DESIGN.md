@@ -4092,12 +4092,19 @@ picture. Two pieces, both `no_std`-friendly:
   described buffer and keeps it.
 - **The overlay.** The visible end of the detector chain reads the
   `AnalyticsMeta` carried onto the *display* frame (via the fan-out path) and
-  draws each box, so `decode -> tee -> {detect, video} -> overlay -> display`
-  works. Two backends with a shared per-class palette: the CPU
+  draws it, so `decode -> tee -> {detect, video} -> overlay -> display`
+  works. Three shapes, in one shared palette: a detection box as a solid outline
+  in its class colour, an instance segmentation as a translucent fill of its mask
+  (`mask-alpha`), and a region of interest as a dashed rectangle. A mask spans
+  exactly its instance's box at the model's own grid resolution, which is the
+  whole placement rule either backend needs, and an ROI takes the palette slot of
+  the segmentation that `Contains` it, so a mask and its tight box read as one
+  instance rather than two findings. Two backends: the CPU
   `g2g-plugins::analyticsoverlay::AnalyticsOverlay` (`analytics` feature) paints
-  box outlines onto RGBA8 with the compositor's integer source-over blend (the
+  onto RGBA8 with the compositor's integer source-over blend (the
   `no_std` baseline), and the GPU `vellooverlay::VelloAnalyticsOverlay`
-  (`vello-overlay` feature) strokes antialiased boxes over a full-frame image
+  (`vello-overlay` feature) strokes antialiased boxes and scales each mask on as
+  an alpha image fill over a full-frame image
   with the Vello GPU 2D renderer, emitting the result in the new
   `MemoryDomain::WgpuTexture` domain. That domain (an `OwnedWgpuTexture` whose
   `wgpu::Texture` lives in a `WgpuKeepAlive` owner, since `g2g-core` never links

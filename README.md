@@ -371,7 +371,7 @@ OS-coupled elements live behind cargo features:
 | `Av1Enc` (pure-Rust `rav1e`) | `av1-encode` | — |
 | `VpxEnc` (VP8 / VP9 via libvpx) | `vpx` | libvpx |
 | `MjpegDec` / `MjpegEnc` (pure Rust) | `mjpeg`, `mjpeg-encode` | — |
-| `AnalyticsOverlay` (CPU) / `VelloAnalyticsOverlay` (GPU) / `WgpuSink` | `analytics`, `vello-overlay`, `wgpu-sink` | wgpu (GPU variants) |
+| `AnalyticsOverlay` (CPU) / `VelloAnalyticsOverlay` (GPU) (detection boxes, segmentation masks, ROIs) / `WgpuSink` | `analytics`, `vello-overlay`, `wgpu-sink` | wgpu (GPU variants) |
 | `VelloTextOverlay` (subtitle cues drawn on the GPU, `WgpuTexture` out) | `vello-text-overlay` | wgpu |
 | `OrtInference` (+ CUDA / DirectML EPs) | `ort`, `cuda`, `directml` (in `g2g-ml`) | onnxruntime |
 | `BurnInference` (linear layer, or an ONNX topology imported by `burn-onnx` codegen) | `burn` (in `g2g-ml`) | wgpu (Vulkan / Metal / DX12) |

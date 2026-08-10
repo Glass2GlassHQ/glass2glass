@@ -1,12 +1,16 @@
-//! Vello GPU analytics overlay (M102): the GPU companion to the CPU
+//! Vello GPU analytics overlay (M102, masks M994): the GPU companion to the CPU
 //! [`AnalyticsOverlay`](crate::analyticsoverlay), rendering the `AnalyticsMeta`
-//! detection boxes with the Vello GPU 2D renderer (wgpu) instead of the CPU
-//! blend loop. The HD / many-box path: stroking dozens of antialiased boxes per
-//! frame is a GPU job, and the result stays on the GPU.
+//! with the Vello GPU 2D renderer (wgpu) instead of the CPU blend loop. The HD /
+//! many-box path: stroking dozens of antialiased boxes per frame is a GPU job, and
+//! the result stays on the GPU.
+//!
+//! Same three shapes as the CPU backend, in the same palette: a solid box per
+//! detection, a translucent image fill per segmentation mask, and a dashed
+//! rectangle per region of interest.
 //!
 //! `Caps::RawVideo{Rgba8}` in (system memory), [`MemoryDomain::WgpuTexture`] out:
 //! the input picture is drawn into a Vello scene as a full-frame image, the
-//! detection boxes are stroked on top, and the scene is rendered into a
+//! analytics are drawn on top, and the scene is rendered into a
 //! `wgpu::Texture` that the output frame carries by keep-alive. Nothing is read
 //! back to the CPU, so a downstream GPU sink presents it directly (the keep-on-GPU
 //! contract the decode-side CUDA / D3D11 domains already use). The pixel format
@@ -29,10 +33,14 @@ use alloc::vec::Vec;
 use g2g_core::frame::Frame;
 use g2g_core::memory::OwnedWgpuTexture;
 use g2g_core::{
-    AnalyticsMeta, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError,
-    MemoryDomain, ObjectDetection, OutputSink, PipelinePacket, RawVideoFormat,
+    AnalyticsMeta, AsyncElement, BBox, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
+    G2gError, MemoryDomain, OutputSink, PipelinePacket, PropError, PropKind, PropValue,
+    PropertySpec, RawVideoFormat,
 };
 
+use crate::analyticsoverlay::{
+    palette_rgb, AnalyticsShapes, PaintedMask, MASK_ALPHA_DEFAULT, ROI_DASH_PX,
+};
 use crate::gpu::{gpu_err, GpuContext, WgpuTextureKeepAlive};
 use vello::kurbo::{Affine, Rect, Stroke};
 use vello::peniko::{Blob, Color, ImageAlphaType, ImageData, ImageFormat};
@@ -40,7 +48,7 @@ use vello::wgpu;
 use vello::{AaConfig, AaSupport, RenderParams, Renderer, RendererOptions, Scene};
 
 #[cfg(feature = "vello-text-overlay")]
-use g2g_core::{ElementMetadata, PropError, PropValue, PropertySpec};
+use g2g_core::ElementMetadata;
 #[cfg(feature = "vello-text-overlay")]
 use vello::peniko::{Fill, FontData};
 #[cfg(feature = "vello-text-overlay")]
@@ -53,8 +61,9 @@ use crate::textoverlay::TextOverlay;
 #[cfg(feature = "vello-text-overlay")]
 use crate::textshape::FontId;
 
-/// Renders detection bounding boxes from an attached [`AnalyticsMeta`] onto an
-/// RGBA8 frame with Vello, emitting a GPU-resident [`MemoryDomain::WgpuTexture`].
+/// Renders the detection boxes, segmentation masks and regions of interest of an
+/// attached [`AnalyticsMeta`] onto an RGBA8 frame with Vello, emitting a
+/// GPU-resident [`MemoryDomain::WgpuTexture`].
 ///
 /// # Example
 ///
@@ -68,6 +77,8 @@ pub struct VelloAnalyticsOverlay {
     height: u32,
     /// Outline stroke width in pixels.
     thickness: f64,
+    /// Alpha the mask fill is drawn at (0 = invisible, 255 = opaque).
+    mask_alpha: u8,
     configured: bool,
     drawn: u64,
     /// A shared device to render on, set via [`with_context`](Self::with_context)
@@ -195,6 +206,7 @@ impl core::fmt::Debug for VelloAnalyticsOverlay {
             .field("width", &self.width)
             .field("height", &self.height)
             .field("thickness", &self.thickness)
+            .field("mask_alpha", &self.mask_alpha)
             .field("configured", &self.configured)
             .field("drawn", &self.drawn)
             .field("gpu_ready", &self.gpu.is_some())
@@ -215,6 +227,7 @@ impl VelloAnalyticsOverlay {
             width: 0,
             height: 0,
             thickness: 3.0,
+            mask_alpha: MASK_ALPHA_DEFAULT,
             configured: false,
             drawn: 0,
             ctx: None,
@@ -233,6 +246,12 @@ impl VelloAnalyticsOverlay {
     /// Set the box outline stroke width in pixels.
     pub fn with_thickness(mut self, px: f64) -> Self {
         self.thickness = px.max(0.5);
+        self
+    }
+
+    /// Set the alpha the segmentation mask fill is drawn at (0..=255).
+    pub fn with_mask_alpha(mut self, alpha: u8) -> Self {
+        self.mask_alpha = alpha;
         self
     }
 
@@ -266,43 +285,107 @@ impl VelloAnalyticsOverlay {
         )
     }
 
-    /// Render `rgba` (full-frame image, consumed) with `detections` stroked over
-    /// it into a fresh `wgpu::Texture`, returned for the output frame to own.
+    /// Render `rgba` (full-frame image, consumed) with `shapes` drawn over it into
+    /// a fresh `wgpu::Texture`, returned for the output frame to own.
     fn render(
         &mut self,
         rgba: Vec<u8>,
-        detections: &[ObjectDetection],
+        shapes: &AnalyticsShapes,
     ) -> Result<wgpu::Texture, G2gError> {
         let (w, h) = (self.width, self.height);
         let thickness = self.thickness;
+        let mask_alpha = self.mask_alpha;
         let gpu = self.gpu.as_mut().ok_or(G2gError::NotConfigured)?;
 
         let mut scene = Scene::new();
         // The caller already owns this buffer, so move it into the blob.
         draw_frame_image(&mut scene, rgba, w, h);
 
+        // Mask fills first, so a box or ROI stroke stays readable over one.
+        for mask in &shapes.masks {
+            draw_mask(&mut scene, mask, w, h, mask_alpha);
+        }
         let stroke = Stroke::new(thickness);
-        for d in detections {
-            // Denormalize the [0,1] box to pixel coordinates.
-            let x0 = (d.bbox.x as f64) * w as f64;
-            let y0 = (d.bbox.y as f64) * h as f64;
-            let x1 = ((d.bbox.x + d.bbox.w) as f64) * w as f64;
-            let y1 = ((d.bbox.y + d.bbox.h) as f64) * h as f64;
-            if x1 <= x0 || y1 <= y0 {
-                continue;
+        for detection in &shapes.detections {
+            if let Some(rect) = pixel_rect(detection.bbox, w, h) {
+                scene.stroke(
+                    &stroke,
+                    Affine::IDENTITY,
+                    palette_color(detection.label),
+                    None,
+                    &rect,
+                );
             }
-            let rect = Rect::new(x0, y0, x1, y1);
-            scene.stroke(&stroke, Affine::IDENTITY, class_color(d.label), None, &rect);
+        }
+        let dashed = Stroke::new(thickness).with_dashes(0.0, [ROI_DASH_PX as f64; 2]);
+        for roi in &shapes.rois {
+            if let Some(rect) = pixel_rect(roi.roi.bbox, w, h) {
+                scene.stroke(
+                    &dashed,
+                    Affine::IDENTITY,
+                    palette_color(roi.palette_index),
+                    None,
+                    &rect,
+                );
+            }
         }
 
         gpu.render_scene(&scene, w, h)
     }
 }
 
-/// The opaque stroke colour for a class label, from the shared CPU-overlay
-/// palette so the two backends draw the same classes the same colour.
-fn class_color(label: u32) -> Color {
-    let c = crate::analyticsoverlay::class_rgb(label);
+/// The pixel rectangle a normalized box covers on a `w` x `h` canvas, or `None`
+/// when it collapses to nothing.
+fn pixel_rect(bbox: BBox, w: u32, h: u32) -> Option<Rect> {
+    let x0 = (bbox.x as f64) * w as f64;
+    let y0 = (bbox.y as f64) * h as f64;
+    let x1 = ((bbox.x + bbox.w) as f64) * w as f64;
+    let y1 = ((bbox.y + bbox.h) as f64) * h as f64;
+    if x1 <= x0 || y1 <= y0 {
+        return None;
+    }
+    Some(Rect::new(x0, y0, x1, y1))
+}
+
+/// Draw an instance's mask as a translucent image fill scaled onto its box: the
+/// mask spans exactly the box (its grid is the model's, not the frame's), so
+/// scaling the mask's own rect over the box is the whole placement.
+fn draw_mask(scene: &mut Scene, painted: &PaintedMask, w: u32, h: u32, mask_alpha: u8) {
+    let mask = &painted.segmentation.mask;
+    let (mask_w, mask_h) = (mask.width(), mask.height());
+    let Some(rect) = pixel_rect(painted.segmentation.bbox, w, h) else {
+        return;
+    };
+    if mask_w == 0 || mask_h == 0 {
+        return;
+    }
+    let rgb = palette_rgb(painted.palette_index);
+    let mut data = Vec::with_capacity((mask_w as usize) * (mask_h as usize) * 4);
+    for j in 0..mask_h {
+        for i in 0..mask_w {
+            let coverage = mask.sample(i, j).unwrap_or(0) as u32;
+            // Every sample carries the fill colour, covered or not, so the
+            // sampler cannot blend a covered edge sample toward black.
+            let alpha = (coverage * mask_alpha as u32 / 255) as u8;
+            data.extend_from_slice(&[rgb[0], rgb[1], rgb[2], alpha]);
+        }
+    }
+    let image = ImageData {
+        data: Blob::from(data),
+        format: ImageFormat::Rgba8,
+        alpha_type: ImageAlphaType::Alpha,
+        width: mask_w,
+        height: mask_h,
+    };
+    let transform = Affine::translate((rect.x0, rect.y0))
+        * Affine::scale_non_uniform(rect.width() / mask_w as f64, rect.height() / mask_h as f64);
+    scene.draw_image(&image, transform);
+}
+
+/// The opaque stroke colour of a palette slot, from the shared CPU-overlay palette
+/// so the two backends draw the same slot the same colour.
+fn palette_color(index: u32) -> Color {
+    let c = palette_rgb(index);
     Color::from_rgba8(c[0], c[1], c[2], 0xFF)
 }
 
@@ -351,10 +434,10 @@ impl AsyncElement for VelloAnalyticsOverlay {
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let detections: Vec<ObjectDetection> = frame
+                    let shapes = frame
                         .meta
                         .get::<AnalyticsMeta>()
-                        .map(|a| a.detections().copied().collect())
+                        .map(AnalyticsShapes::collect)
                         .unwrap_or_default();
                     let Some(slice) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
@@ -366,7 +449,7 @@ impl AsyncElement for VelloAnalyticsOverlay {
                     let rgba = slice[..need].to_vec();
 
                     ensure_gpu(&mut self.gpu, &self.ctx).await?;
-                    let texture = self.render(rgba, &detections)?;
+                    let texture = self.render(rgba, &shapes)?;
 
                     let domain = MemoryDomain::WgpuTexture(OwnedWgpuTexture::new(
                         self.width,
@@ -395,6 +478,48 @@ impl AsyncElement for VelloAnalyticsOverlay {
             }
             Ok(())
         })
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        const PROPS: &[PropertySpec] = &[
+            PropertySpec::new(
+                "thickness",
+                PropKind::Double,
+                "box outline stroke width in pixels",
+            )
+            .with_range("0.5", "65535")
+            .with_default("3"),
+            PropertySpec::new(
+                "mask-alpha",
+                PropKind::Uint,
+                "alpha the segmentation mask fill is drawn at (0..255)",
+            )
+            .with_range("0", "255")
+            .with_default("96"),
+        ];
+        PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            "thickness" => {
+                self.thickness = value.as_double().ok_or(PropError::Type)?.max(0.5);
+                Ok(())
+            }
+            "mask-alpha" => {
+                self.mask_alpha = value.as_uint().ok_or(PropError::Type)?.min(255) as u8;
+                Ok(())
+            }
+            _ => Err(PropError::Unknown),
+        }
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "thickness" => Some(PropValue::Double(self.thickness)),
+            "mask-alpha" => Some(PropValue::Uint(self.mask_alpha as u64)),
+            _ => None,
+        }
     }
 }
 
@@ -726,7 +851,10 @@ mod tests {
     use super::*;
     use crate::gpu::shared_ctx;
     use g2g_core::memory::SystemSlice;
-    use g2g_core::{BBox, FrameTiming, PushOutcome, Rate};
+    use g2g_core::{
+        AnalyticsNode, FrameTiming, Mask, ObjectDetection, PushOutcome, Rate, RelationKind, Roi,
+        Segmentation,
+    };
 
     fn rgba_caps(w: u32, h: u32) -> Caps {
         Caps::RawVideo {
@@ -894,6 +1022,99 @@ mod tests {
         assert!(
             interior[0] < 70 && interior[1] < 70 && interior[2] < 70,
             "interior is the dark input frame: {interior:?}"
+        );
+        assert_eq!(ov.drawn_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn renders_mask_fill_and_dashed_roi_onto_gpu_texture() {
+        let Some(ctx) = shared_ctx().await else {
+            std::eprintln!("no wgpu adapter; skipping Vello GPU mask render test");
+            return;
+        };
+        let (w, h) = (64u32, 64u32);
+        let mut ov = VelloAnalyticsOverlay::new()
+            .with_thickness(4.0)
+            .with_context(ctx);
+        ov.configure_pipeline(&rgba_caps(w, h)).unwrap();
+
+        let mut bytes = Vec::with_capacity((w * h * 4) as usize);
+        for _ in 0..w * h {
+            bytes.extend_from_slice(&[20, 20, 20, 255]);
+        }
+        let mut frame = Frame::new(
+            MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
+            FrameTiming::default(),
+            0,
+        );
+        // An instance over pixels 16..48 whose 2x2 mask covers only its left
+        // column, so the fill is pixels 16..32; the ROI is that mask-tight half.
+        let bbox = BBox {
+            x: 0.25,
+            y: 0.25,
+            w: 0.5,
+            h: 0.5,
+        };
+        let mask = Mask::new(2, 2, 2, alloc::vec![255, 0, 255, 0]).expect("mask geometry");
+        let mut analytics = AnalyticsMeta::new();
+        let instance = analytics.push(AnalyticsNode::Segmentation(Segmentation {
+            bbox,
+            label: 0,
+            confidence: 0.9,
+            mask,
+        }));
+        let roi = analytics.push(AnalyticsNode::Roi(Roi {
+            bbox: BBox {
+                x: 0.25,
+                y: 0.25,
+                w: 0.25,
+                h: 0.5,
+            },
+            id: 5,
+            label: 0,
+        }));
+        analytics.relate(instance, roi, RelationKind::Contains);
+        frame.meta.attach(analytics);
+
+        let mut sink = FrameSink::default();
+        ov.process(PipelinePacket::DataFrame(frame), &mut sink)
+            .await
+            .unwrap();
+
+        let out = sink.last.expect("frame forwarded");
+        let MemoryDomain::WgpuTexture(owned) = &out.domain else {
+            panic!("output is a GPU texture domain");
+        };
+        let tex = crate::gpu::texture_of(owned).expect("texture keep-alive");
+        let pixels = read_back(ov.gpu.as_ref().unwrap(), tex, w, h);
+        let px = |x: u32, y: u32| {
+            let i = ((y * w + x) * 4) as usize;
+            [pixels[i], pixels[i + 1], pixels[i + 2], pixels[i + 3]]
+        };
+
+        // Inside the covered half, clear of the ROI stroke: reddish, but faint
+        // enough that the dark input still shows through.
+        let filled = px(24, 32);
+        assert!(
+            filled[0] > 80 && filled[0] < 200 && filled[0] > filled[1] + 40,
+            "mask fill is translucent red: {filled:?}"
+        );
+        // The uncovered half of the same box keeps the input frame.
+        let uncovered = px(40, 32);
+        assert!(
+            uncovered.iter().take(3).all(|c| *c < 60),
+            "uncovered mask samples untouched: {uncovered:?}"
+        );
+        // The ROI outline dashes: along its top edge some pixels carry the opaque
+        // stroke and some only the fill underneath it.
+        let top_edge: Vec<[u8; 4]> = (17..31).map(|x| px(x, 16)).collect();
+        assert!(
+            top_edge.iter().any(|p| p[0] > 200),
+            "a dash paints on the ROI edge: {top_edge:?}"
+        );
+        assert!(
+            top_edge.iter().any(|p| p[0] < 150),
+            "a gap leaves the ROI edge unstroked: {top_edge:?}"
         );
         assert_eq!(ov.drawn_count(), 1);
     }
