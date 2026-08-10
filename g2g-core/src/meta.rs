@@ -140,17 +140,28 @@ mod on {
             FrameMetaSet(Vec::new())
         }
 
-        /// Attach one piece of metadata.
+        /// Attach one piece of metadata, replacing any entry of the same type
+        /// (in place, so the order of the other entries is unchanged).
+        ///
+        /// A set holds at most one meta per type: [`get`](Self::get) /
+        /// [`get_mut`](Self::get_mut) key by type, so a second entry of a type
+        /// would be unreachable, and an empty one already on the frame would
+        /// hide what an element attaches later.
         pub fn attach<T: FrameMeta + 'static>(&mut self, meta: T) {
-            self.0.push(Arc::new(meta));
+            match self.0.iter().position(|m| m.as_any().is::<T>()) {
+                Some(idx) => self.0[idx] = Arc::new(meta),
+                None => self.0.push(Arc::new(meta)),
+            }
         }
 
-        /// The first attached meta of type `T`, if any.
+        /// The attached meta of type `T`, if any. At most one is ever attached
+        /// (see [`attach`](Self::attach)).
         pub fn get<T: FrameMeta + 'static>(&self) -> Option<&T> {
             self.0.iter().find_map(|m| m.as_any().downcast_ref::<T>())
         }
 
-        /// Mutable access to the first attached meta of type `T`, if any.
+        /// Mutable access to the attached meta of type `T`, if any (at most one
+        /// is ever attached, see [`attach`](Self::attach)).
         ///
         /// Copy-on-write: if the entry is shared with another frame (a tee
         /// branch holds the same [`Arc`]), it is first deep-copied via
@@ -1015,6 +1026,28 @@ mod tests {
         let got = set.get::<AnalyticsMeta>().expect("AnalyticsMeta attached");
         assert_eq!(got.detections().count(), 1);
         assert_eq!(got.detections().next().unwrap().label, 7);
+    }
+
+    #[test]
+    fn attach_replaces_the_same_type_and_keeps_other_types() {
+        let mut set = FrameMetaSet::new();
+        set.attach(AnalyticsMeta::new());
+        set.attach(BlobMeta::new());
+
+        let mut second = AnalyticsMeta::new();
+        second.add_detection(det(0.1, 0.1, 0.2, 0.2, 7, 0.9));
+        set.attach(second);
+
+        assert_eq!(set.len(), 2, "the replacement is not a second entry");
+        assert_eq!(
+            set.get::<AnalyticsMeta>().unwrap().detections().count(),
+            1,
+            "the meta attached last is the one that can be read back"
+        );
+        assert!(
+            set.get::<BlobMeta>().is_some(),
+            "another type is untouched by the replacement"
+        );
     }
 
     #[test]

@@ -385,12 +385,8 @@ impl SourceLoop for ImageSource {
                     meta: Default::default(),
                 };
                 // Carry the detections on the frame; the overlay reads and draws
-                // them (the M214 meta-on-frame fan-out contract). An empty graph
-                // is left off entirely: `FrameMetaSet::get` returns the first entry
-                // of a type, so it would shadow what a downstream analytic attaches.
-                if !self.meta.nodes.is_empty() {
-                    frame.meta.attach(self.meta.clone());
-                }
+                // them (the M214 meta-on-frame fan-out contract).
+                frame.meta.attach(self.meta.clone());
                 out.push(PipelinePacket::DataFrame(frame)).await?;
                 pushed += 1;
             }

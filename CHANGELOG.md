@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M995: `FrameMetaSet::attach` replaces the entry of the same type instead of adding an unreachable second one.
 - M994: both analytics overlays draw segmentation masks as a translucent fill and ROIs as dashed rectangles.
 - M993: `WgpuPreprocess` takes a webcam's YUYV dma-buf, importing on a GPU chosen by `import-adapter`.
 - M992: `OrtSegmentation` runs a YOLO `-seg` model and attaches `Segmentation` / `Roi` masks to the frame.
