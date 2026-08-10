@@ -436,6 +436,43 @@ pub trait DynMultiInputElement: ElementBound {
 
     /// Dyn-safe mirror of [`MultiInputElement::set_log_category`].
     fn set_log_category(&mut self, _category: alloc::string::String) {}
+
+    /// Consume this element into its graph-runner muxer arm (M1009), the fan-in
+    /// analog of
+    /// [`DynAsyncElement::drive_transform_arm`](crate::element::DynAsyncElement::drive_transform_arm).
+    /// The blanket impl picks the arrival-order or PTS-ordered arm from
+    /// [`input_pts_ordered`](Self::input_pts_ordered) and monomorphizes it over
+    /// the concrete element type, so the per-packet `process` future is unboxed.
+    /// Implementations outside the blanket cannot build the runner's
+    /// [`MuxerArmIo`](crate::runtime::MuxerArmIo); implement
+    /// [`MultiInputElement`] instead.
+    #[doc(hidden)]
+    fn drive_muxer_arm<'s>(
+        self: Box<Self>,
+        io: crate::runtime::MuxerArmIo<'s>,
+    ) -> BoxFuture<'s, Result<u64, G2gError>>
+    where
+        Self: 's;
+
+    /// As [`Self::drive_muxer_arm`], for the thread-per-arm runner, whose
+    /// builder closure owns its ticker rather than borrowing the graph's.
+    #[cfg(feature = "multi-thread")]
+    #[doc(hidden)]
+    fn drive_muxer_arm_owned_tick(
+        self: Box<Self>,
+        io: crate::runtime::MuxerArmOwnedTickIo,
+    ) -> BoxFuture<'static, Result<u64, G2gError>>
+    where
+        Self: 'static;
+
+    /// As [`Self::drive_muxer_arm`], for a terminal fan-in node (no downstream).
+    #[doc(hidden)]
+    fn drive_fanin_sink_arm<'s>(
+        self: Box<Self>,
+        io: crate::runtime::FaninSinkArmIo,
+    ) -> BoxFuture<'s, Result<u64, G2gError>>
+    where
+        Self: 's;
 }
 
 impl<T: MultiInputElement> DynMultiInputElement for T {
@@ -534,6 +571,166 @@ impl<T: MultiInputElement> DynMultiInputElement for T {
 
     fn set_log_category(&mut self, category: alloc::string::String) {
         MultiInputElement::set_log_category(self, category)
+    }
+
+    fn drive_muxer_arm<'s>(
+        self: Box<Self>,
+        io: crate::runtime::MuxerArmIo<'s>,
+    ) -> BoxFuture<'s, Result<u64, G2gError>>
+    where
+        Self: 's,
+    {
+        if MultiInputElement::input_pts_ordered(&*self) {
+            Box::pin(crate::runtime::graph_runner::muxer_arm_pts(*self, io))
+        } else {
+            Box::pin(crate::runtime::graph_runner::muxer_arm(*self, io))
+        }
+    }
+
+    #[cfg(feature = "multi-thread")]
+    fn drive_muxer_arm_owned_tick(
+        self: Box<Self>,
+        io: crate::runtime::MuxerArmOwnedTickIo,
+    ) -> BoxFuture<'static, Result<u64, G2gError>>
+    where
+        Self: 'static,
+    {
+        Box::pin(crate::runtime::graph_runner::muxer_arm_owned_tick(
+            *self, io,
+        ))
+    }
+
+    fn drive_fanin_sink_arm<'s>(
+        self: Box<Self>,
+        io: crate::runtime::FaninSinkArmIo,
+    ) -> BoxFuture<'s, Result<u64, G2gError>>
+    where
+        Self: 's,
+    {
+        Box::pin(crate::runtime::graph_runner::fanin_sink_arm(*self, io))
+    }
+}
+
+/// Private [`MultiInputElement`] face over an erased muxer, so the generic
+/// (monomorphized) arms can drive a `&mut dyn DynMultiInputElement` graph node
+/// too. Its per-packet process future stays boxed (the element underneath is
+/// erased). The `DynRef` shape, for the fan-in trait.
+struct MuxRef<'b>(&'b mut (dyn DynMultiInputElement + 'b));
+
+impl MultiInputElement for MuxRef<'_> {
+    type ProcessFuture<'a>
+        = BoxFuture<'a, Result<(), G2gError>>
+    where
+        Self: 'a;
+
+    fn input_count(&self) -> usize {
+        self.0.input_count()
+    }
+
+    fn input_pts_ordered(&self) -> bool {
+        self.0.input_pts_ordered()
+    }
+
+    fn tick_interval_ns(&self) -> Option<u64> {
+        self.0.tick_interval_ns()
+    }
+
+    /// Only reachable by a direct call: the arms drive `process`, and
+    /// `caps_constraint_as_input` below forwards the erased element's own
+    /// constraint rather than routing through here.
+    fn intercept_caps(&self, input: usize, upstream_caps: &Caps) -> Result<Caps, G2gError> {
+        let upstream = CapsConstraint::LegacySource(upstream_caps.clone());
+        let pad = self.0.caps_constraint_as_input(input);
+        crate::runtime::solver::solve_linear(&[&upstream, &pad])
+            .map_err(|_| G2gError::CapsMismatch)?
+            .last()
+            .cloned()
+            .ok_or(G2gError::CapsMismatch)
+    }
+
+    fn caps_constraint_as_input(&self, input: usize) -> CapsConstraint<'_> {
+        self.0.caps_constraint_as_input(input)
+    }
+
+    fn caps_constraint_for_output(&self) -> Result<CapsConstraint<'_>, G2gError> {
+        self.0.caps_constraint_for_output()
+    }
+
+    fn configure_pipeline(
+        &mut self,
+        input: usize,
+        absolute_caps: &Caps,
+    ) -> Result<ConfigureOutcome, G2gError> {
+        self.0.configure_pipeline(input, absolute_caps)
+    }
+
+    fn output_caps(&self) -> Result<Caps, G2gError> {
+        self.0.output_caps()
+    }
+
+    fn output_follows_input(&self) -> Option<usize> {
+        self.0.output_follows_input()
+    }
+
+    fn input_pad_index(&self, req: &PadRequest, ordinal: usize) -> Option<usize> {
+        self.0.input_pad_index(req, ordinal)
+    }
+
+    fn accepts_runtime_input(&self, pad: usize, caps: &Caps) -> bool {
+        self.0.accepts_runtime_input(pad, caps)
+    }
+
+    fn reverse_channel(&self, input: usize) -> Option<crate::fanout::ReverseChannel> {
+        self.0.reverse_channel(input)
+    }
+
+    fn is_terminal(&self) -> bool {
+        self.0.is_terminal()
+    }
+
+    fn propose_allocation_for_input(&self, input: usize, caps: &Caps) -> Option<AllocationParams> {
+        self.0.propose_allocation_for_input(input, caps)
+    }
+
+    fn propose_allocation_for_output(&self, caps: &Caps) -> Option<AllocationParams> {
+        self.0.propose_allocation_for_output(caps)
+    }
+
+    fn configure_allocation_for_output(&mut self, params: &AllocationParams) {
+        self.0.configure_allocation_for_output(params)
+    }
+
+    fn process<'a>(
+        &'a mut self,
+        input: usize,
+        packet: PipelinePacket,
+        out: &'a mut dyn OutputSink,
+    ) -> Self::ProcessFuture<'a> {
+        self.0.process(input, packet, out)
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        self.0.properties()
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        self.0.set_property(name, value)
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        self.0.get_property(name)
+    }
+
+    fn metadata(&self) -> ElementMetadata {
+        self.0.metadata()
+    }
+
+    fn set_instance_name(&mut self, name: alloc::string::String) {
+        self.0.set_instance_name(name)
+    }
+
+    fn set_log_category(&mut self, category: alloc::string::String) {
+        self.0.set_log_category(category)
     }
 }
 
@@ -637,6 +834,48 @@ impl<'b> DynMultiInputElement for &'b mut (dyn DynMultiInputElement + 'b) {
 
     fn set_log_category(&mut self, category: alloc::string::String) {
         (**self).set_log_category(category)
+    }
+
+    fn drive_muxer_arm<'s>(
+        self: Box<Self>,
+        io: crate::runtime::MuxerArmIo<'s>,
+    ) -> BoxFuture<'s, Result<u64, G2gError>>
+    where
+        Self: 's,
+    {
+        let mux = MuxRef(*self);
+        if MultiInputElement::input_pts_ordered(&mux) {
+            Box::pin(crate::runtime::graph_runner::muxer_arm_pts(mux, io))
+        } else {
+            Box::pin(crate::runtime::graph_runner::muxer_arm(mux, io))
+        }
+    }
+
+    #[cfg(feature = "multi-thread")]
+    fn drive_muxer_arm_owned_tick(
+        self: Box<Self>,
+        io: crate::runtime::MuxerArmOwnedTickIo,
+    ) -> BoxFuture<'static, Result<u64, G2gError>>
+    where
+        Self: 'static,
+    {
+        Box::pin(crate::runtime::graph_runner::muxer_arm_owned_tick(
+            MuxRef(*self),
+            io,
+        ))
+    }
+
+    fn drive_fanin_sink_arm<'s>(
+        self: Box<Self>,
+        io: crate::runtime::FaninSinkArmIo,
+    ) -> BoxFuture<'s, Result<u64, G2gError>>
+    where
+        Self: 's,
+    {
+        Box::pin(crate::runtime::graph_runner::fanin_sink_arm(
+            MuxRef(*self),
+            io,
+        ))
     }
 }
 

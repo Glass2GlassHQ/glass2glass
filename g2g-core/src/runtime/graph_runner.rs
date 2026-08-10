@@ -283,6 +283,18 @@ pub trait DynMultiOutputElement: ElementBound {
 
     /// Dyn-safe mirror of [`MultiOutputElement::set_log_category`].
     fn set_log_category(&mut self, _category: alloc::string::String) {}
+
+    /// Consume this element into its graph-runner demux arm (M1009), the
+    /// fan-out analog of
+    /// [`DynAsyncElement::drive_transform_arm`](crate::element::DynAsyncElement::drive_transform_arm).
+    /// The blanket impl monomorphizes the arm over the concrete element type,
+    /// so the per-packet `process` future is unboxed. Implementations outside
+    /// the blanket cannot build the runner's [`DemuxArmIo`]; implement
+    /// [`MultiOutputElement`] instead.
+    #[doc(hidden)]
+    fn drive_demux_arm<'s>(self: Box<Self>, io: DemuxArmIo) -> BoxFuture<'s, Result<u64, G2gError>>
+    where
+        Self: 's;
 }
 
 impl<T: MultiOutputElement> DynMultiOutputElement for T {
@@ -324,6 +336,79 @@ impl<T: MultiOutputElement> DynMultiOutputElement for T {
 
     fn set_log_category(&mut self, category: alloc::string::String) {
         MultiOutputElement::set_log_category(self, category)
+    }
+
+    fn drive_demux_arm<'s>(self: Box<Self>, io: DemuxArmIo) -> BoxFuture<'s, Result<u64, G2gError>>
+    where
+        Self: 's,
+    {
+        Box::pin(demux_arm(*self, io))
+    }
+}
+
+/// Private [`MultiOutputElement`] face over an erased demux, so the generic
+/// (monomorphized) arm can drive a `&mut dyn DynMultiOutputElement` graph node
+/// too. Its per-packet process future stays boxed (the element underneath is
+/// erased). The `DynRef` shape, for the fan-out trait.
+struct DemuxRef<'b>(&'b mut (dyn DynMultiOutputElement + 'b));
+
+impl MultiOutputElement for DemuxRef<'_> {
+    type ProcessFuture<'a>
+        = BoxFuture<'a, Result<(), G2gError>>
+    where
+        Self: 'a;
+
+    /// Only reachable by a direct call: the arm drives `process`, and
+    /// `caps_constraint_as_input` below forwards the erased element's own
+    /// constraint rather than routing through here.
+    fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
+        let upstream = CapsConstraint::LegacySource(upstream_caps.clone());
+        let own = self.0.caps_constraint_as_input();
+        solve_linear(&[&upstream, &own])
+            .map_err(|_| G2gError::CapsMismatch)?
+            .last()
+            .cloned()
+            .ok_or(G2gError::CapsMismatch)
+    }
+
+    fn caps_constraint_as_input(&self) -> CapsConstraint<'_> {
+        self.0.caps_constraint_as_input()
+    }
+
+    fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        self.0.configure_pipeline(absolute_caps)
+    }
+
+    fn process<'a>(
+        &'a mut self,
+        packet: PipelinePacket,
+        out: &'a mut dyn MultiOutputSink,
+    ) -> Self::ProcessFuture<'a> {
+        self.0.process(packet, out)
+    }
+
+    fn port_output_caps(&self, port: usize) -> Option<Caps> {
+        self.0.port_output_caps(port)
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        self.0.properties()
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        self.0.set_property(name, value)
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        self.0.get_property(name)
+    }
+
+    fn set_instance_name(&mut self, name: alloc::string::String) {
+        self.0.set_instance_name(name)
+    }
+
+    fn set_log_category(&mut self, category: alloc::string::String) {
+        self.0.set_log_category(category)
     }
 }
 
@@ -369,6 +454,13 @@ impl<'b> DynMultiOutputElement for &'b mut (dyn DynMultiOutputElement + 'b) {
 
     fn set_log_category(&mut self, category: alloc::string::String) {
         (**self).set_log_category(category)
+    }
+
+    fn drive_demux_arm<'s>(self: Box<Self>, io: DemuxArmIo) -> BoxFuture<'s, Result<u64, G2gError>>
+    where
+        Self: 's,
+    {
+        Box::pin(demux_arm(DemuxRef(*self), io))
     }
 }
 
@@ -1696,36 +1788,23 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
             }
             // A muxer can opt into runner-level PTS-ordered delivery (the runner
             // merges its inputs by DataFrame PTS); the default drains round-robin
-            // in arrival order.
+            // in arrival order. The hook picks the arm from
+            // `input_pts_ordered` and monomorphizes it over the element.
             let mux_probe = probes[node.0 as usize].clone();
             let mux_control = controllers[node.0 as usize].take();
-            let arm: BoxFuture<'a, Result<u64, G2gError>> = if mux.input_pts_ordered() {
-                Box::pin(muxer_arm_pts(
-                    mux,
+            let arm: BoxFuture<'a, Result<u64, G2gError>> = mux.drive_muxer_arm(MuxerArmIo {
+                parts: MuxerArmParts {
                     pad_rxs,
                     out_tx,
                     input_count,
-                    mux_out_caps,
+                    current_output: mux_out_caps,
                     beta,
-                    mux_ctrl,
-                    mux_probe,
-                    ticker,
-                    mux_control,
-                ))
-            } else {
-                Box::pin(muxer_arm(
-                    mux,
-                    pad_rxs,
-                    out_tx,
-                    input_count,
-                    mux_out_caps,
-                    beta,
-                    mux_ctrl,
-                    mux_probe,
-                    ticker,
-                    mux_control,
-                ))
-            };
+                    arm_rx: mux_ctrl,
+                    probe: mux_probe,
+                    control: mux_control,
+                },
+                ticker,
+            });
             arms.push(arm);
             arm_kinds.push(kind);
             continue;
@@ -1791,12 +1870,11 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
                 // tolerates a branch that has dropped out (closed its channel).
                 let branch_drop = vg.fanout_policy(node) == FanOutPolicy::AllowBranchDrop;
                 match element {
-                    Some(GraphNodeRef::Demux(demux)) => Box::pin(demux_arm(
-                        demux,
+                    Some(GraphNodeRef::Demux(demux)) => demux.drive_demux_arm(DemuxArmIo {
                         in_rx,
-                        demux_out_txs_by_port(&vg, node, out_txs),
-                        probes[node.0 as usize].clone(),
-                    )),
+                        out_txs: demux_out_txs_by_port(&vg, node, out_txs),
+                        probe: probes[node.0 as usize].clone(),
+                    }),
                     _ => Box::pin(tee_arm(in_rx, out_txs, branch_drop)),
                 }
             }
@@ -1805,12 +1883,11 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
                     return Err(G2gError::CapsMismatch);
                 };
                 let (pad_rxs, reverse) = fanin_sink_pads(&vg, node, in_rxs, &*session);
-                Box::pin(fanin_sink_arm(
-                    session,
+                session.drive_fanin_sink_arm(FaninSinkArmIo {
                     pad_rxs,
                     reverse,
-                    probes[node.0 as usize].clone(),
-                ))
+                    probe: probes[node.0 as usize].clone(),
+                })
             }
             NodeKind::FanoutSrc(_) => {
                 let Some(GraphNodeRef::FanoutSource(source)) = element else {
@@ -2115,25 +2192,24 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
                 arm_kinds.push(kind);
                 pad_rxs.push((pad, pad_rx));
             }
-            let pts_ordered = mux.input_pts_ordered();
             let mux_probe = probes[node.0 as usize].clone();
             let mux_ticker = ticker.clone();
             let mux_control = controllers[node.0 as usize].take();
             let build: alloc::boxed::Box<dyn FnOnce() -> LocalArmFuture + Send> =
                 alloc::boxed::Box::new(move || -> LocalArmFuture {
-                    Box::pin(muxer_arm_owned_tick(
-                        pts_ordered,
-                        mux,
-                        pad_rxs,
-                        out_tx,
-                        input_count,
-                        mux_out_caps,
-                        beta,
-                        mux_ctrl,
-                        mux_probe,
-                        mux_ticker,
-                        mux_control,
-                    ))
+                    mux.drive_muxer_arm_owned_tick(MuxerArmOwnedTickIo {
+                        parts: MuxerArmParts {
+                            pad_rxs,
+                            out_tx,
+                            input_count,
+                            current_output: mux_out_caps,
+                            beta,
+                            arm_rx: mux_ctrl,
+                            probe: mux_probe,
+                            control: mux_control,
+                        },
+                        ticker: mux_ticker,
+                    })
                 });
             handles.push(spawner.spawn_arm(with_stream_status(bus.cloned(), build)));
             arm_kinds.push(kind);
@@ -2221,7 +2297,11 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
                         let demux_probe = probes[node.0 as usize].clone();
                         let out_txs = demux_out_txs_by_port(&vg, node, out_txs);
                         alloc::boxed::Box::new(move || -> LocalArmFuture {
-                            Box::pin(demux_arm(demux, in_rx, out_txs, demux_probe))
+                            demux.drive_demux_arm(DemuxArmIo {
+                                in_rx,
+                                out_txs,
+                                probe: demux_probe,
+                            })
                         })
                     }
                     _ => alloc::boxed::Box::new(move || -> LocalArmFuture {
@@ -2236,7 +2316,11 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
                 let (pad_rxs, reverse) = fanin_sink_pads(&vg, node, in_rxs, &*session);
                 let probe = probes[node.0 as usize].clone();
                 alloc::boxed::Box::new(move || -> LocalArmFuture {
-                    Box::pin(fanin_sink_arm(session, pad_rxs, reverse, probe))
+                    session.drive_fanin_sink_arm(FaninSinkArmIo {
+                        pad_rxs,
+                        reverse,
+                        probe,
+                    })
                 })
             }
             NodeKind::FanoutSrc(_) => {
@@ -3559,18 +3643,36 @@ async fn broadcast_drop_closed(
     Ok(())
 }
 
+/// Everything a demux arm needs besides its element (M1009), the fan-out mirror
+/// of [`TransformArmIo`]. Opaque on purpose: only the runner can build one, so
+/// the `drive_demux_arm` hook stays implementable only through the blanket impl.
+#[doc(hidden)]
+#[allow(missing_debug_implementations)]
+pub struct DemuxArmIo {
+    pub(crate) in_rx: LinkReceiver,
+    pub(crate) out_txs: Vec<LinkSender>,
+    pub(crate) probe: Probe,
+}
+
 /// The demux arm: drain the single input edge and let the routing element
 /// dispatch each packet to a chosen output port (the transpose of `muxer_arm`).
 /// Mirrors the `run_source_fanout` router loop: a packet goes to
 /// `MultiOutputElement::process`, which calls `push_to(port, ..)`; on `Eos` the
 /// element flushes first, then the arm closes every branch with its own `Eos`
 /// (the runner owns the per-branch end, like the tee arm).
-async fn demux_arm<'a>(
-    mut demux: Box<dyn DynMultiOutputElement + 'a>,
-    in_rx: LinkReceiver,
-    out_txs: Vec<LinkSender>,
-    probe: Probe,
+///
+/// Monomorphized over the element type by the `drive_demux_arm` blanket hook
+/// (M1009), so the per-packet `process` future is the element's own unboxed
+/// state machine; see [`transform_arm`].
+pub(crate) async fn demux_arm<E: MultiOutputElement>(
+    mut demux: E,
+    io: DemuxArmIo,
 ) -> Result<u64, G2gError> {
+    let DemuxArmIo {
+        in_rx,
+        out_txs,
+        probe,
+    } = io;
     let branch_count = out_txs.len();
     let senders: Vec<SenderSink> = out_txs.into_iter().map(SenderSink::new).collect();
     let mut multi = MultiSenderSink::new(senders);
@@ -3793,6 +3895,15 @@ async fn fanout_src_arm<'a>(
     source.run(&mut sinks).await
 }
 
+/// Everything a terminal fan-in arm needs besides its element (M1009).
+#[doc(hidden)]
+#[allow(missing_debug_implementations)]
+pub struct FaninSinkArmIo {
+    pub(crate) pad_rxs: Vec<(usize, LinkReceiver)>,
+    pub(crate) reverse: Vec<Option<ReverseChannel>>,
+    pub(crate) probe: Probe,
+}
+
 /// Drive a terminal fan-in element (an N-input [`MultiInputElement`] with no
 /// downstream output, e.g. a WebRTC session) the `run_fanin_session` way but over
 /// the DAG's per-edge channels. Drains the input edges round-robin (fairness, so a
@@ -3802,12 +3913,18 @@ async fn fanout_src_arm<'a>(
 /// are relayed onto each pad's edge, so a per-layer PLI reaches the encoder feeding
 /// it (`Reconfigure::ForceKeyframe` through that arm), the analog of the
 /// `TaggingSink` reverse routing in the standalone fan-in session runner.
-async fn fanin_sink_arm<'a>(
-    mut session: Box<dyn DynMultiInputElement + 'a>,
-    pad_rxs: Vec<(usize, LinkReceiver)>,
-    reverse: Vec<Option<ReverseChannel>>,
-    probe: Probe,
+///
+/// Monomorphized over the element type by the `drive_fanin_sink_arm` hook
+/// (M1009), so the per-packet `process` future is unboxed; see [`transform_arm`].
+pub(crate) async fn fanin_sink_arm<E: MultiInputElement>(
+    mut session: E,
+    io: FaninSinkArmIo,
 ) -> Result<u64, G2gError> {
+    let FaninSinkArmIo {
+        pad_rxs,
+        reverse,
+        probe,
+    } = io;
     let mut null = NullSink;
     let input_count = pad_rxs.len();
     let mut open = alloc::vec![true; input_count];
@@ -3936,7 +4053,7 @@ struct MuxPad {
 /// constraining pair of pads that keeps flipping the output fails loud with
 /// `AllocationConflict` instead of looping forever.
 #[derive(Debug)]
-struct MuxBeta {
+pub(crate) struct MuxBeta {
     node: NodeId,
     coord: GraphCoordHandle,
     pads: Vec<MuxPad>,
@@ -4087,9 +4204,9 @@ impl<'a> ArmTick<'a> {
     /// Deliver one tick, then snap the next deadline forward from now rather than
     /// adding a period to a deadline already in the past, so a slow element does
     /// not build up a backlog of ticks to fire.
-    async fn fire(
+    async fn fire<E: MultiInputElement>(
         &mut self,
-        mux: &mut (dyn DynMultiInputElement + '_),
+        mux: &mut E,
         out: &mut dyn OutputSink,
     ) -> Result<(), G2gError> {
         mux.process(0, PipelinePacket::Tick, out).await?;
@@ -4099,9 +4216,9 @@ impl<'a> ArmTick<'a> {
 
     /// The busy path: a live pad can spin an arm's drain loop forever without
     /// ever parking below, so the deadline is checked per iteration too.
-    async fn fire_if_due(
+    async fn fire_if_due<E: MultiInputElement>(
         &mut self,
-        mux: &mut (dyn DynMultiInputElement + '_),
+        mux: &mut E,
         out: &mut dyn OutputSink,
     ) -> Result<(), G2gError> {
         if self.clock.now_ns() >= self.next_ns {
@@ -4115,10 +4232,10 @@ impl<'a> ArmTick<'a> {
 /// fan-in whose inputs have all gone quiet still gets its tick. `None` means the
 /// deadline won and a tick fired, so the caller loops. Data and control stay
 /// biased ahead of the tick: a packet already waiting is handled first.
-async fn park_or_tick<T>(
+async fn park_or_tick<T, E: MultiInputElement>(
     park: impl core::future::Future<Output = T>,
     tick: Option<&mut ArmTick<'_>>,
-    mux: &mut (dyn DynMultiInputElement + '_),
+    mux: &mut E,
     out: &mut dyn OutputSink,
 ) -> Result<Option<T>, G2gError> {
     let Some(tick) = tick else {
@@ -4136,6 +4253,43 @@ async fn park_or_tick<T>(
     }
 }
 
+/// Everything a muxer arm needs besides its element and its ticker (M1009).
+/// Split from the ticker so the cooperative arm (which borrows the graph's
+/// clock) and the thread-per-arm one (which owns a shared handle) carry the
+/// same payload.
+#[allow(missing_debug_implementations)]
+pub(crate) struct MuxerArmParts {
+    pub(crate) pad_rxs: Vec<(usize, Receiver<PipelinePacket>)>,
+    pub(crate) out_tx: LinkSender,
+    pub(crate) input_count: usize,
+    pub(crate) current_output: Caps,
+    pub(crate) beta: MuxBeta,
+    pub(crate) arm_rx: Receiver<ArmDirective>,
+    pub(crate) probe: Probe,
+    pub(crate) control: Option<ArmController>,
+}
+
+/// A muxer arm's input, as the cooperative runner builds it. Opaque on purpose,
+/// like [`TransformArmIo`]: only the runner can build one, so `drive_muxer_arm`
+/// stays implementable only through the blanket impl.
+#[doc(hidden)]
+#[allow(missing_debug_implementations)]
+pub struct MuxerArmIo<'a> {
+    pub(crate) parts: MuxerArmParts,
+    pub(crate) ticker: Option<&'a dyn DynAsyncClock>,
+}
+
+/// As [`MuxerArmIo`], for the thread-per-arm runner: a builder closure that
+/// crosses onto a worker thread must own everything it carries, so the ticker
+/// is the shared handle rather than a borrow (M879).
+#[cfg(all(feature = "std", feature = "multi-thread"))]
+#[doc(hidden)]
+#[allow(missing_debug_implementations)]
+pub struct MuxerArmOwnedTickIo {
+    pub(crate) parts: MuxerArmParts,
+    pub(crate) ticker: Option<alloc::sync::Arc<dyn DynAsyncClock + Send + Sync>>,
+}
+
 /// The muxer arm: drain the per-input channels round-robin, combine each input's
 /// packets via `process(pad, ..)`, and emit a single `Eos` once every input has
 /// ended. Round-robin draining keeps a fast input from starving a slow one (a
@@ -4150,19 +4304,28 @@ async fn park_or_tick<T>(
 /// packet arriving. The deadline is checked on both paths: once per loop iteration
 /// for the busy case (packets flowing on one pad while another is stalled never
 /// park the arm), and raced against the parked `recv` otherwise.
-#[allow(clippy::too_many_arguments)]
-async fn muxer_arm<'a>(
-    mut mux: Box<dyn DynMultiInputElement + 'a>,
-    pad_rxs: Vec<(usize, Receiver<PipelinePacket>)>,
-    out_tx: LinkSender,
-    input_count: usize,
-    mut current_output: Caps,
-    mut beta: MuxBeta,
-    arm_rx: Receiver<ArmDirective>,
-    probe: Probe,
-    ticker: Option<&'a dyn DynAsyncClock>,
-    control: Option<ArmController>,
+///
+/// Monomorphized over the element type by the `drive_muxer_arm` blanket hook
+/// (M1009), so the per-packet `process` future is the element's own unboxed
+/// state machine; see [`transform_arm`].
+pub(crate) async fn muxer_arm<E: MultiInputElement>(
+    mut mux: E,
+    io: MuxerArmIo<'_>,
 ) -> Result<u64, G2gError> {
+    let MuxerArmIo {
+        parts:
+            MuxerArmParts {
+                pad_rxs,
+                out_tx,
+                input_count,
+                mut current_output,
+                mut beta,
+                arm_rx,
+                probe,
+                control,
+            },
+        ticker,
+    } = io;
     let mut adapter = SenderSink::new(out_tx);
     adapter.set_push_wait_probe(probe.clone());
     let mut open = alloc::vec![true; input_count];
@@ -4170,18 +4333,24 @@ async fn muxer_arm<'a>(
     // Cursor for round-robin fairness across both the try-drain and block paths.
     let mut next = 0usize;
     let mut control_open = true;
-    let mut tick = ArmTick::new(ticker, &*mux);
-    beta.seed(&*mux, &current_output);
+    let mut tick = ArmTick::new(ticker, &mux as &dyn DynMultiInputElement);
+    beta.seed(&mux as &dyn DynMultiInputElement, &current_output);
     loop {
         // M839: a consumer's demand on the merged output arrives here. Checked
         // before the data drain so a busy muxer still applies it promptly.
         while let Some(directive) = arm_rx.try_recv() {
-            apply_mux_directive(&mut *mux, &mut beta, directive, &current_output).await?;
+            apply_mux_directive(
+                &mut mux as &mut dyn DynMultiInputElement,
+                &mut beta,
+                directive,
+                &current_output,
+            )
+            .await?;
         }
         // Deadline reached while packets keep this arm busy (a live overlay pad
         // spinning the drain loop below without ever parking).
         if let Some(t) = tick.as_mut() {
-            t.fire_if_due(&mut *mux, &mut adapter).await?;
+            t.fire_if_due(&mut mux, &mut adapter).await?;
         }
         // Take one buffered packet, scanning round-robin from `next`, so no
         // single input can monopolize the muxer while others have data waiting.
@@ -4214,14 +4383,19 @@ async fn muxer_arm<'a>(
                 };
                 // M875: the tick deadline joins the race; a fired tick loops.
                 let Some(parked) =
-                    park_or_tick(park, tick.as_mut(), &mut *mux, &mut adapter).await?
+                    park_or_tick(park, tick.as_mut(), &mut mux, &mut adapter).await?
                 else {
                     continue;
                 };
                 let (slot, maybe) = match parked {
                     Either::Left(Some(directive)) => {
-                        apply_mux_directive(&mut *mux, &mut beta, directive, &current_output)
-                            .await?;
+                        apply_mux_directive(
+                            &mut mux as &mut dyn DynMultiInputElement,
+                            &mut beta,
+                            directive,
+                            &current_output,
+                        )
+                        .await?;
                         continue;
                     }
                     Either::Left(None) => {
@@ -4251,7 +4425,8 @@ async fn muxer_arm<'a>(
                 // MX-1: re-solve this input against its pad constraint and
                 // reconfigure the pad; the input-side `CapsChanged` is consumed,
                 // not forwarded as if it were the merged output.
-                let input_caps = solve_mux_input_dyn(&new_caps, &*mux, pad)?;
+                let input_caps =
+                    solve_mux_input_dyn(&new_caps, &mux as &dyn DynMultiInputElement, pad)?;
                 log_caps_rejected(
                     probe.as_deref().map(|p| p.name()),
                     &input_caps,
@@ -4260,7 +4435,7 @@ async fn muxer_arm<'a>(
                 .reject_refixate()?;
                 // MX-2: the per-input change may shift the merged output. Emit one
                 // downstream `CapsChanged` only when it actually changed.
-                let new_output = solve_mux_output_dyn(&*mux)?;
+                let new_output = solve_mux_output_dyn(&mux as &dyn DynMultiInputElement)?;
                 if new_output != current_output {
                     current_output = new_output.clone();
                     adapter
@@ -4268,8 +4443,13 @@ async fn muxer_arm<'a>(
                         .await?;
                 }
                 // MX-1β / M839: walk the allocation change through this boundary.
-                beta.pad_changed(&mut *mux, slot, input_caps, &current_output)
-                    .await?;
+                beta.pad_changed(
+                    &mut mux as &mut dyn DynMultiInputElement,
+                    slot,
+                    input_caps,
+                    &current_output,
+                )
+                .await?;
             }
             packet => {
                 // M694: time the data-frame `process()` and sample this pad's
@@ -4282,7 +4462,12 @@ async fn muxer_arm<'a>(
                     p.record_fill(pad_rxs[slot].1.fill_percent());
                 }
                 // M882: sample the animated properties at this frame's PTS.
-                apply_control(control.as_ref(), &mut *mux, &packet, &probe)?;
+                apply_control(
+                    control.as_ref(),
+                    &mut mux as &mut dyn DynMultiInputElement,
+                    &packet,
+                    &probe,
+                )?;
                 let t0 = ElementProbe::mark();
                 mux.process(pad, packet, &mut adapter).await?;
                 if let Some(p) = timed {
@@ -4308,19 +4493,26 @@ async fn muxer_arm<'a>(
 /// exit and after the aggregator's release round: an arm on its way out ticks no
 /// more, and a tick never jumps ahead of a frame already safe to emit in PTS
 /// order.
-#[allow(clippy::too_many_arguments)]
-async fn muxer_arm_pts<'a>(
-    mut mux: Box<dyn DynMultiInputElement + 'a>,
-    pad_rxs: Vec<(usize, Receiver<PipelinePacket>)>,
-    out_tx: LinkSender,
-    input_count: usize,
-    mut current_output: Caps,
-    mut beta: MuxBeta,
-    arm_rx: Receiver<ArmDirective>,
-    probe: Probe,
-    ticker: Option<&'a dyn DynAsyncClock>,
-    control: Option<ArmController>,
+///
+/// Monomorphized over the element type like [`muxer_arm`] (M1009).
+pub(crate) async fn muxer_arm_pts<E: MultiInputElement>(
+    mut mux: E,
+    io: MuxerArmIo<'_>,
 ) -> Result<u64, G2gError> {
+    let MuxerArmIo {
+        parts:
+            MuxerArmParts {
+                pad_rxs,
+                out_tx,
+                input_count,
+                mut current_output,
+                mut beta,
+                arm_rx,
+                probe,
+                control,
+            },
+        ticker,
+    } = io;
     let mut adapter = SenderSink::new(out_tx);
     adapter.set_push_wait_probe(probe.clone());
     let mut open = alloc::vec![true; input_count];
@@ -4328,8 +4520,8 @@ async fn muxer_arm_pts<'a>(
     // Round-robin wake cursor, so a fast input does not bias the block path.
     let mut next = 0usize;
     let mut control_open = true;
-    let mut tick = ArmTick::new(ticker, &*mux);
-    beta.seed(&*mux, &current_output);
+    let mut tick = ArmTick::new(ticker, &mux as &dyn DynMultiInputElement);
+    beta.seed(&mux as &dyn DynMultiInputElement, &current_output);
     loop {
         // Release every frame now safe to emit, in global PTS order: the
         // aggregator yields the earliest only once every still-contributing input
@@ -4343,7 +4535,12 @@ async fn muxer_arm_pts<'a>(
             }
             // M882: sampled in release (PTS) order, so the animation follows the
             // ordered stream rather than pad arrival.
-            apply_control_at(control.as_ref(), &mut *mux, frame.timing.pts_ns, &probe)?;
+            apply_control_at(
+                control.as_ref(),
+                &mut mux as &mut dyn DynMultiInputElement,
+                frame.timing.pts_ns,
+                &probe,
+            )?;
             let t0 = ElementProbe::mark();
             mux.process(pad, PipelinePacket::DataFrame(frame), &mut adapter)
                 .await?;
@@ -4360,7 +4557,7 @@ async fn muxer_arm_pts<'a>(
         // Deadline reached while frames keep arriving on one pad (the arm never
         // parks below).
         if let Some(t) = tick.as_mut() {
-            t.fire_if_due(&mut *mux, &mut adapter).await?;
+            t.fire_if_due(&mut mux, &mut adapter).await?;
         }
         // Make progress: block for the next packet from any still-open input,
         // racing the β control channel (M839) so a consumer's demand on the
@@ -4373,12 +4570,18 @@ async fn muxer_arm_pts<'a>(
                 Either::Right(muxer_recv_any(&pad_rxs, &open, next).await)
             }
         };
-        let Some(parked) = park_or_tick(park, tick.as_mut(), &mut *mux, &mut adapter).await? else {
+        let Some(parked) = park_or_tick(park, tick.as_mut(), &mut mux, &mut adapter).await? else {
             continue;
         };
         let (slot, maybe) = match parked {
             Either::Left(Some(directive)) => {
-                apply_mux_directive(&mut *mux, &mut beta, directive, &current_output).await?;
+                apply_mux_directive(
+                    &mut mux as &mut dyn DynMultiInputElement,
+                    &mut beta,
+                    directive,
+                    &current_output,
+                )
+                .await?;
                 continue;
             }
             Either::Left(None) => {
@@ -4402,22 +4605,28 @@ async fn muxer_arm_pts<'a>(
                 // input's pad, emit one downstream `CapsChanged` only when the
                 // merged output actually shifts, and walk the allocation change
                 // through the boundary.
-                let input_caps = solve_mux_input_dyn(&new_caps, &*mux, pad)?;
+                let input_caps =
+                    solve_mux_input_dyn(&new_caps, &mux as &dyn DynMultiInputElement, pad)?;
                 log_caps_rejected(
                     probe.as_deref().map(|p| p.name()),
                     &input_caps,
                     mux.configure_pipeline(pad, &input_caps),
                 )?
                 .reject_refixate()?;
-                let new_output = solve_mux_output_dyn(&*mux)?;
+                let new_output = solve_mux_output_dyn(&mux as &dyn DynMultiInputElement)?;
                 if new_output != current_output {
                     current_output = new_output.clone();
                     adapter
                         .push(PipelinePacket::CapsChanged(new_output))
                         .await?;
                 }
-                beta.pad_changed(&mut *mux, slot, input_caps, &current_output)
-                    .await?;
+                beta.pad_changed(
+                    &mut mux as &mut dyn DynMultiInputElement,
+                    slot,
+                    input_caps,
+                    &current_output,
+                )
+                .await?;
             }
             // Every other packet reaches the element, as on the single-input
             // path and in `muxer_arm`: `Segment` and `Flush` are per-input
@@ -4436,52 +4645,23 @@ async fn muxer_arm_pts<'a>(
 /// their ticker as a borrow, but a builder closure that crosses onto a worker
 /// thread must own everything it carries. This future owns the shared clock for its
 /// whole life and lends it to the arm it drives, so the arms' signatures stay as
-/// the cooperative runner needs them. `pts_ordered` picks the arm, the same choice
-/// the cooperative path makes at the call site.
+/// the cooperative runner needs them. [`MultiInputElement::input_pts_ordered`]
+/// picks the arm, the same choice `drive_muxer_arm` makes on the cooperative path.
 #[cfg(all(feature = "std", feature = "multi-thread"))]
-#[allow(clippy::too_many_arguments)]
-async fn muxer_arm_owned_tick(
-    pts_ordered: bool,
-    mux: Box<dyn DynMultiInputElement>,
-    pad_rxs: Vec<(usize, Receiver<PipelinePacket>)>,
-    out_tx: LinkSender,
-    input_count: usize,
-    current_output: Caps,
-    beta: MuxBeta,
-    arm_rx: Receiver<ArmDirective>,
-    probe: Probe,
-    ticker: Option<alloc::sync::Arc<dyn DynAsyncClock + Send + Sync>>,
-    control: Option<ArmController>,
+pub(crate) async fn muxer_arm_owned_tick<E: MultiInputElement>(
+    mux: E,
+    io: MuxerArmOwnedTickIo,
 ) -> Result<u64, G2gError> {
+    let MuxerArmOwnedTickIo { parts, ticker } = io;
     let tick: Option<&dyn DynAsyncClock> = ticker.as_deref().map(|c| c as &dyn DynAsyncClock);
-    if pts_ordered {
-        muxer_arm_pts(
-            mux,
-            pad_rxs,
-            out_tx,
-            input_count,
-            current_output,
-            beta,
-            arm_rx,
-            probe,
-            tick,
-            control,
-        )
-        .await
+    let io = MuxerArmIo {
+        parts,
+        ticker: tick,
+    };
+    if MultiInputElement::input_pts_ordered(&mux) {
+        muxer_arm_pts(mux, io).await
     } else {
-        muxer_arm(
-            mux,
-            pad_rxs,
-            out_tx,
-            input_count,
-            current_output,
-            beta,
-            arm_rx,
-            probe,
-            tick,
-            control,
-        )
-        .await
+        muxer_arm(mux, io).await
     }
 }
 
