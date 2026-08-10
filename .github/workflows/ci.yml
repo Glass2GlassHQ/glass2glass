@@ -386,6 +386,8 @@ jobs:
           cargo test -p g2g-plugins --locked --features webrtc --test webrtc_data_channel
           cargo test -p g2g-plugins --locked --features webrtc --test m784_duplex_new_track
           cargo test -p g2g-plugins --locked --features webrtc --test m785_duplex_track_remove
+          cargo test -p g2g-plugins --locked --features webrtc --test m1014_duplex_renegotiation
+          cargo test -p g2g-core --locked --features std,runtime,multi-thread --test m1014_dynamic_duplex
 
   # Windows platform build: Media Foundation decode/encode/AAC, WASAPI audio,
   # Direct3D11 present, MF camera. The `windows` crate bundles its bindings, so no

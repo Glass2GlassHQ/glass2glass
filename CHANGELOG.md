@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1014: the duplex session grows its pad count live, so a new WebRTC track needs no reserved spare pad.
 - M1013: the Cuda memory domain carries the device ordinal, reported through DLPack and torch-verified.
 - M1012: `g2g-launch --tui` renders the live telemetry tap in the terminal, tables plus an ASCII topology view.
 - M1011: `VpxEnc` validated against system libvpx and the encode/decode PSNR battery covers VP8 / VP9.

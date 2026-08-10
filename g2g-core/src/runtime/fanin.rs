@@ -29,7 +29,7 @@ use crate::element::{
 };
 use crate::error::G2gError;
 use crate::fanout::{
-    DuplexInbound, Merger, MultiDuplexSession, MultiInputElement, MultiSenderSink,
+    DuplexInbound, Merger, MultiDuplexSession, MultiInputElement, MultiOutputSink, MultiSenderSink,
 };
 use crate::format_element::{CapsConstraint, CapsPreferences};
 use crate::frame::PipelinePacket;
@@ -42,11 +42,12 @@ use crate::runtime::channel::{
 };
 use crate::runtime::coordinator::log_caps_rejected;
 use crate::runtime::graph_runner::{run_graph_inner, GraphNodeRef};
-use crate::runtime::instrument::{EdgeCounters, ElementProbe};
+use crate::runtime::instrument::{EdgeCounters, ElementProbe, Probe};
 use crate::runtime::join::{dynamic_join, join_all, select2, Either};
 use crate::runtime::observe::{link_tapped, register_runner_tap, EdgeTap, TapEdge, TapNode};
 use crate::runtime::runner::{LinkCapacity, NullSink, RunStats, SourceLoop};
 use crate::runtime::{NodeRole, Observer};
+use spin::Mutex;
 
 /// Dyn-safe mirror of [`SourceLoop`] for heterogeneous fan-in branches, the
 /// source-side analog of [`DynAsyncElement`](crate::element::DynAsyncElement).
@@ -1437,16 +1438,75 @@ where
     })
 }
 
+/// The per-input reverse-signal handles a duplex run shares with its session.
+/// The dynamic runner fills a slot when it attaches a send track mid-run, and the
+/// session reads it back through [`DuplexInbound::reverse_channel`]; the
+/// fixed-arity runner leaves it empty, having handed every channel over up front.
+type ReverseMap = Arc<Mutex<Vec<Option<crate::fanout::ReverseChannel>>>>;
+
 /// [`DuplexInbound`] backed by the runner's shared tagged inbound channel, so a
 /// [`MultiDuplexSession`] drains its send-side sources through the same erased
 /// interface regardless of how the runner wired them.
 struct InboundReceiver {
     rx: Receiver<(usize, PipelinePacket)>,
+    reverse: ReverseMap,
 }
 
 impl DuplexInbound for InboundReceiver {
     fn recv(&mut self) -> BoxFuture<'_, Option<(usize, PipelinePacket)>> {
         Box::pin(async move { self.rx.recv().await })
+    }
+
+    fn reverse_channel(&self, input: usize) -> Option<crate::fanout::ReverseChannel> {
+        self.reverse.lock().get(input).cloned().flatten()
+    }
+}
+
+/// One recv-side sink arm of a duplex run: configure on each `CapsChanged`, then
+/// process until `Eos` or the branch link closes. Shared with the dynamic runner,
+/// so a port grown mid-run drains exactly like a declared one.
+async fn duplex_sink_arm(
+    sink: &mut dyn DynAsyncElement,
+    rx: crate::runtime::channel::LinkReceiver,
+    probe: &ElementProbe,
+) -> Result<u64, G2gError> {
+    let mut null = NullSink;
+    let mut consumed: u64 = 0;
+    loop {
+        match rx.recv().await {
+            Some(PipelinePacket::Eos) => {
+                sink.process(PipelinePacket::Eos, &mut null).await?;
+                return Ok(consumed);
+            }
+            Some(PipelinePacket::CapsChanged(new_caps)) => {
+                match log_caps_rejected(
+                    Some(probe.name()),
+                    &new_caps,
+                    sink.configure_pipeline(&new_caps),
+                )? {
+                    ConfigureOutcome::Accepted => {
+                        sink.process(PipelinePacket::CapsChanged(new_caps), &mut null)
+                            .await?;
+                    }
+                    ConfigureOutcome::ReFixate(counter) => {
+                        rx.request_reconfigure(Reconfigure::Propose(counter));
+                    }
+                }
+            }
+            Some(packet) => {
+                let is_data = matches!(packet, PipelinePacket::DataFrame(_));
+                if is_data {
+                    consumed += 1;
+                    probe.record_fill(rx.fill_percent());
+                }
+                let t0 = is_data.then(ElementProbe::mark).flatten();
+                sink.process(packet, &mut null).await?;
+                if is_data {
+                    probe.record_proc_since(t0);
+                }
+            }
+            None => return Ok(consumed),
+        }
     }
 }
 
@@ -1686,7 +1746,10 @@ where
     drop(in_tx);
 
     let session_arm: BoxFuture<'_, Result<u64, G2gError>> = Box::pin(async move {
-        let mut inbound = InboundReceiver { rx: in_rx };
+        let mut inbound = InboundReceiver {
+            rx: in_rx,
+            reverse: Arc::new(Mutex::new(Vec::new())),
+        };
         let mut multi = MultiSenderSink::new(branch_senders);
         session.run(&mut inbound, &mut multi).await
     });
@@ -1697,46 +1760,9 @@ where
         .zip(branch_receivers)
         .zip(sink_probes.iter().cloned())
     {
-        sink_arms.push(Box::pin(async move {
-            let mut null = NullSink;
-            let mut consumed: u64 = 0;
-            loop {
-                match rx.recv().await {
-                    Some(PipelinePacket::Eos) => {
-                        sink.process(PipelinePacket::Eos, &mut null).await?;
-                        return Ok::<u64, G2gError>(consumed);
-                    }
-                    Some(PipelinePacket::CapsChanged(new_caps)) => {
-                        match log_caps_rejected(
-                            Some(probe.name()),
-                            &new_caps,
-                            sink.configure_pipeline(&new_caps),
-                        )? {
-                            ConfigureOutcome::Accepted => {
-                                sink.process(PipelinePacket::CapsChanged(new_caps), &mut null)
-                                    .await?;
-                            }
-                            ConfigureOutcome::ReFixate(counter) => {
-                                rx.request_reconfigure(Reconfigure::Propose(counter));
-                            }
-                        }
-                    }
-                    Some(packet) => {
-                        let is_data = matches!(packet, PipelinePacket::DataFrame(_));
-                        if is_data {
-                            consumed += 1;
-                            probe.record_fill(rx.fill_percent());
-                        }
-                        let t0 = is_data.then(ElementProbe::mark).flatten();
-                        sink.process(packet, &mut null).await?;
-                        if is_data {
-                            probe.record_proc_since(t0);
-                        }
-                    }
-                    None => return Ok(consumed),
-                }
-            }
-        }));
+        sink_arms.push(Box::pin(
+            async move { duplex_sink_arm(sink, rx, &probe).await },
+        ));
     }
 
     // Arm order: [source0..N, session, sink0..M].
@@ -2600,4 +2626,762 @@ async fn attach_input<'a>(
     new_arm_tx.try_send(arm).map_err(|_| G2gError::Shutdown)?;
     let _ = verdict.try_send(Ok(()));
     Ok(())
+}
+
+/// The log category a dynamic duplex run reports pad growth on, so
+/// `G2G_DEBUG=duplex:debug` follows runtime tracks and ports independently of
+/// element logging (as [`FANIN_CATEGORY`] does for request sink pads).
+#[cfg(feature = "std")]
+const DUPLEX_CATEGORY: &str = "duplex";
+
+/// Which arm of a dynamic duplex run ([`run_duplex_session_dynamic`]) produced
+/// this result. The arm set grows at runtime, so identity rides in the variant
+/// rather than in a position, as it does for the dynamic fan-in.
+#[cfg(feature = "std")]
+#[derive(Debug, Clone, Copy)]
+enum DuplexArmOut {
+    /// A send-side source emitted this many `DataFrame`s.
+    Source(u64),
+    /// The session arm ended. Its own received-frame count is not reported: as
+    /// in the fixed runner, `frames_consumed` is what the recv sinks took.
+    Session,
+    /// A recv-side sink consumed this many `DataFrame`s.
+    Sink(u64),
+    /// A grown recv port the sink factory declined dropped this many `DataFrame`s.
+    Dropped(u64),
+    /// The control arm, which attaches runtime send tracks and recv ports.
+    Control,
+}
+
+/// One runtime send-track add in flight: the source and the input index reserved
+/// for it. Unlike an [`InputRequest`] there is no verdict channel: the session
+/// only learns of the pad from its first packet, so nothing can answer for it.
+#[cfg(feature = "std")]
+struct SendTrackRequest<'a> {
+    input: usize,
+    source: Box<dyn DynSourceLoop + 'a>,
+}
+
+/// A recv port the session grew mid-run through [`MultiOutputSink::add_port`]:
+/// the index it was given, the caps it carries, and the link the runner drains.
+#[cfg(feature = "std")]
+#[derive(Debug)]
+struct GrownPort {
+    port: usize,
+    caps: Caps,
+    rx: crate::runtime::channel::LinkReceiver,
+    edge: EdgeTap,
+}
+
+/// [`MultiOutputSink`] whose port set grows at runtime: `add_port` mints the
+/// port's link, keeps the sending end, and hands the receiving end to the dynamic
+/// duplex runner's control arm, which finds it a sink. The growable counterpart
+/// of [`MultiSenderSink`], which it wraps for the fixed ports' push path.
+#[cfg(feature = "std")]
+#[derive(Debug)]
+struct GrowableSenderSink {
+    ports: MultiSenderSink,
+    link_capacity: usize,
+    /// Whether links carry observer taps, so a grown port is instrumented like a
+    /// declared one.
+    tap: bool,
+    grown_tx: Sender<GrownPort>,
+}
+
+#[cfg(feature = "std")]
+impl MultiOutputSink for GrowableSenderSink {
+    fn begin_push_to(&mut self, port: usize) {
+        self.ports.begin_push_to(port);
+    }
+
+    fn poll_push_to(
+        &mut self,
+        cx: &mut core::task::Context<'_>,
+        port: usize,
+        packet: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        self.ports.poll_push_to(cx, port, packet)
+    }
+
+    fn port_count(&self) -> usize {
+        self.ports.port_count()
+    }
+
+    fn add_port(&mut self, caps: &Caps) -> Option<usize> {
+        let port = self.ports.port_count();
+        let (tx, rx, edge) = link_tapped(self.link_capacity, self.tap);
+        let request = GrownPort {
+            port,
+            caps: caps.clone(),
+            rx,
+            edge,
+        };
+        // Non-blocking by contract: a full or closed control channel is a refusal,
+        // so the session keeps whatever it does for a track it cannot place.
+        match self.grown_tx.try_send(request) {
+            Ok(()) => {
+                self.ports.push_port(SenderSink::new(tx));
+                Some(port)
+            }
+            Err(_) => None,
+        }
+    }
+}
+
+/// Telemetry bookkeeping the control arm of a dynamic duplex run carries, so a
+/// track or port attached mid-run is named and in the observer's topology before
+/// its first packet (M869).
+#[cfg(feature = "std")]
+#[derive(Debug)]
+struct DuplexTap {
+    obs: Option<Observer>,
+    namer: crate::log::InstanceNamer,
+    /// Measured-latency probes of the recv sinks, seeded with the declared ones
+    /// and appended to as ports grow, read back for [`RunStats::per_element`].
+    probes: Arc<Mutex<Vec<Probe>>>,
+    /// Node id of the session in the topology registered at startup.
+    session_id: usize,
+}
+
+/// A handle to add send-side tracks to a *running* duplex session (M1014): the
+/// duplex analog of [`DynamicFaninHandle`], for the case the fixed-arity
+/// [`run_duplex_session`] cannot serve, a track beyond the pads the session was
+/// built with. Cheap to clone (a channel sender plus an atomic).
+///
+/// `'a` is the run's lifetime: the handle is used concurrently with the run
+/// future and must be dropped no later than it. Dropping it is also what tells
+/// the runner no more tracks are coming, so a run whose session ends when its
+/// send side does only finishes once the handle is gone.
+#[cfg(feature = "std")]
+#[derive(Clone)]
+#[allow(missing_debug_implementations)]
+pub struct DynamicDuplexHandle<'a> {
+    new_track_tx: Sender<SendTrackRequest<'a>>,
+    /// Next free send input index. Reserving it and enqueueing the request happen
+    /// under this one lock, so indices reach the runner in order: the session
+    /// learns pad N before N+1, which its grow-on-first-sight path relies on. It
+    /// starts past the sources the run was built with and has no ceiling: growing
+    /// the pad count is the point of this runner.
+    next_input: Arc<Mutex<usize>>,
+}
+
+#[cfg(feature = "std")]
+impl<'a> DynamicDuplexHandle<'a> {
+    /// Attach `source` as a new send-side track of the running session, returning
+    /// the input index its packets will be tagged with. The runner negotiates the
+    /// source on its own (the session owns itself inside its run loop, so it
+    /// cannot be consulted mid-run) and announces the fixated caps on that index
+    /// before the source runs, which is how the session learns the pad exists.
+    ///
+    /// Unlike [`DynamicFaninHandle::add_input`] there is no verdict to await: a
+    /// session that cannot map the caps to a track logs the refusal and drops that
+    /// index's packets, so the answer is in the log and in whether media flows.
+    ///
+    /// Returns [`G2gError::Shutdown`] if the run has finished, and
+    /// [`G2gError::PoolExhausted`] if the add channel is transiently full (the
+    /// runner has not drained pending adds yet); retry the latter.
+    pub fn add_send_track(&self, source: Box<dyn DynSourceLoop + 'a>) -> Result<usize, G2gError> {
+        // Reserve and enqueue under one lock: a fetch_add-then-send pair lets two
+        // callers enqueue out of order, and a session that learns index N+1 first
+        // would treat a later N as an already-known pad and orphan it.
+        let mut next_input = self.next_input.lock();
+        let input = *next_input;
+        match self
+            .new_track_tx
+            .try_send(SendTrackRequest { input, source })
+        {
+            Ok(()) => {
+                *next_input = input + 1;
+                Ok(input)
+            }
+            Err((_, SendError::Closed)) => Err(G2gError::Shutdown),
+            // Transient backpressure, not a teardown. The index was never
+            // claimed, so a retry reuses it and leaves no hole.
+            Err((_, SendError::Full)) => Err(G2gError::PoolExhausted),
+        }
+    }
+}
+
+/// Drives a terminal **duplex** session whose pad count grows at runtime (M1014),
+/// the renegotiating counterpart of [`run_duplex_session`]: a sendrecv
+/// PeerConnection that takes a new local track, or receives a new peer track,
+/// with no pad reserved for it up front.
+///
+/// It starts exactly as the fixed runner does (negotiate the send sources against
+/// their pads, configure the recv sinks against the session's output caps), and
+/// adds the two growth paths:
+///
+/// - **Send side.** [`DynamicDuplexHandle::add_send_track`] attaches a source at
+///   the next input index. The runner fixates it alone, registers a
+///   [`ReverseChannel`](crate::fanout::ReverseChannel) the session reads back
+///   through [`DuplexInbound::reverse_channel`], and its arm announces the caps on
+///   the new index before the source runs, so the session sees the pad before any
+///   of its frames.
+/// - **Recv side.** The session calls [`MultiOutputSink::add_port`] when a peer
+///   track has no free pad. The runner mints that port's link and asks
+///   `sink_factory` for the element to drain it; the factory receives the port
+///   index and the caps the session declared for it. A factory that answers `None`
+///   leaves the port draining to nowhere (`add_port` already succeeded on the
+///   session's side, so the frames have to go somewhere) and the run logs it.
+///
+/// Returns the handle plus the run future; drive them concurrently. The run ends
+/// as the fixed one does, when the session's `run` returns and the arms drain.
+#[cfg(feature = "std")]
+pub fn run_duplex_session_dynamic<'a, Sess, Clk, Factory>(
+    sources: Vec<&'a mut dyn DynSourceLoop>,
+    session: &'a mut Sess,
+    sinks: Vec<&'a mut dyn DynAsyncElement>,
+    clock: &'a Clk,
+    link_capacity: impl Into<LinkCapacity>,
+    sink_factory: Factory,
+) -> (
+    DynamicDuplexHandle<'a>,
+    impl Future<Output = Result<RunStats, G2gError>> + 'a,
+)
+where
+    Sess: MultiDuplexSession + 'a,
+    Clk: PipelineClock + 'a,
+    Factory: FnMut(usize, &Caps) -> Option<Box<dyn DynAsyncElement + 'a>> + 'a,
+{
+    run_duplex_session_dynamic_inner(
+        sources,
+        session,
+        sinks,
+        clock,
+        link_capacity,
+        sink_factory,
+        None,
+    )
+}
+
+/// As [`run_duplex_session_dynamic`], but taps live telemetry into `observer`.
+/// The topology starts as the declared sources, session and sinks; a track or
+/// port added later appends its node and link before its first packet, so a
+/// dashboard polling [`Observer::snapshot`] sees renegotiated pads appear.
+#[cfg(feature = "std")]
+pub fn run_duplex_session_dynamic_observed<'a, Sess, Clk, Factory>(
+    sources: Vec<&'a mut dyn DynSourceLoop>,
+    session: &'a mut Sess,
+    sinks: Vec<&'a mut dyn DynAsyncElement>,
+    clock: &'a Clk,
+    link_capacity: impl Into<LinkCapacity>,
+    sink_factory: Factory,
+    observer: &Observer,
+) -> (
+    DynamicDuplexHandle<'a>,
+    impl Future<Output = Result<RunStats, G2gError>> + 'a,
+)
+where
+    Sess: MultiDuplexSession + 'a,
+    Clk: PipelineClock + 'a,
+    Factory: FnMut(usize, &Caps) -> Option<Box<dyn DynAsyncElement + 'a>> + 'a,
+{
+    run_duplex_session_dynamic_inner(
+        sources,
+        session,
+        sinks,
+        clock,
+        link_capacity,
+        sink_factory,
+        Some(observer.clone()),
+    )
+}
+
+#[cfg(feature = "std")]
+#[allow(clippy::too_many_arguments)]
+fn run_duplex_session_dynamic_inner<'a, Sess, Clk, Factory>(
+    sources: Vec<&'a mut dyn DynSourceLoop>,
+    session: &'a mut Sess,
+    sinks: Vec<&'a mut dyn DynAsyncElement>,
+    _clock: &'a Clk,
+    link_capacity: impl Into<LinkCapacity>,
+    mut sink_factory: Factory,
+    observer: Option<Observer>,
+) -> (
+    DynamicDuplexHandle<'a>,
+    impl Future<Output = Result<RunStats, G2gError>> + 'a,
+)
+where
+    Sess: MultiDuplexSession + 'a,
+    Clk: PipelineClock + 'a,
+    Factory: FnMut(usize, &Caps) -> Option<Box<dyn DynAsyncElement + 'a>> + 'a,
+{
+    let link_capacity: usize = link_capacity.into().get();
+    let input_count = sources.len();
+    let output_count = sinks.len();
+    // Control channel: handle -> control arm (new send tracks).
+    let (new_track_tx, new_track_rx) = bounded::<SendTrackRequest<'a>>(link_capacity);
+    let handle = DynamicDuplexHandle {
+        new_track_tx,
+        next_input: Arc::new(Mutex::new(input_count)),
+    };
+
+    let run = async move {
+        assert!(
+            input_count > 0,
+            "duplex session needs at least one send source"
+        );
+        assert!(
+            output_count > 0,
+            "duplex session needs at least one recv sink"
+        );
+        assert!(
+            session.input_count() == input_count,
+            "session input count must match the number of send sources"
+        );
+        assert!(
+            session.output_count() == output_count,
+            "session output count must match the number of recv sinks"
+        );
+
+        let mut sources = sources;
+        let mut sinks = sinks;
+        let mut namer = crate::log::InstanceNamer::new();
+        let mut source_names: Vec<alloc::string::String> = Vec::with_capacity(input_count);
+        for source in sources.iter_mut() {
+            let name = namer.add(source.log_category(), None);
+            source.set_instance_name(name.clone());
+            source_names.push(name);
+        }
+        let session_name = namer.add(crate::log::short_type_name::<Sess>(), None);
+        let mut sink_probes = Vec::with_capacity(output_count);
+        for sink in sinks.iter_mut() {
+            let name = namer.add(sink.log_category(), None);
+            sink.set_instance_name(name.clone());
+            sink_probes.push(ElementProbe::new(name));
+        }
+
+        // Negotiate the declared send inputs and recv outputs exactly as the
+        // fixed runner does; only the pads added later take the growth paths.
+        let mut input_caps: Vec<Caps> = Vec::with_capacity(input_count);
+        for (i, source) in sources.iter_mut().enumerate() {
+            let produced = source.produced_caps().await?;
+            let fixated = {
+                let pad_constraint = MultiDuplexSession::caps_constraint_as_input(session, i);
+                select_branch_caps(&produced, &pad_constraint)?
+            };
+            source.configure_pipeline(&fixated)?.reject_refixate()?;
+            session.configure_input(i, &fixated)?.reject_refixate()?;
+            input_caps.push(fixated);
+        }
+        let mut output_caps: Vec<Caps> = Vec::with_capacity(output_count);
+        for (o, sink) in sinks.iter_mut().enumerate() {
+            let fixated = session.output_caps(o)?.fixate()?;
+            sink.configure_pipeline(&fixated)?.reject_refixate()?;
+            output_caps.push(fixated);
+        }
+
+        let (in_tx, in_rx) = bounded::<(usize, PipelinePacket)>(link_capacity);
+        let in_counters: Vec<Option<Arc<EdgeCounters>>> = (0..input_count)
+            .map(|_| observer.as_ref().map(|_| Arc::new(EdgeCounters::default())))
+            .collect();
+        let in_probes: Vec<Option<ProbeSlot>> = (0..input_count)
+            .map(|_| observer.as_ref().map(|_| ProbeSlot::default()))
+            .collect();
+        let tap = observer.is_some();
+        let mut branch_senders = Vec::with_capacity(output_count);
+        let mut branch_receivers = Vec::with_capacity(output_count);
+        let mut branch_taps = Vec::with_capacity(output_count);
+        for _ in 0..output_count {
+            let (tx, rx, edge) = link_tapped(link_capacity, tap);
+            branch_senders.push(SenderSink::new(tx));
+            branch_receivers.push(rx);
+            branch_taps.push(edge);
+        }
+
+        let session_id = input_count;
+        if let Some(obs) = &observer {
+            let mut nodes: Vec<TapNode> = source_names
+                .iter()
+                .map(|n| (n.clone(), NodeRole::Source, None))
+                .collect();
+            nodes.push((session_name, NodeRole::Muxer, None));
+            for probe in &sink_probes {
+                nodes.push((
+                    alloc::string::String::from(probe.name()),
+                    NodeRole::Sink,
+                    Some(probe.clone()),
+                ));
+            }
+            let mut edges: Vec<TapEdge> = Vec::with_capacity(input_count + output_count);
+            for (i, ((caps, c), p)) in input_caps
+                .iter()
+                .zip(in_counters.iter())
+                .zip(in_probes.iter())
+                .enumerate()
+            {
+                edges.push((
+                    i,
+                    session_id,
+                    caps.clone(),
+                    EdgeTap {
+                        probe: p.clone().unwrap_or_default(),
+                        counters: c.clone(),
+                    },
+                ));
+            }
+            for (o, (caps, edge)) in output_caps
+                .iter()
+                .zip(core::mem::take(&mut branch_taps))
+                .enumerate()
+            {
+                edges.push((session_id, session_id + 1 + o, caps.clone(), edge));
+            }
+            register_runner_tap(obs, nodes, edges);
+        }
+
+        // Reverse channels: the declared pads' come from the session, the ones
+        // grown later are minted by the control arm into this same map, which the
+        // session reads through `DuplexInbound::reverse_channel`.
+        let reverse: Vec<Option<crate::fanout::ReverseChannel>> = (0..input_count)
+            .map(|i| session.reverse_channel(i))
+            .collect();
+        let reverse_map: ReverseMap = Arc::new(Mutex::new(reverse.clone()));
+
+        let mut source_arms: Vec<BoxFuture<'a, Result<DuplexArmOut, G2gError>>> =
+            Vec::with_capacity(input_count);
+        for (i, source) in sources.into_iter().enumerate() {
+            let tx_i = in_tx.clone();
+            let reverse_i = reverse[i].clone();
+            let counters_i = in_counters[i].clone();
+            let probe_i = in_probes[i].clone();
+            source_arms.push(Box::pin(async move {
+                let mut adapter = TaggingSink {
+                    idx: i,
+                    tx: tx_i,
+                    reverse: reverse_i,
+                    counters: counters_i,
+                    probe: probe_i,
+                    staged: None,
+                    staged_bytes: 0,
+                };
+                source.run(&mut adapter).await.map(DuplexArmOut::Source)
+            }));
+        }
+
+        // Growth channel: the session's multi-sink -> control arm (new recv
+        // ports). The session arm owns the sending end, so it closes when the
+        // session ends, which is what lets the control arm finish.
+        let (grown_tx, grown_rx) = bounded::<GrownPort>(link_capacity);
+        // Arm channel: control arm -> join (the attached source / sink futures).
+        let (new_arm_tx, new_arm_rx) =
+            bounded::<BoxFuture<'a, Result<DuplexArmOut, G2gError>>>(link_capacity);
+
+        let session_reverse = reverse_map.clone();
+        let session_arm: BoxFuture<'a, Result<DuplexArmOut, G2gError>> = Box::pin(async move {
+            let mut inbound = InboundReceiver {
+                rx: in_rx,
+                reverse: session_reverse,
+            };
+            let mut multi = GrowableSenderSink {
+                ports: MultiSenderSink::new(branch_senders),
+                link_capacity,
+                tap,
+                grown_tx,
+            };
+            session
+                .run(&mut inbound, &mut multi)
+                .await
+                .map(|_| DuplexArmOut::Session)
+        });
+
+        let mut sink_arms: Vec<BoxFuture<'a, Result<DuplexArmOut, G2gError>>> =
+            Vec::with_capacity(output_count);
+        for ((sink, rx), probe) in sinks
+            .into_iter()
+            .zip(branch_receivers)
+            .zip(sink_probes.iter().cloned())
+        {
+            sink_arms.push(Box::pin(async move {
+                duplex_sink_arm(sink, rx, &probe)
+                    .await
+                    .map(DuplexArmOut::Sink)
+            }));
+        }
+
+        let probes: Arc<Mutex<Vec<Probe>>> =
+            Arc::new(Mutex::new(sink_probes.into_iter().map(Some).collect()));
+        let mut tap_state = DuplexTap {
+            obs: observer,
+            namer,
+            probes: probes.clone(),
+            session_id,
+        };
+        let control_arm: BoxFuture<'a, Result<DuplexArmOut, G2gError>> = Box::pin(async move {
+            // Hold one tagged sender open while tracks may still be added, so the
+            // inbound channel does not close (telling the session its send side is
+            // over) before a late track can attach. Dropped when the handle goes.
+            let mut keepalive: Option<Sender<(usize, PipelinePacket)>> = Some(in_tx);
+            loop {
+                // Attach everything queued so far BEFORE parking on the select
+                // below, so a request that arrived while we were busy is never
+                // left waiting behind an idle channel.
+                if let Some(tx) = keepalive.clone() {
+                    while let Some(request) = new_track_rx.try_recv() {
+                        attach_send_track(request, &tx, &new_arm_tx, &reverse_map, &mut tap_state)
+                            .await?;
+                    }
+                }
+                while let Some(grown) = grown_rx.try_recv() {
+                    attach_recv_port(grown, &mut sink_factory, &new_arm_tx, &mut tap_state).await?;
+                }
+
+                match keepalive {
+                    Some(ref tx) => {
+                        let tx = tx.clone();
+                        match select2(new_track_rx.recv(), grown_rx.recv()).await {
+                            Either::Left(Some(request)) => {
+                                attach_send_track(
+                                    request,
+                                    &tx,
+                                    &new_arm_tx,
+                                    &reverse_map,
+                                    &mut tap_state,
+                                )
+                                .await?;
+                            }
+                            // Handle dropped: no more tracks, so release the
+                            // keepalive and let the send side end with its sources.
+                            Either::Left(None) => keepalive = None,
+                            Either::Right(Some(grown)) => {
+                                attach_recv_port(
+                                    grown,
+                                    &mut sink_factory,
+                                    &new_arm_tx,
+                                    &mut tap_state,
+                                )
+                                .await?;
+                            }
+                            Either::Right(None) => return Ok(DuplexArmOut::Control),
+                        }
+                    }
+                    // The session can still grow its recv side after the last
+                    // track request; its arm ending closes this channel.
+                    None => match grown_rx.recv().await {
+                        Some(grown) => {
+                            attach_recv_port(grown, &mut sink_factory, &new_arm_tx, &mut tap_state)
+                                .await?;
+                        }
+                        None => return Ok(DuplexArmOut::Control),
+                    },
+                }
+            }
+        });
+
+        let mut arms: Vec<BoxFuture<'a, Result<DuplexArmOut, G2gError>>> =
+            Vec::with_capacity(input_count + output_count + 2);
+        arms.extend(source_arms);
+        arms.push(session_arm);
+        arms.extend(sink_arms);
+        arms.push(control_arm);
+
+        let results = dynamic_join(arms, new_arm_rx).await;
+        let mut emitted = 0u64;
+        let mut consumed = 0u64;
+        let mut dropped = 0u64;
+        for r in results {
+            match r? {
+                DuplexArmOut::Source(n) => emitted += n,
+                DuplexArmOut::Sink(n) => consumed += n,
+                DuplexArmOut::Dropped(n) => dropped += n,
+                DuplexArmOut::Session | DuplexArmOut::Control => {}
+            }
+        }
+        let per_element = crate::runtime::snapshot_all(&probes.lock());
+        Ok(RunStats {
+            frames_emitted: emitted,
+            frames_consumed: consumed,
+            frames_dropped: dropped,
+            latency: LatencyReport::ZERO,
+            allocation: None,
+            clock_priority: ClockPriority::SystemFallback,
+            base_time_ns: 0,
+            coordinator_events: 0,
+            per_element,
+        })
+    };
+
+    (handle, run)
+}
+
+/// Fixate a send track added at runtime. It negotiates alone: the session owns
+/// itself inside its run loop, so unlike a declared input there is no pad
+/// constraint to narrow against, and the session hears about the caps in the
+/// `CapsChanged` the track's arm announces.
+#[cfg(feature = "std")]
+async fn negotiate_new_send_track(source: &mut dyn DynSourceLoop) -> Result<Caps, G2gError> {
+    let produced = source.produced_caps().await?;
+    let fixated = produced.fixate().ok_or(G2gError::CapsMismatch)?;
+    source.configure_pipeline(&fixated)?.reject_refixate()?;
+    Ok(fixated)
+}
+
+/// Attach a send track requested at runtime: negotiate it, register the reverse
+/// channel the session will look up for it, and hand its run loop (feeding a
+/// [`TaggingSink`] tagged with the new index) to the dynamic join.
+///
+/// A source that cannot negotiate is logged and dropped, leaving the run on the
+/// tracks it already has; only losing the arm channel, which would strand an
+/// attached track, ends the run.
+#[cfg(feature = "std")]
+async fn attach_send_track<'a>(
+    request: SendTrackRequest<'a>,
+    in_tx: &Sender<(usize, PipelinePacket)>,
+    new_arm_tx: &Sender<BoxFuture<'a, Result<DuplexArmOut, G2gError>>>,
+    reverse: &ReverseMap,
+    tap: &mut DuplexTap,
+) -> Result<(), G2gError> {
+    let SendTrackRequest { input, mut source } = request;
+    let fixated = match negotiate_new_send_track(source.as_mut()).await {
+        Ok(caps) => caps,
+        Err(e) => {
+            crate::g2g_error!(
+                crate::log::Target::category(DUPLEX_CATEGORY),
+                "runtime send track on input {input} rejected: {e:?}"
+            );
+            return Ok(());
+        }
+    };
+
+    let name = tap.namer.add(source.log_category(), None);
+    source.set_instance_name(name.clone());
+    let (counters, slot) = match &tap.obs {
+        Some(obs) => {
+            let counters = Arc::new(EdgeCounters::default());
+            let slot = ProbeSlot::default();
+            let id = obs.add_node(name, NodeRole::Source, None);
+            obs.add_edge(
+                id,
+                tap.session_id,
+                fixated.clone(),
+                EdgeTap {
+                    probe: slot.clone(),
+                    counters: Some(counters.clone()),
+                },
+            );
+            (Some(counters), Some(slot))
+        }
+        None => (None, None),
+    };
+
+    let channel = crate::fanout::ReverseChannel::new();
+    {
+        let mut map = reverse.lock();
+        if map.len() <= input {
+            map.resize(input + 1, None);
+        }
+        map[input] = Some(channel.clone());
+    }
+
+    let tx = in_tx.clone();
+    let arm: BoxFuture<'a, Result<DuplexArmOut, G2gError>> = Box::pin(async move {
+        let mut adapter = TaggingSink {
+            idx: input,
+            tx,
+            reverse: Some(channel),
+            counters,
+            probe: slot,
+            staged: None,
+            staged_bytes: 0,
+        };
+        // The session has no other way to learn the pad exists, so its caps go out
+        // before the source can push a frame on the index.
+        adapter.push(PipelinePacket::CapsChanged(fixated)).await?;
+        let mut source = source;
+        source.run(&mut adapter).await.map(DuplexArmOut::Source)
+    });
+    // Await capacity rather than failing: a burst of adds larger than the arm
+    // channel is backpressure on the control arm, not a session teardown. The
+    // dynamic join drains this channel on every poll, so the send resumes.
+    new_arm_tx.send(arm).await.map_err(|_| G2gError::Shutdown)
+}
+
+/// Prepare the element a factory returned for a grown recv port: name it, probe
+/// it, put it in the observer's topology, and configure it against the port's
+/// caps. `None` (logged) if it refuses them, which leaves the port draining
+/// rather than failing a live session over one late sink.
+#[cfg(feature = "std")]
+fn prepare_grown_sink<'a>(
+    mut sink: Box<dyn DynAsyncElement + 'a>,
+    port: usize,
+    caps: &Caps,
+    edge: EdgeTap,
+    tap: &mut DuplexTap,
+) -> Option<(Box<dyn DynAsyncElement + 'a>, Arc<ElementProbe>)> {
+    let name = tap.namer.add(sink.log_category(), None);
+    sink.set_instance_name(name.clone());
+    let probe = ElementProbe::new(name.clone());
+    if let Some(obs) = &tap.obs {
+        let id = obs.add_node(name, NodeRole::Sink, Some(probe.clone()));
+        obs.add_edge(tap.session_id, id, caps.clone(), edge);
+    }
+    match log_caps_rejected(Some(probe.name()), caps, sink.configure_pipeline(caps)) {
+        Ok(ConfigureOutcome::Accepted) => {
+            tap.probes.lock().push(Some(probe.clone()));
+            Some((sink, probe))
+        }
+        _ => {
+            crate::g2g_error!(
+                crate::log::Target::category(DUPLEX_CATEGORY),
+                "sink for grown recv port {port} refused its caps: draining the port"
+            );
+            None
+        }
+    }
+}
+
+/// Attach a recv port the session grew: ask the factory for its sink, then hand
+/// that sink's drain loop to the dynamic join. With no sink for it the port is
+/// drained and counted as dropped: `add_port` already answered the session, so
+/// its frames are coming either way.
+#[cfg(feature = "std")]
+async fn attach_recv_port<'a, Factory>(
+    grown: GrownPort,
+    factory: &mut Factory,
+    new_arm_tx: &Sender<BoxFuture<'a, Result<DuplexArmOut, G2gError>>>,
+    tap: &mut DuplexTap,
+) -> Result<(), G2gError>
+where
+    Factory: FnMut(usize, &Caps) -> Option<Box<dyn DynAsyncElement + 'a>>,
+{
+    let GrownPort {
+        port,
+        caps,
+        rx,
+        edge,
+    } = grown;
+    let prepared = match factory(port, &caps) {
+        Some(sink) => prepare_grown_sink(sink, port, &caps, edge, tap),
+        None => {
+            crate::g2g_error!(
+                crate::log::Target::category(DUPLEX_CATEGORY),
+                "no sink for grown recv port {port}: draining it"
+            );
+            None
+        }
+    };
+    let arm: BoxFuture<'a, Result<DuplexArmOut, G2gError>> = match prepared {
+        Some((mut sink, probe)) => Box::pin(async move {
+            duplex_sink_arm(sink.as_mut(), rx, &probe)
+                .await
+                .map(DuplexArmOut::Sink)
+        }),
+        None => Box::pin(async move { drain_grown_port(rx).await.map(DuplexArmOut::Dropped) }),
+    };
+    // Same backpressure contract as the send-track twin above.
+    new_arm_tx.send(arm).await.map_err(|_| G2gError::Shutdown)
+}
+
+/// Consume a grown recv port that has no sink behind it, counting the frames it
+/// drops so they show up in [`RunStats::frames_dropped`].
+#[cfg(feature = "std")]
+async fn drain_grown_port(rx: crate::runtime::channel::LinkReceiver) -> Result<u64, G2gError> {
+    let mut dropped = 0u64;
+    loop {
+        match rx.recv().await {
+            Some(PipelinePacket::DataFrame(_)) => dropped += 1,
+            Some(PipelinePacket::Eos) | None => return Ok(dropped),
+            Some(_) => {}
+        }
+    }
 }

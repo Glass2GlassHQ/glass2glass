@@ -3126,6 +3126,20 @@ send and recv halves therefore share `&mut self` directly with **no detached
 task**, unlike the send-only session which spawns the `Rtc` onto its own task to
 dodge `process` / run-loop aliasing.
 
+**Growing the pad count live (M1014).** `run_duplex_session_dynamic` is the
+renegotiating sibling: its arms live under a `dynamic_join`, so pads are not
+fixed at build time. A local track enters through `DynamicDuplexHandle::
+add_send_track` (index reserved and enqueued under one lock, so the session
+learns pads in order); the runner fixates the source alone and announces its
+caps on the new index before any frame, which is how a session that never
+declared the pad learns it exists, and `DuplexInbound::reverse_channel` hands it
+the PLI / BWE route back. A remote track with no free pad is taken by the
+session calling `MultiOutputSink::add_port` (default `None`, so fixed runners
+refuse growth); the runner mints the port's link and asks an app-supplied sink
+factory for the element that drains it, a factory `None` leaving the port
+counted as drops. Backpressure on the runner's internal add channels delays the
+attach rather than failing the run.
+
 **Signaling.** WHIP (egress) and WHEP (ingress) are the same wire move — an
 `application/sdp` POST of the local offer that returns the remote answer (reqwest,
 `webrtc_util::post_sdp`); the media server is the relay in the middle, so there is

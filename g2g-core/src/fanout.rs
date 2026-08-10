@@ -117,6 +117,20 @@ pub trait MultiOutputSink {
     fn begin_push_to(&mut self, _port: usize) {}
 
     fn port_count(&self) -> usize;
+
+    /// Add an output port carrying `caps` and return its index, or `None` if this
+    /// sink cannot grow (M1014). A duplex session calls it when the peer adds a
+    /// track and none of its declared pads is free; the dynamic duplex runner
+    /// answers by building that port's link and finding it a sink. Never blocks,
+    /// so it is callable from a session's own poll loop: a sink that cannot take
+    /// the port right now answers `None` and the caller keeps whatever it does for
+    /// a track it cannot place.
+    ///
+    /// Default `None`: the fixed-arity multi-sinks the static runners build refuse
+    /// to grow, so a session written against this sees exactly today's behavior.
+    fn add_port(&mut self, _caps: &Caps) -> Option<usize> {
+        None
+    }
 }
 
 /// `push_to` for concrete (sized) sinks; split out for the same
@@ -197,6 +211,15 @@ impl MultiSenderSink {
         for port in self.ports.iter_mut() {
             port.set_push_wait_probe(probe.clone());
         }
+    }
+
+    /// Append a port, for the growable multi-sink the dynamic duplex runner wraps
+    /// this in (M1014).
+    // Only that runner grows a multi-sink, so without std this would be dead code
+    // (which the workspace denies).
+    #[cfg(feature = "std")]
+    pub(crate) fn push_port(&mut self, port: SenderSink) {
+        self.ports.push(port);
     }
 }
 
@@ -365,6 +388,16 @@ impl<'b> DynMultiOutputSource for &'b mut (dyn DynMultiOutputSource + 'b) {
 /// so the session can stop publishing while still draining the peer.
 pub trait DuplexInbound {
     fn recv(&mut self) -> BoxFuture<'_, Option<(usize, PipelinePacket)>>;
+
+    /// The [`ReverseChannel`] of send input `input`, for a pad the session only
+    /// learned about mid-run (M1014). The runner asks
+    /// [`MultiDuplexSession::reverse_channel`] for the pads that exist when the
+    /// run starts, so a track attached later has no route for its PLI / BWE until
+    /// the session reads it back here, keyed by the index its packets arrive on.
+    /// Default `None`: the fixed-arity runner hands every channel over up front.
+    fn reverse_channel(&self, _input: usize) -> Option<ReverseChannel> {
+        None
+    }
 }
 
 /// A terminal **duplex** session: N send-side inputs **and** M recv-side outputs

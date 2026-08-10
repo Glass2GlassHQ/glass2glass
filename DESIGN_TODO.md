@@ -344,9 +344,9 @@ Phased plan:
     run (genuine remote NAT + STUN/TURN on the LiveKit elements); then Janus /
     Kinesis as wanted.
   - **T5: advanced.** FEC is blocked upstream (str0m has no FEC payload;
-    loss recovery is NACK/RTX). Full renegotiation: a track arriving with no
-    spare pad of its kind left on the duplex session is refused, so growing the
-    pad count on a live graph is still open. Data-channel loose ends
+    loss recovery is NACK/RTX). A send source still streaming when the duplex
+    session ends makes the run return `Shutdown` rather than winding down
+    gracefully (both runners). Data-channel loose ends
     (str0m surfaces no remote-close event, so EOS rides an explicit marker
     message; a WHIP/SFU-signalled data channel vs the P2P `SdpChannel` seam).
   Recommended order: T1 remainders -> T2 -> T4 -> T5.
