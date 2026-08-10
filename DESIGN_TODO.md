@@ -578,12 +578,10 @@ _(No open tag items.)_
 
 ## Dynamic plugin loading (M201+)
 
-- An `abi_stable` / `stabby` facade over the element traits for cross-toolchain
-  binary plugins (the v1 path is version + toolchain-locked).
 - Whether the distro ships `g2g-core` in a local cargo registry for offline
   plugin builds.
-- Plugin signing / capability gating.
-- A C-FFI loader entry so non-cargo build systems can produce plugins.
+- Plugin signing (a detached signature the loader verifies before `dlopen`,
+  on top of the v2 capability declaration).
 
 ## Embedded
 

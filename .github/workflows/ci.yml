@@ -162,6 +162,13 @@ jobs:
         run: >
           cargo check -p g2g-plugins --locked --all-targets --features
           rtsp,onvif,srt,udp-egress,udp-ingress,rtmp,http-src,hls,dash,av1-encode,dav1d,rav1d,mjpeg,mjpeg-encode,opus,vorbis,alsa-sink,pulse-sink,alsa-src,pulse-src,wayland-sink,kms-sink,v4l2,analytics,vello-overlay,wgpu-sink,plugin-loader,declarative-yaml,script-rhai,webtransport,moqt
+      # Plugin loading v1 (same-toolchain dlopen) + v2 (frozen C ABI, M1010):
+      # each test builds its fixture cdylib (v2 also compiles the plain-C
+      # plugin with cc), so the dynamic boundary is exercised, not just checked.
+      - name: test g2g-plugins (plugin loading v1 + v2)
+        run: >
+          cargo test -p g2g-plugins --locked --features plugin-loader
+          --test plugin_loader_dlopen --test plugin_loader_v2 --test plugin_c_abi
       # MoQ Transport draft-16 (M902 / M903 / M905): control-message and datagram
       # layouts against the reference implementation, malformed peer input,
       # subgroup reassembly, and the property surface. The legs that need the
