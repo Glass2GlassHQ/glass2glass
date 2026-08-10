@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M996: `SyncSink` paces through the shared `PresentationPacer` and adopts the elected `ClockSync`.
 - M998: `PtpClient` shares UDP 319 / 320 with a running `ptp4l`, and `PtpSystemClock` reports the daemon's port state.
 - M995: `FrameMetaSet::attach` replaces the entry of the same type instead of adding an unreachable second one.
 - M994: both analytics overlays draw segmentation masks as a translucent fill and ROIs as dashed rectangles.

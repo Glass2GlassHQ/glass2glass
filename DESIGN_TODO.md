@@ -529,11 +529,9 @@ _(No open parser items.)_
   the lip-sync payoff are done and CI-validated (M590/M591/M592). Still owed:
   extend the same clock discipline to `PipeWireSink` (blocked on the pinned
   `pipewire` 0.8 binding lacking `pw_stream_get_time`, plus playout accounting
-  in its leaky realtime callback); a headless display sink that adopts the
-  elected `ClockSync` (today `SyncSink` uses its own clock and `WaylandSink`
-  needs a display, so the M592 lip-sync test uses a harness sink); an on-display
-  lip-sync soak on real hardware; and optionally a tighter drift model (outlier
-  rejection on a glitchy `delay()`, faster convergence).
+  in its leaky realtime callback); an on-display lip-sync soak on real hardware;
+  and optionally a tighter drift model (outlier rejection on a glitchy
+  `delay()`, faster convergence).
 - **PTP clock (`PtpClock`)** DONE (M593 A/B/C + M594): `PtpServo`
   (offset/delay -> `DriftClock`, lock/holdover/outlier), `PtpClock` +
   `ClockPriority::PtpGrandmaster` (elected over audio/video, slaved to sinks via
