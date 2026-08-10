@@ -46,19 +46,6 @@ Sequenced next:
   Get the device-tagged `Hardware` rows into CI by wiring a runner that has the
   hardware: a `Hardware` row can only come from a run on the device, so a runner
   without a GPU or a camera will never produce one.
-- **Whole-graph zero-alloc (M616 + M620).** The single-stage (M616) and multi-stage
-  concrete-link (M620, source -> transform -> sink) data paths are proven zero-alloc.
-  Remaining (larger, deferred): a fully zero-alloc *dyn* runner, monomorphized arms
-  with unboxed `process` futures and a non-boxing `OutputSink`, so an arbitrary graph
-  run through `run_graph` is heap-free, not only a hand-wired concrete chain. Low ROI
-  vs. the proven data-plane claim; do it if an MCU deployment needs the full runner.
-- **No-steady-state-allocation embedded mode (landed, M616).** A counting
-  `#[global_allocator]` test proves the `StaticLendRing` capture -> frame -> drop
-  data path is zero-alloc over 100k frames, with the `dyn OutputSink::push` per-frame
-  box pinned as the honest boundary. Remaining: extend the zero-alloc proof to a
-  multi-element pipeline over a concrete (non-`dyn`) link (a runner path whose
-  `process` future is not boxed), so a whole graph, not just the capture edge, is
-  provably heap-free in steady state.
 - **Boundary-scoped time newtypes (landed, M618 + M622).** `TaiNs` / `RtpTs` in
   `g2g-core::time`; `MediaClock` takes a `TaiNs`, returns an `RtpTs`. M622 added
   `RefNs` (the monotonic reference) and typed the PTP servo's reference-vs-master
@@ -493,10 +480,9 @@ _(No open parser items.)_
     the per-count `ChannelLayout` convention) once a real source needs one.
   Glyph
   rendering (incl. `vertical:rl` / `lr` layout) is the `truetype-overlay` feature
-  above. Still open in cue CSS: per-span `font-size` (needs per-run sizing in
-  all three render paths and an `AttrsList` API in `textshape`), `text-shadow`
-  and further properties, and a span-scoped `background-color` (a cue has one
-  backing box today).
+  above. Still open in cue CSS: a real blur on `text-shadow` (the radius parses but
+  renders hard-edged) and further properties beyond per-span `font-size` /
+  `text-shadow` / `background-color`.
 - **Tensor substrate orientation descriptor (M181).** A deferred
   rotate/mirror descriptor the sink can absorb in hardware (DRM/KMS, Wayland
   `set_buffer_transform`, VAAPI VPP, D3D11 VideoProcessor), with eager strided /
@@ -661,7 +647,7 @@ Outstanding developer-tooling tasks, highest leverage first.
   diff, so their link caps compare nothing without an explicit `name=`; feed
   the `g2g-inspect --gst` mapping into calliope's matcher as a synonym table.
 - Longer tail: a live pipeline TUI (a ratatui consumer of the same telemetry
-  tap); a codec golden-fixture / PSNR conformance harness.
+  tap).
 
 ## Code audit follow-up
 

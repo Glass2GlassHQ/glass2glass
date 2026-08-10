@@ -6,8 +6,6 @@
 //! included per test binary via `mod m1001_common;`.
 #![allow(dead_code)] // no one battery uses every helper here
 
-use core::future::Future;
-use core::pin::Pin;
 use std::path::PathBuf;
 
 use g2g_core::conformance::Evidence;
@@ -24,22 +22,21 @@ pub(crate) struct CaptureSink {
 }
 
 impl OutputSink for CaptureSink {
-    fn push<'a>(
-        &'a mut self,
-        packet: PipelinePacket,
-    ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
-        Box::pin(async move {
-            match packet {
-                PipelinePacket::CapsChanged(c) => self.caps.push(c),
-                PipelinePacket::DataFrame(f) => {
-                    if let Some(s) = f.domain.as_system_slice() {
-                        self.frames.push(s.to_vec());
-                    }
+    fn poll_push(
+        &mut self,
+        _cx: &mut core::task::Context<'_>,
+        packet: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        match packet.take().expect("poll_push without a packet") {
+            PipelinePacket::CapsChanged(c) => self.caps.push(c),
+            PipelinePacket::DataFrame(f) => {
+                if let Some(s) = f.domain.as_system_slice() {
+                    self.frames.push(s.to_vec());
                 }
-                _ => {}
             }
-            Ok(PushOutcome::Accepted)
-        })
+            _ => {}
+        }
+        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
     }
 }
 

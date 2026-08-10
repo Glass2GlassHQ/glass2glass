@@ -170,14 +170,13 @@ mod av1 {
             .process(PipelinePacket::Eos, &mut decoded)
             .await
             .expect("drain");
-        // One short: with rav1e reordering, rav1d holds the last picture until a
-        // flush, and the decoder element has no drain on `Eos` (it forwards the
-        // packet). Measure what came back rather than paper over the count.
         assert_eq!(encoded.frames.len(), source.len(), "one packet per frame");
-        assert!(
-            decoded.frames.len() + 1 >= source.len(),
-            "at most the reordering tail is missing, got {}",
-            decoded.frames.len()
+        // The `Eos` drain (M1003) returns the reordering tail, so the count is
+        // exact.
+        assert_eq!(
+            decoded.frames.len(),
+            source.len(),
+            "every encoded frame decodes back"
         );
 
         let psnr = i420_psnr(&source, &decoded.frames);

@@ -187,7 +187,10 @@ safety / no-heap MCU market (MISRA, cert) GStreamer can't reach.
   `StaticTransform` / `StaticSink` with `async fn` in trait, const-arity
   runners, a `Chain` combinator), so every stage's future is unboxed, no `dyn`,
   no `Box`, no allocation. Buffers are lent zero-copy from a const-generic
-  `StaticLendRing` sized at compile time.
+  `StaticLendRing` sized at compile time. The full dynamic runner carries the
+  same steady-state contract on the host: `run_graph` pushes and processes
+  without a single per-frame heap allocation (counting-allocator proven over
+  100k frames).
 - **The guarantees are machine-checked in CI, not asserted.** The linked archive
   carries **zero allocator symbols** and **zero panic symbols** (`tools/noalloc-check.sh`);
   a gc-sectioned ELF is measured for **ROM / static RAM / worst-case stack** and

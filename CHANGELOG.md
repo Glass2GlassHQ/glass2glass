@@ -6,6 +6,10 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1003: the AV1 decoders drain their reorder tail on `Eos` instead of dropping the stream's last pictures.
+- M1002: WebVTT cue CSS gains per-span `font-size`, `text-shadow`, and span-scoped `background-color` in all three overlay renderers.
+- M1001: codec quality harness: decoder goldens, encode/decode PSNR floors, and ffmpeg-oracle PSNR recorded as `Quality` conformance evidence.
+- M1000: `run_graph` is heap-free in steady state: poll-based `OutputSink` plus arms monomorphized over the element type.
 - M999: MSRV splits, 1.86 for the embedded-facing crates and 1.92 for the rest, unpinning `web-transport-quinn` and `cosmic-text`.
 - M997: `FfmpegVideoDec` sheds non-reference pictures on a downstream QoS report instead of relaying it.
 - M996: `SyncSink` paces through the shared `PresentationPacer` and adopts the elected `ClockSync`.

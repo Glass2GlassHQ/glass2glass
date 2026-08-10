@@ -193,7 +193,7 @@ let mut frame = SystemSlice::from_pool(buf, frame_len);  // valid payload length
 ```
 
 - **`no_std + alloc` environments (and `std`):** `BufferPool<T>` wraps `Arc<Mutex<Vec<T>>>` plus a `VecDeque<Waker>` of acquire waiters. `acquire().await` resolves the moment a `PooledBuffer` elsewhere is dropped. `try_acquire()` is the sync fast path for non-blocking contexts.
-- **Strict `no_std` (no heap) environments:** two pure-`core` pools sized at construction, no `alloc`. `StaticBufferPool::<[u8; N], 8>` is the *move-out* pool: `acquire` takes an owned buffer out and the RAII handle returns it on drop, the no-heap analog of `BufferPool`. `StaticLendRing::<N, BYTES>` is the *zero-copy lend* sibling for the capture path (a DMA ring): `N` inline slots, the producer fills the next free slot and `publish`es it as a `SystemSlice` that *borrows* the slot, and a per-slot lease (an `AtomicBool`, plain store, no CAS so it builds on `thumbv6m`) is cleared when the lent frame drops, so the slot is reused only after the consumer is done, the genuine ring back-pressure (the producer stalls when every slot is in flight). The borrow is runtime-guarded, not a Rust lifetime: a `PipelinePacket` crosses the `OutputSink` / stack channel by value (`'static`), so the lend reuses the `'static` foreign-buffer carrier (`SystemSlice::from_foreign`) with the lease standing in for the borrow. This keeps `Frame` / `MemoryDomain` lifetime-free (every element signature stays clean) while still proving a heap-free capture-to-consumer path end to end (validated under `block_on` over the embassy stack channel; a real capture wires a DMA-completion ISR / HAL into the same ring). The heap-free claim is *measured*, not asserted: a counting `#[global_allocator]` test (`m616_no_steady_state_alloc`) runs the `StaticLendRing` capture -> frame -> drop hot path for 100k frames and confirms zero heap allocations across the loop. The one place the async plumbing still allocates is pinned honestly by a sibling test: the object-safe `OutputSink::push` returns `Pin<Box<dyn Future>>`, so a `dyn` sink boxes one future per frame; the zero-alloc contract therefore covers the data path and a concrete (non-`dyn`) link, and that control-plane cost is measured rather than hidden.
+- **Strict `no_std` (no heap) environments:** two pure-`core` pools sized at construction, no `alloc`. `StaticBufferPool::<[u8; N], 8>` is the *move-out* pool: `acquire` takes an owned buffer out and the RAII handle returns it on drop, the no-heap analog of `BufferPool`. `StaticLendRing::<N, BYTES>` is the *zero-copy lend* sibling for the capture path (a DMA ring): `N` inline slots, the producer fills the next free slot and `publish`es it as a `SystemSlice` that *borrows* the slot, and a per-slot lease (an `AtomicBool`, plain store, no CAS so it builds on `thumbv6m`) is cleared when the lent frame drops, so the slot is reused only after the consumer is done, the genuine ring back-pressure (the producer stalls when every slot is in flight). The borrow is runtime-guarded, not a Rust lifetime: a `PipelinePacket` crosses the `OutputSink` / stack channel by value (`'static`), so the lend reuses the `'static` foreign-buffer carrier (`SystemSlice::from_foreign`) with the lease standing in for the borrow. This keeps `Frame` / `MemoryDomain` lifetime-free (every element signature stays clean) while still proving a heap-free capture-to-consumer path end to end (validated under `block_on` over the embassy stack channel; a real capture wires a DMA-completion ISR / HAL into the same ring). The heap-free claim is *measured*, not asserted: a counting `#[global_allocator]` test (`m616_no_steady_state_alloc`) runs the `StaticLendRing` capture -> frame -> drop hot path for 100k frames and confirms zero heap allocations across the loop. The control plane carries the same contract since M1000: `OutputSink` is poll-based (its required method is `poll_push`; `push` wraps it in a stack `PushFuture`), so a push through `&mut dyn OutputSink` costs no heap either, and a sibling counting test (`m616_dyn_push_allocates`) pins that at zero. The remaining opt-in is the element's own `ProcessFuture`: an element that declares a boxed one pays one box per `process` call; one that declares a concrete future type runs heap-free through the whole dyn runner (`m1000_dyn_graph_noalloc` proves a 3-stage `run_graph` steady state at zero allocations).
 
 The `SystemSlice` carrier transparently supports these ownership models: `SystemSlice::from_boxed(Box<[u8]>)` for one-off frames, `SystemSlice::from_pool(PooledBuffer<Box<[u8]>>, len)` for recycled frames (the buffer may exceed the frame, so the valid length is carried), and `SystemSlice::from_foreign(ptr, len, free, user)` for a zero-copy lend of borrowed bytes (a `StaticLendRing` slot, or an application buffer through the C ABI). Downstream elements treat them identically.
 
@@ -310,14 +310,20 @@ pub enum ConfigureOutcome {
     ReFixate(Caps),
 }
 
-/// Output sink for both transform and source elements. `push` is async
-/// so elements await downstream capacity rather than failing fast on a
-/// full bounded link. Dyn-safe via a boxed future.
+/// Output sink for both transform and source elements. Push is async so
+/// elements await downstream capacity rather than failing fast on a full
+/// bounded link. Dyn-safe via the poll form: `push` (provided for concrete
+/// sinks and on the trait object) wraps `poll_push` in a concrete stack
+/// `PushFuture`, so a push through `&mut dyn OutputSink` allocates nothing
+/// (M1000).
 pub trait OutputSink {
-    fn push<'a>(
-        &'a mut self,
-        packet: PipelinePacket,
-    ) -> Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>;
+    fn poll_push(
+        &mut self,
+        cx: &mut Context<'_>,
+        packet: &mut Option<PipelinePacket>,
+    ) -> Poll<Result<PushOutcome, G2gError>>;
+
+    fn begin_push(&mut self) {}
 }
 ```
 
@@ -354,6 +360,8 @@ pub trait DynAsyncElement: ElementBound {
 #[cfg(feature = "std")]
 impl<T: AsyncElement> DynAsyncElement for T { /* blanket boxed-future impl */ }
 ```
+
+Since M1000 the graph runner does not pay this box per frame: `DynAsyncElement` carries `drive_transform_arm` / `drive_sink_arm` hooks whose blanket impls monomorphize the arm loop over the concrete element type, so `run_graph` awaits each element's own `ProcessFuture` unboxed (one boxed arm future per run, none per frame). The erased `process` above remains for callers that drive an element directly through the trait object; an element opting into the zero-alloc steady state declares a concrete (non-boxed) `ProcessFuture`. Fan-in / fan-out arms (muxer, demux, session elements) still drive their elements through boxed per-packet futures, a known residual.
 
 `no_std` graphs use concrete element types composed via a typed graph builder (no boxing, no virtual dispatch).
 
