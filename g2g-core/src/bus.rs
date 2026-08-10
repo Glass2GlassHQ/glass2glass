@@ -180,6 +180,15 @@ pub enum BusMessage {
         /// form. Only equality is meaningful, so an enter pairs with its leave.
         thread_id: u64,
     },
+    /// The elected pipeline clock lost the reference it disciplines to (the
+    /// GStreamer `GST_MESSAGE_CLOCK_LOST` analog): a PTP clock whose master went
+    /// away, say. The runner posts it once per loss, having polled
+    /// [`PipelineClock::healthy`](crate::PipelineClock::healthy) on the elected
+    /// clock, then re-elects over the candidates that are still healthy and
+    /// retargets every sink's [`ClockSync`](crate::ClockSync) at the winner. The
+    /// application does not have to act; this says the timeline it was
+    /// synchronising to is no longer the one it started with.
+    ClockLost,
     /// Application-defined signal carrying an opaque code.
     Custom(u64),
 }

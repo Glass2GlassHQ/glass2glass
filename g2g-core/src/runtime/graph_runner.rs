@@ -54,7 +54,8 @@ use crate::aggregator::InputAggregator;
 use crate::bus::{BusHandle, BusMessage};
 use crate::caps::{Caps, CapsSet};
 use crate::clock::{
-    elect_clock, ClockCandidate, ClockPriority, ClockSync, DynAsyncClock, PipelineClock,
+    elect_clock, ClockCandidate, ClockPriority, ClockSync, DynAsyncClock, ElectedClock,
+    PipelineClock,
 };
 use crate::controller::{ArmController, ControlTarget, CONTROL_CATEGORY};
 use crate::element::{
@@ -1000,6 +1001,12 @@ struct Prepared {
     allocation: Option<AllocationParams>,
     clock_priority: ClockPriority,
     base_time_ns: u64,
+    /// Every clock the elements offered, kept so the health monitor can re-elect
+    /// over the survivors. Empty when no monitor runs.
+    clock_candidates: Vec<ClockCandidate>,
+    /// The swappable handle the sinks' [`ClockSync`] points at, so a re-election
+    /// retargets them. `Some` exactly when the monitor runs.
+    elected_clock: Option<alloc::sync::Arc<ElectedClock>>,
 }
 
 /// Phases 1-3.5 of the graph runner: name instances + mint probes, probe source
@@ -1015,6 +1022,7 @@ async fn prepare_graph<'a>(
     bus: Option<&BusHandle>,
     clock: &dyn PipelineClock,
     observer: Option<&Observer>,
+    clock_monitor: bool,
 ) -> Result<(Vec<Probe>, Prepared), G2gError> {
     let n = vg.node_count();
     // M78: tell the controller how many sinks must preroll before the async
@@ -1348,10 +1356,24 @@ async fn prepare_graph<'a>(
         }
     }
     let latency = LatencyReport::aggregate(latencies);
-    let elected = elect_clock(clocks);
+    let elected = elect_clock(clocks.iter().cloned());
     let (clock_priority, base_time_ns) = match &elected {
         Some(c) => (c.priority, c.clock.now_ns()),
         None => (ClockPriority::SystemFallback, clock.now_ns()),
+    };
+
+    // M1004: when the runner is going to watch the elected clock's health, the
+    // sinks read it through a swappable handle instead of directly, so a
+    // re-election after a loss retargets them without reaching the elements
+    // again (they are already inside their arms by then).
+    let elected_clock = elected
+        .as_ref()
+        .filter(|_| clock_monitor)
+        .map(|c| alloc::sync::Arc::new(ElectedClock::new(c.clock.clone())));
+    let clock_candidates: Vec<ClockCandidate> = if clock_monitor {
+        clocks.into_iter().flatten().collect()
+    } else {
+        Vec::new()
     };
 
     // Hand the elected clock + base time to every sink so each presents its
@@ -1360,19 +1382,25 @@ async fn prepare_graph<'a>(
     // as fast as backpressure allows. A sink node always holds a
     // `GraphNodeRef::Element` (not a `Source`), so the match below covers them.
     if let Some(c) = &elected {
+        let sink_clock: alloc::sync::Arc<dyn PipelineClock + Send + Sync> = match &elected_clock {
+            Some(handle) => handle.clone(),
+            None => c.clock.clone(),
+        };
         // M176: under a state controller, arm one Playing-transition anchor
         // (shared across sinks) so each bases presentation on the play edge,
         // not on startup / its preroll frame; without one, the eager base time
         // stands. Armed once outside the loop; the anchor is cheaply cloned.
-        let anchor = state.as_ref().map(|sc| sc.arm_play_anchor(c.clock.clone()));
+        let anchor = state
+            .as_ref()
+            .map(|sc| sc.arm_play_anchor(sink_clock.clone()));
         for &node in topo {
             if matches!(vg.kind(node), NodeKind::Sink) {
                 if let Some(GraphNodeRef::Element(elem)) = vg.element_mut(node) {
                     let sync = match &anchor {
                         Some(a) => {
-                            ClockSync::with_play_anchor(c.clock.clone(), base_time_ns, a.clone())
+                            ClockSync::with_play_anchor(sink_clock.clone(), base_time_ns, a.clone())
                         }
-                        None => ClockSync::new(c.clock.clone(), base_time_ns),
+                        None => ClockSync::new(sink_clock.clone(), base_time_ns),
                     };
                     elem.set_clock_sync(sync);
                 }
@@ -1389,6 +1417,8 @@ async fn prepare_graph<'a>(
             allocation,
             clock_priority,
             base_time_ns,
+            clock_candidates,
+            elected_clock,
         },
     ))
 }
@@ -1561,8 +1591,19 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
             allocation,
             clock_priority,
             base_time_ns,
+            clock_candidates,
+            elected_clock,
         },
-    ) = prepare_graph(&mut vg, &topo, &state, bus, clock, observer).await?;
+    ) = prepare_graph(
+        &mut vg,
+        &topo,
+        &state,
+        bus,
+        clock,
+        observer,
+        bus.is_some() && ticker.is_some(),
+    )
+    .await?;
 
     // Enforce the memory-domain copy budget (M617) before any frame flows: the graph
     // is negotiated, so the per-edge domains are known and the copy plan is exact. A
@@ -1791,7 +1832,18 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
     let coord_arm_index = arms.len();
     arms.push(Box::pin(async move { Ok(coordinator.run().await) }));
 
-    let results = join_all(arms).await;
+    // M1004: with a swappable elected clock installed, the health monitor runs
+    // alongside the arms and is dropped once they finish (it never ends itself).
+    let results = match (elected_clock, bus, ticker) {
+        (Some(handle), Some(b), Some(t)) => {
+            let monitor = clock_health_monitor(clock_candidates, handle, b.clone(), t);
+            match select2(join_all(arms), monitor).await {
+                Either::Left(results) => results,
+                Either::Right(never) => match never {},
+            }
+        }
+        _ => join_all(arms).await,
+    };
     fold_run_stats(
         results,
         &arm_kinds,
@@ -1991,8 +2043,19 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
             allocation,
             clock_priority,
             base_time_ns,
+            clock_candidates,
+            elected_clock,
         },
-    ) = prepare_graph(&mut vg, &topo, &state, bus, clock, observer).await?;
+    ) = prepare_graph(
+        &mut vg,
+        &topo,
+        &state,
+        bus,
+        clock,
+        observer,
+        bus.is_some() && ticker.is_some(),
+    )
+    .await?;
 
     let GraphChannels {
         mut txs,
@@ -2202,7 +2265,18 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
         }),
     )));
 
-    let results = join_all(handles).await;
+    // M1004: same clock-health watch as the cooperative runner, driven on the
+    // caller's executor rather than a worker thread (it only sleeps and reads).
+    let results = match (elected_clock, bus, &ticker) {
+        (Some(handle), Some(b), Some(t)) => {
+            let monitor = clock_health_monitor(clock_candidates, handle, b.clone(), &**t);
+            match select2(join_all(handles), monitor).await {
+                Either::Left(results) => results,
+                Either::Right(never) => match never {},
+            }
+        }
+        _ => join_all(handles).await,
+    };
     fold_run_stats(
         results,
         &arm_kinds,
@@ -2757,6 +2831,51 @@ fn element_latency(vg: &ValidatedGraph<GraphNodeRef<'_>>, node: NodeId) -> Optio
         Some(GraphNodeRef::Source(src)) => Some(src.latency()),
         Some(GraphNodeRef::Element(elem)) => Some(elem.latency()),
         _ => None,
+    }
+}
+
+/// How often the runner reads the elected clock's health. Coarse on purpose:
+/// losing a grandmaster is a seconds-scale event, and the check costs a lock on
+/// the clock.
+const CLOCK_HEALTH_PERIOD_NS: u64 = 1_000_000_000;
+
+/// Watch the elected clock and re-elect when it loses the reference it
+/// disciplines to (M1004). Runs alongside the graph's arms, sleeping on the same
+/// timer the fan-in arms tick on so it stays executor-agnostic, and posts
+/// [`BusMessage::ClockLost`] on each healthy -> unhealthy edge. It then elects
+/// again over the candidates that are still healthy and retargets `elected`, which
+/// is what every sink's [`ClockSync`] reads through. With no healthy candidate
+/// left the pipeline keeps the clock it has: it still tells time, it is just no
+/// longer disciplined, and a later re-lock is picked up by the same check.
+///
+/// Never returns; the runner drops it once the arms have finished.
+async fn clock_health_monitor(
+    candidates: Vec<ClockCandidate>,
+    elected: alloc::sync::Arc<ElectedClock>,
+    bus: BusHandle,
+    ticker: &dyn DynAsyncClock,
+) -> core::convert::Infallible {
+    let mut was_healthy = true;
+    loop {
+        let deadline = ticker.now_ns().saturating_add(CLOCK_HEALTH_PERIOD_NS);
+        ticker.sleep_until_ns(deadline).await;
+        let healthy = elected.healthy();
+        if healthy || !was_healthy {
+            was_healthy = healthy;
+            continue;
+        }
+        was_healthy = false;
+        bus.try_post(BusMessage::ClockLost);
+        if let Some(c) = elect_clock(
+            candidates
+                .iter()
+                .filter(|c| c.clock.healthy())
+                .cloned()
+                .map(Some),
+        ) {
+            elected.swap(c.clock.clone());
+            was_healthy = elected.healthy();
+        }
     }
 }
 

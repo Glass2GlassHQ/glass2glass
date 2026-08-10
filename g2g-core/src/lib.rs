@@ -160,7 +160,8 @@ pub use clock::DriftClock;
 pub use clock::MonotonicClock;
 #[cfg(feature = "alloc")]
 pub use clock::{
-    elect_clock, AsyncClock, ClockCandidate, ClockPriority, ClockSync, DynAsyncClock, PipelineClock,
+    elect_clock, AsyncClock, ClockCandidate, ClockPriority, ClockSync, DynAsyncClock, ElectedClock,
+    PipelineClock,
 };
 #[cfg(feature = "alloc")]
 pub use conformance::{
