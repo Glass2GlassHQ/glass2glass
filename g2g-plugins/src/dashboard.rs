@@ -141,6 +141,7 @@ pub fn event_json(msg: &BusMessage) -> Option<String> {
         BusMessage::StreamStatus { entered, thread_id } => {
             json!({"kind": "stream-status", "entered": entered, "thread_id": thread_id})
         }
+        BusMessage::ClockLost => json!({"kind": "clock-lost"}),
         BusMessage::Custom(code) => json!({"kind": "custom", "code": code}),
         // Skip the large structured payloads the dashboard has no view for.
         BusMessage::Tag { .. } | BusMessage::StreamTag { .. } | BusMessage::StreamCollection(_) => {
