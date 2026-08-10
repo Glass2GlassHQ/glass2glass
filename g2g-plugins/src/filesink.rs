@@ -30,6 +30,23 @@ pub(crate) fn io_err(e: std::io::Error) -> G2gError {
     G2gError::Hardware(HardwareError::Io(e.raw_os_error().unwrap_or(0)))
 }
 
+/// [`io_err`] plus an error log naming the file and the OS message. The errno in
+/// `Hardware(Io)` alone does not say which path failed or what went wrong, so
+/// every element that opens a path reports through here.
+pub(crate) fn path_io_err<P: AsRef<std::path::Path>>(
+    category: &'static str,
+    verb: &str,
+    path: P,
+    e: std::io::Error,
+) -> G2gError {
+    g2g_core::g2g_error!(
+        g2g_core::log::Target::category(category),
+        "cannot {verb} {}: {e}",
+        path.as_ref().display()
+    );
+    io_err(e)
+}
+
 /// # Example
 ///
 /// ```no_run
@@ -94,7 +111,8 @@ impl AsyncElement for FileSink {
         // later re-negotiation keeps the open writer and what was already
         // recorded, instead of truncating it.
         if self.writer.is_none() {
-            let file = File::create(&self.path).map_err(io_err)?;
+            let file = File::create(&self.path)
+                .map_err(|e| path_io_err(self.log_category(), "create", &self.path, e))?;
             self.writer = Some(BufWriter::new(file));
         }
         Ok(ConfigureOutcome::Accepted)

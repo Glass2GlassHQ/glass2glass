@@ -26,7 +26,8 @@ use g2g_core::{
     PropertySpec, PushOutcome, Rate, VideoCodec,
 };
 
-use crate::filesink::io_err;
+use crate::filesink::{io_err, path_io_err};
+use g2g_core::log::short_type_name;
 
 // A type alias (not a `use` of the trait) so the trait's methods do not land in
 // scope: `SplitMuxSink` implements `AsyncElement`, and the blanket
@@ -80,7 +81,8 @@ struct SegmentSink {
 
 impl SegmentSink {
     fn create(path: &str) -> Result<Self, G2gError> {
-        let file = File::create(path).map_err(io_err)?;
+        let file = File::create(path)
+            .map_err(|e| path_io_err(short_type_name::<Self>(), "create", path, e))?;
         Ok(Self {
             writer: BufWriter::new(file),
             bytes: 0,

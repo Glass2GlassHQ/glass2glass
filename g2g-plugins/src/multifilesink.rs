@@ -22,7 +22,8 @@ use g2g_core::{
     PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
 
-use crate::filesink::io_err;
+use crate::filesink::{io_err, path_io_err};
+use g2g_core::log::short_type_name;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NextFile {
@@ -94,7 +95,8 @@ impl MultiFileSink {
             w.flush().map_err(io_err)?;
         }
         let path = expand(&self.location, self.index);
-        let file = File::create(&path).map_err(io_err)?;
+        let file = File::create(&path)
+            .map_err(|e| path_io_err(short_type_name::<Self>(), "create", &path, e))?;
         self.writer = Some(BufWriter::new(file));
         self.current_bytes = 0;
         self.index += 1;

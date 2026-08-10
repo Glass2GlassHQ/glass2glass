@@ -21,17 +21,14 @@ use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 use std::time::Duration;
 
+use crate::filesink::{io_err, path_io_err};
+use g2g_core::log::short_type_name;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::wire::{decode_packet, encode_packet};
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, ConfigureOutcome, ElementMetadata, G2gError, HardwareError,
-    OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue,
-    PropertySpec,
+    AsyncElement, Caps, CapsConstraint, ConfigureOutcome, ElementMetadata, G2gError, OutputSink,
+    PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
-
-fn io_err(e: std::io::Error) -> G2gError {
-    G2gError::Hardware(HardwareError::Io(e.raw_os_error().unwrap_or(0)))
-}
 
 /// Serialize `packet` and append it to `w` as a `[u32-le len][bytes]` record.
 /// A non-`System` frame is not serializable and returns `UnsupportedDomain`.
@@ -111,7 +108,8 @@ impl AsyncElement for RecordSink {
         // keeps the open writer and appends the new caps as a record so the
         // replay reproduces the change at the right point.
         if self.writer.is_none() {
-            let file = File::create(&self.path).map_err(io_err)?;
+            let file = File::create(&self.path)
+                .map_err(|e| path_io_err(short_type_name::<Self>(), "create", &self.path, e))?;
             self.writer = Some(BufWriter::new(file));
         }
         let caps = absolute_caps.clone();
@@ -213,7 +211,8 @@ impl ReplaySrc {
 
     /// The caps stored as the recording's leading record.
     fn leading_caps(&self) -> Result<Caps, G2gError> {
-        let buf = std::fs::read(&self.path).map_err(io_err)?;
+        let buf = std::fs::read(&self.path)
+            .map_err(|e| path_io_err(short_type_name::<Self>(), "read", &self.path, e))?;
         match read_records(&buf)?.into_iter().next() {
             Some(PipelinePacket::CapsChanged(caps)) => Ok(caps),
             // An empty or non-caps-led recording cannot type the stream.
@@ -254,7 +253,8 @@ impl SourceLoop for ReplaySrc {
             if !self.configured {
                 return Err(G2gError::NotConfigured);
             }
-            let buf = std::fs::read(&self.path).map_err(io_err)?;
+            let buf = std::fs::read(&self.path)
+                .map_err(|e| path_io_err(short_type_name::<Self>(), "read", &self.path, e))?;
             let records = read_records(&buf)?;
             let mut frames = 0u64;
             let mut prev_pts: Option<u64> = None;

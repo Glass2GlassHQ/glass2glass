@@ -25,6 +25,12 @@ pub enum GstEquivalent {
     Renamed(&'static str),
     /// No g2g element; the hint explains the closest path.
     Unsupported(&'static str),
+    /// g2g has this exact element, but the cargo feature that compiles it (the
+    /// payload) is off in this build.
+    NotCompiled(&'static str),
+    /// Unknown, but close enough to a name this build does have (the payload)
+    /// to be a spelling mistake.
+    DidYouMean(&'static str),
     /// Unknown to both the registry and the gst-compat table: cannot advise.
     Unknown,
 }
@@ -83,16 +89,68 @@ static GST_MAP: &[(&str, GstEquivalent)] = &[
 /// Map a GStreamer element name to its g2g equivalent, consulting the live
 /// `registry` first (so aliases resolve and feature-gated elements that ARE
 /// compiled in show as `Available`), then the launch keywords, then the static
-/// guidance table.
+/// guidance table, then the feature catalog (the name is a g2g element this build
+/// left out), and finally the nearest known name (a spelling mistake).
+///
+/// The hand-written table outranks the feature catalog: both know `x264enc`, and
+/// the table's entry also lists the alternatives for a platform where the feature
+/// cannot be built.
 pub fn gst_equivalent(registry: &Registry, gst_name: &str) -> GstEquivalent {
     if registry_has(registry, gst_name) || LAUNCH_KEYWORDS.contains(&gst_name) {
         return GstEquivalent::Available;
     }
-    GST_MAP
-        .iter()
-        .find(|(name, _)| *name == gst_name)
-        .map(|(_, eq)| eq.clone())
-        .unwrap_or(GstEquivalent::Unknown)
+    if let Some((_, equivalent)) = GST_MAP.iter().find(|(name, _)| *name == gst_name) {
+        return equivalent.clone();
+    }
+    if let Some(feature) = crate::registry::required_feature(gst_name) {
+        return GstEquivalent::NotCompiled(feature);
+    }
+    match nearest_known_name(registry, gst_name) {
+        Some(near) => GstEquivalent::DidYouMean(near),
+        None => GstEquivalent::Unknown,
+    }
+}
+
+/// How many single-character insertions, deletions, or substitutions turn `left`
+/// into `right`, comparing ASCII case-insensitively (element names are lowercase,
+/// so `FileSrc` should still read as `filesrc`).
+fn edit_distance(left: &str, right: &str) -> usize {
+    let right: Vec<u8> = right.bytes().map(|b| b.to_ascii_lowercase()).collect();
+    // One row of the edit matrix: `previous[j]` is the distance from the prefix
+    // of `left` handled so far to the first `j` bytes of `right`.
+    let mut previous: Vec<usize> = (0..=right.len()).collect();
+    let mut current = alloc::vec![0usize; right.len() + 1];
+    for (i, l) in left.bytes().map(|b| b.to_ascii_lowercase()).enumerate() {
+        current[0] = i + 1;
+        for (j, r) in right.iter().enumerate() {
+            let substitute = previous[j] + usize::from(l != *r);
+            current[j + 1] = substitute.min(previous[j + 1] + 1).min(current[j] + 1);
+        }
+        core::mem::swap(&mut previous, &mut current);
+    }
+    previous[right.len()]
+}
+
+/// The name closest to `name` among everything a launch line can reference, when
+/// one is close enough to be a typo of it: at most one edit per four characters
+/// (capped at two), so a garbage token gets no suggestion. Ties go to the
+/// earliest candidate, registered elements before keywords before gst names.
+fn nearest_known_name(registry: &Registry, name: &str) -> Option<&'static str> {
+    let mut best: Option<(usize, &'static str)> = None;
+    let candidates = registry
+        .element_names()
+        .into_iter()
+        .chain(LAUNCH_KEYWORDS.iter().copied())
+        .chain(GST_MAP.iter().map(|(gst_name, _)| *gst_name));
+    for candidate in candidates {
+        let distance = edit_distance(name, candidate);
+        if best.is_none_or(|(best_distance, _)| distance < best_distance) {
+            best = Some((distance, candidate));
+        }
+    }
+    let (distance, candidate) = best?;
+    let allowed = (name.len() / 4).min(2);
+    (distance <= allowed).then_some(candidate)
 }
 
 /// Every GStreamer element name g2g's runtime reports under a different name,
@@ -191,6 +249,29 @@ fn element_names(line: &str) -> Vec<&str> {
     names
 }
 
+/// The porting guidance for one element name, `None` when it is portable as
+/// written. Shared by the launch linter, the source scanner, and the parse-error
+/// explainer, so all three word the same problem identically.
+fn finding(name: &str, equivalent: &GstEquivalent) -> Option<String> {
+    match equivalent {
+        GstEquivalent::Available => None,
+        GstEquivalent::Renamed(g) => Some(format!(
+            "`{name}` is not a g2g element name; g2g calls it `{g}` (see `g2g-inspect {g}`)"
+        )),
+        GstEquivalent::Unsupported(hint) => Some(format!("`{name}` has no g2g element: {hint}")),
+        GstEquivalent::NotCompiled(feature) => Some(format!(
+            "`{name}` is a g2g element but is not compiled into this build; \
+             rebuild with `--features {feature}`"
+        )),
+        GstEquivalent::DidYouMean(near) => Some(format!(
+            "`{name}` is not a g2g element; did you mean `{near}`?"
+        )),
+        GstEquivalent::Unknown => Some(format!(
+            "`{name}` is unknown to g2g with no known equivalent; list elements with `g2g-inspect`"
+        )),
+    }
+}
+
 /// Lint a `gst-launch` line for g2g portability. First scans every element name
 /// and collects guidance for all that are not portable as-is (renamed,
 /// unsupported, or unknown); if all elements resolve, runs the authoritative
@@ -198,18 +279,7 @@ fn element_names(line: &str) -> Vec<&str> {
 pub fn lint_launch(registry: &Registry, line: &str) -> LintReport {
     let mut findings = Vec::new();
     for name in element_names(line) {
-        match gst_equivalent(registry, name) {
-            GstEquivalent::Available => {}
-            GstEquivalent::Renamed(g) => findings.push(format!(
-                "`{name}` is not a g2g element name; g2g calls it `{g}` (see `g2g-inspect {g}`)"
-            )),
-            GstEquivalent::Unsupported(hint) => {
-                findings.push(format!("`{name}` has no g2g element: {hint}"))
-            }
-            GstEquivalent::Unknown => findings.push(format!(
-                "`{name}` is unknown to g2g with no known equivalent; list elements with `g2g-inspect`"
-            )),
-        }
+        findings.extend(finding(name, &gst_equivalent(registry, name)));
     }
     if !findings.is_empty() {
         return LintReport {
@@ -291,18 +361,7 @@ pub fn scan_source(registry: &Registry, source: &str) -> SourceScanReport {
 
     let mut findings = Vec::new();
     for name in &names {
-        match gst_equivalent(registry, name) {
-            GstEquivalent::Available => {}
-            GstEquivalent::Renamed(g) => findings.push(format!(
-                "`{name}` is not a g2g element name; g2g calls it `{g}` (see `g2g-inspect {g}`)"
-            )),
-            GstEquivalent::Unsupported(hint) => {
-                findings.push(format!("`{name}` has no g2g element: {hint}"))
-            }
-            GstEquivalent::Unknown => findings.push(format!(
-                "`{name}` is unknown to g2g with no known equivalent; list elements with `g2g-inspect`"
-            )),
-        }
+        findings.extend(finding(name, &gst_equivalent(registry, name)));
     }
 
     // Dynamic-pipeline idioms: map each to its g2g primitive (PORTING.md §5.1).
@@ -343,18 +402,12 @@ pub fn scan_source(registry: &Registry, source: &str) -> SourceScanReport {
 fn explain(registry: &Registry, e: &ParseError) -> String {
     match e {
         ParseError::UnknownElement(n) | ParseError::UnknownSource(n) => {
-            match gst_equivalent(registry, n) {
-                GstEquivalent::Renamed(g) => {
-                    format!("`{n}` is not a g2g element name; g2g calls it `{g}` (see `g2g-inspect {g}`)")
-                }
-                GstEquivalent::Unsupported(hint) => format!("`{n}` has no g2g element: {hint}"),
-                GstEquivalent::Available => {
-                    format!("`{n}` is available; re-check spelling or whether its feature is compiled in")
-                }
-                GstEquivalent::Unknown => {
-                    format!("`{n}` is unknown to g2g with no known equivalent; list elements with `g2g-inspect`")
-                }
-            }
+            let equivalent = gst_equivalent(registry, n);
+            finding(n, &equivalent).unwrap_or_else(|| {
+                format!(
+                    "`{n}` is available; re-check spelling or whether its feature is compiled in"
+                )
+            })
         }
         ParseError::UnknownProperty { element, key } => {
             format!("`{element}` has no property `{key}`; run `g2g-inspect {element}` for its properties")
@@ -501,6 +554,50 @@ mod tests {
             gst_equivalent(&reg, "totally-made-up"),
             GstEquivalent::Unknown
         );
+    }
+
+    #[test]
+    fn a_misspelled_element_gets_a_suggestion() {
+        let reg = default_registry();
+        assert_eq!(
+            gst_equivalent(&reg, "filesrcc"),
+            GstEquivalent::DidYouMean("filesrc")
+        );
+        let r = lint_launch(&reg, "filesrcc location=x ! fakesink");
+        assert!(!r.ok);
+        assert_eq!(r.findings.len(), 1, "{:?}", r.findings);
+        assert!(
+            r.findings[0].contains("did you mean `filesrc`"),
+            "{:?}",
+            r.findings
+        );
+    }
+
+    #[test]
+    fn a_garbage_token_gets_no_suggestion() {
+        let reg = default_registry();
+        for name in ["totally-made-up", "zzzz", "xyzzy", "qqqqqqqqqqqq"] {
+            assert_eq!(
+                gst_equivalent(&reg, name),
+                GstEquivalent::Unknown,
+                "`{name}` must not get a suggestion"
+            );
+        }
+    }
+
+    // Only meaningful when `srt` is NOT compiled in: with the feature the element
+    // is registered, so it resolves as `Available`.
+    #[cfg(not(feature = "srt"))]
+    #[test]
+    fn a_feature_gated_element_names_its_feature() {
+        let reg = default_registry();
+        assert_eq!(
+            gst_equivalent(&reg, "srtsink"),
+            GstEquivalent::NotCompiled("srt")
+        );
+        let r = lint_launch(&reg, "filesrc location=x ! srtsink");
+        assert!(!r.ok);
+        assert!(r.findings[0].contains("--features srt"), "{:?}", r.findings);
     }
 
     #[test]

@@ -26,7 +26,8 @@ use g2g_core::{
     VideoCodec,
 };
 
-use crate::filesink::io_err;
+use crate::filesink::{io_err, path_io_err};
+use g2g_core::log::short_type_name;
 
 /// # Example
 ///
@@ -141,7 +142,7 @@ impl SourceLoop for MultiFileSrc {
                         }
                         break;
                     }
-                    Err(e) => return Err(io_err(e)),
+                    Err(e) => return Err(path_io_err(short_type_name::<Self>(), "open", &path, e)),
                 };
                 let mut buf = alloc::vec::Vec::new();
                 file.read_to_end(&mut buf).map_err(io_err)?;

@@ -25,7 +25,8 @@ use g2g_core::{
     MemoryDomain, OutputSink, PipelinePacket,
 };
 
-use crate::filesink::io_err;
+use crate::filesink::path_io_err;
+use g2g_core::log::short_type_name;
 
 #[derive(Debug)]
 struct Header {
@@ -65,7 +66,8 @@ impl Mp4AudioSrc {
 
     fn probe(&mut self) -> Result<Caps, G2gError> {
         if self.header.is_none() {
-            let data = std::fs::read(&self.path).map_err(io_err)?;
+            let data = std::fs::read(&self.path)
+                .map_err(|e| path_io_err(short_type_name::<Self>(), "read", &self.path, e))?;
             self.header = Some(parse_header(&data)?);
         }
         let h = self.header.as_ref().expect("just parsed");
@@ -111,7 +113,8 @@ impl SourceLoop for Mp4AudioSrc {
             if !self.configured {
                 return Err(G2gError::NotConfigured);
             }
-            let data = std::fs::read(&self.path).map_err(io_err)?;
+            let data = std::fs::read(&self.path)
+                .map_err(|e| path_io_err(short_type_name::<Self>(), "read", &self.path, e))?;
             if self.header.is_none() {
                 self.header = Some(parse_header(&data)?);
             }

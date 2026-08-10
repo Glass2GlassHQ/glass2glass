@@ -26,7 +26,8 @@ use g2g_core::{
     TextFormat,
 };
 
-use crate::filesink::io_err;
+use crate::filesink::path_io_err;
+use g2g_core::log::short_type_name;
 
 /// A subtitle / text file source. Emits the file's bytes as a single
 /// [`Caps::Text`] `format` frame, then `Eos`.
@@ -157,7 +158,8 @@ impl SourceLoop for SubtitleSrc {
             if !self.configured {
                 return Err(G2gError::NotConfigured);
             }
-            let bytes = std::fs::read(&self.path).map_err(io_err)?;
+            let bytes = std::fs::read(&self.path)
+                .map_err(|e| path_io_err(short_type_name::<Self>(), "read", &self.path, e))?;
             let frame = Frame::new(
                 MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
                 FrameTiming::default(),

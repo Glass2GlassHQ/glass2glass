@@ -37,18 +37,25 @@ use crate::segment::Segment;
 /// `Shutdown` is usually the *consequence* of another arm erroring first (it
 /// dropped its channel end), so prefer any non-`Shutdown` error over it; fall
 /// back to the first error otherwise (M81). `None` if every arm succeeded.
+///
+/// Each result is paired with its arm's instance name, and the one that wins is
+/// logged naming that element, since `G2gError` carries no element identity.
 fn substantive_error<'a, I>(results: I) -> Option<G2gError>
 where
-    I: IntoIterator<Item = Option<&'a G2gError>>,
+    I: IntoIterator<Item = (&'a str, Option<&'a G2gError>)>,
 {
-    let mut first: Option<G2gError> = None;
-    for e in results.into_iter().flatten() {
+    let mut first: Option<(&str, &G2gError)> = None;
+    for (name, e) in results {
+        let Some(e) = e else { continue };
         if *e != G2gError::Shutdown {
+            crate::log::report_element_failure(Some(name), e);
             return Some(e.clone());
         }
-        first.get_or_insert_with(|| e.clone());
+        first.get_or_insert((name, e));
     }
-    first
+    let (name, e) = first?;
+    crate::log::report_element_failure(Some(name), e);
+    Some(e.clone())
 }
 
 #[cfg(feature = "std")]
@@ -626,7 +633,7 @@ where
     // too. The sink's name also keys its measured-latency probe below.
     let mut namer = crate::log::InstanceNamer::new();
     let source_name = namer.add(crate::log::short_type_name::<Src>(), None);
-    SourceLoop::set_instance_name(source, source_name);
+    SourceLoop::set_instance_name(source, source_name.clone());
     let sink_name = namer.add(crate::log::short_type_name::<Snk>(), None);
     AsyncElement::set_instance_name(sink, sink_name.clone());
     // M16 step 5f: startup negotiation honors `SourceLoop::caps_constraint`
@@ -734,7 +741,7 @@ where
 
     // M399: measured per-element telemetry for the sink (the linear runner's one
     // interior element with a `process()`); the source's cost surfaces as fill.
-    let sink_probe = ElementProbe::new(sink_name);
+    let sink_probe = ElementProbe::new(sink_name.clone());
     let probe_for_sink = sink_probe.clone();
 
     let bus_for_sink = bus.cloned();
@@ -892,7 +899,10 @@ where
     // M81: a closed-link `Shutdown` on the source arm can be the consequence of
     // the sink arm's real error (it dropped the link), so surface the
     // substantive one rather than whichever arm we check first.
-    if let Some(e) = substantive_error([src_res.as_ref().err(), snk_res.as_ref().err()]) {
+    if let Some(e) = substantive_error([
+        (source_name.as_str(), src_res.as_ref().err()),
+        (sink_name.as_str(), snk_res.as_ref().err()),
+    ]) {
         return Err(e);
     }
     let emitted = src_res?;
@@ -1062,7 +1072,7 @@ where
     // Dev-tooling tap: source 0, fan-out 1, then the branch sinks.
     if let Some(obs) = observer {
         let mut nodes: Vec<TapNode> = alloc::vec![
-            (source_name, NodeRole::Source, None),
+            (source_name.clone(), NodeRole::Source, None),
             (
                 alloc::string::String::from(fanout_probe.name()),
                 NodeRole::Tee,
@@ -1195,7 +1205,11 @@ where
     // M81: a real branch error closes the shared links, surfacing as Shutdown on
     // the sibling arms; surface the substantive error rather than whichever arm
     // the count loop unwraps first (consistent with the linear path).
-    if let Some(e) = substantive_error(results.iter().map(|r| r.as_ref().err())) {
+    // Arm order: [source, router, sink0, sink1, ...].
+    let arm_names = [source_name.as_str(), fanout_probe.name()]
+        .into_iter()
+        .chain(sink_probes.iter().map(|p| p.name()));
+    if let Some(e) = substantive_error(arm_names.zip(results.iter().map(|r| r.as_ref().err()))) {
         return Err(e);
     }
     let mut counts = Vec::with_capacity(results.len());
@@ -2091,7 +2105,7 @@ where
     // interior names key the probes below.
     let mut namer = crate::log::InstanceNamer::new();
     let source_name = namer.add(crate::log::short_type_name::<Src>(), None);
-    SourceLoop::set_instance_name(source, source_name);
+    SourceLoop::set_instance_name(source, source_name.clone());
     let transform_name = namer.add(crate::log::short_type_name::<Tx>(), None);
     AsyncElement::set_instance_name(transform, transform_name.clone());
     let sink_name = namer.add(crate::log::short_type_name::<Snk>(), None);
@@ -2451,9 +2465,9 @@ where
     // in the transform or sink closes a link, which can surface as `Shutdown` on
     // the source arm (checked first); without this, that masks the real cause.
     if let Some(e) = substantive_error([
-        src_res.as_ref().err(),
-        tx_res.as_ref().err(),
-        snk_res.as_ref().err(),
+        (source_name.as_str(), src_res.as_ref().err()),
+        (transform_probe.name(), tx_res.as_ref().err()),
+        (sink_probe.name(), snk_res.as_ref().err()),
     ]) {
         return Err(e);
     }

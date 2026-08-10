@@ -33,7 +33,8 @@ use g2g_core::{
     PropValue, PropertySpec, VideoCodec,
 };
 
-use crate::filesink::io_err;
+use crate::filesink::{io_err, path_io_err};
+use g2g_core::log::short_type_name;
 
 /// Default read chunk size: large enough to amortize syscalls, small enough
 /// that a parser downstream sees steady progress.
@@ -132,7 +133,8 @@ impl FileSrc {
         if !self.auto_detect {
             return Ok(());
         }
-        let mut file = File::open(&self.path).map_err(io_err)?;
+        let mut file = File::open(&self.path)
+            .map_err(|e| path_io_err(short_type_name::<Self>(), "open", &self.path, e))?;
         let mut header = alloc::vec![0u8; SNIFF_LEN];
         let mut filled = 0;
         while filled < header.len() {
@@ -232,7 +234,8 @@ impl SourceLoop for FileSrc {
                 return Err(G2gError::NotConfigured);
             }
 
-            let mut file = File::open(&self.path).map_err(io_err)?;
+            let mut file = File::open(&self.path)
+                .map_err(|e| path_io_err(short_type_name::<Self>(), "open", &self.path, e))?;
             // The file size bounds a downstream demuxer's byte-offset guesses; an
             // unreadable metadata just leaves the length unknown.
             if let (Some(ctl), Ok(meta)) = (self.seek.as_ref(), file.metadata()) {

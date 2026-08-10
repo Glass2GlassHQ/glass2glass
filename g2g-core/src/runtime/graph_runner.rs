@@ -1099,6 +1099,10 @@ struct Prepared {
     /// The swappable handle the sinks' [`ClockSync`] points at, so a re-election
     /// retargets them. `Some` exactly when the monitor runs.
     elected_clock: Option<alloc::sync::Arc<ElectedClock>>,
+    /// Every node's instance name, indexed by `NodeId` (empty for a structural
+    /// tee, which carries no element). The arm loop copies these into arm order
+    /// so a failed run can name the element that raised the error.
+    names: Vec<alloc::string::String>,
 }
 
 /// Phases 1-3.5 of the graph runner: name instances + mint probes, probe source
@@ -1219,7 +1223,7 @@ async fn prepare_graph<'a>(
                 ..Default::default()
             })
             .collect();
-        obs.register(names, roles, probes.clone(), edges);
+        obs.register(names.clone(), roles, probes.clone(), edges);
     }
 
     // Phase 1: probe each source's produce set (async) into an owned map,
@@ -1511,6 +1515,7 @@ async fn prepare_graph<'a>(
             base_time_ns,
             clock_candidates,
             elected_clock,
+            names,
         },
     ))
 }
@@ -1685,6 +1690,7 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
             base_time_ns,
             clock_candidates,
             elected_clock,
+            names,
         },
     ) = prepare_graph(
         &mut vg,
@@ -1738,6 +1744,9 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
 
     let mut arms: Vec<BoxFuture<'a, Result<u64, G2gError>>> = Vec::with_capacity(n + 1);
     let mut arm_kinds: Vec<NodeKind> = Vec::with_capacity(n);
+    // Arm order, not node order: a muxer contributes one forwarder arm per
+    // input pad plus its own, so an arm index cannot index `names` directly.
+    let mut arm_names: Vec<alloc::string::String> = Vec::with_capacity(n + 1);
 
     for &node in &topo {
         let kind = vg.kind(node);
@@ -1784,6 +1793,7 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
                     Box::pin(muxer_forwarder(in_rx, pad_tx));
                 arms.push(fwd);
                 arm_kinds.push(kind);
+                arm_names.push(names[node.0 as usize].clone());
                 pad_rxs.push((pad, pad_rx));
             }
             // A muxer can opt into runner-level PTS-ordered delivery (the runner
@@ -1807,6 +1817,7 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
             });
             arms.push(arm);
             arm_kinds.push(kind);
+            arm_names.push(names[node.0 as usize].clone());
             continue;
         }
 
@@ -1900,6 +1911,7 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
         };
         arms.push(arm);
         arm_kinds.push(kind);
+        arm_names.push(names[node.0 as usize].clone());
     }
 
     // Drop the template handle so the coordinator can end once every arm's
@@ -1924,6 +1936,7 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
     fold_run_stats(
         results,
         &arm_kinds,
+        &arm_names,
         coord_arm_index,
         &dropped,
         &probes,
@@ -1945,6 +1958,7 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
 fn fold_run_stats(
     results: Vec<Result<u64, G2gError>>,
     arm_kinds: &[NodeKind],
+    arm_names: &[alloc::string::String],
     coord_arm_index: usize,
     dropped: &alloc::sync::Arc<spin::Mutex<u64>>,
     probes: &[Probe],
@@ -1957,12 +1971,15 @@ fn fold_run_stats(
     // error in one node closes links, which surfaces as `Shutdown` on the
     // others; reporting the first-in-topo-order error would often mask the
     // cause).
-    if let Some(e) = results
-        .iter()
-        .filter_map(|r| r.as_ref().err())
-        .find(|e| **e != G2gError::Shutdown)
-        .or_else(|| results.iter().filter_map(|r| r.as_ref().err()).next())
-    {
+    let failed = |only_substantive: bool| {
+        results
+            .iter()
+            .enumerate()
+            .filter_map(|(i, r)| r.as_ref().err().map(|e| (i, e)))
+            .find(|(_, e)| !only_substantive || **e != G2gError::Shutdown)
+    };
+    if let Some((arm, e)) = failed(true).or_else(|| failed(false)) {
+        crate::log::report_element_failure(arm_names.get(arm).map(|n| n.as_str()), e);
         return Err(e.clone());
     }
     let mut counts = Vec::with_capacity(results.len());
@@ -2122,6 +2139,7 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
             base_time_ns,
             clock_candidates,
             elected_clock,
+            names,
         },
     ) = prepare_graph(
         &mut vg,
@@ -2152,6 +2170,9 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
     // handle resolves on this thread once its worker thread finishes.
     let mut handles: Vec<BoxFuture<'static, Result<u64, G2gError>>> = Vec::with_capacity(n + 1);
     let mut arm_kinds: Vec<NodeKind> = Vec::with_capacity(n);
+    // Arm order, not node order: a muxer contributes one forwarder arm per
+    // input pad plus its own, so an arm index cannot index `names` directly.
+    let mut arm_names: Vec<alloc::string::String> = Vec::with_capacity(n + 1);
 
     for &node in &topo {
         let kind = vg.kind(node);
@@ -2190,6 +2211,7 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
                     });
                 handles.push(spawner.spawn_arm(with_stream_status(bus.cloned(), build)));
                 arm_kinds.push(kind);
+                arm_names.push(names[node.0 as usize].clone());
                 pad_rxs.push((pad, pad_rx));
             }
             let mux_probe = probes[node.0 as usize].clone();
@@ -2213,6 +2235,7 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
                 });
             handles.push(spawner.spawn_arm(with_stream_status(bus.cloned(), build)));
             arm_kinds.push(kind);
+            arm_names.push(names[node.0 as usize].clone());
             continue;
         }
 
@@ -2336,6 +2359,7 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
         };
         handles.push(spawner.spawn_arm(with_stream_status(bus.cloned(), build)));
         arm_kinds.push(kind);
+        arm_names.push(names[node.0 as usize].clone());
     }
 
     // Drop the template handle so the coordinator ends once every arm's clone
@@ -2364,6 +2388,7 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
     fold_run_stats(
         results,
         &arm_kinds,
+        &arm_names,
         coord_arm_index,
         &dropped,
         &probes,

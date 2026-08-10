@@ -154,6 +154,15 @@ fn main() {
                 GstEquivalent::Unsupported(hint) => {
                     println!("{gst_name}: no g2g element. {hint}");
                 }
+                GstEquivalent::NotCompiled(feature) => {
+                    println!(
+                        "{gst_name}: a g2g element, but this build left it out; rebuild with `--features {feature}`"
+                    );
+                }
+                GstEquivalent::DidYouMean(near) => {
+                    println!("{gst_name}: unknown to g2g; did you mean `{near}`?");
+                    process::exit(1);
+                }
                 GstEquivalent::Unknown => {
                     println!("{gst_name}: unknown to g2g; no known equivalent. List elements with `g2g-inspect`.");
                     process::exit(1);
