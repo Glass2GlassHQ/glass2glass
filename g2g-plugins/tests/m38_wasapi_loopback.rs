@@ -13,7 +13,7 @@
 
 #![cfg(all(target_os = "windows", feature = "wasapi-src", feature = "wasapi-sink"))]
 
-use g2g_core::element::{BoxFuture, OutputSink, PushOutcome};
+use g2g_core::element::{OutputSink, PushOutcome};
 use g2g_core::frame::PipelinePacket;
 use g2g_core::runtime::{run_simple_pipeline, SourceLoop};
 use g2g_core::{Caps, G2gError, PipelineClock};

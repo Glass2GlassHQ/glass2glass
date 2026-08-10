@@ -14,7 +14,7 @@
 
 #![cfg(all(target_os = "android", feature = "camera2"))]
 
-use g2g_core::element::{BoxFuture, OutputSink, PushOutcome};
+use g2g_core::element::{OutputSink, PushOutcome};
 use g2g_core::frame::PipelinePacket;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{Caps, Dim, G2gError, RawVideoFormat};
