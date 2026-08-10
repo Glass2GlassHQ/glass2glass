@@ -291,7 +291,17 @@ fn build_graph(reg: &Registry, opts: &Opts, pipeline: &str) -> Result<Graph<Grap
     } else if let Some(path) = &opts.script {
         load_script_file(reg, path)
     } else {
-        parse_launch(reg, pipeline).map_err(|e| format!("parse error: {e}"))
+        parse_launch(reg, pipeline).map_err(|e| {
+            let mut message = format!("parse error: {e}");
+            // gst->g2g porting guidance, from the error already in hand (a
+            // re-parse would repeat side effects like the uridecodebin file
+            // probe, logging the same unreadable path twice).
+            for hint in g2g_plugins::gst_compat::explain_parse_error(reg, pipeline, &e) {
+                message.push_str("\n  hint: ");
+                message.push_str(&hint);
+            }
+            message
+        })
     }
 }
 
@@ -434,13 +444,6 @@ fn main() {
         Ok(graph) => graph,
         Err(err) => {
             eprintln!("{err}");
-            // Add a gst->g2g porting hint when one applies (text pipelines only).
-            if !use_file {
-                let report = g2g_plugins::gst_compat::lint_launch(&reg, &pipeline);
-                for hint in &report.findings {
-                    eprintln!("  hint: {hint}");
-                }
-            }
             process::exit(1);
         }
     };

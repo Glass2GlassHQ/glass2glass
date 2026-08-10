@@ -131,9 +131,16 @@ fn edit_distance(left: &str, right: &str) -> usize {
     previous[right.len()]
 }
 
+/// A typo suggestion allows one edit per this many characters of the unknown
+/// name, so a name under this length gets no suggestion at all.
+const TYPO_CHARS_PER_EDIT: usize = 4;
+
+/// The edit allowance cap, so a long garbage token cannot reach a real name.
+const TYPO_MAX_EDITS: usize = 2;
+
 /// The name closest to `name` among everything a launch line can reference, when
-/// one is close enough to be a typo of it: at most one edit per four characters
-/// (capped at two), so a garbage token gets no suggestion. Ties go to the
+/// one is close enough to be a typo of it (see [`TYPO_CHARS_PER_EDIT`] /
+/// [`TYPO_MAX_EDITS`]), so a garbage token gets no suggestion. Ties go to the
 /// earliest candidate, registered elements before keywords before gst names.
 fn nearest_known_name(registry: &Registry, name: &str) -> Option<&'static str> {
     let mut best: Option<(usize, &'static str)> = None;
@@ -149,7 +156,7 @@ fn nearest_known_name(registry: &Registry, name: &str) -> Option<&'static str> {
         }
     }
     let (distance, candidate) = best?;
-    let allowed = (name.len() / 4).min(2);
+    let allowed = (name.len() / TYPO_CHARS_PER_EDIT).min(TYPO_MAX_EDITS);
     (distance <= allowed).then_some(candidate)
 }
 
@@ -272,15 +279,38 @@ fn finding(name: &str, equivalent: &GstEquivalent) -> Option<String> {
     }
 }
 
+/// The porting findings for a set of element names, in order, portable names
+/// skipped. Shared by the linter, the source scanner, and the parse-error
+/// explainer.
+fn name_findings<'a>(registry: &Registry, names: impl Iterator<Item = &'a str>) -> Vec<String> {
+    names
+        .filter_map(|name| finding(name, &gst_equivalent(registry, name)))
+        .collect()
+}
+
+/// Guidance for a [`ParseError`] that `line` already produced, without re-running
+/// the parse (a re-parse would repeat its side effects, like a `uridecodebin`
+/// file probe logging the same unreadable path twice). Element-name findings when
+/// a name is at fault, else the explained error; empty when the explanation would
+/// only restate the error's own message.
+pub fn explain_parse_error(registry: &Registry, line: &str, error: &ParseError) -> Vec<String> {
+    let findings = name_findings(registry, element_names(line).into_iter());
+    if !findings.is_empty() {
+        return findings;
+    }
+    let explained = explain(registry, error);
+    if explained == error.to_string() {
+        return Vec::new();
+    }
+    Vec::from([explained])
+}
+
 /// Lint a `gst-launch` line for g2g portability. First scans every element name
 /// and collects guidance for all that are not portable as-is (renamed,
 /// unsupported, or unknown); if all elements resolve, runs the authoritative
 /// [`parse_launch`] and, on failure, explains that structural / property error.
 pub fn lint_launch(registry: &Registry, line: &str) -> LintReport {
-    let mut findings = Vec::new();
-    for name in element_names(line) {
-        findings.extend(finding(name, &gst_equivalent(registry, name)));
-    }
+    let findings = name_findings(registry, element_names(line).into_iter());
     if !findings.is_empty() {
         return LintReport {
             ok: false,
@@ -359,10 +389,7 @@ pub fn scan_source(registry: &Registry, source: &str) -> SourceScanReport {
         }
     }
 
-    let mut findings = Vec::new();
-    for name in &names {
-        findings.extend(finding(name, &gst_equivalent(registry, name)));
-    }
+    let findings = name_findings(registry, names.iter().map(String::as_str));
 
     // Dynamic-pipeline idioms: map each to its g2g primitive (PORTING.md §5.1).
     let mut notes = Vec::new();

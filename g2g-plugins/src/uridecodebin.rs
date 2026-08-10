@@ -22,6 +22,7 @@
 use alloc::boxed::Box;
 
 #[cfg(feature = "std")]
+use g2g_core::log::short_type_name;
 use g2g_core::runtime::{DynMultiOutputElement, PadKind, PadRequest};
 use g2g_core::runtime::{DynSourceLoop, Uri, UriError, UriSourceFactory};
 use g2g_core::{Caps, Dim, Rate, VideoCodec};
@@ -67,6 +68,17 @@ pub fn file_handler() -> UriSourceFactory {
     UriSourceFactory::new("file", |uri: &Uri| {
         if uri.rest.is_empty() {
             return Err(UriError::Malformed);
+        }
+        // The handler never reads the file (caps are declared, not sniffed), so
+        // an unopenable path would otherwise surface only as a downstream error
+        // that never mentions it. Report here and let the run fail as before.
+        if let Err(e) = std::fs::File::open(uri.rest) {
+            crate::filesink::path_io_err(
+                short_type_name::<crate::mp4src::Mp4Src>(),
+                "open",
+                uri.rest,
+                e,
+            );
         }
         let src = crate::mp4src::Mp4Src::new(uri.rest);
         Ok((Box::new(src) as Box<dyn DynSourceLoop>, h264_any()))
@@ -144,6 +156,9 @@ use g2g_core::{ByteStreamEncoding, Graph};
 /// file:// probe: read a bounded prefix of the URI's file for container sniffing.
 /// `None` for a non-`file://` URI or an unreadable file (the hook then declines),
 /// else the absolute path (for the byte source) plus the prefix bytes.
+///
+/// An unreadable file is reported before declining: the decline falls back to
+/// extension-guessed caps, whose downstream error would never mention the file.
 #[cfg(feature = "std")]
 fn open_file_prefix(uri: &str) -> Option<(alloc::string::String, Vec<u8>)> {
     use std::io::Read;
@@ -152,7 +167,17 @@ fn open_file_prefix(uri: &str) -> Option<(alloc::string::String, Vec<u8>)> {
         return None;
     }
     let mut prefix = Vec::new();
-    let f = std::fs::File::open(parsed.rest).ok()?;
+    // Reported as FileSrc: every hook that probes here reads the file with one.
+    let f = std::fs::File::open(parsed.rest)
+        .map_err(|e| {
+            crate::filesink::path_io_err(
+                short_type_name::<crate::filesrc::FileSrc>(),
+                "open",
+                parsed.rest,
+                e,
+            )
+        })
+        .ok()?;
     f.take(PLAYBIN_PROBE_BYTES).read_to_end(&mut prefix).ok()?;
     Some((parsed.rest.to_string(), prefix))
 }
