@@ -65,18 +65,60 @@ pub enum WritingMode {
     VerticalLr,
 }
 
+/// A `font-size` a `::cue` rule asked for: absolute pixels, or a percent of the
+/// size the text would otherwise draw at. Both are whole units (a fractional
+/// value rounds at parse time) and both are clamped, so a hostile stylesheet
+/// cannot ask for a glyph raster the size of the frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CueFontSize {
+    /// `font-size: 24px`.
+    Pixels(u32),
+    /// `font-size: 150%`, relative to the cue's own size.
+    Percent(u32),
+}
+
+impl CueFontSize {
+    /// The pixel size this asks for, given the size in effect around it.
+    pub fn resolve(self, base_px: f32) -> f32 {
+        match self {
+            Self::Pixels(px) => px as f32,
+            Self::Percent(percent) => base_px * percent as f32 / 100.0,
+        }
+    }
+}
+
+/// A `text-shadow` a `::cue` rule asked for: one offset copy of the text drawn
+/// under it. `blur` is parsed but the overlays draw a hard-edged shadow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextShadow {
+    /// Rightward offset of the shadow copy, in pixels (negative goes left).
+    pub offset_x: i32,
+    /// Downward offset of the shadow copy, in pixels (negative goes up).
+    pub offset_y: i32,
+    /// Blur radius in pixels, kept from the stylesheet but not applied.
+    pub blur: u32,
+    /// Shadow RGBA; CSS defaults it to the text colour, we default it to black.
+    pub color: [u8; 4],
+}
+
 /// One styled run of a cue's text: the `[start, end)` byte range of
 /// [`Cue::text`] that a class-carrying WebVTT span (`<c.loud>...</c>`) covers,
-/// and the colour the `::cue(.loud)` rules resolved for it. Runs are in document
-/// order and may nest, so where two overlap the later one wins.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// and what the `::cue(.loud)` rules resolved for it. Runs are in document
+/// order and may nest, so where two overlap the later one wins, per property.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct SpanStyle {
     /// Byte offset of the span's first character in [`Cue::text`].
     pub start: usize,
     /// Byte offset just past the span's last character.
     pub end: usize,
     /// Text RGBA for this run, overriding the cue-wide colour.
-    pub color: [u8; 4],
+    pub color: Option<[u8; 4]>,
+    /// Text size for this run, overriding the cue's.
+    pub font_size: Option<CueFontSize>,
+    /// Drop shadow for this run, overriding the cue's.
+    pub shadow: Option<TextShadow>,
+    /// Fill drawn behind this run's glyphs alone, over the cue's backing box.
+    pub background: Option<[u8; 4]>,
 }
 
 /// WebVTT cue placement settings, the subset the bitmap overlay honours. `None`
@@ -98,26 +140,57 @@ pub struct CueSettings {
     /// Opaque text RGBA from a WebVTT `STYLE` `::cue` `color:` rule, if any
     /// (resolved at parse time). `None` = the overlay's default text colour.
     pub color: Option<[u8; 4]>,
-    /// Backing-box RGBA from a `::cue` `background-color:` rule, if any. A zero
-    /// alpha (e.g. `transparent`) draws no box. `None` = the overlay's default.
-    /// A cue has one backing box, so a span-scoped rule's `background-color`
-    /// lands here too rather than behind its span alone.
+    /// Backing-box RGBA from a whole-cue `background-color:` rule, if any. A
+    /// zero alpha (e.g. `transparent`) draws no box. `None` = the overlay's
+    /// default. A span-scoped rule's `background-color` fills behind that span
+    /// alone instead, as [`SpanStyle::background`].
     pub background: Option<[u8; 4]>,
-    /// Per-span text colours from `::cue(.class)` rules, each covering only the
-    /// span it came from. Empty unless a span-scoped rule matched.
+    /// Text size from a whole-cue `font-size:` rule, if any. `None` = the size
+    /// the overlay derives from the frame height (or its `font-size` property).
+    pub font_size: Option<CueFontSize>,
+    /// Drop shadow from a whole-cue `text-shadow:` rule, if any.
+    pub shadow: Option<TextShadow>,
+    /// Per-span styling from `::cue(.class)` rules, each covering only the span
+    /// it came from. Empty unless a span-scoped rule matched.
     pub spans: Vec<SpanStyle>,
 }
 
 impl CueSettings {
+    /// What the innermost span run covering byte offset `at` sets for one
+    /// property, or `None` where no covering run sets it.
+    fn innermost<T>(&self, at: usize, of: impl Fn(&SpanStyle) -> Option<T>) -> Option<T> {
+        self.spans.iter().rev().find_map(|s| {
+            if at >= s.start && at < s.end {
+                of(s)
+            } else {
+                None
+            }
+        })
+    }
+
     /// The colour to draw the character at byte offset `at` in the cue text: the
     /// innermost span run covering it, else the cue-wide `color`.
     pub fn color_at(&self, at: usize) -> Option<[u8; 4]> {
-        self.spans
-            .iter()
-            .rev()
-            .find(|s| at >= s.start && at < s.end)
-            .map(|s| s.color)
-            .or(self.color)
+        self.innermost(at, |s| s.color).or(self.color)
+    }
+
+    /// The size to draw the character at byte offset `at` at, relative to the
+    /// size the cue itself draws at. No cue-wide fallback: `font_size` is
+    /// already that size, so folding it in here would apply a percent twice.
+    pub fn span_font_size_at(&self, at: usize) -> Option<CueFontSize> {
+        self.innermost(at, |s| s.font_size)
+    }
+
+    /// The shadow to draw under the character at byte offset `at`: the innermost
+    /// span run covering it, else the cue-wide `shadow`.
+    pub fn shadow_at(&self, at: usize) -> Option<TextShadow> {
+        self.innermost(at, |s| s.shadow).or(self.shadow)
+    }
+
+    /// The fill to draw behind the character at byte offset `at` alone. No
+    /// cue-wide fallback: that is the backing box (`background`).
+    pub fn span_background_at(&self, at: usize) -> Option<[u8; 4]> {
+        self.innermost(at, |s| s.background)
     }
 }
 
@@ -182,10 +255,11 @@ pub fn parse_srt(input: &str) -> Vec<Cue> {
 /// Parse WebVTT (`.vtt`) text into cues, in file order. The `WEBVTT` header and
 /// `NOTE` / `REGION` blocks are skipped and inline markup is removed; `STYLE`
 /// blocks are read for `::cue`, `::cue(#id)` and `::cue(.a[.b...])`
-/// `color` / `background-color` rules, which are resolved onto each cue's
-/// [`CueSettings`] (the subset the overlay can apply; other CSS properties are
-/// ignored). A span-scoped `::cue(.class)` colour covers only the `<c.class>`
-/// span it matched, as a [`SpanStyle`] run. A header block's `X-TIMESTAMP-MAP` (RFC 8216 §3.5) rebases the cue
+/// `color` / `background-color` / `font-size` / `text-shadow` rules, which are
+/// resolved onto each cue's [`CueSettings`] (the subset the overlay can apply;
+/// other CSS properties are ignored). A span-scoped `::cue(.class)` rule covers
+/// only the `<c.class>` span it matched, as a [`SpanStyle`] run. A header
+/// block's `X-TIMESTAMP-MAP` (RFC 8216 §3.5) rebases the cue
 /// times that follow it onto the MPEG-2 media timeline, so the concatenated
 /// segments of an HLS rendition land where the video does.
 pub fn parse_webvtt(input: &str) -> Vec<Cue> {
@@ -330,13 +404,15 @@ enum CueSelector {
     Classes(Vec<String>),
 }
 
-/// One parsed `::cue` rule: its selectors and the `color` / `background-color`
-/// it sets (the only properties the overlay can honour).
+/// One parsed `::cue` rule: its selectors and the `color` / `background-color` /
+/// `font-size` / `text-shadow` it sets (the properties the overlay can honour).
 #[derive(Debug)]
 struct CueStyleRule {
     selectors: Vec<CueSelector>,
     color: Option<[u8; 4]>,
     background: Option<[u8; 4]>,
+    font_size: Option<CueFontSize>,
+    shadow: Option<TextShadow>,
 }
 
 /// Parse the WebVTT `STYLE` CSS into the supported `::cue` rules. Comments are
@@ -362,6 +438,8 @@ fn parse_cue_styles(css: &str) -> Vec<CueStyleRule> {
         }
         let mut color = None;
         let mut background = None;
+        let mut font_size = None;
+        let mut shadow = None;
         for decl in decl_str.split(';') {
             let Some((prop, val)) = decl.split_once(':') else {
                 continue;
@@ -369,6 +447,8 @@ fn parse_cue_styles(css: &str) -> Vec<CueStyleRule> {
             match prop.trim().to_ascii_lowercase().as_str() {
                 "color" => color = parse_css_color(val.trim()),
                 "background-color" | "background" => background = parse_css_color(val.trim()),
+                "font-size" => font_size = parse_css_font_size(val.trim()),
+                "text-shadow" => shadow = parse_text_shadow(val.trim()),
                 _ => {}
             }
         }
@@ -376,6 +456,8 @@ fn parse_cue_styles(css: &str) -> Vec<CueStyleRule> {
             selectors,
             color,
             background,
+            font_size,
+            shadow,
         });
     }
     rules
@@ -406,10 +488,9 @@ fn parse_cue_selector(sel: &str) -> Option<CueSelector> {
 }
 
 /// Resolve a cue's style from the sheet. Whole-cue rules (`::cue`, then
-/// `::cue(#id)`, in increasing specificity) set the cue's `color` /
-/// `background`; a span-scoped `::cue(.class)` rule sets the colour of just the
-/// spans that carry its classes, as a [`SpanStyle`] run. A cue has one backing
-/// box, so a span rule's `background-color` still applies cue-wide.
+/// `::cue(#id)`, in increasing specificity) set the cue's properties; a
+/// span-scoped `::cue(.class)` rule sets them for just the spans that carry its
+/// classes, as a [`SpanStyle`] run.
 fn apply_cue_style(
     sheet: &[CueStyleRule],
     id: Option<&str>,
@@ -442,15 +523,19 @@ fn apply_cue_style(
         for (_, rule) in matched {
             fold_rule(rule, &mut run);
         }
-        if let Some(color) = run.color {
+        if run.color.is_some()
+            || run.font_size.is_some()
+            || run.shadow.is_some()
+            || run.background.is_some()
+        {
             settings.spans.push(SpanStyle {
                 start: span.start,
                 end: span.end,
-                color,
+                color: run.color,
+                font_size: run.font_size,
+                shadow: run.shadow,
+                background: run.background,
             });
-        }
-        if run.background.is_some() {
-            settings.background = run.background;
         }
     }
     if let Some(id) = id {
@@ -462,8 +547,8 @@ fn apply_cue_style(
     }
 }
 
-/// Fold the `color` / `background` of every rule with a selector satisfying
-/// `pred` onto `settings`, in sheet order (a later rule wins).
+/// Fold every rule with a selector satisfying `pred` onto `settings`, in sheet
+/// order (a later rule wins).
 fn apply_matching(
     sheet: &[CueStyleRule],
     settings: &mut CueSettings,
@@ -476,14 +561,20 @@ fn apply_matching(
     }
 }
 
-/// Fold one rule's `color` / `background` onto `settings` (a property the rule
-/// does not set leaves the current value).
+/// Fold one rule's properties onto `settings` (a property the rule does not set
+/// leaves the current value).
 fn fold_rule(rule: &CueStyleRule, settings: &mut CueSettings) {
     if rule.color.is_some() {
         settings.color = rule.color;
     }
     if rule.background.is_some() {
         settings.background = rule.background;
+    }
+    if rule.font_size.is_some() {
+        settings.font_size = rule.font_size;
+    }
+    if rule.shadow.is_some() {
+        settings.shadow = rule.shadow;
     }
 }
 
@@ -536,6 +627,139 @@ fn parse_css_color(v: &str) -> Option<[u8; 4]> {
         return Some([r, g, b, a]);
     }
     named_css_color(v)
+}
+
+/// Largest `font-size` a cue rule can ask for, in pixels: the size becomes a
+/// glyph raster, and a stylesheet is as untrusted as the rest of the file.
+const MAX_CUE_FONT_PX: u32 = 512;
+/// Largest `font-size` percent a cue rule can ask for.
+const MAX_CUE_FONT_PERCENT: u32 = 1000;
+/// Largest shadow offset or blur radius a cue rule can ask for, in pixels.
+const MAX_SHADOW_PX: i32 = 256;
+
+/// Parse a `font-size` value: `24px` or `150%`. `None` for any other unit or a
+/// keyword (`larger`, `medium`), which leaves the size the overlay chose.
+fn parse_css_font_size(value: &str) -> Option<CueFontSize> {
+    let value = value.trim().to_ascii_lowercase();
+    if let Some(percent) = value.strip_suffix('%') {
+        let percent = positive_length(percent)?;
+        return Some(CueFontSize::Percent(
+            round_to_u32(percent).clamp(1, MAX_CUE_FONT_PERCENT),
+        ));
+    }
+    let px = positive_length(value.strip_suffix("px")?)?;
+    Some(CueFontSize::Pixels(
+        round_to_u32(px).clamp(1, MAX_CUE_FONT_PX),
+    ))
+}
+
+/// Parse a `text-shadow` value: `offset-x offset-y [blur] [color]`, the colour
+/// in any position and defaulting to black. Lengths are `px` (or a bare `0`);
+/// any other unit, or a token that is neither a length nor a colour, drops the
+/// whole declaration. Only the first shadow of a comma-separated list is kept.
+fn parse_text_shadow(value: &str) -> Option<TextShadow> {
+    let value = value.trim().to_ascii_lowercase();
+    let mut lengths: Vec<f32> = Vec::new();
+    let mut color = None;
+    for part in css_components(first_css_value(&value)) {
+        if let Some(px) = parse_px_length(part) {
+            lengths.push(px);
+            continue;
+        }
+        if color.is_some() {
+            return None;
+        }
+        color = parse_css_color(part);
+        color?;
+    }
+    if lengths.len() < 2 || lengths.len() > 3 {
+        return None;
+    }
+    let blur = match lengths.get(2) {
+        Some(&blur) if blur < 0.0 => return None,
+        Some(&blur) => round_to_u32(blur).min(MAX_SHADOW_PX as u32),
+        None => 0,
+    };
+    Some(TextShadow {
+        offset_x: round_to_i32(lengths[0]).clamp(-MAX_SHADOW_PX, MAX_SHADOW_PX),
+        offset_y: round_to_i32(lengths[1]).clamp(-MAX_SHADOW_PX, MAX_SHADOW_PX),
+        blur,
+        color: color.unwrap_or([0, 0, 0, 255]),
+    })
+}
+
+/// A CSS `px` length, or a bare `0`. `None` for another unit or a non-number.
+fn parse_px_length(token: &str) -> Option<f32> {
+    let token = token.trim();
+    if token == "0" {
+        return Some(0.0);
+    }
+    let n: f32 = token.strip_suffix("px")?.trim().parse().ok()?;
+    n.is_finite().then_some(n)
+}
+
+/// A finite, strictly positive CSS number, for the length forms where zero is
+/// not a usable value.
+fn positive_length(token: &str) -> Option<f32> {
+    let n: f32 = token.trim().parse().ok()?;
+    (n.is_finite() && n > 0.0).then_some(n)
+}
+
+/// Round a non-negative float to the nearest whole number (`f32::round` is not
+/// on the `no_std` baseline).
+fn round_to_u32(v: f32) -> u32 {
+    (v + 0.5) as u32
+}
+
+/// Round a float to the nearest whole number, away from zero at the halfway
+/// point.
+fn round_to_i32(v: f32) -> i32 {
+    if v < 0.0 {
+        -((-v + 0.5) as i32)
+    } else {
+        (v + 0.5) as i32
+    }
+}
+
+/// The part of a comma-separated CSS value before the first separating comma. A
+/// comma inside a function (`rgba(0, 0, 0, .5)`) does not separate.
+fn first_css_value(value: &str) -> &str {
+    let mut depth = 0usize;
+    for (i, c) in value.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => return &value[..i],
+            _ => {}
+        }
+    }
+    value
+}
+
+/// The whitespace-separated components of one CSS value, keeping a
+/// parenthesised group (`rgba(0, 0, 0, .5)`) whole.
+fn css_components(value: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut depth = 0usize;
+    let mut start = None;
+    for (i, c) in value.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        if c.is_whitespace() && depth == 0 {
+            if let Some(from) = start.take() {
+                parts.push(&value[from..i]);
+            }
+        } else if start.is_none() {
+            start = Some(i);
+        }
+    }
+    if let Some(from) = start {
+        parts.push(&value[from..]);
+    }
+    parts
 }
 
 /// Parse a `#rgb` or `#rrggbb` hex colour to opaque RGBA.
@@ -2340,6 +2564,8 @@ mod tests {
                 vertical: WritingMode::Horizontal,
                 color: None,
                 background: None,
+                font_size: None,
+                shadow: None,
                 spans: Vec::new(),
             }
         );
@@ -2353,6 +2579,8 @@ mod tests {
                 vertical: WritingMode::Horizontal,
                 color: None,
                 background: None,
+                font_size: None,
+                shadow: None,
                 spans: Vec::new(),
             }
         );
@@ -2403,21 +2631,26 @@ mod tests {
         assert_eq!(cues.len(), 4);
 
         // .loud recolours "SHOUT" only; the cue-wide colour stays the global one,
-        // and the box (one per cue) takes the rule's background.
+        // and the rule's background fills behind that span alone, leaving the
+        // cue's own backing box unset.
         assert_eq!(cues[0].text, "say SHOUT now");
         assert_eq!(
             cues[0].settings.spans,
             alloc::vec![SpanStyle {
                 start: 4,
                 end: 9,
-                color: [255, 0, 0, 255],
+                color: Some([255, 0, 0, 255]),
+                background: Some([0, 0, 0, 255]),
+                ..SpanStyle::default()
             }]
         );
         assert_eq!(cues[0].settings.color, Some([255, 255, 255, 255]));
-        assert_eq!(cues[0].settings.background, Some([0, 0, 0, 255]));
+        assert_eq!(cues[0].settings.background, None);
         assert_eq!(cues[0].settings.color_at(0), Some([255, 255, 255, 255]));
         assert_eq!(cues[0].settings.color_at(4), Some([255, 0, 0, 255]));
         assert_eq!(cues[0].settings.color_at(9), Some([255, 255, 255, 255]));
+        assert_eq!(cues[0].settings.span_background_at(3), None);
+        assert_eq!(cues[0].settings.span_background_at(4), Some([0, 0, 0, 255]));
 
         // An unclosed voice span runs to the end of the cue.
         assert_eq!(
@@ -2425,7 +2658,8 @@ mod tests {
             alloc::vec![SpanStyle {
                 start: 0,
                 end: 4,
-                color: [0, 255, 255, 255],
+                color: Some([0, 255, 255, 255]),
+                ..SpanStyle::default()
             }]
         );
 
@@ -2463,12 +2697,14 @@ mod tests {
                 SpanStyle {
                     start: 0,
                     end: 8,
-                    color: [0, 0, 255, 255],
+                    color: Some([0, 0, 255, 255]),
+                    ..SpanStyle::default()
                 },
                 SpanStyle {
                     start: 5,
                     end: 8,
-                    color: [255, 0, 0, 255],
+                    color: Some([255, 0, 0, 255]),
+                    ..SpanStyle::default()
                 },
             ]
         );
@@ -2489,6 +2725,122 @@ mod tests {
         let cues = parse_webvtt(input);
         assert_eq!(cues[0].text, "karaoke");
         assert_eq!(cues[0].settings.color, None);
+    }
+
+    #[test]
+    fn webvtt_cue_font_size_is_parsed_per_cue_and_per_span() {
+        // A whole-cue `font-size` sizes the cue; a span rule sizes its own run,
+        // and the percent form stays relative (it resolves against whatever the
+        // cue draws at, which the overlay decides).
+        let input = "WEBVTT\n\n\
+            STYLE\n\
+            ::cue { font-size: 24px; }\n\
+            ::cue(.big) { font-size: 150%; }\n\
+            ::cue(.small) { font-size: 12.4px; }\n\
+            ::cue(.bogus) { font-size: 2em; }\n\
+            ::cue(.huge) { font-size: 99999px; }\n\n\
+            00:00:00.000 --> 00:00:01.000\nsay <c.big>LOUD</c> now\n\n\
+            00:00:01.000 --> 00:00:02.000\n<c.small>a</c><c.bogus>b</c><c.huge>c</c>\n";
+        let cues = parse_webvtt(input);
+        assert_eq!(cues[0].settings.font_size, Some(CueFontSize::Pixels(24)));
+        assert_eq!(cues[0].settings.span_font_size_at(0), None);
+        assert_eq!(
+            cues[0].settings.span_font_size_at(4),
+            Some(CueFontSize::Percent(150))
+        );
+        // 150% of the 24px the cue draws at.
+        assert_eq!(
+            cues[0]
+                .settings
+                .span_font_size_at(4)
+                .map(|size| size.resolve(24.0)),
+            Some(36.0)
+        );
+
+        // A fractional px rounds, an unsupported unit leaves the span alone, and
+        // an absurd size is clamped rather than passed to the rasterizer.
+        assert_eq!(cues[1].text, "abc");
+        assert_eq!(
+            cues[1].settings.span_font_size_at(0),
+            Some(CueFontSize::Pixels(12))
+        );
+        assert_eq!(cues[1].settings.span_font_size_at(1), None);
+        assert_eq!(
+            cues[1].settings.span_font_size_at(2),
+            Some(CueFontSize::Pixels(512))
+        );
+    }
+
+    #[test]
+    fn webvtt_cue_text_shadow_is_parsed() {
+        // The `offset-x offset-y [blur] [colour]` forms, cue-wide and per span.
+        // A blur radius is kept but the overlays draw a hard shadow.
+        let input = "WEBVTT\n\n\
+            STYLE\n\
+            ::cue { text-shadow: 2px 3px; }\n\
+            ::cue(.soft) { text-shadow: -1px 2px 4px rgba(0, 0, 255, 1.0); }\n\
+            ::cue(.first) { text-shadow: red 1px 1px; }\n\
+            ::cue(.list) { text-shadow: 1px 1px black, 9px 9px white; }\n\
+            ::cue(.bad) { text-shadow: 1em 1em; }\n\
+            ::cue(.short) { text-shadow: 4px; }\n\n\
+            00:00:00.000 --> 00:00:01.000\n\
+            a<c.soft>b</c><c.first>c</c><c.list>d</c><c.bad>e</c><c.short>f</c>\n";
+        let cues = parse_webvtt(input);
+        let s = &cues[0].settings;
+        assert_eq!(cues[0].text, "abcdef");
+        // The cue-wide rule, with a black default colour and no blur.
+        assert_eq!(
+            s.shadow,
+            Some(TextShadow {
+                offset_x: 2,
+                offset_y: 3,
+                blur: 0,
+                color: [0, 0, 0, 255],
+            })
+        );
+        assert_eq!(s.shadow_at(0), s.shadow);
+        assert_eq!(
+            s.shadow_at(1),
+            Some(TextShadow {
+                offset_x: -1,
+                offset_y: 2,
+                blur: 4,
+                color: [0, 0, 255, 255],
+            })
+        );
+        // A leading colour is allowed, and only the first shadow of a list is
+        // kept.
+        assert_eq!(s.shadow_at(2).map(|sh| sh.color), Some([255, 0, 0, 255]));
+        assert_eq!(
+            s.shadow_at(3),
+            Some(TextShadow {
+                offset_x: 1,
+                offset_y: 1,
+                blur: 0,
+                color: [0, 0, 0, 255],
+            })
+        );
+        // An unsupported unit and a missing offset both leave the cue-wide
+        // shadow in place.
+        assert_eq!(s.shadow_at(4), s.shadow);
+        assert_eq!(s.shadow_at(5), s.shadow);
+    }
+
+    #[test]
+    fn webvtt_span_background_stays_on_its_span() {
+        // A span-scoped `background-color` fills behind that span alone; the
+        // cue's own backing box comes from the whole-cue rule.
+        let input = "WEBVTT\n\n\
+            STYLE\n\
+            ::cue { background-color: #001122; }\n\
+            ::cue(.mark) { background-color: yellow; }\n\n\
+            00:00:00.000 --> 00:00:01.000\nsay <c.mark>this</c>\n";
+        let cues = parse_webvtt(input);
+        let s = &cues[0].settings;
+        assert_eq!(s.background, Some([0x00, 0x11, 0x22, 255]));
+        assert_eq!(s.span_background_at(0), None);
+        assert_eq!(s.span_background_at(4), Some([255, 255, 0, 255]));
+        assert_eq!(s.span_background_at(8), None);
     }
 
     #[test]
@@ -2515,6 +2867,8 @@ mod tests {
                 vertical: WritingMode::VerticalRl,
                 color: None,
                 background: None,
+                font_size: None,
+                shadow: None,
                 spans: Vec::new(),
             }
         );
@@ -3215,6 +3569,8 @@ mod tests {
                 vertical: WritingMode::Horizontal,
                 color: None,
                 background: None,
+                font_size: None,
+                shadow: None,
                 spans: Vec::new(),
             }
         );
