@@ -1110,6 +1110,43 @@ pub fn decode_packet(bytes: &[u8]) -> Result<PipelinePacket, WireError> {
     })
 }
 
+// ---- framed recordings ----
+
+/// Width of a framed record's length prefix: a `u32-le` payload byte count
+/// ahead of each [`encode_packet`] body.
+pub const RECORD_LENGTH_PREFIX_BYTES: usize = 4;
+
+/// The length prefix that frames a `payload_len`-byte [`encode_packet`] body in
+/// a recording, the one definition of the on-disk record framing that
+/// `recordsink`, `replaysrc`, and the runner's flight-recorder dump share.
+/// [`UnsupportedDomain`](WireError::UnsupportedDomain) for a payload too large
+/// to describe in the prefix.
+pub fn record_length_prefix(
+    payload_len: usize,
+) -> Result<[u8; RECORD_LENGTH_PREFIX_BYTES], WireError> {
+    let len = u32::try_from(payload_len).map_err(|_| WireError::UnsupportedDomain)?;
+    Ok(len.to_le_bytes())
+}
+
+/// Split a recording buffer into its packets. A truncated trailing record (a
+/// recording cut off mid-write, e.g. by the crash being investigated) is dropped
+/// rather than failing the replay.
+pub fn read_records(buf: &[u8]) -> Result<Vec<PipelinePacket>, WireError> {
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i + RECORD_LENGTH_PREFIX_BYTES <= buf.len() {
+        let len = u32::from_le_bytes([buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]) as usize;
+        let start = i + RECORD_LENGTH_PREFIX_BYTES;
+        let end = match start.checked_add(len) {
+            Some(e) if e <= buf.len() => e,
+            _ => break, // truncated tail
+        };
+        out.push(decode_packet(&buf[start..end])?);
+        i = end;
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

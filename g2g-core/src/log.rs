@@ -826,6 +826,35 @@ pub fn report_element_failure(name: Option<&str>, err: &crate::G2gError) {
     );
 }
 
+/// Map a filesystem / device I/O failure onto [`G2gError`](crate::G2gError),
+/// which carries an errno rather than the `io::Error` itself. The single mapping
+/// every path-opening element and the flight-recorder dump share; prefer
+/// [`path_io_err`], which also says which path failed.
+#[cfg(feature = "std")]
+pub fn io_err(e: std::io::Error) -> crate::G2gError {
+    crate::G2gError::Hardware(crate::error::HardwareError::Io(
+        e.raw_os_error().unwrap_or(0),
+    ))
+}
+
+/// [`io_err`] plus an error log naming the file and the OS message. The errno in
+/// `Hardware(Io)` alone does not say which path failed or what went wrong, so
+/// every element that opens a path reports through here.
+#[cfg(feature = "std")]
+pub fn path_io_err<P: AsRef<std::path::Path>>(
+    category: &'static str,
+    verb: &str,
+    path: P,
+    e: std::io::Error,
+) -> crate::G2gError {
+    crate::g2g_error!(
+        Target::category(category),
+        "cannot {verb} {}: {e}",
+        path.as_ref().display()
+    );
+    io_err(e)
+}
+
 /// Install the stderr sink and apply logging from the environment. The sink is
 /// always installed, so ERROR-level diagnostics print by default; the
 /// `G2G_DEBUG` environment variable (a `GST_DEBUG`-style spec) tunes thresholds

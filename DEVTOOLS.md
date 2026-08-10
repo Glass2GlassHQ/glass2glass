@@ -360,6 +360,29 @@ The round-trip is byte-identical (`replaysrc` re-emits the recorded caps and
 frames exactly). The file is length-prefixed `g2g_core::wire` records, the same
 codec the distributed-graph transports use.
 
+## Flight recorder
+
+`recordsink` needs to be in the pipeline before the run. When a live pipeline
+fails after an hour, use the flight recorder instead: every link keeps a bounded
+ring of its most recent packets, and a failed run writes each ring out as a
+recording of the traffic that led there.
+
+```sh
+g2g-launch --record-on-error dumps/ "videotestsrc ! videoscale width=64 height=48 ! filesink location=/dev/full"
+# on failure it prints one line per file:
+#   recorded dumps/0-VideoTestSrc0-to-VideoScale0.g2grec
+#   recorded dumps/1-VideoScale0-to-FileSink0.g2grec
+
+g2g-launch "replaysrc location=dumps/1-VideoScale0-to-FileSink0.g2grec ! fakesink"
+```
+
+Files are named for the two elements the link joins, and hold the same records
+`recordsink` writes, so any dump replays as a source. Retention per link is
+`FLIGHT_RING_PACKETS` (60) packets or `FLIGHT_RING_BYTES` (8 MiB), whichever
+binds first. Off by default and free when off. Works under `--threads`, and with
+`--observe` / `--tui`. One limit: a link carrying GPU memory is skipped (device
+frames do not serialize, so they cannot be replayed).
+
 ## MCP server (`g2g-mcp`)
 
 `g2g-mcp` is a Model Context Protocol server (JSON-RPC over stdio) for

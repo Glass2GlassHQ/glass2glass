@@ -19,33 +19,14 @@ use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, ConfigureOutcome, ElementMetadata, G2gError, HardwareError,
-    OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue,
-    PropertySpec,
+    AsyncElement, Caps, CapsConstraint, ConfigureOutcome, ElementMetadata, G2gError, OutputSink,
+    PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
 
-/// Map a filesystem error to the structured `Hardware(Io)` variant, carrying
-/// the raw OS error code. Shared with `FileSrc`.
-pub(crate) fn io_err(e: std::io::Error) -> G2gError {
-    G2gError::Hardware(HardwareError::Io(e.raw_os_error().unwrap_or(0)))
-}
-
-/// [`io_err`] plus an error log naming the file and the OS message. The errno in
-/// `Hardware(Io)` alone does not say which path failed or what went wrong, so
-/// every element that opens a path reports through here.
-pub(crate) fn path_io_err<P: AsRef<std::path::Path>>(
-    category: &'static str,
-    verb: &str,
-    path: P,
-    e: std::io::Error,
-) -> G2gError {
-    g2g_core::g2g_error!(
-        g2g_core::log::Target::category(category),
-        "cannot {verb} {}: {e}",
-        path.as_ref().display()
-    );
-    io_err(e)
-}
+/// The filesystem-error mapping every path-opening element here reports through,
+/// shared with the runner's flight-recorder dump (which is in `g2g-core`, so the
+/// one definition lives there).
+pub(crate) use g2g_core::log::{io_err, path_io_err};
 
 /// # Example
 ///

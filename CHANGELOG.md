@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1016: `g2g-launch --record-on-error <dir>` keeps a bounded ring of recent packets per link and dumps each one as a replayable recording when the run fails.
 - M1015: pipeline errors name the failing element and the file path that failed, and an unknown launch name suggests the nearest spelling or the feature that compiles it.
 - M1014: the duplex session grows its pad count live, so a new WebRTC track needs no reserved spare pad.
 - M1013: the Cuda memory domain carries the device ordinal, reported through DLPack and torch-verified.

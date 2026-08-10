@@ -93,6 +93,7 @@ use crate::runtime::solver::{
     ForwardResolve, NegotiationFailure, NodeConstraint,
 };
 use crate::runtime::state::{Flow, StateController};
+use crate::runtime::FlightRecorder;
 use crate::runtime::Observer;
 use crate::segment::Segment;
 
@@ -845,6 +846,7 @@ pub async fn run_graph<'a, Clk: PipelineClock>(
         None,
         None,
         None,
+        None,
     )
     .await
 }
@@ -872,6 +874,7 @@ pub async fn run_graph_with_copy_policy<'a, Clk: PipelineClock>(
         None,
         None,
         Some(policy),
+        None,
         None,
         None,
     )
@@ -962,6 +965,7 @@ pub async fn run_graph_with_bus<'a, Clk: PipelineClock>(
         None,
         None,
         None,
+        None,
     )
     .await
 }
@@ -990,6 +994,7 @@ pub async fn run_graph_observed<'a, Clk: PipelineClock>(
         None,
         Some(observer),
         None,
+        None,
     )
     .await
 }
@@ -1014,6 +1019,7 @@ pub async fn run_graph_with_progress<'a, Clk: PipelineClock>(
         None,
         None,
         Some(progress),
+        None,
         None,
         None,
         None,
@@ -1072,6 +1078,63 @@ pub async fn run_graph_stateful<'a, Clk: PipelineClock>(
         None,
         None,
         None,
+        None,
+        None,
+    )
+    .await
+}
+
+/// As [`run_graph_with_progress`], but with a [`FlightRecorder`] attached
+/// (M1016): every edge keeps a bounded ring of its most recent packets while the
+/// run goes, and on failure the caller writes them out with
+/// [`FlightRecorder::dump_to_dir`] as one replayable recording per edge. An hour
+/// of live streaming that ends in an error hands back the last moments of
+/// traffic instead of nothing.
+///
+/// `progress` is optional (the recorder does not need it); pass `None` for the
+/// plain [`run_graph`] behavior plus recording.
+pub async fn run_graph_recorded<'a, Clk: PipelineClock>(
+    graph: Graph<GraphNodeRef<'a>>,
+    clock: &Clk,
+    link_capacity: impl Into<LinkCapacity>,
+    progress: Option<&PipelineProgress>,
+    recorder: &FlightRecorder,
+) -> Result<RunStats, G2gError> {
+    run_graph_inner(
+        graph,
+        clock,
+        link_capacity,
+        None,
+        None,
+        progress,
+        None,
+        None,
+        Some(recorder),
+        None,
+    )
+    .await
+}
+
+/// [`run_graph_observed`] plus the [`run_graph_recorded`] flight recorder, for a
+/// tool that watches a run live and still wants the last packets when it fails.
+pub async fn run_graph_observed_recorded<'a, Clk: PipelineClock>(
+    graph: Graph<GraphNodeRef<'a>>,
+    clock: &Clk,
+    link_capacity: impl Into<LinkCapacity>,
+    observer: &Observer,
+    bus: Option<&BusHandle>,
+    recorder: &FlightRecorder,
+) -> Result<RunStats, G2gError> {
+    run_graph_inner(
+        graph,
+        clock,
+        link_capacity,
+        bus,
+        None,
+        None,
+        None,
+        Some(observer),
+        Some(recorder),
         None,
     )
     .await
@@ -1633,6 +1696,33 @@ fn build_channels<'a>(
     }
 }
 
+/// Start the flight recorder on every edge, through the same per-edge
+/// content-inspection slot an observer's preview tap uses. Called once the
+/// channels are built and before any packet flows, so each edge's ring opens
+/// with its negotiated caps and the element names the run assigned. Generic over
+/// the node payload because the cooperative runner borrows its elements and the
+/// thread-per-arm one owns them, while the edges this reads are the same.
+fn install_flight_recorder<E>(
+    recorder: &crate::runtime::FlightRecorder,
+    vg: &ValidatedGraph<E>,
+    txs: &[Option<LinkSender>],
+    solution: &[Caps],
+    names: &[alloc::string::String],
+) {
+    for (eid, tx) in txs.iter().enumerate() {
+        let (Some(tx), Some(caps)) = (tx.as_ref(), solution.get(eid)) else {
+            continue;
+        };
+        let edge = vg.edge(eid);
+        let label = crate::runtime::flight_recorder::edge_label(
+            names,
+            edge.src.node.0 as usize,
+            edge.dst.node.0 as usize,
+        );
+        recorder.record_edge(label, caps, &tx.probe);
+    }
+}
+
 /// Hand `obs` the per-edge taps that only exist once the channels are built: the
 /// content-inspection slot, the negotiated caps, and the live traffic counters.
 /// Aligned with the edge ids registered during `prepare_graph`.
@@ -1662,6 +1752,7 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
     progress: Option<&PipelineProgress>,
     copy_policy: Option<crate::copyplan::CopyPolicy>,
     observer: Option<&Observer>,
+    recorder: Option<&crate::runtime::FlightRecorder>,
     ticker: Option<&'a dyn DynAsyncClock>,
 ) -> Result<RunStats, G2gError> {
     // A pipeline clock that can sleep on a deadline is the fan-in tick timer
@@ -1740,6 +1831,12 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
     // installs an interceptor.
     if let Some(obs) = observer {
         register_edge_taps(obs, &txs, &solution, link_capacity);
+    }
+    // Flight recorder: a bounded ring of recent packets per edge, dumped by the
+    // caller once the run has failed. Same per-edge slot as the observer's
+    // preview tap, so an unrecorded run stays exactly as cheap as before.
+    if let Some(rec) = recorder {
+        install_flight_recorder(rec, &vg, &txs, &solution, &names);
     }
 
     let mut arms: Vec<BoxFuture<'a, Result<u64, G2gError>>> = Vec::with_capacity(n + 1);
@@ -2108,6 +2205,7 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
     state: Option<StateController>,
     progress: Option<&PipelineProgress>,
     observer: Option<&Observer>,
+    recorder: Option<&FlightRecorder>,
     ticker: Option<alloc::sync::Arc<dyn DynAsyncClock + Send + Sync>>,
     spawner: &S,
 ) -> Result<RunStats, G2gError> {
@@ -2164,6 +2262,12 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
     // Dev-tooling edge tap: same as the cooperative path.
     if let Some(obs) = observer {
         register_edge_taps(obs, &txs, &solution, link_capacity);
+    }
+    // Flight recorder: installed here, before the arms move onto their threads,
+    // so each ring is shared with the worker that fills it (see the cooperative
+    // path for the mechanism).
+    if let Some(rec) = recorder {
+        install_flight_recorder(rec, &vg, &txs, &solution, &names);
     }
 
     // One `spawn_arm` handle per arm (mirrors the cooperative `arms` vec). Each
@@ -2425,6 +2529,7 @@ pub async fn run_graph_threaded<Clk: PipelineClock, S: GraphSpawner>(
         None,
         None,
         None,
+        None,
         spawner,
     )
     .await
@@ -2457,6 +2562,7 @@ pub async fn run_graph_threaded_ticked<S: GraphSpawner>(
         None,
         None,
         None,
+        None,
         Some(clock.clone()),
         spawner,
     )
@@ -2480,6 +2586,7 @@ pub async fn run_graph_threaded_with_bus<Clk: PipelineClock, S: GraphSpawner>(
         clock,
         link_capacity,
         Some(bus),
+        None,
         None,
         None,
         None,
@@ -2508,6 +2615,7 @@ pub async fn run_graph_threaded_with_progress<Clk: PipelineClock, S: GraphSpawne
         Some(progress),
         None,
         None,
+        None,
         spawner,
     )
     .await
@@ -2534,6 +2642,38 @@ pub async fn run_graph_threaded_observed<Clk: PipelineClock, S: GraphSpawner>(
         None,
         None,
         Some(observer),
+        None,
+        None,
+        spawner,
+    )
+    .await
+}
+
+/// [`run_graph_recorded`]'s thread-per-arm twin: the same [`FlightRecorder`],
+/// with each arm on its own OS thread. The rings are shared with the worker
+/// threads that fill them, so a heavy multicore pipeline (the kind that runs
+/// under [`run_graph_threaded`] in the first place) leaves the same replayable
+/// per-edge recording behind when it fails.
+///
+/// `progress` is optional, as in [`run_graph_recorded`].
+#[cfg(all(feature = "std", feature = "multi-thread"))]
+pub async fn run_graph_threaded_recorded<Clk: PipelineClock, S: GraphSpawner>(
+    graph: Graph<GraphNode>,
+    clock: &Clk,
+    link_capacity: impl Into<LinkCapacity>,
+    progress: Option<&PipelineProgress>,
+    recorder: &FlightRecorder,
+    spawner: &S,
+) -> Result<RunStats, G2gError> {
+    run_graph_threaded_inner(
+        graph,
+        clock,
+        link_capacity,
+        None,
+        None,
+        progress,
+        None,
+        Some(recorder),
         None,
         spawner,
     )

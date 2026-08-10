@@ -6,9 +6,12 @@
 //! a file.
 //!
 //! File format: a flat sequence of `[u32-le length][length bytes]` records, each
-//! payload an `encode_packet` frame. The first record is the `CapsChanged` the
-//! sink was configured with; the rest are `DataFrame`s in arrival order. EOS is
-//! not stored (the replay source emits its own at end of file).
+//! payload an `encode_packet` frame (the framing itself is
+//! [`g2g_core::wire::record_length_prefix`] / [`g2g_core::wire::read_records`],
+//! shared with the runner's flight-recorder dump). The first record is the
+//! `CapsChanged` the sink was configured with; the rest are `DataFrame`s in
+//! arrival order. EOS is not stored (the replay source emits its own at end of
+//! file).
 
 use core::future::Future;
 use core::pin::Pin;
@@ -24,38 +27,25 @@ use std::time::Duration;
 use crate::filesink::{io_err, path_io_err};
 use g2g_core::log::short_type_name;
 use g2g_core::runtime::SourceLoop;
-use g2g_core::wire::{decode_packet, encode_packet};
+use g2g_core::wire::{encode_packet, record_length_prefix};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, ConfigureOutcome, ElementMetadata, G2gError, OutputSink,
     PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
 
-/// Serialize `packet` and append it to `w` as a `[u32-le len][bytes]` record.
-/// A non-`System` frame is not serializable and returns `UnsupportedDomain`.
+/// Serialize `packet` and append it to `w` as one framed record. A non-`System`
+/// frame is not serializable and returns `UnsupportedDomain`.
 fn write_record<W: Write>(w: &mut W, packet: &PipelinePacket) -> Result<(), G2gError> {
     let bytes = encode_packet(packet).map_err(|_| G2gError::UnsupportedDomain)?;
-    let len = u32::try_from(bytes.len()).map_err(|_| G2gError::UnsupportedDomain)?;
-    w.write_all(&len.to_le_bytes()).map_err(io_err)?;
+    let prefix = record_length_prefix(bytes.len()).map_err(|_| G2gError::UnsupportedDomain)?;
+    w.write_all(&prefix).map_err(io_err)?;
     w.write_all(&bytes).map_err(io_err)?;
     Ok(())
 }
 
-/// Split a recording buffer into its packet records. A truncated trailing record
-/// (a recording cut off mid-write) is dropped rather than failing the replay.
+/// The recording's packets, mapping a corrupt record onto the pipeline error.
 fn read_records(buf: &[u8]) -> Result<Vec<PipelinePacket>, G2gError> {
-    let mut out = Vec::new();
-    let mut i = 0usize;
-    while i + 4 <= buf.len() {
-        let len = u32::from_le_bytes([buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]) as usize;
-        let start = i + 4;
-        let end = match start.checked_add(len) {
-            Some(e) if e <= buf.len() => e,
-            _ => break, // truncated tail
-        };
-        out.push(decode_packet(&buf[start..end]).map_err(|_| G2gError::CapsMismatch)?);
-        i = end;
-    }
-    Ok(out)
+    g2g_core::wire::read_records(buf).map_err(|_| G2gError::CapsMismatch)
 }
 
 // --- recordsink ---------------------------------------------------------
