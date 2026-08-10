@@ -41,7 +41,7 @@
 
 use std::time::Instant;
 
-use g2g_core::element::{BoxFuture, PushOutcome};
+use g2g_core::element::PushOutcome;
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::MemoryDomain;
 use g2g_core::metrics::{monotonic_ns, LatencySnapshot};

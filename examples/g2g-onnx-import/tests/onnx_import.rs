@@ -14,7 +14,7 @@
 //! Skips when burn's wgpu backend finds no adapter. There is no ndarray-backend
 //! variant: `BurnInference` is pinned to the wgpu backend.
 
-use g2g_core::element::{BoxFuture, PushOutcome};
+use g2g_core::element::{PushOutcome};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{

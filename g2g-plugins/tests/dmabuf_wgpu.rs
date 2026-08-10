@@ -9,7 +9,7 @@ use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
 
 use ash::vk;
 
-use g2g_core::element::{BoxFuture, PushOutcome};
+use g2g_core::element::PushOutcome;
 use g2g_core::memory::{MemoryDomain, OwnedDmaBuf};
 use g2g_core::runtime::block_on;
 use g2g_core::{

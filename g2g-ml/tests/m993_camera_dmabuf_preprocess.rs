@@ -17,7 +17,9 @@
 //!     -- --ignored --nocapture
 //! ```
 
+#[cfg(feature = "v4l2-dmabuf-wgpu")]
 use core::future::Future;
+#[cfg(feature = "v4l2-dmabuf-wgpu")]
 use core::pin::Pin;
 use g2g_ml::wgpupreprocess::{gpu_available, yuyv_to_rgb_tensor};
 
