@@ -14,8 +14,6 @@
 //! (1 s + 1 s = 2 s) for both mappings; g2g presents the GStreamer timeline.
 #![cfg(feature = "std")]
 
-use core::future::Future;
-use core::pin::Pin;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -62,11 +60,13 @@ impl CaptureSink {
 }
 
 impl OutputSink for CaptureSink {
-    fn push<'a>(
-        &'a mut self,
-        packet: PipelinePacket,
-    ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
-        Box::pin(async move {
+    fn poll_push(
+        &mut self,
+        _cx: &mut core::task::Context<'_>,
+        packet_slot: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        let packet = packet_slot.take().expect("poll_push without a packet");
+        core::task::Poll::Ready({
             match packet {
                 PipelinePacket::CapsChanged(c) => self.caps.push(c),
                 PipelinePacket::Segment(s) => self.segments.push(s),
@@ -87,12 +87,13 @@ impl MultiOutputSink for CaptureSink {
         1
     }
 
-    fn push_to<'a>(
-        &'a mut self,
+    fn poll_push_to(
+        &mut self,
+        cx: &mut core::task::Context<'_>,
         _port: usize,
-        packet: PipelinePacket,
-    ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
-        OutputSink::push(self, packet)
+        packet: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        OutputSink::poll_push(self, cx, packet)
     }
 }
 

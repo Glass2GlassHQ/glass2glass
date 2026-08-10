@@ -7,8 +7,6 @@
 //! real device plus cupy and skips itself when either is missing.
 #![cfg(feature = "python")]
 
-use core::future::Future;
-use core::pin::Pin;
 use std::sync::Arc;
 
 use pyo3::prelude::*;
@@ -36,12 +34,15 @@ struct CollectSink {
 }
 
 impl OutputSink for CollectSink {
-    fn push<'a>(
-        &'a mut self,
-        packet: PipelinePacket,
-    ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
+    fn poll_push(
+        &mut self,
+        _cx: &mut core::task::Context<'_>,
+        packet_slot: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        let packet = packet_slot.take().expect("poll_push without a packet");
+
         self.packets.push(packet);
-        Box::pin(async { Ok(PushOutcome::Accepted) })
+        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
     }
 }
 

@@ -31,11 +31,13 @@ fn h264_caps() -> Caps {
 
 struct NullOut;
 impl g2g_core::OutputSink for NullOut {
-    fn push<'a>(
-        &'a mut self,
-        _packet: PipelinePacket,
-    ) -> g2g_core::element::BoxFuture<'a, Result<g2g_core::element::PushOutcome, G2gError>> {
-        Box::pin(async { Ok(g2g_core::element::PushOutcome::Accepted) })
+    fn poll_push(
+        &mut self,
+        _cx: &mut core::task::Context<'_>,
+        packet_slot: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<g2g_core::PushOutcome, G2gError>> {
+        packet_slot.take();
+        core::task::Poll::Ready(Ok(g2g_core::element::PushOutcome::Accepted))
     }
 }
 

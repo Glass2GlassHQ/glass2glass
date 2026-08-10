@@ -65,7 +65,13 @@ struct CaptureSink {
     first_len: usize,
 }
 impl OutputSink for CaptureSink {
-    fn push<'a>(&'a mut self, p: PipelinePacket) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
+    fn poll_push(
+        &mut self,
+        _cx: &mut core::task::Context<'_>,
+        packet_slot: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        let p = packet_slot.take().expect("poll_push without a packet");
+
         if let PipelinePacket::DataFrame(f) = &p {
             if self.frames == 0 {
                 if let Some(s) = f.domain.as_system_slice() {
@@ -74,7 +80,7 @@ impl OutputSink for CaptureSink {
             }
             self.frames += 1;
         }
-        Box::pin(async move { Ok(PushOutcome::Accepted) })
+        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
     }
 }
 

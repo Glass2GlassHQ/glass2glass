@@ -79,19 +79,19 @@ pub(crate) async fn emit_packets(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::boxed::Box;
-    use core::future::Future;
-    use core::pin::Pin;
 
     /// Sink whose push returns a fixed outcome, to drive the keyframe-request path.
     struct OutcomeSink(PushOutcome);
     impl OutputSink for OutcomeSink {
-        fn push<'a>(
-            &'a mut self,
-            _packet: PipelinePacket,
-        ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
+        fn poll_push(
+            &mut self,
+            _cx: &mut core::task::Context<'_>,
+            packet_slot: &mut Option<PipelinePacket>,
+        ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+            packet_slot.take();
+
             let outcome = self.0.clone();
-            Box::pin(async move { Ok(outcome) })
+            core::task::Poll::Ready(Ok(outcome))
         }
     }
 

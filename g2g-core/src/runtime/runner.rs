@@ -1,12 +1,15 @@
-use core::future::Future;
-
+#[cfg(feature = "std")]
 use alloc::boxed::Box;
+use core::future::Future;
 
 use crate::bus::BusHandle;
 use crate::caps::Caps;
 use crate::clock::{elect_clock, ClockCandidate, ClockPriority, ClockSync, PipelineClock};
+#[cfg(feature = "std")]
+use crate::element::BoxFuture;
 use crate::element::{
-    AsyncElement, BoxFuture, ConfigureOutcome, ElementBound, OutputSink, PushOutcome, Reconfigure,
+    AsyncElement, ConfigureOutcome, ElementBound, OutputSink, OutputSinkExt, PushOutcome,
+    Reconfigure,
 };
 use crate::error::G2gError;
 use crate::format_element::{CapsConstraint, CapsPreferences};
@@ -51,7 +54,7 @@ where
 #[cfg(feature = "std")]
 use crate::element::DynAsyncElement;
 #[cfg(feature = "std")]
-use crate::fanout::{MultiOutputElement, MultiOutputSink, MultiOutputSource, MultiSenderSink};
+use crate::fanout::{MultiOutputElement, MultiOutputSinkExt, MultiOutputSource, MultiSenderSink};
 #[cfg(feature = "std")]
 use crate::graph::Graph;
 #[cfg(feature = "std")]
@@ -2007,11 +2010,13 @@ where
 pub(crate) struct NullSink;
 
 impl OutputSink for NullSink {
-    fn push<'a>(
-        &'a mut self,
-        _packet: PipelinePacket,
-    ) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
-        Box::pin(async { Ok(PushOutcome::Accepted) })
+    fn poll_push(
+        &mut self,
+        _cx: &mut core::task::Context<'_>,
+        packet: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        packet.take();
+        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
     }
 }
 

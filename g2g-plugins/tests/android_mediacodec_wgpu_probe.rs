@@ -78,11 +78,13 @@ const H264: &[u8] = include_bytes!("fixtures/h264_640x480.h264");
 struct Discard;
 
 impl OutputSink for Discard {
-    fn push<'a>(
-        &'a mut self,
-        _packet: PipelinePacket,
-    ) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
-        Box::pin(async move { Ok(PushOutcome::Accepted) })
+    fn poll_push(
+        &mut self,
+        _cx: &mut core::task::Context<'_>,
+        packet_slot: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        packet_slot.take();
+        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
     }
 }
 
@@ -93,11 +95,13 @@ struct Collect {
 }
 
 impl OutputSink for Collect {
-    fn push<'a>(
-        &'a mut self,
-        packet: PipelinePacket,
-    ) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
-        Box::pin(async move {
+    fn poll_push(
+        &mut self,
+        _cx: &mut core::task::Context<'_>,
+        packet_slot: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        let packet = packet_slot.take().expect("poll_push without a packet");
+        core::task::Poll::Ready({
             self.packets.push(packet);
             Ok(PushOutcome::Accepted)
         })

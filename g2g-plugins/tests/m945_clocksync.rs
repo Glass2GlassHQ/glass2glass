@@ -10,8 +10,7 @@
 //! std-gated: `cargo test -p g2g-plugins --features std --test m945_clocksync`.
 #![cfg(feature = "std")]
 
-use core::future::{ready, Future, Ready};
-use core::pin::Pin;
+use core::future::{ready, Ready};
 use core::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -63,11 +62,13 @@ struct CaptureSink {
 }
 
 impl OutputSink for CaptureSink {
-    fn push<'a>(
-        &'a mut self,
-        packet: PipelinePacket,
-    ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
-        Box::pin(async move {
+    fn poll_push(
+        &mut self,
+        _cx: &mut core::task::Context<'_>,
+        packet_slot: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        let packet = packet_slot.take().expect("poll_push without a packet");
+        core::task::Poll::Ready({
             match packet {
                 PipelinePacket::DataFrame(f) => self.frames.push(f.timing.pts_ns),
                 PipelinePacket::CapsChanged(c) => self.caps.push(c),

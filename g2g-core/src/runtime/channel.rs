@@ -4,10 +4,9 @@ use core::future::Future;
 use core::pin::Pin;
 use core::task::{Context, Poll, Waker};
 
-use alloc::boxed::Box;
 use spin::Mutex;
 
-use crate::element::{BoxFuture, OutputSink, PushOutcome, QosMessage, Reconfigure};
+use crate::element::{OutputSink, PushOutcome, QosMessage, Reconfigure};
 use crate::error::G2gError;
 use crate::frame::PipelinePacket;
 use crate::link::LinkPolicy;
@@ -117,6 +116,30 @@ impl<T> Sender<T> {
         }
     }
 
+    /// Poll form of [`send`](Self::send): enqueue `value` once capacity frees,
+    /// parking the send waker while full. `value` is taken only on success, so
+    /// the caller re-polls with the same slot.
+    pub fn poll_send(
+        &self,
+        cx: &mut Context<'_>,
+        value: &mut Option<T>,
+    ) -> Poll<Result<(), SendError>> {
+        let mut g = self.inner.lock();
+        if g.receivers == 0 {
+            return Poll::Ready(Err(SendError::Closed));
+        }
+        if g.queue.len() < g.capacity {
+            let v = value.take().expect("poll_send called without a value");
+            g.queue.push_back(v);
+            if let Some(w) = g.recv_waker.take() {
+                w.wake();
+            }
+            return Poll::Ready(Ok(()));
+        }
+        g.send_waker = Some(cx.waker().clone());
+        Poll::Pending
+    }
+
     /// Remove and return the front-most queued value matching `pred`, or
     /// `None` if none match. Used by a leaky `DropOldest` link to evict the
     /// oldest data frame and make room without disturbing queued control
@@ -140,23 +163,7 @@ impl<'a, T: Unpin> Future for SendFuture<'a, T> {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
-        let mut g = this.sender.inner.lock();
-        if g.receivers == 0 {
-            return Poll::Ready(Err(SendError::Closed));
-        }
-        if g.queue.len() < g.capacity {
-            let v = this
-                .value
-                .take()
-                .expect("SendFuture polled after completion");
-            g.queue.push_back(v);
-            if let Some(w) = g.recv_waker.take() {
-                w.wake();
-            }
-            return Poll::Ready(Ok(()));
-        }
-        g.send_waker = Some(cx.waker().clone());
-        Poll::Pending
+        this.sender.poll_send(cx, &mut this.value)
     }
 }
 
@@ -624,6 +631,25 @@ pub struct SenderSink {
     /// downstream backpressure. `None` on an uninstrumented adapter (no cost:
     /// the blocking send then takes no extra clock read).
     push_wait_probe: Probe,
+    /// In-flight push phase, so `poll_push` runs the pre-send steps exactly
+    /// once per packet and a blocked send resumes where it left off.
+    push_phase: PushPhase,
+}
+
+/// See [`SenderSink::push_phase`].
+#[derive(Debug, Clone, Copy)]
+enum PushPhase {
+    /// No push in flight: the next poll runs the pre-send steps.
+    Idle,
+    /// Past the pre-send steps, awaiting queue capacity: only the enqueue and
+    /// its accounting remain. `stamped` records whether a transit stamp was
+    /// pushed for this packet (Block links only), so a dead link rolls back
+    /// exactly what was stamped.
+    Sending {
+        bytes: u64,
+        blocked_since: Option<u64>,
+        stamped: bool,
+    },
 }
 
 impl SenderSink {
@@ -642,6 +668,7 @@ impl SenderSink {
             meta_stash: None,
             eos_forwarded: false,
             push_wait_probe: None,
+            push_phase: PushPhase::Idle,
         }
     }
 
@@ -751,129 +778,184 @@ impl SenderSink {
     }
 }
 
+impl SenderSink {
+    /// The blocking-send tail of a push: enqueue when capacity frees, then the
+    /// accounting and the post-send outcome. `stamped` says whether the Block
+    /// path pushed a transit stamp for this packet, so a dead link rolls back
+    /// exactly that.
+    fn poll_blocking_send(
+        &mut self,
+        cx: &mut core::task::Context<'_>,
+        packet: &mut Option<PipelinePacket>,
+        bytes: u64,
+        blocked_since: Option<u64>,
+        stamped: bool,
+    ) -> Poll<Result<PushOutcome, G2gError>> {
+        match self.link.data.poll_send(cx, packet) {
+            Poll::Pending => Poll::Pending,
+            // Post-send check covers the "request fired while we were
+            // awaiting capacity" window; the packet is already in the link
+            // under old caps.
+            Poll::Ready(Ok(())) => {
+                self.push_phase = PushPhase::Idle;
+                self.link.record_sent(bytes, blocked_since);
+                self.record_push_wait(blocked_since);
+                Poll::Ready(Ok(self.post_send_outcome()))
+            }
+            Poll::Ready(Err(SendError::Closed)) => {
+                self.push_phase = PushPhase::Idle;
+                if stamped {
+                    if let Some(ring) = &self.link.transit {
+                        ring.lock().pop_back();
+                    }
+                }
+                // The old by-value push dropped an unsent packet with its
+                // future; taking it here keeps that.
+                packet.take();
+                Poll::Ready(Err(G2gError::Shutdown))
+            }
+            Poll::Ready(Err(SendError::Full)) => unreachable!("poll_send never returns Full"),
+        }
+    }
+}
+
 impl OutputSink for SenderSink {
-    fn push<'a>(
-        &'a mut self,
-        #[cfg_attr(not(feature = "metadata"), allow(unused_mut))] mut packet: PipelinePacket,
-    ) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
-        Box::pin(async move {
-            // M759: attach the arm's stashed propagated metadata to a fresh
-            // output frame (one whose own meta is empty), so a transform that
-            // emits new frames still carries the survivors forward.
-            // Element-authored meta is never overwritten.
-            #[cfg(feature = "metadata")]
-            if let (Some(stash), PipelinePacket::DataFrame(frame)) = (&self.meta_stash, &mut packet)
-            {
-                if frame.meta.is_empty() {
-                    frame.meta = stash.clone();
-                }
+    fn begin_push(&mut self) {
+        // A cancelled push may have parked mid-send; its packet died with its
+        // future, so the phase must not leak into this push.
+        self.push_phase = PushPhase::Idle;
+    }
+
+    fn poll_push(
+        &mut self,
+        cx: &mut core::task::Context<'_>,
+        packet_slot: &mut Option<PipelinePacket>,
+    ) -> Poll<Result<PushOutcome, G2gError>> {
+        if let PushPhase::Sending {
+            bytes,
+            blocked_since,
+            stamped,
+        } = self.push_phase
+        {
+            return self.poll_blocking_send(cx, packet_slot, bytes, blocked_since, stamped);
+        }
+        let packet = packet_slot
+            .as_mut()
+            .expect("poll_push called without a packet");
+        // M759: attach the arm's stashed propagated metadata to a fresh
+        // output frame (one whose own meta is empty), so a transform that
+        // emits new frames still carries the survivors forward.
+        // Element-authored meta is never overwritten.
+        #[cfg(feature = "metadata")]
+        if let (Some(stash), PipelinePacket::DataFrame(frame)) = (&self.meta_stash, &mut *packet) {
+            if frame.meta.is_empty() {
+                frame.meta = stash.clone();
             }
-            // A probe may drop the packet before it ever enters the link.
-            if self.probe.action(&packet) == ProbeAction::Drop {
-                return Ok(PushOutcome::Accepted);
-            }
-            // Pre-send check: if downstream already requested a
-            // reconfigure, surface it before this packet enters the
-            // link. Caller renegotiates and decides what to do with
-            // `packet` (resend under agreed caps, drop, etc.). A relayed
-            // ForceKeyframe hops upstream instead (M720).
-            if let Some(r) = self.take_reconfigure_or_relay() {
-                return Ok(PushOutcome::Reconfigure(r));
-            }
-            // Past the pre-send checks the packet is committed to the link, so
-            // an Eos here is one the consumer will see (M909).
-            if matches!(packet, PipelinePacket::Eos) {
-                self.eos_forwarded = true;
-            }
-            // M980: keep the caps this link is carrying, so an observer reads the
-            // shape data actually flows under, not just the solved one.
-            if let (PipelinePacket::CapsChanged(caps), Some(c)) = (&packet, &self.link.counters) {
-                c.record_caps(caps);
-            }
-            // Leaky links drop *data frames* under a full channel rather than
-            // applying backpressure; control packets (caps / segment / flush /
-            // eos) are never dropped, they always block so the stream stays
-            // correct. A non-leaky link (the default) always blocks.
-            let is_data = matches!(packet, PipelinePacket::DataFrame(_));
-            // Measured before the send moves the packet into the link.
-            let bytes = packet_bytes(&packet);
-            if is_data && self.link.policy != LinkPolicy::Block {
-                match self.link.policy {
-                    LinkPolicy::DropNewest => match self.link.data.try_send(packet) {
-                        Ok(()) => self.link.record_sent(bytes, None),
-                        // Channel full: drop the incoming frame.
-                        Err((_dropped, SendError::Full)) => self.link.record_drop(),
-                        Err((_v, SendError::Closed)) => return Err(G2gError::Shutdown),
-                    },
-                    LinkPolicy::DropOldest => match self.link.data.try_send(packet) {
-                        Ok(()) => self.link.record_sent(bytes, None),
-                        Err((returned, SendError::Full)) => {
-                            // Evict the oldest queued data frame to make room.
-                            // If only control packets are queued, fall back to
-                            // blocking rather than dropping a control packet.
-                            if self
-                                .link
-                                .data
-                                .evict_front_matching(|p| matches!(p, PipelinePacket::DataFrame(_)))
-                                .is_some()
-                            {
-                                self.link.record_drop();
-                                match self.link.data.try_send(returned) {
-                                    Ok(()) => self.link.record_sent(bytes, None),
-                                    Err((_v, SendError::Closed)) => return Err(G2gError::Shutdown),
-                                    Err((_v, SendError::Full)) => {
-                                        unreachable!("a slot was just freed by eviction")
-                                    }
+        }
+        // A probe may drop the packet before it ever enters the link.
+        if self.probe.action(packet) == ProbeAction::Drop {
+            packet_slot.take();
+            return Poll::Ready(Ok(PushOutcome::Accepted));
+        }
+        // Pre-send check: if downstream already requested a
+        // reconfigure, surface it before this packet enters the
+        // link. Caller renegotiates and decides what to do with
+        // `packet` (resend under agreed caps, drop, etc.). A relayed
+        // ForceKeyframe hops upstream instead (M720).
+        if let Some(r) = self.take_reconfigure_or_relay() {
+            packet_slot.take();
+            return Poll::Ready(Ok(PushOutcome::Reconfigure(r)));
+        }
+        // Past the pre-send checks the packet is committed to the link, so
+        // an Eos here is one the consumer will see (M909).
+        if matches!(packet, PipelinePacket::Eos) {
+            self.eos_forwarded = true;
+        }
+        // M980: keep the caps this link is carrying, so an observer reads the
+        // shape data actually flows under, not just the solved one.
+        if let (PipelinePacket::CapsChanged(caps), Some(c)) = (&*packet, &self.link.counters) {
+            c.record_caps(caps);
+        }
+        // Leaky links drop *data frames* under a full channel rather than
+        // applying backpressure; control packets (caps / segment / flush /
+        // eos) are never dropped, they always block so the stream stays
+        // correct. A non-leaky link (the default) always blocks.
+        let is_data = matches!(packet, PipelinePacket::DataFrame(_));
+        // Measured before the send moves the packet into the link.
+        let bytes = packet_bytes(packet);
+        if is_data && self.link.policy != LinkPolicy::Block {
+            let taken = packet_slot.take().expect("packet checked above");
+            match self.link.policy {
+                LinkPolicy::DropNewest => match self.link.data.try_send(taken) {
+                    Ok(()) => self.link.record_sent(bytes, None),
+                    // Channel full: drop the incoming frame.
+                    Err((_dropped, SendError::Full)) => self.link.record_drop(),
+                    Err((_v, SendError::Closed)) => return Poll::Ready(Err(G2gError::Shutdown)),
+                },
+                LinkPolicy::DropOldest => match self.link.data.try_send(taken) {
+                    Ok(()) => self.link.record_sent(bytes, None),
+                    Err((returned, SendError::Full)) => {
+                        // Evict the oldest queued data frame to make room.
+                        // If only control packets are queued, fall back to
+                        // blocking rather than dropping a control packet.
+                        if self
+                            .link
+                            .data
+                            .evict_front_matching(|p| matches!(p, PipelinePacket::DataFrame(_)))
+                            .is_some()
+                        {
+                            self.link.record_drop();
+                            match self.link.data.try_send(returned) {
+                                Ok(()) => self.link.record_sent(bytes, None),
+                                Err((_v, SendError::Closed)) => {
+                                    return Poll::Ready(Err(G2gError::Shutdown))
                                 }
-                            } else {
-                                let t0 = self.wants_blocked_stamp().then(stamp_now_ns);
-                                self.link
-                                    .data
-                                    .send(returned)
-                                    .await
-                                    .map_err(|_| G2gError::Shutdown)?;
-                                self.link.record_sent(bytes, t0);
-                                self.record_push_wait(t0);
+                                Err((_v, SendError::Full)) => {
+                                    unreachable!("a slot was just freed by eviction")
+                                }
                             }
-                        }
-                        Err((_v, SendError::Closed)) => return Err(G2gError::Shutdown),
-                    },
-                    LinkPolicy::Block => unreachable!("guarded by policy != Block"),
-                }
-                return Ok(self.post_send_outcome());
-            }
-            // Transit instrumentation (Block links only, where there are no
-            // drops so the stamp ring stays aligned): stamp the frame's queue
-            // entry before the send, roll back if it never enqueues.
-            if is_data {
-                if let Some(ring) = &self.link.transit {
-                    ring.lock().push_back(stamp_now_ns());
-                }
-            }
-            // Stamp before the blocking send so the counters carry how long the
-            // producer was held up by a full link (M846), and the producing
-            // element's probe can take that wait out of its `process()` timing.
-            let blocked_since = self.wants_blocked_stamp().then(stamp_now_ns);
-            match self.link.data.send(packet).await {
-                // Post-send check covers the "request fired while we were
-                // awaiting capacity" window; the packet is already in the link
-                // under old caps.
-                Ok(()) => {
-                    self.link.record_sent(bytes, blocked_since);
-                    self.record_push_wait(blocked_since);
-                    Ok(self.post_send_outcome())
-                }
-                Err(SendError::Closed) => {
-                    if is_data {
-                        if let Some(ring) = &self.link.transit {
-                            ring.lock().pop_back();
+                        } else {
+                            *packet_slot = Some(returned);
+                            let blocked_since = self.wants_blocked_stamp().then(stamp_now_ns);
+                            self.push_phase = PushPhase::Sending {
+                                bytes,
+                                blocked_since,
+                                stamped: false,
+                            };
+                            return self.poll_blocking_send(
+                                cx,
+                                packet_slot,
+                                bytes,
+                                blocked_since,
+                                false,
+                            );
                         }
                     }
-                    Err(G2gError::Shutdown)
-                }
-                Err(SendError::Full) => unreachable!("send().await never returns Full"),
+                    Err((_v, SendError::Closed)) => return Poll::Ready(Err(G2gError::Shutdown)),
+                },
+                LinkPolicy::Block => unreachable!("guarded by policy != Block"),
             }
-        })
+            return Poll::Ready(Ok(self.post_send_outcome()));
+        }
+        // Transit instrumentation (Block links only, where there are no
+        // drops so the stamp ring stays aligned): stamp the frame's queue
+        // entry before the send, roll back if it never enqueues.
+        let stamped = is_data && self.link.transit.is_some();
+        if stamped {
+            if let Some(ring) = &self.link.transit {
+                ring.lock().push_back(stamp_now_ns());
+            }
+        }
+        // Stamp before the blocking send so the counters carry how long the
+        // producer was held up by a full link (M846), and the producing
+        // element's probe can take that wait out of its `process()` timing.
+        let blocked_since = self.wants_blocked_stamp().then(stamp_now_ns);
+        self.push_phase = PushPhase::Sending {
+            bytes,
+            blocked_since,
+            stamped,
+        };
+        self.poll_blocking_send(cx, packet_slot, bytes, blocked_since, stamped)
     }
 }
 
@@ -881,6 +963,7 @@ impl OutputSink for SenderSink {
 mod link_tests {
     use super::*;
     use crate::caps::{Caps, Dim, Rate, VideoCodec};
+    use crate::element::OutputSinkExt;
     use crate::frame::{Frame, FrameTiming};
     use crate::memory::{MemoryDomain, SystemSlice};
     use alloc::boxed::Box;
@@ -1216,12 +1299,11 @@ mod link_tests {
 
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
-        let mut fut = sink.push(PipelinePacket::CapsChanged(proposed_caps()));
+        let mut fut = core::pin::pin!(sink.push(PipelinePacket::CapsChanged(proposed_caps())));
         assert!(
             matches!(fut.as_mut().poll(&mut cx), Poll::Pending),
             "a control packet blocks on a full leaky link, never dropped"
         );
-        drop(fut);
 
         // The queued data frame is untouched.
         assert_eq!(drained_sequences(&rx), [0]);

@@ -8,11 +8,9 @@
 //! publisher.
 
 use core::cell::Cell;
-use core::future::Future;
-use core::pin::Pin;
+
 use core::time::Duration;
 
-use alloc::boxed::Box;
 use alloc::format;
 use alloc::vec::Vec;
 
@@ -151,6 +149,9 @@ pub(crate) struct SessionTap<'a> {
     pts_offset_ns: u64,
     last_pts_ns: u64,
     frame_period_ns: u64,
+    /// Whether the packet in the caller's slot already got the PTS offset, so
+    /// a re-poll under downstream backpressure never shifts twice.
+    shifted: bool,
 }
 
 impl core::fmt::Debug for SessionTap<'_> {
@@ -175,6 +176,7 @@ impl<'a> SessionTap<'a> {
             pts_offset_ns: 0,
             last_pts_ns: 0,
             frame_period_ns,
+            shifted: false,
         }
     }
 
@@ -197,21 +199,31 @@ impl<'a> SessionTap<'a> {
 }
 
 impl OutputSink for SessionTap<'_> {
-    fn push<'b>(
-        &'b mut self,
-        packet: PipelinePacket,
-    ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'b>> {
-        let mut packet = packet;
-        if let PipelinePacket::DataFrame(frame) = &mut packet {
-            let t = &mut frame.timing;
-            t.pts_ns = t.pts_ns.saturating_add(self.pts_offset_ns);
-            t.dts_ns = t.dts_ns.saturating_add(self.pts_offset_ns);
-            t.capture_ns = t.capture_ns.saturating_add(self.pts_offset_ns);
-            self.last_pts_ns = t.pts_ns;
-            self.frames += 1;
-            self.activity.set(g2g_core::metrics::monotonic_ns());
+    fn begin_push(&mut self) {
+        self.shifted = false;
+        self.out.begin_push();
+    }
+
+    fn poll_push(
+        &mut self,
+        cx: &mut core::task::Context<'_>,
+        packet: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        // Shift exactly once per packet: a re-poll under downstream
+        // backpressure must not re-apply the offset.
+        if !self.shifted {
+            if let Some(PipelinePacket::DataFrame(frame)) = packet.as_mut() {
+                let t = &mut frame.timing;
+                t.pts_ns = t.pts_ns.saturating_add(self.pts_offset_ns);
+                t.dts_ns = t.dts_ns.saturating_add(self.pts_offset_ns);
+                t.capture_ns = t.capture_ns.saturating_add(self.pts_offset_ns);
+                self.last_pts_ns = t.pts_ns;
+                self.frames += 1;
+                self.activity.set(g2g_core::metrics::monotonic_ns());
+            }
+            self.shifted = true;
         }
-        self.out.push(packet)
+        self.out.poll_push(cx, packet)
     }
 }
 

@@ -11,8 +11,6 @@
 
 #![cfg(all(feature = "std", feature = "hls"))]
 
-use core::future::Future;
-use core::pin::Pin;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::thread;
@@ -190,11 +188,13 @@ struct CueSink {
 }
 
 impl OutputSink for CueSink {
-    fn push<'a>(
-        &'a mut self,
-        packet: PipelinePacket,
-    ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
-        Box::pin(async move {
+    fn poll_push(
+        &mut self,
+        _cx: &mut core::task::Context<'_>,
+        packet_slot: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        let packet = packet_slot.take().expect("poll_push without a packet");
+        core::task::Poll::Ready({
             match packet {
                 PipelinePacket::DataFrame(f) => {
                     if let Some(s) = f.domain.as_system_slice() {
@@ -221,14 +221,21 @@ struct SubParseSink {
 }
 
 impl OutputSink for SubParseSink {
-    fn push<'a>(
-        &'a mut self,
-        packet: PipelinePacket,
-    ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
-        Box::pin(async move {
-            self.sub.process(packet, &mut self.cues).await?;
-            Ok(PushOutcome::Accepted)
-        })
+    fn poll_push(
+        &mut self,
+        cx: &mut core::task::Context<'_>,
+        packet: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        let packet = packet.take().expect("poll_push without a packet");
+        let mut fut = self.sub.process(packet, &mut self.cues);
+        match fut.as_mut().poll(cx) {
+            core::task::Poll::Ready(r) => {
+                core::task::Poll::Ready(r.map(|()| PushOutcome::Accepted))
+            }
+            // In-memory test elements never block: their only awaits are
+            // pushes into always-ready capture sinks.
+            core::task::Poll::Pending => panic!("element future did not resolve in one poll"),
+        }
     }
 }
 

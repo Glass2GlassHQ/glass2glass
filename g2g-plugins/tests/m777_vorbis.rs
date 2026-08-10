@@ -10,8 +10,6 @@
 //! end to end.
 #![cfg(all(feature = "std", feature = "vorbis"))]
 
-use core::future::Future;
-use core::pin::Pin;
 use std::process::Command;
 
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
@@ -58,11 +56,13 @@ struct CaptureSink {
     frames: Vec<Vec<u8>>,
 }
 impl OutputSink for CaptureSink {
-    fn push<'a>(
-        &'a mut self,
-        packet: PipelinePacket,
-    ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
-        Box::pin(async move {
+    fn poll_push(
+        &mut self,
+        _cx: &mut core::task::Context<'_>,
+        packet_slot: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        let packet = packet_slot.take().expect("poll_push without a packet");
+        core::task::Poll::Ready({
             match packet {
                 PipelinePacket::CapsChanged(c) => self.caps.push(c),
                 PipelinePacket::DataFrame(f) => {

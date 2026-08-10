@@ -26,7 +26,6 @@
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
-use g2g_core::element::{BoxFuture, PushOutcome};
 use g2g_core::frame::PipelinePacket;
 use g2g_core::memory::MemoryDomain;
 use g2g_core::runtime::SourceLoop;
@@ -40,13 +39,15 @@ struct Collect {
 }
 
 impl OutputSink for Collect {
-    fn push<'a>(
-        &'a mut self,
-        packet: PipelinePacket,
-    ) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
-        Box::pin(async move {
+    fn poll_push(
+        &mut self,
+        _cx: &mut core::task::Context<'_>,
+        packet_slot: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<g2g_core::PushOutcome, G2gError>> {
+        let packet = packet_slot.take().expect("poll_push without a packet");
+        core::task::Poll::Ready({
             self.packets.push(packet);
-            Ok(PushOutcome::Accepted)
+            Ok(g2g_core::PushOutcome::Accepted)
         })
     }
 }

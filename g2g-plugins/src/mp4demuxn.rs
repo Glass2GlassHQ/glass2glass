@@ -845,8 +845,6 @@ impl MultiOutputElement for Mp4DemuxN {
 mod tests {
     use super::*;
     use crate::mp4muxn::Mp4MuxN;
-    use core::future::Future;
-    use core::pin::Pin;
     use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
     use g2g_core::memory::{MemoryDomain, SystemSlice};
     use g2g_core::runtime::block_on;
@@ -861,11 +859,13 @@ mod tests {
         bytes: Vec<u8>,
     }
     impl OutputSink for ByteCapture {
-        fn push<'a>(
-            &'a mut self,
-            packet: PipelinePacket,
-        ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
-            Box::pin(async move {
+        fn poll_push(
+            &mut self,
+            _cx: &mut core::task::Context<'_>,
+            packet_slot: &mut Option<PipelinePacket>,
+        ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+            let packet = packet_slot.take().expect("poll_push without a packet");
+            core::task::Poll::Ready({
                 if let PipelinePacket::DataFrame(f) = packet {
                     if let Some(s) = f.domain.as_system_slice() {
                         self.bytes.extend_from_slice(s);
@@ -898,12 +898,14 @@ mod tests {
             self.frames.len()
         }
 
-        fn push_to<'a>(
-            &'a mut self,
+        fn poll_push_to(
+            &mut self,
+            _cx: &mut core::task::Context<'_>,
             port: usize,
-            packet: PipelinePacket,
-        ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
-            Box::pin(async move {
+            packet_slot: &mut Option<PipelinePacket>,
+        ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+            let packet = packet_slot.take().expect("poll_push without a packet");
+            core::task::Poll::Ready({
                 match packet {
                     PipelinePacket::CapsChanged(c) => self.caps[port] = Some(c),
                     PipelinePacket::DataFrame(f) => {
@@ -1221,11 +1223,13 @@ mod tests {
             last: Option<Caps>,
         }
         impl OutputSink for CapsCapture {
-            fn push<'a>(
-                &'a mut self,
-                packet: PipelinePacket,
-            ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
-                Box::pin(async move {
+            fn poll_push(
+                &mut self,
+                _cx: &mut core::task::Context<'_>,
+                packet_slot: &mut Option<PipelinePacket>,
+            ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+                let packet = packet_slot.take().expect("poll_push without a packet");
+                core::task::Poll::Ready({
                     if let PipelinePacket::CapsChanged(c) = packet {
                         self.last = Some(c);
                     }

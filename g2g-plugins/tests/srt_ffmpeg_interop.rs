@@ -13,8 +13,6 @@
 //! ```
 #![cfg(feature = "srt")]
 
-use core::future::Future;
-use core::pin::Pin;
 use std::net::UdpSocket as StdUdpSocket;
 use std::time::Duration;
 
@@ -41,10 +39,13 @@ struct Capture {
 }
 
 impl OutputSink for Capture {
-    fn push<'a>(
-        &'a mut self,
-        p: PipelinePacket,
-    ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
+    fn poll_push(
+        &mut self,
+        _cx: &mut core::task::Context<'_>,
+        packet_slot: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        let p = packet_slot.take().expect("poll_push without a packet");
+
         if let PipelinePacket::DataFrame(frame) = &p {
             if let Some(slice) = frame.domain.as_system_slice() {
                 let s = slice;
@@ -52,7 +53,7 @@ impl OutputSink for Capture {
                 self.total_bytes += s.len();
             }
         }
-        Box::pin(async { Ok(PushOutcome::Accepted) })
+        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
     }
 }
 
@@ -181,11 +182,13 @@ async fn ffmpeg_srt_aes256_caller_streams_mpegts_into_srtsrc() {
 /// A do-nothing sink so `SrtSink` (a terminal egress element) can be driven.
 struct NullOut;
 impl OutputSink for NullOut {
-    fn push<'a>(
-        &'a mut self,
-        _p: PipelinePacket,
-    ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
-        Box::pin(async { Ok(PushOutcome::Accepted) })
+    fn poll_push(
+        &mut self,
+        _cx: &mut core::task::Context<'_>,
+        packet_slot: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        packet_slot.take();
+        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
     }
 }
 

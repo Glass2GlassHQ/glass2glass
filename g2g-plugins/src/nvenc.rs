@@ -1787,19 +1787,19 @@ pub(crate) mod tests {
     async fn system_memory_frame_is_rejected() {
         // NvEnc is the device-resident encoder: a System frame is the wrong
         // domain (FfmpegH264Enc handles that path). No GPU needed for this.
-        use core::future::Future;
-        use core::pin::Pin;
         use g2g_core::frame::Frame;
         use g2g_core::memory::SystemSlice;
-        use g2g_core::{FrameTiming, PushOutcome};
+        use g2g_core::FrameTiming;
 
         struct NullSink;
         impl OutputSink for NullSink {
-            fn push<'a>(
-                &'a mut self,
-                _p: PipelinePacket,
-            ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
-                Box::pin(async { Ok(PushOutcome::Accepted) })
+            fn poll_push(
+                &mut self,
+                _cx: &mut core::task::Context<'_>,
+                packet_slot: &mut Option<PipelinePacket>,
+            ) -> core::task::Poll<Result<g2g_core::PushOutcome, G2gError>> {
+                packet_slot.take();
+                core::task::Poll::Ready(Ok(g2g_core::PushOutcome::Accepted))
             }
         }
 
@@ -1840,13 +1840,13 @@ pub(crate) mod tests {
     }
 
     impl OutputSink for CaptureSink {
-        fn push<'a>(
-            &'a mut self,
-            packet: PipelinePacket,
-        ) -> core::pin::Pin<
-            Box<dyn core::future::Future<Output = Result<g2g_core::PushOutcome, G2gError>> + 'a>,
-        > {
-            Box::pin(async move {
+        fn poll_push(
+            &mut self,
+            _cx: &mut core::task::Context<'_>,
+            packet_slot: &mut Option<PipelinePacket>,
+        ) -> core::task::Poll<Result<g2g_core::PushOutcome, G2gError>> {
+            let packet = packet_slot.take().expect("poll_push without a packet");
+            core::task::Poll::Ready({
                 match packet {
                     PipelinePacket::CapsChanged(c) => self.caps.push(c),
                     PipelinePacket::DataFrame(f) => {
@@ -2293,16 +2293,13 @@ pub(crate) mod tests {
                 count: &'a mut usize,
             }
             impl OutputSink for DecSink<'_> {
-                fn push<'a>(
-                    &'a mut self,
-                    packet: PipelinePacket,
-                ) -> core::pin::Pin<
-                    Box<
-                        dyn core::future::Future<Output = Result<g2g_core::PushOutcome, G2gError>>
-                            + 'a,
-                    >,
-                > {
-                    Box::pin(async move {
+                fn poll_push(
+                    &mut self,
+                    _cx: &mut core::task::Context<'_>,
+                    packet_slot: &mut Option<PipelinePacket>,
+                ) -> core::task::Poll<Result<g2g_core::PushOutcome, G2gError>> {
+                    let packet = packet_slot.take().expect("poll_push without a packet");
+                    core::task::Poll::Ready({
                         match packet {
                             PipelinePacket::CapsChanged(c) => self.caps.push(c),
                             PipelinePacket::DataFrame(_) => *self.count += 1,

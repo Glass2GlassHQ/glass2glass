@@ -5,8 +5,8 @@
 //! so this covers their reporting without a display attached.
 #![cfg(feature = "std")]
 
-use core::future::{ready, Future, Ready};
-use core::pin::Pin;
+use core::future::{ready, Ready};
+
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -40,11 +40,13 @@ impl AsyncClock for ManualClock {
 
 struct NullOut;
 impl OutputSink for NullOut {
-    fn push<'a>(
-        &'a mut self,
-        _packet: PipelinePacket,
-    ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
-        Box::pin(async { Ok(PushOutcome::Accepted) })
+    fn poll_push(
+        &mut self,
+        _cx: &mut core::task::Context<'_>,
+        packet_slot: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        packet_slot.take();
+        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
     }
 }
 

@@ -15,9 +15,6 @@
 //! no microphone attached.
 #![cfg(any(feature = "alsa-src", feature = "pulse-src"))]
 
-use std::future::Future;
-use std::pin::Pin;
-
 use g2g_core::runtime::{block_on, SourceLoop};
 use g2g_core::{AudioFormat, Caps, G2gError, OutputSink, PipelinePacket, PropValue, PushOutcome};
 
@@ -34,11 +31,13 @@ struct Collect {
 }
 
 impl OutputSink for Collect {
-    fn push<'a>(
-        &'a mut self,
-        packet: PipelinePacket,
-    ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
-        Box::pin(async move {
+    fn poll_push(
+        &mut self,
+        _cx: &mut core::task::Context<'_>,
+        packet_slot: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        let packet = packet_slot.take().expect("poll_push without a packet");
+        core::task::Poll::Ready({
             match packet {
                 PipelinePacket::DataFrame(frame) => {
                     let slice = frame

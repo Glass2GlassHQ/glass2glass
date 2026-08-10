@@ -11,8 +11,6 @@
 //! repo's Annex-B H.264 clip, four IDR-led GOPs of five frames.
 #![cfg(feature = "std")]
 
-use core::future::Future;
-use core::pin::Pin;
 use std::path::{Path, PathBuf};
 
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
@@ -47,11 +45,13 @@ struct Collect {
 }
 
 impl OutputSink for Collect {
-    fn push<'a>(
-        &'a mut self,
-        packet: PipelinePacket,
-    ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
-        Box::pin(async move {
+    fn poll_push(
+        &mut self,
+        _cx: &mut core::task::Context<'_>,
+        packet_slot: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        let packet = packet_slot.take().expect("poll_push without a packet");
+        core::task::Poll::Ready({
             self.packets.push(packet);
             Ok(PushOutcome::Accepted)
         })
@@ -97,11 +97,13 @@ impl AsyncClock for RecordingClock {
 
 struct NullSink;
 impl OutputSink for NullSink {
-    fn push<'a>(
-        &'a mut self,
-        _packet: PipelinePacket,
-    ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
-        Box::pin(async { Ok(PushOutcome::Accepted) })
+    fn poll_push(
+        &mut self,
+        _cx: &mut core::task::Context<'_>,
+        packet_slot: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        packet_slot.take();
+        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
     }
 }
 
@@ -180,11 +182,13 @@ struct ByteSink {
 }
 
 impl OutputSink for ByteSink {
-    fn push<'a>(
-        &'a mut self,
-        packet: PipelinePacket,
-    ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
-        Box::pin(async move {
+    fn poll_push(
+        &mut self,
+        _cx: &mut core::task::Context<'_>,
+        packet_slot: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        let packet = packet_slot.take().expect("poll_push without a packet");
+        core::task::Poll::Ready({
             if let PipelinePacket::DataFrame(f) = packet {
                 if let Some(s) = f.domain.as_system_slice() {
                     self.bytes.extend_from_slice(s);

@@ -424,11 +424,13 @@ mod tests {
         last: Option<AnalyticsMeta>,
     }
     impl OutputSink for MetaSink {
-        fn push<'a>(
-            &'a mut self,
-            packet: PipelinePacket,
-        ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
-            Box::pin(async move {
+        fn poll_push(
+            &mut self,
+            _cx: &mut core::task::Context<'_>,
+            packet_slot: &mut Option<PipelinePacket>,
+        ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+            let packet = packet_slot.take().expect("poll_push without a packet");
+            core::task::Poll::Ready({
                 if let PipelinePacket::DataFrame(frame) = packet {
                     if let Some(a) = frame.meta.get::<AnalyticsMeta>() {
                         self.last = Some(a.clone());

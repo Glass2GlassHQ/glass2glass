@@ -77,11 +77,13 @@ struct FrameGrab {
     count: u64,
 }
 impl OutputSink for FrameGrab {
-    fn push<'a>(
-        &'a mut self,
-        packet: PipelinePacket,
-    ) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
-        Box::pin(async move {
+    fn poll_push(
+        &mut self,
+        _cx: &mut core::task::Context<'_>,
+        packet_slot: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        let packet = packet_slot.take().expect("poll_push without a packet");
+        core::task::Poll::Ready({
             if let PipelinePacket::DataFrame(f) = packet {
                 if let Some(s) = f.domain.as_system_slice() {
                     if self.first.is_none() {
@@ -101,11 +103,13 @@ struct OneFrame {
     bytes: Option<Vec<u8>>,
 }
 impl OutputSink for OneFrame {
-    fn push<'a>(
-        &'a mut self,
-        packet: PipelinePacket,
-    ) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
-        Box::pin(async move {
+    fn poll_push(
+        &mut self,
+        _cx: &mut core::task::Context<'_>,
+        packet_slot: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        let packet = packet_slot.take().expect("poll_push without a packet");
+        core::task::Poll::Ready({
             if let PipelinePacket::DataFrame(f) = packet {
                 if self.bytes.is_none() {
                     if let Some(s) = f.domain.as_system_slice() {

@@ -179,8 +179,8 @@ pub use copyplan::{
 pub use dot::DotAnnotations;
 #[cfg(feature = "alloc")]
 pub use element::{
-    AsyncElement, ConfigureOutcome, ElementBound, OutputSink, PresentationStats, PushOutcome,
-    QosMessage, Reconfigure,
+    AsyncElement, ConfigureOutcome, ElementBound, OutputSink, OutputSinkExt, PresentationStats,
+    PushFuture, PushOutcome, QosMessage, Reconfigure,
 };
 pub use error::{G2gError, HardwareError};
 #[cfg(feature = "alloc")]
@@ -278,8 +278,8 @@ pub use pad_template::{
 #[cfg(feature = "runtime")]
 pub use fanout::{
     DuplexInbound, Gate, GateHandle, Merger, MergerHandle, MultiDuplexSession, MultiInputElement,
-    MultiOutputElement, MultiOutputSink, MultiOutputSource, MultiSenderSink, ReverseChannel,
-    Router, RouterHandle,
+    MultiOutputElement, MultiOutputSink, MultiOutputSinkExt, MultiOutputSource, MultiSenderSink,
+    PushToFuture, ReverseChannel, Router, RouterHandle,
 };
 
 #[cfg(feature = "dyn-slot")]

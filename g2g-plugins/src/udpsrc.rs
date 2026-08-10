@@ -505,12 +505,13 @@ mod tests {
         // before any socket work.
         struct NullSink;
         impl OutputSink for NullSink {
-            fn push<'a>(
-                &'a mut self,
-                _p: PipelinePacket,
-            ) -> Pin<Box<dyn Future<Output = Result<g2g_core::PushOutcome, G2gError>> + 'a>>
-            {
-                Box::pin(async { Ok(g2g_core::PushOutcome::Accepted) })
+            fn poll_push(
+                &mut self,
+                _cx: &mut core::task::Context<'_>,
+                packet_slot: &mut Option<PipelinePacket>,
+            ) -> core::task::Poll<Result<g2g_core::PushOutcome, G2gError>> {
+                packet_slot.take();
+                core::task::Poll::Ready(Ok(g2g_core::PushOutcome::Accepted))
             }
         }
         let mut src = UdpSrc::new("127.0.0.1:0".parse().unwrap());

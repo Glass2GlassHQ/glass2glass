@@ -1080,11 +1080,13 @@ mod tests {
     /// A no-op downstream (a sink has none, but `process` takes one).
     struct NullOut;
     impl OutputSink for NullOut {
-        fn push<'a>(
-            &'a mut self,
-            _p: PipelinePacket,
-        ) -> Pin<Box<dyn Future<Output = Result<g2g_core::PushOutcome, G2gError>> + 'a>> {
-            Box::pin(async { Ok(g2g_core::PushOutcome::Accepted) })
+        fn poll_push(
+            &mut self,
+            _cx: &mut core::task::Context<'_>,
+            packet_slot: &mut Option<PipelinePacket>,
+        ) -> core::task::Poll<Result<g2g_core::PushOutcome, G2gError>> {
+            packet_slot.take();
+            core::task::Poll::Ready(Ok(g2g_core::PushOutcome::Accepted))
         }
     }
 

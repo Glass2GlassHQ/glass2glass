@@ -7,7 +7,7 @@
 //! Mono S16LE at 1000 Hz: one sample-frame is 1 ms, so a PTS of `k` ms maps to
 //! sample-frame `k` and the emitted PTS/duration read back in whole ms.
 
-use g2g_core::element::{BoxFuture, PushOutcome};
+use g2g_core::element::PushOutcome;
 use g2g_core::frame::{Frame, FrameTiming};
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
@@ -53,11 +53,13 @@ struct Collect {
 }
 
 impl OutputSink for Collect {
-    fn push<'a>(
-        &'a mut self,
-        packet: PipelinePacket,
-    ) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
-        Box::pin(async move {
+    fn poll_push(
+        &mut self,
+        _cx: &mut core::task::Context<'_>,
+        packet_slot: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        let packet = packet_slot.take().expect("poll_push without a packet");
+        core::task::Poll::Ready({
             if let PipelinePacket::DataFrame(f) = packet {
                 if let Some(s) = f.domain.as_system_slice() {
                     let samples = s

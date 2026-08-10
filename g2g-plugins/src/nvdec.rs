@@ -1340,13 +1340,13 @@ mod tests {
     }
 
     impl OutputSink for RecordSink {
-        fn push<'a>(
-            &'a mut self,
-            packet: PipelinePacket,
-        ) -> core::pin::Pin<
-            Box<dyn core::future::Future<Output = Result<g2g_core::PushOutcome, G2gError>> + 'a>,
-        > {
-            Box::pin(async move {
+        fn poll_push(
+            &mut self,
+            _cx: &mut core::task::Context<'_>,
+            packet_slot: &mut Option<PipelinePacket>,
+        ) -> core::task::Poll<Result<g2g_core::PushOutcome, G2gError>> {
+            let packet = packet_slot.take().expect("poll_push without a packet");
+            core::task::Poll::Ready({
                 match packet {
                     PipelinePacket::CapsChanged(c) => self.caps.push(c),
                     PipelinePacket::DataFrame(f) => {
@@ -1776,11 +1776,9 @@ mod tests {
         use crate::nvenc::NvEnc;
         // One NVENC session at a time across this binary's test threads.
         let _lock = crate::nvenc::tests::encode_session_lock().await;
-        use core::future::Future;
-        use core::pin::Pin;
         use g2g_core::frame::Frame;
         use g2g_core::memory::SystemSlice;
-        use g2g_core::{FrameTiming, PushOutcome};
+        use g2g_core::FrameTiming;
 
         const W: u32 = 320;
         const H: u32 = 240;
@@ -1867,17 +1865,19 @@ mod tests {
             aus: Vec<Vec<u8>>,
         }
         impl OutputSink for AuSink {
-            fn push<'a>(
-                &'a mut self,
-                packet: PipelinePacket,
-            ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
-                Box::pin(async move {
+            fn poll_push(
+                &mut self,
+                _cx: &mut core::task::Context<'_>,
+                packet_slot: &mut Option<PipelinePacket>,
+            ) -> core::task::Poll<Result<g2g_core::PushOutcome, G2gError>> {
+                let packet = packet_slot.take().expect("poll_push without a packet");
+                core::task::Poll::Ready({
                     if let PipelinePacket::DataFrame(f) = packet {
                         if let Some(s) = f.domain.as_system_slice() {
                             self.aus.push(s.to_vec());
                         }
                     }
-                    Ok(PushOutcome::Accepted)
+                    Ok(g2g_core::PushOutcome::Accepted)
                 })
             }
         }
@@ -1924,11 +1924,13 @@ mod tests {
             count: usize,
         }
         impl OutputSink for CudaSink {
-            fn push<'a>(
-                &'a mut self,
-                packet: PipelinePacket,
-            ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
-                Box::pin(async move {
+            fn poll_push(
+                &mut self,
+                _cx: &mut core::task::Context<'_>,
+                packet_slot: &mut Option<PipelinePacket>,
+            ) -> core::task::Poll<Result<g2g_core::PushOutcome, G2gError>> {
+                let packet = packet_slot.take().expect("poll_push without a packet");
+                core::task::Poll::Ready({
                     match packet {
                         PipelinePacket::CapsChanged(c) => self.caps.push(c),
                         PipelinePacket::DataFrame(f) => {
@@ -1961,7 +1963,7 @@ mod tests {
                         }
                         _ => {}
                     }
-                    Ok(PushOutcome::Accepted)
+                    Ok(g2g_core::PushOutcome::Accepted)
                 })
             }
         }

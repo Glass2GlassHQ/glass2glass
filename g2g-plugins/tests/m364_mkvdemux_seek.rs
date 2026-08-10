@@ -157,11 +157,13 @@ struct Capture {
     segments: usize,
 }
 impl OutputSink for Capture {
-    fn push<'a>(
-        &'a mut self,
-        packet: PipelinePacket,
-    ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
-        Box::pin(async move {
+    fn poll_push(
+        &mut self,
+        _cx: &mut core::task::Context<'_>,
+        packet_slot: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        let packet = packet_slot.take().expect("poll_push without a packet");
+        core::task::Poll::Ready({
             match packet {
                 PipelinePacket::DataFrame(Frame {
                     domain: MemoryDomain::System(s),
@@ -191,14 +193,21 @@ struct Chain<'a> {
     capture: &'a mut Capture,
 }
 impl OutputSink for Chain<'_> {
-    fn push<'a>(
-        &'a mut self,
-        packet: PipelinePacket,
-    ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
-        Box::pin(async move {
-            self.demux.process(packet, self.capture).await?;
-            Ok(PushOutcome::Accepted)
-        })
+    fn poll_push(
+        &mut self,
+        cx: &mut core::task::Context<'_>,
+        packet: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        let packet = packet.take().expect("poll_push without a packet");
+        let mut fut = self.demux.process(packet, self.capture);
+        match fut.as_mut().poll(cx) {
+            core::task::Poll::Ready(r) => {
+                core::task::Poll::Ready(r.map(|()| PushOutcome::Accepted))
+            }
+            // In-memory test elements never block: their only awaits are
+            // pushes into always-ready capture sinks.
+            core::task::Poll::Pending => panic!("element future did not resolve in one poll"),
+        }
     }
 }
 

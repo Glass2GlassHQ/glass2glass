@@ -25,7 +25,7 @@ use crate::clock::{ClockCandidate, ClockPriority};
 use crate::clock::{DynAsyncClock, PipelineClock};
 use crate::element::{
     AsyncElement, BoxFuture, ConfigureOutcome, DynAsyncElement, ElementBound, OutputSink,
-    PushOutcome, Reconfigure,
+    OutputSinkExt, PushOutcome, Reconfigure,
 };
 use crate::error::G2gError;
 use crate::fanout::{
@@ -911,36 +911,57 @@ struct TaggingSink {
     /// each input carries its own slot here. `None` unless an observer is
     /// attached, and empty (pass-through) until a tool installs an interceptor.
     probe: Option<ProbeSlot>,
+    /// The in-flight tagged packet of a blocked push, so the pre-send steps run
+    /// exactly once and a later poll resumes at the enqueue. The tagged channel
+    /// carries `(input, packet)`, so the caller's slot cannot hold it directly.
+    staged: Option<(usize, PipelinePacket)>,
+    /// Size of the staged packet, measured before the send moves it away.
+    staged_bytes: u64,
 }
 
 impl OutputSink for TaggingSink {
-    fn push<'a>(
-        &'a mut self,
-        packet: PipelinePacket,
-    ) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
-        Box::pin(async move {
+    fn begin_push(&mut self) {
+        // A cancelled push's packet died with its future; drop its leftovers.
+        self.staged = None;
+    }
+
+    fn poll_push(
+        &mut self,
+        cx: &mut core::task::Context<'_>,
+        packet_slot: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        use core::task::Poll;
+        if self.staged.is_none() {
+            let packet = packet_slot
+                .take()
+                .expect("poll_push called without a packet");
             // A probe may drop the packet before it enters the channel, as on a
             // `SenderSink` link.
             if let Some(p) = &self.probe {
                 if p.action(&packet) == ProbeAction::Drop {
-                    return Ok(PushOutcome::Accepted);
+                    return Poll::Ready(Ok(PushOutcome::Accepted));
                 }
             }
-            let bytes = packet_bytes(&packet);
-            match self.tx.send((self.idx, packet)).await {
-                Ok(()) => {
-                    if let Some(c) = &self.counters {
-                        c.record_packet(bytes, 0);
-                    }
-                    Ok(self
-                        .reverse
-                        .as_ref()
-                        .and_then(|rc| rc.take())
-                        .unwrap_or(PushOutcome::Accepted))
+            self.staged_bytes = packet_bytes(&packet);
+            self.staged = Some((self.idx, packet));
+        }
+        match self.tx.poll_send(cx, &mut self.staged) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Ok(())) => {
+                if let Some(c) = &self.counters {
+                    c.record_packet(self.staged_bytes, 0);
                 }
-                Err(_) => Err(G2gError::Shutdown),
+                Poll::Ready(Ok(self
+                    .reverse
+                    .as_ref()
+                    .and_then(|rc| rc.take())
+                    .unwrap_or(PushOutcome::Accepted)))
             }
-        })
+            Poll::Ready(Err(_)) => {
+                self.staged = None;
+                Poll::Ready(Err(G2gError::Shutdown))
+            }
+        }
     }
 }
 
@@ -1102,6 +1123,8 @@ where
                 reverse: reverse_i,
                 counters: counters_i,
                 probe: probe_i,
+                staged: None,
+                staged_bytes: 0,
             };
             source.run(&mut adapter).await
         }));
@@ -1413,6 +1436,8 @@ where
                 reverse: reverse_i,
                 counters: counters_i,
                 probe: probe_i,
+                staged: None,
+                staged_bytes: 0,
             };
             source.run(&mut adapter).await
         }));
@@ -2327,6 +2352,8 @@ async fn attach_input<'a>(
             reverse: None,
             counters,
             probe: slot,
+            staged: None,
+            staged_bytes: 0,
         };
         let mut source = source;
         source.run(&mut sink).await.map(FaninArmOut::Source)

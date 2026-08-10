@@ -11,8 +11,6 @@
 //! ffmpeg's own decode of the remux.
 #![cfg(feature = "std")]
 
-use core::future::Future;
-use core::pin::Pin;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -38,11 +36,13 @@ struct CaptureSink {
 }
 
 impl OutputSink for CaptureSink {
-    fn push<'a>(
-        &'a mut self,
-        packet: PipelinePacket,
-    ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
-        Box::pin(async move {
+    fn poll_push(
+        &mut self,
+        _cx: &mut core::task::Context<'_>,
+        packet_slot: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        let packet = packet_slot.take().expect("poll_push without a packet");
+        core::task::Poll::Ready({
             if let PipelinePacket::DataFrame(f) = packet {
                 if let Some(s) = f.domain.as_system_slice() {
                     self.bytes.extend_from_slice(s);
@@ -60,12 +60,14 @@ struct PortCapture {
 }
 
 impl MultiOutputSink for PortCapture {
-    fn push_to<'a>(
-        &'a mut self,
+    fn poll_push_to(
+        &mut self,
+        _cx: &mut core::task::Context<'_>,
         port: usize,
-        packet: PipelinePacket,
-    ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
-        Box::pin(async move {
+        packet_slot: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        let packet = packet_slot.take().expect("poll_push without a packet");
+        core::task::Poll::Ready({
             if let PipelinePacket::DataFrame(f) = packet {
                 if let Some(s) = f.domain.as_system_slice() {
                     self.ports[port].push((s.to_vec(), f.timing));

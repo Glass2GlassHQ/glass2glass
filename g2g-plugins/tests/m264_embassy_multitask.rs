@@ -17,7 +17,7 @@ use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use embassy_executor::{Executor, Spawner};
 
 use g2g_core::runtime::SourceLoop;
-use g2g_core::{AsyncElement, Caps, Dim, OutputSink, PipelinePacket, Rate, RawVideoFormat};
+use g2g_core::{AsyncElement, Caps, Dim, OutputSinkExt, PipelinePacket, Rate, RawVideoFormat};
 use g2g_plugins::embassylink::SharedPacketChannel;
 use g2g_plugins::identity::IdentityTransform;
 use g2g_plugins::videotestsrc::VideoTestSrc;

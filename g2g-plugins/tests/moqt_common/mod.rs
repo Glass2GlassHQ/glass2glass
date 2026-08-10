@@ -10,8 +10,6 @@
 //! is exactly what the element wrote.
 #![allow(dead_code)] // no one test binary uses every helper here
 
-use core::future::Future;
-use core::pin::Pin;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -254,12 +252,14 @@ impl CaptureMultiSink {
 }
 
 impl g2g_core::MultiOutputSink for CaptureMultiSink {
-    fn push_to<'a>(
-        &'a mut self,
+    fn poll_push_to(
+        &mut self,
+        _cx: &mut core::task::Context<'_>,
         port: usize,
-        packet: PipelinePacket,
-    ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
-        Box::pin(async move {
+        packet_slot: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        let packet = packet_slot.take().expect("poll_push without a packet");
+        core::task::Poll::Ready({
             if let PipelinePacket::DataFrame(f) = packet {
                 if let Some(s) = f.domain.as_system_slice() {
                     if let Some(log) = self.ports.get_mut(port) {
@@ -926,11 +926,13 @@ pub(crate) struct CaptureSink {
 }
 
 impl OutputSink for CaptureSink {
-    fn push<'a>(
-        &'a mut self,
-        packet: PipelinePacket,
-    ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
-        Box::pin(async move {
+    fn poll_push(
+        &mut self,
+        _cx: &mut core::task::Context<'_>,
+        packet_slot: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        let packet = packet_slot.take().expect("poll_push without a packet");
+        core::task::Poll::Ready({
             if let PipelinePacket::DataFrame(f) = packet {
                 if let Some(s) = f.domain.as_system_slice() {
                     self.frames.push(s.to_vec());
@@ -943,11 +945,13 @@ impl OutputSink for CaptureSink {
 
 pub(crate) struct NullOut;
 impl OutputSink for NullOut {
-    fn push<'a>(
-        &'a mut self,
-        _packet: PipelinePacket,
-    ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
-        Box::pin(async { Ok(PushOutcome::Accepted) })
+    fn poll_push(
+        &mut self,
+        _cx: &mut core::task::Context<'_>,
+        packet_slot: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        packet_slot.take();
+        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
     }
 }
 

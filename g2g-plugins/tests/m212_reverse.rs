@@ -70,11 +70,13 @@ fn frame(pts_ns: u64, sequence: u64) -> PipelinePacket {
 
 struct NullSink;
 impl OutputSink for NullSink {
-    fn push<'a>(
-        &'a mut self,
-        _packet: PipelinePacket,
-    ) -> Pin<Box<dyn Future<Output = Result<g2g_core::PushOutcome, G2gError>> + 'a>> {
-        Box::pin(async { Ok(g2g_core::PushOutcome::Accepted) })
+    fn poll_push(
+        &mut self,
+        _cx: &mut core::task::Context<'_>,
+        packet_slot: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<g2g_core::PushOutcome, G2gError>> {
+        packet_slot.take();
+        core::task::Poll::Ready(Ok(g2g_core::PushOutcome::Accepted))
     }
 }
 

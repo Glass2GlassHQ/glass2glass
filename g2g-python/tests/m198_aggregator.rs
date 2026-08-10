@@ -10,10 +10,6 @@ use g2g_python::PyAggregator;
 // The sink and its imports are only used by the collection / batch tests
 // (default + analytics builds), not by the python-only negotiation test.
 #[cfg(any(not(feature = "python"), feature = "analytics"))]
-use core::future::Future;
-#[cfg(any(not(feature = "python"), feature = "analytics"))]
-use core::pin::Pin;
-#[cfg(any(not(feature = "python"), feature = "analytics"))]
 use g2g_core::{G2gError, OutputSink, PipelinePacket, PushOutcome};
 
 #[cfg(any(not(feature = "python"), feature = "analytics"))]
@@ -24,12 +20,15 @@ struct CollectSink {
 
 #[cfg(any(not(feature = "python"), feature = "analytics"))]
 impl OutputSink for CollectSink {
-    fn push<'a>(
-        &'a mut self,
-        packet: PipelinePacket,
-    ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
+    fn poll_push(
+        &mut self,
+        _cx: &mut core::task::Context<'_>,
+        packet_slot: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        let packet = packet_slot.take().expect("poll_push without a packet");
+
         self.packets.push(packet);
-        Box::pin(async { Ok(PushOutcome::Accepted) })
+        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
     }
 }
 

@@ -14,8 +14,6 @@
 //! ```
 #![cfg(feature = "rtmp")]
 
-use core::future::Future;
-use core::pin::Pin;
 use std::net::TcpListener as StdTcpListener;
 use std::path::Path;
 use std::process::Command;
@@ -33,16 +31,19 @@ struct FlvCollect {
 }
 
 impl OutputSink for FlvCollect {
-    fn push<'a>(
-        &'a mut self,
-        p: PipelinePacket,
-    ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
+    fn poll_push(
+        &mut self,
+        _cx: &mut core::task::Context<'_>,
+        packet_slot: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        let p = packet_slot.take().expect("poll_push without a packet");
+
         if let PipelinePacket::DataFrame(frame) = &p {
             if let Some(slice) = frame.domain.as_system_slice() {
                 self.bytes.extend_from_slice(slice);
             }
         }
-        Box::pin(async { Ok(PushOutcome::Accepted) })
+        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
     }
 }
 

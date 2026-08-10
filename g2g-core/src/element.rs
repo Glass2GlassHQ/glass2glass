@@ -107,14 +107,75 @@ pub enum PushOutcome {
     Bitrate(u32),
 }
 
-/// Downstream output for elements. `push` is async so backpressure-aware
+/// Downstream output for elements. Push is async so backpressure-aware
 /// implementations can await downstream capacity instead of erroring on a
-/// full link. The boxed future keeps the trait dyn-safe.
+/// full link. The required method is the poll form, so a push through a
+/// `dyn OutputSink` costs no heap: `push` wraps it in the concrete
+/// [`PushFuture`] (provided here for concrete sinks and on the trait object
+/// for `&mut dyn OutputSink` callers, so `out.push(pkt).await` reads the same
+/// either way).
 pub trait OutputSink {
-    fn push<'a>(
-        &'a mut self,
-        packet: PipelinePacket,
-    ) -> BoxFuture<'a, Result<PushOutcome, G2gError>>;
+    /// Drive one packet toward downstream. `packet` is `Some` until this
+    /// implementation commits it (or resolves it early: a probe drop, a
+    /// pre-send reconfigure); the caller re-polls with the same slot until
+    /// `Ready`. Taking the packet on an early outcome matches the old
+    /// by-value push, where an unsent packet was dropped with the future.
+    fn poll_push(
+        &mut self,
+        cx: &mut core::task::Context<'_>,
+        packet: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>>;
+
+    /// Discard any phase a cancelled earlier push left behind. Runs once per
+    /// [`PushFuture`] construction; stateless sinks keep the no-op.
+    fn begin_push(&mut self) {}
+}
+
+/// `push` for concrete (sized) sinks. Separate from [`OutputSink`] because a
+/// provided method there is ambiguous against the inherent `push` on the
+/// trait object (an inherent impl on `dyn` does not shadow trait methods).
+pub trait OutputSinkExt: OutputSink + Sized {
+    fn push(&mut self, packet: PipelinePacket) -> PushFuture<'_, Self> {
+        self.begin_push();
+        PushFuture {
+            sink: self,
+            packet: Some(packet),
+        }
+    }
+}
+
+impl<S: OutputSink> OutputSinkExt for S {}
+
+impl<'e> dyn OutputSink + 'e {
+    /// [`OutputSink::push`] for trait objects (the provided method needs
+    /// `Self: Sized`).
+    pub fn push(&mut self, packet: PipelinePacket) -> PushFuture<'_, dyn OutputSink + 'e> {
+        self.begin_push();
+        PushFuture {
+            sink: self,
+            packet: Some(packet),
+        }
+    }
+}
+
+/// Concrete future behind [`OutputSink::push`]: the packet slot
+/// [`OutputSink::poll_push`] drains. No heap.
+#[allow(missing_debug_implementations)]
+pub struct PushFuture<'a, S: OutputSink + ?Sized> {
+    sink: &'a mut S,
+    packet: Option<PipelinePacket>,
+}
+
+impl<S: OutputSink + ?Sized> Future for PushFuture<'_, S> {
+    type Output = Result<PushOutcome, G2gError>;
+
+    fn poll(
+        self: Pin<&mut Self>,
+        cx: &mut core::task::Context<'_>,
+    ) -> core::task::Poll<Self::Output> {
+        let this = self.get_mut();
+        this.sink.poll_push(cx, &mut this.packet)
+    }
 }
 
 // Closed set: intentionally exhaustive (not #[non_exhaustive]); see STABILITY.md.
@@ -443,6 +504,13 @@ pub trait AsyncElement: ElementBound {
     fn get_property(&self, _name: &str) -> Option<PropValue> {
         None
     }
+
+    /// The log category for this element (M179): its short type name by
+    /// default, the `G2G_DEBUG` filtering key. A wrapper that erases another
+    /// element forwards the inner one's category instead.
+    fn log_category(&self) -> &'static str {
+        crate::log::short_type_name::<Self>()
+    }
 }
 
 /// Dyn-safe variant of [`AsyncElement`] for plugin registries on `std` targets.
@@ -615,6 +683,31 @@ pub trait DynAsyncElement: ElementBound {
     fn get_property(&self, _name: &str) -> Option<PropValue> {
         None
     }
+
+    /// Consume this element into its graph-runner transform arm (M1000). The
+    /// blanket impl monomorphizes the arm loop over the concrete element type,
+    /// so the per-frame `process` future is unboxed: the one box is this
+    /// method's returned arm future, once per run. Implementations outside the
+    /// blanket cannot build the runner's `TransformArmIo`; implement
+    /// [`AsyncElement`] instead.
+    #[cfg(feature = "runtime")]
+    #[doc(hidden)]
+    fn drive_transform_arm<'s>(
+        self: alloc::boxed::Box<Self>,
+        io: crate::runtime::TransformArmIo,
+    ) -> BoxFuture<'s, Result<u64, G2gError>>
+    where
+        Self: 's;
+
+    /// As [`Self::drive_transform_arm`], for the sink arm.
+    #[cfg(feature = "runtime")]
+    #[doc(hidden)]
+    fn drive_sink_arm<'s>(
+        self: alloc::boxed::Box<Self>,
+        io: crate::runtime::SinkArmIo,
+    ) -> BoxFuture<'s, Result<u64, G2gError>>
+    where
+        Self: 's;
 }
 
 /// Blanket adapter: every [`AsyncElement`] is usable as a
@@ -734,7 +827,7 @@ impl<T: AsyncElement> DynAsyncElement for T {
     }
 
     fn log_category(&self) -> &'static str {
-        crate::log::short_type_name::<T>()
+        AsyncElement::log_category(self)
     }
 
     fn set_instance_name(&mut self, name: alloc::string::String) {
@@ -751,6 +844,173 @@ impl<T: AsyncElement> DynAsyncElement for T {
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
         AsyncElement::get_property(self, name)
+    }
+
+    #[cfg(feature = "runtime")]
+    fn drive_transform_arm<'s>(
+        self: Box<Self>,
+        io: crate::runtime::TransformArmIo,
+    ) -> BoxFuture<'s, Result<u64, G2gError>>
+    where
+        Self: 's,
+    {
+        Box::pin(crate::runtime::transform_arm(*self, io))
+    }
+
+    #[cfg(feature = "runtime")]
+    fn drive_sink_arm<'s>(
+        self: Box<Self>,
+        io: crate::runtime::SinkArmIo,
+    ) -> BoxFuture<'s, Result<u64, G2gError>>
+    where
+        Self: 's,
+    {
+        Box::pin(crate::runtime::sink_arm(*self, io))
+    }
+}
+
+/// Private [`AsyncElement`] face over an erased element, so the generic
+/// (monomorphized) arms can drive a `&mut dyn DynAsyncElement` graph node too.
+/// Its per-frame process future stays boxed (the element underneath is
+/// erased); a newtype rather than an impl on `&mut dyn` itself, which would
+/// make method calls ambiguous wherever both traits are imported.
+#[cfg(all(feature = "std", feature = "runtime"))]
+struct DynRef<'b>(&'b mut (dyn DynAsyncElement + 'b));
+
+#[cfg(all(feature = "std", feature = "runtime"))]
+impl<'b> AsyncElement for DynRef<'b> {
+    type ProcessFuture<'a>
+        = BoxFuture<'a, Result<(), G2gError>>
+    where
+        Self: 'a;
+
+    fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
+        self.0.intercept_caps(upstream_caps)
+    }
+
+    fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        self.0.configure_pipeline(absolute_caps)
+    }
+
+    fn configure_output(&mut self, output_caps: &Caps) -> Result<(), G2gError> {
+        self.0.configure_output(output_caps)
+    }
+
+    fn process<'a>(
+        &'a mut self,
+        packet: PipelinePacket,
+        out: &'a mut dyn OutputSink,
+    ) -> Self::ProcessFuture<'a> {
+        self.0.process(packet, out)
+    }
+
+    fn caps_constraint_as_sink(&self) -> CapsConstraint<'_> {
+        self.0.caps_constraint_as_sink()
+    }
+
+    fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
+        self.0.caps_constraint_as_transform()
+    }
+
+    fn caps_preferences(&self) -> Option<CapsPreferences> {
+        self.0.caps_preferences()
+    }
+
+    fn propose_allocation(&self, caps: &Caps) -> Option<AllocationParams> {
+        self.0.propose_allocation(caps)
+    }
+
+    fn configure_allocation(&mut self, params: &AllocationParams) {
+        self.0.configure_allocation(params)
+    }
+
+    fn latency(&self) -> LatencyReport {
+        self.0.latency()
+    }
+
+    fn output_memory(&self) -> MemoryDomainKind {
+        self.0.output_memory()
+    }
+
+    fn output_domains(&self) -> DomainSet {
+        self.0.output_domains()
+    }
+
+    fn input_domains(&self) -> DomainSet {
+        self.0.input_domains()
+    }
+
+    #[cfg(feature = "metadata")]
+    fn meta_transform(&self) -> Option<crate::meta::Transform> {
+        self.0.meta_transform()
+    }
+
+    fn meta_requests(&self) -> crate::meta::MetaRequests {
+        self.0.meta_requests()
+    }
+
+    fn provide_clock(&self) -> Option<ClockCandidate> {
+        self.0.provide_clock()
+    }
+
+    fn set_clock_sync(&mut self, sync: ClockSync) {
+        self.0.set_clock_sync(sync)
+    }
+
+    fn take_qos(&mut self) -> Option<QosMessage> {
+        self.0.take_qos()
+    }
+
+    fn presentation_stats(&self) -> Option<PresentationStats> {
+        self.0.presentation_stats()
+    }
+
+    fn take_reconfigure(&mut self) -> Option<Reconfigure> {
+        self.0.take_reconfigure()
+    }
+
+    fn take_bitrate(&mut self) -> Option<u32> {
+        self.0.take_bitrate()
+    }
+
+    fn handles_keyframe_requests(&self) -> bool {
+        self.0.handles_keyframe_requests()
+    }
+
+    fn handles_bitrate_requests(&self) -> bool {
+        self.0.handles_bitrate_requests()
+    }
+
+    fn handles_qos(&self) -> bool {
+        self.0.handles_qos()
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        self.0.properties()
+    }
+
+    fn metadata(&self) -> ElementMetadata {
+        self.0.metadata()
+    }
+
+    fn log_category(&self) -> &'static str {
+        self.0.log_category()
+    }
+
+    fn set_instance_name(&mut self, name: alloc::string::String) {
+        self.0.set_instance_name(name)
+    }
+
+    fn set_log_category(&mut self, category: alloc::string::String) {
+        self.0.set_log_category(category)
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        self.0.set_property(name, value)
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        self.0.get_property(name)
     }
 }
 
@@ -888,5 +1148,27 @@ impl<'b> DynAsyncElement for &'b mut (dyn DynAsyncElement + 'b) {
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
         (**self).get_property(name)
+    }
+
+    #[cfg(feature = "runtime")]
+    fn drive_transform_arm<'s>(
+        self: Box<Self>,
+        io: crate::runtime::TransformArmIo,
+    ) -> BoxFuture<'s, Result<u64, G2gError>>
+    where
+        Self: 's,
+    {
+        Box::pin(crate::runtime::transform_arm(DynRef(*self), io))
+    }
+
+    #[cfg(feature = "runtime")]
+    fn drive_sink_arm<'s>(
+        self: Box<Self>,
+        io: crate::runtime::SinkArmIo,
+    ) -> BoxFuture<'s, Result<u64, G2gError>>
+    where
+        Self: 's,
+    {
+        Box::pin(crate::runtime::sink_arm(DynRef(*self), io))
     }
 }

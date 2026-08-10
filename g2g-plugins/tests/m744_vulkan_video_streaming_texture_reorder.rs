@@ -23,9 +23,6 @@
     feature = "vulkan-video"
 ))]
 
-use std::future::Future;
-use std::pin::Pin;
-
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::block_on;
@@ -48,11 +45,13 @@ struct RecordingSink {
 }
 
 impl OutputSink for RecordingSink {
-    fn push<'a>(
-        &'a mut self,
-        packet: PipelinePacket,
-    ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
-        Box::pin(async move {
+    fn poll_push(
+        &mut self,
+        _cx: &mut core::task::Context<'_>,
+        packet_slot: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        let packet = packet_slot.take().expect("poll_push without a packet");
+        core::task::Poll::Ready({
             self.packets.push(packet);
             Ok(PushOutcome::Accepted)
         })
@@ -182,7 +181,7 @@ fn element_streaming_output(codec: VideoCodec, aus: Vec<Vec<u8>>, gpu: bool) -> 
         dec.configure_allocation(&AllocationParams {
             domain: MemoryDomainKind::WgpuTexture,
             accepts: DomainSet::only(MemoryDomainKind::WgpuTexture),
-            ..Default::default()..Default::default()
+            ..Default::default()
         });
     }
     let in_caps = Caps::CompressedVideo {

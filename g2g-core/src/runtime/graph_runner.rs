@@ -59,12 +59,12 @@ use crate::clock::{
 use crate::controller::{ArmController, ControlTarget, CONTROL_CATEGORY};
 use crate::element::{
     AsyncElement, BoxFuture, ConfigureOutcome, DynAsyncElement, ElementBound, OutputSink,
-    PushOutcome, Reconfigure,
+    OutputSinkExt, PushOutcome, Reconfigure,
 };
 use crate::error::G2gError;
 use crate::fanout::{
     DynMultiOutputSource, MultiInputElement, MultiOutputElement, MultiOutputSink,
-    MultiOutputSource, MultiSenderSink, ReverseChannel,
+    MultiOutputSinkExt, MultiOutputSource, MultiSenderSink, ReverseChannel,
 };
 use crate::format_element::{CapsConstraint, CapsPreferences};
 use crate::frame::{Frame, PipelinePacket};
@@ -402,7 +402,7 @@ enum RecascadeRoute {
 /// Producer end of the graph coordinator's control channel, cloned to each
 /// transform and sink arm so it can report a [`Recascade`].
 #[derive(Debug, Clone)]
-struct GraphCoordHandle {
+pub(crate) struct GraphCoordHandle {
     tx: Sender<Recascade>,
 }
 
@@ -555,7 +555,7 @@ fn behind_tee_policy<E>(vg: &ValidatedGraph<E>, node: NodeId) -> Option<FanOutPo
 /// How a branch arm reacts to a mid-stream `CapsChanged` it cannot negotiate,
 /// derived from its position ([`behind_tee_policy`]).
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum BranchMode {
+pub(crate) enum BranchMode {
     /// Single-producer chain: a feasible mid-stream re-solve is forwarded and
     /// the chain keeps flowing; a genuinely infeasible one fails the run loud,
     /// since no runtime producer renegotiates its output caps.
@@ -1710,20 +1710,19 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
                     .expect("transform ctrl rx");
                 let out_caps = solution[out_edge].clone();
                 let downstream_feasible = feasibility[out_edge].clone();
-                Box::pin(transform_arm(
-                    elem,
+                elem.drive_transform_arm(TransformArmIo {
                     in_rx,
                     out_tx,
                     arm_rx,
-                    coord_handle.clone(),
+                    coord: coord_handle.clone(),
                     node,
                     out_caps,
                     downstream_feasible,
-                    branch_mode(&vg, node),
-                    bus.cloned(),
-                    probes[node.0 as usize].clone(),
-                    controllers[node.0 as usize].take(),
-                ))
+                    mode: branch_mode(&vg, node),
+                    bus: bus.cloned(),
+                    probe: probes[node.0 as usize].clone(),
+                    control: controllers[node.0 as usize].take(),
+                })
             }
             NodeKind::Sink => {
                 let Some(GraphNodeRef::Element(elem)) = element else {
@@ -1731,19 +1730,18 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
                 };
                 let in_rx = in_rxs.pop().expect("sink input edge");
                 let arm_rx = arm_ctrl_rx[node.0 as usize].take().expect("sink ctrl rx");
-                Box::pin(sink_arm(
-                    elem,
+                elem.drive_sink_arm(SinkArmIo {
                     in_rx,
                     arm_rx,
-                    coord_handle.clone(),
+                    coord: coord_handle.clone(),
                     node,
-                    branch_mode(&vg, node),
-                    bus.cloned(),
-                    state.clone(),
-                    progress.cloned(),
-                    probes[node.0 as usize].clone(),
-                    controllers[node.0 as usize].take(),
-                ))
+                    mode: branch_mode(&vg, node),
+                    bus: bus.cloned(),
+                    state: state.clone(),
+                    progress: progress.cloned(),
+                    probe: probes[node.0 as usize].clone(),
+                    control: controllers[node.0 as usize].take(),
+                })
             }
             NodeKind::Tee(_) => {
                 let in_rx = in_rxs.pop().expect("tee input edge");
@@ -2066,20 +2064,19 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
                 let ch = coord_handle.clone();
                 let control = controllers[node.0 as usize].take();
                 alloc::boxed::Box::new(move || -> LocalArmFuture {
-                    Box::pin(transform_arm(
-                        elem,
+                    elem.drive_transform_arm(TransformArmIo {
                         in_rx,
                         out_tx,
                         arm_rx,
-                        ch,
+                        coord: ch,
                         node,
                         out_caps,
                         downstream_feasible,
-                        bm,
-                        bus_c,
+                        mode: bm,
+                        bus: bus_c,
                         probe,
                         control,
-                    ))
+                    })
                 })
             }
             NodeKind::Sink => {
@@ -2096,9 +2093,18 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
                 let arm_rx = arm_ctrl_rx[node.0 as usize].take().expect("sink ctrl rx");
                 let control = controllers[node.0 as usize].take();
                 alloc::boxed::Box::new(move || -> LocalArmFuture {
-                    Box::pin(sink_arm(
-                        elem, in_rx, arm_rx, ch, node, bm, bus_c, state_c, prog_c, probe, control,
-                    ))
+                    elem.drive_sink_arm(SinkArmIo {
+                        in_rx,
+                        arm_rx,
+                        coord: ch,
+                        node,
+                        mode: bm,
+                        bus: bus_c,
+                        state: state_c,
+                        progress: prog_c,
+                        probe,
+                        control,
+                    })
                 })
             }
             NodeKind::Tee(_) => {
@@ -2783,21 +2789,62 @@ async fn source_arm<'a>(
 /// its forwarded output toward a downstream-acceptable shape using its
 /// `downstream_feasible` snapshot (Caps-α), failing loud via a reverse
 /// reconfigure if downstream positively rejects every output it can produce.
-#[allow(clippy::too_many_arguments)]
-async fn transform_arm<'a>(
-    mut elem: Box<dyn DynAsyncElement + 'a>,
-    in_rx: LinkReceiver,
-    out_tx: LinkSender,
-    arm_rx: Receiver<ArmDirective>,
-    coord: GraphCoordHandle,
-    node: NodeId,
-    mut out_caps: Caps,
-    downstream_feasible: Option<CapsSet>,
-    mode: BranchMode,
-    bus: Option<BusHandle>,
-    probe: Probe,
-    control: Option<ArmController>,
+/// Everything a transform arm needs besides its element (M1000). Opaque on
+/// purpose: only the runner can build one, so the `drive_transform_arm` hook
+/// on `DynAsyncElement` stays implementable only through the blanket impl.
+#[doc(hidden)]
+#[allow(missing_debug_implementations)]
+pub struct TransformArmIo {
+    pub(crate) in_rx: LinkReceiver,
+    pub(crate) out_tx: LinkSender,
+    pub(crate) arm_rx: Receiver<ArmDirective>,
+    pub(crate) coord: GraphCoordHandle,
+    pub(crate) node: NodeId,
+    pub(crate) out_caps: Caps,
+    pub(crate) downstream_feasible: Option<CapsSet>,
+    pub(crate) mode: BranchMode,
+    pub(crate) bus: Option<BusHandle>,
+    pub(crate) probe: Probe,
+    pub(crate) control: Option<ArmController>,
+}
+
+/// As [`TransformArmIo`], for the sink arm.
+#[doc(hidden)]
+#[allow(missing_debug_implementations)]
+pub struct SinkArmIo {
+    pub(crate) in_rx: LinkReceiver,
+    pub(crate) arm_rx: Receiver<ArmDirective>,
+    pub(crate) coord: GraphCoordHandle,
+    pub(crate) node: NodeId,
+    pub(crate) mode: BranchMode,
+    pub(crate) bus: Option<BusHandle>,
+    pub(crate) state: Option<StateController>,
+    pub(crate) progress: Option<PipelineProgress>,
+    pub(crate) probe: Probe,
+    pub(crate) control: Option<ArmController>,
+}
+
+/// Monomorphized over the element type by the `drive_transform_arm` blanket
+/// hook (M1000), so the per-frame `process` future is the element's own
+/// unboxed state machine, not a `Box<dyn Future>`.
+#[doc(hidden)]
+pub async fn transform_arm<E: AsyncElement>(
+    mut elem: E,
+    io: TransformArmIo,
 ) -> Result<u64, G2gError> {
+    let TransformArmIo {
+        in_rx,
+        out_tx,
+        arm_rx,
+        coord,
+        node,
+        mut out_caps,
+        downstream_feasible,
+        mode,
+        bus,
+        probe,
+        control,
+    } = io;
     let mut adapter = SenderSink::new(out_tx);
     // M947: charge time spent blocked on the downstream link to this element's
     // push-wait, not to its `process()` compute.
@@ -2938,7 +2985,7 @@ async fn transform_arm<'a>(
                                 elem.configure_output(&forward_caps),
                             )?;
                         }
-                        realloc_local_dyn(&mut *elem, &forward_caps);
+                        realloc_local_dyn(&mut elem as &mut dyn DynAsyncElement, &forward_caps);
                         // On a Defer `forward_caps` is the incoming INPUT caps:
                         // keep the last known real output as the shape to steer
                         // future re-solves (and allocation proposals) by.
@@ -2993,7 +3040,12 @@ async fn transform_arm<'a>(
                 // M882: animated properties are sampled at this frame's PTS, so
                 // the element processes it under the values that frame's time
                 // calls for.
-                apply_control(control.as_ref(), &mut *elem, &packet, &probe)?;
+                apply_control(
+                    control.as_ref(),
+                    &mut elem as &mut dyn DynAsyncElement,
+                    &packet,
+                    &probe,
+                )?;
                 let t0 = ElementProbe::mark();
                 elem.process(packet, &mut adapter).await?;
                 if let (Some(p), Some(seq)) = (timed, seq) {
@@ -3016,34 +3068,12 @@ async fn transform_arm<'a>(
 /// loud as a reverse reconfigure into the boundary that emitted the change.
 /// M839: it also selects on the β control channel, so the pool an upstream muxer
 /// settles on for its merged output reaches the element that reads it.
-#[allow(clippy::too_many_arguments)]
-async fn sink_arm<'a>(
-    mut elem: Box<dyn DynAsyncElement + 'a>,
-    in_rx: LinkReceiver,
-    arm_rx: Receiver<ArmDirective>,
-    coord: GraphCoordHandle,
-    node: NodeId,
-    mode: BranchMode,
-    bus: Option<BusHandle>,
-    state: Option<StateController>,
-    progress: Option<PipelineProgress>,
-    probe: Probe,
-    control: Option<ArmController>,
-) -> Result<u64, G2gError> {
-    let result = sink_arm_loop(
-        &mut *elem,
-        in_rx,
-        arm_rx,
-        coord,
-        node,
-        mode,
-        bus,
-        state,
-        progress,
-        probe.clone(),
-        control,
-    )
-    .await;
+/// Monomorphized over the element type by the `drive_sink_arm` blanket hook
+/// (M1000); see [`transform_arm`].
+#[doc(hidden)]
+pub async fn sink_arm<E: AsyncElement>(mut elem: E, io: SinkArmIo) -> Result<u64, G2gError> {
+    let probe = io.probe.clone();
+    let result = sink_arm_loop(&mut elem, io).await;
     // A paced sink's presented / dropped counters, read here (after the loop
     // ended, on any exit) so the snapshot taken once every arm joined sees a
     // settled value.
@@ -3053,20 +3083,19 @@ async fn sink_arm<'a>(
     result
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn sink_arm_loop<'a>(
-    elem: &'a mut (dyn DynAsyncElement + 'a),
-    in_rx: LinkReceiver,
-    arm_rx: Receiver<ArmDirective>,
-    coord: GraphCoordHandle,
-    node: NodeId,
-    mode: BranchMode,
-    bus: Option<BusHandle>,
-    state: Option<StateController>,
-    progress: Option<PipelineProgress>,
-    probe: Probe,
-    control: Option<ArmController>,
-) -> Result<u64, G2gError> {
+async fn sink_arm_loop<E: AsyncElement>(elem: &mut E, io: SinkArmIo) -> Result<u64, G2gError> {
+    let SinkArmIo {
+        in_rx,
+        arm_rx,
+        coord,
+        node,
+        mode,
+        bus,
+        state,
+        progress,
+        probe,
+        control,
+    } = io;
     let mut null = NullSink;
     let mut consumed = 0u64;
     let mut prerolled_self = false;
@@ -3143,20 +3172,21 @@ async fn sink_arm_loop<'a>(
                 // (`FailLoud`) and a single-producer chain (`Reconfigure`) both
                 // fail the run loud rather than flowing stale caps; `Drop` (a
                 // tee) ends this branch while its siblings continue.
-                let sink_caps = match re_solve_downstream_dyn_sink(&new_caps, &*elem) {
-                    Ok(caps) => caps,
-                    Err(failure) => match mode {
-                        BranchMode::FailLoud | BranchMode::Reconfigure => {
-                            report_runtime_caps_conflict(&new_caps);
-                            report_nego_failure(bus.as_ref(), failure);
-                            return Err(G2gError::CapsMismatch);
-                        }
-                        BranchMode::Drop => {
-                            report_nego_failure(bus.as_ref(), failure);
-                            return Ok(consumed);
-                        }
-                    },
-                };
+                let sink_caps =
+                    match re_solve_downstream_dyn_sink(&new_caps, &*elem as &dyn DynAsyncElement) {
+                        Ok(caps) => caps,
+                        Err(failure) => match mode {
+                            BranchMode::FailLoud | BranchMode::Reconfigure => {
+                                report_runtime_caps_conflict(&new_caps);
+                                report_nego_failure(bus.as_ref(), failure);
+                                return Err(G2gError::CapsMismatch);
+                            }
+                            BranchMode::Drop => {
+                                report_nego_failure(bus.as_ref(), failure);
+                                return Ok(consumed);
+                            }
+                        },
+                    };
                 let instance = probe.as_deref().map(|p| p.name());
                 log_caps_forward(instance, &new_caps, &sink_caps, true);
                 match log_caps_rejected(instance, &sink_caps, elem.configure_pipeline(&sink_caps))?
@@ -3229,7 +3259,12 @@ async fn sink_arm_loop<'a>(
                     }
                 }
                 // M882: sample the animated properties at this frame's PTS.
-                apply_control(control.as_ref(), &mut *elem, &packet, &probe)?;
+                apply_control(
+                    control.as_ref(),
+                    &mut *elem as &mut dyn DynAsyncElement,
+                    &packet,
+                    &probe,
+                )?;
                 let t0 = ElementProbe::mark();
                 elem.process(packet, &mut null).await?;
                 if let (Some(p), Some(seq)) = (timed, seq) {

@@ -104,6 +104,12 @@ pub use graph_runner::{
     NegotiateError,
 };
 
+// The monomorphized-arm seam (M1000): `DynAsyncElement`'s drive hooks name
+// these, so they must be reachable, but they are runner plumbing, not API.
+#[cfg(feature = "std")]
+#[doc(hidden)]
+pub use graph_runner::{sink_arm, transform_arm, SinkArmIo, TransformArmIo};
+
 #[cfg(feature = "std")]
 pub use observe::{
     EdgeInfo, FrameJourney, JourneyStage, NodeRole, NodeTelemetry, Observer, TelemetrySnapshot,

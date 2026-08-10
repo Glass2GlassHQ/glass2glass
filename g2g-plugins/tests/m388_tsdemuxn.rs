@@ -11,9 +11,6 @@
 
 #![cfg(feature = "std")]
 
-use core::future::Future;
-use core::pin::Pin;
-
 use g2g_core::fanout::MultiOutputSink;
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
@@ -135,12 +132,14 @@ impl PortTap {
     }
 }
 impl MultiOutputSink for PortTap {
-    fn push_to<'a>(
-        &'a mut self,
+    fn poll_push_to(
+        &mut self,
+        _cx: &mut core::task::Context<'_>,
         port: usize,
-        packet: PipelinePacket,
-    ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
-        Box::pin(async move {
+        packet_slot: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        let packet = packet_slot.take().expect("poll_push without a packet");
+        core::task::Poll::Ready({
             match packet {
                 PipelinePacket::DataFrame(Frame {
                     domain: MemoryDomain::System(s),

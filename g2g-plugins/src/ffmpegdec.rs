@@ -3118,12 +3118,15 @@ mod tests {
     // results are collected into a `RefCell<Vec<_>>` we inspect after.
     struct RecSink<'a>(&'a core::cell::RefCell<Vec<PipelinePacket>>);
     impl<'a> OutputSink for RecSink<'a> {
-        fn push<'b>(
-            &'b mut self,
-            packet: PipelinePacket,
-        ) -> Pin<Box<dyn Future<Output = Result<g2g_core::PushOutcome, G2gError>> + 'b>> {
+        fn poll_push(
+            &mut self,
+            _cx: &mut core::task::Context<'_>,
+            packet_slot: &mut Option<PipelinePacket>,
+        ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+            let packet = packet_slot.take().expect("poll_push without a packet");
+
             let log = self.0;
-            Box::pin(async move {
+            core::task::Poll::Ready({
                 log.borrow_mut().push(packet);
                 Ok(g2g_core::PushOutcome::Accepted)
             })

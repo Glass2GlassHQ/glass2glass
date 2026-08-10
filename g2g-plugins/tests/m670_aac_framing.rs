@@ -3,7 +3,7 @@
 //! sine encoded by ffmpeg; the parser must recover the channel count and sample
 //! rate and emit a `CapsChanged` before forwarding the frame.
 
-use g2g_core::element::{BoxFuture, PushOutcome};
+use g2g_core::element::PushOutcome;
 use g2g_core::frame::{Frame, FrameTiming};
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
@@ -21,11 +21,13 @@ struct Collect {
 }
 
 impl OutputSink for Collect {
-    fn push<'a>(
-        &'a mut self,
-        packet: PipelinePacket,
-    ) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
-        Box::pin(async move {
+    fn poll_push(
+        &mut self,
+        _cx: &mut core::task::Context<'_>,
+        packet_slot: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        let packet = packet_slot.take().expect("poll_push without a packet");
+        core::task::Poll::Ready({
             match packet {
                 PipelinePacket::CapsChanged(Caps::Audio {
                     channels,

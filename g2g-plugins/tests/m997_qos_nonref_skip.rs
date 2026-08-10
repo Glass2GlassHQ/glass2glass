@@ -89,27 +89,27 @@ impl QosSink {
 }
 
 impl OutputSink for QosSink {
-    fn push<'a>(
-        &'a mut self,
-        packet: PipelinePacket,
-    ) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
-        Box::pin(async move {
-            if let PipelinePacket::DataFrame(f) = &packet {
-                let bytes = f
-                    .domain
-                    .as_system_slice()
-                    .expect("decoded system frame")
-                    .to_vec();
-                self.frames.push((f.timing.pts_ns, bytes));
-            }
-            if self.pressure.load(Ordering::Relaxed) {
-                return Ok(PushOutcome::Qos(QosMessage {
-                    jitter_ns: LATE_NS,
-                    running_time_ns: 0,
-                }));
-            }
-            Ok(PushOutcome::Accepted)
-        })
+    fn poll_push(
+        &mut self,
+        _cx: &mut core::task::Context<'_>,
+        packet: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        use core::task::Poll;
+        if let Some(PipelinePacket::DataFrame(f)) = packet.take() {
+            let bytes = f
+                .domain
+                .as_system_slice()
+                .expect("decoded system frame")
+                .to_vec();
+            self.frames.push((f.timing.pts_ns, bytes));
+        }
+        if self.pressure.load(Ordering::Relaxed) {
+            return Poll::Ready(Ok(PushOutcome::Qos(QosMessage {
+                jitter_ns: LATE_NS,
+                running_time_ns: 0,
+            })));
+        }
+        Poll::Ready(Ok(PushOutcome::Accepted))
     }
 }
 
