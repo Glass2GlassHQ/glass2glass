@@ -95,6 +95,59 @@ pub fn gst_equivalent(registry: &Registry, gst_name: &str) -> GstEquivalent {
         .unwrap_or(GstEquivalent::Unknown)
 }
 
+/// Every GStreamer element name g2g's runtime reports under a different name,
+/// as `(gst name, g2g runtime name)`.
+///
+/// The runtime name is what a graph dump calls the element, its log category,
+/// which is the Rust type name and so often not the launch name: gst's
+/// `h264parse` is g2g's `NalParse`. A tool comparing the two engines' graphs
+/// pairs elements with this; names that already read the same on both sides
+/// (`filesrc` against `FileSrc`) are left out, since pairing those needs no
+/// table. Backs `g2g-inspect --gst-map`.
+pub fn gst_name_synonyms(registry: &Registry) -> Vec<(&'static str, &'static str)> {
+    let mut pairs = Vec::new();
+    let mut add = |gst_name: &'static str, g2g_name: &str| {
+        let Some(runtime) = runtime_name(registry, g2g_name) else {
+            return;
+        };
+        if !same_word(gst_name, runtime) {
+            pairs.push((gst_name, runtime));
+        }
+    };
+    for name in registry.element_names() {
+        add(name, name);
+    }
+    for (gst_name, equivalent) in GST_MAP {
+        if let GstEquivalent::Renamed(g2g_name) = equivalent {
+            add(gst_name, g2g_name);
+        }
+    }
+    pairs.sort_unstable();
+    pairs.dedup();
+    pairs
+}
+
+/// What the runtime calls the element registered as `name`: its log category,
+/// which the runner suffixes with an instance number to name a graph node.
+fn runtime_name(registry: &Registry, name: &str) -> Option<&'static str> {
+    if let Some(element) = registry.make_element(name) {
+        return Some(element.log_category());
+    }
+    registry.make_source(name).map(|s| s.log_category())
+}
+
+/// Whether two element names are the same word once case and punctuation are
+/// dropped, which is how a graph comparison pairs `filesrc0` with `FileSrc0`.
+fn same_word(left: &str, right: &str) -> bool {
+    let word = |s: &str| -> String {
+        s.chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .map(|c| c.to_ascii_lowercase())
+            .collect()
+    };
+    word(left) == word(right)
+}
+
 /// Whether `name` resolves to a registered element of any role (transform/sink,
 /// source, or muxer), aliases included.
 fn registry_has(registry: &Registry, name: &str) -> bool {
@@ -337,6 +390,26 @@ mod tests {
             interlace: g2g_core::Interlace::Any,
         };
         assert_eq!(parse_caps(&c.to_gst_string()), Some(c));
+    }
+
+    #[test]
+    fn the_synonym_table_names_the_elements_the_two_engines_disagree_about() {
+        let reg = default_registry();
+        let pairs = gst_name_synonyms(&reg);
+        // The case that makes the table necessary: gst's parser is a type g2g
+        // shares between codecs, so a graph dump never pairs the two by name.
+        assert!(pairs.contains(&("h264parse", "NalParse")), "got {pairs:?}");
+        for (gst_name, g2g_name) in &pairs {
+            assert!(
+                !same_word(gst_name, g2g_name),
+                "{gst_name} and {g2g_name} already pair without the table"
+            );
+            assert!(
+                runtime_name(&reg, gst_name).is_some_and(|n| n == *g2g_name)
+                    || matches!(gst_equivalent(&reg, gst_name), GstEquivalent::Renamed(_)),
+                "{gst_name} maps to {g2g_name} through the registry or the rename table"
+            );
+        }
     }
 
     #[test]

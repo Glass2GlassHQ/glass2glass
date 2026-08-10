@@ -22,6 +22,7 @@ const W: u32 = 480;
 const H: u32 = 160;
 const FONT_PX: u32 = 32;
 const SHADOW_OFFSET: i32 = 8;
+const SHADOW_BLUR: u32 = 6;
 
 /// First available Latin system font, or `None` to skip (a host with no fonts).
 /// These are the Fedora paths the dev host has.
@@ -122,6 +123,57 @@ fn is_white(px: &[u8]) -> bool {
     px[0] > 60 && px[1] > 60 && px[2] > 60
 }
 
+/// How strongly the blue drop shadow covers a pixel. The shadow is pure blue
+/// over a black frame, so the blue channel is its coverage, and any red or green
+/// means the white glyphs painted there instead.
+fn shadow_alpha(px: &[u8]) -> u8 {
+    if px[0] == 0 && px[1] == 0 {
+        px[2]
+    } else {
+        0
+    }
+}
+
+/// How far the shadow reaches outside `core` and how strong it is on the way
+/// out: the peak [`shadow_alpha`] per ring, ring 0 being inside `core` and ring
+/// n being n pixels outside it on the nearest side, plus the last ring the
+/// shadow reaches. `core` is the box a hard-edged shadow of the same offset
+/// covers, so every ring past 0 is what the blur added.
+fn shadow_rings(pixels: &[u8], core: (u32, u32, u32, u32)) -> (usize, Vec<u8>) {
+    let (left, top, right, bottom) = core;
+    let mut rings = vec![0u8; SHADOW_BLUR as usize * 3 + 2];
+    for (i, px) in pixels.chunks_exact(4).enumerate() {
+        let (x, y) = (i as u32 % W, i as u32 / W);
+        let outside = [
+            left.saturating_sub(x),
+            x.saturating_sub(right),
+            top.saturating_sub(y),
+            y.saturating_sub(bottom),
+        ]
+        .into_iter()
+        .max()
+        .unwrap_or(0) as usize;
+        let Some(ring) = rings.get_mut(outside) else {
+            continue;
+        };
+        *ring = (*ring).max(shadow_alpha(px));
+    }
+    let spread = rings.iter().rposition(|&a| a > 0).expect("a shadow at all");
+    (spread, rings)
+}
+
+/// A one-word cue with a blue drop shadow, `blur` being the blur radius term of
+/// the `text-shadow` (empty for a hard-edged shadow, `"6px "` for a blurred one).
+fn shadow_document(blur: &str) -> String {
+    document(
+        &format!(
+            "::cue {{ color: white; background-color: transparent; \
+              text-shadow: {SHADOW_OFFSET}px {SHADOW_OFFSET}px {blur}blue; }}"
+        ),
+        "no",
+    )
+}
+
 /// Bounding box `(left, top, right, bottom)` of the pixels `pick` accepts,
 /// inclusive on every edge. `None` when it accepted none.
 fn bounds(pixels: &[u8], pick: fn(&[u8]) -> bool) -> Option<(u32, u32, u32, u32)> {
@@ -219,14 +271,7 @@ async fn text_shadow_paints_offset_under_the_glyphs() {
         std::eprintln!("no system font; skipping");
         return;
     };
-    let vtt = document(
-        &format!(
-            "::cue {{ color: white; background-color: transparent; \
-              text-shadow: {SHADOW_OFFSET}px {SHADOW_OFFSET}px blue; }}"
-        ),
-        "no",
-    );
-    let pixels = render(&font, &vtt).await;
+    let pixels = render(&font, &shadow_document("")).await;
 
     assert!(count(&pixels, is_blue) > 40, "the shadow was drawn");
     assert!(
@@ -249,6 +294,41 @@ async fn text_shadow_paints_offset_under_the_glyphs() {
         blue_top >= white_top,
         "a downward shadow never rises above the glyphs: {blue_top} vs {white_top}"
     );
+}
+
+/// A `text-shadow` blur radius spreads the shadow past the hard-edged copy and
+/// fades it out: the blurred shadow paints outside the unblurred one's box, and
+/// every ring further out is weaker than the one inside it.
+#[tokio::test]
+async fn text_shadow_blur_spreads_past_the_hard_edge_and_fades() {
+    let Some(font) = latin_font() else {
+        std::eprintln!("no system font; skipping");
+        return;
+    };
+    let hard = render(&font, &shadow_document("")).await;
+    let soft = render(&font, &shadow_document(&format!("{SHADOW_BLUR}px "))).await;
+
+    let box_of_hard = bounds(&hard, is_blue).expect("hard-edged shadow");
+    let (spread, rings) = shadow_rings(&soft, box_of_hard);
+    // Well past what the hard-edged shadow's own antialiased fringe reaches.
+    assert!(
+        spread >= SHADOW_BLUR as usize,
+        "the blur spreads past the hard-edged shadow's box: {spread} px"
+    );
+    assert!(
+        rings[spread] < rings[0],
+        "the shadow is weakest where it reaches furthest: {} vs {} at the core",
+        rings[spread],
+        rings[0]
+    );
+    for ring in 1..=spread {
+        assert!(
+            rings[ring] <= rings[ring - 1],
+            "the shadow falls off with distance, but ring {ring} is {} against {} inside it",
+            rings[ring],
+            rings[ring - 1]
+        );
+    }
 }
 
 /// A span-scoped `background-color` fills behind that span's glyphs alone,
@@ -420,5 +500,40 @@ mod gpu {
             big as f32 >= plain as f32 * 1.4,
             "the GPU drew the 200% span taller: {big} px vs {plain} px"
         );
+    }
+
+    /// Vello has no glyph-run blur, so a blurred `text-shadow` goes down as a
+    /// tinted mask image per glyph. The check is that it lands on the CPU
+    /// overlay's pixels: same spread past the hard-edged shadow, same falloff.
+    #[tokio::test]
+    async fn gpu_blurs_the_shadow_like_the_cpu_overlay() {
+        let _gpu = GPU_LOCK.lock().await;
+        let Some(ctx) = gpu_context().await else {
+            return;
+        };
+        let Some(font) = latin_font() else {
+            std::eprintln!("no system font; skipping");
+            return;
+        };
+        let vtt = shadow_document(&format!("{SHADOW_BLUR}px "));
+        let on_gpu = gpu_render(&ctx, &font, &vtt).await;
+        let on_cpu = render(&font, &vtt).await;
+
+        let hard = render(&font, &shadow_document("")).await;
+        let box_of_hard = bounds(&hard, is_blue).expect("hard-edged shadow");
+        let (gpu_spread, gpu_rings) = shadow_rings(&on_gpu, box_of_hard);
+        let (cpu_spread, cpu_rings) = shadow_rings(&on_cpu, box_of_hard);
+        assert!(
+            gpu_spread.abs_diff(cpu_spread) <= 1,
+            "the GPU blur reaches as far as the CPU one: {gpu_spread} px vs {cpu_spread} px"
+        );
+        for ring in 0..=gpu_spread.min(cpu_spread) {
+            assert!(
+                gpu_rings[ring].abs_diff(cpu_rings[ring]) <= 24,
+                "ring {ring} of the GPU shadow matches the CPU one: {} vs {}",
+                gpu_rings[ring],
+                cpu_rings[ring]
+            );
+        }
     }
 }

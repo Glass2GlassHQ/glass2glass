@@ -2662,8 +2662,13 @@ cosmic-text `Metrics` overrides on the line's `AttrsList`, so a line mixing size
 is still one shaped, bidi-reordered run and takes the tallest span's line height;
 the `ab_glyph` renderer rasterizes each character at its own size on a shared
 baseline. A shadow is one offset copy of the glyphs in the shadow colour, drawn
-under every glyph of the cue so a neighbour's shadow never lands on top of one (a
-blur radius is parsed but not applied: the shadow is hard-edged). A whole-cue
+under every glyph of the cue so a neighbour's shadow never lands on top of one. A
+blur radius is applied: the glyph's coverage mask is zero-padded and run through
+three separable box passes, sized so the stack matches the gaussian CSS asks for
+(standard deviation half the radius), and the grown mask is tinted in the shadow
+colour. Vello has no filter that blurs a glyph run, so the GPU backend draws a
+blurred shadow as one tinted mask image per glyph, blurred by the same code, and
+falls back to a glyph run when the radius is 0. A whole-cue
 `background-color` is the backing box; a span-scoped one fills the line box
 behind that span's own glyphs, over the box and under the text. Sizes and offsets
 are clamped at parse time, because a stylesheet is as untrusted as the rest of

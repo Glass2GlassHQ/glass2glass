@@ -155,6 +155,94 @@ fn merge_span_fills(
     runs
 }
 
+/// Box-blur passes stacked per axis to approximate a gaussian. Three is where
+/// the stack stops looking boxy.
+#[cfg(feature = "truetype-overlay")]
+const BLUR_PASSES: usize = 3;
+
+/// Box radius whose [`BLUR_PASSES`] stack matches the gaussian a CSS blur radius
+/// asks for. CSS puts the standard deviation at half the blur radius, and n box
+/// passes of radius `b` have variance `n * ((2b + 1)^2 - 1) / 12`.
+#[cfg(feature = "truetype-overlay")]
+fn box_radius_for(blur: u32) -> usize {
+    let sigma = blur as f32 / 2.0;
+    let variance = sigma * sigma * 12.0 / BLUR_PASSES as f32;
+    let radius = ((1.0 + variance).sqrt() - 1.0) / 2.0;
+    (radius.round() as usize).max(1)
+}
+
+/// Blur a glyph coverage mask, returning the grown mask, its size, and how far
+/// it grew on each side (the caller shifts the blit origin back by that much).
+/// The mask is zero-padded first, so the blur falls off into the padding rather
+/// than being clipped at the glyph's own edge.
+#[cfg(feature = "truetype-overlay")]
+fn blur_coverage(
+    coverage: &[u8],
+    (gw, gh): (usize, usize),
+    blur: u32,
+) -> (Vec<u8>, (usize, usize), usize) {
+    let radius = box_radius_for(blur);
+    let pad = radius * BLUR_PASSES;
+    let (w, h) = (gw + 2 * pad, gh + 2 * pad);
+    let mut mask = alloc::vec![0u8; w * h];
+    for row in 0..gh {
+        let out = (row + pad) * w + pad;
+        mask[out..out + gw].copy_from_slice(&coverage[row * gw..row * gw + gw]);
+    }
+    let mut scratch = alloc::vec![0u8; w * h];
+    for _ in 0..BLUR_PASSES {
+        box_blur_axis(&mask, &mut scratch, h, w, 1, radius);
+        box_blur_axis(&scratch, &mut mask, w, h, w, radius);
+    }
+    (mask, (w, h), pad)
+}
+
+/// One box-blur pass along the axis `stride` steps through: `lines` runs of
+/// `len` samples, with anything past an end read as zero. Both axes go through
+/// here, the vertical one by walking columns with the row stride.
+#[cfg(feature = "truetype-overlay")]
+fn box_blur_axis(
+    src: &[u8],
+    dst: &mut [u8],
+    lines: usize,
+    len: usize,
+    stride: usize,
+    radius: usize,
+) {
+    // Stepping along a row advances by one, so the next row starts `len` on;
+    // stepping down a column advances by the row stride, so the next column
+    // starts one on.
+    let line_step = if stride == 1 { len } else { 1 };
+    let window = (2 * radius + 1) as u32;
+    for line in 0..lines {
+        let start = line * line_step;
+        let mut sum: u32 = (0..radius.min(len))
+            .map(|i| src[start + i * stride] as u32)
+            .sum();
+        for i in 0..len {
+            if i + radius < len {
+                sum += src[start + (i + radius) * stride] as u32;
+            }
+            if i > radius {
+                sum -= src[start + (i - radius - 1) * stride] as u32;
+            }
+            dst[start + i * stride] = (sum / window) as u8;
+        }
+    }
+}
+
+/// One glyph's blurred drop shadow as a coverage mask, with `left` / `top`
+/// giving the mask's top-left corner relative to the pen origin.
+#[cfg(all(feature = "text-shaping", feature = "vello-text-overlay"))]
+#[derive(Debug)]
+pub(crate) struct BlurredShadowMask {
+    pub coverage: Vec<u8>,
+    pub width: usize,
+    pub height: usize,
+    pub left: i32,
+    pub top: i32,
+}
+
 /// One shaped glyph placed on the canvas: `(x, y)` is the pen origin on the
 /// baseline in frame pixels, before the rasterizer's own bitmap offsets.
 #[cfg(feature = "text-shaping")]
@@ -174,8 +262,8 @@ pub(crate) struct PlacedGlyph {
     /// blitter reads it out of the raster key instead.
     #[cfg(feature = "vello-text-overlay")]
     pub font_size: f32,
-    /// The `text-shadow` in effect here, drawn as an offset copy under every
-    /// glyph of the cue.
+    /// The `text-shadow` in effect here, drawn as an offset copy, blurred when
+    /// the rule asked for a radius, under every glyph of the cue.
     pub shadow: Option<TextShadow>,
 }
 
@@ -749,6 +837,28 @@ impl TextOverlay {
         }
     }
 
+    /// Blit one glyph's coverage as a drop shadow at `(x0, y0)`, in the shadow
+    /// colour. A `text-shadow` blur radius grows the mask, so the blit starts
+    /// that much up and to the left of where the hard-edged copy would.
+    #[cfg(feature = "truetype-overlay")]
+    fn blit_shadow(
+        &self,
+        buf: &mut [u8],
+        x0: i32,
+        y0: i32,
+        size: (usize, usize),
+        coverage: &[u8],
+        shadow: TextShadow,
+    ) {
+        if shadow.blur == 0 || size.0 == 0 || size.1 == 0 {
+            self.blit_coverage(buf, x0, y0, size, coverage, shadow.color);
+            return;
+        }
+        let (mask, grown, pad) = blur_coverage(coverage, size, shadow.blur);
+        let pad = pad as i32;
+        self.blit_coverage(buf, x0 - pad, y0 - pad, grown, &mask, shadow.color);
+    }
+
     /// TrueType render path (the `truetype-overlay` feature): rasterize each
     /// active cue's glyphs from the loaded font. Horizontal cues lay out
     /// left-to-right, top-to-bottom (auto-`line` cues stack from the bottom like
@@ -963,13 +1073,13 @@ impl TextOverlay {
             // lands on top of this glyph.
             for g in &glyphs {
                 let Some(shadow) = g.shadow else { continue };
-                self.blit_coverage(
+                self.blit_shadow(
                     buf,
                     g.x + shadow.offset_x,
                     g.y + shadow.offset_y,
                     g.size,
                     &g.coverage,
-                    shadow.color,
+                    shadow,
                 );
             }
             for g in &glyphs {
@@ -1220,13 +1330,13 @@ impl TextOverlay {
                 if img.color {
                     continue;
                 }
-                self.blit_coverage(
+                self.blit_shadow(
                     buf,
                     g.x + img.left + shadow.offset_x,
                     g.y - img.top + shadow.offset_y,
                     (img.width, img.height),
                     img.data,
-                    shadow.color,
+                    shadow,
                 );
             }
             for g in &cue.glyphs {
@@ -1243,6 +1353,33 @@ impl TextOverlay {
             }
         }
         self.shaper = Some(shaper);
+    }
+
+    /// The blurred drop-shadow mask for one shaped glyph: its rasterized
+    /// coverage grown by the blur, with the grown mask's top-left corner as an
+    /// offset from the pen origin. `None` for a colour (emoji) bitmap, which has
+    /// no coverage mask to tint. For the Vello backend, which has no filter to
+    /// blur a glyph run with and draws the mask as an image instead.
+    #[cfg(all(feature = "text-shaping", feature = "vello-text-overlay"))]
+    pub(crate) fn blurred_shadow_mask(
+        &mut self,
+        key: crate::textshape::GlyphKey,
+        blur: u32,
+    ) -> Option<BlurredShadowMask> {
+        let img = self.shaper.as_mut()?.image(key)?;
+        if img.color || img.width == 0 || img.height == 0 {
+            return None;
+        }
+        let (left, top) = (img.left, img.top);
+        let (coverage, (width, height), pad) =
+            blur_coverage(img.data, (img.width, img.height), blur);
+        Some(BlurredShadowMask {
+            coverage,
+            width,
+            height,
+            left: left - pad as i32,
+            top: -top - pad as i32,
+        })
     }
 
     /// Alpha-blend a colour (emoji) glyph bitmap, four bytes per pixel, at output

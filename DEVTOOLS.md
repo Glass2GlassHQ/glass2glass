@@ -359,7 +359,13 @@ Find the docs for a single element the way `gst-inspect` does:
 g2g-inspect                     # list every element in this build
 g2g-inspect videotestsrc        # role, caps / pad templates, and all properties
 g2g-inspect --gst <name>        # what a GStreamer element name maps to in g2g
+g2g-inspect --gst-map           # gst-name/g2g-runtime-name pairs, tab separated
 ```
+
+`--gst-map` is for a tool comparing g2g's graph against GStreamer's: g2g names a
+graph node after the Rust type (`NalParse0`) where gst names it after the factory
+(`h264parse0`), so pairing the two engines' elements needs the synonyms. Only the
+names that actually differ are printed.
 
 The same facts are available as structured data (`Registry::describe(name)` /
 `describe_all()` returning `ElementDoc` / `PropertyDoc`), which powers a
