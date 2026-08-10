@@ -169,15 +169,18 @@ static const G2gPropertySpec PROPERTIES[] = {
      G2G_STR("forward frames; drop them when false"), G2G_STR("true")},
 };
 
+/* `struct_size` deliberately stops before the reserved slots, so this element
+ * exercises the host's short-vtable path: it reads the prefix this plugin
+ * actually wrote and zero-fills the rest. */
 static const G2gElementVtable VTABLE = {
-    sizeof(G2gElementVtable),
+    offsetof(G2gElementVtable, reserved),
     1u,
+    counter_process,
+    counter_destroy,
     NULL, /* configure_pipeline: accept whatever was negotiated */
     NULL, /* configure_output */
-    counter_process,
     counter_set_property,
     counter_get_property,
-    counter_destroy,
     {NULL, NULL, NULL, NULL, NULL, NULL},
 };
 

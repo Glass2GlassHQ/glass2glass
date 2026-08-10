@@ -658,6 +658,13 @@ mod tests {
         core::ptr::null_mut()
     }
     unsafe extern "C" fn stub_destroy(_e: *mut c_void) {}
+    unsafe extern "C" fn stub_set_property(
+        _e: *mut c_void,
+        _n: FfiStr,
+        _v: *const crate::abi::FfiPropValue,
+    ) -> FfiStatus {
+        super::super::STATUS_OK
+    }
     unsafe extern "C" fn stub_process(
         _e: *mut c_void,
         _p: crate::abi::FfiPacket,
@@ -912,17 +919,23 @@ mod tests {
     }
 
     #[test]
-    fn a_short_vtable_still_loads_with_host_defaults() {
-        // The compatibility promise: a plugin built against an older header
-        // that stops after `process` loads, and the entries it lacks come back
-        // as absent rather than as garbage function pointers.
+    fn a_short_vtable_loads_with_host_defaults_for_what_it_lacks() {
+        // The compatibility promise: a plugin that wrote only the two required
+        // entries loads, and everything past its declared size comes back absent
+        // rather than as a garbage function pointer read off the end.
         let mut vt = good_vtable();
-        vt.struct_size = core::mem::offset_of!(FfiElementVtable, set_property) as u32;
-        // A short vtable has no destroy field, so validation must reject it for
-        // the missing required entry rather than reading past the declared size.
+        vt.set_property = Some(stub_set_property);
+        vt.struct_size = core::mem::offset_of!(FfiElementVtable, configure_pipeline) as u32;
         let reg = good_registration(&vt);
-        let err = read_registration(&reg).expect_err("a truncated vtable loses destroy");
-        assert_eq!(err, ValidationError::MissingFunction { name: "destroy" });
+        let elem = read_registration(&reg).expect("a minimal vtable is enough");
+        assert!(elem.vtable.process.is_some());
+        assert!(elem.vtable.destroy.is_some());
+        assert!(
+            elem.vtable.set_property.is_none(),
+            "an entry past the declared size is not read, even though it is set"
+        );
+        assert!(elem.vtable.configure_pipeline.is_none());
+        assert!(elem.vtable.reserved.iter().all(Option::is_none));
     }
 
     #[test]

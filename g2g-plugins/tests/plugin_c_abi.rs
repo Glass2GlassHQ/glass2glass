@@ -13,8 +13,9 @@
 //!    for every ABI struct and the test compares each against the Rust type, so
 //!    a field added on one side and forgotten on the other fails here rather
 //!    than corrupting memory in a pipeline.
-//! 3. A shorter vtable loads. The C element leaves `configure_pipeline` and
-//!    `configure_output` null and the host substitutes its defaults.
+//! 3. A shorter vtable loads. The C element declares a `struct_size` that stops
+//!    before the reserved slots and leaves `configure_pipeline` /
+//!    `configure_output` null, and the host substitutes its own defaults.
 //!
 //! Unix only: it shells out to a C compiler with `-shared` / `-dynamiclib`.
 //!

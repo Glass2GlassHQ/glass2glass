@@ -338,9 +338,12 @@ typedef struct {
 
 /* Per-instance entry points.
  *
- * `process` and `destroy` are REQUIRED. The rest may be NULL, and the host then
- * uses its own default: accept the caps, ignore the output caps, report no such
- * property. A shorter `struct_size` from an older header defaults the same way.
+ * `process` and `destroy` are REQUIRED, and come first so that the shortest
+ * useful `struct_size` is one that stops right after them: a minimal plugin can
+ * declare four fields and let the host default the rest. The others may be NULL
+ * (or absent, if `struct_size` does not reach them) and the host then uses its
+ * own default: accept the caps, ignore the output caps, report no such
+ * property. Field order is frozen.
  *
  * Thread contract: the host owns an instance exclusively and never calls into
  * it from two threads at once, but it MAY move it between threads between
@@ -350,6 +353,16 @@ typedef struct {
     uint32_t struct_size;
     uint32_t version;
 
+    /* Handle one packet, pushing any output through `out`. REQUIRED.
+     *
+     * Ownership of the packet's payload transfers to you. The returned future
+     * borrows both `elem` and `out`; the host keeps them valid until it drops
+     * the future, and does not touch `elem` while the future is alive. */
+    G2gFuture (*process)(void *elem, G2gPacket packet, G2gOutputSink out);
+
+    /* Destroy an instance `create` built. REQUIRED. Called once per instance. */
+    void (*destroy)(void *elem);
+
     /* Accept the negotiated input caps. Return G2G_STATUS_CAPS_MISMATCH to
      * reject. Writing a caps value with a tag other than G2G_CAPS_NONE through
      * `refixate` asks the solver to retry with that proposal. */
@@ -358,22 +371,12 @@ typedef struct {
     /* Receive this element's own negotiated OUTPUT caps. */
     G2gStatus (*configure_output)(void *elem, const G2gCaps *caps);
 
-    /* Handle one packet, pushing any output through `out`. REQUIRED.
-     *
-     * Ownership of the packet's payload transfers to you. The returned future
-     * borrows both `elem` and `out`; the host keeps them valid until it drops
-     * the future, and does not touch `elem` while the future is alive. */
-    G2gFuture (*process)(void *elem, G2gPacket packet, G2gOutputSink out);
-
     /* `value` is borrowed for the call. */
     G2gStatus (*set_property)(void *elem, G2gStr name, const G2gPropValue *value);
 
     /* Write the value through `out` and return G2G_STATUS_OK, or
      * G2G_STATUS_PROPERTY_UNKNOWN. */
     G2gStatus (*get_property)(void *elem, G2gStr name, G2gPropValue *out);
-
-    /* Destroy an instance `create` built. REQUIRED. Called once per instance. */
-    void (*destroy)(void *elem);
 
     void (*reserved[6])(void);
 } G2gElementVtable;

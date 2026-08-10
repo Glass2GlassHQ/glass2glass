@@ -715,6 +715,11 @@ pub struct FfiPropertySpec {
 /// the caps, ignore the output caps, report no such property). A vtable whose
 /// `struct_size` is smaller than the host's is read as a prefix and the missing
 /// tail defaults the same way.
+///
+/// The two required entries come **first** deliberately, so the shortest useful
+/// `struct_size` is one that stops right after them: a minimal plugin declares
+/// four fields and lets the host default everything else. Field order is frozen;
+/// a new entry appends, or claims a `reserved` slot.
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
 pub struct FfiElementVtable {
@@ -723,6 +728,23 @@ pub struct FfiElementVtable {
     pub struct_size: u32,
     /// Vtable revision within [`V2_ABI_VERSION`].
     pub version: u32,
+
+    /// Handle one packet, pushing any output through `out`. **Required.**
+    ///
+    /// Ownership of `packet`'s payload transfers to the element. The returned
+    /// future borrows both `elem` and `out`; the host drops it before either
+    /// goes away, and polls it to completion or drops it, never both.
+    pub process: Option<
+        unsafe extern "C" fn(
+            elem: *mut c_void,
+            packet: FfiPacket,
+            out: FfiOutputSink,
+        ) -> async_ffi::LocalFfiFuture<FfiStatus>,
+    >,
+
+    /// Destroy an instance built by [`FfiElementRegistration::create`].
+    /// **Required.** Called exactly once per instance.
+    pub destroy: Option<unsafe extern "C" fn(elem: *mut c_void)>,
 
     /// Accept the negotiated input caps. Optional; absent means "accept".
     ///
@@ -742,19 +764,6 @@ pub struct FfiElementVtable {
     pub configure_output:
         Option<unsafe extern "C" fn(elem: *mut c_void, caps: *const FfiCaps) -> FfiStatus>,
 
-    /// Handle one packet, pushing any output through `out`. **Required.**
-    ///
-    /// Ownership of `packet`'s payload transfers to the element. The returned
-    /// future borrows both `elem` and `out`; the host drops it before either
-    /// goes away, and polls it to completion or drops it, never both.
-    pub process: Option<
-        unsafe extern "C" fn(
-            elem: *mut c_void,
-            packet: FfiPacket,
-            out: FfiOutputSink,
-        ) -> async_ffi::LocalFfiFuture<FfiStatus>,
-    >,
-
     /// Set a property by name. Optional; absent means the element has none.
     /// `value` is borrowed for the call.
     pub set_property: Option<
@@ -770,10 +779,6 @@ pub struct FfiElementVtable {
     pub get_property: Option<
         unsafe extern "C" fn(elem: *mut c_void, name: FfiStr, out: *mut FfiPropValue) -> FfiStatus,
     >,
-
-    /// Destroy an instance built by [`FfiElementRegistration::create`].
-    /// **Required.** Called exactly once per instance.
-    pub destroy: Option<unsafe extern "C" fn(elem: *mut c_void)>,
 
     /// Reserved for future entries; null in this revision.
     pub reserved: [Option<extern "C" fn()>; 6],
@@ -1020,15 +1025,16 @@ mod tests {
             destroy: None,
             reserved: [None; 6],
         };
-        // Pretend the plugin only wrote up to and including `process`.
-        let short = core::mem::offset_of!(FfiElementVtable, set_property);
+        // Pretend the plugin only wrote the two required entries.
+        let short = core::mem::offset_of!(FfiElementVtable, configure_pipeline);
         // SAFETY: `full` is a live, fully written local, so reading any prefix
         // of it is in bounds.
         let read: FfiElementVtable =
             unsafe { read_versioned(&full as *const _, short) }.expect("prefix reads");
+        assert!(read.configure_pipeline.is_none());
+        assert!(read.configure_output.is_none());
         assert!(read.set_property.is_none());
         assert!(read.get_property.is_none());
-        assert!(read.destroy.is_none());
         assert!(read.reserved.iter().all(Option::is_none));
     }
 
