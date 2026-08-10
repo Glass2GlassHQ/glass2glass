@@ -19,6 +19,11 @@ members = [
 # with its own target dir and feature resolution.
 exclude = [
     "g2g-plugins/tests/fixtures/example-plugin",
+    # Out-of-tree v2-ABI plugin example (M1010): the same idea against the
+    # cross-toolchain `repr(C)` boundary, built standalone by the
+    # plugin_loader_v2 test (deliberately with a mismatched g2g-core feature
+    # set, which v2 must not care about).
+    "g2g-plugins/tests/fixtures/v2-example-plugin",
     # Bevy integration crate (M796): a heavy `bevy` dependency that must stay
     # out of the normal build / CI. Standalone (its own Cargo.lock), built
     # against g2g as path packages. See its README.

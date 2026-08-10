@@ -60,7 +60,7 @@ script-rhai = ["declarative", "dep:rhai"]
 # Pulls `libloading`; implies std (the Registry is std-only). A packaged
 # `g2g-launch` / `g2g-inspect` is built with this so `--plugin` / $G2G_PLUGIN_PATH
 # extend it without a rebuild.
-plugin-loader = ["std", "dep:libloading"]
+plugin-loader = ["std", "dep:libloading", "dep:g2g-plugin", "dep:async-ffi"]
 # RTSP source element wrapping the `retina` crate. Pulls retina, futures, url; implies std + tokio.
 rtsp = ["std", "dep:retina", "dep:futures-util", "dep:url", "dep:bytes"]
 # RTSP server sink (RtspServerSink): hosts a pipeline's H.264 as an RTSP endpoint,
@@ -714,6 +714,11 @@ socket2 = { version = "0.6", features = ["all"], optional = true }
 # over the loaded `cdylib`. The host keeps each `Library` alive for the process
 # lifetime (dropping it unmaps the code the registered elements run from).
 libloading = { version = "0.8", optional = true }
+# The frozen v2 plugin ABI types + validation (M1010), shared with the SDK a
+# plugin author builds against, and the FFI-safe `Future` its poll boundary
+# uses. Both are plugin-loader-only, so the no_std baseline never sees them.
+g2g-plugin = { version = "0.2.0", path = "../g2g-plugin", optional = true }
+async-ffi = { version = "0.5", optional = true }
 # Declarative graph format (declarative / declarative-yaml features, M578). serde
 # derive for the spec model; serde_json / serde_yaml are the two front-ends. All
 # std-gated. serde_yaml 0.9 is the last (archived) release but builds clean and
@@ -1308,6 +1313,16 @@ required-features = ["declarative-yaml"]
 # loader, so it is gated on `plugin-loader` (skipped by a default `cargo test`).
 [[test]]
 name = "plugin_loader_dlopen"
+required-features = ["plugin-loader"]
+
+# M1010: the same for the v2 (cross-toolchain repr(C)) plugin ABI, and for a
+# plugin written in C against the hand-written header.
+[[test]]
+name = "plugin_loader_v2"
+required-features = ["plugin-loader"]
+
+[[test]]
+name = "plugin_c_abi"
 required-features = ["plugin-loader"]
 
 # M214: zero-copy GPU fan-out (overlay -> tee -> {sink, sink}) on a real wgpu

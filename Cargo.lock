@@ -344,6 +344,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "async-ffi"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "39cd9de47399986d5b216c6bef9434dfff1689ab61ba8d1e2720dc5fe5c84083"
+
+[[package]]
 name = "async-io"
 version = "2.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3774,6 +3780,7 @@ dependencies = [
 name = "g2g-plugin"
 version = "0.2.0"
 dependencies = [
+ "async-ffi",
  "g2g-core",
 ]
 
@@ -3786,6 +3793,7 @@ dependencies = [
  "aes-kw",
  "alsa",
  "ash",
+ "async-ffi",
  "audiopus",
  "base64 0.22.1",
  "block2 0.6.2",
@@ -3807,6 +3815,7 @@ dependencies = [
  "ffmpeg-next",
  "futures-util",
  "g2g-core",
+ "g2g-plugin",
  "gbm",
  "getrandom 0.2.17",
  "glow",
