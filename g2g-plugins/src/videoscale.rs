@@ -53,7 +53,7 @@ const FORMATS: [RawVideoFormat; 12] = [
 /// subsampling requires (so a scale stays on chroma-sample boundaries).
 fn bad_even_dims(format: RawVideoFormat, w: u32, h: u32) -> bool {
     let (ew, eh) = even_dims_required(format);
-    (ew && w % 2 != 0) || (eh && h % 2 != 0)
+    (ew && !w.is_multiple_of(2)) || (eh && !h.is_multiple_of(2))
 }
 
 /// Upper bound on the scalable output range advertised in caps-driven (auto)

@@ -591,7 +591,7 @@ fn deframe_c608(raw: &[u8]) -> Vec<u8> {
         };
         let body = &raw[off + 8..off + size];
         if let Some(cc_type) = cc_type {
-            if body.len() % 2 != 0 {
+            if !body.len().is_multiple_of(2) {
                 break;
             }
             for pair in body.chunks_exact(2) {

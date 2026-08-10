@@ -74,7 +74,12 @@ fn raw_video_thumb(bytes: &[u8], format: RawVideoFormat, w: usize, h: usize) -> 
         RawVideoFormat::Nv12 | RawVideoFormat::I420 => {
             // 4:2:0 needs even dims and a luma + half-size chroma plane.
             let planar_len = w.saturating_mul(h).saturating_mul(3) / 2;
-            if w == 0 || h == 0 || w % 2 != 0 || h % 2 != 0 || bytes.len() < planar_len {
+            if w == 0
+                || h == 0
+                || !w.is_multiple_of(2)
+                || !h.is_multiple_of(2)
+                || bytes.len() < planar_len
+            {
                 return hexdump(bytes);
             }
             let rgba = crate::videoconvert::convert(bytes, format, RawVideoFormat::Rgba8, w, h);

@@ -22,7 +22,7 @@ struct Bits {
 
 impl Bits {
     fn bit(&mut self, value: u32) {
-        if self.written % 8 == 0 {
+        if self.written.is_multiple_of(8) {
             self.out.push(0);
         }
         if value & 1 == 1 {
@@ -58,7 +58,7 @@ impl Bits {
     /// Close the RBSP with `rbsp_trailing_bits()`.
     fn finish(mut self) -> Vec<u8> {
         self.bit(1);
-        while self.written % 8 != 0 {
+        while !self.written.is_multiple_of(8) {
             self.bit(0);
         }
         self.out

@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M999: MSRV splits, 1.86 for the embedded-facing crates and 1.92 for the rest, unpinning `web-transport-quinn` and `cosmic-text`.
 - M997: `FfmpegVideoDec` sheds non-reference pictures on a downstream QoS report instead of relaying it.
 - M996: `SyncSink` paces through the shared `PresentationPacer` and adopts the elected `ClockSync`.
 - M998: `PtpClient` shares UDP 319 / 320 with a running `ptp4l`, and `PtpSystemClock` reports the daemon's port state.

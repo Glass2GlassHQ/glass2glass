@@ -295,7 +295,7 @@ pub(crate) fn utf8_string(v: &[u8]) -> Option<String> {
 /// form has interior zero bytes and its UTF-8 form never does: that tells the
 /// two apart without needing the set's version tag, which trails this one.
 fn country_codes_string(v: &[u8]) -> Option<String> {
-    if v.len() % 2 == 0 && v.contains(&0) {
+    if v.len().is_multiple_of(2) && v.contains(&0) {
         let units = v.chunks_exact(2).map(|c| u16::from_be_bytes([c[0], c[1]]));
         return decode_utf16(units).collect::<Result<String, _>>().ok();
     }

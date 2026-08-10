@@ -273,9 +273,6 @@ Phased plan:
 
 ## Egress / transports
 
-- **WebTransport residuals:** the `web-transport-quinn = "=0.11.12"` pin and
-  the `idna_adapter` 1.1.0 hold in `Cargo.lock` can both drop once the
-  workspace MSRV moves past 1.91.
 - **RTP over QUIC (RoQ):** blocked on the spec. draft-ietf-avtcore-rtp-over-quic
   expired at -14 (its ALPN is forbidden until an RFC exists) and the WG missed
   its milestone; revisit only if the draft revives. Peers if it does:
@@ -391,6 +388,9 @@ Phased plan:
   property, and the `IMMNotificationClient` hotplug path. Both are
   compile-checked only (CI cross-compiles them; the runners have no camera and
   no way to replug one).
+- Move the `portal` feature off the `zbus` / `zbus_macros` `=5.13.2` pins: run
+  the xdg-desktop-portal handshake against the 5.14+ line and drop both pins if
+  it holds.
 
 ## Sinks
 
@@ -435,9 +435,8 @@ _(No open parser items.)_
   horizontal + vertical) with an explicit Latin+CJK fallback chain, so OpenType-CFF
   `.otf` fonts render, not only glyf `.ttf`s. Still open:
   font-variation axes beyond `wght` on the shaped horizontal path (cosmic-text
-  0.17 exposes only weight, and 0.17.1+ needs rustc 1.89, above the 1.86 MSRV,
-  so the upgrade waits on an MSRV bump); vertical-mode shaping if cosmic-text
-  ever grows writing modes.
+  exposes only weight); vertical-mode shaping if cosmic-text ever grows writing
+  modes.
 - **Text / subtitle pipeline depth.** The foundation is in: `Caps::Text` +
   `TextFormat` (M400), the `SubParse` element (`Text{Srt|WebVtt|Ssa|Ttml}` ->
   `Text{Utf8}`), the SRT / WebVTT / SSA-ASS / TTML parsers (M171 / M401 / M402),

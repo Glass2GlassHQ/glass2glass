@@ -488,7 +488,7 @@ mod tests {
     /// (both multiples of 16), then frame it in Annex-B. Returns the
     /// full byte stream including a 4-byte start code and NAL header.
     fn build_test_annexb_sps(width: u32, height: u32) -> Vec<u8> {
-        assert!(width % 16 == 0 && height % 16 == 0);
+        assert!(width.is_multiple_of(16) && height.is_multiple_of(16));
         let mut w = BitWriter::default();
         // Post NAL-header SPS fields:
         // seq_parameter_set_id = 0
@@ -631,7 +631,7 @@ mod tests {
         num_units_in_tick: u32,
         time_scale: u32,
     ) -> Vec<u8> {
-        assert!(width % 16 == 0 && height % 16 == 0);
+        assert!(width.is_multiple_of(16) && height.is_multiple_of(16));
         let mut w = BitWriter::default();
         w.write_ue(0); // seq_parameter_set_id
         w.write_ue(0); // log2_max_frame_num_minus4

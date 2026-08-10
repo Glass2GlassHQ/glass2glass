@@ -7,7 +7,9 @@ keywords = ["multimedia", "video", "pipeline", "streaming", "no-std"]
 categories = ["multimedia", "multimedia::video", "no-std", "embedded"]
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
+# Below the workspace floor on purpose: this is the crate an embedded / RTOS
+# consumer pins, so it holds the conservative MSRV. See STABILITY.md.
+rust-version = "1.86"
 authors.workspace = true
 repository.workspace = true
 

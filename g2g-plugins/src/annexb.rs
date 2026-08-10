@@ -743,7 +743,7 @@ impl BitWriter {
     }
 
     pub(crate) fn align_to_byte(&mut self) {
-        while self.bit_pos % 8 != 0 {
+        while !self.bit_pos.is_multiple_of(8) {
             self.write_bit(0);
         }
     }

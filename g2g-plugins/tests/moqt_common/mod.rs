@@ -974,7 +974,7 @@ pub(crate) const SPS: [u8; 6] = [0x67, 0x42, 0xC0, 0x1E, 0x11, 0x22];
 /// `big_every` (0 = never) pads that many-th unit past the path MTU, so datagram
 /// mode has to fall back to a stream for it.
 pub(crate) fn access_unit(index: u64, big_every: u64) -> Vec<u8> {
-    let pad = if big_every != 0 && index % big_every == 0 {
+    let pad = if big_every != 0 && index.is_multiple_of(big_every) {
         2500
     } else {
         0
@@ -985,7 +985,7 @@ pub(crate) fn access_unit(index: u64, big_every: u64) -> Vec<u8> {
 /// The same access unit with `pad` bytes appended.
 pub(crate) fn padded_access_unit(index: u64, pad: usize) -> Vec<u8> {
     let pps = [0x68u8, 0xCE, 0x3C, 0x80];
-    let mut unit = if index % 10 == 0 {
+    let mut unit = if index.is_multiple_of(10) {
         [
             &[0, 0, 0, 1][..],
             &SPS,

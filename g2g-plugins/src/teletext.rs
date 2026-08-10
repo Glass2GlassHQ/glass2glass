@@ -124,7 +124,7 @@ pub fn unparity(byte: u8) -> Option<u8> {
 /// [`unparity`].
 pub fn parity(value: u8) -> u8 {
     let v = value & 0x7f;
-    if v.count_ones() % 2 == 0 {
+    if v.count_ones().is_multiple_of(2) {
         v | 0x80
     } else {
         v

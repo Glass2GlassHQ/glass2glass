@@ -321,7 +321,9 @@ catalogs, `tools/mcugen-check.sh`).
 
 ## Build
 
-Stable Rust, MSRV 1.86, `resolver = "2"`.
+Stable Rust, `resolver = "2"`. MSRV 1.92, except the embedded-facing crates
+(`g2g-core`, `g2g-mcu`, `g2g-mcugen`, `g2g-plugin`), which build on 1.86 so a
+vendor-pinned toolchain can consume the portable core (see `STABILITY.md`).
 
 ```sh
 cargo check --workspace          # no_std baseline
@@ -780,7 +782,7 @@ cargo test -p g2g-ml --features cuda --test ort_inference -- --nocapture
 cargo test -p g2g-ml --features burn --test burn_inference -- --nocapture
 
 # An ONNX topology imported into that element by build-time codegen. Standalone
-# (workspace-excluded): burn-onnx carries burn's own rustc 1.92 MSRV.
+# (workspace-excluded): keeps burn's codegen tree out of the workspace lockfile.
 cd examples/g2g-onnx-import && cargo test
 ```
 

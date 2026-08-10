@@ -189,7 +189,7 @@ impl St2110AudioDepacketizer {
         let sample_bytes = self.depth.bytes();
         let frame_bytes = sample_bytes * usize::from(self.channels);
         // A partial sample-frame is malformed; reject rather than mis-deinterleave.
-        if frame_bytes == 0 || payload.len() % frame_bytes != 0 {
+        if frame_bytes == 0 || !payload.len().is_multiple_of(frame_bytes) {
             return None;
         }
         let mut samples = Vec::with_capacity(payload.len() / sample_bytes);

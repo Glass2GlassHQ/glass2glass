@@ -380,7 +380,7 @@ impl AudioResample {
         let bytes = sample_bytes(in_format);
         let ch = in_channels as usize;
         let in_frame = bytes * ch;
-        if in_frame == 0 || src.len() % in_frame != 0 {
+        if in_frame == 0 || !src.len().is_multiple_of(in_frame) {
             return Err(G2gError::CapsMismatch);
         }
         let n = src.len() / in_frame;

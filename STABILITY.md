@@ -131,9 +131,19 @@ The type tiers above translate to per-crate promises:
   **not** breaking, by design.
 - **Feature flags** are additive and not part of the semver contract; enabling one
   may pull in `std` / OS deps. Default (`no_std + alloc`) is the stable baseline.
-- **MSRV.** Currently Rust 1.86 (`rust-version` in `[workspace.package]`). An MSRV
-  bump is a minor-version change and called out in `CHANGELOG.md`. We do not raise
-  MSRV in a patch release.
+- **MSRV.** Split, because the two audiences are not the same. The embedded-facing
+  crates hold **Rust 1.86**: `g2g-core`, `g2g-mcu`, `g2g-mcugen`, `g2g-plugin`.
+  That is the surface an MCU / RTOS consumer compiles, often on a toolchain their
+  vendor or their certification evidence pins, so it stays conservative and CI
+  checks each of those crates on 1.86 (the `msrv` job). Everything else is
+  **Rust 1.92** (`rust-version` in `[workspace.package]`): `g2g-plugins`,
+  `g2g-ml`, `g2g-bridge`, `g2g-python`, `g2g-capi`, `g2g-pyapi`, `xtask`. Those
+  are host crates whose own dependencies move, and holding them back only meant
+  pinning deps to stale versions. `g2g-capi` is on the host floor rather than
+  1.86 because its element registry comes from `g2g-plugins`: cargo will not
+  build a package against a dependency with a higher `rust-version`. An MSRV
+  bump on either floor is a minor-version change and called out in
+  `CHANGELOG.md`. We do not raise MSRV in a patch release.
 - **The `wire` codec** carries its own `WIRE_VERSION`; on-wire format changes are
   gated there independently of the crate version.
 

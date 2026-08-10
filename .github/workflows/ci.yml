@@ -61,6 +61,39 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --workspace --all-targets --locked
 
+  # MSRV floor of the embedded-facing surface (M999). g2g-core / g2g-mcu /
+  # g2g-mcugen / g2g-plugin declare rust-version 1.86 while the host crates are
+  # on 1.92, so a vendor-pinned or certification-frozen toolchain can still
+  # consume the portable core and build a plugin against it. The claim is that
+  # the LIBRARIES build on 1.86: `--all-targets` is deliberately absent because
+  # g2g-mcu's dev-dependency on g2g-plugins is a 1.92 crate.
+  msrv:
+    name: msrv 1.86 (embedded surface)
+    runs-on: ubuntu-latest
+    # rust-toolchain.toml (channel = stable) otherwise wins over the toolchain
+    # the action makes default, and the job silently checks stable instead.
+    env:
+      RUSTUP_TOOLCHAIN: "1.86"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.86
+        with:
+          targets: thumbv7em-none-eabihf
+      - uses: Swatinem/rust-cache@v2
+      - name: check g2g-core (heap-free baseline, thumb cross, full host surface)
+        run: |
+          cargo check -p g2g-core --locked --no-default-features
+          cargo check -p g2g-core --locked --no-default-features --target thumbv7em-none-eabihf
+          cargo check -p g2g-core --locked --all-targets --features std,runtime,dyn-slot,metadata
+      - name: check g2g-mcu (no-alloc dep config + thumb cross)
+        run: |
+          cargo check -p g2g-mcu --locked
+          cargo check -p g2g-mcu --locked --target thumbv7em-none-eabihf
+      - name: check g2g-mcugen (host graph compiler)
+        run: cargo check -p g2g-mcugen --locked
+      - name: check g2g-plugin (third-party plugin SDK)
+        run: cargo check -p g2g-plugin --locked
+
   # Feature-union rot guard. The big `features-linux` union below turns nearly
   # everything on at once, so a symmetric pair (`pulse-sink` + `pulse-src`) hides
   # code that only one half reaches: `-D warnings` then fires for a real user who
@@ -319,8 +352,8 @@ jobs:
           cargo test -p g2g-plugins --locked --features observe,declarative-yaml --lib -- dashboard:: preview:: toolingjson::
           cargo test -p g2g-plugins --locked --features observe,declarative-yaml --test m677_observe --test m846_live_edge_counters --test m849_fanin_edge_preview
           cargo test -p g2g-plugins --locked --features observe,declarative-yaml --test m681_mcp
-      # Native WebRTC (str0m sans-IO stack): needs rustc 1.85 (within the
-      # workspace MSRV), so it stays out of the default suite. Compile the feature, then run the
+      # Native WebRTC (str0m sans-IO stack): an opt-in feature, so it stays out
+      # of the default suite. Compile the feature, then run the
       # deterministic + localhost-only tests: the webrtc element/util/turn lib
       # units, the duplex session runner, and the synthetic lossy-relay NACK/RTX
       # resilience test. The WHIP/WHEP + P2P loopback harness is #[ignore] (needs

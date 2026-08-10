@@ -293,8 +293,8 @@ fn any_geometry(format: RawVideoFormat) -> Caps {
 /// needs both dimensions even, packed 4:2:2 only an even width.
 fn geometry_ok(format: RawVideoFormat, width: u32, height: u32) -> bool {
     match format {
-        RawVideoFormat::Nv12 => width % 2 == 0 && height % 2 == 0,
-        RawVideoFormat::Yuyv => width % 2 == 0,
+        RawVideoFormat::Nv12 => width.is_multiple_of(2) && height.is_multiple_of(2),
+        RawVideoFormat::Yuyv => width.is_multiple_of(2),
         #[cfg(all(target_os = "android", feature = "mediacodec-wgpu"))]
         RawVideoFormat::Rgba8 => true,
         _ => false,
@@ -1453,7 +1453,7 @@ pub async fn nv12_to_gpu_texture(
     width: u32,
     height: u32,
 ) -> Result<MemoryDomain, G2gError> {
-    if width % 2 != 0 || height % 2 != 0 {
+    if !width.is_multiple_of(2) || !height.is_multiple_of(2) {
         return Err(G2gError::CapsMismatch);
     }
     let tex_rows = height + height / 2;

@@ -131,8 +131,8 @@ impl VideoCrop {
 
     fn even_insets_ok(&self, format: RawVideoFormat) -> bool {
         let (ew, eh) = even_dims_required(format);
-        let horiz_ok = !ew || (self.left % 2 == 0 && self.right % 2 == 0);
-        let vert_ok = !eh || (self.top % 2 == 0 && self.bottom % 2 == 0);
+        let horiz_ok = !ew || (self.left.is_multiple_of(2) && self.right.is_multiple_of(2));
+        let vert_ok = !eh || (self.top.is_multiple_of(2) && self.bottom.is_multiple_of(2));
         horiz_ok && vert_ok
     }
 

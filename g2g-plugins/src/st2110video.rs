@@ -123,7 +123,7 @@ impl Layout {
     /// A layout for `sampling` at `width` x `height`, or `None` if the width is not
     /// a whole number of pgroups (e.g. an odd width for 4:2:2) or the height is 0.
     pub fn new(sampling: Sampling, width: usize, height: usize) -> Option<Self> {
-        if width == 0 || height == 0 || width % sampling.pixels_per_group() != 0 {
+        if width == 0 || height == 0 || !width.is_multiple_of(sampling.pixels_per_group()) {
             return None;
         }
         Some(Self {
