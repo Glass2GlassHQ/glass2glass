@@ -511,8 +511,8 @@ _(No open parser items.)_
 
 ## Metadata (FrameMeta / AnalyticsMeta)
 
-- A real ML producer for the `Segmentation` / `Roi` analytics nodes (no in-tree
-  model emits masks or ROIs yet).
+- `AnalyticsOverlay` / `VelloAnalyticsOverlay` draw only detection boxes: add
+  mask and ROI drawing so a segmentation graph is visible on screen.
 - Further `PlaneLayout` producers (v4l2 `bytesperline` padding, decoder DMA-BUF
   pitches); only the wgpu compositor readback emits it today.
 - `NvEnc` AV1 encode (needs RTX 40-series hardware).

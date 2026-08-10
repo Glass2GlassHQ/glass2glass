@@ -41,6 +41,18 @@ pub mod safetensors;
 #[cfg(feature = "analytics")]
 pub mod detect;
 
+// Instance-segmentation decode (DESIGN.md §5.3): a YOLO -seg model's box and
+// mask-prototype outputs -> AnalyticsMeta Segmentation + Roi nodes. Pure Rust,
+// no inference engine, so a browser ort-web caller can decode with it too.
+#[cfg(feature = "analytics")]
+pub mod segmentation;
+
+// The in-graph instance-segmentation producer (M992): runs a YOLO -seg ONNX and
+// attaches the decoded masks / ROIs to the frame it forwards. Needs both the ORT
+// session and the metadata graph.
+#[cfg(all(feature = "ort", feature = "analytics"))]
+pub mod ortsegment;
+
 // Inline GPU tensor preprocessing (DESIGN.md §5.1): NV12 -> normalized f32
 // NCHW RGB tensor in a wgpu compute shader, the hardware-first preprocessing
 // counterpart of OrtInference's CPU path.

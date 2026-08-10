@@ -616,7 +616,8 @@ elements still need explicit Rust construction.
 
 The ML elements live in a separate crate, so an app opts them in after building
 the registry: `g2g_ml::register(&mut reg)` (the `launch` feature) adds
-`ortinfer`, `wgpupreprocess`, and `detectionpostprocess`, making
+`ortinfer`, `wgpupreprocess`, `detectionpostprocess`, and `ortsegment` (instance
+segmentation), making
 `... ! ortinfer model=yolov8n.onnx ! detectionpostprocess conf-threshold=0.3 !
 ...` parse.
 

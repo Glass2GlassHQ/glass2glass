@@ -96,43 +96,6 @@ impl DetectionPostprocess {
         }
     }
 
-    /// Decode the flat channel-major tensor into normalized detections above the
-    /// confidence threshold (pre-NMS).
-    fn decode(&self, values: &[f32]) -> Vec<ObjectDetection> {
-        let a = self.anchors;
-        let classes = self.channels - 4;
-        let mut out = Vec::new();
-        for ai in 0..a {
-            let cx = values[ai];
-            let cy = values[a + ai];
-            let w = values[2 * a + ai];
-            let h = values[3 * a + ai];
-            // Best class score for this anchor.
-            let mut best_label = 0u32;
-            let mut best_score = f32::MIN;
-            for cls in 0..classes {
-                let s = values[(4 + cls) * a + ai];
-                if s > best_score {
-                    best_score = s;
-                    best_label = cls as u32;
-                }
-            }
-            if best_score >= self.conf_threshold {
-                out.push(ObjectDetection {
-                    bbox: BBox {
-                        x: (cx - w / 2.0) / self.input_w,
-                        y: (cy - h / 2.0) / self.input_h,
-                        w: w / self.input_w,
-                        h: h / self.input_h,
-                    },
-                    label: best_label,
-                    confidence: best_score,
-                });
-            }
-        }
-        out
-    }
-
     /// Decode a flat channel-major YOLOv8 output tensor `[1, 4 + C, A]` (as f32
     /// values, sized by the configured `channels` / `anchors`) into normalized,
     /// NMS-filtered detections. This is the reusable core of [`process`]; a caller
@@ -142,29 +105,118 @@ impl DetectionPostprocess {
     ///
     /// [`process`]: AsyncElement::process
     pub fn detect(&self, values: &[f32]) -> Vec<ObjectDetection> {
-        self.nms(self.decode(values))
+        let boxes = decode_anchors(
+            values,
+            AnchorLayout {
+                anchors: self.anchors,
+                classes: self.channels.saturating_sub(4),
+                extra: 0,
+                input_w: self.input_w,
+                input_h: self.input_h,
+            },
+            self.conf_threshold,
+        );
+        suppress_overlaps(boxes, self.iou_threshold)
+            .into_iter()
+            .map(|b| b.detection)
+            .collect()
     }
+}
 
-    /// Greedy per-class non-maximum suppression: highest confidence first,
-    /// dropping later same-class boxes that overlap a kept one beyond the IoU
-    /// threshold.
-    fn nms(&self, mut dets: Vec<ObjectDetection>) -> Vec<ObjectDetection> {
-        dets.sort_by(|x, y| {
-            y.confidence
-                .partial_cmp(&x.confidence)
-                .unwrap_or(core::cmp::Ordering::Equal)
-        });
-        let mut kept: Vec<ObjectDetection> = Vec::new();
-        for cand in dets {
-            let suppressed = kept
-                .iter()
-                .any(|k| k.label == cand.label && k.bbox.iou(&cand.bbox) > self.iou_threshold);
-            if !suppressed {
-                kept.push(cand);
+/// How to read one YOLO channel-major output tensor `[1, 4 + classes + extra,
+/// anchors]`: the 4 box channels, the class scores, then `extra` trailing
+/// channels a head other than plain detection carries (the mask coefficients of
+/// a `-seg` export). `input_w` / `input_h` are the model input size the box
+/// coordinates are normalized against.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct AnchorLayout {
+    pub anchors: usize,
+    pub classes: usize,
+    pub extra: usize,
+    pub input_w: f32,
+    pub input_h: f32,
+}
+
+/// One anchor's decoded box plus its trailing non-class channel values (empty
+/// for a plain detector).
+#[derive(Debug, Clone)]
+pub(crate) struct AnchorBox {
+    pub detection: ObjectDetection,
+    pub extra: Vec<f32>,
+}
+
+/// Decode a flat channel-major output tensor into normalized boxes above
+/// `conf_threshold` (pre-NMS). An input shorter than the layout describes yields
+/// nothing rather than indexing past its end.
+pub(crate) fn decode_anchors(
+    values: &[f32],
+    layout: AnchorLayout,
+    conf_threshold: f32,
+) -> Vec<AnchorBox> {
+    let a = layout.anchors;
+    let channels = 4 + layout.classes + layout.extra;
+    let needed = channels.checked_mul(a);
+    if layout.classes == 0 || needed.is_none_or(|n| n > values.len()) {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for ai in 0..a {
+        let cx = values[ai];
+        let cy = values[a + ai];
+        let w = values[2 * a + ai];
+        let h = values[3 * a + ai];
+        // Best class score for this anchor.
+        let mut best_label = 0u32;
+        let mut best_score = f32::MIN;
+        for cls in 0..layout.classes {
+            let s = values[(4 + cls) * a + ai];
+            if s > best_score {
+                best_score = s;
+                best_label = cls as u32;
             }
         }
-        kept
+        if best_score >= conf_threshold {
+            let first_extra = 4 + layout.classes;
+            out.push(AnchorBox {
+                detection: ObjectDetection {
+                    bbox: BBox {
+                        x: (cx - w / 2.0) / layout.input_w,
+                        y: (cy - h / 2.0) / layout.input_h,
+                        w: w / layout.input_w,
+                        h: h / layout.input_h,
+                    },
+                    label: best_label,
+                    confidence: best_score,
+                },
+                extra: (0..layout.extra)
+                    .map(|e| values[(first_extra + e) * a + ai])
+                    .collect(),
+            });
+        }
     }
+    out
+}
+
+/// Greedy per-class non-maximum suppression: highest confidence first, dropping
+/// later same-class boxes that overlap a kept one beyond the IoU threshold.
+pub(crate) fn suppress_overlaps(mut boxes: Vec<AnchorBox>, iou_threshold: f32) -> Vec<AnchorBox> {
+    boxes.sort_by(|x, y| {
+        y.detection
+            .confidence
+            .partial_cmp(&x.detection.confidence)
+            .unwrap_or(core::cmp::Ordering::Equal)
+    });
+    let mut kept: Vec<AnchorBox> = Vec::new();
+    for cand in boxes {
+        let suppressed = kept.iter().any(|k| {
+            k.detection.label == cand.detection.label
+                && k.detection.bbox.iou(&cand.detection.bbox) > iou_threshold
+        });
+        if !suppressed {
+            kept.push(cand);
+        }
+    }
+    kept
 }
 
 impl AsyncElement for DetectionPostprocess {

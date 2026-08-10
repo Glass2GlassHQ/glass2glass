@@ -331,22 +331,15 @@ impl Model {
             (input.name().to_owned(), input_tensor_dims(input.dtype())?);
         let (output_name, out_dims) = (output.name().to_owned(), f32_tensor_dims(output.dtype())?);
 
-        // input must be [N, 3, H, W] with static H/W; N may be dynamic.
-        let [n, c, h, w] = in_dims[..] else {
-            return Err(G2gError::CapsMismatch);
-        };
-        if !(n == 1 || n == -1) || c != 3 || h <= 0 || w <= 0 {
-            return Err(G2gError::CapsMismatch);
-        }
-
+        let (width, height) = input_geometry(&in_dims)?;
         let out_shape = static_output_dims(&out_dims)?;
 
         Ok(Self {
             session,
             input_name,
             output_name,
-            width: w as u32,
-            height: h as u32,
+            width,
+            height,
             out_shape,
             input_dtype,
         })
@@ -354,23 +347,7 @@ impl Model {
 
     /// RGBA8 -> normalized f32 NCHW RGB, then run the session.
     fn infer(&mut self, rgba: &[u8]) -> Result<(Box<[u8]>, Vec<u32>), G2gError> {
-        let (w, h) = (self.width as usize, self.height as usize);
-        // Geometry comes from the model's declared input dims; fold with checked
-        // ops so absurd dimensions fail loud instead of overflowing the length
-        // guard or over-allocating.
-        let plane = w.checked_mul(h).ok_or(G2gError::CapsMismatch)?;
-        let needed = plane.checked_mul(4).ok_or(G2gError::CapsMismatch)?;
-        if rgba.len() < needed {
-            return Err(G2gError::CapsMismatch);
-        }
-        let chw_len = plane.checked_mul(3).ok_or(G2gError::CapsMismatch)?;
-        let mut chw = vec![0f32; chw_len];
-        for px in 0..plane {
-            let src = px * 4;
-            chw[px] = rgba[src] as f32 / 255.0;
-            chw[plane + px] = rgba[src + 1] as f32 / 255.0;
-            chw[2 * plane + px] = rgba[src + 2] as f32 / 255.0;
-        }
+        let chw = rgba_to_chw(rgba, self.width, self.height)?;
         self.run_chw(chw)
     }
 
@@ -378,17 +355,7 @@ impl Model {
     /// the session (tensor-input mode); the bytes are the tensor's
     /// little-endian f32 values, e.g. from a GPU preprocess step.
     fn infer_tensor(&mut self, bytes: &[u8]) -> Result<(Box<[u8]>, Vec<u32>), G2gError> {
-        let (w, h) = (self.width as usize, self.height as usize);
-        let plane = w.checked_mul(h).ok_or(G2gError::CapsMismatch)?;
-        let n = plane.checked_mul(3).ok_or(G2gError::CapsMismatch)?;
-        let nbytes = n.checked_mul(4).ok_or(G2gError::CapsMismatch)?;
-        if bytes.len() < nbytes {
-            return Err(G2gError::CapsMismatch);
-        }
-        let chw: Vec<f32> = bytes[..nbytes]
-            .chunks_exact(4)
-            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-            .collect();
+        let chw = tensor_bytes_to_chw(bytes, self.width, self.height)?;
         self.run_chw(chw)
     }
 
@@ -630,8 +597,64 @@ impl g2g_core::PadTemplates for OrtInference {
     }
 }
 
+/// RGBA8 at `width` x `height` -> normalized f32 NCHW RGB (`value / 255`), the
+/// CPU preprocessing every RGBA-fed ORT element shares. Geometry comes from the
+/// model's declared input dims; fold with checked ops so absurd dimensions fail
+/// loud instead of overflowing the length guard or over-allocating.
+pub(crate) fn rgba_to_chw(rgba: &[u8], width: u32, height: u32) -> Result<Vec<f32>, G2gError> {
+    let plane = (width as usize)
+        .checked_mul(height as usize)
+        .ok_or(G2gError::CapsMismatch)?;
+    let needed = plane.checked_mul(4).ok_or(G2gError::CapsMismatch)?;
+    if rgba.len() < needed {
+        return Err(G2gError::CapsMismatch);
+    }
+    let chw_len = plane.checked_mul(3).ok_or(G2gError::CapsMismatch)?;
+    let mut chw = vec![0f32; chw_len];
+    for px in 0..plane {
+        let src = px * 4;
+        chw[px] = rgba[src] as f32 / 255.0;
+        chw[plane + px] = rgba[src + 1] as f32 / 255.0;
+        chw[2 * plane + px] = rgba[src + 2] as f32 / 255.0;
+    }
+    Ok(chw)
+}
+
+/// An already-normalized f32 NCHW `[1, 3, height, width]` tensor's little-endian
+/// bytes -> its values, the tensor-input path's decode.
+pub(crate) fn tensor_bytes_to_chw(
+    bytes: &[u8],
+    width: u32,
+    height: u32,
+) -> Result<Vec<f32>, G2gError> {
+    let plane = (width as usize)
+        .checked_mul(height as usize)
+        .ok_or(G2gError::CapsMismatch)?;
+    let n = plane.checked_mul(3).ok_or(G2gError::CapsMismatch)?;
+    let nbytes = n.checked_mul(4).ok_or(G2gError::CapsMismatch)?;
+    if bytes.len() < nbytes {
+        return Err(G2gError::CapsMismatch);
+    }
+    Ok(bytes[..nbytes]
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect())
+}
+
+/// The `(width, height)` of a model input that must be `[N, 3, H, W]` with static
+/// `H` / `W`; `N` may be dynamic (the exported-with-dynamic-batch convention).
+pub(crate) fn input_geometry(dims: &[i64]) -> Result<(u32, u32), G2gError> {
+    let [n, c, h, w] = dims else {
+        return Err(G2gError::CapsMismatch);
+    };
+    if !(*n == 1 || *n == -1) || *c != 3 || *h <= 0 || *w <= 0 {
+        return Err(G2gError::CapsMismatch);
+    }
+    Ok((*w as u32, *h as u32))
+}
+
 /// Dims of an f32 tensor outlet; rejects every other value type.
-fn f32_tensor_dims(dtype: &ValueType) -> Result<Vec<i64>, G2gError> {
+pub(crate) fn f32_tensor_dims(dtype: &ValueType) -> Result<Vec<i64>, G2gError> {
     match dtype {
         ValueType::Tensor {
             ty: TensorElementType::Float32,
@@ -644,7 +667,7 @@ fn f32_tensor_dims(dtype: &ValueType) -> Result<Vec<i64>, G2gError> {
 
 /// Dims and dtype of an input tensor: f32 (RGBA / f32-tensor path) or a quantized
 /// u8 / i8 (a quantized model's integer input, M442). Other value types reject.
-fn input_tensor_dims(dtype: &ValueType) -> Result<(Vec<i64>, TensorDType), G2gError> {
+pub(crate) fn input_tensor_dims(dtype: &ValueType) -> Result<(Vec<i64>, TensorDType), G2gError> {
     match dtype {
         ValueType::Tensor { ty, shape, .. } => {
             let dt = match ty {
@@ -662,7 +685,7 @@ fn input_tensor_dims(dtype: &ValueType) -> Result<(Vec<i64>, TensorDType), G2gEr
 /// Resolve an output shape to static dims: a dynamic leading batch dim is
 /// the exported-with-dynamic-batch convention and becomes 1; any other
 /// dynamic dim is rejected (v1 needs static output caps for negotiation).
-fn static_output_dims(dims: &[i64]) -> Result<TensorShape, G2gError> {
+pub(crate) fn static_output_dims(dims: &[i64]) -> Result<TensorShape, G2gError> {
     let mut out = Vec::with_capacity(dims.len());
     for (i, d) in dims.iter().enumerate() {
         match d {
@@ -678,7 +701,7 @@ fn static_output_dims(dims: &[i64]) -> Result<TensorShape, G2gError> {
 
 // generic over the error's payload: builder-consuming ort calls return
 // `Error<SessionBuilder>` instead of the plain `Error<()>`.
-fn ort_err<T>(_e: ::ort::Error<T>) -> G2gError {
+pub(crate) fn ort_err<T>(_e: ::ort::Error<T>) -> G2gError {
     G2gError::Hardware(HardwareError::Other)
 }
 

@@ -1,0 +1,8 @@
+# Built on demand by gen.py (tools/segment-fixture.sh); not committed. The YOLO
+# -seg model is tens of MB (repo fixtures are KB-scale); the rest is derived from
+# it. This dir tracks only gen.py + this .gitignore.
+model.onnx
+input_rgba.bin
+sample.jpg
+yolo11n-seg.onnx
+yolo11n-seg.pt

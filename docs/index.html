@@ -814,7 +814,7 @@
             <div class="crate-card">
                 <div class="crate-name">g2g-ml</div>
                 <div class="crate-tag">std</div>
-                <p>ONNX Runtime inference (<code>OrtInference</code>) with CUDA + DirectML EPs, pure-Rust Burn inference (<code>BurnInference</code>) on wgpu, running a linear layer or an ONNX topology imported by <code>burn-onnx</code> build-time codegen, the keep-on-GPU wgpu branch (<code>WgpuPreprocess</code> + <code>WgpuInference</code>, GPU-resident tensors end to end), classification head, and the lock-free multi-stream <code>TensorBatcher</code> (fans N streams into one GPU tensor array). <code>g2g_ml::register</code> puts <code>ortinfer</code> / <code>wgpupreprocess</code> / <code>detectionpostprocess</code> in a <code>gst-launch</code> line. MPL-2.0.</p>
+                <p>ONNX Runtime inference (<code>OrtInference</code>) with CUDA + DirectML EPs, pure-Rust Burn inference (<code>BurnInference</code>) on wgpu, running a linear layer or an ONNX topology imported by <code>burn-onnx</code> build-time codegen, the keep-on-GPU wgpu branch (<code>WgpuPreprocess</code> + <code>WgpuInference</code>, GPU-resident tensors end to end), classification head, instance segmentation (<code>OrtSegmentation</code>, a YOLO <code>-seg</code> model's masks and ROIs attached to the frame), and the lock-free multi-stream <code>TensorBatcher</code> (fans N streams into one GPU tensor array). <code>g2g_ml::register</code> puts <code>ortinfer</code> / <code>wgpupreprocess</code> / <code>detectionpostprocess</code> / <code>ortsegment</code> in a <code>gst-launch</code> line. MPL-2.0.</p>
             </div>
             <div class="crate-card">
                 <div class="crate-name">g2g-bridge</div>
@@ -1037,7 +1037,7 @@ g2g-launch <span class="flag">--script</span> build.rhai</div>
                 <p class="f-lead">Typed <code>FrameMeta</code>&nbsp;/&nbsp;<code>AnalyticsMeta</code> relation graph (detection / classification / tracking) survives tee fan-out copy-on-write.</p>
                 <div class="chip-group">
                     <span class="chip-label">Produce</span>
-                    <div class="chip-row"><span class="chip">DetectionPostprocess</span></div>
+                    <div class="chip-row"><span class="chip">DetectionPostprocess</span><span class="chip">OrtSegmentation</span></div>
                 </div>
                 <div class="chip-group">
                     <span class="chip-label">Draw</span>

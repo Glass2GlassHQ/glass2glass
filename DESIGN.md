@@ -3998,6 +3998,21 @@ picture. Two pieces, both `no_std`-friendly:
   per-class NMS) into `ObjectDetection`s, attaches an `AnalyticsMeta`, and
   forwards the frame. A real client shaping the metadata API (rather than
   speculation) is why the system was deferred to this point.
+- **The mask producer (`g2g-ml::OrtSegmentation`, `ort` + `analytics`).** Runs a
+  YOLO `-seg` export (Ultralytics YOLOv8-seg / YOLO11-seg) and attaches
+  `Segmentation` plus `Roi` nodes to the frame it forwards: an identity transform
+  that adds metadata, so the picture and its masks reach an overlay together.
+  Both of the model's outputs stay inside the element, unlike the detection split
+  (`OrtInference -> DetectionPostprocess`): a tensor frame carries one tensor and
+  a mask needs both the box-plus-coefficient output `[1, 4+C+M, A]` and the
+  prototype planes `[1, M, mh, mw]`. An instance's mask is the
+  coefficient-weighted prototype sum through a sigmoid, read over the instance's
+  box at prototype resolution, so a consumer places sample `i` of
+  `mask.width()` at `bbox.x + (i + 0.5) / mask.width() * bbox.w` and needs
+  nothing else; the `Roi` is the mask-tight sub-box, the region an encoder or
+  tracker should treat specially, related to its `Segmentation` by `Contains`.
+  The decode is pure Rust (`g2g-ml::segmentation`), so an `ort-web` caller in the
+  browser that already holds both outputs reuses it without an element.
 - **Metadata through fan-out.** `FrameMetaSet` holds each `FrameMeta` as
   an `Arc<dyn FrameMeta>` and is `Clone`, so a tee clone shares the analytics
   graph by refcount rather than dropping it: the graph runner's
