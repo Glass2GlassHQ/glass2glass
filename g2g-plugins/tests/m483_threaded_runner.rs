@@ -5,11 +5,13 @@
 //! to the cooperative one, just spread across threads.
 #![cfg(all(feature = "std", feature = "multi-thread"))]
 
+use std::collections::BTreeSet;
+
 use g2g_core::runtime::{
-    parse_launch, run_graph, run_graph_threaded, LaunchFactory, Registry, SourceFactory,
-    ThreadSpawner,
+    parse_launch, run_graph, run_graph_threaded, run_graph_threaded_with_bus, run_graph_with_bus,
+    LaunchFactory, Registry, SourceFactory, ThreadSpawner,
 };
-use g2g_core::{Caps, Dim, PipelineClock, Rate, RawVideoFormat};
+use g2g_core::{Bus, BusMessage, Caps, Dim, PipelineClock, Rate, RawVideoFormat};
 use g2g_plugins::fakesink::FakeSink;
 use g2g_plugins::videoflip::{FlipMethod, VideoFlip};
 use g2g_plugins::videorate::VideoRate;
@@ -111,4 +113,68 @@ async fn core_thread_spawner_runs() {
         stats.frames_consumed, 8,
         "all frames reached the sink under ThreadSpawner"
     );
+}
+
+/// Each arm thread brackets itself with a `StreamStatus` enter / leave pair, so
+/// an application can see the graph's real thread fan-out. The cooperative
+/// runner, which multiplexes every arm on one executor, posts none.
+#[tokio::test]
+async fn stream_status_brackets_every_arm_thread() {
+    let reg = registry();
+    let (bus, handle) = Bus::new(64);
+
+    let stats = run_graph_threaded_with_bus(
+        parse_launch(&reg, PIPELINE).expect("parses"),
+        &ZeroClock,
+        4,
+        &handle,
+        &TokioThreadSpawner,
+    )
+    .await
+    .expect("threaded run");
+    assert_eq!(
+        stats.frames_consumed, 8,
+        "the run still delivers its frames"
+    );
+
+    let (mut entered, mut left) = (Vec::new(), Vec::new());
+    while let Some(m) = bus.try_recv() {
+        match m {
+            BusMessage::StreamStatus {
+                entered: true,
+                thread_id,
+            } => entered.push(thread_id),
+            BusMessage::StreamStatus {
+                entered: false,
+                thread_id,
+            } => left.push(thread_id),
+            _ => {}
+        }
+    }
+    // One thread per graph arm (source, videoflip, videorate, fakesink) plus the
+    // re-cascade coordinator's own.
+    assert_eq!(entered.len(), 5, "one enter per spawned arm thread");
+    let distinct: BTreeSet<u64> = entered.iter().copied().collect();
+    assert_eq!(distinct.len(), entered.len(), "each arm on its own thread");
+    entered.sort_unstable();
+    left.sort_unstable();
+    assert_eq!(entered, left, "every thread that entered also left");
+
+    // Negative control: the cooperative runner has no streaming threads.
+    let (coop_bus, coop_handle) = Bus::new(64);
+    run_graph_with_bus(
+        parse_launch(&reg, PIPELINE).expect("parses"),
+        &ZeroClock,
+        4,
+        &coop_handle,
+    )
+    .await
+    .expect("cooperative run");
+    let mut posted = 0;
+    while let Some(m) = coop_bus.try_recv() {
+        if matches!(m, BusMessage::StreamStatus { .. }) {
+            posted += 1;
+        }
+    }
+    assert_eq!(posted, 0, "the cooperative runner posts no stream-status");
 }

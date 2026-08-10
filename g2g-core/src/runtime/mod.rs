@@ -121,7 +121,8 @@ pub use observe::{
 #[cfg(all(feature = "std", feature = "multi-thread"))]
 pub use graph_runner::{
     run_graph_threaded, run_graph_threaded_observed, run_graph_threaded_ticked,
-    run_graph_threaded_with_progress, GraphSpawner, LocalArmFuture, ThreadSpawner,
+    run_graph_threaded_with_bus, run_graph_threaded_with_progress, GraphSpawner, LocalArmFuture,
+    ThreadSpawner,
 };
 
 // `PadKind` / `PadRequest` are not std-gated: the `no_std` fan-in trait

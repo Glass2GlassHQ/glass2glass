@@ -153,6 +153,42 @@ pub enum BusMessage {
         /// The new total duration in nanoseconds.
         duration_ns: u64,
     },
+    /// A [`SeekFlags::SEGMENT`](crate::segment::SeekFlags::SEGMENT) seek reached
+    /// its `stop` (the GStreamer `GST_MESSAGE_SEGMENT_DONE` analog). Posted by
+    /// [`SeekController::notify_segment_done`](crate::runtime::SeekController::notify_segment_done)
+    /// when a bus is attached to the controller, at the same moment the source
+    /// arms the take-once back-channel, so an application that loops a segment
+    /// can drive the next loop seek from the bus instead of polling
+    /// [`segment_done_count`](crate::runtime::SeekController::segment_done_count).
+    SegmentDone {
+        /// Stream-time position (ns) where the segment ended.
+        position_ns: u64,
+    },
+    /// A streaming thread started or finished (the GStreamer
+    /// `GST_MESSAGE_STREAM_STATUS` enter / leave analog). Only the thread-per-arm
+    /// runner ([`run_graph_threaded`](crate::runtime::run_graph_threaded)) posts
+    /// it, one `entered: true` before an arm's future first polls on its own OS
+    /// thread and one `entered: false` when that future finishes, so an
+    /// application can see how many threads the graph is really spread over and
+    /// when each ends. The cooperative runner multiplexes every arm on the
+    /// caller's executor and posts nothing.
+    StreamStatus {
+        /// `true` for the thread's enter, `false` for its leave.
+        entered: bool,
+        /// Identifies the OS thread the arm runs on: a hash of its
+        /// `std::thread::ThreadId`, since the id itself has no stable numeric
+        /// form. Only equality is meaningful, so an enter pairs with its leave.
+        thread_id: u64,
+    },
+    /// The elected pipeline clock lost the reference it disciplines to (the
+    /// GStreamer `GST_MESSAGE_CLOCK_LOST` analog): a PTP clock whose master went
+    /// away, say. The runner posts it once per loss, having polled
+    /// [`PipelineClock::healthy`](crate::PipelineClock::healthy) on the elected
+    /// clock, then re-elects over the candidates that are still healthy and
+    /// retargets every sink's [`ClockSync`](crate::ClockSync) at the winner. The
+    /// application does not have to act; this says the timeline it was
+    /// synchronising to is no longer the one it started with.
+    ClockLost,
     /// Application-defined signal carrying an opaque code.
     Custom(u64),
 }
