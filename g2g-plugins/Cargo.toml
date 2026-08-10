@@ -32,7 +32,7 @@ linux-full = [
     "opus", "vorbis", "vpx", "av1-encode", "mjpeg", "mjpeg-encode",
     "alsa-sink", "alsa-src", "pulse-sink", "pulse-src", "pipewire", "portal",
     "wayland-sink", "kms-sink", "wgpu-sink", "vello-overlay", "analytics",
-    "declarative-yaml", "script-rhai", "observe",
+    "declarative-yaml", "script-rhai", "observe", "tui",
 ]
 std = ["g2g-core/std", "dep:tokio"]
 multi-thread = ["g2g-core/multi-thread"]
@@ -128,6 +128,11 @@ moqt = ["webtransport", "tokio/rt", "tokio/sync", "tokio/macros"]
 # of std; the transports below layer their own deps.
 tooling-json = ["std", "dep:serde_json"]
 observe = ["tooling-json", "tokio/net", "tokio/io-util", "tokio/rt", "tokio/time", "tokio/macros", "tokio/sync", "dep:tokio-tungstenite", "futures-util/sink"]
+# In-terminal live telemetry: `g2g-launch --tui` reads the same `Observer` tap
+# the dashboard does and draws it with ratatui, no browser and no server. No
+# JSON: it renders the snapshot structs directly, so it is independent of
+# `observe` / `tooling-json`.
+tui = ["std", "tokio/time", "tokio/macros", "dep:ratatui"]
 # Native WebRTC egress sink (WebRtcSink): publishes a pipeline's encoded H.264 to
 # a WHIP server over a str0m-driven PeerConnection (ICE / DTLS / SRTP). str0m is a
 # sans-IO WebRTC stack; we drive its handle_input / poll_output loop on a tokio
@@ -862,6 +867,7 @@ embassy-sync = { version = "0.8", optional = true }
 # vendored C library (cmake + nasm needed at build time); with_simd + nasm_simd
 # keep the SIMD kernels that make it worth having.
 mozjpeg = { version = "0.10.13", optional = true, features = ["with_simd", "nasm_simd"] }
+ratatui = { version = "0.30.2", optional = true }
 
 # Media Foundation bindings are Windows-only; target-gate so other platforms
 # never attempt to resolve or build the windows crate.

@@ -560,6 +560,11 @@ pub mod preview;
 #[cfg(feature = "observe")]
 pub mod dashboard;
 
+// In-terminal live telemetry (tui feature): the same Observer tap drawn with
+// ratatui. Used by `g2g-launch --tui`.
+#[cfg(feature = "tui")]
+pub mod tui;
+
 #[cfg(feature = "remote")]
 pub mod remotesink;
 #[cfg(feature = "remote")]

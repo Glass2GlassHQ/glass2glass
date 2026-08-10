@@ -256,6 +256,31 @@ Today's tap covers the cooperative graph runner and the two linear runners
 per-link transit time, source-side timing, and the threaded runner are
 follow-ups (see `DESIGN_TODO.md`).
 
+## Terminal UI (`--tui`)
+
+`g2g-launch --tui` draws the same live telemetry in the terminal, with no
+browser and no port. Build with the `tui` feature:
+
+```sh
+cargo run -p g2g-plugins --features tui --bin g2g-launch -- \
+  --tui videotestsrc ! videoscale ! fakesink
+```
+
+Two screens, `g` toggles: a table view (per-element `process()` p50 / p99, input
+wait, push-back, input fill; per-link caps, packets, bytes, drops; the
+single-frame journey as a wait / work / blocked bar per stage) and an ASCII
+topology view (one box per element with its live p99, arrows following the
+links, each labelled with packets crossed and `-N` frames dropped, boxes colored
+by peak input fill). Arrow keys pan the topology when it is wider than the
+terminal. `q`, Esc, or Ctrl-C quits, which stops the pipeline and restores the
+terminal.
+
+It reads the same `Observer` tap the dashboard does, in-process, at 250 ms; it
+needs neither `observe` nor JSON. Log records would tear up the drawing, so
+while the UI holds the terminal, g2g logging is diverted from stderr into a ring
+buffer and shown as a log pane (`G2G_DEBUG` still selects what is recorded); the
+stderr sink comes back on exit.
+
 ## Visual pipeline builder
 
 `tools/builder/` is a React Flow app (Vite + pnpm) that lets you assemble a

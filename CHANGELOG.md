@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1012: `g2g-launch --tui` renders the live telemetry tap in the terminal, tables plus an ASCII topology view.
 - M1011: `VpxEnc` validated against system libvpx and the encode/decode PSNR battery covers VP8 / VP9.
 - M1010: plugin ABI v2: a frozen C ABI (descriptor, vtables, async-ffi poll boundary) with capability-gated loading, so cross-toolchain and plain-C plugins load; v1 stays for same-toolchain builds.
 - M1009: the demux, muxer, and terminal fan-in arms drive their elements monomorphized, zero per-packet heap like the linear arms.

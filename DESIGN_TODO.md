@@ -633,8 +633,6 @@ Outstanding developer-tooling tasks, highest leverage first.
 
 - **Per-element / per-link telemetry gaps.** Remaining `Observer` coverage:
   validate the dashboard live against an RTSP source.
-- Longer tail: a live pipeline TUI (a ratatui consumer of the same telemetry
-  tap).
 
 ## Code audit follow-up
 
