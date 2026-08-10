@@ -944,10 +944,9 @@ pub fn forwardable_streams(demux: &MatroskaDemuxer) -> Vec<MkvStreamInfo> {
         .iter()
         .filter_map(|t| {
             let stream = codec_to_stream(t.codec)?;
-            // Subtitle tracks are discovered (and forwardable by an explicit
-            // MkvDemuxN port) but not yet auto-plugged by playbin (no MKV
-            // text-branch overlay wiring), so omit them from the A/V fan-out.
-            if matches!(stream, MkvStream::Subtitle(_)) {
+            // Subtitle tracks reach the graph through the overlay branch
+            // (`subtitle_streams`), not as an A/V sink of their own.
+            if is_subtitle(stream) {
                 return None;
             }
             let video = matches!(
@@ -987,19 +986,29 @@ pub fn forwardable_streams(demux: &MatroskaDemuxer) -> Vec<MkvStreamInfo> {
         .collect()
 }
 
-/// The subtitle (text) tracks a parsed Matroska container carries, in track order
-/// (M415): one [`MkvStreamInfo`] per track whose codec maps to an
-/// [`MkvStream::Subtitle`]. The read-side complement of [`forwardable_streams`]
-/// (which is A/V-only): the subtitle-overlay `playbin` builder pairs these with the
-/// A/V streams to plug a `TextOverlayN` onto the video branch (the MKV sibling of
-/// `mp4demuxn::subtitle_streams`). `video` is always `false` for a text track.
+/// Whether a stream is a subtitle track, timed text (`Caps::Text`) or bitmap cues
+/// (`Caps::SubPicture`). Both reach the picture through the overlay branch rather
+/// than through a sink of their own, so both are kept out of the A/V fan-out.
+fn is_subtitle(stream: MkvStream) -> bool {
+    matches!(
+        stream,
+        MkvStream::Subtitle(_) | MkvStream::VobSub | MkvStream::DvbSub | MkvStream::Pgs
+    )
+}
+
+/// The subtitle tracks a parsed Matroska container carries, in track order
+/// (M415): one [`MkvStreamInfo`] per timed-text or bitmap-subtitle track. The
+/// read-side complement of [`forwardable_streams`] (which is A/V-only): the
+/// subtitle-overlay `playbin` builder pairs these with the A/V streams to plug an
+/// overlay onto the video branch (the MKV sibling of
+/// `mp4demuxn::subtitle_streams`). `video` is always `false` for a subtitle track.
 pub fn subtitle_streams(demux: &MatroskaDemuxer) -> Vec<MkvStreamInfo> {
     demux
         .tracks()
         .iter()
         .filter_map(|t| {
             let stream = codec_to_stream(t.codec)?;
-            if !matches!(stream, MkvStream::Subtitle(_)) {
+            if !is_subtitle(stream) {
                 return None;
             }
             Some(MkvStreamInfo {

@@ -2793,13 +2793,30 @@ is raw pixels. `VobSubDec` (`vobsubdec`, gst's `dvdsubdec`), `DvbSubDec`
 element rather than a bare decoder) and `PgsDec` (`pgsdec`; gst has no PGS
 decoder at all) all emit one full-frame transparent
 `Caps::RawVideo{Rgba8}` canvas per cue at the subpicture display geometry,
-stamped with the cue's PTS and duration, so the consumer is the ordinary
-`compositor` and there is no bitmap-cue overlay element to build. A cue ends with a
-second, fully transparent canvas at its hide time: the compositor holds an overlay
+stamped with the cue's PTS and duration, so the consumer is a pixel one:
+`subpictureoverlay` or the ordinary `compositor`. A cue ends with a
+second, fully transparent canvas at its hide time: either consumer holds an overlay
 pad's last frame between output frames, and a zero-alpha source-over is a no-op,
 so the clear canvas is exactly what makes a cue disappear on time. One more empty
-canvas opens the stream, so the compositor is not waiting on this input for
+canvas opens the stream, so the consumer is not waiting on this input for
 however long it is until the first cue.
+
+`subpictureoverlay::SubPictureOverlay` is the element that puts those canvases on
+the picture. It is a two-pad `MultiInputElement` shaped like `TextOverlayN`, video
+on pad 0 and the decoder's canvases on pad 1, opting into the runner's
+`input_pts_ordered` merge so a canvas lands just before the first video frame it
+covers. It holds the last canvas whose PTS the video has reached and source-over
+blends it onto every frame, so a cue stays up between canvases; a canvas with no
+drawn pixel is dropped rather than held, which is how the clearing canvas takes the
+cue down. Both pads are RGBA8 on the CPU (`videoconvert` on either side for another
+format), and a canvas whose geometry differs from the video is resampled onto it by
+the `compositor`'s bilinear scaler, so a PAL-sized subpicture composites onto a
+scaled picture. `mkv_playbin` auto-plugs it: a Matroska bitmap-subtitle track
+decodes to canvases and feeds this overlay where a text track feeds `subparse` and
+`TextOverlayN`. In a launch line it is a fan-in muxer built by link degree like
+`textoverlay`, with the video and subpicture branches on its `video` and `text`
+request pads. The MPEG program-stream (DVD) `playbin` composites its subpicture
+track with `compositor` at the video's own geometry instead.
 
 The VobSub bitstream itself (`vobsub.rs`, `no_std`) is one subpicture unit per
 cue: a packet size and a control-sequence offset, 2-bits-per-pixel run-length data

@@ -173,6 +173,8 @@ pub mod dvbsubdec;
 // `pgsdec` element that renders display sets to RGBA canvases.
 pub mod pgs;
 pub mod pgsdec;
+// The visible end of those three decoders: blends their cue canvases onto video.
+pub mod subpictureoverlay;
 // EBU teletext (ETSI EN 300 706): the page-assembly codec (no_std) plus the
 // `teletextdec` element that turns a subtitle page into plain-text cues.
 pub mod teletext;

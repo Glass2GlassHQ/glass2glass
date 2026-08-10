@@ -934,7 +934,7 @@ fn blend_over(
 /// math as [`blend_over`], with integer fixed-point sampling (no float intrinsics
 /// for the `no_std` baseline). Pixels outside the canvas are clipped.
 #[allow(clippy::too_many_arguments)]
-fn blend_over_scaled(
+pub(crate) fn blend_over_scaled(
     canvas: &mut [u8],
     cw: usize,
     ch: usize,
