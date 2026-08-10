@@ -724,16 +724,9 @@ impl AsyncElement for VelloTextOverlay {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gpu::shared_ctx;
     use g2g_core::memory::SystemSlice;
     use g2g_core::{BBox, FrameTiming, PushOutcome, Rate};
-
-    /// Whether a wgpu adapter is available; tests skip gracefully without a GPU.
-    async fn gpu_available() -> bool {
-        wgpu::Instance::default()
-            .request_adapter(&wgpu::RequestAdapterOptions::default())
-            .await
-            .is_ok()
-    }
 
     fn rgba_caps(w: u32, h: u32) -> Caps {
         Caps::RawVideo {
@@ -849,12 +842,14 @@ mod tests {
 
     #[tokio::test]
     async fn renders_box_onto_gpu_texture() {
-        if !gpu_available().await {
+        let Some(ctx) = shared_ctx().await else {
             std::eprintln!("no wgpu adapter; skipping Vello GPU render test");
             return;
-        }
+        };
         let (w, h) = (64u32, 64u32);
-        let mut ov = VelloAnalyticsOverlay::new().with_thickness(4.0);
+        let mut ov = VelloAnalyticsOverlay::new()
+            .with_thickness(4.0)
+            .with_context(ctx);
         ov.configure_pipeline(&rgba_caps(w, h)).unwrap();
 
         // Dark-grey input frame; a class-0 (red) box covering the centre.
