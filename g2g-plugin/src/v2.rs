@@ -197,20 +197,23 @@ pub unsafe extern "C" fn process_shim<E: AsyncElement + 'static>(
     packet: FfiPacket,
     out: FfiOutputSink,
 ) -> LocalFfiFuture<FfiStatus> {
+    // Convert before building the future, not inside it. The raw `FfiPacket` has
+    // no destructor, so a host that drops the returned future without ever
+    // polling it would leak the payload; the converted `PipelinePacket` releases
+    // itself when the future is dropped, polled or not.
+    // SAFETY: payload ownership arrived with the packet.
+    let converted = unsafe { packet_from_ffi(packet) };
     LocalFfiFuture::new(async move {
+        let packet = match converted {
+            Ok(p) => p,
+            Err(status) => return status,
+        };
         if elem.is_null() {
-            // SAFETY: nothing has taken the payload, so this side still owns it.
-            unsafe { release_packet(&packet) };
             return STATUS_ERROR;
         }
         // SAFETY: the host's contract is exclusive access for the life of this
         // future.
         let element = unsafe { &mut *elem.cast::<E>() };
-        // SAFETY: payload ownership arrived with the packet.
-        let packet = match unsafe { packet_from_ffi(packet) } {
-            Ok(p) => p,
-            Err(status) => return status,
-        };
         let mut sink = HostSink::new(out);
         match element.process(packet, &mut sink).await {
             Ok(()) => STATUS_OK,
