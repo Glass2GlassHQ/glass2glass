@@ -901,6 +901,24 @@ pub struct FfiPluginDescriptor {
     pub reserved: [Option<extern "C" fn()>; 4],
 }
 
+/// Wrapper that lets an ABI table live in a `static`.
+///
+/// Every table a plugin exports (the descriptor, its capability array, its
+/// vtables, its property specs) holds raw pointers, so Rust will not put one in
+/// a `static` on its own. `repr(transparent)`, so the symbol's address is the
+/// table's address, which is what `dlsym` hands the host.
+///
+/// Only for **immutable** v2 ABI tables, whose pointers address other immutable
+/// statics in the same library. Nothing else may use it.
+#[derive(Debug)]
+#[repr(transparent)]
+pub struct AbiStatic<T>(pub T);
+
+// SAFETY: the wrapped value is an immutable ABI table. Nothing ever writes it,
+// and the pointers it holds address other immutable statics in the same
+// library, so sharing it across threads is a read of constant data.
+unsafe impl<T> Sync for AbiStatic<T> {}
+
 /// Bytes every versioned struct's `struct_size` must at least cover: its own
 /// size field plus the `u32` after it. A smaller declared size cannot even
 /// describe itself and is refused.
