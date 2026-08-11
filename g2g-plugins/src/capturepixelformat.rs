@@ -28,18 +28,10 @@ impl CapturePixelFormat {
     /// per-buffer byte count there. The geometry comes from the device, so the
     /// arithmetic is checked.
     pub fn frame_bytes(self, width: u32, height: u32) -> Option<usize> {
-        let (width, height) = (width as usize, height as usize);
-        let luma = width.checked_mul(height)?;
-        match self {
-            // 4:2:0 carries one U and one V sample per 2x2 block, rounded up.
-            CapturePixelFormat::Nv12 | CapturePixelFormat::I420 => width
-                .div_ceil(2)
-                .checked_mul(height.div_ceil(2))?
-                .checked_mul(2)?
-                .checked_add(luma),
-            CapturePixelFormat::Yuyv => luma.checked_mul(2),
-            CapturePixelFormat::Mjpeg => None,
-        }
+        self.raw_format()?
+            .unpadded_frame_bytes(width, height)?
+            .try_into()
+            .ok()
     }
 
     /// The caps this format produces at a negotiated geometry and rate. Raw

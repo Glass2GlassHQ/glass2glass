@@ -1229,6 +1229,112 @@ impl RawVideoFormat {
             _ => None,
         }
     }
+
+    /// How many separate planes the format stores: 1 packed (RGBA / BGRA /
+    /// YUYV), 2 semi-planar (NV12 / P010, luma then interleaved chroma), 3 fully
+    /// planar (the I420 / I422 / I444 family). Matched exhaustively so a new
+    /// format has to state its own layout rather than inherit a wrong one.
+    pub const fn plane_count(self) -> usize {
+        match self {
+            RawVideoFormat::Rgba8 | RawVideoFormat::Bgra8 | RawVideoFormat::Yuyv => 1,
+            RawVideoFormat::Nv12 | RawVideoFormat::P010 => 2,
+            RawVideoFormat::I420
+            | RawVideoFormat::I420p10
+            | RawVideoFormat::I420p12
+            | RawVideoFormat::I422
+            | RawVideoFormat::I422p10
+            | RawVideoFormat::I422p12
+            | RawVideoFormat::I444
+            | RawVideoFormat::I444p10
+            | RawVideoFormat::I444p12 => 3,
+        }
+    }
+
+    /// Bytes one pixel occupies in a packed format's single plane: 4 for RGBA /
+    /// BGRA, 2 for YUYV. `None` for the multi-plane formats, where one pixel's
+    /// samples are spread across planes.
+    pub const fn pixel_stride(self) -> Option<usize> {
+        match self {
+            RawVideoFormat::Rgba8 | RawVideoFormat::Bgra8 => Some(4),
+            RawVideoFormat::Yuyv => Some(2),
+            _ => None,
+        }
+    }
+
+    /// Row stride in bytes of `plane` at `width`, with no row padding. `None`
+    /// for a plane this format does not have, or on overflow.
+    pub fn plane_stride(self, plane: usize, width: u32) -> Option<u32> {
+        if plane >= self.plane_count() {
+            return None;
+        }
+        if let Some(pixel) = self.pixel_stride() {
+            return width.checked_mul(pixel as u32);
+        }
+        let sample = self.bytes_per_sample() as u32;
+        if plane == 0 {
+            return width.checked_mul(sample);
+        }
+        match self {
+            // One interleaved U+V pair per 2x2 block, so the chroma row is as
+            // wide as the luma row (rounded up on an odd width).
+            RawVideoFormat::Nv12 | RawVideoFormat::P010 => {
+                width.div_ceil(2).checked_mul(2)?.checked_mul(sample)
+            }
+            _ => {
+                let (horizontal, _) = self.chroma_shift()?;
+                width.div_ceil(1 << horizontal).checked_mul(sample)
+            }
+        }
+    }
+
+    /// Rows in `plane` at `height`. `None` for a plane this format does not have.
+    pub fn plane_rows(self, plane: usize, height: u32) -> Option<u32> {
+        if plane >= self.plane_count() {
+            return None;
+        }
+        if plane == 0 {
+            return Some(height);
+        }
+        match self {
+            RawVideoFormat::Nv12 | RawVideoFormat::P010 => Some(height.div_ceil(2)),
+            _ => {
+                let (_, vertical) = self.chroma_shift()?;
+                Some(height.div_ceil(1 << vertical))
+            }
+        }
+    }
+
+    /// Bytes `plane` occupies with no row padding.
+    pub fn plane_bytes(self, plane: usize, width: u32, height: u32) -> Option<u64> {
+        let stride = self.plane_stride(plane, width)? as u64;
+        let rows = self.plane_rows(plane, height)? as u64;
+        stride.checked_mul(rows)
+    }
+
+    /// Byte offset of `plane` from the start of an unpadded frame, its planes
+    /// laid out back to back in index order.
+    pub fn plane_offset(self, plane: usize, width: u32, height: u32) -> Option<u64> {
+        if plane >= self.plane_count() {
+            return None;
+        }
+        let mut offset = 0u64;
+        for earlier in 0..plane {
+            offset = offset.checked_add(self.plane_bytes(earlier, width, height)?)?;
+        }
+        Some(offset)
+    }
+
+    /// Bytes a whole frame occupies with no row padding, covering every format.
+    /// [`Self::frame_bytes`] answers the narrower dma-buf question instead: the
+    /// size given an externally chosen row stride, for the formats that can be
+    /// exported as one tightly strided buffer.
+    pub fn unpadded_frame_bytes(self, width: u32, height: u32) -> Option<u64> {
+        let mut total = 0u64;
+        for plane in 0..self.plane_count() {
+            total = total.checked_add(self.plane_bytes(plane, width, height)?)?;
+        }
+        Some(total)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -1898,6 +2004,47 @@ mod tests {
         // Formats with no single-stride layout report nothing rather than a guess.
         assert_eq!(I420p10.frame_bytes(640, 480), None);
         assert_eq!(P010.row_stride(640), None);
+    }
+
+    #[test]
+    fn plane_layout_covers_every_format_family() {
+        use RawVideoFormat::*;
+        // Packed: one plane, the pixel stride straight off the format.
+        assert_eq!((Rgba8.plane_count(), Rgba8.pixel_stride()), (1, Some(4)));
+        assert_eq!(Rgba8.plane_stride(0, 640), Some(2560));
+        assert_eq!(Rgba8.unpadded_frame_bytes(640, 480), Some(640 * 480 * 4));
+        assert_eq!(Yuyv.plane_stride(0, 640), Some(1280));
+        assert_eq!(Rgba8.plane_stride(1, 640), None, "no second plane");
+
+        // Semi-planar: luma then one interleaved chroma plane at half height.
+        assert_eq!((Nv12.plane_count(), Nv12.pixel_stride()), (2, None));
+        assert_eq!(Nv12.plane_stride(1, 640), Some(640));
+        assert_eq!(Nv12.plane_rows(1, 480), Some(240));
+        assert_eq!(Nv12.unpadded_frame_bytes(640, 480), Some(640 * 480 * 3 / 2));
+        assert_eq!(Nv12.plane_offset(1, 640, 480), Some(640 * 480));
+        // P010 is NV12's layout with 2-byte samples, which `frame_bytes` refuses.
+        assert_eq!(P010.plane_stride(0, 640), Some(1280));
+        assert_eq!(P010.unpadded_frame_bytes(640, 480), Some(640 * 480 * 3));
+
+        // Fully planar: chroma dimensions follow the subsampling shift.
+        assert_eq!(I420.plane_count(), 3);
+        assert_eq!(I420.plane_stride(1, 640), Some(320));
+        assert_eq!(I420.plane_rows(1, 480), Some(240));
+        assert_eq!(I420.unpadded_frame_bytes(640, 480), Some(640 * 480 * 3 / 2));
+        // 4:2:2 halves width only, 4:4:4 neither.
+        assert_eq!(I422.plane_rows(1, 480), Some(480));
+        assert_eq!(I422.unpadded_frame_bytes(640, 480), Some(640 * 480 * 2));
+        assert_eq!(I444.plane_stride(1, 640), Some(640));
+        assert_eq!(I444.unpadded_frame_bytes(640, 480), Some(640 * 480 * 3));
+        // 10-bit doubles every plane.
+        assert_eq!(I420p10.unpadded_frame_bytes(640, 480), Some(640 * 480 * 3));
+
+        // Odd geometry rounds chroma up rather than truncating a row away.
+        assert_eq!(I420.unpadded_frame_bytes(3, 3), Some(9 + 2 * 2 * 2));
+        assert_eq!(Nv12.unpadded_frame_bytes(3, 3), Some(9 + 4 * 2));
+
+        // A width that overflows its stride yields nothing, never a short buffer.
+        assert_eq!(Rgba8.unpadded_frame_bytes(u32::MAX, 4), None);
     }
 
     #[test]
