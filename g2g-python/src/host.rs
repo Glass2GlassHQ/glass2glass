@@ -215,6 +215,14 @@ enum Staged {
         header: String,
         payload: Vec<u8>,
     },
+    Tracking {
+        object_id: u64,
+    },
+    /// A directed edge between two staged records, by their staging index.
+    Relation {
+        from: usize,
+        to: usize,
+    },
 }
 
 /// The analytics sink handed to `g2g_process` as `meta`: the `AnalyticsBackend`
@@ -240,19 +248,21 @@ struct MetaSink {
 }
 
 impl MetaSink {
-    fn stage(&self, item: Staged) {
-        self.staged
-            .lock()
-            .expect("MetaSink staged lock poisoned")
-            .push(item);
+    /// Stage one record, returning its staging index (the handle Python relates
+    /// records by).
+    fn stage(&self, item: Staged) -> usize {
+        let mut staged = self.staged.lock().expect("MetaSink staged lock poisoned");
+        staged.push(item);
+        staged.len() - 1
     }
 }
 
 #[pymethods]
 impl MetaSink {
     /// Add an object-detection box: class `label` id, pixel `(x, y, w, h)`,
-    /// confidence `score` in `[0, 1]`.
-    fn add_object(&self, label: u32, x: f32, y: f32, w: f32, h: f32, score: f32) {
+    /// confidence `score` in `[0, 1]`. Returns the record's handle, for
+    /// [`relate`](Self::relate).
+    fn add_object(&self, label: u32, x: f32, y: f32, w: f32, h: f32, score: f32) -> usize {
         self.stage(Staged::Object {
             label,
             x,
@@ -260,12 +270,27 @@ impl MetaSink {
             w,
             h,
             score,
-        });
+        })
     }
 
-    /// Add a whole-frame classification: class `label` id and `score`.
-    fn add_classification(&self, label: u32, score: f32) {
-        self.stage(Staged::Classification { label, score });
+    /// Add a whole-frame classification: class `label` id and `score`. Returns
+    /// the record's handle.
+    fn add_classification(&self, label: u32, score: f32) -> usize {
+        self.stage(Staged::Classification { label, score })
+    }
+
+    /// Add a tracking identity that persists across frames. Returns the record's
+    /// handle; pair it with the detection it belongs to via
+    /// [`relate`](Self::relate).
+    fn add_tracking(&self, object_id: u64) -> usize {
+        self.stage(Staged::Tracking { object_id })
+    }
+
+    /// Relate two staged records by their handles (detection -> tracking), the
+    /// `GstAnalytics` `set_relation` mirror. Out-of-range handles are dropped
+    /// when the frame's metadata is materialized.
+    fn relate(&self, from: usize, to: usize) {
+        self.stage(Staged::Relation { from, to });
     }
 
     /// Append an opaque tagged blob (the `FrameIO.append_blob` mirror): a
@@ -856,7 +881,10 @@ fn planes_released(py: Python<'_>, planes: &[Py<CudaPlane>]) -> PyResult<bool> {
 /// an [`g2g_core::AnalyticsMeta`], opaque blobs into a [`g2g_core::BlobMeta`].
 #[cfg(feature = "analytics")]
 fn attach_metadata(frame: &mut Frame, staged: Vec<Staged>, frame_w: u32, frame_h: u32) {
-    use g2g_core::{AnalyticsMeta, AnalyticsNode, BBox, BlobMeta, Classification, ObjectDetection};
+    use g2g_core::{
+        AnalyticsMeta, AnalyticsNode, BBox, BlobMeta, Classification, ObjectDetection,
+        RelationKind, Tracking,
+    };
 
     if staged.is_empty() {
         return;
@@ -878,7 +906,13 @@ fn attach_metadata(frame: &mut Frame, staged: Vec<Staged>, frame_w: u32, frame_h
     };
     let mut analytics = AnalyticsMeta::new();
     let mut blobs = BlobMeta::new();
-    for s in staged {
+    // Python relates records by staging index, but a blob stages a record and
+    // adds no analytics node, so the two index spaces drift apart. Keep the map
+    // and resolve relations in a second pass, since a relation may also be
+    // staged before the record it names.
+    let mut node_of_staged: Vec<Option<usize>> = vec![None; staged.len()];
+    let mut relations: Vec<(usize, usize)> = Vec::new();
+    for (index, s) in staged.into_iter().enumerate() {
         match s {
             Staged::Object {
                 label,
@@ -888,7 +922,7 @@ fn attach_metadata(frame: &mut Frame, staged: Vec<Staged>, frame_w: u32, frame_h
                 h,
                 score,
             } => {
-                analytics.add_detection(ObjectDetection {
+                node_of_staged[index] = Some(analytics.add_detection(ObjectDetection {
                     bbox: BBox {
                         x: x * sx,
                         y: y * sy,
@@ -897,16 +931,32 @@ fn attach_metadata(frame: &mut Frame, staged: Vec<Staged>, frame_w: u32, frame_h
                     },
                     label,
                     confidence: score,
-                });
-            }
-            Staged::Classification { label, score } => {
-                analytics.push(AnalyticsNode::Classification(Classification {
-                    label,
-                    confidence: score,
                 }));
             }
+            Staged::Classification { label, score } => {
+                node_of_staged[index] = Some(analytics.push(AnalyticsNode::Classification(
+                    Classification {
+                        label,
+                        confidence: score,
+                    },
+                )));
+            }
+            Staged::Tracking { object_id } => {
+                node_of_staged[index] =
+                    Some(analytics.push(AnalyticsNode::Tracking(Tracking { object_id })));
+            }
+            Staged::Relation { from, to } => relations.push((from, to)),
             Staged::Blob { header, payload } => blobs.push(header, payload),
         }
+    }
+    for (from, to) in relations {
+        let (Some(Some(from)), Some(Some(to))) = (
+            node_of_staged.get(from).copied(),
+            node_of_staged.get(to).copied(),
+        ) else {
+            continue;
+        };
+        analytics.relate(from, to, RelationKind::Tracks);
     }
     if !analytics.nodes.is_empty() {
         frame.meta.attach(analytics);
