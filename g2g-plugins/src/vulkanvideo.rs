@@ -13108,6 +13108,16 @@ impl VulkanVideoDec {
         self.reorder_tex.max_hold = hold;
     }
 
+    /// The pixel format the decoder emits, which tracks the resolved output
+    /// domain: `Rgba8` for the GPU-texture path, `Nv12` for the system one.
+    fn output_format(&self) -> RawVideoFormat {
+        if self.out_domain == MemoryDomainKind::WgpuTexture {
+            RawVideoFormat::Rgba8
+        } else {
+            RawVideoFormat::Nv12
+        }
+    }
+
     /// The domains this decoder can emit: the zero-copy `WgpuTexture` (preferred)
     /// or system memory.
     const OUTPUT_DOMAINS: DomainSet =
@@ -13498,11 +13508,7 @@ impl AsyncElement for VulkanVideoDec {
     /// resolved domain: `Rgba8` for the GPU-texture (`WgpuTexture`) path, `Nv12`
     /// for the system path.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
-        let format = if self.out_domain == MemoryDomainKind::WgpuTexture {
-            RawVideoFormat::Rgba8
-        } else {
-            RawVideoFormat::Nv12
-        };
+        let format = self.output_format();
         CapsConstraint::DerivedOutput(alloc::boxed::Box::new(move |input: &Caps| match input {
             Caps::CompressedVideo {
                 codec,
@@ -13768,6 +13774,16 @@ impl AsyncElement for VulkanVideoDec {
                 }
                 PipelinePacket::CapsChanged(c) => match &c {
                     Caps::CompressedVideo { codec, .. } if VULKAN_DEC_CODECS.contains(codec) => {
+                        Ok(())
+                    }
+                    // The runner hands an interior element the output caps it
+                    // solved for it, ahead of the first frame, so the sink sees
+                    // them before any data: forward them and record them, which
+                    // suppresses the identical one the first decoded picture
+                    // would emit.
+                    Caps::RawVideo { format, .. } if *format == self.output_format() => {
+                        out.push(PipelinePacket::CapsChanged(c.clone())).await?;
+                        self.last_caps = Some(c);
                         Ok(())
                     }
                     _ => Err(G2gError::CapsMismatch),

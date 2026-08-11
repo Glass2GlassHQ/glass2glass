@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1018: a launch line's `decodebin` reads the memory its consumer takes, so a GPU sink gets a decoder that decodes into that memory instead of one whose frames need a download.
 - M1020: an element refusing a frame says which memory domain arrived, and `--tui` replays its error lines on exit instead of losing them with the screen.
 - M1019: an element's declared input memory domains reach the allocation cascade, so a CPU sink or transform makes a GPU decoder download instead of failing on the first frame.
 - M1017: `wgpusink` presents on a Wayland window it owns, and a CUDA-resident decoded frame is bridged onto its device instead of downloaded.

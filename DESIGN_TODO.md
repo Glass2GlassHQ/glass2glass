@@ -494,10 +494,6 @@ _(No open parser items.)_
 - Further `PlaneLayout` producers (v4l2 `bytesperline` padding, decoder DMA-BUF
   pitches); only the wgpu compositor readback emits it today.
 - `NvEnc` AV1 encode (needs RTX 40-series hardware).
-- Memory-domain preference for a `decodebin` in a launch line, where the
-  downstream consumer is a factory name and not yet a built element: needs a
-  factory-level declaration of accepted input memory, so nothing has to be
-  constructed to ask.
 
 ## Clock-synchronised presentation
 

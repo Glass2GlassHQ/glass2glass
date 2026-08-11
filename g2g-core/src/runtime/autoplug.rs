@@ -1101,6 +1101,18 @@ mod factory {
         }
     }
 
+    /// The memory domain a consumer accepting `accepted` wants its frames in: its
+    /// most-preferred domain (GPU-resident before `System`, per `DomainSet`).
+    /// [`DomainSet::ALL`] is the default an element that never declared carries,
+    /// meaning "imposes no requirement" rather than "wants any domain", so it
+    /// derives `System` and leaves a plain pipeline's selection alone.
+    fn memory_preference(accepted: DomainSet) -> MemoryDomainKind {
+        if accepted == DomainSet::ALL {
+            return MemoryDomainKind::System;
+        }
+        accepted.preferred().unwrap_or(MemoryDomainKind::System)
+    }
+
     /// A runtime collection of element factories the auto-plugger searches over,
     /// the analog of GStreamer's plugin registry. Registration order is the
     /// tie-break only indirectly: [`find_chain`] is breadth-first, so among
@@ -1788,10 +1800,26 @@ mod factory {
                 .element(to.node)
                 .map(|node| node.input_domains())
                 .unwrap_or(DomainSet::ALL);
-            if accepted == DomainSet::ALL {
-                return MemoryDomainKind::System;
-            }
-            accepted.preferred().unwrap_or(MemoryDomainKind::System)
+            memory_preference(accepted)
+        }
+
+        /// The memory domain the element registered under `name` wants its frames
+        /// in, the same rule as
+        /// [`derived_memory_preference`](Self::derived_memory_preference) but
+        /// reached by launch name rather than through a built graph (M1018): the
+        /// text parser expands a `decodebin` before any element exists, so its
+        /// consumer is still just a name. An unregistered name derives `System`.
+        ///
+        /// The name is default-constructed to be asked, since `input_domains` is a
+        /// per-instance method and every implementation of it is constant per
+        /// element type; a factory-level copy of the same fact could drift from it.
+        /// A launch factory's constructor takes no arguments and opens nothing (a
+        /// sink reaches its device in `configure_pipeline`), so the throwaway
+        /// instance costs an allocation.
+        pub fn declared_memory_preference(&self, name: &str) -> MemoryDomainKind {
+            self.make_element(name)
+                .map(|element| memory_preference(element.input_domains()))
+                .unwrap_or(MemoryDomainKind::System)
         }
 
         /// [`decodebin`](Self::decodebin) with per-element property assignments

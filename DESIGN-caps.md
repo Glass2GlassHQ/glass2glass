@@ -880,6 +880,19 @@ forwarded in-band ahead of the first frame as decoder extradata).
   domain gap (an explicit `System` decode into a Cuda consumer) is closed by the
   converter auto-plug as usual.
 
+  A `gst-launch` line reaches the same preference one step earlier, where the
+  consumer is still only a name: the text parser expands `decodebin` /
+  `uridecodebin` / `playbin` before any element exists, so it reads the element
+  named right after the macro (or `playbin`'s own `video-sink=`) through
+  `Registry::declared_memory_preference`, which default-constructs that name and
+  asks it. Constructing to ask beats a factory-level copy of the same fact, which
+  could drift from `input_domains`; a launch constructor takes no arguments and
+  opens nothing (a sink reaches its device in `configure_pipeline`), so the
+  throwaway instance costs an allocation. The rule is otherwise identical,
+  immediate consumer only and `ALL` deriving `System`, so
+  `... ! decodebin ! wgpusink` decodes on the GPU and
+  `... ! decodebin ! filesink` still decodes on the CPU.
+
 #### 4.13.10 Current limits
 
 The solver is **arc consistency** (constraint propagation over per-link caps),

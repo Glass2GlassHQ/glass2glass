@@ -54,6 +54,7 @@ use crate::caps::Caps;
 use crate::element::DynAsyncElement;
 use crate::graph::{Graph, GraphError, NodeId, PadId};
 use crate::link::LinkPolicy;
+use crate::memory::MemoryDomainKind;
 use crate::property::{PropError, PropValue, PropertySpec, ValueError};
 use crate::runtime::autoplug::{
     is_raw_audio, is_raw_video, PadKind, PadRequest, Registry, UriError,
@@ -708,7 +709,8 @@ fn expand_decodebin(registry: &Registry, chains: Vec<Chain>) -> Result<Vec<Chain
         // another chain). Props matter because they can re-type the output (a
         // `filesrc`'s `bytestream-format` selects the container).
         let mut upstream: Option<(String, Vec<(String, String)>)> = None;
-        for item in chain {
+        let mut items = chain.into_iter().peekable();
+        while let Some(item) = items.next() {
             match item {
                 // A fan-out `decodebin name=d` is left for `build_graph`'s
                 // decodebin-select path; it is not linearly expandable.
@@ -746,8 +748,24 @@ fn expand_decodebin(registry: &Registry, chains: Vec<Chain>) -> Result<Vec<Chain
                             None => caps,
                         };
                     let target = |c: &Caps| is_raw_video(c) || is_raw_audio(c);
+                    // M1018: the element right after the `decodebin` picks the
+                    // decoder's memory domain, so a GPU-resident consumer gets a
+                    // decoder that decodes into its domain instead of one whose
+                    // frames have to be downloaded first. Only the immediate
+                    // consumer counts, the rule the graph-side derivation follows.
+                    let preferred = match items.peek() {
+                        Some(Item::Element(consumer)) => {
+                            registry.declared_memory_preference(&consumer.name)
+                        }
+                        _ => MemoryDomainKind::System,
+                    };
                     let mut names = registry
-                        .autoplug_names(&chain_input, &target, DECODEBIN_MAX_DEPTH)
+                        .autoplug_names_preferring(
+                            &chain_input,
+                            &target,
+                            DECODEBIN_MAX_DEPTH,
+                            preferred,
+                        )
                         .ok_or_else(|| {
                             ParseError::NoDecodeChain(alloc::format!("{chain_input:?}"))
                         })?;
@@ -846,7 +864,8 @@ fn expand_uri_sources(registry: &Registry, chains: Vec<Chain>) -> Result<Vec<Cha
     let mut out = Vec::with_capacity(chains.len());
     for chain in chains {
         let mut new_chain: Chain = Vec::with_capacity(chain.len());
-        for (i, item) in chain.into_iter().enumerate() {
+        let mut items = chain.into_iter().enumerate().peekable();
+        while let Some((i, item)) = items.next() {
             let spec = match item {
                 Item::Element(spec) if is_uri_source(&spec.name) => spec,
                 other => {
@@ -863,18 +882,31 @@ fn expand_uri_sources(registry: &Registry, chains: Vec<Chain>) -> Result<Vec<Cha
             let (source, caps) = registry
                 .build_uri_source(uri)
                 .map_err(|e: UriError| ParseError::Uri(alloc::format!("{uri}: {e:?}")))?;
+            // `playbin` names its own sink, a bare `uridecodebin` is followed by
+            // one: either way the consumer's declared input memory picks the
+            // decoder (M1018), as it does after a `decodebin`.
+            let sink = is_playbin.then(|| {
+                prop(&spec, "video-sink")
+                    .unwrap_or("autovideosink")
+                    .to_string()
+            });
+            let consumer = match (&sink, items.peek()) {
+                (Some(sink), _) => Some(sink.as_str()),
+                (None, Some((_, Item::Element(consumer)))) => Some(consumer.name.as_str()),
+                _ => None,
+            };
+            let preferred = consumer.map_or(MemoryDomainKind::System, |name| {
+                registry.declared_memory_preference(name)
+            });
             let target = |c: &Caps| is_raw_video(c) || is_raw_audio(c);
             let decoders = registry
-                .autoplug(&caps, &target, DECODEBIN_MAX_DEPTH)
+                .autoplug_preferring(&caps, &target, DECODEBIN_MAX_DEPTH, preferred)
                 .ok_or_else(|| ParseError::NoDecodeChain(alloc::format!("{caps:?}")))?;
             new_chain.push(Item::Prebuilt(PrebuiltNode::Source(source)));
             for dec in decoders {
                 new_chain.push(Item::Prebuilt(PrebuiltNode::Element(dec)));
             }
-            if is_playbin {
-                let sink = prop(&spec, "video-sink")
-                    .unwrap_or("autovideosink")
-                    .to_string();
+            if let Some(sink) = sink {
                 new_chain.push(Item::Element(ElementSpec {
                     name: sink,
                     props: Vec::new(),
