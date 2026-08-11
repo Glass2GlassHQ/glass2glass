@@ -60,13 +60,14 @@ use crate::glwindow::{run_gl_window, FramePresenter};
 use crate::waylandwindow::{WindowParams, WorkerChannels, WorkerCmd};
 use crate::worker_ready::Handshake;
 use g2g_core::element::QosMessage;
+use g2g_core::memory::{DomainSet, MemoryDomainKind};
 use g2g_core::metrics::{monotonic_ns, LatencyHistogram, LatencySnapshot};
 use g2g_core::{
-    AsyncElement, BusHandle, Caps, CapsConstraint, CapsSet, ClockCandidate, ClockPriority,
-    ClockSync, ConfigureOutcome, Dim, ElementMetadata, Frame, G2gError, HardwareError, OutputSink,
-    PadTemplate, PadTemplates, PipelineClock, PipelinePacket, PresentationPacer, PropError,
-    PropKind, PropValue, PropertySpec, Rate, RawVideoFormat, MAX_LATENESS_PROPERTY,
-    QOS_INTERVAL_PROPERTY,
+    AllocationParams, AsyncElement, BusHandle, Caps, CapsConstraint, CapsSet, ClockCandidate,
+    ClockPriority, ClockSync, ConfigureOutcome, Dim, ElementMetadata, Frame, G2gError,
+    HardwareError, OutputSink, PadTemplate, PadTemplates, PipelineClock, PipelinePacket,
+    PresentationPacer, PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat,
+    MAX_LATENESS_PROPERTY, QOS_INTERVAL_PROPERTY,
 };
 
 /// Worker thread name, also the prefix on the worker's error lines.
@@ -238,6 +239,19 @@ impl AsyncElement for GlSink {
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
+
+    /// This sink uploads from host memory with `glTexSubImage2D`, so it takes
+    /// system frames only. `cudaglsink` is the device-resident counterpart.
+    fn input_domains(&self) -> DomainSet {
+        DomainSet::only(MemoryDomainKind::System)
+    }
+
+    /// Ask upstream for system memory, constraining nothing else about the pool.
+    /// A GPU decoder defaults to keeping frames device-resident, so without this
+    /// demand it hands over a device pointer that `process` rejects.
+    fn propose_allocation(&self, _caps: &Caps) -> Option<AllocationParams> {
+        Some(AllocationParams::system(0, 1))
+    }
 
     fn provide_clock(&self) -> Option<ClockCandidate> {
         Some(ClockCandidate::new(
@@ -480,6 +494,24 @@ mod tests {
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
         }
+    }
+
+    /// The sink uploads from host memory, so it has to tell a GPU decoder to
+    /// download. Without both halves of that (the declared domain and the
+    /// proposal the allocation cascade actually reads) `nvdec ! glsink` hands
+    /// over a device pointer and dies with `UnsupportedDomain`.
+    #[test]
+    fn demands_system_memory_from_its_producer() {
+        let sink = GlSink::new();
+        assert_eq!(
+            sink.input_domains(),
+            DomainSet::only(MemoryDomainKind::System)
+        );
+        let proposal = sink
+            .propose_allocation(&caps(RawVideoFormat::Nv12, 640, 480))
+            .expect("a system proposal");
+        assert_eq!(proposal.domain, MemoryDomainKind::System);
+        assert_eq!(proposal.accepts, DomainSet::only(MemoryDomainKind::System));
     }
 
     #[test]

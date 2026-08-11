@@ -60,12 +60,13 @@ use drm::Device;
 
 use g2g_core::element::QosMessage;
 use g2g_core::frame::Frame;
+use g2g_core::memory::{DomainSet, MemoryDomainKind};
 use g2g_core::metrics::{monotonic_ns, LatencyHistogram, LatencySnapshot};
 use g2g_core::{
-    AsyncElement, BusHandle, Caps, CapsConstraint, CapsSet, ClockCandidate, ClockPriority,
-    ClockSync, ConfigureOutcome, Dim, ElementMetadata, G2gError, HardwareError, OutputSink,
-    PipelineClock, PipelinePacket, PresentationPacer, PropError, PropKind, PropValue, PropertySpec,
-    Rate, RawVideoFormat, MAX_LATENESS_PROPERTY, QOS_INTERVAL_PROPERTY,
+    AllocationParams, AsyncElement, BusHandle, Caps, CapsConstraint, CapsSet, ClockCandidate,
+    ClockPriority, ClockSync, ConfigureOutcome, Dim, ElementMetadata, G2gError, HardwareError,
+    OutputSink, PipelineClock, PipelinePacket, PresentationPacer, PropError, PropKind, PropValue,
+    PropertySpec, Rate, RawVideoFormat, MAX_LATENESS_PROPERTY, QOS_INTERVAL_PROPERTY,
 };
 
 use crate::clock::wait_to_present;
@@ -492,6 +493,19 @@ impl AsyncElement for KmsSink {
     where
         Self: 'a;
 
+    /// This sink copies into a dumb buffer it maps on the CPU, so it takes
+    /// system frames only.
+    fn input_domains(&self) -> DomainSet {
+        DomainSet::only(MemoryDomainKind::System)
+    }
+
+    /// Ask upstream for system memory, constraining nothing else about the pool.
+    /// A GPU decoder defaults to keeping frames device-resident, so without this
+    /// demand it hands over a device pointer that `process` rejects.
+    fn propose_allocation(&self, _caps: &Caps) -> Option<AllocationParams> {
+        Some(AllocationParams::system(0, 1))
+    }
+
     fn provide_clock(&self) -> Option<ClockCandidate> {
         Some(ClockCandidate::new(
             ClockPriority::Provider,
@@ -728,6 +742,29 @@ mod tests {
     use super::*;
     use alloc::vec;
     use g2g_core::{Rate, VideoCodec};
+
+    /// The sink maps its dumb buffer on the CPU, so it has to tell a GPU decoder
+    /// to download. Without both halves of that (the declared domain and the
+    /// proposal the allocation cascade actually reads) `nvdec ! kmssink` hands
+    /// over a device pointer and dies with `UnsupportedDomain`.
+    #[test]
+    fn demands_system_memory_from_its_producer() {
+        let sink = KmsSink::new();
+        assert_eq!(
+            sink.input_domains(),
+            DomainSet::only(MemoryDomainKind::System)
+        );
+        let caps = Caps::RawVideo {
+            format: RawVideoFormat::Nv12,
+            width: Dim::Fixed(640),
+            height: Dim::Fixed(480),
+            framerate: Rate::Fixed(30 << 16),
+            interlace: g2g_core::Interlace::Any,
+        };
+        let proposal = sink.propose_allocation(&caps).expect("a system proposal");
+        assert_eq!(proposal.domain, MemoryDomainKind::System);
+        assert_eq!(proposal.accepts, DomainSet::only(MemoryDomainKind::System));
+    }
 
     #[test]
     fn intercept_passes_through_any_format() {

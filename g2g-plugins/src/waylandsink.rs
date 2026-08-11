@@ -978,6 +978,29 @@ mod tests {
     use super::*;
     use g2g_core::{BusMessage, Rate, VideoCodec};
 
+    /// The sink converts on the CPU into `wl_shm`, so it has to tell a GPU
+    /// decoder to download. Without both halves of that (the declared domain and
+    /// the proposal the allocation cascade actually reads) `nvdec ! waylandsink`
+    /// hands over a device pointer and dies with `UnsupportedDomain`.
+    #[test]
+    fn demands_system_memory_from_its_producer() {
+        let sink = WaylandSink::new();
+        assert_eq!(
+            sink.input_domains(),
+            DomainSet::only(MemoryDomainKind::System)
+        );
+        let caps = Caps::RawVideo {
+            format: RawVideoFormat::Nv12,
+            width: Dim::Fixed(640),
+            height: Dim::Fixed(480),
+            framerate: Rate::Fixed(30 << 16),
+            interlace: g2g_core::Interlace::Any,
+        };
+        let proposal = sink.propose_allocation(&caps).expect("a system proposal");
+        assert_eq!(proposal.domain, MemoryDomainKind::System);
+        assert_eq!(proposal.accepts, DomainSet::only(MemoryDomainKind::System));
+    }
+
     #[test]
     fn intercept_passes_through_any_format() {
         // Negotiation-time intercept is pass-through; the NV12 requirement
