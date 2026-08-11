@@ -160,8 +160,10 @@ impl AnalyticsShapes {
     /// Read the drawable nodes out of `meta`, numbering the segmentations for the
     /// palette and giving every ROI the slot of the segmentation that contains it.
     pub(crate) fn collect(meta: &AnalyticsMeta) -> Self {
-        let mut shapes = Self::default();
-        shapes.class_names = meta.class_names.clone();
+        let mut shapes = Self {
+            class_names: meta.class_names.clone(),
+            ..Default::default()
+        };
         let mut slot_of_node: Vec<Option<u32>> = alloc::vec![None; meta.nodes.len()];
         for (index, node) in meta.nodes.iter().enumerate() {
             match node {
