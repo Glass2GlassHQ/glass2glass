@@ -66,16 +66,15 @@ struct Model {
     input_dtype: TensorDType,
 }
 
-/// Which execution provider a text-constructed element registers ahead of the
-/// CPU fallback. The `from_memory_with_*` constructors are the equivalent for
-/// code; this is what lets a launch line ask for the GPU.
+/// Which execution provider a text-constructed element runs the session on.
+/// The `from_memory_with_*` constructors are the equivalent for code, and differ
+/// in intent: those register best-effort and fall back to the CPU, where naming
+/// one here is a request that fails loud if it cannot be honoured.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExecutionProvider {
     Cpu,
     #[cfg(feature = "cuda")]
     Cuda,
-    #[cfg(feature = "directml")]
-    DirectMl,
 }
 
 impl ExecutionProvider {
@@ -84,8 +83,6 @@ impl ExecutionProvider {
             "cpu" => Some(Self::Cpu),
             #[cfg(feature = "cuda")]
             "cuda" => Some(Self::Cuda),
-            #[cfg(feature = "directml")]
-            "directml" => Some(Self::DirectMl),
             _ => None,
         }
     }
@@ -95,8 +92,6 @@ impl ExecutionProvider {
             Self::Cpu => "cpu",
             #[cfg(feature = "cuda")]
             Self::Cuda => "cuda",
-            #[cfg(feature = "directml")]
-            Self::DirectMl => "directml",
         }
     }
 }
@@ -183,20 +178,30 @@ impl OrtInference {
     /// the constructors do. The tensor-input mode is preserved, so `tensor-input`
     /// and `model` can be set in either order.
     pub fn load_model(&mut self, path: &str) -> Result<(), G2gError> {
-        let builder = Session::builder().map_err(ort_err)?;
-        // Registering an EP is best-effort in ort: with no usable device the
-        // session falls back to the CPU and the pipeline keeps flowing.
-        let mut builder = match self.provider {
-            ExecutionProvider::Cpu => builder,
-            #[cfg(feature = "cuda")]
-            ExecutionProvider::Cuda => builder
-                .with_execution_providers([::ort::ep::CUDA::default().build()])
-                .map_err(ort_err)?,
-            #[cfg(feature = "directml")]
-            ExecutionProvider::DirectMl => builder
-                .with_execution_providers([::ort::ep::DirectML::default().build()])
-                .map_err(ort_err)?,
-        };
+        let mut builder = Session::builder().map_err(ort_err)?;
+        // registering directly, because `with_execution_providers` swallows a
+        // failure and leaves the session on the CPU, an order of magnitude slower
+        #[cfg(feature = "cuda")]
+        {
+            use ::ort::ep::ExecutionProvider as _;
+            match self.provider {
+                ExecutionProvider::Cpu => {}
+                ExecutionProvider::Cuda => {
+                    ::ort::ep::CUDA::default()
+                        .register(&mut builder)
+                        .map_err(|e| {
+                            // the caller only sees "invalid value", so name the cause
+                            // here, usually a missing cuDNN
+                            g2g_core::g2g_error!(
+                                g2g_core::log::Target::category("OrtInference"),
+                                "CUDA execution provider could not be enabled, \
+                             check the CUDA runtime and cuDNN are installed: {e}"
+                            );
+                            G2gError::Hardware(HardwareError::Other)
+                        })?
+                }
+            }
+        }
         let session = builder.commit_from_file(path).map_err(ort_err)?;
         self.model = Some(Model::load(session)?);
         self.model_path = Some(path.to_owned());
@@ -724,7 +729,7 @@ const TENSOR_INPUT_PROP: PropertySpec = PropertySpec::new(
 const PROVIDER_PROP: PropertySpec = PropertySpec::new(
     "execution-provider",
     PropKind::Str,
-    "execution provider to register ahead of the CPU fallback: cpu, cuda, directml",
+    "execution provider to run the session on: cpu, or cuda when built with it",
 );
 #[cfg(feature = "analytics")]
 const ATTACH_TENSOR_PROP: PropertySpec = PropertySpec::new(
