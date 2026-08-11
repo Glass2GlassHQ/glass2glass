@@ -103,6 +103,16 @@ pub enum MemoryDomainKind {
 }
 
 impl MemoryDomainKind {
+    /// Whether this domain is CPU-addressable memory rather than a device-side
+    /// allocation. The distinction the converter auto-plug uses to tell "these
+    /// two agree on system memory" from "these two both want to stay on the GPU".
+    pub const fn is_system(self) -> bool {
+        matches!(
+            self,
+            MemoryDomainKind::System | MemoryDomainKind::SystemView
+        )
+    }
+
     /// Stable bit index for [`DomainSet`]. Keep in sync with the enum (one bit
     /// per variant, 11 variants fit a `u16`).
     const fn bit_index(self) -> u16 {

@@ -1,69 +1,21 @@
-//! Shared Wayland + EGL worker for the GL display sinks.
+//! EGL + GL ES renderer for the GL display sinks, over the shared Wayland window
+//! worker ([`crate::waylandwindow`]).
 //!
-//! GL and Wayland are both single-thread-affine, so each GL sink runs its window
-//! on a dedicated worker thread. Everything that thread does apart from getting
-//! the pixels into the textures is the same for every sink: connect to the
-//! compositor, map an `xdg_toplevel`, bring up an EGL display + GL ES 3 context
-//! on a `wl_egl_window`, build the [`GlState`], then loop on a `calloop` channel
-//! drawing each handed-over frame and `eglSwapBuffers`-ing it. That is
-//! [`run_gl_window`]; the sink supplies a [`FramePresenter`] for the one
-//! per-sink step (a CUDA device->texture copy for [`crate::cudaglsink`], a
-//! `glTexSubImage2D` for [`crate::glsink`]).
-//!
-//! The first `xdg` configure signals the sink's readiness handshake, and a frame
-//! that arrives before the surface is mappable is held and drawn then.
-
-use core::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
+//! Brings up an EGL display + GL ES 3 context on a `wl_egl_window` over the
+//! worker's `wl_surface`, builds the [`GlState`] for the negotiated layout, and
+//! presents each frame with `eglSwapBuffers`. The sink supplies a
+//! [`FramePresenter`] for the one per-sink step (a CUDA device->texture copy for
+//! [`crate::cudaglsink`], a `glTexSubImage2D` for [`crate::glsink`]).
 
 use alloc::boxed::Box;
-use alloc::string::String;
 
 use khronos_egl as egl;
-use smithay_client_toolkit::{
-    compositor::{CompositorHandler, CompositorState},
-    delegate_compositor, delegate_output, delegate_registry, delegate_xdg_shell,
-    delegate_xdg_window,
-    output::{OutputHandler, OutputState},
-    reexports::calloop::{
-        channel::{Channel, Event as ChanEvent},
-        EventLoop,
-    },
-    reexports::calloop_wayland_source::WaylandSource,
-    reexports::client::{
-        globals::registry_queue_init,
-        protocol::{wl_output, wl_surface},
-        Connection, Proxy, QueueHandle,
-    },
-    registry::{ProvidesRegistryState, RegistryState},
-    registry_handlers,
-    shell::{
-        xdg::{
-            window::{Window, WindowConfigure, WindowDecorations, WindowHandler},
-            XdgShell,
-        },
-        WaylandSurface,
-    },
-};
+use smithay_client_toolkit::reexports::client::{protocol::wl_surface, Connection, Proxy};
 use wayland_egl::WlEglSurface;
 
 use crate::glnv12::{GlMode, GlState};
-use crate::worker_ready::Handshake;
-use g2g_core::metrics::{monotonic_ns, LatencyHistogram};
+use crate::waylandwindow::{run_window, WindowParams, WindowRenderer, WorkerChannels};
 use g2g_core::{G2gError, HardwareError};
-
-/// Worker-thread command. `Frame` carries the sink's frame payload plus the
-/// source-side `arrival_ns` for latency and a one-shot `ack` the worker signals
-/// once the frame is presented.
-pub(crate) enum WorkerCmd<F> {
-    Frame {
-        frame: F,
-        arrival_ns: u64,
-        ack: tokio::sync::oneshot::Sender<()>,
-    },
-    Shutdown,
-}
 
 /// The per-sink half of the worker: which pixel layout to build the GL state
 /// for, and how to get one frame's pixels into it. The draw itself (program,
@@ -79,105 +31,52 @@ pub(crate) trait FramePresenter: 'static {
     fn present(&mut self, gl: &mut GlState, frame: &Self::Frame) -> Result<(), G2gError>;
 }
 
-/// Window geometry + identity the worker opens with.
-pub(crate) struct WindowParams {
-    pub(crate) width: u32,
-    pub(crate) height: u32,
-    pub(crate) title: String,
-    pub(crate) app_id: String,
-    /// Prefix for the worker's error lines (the sink's element name).
-    pub(crate) log_tag: &'static str,
-}
-
-/// The handles the sink shares with its worker: the frame channel plus the
-/// counters and readiness handshake the sink reads.
-pub(crate) struct WorkerChannels<F> {
-    pub(crate) rx: Channel<WorkerCmd<F>>,
-    pub(crate) presented: Arc<AtomicU64>,
-    pub(crate) latency: Arc<LatencyHistogram>,
-    pub(crate) ready: Arc<Handshake>,
-}
-
-/// Open the Wayland window + EGL context, build the GL state, and run the
-/// present loop until the sink sends `Shutdown` (or the compositor closes the
-/// window). Runs on the sink's worker thread and returns when the loop exits.
+/// Open the GL window and run the shared present loop until the sink sends
+/// `Shutdown` (or the compositor closes the window). Runs on the sink's worker
+/// thread and returns when the loop exits.
 pub(crate) fn run_gl_window<P: FramePresenter>(
     presenter: P,
     params: WindowParams,
     channels: WorkerChannels<P::Frame>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let WindowParams {
-        width,
-        height,
-        title,
-        app_id,
-        log_tag,
-    } = params;
-    let conn = Connection::connect_to_env()?;
-    let (globals, event_queue) = registry_queue_init(&conn)?;
-    let qh = event_queue.handle();
-
-    let mut event_loop: EventLoop<WindowWorker<P>> = EventLoop::try_new()?;
-    let loop_handle = event_loop.handle();
-    WaylandSource::new(conn.clone(), event_queue).insert(loop_handle.clone())?;
-
-    let compositor = CompositorState::bind(&globals, &qh)?;
-    let xdg_shell = XdgShell::bind(&globals, &qh)?;
-
-    let surface = compositor.create_surface(&qh);
-    let window = xdg_shell.create_window(surface, WindowDecorations::RequestServer, &qh);
-    window.set_title(&title);
-    window.set_app_id(&app_id);
-    window.set_min_size(Some((width, height)));
-    window.commit();
-
-    let (egl_window, gl) = EglWindow::new(&conn, window.wl_surface(), width, height)?;
-    // SAFETY: `gl` wraps the GL ES 3 context `EglWindow::new` made current on
-    // this thread.
-    let gl_state = unsafe { GlState::build(gl, width, height, presenter.mode()) }?;
-
-    let mut state = WindowWorker {
-        registry_state: RegistryState::new(&globals),
-        output_state: OutputState::new(&globals, &qh),
-        window,
-        qh: qh.clone(),
-        egl: egl_window,
-        gl: gl_state,
-        presenter,
-        log_tag,
-        configured: false,
-        exit: false,
-        ready: Some(channels.ready),
-        presented: channels.presented,
-        latency: channels.latency,
-        pending: None,
-    };
-
-    loop_handle.insert_source(
-        channels.rx,
-        |event, _, state: &mut WindowWorker<P>| match event {
-            ChanEvent::Msg(WorkerCmd::Frame {
-                frame,
-                arrival_ns,
-                ack,
-            }) => {
-                if state.configured {
-                    state.draw(frame, arrival_ns, ack);
-                } else {
-                    state.pending = Some((frame, arrival_ns, ack));
-                }
-            }
-            ChanEvent::Msg(WorkerCmd::Shutdown) | ChanEvent::Closed => {
-                state.exit = true;
-            }
+    run_window(
+        |conn, wl_surface, width, height| {
+            let (egl, gl) = EglWindow::new(conn, wl_surface, width, height)?;
+            // SAFETY: `gl` wraps the GL ES 3 context `EglWindow::new` made
+            // current on this thread.
+            let state = unsafe { GlState::build(gl, width, height, presenter.mode()) }?;
+            Ok(GlRenderer {
+                gl: state,
+                egl,
+                presenter,
+            })
         },
-    )?;
-
-    while !state.exit {
-        event_loop.dispatch(Some(Duration::from_millis(100)), &mut state)?;
-    }
-    Ok(())
+        params,
+        channels,
+    )
 }
+
+/// The GL half of the worker: the sink's upload + draw, then `eglSwapBuffers`.
+/// `gl` is declared before `egl` so the GL state is dropped while its context is
+/// still alive.
+struct GlRenderer<P: FramePresenter> {
+    gl: GlState,
+    egl: EglWindow,
+    presenter: P,
+}
+
+impl<P: FramePresenter> WindowRenderer for GlRenderer<P> {
+    type Frame = P::Frame;
+
+    fn present(&mut self, frame: &Self::Frame) -> Result<(), G2gError> {
+        self.presenter.present(&mut self.gl, frame)?;
+        self.egl.swap()
+    }
+}
+
+// =================================================================
+// EGL on a Wayland surface
+// =================================================================
 
 // =================================================================
 // EGL on a Wayland surface
@@ -294,142 +193,3 @@ impl Drop for EglWindow {
         let _ = self.egl.terminate(self.display);
     }
 }
-
-// =================================================================
-// Worker state + SCTK handlers
-// =================================================================
-
-struct WindowWorker<P: FramePresenter> {
-    registry_state: RegistryState,
-    output_state: OutputState,
-    window: Window,
-    qh: QueueHandle<WindowWorker<P>>,
-    egl: EglWindow,
-    gl: GlState,
-    presenter: P,
-    log_tag: &'static str,
-    configured: bool,
-    exit: bool,
-    ready: Option<Arc<Handshake>>,
-    presented: Arc<AtomicU64>,
-    latency: Arc<LatencyHistogram>,
-    /// Frame that arrived before the surface was mappable.
-    pending: Option<(P::Frame, u64, tokio::sync::oneshot::Sender<()>)>,
-}
-
-impl<P: FramePresenter> WindowWorker<P> {
-    /// Upload + draw one frame and present it. Signals `ack` after
-    /// `eglSwapBuffers` returns (compositor-paced backpressure).
-    fn draw(&mut self, frame: P::Frame, arrival_ns: u64, ack: tokio::sync::oneshot::Sender<()>) {
-        if let Err(e) = self.draw_inner(&frame) {
-            std::eprintln!("{} draw error: {e:?}", self.log_tag);
-            // Release the producer so a transient GPU error doesn't deadlock
-            // the pipeline; the frame just didn't paint.
-            let _ = ack.send(());
-            return;
-        }
-        self.presented.fetch_add(1, Ordering::Relaxed);
-        if arrival_ns != 0 {
-            let now = monotonic_ns();
-            if now >= arrival_ns {
-                self.latency.record(now - arrival_ns);
-            }
-        }
-        let _ = ack.send(());
-    }
-
-    fn draw_inner(&mut self, frame: &P::Frame) -> Result<(), G2gError> {
-        self.presenter.present(&mut self.gl, frame)?;
-        // Subscribe to the next frame callback (compositor pacing) and present.
-        let surface = self.window.wl_surface().clone();
-        surface.frame(&self.qh, surface.clone());
-        self.egl.swap()
-    }
-}
-
-impl<P: FramePresenter> CompositorHandler for WindowWorker<P> {
-    fn scale_factor_changed(
-        &mut self,
-        _: &Connection,
-        _: &QueueHandle<Self>,
-        _: &wl_surface::WlSurface,
-        _: i32,
-    ) {
-    }
-    fn transform_changed(
-        &mut self,
-        _: &Connection,
-        _: &QueueHandle<Self>,
-        _: &wl_surface::WlSurface,
-        _: wl_output::Transform,
-    ) {
-    }
-    fn frame(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: u32) {
-        // Compositor released the buffer; pacing is handled by the per-frame
-        // ack in `draw`, so nothing extra is needed here.
-    }
-    fn surface_enter(
-        &mut self,
-        _: &Connection,
-        _: &QueueHandle<Self>,
-        _: &wl_surface::WlSurface,
-        _: &wl_output::WlOutput,
-    ) {
-    }
-    fn surface_leave(
-        &mut self,
-        _: &Connection,
-        _: &QueueHandle<Self>,
-        _: &wl_surface::WlSurface,
-        _: &wl_output::WlOutput,
-    ) {
-    }
-}
-
-impl<P: FramePresenter> WindowHandler for WindowWorker<P> {
-    fn request_close(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &Window) {
-        self.exit = true;
-    }
-
-    fn configure(
-        &mut self,
-        _: &Connection,
-        _: &QueueHandle<Self>,
-        _: &Window,
-        _configure: WindowConfigure,
-        _serial: u32,
-    ) {
-        let was_first = !self.configured;
-        self.configured = true;
-        if was_first {
-            if let Some(ready) = self.ready.take() {
-                ready.notify();
-            }
-            if let Some((frame, arrival_ns, ack)) = self.pending.take() {
-                self.draw(frame, arrival_ns, ack);
-            }
-        }
-    }
-}
-
-impl<P: FramePresenter> OutputHandler for WindowWorker<P> {
-    fn output_state(&mut self) -> &mut OutputState {
-        &mut self.output_state
-    }
-    fn new_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
-    fn update_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
-    fn output_destroyed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
-}
-
-impl<P: FramePresenter> ProvidesRegistryState for WindowWorker<P> {
-    fn registry(&mut self) -> &mut RegistryState {
-        &mut self.registry_state
-    }
-    registry_handlers![OutputState,];
-}
-
-delegate_compositor!(@<P: FramePresenter> WindowWorker<P>);
-delegate_output!(@<P: FramePresenter> WindowWorker<P>);
-delegate_xdg_shell!(@<P: FramePresenter> WindowWorker<P>);
-delegate_xdg_window!(@<P: FramePresenter> WindowWorker<P>);
-delegate_registry!(@<P: FramePresenter> WindowWorker<P>);

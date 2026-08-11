@@ -512,8 +512,9 @@ unsafe fn htod_plane(
 /// The g2g memory-domain converter for a `(from, to)` pair, or `None` when g2g
 /// has none (the auto-plug then leaves the edge to fail loud). Covers the
 /// CUDA<->System pair: [`CudaDownload`] (`Cuda -> System`) and [`CudaUpload`]
-/// (`System -> Cuda`). The factory the M354 auto-plug calls; see
-/// [`auto_plug_cuda_converters`].
+/// (`System -> Cuda`), plus `Cuda -> WgpuTexture` through the zero-copy
+/// external-memory bridge where that is built in. The factory the M354 auto-plug
+/// calls; see [`auto_plug_cuda_converters`].
 pub fn cuda_domain_converter(from: MemoryDomainKind, to: MemoryDomainKind) -> Option<GraphNode> {
     match (from, to) {
         (MemoryDomainKind::Cuda, MemoryDomainKind::System) => {
@@ -521,6 +522,12 @@ pub fn cuda_domain_converter(from: MemoryDomainKind, to: MemoryDomainKind) -> Op
         }
         (MemoryDomainKind::System, MemoryDomainKind::Cuda) => {
             Some(GraphNode::element(CudaUpload::new()))
+        }
+        // Keeps a decoded NVDEC frame on the GPU all the way to a wgpu consumer
+        // (preprocess, present), instead of the PCIe download a System hop costs.
+        #[cfg(all(target_os = "linux", feature = "cuda-wgpu"))]
+        (MemoryDomainKind::Cuda, MemoryDomainKind::WgpuTexture) => {
+            Some(GraphNode::element(crate::cudatowgpu::CudaToWgpu::new()))
         }
         _ => None,
     }

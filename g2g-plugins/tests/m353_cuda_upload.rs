@@ -6,8 +6,6 @@
 
 #![cfg(all(target_os = "linux", feature = "cuda"))]
 
-#[cfg(feature = "nvenc")]
-#[cfg(feature = "nvenc")]
 use g2g_core::element::PushOutcome;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{

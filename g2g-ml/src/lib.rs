@@ -66,10 +66,12 @@ pub mod wgpupreprocess;
 #[cfg(feature = "wgpu")]
 pub mod wgpuinfer;
 
-// CudaToWgpu: bridges NVDEC CUDA NV12 to WgpuPreprocess's surface-import path
-// via g2g-plugins's Vulkan/CUDA external-memory interop. Linux + NVIDIA.
+// CudaToWgpu: bridges NVDEC CUDA NV12 to WgpuPreprocess's surface-import path.
+// It lives with the Vulkan/CUDA external-memory interop it drives (and with the
+// launch registry that auto-plugs it); re-exported here for its ML consumers.
+// Linux + NVIDIA.
 #[cfg(all(target_os = "linux", feature = "cuda-wgpu"))]
-pub mod cudatowgpu;
+pub use g2g_plugins::cudatowgpu;
 
 // Pure-Rust Burn inference element (DESIGN.md §5.2): a linear layer run on
 // burn's wgpu backend, the no-C++ counterpart of OrtInference. The module is

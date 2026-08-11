@@ -230,6 +230,11 @@ pub fn default_registry() -> Registry {
     // (M421), so a decoder fed un-access-unit-aligned input (e.g. one MPEG-TS PES
     // that is not one coded picture) does not mis-parse.
     reg.set_parser_provider(decode_parser_provider);
+    // A parsed pipeline whose producer and consumer disagree on a memory domain
+    // gets the bridge spliced in (M354): `nvdec ! wgpusink` keeps the frame on
+    // the GPU, `nvdec ! waylandsink` downloads it.
+    #[cfg(all(target_os = "linux", feature = "cuda"))]
+    reg.set_domain_converter(crate::cuda::cuda_domain_converter);
 
     // Sources. The output caps are the autoplug `decodebin` input; the parser
     // only calls the constructor and applies properties.
@@ -1256,9 +1261,17 @@ fn register_autoplug_candidates(reg: &mut Registry) {
 /// `fakesink` (always present), which keeps a tutorial line running headless.
 fn register_aliases(reg: &mut Registry) {
     // Auto sinks: prefer a real display / audio sink, fall back to fakesink.
+    // `wgpusink` leads: it is the only one that presents a GPU-resident frame
+    // without a round trip through system memory.
     reg.register_alias(
         "autovideosink",
-        &["waylandsink", "kmssink", "metalvideosink", "fakesink"],
+        &[
+            "wgpusink",
+            "waylandsink",
+            "kmssink",
+            "metalvideosink",
+            "fakesink",
+        ],
     );
     reg.register_alias(
         "autoaudiosink",
@@ -1421,6 +1434,7 @@ pub static FEATURE_GATED_ELEMENTS: &[FeatureGatedElement] = &{
         "dmabuftowgpu" => "dmabuf-wgpu" on "linux";
         "wgputodmabuf" => "dmabuf-wgpu" on "linux";
         "waylandsink" => "wayland-sink" on "linux";
+        "wgpusink" => "wgpu-present" on "linux";
         "kmssink" => "kms-sink" on "linux";
         "alsasink" => "alsa-sink" on "linux";
         "alsasrc" => "alsa-src" on "linux";
@@ -1928,6 +1942,14 @@ fn register_feature_gated(reg: &mut Registry) {
     reg.register_launch(LaunchFactory::of::<crate::glsink::GlSink>(
         "glimagesink",
         || Box::new(crate::glsink::GlSink::new()),
+    ));
+    // Windowed wgpu display sink: it takes GPU-resident frames as they are, so a
+    // decoder that keeps them on the GPU reaches the screen with no upload. Its
+    // NV12 + RGBA pad templates let decodebin auto-plug onto it.
+    #[cfg(all(target_os = "linux", feature = "wgpu-present"))]
+    reg.register_launch(LaunchFactory::of::<crate::wgpupresent::WgpuPresentSink>(
+        "wgpusink",
+        || Box::new(crate::wgpupresent::WgpuPresentSink::new()),
     ));
     // WebRTC WHIP egress; the `location` property targets the endpoint. The URL
     // defaults empty (set it via `webrtcsink location=...`); publishing starts

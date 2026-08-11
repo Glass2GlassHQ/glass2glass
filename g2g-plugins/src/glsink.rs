@@ -56,7 +56,8 @@ use smithay_client_toolkit::reexports::calloop::channel::{channel, Sender as Cal
 
 use crate::clock::wait_to_present;
 use crate::glnv12::{GlMode, GlState};
-use crate::glwindow::{run_gl_window, FramePresenter, WindowParams, WorkerChannels, WorkerCmd};
+use crate::glwindow::{run_gl_window, FramePresenter};
+use crate::waylandwindow::{WindowParams, WorkerChannels, WorkerCmd};
 use crate::worker_ready::Handshake;
 use g2g_core::element::QosMessage;
 use g2g_core::metrics::{monotonic_ns, LatencyHistogram, LatencySnapshot};
@@ -356,6 +357,7 @@ impl AsyncElement for GlSink {
             height: h,
             title: self.title.clone(),
             app_id: self.app_id.clone(),
+            fullscreen: false,
             log_tag: WORKER_NAME,
         };
 

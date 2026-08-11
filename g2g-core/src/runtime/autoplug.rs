@@ -1158,6 +1158,11 @@ mod factory {
         /// `None` (the default) decodes directly, preserving the prior behaviour
         /// for registries that do not set it.
         parser_provider: Option<fn(&Caps) -> Option<&'static str>>,
+        /// The memory-domain converter factory `parse_launch` splices with (M354,
+        /// M1017). The converter elements live outside this crate, so the registry
+        /// carries the factory; `None` (the default) leaves a domain mismatch to
+        /// fail loud at negotiation, as it did before.
+        domain_converter: Option<fn(MemoryDomainKind, MemoryDomainKind) -> Option<GraphNode>>,
     }
 
     impl Registry {
@@ -1307,6 +1312,26 @@ mod factory {
         ) -> &mut Self {
             self.parser_provider = Some(provider);
             self
+        }
+
+        /// Set the memory-domain converter factory a parsed pipeline is spliced
+        /// with (M1017): after the graph is built, an edge whose producer and
+        /// consumer share no memory domain gets `factory(from, to)` inserted, so a
+        /// text pipeline reaches a GPU sink from a GPU decoder without naming the
+        /// bridge element. Returns `&mut self` to chain calls.
+        pub fn set_domain_converter(
+            &mut self,
+            factory: fn(MemoryDomainKind, MemoryDomainKind) -> Option<GraphNode>,
+        ) -> &mut Self {
+            self.domain_converter = Some(factory);
+            self
+        }
+
+        /// The configured domain-converter factory, if any.
+        pub fn domain_converter(
+            &self,
+        ) -> Option<fn(MemoryDomainKind, MemoryDomainKind) -> Option<GraphNode>> {
+            self.domain_converter
         }
 
         /// The launch name of the re-framing parser `decodebin` prepends ahead of

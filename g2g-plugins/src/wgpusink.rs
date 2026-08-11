@@ -30,19 +30,20 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use g2g_core::element::QosMessage;
+use g2g_core::memory::{DomainSet, MemoryDomainKind};
 use g2g_core::{
-    AsyncElement, BusHandle, Caps, CapsConstraint, ClockSync, ConfigureOutcome, G2gError,
-    MemoryDomain, OutputSink, PipelinePacket, PresentationPacer, PropError, PropValue,
-    PropertySpec, PACING_PROPERTIES,
+    AsyncElement, BusHandle, Caps, CapsConstraint, CapsSet, ClockSync, ConfigureOutcome, Dim,
+    G2gError, Interlace, MemoryDomain, OutputSink, PipelinePacket, PresentationPacer, PropError,
+    PropValue, PropertySpec, Rate, RawVideoFormat, PACING_PROPERTIES,
 };
 
 use crate::clock::wait_to_present;
-use crate::gpu::{gpu_err, texture_of, GpuContext};
+use crate::gpu::{gpu_err, texture_layout, texture_of, GpuContext, WgpuTextureLayout};
 
-/// Fullscreen-triangle blit: sample the source texture and write the target. The
+/// Fullscreen-triangle vertex stage, shared by both fragment stages below. The
 /// UV flips Y so a top-left-origin source (Vello / video) lands top-left on the
 /// target.
-const BLIT_SHADER: &str = r#"
+const VERTEX_STAGE: &str = r#"
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
     @location(0) uv: vec2<f32>,
@@ -61,13 +62,50 @@ fn vs(@builtin(vertex_index) vid: u32) -> VsOut {
     out.uv = vec2<f32>((xy.x + 1.0) * 0.5, 1.0 - (xy.y + 1.0) * 0.5);
     return out;
 }
+"#;
 
+/// Blit an already-colour-converted texture: one filtered sample per pixel.
+const FRAGMENT_RGBA: &str = r#"
 @group(0) @binding(0) var src_tex: texture_2d<f32>;
 @group(0) @binding(1) var src_smp: sampler;
 
 @fragment
 fn fs(in: VsOut) -> @location(0) vec4<f32> {
     return textureSample(src_tex, src_smp, in.uv);
+}
+"#;
+
+/// Blit a packed-NV12 R8Uint plane (`width x height*3/2`: Y rows, then
+/// interleaved CbCr), converting BT.601 limited-range YCbCr -> RGB with the same
+/// coefficients the GL sink's shader uses. A uint texture is not filterable, so
+/// this fetches texels instead of sampling; the picture height comes from the
+/// texture (the packed plane is exactly 3/2 of it).
+const FRAGMENT_NV12: &str = r#"
+@group(0) @binding(0) var nv12_tex: texture_2d<u32>;
+
+fn plane_value(x: u32, y: u32) -> f32 {
+    return f32(textureLoad(nv12_tex, vec2<u32>(x, y), 0).r) / 255.0;
+}
+
+@fragment
+fn fs(in: VsOut) -> @location(0) vec4<f32> {
+    let packed = textureDimensions(nv12_tex);
+    let luma_height = packed.y * 2u / 3u;
+    let x = min(u32(in.uv.x * f32(packed.x)), packed.x - 1u);
+    let y = min(u32(in.uv.y * f32(luma_height)), luma_height - 1u);
+
+    let luma = 1.1643 * (plane_value(x, y) - 0.0625);
+    let chroma_x = (x / 2u) * 2u;
+    let chroma_y = luma_height + y / 2u;
+    let cb = plane_value(chroma_x, chroma_y) - 0.5;
+    let cr = plane_value(chroma_x + 1u, chroma_y) - 0.5;
+
+    return vec4<f32>(
+        luma + 1.5958 * cr,
+        luma - 0.3917 * cb - 0.8129 * cr,
+        luma + 2.0170 * cb,
+        1.0,
+    );
 }
 "#;
 
@@ -90,6 +128,187 @@ fn offscreen_texture(ctx: &GpuContext, width: u32, height: u32) -> wgpu::Texture
             | wgpu::TextureUsages::TEXTURE_BINDING,
         view_formats: &[],
     })
+}
+
+/// A blit pipeline plus the bind group layout its fragment stage expects.
+#[derive(Debug)]
+struct BlitPipeline {
+    pipeline: wgpu::RenderPipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
+}
+
+impl BlitPipeline {
+    /// Build the pipeline for one source layout: `fragment_stage` is appended to
+    /// the shared vertex stage, and the bind group layout matches the bindings
+    /// that stage declares (a filtered colour texture + sampler for RGBA, a
+    /// non-filterable uint texture alone for packed NV12).
+    fn build(
+        device: &wgpu::Device,
+        target_format: wgpu::TextureFormat,
+        layout: WgpuTextureLayout,
+        fragment_stage: &str,
+    ) -> Self {
+        let source = alloc::string::String::from(VERTEX_STAGE) + fragment_stage;
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("wgpu-sink-blit"),
+            source: wgpu::ShaderSource::Wgsl(source.into()),
+        });
+        let texture_entry = wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: match layout {
+                    WgpuTextureLayout::Rgba => wgpu::TextureSampleType::Float { filterable: true },
+                    WgpuTextureLayout::PackedNv12 => wgpu::TextureSampleType::Uint,
+                },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        };
+        let sampler_entry = wgpu::BindGroupLayoutEntry {
+            binding: 1,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+            count: None,
+        };
+        let entries: &[wgpu::BindGroupLayoutEntry] = match layout {
+            WgpuTextureLayout::Rgba => &[texture_entry, sampler_entry],
+            WgpuTextureLayout::PackedNv12 => &[texture_entry],
+        };
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("wgpu-sink-bgl"),
+            entries,
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("wgpu-sink-layout"),
+            bind_group_layouts: &[Some(&bind_group_layout)],
+            immediate_size: 0,
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("wgpu-sink-pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target_format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        Self {
+            pipeline,
+            bind_group_layout,
+        }
+    }
+}
+
+/// Pixel format + geometry of the frames the sink was configured for.
+#[derive(Debug, Clone, Copy)]
+struct SourceLayout {
+    layout: WgpuTextureLayout,
+    width: u32,
+    height: u32,
+}
+
+impl SourceLayout {
+    /// Texture format + size a system-memory frame of this layout uploads into,
+    /// and its packed row stride in bytes.
+    fn upload_geometry(&self) -> (wgpu::TextureFormat, u32, u32, u32) {
+        match self.layout {
+            WgpuTextureLayout::Rgba => (
+                wgpu::TextureFormat::Rgba8Unorm,
+                self.width,
+                self.height,
+                self.width * 4,
+            ),
+            WgpuTextureLayout::PackedNv12 => (
+                wgpu::TextureFormat::R8Uint,
+                self.width,
+                packed_nv12_height(self.height),
+                self.width,
+            ),
+        }
+    }
+}
+
+/// Rows an NV12 frame of `height` occupies once packed into a single plane: the
+/// luma rows plus the half-height interleaved chroma rows.
+fn packed_nv12_height(height: u32) -> u32 {
+    height + height / 2
+}
+
+/// The sink's accepted layouts: NV12 (what the decoders produce) and RGBA (what
+/// the GPU overlay / decode elements produce), at any geometry. Shared with the
+/// windowed present sink, which drives this renderer.
+pub(crate) fn accepted_caps() -> CapsSet {
+    CapsSet::from_alternatives(Vec::from([
+        any_geometry(RawVideoFormat::Nv12),
+        any_geometry(RawVideoFormat::Rgba8),
+    ]))
+}
+
+fn any_geometry(format: RawVideoFormat) -> Caps {
+    Caps::RawVideo {
+        format,
+        width: Dim::Any,
+        height: Dim::Any,
+        framerate: Rate::Any,
+        interlace: Interlace::Any,
+    }
+}
+
+/// The source layout the negotiated caps settle on, rejecting anything the blit
+/// pipelines cannot read.
+fn source_layout(absolute_caps: &Caps) -> Result<SourceLayout, G2gError> {
+    let Caps::RawVideo {
+        format,
+        width: Dim::Fixed(width),
+        height: Dim::Fixed(height),
+        ..
+    } = absolute_caps
+    else {
+        return Err(G2gError::CapsMismatch);
+    };
+    let layout = match format {
+        RawVideoFormat::Nv12 => WgpuTextureLayout::PackedNv12,
+        RawVideoFormat::Rgba8 => WgpuTextureLayout::Rgba,
+        _ => return Err(G2gError::CapsMismatch),
+    };
+    // NV12 chroma is subsampled: odd geometry has no well-defined plane.
+    if layout == WgpuTextureLayout::PackedNv12 && (width % 2 != 0 || height % 2 != 0) {
+        return Err(G2gError::CapsMismatch);
+    }
+    if *width == 0 || *height == 0 {
+        return Err(G2gError::CapsMismatch);
+    }
+    Ok(SourceLayout {
+        layout,
+        width: *width,
+        height: *height,
+    })
+}
+
+/// The picture size these caps settle on, rejecting anything the blit pipelines
+/// cannot read. The windowed present sink checks this before opening a window.
+#[cfg(all(target_os = "linux", feature = "wgpu-present"))]
+pub(crate) fn source_geometry(absolute_caps: &Caps) -> Result<(u32, u32), G2gError> {
+    let source = source_layout(absolute_caps)?;
+    Ok((source.width, source.height))
 }
 
 /// Where a [`WgpuSink`] presents.
@@ -123,10 +342,18 @@ enum Target {
 /// ```
 pub struct WgpuSink {
     ctx: GpuContext,
-    pipeline: wgpu::RenderPipeline,
-    bind_group_layout: wgpu::BindGroupLayout,
+    /// One blit pipeline per source layout; which one runs is decided per frame
+    /// from the texture, so a sink fed RGBA and NV12 in turn needs no rebuild.
+    rgba_blit: BlitPipeline,
+    nv12_blit: BlitPipeline,
     sampler: wgpu::Sampler,
     target: Target,
+    /// Pixel format + geometry negotiated for the incoming frames, which a
+    /// system-memory frame needs to be uploaded (a GPU frame carries its own).
+    source: Option<SourceLayout>,
+    /// Texture the system-memory upload path writes into, allocated on the first
+    /// such frame and reused.
+    upload: Option<wgpu::Texture>,
     configured: bool,
     presented: u64,
     /// PTS pacing + QoS late-drop: idle until the runner hands over a clock, and
@@ -184,61 +411,6 @@ impl WgpuSink {
 
     fn build(ctx: GpuContext, target_format: wgpu::TextureFormat, target: Target) -> Self {
         let device = &ctx.device;
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("wgpu-sink-blit"),
-            source: wgpu::ShaderSource::Wgsl(BLIT_SHADER.into()),
-        });
-        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("wgpu-sink-bgl"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-            ],
-        });
-        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("wgpu-sink-layout"),
-            bind_group_layouts: &[Some(&bind_group_layout)],
-            immediate_size: 0,
-        });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("wgpu-sink-pipeline"),
-            layout: Some(&layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs"),
-                compilation_options: Default::default(),
-                buffers: &[],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: target_format,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("wgpu-sink-sampler"),
             mag_filter: wgpu::FilterMode::Linear,
@@ -246,11 +418,23 @@ impl WgpuSink {
             ..Default::default()
         });
         Self {
+            rgba_blit: BlitPipeline::build(
+                device,
+                target_format,
+                WgpuTextureLayout::Rgba,
+                FRAGMENT_RGBA,
+            ),
+            nv12_blit: BlitPipeline::build(
+                device,
+                target_format,
+                WgpuTextureLayout::PackedNv12,
+                FRAGMENT_NV12,
+            ),
             ctx,
-            pipeline,
-            bind_group_layout,
             sampler,
             target,
+            source: None,
+            upload: None,
             configured: false,
             presented: 0,
             pacer: PresentationPacer::new(),
@@ -330,26 +514,108 @@ impl WgpuSink {
         self.pacer.late_dropped()
     }
 
-    /// Blit `src` onto the target. For a surface target, acquires and presents
-    /// the swapchain image; for offscreen, renders into the owned texture.
-    fn present(&mut self, src: &wgpu::Texture) -> Result<(), G2gError> {
+    /// Present one frame's pixels: a `WgpuTexture`-domain frame is blitted from
+    /// the producer's own texture, a system-memory frame is uploaded to the
+    /// sink's own texture first. The path [`process`](AsyncElement::process) and
+    /// the windowed present sink share, past pacing.
+    pub fn present_frame(&mut self, domain: &MemoryDomain) -> Result<(), G2gError> {
+        match domain {
+            MemoryDomain::WgpuTexture(owned) => {
+                // A frame from a different GPU producer (foreign keep-alive type,
+                // or a format no blit here samples) is not presentable.
+                let texture = texture_of(owned).ok_or(G2gError::UnsupportedDomain)?;
+                let layout = texture_layout(texture).ok_or(G2gError::UnsupportedDomain)?;
+                // The texture belongs to the frame; the blit only reads it, but
+                // `present` needs `&mut self`, so clone the handle (cheap: wgpu
+                // handles are reference-counted).
+                let texture = texture.clone();
+                self.present(&texture, layout)
+            }
+            _ => {
+                let slice = domain
+                    .as_system_slice()
+                    .ok_or(G2gError::UnsupportedDomain)?;
+                self.upload_system(slice)
+            }
+        }
+    }
+
+    /// Upload a packed system-memory frame into the sink's own texture in the
+    /// negotiated layout, then blit it.
+    fn upload_system(&mut self, bytes: &[u8]) -> Result<(), G2gError> {
+        let source = self.source.ok_or(G2gError::NotConfigured)?;
+        let (format, width, rows, bytes_per_row) = source.upload_geometry();
+        if bytes.len() < (bytes_per_row as usize) * (rows as usize) {
+            return Err(G2gError::CapsMismatch);
+        }
+        let size = wgpu::Extent3d {
+            width,
+            height: rows,
+            depth_or_array_layers: 1,
+        };
+        let texture = match &self.upload {
+            Some(texture) => texture.clone(),
+            None => {
+                let texture = self.ctx.device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("wgpu-sink-upload"),
+                    size,
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format,
+                    usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                });
+                self.upload = Some(texture.clone());
+                texture
+            }
+        };
+        self.ctx.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            bytes,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(bytes_per_row),
+                rows_per_image: Some(rows),
+            },
+            size,
+        );
+        self.present(&texture, source.layout)
+    }
+
+    /// Blit `src` onto the target with the pipeline for its `layout`. For a
+    /// surface target, acquires and presents the swapchain image; for offscreen,
+    /// renders into the owned texture.
+    fn present(&mut self, src: &wgpu::Texture, layout: WgpuTextureLayout) -> Result<(), G2gError> {
+        let blit = match layout {
+            WgpuTextureLayout::Rgba => &self.rgba_blit,
+            WgpuTextureLayout::PackedNv12 => &self.nv12_blit,
+        };
         let src_view = src.create_view(&wgpu::TextureViewDescriptor::default());
+        let texture_binding = wgpu::BindGroupEntry {
+            binding: 0,
+            resource: wgpu::BindingResource::TextureView(&src_view),
+        };
+        let sampler_binding = wgpu::BindGroupEntry {
+            binding: 1,
+            resource: wgpu::BindingResource::Sampler(&self.sampler),
+        };
+        let entries: &[wgpu::BindGroupEntry] = match layout {
+            WgpuTextureLayout::Rgba => &[texture_binding, sampler_binding],
+            WgpuTextureLayout::PackedNv12 => &[texture_binding],
+        };
         let bind_group = self
             .ctx
             .device
             .create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("wgpu-sink-bg"),
-                layout: &self.bind_group_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&src_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Sampler(&self.sampler),
-                    },
-                ],
+                layout: &blit.bind_group_layout,
+                entries,
             });
 
         // Acquire the destination view. For a surface, hold the SurfaceTexture
@@ -404,7 +670,7 @@ impl WgpuSink {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_pipeline(&self.pipeline);
+            pass.set_pipeline(&blit.pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
             pass.draw(0..3, 0..1);
         }
@@ -499,14 +765,29 @@ impl AsyncElement for WgpuSink {
         Ok(upstream_caps.clone())
     }
 
+    /// RGBA or NV12, geometry open (the producer fixates it), whichever memory
+    /// domain the frames arrive in.
     fn caps_constraint_as_sink(&self) -> CapsConstraint<'_> {
-        // The pixel caps are whatever the upstream GPU element produced (RGBA);
-        // what this sink really requires is the WgpuTexture memory domain, which
-        // caps do not describe, so it is checked at process() time.
-        CapsConstraint::AcceptsAny
+        CapsConstraint::Accepts(accepted_caps())
     }
 
-    fn configure_pipeline(&mut self, _absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+    /// A GPU texture is blitted where it lies; system memory is uploaded. Any
+    /// other domain (a CUDA frame, say) needs a converter spliced ahead, and
+    /// declaring this is what makes the M354 auto-plug do it.
+    fn input_domains(&self) -> DomainSet {
+        DomainSet::only(MemoryDomainKind::WgpuTexture).with(MemoryDomainKind::System)
+    }
+
+    fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        let source = source_layout(absolute_caps)?;
+        // A geometry or format change invalidates the upload texture allocated
+        // for the old one.
+        if self.source.map(|s| (s.layout, s.width, s.height))
+            != Some((source.layout, source.width, source.height))
+        {
+            self.upload = None;
+        }
+        self.source = Some(source);
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
     }
@@ -556,13 +837,7 @@ impl AsyncElement for WgpuSink {
                     if !wait_to_present(paced).await {
                         return Ok(());
                     }
-                    let MemoryDomain::WgpuTexture(owned) = &frame.domain else {
-                        return Err(G2gError::UnsupportedDomain);
-                    };
-                    // A frame from a different GPU producer (foreign keep-alive type)
-                    // is not presentable by this sink.
-                    let texture = texture_of(owned).ok_or(G2gError::UnsupportedDomain)?;
-                    self.present(texture)?;
+                    self.present_frame(&frame.domain)?;
                 }
                 // Track the playback segment so PTS maps to running time (correct
                 // across a seek), and re-anchor after a seek flush.
@@ -758,6 +1033,211 @@ mod tests {
             );
         }
         assert_eq!(sink.presented_count(), 1);
+    }
+
+    /// Caps for a `w` x `h` frame in `format`, the shape negotiation hands the
+    /// sink.
+    fn caps(format: g2g_core::RawVideoFormat, w: u32, h: u32) -> Caps {
+        Caps::RawVideo {
+            format,
+            width: g2g_core::Dim::Fixed(w),
+            height: g2g_core::Dim::Fixed(h),
+            framerate: g2g_core::Rate::Any,
+            interlace: g2g_core::Interlace::Any,
+        }
+    }
+
+    /// A `w` x `h` NV12 frame, BT.601 limited-range: top half red, bottom half
+    /// blue. Packed as the sink expects (Y rows, then interleaved CbCr rows).
+    fn nv12_red_over_blue(w: u32, h: u32) -> Vec<u8> {
+        const RED: (u8, u8, u8) = (81, 90, 240);
+        const BLUE: (u8, u8, u8) = (41, 240, 110);
+        let mut bytes = Vec::new();
+        for y in 0..h {
+            let luma = if y < h / 2 { RED.0 } else { BLUE.0 };
+            bytes.extend(core::iter::repeat_n(luma, w as usize));
+        }
+        for y in 0..h / 2 {
+            let (_, cb, cr) = if y < h / 4 { RED } else { BLUE };
+            for _ in 0..w / 2 {
+                bytes.extend_from_slice(&[cb, cr]);
+            }
+        }
+        bytes
+    }
+
+    /// A system-memory frame carrying `bytes`.
+    fn system_frame(bytes: Vec<u8>) -> Frame {
+        Frame::new(
+            MemoryDomain::System(g2g_core::memory::SystemSlice::from_boxed(
+                bytes.into_boxed_slice(),
+            )),
+            FrameTiming::default(),
+            0,
+        )
+    }
+
+    /// Assert `out` (packed RGBA8, `w` wide) is red on top and blue at the
+    /// bottom, the pattern both NV12 fixtures encode.
+    fn assert_red_over_blue(out: &[u8], w: u32, h: u32) {
+        let px = |x: u32, y: u32| {
+            let i = ((y * w + x) * 4) as usize;
+            [out[i], out[i + 1], out[i + 2]]
+        };
+        let top = px(0, 0);
+        assert!(
+            top[0] > 230 && top[1] < 25 && top[2] < 25,
+            "top rows convert to red: {top:?}"
+        );
+        let bottom = px(0, h - 1);
+        assert!(
+            bottom[2] > 230 && bottom[0] < 25 && bottom[1] < 25,
+            "bottom rows convert to blue: {bottom:?}"
+        );
+    }
+
+    /// System-memory RGBA in: uploaded to the sink's own texture and blitted,
+    /// orientation preserved.
+    #[tokio::test]
+    async fn system_rgba_frame_is_uploaded_and_presented() {
+        let Some(ctx) = shared_ctx().await else {
+            std::eprintln!("no wgpu adapter; skipping WgpuSink system RGBA test");
+            return;
+        };
+        let (w, h) = (4u32, 4u32);
+        let mut pixels = Vec::new();
+        for y in 0..h {
+            for _ in 0..w {
+                if y < h / 2 {
+                    pixels.extend_from_slice(&[255, 0, 0, 255]);
+                } else {
+                    pixels.extend_from_slice(&[0, 0, 255, 255]);
+                }
+            }
+        }
+        let mut sink = WgpuSink::offscreen(ctx.clone(), w, h);
+        sink.configure_pipeline(&caps(g2g_core::RawVideoFormat::Rgba8, w, h))
+            .unwrap();
+        sink.process(
+            PipelinePacket::DataFrame(system_frame(pixels)),
+            &mut NullSink,
+        )
+        .await
+        .unwrap();
+
+        assert_red_over_blue(&sink.read_target().unwrap(), w, h);
+        assert_eq!(sink.presented_count(), 1);
+    }
+
+    /// System-memory NV12 in: uploaded as the packed plane and converted to RGB
+    /// by the sink's shader (a CPU `videoconvert` would be the alternative).
+    #[tokio::test]
+    async fn system_nv12_frame_is_converted_on_the_gpu() {
+        let Some(ctx) = shared_ctx().await else {
+            std::eprintln!("no wgpu adapter; skipping WgpuSink system NV12 test");
+            return;
+        };
+        let (w, h) = (8u32, 8u32);
+        let mut sink = WgpuSink::offscreen(ctx.clone(), w, h);
+        sink.configure_pipeline(&caps(g2g_core::RawVideoFormat::Nv12, w, h))
+            .unwrap();
+        sink.process(
+            PipelinePacket::DataFrame(system_frame(nv12_red_over_blue(w, h))),
+            &mut NullSink,
+        )
+        .await
+        .unwrap();
+
+        assert_red_over_blue(&sink.read_target().unwrap(), w, h);
+        assert_eq!(sink.presented_count(), 1);
+    }
+
+    /// The zero-copy input the CUDA / GPU-decode bridges emit: an R8Uint packed
+    /// NV12 texture already on the device. It is sampled where it lies, and comes
+    /// out pixel-identical to the same bytes uploaded from system memory.
+    #[tokio::test]
+    async fn packed_nv12_texture_presents_without_an_upload() {
+        use crate::gpu::WgpuNv12Texture;
+
+        let Some(ctx) = shared_ctx().await else {
+            std::eprintln!("no wgpu adapter; skipping WgpuSink NV12 texture test");
+            return;
+        };
+        let (w, h) = (8u32, 8u32);
+        let bytes = nv12_red_over_blue(w, h);
+        let nv12_caps = caps(g2g_core::RawVideoFormat::Nv12, w, h);
+
+        // The GPU-resident frame: one R8Uint plane of w x (h * 3/2).
+        let packed_rows = h + h / 2;
+        let texture = ctx.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("test-nv12"),
+            size: wgpu::Extent3d {
+                width: w,
+                height: packed_rows,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Uint,
+            usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        ctx.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &bytes,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(w),
+                rows_per_image: Some(packed_rows),
+            },
+            wgpu::Extent3d {
+                width: w,
+                height: packed_rows,
+                depth_or_array_layers: 1,
+            },
+        );
+        let frame = Frame::new(
+            MemoryDomain::WgpuTexture(OwnedWgpuTexture::new(
+                w,
+                h,
+                alloc::sync::Arc::new(WgpuNv12Texture::new(
+                    ctx.device.clone(),
+                    ctx.queue.clone(),
+                    texture,
+                )),
+            )),
+            FrameTiming::default(),
+            0,
+        );
+
+        let mut sink = WgpuSink::offscreen(ctx.clone(), w, h);
+        sink.configure_pipeline(&nv12_caps).unwrap();
+        sink.process(PipelinePacket::DataFrame(frame), &mut NullSink)
+            .await
+            .unwrap();
+        let from_gpu = sink.read_target().unwrap();
+        assert_red_over_blue(&from_gpu, w, h);
+
+        let mut cpu_sink = WgpuSink::offscreen(ctx.clone(), w, h);
+        cpu_sink.configure_pipeline(&nv12_caps).unwrap();
+        cpu_sink
+            .process(
+                PipelinePacket::DataFrame(system_frame(bytes)),
+                &mut NullSink,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            from_gpu,
+            cpu_sink.read_target().unwrap(),
+            "the zero-copy texture path renders the same pixels as the upload path"
+        );
     }
 
     /// A clock whose `now_ns` the test drives by hand.

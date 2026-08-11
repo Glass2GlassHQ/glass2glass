@@ -306,6 +306,11 @@ fn host_test_features(c: &Capabilities) -> Vec<&'static str> {
         f.push("vello-overlay");
         f.push("kms-sink");
     }
+    // The windowed wgpu sink needs both halves: a compositor to open a window on
+    // and a GPU to render with.
+    if c.wayland && c.gpu_drm {
+        f.push("wgpu-present");
+    }
     if c.v4l2 {
         f.push("v4l2");
     }
@@ -413,6 +418,11 @@ fn host_launch_features(c: &Capabilities) -> Vec<LaunchFeature> {
         lf("wayland-sink", c.wayland, "needs wayland-devel"),
         lf("kms-sink", c.gpu_drm, "needs a DRM render node (/dev/dri)"),
         lf("wgpu-sink", c.gpu_drm, "needs a GPU render node (/dev/dri)"),
+        lf(
+            "wgpu-present",
+            c.wayland && c.gpu_drm,
+            "needs wayland-devel + a GPU render node (/dev/dri)",
+        ),
         lf(
             "vello-overlay",
             c.gpu_drm,

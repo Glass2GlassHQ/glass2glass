@@ -1474,11 +1474,25 @@ pub fn parse_launch(registry: &Registry, pipeline: &str) -> Result<Graph<GraphNo
         // URI; a hook returns Ok(None) to decline a container it does not parse.
         for hook in registry.playbin_hooks() {
             if let Some(graph) = hook(registry, uri)? {
-                return Ok(graph);
+                return Ok(splice_domain_converters(registry, graph));
             }
         }
     }
-    build_graph(registry, chains)
+    Ok(splice_domain_converters(
+        registry,
+        build_graph(registry, chains)?,
+    ))
+}
+
+/// Splice memory-domain converters into a just-parsed graph (M1017), where the
+/// registry carries a factory: a text pipeline that links a GPU decoder to a sink
+/// in another domain gets the bridge (or the download) it needs without naming
+/// it. A no-op when the domains already agree, or when no factory is registered.
+fn splice_domain_converters(registry: &Registry, graph: Graph<GraphNode>) -> Graph<GraphNode> {
+    match registry.domain_converter() {
+        Some(factory) => crate::runtime::auto_plug_domain_converters(graph, &factory),
+        None => graph,
+    }
 }
 
 /// The `uri=` of a pipeline that is a single bare `playbin uri=X` element (and

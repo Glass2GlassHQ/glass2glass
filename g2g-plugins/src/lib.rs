@@ -142,6 +142,10 @@ pub mod videoscale;
 pub mod wgpucompositor;
 #[cfg(feature = "wgpu-sink")]
 pub mod wgpusink;
+// Windowed wgpu display sink (`wgpusink` on a launch line): owns an
+// xdg_toplevel, builds the wgpu::Surface over it, and drives WgpuSink on it.
+#[cfg(all(target_os = "linux", feature = "wgpu-present"))]
+pub mod wgpupresent;
 // Subtitle cue parsing (SRT / WebVTT) and the embedded bitmap font, both no_std,
 // feeding the `textoverlay` element below.
 pub mod bitmapfont;
@@ -874,6 +878,7 @@ pub mod cenc;
     all(target_os = "linux", feature = "wayland-sink"),
     all(target_os = "linux", feature = "cuda-gl"),
     all(target_os = "linux", feature = "gl-sink"),
+    all(target_os = "linux", feature = "wgpu-present"),
 ))]
 mod worker_ready;
 
@@ -1161,8 +1166,16 @@ pub mod svtjpegxs;
 ))]
 pub(crate) mod glnv12;
 
-// Shared Wayland window + EGL context + present loop for the GL sinks that draw
-// on a compositor surface; each sink supplies only its per-frame upload.
+// Shared Wayland window + present loop for the sinks that own their window on a
+// worker thread; each supplies only the renderer that draws one frame.
+#[cfg(all(
+    target_os = "linux",
+    any(feature = "cuda-gl", feature = "gl-sink", feature = "wgpu-present")
+))]
+pub(crate) mod waylandwindow;
+
+// EGL + GL ES renderer over that worker for the GL sinks; each sink supplies
+// only its per-frame upload.
 #[cfg(all(target_os = "linux", any(feature = "cuda-gl", feature = "gl-sink")))]
 pub(crate) mod glwindow;
 
@@ -1185,6 +1198,12 @@ pub mod cudakmssink;
 // CUDA so NVDEC NV12 reaches WgpuPreprocess on the GPU. Linux + NVIDIA.
 #[cfg(all(target_os = "linux", feature = "cuda-wgpu"))]
 pub mod cudawgpu;
+
+// CudaToWgpu: the element wiring cudawgpu's transport into a graph, so an NVDEC
+// CUDA frame reaches a wgpu consumer (preprocess, present) with no PCIe
+// round-trip. Linux + NVIDIA.
+#[cfg(all(target_os = "linux", feature = "cuda-wgpu"))]
+pub mod cudatowgpu;
 
 // Browser / WebAssembly target (DESIGN.md §6.3), behind the `web` feature:
 // WasmClock (performance.now + setTimeout) and WebSocketSrc ingest. The wasm

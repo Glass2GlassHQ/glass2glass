@@ -101,12 +101,13 @@ use crate::clock::wait_to_present;
 use crate::worker_ready::Handshake;
 use g2g_core::element::{PresentationStats, QosMessage};
 use g2g_core::frame::Frame;
+use g2g_core::memory::{DomainSet, MemoryDomainKind};
 use g2g_core::metrics::{monotonic_ns, LatencyHistogram, LatencySnapshot};
 use g2g_core::{
-    AsyncElement, BusHandle, Caps, CapsConstraint, CapsSet, ClockCandidate, ClockPriority,
-    ClockSync, ConfigureOutcome, Dim, ElementMetadata, G2gError, HardwareError, OutputSink,
-    PipelineClock, PipelinePacket, PresentationPacer, PropError, PropKind, PropValue, PropertySpec,
-    Rate, RawVideoFormat, MAX_LATENESS_PROPERTY, QOS_INTERVAL_PROPERTY,
+    AllocationParams, AsyncElement, BusHandle, Caps, CapsConstraint, CapsSet, ClockCandidate,
+    ClockPriority, ClockSync, ConfigureOutcome, Dim, ElementMetadata, G2gError, HardwareError,
+    OutputSink, PipelineClock, PipelinePacket, PresentationPacer, PropError, PropKind, PropValue,
+    PropertySpec, Rate, RawVideoFormat, MAX_LATENESS_PROPERTY, QOS_INTERVAL_PROPERTY,
 };
 
 /// Worker-thread message. `Frame` carries the pre-converted XRGB8888
@@ -334,6 +335,18 @@ impl AsyncElement for WaylandSink {
             ClockPriority::Provider,
             alloc::sync::Arc::new(WaylandClock),
         ))
+    }
+
+    /// This sink blits from host memory, so it takes system frames only.
+    fn input_domains(&self) -> DomainSet {
+        DomainSet::only(MemoryDomainKind::System)
+    }
+
+    /// Ask upstream for system memory, constraining nothing else about the pool.
+    /// A GPU decoder defaults to keeping frames device-resident, so without this
+    /// demand it hands over a device pointer that `process` rejects.
+    fn propose_allocation(&self, _caps: &Caps) -> Option<AllocationParams> {
+        Some(AllocationParams::system(0, 1))
     }
 
     /// Adopt the elected clock + base time so frames present at their PTS

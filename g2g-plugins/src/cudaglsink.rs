@@ -79,7 +79,8 @@ use g2g_core::{
 use crate::clock::wait_to_present;
 use crate::cuda::nv12_byte_size;
 use crate::glnv12::{GlMode, GlState};
-use crate::glwindow::{run_gl_window, FramePresenter, WindowParams, WorkerChannels, WorkerCmd};
+use crate::glwindow::{run_gl_window, FramePresenter};
+use crate::waylandwindow::{WindowParams, WorkerChannels, WorkerCmd};
 
 /// Device-buffer pool headroom the sink asks the producer to keep resident:
 /// the frame in flight on the GL thread plus the one the runner link holds, so
@@ -347,6 +348,7 @@ impl AsyncElement for CudaGlSink {
             height: h,
             title: self.title.clone(),
             app_id: self.app_id.clone(),
+            fullscreen: false,
             log_tag: WORKER_NAME,
         };
 

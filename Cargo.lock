@@ -4029,6 +4029,7 @@ dependencies = [
  "vpx-encode",
  "wasm-bindgen",
  "wasm-bindgen-futures",
+ "wayland-backend",
  "wayland-egl",
  "web-sys",
  "web-transport-quinn",

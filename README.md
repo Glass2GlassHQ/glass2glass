@@ -349,6 +349,7 @@ OS-coupled elements live behind cargo features:
 | `KmsSink` | `kms-sink` | Linux + libdrm; needs DRM master / tty |
 | `D3D11Sink` | `d3d11-sink` | Windows |
 | `MetalVideoSink` (zero-copy from `CVPixelBuffer`, validated on the CI Mac) | `metal-sink` | macOS + Metal |
+| `WgpuPresentSink` (`wgpusink`: owns its Wayland window, presents GPU-resident frames with no upload) | `wgpu-present` | Linux + Wayland + wgpu |
 | `NvDec` (native NVDEC H.264/H.265/AV1 → CUDA NV12 or 10-bit P010, NVCUVID) | `nvdec` | Linux + NVIDIA driver (libnvcuvid) |
 | `NvEnc` (native NVENC CUDA NV12/P010 → H.264/H.265, incl. HEVC Main 10) | `nvenc` | Linux + NVIDIA driver (libnvidia-encode) |
 | `CudaDownload` (CUDA → System), `CudaUpload` (System → CUDA) | `cuda` | Linux + NVIDIA driver (libcuda) |

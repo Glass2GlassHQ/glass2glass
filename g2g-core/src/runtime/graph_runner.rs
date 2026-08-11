@@ -912,17 +912,32 @@ pub fn auto_plug_domain_converters<'a>(
             .element(edge.dst.node)
             .map(|n| n.input_domains())
             .unwrap_or(DomainSet::ALL);
-        if !producer.intersect(consumer).is_empty() {
-            continue; // already compatible, no converter needed
-        }
         let (Some(from), Some(to)) = (producer.preferred(), consumer.preferred()) else {
             continue;
         };
+        // Nothing to do when the two ends already agree on a domain, unless the
+        // only thing they agree on is system memory while both would rather stay
+        // on the GPU.
+        if !producer.intersect(consumer).is_empty() && !bridges_two_gpus(from, to) {
+            continue;
+        }
         if let Some(conv) = factory(from, to) {
             graph.insert_on_edge(e, conv);
         }
     }
     graph
+}
+
+/// Whether a converter beats the domain the two ends would otherwise agree on
+/// (M1017): both prefer to keep the frame on the GPU, but in different GPU
+/// domains, so the only domain they share is system memory. Bridging the two GPU
+/// domains costs a device-to-device copy where agreeing on system memory costs a
+/// download and an upload, so the bridge wins whenever the factory has one (a
+/// CUDA decoder feeding a wgpu display sink is the case this exists for). When
+/// either end prefers system memory, the shared domain is what it asked for and
+/// nothing is spliced.
+fn bridges_two_gpus(from: MemoryDomainKind, to: MemoryDomainKind) -> bool {
+    from != to && !from.is_system() && !to.is_system()
 }
 
 /// Domains the node emits, tracing through structural tee/demux nodes (which

@@ -31,7 +31,7 @@ linux-full = [
     "ffmpeg", "vaapi", "v4l2",
     "opus", "vorbis", "vpx", "av1-encode", "mjpeg", "mjpeg-encode",
     "alsa-sink", "alsa-src", "pulse-sink", "pulse-src", "pipewire", "portal",
-    "wayland-sink", "kms-sink", "wgpu-sink", "vello-overlay", "analytics",
+    "wayland-sink", "kms-sink", "wgpu-sink", "wgpu-present", "vello-overlay", "analytics",
     "declarative-yaml", "script-rhai", "observe", "tui",
 ]
 std = ["g2g-core/std", "dep:tokio"]
@@ -568,6 +568,12 @@ vello-text-overlay = ["vello-overlay", "text-shaping"]
 # texture (render-to-texture / screenshot, testable headless) or a caller-built
 # wgpu::Surface (on-screen). Pulls wgpu 29; implies std.
 wgpu-sink = ["std", "dep:wgpu"]
+# Windowed wgpu present sink (`wgpusink`, M1017): the launch-line display sink
+# built on WgpuSink. It owns an xdg_toplevel on a worker thread (the shared
+# waylandwindow machinery) and builds the wgpu::Surface over it, so a
+# WgpuTexture-domain frame reaches the screen with no upload and a system-memory
+# NV12 / RGBA frame with one write_texture. Linux (Wayland) only.
+wgpu-present = ["wgpu-sink", "dep:smithay-client-toolkit", "dep:wayland-backend", "dep:raw-window-handle"]
 # AV1 encode via the pure-Rust `rav1e` encoder (Av1Enc, I420 -> CompressedVideo{Av1}).
 # default-features = false drops rav1e's NASM asm, CLI `binaries`, and `threading`
 # features, so it builds with no system deps (no NASM) as a portable software
@@ -1100,6 +1106,10 @@ libcamera = { version = "0.7", optional = true }
 # it (the underlying pkg-config probe doesn't fit those targets).
 ffmpeg-next = { version = "8.1", optional = true, default-features = false, features = ["codec", "format", "software-scaling"] }
 smithay-client-toolkit = { version = "0.20", optional = true }
+# The libwayland-backed client backend, so a display / surface raw pointer can be
+# handed to a native API (Vulkan WSI under `wgpu-present`). The GL sinks get the
+# same backend through wayland-egl.
+wayland-backend = { version = "0.3", optional = true, features = ["client_system"] }
 # CUDA-GL sink (cuda-gl feature). khronos-egl `static` links libEGL at build;
 # glow is the GL ES wrapper; wayland-egl turns a wl_surface into an EGL window.
 khronos-egl = { version = "6", optional = true, features = ["static"] }
