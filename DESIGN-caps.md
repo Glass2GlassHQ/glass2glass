@@ -722,7 +722,11 @@ forwarded in-band ahead of the first frame as decoder extradata).
   (`uridecodebin.rs`), each gated to its source's feature, so an app registers
   only the schemes its build supports. A handler reports the *media type* it
   produces (geometry resolves at negotiation), which is all the chain search
-  needs to pick the right decoder.
+  needs to pick the right decoder. The `file://` handler reads that type off the
+  file's header (`typefind::sniff_caps`, M1025) rather than assuming one: an
+  ISO-BMFF file becomes a self-demuxing `Mp4Src`, anything else the sniff
+  recognises a `FileSrc` declaring those caps, so an elementary stream or a
+  non-MP4 container reaches the decode chain its content needs.
 
 - **playbin (multi-stream front door)** (`std`). Beyond the
   single-stream expansion, g2g's `playbin` can split a container into *all* its

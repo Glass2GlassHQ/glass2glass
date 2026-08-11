@@ -60,28 +60,37 @@ pub fn rtsp_handler() -> UriSourceFactory {
     })
 }
 
-/// `file:///path.mp4` -> [`Mp4Src`](crate::mp4src::Mp4Src): demuxes an MP4
-/// file's H.264 track. `rest` is the absolute path (the `file://` authority is
-/// empty, so `file:///a/b` leaves `/a/b`).
+/// `file:///path` -> the source matching what the file's header says it is: an
+/// ISO-BMFF file gets [`Mp4Src`](crate::mp4src::Mp4Src) (which demuxes its H.264
+/// track), anything else a [`FileSrc`](crate::filesrc::FileSrc) declaring the
+/// sniffed caps, so `decodebin` plugs the demux / parse chain that type needs.
+/// Content, not extension: a `.h264` elementary stream or an `.mkv` is not an
+/// MP4 and used to reach `Mp4Src` anyway. `rest` is the absolute path (the
+/// `file://` authority is empty, so `file:///a/b` leaves `/a/b`).
+///
+/// An unreadable or unrecognized file falls back to `Mp4Src`, so the run fails
+/// downstream the way it did before rather than here.
 #[cfg(feature = "std")]
 pub fn file_handler() -> UriSourceFactory {
     UriSourceFactory::new("file", |uri: &Uri| {
         if uri.rest.is_empty() {
             return Err(UriError::Malformed);
         }
-        // The handler never reads the file (caps are declared, not sniffed), so
-        // an unopenable path would otherwise surface only as a downstream error
-        // that never mentions it. Report here and let the run fail as before.
-        if let Err(e) = std::fs::File::open(uri.rest) {
-            crate::filesink::path_io_err(
-                short_type_name::<crate::mp4src::Mp4Src>(),
-                "open",
-                uri.rest,
-                e,
-            );
+        let sniffed = read_file_prefix(uri.rest, crate::typefind::SNIFF_LEN as u64)
+            .and_then(|prefix| crate::typefind::sniff_caps(&prefix));
+        match sniffed {
+            Some(Caps::ByteStream {
+                encoding: ByteStreamEncoding::IsoBmff,
+            })
+            | None => {
+                let src = crate::mp4src::Mp4Src::new(uri.rest);
+                Ok((Box::new(src) as Box<dyn DynSourceLoop>, h264_any()))
+            }
+            Some(caps) => {
+                let src = crate::filesrc::FileSrc::new(uri.rest, caps.clone());
+                Ok((Box::new(src) as Box<dyn DynSourceLoop>, caps))
+            }
         }
-        let src = crate::mp4src::Mp4Src::new(uri.rest);
-        Ok((Box::new(src) as Box<dyn DynSourceLoop>, h264_any()))
     })
 }
 
@@ -161,25 +170,34 @@ use g2g_core::{ByteStreamEncoding, Graph};
 /// extension-guessed caps, whose downstream error would never mention the file.
 #[cfg(feature = "std")]
 fn open_file_prefix(uri: &str) -> Option<(alloc::string::String, Vec<u8>)> {
-    use std::io::Read;
     let parsed = Uri::parse(uri)?;
     if parsed.scheme != "file" || parsed.rest.is_empty() {
         return None;
     }
+    let prefix = read_file_prefix(parsed.rest, PLAYBIN_PROBE_BYTES)?;
+    Some((parsed.rest.to_string(), prefix))
+}
+
+/// The first `bytes` of `path`, or `None` if it cannot be opened or read. An
+/// unreadable file is reported here (as `FileSrc`, since every caller that
+/// probes goes on to read it with one) because a caller that declines on `None`
+/// would otherwise fail somewhere that never mentions the file.
+#[cfg(feature = "std")]
+fn read_file_prefix(path: &str, bytes: u64) -> Option<Vec<u8>> {
+    use std::io::Read;
     let mut prefix = Vec::new();
-    // Reported as FileSrc: every hook that probes here reads the file with one.
-    let f = std::fs::File::open(parsed.rest)
+    let f = std::fs::File::open(path)
         .map_err(|e| {
             crate::filesink::path_io_err(
                 short_type_name::<crate::filesrc::FileSrc>(),
                 "open",
-                parsed.rest,
+                path,
                 e,
             )
         })
         .ok()?;
-    f.take(PLAYBIN_PROBE_BYTES).read_to_end(&mut prefix).ok()?;
-    Some((parsed.rest.to_string(), prefix))
+    f.take(bytes).read_to_end(&mut prefix).ok()?;
+    Some(prefix)
 }
 
 /// Parse a closed-caption request from a `playbin` URI fragment, returning the URI

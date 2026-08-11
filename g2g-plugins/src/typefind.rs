@@ -46,6 +46,10 @@ const IVF_MAGIC: [u8; 4] = *b"DKIF";
 /// MPEG-2 `.vob`) opens on one, and packs recur throughout.
 const PS_PACK_MAGIC: [u8; 4] = [0x00, 0x00, 0x01, 0xBA];
 
+/// Header bytes [`sniff_caps`] needs to decide: enough to confirm an MPEG-TS
+/// sync byte across several packets, the longest signature here.
+pub const SNIFF_LEN: usize = 4 * TS_PACKET_LEN;
+
 /// Guess a media type from a stream's leading bytes, or `None` if nothing matches
 /// (a `typefind` failure). Tries container magic first (binary signatures), then a
 /// raw Annex-B video elementary stream, then a subtitle-document text sniff. Pass

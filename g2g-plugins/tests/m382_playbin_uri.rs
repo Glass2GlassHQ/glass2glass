@@ -89,12 +89,24 @@ impl AsyncElement for NullSink {
     }
 }
 
-/// A registry with the `file://` handler, stub H.264 / AAC decoders (so the
-/// per-port auto-plug reaches raw), and the auto-sink names. The playbin hook is
-/// added separately so a no-hook control registry can omit it.
+/// A registry with the `file://` handler, a stub Matroska demuxer, stub H.264 /
+/// AAC decoders (so the per-port auto-plug reaches raw), and the auto-sink names.
+/// The playbin hook is added separately so a no-hook control registry can omit it.
 fn base_registry() -> Registry {
     let mut reg = Registry::new();
     reg.register_uri(g2g_plugins::uridecodebin::file_handler());
+    // The handler types a probe file by content (M1025), so the single-stream
+    // fall-through starts from Matroska bytes and needs something to demux them.
+    reg.register(ElementFactory::new(
+        "mkvstub",
+        Vec::from([
+            PadTemplate::sink(CapsSet::one(Caps::ByteStream {
+                encoding: g2g_core::ByteStreamEncoding::Matroska,
+            })),
+            PadTemplate::source(CapsSet::one(h264_any())),
+        ]),
+        |_| Box::new(g2g_plugins::identity::IdentityTransform::new()),
+    ));
     reg.register(ElementFactory::new(
         "h264stub",
         Vec::from([
@@ -270,8 +282,8 @@ async fn playbin_uri_without_hook_stays_single_stream() {
 
     assert_eq!(
         graph.node_count(),
-        3,
-        "source, one decoder, one sink: single-stream playbin"
+        4,
+        "source, demux, one decoder, one sink: single-stream playbin"
     );
 }
 
