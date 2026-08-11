@@ -5,7 +5,7 @@
 //! the bitstream, so hand-built access units exercise the full path on any
 //! platform.
 
-use g2g_core::element::{AsyncElement, BoxFuture, OutputSink, PushOutcome};
+use g2g_core::element::{AsyncElement, OutputSink, PushOutcome};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::SourceLoop;
@@ -55,11 +55,13 @@ struct Collect {
 }
 
 impl OutputSink for Collect {
-    fn push<'a>(
-        &'a mut self,
-        packet: PipelinePacket,
-    ) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
-        Box::pin(async move {
+    fn poll_push(
+        &mut self,
+        _cx: &mut core::task::Context<'_>,
+        packet_slot: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        let packet = packet_slot.take().expect("poll_push without a packet");
+        core::task::Poll::Ready({
             match packet {
                 PipelinePacket::DataFrame(f) => {
                     let Some(s) = f.domain.as_system_slice() else {
@@ -77,8 +79,13 @@ impl OutputSink for Collect {
 
 struct Discard;
 impl OutputSink for Discard {
-    fn push<'a>(&'a mut self, _p: PipelinePacket) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
-        Box::pin(async move { Ok(PushOutcome::Accepted) })
+    fn poll_push(
+        &mut self,
+        _cx: &mut core::task::Context<'_>,
+        packet_slot: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        packet_slot.take();
+        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
     }
 }
 

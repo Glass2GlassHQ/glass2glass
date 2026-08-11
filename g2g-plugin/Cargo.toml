@@ -7,7 +7,8 @@ keywords = ["multimedia", "plugin", "sdk", "pipeline", "video"]
 categories = ["multimedia", "development-tools"]
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
+# Conservative MSRV with g2g-core: a third party builds their plugin against this.
+rust-version = "1.86"
 authors.workspace = true
 repository.workspace = true
 
@@ -17,6 +18,10 @@ repository.workspace = true
 # (for the element traits) against the same published versions the host uses.
 [dependencies]
 g2g-core = { workspace = true, features = ["std", "runtime"] }
+# FFI-safe `Future`: the v2 plugin ABI's poll boundary (`FfiFuture` / `FfiContext`
+# / `FfiPoll`). Pure Rust, no dependencies of its own, MSRV 1.56, so it fits this
+# crate's 1.86 floor.
+async-ffi = "0.5"
 
 [lints]
 workspace = true

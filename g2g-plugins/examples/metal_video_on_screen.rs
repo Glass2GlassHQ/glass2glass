@@ -33,8 +33,7 @@ fn main() {
 
 #[cfg(all(target_os = "macos", feature = "vtdecode", feature = "metal-sink"))]
 mod demo {
-    use core::future::Future;
-    use core::pin::Pin;
+
     use core::ptr::NonNull;
     use std::time::{Duration, Instant};
 
@@ -79,11 +78,13 @@ mod demo {
     }
 
     impl OutputSink for Collect {
-        fn push<'a>(
-            &'a mut self,
-            packet: PipelinePacket,
-        ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
-            Box::pin(async move {
+        fn poll_push(
+            &mut self,
+            _cx: &mut core::task::Context<'_>,
+            packet_slot: &mut Option<PipelinePacket>,
+        ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+            let packet = packet_slot.take().expect("poll_push without a packet");
+            core::task::Poll::Ready({
                 self.packets.push(packet);
                 Ok(PushOutcome::Accepted)
             })
@@ -94,11 +95,13 @@ mod demo {
     struct NullSink;
 
     impl OutputSink for NullSink {
-        fn push<'a>(
-            &'a mut self,
-            _packet: PipelinePacket,
-        ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
-            Box::pin(async move { Ok(PushOutcome::Accepted) })
+        fn poll_push(
+            &mut self,
+            _cx: &mut core::task::Context<'_>,
+            packet_slot: &mut Option<PipelinePacket>,
+        ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+            packet_slot.take();
+            core::task::Poll::Ready(Ok(PushOutcome::Accepted))
         }
     }
 

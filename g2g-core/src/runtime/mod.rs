@@ -13,6 +13,9 @@
 mod autoplug;
 mod channel;
 mod coordinator;
+// Only the (std-gated) graph runner attaches it, so the whole module follows.
+#[cfg(feature = "std")]
+mod flight_recorder;
 mod instrument;
 mod join;
 mod passthrough;
@@ -53,6 +56,8 @@ pub use channel::{
     QosSlot, Receiver, ReconfigureSlot, RecvFuture, SendError, SendFuture, Sender, SenderSink,
 };
 pub use coordinator::{coordinator, Coordinator, CoordinatorEvent, CoordinatorHandle};
+#[cfg(feature = "std")]
+pub use flight_recorder::{FlightRecorder, FLIGHT_RING_BYTES, FLIGHT_RING_PACKETS};
 pub use instrument::{
     snapshot_all, EdgeCounters, EdgeCounts, ElementLatency, ElementProbe, Probe, StageVisit,
 };
@@ -87,9 +92,10 @@ pub use runner::{
 #[cfg(feature = "std")]
 pub use fanin::{
     run_aggregator_dynamic, run_aggregator_dynamic_observed, run_duplex_session,
-    run_duplex_session_observed, run_fanin_session, run_fanin_session_observed, run_fanin_sink,
-    run_fanin_sink_observed, run_muxer_sink, run_muxer_sink_dynamic,
-    run_muxer_sink_dynamic_observed, run_muxer_sink_with_bus, DynMultiInputElement, DynSourceLoop,
+    run_duplex_session_dynamic, run_duplex_session_dynamic_observed, run_duplex_session_observed,
+    run_fanin_session, run_fanin_session_observed, run_fanin_sink, run_fanin_sink_observed,
+    run_muxer_sink, run_muxer_sink_dynamic, run_muxer_sink_dynamic_observed,
+    run_muxer_sink_with_bus, DynMultiInputElement, DynSourceLoop, DynamicDuplexHandle,
     DynamicFaninHandle, PendingInput,
 };
 
@@ -99,10 +105,24 @@ pub use gapless::{GaplessController, GaplessInstantWait, GaplessWait};
 #[cfg(feature = "std")]
 pub use graph_runner::{
     auto_plug_domain_converters, copy_plan, negotiate_graph, negotiate_graph_explained, run_graph,
-    run_graph_observed, run_graph_stateful, run_graph_with_bus, run_graph_with_copy_policy,
-    run_graph_with_progress, DynMultiOutputElement, GraphNode, GraphNodeRef, GraphTemplate,
-    NegotiateError,
+    run_graph_observed, run_graph_observed_recorded, run_graph_recorded, run_graph_stateful,
+    run_graph_with_bus, run_graph_with_copy_policy, run_graph_with_progress, DynMultiOutputElement,
+    GraphNode, GraphNodeRef, GraphTemplate, NegotiateError,
 };
+
+// The monomorphized-arm seam (M1000, extended to the fan-in / fan-out arms in
+// M1009): the drive hooks on `DynAsyncElement` / `DynMultiInputElement` /
+// `DynMultiOutputElement` name these, so they must be reachable, but they are
+// runner plumbing, not API.
+#[cfg(feature = "std")]
+#[doc(hidden)]
+pub use graph_runner::{
+    sink_arm, transform_arm, DemuxArmIo, FaninSinkArmIo, MuxerArmIo, SinkArmIo, TransformArmIo,
+};
+
+#[cfg(all(feature = "std", feature = "multi-thread"))]
+#[doc(hidden)]
+pub use graph_runner::MuxerArmOwnedTickIo;
 
 #[cfg(feature = "std")]
 pub use observe::{
@@ -114,8 +134,9 @@ pub use observe::{
 // future stays on its thread); `std` for the OS-thread spawner it drives.
 #[cfg(all(feature = "std", feature = "multi-thread"))]
 pub use graph_runner::{
-    run_graph_threaded, run_graph_threaded_observed, run_graph_threaded_ticked,
-    run_graph_threaded_with_progress, GraphSpawner, LocalArmFuture, ThreadSpawner,
+    run_graph_threaded, run_graph_threaded_observed, run_graph_threaded_recorded,
+    run_graph_threaded_ticked, run_graph_threaded_with_bus, run_graph_threaded_with_progress,
+    GraphSpawner, LocalArmFuture, ThreadSpawner,
 };
 
 // `PadKind` / `PadRequest` are not std-gated: the `no_std` fan-in trait

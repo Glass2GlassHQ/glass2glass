@@ -534,7 +534,7 @@ async fn live_overlay_animates_and_background_never_collapses() {
 /// past their smaller buffers and panic.
 #[tokio::test]
 async fn geometry_change_drops_stale_startup_frames() {
-    use g2g_core::element::{BoxFuture, PushOutcome};
+    use g2g_core::element::PushOutcome;
     use g2g_core::frame::FrameTiming;
     use g2g_core::MultiInputElement;
 
@@ -543,11 +543,13 @@ async fn geometry_change_drops_stale_startup_frames() {
         sizes: Vec<usize>,
     }
     impl OutputSink for Collect {
-        fn push<'a>(
-            &'a mut self,
-            packet: PipelinePacket,
-        ) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
-            Box::pin(async move {
+        fn poll_push(
+            &mut self,
+            _cx: &mut core::task::Context<'_>,
+            packet_slot: &mut Option<PipelinePacket>,
+        ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+            let packet = packet_slot.take().expect("poll_push without a packet");
+            core::task::Poll::Ready({
                 if let PipelinePacket::DataFrame(f) = packet {
                     self.sizes
                         .push(f.domain.as_system_slice().map_or(0, |s| s.len()));

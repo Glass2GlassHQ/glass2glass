@@ -44,13 +44,32 @@ pub struct ShapedGlyph {
     pub glyph_id: u16,
     /// Whether the glyph sits in a right-to-left bidi run.
     pub rtl: bool,
+    /// Size this glyph was shaped at, which is the block's `px` unless a
+    /// [`SizedSpan`] covered it.
+    pub font_size: f32,
+    /// Horizontal advance of this glyph's cluster, for a caller measuring the
+    /// pixels a byte range covers (a span background fill).
+    pub advance: f32,
 }
 
-/// One visual line of a laid-out block, in visual (post-bidi) order.
+/// One visual line of a laid-out block, in visual (post-bidi) order. `top` and
+/// `height` are the line box, relative to the block's top-left.
 #[derive(Debug)]
 pub struct ShapedLine {
     pub width: f32,
+    pub top: f32,
+    pub height: f32,
     pub glyphs: Vec<ShapedGlyph>,
+}
+
+/// A byte range of the text to lay out at a size other than the block's. Ranges
+/// must be non-overlapping and ascending; the bytes between them take the
+/// block's size.
+#[derive(Debug, Clone, Copy)]
+pub struct SizedSpan {
+    pub start: usize,
+    pub end: usize,
+    pub px: f32,
 }
 
 /// A laid-out text block: `width` is the widest line, `height` the sum of the
@@ -74,6 +93,45 @@ pub struct GlyphImage<'a> {
     pub data: &'a [u8],
     /// A colour bitmap (emoji) rather than an alpha mask.
     pub color: bool,
+}
+
+/// Split `text` into the `(slice, attrs)` pairs `set_rich_text` wants: the
+/// ranges `sizes` names carry a `Metrics` override, the bytes between them carry
+/// `base`. A range that runs backwards, is empty, or lands inside a codepoint is
+/// skipped rather than shifting the text.
+fn sized_spans<'text, 'attrs>(
+    text: &'text str,
+    px: f32,
+    line_height: f32,
+    base: &Attrs<'attrs>,
+    sizes: &[SizedSpan],
+) -> Vec<(&'text str, Attrs<'attrs>)> {
+    let mut spans = Vec::new();
+    let mut at = 0usize;
+    for span in sizes {
+        let usable = span.start >= at
+            && span.end > span.start
+            && span.end <= text.len()
+            && text.is_char_boundary(span.start)
+            && text.is_char_boundary(span.end)
+            && span.px > 0.0;
+        if !usable {
+            continue;
+        }
+        if at < span.start {
+            spans.push((&text[at..span.start], base.clone()));
+        }
+        // Scale the line height with the size, so a larger span asks for a
+        // proportionally taller line box (cosmic-text takes the line's tallest).
+        let scale = if px > 0.0 { span.px / px } else { 1.0 };
+        let metrics = Metrics::new(span.px, line_height * scale);
+        spans.push((&text[span.start..span.end], base.clone().metrics(metrics)));
+        at = span.end;
+    }
+    if at < text.len() {
+        spans.push((&text[at..], base.clone()));
+    }
+    spans
 }
 
 /// Shaping + rasterization state: the discovered font database and the glyph
@@ -159,14 +217,18 @@ impl TextShaper {
     }
 
     /// Shape and lay out `text` at `px` (one visual line per logical line, no
-    /// wrapping), optionally at variable-font weight `wght`. Line positions are
-    /// relative to the block's top-left.
+    /// wrapping), optionally at variable-font weight `wght`. Ranges named in
+    /// `sizes` are laid out at their own size instead, which cosmic-text carries
+    /// as a per-span `Metrics` override on the line's `AttrsList`, so a line
+    /// mixing sizes is still one shaped, bidi-reordered run and takes the tallest
+    /// span's line height. Line positions are relative to the block's top-left.
     pub fn layout(
         &mut self,
         text: &str,
         px: f32,
         line_height: f32,
         wght: Option<f32>,
+        sizes: &[SizedSpan],
     ) -> ShapedBlock {
         let mut attrs = Attrs::new();
         if let Some(family) = &self.primary {
@@ -181,7 +243,12 @@ impl TextShaper {
         // ab_glyph path, rather than reflowed.
         buffer.set_wrap(&mut self.fonts, Wrap::None);
         buffer.set_size(&mut self.fonts, None, None);
-        buffer.set_text(&mut self.fonts, text, &attrs, Shaping::Advanced, None);
+        if sizes.is_empty() {
+            buffer.set_text(&mut self.fonts, text, &attrs, Shaping::Advanced, None);
+        } else {
+            let spans = sized_spans(text, px, line_height, &attrs, sizes);
+            buffer.set_rich_text(&mut self.fonts, spans, &attrs, Shaping::Advanced, None);
+        }
         buffer.shape_until_scroll(&mut self.fonts, false);
 
         let mut lines = Vec::new();
@@ -200,6 +267,8 @@ impl TextShaper {
                         start: g.start,
                         glyph_id: g.glyph_id,
                         rtl: g.level.is_rtl(),
+                        font_size: g.font_size,
+                        advance: g.w,
                     }
                 })
                 .collect();
@@ -207,6 +276,8 @@ impl TextShaper {
             height = height.max(run.line_top + run.line_height);
             lines.push(ShapedLine {
                 width: run.line_w,
+                top: run.line_top,
+                height: run.line_height,
                 glyphs,
             });
         }

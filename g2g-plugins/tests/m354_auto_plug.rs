@@ -55,12 +55,25 @@ fn frame(seq: u64) -> PipelinePacket {
     })
 }
 
-/// System-memory source (default `output_domains == {System}`).
-struct SysSource {
+/// Fake source emitting `count` frames, advertising `domains` as what it can
+/// deliver into (a single domain, or the pair a GPU decoder that can also
+/// download offers).
+struct FakeSource {
     count: u32,
+    domains: DomainSet,
 }
 
-impl SourceLoop for SysSource {
+impl FakeSource {
+    /// The plain system-memory source, the default shape.
+    fn system(count: u32) -> Self {
+        Self {
+            count,
+            domains: DomainSet::only(MemoryDomainKind::System),
+        }
+    }
+}
+
+impl SourceLoop for FakeSource {
     type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>;
     type CapsFuture<'a>
         = core::future::Ready<Result<Caps, G2gError>>
@@ -73,6 +86,9 @@ impl SourceLoop for SysSource {
     fn configure_pipeline(&mut self, _: &Caps) -> Result<ConfigureOutcome, G2gError> {
         Ok(ConfigureOutcome::Accepted)
     }
+    fn output_domains(&self) -> DomainSet {
+        self.domains
+    }
     fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a> {
         Box::pin(async move {
             for seq in 0..self.count as u64 {
@@ -84,11 +100,13 @@ impl SourceLoop for SysSource {
     }
 }
 
-/// Fake converter: a pass-through that *declares* it emits the GPU domain, so a
+/// Fake converter: a pass-through that *declares* it emits `emits`, so a
 /// downstream domain-strict consumer is satisfied. The runtime frame is left as
 /// it is (domains are declarative for the splice decision; the real CUDA copy is
 /// the hardware test's job).
-struct FakeConverter;
+struct FakeConverter {
+    emits: MemoryDomainKind,
+}
 
 impl AsyncElement for FakeConverter {
     type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>;
@@ -103,7 +121,7 @@ impl AsyncElement for FakeConverter {
         Ok(ConfigureOutcome::Accepted)
     }
     fn output_memory(&self) -> MemoryDomainKind {
-        MemoryDomainKind::Cuda
+        self.emits
     }
     fn process<'a>(
         &'a mut self,
@@ -157,11 +175,19 @@ impl AsyncElement for DomainSink {
     }
 }
 
-/// Fake factory: a System->Cuda converter, nothing else.
+/// Fake factory: an upload into CUDA and a CUDA -> GPU-texture bridge, the two
+/// pairs the real CUDA factory covers besides the download.
 fn fake_factory(from: MemoryDomainKind, to: MemoryDomainKind) -> Option<GraphNode> {
     match (from, to) {
         (MemoryDomainKind::System, MemoryDomainKind::Cuda) => {
-            Some(GraphNode::element(FakeConverter))
+            Some(GraphNode::element(FakeConverter {
+                emits: MemoryDomainKind::Cuda,
+            }))
+        }
+        (MemoryDomainKind::Cuda, MemoryDomainKind::WgpuTexture) => {
+            Some(GraphNode::element(FakeConverter {
+                emits: MemoryDomainKind::WgpuTexture,
+            }))
         }
         _ => None,
     }
@@ -173,7 +199,7 @@ fn fake_factory(from: MemoryDomainKind, to: MemoryDomainKind) -> Option<GraphNod
 async fn splices_converter_on_linear_domain_conflict() {
     let seen = Arc::new(Mutex::new(0u64));
     let mut g: Graph<GraphNode> = Graph::new();
-    let src = g.add_source(GraphNode::source(SysSource { count: 4 }));
+    let src = g.add_source(GraphNode::source(FakeSource::system(4)));
     let snk = g.add_sink(GraphNode::element(DomainSink {
         requires: DomainSet::only(MemoryDomainKind::Cuda),
         seen: Arc::clone(&seen),
@@ -203,7 +229,7 @@ async fn splices_converter_on_linear_domain_conflict() {
 async fn no_splice_when_domains_agree() {
     let seen = Arc::new(Mutex::new(0u64));
     let mut g: Graph<GraphNode> = Graph::new();
-    let src = g.add_source(GraphNode::source(SysSource { count: 3 }));
+    let src = g.add_source(GraphNode::source(FakeSource::system(3)));
     let snk = g.add_sink(GraphNode::element(DomainSink {
         requires: DomainSet::only(MemoryDomainKind::System),
         seen: Arc::clone(&seen),
@@ -223,7 +249,7 @@ async fn splices_only_the_conflicting_tee_branch() {
     let cuda_seen = Arc::new(Mutex::new(0u64));
     let sys_seen = Arc::new(Mutex::new(0u64));
     let mut g: Graph<GraphNode> = Graph::new();
-    let src = g.add_source(GraphNode::source(SysSource { count: 5 }));
+    let src = g.add_source(GraphNode::source(FakeSource::system(5)));
     let tee = g.add_tee(2);
     let cuda = g.add_sink(GraphNode::element(DomainSink {
         requires: DomainSet::only(MemoryDomainKind::Cuda),
@@ -393,4 +419,65 @@ async fn auto_plugs_cuda_upload_before_nvenc() {
         aus.iter().any(|au| au.windows(3).any(|w| w == [0, 0, 1])),
         "access units carry Annex-B start codes",
     );
+}
+
+/// A decoder that can keep frames on the GPU *or* download them, feeding a sink
+/// that takes a GPU texture *or* system memory (M1017: `nvdec ! wgpusink`): the
+/// only domain they share is system memory, so without this rule the frame would
+/// make a PCIe round trip. A bridge between their GPU domains is spliced instead.
+#[tokio::test]
+async fn splices_a_gpu_bridge_rather_than_agreeing_on_system_memory() {
+    let seen = Arc::new(Mutex::new(0u64));
+    let mut g: Graph<GraphNode> = Graph::new();
+    let src = g.add_source(GraphNode::source(FakeSource {
+        count: 4,
+        domains: DomainSet::only(MemoryDomainKind::Cuda).with(MemoryDomainKind::System),
+    }));
+    let snk = g.add_sink(GraphNode::element(DomainSink {
+        requires: DomainSet::only(MemoryDomainKind::WgpuTexture).with(MemoryDomainKind::System),
+        seen: Arc::clone(&seen),
+    }));
+    g.link(src, snk).unwrap();
+
+    let g = auto_plug_domain_converters(g, &fake_factory);
+    assert_eq!(g.node_count(), 3, "the GPU bridge was spliced");
+    let bridge = g
+        .edges()
+        .iter()
+        .find(|e| e.dst.node == snk)
+        .expect("an edge into the sink");
+    assert_eq!(
+        g.element(bridge.src.node).unwrap().output_domains(),
+        DomainSet::only(MemoryDomainKind::WgpuTexture),
+        "the sink is now fed the GPU texture domain it prefers"
+    );
+
+    let stats = run_graph(g, &NullClock, 4)
+        .await
+        .expect("spliced graph runs");
+    assert_eq!(stats.frames_consumed, 4);
+    assert_eq!(*seen.lock().unwrap(), 4);
+}
+
+/// The same decoder feeding a system-memory-only sink is left alone (M1017:
+/// `nvdec ! waylandsink`): system memory is what the consumer asked for, and the
+/// decoder's own download is the way there.
+#[tokio::test]
+async fn no_bridge_when_the_consumer_wants_system_memory() {
+    let seen = Arc::new(Mutex::new(0u64));
+    let mut g: Graph<GraphNode> = Graph::new();
+    let src = g.add_source(GraphNode::source(FakeSource {
+        count: 3,
+        domains: DomainSet::only(MemoryDomainKind::Cuda).with(MemoryDomainKind::System),
+    }));
+    let snk = g.add_sink(GraphNode::element(DomainSink {
+        requires: DomainSet::only(MemoryDomainKind::System),
+        seen: Arc::clone(&seen),
+    }));
+    g.link(src, snk).unwrap();
+
+    let g = auto_plug_domain_converters(g, &fake_factory);
+    assert_eq!(g.node_count(), 2, "nothing spliced");
+    run_graph(g, &NullClock, 4).await.expect("runs");
+    assert_eq!(*seen.lock().unwrap(), 3);
 }

@@ -85,7 +85,7 @@ pub struct PageIds {
 /// blob that looks like one is refused here. Only a multi-substream blob whose
 /// first composition page id happens to be `0x0Fxx` or `0x20xx` is ambiguous.
 pub fn parse_page_ids(bytes: &[u8]) -> Option<PageIds> {
-    if bytes.len() != 4 && (bytes.len() < 5 || bytes.len() % 5 != 0) {
+    if bytes.len() != 4 && (bytes.len() < 5 || !bytes.len().is_multiple_of(5)) {
         return None;
     }
     if bytes.len() >= 8 && matches!(bytes[0], SYNC_BYTE | DATA_IDENTIFIER) {

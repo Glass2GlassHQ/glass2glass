@@ -56,9 +56,11 @@ use smithay_client_toolkit::reexports::calloop::channel::{channel, Sender as Cal
 
 use crate::clock::wait_to_present;
 use crate::glnv12::{GlMode, GlState};
-use crate::glwindow::{run_gl_window, FramePresenter, WindowParams, WorkerChannels, WorkerCmd};
+use crate::glwindow::{run_gl_window, FramePresenter};
+use crate::waylandwindow::{WindowParams, WorkerChannels, WorkerCmd};
 use crate::worker_ready::Handshake;
 use g2g_core::element::QosMessage;
+use g2g_core::memory::{DomainSet, MemoryDomainKind};
 use g2g_core::metrics::{monotonic_ns, LatencyHistogram, LatencySnapshot};
 use g2g_core::{
     AsyncElement, BusHandle, Caps, CapsConstraint, CapsSet, ClockCandidate, ClockPriority,
@@ -238,6 +240,12 @@ impl AsyncElement for GlSink {
     where
         Self: 'a;
 
+    /// This sink uploads from host memory with `glTexSubImage2D`, so it takes
+    /// system frames only. `cudaglsink` is the device-resident counterpart.
+    fn input_domains(&self) -> DomainSet {
+        DomainSet::only(MemoryDomainKind::System)
+    }
+
     fn provide_clock(&self) -> Option<ClockCandidate> {
         Some(ClockCandidate::new(
             ClockPriority::Provider,
@@ -356,6 +364,7 @@ impl AsyncElement for GlSink {
             height: h,
             title: self.title.clone(),
             app_id: self.app_id.clone(),
+            fullscreen: false,
             log_tag: WORKER_NAME,
         };
 
@@ -478,6 +487,18 @@ mod tests {
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
         }
+    }
+
+    /// The sink uploads from host memory, so it has to tell a GPU decoder to
+    /// download. The allocation cascade reads this declaration, so getting it
+    /// wrong means `nvdec ! glsink` takes a device pointer and dies with
+    /// `UnsupportedDomain`.
+    #[test]
+    fn declares_system_memory_only() {
+        assert_eq!(
+            GlSink::new().input_domains(),
+            DomainSet::only(MemoryDomainKind::System)
+        );
     }
 
     #[test]

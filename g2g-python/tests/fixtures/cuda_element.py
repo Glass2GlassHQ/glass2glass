@@ -3,8 +3,9 @@
 # its batch and produce siblings, and the DLPack export (M986).
 #
 # The probes that only read a plane's description never touch device memory, so
-# they run with no GPU present. The cupy classes need a real device and are
-# skipped by the Rust side when there is none.
+# they run with no GPU present. The cupy and torch classes need a real device
+# and are skipped by the Rust side when there is none; the two frameworks are
+# independent, so a host with only one of them still runs that half.
 
 # What the last g2g_process_cuda call saw, read back by the Rust test.
 OBSERVED = {}
@@ -239,3 +240,209 @@ class CupyConsumer:
         OBSERVED["chroma_matches"] = bool((uv == CHROMA_VALUE).all())
         y[1, 2] = MARKER_VALUE
         cupy.cuda.runtime.deviceSynchronize()
+
+
+def _torch_luma_ramp(torch, height, width, device):
+    """The luma pattern of `_luma_ramp`, built with torch instead of cupy."""
+    rows = torch.arange(height, dtype=torch.int32, device=device)[:, None]
+    columns = torch.arange(width, dtype=torch.int32, device=device)[None, :]
+    return ((rows * 7 + columns) % 256).to(torch.uint8)
+
+
+def allocate_nv12_torch(width, height, pitch):
+    """`allocate_nv12`'s torch twin: one device allocation holding the pitched
+    luma rows then the chroma plane, returning `(device_pointer, pitch, ordinal)`.
+    None when torch is missing or has no usable CUDA device."""
+    try:
+        import torch
+    except Exception as e:  # torch not installed
+        OBSERVED["torch_allocate_error"] = repr(e)
+        return None
+    try:
+        if not torch.cuda.is_available():
+            OBSERVED["torch_allocate_error"] = "no CUDA device"
+            return None
+        device = torch.device("cuda", torch.cuda.current_device())
+        surface = torch.zeros(
+            (height + height // 2, pitch), dtype=torch.uint8, device=device
+        )
+        surface[:height, :width] = _torch_luma_ramp(torch, height, width, device)
+        surface[height:, :width] = CHROMA_VALUE
+        torch.cuda.synchronize()
+    except Exception as e:  # driver failure, out of memory
+        OBSERVED["torch_allocate_error"] = repr(e)
+        return None
+    SURFACES.append(surface)
+    return int(surface.data_ptr()), pitch, device.index
+
+
+def read_surface_torch(pointer, row, column):
+    """`read_surface`'s torch twin: one luma byte read through the producer's own
+    tensor, to see whether a write through an exported plane landed in it. Keyed
+    by device pointer, since several tests allocate concurrently."""
+    import torch
+
+    torch.cuda.synchronize()
+    surface = next(s for s in SURFACES if int(s.data_ptr()) == pointer)
+    return int(surface[row, column])
+
+
+def torch_cuda_available():
+    """Whether this host has torch and a CUDA device for it."""
+    try:
+        import torch
+
+        return bool(torch.cuda.is_available())
+    except Exception:
+        return False
+
+
+class TorchDlpackConsumer:
+    """Maps both planes into torch through DLPack and checks they alias the
+    producer's surface: same device pointer, same pitched strides, the producer's
+    pattern reads back, and the device torch reports is the ordinal the frame
+    carried. Then writes a marker byte through the luma tensor so the producer
+    side can confirm one allocation, two views."""
+
+    def g2g_process_cuda(self, luma, chroma, width, height, meta):
+        import torch
+
+        OBSERVED["torch_dlpack_device"] = luma.__dlpack_device__()
+        y = torch.from_dlpack(luma)
+        uv = torch.from_dlpack(chroma)
+        OBSERVED["torch_luma_ptr"] = int(y.data_ptr())
+        OBSERVED["torch_chroma_ptr"] = int(uv.data_ptr())
+        OBSERVED["torch_luma_shape"] = tuple(y.shape)
+        OBSERVED["torch_luma_strides"] = tuple(y.stride())
+        OBSERVED["torch_chroma_shape"] = tuple(uv.shape)
+        OBSERVED["torch_luma_device"] = (y.device.type, y.device.index)
+        OBSERVED["torch_pattern_matches"] = bool(
+            (y == _torch_luma_ramp(torch, height, width, y.device)).all()
+        )
+        OBSERVED["torch_chroma_matches"] = bool((uv == CHROMA_VALUE).all())
+        y[1, 2] = MARKER_VALUE
+        torch.cuda.synchronize()
+
+
+class TorchCaiConsumer:
+    """The other import path: `torch.as_tensor` over `__cuda_array_interface__`,
+    which carries no device of its own, so torch derives it from the pointer.
+    torch refuses a read-only export, which is what a g2g plane advertises, so
+    this records the refusal and then re-describes the same plane writable to
+    check the rest of the dict (pointer, shape, pitched strides, device) is what
+    torch consumes."""
+
+    def g2g_process_cuda(self, luma, chroma, width, height, meta):
+        import torch
+
+        try:
+            torch.as_tensor(luma)
+            OBSERVED["torch_cai_read_only_refused"] = False
+        except TypeError:
+            OBSERVED["torch_cai_read_only_refused"] = True
+
+        y = torch.as_tensor(_writable(luma))
+        uv = torch.as_tensor(_writable(chroma))
+        OBSERVED["torch_cai_luma_ptr"] = int(y.data_ptr())
+        OBSERVED["torch_cai_chroma_ptr"] = int(uv.data_ptr())
+        OBSERVED["torch_cai_luma_shape"] = tuple(y.shape)
+        OBSERVED["torch_cai_luma_strides"] = tuple(y.stride())
+        OBSERVED["torch_cai_luma_device"] = (y.device.type, y.device.index)
+        OBSERVED["torch_cai_pattern_matches"] = bool(
+            (y == _torch_luma_ramp(torch, height, width, y.device)).all()
+        )
+        OBSERVED["torch_cai_chroma_matches"] = bool((uv == CHROMA_VALUE).all())
+
+
+class _Writable:
+    """Re-exports a plane's CAI dict with the advisory read-only flag cleared."""
+
+    def __init__(self, cai):
+        self.__cuda_array_interface__ = cai
+
+
+def _writable(plane):
+    cai = dict(plane.__cuda_array_interface__)
+    cai["data"] = (cai["data"][0], False)
+    return _Writable(cai)
+
+
+class TorchCudaSource:
+    """A GPU source allocating with torch, reporting the device it allocated on
+    through `cuda_device` so the frame can name it. Ends after `frames`."""
+
+    def __init__(self):
+        self.frames = 2
+        self.produced = 0
+        self.surfaces = []
+
+    def g2g_produce_cuda(self, width, height, meta):
+        if self.produced >= self.frames:
+            return None
+        import torch
+
+        pitch = width + 64  # deliberately not the packed width
+        device = torch.device("cuda", torch.cuda.current_device())
+        surface = torch.zeros(
+            (height + height // 2, pitch), dtype=torch.uint8, device=device
+        )
+        surface[:height, :width] = self.produced + 1
+        surface[height:, :width] = CHROMA_VALUE
+        luma = surface[:height, :width]
+        # Interleaved chroma over the same allocation: a strided view, since a
+        # reshape of a pitched slice would copy.
+        chroma = torch.as_strided(
+            surface,
+            (height // 2, width // 2, 2),
+            (pitch, 2, 1),
+            storage_offset=pitch * height,
+        )
+        torch.cuda.synchronize()
+        # Keep the allocation alive past the call: the frame holds only pointers.
+        self.surfaces.append(surface)
+        self.produced += 1
+        self.cuda_device = device.index
+        OBSERVED["torch_produced_ptr"] = int(surface.data_ptr())
+        OBSERVED["torch_produced_pitch"] = pitch
+        return luma, chroma
+
+
+class _DescribedPlane:
+    """A plane that exists only as a CAI description. The host reads the dict and
+    never dereferences the pointer, so a source can be exercised with no GPU."""
+
+    def __init__(self, shape, strides, pointer):
+        self.__cuda_array_interface__ = {
+            "shape": shape,
+            "typestr": "|u1",
+            "data": (pointer, False),
+            "strides": strides,
+            "version": 3,
+        }
+
+
+DESCRIBED_DEVICE = 5
+DESCRIBED_PTR = 0xF00D_0000
+
+
+class DescribedCudaSource:
+    """Produces one frame out of pure descriptions, reporting `cuda_device` so
+    the Rust side can see the ordinal reach the frame with no GPU involved."""
+
+    cuda_device = DESCRIBED_DEVICE
+
+    def __init__(self):
+        self.produced = False
+
+    def g2g_produce_cuda(self, width, height, meta):
+        if self.produced:
+            return None
+        self.produced = True
+        pitch = width + 64
+        luma = _DescribedPlane((height, width), (pitch, 1), DESCRIBED_PTR)
+        chroma = _DescribedPlane(
+            (height // 2, width // 2, 2),
+            (pitch, 2, 1),
+            DESCRIBED_PTR + pitch * height,
+        )
+        return luma, chroma

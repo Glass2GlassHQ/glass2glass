@@ -177,7 +177,7 @@ fn detectionpostprocess_thresholds_and_input_size_round_trip() {
 #[cfg(feature = "analytics")]
 #[tokio::test]
 async fn conf_threshold_property_changes_what_is_detected() {
-    use g2g_core::element::{BoxFuture, OutputSink, PushOutcome};
+    use g2g_core::element::{OutputSink, PushOutcome};
     use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
     use g2g_core::memory::{MemoryDomain, SystemSlice};
     use g2g_core::{AnalyticsMeta, Caps, G2gError, TensorDType, TensorLayout, TensorShape};
@@ -188,11 +188,13 @@ async fn conf_threshold_property_changes_what_is_detected() {
         detections: usize,
     }
     impl OutputSink for MetaSink {
-        fn push<'a>(
-            &'a mut self,
-            packet: PipelinePacket,
-        ) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
-            Box::pin(async move {
+        fn poll_push(
+            &mut self,
+            _cx: &mut core::task::Context<'_>,
+            packet_slot: &mut Option<PipelinePacket>,
+        ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+            let packet = packet_slot.take().expect("poll_push without a packet");
+            core::task::Poll::Ready({
                 if let PipelinePacket::DataFrame(frame) = packet {
                     if let Some(a) = frame.meta.get::<AnalyticsMeta>() {
                         self.detections = a.detections().count();

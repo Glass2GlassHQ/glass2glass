@@ -103,6 +103,16 @@ pub enum MemoryDomainKind {
 }
 
 impl MemoryDomainKind {
+    /// Whether this domain is CPU-addressable memory rather than a device-side
+    /// allocation. The distinction the converter auto-plug uses to tell "these
+    /// two agree on system memory" from "these two both want to stay on the GPU".
+    pub const fn is_system(self) -> bool {
+        matches!(
+            self,
+            MemoryDomainKind::System | MemoryDomainKind::SystemView
+        )
+    }
+
     /// Stable bit index for [`DomainSet`]. Keep in sync with the enum (one bit
     /// per variant, 11 variants fit a `u16`).
     const fn bit_index(self) -> u16 {
@@ -747,6 +757,11 @@ pub struct OwnedCudaBuffer {
     /// `CUcontext` (as `u64`) the pointers are valid in. A consumer pushes
     /// this context (`cuCtxPushCurrent`) before touching the memory.
     pub context: u64,
+    /// Ordinal of the CUDA device the memory is allocated on, as `cuDeviceGet`
+    /// numbers them. A consumer that describes the memory to another API
+    /// (DLPack's `device_id`) reports this rather than assuming device 0, and a
+    /// multi-GPU graph can tell two producers' surfaces apart.
+    pub device_ordinal: i32,
     /// Pins the backing allocation (eg the decoder's `AVFrame`) for the life
     /// of the pointers. Reference-counted (`Arc`), so a tee branch shares the
     /// allocation rather than copying it; the last drop releases it.
@@ -766,6 +781,7 @@ impl OwnedCudaBuffer {
         width: u32,
         height: u32,
         context: u64,
+        device_ordinal: i32,
         keep_alive: Arc<dyn CudaKeepAlive>,
     ) -> Self {
         Self {
@@ -776,6 +792,7 @@ impl OwnedCudaBuffer {
             width,
             height,
             context,
+            device_ordinal,
             keep_alive,
         }
     }
@@ -1157,6 +1174,7 @@ mod tests {
             1920,
             1080,
             0xC0FFEE,
+            0,
             Arc::new(FlagOnDrop(dropped.clone())),
         );
         let domain = MemoryDomain::Cuda(buf);
@@ -1174,6 +1192,7 @@ mod tests {
             1920,
             1080,
             0xC0FFEE,
+            0,
             Arc::new(FlagOnDrop(dropped.clone())),
         );
         assert!(
@@ -1269,6 +1288,7 @@ mod tests {
             1920,
             1080,
             0xC0FFEE,
+            0,
             Arc::new(FlagOnDrop(dropped.clone())),
         );
         let original = MemoryDomain::Cuda(buf);

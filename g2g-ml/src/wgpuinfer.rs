@@ -1104,7 +1104,7 @@ impl WgpuInference {
     /// [`StackLayer::Attention`] wires up. `attention_reference` matches it.
     /// Fails loud on a zero dim or a head count that does not divide `D`.
     pub fn attention(rows: u32, model_dim: u32, heads: u32) -> Result<Self, G2gError> {
-        if rows == 0 || model_dim == 0 || heads == 0 || model_dim % heads != 0 {
+        if rows == 0 || model_dim == 0 || heads == 0 || !model_dim.is_multiple_of(heads) {
             return Err(G2gError::CapsMismatch);
         }
         let dh = model_dim / heads;

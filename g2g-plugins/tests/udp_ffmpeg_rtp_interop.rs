@@ -13,8 +13,6 @@
 //! ```
 #![cfg(feature = "udp-ingress")]
 
-use core::future::Future;
-use core::pin::Pin;
 use std::net::UdpSocket as StdUdpSocket;
 use std::process::Command;
 use std::time::Duration;
@@ -31,10 +29,13 @@ struct AuCollect {
 }
 
 impl OutputSink for AuCollect {
-    fn push<'a>(
-        &'a mut self,
-        p: PipelinePacket,
-    ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
+    fn poll_push(
+        &mut self,
+        _cx: &mut core::task::Context<'_>,
+        packet_slot: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        let p = packet_slot.take().expect("poll_push without a packet");
+
         if let PipelinePacket::DataFrame(frame) = &p {
             if let Some(slice) = frame.domain.as_system_slice() {
                 let s = slice;
@@ -42,7 +43,7 @@ impl OutputSink for AuCollect {
                 self.aus.push((head, s.len(), frame.timing.keyframe));
             }
         }
-        Box::pin(async { Ok(PushOutcome::Accepted) })
+        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
     }
 }
 

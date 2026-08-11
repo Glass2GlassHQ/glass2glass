@@ -153,6 +153,7 @@ impl SourceLoop for GaplessSrc {
                         offset,
                         max_end: offset,
                         frames: 0,
+                        shifted: false,
                     };
                     let preempted =
                         match select2(src.run(&mut adapter), self.ctl.wait_instant()).await {
@@ -225,15 +226,24 @@ struct ShiftSink<'o> {
     /// `DataFrame`s forwarded for this item, so `GaplessSrc` counts frames even
     /// when a preemption drops the inner source's run future (losing its count).
     frames: u64,
+    /// Whether the packet in the caller's slot has already been shifted and
+    /// counted, so a re-poll under inner backpressure never shifts twice.
+    shifted: bool,
 }
 
 impl OutputSink for ShiftSink<'_> {
-    fn push<'a>(
-        &'a mut self,
-        packet: PipelinePacket,
-    ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
-        Box::pin(async move {
-            match packet {
+    fn begin_push(&mut self) {
+        self.shifted = false;
+        self.out.begin_push();
+    }
+
+    fn poll_push(
+        &mut self,
+        cx: &mut core::task::Context<'_>,
+        packet: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        if !self.shifted {
+            match packet.take().expect("poll_push without a packet") {
                 PipelinePacket::DataFrame(mut f) => {
                     f.timing.pts_ns = f.timing.pts_ns.saturating_add(self.offset);
                     f.timing.dts_ns = f.timing.dts_ns.saturating_add(self.offset);
@@ -242,16 +252,18 @@ impl OutputSink for ShiftSink<'_> {
                         self.max_end = end;
                     }
                     self.frames = self.frames.saturating_add(1);
-                    self.out.push(PipelinePacket::DataFrame(f)).await
+                    *packet = Some(PipelinePacket::DataFrame(f));
                 }
                 // Swallow the inner item's EOS: only playlist-end emits a terminal
                 // Eos (from `GaplessSrc::run`).
-                PipelinePacket::Eos => Ok(PushOutcome::Accepted),
+                PipelinePacket::Eos => return core::task::Poll::Ready(Ok(PushOutcome::Accepted)),
                 // A per-item caps refinement / segment / flush still reaches the
                 // chain unchanged.
-                other => self.out.push(other).await,
+                other => *packet = Some(other),
             }
-        })
+            self.shifted = true;
+        }
+        self.out.poll_push(cx, packet)
     }
 }
 

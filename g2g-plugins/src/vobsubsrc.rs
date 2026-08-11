@@ -34,8 +34,9 @@ use g2g_core::{
     SubPictureFormat,
 };
 
-use crate::filesink::io_err;
+use crate::filesink::path_io_err;
 use crate::vobsub::{parse_idx_index, read_spu_packet, spu_timing, IdxStream};
+use g2g_core::log::short_type_name;
 
 /// A VobSub `.idx` / `.sub` sidecar source.
 ///
@@ -158,14 +159,16 @@ impl SourceLoop for VobSubSrc {
             if !self.configured {
                 return Err(G2gError::NotConfigured);
             }
-            let idx = std::fs::read(&self.idx_path).map_err(io_err)?;
+            let idx = std::fs::read(&self.idx_path)
+                .map_err(|e| path_io_err(short_type_name::<Self>(), "read", &self.idx_path, e))?;
             let index = parse_idx_index(&idx).ok_or(G2gError::CapsMismatch)?;
             if index.streams.is_empty() {
                 return Err(G2gError::CapsMismatch);
             }
             let stream = select(&index.streams, self.language.as_deref(), index.langidx);
             let entries = stream.entries.clone();
-            let sub = std::fs::read(self.sub_path()).map_err(io_err)?;
+            let sub = std::fs::read(self.sub_path())
+                .map_err(|e| path_io_err(short_type_name::<Self>(), "read", self.sub_path(), e))?;
 
             // The out-of-band config first: the decoder tells it from a cue by
             // parsing it as `.idx` text, and needs it before the first one.
@@ -267,11 +270,13 @@ mod tests {
         packets: Vec<PipelinePacket>,
     }
     impl OutputSink for Collect {
-        fn push<'a>(
-            &'a mut self,
-            packet: PipelinePacket,
-        ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
-            Box::pin(async move {
+        fn poll_push(
+            &mut self,
+            _cx: &mut core::task::Context<'_>,
+            packet_slot: &mut Option<PipelinePacket>,
+        ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+            let packet = packet_slot.take().expect("poll_push without a packet");
+            core::task::Poll::Ready({
                 self.packets.push(packet);
                 Ok(PushOutcome::Accepted)
             })

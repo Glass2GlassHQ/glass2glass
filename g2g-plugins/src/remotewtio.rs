@@ -273,7 +273,7 @@ pub(crate) fn parse_cert_hashes(spec: &str) -> Result<Vec<Vec<u8>>, G2gError> {
 /// Decode an even-length hex string, tolerating `:` separators.
 fn hex_bytes(s: &str) -> Option<Vec<u8>> {
     let digits: Vec<u8> = s.bytes().filter(|b| *b != b':').collect();
-    if digits.len() % 2 != 0 {
+    if !digits.len().is_multiple_of(2) {
         return None;
     }
     digits

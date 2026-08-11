@@ -11,8 +11,6 @@
 //! self-skip when the binary is absent.
 #![cfg(feature = "std")]
 
-use core::future::Future;
-use core::pin::Pin;
 use std::process::Command;
 
 use g2g_core::conformance::{ConformanceDimension, Evidence};
@@ -53,11 +51,13 @@ struct Collect {
     bytes: Vec<u8>,
 }
 impl OutputSink for Collect {
-    fn push<'a>(
-        &'a mut self,
-        packet: PipelinePacket,
-    ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
-        Box::pin(async move {
+    fn poll_push(
+        &mut self,
+        _cx: &mut core::task::Context<'_>,
+        packet_slot: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        let packet = packet_slot.take().expect("poll_push without a packet");
+        core::task::Poll::Ready({
             if let PipelinePacket::DataFrame(f) = packet {
                 if let Some(s) = f.domain.as_system_slice() {
                     self.bytes.extend_from_slice(s);
@@ -74,12 +74,14 @@ struct PortTap {
     frames: Vec<usize>,
 }
 impl MultiOutputSink for PortTap {
-    fn push_to<'a>(
-        &'a mut self,
+    fn poll_push_to(
+        &mut self,
+        _cx: &mut core::task::Context<'_>,
         port: usize,
-        packet: PipelinePacket,
-    ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
-        Box::pin(async move {
+        packet_slot: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        let packet = packet_slot.take().expect("poll_push without a packet");
+        core::task::Poll::Ready({
             if matches!(packet, PipelinePacket::DataFrame(_)) {
                 self.frames[port] += 1;
             }

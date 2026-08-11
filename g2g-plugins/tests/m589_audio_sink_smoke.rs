@@ -15,9 +15,6 @@
 //! (PulseAudio-on-PipeWire + pipewire-alsa); it plays a brief quiet tone.
 #![cfg(any(feature = "alsa-sink", feature = "pulse-sink", feature = "pipewire"))]
 
-use std::future::Future;
-use std::pin::Pin;
-
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::block_on;
@@ -55,11 +52,13 @@ const SHAPES: &[(AudioFormat, u8)] = &[
 /// `OutputSink` argument of `process`.
 struct NullSink;
 impl OutputSink for NullSink {
-    fn push<'a>(
-        &'a mut self,
-        _packet: PipelinePacket,
-    ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
-        Box::pin(async { Ok(PushOutcome::Accepted) })
+    fn poll_push(
+        &mut self,
+        _cx: &mut core::task::Context<'_>,
+        packet_slot: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        packet_slot.take();
+        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
     }
 }
 

@@ -22,7 +22,8 @@ use g2g_core::{
 };
 
 use crate::audio::WAVE_FORMAT_IEEE_FLOAT;
-use crate::filesink::io_err;
+use crate::filesink::{io_err, path_io_err};
+use g2g_core::log::short_type_name;
 
 /// Byte offset of the RIFF running size (constant across header layouts).
 const RIFF_SIZE_OFFSET: u64 = 4;
@@ -127,7 +128,8 @@ impl AsyncElement for WavSink {
         let header = wav_header(tag, bits, channels, rate);
         self.header_len = header.len() as u64;
         self.block_align = (channels * bits / 8) as u32;
-        let file = File::create(&self.path).map_err(io_err)?;
+        let file = File::create(&self.path)
+            .map_err(|e| path_io_err(short_type_name::<Self>(), "create", &self.path, e))?;
         let mut writer = BufWriter::new(file);
         writer.write_all(&header).map_err(io_err)?;
         self.writer = Some(writer);
@@ -332,11 +334,13 @@ mod tests {
         use g2g_core::{Frame, FrameTiming, MemoryDomain, PushOutcome, SystemSlice};
         struct NullSink;
         impl OutputSink for NullSink {
-            fn push<'a>(
-                &'a mut self,
-                _p: PipelinePacket,
-            ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
-                Box::pin(async { Ok(PushOutcome::Accepted) })
+            fn poll_push(
+                &mut self,
+                _cx: &mut core::task::Context<'_>,
+                packet_slot: &mut Option<PipelinePacket>,
+            ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+                packet_slot.take();
+                core::task::Poll::Ready(Ok(PushOutcome::Accepted))
             }
         }
         let path = std::env::temp_dir().join("g2g_wavsink_float.wav");

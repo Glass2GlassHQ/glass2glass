@@ -25,8 +25,6 @@
 //!
 //! Close the window (or Esc) to quit.
 
-use core::future::Future;
-use core::pin::Pin;
 use std::sync::Arc;
 
 use g2g_core::runtime::{block_on, link, LinkReceiver, SenderSink, SourceLoop};
@@ -294,24 +292,34 @@ fn surface_config(
 struct PresentSink<'s>(&'s mut WgpuSink);
 
 impl OutputSink for PresentSink<'_> {
-    fn push<'a>(
-        &'a mut self,
-        packet: PipelinePacket,
-    ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
-        Box::pin(async move {
-            self.0.process(packet, &mut NullSink).await?;
-            Ok(PushOutcome::Accepted)
-        })
+    fn poll_push(
+        &mut self,
+        cx: &mut core::task::Context<'_>,
+        packet: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        let packet = packet.take().expect("poll_push without a packet");
+        let mut nul = NullSink;
+        let mut fut = self.0.process(packet, &mut nul);
+        match fut.as_mut().poll(cx) {
+            core::task::Poll::Ready(r) => {
+                core::task::Poll::Ready(r.map(|()| PushOutcome::Accepted))
+            }
+            // In-memory test elements never block: their only awaits are
+            // pushes into always-ready capture sinks.
+            core::task::Poll::Pending => panic!("element future did not resolve in one poll"),
+        }
     }
 }
 
 /// A discarding sink for the terminal `WgpuSink` (it forwards nothing).
 struct NullSink;
 impl OutputSink for NullSink {
-    fn push<'a>(
-        &'a mut self,
-        _packet: PipelinePacket,
-    ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
-        Box::pin(async { Ok(PushOutcome::Accepted) })
+    fn poll_push(
+        &mut self,
+        _cx: &mut core::task::Context<'_>,
+        packet_slot: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        packet_slot.take();
+        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
     }
 }

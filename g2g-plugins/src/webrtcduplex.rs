@@ -31,8 +31,13 @@
 //! [`DuplexControl::remove_track`] is the inverse (M785): it stops the m-line,
 //! freeing both of its pads on both peers. A freed pad is claimable again by the
 //! same two paths, and its next track always negotiates a NEW m-line, since a
-//! stopped one cannot be reactivated. STUN / TURN NAT traversal and a pluggable
-//! real-SFU signaller are follow-ups.
+//! stopped one cannot be reactivated. Under the dynamic runner
+//! (`run_duplex_session_dynamic`, M1014) no reserve is needed at all: a send
+//! track added through the runner's handle announces itself on a fresh input
+//! index and the session grows to take it, and a peer track with no free pad
+//! grows a recv port through `MultiOutputSink::add_port` instead of being
+//! skipped. STUN / TURN NAT traversal and a pluggable real-SFU signaller are
+//! follow-ups.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -56,6 +61,7 @@ use str0m::media::{Direction, MediaKind, Mid, Pt};
 use str0m::{Event, IceConnectionState, Input, Output, RtcConfig};
 
 use g2g_core::frame::Frame;
+use g2g_core::g2g_warn;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AudioFormat, Caps, CapsConstraint, ConfigureOutcome, Dim, DuplexInbound, G2gError,
@@ -251,9 +257,10 @@ impl WebRtcDuplexSession {
     /// Reserve `video` + `audio` extra pads beyond the active tracks (M784).
     /// A spare pad carries no m-line at the handshake: it binds mid-session,
     /// either when its send pad gets its first frame (the session offers the
-    /// peer a new m-line) or when the peer adds an m-line of that kind. Tracks
-    /// beyond the reserve are rejected, since the pad count is fixed at graph
-    /// build time.
+    /// peer a new m-line) or when the peer adds an m-line of that kind. Under
+    /// the fixed-arity runner, tracks beyond the reserve are rejected; the
+    /// dynamic runner (`run_duplex_session_dynamic`, M1014) grows the pad count
+    /// instead, so it needs no reserve.
     pub fn with_spare_tracks(mut self, video: usize, audio: usize) -> Self {
         self.pad_kinds
             .extend(core::iter::repeat_n(Track::Video, video));
@@ -338,6 +345,27 @@ fn caps_for(kind: Track) -> Caps {
         Track::Video => video_caps(),
         Track::Audio => audio_caps(),
     }
+}
+
+/// The log category this session reports its pad decisions on.
+const DUPLEX_CATEGORY: &str = "webrtcduplex";
+
+/// Ask the runner for one more recv pad of `kind` when no declared pad is free
+/// (M1014), and take it into the pad tables so the new port announces its caps
+/// before its first frame like any other. `None` when the runner cannot grow (the
+/// fixed-arity duplex runner), which leaves the caller with today's behavior.
+fn grow_out_pad(
+    out: &mut dyn MultiOutputSink,
+    pad_kinds: &mut Vec<Track>,
+    announced: &mut Vec<bool>,
+    kind: Track,
+) -> Option<usize> {
+    let port = out.add_port(&caps_for(kind))?;
+    if port >= pad_kinds.len() {
+        pad_kinds.resize(port + 1, kind);
+        announced.resize(port + 1, false);
+    }
+    Some(port)
 }
 
 /// One negotiated m-line and the pads it serves: `out_pad` emits the peer's
@@ -438,8 +466,11 @@ impl MultiDuplexSession for WebRtcDuplexSession {
     ) -> Self::RunFuture<'a> {
         let role = self.role;
         let track_count = self.track_count;
-        let pad_kinds = self.pad_kinds.clone();
-        let inputs = self.inputs.clone();
+        // Pad tables grow with the session (M1014): a send pad appears when a
+        // track the runner attached mid-run announces its caps, a recv pad when
+        // the runner hands out a port for a track no declared pad can carry.
+        let mut pad_kinds = self.pad_kinds.clone();
+        let mut inputs = self.inputs.clone();
         let stun = self.stun_server.clone();
         let turn_server = self.turn_server.clone();
         let turn_user = self.turn_user.clone();
@@ -449,7 +480,7 @@ impl MultiDuplexSession for WebRtcDuplexSession {
         let control_handle = self.control.clone();
         // Per-input reverse channels, so a remote PLI / BWE naming a track's
         // m-line routes back to the source feeding that m-line's send pad.
-        let reverse = self.reverse.clone();
+        let mut reverse = self.reverse.clone();
         let nacks_seen = self.nacks_seen.clone();
         Box::pin(async move {
             let hw = || G2gError::Hardware(HardwareError::Other);
@@ -558,6 +589,10 @@ impl MultiDuplexSession for WebRtcDuplexSession {
             // answers the peer's offer.
             let control = control_handle;
             let mut renego_pending: Option<str0m::change::SdpPendingOffer> = None;
+            // Send pads added mid-run, waiting for their reverse channel. The
+            // lookup cannot happen where the pad is learned: that is inside the
+            // select below, which holds `inbound` borrowed for its `recv`.
+            let mut pending_reverse: Vec<usize> = Vec::new();
 
             // Run after every SDP application: drop the bindings whose m-line
             // str0m no longer has (a retracted ADD, e.g. one this side yielded on
@@ -581,7 +616,7 @@ impl MultiDuplexSession for WebRtcDuplexSession {
 
             macro_rules! finish {
                 () => {{
-                    for o in 0..pad_count {
+                    for o in 0..pad_kinds.len() {
                         out.push_to(o, PipelinePacket::Eos).await?;
                     }
                     return Ok(received);
@@ -589,6 +624,12 @@ impl MultiDuplexSession for WebRtcDuplexSession {
             }
 
             loop {
+                for idx in core::mem::take(&mut pending_reverse) {
+                    if let Some(rc) = inbound.reverse_channel(idx) {
+                        reverse[idx] = rc;
+                    }
+                }
+
                 // (output port, pts_ns, data) collected while draining poll_output.
                 let mut frames: Vec<(usize, u64, Vec<u8>)> = Vec::new();
                 let deadline = loop {
@@ -598,16 +639,20 @@ impl MultiDuplexSession for WebRtcDuplexSession {
                         // A remote-created m-line: the answerer learns its initial
                         // `Mid`s here (the offerer captured them from `add_media`),
                         // and either side learns a mid-session ADD by the peer
-                        // (M784). Bind it to the first free pad of its kind; with
-                        // no free output pad it stays unbound and its media is
-                        // skipped by the unknown-mid path below.
+                        // (M784). Bind it to the first free pad of its kind, or to
+                        // one grown for it (M1014); only a runner that cannot grow
+                        // leaves it unbound, its media skipped by the unknown-mid
+                        // path below.
                         Ok(Output::Event(Event::MediaAdded(m))) => {
                             if binding_of_mid(&bindings, m.mid).is_none() {
                                 let kind = match m.kind {
                                     MediaKind::Video => Track::Video,
                                     MediaKind::Audio => Track::Audio,
                                 };
-                                if let Some(out_pad) = free_out_pad(&bindings, &pad_kinds, kind) {
+                                let pad = free_out_pad(&bindings, &pad_kinds, kind).or_else(|| {
+                                    grow_out_pad(out, &mut pad_kinds, &mut announced, kind)
+                                });
+                                if let Some(out_pad) = pad {
                                     let in_pad = free_in_pad(&bindings, &inputs, kind);
                                     bindings.push(Binding {
                                         mid: m.mid,
@@ -868,19 +913,30 @@ impl MultiDuplexSession for WebRtcDuplexSession {
                                             }
                                         }
                                     }
-                                    // A spare send pad with no m-line yet (M784):
-                                    // offer the peer a new sendrecv m-line and claim
-                                    // a free output pad of the same kind. This frame
-                                    // is dropped (nothing can be written before the
-                                    // answer lands); a later one starts the stream.
-                                    // With another exchange in flight, retry later.
+                                    // A send pad with no m-line yet, either a spare
+                                    // (M784) or one added mid-run (M1014): offer the
+                                    // peer a new sendrecv m-line and claim an output
+                                    // pad of the same kind, growing the recv side if
+                                    // none is free. This frame is dropped (nothing
+                                    // can be written before the answer lands); a
+                                    // later one starts the stream. With another
+                                    // exchange in flight, retry later.
                                     None => {
                                         let add = kind.filter(|_| {
                                             idx >= track_count && renego_pending.is_none()
                                         });
                                         if let Some(kind) = add {
                                             let out_pad =
-                                                free_out_pad(&bindings, &pad_kinds, kind);
+                                                free_out_pad(&bindings, &pad_kinds, kind).or_else(
+                                                    || {
+                                                        grow_out_pad(
+                                                            out,
+                                                            &mut pad_kinds,
+                                                            &mut announced,
+                                                            kind,
+                                                        )
+                                                    },
+                                                );
                                             if let Some(out_pad) = out_pad {
                                                 let mut api = rtc.sdp_api();
                                                 let mid = api.add_media(
@@ -908,6 +964,28 @@ impl MultiDuplexSession for WebRtcDuplexSession {
                                                 }
                                             }
                                         }
+                                    }
+                                }
+                            }
+                            // A send pad the runner attached mid-run (M1014)
+                            // introduces itself with its caps on an index past the
+                            // ones configured at startup. Its kind comes from those
+                            // caps; the local-ADD path above then offers the peer an
+                            // m-line for it on its first frame.
+                            Some((idx, PipelinePacket::CapsChanged(caps))) => {
+                                if idx >= inputs.len() {
+                                    match track_of(&caps) {
+                                        Some(kind) => {
+                                            inputs.resize(idx + 1, None);
+                                            inputs[idx] = Some(kind);
+                                            reverse.resize_with(idx + 1, ReverseChannel::new);
+                                            pending_reverse.push(idx);
+                                        }
+                                        None => g2g_warn!(
+                                            g2g_core::log::Target::category(DUPLEX_CATEGORY),
+                                            "send pad {idx} announced caps this session cannot \
+                                             carry ({caps:?}): dropping its frames"
+                                        ),
                                     }
                                 }
                             }

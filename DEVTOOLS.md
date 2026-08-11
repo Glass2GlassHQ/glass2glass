@@ -256,6 +256,31 @@ Today's tap covers the cooperative graph runner and the two linear runners
 per-link transit time, source-side timing, and the threaded runner are
 follow-ups (see `DESIGN_TODO.md`).
 
+## Terminal UI (`--tui`)
+
+`g2g-launch --tui` draws the same live telemetry in the terminal, with no
+browser and no port. Build with the `tui` feature:
+
+```sh
+cargo run -p g2g-plugins --features tui --bin g2g-launch -- \
+  --tui videotestsrc ! videoscale ! fakesink
+```
+
+Two screens, `g` toggles: a table view (per-element `process()` p50 / p99, input
+wait, push-back, input fill; per-link caps, packets, bytes, drops; the
+single-frame journey as a wait / work / blocked bar per stage) and an ASCII
+topology view (one box per element with its live p99, arrows following the
+links, each labelled with packets crossed and `-N` frames dropped, boxes colored
+by peak input fill). Arrow keys pan the topology when it is wider than the
+terminal. `q`, Esc, or Ctrl-C quits, which stops the pipeline and restores the
+terminal.
+
+It reads the same `Observer` tap the dashboard does, in-process, at 250 ms; it
+needs neither `observe` nor JSON. Log records would tear up the drawing, so
+while the UI holds the terminal, g2g logging is diverted from stderr into a ring
+buffer and shown as a log pane (`G2G_DEBUG` still selects what is recorded); the
+stderr sink comes back on exit.
+
 ## Visual pipeline builder
 
 `tools/builder/` is a React Flow app (Vite + pnpm) that lets you assemble a
@@ -335,6 +360,29 @@ The round-trip is byte-identical (`replaysrc` re-emits the recorded caps and
 frames exactly). The file is length-prefixed `g2g_core::wire` records, the same
 codec the distributed-graph transports use.
 
+## Flight recorder
+
+`recordsink` needs to be in the pipeline before the run. When a live pipeline
+fails after an hour, use the flight recorder instead: every link keeps a bounded
+ring of its most recent packets, and a failed run writes each ring out as a
+recording of the traffic that led there.
+
+```sh
+g2g-launch --record-on-error dumps/ "videotestsrc ! videoscale width=64 height=48 ! filesink location=/dev/full"
+# on failure it prints one line per file:
+#   recorded dumps/0-VideoTestSrc0-to-VideoScale0.g2grec
+#   recorded dumps/1-VideoScale0-to-FileSink0.g2grec
+
+g2g-launch "replaysrc location=dumps/1-VideoScale0-to-FileSink0.g2grec ! fakesink"
+```
+
+Files are named for the two elements the link joins, and hold the same records
+`recordsink` writes, so any dump replays as a source. Retention per link is
+`FLIGHT_RING_PACKETS` (60) packets or `FLIGHT_RING_BYTES` (8 MiB), whichever
+binds first. Off by default and free when off. Works under `--threads`, and with
+`--observe` / `--tui`. One limit: a link carrying GPU memory is skipped (device
+frames do not serialize, so they cannot be replayed).
+
 ## MCP server (`g2g-mcp`)
 
 `g2g-mcp` is a Model Context Protocol server (JSON-RPC over stdio) for
@@ -359,7 +407,13 @@ Find the docs for a single element the way `gst-inspect` does:
 g2g-inspect                     # list every element in this build
 g2g-inspect videotestsrc        # role, caps / pad templates, and all properties
 g2g-inspect --gst <name>        # what a GStreamer element name maps to in g2g
+g2g-inspect --gst-map           # gst-name/g2g-runtime-name pairs, tab separated
 ```
+
+`--gst-map` is for a tool comparing g2g's graph against GStreamer's: g2g names a
+graph node after the Rust type (`NalParse0`) where gst names it after the factory
+(`h264parse0`), so pairing the two engines' elements needs the synonyms. Only the
+names that actually differ are printed.
 
 The same facts are available as structured data (`Registry::describe(name)` /
 `describe_all()` returning `ElementDoc` / `PropertyDoc`), which powers a

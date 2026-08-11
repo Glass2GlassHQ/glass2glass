@@ -101,6 +101,7 @@ use crate::clock::wait_to_present;
 use crate::worker_ready::Handshake;
 use g2g_core::element::{PresentationStats, QosMessage};
 use g2g_core::frame::Frame;
+use g2g_core::memory::{DomainSet, MemoryDomainKind};
 use g2g_core::metrics::{monotonic_ns, LatencyHistogram, LatencySnapshot};
 use g2g_core::{
     AsyncElement, BusHandle, Caps, CapsConstraint, CapsSet, ClockCandidate, ClockPriority,
@@ -334,6 +335,12 @@ impl AsyncElement for WaylandSink {
             ClockPriority::Provider,
             alloc::sync::Arc::new(WaylandClock),
         ))
+    }
+
+    /// This sink blits from host memory, so it takes system frames only. The
+    /// allocation cascade turns that into a download demand on a GPU producer.
+    fn input_domains(&self) -> DomainSet {
+        DomainSet::only(MemoryDomainKind::System)
     }
 
     /// Adopt the elected clock + base time so frames present at their PTS
@@ -965,6 +972,18 @@ mod tests {
     use super::*;
     use g2g_core::{BusMessage, Rate, VideoCodec};
 
+    /// The sink converts on the CPU into `wl_shm`, so it has to tell a GPU decoder to
+    /// download. The allocation cascade reads this declaration, so getting it
+    /// wrong means `nvdec ! waylandsink` takes a device pointer and dies with
+    /// `UnsupportedDomain`.
+    #[test]
+    fn declares_system_memory_only() {
+        assert_eq!(
+            WaylandSink::new().input_domains(),
+            DomainSet::only(MemoryDomainKind::System)
+        );
+    }
+
     #[test]
     fn intercept_passes_through_any_format() {
         // Negotiation-time intercept is pass-through; the NV12 requirement
@@ -1080,11 +1099,13 @@ mod tests {
     /// A no-op downstream (a sink has none, but `process` takes one).
     struct NullOut;
     impl OutputSink for NullOut {
-        fn push<'a>(
-            &'a mut self,
-            _p: PipelinePacket,
-        ) -> Pin<Box<dyn Future<Output = Result<g2g_core::PushOutcome, G2gError>> + 'a>> {
-            Box::pin(async { Ok(g2g_core::PushOutcome::Accepted) })
+        fn poll_push(
+            &mut self,
+            _cx: &mut core::task::Context<'_>,
+            packet_slot: &mut Option<PipelinePacket>,
+        ) -> core::task::Poll<Result<g2g_core::PushOutcome, G2gError>> {
+            packet_slot.take();
+            core::task::Poll::Ready(Ok(g2g_core::PushOutcome::Accepted))
         }
     }
 

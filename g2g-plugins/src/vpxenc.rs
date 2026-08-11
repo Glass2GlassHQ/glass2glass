@@ -443,26 +443,27 @@ mod tests {
         bps: u32,
     }
     impl OutputSink for FeedbackSink {
-        fn push<'a>(
-            &'a mut self,
-            packet: PipelinePacket,
-        ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
-            Box::pin(async move {
-                if let PipelinePacket::DataFrame(f) = packet {
-                    if let Some(sl) = f.domain.as_system_slice() {
-                        self.frames.push(sl.to_vec());
-                    }
+        fn poll_push(
+            &mut self,
+            _cx: &mut core::task::Context<'_>,
+            packet: &mut Option<PipelinePacket>,
+        ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+            use core::task::Poll;
+            if let PipelinePacket::DataFrame(f) = packet.take().expect("poll_push without a packet")
+            {
+                if let Some(sl) = f.domain.as_system_slice() {
+                    self.frames.push(sl.to_vec());
                 }
-                if self.frames.len() >= 2 && !core::mem::replace(&mut self.kf_sent, true) {
-                    return Ok(PushOutcome::Reconfigure(
-                        g2g_core::Reconfigure::ForceKeyframe,
-                    ));
-                }
-                if self.bps > 0 {
-                    return Ok(PushOutcome::Bitrate(self.bps));
-                }
-                Ok(PushOutcome::Accepted)
-            })
+            }
+            if self.frames.len() >= 2 && !core::mem::replace(&mut self.kf_sent, true) {
+                return Poll::Ready(Ok(PushOutcome::Reconfigure(
+                    g2g_core::Reconfigure::ForceKeyframe,
+                )));
+            }
+            if self.bps > 0 {
+                return Poll::Ready(Ok(PushOutcome::Bitrate(self.bps)));
+            }
+            Poll::Ready(Ok(PushOutcome::Accepted))
         }
     }
 
@@ -510,11 +511,13 @@ mod tests {
         frames: Vec<Vec<u8>>,
     }
     impl OutputSink for CaptureSink {
-        fn push<'a>(
-            &'a mut self,
-            packet: PipelinePacket,
-        ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
-            Box::pin(async move {
+        fn poll_push(
+            &mut self,
+            _cx: &mut core::task::Context<'_>,
+            packet_slot: &mut Option<PipelinePacket>,
+        ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+            let packet = packet_slot.take().expect("poll_push without a packet");
+            core::task::Poll::Ready({
                 match packet {
                     PipelinePacket::CapsChanged(c) => self.caps.push(c),
                     PipelinePacket::DataFrame(f) => {

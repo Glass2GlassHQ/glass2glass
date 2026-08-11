@@ -14,6 +14,8 @@
 //! last reuses [`texture_of`] / [`WgpuTextureKeepAlive`] to read an upstream
 //! producer's texture in the wgpu -> CUDA bridge element.
 
+use alloc::boxed::Box;
+
 use g2g_core::memory::OwnedWgpuTexture;
 use g2g_core::{G2gError, HardwareError, WgpuKeepAlive};
 
@@ -129,14 +131,19 @@ impl WgpuKeepAlive for WgpuTextureKeepAlive {
 /// producer wrapped it. Returns `None` if the frame's keep-alive is some other
 /// (foreign) producer's type this sink cannot present.
 ///
-/// Two in-tree producers wrap their texture differently: the overlay / blit path
-/// uses [`WgpuTextureKeepAlive`], and the Android MediaCodec GPU decode (M304/M305)
-/// uses [`mediacodec_wgpu::WgpuRgbaTexture`](crate::mediacodec_wgpu::WgpuRgbaTexture).
-/// Recognising both lets the one [`WgpuSink`](crate::wgpusink) present either.
+/// Three in-tree producers wrap their texture differently: the overlay / blit
+/// path uses [`WgpuTextureKeepAlive`], the CUDA and GPU-decode NV12 bridges use
+/// [`WgpuNv12Texture`], and the Android MediaCodec GPU decode (M304/M305) uses
+/// [`mediacodec_wgpu::WgpuRgbaTexture`](crate::mediacodec_wgpu::WgpuRgbaTexture).
+/// Recognising all three lets the one [`WgpuSink`](crate::wgpusink) present any
+/// of them; [`texture_layout`] says how the pixels are stored.
 pub fn texture_of(owned: &OwnedWgpuTexture) -> Option<&wgpu::Texture> {
     let any = owned.keep_alive().as_any();
     if let Some(k) = any.downcast_ref::<WgpuTextureKeepAlive>() {
         return Some(&k.0);
+    }
+    if let Some(k) = any.downcast_ref::<WgpuNv12Texture>() {
+        return Some(k.texture());
     }
     // The Android decoder's RGBA output: same device, different wrapper.
     #[cfg(all(target_os = "android", feature = "mediacodec-wgpu"))]
@@ -144,6 +151,32 @@ pub fn texture_of(owned: &OwnedWgpuTexture) -> Option<&wgpu::Texture> {
         return Some(k.texture());
     }
     None
+}
+
+/// How a `WgpuTexture`-domain frame stores its picture, which decides how a
+/// consumer samples it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WgpuTextureLayout {
+    /// One colour texture holding the finished picture, sampled directly.
+    Rgba,
+    /// The packed-NV12 plane [`WgpuNv12Texture`] describes: `width x height*3/2`
+    /// R8Uint, Y rows then interleaved CbCr, needing a YCbCr -> RGB convert.
+    PackedNv12,
+}
+
+/// The layout of `texture` from its format: the R8Uint single-channel plane the
+/// NV12 bridges allocate is packed NV12, an uncompressed colour format is a
+/// finished picture. `None` for a format no g2g consumer samples.
+pub fn texture_layout(texture: &wgpu::Texture) -> Option<WgpuTextureLayout> {
+    match texture.format() {
+        wgpu::TextureFormat::R8Uint => Some(WgpuTextureLayout::PackedNv12),
+        wgpu::TextureFormat::Rgba8Unorm
+        | wgpu::TextureFormat::Rgba8UnormSrgb
+        | wgpu::TextureFormat::Bgra8Unorm
+        | wgpu::TextureFormat::Bgra8UnormSrgb
+        | wgpu::TextureFormat::Rgba16Float => Some(WgpuTextureLayout::Rgba),
+        _ => None,
+    }
 }
 
 /// Read an RGBA8 `wgpu::Texture` back to a packed `Vec<u8>` (`width * height * 4`)
@@ -309,6 +342,85 @@ pub(crate) unsafe fn import_vk_image_as_wgpu_texture(
     }
 }
 
+/// Owns a GPU-resident NV12 frame for surface-import into `WgpuPreprocess`
+/// (M217): an R8Uint `wgpu::Texture` of size `width x (height * 3/2)` holding the
+/// bytes in the standard NV12 layout (Y plane, then interleaved Cb,Cr), plus the
+/// device / queue it lives on. Boxed as the [`WgpuKeepAlive`] of a
+/// [`MemoryDomain::WgpuTexture`](g2g_core::MemoryDomain); a consumer downcasts to
+/// recover the texture and adopt its device (a texture is bindable only on its
+/// own device), so the NV12 pixels are sampled straight into a compute or render
+/// pass with no CPU upload. `CudaToWgpu` and the g2g-ml `nv12_to_gpu_texture`
+/// helper are the producers; `WgpuSink` and `WgpuPreprocess` are the consumers.
+pub struct WgpuNv12Texture {
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    texture: wgpu::Texture,
+    /// Optional drop guard whose `Drop` recycles the backing image (e.g. a
+    /// `CudaWgpuPool` return handle from `CudaToWgpu`). Type-erased so this stays
+    /// decoupled from the producer; `None` for non-pooled producers like
+    /// `nv12_to_gpu_texture`. Held only to run its `Drop` when the frame releases.
+    _recycle: Option<Box<dyn core::any::Any + Send + Sync>>,
+}
+
+impl core::fmt::Debug for WgpuNv12Texture {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("WgpuNv12Texture")
+            .field("texture", &self.texture)
+            .field("pooled", &self._recycle.is_some())
+            .finish()
+    }
+}
+
+impl WgpuNv12Texture {
+    /// Wrap an NV12 R8Uint texture with the device / queue it lives on.
+    pub fn new(device: wgpu::Device, queue: wgpu::Queue, texture: wgpu::Texture) -> Self {
+        Self {
+            device,
+            queue,
+            texture,
+            _recycle: None,
+        }
+    }
+
+    /// Like [`new`](Self::new), but carries a drop guard recycled when the frame
+    /// is released (a pooled producer hands back a `CudaWgpuPool` return handle).
+    pub fn with_recycle(
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        texture: wgpu::Texture,
+        recycle: Box<dyn core::any::Any + Send + Sync>,
+    ) -> Self {
+        Self {
+            device,
+            queue,
+            texture,
+            _recycle: Some(recycle),
+        }
+    }
+
+    /// The backing NV12 texture, for the importer to sample directly.
+    pub fn texture(&self) -> &wgpu::Texture {
+        &self.texture
+    }
+
+    /// The device the texture lives on; the importer adopts it to bind the
+    /// texture rather than uploading the frame to its own device.
+    pub fn device(&self) -> &wgpu::Device {
+        &self.device
+    }
+
+    /// The queue paired with [`device`](Self::device).
+    pub fn queue(&self) -> &wgpu::Queue {
+        &self.queue
+    }
+}
+
+impl WgpuKeepAlive for WgpuNv12Texture {
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
+}
+
 /// Guards every device open in the test binary: opening several wgpu devices
 /// concurrently crashes some drivers (seen as a SIGSEGV inside the NVIDIA driver
 /// when GPU tests each opened their own). Holds the shared context once built.
@@ -317,7 +429,7 @@ static SHARED_CTX: tokio::sync::Mutex<Option<GpuContext>> = tokio::sync::Mutex::
 
 /// One device for the whole test binary, built under [`SHARED_CTX`]. `None` when
 /// the host has no adapter (CI), so every GPU test skips.
-#[cfg(test)]
+#[cfg(all(test, any(feature = "wgpu-sink", feature = "vello-overlay")))]
 pub(crate) async fn shared_ctx() -> Option<GpuContext> {
     let mut slot = SHARED_CTX.lock().await;
     if slot.is_none() {

@@ -147,7 +147,10 @@ pub fn negotiated_version(
     session: &web_transport_quinn::Session,
     offered: &[MoqtVersion],
 ) -> Result<MoqtVersion, G2gError> {
-    match session.response().protocol.as_deref() {
+    match session
+        .response()
+        .and_then(|response| response.protocol.as_deref())
+    {
         Some(protocol) => {
             MoqtVersion::from_protocol(protocol).ok_or(G2gError::Hardware(HardwareError::Other))
         }

@@ -25,6 +25,13 @@
 //!   --run-json          run the pipeline to EOS and print the same JSON with
 //!                       each edge's caps as observed while it ran, so a stream
 //!                       that refines mid-run reports its real geometry
+//!   --tui               run the pipeline under a live terminal UI (element
+//!                       latency, link traffic, topology, frame journey);
+//!                       needs the `tui` build feature
+//!   --record-on-error <dir>
+//!                       keep a bounded ring of recent packets per link while the
+//!                       run goes, and on failure write each link's ring into
+//!                       <dir> as a `replaysrc` recording (M1016)
 //!   --plugin <path>     load a third-party plugin `.so` before parsing
 //!                       (repeatable; needs the `plugin-loader` build feature)
 //!   --graph <file>      build the graph from a declarative JSON / YAML document
@@ -60,13 +67,14 @@ use std::io::Write;
 use std::process;
 use std::time::{Duration, Instant};
 
-#[cfg(feature = "multi-thread")]
-use g2g_core::runtime::run_graph_threaded_with_progress;
 use g2g_core::runtime::{
-    parse_launch, run_graph_with_progress, GraphNode, PipelineProgress, Registry,
+    parse_launch, run_graph_recorded, run_graph_with_progress, FlightRecorder, GraphNode,
+    PipelineProgress, Registry,
 };
-#[cfg(feature = "observe")]
-use g2g_core::runtime::{run_graph_observed, Observer};
+#[cfg(any(feature = "observe", feature = "tui"))]
+use g2g_core::runtime::{run_graph_observed, run_graph_observed_recorded, Observer};
+#[cfg(feature = "multi-thread")]
+use g2g_core::runtime::{run_graph_threaded_recorded, run_graph_threaded_with_progress};
 #[cfg(feature = "observe")]
 use g2g_core::Bus;
 use g2g_core::Graph;
@@ -80,7 +88,16 @@ use g2g_plugins::TokioThreadSpawner;
 // link_capacity dominating glass-to-glass latency).
 const LINK_CAPACITY: usize = 4;
 
-const USAGE: &str = "usage: g2g-launch [-v] [-q] [--dot] [--copy-plan] [--validate-json] [--run-json] [--threads] [--observe <port>] [--observe-host <addr>] [--plugin <path>] [-e] [-m] [-h] \
+/// A boxed pipeline run, so the runner entry a flag selects (recorded or not,
+/// cooperative or thread-per-arm) is one type the driving loop can hold.
+type RunFuture<'r> = core::pin::Pin<
+    Box<
+        dyn core::future::Future<Output = Result<g2g_core::runtime::RunStats, g2g_core::G2gError>>
+            + 'r,
+    >,
+>;
+
+const USAGE: &str = "usage: g2g-launch [-v] [-q] [--dot] [--copy-plan] [--validate-json] [--run-json] [--threads] [--observe <port>] [--observe-host <addr>] [--tui] [--record-on-error <dir>] [--plugin <path>] [-e] [-m] [-h] \
 <element> [key=value ...] ! <element> ! ...\n       \
 g2g-launch [OPTIONS] --graph <file.json|.yaml>   # declarative graph (M578)\n       \
 g2g-launch [OPTIONS] --script <file.rhai>         # Rhai graph-building script (M579)";
@@ -91,11 +108,13 @@ g2g-launch [OPTIONS] --script <file.rhai>         # Rhai graph-building script (
 const SEE_ALSO: &str = "\n\
 dev tooling (see DEVTOOLS.md):\n  \
 watch a run live      g2g-launch --observe 8787 <pipeline>   then open http://127.0.0.1:8787\n  \
+watch it in a shell   g2g-launch --tui <pipeline>             live tables + ASCII topology, q to quit\n  \
 why did nego fail     a failed run prints the conflicting elements + caps by default; G2G_CAPS_TRACE=1 adds the per-edge trace\n  \
 see the graph         g2g-launch --dot <pipeline> | dot -Tsvg -o pipe.svg\n  \
 inspect an element    g2g-inspect [<name>]                    role, caps, and every property\n  \
 build it visually     tools/builder/ (React Flow: assemble, import, export a pipeline)\n  \
-record / replay       <pipeline> ! recordsink location=cap.g2g   then   replaysrc location=cap.g2g ! ...";
+record / replay       <pipeline> ! recordsink location=cap.g2g   then   replaysrc location=cap.g2g ! ...\n  \
+repro a crash         g2g-launch --record-on-error dumps/ <pipeline>   then   replaysrc location=dumps/<file> ! ...";
 
 /// Parsed command-line options plus the leftover pipeline tokens.
 #[derive(Default)]
@@ -143,6 +162,15 @@ struct Opts {
     /// telemetry / edge previews expose frame content, so only bind non-loopback
     /// on a trusted network.
     observe_host: Option<String>,
+    /// Run the pipeline under the in-terminal live UI (`--tui`): the same
+    /// `Observer` telemetry the dashboard serves, drawn in this terminal
+    /// instead of a browser. Needs the `tui` build.
+    tui: bool,
+    /// Directory for the flight recorder's dump (`--record-on-error <dir>`,
+    /// M1016): while the run goes, every link keeps a bounded ring of its most
+    /// recent packets; if the run fails, each ring is written there as a
+    /// `replaysrc` recording of the traffic that led to the failure.
+    record_on_error: Option<String>,
 }
 
 /// Parse a `--observe` port, warning and returning `None` on a bad value.
@@ -194,6 +222,10 @@ fn parse_opts(args: impl Iterator<Item = String>) -> (Opts, Vec<String>) {
             opts.observe_host = Some(host.to_string());
             continue;
         }
+        if let Some(dir) = arg.strip_prefix("--record-on-error=") {
+            opts.record_on_error = Some(dir.to_string());
+            continue;
+        }
         match arg.as_str() {
             "-v" | "--verbose" => opts.verbose = true,
             "-q" | "--quiet" => opts.quiet = true,
@@ -203,6 +235,7 @@ fn parse_opts(args: impl Iterator<Item = String>) -> (Opts, Vec<String>) {
             "--validate-json" => opts.validate_json = true,
             "--run-json" => opts.run_json = true,
             "--threads" => opts.threads = true,
+            "--tui" => opts.tui = true,
             "--plugin" => match args.next() {
                 Some(path) => opts.plugins.push(path),
                 None => eprintln!("g2g-launch: --plugin needs a path argument"),
@@ -222,6 +255,10 @@ fn parse_opts(args: impl Iterator<Item = String>) -> (Opts, Vec<String>) {
             "--observe-host" => match args.next() {
                 Some(host) => opts.observe_host = Some(host),
                 None => eprintln!("g2g-launch: --observe-host needs an address argument"),
+            },
+            "--record-on-error" => match args.next() {
+                Some(dir) => opts.record_on_error = Some(dir),
+                None => eprintln!("g2g-launch: --record-on-error needs a directory argument"),
             },
             // Accepted for compatibility (see the module-level notes): these
             // govern live shutdown / bus output, which g2g does not yet expose
@@ -282,7 +319,17 @@ fn build_graph(reg: &Registry, opts: &Opts, pipeline: &str) -> Result<Graph<Grap
     } else if let Some(path) = &opts.script {
         load_script_file(reg, path)
     } else {
-        parse_launch(reg, pipeline).map_err(|e| format!("parse error: {e}"))
+        parse_launch(reg, pipeline).map_err(|e| {
+            let mut message = format!("parse error: {e}");
+            // gst->g2g porting guidance, from the error already in hand (a
+            // re-parse would repeat side effects like the uridecodebin file
+            // probe, logging the same unreadable path twice).
+            for hint in g2g_plugins::gst_compat::explain_parse_error(reg, pipeline, &e) {
+                message.push_str("\n  hint: ");
+                message.push_str(&hint);
+            }
+            message
+        })
     }
 }
 
@@ -425,13 +472,6 @@ fn main() {
         Ok(graph) => graph,
         Err(err) => {
             eprintln!("{err}");
-            // Add a gst->g2g porting hint when one applies (text pipelines only).
-            if !use_file {
-                let report = g2g_plugins::gst_compat::lint_launch(&reg, &pipeline);
-                for hint in &report.findings {
-                    eprintln!("  hint: {hint}");
-                }
-            }
             process::exit(1);
         }
     };
@@ -576,7 +616,14 @@ fn main() {
         #[cfg(feature = "observe")]
         {
             let host = opts.observe_host.as_deref().unwrap_or("127.0.0.1");
-            run_dashboard(&rt, graph, host, port, opts.quiet);
+            run_dashboard(
+                &rt,
+                graph,
+                host,
+                port,
+                opts.quiet,
+                opts.record_on_error.as_deref(),
+            );
             return;
         }
         #[cfg(not(feature = "observe"))]
@@ -590,11 +637,33 @@ fn main() {
         }
     }
 
+    // Live terminal UI path: same tap as `--observe`, drawn here instead of in a
+    // browser. Diverges like the dashboard path, so it also precedes the normal
+    // run that consumes `graph`.
+    if opts.tui {
+        #[cfg(feature = "tui")]
+        {
+            run_tui(&rt, graph, opts.quiet, opts.record_on_error.as_deref());
+            return;
+        }
+        #[cfg(not(feature = "tui"))]
+        {
+            eprintln!(
+                "pipeline error: --tui requires a tui build \
+                 (rebuild with --features tui)"
+            );
+            process::exit(1);
+        }
+    }
+
     if !opts.quiet {
         println!("Setting pipeline to PLAYING ...");
     }
     let clock = WallClock::new();
     let progress = PipelineProgress::new();
+    // Only built for `--record-on-error`: without it no ring is attached to any
+    // link and the run costs exactly what it did before.
+    let recorder = opts.record_on_error.as_ref().map(|_| FlightRecorder::new());
     let started = Instant::now();
     // Poll the run future with a 1s timeout so a long-running (e.g. forever, the
     // default `videotestsrc`) pipeline prints a liveness heartbeat instead of
@@ -605,23 +674,26 @@ fn main() {
         // `--threads` runs one OS thread per arm (opt-in multicore); the default
         // is the cooperative single-thread runner. Both return the same
         // `Result<RunStats, _>`, boxed to one type so the heartbeat loop is shared.
-        type RunFut<'r> = core::pin::Pin<
-            Box<
-                dyn core::future::Future<
-                        Output = Result<g2g_core::runtime::RunStats, g2g_core::G2gError>,
-                    > + 'r,
-            >,
-        >;
-        let mut run: RunFut = if opts.threads {
+        let mut run: RunFuture = if opts.threads {
             #[cfg(feature = "multi-thread")]
             {
-                Box::pin(run_graph_threaded_with_progress(
-                    graph,
-                    &clock,
-                    LINK_CAPACITY,
-                    &progress,
-                    &TokioThreadSpawner,
-                ))
+                match &recorder {
+                    Some(rec) => Box::pin(run_graph_threaded_recorded(
+                        graph,
+                        &clock,
+                        LINK_CAPACITY,
+                        Some(&progress),
+                        rec,
+                        &TokioThreadSpawner,
+                    )),
+                    None => Box::pin(run_graph_threaded_with_progress(
+                        graph,
+                        &clock,
+                        LINK_CAPACITY,
+                        &progress,
+                        &TokioThreadSpawner,
+                    )),
+                }
             }
             #[cfg(not(feature = "multi-thread"))]
             {
@@ -632,6 +704,14 @@ fn main() {
                 );
                 process::exit(1);
             }
+        } else if let Some(rec) = &recorder {
+            Box::pin(run_graph_recorded(
+                graph,
+                &clock,
+                LINK_CAPACITY,
+                Some(&progress),
+                rec,
+            ))
         } else {
             Box::pin(run_graph_with_progress(
                 graph,
@@ -671,8 +751,32 @@ fn main() {
         }
         Err(err) => {
             eprintln!("pipeline error: {err:?}");
+            if let (Some(rec), Some(dir)) = (&recorder, &opts.record_on_error) {
+                dump_flight_recording(rec, dir);
+            }
             process::exit(1);
         }
+    }
+}
+
+/// Write the flight recorder's per-link rings into the `--record-on-error`
+/// directory, naming each recording so the failing traffic can be replayed
+/// straight back into a pipeline.
+fn dump_flight_recording(recorder: &FlightRecorder, dir: &str) {
+    match recorder.dump_to_dir(std::path::Path::new(dir)) {
+        Ok(paths) if paths.is_empty() => {
+            eprintln!("g2g-launch: no packets were recorded, nothing to dump")
+        }
+        Ok(paths) => {
+            for path in &paths {
+                eprintln!("  recorded {}", path.display());
+            }
+            eprintln!(
+                "  replay with: g2g-launch \"replaysrc location={} ! ...\"",
+                paths[0].display()
+            );
+        }
+        Err(err) => eprintln!("g2g-launch: could not write the recording: {err:?}"),
     }
 }
 
@@ -711,6 +815,7 @@ fn run_dashboard(
     host: &str,
     port: u16,
     quiet: bool,
+    record_dir: Option<&str>,
 ) {
     use tokio::sync::broadcast;
 
@@ -726,6 +831,7 @@ fn run_dashboard(
 
     let clock = WallClock::new();
     let started = Instant::now();
+    let recorder = record_dir.map(|_| FlightRecorder::new());
     let result = rt.block_on(async {
         let observer = Observer::new();
         let (bus, bus_handle) = Bus::new(256);
@@ -751,8 +857,25 @@ fn run_dashboard(
         // The run future finishes with the pipeline; the server runs forever.
         // `select!` returns on whichever ends first: normally the run, dropping
         // the server; a bind error ends the server first and we surface it.
+        let run: RunFuture = match &recorder {
+            Some(rec) => Box::pin(run_graph_observed_recorded(
+                graph,
+                &clock,
+                LINK_CAPACITY,
+                &observer,
+                Some(&bus_handle),
+                rec,
+            )),
+            None => Box::pin(run_graph_observed(
+                graph,
+                &clock,
+                LINK_CAPACITY,
+                &observer,
+                Some(&bus_handle),
+            )),
+        };
         tokio::select! {
-            r = run_graph_observed(graph, &clock, LINK_CAPACITY, &observer, Some(&bus_handle)) => r,
+            r = run => r,
             e = g2g_plugins::dashboard::serve(observer.clone(), ev_tx.clone(), host, port) => {
                 if let Err(err) = e {
                     eprintln!("dashboard: server error: {err}");
@@ -770,7 +893,100 @@ fn run_dashboard(
         }
         Err(err) => {
             eprintln!("pipeline error: {err:?}");
+            if let (Some(rec), Some(dir)) = (&recorder, record_dir) {
+                dump_flight_recording(rec, dir);
+            }
             process::exit(1);
+        }
+    }
+}
+
+/// Run the pipeline under the in-terminal live UI (`--tui`). Same `Observer`
+/// tap as the dashboard, drawn here: the run future is driven against a redraw
+/// tick and a keyboard poll with `select!`, so the screen refreshes while the
+/// pipeline runs. Quitting (`q` / Esc / Ctrl-C, which raw mode delivers as a
+/// keypress rather than a signal) drops the run future, ending the pipeline the
+/// same way Ctrl-C ends the dashboard path.
+#[cfg(feature = "tui")]
+fn run_tui(
+    rt: &tokio::runtime::Runtime,
+    graph: Graph<GraphNode>,
+    quiet: bool,
+    record_dir: Option<&str>,
+) {
+    use g2g_plugins::tui::PipelineTui;
+
+    const REDRAW: Duration = Duration::from_millis(250);
+    const INPUT_POLL: Duration = Duration::from_millis(50);
+
+    let mut tui = match PipelineTui::start() {
+        Ok(tui) => tui,
+        Err(err) => {
+            eprintln!("g2g-launch: --tui needs an interactive terminal ({err})");
+            process::exit(1);
+        }
+    };
+    let clock = WallClock::new();
+    let started = Instant::now();
+    let observer = Observer::new();
+    let recorder = record_dir.map(|_| FlightRecorder::new());
+    // `None` on quit, the run's own result when the pipeline ends first.
+    let outcome = rt.block_on(async {
+        let mut run: RunFuture = match &recorder {
+            Some(rec) => Box::pin(run_graph_observed_recorded(
+                graph,
+                &clock,
+                LINK_CAPACITY,
+                &observer,
+                None,
+                rec,
+            )),
+            None => Box::pin(run_graph_observed(
+                graph,
+                &clock,
+                LINK_CAPACITY,
+                &observer,
+                None,
+            )),
+        };
+        let mut redraw = tokio::time::interval(REDRAW);
+        let mut input = tokio::time::interval(INPUT_POLL);
+        loop {
+            tokio::select! {
+                result = run.as_mut() => break Some(result),
+                _ = redraw.tick() => {
+                    if tui.draw(&observer.snapshot()).is_err() {
+                        break None;
+                    }
+                }
+                _ = input.tick() => {
+                    if tui.handle_input().unwrap_or(true) {
+                        break None;
+                    }
+                }
+            }
+        }
+    });
+    // Hand the terminal (and the stderr log sink) back before anything prints.
+    drop(tui);
+
+    match outcome {
+        Some(Ok(stats)) => {
+            if !quiet {
+                print_run_summary(&stats, started.elapsed().as_secs_f64());
+            }
+        }
+        Some(Err(err)) => {
+            eprintln!("pipeline error: {err:?}");
+            if let (Some(rec), Some(dir)) = (&recorder, record_dir) {
+                dump_flight_recording(rec, dir);
+            }
+            process::exit(1);
+        }
+        None => {
+            if !quiet {
+                println!("stopped after {:.2} s", started.elapsed().as_secs_f64());
+            }
         }
     }
 }
@@ -793,6 +1009,24 @@ mod tests {
     }
 
     #[test]
+    fn record_on_error_takes_a_directory_either_way() {
+        let (spaced, rest) = parse_opts(
+            toks(&[
+                "--record-on-error",
+                "dumps",
+                "videotestsrc",
+                "!",
+                "fakesink",
+            ])
+            .into_iter(),
+        );
+        assert_eq!(spaced.record_on_error.as_deref(), Some("dumps"));
+        assert_eq!(rest, toks(&["videotestsrc", "!", "fakesink"]));
+        let (joined, _) = parse_opts(toks(&["--record-on-error=dumps", "fakesink"]).into_iter());
+        assert_eq!(joined.record_on_error.as_deref(), Some("dumps"));
+    }
+
+    #[test]
     fn negative_property_value_is_not_a_flag() {
         // `top=-5` starts the pipeline; a later `-5`-looking token stays put
         // because once a non-flag token is seen, everything after is pipeline.
@@ -806,6 +1040,15 @@ mod tests {
         let (opts, rest) = parse_opts(toks(&["--quiet", "--verbose", "fakesink"]).into_iter());
         assert!(opts.quiet && opts.verbose);
         assert_eq!(rest, toks(&["fakesink"]));
+    }
+
+    #[test]
+    fn tui_flag_splits_from_pipeline() {
+        let (opts, rest) =
+            parse_opts(toks(&["--tui", "videotestsrc", "!", "fakesink"]).into_iter());
+        assert!(opts.tui);
+        assert!(opts.observe.is_none());
+        assert_eq!(rest, toks(&["videotestsrc", "!", "fakesink"]));
     }
 
     #[test]

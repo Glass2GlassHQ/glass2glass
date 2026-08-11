@@ -16,8 +16,6 @@
 //! Validated on this Fedora / PipeWire host (pipewire-alsa); plays a brief tone.
 #![cfg(feature = "alsa-sink")]
 
-use std::future::Future;
-use std::pin::Pin;
 use std::thread::sleep;
 use std::time::Duration;
 
@@ -41,11 +39,13 @@ const CHUNK_FRAMES: usize = (RATE as usize) / 100;
 
 struct NullSink;
 impl OutputSink for NullSink {
-    fn push<'a>(
-        &'a mut self,
-        _packet: PipelinePacket,
-    ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
-        Box::pin(async { Ok(PushOutcome::Accepted) })
+    fn poll_push(
+        &mut self,
+        _cx: &mut core::task::Context<'_>,
+        packet_slot: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        packet_slot.take();
+        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
     }
 }
 

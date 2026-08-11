@@ -118,20 +118,18 @@ struct PtsSpanSink {
 }
 
 impl g2g_core::element::OutputSink for PtsSpanSink {
-    fn push<'a>(
-        &'a mut self,
-        packet: g2g_core::frame::PipelinePacket,
-    ) -> g2g_core::element::BoxFuture<'a, Result<g2g_core::element::PushOutcome, g2g_core::G2gError>>
-    {
-        Box::pin(async move {
-            if let g2g_core::frame::PipelinePacket::DataFrame(f) = &packet {
-                let now = (f.timing.pts_ns, std::time::Instant::now());
-                self.first.get_or_insert(now);
-                self.last = Some(now);
-                self.frames += 1;
-            }
-            Ok(g2g_core::element::PushOutcome::Accepted)
-        })
+    fn poll_push(
+        &mut self,
+        _cx: &mut core::task::Context<'_>,
+        packet: &mut Option<g2g_core::frame::PipelinePacket>,
+    ) -> core::task::Poll<Result<g2g_core::element::PushOutcome, g2g_core::G2gError>> {
+        if let Some(g2g_core::frame::PipelinePacket::DataFrame(f)) = packet.take() {
+            let now = (f.timing.pts_ns, std::time::Instant::now());
+            self.first.get_or_insert(now);
+            self.last = Some(now);
+            self.frames += 1;
+        }
+        core::task::Poll::Ready(Ok(g2g_core::element::PushOutcome::Accepted))
     }
 }
 

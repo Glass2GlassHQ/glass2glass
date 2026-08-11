@@ -10,9 +10,14 @@
 //! surface as "unit-tested, interop pending" rather than claiming more).
 //!
 //! Only in-process, dependency-free checks run here, so `g2g-inspect --maturity` can
-//! run the whole battery live. `Oracle` (ffmpeg / reference-gear) and `Hardware`
-//! (GPU / device) evidence is produced by the feature-gated / host-gated integration
-//! tests that own those resources, not by this always-on battery.
+//! run the whole battery live. `Oracle` (ffmpeg / reference-gear), `Hardware`
+//! (GPU / device), and `Quality` (codec-feature-gated) evidence is produced by the
+//! feature-gated / host-gated integration tests that own those resources, not by this
+//! always-on battery.
+//!
+//! The measurement helpers those `Quality` batteries share live here too:
+//! [`fnv1a_64`] for a committed golden digest, and [`psnr_db`] / [`pooled_psnr_db`]
+//! for a fidelity floor against a reference image.
 
 use alloc::vec::Vec;
 
@@ -23,6 +28,88 @@ use g2g_core::RawVideoFormat;
 
 use crate::st2110dup::SeamlessDedup;
 use crate::st2110video::{Sampling, St2110VideoDepacketizer, St2110VideoPacketizer};
+
+/// FNV-1a 64: a dependency-free stable digest for a committed golden. Used by the
+/// decoder-regression batteries to pin decoded pixels / samples to a value in the
+/// test, so a silent change in decode output fails rather than passing unnoticed.
+pub fn fnv1a_64(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in bytes {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
+/// The three planes of an I420 buffer of `width` x `height`, or `None` if the buffer
+/// is not exactly that size (odd geometry included, which I420 cannot represent).
+pub fn i420_planes(bytes: &[u8], width: usize, height: usize) -> Option<[&[u8]; 3]> {
+    if !width.is_multiple_of(2) || !height.is_multiple_of(2) {
+        return None;
+    }
+    let luma = width.checked_mul(height)?;
+    let chroma = (width / 2).checked_mul(height / 2)?;
+    if bytes.len() != luma.checked_add(chroma.checked_mul(2)?)? {
+        return None;
+    }
+    let (y, rest) = bytes.split_at(luma);
+    let (u, v) = rest.split_at(chroma);
+    Some([y, u, v])
+}
+
+/// Peak signal-to-noise ratio in dB of `measured` against `reference`, both 8-bit
+/// samples of one plane. `None` on a length mismatch or an empty plane; infinite
+/// when the two are identical (zero error has no finite dB value, and a threshold
+/// comparison against it still reads correctly).
+///
+/// Needs `std` for `log10`; the `no_std` baseline has no float math.
+#[cfg(feature = "std")]
+pub fn psnr_db(reference: &[u8], measured: &[u8]) -> Option<f64> {
+    if reference.is_empty() || reference.len() != measured.len() {
+        return None;
+    }
+    let sum: f64 = reference
+        .iter()
+        .zip(measured)
+        .map(|(&a, &b)| {
+            let d = a as f64 - b as f64;
+            d * d
+        })
+        .sum();
+    Some(psnr_from_mse(sum / reference.len() as f64))
+}
+
+/// PSNR in dB over several planes at once, with the mean squared error pooled by
+/// sample count so a large luma plane weighs more than the chroma planes. This is
+/// the aggregate figure the encode / decode batteries assert against.
+#[cfg(feature = "std")]
+pub fn pooled_psnr_db(planes: &[(&[u8], &[u8])]) -> Option<f64> {
+    let mut sum = 0.0f64;
+    let mut count = 0usize;
+    for (reference, measured) in planes {
+        if reference.is_empty() || reference.len() != measured.len() {
+            return None;
+        }
+        for (&a, &b) in reference.iter().zip(*measured) {
+            let d = a as f64 - b as f64;
+            sum += d * d;
+        }
+        count += reference.len();
+    }
+    if count == 0 {
+        return None;
+    }
+    Some(psnr_from_mse(sum / count as f64))
+}
+
+/// dB for a mean squared error over 8-bit samples (peak 255).
+#[cfg(feature = "std")]
+fn psnr_from_mse(mse: f64) -> f64 {
+    if mse <= 0.0 {
+        return f64::INFINITY;
+    }
+    10.0 * (255.0f64 * 255.0 / mse).log10()
+}
 
 /// Conformance of the ST 2110-20 (RFC 4175) video packetizer / depacketizer core.
 ///
@@ -508,6 +595,59 @@ mod tests {
             "reordered arrival reconstructs, the hole is skipped not stalled"
         );
         assert_eq!(rec.level(), MaturityLevel::UnitTested);
+    }
+
+    #[test]
+    fn fnv1a_is_stable_and_order_sensitive() {
+        // Pinned against the reference FNV-1a 64 vector for "a", so a rewrite of the
+        // digest cannot silently invalidate every committed golden.
+        assert_eq!(fnv1a_64(b"a"), 0xaf63_dc4c_8601_ec8c);
+        assert_ne!(fnv1a_64(b"ab"), fnv1a_64(b"ba"));
+        assert_eq!(fnv1a_64(b""), 0xcbf2_9ce4_8422_2325);
+    }
+
+    #[test]
+    fn i420_planes_splits_and_rejects_a_bad_size() {
+        let buf = alloc::vec![0u8; 4 * 4 + 2 * 2 * 2];
+        let [y, u, v] = i420_planes(&buf, 4, 4).expect("exact I420 size");
+        assert_eq!((y.len(), u.len(), v.len()), (16, 4, 4));
+        assert!(i420_planes(&buf, 4, 6).is_none(), "wrong height rejected");
+        assert!(i420_planes(&buf, 3, 4).is_none(), "odd width rejected");
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn psnr_scales_with_error_and_is_infinite_when_identical() {
+        let reference = [10u8, 20, 30, 40];
+        assert_eq!(psnr_db(&reference, &reference), Some(f64::INFINITY));
+        // A uniform error of 1 LSB is 20*log10(255) = 48.13 dB.
+        let off_by_one = [11u8, 21, 31, 41];
+        let db = psnr_db(&reference, &off_by_one).expect("same length");
+        assert!(
+            (db - 48.13).abs() < 0.01,
+            "1 LSB of error is ~48.13 dB: {db}"
+        );
+        // A larger error must score lower.
+        let off_by_four = [14u8, 24, 34, 44];
+        assert!(psnr_db(&reference, &off_by_four).expect("same length") < db);
+        assert!(psnr_db(&reference, &[0u8; 3]).is_none(), "length mismatch");
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn pooled_psnr_weighs_planes_by_sample_count() {
+        // A big clean plane and a small dirty one pool to more than the dirty plane
+        // alone, because the error is averaged over every sample.
+        let clean = [128u8; 16];
+        let dirty_reference = [128u8; 4];
+        let dirty = [132u8; 4];
+        let dirty_only = psnr_db(&dirty_reference, &dirty).expect("same length");
+        let pooled =
+            pooled_psnr_db(&[(&clean[..], &clean[..]), (&dirty_reference[..], &dirty[..])])
+                .expect("same lengths");
+        assert!(pooled > dirty_only, "{pooled} > {dirty_only}");
+        assert!(pooled.is_finite());
+        assert!(pooled_psnr_db(&[]).is_none(), "nothing measured");
     }
 
     #[test]

@@ -166,7 +166,9 @@ impl TensorRef<'_> {
             Dtype::F16 | Dtype::Bf16 => 2,
             _ => return Err(SafeTensorsError::NotFloat),
         };
-        if self.bytes.len() % elem_size != 0 || self.bytes.len() / elem_size != self.numel() {
+        if !self.bytes.len().is_multiple_of(elem_size)
+            || self.bytes.len() / elem_size != self.numel()
+        {
             return Err(SafeTensorsError::LenMismatch);
         }
         Ok(match self.dtype {

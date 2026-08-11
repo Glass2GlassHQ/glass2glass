@@ -157,11 +157,13 @@ struct Capture {
     segments: usize,
 }
 impl OutputSink for Capture {
-    fn push<'a>(
-        &'a mut self,
-        packet: PipelinePacket,
-    ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
-        Box::pin(async move {
+    fn poll_push(
+        &mut self,
+        _cx: &mut core::task::Context<'_>,
+        packet_slot: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        let packet = packet_slot.take().expect("poll_push without a packet");
+        core::task::Poll::Ready({
             match packet {
                 PipelinePacket::DataFrame(Frame {
                     domain: MemoryDomain::System(s),
@@ -202,31 +204,39 @@ struct Chain<'a> {
     requested: Vec<u64>,
 }
 impl OutputSink for Chain<'_> {
-    fn push<'a>(
-        &'a mut self,
-        packet: PipelinePacket,
-    ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
-        Box::pin(async move {
-            if let PipelinePacket::DataFrame(Frame {
-                domain: MemoryDomain::System(s),
-                ..
-            }) = &packet
-            {
-                self.bytes += s.as_slice().len() as u64;
+    fn poll_push(
+        &mut self,
+        cx: &mut core::task::Context<'_>,
+        packet: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        let packet = packet.take().expect("poll_push without a packet");
+        if let PipelinePacket::DataFrame(Frame {
+            domain: MemoryDomain::System(s),
+            ..
+        }) = &packet
+        {
+            self.bytes += s.as_slice().len() as u64;
+        }
+        let mut fut = self.demux.process(packet, self.capture);
+        match fut.as_mut().poll(cx) {
+            core::task::Poll::Ready(Ok(())) => {}
+            core::task::Poll::Ready(Err(e)) => return core::task::Poll::Ready(Err(e)),
+            // In-memory test elements never block: their only awaits are
+            // pushes into always-ready capture sinks.
+            core::task::Poll::Pending => panic!("element future did not resolve in one poll"),
+        }
+        drop(fut);
+        if let Some(seek) = self.byte.take_pending() {
+            self.requested.push(seek.start);
+            self.byte.seek(seek);
+        }
+        if let Some((at, target_ns, ctl)) = &self.arm {
+            if self.bytes >= *at {
+                ctl.seek(Seek::flush_to(*target_ns));
+                self.arm = None;
             }
-            self.demux.process(packet, self.capture).await?;
-            if let Some(seek) = self.byte.take_pending() {
-                self.requested.push(seek.start);
-                self.byte.seek(seek);
-            }
-            if let Some((at, target_ns, ctl)) = &self.arm {
-                if self.bytes >= *at {
-                    ctl.seek(Seek::flush_to(*target_ns));
-                    self.arm = None;
-                }
-            }
-            Ok(PushOutcome::Accepted)
-        })
+        }
+        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
     }
 }
 

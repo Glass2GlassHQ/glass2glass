@@ -13,7 +13,7 @@
 
 #![cfg(all(target_os = "android", feature = "aaudio"))]
 
-use g2g_core::element::{AsyncElement, BoxFuture, OutputSink, PushOutcome};
+use g2g_core::element::{AsyncElement, OutputSink, PushOutcome};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::SourceLoop;
@@ -23,8 +23,13 @@ use g2g_plugins::aaudio::{AAudioSink, AAudioSrc};
 #[derive(Default)]
 struct Discard;
 impl OutputSink for Discard {
-    fn push<'a>(&'a mut self, _p: PipelinePacket) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
-        Box::pin(async move { Ok(PushOutcome::Accepted) })
+    fn poll_push(
+        &mut self,
+        _cx: &mut core::task::Context<'_>,
+        packet_slot: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        packet_slot.take();
+        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
     }
 }
 
@@ -35,14 +40,20 @@ struct CountFrames {
     bytes: usize,
 }
 impl OutputSink for CountFrames {
-    fn push<'a>(&'a mut self, p: PipelinePacket) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
+    fn poll_push(
+        &mut self,
+        _cx: &mut core::task::Context<'_>,
+        packet_slot: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        let p = packet_slot.take().expect("poll_push without a packet");
+
         if let PipelinePacket::DataFrame(f) = &p {
             self.frames += 1;
             if let Some(s) = f.domain.as_system_slice() {
                 self.bytes += s.len();
             }
         }
-        Box::pin(async move { Ok(PushOutcome::Accepted) })
+        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
     }
 }
 

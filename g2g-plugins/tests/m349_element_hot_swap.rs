@@ -85,7 +85,12 @@ struct ElementB {
     count: Arc<AtomicU64>,
 }
 
-impl DynAsyncElement for ElementB {
+impl g2g_core::AsyncElement for ElementB {
+    type ProcessFuture<'a>
+        = BoxFuture<'a, Result<(), G2gError>>
+    where
+        Self: 'a;
+
     fn intercept_caps(&self, c: &Caps) -> Result<Caps, G2gError> {
         Ok(c.clone())
     }
@@ -102,7 +107,7 @@ impl DynAsyncElement for ElementB {
         &'a mut self,
         packet: PipelinePacket,
         out: &'a mut dyn OutputSink,
-    ) -> BoxFuture<'a, Result<(), G2gError>> {
+    ) -> Self::ProcessFuture<'a> {
         let count = self.count.clone();
         Box::pin(async move {
             match packet {
@@ -135,7 +140,12 @@ struct ElementA {
     swap: SwapCell,
 }
 
-impl DynAsyncElement for ElementA {
+impl g2g_core::AsyncElement for ElementA {
+    type ProcessFuture<'a>
+        = BoxFuture<'a, Result<(), G2gError>>
+    where
+        Self: 'a;
+
     fn intercept_caps(&self, c: &Caps) -> Result<Caps, G2gError> {
         Ok(c.clone())
     }
@@ -152,7 +162,7 @@ impl DynAsyncElement for ElementA {
         &'a mut self,
         packet: PipelinePacket,
         out: &'a mut dyn OutputSink,
-    ) -> BoxFuture<'a, Result<(), G2gError>> {
+    ) -> Self::ProcessFuture<'a> {
         let count = self.count.clone();
         let threshold = self.threshold;
         let swap = self.swap.clone();
@@ -202,7 +212,7 @@ async fn element_hot_swaps_mid_stream_inside_a_running_graph() {
     let mut b = ElementB {
         count: Arc::clone(&b_count),
     };
-    b.configure_pipeline(&nv12()).unwrap();
+    g2g_core::AsyncElement::configure_pipeline(&mut b, &nv12()).unwrap();
     *swap_cell.lock().unwrap() = Some((slot.handle(), Box::new(b)));
 
     // Counting sink.

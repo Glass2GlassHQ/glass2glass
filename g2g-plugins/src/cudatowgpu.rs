@@ -7,10 +7,11 @@
 //! never leave the GPU: NVDEC's planes are copied device->device into a Vulkan
 //! image shared with CUDA (no PCIe download, unlike `CudaDownload`).
 //!
-//! The transport primitives live in `g2g_plugins::cudawgpu` (raw Vulkan + the
-//! CUDA external-memory FFI); this element wires them into the pipeline and
-//! produces a `WgpuNv12Texture`-owned frame on its interop device, which
-//! `WgpuPreprocess` then adopts (the M217 device-identity pattern).
+//! The transport primitives live in [`crate::cudawgpu`] (raw Vulkan + the CUDA
+//! external-memory FFI); this element wires them into the pipeline and produces a
+//! [`WgpuNv12Texture`](crate::gpu::WgpuNv12Texture)-owned frame on the shared
+//! interop device, which `WgpuPreprocess` then adopts (the M217 device-identity
+//! pattern) and a windowed `WgpuSink` blits.
 //!
 //! Caps are `Identity(NV12)`: only the memory domain changes, Cuda -> WgpuTexture
 //! (caps do not encode the domain), so the element drops into an
@@ -23,20 +24,35 @@
 //! two device->device plane copies and a sync run. A recycled entry may still be
 //! sampled by an in-flight wgpu submission, so the device is drained
 //! (`Device::poll`) before its image is overwritten.
+//!
+//! The pooled images are imported into the *decoder's* CUDA context, and the
+//! driver wedges if such an import is destroyed after its context is gone, so the
+//! pool is released at end of stream. A consumer that parks emitted frames past
+//! the end of the pipeline hits the same wedge: present or copy each frame and
+//! let it go.
 
 use core::future::Future;
 use core::pin::Pin;
 
 use std::sync::Arc;
 
-use g2g_core::memory::OwnedWgpuTexture;
+use alloc::boxed::Box;
+
+use crate::cudawgpu::{shared_interop_device, CudaWgpuPool, InteropDevice};
+use crate::gpu::WgpuNv12Texture;
+use g2g_core::log::{short_type_name, LogName, LogSource};
+use g2g_core::memory::{DomainSet, MemoryDomainKind, OwnedWgpuTexture};
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, Frame, G2gError,
+    g2g_error, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, Frame, G2gError,
     HardwareError, MemoryDomain, OutputSink, PipelinePacket, Rate, RawVideoFormat,
 };
-use g2g_plugins::cudawgpu::{create_interop_device, CudaWgpuPool, InteropDevice};
 
-use crate::wgpupreprocess::WgpuNv12Texture;
+/// How long end-of-stream waits for the consumer to release the frames it is
+/// still presenting before giving up on tearing their shared images down.
+const RECLAIM_TIMEOUT: core::time::Duration = core::time::Duration::from_secs(2);
+
+/// How often that wait re-checks, yielding in between so the consumer's arm runs.
+const RECLAIM_POLL: core::time::Duration = core::time::Duration::from_millis(2);
 
 /// NV12 with open geometry: the element's identity caps set (see module docs).
 fn nv12_any() -> CapsSet {
@@ -54,7 +70,7 @@ fn nv12_any() -> CapsSet {
 /// # Example
 ///
 /// ```no_run
-/// use g2g_ml::cudatowgpu::CudaToWgpu;
+/// use g2g_plugins::cudatowgpu::CudaToWgpu;
 ///
 /// let bridge = CudaToWgpu::new();
 /// assert_eq!(bridge.converted(), 0);
@@ -62,15 +78,29 @@ fn nv12_any() -> CapsSet {
 #[derive(Debug, Default)]
 pub struct CudaToWgpu {
     configured: bool,
-    /// The Vulkan wgpu device with `VK_KHR_external_memory_fd`, built lazily on
-    /// the first frame (device creation is async) and reused.
-    interop: Option<InteropDevice>,
+    /// The Vulkan wgpu device with `VK_KHR_external_memory_fd`, taken from the
+    /// process-wide slot on the first frame (device creation is async) and reused.
+    interop: Option<Arc<InteropDevice>>,
     /// Reuse pool of shared NV12 images (allocation + CUDA import amortized).
     pool: CudaWgpuPool,
     /// NV12 geometry of the pooled entries; a change rebuilds the pool.
     dims: Option<(u32, u32)>,
     /// Frames bridged CUDA -> wgpu texture.
     converted: u64,
+    /// Runner-assigned instance name, so this element's error lines name it.
+    log_name: LogName,
+}
+
+impl LogSource for CudaToWgpu {
+    fn log_category(&self) -> &'static str {
+        short_type_name::<Self>()
+    }
+    fn log_instance(&self) -> Option<&str> {
+        self.log_name.instance()
+    }
+    fn log_category_override(&self) -> Option<&str> {
+        self.log_name.category()
+    }
 }
 
 impl CudaToWgpu {
@@ -81,6 +111,29 @@ impl CudaToWgpu {
     /// Frames bridged so far. Useful in tests.
     pub fn converted(&self) -> u64 {
         self.converted
+    }
+
+    /// Wait for the sink to give back the frames it is still presenting, then
+    /// destroy the shared images while the decoder's CUDA context is alive.
+    /// Leaks them instead if the wait runs out: destroying an image a consumer
+    /// still holds wedges the driver, and a wedge is not a trade for a leak.
+    async fn release_pool(&mut self) {
+        let Some(interop) = &self.interop else {
+            return;
+        };
+        let deadline = std::time::Instant::now() + RECLAIM_TIMEOUT;
+        while !self.pool.all_returned() {
+            if std::time::Instant::now() >= deadline {
+                g2g_error!(
+                    self,
+                    "a consumer still holds decoded frames at end of stream; \
+                     leaking their shared images rather than tearing them down"
+                );
+                return;
+            }
+            tokio::time::sleep(RECLAIM_POLL).await;
+        }
+        self.pool.destroy_returned(&interop.device);
     }
 
     /// Drop the reuse pool's free entries, forcing the next frame to allocate +
@@ -108,8 +161,27 @@ impl AsyncElement for CudaToWgpu {
         Err(G2gError::CapsMismatch)
     }
 
+    fn set_instance_name(&mut self, name: alloc::string::String) {
+        self.log_name.set_instance(name);
+    }
+
+    fn set_log_category(&mut self, category: alloc::string::String) {
+        self.log_name.set_category(category);
+    }
+
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         CapsConstraint::Identity(nv12_any())
+    }
+
+    /// The whole point of the element: CUDA device memory in, a wgpu texture out.
+    /// Declaring both ends lets the M354 auto-plug pick this as the converter for
+    /// a `Cuda -> WgpuTexture` edge, and stops it splicing another one after.
+    fn input_domains(&self) -> DomainSet {
+        DomainSet::only(MemoryDomainKind::Cuda)
+    }
+
+    fn output_memory(&self) -> MemoryDomainKind {
+        MemoryDomainKind::WgpuTexture
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -147,11 +219,13 @@ impl AsyncElement for CudaToWgpu {
                     );
 
                     if self.interop.is_none() {
-                        self.interop = Some(create_interop_device().await?);
+                        self.interop = Some(shared_interop_device().await?);
                     }
-                    // A geometry change invalidates pooled entries of the old size.
+                    // A geometry change invalidates pooled entries of the old
+                    // size; tear them down under the same three conditions.
                     if self.dims != Some((w, h)) {
                         self.dims = Some((w, h));
+                        self.release_pool().await;
                         self.pool = CudaWgpuPool::new();
                     }
                     let interop = self.interop.as_ref().unwrap();
@@ -172,7 +246,7 @@ impl AsyncElement for CudaToWgpu {
                         }
                         // SAFETY: `interop.device` has VK_KHR_external_memory_fd; `ctx`
                         // is the decoder's CUDA context where the planes are valid.
-                        None => unsafe { CudaWgpuPool::build_entry(&interop.device, ctx, w, h)? },
+                        None => unsafe { self.pool.build_entry(&interop.device, ctx, w, h)? },
                     };
 
                     // Copy this frame's planes into the entry's persistent CUDA array.
@@ -211,7 +285,15 @@ impl AsyncElement for CudaToWgpu {
                 PipelinePacket::Segment(seg) => {
                     out.push(PipelinePacket::Segment(seg)).await?;
                 }
-                PipelinePacket::Eos => {}
+                PipelinePacket::Eos => {
+                    // Last point at which the decoder's CUDA context is certainly
+                    // still alive, which is one of the three conditions destroying
+                    // these imports needs. The other two are the frames being back
+                    // from the sink and the GPU being idle: wait for the first
+                    // (yielding, so the sink's arm can drain and return them) and
+                    // let `destroy_returned` do the second.
+                    self.release_pool().await;
+                }
                 // future PipelinePacket variants (non_exhaustive): pass-through
                 // transform, forward unknown ordered control packets unchanged.
                 other => {

@@ -496,4 +496,5 @@ g2g-inspect                       # list elements
 g2g-inspect <element>             # one element's role, properties, pad templates
 g2g-inspect --all                 # full catalog
 g2g-inspect --gst <gst-name>      # map a GStreamer element name to g2g
+g2g-inspect --gst-map             # every gst-name/g2g-name pair, tab separated
 ```

@@ -65,6 +65,36 @@ pub struct InteropDevice {
     pub instance: wgpu::Instance,
 }
 
+/// The process-wide interop device, once someone has one. A `wgpu::Texture` binds
+/// only on the device that made it, so the CUDA bridge and a wgpu consumer that
+/// cannot adopt a foreign device (a present sink, whose surface is tied to the
+/// device it was configured with) have to be on the same one.
+static SHARED_INTEROP: std::sync::Mutex<Option<alloc::sync::Arc<InteropDevice>>> =
+    std::sync::Mutex::new(None);
+
+/// Publish `device` as the process-wide interop device, and return the one now in
+/// force: an earlier installer wins, so a caller that opened a device
+/// speculatively still ends up using the shared one. A windowed present sink
+/// installs the device its surface was opened on, so [`shared_interop_device`]
+/// hands the CUDA bridge a device whose textures that sink can blit.
+pub fn install_shared_interop_device(
+    device: alloc::sync::Arc<InteropDevice>,
+) -> alloc::sync::Arc<InteropDevice> {
+    let mut slot = SHARED_INTEROP.lock().unwrap();
+    slot.get_or_insert(device).clone()
+}
+
+/// The shared interop device, opening a headless one on first use. Every element
+/// that bridges CUDA into wgpu takes its device from here rather than opening its
+/// own, so all the bridged textures land on one device.
+pub async fn shared_interop_device() -> Result<alloc::sync::Arc<InteropDevice>, G2gError> {
+    if let Some(shared) = SHARED_INTEROP.lock().unwrap().clone() {
+        return Ok(shared);
+    }
+    let opened = alloc::sync::Arc::new(create_interop_device().await?);
+    Ok(install_shared_interop_device(opened))
+}
+
 /// Create a wgpu device that can import / export external memory by FD.
 ///
 /// Forces the Vulkan backend (the only one with an FD external-memory path on
@@ -72,6 +102,26 @@ pub struct InteropDevice {
 /// callback. Fails loud if the adapter is not Vulkan or the extension is absent.
 pub async fn create_interop_device() -> Result<InteropDevice, G2gError> {
     create_interop_device_inner(false).await
+}
+
+/// Like [`create_interop_device`], but on an adapter that can present to
+/// `surface` (which the caller built from `instance`), opened with the adapter's
+/// full features so it can also drive the caller's renderer. The device a
+/// windowed sink needs when its frames come from the CUDA bridge: presenting and
+/// importing have to happen on one device.
+pub async fn create_interop_device_for_surface(
+    instance: wgpu::Instance,
+    surface: &wgpu::Surface<'_>,
+) -> Result<InteropDevice, G2gError> {
+    let adapter = instance
+        .request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: Some(surface),
+            ..Default::default()
+        })
+        .await
+        .map_err(gpu_err)?;
+    open_interop_device(instance, adapter, true).await
 }
 
 /// Like [`create_interop_device`], but opens the device with the adapter's full
@@ -88,13 +138,7 @@ pub async fn create_interop_device_full() -> Result<InteropDevice, G2gError> {
 /// Shared body: `full` requests the adapter's whole feature set + limits (for a
 /// renderer driving this device), else the minimal default (the bridge's own use).
 async fn create_interop_device_inner(full: bool) -> Result<InteropDevice, G2gError> {
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-        backends: wgpu::Backends::VULKAN,
-        flags: wgpu::InstanceFlags::default(),
-        memory_budget_thresholds: Default::default(),
-        backend_options: Default::default(),
-        display: None,
-    });
+    let instance = vulkan_instance();
     let adapter = instance
         .request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
@@ -102,7 +146,39 @@ async fn create_interop_device_inner(full: bool) -> Result<InteropDevice, G2gErr
         })
         .await
         .map_err(gpu_err)?;
+    open_interop_device(instance, adapter, full).await
+}
 
+/// The process-wide wgpu instance for the interop paths, on the Vulkan backend
+/// (the only one with an FD external-memory path on Linux). `display` is left
+/// unset: on Wayland the surface carries its own display handle.
+///
+/// One instance, because a wgpu handle is only meaningful to the instance that
+/// issued it: a surface built on one instance and an adapter from another cannot
+/// be used together, and mixing them is a hard error inside wgpu rather than a
+/// `Result`. [`shared_interop_device`] hands the same device to whoever asks, so
+/// its adapter has to resolve against every surface built here.
+pub fn vulkan_instance() -> wgpu::Instance {
+    static SHARED: std::sync::OnceLock<wgpu::Instance> = std::sync::OnceLock::new();
+    SHARED
+        .get_or_init(|| {
+            wgpu::Instance::new(wgpu::InstanceDescriptor {
+                backends: wgpu::Backends::VULKAN,
+                flags: wgpu::InstanceFlags::default(),
+                memory_budget_thresholds: Default::default(),
+                backend_options: Default::default(),
+                display: None,
+            })
+        })
+        .clone()
+}
+
+/// Open the FD-external-memory device on an already-chosen adapter.
+async fn open_interop_device(
+    instance: wgpu::Instance,
+    adapter: wgpu::Adapter,
+    full: bool,
+) -> Result<InteropDevice, G2gError> {
     // Open via the hal escape hatch so we can add the FD external-memory device
     // extension. wgpu-hal fills in the rest of the feature / queue chain.
     let (features, limits) = if full {
@@ -601,15 +677,28 @@ pub struct CudaImageMapping {
     context: u64,
 }
 
-impl Drop for CudaImageMapping {
-    fn drop(&mut self) {
+impl CudaImageMapping {
+    /// Destroy the CUDA import.
+    ///
+    /// Deliberately not a `Drop`: this call wedges inside the driver (rather than
+    /// failing) if the producer's CUDA context is already gone or the GPU is
+    /// still reading the image, and dropping is the one moment we cannot promise
+    /// either. Dropping a mapping therefore leaks it, and
+    /// [`CudaWgpuPool::destroy_returned`] is the path that reclaims one, at a
+    /// point where both promises hold. A leaked import costs GPU memory until the
+    /// process exits; a wedged driver costs the pipeline.
+    ///
+    /// # Safety
+    /// The context this was imported in must still be alive, and no GPU work may
+    /// still be reading the image.
+    unsafe fn destroy(&mut self) {
         use cuda_ffi as c;
         if self.ext_mem == 0 {
             return;
         }
         // SAFETY: the handles came from `import_image_into_cuda` in `context`; we
         // push it current for the destroy and pop after. Only reached once (the
-        // mapping is owned, not copied).
+        // caller takes the mapping).
         unsafe {
             if c::cuCtxPushCurrent(self.context as c::CuContext) == 0 {
                 if self.mipmap != 0 {
@@ -620,6 +709,7 @@ impl Drop for CudaImageMapping {
                 let _ = c::cuCtxPopCurrent(&mut popped);
             }
         }
+        self.ext_mem = 0;
     }
 }
 
@@ -796,9 +886,9 @@ pub unsafe fn cuda_copy_planes_into(
 }
 
 /// One pooled shared image: the `wgpu::Texture` (whose drop frees the backing
-/// Vulkan image/memory) and the persistent CUDA import that writes into it. Field
-/// order matters: `mapping` is declared first so its Drop (destroy the CUDA
-/// import) runs before `texture`'s drop frees the Vulkan memory the import aliased.
+/// Vulkan image/memory) and the persistent CUDA import that writes into it.
+/// Dropping an entry leaks the import by design (see
+/// [`CudaImageMapping::destroy`]); [`CudaWgpuPool::destroy_returned`] reclaims it.
 #[derive(Debug)]
 pub struct PoolEntry {
     mapping: CudaImageMapping,
@@ -854,6 +944,10 @@ impl PoolEntry {
 #[derive(Debug, Clone, Default)]
 pub struct CudaWgpuPool {
     free: alloc::sync::Arc<std::sync::Mutex<alloc::vec::Vec<PoolEntry>>>,
+    /// Entries handed out and not yet destroyed. [`release`](Self::release) waits
+    /// for the free list to hold all of them, so no consumer is still presenting
+    /// from an image when it is torn down.
+    issued: alloc::sync::Arc<core::sync::atomic::AtomicUsize>,
 }
 
 impl CudaWgpuPool {
@@ -869,6 +963,7 @@ impl CudaWgpuPool {
     /// `device` must be a `VK_KHR_external_memory_fd` interop device (see
     /// [`create_interop_device`]); `context` must be the decoder's CUDA context.
     pub unsafe fn build_entry(
+        &self,
         device: &wgpu::Device,
         context: u64,
         width: u32,
@@ -890,8 +985,36 @@ impl CudaWgpuPool {
                 }
             };
             let texture = wrap_as_texture(device, shared);
+            self.issued
+                .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             Ok(PoolEntry { mapping, texture })
         }
+    }
+
+    /// Whether every entry handed out is back in the free list, i.e. no consumer
+    /// is still holding (or presenting) a frame backed by one of these images.
+    pub fn all_returned(&self) -> bool {
+        self.free.lock().unwrap().len() >= self.issued.load(core::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Destroy every shared image. Three conditions have to hold at the call, and
+    /// none of them is optional: the producer's CUDA context must still be alive,
+    /// every entry must be back ([`all_returned`](Self::all_returned)), and the
+    /// GPU must be done reading them (drained here). A CUDA import destroyed
+    /// without them wedges inside the driver rather than failing, and it wedges
+    /// whichever thread drops it. End of stream on the pipeline thread is the one
+    /// moment all three can be arranged.
+    pub fn destroy_returned(&self, device: &wgpu::Device) {
+        let _ = device.poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        });
+        for mut entry in self.free.lock().unwrap().drain(..) {
+            // SAFETY: the caller promised the producer's CUDA context is alive,
+            // and the poll above leaves the GPU done reading the image.
+            unsafe { entry.mapping.destroy() };
+        }
+        self.issued.store(0, core::sync::atomic::Ordering::Relaxed);
     }
 
     /// Pop a recycled entry, or `None` if the pool is empty. A returned entry has
@@ -1207,6 +1330,9 @@ pub struct WgpuToCuda {
     mapping: CudaImageMapping,
     texture: wgpu::Texture,
     context: u64,
+    /// Ordinal of the device the context was retained on, carried onto every
+    /// bridged frame so a consumer can name the device.
+    device_ordinal: i32,
     width: u32,
     height: u32,
     /// Free list of linear output buffers, recycled across frames.
@@ -1290,6 +1416,7 @@ impl WgpuToCuda {
                 mapping,
                 texture,
                 context,
+                device_ordinal,
                 width,
                 height,
                 pool: LinearBufferPool::new(),
@@ -1390,6 +1517,7 @@ impl WgpuToCuda {
             self.width,
             self.height,
             self.context,
+            self.device_ordinal,
             keep_alive,
         );
         self.frames

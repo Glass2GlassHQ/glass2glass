@@ -44,6 +44,17 @@ pub trait PipelineClock {
     fn shared_ticker(&self) -> Option<Arc<dyn DynAsyncClock + Send + Sync>> {
         None
     }
+
+    /// Whether this clock still holds the reference it disciplines to. A clock
+    /// that tells time from a source it cannot lose (a monotonic counter, a
+    /// DAC) is always healthy, which is the default; a disciplined clock
+    /// ([`PtpClock`](crate::ptp::PtpClock)) reports `false` once its master is
+    /// gone. The runner polls the elected clock and, on a loss, posts
+    /// [`BusMessage::ClockLost`](crate::BusMessage::ClockLost) and re-elects
+    /// over the candidates that are still healthy.
+    fn healthy(&self) -> bool {
+        true
+    }
 }
 
 /// Pipeline clock with async sleep capability. Used by elements that
@@ -91,6 +102,10 @@ impl<T: PipelineClock + ?Sized> PipelineClock for Arc<T> {
 
     fn shared_ticker(&self) -> Option<Arc<dyn DynAsyncClock + Send + Sync>> {
         (**self).shared_ticker()
+    }
+
+    fn healthy(&self) -> bool {
+        (**self).healthy()
     }
 }
 
@@ -319,6 +334,69 @@ where
             Some(b) if b.priority >= c.priority => Some(b),
             _ => Some(c),
         })
+}
+
+/// The elected pipeline clock as the sinks hold it: a stable shared handle whose
+/// target can be replaced (M1004).
+///
+/// [`ClockSync`] is handed to each sink once, before any frame flows, and the
+/// runner cannot reach the sinks again afterwards (their elements have moved
+/// into the arms, on other threads under the thread-per-arm runner). So when the
+/// elected clock degrades and the runner re-elects, the way the new choice
+/// reaches every sink is this handle: the `ClockSync` they hold points at the
+/// `ElectedClock`, and [`swap`](Self::swap) retargets it in place.
+///
+/// [`as_ticker`](PipelineClock::as_ticker) stays `None` here: it lends out a
+/// borrow of the clock, which a target that can be replaced cannot give.
+/// [`shared_ticker`](PipelineClock::shared_ticker) is owned, so it forwards and
+/// follows the swap. The runner only installs this indirection when it is going
+/// to monitor clock health; otherwise sinks get the elected clock directly.
+pub struct ElectedClock {
+    target: spin::Mutex<Arc<dyn PipelineClock + Send + Sync>>,
+}
+
+impl ElectedClock {
+    /// A handle pointing at the freshly elected clock.
+    pub fn new(target: Arc<dyn PipelineClock + Send + Sync>) -> Self {
+        Self {
+            target: spin::Mutex::new(target),
+        }
+    }
+
+    /// Retarget every holder at `target` (a re-election). Reads after this see
+    /// the new clock's timeline; a sink re-anchors on its next frame the same
+    /// way it does for any other epoch change.
+    pub fn swap(&self, target: Arc<dyn PipelineClock + Send + Sync>) {
+        *self.target.lock() = target;
+    }
+
+    /// The clock currently pointed at.
+    pub fn target(&self) -> Arc<dyn PipelineClock + Send + Sync> {
+        self.target.lock().clone()
+    }
+}
+
+impl PipelineClock for ElectedClock {
+    fn now_ns(&self) -> u64 {
+        self.target().now_ns()
+    }
+
+    fn shared_ticker(&self) -> Option<Arc<dyn DynAsyncClock + Send + Sync>> {
+        self.target().shared_ticker()
+    }
+
+    fn healthy(&self) -> bool {
+        self.target().healthy()
+    }
+}
+
+impl core::fmt::Debug for ElectedClock {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ElectedClock")
+            .field("now_ns", &self.now_ns())
+            .field("healthy", &self.healthy())
+            .finish()
+    }
 }
 
 /// A disciplined clock that slaves a smooth pipeline timeline to a real

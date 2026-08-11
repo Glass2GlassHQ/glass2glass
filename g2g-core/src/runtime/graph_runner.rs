@@ -54,17 +54,18 @@ use crate::aggregator::InputAggregator;
 use crate::bus::{BusHandle, BusMessage};
 use crate::caps::{Caps, CapsSet};
 use crate::clock::{
-    elect_clock, ClockCandidate, ClockPriority, ClockSync, DynAsyncClock, PipelineClock,
+    elect_clock, ClockCandidate, ClockPriority, ClockSync, DynAsyncClock, ElectedClock,
+    PipelineClock,
 };
 use crate::controller::{ArmController, ControlTarget, CONTROL_CATEGORY};
 use crate::element::{
     AsyncElement, BoxFuture, ConfigureOutcome, DynAsyncElement, ElementBound, OutputSink,
-    PushOutcome, Reconfigure,
+    OutputSinkExt, PushOutcome, Reconfigure,
 };
 use crate::error::G2gError;
 use crate::fanout::{
     DynMultiOutputSource, MultiInputElement, MultiOutputElement, MultiOutputSink,
-    MultiOutputSource, MultiSenderSink, ReverseChannel,
+    MultiOutputSinkExt, MultiOutputSource, MultiSenderSink, ReverseChannel,
 };
 use crate::format_element::{CapsConstraint, CapsPreferences};
 use crate::frame::{Frame, PipelinePacket};
@@ -92,6 +93,7 @@ use crate::runtime::solver::{
     ForwardResolve, NegotiationFailure, NodeConstraint,
 };
 use crate::runtime::state::{Flow, StateController};
+use crate::runtime::FlightRecorder;
 use crate::runtime::Observer;
 use crate::segment::Segment;
 
@@ -282,6 +284,18 @@ pub trait DynMultiOutputElement: ElementBound {
 
     /// Dyn-safe mirror of [`MultiOutputElement::set_log_category`].
     fn set_log_category(&mut self, _category: alloc::string::String) {}
+
+    /// Consume this element into its graph-runner demux arm (M1009), the
+    /// fan-out analog of
+    /// [`DynAsyncElement::drive_transform_arm`](crate::element::DynAsyncElement::drive_transform_arm).
+    /// The blanket impl monomorphizes the arm over the concrete element type,
+    /// so the per-packet `process` future is unboxed. Implementations outside
+    /// the blanket cannot build the runner's [`DemuxArmIo`]; implement
+    /// [`MultiOutputElement`] instead.
+    #[doc(hidden)]
+    fn drive_demux_arm<'s>(self: Box<Self>, io: DemuxArmIo) -> BoxFuture<'s, Result<u64, G2gError>>
+    where
+        Self: 's;
 }
 
 impl<T: MultiOutputElement> DynMultiOutputElement for T {
@@ -323,6 +337,79 @@ impl<T: MultiOutputElement> DynMultiOutputElement for T {
 
     fn set_log_category(&mut self, category: alloc::string::String) {
         MultiOutputElement::set_log_category(self, category)
+    }
+
+    fn drive_demux_arm<'s>(self: Box<Self>, io: DemuxArmIo) -> BoxFuture<'s, Result<u64, G2gError>>
+    where
+        Self: 's,
+    {
+        Box::pin(demux_arm(*self, io))
+    }
+}
+
+/// Private [`MultiOutputElement`] face over an erased demux, so the generic
+/// (monomorphized) arm can drive a `&mut dyn DynMultiOutputElement` graph node
+/// too. Its per-packet process future stays boxed (the element underneath is
+/// erased). The `DynRef` shape, for the fan-out trait.
+struct DemuxRef<'b>(&'b mut (dyn DynMultiOutputElement + 'b));
+
+impl MultiOutputElement for DemuxRef<'_> {
+    type ProcessFuture<'a>
+        = BoxFuture<'a, Result<(), G2gError>>
+    where
+        Self: 'a;
+
+    /// Only reachable by a direct call: the arm drives `process`, and
+    /// `caps_constraint_as_input` below forwards the erased element's own
+    /// constraint rather than routing through here.
+    fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
+        let upstream = CapsConstraint::LegacySource(upstream_caps.clone());
+        let own = self.0.caps_constraint_as_input();
+        solve_linear(&[&upstream, &own])
+            .map_err(|_| G2gError::CapsMismatch)?
+            .last()
+            .cloned()
+            .ok_or(G2gError::CapsMismatch)
+    }
+
+    fn caps_constraint_as_input(&self) -> CapsConstraint<'_> {
+        self.0.caps_constraint_as_input()
+    }
+
+    fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        self.0.configure_pipeline(absolute_caps)
+    }
+
+    fn process<'a>(
+        &'a mut self,
+        packet: PipelinePacket,
+        out: &'a mut dyn MultiOutputSink,
+    ) -> Self::ProcessFuture<'a> {
+        self.0.process(packet, out)
+    }
+
+    fn port_output_caps(&self, port: usize) -> Option<Caps> {
+        self.0.port_output_caps(port)
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        self.0.properties()
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        self.0.set_property(name, value)
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        self.0.get_property(name)
+    }
+
+    fn set_instance_name(&mut self, name: alloc::string::String) {
+        self.0.set_instance_name(name)
+    }
+
+    fn set_log_category(&mut self, category: alloc::string::String) {
+        self.0.set_log_category(category)
     }
 }
 
@@ -369,6 +456,13 @@ impl<'b> DynMultiOutputElement for &'b mut (dyn DynMultiOutputElement + 'b) {
     fn set_log_category(&mut self, category: alloc::string::String) {
         (**self).set_log_category(category)
     }
+
+    fn drive_demux_arm<'s>(self: Box<Self>, io: DemuxArmIo) -> BoxFuture<'s, Result<u64, G2gError>>
+    where
+        Self: 's,
+    {
+        Box::pin(demux_arm(DemuxRef(*self), io))
+    }
 }
 
 /// A β allocation re-cascade report from an arm to the [`GraphCoordinator`].
@@ -402,7 +496,7 @@ enum RecascadeRoute {
 /// Producer end of the graph coordinator's control channel, cloned to each
 /// transform and sink arm so it can report a [`Recascade`].
 #[derive(Debug, Clone)]
-struct GraphCoordHandle {
+pub(crate) struct GraphCoordHandle {
     tx: Sender<Recascade>,
 }
 
@@ -555,7 +649,7 @@ fn behind_tee_policy<E>(vg: &ValidatedGraph<E>, node: NodeId) -> Option<FanOutPo
 /// How a branch arm reacts to a mid-stream `CapsChanged` it cannot negotiate,
 /// derived from its position ([`behind_tee_policy`]).
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum BranchMode {
+pub(crate) enum BranchMode {
     /// Single-producer chain: a feasible mid-stream re-solve is forwarded and
     /// the chain keeps flowing; a genuinely infeasible one fails the run loud,
     /// since no runtime producer renegotiates its output caps.
@@ -752,6 +846,7 @@ pub async fn run_graph<'a, Clk: PipelineClock>(
         None,
         None,
         None,
+        None,
     )
     .await
 }
@@ -779,6 +874,7 @@ pub async fn run_graph_with_copy_policy<'a, Clk: PipelineClock>(
         None,
         None,
         Some(policy),
+        None,
         None,
         None,
     )
@@ -816,17 +912,32 @@ pub fn auto_plug_domain_converters<'a>(
             .element(edge.dst.node)
             .map(|n| n.input_domains())
             .unwrap_or(DomainSet::ALL);
-        if !producer.intersect(consumer).is_empty() {
-            continue; // already compatible, no converter needed
-        }
         let (Some(from), Some(to)) = (producer.preferred(), consumer.preferred()) else {
             continue;
         };
+        // Nothing to do when the two ends already agree on a domain, unless the
+        // only thing they agree on is system memory while both would rather stay
+        // on the GPU.
+        if !producer.intersect(consumer).is_empty() && !bridges_two_gpus(from, to) {
+            continue;
+        }
         if let Some(conv) = factory(from, to) {
             graph.insert_on_edge(e, conv);
         }
     }
     graph
+}
+
+/// Whether a converter beats the domain the two ends would otherwise agree on
+/// (M1017): both prefer to keep the frame on the GPU, but in different GPU
+/// domains, so the only domain they share is system memory. Bridging the two GPU
+/// domains costs a device-to-device copy where agreeing on system memory costs a
+/// download and an upload, so the bridge wins whenever the factory has one (a
+/// CUDA decoder feeding a wgpu display sink is the case this exists for). When
+/// either end prefers system memory, the shared domain is what it asked for and
+/// nothing is spliced.
+fn bridges_two_gpus(from: MemoryDomainKind, to: MemoryDomainKind) -> bool {
+    from != to && !from.is_system() && !to.is_system()
 }
 
 /// Domains the node emits, tracing through structural tee/demux nodes (which
@@ -869,6 +980,7 @@ pub async fn run_graph_with_bus<'a, Clk: PipelineClock>(
         None,
         None,
         None,
+        None,
     )
     .await
 }
@@ -897,6 +1009,7 @@ pub async fn run_graph_observed<'a, Clk: PipelineClock>(
         None,
         Some(observer),
         None,
+        None,
     )
     .await
 }
@@ -921,6 +1034,7 @@ pub async fn run_graph_with_progress<'a, Clk: PipelineClock>(
         None,
         None,
         Some(progress),
+        None,
         None,
         None,
         None,
@@ -980,6 +1094,63 @@ pub async fn run_graph_stateful<'a, Clk: PipelineClock>(
         None,
         None,
         None,
+        None,
+    )
+    .await
+}
+
+/// As [`run_graph_with_progress`], but with a [`FlightRecorder`] attached
+/// (M1016): every edge keeps a bounded ring of its most recent packets while the
+/// run goes, and on failure the caller writes them out with
+/// [`FlightRecorder::dump_to_dir`] as one replayable recording per edge. An hour
+/// of live streaming that ends in an error hands back the last moments of
+/// traffic instead of nothing.
+///
+/// `progress` is optional (the recorder does not need it); pass `None` for the
+/// plain [`run_graph`] behavior plus recording.
+pub async fn run_graph_recorded<'a, Clk: PipelineClock>(
+    graph: Graph<GraphNodeRef<'a>>,
+    clock: &Clk,
+    link_capacity: impl Into<LinkCapacity>,
+    progress: Option<&PipelineProgress>,
+    recorder: &FlightRecorder,
+) -> Result<RunStats, G2gError> {
+    run_graph_inner(
+        graph,
+        clock,
+        link_capacity,
+        None,
+        None,
+        progress,
+        None,
+        None,
+        Some(recorder),
+        None,
+    )
+    .await
+}
+
+/// [`run_graph_observed`] plus the [`run_graph_recorded`] flight recorder, for a
+/// tool that watches a run live and still wants the last packets when it fails.
+pub async fn run_graph_observed_recorded<'a, Clk: PipelineClock>(
+    graph: Graph<GraphNodeRef<'a>>,
+    clock: &Clk,
+    link_capacity: impl Into<LinkCapacity>,
+    observer: &Observer,
+    bus: Option<&BusHandle>,
+    recorder: &FlightRecorder,
+) -> Result<RunStats, G2gError> {
+    run_graph_inner(
+        graph,
+        clock,
+        link_capacity,
+        bus,
+        None,
+        None,
+        None,
+        Some(observer),
+        Some(recorder),
+        None,
     )
     .await
 }
@@ -1000,6 +1171,16 @@ struct Prepared {
     allocation: Option<AllocationParams>,
     clock_priority: ClockPriority,
     base_time_ns: u64,
+    /// Every clock the elements offered, kept so the health monitor can re-elect
+    /// over the survivors. Empty when no monitor runs.
+    clock_candidates: Vec<ClockCandidate>,
+    /// The swappable handle the sinks' [`ClockSync`] points at, so a re-election
+    /// retargets them. `Some` exactly when the monitor runs.
+    elected_clock: Option<alloc::sync::Arc<ElectedClock>>,
+    /// Every node's instance name, indexed by `NodeId` (empty for a structural
+    /// tee, which carries no element). The arm loop copies these into arm order
+    /// so a failed run can name the element that raised the error.
+    names: Vec<alloc::string::String>,
 }
 
 /// Phases 1-3.5 of the graph runner: name instances + mint probes, probe source
@@ -1015,6 +1196,7 @@ async fn prepare_graph<'a>(
     bus: Option<&BusHandle>,
     clock: &dyn PipelineClock,
     observer: Option<&Observer>,
+    clock_monitor: bool,
 ) -> Result<(Vec<Probe>, Prepared), G2gError> {
     let n = vg.node_count();
     // M78: tell the controller how many sinks must preroll before the async
@@ -1119,7 +1301,7 @@ async fn prepare_graph<'a>(
                 ..Default::default()
             })
             .collect();
-        obs.register(names, roles, probes.clone(), edges);
+        obs.register(names.clone(), roles, probes.clone(), edges);
     }
 
     // Phase 1: probe each source's produce set (async) into an owned map,
@@ -1235,107 +1417,7 @@ async fn prepare_graph<'a>(
     // edge (the boundary now crosses at startup). The source's absorbed proposal
     // is the reported `allocation`. For a linear chain this is byte-for-byte the
     // linear runner's sink->source fold.
-    let nee = vg.edge_count();
-    let mut edge_proposal: Vec<Option<AllocationParams>> = (0..nee).map(|_| None).collect();
-    let mut allocation: Option<AllocationParams> = None;
-    for &node in topo.iter().rev() {
-        match vg.kind(node) {
-            NodeKind::Sink => {
-                let in_e = vg.in_edges(node)[0];
-                let caps = solution[in_e].clone();
-                edge_proposal[in_e] = element_propose(vg, node, &caps, MetaRequests::new());
-            }
-            NodeKind::Transform => {
-                let in_e = vg.in_edges(node)[0];
-                let out_e = vg.out_edges(node)[0];
-                // A transform is a memory-domain pass-through here: it forwards the
-                // downstream proposal to its own pool and re-proposes upstream
-                // unchanged. Domain capability is enforced at the buffer-pool
-                // origin (the source) and at the sibling join (the tee), not at
-                // every hop, so a GPU proposal merely passing through a plain
-                // transform is not rejected against its System default (M351).
-                if let Some(p) = edge_proposal[out_e] {
-                    element_configure_alloc(vg, node, &p);
-                }
-                let caps = solution[out_e].clone();
-                let downstream = edge_meta_requests(edge_proposal[out_e]);
-                edge_proposal[in_e] = element_propose(vg, node, &caps, downstream);
-            }
-            NodeKind::Tee(_) => {
-                let in_e = vg.in_edges(node)[0];
-                // The first branch seeds the join: a `None` from there on means a
-                // branch that asked for nothing, which is not the same as no
-                // branch yet (it vetoes a demand needing every consumer).
-                let mut joined: Option<AllocationParams> = None;
-                for (i, &oe) in vg.out_edges(node).iter().enumerate() {
-                    joined = match i {
-                        0 => edge_proposal[oe],
-                        _ => join_alloc(joined, edge_proposal[oe])?,
-                    };
-                }
-                edge_proposal[in_e] = joined;
-            }
-            NodeKind::Source => {
-                let out_e = vg.out_edges(node)[0];
-                if let Some(p) = edge_proposal[out_e] {
-                    // M351: reconcile against the source's emittable domains, the
-                    // upstream end of the two-sided negotiation. The reconciled
-                    // proposal is what the source allocates and what `RunStats`
-                    // reports.
-                    let can = node_output_domains(vg, node);
-                    // A proposal carrying only metadata demand accepts every
-                    // domain, so reconciling it would let a metadata request pick
-                    // the source's memory domain: pass it through untouched.
-                    let resolved = match p.constrains_pool() {
-                        true => p.resolve_for_producer(can)?,
-                        false => p,
-                    };
-                    if let GraphNodeRef::Source(src) =
-                        vg.element_mut(node).ok_or(G2gError::CapsMismatch)?
-                    {
-                        src.configure_allocation(&resolved);
-                    }
-                    allocation = Some(resolved);
-                }
-            }
-            // A terminal fan-out source exposes no allocation hook (its
-            // outputs are network-generated System bytes).
-            NodeKind::FanoutSrc(_) => {}
-            NodeKind::Muxer(_) | NodeKind::FaninSink(_) => {
-                // A muxer / terminal fan-in asks each input pad for the allocation
-                // it wants (most are content-agnostic and propose nothing), storing
-                // it on that input edge so the demand crosses the boundary and
-                // re-cascades up the branch like any other downstream proposal. The
-                // muxer's own output edge proposal is not absorbed here: a container
-                // muxer's byte output has no memory-domain tie to its inputs, and a
-                // terminal fan-in has no output at all.
-                //
-                // M976: downstream *metadata* demand does cross the output, on its
-                // own, because it describes the frames the fan-in writes (a GPU
-                // compositor deciding whether to declare its row padding). Nothing
-                // is called when no demand was declared.
-                let out_demand = vg
-                    .out_edges(node)
-                    .first()
-                    .map(|&out_e| edge_meta_requests(edge_proposal[out_e]))
-                    .unwrap_or_default();
-                if !out_demand.is_empty() {
-                    if let Some(GraphNodeRef::Muxer(mux)) = vg.element_mut(node) {
-                        mux.configure_allocation_for_output(&AllocationParams::meta_demand(
-                            out_demand,
-                        ));
-                    }
-                }
-                if let Some(GraphNodeRef::Muxer(mux)) = vg.element(node) {
-                    for &in_e in vg.in_edges(node) {
-                        let pad = vg.edge(in_e).dst.index as usize;
-                        let caps = solution[in_e].clone();
-                        edge_proposal[in_e] = mux.propose_allocation_for_input(pad, &caps);
-                    }
-                }
-            }
-        }
-    }
+    let allocation = cascade_allocation(vg, topo, &solution)?;
 
     // Latency fold + clock election over every element node (tee is structural;
     // a muxer contributes neither, like the fan-in runner).
@@ -1348,10 +1430,24 @@ async fn prepare_graph<'a>(
         }
     }
     let latency = LatencyReport::aggregate(latencies);
-    let elected = elect_clock(clocks);
+    let elected = elect_clock(clocks.iter().cloned());
     let (clock_priority, base_time_ns) = match &elected {
         Some(c) => (c.priority, c.clock.now_ns()),
         None => (ClockPriority::SystemFallback, clock.now_ns()),
+    };
+
+    // M1004: when the runner is going to watch the elected clock's health, the
+    // sinks read it through a swappable handle instead of directly, so a
+    // re-election after a loss retargets them without reaching the elements
+    // again (they are already inside their arms by then).
+    let elected_clock = elected
+        .as_ref()
+        .filter(|_| clock_monitor)
+        .map(|c| alloc::sync::Arc::new(ElectedClock::new(c.clock.clone())));
+    let clock_candidates: Vec<ClockCandidate> = if clock_monitor {
+        clocks.into_iter().flatten().collect()
+    } else {
+        Vec::new()
     };
 
     // Hand the elected clock + base time to every sink so each presents its
@@ -1360,19 +1456,25 @@ async fn prepare_graph<'a>(
     // as fast as backpressure allows. A sink node always holds a
     // `GraphNodeRef::Element` (not a `Source`), so the match below covers them.
     if let Some(c) = &elected {
+        let sink_clock: alloc::sync::Arc<dyn PipelineClock + Send + Sync> = match &elected_clock {
+            Some(handle) => handle.clone(),
+            None => c.clock.clone(),
+        };
         // M176: under a state controller, arm one Playing-transition anchor
         // (shared across sinks) so each bases presentation on the play edge,
         // not on startup / its preroll frame; without one, the eager base time
         // stands. Armed once outside the loop; the anchor is cheaply cloned.
-        let anchor = state.as_ref().map(|sc| sc.arm_play_anchor(c.clock.clone()));
+        let anchor = state
+            .as_ref()
+            .map(|sc| sc.arm_play_anchor(sink_clock.clone()));
         for &node in topo {
             if matches!(vg.kind(node), NodeKind::Sink) {
                 if let Some(GraphNodeRef::Element(elem)) = vg.element_mut(node) {
                     let sync = match &anchor {
                         Some(a) => {
-                            ClockSync::with_play_anchor(c.clock.clone(), base_time_ns, a.clone())
+                            ClockSync::with_play_anchor(sink_clock.clone(), base_time_ns, a.clone())
                         }
-                        None => ClockSync::new(c.clock.clone(), base_time_ns),
+                        None => ClockSync::new(sink_clock.clone(), base_time_ns),
                     };
                     elem.set_clock_sync(sync);
                 }
@@ -1389,6 +1491,9 @@ async fn prepare_graph<'a>(
             allocation,
             clock_priority,
             base_time_ns,
+            clock_candidates,
+            elected_clock,
+            names,
         },
     ))
 }
@@ -1506,6 +1611,33 @@ fn build_channels<'a>(
     }
 }
 
+/// Start the flight recorder on every edge, through the same per-edge
+/// content-inspection slot an observer's preview tap uses. Called once the
+/// channels are built and before any packet flows, so each edge's ring opens
+/// with its negotiated caps and the element names the run assigned. Generic over
+/// the node payload because the cooperative runner borrows its elements and the
+/// thread-per-arm one owns them, while the edges this reads are the same.
+fn install_flight_recorder<E>(
+    recorder: &crate::runtime::FlightRecorder,
+    vg: &ValidatedGraph<E>,
+    txs: &[Option<LinkSender>],
+    solution: &[Caps],
+    names: &[alloc::string::String],
+) {
+    for (eid, tx) in txs.iter().enumerate() {
+        let (Some(tx), Some(caps)) = (tx.as_ref(), solution.get(eid)) else {
+            continue;
+        };
+        let edge = vg.edge(eid);
+        let label = crate::runtime::flight_recorder::edge_label(
+            names,
+            edge.src.node.0 as usize,
+            edge.dst.node.0 as usize,
+        );
+        recorder.record_edge(label, caps, &tx.probe);
+    }
+}
+
 /// Hand `obs` the per-edge taps that only exist once the channels are built: the
 /// content-inspection slot, the negotiated caps, and the live traffic counters.
 /// Aligned with the edge ids registered during `prepare_graph`.
@@ -1535,6 +1667,7 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
     progress: Option<&PipelineProgress>,
     copy_policy: Option<crate::copyplan::CopyPolicy>,
     observer: Option<&Observer>,
+    recorder: Option<&crate::runtime::FlightRecorder>,
     ticker: Option<&'a dyn DynAsyncClock>,
 ) -> Result<RunStats, G2gError> {
     // A pipeline clock that can sleep on a deadline is the fan-in tick timer
@@ -1561,8 +1694,20 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
             allocation,
             clock_priority,
             base_time_ns,
+            clock_candidates,
+            elected_clock,
+            names,
         },
-    ) = prepare_graph(&mut vg, &topo, &state, bus, clock, observer).await?;
+    ) = prepare_graph(
+        &mut vg,
+        &topo,
+        &state,
+        bus,
+        clock,
+        observer,
+        bus.is_some() && ticker.is_some(),
+    )
+    .await?;
 
     // Enforce the memory-domain copy budget (M617) before any frame flows: the graph
     // is negotiated, so the per-edge domains are known and the copy plan is exact. A
@@ -1602,9 +1747,18 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
     if let Some(obs) = observer {
         register_edge_taps(obs, &txs, &solution, link_capacity);
     }
+    // Flight recorder: a bounded ring of recent packets per edge, dumped by the
+    // caller once the run has failed. Same per-edge slot as the observer's
+    // preview tap, so an unrecorded run stays exactly as cheap as before.
+    if let Some(rec) = recorder {
+        install_flight_recorder(rec, &vg, &txs, &solution, &names);
+    }
 
     let mut arms: Vec<BoxFuture<'a, Result<u64, G2gError>>> = Vec::with_capacity(n + 1);
     let mut arm_kinds: Vec<NodeKind> = Vec::with_capacity(n);
+    // Arm order, not node order: a muxer contributes one forwarder arm per
+    // input pad plus its own, so an arm index cannot index `names` directly.
+    let mut arm_names: Vec<alloc::string::String> = Vec::with_capacity(n + 1);
 
     for &node in &topo {
         let kind = vg.kind(node);
@@ -1651,42 +1805,31 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
                     Box::pin(muxer_forwarder(in_rx, pad_tx));
                 arms.push(fwd);
                 arm_kinds.push(kind);
+                arm_names.push(names[node.0 as usize].clone());
                 pad_rxs.push((pad, pad_rx));
             }
             // A muxer can opt into runner-level PTS-ordered delivery (the runner
             // merges its inputs by DataFrame PTS); the default drains round-robin
-            // in arrival order.
+            // in arrival order. The hook picks the arm from
+            // `input_pts_ordered` and monomorphizes it over the element.
             let mux_probe = probes[node.0 as usize].clone();
             let mux_control = controllers[node.0 as usize].take();
-            let arm: BoxFuture<'a, Result<u64, G2gError>> = if mux.input_pts_ordered() {
-                Box::pin(muxer_arm_pts(
-                    mux,
+            let arm: BoxFuture<'a, Result<u64, G2gError>> = mux.drive_muxer_arm(MuxerArmIo {
+                parts: MuxerArmParts {
                     pad_rxs,
                     out_tx,
                     input_count,
-                    mux_out_caps,
+                    current_output: mux_out_caps,
                     beta,
-                    mux_ctrl,
-                    mux_probe,
-                    ticker,
-                    mux_control,
-                ))
-            } else {
-                Box::pin(muxer_arm(
-                    mux,
-                    pad_rxs,
-                    out_tx,
-                    input_count,
-                    mux_out_caps,
-                    beta,
-                    mux_ctrl,
-                    mux_probe,
-                    ticker,
-                    mux_control,
-                ))
-            };
+                    arm_rx: mux_ctrl,
+                    probe: mux_probe,
+                    control: mux_control,
+                },
+                ticker,
+            });
             arms.push(arm);
             arm_kinds.push(kind);
+            arm_names.push(names[node.0 as usize].clone());
             continue;
         }
 
@@ -1710,20 +1853,19 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
                     .expect("transform ctrl rx");
                 let out_caps = solution[out_edge].clone();
                 let downstream_feasible = feasibility[out_edge].clone();
-                Box::pin(transform_arm(
-                    elem,
+                elem.drive_transform_arm(TransformArmIo {
                     in_rx,
                     out_tx,
                     arm_rx,
-                    coord_handle.clone(),
+                    coord: coord_handle.clone(),
                     node,
                     out_caps,
                     downstream_feasible,
-                    branch_mode(&vg, node),
-                    bus.cloned(),
-                    probes[node.0 as usize].clone(),
-                    controllers[node.0 as usize].take(),
-                ))
+                    mode: branch_mode(&vg, node),
+                    bus: bus.cloned(),
+                    probe: probes[node.0 as usize].clone(),
+                    control: controllers[node.0 as usize].take(),
+                })
             }
             NodeKind::Sink => {
                 let Some(GraphNodeRef::Element(elem)) = element else {
@@ -1731,19 +1873,18 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
                 };
                 let in_rx = in_rxs.pop().expect("sink input edge");
                 let arm_rx = arm_ctrl_rx[node.0 as usize].take().expect("sink ctrl rx");
-                Box::pin(sink_arm(
-                    elem,
+                elem.drive_sink_arm(SinkArmIo {
                     in_rx,
                     arm_rx,
-                    coord_handle.clone(),
+                    coord: coord_handle.clone(),
                     node,
-                    branch_mode(&vg, node),
-                    bus.cloned(),
-                    state.clone(),
-                    progress.cloned(),
-                    probes[node.0 as usize].clone(),
-                    controllers[node.0 as usize].take(),
-                ))
+                    mode: branch_mode(&vg, node),
+                    bus: bus.cloned(),
+                    state: state.clone(),
+                    progress: progress.cloned(),
+                    probe: probes[node.0 as usize].clone(),
+                    control: controllers[node.0 as usize].take(),
+                })
             }
             NodeKind::Tee(_) => {
                 let in_rx = in_rxs.pop().expect("tee input edge");
@@ -1752,12 +1893,11 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
                 // tolerates a branch that has dropped out (closed its channel).
                 let branch_drop = vg.fanout_policy(node) == FanOutPolicy::AllowBranchDrop;
                 match element {
-                    Some(GraphNodeRef::Demux(demux)) => Box::pin(demux_arm(
-                        demux,
+                    Some(GraphNodeRef::Demux(demux)) => demux.drive_demux_arm(DemuxArmIo {
                         in_rx,
-                        demux_out_txs_by_port(&vg, node, out_txs),
-                        probes[node.0 as usize].clone(),
-                    )),
+                        out_txs: demux_out_txs_by_port(&vg, node, out_txs),
+                        probe: probes[node.0 as usize].clone(),
+                    }),
                     _ => Box::pin(tee_arm(in_rx, out_txs, branch_drop)),
                 }
             }
@@ -1766,12 +1906,11 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
                     return Err(G2gError::CapsMismatch);
                 };
                 let (pad_rxs, reverse) = fanin_sink_pads(&vg, node, in_rxs, &*session);
-                Box::pin(fanin_sink_arm(
-                    session,
+                session.drive_fanin_sink_arm(FaninSinkArmIo {
                     pad_rxs,
                     reverse,
-                    probes[node.0 as usize].clone(),
-                ))
+                    probe: probes[node.0 as usize].clone(),
+                })
             }
             NodeKind::FanoutSrc(_) => {
                 let Some(GraphNodeRef::FanoutSource(source)) = element else {
@@ -1784,6 +1923,7 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
         };
         arms.push(arm);
         arm_kinds.push(kind);
+        arm_names.push(names[node.0 as usize].clone());
     }
 
     // Drop the template handle so the coordinator can end once every arm's
@@ -1793,10 +1933,22 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
     let coord_arm_index = arms.len();
     arms.push(Box::pin(async move { Ok(coordinator.run().await) }));
 
-    let results = join_all(arms).await;
+    // M1004: with a swappable elected clock installed, the health monitor runs
+    // alongside the arms and is dropped once they finish (it never ends itself).
+    let results = match (elected_clock, bus, ticker) {
+        (Some(handle), Some(b), Some(t)) => {
+            let monitor = clock_health_monitor(clock_candidates, handle, b.clone(), t);
+            match select2(join_all(arms), monitor).await {
+                Either::Left(results) => results,
+                Either::Right(never) => match never {},
+            }
+        }
+        _ => join_all(arms).await,
+    };
     fold_run_stats(
         results,
         &arm_kinds,
+        &arm_names,
         coord_arm_index,
         &dropped,
         &probes,
@@ -1818,6 +1970,7 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
 fn fold_run_stats(
     results: Vec<Result<u64, G2gError>>,
     arm_kinds: &[NodeKind],
+    arm_names: &[alloc::string::String],
     coord_arm_index: usize,
     dropped: &alloc::sync::Arc<spin::Mutex<u64>>,
     probes: &[Probe],
@@ -1830,12 +1983,15 @@ fn fold_run_stats(
     // error in one node closes links, which surfaces as `Shutdown` on the
     // others; reporting the first-in-topo-order error would often mask the
     // cause).
-    if let Some(e) = results
-        .iter()
-        .filter_map(|r| r.as_ref().err())
-        .find(|e| **e != G2gError::Shutdown)
-        .or_else(|| results.iter().filter_map(|r| r.as_ref().err()).next())
-    {
+    let failed = |only_substantive: bool| {
+        results
+            .iter()
+            .enumerate()
+            .filter_map(|(i, r)| r.as_ref().err().map(|e| (i, e)))
+            .find(|(_, e)| !only_substantive || **e != G2gError::Shutdown)
+    };
+    if let Some((arm, e)) = failed(true).or_else(|| failed(false)) {
+        crate::log::report_element_failure(arm_names.get(arm).map(|n| n.as_str()), e);
         return Err(e.clone());
     }
     let mut counts = Vec::with_capacity(results.len());
@@ -1900,6 +2056,49 @@ pub trait GraphSpawner {
     ) -> BoxFuture<'static, Result<u64, G2gError>>;
 }
 
+/// Identifies the calling OS thread for
+/// [`BusMessage::StreamStatus`](crate::BusMessage::StreamStatus). `ThreadId` has
+/// no stable numeric form on the MSRV (`as_u64` is unstable), so hash it: only
+/// equality between an enter and its leave is meaningful.
+#[cfg(all(feature = "std", feature = "multi-thread"))]
+fn current_thread_id() -> u64 {
+    use core::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    std::thread::current().id().hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Bracket one arm's builder with its [`BusMessage::StreamStatus`](crate::BusMessage::StreamStatus)
+/// enter / leave pair. The builder itself runs on the worker thread, so posting
+/// there names the thread the arm will be driven on; the leave rides on the
+/// arm's own future so it lands when that arm finishes. Without a bus the
+/// builder is returned untouched.
+#[cfg(all(feature = "std", feature = "multi-thread"))]
+fn with_stream_status(
+    bus: Option<BusHandle>,
+    build: alloc::boxed::Box<dyn FnOnce() -> LocalArmFuture + Send>,
+) -> alloc::boxed::Box<dyn FnOnce() -> LocalArmFuture + Send> {
+    let Some(bus) = bus else {
+        return build;
+    };
+    alloc::boxed::Box::new(move || -> LocalArmFuture {
+        let thread_id = current_thread_id();
+        bus.try_post(BusMessage::StreamStatus {
+            entered: true,
+            thread_id,
+        });
+        let arm = build();
+        Box::pin(async move {
+            let result = arm.await;
+            bus.try_post(BusMessage::StreamStatus {
+                entered: false,
+                thread_id,
+            });
+            result
+        })
+    })
+}
+
 /// Thread-per-arm sibling of [`run_graph_inner`]: negotiates the graph
 /// identically (shared [`prepare_graph`] / [`build_channels`] / [`fold_run_stats`]),
 /// then hands each arm to `spawner` to run on its own OS thread rather than
@@ -1921,6 +2120,7 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
     state: Option<StateController>,
     progress: Option<&PipelineProgress>,
     observer: Option<&Observer>,
+    recorder: Option<&FlightRecorder>,
     ticker: Option<alloc::sync::Arc<dyn DynAsyncClock + Send + Sync>>,
     spawner: &S,
 ) -> Result<RunStats, G2gError> {
@@ -1950,8 +2150,20 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
             allocation,
             clock_priority,
             base_time_ns,
+            clock_candidates,
+            elected_clock,
+            names,
         },
-    ) = prepare_graph(&mut vg, &topo, &state, bus, clock, observer).await?;
+    ) = prepare_graph(
+        &mut vg,
+        &topo,
+        &state,
+        bus,
+        clock,
+        observer,
+        bus.is_some() && ticker.is_some(),
+    )
+    .await?;
 
     let GraphChannels {
         mut txs,
@@ -1966,11 +2178,20 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
     if let Some(obs) = observer {
         register_edge_taps(obs, &txs, &solution, link_capacity);
     }
+    // Flight recorder: installed here, before the arms move onto their threads,
+    // so each ring is shared with the worker that fills it (see the cooperative
+    // path for the mechanism).
+    if let Some(rec) = recorder {
+        install_flight_recorder(rec, &vg, &txs, &solution, &names);
+    }
 
     // One `spawn_arm` handle per arm (mirrors the cooperative `arms` vec). Each
     // handle resolves on this thread once its worker thread finishes.
     let mut handles: Vec<BoxFuture<'static, Result<u64, G2gError>>> = Vec::with_capacity(n + 1);
     let mut arm_kinds: Vec<NodeKind> = Vec::with_capacity(n);
+    // Arm order, not node order: a muxer contributes one forwarder arm per
+    // input pad plus its own, so an arm index cannot index `names` directly.
+    let mut arm_names: Vec<alloc::string::String> = Vec::with_capacity(n + 1);
 
     for &node in &topo {
         let kind = vg.kind(node);
@@ -2007,32 +2228,33 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
                     alloc::boxed::Box::new(move || -> LocalArmFuture {
                         Box::pin(muxer_forwarder(in_rx, pad_tx))
                     });
-                handles.push(spawner.spawn_arm(build));
+                handles.push(spawner.spawn_arm(with_stream_status(bus.cloned(), build)));
                 arm_kinds.push(kind);
+                arm_names.push(names[node.0 as usize].clone());
                 pad_rxs.push((pad, pad_rx));
             }
-            let pts_ordered = mux.input_pts_ordered();
             let mux_probe = probes[node.0 as usize].clone();
             let mux_ticker = ticker.clone();
             let mux_control = controllers[node.0 as usize].take();
             let build: alloc::boxed::Box<dyn FnOnce() -> LocalArmFuture + Send> =
                 alloc::boxed::Box::new(move || -> LocalArmFuture {
-                    Box::pin(muxer_arm_owned_tick(
-                        pts_ordered,
-                        mux,
-                        pad_rxs,
-                        out_tx,
-                        input_count,
-                        mux_out_caps,
-                        beta,
-                        mux_ctrl,
-                        mux_probe,
-                        mux_ticker,
-                        mux_control,
-                    ))
+                    mux.drive_muxer_arm_owned_tick(MuxerArmOwnedTickIo {
+                        parts: MuxerArmParts {
+                            pad_rxs,
+                            out_tx,
+                            input_count,
+                            current_output: mux_out_caps,
+                            beta,
+                            arm_rx: mux_ctrl,
+                            probe: mux_probe,
+                            control: mux_control,
+                        },
+                        ticker: mux_ticker,
+                    })
                 });
-            handles.push(spawner.spawn_arm(build));
+            handles.push(spawner.spawn_arm(with_stream_status(bus.cloned(), build)));
             arm_kinds.push(kind);
+            arm_names.push(names[node.0 as usize].clone());
             continue;
         }
 
@@ -2066,20 +2288,19 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
                 let ch = coord_handle.clone();
                 let control = controllers[node.0 as usize].take();
                 alloc::boxed::Box::new(move || -> LocalArmFuture {
-                    Box::pin(transform_arm(
-                        elem,
+                    elem.drive_transform_arm(TransformArmIo {
                         in_rx,
                         out_tx,
                         arm_rx,
-                        ch,
+                        coord: ch,
                         node,
                         out_caps,
                         downstream_feasible,
-                        bm,
-                        bus_c,
+                        mode: bm,
+                        bus: bus_c,
                         probe,
                         control,
-                    ))
+                    })
                 })
             }
             NodeKind::Sink => {
@@ -2096,9 +2317,18 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
                 let arm_rx = arm_ctrl_rx[node.0 as usize].take().expect("sink ctrl rx");
                 let control = controllers[node.0 as usize].take();
                 alloc::boxed::Box::new(move || -> LocalArmFuture {
-                    Box::pin(sink_arm(
-                        elem, in_rx, arm_rx, ch, node, bm, bus_c, state_c, prog_c, probe, control,
-                    ))
+                    elem.drive_sink_arm(SinkArmIo {
+                        in_rx,
+                        arm_rx,
+                        coord: ch,
+                        node,
+                        mode: bm,
+                        bus: bus_c,
+                        state: state_c,
+                        progress: prog_c,
+                        probe,
+                        control,
+                    })
                 })
             }
             NodeKind::Tee(_) => {
@@ -2109,7 +2339,11 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
                         let demux_probe = probes[node.0 as usize].clone();
                         let out_txs = demux_out_txs_by_port(&vg, node, out_txs);
                         alloc::boxed::Box::new(move || -> LocalArmFuture {
-                            Box::pin(demux_arm(demux, in_rx, out_txs, demux_probe))
+                            demux.drive_demux_arm(DemuxArmIo {
+                                in_rx,
+                                out_txs,
+                                probe: demux_probe,
+                            })
                         })
                     }
                     _ => alloc::boxed::Box::new(move || -> LocalArmFuture {
@@ -2124,7 +2358,11 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
                 let (pad_rxs, reverse) = fanin_sink_pads(&vg, node, in_rxs, &*session);
                 let probe = probes[node.0 as usize].clone();
                 alloc::boxed::Box::new(move || -> LocalArmFuture {
-                    Box::pin(fanin_sink_arm(session, pad_rxs, reverse, probe))
+                    session.drive_fanin_sink_arm(FaninSinkArmIo {
+                        pad_rxs,
+                        reverse,
+                        probe,
+                    })
                 })
             }
             NodeKind::FanoutSrc(_) => {
@@ -2138,24 +2376,38 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
             }
             NodeKind::Muxer(_) => unreachable!("muxer handled above"),
         };
-        handles.push(spawner.spawn_arm(build));
+        handles.push(spawner.spawn_arm(with_stream_status(bus.cloned(), build)));
         arm_kinds.push(kind);
+        arm_names.push(names[node.0 as usize].clone());
     }
 
     // Drop the template handle so the coordinator ends once every arm's clone
     // drops; append the coordinator as the final arm on its own thread.
     drop(coord_handle);
     let coord_arm_index = handles.len();
-    handles.push(
-        spawner.spawn_arm(alloc::boxed::Box::new(move || -> LocalArmFuture {
+    handles.push(spawner.spawn_arm(with_stream_status(
+        bus.cloned(),
+        alloc::boxed::Box::new(move || -> LocalArmFuture {
             Box::pin(async move { Ok(coordinator.run().await) })
-        })),
-    );
+        }),
+    )));
 
-    let results = join_all(handles).await;
+    // M1004: same clock-health watch as the cooperative runner, driven on the
+    // caller's executor rather than a worker thread (it only sleeps and reads).
+    let results = match (elected_clock, bus, &ticker) {
+        (Some(handle), Some(b), Some(t)) => {
+            let monitor = clock_health_monitor(clock_candidates, handle, b.clone(), &**t);
+            match select2(join_all(handles), monitor).await {
+                Either::Left(results) => results,
+                Either::Right(never) => match never {},
+            }
+        }
+        _ => join_all(handles).await,
+    };
     fold_run_stats(
         results,
         &arm_kinds,
+        &arm_names,
         coord_arm_index,
         &dropped,
         &probes,
@@ -2187,6 +2439,7 @@ pub async fn run_graph_threaded<Clk: PipelineClock, S: GraphSpawner>(
         graph,
         clock,
         link_capacity,
+        None,
         None,
         None,
         None,
@@ -2224,7 +2477,35 @@ pub async fn run_graph_threaded_ticked<S: GraphSpawner>(
         None,
         None,
         None,
+        None,
         Some(clock.clone()),
+        spawner,
+    )
+    .await
+}
+
+/// As [`run_graph_threaded`], but posts pipeline messages to `bus` (the
+/// thread-per-arm analog of [`run_graph_with_bus`]). This runner adds the
+/// [`StreamStatus`](crate::BusMessage::StreamStatus) enter / leave pair per arm
+/// thread, which the cooperative runner has no equivalent of.
+#[cfg(all(feature = "std", feature = "multi-thread"))]
+pub async fn run_graph_threaded_with_bus<Clk: PipelineClock, S: GraphSpawner>(
+    graph: Graph<GraphNode>,
+    clock: &Clk,
+    link_capacity: impl Into<LinkCapacity>,
+    bus: &BusHandle,
+    spawner: &S,
+) -> Result<RunStats, G2gError> {
+    run_graph_threaded_inner(
+        graph,
+        clock,
+        link_capacity,
+        Some(bus),
+        None,
+        None,
+        None,
+        None,
+        None,
         spawner,
     )
     .await
@@ -2247,6 +2528,7 @@ pub async fn run_graph_threaded_with_progress<Clk: PipelineClock, S: GraphSpawne
         None,
         None,
         Some(progress),
+        None,
         None,
         None,
         spawner,
@@ -2275,6 +2557,38 @@ pub async fn run_graph_threaded_observed<Clk: PipelineClock, S: GraphSpawner>(
         None,
         None,
         Some(observer),
+        None,
+        None,
+        spawner,
+    )
+    .await
+}
+
+/// [`run_graph_recorded`]'s thread-per-arm twin: the same [`FlightRecorder`],
+/// with each arm on its own OS thread. The rings are shared with the worker
+/// threads that fill them, so a heavy multicore pipeline (the kind that runs
+/// under [`run_graph_threaded`] in the first place) leaves the same replayable
+/// per-edge recording behind when it fails.
+///
+/// `progress` is optional, as in [`run_graph_recorded`].
+#[cfg(all(feature = "std", feature = "multi-thread"))]
+pub async fn run_graph_threaded_recorded<Clk: PipelineClock, S: GraphSpawner>(
+    graph: Graph<GraphNode>,
+    clock: &Clk,
+    link_capacity: impl Into<LinkCapacity>,
+    progress: Option<&PipelineProgress>,
+    recorder: &FlightRecorder,
+    spawner: &S,
+) -> Result<RunStats, G2gError> {
+    run_graph_threaded_inner(
+        graph,
+        clock,
+        link_capacity,
+        None,
+        None,
+        progress,
+        None,
+        Some(recorder),
         None,
         spawner,
     )
@@ -2575,6 +2889,13 @@ pub async fn negotiate_graph_explained<'a>(
         .map_err(NegotiateError::Solve)?
     };
 
+    // Phase 3.5's allocation cascade, run for its effect on the elements: it is
+    // what settles a multi-domain producer (a decoder that can keep frames on
+    // the GPU or download them) on the domain its consumer asked for. Reading
+    // `output_memory` without it reports every producer's default preference, so
+    // the dump would call a downloading link a GPU link.
+    cascade_allocation(&mut vg, &topo, &solution).map_err(NegotiateError::Setup)?;
+
     // Per-edge memory domain: the domain of the node producing onto that edge.
     let edge_memory: Vec<crate::memory::MemoryDomainKind> = (0..vg.edge_count())
         .map(|id| {
@@ -2625,6 +2946,128 @@ pub fn copy_plan(
     crate::copyplan::CopyPlan::analyze(&nodes, &edges)
 }
 
+/// Run the allocation cascade over a solved graph, in reverse topo order: each
+/// element absorbs the proposal arriving on its output edge(s)
+/// (`configure_allocation`), then proposes from its output-link caps, and the
+/// proposal is stored on its input edge(s) for its upstream to absorb. A tee
+/// joins its branch proposals (most-restrictive intersection, loud failure on a
+/// domain conflict) onto its single input; a muxer proposes its own per-pad
+/// demand onto each input edge. For a linear chain this is byte-for-byte the
+/// linear runner's sink->source fold.
+///
+/// Returns the source's absorbed proposal (what the runner reports as its
+/// `allocation`). Shared with [`negotiate_graph`], which runs it
+/// purely to settle each element's domain so a graph dump reports the negotiated
+/// memory domain rather than every producer's default preference.
+fn cascade_allocation(
+    vg: &mut ValidatedGraph<GraphNodeRef<'_>>,
+    topo: &[NodeId],
+    solution: &[Caps],
+) -> Result<Option<AllocationParams>, G2gError> {
+    let nee = vg.edge_count();
+    let mut edge_proposal: Vec<Option<AllocationParams>> = (0..nee).map(|_| None).collect();
+    let mut allocation: Option<AllocationParams> = None;
+    for &node in topo.iter().rev() {
+        match vg.kind(node) {
+            NodeKind::Sink => {
+                let in_e = vg.in_edges(node)[0];
+                let caps = solution[in_e].clone();
+                edge_proposal[in_e] = element_propose(vg, node, &caps, MetaRequests::new());
+            }
+            NodeKind::Transform => {
+                let in_e = vg.in_edges(node)[0];
+                let out_e = vg.out_edges(node)[0];
+                // A transform is a memory-domain pass-through here: it forwards the
+                // downstream proposal to its own pool and re-proposes upstream
+                // unchanged. Domain capability is enforced at the buffer-pool
+                // origin (the source) and at the sibling join (the tee), not at
+                // every hop, so a GPU proposal merely passing through a plain
+                // transform is not rejected against its System default (M351).
+                if let Some(p) = edge_proposal[out_e] {
+                    element_configure_alloc(vg, node, &p);
+                }
+                let caps = solution[out_e].clone();
+                let downstream = edge_meta_requests(edge_proposal[out_e]);
+                edge_proposal[in_e] = element_propose(vg, node, &caps, downstream);
+            }
+            NodeKind::Tee(_) => {
+                let in_e = vg.in_edges(node)[0];
+                // The first branch seeds the join: a `None` from there on means a
+                // branch that asked for nothing, which is not the same as no
+                // branch yet (it vetoes a demand needing every consumer).
+                let mut joined: Option<AllocationParams> = None;
+                for (i, &oe) in vg.out_edges(node).iter().enumerate() {
+                    joined = match i {
+                        0 => edge_proposal[oe],
+                        _ => join_alloc(joined, edge_proposal[oe])?,
+                    };
+                }
+                edge_proposal[in_e] = joined;
+            }
+            NodeKind::Source => {
+                let out_e = vg.out_edges(node)[0];
+                if let Some(p) = edge_proposal[out_e] {
+                    // M351: reconcile against the source's emittable domains, the
+                    // upstream end of the two-sided negotiation. The reconciled
+                    // proposal is what the source allocates and what `RunStats`
+                    // reports.
+                    let can = node_output_domains(vg, node);
+                    // A proposal carrying only metadata demand accepts every
+                    // domain, so reconciling it would let a metadata request pick
+                    // the source's memory domain: pass it through untouched.
+                    let resolved = match p.constrains_pool() {
+                        true => p.resolve_for_producer(can)?,
+                        false => p,
+                    };
+                    if let GraphNodeRef::Source(src) =
+                        vg.element_mut(node).ok_or(G2gError::CapsMismatch)?
+                    {
+                        src.configure_allocation(&resolved);
+                    }
+                    allocation = Some(resolved);
+                }
+            }
+            // A terminal fan-out source exposes no allocation hook (its
+            // outputs are network-generated System bytes).
+            NodeKind::FanoutSrc(_) => {}
+            NodeKind::Muxer(_) | NodeKind::FaninSink(_) => {
+                // A muxer / terminal fan-in asks each input pad for the allocation
+                // it wants (most are content-agnostic and propose nothing), storing
+                // it on that input edge so the demand crosses the boundary and
+                // re-cascades up the branch like any other downstream proposal. The
+                // muxer's own output edge proposal is not absorbed here: a container
+                // muxer's byte output has no memory-domain tie to its inputs, and a
+                // terminal fan-in has no output at all.
+                //
+                // M976: downstream *metadata* demand does cross the output, on its
+                // own, because it describes the frames the fan-in writes (a GPU
+                // compositor deciding whether to declare its row padding). Nothing
+                // is called when no demand was declared.
+                let out_demand = vg
+                    .out_edges(node)
+                    .first()
+                    .map(|&out_e| edge_meta_requests(edge_proposal[out_e]))
+                    .unwrap_or_default();
+                if !out_demand.is_empty() {
+                    if let Some(GraphNodeRef::Muxer(mux)) = vg.element_mut(node) {
+                        mux.configure_allocation_for_output(&AllocationParams::meta_demand(
+                            out_demand,
+                        ));
+                    }
+                }
+                if let Some(GraphNodeRef::Muxer(mux)) = vg.element(node) {
+                    for &in_e in vg.in_edges(node) {
+                        let pad = vg.edge(in_e).dst.index as usize;
+                        let caps = solution[in_e].clone();
+                        edge_proposal[in_e] = mux.propose_allocation_for_input(pad, &caps);
+                    }
+                }
+            }
+        }
+    }
+    Ok(allocation)
+}
+
 /// A transform/sink node's allocation proposal from `caps` (its output-link caps
 /// for a transform, its input-link caps for a sink), carrying the node's own meta
 /// requests plus `downstream`'s onward up the cascade (M976). `None` for other
@@ -2637,11 +3080,42 @@ fn element_propose(
 ) -> Option<AllocationParams> {
     match vg.element(node) {
         Some(GraphNodeRef::Element(elem)) => with_meta_demand(
-            elem.propose_allocation(caps),
+            narrow_to_input_domains(elem.propose_allocation(caps), elem.input_domains()),
             elem.meta_requests().carry_upstream(downstream),
         ),
         _ => None,
     }
+}
+
+/// Fold the domains an element declared it can take into the proposal it hands
+/// its producer. Without this an element that accepts one domain but proposes
+/// nothing leaves its producer free to pick any domain, and the mismatch only
+/// surfaces as an `UnsupportedDomain` on the first frame; the declaration used
+/// to reach nothing but the converter auto-plug. The all-domains default (what
+/// an element that never thought about memory reports) narrows nothing, so a
+/// graph of such elements cascades exactly as before.
+fn narrow_to_input_domains(
+    proposal: Option<AllocationParams>,
+    accepts: DomainSet,
+) -> Option<AllocationParams> {
+    if accepts == DomainSet::ALL {
+        return proposal;
+    }
+    let narrowed = match proposal {
+        Some(p) => p.accepts.intersect(accepts),
+        None => accepts,
+    };
+    // An element whose own proposal contradicts its declaration is
+    // self-inconsistent: keep the explicit proposal, so the producer-side
+    // reconcile reports the conflict rather than this silently picking a side.
+    let Some(domain) = narrowed.preferred() else {
+        return proposal;
+    };
+    Some(AllocationParams {
+        domain,
+        accepts: narrowed,
+        ..proposal.unwrap_or_default()
+    })
 }
 
 /// The metadata demand an edge's stored proposal carries, empty when there is
@@ -2681,6 +3155,51 @@ fn element_latency(vg: &ValidatedGraph<GraphNodeRef<'_>>, node: NodeId) -> Optio
         Some(GraphNodeRef::Source(src)) => Some(src.latency()),
         Some(GraphNodeRef::Element(elem)) => Some(elem.latency()),
         _ => None,
+    }
+}
+
+/// How often the runner reads the elected clock's health. Coarse on purpose:
+/// losing a grandmaster is a seconds-scale event, and the check costs a lock on
+/// the clock.
+const CLOCK_HEALTH_PERIOD_NS: u64 = 1_000_000_000;
+
+/// Watch the elected clock and re-elect when it loses the reference it
+/// disciplines to (M1004). Runs alongside the graph's arms, sleeping on the same
+/// timer the fan-in arms tick on so it stays executor-agnostic, and posts
+/// [`BusMessage::ClockLost`] on each healthy -> unhealthy edge. It then elects
+/// again over the candidates that are still healthy and retargets `elected`, which
+/// is what every sink's [`ClockSync`] reads through. With no healthy candidate
+/// left the pipeline keeps the clock it has: it still tells time, it is just no
+/// longer disciplined, and a later re-lock is picked up by the same check.
+///
+/// Never returns; the runner drops it once the arms have finished.
+async fn clock_health_monitor(
+    candidates: Vec<ClockCandidate>,
+    elected: alloc::sync::Arc<ElectedClock>,
+    bus: BusHandle,
+    ticker: &dyn DynAsyncClock,
+) -> core::convert::Infallible {
+    let mut was_healthy = true;
+    loop {
+        let deadline = ticker.now_ns().saturating_add(CLOCK_HEALTH_PERIOD_NS);
+        ticker.sleep_until_ns(deadline).await;
+        let healthy = elected.healthy();
+        if healthy || !was_healthy {
+            was_healthy = healthy;
+            continue;
+        }
+        was_healthy = false;
+        bus.try_post(BusMessage::ClockLost);
+        if let Some(c) = elect_clock(
+            candidates
+                .iter()
+                .filter(|c| c.clock.healthy())
+                .cloned()
+                .map(Some),
+        ) {
+            elected.swap(c.clock.clone());
+            was_healthy = elected.healthy();
+        }
     }
 }
 
@@ -2783,21 +3302,62 @@ async fn source_arm<'a>(
 /// its forwarded output toward a downstream-acceptable shape using its
 /// `downstream_feasible` snapshot (Caps-α), failing loud via a reverse
 /// reconfigure if downstream positively rejects every output it can produce.
-#[allow(clippy::too_many_arguments)]
-async fn transform_arm<'a>(
-    mut elem: Box<dyn DynAsyncElement + 'a>,
-    in_rx: LinkReceiver,
-    out_tx: LinkSender,
-    arm_rx: Receiver<ArmDirective>,
-    coord: GraphCoordHandle,
-    node: NodeId,
-    mut out_caps: Caps,
-    downstream_feasible: Option<CapsSet>,
-    mode: BranchMode,
-    bus: Option<BusHandle>,
-    probe: Probe,
-    control: Option<ArmController>,
+/// Everything a transform arm needs besides its element (M1000). Opaque on
+/// purpose: only the runner can build one, so the `drive_transform_arm` hook
+/// on `DynAsyncElement` stays implementable only through the blanket impl.
+#[doc(hidden)]
+#[allow(missing_debug_implementations)]
+pub struct TransformArmIo {
+    pub(crate) in_rx: LinkReceiver,
+    pub(crate) out_tx: LinkSender,
+    pub(crate) arm_rx: Receiver<ArmDirective>,
+    pub(crate) coord: GraphCoordHandle,
+    pub(crate) node: NodeId,
+    pub(crate) out_caps: Caps,
+    pub(crate) downstream_feasible: Option<CapsSet>,
+    pub(crate) mode: BranchMode,
+    pub(crate) bus: Option<BusHandle>,
+    pub(crate) probe: Probe,
+    pub(crate) control: Option<ArmController>,
+}
+
+/// As [`TransformArmIo`], for the sink arm.
+#[doc(hidden)]
+#[allow(missing_debug_implementations)]
+pub struct SinkArmIo {
+    pub(crate) in_rx: LinkReceiver,
+    pub(crate) arm_rx: Receiver<ArmDirective>,
+    pub(crate) coord: GraphCoordHandle,
+    pub(crate) node: NodeId,
+    pub(crate) mode: BranchMode,
+    pub(crate) bus: Option<BusHandle>,
+    pub(crate) state: Option<StateController>,
+    pub(crate) progress: Option<PipelineProgress>,
+    pub(crate) probe: Probe,
+    pub(crate) control: Option<ArmController>,
+}
+
+/// Monomorphized over the element type by the `drive_transform_arm` blanket
+/// hook (M1000), so the per-frame `process` future is the element's own
+/// unboxed state machine, not a `Box<dyn Future>`.
+#[doc(hidden)]
+pub async fn transform_arm<E: AsyncElement>(
+    mut elem: E,
+    io: TransformArmIo,
 ) -> Result<u64, G2gError> {
+    let TransformArmIo {
+        in_rx,
+        out_tx,
+        arm_rx,
+        coord,
+        node,
+        mut out_caps,
+        downstream_feasible,
+        mode,
+        bus,
+        probe,
+        control,
+    } = io;
     let mut adapter = SenderSink::new(out_tx);
     // M947: charge time spent blocked on the downstream link to this element's
     // push-wait, not to its `process()` compute.
@@ -2938,7 +3498,7 @@ async fn transform_arm<'a>(
                                 elem.configure_output(&forward_caps),
                             )?;
                         }
-                        realloc_local_dyn(&mut *elem, &forward_caps);
+                        realloc_local_dyn(&mut elem as &mut dyn DynAsyncElement, &forward_caps);
                         // On a Defer `forward_caps` is the incoming INPUT caps:
                         // keep the last known real output as the shape to steer
                         // future re-solves (and allocation proposals) by.
@@ -2993,7 +3553,12 @@ async fn transform_arm<'a>(
                 // M882: animated properties are sampled at this frame's PTS, so
                 // the element processes it under the values that frame's time
                 // calls for.
-                apply_control(control.as_ref(), &mut *elem, &packet, &probe)?;
+                apply_control(
+                    control.as_ref(),
+                    &mut elem as &mut dyn DynAsyncElement,
+                    &packet,
+                    &probe,
+                )?;
                 let t0 = ElementProbe::mark();
                 elem.process(packet, &mut adapter).await?;
                 if let (Some(p), Some(seq)) = (timed, seq) {
@@ -3016,34 +3581,12 @@ async fn transform_arm<'a>(
 /// loud as a reverse reconfigure into the boundary that emitted the change.
 /// M839: it also selects on the β control channel, so the pool an upstream muxer
 /// settles on for its merged output reaches the element that reads it.
-#[allow(clippy::too_many_arguments)]
-async fn sink_arm<'a>(
-    mut elem: Box<dyn DynAsyncElement + 'a>,
-    in_rx: LinkReceiver,
-    arm_rx: Receiver<ArmDirective>,
-    coord: GraphCoordHandle,
-    node: NodeId,
-    mode: BranchMode,
-    bus: Option<BusHandle>,
-    state: Option<StateController>,
-    progress: Option<PipelineProgress>,
-    probe: Probe,
-    control: Option<ArmController>,
-) -> Result<u64, G2gError> {
-    let result = sink_arm_loop(
-        &mut *elem,
-        in_rx,
-        arm_rx,
-        coord,
-        node,
-        mode,
-        bus,
-        state,
-        progress,
-        probe.clone(),
-        control,
-    )
-    .await;
+/// Monomorphized over the element type by the `drive_sink_arm` blanket hook
+/// (M1000); see [`transform_arm`].
+#[doc(hidden)]
+pub async fn sink_arm<E: AsyncElement>(mut elem: E, io: SinkArmIo) -> Result<u64, G2gError> {
+    let probe = io.probe.clone();
+    let result = sink_arm_loop(&mut elem, io).await;
     // A paced sink's presented / dropped counters, read here (after the loop
     // ended, on any exit) so the snapshot taken once every arm joined sees a
     // settled value.
@@ -3053,20 +3596,19 @@ async fn sink_arm<'a>(
     result
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn sink_arm_loop<'a>(
-    elem: &'a mut (dyn DynAsyncElement + 'a),
-    in_rx: LinkReceiver,
-    arm_rx: Receiver<ArmDirective>,
-    coord: GraphCoordHandle,
-    node: NodeId,
-    mode: BranchMode,
-    bus: Option<BusHandle>,
-    state: Option<StateController>,
-    progress: Option<PipelineProgress>,
-    probe: Probe,
-    control: Option<ArmController>,
-) -> Result<u64, G2gError> {
+async fn sink_arm_loop<E: AsyncElement>(elem: &mut E, io: SinkArmIo) -> Result<u64, G2gError> {
+    let SinkArmIo {
+        in_rx,
+        arm_rx,
+        coord,
+        node,
+        mode,
+        bus,
+        state,
+        progress,
+        probe,
+        control,
+    } = io;
     let mut null = NullSink;
     let mut consumed = 0u64;
     let mut prerolled_self = false;
@@ -3143,20 +3685,21 @@ async fn sink_arm_loop<'a>(
                 // (`FailLoud`) and a single-producer chain (`Reconfigure`) both
                 // fail the run loud rather than flowing stale caps; `Drop` (a
                 // tee) ends this branch while its siblings continue.
-                let sink_caps = match re_solve_downstream_dyn_sink(&new_caps, &*elem) {
-                    Ok(caps) => caps,
-                    Err(failure) => match mode {
-                        BranchMode::FailLoud | BranchMode::Reconfigure => {
-                            report_runtime_caps_conflict(&new_caps);
-                            report_nego_failure(bus.as_ref(), failure);
-                            return Err(G2gError::CapsMismatch);
-                        }
-                        BranchMode::Drop => {
-                            report_nego_failure(bus.as_ref(), failure);
-                            return Ok(consumed);
-                        }
-                    },
-                };
+                let sink_caps =
+                    match re_solve_downstream_dyn_sink(&new_caps, &*elem as &dyn DynAsyncElement) {
+                        Ok(caps) => caps,
+                        Err(failure) => match mode {
+                            BranchMode::FailLoud | BranchMode::Reconfigure => {
+                                report_runtime_caps_conflict(&new_caps);
+                                report_nego_failure(bus.as_ref(), failure);
+                                return Err(G2gError::CapsMismatch);
+                            }
+                            BranchMode::Drop => {
+                                report_nego_failure(bus.as_ref(), failure);
+                                return Ok(consumed);
+                            }
+                        },
+                    };
                 let instance = probe.as_deref().map(|p| p.name());
                 log_caps_forward(instance, &new_caps, &sink_caps, true);
                 match log_caps_rejected(instance, &sink_caps, elem.configure_pipeline(&sink_caps))?
@@ -3229,7 +3772,12 @@ async fn sink_arm_loop<'a>(
                     }
                 }
                 // M882: sample the animated properties at this frame's PTS.
-                apply_control(control.as_ref(), &mut *elem, &packet, &probe)?;
+                apply_control(
+                    control.as_ref(),
+                    &mut *elem as &mut dyn DynAsyncElement,
+                    &packet,
+                    &probe,
+                )?;
                 let t0 = ElementProbe::mark();
                 elem.process(packet, &mut null).await?;
                 if let (Some(p), Some(seq)) = (timed, seq) {
@@ -3335,18 +3883,36 @@ async fn broadcast_drop_closed(
     Ok(())
 }
 
+/// Everything a demux arm needs besides its element (M1009), the fan-out mirror
+/// of [`TransformArmIo`]. Opaque on purpose: only the runner can build one, so
+/// the `drive_demux_arm` hook stays implementable only through the blanket impl.
+#[doc(hidden)]
+#[allow(missing_debug_implementations)]
+pub struct DemuxArmIo {
+    pub(crate) in_rx: LinkReceiver,
+    pub(crate) out_txs: Vec<LinkSender>,
+    pub(crate) probe: Probe,
+}
+
 /// The demux arm: drain the single input edge and let the routing element
 /// dispatch each packet to a chosen output port (the transpose of `muxer_arm`).
 /// Mirrors the `run_source_fanout` router loop: a packet goes to
 /// `MultiOutputElement::process`, which calls `push_to(port, ..)`; on `Eos` the
 /// element flushes first, then the arm closes every branch with its own `Eos`
 /// (the runner owns the per-branch end, like the tee arm).
-async fn demux_arm<'a>(
-    mut demux: Box<dyn DynMultiOutputElement + 'a>,
-    in_rx: LinkReceiver,
-    out_txs: Vec<LinkSender>,
-    probe: Probe,
+///
+/// Monomorphized over the element type by the `drive_demux_arm` blanket hook
+/// (M1009), so the per-packet `process` future is the element's own unboxed
+/// state machine; see [`transform_arm`].
+pub(crate) async fn demux_arm<E: MultiOutputElement>(
+    mut demux: E,
+    io: DemuxArmIo,
 ) -> Result<u64, G2gError> {
+    let DemuxArmIo {
+        in_rx,
+        out_txs,
+        probe,
+    } = io;
     let branch_count = out_txs.len();
     let senders: Vec<SenderSink> = out_txs.into_iter().map(SenderSink::new).collect();
     let mut multi = MultiSenderSink::new(senders);
@@ -3569,6 +4135,15 @@ async fn fanout_src_arm<'a>(
     source.run(&mut sinks).await
 }
 
+/// Everything a terminal fan-in arm needs besides its element (M1009).
+#[doc(hidden)]
+#[allow(missing_debug_implementations)]
+pub struct FaninSinkArmIo {
+    pub(crate) pad_rxs: Vec<(usize, LinkReceiver)>,
+    pub(crate) reverse: Vec<Option<ReverseChannel>>,
+    pub(crate) probe: Probe,
+}
+
 /// Drive a terminal fan-in element (an N-input [`MultiInputElement`] with no
 /// downstream output, e.g. a WebRTC session) the `run_fanin_session` way but over
 /// the DAG's per-edge channels. Drains the input edges round-robin (fairness, so a
@@ -3578,12 +4153,18 @@ async fn fanout_src_arm<'a>(
 /// are relayed onto each pad's edge, so a per-layer PLI reaches the encoder feeding
 /// it (`Reconfigure::ForceKeyframe` through that arm), the analog of the
 /// `TaggingSink` reverse routing in the standalone fan-in session runner.
-async fn fanin_sink_arm<'a>(
-    mut session: Box<dyn DynMultiInputElement + 'a>,
-    pad_rxs: Vec<(usize, LinkReceiver)>,
-    reverse: Vec<Option<ReverseChannel>>,
-    probe: Probe,
+///
+/// Monomorphized over the element type by the `drive_fanin_sink_arm` hook
+/// (M1009), so the per-packet `process` future is unboxed; see [`transform_arm`].
+pub(crate) async fn fanin_sink_arm<E: MultiInputElement>(
+    mut session: E,
+    io: FaninSinkArmIo,
 ) -> Result<u64, G2gError> {
+    let FaninSinkArmIo {
+        pad_rxs,
+        reverse,
+        probe,
+    } = io;
     let mut null = NullSink;
     let input_count = pad_rxs.len();
     let mut open = alloc::vec![true; input_count];
@@ -3712,7 +4293,7 @@ struct MuxPad {
 /// constraining pair of pads that keeps flipping the output fails loud with
 /// `AllocationConflict` instead of looping forever.
 #[derive(Debug)]
-struct MuxBeta {
+pub(crate) struct MuxBeta {
     node: NodeId,
     coord: GraphCoordHandle,
     pads: Vec<MuxPad>,
@@ -3863,9 +4444,9 @@ impl<'a> ArmTick<'a> {
     /// Deliver one tick, then snap the next deadline forward from now rather than
     /// adding a period to a deadline already in the past, so a slow element does
     /// not build up a backlog of ticks to fire.
-    async fn fire(
+    async fn fire<E: MultiInputElement>(
         &mut self,
-        mux: &mut (dyn DynMultiInputElement + '_),
+        mux: &mut E,
         out: &mut dyn OutputSink,
     ) -> Result<(), G2gError> {
         mux.process(0, PipelinePacket::Tick, out).await?;
@@ -3875,9 +4456,9 @@ impl<'a> ArmTick<'a> {
 
     /// The busy path: a live pad can spin an arm's drain loop forever without
     /// ever parking below, so the deadline is checked per iteration too.
-    async fn fire_if_due(
+    async fn fire_if_due<E: MultiInputElement>(
         &mut self,
-        mux: &mut (dyn DynMultiInputElement + '_),
+        mux: &mut E,
         out: &mut dyn OutputSink,
     ) -> Result<(), G2gError> {
         if self.clock.now_ns() >= self.next_ns {
@@ -3891,10 +4472,10 @@ impl<'a> ArmTick<'a> {
 /// fan-in whose inputs have all gone quiet still gets its tick. `None` means the
 /// deadline won and a tick fired, so the caller loops. Data and control stay
 /// biased ahead of the tick: a packet already waiting is handled first.
-async fn park_or_tick<T>(
+async fn park_or_tick<T, E: MultiInputElement>(
     park: impl core::future::Future<Output = T>,
     tick: Option<&mut ArmTick<'_>>,
-    mux: &mut (dyn DynMultiInputElement + '_),
+    mux: &mut E,
     out: &mut dyn OutputSink,
 ) -> Result<Option<T>, G2gError> {
     let Some(tick) = tick else {
@@ -3912,6 +4493,43 @@ async fn park_or_tick<T>(
     }
 }
 
+/// Everything a muxer arm needs besides its element and its ticker (M1009).
+/// Split from the ticker so the cooperative arm (which borrows the graph's
+/// clock) and the thread-per-arm one (which owns a shared handle) carry the
+/// same payload.
+#[allow(missing_debug_implementations)]
+pub(crate) struct MuxerArmParts {
+    pub(crate) pad_rxs: Vec<(usize, Receiver<PipelinePacket>)>,
+    pub(crate) out_tx: LinkSender,
+    pub(crate) input_count: usize,
+    pub(crate) current_output: Caps,
+    pub(crate) beta: MuxBeta,
+    pub(crate) arm_rx: Receiver<ArmDirective>,
+    pub(crate) probe: Probe,
+    pub(crate) control: Option<ArmController>,
+}
+
+/// A muxer arm's input, as the cooperative runner builds it. Opaque on purpose,
+/// like [`TransformArmIo`]: only the runner can build one, so `drive_muxer_arm`
+/// stays implementable only through the blanket impl.
+#[doc(hidden)]
+#[allow(missing_debug_implementations)]
+pub struct MuxerArmIo<'a> {
+    pub(crate) parts: MuxerArmParts,
+    pub(crate) ticker: Option<&'a dyn DynAsyncClock>,
+}
+
+/// As [`MuxerArmIo`], for the thread-per-arm runner: a builder closure that
+/// crosses onto a worker thread must own everything it carries, so the ticker
+/// is the shared handle rather than a borrow (M879).
+#[cfg(all(feature = "std", feature = "multi-thread"))]
+#[doc(hidden)]
+#[allow(missing_debug_implementations)]
+pub struct MuxerArmOwnedTickIo {
+    pub(crate) parts: MuxerArmParts,
+    pub(crate) ticker: Option<alloc::sync::Arc<dyn DynAsyncClock + Send + Sync>>,
+}
+
 /// The muxer arm: drain the per-input channels round-robin, combine each input's
 /// packets via `process(pad, ..)`, and emit a single `Eos` once every input has
 /// ended. Round-robin draining keeps a fast input from starving a slow one (a
@@ -3926,19 +4544,28 @@ async fn park_or_tick<T>(
 /// packet arriving. The deadline is checked on both paths: once per loop iteration
 /// for the busy case (packets flowing on one pad while another is stalled never
 /// park the arm), and raced against the parked `recv` otherwise.
-#[allow(clippy::too_many_arguments)]
-async fn muxer_arm<'a>(
-    mut mux: Box<dyn DynMultiInputElement + 'a>,
-    pad_rxs: Vec<(usize, Receiver<PipelinePacket>)>,
-    out_tx: LinkSender,
-    input_count: usize,
-    mut current_output: Caps,
-    mut beta: MuxBeta,
-    arm_rx: Receiver<ArmDirective>,
-    probe: Probe,
-    ticker: Option<&'a dyn DynAsyncClock>,
-    control: Option<ArmController>,
+///
+/// Monomorphized over the element type by the `drive_muxer_arm` blanket hook
+/// (M1009), so the per-packet `process` future is the element's own unboxed
+/// state machine; see [`transform_arm`].
+pub(crate) async fn muxer_arm<E: MultiInputElement>(
+    mut mux: E,
+    io: MuxerArmIo<'_>,
 ) -> Result<u64, G2gError> {
+    let MuxerArmIo {
+        parts:
+            MuxerArmParts {
+                pad_rxs,
+                out_tx,
+                input_count,
+                mut current_output,
+                mut beta,
+                arm_rx,
+                probe,
+                control,
+            },
+        ticker,
+    } = io;
     let mut adapter = SenderSink::new(out_tx);
     adapter.set_push_wait_probe(probe.clone());
     let mut open = alloc::vec![true; input_count];
@@ -3946,18 +4573,24 @@ async fn muxer_arm<'a>(
     // Cursor for round-robin fairness across both the try-drain and block paths.
     let mut next = 0usize;
     let mut control_open = true;
-    let mut tick = ArmTick::new(ticker, &*mux);
-    beta.seed(&*mux, &current_output);
+    let mut tick = ArmTick::new(ticker, &mux as &dyn DynMultiInputElement);
+    beta.seed(&mux as &dyn DynMultiInputElement, &current_output);
     loop {
         // M839: a consumer's demand on the merged output arrives here. Checked
         // before the data drain so a busy muxer still applies it promptly.
         while let Some(directive) = arm_rx.try_recv() {
-            apply_mux_directive(&mut *mux, &mut beta, directive, &current_output).await?;
+            apply_mux_directive(
+                &mut mux as &mut dyn DynMultiInputElement,
+                &mut beta,
+                directive,
+                &current_output,
+            )
+            .await?;
         }
         // Deadline reached while packets keep this arm busy (a live overlay pad
         // spinning the drain loop below without ever parking).
         if let Some(t) = tick.as_mut() {
-            t.fire_if_due(&mut *mux, &mut adapter).await?;
+            t.fire_if_due(&mut mux, &mut adapter).await?;
         }
         // Take one buffered packet, scanning round-robin from `next`, so no
         // single input can monopolize the muxer while others have data waiting.
@@ -3990,14 +4623,19 @@ async fn muxer_arm<'a>(
                 };
                 // M875: the tick deadline joins the race; a fired tick loops.
                 let Some(parked) =
-                    park_or_tick(park, tick.as_mut(), &mut *mux, &mut adapter).await?
+                    park_or_tick(park, tick.as_mut(), &mut mux, &mut adapter).await?
                 else {
                     continue;
                 };
                 let (slot, maybe) = match parked {
                     Either::Left(Some(directive)) => {
-                        apply_mux_directive(&mut *mux, &mut beta, directive, &current_output)
-                            .await?;
+                        apply_mux_directive(
+                            &mut mux as &mut dyn DynMultiInputElement,
+                            &mut beta,
+                            directive,
+                            &current_output,
+                        )
+                        .await?;
                         continue;
                     }
                     Either::Left(None) => {
@@ -4027,7 +4665,8 @@ async fn muxer_arm<'a>(
                 // MX-1: re-solve this input against its pad constraint and
                 // reconfigure the pad; the input-side `CapsChanged` is consumed,
                 // not forwarded as if it were the merged output.
-                let input_caps = solve_mux_input_dyn(&new_caps, &*mux, pad)?;
+                let input_caps =
+                    solve_mux_input_dyn(&new_caps, &mux as &dyn DynMultiInputElement, pad)?;
                 log_caps_rejected(
                     probe.as_deref().map(|p| p.name()),
                     &input_caps,
@@ -4036,7 +4675,7 @@ async fn muxer_arm<'a>(
                 .reject_refixate()?;
                 // MX-2: the per-input change may shift the merged output. Emit one
                 // downstream `CapsChanged` only when it actually changed.
-                let new_output = solve_mux_output_dyn(&*mux)?;
+                let new_output = solve_mux_output_dyn(&mux as &dyn DynMultiInputElement)?;
                 if new_output != current_output {
                     current_output = new_output.clone();
                     adapter
@@ -4044,8 +4683,13 @@ async fn muxer_arm<'a>(
                         .await?;
                 }
                 // MX-1β / M839: walk the allocation change through this boundary.
-                beta.pad_changed(&mut *mux, slot, input_caps, &current_output)
-                    .await?;
+                beta.pad_changed(
+                    &mut mux as &mut dyn DynMultiInputElement,
+                    slot,
+                    input_caps,
+                    &current_output,
+                )
+                .await?;
             }
             packet => {
                 // M694: time the data-frame `process()` and sample this pad's
@@ -4058,7 +4702,12 @@ async fn muxer_arm<'a>(
                     p.record_fill(pad_rxs[slot].1.fill_percent());
                 }
                 // M882: sample the animated properties at this frame's PTS.
-                apply_control(control.as_ref(), &mut *mux, &packet, &probe)?;
+                apply_control(
+                    control.as_ref(),
+                    &mut mux as &mut dyn DynMultiInputElement,
+                    &packet,
+                    &probe,
+                )?;
                 let t0 = ElementProbe::mark();
                 mux.process(pad, packet, &mut adapter).await?;
                 if let Some(p) = timed {
@@ -4084,19 +4733,26 @@ async fn muxer_arm<'a>(
 /// exit and after the aggregator's release round: an arm on its way out ticks no
 /// more, and a tick never jumps ahead of a frame already safe to emit in PTS
 /// order.
-#[allow(clippy::too_many_arguments)]
-async fn muxer_arm_pts<'a>(
-    mut mux: Box<dyn DynMultiInputElement + 'a>,
-    pad_rxs: Vec<(usize, Receiver<PipelinePacket>)>,
-    out_tx: LinkSender,
-    input_count: usize,
-    mut current_output: Caps,
-    mut beta: MuxBeta,
-    arm_rx: Receiver<ArmDirective>,
-    probe: Probe,
-    ticker: Option<&'a dyn DynAsyncClock>,
-    control: Option<ArmController>,
+///
+/// Monomorphized over the element type like [`muxer_arm`] (M1009).
+pub(crate) async fn muxer_arm_pts<E: MultiInputElement>(
+    mut mux: E,
+    io: MuxerArmIo<'_>,
 ) -> Result<u64, G2gError> {
+    let MuxerArmIo {
+        parts:
+            MuxerArmParts {
+                pad_rxs,
+                out_tx,
+                input_count,
+                mut current_output,
+                mut beta,
+                arm_rx,
+                probe,
+                control,
+            },
+        ticker,
+    } = io;
     let mut adapter = SenderSink::new(out_tx);
     adapter.set_push_wait_probe(probe.clone());
     let mut open = alloc::vec![true; input_count];
@@ -4104,8 +4760,8 @@ async fn muxer_arm_pts<'a>(
     // Round-robin wake cursor, so a fast input does not bias the block path.
     let mut next = 0usize;
     let mut control_open = true;
-    let mut tick = ArmTick::new(ticker, &*mux);
-    beta.seed(&*mux, &current_output);
+    let mut tick = ArmTick::new(ticker, &mux as &dyn DynMultiInputElement);
+    beta.seed(&mux as &dyn DynMultiInputElement, &current_output);
     loop {
         // Release every frame now safe to emit, in global PTS order: the
         // aggregator yields the earliest only once every still-contributing input
@@ -4119,7 +4775,12 @@ async fn muxer_arm_pts<'a>(
             }
             // M882: sampled in release (PTS) order, so the animation follows the
             // ordered stream rather than pad arrival.
-            apply_control_at(control.as_ref(), &mut *mux, frame.timing.pts_ns, &probe)?;
+            apply_control_at(
+                control.as_ref(),
+                &mut mux as &mut dyn DynMultiInputElement,
+                frame.timing.pts_ns,
+                &probe,
+            )?;
             let t0 = ElementProbe::mark();
             mux.process(pad, PipelinePacket::DataFrame(frame), &mut adapter)
                 .await?;
@@ -4136,7 +4797,7 @@ async fn muxer_arm_pts<'a>(
         // Deadline reached while frames keep arriving on one pad (the arm never
         // parks below).
         if let Some(t) = tick.as_mut() {
-            t.fire_if_due(&mut *mux, &mut adapter).await?;
+            t.fire_if_due(&mut mux, &mut adapter).await?;
         }
         // Make progress: block for the next packet from any still-open input,
         // racing the β control channel (M839) so a consumer's demand on the
@@ -4149,12 +4810,18 @@ async fn muxer_arm_pts<'a>(
                 Either::Right(muxer_recv_any(&pad_rxs, &open, next).await)
             }
         };
-        let Some(parked) = park_or_tick(park, tick.as_mut(), &mut *mux, &mut adapter).await? else {
+        let Some(parked) = park_or_tick(park, tick.as_mut(), &mut mux, &mut adapter).await? else {
             continue;
         };
         let (slot, maybe) = match parked {
             Either::Left(Some(directive)) => {
-                apply_mux_directive(&mut *mux, &mut beta, directive, &current_output).await?;
+                apply_mux_directive(
+                    &mut mux as &mut dyn DynMultiInputElement,
+                    &mut beta,
+                    directive,
+                    &current_output,
+                )
+                .await?;
                 continue;
             }
             Either::Left(None) => {
@@ -4178,22 +4845,28 @@ async fn muxer_arm_pts<'a>(
                 // input's pad, emit one downstream `CapsChanged` only when the
                 // merged output actually shifts, and walk the allocation change
                 // through the boundary.
-                let input_caps = solve_mux_input_dyn(&new_caps, &*mux, pad)?;
+                let input_caps =
+                    solve_mux_input_dyn(&new_caps, &mux as &dyn DynMultiInputElement, pad)?;
                 log_caps_rejected(
                     probe.as_deref().map(|p| p.name()),
                     &input_caps,
                     mux.configure_pipeline(pad, &input_caps),
                 )?
                 .reject_refixate()?;
-                let new_output = solve_mux_output_dyn(&*mux)?;
+                let new_output = solve_mux_output_dyn(&mux as &dyn DynMultiInputElement)?;
                 if new_output != current_output {
                     current_output = new_output.clone();
                     adapter
                         .push(PipelinePacket::CapsChanged(new_output))
                         .await?;
                 }
-                beta.pad_changed(&mut *mux, slot, input_caps, &current_output)
-                    .await?;
+                beta.pad_changed(
+                    &mut mux as &mut dyn DynMultiInputElement,
+                    slot,
+                    input_caps,
+                    &current_output,
+                )
+                .await?;
             }
             // Every other packet reaches the element, as on the single-input
             // path and in `muxer_arm`: `Segment` and `Flush` are per-input
@@ -4212,52 +4885,23 @@ async fn muxer_arm_pts<'a>(
 /// their ticker as a borrow, but a builder closure that crosses onto a worker
 /// thread must own everything it carries. This future owns the shared clock for its
 /// whole life and lends it to the arm it drives, so the arms' signatures stay as
-/// the cooperative runner needs them. `pts_ordered` picks the arm, the same choice
-/// the cooperative path makes at the call site.
+/// the cooperative runner needs them. [`MultiInputElement::input_pts_ordered`]
+/// picks the arm, the same choice `drive_muxer_arm` makes on the cooperative path.
 #[cfg(all(feature = "std", feature = "multi-thread"))]
-#[allow(clippy::too_many_arguments)]
-async fn muxer_arm_owned_tick(
-    pts_ordered: bool,
-    mux: Box<dyn DynMultiInputElement>,
-    pad_rxs: Vec<(usize, Receiver<PipelinePacket>)>,
-    out_tx: LinkSender,
-    input_count: usize,
-    current_output: Caps,
-    beta: MuxBeta,
-    arm_rx: Receiver<ArmDirective>,
-    probe: Probe,
-    ticker: Option<alloc::sync::Arc<dyn DynAsyncClock + Send + Sync>>,
-    control: Option<ArmController>,
+pub(crate) async fn muxer_arm_owned_tick<E: MultiInputElement>(
+    mux: E,
+    io: MuxerArmOwnedTickIo,
 ) -> Result<u64, G2gError> {
+    let MuxerArmOwnedTickIo { parts, ticker } = io;
     let tick: Option<&dyn DynAsyncClock> = ticker.as_deref().map(|c| c as &dyn DynAsyncClock);
-    if pts_ordered {
-        muxer_arm_pts(
-            mux,
-            pad_rxs,
-            out_tx,
-            input_count,
-            current_output,
-            beta,
-            arm_rx,
-            probe,
-            tick,
-            control,
-        )
-        .await
+    let io = MuxerArmIo {
+        parts,
+        ticker: tick,
+    };
+    if MultiInputElement::input_pts_ordered(&mux) {
+        muxer_arm_pts(mux, io).await
     } else {
-        muxer_arm(
-            mux,
-            pad_rxs,
-            out_tx,
-            input_count,
-            current_output,
-            beta,
-            arm_rx,
-            probe,
-            tick,
-            control,
-        )
-        .await
+        muxer_arm(mux, io).await
     }
 }
 

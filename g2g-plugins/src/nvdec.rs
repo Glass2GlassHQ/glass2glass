@@ -54,6 +54,10 @@ use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
+use core::sync::atomic::{AtomicU32, Ordering};
+
+use g2g_core::g2g_error;
+use g2g_core::log::{short_type_name, Target};
 use g2g_core::memory::{CudaKeepAlive, DomainSet, MemoryDomainKind, OwnedCudaBuffer};
 use g2g_core::{
     AllocationParams, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
@@ -66,12 +70,20 @@ use g2g_core::{
 /// decoder's surface pool; the sequence callback clamps the stream's minimum into
 /// this. Bigger = more reorder / in-flight headroom at a memory cost.
 const NUM_DECODE_SURFACES: u32 = 20;
-/// Max output surfaces mapped at once (frames held downstream before release).
-const NUM_OUTPUT_SURFACES: u32 = 8;
+/// Default max output surfaces mapped at once, i.e. how many decoded frames the
+/// rest of the pipeline may hold before a map fails the decode outright. A
+/// display chain holds several at a time (the link queues plus the frame on
+/// screen), so the default leaves headroom above that.
+const DEFAULT_NUM_OUTPUT_SURFACES: u32 = 20;
+/// Upper bound the `num-output-surfaces` property accepts, as gst-nvcodec's.
+const NUM_OUTPUT_SURFACES_LIMIT: u32 = 64;
 /// Default parser display delay, in frames: one, the low-latency setting.
 const DEFAULT_MAX_DISPLAY_DELAY: u32 = 1;
 /// Upper bound the `max-display-delay` property accepts, as gst-nvcodec's.
 const MAX_DISPLAY_DELAY_LIMIT: u32 = 16;
+/// CUDA device this decoder opens. Carried onto every emitted frame so a
+/// consumer knows which GPU the surface lives on.
+const DECODE_DEVICE_ORDINAL: i32 = 0;
 
 /// Native NVDEC H.264 decoder. Annex-B in, CUDA NV12 out. See the module docs.
 ///
@@ -103,6 +115,11 @@ pub struct NvDec {
     /// decode against display at the cost of latency. Applied when the parser
     /// opens at configure.
     max_display_delay: u32,
+    /// Decoded frames that may be mapped at once (`CUVIDDECODECREATEINFO::
+    /// ulNumOutputSurfaces`). Every frame still held downstream occupies one, so
+    /// a chain that queues more than this decodes until the pool is empty and
+    /// then fails. Applied when the decoder is created.
+    num_output_surfaces: u32,
     configured: bool,
     /// The memory domain the negotiation settled this decoder's output on (M352).
     /// `Cuda` keeps frames device-resident (zero-copy, the default); `System`
@@ -142,6 +159,9 @@ struct DecoderState {
     /// Decode-surface count the live decoder was created with; a reconfigure must
     /// stay within it, and the sequence callback keeps reporting it to the parser.
     num_decode_surfaces: u32,
+    /// Output-surface count to create the decoder with, copied from the element
+    /// when the parser opens (the sequence callback has only this state).
+    num_output_surfaces: u32,
     /// Decoders built so far: 1 for a stream whose format changes stayed within
     /// what `cuvidReconfigureDecoder` can apply in place.
     decoders_created: u32,
@@ -207,6 +227,7 @@ impl NvDec {
                 target_width: 0,
                 target_height: 0,
                 num_decode_surfaces: 0,
+                num_output_surfaces: DEFAULT_NUM_OUTPUT_SURFACES,
                 decoders_created: 0,
                 surface_format: ffi::CUDA_VIDEO_SURFACE_FORMAT_NV12,
                 out_format: RawVideoFormat::Nv12,
@@ -216,6 +237,7 @@ impl NvDec {
             emitted: 0,
             last_caps: None,
             max_display_delay: DEFAULT_MAX_DISPLAY_DELAY,
+            num_output_surfaces: DEFAULT_NUM_OUTPUT_SURFACES,
             configured: false,
             out_domain: MemoryDomainKind::Cuda,
         }
@@ -227,6 +249,15 @@ impl NvDec {
     /// applied when the parser opens at configure.
     pub fn with_max_display_delay(mut self, frames: u32) -> Self {
         self.max_display_delay = frames.min(MAX_DISPLAY_DELAY_LIMIT);
+        self
+    }
+
+    /// Decoded frames that may be held downstream at once (1..=64, default 20).
+    /// Also the `num-output-surfaces` property. A chain that holds more frames
+    /// than this fails the decode once the pool empties, so raise it for a deep
+    /// one; each surface costs a full frame of device memory.
+    pub fn with_num_output_surfaces(mut self, surfaces: u32) -> Self {
+        self.num_output_surfaces = surfaces.clamp(1, NUM_OUTPUT_SURFACES_LIMIT);
         self
     }
 
@@ -298,7 +329,7 @@ impl NvDec {
         let context = unsafe {
             cuchk(ffi::cu_init(0))?;
             let mut dev = 0i32;
-            cuchk(ffi::cu_device_get(&mut dev, 0))?;
+            cuchk(ffi::cu_device_get(&mut dev, DECODE_DEVICE_ORDINAL))?;
             let mut ctx: *mut core::ffi::c_void = core::ptr::null_mut();
             cuchk(ffi::cu_ctx_create(&mut ctx, 0, dev))?;
             if ctx.is_null() {
@@ -318,7 +349,13 @@ impl NvDec {
             ))?;
             lock
         };
-        self.state.cuda = Some(Arc::new(CuvidContext { ctx_lock, context }));
+        self.state.cuda = Some(Arc::new(CuvidContext {
+            ctx_lock,
+            context,
+            device_ordinal: DECODE_DEVICE_ORDINAL,
+        }));
+
+        self.state.num_output_surfaces = self.num_output_surfaces;
 
         // Create the parser, pointing it at the heap `DecoderState` as user-data.
         let user = self.state.as_mut() as *mut DecoderState as *mut core::ffi::c_void;
@@ -441,6 +478,9 @@ impl Drop for NvDec {
 struct CuvidContext {
     ctx_lock: *mut core::ffi::c_void,
     context: u64,
+    /// Ordinal of the device the context was created on, carried onto every
+    /// frame's `OwnedCudaBuffer` so a consumer can name the device.
+    device_ordinal: i32,
 }
 
 // SAFETY: the handles are owned and inert; see `CuvidDecoder` below for the
@@ -478,6 +518,9 @@ impl Drop for CuvidContext {
 struct CuvidDecoder {
     decoder: *mut core::ffi::c_void,
     ctx: Arc<CuvidContext>,
+    /// Output surfaces mapped right now. Only read to tell an exhausted pool
+    /// apart from any other map failure, so the error can name the cause.
+    mapped: AtomicU32,
 }
 
 // SAFETY: the handles are owned and inert. `Send` + `Sync` let an output frame
@@ -533,6 +576,7 @@ impl CudaKeepAlive for CuvidMappedFrame {}
 
 impl Drop for CuvidMappedFrame {
     fn drop(&mut self) {
+        self.owner.mapped.fetch_sub(1, Ordering::Relaxed);
         // SAFETY: `dev_ptr` was returned by `cuvidMapVideoFrame64` on
         // `owner.decoder` and is unmapped once. Push the context first so the
         // unmap runs in it; best-effort.
@@ -650,7 +694,7 @@ extern "C" fn handle_sequence(user: *mut core::ffi::c_void, fmt: *mut ffi::Video
     info.deinterlace_mode = ffi::CUDA_VIDEO_DEINTERLACE_WEAVE;
     info.target_width = target_w as u64;
     info.target_height = target_h as u64;
-    info.num_output_surfaces = NUM_OUTPUT_SURFACES as u64;
+    info.num_output_surfaces = state.num_output_surfaces as u64;
     info.vid_lock = cuda.ctx_lock;
 
     let mut decoder: *mut core::ffi::c_void = core::ptr::null_mut();
@@ -670,7 +714,11 @@ extern "C" fn handle_sequence(user: *mut core::ffi::c_void, fmt: *mut ffi::Video
     state.decoders_created += 1;
     state.surface_format = surface_format;
     state.out_format = out_format;
-    state.decoder_owner = Some(Arc::new(CuvidDecoder { decoder, ctx: cuda }));
+    state.decoder_owner = Some(Arc::new(CuvidDecoder {
+        decoder,
+        ctx: cuda,
+        mapped: AtomicU32::new(0),
+    }));
     num_surfaces as i32
 }
 
@@ -723,13 +771,23 @@ extern "C" fn handle_display(user: *mut core::ffi::c_void, disp: *mut ffi::Parse
         )
     };
     if rc != 0 || dev_ptr == 0 {
+        if owner.mapped.load(Ordering::Relaxed) >= state.num_output_surfaces {
+            g2g_error!(
+                Target::category(short_type_name::<NvDec>()),
+                "the pipeline is holding all {} decoded frames NVDEC can map at once, so there is none left to decode into: raise num-output-surfaces (max {})",
+                state.num_output_surfaces,
+                NUM_OUTPUT_SURFACES_LIMIT
+            );
+        }
         return fail(state, G2gError::Hardware(HardwareError::Cuda(rc)));
     }
+    owner.mapped.fetch_add(1, Ordering::Relaxed);
 
     // Semi-planar: the chroma plane follows luma at pitch * target_height bytes,
     // at 8 or 16 bits per sample.
     let chroma_ptr = dev_ptr + (pitch as u64) * (state.target_height as u64);
     let context = owner.ctx.context;
+    let device_ordinal = owner.ctx.device_ordinal;
     let buffer = OwnedCudaBuffer::new(
         dev_ptr,
         chroma_ptr,
@@ -738,6 +796,7 @@ extern "C" fn handle_display(user: *mut core::ffi::c_void, disp: *mut ffi::Parse
         state.target_width,
         state.target_height,
         context,
+        device_ordinal,
         Arc::new(CuvidMappedFrame { owner, dev_ptr }),
     );
     state.ready.push(ReadyFrame {
@@ -853,12 +912,14 @@ impl AsyncElement for NvDec {
         Ok(ConfigureOutcome::Accepted)
     }
 
-    /// NVDEC emits NV12 in CUDA device memory (the zero-copy hwframe domain),
-    /// so a downstream link from this element is a GPU link (M285). This is the
-    /// *preferred* domain; [`output_domains`](Self::output_domains) widens it to
-    /// the full set the decoder can satisfy.
+    /// The domain this decoder emits into: CUDA device memory (the zero-copy
+    /// hwframe domain, and the default) until the allocation cascade settles it
+    /// on System for a host-memory consumer. Reporting the settled domain rather
+    /// than the default is what keeps a graph dump honest about which links are
+    /// GPU links (M285). [`output_domains`](Self::output_domains) is the full set
+    /// it can satisfy.
     fn output_memory(&self) -> g2g_core::memory::MemoryDomainKind {
-        g2g_core::memory::MemoryDomainKind::Cuda
+        self.out_domain
     }
 
     /// M352: the decoder can keep frames on the GPU *or* download them to System,
@@ -905,6 +966,14 @@ impl AsyncElement for NvDec {
                 self.max_display_delay = frames as u32;
                 Ok(())
             }
+            "num-output-surfaces" => {
+                let surfaces = value.as_uint().ok_or(PropError::Type)?;
+                if surfaces == 0 || surfaces > NUM_OUTPUT_SURFACES_LIMIT as u64 {
+                    return Err(PropError::Value);
+                }
+                self.num_output_surfaces = surfaces as u32;
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -912,6 +981,7 @@ impl AsyncElement for NvDec {
     fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
             "max-display-delay" => Some(PropValue::Uint(self.max_display_delay as u64)),
+            "num-output-surfaces" => Some(PropValue::Uint(self.num_output_surfaces as u64)),
             _ => None,
         }
     }
@@ -969,14 +1039,22 @@ impl PadTemplates for NvDec {
     }
 }
 
-/// Settable properties: the parser's display delay, so a `gst-launch` line can
-/// trade latency for decode/display pipelining without the builder. Named as
-/// gst-nvcodec's decoders name it.
-static NVDEC_PROPS: &[PropertySpec] = &[PropertySpec::new(
-    "max-display-delay",
-    PropKind::Uint,
-    "frames the parser holds back before display, 0..16 (default 1, low latency)",
-)];
+/// Settable properties: the parser's display delay and the output-surface pool,
+/// so a `gst-launch` line can trade latency for decode/display pipelining, or
+/// give a deep chain room to hold frames, without the builder. Named as
+/// gst-nvcodec's decoders name them.
+static NVDEC_PROPS: &[PropertySpec] = &[
+    PropertySpec::new(
+        "max-display-delay",
+        PropKind::Uint,
+        "frames the parser holds back before display, 0..16 (default 1, low latency)",
+    ),
+    PropertySpec::new(
+        "num-output-surfaces",
+        PropKind::Uint,
+        "decoded frames the pipeline may hold at once, 1..64 (default 20); a deeper chain needs more, at a frame of device memory each",
+    ),
+];
 
 /// Thin hand-rolled FFI for the NVCUVID decode API (`cuviddec.h` / `nvcuvid.h`)
 /// plus the `libcuda` context calls. Only the surface this element uses is
@@ -1316,6 +1394,41 @@ mod tests {
         assert_eq!(NvDec::new().with_max_display_delay(3).max_display_delay, 3);
     }
 
+    #[test]
+    fn num_output_surfaces_property_round_trips() {
+        let mut d = NvDec::new();
+        assert_eq!(
+            d.get_property("num-output-surfaces"),
+            Some(PropValue::Uint(DEFAULT_NUM_OUTPUT_SURFACES as u64))
+        );
+        d.set_property("num-output-surfaces", PropValue::Uint(32))
+            .unwrap();
+        assert_eq!(d.num_output_surfaces, 32);
+        assert_eq!(
+            d.get_property("num-output-surfaces"),
+            Some(PropValue::Uint(32))
+        );
+        // A pool of zero could never map a frame, and 64 is NVCUVID's ceiling.
+        assert_eq!(
+            d.set_property("num-output-surfaces", PropValue::Uint(0)),
+            Err(PropError::Value)
+        );
+        assert_eq!(
+            d.set_property("num-output-surfaces", PropValue::Uint(65)),
+            Err(PropError::Value)
+        );
+        assert!(d
+            .properties()
+            .iter()
+            .any(|s| s.name == "num-output-surfaces"));
+        assert_eq!(
+            NvDec::new()
+                .with_num_output_surfaces(99)
+                .num_output_surfaces,
+            NUM_OUTPUT_SURFACES_LIMIT
+        );
+    }
+
     // --- On-hardware fixture decodes (RTX 3060): mid-stream resolution change,
     // 10-bit (P010) output, AV1, and the display-delay knob. Each skips cleanly
     // when NVDEC is unavailable. ---
@@ -1340,13 +1453,13 @@ mod tests {
     }
 
     impl OutputSink for RecordSink {
-        fn push<'a>(
-            &'a mut self,
-            packet: PipelinePacket,
-        ) -> core::pin::Pin<
-            Box<dyn core::future::Future<Output = Result<g2g_core::PushOutcome, G2gError>> + 'a>,
-        > {
-            Box::pin(async move {
+        fn poll_push(
+            &mut self,
+            _cx: &mut core::task::Context<'_>,
+            packet_slot: &mut Option<PipelinePacket>,
+        ) -> core::task::Poll<Result<g2g_core::PushOutcome, G2gError>> {
+            let packet = packet_slot.take().expect("poll_push without a packet");
+            core::task::Poll::Ready({
                 match packet {
                     PipelinePacket::CapsChanged(c) => self.caps.push(c),
                     PipelinePacket::DataFrame(f) => {
@@ -1776,11 +1889,9 @@ mod tests {
         use crate::nvenc::NvEnc;
         // One NVENC session at a time across this binary's test threads.
         let _lock = crate::nvenc::tests::encode_session_lock().await;
-        use core::future::Future;
-        use core::pin::Pin;
         use g2g_core::frame::Frame;
         use g2g_core::memory::SystemSlice;
-        use g2g_core::{FrameTiming, PushOutcome};
+        use g2g_core::FrameTiming;
 
         const W: u32 = 320;
         const H: u32 = 240;
@@ -1850,6 +1961,7 @@ mod tests {
                         W,
                         H,
                         ctx,
+                        DECODE_DEVICE_ORDINAL,
                         Arc::new(DevAlloc { dptr, ctx }),
                     )),
                     FrameTiming {
@@ -1867,17 +1979,19 @@ mod tests {
             aus: Vec<Vec<u8>>,
         }
         impl OutputSink for AuSink {
-            fn push<'a>(
-                &'a mut self,
-                packet: PipelinePacket,
-            ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
-                Box::pin(async move {
+            fn poll_push(
+                &mut self,
+                _cx: &mut core::task::Context<'_>,
+                packet_slot: &mut Option<PipelinePacket>,
+            ) -> core::task::Poll<Result<g2g_core::PushOutcome, G2gError>> {
+                let packet = packet_slot.take().expect("poll_push without a packet");
+                core::task::Poll::Ready({
                     if let PipelinePacket::DataFrame(f) = packet {
                         if let Some(s) = f.domain.as_system_slice() {
                             self.aus.push(s.to_vec());
                         }
                     }
-                    Ok(PushOutcome::Accepted)
+                    Ok(g2g_core::PushOutcome::Accepted)
                 })
             }
         }
@@ -1924,11 +2038,13 @@ mod tests {
             count: usize,
         }
         impl OutputSink for CudaSink {
-            fn push<'a>(
-                &'a mut self,
-                packet: PipelinePacket,
-            ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
-                Box::pin(async move {
+            fn poll_push(
+                &mut self,
+                _cx: &mut core::task::Context<'_>,
+                packet_slot: &mut Option<PipelinePacket>,
+            ) -> core::task::Poll<Result<g2g_core::PushOutcome, G2gError>> {
+                let packet = packet_slot.take().expect("poll_push without a packet");
+                core::task::Poll::Ready({
                     match packet {
                         PipelinePacket::CapsChanged(c) => self.caps.push(c),
                         PipelinePacket::DataFrame(f) => {
@@ -1961,7 +2077,7 @@ mod tests {
                         }
                         _ => {}
                     }
-                    Ok(PushOutcome::Accepted)
+                    Ok(g2g_core::PushOutcome::Accepted)
                 })
             }
         }

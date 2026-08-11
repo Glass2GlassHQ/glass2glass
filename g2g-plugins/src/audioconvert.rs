@@ -427,7 +427,7 @@ fn convert_pcm(
     let in_ch = in_channels as usize;
     let out_ch = out_channels as usize;
     let in_frame = in_bytes * in_ch;
-    if in_frame == 0 || src.len() % in_frame != 0 {
+    if in_frame == 0 || !src.len().is_multiple_of(in_frame) {
         return Err(G2gError::CapsMismatch);
     }
     let frames = src.len() / in_frame;

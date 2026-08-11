@@ -33,11 +33,12 @@ use g2g_core::{
     StreamCollection, StreamType,
 };
 
-use crate::filesink::io_err;
+use crate::filesink::path_io_err;
 use crate::fmp4::{
     parse_fragments, parse_header, parse_progressive, starts_with_param_set, Header, Sample,
 };
 use crate::mp4box::{find_box, parse_ilst_tags};
+use g2g_core::log::short_type_name;
 
 /// # Example
 ///
@@ -95,7 +96,8 @@ impl Mp4Src {
 
     fn probe(&mut self) -> Result<Caps, G2gError> {
         if self.header.is_none() {
-            let data = std::fs::read(&self.path).map_err(io_err)?;
+            let data = std::fs::read(&self.path)
+                .map_err(|e| path_io_err(short_type_name::<Self>(), "read", &self.path, e))?;
             self.header = Some(parse_header(&data)?);
         }
         let h = self.header.as_ref().expect("just parsed");
@@ -158,7 +160,8 @@ impl SourceLoop for Mp4Src {
             if !self.configured {
                 return Err(G2gError::NotConfigured);
             }
-            let data = std::fs::read(&self.path).map_err(io_err)?;
+            let data = std::fs::read(&self.path)
+                .map_err(|e| path_io_err(short_type_name::<Self>(), "read", &self.path, e))?;
             if self.header.is_none() {
                 self.header = Some(parse_header(&data)?);
             }

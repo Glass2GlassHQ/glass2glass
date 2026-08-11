@@ -3,9 +3,6 @@
 //! guard all work without an interpreter; the per-frame Python call is covered
 //! separately under `--features python` (needs libpython).
 
-use core::future::Future;
-use core::pin::Pin;
-
 use g2g_core::{
     AsyncElement, Caps, Dim, G2gError, OutputSink, PipelinePacket, PropValue, PushOutcome, Rate,
     RawVideoFormat,
@@ -32,12 +29,15 @@ struct CollectSink {
 }
 
 impl OutputSink for CollectSink {
-    fn push<'a>(
-        &'a mut self,
-        packet: PipelinePacket,
-    ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
+    fn poll_push(
+        &mut self,
+        _cx: &mut core::task::Context<'_>,
+        packet_slot: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        let packet = packet_slot.take().expect("poll_push without a packet");
+
         self.packets.push(packet);
-        Box::pin(async { Ok(PushOutcome::Accepted) })
+        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
     }
 }
 

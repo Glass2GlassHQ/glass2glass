@@ -61,6 +61,41 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --workspace --all-targets --locked
 
+  # MSRV floor of the embedded-facing surface (M999). g2g-core / g2g-mcu /
+  # g2g-mcugen / g2g-plugin declare rust-version 1.86 while the host crates are
+  # on 1.92, so a vendor-pinned or certification-frozen toolchain can still
+  # consume the portable core and build a plugin against it. The claim is that
+  # the LIBRARIES build on 1.86: `--all-targets` is deliberately absent because
+  # g2g-mcu's dev-dependency on g2g-plugins is a 1.92 crate.
+  msrv:
+    name: msrv 1.86 (embedded surface)
+    runs-on: ubuntu-latest
+    # rust-toolchain.toml (channel = stable) otherwise wins over the toolchain
+    # the action makes default, and the job silently checks stable instead.
+    # The exact name the action installs ("1.86" would be a separate rustup
+    # toolchain, auto-installed without the thumb target).
+    env:
+      RUSTUP_TOOLCHAIN: "1.86.0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.86
+        with:
+          targets: thumbv7em-none-eabihf
+      - uses: Swatinem/rust-cache@v2
+      - name: check g2g-core (heap-free baseline, thumb cross, full host surface)
+        run: |
+          cargo check -p g2g-core --locked --no-default-features
+          cargo check -p g2g-core --locked --no-default-features --target thumbv7em-none-eabihf
+          cargo check -p g2g-core --locked --all-targets --features std,runtime,dyn-slot,metadata
+      - name: check g2g-mcu (no-alloc dep config + thumb cross)
+        run: |
+          cargo check -p g2g-mcu --locked
+          cargo check -p g2g-mcu --locked --target thumbv7em-none-eabihf
+      - name: check g2g-mcugen (host graph compiler)
+        run: cargo check -p g2g-mcugen --locked
+      - name: check g2g-plugin (third-party plugin SDK)
+        run: cargo check -p g2g-plugin --locked
+
   # Feature-union rot guard. The big `features-linux` union below turns nearly
   # everything on at once, so a symmetric pair (`pulse-sink` + `pulse-src`) hides
   # code that only one half reaches: `-D warnings` then fires for a real user who
@@ -127,6 +162,13 @@ jobs:
         run: >
           cargo check -p g2g-plugins --locked --all-targets --features
           rtsp,onvif,srt,udp-egress,udp-ingress,rtmp,http-src,hls,dash,av1-encode,dav1d,rav1d,mjpeg,mjpeg-encode,opus,vorbis,alsa-sink,pulse-sink,alsa-src,pulse-src,wayland-sink,kms-sink,v4l2,analytics,vello-overlay,wgpu-sink,plugin-loader,declarative-yaml,script-rhai,webtransport,moqt
+      # Plugin loading v1 (same-toolchain dlopen) + v2 (frozen C ABI, M1010):
+      # each test builds its fixture cdylib (v2 also compiles the plain-C
+      # plugin with cc), so the dynamic boundary is exercised, not just checked.
+      - name: test g2g-plugins (plugin loading v1 + v2)
+        run: >
+          cargo test -p g2g-plugins --locked --features plugin-loader
+          --test plugin_loader_dlopen --test plugin_loader_v2 --test plugin_c_abi
       # MoQ Transport draft-16 (M902 / M903 / M905): control-message and datagram
       # layouts against the reference implementation, malformed peer input,
       # subgroup reassembly, and the property surface. The legs that need the
@@ -158,6 +200,14 @@ jobs:
       # feature set above is only checked, so the opus-gated tests run here.
       - name: test g2g-plugins (opus codec + properties)
         run: cargo test -p g2g-plugins --locked --features std,opus --test m454_element_properties --test m177_opus_codec
+      # Codec quality harness (M1001): the decoder goldens over the committed
+      # fixtures, and the encode / decode PSNR floors for the encoders that need
+      # no special hardware. Both persist `Quality` conformance evidence.
+      - name: test g2g-plugins (codec goldens + PSNR)
+        run: >
+          cargo test -p g2g-plugins --locked --features
+          std,rav1d,mjpeg,mjpeg-encode,av1-encode,opus,vorbis
+          --test m1001_golden_decode --test m1001_encode_psnr -- --nocapture
       # CENC decrypt shapes (M164 / M835 / M867): hand-built fixtures run
       # everywhere; the ffmpeg-authored oracle cases skip without ffmpeg.
       - name: test g2g-plugins (cenc decrypt)
@@ -319,8 +369,8 @@ jobs:
           cargo test -p g2g-plugins --locked --features observe,declarative-yaml --lib -- dashboard:: preview:: toolingjson::
           cargo test -p g2g-plugins --locked --features observe,declarative-yaml --test m677_observe --test m846_live_edge_counters --test m849_fanin_edge_preview
           cargo test -p g2g-plugins --locked --features observe,declarative-yaml --test m681_mcp
-      # Native WebRTC (str0m sans-IO stack): needs rustc 1.85 (within the
-      # workspace MSRV), so it stays out of the default suite. Compile the feature, then run the
+      # Native WebRTC (str0m sans-IO stack): an opt-in feature, so it stays out
+      # of the default suite. Compile the feature, then run the
       # deterministic + localhost-only tests: the webrtc element/util/turn lib
       # units, the duplex session runner, and the synthetic lossy-relay NACK/RTX
       # resilience test. The WHIP/WHEP + P2P loopback harness is #[ignore] (needs
@@ -336,6 +386,8 @@ jobs:
           cargo test -p g2g-plugins --locked --features webrtc --test webrtc_data_channel
           cargo test -p g2g-plugins --locked --features webrtc --test m784_duplex_new_track
           cargo test -p g2g-plugins --locked --features webrtc --test m785_duplex_track_remove
+          cargo test -p g2g-plugins --locked --features webrtc --test m1014_duplex_renegotiation
+          cargo test -p g2g-core --locked --features std,runtime,multi-thread --test m1014_dynamic_duplex
 
   # Windows platform build: Media Foundation decode/encode/AAC, WASAPI audio,
   # Direct3D11 present, MF camera. The `windows` crate bundles its bindings, so no
@@ -493,6 +545,11 @@ jobs:
       # absent, so a green run here means real interop evidence was produced.
       - name: native-muxer oracles (mp4mux + mpegtsmux vs ffprobe)
         run: cargo test -p g2g-plugins --locked --features std --test m615_conformance_oracle --test m619_conformance_ts_oracle -- --nocapture
+      # Reference-decoder PSNR (M1001): ffmpeg's own decode of the AV1 and JPEG
+      # fixtures measured against g2g's, appending peer-tagged Oracle evidence.
+      # AV1 decode is bit-exact by spec, so that leg must agree sample for sample.
+      - name: decode PSNR oracle (rav1ddec + mjpegdec vs ffmpeg)
+        run: cargo test -p g2g-plugins --locked --features std,rav1d,mjpeg --test m1001_psnr_oracle -- --nocapture
       # MPEG-TS PSI metadata (M783/M872/M878): ffprobe reads the multi-program PAT
       # / PMT layout, the SDT service text (one entry per program) and the
       # per-stream ISO-639 languages g2g writes, and g2g demuxes an ffmpeg-authored

@@ -19,6 +19,11 @@ members = [
 # with its own target dir and feature resolution.
 exclude = [
     "g2g-plugins/tests/fixtures/example-plugin",
+    # Out-of-tree v2-ABI plugin example (M1010): the same idea against the
+    # cross-toolchain `repr(C)` boundary, built standalone by the
+    # plugin_loader_v2 test (deliberately with a mismatched g2g-core feature
+    # set, which v2 must not care about).
+    "g2g-plugins/tests/fixtures/v2-example-plugin",
     # Bevy integration crate (M796): a heavy `bevy` dependency that must stay
     # out of the normal build / CI. Standalone (its own Cargo.lock), built
     # against g2g as path packages. See its README.
@@ -90,9 +95,9 @@ exclude = [
     "examples/portability-core",
     "examples/portability-native",
     # ONNX topology import for the Burn backend (M983): its `burn-onnx`
-    # build-dependency needs rustc 1.92 (burn 0.21's MSRV), above this
-    # workspace's publish-relevant 1.86. Standalone (own Cargo.lock, path-deps
-    # g2g-ml). See its README.
+    # build-dependency drags burn's whole codegen tree (and burn itself) into
+    # whatever lockfile resolves it, so it stays out of the workspace's.
+    # Standalone (own Cargo.lock, path-deps g2g-ml). See its README.
     "examples/g2g-onnx-import",
     # Correctness gate for a pure-Rust Opus decode path (M916): compares
     # `opus-rs` against libopus on the RFC 8251 vectors. Standalone so the
@@ -104,7 +109,10 @@ exclude = [
 [workspace.package]
 version = "0.2.0"
 edition = "2021"
-rust-version = "1.86"
+# The host-side floor. The embedded-facing crates (g2g-core, g2g-mcu, g2g-mcugen,
+# g2g-plugin) override this with a conservative 1.86, since a certified /
+# vendor-pinned toolchain is what that audience has. See STABILITY.md.
+rust-version = "1.92"
 authors = ["Aaron Boxer <boxerab@protonmail.com>"]
 repository = "https://github.com/boxerab/glass2glass"
 

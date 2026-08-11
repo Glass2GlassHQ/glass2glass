@@ -590,7 +590,7 @@ async fn run_pipe(
     let mut seen = 0u64;
     while let Ok(bytes) = publisher.session.read_datagram().await {
         seen += 1;
-        if drop_every != 0 && seen % drop_every == 0 {
+        if drop_every != 0 && seen.is_multiple_of(drop_every) {
             dropped.fetch_add(1, Ordering::Relaxed);
             continue;
         }

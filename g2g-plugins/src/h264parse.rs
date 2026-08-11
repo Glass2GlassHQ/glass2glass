@@ -477,9 +477,8 @@ pub fn fuzz_parse(data: &[u8]) {
 mod tests {
     use super::*;
     use crate::annexb::{nal_units, BitWriter};
-    use alloc::boxed::Box;
     use alloc::vec;
-    use core::future::Future;
+
     use g2g_core::{
         AsyncElement, Caps, CapsConstraint, Dim, G2gError, OutputSink, PipelinePacket, Rate,
     };
@@ -488,7 +487,7 @@ mod tests {
     /// (both multiples of 16), then frame it in Annex-B. Returns the
     /// full byte stream including a 4-byte start code and NAL header.
     fn build_test_annexb_sps(width: u32, height: u32) -> Vec<u8> {
-        assert!(width % 16 == 0 && height % 16 == 0);
+        assert!(width.is_multiple_of(16) && height.is_multiple_of(16));
         let mut w = BitWriter::default();
         // Post NAL-header SPS fields:
         // seq_parameter_set_id = 0
@@ -631,7 +630,7 @@ mod tests {
         num_units_in_tick: u32,
         time_scale: u32,
     ) -> Vec<u8> {
-        assert!(width % 16 == 0 && height % 16 == 0);
+        assert!(width.is_multiple_of(16) && height.is_multiple_of(16));
         let mut w = BitWriter::default();
         w.write_ue(0); // seq_parameter_set_id
         w.write_ue(0); // log2_max_frame_num_minus4
@@ -780,7 +779,6 @@ mod tests {
 
     // -- Element-level tests (drive H264Parse::process directly) -----------
 
-    use core::pin::Pin;
     use g2g_core::frame::Frame;
     use g2g_core::memory::SystemSlice;
     use g2g_core::{FrameTiming, MemoryDomain, PushOutcome};
@@ -791,11 +789,13 @@ mod tests {
     }
 
     impl OutputSink for RecordingSink {
-        fn push<'a>(
-            &'a mut self,
-            packet: PipelinePacket,
-        ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
-            Box::pin(async move {
+        fn poll_push(
+            &mut self,
+            _cx: &mut core::task::Context<'_>,
+            packet_slot: &mut Option<PipelinePacket>,
+        ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+            let packet = packet_slot.take().expect("poll_push without a packet");
+            core::task::Poll::Ready({
                 self.packets.push(packet);
                 Ok(PushOutcome::Accepted)
             })

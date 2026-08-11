@@ -19,16 +19,14 @@ use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, ConfigureOutcome, ElementMetadata, G2gError, HardwareError,
-    OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue,
-    PropertySpec,
+    AsyncElement, Caps, CapsConstraint, ConfigureOutcome, ElementMetadata, G2gError, OutputSink,
+    PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
 
-/// Map a filesystem error to the structured `Hardware(Io)` variant, carrying
-/// the raw OS error code. Shared with `FileSrc`.
-pub(crate) fn io_err(e: std::io::Error) -> G2gError {
-    G2gError::Hardware(HardwareError::Io(e.raw_os_error().unwrap_or(0)))
-}
+/// The filesystem-error mapping every path-opening element here reports through,
+/// shared with the runner's flight-recorder dump (which is in `g2g-core`, so the
+/// one definition lives there).
+pub(crate) use g2g_core::log::{io_err, path_io_err};
 
 /// # Example
 ///
@@ -94,7 +92,8 @@ impl AsyncElement for FileSink {
         // later re-negotiation keeps the open writer and what was already
         // recorded, instead of truncating it.
         if self.writer.is_none() {
-            let file = File::create(&self.path).map_err(io_err)?;
+            let file = File::create(&self.path)
+                .map_err(|e| path_io_err(self.log_category(), "create", &self.path, e))?;
             self.writer = Some(BufWriter::new(file));
         }
         Ok(ConfigureOutcome::Accepted)
@@ -189,11 +188,13 @@ mod tests {
 
     struct NullSink;
     impl OutputSink for NullSink {
-        fn push<'a>(
-            &'a mut self,
-            _packet: PipelinePacket,
-        ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
-            Box::pin(async { Ok(PushOutcome::Accepted) })
+        fn poll_push(
+            &mut self,
+            _cx: &mut core::task::Context<'_>,
+            packet_slot: &mut Option<PipelinePacket>,
+        ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+            packet_slot.take();
+            core::task::Poll::Ready(Ok(PushOutcome::Accepted))
         }
     }
 

@@ -7,6 +7,8 @@ keywords = ["multimedia", "ffi", "video", "pipeline", "bindings"]
 categories = ["multimedia", "external-ffi-bindings", "api-bindings"]
 version.workspace = true
 edition.workspace = true
+# The host floor, not g2g-core's 1.86: this crate's element registry comes from
+# g2g-plugins, so its MSRV can be no lower than that crate's.
 rust-version.workspace = true
 authors.workspace = true
 repository.workspace = true

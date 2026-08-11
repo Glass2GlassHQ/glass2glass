@@ -416,6 +416,13 @@ impl PipelineClock for PtpClock {
     fn now_ns(&self) -> u64 {
         self.servo.lock().now_ns()
     }
+
+    /// Healthy while the servo is synchronised. `Holdover` still projects the
+    /// master's rate from the last fit and counts as healthy; `FreeRunning` has
+    /// lost the master, which is the clock loss the runner re-elects on.
+    fn healthy(&self) -> bool {
+        self.state() != PtpState::FreeRunning
+    }
 }
 
 #[cfg(test)]

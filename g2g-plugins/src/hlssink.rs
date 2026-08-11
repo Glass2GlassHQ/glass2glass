@@ -45,11 +45,12 @@ use g2g_core::{
     PropKind, PropValue, PropertySpec,
 };
 
-use crate::filesink::io_err;
+use crate::filesink::{io_err, path_io_err};
 use crate::fmp4::{parse_trun, tfhd_defaults, trun_first_sample_is_sync};
 use crate::hls::{write_media, MediaPlaylist, Segment};
 use crate::mp4box::{be32, boxes, find_box, find_path};
 use crate::multifilesink::expand;
+use g2g_core::log::short_type_name;
 
 /// # Example
 ///
@@ -230,12 +231,15 @@ impl HlsSink {
             return Ok(());
         }
         if !self.init.is_empty() && !self.init_written {
-            fs::write(&self.init_location, &self.init).map_err(io_err)?;
+            fs::write(&self.init_location, &self.init).map_err(|e| {
+                path_io_err(short_type_name::<Self>(), "write", &self.init_location, e)
+            })?;
             self.playlist.map_uri = Some(self.playlist_uri(&self.init_location));
             self.init_written = true;
         }
         let path = expand(&self.location, self.index);
-        let mut file = fs::File::create(&path).map_err(io_err)?;
+        let mut file = fs::File::create(&path)
+            .map_err(|e| path_io_err(short_type_name::<Self>(), "create", &path, e))?;
         file.write_all(&self.open_segment).map_err(io_err)?;
         file.flush().map_err(io_err)?;
         self.index += 1;
@@ -281,7 +285,14 @@ impl HlsSink {
     }
 
     fn write_playlist(&self) -> Result<(), G2gError> {
-        fs::write(&self.playlist_location, write_media(&self.playlist)).map_err(io_err)
+        fs::write(&self.playlist_location, write_media(&self.playlist)).map_err(|e| {
+            path_io_err(
+                short_type_name::<Self>(),
+                "write",
+                &self.playlist_location,
+                e,
+            )
+        })
     }
 
     /// One MPEG-TS input frame: a whole access unit's packets. The keyframe flag

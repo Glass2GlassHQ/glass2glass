@@ -169,7 +169,7 @@ impl MjpegDec {
         match self.out_format {
             RawVideoFormat::Rgba8 => Ok(rgba),
             RawVideoFormat::I420 => {
-                if w % 2 != 0 || h % 2 != 0 {
+                if !w.is_multiple_of(2) || !h.is_multiple_of(2) {
                     return Err(G2gError::CapsMismatch);
                 }
                 Ok(crate::videoconvert::convert(

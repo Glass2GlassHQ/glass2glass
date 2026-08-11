@@ -12,7 +12,8 @@ keywords = ["embedded", "no-std", "mcu", "multimedia", "embedded-hal"]
 categories = ["embedded", "no-std", "no-std::no-alloc", "multimedia", "hardware-support"]
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
+# Conservative MSRV with g2g-core: this crate only ever builds for an MCU target.
+rust-version = "1.86"
 authors.workspace = true
 repository.workspace = true
 

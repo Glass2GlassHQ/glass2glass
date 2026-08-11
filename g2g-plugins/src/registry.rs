@@ -230,6 +230,11 @@ pub fn default_registry() -> Registry {
     // (M421), so a decoder fed un-access-unit-aligned input (e.g. one MPEG-TS PES
     // that is not one coded picture) does not mis-parse.
     reg.set_parser_provider(decode_parser_provider);
+    // A parsed pipeline whose producer and consumer disagree on a memory domain
+    // gets the bridge spliced in (M354): `nvdec ! wgpusink` keeps the frame on
+    // the GPU, `nvdec ! waylandsink` downloads it.
+    #[cfg(all(target_os = "linux", feature = "cuda"))]
+    reg.set_domain_converter(crate::cuda::cuda_domain_converter);
 
     // Sources. The output caps are the autoplug `decodebin` input; the parser
     // only calls the constructor and applies properties.
@@ -667,6 +672,15 @@ pub fn default_registry() -> Registry {
     // link exactly the video and text branches.
     reg.register_muxer(MuxerFactory::new("textoverlay", |_inputs| {
         Box::new(crate::textoverlay::TextOverlayN::new())
+    }));
+    // Bitmap-subtitle overlay fan-in (M1005): the same shape for cues that are
+    // pixels rather than text. An RGBA8 video pad (input 0) and the RGBA8
+    // canvases a subpicture decoder paints (input 1), merged by PTS:
+    // `d.video_0 ! avdec_h264 ! videoconvert ! o.video   d.text_0 ! vobsubdec !
+    // o.text   subpictureoverlay name=o ! videoconvert ! autovideosink`. Always
+    // 2-input, so link exactly the video and subpicture branches.
+    reg.register_muxer(MuxerFactory::new("subpictureoverlay", |_inputs| {
+        Box::new(crate::subpictureoverlay::SubPictureOverlay::new())
     }));
     // Picture-in-picture / grid video fan-in (M876): the gst `compositor` analog,
     // built by link degree like the muxers above (one pad per branch linked in,
@@ -1247,9 +1261,17 @@ fn register_autoplug_candidates(reg: &mut Registry) {
 /// `fakesink` (always present), which keeps a tutorial line running headless.
 fn register_aliases(reg: &mut Registry) {
     // Auto sinks: prefer a real display / audio sink, fall back to fakesink.
+    // `wgpusink` leads: it is the only one that presents a GPU-resident frame
+    // without a round trip through system memory.
     reg.register_alias(
         "autovideosink",
-        &["waylandsink", "kmssink", "metalvideosink", "fakesink"],
+        &[
+            "wgpusink",
+            "waylandsink",
+            "kmssink",
+            "metalvideosink",
+            "fakesink",
+        ],
     );
     reg.register_alias(
         "autoaudiosink",
@@ -1312,6 +1334,145 @@ fn register_aliases(reg: &mut Registry) {
     reg.register_alias("nvh264dec", &["nvdec"]);
     reg.register_alias("nvh264enc", &["nvenc"]);
     reg.register_alias("nvv4l2h264enc", &["nvenc"]);
+}
+
+/// One feature-gated launch element: the name a pipeline writes, the cargo
+/// feature that compiles it, and whether this build has it.
+///
+/// `compiled_in` mirrors the element's `#[cfg]` in [`register_feature_gated`];
+/// the catalog itself is un-cfg'd, so a build that lacks an element can still
+/// name the feature that would provide it.
+#[derive(Debug, Clone, Copy)]
+pub struct FeatureGatedElement {
+    pub name: &'static str,
+    pub feature: &'static str,
+    pub compiled_in: bool,
+}
+
+/// Every launch element name that only exists with a cargo feature, so an
+/// "unknown element" can be answered with "rebuild with this feature" instead of
+/// "no such element". `glimagesink` is deliberately absent: without `gl-sink` the
+/// name resolves anyway, as an alias onto whatever display sink is built.
+pub static FEATURE_GATED_ELEMENTS: &[FeatureGatedElement] = &{
+    // Each row's gate is built from the feature (and the platform, where the
+    // element is target-gated), so it cannot drift from the row it describes.
+    macro_rules! rows {
+        ($($name:literal => $feature:literal $(on $os:literal)?;)*) => {
+            [$(FeatureGatedElement {
+                name: $name,
+                feature: $feature,
+                compiled_in: cfg!(all(feature = $feature $(, target_os = $os)?)),
+            }),*]
+        };
+    }
+    rows! {
+        "scriptelement" => "script-rhai";
+        "scriptrouter" => "script-rhai";
+        "opusenc" => "opus";
+        "opusdec" => "opus";
+        "vorbisdec" => "vorbis";
+        "av1enc" => "av1-encode";
+        "vpxenc" => "vpx";
+        "mjpegdec" => "mjpeg";
+        "mjpegenc" => "mjpeg-encode";
+        "dav1ddec" => "dav1d";
+        "rav1ddec" => "rav1d";
+        "vulkanvideodec" => "vulkan-video";
+        "rtspsrc" => "rtsp";
+        "onvifsrc" => "onvif";
+        "udpsrc" => "udp-ingress";
+        "udpsink" => "udp-egress";
+        "cotsink" => "udp-egress";
+        "rtspserversink" => "rtsp-server";
+        "rtspserversrc" => "rtsp-server";
+        "rtspserversrcn" => "rtsp-server";
+        "srtsrc" => "srt";
+        "srtsink" => "srt";
+        "remotesrc" => "remote";
+        "remotesink" => "remote";
+        "remotewssrc" => "remote-ws";
+        "remotewssink" => "remote-ws";
+        "remotewstransform" => "remote-ws";
+        "remotewtsrc" => "webtransport";
+        "remotewtsink" => "webtransport";
+        "remotewttransform" => "webtransport";
+        "moqtsink" => "moqt";
+        "moqtsrc" => "moqt";
+        "moqtsessionsrc" => "moqt";
+        "webrtcsrc" => "webrtc";
+        "webrtcsink" => "webrtc";
+        "webrtcsessionsink" => "webrtc";
+        "webrtcwhepsessionsrc" => "webrtc";
+        "livekitsink" => "webrtc-livekit";
+        "livekitsrc" => "webrtc-livekit";
+        "httpsrc" => "http-src";
+        "hlssrc" => "hls";
+        "dashsrc" => "dash";
+        "rtmpsrc" => "rtmp";
+        "rtmpsink" => "rtmp";
+        "analyticsoverlay" => "analytics";
+        "wgpucompositor" => "wgpu-sink";
+        "gstwrap" => "gstreamer";
+        "mp4mux" => "std";
+        "localcudasrc" => "local-ipc" on "linux";
+        "localcudasink" => "local-ipc" on "linux";
+        "dmabufsrc" => "local-dmabuf" on "linux";
+        "dmabufsink" => "local-dmabuf" on "linux";
+        "v4l2src" => "v4l2" on "linux";
+        "libcamerasrc" => "libcamera" on "linux";
+        "ffmpegdec" => "ffmpeg" on "linux";
+        "ffmpegaudiodec" => "ffmpeg" on "linux";
+        "ffmpegvaapidec" => "ffmpeg" on "linux";
+        "ffmpegenc" => "ffmpeg" on "linux";
+        "x264enc" => "ffmpeg" on "linux";
+        "avenc_aac" => "ffmpeg" on "linux";
+        "vaapidec" => "vaapi" on "linux";
+        "nvdec" => "nvdec" on "linux";
+        "nvenc" => "nvenc" on "linux";
+        "jpegxsenc" => "jpegxs" on "linux";
+        "jpegxsdec" => "jpegxs" on "linux";
+        "dmabuftowgpu" => "dmabuf-wgpu" on "linux";
+        "wgputodmabuf" => "dmabuf-wgpu" on "linux";
+        "waylandsink" => "wayland-sink" on "linux";
+        "wgpusink" => "wgpu-present" on "linux";
+        "kmssink" => "kms-sink" on "linux";
+        "alsasink" => "alsa-sink" on "linux";
+        "alsasrc" => "alsa-src" on "linux";
+        "pulsesink" => "pulse-sink" on "linux";
+        "pulsesrc" => "pulse-src" on "linux";
+        "pipewiresink" => "pipewire" on "linux";
+        "pipewiresrc" => "pipewire" on "linux";
+        "pipewirevideosrc" => "pipewire" on "linux";
+        "aaudiosrc" => "aaudio" on "android";
+        "aaudiosink" => "aaudio" on "android";
+        "camera2src" => "camera2" on "android";
+        "mediacodecdec" => "mediacodec" on "android";
+        "mediacodecdech265" => "mediacodec" on "android";
+        "mediacodecenc" => "mediacodec" on "android";
+        "mediacodecench265" => "mediacodec" on "android";
+        "vtdec" => "vtdecode" on "macos";
+        "vtdech265" => "vtdecode" on "macos";
+        "vtenc_h264" => "vtencode" on "macos";
+        "vtenc_h265" => "vtencode" on "macos";
+        "metalvideosink" => "metal-sink" on "macos";
+        "coreaudiosink" => "coreaudio" on "macos";
+        "coreaudiosrc" => "coreaudio" on "macos";
+        "avfvideosrc" => "avfoundation" on "macos";
+        "avfaudiosrc" => "avfoundation" on "macos";
+        "screencapturesrc" => "screencapture" on "macos";
+        "mfvideosrc" => "mf-video-src" on "windows";
+        "wasapisrc" => "wasapi-src" on "windows";
+        "wasapisink" => "wasapi-sink" on "windows";
+    }
+};
+
+/// The cargo feature that would compile the launch element named `name`, `None`
+/// if the name is not in [`FEATURE_GATED_ELEMENTS`].
+pub fn required_feature(name: &str) -> Option<&'static str> {
+    FEATURE_GATED_ELEMENTS
+        .iter()
+        .find(|element| element.name == name)
+        .map(|element| element.feature)
 }
 
 /// Register the feature- and platform-gated elements. Each block compiles only
@@ -1782,6 +1943,14 @@ fn register_feature_gated(reg: &mut Registry) {
         "glimagesink",
         || Box::new(crate::glsink::GlSink::new()),
     ));
+    // Windowed wgpu display sink: it takes GPU-resident frames as they are, so a
+    // decoder that keeps them on the GPU reaches the screen with no upload. Its
+    // NV12 + RGBA pad templates let decodebin auto-plug onto it.
+    #[cfg(all(target_os = "linux", feature = "wgpu-present"))]
+    reg.register_launch(LaunchFactory::of::<crate::wgpupresent::WgpuPresentSink>(
+        "wgpusink",
+        || Box::new(crate::wgpupresent::WgpuPresentSink::new()),
+    ));
     // WebRTC WHIP egress; the `location` property targets the endpoint. The URL
     // defaults empty (set it via `webrtcsink location=...`); publishing starts
     // on the first frame.
@@ -1970,6 +2139,37 @@ mod ffmpeg_enc_registry_tests {
                 reg.make_element(name).is_some(),
                 "registry resolves `{name}`"
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod feature_catalog_tests {
+    use super::*;
+
+    /// The catalog has to agree with the live registry both ways: a name listed
+    /// here that resolves without its feature is a baseline element wrongly
+    /// listed (the lint would advise a pointless rebuild), and a name that does
+    /// not resolve with its feature on means the row names the wrong feature.
+    #[test]
+    fn the_feature_catalog_matches_the_live_registry() {
+        let reg = default_registry();
+        for element in FEATURE_GATED_ELEMENTS {
+            assert_eq!(
+                reg.knows_element(element.name),
+                element.compiled_in,
+                "`{}` (feature `{}`)",
+                element.name,
+                element.feature
+            );
+        }
+    }
+
+    #[test]
+    fn every_catalog_name_is_listed_once() {
+        let mut seen = alloc::collections::BTreeSet::new();
+        for element in FEATURE_GATED_ELEMENTS {
+            assert!(seen.insert(element.name), "`{}` listed twice", element.name);
         }
     }
 }

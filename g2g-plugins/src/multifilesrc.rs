@@ -26,7 +26,8 @@ use g2g_core::{
     VideoCodec,
 };
 
-use crate::filesink::io_err;
+use crate::filesink::{io_err, path_io_err};
+use g2g_core::log::short_type_name;
 
 /// # Example
 ///
@@ -141,7 +142,7 @@ impl SourceLoop for MultiFileSrc {
                         }
                         break;
                     }
-                    Err(e) => return Err(io_err(e)),
+                    Err(e) => return Err(path_io_err(short_type_name::<Self>(), "open", &path, e)),
                 };
                 let mut buf = alloc::vec::Vec::new();
                 file.read_to_end(&mut buf).map_err(io_err)?;
@@ -222,10 +223,13 @@ mod tests {
         eos: bool,
     }
     impl OutputSink for CollectSink {
-        fn push<'a>(
-            &'a mut self,
-            packet: PipelinePacket,
-        ) -> Pin<Box<dyn Future<Output = Result<g2g_core::PushOutcome, G2gError>> + 'a>> {
+        fn poll_push(
+            &mut self,
+            _cx: &mut core::task::Context<'_>,
+            packet_slot: &mut Option<PipelinePacket>,
+        ) -> core::task::Poll<Result<g2g_core::PushOutcome, G2gError>> {
+            let packet = packet_slot.take().expect("poll_push without a packet");
+
             match packet {
                 PipelinePacket::DataFrame(f) => {
                     if let Some(s) = f.domain.as_system_slice() {
@@ -235,7 +239,7 @@ mod tests {
                 PipelinePacket::Eos => self.eos = true,
                 _ => {}
             }
-            Box::pin(async { Ok(g2g_core::PushOutcome::Accepted) })
+            core::task::Poll::Ready(Ok(g2g_core::PushOutcome::Accepted))
         }
     }
 

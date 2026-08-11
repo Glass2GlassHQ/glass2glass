@@ -7,7 +7,7 @@
 #![cfg(feature = "rtsp-server")]
 
 use core::future::Future;
-use core::pin::Pin;
+
 use std::net::TcpListener as StdTcpListener;
 
 use g2g_core::runtime::SourceLoop;
@@ -23,16 +23,19 @@ struct Capture {
     tags: Vec<u8>,
 }
 impl OutputSink for Capture {
-    fn push<'a>(
-        &'a mut self,
-        p: PipelinePacket,
-    ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
+    fn poll_push(
+        &mut self,
+        _cx: &mut core::task::Context<'_>,
+        packet_slot: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        let p = packet_slot.take().expect("poll_push without a packet");
+
         if let PipelinePacket::DataFrame(frame) = &p {
             if let Some(slice) = frame.domain.as_system_slice() {
                 self.tags.push(slice.get(5).copied().unwrap_or(0));
             }
         }
-        Box::pin(async { Ok(PushOutcome::Accepted) })
+        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
     }
 }
 

@@ -7,7 +7,8 @@ keywords = ["embedded", "no-std", "mcu", "codegen", "multimedia"]
 categories = ["embedded", "development-tools", "multimedia", "command-line-utilities"]
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
+# Conservative MSRV: it runs on whatever host toolchain the MCU consumer already has.
+rust-version = "1.86"
 authors.workspace = true
 repository.workspace = true
 

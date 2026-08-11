@@ -99,16 +99,93 @@ impl ReverseChannel {
 }
 
 /// Downstream output addressing one of N ports. The fan-out analog of
-/// [`OutputSink`]: `push_to` selects the destination port. Dyn-safe via a
-/// boxed future so [`MultiOutputElement`] can take `&mut dyn MultiOutputSink`.
+/// [`OutputSink`]: `push_to` selects the destination port. Dyn-safe via the
+/// poll form (no heap), mirroring [`OutputSink::poll_push`]; `push_to` wraps
+/// it in the concrete [`PushToFuture`] so `&mut dyn MultiOutputSink` callers
+/// await it unchanged.
 pub trait MultiOutputSink {
-    fn push_to<'a>(
-        &'a mut self,
+    /// Drive one packet toward `port`. Same slot contract as
+    /// [`OutputSink::poll_push`].
+    fn poll_push_to(
+        &mut self,
+        cx: &mut core::task::Context<'_>,
         port: usize,
-        packet: PipelinePacket,
-    ) -> BoxFuture<'a, Result<PushOutcome, G2gError>>;
+        packet: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>>;
+
+    /// Discard any phase a cancelled earlier push to `port` left behind.
+    fn begin_push_to(&mut self, _port: usize) {}
 
     fn port_count(&self) -> usize;
+
+    /// Add an output port carrying `caps` and return its index, or `None` if this
+    /// sink cannot grow (M1014). A duplex session calls it when the peer adds a
+    /// track and none of its declared pads is free; the dynamic duplex runner
+    /// answers by building that port's link and finding it a sink. Never blocks,
+    /// so it is callable from a session's own poll loop: a sink that cannot take
+    /// the port right now answers `None` and the caller keeps whatever it does for
+    /// a track it cannot place.
+    ///
+    /// Default `None`: the fixed-arity multi-sinks the static runners build refuse
+    /// to grow, so a session written against this sees exactly today's behavior.
+    fn add_port(&mut self, _caps: &Caps) -> Option<usize> {
+        None
+    }
+}
+
+/// `push_to` for concrete (sized) sinks; split out for the same
+/// dyn-vs-provided-method ambiguity [`OutputSinkExt`] resolves.
+///
+/// [`OutputSinkExt`]: crate::element::OutputSinkExt
+pub trait MultiOutputSinkExt: MultiOutputSink + Sized {
+    fn push_to(&mut self, port: usize, packet: PipelinePacket) -> PushToFuture<'_, Self> {
+        self.begin_push_to(port);
+        PushToFuture {
+            sink: self,
+            port,
+            packet: Some(packet),
+        }
+    }
+}
+
+impl<S: MultiOutputSink> MultiOutputSinkExt for S {}
+
+impl<'e> dyn MultiOutputSink + 'e {
+    /// [`MultiOutputSink::push_to`] for trait objects (the provided method
+    /// needs `Self: Sized`).
+    pub fn push_to(
+        &mut self,
+        port: usize,
+        packet: PipelinePacket,
+    ) -> PushToFuture<'_, dyn MultiOutputSink + 'e> {
+        self.begin_push_to(port);
+        PushToFuture {
+            sink: self,
+            port,
+            packet: Some(packet),
+        }
+    }
+}
+
+/// Concrete future behind [`MultiOutputSink::push_to`]: the packet slot
+/// [`MultiOutputSink::poll_push_to`] drains. No heap.
+#[allow(missing_debug_implementations)]
+pub struct PushToFuture<'a, S: MultiOutputSink + ?Sized> {
+    sink: &'a mut S,
+    port: usize,
+    packet: Option<PipelinePacket>,
+}
+
+impl<S: MultiOutputSink + ?Sized> core::future::Future for PushToFuture<'_, S> {
+    type Output = Result<PushOutcome, G2gError>;
+
+    fn poll(
+        self: core::pin::Pin<&mut Self>,
+        cx: &mut core::task::Context<'_>,
+    ) -> core::task::Poll<Self::Output> {
+        let this = self.get_mut();
+        this.sink.poll_push_to(cx, this.port, &mut this.packet)
+    }
 }
 
 /// [`MultiOutputSink`] backed by one [`SenderSink`] per output link. Built
@@ -135,14 +212,30 @@ impl MultiSenderSink {
             port.set_push_wait_probe(probe.clone());
         }
     }
+
+    /// Append a port, for the growable multi-sink the dynamic duplex runner wraps
+    /// this in (M1014).
+    // Only that runner grows a multi-sink, so without std this would be dead code
+    // (which the workspace denies).
+    #[cfg(feature = "std")]
+    pub(crate) fn push_port(&mut self, port: SenderSink) {
+        self.ports.push(port);
+    }
 }
 
 impl MultiOutputSink for MultiSenderSink {
-    fn push_to<'a>(
-        &'a mut self,
+    fn begin_push_to(&mut self, port: usize) {
+        if let Some(sink) = self.ports.get_mut(port) {
+            sink.begin_push();
+        }
+    }
+
+    fn poll_push_to(
+        &mut self,
+        cx: &mut core::task::Context<'_>,
         port: usize,
-        packet: PipelinePacket,
-    ) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
+        packet: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
         // Port range is an internal invariant: `Router` clamps its selection
         // and broadcasts only over `0..port_count`, so an out-of-range port
         // is a framework bug, not a runtime error.
@@ -150,7 +243,7 @@ impl MultiOutputSink for MultiSenderSink {
             .ports
             .get_mut(port)
             .expect("push_to: port out of range");
-        sink.push(packet)
+        sink.poll_push(cx, packet)
     }
 
     fn port_count(&self) -> usize {
@@ -295,6 +388,16 @@ impl<'b> DynMultiOutputSource for &'b mut (dyn DynMultiOutputSource + 'b) {
 /// so the session can stop publishing while still draining the peer.
 pub trait DuplexInbound {
     fn recv(&mut self) -> BoxFuture<'_, Option<(usize, PipelinePacket)>>;
+
+    /// The [`ReverseChannel`] of send input `input`, for a pad the session only
+    /// learned about mid-run (M1014). The runner asks
+    /// [`MultiDuplexSession::reverse_channel`] for the pads that exist when the
+    /// run starts, so a track attached later has no route for its PLI / BWE until
+    /// the session reads it back here, keyed by the index its packets arrive on.
+    /// Default `None`: the fixed-arity runner hands every channel over up front.
+    fn reverse_channel(&self, _input: usize) -> Option<ReverseChannel> {
+        None
+    }
 }
 
 /// A terminal **duplex** session: N send-side inputs **and** M recv-side outputs
@@ -1056,12 +1159,13 @@ mod tests {
     }
 
     impl MultiOutputSink for RecordingMultiSink {
-        fn push_to<'a>(
-            &'a mut self,
+        fn poll_push_to(
+            &mut self,
+            _cx: &mut core::task::Context<'_>,
             port: usize,
-            packet: PipelinePacket,
-        ) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
-            match packet {
+            packet: &mut Option<PipelinePacket>,
+        ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+            match packet.take().expect("poll_push_to without a packet") {
                 PipelinePacket::DataFrame(f) => self.data_seqs[port].push(f.sequence),
                 PipelinePacket::CapsChanged(_) => self.caps_changes[port] += 1,
                 PipelinePacket::Eos
@@ -1069,7 +1173,7 @@ mod tests {
                 | PipelinePacket::Segment(_)
                 | PipelinePacket::Tick => {}
             }
-            Box::pin(async { Ok(PushOutcome::Accepted) })
+            core::task::Poll::Ready(Ok(PushOutcome::Accepted))
         }
 
         fn port_count(&self) -> usize {
@@ -1085,11 +1189,12 @@ mod tests {
     }
 
     impl OutputSink for RecordingSink {
-        fn push<'a>(
-            &'a mut self,
-            packet: PipelinePacket,
-        ) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
-            match packet {
+        fn poll_push(
+            &mut self,
+            _cx: &mut core::task::Context<'_>,
+            packet: &mut Option<PipelinePacket>,
+        ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+            match packet.take().expect("poll_push without a packet") {
                 PipelinePacket::DataFrame(f) => self.data_seqs.push(f.sequence),
                 PipelinePacket::CapsChanged(_) => self.caps_changes += 1,
                 PipelinePacket::Eos
@@ -1097,7 +1202,7 @@ mod tests {
                 | PipelinePacket::Segment(_)
                 | PipelinePacket::Tick => {}
             }
-            Box::pin(async { Ok(PushOutcome::Accepted) })
+            core::task::Poll::Ready(Ok(PushOutcome::Accepted))
         }
     }
 

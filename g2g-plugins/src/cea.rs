@@ -808,7 +808,7 @@ pub const CC_NULL: u8 = 0x80;
 /// masks the parity bit off, so it is cosmetic for our own round trip but required
 /// by a conformant decoder / TV).
 fn odd_parity(b: u8) -> u8 {
-    if (b & 0x7F).count_ones() % 2 == 0 {
+    if (b & 0x7F).count_ones().is_multiple_of(2) {
         (b & 0x7F) | 0x80
     } else {
         b & 0x7F
@@ -1765,7 +1765,7 @@ mod tests {
     /// Odd-parity-encode a CEA-608 byte (bit 7 makes the total bit count odd).
     fn parity(mut b: u8) -> u8 {
         let ones = b.count_ones();
-        if ones % 2 == 0 {
+        if ones.is_multiple_of(2) {
             b |= 0x80;
         }
         b
@@ -2067,7 +2067,7 @@ mod tests {
     /// odd-length-padded data) ready to split into caption triples.
     fn dtvcc_packet(blocks: &[u8]) -> Vec<u8> {
         let mut data = blocks.to_vec();
-        if data.len() % 2 == 0 {
+        if data.len().is_multiple_of(2) {
             data.push(0x00); // pad so data_size is odd (= size_code * 2 - 1)
         }
         let size_code = data.len().div_ceil(2) as u8;

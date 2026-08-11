@@ -183,7 +183,7 @@ impl FfmpegAacEnc {
     fn ingest(&mut self, bytes: &[u8]) -> Result<(), G2gError> {
         match self.input_format {
             AudioFormat::PcmS16Le => {
-                if bytes.len() % 2 != 0 {
+                if !bytes.len().is_multiple_of(2) {
                     return Err(G2gError::CapsMismatch);
                 }
                 self.pending.extend(
@@ -193,7 +193,7 @@ impl FfmpegAacEnc {
                 );
             }
             AudioFormat::PcmF32Le => {
-                if bytes.len() % 4 != 0 {
+                if !bytes.len().is_multiple_of(4) {
                     return Err(G2gError::CapsMismatch);
                 }
                 self.pending.extend(

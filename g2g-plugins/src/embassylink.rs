@@ -4,15 +4,10 @@
 //! the `PacketChannel` (e.g. in a `StaticCell` or `static`) and hands its `sink`
 //! to a producer and its `receiver` to a consumer.
 //!
-//! The channel storage is static (no allocation). The `OutputSink` adapter
-//! still boxes its push future, since that trait is dyn-safe; a fully
-//! allocation-free element model (concrete future types, no boxing) is the
+//! The channel storage is static (no allocation), and the `OutputSink`
+//! adapter pushes through the poll form, so a push costs no heap either. The
+//! fully static element model (concrete future types, no `dyn`) remains the
 //! static-graph layer (§4.8.1).
-
-use core::future::Future;
-use core::pin::Pin;
-
-use alloc::boxed::Box;
 
 use embassy_sync::blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex, RawMutex};
 use embassy_sync::channel::{Channel, Receiver, Sender};
@@ -73,13 +68,27 @@ pub struct EmbassySink<'a, M: RawMutex, const N: usize> {
 }
 
 impl<M: RawMutex, const N: usize> OutputSink for EmbassySink<'_, M, N> {
-    fn push<'b>(
-        &'b mut self,
-        packet: PipelinePacket,
-    ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'b>> {
-        Box::pin(async move {
-            self.sender.send(packet).await;
-            Ok(PushOutcome::Accepted)
-        })
+    fn poll_push(
+        &mut self,
+        cx: &mut core::task::Context<'_>,
+        packet: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        use core::task::Poll;
+        match self.sender.poll_ready_to_send(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(()) => {
+                let taken = packet.take().expect("poll_push without a packet");
+                match self.sender.try_send(taken) {
+                    Ok(()) => Poll::Ready(Ok(PushOutcome::Accepted)),
+                    // Lost the slot between readiness and send (another sender
+                    // on the shared channel); park again for the next wake.
+                    Err(embassy_sync::channel::TrySendError::Full(returned)) => {
+                        *packet = Some(returned);
+                        let _ = self.sender.poll_ready_to_send(cx);
+                        Poll::Pending
+                    }
+                }
+            }
+        }
     }
 }

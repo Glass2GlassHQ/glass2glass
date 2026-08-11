@@ -232,7 +232,6 @@ fn separate_audio_rendition_builds_two_source_chains() {
 /// hook calls after fetching the init.
 #[test]
 fn fmp4_variant_fans_out_via_mp4demuxn() {
-    use core::future::Future;
     use g2g_core::frame::{Frame, FrameTiming};
     use g2g_core::memory::{MemoryDomain, SystemSlice};
     use g2g_core::runtime::block_on;
@@ -244,11 +243,13 @@ fn fmp4_variant_fans_out_via_mp4demuxn() {
         bytes: Vec<u8>,
     }
     impl OutputSink for ByteCapture {
-        fn push<'a>(
-            &'a mut self,
-            packet: PipelinePacket,
-        ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
-            Box::pin(async move {
+        fn poll_push(
+            &mut self,
+            _cx: &mut core::task::Context<'_>,
+            packet_slot: &mut Option<PipelinePacket>,
+        ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+            let packet = packet_slot.take().expect("poll_push without a packet");
+            core::task::Poll::Ready({
                 if let PipelinePacket::DataFrame(f) = packet {
                     if let Some(s) = f.domain.as_system_slice() {
                         self.bytes.extend_from_slice(s);

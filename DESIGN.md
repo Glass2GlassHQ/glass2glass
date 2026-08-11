@@ -193,7 +193,7 @@ let mut frame = SystemSlice::from_pool(buf, frame_len);  // valid payload length
 ```
 
 - **`no_std + alloc` environments (and `std`):** `BufferPool<T>` wraps `Arc<Mutex<Vec<T>>>` plus a `VecDeque<Waker>` of acquire waiters. `acquire().await` resolves the moment a `PooledBuffer` elsewhere is dropped. `try_acquire()` is the sync fast path for non-blocking contexts.
-- **Strict `no_std` (no heap) environments:** two pure-`core` pools sized at construction, no `alloc`. `StaticBufferPool::<[u8; N], 8>` is the *move-out* pool: `acquire` takes an owned buffer out and the RAII handle returns it on drop, the no-heap analog of `BufferPool`. `StaticLendRing::<N, BYTES>` is the *zero-copy lend* sibling for the capture path (a DMA ring): `N` inline slots, the producer fills the next free slot and `publish`es it as a `SystemSlice` that *borrows* the slot, and a per-slot lease (an `AtomicBool`, plain store, no CAS so it builds on `thumbv6m`) is cleared when the lent frame drops, so the slot is reused only after the consumer is done, the genuine ring back-pressure (the producer stalls when every slot is in flight). The borrow is runtime-guarded, not a Rust lifetime: a `PipelinePacket` crosses the `OutputSink` / stack channel by value (`'static`), so the lend reuses the `'static` foreign-buffer carrier (`SystemSlice::from_foreign`) with the lease standing in for the borrow. This keeps `Frame` / `MemoryDomain` lifetime-free (every element signature stays clean) while still proving a heap-free capture-to-consumer path end to end (validated under `block_on` over the embassy stack channel; a real capture wires a DMA-completion ISR / HAL into the same ring). The heap-free claim is *measured*, not asserted: a counting `#[global_allocator]` test (`m616_no_steady_state_alloc`) runs the `StaticLendRing` capture -> frame -> drop hot path for 100k frames and confirms zero heap allocations across the loop. The one place the async plumbing still allocates is pinned honestly by a sibling test: the object-safe `OutputSink::push` returns `Pin<Box<dyn Future>>`, so a `dyn` sink boxes one future per frame; the zero-alloc contract therefore covers the data path and a concrete (non-`dyn`) link, and that control-plane cost is measured rather than hidden.
+- **Strict `no_std` (no heap) environments:** two pure-`core` pools sized at construction, no `alloc`. `StaticBufferPool::<[u8; N], 8>` is the *move-out* pool: `acquire` takes an owned buffer out and the RAII handle returns it on drop, the no-heap analog of `BufferPool`. `StaticLendRing::<N, BYTES>` is the *zero-copy lend* sibling for the capture path (a DMA ring): `N` inline slots, the producer fills the next free slot and `publish`es it as a `SystemSlice` that *borrows* the slot, and a per-slot lease (an `AtomicBool`, plain store, no CAS so it builds on `thumbv6m`) is cleared when the lent frame drops, so the slot is reused only after the consumer is done, the genuine ring back-pressure (the producer stalls when every slot is in flight). The borrow is runtime-guarded, not a Rust lifetime: a `PipelinePacket` crosses the `OutputSink` / stack channel by value (`'static`), so the lend reuses the `'static` foreign-buffer carrier (`SystemSlice::from_foreign`) with the lease standing in for the borrow. This keeps `Frame` / `MemoryDomain` lifetime-free (every element signature stays clean) while still proving a heap-free capture-to-consumer path end to end (validated under `block_on` over the embassy stack channel; a real capture wires a DMA-completion ISR / HAL into the same ring). The heap-free claim is *measured*, not asserted: a counting `#[global_allocator]` test (`m616_no_steady_state_alloc`) runs the `StaticLendRing` capture -> frame -> drop hot path for 100k frames and confirms zero heap allocations across the loop. The control plane carries the same contract since M1000: `OutputSink` is poll-based (its required method is `poll_push`; `push` wraps it in a stack `PushFuture`), so a push through `&mut dyn OutputSink` costs no heap either, and a sibling counting test (`m616_dyn_push_allocates`) pins that at zero. The remaining opt-in is the element's own `ProcessFuture`: an element that declares a boxed one pays one box per `process` call; one that declares a concrete future type runs heap-free through the whole dyn runner (`m1000_dyn_graph_noalloc` proves a 3-stage `run_graph` steady state at zero allocations).
 
 The `SystemSlice` carrier transparently supports these ownership models: `SystemSlice::from_boxed(Box<[u8]>)` for one-off frames, `SystemSlice::from_pool(PooledBuffer<Box<[u8]>>, len)` for recycled frames (the buffer may exceed the frame, so the valid length is carried), and `SystemSlice::from_foreign(ptr, len, free, user)` for a zero-copy lend of borrowed bytes (a `StaticLendRing` slot, or an application buffer through the C ABI). Downstream elements treat them identically.
 
@@ -310,14 +310,20 @@ pub enum ConfigureOutcome {
     ReFixate(Caps),
 }
 
-/// Output sink for both transform and source elements. `push` is async
-/// so elements await downstream capacity rather than failing fast on a
-/// full bounded link. Dyn-safe via a boxed future.
+/// Output sink for both transform and source elements. Push is async so
+/// elements await downstream capacity rather than failing fast on a full
+/// bounded link. Dyn-safe via the poll form: `push` (provided for concrete
+/// sinks and on the trait object) wraps `poll_push` in a concrete stack
+/// `PushFuture`, so a push through `&mut dyn OutputSink` allocates nothing
+/// (M1000).
 pub trait OutputSink {
-    fn push<'a>(
-        &'a mut self,
-        packet: PipelinePacket,
-    ) -> Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>;
+    fn poll_push(
+        &mut self,
+        cx: &mut Context<'_>,
+        packet: &mut Option<PipelinePacket>,
+    ) -> Poll<Result<PushOutcome, G2gError>>;
+
+    fn begin_push(&mut self) {}
 }
 ```
 
@@ -354,6 +360,8 @@ pub trait DynAsyncElement: ElementBound {
 #[cfg(feature = "std")]
 impl<T: AsyncElement> DynAsyncElement for T { /* blanket boxed-future impl */ }
 ```
+
+Since M1000 the graph runner does not pay this box per frame: `DynAsyncElement` carries `drive_transform_arm` / `drive_sink_arm` hooks whose blanket impls monomorphize the arm loop over the concrete element type, so `run_graph` awaits each element's own `ProcessFuture` unboxed (one boxed arm future per run, none per frame). The erased `process` above remains for callers that drive an element directly through the trait object; an element opting into the zero-alloc steady state declares a concrete (non-boxed) `ProcessFuture`. M1009 extends the same treatment to the fan-in / fan-out arms: `DynMultiOutputElement::drive_demux_arm` and `DynMultiInputElement::drive_muxer_arm` / `drive_muxer_arm_owned_tick` / `drive_fanin_sink_arm` monomorphize the demux, muxer (arrival-order and PTS-ordered) and terminal fan-in arms over their element, so a demux or muxer node also runs with no per-packet box. A graph node built from a `&mut dyn` element keeps a boxed per-packet future: the concrete type is already erased, so the arm drives it through a private `AsyncElement` / `MultiInputElement` / `MultiOutputElement` face over the trait object.
 
 `no_std` graphs use concrete element types composed via a typed graph builder (no boxing, no virtual dispatch).
 
@@ -394,6 +402,8 @@ A free-running source feeding a sync sink is paced automatically by upstream bac
 #### Clock distribution to sinks
 
 A pipeline runs against one elected clock (`elect_clock` over `ClockPriority`: a PTP grandmaster-disciplined clock (`PtpGrandmaster`) outranks a live source's hardware clock (`LiveSource`), which outranks an audio sink's DAC clock (`AudioProvider`), which outranks a plain monotonic provider such as a video display sink (`Provider`), which outranks the system fallback). The runner samples the elected clock's `now_ns()` once at startup as the **base time** (the clock reading at running-time zero) and hands both to each sink via `set_clock_sync(ClockSync { clock, base_time_ns })`, called once after election. Both the linear runners and the DAG runner `run_graph` deliver it (the latter walks its sink nodes after election), so a display sink PTS-paces in any topology. A sink that synchronises presents a frame when the elected clock reaches `base_time_ns + running_time`, where running time is the frame's `pts_ns` mapped through the active `Segment`; a sink that ignores the hook presents as fast as backpressure allows.
+
+**Clock loss and re-election.** An elected clock can lose the reference it is disciplined to (a PTP servo going free-running when its grandmaster disappears), which `PipelineClock::healthy` reports: true by default, since a clock reading a monotonic counter or a DAC has nothing to lose, and overridden by `PtpClock` (healthy in `Locked` and `Holdover`, not in `FreeRunning`). When a bus is attached and the runner has a timer to sleep on, `run_graph` (cooperative and thread-per-arm alike) runs a health monitor alongside the arms: it reads the elected clock once a second and, on a loss, posts `BusMessage::ClockLost`, elects again over the candidates that are still healthy, and retargets every sink. The retarget works because in that mode the sinks' `ClockSync` points at an `ElectedClock`, a shared handle over a swappable target, rather than at the clock itself: the elements are already inside their arms (on other threads under the thread-per-arm runner), so there is no second `set_clock_sync`. A sink re-anchors on its next frame, as it does for any epoch change. `ElectedClock` answers `shared_ticker` (owned) but not `as_ticker` (a borrow into a target that can be replaced), which is why the indirection is installed only when the monitor runs. With no healthy candidate left the pipeline keeps the clock it has: it still tells time, it is just no longer disciplined, and a later re-lock is picked up by the same check.
 
 **Pacing mid-graph (`clocksync`).** Presentation is not the only place a stream needs to run at real time: a publisher muxing to a live transport (the MoQ Transport demo's `videotestsrc ! x264enc ! mp4mux ! moqtsink`) has no sync sink at all, so nothing stops it producing minutes of media per minute of wall clock. `ClockSyncTransform` (`clocksync`) is the sink's pacing as a pass-through transform: it holds each buffer until its PTS, anchored on the first one, is due on the clock, and forwards everything else unchanged. It shares the display sinks' `PresentationPacer`, so the anchor, the segment mapping and the seek re-anchor behave identically, and differs in two ways. It never drops: a late or segment-clipped buffer is forwarded immediately, because a hole in a transform's output is one downstream cannot recover. And it supplies its own monotonic clock when none was handed to it, which is both GStreamer's fallback to the pipeline system clock and a necessity here, since the runners deliver `ClockSync` to sink nodes only, and a `clocksync` sits mid-graph. `sync=false` reduces it to an identity; `ts-offset` shifts the whole schedule.
 
@@ -1620,6 +1630,18 @@ application reacts to:
   (self-posting prebuffer sources leave it `None`). Since g2g has no `queue`
   element, this reports the bounded link channel's own occupancy
   (`fill_percent`), the `GST_MESSAGE_BUFFERING` analog.
+- `SegmentDone { position_ns }` — a `SeekFlags::SEGMENT` seek reached its `stop`
+  (`GST_MESSAGE_SEGMENT_DONE`), posted by `SeekController::notify_segment_done`
+  when the app attached a bus to the controller (`set_bus`). The take-once
+  back-channel (§4.14) is unchanged; this is the push side of the same event, so
+  a looping app drives the next loop seek from the bus instead of polling.
+- `StreamStatus { entered, thread_id }` — a streaming thread started or finished
+  (`GST_MESSAGE_STREAM_STATUS` enter / leave), posted only by the thread-per-arm
+  runner, one pair per spawned arm thread (the coordinator's included), so an app
+  sees the graph's real thread fan-out. `thread_id` hashes the OS `ThreadId`
+  (which has no stable numeric form), so only equality is meaningful.
+- `ClockLost` — the elected clock lost the reference it disciplines to
+  (`GST_MESSAGE_CLOCK_LOST`); see the clock health monitor in §4.4.
 
 Posting is non-blocking (`try_post`): a control message never stalls the data
 path; a full bus drops the report rather than applying backpressure.
@@ -1819,12 +1841,91 @@ refuses a mismatch with a clear `AbiMismatch` error rather than risk passing a
 differently-laid-out `Frame` or trait object across the boundary (undefined
 behavior). Each loaded `libloading::Library` is held for the life of the process:
 the registered factories are `fn` pointers into its mapped code, so dropping it
-would be a use-after-free with no back-pointer to catch it. This version+toolchain
-lock is the v1 design; an `abi_stable`/`stabby` facade over the element traits is
-the later upgrade for cross-toolchain binary plugins, and a pure C-ABI shim was
-rejected (it loses the ergonomic Rust trait). The whole path is exercised
-out-of-tree by `g2g-plugins/tests/fixtures/example-plugin` +
+would be a use-after-free with no back-pointer to catch it. The whole path is
+exercised out-of-tree by `g2g-plugins/tests/fixtures/example-plugin` +
 `tests/plugin_loader_dlopen.rs`.
+
+**Plugin ABI v2: the cross-toolchain tier (M1010).** The version lock above is
+the price of passing Rust types across `dlopen`. v2 is the other trade: a frozen
+`repr(C)` boundary (`g2g-plugin::abi`, header `g2g-plugin/include/g2g_plugin_v2.h`)
+that carries a smaller surface but loads into a host built by a different
+compiler, and can be written in C. The model is GStreamer's `gst_plugin_desc`: a
+versioned descriptor plus vtables, hand-rolled rather than taken from
+`abi_stable` (dormant) or `stabby` (a leaked heap vtable registry on stable
+Rust). `async-ffi` supplies the one thing a hand-rolled C ABI cannot express, an
+FFI-safe `Future` (`FfiPoll` / `FfiContext` / a three-pointer future struct), so
+`process` stays backpressure-aware across the boundary.
+
+- **The descriptor is data, not code.** A v2 plugin exports one *data* symbol,
+  `g2g_plugin_v2_descriptor`, holding a magic, an ABI generation, and the list of
+  element names and kinds it will register. The host reads and validates it with
+  `dlsym` before calling any plugin function, which is what makes the capability
+  gate meaningful: `load_plugin_with_policy` hands the declaration to a
+  caller-supplied policy *before* the plugin gets control, and the default policy
+  refuses a declaration carrying a capability kind this host does not understand.
+  The declaration is then binding. The registrar stages elements rather than
+  writing them into the `Registry`, checks each against the declaration, and
+  commits only if every one matched: a plugin that registers three declared
+  elements and one undeclared one contributes nothing.
+- **What crosses.** `configure_pipeline`, `configure_output`, `process`,
+  `set_property`, `get_property`, `destroy`, plus a `create` on the registration.
+  Caps cross as a `repr(C)` tagged union over a frozen numeric code table (the
+  host's caps enums are `#[non_exhaustive]`, so their discriminants can never be
+  an ABI); property values likewise. Frames cross as pointer + length + an
+  owner-side `free`, which maps exactly onto `SystemSlice::from_foreign`, so a
+  frame moves in either direction without a copy.
+- **What does not.** v2 elements are **System memory only**: the wrapper narrows
+  `input_domains` to `System`, so a GPU-resident producer upstream gets a domain
+  converter spliced in rather than a frame the plugin cannot read. GPU domains,
+  and the ~50 exotic `AsyncElement` hooks (clock election, QoS, metadata
+  propagation, the allocation cascade, the reverse-channel signals), stay v1 and
+  host-native: the host-side wrapper element answers them with the trait
+  defaults. The flag-set property kind and the tensor / KLV / closed-caption /
+  sub-picture caps kinds do not cross either, and a registration that names one
+  is refused rather than approximated.
+- **Growing it.** Two mechanisms. `abi_version` gates the whole surface: a
+  semantic change to an existing field bumps it. Inside one generation, every
+  versioned struct carries its own `struct_size` and the host reads
+  `min(plugin, host)` bytes into a zeroed local, so an older plugin's shorter
+  vtable simply leaves the host's newer entries absent and the host uses its
+  defaults; and trailing reserved fn-pointer slots let a future entry appear
+  without the size changing, which an older host ignores.
+- **Where v1 stays.** The loader probes the v2 symbol first and falls back to the
+  v1 pair, so existing v1 plugins load unchanged. v1 remains the path for a
+  plugin that needs the whole trait surface or GPU memory and ships alongside the
+  host build it was compiled against.
+- **The `fn()` slot table.** `LaunchFactory` builds an element from a
+  context-free `fn()` pointer, and a v2 element's constructor needs to know
+  *which* plugin vtable it belongs to. The host therefore keeps a fixed table of
+  64 const-generic trampolines (`MAX_V2_ELEMENT_SLOTS`); past that a load is
+  refused rather than silently dropping an element. Slots are never freed,
+  matching the loaded-forever library.
+
+**Security posture of the loader.** It defends against a *malformed* plugin, not
+a *malicious* one, and the difference is worth stating plainly. `dlopen` runs the
+library's initialisers before the loader reads a single field, and a loaded
+plugin shares the host's address space with no boundary at all: it can make any
+syscall the host can, read the host's memory, and ignore every rule in the ABI.
+The capability gate decides whether to load a file and what it may register; it
+cannot constrain what loaded code does. It is policy, not sandboxing. Anything
+stronger (a separate process, seccomp, signature verification) is out of scope
+and deliberately has no half-built stubs. What the loader *does* do is treat
+every byte reachable from the descriptor as untrusted input, on the same rules as
+a bitstream parser: bound every count before using it as a length, null-check
+before dereferencing, UTF-8 check before a byte range becomes a `str`, restrict
+element and property names to a `gst-launch`-safe character set, and refuse any
+unknown discriminant instead of reinterpreting it. Two things it cannot check and
+takes on the plugin's contract: that a pointer+length pair really addresses that
+many readable bytes, and that a `struct_size` really matches what the plugin
+wrote. The wrapper also asserts `Send` for a plugin instance under a documented
+contract (the runner owns an element exclusively but may move it between
+threads), so a thread-affine plugin is outside the ABI.
+
+Exercised by `g2g-plugins/tests/plugin_loader_v2.rs` (a Rust plugin built with a
+deliberately mismatched `g2g-core` feature set, which v1 refuses and v2 does not
+care about) and `tests/plugin_c_abi.rs` (a plugin written in C, compiled against
+the hand-written header, including a `sizeof` comparison of every ABI struct
+against its Rust type so the two cannot drift).
 
 **Hosted Python elements (`pyelement` / `pysrc` / `pyaggregator`, `g2g-python`).**
 A gst-python-ml element shell runs as a first-class g2g element: `g2g-python`
@@ -2629,6 +2730,29 @@ variable Noto Sans CJK) yields empty glyphs and is one of the reasons the richer
 `cosmic-text` backend (shaping, bidi, CFF, system fallback) is the planned
 upgrade. The no_std baseline keeps the bitmap font (no font file or rasterizer).
 
+A WebVTT `STYLE` block reaches the pixels. `parse_cue_styles` resolves `::cue`,
+`::cue(#id)` and `::cue(.class)` rules onto each cue's `CueSettings`, and a
+span-scoped rule lands as a `SpanStyle` run over the byte range its `<c.class>`
+tag covers, so nested spans resolve per property (the innermost run that sets one
+wins). Beyond `color` the properties honoured are `font-size` (`px`, or a percent
+of the size the cue itself draws at), `text-shadow` and `background-color`, and
+all three render paths apply them. On the shaped path the sized runs become
+cosmic-text `Metrics` overrides on the line's `AttrsList`, so a line mixing sizes
+is still one shaped, bidi-reordered run and takes the tallest span's line height;
+the `ab_glyph` renderer rasterizes each character at its own size on a shared
+baseline. A shadow is one offset copy of the glyphs in the shadow colour, drawn
+under every glyph of the cue so a neighbour's shadow never lands on top of one. A
+blur radius is applied: the glyph's coverage mask is zero-padded and run through
+three separable box passes, sized so the stack matches the gaussian CSS asks for
+(standard deviation half the radius), and the grown mask is tinted in the shadow
+colour. Vello has no filter that blurs a glyph run, so the GPU backend draws a
+blurred shadow as one tinted mask image per glyph, blurred by the same code, and
+falls back to a glyph run when the radius is 0. A whole-cue
+`background-color` is the backing box; a span-scoped one fills the line box
+behind that span's own glyphs, over the box and under the text. Sizes and offsets
+are clamped at parse time, because a stylesheet is as untrusted as the rest of
+the subtitle file and the size becomes a glyph raster.
+
 `vellooverlay::VelloTextOverlay` (`vello-text-overlay`) is the GPU backend for
 the same cues, for a pipeline that keeps frames on the GPU: RGBA8 in,
 `MemoryDomain::WgpuTexture` out, like `VelloAnalyticsOverlay` beside it. It holds
@@ -2753,13 +2877,30 @@ is raw pixels. `VobSubDec` (`vobsubdec`, gst's `dvdsubdec`), `DvbSubDec`
 element rather than a bare decoder) and `PgsDec` (`pgsdec`; gst has no PGS
 decoder at all) all emit one full-frame transparent
 `Caps::RawVideo{Rgba8}` canvas per cue at the subpicture display geometry,
-stamped with the cue's PTS and duration, so the consumer is the ordinary
-`compositor` and there is no bitmap-cue overlay element to build. A cue ends with a
-second, fully transparent canvas at its hide time: the compositor holds an overlay
+stamped with the cue's PTS and duration, so the consumer is a pixel one:
+`subpictureoverlay` or the ordinary `compositor`. A cue ends with a
+second, fully transparent canvas at its hide time: either consumer holds an overlay
 pad's last frame between output frames, and a zero-alpha source-over is a no-op,
 so the clear canvas is exactly what makes a cue disappear on time. One more empty
-canvas opens the stream, so the compositor is not waiting on this input for
+canvas opens the stream, so the consumer is not waiting on this input for
 however long it is until the first cue.
+
+`subpictureoverlay::SubPictureOverlay` is the element that puts those canvases on
+the picture. It is a two-pad `MultiInputElement` shaped like `TextOverlayN`, video
+on pad 0 and the decoder's canvases on pad 1, opting into the runner's
+`input_pts_ordered` merge so a canvas lands just before the first video frame it
+covers. It holds the last canvas whose PTS the video has reached and source-over
+blends it onto every frame, so a cue stays up between canvases; a canvas with no
+drawn pixel is dropped rather than held, which is how the clearing canvas takes the
+cue down. Both pads are RGBA8 on the CPU (`videoconvert` on either side for another
+format), and a canvas whose geometry differs from the video is resampled onto it by
+the `compositor`'s bilinear scaler, so a PAL-sized subpicture composites onto a
+scaled picture. `mkv_playbin` auto-plugs it: a Matroska bitmap-subtitle track
+decodes to canvases and feeds this overlay where a text track feeds `subparse` and
+`TextOverlayN`. In a launch line it is a fan-in muxer built by link degree like
+`textoverlay`, with the video and subpicture branches on its `video` and `text`
+request pads. The MPEG program-stream (DVD) `playbin` composites its subpicture
+track with `compositor` at the video's own geometry instead.
 
 The VobSub bitstream itself (`vobsub.rs`, `no_std`) is one subpicture unit per
 cue: a packet size and a control-sequence offset, 2-bits-per-pixel run-length data
@@ -2913,9 +3054,9 @@ owns the `UdpSocket` and the timer and drives str0m's `poll_output` /
 `handle_input` loop, exactly the contract the `srt` and `rtspserver` modules
 already follow. str0m's pure-Rust **`rust-crypto`** backend is selected, so there
 is no OpenSSL / libnice system dependency. Everything lives behind the opt-in
-`webrtc` feature (it raises the effective MSRV above the workspace floor, so it is
-off by default and the no_std baseline is unaffected). This is the native,
-server-grade counterpart of the browser-only data-channel `WebRtcSrc` (§6.3).
+`webrtc` feature (off by default, so the no_std baseline is unaffected). This is
+the native, server-grade counterpart of the browser-only data-channel
+`WebRtcSrc` (§6.3).
 
 **Element family.** One PeerConnection can carry one track per element or N tracks
 in a session element; the shape is chosen by which trait the element implements,
@@ -2984,6 +3125,20 @@ packets (`DuplexInbound`) and the network, pushing received frames to `out`; the
 send and recv halves therefore share `&mut self` directly with **no detached
 task**, unlike the send-only session which spawns the `Rtc` onto its own task to
 dodge `process` / run-loop aliasing.
+
+**Growing the pad count live (M1014).** `run_duplex_session_dynamic` is the
+renegotiating sibling: its arms live under a `dynamic_join`, so pads are not
+fixed at build time. A local track enters through `DynamicDuplexHandle::
+add_send_track` (index reserved and enqueued under one lock, so the session
+learns pads in order); the runner fixates the source alone and announces its
+caps on the new index before any frame, which is how a session that never
+declared the pad learns it exists, and `DuplexInbound::reverse_channel` hands it
+the PLI / BWE route back. A remote track with no free pad is taken by the
+session calling `MultiOutputSink::add_port` (default `None`, so fixed runners
+refuse growth); the runner mints the port's link and asks an app-supplied sink
+factory for the element that drains it, a factory `None` leaving the port
+counted as drops. Backpressure on the runner's internal add channels delays the
+attach rather than failing the run.
 
 **Signaling.** WHIP (egress) and WHEP (ingress) are the same wire move — an
 `application/sdp` POST of the local offer that returns the remote answer (reqwest,
@@ -3141,7 +3296,11 @@ the new `GraphNodeRef::log_category`. To show the *chosen* caps it first calls
 without running the pipeline), which returns the per-edge fixated caps and each
 edge's memory domain (the producing node's `output_memory`) the dump
 renders on the edges, marking GPU / zero-copy links bold; a negotiation failure
-falls back to a topology-only dump. Because negotiation probes sources, a `--dot`
+falls back to a topology-only dump. It also runs the allocation cascade
+(§4.13.5) before reading those domains, since that is what settles a
+multi-domain producer on the one its consumer asked for: without it a decoder
+feeding a CPU sink still reported its `Cuda` default and the dump called a
+downloading link a GPU link. Because negotiation probes sources, a `--dot`
 of a live-ingress pipeline does that source's `intercept_caps` (typically a
 connect) just as a run would. Memory domain is a per-element declaration
 (`AsyncElement::output_memory` / `SourceLoop::output_memory`, default `System`,
@@ -3462,6 +3621,50 @@ the validation-first posture: the framework states hard, checkable properties (t
 graph is zero-copy; this element is unit-tested but not interop-validated) rather
 than leaving them to prose and trust.
 
+### 4.20d Developer Tooling: Codec Goldens and PSNR
+
+The conformance dimensions above say whether data *survived* an element. For a
+codec that is not enough: a decoder that starts producing different pixels after a
+dependency bump, or an encoder that quietly stops applying its bitrate, still
+round-trips frames of the right size and shape. `ConformanceDimension::Quality` is
+the dimension for the pixels and samples themselves, and it counts as behavioral
+evidence (a `Quality`-only element derives `UnitTested`, and with a peer-tagged
+`Oracle` alongside it, `InteropTested`). Its measurement helpers live next to the
+batteries in `g2g-plugins::conformance`, dependency-free like the rest: `fnv1a_64`
+(a stable digest for a committed golden), `i420_planes`, and `psnr_db` /
+`pooled_psnr_db` (per-plane and sample-count-pooled peak signal-to-noise ratio,
+infinite for identical input, `std`-gated only because `no_std` has no `log10`).
+
+Three battery kinds produce that evidence, in `g2g-plugins/tests/m1001_*`. The
+**decoder goldens** decode a committed fixture with the in-repo decoder and hash
+the raw output against a value recorded in the test: `rav1ddec` over
+`av1_640x480.obu`, `mjpegdec` over the two 16x16 JPEGs, `opusdec` and `vorbisdec`
+over their Ogg fixtures, and behind the `ffmpeg` feature `ffmpegdec` over
+`h264_640x480.h264`. Each of those codecs decodes bit-exactly by its specification,
+so a mismatch means g2g changed rather than the reference moved; AAC is the
+exception (libavcodec decodes it in float and is not bit-exact across versions), so
+its leg checks determinism and frame alignment instead of a digest. The
+**encode / decode PSNR** batteries encode a synthetic source generated in-test (a
+gradient with a checkerboard and a walking bar, so there is both smooth and
+hard-edged content) and decode it back with the matching in-repo decoder, requiring
+the pooled PSNR and the worst single plane to clear a per-codec floor set a few dB
+under the figure observed when the battery was written: AV1 (`av1enc` / `rav1ddec`),
+MJPEG (`mjpegenc` / `mjpegdec`, measured in packed RGBA because through I420 the
+pair converts colorspace twice and the score stops tracking encode quality), and
+H.264 (`ffmpegenc` / `ffmpegdec` at a bitrate that keeps libx264 off its quality
+ceiling). The **reference-decoder oracle** closes the loop the goldens cannot: it
+has the ffmpeg CLI decode the same fixture and measures g2g's decode against it, so
+a pass is evidence about correctness rather than stability, and it persists a
+peer-tagged `Oracle` row next to the `Quality` one. AV1 must agree sample for
+sample there; JPEG agrees to within each decoder's own IDCT and colorspace
+rounding. It self-skips where ffmpeg is absent, like the muxer oracles.
+
+The batteries are codec-feature-gated, so unlike the always-on ST 2110 / RTP
+batteries they cannot run inside `g2g-inspect --maturity`; they persist their rows
+to `$G2G_CONFORMANCE_LOG` and `full_report` folds them in, the same path the
+`Hardware` rows take. CI runs the goldens and the PSNR floors in the Linux feature
+job and the ffmpeg oracle in the conformance job.
+
 ### 4.20 Distributed Graphs (`remotesink` / `remotesrc`)
 
 A graph is normally one process, but a pipeline stage is not bound to the
@@ -3600,11 +3803,10 @@ both directions.
 is a single-vendor dialect with its own ALPN and cannot talk to IETF endpoints.
 The versions are **draft-16, `0xff000010`** (what Cloudflare's `moq-relay-ietf`
 runs in production) and **draft-18** (what moq-dev, imquic, moqxr and Meta's
-public moxygen relay speak). Nothing on crates.io implements the IETF
-draft within this workspace's MSRV (`moq-net` needs rustc 1.91; cloudflare's
-`moq-transport` fails to build on 1.85), so the wire layer is written here, the
-way the SRT and ST 2110 stacks were: read the draft, read the reference
-implementation (`cloudflare/moq-rs`), and validate against the reference peer.
+public moxygen relay speak). Nothing on crates.io implements the IETF draft, so
+the wire layer is written here, the way the SRT and ST 2110 stacks were: read
+the draft, read the reference implementation (`cloudflare/moq-rs`), and validate
+against the reference peer.
 From draft-16 the version is *not* negotiated in the SETUP payload; the QUIC
 ALPN for WebTransport is always `h3`, so the version rides the HTTP/3 CONNECT
 request as the WebTransport subprotocol `moqt-16`, and CLIENT_SETUP /
@@ -3965,7 +4167,7 @@ The ML element sits in the same memory domain context as the hardware decoder. W
 ### 5.2 Unified Pure-Rust Inference Backends
 `g2g` avoids bundling heavy, unsafe proprietary C++ engines. The `g2g-ml` crate provides wrapper elements targeting two execution paradigms:
 
-- **`g2g-ml::burn`** (Embedded / Wasm / RTOS): leverages the pure-Rust Burn framework with a `wgpu` backend, compiling ONNX workflows into type-safe, compile-time Rust graphics shaders. `BurnInference` (`g2g-ml/src/burninfer.rs`, `burn` feature) is the wgpu-backend inference element over the `RawVideo` → `Tensor` contract, driving an `input · W + b` linear layer on any Vulkan / Metal / DX12 / WebGPU adapter. **An ONNX topology runs through the same element**, but the import is build-time: `burn-onnx` (what `burn-import` 0.21 forwards to) generates a burn `Module` plus an embedded burnpack weight blob from the `.onnx` at compile time, so there is no runtime graph loader to hand the file to. The seam is the `BurnModule` trait: one forward pass from the `[1, 3, H, W]` NCHW f32 tensor the element normalizes to `[1, N]` logits. The importing crate implements it over its generated `Model<Wgpu>` and passes it to `BurnInference::module`, which then drives it frame by frame exactly like the built-in linear layer (a forward pass whose output is not the declared `num_outputs` fails the frame, so the emitted `Caps::Tensor` cannot lie). Because the codegen crate carries burn's own rustc 1.92 MSRV, the worked case is a workspace-excluded standalone crate, `examples/g2g-onnx-import`: a `Conv2d -> BatchNorm -> ReLU -> global average pool -> linear` graph whose logits match the ONNX Runtime reference for the same frame on the RTX 3060. Attention imports through the same seam: the standard-domain ONNX `Attention` op (opset 23, one node for a whole multi-head block) is lowered by `burn-onnx` onto `burn::tensor::module::attention`, so the GPU runs burn's own attention kernel rather than a hand-unrolled matmul / softmax chain, validated on the 3060 by a second fixture in that crate (pixels as a token sequence -> multi-head self-attention -> mean pool -> linear). Because that node is opaque in the graph, the fixture generator folds the attention formula in numpy and asserts ONNX Runtime agrees before emitting the reference logits, so the reference is not ORT agreeing with itself. This is the topology half of the Burn story, the counterpart of the runtime `safetensors` weight import below.
+- **`g2g-ml::burn`** (Embedded / Wasm / RTOS): leverages the pure-Rust Burn framework with a `wgpu` backend, compiling ONNX workflows into type-safe, compile-time Rust graphics shaders. `BurnInference` (`g2g-ml/src/burninfer.rs`, `burn` feature) is the wgpu-backend inference element over the `RawVideo` → `Tensor` contract, driving an `input · W + b` linear layer on any Vulkan / Metal / DX12 / WebGPU adapter. **An ONNX topology runs through the same element**, but the import is build-time: `burn-onnx` (what `burn-import` 0.21 forwards to) generates a burn `Module` plus an embedded burnpack weight blob from the `.onnx` at compile time, so there is no runtime graph loader to hand the file to. The seam is the `BurnModule` trait: one forward pass from the `[1, 3, H, W]` NCHW f32 tensor the element normalizes to `[1, N]` logits. The importing crate implements it over its generated `Model<Wgpu>` and passes it to `BurnInference::module`, which then drives it frame by frame exactly like the built-in linear layer (a forward pass whose output is not the declared `num_outputs` fails the frame, so the emitted `Caps::Tensor` cannot lie). Because the codegen crate drags burn's whole dependency tree into any lockfile that resolves it, the worked case is a workspace-excluded standalone crate, `examples/g2g-onnx-import`: a `Conv2d -> BatchNorm -> ReLU -> global average pool -> linear` graph whose logits match the ONNX Runtime reference for the same frame on the RTX 3060. Attention imports through the same seam: the standard-domain ONNX `Attention` op (opset 23, one node for a whole multi-head block) is lowered by `burn-onnx` onto `burn::tensor::module::attention`, so the GPU runs burn's own attention kernel rather than a hand-unrolled matmul / softmax chain, validated on the 3060 by a second fixture in that crate (pixels as a token sequence -> multi-head self-attention -> mean pool -> linear). Because that node is opaque in the graph, the fixture generator folds the attention formula in numpy and asserts ONNX Runtime agrees before emitting the reference logits, so the reference is not ORT agreeing with itself. This is the topology half of the Burn story, the counterpart of the runtime `safetensors` weight import below.
 - **`g2g-ml::ort`** (High-Performance Enterprise Server): wraps ONNX Runtime bindings to pass underlying memory domains to hardware-specific execution paths (CUDA / TensorRT / DirectML / Apple CoreML) natively. Each execution provider is a constructor variant on `OrtInference` that registers the EP ahead of the CPU fallback; registration is best-effort, so the session keeps running (on CPU) when the device is absent. Desktop: `from_memory_with_cuda`, `from_memory_with_directml`. **Android edge**: `from_memory_with_nnapi` (the system NeuralNetworks API: NPU / GPU / DSP), `from_memory_with_xnnpack` (ARM-optimized CPU), and `from_memory_for_android`, which registers NNAPI then XNNPACK then the default CPU EP in one call so ORT assigns each node to the first provider that supports it, the MediaPipe delegate-with-fallback shape. The `nnapi` / `xnnpack` features link symbols only the Android ONNX Runtime build carries, so they are Android-target features (a host build / CI never enables them); the EP stack is validated on a device (`tools/android-nnapi-smoke.sh` runs `g2g-ml/tests/android_nnapi_probe.rs` from `/data/local/tmp`, a binder-threadpool shim for the vendor NNAPI HAL, output byte-exact with the CPU reference). **Edge TPU offload is proven**: an int8 QDQ Conv->ReLU fixture run through `from_memory_for_android` is placed on `NnapiExecutionProvider` (read from ORT's profiling JSON), and on a Pixel 10a (Tensor G4) the DarwiNN HAL log confirms the Edge TPU compiled and executed it (`/dev/edgetpu core0` firmware load); the float-typed input-boundary `QuantizeLinear` is the one op the TPU declines, correctly delegated to CPU (`tools/android-nnapi-conv-smoke.sh`, which also greps the `darwinn` logcat to disambiguate the TPU from other NNAPI accelerators). **Full-graph offload**: a uint8-input variant of the model (the boundary `QuantizeLinear` removed, the graph input retyped to uint8) runs *entirely* on the TPU, every node on `NnapiExecutionProvider` with nothing on the CPU, and the DarwiNN log confirms `Ops supported = ..., not supported = 0` / `compilation finished successfully on google-edgetpu`. The f32->uint8 quantization that feeds such a model is `TensorConvert` (`g2g-plugins`), the tensor-domain sibling of `VideoConvert`: it quantizes an f32 tensor to int8 / uint8 (`q = round(x / scale) + zero_point`, clamped) or dequantizes the inverse, shape and layout passing through. So `preprocess -> TensorConvert(quantize) -> inference` keeps the boundary quantize *out* of the model, leaving the whole inference graph accelerator-eligible. `TensorConvert` also transposes NCHW<->NHWC and narrows / widens f32<->F16 in the same pass, so a model that wants `NHWC uint8` (NNAPI / TFLite) is fed straight from an `NCHW f32` source. `OrtInference` itself accepts the integer input: `from_session` reads the model's input element type and `with_tensor_input` on a u8 / i8 model feeds the quantized tensor straight to the session (RGBA mode stays f32-only). **The whole chain is validated live on the device**: `Camera2Src -> TensorConvert(quantize) -> OrtInference(uint8) ` runs a real camera frame onto the Edge TPU (`tools/android-camera-tpu-smoke.sh`; on a Pixel 10a the logcat shows `accelerator name: EDGETPU` and `compilation finished successfully on google-edgetpu`), the g2g answer to "an edge framework that moves inference between CPU and accelerator" demonstrated end to end on real hardware. The same constructor shape extends to the other vendor accelerators: `from_memory_with_qnn` (Qualcomm AI Engine Direct, the Hexagon NPU / Adreno GPU on Snapdragon, the alternative to reaching the Hexagon through NNAPI) and `from_memory_with_coreml` (the Apple Neural Engine / GPU on macOS / iOS), each behind a target-only feature like `nnapi` (a host build never links them); both are validated to compile for their target, with on-device runtime validation pending the hardware (no Snapdragon / Apple device in CI, like the CUDA EP). This is the heterogeneous-device story (a desktop NVIDIA box, a Windows D3D12 GPU, an Android phone NPU, and the Qualcomm / Apple NPUs all run the same element, the EP picked per platform), the architectural answer to MediaPipe's runtime CPU/GPU delegate switch.
 
 `WgpuInference` (`g2g-ml/src/wgpuinfer.rs`, `wgpu` feature) is the GPU-resident counterpart of `BurnInference`: a raw wgpu compute pass that binds the GPU-resident tensor `WgpuPreprocess::with_gpu_output` (§5.1) produced **directly**, rather than taking `RawVideo` / `System` and uploading. It runs one of a small op zoo on that tensor, selected at construction (each its own WGSL shader behind the shared device-adopt / dispatch / read-back machinery): the original `input · W + b` linear matmul (`linear`); a same-padding stride-1 2D convolution (`conv2d`) over the `[1, Cin, H, W]` NCHW tensor with `[Cout, Cin, KH, KW]` weights, leaving a `[1, Cout, H, W]` feature map; the elementwise activations `relu` / `sigmoid`; and `maxpool2d` / `avgpool2d` spatial pooling. The weighted ops (linear, conv2d) bind a 5-entry group (meta, input, weights, bias, out); the weightless ops (activation, pooling) bind a 3-entry group (meta, input, out), the bind-group layout following the active shader. The conv is the keystone that lets the chain run an actual CNN layer, not just a final classifier; the activation is the nonlinearity that keeps stacked convs from collapsing to one linear map, and the pool the spatial downsampler. Chained GPU-resident (`conv2d -> relu -> maxpool`, each in `with_gpu_output` mode so the data never leaves the device between layers), they are a real small-CNN body, validated on the RTX 3060 against a CPU reference folding the same ops (`conv2d_reference` / `relu_reference` / `maxpool2d_reference`) over the exact tensor the GPU preprocess produced. **Trained weights are imported at runtime** from a `safetensors` file via a dependency-free reader (`g2g-ml::safetensors`, a focused parser for the format's `u64` length + JSON-subset header + raw tensor bytes, no `serde` / no `safetensors` crate): `conv2d_from_safetensors` reads the `[Cout, Cin, KH, KW]` weight and `[Cout]` bias by name and infers the kernel dims, so picking a different trained checkpoint is "parse a different file" while the layer topology stays this compiled element. This is the weights half; the architecture stays Rust (truly dynamic *graphs* at runtime are the `ort` backend's job, and `burn-onnx` build-time codegen is the Burn-side topology path, above). It owns no device: because a `wgpu::Buffer` is bindable only on the device that created it, the element adopts the producer's device / queue (carried by the incoming `WgpuBufferOwner`) on the first frame and submits its compute on the producer's queue, which orders it after the producer's work with no fence or read-back. The logits are read back to `MemoryDomain::System` by default or left GPU-resident (`with_gpu_output`) for a downstream GPU consumer. A burn / ort consumer cannot do this zero-copy: their tensor handles are opaque (no foreign-buffer adopt) and run on their own device, so they would force the GPU->CPU->GPU round-trip the GPU-resident preprocess and inference paths exist to delete.

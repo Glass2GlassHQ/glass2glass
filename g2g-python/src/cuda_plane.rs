@@ -5,9 +5,10 @@
 //! pointers, not bytes, so the buffer protocol the System path uses cannot
 //! describe it. Each semi-planar plane becomes a [`CudaPlane`] whose
 //! `__cuda_array_interface__` dict names the device pointer, the plane shape and
-//! the producer's row pitch as strides, so `cupy.asarray(plane)` or
-//! `torch.as_tensor(plane, device="cuda")` alias the decoder's surface with no
-//! PCIe round-trip.
+//! the producer's row pitch as strides, so `cupy.asarray(plane)` aliases the
+//! decoder's surface with no PCIe round-trip. `torch.as_tensor` refuses a
+//! read-only CAI export (see [`PLANE_READ_ONLY`]), so torch's path here is
+//! DLPack.
 //!
 //! The same plane also exports DLPack (M986): `__dlpack__` hands out a capsule
 //! over the same device pointer, for the frameworks that prefer it (torch's
@@ -40,8 +41,9 @@ const CAI_VERSION: u32 = 3;
 /// CAI's `data` read-only flag. The device memory belongs to the producer (a
 /// decoder surface), and a teed frame hands the same pointers to every branch
 /// under a read-only-sharing guarantee; unlike the System path there is no
-/// copy-on-write to fall back on here, so a plane is exported read-only. The
-/// flag is advisory: cupy and torch do not enforce it.
+/// copy-on-write to fall back on here, so a plane is exported read-only. cupy
+/// treats the flag as advisory and aliases anyway; torch's CAI importer refuses
+/// a read-only export outright, so a torch consumer takes the DLPack path.
 const PLANE_READ_ONLY: bool = true;
 
 /// DLPack, as the `dlpack.h` the installed consumers bundle defines it (v1.0;
@@ -56,11 +58,6 @@ const DLPACK_CODE_UINT: u8 = 1;
 /// `DLPACK_FLAG_BITMASK_READ_ONLY`, the versioned struct's spelling of the
 /// read-only export [`PLANE_READ_ONLY`] declares on the CAI side.
 const DLPACK_FLAG_READ_ONLY: u64 = 1;
-/// The CUDA device the pointers live on. The g2g CUDA memory domain carries the
-/// producing context but no device ordinal, and every CUDA element in the tree
-/// works on the default device, so this reports device 0. A multi-GPU producer
-/// would need the ordinal carried on the domain first.
-const DLPACK_DEVICE_ID: i32 = 0;
 /// Capsule names the protocol fixes. A consumer that takes ownership renames the
 /// capsule to `used_dltensor*`, which is how [`drop_unconsumed_legacy`] knows
 /// whether the tensor is still ours to free.
@@ -156,6 +153,9 @@ pub(crate) struct CudaPlane {
     /// Bytes per sample: 1 for NV12, 2 for P010.
     sample_bytes: usize,
     context: u64,
+    /// Ordinal of the CUDA device the pointer lives on, as the producer
+    /// reported it. DLPack carries it; CAI has no field for it.
+    device_ordinal: i32,
 }
 
 impl CudaPlane {
@@ -189,7 +189,7 @@ impl CudaPlane {
             data: self.device_ptr as *mut c_void,
             device: DlDevice {
                 device_type: DLPACK_DEVICE_CUDA,
-                device_id: DLPACK_DEVICE_ID,
+                device_id: self.device_ordinal,
             },
             ndim: self.shape.len() as i32,
             dtype: DlDataType {
@@ -417,14 +417,15 @@ impl CudaPlane {
                 "g2g.CudaPlane cannot copy the producer's device memory",
             ));
         }
+        let plane = slf.get();
         if let Some(device) = dl_device {
-            if device != (DLPACK_DEVICE_CUDA, DLPACK_DEVICE_ID) {
+            if device != (DLPACK_DEVICE_CUDA, plane.device_ordinal) {
+                let ordinal = plane.device_ordinal;
                 return Err(PyBufferError::new_err(format!(
-                    "g2g.CudaPlane lives on CUDA device {DLPACK_DEVICE_ID}, not {device:?}"
+                    "g2g.CudaPlane lives on CUDA device {ordinal}, not {device:?}"
                 )));
             }
         }
-        let plane = slf.get();
         let Some((tensor, shape, strides)) = plane.dl_tensor() else {
             return Err(PyBufferError::new_err(
                 "row pitch is not a whole number of samples, so DLPack element strides cannot describe this plane",
@@ -442,7 +443,7 @@ impl CudaPlane {
 
     /// The DLPack device this plane's memory lives on: `(kDLCUDA, ordinal)`.
     fn __dlpack_device__(&self) -> (i32, i32) {
-        (DLPACK_DEVICE_CUDA, DLPACK_DEVICE_ID)
+        (DLPACK_DEVICE_CUDA, self.device_ordinal)
     }
 }
 
@@ -465,6 +466,7 @@ pub(crate) fn nv12_planes(
         strides: vec![buf.luma_pitch as usize, sample],
         sample_bytes: sample,
         context: buf.context,
+        device_ordinal: buf.device_ordinal,
     };
     let chroma = CudaPlane {
         device_ptr: buf.chroma_ptr,
@@ -472,6 +474,7 @@ pub(crate) fn nv12_planes(
         strides: vec![buf.chroma_pitch as usize, 2 * sample, sample],
         sample_bytes: sample,
         context: buf.context,
+        device_ordinal: buf.device_ordinal,
     };
     Some((luma, chroma))
 }
@@ -565,7 +568,8 @@ fn read_produced_plane(
 /// Wrap the two planes a Python source produced as a CUDA-domain buffer, holding
 /// the producing objects so the device memory outlives the frame. `context` is the
 /// `CUcontext` the source reported (zero when it reported none), which a
-/// downstream element that must push the producing context needs.
+/// downstream element that must push the producing context needs, and
+/// `device_ordinal` the device it allocated on.
 pub(crate) fn produced_cuda_buffer(
     luma: &Bound<'_, PyAny>,
     chroma: &Bound<'_, PyAny>,
@@ -573,6 +577,7 @@ pub(crate) fn produced_cuda_buffer(
     width: u32,
     height: u32,
     context: u64,
+    device_ordinal: i32,
 ) -> PyResult<OwnedCudaBuffer> {
     if !matches!(fmt, RawVideoFormat::Nv12 | RawVideoFormat::P010) {
         return Err(PyBufferError::new_err(
@@ -591,6 +596,7 @@ pub(crate) fn produced_cuda_buffer(
         width,
         height,
         context,
+        device_ordinal,
         Arc::new(PyOwnedSurface {
             planes: [luma.clone().unbind(), chroma.clone().unbind()],
         }),
@@ -616,6 +622,10 @@ mod tests {
     const FAKE_LUMA: u64 = 0xdead_0000;
     const FAKE_CHROMA: u64 = 0xdead_8000;
 
+    /// The device the fixtures allocate on. Not 0, so a plane reporting a fixed
+    /// device rather than the buffer's fails.
+    const FAKE_DEVICE: i32 = 1;
+
     /// A 1920x1080 surface at the 2048-byte pitch a decoder would align to, so
     /// pitch != width and the strides cannot be confused with a packed layout.
     fn pitched(fmt: RawVideoFormat) -> (CudaPlane, CudaPlane) {
@@ -627,6 +637,7 @@ mod tests {
             1920,
             1080,
             0x1234,
+            FAKE_DEVICE,
             owner(),
         );
         nv12_planes(fmt, &buf).expect("NV12 / P010 are semi-planar")
@@ -694,14 +705,24 @@ mod tests {
 
     #[test]
     fn odd_dimensions_round_the_chroma_plane_up() {
-        let buf = OwnedCudaBuffer::new(FAKE_LUMA, FAKE_CHROMA, 64, 64, 33, 17, 0, owner());
+        let buf = OwnedCudaBuffer::new(FAKE_LUMA, FAKE_CHROMA, 64, 64, 33, 17, 0, 0, owner());
         let (_, chroma) = nv12_planes(RawVideoFormat::Nv12, &buf).unwrap();
         assert_eq!(describe(&chroma).shape, vec![9, 17, 2]);
     }
 
     #[test]
     fn non_semi_planar_format_has_no_planes() {
-        let buf = OwnedCudaBuffer::new(FAKE_LUMA, FAKE_CHROMA, 2048, 2048, 1920, 1080, 0, owner());
+        let buf = OwnedCudaBuffer::new(
+            FAKE_LUMA,
+            FAKE_CHROMA,
+            2048,
+            2048,
+            1920,
+            1080,
+            0,
+            0,
+            owner(),
+        );
         assert!(nv12_planes(RawVideoFormat::Rgba8, &buf).is_none());
         assert!(nv12_planes(RawVideoFormat::I420, &buf).is_none());
     }
@@ -710,5 +731,19 @@ mod tests {
     fn context_reaches_python() {
         let (luma, _) = pitched(RawVideoFormat::Nv12);
         assert_eq!(luma.cuda_context(), 0x1234);
+    }
+
+    #[test]
+    fn dlpack_reports_the_producers_device_ordinal() {
+        let (luma, chroma) = pitched(RawVideoFormat::Nv12);
+        for plane in [&luma, &chroma] {
+            assert_eq!(
+                plane.__dlpack_device__(),
+                (DLPACK_DEVICE_CUDA, FAKE_DEVICE),
+                "kDLCUDA on the device the producer allocated on"
+            );
+            let (tensor, _, _) = plane.dl_tensor().expect("pitch is a whole sample count");
+            assert_eq!(tensor.device.device_id, FAKE_DEVICE);
+        }
     }
 }

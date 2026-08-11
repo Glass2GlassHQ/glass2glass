@@ -12,9 +12,6 @@
 //! Needs a wgpu adapter; skips (passes) without one.
 #![cfg(all(feature = "wgpu-sink", feature = "metadata"))]
 
-use core::future::Future;
-use core::pin::Pin;
-
 use g2g_core::frame::{Frame, FrameTiming};
 use g2g_core::memory::SystemSlice;
 use g2g_core::meta::{MetaRequests, PlaneLayout, RequestPolicy};
@@ -40,11 +37,13 @@ struct FrameSink {
 }
 
 impl OutputSink for FrameSink {
-    fn push<'a>(
-        &'a mut self,
-        packet: PipelinePacket,
-    ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
-        Box::pin(async move {
+    fn poll_push(
+        &mut self,
+        _cx: &mut core::task::Context<'_>,
+        packet_slot: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        let packet = packet_slot.take().expect("poll_push without a packet");
+        core::task::Poll::Ready({
             if let PipelinePacket::DataFrame(frame) = packet {
                 self.frames.push(frame);
             }

@@ -46,19 +46,6 @@ Sequenced next:
   Get the device-tagged `Hardware` rows into CI by wiring a runner that has the
   hardware: a `Hardware` row can only come from a run on the device, so a runner
   without a GPU or a camera will never produce one.
-- **Whole-graph zero-alloc (M616 + M620).** The single-stage (M616) and multi-stage
-  concrete-link (M620, source -> transform -> sink) data paths are proven zero-alloc.
-  Remaining (larger, deferred): a fully zero-alloc *dyn* runner, monomorphized arms
-  with unboxed `process` futures and a non-boxing `OutputSink`, so an arbitrary graph
-  run through `run_graph` is heap-free, not only a hand-wired concrete chain. Low ROI
-  vs. the proven data-plane claim; do it if an MCU deployment needs the full runner.
-- **No-steady-state-allocation embedded mode (landed, M616).** A counting
-  `#[global_allocator]` test proves the `StaticLendRing` capture -> frame -> drop
-  data path is zero-alloc over 100k frames, with the `dyn OutputSink::push` per-frame
-  box pinned as the honest boundary. Remaining: extend the zero-alloc proof to a
-  multi-element pipeline over a concrete (non-`dyn`) link (a runner path whose
-  `process` future is not boxed), so a whole graph, not just the capture edge, is
-  provably heap-free in steady state.
 - **Boundary-scoped time newtypes (landed, M618 + M622).** `TaiNs` / `RtpTs` in
   `g2g-core::time`; `MediaClock` takes a `TaiNs`, returns an `RtpTs`. M622 added
   `RefNs` (the monotonic reference) and typed the PTP servo's reference-vs-master
@@ -273,9 +260,6 @@ Phased plan:
 
 ## Egress / transports
 
-- **WebTransport residuals:** the `web-transport-quinn = "=0.11.12"` pin and
-  the `idna_adapter` 1.1.0 hold in `Cargo.lock` can both drop once the
-  workspace MSRV moves past 1.91.
 - **RTP over QUIC (RoQ):** blocked on the spec. draft-ietf-avtcore-rtp-over-quic
   expired at -14 (its ALPN is forbidden until an RFC exists) and the WG missed
   its milestone; revisit only if the draft revives. Peers if it does:
@@ -360,9 +344,9 @@ Phased plan:
     run (genuine remote NAT + STUN/TURN on the LiveKit elements); then Janus /
     Kinesis as wanted.
   - **T5: advanced.** FEC is blocked upstream (str0m has no FEC payload;
-    loss recovery is NACK/RTX). Full renegotiation: a track arriving with no
-    spare pad of its kind left on the duplex session is refused, so growing the
-    pad count on a live graph is still open. Data-channel loose ends
+    loss recovery is NACK/RTX). A send source still streaming when the duplex
+    session ends makes the run return `Shutdown` rather than winding down
+    gracefully (both runners). Data-channel loose ends
     (str0m surfaces no remote-close event, so EOS rides an explicit marker
     message; a WHIP/SFU-signalled data channel vs the P2P `SdpChannel` seam).
   Recommended order: T1 remainders -> T2 -> T4 -> T5.
@@ -419,7 +403,6 @@ Phased plan:
 
 ## Codecs
 
-- **VP8 / VP9 encode** (`VpxEnc`): validate on a libvpx host (compile-unverified).
 - **Pure-Rust / wasm decode** to drop the ffmpeg FFI: AV1 done (`Rav1dDec`, emits
   4:2:0 / 4:2:2 / 4:4:4 at 8/10/12-bit, round-trip tested end to end); still
   VP8 / VP9 decode and a pure-Rust Opus path.
@@ -435,9 +418,8 @@ _(No open parser items.)_
   horizontal + vertical) with an explicit Latin+CJK fallback chain, so OpenType-CFF
   `.otf` fonts render, not only glyf `.ttf`s. Still open:
   font-variation axes beyond `wght` on the shaped horizontal path (cosmic-text
-  0.17 exposes only weight, and 0.17.1+ needs rustc 1.89, above the 1.86 MSRV,
-  so the upgrade waits on an MSRV bump); vertical-mode shaping if cosmic-text
-  ever grows writing modes.
+  exposes only weight); vertical-mode shaping if cosmic-text ever grows writing
+  modes.
 - **Text / subtitle pipeline depth.** The foundation is in: `Caps::Text` +
   `TextFormat` (M400), the `SubParse` element (`Text{Srt|WebVtt|Ssa|Ttml}` ->
   `Text{Utf8}`), the SRT / WebVTT / SSA-ASS / TTML parsers (M171 / M401 / M402),
@@ -494,10 +476,8 @@ _(No open parser items.)_
     the per-count `ChannelLayout` convention) once a real source needs one.
   Glyph
   rendering (incl. `vertical:rl` / `lr` layout) is the `truetype-overlay` feature
-  above. Still open in cue CSS: per-span `font-size` (needs per-run sizing in
-  all three render paths and an `AttrsList` API in `textshape`), `text-shadow`
-  and further properties, and a span-scoped `background-color` (a cue has one
-  backing box today).
+  above. Still open in cue CSS: further properties beyond per-span `font-size` /
+  `text-shadow` (blurred) / `background-color`.
 - **Tensor substrate orientation descriptor (M181).** A deferred
   rotate/mirror descriptor the sink can absorb in hardware (DRM/KMS, Wayland
   `set_buffer_transform`, VAAPI VPP, D3D11 VideoProcessor), with eager strided /
@@ -574,9 +554,7 @@ _(No open parser items.)_
   interop-tested).
 ## Bus and logging
 
-- Remaining bus messages, each gated on a subsystem not present: `segment-done`
-  (segment seeks), `stream-status` (thread pool), `clock-lost` (clock
-  re-election).
+_(No open bus items.)_
 ## Properties / introspection / DSL
 
 - Properties on the platform capture sources (`aaudiosrc` / `camera2src` /
@@ -591,20 +569,18 @@ _(No open tag items.)_
 
 ## Python-element host (M198+)
 
-- Carry the CUDA device ordinal on the Cuda memory domain, so a GPU plane can
-  report the device it really lives on (DLPack has to say device 0 today) and a
-  multi-GPU graph is describable.
-- Verify the GPU planes against torch (`torch.from_dlpack`,
-  `torch.as_tensor(plane)`); only cupy has been run against them.
+- Decide whether the CUDA-array-interface export drops its advisory read-only
+  flag: torch's `torch.as_tensor` rejects `data[1] = True` outright (cupy
+  ignores it), and clearing it licenses writes into tee-shared GPU surfaces.
+- Device selection to go with the carried ordinal: a `cuda-device` property on
+  the CUDA producers feeding the ordinal they open.
 
 ## Dynamic plugin loading (M201+)
 
-- An `abi_stable` / `stabby` facade over the element traits for cross-toolchain
-  binary plugins (the v1 path is version + toolchain-locked).
 - Whether the distro ships `g2g-core` in a local cargo registry for offline
   plugin builds.
-- Plugin signing / capability gating.
-- A C-FFI loader entry so non-cargo build systems can produce plugins.
+- Plugin signing (a detached signature the loader verifies before `dlopen`,
+  on top of the v2 capability declaration).
 
 ## Embedded
 
@@ -657,12 +633,6 @@ Outstanding developer-tooling tasks, highest leverage first.
 
 - **Per-element / per-link telemetry gaps.** Remaining `Observer` coverage:
   validate the dashboard live against an RTSP source.
-- **gst-parity differ residual.** Elements g2g names differently than
-  GStreamer (`NalParse` vs `h264parse0`) go unmatched in calliope's parity
-  diff, so their link caps compare nothing without an explicit `name=`; feed
-  the `g2g-inspect --gst` mapping into calliope's matcher as a synonym table.
-- Longer tail: a live pipeline TUI (a ratatui consumer of the same telemetry
-  tap); a codec golden-fixture / PSNR conformance harness.
 
 ## Code audit follow-up
 

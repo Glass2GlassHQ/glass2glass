@@ -26,7 +26,8 @@ use g2g_core::{
     PropertySpec, PushOutcome, Rate, VideoCodec,
 };
 
-use crate::filesink::io_err;
+use crate::filesink::{io_err, path_io_err};
+use g2g_core::log::short_type_name;
 
 // A type alias (not a `use` of the trait) so the trait's methods do not land in
 // scope: `SplitMuxSink` implements `AsyncElement`, and the blanket
@@ -80,7 +81,8 @@ struct SegmentSink {
 
 impl SegmentSink {
     fn create(path: &str) -> Result<Self, G2gError> {
-        let file = File::create(path).map_err(io_err)?;
+        let file = File::create(path)
+            .map_err(|e| path_io_err(short_type_name::<Self>(), "create", path, e))?;
         Ok(Self {
             writer: BufWriter::new(file),
             bytes: 0,
@@ -93,19 +95,21 @@ impl SegmentSink {
 }
 
 impl OutputSink for SegmentSink {
-    fn push<'a>(
-        &'a mut self,
-        packet: PipelinePacket,
-    ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
-        Box::pin(async move {
-            if let PipelinePacket::DataFrame(frame) = &packet {
-                if let Some(b) = frame.domain.as_system_slice() {
-                    self.writer.write_all(b).map_err(io_err)?;
-                    self.bytes += b.len() as u64;
+    fn poll_push(
+        &mut self,
+        _cx: &mut core::task::Context<'_>,
+        packet: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        let packet = packet.take().expect("poll_push without a packet");
+        if let PipelinePacket::DataFrame(frame) = &packet {
+            if let Some(b) = frame.domain.as_system_slice() {
+                if let Err(e) = self.writer.write_all(b).map_err(io_err) {
+                    return core::task::Poll::Ready(Err(e));
                 }
+                self.bytes += b.len() as u64;
             }
-            Ok(PushOutcome::Accepted)
-        })
+        }
+        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
     }
 }
 
@@ -375,11 +379,13 @@ mod tests {
 
     struct NullSink;
     impl OutputSink for NullSink {
-        fn push<'a>(
-            &'a mut self,
-            _packet: PipelinePacket,
-        ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
-            Box::pin(async { Ok(PushOutcome::Accepted) })
+        fn poll_push(
+            &mut self,
+            _cx: &mut core::task::Context<'_>,
+            packet_slot: &mut Option<PipelinePacket>,
+        ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+            packet_slot.take();
+            core::task::Poll::Ready(Ok(PushOutcome::Accepted))
         }
     }
 

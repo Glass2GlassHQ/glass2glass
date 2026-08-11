@@ -45,8 +45,12 @@ use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError, HardwareError,
     MemoryDomain, OutputSink, OwnedWgpuBuffer, OwnedWgpuTexture, PipelinePacket, PropError,
     PropKind, PropValue, PropertySpec, Rate, RawVideoFormat, TensorDType, TensorLayout,
-    TensorShape, WgpuBufferKeepAlive, WgpuKeepAlive,
+    TensorShape, WgpuBufferKeepAlive,
 };
+// The GPU-resident NV12 frame owner lives with the interop code that produces it
+// (the CUDA and dma-buf bridges); re-exported so this module's consumers keep
+// naming it here.
+pub use g2g_plugins::gpu::WgpuNv12Texture;
 
 /// 8x8 invocations per workgroup; the dispatch covers ceil(W/8) x ceil(H/8).
 const WORKGROUP: u32 = 8;
@@ -293,8 +297,8 @@ fn any_geometry(format: RawVideoFormat) -> Caps {
 /// needs both dimensions even, packed 4:2:2 only an even width.
 fn geometry_ok(format: RawVideoFormat, width: u32, height: u32) -> bool {
     match format {
-        RawVideoFormat::Nv12 => width % 2 == 0 && height % 2 == 0,
-        RawVideoFormat::Yuyv => width % 2 == 0,
+        RawVideoFormat::Nv12 => width.is_multiple_of(2) && height.is_multiple_of(2),
+        RawVideoFormat::Yuyv => width.is_multiple_of(2),
         #[cfg(all(target_os = "android", feature = "mediacodec-wgpu"))]
         RawVideoFormat::Rgba8 => true,
         _ => false,
@@ -978,85 +982,6 @@ impl WgpuBufferKeepAlive for WgpuBufferOwner {
     }
 }
 
-/// Owns a GPU-resident NV12 frame for surface-import into [`WgpuPreprocess`]
-/// (M217): an R8Uint `wgpu::Texture` of size `width x (height * 3/2)` holding the
-/// bytes in the standard NV12 layout (Y plane, then interleaved Cb,Cr), plus the
-/// device / queue it lives on. Boxed as the [`WgpuKeepAlive`] of a
-/// [`MemoryDomain::WgpuTexture`]; `WgpuPreprocess` downcasts to recover the
-/// texture and adopt its device (a texture is bindable only on its own device),
-/// so the NV12 pixels are sampled straight into the compute pass with no CPU
-/// upload. A real GPU NV12 decoder is the intended producer; until one lands,
-/// [`nv12_to_gpu_texture`] builds one from system bytes.
-pub struct WgpuNv12Texture {
-    device: wgpu::Device,
-    queue: wgpu::Queue,
-    texture: wgpu::Texture,
-    /// Optional drop guard whose `Drop` recycles the backing image (e.g. a
-    /// `CudaWgpuPool` return handle from `CudaToWgpu`). Type-erased so this stays
-    /// decoupled from the producer; `None` for non-pooled producers like
-    /// `nv12_to_gpu_texture`. Held only to run its `Drop` when the frame releases.
-    _recycle: Option<Box<dyn core::any::Any + Send + Sync>>,
-}
-
-impl core::fmt::Debug for WgpuNv12Texture {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("WgpuNv12Texture")
-            .field("texture", &self.texture)
-            .field("pooled", &self._recycle.is_some())
-            .finish()
-    }
-}
-
-impl WgpuNv12Texture {
-    /// Wrap an NV12 R8Uint texture with the device / queue it lives on.
-    pub fn new(device: wgpu::Device, queue: wgpu::Queue, texture: wgpu::Texture) -> Self {
-        Self {
-            device,
-            queue,
-            texture,
-            _recycle: None,
-        }
-    }
-
-    /// Like [`new`](Self::new), but carries a drop guard recycled when the frame
-    /// is released (a pooled producer hands back a `CudaWgpuPool` return handle).
-    pub fn with_recycle(
-        device: wgpu::Device,
-        queue: wgpu::Queue,
-        texture: wgpu::Texture,
-        recycle: Box<dyn core::any::Any + Send + Sync>,
-    ) -> Self {
-        Self {
-            device,
-            queue,
-            texture,
-            _recycle: Some(recycle),
-        }
-    }
-
-    /// The backing NV12 texture, for the importer to sample directly.
-    pub fn texture(&self) -> &wgpu::Texture {
-        &self.texture
-    }
-
-    /// The device the texture lives on; the importer adopts it to bind the
-    /// texture rather than uploading the frame to its own device.
-    pub fn device(&self) -> &wgpu::Device {
-        &self.device
-    }
-
-    /// The queue paired with [`device`](Self::device).
-    pub fn queue(&self) -> &wgpu::Queue {
-        &self.queue
-    }
-}
-
-impl WgpuKeepAlive for WgpuNv12Texture {
-    fn as_any(&self) -> &dyn core::any::Any {
-        self
-    }
-}
-
 impl AsyncElement for WgpuPreprocess {
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
@@ -1453,7 +1378,7 @@ pub async fn nv12_to_gpu_texture(
     width: u32,
     height: u32,
 ) -> Result<MemoryDomain, G2gError> {
-    if width % 2 != 0 || height % 2 != 0 {
+    if !width.is_multiple_of(2) || !height.is_multiple_of(2) {
         return Err(G2gError::CapsMismatch);
     }
     let tex_rows = height + height / 2;

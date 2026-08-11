@@ -9,10 +9,7 @@
 //! strict parse passes), unlike the published MISMMS doc fixture (m801), which
 //! is exactly why `klvdecode` keeps strict the default and lenient a knob.
 
-use std::pin::Pin;
 use std::process::Command;
-
-use core::future::Future;
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
@@ -41,11 +38,13 @@ struct CaptureSink {
     aus: Vec<Vec<u8>>,
 }
 impl OutputSink for CaptureSink {
-    fn push<'a>(
-        &'a mut self,
-        packet: PipelinePacket,
-    ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
-        Box::pin(async move {
+    fn poll_push(
+        &mut self,
+        _cx: &mut core::task::Context<'_>,
+        packet_slot: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        let packet = packet_slot.take().expect("poll_push without a packet");
+        core::task::Poll::Ready({
             if let PipelinePacket::DataFrame(f) = packet {
                 if let Some(s) = f.domain.as_system_slice() {
                     self.aus.push(s.to_vec());

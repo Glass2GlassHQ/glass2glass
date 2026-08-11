@@ -292,22 +292,36 @@ impl PadConfig {
 #[derive(Debug)]
 struct PadSink {
     port: usize,
-    tx: mpsc::Sender<(usize, PipelinePacket)>,
+    tx: g2g_core::runtime::Sender<(usize, PipelinePacket)>,
+    /// The in-flight tagged packet of a blocked push (the drain channel wants
+    /// `(port, packet)`, so the caller's slot cannot hold it directly).
+    staged: Option<(usize, PipelinePacket)>,
 }
 
 impl OutputSink for PadSink {
-    fn push<'b>(
-        &'b mut self,
-        packet: PipelinePacket,
-    ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'b>> {
-        Box::pin(async move {
-            // The drain loop is gone only once the graph is shutting down.
-            self.tx
-                .send((self.port, packet))
-                .await
-                .map_err(|_| G2gError::Shutdown)?;
-            Ok(PushOutcome::Accepted)
-        })
+    fn begin_push(&mut self) {
+        self.staged = None;
+    }
+
+    fn poll_push(
+        &mut self,
+        cx: &mut core::task::Context<'_>,
+        packet: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        use core::task::Poll;
+        if self.staged.is_none() {
+            let taken = packet.take().expect("poll_push without a packet");
+            self.staged = Some((self.port, taken));
+        }
+        // The drain loop is gone only once the graph is shutting down.
+        match self.tx.poll_send(cx, &mut self.staged) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Ok(())) => Poll::Ready(Ok(PushOutcome::Accepted)),
+            Poll::Ready(Err(_)) => {
+                self.staged = None;
+                Poll::Ready(Err(G2gError::Shutdown))
+            }
+        }
     }
 }
 
@@ -321,9 +335,13 @@ async fn pad_worker(
     busy: &Cell<bool>,
     served: &Cell<u64>,
     cfg: &PadConfig,
-    tx: mpsc::Sender<(usize, PipelinePacket)>,
+    tx: g2g_core::runtime::Sender<(usize, PipelinePacket)>,
 ) -> Result<(u64, bool), G2gError> {
-    let mut sink = PadSink { port, tx };
+    let mut sink = PadSink {
+        port,
+        tx,
+        staged: None,
+    };
     let activity = Cell::new(g2g_core::metrics::monotonic_ns());
     // One tap for the pad's whole life: a publisher taking the pad over continues
     // the sequence numbering and the timeline of the previous one.
@@ -676,7 +694,7 @@ impl MultiOutputSource for RtspServerSrcN {
                 dispatch.push(tx);
                 inboxes.push(rx);
             }
-            let (tx, mut rx) = mpsc::channel::<(usize, PipelinePacket)>(PAD_QUEUE * pads);
+            let (tx, rx) = g2g_core::runtime::bounded::<(usize, PipelinePacket)>(PAD_QUEUE * pads);
             let workers: Vec<BoxFuture<'_, Result<(u64, bool), G2gError>>> = inboxes
                 .into_iter()
                 .enumerate()

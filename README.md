@@ -187,7 +187,10 @@ safety / no-heap MCU market (MISRA, cert) GStreamer can't reach.
   `StaticTransform` / `StaticSink` with `async fn` in trait, const-arity
   runners, a `Chain` combinator), so every stage's future is unboxed, no `dyn`,
   no `Box`, no allocation. Buffers are lent zero-copy from a const-generic
-  `StaticLendRing` sized at compile time.
+  `StaticLendRing` sized at compile time. The full dynamic runner carries the
+  same steady-state contract on the host: `run_graph` pushes and processes
+  without a single per-frame heap allocation (counting-allocator proven over
+  100k frames).
 - **The guarantees are machine-checked in CI, not asserted.** The linked archive
   carries **zero allocator symbols** and **zero panic symbols** (`tools/noalloc-check.sh`);
   a gc-sectioned ELF is measured for **ROM / static RAM / worst-case stack** and
@@ -311,7 +314,7 @@ catalogs, `tools/mcugen-check.sh`).
 | `g2g-core` | Traits, `Frame`/`PipelinePacket`, caps algebra, clock, runner, static element model. | `no_std`, `alloc` optional |
 | `g2g-mcu` | Heap-free MCU peripheral elements (SPI display incl. banded streaming, camera / PCM capture, I2C sensor, UART, G.711 / ADPCM codecs, hardware JPEG-decode / H.264-encode seams, RTP egress + ingress, jitter buffer, fault-recovery watchdog) over `embedded-hal` / C-callback seams. | `no_std`, no alloc |
 | `g2g-mcugen` | Host graph compiler: a declarative MCU graph (YAML/JSON, audio or video/display) → a monomorphized static pipeline (heap-free Rust). | `std` (host tool) |
-| `g2g-plugin` | SDK for dynamically loadable plugins (`declare_plugin!` + ABI tag). | `no_std + alloc` |
+| `g2g-plugin` | SDK for dynamically loadable plugins: same-toolchain (`declare_plugin!` + ABI tag) and the frozen C ABI v2, so cross-toolchain Rust and plain-C plugins load too. | `no_std + alloc` |
 | `g2g-plugins` | Sources/sinks/transforms (RTSP, RTP in/out, HTTP/HLS/DASH/RTMP ingest, V4L2 / PipeWire / MF capture, ffmpeg, VAAPI, MF, VideoToolbox (macOS), MediaCodec (Android), Wayland, KMS, WASAPI, ALSA / PulseAudio / PipeWire audio, compositor, Embassy, web), container mux/demux (MP4, MPEG-TS, MPEG-PS, Matroska/WebM, FLV, Ogg), codec parsers + encoders (AV1, VP8/9, MJPEG), the tag system, and the `gst-launch` text DSL. | mixed |
 | `g2g-ml` | ORT, Burn, WgpuPreprocess, TensorPostprocess, multi-stream tensor batcher. | `std` |
 | `g2g-bridge` | GStreamer C-FFI bridge. | `std` |
@@ -321,7 +324,9 @@ catalogs, `tools/mcugen-check.sh`).
 
 ## Build
 
-Stable Rust, MSRV 1.86, `resolver = "2"`.
+Stable Rust, `resolver = "2"`. MSRV 1.92, except the embedded-facing crates
+(`g2g-core`, `g2g-mcu`, `g2g-mcugen`, `g2g-plugin`), which build on 1.86 so a
+vendor-pinned toolchain can consume the portable core (see `STABILITY.md`).
 
 ```sh
 cargo check --workspace          # no_std baseline
@@ -344,6 +349,7 @@ OS-coupled elements live behind cargo features:
 | `KmsSink` | `kms-sink` | Linux + libdrm; needs DRM master / tty |
 | `D3D11Sink` | `d3d11-sink` | Windows |
 | `MetalVideoSink` (zero-copy from `CVPixelBuffer`, validated on the CI Mac) | `metal-sink` | macOS + Metal |
+| `WgpuPresentSink` (`wgpusink`: owns its Wayland window, presents GPU-resident frames with no upload) | `wgpu-present` | Linux + Wayland + wgpu |
 | `NvDec` (native NVDEC H.264/H.265/AV1 → CUDA NV12 or 10-bit P010, NVCUVID) | `nvdec` | Linux + NVIDIA driver (libnvcuvid) |
 | `NvEnc` (native NVENC CUDA NV12/P010 → H.264/H.265, incl. HEVC Main 10) | `nvenc` | Linux + NVIDIA driver (libnvidia-encode) |
 | `CudaDownload` (CUDA → System), `CudaUpload` (System → CUDA) | `cuda` | Linux + NVIDIA driver (libcuda) |
@@ -389,7 +395,7 @@ transforms (`videoscale` / `videorate` / `videocrop` / `videoflip` /
 `audioamplify` / `audioecho` / `level` / `cutter` / `equalizer-3bands` /
 `spectrum`), the KLV telemetry codec (`klvdecode`, MISB ST 0601 / STANAG 4609),
 the bitmap-subtitle decoders (`vobsubdec`, alias `dvdsubdec`, `dvbsubdec` and
-`pgsdec`)
+`pgsdec`) with the `subpictureoverlay` that blends their cues onto video,
 and the EBU teletext subtitle decoder (`teletextdec`),
 the flow-control elements (`concat` / `input-selector` /
 `output-selector` / `progressreport`), the `compositor`, the tag system, and the
@@ -780,7 +786,7 @@ cargo test -p g2g-ml --features cuda --test ort_inference -- --nocapture
 cargo test -p g2g-ml --features burn --test burn_inference -- --nocapture
 
 # An ONNX topology imported into that element by build-time codegen. Standalone
-# (workspace-excluded): burn-onnx carries burn's own rustc 1.92 MSRV.
+# (workspace-excluded): keeps burn's codegen tree out of the workspace lockfile.
 cd examples/g2g-onnx-import && cargo test
 ```
 

@@ -6,13 +6,7 @@
 
 #![cfg(all(target_os = "linux", feature = "cuda"))]
 
-#[cfg(feature = "nvenc")]
-use core::future::Future;
-#[cfg(feature = "nvenc")]
-use core::pin::Pin;
-use std::boxed::Box;
-
-use g2g_core::element::{BoxFuture, PushOutcome};
+use g2g_core::element::PushOutcome;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, Caps, Dim, Frame, FrameTiming, G2gError, MemoryDomain, MemoryDomainKind,
@@ -62,11 +56,13 @@ struct Collect {
 }
 
 impl OutputSink for Collect {
-    fn push<'a>(
-        &'a mut self,
-        packet: PipelinePacket,
-    ) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
-        Box::pin(async move {
+    fn poll_push(
+        &mut self,
+        _cx: &mut core::task::Context<'_>,
+        packet_slot: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        let packet = packet_slot.take().expect("poll_push without a packet");
+        core::task::Poll::Ready({
             self.packets.push(packet);
             Ok(PushOutcome::Accepted)
         })
@@ -212,11 +208,13 @@ struct CollectAus<'a> {
 
 #[cfg(feature = "nvenc")]
 impl OutputSink for CollectAus<'_> {
-    fn push<'a>(
-        &'a mut self,
-        packet: PipelinePacket,
-    ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
-        Box::pin(async move {
+    fn poll_push(
+        &mut self,
+        _cx: &mut core::task::Context<'_>,
+        packet_slot: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        let packet = packet_slot.take().expect("poll_push without a packet");
+        core::task::Poll::Ready({
             if let PipelinePacket::DataFrame(f) = packet {
                 if let Some(s) = f.domain.as_system_slice() {
                     self.aus.push(s.to_vec());

@@ -26,7 +26,8 @@ use g2g_core::{
     OutputSink, PadTemplate, PadTemplates, PipelinePacket,
 };
 
-use crate::filesink::io_err;
+use crate::filesink::{io_err, path_io_err};
+use g2g_core::log::short_type_name;
 
 /// Samples per AAC-LC access unit (the fragment sample duration in media-time).
 const AAC_FRAME_SAMPLES: u32 = 1024;
@@ -136,7 +137,8 @@ impl AsyncElement for Mp4AudioSink {
         if self.asc.is_empty() {
             return Err(G2gError::CapsMismatch);
         }
-        let file = File::create(&self.path).map_err(io_err)?;
+        let file = File::create(&self.path)
+            .map_err(|e| path_io_err(short_type_name::<Self>(), "create", &self.path, e))?;
         self.writer = Some(BufWriter::new(file));
         Ok(ConfigureOutcome::Accepted)
     }

@@ -1265,7 +1265,7 @@ fn split_laced(body: &[u8], lacing: u8) -> Option<Vec<&[u8]>> {
 
 /// Fixed-size lacing: every frame is `len / count` bytes (exact division).
 fn split_fixed(data: &[u8], count: usize) -> Option<Vec<&[u8]>> {
-    if count == 0 || data.is_empty() || data.len() % count != 0 {
+    if count == 0 || data.is_empty() || !data.len().is_multiple_of(count) {
         return None;
     }
     Some(data.chunks(data.len() / count).collect())

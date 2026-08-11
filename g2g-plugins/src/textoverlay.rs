@@ -47,9 +47,9 @@ use g2g_core::{
 
 use crate::bitmapfont::{glyph, GLYPH_ADVANCE, GLYPH_HEIGHT};
 use crate::paint::blend_px;
-#[cfg(feature = "truetype-overlay")]
-use crate::subparse::WritingMode;
 use crate::subparse::{parse_srt, parse_ssa, parse_ttml, parse_webvtt, Cue, TextAlign};
+#[cfg(feature = "truetype-overlay")]
+use crate::subparse::{TextShadow, WritingMode};
 
 /// A parsed TrueType / OpenType face used by the [`truetype-overlay`](crate)
 /// render path. Wraps `ab_glyph` (glyf + CFF/CFF2 outlines) behind a small shim
@@ -84,6 +84,165 @@ struct LineMetrics {
 #[cfg(feature = "truetype-overlay")]
 type FontAxis = ([u8; 4], f32);
 
+/// A fill behind one span's glyphs on one line: `(x, y, width, height)` in frame
+/// pixels, and its RGBA.
+#[cfg(feature = "truetype-overlay")]
+pub(crate) type SpanFill = ((i32, i32, i32, i32), [u8; 4]);
+
+/// One rasterized glyph of a cue waiting to be blitted, on the `ab_glyph` path:
+/// the coverage bitmap plus where it goes and what it is drawn in. Collected for
+/// the whole cue first, so every shadow lands under every glyph.
+#[cfg(feature = "truetype-overlay")]
+#[derive(Debug)]
+struct TtfGlyph {
+    x: i32,
+    y: i32,
+    size: (usize, usize),
+    coverage: Vec<u8>,
+    color: [u8; 4],
+    shadow: Option<TextShadow>,
+}
+
+/// The byte ranges of `text` a `::cue(.class)` rule sizes differently from
+/// `cue_px`, flattened to the non-overlapping, ascending runs the shaper takes
+/// (nested spans have already resolved to one size per character).
+#[cfg(feature = "text-shaping")]
+fn sized_spans(
+    text: &str,
+    settings: &crate::subparse::CueSettings,
+    cue_px: f32,
+) -> Vec<crate::textshape::SizedSpan> {
+    let mut spans: Vec<crate::textshape::SizedSpan> = Vec::new();
+    for (offset, c) in text.char_indices() {
+        let Some(size) = settings.span_font_size_at(offset) else {
+            continue;
+        };
+        let px = size.resolve(cue_px);
+        let end = offset + c.len_utf8();
+        match spans.last_mut() {
+            Some(open) if open.end == offset && open.px == px => open.end = end,
+            _ => spans.push(crate::textshape::SizedSpan {
+                start: offset,
+                end,
+                px,
+            }),
+        }
+    }
+    spans
+}
+
+/// Merge consecutive glyphs asking for the same span background into one fill
+/// each. Cells are `(colour, low, high)` along the direction the line advances
+/// in (x for a horizontal line, y for a vertical column); the result is one
+/// `(colour, low, high)` per run.
+#[cfg(feature = "truetype-overlay")]
+fn merge_span_fills(
+    cells: impl IntoIterator<Item = (Option<[u8; 4]>, i32, i32)>,
+) -> Vec<([u8; 4], i32, i32)> {
+    let mut runs: Vec<([u8; 4], i32, i32)> = Vec::new();
+    for (color, low, high) in cells {
+        let Some(color) = color else {
+            continue;
+        };
+        match runs.last_mut() {
+            Some(open) if open.0 == color && open.2 >= low => {
+                open.1 = open.1.min(low);
+                open.2 = open.2.max(high);
+            }
+            _ => runs.push((color, low, high)),
+        }
+    }
+    runs
+}
+
+/// Box-blur passes stacked per axis to approximate a gaussian. Three is where
+/// the stack stops looking boxy.
+#[cfg(feature = "truetype-overlay")]
+const BLUR_PASSES: usize = 3;
+
+/// Box radius whose [`BLUR_PASSES`] stack matches the gaussian a CSS blur radius
+/// asks for. CSS puts the standard deviation at half the blur radius, and n box
+/// passes of radius `b` have variance `n * ((2b + 1)^2 - 1) / 12`.
+#[cfg(feature = "truetype-overlay")]
+fn box_radius_for(blur: u32) -> usize {
+    let sigma = blur as f32 / 2.0;
+    let variance = sigma * sigma * 12.0 / BLUR_PASSES as f32;
+    let radius = ((1.0 + variance).sqrt() - 1.0) / 2.0;
+    (radius.round() as usize).max(1)
+}
+
+/// Blur a glyph coverage mask, returning the grown mask, its size, and how far
+/// it grew on each side (the caller shifts the blit origin back by that much).
+/// The mask is zero-padded first, so the blur falls off into the padding rather
+/// than being clipped at the glyph's own edge.
+#[cfg(feature = "truetype-overlay")]
+fn blur_coverage(
+    coverage: &[u8],
+    (gw, gh): (usize, usize),
+    blur: u32,
+) -> (Vec<u8>, (usize, usize), usize) {
+    let radius = box_radius_for(blur);
+    let pad = radius * BLUR_PASSES;
+    let (w, h) = (gw + 2 * pad, gh + 2 * pad);
+    let mut mask = alloc::vec![0u8; w * h];
+    for row in 0..gh {
+        let out = (row + pad) * w + pad;
+        mask[out..out + gw].copy_from_slice(&coverage[row * gw..row * gw + gw]);
+    }
+    let mut scratch = alloc::vec![0u8; w * h];
+    for _ in 0..BLUR_PASSES {
+        box_blur_axis(&mask, &mut scratch, h, w, 1, radius);
+        box_blur_axis(&scratch, &mut mask, w, h, w, radius);
+    }
+    (mask, (w, h), pad)
+}
+
+/// One box-blur pass along the axis `stride` steps through: `lines` runs of
+/// `len` samples, with anything past an end read as zero. Both axes go through
+/// here, the vertical one by walking columns with the row stride.
+#[cfg(feature = "truetype-overlay")]
+fn box_blur_axis(
+    src: &[u8],
+    dst: &mut [u8],
+    lines: usize,
+    len: usize,
+    stride: usize,
+    radius: usize,
+) {
+    // Stepping along a row advances by one, so the next row starts `len` on;
+    // stepping down a column advances by the row stride, so the next column
+    // starts one on.
+    let line_step = if stride == 1 { len } else { 1 };
+    let window = (2 * radius + 1) as u32;
+    for line in 0..lines {
+        let start = line * line_step;
+        let mut sum: u32 = (0..radius.min(len))
+            .map(|i| src[start + i * stride] as u32)
+            .sum();
+        for i in 0..len {
+            if i + radius < len {
+                sum += src[start + (i + radius) * stride] as u32;
+            }
+            if i > radius {
+                sum -= src[start + (i - radius - 1) * stride] as u32;
+            }
+            dst[start + i * stride] = (sum / window) as u8;
+        }
+    }
+}
+
+/// One glyph's blurred drop shadow as a coverage mask, with `left` / `top`
+/// giving the mask's top-left corner relative to the pen origin.
+#[cfg(all(feature = "text-shaping", feature = "vello-text-overlay"))]
+#[derive(Debug)]
+pub(crate) struct BlurredShadowMask {
+    pub coverage: Vec<u8>,
+    pub width: usize,
+    pub height: usize,
+    pub left: i32,
+    pub top: i32,
+}
+
 /// One shaped glyph placed on the canvas: `(x, y)` is the pen origin on the
 /// baseline in frame pixels, before the rasterizer's own bitmap offsets.
 #[cfg(feature = "text-shaping")]
@@ -98,6 +257,14 @@ pub(crate) struct PlacedGlyph {
     /// Text colour, resolved per glyph so a `::cue(.class)` span recolours only
     /// its own run.
     pub color: [u8; 4],
+    /// Size this glyph was shaped at, which a backend drawing outlines needs to
+    /// scale them by (a `font-size` span differs from the cue's size). The CPU
+    /// blitter reads it out of the raster key instead.
+    #[cfg(feature = "vello-text-overlay")]
+    pub font_size: f32,
+    /// The `text-shadow` in effect here, drawn as an offset copy, blurred when
+    /// the rule asked for a radius, under every glyph of the cue.
+    pub shadow: Option<TextShadow>,
 }
 
 /// One cue laid out on the canvas: the backing box as `(x, y, width, height)`
@@ -109,6 +276,9 @@ pub(crate) struct PlacedGlyph {
 pub(crate) struct PlacedCue {
     pub background: (i32, i32, i32, i32),
     pub background_color: [u8; 4],
+    /// Fills behind the spans that asked for one, one per run of a span on a
+    /// line. Drawn over the backing box and under the glyphs.
+    pub span_backgrounds: Vec<SpanFill>,
     pub glyphs: Vec<PlacedGlyph>,
 }
 
@@ -667,13 +837,36 @@ impl TextOverlay {
         }
     }
 
+    /// Blit one glyph's coverage as a drop shadow at `(x0, y0)`, in the shadow
+    /// colour. A `text-shadow` blur radius grows the mask, so the blit starts
+    /// that much up and to the left of where the hard-edged copy would.
+    #[cfg(feature = "truetype-overlay")]
+    fn blit_shadow(
+        &self,
+        buf: &mut [u8],
+        x0: i32,
+        y0: i32,
+        size: (usize, usize),
+        coverage: &[u8],
+        shadow: TextShadow,
+    ) {
+        if shadow.blur == 0 || size.0 == 0 || size.1 == 0 {
+            self.blit_coverage(buf, x0, y0, size, coverage, shadow.color);
+            return;
+        }
+        let (mask, grown, pad) = blur_coverage(coverage, size, shadow.blur);
+        let pad = pad as i32;
+        self.blit_coverage(buf, x0 - pad, y0 - pad, grown, &mask, shadow.color);
+    }
+
     /// TrueType render path (the `truetype-overlay` feature): rasterize each
     /// active cue's glyphs from the loaded font. Horizontal cues lay out
     /// left-to-right, top-to-bottom (auto-`line` cues stack from the bottom like
     /// the bitmap path); `vertical:rl` / `lr` cues lay out as top-to-bottom
     /// columns advancing right-to-left / left-to-right, with `align` justifying
     /// each column vertically. Placement (`position` / `line`) mirrors the bitmap
-    /// path; metrics and advances come from the font.
+    /// path; metrics and advances come from the font, at the per-character size
+    /// a `::cue` `font-size` asked for.
     #[cfg(feature = "truetype-overlay")]
     fn render_active_ttf(&self, buf: &mut [u8], t_ns: u64) {
         // Line metrics come from the primary; each glyph is rasterized from the
@@ -682,8 +875,6 @@ impl TextOverlay {
         let w = self.width as f32;
         let h = self.height as f32;
         let px = self.ttf_px();
-        let lm = primary.line_metrics(px);
-        let line_h = lm.new_line_size.max(px);
         let pad = (px * 0.25).max(2.0);
         let margin = px * 0.5;
         let mut auto_bottom = h - margin;
@@ -709,14 +900,31 @@ impl TextOverlay {
             let fg_at = |off: usize| s.color_at(off).unwrap_or(self.text_color);
             let bg = s.background.unwrap_or(self.bg_color);
             let bases = line_offsets(&cue.text);
+            // A `::cue` `font-size` sizes the whole cue; a `::cue(.class)` one
+            // sizes its span alone, so the line box takes the largest in the cue
+            // and every glyph sits on that shared baseline.
+            let cue_px = s.font_size.map_or(px, |size| size.resolve(px));
+            let px_at = |off: usize| {
+                s.span_font_size_at(off)
+                    .map_or(cue_px, |size| size.resolve(cue_px))
+            };
+            let tallest_px = cue
+                .text
+                .char_indices()
+                .map(|(off, _)| px_at(off))
+                .fold(cue_px, f32::max);
+            let lm = primary.line_metrics(tallest_px);
+            let line_h = lm.new_line_size.max(tallest_px);
+            let mut glyphs: Vec<TtfGlyph> = Vec::new();
+            let mut fills: Vec<SpanFill> = Vec::new();
 
             if matches!(
                 s.vertical,
                 WritingMode::VerticalRl | WritingMode::VerticalLr
             ) {
                 let rl = matches!(s.vertical, WritingMode::VerticalRl);
-                let col_w = px * 1.3;
-                let cell_h = px * 1.15;
+                let col_w = tallest_px * 1.3;
+                let cell_h = tallest_px * 1.15;
                 let n_cols = lines.len();
                 let max_len = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0) as f32;
                 let block_w = n_cols as f32 * col_w;
@@ -756,27 +964,44 @@ impl TextOverlay {
                             TextAlign::End => block_h - col_h,
                         };
                     let base = bases.get(ci).copied().unwrap_or(0);
+                    let mut cells = Vec::new();
                     for (j, &(off, c)) in chars.iter().enumerate() {
-                        let (m, cov) = self.glyph_font(c).rasterize(c, px);
+                        let (m, cov) = self.glyph_font(c).rasterize(c, px_at(base + off));
                         let gx = col_x + (col_w - m.advance_width) / 2.0 + m.xmin as f32;
                         let baseline = start_y + lm.ascent + j as f32 * cell_h;
                         let gy = baseline - m.ymin as f32 - m.height as f32;
-                        self.blit_coverage(
-                            buf,
-                            gx as i32,
-                            gy as i32,
-                            (m.width, m.height),
-                            &cov,
-                            fg_at(base + off),
-                        );
+                        let cell_top = start_y + j as f32 * cell_h;
+                        cells.push((
+                            s.span_background_at(base + off),
+                            cell_top as i32,
+                            (cell_top + cell_h) as i32,
+                        ));
+                        glyphs.push(TtfGlyph {
+                            x: gx as i32,
+                            y: gy as i32,
+                            size: (m.width, m.height),
+                            coverage: cov,
+                            color: fg_at(base + off),
+                            shadow: s.shadow_at(base + off),
+                        });
+                    }
+                    // A span's fill runs down the column it is in.
+                    for (color, top, bottom) in merge_span_fills(cells) {
+                        fills.push(((col_x as i32, top, col_w as i32, bottom - top), color));
                     }
                 }
             } else {
                 let line_ws: Vec<f32> = lines
                     .iter()
-                    .map(|l| {
-                        l.chars()
-                            .map(|c| self.glyph_font(c).metrics(c, px).advance_width)
+                    .enumerate()
+                    .map(|(row, l)| {
+                        let base = bases.get(row).copied().unwrap_or(0);
+                        l.char_indices()
+                            .map(|(off, c)| {
+                                self.glyph_font(c)
+                                    .metrics(c, px_at(base + off))
+                                    .advance_width
+                            })
                             .sum()
                     })
                     .collect();
@@ -811,23 +1036,54 @@ impl TextOverlay {
                         TextAlign::End => block_left + (block_w - line_w),
                     };
                     let baseline = block_top + lm.ascent + row as f32 * line_h;
+                    let line_top = block_top + row as f32 * line_h;
                     let base = bases.get(row).copied().unwrap_or(0);
                     let mut pen = x0;
+                    let mut cells = Vec::new();
                     for (off, c) in line.char_indices() {
-                        let (m, cov) = self.glyph_font(c).rasterize(c, px);
+                        let (m, cov) = self.glyph_font(c).rasterize(c, px_at(base + off));
                         let gx = pen + m.xmin as f32;
                         let gy = baseline - m.ymin as f32 - m.height as f32;
-                        self.blit_coverage(
-                            buf,
-                            gx as i32,
-                            gy as i32,
-                            (m.width, m.height),
-                            &cov,
-                            fg_at(base + off),
-                        );
+                        cells.push((
+                            s.span_background_at(base + off),
+                            pen as i32,
+                            (pen + m.advance_width) as i32,
+                        ));
+                        glyphs.push(TtfGlyph {
+                            x: gx as i32,
+                            y: gy as i32,
+                            size: (m.width, m.height),
+                            coverage: cov,
+                            color: fg_at(base + off),
+                            shadow: s.shadow_at(base + off),
+                        });
                         pen += m.advance_width;
                     }
+                    // A span's fill covers the line box behind its own glyphs.
+                    for (color, left, right) in merge_span_fills(cells) {
+                        fills.push(((left, line_top as i32, right - left, line_h as i32), color));
+                    }
                 }
+            }
+
+            for (rect, color) in fills {
+                self.fill_rect(buf, rect.0, rect.1, rect.2, rect.3, color);
+            }
+            // Every shadow goes under every glyph, so a neighbour's shadow never
+            // lands on top of this glyph.
+            for g in &glyphs {
+                let Some(shadow) = g.shadow else { continue };
+                self.blit_shadow(
+                    buf,
+                    g.x + shadow.offset_x,
+                    g.y + shadow.offset_y,
+                    g.size,
+                    &g.coverage,
+                    shadow,
+                );
+            }
+            for g in &glyphs {
+                self.blit_coverage(buf, g.x, g.y, g.size, &g.coverage, g.color);
             }
         }
     }
@@ -948,7 +1204,6 @@ impl TextOverlay {
         let w = self.width as f32;
         let h = self.height as f32;
         let px = self.ttf_px();
-        let line_h = px * 1.25;
         let pad = (px * 0.25).max(2.0);
         let margin = px * 0.5;
         let wght = self.wght();
@@ -964,11 +1219,17 @@ impl TextOverlay {
             if cue.text.lines().next().is_none() {
                 continue;
             }
-            let block = shaper.layout(&cue.text, px, line_h, wght);
+            let s = &cue.settings;
+            // A `::cue` `font-size` sizes the whole cue, a `::cue(.class)` one
+            // sizes its span alone; the shaper takes the spans as size overrides
+            // so a mixed-size line is still one shaped run.
+            let cue_px = s.font_size.map_or(px, |size| size.resolve(px));
+            let line_h = cue_px * 1.25;
+            let sizes = sized_spans(&cue.text, s, cue_px);
+            let block = shaper.layout(&cue.text, cue_px, line_h, wght, &sizes);
             if block.lines.is_empty() {
                 continue;
             }
-            let s = &cue.settings;
             // WebVTT `::cue` colours, falling back to the element defaults; the
             // text colour is per glyph so a `::cue(.class)` run recolours only
             // its own span. The shaper lays out one visual line per logical line,
@@ -991,6 +1252,7 @@ impl TextOverlay {
                 }
             };
             let mut glyphs = Vec::new();
+            let mut span_backgrounds = Vec::new();
             for (row, line) in block.lines.iter().enumerate() {
                 let x0 = match s.align {
                     TextAlign::Center => block_left + (block_w - line.width) / 2.0,
@@ -998,13 +1260,30 @@ impl TextOverlay {
                     TextAlign::End => block_left + (block_w - line.width),
                 };
                 let base = bases.get(row).copied().unwrap_or(0);
+                let mut cells = Vec::new();
                 for g in &line.glyphs {
+                    let at = base + g.start;
+                    let left = x0 as i32 + g.x;
+                    cells.push((
+                        s.span_background_at(at),
+                        left,
+                        left + g.advance.ceil() as i32,
+                    ));
                     glyphs.push(PlacedGlyph {
                         key: g.key,
-                        x: x0 as i32 + g.x,
+                        x: left,
                         y: block_top as i32 + g.y,
-                        color: fg_at(base + g.start),
+                        color: fg_at(at),
+                        #[cfg(feature = "vello-text-overlay")]
+                        font_size: g.font_size,
+                        shadow: s.shadow_at(at),
                     });
+                }
+                // A span's fill covers the line box behind its own glyphs.
+                let line_top = block_top as i32 + line.top as i32;
+                for (color, left, right) in merge_span_fills(cells) {
+                    span_backgrounds
+                        .push(((left, line_top, right - left, line.height as i32), color));
                 }
             }
             placed.push(PlacedCue {
@@ -1015,6 +1294,7 @@ impl TextOverlay {
                     (block_h + 2.0 * pad) as i32,
                 ),
                 background_color: bg,
+                span_backgrounds,
                 glyphs,
             });
         }
@@ -1023,8 +1303,8 @@ impl TextOverlay {
     }
 
     /// Blit the cues [`place_shaped_cues`](Self::place_shaped_cues) laid out:
-    /// the backing box, then each glyph's rasterized coverage (or its colour
-    /// bitmap for an emoji face).
+    /// the backing box, the span fills over it, the shadows, then each glyph's
+    /// rasterized coverage (or its colour bitmap for an emoji face).
     #[cfg(feature = "text-shaping")]
     fn render_active_shaped(&mut self, buf: &mut [u8], t_ns: u64) {
         let placed = self.place_shaped_cues(t_ns);
@@ -1036,6 +1316,29 @@ impl TextOverlay {
         for cue in &placed {
             let (bx, by, bw, bh) = cue.background;
             self.fill_rect(buf, bx, by, bw, bh, cue.background_color);
+            for &(rect, color) in &cue.span_backgrounds {
+                self.fill_rect(buf, rect.0, rect.1, rect.2, rect.3, color);
+            }
+            // Every shadow goes under every glyph, so a neighbour's shadow never
+            // lands on top of this glyph.
+            for g in &cue.glyphs {
+                let Some(shadow) = g.shadow else { continue };
+                let Some(img) = shaper.image(g.key) else {
+                    continue;
+                };
+                // A colour (emoji) bitmap has no coverage mask to tint.
+                if img.color {
+                    continue;
+                }
+                self.blit_shadow(
+                    buf,
+                    g.x + img.left + shadow.offset_x,
+                    g.y - img.top + shadow.offset_y,
+                    (img.width, img.height),
+                    img.data,
+                    shadow,
+                );
+            }
             for g in &cue.glyphs {
                 let Some(img) = shaper.image(g.key) else {
                     continue;
@@ -1050,6 +1353,33 @@ impl TextOverlay {
             }
         }
         self.shaper = Some(shaper);
+    }
+
+    /// The blurred drop-shadow mask for one shaped glyph: its rasterized
+    /// coverage grown by the blur, with the grown mask's top-left corner as an
+    /// offset from the pen origin. `None` for a colour (emoji) bitmap, which has
+    /// no coverage mask to tint. For the Vello backend, which has no filter to
+    /// blur a glyph run with and draws the mask as an image instead.
+    #[cfg(all(feature = "text-shaping", feature = "vello-text-overlay"))]
+    pub(crate) fn blurred_shadow_mask(
+        &mut self,
+        key: crate::textshape::GlyphKey,
+        blur: u32,
+    ) -> Option<BlurredShadowMask> {
+        let img = self.shaper.as_mut()?.image(key)?;
+        if img.color || img.width == 0 || img.height == 0 {
+            return None;
+        }
+        let (left, top) = (img.left, img.top);
+        let (coverage, (width, height), pad) =
+            blur_coverage(img.data, (img.width, img.height), blur);
+        Some(BlurredShadowMask {
+            coverage,
+            width,
+            height,
+            left: left - pad as i32,
+            top: -top - pad as i32,
+        })
     }
 
     /// Alpha-blend a colour (emoji) glyph bitmap, four bytes per pixel, at output
@@ -1690,11 +2020,13 @@ mod tests {
         last: Option<Vec<u8>>,
     }
     impl OutputSink for PixelSink {
-        fn push<'a>(
-            &'a mut self,
-            packet: PipelinePacket,
-        ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
-            Box::pin(async move {
+        fn poll_push(
+            &mut self,
+            _cx: &mut core::task::Context<'_>,
+            packet_slot: &mut Option<PipelinePacket>,
+        ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+            let packet = packet_slot.take().expect("poll_push without a packet");
+            core::task::Poll::Ready({
                 if let PipelinePacket::DataFrame(frame) = packet {
                     if let Some(slice) = frame.domain.as_system_slice() {
                         self.last = Some(slice.to_vec());
@@ -2030,7 +2362,8 @@ mod tests {
             spans: alloc::vec![SpanStyle {
                 start: 3,
                 end: 5,
-                color: [255, 0, 0, 255],
+                color: Some([255, 0, 0, 255]),
+                ..SpanStyle::default()
             }],
             ..CueSettings::default()
         };
@@ -2056,7 +2389,8 @@ mod tests {
             spans: alloc::vec![SpanStyle {
                 start: 3,
                 end: 5,
-                color: [255, 0, 0, 255],
+                color: Some([255, 0, 0, 255]),
+                ..SpanStyle::default()
             }],
             ..CueSettings::default()
         };
@@ -2413,6 +2747,7 @@ mod tests {
             ov.ttf_px(),
             ov.ttf_px() * 1.25,
             None,
+            &[],
         );
         let line = &block.lines[0];
         let rtl: Vec<_> = line.glyphs.iter().filter(|g| g.rtl).collect();
@@ -2458,7 +2793,7 @@ mod tests {
         let mut ov = shaped_overlay(w as u32, h as u32, word, &bytes);
         ov.ensure_shaper();
         let mut shaper = ov.shaper.take().expect("shaper built");
-        let block = shaper.layout(word, ov.ttf_px(), ov.ttf_px() * 1.25, None);
+        let block = shaper.layout(word, ov.ttf_px(), ov.ttf_px() * 1.25, None, &[]);
         let shaped: Vec<u16> = block.lines[0].glyphs.iter().map(|g| g.glyph_id).collect();
 
         // What the isolated first-font-with-glyph lookup would have produced.

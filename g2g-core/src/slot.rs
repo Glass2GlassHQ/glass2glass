@@ -171,7 +171,12 @@ mod tests {
         configured: bool,
     }
 
-    impl DynAsyncElement for CountingElement {
+    impl crate::element::AsyncElement for CountingElement {
+        type ProcessFuture<'a>
+            = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+        where
+            Self: 'a;
+
         fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
             Ok(upstream_caps.clone())
         }
@@ -188,7 +193,7 @@ mod tests {
             &'a mut self,
             _packet: PipelinePacket,
             _out: &'a mut dyn OutputSink,
-        ) -> Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>> {
+        ) -> Self::ProcessFuture<'a> {
             let counter = self.counter.clone();
             Box::pin(async move {
                 counter.fetch_add(1, Ordering::SeqCst);
@@ -250,11 +255,13 @@ mod tests {
 
     struct NoopSink;
     impl OutputSink for NoopSink {
-        fn push<'a>(
-            &'a mut self,
-            _packet: PipelinePacket,
-        ) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
-            Box::pin(async { Ok(PushOutcome::Accepted) })
+        fn poll_push(
+            &mut self,
+            _cx: &mut core::task::Context<'_>,
+            packet: &mut Option<PipelinePacket>,
+        ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+            packet.take();
+            core::task::Poll::Ready(Ok(PushOutcome::Accepted))
         }
     }
 

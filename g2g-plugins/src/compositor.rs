@@ -934,7 +934,7 @@ fn blend_over(
 /// math as [`blend_over`], with integer fixed-point sampling (no float intrinsics
 /// for the `no_std` baseline). Pixels outside the canvas are clipped.
 #[allow(clippy::too_many_arguments)]
-fn blend_over_scaled(
+pub(crate) fn blend_over_scaled(
     canvas: &mut [u8],
     cw: usize,
     ch: usize,
@@ -1400,11 +1400,13 @@ mod tests {
     }
 
     impl OutputSink for FrameSink {
-        fn push<'a>(
-            &'a mut self,
-            packet: PipelinePacket,
-        ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
-            Box::pin(async move {
+        fn poll_push(
+            &mut self,
+            _cx: &mut core::task::Context<'_>,
+            packet_slot: &mut Option<PipelinePacket>,
+        ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+            let packet = packet_slot.take().expect("poll_push without a packet");
+            core::task::Poll::Ready({
                 if let PipelinePacket::DataFrame(frame) = packet {
                     self.frames.push(frame);
                 }

@@ -26,9 +26,9 @@ rather than a hand-unrolled matmul/softmax chain.
 
 ## Why it is workspace-excluded
 
-`burn-onnx` needs rustc 1.92 (burn 0.21's own MSRV) and the publishable workspace
-is pinned at 1.86, so this crate is in the root `Cargo.toml` `exclude` list with
-its own `Cargo.lock` and path-deps back to `g2g-ml`. Build, test, `fmt` and
+`burn-onnx` drags burn's whole codegen tree (and burn itself) into whatever
+lockfile resolves it, so this crate is in the root `Cargo.toml` `exclude` list
+with its own `Cargo.lock` and path-deps back to `g2g-ml`. Build, test, `fmt` and
 `clippy` it from this directory, not from the workspace root.
 
 ## Run

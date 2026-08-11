@@ -41,6 +41,10 @@ use g2g_core::{
     HardwareError, MemoryDomain, OutputSink, PipelinePacket, Rate, RawVideoFormat, SystemSlice,
 };
 
+/// CUDA device the upload context is created on, carried onto every uploaded
+/// frame so a consumer knows which GPU the surface lives on.
+const UPLOAD_DEVICE_ORDINAL: i32 = 0;
+
 /// Pass-through transform that copies CUDA device-memory NV12 frames to
 /// system memory. See the module docs.
 ///
@@ -312,7 +316,7 @@ impl AsyncElement for CudaUpload {
         let ctx = unsafe {
             check(ffi::cu_init(0))?;
             let mut dev: ffi::CuDevice = 0;
-            check(ffi::cu_device_get(&mut dev, 0))?;
+            check(ffi::cu_device_get(&mut dev, UPLOAD_DEVICE_ORDINAL))?;
             let mut ctx: ffi::CuContext = core::ptr::null_mut();
             check(ffi::cu_ctx_create(&mut ctx, 0, dev))?;
             // `cu_ctx_create` leaves the new context current on this thread; pop
@@ -457,6 +461,7 @@ unsafe fn upload_nv12(
             width,
             height,
             ctx.0,
+            UPLOAD_DEVICE_ORDINAL,
             Arc::new(DevAlloc {
                 dptr,
                 ctx: Arc::clone(ctx),
@@ -507,8 +512,9 @@ unsafe fn htod_plane(
 /// The g2g memory-domain converter for a `(from, to)` pair, or `None` when g2g
 /// has none (the auto-plug then leaves the edge to fail loud). Covers the
 /// CUDA<->System pair: [`CudaDownload`] (`Cuda -> System`) and [`CudaUpload`]
-/// (`System -> Cuda`). The factory the M354 auto-plug calls; see
-/// [`auto_plug_cuda_converters`].
+/// (`System -> Cuda`), plus `Cuda -> WgpuTexture` through the zero-copy
+/// external-memory bridge where that is built in. The factory the M354 auto-plug
+/// calls; see [`auto_plug_cuda_converters`].
 pub fn cuda_domain_converter(from: MemoryDomainKind, to: MemoryDomainKind) -> Option<GraphNode> {
     match (from, to) {
         (MemoryDomainKind::Cuda, MemoryDomainKind::System) => {
@@ -516,6 +522,12 @@ pub fn cuda_domain_converter(from: MemoryDomainKind, to: MemoryDomainKind) -> Op
         }
         (MemoryDomainKind::System, MemoryDomainKind::Cuda) => {
             Some(GraphNode::element(CudaUpload::new()))
+        }
+        // Keeps a decoded NVDEC frame on the GPU all the way to a wgpu consumer
+        // (preprocess, present), instead of the PCIe download a System hop costs.
+        #[cfg(all(target_os = "linux", feature = "cuda-wgpu"))]
+        (MemoryDomainKind::Cuda, MemoryDomainKind::WgpuTexture) => {
+            Some(GraphNode::element(crate::cudatowgpu::CudaToWgpu::new()))
         }
         _ => None,
     }

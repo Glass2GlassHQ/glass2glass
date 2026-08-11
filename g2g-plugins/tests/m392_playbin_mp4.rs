@@ -163,18 +163,17 @@ struct Collect {
     bytes: Vec<u8>,
 }
 impl OutputSink for Collect {
-    fn push<'a>(
-        &'a mut self,
-        packet: g2g_core::PipelinePacket,
-    ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
-        Box::pin(async move {
-            if let g2g_core::PipelinePacket::DataFrame(f) = packet {
-                if let Some(s) = f.domain.as_system_slice() {
-                    self.bytes.extend_from_slice(s);
-                }
+    fn poll_push(
+        &mut self,
+        _cx: &mut core::task::Context<'_>,
+        packet: &mut Option<g2g_core::PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        if let Some(g2g_core::PipelinePacket::DataFrame(f)) = packet.take() {
+            if let Some(s) = f.domain.as_system_slice() {
+                self.bytes.extend_from_slice(s);
             }
-            Ok(PushOutcome::Accepted)
-        })
+        }
+        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
     }
 }
 async fn av_mp4() -> Vec<u8> {

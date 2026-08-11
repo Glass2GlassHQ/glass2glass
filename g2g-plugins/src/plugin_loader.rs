@@ -1,11 +1,48 @@
-//! Dynamic (`dlopen`) loader for third-party plugins (M201).
+//! Dynamic (`dlopen`) loader for third-party plugins (M201, M1010).
 //!
-//! A plugin is a `cdylib` built with the `g2g-plugin` SDK (its
-//! `declare_plugin!` macro emits `g2g_plugin_abi` + `g2g_plugin_register`). This
-//! module opens such a shared object, verifies its ABI tag against the host's
-//! [`g2g_core::ABI_VERSION`], and, on a match, calls its registration entry to
-//! add the plugin's elements to a [`Registry`]. The `gst-launch` parser then
-//! resolves those elements by name like any built-in.
+//! Two plugin ABIs, probed in that order:
+//!
+//! - **v2 (M1010), cross-toolchain.** The plugin exports the data symbol
+//!   [`V2_DESCRIPTOR_SYMBOL`], a `static` [`FfiPluginDescriptor`] carrying a
+//!   magic, an ABI generation, and the list of elements it will register.
+//!   Everything crossing the boundary is `repr(C)`, so the plugin may be built
+//!   by a different `rustc`, or written in C. See [`g2g_plugin::abi`].
+//! - **v1 (M201), same-toolchain.** The plugin exports `g2g_plugin_abi` +
+//!   `g2g_plugin_register` (the `declare_plugin!` macro) and passes Rust types
+//!   straight across, which is sound only when the ABI tag matches exactly.
+//!
+//! [`load_plugin`] tries v2 first and falls back to v1, so an existing v1
+//! plugin keeps loading unchanged.
+//!
+//! **The capability gate.** A v2 descriptor declares what the plugin will
+//! register *before* any of its code runs, so [`load_plugin_with_policy`] can
+//! put a caller-supplied decision in front of it. Once the policy allows a
+//! declaration, the plugin is held to it: an element it then tries to register
+//! that the declaration did not cover fails the whole load, and nothing reaches
+//! the caller's `Registry`. This is **policy, not sandboxing**, see the
+//! "Security" note below.
+//!
+//! # Security
+//!
+//! The loader defends against a *malformed* plugin, not a *malicious* one.
+//!
+//! `dlopen` runs the library's initialisers before the loader reads a single
+//! field, and once loaded a plugin shares the host's address space with no
+//! boundary at all: it can call any syscall the host process can, read the
+//! host's memory, and ignore every rule in this module. The capability gate
+//! decides *whether to load a file at all* and *what it may register*; it
+//! cannot constrain what loaded code does. Anything stronger (a separate
+//! process, a seccomp filter, a signature check) is out of scope here, and
+//! there are no stubs for it.
+//!
+//! What the loader does do is treat every byte reachable from the descriptor as
+//! untrusted input: counts are bounded before they are used as lengths,
+//! pointers are null-checked before they are dereferenced, strings are UTF-8
+//! checked and length-bounded, names are restricted to a `gst-launch`-safe
+//! character set, and every unknown discriminant is refused rather than
+//! reinterpreted. Two things it cannot check, and takes on the plugin's
+//! contract: that a pointer+length pair really addresses that many readable
+//! bytes, and that a `struct_size` really matches what the plugin wrote.
 //!
 //! **ABI safety.** Rust has no stable ABI, so loading a plugin built against a
 //! different `g2g-core` version, a different `rustc`, or a different
@@ -32,6 +69,15 @@ use libloading::{Library, Symbol};
 
 use g2g_core::runtime::Registry;
 use g2g_core::ABI_VERSION;
+
+use g2g_plugin::abi::{
+    validate_descriptor, FfiPluginDescriptor, PluginCapability, PluginDeclaration, ValidationError,
+    V2_DESCRIPTOR_SYMBOL,
+};
+
+mod v2;
+
+pub use v2::MAX_V2_ELEMENT_SLOTS;
 
 /// The C-ABI symbol names a `g2g-plugin` `cdylib` exports. Kept in sync with the
 /// `declare_plugin!` expansion in the SDK.
@@ -76,6 +122,25 @@ pub enum PluginError {
     },
     /// A directory scan could not read the directory.
     DirRead { path: PathBuf, message: String },
+    /// The plugin exports a v2 descriptor, but something in it (or in an
+    /// element it tried to register) was malformed. The plugin is refused and
+    /// the registry is left untouched.
+    V2Invalid {
+        path: PathBuf,
+        error: ValidationError,
+    },
+    /// The caller's policy refused this plugin's declared capabilities. No
+    /// plugin code beyond the library's own initialisers has run.
+    PolicyDenied {
+        path: PathBuf,
+        plugin: String,
+        reason: String,
+    },
+    /// The plugin's `register` entry reported failure. Nothing it staged is
+    /// committed.
+    V2RegisterFailed { path: PathBuf, status: i32 },
+    /// The process has already registered [`MAX_V2_ELEMENT_SLOTS`] v2 elements.
+    V2NoSlots { path: PathBuf },
 }
 
 impl core::fmt::Display for PluginError {
@@ -101,8 +166,70 @@ impl core::fmt::Display for PluginError {
             PluginError::DirRead { path, message } => {
                 write!(f, "cannot scan plugin dir {}: {message}", path.display())
             }
+            PluginError::V2Invalid { path, error } => {
+                write!(
+                    f,
+                    "plugin {} has an invalid v2 ABI: {error}",
+                    path.display()
+                )
+            }
+            PluginError::PolicyDenied {
+                path,
+                plugin,
+                reason,
+            } => write!(
+                f,
+                "plugin {} ('{plugin}') refused by policy: {reason}",
+                path.display()
+            ),
+            PluginError::V2RegisterFailed { path, status } => write!(
+                f,
+                "plugin {} failed to register its elements (status {status})",
+                path.display()
+            ),
+            PluginError::V2NoSlots { path } => write!(
+                f,
+                "plugin {} cannot load: all {MAX_V2_ELEMENT_SLOTS} v2 element slots are taken",
+                path.display()
+            ),
         }
     }
+}
+
+/// A caller's answer to "may this plugin register what it declares?".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PolicyDecision {
+    /// Load it.
+    Allow,
+    /// Refuse it, with a reason for the error message.
+    Deny(String),
+}
+
+/// The capability gate: a caller-supplied decision over what a v2 plugin
+/// declares, taken *before* the plugin's `register` entry is called.
+///
+/// The declaration is available because a v2 descriptor is a `static` the host
+/// reads with `dlsym`, not something the plugin computes. Bear in mind what the
+/// module "Security" note says: this decides whether to hand a plugin control,
+/// not what it may do once it has it.
+pub type CapabilityPolicy<'p> = &'p dyn Fn(&PluginDeclaration) -> PolicyDecision;
+
+/// The gate [`load_plugin`] applies: allow declared elements, refuse a
+/// declaration carrying a capability kind this host does not understand.
+///
+/// Default-deny on the unknown is the conservative half. Such a capability is
+/// inert (nothing in this host can register under it), but refusing makes a
+/// plugin built for a newer host an explicit decision rather than a silent
+/// partial load.
+pub fn default_policy(declaration: &PluginDeclaration) -> PolicyDecision {
+    for capability in &declaration.capabilities {
+        if let PluginCapability::Unknown { kind, name } = capability {
+            return PolicyDecision::Deny(alloc::format!(
+                "declares capability '{name}' of unknown kind {kind}"
+            ));
+        }
+    }
+    PolicyDecision::Allow
 }
 
 impl std::error::Error for PluginError {}
@@ -130,6 +257,20 @@ fn check_abi(path: &Path, plugin_abi: &str) -> Result<(), PluginError> {
 /// any failure `reg` is left untouched and the loaded library, if any, is
 /// dropped (no elements were registered from it).
 pub fn load_plugin(path: impl AsRef<Path>, reg: &mut Registry) -> Result<(), PluginError> {
+    load_plugin_with_policy(path, reg, &default_policy)
+}
+
+/// [`load_plugin`] with a caller-supplied capability gate over the v2
+/// declaration. The policy runs after the descriptor validates and before the
+/// plugin's `register` entry is called; a `Deny` leaves `reg` untouched.
+///
+/// The policy is not consulted for a v1 plugin: v1 has no declaration to gate
+/// on, which is one of the reasons v2 exists.
+pub fn load_plugin_with_policy(
+    path: impl AsRef<Path>,
+    reg: &mut Registry,
+    policy: CapabilityPolicy<'_>,
+) -> Result<(), PluginError> {
     let path = path.as_ref();
 
     // SAFETY: loading an arbitrary shared object runs its initializers and is
@@ -139,6 +280,17 @@ pub fn load_plugin(path: impl AsRef<Path>, reg: &mut Registry) -> Result<(), Plu
         path: path.to_path_buf(),
         message: e.to_string(),
     })?;
+
+    // v2 first: a plugin that exports the descriptor symbol is a v2 plugin and
+    // never falls through to the v1 tag check.
+    // SAFETY: we assert the symbol's type matches the SDK's exported static.
+    // The value is validated field by field before anything in it is trusted.
+    let v2_descriptor = unsafe { lib.get::<*const FfiPluginDescriptor>(V2_DESCRIPTOR_SYMBOL) }
+        .ok()
+        .map(|symbol| *symbol);
+    if let Some(descriptor) = v2_descriptor {
+        return load_v2(path, lib, descriptor, reg, policy);
+    }
 
     // Read the ABI tag first, before touching any other plugin code.
     // SAFETY: we assert the symbol's type matches the SDK's `g2g_plugin_abi`
@@ -179,6 +331,58 @@ pub fn load_plugin(path: impl AsRef<Path>, reg: &mut Registry) -> Result<(), Plu
 
     // Keep the code resident: the factories just registered are `fn` pointers
     // into `lib`. Must outlive every element, so it lives for the process.
+    keep_alive(lib);
+    Ok(())
+}
+
+/// The v2 path: validate the descriptor, run the caller's capability gate, let
+/// the plugin stage its elements, and commit them only if every one of them was
+/// declared. `reg` is untouched on any failure.
+fn load_v2(
+    path: &Path,
+    lib: Library,
+    descriptor: *const FfiPluginDescriptor,
+    reg: &mut Registry,
+    policy: CapabilityPolicy<'_>,
+) -> Result<(), PluginError> {
+    let invalid = |error: ValidationError| PluginError::V2Invalid {
+        path: path.to_path_buf(),
+        error,
+    };
+
+    // SAFETY: `descriptor` is the address `dlsym` resolved in `lib`, which is
+    // still loaded here. Everything reachable from it is treated as untrusted.
+    let declaration = unsafe { validate_descriptor(descriptor) }.map_err(invalid)?;
+
+    // The gate runs here: the declaration is known and no plugin code has run.
+    if let PolicyDecision::Deny(reason) = policy(&declaration) {
+        return Err(PluginError::PolicyDenied {
+            path: path.to_path_buf(),
+            plugin: declaration.name,
+            reason,
+        });
+    }
+
+    // SAFETY: `declaration` came from `validate_descriptor` on `lib`, which is
+    // still loaded, so its `register` entry is a live function.
+    let registered =
+        unsafe { v2::run_registration(&declaration) }.map_err(|failure| match failure {
+            v2::RegistrationFailure::Invalid(error) => invalid(error),
+            v2::RegistrationFailure::Status(status) => PluginError::V2RegisterFailed {
+                path: path.to_path_buf(),
+                status,
+            },
+            v2::RegistrationFailure::NoSlots => PluginError::V2NoSlots {
+                path: path.to_path_buf(),
+            },
+        })?;
+
+    v2::commit(registered, reg).map_err(|_| PluginError::V2NoSlots {
+        path: path.to_path_buf(),
+    })?;
+
+    // Keep the code resident: the vtables just registered are `fn` pointers
+    // into `lib`. Same contract as the v1 path.
     keep_alive(lib);
     Ok(())
 }

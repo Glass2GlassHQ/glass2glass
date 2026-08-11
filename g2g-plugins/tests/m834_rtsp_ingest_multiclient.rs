@@ -15,8 +15,6 @@
 //! ```
 #![cfg(feature = "rtsp-server")]
 
-use core::future::Future;
-use core::pin::Pin;
 use std::net::{SocketAddr, TcpListener as StdTcpListener, UdpSocket as StdUdpSocket};
 use std::time::Duration;
 
@@ -42,10 +40,13 @@ impl Capture {
 }
 
 impl OutputSink for Capture {
-    fn push<'a>(
-        &'a mut self,
-        p: PipelinePacket,
-    ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
+    fn poll_push(
+        &mut self,
+        _cx: &mut core::task::Context<'_>,
+        packet_slot: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        let p = packet_slot.take().expect("poll_push without a packet");
+
         match &p {
             PipelinePacket::DataFrame(frame) => {
                 if let Some(slice) = frame.domain.as_system_slice() {
@@ -59,7 +60,7 @@ impl OutputSink for Capture {
             PipelinePacket::Eos => self.eos += 1,
             _ => {}
         }
-        Box::pin(async { Ok(PushOutcome::Accepted) })
+        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
     }
 }
 

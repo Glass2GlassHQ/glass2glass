@@ -95,6 +95,9 @@ const CUDA_PRODUCE_HOOK: &str = "g2g_produce_cuda";
 /// Optional attribute a hosted GPU source sets to report the `CUcontext` its
 /// surfaces live in, for a downstream consumer that has to push it.
 const CUDA_CONTEXT_ATTR: &str = "cuda_context";
+/// Optional attribute a hosted GPU source sets to report which CUDA device it
+/// allocated on. Absent means device 0.
+const CUDA_DEVICE_ATTR: &str = "cuda_device";
 
 static INIT: Once = Once::new();
 
@@ -796,7 +799,16 @@ fn call_produce_cuda(
     }
     let (luma, chroma): (Bound<'_, PyAny>, Bound<'_, PyAny>) = returned.extract()?;
     let context = reported_cuda_context(bound)?;
-    let buffer = produced_cuda_buffer(&luma, &chroma, job.fmt, job.width, job.height, context)?;
+    let device_ordinal = reported_cuda_device(bound)?;
+    let buffer = produced_cuda_buffer(
+        &luma,
+        &chroma,
+        job.fmt,
+        job.width,
+        job.height,
+        context,
+        device_ordinal,
+    )?;
     job.frames.push(Frame {
         domain: MemoryDomain::Cuda(buffer),
         // The source stamps timing and sequence on the way out; it owns the clock.
@@ -811,6 +823,15 @@ fn call_produce_cuda(
 /// `cuda_context` attribute, or zero when it reports none.
 fn reported_cuda_context(instance: &Bound<'_, PyAny>) -> PyResult<u64> {
     match instance.getattr(CUDA_CONTEXT_ATTR) {
+        Ok(value) if !value.is_none() => value.extract(),
+        _ => Ok(0),
+    }
+}
+
+/// The CUDA device ordinal a hosted GPU source reports through its optional
+/// `cuda_device` attribute, or zero when it reports none.
+fn reported_cuda_device(instance: &Bound<'_, PyAny>) -> PyResult<i32> {
+    match instance.getattr(CUDA_DEVICE_ATTR) {
         Ok(value) if !value.is_none() => value.extract(),
         _ => Ok(0),
     }

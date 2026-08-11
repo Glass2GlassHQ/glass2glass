@@ -22,7 +22,8 @@ use g2g_core::{
     PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
 
-use crate::filesink::io_err;
+use crate::filesink::{io_err, path_io_err};
+use g2g_core::log::short_type_name;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NextFile {
@@ -94,7 +95,8 @@ impl MultiFileSink {
             w.flush().map_err(io_err)?;
         }
         let path = expand(&self.location, self.index);
-        let file = File::create(&path).map_err(io_err)?;
+        let file = File::create(&path)
+            .map_err(|e| path_io_err(short_type_name::<Self>(), "create", &path, e))?;
         self.writer = Some(BufWriter::new(file));
         self.current_bytes = 0;
         self.index += 1;
@@ -322,11 +324,13 @@ mod tests {
 
     struct NullSink;
     impl OutputSink for NullSink {
-        fn push<'a>(
-            &'a mut self,
-            _packet: PipelinePacket,
-        ) -> Pin<Box<dyn Future<Output = Result<g2g_core::PushOutcome, G2gError>> + 'a>> {
-            Box::pin(async { Ok(g2g_core::PushOutcome::Accepted) })
+        fn poll_push(
+            &mut self,
+            _cx: &mut core::task::Context<'_>,
+            packet_slot: &mut Option<PipelinePacket>,
+        ) -> core::task::Poll<Result<g2g_core::PushOutcome, G2gError>> {
+            packet_slot.take();
+            core::task::Poll::Ready(Ok(g2g_core::PushOutcome::Accepted))
         }
     }
 

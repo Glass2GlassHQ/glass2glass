@@ -19,10 +19,12 @@ use core::future::Future;
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
-use g2g_core::runtime::{run_simple_pipeline, SeekController, SourceLoop};
+use g2g_core::runtime::{
+    run_simple_pipeline, run_simple_pipeline_with_bus, SeekController, SourceLoop,
+};
 use g2g_core::{
-    Caps, ConfigureOutcome, Dim, FrameTiming, G2gError, MemoryDomain, OutputSink, PipelineClock,
-    PipelinePacket, Rate, RawVideoFormat, Seek, SeekFlags, SeekType, Segment,
+    Bus, BusMessage, Caps, ConfigureOutcome, Dim, FrameTiming, G2gError, MemoryDomain, OutputSink,
+    PipelineClock, PipelinePacket, Rate, RawVideoFormat, Seek, SeekFlags, SeekType, Segment,
 };
 
 use g2g_plugins::fakesink::FakeSink;
@@ -292,4 +294,111 @@ async fn single_segment_then_shutdown_emits_eos() {
     // pts 0..=3000 step 1000 = 4 frames.
     assert_eq!(stats.frames_consumed, 4);
     assert_eq!(sink.flushes(), 1, "the initial segment seek flushed once");
+}
+
+/// With a bus attached to the controller, each completed segment also arrives as
+/// `BusMessage::SegmentDone`, exactly once, carrying the segment's stop position.
+#[tokio::test]
+async fn segment_done_reaches_an_attached_bus() {
+    let stop = 4_000u64;
+    let n_loops = 3u64;
+
+    let (bus, handle) = Bus::new(64);
+    let seek_ctl = SeekController::new();
+    seek_ctl.set_bus(handle.clone());
+    seek_ctl.seek(flush_segment_seek(0, stop));
+
+    let mut src = SegmentLoopSrc {
+        position: 0,
+        step_ns: 1_000,
+        sequence: 0,
+        segment: Segment::new(),
+        segment_mode: false,
+        seek_ctl: seek_ctl.clone(),
+    };
+    let mut sink = FakeSink::new();
+
+    let pipeline = run_simple_pipeline_with_bus(&mut src, &mut sink, &ZeroClock, 4, &handle);
+
+    let driver_ctl = seek_ctl.clone();
+    let driver = async move {
+        loop {
+            let before = driver_ctl.segment_done_count();
+            while driver_ctl.segment_done_count() == before {
+                tokio::task::yield_now().await;
+            }
+            if driver_ctl.segment_done_count() >= n_loops {
+                driver_ctl.shutdown();
+                break;
+            }
+            driver_ctl.seek(loop_segment_seek(0, stop));
+        }
+    };
+
+    let (res, ()) = tokio::join!(pipeline, driver);
+    res.expect("pipeline runs");
+
+    let posted: Vec<u64> = drain(&bus)
+        .into_iter()
+        .filter_map(|m| match m {
+            BusMessage::SegmentDone { position_ns } => Some(position_ns),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        posted,
+        vec![stop; n_loops as usize],
+        "one SegmentDone per completed segment, at the segment stop"
+    );
+    // The back-channel is unchanged by the bus attachment.
+    assert_eq!(seek_ctl.segment_done_count(), n_loops);
+}
+
+/// Negative control: the same run with the bus attached to the *pipeline* but
+/// not to the controller posts no `SegmentDone` at all.
+#[tokio::test]
+async fn no_segment_done_without_an_attached_bus() {
+    let stop = 3_000u64;
+    let (bus, handle) = Bus::new(64);
+    let seek_ctl = SeekController::new();
+    seek_ctl.seek(flush_segment_seek(0, stop));
+
+    let mut src = SegmentLoopSrc {
+        position: 0,
+        step_ns: 1_000,
+        sequence: 0,
+        segment: Segment::new(),
+        segment_mode: false,
+        seek_ctl: seek_ctl.clone(),
+    };
+    let mut sink = FakeSink::new();
+
+    let pipeline = run_simple_pipeline_with_bus(&mut src, &mut sink, &ZeroClock, 4, &handle);
+    let driver_ctl = seek_ctl.clone();
+    let driver = async move {
+        while driver_ctl.segment_done_count() == 0 {
+            tokio::task::yield_now().await;
+        }
+        driver_ctl.shutdown();
+    };
+
+    let (res, ()) = tokio::join!(pipeline, driver);
+    res.expect("pipeline runs");
+
+    assert_eq!(seek_ctl.segment_done_count(), 1, "the segment did complete");
+    assert!(
+        !drain(&bus)
+            .iter()
+            .any(|m| matches!(m, BusMessage::SegmentDone { .. })),
+        "an unattached controller posts nothing"
+    );
+}
+
+/// Every message the bus holds after a run.
+fn drain(bus: &Bus) -> Vec<BusMessage> {
+    let mut out = Vec::new();
+    while let Some(m) = bus.try_recv() {
+        out.push(m);
+    }
+    out
 }

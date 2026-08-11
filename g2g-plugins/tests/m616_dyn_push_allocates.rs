@@ -1,17 +1,14 @@
-//! M616 (honest boundary): the object-safe `OutputSink::push` returns
-//! `Pin<Box<dyn Future>>`, so driving frames through a `dyn OutputSink` boxes one
-//! future per frame, a control-plane heap allocation. This is the counterpart to
-//! `m616_no_steady_state_alloc` (the zero-alloc *data* path): it pins the control
-//! path's per-frame cost with the same counting allocator, so the zero-alloc claim
-//! is scoped honestly (data path + a concrete non-dyn link) and the boxing cost
-//! cannot creep without a test noticing.
+//! M616 -> M1000: this test used to pin the honest boundary of the zero-alloc
+//! claim, the one box `OutputSink::push` allocated per frame through a `dyn`
+//! sink. The poll-based `OutputSink` (M1000) removed that box: `push` builds a
+//! concrete `PushFuture` on the stack and `poll_push` is a plain dyn call. The
+//! assertion is therefore inverted: pushing through `&mut dyn OutputSink` must
+//! not allocate at all, so the control path now carries the same zero-alloc
+//! contract as the data path and a reintroduced per-push box fails loudly here.
 //!
-//! The frames themselves come from a `StaticLendRing` (zero-alloc), so the counted
-//! allocations are the push futures, not frame buffers: the measured count is at
-//! least one per frame.
+//! The frames themselves come from a `StaticLendRing` (zero-alloc), so any
+//! counted allocation would be control-plane traffic, not frame buffers.
 
-use core::future::Future;
-use core::pin::Pin;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use std::alloc::{GlobalAlloc, Layout, System};
 
@@ -52,22 +49,24 @@ const SLOTS: usize = 2;
 const BYTES: usize = 16;
 const PAYLOAD: usize = 4;
 
-/// A sink that discards frames. Its `push` still returns a boxed future (the trait is
-/// object-safe), so each call heap-allocates a box.
+/// A sink that discards frames through the poll form, so a push through the
+/// trait object costs no heap.
 struct NullSink;
 
 impl OutputSink for NullSink {
-    fn push<'a>(
-        &'a mut self,
-        _packet: PipelinePacket,
-    ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
-        Box::pin(async { Ok(PushOutcome::Accepted) })
+    fn poll_push(
+        &mut self,
+        _cx: &mut core::task::Context<'_>,
+        packet_slot: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        packet_slot.take();
+        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
     }
 }
 
-/// Push `frames` zero-alloc ring frames through the dyn sink, driving each push to
-/// completion. The only per-frame heap traffic is the boxed push future.
-fn push_frames(ring: &StaticLendRing<SLOTS, BYTES>, sink: &mut NullSink, frames: u64) {
+/// Push `frames` zero-alloc ring frames through the sink as a `dyn OutputSink`
+/// (the trait-object path the graph runner drives), completing each push.
+fn push_frames(ring: &StaticLendRing<SLOTS, BYTES>, sink: &mut dyn OutputSink, frames: u64) {
     for i in 0..frames {
         let mut slot = ring.acquire().expect("a slot is free");
         for b in slot.buf_mut()[..PAYLOAD].iter_mut() {
@@ -81,7 +80,7 @@ fn push_frames(ring: &StaticLendRing<SLOTS, BYTES>, sink: &mut NullSink, frames:
 }
 
 #[test]
-fn dyn_output_sink_push_boxes_a_future_per_frame() {
+fn dyn_output_sink_push_never_allocates() {
     let ring: StaticLendRing<SLOTS, BYTES> = StaticLendRing::new();
     let mut sink = NullSink;
 
@@ -93,9 +92,9 @@ fn dyn_output_sink_push_boxes_a_future_per_frame() {
     push_frames(&ring, &mut sink, N);
     let allocs = ALLOCS.load(Ordering::Relaxed) - before;
 
-    assert!(
-        allocs >= N as usize,
-        "the dyn OutputSink::push path allocated {allocs} times for {N} frames (expected >= one box each); \
-         the zero-alloc contract is the data path, not the dyn control path"
+    assert_eq!(
+        allocs, 0,
+        "the dyn OutputSink push path allocated {allocs} times for {N} frames; \
+         the poll-based sink contract (M1000) is zero-alloc on the control path too"
     );
 }

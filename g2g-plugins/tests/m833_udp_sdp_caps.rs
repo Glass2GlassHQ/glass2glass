@@ -14,8 +14,6 @@
 //! ```
 #![cfg(feature = "udp-ingress")]
 
-use core::future::Future;
-use core::pin::Pin;
 use std::net::UdpSocket as StdUdpSocket;
 use std::process::Command;
 use std::time::Duration;
@@ -87,10 +85,13 @@ struct OrderedSink {
 }
 
 impl OutputSink for OrderedSink {
-    fn push<'a>(
-        &'a mut self,
-        p: PipelinePacket,
-    ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
+    fn poll_push(
+        &mut self,
+        _cx: &mut core::task::Context<'_>,
+        packet_slot: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        let p = packet_slot.take().expect("poll_push without a packet");
+
         match p {
             PipelinePacket::CapsChanged(c) => {
                 self.caps.push(c);
@@ -100,7 +101,7 @@ impl OutputSink for OrderedSink {
             PipelinePacket::Eos => self.order.push("eos"),
             _ => {}
         }
-        Box::pin(async { Ok(PushOutcome::Accepted) })
+        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
     }
 }
 

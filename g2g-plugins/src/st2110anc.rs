@@ -337,7 +337,7 @@ impl BitWriter {
 
     /// Zero-pad to the next 32-bit boundary (RFC 8331 word_align).
     fn align32(&mut self) {
-        while self.bit_len() % 32 != 0 {
+        while !self.bit_len().is_multiple_of(32) {
             self.write(0, 1);
         }
     }
@@ -379,7 +379,7 @@ impl<'a> BitReader<'a> {
 
     /// Skip padding to the next 32-bit boundary (word_align).
     fn align32(&mut self) {
-        while self.pos % 32 != 0 && self.pos < self.data.len() * 8 {
+        while !self.pos.is_multiple_of(32) && self.pos < self.data.len() * 8 {
             self.pos += 1;
         }
     }

@@ -41,6 +41,9 @@ macro_rules! av1_decoder {
             out: Option<(RawVideoFormat, u32, u32)>,
             sequence: u64,
             configured: bool,
+            /// Timing of the newest input unit, stamped onto the reorder-delayed
+            /// pictures the EOS drain emits (their own units' stamps are gone).
+            last_timing: g2g_core::frame::FrameTiming,
         }
 
         impl core::fmt::Debug for $ty {
@@ -62,7 +65,14 @@ macro_rules! av1_decoder {
 
         impl $ty {
             pub fn new() -> Self {
-                Self { decoder: None, framerate: Rate::Any, out: None, sequence: 0, configured: false }
+                Self {
+                    decoder: None,
+                    framerate: Rate::Any,
+                    out: None,
+                    sequence: 0,
+                    configured: false,
+                    last_timing: g2g_core::frame::FrameTiming::default(),
+                }
             }
 
             fn input_template() -> Caps {
@@ -91,21 +101,7 @@ macro_rules! av1_decoder {
                 let mut frames = Vec::new();
                 let mut send = decoder.send_data(unit, None, None, None);
                 loop {
-                    // Drain all pictures ready right now.
-                    loop {
-                        match decoder.get_picture() {
-                            Ok(pic) => {
-                                let format = pic_format(&pic)?;
-                                frames.push((
-                                    format,
-                                    pack_planar(&pic, format)?,
-                                    (pic.width(), pic.height()),
-                                ));
-                            }
-                            Err(e) if e.is_again() => break,
-                            Err(_) => return Err(G2gError::CapsMismatch),
-                        }
-                    }
+                    Self::drain_ready(decoder, &mut frames)?;
                     match send {
                         Ok(()) => break, // input fully consumed
                         Err(e) if e.is_again() => send = decoder.send_pending_data(),
@@ -113,6 +109,55 @@ macro_rules! av1_decoder {
                     }
                 }
                 Ok(frames)
+            }
+
+            /// Collect every picture decodable right now. With no new input this
+            /// is the end-of-stream drain: past the last fed unit the decoder
+            /// hands out its reorder-delayed tail until `Try again` means empty
+            /// (the dav1d draining contract).
+            fn drain_ready(
+                decoder: &mut Decoder,
+                frames: &mut DecodedFrames,
+            ) -> Result<(), G2gError> {
+                loop {
+                    match decoder.get_picture() {
+                        Ok(pic) => {
+                            let format = pic_format(&pic)?;
+                            frames.push((
+                                format,
+                                pack_planar(&pic, format)?,
+                                (pic.width(), pic.height()),
+                            ));
+                        }
+                        Err(e) if e.is_again() => return Ok(()),
+                        Err(_) => return Err(G2gError::CapsMismatch),
+                    }
+                }
+            }
+
+            /// Push `frames` as caps-checked output at `timing`, the shared tail
+            /// of the per-unit decode and the EOS drain.
+            async fn emit(
+                &mut self,
+                frames: DecodedFrames,
+                timing: g2g_core::frame::FrameTiming,
+                out: &mut dyn OutputSink,
+            ) -> Result<(), G2gError> {
+                for (format, pixels, (w, h)) in frames {
+                    if self.out != Some((format, w, h)) {
+                        out.push(PipelinePacket::CapsChanged(self.output_caps(format, w, h)))
+                            .await?;
+                        self.out = Some((format, w, h));
+                    }
+                    let decoded = Frame::new(
+                        MemoryDomain::System(SystemSlice::from_boxed(pixels.into_boxed_slice())),
+                        timing,
+                        self.sequence,
+                    );
+                    self.sequence += 1;
+                    out.push(PipelinePacket::DataFrame(decoded)).await?;
+                }
+                Ok(())
             }
         }
 
@@ -225,26 +270,22 @@ macro_rules! av1_decoder {
                             let decoder = self.decoder.as_mut().ok_or(G2gError::NotConfigured)?;
                             let unit = slice.to_vec();
                             let frames = Self::feed(decoder, unit)?;
-                            for (format, pixels, (w, h)) in frames {
-                                if self.out != Some((format, w, h)) {
-                                    out.push(PipelinePacket::CapsChanged(
-                                        self.output_caps(format, w, h),
-                                    ))
-                                    .await?;
-                                    self.out = Some((format, w, h));
-                                }
-                                let decoded = Frame::new(
-                                    MemoryDomain::System(SystemSlice::from_boxed(
-                                        pixels.into_boxed_slice(),
-                                    )),
-                                    frame.timing,
-                                    self.sequence,
-                                );
-                                self.sequence += 1;
-                                out.push(PipelinePacket::DataFrame(decoded)).await?;
-                            }
+                            self.last_timing = frame.timing;
+                            self.emit(frames, frame.timing, out).await?;
                         }
                         PipelinePacket::CapsChanged(_) => {}
+                        PipelinePacket::Eos => {
+                            // A reordering stream holds its tail pictures back
+                            // (M1003): drain them before the sentinel, so the
+                            // last frames of the stream are not lost.
+                            if let Some(decoder) = self.decoder.as_mut() {
+                                let mut frames = DecodedFrames::new();
+                                Self::drain_ready(decoder, &mut frames)?;
+                                let timing = self.last_timing;
+                                self.emit(frames, timing, out).await?;
+                            }
+                            out.push(PipelinePacket::Eos).await?;
+                        }
                         other => {
                             out.push(other).await?;
                         }

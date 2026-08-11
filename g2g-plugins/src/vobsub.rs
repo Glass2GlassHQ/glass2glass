@@ -566,7 +566,7 @@ struct Nibbles<'a> {
 impl Nibbles<'_> {
     fn next(&mut self) -> Option<u32> {
         let byte = *self.data.get(self.at / 2)?;
-        let v = if self.at % 2 == 0 {
+        let v = if self.at.is_multiple_of(2) {
             byte >> 4
         } else {
             byte & 0x0f

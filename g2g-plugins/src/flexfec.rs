@@ -266,7 +266,7 @@ impl FlexFecEncoder {
     pub fn push(&mut self, media: &[u8]) -> Vec<Vec<u8>> {
         self.pending.push(media.to_vec());
         let mut out = Vec::new();
-        if self.pending.len() % self.group == 0 {
+        if self.pending.len().is_multiple_of(self.group) {
             let row = &self.pending[self.pending.len() - self.group..];
             let refs: Vec<&[u8]> = row.iter().map(|v| v.as_slice()).collect();
             out.extend(build_flexfec_packet(

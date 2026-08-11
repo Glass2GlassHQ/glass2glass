@@ -5,8 +5,6 @@
 
 #![cfg(feature = "udp-egress")]
 
-use core::future::Future;
-use core::pin::Pin;
 use std::net::UdpSocket as StdUdpSocket;
 
 use g2g_core::frame::Frame;
@@ -21,11 +19,13 @@ use g2g_plugins::udpsink::UdpSink;
 
 struct NullOut;
 impl OutputSink for NullOut {
-    fn push<'a>(
-        &'a mut self,
-        _p: PipelinePacket,
-    ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
-        Box::pin(async { Ok(PushOutcome::Accepted) })
+    fn poll_push(
+        &mut self,
+        _cx: &mut core::task::Context<'_>,
+        packet_slot: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        packet_slot.take();
+        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
     }
 }
 

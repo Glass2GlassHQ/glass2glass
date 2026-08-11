@@ -55,9 +55,9 @@ use vello::peniko::{Fill, FontData};
 use vello::Glyph;
 
 #[cfg(feature = "vello-text-overlay")]
-use crate::subparse::Cue;
+use crate::subparse::{Cue, TextShadow};
 #[cfg(feature = "vello-text-overlay")]
-use crate::textoverlay::TextOverlay;
+use crate::textoverlay::{PlacedGlyph, TextOverlay};
 #[cfg(feature = "vello-text-overlay")]
 use crate::textshape::FontId;
 
@@ -676,47 +676,115 @@ impl VelloTextOverlay {
         gpu.render_scene(&scene, w, h)
     }
 
-    /// Draw each active cue's backing box and glyphs, batching the glyphs into
-    /// runs of one face and one colour (a `::cue(.class)` span or a fallback
-    /// face starts a new run).
+    /// Draw each active cue's backing box, span fills, shadows and glyphs,
+    /// batching the glyphs into runs of one face, colour and size (a
+    /// `::cue(.class)` span or a fallback face starts a new run). Every shadow
+    /// is drawn before any glyph, so a neighbour's shadow never lands on top of
+    /// a glyph.
     fn draw_cues(&mut self, scene: &mut Scene, t_ns: u64) {
-        let px = self.text.ttf_px();
         let placed = self.text.place_shaped_cues(t_ns);
         for cue in placed {
             let (x, y, box_w, box_h) = cue.background;
             if box_w > 0 && box_h > 0 {
-                scene.fill(
-                    Fill::NonZero,
-                    Affine::IDENTITY,
-                    brush_color(cue.background_color),
-                    None,
-                    &Rect::new(x as f64, y as f64, (x + box_w) as f64, (y + box_h) as f64),
-                );
+                fill_rect(scene, (x, y, box_w, box_h), cue.background_color);
             }
-            let mut start = 0;
-            while start < cue.glyphs.len() {
-                let font_id = cue.glyphs[start].key.font_id;
-                let color = cue.glyphs[start].color;
-                let end = cue.glyphs[start..]
-                    .iter()
-                    .position(|g| g.key.font_id != font_id || g.color != color)
-                    .map_or(cue.glyphs.len(), |n| start + n);
-                let run = cue.glyphs[start..end].iter().map(|g| Glyph {
-                    id: g.key.glyph_id as u32,
-                    x: g.x as f32,
-                    y: g.y as f32,
-                });
-                if let Some(font) = font_handle(&mut self.fonts, &mut self.text, font_id) {
-                    scene
-                        .draw_glyphs(font)
-                        .font_size(px)
-                        .brush(brush_color(color))
-                        .draw(Fill::NonZero, run);
+            for (rect, color) in &cue.span_backgrounds {
+                fill_rect(scene, *rect, *color);
+            }
+            // Shadows first, then the glyphs over them.
+            for drawing_shadows in [true, false] {
+                let mut start = 0;
+                while start < cue.glyphs.len() {
+                    let head = &cue.glyphs[start];
+                    let (font_id, size, shadow) = (head.key.font_id, head.font_size, head.shadow);
+                    let color = head.color;
+                    let end = cue.glyphs[start..]
+                        .iter()
+                        .position(|g| {
+                            g.key.font_id != font_id
+                                || g.color != color
+                                || g.font_size != size
+                                || g.shadow != shadow
+                        })
+                        .map_or(cue.glyphs.len(), |n| start + n);
+                    let batch = &cue.glyphs[start..end];
+                    start = end;
+                    let (offset, brush) = match (drawing_shadows, shadow) {
+                        // Vello has no filter that blurs a glyph run, so a
+                        // blurred shadow goes down as one tinted mask image per
+                        // glyph, blurred by the same code as the CPU paths.
+                        (true, Some(shadow)) if shadow.blur > 0 => {
+                            for glyph in batch {
+                                draw_blurred_shadow(scene, &mut self.text, glyph, shadow);
+                            }
+                            continue;
+                        }
+                        (true, Some(shadow)) => (
+                            (shadow.offset_x as f32, shadow.offset_y as f32),
+                            shadow.color,
+                        ),
+                        (true, None) => continue,
+                        (false, _) => ((0.0, 0.0), color),
+                    };
+                    let run = batch.iter().map(|g| Glyph {
+                        id: g.key.glyph_id as u32,
+                        x: g.x as f32 + offset.0,
+                        y: g.y as f32 + offset.1,
+                    });
+                    if let Some(font) = font_handle(&mut self.fonts, &mut self.text, font_id) {
+                        scene
+                            .draw_glyphs(font)
+                            .font_size(size)
+                            .brush(brush_color(brush))
+                            .draw(Fill::NonZero, run);
+                    }
                 }
-                start = end;
             }
         }
     }
+}
+
+/// Draw one glyph's blurred drop shadow as an image: the blurred coverage mask
+/// tinted with the shadow colour, placed at the glyph's shadow offset.
+#[cfg(feature = "vello-text-overlay")]
+fn draw_blurred_shadow(
+    scene: &mut Scene,
+    text: &mut TextOverlay,
+    glyph: &PlacedGlyph,
+    shadow: TextShadow,
+) {
+    let Some(mask) = text.blurred_shadow_mask(glyph.key, shadow.blur) else {
+        return;
+    };
+    let [r, g, b, a] = shadow.color;
+    let mut data = Vec::with_capacity(mask.coverage.len() * 4);
+    for coverage in mask.coverage {
+        // Every sample carries the shadow colour, covered or not, so the sampler
+        // cannot blend a covered edge sample toward black.
+        data.extend_from_slice(&[r, g, b, (coverage as u32 * a as u32 / 255) as u8]);
+    }
+    let image = ImageData {
+        data: Blob::from(data),
+        format: ImageFormat::Rgba8,
+        alpha_type: ImageAlphaType::Alpha,
+        width: mask.width as u32,
+        height: mask.height as u32,
+    };
+    let x = glyph.x + shadow.offset_x + mask.left;
+    let y = glyph.y + shadow.offset_y + mask.top;
+    scene.draw_image(&image, Affine::translate((x as f64, y as f64)));
+}
+
+/// Fill one `(x, y, width, height)` rectangle in frame pixels.
+#[cfg(feature = "vello-text-overlay")]
+fn fill_rect(scene: &mut Scene, (x, y, w, h): (i32, i32, i32, i32), color: [u8; 4]) {
+    scene.fill(
+        Fill::NonZero,
+        Affine::IDENTITY,
+        brush_color(color),
+        None,
+        &Rect::new(x as f64, y as f64, (x + w) as f64, (y + h) as f64),
+    );
 }
 
 /// The Vello handle for the shaper face `id`, copying the face bytes into the
@@ -941,11 +1009,13 @@ mod tests {
         last: Option<Frame>,
     }
     impl OutputSink for FrameSink {
-        fn push<'a>(
-            &'a mut self,
-            packet: PipelinePacket,
-        ) -> Pin<Box<dyn Future<Output = Result<PushOutcome, G2gError>> + 'a>> {
-            Box::pin(async move {
+        fn poll_push(
+            &mut self,
+            _cx: &mut core::task::Context<'_>,
+            packet_slot: &mut Option<PipelinePacket>,
+        ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+            let packet = packet_slot.take().expect("poll_push without a packet");
+            core::task::Poll::Ready({
                 if let PipelinePacket::DataFrame(frame) = packet {
                     self.last = Some(frame);
                 }

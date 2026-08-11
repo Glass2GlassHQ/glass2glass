@@ -3,7 +3,7 @@
 //! recorded geometry during negotiation, and on Windows the full circle
 //! runs encode -> container -> demux -> decode through both real MFTs.
 
-use g2g_core::element::{AsyncElement, BoxFuture, OutputSink, PushOutcome};
+use g2g_core::element::{AsyncElement, OutputSink, PushOutcome};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::SourceLoop;
@@ -32,11 +32,13 @@ struct Collect {
 }
 
 impl OutputSink for Collect {
-    fn push<'a>(
-        &'a mut self,
-        packet: PipelinePacket,
-    ) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
-        Box::pin(async move {
+    fn poll_push(
+        &mut self,
+        _cx: &mut core::task::Context<'_>,
+        packet_slot: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        let packet = packet_slot.take().expect("poll_push without a packet");
+        core::task::Poll::Ready({
             self.packets.push(packet);
             Ok(PushOutcome::Accepted)
         })
@@ -83,11 +85,13 @@ struct Capture {
 }
 
 impl OutputSink for Capture {
-    fn push<'a>(
-        &'a mut self,
-        packet: PipelinePacket,
-    ) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
-        Box::pin(async move {
+    fn poll_push(
+        &mut self,
+        _cx: &mut core::task::Context<'_>,
+        packet_slot: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        let packet = packet_slot.take().expect("poll_push without a packet");
+        core::task::Poll::Ready({
             if let PipelinePacket::DataFrame(f) = packet {
                 if let Some(s) = f.domain.as_system_slice() {
                     self.bytes.extend_from_slice(s);
@@ -424,19 +428,22 @@ struct ScrubSink {
 }
 
 impl OutputSink for ScrubSink {
-    fn push<'a>(
-        &'a mut self,
-        packet: PipelinePacket,
-    ) -> BoxFuture<'a, Result<PushOutcome, G2gError>> {
-        Box::pin(async move {
-            if self.armed {
-                if let PipelinePacket::DataFrame(_) = &packet {
-                    self.ctl.seek(g2g_core::Seek::flush_to(self.target));
-                    self.armed = false;
-                }
+    fn begin_push(&mut self) {
+        self.inner.begin_push();
+    }
+
+    fn poll_push(
+        &mut self,
+        cx: &mut core::task::Context<'_>,
+        packet: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        if self.armed {
+            if let Some(PipelinePacket::DataFrame(_)) = packet.as_ref() {
+                self.ctl.seek(g2g_core::Seek::flush_to(self.target));
+                self.armed = false;
             }
-            self.inner.push(packet).await
-        })
+        }
+        self.inner.poll_push(cx, packet)
     }
 }
 

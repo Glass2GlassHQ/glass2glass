@@ -323,7 +323,7 @@ impl St2022FecEncoder {
             .unwrap_or(0);
         let mut out = Vec::new();
 
-        if self.rows && self.pending.len() % self.l == 0 {
+        if self.rows && self.pending.len().is_multiple_of(self.l) {
             let row: Vec<&[u8]> = self.pending[self.pending.len() - self.l..]
                 .iter()
                 .map(|v| v.as_slice())
