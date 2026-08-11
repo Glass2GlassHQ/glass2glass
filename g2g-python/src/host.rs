@@ -211,6 +211,9 @@ enum Staged {
         label: u32,
         score: f32,
     },
+    ClassNames {
+        names: Vec<String>,
+    },
     Blob {
         header: String,
         payload: Vec<u8>,
@@ -277,6 +280,13 @@ impl MetaSink {
     /// the record's handle.
     fn add_classification(&self, label: u32, score: f32) -> usize {
         self.stage(Staged::Classification { label, score })
+    }
+
+    /// Publish the class names the staged label ids index into, so a consumer
+    /// can show "person" rather than `0`. Names the element already holds, sent
+    /// once per frame rather than per detection.
+    fn set_class_names(&self, names: Vec<String>) {
+        self.stage(Staged::ClassNames { names });
     }
 
     /// Add a tracking identity that persists across frames. Returns the record's
@@ -946,6 +956,7 @@ fn attach_metadata(frame: &mut Frame, staged: Vec<Staged>, frame_w: u32, frame_h
                     Some(analytics.push(AnalyticsNode::Tracking(Tracking { object_id })));
             }
             Staged::Relation { from, to } => relations.push((from, to)),
+            Staged::ClassNames { names } => analytics.set_class_names(names),
             Staged::Blob { header, payload } => blobs.push(header, payload),
         }
     }

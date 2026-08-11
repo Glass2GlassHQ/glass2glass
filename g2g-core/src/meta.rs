@@ -524,11 +524,33 @@ mod on {
     pub struct AnalyticsMeta {
         pub nodes: Vec<AnalyticsNode>,
         pub relations: Vec<Relation>,
+        /// Class names indexed by a node's `label`, so a consumer can show
+        /// "person" rather than `12`. Shared rather than stored per node: the
+        /// names repeat on every detection of every frame, and a node stays
+        /// `Copy`. `None` means the producer published no table.
+        pub class_names: Option<Arc<[Box<str>]>>,
     }
 
     impl AnalyticsMeta {
         pub fn new() -> Self {
             Self::default()
+        }
+
+        /// Set the class-name table, indexed by label id.
+        pub fn set_class_names<I, S>(&mut self, names: I)
+        where
+            I: IntoIterator<Item = S>,
+            S: Into<Box<str>>,
+        {
+            self.class_names = Some(names.into_iter().map(Into::into).collect());
+        }
+
+        /// The name for a label id. `None` with no table, or for an id past its
+        /// end: that means the table and the producer disagree, and showing a
+        /// neighbour's name would be worse than showing none.
+        pub fn class_name(&self, label: u32) -> Option<&str> {
+            let names = self.class_names.as_ref()?;
+            names.get(label as usize).map(|name| &**name)
         }
 
         /// Append a node, returning its index (used to wire relations).
@@ -1179,6 +1201,23 @@ mod tests {
                 kind: RelationKind::Classifies
             }
         );
+    }
+
+    #[test]
+    fn class_names_name_a_label_and_refuse_an_unknown_one() {
+        let mut m = AnalyticsMeta::new();
+        m.add_detection(det(0.1, 0.1, 0.2, 0.2, 1, 0.9));
+        assert_eq!(m.class_name(1), None, "no table yet");
+
+        m.set_class_names(["person", "bicycle"]);
+        assert_eq!(m.class_name(0), Some("person"));
+        assert_eq!(m.class_name(1), Some("bicycle"));
+        // An id the table does not cover means producer and table disagree, so
+        // it reads as unnamed rather than borrowing a neighbour's name.
+        assert_eq!(m.class_name(2), None);
+
+        // The table survives the clone a fan-out branch takes.
+        assert_eq!(m.clone().class_name(0), Some("person"));
     }
 
     #[test]
