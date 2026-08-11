@@ -13,9 +13,10 @@ use core::future::Future;
 use core::pin::Pin;
 
 use g2g_core::bus::{Bus, BusMessage};
+use g2g_core::clock::{ClockCandidate, ClockPriority};
 use g2g_core::runtime::{
-    block_on, parse_launch, parse_launch_avoiding, run_graph_with_bus, ElementFactory,
-    LaunchFactory, Registry, SourceFactory, SourceLoop,
+    block_on, fallback_factory, has_live_source, parse_launch, parse_launch_avoiding,
+    run_graph_with_bus, ElementFactory, LaunchFactory, Registry, SourceFactory, SourceLoop,
 };
 use g2g_core::{
     AsyncElement, Caps, CapsSet, ConfigureOutcome, Dim, G2gError, Interlace, OutputSink,
@@ -280,4 +281,94 @@ fn an_instance_name_maps_back_to_the_factory_that_built_it() {
     );
     assert_eq!(registry.factory_of_instance("NoSuchElement3"), None);
     assert_eq!(registry.factory_of_instance("7"), None);
+}
+
+/// A source that offers a live clock, the way a capture or network source does.
+struct LiveSource;
+
+impl SourceLoop for LiveSource {
+    type RunFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
+    where
+        Self: 'a;
+    type CapsFuture<'a>
+        = core::future::Ready<Result<Caps, G2gError>>
+    where
+        Self: 'a;
+
+    fn intercept_caps(&mut self) -> Self::CapsFuture<'_> {
+        core::future::ready(Ok(h264()))
+    }
+
+    fn configure_pipeline(&mut self, _caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        Ok(ConfigureOutcome::Accepted)
+    }
+
+    fn provide_clock(&self) -> Option<ClockCandidate> {
+        Some(ClockCandidate::new(
+            ClockPriority::LiveSource,
+            alloc_zero_clock(),
+        ))
+    }
+
+    fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a> {
+        Box::pin(async move {
+            out.push(PipelinePacket::Eos).await?;
+            Ok(0)
+        })
+    }
+}
+
+fn alloc_zero_clock() -> std::sync::Arc<dyn g2g_core::PipelineClock + Send + Sync> {
+    std::sync::Arc::new(ZeroClock)
+}
+
+#[test]
+fn only_an_auto_plugged_factory_is_ruled_out() {
+    let registry = registry();
+    // The element the bus named, mapped back and cleared for replacement.
+    assert_eq!(
+        fallback_factory(&registry, PIPELINE, "StubDecoder0", &[]),
+        Some("refusingdec")
+    );
+    // Named on the line: the user asked for that element, so it is not swapped.
+    assert_eq!(
+        fallback_factory(
+            &registry,
+            "h264src ! refusingdec ! countsink",
+            "StubDecoder0",
+            &[]
+        ),
+        None
+    );
+    // Already tried: a second failure is not a plug problem.
+    assert_eq!(
+        fallback_factory(&registry, PIPELINE, "StubDecoder0", &["refusingdec"]),
+        None
+    );
+    // An element no factory in this registry builds.
+    assert_eq!(
+        fallback_factory(&registry, PIPELINE, "SomeOtherElement2", &[]),
+        None
+    );
+}
+
+#[test]
+fn a_live_source_is_recognised_before_a_restart() {
+    let mut registry = registry();
+    registry.register_source(SourceFactory::new("livesrc", h264(), || {
+        Box::new(LiveSource)
+    }));
+
+    let pull = parse_launch(&registry, PIPELINE).expect("parses");
+    assert!(
+        !has_live_source(&pull),
+        "a file-shaped source restarts for free"
+    );
+
+    let live = parse_launch(&registry, "livesrc ! decodebin ! countsink").expect("parses");
+    assert!(
+        has_live_source(&live),
+        "a source offering a live clock must not be silently reopened"
+    );
 }

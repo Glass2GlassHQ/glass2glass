@@ -1542,6 +1542,49 @@ pub fn parse_launch_avoiding(
     ))
 }
 
+/// The factory to bar from the auto-plug search after a run ended in
+/// `failed_element`, or `None` when re-plugging cannot help (M1023). Pass the
+/// result to [`parse_launch_avoiding`] (accumulating it into `avoided`) and run
+/// the line again; `None` means report the failure instead.
+///
+/// The caller owns the rest of the policy, because only it knows whether a
+/// restart is safe: retry only while nothing has been presented (a run that
+/// output nothing restarts invisibly, one that did not would repeat itself) and
+/// not for a live source ([`has_live_source`], where a restart reopens the
+/// connection and drops what was in flight).
+///
+/// `None` when the failing element is unknown to the registry, when the line
+/// names it explicitly (the user asked for that element by name, so substituting
+/// another would defy them), or when it has already been barred once.
+pub fn fallback_factory(
+    registry: &Registry,
+    pipeline: &str,
+    failed_element: &str,
+    avoided: &[&str],
+) -> Option<&'static str> {
+    let factory = registry.factory_of_instance(failed_element)?;
+    if avoided.contains(&factory) {
+        return None;
+    }
+    let named_in_line = tokenize(pipeline).iter().any(|t| t == factory);
+    (!named_in_line).then_some(factory)
+}
+
+/// Whether any element in `graph` offers a live-source clock: a capture or
+/// network source, which a restart would reopen at the cost of whatever was in
+/// flight. The signal a caller checks before re-running a pipeline it has already
+/// started (see [`fallback_factory`]).
+pub fn has_live_source(graph: &Graph<GraphNode>) -> bool {
+    (0..graph.node_count())
+        .filter_map(|i| graph.element(NodeId(i as u32)))
+        .filter_map(|node| match node {
+            GraphNodeRef::Source(source) => source.provide_clock(),
+            GraphNodeRef::Element(element) => element.provide_clock(),
+            _ => None,
+        })
+        .any(|candidate| candidate.priority == crate::clock::ClockPriority::LiveSource)
+}
+
 /// Splice memory-domain converters into a just-parsed graph (M1017), where the
 /// registry carries a factory: a text pipeline that links a GPU decoder to a sink
 /// in another domain gets the bridge (or the download) it needs without naming

@@ -68,16 +68,15 @@ use std::process;
 use std::time::{Duration, Instant};
 
 use g2g_core::runtime::{
-    parse_launch, run_graph_recorded, run_graph_with_progress, FlightRecorder, GraphNode,
-    PipelineProgress, Registry,
+    fallback_factory, has_live_source, parse_launch, parse_launch_avoiding, run_graph_recorded,
+    run_graph_with_progress, FlightRecorder, GraphNode, PipelineProgress, Registry,
 };
 #[cfg(any(feature = "observe", feature = "tui"))]
 use g2g_core::runtime::{run_graph_observed, run_graph_observed_recorded, Observer};
 #[cfg(feature = "multi-thread")]
 use g2g_core::runtime::{run_graph_threaded_recorded, run_graph_threaded_with_progress};
-#[cfg(feature = "observe")]
-use g2g_core::Bus;
 use g2g_core::Graph;
+use g2g_core::{Bus, BusMessage};
 use g2g_plugins::clock::WallClock;
 use g2g_plugins::registry::default_registry;
 #[cfg(feature = "multi-thread")]
@@ -87,6 +86,10 @@ use g2g_plugins::TokioThreadSpawner;
 // keep latency low without starving the source (see DESIGN notes on
 // link_capacity dominating glass-to-glass latency).
 const LINK_CAPACITY: usize = 4;
+
+/// Bus depth for a run: only the tail matters here (the message naming what
+/// ended the run), and a slow reader must not stall an element posting one.
+const BUS_DEPTH: usize = 64;
 
 /// A boxed pipeline run, so the runner entry a flag selects (recorded or not,
 /// cooperative or thread-per-arm) is one type the driving loop can hold.
@@ -659,104 +662,153 @@ fn main() {
     if !opts.quiet {
         println!("Setting pipeline to PLAYING ...");
     }
-    let clock = WallClock::new();
-    let progress = PipelineProgress::new();
-    // Only built for `--record-on-error`: without it no ring is attached to any
-    // link and the run costs exactly what it did before.
-    let recorder = opts.record_on_error.as_ref().map(|_| FlightRecorder::new());
-    let started = Instant::now();
-    // Poll the run future with a 1s timeout so a long-running (e.g. forever, the
-    // default `videotestsrc`) pipeline prints a liveness heartbeat instead of
-    // looking hung. `timeout` only needs tokio's `time` feature (no `select!`
-    // macro). A short pipeline finishes inside the first tick, so it stays quiet.
-    let mut printed_status = false;
-    let result = rt.block_on(async {
-        // `--threads` runs one OS thread per arm (opt-in multicore); the default
-        // is the cooperative single-thread runner. Both return the same
-        // `Result<RunStats, _>`, boxed to one type so the heartbeat loop is shared.
-        let mut run: RunFuture = if opts.threads {
-            #[cfg(feature = "multi-thread")]
-            {
-                match &recorder {
-                    Some(rec) => Box::pin(run_graph_threaded_recorded(
-                        graph,
-                        &clock,
-                        LINK_CAPACITY,
-                        Some(&progress),
-                        rec,
-                        &TokioThreadSpawner,
-                    )),
-                    None => Box::pin(run_graph_threaded_with_progress(
-                        graph,
-                        &clock,
-                        LINK_CAPACITY,
-                        &progress,
-                        &TokioThreadSpawner,
-                    )),
+    // The auto-plug fallback (M1023). A decoder the search picked can turn out
+    // not to decode this stream, and the run dies where another decoder would
+    // have played it. Retrying means restarting the pipeline, which is only
+    // invisible while nothing has been presented, so the loop below re-plugs on
+    // exactly that condition and reports the failure otherwise. A text pipeline
+    // only: a `--graph` / `--script` file names its elements, so there is nothing
+    // to choose differently.
+    let mut avoided: Vec<&'static str> = Vec::new();
+    let mut graph = graph;
+    loop {
+        let clock = WallClock::new();
+        let progress = PipelineProgress::new();
+        let (bus, bus_handle) = Bus::new(BUS_DEPTH);
+        // Only built for `--record-on-error`: without it no ring is attached to any
+        // link and the run costs exactly what it did before.
+        let recorder = opts.record_on_error.as_ref().map(|_| FlightRecorder::new());
+        let live = has_live_source(&graph);
+        let started = Instant::now();
+        // Poll the run future with a 1s timeout so a long-running (e.g. forever, the
+        // default `videotestsrc`) pipeline prints a liveness heartbeat instead of
+        // looking hung. `timeout` only needs tokio's `time` feature (no `select!`
+        // macro). A short pipeline finishes inside the first tick, so it stays quiet.
+        let mut printed_status = false;
+        let result = rt.block_on(async {
+            // `--threads` runs one OS thread per arm (opt-in multicore); the default
+            // is the cooperative single-thread runner. Both return the same
+            // `Result<RunStats, _>`, boxed to one type so the heartbeat loop is shared.
+            let mut run: RunFuture = if opts.threads {
+                #[cfg(feature = "multi-thread")]
+                {
+                    match &recorder {
+                        Some(rec) => Box::pin(run_graph_threaded_recorded(
+                            graph,
+                            &clock,
+                            LINK_CAPACITY,
+                            Some(&progress),
+                            Some(&bus_handle),
+                            rec,
+                            &TokioThreadSpawner,
+                        )),
+                        None => Box::pin(run_graph_threaded_with_progress(
+                            graph,
+                            &clock,
+                            LINK_CAPACITY,
+                            &progress,
+                            Some(&bus_handle),
+                            &TokioThreadSpawner,
+                        )),
+                    }
                 }
-            }
-            #[cfg(not(feature = "multi-thread"))]
-            {
-                let _ = graph;
-                eprintln!(
-                    "pipeline error: --threads requires a multi-thread build \
+                #[cfg(not(feature = "multi-thread"))]
+                {
+                    let _ = graph;
+                    eprintln!(
+                        "pipeline error: --threads requires a multi-thread build \
                      (rebuild with --features multi-thread)"
-                );
-                process::exit(1);
-            }
-        } else if let Some(rec) = &recorder {
-            Box::pin(run_graph_recorded(
-                graph,
-                &clock,
-                LINK_CAPACITY,
-                Some(&progress),
-                rec,
-            ))
-        } else {
-            Box::pin(run_graph_with_progress(
-                graph,
-                &clock,
-                LINK_CAPACITY,
-                &progress,
-            ))
-        };
-        loop {
-            match tokio::time::timeout(Duration::from_secs(1), &mut run).await {
-                Ok(r) => break r,
-                Err(_elapsed) => {
-                    if !opts.quiet {
-                        let pos = match progress.position() {
-                            Some(ns) => format!("t={:.1}s", ns as f64 / 1.0e9),
-                            None => String::from("prerolling"),
-                        };
-                        eprint!(
-                            "\r  running... {pos} ({:.0}s wall)   ",
-                            started.elapsed().as_secs_f64()
-                        );
-                        let _ = std::io::stderr().flush();
-                        printed_status = true;
+                    );
+                    process::exit(1);
+                }
+            } else if let Some(rec) = &recorder {
+                Box::pin(run_graph_recorded(
+                    graph,
+                    &clock,
+                    LINK_CAPACITY,
+                    Some(&progress),
+                    Some(&bus_handle),
+                    rec,
+                ))
+            } else {
+                Box::pin(run_graph_with_progress(
+                    graph,
+                    &clock,
+                    LINK_CAPACITY,
+                    &progress,
+                    Some(&bus_handle),
+                ))
+            };
+            loop {
+                match tokio::time::timeout(Duration::from_secs(1), &mut run).await {
+                    Ok(r) => break r,
+                    Err(_elapsed) => {
+                        if !opts.quiet {
+                            let pos = match progress.position() {
+                                Some(ns) => format!("t={:.1}s", ns as f64 / 1.0e9),
+                                None => String::from("prerolling"),
+                            };
+                            eprint!(
+                                "\r  running... {pos} ({:.0}s wall)   ",
+                                started.elapsed().as_secs_f64()
+                            );
+                            let _ = std::io::stderr().flush();
+                            printed_status = true;
+                        }
                     }
                 }
             }
+        });
+        if printed_status {
+            eprintln!(); // move off the \r status line before the summary
         }
-    });
-    if printed_status {
-        eprintln!(); // move off the \r status line before the summary
-    }
-    match result {
-        Ok(stats) => {
-            if !opts.quiet {
-                print_run_summary(&stats, started.elapsed().as_secs_f64());
+        match result {
+            Ok(stats) => {
+                if !opts.quiet {
+                    print_run_summary(&stats, started.elapsed().as_secs_f64());
+                }
+                return;
+            }
+            Err(err) => {
+                // Re-plug around the element that failed, when the run is one a
+                // restart can repeat: nothing presented, a pull source, and a text
+                // pipeline that did not name the element itself.
+                let replug = (!use_file && !live && progress.position().is_none())
+                    .then(|| failed_element(&bus))
+                    .flatten()
+                    .and_then(|failed| fallback_factory(&reg, &pipeline, &failed, &avoided));
+                if let Some(factory) = replug {
+                    avoided.push(factory);
+                    // A parse error here means nothing is left to plug in its
+                    // place, so the original failure is what gets reported.
+                    if let Ok(next) = parse_launch_avoiding(&reg, &pipeline, &avoided) {
+                        eprintln!(
+                            "{factory} could not decode this stream ({err:?}), retrying without it"
+                        );
+                        graph = next;
+                        continue;
+                    }
+                }
+                eprintln!("pipeline error: {err:?}");
+                if let (Some(rec), Some(dir)) = (&recorder, &opts.record_on_error) {
+                    dump_flight_recording(rec, dir);
+                }
+                process::exit(1);
             }
         }
-        Err(err) => {
-            eprintln!("pipeline error: {err:?}");
-            if let (Some(rec), Some(dir)) = (&recorder, &opts.record_on_error) {
-                dump_flight_recording(rec, dir);
-            }
-            process::exit(1);
+    }
+}
+
+/// The element the bus named as having ended the run, if it named one. Drains
+/// what is left on the bus, which nothing else reads on this path.
+fn failed_element(bus: &Bus) -> Option<String> {
+    let mut failed = None;
+    while let Some(message) = bus.try_recv() {
+        if let BusMessage::ElementError { element, .. } = message {
+            failed = Some(element);
         }
     }
+    failed
 }
 
 /// Write the flight recorder's per-link rings into the `--record-on-error`

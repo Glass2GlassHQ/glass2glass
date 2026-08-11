@@ -108,6 +108,9 @@ pub fn event_json(msg: &BusMessage) -> Option<String> {
         BusMessage::Eos => json!({"kind": "eos"}),
         BusMessage::Info(s) => json!({"kind": "info", "text": s}),
         BusMessage::Error(e) => json!({"kind": "error", "text": format!("{e:?}")}),
+        BusMessage::ElementError { element, error } => {
+            json!({"kind": "error", "element": element, "text": format!("{error:?}")})
+        }
         BusMessage::Warning(e) => json!({"kind": "warning", "text": format!("{e:?}")}),
         BusMessage::NegotiationFailed(f) => {
             json!({"kind": "negotiation-failed", "text": format!("{f:?}")})

@@ -906,6 +906,17 @@ forwarded in-band ahead of the first frame as decoder extradata).
   auto-plug search is bounded: an element the line names explicitly is still
   built, since the user asked for it by name.
 
+  The policy sits with the caller, because only it knows whether restarting is
+  safe: g2g has no dynamic re-plugging, so trying the next decoder means running
+  the pipeline again, which is invisible only if the first attempt presented
+  nothing. `g2g-launch` retries while `PipelineProgress::position()` is still
+  `None` (no buffer has reached a sink) and `has_live_source` is false (a live
+  source would be reopened, losing what was in flight), looping until a run
+  succeeds or no candidate is left, and naming on stderr what it dropped and why.
+  `fallback_factory` is the decision: it maps the failing instance to its factory
+  and returns `None` when the line named that element itself, when it has already
+  been barred, or when no factory owns it.
+
 #### 4.13.10 Current limits
 
 The solver is **arc consistency** (constraint propagation over per-link caps),

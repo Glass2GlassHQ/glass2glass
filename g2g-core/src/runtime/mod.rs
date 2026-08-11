@@ -152,4 +152,6 @@ pub use autoplug::{
 };
 
 #[cfg(feature = "std")]
-pub use launch::{parse_launch, parse_launch_avoiding, ParseError};
+pub use launch::{
+    fallback_factory, has_live_source, parse_launch, parse_launch_avoiding, ParseError,
+};

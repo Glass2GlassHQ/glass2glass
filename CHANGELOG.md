@@ -6,7 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
-- M1023: a decoder that refuses a stream can be auto-plugged around: the runner names the failing element on the bus, and a launch line re-parses without that factory.
+- M1023: `g2g-launch` retries a launch line without the decoder that refused the stream, while nothing has been presented and the source is not live; the runner names the failing element on the bus. Breaking: `run_graph_with_progress` / `run_graph_recorded` and their threaded siblings take a bus.
 - M1022: the H.264 decoder honours a stream's own reference marking instead of always sliding-window, and a decode the GPU refuses says what it refused.
 - M1021: a windowed `wgpusink` presents on the device the GPU decoder upstream opened, so `decodebin ! wgpusink` reaches the screen with no copy and no application code.
 - M1018: a launch line's `decodebin` reads the memory its consumer takes, so a GPU sink gets a decoder that decodes into that memory instead of one whose frames need a download.

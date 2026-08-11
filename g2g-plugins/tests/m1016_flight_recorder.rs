@@ -220,7 +220,7 @@ async fn run_failing(plan: SourcePlan, failing_frame: u64, recorder: &FlightReco
     let src = g.add_source(GraphNodeRef::source(CountingSource { plan }));
     let sink = g.add_sink(GraphNodeRef::element(FailingSink { failing_frame }));
     g.link(src, sink).expect("linked");
-    let err = run_graph_recorded(g, &ZeroClock, LINK_CAPACITY, None, recorder)
+    let err = run_graph_recorded(g, &ZeroClock, LINK_CAPACITY, None, None, recorder)
         .await
         .expect_err("the sink fails the run");
     assert_eq!(err, failure(), "the sink's failure, not a recording error");
@@ -234,10 +234,17 @@ async fn run_failing_threaded(plan: SourcePlan, failing_frame: u64, recorder: &F
     let src = g.add_source(GraphNode::source(CountingSource { plan }));
     let sink = g.add_sink(GraphNode::element(FailingSink { failing_frame }));
     g.link(src, sink).expect("linked");
-    let err =
-        run_graph_threaded_recorded(g, &ZeroClock, LINK_CAPACITY, None, recorder, &ThreadSpawner)
-            .await
-            .expect_err("the sink fails the run");
+    let err = run_graph_threaded_recorded(
+        g,
+        &ZeroClock,
+        LINK_CAPACITY,
+        None,
+        None,
+        recorder,
+        &ThreadSpawner,
+    )
+    .await
+    .expect_err("the sink fails the run");
     assert_eq!(err, failure(), "the sink's failure, not a recording error");
 }
 
@@ -513,7 +520,7 @@ async fn an_unrecorded_run_attaches_no_rings() {
     let sink = g.add_sink(GraphNodeRef::element(FailingSink { failing_frame: 6 }));
     g.link(src, sink).expect("linked");
     let progress = PipelineProgress::new();
-    let err = run_graph_with_progress(g, &ZeroClock, LINK_CAPACITY, &progress)
+    let err = run_graph_with_progress(g, &ZeroClock, LINK_CAPACITY, &progress, None)
         .await
         .expect_err("the sink fails the run");
     assert_eq!(err, failure());

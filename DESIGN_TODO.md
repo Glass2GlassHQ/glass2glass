@@ -261,12 +261,15 @@ Phased plan:
   Vulkan Video path refuses. Next step is validation-layer output, which needs
   `vulkan-validation-layers` installed on the test host.
 
-- **Wire the decoder fallback into `g2g-launch`.** The mechanism landed (M1023:
-  `BusMessage::ElementError` names the failing element, `Registry::factory_of_instance`
-  maps it back to its factory, `parse_launch_avoiding` re-plugs the line without
-  it). What is left is the CLI policy: the default run path attaches no bus, so
-  `g2g-launch` cannot see the name, and the retry (re-parse, re-run once, only
-  when nothing has been presented yet) is not written.
+- **An auto-plugged CPU decoder does not fit a GPU sink.** `decodebin ! wgpusink`
+  picks `ffmpegdec`'s first raw output (I420) where the sink takes only NV12 /
+  RGBA, so the line fails to negotiate and needs an explicit `videoconvert`;
+  naming `ffmpegdec` by hand fails the same way, so this predates the fallback
+  that now lands there. The decodebin expansion already reads the consumer for its
+  memory domain (M1018) and could steer the decoder's output format the same way,
+  which is what `Registry::decodebin` does on the graph path (M414). The text path
+  builds by name through a parameterless launch factory, so the chosen output caps
+  never reach the element: it needs a property assignment, not a different search.
 
 ## CUDA / display
 
