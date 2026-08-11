@@ -912,12 +912,14 @@ impl AsyncElement for NvDec {
         Ok(ConfigureOutcome::Accepted)
     }
 
-    /// NVDEC emits NV12 in CUDA device memory (the zero-copy hwframe domain),
-    /// so a downstream link from this element is a GPU link (M285). This is the
-    /// *preferred* domain; [`output_domains`](Self::output_domains) widens it to
-    /// the full set the decoder can satisfy.
+    /// The domain this decoder emits into: CUDA device memory (the zero-copy
+    /// hwframe domain, and the default) until the allocation cascade settles it
+    /// on System for a host-memory consumer. Reporting the settled domain rather
+    /// than the default is what keeps a graph dump honest about which links are
+    /// GPU links (M285). [`output_domains`](Self::output_domains) is the full set
+    /// it can satisfy.
     fn output_memory(&self) -> g2g_core::memory::MemoryDomainKind {
-        g2g_core::memory::MemoryDomainKind::Cuda
+        self.out_domain
     }
 
     /// M352: the decoder can keep frames on the GPU *or* download them to System,

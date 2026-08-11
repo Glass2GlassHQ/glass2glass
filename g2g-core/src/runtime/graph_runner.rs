@@ -1417,107 +1417,7 @@ async fn prepare_graph<'a>(
     // edge (the boundary now crosses at startup). The source's absorbed proposal
     // is the reported `allocation`. For a linear chain this is byte-for-byte the
     // linear runner's sink->source fold.
-    let nee = vg.edge_count();
-    let mut edge_proposal: Vec<Option<AllocationParams>> = (0..nee).map(|_| None).collect();
-    let mut allocation: Option<AllocationParams> = None;
-    for &node in topo.iter().rev() {
-        match vg.kind(node) {
-            NodeKind::Sink => {
-                let in_e = vg.in_edges(node)[0];
-                let caps = solution[in_e].clone();
-                edge_proposal[in_e] = element_propose(vg, node, &caps, MetaRequests::new());
-            }
-            NodeKind::Transform => {
-                let in_e = vg.in_edges(node)[0];
-                let out_e = vg.out_edges(node)[0];
-                // A transform is a memory-domain pass-through here: it forwards the
-                // downstream proposal to its own pool and re-proposes upstream
-                // unchanged. Domain capability is enforced at the buffer-pool
-                // origin (the source) and at the sibling join (the tee), not at
-                // every hop, so a GPU proposal merely passing through a plain
-                // transform is not rejected against its System default (M351).
-                if let Some(p) = edge_proposal[out_e] {
-                    element_configure_alloc(vg, node, &p);
-                }
-                let caps = solution[out_e].clone();
-                let downstream = edge_meta_requests(edge_proposal[out_e]);
-                edge_proposal[in_e] = element_propose(vg, node, &caps, downstream);
-            }
-            NodeKind::Tee(_) => {
-                let in_e = vg.in_edges(node)[0];
-                // The first branch seeds the join: a `None` from there on means a
-                // branch that asked for nothing, which is not the same as no
-                // branch yet (it vetoes a demand needing every consumer).
-                let mut joined: Option<AllocationParams> = None;
-                for (i, &oe) in vg.out_edges(node).iter().enumerate() {
-                    joined = match i {
-                        0 => edge_proposal[oe],
-                        _ => join_alloc(joined, edge_proposal[oe])?,
-                    };
-                }
-                edge_proposal[in_e] = joined;
-            }
-            NodeKind::Source => {
-                let out_e = vg.out_edges(node)[0];
-                if let Some(p) = edge_proposal[out_e] {
-                    // M351: reconcile against the source's emittable domains, the
-                    // upstream end of the two-sided negotiation. The reconciled
-                    // proposal is what the source allocates and what `RunStats`
-                    // reports.
-                    let can = node_output_domains(vg, node);
-                    // A proposal carrying only metadata demand accepts every
-                    // domain, so reconciling it would let a metadata request pick
-                    // the source's memory domain: pass it through untouched.
-                    let resolved = match p.constrains_pool() {
-                        true => p.resolve_for_producer(can)?,
-                        false => p,
-                    };
-                    if let GraphNodeRef::Source(src) =
-                        vg.element_mut(node).ok_or(G2gError::CapsMismatch)?
-                    {
-                        src.configure_allocation(&resolved);
-                    }
-                    allocation = Some(resolved);
-                }
-            }
-            // A terminal fan-out source exposes no allocation hook (its
-            // outputs are network-generated System bytes).
-            NodeKind::FanoutSrc(_) => {}
-            NodeKind::Muxer(_) | NodeKind::FaninSink(_) => {
-                // A muxer / terminal fan-in asks each input pad for the allocation
-                // it wants (most are content-agnostic and propose nothing), storing
-                // it on that input edge so the demand crosses the boundary and
-                // re-cascades up the branch like any other downstream proposal. The
-                // muxer's own output edge proposal is not absorbed here: a container
-                // muxer's byte output has no memory-domain tie to its inputs, and a
-                // terminal fan-in has no output at all.
-                //
-                // M976: downstream *metadata* demand does cross the output, on its
-                // own, because it describes the frames the fan-in writes (a GPU
-                // compositor deciding whether to declare its row padding). Nothing
-                // is called when no demand was declared.
-                let out_demand = vg
-                    .out_edges(node)
-                    .first()
-                    .map(|&out_e| edge_meta_requests(edge_proposal[out_e]))
-                    .unwrap_or_default();
-                if !out_demand.is_empty() {
-                    if let Some(GraphNodeRef::Muxer(mux)) = vg.element_mut(node) {
-                        mux.configure_allocation_for_output(&AllocationParams::meta_demand(
-                            out_demand,
-                        ));
-                    }
-                }
-                if let Some(GraphNodeRef::Muxer(mux)) = vg.element(node) {
-                    for &in_e in vg.in_edges(node) {
-                        let pad = vg.edge(in_e).dst.index as usize;
-                        let caps = solution[in_e].clone();
-                        edge_proposal[in_e] = mux.propose_allocation_for_input(pad, &caps);
-                    }
-                }
-            }
-        }
-    }
+    let allocation = cascade_allocation(vg, topo, &solution)?;
 
     // Latency fold + clock election over every element node (tee is structural;
     // a muxer contributes neither, like the fan-in runner).
@@ -2989,6 +2889,13 @@ pub async fn negotiate_graph_explained<'a>(
         .map_err(NegotiateError::Solve)?
     };
 
+    // Phase 3.5's allocation cascade, run for its effect on the elements: it is
+    // what settles a multi-domain producer (a decoder that can keep frames on
+    // the GPU or download them) on the domain its consumer asked for. Reading
+    // `output_memory` without it reports every producer's default preference, so
+    // the dump would call a downloading link a GPU link.
+    cascade_allocation(&mut vg, &topo, &solution).map_err(NegotiateError::Setup)?;
+
     // Per-edge memory domain: the domain of the node producing onto that edge.
     let edge_memory: Vec<crate::memory::MemoryDomainKind> = (0..vg.edge_count())
         .map(|id| {
@@ -3039,6 +2946,128 @@ pub fn copy_plan(
     crate::copyplan::CopyPlan::analyze(&nodes, &edges)
 }
 
+/// Run the allocation cascade over a solved graph, in reverse topo order: each
+/// element absorbs the proposal arriving on its output edge(s)
+/// (`configure_allocation`), then proposes from its output-link caps, and the
+/// proposal is stored on its input edge(s) for its upstream to absorb. A tee
+/// joins its branch proposals (most-restrictive intersection, loud failure on a
+/// domain conflict) onto its single input; a muxer proposes its own per-pad
+/// demand onto each input edge. For a linear chain this is byte-for-byte the
+/// linear runner's sink->source fold.
+///
+/// Returns the source's absorbed proposal (what the runner reports as its
+/// `allocation`). Shared with [`negotiate_graph`], which runs it
+/// purely to settle each element's domain so a graph dump reports the negotiated
+/// memory domain rather than every producer's default preference.
+fn cascade_allocation(
+    vg: &mut ValidatedGraph<GraphNodeRef<'_>>,
+    topo: &[NodeId],
+    solution: &[Caps],
+) -> Result<Option<AllocationParams>, G2gError> {
+    let nee = vg.edge_count();
+    let mut edge_proposal: Vec<Option<AllocationParams>> = (0..nee).map(|_| None).collect();
+    let mut allocation: Option<AllocationParams> = None;
+    for &node in topo.iter().rev() {
+        match vg.kind(node) {
+            NodeKind::Sink => {
+                let in_e = vg.in_edges(node)[0];
+                let caps = solution[in_e].clone();
+                edge_proposal[in_e] = element_propose(vg, node, &caps, MetaRequests::new());
+            }
+            NodeKind::Transform => {
+                let in_e = vg.in_edges(node)[0];
+                let out_e = vg.out_edges(node)[0];
+                // A transform is a memory-domain pass-through here: it forwards the
+                // downstream proposal to its own pool and re-proposes upstream
+                // unchanged. Domain capability is enforced at the buffer-pool
+                // origin (the source) and at the sibling join (the tee), not at
+                // every hop, so a GPU proposal merely passing through a plain
+                // transform is not rejected against its System default (M351).
+                if let Some(p) = edge_proposal[out_e] {
+                    element_configure_alloc(vg, node, &p);
+                }
+                let caps = solution[out_e].clone();
+                let downstream = edge_meta_requests(edge_proposal[out_e]);
+                edge_proposal[in_e] = element_propose(vg, node, &caps, downstream);
+            }
+            NodeKind::Tee(_) => {
+                let in_e = vg.in_edges(node)[0];
+                // The first branch seeds the join: a `None` from there on means a
+                // branch that asked for nothing, which is not the same as no
+                // branch yet (it vetoes a demand needing every consumer).
+                let mut joined: Option<AllocationParams> = None;
+                for (i, &oe) in vg.out_edges(node).iter().enumerate() {
+                    joined = match i {
+                        0 => edge_proposal[oe],
+                        _ => join_alloc(joined, edge_proposal[oe])?,
+                    };
+                }
+                edge_proposal[in_e] = joined;
+            }
+            NodeKind::Source => {
+                let out_e = vg.out_edges(node)[0];
+                if let Some(p) = edge_proposal[out_e] {
+                    // M351: reconcile against the source's emittable domains, the
+                    // upstream end of the two-sided negotiation. The reconciled
+                    // proposal is what the source allocates and what `RunStats`
+                    // reports.
+                    let can = node_output_domains(vg, node);
+                    // A proposal carrying only metadata demand accepts every
+                    // domain, so reconciling it would let a metadata request pick
+                    // the source's memory domain: pass it through untouched.
+                    let resolved = match p.constrains_pool() {
+                        true => p.resolve_for_producer(can)?,
+                        false => p,
+                    };
+                    if let GraphNodeRef::Source(src) =
+                        vg.element_mut(node).ok_or(G2gError::CapsMismatch)?
+                    {
+                        src.configure_allocation(&resolved);
+                    }
+                    allocation = Some(resolved);
+                }
+            }
+            // A terminal fan-out source exposes no allocation hook (its
+            // outputs are network-generated System bytes).
+            NodeKind::FanoutSrc(_) => {}
+            NodeKind::Muxer(_) | NodeKind::FaninSink(_) => {
+                // A muxer / terminal fan-in asks each input pad for the allocation
+                // it wants (most are content-agnostic and propose nothing), storing
+                // it on that input edge so the demand crosses the boundary and
+                // re-cascades up the branch like any other downstream proposal. The
+                // muxer's own output edge proposal is not absorbed here: a container
+                // muxer's byte output has no memory-domain tie to its inputs, and a
+                // terminal fan-in has no output at all.
+                //
+                // M976: downstream *metadata* demand does cross the output, on its
+                // own, because it describes the frames the fan-in writes (a GPU
+                // compositor deciding whether to declare its row padding). Nothing
+                // is called when no demand was declared.
+                let out_demand = vg
+                    .out_edges(node)
+                    .first()
+                    .map(|&out_e| edge_meta_requests(edge_proposal[out_e]))
+                    .unwrap_or_default();
+                if !out_demand.is_empty() {
+                    if let Some(GraphNodeRef::Muxer(mux)) = vg.element_mut(node) {
+                        mux.configure_allocation_for_output(&AllocationParams::meta_demand(
+                            out_demand,
+                        ));
+                    }
+                }
+                if let Some(GraphNodeRef::Muxer(mux)) = vg.element(node) {
+                    for &in_e in vg.in_edges(node) {
+                        let pad = vg.edge(in_e).dst.index as usize;
+                        let caps = solution[in_e].clone();
+                        edge_proposal[in_e] = mux.propose_allocation_for_input(pad, &caps);
+                    }
+                }
+            }
+        }
+    }
+    Ok(allocation)
+}
+
 /// A transform/sink node's allocation proposal from `caps` (its output-link caps
 /// for a transform, its input-link caps for a sink), carrying the node's own meta
 /// requests plus `downstream`'s onward up the cascade (M976). `None` for other
@@ -3051,11 +3080,42 @@ fn element_propose(
 ) -> Option<AllocationParams> {
     match vg.element(node) {
         Some(GraphNodeRef::Element(elem)) => with_meta_demand(
-            elem.propose_allocation(caps),
+            narrow_to_input_domains(elem.propose_allocation(caps), elem.input_domains()),
             elem.meta_requests().carry_upstream(downstream),
         ),
         _ => None,
     }
+}
+
+/// Fold the domains an element declared it can take into the proposal it hands
+/// its producer. Without this an element that accepts one domain but proposes
+/// nothing leaves its producer free to pick any domain, and the mismatch only
+/// surfaces as an `UnsupportedDomain` on the first frame; the declaration used
+/// to reach nothing but the converter auto-plug. The all-domains default (what
+/// an element that never thought about memory reports) narrows nothing, so a
+/// graph of such elements cascades exactly as before.
+fn narrow_to_input_domains(
+    proposal: Option<AllocationParams>,
+    accepts: DomainSet,
+) -> Option<AllocationParams> {
+    if accepts == DomainSet::ALL {
+        return proposal;
+    }
+    let narrowed = match proposal {
+        Some(p) => p.accepts.intersect(accepts),
+        None => accepts,
+    };
+    // An element whose own proposal contradicts its declaration is
+    // self-inconsistent: keep the explicit proposal, so the producer-side
+    // reconcile reports the conflict rather than this silently picking a side.
+    let Some(domain) = narrowed.preferred() else {
+        return proposal;
+    };
+    Some(AllocationParams {
+        domain,
+        accepts: narrowed,
+        ..proposal.unwrap_or_default()
+    })
 }
 
 /// The metadata demand an edge's stored proposal carries, empty when there is

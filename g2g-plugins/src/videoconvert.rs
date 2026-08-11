@@ -22,7 +22,7 @@ use alloc::vec::Vec;
 use crate::pixel::plane_shapes;
 use crate::pixel::{even_dims_required, frame_byte_size, planar_planes, row_bytes};
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
+use g2g_core::memory::{DomainSet, MemoryDomainKind, SystemSlice};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, CapsTransform, ConfigureOutcome, Dim,
     ElementMetadata, FieldTransform, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
@@ -172,6 +172,13 @@ impl AsyncElement for VideoConvert {
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
+
+    /// The conversion reads and writes host memory, so it takes system frames
+    /// only. The allocation cascade turns that into a download demand on a GPU
+    /// producer, which is what lets a decoder feed this at all.
+    fn input_domains(&self) -> DomainSet {
+        DomainSet::only(MemoryDomainKind::System)
+    }
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
         // any supported raw format at any geometry; per-format alternatives

@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1019: an element's declared input memory domains reach the allocation cascade, so a CPU sink or transform makes a GPU decoder download instead of failing on the first frame.
 - M1017: `wgpusink` presents on a Wayland window it owns, and a CUDA-resident decoded frame is bridged onto its device instead of downloaded.
 - M1016: `g2g-launch --record-on-error <dir>` keeps a bounded ring of recent packets per link and dumps each one as a replayable recording when the run fails.
 - M1015: pipeline errors name the failing element and the file path that failed, and an unknown launch name suggests the nearest spelling or the feature that compiles it.

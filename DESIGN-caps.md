@@ -419,6 +419,17 @@ Two fan structures have non-trivial joins:
   either keeps the decoded NV12 surface device-resident (zero-copy) or downloads
   it, chosen by the negotiated proposal alone, validated end-to-end on an RTX
   3060.
+- **The declaration feeds the cascade.** A consumer names its domains in
+  `input_domains`, and that declaration is folded into the proposal it hands
+  upstream (`narrow_to_input_domains`, intersected with whatever the element
+  proposed for itself), so an element does not also have to write a
+  `propose_allocation` restating it. Without this the two halves disagreed: the
+  declaration reached only the auto-plug, the cascade read `propose_allocation`
+  alone, and a CPU sink that declared `System` but proposed nothing left a GPU
+  producer free to hand it a device pointer, failing with `UnsupportedDomain` on
+  the first frame instead of at negotiation. The `DomainSet::ALL` default (what
+  an element that never considered memory reports) narrows nothing, so a graph of
+  such elements cascades unchanged.
 - **Converter auto-plug.** When no shared domain exists (the negotiation
   would otherwise fail loud), `auto_plug_domain_converters` splices a memory-domain
   converter instead. A pre-solve graph pass: for each edge it traces the producer

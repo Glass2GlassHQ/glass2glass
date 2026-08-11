@@ -3296,7 +3296,11 @@ the new `GraphNodeRef::log_category`. To show the *chosen* caps it first calls
 without running the pipeline), which returns the per-edge fixated caps and each
 edge's memory domain (the producing node's `output_memory`) the dump
 renders on the edges, marking GPU / zero-copy links bold; a negotiation failure
-falls back to a topology-only dump. Because negotiation probes sources, a `--dot`
+falls back to a topology-only dump. It also runs the allocation cascade
+(§4.13.5) before reading those domains, since that is what settles a
+multi-domain producer on the one its consumer asked for: without it a decoder
+feeding a CPU sink still reported its `Cuda` default and the dump called a
+downloading link a GPU link. Because negotiation probes sources, a `--dot`
 of a live-ingress pipeline does that source's `intercept_caps` (typically a
 connect) just as a run would. Memory domain is a per-element declaration
 (`AsyncElement::output_memory` / `SourceLoop::output_memory`, default `System`,
