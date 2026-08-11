@@ -23,7 +23,8 @@ use g2g_core::{
     TensorDType,
 };
 
-/// Default model input resolution used to normalize box coordinates.
+/// Model input resolution assumed when neither the properties nor a video link
+/// give one.
 const DEFAULT_INPUT_SIZE: f32 = 640.0;
 
 /// # Example
@@ -39,9 +40,10 @@ pub struct DetectionPostprocess {
     conf_threshold: f32,
     /// IoU above which a lower-scoring same-class box is suppressed.
     iou_threshold: f32,
-    /// Model input size used to normalize box coordinates to `[0, 1]`.
-    input_w: f32,
-    input_h: f32,
+    /// Model input size used to normalize box coordinates to `[0, 1]`. Unset
+    /// takes it from the video link, which carries the model input size.
+    input_w: Option<f32>,
+    input_h: Option<f32>,
     /// Channels (`4 + C`) and anchors (`A`), parsed from the configured tensor
     /// shape `[1, 4 + C, A]`.
     channels: usize,
@@ -55,14 +57,14 @@ pub struct DetectionPostprocess {
 }
 
 impl DetectionPostprocess {
-    /// A decoder with the given confidence and IoU thresholds, default
-    /// 640x640 input normalization.
+    /// A decoder with the given confidence and IoU thresholds, normalizing
+    /// against the video link's size, or 640x640 when there is none.
     pub fn new(conf_threshold: f32, iou_threshold: f32) -> Self {
         Self {
             conf_threshold,
             iou_threshold,
-            input_w: DEFAULT_INPUT_SIZE,
-            input_h: DEFAULT_INPUT_SIZE,
+            input_w: None,
+            input_h: None,
             channels: 0,
             anchors: 0,
             tensor_name: String::new(),
@@ -74,9 +76,32 @@ impl DetectionPostprocess {
 
     /// Set the model input resolution box coordinates are normalized against.
     pub fn with_input_size(mut self, width: u32, height: u32) -> Self {
-        self.input_w = width as f32;
-        self.input_h = height as f32;
+        self.input_w = Some(width as f32);
+        self.input_h = Some(height as f32);
         self
+    }
+
+    /// The size the box coordinates divide by. `ortinfer` accepts video only at
+    /// the model's own input size, so on the `attach-tensor` link the frame
+    /// carries that size and an unset property should follow it rather than
+    /// assume a square model.
+    fn normalize_size(&self) -> (f32, f32) {
+        let from_link = match &self.input_caps {
+            Some(Caps::RawVideo {
+                width: g2g_core::Dim::Fixed(w),
+                height: g2g_core::Dim::Fixed(h),
+                ..
+            }) => Some((*w as f32, *h as f32)),
+            _ => None,
+        };
+        (
+            self.input_w
+                .or(from_link.map(|(w, _)| w))
+                .unwrap_or(DEFAULT_INPUT_SIZE),
+            self.input_h
+                .or(from_link.map(|(_, h)| h))
+                .unwrap_or(DEFAULT_INPUT_SIZE),
+        )
     }
 
     /// Decode the attached tensor of this name, for a frame carrying more than
@@ -148,14 +173,15 @@ impl DetectionPostprocess {
     ///
     /// [`process`]: AsyncElement::process
     pub fn detect(&self, values: &[f32]) -> Vec<ObjectDetection> {
+        let (input_w, input_h) = self.normalize_size();
         let boxes = decode_anchors(
             values,
             AnchorLayout {
                 anchors: self.anchors,
                 classes: self.channels.saturating_sub(4),
                 extra: 0,
-                input_w: self.input_w,
-                input_h: self.input_h,
+                input_w,
+                input_h,
             },
             self.conf_threshold,
         );
@@ -333,9 +359,9 @@ impl AsyncElement for DetectionPostprocess {
                     return Err(PropError::Value);
                 }
                 if name == "input-width" {
-                    self.input_w = v as f32;
+                    self.input_w = Some(v as f32);
                 } else {
-                    self.input_h = v as f32;
+                    self.input_h = Some(v as f32);
                 }
                 Ok(())
             }
@@ -347,8 +373,8 @@ impl AsyncElement for DetectionPostprocess {
         match name {
             "conf-threshold" => Some(PropValue::Double(self.conf_threshold as f64)),
             "iou-threshold" => Some(PropValue::Double(self.iou_threshold as f64)),
-            "input-width" => Some(PropValue::Uint(self.input_w as u64)),
-            "input-height" => Some(PropValue::Uint(self.input_h as u64)),
+            "input-width" => Some(PropValue::Uint(self.normalize_size().0 as u64)),
+            "input-height" => Some(PropValue::Uint(self.normalize_size().1 as u64)),
             "tensor-name" => Some(PropValue::Str(self.tensor_name.clone())),
             _ => None,
         }
@@ -416,8 +442,8 @@ impl AsyncElement for DetectionPostprocess {
                     if let Some((ch, a)) = Self::parse_shape(&caps) {
                         self.channels = ch;
                         self.anchors = a;
-                        self.input_caps = Some(caps.clone());
                     }
+                    self.input_caps = Some(caps.clone());
                     out.push(PipelinePacket::CapsChanged(caps)).await?;
                 }
                 // Drop EOS: the runner's transform arm forwards it; re-pushing it
@@ -458,12 +484,12 @@ static DETECT_PROPS: &[PropertySpec] = &[
     PropertySpec::new(
         "input-width",
         PropKind::Uint,
-        "model input width used to normalize box coordinates",
+        "model input width used to normalize box coordinates, default the video link's",
     ),
     PropertySpec::new(
         "input-height",
         PropKind::Uint,
-        "model input height used to normalize box coordinates",
+        "model input height used to normalize box coordinates, default the video link's",
     ),
     PropertySpec::new(
         "tensor-name",
@@ -624,6 +650,51 @@ mod tests {
             sink.pixels.expect("frame forwarded"),
             vec![7u8; 64],
             "the picture passed through untouched"
+        );
+    }
+
+    /// With no size set, boxes normalize against the video link rather than a
+    /// square default. A 640x384 model drawn against 640x640 put every box at
+    /// 0.6 of its true height, so nothing lined up with what it detected.
+    #[tokio::test]
+    async fn an_unset_input_size_follows_the_video_link() {
+        let mut det = DetectionPostprocess::new(0.5, 0.5);
+        det.configure_pipeline(&rgba_caps(640, 384)).unwrap();
+
+        let frame = video_frame_with_tensor(
+            &[
+                [100.0, 105.0, 400.0],
+                [100.0, 102.0, 400.0],
+                [40.0, 40.0, 40.0],
+                [40.0, 40.0, 40.0],
+                [0.90, 0.80, 0.05],
+                [0.10, 0.05, 0.95],
+            ],
+            16,
+        );
+
+        let mut sink = PixelAndMetaSink::default();
+        det.process(PipelinePacket::DataFrame(frame), &mut sink)
+            .await
+            .unwrap();
+
+        let meta = sink.meta.expect("frame carries AnalyticsMeta");
+        let d0 = meta.detections().find(|d| d.label == 0).unwrap();
+        assert!(
+            (d0.bbox.x - (80.0 / 640.0)).abs() < 1e-6,
+            "width from the link"
+        );
+        assert!(
+            (d0.bbox.y - (80.0 / 384.0)).abs() < 1e-6,
+            "height from the link, not the 640 default"
+        );
+
+        // An explicit property still wins over the link.
+        let mut pinned = DetectionPostprocess::new(0.5, 0.5).with_input_size(640, 640);
+        pinned.configure_pipeline(&rgba_caps(640, 384)).unwrap();
+        assert_eq!(
+            pinned.get_property("input-height"),
+            Some(PropValue::Uint(640))
         );
     }
 
