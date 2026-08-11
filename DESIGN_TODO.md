@@ -250,6 +250,17 @@ Phased plan:
   the `vulkanvideo` GPU tests (the element is vendor-neutral; hardware-gated,
   `VERIFY:` markers in-tree). Optional extra output domains (multiplanar NV12 /
   `VulkanTexture`).
+- **A stream the driver rejects fails the whole run.** `VulkanVideoDec` decoding
+  `g2g-plugins/tests/fixtures/av_h264_aac.mp4` (64x48, within the GPU's coded
+  extent) gets `ERROR_INVALID_VIDEO_STD_PARAMETERS_KHR` from the first
+  `decode_push_meta`, so the Std parameter mapping is wrong for something that
+  clip's parameter sets carry. It surfaces as a bare `CapsMismatch`; a rejected
+  stream should at least name what the driver refused.
+
+- **Auto-plug has no second choice.** A decoder the search picks and the hardware
+  then refuses at runtime (the fixture above) fails the pipeline, where the CPU
+  decoder would have played it. `decodebin` needs to fall back to the next
+  candidate chain on a decode failure, the way GStreamer's does.
 
 ## CUDA / display
 

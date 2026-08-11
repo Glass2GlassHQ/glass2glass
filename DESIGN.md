@@ -4360,6 +4360,21 @@ picture. Two pieces, both `no_std`-friendly:
   The mirror of the crate's streaming side (§4.11.3), which renders in Bevy and
   encodes in g2g.
 
+- **Presenting on the producer's device.** A GPU decoder cannot be handed a
+  device: Vulkan Video decode needs queues and extensions wgpu never asks for, so
+  `VulkanVideoDec` opens its own, and its textures bind to no other. A launch line
+  has no application to pass a `GpuContext` between the two, so the decoder
+  publishes its own (`gpu::publish_producer_context`, only when the device's
+  swapchain extension is enabled) and a windowed sink builds its surface on that
+  instance and presents from that device
+  (`gpu::present_on_producer_device`, shared by every wgpu display sink),
+  falling back to opening its own device when nothing published or the published
+  one cannot drive this display. The decode device is opened once per codec and
+  kept across the repeated `configure_pipeline` a launch line does, since a second
+  device would leave the sink presenting from one nothing produces on. So
+  `filesrc ! decodebin ! wgpusink` decodes on the GPU and presents the frame where
+  it already lies, with no application code.
+
 ---
 
 ## 6. Target Deployment Environments

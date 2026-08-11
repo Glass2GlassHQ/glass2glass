@@ -13048,6 +13048,9 @@ pub struct VulkanVideoDec {
     /// `num-dpb-slots` property: a DPB image count for the decoder built at the
     /// first keyframe, or `None` to size it from the stream.
     dpb_slots: Option<u32>,
+    /// What the open device was opened for, so a later `configure_pipeline` with
+    /// the same codec on the same GPU keeps it.
+    opened_device: Option<(VideoCodec, Option<u32>)>,
 }
 
 impl core::fmt::Debug for VulkanVideoDec {
@@ -13091,6 +13094,7 @@ impl VulkanVideoDec {
             low_latency: false,
             device_index: None,
             dpb_slots: None,
+            opened_device: None,
         }
     }
 
@@ -13568,9 +13572,24 @@ impl AsyncElement for VulkanVideoDec {
         // parameter sets, which arrive in-band and build the session lazily on
         // the first keyframe AU). Each codec enables its own decode profile; the
         // `device-index` property picks the GPU among those that support it.
+        // Configure runs again whenever the caps change (a launch line negotiates
+        // a placeholder geometry, so at least twice), and the device depends on
+        // neither geometry nor the stream: keep the open one, else every decoded
+        // texture so far would belong to a device nothing downstream holds.
+
+        if self.opened_device == Some((codec, self.device_index)) && self.device.is_some() {
+            return Ok(ConfigureOutcome::Accepted);
+        }
         let vk_codec = VulkanVideoCodec::from_video_codec(codec).ok_or(G2gError::CapsMismatch)?;
         let device = block_on(open_decode_device_at(vk_codec, self.device_index))
             .map_err(|_| G2gError::CapsMismatch)?;
+        // Offer this device to a display sink downstream: its swapchain extension
+        // is enabled when the GPU has one, so the sink can present the decoded
+        // textures where they lie instead of opening a device they cannot bind to.
+        if device.present_capable() {
+            crate::gpu::publish_producer_context(device.gpu_context());
+        }
+        self.opened_device = Some((codec, self.device_index));
         self.device = Some(device);
         Ok(ConfigureOutcome::Accepted)
     }
