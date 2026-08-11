@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1026: the Vulkan decoder enables the `synchronization2` feature it barriers with, and zeroes the bitstream buffer padding it hands the driver instead of leaving fresh allocation garbage there.
 - M1025: a `file://` URI is typed by sniffing the file's header, so `uridecodebin` plays an elementary stream or a non-MP4 container instead of reading every path as an MP4.
 - M1024: inline `decodebin` builds each decoder for the caps the search chose it to produce, so a CPU decoder feeding a strict-format sink no longer needs an explicit `videoconvert`.
 - M1023: `g2g-launch` retries a launch line without the decoder that refused the stream, while nothing has been presented and the source is not live; the runner names the failing element on the bus. Breaking: `run_graph_with_progress` / `run_graph_recorded` and their threaded siblings take a bus.

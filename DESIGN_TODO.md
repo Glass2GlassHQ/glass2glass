@@ -251,15 +251,24 @@ Phased plan:
   `VERIFY:` markers in-tree). Optional extra output domains (multiplanar NV12 /
   `VulkanTexture`).
 - **A stream the driver rejects, cause unknown.** `VulkanVideoDec` gets
-  `ERROR_INVALID_VIDEO_STD_PARAMETERS_KHR` out of `vkEndCommandBuffer` while
-  recording the first decode of some streams (`tests/fixtures/av_h264_aac.mp4`,
-  and x264 `-bf 2` output at 64x48 / 64x64 / 64x128 / 64x240 but not 48x48,
-  64x96, 80x64 or anything larger). Ruled out: the coded extent (all within the
-  device's reported range), the parameter sets (a working 320x240 clip's are
-  identical field for field), and the reference marking (same MMCO operations in
-  both). NVDEC decodes every one of these clips, so the hardware can; only the
-  Vulkan Video path refuses. Next step is validation-layer output, which needs
-  `vulkan-validation-layers` installed on the test host.
+  `ERROR_INVALID_VIDEO_STD_PARAMETERS_KHR` recording a decode. It is our bug, not
+  the hardware's: GStreamer's `vulkanh264device1dec` decodes a refused clip to
+  every frame on the same GPU and driver, and NVDEC decodes them too.
+
+  Reproduce with x264 output at `-bf 2` (which selects `pic_order_cnt_type = 0`
+  and `max_num_ref_frames = 4`) at 64 or 128 pixels wide and 48, 64, 112 or 128
+  high; `-bf 0` / `-bf 1` / `b-pyramid=none` at the same size decode, as does
+  `-bf 2` at 64x80, 64x96, 192x48 or anything larger. Independent of content
+  (every `lavfi` source at a refused size is refused) and of frame count: a
+  single-IDR stream is refused, so reference management, MMCO and multi-frame POC
+  are not involved, only session setup and the first decode record.
+
+  Ruled out: the coded extent (all within the device's `minCodedExtent` of
+  (48,16)), the parameter sets (a refused and an accepted clip differ only in
+  height), spec violations (the validation layers report none), the DPB image
+  count (a `num-dpb-slots` override up to the device ceiling changes nothing),
+  and the bitstream buffer padding. Next step is diffing our session and decode
+  record against the GStreamer decoder's for the same clip.
 
 ## CUDA / display
 

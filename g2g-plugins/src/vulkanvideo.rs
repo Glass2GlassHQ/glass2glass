@@ -6701,6 +6701,12 @@ pub async fn open_decode_device_at(
     // Priorities array lives in this scope so the queue-create pointer the
     // callback records stays valid through `open_with_callback`.
     let priorities = [1.0f32];
+    // The extension alone does not turn `vkCmdPipelineBarrier2` on: without the
+    // feature its behaviour is undefined, and every decode barrier goes through
+    // it. wgpu does not enable it, so chain it here. Same scope rule as
+    // `priorities`: the pointer the callback chains has to outlive the call.
+    let mut sync2_features =
+        vk::PhysicalDeviceSynchronization2Features::default().synchronization2(true);
 
     // SAFETY: `open_with_callback` + `create_device_from_hal` follow the
     // documented cudawgpu pattern; the callback only appends extensions and (for
@@ -6720,6 +6726,8 @@ pub async fn open_decode_device_at(
                         for e in exts {
                             args.extensions.push(e);
                         }
+                        let create_info = core::mem::take(args.create_info);
+                        *args.create_info = create_info.push_next(&mut sync2_features);
                         // Present-side extensions (see the detection above): enable
                         // them so an HDR swapchain sink can present on this device.
                         if want_swapchain {
@@ -7638,7 +7646,7 @@ impl VulkanVideoDevice {
             let ptr = dev
                 .map_memory(m, 0, breq.size, vk::MemoryMapFlags::empty())
                 .map_err(VulkanVideoError::QueryFailed)? as *mut u8;
-            core::ptr::copy_nonoverlapping(slice.as_ptr(), ptr, slice.len());
+            fill_bitstream(ptr, &slice, buf_size);
             dev.unmap_memory(m);
             m
         };
@@ -8019,7 +8027,7 @@ impl VulkanVideoDevice {
             let ptr = dev
                 .map_memory(m, 0, breq.size, vk::MemoryMapFlags::empty())
                 .map_err(VulkanVideoError::QueryFailed)? as *mut u8;
-            core::ptr::copy_nonoverlapping(slice.as_ptr(), ptr, slice.len());
+            fill_bitstream(ptr, slice, buf_size);
             dev.unmap_memory(m);
             m
         };
@@ -9191,7 +9199,7 @@ impl DpbCore {
             let ptr = dev
                 .map_memory(m, 0, breq.size, vk::MemoryMapFlags::empty())
                 .map_err(VulkanVideoError::QueryFailed)? as *mut u8;
-            core::ptr::copy_nonoverlapping(data.as_ptr(), ptr, data.len());
+            fill_bitstream(ptr, data, buf_size);
             dev.unmap_memory(m);
             m
         };
@@ -12714,6 +12722,24 @@ fn session_sps_id(_session: &H264DecodeSession) -> u8 {
 
 fn round_up(x: u64, align: u64) -> u64 {
     x.div_ceil(align).saturating_mul(align)
+}
+
+/// Write `data` into a mapped bitstream buffer of `buf_size` bytes, zeroing the
+/// rest. The buffer is rounded up to the driver's size alignment and the decode
+/// is told the payload spans the whole range, so whatever follows the slice is
+/// read as trailing bytes of it: leaving fresh allocation garbage there makes
+/// the driver reject the stream (`ERROR_INVALID_VIDEO_STD_PARAMETERS_KHR`),
+/// depending on the byte length of each frame. Zeros are legal trailer.
+///
+/// # Safety
+/// `ptr` must be writable for `buf_size` bytes, and `data.len() <= buf_size`.
+unsafe fn fill_bitstream(ptr: *mut u8, data: &[u8], buf_size: u64) {
+    // SAFETY: the caller guarantees the mapping covers `buf_size` bytes, which
+    // is at least `data.len()`, so both writes stay inside it.
+    unsafe {
+        core::ptr::copy_nonoverlapping(data.as_ptr(), ptr, data.len());
+        core::ptr::write_bytes(ptr.add(data.len()), 0, buf_size as usize - data.len());
+    }
 }
 
 /// The full-color single-mip single-layer subresource range used for the decode
