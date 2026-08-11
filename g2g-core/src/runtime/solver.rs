@@ -742,7 +742,18 @@ pub(crate) fn resolve_forward_output(
     if narrowed.is_empty() {
         return ForwardResolve::Infeasible(NegotiationFailure::empty_link(0, 1));
     }
-    match fixate_kept_shape(&narrowed).or_else(|| narrowed.fixate()) {
+    match fixate_kept_shape(&narrowed)
+        .or_else(|| narrowed.fixate())
+        .or_else(|| match narrowed.alternatives() {
+            // Unambiguous but unfixatable: an input field the element never
+            // learned (a decoder announcing its geometry before it knows the
+            // framerate) leaves the derived output partly unfixed. Deferring
+            // here would forward the element's INPUT, which misreports what a
+            // geometry-changing element produces; downstream has already
+            // accepted this shape, so send the element's own output on.
+            [one] => Some(one.clone()),
+            _ => None,
+        }) {
         Some(c) => ForwardResolve::Fixed(c),
         None => ForwardResolve::Defer,
     }
@@ -3015,6 +3026,56 @@ mod tests {
             resolve_forward_output(&conv, &i420, Some(&bgra_set), None),
             ForwardResolve::Infeasible(NegotiationFailure::EmptyLink { .. })
         ));
+    }
+
+    /// A rescaler's single output is forwarded even when an input field it never
+    /// learned leaves that output unfixatable. The `filesrc ! qtdemux ! h264parse
+    /// ! ffmpegdec ! videoscale ! video/x-raw,width=640,height=640` regression:
+    /// the decoder announces its geometry before it knows the framerate, and
+    /// deferring on that first event forwards the scaler's 1280x720 INPUT, which
+    /// the capsfilter then rightly rejects.
+    #[test]
+    fn resolve_forward_output_forwards_an_unfixatable_single_output() {
+        // Rescaler: any raw input -> the same format at a fixed 640x640, the
+        // input's framerate carried through (unfixed included).
+        let scale = CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
+            Caps::RawVideo {
+                format, framerate, ..
+            } => CapsSet::one(video(
+                *format,
+                Dim::Fixed(640),
+                Dim::Fixed(640),
+                framerate.clone(),
+            )),
+            _ => CapsSet::from_alternatives(vec![]),
+        }));
+        // The decoder's first mid-stream caps: real geometry, framerate not yet
+        // known.
+        let no_rate = video(
+            RawVideoFormat::I420,
+            Dim::Fixed(1280),
+            Dim::Fixed(720),
+            Rate::Any,
+        );
+        let downstream = CapsSet::one(video(
+            RawVideoFormat::I420,
+            Dim::Fixed(640),
+            Dim::Fixed(640),
+            Rate::Any,
+        ));
+        match resolve_forward_output(&scale, &no_rate, Some(&downstream), None) {
+            ForwardResolve::Fixed(c) => assert_eq!(
+                c,
+                video(
+                    RawVideoFormat::I420,
+                    Dim::Fixed(640),
+                    Dim::Fixed(640),
+                    Rate::Any
+                ),
+                "the scaler's own output geometry, not its input's"
+            ),
+            other => panic!("expected Fixed(640x640), got {other:?}"),
+        }
     }
 
     /// An ambiguous producible set with no downstream snapshot keeps the shape
