@@ -39,6 +39,16 @@ pub enum BusMessage {
     Info(alloc::string::String),
     /// Fatal error; the application should tear the pipeline down.
     Error(G2gError),
+    /// The fatal error that ended a run, named with the element instance that
+    /// raised it. [`G2gError`] carries no element identity and the runner only
+    /// logged the name, which a program cannot act on; an application that wants
+    /// to react per element (retrying an auto-plugged decode with a different
+    /// decoder) reads this. Posted once, alongside the error the runner returns.
+    ElementError {
+        /// The failing element's instance name, as the runner assigned it.
+        element: alloc::string::String,
+        error: G2gError,
+    },
     /// Non-fatal condition worth surfacing.
     Warning(G2gError),
     /// A caps negotiation failed, carrying the structured

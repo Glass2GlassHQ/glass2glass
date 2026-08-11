@@ -895,6 +895,19 @@ not 0, for the driver's own slice-header re-parse. All 500 frames of the JCT-VC
 `LTRPSPS_A_Qualcomm_1` conformance vector decode bit-exact vs ffmpeg on the 3060
 (`m743`); the GPU-texture path shares the same DPB machinery.
 
+**Reference marking.** Which decoded pictures stay available as references is the
+stream's decision, not the decoder's: `dec_ref_pic_marking()` in each slice header
+either leaves it to the default sliding window (evict the smallest `FrameNumWrap`)
+or names the pictures to retire, which is what x264 does for its B-pyramid.
+Reading the marking means walking past the reference-list modification and the
+prediction weight table first, so `poc::parse_h264_slice_marking` continues the
+shared slice parse through them and returns the operations
+(`H264RefPicMarking`, fixed-capacity so the header stays `Copy`); the DPB applies
+the short-term ones and refuses a long-term operation rather than keep feeding the
+driver a reference the stream has retired. Running the sliding window regardless,
+as the decoder did before, diverges from the reference set the driver builds its
+L0 / L1 lists against.
+
 **B-frames and display order.** The hardware decode handles B-frames directly: the
 driver builds the L0 / L1 reference lists from the DPB and the per-picture POC the
 decoder supplies (H.264 supplies every DPB slot's FrameNum/POC; H.265 the

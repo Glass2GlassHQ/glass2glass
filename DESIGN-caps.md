@@ -893,6 +893,19 @@ forwarded in-band ahead of the first frame as decoder extradata).
   `... ! decodebin ! wgpusink` decodes on the GPU and
   `... ! decodebin ! filesink` still decodes on the CPU.
 
+  Pad templates and memory domains say nothing about whether the hardware behind
+  a decoder will accept a particular bitstream, and a driver that refuses one only
+  says so once frames flow. Re-plugging around it takes three pieces (M1023): the
+  runner posts `BusMessage::ElementError`, naming the element instance that failed
+  (`G2gError` carries no identity, and the runner previously only logged the
+  name); `Registry::factory_of_instance` maps that instance back to the factory
+  that built it; and `parse_launch_avoiding(registry, line, avoided)` parses the
+  same line with those factories barred from the search, so the next candidate is
+  chosen. Barring every candidate fails the parse rather than substituting
+  something, which is what lets a caller retry in a loop and terminate. Only the
+  auto-plug search is bounded: an element the line names explicitly is still
+  built, since the user asked for it by name.
+
 #### 4.13.10 Current limits
 
 The solver is **arc consistency** (constraint propagation over per-link caps),

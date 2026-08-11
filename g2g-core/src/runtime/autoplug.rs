@@ -1688,6 +1688,80 @@ mod factory {
             self.factories.iter().map(|f| f.desc.clone()).collect()
         }
 
+        /// The descriptors the search may pick from with `avoided` factories left
+        /// out, plus each one's index into [`descs`](Self::descs) (a chain link
+        /// names a factory by that index, which leaving entries out would shift).
+        fn descs_avoiding(&self, avoided: &[&str]) -> (Vec<ElementDesc>, Vec<usize>) {
+            self.factories
+                .iter()
+                .enumerate()
+                .filter(|(_, f)| !avoided.contains(&f.desc.name))
+                .map(|(i, f)| (f.desc.clone(), i))
+                .unzip()
+        }
+
+        /// The names of the shortest chain that avoids every factory in
+        /// `avoided`: the retry after one of them turned out not to decode the
+        /// stream, where the search would otherwise pick it again. An empty
+        /// `avoided` is [`autoplug_names_preferring`](Self::autoplug_names_preferring).
+        pub fn autoplug_names_avoiding(
+            &self,
+            input: &Caps,
+            target: &dyn Fn(&Caps) -> bool,
+            max_depth: usize,
+            preferred: MemoryDomainKind,
+            avoided: &[&str],
+        ) -> Option<Vec<&'static str>> {
+            let (descs, indices) = self.descs_avoiding(avoided);
+            let chain = find_chain_preferring(&descs, input, target, max_depth, preferred)?;
+            Some(
+                chain
+                    .into_iter()
+                    .map(|link| self.factories[indices[link.index]].desc.name)
+                    .collect(),
+            )
+        }
+
+        /// [`autoplug_names_avoiding`](Self::autoplug_names_avoiding), instantiated.
+        pub fn autoplug_avoiding(
+            &self,
+            input: &Caps,
+            target: &dyn Fn(&Caps) -> bool,
+            max_depth: usize,
+            preferred: MemoryDomainKind,
+            avoided: &[&str],
+        ) -> Option<Vec<Box<dyn DynAsyncElement>>> {
+            let (descs, indices) = self.descs_avoiding(avoided);
+            let chain = find_chain_preferring(&descs, input, target, max_depth, preferred)?;
+            let chain = chain
+                .into_iter()
+                .map(|link| ChainLink {
+                    index: indices[link.index],
+                    output: link.output,
+                })
+                .collect();
+            self.instantiate(chain, &AutoplugParams::new()).ok()
+        }
+
+        /// The factory whose element the runner would name `instance` (its type's
+        /// log category plus a number, e.g. `VulkanVideoDec0` -> `vulkanvideodec`).
+        /// The bus names a failing element by instance; acting on it per factory,
+        /// to auto-plug around the one that failed, needs the way back.
+        ///
+        /// Each candidate is default-constructed to be asked its category, which
+        /// costs an allocation and opens nothing (a decoder reaches its device at
+        /// `configure_pipeline`). `None` if no registered factory matches.
+        pub fn factory_of_instance(&self, instance: &str) -> Option<&'static str> {
+            let category = instance.trim_end_matches(|c: char| c.is_ascii_digit());
+            if category.is_empty() {
+                return None;
+            }
+            self.launch
+                .iter()
+                .find(|f| (f.build)().log_category() == category)
+                .map(|f| f.name)
+        }
+
         /// The names of the shortest chain converting `input` into caps
         /// satisfying `target`, without instantiating anything. `Some(vec![])`
         /// if `input` already satisfies `target`; `None` if no chain exists

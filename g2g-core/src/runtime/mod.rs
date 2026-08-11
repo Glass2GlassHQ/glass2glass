@@ -152,4 +152,4 @@ pub use autoplug::{
 };
 
 #[cfg(feature = "std")]
-pub use launch::{parse_launch, ParseError};
+pub use launch::{parse_launch, parse_launch_avoiding, ParseError};

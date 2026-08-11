@@ -678,7 +678,11 @@ const DECODEBIN_MAX_DEPTH: usize = 6;
 /// before the `decodebin` in the same chain; a `decodebin` with no upstream
 /// element (chain head, or after a bare `name.` reference) is a loud error,
 /// since it has nothing to take its input caps from.
-fn expand_decodebin(registry: &Registry, chains: Vec<Chain>) -> Result<Vec<Chain>, ParseError> {
+fn expand_decodebin(
+    registry: &Registry,
+    chains: Vec<Chain>,
+    avoided: &[&str],
+) -> Result<Vec<Chain>, ParseError> {
     // Names referenced as `name.` somewhere: a `decodebin name=d` with such refs is
     // a FAN-OUT node (M482), not the inline linear case, so it is left unexpanded
     // here and handled by the decodebin-select path in `build_graph` (which probes
@@ -760,11 +764,12 @@ fn expand_decodebin(registry: &Registry, chains: Vec<Chain>) -> Result<Vec<Chain
                         _ => MemoryDomainKind::System,
                     };
                     let mut names = registry
-                        .autoplug_names_preferring(
+                        .autoplug_names_avoiding(
                             &chain_input,
                             &target,
                             DECODEBIN_MAX_DEPTH,
                             preferred,
+                            avoided,
                         )
                         .ok_or_else(|| {
                             ParseError::NoDecodeChain(alloc::format!("{chain_input:?}"))
@@ -860,7 +865,11 @@ fn prop<'a>(spec: &'a ElementSpec, key: &str) -> Option<&'a str> {
 /// pre-built nodes spliced straight into the chain. `playbin` additionally
 /// appends an auto sink so the line is a complete pipeline. The element must head
 /// its chain (it provides the source).
-fn expand_uri_sources(registry: &Registry, chains: Vec<Chain>) -> Result<Vec<Chain>, ParseError> {
+fn expand_uri_sources(
+    registry: &Registry,
+    chains: Vec<Chain>,
+    avoided: &[&str],
+) -> Result<Vec<Chain>, ParseError> {
     let mut out = Vec::with_capacity(chains.len());
     for chain in chains {
         let mut new_chain: Chain = Vec::with_capacity(chain.len());
@@ -900,7 +909,7 @@ fn expand_uri_sources(registry: &Registry, chains: Vec<Chain>) -> Result<Vec<Cha
             });
             let target = |c: &Caps| is_raw_video(c) || is_raw_audio(c);
             let decoders = registry
-                .autoplug_preferring(&caps, &target, DECODEBIN_MAX_DEPTH, preferred)
+                .autoplug_avoiding(&caps, &target, DECODEBIN_MAX_DEPTH, preferred, avoided)
                 .ok_or_else(|| ParseError::NoDecodeChain(alloc::format!("{caps:?}")))?;
             new_chain.push(Item::Prebuilt(PrebuiltNode::Source(source)));
             for dec in decoders {
@@ -920,12 +929,16 @@ fn expand_uri_sources(registry: &Registry, chains: Vec<Chain>) -> Result<Vec<Cha
     Ok(out)
 }
 
-fn build_graph(registry: &Registry, chains: Vec<Chain>) -> Result<Graph<GraphNode>, ParseError> {
+fn build_graph(
+    registry: &Registry,
+    chains: Vec<Chain>,
+    avoided: &[&str],
+) -> Result<Graph<GraphNode>, ParseError> {
     // Expand the source-providing (uridecodebin / playbin) and mid-chain
     // (decodebin) macros into concrete nodes before the structural build, so the
     // rest of the builder sees only real elements and pre-built nodes.
-    let chains = expand_uri_sources(registry, chains)?;
-    let chains = expand_decodebin(registry, chains)?;
+    let chains = expand_uri_sources(registry, chains, avoided)?;
+    let chains = expand_decodebin(registry, chains, avoided)?;
 
     // A chain endpoint after flattening: a concrete element index, or a still
     // unresolved reference by name.
@@ -1486,6 +1499,19 @@ fn queue_capacity_of(spec: &ElementSpec) -> Option<usize> {
 /// videotestsrc num-buffers=3 ! tee name=t ! fakesink   t. ! videoflip ! fakesink
 /// ```
 pub fn parse_launch(registry: &Registry, pipeline: &str) -> Result<Graph<GraphNode>, ParseError> {
+    parse_launch_avoiding(registry, pipeline, &[])
+}
+
+/// [`parse_launch`], with the auto-plug search forbidden from picking any
+/// factory named in `avoided` (M1023). The line is otherwise parsed identically,
+/// so an element the text names explicitly is still built: this bounds only what
+/// a `decodebin` / `uridecodebin` / `playbin` may choose. An application retries
+/// through here after a chosen decoder turned out not to decode the stream.
+pub fn parse_launch_avoiding(
+    registry: &Registry,
+    pipeline: &str,
+    avoided: &[&str],
+) -> Result<Graph<GraphNode>, ParseError> {
     // The parser's own built-ins are not registry factories, but they are
     // element names all the same, so a chain may start on one.
     let knows = |name: &str| {
@@ -1512,7 +1538,7 @@ pub fn parse_launch(registry: &Registry, pipeline: &str) -> Result<Graph<GraphNo
     }
     Ok(splice_domain_converters(
         registry,
-        build_graph(registry, chains)?,
+        build_graph(registry, chains, avoided)?,
     ))
 }
 

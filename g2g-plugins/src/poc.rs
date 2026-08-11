@@ -136,7 +136,105 @@ pub struct H264SlicePoc {
     pub delta_pic_order_cnt_bottom: i32,
     /// `delta_pic_order_cnt[0..2]` (POC type 1 only).
     pub delta_pic_order_cnt: [i32; 2],
+    /// The slice's `dec_ref_pic_marking()`, which only
+    /// [`parse_h264_slice_marking`] reads: `None` means it was not parsed, not
+    /// that the slice carries none. A decoder that manages a reference list must
+    /// refuse a `None` rather than assume the default marking, since a stream
+    /// using adaptive marking would then decode against the wrong references.
+    pub ref_pic_marking: Option<H264RefPicMarking>,
 }
+
+/// One `memory_management_control_operation` of a slice's `dec_ref_pic_marking()`
+/// (H.264 7.4.3.3), holding the operands as coded. Operation 0 ends the list and
+/// is not represented.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum H264Mmco {
+    /// 1: mark a short-term picture unused for reference. The picture is
+    /// `CurrPicNum - (difference_of_pic_nums_minus1 + 1)`.
+    ShortTermUnused { difference_of_pic_nums_minus1: u32 },
+    /// 2: mark a long-term picture unused for reference.
+    LongTermUnused { long_term_pic_num: u32 },
+    /// 3: give a short-term picture a long-term index.
+    AssignLongTerm {
+        difference_of_pic_nums_minus1: u32,
+        long_term_frame_idx: u32,
+    },
+    /// 4: set the largest long-term frame index in use (`plus1 == 0` means no
+    /// long-term references).
+    MaxLongTermIndex { max_long_term_frame_idx_plus1: u32 },
+    /// 5: mark every reference picture unused and reset the order count.
+    AllUnused,
+    /// 6: mark the current picture as a long-term reference.
+    CurrentAsLongTerm { long_term_frame_idx: u32 },
+}
+
+/// The most operations one `dec_ref_pic_marking()` is read as carrying. Real
+/// streams use one or two (x264's B-pyramid unmarks a single short-term
+/// reference); a longer list makes the parse refuse the header rather than drop
+/// an operation that changes which pictures are references.
+pub const MAX_MMCO_OPS: usize = 8;
+
+/// A slice's `dec_ref_pic_marking()` (H.264 7.3.3.3). Fixed-capacity so the
+/// slice header stays `Copy`.
+#[derive(Debug, Clone, Copy)]
+pub struct H264RefPicMarking {
+    /// IDR only: the prior pictures need not be output before decoding resumes.
+    pub no_output_of_prior_pics: bool,
+    /// IDR only: this picture becomes a long-term reference.
+    pub long_term_reference: bool,
+    /// Non-IDR: the operations below replace the default sliding-window marking.
+    pub adaptive: bool,
+    ops: [H264Mmco; MAX_MMCO_OPS],
+    len: u8,
+}
+
+impl Default for H264RefPicMarking {
+    fn default() -> Self {
+        Self {
+            no_output_of_prior_pics: false,
+            long_term_reference: false,
+            adaptive: false,
+            ops: [H264Mmco::AllUnused; MAX_MMCO_OPS],
+            len: 0,
+        }
+    }
+}
+
+impl H264RefPicMarking {
+    /// The operations in coded order (empty unless `adaptive`).
+    pub fn ops(&self) -> &[H264Mmco] {
+        &self.ops[..self.len as usize]
+    }
+
+    fn push(&mut self, op: H264Mmco) -> Option<()> {
+        let slot = self.ops.get_mut(self.len as usize)?;
+        *slot = op;
+        self.len += 1;
+        Some(())
+    }
+}
+
+/// The picture-parameter-set fields the syntax between the order count and
+/// `dec_ref_pic_marking()` is sized by, plus `ChromaArrayType` (from the SPS,
+/// which sizes `pred_weight_table`'s chroma entries).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct H264PpsRefMarking {
+    pub redundant_pic_cnt_present_flag: bool,
+    pub weighted_pred_flag: bool,
+    pub weighted_bipred_idc: u8,
+    pub num_ref_idx_l0_default_active_minus1: u32,
+    pub num_ref_idx_l1_default_active_minus1: u32,
+    pub chroma_array_type: u8,
+}
+
+/// Largest `num_ref_idx_lX_active_minus1` the spec allows (H.264 7.4.3), which
+/// bounds the `pred_weight_table` loops a malformed header could otherwise run.
+const MAX_NUM_REF_IDX_MINUS1: u32 = 31;
+
+/// Iterations the `ref_pic_list_modification` loop is read for before the parse
+/// gives up: the list is bounded by the reference count, and a stream coding more
+/// than this is refused rather than spun on.
+const MAX_REF_LIST_MODIFICATIONS: usize = 64;
 
 impl H264SlicePoc {
     /// Whether this is an I (intra) slice: `slice_type % 5 == 2`.
@@ -164,6 +262,176 @@ pub fn parse_h264_slice_poc(
     let rbsp = strip_emulation_prevention(&nal[1..]);
     let mut br = BitReader::new(&rbsp);
     parse_h264_slice_poc_bits(&mut br, nal_ref_idc, nal_unit_type == 5, sps, pps)
+}
+
+/// [`parse_h264_slice_poc`] carried on through `dec_ref_pic_marking()`, for a
+/// decoder that has to keep a reference list. Everything between the two (the
+/// reference-list modification and the prediction weight table) is read only to
+/// get past it, so `marking` must describe the picture parameter set the slice
+/// selects, else the reference marking is read from the wrong bit.
+///
+/// `None` on a malformed header, exactly as [`parse_h264_slice_poc`].
+pub fn parse_h264_slice_marking(
+    nal: &[u8],
+    sps: &H264PocContext<'_>,
+    pps: &[H264PpsPoc],
+    marking: &H264PpsRefMarking,
+) -> Option<H264SlicePoc> {
+    if nal.is_empty() {
+        return None;
+    }
+    let nal_ref_idc = (nal[0] >> 5) & 0x3;
+    let nal_unit_type = nal[0] & 0x1F;
+    if nal_unit_type != 1 && nal_unit_type != 5 {
+        return None;
+    }
+    let rbsp = strip_emulation_prevention(&nal[1..]);
+    let mut br = BitReader::new(&rbsp);
+    let mut slice = parse_h264_slice_poc_bits(&mut br, nal_ref_idc, nal_unit_type == 5, sps, pps)?;
+    skip_to_ref_pic_marking(&mut br, &slice, marking)?;
+    slice.ref_pic_marking = Some(read_dec_ref_pic_marking(&mut br, &slice)?);
+    Some(slice)
+}
+
+/// Read past `redundant_pic_cnt` .. `pred_weight_table()`, leaving `br` at
+/// `dec_ref_pic_marking()` (H.264 7.3.3).
+fn skip_to_ref_pic_marking(
+    br: &mut BitReader<'_>,
+    slice: &H264SlicePoc,
+    pps: &H264PpsRefMarking,
+) -> Option<()> {
+    let slice_type = slice.slice_type % 5;
+    let is_p = slice_type == 0 || slice_type == 3;
+    let is_b = slice_type == 1;
+    let is_intra = slice_type == 2 || slice_type == 4;
+    if pps.redundant_pic_cnt_present_flag {
+        br.read_ue()?;
+    }
+    if is_b {
+        br.read_bit()?; // direct_spatial_mv_pred_flag
+    }
+    let mut num_ref_idx_l0_minus1 = pps.num_ref_idx_l0_default_active_minus1;
+    let mut num_ref_idx_l1_minus1 = pps.num_ref_idx_l1_default_active_minus1;
+    if is_p || is_b {
+        if br.read_bit()? == 1 {
+            num_ref_idx_l0_minus1 = br.read_ue()?;
+            if is_b {
+                num_ref_idx_l1_minus1 = br.read_ue()?;
+            }
+        }
+        if num_ref_idx_l0_minus1 > MAX_NUM_REF_IDX_MINUS1
+            || num_ref_idx_l1_minus1 > MAX_NUM_REF_IDX_MINUS1
+        {
+            return None;
+        }
+    }
+
+    // ref_pic_list_modification (7.3.3.1): each entry is an op plus one operand,
+    // op 3 ends the list.
+    if !is_intra {
+        read_ref_pic_list_modification(br)?;
+    }
+    if is_b {
+        read_ref_pic_list_modification(br)?;
+    }
+
+    let weighted = (pps.weighted_pred_flag && is_p) || (pps.weighted_bipred_idc == 1 && is_b);
+    if weighted {
+        br.read_ue()?; // luma_log2_weight_denom
+        if pps.chroma_array_type != 0 {
+            br.read_ue()?; // chroma_log2_weight_denom
+        }
+        read_weight_list(br, num_ref_idx_l0_minus1, pps.chroma_array_type)?;
+        if is_b {
+            read_weight_list(br, num_ref_idx_l1_minus1, pps.chroma_array_type)?;
+        }
+    }
+    Some(())
+}
+
+/// One `ref_pic_list_modification` list (H.264 7.3.3.1).
+fn read_ref_pic_list_modification(br: &mut BitReader<'_>) -> Option<()> {
+    if br.read_bit()? != 1 {
+        return Some(());
+    }
+    for _ in 0..MAX_REF_LIST_MODIFICATIONS {
+        let op = br.read_ue()?;
+        if op == 3 {
+            return Some(());
+        }
+        if op > 3 {
+            return None;
+        }
+        br.read_ue()?; // abs_diff_pic_num_minus1 / long_term_pic_num
+    }
+    None
+}
+
+/// One list of `pred_weight_table` entries (H.264 7.3.3.2).
+fn read_weight_list(
+    br: &mut BitReader<'_>,
+    num_ref_idx_minus1: u32,
+    chroma_array_type: u8,
+) -> Option<()> {
+    for _ in 0..=num_ref_idx_minus1 {
+        if br.read_bit()? == 1 {
+            br.read_se()?; // luma_weight
+            br.read_se()?; // luma_offset
+        }
+        if chroma_array_type != 0 && br.read_bit()? == 1 {
+            for _ in 0..2 {
+                br.read_se()?; // chroma_weight
+                br.read_se()?; // chroma_offset
+            }
+        }
+    }
+    Some(())
+}
+
+/// `dec_ref_pic_marking()` (H.264 7.3.3.3). A non-reference picture codes none,
+/// which reads as the default marking.
+fn read_dec_ref_pic_marking(
+    br: &mut BitReader<'_>,
+    slice: &H264SlicePoc,
+) -> Option<H264RefPicMarking> {
+    let mut marking = H264RefPicMarking::default();
+    if slice.nal_ref_idc == 0 {
+        return Some(marking);
+    }
+    if slice.is_idr {
+        marking.no_output_of_prior_pics = br.read_bit()? == 1;
+        marking.long_term_reference = br.read_bit()? == 1;
+        return Some(marking);
+    }
+    marking.adaptive = br.read_bit()? == 1;
+    if !marking.adaptive {
+        return Some(marking);
+    }
+    for _ in 0..=MAX_MMCO_OPS {
+        let op = match br.read_ue()? {
+            0 => return Some(marking),
+            1 => H264Mmco::ShortTermUnused {
+                difference_of_pic_nums_minus1: br.read_ue()?,
+            },
+            2 => H264Mmco::LongTermUnused {
+                long_term_pic_num: br.read_ue()?,
+            },
+            3 => H264Mmco::AssignLongTerm {
+                difference_of_pic_nums_minus1: br.read_ue()?,
+                long_term_frame_idx: br.read_ue()?,
+            },
+            4 => H264Mmco::MaxLongTermIndex {
+                max_long_term_frame_idx_plus1: br.read_ue()?,
+            },
+            5 => H264Mmco::AllUnused,
+            6 => H264Mmco::CurrentAsLongTerm {
+                long_term_frame_idx: br.read_ue()?,
+            },
+            _ => return None,
+        };
+        marking.push(op)?;
+    }
+    None
 }
 
 /// The bit-level half of [`parse_h264_slice_poc`], over an already de-emulated
@@ -230,6 +498,7 @@ pub(crate) fn parse_h264_slice_poc_bits(
         pic_order_cnt_lsb,
         delta_pic_order_cnt_bottom,
         delta_pic_order_cnt,
+        ref_pic_marking: None,
     })
 }
 

@@ -250,17 +250,23 @@ Phased plan:
   the `vulkanvideo` GPU tests (the element is vendor-neutral; hardware-gated,
   `VERIFY:` markers in-tree). Optional extra output domains (multiplanar NV12 /
   `VulkanTexture`).
-- **A stream the driver rejects fails the whole run.** `VulkanVideoDec` decoding
-  `g2g-plugins/tests/fixtures/av_h264_aac.mp4` (64x48, within the GPU's coded
-  extent) gets `ERROR_INVALID_VIDEO_STD_PARAMETERS_KHR` from the first
-  `decode_push_meta`, so the Std parameter mapping is wrong for something that
-  clip's parameter sets carry. It surfaces as a bare `CapsMismatch`; a rejected
-  stream should at least name what the driver refused.
+- **A stream the driver rejects, cause unknown.** `VulkanVideoDec` gets
+  `ERROR_INVALID_VIDEO_STD_PARAMETERS_KHR` out of `vkEndCommandBuffer` while
+  recording the first decode of some streams (`tests/fixtures/av_h264_aac.mp4`,
+  and x264 `-bf 2` output at 64x48 / 64x64 / 64x128 / 64x240 but not 48x48,
+  64x96, 80x64 or anything larger). Ruled out: the coded extent (all within the
+  device's reported range), the parameter sets (a working 320x240 clip's are
+  identical field for field), and the reference marking (same MMCO operations in
+  both). NVDEC decodes every one of these clips, so the hardware can; only the
+  Vulkan Video path refuses. Next step is validation-layer output, which needs
+  `vulkan-validation-layers` installed on the test host.
 
-- **Auto-plug has no second choice.** A decoder the search picks and the hardware
-  then refuses at runtime (the fixture above) fails the pipeline, where the CPU
-  decoder would have played it. `decodebin` needs to fall back to the next
-  candidate chain on a decode failure, the way GStreamer's does.
+- **Wire the decoder fallback into `g2g-launch`.** The mechanism landed (M1023:
+  `BusMessage::ElementError` names the failing element, `Registry::factory_of_instance`
+  maps it back to its factory, `parse_launch_avoiding` re-plugs the line without
+  it). What is left is the CLI policy: the default run path attaches no bus, so
+  `g2g-launch` cannot see the name, and the retry (re-parse, re-run once, only
+  when nothing has been presented yet) is not written.
 
 ## CUDA / display
 
