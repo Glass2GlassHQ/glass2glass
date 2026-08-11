@@ -719,14 +719,22 @@ pub(crate) fn resolve_forward_output(
             .find(|c| tracks_input(c, input))
             .cloned()
     };
+    // a Derived closure computed the candidate from this input, so the element
+    // really does produce it, changed geometry included
+    let derives_from_input = matches!(
+        constraint,
+        CapsConstraint::DerivedOutput(_) | CapsConstraint::DerivedFields(_)
+    );
     let Some(d) = downstream_feasible else {
         return match candidates.alternatives() {
             // Unambiguous: forward the one output, fixated, or as-is when an
-            // unlearned input field (Any rate) blocks fixation but the output
-            // tracks the input.
+            // unlearned input field (Any rate) blocks fixation but the output is
+            // input-derived or otherwise tracks the input.
             [one] => match candidates.fixate() {
                 Some(c) => ForwardResolve::Fixed(c),
-                None if tracks_input(one, input) => ForwardResolve::Fixed(one.clone()),
+                None if derives_from_input || tracks_input(one, input) => {
+                    ForwardResolve::Fixed(one.clone())
+                }
                 None => ForwardResolve::Defer,
             },
             // Ambiguous with nothing to steer by: keep the previous output
@@ -3075,6 +3083,49 @@ mod tests {
                 "the scaler's own output geometry, not its input's"
             ),
             other => panic!("expected Fixed(640x640), got {other:?}"),
+        }
+    }
+
+    /// The same unfixatable single output with no downstream snapshot, which a
+    /// wildcard sink below a chain of `DerivedOutput` elements leaves empty.
+    /// Deferring forwards a letterboxing `videobox`'s INPUT, which the
+    /// fixed-size consumer below it then rejects.
+    #[test]
+    fn resolve_forward_output_forwards_a_derived_single_output_without_a_snapshot() {
+        // Letterbox: any raw input -> same format, 24 rows taller, input's rate.
+        let letterbox = CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
+            Caps::RawVideo {
+                format,
+                width,
+                height: Dim::Fixed(h),
+                framerate,
+                ..
+            } => CapsSet::one(video(
+                *format,
+                width.clone(),
+                Dim::Fixed(h + 24),
+                framerate.clone(),
+            )),
+            _ => CapsSet::from_alternatives(vec![]),
+        }));
+        let no_rate = video(
+            RawVideoFormat::Rgba8,
+            Dim::Fixed(640),
+            Dim::Fixed(360),
+            Rate::Any,
+        );
+        match resolve_forward_output(&letterbox, &no_rate, None, None) {
+            ForwardResolve::Fixed(c) => assert_eq!(
+                c,
+                video(
+                    RawVideoFormat::Rgba8,
+                    Dim::Fixed(640),
+                    Dim::Fixed(384),
+                    Rate::Any
+                ),
+                "the boxer's own output geometry, not its input's"
+            ),
+            other => panic!("expected Fixed(640x384), got {other:?}"),
         }
     }
 
