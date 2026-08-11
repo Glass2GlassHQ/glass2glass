@@ -816,7 +816,11 @@ probe feeding `intercept_caps`, a `VkVideoSessionKHR` /
 the parsed SPS/PPS/VPS (the correctness-critical part, one mapping module per
 codec, re-emitted on mid-stream change via `CapsChanged`), DPB reference-slot
 management, and the `vkCmdDecodeVideoKHR` recording, output pipelined through the
-YCbCr pass with an in-flight ring. The session + DPB rebuild mid-stream on *any*
+YCbCr pass with an in-flight ring. A session's `maxCodedExtent` is the device's
+maximum, not the stream's geometry (M1027): it is only an upper bound, each
+picture resource carries its real extent, and sizing the session to the picture
+made the NVIDIA driver refuse whole small geometries with
+`ERROR_INVALID_VIDEO_STD_PARAMETERS_KHR`. The session + DPB rebuild mid-stream on *any*
 in-band parameter-set change, keyed by a byte fingerprint of the AU's parameter
 sets (M519 geometry / M764 same-geometry content, e.g. a profile or entropy-mode
 switch; byte-identical keyframe re-sends keep the session), flushing the outgoing

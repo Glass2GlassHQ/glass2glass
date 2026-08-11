@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1027: the Vulkan decoder bounds its video session by the device's maximum coded extent instead of the picture's own, so small geometries the driver used to refuse outright now decode.
 - M1026: the Vulkan decoder enables the `synchronization2` feature it barriers with, and zeroes the bitstream buffer padding it hands the driver instead of leaving fresh allocation garbage there.
 - M1025: a `file://` URI is typed by sniffing the file's header, so `uridecodebin` plays an elementary stream or a non-MP4 container instead of reading every path as an MP4.
 - M1024: inline `decodebin` builds each decoder for the caps the search chose it to produce, so a CPU decoder feeding a strict-format sink no longer needs an explicit `videoconvert`.

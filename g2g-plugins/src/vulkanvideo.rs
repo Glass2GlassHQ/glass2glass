@@ -7102,7 +7102,22 @@ impl VulkanVideoDevice {
         }
     }
 
-    /// Create an H.264 decode session + parameters for `ps`, sized to
+    /// The `maxCodedExtent` a video session is created with: the device's own
+    /// maximum, never the picture's size. Only an upper bound is being declared,
+    /// and each picture resource still carries its real coded extent, so this
+    /// costs nothing in the decode. Binding the session to the picture size
+    /// instead makes the NVIDIA driver refuse some small geometries outright
+    /// with `ERROR_INVALID_VIDEO_STD_PARAMETERS_KHR` (64x48 and 64x64 do, 64x96
+    /// does not), and GStreamer's Vulkan decoder, which does not hit that, sizes
+    /// its session the same way.
+    fn session_max_coded_extent(&self) -> vk::Extent2D {
+        vk::Extent2D {
+            width: self.caps.max_coded_extent.0,
+            height: self.caps.max_coded_extent.1,
+        }
+    }
+
+    /// Create an H.264 decode session + parameters for `ps`, whose pictures are
     /// `max_w`x`max_h` (clamped to the device's coded-extent range). Session
     /// parameter creation validates the `Std*` SPS/PPS mapping.
     pub fn create_h264_session(
@@ -7117,10 +7132,7 @@ impl VulkanVideoDevice {
 
         let w = max_w.clamp(self.caps.min_coded_extent.0, self.caps.max_coded_extent.0);
         let h = max_h.clamp(self.caps.min_coded_extent.1, self.caps.max_coded_extent.1);
-        let coded_extent = vk::Extent2D {
-            width: w,
-            height: h,
-        };
+        let coded_extent = self.session_max_coded_extent();
 
         let session_ci = vk::VideoSessionCreateInfoKHR::default()
             .queue_family_index(self.decode_queue_family)
@@ -7235,10 +7247,7 @@ impl VulkanVideoDevice {
 
         let w = max_w.clamp(self.caps.min_coded_extent.0, self.caps.max_coded_extent.0);
         let h = max_h.clamp(self.caps.min_coded_extent.1, self.caps.max_coded_extent.1);
-        let coded_extent = vk::Extent2D {
-            width: w,
-            height: h,
-        };
+        let coded_extent = self.session_max_coded_extent();
 
         let session_ci = vk::VideoSessionCreateInfoKHR::default()
             .queue_family_index(self.decode_queue_family)
@@ -7355,10 +7364,7 @@ impl VulkanVideoDevice {
 
         let w = max_w.clamp(self.caps.min_coded_extent.0, self.caps.max_coded_extent.0);
         let h = max_h.clamp(self.caps.min_coded_extent.1, self.caps.max_coded_extent.1);
-        let coded_extent = vk::Extent2D {
-            width: w,
-            height: h,
-        };
+        let coded_extent = self.session_max_coded_extent();
 
         let session_ci = vk::VideoSessionCreateInfoKHR::default()
             .queue_family_index(self.decode_queue_family)
