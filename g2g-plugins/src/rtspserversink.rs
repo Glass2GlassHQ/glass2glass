@@ -752,9 +752,9 @@ impl AsyncElement for RtspServerSink {
                     if !self.configured {
                         return Err(G2gError::NotConfigured);
                     }
-                    let Some(slice) = frame.domain.as_system_slice() else {
-                        return Err(G2gError::UnsupportedDomain);
-                    };
+                    let slice = frame
+                        .domain
+                        .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
                     // Block on the first buffer until one player connects + PLAYs,
                     // then serve every connected player without blocking.
                     if !self.started {

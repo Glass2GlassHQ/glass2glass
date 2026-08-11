@@ -172,9 +172,9 @@ impl AsyncElement for TeletextDec {
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let Some(slice) = frame.domain.as_system_slice() else {
-                        return Err(G2gError::UnsupportedDomain);
-                    };
+                    let slice = frame
+                        .domain
+                        .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
                     // The page blob and the data units share one pad; the blob is
                     // the one that parses as a page selection.
                     if let Some(cfg) = parse_page_config(slice) {

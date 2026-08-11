@@ -206,9 +206,9 @@ impl AsyncElement for FlvMux {
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let Some(au) = frame.domain.as_system_slice() else {
-                        return Err(G2gError::UnsupportedDomain);
-                    };
+                    let au = frame
+                        .domain
+                        .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
                     let codec = self.codec.ok_or(G2gError::NotConfigured)?;
                     let mux = self.mux.as_mut().ok_or(G2gError::NotConfigured)?;
                     let pts_ms = (frame.timing.pts_ns / 1_000_000) as u32;

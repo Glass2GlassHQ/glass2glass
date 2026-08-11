@@ -1411,9 +1411,9 @@ impl AsyncElement for FfmpegVideoDec {
             let mut decoded = Vec::new();
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let Some(slice) = frame.domain.as_system_slice() else {
-                        return Err(G2gError::UnsupportedDomain);
-                    };
+                    let slice = frame
+                        .domain
+                        .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
                     // Open the decoder on the first access unit, seeding it with
                     // the unit's parameter sets (extradata) and its output-reorder
                     // depth so libavcodec keeps the opening GOP's leading pictures

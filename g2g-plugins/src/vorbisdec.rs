@@ -209,9 +209,9 @@ impl AsyncElement for VorbisDec {
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let Some(slice) = frame.domain.as_system_slice() else {
-                        return Err(G2gError::UnsupportedDomain);
-                    };
+                    let slice = frame
+                        .domain
+                        .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
                     // In-band header packets (audio packets have bit 0 of the
                     // first byte clear, so the prefixes cannot alias): stash
                     // ident, skip the comment, build on setup. Codec config,

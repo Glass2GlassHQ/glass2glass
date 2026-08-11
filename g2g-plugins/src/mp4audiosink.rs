@@ -154,9 +154,9 @@ impl AsyncElement for Mp4AudioSink {
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let Some(au) = frame.domain.as_system_slice() else {
-                        return Err(G2gError::UnsupportedDomain);
-                    };
+                    let au = frame
+                        .domain
+                        .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
                     if au.is_empty() {
                         return Err(G2gError::CapsMismatch);
                     }

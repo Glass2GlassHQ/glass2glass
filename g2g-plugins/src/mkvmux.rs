@@ -433,9 +433,9 @@ impl AsyncElement for MkvMux {
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let Some(slice) = frame.domain.as_system_slice() else {
-                        return Err(G2gError::UnsupportedDomain);
-                    };
+                    let slice = frame
+                        .domain
+                        .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
                     // A bitmap subtitle pad opens on its config blob (the `.idx`
                     // text, the page ids), which becomes the track's
                     // `CodecPrivate` and is never a cue to write.

@@ -122,9 +122,9 @@ impl AsyncElement for Volume {
                         Some(c) => c.clone(),
                         None => return Err(G2gError::NotConfigured),
                     };
-                    let Some(src) = frame.domain.as_system_slice() else {
-                        return Err(G2gError::UnsupportedDomain);
-                    };
+                    let src = frame
+                        .domain
+                        .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
                     let mut dst = vec![0u8; src.len()].into_boxed_slice();
                     apply_gain(src, &mut dst, self.volume, self.mute);
 

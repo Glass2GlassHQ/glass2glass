@@ -251,6 +251,27 @@ impl MemoryDomain {
 
     /// The CPU-readable bytes when the payload lives in system memory, else
     /// `None` (a device-domain handle that would need a download first).
+    /// The frame's bytes for an element that reads host memory, or a loud
+    /// failure naming the domain that turned up instead. A bare
+    /// `UnsupportedDomain` says only that some element refused some frame, which
+    /// leaves the reader no way to tell a missing download from a wrong element;
+    /// `category` is the element's own name, so the line says who refused what.
+    /// Needs `alloc`, which is what the logging it does needs.
+    #[cfg(feature = "alloc")]
+    pub fn require_system_slice(&self, category: &'static str) -> Result<&[u8], crate::G2gError> {
+        match self.as_system_slice() {
+            Some(slice) => Ok(slice),
+            None => {
+                crate::g2g_error!(
+                    crate::log::Target::category(category),
+                    "reads host memory but the link delivered a {:?} frame: the producer kept it on the device, so put a converter in front or let negotiation settle the link on system memory",
+                    self.kind()
+                );
+                Err(crate::G2gError::UnsupportedDomain)
+            }
+        }
+    }
+
     pub fn as_system_slice(&self) -> Option<&[u8]> {
         match self {
             MemoryDomain::System(s) => Some(s.as_slice()),
@@ -1161,6 +1182,46 @@ mod tests {
         fn as_any(&self) -> &dyn core::any::Any {
             self
         }
+    }
+
+    /// A CPU element refusing a device frame has to say which domain turned up,
+    /// or the reader cannot tell a missing download from a wrong element. The
+    /// error kind stays `UnsupportedDomain`; the detail rides the log.
+    #[test]
+    fn refusing_a_device_frame_names_the_domain_that_arrived() {
+        let logs = crate::log::RingSink::new(8);
+        crate::log::set_sink(alloc::boxed::Box::new(logs.clone()));
+
+        let domain = MemoryDomain::Cuda(OwnedCudaBuffer::new(
+            0x1000,
+            0x2000,
+            2048,
+            2048,
+            1920,
+            1080,
+            0xC0FFEE,
+            0,
+            Arc::new(FlagOnDrop(Arc::new(AtomicBool::new(false)))),
+        ));
+        assert_eq!(
+            domain.require_system_slice("TestSink"),
+            Err(crate::G2gError::UnsupportedDomain)
+        );
+
+        let records = logs.snapshot();
+        let record = records.last().expect("the refusal is logged");
+        assert_eq!(record.category, "TestSink");
+        assert!(
+            record.message.contains("Cuda"),
+            "the refusal must name the domain that arrived: {}",
+            record.message
+        );
+
+        // System memory is what the element wanted, so it passes straight through.
+        let ok = MemoryDomain::System(SystemSlice::from_boxed(
+            alloc::vec![7u8; 4].into_boxed_slice(),
+        ));
+        assert_eq!(ok.require_system_slice("TestSink"), Ok(&[7u8, 7, 7, 7][..]));
     }
 
     #[test]

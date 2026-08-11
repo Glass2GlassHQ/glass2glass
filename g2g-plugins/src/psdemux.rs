@@ -1289,9 +1289,9 @@ impl AsyncElement for PsDemux {
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let Some(slice) = frame.domain.as_system_slice() else {
-                        return Err(G2gError::UnsupportedDomain);
-                    };
+                    let slice = frame
+                        .domain
+                        .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
                     self.demux.push_data(slice);
                     if self.bus.is_some() {
                         self.post_stream_collection();
@@ -1728,9 +1728,9 @@ impl MultiOutputElement for PsDemuxN {
         Box::pin(async move {
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let Some(slice) = frame.domain.as_system_slice() else {
-                        return Err(G2gError::UnsupportedDomain);
-                    };
+                    let slice = frame
+                        .domain
+                        .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
                     self.demux.push_data(slice);
                     if self.bus.is_some() {
                         self.post_stream_collection();

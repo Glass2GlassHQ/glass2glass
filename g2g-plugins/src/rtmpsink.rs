@@ -240,9 +240,9 @@ impl AsyncElement for RtmpSink {
         Box::pin(async move {
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let Some(slice) = frame.domain.as_system_slice() else {
-                        return Err(G2gError::UnsupportedDomain);
-                    };
+                    let slice = frame
+                        .domain
+                        .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
                     // Lazily connect + publish on the first buffer.
                     if self.stream.is_none() {
                         let target = self.target.clone().ok_or(G2gError::NotConfigured)?;

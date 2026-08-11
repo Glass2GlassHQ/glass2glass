@@ -13638,9 +13638,9 @@ impl AsyncElement for VulkanVideoDec {
         alloc::boxed::Box::pin(async move {
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let Some(slice) = frame.domain.as_system_slice() else {
-                        return Err(G2gError::UnsupportedDomain);
-                    };
+                    let slice = frame
+                        .domain
+                        .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
                     // Decode the access unit. The whole thing is owned by the
                     // packet, so borrow the bytes into an owned Vec first (the
                     // decoder borrows `self.decoder` mutably below).

@@ -978,9 +978,9 @@ impl AsyncElement for OggDemux {
                     if self.seek.dropping_input() {
                         return Ok(());
                     }
-                    let Some(slice) = frame.domain.as_system_slice() else {
-                        return Err(G2gError::UnsupportedDomain);
-                    };
+                    let slice = frame
+                        .domain
+                        .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
                     self.read_offset = self.read_offset.saturating_add(slice.len() as u64);
                     self.demux.push_data(slice);
                     self.emit_ready(out).await?;
@@ -1305,9 +1305,9 @@ impl MultiOutputElement for OggDemuxN {
         Box::pin(async move {
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let Some(slice) = frame.domain.as_system_slice() else {
-                        return Err(G2gError::UnsupportedDomain);
-                    };
+                    let slice = frame
+                        .domain
+                        .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
                     self.demux.push_data(slice);
                 }
                 // Emit any final packets; the runner forwards EOS to every port.

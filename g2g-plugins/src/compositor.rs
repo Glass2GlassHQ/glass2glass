@@ -1312,9 +1312,9 @@ impl MultiInputElement for Compositor {
             match packet {
                 PipelinePacket::DataFrame(frame) => {
                     let (w, h) = self.state.geometry(input).ok_or(G2gError::NotConfigured)?;
-                    let Some(src) = frame.domain.as_system_slice() else {
-                        return Err(G2gError::UnsupportedDomain);
-                    };
+                    let src = frame
+                        .domain
+                        .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
                     let need = frame_byte_size(self.format, w, h);
                     if src.len() < need {
                         return Err(G2gError::CapsMismatch);

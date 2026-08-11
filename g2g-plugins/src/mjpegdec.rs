@@ -405,9 +405,9 @@ impl AsyncElement for MjpegDec {
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let Some(slice) = frame.domain.as_system_slice() else {
-                        return Err(G2gError::UnsupportedDomain);
-                    };
+                    let slice = frame
+                        .domain
+                        .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
                     let (pixels, w, h) = self.decode(slice)?;
                     if self.out_dims != Some((w, h)) {
                         out.push(PipelinePacket::CapsChanged(self.output_caps(w, h)))

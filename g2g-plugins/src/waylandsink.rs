@@ -523,9 +523,8 @@ impl AsyncElement for WaylandSink {
         Box::pin(async move {
             match packet {
                 PipelinePacket::DataFrame(Frame { domain, timing, .. }) => {
-                    let Some(slice) = domain.as_system_slice() else {
-                        return Err(G2gError::UnsupportedDomain);
-                    };
+                    let slice =
+                        domain.require_system_slice(g2g_core::log::short_type_name::<Self>())?;
 
                     // PTS pacing: hold the frame until its running-time deadline
                     // on the elected clock, or drop it if it is already too late

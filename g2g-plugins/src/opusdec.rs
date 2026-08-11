@@ -581,9 +581,9 @@ impl AsyncElement for OpusDec {
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let Some(slice) = frame.domain.as_system_slice() else {
-                        return Err(G2gError::UnsupportedDomain);
-                    };
+                    let slice = frame
+                        .domain
+                        .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
                     // An in-band OpusHead is codec config, not audio: read its
                     // channel count + pre-skip, (re)build the decoder, and consume
                     // it (no PCM out). The demuxer forwards it before the audio.
