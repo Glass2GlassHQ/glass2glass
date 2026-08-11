@@ -11,6 +11,11 @@
 //! `ObjectDetection` carries a `u32` label id and the meta has no name table, so
 //! the producer's class strings never reach this element.
 //!
+//! `show-trail` draws where each tracked object has been, as a polyline through
+//! the bottom edge of its recent boxes that fades out towards the oldest point.
+//! It is the one thing here that remembers anything between frames, so a trail
+//! outlives a few missed detections and is dropped once its track stops coming.
+//!
 //! Pairs with the M100 metadata-through-fan-out path: a `decode -> tee ->
 //! {detect, video} -> overlay -> display` diamond runs the detector on one branch
 //! and carries its `AnalyticsMeta` (shared by Arc) onto the video branch, where
@@ -28,6 +33,7 @@ use core::future::Future;
 use core::pin::Pin;
 
 use alloc::boxed::Box;
+use alloc::collections::{BTreeMap, VecDeque};
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -49,6 +55,18 @@ pub(crate) const MASK_ALPHA_DEFAULT: u8 = 96;
 /// same off. Measured in absolute canvas coordinates, so the four sides of one
 /// rectangle keep a common phase.
 pub(crate) const ROI_DASH_PX: i32 = 6;
+
+/// How many past positions a trail keeps by default, i.e. about a second of
+/// movement at 30 fps.
+const TRAIL_LENGTH_DEFAULT: usize = 30;
+
+/// A trail is dropped once its track has gone this many frames without a
+/// detection, so an object that leaves the scene stops being drawn.
+const TRAIL_TTL_FRAMES: u64 = 30;
+
+/// The faintest a trail segment is blended at, so its oldest end stays visible
+/// rather than fading to nothing.
+const TRAIL_MIN_ALPHA: u32 = 40;
 
 /// Draws the detection boxes, segmentation masks and regions of interest of an
 /// attached [`AnalyticsMeta`] onto an RGBA8 frame. Outline thickness and mask fill
@@ -77,8 +95,22 @@ pub struct AnalyticsOverlay {
     show_score: bool,
     /// Draw each detection's tracking id in its caption, where it has one.
     show_track: bool,
+    /// Draw the path each tracked object took.
+    show_trail: bool,
+    /// How many past positions a trail keeps.
+    trail_length: usize,
+    /// The path of each tracked object, keyed by tracking id.
+    trails: BTreeMap<u64, Trail>,
     configured: bool,
     drawn: u64,
+}
+
+/// The recent path of one tracked object: normalized bottom-centre points of its
+/// boxes, oldest first, and the frame the newest one arrived on.
+#[derive(Debug, Default)]
+struct Trail {
+    points: VecDeque<(f32, f32)>,
+    last_seen: u64,
 }
 
 /// A detection box to outline, with the id of the tracking node related to it
@@ -192,6 +224,9 @@ impl AnalyticsOverlay {
             mask_alpha: MASK_ALPHA_DEFAULT,
             show_score: false,
             show_track: false,
+            show_trail: false,
+            trail_length: TRAIL_LENGTH_DEFAULT,
+            trails: BTreeMap::new(),
             configured: false,
             drawn: 0,
         }
@@ -206,6 +241,19 @@ impl AnalyticsOverlay {
     /// Draw each detection's tracking id above its box.
     pub fn with_track(mut self, show: bool) -> Self {
         self.show_track = show;
+        self
+    }
+
+    /// Draw the path each tracked object took.
+    pub fn with_trail(mut self, show: bool) -> Self {
+        self.show_trail = show;
+        self
+    }
+
+    /// Set how many past positions a trail keeps (clamped to at least 2, since a
+    /// segment needs both ends).
+    pub fn with_trail_length(mut self, points: usize) -> Self {
+        self.trail_length = points.max(2);
         self
     }
 
@@ -255,6 +303,9 @@ impl AnalyticsOverlay {
     /// Paint every shape onto the RGBA8 `buf` of `self.width` x `self.height`.
     /// Mask fills go down first, so a box or ROI edge stays readable over one.
     fn render(&self, buf: &mut [u8], shapes: &AnalyticsShapes) {
+        if self.show_trail {
+            self.draw_trails(buf);
+        }
         for mask in &shapes.masks {
             self.fill_mask(buf, mask);
         }
@@ -267,6 +318,98 @@ impl AnalyticsOverlay {
         }
         for roi in &shapes.rois {
             self.outline(buf, roi.roi.bbox, palette_color(roi.palette_index), true);
+        }
+    }
+
+    /// Extend each tracked object's path with this frame's position, and forget
+    /// the tracks that have stopped arriving. `drawn` counts every frame, so it
+    /// is what a trail's age is measured against.
+    fn record_trails(&mut self, shapes: &AnalyticsShapes) {
+        for painted in &shapes.detections {
+            let Some(id) = painted.track_id else {
+                continue;
+            };
+            let bbox = painted.detection.bbox;
+            let trail = self.trails.entry(id).or_default();
+            trail
+                .points
+                .push_back((bbox.x + bbox.w / 2.0, bbox.y + bbox.h));
+            while trail.points.len() > self.trail_length {
+                trail.points.pop_front();
+            }
+            trail.last_seen = self.drawn;
+        }
+        let cutoff = self.drawn.saturating_sub(TRAIL_TTL_FRAMES);
+        self.trails.retain(|_, trail| trail.last_seen >= cutoff);
+    }
+
+    /// Stroke every trail, each in the palette slot of its tracking id so two
+    /// objects of the same class still read apart, fading towards its old end.
+    fn draw_trails(&self, buf: &mut [u8]) {
+        for (id, trail) in &self.trails {
+            let color = palette_color(*id as u32);
+            let count = trail.points.len() as u32;
+            let mut previous = None;
+            for (index, point) in trail.points.iter().enumerate() {
+                let x = (point.0 * self.width as f32 + 0.5) as i32;
+                let y = (point.1 * self.height as f32 + 0.5) as i32;
+                if let Some(from) = previous {
+                    let ramp = (255 - TRAIL_MIN_ALPHA) * (index as u32 + 1) / count;
+                    self.trail_segment(buf, from, (x, y), color, (TRAIL_MIN_ALPHA + ramp) as u8);
+                }
+                previous = Some((x, y));
+            }
+        }
+    }
+
+    /// Blend a straight run between two canvas points (Bresenham, integer only
+    /// for the `no_std` baseline).
+    fn trail_segment(
+        &self,
+        buf: &mut [u8],
+        from: (i32, i32),
+        to: (i32, i32),
+        color: [u8; 4],
+        alpha: u8,
+    ) {
+        let (mut x, mut y) = from;
+        let dx = (to.0 - x).abs();
+        let dy = -(to.1 - y).abs();
+        let sx = if x < to.0 { 1 } else { -1 };
+        let sy = if y < to.1 { 1 } else { -1 };
+        let mut err = dx + dy;
+        loop {
+            self.trail_dot(buf, x, y, color, alpha);
+            if x == to.0 && y == to.1 {
+                return;
+            }
+            let e2 = 2 * err;
+            if e2 >= dy {
+                err += dy;
+                x += sx;
+            }
+            if e2 <= dx {
+                err += dx;
+                y += sy;
+            }
+        }
+    }
+
+    /// Blend one square of the stroke, `thickness` wide, clipped to the canvas.
+    fn trail_dot(&self, buf: &mut [u8], x: i32, y: i32, color: [u8; 4], alpha: u8) {
+        let w = self.width as i32;
+        let h = self.height as i32;
+        let half = self.thickness as i32 / 2;
+        for py in y - half..=y + half {
+            if py < 0 || py >= h {
+                continue;
+            }
+            for px in x - half..=x + half {
+                if px < 0 || px >= w {
+                    continue;
+                }
+                blend_px(buf, ((py * w + px) * 4) as usize, color, alpha);
+            }
         }
     }
 
@@ -535,6 +678,19 @@ impl AsyncElement for AnalyticsOverlay {
                 "draw each detection's tracking id above its box",
             )
             .with_default("false"),
+            PropertySpec::new(
+                "show-trail",
+                PropKind::Bool,
+                "draw the path each tracked object took",
+            )
+            .with_default("false"),
+            PropertySpec::new(
+                "trail-length",
+                PropKind::Uint,
+                "how many past positions a trail keeps (>= 2)",
+            )
+            .with_range("2", "65535")
+            .with_default("30"),
         ];
         PROPS
     }
@@ -557,6 +713,14 @@ impl AsyncElement for AnalyticsOverlay {
                 self.show_track = value.as_bool().ok_or(PropError::Type)?;
                 Ok(())
             }
+            "show-trail" => {
+                self.show_trail = value.as_bool().ok_or(PropError::Type)?;
+                Ok(())
+            }
+            "trail-length" => {
+                self.trail_length = (value.as_uint().ok_or(PropError::Type)? as usize).max(2);
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -567,6 +731,8 @@ impl AsyncElement for AnalyticsOverlay {
             "mask-alpha" => Some(PropValue::Uint(self.mask_alpha as u64)),
             "show-score" => Some(PropValue::Bool(self.show_score)),
             "show-track" => Some(PropValue::Bool(self.show_track)),
+            "show-trail" => Some(PropValue::Bool(self.show_trail)),
+            "trail-length" => Some(PropValue::Uint(self.trail_length as u64)),
             _ => None,
         }
     }
@@ -589,7 +755,14 @@ impl AsyncElement for AnalyticsOverlay {
                         .get::<AnalyticsMeta>()
                         .map(AnalyticsShapes::collect)
                         .unwrap_or_default();
-                    if !shapes.is_empty() {
+                    self.drawn += 1;
+                    if self.show_trail {
+                        self.record_trails(&shapes);
+                    }
+                    // A live trail outlives the detections that fed it, so this
+                    // frame may have something to paint with no shapes of its own.
+                    let has_trail = self.show_trail && !self.trails.is_empty();
+                    if !shapes.is_empty() || has_trail {
                         let MemoryDomain::System(slice) = &mut frame.domain else {
                             return Err(G2gError::UnsupportedDomain);
                         };
@@ -600,7 +773,6 @@ impl AsyncElement for AnalyticsOverlay {
                         }
                         self.render(&mut buf[..need], &shapes);
                     }
-                    self.drawn += 1;
                     out.push(PipelinePacket::DataFrame(frame)).await?;
                 }
                 PipelinePacket::CapsChanged(caps) => {
@@ -667,9 +839,21 @@ mod tests {
             mask_alpha: MASK_ALPHA_DEFAULT,
             show_score: false,
             show_track: false,
+            show_trail: false,
+            trail_length: TRAIL_LENGTH_DEFAULT,
+            trails: BTreeMap::new(),
             configured: true,
             drawn: 0,
         }
+    }
+
+    /// A meta holding one detection wired to the tracking id `track`.
+    fn tracked_meta(detection: ObjectDetection, track: u64) -> AnalyticsMeta {
+        let mut meta = AnalyticsMeta::new();
+        let node = meta.add_detection(detection);
+        let tracking = meta.push(AnalyticsNode::Tracking(Tracking { object_id: track }));
+        meta.relate(node, tracking, RelationKind::Tracks);
+        meta
     }
 
     /// The shapes of a meta holding just these detections.
@@ -1078,6 +1262,91 @@ mod tests {
             sink.last.expect("forwarded"),
             bytes,
             "pixels unchanged without meta"
+        );
+    }
+
+    #[tokio::test]
+    async fn trail_joins_a_track_across_frames_and_leaves_it_alone_untracked() {
+        // Two frames of one tracked box moving down the right half of a 32x32
+        // canvas. The trail runs through the bottom edge of each box, so the
+        // midpoint between the two bottom edges must be painted on frame two.
+        let mut ov = AnalyticsOverlay::new().with_thickness(1).with_trail(true);
+        ov.configure_pipeline(&rgba_caps(32, 32)).unwrap();
+        let mut sink = PixelSink::default();
+        for y in [0.25_f32, 0.5] {
+            let meta = tracked_meta(det(0.5, y, 0.25, 0.25, 0), 3);
+            let frame = rgba_frame_with_meta(32, 32, meta);
+            ov.process(PipelinePacket::DataFrame(frame), &mut sink)
+                .await
+                .unwrap();
+        }
+        let out = sink.last.expect("frame forwarded");
+        // Bottom-centre of the boxes: (20, 16) then (20, 24); the segment
+        // between them covers (20, 20).
+        assert_ne!(
+            px(&out, 32, 20, 20),
+            [0, 0, 0, 255],
+            "trail drawn between the two positions"
+        );
+
+        // The same movement without a Tracks relation records nothing to draw.
+        let mut untracked = AnalyticsOverlay::new().with_thickness(1).with_trail(true);
+        untracked.configure_pipeline(&rgba_caps(32, 32)).unwrap();
+        let mut sink = PixelSink::default();
+        for y in [0.25_f32, 0.5] {
+            let mut meta = AnalyticsMeta::new();
+            meta.add_detection(det(0.5, y, 0.25, 0.25, 0));
+            let frame = rgba_frame_with_meta(32, 32, meta);
+            untracked
+                .process(PipelinePacket::DataFrame(frame), &mut sink)
+                .await
+                .unwrap();
+        }
+        assert!(untracked.trails.is_empty(), "no track, no trail");
+        assert_eq!(
+            px(&sink.last.expect("forwarded"), 32, 20, 20),
+            [0, 0, 0, 255],
+            "nothing painted between the boxes"
+        );
+    }
+
+    #[tokio::test]
+    async fn trail_is_capped_at_its_length_and_expires_with_its_track() {
+        let mut ov = AnalyticsOverlay::new()
+            .with_trail(true)
+            .with_trail_length(4);
+        ov.configure_pipeline(&rgba_caps(32, 32)).unwrap();
+        let mut sink = PixelSink::default();
+        for _ in 0..10 {
+            let frame = rgba_frame_with_meta(32, 32, tracked_meta(det(0.4, 0.4, 0.2, 0.2, 0), 8));
+            ov.process(PipelinePacket::DataFrame(frame), &mut sink)
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            ov.trails[&8].points.len(),
+            4,
+            "only the last trail-length points are kept"
+        );
+
+        // Frames with no detections age the trail out; it survives the first few.
+        for _ in 0..TRAIL_TTL_FRAMES {
+            let frame = rgba_frame_with_meta(32, 32, AnalyticsMeta::new());
+            ov.process(PipelinePacket::DataFrame(frame), &mut sink)
+                .await
+                .unwrap();
+        }
+        assert!(
+            ov.trails.contains_key(&8),
+            "trail outlives a gap in the track"
+        );
+        let frame = rgba_frame_with_meta(32, 32, AnalyticsMeta::new());
+        ov.process(PipelinePacket::DataFrame(frame), &mut sink)
+            .await
+            .unwrap();
+        assert!(
+            ov.trails.is_empty(),
+            "trail dropped once its track is stale"
         );
     }
 
