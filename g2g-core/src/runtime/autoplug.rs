@@ -547,6 +547,7 @@ mod factory {
         name: &'static str,
         templates: Vec<PadTemplate>,
         build: fn() -> Box<dyn DynAsyncElement>,
+        usable: Option<fn() -> bool>,
     }
 
     impl LaunchFactory {
@@ -561,6 +562,7 @@ mod factory {
                 name,
                 templates,
                 build,
+                usable: None,
             }
         }
 
@@ -573,9 +575,27 @@ mod factory {
             Self::new(name, E::pad_templates(), build)
         }
 
+        /// Declare a check for whether this element can run on this machine
+        /// right now, beyond having been compiled in: a display sink asking
+        /// whether there is a display to present on, say.
+        ///
+        /// Only [`register_alias`](Registry::register_alias) consults it, so an
+        /// `autovideosink` falls through a sink with nothing to draw on while a
+        /// pipeline naming that sink outright still fails and says why.
+        pub fn with_usable(mut self, usable: fn() -> bool) -> Self {
+            self.usable = Some(usable);
+            self
+        }
+
         /// This factory's element name.
         pub fn name(&self) -> &'static str {
             self.name
+        }
+
+        /// Whether this element can run here, per the check it declared.
+        /// `true` when it declared none.
+        pub fn usable(&self) -> bool {
+            self.usable.is_none_or(|check| check())
         }
     }
 
@@ -1393,14 +1413,25 @@ mod factory {
             self
         }
 
-        /// Resolve a name through the alias table to the first registered target,
-        /// or the name itself when it is not an alias. One hop only (aliases do not
-        /// chain to other aliases).
-        fn resolve_alias<'a>(&self, name: &'a str) -> &'a str {
+        /// Resolve a name through the alias table to the first target that is
+        /// registered and can run here, or the name itself when it is not an
+        /// alias. One hop only (aliases do not chain to other aliases).
+        ///
+        /// A launch target that declared a
+        /// [`with_usable`](LaunchFactory::with_usable) check is skipped when the
+        /// check says no, so `autovideosink` falls past a display sink that was
+        /// compiled in but has no display to present on. The last entry of an
+        /// auto alias is `fakesink`, which always runs.
+        pub(crate) fn resolve_alias<'a>(&self, name: &'a str) -> &'a str {
             if let Some((_, targets)) = self.aliases.iter().find(|(a, _)| *a == name) {
                 for &t in *targets {
+                    if let Some(factory) = self.launch.iter().find(|f| f.name == t) {
+                        if factory.usable() {
+                            return t;
+                        }
+                        continue;
+                    }
                     if self.sources.iter().any(|s| s.name == t)
-                        || self.launch.iter().any(|f| f.name == t)
                         || self.muxers.iter().any(|m| m.name == t)
                         || self.demuxes.iter().any(|d| d.name == t)
                     {
@@ -2675,5 +2706,42 @@ mod tests {
             2,
             "provider: a parser is spliced in ahead of the decoder"
         );
+    }
+
+    fn named_sink(name: &'static str) -> LaunchFactory {
+        LaunchFactory::new(name, Vec::new(), || alloc::boxed::Box::new(Dummy))
+    }
+
+    #[test]
+    fn an_alias_falls_past_a_target_that_cannot_run_here() {
+        let mut reg = Registry::new();
+        reg.register_launch(named_sink("displaysink").with_usable(|| false));
+        reg.register_launch(named_sink("nullsink"));
+        reg.register_alias("autosink", &["displaysink", "nullsink"]);
+
+        assert_eq!(reg.resolve_alias("autosink"), "nullsink");
+        assert!(
+            reg.make_element("displaysink").is_some(),
+            "naming the sink outright still builds it, so it reports its own failure"
+        );
+    }
+
+    #[test]
+    fn an_alias_takes_the_first_target_that_can_run_here() {
+        let mut reg = Registry::new();
+        reg.register_launch(named_sink("displaysink").with_usable(|| true));
+        reg.register_launch(named_sink("nullsink"));
+        reg.register_alias("autosink", &["displaysink", "nullsink"]);
+
+        assert_eq!(reg.resolve_alias("autosink"), "displaysink");
+    }
+
+    #[test]
+    fn a_target_declaring_no_check_stays_usable() {
+        let mut reg = Registry::new();
+        reg.register_launch(named_sink("plainsink"));
+        reg.register_alias("autosink", &["plainsink"]);
+
+        assert_eq!(reg.resolve_alias("autosink"), "plainsink");
     }
 }

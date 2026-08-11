@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1028: an element can declare whether it can run on this machine right now (`LaunchFactory::with_usable`), and the `auto*sink` aliases resolve through it, so `autovideosink` falls past a display sink that was compiled in but has no compositor to present on and reaches `fakesink`. Only alias resolution consults the check: a pipeline naming the sink outright still builds it and lets it report its own failure.
 - M1027: the Vulkan decoder bounds its video session by the device's maximum coded extent instead of the picture's own, so small geometries the driver used to refuse outright now decode.
 - M1026: the Vulkan decoder enables the `synchronization2` feature it barriers with, and zeroes the bitstream buffer padding it hands the driver instead of leaving fresh allocation garbage there.
 - M1025: a `file://` URI is typed by sniffing the file's header, so `uridecodebin` plays an elementary stream or a non-MP4 container instead of reading every path as an MP4.

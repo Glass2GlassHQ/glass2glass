@@ -1932,25 +1932,33 @@ fn register_feature_gated(reg: &mut Registry) {
     reg.register_launch(LaunchFactory::new("gstwrap", Vec::new(), || {
         Box::new(crate::gstwrap::GstWrap::new())
     }));
+    // Each of the three presents on Wayland, so each declares the same
+    // compositor check; it only changes what the `auto*sink` aliases fall
+    // through to, never what a pipeline naming the sink outright does.
     #[cfg(all(target_os = "linux", feature = "wayland-sink"))]
-    reg.register_launch(LaunchFactory::new("waylandsink", Vec::new(), || {
-        Box::new(WaylandSink::new())
-    }));
+    reg.register_launch(
+        LaunchFactory::new("waylandsink", Vec::new(), || Box::new(WaylandSink::new()))
+            .with_usable(crate::waylanddisplay::compositor_reachable),
+    );
     // Vendor-neutral EGL / GL ES display sink under its gst name; it declares
     // NV12 + RGBA pad templates, so decodebin can auto-plug onto it.
     #[cfg(all(target_os = "linux", feature = "gl-sink"))]
-    reg.register_launch(LaunchFactory::of::<crate::glsink::GlSink>(
-        "glimagesink",
-        || Box::new(crate::glsink::GlSink::new()),
-    ));
+    reg.register_launch(
+        LaunchFactory::of::<crate::glsink::GlSink>("glimagesink", || {
+            Box::new(crate::glsink::GlSink::new())
+        })
+        .with_usable(crate::waylanddisplay::compositor_reachable),
+    );
     // Windowed wgpu display sink: it takes GPU-resident frames as they are, so a
     // decoder that keeps them on the GPU reaches the screen with no upload. Its
     // NV12 + RGBA pad templates let decodebin auto-plug onto it.
     #[cfg(all(target_os = "linux", feature = "wgpu-present"))]
-    reg.register_launch(LaunchFactory::of::<crate::wgpupresent::WgpuPresentSink>(
-        "wgpusink",
-        || Box::new(crate::wgpupresent::WgpuPresentSink::new()),
-    ));
+    reg.register_launch(
+        LaunchFactory::of::<crate::wgpupresent::WgpuPresentSink>("wgpusink", || {
+            Box::new(crate::wgpupresent::WgpuPresentSink::new())
+        })
+        .with_usable(crate::waylanddisplay::compositor_reachable),
+    );
     // WebRTC WHIP egress; the `location` property targets the endpoint. The URL
     // defaults empty (set it via `webrtcsink location=...`); publishing starts
     // on the first frame.
