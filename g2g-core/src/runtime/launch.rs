@@ -671,6 +671,55 @@ fn is_decodebin(name: &str) -> bool {
 /// wander.
 const DECODEBIN_MAX_DEPTH: usize = 6;
 
+/// The decode chain to raw for `input`, built for what `consumer` (the element
+/// right after the macro, by launch name) accepts.
+///
+/// The search walks to a *shape*, raw video or raw audio, and the first raw
+/// format a decoder lists satisfies that shape whether or not the consumer takes
+/// it: that is how `decodebin ! wgpusink` reached a strict-NV12 sink with a
+/// decoder set to I420. Narrowing the target to the consumer's accept set fixes
+/// the pick, and instantiating from the chain (rather than naming the factories)
+/// is what carries the chosen caps into the element. A consumer that declares no
+/// accept set, or one no chain can satisfy, falls back to the plain raw target,
+/// so a line that needs a converter fails where it did before rather than
+/// silently finding nothing.
+fn autoplug_for_consumer(
+    registry: &Registry,
+    input: &Caps,
+    consumer: Option<&str>,
+    preferred: MemoryDomainKind,
+    avoided: &[&str],
+) -> Option<Vec<Box<dyn DynAsyncElement>>> {
+    let raw = |c: &Caps| is_raw_video(c) || is_raw_audio(c);
+    let accepted = consumer.and_then(|name| registry.declared_accepted_caps(name));
+    let fits = |c: &Caps| {
+        raw(c)
+            && accepted.as_ref().is_none_or(|set| {
+                !crate::caps::CapsSet::one(c.clone())
+                    .intersect(set)
+                    .is_empty()
+            })
+    };
+    let mut chain = registry
+        .autoplug_avoiding(input, &fits, DECODEBIN_MAX_DEPTH, preferred, avoided)
+        .or_else(|| {
+            registry.autoplug_avoiding(input, &raw, DECODEBIN_MAX_DEPTH, preferred, avoided)
+        })?;
+    // M421/M676: prepend the re-framing parser ahead of a real decode of an
+    // elementary stream, like the boxed `decodebin` splice (the caps-identity
+    // parser is invisible to the shortest-chain search, so it never appears in
+    // the chain).
+    if !chain.is_empty() {
+        if let Some(parser) = registry
+            .parser_name(input)
+            .and_then(|p| registry.make_element(p))
+        {
+            chain.insert(0, parser);
+        }
+    }
+    Some(chain)
+}
+
 /// Expand every `decodebin` node into the decoder chain the registry auto-plugs
 /// from its predecessor's declared caps down to raw (video or audio). An empty
 /// chain (the input is already raw) drops the node entirely, so its predecessor
@@ -746,52 +795,44 @@ fn expand_decodebin(
                                     instance: None,
                                     log_category: None,
                                 }));
-                                upstream = Some((primary.demux.to_string(), primary.props));
                                 primary.caps
                             }
                             None => caps,
                         };
-                    let target = |c: &Caps| is_raw_video(c) || is_raw_audio(c);
-                    // M1018: the element right after the `decodebin` picks the
-                    // decoder's memory domain, so a GPU-resident consumer gets a
-                    // decoder that decodes into its domain instead of one whose
-                    // frames have to be downloaded first. Only the immediate
-                    // consumer counts, the rule the graph-side derivation follows.
-                    let preferred = match items.peek() {
-                        Some(Item::Element(consumer)) => {
-                            registry.declared_memory_preference(&consumer.name)
-                        }
-                        _ => MemoryDomainKind::System,
+                    // M1018 / M1024: the element right after the `decodebin`
+                    // decides both what memory the decoder should decode into
+                    // (a GPU-resident consumer gets a decoder that decodes into
+                    // its domain rather than one whose frames have to be
+                    // downloaded) and which raw format to walk to. Only the
+                    // immediate consumer counts, the rule the graph-side
+                    // derivation follows.
+                    let consumer = match items.peek() {
+                        Some(Item::Element(consumer)) => Some(consumer.name.clone()),
+                        _ => None,
                     };
-                    let mut names = registry
-                        .autoplug_names_avoiding(
-                            &chain_input,
-                            &target,
-                            DECODEBIN_MAX_DEPTH,
-                            preferred,
-                            avoided,
-                        )
-                        .ok_or_else(|| {
-                            ParseError::NoDecodeChain(alloc::format!("{chain_input:?}"))
-                        })?;
-                    // M421/M676: prepend the re-framing parser ahead of a real
-                    // decode of an elementary stream, like the boxed `decodebin`
-                    // splice (the caps-identity parser is invisible to the
-                    // shortest-chain search, so it never appears in `names`).
-                    if let Some(parser) = registry.parser_name(&chain_input) {
-                        if !names.is_empty() {
-                            names.insert(0, parser);
-                        }
+                    let preferred = consumer
+                        .as_deref()
+                        .map_or(MemoryDomainKind::System, |name| {
+                            registry.declared_memory_preference(name)
+                        });
+                    let decoders = autoplug_for_consumer(
+                        registry,
+                        &chain_input,
+                        consumer.as_deref(),
+                        preferred,
+                        avoided,
+                    )
+                    .ok_or_else(|| ParseError::NoDecodeChain(alloc::format!("{chain_input:?}")))?;
+                    // Built here rather than named, so each element is
+                    // constructed for the caps the search chose it to produce (a
+                    // multi-format decoder emits the format the consumer takes,
+                    // not the first one it lists). A pre-built node carries no
+                    // name, so `upstream` clears as it does after a
+                    // `uridecodebin`.
+                    for element in decoders {
+                        new_chain.push(Item::Prebuilt(PrebuiltNode::Element(element)));
                     }
-                    for name in names {
-                        new_chain.push(Item::Element(ElementSpec {
-                            name: name.to_string(),
-                            props: Vec::new(),
-                            instance: None,
-                            log_category: None,
-                        }));
-                        upstream = Some((name.to_string(), Vec::new()));
-                    }
+                    upstream = None;
                 }
                 Item::Element(spec) => {
                     upstream = Some((spec.name.clone(), spec.props.clone()));

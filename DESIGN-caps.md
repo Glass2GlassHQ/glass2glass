@@ -917,6 +917,19 @@ forwarded in-band ahead of the first frame as decoder extradata).
   and returns `None` when the line named that element itself, when it has already
   been barred, or when no factory owns it.
 
+  The consumer settles the *format* as well (M1024). The search walks to a shape,
+  raw video or raw audio, and the first raw format a decoder lists satisfies that
+  shape whether or not the consumer takes it, which is how a chain reached a
+  strict-NV12 sink with a decoder set to I420. The target is narrowed by the
+  consumer's declared accept set (`Registry::declared_accepted_caps`, read the
+  same construct-to-ask way as the memory domain), falling back to the plain raw
+  target when nothing satisfies it, so a line that genuinely needs a converter
+  fails as before rather than finding nothing. The inline `decodebin` then
+  *instantiates* its chain from the search result instead of naming the factories,
+  as `uridecodebin` always did: the caps the search chose reach the element only
+  through the factory that takes them, and a parameterless launch factory would
+  build the decoder's default format again.
+
 #### 4.13.10 Current limits
 
 The solver is **arc consistency** (constraint propagation over per-link caps),

@@ -261,16 +261,6 @@ Phased plan:
   Vulkan Video path refuses. Next step is validation-layer output, which needs
   `vulkan-validation-layers` installed on the test host.
 
-- **An auto-plugged CPU decoder does not fit a GPU sink.** `decodebin ! wgpusink`
-  picks `ffmpegdec`'s first raw output (I420) where the sink takes only NV12 /
-  RGBA, so the line fails to negotiate and needs an explicit `videoconvert`;
-  naming `ffmpegdec` by hand fails the same way, so this predates the fallback
-  that now lands there. The decodebin expansion already reads the consumer for its
-  memory domain (M1018) and could steer the decoder's output format the same way,
-  which is what `Registry::decodebin` does on the graph path (M414). The text path
-  builds by name through a parameterless launch factory, so the chosen output caps
-  never reach the element: it needs a property assignment, not a different search.
-
 ## CUDA / display
 
 - `CudaKmsSink` on-tty validation (M255): the GL-on-KMS present path is authored
