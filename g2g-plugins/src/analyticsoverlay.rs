@@ -6,6 +6,11 @@
 //! instance segmentation as a translucent fill of its mask, and a region of
 //! interest as a dashed outline in the colour of the mask that contains it.
 //!
+//! `show-score` / `show-track` add a caption bar above each detection box with
+//! its confidence and its tracking id. Class names are not drawn: an
+//! `ObjectDetection` carries a `u32` label id and the meta has no name table, so
+//! the producer's class strings never reach this element.
+//!
 //! Pairs with the M100 metadata-through-fan-out path: a `decode -> tee ->
 //! {detect, video} -> overlay -> display` diamond runs the detector on one branch
 //! and carries its `AnalyticsMeta` (shared by Arc) onto the video branch, where
@@ -23,6 +28,8 @@ use core::future::Future;
 use core::pin::Pin;
 
 use alloc::boxed::Box;
+use alloc::format;
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use g2g_core::{
@@ -32,7 +39,8 @@ use g2g_core::{
     Roi, Segmentation,
 };
 
-use crate::paint::blend_px;
+use crate::bitmapfont::{glyph, GLYPH_ADVANCE, GLYPH_HEIGHT};
+use crate::paint::{blend_px, Canvas};
 
 /// Default mask fill alpha: faint enough that the picture reads through the fill.
 pub(crate) const MASK_ALPHA_DEFAULT: u8 = 96;
@@ -52,7 +60,10 @@ pub(crate) const ROI_DASH_PX: i32 = 6;
 /// ```no_run
 /// use g2g_plugins::analyticsoverlay::AnalyticsOverlay;
 ///
-/// let overlay = AnalyticsOverlay::new().with_thickness(3).with_mask_alpha(120);
+/// let overlay = AnalyticsOverlay::new()
+///     .with_thickness(3)
+///     .with_mask_alpha(120)
+///     .with_score(true);
 /// ```
 #[derive(Debug)]
 pub struct AnalyticsOverlay {
@@ -62,8 +73,20 @@ pub struct AnalyticsOverlay {
     thickness: u32,
     /// Alpha the mask fill is blended at (0 = invisible, 255 = opaque).
     mask_alpha: u8,
+    /// Draw each detection's confidence in its caption.
+    show_score: bool,
+    /// Draw each detection's tracking id in its caption, where it has one.
+    show_track: bool,
     configured: bool,
     drawn: u64,
+}
+
+/// A detection box to outline, with the id of the tracking node related to it
+/// when the producer wired one (`Detection -Tracks-> Tracking`).
+#[derive(Debug)]
+pub(crate) struct PaintedDetection {
+    pub detection: ObjectDetection,
+    pub track_id: Option<u64>,
 }
 
 /// A segmentation mask to fill, with the palette slot of the instance it belongs
@@ -89,7 +112,7 @@ pub(crate) struct PaintedRoi {
 /// same palette slots and the same containment pairing.
 #[derive(Debug, Default)]
 pub(crate) struct AnalyticsShapes {
-    pub detections: Vec<ObjectDetection>,
+    pub detections: Vec<PaintedDetection>,
     pub masks: Vec<PaintedMask>,
     pub rois: Vec<PaintedRoi>,
 }
@@ -102,7 +125,10 @@ impl AnalyticsShapes {
         let mut slot_of_node: Vec<Option<u32>> = alloc::vec![None; meta.nodes.len()];
         for (index, node) in meta.nodes.iter().enumerate() {
             match node {
-                AnalyticsNode::Detection(detection) => shapes.detections.push(*detection),
+                AnalyticsNode::Detection(detection) => shapes.detections.push(PaintedDetection {
+                    detection: *detection,
+                    track_id: track_id_of(meta, index),
+                }),
                 AnalyticsNode::Segmentation(segmentation) => {
                     let palette_index = shapes.masks.len() as u32;
                     slot_of_node[index] = Some(palette_index);
@@ -138,6 +164,18 @@ impl AnalyticsShapes {
     }
 }
 
+/// The `object_id` of the tracking node the detection at `index` tracks as, if
+/// the producer wired one.
+fn track_id_of(meta: &AnalyticsMeta, index: usize) -> Option<u64> {
+    meta.relations
+        .iter()
+        .find(|r| r.from == index && r.kind == RelationKind::Tracks)
+        .and_then(|r| match meta.nodes.get(r.to) {
+            Some(AnalyticsNode::Tracking(tracking)) => Some(tracking.object_id),
+            _ => None,
+        })
+}
+
 impl Default for AnalyticsOverlay {
     fn default() -> Self {
         Self::new()
@@ -152,9 +190,23 @@ impl AnalyticsOverlay {
             height: 0,
             thickness: 2,
             mask_alpha: MASK_ALPHA_DEFAULT,
+            show_score: false,
+            show_track: false,
             configured: false,
             drawn: 0,
         }
+    }
+
+    /// Draw each detection's confidence above its box.
+    pub fn with_score(mut self, show: bool) -> Self {
+        self.show_score = show;
+        self
+    }
+
+    /// Draw each detection's tracking id above its box.
+    pub fn with_track(mut self, show: bool) -> Self {
+        self.show_track = show;
+        self
     }
 
     /// Set the box outline thickness in pixels (clamped to at least 1).
@@ -206,11 +258,62 @@ impl AnalyticsOverlay {
         for mask in &shapes.masks {
             self.fill_mask(buf, mask);
         }
-        for detection in &shapes.detections {
-            self.outline(buf, detection.bbox, palette_color(detection.label), false);
+        for painted in &shapes.detections {
+            let color = palette_color(painted.detection.label);
+            self.outline(buf, painted.detection.bbox, color, false);
+            if let Some(text) = self.caption(painted) {
+                self.draw_caption(buf, painted.detection.bbox, &text, color);
+            }
         }
         for roi in &shapes.rois {
             self.outline(buf, roi.roi.bbox, palette_color(roi.palette_index), true);
+        }
+    }
+
+    /// The caption for one detection, or `None` when neither part is enabled (or
+    /// a tracking id was asked for and the producer wired none).
+    fn caption(&self, painted: &PaintedDetection) -> Option<String> {
+        let track = painted.track_id.filter(|_| self.show_track);
+        match (track, self.show_score) {
+            (Some(id), true) => Some(format!("ID:{id} {}", score_text(&painted.detection))),
+            (Some(id), false) => Some(format!("ID:{id}")),
+            (None, true) => Some(score_text(&painted.detection)),
+            (None, false) => None,
+        }
+    }
+
+    /// One source font pixel per this many output pixels, from the frame height
+    /// so a caption stays readable across resolutions.
+    fn text_scale(&self) -> i32 {
+        (self.height / 240).max(1) as i32
+    }
+
+    /// Draw `text` in a filled bar the colour of its box, sitting on the box's
+    /// top edge, or just inside it when the box starts at the top of the frame.
+    fn draw_caption(&self, buf: &mut [u8], bbox: BBox, text: &str, color: [u8; 4]) {
+        let w = self.width as i32;
+        let h = self.height as i32;
+        let Some((x0, y0, _, _)) = pixel_rect(bbox, w, h) else {
+            return;
+        };
+        let scale = self.text_scale();
+        let pad = scale;
+        let cell_w = GLYPH_ADVANCE as i32 * scale;
+        let bar_w = text.chars().count() as i32 * cell_w + 2 * pad;
+        let bar_h = GLYPH_HEIGHT as i32 * scale + 2 * pad;
+        let bar_x = x0.min((w - bar_w).max(0)).max(0);
+        let bar_y = if y0 - bar_h >= 0 { y0 - bar_h } else { y0 };
+        let mut canvas = Canvas {
+            pixels: buf,
+            width: w,
+            height: h,
+        };
+        canvas.fill_rect(bar_x, bar_y, bar_w, bar_h, color);
+        let ink = contrast_ink(color);
+        let mut gx = bar_x + pad;
+        for c in text.chars() {
+            canvas.blit_glyph(gx, bar_y + pad, scale, glyph(c), ink);
+            gx += cell_w;
         }
     }
 
@@ -318,6 +421,27 @@ fn vspan(buf: &mut [u8], w: i32, h: i32, y0: i32, y1: i32, x: i32, paint: SpanPa
     }
 }
 
+/// A detection's confidence as a fixed two-decimal string (`0.92`). Built from
+/// integer parts: the `no_std` baseline has no float formatting to lean on, and
+/// `+ 0.5` rounds without `f32::round`.
+fn score_text(detection: &ObjectDetection) -> String {
+    let hundredths = (detection.confidence.clamp(0.0, 1.0) * 100.0 + 0.5) as u32;
+    format!("{}.{:02}", hundredths / 100, hundredths % 100)
+}
+
+/// Black or white, whichever reads on `background`. Rec. 601 luma, since the
+/// palette is sRGB and the threshold only has to separate light from dark.
+fn contrast_ink(background: [u8; 4]) -> [u8; 4] {
+    let luma =
+        (background[0] as u32 * 299 + background[1] as u32 * 587 + background[2] as u32 * 114)
+            / 1000;
+    if luma > 140 {
+        [0x00, 0x00, 0x00, 0xFF]
+    } else {
+        [0xFF, 0xFF, 0xFF, 0xFF]
+    }
+}
+
 /// A fixed, opaque RGB palette so adjacent slots are visually distinct: a
 /// detection box indexes it by class label, a mask and its ROI by instance.
 /// Cycles for indices beyond the palette length. Shared with the Vello overlay
@@ -399,6 +523,18 @@ impl AsyncElement for AnalyticsOverlay {
             )
             .with_range("0", "255")
             .with_default("96"),
+            PropertySpec::new(
+                "show-score",
+                PropKind::Bool,
+                "draw each detection's confidence above its box",
+            )
+            .with_default("false"),
+            PropertySpec::new(
+                "show-track",
+                PropKind::Bool,
+                "draw each detection's tracking id above its box",
+            )
+            .with_default("false"),
         ];
         PROPS
     }
@@ -413,6 +549,14 @@ impl AsyncElement for AnalyticsOverlay {
                 self.mask_alpha = value.as_uint().ok_or(PropError::Type)?.min(255) as u8;
                 Ok(())
             }
+            "show-score" => {
+                self.show_score = value.as_bool().ok_or(PropError::Type)?;
+                Ok(())
+            }
+            "show-track" => {
+                self.show_track = value.as_bool().ok_or(PropError::Type)?;
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -421,6 +565,8 @@ impl AsyncElement for AnalyticsOverlay {
         match name {
             "thickness" => Some(PropValue::Uint(self.thickness as u64)),
             "mask-alpha" => Some(PropValue::Uint(self.mask_alpha as u64)),
+            "show-score" => Some(PropValue::Bool(self.show_score)),
+            "show-track" => Some(PropValue::Bool(self.show_track)),
             _ => None,
         }
     }
@@ -480,7 +626,7 @@ mod tests {
     use super::*;
     use g2g_core::frame::Frame;
     use g2g_core::memory::SystemSlice;
-    use g2g_core::{FrameTiming, Mask, PushOutcome, Rate};
+    use g2g_core::{FrameTiming, Mask, PushOutcome, Rate, Tracking};
 
     fn solid(w: usize, h: usize, rgba: [u8; 4]) -> Vec<u8> {
         let mut v = Vec::with_capacity(w * h * 4);
@@ -519,6 +665,8 @@ mod tests {
             height,
             thickness,
             mask_alpha: MASK_ALPHA_DEFAULT,
+            show_score: false,
+            show_track: false,
             configured: true,
             drawn: 0,
         }
@@ -554,6 +702,113 @@ mod tests {
             confidence: 0.9,
             mask: Mask::new(mask_w, mask_h, mask_w, data).expect("mask geometry"),
         }
+    }
+
+    #[test]
+    fn score_text_is_two_decimals() {
+        let text = |confidence| {
+            score_text(&ObjectDetection {
+                bbox: BBox {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 1.0,
+                    h: 1.0,
+                },
+                label: 0,
+                confidence,
+            })
+        };
+        assert_eq!(text(0.923), "0.92");
+        assert_eq!(text(0.5), "0.50");
+        assert_eq!(text(1.0), "1.00");
+        assert_eq!(text(0.0), "0.00");
+    }
+
+    #[test]
+    fn collect_pairs_a_detection_with_the_tracking_it_tracks_as() {
+        let mut meta = AnalyticsMeta::new();
+        let tracked = meta.add_detection(det(0.1, 0.1, 0.2, 0.2, 0));
+        let untracked = meta.add_detection(det(0.5, 0.5, 0.2, 0.2, 1));
+        let tracking = meta.push(AnalyticsNode::Tracking(Tracking { object_id: 77 }));
+        meta.relate(tracked, tracking, RelationKind::Tracks);
+
+        let shapes = AnalyticsShapes::collect(&meta);
+        assert_eq!(shapes.detections[0].track_id, Some(77));
+        assert_eq!(
+            shapes.detections[1].track_id, None,
+            "detection {untracked} has no Tracks relation"
+        );
+    }
+
+    #[test]
+    fn captions_are_off_until_asked_for() {
+        let shapes = detection_shapes(&[det(0.25, 0.25, 0.5, 0.5, 0)]);
+        let painted = &shapes.detections[0];
+        assert_eq!(overlay(64, 64, 1).caption(painted), None);
+        assert_eq!(
+            overlay(64, 64, 1).with_score(true).caption(painted),
+            Some(String::from("0.90"))
+        );
+    }
+
+    #[test]
+    fn caption_shows_the_tracking_id_when_one_is_wired() {
+        let mut meta = AnalyticsMeta::new();
+        let detection = meta.add_detection(det(0.25, 0.25, 0.5, 0.5, 0));
+        let tracking = meta.push(AnalyticsNode::Tracking(Tracking { object_id: 4 }));
+        meta.relate(detection, tracking, RelationKind::Tracks);
+        let shapes = AnalyticsShapes::collect(&meta);
+        let painted = &shapes.detections[0];
+
+        assert_eq!(
+            overlay(64, 64, 1).with_track(true).caption(painted),
+            Some(String::from("ID:4"))
+        );
+        assert_eq!(
+            overlay(64, 64, 1)
+                .with_track(true)
+                .with_score(true)
+                .caption(painted),
+            Some(String::from("ID:4 0.90"))
+        );
+    }
+
+    #[test]
+    fn caption_paints_a_bar_above_the_box_and_leaves_the_box_alone() {
+        // A 64x64 canvas so the glyph scale is 1 and the box has room above it.
+        let ov = overlay(64, 64, 1).with_score(true);
+        let mut buf = solid(64, 64, [0, 0, 0, 255]);
+        // Box pixels (16,16)..(47,47); the caption bar sits directly above row 16.
+        ov.render(&mut buf, &detection_shapes(&[det(0.25, 0.25, 0.5, 0.5, 0)]));
+        let bar_row = 16 - (GLYPH_HEIGHT as usize + 2);
+        assert_ne!(
+            px(&buf, 64, 16, bar_row),
+            [0, 0, 0, 255],
+            "caption bar painted above the box"
+        );
+        assert_eq!(
+            px(&buf, 64, 20, 20),
+            [0, 0, 0, 255],
+            "box interior still untouched"
+        );
+        assert_eq!(
+            px(&buf, 64, 16, bar_row - 1),
+            [0, 0, 0, 255],
+            "nothing painted above the bar"
+        );
+    }
+
+    #[test]
+    fn caption_on_a_box_at_the_top_edge_stays_on_canvas() {
+        // No room above, so the bar drops inside the box rather than off-canvas.
+        let ov = overlay(32, 32, 1).with_score(true);
+        let mut buf = solid(32, 32, [0, 0, 0, 255]);
+        ov.render(&mut buf, &detection_shapes(&[det(0.0, 0.0, 1.0, 1.0, 0)]));
+        assert_ne!(
+            px(&buf, 32, 1, 1),
+            [0, 0, 0, 255],
+            "caption drawn inside the top edge"
+        );
     }
 
     #[test]

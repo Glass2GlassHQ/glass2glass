@@ -306,12 +306,12 @@ impl VelloAnalyticsOverlay {
             draw_mask(&mut scene, mask, w, h, mask_alpha);
         }
         let stroke = Stroke::new(thickness);
-        for detection in &shapes.detections {
-            if let Some(rect) = pixel_rect(detection.bbox, w, h) {
+        for painted in &shapes.detections {
+            if let Some(rect) = pixel_rect(painted.detection.bbox, w, h) {
                 scene.stroke(
                     &stroke,
                     Affine::IDENTITY,
-                    palette_color(detection.label),
+                    palette_color(painted.detection.label),
                     None,
                     &rect,
                 );

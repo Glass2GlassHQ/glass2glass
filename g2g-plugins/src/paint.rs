@@ -38,6 +38,64 @@ pub(crate) fn over_px(canvas: &mut [u8], d: usize, src: [u8; 4]) {
     canvas[d + 3] = out_a as u8;
 }
 
+/// An RGBA8 pixel buffer plus the geometry needed to clip against it, for the
+/// shape and glyph painting the CPU overlays share.
+pub(crate) struct Canvas<'a> {
+    pub pixels: &'a mut [u8],
+    pub width: i32,
+    pub height: i32,
+}
+
+impl Canvas<'_> {
+    /// Source-over blend a filled rectangle, clipped to the canvas.
+    pub(crate) fn fill_rect(&mut self, x: i32, y: i32, rw: i32, rh: i32, color: [u8; 4]) {
+        for py in y..y + rh {
+            if py < 0 || py >= self.height {
+                continue;
+            }
+            for px in x..x + rw {
+                if px < 0 || px >= self.width {
+                    continue;
+                }
+                blend_px(
+                    self.pixels,
+                    ((py * self.width + px) * 4) as usize,
+                    color,
+                    255,
+                );
+            }
+        }
+    }
+
+    /// Blit one 8x8 [`bitmapfont`](crate::bitmapfont) glyph at `(gx, gy)`, each
+    /// set bit a `scale` x `scale` block of `color`.
+    pub(crate) fn blit_glyph(
+        &mut self,
+        gx: i32,
+        gy: i32,
+        scale: i32,
+        rows: [u8; 8],
+        color: [u8; 4],
+    ) {
+        for (ry, bits) in rows.iter().enumerate() {
+            if *bits == 0 {
+                continue;
+            }
+            for col in 0..8i32 {
+                if bits & (0x80 >> col) != 0 {
+                    self.fill_rect(
+                        gx + col * scale,
+                        gy + ry as i32 * scale,
+                        scale,
+                        scale,
+                        color,
+                    );
+                }
+            }
+        }
+    }
+}
+
 /// Which matrix a limited-range Y'CrCb palette is converted through. The bitmap
 /// subtitle formats carry no colorimetry, so the decoder picks one: DVB is
 /// always BT.601, PGS switches on the video height.
