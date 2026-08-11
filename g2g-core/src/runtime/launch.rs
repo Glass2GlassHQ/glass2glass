@@ -671,40 +671,24 @@ fn is_decodebin(name: &str) -> bool {
 /// wander.
 const DECODEBIN_MAX_DEPTH: usize = 6;
 
-/// The decode chain to raw for `input`, built for what `consumer` (the element
-/// right after the macro, by launch name) accepts.
+/// The decode chain to raw for `input`, decoding into `preferred` (the memory
+/// the element right after the macro takes).
 ///
-/// The search walks to a *shape*, raw video or raw audio, and the first raw
-/// format a decoder lists satisfies that shape whether or not the consumer takes
-/// it: that is how `decodebin ! wgpusink` reached a strict-NV12 sink with a
-/// decoder set to I420. Narrowing the target to the consumer's accept set fixes
-/// the pick, and instantiating from the chain (rather than naming the factories)
-/// is what carries the chosen caps into the element. A consumer that declares no
-/// accept set, or one no chain can satisfy, falls back to the plain raw target,
-/// so a line that needs a converter fails where it did before rather than
-/// silently finding nothing.
+/// The chain is returned built, not named: the caps the search chose a decoder
+/// to produce reach the element only through the factory that takes them, and a
+/// parameterless launch factory would build the decoder's default format again.
+/// That is how `decodebin ! wgpusink` reached a strict-NV12 sink with a decoder
+/// left on I420; the solver re-fixates among the decoder's advertised formats
+/// once the chosen one arrives.
 fn autoplug_for_consumer(
     registry: &Registry,
     input: &Caps,
-    consumer: Option<&str>,
     preferred: MemoryDomainKind,
     avoided: &[&str],
 ) -> Option<Vec<Box<dyn DynAsyncElement>>> {
     let raw = |c: &Caps| is_raw_video(c) || is_raw_audio(c);
-    let accepted = consumer.and_then(|name| registry.declared_accepted_caps(name));
-    let fits = |c: &Caps| {
-        raw(c)
-            && accepted.as_ref().is_none_or(|set| {
-                !crate::caps::CapsSet::one(c.clone())
-                    .intersect(set)
-                    .is_empty()
-            })
-    };
-    let mut chain = registry
-        .autoplug_avoiding(input, &fits, DECODEBIN_MAX_DEPTH, preferred, avoided)
-        .or_else(|| {
-            registry.autoplug_avoiding(input, &raw, DECODEBIN_MAX_DEPTH, preferred, avoided)
-        })?;
+    let mut chain =
+        registry.autoplug_avoiding(input, &raw, DECODEBIN_MAX_DEPTH, preferred, avoided)?;
     // M421/M676: prepend the re-framing parser ahead of a real decode of an
     // elementary stream, like the boxed `decodebin` splice (the caps-identity
     // parser is invisible to the shortest-chain search, so it never appears in
@@ -799,30 +783,23 @@ fn expand_decodebin(
                             }
                             None => caps,
                         };
-                    // M1018 / M1024: the element right after the `decodebin`
-                    // decides both what memory the decoder should decode into
-                    // (a GPU-resident consumer gets a decoder that decodes into
-                    // its domain rather than one whose frames have to be
-                    // downloaded) and which raw format to walk to. Only the
+                    // M1018: the element right after the `decodebin` decides what
+                    // memory the decoder should decode into, so a GPU-resident
+                    // consumer gets a decoder that decodes into its domain rather
+                    // than one whose frames have to be downloaded. Only the
                     // immediate consumer counts, the rule the graph-side
                     // derivation follows.
-                    let consumer = match items.peek() {
-                        Some(Item::Element(consumer)) => Some(consumer.name.clone()),
-                        _ => None,
+                    let preferred = match items.peek() {
+                        Some(Item::Element(consumer)) => {
+                            registry.declared_memory_preference(&consumer.name)
+                        }
+                        _ => MemoryDomainKind::System,
                     };
-                    let preferred = consumer
-                        .as_deref()
-                        .map_or(MemoryDomainKind::System, |name| {
-                            registry.declared_memory_preference(name)
-                        });
-                    let decoders = autoplug_for_consumer(
-                        registry,
-                        &chain_input,
-                        consumer.as_deref(),
-                        preferred,
-                        avoided,
-                    )
-                    .ok_or_else(|| ParseError::NoDecodeChain(alloc::format!("{chain_input:?}")))?;
+                    let decoders =
+                        autoplug_for_consumer(registry, &chain_input, preferred, avoided)
+                            .ok_or_else(|| {
+                                ParseError::NoDecodeChain(alloc::format!("{chain_input:?}"))
+                            })?;
                     // Built here rather than named, so each element is
                     // constructed for the caps the search chose it to produce (a
                     // multi-format decoder emits the format the consumer takes,

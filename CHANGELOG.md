@@ -6,7 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
-- M1024: `decodebin` walks to a raw format its consumer accepts and builds each decoder for the caps it was chosen to produce, so a CPU decoder feeding a strict-format sink no longer needs an explicit `videoconvert`.
+- M1024: inline `decodebin` builds each decoder for the caps the search chose it to produce, so a CPU decoder feeding a strict-format sink no longer needs an explicit `videoconvert`.
 - M1023: `g2g-launch` retries a launch line without the decoder that refused the stream, while nothing has been presented and the source is not live; the runner names the failing element on the bus. Breaking: `run_graph_with_progress` / `run_graph_recorded` and their threaded siblings take a bus.
 - M1022: the H.264 decoder honours a stream's own reference marking instead of always sliding-window, and a decode the GPU refuses says what it refused.
 - M1021: a windowed `wgpusink` presents on the device the GPU decoder upstream opened, so `decodebin ! wgpusink` reaches the screen with no copy and no application code.

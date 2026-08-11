@@ -1896,25 +1896,6 @@ mod factory {
                 .unwrap_or(MemoryDomainKind::System)
         }
 
-        /// The caps the element registered under `name` accepts on its sink pad,
-        /// reached by launch name the same way as
-        /// [`declared_memory_preference`](Self::declared_memory_preference).
-        /// `None` for an unregistered name or one that accepts anything, in both
-        /// cases meaning "imposes no requirement".
-        ///
-        /// The auto-plug search walks to a *shape* (raw video, raw audio), and
-        /// the first raw format a decoder lists satisfies that shape whether or
-        /// not the consumer can take it. Narrowing the target with this is what
-        /// makes `decodebin` pick the decoder output its sink actually accepts.
-        pub fn declared_accepted_caps(&self, name: &str) -> Option<CapsSet> {
-            let element = self.make_element(name)?;
-            let constraint = element.caps_constraint_as_sink();
-            match &constraint {
-                crate::CapsConstraint::Accepts(set) => Some(set.clone()),
-                _ => None,
-            }
-        }
-
         /// [`decodebin`](Self::decodebin) with per-element property assignments
         /// (see [`AutoplugParams`]): each element the search selects, plus the
         /// injected parser, gets the assignments addressed to its factory name
