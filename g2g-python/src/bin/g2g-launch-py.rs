@@ -105,6 +105,7 @@ fn main() {
             &clock,
             LINK_CAPACITY,
             &progress,
+            None,
         ));
         loop {
             match tokio::time::timeout(Duration::from_secs(1), &mut run).await {
