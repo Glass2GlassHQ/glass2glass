@@ -868,9 +868,7 @@ impl WgpuCompositor {
             }
             return Ok(Source::Texture(owned.clone()));
         }
-        let Some(src) = domain.as_system_slice() else {
-            return Err(G2gError::UnsupportedDomain);
-        };
+        let src = domain.require_system_slice(g2g_core::log::short_type_name::<Self>())?;
         let need = w as usize * h as usize * 4;
         if src.len() < need {
             return Err(G2gError::CapsMismatch);

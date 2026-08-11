@@ -285,9 +285,9 @@ impl AsyncElement for VideoConvert {
                 PipelinePacket::DataFrame(frame) => {
                     let (format, w, h, framerate) =
                         self.input.clone().ok_or(G2gError::NotConfigured)?;
-                    let Some(src) = frame.domain.as_system_slice() else {
-                        return Err(G2gError::UnsupportedDomain);
-                    };
+                    let src = frame
+                        .domain
+                        .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
                     // Effective output format: property, or caps-resolved (auto).
                     // Auto without a delivered output caps (a runner that doesn't
                     // call configure_output) is unfixed.

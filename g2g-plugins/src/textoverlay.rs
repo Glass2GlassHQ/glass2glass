@@ -46,6 +46,10 @@ use g2g_core::{
 };
 
 use crate::bitmapfont::{glyph, GLYPH_ADVANCE, GLYPH_HEIGHT};
+use crate::paint::Canvas;
+// Only the coverage-blitting paths blend directly now; the bitmap path goes
+// through `Canvas::fill_rect`.
+#[cfg(any(feature = "truetype-overlay", feature = "text-shaping"))]
 use crate::paint::blend_px;
 use crate::subparse::{parse_srt, parse_ssa, parse_ttml, parse_webvtt, Cue, TextAlign};
 #[cfg(feature = "truetype-overlay")]
@@ -758,39 +762,20 @@ impl TextOverlay {
         rows: [u8; 8],
         color: [u8; 4],
     ) {
-        for (ry, bits) in rows.iter().enumerate() {
-            if *bits == 0 {
-                continue;
-            }
-            for col in 0..8i32 {
-                if bits & (0x80 >> col) != 0 {
-                    self.fill_rect(
-                        buf,
-                        gx + col * scale,
-                        gy + ry as i32 * scale,
-                        scale,
-                        scale,
-                        color,
-                    );
-                }
-            }
-        }
+        self.canvas(buf).blit_glyph(gx, gy, scale, rows, color);
     }
 
     /// Source-over blend a filled rectangle, clipped to the canvas.
     fn fill_rect(&self, buf: &mut [u8], x: i32, y: i32, rw: i32, rh: i32, color: [u8; 4]) {
-        let w = self.width as i32;
-        let h = self.height as i32;
-        for py in y..y + rh {
-            if py < 0 || py >= h {
-                continue;
-            }
-            for px in x..x + rw {
-                if px < 0 || px >= w {
-                    continue;
-                }
-                blend_px(buf, ((py * w + px) * 4) as usize, color, 255);
-            }
+        self.canvas(buf).fill_rect(x, y, rw, rh, color);
+    }
+
+    /// `buf` as a canvas at the negotiated geometry.
+    fn canvas<'a>(&self, buf: &'a mut [u8]) -> Canvas<'a> {
+        Canvas {
+            pixels: buf,
+            width: self.width as i32,
+            height: self.height as i32,
         }
     }
 

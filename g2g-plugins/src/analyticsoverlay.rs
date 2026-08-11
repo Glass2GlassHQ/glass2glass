@@ -6,6 +6,17 @@
 //! instance segmentation as a translucent fill of its mask, and a region of
 //! interest as a dashed outline in the colour of the mask that contains it.
 //!
+//! `show-label` / `show-track` / `show-score` add a caption bar above each
+//! detection box with its class name, tracking id and confidence. A node stores
+//! a `u32` label id, so the name comes from the meta's shared `class_names`
+//! table; a producer that publishes none leaves `show-label` with nothing to
+//! draw.
+//!
+//! `show-trail` draws where each tracked object has been, as a polyline through
+//! the bottom edge of its recent boxes that fades out towards the oldest point.
+//! It is the one thing here that remembers anything between frames, so a trail
+//! outlives a few missed detections and is dropped once its track stops coming.
+//!
 //! Pairs with the M100 metadata-through-fan-out path: a `decode -> tee ->
 //! {detect, video} -> overlay -> display` diamond runs the detector on one branch
 //! and carries its `AnalyticsMeta` (shared by Arc) onto the video branch, where
@@ -23,6 +34,9 @@ use core::future::Future;
 use core::pin::Pin;
 
 use alloc::boxed::Box;
+use alloc::collections::{BTreeMap, VecDeque};
+use alloc::format;
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use g2g_core::{
@@ -32,7 +46,8 @@ use g2g_core::{
     Roi, Segmentation,
 };
 
-use crate::paint::blend_px;
+use crate::bitmapfont::{glyph, GLYPH_ADVANCE, GLYPH_HEIGHT};
+use crate::paint::{blend_px, Canvas};
 
 /// Default mask fill alpha: faint enough that the picture reads through the fill.
 pub(crate) const MASK_ALPHA_DEFAULT: u8 = 96;
@@ -41,6 +56,18 @@ pub(crate) const MASK_ALPHA_DEFAULT: u8 = 96;
 /// same off. Measured in absolute canvas coordinates, so the four sides of one
 /// rectangle keep a common phase.
 pub(crate) const ROI_DASH_PX: i32 = 6;
+
+/// How many past positions a trail keeps by default, i.e. about a second of
+/// movement at 30 fps.
+const TRAIL_LENGTH_DEFAULT: usize = 30;
+
+/// A trail is dropped once its track has gone this many frames without a
+/// detection, so an object that leaves the scene stops being drawn.
+const TRAIL_TTL_FRAMES: u64 = 30;
+
+/// The faintest a trail segment is blended at, so its oldest end stays visible
+/// rather than fading to nothing.
+const TRAIL_MIN_ALPHA: u32 = 40;
 
 /// Draws the detection boxes, segmentation masks and regions of interest of an
 /// attached [`AnalyticsMeta`] onto an RGBA8 frame. Outline thickness and mask fill
@@ -52,7 +79,10 @@ pub(crate) const ROI_DASH_PX: i32 = 6;
 /// ```no_run
 /// use g2g_plugins::analyticsoverlay::AnalyticsOverlay;
 ///
-/// let overlay = AnalyticsOverlay::new().with_thickness(3).with_mask_alpha(120);
+/// let overlay = AnalyticsOverlay::new()
+///     .with_thickness(3)
+///     .with_mask_alpha(120)
+///     .with_score(true);
 /// ```
 #[derive(Debug)]
 pub struct AnalyticsOverlay {
@@ -62,8 +92,37 @@ pub struct AnalyticsOverlay {
     thickness: u32,
     /// Alpha the mask fill is blended at (0 = invisible, 255 = opaque).
     mask_alpha: u8,
+    /// Draw each detection's class name in its caption, where the producer
+    /// published a name table.
+    show_label: bool,
+    /// Draw each detection's confidence in its caption.
+    show_score: bool,
+    /// Draw each detection's tracking id in its caption, where it has one.
+    show_track: bool,
+    /// Draw the path each tracked object took.
+    show_trail: bool,
+    /// How many past positions a trail keeps.
+    trail_length: usize,
+    /// The path of each tracked object, keyed by tracking id.
+    trails: BTreeMap<u64, Trail>,
     configured: bool,
     drawn: u64,
+}
+
+/// The recent path of one tracked object: normalized bottom-centre points of its
+/// boxes, oldest first, and the frame the newest one arrived on.
+#[derive(Debug, Default)]
+struct Trail {
+    points: VecDeque<(f32, f32)>,
+    last_seen: u64,
+}
+
+/// A detection box to outline, with the id of the tracking node related to it
+/// when the producer wired one (`Detection -Tracks-> Tracking`).
+#[derive(Debug)]
+pub(crate) struct PaintedDetection {
+    pub detection: ObjectDetection,
+    pub track_id: Option<u64>,
 }
 
 /// A segmentation mask to fill, with the palette slot of the instance it belongs
@@ -89,20 +148,29 @@ pub(crate) struct PaintedRoi {
 /// same palette slots and the same containment pairing.
 #[derive(Debug, Default)]
 pub(crate) struct AnalyticsShapes {
-    pub detections: Vec<ObjectDetection>,
+    pub detections: Vec<PaintedDetection>,
     pub masks: Vec<PaintedMask>,
     pub rois: Vec<PaintedRoi>,
+    /// The meta's class-name table, carried so a caption can name a label
+    /// without the shapes borrowing the meta.
+    pub class_names: Option<alloc::sync::Arc<[alloc::boxed::Box<str>]>>,
 }
 
 impl AnalyticsShapes {
     /// Read the drawable nodes out of `meta`, numbering the segmentations for the
     /// palette and giving every ROI the slot of the segmentation that contains it.
     pub(crate) fn collect(meta: &AnalyticsMeta) -> Self {
-        let mut shapes = Self::default();
+        let mut shapes = Self {
+            class_names: meta.class_names.clone(),
+            ..Default::default()
+        };
         let mut slot_of_node: Vec<Option<u32>> = alloc::vec![None; meta.nodes.len()];
         for (index, node) in meta.nodes.iter().enumerate() {
             match node {
-                AnalyticsNode::Detection(detection) => shapes.detections.push(*detection),
+                AnalyticsNode::Detection(detection) => shapes.detections.push(PaintedDetection {
+                    detection: *detection,
+                    track_id: track_id_of(meta, index),
+                }),
                 AnalyticsNode::Segmentation(segmentation) => {
                     let palette_index = shapes.masks.len() as u32;
                     slot_of_node[index] = Some(palette_index);
@@ -138,6 +206,18 @@ impl AnalyticsShapes {
     }
 }
 
+/// The `object_id` of the tracking node the detection at `index` tracks as, if
+/// the producer wired one.
+fn track_id_of(meta: &AnalyticsMeta, index: usize) -> Option<u64> {
+    meta.relations
+        .iter()
+        .find(|r| r.from == index && r.kind == RelationKind::Tracks)
+        .and_then(|r| match meta.nodes.get(r.to) {
+            Some(AnalyticsNode::Tracking(tracking)) => Some(tracking.object_id),
+            _ => None,
+        })
+}
+
 impl Default for AnalyticsOverlay {
     fn default() -> Self {
         Self::new()
@@ -152,9 +232,46 @@ impl AnalyticsOverlay {
             height: 0,
             thickness: 2,
             mask_alpha: MASK_ALPHA_DEFAULT,
+            show_label: false,
+            show_score: false,
+            show_track: false,
+            show_trail: false,
+            trail_length: TRAIL_LENGTH_DEFAULT,
+            trails: BTreeMap::new(),
             configured: false,
             drawn: 0,
         }
+    }
+
+    /// Draw each detection's class name above its box.
+    pub fn with_label(mut self, show: bool) -> Self {
+        self.show_label = show;
+        self
+    }
+
+    /// Draw each detection's confidence above its box.
+    pub fn with_score(mut self, show: bool) -> Self {
+        self.show_score = show;
+        self
+    }
+
+    /// Draw each detection's tracking id above its box.
+    pub fn with_track(mut self, show: bool) -> Self {
+        self.show_track = show;
+        self
+    }
+
+    /// Draw the path each tracked object took.
+    pub fn with_trail(mut self, show: bool) -> Self {
+        self.show_trail = show;
+        self
+    }
+
+    /// Set how many past positions a trail keeps (clamped to at least 2, since a
+    /// segment needs both ends).
+    pub fn with_trail_length(mut self, points: usize) -> Self {
+        self.trail_length = points.max(2);
+        self
     }
 
     /// Set the box outline thickness in pixels (clamped to at least 1).
@@ -203,14 +320,175 @@ impl AnalyticsOverlay {
     /// Paint every shape onto the RGBA8 `buf` of `self.width` x `self.height`.
     /// Mask fills go down first, so a box or ROI edge stays readable over one.
     fn render(&self, buf: &mut [u8], shapes: &AnalyticsShapes) {
+        if self.show_trail {
+            self.draw_trails(buf);
+        }
         for mask in &shapes.masks {
             self.fill_mask(buf, mask);
         }
-        for detection in &shapes.detections {
-            self.outline(buf, detection.bbox, palette_color(detection.label), false);
+        for painted in &shapes.detections {
+            let color = palette_color(painted.detection.label);
+            self.outline(buf, painted.detection.bbox, color, false);
+            let name = shapes
+                .class_names
+                .as_ref()
+                .and_then(|names| names.get(painted.detection.label as usize))
+                .map(|name| &**name);
+            if let Some(text) = self.caption(painted, name) {
+                self.draw_caption(buf, painted.detection.bbox, &text, color);
+            }
         }
         for roi in &shapes.rois {
             self.outline(buf, roi.roi.bbox, palette_color(roi.palette_index), true);
+        }
+    }
+
+    /// Extend each tracked object's path with this frame's position, and forget
+    /// the tracks that have stopped arriving. `drawn` counts every frame, so it
+    /// is what a trail's age is measured against.
+    fn record_trails(&mut self, shapes: &AnalyticsShapes) {
+        for painted in &shapes.detections {
+            let Some(id) = painted.track_id else {
+                continue;
+            };
+            let bbox = painted.detection.bbox;
+            let trail = self.trails.entry(id).or_default();
+            trail
+                .points
+                .push_back((bbox.x + bbox.w / 2.0, bbox.y + bbox.h));
+            while trail.points.len() > self.trail_length {
+                trail.points.pop_front();
+            }
+            trail.last_seen = self.drawn;
+        }
+        let cutoff = self.drawn.saturating_sub(TRAIL_TTL_FRAMES);
+        self.trails.retain(|_, trail| trail.last_seen >= cutoff);
+    }
+
+    /// Stroke every trail, each in the palette slot of its tracking id so two
+    /// objects of the same class still read apart, fading towards its old end.
+    fn draw_trails(&self, buf: &mut [u8]) {
+        for (id, trail) in &self.trails {
+            let color = palette_color(*id as u32);
+            let count = trail.points.len() as u32;
+            let mut previous = None;
+            for (index, point) in trail.points.iter().enumerate() {
+                let x = (point.0 * self.width as f32 + 0.5) as i32;
+                let y = (point.1 * self.height as f32 + 0.5) as i32;
+                if let Some(from) = previous {
+                    let ramp = (255 - TRAIL_MIN_ALPHA) * (index as u32 + 1) / count;
+                    self.trail_segment(buf, from, (x, y), color, (TRAIL_MIN_ALPHA + ramp) as u8);
+                }
+                previous = Some((x, y));
+            }
+        }
+    }
+
+    /// Blend a straight run between two canvas points (Bresenham, integer only
+    /// for the `no_std` baseline).
+    fn trail_segment(
+        &self,
+        buf: &mut [u8],
+        from: (i32, i32),
+        to: (i32, i32),
+        color: [u8; 4],
+        alpha: u8,
+    ) {
+        let (mut x, mut y) = from;
+        let dx = (to.0 - x).abs();
+        let dy = -(to.1 - y).abs();
+        let sx = if x < to.0 { 1 } else { -1 };
+        let sy = if y < to.1 { 1 } else { -1 };
+        let mut err = dx + dy;
+        loop {
+            self.trail_dot(buf, x, y, color, alpha);
+            if x == to.0 && y == to.1 {
+                return;
+            }
+            let e2 = 2 * err;
+            if e2 >= dy {
+                err += dy;
+                x += sx;
+            }
+            if e2 <= dx {
+                err += dx;
+                y += sy;
+            }
+        }
+    }
+
+    /// Blend one square of the stroke, `thickness` wide, clipped to the canvas.
+    fn trail_dot(&self, buf: &mut [u8], x: i32, y: i32, color: [u8; 4], alpha: u8) {
+        let w = self.width as i32;
+        let h = self.height as i32;
+        let half = self.thickness as i32 / 2;
+        for py in y - half..=y + half {
+            if py < 0 || py >= h {
+                continue;
+            }
+            for px in x - half..=x + half {
+                if px < 0 || px >= w {
+                    continue;
+                }
+                blend_px(buf, ((py * w + px) * 4) as usize, color, alpha);
+            }
+        }
+    }
+
+    /// The caption for one detection, or `None` when neither part is enabled (or
+    /// a tracking id was asked for and the producer wired none).
+    fn caption(&self, painted: &PaintedDetection, name: Option<&str>) -> Option<String> {
+        let mut caption = String::new();
+        let mut add = |part: &str| {
+            if !caption.is_empty() {
+                caption.push(' ');
+            }
+            caption.push_str(part);
+        };
+        if let Some(name) = name.filter(|_| self.show_label) {
+            add(name);
+        }
+        if let Some(id) = painted.track_id.filter(|_| self.show_track) {
+            add(&format!("ID:{id}"));
+        }
+        if self.show_score {
+            add(&score_text(&painted.detection));
+        }
+        (!caption.is_empty()).then_some(caption)
+    }
+
+    /// One source font pixel per this many output pixels, from the frame height
+    /// so a caption stays readable across resolutions.
+    fn text_scale(&self) -> i32 {
+        (self.height / 240).max(1) as i32
+    }
+
+    /// Draw `text` in a filled bar the colour of its box, sitting on the box's
+    /// top edge, or just inside it when the box starts at the top of the frame.
+    fn draw_caption(&self, buf: &mut [u8], bbox: BBox, text: &str, color: [u8; 4]) {
+        let w = self.width as i32;
+        let h = self.height as i32;
+        let Some((x0, y0, _, _)) = pixel_rect(bbox, w, h) else {
+            return;
+        };
+        let scale = self.text_scale();
+        let pad = scale;
+        let cell_w = GLYPH_ADVANCE as i32 * scale;
+        let bar_w = text.chars().count() as i32 * cell_w + 2 * pad;
+        let bar_h = GLYPH_HEIGHT as i32 * scale + 2 * pad;
+        let bar_x = x0.min((w - bar_w).max(0)).max(0);
+        let bar_y = if y0 - bar_h >= 0 { y0 - bar_h } else { y0 };
+        let mut canvas = Canvas {
+            pixels: buf,
+            width: w,
+            height: h,
+        };
+        canvas.fill_rect(bar_x, bar_y, bar_w, bar_h, color);
+        let ink = contrast_ink(color);
+        let mut gx = bar_x + pad;
+        for c in text.chars() {
+            canvas.blit_glyph(gx, bar_y + pad, scale, glyph(c), ink);
+            gx += cell_w;
         }
     }
 
@@ -318,6 +596,27 @@ fn vspan(buf: &mut [u8], w: i32, h: i32, y0: i32, y1: i32, x: i32, paint: SpanPa
     }
 }
 
+/// A detection's confidence as a fixed two-decimal string (`0.92`). Built from
+/// integer parts: the `no_std` baseline has no float formatting to lean on, and
+/// `+ 0.5` rounds without `f32::round`.
+fn score_text(detection: &ObjectDetection) -> String {
+    let hundredths = (detection.confidence.clamp(0.0, 1.0) * 100.0 + 0.5) as u32;
+    format!("{}.{:02}", hundredths / 100, hundredths % 100)
+}
+
+/// Black or white, whichever reads on `background`. Rec. 601 luma, since the
+/// palette is sRGB and the threshold only has to separate light from dark.
+fn contrast_ink(background: [u8; 4]) -> [u8; 4] {
+    let luma =
+        (background[0] as u32 * 299 + background[1] as u32 * 587 + background[2] as u32 * 114)
+            / 1000;
+    if luma > 140 {
+        [0x00, 0x00, 0x00, 0xFF]
+    } else {
+        [0xFF, 0xFF, 0xFF, 0xFF]
+    }
+}
+
 /// A fixed, opaque RGB palette so adjacent slots are visually distinct: a
 /// detection box indexes it by class label, a mask and its ROI by instance.
 /// Cycles for indices beyond the palette length. Shared with the Vello overlay
@@ -399,6 +698,37 @@ impl AsyncElement for AnalyticsOverlay {
             )
             .with_range("0", "255")
             .with_default("96"),
+            PropertySpec::new(
+                "show-label",
+                PropKind::Bool,
+                "draw each detection's class name above its box",
+            )
+            .with_default("false"),
+            PropertySpec::new(
+                "show-score",
+                PropKind::Bool,
+                "draw each detection's confidence above its box",
+            )
+            .with_default("false"),
+            PropertySpec::new(
+                "show-track",
+                PropKind::Bool,
+                "draw each detection's tracking id above its box",
+            )
+            .with_default("false"),
+            PropertySpec::new(
+                "show-trail",
+                PropKind::Bool,
+                "draw the path each tracked object took",
+            )
+            .with_default("false"),
+            PropertySpec::new(
+                "trail-length",
+                PropKind::Uint,
+                "how many past positions a trail keeps (>= 2)",
+            )
+            .with_range("2", "65535")
+            .with_default("30"),
         ];
         PROPS
     }
@@ -413,6 +743,26 @@ impl AsyncElement for AnalyticsOverlay {
                 self.mask_alpha = value.as_uint().ok_or(PropError::Type)?.min(255) as u8;
                 Ok(())
             }
+            "show-label" => {
+                self.show_label = value.as_bool().ok_or(PropError::Type)?;
+                Ok(())
+            }
+            "show-score" => {
+                self.show_score = value.as_bool().ok_or(PropError::Type)?;
+                Ok(())
+            }
+            "show-track" => {
+                self.show_track = value.as_bool().ok_or(PropError::Type)?;
+                Ok(())
+            }
+            "show-trail" => {
+                self.show_trail = value.as_bool().ok_or(PropError::Type)?;
+                Ok(())
+            }
+            "trail-length" => {
+                self.trail_length = (value.as_uint().ok_or(PropError::Type)? as usize).max(2);
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -421,6 +771,11 @@ impl AsyncElement for AnalyticsOverlay {
         match name {
             "thickness" => Some(PropValue::Uint(self.thickness as u64)),
             "mask-alpha" => Some(PropValue::Uint(self.mask_alpha as u64)),
+            "show-label" => Some(PropValue::Bool(self.show_label)),
+            "show-score" => Some(PropValue::Bool(self.show_score)),
+            "show-track" => Some(PropValue::Bool(self.show_track)),
+            "show-trail" => Some(PropValue::Bool(self.show_trail)),
+            "trail-length" => Some(PropValue::Uint(self.trail_length as u64)),
             _ => None,
         }
     }
@@ -443,7 +798,14 @@ impl AsyncElement for AnalyticsOverlay {
                         .get::<AnalyticsMeta>()
                         .map(AnalyticsShapes::collect)
                         .unwrap_or_default();
-                    if !shapes.is_empty() {
+                    self.drawn += 1;
+                    if self.show_trail {
+                        self.record_trails(&shapes);
+                    }
+                    // A live trail outlives the detections that fed it, so this
+                    // frame may have something to paint with no shapes of its own.
+                    let has_trail = self.show_trail && !self.trails.is_empty();
+                    if !shapes.is_empty() || has_trail {
                         let MemoryDomain::System(slice) = &mut frame.domain else {
                             return Err(G2gError::UnsupportedDomain);
                         };
@@ -454,7 +816,6 @@ impl AsyncElement for AnalyticsOverlay {
                         }
                         self.render(&mut buf[..need], &shapes);
                     }
-                    self.drawn += 1;
                     out.push(PipelinePacket::DataFrame(frame)).await?;
                 }
                 PipelinePacket::CapsChanged(caps) => {
@@ -480,7 +841,7 @@ mod tests {
     use super::*;
     use g2g_core::frame::Frame;
     use g2g_core::memory::SystemSlice;
-    use g2g_core::{FrameTiming, Mask, PushOutcome, Rate};
+    use g2g_core::{FrameTiming, Mask, PushOutcome, Rate, Tracking};
 
     fn solid(w: usize, h: usize, rgba: [u8; 4]) -> Vec<u8> {
         let mut v = Vec::with_capacity(w * h * 4);
@@ -519,9 +880,24 @@ mod tests {
             height,
             thickness,
             mask_alpha: MASK_ALPHA_DEFAULT,
+            show_label: false,
+            show_score: false,
+            show_track: false,
+            show_trail: false,
+            trail_length: TRAIL_LENGTH_DEFAULT,
+            trails: BTreeMap::new(),
             configured: true,
             drawn: 0,
         }
+    }
+
+    /// A meta holding one detection wired to the tracking id `track`.
+    fn tracked_meta(detection: ObjectDetection, track: u64) -> AnalyticsMeta {
+        let mut meta = AnalyticsMeta::new();
+        let node = meta.add_detection(detection);
+        let tracking = meta.push(AnalyticsNode::Tracking(Tracking { object_id: track }));
+        meta.relate(node, tracking, RelationKind::Tracks);
+        meta
     }
 
     /// The shapes of a meta holding just these detections.
@@ -554,6 +930,113 @@ mod tests {
             confidence: 0.9,
             mask: Mask::new(mask_w, mask_h, mask_w, data).expect("mask geometry"),
         }
+    }
+
+    #[test]
+    fn score_text_is_two_decimals() {
+        let text = |confidence| {
+            score_text(&ObjectDetection {
+                bbox: BBox {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 1.0,
+                    h: 1.0,
+                },
+                label: 0,
+                confidence,
+            })
+        };
+        assert_eq!(text(0.923), "0.92");
+        assert_eq!(text(0.5), "0.50");
+        assert_eq!(text(1.0), "1.00");
+        assert_eq!(text(0.0), "0.00");
+    }
+
+    #[test]
+    fn collect_pairs_a_detection_with_the_tracking_it_tracks_as() {
+        let mut meta = AnalyticsMeta::new();
+        let tracked = meta.add_detection(det(0.1, 0.1, 0.2, 0.2, 0));
+        let untracked = meta.add_detection(det(0.5, 0.5, 0.2, 0.2, 1));
+        let tracking = meta.push(AnalyticsNode::Tracking(Tracking { object_id: 77 }));
+        meta.relate(tracked, tracking, RelationKind::Tracks);
+
+        let shapes = AnalyticsShapes::collect(&meta);
+        assert_eq!(shapes.detections[0].track_id, Some(77));
+        assert_eq!(
+            shapes.detections[1].track_id, None,
+            "detection {untracked} has no Tracks relation"
+        );
+    }
+
+    #[test]
+    fn captions_are_off_until_asked_for() {
+        let shapes = detection_shapes(&[det(0.25, 0.25, 0.5, 0.5, 0)]);
+        let painted = &shapes.detections[0];
+        assert_eq!(overlay(64, 64, 1).caption(painted, None), None);
+        assert_eq!(
+            overlay(64, 64, 1).with_score(true).caption(painted, None),
+            Some(String::from("0.90"))
+        );
+    }
+
+    #[test]
+    fn caption_shows_the_tracking_id_when_one_is_wired() {
+        let mut meta = AnalyticsMeta::new();
+        let detection = meta.add_detection(det(0.25, 0.25, 0.5, 0.5, 0));
+        let tracking = meta.push(AnalyticsNode::Tracking(Tracking { object_id: 4 }));
+        meta.relate(detection, tracking, RelationKind::Tracks);
+        let shapes = AnalyticsShapes::collect(&meta);
+        let painted = &shapes.detections[0];
+
+        assert_eq!(
+            overlay(64, 64, 1).with_track(true).caption(painted, None),
+            Some(String::from("ID:4"))
+        );
+        assert_eq!(
+            overlay(64, 64, 1)
+                .with_track(true)
+                .with_score(true)
+                .caption(painted, None),
+            Some(String::from("ID:4 0.90"))
+        );
+    }
+
+    #[test]
+    fn caption_paints_a_bar_above_the_box_and_leaves_the_box_alone() {
+        // A 64x64 canvas so the glyph scale is 1 and the box has room above it.
+        let ov = overlay(64, 64, 1).with_score(true);
+        let mut buf = solid(64, 64, [0, 0, 0, 255]);
+        // Box pixels (16,16)..(47,47); the caption bar sits directly above row 16.
+        ov.render(&mut buf, &detection_shapes(&[det(0.25, 0.25, 0.5, 0.5, 0)]));
+        let bar_row = 16 - (GLYPH_HEIGHT as usize + 2);
+        assert_ne!(
+            px(&buf, 64, 16, bar_row),
+            [0, 0, 0, 255],
+            "caption bar painted above the box"
+        );
+        assert_eq!(
+            px(&buf, 64, 20, 20),
+            [0, 0, 0, 255],
+            "box interior still untouched"
+        );
+        assert_eq!(
+            px(&buf, 64, 16, bar_row - 1),
+            [0, 0, 0, 255],
+            "nothing painted above the bar"
+        );
+    }
+
+    #[test]
+    fn caption_on_a_box_at_the_top_edge_stays_on_canvas() {
+        // No room above, so the bar drops inside the box rather than off-canvas.
+        let ov = overlay(32, 32, 1).with_score(true);
+        let mut buf = solid(32, 32, [0, 0, 0, 255]);
+        ov.render(&mut buf, &detection_shapes(&[det(0.0, 0.0, 1.0, 1.0, 0)]));
+        assert_ne!(
+            px(&buf, 32, 1, 1),
+            [0, 0, 0, 255],
+            "caption drawn inside the top edge"
+        );
     }
 
     #[test]
@@ -823,6 +1306,91 @@ mod tests {
             sink.last.expect("forwarded"),
             bytes,
             "pixels unchanged without meta"
+        );
+    }
+
+    #[tokio::test]
+    async fn trail_joins_a_track_across_frames_and_leaves_it_alone_untracked() {
+        // Two frames of one tracked box moving down the right half of a 32x32
+        // canvas. The trail runs through the bottom edge of each box, so the
+        // midpoint between the two bottom edges must be painted on frame two.
+        let mut ov = AnalyticsOverlay::new().with_thickness(1).with_trail(true);
+        ov.configure_pipeline(&rgba_caps(32, 32)).unwrap();
+        let mut sink = PixelSink::default();
+        for y in [0.25_f32, 0.5] {
+            let meta = tracked_meta(det(0.5, y, 0.25, 0.25, 0), 3);
+            let frame = rgba_frame_with_meta(32, 32, meta);
+            ov.process(PipelinePacket::DataFrame(frame), &mut sink)
+                .await
+                .unwrap();
+        }
+        let out = sink.last.expect("frame forwarded");
+        // Bottom-centre of the boxes: (20, 16) then (20, 24); the segment
+        // between them covers (20, 20).
+        assert_ne!(
+            px(&out, 32, 20, 20),
+            [0, 0, 0, 255],
+            "trail drawn between the two positions"
+        );
+
+        // The same movement without a Tracks relation records nothing to draw.
+        let mut untracked = AnalyticsOverlay::new().with_thickness(1).with_trail(true);
+        untracked.configure_pipeline(&rgba_caps(32, 32)).unwrap();
+        let mut sink = PixelSink::default();
+        for y in [0.25_f32, 0.5] {
+            let mut meta = AnalyticsMeta::new();
+            meta.add_detection(det(0.5, y, 0.25, 0.25, 0));
+            let frame = rgba_frame_with_meta(32, 32, meta);
+            untracked
+                .process(PipelinePacket::DataFrame(frame), &mut sink)
+                .await
+                .unwrap();
+        }
+        assert!(untracked.trails.is_empty(), "no track, no trail");
+        assert_eq!(
+            px(&sink.last.expect("forwarded"), 32, 20, 20),
+            [0, 0, 0, 255],
+            "nothing painted between the boxes"
+        );
+    }
+
+    #[tokio::test]
+    async fn trail_is_capped_at_its_length_and_expires_with_its_track() {
+        let mut ov = AnalyticsOverlay::new()
+            .with_trail(true)
+            .with_trail_length(4);
+        ov.configure_pipeline(&rgba_caps(32, 32)).unwrap();
+        let mut sink = PixelSink::default();
+        for _ in 0..10 {
+            let frame = rgba_frame_with_meta(32, 32, tracked_meta(det(0.4, 0.4, 0.2, 0.2, 0), 8));
+            ov.process(PipelinePacket::DataFrame(frame), &mut sink)
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            ov.trails[&8].points.len(),
+            4,
+            "only the last trail-length points are kept"
+        );
+
+        // Frames with no detections age the trail out; it survives the first few.
+        for _ in 0..TRAIL_TTL_FRAMES {
+            let frame = rgba_frame_with_meta(32, 32, AnalyticsMeta::new());
+            ov.process(PipelinePacket::DataFrame(frame), &mut sink)
+                .await
+                .unwrap();
+        }
+        assert!(
+            ov.trails.contains_key(&8),
+            "trail outlives a gap in the track"
+        );
+        let frame = rgba_frame_with_meta(32, 32, AnalyticsMeta::new());
+        ov.process(PipelinePacket::DataFrame(frame), &mut sink)
+            .await
+            .unwrap();
+        assert!(
+            ov.trails.is_empty(),
+            "trail dropped once its track is stale"
         );
     }
 

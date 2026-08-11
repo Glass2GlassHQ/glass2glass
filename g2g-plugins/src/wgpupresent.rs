@@ -601,9 +601,26 @@ fn build_renderer(
     height: u32,
     caps: &Caps,
 ) -> Result<SurfaceRenderer, Box<dyn std::error::Error>> {
-    let (instance, wgpu_surface) = create_surface(conn, surface)?;
-    let ctx = g2g_core::runtime::block_on(open_device(instance, &wgpu_surface))
-        .map_err(|e| alloc::format!("no wgpu device for this surface: {e:?}"))?;
+    // A GPU decoder upstream opens its own device (Vulkan Video needs queues wgpu
+    // does not ask for) and its textures bind to no other, so present on that
+    // device when one is offered rather than opening a second.
+    let adopted = crate::gpu::present_on_producer_device(
+        |instance| create_surface_on(instance, conn, surface),
+        width,
+        height,
+    );
+    let (ctx, wgpu_surface, config) = match adopted {
+        Some(adopted) => adopted,
+        None => {
+            let (instance, wgpu_surface) = create_surface(conn, surface)?;
+            let ctx = g2g_core::runtime::block_on(open_device(instance, &wgpu_surface))
+                .map_err(|e| alloc::format!("no wgpu device for this surface: {e:?}"))?;
+            let config = wgpu_surface
+                .get_default_config(&ctx.adapter, width, height)
+                .ok_or("no GPU adapter here can present to this Wayland display")?;
+            (ctx, wgpu_surface, config)
+        }
+    };
     // wgpu answers an error it cannot return with a panic, and the release
     // profile aborts on one, so take those here: the failure names itself on this
     // sink's log category and the pipeline fails on the next frame instead of the
@@ -615,9 +632,6 @@ fn build_renderer(
                 "gpu error while presenting: {error}"
             );
         }));
-    let config = wgpu_surface
-        .get_default_config(&ctx.adapter, width, height)
-        .ok_or("no GPU adapter here can present to this Wayland display")?;
     wgpu_surface.configure(&ctx.device, &config);
     let mut sink = WgpuSink::with_surface(ctx, wgpu_surface, config);
     sink.configure_pipeline(caps)
@@ -654,17 +668,28 @@ fn create_surface(
     conn: &Connection,
     surface: &wl_surface::WlSurface,
 ) -> Result<(wgpu::Instance, wgpu::Surface<'static>), Box<dyn std::error::Error>> {
+    #[cfg(feature = "cuda-wgpu")]
+    let instance = crate::cudawgpu::vulkan_instance();
+    #[cfg(not(feature = "cuda-wgpu"))]
+    let instance = wgpu::Instance::default();
+
+    let wgpu_surface = create_surface_on(&instance, conn, surface)?;
+    Ok((instance, wgpu_surface))
+}
+
+/// The worker's `wl_surface` as a `wgpu::Surface` on a given instance, so a
+/// producer's instance can be adopted (see [`crate::gpu::present_on_producer_device`]).
+fn create_surface_on(
+    instance: &wgpu::Instance,
+    conn: &Connection,
+    surface: &wl_surface::WlSurface,
+) -> Result<wgpu::Surface<'static>, Box<dyn std::error::Error>> {
     // The libwayland `*mut wl_display` / `*mut wl_proxy` the Vulkan WSI wants as
     // its native handles, from the connection wayland-client owns.
     let display = NonNull::new(conn.backend().display_ptr().cast::<core::ffi::c_void>())
         .ok_or("no wl_display pointer on this connection")?;
     let window = NonNull::new(surface.id().as_ptr().cast::<core::ffi::c_void>())
         .ok_or("no wl_surface pointer for this surface")?;
-
-    #[cfg(feature = "cuda-wgpu")]
-    let instance = crate::cudawgpu::vulkan_instance();
-    #[cfg(not(feature = "cuda-wgpu"))]
-    let instance = wgpu::Instance::default();
 
     // SAFETY: both handles come from the live `Connection` and the `wl_surface`
     // this worker owns. The surface is stored in the renderer, which the worker
@@ -678,7 +703,7 @@ fn create_surface(
             raw_window_handle: RawWindowHandle::Wayland(WaylandWindowHandle::new(window)),
         })
     }?;
-    Ok((instance, wgpu_surface))
+    Ok(wgpu_surface)
 }
 
 #[cfg(test)]

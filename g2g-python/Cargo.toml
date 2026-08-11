@@ -43,6 +43,16 @@ launch = [
     "g2g-plugins/wayland-sink",
     "g2g-plugins/analytics",
 ]
+# Also register the native Rust inference elements (`ortinfer` /
+# `detectionpostprocess` / ...) in `g2g-launch-py`, so one launch line can run a
+# detector with no Python in it at all. It lands here rather than in `g2g-launch`
+# because g2g-ml already depends on g2g-plugins, so g2g-plugins cannot depend
+# back on g2g-ml; this crate can depend on both.
+ml = ["launch", "dep:g2g-ml", "g2g-ml/launch", "g2g-ml/ort", "g2g-ml/analytics"]
+# `ortinfer execution-provider=cuda` on top of `ml`. Separate because it pulls
+# the CUDA execution provider and its runtime libraries, which a machine without
+# an NVIDIA GPU should not have to build or ship.
+ml-cuda = ["ml", "g2g-ml/cuda"]
 
 [[bin]]
 name = "g2g-launch-py"
@@ -61,6 +71,9 @@ pyo3 = { version = "0.26", optional = true, features = ["auto-initialize"] }
 # the library / host build keeps its lean dependency set.
 tokio = { version = "1", features = ["rt", "macros", "time"], optional = true }
 g2g-plugins = { workspace = true, optional = true }
+# The `ml` feature only: the native inference elements registered alongside the
+# hosted Python ones.
+g2g-ml = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros"] }

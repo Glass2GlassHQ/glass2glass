@@ -75,9 +75,12 @@ fn main() {
     }
 
     // The one difference from `g2g-launch`: register the hosted Python elements
-    // (`pyelement` / `pysrc` / `pyaggregator`) on top of the standard registry.
+    // (`pyelement` / `pysrc` / `pyaggregator`) on top of the standard registry,
+    // plus the native inference elements under `ml`.
     let mut reg = default_registry();
     g2g_python::register(&mut reg);
+    #[cfg(feature = "ml")]
+    g2g_ml::register(&mut reg);
 
     let graph = match parse_launch(&reg, &pipeline) {
         Ok(graph) => graph,
@@ -105,6 +108,7 @@ fn main() {
             &clock,
             LINK_CAPACITY,
             &progress,
+            None,
         ));
         loop {
             match tokio::time::timeout(Duration::from_secs(1), &mut run).await {

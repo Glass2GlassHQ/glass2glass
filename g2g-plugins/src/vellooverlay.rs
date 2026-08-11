@@ -306,12 +306,12 @@ impl VelloAnalyticsOverlay {
             draw_mask(&mut scene, mask, w, h, mask_alpha);
         }
         let stroke = Stroke::new(thickness);
-        for detection in &shapes.detections {
-            if let Some(rect) = pixel_rect(detection.bbox, w, h) {
+        for painted in &shapes.detections {
+            if let Some(rect) = pixel_rect(painted.detection.bbox, w, h) {
                 scene.stroke(
                     &stroke,
                     Affine::IDENTITY,
-                    palette_color(detection.label),
+                    palette_color(painted.detection.label),
                     None,
                     &rect,
                 );
@@ -439,9 +439,9 @@ impl AsyncElement for VelloAnalyticsOverlay {
                         .get::<AnalyticsMeta>()
                         .map(AnalyticsShapes::collect)
                         .unwrap_or_default();
-                    let Some(slice) = frame.domain.as_system_slice() else {
-                        return Err(G2gError::UnsupportedDomain);
-                    };
+                    let slice = frame
+                        .domain
+                        .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
                     let need = self.width as usize * self.height as usize * 4;
                     if slice.len() < need {
                         return Err(G2gError::CapsMismatch);
@@ -852,9 +852,9 @@ impl AsyncElement for VelloTextOverlay {
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let Some(slice) = frame.domain.as_system_slice() else {
-                        return Err(G2gError::UnsupportedDomain);
-                    };
+                    let slice = frame
+                        .domain
+                        .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
                     let need = self.width as usize * self.height as usize * 4;
                     if slice.len() < need {
                         return Err(G2gError::CapsMismatch);

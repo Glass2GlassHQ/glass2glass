@@ -524,11 +524,33 @@ mod on {
     pub struct AnalyticsMeta {
         pub nodes: Vec<AnalyticsNode>,
         pub relations: Vec<Relation>,
+        /// Class names indexed by a node's `label`, so a consumer can show
+        /// "person" rather than `12`. Shared rather than stored per node: the
+        /// names repeat on every detection of every frame, and a node stays
+        /// `Copy`. `None` means the producer published no table.
+        pub class_names: Option<Arc<[Box<str>]>>,
     }
 
     impl AnalyticsMeta {
         pub fn new() -> Self {
             Self::default()
+        }
+
+        /// Set the class-name table, indexed by label id.
+        pub fn set_class_names<I, S>(&mut self, names: I)
+        where
+            I: IntoIterator<Item = S>,
+            S: Into<Box<str>>,
+        {
+            self.class_names = Some(names.into_iter().map(Into::into).collect());
+        }
+
+        /// The name for a label id. `None` with no table, or for an id past its
+        /// end: that means the table and the producer disagree, and showing a
+        /// neighbour's name would be worse than showing none.
+        pub fn class_name(&self, label: u32) -> Option<&str> {
+            let names = self.class_names.as_ref()?;
+            names.get(label as usize).map(|name| &**name)
         }
 
         /// Append a node, returning its index (used to wire relations).
@@ -584,6 +606,97 @@ mod on {
         }
         /// Normalized coordinates survive a scale / crop / copy unchanged; a
         /// re-encode to a compressed codec discards pixel-derived analytics.
+        fn propagate(&self, transform: Transform) -> Propagation {
+            match transform {
+                Transform::Encode => Propagation::Drop,
+                _ => Propagation::Keep,
+            }
+        }
+    }
+
+    /// One inference output riding along with the frame it was computed from.
+    ///
+    /// Carries what a `Caps::Tensor` link would have carried, since it stands in
+    /// for exactly that: the descriptor plus the raw little-endian bytes. `name`
+    /// says which stage produced it, so a frame can hold the outputs of several
+    /// models at once; it comes from the producing element's configuration, not
+    /// from anything read out of a model file, so every inference backend tags
+    /// its output the same way. Empty is the ordinary single-model case.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct NamedTensor {
+        pub name: String,
+        pub dtype: crate::caps::TensorDType,
+        pub shape: crate::caps::TensorShape,
+        pub layout: crate::caps::TensorLayout,
+        pub data: Vec<u8>,
+    }
+
+    /// The inference outputs attached to a frame, for the elements that keep the
+    /// picture on the wire instead of replacing it with the tensor. That is what
+    /// lets `inference -> post-process -> overlay` stay one straight chain: the
+    /// frame reaching the overlay is still the video the model saw.
+    ///
+    /// Holds every tensor on the frame, since a [`FrameMetaSet`] keys by concrete
+    /// type and would otherwise let a second model's output replace the first.
+    /// These are not detections; those are the post-processor's [`AnalyticsMeta`].
+    #[derive(Debug, Default, Clone, PartialEq)]
+    pub struct TensorMeta(Vec<NamedTensor>);
+
+    impl TensorMeta {
+        /// An empty set, the starting point a producer pushes onto.
+        pub fn new() -> Self {
+            TensorMeta(Vec::new())
+        }
+
+        /// Add one output, replacing any earlier tensor of the same name so a
+        /// re-run of the same stage updates rather than accumulates.
+        pub fn push(&mut self, tensor: NamedTensor) {
+            match self.0.iter().position(|t| t.name == tensor.name) {
+                Some(idx) => self.0[idx] = tensor,
+                None => self.0.push(tensor),
+            }
+        }
+
+        /// Every attached tensor, in the order the stages produced them.
+        pub fn iter(&self) -> impl Iterator<Item = &NamedTensor> {
+            self.0.iter()
+        }
+
+        /// The tensor named `name`.
+        pub fn get(&self, name: &str) -> Option<&NamedTensor> {
+            self.0.iter().find(|t| t.name == name)
+        }
+
+        /// The tensor when the frame carries exactly one, so the ordinary
+        /// single-model pipeline needs no names. `None` when there are several:
+        /// the consumer must then say which it wants rather than be handed an
+        /// arbitrary one.
+        pub fn only(&self) -> Option<&NamedTensor> {
+            match self.0.as_slice() {
+                [one] => Some(one),
+                _ => None,
+            }
+        }
+
+        pub fn is_empty(&self) -> bool {
+            self.0.is_empty()
+        }
+    }
+
+    impl FrameMeta for TensorMeta {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+        fn as_any_mut(&mut self) -> &mut dyn Any {
+            self
+        }
+        fn clone_box(&self) -> Box<dyn FrameMeta> {
+            Box::new(self.clone())
+        }
+        /// The tensors describe the picture the models saw, so a re-encode ends
+        /// their usefulness the way it ends an analytics graph's. A scale or crop
+        /// leaves them readable: what they mean is fixed by the model input size
+        /// the post-processor normalizes against, not the frame's current size.
         fn propagate(&self, transform: Transform) -> Propagation {
             match transform {
                 Transform::Encode => Propagation::Drop,
@@ -1088,6 +1201,23 @@ mod tests {
                 kind: RelationKind::Classifies
             }
         );
+    }
+
+    #[test]
+    fn class_names_name_a_label_and_refuse_an_unknown_one() {
+        let mut m = AnalyticsMeta::new();
+        m.add_detection(det(0.1, 0.1, 0.2, 0.2, 1, 0.9));
+        assert_eq!(m.class_name(1), None, "no table yet");
+
+        m.set_class_names(["person", "bicycle"]);
+        assert_eq!(m.class_name(0), Some("person"));
+        assert_eq!(m.class_name(1), Some("bicycle"));
+        // An id the table does not cover means producer and table disagree, so
+        // it reads as unnamed rather than borrowing a neighbour's name.
+        assert_eq!(m.class_name(2), None);
+
+        // The table survives the clone a fan-out branch takes.
+        assert_eq!(m.clone().class_name(0), Some("person"));
     }
 
     #[test]

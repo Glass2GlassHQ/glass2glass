@@ -719,14 +719,22 @@ pub(crate) fn resolve_forward_output(
             .find(|c| tracks_input(c, input))
             .cloned()
     };
+    // a Derived closure computed the candidate from this input, so the element
+    // really does produce it, changed geometry included
+    let derives_from_input = matches!(
+        constraint,
+        CapsConstraint::DerivedOutput(_) | CapsConstraint::DerivedFields(_)
+    );
     let Some(d) = downstream_feasible else {
         return match candidates.alternatives() {
             // Unambiguous: forward the one output, fixated, or as-is when an
-            // unlearned input field (Any rate) blocks fixation but the output
-            // tracks the input.
+            // unlearned input field (Any rate) blocks fixation but the output is
+            // input-derived or otherwise tracks the input.
             [one] => match candidates.fixate() {
                 Some(c) => ForwardResolve::Fixed(c),
-                None if tracks_input(one, input) => ForwardResolve::Fixed(one.clone()),
+                None if derives_from_input || tracks_input(one, input) => {
+                    ForwardResolve::Fixed(one.clone())
+                }
                 None => ForwardResolve::Defer,
             },
             // Ambiguous with nothing to steer by: keep the previous output
@@ -742,7 +750,18 @@ pub(crate) fn resolve_forward_output(
     if narrowed.is_empty() {
         return ForwardResolve::Infeasible(NegotiationFailure::empty_link(0, 1));
     }
-    match fixate_kept_shape(&narrowed).or_else(|| narrowed.fixate()) {
+    match fixate_kept_shape(&narrowed)
+        .or_else(|| narrowed.fixate())
+        .or_else(|| match narrowed.alternatives() {
+            // Unambiguous but unfixatable: an input field the element never
+            // learned (a decoder announcing its geometry before it knows the
+            // framerate) leaves the derived output partly unfixed. Deferring
+            // here would forward the element's INPUT, which misreports what a
+            // geometry-changing element produces; downstream has already
+            // accepted this shape, so send the element's own output on.
+            [one] => Some(one.clone()),
+            _ => None,
+        }) {
         Some(c) => ForwardResolve::Fixed(c),
         None => ForwardResolve::Defer,
     }
@@ -3015,6 +3034,99 @@ mod tests {
             resolve_forward_output(&conv, &i420, Some(&bgra_set), None),
             ForwardResolve::Infeasible(NegotiationFailure::EmptyLink { .. })
         ));
+    }
+
+    /// A rescaler's single output is forwarded even when an input field it never
+    /// learned leaves that output unfixatable. The `filesrc ! qtdemux ! h264parse
+    /// ! ffmpegdec ! videoscale ! video/x-raw,width=640,height=640` regression:
+    /// the decoder announces its geometry before it knows the framerate, and
+    /// deferring on that first event forwards the scaler's 1280x720 INPUT, which
+    /// the capsfilter then rightly rejects.
+    #[test]
+    fn resolve_forward_output_forwards_an_unfixatable_single_output() {
+        // Rescaler: any raw input -> the same format at a fixed 640x640, the
+        // input's framerate carried through (unfixed included).
+        let scale = CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
+            Caps::RawVideo {
+                format, framerate, ..
+            } => CapsSet::one(video(
+                *format,
+                Dim::Fixed(640),
+                Dim::Fixed(640),
+                framerate.clone(),
+            )),
+            _ => CapsSet::from_alternatives(vec![]),
+        }));
+        // The decoder's first mid-stream caps: real geometry, framerate not yet
+        // known.
+        let no_rate = video(
+            RawVideoFormat::I420,
+            Dim::Fixed(1280),
+            Dim::Fixed(720),
+            Rate::Any,
+        );
+        let downstream = CapsSet::one(video(
+            RawVideoFormat::I420,
+            Dim::Fixed(640),
+            Dim::Fixed(640),
+            Rate::Any,
+        ));
+        match resolve_forward_output(&scale, &no_rate, Some(&downstream), None) {
+            ForwardResolve::Fixed(c) => assert_eq!(
+                c,
+                video(
+                    RawVideoFormat::I420,
+                    Dim::Fixed(640),
+                    Dim::Fixed(640),
+                    Rate::Any
+                ),
+                "the scaler's own output geometry, not its input's"
+            ),
+            other => panic!("expected Fixed(640x640), got {other:?}"),
+        }
+    }
+
+    /// The same unfixatable single output with no downstream snapshot, which a
+    /// wildcard sink below a chain of `DerivedOutput` elements leaves empty.
+    /// Deferring forwards a letterboxing `videobox`'s INPUT, which the
+    /// fixed-size consumer below it then rejects.
+    #[test]
+    fn resolve_forward_output_forwards_a_derived_single_output_without_a_snapshot() {
+        // Letterbox: any raw input -> same format, 24 rows taller, input's rate.
+        let letterbox = CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
+            Caps::RawVideo {
+                format,
+                width,
+                height: Dim::Fixed(h),
+                framerate,
+                ..
+            } => CapsSet::one(video(
+                *format,
+                width.clone(),
+                Dim::Fixed(h + 24),
+                framerate.clone(),
+            )),
+            _ => CapsSet::from_alternatives(vec![]),
+        }));
+        let no_rate = video(
+            RawVideoFormat::Rgba8,
+            Dim::Fixed(640),
+            Dim::Fixed(360),
+            Rate::Any,
+        );
+        match resolve_forward_output(&letterbox, &no_rate, None, None) {
+            ForwardResolve::Fixed(c) => assert_eq!(
+                c,
+                video(
+                    RawVideoFormat::Rgba8,
+                    Dim::Fixed(640),
+                    Dim::Fixed(384),
+                    Rate::Any
+                ),
+                "the boxer's own output geometry, not its input's"
+            ),
+            other => panic!("expected Fixed(640x384), got {other:?}"),
+        }
     }
 
     /// An ambiguous producible set with no downstream snapshot keeps the shape

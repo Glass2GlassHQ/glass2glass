@@ -237,9 +237,9 @@ impl MultiInputElement for OggMuxN {
         Box::pin(async move {
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let Some(slice) = frame.domain.as_system_slice() else {
-                        return Err(G2gError::UnsupportedDomain);
-                    };
+                    let slice = frame
+                        .domain
+                        .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
                     // Codec config arrives in-band ahead of the audio. It never
                     // enters the merge: the header block needs every stream's
                     // config before any of it can be written.
@@ -276,9 +276,9 @@ impl MultiInputElement for OggMuxN {
                 if !self.headers_written {
                     bytes.extend_from_slice(&self.write_headers()?);
                 }
-                let Some(slice) = frame.domain.as_system_slice() else {
-                    return Err(G2gError::UnsupportedDomain);
-                };
+                let slice = frame
+                    .domain
+                    .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
                 bytes.extend_from_slice(
                     &self.streams[stream].push_audio(slice, frame.timing.duration_ns),
                 );

@@ -132,6 +132,15 @@ impl Drop for PipelineTui {
     fn drop(&mut self) {
         ratatui::restore();
         log::set_sink(Box::new(StderrSink));
+        // The log pane goes away with the alternate screen, so a diagnosis that
+        // only reached the ring would die with it and leave the caller's bare
+        // `pipeline error: <kind>` as the whole story. Replay the errors, which
+        // is where the failing element and its cause are named.
+        for record in self.logs.snapshot() {
+            if record.level <= LogLevel::Error {
+                record.emit_to(&StderrSink);
+            }
+        }
     }
 }
 

@@ -108,9 +108,9 @@ impl AsyncElement for FileSink {
             let writer = self.writer.as_mut().ok_or(G2gError::NotConfigured)?;
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let Some(bytes) = frame.domain.as_system_slice() else {
-                        return Err(G2gError::UnsupportedDomain);
-                    };
+                    let bytes = frame
+                        .domain
+                        .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
                     writer.write_all(bytes).map_err(io_err)?;
                     self.bytes_written += bytes.len() as u64;
                     self.frames_written += 1;

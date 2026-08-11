@@ -256,9 +256,9 @@ impl AsyncElement for AudioConvert {
                 PipelinePacket::DataFrame(frame) => {
                     let (in_format, in_channels, rate) =
                         self.input.ok_or(G2gError::NotConfigured)?;
-                    let Some(slice) = frame.domain.as_system_slice() else {
-                        return Err(G2gError::UnsupportedDomain);
-                    };
+                    let slice = frame
+                        .domain
+                        .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
                     let out_format = self.out_format(in_format);
                     let out_channels = self.out_channels(in_channels);
                     let converted =

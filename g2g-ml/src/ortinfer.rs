@@ -66,6 +66,36 @@ struct Model {
     input_dtype: TensorDType,
 }
 
+/// Which execution provider a text-constructed element runs the session on.
+/// The `from_memory_with_*` constructors are the equivalent for code, and differ
+/// in intent: those register best-effort and fall back to the CPU, where naming
+/// one here is a request that fails loud if it cannot be honoured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionProvider {
+    Cpu,
+    #[cfg(feature = "cuda")]
+    Cuda,
+}
+
+impl ExecutionProvider {
+    fn parse(name: &str) -> Option<Self> {
+        match name {
+            "cpu" => Some(Self::Cpu),
+            #[cfg(feature = "cuda")]
+            "cuda" => Some(Self::Cuda),
+            _ => None,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Cpu => "cpu",
+            #[cfg(feature = "cuda")]
+            Self::Cuda => "cuda",
+        }
+    }
+}
+
 /// # Example
 ///
 /// ```no_run
@@ -87,6 +117,16 @@ pub struct OrtInference {
     /// When set, the input pad is a preprocessed NCHW `Caps::Tensor` fed straight
     /// to the session, not RGBA normalized on the CPU.
     tensor_input: bool,
+    /// Execution provider registered when the model loads.
+    provider: ExecutionProvider,
+    /// When set, the video frame goes out unchanged with the model output
+    /// attached as a `TensorMeta` instead of becoming the tensor frame.
+    #[cfg(feature = "analytics")]
+    attach_tensor: bool,
+    /// Name this element's output is attached under, so a frame carrying
+    /// several models' outputs keeps them apart. Empty for a single model.
+    #[cfg(feature = "analytics")]
+    tensor_name: String,
     configured: bool,
     last_caps: Option<Caps>,
     emitted: u64,
@@ -108,6 +148,11 @@ impl OrtInference {
             model: None,
             model_path: None,
             tensor_input: false,
+            provider: ExecutionProvider::Cpu,
+            #[cfg(feature = "analytics")]
+            attach_tensor: false,
+            #[cfg(feature = "analytics")]
+            tensor_name: String::new(),
             configured: false,
             last_caps: None,
             emitted: 0,
@@ -134,6 +179,29 @@ impl OrtInference {
     /// and `model` can be set in either order.
     pub fn load_model(&mut self, path: &str) -> Result<(), G2gError> {
         let mut builder = Session::builder().map_err(ort_err)?;
+        // registering directly, because `with_execution_providers` swallows a
+        // failure and leaves the session on the CPU, an order of magnitude slower
+        #[cfg(feature = "cuda")]
+        {
+            use ::ort::ep::ExecutionProvider as _;
+            match self.provider {
+                ExecutionProvider::Cpu => {}
+                ExecutionProvider::Cuda => {
+                    ::ort::ep::CUDA::default()
+                        .register(&mut builder)
+                        .map_err(|e| {
+                            // the caller only sees "invalid value", so name the cause
+                            // here, usually a missing cuDNN
+                            g2g_core::g2g_error!(
+                                g2g_core::log::Target::category("OrtInference"),
+                                "CUDA execution provider could not be enabled, \
+                             check the CUDA runtime and cuDNN are installed: {e}"
+                            );
+                            G2gError::Hardware(HardwareError::Other)
+                        })?
+                }
+            }
+        }
         let session = builder.commit_from_file(path).map_err(ort_err)?;
         self.model = Some(Model::load(session)?);
         self.model_path = Some(path.to_owned());
@@ -281,6 +349,25 @@ impl OrtInference {
     /// geometry is unchanged.
     pub fn with_tensor_input(mut self) -> Self {
         self.tensor_input = true;
+        self
+    }
+
+    /// Keep the video frame on the wire and attach the model output to it as a
+    /// [`TensorMeta`](g2g_core::TensorMeta) instead of emitting the tensor as
+    /// the frame. Lets `ortinfer ! detectionpostprocess ! analyticsoverlay` run
+    /// as one straight chain, since the frame that reaches the overlay is still
+    /// the picture the model saw.
+    #[cfg(feature = "analytics")]
+    pub fn with_attach_tensor(mut self) -> Self {
+        self.attach_tensor = true;
+        self
+    }
+
+    /// Name this element's output is attached under, so a second model on the
+    /// same frame does not collide with it. Only needed with more than one.
+    #[cfg(feature = "analytics")]
+    pub fn with_tensor_name(mut self, name: &str) -> Self {
+        self.tensor_name = String::from(name);
         self
     }
 
@@ -439,11 +526,18 @@ impl AsyncElement for OrtInference {
     /// the solver rejects it at negotiation time. With no model loaded the set
     /// is empty for every input, so negotiation fails instead of guessing caps.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
+        #[cfg(feature = "analytics")]
+        let attach = self.attach_tensor;
+        #[cfg(not(feature = "analytics"))]
+        let attach = false;
         let loaded = self.supported_input().zip(self.output_caps());
         CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| match &loaded {
-            Some((supported, out)) if input.intersect(supported).is_ok() => {
-                CapsSet::one(out.clone())
-            }
+            Some((supported, out)) => match input.intersect(supported) {
+                // attach-tensor keeps the picture: identity output, the model
+                // output rides along as meta.
+                Ok(narrowed) => CapsSet::one(if attach { narrowed } else { out.clone() }),
+                Err(_) => CapsSet::from_alternatives(Vec::new()),
+            },
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
     }
@@ -477,6 +571,26 @@ impl AsyncElement for OrtInference {
                 self.tensor_input = value.as_bool().ok_or(PropError::Type)?;
                 Ok(())
             }
+            "execution-provider" => {
+                let name = value.as_str().ok_or(PropError::Type)?;
+                self.provider = ExecutionProvider::parse(name).ok_or(PropError::Value)?;
+                // Set after `model=`, so rebuild the session on the new provider
+                // rather than making the launch line's property order matter.
+                if let Some(path) = self.model_path.clone() {
+                    self.load_model(&path).map_err(|_| PropError::Value)?;
+                }
+                Ok(())
+            }
+            #[cfg(feature = "analytics")]
+            "attach-tensor" => {
+                self.attach_tensor = value.as_bool().ok_or(PropError::Type)?;
+                Ok(())
+            }
+            #[cfg(feature = "analytics")]
+            "tensor-name" => {
+                self.tensor_name = String::from(value.as_str().ok_or(PropError::Type)?);
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -485,6 +599,11 @@ impl AsyncElement for OrtInference {
         match name {
             "model" => Some(PropValue::Str(self.model_path.clone().unwrap_or_default())),
             "tensor-input" => Some(PropValue::Bool(self.tensor_input)),
+            "execution-provider" => Some(PropValue::Str(String::from(self.provider.name()))),
+            #[cfg(feature = "analytics")]
+            "attach-tensor" => Some(PropValue::Bool(self.attach_tensor)),
+            #[cfg(feature = "analytics")]
+            "tensor-name" => Some(PropValue::Str(self.tensor_name.clone())),
             _ => None,
         }
     }
@@ -514,9 +633,37 @@ impl AsyncElement for OrtInference {
                     } else {
                         model.infer(slice)?
                     };
+                    let shape = TensorShape::from_slice(&dims).ok_or(G2gError::CapsMismatch)?;
+                    #[cfg(feature = "analytics")]
+                    if self.attach_tensor {
+                        // Caps are identity here, so no CapsChanged: the frame
+                        // going out is the one that came in, carrying the model
+                        // output for a post-processor downstream.
+                        let mut frame = frame;
+                        let produced = g2g_core::NamedTensor {
+                            name: self.tensor_name.clone(),
+                            dtype: TensorDType::F32,
+                            shape,
+                            layout: TensorLayout::Nchw,
+                            data: bytes.into_vec(),
+                        };
+                        // Add to whatever an earlier inference stage already put
+                        // on this frame rather than displacing it.
+                        match frame.meta.get_mut::<g2g_core::TensorMeta>() {
+                            Some(tensors) => tensors.push(produced),
+                            None => {
+                                let mut tensors = g2g_core::TensorMeta::new();
+                                tensors.push(produced);
+                                frame.meta.attach(tensors);
+                            }
+                        }
+                        self.emitted += 1;
+                        out.push(PipelinePacket::DataFrame(frame)).await?;
+                        return Ok(());
+                    }
                     let new_caps = Caps::Tensor {
                         dtype: TensorDType::F32,
-                        shape: TensorShape::from_slice(&dims).ok_or(G2gError::CapsMismatch)?,
+                        shape,
                         layout: TensorLayout::Nchw,
                     };
                     if self.last_caps.as_ref() != Some(&new_caps) {
@@ -572,14 +719,41 @@ impl AsyncElement for OrtInference {
 
 /// Settable properties: the model file to load and the input-pad mode, so a
 /// `gst-launch` line can build the element without the Rust constructors.
+const MODEL_PROP: PropertySpec =
+    PropertySpec::new("model", PropKind::Str, "path to the ONNX model file");
+const TENSOR_INPUT_PROP: PropertySpec = PropertySpec::new(
+    "tensor-input",
+    PropKind::Bool,
+    "take a preprocessed f32 NCHW tensor instead of RGBA video",
+);
+const PROVIDER_PROP: PropertySpec = PropertySpec::new(
+    "execution-provider",
+    PropKind::Str,
+    "execution provider to run the session on: cpu, or cuda when built with it",
+);
+#[cfg(feature = "analytics")]
+const ATTACH_TENSOR_PROP: PropertySpec = PropertySpec::new(
+    "attach-tensor",
+    PropKind::Bool,
+    "forward the video frame with the model output attached as metadata, instead of emitting the tensor as the frame",
+);
+#[cfg(feature = "analytics")]
+const TENSOR_NAME_PROP: PropertySpec = PropertySpec::new(
+    "tensor-name",
+    PropKind::Str,
+    "name the attached output is stored under, to keep several models on one frame apart",
+);
+
+#[cfg(feature = "analytics")]
 static ORT_INFER_PROPS: &[PropertySpec] = &[
-    PropertySpec::new("model", PropKind::Str, "path to the ONNX model file"),
-    PropertySpec::new(
-        "tensor-input",
-        PropKind::Bool,
-        "take a preprocessed f32 NCHW tensor instead of RGBA video",
-    ),
+    MODEL_PROP,
+    TENSOR_INPUT_PROP,
+    PROVIDER_PROP,
+    ATTACH_TENSOR_PROP,
+    TENSOR_NAME_PROP,
 ];
+#[cfg(not(feature = "analytics"))]
+static ORT_INFER_PROPS: &[PropertySpec] = &[MODEL_PROP, TENSOR_INPUT_PROP, PROVIDER_PROP];
 
 /// The RGBA input pad is the static superset (the model's geometry narrows it at
 /// instance time). No source template: the output tensor's shape is the loaded

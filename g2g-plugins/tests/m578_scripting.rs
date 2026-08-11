@@ -30,7 +30,7 @@ edges:
     let graph = declarative::from_yaml(&reg, yaml).expect("build the graph from YAML");
     let clock = WallClock::new();
     let progress = PipelineProgress::new();
-    let stats = run_graph_with_progress(graph, &clock, 4, &progress)
+    let stats = run_graph_with_progress(graph, &clock, 4, &progress, None)
         .await
         .expect("run");
     assert_eq!(
@@ -56,7 +56,7 @@ edges:
     let graph = declarative::from_yaml(&reg, yaml).expect("build");
     let clock = WallClock::new();
     let progress = PipelineProgress::new();
-    let stats = run_graph_with_progress(graph, &clock, 4, &progress)
+    let stats = run_graph_with_progress(graph, &clock, 4, &progress, None)
         .await
         .expect("run");
     assert_eq!(stats.frames_consumed, 12);
@@ -91,7 +91,7 @@ async fn rhai_script_built_graph_runs() {
     let graph = script::build_from_script(&reg, src).expect("build from script");
     let clock = WallClock::new();
     let progress = PipelineProgress::new();
-    let stats = run_graph_with_progress(graph, &clock, 4, &progress)
+    let stats = run_graph_with_progress(graph, &clock, 4, &progress, None)
         .await
         .expect("run");
     assert_eq!(stats.frames_consumed, 2);
@@ -117,7 +117,7 @@ edges:
     let graph = declarative::from_yaml(&reg, yaml).expect("build a routing graph");
     let clock = WallClock::new();
     let progress = PipelineProgress::new();
-    let stats = run_graph_with_progress(graph, &clock, 4, &progress)
+    let stats = run_graph_with_progress(graph, &clock, 4, &progress, None)
         .await
         .expect("run");
     // Every frame is routed to exactly one branch (parity keeps them all), so all
@@ -146,7 +146,7 @@ edges:
     let graph = declarative::from_yaml(&reg, yaml).expect("build");
     let clock = WallClock::new();
     let progress = PipelineProgress::new();
-    let stats = run_graph_with_progress(graph, &clock, 4, &progress)
+    let stats = run_graph_with_progress(graph, &clock, 4, &progress, None)
         .await
         .expect("run");
     // Sequences 0..4 route to port 0; 4 and 5 are dropped: 4 consumed.
@@ -176,7 +176,7 @@ edges:
     let graph = declarative::from_yaml(&reg, yaml).expect("build a multicast graph");
     let clock = WallClock::new();
     let progress = PipelineProgress::new();
-    let stats = run_graph_with_progress(graph, &clock, 4, &progress)
+    let stats = run_graph_with_progress(graph, &clock, 4, &progress, None)
         .await
         .expect("run");
     assert_eq!(
@@ -227,7 +227,7 @@ edges:
     // is genuinely live (a post-run drain would fill the bounded channel and stall
     // the runner at capacity, so completing at all proves concurrent delivery).
     let (stats, even_seqs, odd_seqs) = tokio::join!(
-        run_graph_with_progress(graph, &clock, 4, &progress),
+        run_graph_with_progress(graph, &clock, 4, &progress, None),
         drain(even),
         drain(odd),
     );

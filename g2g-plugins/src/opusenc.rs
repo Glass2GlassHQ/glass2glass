@@ -720,9 +720,9 @@ impl AsyncElement for OpusEnc {
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let Some(slice) = frame.domain.as_system_slice() else {
-                        return Err(G2gError::UnsupportedDomain);
-                    };
+                    let slice = frame
+                        .domain
+                        .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
                     // Anchor the output timeline to the first input PTS.
                     if self.next_pts_ns.is_none() {
                         self.next_pts_ns = Some(frame.timing.pts_ns);

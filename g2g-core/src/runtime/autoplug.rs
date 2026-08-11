@@ -547,6 +547,7 @@ mod factory {
         name: &'static str,
         templates: Vec<PadTemplate>,
         build: fn() -> Box<dyn DynAsyncElement>,
+        usable: Option<fn() -> bool>,
     }
 
     impl LaunchFactory {
@@ -561,6 +562,7 @@ mod factory {
                 name,
                 templates,
                 build,
+                usable: None,
             }
         }
 
@@ -573,9 +575,27 @@ mod factory {
             Self::new(name, E::pad_templates(), build)
         }
 
+        /// Declare a check for whether this element can run on this machine
+        /// right now, beyond having been compiled in: a display sink asking
+        /// whether there is a display to present on, say.
+        ///
+        /// Only [`register_alias`](Registry::register_alias) consults it, so an
+        /// `autovideosink` falls through a sink with nothing to draw on while a
+        /// pipeline naming that sink outright still fails and says why.
+        pub fn with_usable(mut self, usable: fn() -> bool) -> Self {
+            self.usable = Some(usable);
+            self
+        }
+
         /// This factory's element name.
         pub fn name(&self) -> &'static str {
             self.name
+        }
+
+        /// Whether this element can run here, per the check it declared.
+        /// `true` when it declared none.
+        pub fn usable(&self) -> bool {
+            self.usable.is_none_or(|check| check())
         }
     }
 
@@ -1101,6 +1121,18 @@ mod factory {
         }
     }
 
+    /// The memory domain a consumer accepting `accepted` wants its frames in: its
+    /// most-preferred domain (GPU-resident before `System`, per `DomainSet`).
+    /// [`DomainSet::ALL`] is the default an element that never declared carries,
+    /// meaning "imposes no requirement" rather than "wants any domain", so it
+    /// derives `System` and leaves a plain pipeline's selection alone.
+    fn memory_preference(accepted: DomainSet) -> MemoryDomainKind {
+        if accepted == DomainSet::ALL {
+            return MemoryDomainKind::System;
+        }
+        accepted.preferred().unwrap_or(MemoryDomainKind::System)
+    }
+
     /// A runtime collection of element factories the auto-plugger searches over,
     /// the analog of GStreamer's plugin registry. Registration order is the
     /// tie-break only indirectly: [`find_chain`] is breadth-first, so among
@@ -1381,14 +1413,25 @@ mod factory {
             self
         }
 
-        /// Resolve a name through the alias table to the first registered target,
-        /// or the name itself when it is not an alias. One hop only (aliases do not
-        /// chain to other aliases).
-        fn resolve_alias<'a>(&self, name: &'a str) -> &'a str {
+        /// Resolve a name through the alias table to the first target that is
+        /// registered and can run here, or the name itself when it is not an
+        /// alias. One hop only (aliases do not chain to other aliases).
+        ///
+        /// A launch target that declared a
+        /// [`with_usable`](LaunchFactory::with_usable) check is skipped when the
+        /// check says no, so `autovideosink` falls past a display sink that was
+        /// compiled in but has no display to present on. The last entry of an
+        /// auto alias is `fakesink`, which always runs.
+        pub(crate) fn resolve_alias<'a>(&self, name: &'a str) -> &'a str {
             if let Some((_, targets)) = self.aliases.iter().find(|(a, _)| *a == name) {
                 for &t in *targets {
+                    if let Some(factory) = self.launch.iter().find(|f| f.name == t) {
+                        if factory.usable() {
+                            return t;
+                        }
+                        continue;
+                    }
                     if self.sources.iter().any(|s| s.name == t)
-                        || self.launch.iter().any(|f| f.name == t)
                         || self.muxers.iter().any(|m| m.name == t)
                         || self.demuxes.iter().any(|d| d.name == t)
                     {
@@ -1676,6 +1719,80 @@ mod factory {
             self.factories.iter().map(|f| f.desc.clone()).collect()
         }
 
+        /// The descriptors the search may pick from with `avoided` factories left
+        /// out, plus each one's index into [`descs`](Self::descs) (a chain link
+        /// names a factory by that index, which leaving entries out would shift).
+        fn descs_avoiding(&self, avoided: &[&str]) -> (Vec<ElementDesc>, Vec<usize>) {
+            self.factories
+                .iter()
+                .enumerate()
+                .filter(|(_, f)| !avoided.contains(&f.desc.name))
+                .map(|(i, f)| (f.desc.clone(), i))
+                .unzip()
+        }
+
+        /// The names of the shortest chain that avoids every factory in
+        /// `avoided`: the retry after one of them turned out not to decode the
+        /// stream, where the search would otherwise pick it again. An empty
+        /// `avoided` is [`autoplug_names_preferring`](Self::autoplug_names_preferring).
+        pub fn autoplug_names_avoiding(
+            &self,
+            input: &Caps,
+            target: &dyn Fn(&Caps) -> bool,
+            max_depth: usize,
+            preferred: MemoryDomainKind,
+            avoided: &[&str],
+        ) -> Option<Vec<&'static str>> {
+            let (descs, indices) = self.descs_avoiding(avoided);
+            let chain = find_chain_preferring(&descs, input, target, max_depth, preferred)?;
+            Some(
+                chain
+                    .into_iter()
+                    .map(|link| self.factories[indices[link.index]].desc.name)
+                    .collect(),
+            )
+        }
+
+        /// [`autoplug_names_avoiding`](Self::autoplug_names_avoiding), instantiated.
+        pub fn autoplug_avoiding(
+            &self,
+            input: &Caps,
+            target: &dyn Fn(&Caps) -> bool,
+            max_depth: usize,
+            preferred: MemoryDomainKind,
+            avoided: &[&str],
+        ) -> Option<Vec<Box<dyn DynAsyncElement>>> {
+            let (descs, indices) = self.descs_avoiding(avoided);
+            let chain = find_chain_preferring(&descs, input, target, max_depth, preferred)?;
+            let chain = chain
+                .into_iter()
+                .map(|link| ChainLink {
+                    index: indices[link.index],
+                    output: link.output,
+                })
+                .collect();
+            self.instantiate(chain, &AutoplugParams::new()).ok()
+        }
+
+        /// The factory whose element the runner would name `instance` (its type's
+        /// log category plus a number, e.g. `VulkanVideoDec0` -> `vulkanvideodec`).
+        /// The bus names a failing element by instance; acting on it per factory,
+        /// to auto-plug around the one that failed, needs the way back.
+        ///
+        /// Each candidate is default-constructed to be asked its category, which
+        /// costs an allocation and opens nothing (a decoder reaches its device at
+        /// `configure_pipeline`). `None` if no registered factory matches.
+        pub fn factory_of_instance(&self, instance: &str) -> Option<&'static str> {
+            let category = instance.trim_end_matches(|c: char| c.is_ascii_digit());
+            if category.is_empty() {
+                return None;
+            }
+            self.launch
+                .iter()
+                .find(|f| (f.build)().log_category() == category)
+                .map(|f| f.name)
+        }
+
         /// The names of the shortest chain converting `input` into caps
         /// satisfying `target`, without instantiating anything. `Some(vec![])`
         /// if `input` already satisfies `target`; `None` if no chain exists
@@ -1788,10 +1905,26 @@ mod factory {
                 .element(to.node)
                 .map(|node| node.input_domains())
                 .unwrap_or(DomainSet::ALL);
-            if accepted == DomainSet::ALL {
-                return MemoryDomainKind::System;
-            }
-            accepted.preferred().unwrap_or(MemoryDomainKind::System)
+            memory_preference(accepted)
+        }
+
+        /// The memory domain the element registered under `name` wants its frames
+        /// in, the same rule as
+        /// [`derived_memory_preference`](Self::derived_memory_preference) but
+        /// reached by launch name rather than through a built graph (M1018): the
+        /// text parser expands a `decodebin` before any element exists, so its
+        /// consumer is still just a name. An unregistered name derives `System`.
+        ///
+        /// The name is default-constructed to be asked, since `input_domains` is a
+        /// per-instance method and every implementation of it is constant per
+        /// element type; a factory-level copy of the same fact could drift from it.
+        /// A launch factory's constructor takes no arguments and opens nothing (a
+        /// sink reaches its device in `configure_pipeline`), so the throwaway
+        /// instance costs an allocation.
+        pub fn declared_memory_preference(&self, name: &str) -> MemoryDomainKind {
+            self.make_element(name)
+                .map(|element| memory_preference(element.input_domains()))
+                .unwrap_or(MemoryDomainKind::System)
         }
 
         /// [`decodebin`](Self::decodebin) with per-element property assignments
@@ -2573,5 +2706,42 @@ mod tests {
             2,
             "provider: a parser is spliced in ahead of the decoder"
         );
+    }
+
+    fn named_sink(name: &'static str) -> LaunchFactory {
+        LaunchFactory::new(name, Vec::new(), || alloc::boxed::Box::new(Dummy))
+    }
+
+    #[test]
+    fn an_alias_falls_past_a_target_that_cannot_run_here() {
+        let mut reg = Registry::new();
+        reg.register_launch(named_sink("displaysink").with_usable(|| false));
+        reg.register_launch(named_sink("nullsink"));
+        reg.register_alias("autosink", &["displaysink", "nullsink"]);
+
+        assert_eq!(reg.resolve_alias("autosink"), "nullsink");
+        assert!(
+            reg.make_element("displaysink").is_some(),
+            "naming the sink outright still builds it, so it reports its own failure"
+        );
+    }
+
+    #[test]
+    fn an_alias_takes_the_first_target_that_can_run_here() {
+        let mut reg = Registry::new();
+        reg.register_launch(named_sink("displaysink").with_usable(|| true));
+        reg.register_launch(named_sink("nullsink"));
+        reg.register_alias("autosink", &["displaysink", "nullsink"]);
+
+        assert_eq!(reg.resolve_alias("autosink"), "displaysink");
+    }
+
+    #[test]
+    fn a_target_declaring_no_check_stays_usable() {
+        let mut reg = Registry::new();
+        reg.register_launch(named_sink("plainsink"));
+        reg.register_alias("autosink", &["plainsink"]);
+
+        assert_eq!(reg.resolve_alias("autosink"), "plainsink");
     }
 }

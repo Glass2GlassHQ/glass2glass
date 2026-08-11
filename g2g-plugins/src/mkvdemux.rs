@@ -718,9 +718,9 @@ impl AsyncElement for MkvDemux {
             self.poll_seek();
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let Some(slice) = frame.domain.as_system_slice() else {
-                        return Err(G2gError::UnsupportedDomain);
-                    };
+                    let slice = frame
+                        .domain
+                        .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
                     match self.prefetch {
                         // Awaiting the prefetch byte-seek's flush: drop in-flight
                         // pre-seek bytes (the same as `dropping_input`).
@@ -1428,9 +1428,9 @@ impl MultiOutputElement for MkvDemuxN {
         Box::pin(async move {
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let Some(slice) = frame.domain.as_system_slice() else {
-                        return Err(G2gError::UnsupportedDomain);
-                    };
+                    let slice = frame
+                        .domain
+                        .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
                     self.demux.push_data(slice);
                     if self.bus.is_some() {
                         self.post_stream_collection();

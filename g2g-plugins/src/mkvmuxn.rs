@@ -466,9 +466,9 @@ impl MkvMuxN {
         frame: Frame,
         out: &mut dyn OutputSink,
     ) -> Result<(), G2gError> {
-        let Some(slice) = frame.domain.as_system_slice() else {
-            return Err(G2gError::UnsupportedDomain);
-        };
+        let slice = frame
+            .domain
+            .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
         let pts_ns = frame.timing.pts_ns;
         let (sample, is_key) = self.sample_for(input, slice);
         let mux = self.mux.as_mut().ok_or(G2gError::NotConfigured)?;

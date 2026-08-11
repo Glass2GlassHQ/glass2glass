@@ -1019,19 +1019,25 @@ pub async fn run_graph_observed<'a, Clk: PipelineClock>(
 /// every buffer it consumes, and the source arm publishes the
 /// [`duration`](PipelineProgress::duration) its source reports
 /// ([`SourceLoop::query_duration`]). The application polls the handle while the
-/// pipeline runs, the `POSITION` / `DURATION` query analog. Pair with
-/// [`run_graph_with_bus`] for the matching `DurationChanged` push notification.
+/// pipeline runs, the `POSITION` / `DURATION` query analog.
+///
+/// `bus` carries the out-of-band messages of [`run_graph_with_bus`] (the
+/// matching `DurationChanged` push notification, and the `ElementError` naming
+/// what ended the run); pass `None` for progress alone. A caller that reacts to a
+/// failure by re-plugging the graph needs both, since the decision is "which
+/// element failed" plus "had anything been presented yet".
 pub async fn run_graph_with_progress<'a, Clk: PipelineClock>(
     graph: Graph<GraphNodeRef<'a>>,
     clock: &Clk,
     link_capacity: impl Into<LinkCapacity>,
     progress: &PipelineProgress,
+    bus: Option<&BusHandle>,
 ) -> Result<RunStats, G2gError> {
     run_graph_inner(
         graph,
         clock,
         link_capacity,
-        None,
+        bus,
         None,
         Some(progress),
         None,
@@ -1113,13 +1119,14 @@ pub async fn run_graph_recorded<'a, Clk: PipelineClock>(
     clock: &Clk,
     link_capacity: impl Into<LinkCapacity>,
     progress: Option<&PipelineProgress>,
+    bus: Option<&BusHandle>,
     recorder: &FlightRecorder,
 ) -> Result<RunStats, G2gError> {
     run_graph_inner(
         graph,
         clock,
         link_capacity,
-        None,
+        bus,
         None,
         progress,
         None,
@@ -1956,6 +1963,7 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
         allocation,
         clock_priority,
         base_time_ns,
+        bus,
     )
 }
 
@@ -1978,6 +1986,7 @@ fn fold_run_stats(
     allocation: Option<AllocationParams>,
     clock_priority: ClockPriority,
     base_time_ns: u64,
+    bus: Option<&BusHandle>,
 ) -> Result<RunStats, G2gError> {
     // M81: surface a substantive arm error over a secondary `Shutdown` (a real
     // error in one node closes links, which surfaces as `Shutdown` on the
@@ -1991,7 +2000,16 @@ fn fold_run_stats(
             .find(|(_, e)| !only_substantive || **e != G2gError::Shutdown)
     };
     if let Some((arm, e)) = failed(true).or_else(|| failed(false)) {
-        crate::log::report_element_failure(arm_names.get(arm).map(|n| n.as_str()), e);
+        let name = arm_names.get(arm).map(|n| n.as_str());
+        crate::log::report_element_failure(name, e);
+        // Named on the bus too: the returned error carries no element identity,
+        // so an application that reacts per element has nothing else to key on.
+        if let (Some(bus), Some(name)) = (bus, name.filter(|n| !n.is_empty())) {
+            bus.try_post(crate::bus::BusMessage::ElementError {
+                element: alloc::string::String::from(name),
+                error: e.clone(),
+            });
+        }
         return Err(e.clone());
     }
     let mut counts = Vec::with_capacity(results.len());
@@ -2415,6 +2433,7 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
         allocation,
         clock_priority,
         base_time_ns,
+        bus,
     )
 }
 
@@ -2519,13 +2538,14 @@ pub async fn run_graph_threaded_with_progress<Clk: PipelineClock, S: GraphSpawne
     clock: &Clk,
     link_capacity: impl Into<LinkCapacity>,
     progress: &PipelineProgress,
+    bus: Option<&BusHandle>,
     spawner: &S,
 ) -> Result<RunStats, G2gError> {
     run_graph_threaded_inner(
         graph,
         clock,
         link_capacity,
-        None,
+        bus,
         None,
         Some(progress),
         None,
@@ -2577,6 +2597,7 @@ pub async fn run_graph_threaded_recorded<Clk: PipelineClock, S: GraphSpawner>(
     clock: &Clk,
     link_capacity: impl Into<LinkCapacity>,
     progress: Option<&PipelineProgress>,
+    bus: Option<&BusHandle>,
     recorder: &FlightRecorder,
     spawner: &S,
 ) -> Result<RunStats, G2gError> {
@@ -2584,7 +2605,7 @@ pub async fn run_graph_threaded_recorded<Clk: PipelineClock, S: GraphSpawner>(
         graph,
         clock,
         link_capacity,
-        None,
+        bus,
         None,
         progress,
         None,

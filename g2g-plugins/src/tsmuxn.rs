@@ -554,9 +554,9 @@ impl MultiInputElement for TsMux {
             // Drain every AU now safe to emit, in global PTS order, writing each
             // to its stream's PID.
             while let Some((stream, frame)) = self.agg.take_earliest_by(|f| f.timing.pts_ns) {
-                let Some(slice) = frame.domain.as_system_slice() else {
-                    return Err(G2gError::UnsupportedDomain);
-                };
+                let slice = frame
+                    .domain
+                    .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
                 let pts_90khz = (frame.timing.pts_ns as u128 * 90_000 / 1_000_000_000) as u64;
                 // A DTS rides the PES only for reordered video (dts_ns set and
                 // distinct from the PTS); 0 is the unset sentinel, equal adds nothing.

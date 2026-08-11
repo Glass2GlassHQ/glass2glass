@@ -236,9 +236,9 @@ impl MultiInputElement for AudioMixer {
         Box::pin(async move {
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let Some(bytes) = frame.domain.as_system_slice() else {
-                        return Err(G2gError::UnsupportedDomain);
-                    };
+                    let bytes = frame
+                        .domain
+                        .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
                     let pts_ns = frame.timing.pts_ns;
                     self.accumulate_frame(input, pts_ns, bytes);
                 }

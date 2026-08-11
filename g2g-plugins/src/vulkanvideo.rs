@@ -24,6 +24,7 @@
 use ash::vk;
 
 use g2g_core::frame::Frame;
+use g2g_core::g2g_error;
 use g2g_core::memory::{DomainSet, MemoryDomainKind, OwnedWgpuTexture, SystemSlice};
 use g2g_core::runtime::block_on;
 use g2g_core::{
@@ -5010,7 +5011,20 @@ pub fn parse_h264_slice_header(
             .bottom_field_pic_order_in_frame_present_flag
             == 1,
     }];
-    let slice = crate::poc::parse_h264_slice_poc(nal, &h264_poc_context(sps), &pps_poc)?;
+    // Parsed through `dec_ref_pic_marking()`: a stream using adaptive marking
+    // (x264 does, for its B-pyramid) evicts references on its own schedule, and a
+    // DPB running the default sliding window instead would hand the driver a
+    // reference list naming pictures it no longer holds.
+    let marking = crate::poc::H264PpsRefMarking {
+        redundant_pic_cnt_present_flag: pps.redundant_pic_cnt_present_flag == 1,
+        weighted_pred_flag: pps.weighted_pred_flag == 1,
+        weighted_bipred_idc: pps.weighted_bipred_idc,
+        num_ref_idx_l0_default_active_minus1: u32::from(pps.num_ref_idx_l0_default_active_minus1),
+        num_ref_idx_l1_default_active_minus1: u32::from(pps.num_ref_idx_l1_default_active_minus1),
+        chroma_array_type: sps.chroma_format_idc,
+    };
+    let slice =
+        crate::poc::parse_h264_slice_marking(nal, &h264_poc_context(sps), &pps_poc, &marking)?;
     // Only progressive frame pictures are supported; a field picture (only
     // possible when frame_mbs_only_flag == 0) is rejected rather than mis-run.
     if slice.field_pic_flag {
@@ -6687,6 +6701,12 @@ pub async fn open_decode_device_at(
     // Priorities array lives in this scope so the queue-create pointer the
     // callback records stays valid through `open_with_callback`.
     let priorities = [1.0f32];
+    // The extension alone does not turn `vkCmdPipelineBarrier2` on: without the
+    // feature its behaviour is undefined, and every decode barrier goes through
+    // it. wgpu does not enable it, so chain it here. Same scope rule as
+    // `priorities`: the pointer the callback chains has to outlive the call.
+    let mut sync2_features =
+        vk::PhysicalDeviceSynchronization2Features::default().synchronization2(true);
 
     // SAFETY: `open_with_callback` + `create_device_from_hal` follow the
     // documented cudawgpu pattern; the callback only appends extensions and (for
@@ -6706,6 +6726,8 @@ pub async fn open_decode_device_at(
                         for e in exts {
                             args.extensions.push(e);
                         }
+                        let create_info = core::mem::take(args.create_info);
+                        *args.create_info = create_info.push_next(&mut sync2_features);
                         // Present-side extensions (see the detection above): enable
                         // them so an HDR swapchain sink can present on this device.
                         if want_swapchain {
@@ -7080,7 +7102,22 @@ impl VulkanVideoDevice {
         }
     }
 
-    /// Create an H.264 decode session + parameters for `ps`, sized to
+    /// The `maxCodedExtent` a video session is created with: the device's own
+    /// maximum, never the picture's size. Only an upper bound is being declared,
+    /// and each picture resource still carries its real coded extent, so this
+    /// costs nothing in the decode. Binding the session to the picture size
+    /// instead makes the NVIDIA driver refuse some small geometries outright
+    /// with `ERROR_INVALID_VIDEO_STD_PARAMETERS_KHR` (64x48 and 64x64 do, 64x96
+    /// does not), and GStreamer's Vulkan decoder, which does not hit that, sizes
+    /// its session the same way.
+    fn session_max_coded_extent(&self) -> vk::Extent2D {
+        vk::Extent2D {
+            width: self.caps.max_coded_extent.0,
+            height: self.caps.max_coded_extent.1,
+        }
+    }
+
+    /// Create an H.264 decode session + parameters for `ps`, whose pictures are
     /// `max_w`x`max_h` (clamped to the device's coded-extent range). Session
     /// parameter creation validates the `Std*` SPS/PPS mapping.
     pub fn create_h264_session(
@@ -7095,10 +7132,7 @@ impl VulkanVideoDevice {
 
         let w = max_w.clamp(self.caps.min_coded_extent.0, self.caps.max_coded_extent.0);
         let h = max_h.clamp(self.caps.min_coded_extent.1, self.caps.max_coded_extent.1);
-        let coded_extent = vk::Extent2D {
-            width: w,
-            height: h,
-        };
+        let coded_extent = self.session_max_coded_extent();
 
         let session_ci = vk::VideoSessionCreateInfoKHR::default()
             .queue_family_index(self.decode_queue_family)
@@ -7213,10 +7247,7 @@ impl VulkanVideoDevice {
 
         let w = max_w.clamp(self.caps.min_coded_extent.0, self.caps.max_coded_extent.0);
         let h = max_h.clamp(self.caps.min_coded_extent.1, self.caps.max_coded_extent.1);
-        let coded_extent = vk::Extent2D {
-            width: w,
-            height: h,
-        };
+        let coded_extent = self.session_max_coded_extent();
 
         let session_ci = vk::VideoSessionCreateInfoKHR::default()
             .queue_family_index(self.decode_queue_family)
@@ -7333,10 +7364,7 @@ impl VulkanVideoDevice {
 
         let w = max_w.clamp(self.caps.min_coded_extent.0, self.caps.max_coded_extent.0);
         let h = max_h.clamp(self.caps.min_coded_extent.1, self.caps.max_coded_extent.1);
-        let coded_extent = vk::Extent2D {
-            width: w,
-            height: h,
-        };
+        let coded_extent = self.session_max_coded_extent();
 
         let session_ci = vk::VideoSessionCreateInfoKHR::default()
             .queue_family_index(self.decode_queue_family)
@@ -7624,7 +7652,7 @@ impl VulkanVideoDevice {
             let ptr = dev
                 .map_memory(m, 0, breq.size, vk::MemoryMapFlags::empty())
                 .map_err(VulkanVideoError::QueryFailed)? as *mut u8;
-            core::ptr::copy_nonoverlapping(slice.as_ptr(), ptr, slice.len());
+            fill_bitstream(ptr, &slice, buf_size);
             dev.unmap_memory(m);
             m
         };
@@ -8005,7 +8033,7 @@ impl VulkanVideoDevice {
             let ptr = dev
                 .map_memory(m, 0, breq.size, vk::MemoryMapFlags::empty())
                 .map_err(VulkanVideoError::QueryFailed)? as *mut u8;
-            core::ptr::copy_nonoverlapping(slice.as_ptr(), ptr, slice.len());
+            fill_bitstream(ptr, slice, buf_size);
             dev.unmap_memory(m);
             m
         };
@@ -9177,7 +9205,7 @@ impl DpbCore {
             let ptr = dev
                 .map_memory(m, 0, breq.size, vk::MemoryMapFlags::empty())
                 .map_err(VulkanVideoError::QueryFailed)? as *mut u8;
-            core::ptr::copy_nonoverlapping(data.as_ptr(), ptr, data.len());
+            fill_bitstream(ptr, data, buf_size);
             dev.unmap_memory(m);
             m
         };
@@ -10196,6 +10224,63 @@ impl H264DpbDecoder {
         }
     }
 
+    /// Apply a slice's adaptive reference marking (H.264 8.2.5.4): the stream
+    /// names which pictures stop being references instead of leaving it to the
+    /// sliding window. Only the short-term operations are run; a long-term one is
+    /// refused, since a DPB that ignored it would keep feeding the driver a
+    /// reference the stream has retired.
+    fn apply_ref_pic_marking(
+        &mut self,
+        hdr: &H264SliceHeader,
+        marking: &crate::poc::H264RefPicMarking,
+    ) -> Result<(), VulkanVideoError> {
+        for op in marking.ops() {
+            match *op {
+                crate::poc::H264Mmco::ShortTermUnused {
+                    difference_of_pic_nums_minus1,
+                } => {
+                    let pic_num_x = (hdr.frame_num as i64)
+                        .saturating_sub(i64::from(difference_of_pic_nums_minus1))
+                        .saturating_sub(1);
+                    self.free_short_term(pic_num_x, hdr.frame_num);
+                }
+                crate::poc::H264Mmco::AllUnused => {
+                    for r in &mut self.refs {
+                        *r = None;
+                    }
+                }
+                // "no long-term references in use" is the state this DPB is
+                // always in, so it asks for nothing.
+                crate::poc::H264Mmco::MaxLongTermIndex {
+                    max_long_term_frame_idx_plus1: 0,
+                } => {}
+                _ => return Err(VulkanVideoError::UnsupportedStream),
+            }
+        }
+        Ok(())
+    }
+
+    /// Free the slot holding the short-term reference whose `PicNum` is
+    /// `pic_num_x`, comparing in the wrapped frame-number space the marking
+    /// operations are written in (H.264 8.2.4.1).
+    fn free_short_term(&mut self, pic_num_x: i64, cur_frame_num: u32) {
+        let cur = cur_frame_num as i32;
+        for r in &mut self.refs {
+            if let Some(rp) = r {
+                let fnum = rp.frame_num as i32;
+                let wrap = if fnum > cur {
+                    fnum - self.max_frame_num
+                } else {
+                    fnum
+                };
+                if i64::from(wrap) == pic_num_x {
+                    *r = None;
+                    return;
+                }
+            }
+        }
+    }
+
     /// Decode one primary coded picture (its slice NALs) into a free DPB slot,
     /// referencing the pictures currently in the DPB, and read the result back as
     /// an [`Nv12Frame`]. Updates the DPB (stores the picture as a reference, runs
@@ -10268,12 +10353,23 @@ impl H264DpbDecoder {
             to_system,
         )?;
 
-        // Reference marking: store the decoded picture as a short-term reference
-        // (running sliding-window eviction first if the DPB is full). A
-        // non-reference picture (nal_ref_idc == 0) leaves its slot free.
+        // Reference marking: store the decoded picture as a short-term reference,
+        // freeing a slot first if the DPB is full. The stream picks which picture
+        // goes, either by naming it (adaptive marking) or by leaving it to the
+        // sliding window. A non-reference picture (nal_ref_idc == 0) leaves its
+        // slot free.
         if hdr.nal_ref_idc != 0 && self.max_num_ref_frames > 0 {
+            let marking = hdr
+                .ref_pic_marking
+                .ok_or(VulkanVideoError::UnsupportedStream)?;
+            if marking.long_term_reference {
+                return Err(VulkanVideoError::UnsupportedStream);
+            }
+            if marking.adaptive {
+                self.apply_ref_pic_marking(hdr, &marking)?;
+            }
             let ref_count = self.refs.iter().filter(|r| r.is_some()).count();
-            if ref_count >= self.max_num_ref_frames {
+            if !marking.adaptive && ref_count >= self.max_num_ref_frames {
                 self.evict_oldest(hdr.frame_num);
             }
             self.refs[target] = Some(RefPic {
@@ -12634,6 +12730,24 @@ fn round_up(x: u64, align: u64) -> u64 {
     x.div_ceil(align).saturating_mul(align)
 }
 
+/// Write `data` into a mapped bitstream buffer of `buf_size` bytes, zeroing the
+/// rest. The buffer is rounded up to the driver's size alignment and the decode
+/// is told the payload spans the whole range, so whatever follows the slice is
+/// read as trailing bytes of it: leaving fresh allocation garbage there makes
+/// the driver reject the stream (`ERROR_INVALID_VIDEO_STD_PARAMETERS_KHR`),
+/// depending on the byte length of each frame. Zeros are legal trailer.
+///
+/// # Safety
+/// `ptr` must be writable for `buf_size` bytes, and `data.len() <= buf_size`.
+unsafe fn fill_bitstream(ptr: *mut u8, data: &[u8], buf_size: u64) {
+    // SAFETY: the caller guarantees the mapping covers `buf_size` bytes, which
+    // is at least `data.len()`, so both writes stay inside it.
+    unsafe {
+        core::ptr::copy_nonoverlapping(data.as_ptr(), ptr, data.len());
+        core::ptr::write_bytes(ptr.add(data.len()), 0, buf_size as usize - data.len());
+    }
+}
+
 /// The full-color single-mip single-layer subresource range used for the decode
 /// / conversion images.
 fn color_range() -> vk::ImageSubresourceRange {
@@ -12968,6 +13082,19 @@ fn parameter_set_fingerprint(codec: VideoCodec, au: &[u8]) -> alloc::vec::Vec<u8
     fp
 }
 
+/// Report a decode the GPU would not run and turn it into the pipeline error.
+/// The Vulkan status names which stream feature was refused, and it is the only
+/// thing that does, so dropping it left a bare `CapsMismatch` with nothing to act
+/// on. Errors before any frame flows (bad caps) stay silent here; this is for the
+/// ones that only appear once the bitstream is read.
+fn decode_refused(err: VulkanVideoError) -> G2gError {
+    g2g_error!(
+        g2g_core::log::Target::category(g2g_core::log::short_type_name::<VulkanVideoDec>()),
+        "the GPU refused to decode this stream: {err:?}"
+    );
+    G2gError::CapsMismatch
+}
+
 /// # Example
 ///
 /// ```no_run
@@ -13048,6 +13175,9 @@ pub struct VulkanVideoDec {
     /// `num-dpb-slots` property: a DPB image count for the decoder built at the
     /// first keyframe, or `None` to size it from the stream.
     dpb_slots: Option<u32>,
+    /// What the open device was opened for, so a later `configure_pipeline` with
+    /// the same codec on the same GPU keeps it.
+    opened_device: Option<(VideoCodec, Option<u32>)>,
 }
 
 impl core::fmt::Debug for VulkanVideoDec {
@@ -13091,6 +13221,7 @@ impl VulkanVideoDec {
             low_latency: false,
             device_index: None,
             dpb_slots: None,
+            opened_device: None,
         }
     }
 
@@ -13106,6 +13237,16 @@ impl VulkanVideoDec {
         };
         self.reorder.max_hold = hold;
         self.reorder_tex.max_hold = hold;
+    }
+
+    /// The pixel format the decoder emits, which tracks the resolved output
+    /// domain: `Rgba8` for the GPU-texture path, `Nv12` for the system one.
+    fn output_format(&self) -> RawVideoFormat {
+        if self.out_domain == MemoryDomainKind::WgpuTexture {
+            RawVideoFormat::Rgba8
+        } else {
+            RawVideoFormat::Nv12
+        }
     }
 
     /// The domains this decoder can emit: the zero-copy `WgpuTexture` (preferred)
@@ -13128,12 +13269,12 @@ impl VulkanVideoDec {
                 Ok(d) => Ok((d, true)),
                 // No compute queue: fall back to the system NV12 path.
                 Err(VulkanVideoError::NoComputeQueue) => {
-                    Ok((sys().map_err(|_| G2gError::CapsMismatch)?, false))
+                    Ok((sys().map_err(decode_refused)?, false))
                 }
                 Err(_) => Err(G2gError::CapsMismatch),
             }
         } else {
-            Ok((sys().map_err(|_| G2gError::CapsMismatch)?, false))
+            Ok((sys().map_err(decode_refused)?, false))
         }
     }
 
@@ -13176,7 +13317,7 @@ impl VulkanVideoDec {
                 }
                 let session = device
                     .create_h264_session(&ps, width, height)
-                    .map_err(|_| G2gError::CapsMismatch)?;
+                    .map_err(decode_refused)?;
                 let (decoder, emit_wgpu) = Self::build_with_fallback(
                     want_gpu,
                     || device.create_h264_dpb_decoder_gpu(&session, &ps),
@@ -13207,7 +13348,7 @@ impl VulkanVideoDec {
                 let std = to_std_h265_params(&ps);
                 let session = device
                     .create_h265_session(&std, width, height)
-                    .map_err(|_| G2gError::CapsMismatch)?;
+                    .map_err(decode_refused)?;
                 let (decoder, emit_wgpu) = Self::build_with_fallback(
                     want_gpu,
                     || device.create_h265_dpb_decoder_gpu(&session, &ps),
@@ -13233,7 +13374,7 @@ impl VulkanVideoDec {
                 let std = to_std_av1_seq_header(&seq);
                 let session = device
                     .create_av1_session(&std, width, height)
-                    .map_err(|_| G2gError::CapsMismatch)?;
+                    .map_err(decode_refused)?;
                 let (decoder, emit_wgpu) = Self::build_with_fallback(
                     want_gpu,
                     || device.create_av1_dpb_decoder_gpu(&session, &seq),
@@ -13257,7 +13398,7 @@ impl VulkanVideoDec {
         // keyframe decodes). No-op on the initial build (no old decoder) and on the
         // synchronous texture path (its ring is never in flight).
         let tail = match self.decoder.as_mut() {
-            Some(old) => old.decode_flush().map_err(|_| G2gError::CapsMismatch)?,
+            Some(old) => old.decode_flush().map_err(decode_refused)?,
             None => alloc::vec::Vec::new(),
         };
         self.reconfig_tail = tail;
@@ -13498,11 +13639,7 @@ impl AsyncElement for VulkanVideoDec {
     /// resolved domain: `Rgba8` for the GPU-texture (`WgpuTexture`) path, `Nv12`
     /// for the system path.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
-        let format = if self.out_domain == MemoryDomainKind::WgpuTexture {
-            RawVideoFormat::Rgba8
-        } else {
-            RawVideoFormat::Nv12
-        };
+        let format = self.output_format();
         CapsConstraint::DerivedOutput(alloc::boxed::Box::new(move |input: &Caps| match input {
             Caps::CompressedVideo {
                 codec,
@@ -13562,9 +13699,24 @@ impl AsyncElement for VulkanVideoDec {
         // parameter sets, which arrive in-band and build the session lazily on
         // the first keyframe AU). Each codec enables its own decode profile; the
         // `device-index` property picks the GPU among those that support it.
+        // Configure runs again whenever the caps change (a launch line negotiates
+        // a placeholder geometry, so at least twice), and the device depends on
+        // neither geometry nor the stream: keep the open one, else every decoded
+        // texture so far would belong to a device nothing downstream holds.
+
+        if self.opened_device == Some((codec, self.device_index)) && self.device.is_some() {
+            return Ok(ConfigureOutcome::Accepted);
+        }
         let vk_codec = VulkanVideoCodec::from_video_codec(codec).ok_or(G2gError::CapsMismatch)?;
-        let device = block_on(open_decode_device_at(vk_codec, self.device_index))
-            .map_err(|_| G2gError::CapsMismatch)?;
+        let device =
+            block_on(open_decode_device_at(vk_codec, self.device_index)).map_err(decode_refused)?;
+        // Offer this device to a display sink downstream: its swapchain extension
+        // is enabled when the GPU has one, so the sink can present the decoded
+        // textures where they lie instead of opening a device they cannot bind to.
+        if device.present_capable() {
+            crate::gpu::publish_producer_context(device.gpu_context());
+        }
+        self.opened_device = Some((codec, self.device_index));
         self.device = Some(device);
         Ok(ConfigureOutcome::Accepted)
     }
@@ -13638,9 +13790,9 @@ impl AsyncElement for VulkanVideoDec {
         alloc::boxed::Box::pin(async move {
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let Some(slice) = frame.domain.as_system_slice() else {
-                        return Err(G2gError::UnsupportedDomain);
-                    };
+                    let slice = frame
+                        .domain
+                        .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
                     // Decode the access unit. The whole thing is owned by the
                     // packet, so borrow the bytes into an owned Vec first (the
                     // decoder borrows `self.decoder` mutably below).
@@ -13684,7 +13836,7 @@ impl AsyncElement for VulkanVideoDec {
                             {
                                 Ok(t) => t,
                                 Err(VulkanVideoError::NoDecodableSlice) => alloc::vec::Vec::new(),
-                                Err(_) => return Err(G2gError::CapsMismatch),
+                                Err(e) => return Err(decode_refused(e)),
                             };
                             let paired = textures.into_iter().map(|t| (src_timing, t)).collect();
                             self.emit_textures(paired, out).await?;
@@ -13700,7 +13852,7 @@ impl AsyncElement for VulkanVideoDec {
                                 .as_mut()
                                 .expect("decoder built")
                                 .decode_push_to_textures(&au)
-                                .map_err(|_| G2gError::CapsMismatch)?;
+                                .map_err(decode_refused)?;
                             let mut ready = alloc::vec::Vec::new();
                             for (meta, tex) in metas.into_iter().zip(textures) {
                                 ready.extend(self.reorder_tex.push(
@@ -13726,7 +13878,7 @@ impl AsyncElement for VulkanVideoDec {
                             .as_mut()
                             .expect("decoder built")
                             .decode_push_meta(&au)
-                            .map_err(|_| G2gError::CapsMismatch)?;
+                            .map_err(decode_refused)?;
                         for meta in metas {
                             self.pending_meta.push_back((src_timing, meta));
                         }
@@ -13738,7 +13890,7 @@ impl AsyncElement for VulkanVideoDec {
                                 .as_mut()
                                 .expect("decoder built")
                                 .decode_flush()
-                                .map_err(|_| G2gError::CapsMismatch)?;
+                                .map_err(decode_refused)?;
                             decoded.extend(tail);
                         }
                         self.emit_reordered(decoded, out).await?;
@@ -13757,7 +13909,7 @@ impl AsyncElement for VulkanVideoDec {
                         {
                             Ok(f) => f,
                             Err(VulkanVideoError::NoDecodableSlice) => alloc::vec::Vec::new(),
-                            Err(_) => return Err(G2gError::CapsMismatch),
+                            Err(e) => return Err(decode_refused(e)),
                         };
                         for _ in 0..decoded.len() {
                             self.pending_timings.push_back(src_timing);
@@ -13768,6 +13920,16 @@ impl AsyncElement for VulkanVideoDec {
                 }
                 PipelinePacket::CapsChanged(c) => match &c {
                     Caps::CompressedVideo { codec, .. } if VULKAN_DEC_CODECS.contains(codec) => {
+                        Ok(())
+                    }
+                    // The runner hands an interior element the output caps it
+                    // solved for it, ahead of the first frame, so the sink sees
+                    // them before any data: forward them and record them, which
+                    // suppresses the identical one the first decoded picture
+                    // would emit.
+                    Caps::RawVideo { format, .. } if *format == self.output_format() => {
+                        out.push(PipelinePacket::CapsChanged(c.clone())).await?;
+                        self.last_caps = Some(c);
                         Ok(())
                     }
                     _ => Err(G2gError::CapsMismatch),
@@ -13786,7 +13948,7 @@ impl AsyncElement for VulkanVideoDec {
                     // before forwarding end-of-stream; `decode_flush` on an idle
                     // ring (the per-AU AV1 display path) returns nothing.
                     let tail = match self.decoder.as_mut() {
-                        Some(dec) => dec.decode_flush().map_err(|_| G2gError::CapsMismatch)?,
+                        Some(dec) => dec.decode_flush().map_err(decode_refused)?,
                         None => alloc::vec::Vec::new(),
                     };
                     if self.reorder_enabled {

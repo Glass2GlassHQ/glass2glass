@@ -198,7 +198,7 @@ async fn launched_pts<Clk: PipelineClock>(clock: &Clk) -> Vec<u64> {
     let graph = parse_launch(&reg, LINE).expect("the timed compositor line parses");
     consumed_pts().lock().unwrap().clear();
     let progress = PipelineProgress::new();
-    run_graph_threaded_with_progress(graph, clock, 2, &progress, &TokioThreadSpawner)
+    run_graph_threaded_with_progress(graph, clock, 2, &progress, None, &TokioThreadSpawner)
         .await
         .expect("pipeline runs");
     consumed_pts().lock().unwrap().clone()

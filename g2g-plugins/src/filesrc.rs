@@ -40,10 +40,6 @@ use g2g_core::log::short_type_name;
 /// that a parser downstream sees steady progress.
 const DEFAULT_CHUNK_SIZE: usize = 64 * 1024;
 
-/// Bytes read to sniff the container in `bytestream-format=auto` mode. Enough to
-/// confirm an MPEG-TS sync byte across several 188-byte packets.
-const SNIFF_LEN: usize = 4 * 188;
-
 /// # Example
 ///
 /// ```no_run
@@ -135,7 +131,7 @@ impl FileSrc {
         }
         let mut file = File::open(&self.path)
             .map_err(|e| path_io_err(short_type_name::<Self>(), "open", &self.path, e))?;
-        let mut header = alloc::vec![0u8; SNIFF_LEN];
+        let mut header = alloc::vec![0u8; crate::typefind::SNIFF_LEN];
         let mut filled = 0;
         while filled < header.len() {
             let n = file.read(&mut header[filled..]).map_err(io_err)?;

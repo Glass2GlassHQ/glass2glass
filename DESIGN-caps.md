@@ -722,7 +722,11 @@ forwarded in-band ahead of the first frame as decoder extradata).
   (`uridecodebin.rs`), each gated to its source's feature, so an app registers
   only the schemes its build supports. A handler reports the *media type* it
   produces (geometry resolves at negotiation), which is all the chain search
-  needs to pick the right decoder.
+  needs to pick the right decoder. The `file://` handler reads that type off the
+  file's header (`typefind::sniff_caps`, M1025) rather than assuming one: an
+  ISO-BMFF file becomes a self-demuxing `Mp4Src`, anything else the sniff
+  recognises a `FileSrc` declaring those caps, so an elementary stream or a
+  non-MP4 container reaches the decode chain its content needs.
 
 - **playbin (multi-stream front door)** (`std`). Beyond the
   single-stream expansion, g2g's `playbin` can split a container into *all* its
@@ -879,6 +883,53 @@ forwarded in-band ahead of the first frame as decoder extradata).
   `decodebin_preferring(.., domain)` overrides the derivation, and the resulting
   domain gap (an explicit `System` decode into a Cuda consumer) is closed by the
   converter auto-plug as usual.
+
+  A `gst-launch` line reaches the same preference one step earlier, where the
+  consumer is still only a name: the text parser expands `decodebin` /
+  `uridecodebin` / `playbin` before any element exists, so it reads the element
+  named right after the macro (or `playbin`'s own `video-sink=`) through
+  `Registry::declared_memory_preference`, which default-constructs that name and
+  asks it. Constructing to ask beats a factory-level copy of the same fact, which
+  could drift from `input_domains`; a launch constructor takes no arguments and
+  opens nothing (a sink reaches its device in `configure_pipeline`), so the
+  throwaway instance costs an allocation. The rule is otherwise identical,
+  immediate consumer only and `ALL` deriving `System`, so
+  `... ! decodebin ! wgpusink` decodes on the GPU and
+  `... ! decodebin ! filesink` still decodes on the CPU.
+
+  Pad templates and memory domains say nothing about whether the hardware behind
+  a decoder will accept a particular bitstream, and a driver that refuses one only
+  says so once frames flow. Re-plugging around it takes three pieces (M1023): the
+  runner posts `BusMessage::ElementError`, naming the element instance that failed
+  (`G2gError` carries no identity, and the runner previously only logged the
+  name); `Registry::factory_of_instance` maps that instance back to the factory
+  that built it; and `parse_launch_avoiding(registry, line, avoided)` parses the
+  same line with those factories barred from the search, so the next candidate is
+  chosen. Barring every candidate fails the parse rather than substituting
+  something, which is what lets a caller retry in a loop and terminate. Only the
+  auto-plug search is bounded: an element the line names explicitly is still
+  built, since the user asked for it by name.
+
+  The policy sits with the caller, because only it knows whether restarting is
+  safe: g2g has no dynamic re-plugging, so trying the next decoder means running
+  the pipeline again, which is invisible only if the first attempt presented
+  nothing. `g2g-launch` retries while `PipelineProgress::position()` is still
+  `None` (no buffer has reached a sink) and `has_live_source` is false (a live
+  source would be reopened, losing what was in flight), looping until a run
+  succeeds or no candidate is left, and naming on stderr what it dropped and why.
+  `fallback_factory` is the decision: it maps the failing instance to its factory
+  and returns `None` when the line named that element itself, when it has already
+  been barred, or when no factory owns it.
+
+  The inline `decodebin` *instantiates* its chain from the search result instead
+  of naming the factories (M1024), as `uridecodebin` always did. The caps the
+  search chose a decoder to produce reach the element only through the factory
+  that takes them, and a parameterless launch factory builds the decoder's
+  default format again: that is how a chain reached a strict-NV12 sink with a
+  decoder left on I420. The search target stays the plain shape (raw video or raw
+  audio), since once the chosen caps arrive the solver re-fixates among the
+  decoder's advertised formats, and a line that genuinely needs a converter fails
+  as before rather than finding nothing.
 
 #### 4.13.10 Current limits
 

@@ -202,8 +202,8 @@ pub use meta::FrameMetaSet;
 pub use meta::{
     blob_decoder, decode_blob, AnalyticsMeta, AnalyticsNode, BBox, Blob, BlobDecoder, BlobMeta,
     CaptionMeta, CaptionTriple, Chromaticity, Classification, DecodedBlob, FrameMeta,
-    HdrStaticMeta, Mask, MasteringDisplay, ObjectDetection, Propagation, Relation, RelationKind,
-    Roi, Segmentation, TimecodeMeta, Tracking, Transform, BLOB_DECODERS,
+    HdrStaticMeta, Mask, MasteringDisplay, NamedTensor, ObjectDetection, Propagation, Relation,
+    RelationKind, Roi, Segmentation, TensorMeta, TimecodeMeta, Tracking, Transform, BLOB_DECODERS,
 };
 #[cfg(feature = "alloc")]
 pub use property::{

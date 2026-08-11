@@ -481,9 +481,9 @@ impl AsyncElement for Deinterlace {
                     if self.input.is_none() {
                         return Err(G2gError::NotConfigured);
                     }
-                    let Some(src) = frame.domain.as_system_slice() else {
-                        return Err(G2gError::UnsupportedDomain);
-                    };
+                    let src = frame
+                        .domain
+                        .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
                     let n = self.frame_bytes;
                     if src.len() < n {
                         return Err(G2gError::CapsMismatch);

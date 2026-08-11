@@ -1174,6 +1174,19 @@ pub(crate) mod glnv12;
 ))]
 pub(crate) mod waylandwindow;
 
+// The compositor-reachable check the auto sink aliases resolve through, shared
+// by every display sink that presents on Wayland.
+#[cfg(all(
+    target_os = "linux",
+    any(
+        feature = "wayland-sink",
+        feature = "cuda-gl",
+        feature = "gl-sink",
+        feature = "wgpu-present"
+    )
+))]
+pub(crate) mod waylanddisplay;
+
 // EGL + GL ES renderer over that worker for the GL sinks; each sink supplies
 // only its per-frame upload.
 #[cfg(all(target_os = "linux", any(feature = "cuda-gl", feature = "gl-sink")))]

@@ -194,9 +194,9 @@ impl AsyncElement for AudioEcho {
                         Caps::Audio { sample_rate, .. } => *sample_rate,
                         _ => return Err(G2gError::NotConfigured),
                     };
-                    let Some(src) = frame.domain.as_system_slice() else {
-                        return Err(G2gError::UnsupportedDomain);
-                    };
+                    let src = frame
+                        .domain
+                        .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
                     let mut dst = vec![0u8; src.len()].into_boxed_slice();
                     let df = delay_frames(self.delay_ns, rate);
                     let (intensity, feedback) = (self.intensity, self.feedback);

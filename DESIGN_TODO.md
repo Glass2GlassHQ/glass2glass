@@ -250,6 +250,10 @@ Phased plan:
   the `vulkanvideo` GPU tests (the element is vendor-neutral; hardware-gated,
   `VERIFY:` markers in-tree). Optional extra output domains (multiplanar NV12 /
   `VulkanTexture`).
+- A device whose `pictureAccessGranularity` exceeds 16 needs the coded extent
+  rounded up to it (and the decoded picture cropped back), which the AMD / Intel
+  runs above would be the first to hit: every extent g2g derives is a multiple of
+  16, and this host reports exactly 16, so nothing exercises it.
 
 ## CUDA / display
 
@@ -494,10 +498,6 @@ _(No open parser items.)_
 - Further `PlaneLayout` producers (v4l2 `bytesperline` padding, decoder DMA-BUF
   pitches); only the wgpu compositor readback emits it today.
 - `NvEnc` AV1 encode (needs RTX 40-series hardware).
-- Memory-domain preference for a `decodebin` in a launch line, where the
-  downstream consumer is a factory name and not yet a built element: needs a
-  factory-level declaration of accepted input memory, so nothing has to be
-  constructed to ask.
 
 ## Clock-synchronised presentation
 

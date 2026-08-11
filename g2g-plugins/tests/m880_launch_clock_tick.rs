@@ -281,7 +281,7 @@ async fn launched_pts<Clk: PipelineClock>(clock: &Clk) -> Vec<u64> {
     consumed_pts().lock().unwrap().clear();
     consumed_count().store(0, Ordering::Release);
     let progress = PipelineProgress::new();
-    run_graph_with_progress(graph, clock, 2, &progress)
+    run_graph_with_progress(graph, clock, 2, &progress, None)
         .await
         .expect("pipeline runs");
     consumed_pts().lock().unwrap().clone()

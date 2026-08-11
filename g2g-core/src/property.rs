@@ -95,7 +95,9 @@ impl PropValue {
     pub fn parse(kind: PropKind, text: &str) -> Result<PropValue, PropError> {
         let t = text.trim();
         match kind {
-            PropKind::Bool => match t {
+            // Case-insensitive, so a pipeline pasted from gst-launch (which
+            // takes `True` as readily as `true`) parses here too.
+            PropKind::Bool => match t.to_ascii_lowercase().as_str() {
                 "true" | "1" | "yes" => Ok(PropValue::Bool(true)),
                 "false" | "0" | "no" => Ok(PropValue::Bool(false)),
                 _ => Err(PropError::Value),
@@ -518,6 +520,14 @@ mod tests {
         );
         assert_eq!(
             PropValue::parse(PropKind::Bool, "0").unwrap(),
+            PropValue::Bool(false)
+        );
+        assert_eq!(
+            PropValue::parse(PropKind::Bool, "True").unwrap(),
+            PropValue::Bool(true)
+        );
+        assert_eq!(
+            PropValue::parse(PropKind::Bool, "FALSE").unwrap(),
             PropValue::Bool(false)
         );
         assert_eq!(

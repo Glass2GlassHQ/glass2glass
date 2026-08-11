@@ -253,9 +253,9 @@ impl AsyncElement for AudioResample {
                     if in_rate == 0 {
                         return Err(G2gError::NotConfigured);
                     }
-                    let Some(slice) = frame.domain.as_system_slice() else {
-                        return Err(G2gError::UnsupportedDomain);
-                    };
+                    let slice = frame
+                        .domain
+                        .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
                     self.last_timing = frame.timing;
                     // Effective output rate: property, or caps-resolved (auto).
                     let out_rate = self.out_rate().ok_or(G2gError::NotConfigured)?;

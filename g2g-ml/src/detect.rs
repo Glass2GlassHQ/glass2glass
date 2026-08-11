@@ -23,7 +23,8 @@ use g2g_core::{
     TensorDType,
 };
 
-/// Default model input resolution used to normalize box coordinates.
+/// Model input resolution assumed when neither the properties nor a video link
+/// give one.
 const DEFAULT_INPUT_SIZE: f32 = 640.0;
 
 /// # Example
@@ -39,29 +40,34 @@ pub struct DetectionPostprocess {
     conf_threshold: f32,
     /// IoU above which a lower-scoring same-class box is suppressed.
     iou_threshold: f32,
-    /// Model input size used to normalize box coordinates to `[0, 1]`.
-    input_w: f32,
-    input_h: f32,
+    /// Model input size used to normalize box coordinates to `[0, 1]`. Unset
+    /// takes it from the video link, which carries the model input size.
+    input_w: Option<f32>,
+    input_h: Option<f32>,
     /// Channels (`4 + C`) and anchors (`A`), parsed from the configured tensor
     /// shape `[1, 4 + C, A]`.
     channels: usize,
     anchors: usize,
+    /// Which attached tensor to decode when the frame carries several. Empty
+    /// takes the only one.
+    tensor_name: String,
     input_caps: Option<Caps>,
     configured: bool,
     emitted: u64,
 }
 
 impl DetectionPostprocess {
-    /// A decoder with the given confidence and IoU thresholds, default
-    /// 640x640 input normalization.
+    /// A decoder with the given confidence and IoU thresholds, normalizing
+    /// against the video link's size, or 640x640 when there is none.
     pub fn new(conf_threshold: f32, iou_threshold: f32) -> Self {
         Self {
             conf_threshold,
             iou_threshold,
-            input_w: DEFAULT_INPUT_SIZE,
-            input_h: DEFAULT_INPUT_SIZE,
+            input_w: None,
+            input_h: None,
             channels: 0,
             anchors: 0,
+            tensor_name: String::new(),
             input_caps: None,
             configured: false,
             emitted: 0,
@@ -70,8 +76,38 @@ impl DetectionPostprocess {
 
     /// Set the model input resolution box coordinates are normalized against.
     pub fn with_input_size(mut self, width: u32, height: u32) -> Self {
-        self.input_w = width as f32;
-        self.input_h = height as f32;
+        self.input_w = Some(width as f32);
+        self.input_h = Some(height as f32);
+        self
+    }
+
+    /// The size the box coordinates divide by. `ortinfer` accepts video only at
+    /// the model's own input size, so on the `attach-tensor` link the frame
+    /// carries that size and an unset property should follow it rather than
+    /// assume a square model.
+    fn normalize_size(&self) -> (f32, f32) {
+        let from_link = match &self.input_caps {
+            Some(Caps::RawVideo {
+                width: g2g_core::Dim::Fixed(w),
+                height: g2g_core::Dim::Fixed(h),
+                ..
+            }) => Some((*w as f32, *h as f32)),
+            _ => None,
+        };
+        (
+            self.input_w
+                .or(from_link.map(|(w, _)| w))
+                .unwrap_or(DEFAULT_INPUT_SIZE),
+            self.input_h
+                .or(from_link.map(|(_, h)| h))
+                .unwrap_or(DEFAULT_INPUT_SIZE),
+        )
+    }
+
+    /// Decode the attached tensor of this name, for a frame carrying more than
+    /// one model's output. Unset takes the only one.
+    pub fn with_tensor_name(mut self, name: &str) -> Self {
+        self.tensor_name = String::from(name);
         self
     }
 
@@ -90,10 +126,42 @@ impl DetectionPostprocess {
         else {
             return None;
         };
-        match shape.dims() {
+        Self::parse_dims(shape.dims())
+    }
+
+    /// The `(4 + C, A)` of a YOLO output shape `[1, 4 + C, A]`.
+    fn parse_dims(dims: &[u32]) -> Option<(usize, usize)> {
+        match dims {
             [1, ch, a] if *ch >= 5 && *a >= 1 => Some((*ch as usize, *a as usize)),
             _ => None,
         }
+    }
+
+    /// The two link shapes this element decodes on: a tensor frame (the model
+    /// output IS the frame), or a video frame carrying the model output as a
+    /// `TensorMeta` (`ortinfer attach-tensor=true`). Either way the packet is
+    /// forwarded unchanged with an `AnalyticsMeta` added.
+    fn accepts(caps: &Caps) -> bool {
+        Self::parse_shape(caps).is_some() || matches!(caps, Caps::RawVideo { .. })
+    }
+
+    /// The `channels * anchors` little-endian f32 values of a model output.
+    /// Sizes with `checked_mul`, so an overflowing product fails the length
+    /// check instead of panicking (debug) or wrapping to a small value that
+    /// would admit a bogus payload.
+    fn read_f32(bytes: &[u8], channels: usize, anchors: usize) -> Result<Vec<f32>, G2gError> {
+        let expected = channels.checked_mul(anchors).and_then(|n| n.checked_mul(4));
+        if expected != Some(bytes.len()) {
+            return Err(G2gError::CapsMismatch);
+        }
+        let values: Vec<f32> = bytes
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+        if values.iter().any(|v| !v.is_finite()) {
+            return Err(G2gError::CapsMismatch);
+        }
+        Ok(values)
     }
 
     /// Decode a flat channel-major YOLOv8 output tensor `[1, 4 + C, A]` (as f32
@@ -105,14 +173,15 @@ impl DetectionPostprocess {
     ///
     /// [`process`]: AsyncElement::process
     pub fn detect(&self, values: &[f32]) -> Vec<ObjectDetection> {
+        let (input_w, input_h) = self.normalize_size();
         let boxes = decode_anchors(
             values,
             AnchorLayout {
                 anchors: self.anchors,
                 classes: self.channels.saturating_sub(4),
                 extra: 0,
-                input_w: self.input_w,
-                input_h: self.input_h,
+                input_w,
+                input_h,
             },
             self.conf_threshold,
         );
@@ -226,7 +295,7 @@ impl AsyncElement for DetectionPostprocess {
         Self: 'a;
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
-        if Self::parse_shape(upstream_caps).is_some() {
+        if Self::accepts(upstream_caps) {
             Ok(upstream_caps.clone())
         } else {
             Err(G2gError::CapsMismatch)
@@ -234,9 +303,9 @@ impl AsyncElement for DetectionPostprocess {
     }
 
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
-        // Identity: the tensor passes through unchanged; only metadata is added.
+        // Identity: the frame passes through unchanged; only metadata is added.
         CapsConstraint::DerivedOutput(Box::new(|input: &Caps| {
-            if Self::parse_shape(input).is_some() {
+            if Self::accepts(input) {
                 CapsSet::one(input.clone())
             } else {
                 CapsSet::from_alternatives(Vec::new())
@@ -245,9 +314,15 @@ impl AsyncElement for DetectionPostprocess {
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        let (channels, anchors) = Self::parse_shape(absolute_caps).ok_or(G2gError::CapsMismatch)?;
-        self.channels = channels;
-        self.anchors = anchors;
+        if !Self::accepts(absolute_caps) {
+            return Err(G2gError::CapsMismatch);
+        }
+        // On a video link the shape is not in the caps; it comes off each
+        // frame's TensorMeta instead.
+        if let Some((channels, anchors)) = Self::parse_shape(absolute_caps) {
+            self.channels = channels;
+            self.anchors = anchors;
+        }
         self.input_caps = Some(absolute_caps.clone());
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
@@ -273,6 +348,10 @@ impl AsyncElement for DetectionPostprocess {
                 }
                 Ok(())
             }
+            "tensor-name" => {
+                self.tensor_name = String::from(value.as_str().ok_or(PropError::Type)?);
+                Ok(())
+            }
             "input-width" | "input-height" => {
                 let v = value.as_uint().ok_or(PropError::Type)?;
                 // The size divides the box coordinates, so zero has no meaning.
@@ -280,9 +359,9 @@ impl AsyncElement for DetectionPostprocess {
                     return Err(PropError::Value);
                 }
                 if name == "input-width" {
-                    self.input_w = v as f32;
+                    self.input_w = Some(v as f32);
                 } else {
-                    self.input_h = v as f32;
+                    self.input_h = Some(v as f32);
                 }
                 Ok(())
             }
@@ -294,8 +373,9 @@ impl AsyncElement for DetectionPostprocess {
         match name {
             "conf-threshold" => Some(PropValue::Double(self.conf_threshold as f64)),
             "iou-threshold" => Some(PropValue::Double(self.iou_threshold as f64)),
-            "input-width" => Some(PropValue::Uint(self.input_w as u64)),
-            "input-height" => Some(PropValue::Uint(self.input_h as u64)),
+            "input-width" => Some(PropValue::Uint(self.normalize_size().0 as u64)),
+            "input-height" => Some(PropValue::Uint(self.normalize_size().1 as u64)),
+            "tensor-name" => Some(PropValue::Str(self.tensor_name.clone())),
             _ => None,
         }
     }
@@ -311,28 +391,40 @@ impl AsyncElement for DetectionPostprocess {
             }
             match packet {
                 PipelinePacket::DataFrame(mut frame) => {
+                    // The model output is either the frame itself (tensor link)
+                    // or riding on it as meta (video link, `attach-tensor`).
+                    if let Some(tensors) = frame.meta.get::<g2g_core::TensorMeta>() {
+                        // Unnamed takes the only tensor: with several on the
+                        // frame the pipeline has to say which, rather than get
+                        // whichever model happened to run first.
+                        let tensor = if self.tensor_name.is_empty() {
+                            tensors.only()
+                        } else {
+                            tensors.get(&self.tensor_name)
+                        }
+                        .ok_or(G2gError::CapsMismatch)?;
+                        if tensor.dtype != TensorDType::F32 {
+                            return Err(G2gError::CapsMismatch);
+                        }
+                        let (channels, anchors) =
+                            Self::parse_dims(tensor.shape.dims()).ok_or(G2gError::CapsMismatch)?;
+                        let values = Self::read_f32(&tensor.data, channels, anchors)?;
+                        self.channels = channels;
+                        self.anchors = anchors;
+                        let detections = self.detect(&values);
+                        let mut analytics = AnalyticsMeta::new();
+                        for d in detections {
+                            analytics.add_detection(d);
+                        }
+                        frame.meta.attach(analytics);
+                        self.emitted += 1;
+                        out.push(PipelinePacket::DataFrame(frame)).await?;
+                        return Ok(());
+                    }
                     let Some(slice) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
-                    let bytes = slice;
-                    // channels/anchors come from the upstream tensor caps (model
-                    // output shape), so fold with checked_mul: an overflowing
-                    // product fails the length check instead of panicking (debug)
-                    // or wrapping to a small value that admits a bogus frame.
-                    let expected = self
-                        .channels
-                        .checked_mul(self.anchors)
-                        .and_then(|n| n.checked_mul(4));
-                    if expected != Some(bytes.len()) {
-                        return Err(G2gError::CapsMismatch);
-                    }
-                    let values: Vec<f32> = bytes
-                        .chunks_exact(4)
-                        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-                        .collect();
-                    if values.iter().any(|v| !v.is_finite()) {
-                        return Err(G2gError::CapsMismatch);
-                    }
+                    let values = Self::read_f32(slice, self.channels, self.anchors)?;
 
                     let detections = self.detect(&values);
                     let mut analytics = AnalyticsMeta::new();
@@ -350,8 +442,8 @@ impl AsyncElement for DetectionPostprocess {
                     if let Some((ch, a)) = Self::parse_shape(&caps) {
                         self.channels = ch;
                         self.anchors = a;
-                        self.input_caps = Some(caps.clone());
                     }
+                    self.input_caps = Some(caps.clone());
                     out.push(PipelinePacket::CapsChanged(caps)).await?;
                 }
                 // Drop EOS: the runner's transform arm forwards it; re-pushing it
@@ -392,12 +484,17 @@ static DETECT_PROPS: &[PropertySpec] = &[
     PropertySpec::new(
         "input-width",
         PropKind::Uint,
-        "model input width used to normalize box coordinates",
+        "model input width used to normalize box coordinates, default the video link's",
     ),
     PropertySpec::new(
         "input-height",
         PropKind::Uint,
-        "model input height used to normalize box coordinates",
+        "model input height used to normalize box coordinates, default the video link's",
+    ),
+    PropertySpec::new(
+        "tensor-name",
+        PropKind::Str,
+        "which attached tensor to decode when the frame carries several",
     ),
 ];
 
@@ -462,6 +559,265 @@ mod tests {
             timing: FrameTiming::default(),
             sequence: 0,
             meta: Default::default(),
+        }
+    }
+
+    /// The same `[1, ch, 3]` payload as `tensor_frame`, but riding on an RGBA
+    /// video frame as a `TensorMeta` the way `ortinfer attach-tensor=true`
+    /// delivers it.
+    fn video_frame_with_tensor(channels: &[[f32; 3]], pixels: usize) -> Frame {
+        let mut bytes = Vec::new();
+        for ch in channels {
+            for v in ch {
+                bytes.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        let mut frame = Frame {
+            domain: MemoryDomain::System(SystemSlice::from_boxed(
+                vec![7u8; pixels * 4].into_boxed_slice(),
+            )),
+            timing: FrameTiming::default(),
+            sequence: 0,
+            meta: Default::default(),
+        };
+        let mut tensors = g2g_core::TensorMeta::new();
+        tensors.push(named_tensor("", channels.len() as u32, bytes));
+        frame.meta.attach(tensors);
+        frame
+    }
+
+    fn named_tensor(name: &str, channels: u32, data: Vec<u8>) -> g2g_core::NamedTensor {
+        g2g_core::NamedTensor {
+            name: String::from(name),
+            dtype: TensorDType::F32,
+            shape: TensorShape::new([1, channels, 3]),
+            layout: TensorLayout::Nchw,
+            data,
+        }
+    }
+
+    /// Channel-major rows as little-endian f32 bytes.
+    fn tensor_bytes(channels: &[[f32; 3]]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        for ch in channels {
+            for v in ch {
+                bytes.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        bytes
+    }
+
+    fn rgba_caps(w: u32, h: u32) -> Caps {
+        Caps::RawVideo {
+            format: g2g_core::RawVideoFormat::Rgba8,
+            width: g2g_core::Dim::Fixed(w),
+            height: g2g_core::Dim::Fixed(h),
+            framerate: g2g_core::Rate::Any,
+            interlace: g2g_core::Interlace::Any,
+        }
+    }
+
+    /// The attach-tensor link: the decoder reads the model output off the
+    /// frame's meta, and the video frame reaches the sink with its pixels intact
+    /// so an overlay downstream still has a picture to draw on.
+    #[tokio::test]
+    async fn decodes_a_tensor_carried_as_meta_on_a_video_frame() {
+        let mut det = DetectionPostprocess::new(0.5, 0.5).with_input_size(640, 640);
+        det.configure_pipeline(&rgba_caps(4, 4)).unwrap();
+
+        let frame = video_frame_with_tensor(
+            &[
+                [100.0, 105.0, 400.0],
+                [100.0, 102.0, 400.0],
+                [40.0, 40.0, 40.0],
+                [40.0, 40.0, 40.0],
+                [0.90, 0.80, 0.05],
+                [0.10, 0.05, 0.95],
+            ],
+            16,
+        );
+
+        let mut sink = PixelAndMetaSink::default();
+        det.process(PipelinePacket::DataFrame(frame), &mut sink)
+            .await
+            .unwrap();
+
+        let meta = sink.meta.expect("frame carries AnalyticsMeta");
+        assert_eq!(meta.detections().count(), 2, "decoded from the meta tensor");
+        let d0 = meta.detections().find(|d| d.label == 0).unwrap();
+        assert!((d0.bbox.x - (80.0 / 640.0)).abs() < 1e-6);
+        assert_eq!(
+            sink.pixels.expect("frame forwarded"),
+            vec![7u8; 64],
+            "the picture passed through untouched"
+        );
+    }
+
+    /// With no size set, boxes normalize against the video link rather than a
+    /// square default. A 640x384 model drawn against 640x640 put every box at
+    /// 0.6 of its true height, so nothing lined up with what it detected.
+    #[tokio::test]
+    async fn an_unset_input_size_follows_the_video_link() {
+        let mut det = DetectionPostprocess::new(0.5, 0.5);
+        det.configure_pipeline(&rgba_caps(640, 384)).unwrap();
+
+        let frame = video_frame_with_tensor(
+            &[
+                [100.0, 105.0, 400.0],
+                [100.0, 102.0, 400.0],
+                [40.0, 40.0, 40.0],
+                [40.0, 40.0, 40.0],
+                [0.90, 0.80, 0.05],
+                [0.10, 0.05, 0.95],
+            ],
+            16,
+        );
+
+        let mut sink = PixelAndMetaSink::default();
+        det.process(PipelinePacket::DataFrame(frame), &mut sink)
+            .await
+            .unwrap();
+
+        let meta = sink.meta.expect("frame carries AnalyticsMeta");
+        let d0 = meta.detections().find(|d| d.label == 0).unwrap();
+        assert!(
+            (d0.bbox.x - (80.0 / 640.0)).abs() < 1e-6,
+            "width from the link"
+        );
+        assert!(
+            (d0.bbox.y - (80.0 / 384.0)).abs() < 1e-6,
+            "height from the link, not the 640 default"
+        );
+
+        // An explicit property still wins over the link.
+        let mut pinned = DetectionPostprocess::new(0.5, 0.5).with_input_size(640, 640);
+        pinned.configure_pipeline(&rgba_caps(640, 384)).unwrap();
+        assert_eq!(
+            pinned.get_property("input-height"),
+            Some(PropValue::Uint(640))
+        );
+    }
+
+    /// With two models' outputs on one frame, the decoder takes the one it was
+    /// named for; unnamed it refuses rather than picking whichever ran first.
+    #[tokio::test]
+    async fn several_tensors_on_a_frame_are_selected_by_name() {
+        let strong = tensor_bytes(&[
+            [100.0, 105.0, 400.0],
+            [100.0, 102.0, 400.0],
+            [40.0, 40.0, 40.0],
+            [40.0, 40.0, 40.0],
+            [0.90, 0.80, 0.05],
+            [0.10, 0.05, 0.95],
+        ]);
+        // Same boxes, every score below any sane threshold.
+        let weak = tensor_bytes(&[
+            [100.0, 105.0, 400.0],
+            [100.0, 102.0, 400.0],
+            [40.0, 40.0, 40.0],
+            [40.0, 40.0, 40.0],
+            [0.01, 0.01, 0.01],
+            [0.01, 0.01, 0.01],
+        ]);
+        let build = || {
+            let mut frame = Frame {
+                domain: MemoryDomain::System(SystemSlice::from_boxed(
+                    vec![7u8; 64].into_boxed_slice(),
+                )),
+                timing: FrameTiming::default(),
+                sequence: 0,
+                meta: Default::default(),
+            };
+            let mut tensors = g2g_core::TensorMeta::new();
+            tensors.push(named_tensor("people", 6, strong.clone()));
+            tensors.push(named_tensor("ball", 6, weak.clone()));
+            frame.meta.attach(tensors);
+            frame
+        };
+
+        let mut det = DetectionPostprocess::new(0.5, 0.5).with_tensor_name("people");
+        det.configure_pipeline(&rgba_caps(4, 4)).unwrap();
+        let mut sink = MetaSink::default();
+        det.process(PipelinePacket::DataFrame(build()), &mut sink)
+            .await
+            .unwrap();
+        assert_eq!(
+            sink.last.expect("analytics").detections().count(),
+            2,
+            "decoded the tensor it was named for"
+        );
+
+        let mut other = DetectionPostprocess::new(0.5, 0.5).with_tensor_name("ball");
+        other.configure_pipeline(&rgba_caps(4, 4)).unwrap();
+        let mut sink = MetaSink::default();
+        other
+            .process(PipelinePacket::DataFrame(build()), &mut sink)
+            .await
+            .unwrap();
+        assert_eq!(
+            sink.last.expect("analytics").detections().count(),
+            0,
+            "decoded the other tensor, whose scores are all below threshold"
+        );
+
+        let mut unnamed = DetectionPostprocess::new(0.5, 0.5);
+        unnamed.configure_pipeline(&rgba_caps(4, 4)).unwrap();
+        let mut sink = MetaSink::default();
+        assert!(
+            matches!(
+                unnamed
+                    .process(PipelinePacket::DataFrame(build()), &mut sink)
+                    .await,
+                Err(G2gError::CapsMismatch)
+            ),
+            "ambiguous without a name"
+        );
+    }
+
+    /// A video frame with no tensor on it is a mismatch, not a silent pass: the
+    /// decoder would otherwise read the pixels as a model output.
+    #[tokio::test]
+    async fn a_video_frame_without_a_tensor_is_rejected() {
+        let mut det = DetectionPostprocess::new(0.5, 0.5);
+        det.configure_pipeline(&rgba_caps(4, 4)).unwrap();
+        let frame = Frame {
+            domain: MemoryDomain::System(SystemSlice::from_boxed(vec![0u8; 64].into_boxed_slice())),
+            timing: FrameTiming::default(),
+            sequence: 0,
+            meta: Default::default(),
+        };
+        let mut sink = MetaSink::default();
+        assert!(matches!(
+            det.process(PipelinePacket::DataFrame(frame), &mut sink)
+                .await,
+            Err(G2gError::CapsMismatch)
+        ));
+    }
+
+    /// Capturing sink that keeps both the forwarded pixels and the analytics.
+    #[derive(Default)]
+    struct PixelAndMetaSink {
+        pixels: Option<Vec<u8>>,
+        meta: Option<AnalyticsMeta>,
+    }
+    impl OutputSink for PixelAndMetaSink {
+        fn poll_push(
+            &mut self,
+            _cx: &mut core::task::Context<'_>,
+            packet_slot: &mut Option<PipelinePacket>,
+        ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+            let packet = packet_slot.take().expect("poll_push without a packet");
+            core::task::Poll::Ready({
+                if let PipelinePacket::DataFrame(frame) = packet {
+                    if let Some(a) = frame.meta.get::<AnalyticsMeta>() {
+                        self.meta = Some(a.clone());
+                    }
+                    if let Some(s) = frame.domain.as_system_slice() {
+                        self.pixels = Some(s.to_vec());
+                    }
+                }
+                Ok(PushOutcome::Accepted)
+            })
         }
     }
 

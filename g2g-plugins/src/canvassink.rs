@@ -100,9 +100,9 @@ impl CanvasSink {
         if w == 0 || h == 0 {
             return Ok(()); // no caps yet: nothing to size an ImageData with
         }
-        let Some(slice) = frame.domain.as_system_slice() else {
-            return Err(G2gError::UnsupportedDomain);
-        };
+        let slice = frame
+            .domain
+            .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
         let bytes = slice;
         if bytes.len() != (w as usize) * (h as usize) * 4 {
             return Err(G2gError::CapsMismatch);

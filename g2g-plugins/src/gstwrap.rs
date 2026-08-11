@@ -298,9 +298,9 @@ impl AsyncElement for GstWrap {
             let p = self.handle.ok_or(G2gError::NotConfigured)?;
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let Some(slice) = frame.domain.as_system_slice() else {
-                        return Err(G2gError::UnsupportedDomain);
-                    };
+                    let slice = frame
+                        .domain
+                        .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
                     let bytes = slice;
                     // SAFETY: `p` is valid; `bytes` is valid for `bytes.len()`;
                     // `push` copies the bytes into a GstBuffer.

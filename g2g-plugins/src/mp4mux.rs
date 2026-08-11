@@ -297,9 +297,9 @@ impl AsyncElement for Mp4Mux {
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let Some(slice) = frame.domain.as_system_slice() else {
-                        return Err(G2gError::UnsupportedDomain);
-                    };
+                    let slice = frame
+                        .domain
+                        .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
                     // Build the box writer on the first AU (its moov needs the
                     // in-band parameter sets the first access unit carries).
                     let frag_ns = self.fragment_duration_ms.saturating_mul(1_000_000);

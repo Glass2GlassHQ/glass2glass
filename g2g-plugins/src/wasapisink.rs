@@ -258,9 +258,9 @@ impl AsyncElement for WasapiSink {
         Box::pin(async move {
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let Some(slice) = frame.domain.as_system_slice() else {
-                        return Err(G2gError::UnsupportedDomain);
-                    };
+                    let slice = frame
+                        .domain
+                        .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
                     let tx = self.cmd_tx.as_ref().ok_or(G2gError::NotConfigured)?;
                     tx.send(WorkerCmd::Samples(slice.to_vec()))
                         .map_err(|_| G2gError::Hardware(HardwareError::Other))?;

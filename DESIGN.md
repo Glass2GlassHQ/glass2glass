@@ -816,7 +816,11 @@ probe feeding `intercept_caps`, a `VkVideoSessionKHR` /
 the parsed SPS/PPS/VPS (the correctness-critical part, one mapping module per
 codec, re-emitted on mid-stream change via `CapsChanged`), DPB reference-slot
 management, and the `vkCmdDecodeVideoKHR` recording, output pipelined through the
-YCbCr pass with an in-flight ring. The session + DPB rebuild mid-stream on *any*
+YCbCr pass with an in-flight ring. A session's `maxCodedExtent` is the device's
+maximum, not the stream's geometry (M1027): it is only an upper bound, each
+picture resource carries its real extent, and sizing the session to the picture
+made the NVIDIA driver refuse whole small geometries with
+`ERROR_INVALID_VIDEO_STD_PARAMETERS_KHR`. The session + DPB rebuild mid-stream on *any*
 in-band parameter-set change, keyed by a byte fingerprint of the AU's parameter
 sets (M519 geometry / M764 same-geometry content, e.g. a profile or entropy-mode
 switch; byte-identical keyframe re-sends keep the session), flushing the outgoing
@@ -894,6 +898,19 @@ field), and `NumDeltaPocsOfRefRpsIdx` must be the referenced set's delta count,
 not 0, for the driver's own slice-header re-parse. All 500 frames of the JCT-VC
 `LTRPSPS_A_Qualcomm_1` conformance vector decode bit-exact vs ffmpeg on the 3060
 (`m743`); the GPU-texture path shares the same DPB machinery.
+
+**Reference marking.** Which decoded pictures stay available as references is the
+stream's decision, not the decoder's: `dec_ref_pic_marking()` in each slice header
+either leaves it to the default sliding window (evict the smallest `FrameNumWrap`)
+or names the pictures to retire, which is what x264 does for its B-pyramid.
+Reading the marking means walking past the reference-list modification and the
+prediction weight table first, so `poc::parse_h264_slice_marking` continues the
+shared slice parse through them and returns the operations
+(`H264RefPicMarking`, fixed-capacity so the header stays `Copy`); the DPB applies
+the short-term ones and refuses a long-term operation rather than keep feeding the
+driver a reference the stream has retired. Running the sliding window regardless,
+as the decoder did before, diverges from the reference set the driver builds its
+L0 / L1 lists against.
 
 **B-frames and display order.** The hardware decode handles B-frames directly: the
 driver builds the L0 / L1 reference lists from the DPB and the per-picture POC the
@@ -4359,6 +4376,21 @@ picture. Two pieces, both `no_std`-friendly:
   overlay's texture lists `Rgba8UnormSrgb` in `view_formats` for exactly this).
   The mirror of the crate's streaming side (§4.11.3), which renders in Bevy and
   encodes in g2g.
+
+- **Presenting on the producer's device.** A GPU decoder cannot be handed a
+  device: Vulkan Video decode needs queues and extensions wgpu never asks for, so
+  `VulkanVideoDec` opens its own, and its textures bind to no other. A launch line
+  has no application to pass a `GpuContext` between the two, so the decoder
+  publishes its own (`gpu::publish_producer_context`, only when the device's
+  swapchain extension is enabled) and a windowed sink builds its surface on that
+  instance and presents from that device
+  (`gpu::present_on_producer_device`, shared by every wgpu display sink),
+  falling back to opening its own device when nothing published or the published
+  one cannot drive this display. The decode device is opened once per codec and
+  kept across the repeated `configure_pipeline` a launch line does, since a second
+  device would leave the sink presenting from one nothing produces on. So
+  `filesrc ! decodebin ! wgpusink` decodes on the GPU and presents the frame where
+  it already lies, with no application code.
 
 ---
 

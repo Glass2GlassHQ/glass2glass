@@ -54,6 +54,7 @@ use crate::caps::Caps;
 use crate::element::DynAsyncElement;
 use crate::graph::{Graph, GraphError, NodeId, PadId};
 use crate::link::LinkPolicy;
+use crate::memory::MemoryDomainKind;
 use crate::property::{PropError, PropValue, PropertySpec, ValueError};
 use crate::runtime::autoplug::{
     is_raw_audio, is_raw_video, PadKind, PadRequest, Registry, UriError,
@@ -670,6 +671,39 @@ fn is_decodebin(name: &str) -> bool {
 /// wander.
 const DECODEBIN_MAX_DEPTH: usize = 6;
 
+/// The decode chain to raw for `input`, decoding into `preferred` (the memory
+/// the element right after the macro takes).
+///
+/// The chain is returned built, not named: the caps the search chose a decoder
+/// to produce reach the element only through the factory that takes them, and a
+/// parameterless launch factory would build the decoder's default format again.
+/// That is how `decodebin ! wgpusink` reached a strict-NV12 sink with a decoder
+/// left on I420; the solver re-fixates among the decoder's advertised formats
+/// once the chosen one arrives.
+fn autoplug_for_consumer(
+    registry: &Registry,
+    input: &Caps,
+    preferred: MemoryDomainKind,
+    avoided: &[&str],
+) -> Option<Vec<Box<dyn DynAsyncElement>>> {
+    let raw = |c: &Caps| is_raw_video(c) || is_raw_audio(c);
+    let mut chain =
+        registry.autoplug_avoiding(input, &raw, DECODEBIN_MAX_DEPTH, preferred, avoided)?;
+    // M421/M676: prepend the re-framing parser ahead of a real decode of an
+    // elementary stream, like the boxed `decodebin` splice (the caps-identity
+    // parser is invisible to the shortest-chain search, so it never appears in
+    // the chain).
+    if !chain.is_empty() {
+        if let Some(parser) = registry
+            .parser_name(input)
+            .and_then(|p| registry.make_element(p))
+        {
+            chain.insert(0, parser);
+        }
+    }
+    Some(chain)
+}
+
 /// Expand every `decodebin` node into the decoder chain the registry auto-plugs
 /// from its predecessor's declared caps down to raw (video or audio). An empty
 /// chain (the input is already raw) drops the node entirely, so its predecessor
@@ -677,7 +711,11 @@ const DECODEBIN_MAX_DEPTH: usize = 6;
 /// before the `decodebin` in the same chain; a `decodebin` with no upstream
 /// element (chain head, or after a bare `name.` reference) is a loud error,
 /// since it has nothing to take its input caps from.
-fn expand_decodebin(registry: &Registry, chains: Vec<Chain>) -> Result<Vec<Chain>, ParseError> {
+fn expand_decodebin(
+    registry: &Registry,
+    chains: Vec<Chain>,
+    avoided: &[&str],
+) -> Result<Vec<Chain>, ParseError> {
     // Names referenced as `name.` somewhere: a `decodebin name=d` with such refs is
     // a FAN-OUT node (M482), not the inline linear case, so it is left unexpanded
     // here and handled by the decodebin-select path in `build_graph` (which probes
@@ -708,7 +746,8 @@ fn expand_decodebin(registry: &Registry, chains: Vec<Chain>) -> Result<Vec<Chain
         // another chain). Props matter because they can re-type the output (a
         // `filesrc`'s `bytestream-format` selects the container).
         let mut upstream: Option<(String, Vec<(String, String)>)> = None;
-        for item in chain {
+        let mut items = chain.into_iter().peekable();
+        while let Some(item) = items.next() {
             match item {
                 // A fan-out `decodebin name=d` is left for `build_graph`'s
                 // decodebin-select path; it is not linearly expandable.
@@ -740,35 +779,37 @@ fn expand_decodebin(registry: &Registry, chains: Vec<Chain>) -> Result<Vec<Chain
                                     instance: None,
                                     log_category: None,
                                 }));
-                                upstream = Some((primary.demux.to_string(), primary.props));
                                 primary.caps
                             }
                             None => caps,
                         };
-                    let target = |c: &Caps| is_raw_video(c) || is_raw_audio(c);
-                    let mut names = registry
-                        .autoplug_names(&chain_input, &target, DECODEBIN_MAX_DEPTH)
-                        .ok_or_else(|| {
-                            ParseError::NoDecodeChain(alloc::format!("{chain_input:?}"))
-                        })?;
-                    // M421/M676: prepend the re-framing parser ahead of a real
-                    // decode of an elementary stream, like the boxed `decodebin`
-                    // splice (the caps-identity parser is invisible to the
-                    // shortest-chain search, so it never appears in `names`).
-                    if let Some(parser) = registry.parser_name(&chain_input) {
-                        if !names.is_empty() {
-                            names.insert(0, parser);
+                    // M1018: the element right after the `decodebin` decides what
+                    // memory the decoder should decode into, so a GPU-resident
+                    // consumer gets a decoder that decodes into its domain rather
+                    // than one whose frames have to be downloaded. Only the
+                    // immediate consumer counts, the rule the graph-side
+                    // derivation follows.
+                    let preferred = match items.peek() {
+                        Some(Item::Element(consumer)) => {
+                            registry.declared_memory_preference(&consumer.name)
                         }
+                        _ => MemoryDomainKind::System,
+                    };
+                    let decoders =
+                        autoplug_for_consumer(registry, &chain_input, preferred, avoided)
+                            .ok_or_else(|| {
+                                ParseError::NoDecodeChain(alloc::format!("{chain_input:?}"))
+                            })?;
+                    // Built here rather than named, so each element is
+                    // constructed for the caps the search chose it to produce (a
+                    // multi-format decoder emits the format the consumer takes,
+                    // not the first one it lists). A pre-built node carries no
+                    // name, so `upstream` clears as it does after a
+                    // `uridecodebin`.
+                    for element in decoders {
+                        new_chain.push(Item::Prebuilt(PrebuiltNode::Element(element)));
                     }
-                    for name in names {
-                        new_chain.push(Item::Element(ElementSpec {
-                            name: name.to_string(),
-                            props: Vec::new(),
-                            instance: None,
-                            log_category: None,
-                        }));
-                        upstream = Some((name.to_string(), Vec::new()));
-                    }
+                    upstream = None;
                 }
                 Item::Element(spec) => {
                     upstream = Some((spec.name.clone(), spec.props.clone()));
@@ -842,11 +883,16 @@ fn prop<'a>(spec: &'a ElementSpec, key: &str) -> Option<&'a str> {
 /// pre-built nodes spliced straight into the chain. `playbin` additionally
 /// appends an auto sink so the line is a complete pipeline. The element must head
 /// its chain (it provides the source).
-fn expand_uri_sources(registry: &Registry, chains: Vec<Chain>) -> Result<Vec<Chain>, ParseError> {
+fn expand_uri_sources(
+    registry: &Registry,
+    chains: Vec<Chain>,
+    avoided: &[&str],
+) -> Result<Vec<Chain>, ParseError> {
     let mut out = Vec::with_capacity(chains.len());
     for chain in chains {
         let mut new_chain: Chain = Vec::with_capacity(chain.len());
-        for (i, item) in chain.into_iter().enumerate() {
+        let mut items = chain.into_iter().enumerate().peekable();
+        while let Some((i, item)) = items.next() {
             let spec = match item {
                 Item::Element(spec) if is_uri_source(&spec.name) => spec,
                 other => {
@@ -863,18 +909,31 @@ fn expand_uri_sources(registry: &Registry, chains: Vec<Chain>) -> Result<Vec<Cha
             let (source, caps) = registry
                 .build_uri_source(uri)
                 .map_err(|e: UriError| ParseError::Uri(alloc::format!("{uri}: {e:?}")))?;
+            // `playbin` names its own sink, a bare `uridecodebin` is followed by
+            // one: either way the consumer's declared input memory picks the
+            // decoder (M1018), as it does after a `decodebin`.
+            let sink = is_playbin.then(|| {
+                prop(&spec, "video-sink")
+                    .unwrap_or("autovideosink")
+                    .to_string()
+            });
+            let consumer = match (&sink, items.peek()) {
+                (Some(sink), _) => Some(sink.as_str()),
+                (None, Some((_, Item::Element(consumer)))) => Some(consumer.name.as_str()),
+                _ => None,
+            };
+            let preferred = consumer.map_or(MemoryDomainKind::System, |name| {
+                registry.declared_memory_preference(name)
+            });
             let target = |c: &Caps| is_raw_video(c) || is_raw_audio(c);
             let decoders = registry
-                .autoplug(&caps, &target, DECODEBIN_MAX_DEPTH)
+                .autoplug_avoiding(&caps, &target, DECODEBIN_MAX_DEPTH, preferred, avoided)
                 .ok_or_else(|| ParseError::NoDecodeChain(alloc::format!("{caps:?}")))?;
             new_chain.push(Item::Prebuilt(PrebuiltNode::Source(source)));
             for dec in decoders {
                 new_chain.push(Item::Prebuilt(PrebuiltNode::Element(dec)));
             }
-            if is_playbin {
-                let sink = prop(&spec, "video-sink")
-                    .unwrap_or("autovideosink")
-                    .to_string();
+            if let Some(sink) = sink {
                 new_chain.push(Item::Element(ElementSpec {
                     name: sink,
                     props: Vec::new(),
@@ -888,12 +947,16 @@ fn expand_uri_sources(registry: &Registry, chains: Vec<Chain>) -> Result<Vec<Cha
     Ok(out)
 }
 
-fn build_graph(registry: &Registry, chains: Vec<Chain>) -> Result<Graph<GraphNode>, ParseError> {
+fn build_graph(
+    registry: &Registry,
+    chains: Vec<Chain>,
+    avoided: &[&str],
+) -> Result<Graph<GraphNode>, ParseError> {
     // Expand the source-providing (uridecodebin / playbin) and mid-chain
     // (decodebin) macros into concrete nodes before the structural build, so the
     // rest of the builder sees only real elements and pre-built nodes.
-    let chains = expand_uri_sources(registry, chains)?;
-    let chains = expand_decodebin(registry, chains)?;
+    let chains = expand_uri_sources(registry, chains, avoided)?;
+    let chains = expand_decodebin(registry, chains, avoided)?;
 
     // A chain endpoint after flattening: a concrete element index, or a still
     // unresolved reference by name.
@@ -1454,6 +1517,19 @@ fn queue_capacity_of(spec: &ElementSpec) -> Option<usize> {
 /// videotestsrc num-buffers=3 ! tee name=t ! fakesink   t. ! videoflip ! fakesink
 /// ```
 pub fn parse_launch(registry: &Registry, pipeline: &str) -> Result<Graph<GraphNode>, ParseError> {
+    parse_launch_avoiding(registry, pipeline, &[])
+}
+
+/// [`parse_launch`], with the auto-plug search forbidden from picking any
+/// factory named in `avoided` (M1023). The line is otherwise parsed identically,
+/// so an element the text names explicitly is still built: this bounds only what
+/// a `decodebin` / `uridecodebin` / `playbin` may choose. An application retries
+/// through here after a chosen decoder turned out not to decode the stream.
+pub fn parse_launch_avoiding(
+    registry: &Registry,
+    pipeline: &str,
+    avoided: &[&str],
+) -> Result<Graph<GraphNode>, ParseError> {
     // The parser's own built-ins are not registry factories, but they are
     // element names all the same, so a chain may start on one.
     let knows = |name: &str| {
@@ -1480,8 +1556,51 @@ pub fn parse_launch(registry: &Registry, pipeline: &str) -> Result<Graph<GraphNo
     }
     Ok(splice_domain_converters(
         registry,
-        build_graph(registry, chains)?,
+        build_graph(registry, chains, avoided)?,
     ))
+}
+
+/// The factory to bar from the auto-plug search after a run ended in
+/// `failed_element`, or `None` when re-plugging cannot help (M1023). Pass the
+/// result to [`parse_launch_avoiding`] (accumulating it into `avoided`) and run
+/// the line again; `None` means report the failure instead.
+///
+/// The caller owns the rest of the policy, because only it knows whether a
+/// restart is safe: retry only while nothing has been presented (a run that
+/// output nothing restarts invisibly, one that did not would repeat itself) and
+/// not for a live source ([`has_live_source`], where a restart reopens the
+/// connection and drops what was in flight).
+///
+/// `None` when the failing element is unknown to the registry, when the line
+/// names it explicitly (the user asked for that element by name, so substituting
+/// another would defy them), or when it has already been barred once.
+pub fn fallback_factory(
+    registry: &Registry,
+    pipeline: &str,
+    failed_element: &str,
+    avoided: &[&str],
+) -> Option<&'static str> {
+    let factory = registry.factory_of_instance(failed_element)?;
+    if avoided.contains(&factory) {
+        return None;
+    }
+    let named_in_line = tokenize(pipeline).iter().any(|t| t == factory);
+    (!named_in_line).then_some(factory)
+}
+
+/// Whether any element in `graph` offers a live-source clock: a capture or
+/// network source, which a restart would reopen at the cost of whatever was in
+/// flight. The signal a caller checks before re-running a pipeline it has already
+/// started (see [`fallback_factory`]).
+pub fn has_live_source(graph: &Graph<GraphNode>) -> bool {
+    (0..graph.node_count())
+        .filter_map(|i| graph.element(NodeId(i as u32)))
+        .filter_map(|node| match node {
+            GraphNodeRef::Source(source) => source.provide_clock(),
+            GraphNodeRef::Element(element) => element.provide_clock(),
+            _ => None,
+        })
+        .any(|candidate| candidate.priority == crate::clock::ClockPriority::LiveSource)
 }
 
 /// Splice memory-domain converters into a just-parsed graph (M1017), where the

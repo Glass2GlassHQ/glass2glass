@@ -454,6 +454,23 @@ impl OwnedLogRecord {
     pub fn field(&self, key: &str) -> Option<&LogValue<'static>> {
         self.fields.iter().find(|f| f.key == key).map(|f| &f.value)
     }
+
+    /// Hand a buffered record to `sink`, the reverse of
+    /// [`to_owned_record`](LogRecord::to_owned_record). For replaying what a
+    /// buffering sink captured once a real destination exists: the TUI diverts
+    /// logging into a ring for its log pane, and the pane goes away with the
+    /// alternate screen, so anything explaining a failure has to be played back
+    /// onto stderr afterwards or it is lost.
+    pub fn emit_to(&self, sink: &dyn LogSink) {
+        sink.emit(&LogRecord {
+            level: self.level,
+            category: &self.category,
+            instance: self.instance.as_deref(),
+            timestamp_ns: self.timestamp_ns,
+            fields: &self.fields,
+            message: format_args!("{}", self.message),
+        });
+    }
 }
 
 /// A destination for log records. The host installs one via [`set_sink`]; without
@@ -1092,6 +1109,34 @@ mod tests {
     use super::*;
     use alloc::format;
     use alloc::sync::Arc;
+
+    /// What the TUI leans on at teardown: records buffered while logging was
+    /// diverted into a ring can be handed to a real sink afterwards, or the only
+    /// account of a failure dies with the screen that displayed it.
+    #[test]
+    fn a_buffered_record_replays_into_another_sink() {
+        let ring = RingSink::new(4);
+        ring.emit(&LogRecord {
+            level: LogLevel::Error,
+            category: "FileSink",
+            instance: Some("FileSink0"),
+            timestamp_ns: None,
+            fields: &[],
+            message: format_args!("reads host memory but got a Cuda frame"),
+        });
+
+        let replayed = RingSink::new(4);
+        for record in ring.snapshot() {
+            record.emit_to(&replayed);
+        }
+
+        let out = replayed.snapshot();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].level, LogLevel::Error);
+        assert_eq!(out[0].category, "FileSink");
+        assert_eq!(out[0].instance.as_deref(), Some("FileSink0"));
+        assert_eq!(out[0].message, "reads host memory but got a Cuda frame");
+    }
 
     #[test]
     fn short_type_name_strips_generics_and_path() {

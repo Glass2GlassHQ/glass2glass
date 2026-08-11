@@ -6,6 +6,16 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1028: an element can declare whether it can run on this machine right now (`LaunchFactory::with_usable`), and the `auto*sink` aliases resolve through it, so `autovideosink` falls past a display sink that was compiled in but has no compositor to present on and reaches `fakesink`. Only alias resolution consults the check: a pipeline naming the sink outright still builds it and lets it report its own failure.
+- M1027: the Vulkan decoder bounds its video session by the device's maximum coded extent instead of the picture's own, so small geometries the driver used to refuse outright now decode.
+- M1026: the Vulkan decoder enables the `synchronization2` feature it barriers with, and zeroes the bitstream buffer padding it hands the driver instead of leaving fresh allocation garbage there.
+- M1025: a `file://` URI is typed by sniffing the file's header, so `uridecodebin` plays an elementary stream or a non-MP4 container instead of reading every path as an MP4.
+- M1024: inline `decodebin` builds each decoder for the caps the search chose it to produce, so a CPU decoder feeding a strict-format sink no longer needs an explicit `videoconvert`.
+- M1023: `g2g-launch` retries a launch line without the decoder that refused the stream, while nothing has been presented and the source is not live; the runner names the failing element on the bus. Breaking: `run_graph_with_progress` / `run_graph_recorded` and their threaded siblings take a bus.
+- M1022: the H.264 decoder honours a stream's own reference marking instead of always sliding-window, and a decode the GPU refuses says what it refused.
+- M1021: a windowed `wgpusink` presents on the device the GPU decoder upstream opened, so `decodebin ! wgpusink` reaches the screen with no copy and no application code.
+- M1018: a launch line's `decodebin` reads the memory its consumer takes, so a GPU sink gets a decoder that decodes into that memory instead of one whose frames need a download.
+- M1020: an element refusing a frame says which memory domain arrived, and `--tui` replays its error lines on exit instead of losing them with the screen.
 - M1019: an element's declared input memory domains reach the allocation cascade, so a CPU sink or transform makes a GPU decoder download instead of failing on the first frame.
 - M1017: `wgpusink` presents on a Wayland window it owns, and a CUDA-resident decoded frame is bridged onto its device instead of downloaded.
 - M1016: `g2g-launch --record-on-error <dir>` keeps a bounded ring of recent packets per link and dumps each one as a replayable recording when the run fails.

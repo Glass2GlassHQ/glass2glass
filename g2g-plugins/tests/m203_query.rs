@@ -113,7 +113,7 @@ async fn progress_handle_reports_duration_and_position() {
         }));
         let sink = g.add_sink(GraphNode::element(FakeSink::new()));
         g.link(src, sink).unwrap();
-        run_graph_with_progress(g, &NullClock, 4, &progress)
+        run_graph_with_progress(g, &NullClock, 4, &progress, None)
             .await
             .expect("graph runs")
     };

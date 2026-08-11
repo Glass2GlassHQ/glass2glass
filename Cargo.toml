@@ -123,6 +123,7 @@ repository = "https://github.com/boxerab/glass2glass"
 [workspace.dependencies]
 g2g-core = { version = "0.2.0", path = "g2g-core", default-features = false }
 g2g-plugins = { version = "0.2.0", path = "g2g-plugins" }
+g2g-ml = { version = "0.2.0", path = "g2g-ml", default-features = false }
 
 [workspace.lints.rust]
 # Treat every compiler warning as an error (the meson `-Werror` analog), so a

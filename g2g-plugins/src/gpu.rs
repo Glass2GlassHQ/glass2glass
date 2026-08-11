@@ -114,6 +114,57 @@ impl GpuContext {
     }
 }
 
+/// The context a producer opened that a display sink can present from, if one has
+/// been published (see [`publish_producer_context`]).
+static PRODUCER_CONTEXT: std::sync::Mutex<Option<GpuContext>> = std::sync::Mutex::new(None);
+
+/// Offer this context to any display sink that opens a window later, and return
+/// the one now in force (an earlier publisher wins, so a producer that opened a
+/// device speculatively still leaves one answer standing).
+///
+/// A GPU decoder opens a device of its own, because it needs queues and
+/// extensions wgpu does not ask for (Vulkan Video decode), and a `wgpu::Texture`
+/// binds nowhere but the device that made it. A sink that opened its own device
+/// therefore cannot present the decoder's frames at all. Publishing lets the sink
+/// build its surface and present on the producer's device instead, which is what
+/// makes a decoded frame reach the screen with no copy.
+///
+/// Only a producer whose device can actually drive a swapchain should publish.
+pub fn publish_producer_context(context: GpuContext) -> GpuContext {
+    let mut slot = PRODUCER_CONTEXT.lock().unwrap();
+    slot.get_or_insert(context).clone()
+}
+
+/// The published producer context, if a producer opened one.
+pub fn producer_context() -> Option<GpuContext> {
+    PRODUCER_CONTEXT.lock().unwrap().clone()
+}
+
+/// The surface and swapchain configuration to present a `width` x `height` window
+/// on the published producer device, or `None` when nothing published, the
+/// surface cannot be built on its instance, or its adapter cannot drive this
+/// display. A sink that gets `None` opens its own device as before.
+///
+/// `make_surface` builds the window's surface on a given instance, since only the
+/// sink knows its windowing system; a surface is bound to the instance it was
+/// made on, which is why adopting a device means rebuilding the surface rather
+/// than passing one in. Every wgpu display sink shares this so the rule for when
+/// a producer's device is usable lives in one place.
+pub fn present_on_producer_device<E>(
+    make_surface: impl FnOnce(&wgpu::Instance) -> Result<wgpu::Surface<'static>, E>,
+    width: u32,
+    height: u32,
+) -> Option<(
+    GpuContext,
+    wgpu::Surface<'static>,
+    wgpu::SurfaceConfiguration,
+)> {
+    let context = producer_context()?;
+    let surface = make_surface(&context.instance).ok()?;
+    let config = surface.get_default_config(&context.adapter, width, height)?;
+    Some((context, surface, config))
+}
+
 /// Keep-alive owner for a rendered wgpu texture (the [`WgpuKeepAlive`] payload of
 /// [`MemoryDomain::WgpuTexture`](g2g_core::MemoryDomain)). Owns the
 /// `wgpu::Texture`; the consuming sink recovers it via [`texture_of`]. Shared so

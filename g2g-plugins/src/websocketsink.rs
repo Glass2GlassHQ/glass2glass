@@ -137,9 +137,9 @@ impl AsyncElement for WebSocketSink {
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let Some(slice) = frame.domain.as_system_slice() else {
-                        return Err(G2gError::UnsupportedDomain);
-                    };
+                    let slice = frame
+                        .domain
+                        .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
                     // Copy out of the borrow so the send future owns its bytes.
                     let bytes: Vec<u8> = slice.to_vec();
                     self.send_bytes(&bytes).await?;
