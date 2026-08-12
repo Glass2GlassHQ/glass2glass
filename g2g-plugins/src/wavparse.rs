@@ -21,9 +21,9 @@ use alloc::vec::Vec;
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
-    ElementMetadata, FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
-    PipelinePacket, ANY_CHANNELS, ANY_SAMPLE_RATE,
+    pcm_formats, AsyncElement, AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet,
+    ConfigureOutcome, ElementMetadata, FrameTiming, G2gError, MemoryDomain, OutputSink,
+    PadTemplate, PadTemplates, PipelinePacket, ANY_CHANNELS, ANY_SAMPLE_RATE,
 };
 
 /// `RIFF` + size + `WAVE`.
@@ -129,20 +129,11 @@ impl WavParse {
     /// The PCM formats a WAV file can carry, advertised at negotiation; the
     /// concrete one is fixed via `CapsChanged` once `fmt ` is read.
     fn output_alternatives() -> CapsSet {
-        CapsSet::from_alternatives(Vec::from(
-            [
-                AudioFormat::PcmS16Le,
-                AudioFormat::PcmF32Le,
-                AudioFormat::PcmS24Le,
-                AudioFormat::PcmS32Le,
-                AudioFormat::PcmU8,
-            ]
-            .map(|format| Caps::Audio {
-                format,
-                channels: ANY_CHANNELS,
-                sample_rate: ANY_SAMPLE_RATE,
-            }),
-        ))
+        CapsSet::from_alternatives(Vec::from(pcm_formats().map(|format| Caps::Audio {
+            format,
+            channels: ANY_CHANNELS,
+            sample_rate: ANY_SAMPLE_RATE,
+        })))
     }
 
     /// Read the RIFF header and the chunks ahead of `data`, then push everything

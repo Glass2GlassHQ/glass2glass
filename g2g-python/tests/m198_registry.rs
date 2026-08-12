@@ -27,14 +27,15 @@ fn pyelement_parses_as_a_first_class_element() {
 }
 
 #[test]
-fn pyelement_unknown_property_is_rejected() {
+fn pyelement_takes_a_property_only_the_hosted_class_knows() {
     let reg = registry();
-    let line = "videotestsrc ! videoconvert ! pyelement module=m class=C bogus=1 ! fakesink";
-    // An unknown property name surfaces as a parse error (set_property -> Unknown),
-    // proving properties are actually routed to the element, not ignored.
+    let line = "videotestsrc ! videoconvert ! pyelement module=m class=C top-k=3 ! fakesink";
+    // The hosted class declares the real property set and is not loaded at parse
+    // time, so a name outside the host's own goes through as text. One the class
+    // does not have is refused when it loads, not here.
     assert!(
-        parse_launch(&reg, line).is_err(),
-        "unknown property should be rejected"
+        parse_launch(&reg, line).is_ok(),
+        "a hosted element's own property should parse"
     );
 }
 
@@ -67,13 +68,13 @@ fn pyaggregator_parses_as_a_launch_muxer() {
 }
 
 #[test]
-fn pyaggregator_unknown_property_is_rejected() {
+fn pyaggregator_takes_a_property_only_the_hosted_class_knows() {
     let reg = registry();
     let line = "videotestsrc num-buffers=1 ! m. \
                 videotestsrc num-buffers=1 ! m. \
-                pyaggregator name=m module=batch class=BatchInfer bogus=1 ! fakesink";
+                pyaggregator name=m module=batch class=BatchInfer language=ko ! fakesink";
     assert!(
-        parse_launch(&reg, line).is_err(),
-        "unknown muxer property should be rejected"
+        parse_launch(&reg, line).is_ok(),
+        "a hosted muxer's own property should parse"
     );
 }

@@ -88,7 +88,7 @@ use std::sync::mpsc;
 use std::sync::{Mutex, Once};
 use std::thread::{self, JoinHandle};
 
-use pyo3::exceptions::{PyBufferError, PyRuntimeError};
+use pyo3::exceptions::{PyBufferError, PyRuntimeError, PyValueError};
 use pyo3::ffi;
 use pyo3::prelude::*;
 
@@ -109,6 +109,10 @@ const CUDA_BATCH_HOOK: &str = "g2g_process_cuda_batch";
 const CUDA_PRODUCE_HOOK: &str = "g2g_produce_cuda";
 /// The Python entry point for a stream that is not raw video.
 const PAYLOAD_HOOK: &str = "g2g_process_payload";
+/// Optional method a hosted class defines to list the properties it declares, so
+/// a pipeline naming one it has not is refused instead of silently setting an
+/// attribute nothing reads.
+const DECLARED_PROPERTIES_HOOK: &str = "g2g_properties";
 /// Optional attribute a hosted GPU source sets to report the `CUcontext` its
 /// surfaces live in, for a downstream consumer that has to push it.
 const CUDA_CONTEXT_ATTR: &str = "cuda_context";
@@ -616,13 +620,33 @@ fn instantiate(
         let m = PyModule::import(py, module)?;
         let obj = m.getattr(class)?.call0()?;
         obj.setattr("draw_label", draw_label)?;
+        let declared = declared_properties(&obj)?;
         for (name, value) in params {
             let attr = name.replace('-', "_");
+            if let Some(declared) = &declared {
+                if !declared.iter().any(|d| *d == attr) {
+                    return Err(PyValueError::new_err(format!(
+                        "{class} has no property {name}; it declares {}",
+                        declared.join(", ").replace('_', "-")
+                    )));
+                }
+            }
             obj.setattr(attr.as_str(), propvalue_to_py(py, value)?)?;
         }
         Ok(obj.unbind())
     })()
     .map_err(|e| py_fail(py, e))
+}
+
+/// The property names the hosted class says it has, so a pipeline naming one it
+/// does not is refused here rather than quietly setting an attribute nothing
+/// reads. `None` from a class that does not answer, which is every hosted class
+/// outside gst-python-ml: nothing to check against, so everything is forwarded.
+fn declared_properties(obj: &Bound<'_, PyAny>) -> PyResult<Option<Vec<String>>> {
+    if !obj.hasattr(DECLARED_PROPERTIES_HOOK)? {
+        return Ok(None);
+    }
+    Ok(Some(obj.call_method0(DECLARED_PROPERTIES_HOOK)?.extract()?))
 }
 
 /// Convert a g2g [`PropValue`] to the Python scalar an element property expects.
@@ -787,13 +811,19 @@ fn process_job(
 
     match produced {
         Ok(true) => {
-            // Zero dims for a payload job: it has no pixels for a detection box
-            // to be normalized against.
-            let (w, h) = job.caps.video().map_or((0, 0), |(w, h, _)| (w, h));
+            // `None` for a payload job: it has no pixels for a detection box to
+            // be normalized against.
+            let frame_dims = job
+                .caps
+                .video()
+                .map(|(w, h, _)| (w, h))
+                .filter(|(w, h)| *w > 0 && *h > 0);
             let Some(anchor) = job.frames.first() else {
                 return Ok(Vec::new());
             };
             let anchor_timing = anchor.timing;
+            let anchor_sequence = anchor.sequence;
+            let anchor_meta = anchor.meta.clone();
             let mut out = if emitted.is_empty() {
                 // Nothing emitted: the frame Python was handed, mutated in
                 // place. A batch's other inputs have done their work in the
@@ -801,6 +831,9 @@ fn process_job(
                 job.frames.truncate(1);
                 job.frames
             } else {
+                // Emitted frames number on past the input's rather than from
+                // zero: a sink reads a repeated sequence as a stream fault.
+                *emitted_sequence = (*emitted_sequence).max(anchor_sequence);
                 emitted
                     .into_iter()
                     .map(|emitted| {
@@ -810,18 +843,24 @@ fn process_job(
                         }
                         let sequence = *emitted_sequence;
                         *emitted_sequence += 1;
-                        Frame::new(
+                        let mut frame = Frame::new(
                             MemoryDomain::System(SystemSlice::from_boxed(
                                 emitted.payload.into_boxed_slice(),
                             )),
                             timing,
                             sequence,
-                        )
+                        );
+                        // What upstream attached describes the stream, not the
+                        // one buffer replaced, so it travels with every one sent.
+                        frame.meta = anchor_meta.clone();
+                        frame
                     })
                     .collect()
             };
+            // The staged records describe the one call, so they go on one frame:
+            // repeating them would count each detection several times downstream.
             if let Some(first) = out.first_mut() {
-                attach_metadata(first, staged, w, h);
+                attach_metadata(first, staged, frame_dims);
             }
             Ok(out)
         }
@@ -1038,7 +1077,7 @@ fn planes_released(py: Python<'_>, planes: &[Py<CudaPlane>]) -> PyResult<bool> {
 /// Materialize staged results onto the frame: detections / classifications into
 /// an [`g2g_core::AnalyticsMeta`], opaque blobs into a [`g2g_core::BlobMeta`].
 #[cfg(feature = "analytics")]
-fn attach_metadata(frame: &mut Frame, staged: Vec<Staged>, frame_w: u32, frame_h: u32) {
+fn attach_metadata(frame: &mut Frame, staged: Vec<Staged>, frame_dims: Option<(u32, u32)>) {
     use g2g_core::{
         AnalyticsMeta, AnalyticsNode, BBox, BlobMeta, Classification, ObjectDetection,
         RelationKind, Tracking,
@@ -1051,16 +1090,10 @@ fn attach_metadata(frame: &mut Frame, staged: Vec<Staged>, frame_w: u32, frame_h
     // (the gst-python-ml / GstAnalytics convention); g2g's `BBox` is normalized
     // to [0, 1] so it survives a downstream scale / crop. Divide by the frame
     // dims here (the one place that knows them), so an `analyticsoverlay`
-    // denormalizes back to the right pixels. Guard against a zero dim.
-    let sx = if frame_w > 0 {
-        1.0 / frame_w as f32
-    } else {
-        0.0
-    };
-    let sy = if frame_h > 0 {
-        1.0 / frame_h as f32
-    } else {
-        0.0
+    // denormalizes back to the right pixels.
+    let (sx, sy) = match frame_dims {
+        Some((w, h)) => (1.0 / w as f32, 1.0 / h as f32),
+        None => (0.0, 0.0),
     };
     let mut analytics = AnalyticsMeta::new();
     let mut blobs = BlobMeta::new();
@@ -1080,6 +1113,18 @@ fn attach_metadata(frame: &mut Frame, staged: Vec<Staged>, frame_w: u32, frame_h
                 h,
                 score,
             } => {
+                // A box is in pixels of a frame, and a text or audio buffer has
+                // none to divide by. Dropping it says so; keeping it would put a
+                // box of zeros on the buffer and look like a detection at the
+                // origin.
+                if frame_dims.is_none() {
+                    g2g_warn!(
+                        Target::category("pyelement"),
+                        "hosted element staged a detection on a stream with no \
+                         pixels, dropping it"
+                    );
+                    continue;
+                }
                 node_of_staged[index] = Some(analytics.add_detection(ObjectDetection {
                     bbox: BBox {
                         x: x * sx,

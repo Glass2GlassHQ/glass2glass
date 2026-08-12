@@ -146,9 +146,10 @@ pub mod slot;
 #[cfg(feature = "alloc")]
 pub use aggregator::InputAggregator;
 pub use caps::{
-    AudioFormat, ByteStreamEncoding, Caps, ClosedCaptionFormat, Dim, Interlace, PassthroughFields,
-    Rate, RawVideoFormat, SubPictureFormat, TensorDType, TensorLayout, TensorShape, TextFormat,
-    VideoCodec, ANY_CHANNELS, ANY_SAMPLE_RATE,
+    pcm_formats, pcm_from_gst_format, pcm_gst_format, AudioFormat, ByteStreamEncoding, Caps,
+    ClosedCaptionFormat, Dim, Interlace, PassthroughFields, Rate, RawVideoFormat, SubPictureFormat,
+    TensorDType, TensorLayout, TensorShape, TextFormat, VideoCodec, ANY_CHANNELS, ANY_SAMPLE_RATE,
+    PCM_FORMATS,
 };
 pub use channels::{ChannelLayout, ChannelPosition};
 // `CapsSet` (negotiation-time alternatives) needs alloc; `TensorShape` is
@@ -210,7 +211,8 @@ pub use meta::{
 };
 #[cfg(feature = "alloc")]
 pub use property::{
-    ElementMetadata, PropError, PropFlags, PropKind, PropValue, PropertySpec, ValueError,
+    takes_undeclared_properties, ElementMetadata, PropError, PropFlags, PropKind, PropValue,
+    PropertySpec, ValueError, UNDECLARED_PROPERTIES,
 };
 #[cfg(feature = "runtime")]
 pub use ptp::{

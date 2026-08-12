@@ -589,6 +589,14 @@ _(No open tag items.)_
   content sniffing deliberately refuses prose because any "is this text" rule
   reduces to "valid UTF-8" and would claim most small binaries. Widening that
   property is a vocabulary change, not a bugfix.
+- A `gst-inspect` dump of `pyelement` / `pyaggregator` lists only the host's own
+  properties plus the marker saying the rest come from the hosted class. The real
+  set is known once the class loads, but `properties()` returns a `&'static`
+  slice, so there is nowhere to put an introspected one without changing that
+  signature across ~200 implementors.
+- The staged metadata of a call that emits several buffers goes on the first of
+  them. Repeating it would count each detection several times downstream, and
+  nothing in the Python API says which buffer a record belongs to.
 
 ## Dynamic plugin loading (M201+)
 

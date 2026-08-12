@@ -7,8 +7,8 @@
 use alloc::vec::Vec;
 
 use crate::caps::{
-    AudioFormat, Caps, CapsSet, Dim, Interlace, Rate, RawVideoFormat, SubPictureFormat, TextFormat,
-    VideoCodec,
+    pcm_from_gst_format, AudioFormat, Caps, CapsSet, Dim, Interlace, Rate, RawVideoFormat,
+    SubPictureFormat, TextFormat, VideoCodec, PCM_FORMATS,
 };
 
 /// The raw pixel formats a format-less `video/x-raw` expands to (M184). Order is
@@ -23,13 +23,9 @@ const RAW_VIDEO_FORMATS: [RawVideoFormat; 5] = [
 ];
 
 /// The raw sample formats a format-less `audio/x-raw` expands to (M184).
-const RAW_AUDIO_FORMATS: [AudioFormat; 5] = [
-    AudioFormat::PcmS16Le,
-    AudioFormat::PcmF32Le,
-    AudioFormat::PcmS24Le,
-    AudioFormat::PcmS32Le,
-    AudioFormat::PcmU8,
-];
+fn raw_audio_formats() -> Vec<AudioFormat> {
+    PCM_FORMATS.iter().map(|(format, _)| *format).collect()
+}
 
 /// The plain-text formats a `text/x-raw` with no `format=` covers.
 const TEXT_FORMATS: [TextFormat; 2] = [TextFormat::Utf8, TextFormat::PangoMarkup];
@@ -151,7 +147,7 @@ fn expand_text_format(fv: Option<&FieldVal>) -> Option<Vec<TextFormat>> {
 
 fn expand_audio_format(fv: Option<&FieldVal>) -> Option<Vec<AudioFormat>> {
     Some(match fv {
-        None => RAW_AUDIO_FORMATS.to_vec(),
+        None => raw_audio_formats(),
         Some(FieldVal::One(s)) => alloc::vec![parse_audio_format(s)?],
         Some(FieldVal::List(xs)) => xs
             .iter()
@@ -368,11 +364,7 @@ fn parse_text_format(s: &str) -> Option<TextFormat> {
 }
 
 fn parse_audio_format(s: &str) -> Option<AudioFormat> {
-    Some(match s.to_ascii_lowercase().as_str() {
-        "s16le" => AudioFormat::PcmS16Le,
-        "f32le" => AudioFormat::PcmF32Le,
-        _ => return None,
-    })
+    pcm_from_gst_format(s.trim())
 }
 
 /// Parse a framerate `num/den` (or bare integer) into a Q16 fixed-point value.
@@ -399,6 +391,23 @@ fn parse_rate(s: &str) -> Option<Rate> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_pcm_format_parses_back_from_what_it_prints() {
+        // A format the printer knows and the parser does not makes any caps
+        // description carrying it unreadable, far from the format list.
+        for (format, _) in PCM_FORMATS {
+            let caps = Caps::Audio {
+                format,
+                channels: 1,
+                sample_rate: 16_000,
+            };
+            let printed = caps.to_gst_string();
+            let parsed = CapsSet::from_gst_string(&printed)
+                .unwrap_or_else(|| panic!("{printed} does not parse back"));
+            assert_eq!(parsed.alternatives(), [caps].as_slice(), "{printed}");
+        }
+    }
 
     #[test]
     fn parses_high_bit_depth_and_alt_chroma_format_names() {
@@ -452,7 +461,7 @@ mod tests {
                 .unwrap()
                 .alternatives()
                 .len(),
-            RAW_AUDIO_FORMATS.len()
+            raw_audio_formats().len()
         );
     }
 

@@ -629,28 +629,34 @@ fn apply_props<T: PropTarget>(
     props: &[(String, String)],
 ) -> Result<(), ParseError> {
     for (key, raw) in props {
-        let spec = *target
-            .specs()
-            .iter()
-            .find(|s| s.name == key)
-            .ok_or_else(|| ParseError::UnknownProperty {
-                element: name.into(),
-                key: key.clone(),
-            })?;
         let bad_value = || ParseError::BadValue {
             element: name.into(),
             key: key.clone(),
             value: raw.clone(),
         };
-        let value = spec.parse_value(raw).map_err(|e| match e {
-            ValueError::Kind(_) => bad_value(),
-            ValueError::Nick(nick) => ParseError::BadEnumValue {
-                element: name.into(),
-                key: key.clone(),
-                value: nick,
-                values: spec.enum_values.unwrap_or(""),
-            },
-        })?;
+        let spec = target.specs().iter().find(|s| s.name == key).copied();
+        let value = match spec {
+            Some(spec) => spec.parse_value(raw).map_err(|e| match e {
+                ValueError::Kind(_) => bad_value(),
+                ValueError::Nick(nick) => ParseError::BadEnumValue {
+                    element: name.into(),
+                    key: key.clone(),
+                    value: nick,
+                    values: spec.enum_values.unwrap_or(""),
+                },
+            })?,
+            // The element takes names it cannot declare, so there is no kind to
+            // parse for: the text goes on as written for whatever does know it.
+            None if crate::property::takes_undeclared_properties(target.specs()) => {
+                PropValue::Str(raw.clone())
+            }
+            None => {
+                return Err(ParseError::UnknownProperty {
+                    element: name.into(),
+                    key: key.clone(),
+                })
+            }
+        };
         target.set(key, value).map_err(|_| bad_value())?;
     }
     Ok(())

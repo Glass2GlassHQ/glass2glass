@@ -112,7 +112,10 @@ fn properties_round_trip() {
         Some(PropValue::Str("OtherTransform".into()))
     );
 
-    assert!(el.set_property("nope", PropValue::Bool(true)).is_err());
+    // A name the host does not read itself is kept for the hosted class, which
+    // is the only thing that can say whether it is real.
+    el.set_property("nope", PropValue::Bool(true)).unwrap();
+    assert_eq!(el.get_property("nope"), Some(PropValue::Bool(true)));
 }
 
 #[test]

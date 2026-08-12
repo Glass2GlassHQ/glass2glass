@@ -120,9 +120,9 @@ fn an_emitted_payload_replaces_the_frame_it_was_read_from() {
 }
 
 /// The emitted frame stands in for the anchor, so it keeps its place in the
-/// stream and still carries the metadata the batch produced. Its number is the
-/// host's own: one input can emit several buffers, so they cannot all carry the
-/// number of the buffer they were made from.
+/// stream: the same timing, the same number, and the metadata the call produced.
+/// One input emitting several buffers numbers them on from there, since a sink
+/// reads a repeated number as a stream fault.
 #[test]
 fn the_emitted_frame_keeps_the_anchor_timing_and_metadata() {
     let mut el = transcriber();
@@ -133,7 +133,10 @@ fn the_emitted_frame_keeps_the_anchor_timing_and_metadata() {
     };
     assert_eq!(frame.timing.pts_ns, 1_000);
     assert_eq!(frame.timing.duration_ns, 500);
-    assert_eq!(frame.sequence, 0);
+    assert_eq!(
+        frame.sequence, 7,
+        "the emitted buffer takes the place of the one it was made from"
+    );
 
     let blobs = frame.meta.get::<BlobMeta>().expect("the caps blob");
     let caps = blobs.iter().find(|b| b.header == "caps").unwrap();

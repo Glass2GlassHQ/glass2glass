@@ -548,11 +548,13 @@ fn audio_gst_media_type(f: AudioFormat) -> (&'static str, Option<&'static str>) 
         AudioFormat::Ac3 => ("audio/x-ac3", None),
         AudioFormat::Flac => ("audio/x-flac", None),
         AudioFormat::Vorbis => ("audio/x-vorbis", None),
-        AudioFormat::PcmS16Le => ("audio/x-raw", Some("S16LE")),
-        AudioFormat::PcmF32Le => ("audio/x-raw", Some("F32LE")),
-        AudioFormat::PcmS24Le => ("audio/x-raw", Some("S24LE")),
-        AudioFormat::PcmS32Le => ("audio/x-raw", Some("S32LE")),
-        AudioFormat::PcmU8 => ("audio/x-raw", Some("U8")),
+        // Named in `PCM_FORMATS`, but still listed so a format added to the enum
+        // has to be given a media type here rather than falling into a wildcard.
+        AudioFormat::PcmS16Le
+        | AudioFormat::PcmF32Le
+        | AudioFormat::PcmS24Le
+        | AudioFormat::PcmS32Le
+        | AudioFormat::PcmU8 => ("audio/x-raw", pcm_gst_format(f)),
         AudioFormat::Mulaw => ("audio/x-mulaw", None),
         AudioFormat::Alaw => ("audio/x-alaw", None),
         AudioFormat::ImaAdpcm => ("audio/x-adpcm", None),
@@ -731,17 +733,42 @@ impl Interlace {
     }
 }
 
+/// Every raw (uncompressed) PCM sample format, with the `format=` gst spells it.
+///
+/// One list, so a format g2g prints into a caps description is one it can parse
+/// back: a `format=` missing from the parser makes the whole description
+/// unreadable, which reaches the caller as a caps mismatch far from here.
+pub const PCM_FORMATS: [(AudioFormat, &str); 5] = [
+    (AudioFormat::PcmS16Le, "S16LE"),
+    (AudioFormat::PcmF32Le, "F32LE"),
+    (AudioFormat::PcmS24Le, "S24LE"),
+    (AudioFormat::PcmS32Le, "S32LE"),
+    (AudioFormat::PcmU8, "U8"),
+];
+
+/// Just the formats from [`PCM_FORMATS`], for a caps set covering all of them.
+pub fn pcm_formats() -> [AudioFormat; 5] {
+    PCM_FORMATS.map(|(format, _)| format)
+}
+
+/// The gst `format=` name of a raw PCM format, `None` for an encoded one.
+pub fn pcm_gst_format(f: AudioFormat) -> Option<&'static str> {
+    PCM_FORMATS
+        .iter()
+        .find_map(|(format, name)| (*format == f).then_some(*name))
+}
+
+/// The raw PCM format a gst `format=` names, case-insensitively.
+pub fn pcm_from_gst_format(name: &str) -> Option<AudioFormat> {
+    PCM_FORMATS
+        .iter()
+        .find_map(|(format, gst)| gst.eq_ignore_ascii_case(name).then_some(*format))
+}
+
 /// Raw (uncompressed) PCM formats, the only ones the "any rate" wildcard (M187)
 /// and the resampler apply to.
 fn is_pcm(f: AudioFormat) -> bool {
-    matches!(
-        f,
-        AudioFormat::PcmS16Le
-            | AudioFormat::PcmF32Le
-            | AudioFormat::PcmS24Le
-            | AudioFormat::PcmS32Le
-            | AudioFormat::PcmU8
-    )
+    pcm_gst_format(f).is_some()
 }
 
 /// Intersect two [`Caps::Audio`] sample rates, where [`ANY_SAMPLE_RATE`] (0) is

@@ -33,7 +33,7 @@ use g2g_core::{
     ANY_SAMPLE_RATE,
 };
 
-use crate::audioconvert::{read_sample, sample_bytes, write_sample, PCM_FORMATS};
+use crate::audioconvert::{pcm_formats, read_sample, sample_bytes, write_sample};
 
 /// `f64::floor` without `std` / libm: truncation rounds toward zero, so a
 /// negative non-integer needs one subtracted. `rel` lives in a small range
@@ -150,7 +150,7 @@ impl AudioResample {
         // a passthrough field so a downstream capsfilter pins it). A `DataFrame`
         // never precedes that `CapsChanged`, so `resample` never interpolates at a
         // placeholder rate / channel count (guarded in `process` / `resample`).
-        if !PCM_FORMATS.contains(format) {
+        if !pcm_formats().contains(format) {
             return Err(G2gError::CapsMismatch);
         }
         Ok((*format, *channels, *sample_rate))
@@ -206,7 +206,7 @@ impl AsyncElement for AudioResample {
             ],
         };
         CapsConstraint::DerivedFields(CapsTransform::Audio {
-            accept: PCM_FORMATS.to_vec(),
+            accept: pcm_formats().to_vec(),
             produce: Vec::new(),
             shapes,
         })
@@ -507,7 +507,7 @@ impl PadTemplates for AudioResample {
             channels: 2,
             sample_rate: 48_000,
         };
-        let set = CapsSet::from_alternatives(PCM_FORMATS.map(pcm).to_vec());
+        let set = CapsSet::from_alternatives(pcm_formats().map(pcm).to_vec());
         Vec::from([PadTemplate::sink(set.clone()), PadTemplate::source(set)])
     }
 }

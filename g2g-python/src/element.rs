@@ -184,11 +184,18 @@ impl AsyncElement for PyTransform {
     /// mid-stream `CapsChanged` (e.g. an upstream decoder's first-frame caps)
     /// cleanly through it, instead of stalling on an unconstrained boundary.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
+        // Stating both sides lets the solver narrow the input link too. Derivation
+        // only pushes forward, so wavparse's any-rate any-channels fixates alone.
+        if let Some(produce) = self.produce.clone() {
+            return CapsConstraint::Mapping(vec![(
+                CapsSet::one(self.accept.clone()),
+                CapsSet::one(produce),
+            )]);
+        }
         let accept = self.accept.clone();
-        let produce = self.produce.clone();
         CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| {
             match input.intersect(&accept) {
-                Ok(_) => CapsSet::one(produce.clone().unwrap_or_else(|| input.clone())),
+                Ok(_) => CapsSet::one(input.clone()),
                 Err(_) => CapsSet::from_alternatives(Vec::new()),
             }
         }))
@@ -364,19 +371,12 @@ impl AsyncElement for PyTransform {
                 self.produce = Some(fixed_caps(value.as_str().ok_or(PropError::Type)?)?);
                 Ok(())
             }
-            // Any other *declared* property is forwarded to the hosted Python
-            // instance (a gst-python-ml element's own GObject property, e.g.
-            // model-name / engine-name). Stored in order; re-setting replaces.
-            // An undeclared name is a typo, rejected like any other element.
-            other if PYTRANSFORM_PROPS.iter().any(|s| s.name == other) => {
-                if let Some(slot) = self.params.iter_mut().find(|(k, _)| k == other) {
-                    slot.1 = value;
-                } else {
-                    self.params.push((other.to_string(), value));
-                }
+            // Any other property goes to the hosted Python instance. Which names
+            // are real is the class's to say, so a typo is caught when it loads.
+            other => {
+                crate::props::forward(&mut self.params, other, value);
                 Ok(())
             }
-            _ => Err(PropError::Unknown),
         }
     }
 

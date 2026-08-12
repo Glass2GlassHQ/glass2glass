@@ -152,3 +152,14 @@ class PropEcho:
 
     def g2g_process_batch(self, buffers, width, height, fmt, meta):
         self.g2g_process(buffers[0], width, height, fmt, meta)
+
+
+class DeclaredProps:
+    """States the properties it has, the way a gst-python-ml element does, so the
+    host can refuse a pipeline naming one it has not."""
+
+    def g2g_properties(self):
+        return ["model_name", "device"]
+
+    def g2g_process(self, buf, width, height, fmt, meta):
+        meta.add_blob("model_name", getattr(self, "model_name", "<unset>").encode("utf-8"))

@@ -290,17 +290,12 @@ impl MultiInputElement for PyAggregator {
                 self.produce = Some(fixed_caps(value.as_str().ok_or(PropError::Type)?)?);
                 Ok(())
             }
-            // Any other declared property is forwarded to the hosted Python
-            // instance, the same way `PyTransform` forwards its own.
-            other if PYAGGREGATOR_PROPS.iter().any(|s| s.name == other) => {
-                if let Some(slot) = self.params.iter_mut().find(|(k, _)| k == other) {
-                    slot.1 = value;
-                } else {
-                    self.params.push((other.to_string(), value));
-                }
+            // Any other property is forwarded to the hosted Python instance, the
+            // same way `PyTransform` forwards its own.
+            other => {
+                crate::props::forward(&mut self.params, other, value);
                 Ok(())
             }
-            _ => Err(PropError::Unknown),
         }
     }
 

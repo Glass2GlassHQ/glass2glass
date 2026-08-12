@@ -22,8 +22,9 @@ use alloc::vec::Vec;
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
-    ElementMetadata, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    pcm_formats, AsyncElement, AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet,
+    ConfigureOutcome, ElementMetadata, G2gError, MemoryDomain, OutputSink, PadTemplate,
+    PadTemplates, PipelinePacket,
 };
 
 /// Size fields of a stream whose length is not known when the header is written.
@@ -36,20 +37,11 @@ const FORMAT_IEEE_FLOAT: u16 = 3;
 
 /// The PCM inputs a WAV file can carry.
 fn input_alternatives() -> Vec<Caps> {
-    Vec::from(
-        [
-            AudioFormat::PcmS16Le,
-            AudioFormat::PcmF32Le,
-            AudioFormat::PcmS24Le,
-            AudioFormat::PcmS32Le,
-            AudioFormat::PcmU8,
-        ]
-        .map(|format| Caps::Audio {
-            format,
-            channels: 0,
-            sample_rate: 0,
-        }),
-    )
+    Vec::from(pcm_formats().map(|format| Caps::Audio {
+        format,
+        channels: 0,
+        sample_rate: 0,
+    }))
 }
 
 /// `(wFormatTag, bits per sample)` of a PCM format, `None` for anything WAV

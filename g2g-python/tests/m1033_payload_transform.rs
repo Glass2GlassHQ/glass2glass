@@ -10,9 +10,9 @@
 
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, AudioFormat, Caps, CapsConstraint, Dim, Frame, FrameTiming, G2gError, Interlace,
-    MemoryDomain, OutputSink, PipelinePacket, PropValue, PushOutcome, Rate, RawVideoFormat,
-    TextFormat,
+    AsyncElement, AudioFormat, BlobMeta, Caps, CapsConstraint, Dim, Frame, FrameTiming, G2gError,
+    Interlace, MemoryDomain, OutputSink, PipelinePacket, PropValue, PushOutcome, Rate,
+    RawVideoFormat, TextFormat,
 };
 use g2g_python::PyTransform;
 
@@ -168,9 +168,25 @@ fn payload_of(frame: &Frame) -> &[u8] {
 
 fn derived_output(el: &PyTransform, input: &Caps) -> Vec<Caps> {
     let CapsConstraint::DerivedOutput(derive) = el.caps_constraint_as_transform() else {
-        panic!("PyTransform declares a DerivedOutput constraint");
+        panic!("a same-format PyTransform declares a DerivedOutput constraint");
     };
     derive(input).alternatives().to_vec()
+}
+
+/// The `(accepted, produced)` pairs a format-boundary element states outright.
+fn mapped_pairs(el: &PyTransform) -> Vec<(Vec<Caps>, Vec<Caps>)> {
+    let CapsConstraint::Mapping(pairs) = el.caps_constraint_as_transform() else {
+        panic!("a format-boundary PyTransform declares a Mapping constraint");
+    };
+    pairs
+        .into_iter()
+        .map(|(input, output)| {
+            (
+                input.alternatives().to_vec(),
+                output.alternatives().to_vec(),
+            )
+        })
+        .collect()
 }
 
 /// The whole point: what reaches the sink is the text the element emitted, not
@@ -193,8 +209,8 @@ fn a_payload_transform_pushes_the_emitted_text_downstream() {
         "a one-argument emit inherits the whole timing of the frame it replaced"
     );
     assert_eq!(
-        frame.sequence, 0,
-        "an emitted buffer is numbered by the host"
+        frame.sequence, 3,
+        "an emitted buffer keeps the place of the one it replaced"
     );
     assert_eq!(el.emitted_count(), 1);
 }
@@ -235,10 +251,43 @@ fn every_emitted_buffer_reaches_the_sink() {
     );
     assert_eq!(
         frames.iter().map(|f| f.sequence).collect::<Vec<_>>(),
-        [0, 1, 2],
-        "a repeated frame number reads downstream as a stream fault"
+        [3, 4, 5],
+        "numbered on from the buffer they replace, and never repeating"
     );
     assert_eq!(el.emitted_count(), 3);
+}
+
+/// Whatever upstream attached describes the stream, not the one buffer this
+/// element replaced, so it reaches the sink on every buffer sent in its place.
+#[test]
+fn every_emitted_buffer_carries_the_metadata_it_arrived_with() {
+    const TEXT: &[u8] = b"say ";
+    const UPSTREAM: &str = "upstream";
+
+    let mut el = chunking_synthesizer();
+    el.configure_pipeline(&text_caps()).unwrap();
+
+    let mut frame = payload_frame(TEXT.to_vec());
+    let mut blobs = BlobMeta::new();
+    blobs.push(UPSTREAM.to_string(), vec![1, 2, 3]);
+    frame.meta.attach(blobs);
+
+    let sink = push(&mut el, PipelinePacket::DataFrame(frame));
+
+    let carried: Vec<bool> = sink
+        .packets
+        .iter()
+        .map(|packet| {
+            let PipelinePacket::DataFrame(frame) = packet else {
+                panic!("expected a DataFrame downstream");
+            };
+            frame
+                .meta
+                .get::<BlobMeta>()
+                .is_some_and(|blobs| blobs.iter().any(|blob| blob.header == UPSTREAM))
+        })
+        .collect();
+    assert_eq!(carried, [true, true, true]);
 }
 
 /// Generated audio runs for as long as its samples, not for as long as the text
@@ -268,7 +317,7 @@ fn an_emitted_duration_replaces_the_anchors() {
         "the speech is presented when the text it was generated from arrived"
     );
     assert_eq!(frame.timing.dts_ns, anchor_timing().dts_ns);
-    assert_eq!(frame.sequence, 0);
+    assert_eq!(frame.sequence, 3);
 }
 
 /// Negotiation has to agree with what the element actually pushes, or a text
@@ -277,11 +326,23 @@ fn an_emitted_duration_replaces_the_anchors() {
 fn the_declared_output_caps_are_the_ones_the_element_advertises() {
     let el = transcriber();
     assert_eq!(el.intercept_caps(&audio_caps()).unwrap(), audio_caps());
-    assert_eq!(derived_output(&el, &audio_caps()), [text_caps()]);
     assert_eq!(el.propose_output_caps(&audio_caps()), text_caps());
     assert!(
         el.is_format_boundary(),
         "audio in, text out is a format boundary"
+    );
+}
+
+/// The accepted input is stated, not only derived from whatever arrives.
+///
+/// An upstream parser advertises its whole range with the rate and channel count
+/// left open (`wavparse`), so with nothing narrowing the link it fixates on its
+/// own and the element then refuses what it picked.
+#[test]
+fn a_boundary_element_states_the_input_it_accepts() {
+    assert_eq!(
+        mapped_pairs(&transcriber()),
+        [(vec![audio_caps()], vec![text_caps()])]
     );
 }
 

@@ -34,14 +34,11 @@ use g2g_core::{
     PropValue, PropertySpec, ANY_CHANNELS,
 };
 
-/// The PCM sample formats `AudioConvert` / `AudioResample` read and write.
-pub(crate) const PCM_FORMATS: [AudioFormat; 5] = [
-    AudioFormat::PcmS16Le,
-    AudioFormat::PcmF32Le,
-    AudioFormat::PcmS24Le,
-    AudioFormat::PcmS32Le,
-    AudioFormat::PcmU8,
-];
+/// The PCM sample formats `AudioConvert` / `AudioResample` read and write: every
+/// one g2g has, since the converter is what makes any of them reachable.
+pub(crate) fn pcm_formats() -> [AudioFormat; 5] {
+    g2g_core::pcm_formats()
+}
 
 /// # Example
 ///
@@ -74,7 +71,7 @@ impl AudioConvert {
     pub fn new(target_format: AudioFormat, target_channels: u8) -> Self {
         assert!(target_channels > 0, "target channels must be non-zero");
         assert!(
-            PCM_FORMATS.contains(&target_format),
+            pcm_formats().contains(&target_format),
             "AudioConvert is a raw-PCM converter; target must be a PCM format"
         );
         Self {
@@ -141,7 +138,7 @@ impl AudioConvert {
         else {
             return Err(G2gError::CapsMismatch);
         };
-        if !PCM_FORMATS.contains(format) {
+        if !pcm_formats().contains(format) {
             return Err(G2gError::CapsMismatch);
         }
         Ok((*format, *channels, *sample_rate))
@@ -156,7 +153,7 @@ pub(crate) fn sample_bytes(format: AudioFormat) -> usize {
         AudioFormat::PcmS16Le => 2,
         AudioFormat::PcmS24Le => 3,
         AudioFormat::PcmF32Le | AudioFormat::PcmS32Le => 4,
-        // not reachable: only PCM_FORMATS pass negotiation.
+        // not reachable: only the PCM formats pass negotiation.
         _ => 0,
     }
 }
@@ -186,7 +183,7 @@ impl AsyncElement for AudioConvert {
             Some(f) => alloc::vec![FieldTransform::Fixed(f)],
             None => {
                 let mut v = alloc::vec![FieldTransform::Identity];
-                v.extend(PCM_FORMATS.iter().copied().map(FieldTransform::Fixed));
+                v.extend(pcm_formats().iter().copied().map(FieldTransform::Fixed));
                 v
             }
         };
@@ -214,7 +211,7 @@ impl AsyncElement for AudioConvert {
             }
         }
         CapsConstraint::DerivedFields(CapsTransform::Audio {
-            accept: PCM_FORMATS.to_vec(),
+            accept: pcm_formats().to_vec(),
             produce: Vec::new(),
             shapes,
         })
@@ -236,7 +233,7 @@ impl AsyncElement for AudioConvert {
         else {
             return Err(G2gError::CapsMismatch);
         };
-        if !PCM_FORMATS.contains(format) || *channels == ANY_CHANNELS {
+        if !pcm_formats().contains(format) || *channels == ANY_CHANNELS {
             return Err(G2gError::CapsMismatch);
         }
         self.resolved = Some((*format, *channels));
@@ -373,24 +370,15 @@ static AUDIOCONVERT_PROPS: &[PropertySpec] = &[
 pub(crate) fn audio_format_from_str(s: &str) -> Option<AudioFormat> {
     // Only the PCM formats are valid AudioConvert targets; AAC/OPUS are encoder
     // outputs, not something a raw-sample converter can produce.
-    match s.to_ascii_lowercase().as_str() {
-        "s16le" => Some(AudioFormat::PcmS16Le),
-        "f32le" => Some(AudioFormat::PcmF32Le),
-        "s24le" => Some(AudioFormat::PcmS24Le),
-        "s32le" => Some(AudioFormat::PcmS32Le),
-        "u8" => Some(AudioFormat::PcmU8),
-        _ => None,
-    }
+    g2g_core::pcm_from_gst_format(s)
 }
 
 /// The canonical (GStreamer) property string for an [`AudioFormat`].
 pub(crate) fn audio_format_to_str(f: AudioFormat) -> &'static str {
+    if let Some(name) = g2g_core::pcm_gst_format(f) {
+        return name;
+    }
     match f {
-        AudioFormat::PcmS16Le => "S16LE",
-        AudioFormat::PcmF32Le => "F32LE",
-        AudioFormat::PcmS24Le => "S24LE",
-        AudioFormat::PcmS32Le => "S32LE",
-        AudioFormat::PcmU8 => "U8",
         AudioFormat::Aac => "AAC",
         AudioFormat::Opus => "OPUS",
         // A format added since: no canonical string here, fail loud.
@@ -407,7 +395,7 @@ impl PadTemplates for AudioConvert {
             channels: 2,
             sample_rate: 48_000,
         };
-        let set = CapsSet::from_alternatives(PCM_FORMATS.map(pcm).to_vec());
+        let set = CapsSet::from_alternatives(pcm_formats().map(pcm).to_vec());
         Vec::from([PadTemplate::sink(set.clone()), PadTemplate::source(set)])
     }
 }
