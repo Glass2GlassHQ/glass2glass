@@ -1,5 +1,5 @@
 //! M322: end-to-end host of the real gst-python-ml `objectdetector` under
-//! `GSTML_BACKEND=g2g`.
+//! `PYML_BACKEND=g2g`.
 //!
 //! `PyTransform` imports the actual `objectdetector` element from a gst-python-ml
 //! checkout, forwards `engine-name` / `model-name` / `device`, and drives one

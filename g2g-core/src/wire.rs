@@ -241,6 +241,7 @@ pub fn raw_format_to_u8(f: RawVideoFormat) -> u8 {
         RawVideoFormat::I444p10 => 11,
         RawVideoFormat::I444p12 => 12,
         RawVideoFormat::P010 => 13,
+        RawVideoFormat::Rgb8 => 14,
     }
 }
 /// Inverse of [`raw_format_to_u8`]; errors on an unknown byte (never trust the
@@ -261,6 +262,7 @@ pub fn raw_format_from_u8(v: u8) -> Result<RawVideoFormat, WireError> {
         11 => RawVideoFormat::I444p10,
         12 => RawVideoFormat::I444p12,
         13 => RawVideoFormat::P010,
+        14 => RawVideoFormat::Rgb8,
         _ => return Err(WireError::BadTag),
     })
 }
@@ -317,6 +319,7 @@ fn bytestream_to_u8(e: ByteStreamEncoding) -> u8 {
         ByteStreamEncoding::Mp4 => 5,
         ByteStreamEncoding::Ivf => 6,
         ByteStreamEncoding::MpegPs => 7,
+        ByteStreamEncoding::Wav => 8,
     }
 }
 fn bytestream_from_u8(v: u8) -> Result<ByteStreamEncoding, WireError> {
@@ -329,6 +332,7 @@ fn bytestream_from_u8(v: u8) -> Result<ByteStreamEncoding, WireError> {
         5 => ByteStreamEncoding::Mp4,
         6 => ByteStreamEncoding::Ivf,
         7 => ByteStreamEncoding::MpegPs,
+        8 => ByteStreamEncoding::Wav,
         _ => return Err(WireError::BadTag),
     })
 }

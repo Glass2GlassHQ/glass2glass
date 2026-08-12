@@ -1,7 +1,7 @@
 [package]
 name = "g2g-ml"
 description = "ML inference elements for glass2glass: burn (embedded/Wasm) and ort (server) backends."
-license = "MPL-2.0"
+license.workspace = true
 readme = "README.md"
 keywords = ["multimedia", "inference", "onnx", "gpu", "video"]
 categories = ["multimedia::video", "multimedia", "science"]

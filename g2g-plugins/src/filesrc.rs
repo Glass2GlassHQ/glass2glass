@@ -387,8 +387,8 @@ static FILESRC_PROPS: &[PropertySpec] = &[
 
 /// Derive the media type from a file extension (M478), so a bare launch
 /// `filesrc location=X` types without an explicit `bytestream-format`. Containers
-/// map to `Caps::ByteStream`, subtitle documents to `Caps::Text`, raw Annex-B
-/// elementary streams to `Caps::CompressedVideo` at a fixable `Range`
+/// map to `Caps::ByteStream`, subtitle documents and plain text to `Caps::Text`,
+/// raw Annex-B elementary streams to `Caps::CompressedVideo` at a fixable `Range`
 /// placeholder geometry (never `Any`, which cannot fixate; the parser refines
 /// via SPS, M676); an unknown extension returns `None`, and the caller then
 /// content-sniffs the header. String-only, so it costs no filesystem read at
@@ -409,6 +409,13 @@ fn caps_from_extension(path: &std::path::Path) -> Option<Caps> {
         }
         "h265" | "265" | "hevc" => {
             return Some(crate::typefind::elementary_video_caps(VideoCodec::H265))
+        }
+        // Plain prose matches no subtitle syntax, so content sniffing can never
+        // reach it: the extension is the only safe declaration.
+        "txt" | "text" => {
+            return Some(Caps::Text {
+                format: g2g_core::TextFormat::Utf8,
+            })
         }
         "vtt" => {
             return Some(Caps::Text {

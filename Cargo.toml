@@ -109,6 +109,7 @@ exclude = [
 [workspace.package]
 version = "0.2.0"
 edition = "2021"
+license = "MPL-2.0"
 # The host-side floor. The embedded-facing crates (g2g-core, g2g-mcu, g2g-mcugen,
 # g2g-plugin) override this with a conservative 1.86, since a certified /
 # vendor-pinned toolchain is what that audience has. See STABILITY.md.

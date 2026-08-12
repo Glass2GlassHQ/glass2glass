@@ -36,12 +36,12 @@ use g2g_core::{
     PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, VideoCodec,
 };
 
-use crate::capsfilter::parse_raw_format;
 use crate::filesink::io_err;
 use crate::st2110jxs::{St2110JxsDepacketizer, St2110JxsPacketizer};
 use crate::st2110pacing::{frame_period_ns, pace_send, Pacer, PacingProfile};
 use crate::st2110sdp::{St2110Essence, St2110Sdp};
 use crate::st2110video::Sampling;
+use g2g_core::caps_parse::parse_raw_format;
 
 /// The whole-fps rate from a `Caps::CompressedVideo` framerate (`Rate::Fixed` is
 /// fps << 16), or 0 if not fixed (do not pace).

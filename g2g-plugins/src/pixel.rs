@@ -76,6 +76,7 @@ pub(crate) fn plane_shapes(
 pub(crate) fn row_bytes(format: RawVideoFormat, w: usize) -> usize {
     match format {
         RawVideoFormat::Rgba8 | RawVideoFormat::Bgra8 => w * 4,
+        RawVideoFormat::Rgb8 => w * 3,
         RawVideoFormat::Yuyv => w * 2,
         _ => w * format.bytes_per_sample(),
     }
@@ -95,6 +96,8 @@ pub(crate) fn frame_byte_size(format: RawVideoFormat, w: u32, h: u32) -> usize {
     let (w, h) = (w as usize, h as usize);
     match format {
         RawVideoFormat::Rgba8 | RawVideoFormat::Bgra8 => w * h * 4,
+        // Packed RGB: three bytes per pixel, no alpha.
+        RawVideoFormat::Rgb8 => w * h * 3,
         RawVideoFormat::Nv12 => w * h * 3 / 2,
         // Semi-planar 10-bit: NV12's sample counts at 2 bytes each.
         RawVideoFormat::P010 => w * h * 3,

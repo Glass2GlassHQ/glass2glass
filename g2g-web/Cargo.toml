@@ -10,6 +10,7 @@
 name = "g2g-web"
 version = "0.2.0"
 edition = "2021"
+license = "MPL-2.0"
 publish = false
 description = "glass2glass browser (WebAssembly) pipeline entry points."
 

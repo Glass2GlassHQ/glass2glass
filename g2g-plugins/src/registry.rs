@@ -62,6 +62,7 @@ use crate::tsmux::TsMux;
 use crate::videobalance::VideoBalance;
 use crate::videobox::VideoBox;
 use crate::videoconvert::VideoConvert;
+use crate::videoconvertscale::VideoConvertScale;
 use crate::videocrop::VideoCrop;
 use crate::videoflip::{FlipMethod, VideoFlip};
 use crate::videorate::VideoRate;
@@ -70,6 +71,8 @@ use crate::videotestsrc::VideoTestSrc;
 use crate::volume::Volume;
 use crate::vp8parse::Vp8Parse;
 use crate::vp9parse::Vp9Parse;
+use crate::wavenc::WavEnc;
+use crate::wavparse::WavParse;
 
 // Feature- (and platform-) gated elements, registered when their feature is on so
 // `gst-inspect`, `gst-inspect --all`, and `parse_launch` see them. Each registers
@@ -358,6 +361,18 @@ pub fn default_registry() -> Registry {
     }));
     reg.register_launch(LaunchFactory::of::<VideoScale>("videoscale", || {
         Box::new(VideoScale::new(0, 0))
+    }));
+    // Convert and scale in one element: takes both from a downstream capsfilter
+    // unless the `format` / `width` / `height` properties pin them.
+    reg.register_launch(LaunchFactory::of::<VideoConvertScale>(
+        "videoconvertscale",
+        || Box::new(VideoConvertScale::auto()),
+    ));
+    reg.register_launch(LaunchFactory::of::<WavEnc>("wavenc", || {
+        Box::new(WavEnc::new())
+    }));
+    reg.register_launch(LaunchFactory::of::<WavParse>("wavparse", || {
+        Box::new(WavParse::new())
     }));
     reg.register_launch(LaunchFactory::of::<VideoCrop>("videocrop", || {
         Box::new(VideoCrop::new(0, 0, 0, 0))
@@ -980,6 +995,11 @@ fn register_autoplug_candidates(reg: &mut Registry) {
     }));
     reg.register(ElementFactory::of::<IvfDemux>("ivfdemux", |_| {
         Box::new(IvfDemux::new())
+    }));
+    // RIFF/WAVE (M1030): `ByteStream{Wav}` -> the PCM it carries, so
+    // `filesrc location=x.wav ! decodebin` auto-plugs this.
+    reg.register(ElementFactory::of::<WavParse>("wavparse", |_| {
+        Box::new(WavParse::new())
     }));
     reg.register(ElementFactory::of::<Fmp4Demux>("fmp4demux", |_| {
         Box::new(Fmp4Demux::new())

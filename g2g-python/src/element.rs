@@ -7,11 +7,14 @@
 //! behind the `python` feature.
 //!
 //! Caps model: an overlay/inference-in-place element (the `ActionTask` shape)
-//! takes a raw-video frame and returns one in the same format, so this is a
-//! non-boundary transform whose output caps equal its input. A future
-//! format-changing variant (e.g. raw-video in, `Caps::Tensor` out) would set
-//! [`AsyncElement::is_format_boundary`] and a `DerivedOutput` constraint, like
-//! `g2g-ml`'s `OrtInference`.
+//! takes a raw-video frame and returns one in the same format, so it is a
+//! non-boundary transform whose output caps equal its input. `output-caps=`
+//! makes it a boundary instead ([`AsyncElement::is_format_boundary`] plus a
+//! `DerivedOutput` constraint naming the declared caps, like `g2g-ml`'s
+//! `OrtInference`): the single-chain gst-python-ml families read one media type
+//! and write another (audio in and a transcript out, text in and speech out),
+//! and their output is not the size of their input, so the hosted element
+//! returns it through `meta.emit` (see [`crate::host`]).
 //!
 //! Memory-domain model (M985): the frame is read where it lies and forwarded
 //! untouched, so both pads carry the one domain the hosted code reads, System or
@@ -28,12 +31,13 @@ use g2g_core::{
 };
 
 use crate::format::{format_from_py, format_to_py, frame_bytes};
+use crate::props::{fixed_caps, hosted_element_props};
 
 /// A gst-python-ml element hosted as a first-class g2g transform.
 #[derive(Debug)]
 pub struct PyTransform {
     /// Python module to import, e.g. `"action"` (a gst-python-ml element shell
-    /// running under `GSTML_BACKEND=g2g`).
+    /// running under `PYML_BACKEND=g2g`).
     module: String,
     /// Class within the module to instantiate, e.g. `"ActionTransform"`.
     class: String,
@@ -41,6 +45,11 @@ pub struct PyTransform {
     /// geometry / rate. A real element derives this from the Python class's
     /// declared sink-pad template; `with_accept` overrides it meanwhile.
     accept: Caps,
+    /// Caps produced downstream when the hosted element emits a different media
+    /// type than it reads: audio in / text out for transcription, and the rest
+    /// of the 1-in-1-out gst-python-ml families. Unset means it emits what it
+    /// read (the overlay / detector shape).
+    produce: Option<Caps>,
     /// Overlay flag bridged to the Python task (an example backend-declared
     /// property; `ActionTask` reads `self.draw_label`).
     draw_label: bool,
@@ -81,6 +90,7 @@ impl PyTransform {
                 framerate: Rate::Any,
                 interlace: g2g_core::Interlace::Any,
             },
+            produce: None,
             draw_label: false,
             cuda_frames: false,
             params: Vec::new(),
@@ -98,6 +108,19 @@ impl PyTransform {
     pub fn with_accept(mut self, caps: Caps) -> Self {
         self.accept = caps;
         self
+    }
+
+    /// Emit `caps` downstream instead of the negotiated input caps, for a hosted
+    /// element that changes media type.
+    pub fn with_produce(mut self, caps: Caps) -> Self {
+        self.produce = Some(caps);
+        self
+    }
+
+    /// The caps this element puts on its source pad for `input`: the declared
+    /// output when it changes media type, else the input it passes through.
+    fn output_for(&self, input: &Caps) -> Caps {
+        self.produce.clone().unwrap_or_else(|| input.clone())
     }
 
     /// Set the `draw-label` overlay flag forwarded to the Python task.
@@ -131,14 +154,14 @@ impl PyTransform {
     }
 
     #[cfg(feature = "python")]
-    async fn run(&self, frame: Frame) -> Result<Frame, G2gError> {
+    async fn run(&self, frame: Frame) -> Result<Vec<Frame>, G2gError> {
         let worker = self.worker.as_ref().ok_or(G2gError::NotConfigured)?;
         let caps = self.fixed.as_ref().ok_or(G2gError::NotConfigured)?;
         worker.run(frame, caps).await
     }
 
     #[cfg(not(feature = "python"))]
-    async fn run(&self, _frame: Frame) -> Result<Frame, G2gError> {
+    async fn run(&self, _frame: Frame) -> Result<Vec<Frame>, G2gError> {
         // The per-frame Python call embeds CPython via pyo3 and lives behind
         // the `python` feature. The default build negotiates caps but cannot
         // run frames; build with `--features python`.
@@ -152,22 +175,35 @@ impl AsyncElement for PyTransform {
     where
         Self: 'a;
 
-    /// Passthrough identity: the hosted element reads and writes the frame in
-    /// place, so the output caps equal the input (when it is in the accepted
-    /// set). Declaring this native constraint (rather than the default legacy
-    /// intercept-only path, whose output the solver leaves unconstrained) lets
-    /// the graph solver derive this element's output edge and lets the runtime
-    /// forward-caps resolve steer a mid-stream `CapsChanged` (e.g. an upstream
-    /// decoder's first-frame caps) cleanly through it, instead of stalling on an
-    /// unconstrained boundary.
+    /// The hosted element reads and writes the frame in place, so the output
+    /// caps equal the input (when it is in the accepted set) unless
+    /// `output-caps=` declared a different media type. Declaring this native
+    /// constraint (rather than the default legacy intercept-only path, whose
+    /// output the solver leaves unconstrained) lets the graph solver derive this
+    /// element's output edge and lets the runtime forward-caps resolve steer a
+    /// mid-stream `CapsChanged` (e.g. an upstream decoder's first-frame caps)
+    /// cleanly through it, instead of stalling on an unconstrained boundary.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         let accept = self.accept.clone();
+        let produce = self.produce.clone();
         CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| {
             match input.intersect(&accept) {
-                Ok(_) => CapsSet::one(input.clone()),
+                Ok(_) => CapsSet::one(produce.clone().unwrap_or_else(|| input.clone())),
                 Err(_) => CapsSet::from_alternatives(Vec::new()),
             }
         }))
+    }
+
+    /// A hosted element that declares `output-caps=` turns one media type into
+    /// another (audio into a transcript), which is what a boundary is.
+    fn is_format_boundary(&self) -> bool {
+        self.produce.is_some()
+    }
+
+    /// The legacy-bridge half of the constraint above, for the runner paths that
+    /// derive a boundary element's output side through this hook.
+    fn propose_output_caps(&self, input: &Caps) -> Caps {
+        self.output_for(input)
     }
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
@@ -251,16 +287,18 @@ impl AsyncElement for PyTransform {
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let output = self.run(frame).await?;
-                    self.emitted += 1;
-                    out.push(PipelinePacket::DataFrame(output)).await?;
+                    for output in self.run(frame).await? {
+                        self.emitted += 1;
+                        out.push(PipelinePacket::DataFrame(output)).await?;
+                    }
                 }
-                // Non-boundary, same-format transform: a mid-stream change to
-                // anything outside the accepted set is a hard error; otherwise
-                // forward it so downstream stays in step.
+                // A mid-stream change to anything outside the accepted set is a
+                // hard error; otherwise announce this element's own output side
+                // so downstream stays in step.
                 PipelinePacket::CapsChanged(c) => {
                     c.intersect(&self.accept)?;
-                    out.push(PipelinePacket::CapsChanged(c)).await?;
+                    let announce = self.output_for(&c);
+                    out.push(PipelinePacket::CapsChanged(announce)).await?;
                 }
                 PipelinePacket::Flush => {
                     out.push(PipelinePacket::Flush).await?;
@@ -318,6 +356,14 @@ impl AsyncElement for PyTransform {
                 *format = parsed;
                 Ok(())
             }
+            "input-caps" => {
+                self.accept = fixed_caps(value.as_str().ok_or(PropError::Type)?)?;
+                Ok(())
+            }
+            "output-caps" => {
+                self.produce = Some(fixed_caps(value.as_str().ok_or(PropError::Type)?)?);
+                Ok(())
+            }
             // Any other *declared* property is forwarded to the hosted Python
             // instance (a gst-python-ml element's own GObject property, e.g.
             // model-name / engine-name). Stored in order; re-setting replaces.
@@ -346,6 +392,11 @@ impl AsyncElement for PyTransform {
                 }
                 _ => None,
             },
+            "input-caps" => Some(PropValue::Str(self.accept.to_gst_string())),
+            "output-caps" => self
+                .produce
+                .as_ref()
+                .map(|c| PropValue::Str(c.to_gst_string())),
             other => self
                 .params
                 .iter()
@@ -374,7 +425,7 @@ impl PadTemplates for PyTransform {
 }
 
 /// `PyTransform`'s settable properties (the runtime / `gst-launch` face).
-static PYTRANSFORM_PROPS: &[PropertySpec] = &[
+static PYTRANSFORM_PROPS: &[PropertySpec] = hosted_element_props![
     PropertySpec::new(
         "module",
         PropKind::Str,
@@ -403,60 +454,15 @@ static PYTRANSFORM_PROPS: &[PropertySpec] = &[
         "host an element that reads GPU-resident CUDA frames (needs g2g_process_cuda, NV12 / P010)",
     )
     .with_default("false"),
-    // Common ML tunables declared by the gst-python-ml backend BaseTransform.
-    // These are forwarded to the hosted Python instance (a property absent from
-    // the Python class is simply set as an attribute it ignores). Declaring them
-    // here lets `gst-launch` type and accept `model-name=...` etc.
     PropertySpec::new(
-        "model-name",
+        "input-caps",
         PropKind::Str,
-        "pre-trained model name or local path",
-    ),
-    PropertySpec::new(
-        "engine-name",
-        PropKind::Str,
-        "ML engine: pytorch, onnx, tensorflow, tflite, openvino, ...",
-    ),
-    PropertySpec::new(
-        "device",
-        PropKind::Str,
-        "inference device: cpu, cuda, cuda:0, ...",
-    ),
-    PropertySpec::new(
-        "batch-size",
-        PropKind::Int,
-        "number of items to process in a batch",
-    ),
-    PropertySpec::new(
-        "frame-stride",
-        PropKind::Int,
-        "how often to process a frame",
-    ),
-    PropertySpec::new(
-        "input-format",
-        PropKind::Str,
-        "input tensor layout: auto, nhwc, or nchw",
-    ),
-    PropertySpec::new(
-        "post-process",
-        PropKind::Str,
-        "post-processing format for raw output",
-    ),
-    PropertySpec::new(
-        "device-queue-id",
-        PropKind::Int,
-        "DeviceQueue id from the pool to use",
-    ),
-    PropertySpec::new(
-        "compile",
-        PropKind::Bool,
-        "enable torch.compile for the model",
+        "caps accepted on the sink pad, e.g. audio/x-raw,format=S16LE,rate=16000",
     )
-    .with_default("false"),
+    .with_default("video/x-raw,format=RGBA"),
     PropertySpec::new(
-        "track",
-        PropKind::Bool,
-        "enable object tracking (detectors)",
-    )
-    .with_default("false"),
+        "output-caps",
+        PropKind::Str,
+        "caps produced downstream when the hosted element changes media type, e.g. text/x-raw,format=utf8",
+    ),
 ];

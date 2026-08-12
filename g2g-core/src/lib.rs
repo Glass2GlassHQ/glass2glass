@@ -72,6 +72,9 @@ pub mod time;
 // ---- dynamic / build-time / tooling layer (needs the heap) ----
 #[cfg(feature = "alloc")]
 pub mod aggregator;
+// The `gst-launch` caps-string parser, inverse of `Caps::to_gst_string`.
+#[cfg(feature = "alloc")]
+pub mod caps_parse;
 // Declarative field-wise caps derivation (M837): the data form of a transform's
 // forward derivation, from which the solver reads its backward-coupling mask.
 #[cfg(feature = "alloc")]

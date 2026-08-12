@@ -917,6 +917,7 @@ docs/            # GitHub Pages site
 
 ## License
 
-All crates are MPL-2.0.
+The whole repository is MPL-2.0: every crate, including the examples, tools, and
+test fixtures.
 
 See [LICENSE](LICENSE).

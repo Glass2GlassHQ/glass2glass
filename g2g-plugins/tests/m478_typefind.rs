@@ -13,9 +13,11 @@
 
 #![cfg(feature = "std")]
 
-use g2g_core::runtime::{parse_launch, run_graph};
-use g2g_core::{NodeKind, PipelineClock};
+use g2g_core::runtime::{parse_launch, run_graph, SourceLoop as _};
+use g2g_core::{Caps, NodeKind, PipelineClock, PropValue, TextFormat};
+use g2g_plugins::filesrc::FileSrc;
 use g2g_plugins::registry::default_registry;
+use g2g_plugins::typefind::sniff_caps;
 
 struct ZeroClock;
 impl PipelineClock for ZeroClock {
@@ -105,6 +107,92 @@ fn explicit_bytestream_format_overrides_extension() {
         has_demux,
         "explicit bytestream-format=matroska typed the .dat file for the demuxer"
     );
+}
+
+/// The extension is the whole text-typing rule: `.txt` / `.text` is plain UTF-8,
+/// every subtitle extension keeps its own `TextFormat`, and an extension that
+/// names neither is left to content sniffing (`None` here, so `filesrc` arms
+/// `auto`) rather than being guessed as text.
+#[test]
+fn filesrc_types_text_extensions_to_their_own_format() {
+    let prose = b"Tell me a joke about a cat.\n";
+    let cases: &[(&str, &[u8], Option<TextFormat>)] = &[
+        ("txt", prose, Some(TextFormat::Utf8)),
+        ("text", prose, Some(TextFormat::Utf8)),
+        (
+            "vtt",
+            b"WEBVTT\n\n00:00:00.000 --> 00:00:02.000\nHi\n",
+            Some(TextFormat::WebVtt),
+        ),
+        (
+            "srt",
+            b"1\n00:00:20,000 --> 00:00:24,400\nHello\n",
+            Some(TextFormat::Srt),
+        ),
+        ("ssa", b"[Script Info]\nTitle: x\n", Some(TextFormat::Ssa)),
+        ("ass", b"[Script Info]\nTitle: x\n", Some(TextFormat::Ssa)),
+        // Not claimed as text: an unknown extension, and a container one.
+        ("dat", prose, None),
+        ("mkv", prose, None),
+    ];
+    for (ext, bytes, expected) in cases {
+        let path = temp("typed", ext, bytes);
+        let mut src = FileSrc::untyped();
+        src.set_property("location", PropValue::Str(path.display().to_string()))
+            .expect("location");
+        let typed = match src.configured_output_caps() {
+            Some(Caps::Text { format }) => Some(format),
+            _ => None,
+        };
+        std::fs::remove_file(&path).ok();
+        assert_eq!(typed, *expected, ".{ext} typed as text");
+    }
+}
+
+/// A `.txt` prose file negotiates and runs into an element that accepts
+/// `Caps::Text{Utf8}`, the end-to-end shape of
+/// `filesrc location=prompt.txt ! <text element>`.
+#[tokio::test]
+async fn filesrc_runs_a_plain_text_file_into_a_text_sink() {
+    let path = temp("prompt", "txt", b"Tell me a joke about a cat.\n");
+    let line = format!(
+        "filesrc location={} ! capsfilter caps=text/x-raw,format=utf8 ! fakesink",
+        path.display()
+    );
+    let reg = default_registry();
+    let graph = parse_launch(&reg, &line).unwrap_or_else(|e| panic!("parses `{line}`: {e}"));
+    let consumed = run_graph(graph, &ZeroClock, 4)
+        .await
+        .unwrap_or_else(|e| panic!("runs: {e:?}"))
+        .frames_consumed;
+    std::fs::remove_file(&path).ok();
+    assert!(consumed >= 1, "the text chunk reached the sink: {consumed}");
+}
+
+/// Content sniffing is unchanged by the extension rule: subtitle documents still
+/// sniff to their own format, and prose still sniffs to nothing. A "valid UTF-8"
+/// content rule would claim almost any small ASCII-ish binary, so there is none.
+#[test]
+fn content_sniffing_still_refuses_plain_text() {
+    assert_eq!(
+        sniff_caps(b"WEBVTT\n\n00:00:00.000 --> 00:00:02.000\nHi\n"),
+        Some(Caps::Text {
+            format: TextFormat::WebVtt
+        })
+    );
+    assert_eq!(
+        sniff_caps(b"1\n00:00:20,000 --> 00:00:24,400\nHello\n"),
+        Some(Caps::Text {
+            format: TextFormat::Srt
+        })
+    );
+    assert_eq!(
+        sniff_caps(b"[Script Info]\nTitle: x\n"),
+        Some(Caps::Text {
+            format: TextFormat::Ssa
+        })
+    );
+    assert_eq!(sniff_caps(b"Tell me a joke about a cat.\n"), None);
 }
 
 // --- synthetic Matroska builder (Tracks-only header, mirrors m477 / mkvdemux) ---

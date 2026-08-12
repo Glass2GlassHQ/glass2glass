@@ -1,7 +1,7 @@
 [package]
 name = "g2g-python"
 description = "Host gst-python-ml elements as first-class glass2glass elements (embedded CPython via pyo3)."
-license = "MPL-2.0"
+license.workspace = true
 readme = "README.md"
 keywords = ["multimedia", "python", "pyo3", "inference", "video"]
 categories = ["multimedia", "api-bindings"]
@@ -42,6 +42,10 @@ launch = [
     "g2g-plugins/v4l2",
     "g2g-plugins/wayland-sink",
     "g2g-plugins/analytics",
+    # Audio capture and playback: a gst-python-ml transcribe / separate / TTS
+    # line starts at a microphone or ends at a speaker.
+    "g2g-plugins/pulse-src",
+    "g2g-plugins/pulse-sink",
 ]
 # Also register the native Rust inference elements (`ortinfer` /
 # `detectionpostprocess` / ...) in `g2g-launch-py`, so one launch line can run a

@@ -1,7 +1,7 @@
 [package]
 name = "g2g-core"
 description = "Core traits, frame types, caps, and clock model for the glass2glass multimedia framework."
-license = "MPL-2.0"
+license.workspace = true
 readme = "../README.md"
 keywords = ["multimedia", "video", "pipeline", "streaming", "no-std"]
 categories = ["multimedia", "multimedia::video", "no-std", "embedded"]
