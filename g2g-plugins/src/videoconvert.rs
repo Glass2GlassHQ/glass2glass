@@ -32,9 +32,10 @@ use g2g_core::{
 
 /// Formats this element can both consume and produce. The convert `target`
 /// is always one of these.
-const FORMATS: [RawVideoFormat; 12] = [
+const FORMATS: [RawVideoFormat; 13] = [
     RawVideoFormat::Rgba8,
     RawVideoFormat::Bgra8,
+    RawVideoFormat::Rgb8,
     RawVideoFormat::Nv12,
     RawVideoFormat::I420,
     RawVideoFormat::I420p10,
@@ -50,9 +51,10 @@ const FORMATS: [RawVideoFormat; 12] = [
 /// Formats accepted as **input**. Superset of [`FORMATS`]: `Yuyv` (packed
 /// 4:2:2, the usual webcam output) is unpacked to a planar / RGB target but is
 /// never produced, so it is input-only.
-const INPUT_FORMATS: [RawVideoFormat; 13] = [
+const INPUT_FORMATS: [RawVideoFormat; 14] = [
     RawVideoFormat::Rgba8,
     RawVideoFormat::Bgra8,
+    RawVideoFormat::Rgb8,
     RawVideoFormat::Nv12,
     RawVideoFormat::I420,
     RawVideoFormat::I420p10,
@@ -531,6 +533,17 @@ fn convert_strided(
         }
         // The pairs that read their input where it lies, whatever its pitch.
         (Rgba8, Bgra8) | (Bgra8, Rgba8) => swizzle_rb(src, w, h, src_stride),
+        // RGB carries no alpha, so it rides the packed 4-byte paths: widen on
+        // the way in, narrow on the way out.
+        (Rgb8, Rgba8) => widen_rgb(src, w, h, src_stride),
+        (Rgb8, _) => convert(&widen_rgb(src, w, h, src_stride), Rgba8, to, w, h),
+        (Rgba8, Rgb8) => narrow_rgba(src, w, h, src_stride),
+        (_, Rgb8) => narrow_rgba(
+            &convert_strided(src, from, Rgba8, w, h, src_stride),
+            w,
+            h,
+            w * 4,
+        ),
         (Rgba8, Nv12) => rgb_to_yuv420(src, w, h, 0, 2, true, src_stride),
         (Rgba8, I420) => rgb_to_yuv420(src, w, h, 0, 2, false, src_stride),
         (Bgra8, Nv12) => rgb_to_yuv420(src, w, h, 2, 0, true, src_stride),
@@ -653,7 +666,7 @@ fn rgb_to_yuv(r: i32, g: i32, b: i32) -> (i32, i32, i32) {
 }
 
 /// YUV -> RGB (BT.601 limited range, 8-bit), the per-pixel form of `yuv420_to_rgb`.
-fn yuv_to_rgb(y: i32, u: i32, v: i32) -> (i32, i32, i32) {
+pub(crate) fn yuv_to_rgb(y: i32, u: i32, v: i32) -> (i32, i32, i32) {
     let c = y - 16;
     let (d, e) = (u - 128, v - 128);
     let r = (298 * c + 409 * e + 128) >> 8;
@@ -939,6 +952,30 @@ fn swizzle_rb(src: &[u8], w: usize, h: usize, src_stride: usize) -> Box<[u8]> {
     dst.into_boxed_slice()
 }
 
+/// RGB -> RGBA: copy each pixel's three bytes and add an opaque alpha.
+fn widen_rgb(src: &[u8], w: usize, h: usize, src_stride: usize) -> Box<[u8]> {
+    let mut dst = Vec::with_capacity(w * h * 4);
+    for y in 0..h {
+        let row = y * src_stride;
+        for px in src[row..row + w * 3].chunks_exact(3) {
+            dst.extend_from_slice(&[px[0], px[1], px[2], 255]);
+        }
+    }
+    dst.into_boxed_slice()
+}
+
+/// RGBA -> RGB: drop each pixel's alpha.
+fn narrow_rgba(src: &[u8], w: usize, h: usize, src_stride: usize) -> Box<[u8]> {
+    let mut dst = Vec::with_capacity(w * h * 3);
+    for y in 0..h {
+        let row = y * src_stride;
+        for px in src[row..row + w * 4].chunks_exact(4) {
+            dst.extend_from_slice(&px[..3]);
+        }
+    }
+    dst.into_boxed_slice()
+}
+
 /// NV12 -> I420: split the interleaved UV plane into separate U and V.
 fn nv12_to_i420(src: &[u8], w: usize, h: usize) -> Box<[u8]> {
     let luma = w * h;
@@ -1042,13 +1079,11 @@ fn yuv420_to_rgb(
             } else {
                 (src[luma + ci] as i32, src[luma + luma / 4 + ci] as i32)
             };
-            let c = src[y * w + x] as i32 - 16;
-            let d = u - 128;
-            let e = v - 128;
+            let (r, g, b) = yuv_to_rgb(src[y * w + x] as i32, u, v);
             let p = (y * w + x) * 4;
-            dst[p + r_off] = ((298 * c + 409 * e + 128) >> 8).clamp(0, 255) as u8;
-            dst[p + 1] = ((298 * c - 100 * d - 208 * e + 128) >> 8).clamp(0, 255) as u8;
-            dst[p + b_off] = ((298 * c + 516 * d + 128) >> 8).clamp(0, 255) as u8;
+            dst[p + r_off] = r as u8;
+            dst[p + 1] = g as u8;
+            dst[p + b_off] = b as u8;
             dst[p + 3] = 255;
         }
     }

@@ -273,7 +273,29 @@ pub struct PropertySpec {
     pub flags: PropFlags,
 }
 
+/// [`PropertySpec::name`] of the entry an element adds to say it takes
+/// properties beyond the ones it declares.
+///
+/// No pipeline can spell this as a key, so it cannot collide with a real one.
+pub const UNDECLARED_PROPERTIES: &str = "*";
+
+/// Whether these specs let a name none of them declares through.
+pub fn takes_undeclared_properties(specs: &[PropertySpec]) -> bool {
+    specs.iter().any(|s| s.name == UNDECLARED_PROPERTIES)
+}
+
 impl PropertySpec {
+    /// The entry that lets a key none of the other specs names through, as text,
+    /// for whatever does know it to interpret.
+    ///
+    /// For an element whose real property set is not known until something loads
+    /// at run time: a `pyelement` takes whatever the hosted Python class
+    /// declares, so the list cannot be written down here. `blurb` says where the
+    /// rest come from, since a `gst-inspect` dump shows this entry in their place.
+    pub const fn undeclared(blurb: &'static str) -> Self {
+        Self::new(UNDECLARED_PROPERTIES, PropKind::Str, blurb)
+    }
+
     /// A new spec (a `const fn` so a static `&[PropertySpec]` table is cheap).
     /// Defaults to no default value, no range, and read+write.
     pub const fn new(name: &'static str, kind: PropKind, blurb: &'static str) -> Self {

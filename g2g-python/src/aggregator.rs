@@ -14,8 +14,10 @@
 //! is N-in-1-out, only the anchor (input-0) frame is emitted; the aggregate
 //! result travels as the anchor's `AnalyticsMeta` (the batched-inference-attaches
 //! -detections use). Per-stream results would need a demux, which the trait does
-//! not provide. v1 assumes every input shares one geometry/format (the output);
+//! not provide. v1 assumes every input shares one geometry/format;
 //! `batch_size`-style temporal accumulation and per-input formats are follow-ups.
+//! The output may be a different media type than the input (`output-caps=`), for
+//! the audio-in / text-out families.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -24,6 +26,8 @@ use g2g_core::{
     Caps, ConfigureOutcome, Dim, Frame, G2gError, InputAggregator, MultiInputElement, OutputSink,
     PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat,
 };
+
+use crate::props::{fixed_caps, hosted_element_props};
 
 /// A gst-python-ml batched element hosted as a first-class g2g aggregator.
 #[derive(Debug)]
@@ -39,13 +43,21 @@ pub struct PyAggregator {
     /// `g2g_process_cuda_batch` and passed through untouched.
     cuda_frames: bool,
     inputs: usize,
-    /// Caps accepted on every input pad (and produced on the output).
+    /// Caps accepted on every input pad.
     accept: Caps,
-    /// The negotiated caps, captured at configure time (shared by all inputs and
-    /// the output in v1).
+    /// Caps produced on the output, when the hosted element emits a different
+    /// media type than it reads (audio in / text out, and the rest of the
+    /// gst-python-ml aggregator families). Unset means it emits what it read.
+    produce: Option<Caps>,
+    /// The negotiated input caps, captured at configure time (shared by all
+    /// inputs in v1).
     fixed: Option<Caps>,
     agg: InputAggregator<Frame>,
     emitted: u64,
+    /// Element properties forwarded verbatim to the hosted Python instance at
+    /// spawn, in the order they were set.
+    #[cfg_attr(not(feature = "python"), allow(dead_code))]
+    params: Vec<(String, PropValue)>,
     /// The hosted Python element on its GIL-owning worker thread, spawned once
     /// at the first input's configure. Present only in the `python` build.
     #[cfg(feature = "python")]
@@ -68,17 +80,26 @@ impl PyAggregator {
                 framerate: Rate::Any,
                 interlace: g2g_core::Interlace::Any,
             },
+            produce: None,
             fixed: None,
             agg: InputAggregator::new(inputs),
             emitted: 0,
+            params: Vec::new(),
             #[cfg(feature = "python")]
             worker: None,
         }
     }
 
-    /// Override the accepted (and produced) caps.
+    /// Override the accepted input caps.
     pub fn with_accept(mut self, caps: Caps) -> Self {
         self.accept = caps;
+        self
+    }
+
+    /// Emit `caps` downstream instead of the negotiated input caps, for a hosted
+    /// element that changes media type.
+    pub fn with_produce(mut self, caps: Caps) -> Self {
+        self.produce = Some(caps);
         self
     }
 
@@ -98,7 +119,8 @@ impl PyAggregator {
         self
     }
 
-    /// Count of batches emitted downstream. Useful in tests.
+    /// Count of frames emitted downstream, which is one per batch unless the
+    /// hosted element emits several buffers from one. Useful in tests.
     pub fn emitted_count(&self) -> u64 {
         self.emitted
     }
@@ -118,14 +140,14 @@ impl PyAggregator {
     }
 
     /// Emit every batch currently complete: one frame per contributing input ->
-    /// one Python batch call -> push the anchor frame (carrying metadata).
+    /// one Python batch call -> push the anchor frame (carrying metadata), or
+    /// each of the buffers the element emitted in its stead.
     async fn drain(&mut self, out: &mut dyn OutputSink) -> Result<(), G2gError> {
         let caps = self.fixed.clone().ok_or(G2gError::NotConfigured)?;
         while let Some(round) = self.agg.take_round() {
             let frames: Vec<Frame> = round.into_iter().map(|(_input, frame)| frame).collect();
-            let processed = self.run_batch(frames, &caps).await?;
-            if let Some(anchor) = processed.into_iter().next() {
-                out.push(PipelinePacket::DataFrame(anchor)).await?;
+            for processed in self.run_batch(frames, &caps).await? {
+                out.push(PipelinePacket::DataFrame(processed)).await?;
                 self.emitted += 1;
             }
         }
@@ -161,13 +183,11 @@ impl MultiInputElement for PyAggregator {
             }
             // Spawn the worker once (configure is called per input).
             if self.worker.is_none() {
-                // Property forwarding to the hosted aggregator instance is a
-                // follow-up; transforms (PyTransform) forward theirs today.
                 self.worker = Some(crate::host::PyWorker::spawn(
                     &self.module,
                     &self.class,
                     self.draw_label,
-                    &[],
+                    &self.params,
                 )?);
             }
         }
@@ -175,7 +195,10 @@ impl MultiInputElement for PyAggregator {
     }
 
     fn output_caps(&self) -> Result<Caps, G2gError> {
-        self.fixed.clone().ok_or(G2gError::NotConfigured)
+        self.produce
+            .clone()
+            .or_else(|| self.fixed.clone())
+            .ok_or(G2gError::NotConfigured)
     }
 
     fn process<'a>(
@@ -259,7 +282,20 @@ impl MultiInputElement for PyAggregator {
                 self.cuda_frames = value.as_bool().ok_or(PropError::Type)?;
                 Ok(())
             }
-            _ => Err(PropError::Unknown),
+            "input-caps" => {
+                self.accept = fixed_caps(value.as_str().ok_or(PropError::Type)?)?;
+                Ok(())
+            }
+            "output-caps" => {
+                self.produce = Some(fixed_caps(value.as_str().ok_or(PropError::Type)?)?);
+                Ok(())
+            }
+            // Any other property is forwarded to the hosted Python instance, the
+            // same way `PyTransform` forwards its own.
+            other => {
+                crate::props::forward(&mut self.params, other, value);
+                Ok(())
+            }
         }
     }
 
@@ -269,14 +305,23 @@ impl MultiInputElement for PyAggregator {
             "class" => Some(PropValue::Str(self.class.clone())),
             "draw-label" => Some(PropValue::Bool(self.draw_label)),
             "cuda-frames" => Some(PropValue::Bool(self.cuda_frames)),
-            _ => None,
+            "input-caps" => Some(PropValue::Str(self.accept.to_gst_string())),
+            "output-caps" => self
+                .produce
+                .as_ref()
+                .map(|c| PropValue::Str(c.to_gst_string())),
+            other => self
+                .params
+                .iter()
+                .find(|(k, _)| k == other)
+                .map(|(_, v)| v.clone()),
         }
     }
 }
 
 /// `PyAggregator`'s settable properties (the runtime / `gst-launch` face). The
 /// input count comes from link degree (the muxer factory), not a property.
-static PYAGGREGATOR_PROPS: &[PropertySpec] = &[
+static PYAGGREGATOR_PROPS: &[PropertySpec] = hosted_element_props![
     PropertySpec::new(
         "module",
         PropKind::Str,
@@ -299,4 +344,15 @@ static PYAGGREGATOR_PROPS: &[PropertySpec] = &[
         "batch GPU-resident CUDA frames (needs g2g_process_cuda_batch, NV12 / P010)",
     )
     .with_default("false"),
+    PropertySpec::new(
+        "input-caps",
+        PropKind::Str,
+        "caps accepted on every input pad, e.g. audio/x-raw,format=S16LE,rate=16000",
+    )
+    .with_default("video/x-raw,format=RGBA"),
+    PropertySpec::new(
+        "output-caps",
+        PropKind::Str,
+        "caps produced downstream when the hosted element changes media type, e.g. text/x-raw,format=utf8",
+    ),
 ];

@@ -45,6 +45,9 @@ const IVF_MAGIC: [u8; 4] = *b"DKIF";
 /// MPEG program stream: a pack header start code. Every PS (MPEG-1 `.mpg`,
 /// MPEG-2 `.vob`) opens on one, and packs recur throughout.
 const PS_PACK_MAGIC: [u8; 4] = [0x00, 0x00, 0x01, 0xBA];
+/// RIFF/WAVE: the `RIFF` container magic, with `WAVE` after the 4-byte size.
+const RIFF_MAGIC: [u8; 4] = *b"RIFF";
+const WAVE_MAGIC: [u8; 4] = *b"WAVE";
 
 /// Header bytes [`sniff_caps`] needs to decide: enough to confirm an MPEG-TS
 /// sync byte across several packets, the longest signature here.
@@ -120,6 +123,9 @@ pub fn sniff(header: &[u8]) -> Option<ByteStreamEncoding> {
     }
     if header.starts_with(&PS_PACK_MAGIC) {
         return Some(ByteStreamEncoding::MpegPs);
+    }
+    if header.starts_with(&RIFF_MAGIC) && header.len() >= 12 && header[8..12] == WAVE_MAGIC {
+        return Some(ByteStreamEncoding::Wav);
     }
     // ISO-BMFF (MP4 / QuickTime): both progressive (`moov`-based) and fragmented
     // (CMAF) map to the one `IsoBmff` encoding; the demuxer handles either.

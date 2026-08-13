@@ -4,7 +4,7 @@
 [package]
 name = "xtask"
 description = "glass2glass developer commands: ci, test --here, size, wasm."
-license = "MPL-2.0"
+license.workspace = true
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

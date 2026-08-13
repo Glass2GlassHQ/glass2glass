@@ -31,6 +31,55 @@ class EchoTransform:
         meta.add_object(len(buffers), 0.0, 0.0, 1.0, 1.0, 1.0)
 
 
+class AudioTranscriber:
+    """A payload element: reads an audio buffer, emits a much shorter text one.
+
+    The transcription shape. Nothing about the output fits in the input buffer,
+    so it goes back through meta.emit instead of an in-place write.
+    """
+
+    def g2g_process_payload(self, buffers, caps, meta):
+        samples = memoryview(buffers[0])
+        assert not samples.readonly, "payload buffer must be writable"
+        meta.add_blob("caps", caps.encode("utf-8"))
+        meta.emit(("heard %d bytes" % samples.nbytes).encode("utf-8"))
+
+
+class SpeechSynthesizer:
+    """The other direction: a short text payload in, a long audio one out.
+
+    Synthesized speech runs for as long as its own samples, so it states a
+    duration instead of inheriting the text buffer's.
+    """
+
+    SAMPLE_RATE = 16000
+    SAMPLES_PER_CHARACTER = 100
+    BYTES_PER_SAMPLE = 2
+
+    def g2g_process_payload(self, buffers, caps, meta):
+        text = bytes(memoryview(buffers[0]))
+        samples = len(text) * self.SAMPLES_PER_CHARACTER
+        meta.emit(
+            bytes(samples * self.BYTES_PER_SAMPLE),
+            duration_ns=samples * 1_000_000_000 // self.SAMPLE_RATE,
+        )
+
+
+class ChunkedSynthesizer:
+    """Emits several buffers from one input, the streaming-TTS shape.
+
+    Speech generated a chunk at a time, and the separation family's stems, both
+    hand back more than one buffer per input buffer.
+    """
+
+    CHUNKS = 3
+
+    def g2g_process_payload(self, buffers, caps, meta):
+        text = bytes(memoryview(buffers[0]))
+        for chunk in range(self.CHUNKS):
+            meta.emit(text + str(chunk).encode("utf-8"))
+
+
 class ThreadedTransform:
     """Stages a detection from a *worker thread*, not the calling thread.
 
@@ -98,4 +147,19 @@ class PropEcho:
         batch = getattr(self, "batch_size", 0)
         meta.add_blob("model_name", model.encode("utf-8"))
         meta.add_blob("device", device.encode("utf-8"))
+        meta.add_blob("language", getattr(self, "language", "<unset>").encode("utf-8"))
         meta.add_object(batch, 0.0, 0.0, 1.0, 1.0, 1.0)
+
+    def g2g_process_batch(self, buffers, width, height, fmt, meta):
+        self.g2g_process(buffers[0], width, height, fmt, meta)
+
+
+class DeclaredProps:
+    """States the properties it has, the way a gst-python-ml element does, so the
+    host can refuse a pipeline naming one it has not."""
+
+    def g2g_properties(self):
+        return ["model_name", "device"]
+
+    def g2g_process(self, buf, width, height, fmt, meta):
+        meta.add_blob("model_name", getattr(self, "model_name", "<unset>").encode("utf-8"))

@@ -1,7 +1,7 @@
 [package]
 name = "g2g-plugins"
 description = "Standard source, sink, and transform elements for the glass2glass framework."
-license = "MPL-2.0"
+license.workspace = true
 readme = "README.md"
 keywords = ["multimedia", "video", "audio", "streaming", "gstreamer"]
 categories = ["multimedia", "multimedia::video", "multimedia::audio", "multimedia::encoding"]

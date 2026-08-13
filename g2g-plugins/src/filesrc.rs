@@ -66,6 +66,8 @@ pub struct FileSrc {
     /// `filesrc location=movie.mp4` / `subs.vtt` types without an explicit format.
     format_explicit: bool,
     chunk_size: usize,
+    /// Chunks to emit before EOS; `u64::MAX` is unlimited.
+    target_chunks: u64,
     configured: bool,
     /// Optional byte-offset seek channel (M361). A `FileSrc` is a byte source, so
     /// a [`Seek`](g2g_core::Seek) it observes is in **BYTES** format: `start` is a
@@ -87,6 +89,7 @@ impl FileSrc {
             // The caller pinned the caps, so `location` must not re-type it.
             format_explicit: true,
             chunk_size: DEFAULT_CHUNK_SIZE,
+            target_chunks: u64::MAX,
             configured: false,
             seek: None,
         }
@@ -106,6 +109,7 @@ impl FileSrc {
             auto_detect: false,
             format_explicit: false,
             chunk_size: DEFAULT_CHUNK_SIZE,
+            target_chunks: u64::MAX,
             configured: false,
             seek: None,
         }
@@ -239,6 +243,12 @@ impl SourceLoop for FileSrc {
             }
             let mut sequence = 0u64;
             loop {
+                // Checked before the seek handling so num-buffers=0 emits nothing
+                // and ends at once, instead of reading a chunk first.
+                if sequence >= self.target_chunks {
+                    break;
+                }
+
                 // A flushing byte-seek repositions the read before the next chunk
                 // (GStreamer BYTES-format seek: `start` is a file offset). Emit
                 // `Flush` so a downstream demuxer drops its parse buffer and
@@ -345,6 +355,12 @@ impl SourceLoop for FileSrc {
                 self.chunk_size = bytes.min(1 << 30) as usize;
                 Ok(())
             }
+            "num-buffers" => {
+                let n = value.as_int().ok_or(PropError::Type)?;
+                // GStreamer convention: -1 means "no limit".
+                self.target_chunks = if n < 0 { u64::MAX } else { n as u64 };
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -353,6 +369,11 @@ impl SourceLoop for FileSrc {
         match name {
             "location" => Some(PropValue::Str(self.path.to_string_lossy().into_owned())),
             "blocksize" => Some(PropValue::Uint(self.chunk_size as u64)),
+            "num-buffers" => Some(PropValue::Int(if self.target_chunks == u64::MAX {
+                -1
+            } else {
+                self.target_chunks as i64
+            })),
             "bytestream-format" => {
                 if self.auto_detect {
                     Some(PropValue::Str("auto".into()))
@@ -383,12 +404,19 @@ static FILESRC_PROPS: &[PropertySpec] = &[
     )
     .with_default("65536")
     .with_range("1", "1073741824"),
+    PropertySpec::new(
+        "num-buffers",
+        PropKind::Int,
+        "chunks to emit then EOS (-1 = forever)",
+    )
+    .with_range("-1", "9223372036854775807")
+    .with_default("-1"),
 ];
 
 /// Derive the media type from a file extension (M478), so a bare launch
 /// `filesrc location=X` types without an explicit `bytestream-format`. Containers
-/// map to `Caps::ByteStream`, subtitle documents to `Caps::Text`, raw Annex-B
-/// elementary streams to `Caps::CompressedVideo` at a fixable `Range`
+/// map to `Caps::ByteStream`, subtitle documents and plain text to `Caps::Text`,
+/// raw Annex-B elementary streams to `Caps::CompressedVideo` at a fixable `Range`
 /// placeholder geometry (never `Any`, which cannot fixate; the parser refines
 /// via SPS, M676); an unknown extension returns `None`, and the caller then
 /// content-sniffs the header. String-only, so it costs no filesystem read at
@@ -409,6 +437,13 @@ fn caps_from_extension(path: &std::path::Path) -> Option<Caps> {
         }
         "h265" | "265" | "hevc" => {
             return Some(crate::typefind::elementary_video_caps(VideoCodec::H265))
+        }
+        // Plain prose matches no subtitle syntax, so content sniffing can never
+        // reach it: the extension is the only safe declaration.
+        "txt" | "text" => {
+            return Some(Caps::Text {
+                format: g2g_core::TextFormat::Utf8,
+            })
         }
         "vtt" => {
             return Some(Caps::Text {

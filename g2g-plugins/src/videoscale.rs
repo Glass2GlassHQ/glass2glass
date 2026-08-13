@@ -6,7 +6,7 @@
 //!
 //! Bilinear interpolation, integer-only (Q16 fixed-point weights, half-
 //! pixel-centred source mapping) so the element is deterministic and stays
-//! in the `no_std` crate baseline. Packed formats (`Rgba8`, `Bgra8`)
+//! in the `no_std` crate baseline. Packed formats (`Rgba8`, `Bgra8`, `Rgb8`)
 //! resample as one 4-channel plane; the 4:2:0 formats (`Nv12`, `I420`)
 //! resample luma and chroma independently at their own resolutions, so
 //! chroma keeps its half-resolution sampling. 4:2:0 needs even input and
@@ -34,9 +34,10 @@ use g2g_core::{
     RawVideoShape,
 };
 
-const FORMATS: [RawVideoFormat; 12] = [
+const FORMATS: [RawVideoFormat; 13] = [
     RawVideoFormat::Rgba8,
     RawVideoFormat::Bgra8,
+    RawVideoFormat::Rgb8,
     RawVideoFormat::Nv12,
     RawVideoFormat::I420,
     RawVideoFormat::I420p10,
@@ -420,7 +421,7 @@ impl PadTemplates for VideoScale {
 /// 0.5`) so up- and downscale stay unbiased; clamped to the source extent
 /// at the edges. `dst_n` is non-zero (target dims validated) and a
 /// single-sample axis (`src_n == 1`) collapses to weight 0.
-fn map_axis(out: usize, dst_n: usize, src_n: usize) -> (usize, usize, u32) {
+pub(crate) fn map_axis(out: usize, dst_n: usize, src_n: usize) -> (usize, usize, u32) {
     let pos = ((2 * out as i64 + 1) * src_n as i64 * 32768) / dst_n as i64 - 32768;
     let max = ((src_n - 1) as i64) << 16;
     let pos = pos.clamp(0, max);
@@ -433,7 +434,7 @@ fn map_axis(out: usize, dst_n: usize, src_n: usize) -> (usize, usize, u32) {
 /// Bilinear blend of the four neighbours with Q16 weights, rounded to
 /// nearest. The result is a convex combination of `[0, 255]` samples so it
 /// needs no clamping.
-fn bilerp(p00: u8, p10: u8, p01: u8, p11: u8, fx: u32, fy: u32) -> u8 {
+pub(crate) fn bilerp(p00: u8, p10: u8, p01: u8, p11: u8, fx: u32, fy: u32) -> u8 {
     let (fx, fy) = (fx as i64, fy as i64);
     let one = 1i64 << 16;
     let top = p00 as i64 * (one - fx) + p10 as i64 * fx;
@@ -477,7 +478,7 @@ fn resample_plane(
 /// `format`. `src` is validated to hold the input frame; all dims are even
 /// when the format is 4:2:0. Equal in/out dims short-circuit to a copy so
 /// an identity scale is exact.
-fn scale(
+pub fn scale(
     src: &[u8],
     format: RawVideoFormat,
     in_w: usize,
@@ -492,6 +493,7 @@ fn scale(
         RawVideoFormat::Rgba8 | RawVideoFormat::Bgra8 => {
             resample_plane(src, in_w, in_h, out_w, out_h, 4).into_boxed_slice()
         }
+        RawVideoFormat::Rgb8 => resample_plane(src, in_w, in_h, out_w, out_h, 3).into_boxed_slice(),
         RawVideoFormat::Nv12 => {
             let luma_in = in_w * in_h;
             let chroma_in = (in_w / 2) * (in_h / 2) * 2;

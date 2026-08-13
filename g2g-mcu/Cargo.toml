@@ -6,7 +6,7 @@
 [package]
 name = "g2g-mcu"
 description = "MCU peripheral elements (SPI display, capture seams) for the glass2glass multimedia framework."
-license = "MPL-2.0"
+license.workspace = true
 readme = "README.md"
 keywords = ["embedded", "no-std", "mcu", "multimedia", "embedded-hal"]
 categories = ["embedded", "no-std", "no-std::no-alloc", "multimedia", "hardware-support"]

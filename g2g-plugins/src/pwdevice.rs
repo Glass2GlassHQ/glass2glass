@@ -52,13 +52,9 @@ const DETAIL_KEYS: [&str; 5] = [
 
 /// The PCM formats an audio device advertises, filtered through the elements'
 /// own SPA mapping so the provider cannot offer one they refuse to open.
-const PCM_FORMATS: [AudioFormat; 5] = [
-    AudioFormat::PcmU8,
-    AudioFormat::PcmS16Le,
-    AudioFormat::PcmS24Le,
-    AudioFormat::PcmS32Le,
-    AudioFormat::PcmF32Le,
-];
+fn pcm_formats() -> [AudioFormat; 5] {
+    g2g_core::pcm_formats()
+}
 
 /// Upper framerate bound of an advertised video range. Nothing in the graph
 /// produces faster, and an unbounded `Rate::Any` would not survive fixate.
@@ -204,7 +200,7 @@ fn map_node(props: &[(&str, &str)]) -> Option<Device> {
 /// elements open a stream with is reachable at the element default 48 kHz
 /// stereo.
 fn audio_caps() -> CapsSet {
-    let alternatives: Vec<Caps> = PCM_FORMATS
+    let alternatives: Vec<Caps> = pcm_formats()
         .iter()
         .map(|format| Caps::Audio {
             format: *format,
@@ -404,7 +400,7 @@ mod tests {
             )])
         );
         // every PCM format the elements can open, at the element defaults
-        assert_eq!(device.caps.alternatives().len(), PCM_FORMATS.len());
+        assert_eq!(device.caps.alternatives().len(), pcm_formats().len());
         for caps in device.caps.alternatives() {
             assert!(matches!(
                 caps,

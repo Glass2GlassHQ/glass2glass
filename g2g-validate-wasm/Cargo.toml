@@ -13,6 +13,7 @@
 name = "g2g-validate-wasm"
 version = "0.2.0"
 edition = "2021"
+license = "MPL-2.0"
 publish = false
 description = "glass2glass caps-solver validator compiled to WebAssembly for the visual builder."
 

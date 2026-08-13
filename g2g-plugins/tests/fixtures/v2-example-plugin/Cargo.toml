@@ -3,6 +3,7 @@ name = "g2g-v2-example-plugin"
 description = "Out-of-tree example: a third-party g2g element written against the v2 plugin ABI."
 version = "0.1.0"
 edition = "2021"
+license = "MPL-2.0"
 publish = false
 
 # Stand-alone, like the v1 example: its own workspace root so `cargo build` here

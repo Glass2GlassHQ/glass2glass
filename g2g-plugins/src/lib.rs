@@ -131,10 +131,13 @@ pub mod timeoverlay;
 pub mod videobalance;
 pub mod videobox;
 pub mod videoconvert;
+pub mod videoconvertscale;
 pub mod videocrop;
 pub mod videoflip;
 pub mod videorate;
 pub mod videoscale;
+pub mod wavenc;
+pub mod wavparse;
 // wgpu compute companion to `compositor` (M853): RGBA8 fan-in blending in one
 // compute dispatch, System or MemoryDomain::WgpuTexture out. Shares the wgpu
 // GPU feature with the sink that consumes its textures.

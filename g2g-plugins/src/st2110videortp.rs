@@ -35,13 +35,13 @@ use g2g_core::{
     PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat,
 };
 
-use crate::capsfilter::parse_raw_format;
 use crate::filesink::io_err;
 use crate::st2110dup::RedundantRtpReceiver;
 use crate::st2110pacing::{frame_period_ns, pace_send, Pacer, PacingProfile};
 use crate::st2110sdp::{St2110Essence, St2110Sdp};
 use crate::st2110video::{Sampling, St2110VideoDepacketizer, St2110VideoPacketizer};
 use crate::videoconvert::raw_format_to_str;
+use g2g_core::caps_parse::parse_raw_format;
 
 /// The whole-fps rate from a `Caps::RawVideo` framerate (`Rate::Fixed` is fps << 16),
 /// or 0 if not fixed (do not pace).

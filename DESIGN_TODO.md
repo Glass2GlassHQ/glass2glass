@@ -574,6 +574,29 @@ _(No open tag items.)_
   ignores it), and clearing it licenses writes into tee-shared GPU surfaces.
 - Device selection to go with the carried ordinal: a `cuda-device` property on
   the CUDA producers feeding the ordinal they open.
+- Every buffer a hosted element emits from one input carries the same
+  presentation time, since they all inherit the anchor's timing. Streaming TTS
+  chunks and the separation family's stems arrive stacked at one instant rather
+  than one after another. The gst backend does the same, so the two agree; a
+  sink that schedules by pts plays them all at once.
+- No representation for an unset presentation time. `FrameTiming::pts_ns` is a
+  plain `u64` with no sentinel, so a hosted element cannot say "no pts, play this
+  when you reach it", which is what GStreamer's `CLOCK_TIME_NONE` means. Generated
+  speech carries that on gst and inherits the input text buffer's pts here, so the
+  two backends schedule the audio differently. Duration is unaffected.
+- `bytestream-format=` names container encodings only, so a plain-text file with
+  no `.txt` extension has no escape hatch: `filesrc` types text by extension, and
+  content sniffing deliberately refuses prose because any "is this text" rule
+  reduces to "valid UTF-8" and would claim most small binaries. Widening that
+  property is a vocabulary change, not a bugfix.
+- A `gst-inspect` dump of `pyelement` / `pyaggregator` lists only the host's own
+  properties plus the marker saying the rest come from the hosted class. The real
+  set is known once the class loads, but `properties()` returns a `&'static`
+  slice, so there is nowhere to put an introspected one without changing that
+  signature across ~200 implementors.
+- The staged metadata of a call that emits several buffers goes on the first of
+  them. Repeating it would count each detection several times downstream, and
+  nothing in the Python API says which buffer a record belongs to.
 
 ## Dynamic plugin loading (M201+)
 

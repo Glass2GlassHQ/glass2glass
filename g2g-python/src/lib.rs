@@ -2,7 +2,7 @@
 //!
 //! gst-python-ml factored its ML logic away from GStreamer: the inference
 //! `tasks/`, the engine `MLEngineMixin`, and the per-frame work all run with no
-//! framework types, behind three seams selected by the `GSTML_BACKEND` env var:
+//! framework types, behind three seams selected by the `PYML_BACKEND` env var:
 //! `FrameIO` (read/write/append-blob a buffer), `AnalyticsBackend` (attach
 //! detection metadata), and the element base classes. Today only a `gst`
 //! backend exists. This crate is the g2g host those seams target: it embeds
@@ -35,6 +35,7 @@ pub mod format;
 
 mod aggregator;
 mod element;
+mod props;
 mod source;
 pub use aggregator::PyAggregator;
 pub use element::PyTransform;

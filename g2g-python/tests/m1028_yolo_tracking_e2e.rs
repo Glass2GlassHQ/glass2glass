@@ -1,5 +1,5 @@
 //! End-to-end host of the real gst-python-ml `yolo` element with `track=true`
-//! under `GSTML_BACKEND=g2g`, the tracking counterpart of the M322 detector test.
+//! under `PYML_BACKEND=g2g`, the tracking counterpart of the M322 detector test.
 //!
 //! Detections reach the frame through `MetaSink::add_object` alone, which M322
 //! already covers. Tracking is the path that also needs `add_tracking` and

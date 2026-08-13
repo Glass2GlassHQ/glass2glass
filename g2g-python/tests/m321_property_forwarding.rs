@@ -10,6 +10,7 @@
 #![cfg(feature = "analytics")]
 
 use g2g_core::memory::SystemSlice;
+use g2g_core::property::{PropError, PropKind};
 use g2g_core::{
     AnalyticsMeta, AsyncElement, BlobMeta, Caps, Dim, Frame, FrameTiming, G2gError, MemoryDomain,
     OutputSink, PipelinePacket, PropValue, PushOutcome, Rate, RawVideoFormat,
@@ -117,4 +118,129 @@ fn element_properties_reach_the_python_instance() {
         "model-name -> self.model_name"
     );
     assert_eq!(by_header("device"), b"cuda:0", "device -> self.device");
+}
+
+fn rgba_2x1() -> Caps {
+    Caps::RawVideo {
+        format: RawVideoFormat::Rgba8,
+        width: Dim::Fixed(2),
+        height: Dim::Fixed(1),
+        framerate: Rate::Fixed(30),
+        interlace: g2g_core::Interlace::Any,
+    }
+}
+
+/// Which property names are real is the hosted class's to say, so a name it does
+/// not declare fails when the class loads. Setting it as an attribute nothing
+/// reads would run the pipeline as if the knob had been turned.
+#[test]
+fn a_property_the_hosted_class_does_not_declare_is_refused() {
+    std::env::set_var(
+        "PYTHONPATH",
+        concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures"),
+    );
+
+    let mut el = PyTransform::new("echo_element", "DeclaredProps");
+    el.set_property("model-name", PropValue::Str("yolo11m.onnx".into()))
+        .unwrap();
+    el.set_property("speaker", PropValue::Str("Andrew".into()))
+        .unwrap();
+
+    assert!(
+        el.configure_pipeline(&rgba_2x1()).is_err(),
+        "a detector has no speaker"
+    );
+}
+
+/// The same class takes the ones it does declare.
+#[test]
+fn a_property_the_hosted_class_declares_is_forwarded() {
+    std::env::set_var(
+        "PYTHONPATH",
+        concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures"),
+    );
+
+    let mut el = PyTransform::new("echo_element", "DeclaredProps");
+    el.set_property("model-name", PropValue::Str("yolo11m.onnx".into()))
+        .unwrap();
+    el.set_property("device", PropValue::Str("cuda:0".into()))
+        .unwrap();
+
+    el.configure_pipeline(&rgba_2x1()).unwrap();
+}
+
+/// Every declared property must also be handled in `set_property`: `parse_launch`
+/// reads the kind out of `properties()` and then sets by name, so a spec with no
+/// matching arm is a launch line that fails on a property the element advertises.
+#[test]
+fn every_declared_property_is_settable() {
+    let mut el = PyTransform::new("echo_element", "PropEcho");
+    for spec in el.properties() {
+        // The marker for whatever the hosted class declares, not a name.
+        if spec.name == g2g_core::UNDECLARED_PROPERTIES {
+            continue;
+        }
+        let value = match spec.kind {
+            PropKind::Bool => PropValue::Bool(true),
+            PropKind::Int => PropValue::Int(1),
+            PropKind::Uint => PropValue::Uint(1),
+            PropKind::Double => PropValue::Double(1.0),
+            PropKind::Fraction => PropValue::Fraction(30, 1),
+            // "format" is the one string property that validates its value.
+            PropKind::Str if spec.name == "format" => PropValue::Str("RGBA".into()),
+            PropKind::Str => PropValue::Str("x".into()),
+            // Flags, and any kind added later, carry no single stand-in value.
+            _ => continue,
+        };
+        assert_ne!(
+            el.set_property(spec.name, value),
+            Err(PropError::Unknown),
+            "declared property '{}' has no set_property arm",
+            spec.name
+        );
+    }
+}
+
+/// The per-element knobs a gst-python-ml pipeline line carries reach the hosted
+/// instance, so a README pipeline runs here with its properties intact.
+#[test]
+fn a_per_element_property_reaches_the_python_instance() {
+    std::env::set_var(
+        "PYTHONPATH",
+        concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures"),
+    );
+
+    let mut el = PyTransform::new("echo_element", "PropEcho");
+    el.set_property("language", PropValue::Str("ko".into()))
+        .unwrap();
+
+    let caps = Caps::RawVideo {
+        format: RawVideoFormat::Rgba8,
+        width: Dim::Fixed(2),
+        height: Dim::Fixed(1),
+        framerate: Rate::Fixed(30),
+        interlace: g2g_core::Interlace::Any,
+    };
+    el.configure_pipeline(&caps).unwrap();
+
+    let mut sink = CollectSink::default();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    rt.block_on(el.process(PipelinePacket::DataFrame(frame_2x1_rgba()), &mut sink))
+        .unwrap();
+
+    let PipelinePacket::DataFrame(frame) = &sink.packets[0] else {
+        panic!("expected a DataFrame downstream");
+    };
+    let blobs = frame
+        .meta
+        .get::<BlobMeta>()
+        .expect("PropEcho should attach blobs");
+    let language = blobs
+        .iter()
+        .find(|b| b.header == "language")
+        .map(|b| b.payload.clone())
+        .unwrap_or_default();
+    assert_eq!(language, b"ko", "language -> self.language");
 }

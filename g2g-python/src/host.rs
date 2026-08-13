@@ -5,7 +5,7 @@
 //! imports, and drives a hosted element instance per frame.
 //!
 //! Contract with the Python side (the `backend/g2g` package the gst-python-ml
-//! team writes against `GSTML_BACKEND=g2g`): importing an element module yields
+//! team writes against `PYML_BACKEND=g2g`): importing an element module yields
 //! a class whose instances expose
 //!
 //! ```text
@@ -18,6 +18,20 @@
 //! pixels in place, so neither direction copies. It returns a list of opaque
 //! metadata blobs. This is the `backend/gst` `GstFrameIO` shape on a g2g
 //! [`Frame`]. Step 3 routes the blob list into [`g2g_core::FrameMetaSet`].
+//!
+//! A stream that is not raw video has no picture shape, so it reaches Python
+//! through the payload hook instead:
+//!
+//! ```text
+//! g2g_process_payload(buffers, caps: str, meta)
+//! ```
+//!
+//! `buffers` are the same writable views and `caps` is the negotiated caps as a
+//! `gst-launch` string. Those elements (transcription reading audio and writing
+//! text, speech synthesis the other way) rarely produce output the size of their
+//! input, so they return bytes through `meta.emit(payload, duration_ns=None)`:
+//! the host wraps them in a new frame that replaces the one they were given,
+//! keeping its timing but for a duration the element states.
 //!
 //! GPU-resident frames take their own entry points (M984, M986). A
 //! [`MemoryDomain::Cuda`] frame has no CPU bytes to wrap, so its two semi-planar
@@ -74,7 +88,7 @@ use std::sync::mpsc;
 use std::sync::{Mutex, Once};
 use std::thread::{self, JoinHandle};
 
-use pyo3::exceptions::{PyBufferError, PyRuntimeError};
+use pyo3::exceptions::{PyBufferError, PyRuntimeError, PyValueError};
 use pyo3::ffi;
 use pyo3::prelude::*;
 
@@ -82,6 +96,7 @@ use g2g_core::log::Target;
 use g2g_core::runtime::{bounded, Receiver};
 use g2g_core::{
     g2g_warn, Caps, Dim, Frame, G2gError, HardwareError, MemoryDomain, PropValue, RawVideoFormat,
+    SystemSlice,
 };
 
 use crate::cuda_plane::{nv12_planes, produced_cuda_buffer, CudaPlane};
@@ -92,6 +107,12 @@ use crate::format::format_to_py;
 const CUDA_HOOK: &str = "g2g_process_cuda";
 const CUDA_BATCH_HOOK: &str = "g2g_process_cuda_batch";
 const CUDA_PRODUCE_HOOK: &str = "g2g_produce_cuda";
+/// The Python entry point for a stream that is not raw video.
+const PAYLOAD_HOOK: &str = "g2g_process_payload";
+/// Optional method a hosted class defines to list the properties it declares, so
+/// a pipeline naming one it has not is refused instead of silently setting an
+/// attribute nothing reads.
+const DECLARED_PROPERTIES_HOOK: &str = "g2g_properties";
 /// Optional attribute a hosted GPU source sets to report the `CUcontext` its
 /// surfaces live in, for a downstream consumer that has to push it.
 const CUDA_CONTEXT_ATTR: &str = "cuda_context";
@@ -101,7 +122,6 @@ const CUDA_DEVICE_ATTR: &str = "cuda_device";
 
 static INIT: Once = Once::new();
 
-/// A frame plus its negotiated geometry, sent to the worker thread.
 /// Which Python entry point a job invokes.
 enum JobKind {
     /// `g2g_process(buf, w, h, fmt, meta)` — one frame, mutated in place.
@@ -118,18 +138,40 @@ enum JobKind {
     ProduceCuda,
 }
 
+/// What the job's frames hold: a picture of a known geometry, or a payload of
+/// some other media type, which has no geometry to describe.
+enum JobCaps {
+    RawVideo {
+        width: u32,
+        height: u32,
+        fmt: RawVideoFormat,
+    },
+    /// The negotiated caps, handed to Python as its `gst-launch` string.
+    Payload(Caps),
+}
+
+impl JobCaps {
+    fn video(&self) -> Option<(u32, u32, RawVideoFormat)> {
+        match self {
+            JobCaps::RawVideo { width, height, fmt } => Some((*width, *height, *fmt)),
+            JobCaps::Payload(_) => None,
+        }
+    }
+}
+
+/// Frames plus their negotiated caps, sent to the worker thread.
 struct Job {
     /// One frame for a transform / produce; one per contributing input for an
     /// aggregator batch. Frame 0 is the anchor that carries any metadata.
     frames: Vec<Frame>,
-    width: u32,
-    height: u32,
-    fmt: RawVideoFormat,
+    caps: JobCaps,
     kind: JobKind,
 }
 
-/// Worker -> element reply: the (possibly mutated) frames, or an error. An empty
-/// vec from a `Produce` job means the Python source signalled EOS.
+/// Worker -> element reply: the buffers to send downstream, or an error. Either
+/// the one frame Python was handed, mutated in place, or the ones it emitted in
+/// its stead. An empty vec from a `Produce` job means the Python source
+/// signalled EOS.
 type Reply = Result<Vec<Frame>, G2gError>;
 
 /// Zero-copy writable view over a frame's System-memory bytes, handed to the
@@ -248,6 +290,20 @@ enum Staged {
 #[derive(Debug, Default)]
 struct MetaSink {
     staged: Mutex<Vec<Staged>>,
+    /// The buffers the element produced, when it emits its own rather than
+    /// overwriting the frame it was handed. Locked for the same reason `staged`
+    /// is.
+    emitted: Mutex<Vec<Emitted>>,
+}
+
+/// A buffer a hosted element produced in place of the one it was handed.
+#[derive(Debug)]
+struct Emitted {
+    payload: Vec<u8>,
+    /// How long the produced buffer runs, when that is not the anchor's
+    /// duration: synthesized speech lasts as long as its samples, not as long as
+    /// the text it was generated from. `None` inherits the anchor's.
+    duration_ns: Option<u64>,
 }
 
 impl MetaSink {
@@ -309,6 +365,30 @@ impl MetaSink {
     fn add_blob(&self, header: String, payload: Vec<u8>) {
         self.stage(Staged::Blob { header, payload });
     }
+
+    /// Emit `payload` as a buffer this element produces: it replaces the frame
+    /// the element was handed, so the output need not be the size of the input
+    /// (audio in, a short transcript out). Where `add_blob` travels alongside the
+    /// buffer, this *is* the buffer. Call it more than once to send several
+    /// buffers from one input, as chunked speech and source separation do; they
+    /// go downstream in call order.
+    ///
+    /// Every emitted frame inherits the frame's timing, which is right whenever
+    /// the output covers the same stretch of the stream as the input. An element
+    /// whose output runs for its own length (speech synthesized from a text
+    /// buffer) passes `duration_ns` to say how long, keeping the presentation
+    /// time it was generated at. The frame number is the host's, counted over
+    /// what this element emitted, not the number of the buffer it read.
+    #[pyo3(signature = (payload, duration_ns = None))]
+    fn emit(&self, payload: Vec<u8>, duration_ns: Option<u64>) {
+        self.emitted
+            .lock()
+            .expect("MetaSink emitted lock poisoned")
+            .push(Emitted {
+                payload,
+                duration_ns,
+            });
+    }
 }
 
 /// Native `g2g` module visible to the embedded interpreter, so the `import g2g`
@@ -333,8 +413,8 @@ fn g2g(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
 pub fn init_host() {
     INIT.call_once(|| {
         // Selected before the Python `backend` package is imported so its
-        // GSTML_BACKEND branch binds to `backend/g2g`.
-        std::env::set_var("GSTML_BACKEND", "g2g");
+        // PYML_BACKEND branch binds to `backend/g2g`.
+        std::env::set_var("PYML_BACKEND", "g2g");
         // append_to_inittab! must run before the interpreter is initialized;
         // `auto-initialize` defers init to the first `attach`, and `Once`
         // guarantees this runs first.
@@ -393,37 +473,34 @@ impl PyWorker {
         }
     }
 
-    /// Hand one frame to the worker and await the (possibly mutated) frame. The
-    /// `send` is non-blocking (unbounded job channel); the `await` parks until
+    /// Hand one frame to the worker and await the buffers back: the same frame
+    /// mutated in place, or the ones the element emitted in its stead, which an
+    /// element that chunks its output states more than one of. A frame of any
+    /// media type but raw video reaches the element through the payload hook.
+    /// The `send` is non-blocking (unbounded job channel); the `await` parks until
     /// the worker's `try_send`, freeing the executor thread meanwhile.
-    pub(crate) async fn run(&self, frame: Frame, caps: &Caps) -> Result<Frame, G2gError> {
-        let (width, height, fmt) = raw_video_dims(caps)?;
-        let mut out = self
-            .dispatch(Job {
-                frames: vec![frame],
-                width,
-                height,
-                fmt,
-                kind: JobKind::Transform,
-            })
-            .await?;
-        out.pop().ok_or(G2gError::Shutdown)
+    pub(crate) async fn run(&self, frame: Frame, caps: &Caps) -> Result<Vec<Frame>, G2gError> {
+        self.dispatch(Job {
+            frames: vec![frame],
+            caps: job_caps(caps)?,
+            kind: JobKind::Transform,
+        })
+        .await
     }
 
     /// Hand a batch (one frame per contributing input) to the worker and await
-    /// the frames back. Frame 0 is the anchor; it carries any metadata the
-    /// batch produced. Used by `PyAggregator`.
+    /// the buffers back: the anchor (frame 0) mutated in place, carrying any
+    /// metadata the batch produced, or the ones the element emitted in its
+    /// stead. A batch of any media type but raw video reaches the element
+    /// through the payload hook instead. Used by `PyAggregator`.
     pub(crate) async fn run_batch(
         &self,
         frames: Vec<Frame>,
         caps: &Caps,
     ) -> Result<Vec<Frame>, G2gError> {
-        let (width, height, fmt) = raw_video_dims(caps)?;
         self.dispatch(Job {
             frames,
-            width,
-            height,
-            fmt,
+            caps: job_caps(caps)?,
             kind: JobKind::Batch,
         })
         .await
@@ -434,13 +511,10 @@ impl PyWorker {
     /// source signalled EOS. The returned frame carries no timing; the source
     /// stamps it. Used by `PySource` under `cuda-frames`.
     pub(crate) async fn run_produce_cuda(&self, caps: &Caps) -> Result<Option<Frame>, G2gError> {
-        let (width, height, fmt) = raw_video_dims(caps)?;
         let mut out = self
             .dispatch(Job {
                 frames: Vec::new(),
-                width,
-                height,
-                fmt,
+                caps: raw_video_caps(caps)?,
                 kind: JobKind::ProduceCuda,
             })
             .await?;
@@ -454,13 +528,10 @@ impl PyWorker {
         frame: Frame,
         caps: &Caps,
     ) -> Result<Option<Frame>, G2gError> {
-        let (width, height, fmt) = raw_video_dims(caps)?;
         let mut out = self
             .dispatch(Job {
                 frames: vec![frame],
-                width,
-                height,
-                fmt,
+                caps: raw_video_caps(caps)?,
                 kind: JobKind::Produce,
             })
             .await?;
@@ -514,8 +585,12 @@ fn worker_main(
         }
     };
 
+    // Numbers the buffers the element emits: one input can produce several, and
+    // a sink takes a repeated sequence as a stream fault.
+    let mut emitted_sequence = 0u64;
+
     while let Ok(job) = jobs.recv() {
-        let reply = Python::attach(|py| process_job(py, &instance, job));
+        let reply = Python::attach(|py| process_job(py, &instance, job, &mut emitted_sequence));
         // Capacity-1, and the element awaits each reply before sending the next
         // job, so this never blocks; an error means the element (receiver) is
         // gone, so stop.
@@ -545,13 +620,33 @@ fn instantiate(
         let m = PyModule::import(py, module)?;
         let obj = m.getattr(class)?.call0()?;
         obj.setattr("draw_label", draw_label)?;
+        let declared = declared_properties(&obj)?;
         for (name, value) in params {
             let attr = name.replace('-', "_");
+            if let Some(declared) = &declared {
+                if !declared.iter().any(|d| *d == attr) {
+                    return Err(PyValueError::new_err(format!(
+                        "{class} has no property {name}; it declares {}",
+                        declared.join(", ").replace('_', "-")
+                    )));
+                }
+            }
             obj.setattr(attr.as_str(), propvalue_to_py(py, value)?)?;
         }
         Ok(obj.unbind())
     })()
     .map_err(|e| py_fail(py, e))
+}
+
+/// The property names the hosted class says it has, so a pipeline naming one it
+/// does not is refused here rather than quietly setting an attribute nothing
+/// reads. `None` from a class that does not answer, which is every hosted class
+/// outside gst-python-ml: nothing to check against, so everything is forwarded.
+fn declared_properties(obj: &Bound<'_, PyAny>) -> PyResult<Option<Vec<String>>> {
+    if !obj.hasattr(DECLARED_PROPERTIES_HOOK)? {
+        return Ok(None);
+    }
+    Ok(Some(obj.call_method0(DECLARED_PROPERTIES_HOOK)?.extract()?))
 }
 
 /// Convert a g2g [`PropValue`] to the Python scalar an element property expects.
@@ -593,7 +688,7 @@ enum Handoff {
 /// borrows end before the frames are moved into the reply.
 fn handoff(py: Python<'_>, instance: &Py<PyAny>, job: &mut Job) -> Result<Handoff, G2gError> {
     if matches!(job.kind, JobKind::ProduceCuda) {
-        require_hook(py, instance, CUDA_PRODUCE_HOOK)?;
+        require_hook(py, instance, CUDA_PRODUCE_HOOK, CUDA_REMEDY)?;
         return Ok(Handoff::ProduceCuda);
     }
 
@@ -601,28 +696,35 @@ fn handoff(py: Python<'_>, instance: &Py<PyAny>, job: &mut Job) -> Result<Handof
         job.frames.first().map(|f| &f.domain),
         Some(MemoryDomain::Cuda(_))
     ) {
+        // A GPU frame is a surface with a plane layout, which only raw-video
+        // caps describes.
+        let (_, _, fmt) = job.caps.video().ok_or(G2gError::UnsupportedDomain)?;
         let mut planes = Vec::with_capacity(job.frames.len());
         for frame in &job.frames {
             let MemoryDomain::Cuda(buf) = &frame.domain else {
                 // A batch mixing GPU and CPU frames has no single contract.
                 return Err(G2gError::UnsupportedDomain);
             };
-            planes.push(nv12_planes(job.fmt, buf).ok_or(G2gError::UnsupportedDomain)?);
+            planes.push(nv12_planes(fmt, buf).ok_or(G2gError::UnsupportedDomain)?);
         }
         return match job.kind {
             JobKind::Transform => {
-                require_hook(py, instance, CUDA_HOOK)?;
+                require_hook(py, instance, CUDA_HOOK, CUDA_REMEDY)?;
                 let (luma, chroma) = planes.pop().ok_or(G2gError::UnsupportedDomain)?;
                 Ok(Handoff::Cuda(luma, chroma))
             }
             JobKind::Batch => {
-                require_hook(py, instance, CUDA_BATCH_HOOK)?;
+                require_hook(py, instance, CUDA_BATCH_HOOK, CUDA_REMEDY)?;
                 Ok(Handoff::CudaBatch(planes))
             }
             // A GPU frame handed to the System produce path (or a kind that
             // cannot arise) has nowhere to go.
             JobKind::Produce | JobKind::ProduceCuda => Err(G2gError::UnsupportedDomain),
         };
+    }
+
+    if matches!(job.caps, JobCaps::Payload(_)) {
+        require_hook(py, instance, PAYLOAD_HOOK, PAYLOAD_REMEDY)?;
     }
 
     let mut spans = Vec::with_capacity(job.frames.len());
@@ -636,10 +738,20 @@ fn handoff(py: Python<'_>, instance: &Py<PyAny>, job: &mut Job) -> Result<Handof
     Ok(Handoff::System(spans))
 }
 
-/// Refuse the frame unless the hosted element defines `hook`. There is no
-/// readback fallback: `g2g-python` links no CUDA, so a CPU-only element needs an
-/// explicit `cudadownload` ahead of it.
-fn require_hook(py: Python<'_>, instance: &Py<PyAny>, hook: &str) -> Result<(), G2gError> {
+/// There is no readback fallback for a GPU frame: `g2g-python` links no CUDA, so
+/// a CPU-only element needs an explicit `cudadownload` ahead of it.
+const CUDA_REMEDY: &str = "a GPU-resident frame cannot reach it: insert cudadownload upstream";
+const PAYLOAD_REMEDY: &str =
+    "a stream that is not raw video cannot reach it: it defines only the picture hooks";
+
+/// Refuse the frame unless the hosted element defines `hook`, logging `remedy`
+/// as the way out.
+fn require_hook(
+    py: Python<'_>,
+    instance: &Py<PyAny>,
+    hook: &str,
+    remedy: &str,
+) -> Result<(), G2gError> {
     let defined = instance
         .bind(py)
         .hasattr(hook)
@@ -647,7 +759,7 @@ fn require_hook(py: Python<'_>, instance: &Py<PyAny>, hook: &str) -> Result<(), 
     if !defined {
         g2g_warn!(
             Target::category("pyelement"),
-            "hosted element defines no {hook}, so a GPU-resident frame cannot reach it: insert cudadownload upstream"
+            "hosted element defines no {hook}, so {remedy}"
         );
         return Err(G2gError::UnsupportedDomain);
     }
@@ -658,7 +770,12 @@ fn require_hook(py: Python<'_>, instance: &Py<PyAny>, hook: &str) -> Result<(), 
 /// hosted element. Python reads / overwrites each frame's System memory in place
 /// via the buffer protocol, or reads a GPU frame's planes through CAI; the frames
 /// flow back, timing and sequence preserved.
-fn process_job(py: Python<'_>, instance: &Py<PyAny>, mut job: Job) -> Reply {
+fn process_job(
+    py: Python<'_>,
+    instance: &Py<PyAny>,
+    mut job: Job,
+    emitted_sequence: &mut u64,
+) -> Reply {
     let handoff = handoff(py, instance, &mut job)?;
 
     let sink = match Py::new(py, MetaSink::default()) {
@@ -684,14 +801,68 @@ fn process_job(py: Python<'_>, instance: &Py<PyAny>, mut job: Job) -> Reply {
             .lock()
             .expect("MetaSink staged lock poisoned"),
     );
+    let emitted = core::mem::take(
+        &mut *sink
+            .borrow(py)
+            .emitted
+            .lock()
+            .expect("MetaSink emitted lock poisoned"),
+    );
 
     match produced {
         Ok(true) => {
-            let (w, h) = (job.width, job.height);
-            if let Some(anchor) = job.frames.first_mut() {
-                attach_metadata(anchor, staged, w, h);
+            // `None` for a payload job: it has no pixels for a detection box to
+            // be normalized against.
+            let frame_dims = job
+                .caps
+                .video()
+                .map(|(w, h, _)| (w, h))
+                .filter(|(w, h)| *w > 0 && *h > 0);
+            let Some(anchor) = job.frames.first() else {
+                return Ok(Vec::new());
+            };
+            let anchor_timing = anchor.timing;
+            let anchor_sequence = anchor.sequence;
+            let anchor_meta = anchor.meta.clone();
+            let mut out = if emitted.is_empty() {
+                // Nothing emitted: the frame Python was handed, mutated in
+                // place. A batch's other inputs have done their work in the
+                // call, so only the anchor travels on.
+                job.frames.truncate(1);
+                job.frames
+            } else {
+                // Emitted frames number on past the input's rather than from
+                // zero: a sink reads a repeated sequence as a stream fault.
+                *emitted_sequence = (*emitted_sequence).max(anchor_sequence);
+                emitted
+                    .into_iter()
+                    .map(|emitted| {
+                        let mut timing = anchor_timing;
+                        if let Some(duration_ns) = emitted.duration_ns {
+                            timing.duration_ns = duration_ns;
+                        }
+                        let sequence = *emitted_sequence;
+                        *emitted_sequence += 1;
+                        let mut frame = Frame::new(
+                            MemoryDomain::System(SystemSlice::from_boxed(
+                                emitted.payload.into_boxed_slice(),
+                            )),
+                            timing,
+                            sequence,
+                        );
+                        // What upstream attached describes the stream, not the
+                        // one buffer replaced, so it travels with every one sent.
+                        frame.meta = anchor_meta.clone();
+                        frame
+                    })
+                    .collect()
+            };
+            // The staged records describe the one call, so they go on one frame:
+            // repeating them would count each detection several times downstream.
+            if let Some(first) = out.first_mut() {
+                attach_metadata(first, staged, frame_dims);
             }
-            Ok(job.frames)
+            Ok(out)
         }
         // Produce EOS: drop the blank frame, signal end with an empty reply.
         Ok(false) => Ok(Vec::new()),
@@ -721,33 +892,50 @@ fn call_system(
         })
         .collect::<PyResult<_>>()?;
     let bound = instance.bind(py);
-    let (w, h, fmt) = (job.width, job.height, format_to_py(job.fmt));
     // Pass cloned handles into the call and keep `buffers` so the export
     // counters can be inspected after it returns.
-    let produced = match job.kind {
-        JobKind::Batch => {
+    let produced = match &job.caps {
+        // A payload has no geometry to pass, so the element gets the caps
+        // description instead and reads the buffers' own lengths.
+        JobCaps::Payload(caps) => {
             let list = pyo3::types::PyList::new(py, buffers.iter().map(|b| b.clone_ref(py)))?;
-            bound.call_method1("g2g_process_batch", (list, w, h, fmt, sink.clone_ref(py)))?;
+            bound.call_method1(
+                PAYLOAD_HOOK,
+                (list, caps.to_gst_string(), sink.clone_ref(py)),
+            )?;
             true
         }
-        JobKind::Transform => {
-            let buffer = buffers
-                .first()
-                .expect("single job has one frame")
-                .clone_ref(py);
-            bound.call_method1("g2g_process", (buffer, w, h, fmt, sink.clone_ref(py)))?;
-            true
+        JobCaps::RawVideo { width, height, fmt } => {
+            let (w, h, fmt) = (*width, *height, format_to_py(*fmt));
+            match job.kind {
+                JobKind::Batch => {
+                    let list =
+                        pyo3::types::PyList::new(py, buffers.iter().map(|b| b.clone_ref(py)))?;
+                    bound
+                        .call_method1("g2g_process_batch", (list, w, h, fmt, sink.clone_ref(py)))?;
+                    true
+                }
+                JobKind::Transform => {
+                    let buffer = buffers
+                        .first()
+                        .expect("single job has one frame")
+                        .clone_ref(py);
+                    bound.call_method1("g2g_process", (buffer, w, h, fmt, sink.clone_ref(py)))?;
+                    true
+                }
+                JobKind::Produce => {
+                    let buffer = buffers
+                        .first()
+                        .expect("produce job has one frame")
+                        .clone_ref(py);
+                    let ret = bound
+                        .call_method1("g2g_produce", (buffer, w, h, fmt, sink.clone_ref(py)))?;
+                    ret.extract::<bool>()?
+                }
+                // Routed to `call_produce_cuda`, which never builds System views.
+                JobKind::ProduceCuda => unreachable!("a GPU produce job carries no System frame"),
+            }
         }
-        JobKind::Produce => {
-            let buffer = buffers
-                .first()
-                .expect("produce job has one frame")
-                .clone_ref(py);
-            let ret = bound.call_method1("g2g_produce", (buffer, w, h, fmt, sink.clone_ref(py)))?;
-            ret.extract::<bool>()?
-        }
-        // Routed to `call_produce_cuda`, which never builds System views.
-        JobKind::ProduceCuda => unreachable!("a GPU produce job carries no System frame"),
     };
     // The zero-copy views must not outlive the call: a retained `memoryview` /
     // numpy view holds a pointer that dangles once the frame is freed
@@ -761,6 +949,14 @@ fn call_system(
     Ok(produced)
 }
 
+/// The geometry the GPU hooks pass to Python. `handoff` refuses a GPU job whose
+/// caps is not raw video, so the error never reaches an element.
+fn cuda_geometry(job: &Job) -> PyResult<(u32, u32, RawVideoFormat)> {
+    job.caps
+        .video()
+        .ok_or_else(|| PyRuntimeError::new_err("a GPU job needs raw-video caps"))
+}
+
 /// Call the hosted element with the GPU frame's two planes described by CAI, so
 /// the Python side maps them into cupy / torch without a device->host copy.
 fn call_cuda(
@@ -772,7 +968,7 @@ fn call_cuda(
     sink: &Py<MetaSink>,
 ) -> PyResult<bool> {
     let planes = [Py::new(py, luma)?, Py::new(py, chroma)?];
-    let (w, h) = (job.width, job.height);
+    let (w, h, _) = cuda_geometry(job)?;
     instance.bind(py).call_method1(
         CUDA_HOOK,
         (
@@ -803,10 +999,11 @@ fn call_cuda_batch(
         handles.push(luma);
         handles.push(chroma);
     }
+    let (width, height, _) = cuda_geometry(job)?;
     let list = pyo3::types::PyList::new(py, pairs)?;
     instance.bind(py).call_method1(
         CUDA_BATCH_HOOK,
-        (list.clone(), job.width, job.height, sink.clone_ref(py)),
+        (list.clone(), width, height, sink.clone_ref(py)),
     )?;
     // Release the list's own references before counting, so only what the element
     // kept is left.
@@ -824,26 +1021,16 @@ fn call_produce_cuda(
     job: &mut Job,
     sink: &Py<MetaSink>,
 ) -> PyResult<bool> {
+    let (width, height, fmt) = cuda_geometry(job)?;
     let bound = instance.bind(py);
-    let returned = bound.call_method1(
-        CUDA_PRODUCE_HOOK,
-        (job.width, job.height, sink.clone_ref(py)),
-    )?;
+    let returned = bound.call_method1(CUDA_PRODUCE_HOOK, (width, height, sink.clone_ref(py)))?;
     if !returned.is_truthy()? {
         return Ok(false);
     }
     let (luma, chroma): (Bound<'_, PyAny>, Bound<'_, PyAny>) = returned.extract()?;
     let context = reported_cuda_context(bound)?;
     let device_ordinal = reported_cuda_device(bound)?;
-    let buffer = produced_cuda_buffer(
-        &luma,
-        &chroma,
-        job.fmt,
-        job.width,
-        job.height,
-        context,
-        device_ordinal,
-    )?;
+    let buffer = produced_cuda_buffer(&luma, &chroma, fmt, width, height, context, device_ordinal)?;
     job.frames.push(Frame {
         domain: MemoryDomain::Cuda(buffer),
         // The source stamps timing and sequence on the way out; it owns the clock.
@@ -890,7 +1077,7 @@ fn planes_released(py: Python<'_>, planes: &[Py<CudaPlane>]) -> PyResult<bool> {
 /// Materialize staged results onto the frame: detections / classifications into
 /// an [`g2g_core::AnalyticsMeta`], opaque blobs into a [`g2g_core::BlobMeta`].
 #[cfg(feature = "analytics")]
-fn attach_metadata(frame: &mut Frame, staged: Vec<Staged>, frame_w: u32, frame_h: u32) {
+fn attach_metadata(frame: &mut Frame, staged: Vec<Staged>, frame_dims: Option<(u32, u32)>) {
     use g2g_core::{
         AnalyticsMeta, AnalyticsNode, BBox, BlobMeta, Classification, ObjectDetection,
         RelationKind, Tracking,
@@ -903,16 +1090,10 @@ fn attach_metadata(frame: &mut Frame, staged: Vec<Staged>, frame_w: u32, frame_h
     // (the gst-python-ml / GstAnalytics convention); g2g's `BBox` is normalized
     // to [0, 1] so it survives a downstream scale / crop. Divide by the frame
     // dims here (the one place that knows them), so an `analyticsoverlay`
-    // denormalizes back to the right pixels. Guard against a zero dim.
-    let sx = if frame_w > 0 {
-        1.0 / frame_w as f32
-    } else {
-        0.0
-    };
-    let sy = if frame_h > 0 {
-        1.0 / frame_h as f32
-    } else {
-        0.0
+    // denormalizes back to the right pixels.
+    let (sx, sy) = match frame_dims {
+        Some((w, h)) => (1.0 / w as f32, 1.0 / h as f32),
+        None => (0.0, 0.0),
     };
     let mut analytics = AnalyticsMeta::new();
     let mut blobs = BlobMeta::new();
@@ -932,6 +1113,18 @@ fn attach_metadata(frame: &mut Frame, staged: Vec<Staged>, frame_w: u32, frame_h
                 h,
                 score,
             } => {
+                // A box is in pixels of a frame, and a text or audio buffer has
+                // none to divide by. Dropping it says so; keeping it would put a
+                // box of zeros on the buffer and look like a detection at the
+                // origin.
+                if frame_dims.is_none() {
+                    g2g_warn!(
+                        Target::category("pyelement"),
+                        "hosted element staged a detection on a stream with no \
+                         pixels, dropping it"
+                    );
+                    continue;
+                }
                 node_of_staged[index] = Some(analytics.add_detection(ObjectDetection {
                     bbox: BBox {
                         x: x * sx,
@@ -982,15 +1175,29 @@ fn attach_metadata(frame: &mut Frame, staged: Vec<Staged>, frame_w: u32, frame_h
 #[cfg(not(feature = "analytics"))]
 fn attach_metadata(_frame: &mut Frame, _staged: Vec<Staged>, _frame_w: u32, _frame_h: u32) {}
 
-/// Pull the fixed `(width, height, format)` out of negotiated raw-video caps.
-fn raw_video_dims(caps: &Caps) -> Result<(u32, u32, RawVideoFormat), G2gError> {
+/// Describe the negotiated caps for a job: raw video keeps its fixed geometry,
+/// anything else travels as an opaque payload.
+fn job_caps(caps: &Caps) -> Result<JobCaps, G2gError> {
+    match caps {
+        Caps::RawVideo { .. } => raw_video_caps(caps),
+        other => Ok(JobCaps::Payload(other.clone())),
+    }
+}
+
+/// Pull the fixed geometry out of negotiated raw-video caps, for the paths that
+/// take a picture and nothing else (transform, produce, the GPU hooks).
+fn raw_video_caps(caps: &Caps) -> Result<JobCaps, G2gError> {
     match caps {
         Caps::RawVideo {
             format,
             width,
             height,
             ..
-        } => Ok((dim_fixed(width)?, dim_fixed(height)?, *format)),
+        } => Ok(JobCaps::RawVideo {
+            width: dim_fixed(width)?,
+            height: dim_fixed(height)?,
+            fmt: *format,
+        }),
         _ => Err(G2gError::CapsMismatch),
     }
 }

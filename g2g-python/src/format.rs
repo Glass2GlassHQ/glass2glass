@@ -17,6 +17,7 @@ pub fn format_to_py(fmt: RawVideoFormat) -> &'static str {
     match fmt {
         RawVideoFormat::Rgba8 => "RGBA",
         RawVideoFormat::Bgra8 => "BGRA",
+        RawVideoFormat::Rgb8 => "RGB",
         RawVideoFormat::Nv12 => "NV12",
         RawVideoFormat::I420 => "I420",
         RawVideoFormat::Yuyv => "YUY2",
@@ -42,6 +43,7 @@ pub fn format_from_py(s: &str) -> Option<RawVideoFormat> {
     Some(match s {
         "RGBA" => RawVideoFormat::Rgba8,
         "BGRA" => RawVideoFormat::Bgra8,
+        "RGB" => RawVideoFormat::Rgb8,
         "NV12" => RawVideoFormat::Nv12,
         "I420" => RawVideoFormat::I420,
         "YUY2" | "YUYV" => RawVideoFormat::Yuyv,
@@ -72,6 +74,8 @@ pub fn frame_bytes(fmt: RawVideoFormat, width: u32, height: u32) -> usize {
     let (w, h) = (width as usize, height as usize);
     match fmt {
         RawVideoFormat::Rgba8 | RawVideoFormat::Bgra8 => w * h * 4,
+        // Packed RGB: three bytes per pixel, no alpha.
+        RawVideoFormat::Rgb8 => w * h * 3,
         RawVideoFormat::Yuyv => w * h * 2,
         RawVideoFormat::Nv12 => w * h * 3 / 2,
         // Semi-planar 10-bit: NV12's sample counts at 2 bytes each.

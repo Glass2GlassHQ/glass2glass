@@ -1,7 +1,7 @@
 [package]
 name = "g2g-pyapi"
 description = "Python (PyO3) bindings to drive glass2glass pipelines: parse_launch + run + bus + appsrc/appsink."
-license = "MPL-2.0"
+license.workspace = true
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

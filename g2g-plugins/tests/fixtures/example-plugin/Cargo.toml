@@ -3,6 +3,7 @@ name = "g2g-example-plugin"
 description = "Out-of-tree example: a third-party g2g element built as a dynamically loadable cdylib."
 version = "0.1.0"
 edition = "2021"
+license = "MPL-2.0"
 publish = false
 
 # Stand-alone: this example is built by itself (as a third party would), not as
