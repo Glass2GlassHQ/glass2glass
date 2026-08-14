@@ -59,7 +59,7 @@ fn stream_id(pid: u16) -> alloc::string::String {
 /// [`Tag::Title`], the provider as a [`Tag::Other`] under ffprobe's
 /// `service_provider` key), and each PMT stream's ISO 639 language as a
 /// [`BusMessage::StreamTag`] on that stream's collection id. Shared by the single-
-/// and multi-output demuxers, the MPEG-TS sibling of the Matroska `TagPoster`.
+/// and multi-output demuxers, the MPEG-TS sibling of the Matroska `MetadataPoster`.
 ///
 /// The SDT describes the whole multiplex, so every service it names posts under its
 /// own `program_number` (M878), not only the one this element routes: an

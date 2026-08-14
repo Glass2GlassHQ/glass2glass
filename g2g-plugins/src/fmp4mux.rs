@@ -18,7 +18,7 @@
 
 use alloc::vec::Vec;
 
-use g2g_core::{G2gError, TagList, VideoCodec};
+use g2g_core::{Chapter, G2gError, TagList, VideoCodec};
 
 /// 90 kHz media timescale, the conventional choice for video tracks.
 const TIMESCALE: u64 = 90_000;
@@ -38,6 +38,8 @@ pub(crate) struct Fmp4Muxer {
     width: u32,
     height: u32,
     tags: TagList,
+    /// The table of contents, written as the `moov`'s `udta/chpl` (M1046).
+    chapters: Vec<Chapter>,
     header_written: bool,
     /// `mfhd` sequence number of the last `moof` written. A chunk is a `moof`,
     /// so this counts chunks, not fragments, once chunking is on.
@@ -96,6 +98,7 @@ impl Fmp4Muxer {
             width,
             height,
             tags,
+            chapters: Vec::new(),
             header_written: false,
             sequence: 0,
             decode_time: 0,
@@ -111,6 +114,12 @@ impl Fmp4Muxer {
             fragment_started: false,
             fragment_ntp: 0,
         }
+    }
+
+    /// Attach the table of contents, written as the `moov`'s `udta/chpl`.
+    pub(crate) fn with_chapters(mut self, chapters: Vec<Chapter>) -> Self {
+        self.chapters = chapters;
+        self
     }
 
     /// Batch access units into fragments of at least `ns` (closed at the next sync
@@ -197,6 +206,7 @@ impl Fmp4Muxer {
                 self.height,
                 &param_sets,
                 &self.tags,
+                &self.chapters,
             ));
             self.header_written = true;
         }
@@ -336,6 +346,7 @@ fn moov(
     height: u32,
     param_sets: &[&[u8]],
     tags: &TagList,
+    chapters: &[Chapter],
 ) -> Vec<u8> {
     let mvhd = {
         let mut p = Vec::new();
@@ -430,7 +441,7 @@ fn moov(
     };
 
     // Optional iTunes-style metadata after the track boxes.
-    let udta = udta_with_tags(tags).unwrap_or_default();
+    let udta = udta_with_tags(tags, chapters).unwrap_or_default();
     mp4_box(b"moov", &[mvhd, trak, mvex, udta].concat())
 }
 

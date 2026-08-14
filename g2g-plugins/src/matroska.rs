@@ -27,7 +27,7 @@ use alloc::borrow::Cow;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use g2g_core::{SubPictureFormat, Tag, TagList, TextFormat};
+use g2g_core::{Chapter, SubPictureFormat, Tag, TagList, TextFormat};
 
 use crate::dvbsub::{page_id_blob, parse_page_ids, segment_span, PageIds, DEFAULT_SUBTITLING_TYPE};
 use crate::subparse::ASS_SCRIPT_HEADER;
@@ -93,6 +93,17 @@ const ID_CUE_TRACK_POSITIONS: u32 = 0x00B7;
 const ID_CUE_TRACK: u32 = 0x00F7;
 const ID_CUE_CLUSTER_POSITION: u32 = 0x00F1;
 const ID_CHAPTERS: u32 = 0x1043_A770;
+const ID_EDITION_ENTRY: u32 = 0x45B9;
+const ID_EDITION_FLAG_HIDDEN: u32 = 0x45BD;
+const ID_EDITION_FLAG_DEFAULT: u32 = 0x45DB;
+const ID_CHAPTER_ATOM: u32 = 0x00B6;
+const ID_CHAPTER_UID: u32 = 0x73C4;
+const ID_CHAPTER_TIME_START: u32 = 0x0091;
+const ID_CHAPTER_TIME_END: u32 = 0x0092;
+const ID_CHAPTER_FLAG_HIDDEN: u32 = 0x0098;
+const ID_CHAPTER_DISPLAY: u32 = 0x0080;
+const ID_CHAP_STRING: u32 = 0x0085;
+const ID_CHAP_LANGUAGE: u32 = 0x437C;
 const ID_ATTACHMENTS: u32 = 0x1941_A469;
 
 /// Whether `id` is a Segment-level (level-1) element. Used to decide when an
@@ -440,6 +451,8 @@ pub struct MatroskaDemuxer {
     /// Metadata a `TrackEntry` declares itself (`Name` / `Language`, M788), keyed
     /// by **track number**, not the `TagTrackUID` `track_tags` uses.
     track_entry_tags: Vec<(u64, TagList)>,
+    /// The Segment `Chapters` table of contents (M1046), empty until it is seen.
+    chapters: Vec<Chapter>,
     /// The current Timestamp of an open unknown-size Cluster (the live shape).
     /// `Some` while its children are being parsed at the top level, `None`
     /// otherwise. A definite-size Cluster never sets this (it is consumed whole).
@@ -479,6 +492,7 @@ impl MatroskaDemuxer {
             tags: TagList::new(),
             track_tags: Vec::new(),
             track_entry_tags: Vec::new(),
+            chapters: Vec::new(),
             open_cluster_ts: None,
             consumed: 0,
             segment_data_pos: None,
@@ -574,6 +588,13 @@ impl MatroskaDemuxer {
     /// no entry.
     pub fn track_entry_tags(&self) -> &[(u64, TagList)] {
         &self.track_entry_tags
+    }
+
+    /// The Segment `Chapters` table of contents (M1046), empty until a
+    /// `Chapters` element is parsed. Times are stream-time nanoseconds; hidden
+    /// editions and atoms are already filtered out.
+    pub fn chapters(&self) -> &[Chapter] {
+        &self.chapters
     }
 
     /// Drain the frames demuxed so far.
@@ -732,6 +753,10 @@ impl MatroskaDemuxer {
                         decode_encodings(&mut frames, &self.compressions);
                         self.completed.extend(frames);
                     }
+                    ID_CHAPTERS => {
+                        self.chapters
+                            .extend(parse_chapters(&self.buf[header..total]));
+                    }
                     // The Cues index: time -> Cluster byte position, for indexed
                     // seeking (`cue_seek_offset`). Often trails the Clusters.
                     ID_CUES => {
@@ -744,7 +769,7 @@ impl MatroskaDemuxer {
                             self.cues_index_pos = Some(pos);
                         }
                     }
-                    _ => {} // Chapters / Void, etc.
+                    _ => {} // Attachments / Void, etc.
                 }
             }
             // (elements before the Segment, e.g. the EBML header, are skipped.)
@@ -967,6 +992,82 @@ fn collect_simple_tag(body: &[u8], prefix: &str, depth: u32, out: &mut Vec<Tag>)
     }
 }
 
+/// How deep nested `ChapterAtom`s are followed. The nesting comes from the
+/// stream, so the walk is bounded instead of recursing to whatever depth a file
+/// claims.
+const MAX_CHAPTER_DEPTH: u32 = 4;
+
+/// Cap on the chapters one `Chapters` element yields, nested ones included. An
+/// atom costs the file a couple of bytes and costs the reader a whole
+/// [`Chapter`], so the walk stops rather than turning a small crafted element
+/// into a huge tree.
+const MAX_CHAPTERS: usize = 4096;
+
+/// Parse the Segment `Chapters` element. Each `EditionEntry` holds
+/// `ChapterAtom`s, which may nest further atoms; every edition's atoms land in
+/// one list, in file order. `ChapterTimeStart` / `ChapterTimeEnd` are already
+/// nanoseconds (unlike Cluster timestamps, they are not scaled by
+/// `TimestampScale`), and the first `ChapterDisplay` gives the title and its
+/// `ChapLanguage`. A hidden edition or atom is skipped: it is not meant to reach
+/// a chapter menu.
+fn parse_chapters(body: &[u8]) -> Vec<Chapter> {
+    let mut out = Vec::new();
+    let mut budget = MAX_CHAPTERS;
+    for (id, edition) in children(body) {
+        if id != ID_EDITION_ENTRY || flag_is_set(edition, ID_EDITION_FLAG_HIDDEN) {
+            continue;
+        }
+        collect_chapter_atoms(edition, 0, &mut budget, &mut out);
+    }
+    out
+}
+
+/// Whether a master element declares `flag` as a non-zero child.
+fn flag_is_set(body: &[u8], flag: u32) -> bool {
+    children(body).any(|(id, data)| id == flag && read_uint(data) != 0)
+}
+
+/// Append the `ChapterAtom` children of `body` to `out`, descending into nested
+/// atoms until `depth` hits [`MAX_CHAPTER_DEPTH`] or `budget` runs out.
+fn collect_chapter_atoms(body: &[u8], depth: u32, budget: &mut usize, out: &mut Vec<Chapter>) {
+    for (id, atom) in children(body) {
+        if id != ID_CHAPTER_ATOM || flag_is_set(atom, ID_CHAPTER_FLAG_HIDDEN) {
+            continue;
+        }
+        if *budget == 0 {
+            return;
+        }
+        *budget -= 1;
+        let mut chapter = Chapter::default();
+        let mut display_seen = false;
+        for (child_id, data) in children(atom) {
+            match child_id {
+                ID_CHAPTER_TIME_START => chapter.start_ns = read_uint(data),
+                ID_CHAPTER_TIME_END => chapter.end_ns = Some(read_uint(data)),
+                ID_CHAPTER_DISPLAY if !display_seen => {
+                    display_seen = true;
+                    for (display_id, text) in children(data) {
+                        match display_id {
+                            ID_CHAP_STRING => {
+                                chapter.title = bounded_string(text).unwrap_or("").into()
+                            }
+                            ID_CHAP_LANGUAGE => {
+                                chapter.language = bounded_string(text).map(String::from)
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        if depth < MAX_CHAPTER_DEPTH {
+            collect_chapter_atoms(atom, depth + 1, budget, &mut chapter.sub_chapters);
+        }
+        out.push(chapter);
+    }
+}
+
 /// One parsed `TrackEntry`: the track, its `CodecPrivate` decoder-init bytes
 /// (empty for codecs that carry none), and the metadata the entry itself
 /// declares (`Name` / `Language`, M788).
@@ -992,14 +1093,14 @@ fn parse_tracks(body: &[u8]) -> Vec<ParsedTrack> {
     tracks
 }
 
-/// Cap on a `TrackEntry` string surfaced as a tag (`Name` / `Language`). The
-/// length is the file's claim, so an absurd one is ignored rather than copied.
-const MAX_TRACK_STRING_LEN: usize = 4096;
+/// Cap on a short string element surfaced to the application (a `TrackEntry`
+/// `Name` / `Language`, a `ChapString`). The length is the file's claim, so an
+/// absurd one is ignored rather than copied.
+const MAX_STRING_ELEMENT_LEN: usize = 4096;
 
-/// A `TrackEntry` string element as a tag value: UTF-8 and within the length cap,
-/// else nothing.
-fn track_string(data: &[u8]) -> Option<&str> {
-    if data.len() > MAX_TRACK_STRING_LEN {
+/// A short string element's text: UTF-8 and within the length cap, else nothing.
+fn bounded_string(data: &[u8]) -> Option<&str> {
+    if data.len() > MAX_STRING_ELEMENT_LEN {
         return None;
     }
     core::str::from_utf8(data).ok()
@@ -1026,9 +1127,9 @@ fn parse_track_entry(body: &[u8]) -> Option<ParsedTrack> {
             ID_TRACK_UID => uid = read_uint(data),
             // The track's own metadata: where ffmpeg puts a stream's title and
             // language (a `Tags` element carries the rest).
-            ID_TRACK_NAME => name = track_string(data),
-            ID_LANGUAGE => language = track_string(data),
-            ID_LANGUAGE_BCP47 => language_bcp47 = track_string(data),
+            ID_TRACK_NAME => name = bounded_string(data),
+            ID_LANGUAGE => language = bounded_string(data),
+            ID_LANGUAGE_BCP47 => language_bcp47 = bounded_string(data),
             ID_CODEC_ID => codec_id = data,
             // decoder-init bytes (FLAC's fLaC STREAMINFO); kept per track number.
             ID_CODEC_PRIVATE => codec_private = data,
@@ -1584,6 +1685,8 @@ pub struct MatroskaMuxer {
     /// Per-track tags (track index, tags), each written as a `Targets`-scoped
     /// `Tag` inside the same `Tags` element.
     track_tags: Vec<(usize, TagList)>,
+    /// The table of contents, written as a `Chapters` element (M1046).
+    chapters: Vec<Chapter>,
     max_cluster_span_ms: u64,
     header_written: bool,
     /// The open Cluster's base Timestamp (ms), or `None` before the first frame.
@@ -1668,6 +1771,7 @@ impl MatroskaMuxer {
             tracks,
             tags: TagList::new(),
             track_tags: Vec::new(),
+            chapters: Vec::new(),
             max_cluster_span_ms: DEFAULT_MAX_CLUSTER_SPAN_MS,
             header_written: false,
             cluster_base_ms: None,
@@ -1724,6 +1828,15 @@ impl MatroskaMuxer {
         self
     }
 
+    /// Attach the table of contents, written as a `Chapters` element after
+    /// Tracks on the first frame (the inverse of
+    /// [`MatroskaDemuxer::chapters`]). Chapter times are stream-time
+    /// nanoseconds, the same units the demuxer reports.
+    pub fn with_chapters(mut self, chapters: Vec<Chapter>) -> Self {
+        self.chapters = chapters;
+        self
+    }
+
     /// Cap the time span of one Cluster (ms); a frame this far past the Cluster
     /// base opens a new one. Keep it within the i16 block-timestamp range (±32 s).
     pub fn with_max_cluster_span_ms(mut self, span_ms: u64) -> Self {
@@ -1774,12 +1887,13 @@ impl MatroskaMuxer {
             // until EOS, and a streaming caller has already emitted the header.
             let (info, duration_at) = info_element(self.two_pass);
             let tracks = tracks_element(&self.tracks, &self.track_tags);
+            let chapters = chapters_element(&self.chapters);
             // Empty when every per-track tag went into its TrackEntry instead.
             let tags = tags_element(&self.tags, &self.track_tags);
             if self.two_pass {
                 // Front SeekHead with fixed-layout entries (21 bytes each), so
                 // the Cues position (unknown until EOS) is patchable in place.
-                let entries = 3 + usize::from(!tags.is_empty());
+                let entries = 3 + usize::from(!chapters.is_empty()) + usize::from(!tags.is_empty());
                 let sh_len = (5 + entries * SEEK_ENTRY_LEN) as u64;
                 id_bytes(ID_SEEK_HEAD, &mut out);
                 out.push(0x80 | (entries * SEEK_ENTRY_LEN) as u8);
@@ -1788,6 +1902,10 @@ impl MatroskaMuxer {
                 pos += info.len() as u64;
                 seek_entry(ID_TRACKS, pos, &mut out);
                 pos += tracks.len() as u64;
+                if !chapters.is_empty() {
+                    seek_entry(ID_CHAPTERS, pos, &mut out);
+                    pos += chapters.len() as u64;
+                }
                 if !tags.is_empty() {
                     seek_entry(ID_TAGS, pos, &mut out);
                 }
@@ -1798,6 +1916,7 @@ impl MatroskaMuxer {
             self.duration_patch_offset = duration_at.map(|rel| out.len() + rel);
             out.extend_from_slice(&info);
             out.extend_from_slice(&tracks);
+            out.extend_from_slice(&chapters);
             out.extend_from_slice(&tags);
             self.segment_pos = (out.len() - seg_data_start) as u64;
             self.header_written = true;
@@ -2239,6 +2358,52 @@ fn tags_element(tags: &TagList, track_tags: &[(usize, TagList)]) -> Vec<u8> {
         return Vec::new();
     }
     elem_vec(ID_TAGS, &body)
+}
+
+/// The `Chapters` element (M1046): one default `EditionEntry` holding every
+/// top-level chapter as a `ChapterAtom`, the inverse of [`parse_chapters`].
+/// Empty when there are no chapters, so nothing is written.
+fn chapters_element(chapters: &[Chapter]) -> Vec<u8> {
+    if chapters.is_empty() {
+        return Vec::new();
+    }
+    let mut edition = elem_vec(ID_EDITION_FLAG_DEFAULT, &uint_bytes(1));
+    let mut next_uid = 0u64;
+    for chapter in chapters {
+        edition.extend_from_slice(&chapter_atom(chapter, 0, &mut next_uid));
+    }
+    elem_vec(ID_CHAPTERS, &elem_vec(ID_EDITION_ENTRY, &edition))
+}
+
+/// One `ChapterAtom`: its UID, its times in nanoseconds, a `ChapterDisplay` for
+/// the title, then its nested atoms. `ChapterUID` is mandatory and must be
+/// non-zero, so they are numbered from 1 in document order. `ChapLanguage` is
+/// written only when the chapter names one, leaving the spec default otherwise.
+/// Nesting is bounded like the read side: a caller's deeper atoms are dropped
+/// rather than recursed into.
+fn chapter_atom(chapter: &Chapter, depth: u32, next_uid: &mut u64) -> Vec<u8> {
+    *next_uid += 1;
+    let mut body = elem_vec(ID_CHAPTER_UID, &uint_bytes(*next_uid));
+    body.extend_from_slice(&elem_vec(
+        ID_CHAPTER_TIME_START,
+        &uint_bytes(chapter.start_ns),
+    ));
+    if let Some(end_ns) = chapter.end_ns {
+        body.extend_from_slice(&elem_vec(ID_CHAPTER_TIME_END, &uint_bytes(end_ns)));
+    }
+    if !chapter.title.is_empty() {
+        let mut display = elem_vec(ID_CHAP_STRING, chapter.title.as_bytes());
+        if let Some(language) = &chapter.language {
+            display.extend_from_slice(&elem_vec(ID_CHAP_LANGUAGE, language.as_bytes()));
+        }
+        body.extend_from_slice(&elem_vec(ID_CHAPTER_DISPLAY, &display));
+    }
+    if depth < MAX_CHAPTER_DEPTH {
+        for sub in &chapter.sub_chapters {
+            body.extend_from_slice(&chapter_atom(sub, depth + 1, next_uid));
+        }
+    }
+    elem_vec(ID_CHAPTER_ATOM, &body)
 }
 
 /// One `SimpleTag`: the tag's Matroska `TagName` and its `TagString`.
@@ -3470,7 +3635,7 @@ mod tests {
         assert_eq!(d.tracks().len(), 1, "the track itself still parses");
 
         // Non-UTF-8 Name and an oversized Language: both skipped, the track parses.
-        let oversized = vec![b'x'; MAX_TRACK_STRING_LEN + 1];
+        let oversized = vec![b'x'; MAX_STRING_ELEMENT_LEN + 1];
         let extra = [
             elem(&[0x53, 0x6E], &[0xFF, 0xFE]),
             elem(&[0x22, 0xB5, 0x9C], &oversized),

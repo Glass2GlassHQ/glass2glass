@@ -2276,7 +2276,7 @@ for the WebM codec subset. Scope is one Segment / one track with definite-size
 Clusters (multi-track A/V muxing is the sibling `mkvmuxn`). Both muxers also
 have a `seekable` (two-pass) mode (M770): the element buffers the file and
 finalizes it at EOS with a front `SeekHead` (fixed-layout entries indexing
-Info / Tracks / Tags / Cues, the Cues position patched in place once known), so
+Info / Tracks / Chapters / Tags / Cues, the Cues position patched in place once known), so
 the file seeks from byte 0 without reading past the Clusters; mutually
 exclusive with `streamable`, and the default streaming output is unchanged. The
 same finalize fills an `Info` `Duration` reserved beside them (M794): the value
@@ -2299,6 +2299,26 @@ them and where a player reads them, so the muxers route `Tag::Title` /
 `Tag::Language` there instead of writing a `SimpleTag`, and the demuxers merge
 both sources into one `StreamTag` per stream (M788). A missing `Language` stays
 absent rather than becoming the spec's implicit `eng`.
+
+Chapters (the table of contents, GStreamer's `GstToc`) travel the same
+out-of-band route in both containers (M1046). `g2g_core::Chapter` is the shared
+shape: a stream-time start in nanoseconds, an optional end, a title, an optional
+language, and nested sub-chapters. A demuxer posts what it parsed as
+`BusMessage::Chapters` (once, like the tags), so an application builds a chapter
+menu and seeks to a start without touching the data path; a muxer takes the same
+list through `with_chapters`. Matroska is the container that holds the whole
+shape: the `Chapters` element's `EditionEntry` / `ChapterAtom` tree, whose times
+are unscaled nanoseconds rather than `TimestampScale` ticks, with nesting and a
+per-chapter `ChapLanguage`. The muxers write one default edition; the demuxer
+skips a hidden edition or atom, since it is not meant to reach a menu, and bounds
+both the nesting depth and the chapter count because the file supplies them. MP4
+carries less: the reader prefers the QuickTime chapter *text* track (a media
+`trak` points at it with `tref/chap`, and its samples are the titles timed by its
+own sample table, so each chapter gets an end) and falls back to the Nero
+`udta/chpl` list, which is a flat array of starts in 100 ns ticks with no ends
+and no nesting. The writers emit `chpl` only, in the version-1 shape ffmpeg's
+`mov` muxer produces, so a g2g-written MP4 round-trips titles and starts but
+reports the chapters open-ended.
 
 The Ogg demuxer is the third, the same parser + element split on
 `Caps::ByteStream{Ogg}`. `g2g-plugins::ogg::OggDemuxer` parses RFC 3533 pages

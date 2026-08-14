@@ -40,8 +40,8 @@ use g2g_core::{
 };
 
 use crate::fmp4::{
-    parse_all_tracks, parse_fragments_multi, parse_progressive_multi, starts_with_param_set,
-    Sample, TrackHeader, TrackKind,
+    parse_all_tracks, parse_chapters, parse_fragments_multi, parse_progressive_multi,
+    starts_with_param_set, Sample, TrackHeader, TrackKind,
 };
 use crate::mp4box::{find_box, parse_ilst_tags};
 
@@ -475,8 +475,9 @@ impl Mp4DemuxN {
     }
 
     /// Post the file's metadata, once: the `moov`'s own `udta/meta/ilst` as a
-    /// [`BusMessage::Tag`] and each `trak`'s as a [`BusMessage::StreamTag`] on
-    /// that track's stream id (M838). The two scopes stay separate, so an
+    /// [`BusMessage::Tag`], each `trak`'s as a [`BusMessage::StreamTag`] on that
+    /// track's stream id (M838), and the file's chapters as a
+    /// [`BusMessage::Chapters`] (M1046). The two tag scopes stay separate, so an
     /// application applies the conflict rule (`g2g_core::resolve_tags`: the
     /// stream's tag wins on its own pad) itself.
     fn post_tags(&mut self, tracks: &[TrackHeader]) {
@@ -502,6 +503,10 @@ impl Mp4DemuxN {
                 stream_id: stream_id(t.track_id),
                 tags: t.tags.clone(),
             });
+        }
+        let chapters = parse_chapters(&self.buf);
+        if !chapters.is_empty() {
+            bus.try_post(BusMessage::Chapters(chapters));
         }
     }
 

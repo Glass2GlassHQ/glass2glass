@@ -39,9 +39,9 @@ use alloc::vec::Vec;
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
-    Dim, ElementMetadata, FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate,
-    PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate,
+    AsyncElement, AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, Chapter,
+    ConfigureOutcome, Dim, ElementMetadata, FrameTiming, G2gError, MemoryDomain, OutputSink,
+    PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate,
     SubPictureFormat, TagList, TextFormat, VideoCodec,
 };
 
@@ -70,6 +70,8 @@ pub struct MkvMux {
     caps: Option<Caps>,
     mux: Option<MatroskaMuxer>,
     tags: TagList,
+    /// The table of contents, written as a `Chapters` element (M1046).
+    chapters: Vec<Chapter>,
     configured: bool,
     emitted: u64,
     /// Live / streamable mode (the gst `streamable` property): suppress the `Cues`
@@ -116,6 +118,7 @@ impl MkvMux {
             caps: None,
             mux: None,
             tags: TagList::new(),
+            chapters: Vec::new(),
             configured: false,
             emitted: 0,
             streamable: false,
@@ -131,6 +134,14 @@ impl MkvMux {
     /// Attach stream metadata, written as a `Tags` element in the header.
     pub fn with_tags(mut self, tags: TagList) -> Self {
         self.tags = tags;
+        self
+    }
+
+    /// Attach the table of contents, written as a `Chapters` element in the
+    /// header. Chapter times are stream-time nanoseconds. Builder only: a
+    /// launch line has no syntax for a nested chapter list.
+    pub fn with_chapters(mut self, chapters: Vec<Chapter>) -> Self {
+        self.chapters = chapters;
         self
     }
 
@@ -457,7 +468,8 @@ impl AsyncElement for MkvMux {
                             spec,
                             codec_private: self.codec_private(),
                         }])
-                        .with_tags(self.tags.clone());
+                        .with_tags(self.tags.clone())
+                        .with_chapters(self.chapters.clone());
                         if self.seekable {
                             mux = mux.with_two_pass();
                         }
