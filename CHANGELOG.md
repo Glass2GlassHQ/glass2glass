@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1042: the MoQ and WHEP sources spell `num-buffers` like gst `basesrc` (-1 unlimited, 0 emits nothing then EOS).
+- M1041: the overlay, caption, network-sink, and tensor-batching multi-pad elements declare their memory domains too.
 - M1040: `num-buffers=0` on the capture and ingest sources emits nothing then EOS, matching gst `basesrc`, instead of reading 0 as unlimited or rejecting it.
 - M1039: fan-in and fan-out elements declare their memory domains too, so a muxer or demux reading host memory gets its GPU download planned at negotiation.
 - M1038: the platform capture sources (`aaudiosrc`, `camera2src`, `coreaudiosrc`, `avfaudiosrc`, `avfvideosrc`, `screencapturesrc`) take their constructor knobs as properties, so a launch line can set them.
