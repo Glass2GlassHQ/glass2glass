@@ -180,19 +180,34 @@ impl core::fmt::Debug for SinkState {
     }
 }
 
-/// The one property each Core Audio element takes: the device UID the device
-/// monitor reports, empty for the system default.
+/// The one property the render element takes: the device UID the device monitor
+/// reports, empty for the system default. The sink's PCM shape comes from the
+/// caps it is configured with, so there is nothing else to tune.
 static DEVICE_PROP_RENDER: &[PropertySpec] = &[PropertySpec::new(
     "device",
     PropKind::Str,
     "Core Audio device UID to render on (empty = system default)",
 )];
 
-static DEVICE_PROP_CAPTURE: &[PropertySpec] = &[PropertySpec::new(
-    "device",
-    PropKind::Str,
-    "Core Audio device UID to capture from (empty = system default)",
-)];
+/// `CoreAudioSrc`'s settable properties. `device` matches gst `osxaudiosrc` (a
+/// UID here rather than an integer id) and `num-buffers` matches gst `basesrc`;
+/// rate and channels are caps on the gst side, so they take the g2g `alsasrc`
+/// names.
+static CAPTURE_PROPS: &[PropertySpec] = &[
+    PropertySpec::new(
+        "device",
+        PropKind::Str,
+        "Core Audio device UID to capture from (empty = system default)",
+    ),
+    PropertySpec::new("samplerate", PropKind::Uint, "samples per second").with_default("48000"),
+    PropertySpec::new("channels", PropKind::Uint, "channel count").with_default("2"),
+    PropertySpec::new(
+        "num-buffers",
+        PropKind::Int,
+        "buffers to capture then EOS (-1 = forever)",
+    )
+    .with_default("-1"),
+];
 
 /// Point a freshly created queue at the device with this UID. Empty leaves it
 /// on the system default. Fails loud: a UID nothing carries would otherwise
@@ -619,6 +634,8 @@ unsafe impl Send for CoreAudioSrc {}
 impl CoreAudioSrc {
     /// A capture source at `sample_rate` / `channels` (S16LE), emitting
     /// `target_buffers` buffers then EOS (`u64::MAX` = capture until stopped).
+    /// All three are also settable as the `samplerate` / `channels` /
+    /// `num-buffers` properties.
     pub fn new(sample_rate: u32, channels: u8, target_buffers: u64) -> Self {
         Self {
             device: String::new(),
@@ -740,22 +757,49 @@ impl SourceLoop for CoreAudioSrc {
     }
 
     fn properties(&self) -> &'static [PropertySpec] {
-        DEVICE_PROP_CAPTURE
+        CAPTURE_PROPS
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
         match name {
             "device" => {
                 self.device = value.as_str().ok_or(PropError::Type)?.to_string();
-                Ok(())
             }
-            _ => Err(PropError::Unknown),
+            // Zero would divide by zero in the run loop's per-frame timing, so
+            // a degenerate PCM shape is refused instead of applied.
+            "samplerate" => {
+                let rate = value.as_uint().ok_or(PropError::Type)?;
+                if rate == 0 || rate > u32::MAX as u64 {
+                    return Err(PropError::Value);
+                }
+                self.sample_rate = rate as u32;
+            }
+            "channels" => {
+                let channels = value.as_uint().ok_or(PropError::Type)?;
+                if channels == 0 || channels > u8::MAX as u64 {
+                    return Err(PropError::Value);
+                }
+                self.channels = channels as u8;
+            }
+            "num-buffers" => {
+                let n = value.as_int().ok_or(PropError::Type)?;
+                self.target_buffers = if n < 0 { u64::MAX } else { n as u64 };
+            }
+            _ => return Err(PropError::Unknown),
         }
+        Ok(())
     }
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
             "device" => Some(PropValue::Str(self.device.clone())),
+            "samplerate" => Some(PropValue::Uint(u64::from(self.sample_rate))),
+            "channels" => Some(PropValue::Uint(u64::from(self.channels))),
+            "num-buffers" => Some(PropValue::Int(if self.target_buffers == u64::MAX {
+                -1
+            } else {
+                self.target_buffers as i64
+            })),
             _ => None,
         }
     }

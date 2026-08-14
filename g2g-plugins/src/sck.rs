@@ -182,7 +182,8 @@ unsafe impl Send for ScreenCaptureSrc {}
 
 impl ScreenCaptureSrc {
     /// A display-capture source emitting `target_buffers` frames then EOS
-    /// (`u64::MAX` = capture until stopped).
+    /// (`u64::MAX` = capture until stopped). Also settable as the `num-buffers`
+    /// property.
     pub fn new(target_buffers: u64) -> Self {
         Self {
             target_buffers,
@@ -302,13 +303,23 @@ impl SourceLoop for ScreenCaptureSrc {
         Ok(ConfigureOutcome::Accepted)
     }
 
+    /// The capture geometry comes from the display, so it is reported as caps
+    /// rather than offered as a knob; `num-buffers` matches gst `basesrc`.
     fn properties(&self) -> &'static [PropertySpec] {
-        const PROPS: &[PropertySpec] = &[PropertySpec::new(
-            "cv-output",
-            PropKind::Bool,
-            "emit retained IOSurface-backed CVPixelBuffers (zero-copy) instead of packed NV12",
-        )
-        .with_default("false")];
+        const PROPS: &[PropertySpec] = &[
+            PropertySpec::new(
+                "cv-output",
+                PropKind::Bool,
+                "emit retained IOSurface-backed CVPixelBuffers (zero-copy) instead of packed NV12",
+            )
+            .with_default("false"),
+            PropertySpec::new(
+                "num-buffers",
+                PropKind::Int,
+                "frames to emit then EOS (-1 = forever)",
+            )
+            .with_default("-1"),
+        ];
         PROPS
     }
 
@@ -316,15 +327,24 @@ impl SourceLoop for ScreenCaptureSrc {
         match name {
             "cv-output" => {
                 self.cv_output = value.as_bool().ok_or(PropError::Type)?;
-                Ok(())
             }
-            _ => Err(PropError::Unknown),
+            "num-buffers" => {
+                let n = value.as_int().ok_or(PropError::Type)?;
+                self.target_buffers = if n < 0 { u64::MAX } else { n as u64 };
+            }
+            _ => return Err(PropError::Unknown),
         }
+        Ok(())
     }
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
             "cv-output" => Some(PropValue::Bool(self.cv_output)),
+            "num-buffers" => Some(PropValue::Int(if self.target_buffers == u64::MAX {
+                -1
+            } else {
+                self.target_buffers as i64
+            })),
             _ => None,
         }
     }

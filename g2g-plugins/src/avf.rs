@@ -249,7 +249,8 @@ unsafe impl Send for AvfVideoSrc {}
 
 impl AvfVideoSrc {
     /// A camera source emitting `target_buffers` frames then EOS
-    /// (`u64::MAX` = capture until stopped).
+    /// (`u64::MAX` = capture until stopped). Also settable as the `num-buffers`
+    /// property.
     pub fn new(target_buffers: u64) -> Self {
         Self {
             device: String::new(),
@@ -374,6 +375,12 @@ impl SourceLoop for AvfVideoSrc {
                 "emit retained IOSurface-backed CVPixelBuffers (zero-copy) instead of packed NV12",
             )
             .with_default("false"),
+            PropertySpec::new(
+                "num-buffers",
+                PropKind::Int,
+                "frames to emit then EOS (-1 = forever)",
+            )
+            .with_default("-1"),
         ];
         PROPS
     }
@@ -382,20 +389,28 @@ impl SourceLoop for AvfVideoSrc {
         match name {
             "device" => {
                 self.device = value.as_str().ok_or(PropError::Type)?.to_string();
-                Ok(())
             }
             "cv-output" => {
                 self.cv_output = value.as_bool().ok_or(PropError::Type)?;
-                Ok(())
             }
-            _ => Err(PropError::Unknown),
+            "num-buffers" => {
+                let n = value.as_int().ok_or(PropError::Type)?;
+                self.target_buffers = if n < 0 { u64::MAX } else { n as u64 };
+            }
+            _ => return Err(PropError::Unknown),
         }
+        Ok(())
     }
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
             "device" => Some(PropValue::Str(self.device.clone())),
             "cv-output" => Some(PropValue::Bool(self.cv_output)),
+            "num-buffers" => Some(PropValue::Int(if self.target_buffers == u64::MAX {
+                -1
+            } else {
+                self.target_buffers as i64
+            })),
             _ => None,
         }
     }
@@ -506,6 +521,8 @@ unsafe impl Send for AvfAudioSrc {}
 impl AvfAudioSrc {
     /// A mic source at `sample_rate` / `channels` (S16LE), emitting
     /// `target_buffers` buffers then EOS (`u64::MAX` = capture until stopped).
+    /// All three are also settable as the `samplerate` / `channels` /
+    /// `num-buffers` properties.
     pub fn new(sample_rate: u32, channels: u8, target_buffers: u64) -> Self {
         Self {
             device: String::new(),
@@ -612,6 +629,73 @@ impl SourceLoop for AvfAudioSrc {
         self.open()?;
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
+    }
+
+    /// `device` mirrors the camera source's; rate and channels are caps on the
+    /// gst side, so they take the g2g `alsasrc` names, and `num-buffers`
+    /// matches gst `basesrc`.
+    fn properties(&self) -> &'static [PropertySpec] {
+        const PROPS: &[PropertySpec] = &[
+            PropertySpec::new(
+                "device",
+                PropKind::Str,
+                "AVCaptureDevice unique id, the persistent id (empty = default microphone)",
+            ),
+            PropertySpec::new("samplerate", PropKind::Uint, "samples per second")
+                .with_default("48000"),
+            PropertySpec::new("channels", PropKind::Uint, "channel count").with_default("2"),
+            PropertySpec::new(
+                "num-buffers",
+                PropKind::Int,
+                "buffers to capture then EOS (-1 = forever)",
+            )
+            .with_default("-1"),
+        ];
+        PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            "device" => {
+                self.device = value.as_str().ok_or(PropError::Type)?.to_string();
+            }
+            // Zero would divide by zero in the run loop's per-frame timing, so
+            // a degenerate PCM shape is refused instead of applied.
+            "samplerate" => {
+                let rate = value.as_uint().ok_or(PropError::Type)?;
+                if rate == 0 || rate > u32::MAX as u64 {
+                    return Err(PropError::Value);
+                }
+                self.sample_rate = rate as u32;
+            }
+            "channels" => {
+                let channels = value.as_uint().ok_or(PropError::Type)?;
+                if channels == 0 || channels > u8::MAX as u64 {
+                    return Err(PropError::Value);
+                }
+                self.channels = channels as u8;
+            }
+            "num-buffers" => {
+                let n = value.as_int().ok_or(PropError::Type)?;
+                self.target_buffers = if n < 0 { u64::MAX } else { n as u64 };
+            }
+            _ => return Err(PropError::Unknown),
+        }
+        Ok(())
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "device" => Some(PropValue::Str(self.device.clone())),
+            "samplerate" => Some(PropValue::Uint(u64::from(self.sample_rate))),
+            "channels" => Some(PropValue::Uint(u64::from(self.channels))),
+            "num-buffers" => Some(PropValue::Int(if self.target_buffers == u64::MAX {
+                -1
+            } else {
+                self.target_buffers as i64
+            })),
+            _ => None,
+        }
     }
 
     fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a> {
