@@ -69,6 +69,8 @@ pub struct MoqtSrc {
     cfg: SubscriberConfig,
     /// The media track to play; empty takes the catalog's first.
     track_name: String,
+    /// `u64::MAX` runs until the stream ends; otherwise stop after this many
+    /// frames and emit EOS.
     num_buffers: u64,
 
     configured: bool,
@@ -97,7 +99,7 @@ impl MoqtSrc {
                 ..SubscriberConfig::default()
             },
             track_name: String::new(),
-            num_buffers: 0,
+            num_buffers: u64::MAX,
             configured: false,
             selected_track: String::new(),
             objects_received: 0,
@@ -134,7 +136,8 @@ impl MoqtSrc {
         self.catchup_objects
     }
 
-    /// Stop after `n` frames (the init segment counts as one).
+    /// Stop after `n` frames (the init segment counts as one). 0 emits EOS
+    /// without subscribing.
     pub fn with_num_buffers(mut self, n: u64) -> Self {
         self.num_buffers = n;
         self
@@ -211,6 +214,9 @@ impl SourceLoop for MoqtSrc {
             if !self.configured {
                 return Err(G2gError::NotConfigured);
             }
+            if crate::numbuffers::finished_at_zero_limit(self.num_buffers, out).await? {
+                return Ok(0);
+            }
             let mut driver = connect(&self.cfg).await?;
 
             // The catalog names the tracks. Without it, fall back to the
@@ -242,15 +248,15 @@ impl SourceLoop for MoqtSrc {
 
             let limit = self.num_buffers;
             loop {
-                while let Some(payload) = driver.state().subs[media].next_payload() {
+                while emitted < limit {
+                    let Some(payload) = driver.state().subs[media].next_payload() else {
+                        break;
+                    };
                     out.push(PipelinePacket::DataFrame(byte_frame(payload, emitted)))
                         .await?;
                     emitted += 1;
-                    if limit != 0 && emitted >= limit {
-                        break;
-                    }
                 }
-                if (limit != 0 && emitted >= limit) || driver.state().subs[media].drained() {
+                if emitted >= limit || driver.state().subs[media].drained() {
                     break;
                 }
                 match driver.pump().await? {
@@ -317,7 +323,7 @@ impl SourceLoop for MoqtSrc {
             "max-buffer-bytes" => self.cfg.max_buffer_bytes = uint(&value)?,
             "max-object-size" => self.cfg.max_object_bytes = uint(&value)?,
             "catchup-groups" => self.cfg.catchup_groups = uint(&value)?,
-            "num-buffers" => self.num_buffers = uint(&value)?,
+            "num-buffers" => crate::numbuffers::set_num_buffers(&mut self.num_buffers, &value)?,
             "timeout" => self.cfg.timeout_ms = uint(&value)?,
             _ => return Err(PropError::Unknown),
         }
@@ -339,7 +345,7 @@ impl SourceLoop for MoqtSrc {
             "max-buffer-bytes" => Some(PropValue::Uint(self.cfg.max_buffer_bytes)),
             "max-object-size" => Some(PropValue::Uint(self.cfg.max_object_bytes)),
             "catchup-groups" => Some(PropValue::Uint(self.cfg.catchup_groups)),
-            "num-buffers" => Some(PropValue::Uint(self.num_buffers)),
+            "num-buffers" => Some(crate::numbuffers::get_num_buffers(self.num_buffers)),
             "timeout" => Some(PropValue::Uint(self.cfg.timeout_ms)),
             _ => None,
         }
@@ -420,10 +426,11 @@ static MOQTSRC_PROPS: &[PropertySpec] = &[
     .with_default("0"),
     PropertySpec::new(
         "num-buffers",
-        PropKind::Uint,
-        "stop after this many frames, init segment included (0 = unlimited)",
+        PropKind::Int,
+        "frames to emit then EOS, init segment included (-1 = until the stream ends)",
     )
-    .with_default("0"),
+    .with_default("-1")
+    .with_range("-1", "9223372036854775807"),
     PropertySpec::new(
         "timeout",
         PropKind::Uint,

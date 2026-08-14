@@ -235,16 +235,18 @@ impl<'a> GraphNodeRef<'a> {
         }
     }
 
-    /// The memory domains this node accepts on its input pad (M354), for the
-    /// converter auto-plug. A source has no input; fan-in/out nodes are
-    /// domain-transparent here, so both report [`DomainSet::ALL`] (no requirement).
+    /// The memory domains this node accepts on its input pad(s) (M354), for the
+    /// converter auto-plug and the allocation cascade. A muxer declares one set
+    /// covering every input pad; a terminal fan-out source has no input, so it
+    /// reports [`DomainSet::ALL`] (no requirement), as does a source.
     pub fn input_domains(&self) -> crate::memory::DomainSet {
         match self {
             GraphNodeRef::Element(e) => e.input_domains(),
-            GraphNodeRef::Source(_)
-            | GraphNodeRef::Muxer(_)
-            | GraphNodeRef::FanoutSource(_)
-            | GraphNodeRef::Demux(_) => crate::memory::DomainSet::ALL,
+            GraphNodeRef::Muxer(m) => m.input_domains(),
+            GraphNodeRef::Demux(d) => d.input_domains(),
+            GraphNodeRef::Source(_) | GraphNodeRef::FanoutSource(_) => {
+                crate::memory::DomainSet::ALL
+            }
         }
     }
 }
@@ -267,6 +269,11 @@ impl core::fmt::Debug for GraphNodeRef<'_> {
 /// runner uses are mirrored.
 pub trait DynMultiOutputElement: ElementBound {
     fn caps_constraint_as_input(&self) -> CapsConstraint<'_>;
+    /// Dyn-safe mirror of [`MultiOutputElement::input_domains`]. Default
+    /// [`DomainSet::ALL`].
+    fn input_domains(&self) -> DomainSet {
+        DomainSet::ALL
+    }
     fn port_output_caps(&self, port: usize) -> Option<Caps>;
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError>;
     fn process<'a>(
@@ -301,6 +308,10 @@ pub trait DynMultiOutputElement: ElementBound {
 impl<T: MultiOutputElement> DynMultiOutputElement for T {
     fn caps_constraint_as_input(&self) -> CapsConstraint<'_> {
         MultiOutputElement::caps_constraint_as_input(self)
+    }
+
+    fn input_domains(&self) -> DomainSet {
+        MultiOutputElement::input_domains(self)
     }
 
     fn port_output_caps(&self, port: usize) -> Option<Caps> {
@@ -388,6 +399,10 @@ impl MultiOutputElement for DemuxRef<'_> {
         self.0.process(packet, out)
     }
 
+    fn input_domains(&self) -> DomainSet {
+        self.0.input_domains()
+    }
+
     fn port_output_caps(&self, port: usize) -> Option<Caps> {
         self.0.port_output_caps(port)
     }
@@ -419,6 +434,10 @@ impl MultiOutputElement for DemuxRef<'_> {
 impl<'b> DynMultiOutputElement for &'b mut (dyn DynMultiOutputElement + 'b) {
     fn caps_constraint_as_input(&self) -> CapsConstraint<'_> {
         (**self).caps_constraint_as_input()
+    }
+
+    fn input_domains(&self) -> DomainSet {
+        (**self).input_domains()
     }
 
     fn port_output_caps(&self, port: usize) -> Option<Caps> {
@@ -3023,7 +3042,10 @@ fn cascade_allocation(
                         _ => join_alloc(joined, edge_proposal[oe])?,
                     };
                 }
-                edge_proposal[in_e] = joined;
+                // A plain tee carries no element and narrows nothing; a demux
+                // node folds in the domains it declared it can parse, so a
+                // System-only demuxer makes a GPU producer download (M1039).
+                edge_proposal[in_e] = narrow_to_input_domains(joined, node_input_domains(vg, node));
             }
             NodeKind::Source => {
                 let out_e = vg.out_edges(node)[0];
@@ -3076,11 +3098,15 @@ fn cascade_allocation(
                         ));
                     }
                 }
+                let accepts = node_input_domains(vg, node);
                 if let Some(GraphNodeRef::Muxer(mux)) = vg.element(node) {
                     for &in_e in vg.in_edges(node) {
                         let pad = vg.edge(in_e).dst.index as usize;
                         let caps = solution[in_e].clone();
-                        edge_proposal[in_e] = mux.propose_allocation_for_input(pad, &caps);
+                        edge_proposal[in_e] = narrow_to_input_domains(
+                            mux.propose_allocation_for_input(pad, &caps),
+                            accepts,
+                        );
                     }
                 }
             }
@@ -3143,6 +3169,15 @@ fn narrow_to_input_domains(
 /// none.
 fn edge_meta_requests(proposal: Option<AllocationParams>) -> MetaRequests {
     proposal.map(|p| p.meta_requests).unwrap_or_default()
+}
+
+/// The set of memory domains a node accepts on its inputs, for folding into the
+/// proposal it hands upstream. A node without an element (a structural tee)
+/// requires nothing.
+fn node_input_domains(vg: &ValidatedGraph<GraphNodeRef<'_>>, node: NodeId) -> DomainSet {
+    vg.element(node)
+        .map(|n| n.input_domains())
+        .unwrap_or(DomainSet::ALL)
 }
 
 /// The set of memory domains a node can emit (M351), for reconciling a
@@ -3589,6 +3624,13 @@ pub async fn transform_arm<E: AsyncElement>(
                     // call just banked is charged to this visit too, so the
                     // journey's work segment is compute.
                     p.record_visit(seq, wait_ns, t0, push_wait_ns);
+                }
+                // M1036: renegotiation a transform originates rather than
+                // relays (a decoder that read a new resolution out of the
+                // bitstream); store it on the input link, where the upstream
+                // producer observes it as `PushOutcome::Reconfigure`.
+                if let Some(reconf) = elem.take_reconfigure() {
+                    in_rx.request_reconfigure(reconf);
                 }
             }
             None => return Ok(0),

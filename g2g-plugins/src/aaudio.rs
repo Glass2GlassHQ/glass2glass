@@ -30,6 +30,7 @@ use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, FrameTiming,
     G2gError, HardwareError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    PropError, PropKind, PropValue, PropertySpec,
 };
 
 use alloc::boxed::Box;
@@ -231,6 +232,12 @@ impl AsyncElement for AAudioSink {
     where
         Self: 'a;
 
+    /// Reads host memory, so it takes system frames only. The allocation
+    /// cascade turns that into a download demand on a GPU producer.
+    fn input_domains(&self) -> g2g_core::memory::DomainSet {
+        g2g_core::memory::DomainSet::only(g2g_core::memory::MemoryDomainKind::System)
+    }
+
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
         pcm_params(upstream_caps)?;
         Ok(upstream_caps.clone())
@@ -344,6 +351,8 @@ impl core::fmt::Debug for AAudioSrc {
 impl AAudioSrc {
     /// A capture source requesting `sample_rate` / `channels`, emitting
     /// `target_buffers` buffers then EOS (`u64::MAX` = capture until stopped).
+    /// All three are also settable as the `samplerate` / `channels` /
+    /// `num-buffers` properties.
     pub fn new(sample_rate: u32, channels: u8, target_buffers: u64) -> Self {
         Self {
             req_sample_rate: sample_rate.max(1),
@@ -415,6 +424,43 @@ impl SourceLoop for AAudioSrc {
         stream.request_start().map_err(audio_err)?;
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        AAUDIOSRC_PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            // Zero is not a stream AAudio can open, so a degenerate PCM shape is
+            // refused instead of carried into the builder.
+            "samplerate" => {
+                let rate = value.as_uint().ok_or(PropError::Type)?;
+                if rate == 0 || rate > u32::MAX as u64 {
+                    return Err(PropError::Value);
+                }
+                self.req_sample_rate = rate as u32;
+            }
+            "channels" => {
+                let channels = value.as_uint().ok_or(PropError::Type)?;
+                if channels == 0 || channels > u8::MAX as u64 {
+                    return Err(PropError::Value);
+                }
+                self.req_channels = channels as u8;
+            }
+            "num-buffers" => crate::numbuffers::set_num_buffers(&mut self.target_buffers, &value)?,
+            _ => return Err(PropError::Unknown),
+        }
+        Ok(())
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "samplerate" => Some(PropValue::Uint(u64::from(self.req_sample_rate))),
+            "channels" => Some(PropValue::Uint(u64::from(self.req_channels))),
+            "num-buffers" => Some(crate::numbuffers::get_num_buffers(self.target_buffers)),
+            _ => None,
+        }
     }
 
     fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a> {
@@ -498,3 +544,19 @@ impl PadTemplates for AAudioSrc {
         }))])
     }
 }
+
+/// `AAudioSrc`'s settable properties. AAudio capture has no gst element to match
+/// names with, so rate / channels take the g2g `alsasrc` / `audiotestsrc` names
+/// and `num-buffers` matches gst `basesrc`. Rate and channels are requests: the
+/// opened stream's actuals are what the produced caps report.
+static AAUDIOSRC_PROPS: &[PropertySpec] = &[
+    PropertySpec::new("samplerate", PropKind::Uint, "requested samples per second")
+        .with_default("48000"),
+    PropertySpec::new("channels", PropKind::Uint, "requested channel count").with_default("2"),
+    PropertySpec::new(
+        "num-buffers",
+        PropKind::Int,
+        "buffers to capture then EOS (-1 = forever)",
+    )
+    .with_default("-1"),
+];

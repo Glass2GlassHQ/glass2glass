@@ -133,6 +133,10 @@ use crate::pipewiresink::PipeWireSink;
 use crate::pipewiresrc::PipeWireSrc;
 #[cfg(all(target_os = "linux", feature = "pipewire"))]
 use crate::pipewirevideosrc::PipeWireVideoSrc;
+#[cfg(feature = "png")]
+use crate::pngdec::PngDec;
+#[cfg(feature = "png")]
+use crate::pngenc::PngEnc;
 #[cfg(all(target_os = "linux", feature = "pulse-sink"))]
 use crate::pulsesink::PulseSink;
 #[cfg(all(target_os = "linux", feature = "pulse-src"))]
@@ -178,13 +182,15 @@ use crate::udpsrc::UdpSrc;
 #[cfg(all(target_os = "linux", feature = "v4l2"))]
 use crate::v4l2src::V4l2Src;
 #[cfg(all(target_os = "linux", feature = "vaapi"))]
-use crate::vaapidec::VaapiH264Dec;
+use crate::vaapidec::{VaapiH264Dec, VaapiH265Dec};
 #[cfg(feature = "vorbis")]
 use crate::vorbisdec::VorbisDec;
 #[cfg(feature = "vpx")]
 use crate::vpxenc::VpxEnc;
 #[cfg(all(target_os = "linux", feature = "wayland-sink"))]
 use crate::waylandsink::WaylandSink;
+#[cfg(feature = "webp")]
+use crate::webpdec::WebPDec;
 #[cfg(feature = "webrtc")]
 use crate::webrtcsink::WebRtcSink;
 #[cfg(feature = "webrtc")]
@@ -1030,6 +1036,17 @@ fn register_autoplug_candidates(reg: &mut Registry) {
     reg.register(ElementFactory::of::<MjpegDec>("mjpegdec", |_| {
         Box::new(MjpegDec::new())
     }));
+    // Still images (M1050): typefind types a `.png` / `.webp` file as a
+    // one-frame CompressedVideo stream, and these are what `decodebin` plugs
+    // behind it to reach raw RGBA.
+    #[cfg(feature = "png")]
+    reg.register(ElementFactory::of::<PngDec>("pngdec", |_| {
+        Box::new(PngDec::new())
+    }));
+    #[cfg(feature = "webp")]
+    reg.register(ElementFactory::of::<WebPDec>("webpdec", |_| {
+        Box::new(WebPDec::new())
+    }));
     // AV1 decode via libdav1d (software, System memory): an auto-plug candidate
     // for AV1 -> I420, alongside av1parse.
     #[cfg(feature = "dav1d")]
@@ -1080,6 +1097,11 @@ fn register_autoplug_candidates(reg: &mut Registry) {
     #[cfg(all(target_os = "linux", feature = "vaapi"))]
     reg.register(
         ElementFactory::of::<VaapiH264Dec>("vaapidec", |_| Box::new(VaapiH264Dec::new()))
+            .hardware(),
+    );
+    #[cfg(all(target_os = "linux", feature = "vaapi"))]
+    reg.register(
+        ElementFactory::of::<VaapiH265Dec>("vaapidech265", |_| Box::new(VaapiH265Dec::new()))
             .hardware(),
     );
     // Native NVDEC (M270), registered last so a default (System-memory) auto-plug
@@ -1332,6 +1354,10 @@ fn register_aliases(reg: &mut Registry) {
     // pure-Rust re_rav1d decoder when only the `rav1d` feature is built.
     reg.register_alias("avdec_av1", &["dav1ddec", "rav1ddec"]);
     reg.register_alias("vah264dec", &["ffmpegvaapidec", "vaapidec"]);
+    // H.265 has no ffmpeg VAAPI hwaccel element here, so both gst names go
+    // straight to the cros-codecs decoder.
+    reg.register_alias("vaapih265dec", &["vaapidech265"]);
+    reg.register_alias("vah265dec", &["vaapidech265"]);
     // VPx encoders: gst splits vp8enc / vp9enc; g2g has one vpxenc.
     reg.register_alias("vp8enc", &["vpxenc"]);
     reg.register_alias("vp9enc", &["vpxenc"]);
@@ -1395,6 +1421,9 @@ pub static FEATURE_GATED_ELEMENTS: &[FeatureGatedElement] = &{
         "vpxenc" => "vpx";
         "mjpegdec" => "mjpeg";
         "mjpegenc" => "mjpeg-encode";
+        "pngdec" => "png";
+        "pngenc" => "png";
+        "webpdec" => "webp";
         "dav1ddec" => "dav1d";
         "rav1ddec" => "rav1d";
         "vulkanvideodec" => "vulkan-video";
@@ -1447,6 +1476,7 @@ pub static FEATURE_GATED_ELEMENTS: &[FeatureGatedElement] = &{
         "x264enc" => "ffmpeg" on "linux";
         "avenc_aac" => "ffmpeg" on "linux";
         "vaapidec" => "vaapi" on "linux";
+        "vaapidech265" => "vaapi" on "linux";
         "nvdec" => "nvdec" on "linux";
         "nvenc" => "nvenc" on "linux";
         "jpegxsenc" => "jpegxs" on "linux";
@@ -1555,6 +1585,18 @@ fn register_feature_gated(reg: &mut Registry) {
     #[cfg(feature = "mjpeg-encode")]
     reg.register_launch(LaunchFactory::of::<MjpegEnc>("mjpegenc", || {
         Box::new(MjpegEnc::new())
+    }));
+    #[cfg(feature = "png")]
+    reg.register_launch(LaunchFactory::of::<PngDec>("pngdec", || {
+        Box::new(PngDec::new())
+    }));
+    #[cfg(feature = "png")]
+    reg.register_launch(LaunchFactory::of::<PngEnc>("pngenc", || {
+        Box::new(PngEnc::new())
+    }));
+    #[cfg(feature = "webp")]
+    reg.register_launch(LaunchFactory::of::<WebPDec>("webpdec", || {
+        Box::new(WebPDec::new())
     }));
 
     // Network sources / sinks.
@@ -1914,6 +1956,10 @@ fn register_feature_gated(reg: &mut Registry) {
     #[cfg(all(target_os = "linux", feature = "vaapi"))]
     reg.register_launch(LaunchFactory::of::<VaapiH264Dec>("vaapidec", || {
         Box::new(VaapiH264Dec::new())
+    }));
+    #[cfg(all(target_os = "linux", feature = "vaapi"))]
+    reg.register_launch(LaunchFactory::of::<VaapiH265Dec>("vaapidech265", || {
+        Box::new(VaapiH265Dec::new())
     }));
     // Native NVIDIA Video Codec SDK elements (M269 / M270): zero-copy CUDA NV12
     // <-> H.264, the gst-`nvcodec`-style pair. Explicit-select by name.

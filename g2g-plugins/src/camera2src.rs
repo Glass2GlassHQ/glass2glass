@@ -37,13 +37,14 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError, HardwareError,
-    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, Rate, RawVideoFormat,
+    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
+    PropValue, PropertySpec, Rate, RawVideoFormat,
 };
 
 use alloc::borrow::ToOwned;
 use alloc::boxed::Box;
 use alloc::ffi::CString;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 // `ndk-sys` declares the Camera2 externs but links no library for them, so pull
@@ -179,6 +180,8 @@ impl Camera2Src {
     /// A capture source at `width` x `height`, emitting `target_buffers` frames
     /// then EOS (`u64::MAX` = capture until stopped). Resolution must be one the
     /// camera supports for `YUV_420_888` (640x480 / 1280x720 are widely safe).
+    /// All three are also settable as the `width` / `height` / `num-buffers`
+    /// properties.
     pub fn new(width: u32, height: u32, target_buffers: u64) -> Self {
         Self {
             width,
@@ -192,6 +195,7 @@ impl Camera2Src {
     }
 
     /// Select a specific camera id (default: the first the manager reports).
+    /// Also settable as the `device` property.
     pub fn with_camera_id(mut self, id: impl Into<String>) -> Self {
         self.camera_id = Some(id.into());
         self
@@ -388,6 +392,39 @@ impl SourceLoop for Camera2Src {
         Ok(ConfigureOutcome::Accepted)
     }
 
+    fn properties(&self) -> &'static [PropertySpec] {
+        CAMERA2SRC_PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            "device" => {
+                let id = value.as_str().ok_or(PropError::Type)?;
+                // Empty means "whatever the manager reports first", the default.
+                self.camera_id = if id.is_empty() {
+                    None
+                } else {
+                    Some(id.to_string())
+                };
+            }
+            "width" => self.width = positive_dimension(&value)?,
+            "height" => self.height = positive_dimension(&value)?,
+            "num-buffers" => crate::numbuffers::set_num_buffers(&mut self.target_buffers, &value)?,
+            _ => return Err(PropError::Unknown),
+        }
+        Ok(())
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "device" => Some(PropValue::Str(self.camera_id.clone().unwrap_or_default())),
+            "width" => Some(PropValue::Uint(u64::from(self.width))),
+            "height" => Some(PropValue::Uint(u64::from(self.height))),
+            "num-buffers" => Some(crate::numbuffers::get_num_buffers(self.target_buffers)),
+            _ => None,
+        }
+    }
+
     fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a> {
         Box::pin(async move {
             if !self.configured {
@@ -463,6 +500,45 @@ impl PadTemplates for Camera2Src {
         }))])
     }
 }
+
+/// A frame dimension out of a property: zero would make an `ImageReader` the
+/// camera can never fill, so it is refused rather than carried into `open`.
+fn positive_dimension(value: &PropValue) -> Result<u32, PropError> {
+    match value.as_uint().ok_or(PropError::Type)? {
+        0 => Err(PropError::Value),
+        n if n > u32::MAX as u64 => Err(PropError::Value),
+        n => Ok(n as u32),
+    }
+}
+
+/// `Camera2Src`'s settable properties. `device` matches gst `ahcsrc` (the camera
+/// id the manager reports) and `num-buffers` matches gst `basesrc`; geometry is
+/// caps on the gst side, so it takes the g2g `v4l2src` names.
+static CAMERA2SRC_PROPS: &[PropertySpec] = &[
+    PropertySpec::new(
+        "device",
+        PropKind::Str,
+        "camera id to open (empty = the first the manager reports)",
+    ),
+    PropertySpec::new(
+        "width",
+        PropKind::Uint,
+        "capture width in pixels; must be a YUV_420_888 size the camera supports",
+    )
+    .with_default("640"),
+    PropertySpec::new(
+        "height",
+        PropKind::Uint,
+        "capture height in pixels; must be a YUV_420_888 size the camera supports",
+    )
+    .with_default("480"),
+    PropertySpec::new(
+        "num-buffers",
+        PropKind::Int,
+        "frames to emit then EOS (-1 = forever)",
+    )
+    .with_default("-1"),
+];
 
 /// Pack a decoded `YUV_420_888` image to tight NV12. The capture caps fix the
 /// geometry, so only the packed bytes are kept; see `yuv420::pack_yuv420_to_nv12`.

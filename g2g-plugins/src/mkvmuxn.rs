@@ -45,10 +45,10 @@ use alloc::vec::Vec;
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    split_tags, AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
-    Dim, FrameTiming, G2gError, InputAggregator, MemoryDomain, MultiInputElement, OutputSink,
-    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, SubPictureFormat, TagList,
-    TextFormat, VideoCodec,
+    split_tags, AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, Chapter,
+    ConfigureOutcome, Dim, FrameTiming, G2gError, InputAggregator, MemoryDomain, MultiInputElement,
+    OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, SubPictureFormat,
+    TagList, TextFormat, VideoCodec,
 };
 
 use crate::dvbsub::DEFAULT_PAGE_ID;
@@ -158,6 +158,8 @@ pub struct MkvMuxN {
     /// Per-input metadata, written as `Targets`-scoped `Tag`s in the same `Tags`
     /// element (M787). One (possibly empty) list per input pad.
     track_tags: Vec<TagList>,
+    /// The table of contents, written as a `Chapters` element (M1046).
+    chapters: Vec<Chapter>,
     /// The on-disk syntax a text pad's cues are written in (M898): the `S_TEXT/*`
     /// CodecID and the block framing that goes with it.
     subtitle_format: TextFormat,
@@ -186,6 +188,7 @@ impl MkvMuxN {
             pending: Vec::new(),
             tags: TagList::new(),
             track_tags: alloc::vec![TagList::new(); inputs],
+            chapters: Vec::new(),
             subtitle_format: TextFormat::Utf8,
             text_seq: alloc::vec![0; inputs],
             dvbsub_page_id: DEFAULT_PAGE_ID,
@@ -212,6 +215,14 @@ impl MkvMuxN {
         if input < self.inputs {
             self.track_tags[input] = tags;
         }
+        self
+    }
+
+    /// Attach the table of contents, written as a `Chapters` element in the
+    /// header. Chapter times are stream-time nanoseconds. Builder only: a
+    /// launch line has no syntax for a nested chapter list.
+    pub fn with_chapters(mut self, chapters: Vec<Chapter>) -> Self {
+        self.chapters = chapters;
         self
     }
 
@@ -574,6 +585,12 @@ impl MultiInputElement for MkvMuxN {
     where
         Self: 'a;
 
+    /// Reads host memory, so every pad takes system frames only. The allocation
+    /// cascade turns that into a download demand on a GPU producer.
+    fn input_domains(&self) -> g2g_core::memory::DomainSet {
+        g2g_core::memory::DomainSet::only(g2g_core::memory::MemoryDomainKind::System)
+    }
+
     fn input_count(&self) -> usize {
         self.inputs
     }
@@ -795,7 +812,9 @@ impl MultiInputElement for MkvMuxN {
                     .map(|i| track_config(i.as_ref().expect("ready"), subtitle_format))
                     .collect();
                 let (global, per_track) = split_tags(&self.tags, &self.track_tags);
-                let mut mux = MatroskaMuxer::new_multi(configs).with_tags(global);
+                let mut mux = MatroskaMuxer::new_multi(configs)
+                    .with_tags(global)
+                    .with_chapters(self.chapters.clone());
                 for (input, tags) in per_track.into_iter().enumerate() {
                     if !tags.is_empty() {
                         mux = mux.with_track_tags(input, tags);

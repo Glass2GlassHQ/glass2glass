@@ -43,7 +43,8 @@ use crate::mpegts::{
     unwrap_metadata_au_cells, EsUnit, TsDemuxer, STREAM_TYPE_AAC, STREAM_TYPE_AC3,
     STREAM_TYPE_H264, STREAM_TYPE_H265, STREAM_TYPE_METADATA_PES, STREAM_TYPE_MPEG1_AUDIO,
     STREAM_TYPE_MPEG1_VIDEO, STREAM_TYPE_MPEG2_AUDIO, STREAM_TYPE_MPEG2_VIDEO, STREAM_TYPE_MPEG4P2,
-    STREAM_TYPE_PRIVATE_PES, TAG_KEY_SERVICE_PROVIDER, TS_PACKET_LEN,
+    STREAM_TYPE_PRIVATE_PES, TAG_KEY_EVENT_NAME, TAG_KEY_EVENT_TEXT, TAG_KEY_NEXT_EVENT_NAME,
+    TAG_KEY_NEXT_EVENT_TEXT, TAG_KEY_SERVICE_PROVIDER, TS_PACKET_LEN,
 };
 
 const TS_SYNC: u8 = 0x47;
@@ -59,7 +60,7 @@ fn stream_id(pid: u16) -> alloc::string::String {
 /// [`Tag::Title`], the provider as a [`Tag::Other`] under ffprobe's
 /// `service_provider` key), and each PMT stream's ISO 639 language as a
 /// [`BusMessage::StreamTag`] on that stream's collection id. Shared by the single-
-/// and multi-output demuxers, the MPEG-TS sibling of the Matroska `TagPoster`.
+/// and multi-output demuxers, the MPEG-TS sibling of the Matroska `MetadataPoster`.
 ///
 /// The SDT describes the whole multiplex, so every service it names posts under its
 /// own `program_number` (M878), not only the one this element routes: an
@@ -71,6 +72,11 @@ fn stream_id(pid: u16) -> alloc::string::String {
 struct TagPoster {
     service_posted: bool,
     languages_posted: bool,
+    /// The parser's EIT generation this poster last posted at (M1049). Unlike the
+    /// SDT and the language descriptors, present/following events change during
+    /// the stream, so they re-post whenever a new table version arrives and never
+    /// on a table that only repeats itself.
+    eit_generation_posted: u64,
 }
 
 impl TagPoster {
@@ -100,6 +106,7 @@ impl TagPoster {
                 }
             }
         }
+        self.post_events(demux, bus);
         if self.languages_posted || demux.streams().is_empty() {
             return;
         }
@@ -113,6 +120,59 @@ impl TagPoster {
                 bus.try_post(BusMessage::StreamTag {
                     stream_id: stream_id(es.pid),
                     tags,
+                });
+            }
+        }
+    }
+
+    /// Post each service's EIT present/following text as a [`BusMessage::Tag`]
+    /// scoped to its program (M1049), the way the SDT service name posts: a
+    /// `service_id` is a `program_number`, so the two describe the same program.
+    /// The event on air and the one after it share one tag list per service, under
+    /// their own keys, since [`Tag::Title`] there is already the service name.
+    fn post_events(&mut self, demux: &TsDemuxer, bus: Option<&BusHandle>) {
+        let generation = demux.eit_generation();
+        if generation == self.eit_generation_posted {
+            return;
+        }
+        self.eit_generation_posted = generation;
+        let mut posted: Vec<u16> = Vec::new();
+        for service in demux.eit_events().iter().map(|e| e.service_id) {
+            if posted.contains(&service) {
+                continue;
+            }
+            posted.push(service);
+            let mut list = TagList::new();
+            for event in demux
+                .eit_events()
+                .iter()
+                .filter(|e| e.service_id == service)
+            {
+                let (name_key, text_key) = if event.following {
+                    (TAG_KEY_NEXT_EVENT_NAME, TAG_KEY_NEXT_EVENT_TEXT)
+                } else {
+                    (TAG_KEY_EVENT_NAME, TAG_KEY_EVENT_TEXT)
+                };
+                if !event.name.is_empty() {
+                    list.push(Tag::Other {
+                        key: name_key.into(),
+                        value: event.name.clone(),
+                    });
+                }
+                if !event.text.is_empty() {
+                    list.push(Tag::Other {
+                        key: text_key.into(),
+                        value: event.text.clone(),
+                    });
+                }
+            }
+            if list.is_empty() {
+                continue;
+            }
+            if let Some(bus) = bus {
+                bus.try_post(BusMessage::Tag {
+                    tags: list,
+                    program: Some(service),
                 });
             }
         }
@@ -144,6 +204,11 @@ pub enum TsStream {
     H265,
     /// The first MPEG-4 Part 2 (Visual) video elementary stream.
     Mpeg4Part2,
+    /// The first AV1 video elementary stream (M1049): a private PES (0x06)
+    /// carrying an AV1 registration descriptor. Each PES payload is one temporal
+    /// unit in the low-overhead OBU format, which `av1parse` and the AV1 decoders
+    /// read as-is.
+    Av1,
     /// The first MPEG-1 / MPEG-2 video elementary stream (stream_type 0x01 /
     /// 0x02). The broadcast and DVD video codec; access units are forwarded as
     /// the PES payload carries them (start-code framed, no parse element).
@@ -349,6 +414,7 @@ impl TsDemux {
             // 0x06 is a generic private PES; only an 'Opus' registration marks it
             // as Opus (else g2g does not forward it).
             STREAM_TYPE_PRIVATE_PES if es.opus_channels.is_some() => audio(AudioFormat::Opus),
+            STREAM_TYPE_PRIVATE_PES if es.av1 => (StreamType::Video, video(VideoCodec::Av1)),
             STREAM_TYPE_AC3 => audio(AudioFormat::Ac3),
             STREAM_TYPE_PRIVATE_PES if es.ac3 => audio(AudioFormat::Ac3),
             STREAM_TYPE_PRIVATE_PES if es.subtitling.is_some() => (
@@ -421,6 +487,7 @@ impl TsDemux {
             TsStream::H264 => Self::compressed_video(VideoCodec::H264),
             TsStream::H265 => Self::compressed_video(VideoCodec::H265),
             TsStream::Mpeg4Part2 => Self::compressed_video(VideoCodec::Mpeg4Part2),
+            TsStream::Av1 => Self::compressed_video(VideoCodec::Av1),
             TsStream::Mpeg2 => Self::compressed_video(VideoCodec::Mpeg2),
             TsStream::Aac => Self::compressed_audio(AudioFormat::Aac),
             TsStream::Mp2 => Self::compressed_audio(AudioFormat::Mp2),
@@ -470,6 +537,7 @@ impl TsDemux {
             TsStream::H264 => STREAM_TYPE_H264,
             TsStream::H265 => STREAM_TYPE_H265,
             TsStream::Mpeg4Part2 => STREAM_TYPE_MPEG4P2,
+            TsStream::Av1 => STREAM_TYPE_PRIVATE_PES,
             TsStream::Mpeg2 => STREAM_TYPE_MPEG2_VIDEO,
             TsStream::Aac => STREAM_TYPE_AAC,
             TsStream::Mp2 => STREAM_TYPE_MPEG1_AUDIO,
@@ -485,7 +553,7 @@ impl TsDemux {
     /// (0x03) and MPEG-2 (0x04) audio; Opus accepts the private PES 0x06 (the
     /// 'Opus' registration is checked separately, at PMT parse); Klv accepts the
     /// private PES 0x06 (the 'KLVA' registration likewise) and metadata-in-PES
-    /// 0x15.
+    /// 0x15; Av1 accepts the private PES 0x06 (its registration likewise).
     fn accepts_stream_type(stream: TsStream, stream_type: u8) -> bool {
         match stream {
             TsStream::Mp2 => {
@@ -563,6 +631,11 @@ impl TsDemux {
             {
                 continue;
             }
+            // And for AV1 on a private PES: only a PID whose descriptors carried
+            // the AV1 registration is AV1.
+            if self.stream == TsStream::Av1 && !self.demux.is_av1(u.pid) {
+                continue;
+            }
             // Likewise for DVB subtitles: only a PID whose descriptors carried a
             // subtitling_descriptor is one.
             if self.stream == TsStream::DvbSub && self.demux.subtitling(u.pid).is_none() {
@@ -592,6 +665,9 @@ impl TsDemux {
                     crate::annexb::au_is_keyframe(VideoCodec::Mpeg4Part2, &u.data)
                 }
                 TsStream::Mpeg2 => crate::annexb::au_is_keyframe(VideoCodec::Mpeg2, &u.data),
+                // AV1 is OBU-framed, not Annex-B: its resume points read from the
+                // frame header instead.
+                TsStream::Av1 => crate::av1parse::av1_keyframe(&u.data),
                 TsStream::Aac
                 | TsStream::Mp2
                 | TsStream::Opus
@@ -718,6 +794,12 @@ impl AsyncElement for TsDemux {
     where
         Self: 'a;
 
+    /// Reads host memory, so it takes system frames only. The allocation
+    /// cascade turns that into a download demand on a GPU producer.
+    fn input_domains(&self) -> g2g_core::memory::DomainSet {
+        g2g_core::memory::DomainSet::only(g2g_core::memory::MemoryDomainKind::System)
+    }
+
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
         upstream_caps.intersect(&Self::input_caps())
     }
@@ -837,7 +919,7 @@ static TSDEMUX_PROPS: &[PropertySpec] = &[
     PropertySpec::new(
         "stream",
         PropKind::Str,
-        "elementary stream to emit: h264 | h265 | mpeg2 | mpeg4part2 | aac | mp2 | opus | ac3 | klv | dvbsub | teletext",
+        "elementary stream to emit: h264 | h265 | av1 | mpeg2 | mpeg4part2 | aac | mp2 | opus | ac3 | klv | dvbsub | teletext",
     ),
     PropertySpec::new(
         "program-number",
@@ -869,6 +951,7 @@ fn ts_stream_from_str(s: &str) -> Option<TsStream> {
         "h264" => Some(TsStream::H264),
         "h265" => Some(TsStream::H265),
         "mpeg4part2" => Some(TsStream::Mpeg4Part2),
+        "av1" => Some(TsStream::Av1),
         "mpeg2" => Some(TsStream::Mpeg2),
         "aac" => Some(TsStream::Aac),
         "mp2" => Some(TsStream::Mp2),
@@ -887,6 +970,7 @@ pub(crate) fn ts_stream_to_str(stream: TsStream) -> &'static str {
         TsStream::H264 => "h264",
         TsStream::H265 => "h265",
         TsStream::Mpeg4Part2 => "mpeg4part2",
+        TsStream::Av1 => "av1",
         TsStream::Mpeg2 => "mpeg2",
         TsStream::Aac => "aac",
         TsStream::Mp2 => "mp2",
@@ -910,6 +994,7 @@ fn es_to_ts_stream(es: &crate::mpegts::ElementaryStream) -> Option<TsStream> {
         STREAM_TYPE_AAC => Some(TsStream::Aac),
         STREAM_TYPE_MPEG1_AUDIO | STREAM_TYPE_MPEG2_AUDIO => Some(TsStream::Mp2),
         STREAM_TYPE_PRIVATE_PES if es.opus_channels.is_some() => Some(TsStream::Opus),
+        STREAM_TYPE_PRIVATE_PES if es.av1 => Some(TsStream::Av1),
         STREAM_TYPE_AC3 => Some(TsStream::Ac3),
         STREAM_TYPE_PRIVATE_PES if es.ac3 => Some(TsStream::Ac3),
         // KLV and DVB subtitles stay out: this feeds the playbin fan-out, which
@@ -948,7 +1033,11 @@ pub fn forwardable_streams(demux: &TsDemuxer) -> Vec<TsStreamInfo> {
             let stream = es_to_ts_stream(es)?;
             let video = matches!(
                 stream,
-                TsStream::H264 | TsStream::H265 | TsStream::Mpeg2 | TsStream::Mpeg4Part2
+                TsStream::H264
+                    | TsStream::H265
+                    | TsStream::Mpeg2
+                    | TsStream::Mpeg4Part2
+                    | TsStream::Av1
             );
             Some(TsStreamInfo {
                 stream,
@@ -966,6 +1055,7 @@ impl PadTemplates for TsDemux {
         let source = CapsSet::from_alternatives(Vec::from([
             Self::output_caps(TsStream::H264),
             Self::output_caps(TsStream::H265),
+            Self::output_caps(TsStream::Av1),
             Self::output_caps(TsStream::Mpeg2),
             Self::output_caps(TsStream::Aac),
             Self::output_caps(TsStream::Mp2),
@@ -1209,6 +1299,11 @@ impl TsDemuxN {
             {
                 continue;
             }
+            // And a private PES routed to an av1 port is only AV1 when its
+            // descriptors carried the AV1 registration.
+            if self.ports[port] == TsStream::Av1 && !self.demux.is_av1(u.pid) {
+                continue;
+            }
             // And a private PES routed to a dvbsub port is only DVB subtitles
             // when its descriptors carried a subtitling_descriptor.
             if self.ports[port] == TsStream::DvbSub && self.demux.subtitling(u.pid).is_none() {
@@ -1334,6 +1429,7 @@ fn resolve_ts_stream_id(demux: &TsDemuxer, id: &str) -> Option<TsStream> {
         STREAM_TYPE_H265 => Some(TsStream::H265),
         STREAM_TYPE_MPEG4P2 => Some(TsStream::Mpeg4Part2),
         STREAM_TYPE_MPEG1_VIDEO | STREAM_TYPE_MPEG2_VIDEO => Some(TsStream::Mpeg2),
+        STREAM_TYPE_PRIVATE_PES if es.av1 => Some(TsStream::Av1),
         STREAM_TYPE_AAC => Some(TsStream::Aac),
         _ => None,
     }
@@ -1344,6 +1440,12 @@ impl MultiOutputElement for TsDemuxN {
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
+
+    /// Reads host memory, so it takes system frames only. The allocation
+    /// cascade turns that into a download demand on a GPU producer.
+    fn input_domains(&self) -> g2g_core::memory::DomainSet {
+        g2g_core::memory::DomainSet::only(g2g_core::memory::MemoryDomainKind::System)
+    }
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
         upstream_caps.intersect(&TsDemux::input_caps())
@@ -1463,6 +1565,7 @@ mod tests {
             opus_channels: None,
             ac3: false,
             klv: false,
+            av1: false,
             subtitling: None,
             teletext: None,
             language: None,
@@ -1487,6 +1590,7 @@ mod tests {
                 opus_channels: None,
                 ac3: false,
                 klv: false,
+                av1: false,
                 subtitling: None,
                 teletext: None,
                 language: None,

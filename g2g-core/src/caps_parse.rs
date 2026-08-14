@@ -284,6 +284,8 @@ impl CapsSet {
             "video/x-vp9" => compressed_set(VideoCodec::Vp9),
             "video/x-av1" => compressed_set(VideoCodec::Av1),
             "image/jpeg" => compressed_set(VideoCodec::Mjpeg),
+            "image/png" => compressed_set(VideoCodec::Png),
+            "image/webp" => compressed_set(VideoCodec::WebP),
             // The legacy Flash codecs, under the names gst's flvdemux emits.
             "video/x-flash-video" => compressed_set(VideoCodec::SorensonH263),
             "video/x-vp6-flash" => compressed_set(VideoCodec::Vp6 { alpha: false }),

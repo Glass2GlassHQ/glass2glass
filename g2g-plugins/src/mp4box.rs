@@ -5,7 +5,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use g2g_core::{G2gError, Tag, TagList};
+use g2g_core::{Chapter, G2gError, Tag, TagList};
 
 /// Unity 3x3 transform matrix (16.16 / 2.30 fixed point) for `tkhd`/`mvhd`.
 pub(crate) const MATRIX: [u32; 9] = [0x10000, 0, 0, 0, 0x10000, 0, 0, 0, 0x40000000];
@@ -386,13 +386,103 @@ fn itunes_tag(kind: &[u8; 4], value: &str) -> Tag {
 /// atom, a [`Tag::Number`] its integer atom, and a [`Tag::Freeform`] a `----`
 /// item. `Tag::Language` (an MP4 track field) and `Tag::Other` (no namespace to
 /// write a `----` under) are skipped.
-pub(crate) fn udta_with_tags(tags: &TagList) -> Option<Vec<u8>> {
+/// `chapters` are written alongside as a Nero `chpl` list (M1046); pass `&[]`
+/// for a per-track `udta`, which has no chapter slot.
+pub(crate) fn udta_with_tags(tags: &TagList, chapters: &[Chapter]) -> Option<Vec<u8>> {
     let ilst = ilst_items(tags);
-    if ilst.is_empty() {
+    let chpl = chpl_box(chapters);
+    if ilst.is_empty() && chpl.is_none() {
         return None;
     }
-    let meta_body = [meta_hdlr(), mp4_box(b"ilst", &ilst)].concat();
-    Some(mp4_box(b"udta", &full_box(b"meta", 0, 0, &meta_body)))
+    let mut body = Vec::new();
+    if !ilst.is_empty() {
+        let meta_body = [meta_hdlr(), mp4_box(b"ilst", &ilst)].concat();
+        body.extend_from_slice(&full_box(b"meta", 0, 0, &meta_body));
+    }
+    if let Some(chpl) = chpl {
+        body.extend_from_slice(&chpl);
+    }
+    Some(mp4_box(b"udta", &body))
+}
+
+/// A `chpl` entry counts 100 ns ticks.
+const CHPL_TICK_NS: u64 = 100;
+
+/// The `chpl` chapter count and each title's byte length are single bytes, so
+/// this is the ceiling on both.
+const CHPL_ONE_BYTE_MAX: usize = u8::MAX as usize;
+
+/// Parse the Nero `chpl` chapter list out of `container`'s `udta` box (M1046).
+/// Body layout: the full-box version / flags, then for a non-zero version a
+/// reserved `u32`, then a one-byte chapter count, then per chapter a big-endian
+/// `u64` start in 100 ns ticks, a one-byte title length, and that many UTF-8
+/// bytes. `chpl` carries no end times and no nesting, so every chapter is flat
+/// and open-ended. A truncated entry ends the list instead of failing the file.
+pub(crate) fn parse_chpl(container: &[u8]) -> Vec<Chapter> {
+    let mut out = Vec::new();
+    let Some(chpl) = find_path(container, &[b"udta", b"chpl"]) else {
+        return out;
+    };
+    let Some(&version) = chpl.first() else {
+        return out;
+    };
+    // version / flags, plus the reserved word a version-1 box inserts.
+    let mut at = if version == 0 { 4 } else { 8 };
+    let Some(&count) = chpl.get(at) else {
+        return out;
+    };
+    at += 1;
+    for _ in 0..count {
+        let Ok(ticks) = be64(chpl, at) else { break };
+        at += 8;
+        let Some(&title_len) = chpl.get(at) else {
+            break;
+        };
+        at += 1;
+        let Some(title) = chpl.get(at..at + title_len as usize) else {
+            break;
+        };
+        at += title_len as usize;
+        let Ok(title) = core::str::from_utf8(title) else {
+            continue;
+        };
+        out.push(Chapter::new(ticks.saturating_mul(CHPL_TICK_NS), title));
+    }
+    out
+}
+
+/// The Nero `chpl` box for `chapters` (the inverse of [`parse_chpl`]), or `None`
+/// when there are none. Written in the version-1 shape ffmpeg's `mov` muxer
+/// produces. The box is a flat list of start times, so a chapter's end and its
+/// nested chapters are not written.
+fn chpl_box(chapters: &[Chapter]) -> Option<Vec<u8>> {
+    let written = chapters.get(..CHPL_ONE_BYTE_MAX).unwrap_or(chapters);
+    if written.is_empty() {
+        return None;
+    }
+    let mut body = Vec::new();
+    body.extend_from_slice(&[0u8; 4]); // the version-1 reserved word
+    body.push(written.len() as u8);
+    for chapter in written {
+        body.extend_from_slice(&(chapter.start_ns / CHPL_TICK_NS).to_be_bytes());
+        let title = chpl_title(&chapter.title);
+        body.push(title.len() as u8);
+        body.extend_from_slice(title.as_bytes());
+    }
+    Some(full_box(b"chpl", 1, 0, &body))
+}
+
+/// The longest prefix of `title` a one-byte length can measure, cut on a
+/// character boundary so the written bytes stay valid UTF-8.
+fn chpl_title(title: &str) -> &str {
+    if title.len() <= CHPL_ONE_BYTE_MAX {
+        return title;
+    }
+    let mut end = CHPL_ONE_BYTE_MAX;
+    while end > 0 && !title.is_char_boundary(end) {
+        end -= 1;
+    }
+    &title[..end]
 }
 
 /// The `ilst` children for `tags`, in tag order. The two halves of an index/total
@@ -713,7 +803,7 @@ mod tests {
         ]
         .into_iter()
         .collect();
-        let moov = mp4_box(b"moov", &udta_with_tags(&tags).expect("mappable tags"));
+        let moov = mp4_box(b"moov", &udta_with_tags(&tags, &[]).expect("mappable tags"));
         let read = parse_ilst_tags(find_box(&moov, b"moov").unwrap());
         assert_eq!(
             read.tags(),
@@ -752,7 +842,7 @@ mod tests {
         ]
         .into_iter()
         .collect();
-        let udta = udta_with_tags(&tags).expect("mappable tags present");
+        let udta = udta_with_tags(&tags, &[]).expect("mappable tags present");
         // The reader recovers only the atom-mapped tags, in order.
         let moov = mp4_box(b"moov", &udta);
         let read = parse_ilst_tags(find_box(&moov, b"moov").unwrap());
@@ -770,6 +860,6 @@ mod tests {
         }]
         .into_iter()
         .collect();
-        assert!(udta_with_tags(&tags).is_none());
+        assert!(udta_with_tags(&tags, &[]).is_none());
     }
 }

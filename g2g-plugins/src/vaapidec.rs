@@ -1,10 +1,15 @@
-//! Linux H.264 decode element using the `cros-codecs` VAAPI backend.
+//! Linux H.264 / H.265 decode elements using the `cros-codecs` VAAPI backend.
 //!
-//! M13: consumes Annex-B H.264 `DataFrame`s (the bitstream `RtspSrc` /
-//! `H264Parse` already emit, `MemoryDomain::System`) and produces decoded NV12
+//! M13: consumes Annex-B `DataFrame`s (the bitstream `RtspSrc` / `H264Parse` /
+//! `H265Parse` already emit, `MemoryDomain::System`) and produces decoded NV12
 //! frames, also `MemoryDomain::System` (CPU copy out of the GBM-allocated
 //! surface). A `CapsChanged(Nv12, w, h)` is emitted before the first decoded
 //! frame and again whenever the decoder signals a resolution change.
+//!
+//! [`VaapiDec`] holds the whole decode path; the codec picks the cros-codecs
+//! stateless decoder and the NAL splitter through the [`VaapiCodec`] binding,
+//! so [`VaapiH264Dec`] and [`VaapiH265Dec`] (M1036) are the same element with
+//! a different binding.
 //!
 //! Pipeline:
 //!
@@ -19,16 +24,17 @@
 //! `unsafe impl Send` is sound on the same grounds as `MfDecode`: ownership
 //! transfer, never aliasing.
 //!
+//! A mid-stream resolution change (`DecoderEvent::FormatChanged` reporting a
+//! new display resolution) both re-emits the output `CapsChanged` and stashes
+//! a `Reconfigure::Propose` carrying the new input geometry, which the runner
+//! collects through `take_reconfigure` and relays up the input link.
+//!
 //! Deferred:
 //! - Zero-copy `MemoryDomain::DmaBuf` output. The GBM-allocated surface is
 //!   already a DMA-buf; exposing its fd via `OwnedDmaBuf` is a follow-up that
 //!   needs a refcount story to keep the surface alive until downstream
 //!   consumers release it. This element copies pixels into `System` memory
 //!   to match `MfDecode`'s shape.
-//! - H.265 decode. The same stateless decoder framework supports it; a sibling
-//!   element keyed on `VideoCodec::H265` is straightforward.
-//! - Mid-stream resolution change is observed (`DecoderEvent::FormatChanged`)
-//!   but resolution-driven `Reconfigure` upstream is not yet plumbed.
 //!
 //! Known runtime limitations (cros-codecs 0.0.6, not g2g):
 //! - On AMD desktop GPUs (radeonsi), `libva::Display::open()` and bitstream
@@ -52,15 +58,20 @@
 //!   once the SPS lands. Upstream patch pending.
 
 use core::future::Future;
+use core::marker::PhantomData;
 use core::pin::Pin;
 use std::path::PathBuf;
+use std::rc::Rc;
 
+use alloc::borrow::Cow;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use cros_codecs::bitstream_utils::NalIterator;
 use cros_codecs::codec::h264::parser::Nalu as H264Nalu;
+use cros_codecs::codec::h265::parser::Nalu as H265Nalu;
 use cros_codecs::decoder::stateless::h264::H264;
+use cros_codecs::decoder::stateless::h265::H265;
 use cros_codecs::decoder::stateless::{
     DecodeError, DynStatelessVideoDecoder, StatelessDecoder, StatelessVideoDecoder,
 };
@@ -69,19 +80,100 @@ use cros_codecs::libva;
 use cros_codecs::video_frame::gbm_video_frame::{GbmDevice, GbmUsage};
 use cros_codecs::video_frame::generic_dma_video_frame::GenericDmaVideoFrame;
 use cros_codecs::video_frame::{VideoFrame, UV_PLANE, Y_PLANE};
-use cros_codecs::{BlockingMode, Fourcc};
+use cros_codecs::{BlockingMode, Fourcc, Resolution};
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
+use g2g_core::memory::{DomainSet, MemoryDomainKind, SystemSlice};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata,
     FrameTiming, G2gError, HardwareError, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
-    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat, VideoCodec,
+    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat,
+    Reconfigure, VideoCodec,
 };
 
 /// Default DRM render node. The user can pick a different device via
-/// [`VaapiH264Dec::with_render_node`] for multi-GPU systems.
+/// [`VaapiDec::with_render_node`] for multi-GPU systems.
 const DEFAULT_RENDER_NODE: &str = "/dev/dri/renderD128";
+
+/// The codec half of the VAAPI decode path: which cros-codecs stateless
+/// decoder to build, how to split an access unit into NAL units, and the
+/// names this element goes by. Implemented by [`H264Codec`] / [`H265Codec`];
+/// cros-codecs keys both the decoder type and the NAL parser on the codec, so
+/// they have to travel together.
+pub trait VaapiCodec: 'static {
+    /// The compressed format this decoder consumes.
+    const CODEC: VideoCodec;
+    /// `G2G_DEBUG` filtering key, also the name in error messages.
+    const LOG_CATEGORY: &'static str;
+    /// `gst-inspect` long name.
+    const LONG_NAME: &'static str;
+    /// `gst-inspect` description.
+    const DESCRIPTION: &'static str;
+
+    /// Build the cros-codecs stateless decoder over an open VA display.
+    fn open_decoder(
+        display: Rc<libva::Display>,
+    ) -> Result<DynStatelessVideoDecoder<GenericDmaVideoFrame>, G2gError>;
+
+    /// Split one Annex-B access unit into its NAL units.
+    fn nal_units(bitstream: &[u8]) -> Box<dyn Iterator<Item = Cow<'_, [u8]>> + '_>;
+}
+
+/// H.264 binding for [`VaapiDec`].
+#[derive(Debug)]
+pub struct H264Codec;
+
+impl VaapiCodec for H264Codec {
+    const CODEC: VideoCodec = VideoCodec::H264;
+    const LOG_CATEGORY: &'static str = "VaapiH264Dec";
+    const LONG_NAME: &'static str = "VA-API H.264 decoder";
+    const DESCRIPTION: &'static str = "Hardware H.264 decode via VA-API";
+
+    fn open_decoder(
+        display: Rc<libva::Display>,
+    ) -> Result<DynStatelessVideoDecoder<GenericDmaVideoFrame>, G2gError> {
+        Ok(
+            StatelessDecoder::<H264, _>::new_vaapi(display, BlockingMode::Blocking)
+                .map_err(|_| G2gError::Hardware(HardwareError::V4l2(0)))?
+                .into_trait_object(),
+        )
+    }
+
+    fn nal_units(bitstream: &[u8]) -> Box<dyn Iterator<Item = Cow<'_, [u8]>> + '_> {
+        Box::new(NalIterator::<H264Nalu>::new(bitstream))
+    }
+}
+
+/// H.265 binding for [`VaapiDec`].
+#[derive(Debug)]
+pub struct H265Codec;
+
+impl VaapiCodec for H265Codec {
+    const CODEC: VideoCodec = VideoCodec::H265;
+    const LOG_CATEGORY: &'static str = "VaapiH265Dec";
+    const LONG_NAME: &'static str = "VA-API H.265 decoder";
+    const DESCRIPTION: &'static str = "Hardware H.265 decode via VA-API";
+
+    fn open_decoder(
+        display: Rc<libva::Display>,
+    ) -> Result<DynStatelessVideoDecoder<GenericDmaVideoFrame>, G2gError> {
+        Ok(
+            StatelessDecoder::<H265, _>::new_vaapi(display, BlockingMode::Blocking)
+                .map_err(|_| G2gError::Hardware(HardwareError::V4l2(0)))?
+                .into_trait_object(),
+        )
+    }
+
+    fn nal_units(bitstream: &[u8]) -> Box<dyn Iterator<Item = Cow<'_, [u8]>> + '_> {
+        Box::new(NalIterator::<H265Nalu>::new(bitstream))
+    }
+}
+
+/// VA-API H.264 decoder.
+pub type VaapiH264Dec = VaapiDec<H264Codec>;
+
+/// VA-API H.265 decoder.
+pub type VaapiH265Dec = VaapiDec<H265Codec>;
 
 /// One decoded picture, pixels already copied out of the GBM surface.
 struct DecodedNv12 {
@@ -98,7 +190,7 @@ struct DecodedNv12 {
 ///
 /// let decoder = VaapiH264Dec::with_render_node("/dev/dri/renderD128");
 /// ```
-pub struct VaapiH264Dec {
+pub struct VaapiDec<C: VaapiCodec> {
     render_node: PathBuf,
     gbm: Option<std::sync::Arc<GbmDevice>>,
     decoder: Option<DynStatelessVideoDecoder<GenericDmaVideoFrame>>,
@@ -108,8 +200,12 @@ pub struct VaapiH264Dec {
     /// `PipelinePacket::CapsChanged`. See `ffmpegdec.rs` for the full
     /// notes; same shape across all three decoders.
     input_caps: Option<Caps>,
+    /// Upstream request parked by a mid-stream resolution change, handed to
+    /// the runner by `take_reconfigure`.
+    pending_reconfigure: Option<Reconfigure>,
     configured: bool,
     emitted: u64,
+    codec: PhantomData<C>,
 }
 
 // SAFETY: `DynStatelessVideoDecoder` owns an `Rc<libva::Display>` (`!Send`).
@@ -119,11 +215,11 @@ pub struct VaapiH264Dec {
 // the element through `&mut self` (never concurrently), and the contained `Rc`
 // is moved with the element — no clone is shared across the move boundary, so
 // the non-atomic refcount is never raced.
-unsafe impl Send for VaapiH264Dec {}
+unsafe impl<C: VaapiCodec> Send for VaapiDec<C> {}
 
-impl core::fmt::Debug for VaapiH264Dec {
+impl<C: VaapiCodec> core::fmt::Debug for VaapiDec<C> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("VaapiH264Dec")
+        f.debug_struct(C::LOG_CATEGORY)
             .field("render_node", &self.render_node)
             .field("configured", &self.configured)
             .field("emitted", &self.emitted)
@@ -131,13 +227,13 @@ impl core::fmt::Debug for VaapiH264Dec {
     }
 }
 
-impl Default for VaapiH264Dec {
+impl<C: VaapiCodec> Default for VaapiDec<C> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl VaapiH264Dec {
+impl<C: VaapiCodec> VaapiDec<C> {
     pub fn new() -> Self {
         Self::with_render_node(DEFAULT_RENDER_NODE)
     }
@@ -150,8 +246,10 @@ impl VaapiH264Dec {
             info: None,
             last_caps: None,
             input_caps: None,
+            pending_reconfigure: None,
             configured: false,
             emitted: 0,
+            codec: PhantomData,
         }
     }
 
@@ -170,7 +268,7 @@ impl VaapiH264Dec {
         // cros-codecs takes timestamps as `u64`. The unit is opaque to the
         // backend — it's echoed back unchanged on the decoded handle — so we
         // feed nanoseconds straight through to avoid lossy conversions.
-        for nal in NalIterator::<H264Nalu>::new(bitstream) {
+        for nal in C::nal_units(bitstream) {
             self.feed_nal(nal.as_ref(), pts_ns, decoded)?;
         }
         Ok(())
@@ -244,9 +342,18 @@ impl VaapiH264Dec {
             };
             match event {
                 DecoderEvent::FormatChanged => {
+                    let previous = self.info.as_ref().map(|i| i.display_resolution);
                     // Re-borrow after consuming the event.
                     let decoder = self.decoder.as_mut().expect("decoder still present");
-                    self.info = decoder.stream_info().cloned();
+                    let info = decoder.stream_info().cloned();
+                    if let Some(current) = info.as_ref().map(|i| i.display_resolution) {
+                        if let Some(request) =
+                            geometry_reconfigure::<C>(previous, current, self.input_caps.as_ref())
+                        {
+                            self.pending_reconfigure = Some(request);
+                        }
+                    }
+                    self.info = info;
                 }
                 DecoderEvent::FrameReady(handle) => {
                     let pts_ns = handle.timestamp();
@@ -273,13 +380,13 @@ impl VaapiH264Dec {
     }
 }
 
-impl PadTemplates for VaapiH264Dec {
-    /// Static superset for auto-plug: H.264 in (any geometry), raw NV12 out
+impl<C: VaapiCodec> PadTemplates for VaapiDec<C> {
+    /// Static superset for auto-plug: the codec in (any geometry), raw NV12 out
     /// (the only format the VAAPI path produces, copied from the GBM surface).
     fn pad_templates() -> Vec<PadTemplate> {
         Vec::from([
             PadTemplate::sink(CapsSet::one(Caps::CompressedVideo {
-                codec: VideoCodec::H264,
+                codec: C::CODEC,
                 width: Dim::Any,
                 height: Dim::Any,
                 framerate: Rate::Any,
@@ -295,17 +402,17 @@ impl PadTemplates for VaapiH264Dec {
     }
 }
 
-impl AsyncElement for VaapiH264Dec {
+impl<C: VaapiCodec> AsyncElement for VaapiDec<C> {
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
-        // Consumes H.264 at any geometry; intersecting narrows the proposal
-        // and rejects non-H.264 inputs.
+        // Consumes its codec at any geometry; intersecting narrows the proposal
+        // and rejects every other format.
         let supported = Caps::CompressedVideo {
-            codec: VideoCodec::H264,
+            codec: C::CODEC,
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
@@ -313,32 +420,43 @@ impl AsyncElement for VaapiH264Dec {
         upstream_caps.intersect(&supported)
     }
 
-    /// M16 step 5m: native `DerivedOutput` — accepts H.264 at any
+    /// Annex-B input the decoder reads with the CPU before handing it to
+    /// libva: system memory only.
+    fn input_domains(&self) -> DomainSet {
+        DomainSet::only(MemoryDomainKind::System)
+    }
+
+    /// A mid-stream resolution change parks a counter-proposal for the input
+    /// link here; the runner relays it to the upstream producer.
+    fn take_reconfigure(&mut self) -> Option<Reconfigure> {
+        self.pending_reconfigure.take()
+    }
+
+    fn log_category(&self) -> &'static str {
+        C::LOG_CATEGORY
+    }
+
+    /// M16 step 5m: native `DerivedOutput` — accepts the codec at any
     /// geometry and produces NV12 at the same dims/framerate. The closure
     /// validates the input format and returns an empty set on mismatch, so
-    /// the solver rejects non-H.264 upstream at negotiation time instead of
+    /// the solver rejects a foreign upstream at negotiation time instead of
     /// via the dynamic `intercept_caps` callback. Mixed chains get real
-    /// per-link caps from the solver: H.264 to the decoder, NV12 to the
+    /// per-link caps from the solver: the codec to the decoder, NV12 to the
     /// sink. Mirrors `FfmpegH264Dec` (step 5k); the VAAPI backend only ever
     /// emits NV12, so there is no output-format choice.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
-        CapsConstraint::DerivedOutput(Box::new(|input: &Caps| derive_output_caps(input)))
+        CapsConstraint::DerivedOutput(Box::new(|input: &Caps| derive_output_caps::<C>(input)))
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         match absolute_caps {
-            Caps::CompressedVideo {
-                codec: VideoCodec::H264,
-                ..
-            } => {}
+            Caps::CompressedVideo { codec, .. } if *codec == C::CODEC => {}
             _ => return Err(G2gError::CapsMismatch),
         }
         let display = libva::Display::open().ok_or(G2gError::Hardware(HardwareError::V4l2(0)))?;
         let gbm = GbmDevice::open(&self.render_node)
             .map_err(|_| G2gError::Hardware(HardwareError::V4l2(0)))?;
-        let decoder = StatelessDecoder::<H264, _>::new_vaapi(display, BlockingMode::Blocking)
-            .map_err(|_| G2gError::Hardware(HardwareError::V4l2(0)))?
-            .into_trait_object();
+        let decoder = C::open_decoder(display)?;
         self.gbm = Some(gbm);
         self.decoder = Some(decoder);
         self.configured = true;
@@ -347,9 +465,9 @@ impl AsyncElement for VaapiH264Dec {
 
     fn metadata(&self) -> ElementMetadata {
         ElementMetadata::new(
-            "VA-API H.264 decoder",
+            C::LONG_NAME,
             "Codec/Decoder/Video/Hardware",
-            "Hardware H.264 decode via VA-API",
+            C::DESCRIPTION,
             "g2g",
         )
     }
@@ -394,9 +512,7 @@ impl AsyncElement for VaapiH264Dec {
             let mut decoded = Vec::new();
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let slice = frame
-                        .domain
-                        .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
+                    let slice = frame.domain.require_system_slice(C::LOG_CATEGORY)?;
                     self.feed_access_unit(slice, frame.timing.pts_ns, &mut decoded)?;
                 }
                 PipelinePacket::CapsChanged(c) => {
@@ -407,10 +523,7 @@ impl AsyncElement for VaapiH264Dec {
                     // from decoded stream info at the decode boundary
                     // so the ordering invariant from §3 is preserved.
                     match &c {
-                        Caps::CompressedVideo {
-                            codec: VideoCodec::H264,
-                            ..
-                        } => {}
+                        Caps::CompressedVideo { codec, .. } if *codec == C::CODEC => {}
                         _ => return Err(G2gError::CapsMismatch),
                     }
                     self.input_caps = Some(c);
@@ -442,7 +555,7 @@ impl AsyncElement for VaapiH264Dec {
                     // `ffmpegdec.rs` for the full rationale.
                     #[cfg(debug_assertions)]
                     if let Some(input) = self.input_caps.as_ref() {
-                        let expected = derive_output_caps(input);
+                        let expected = derive_output_caps::<C>(input);
                         debug_assert!(
                             !expected
                                 .intersect(&CapsSet::one(new_caps.clone()))
@@ -478,14 +591,14 @@ impl AsyncElement for VaapiH264Dec {
 /// Shared by the `DerivedOutput` constraint closure and the
 /// workaround-#3 Phase A debug assertion. VAAPI only emits NV12, so
 /// there's no output-format choice.
-fn derive_output_caps(input: &Caps) -> CapsSet {
+fn derive_output_caps<C: VaapiCodec>(input: &Caps) -> CapsSet {
     match input {
         Caps::CompressedVideo {
-            codec: VideoCodec::H264,
+            codec,
             width,
             height,
             framerate,
-        } => CapsSet::one(Caps::RawVideo {
+        } if *codec == C::CODEC => CapsSet::one(Caps::RawVideo {
             format: RawVideoFormat::Nv12,
             width: width.clone(),
             height: height.clone(),
@@ -494,6 +607,30 @@ fn derive_output_caps(input: &Caps) -> CapsSet {
         }),
         _ => CapsSet::from_alternatives(Vec::new()),
     }
+}
+
+/// The upstream request a `FormatChanged` warrants. Only a real change earns
+/// one: the first format the stream reports is the geometry negotiation
+/// already solved for. The proposal is input-side caps (the link it travels
+/// up), carrying the geometry the bitstream turned out to have.
+fn geometry_reconfigure<C: VaapiCodec>(
+    previous: Option<Resolution>,
+    current: Resolution,
+    input_caps: Option<&Caps>,
+) -> Option<Reconfigure> {
+    if previous? == current {
+        return None;
+    }
+    let framerate = match input_caps {
+        Some(Caps::CompressedVideo { framerate, .. }) => framerate.clone(),
+        _ => Rate::Any,
+    };
+    Some(Reconfigure::Propose(Caps::CompressedVideo {
+        codec: C::CODEC,
+        width: Dim::Fixed(current.width),
+        height: Dim::Fixed(current.height),
+        framerate,
+    }))
 }
 
 fn nv12_caps(w: u32, h: u32) -> Caps {
@@ -596,6 +733,40 @@ mod tests {
     fn unconfigured_decoder_reports_zero_decoded() {
         let dec = VaapiH264Dec::new();
         assert_eq!(dec.decoded_count(), 0);
+    }
+
+    #[test]
+    fn geometry_reconfigure_only_on_a_real_change() {
+        let r = |w, h| Resolution {
+            width: w,
+            height: h,
+        };
+        let input = Caps::CompressedVideo {
+            codec: VideoCodec::H265,
+            width: Dim::Fixed(1280),
+            height: Dim::Fixed(720),
+            framerate: Rate::Fixed(30 << 16),
+        };
+        // First format: nothing to renegotiate.
+        assert_eq!(
+            geometry_reconfigure::<H265Codec>(None, r(1280, 720), Some(&input)),
+            None
+        );
+        // Same geometry again: nothing either.
+        assert_eq!(
+            geometry_reconfigure::<H265Codec>(Some(r(1280, 720)), r(1280, 720), Some(&input)),
+            None
+        );
+        // A real change proposes the new input geometry, framerate kept.
+        assert_eq!(
+            geometry_reconfigure::<H265Codec>(Some(r(1280, 720)), r(1920, 1080), Some(&input)),
+            Some(Reconfigure::Propose(Caps::CompressedVideo {
+                codec: VideoCodec::H265,
+                width: Dim::Fixed(1920),
+                height: Dim::Fixed(1080),
+                framerate: Rate::Fixed(30 << 16),
+            }))
+        );
     }
 
     #[test]

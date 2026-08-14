@@ -2358,6 +2358,13 @@ where
                     if let Some(p) = timed {
                         p.record_proc_since(t0);
                     }
+                    // M1036: renegotiation this transform originates rather
+                    // than relays (a decoder that read a new resolution out of
+                    // the bitstream) goes up its own input link, where the
+                    // source observes it as `PushOutcome::Reconfigure`.
+                    if let Some(reconf) = transform.take_reconfigure() {
+                        link1_rx.request_reconfigure(reconf);
+                    }
                 }
                 None => return Ok(()),
             }

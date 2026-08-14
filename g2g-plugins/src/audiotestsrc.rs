@@ -229,10 +229,7 @@ impl SourceLoop for AudioTestSrc {
             "samplerate" => self.sample_rate = value.as_uint().ok_or(PropError::Type)? as u32,
             "channels" => self.channels = value.as_uint().ok_or(PropError::Type)? as u8,
             "freq" => self.tone_hz = value.as_uint().ok_or(PropError::Type)? as u32,
-            "num-buffers" => {
-                let n = value.as_int().ok_or(PropError::Type)?;
-                self.target_buffers = if n < 0 { u64::MAX } else { n as u64 };
-            }
+            "num-buffers" => crate::numbuffers::set_num_buffers(&mut self.target_buffers, &value)?,
             "wave" => {
                 let s = value.as_str().ok_or(PropError::Type)?;
                 self.wave = wave_from_str(s).ok_or(PropError::Value)?;
@@ -247,11 +244,7 @@ impl SourceLoop for AudioTestSrc {
             "samplerate" => Some(PropValue::Uint(self.sample_rate as u64)),
             "channels" => Some(PropValue::Uint(self.channels as u64)),
             "freq" => Some(PropValue::Uint(self.tone_hz as u64)),
-            "num-buffers" => Some(PropValue::Int(if self.target_buffers == u64::MAX {
-                -1
-            } else {
-                self.target_buffers as i64
-            })),
+            "num-buffers" => Some(crate::numbuffers::get_num_buffers(self.target_buffers)),
             "wave" => Some(PropValue::Str(wave_to_str(self.wave).into())),
             _ => None,
         }

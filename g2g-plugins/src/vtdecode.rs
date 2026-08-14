@@ -289,8 +289,8 @@ impl VtDecode {
         // SPS(7)/PPS(8)/AUD(9); H.265 excludes VPS(32)/SPS(33)/PPS(34)/AUD(35).
         let codec = self.codec;
         let avcc = to_avcc(au, |nal| match codec {
-            VideoCodec::H265 => !matches!(h265_nal_type(nal), Some(32 | 33 | 34 | 35)),
-            _ => !matches!(h264_nal_type(nal), Some(7 | 8 | 9)),
+            VideoCodec::H265 => !matches!(h265_nal_type(nal), Some(32..=35)),
+            _ => !matches!(h264_nal_type(nal), Some(7..=9)),
         });
         if avcc.is_empty() {
             return Ok(()); // parameter-set-only access unit, nothing to decode
@@ -322,6 +322,12 @@ impl AsyncElement for VtDecode {
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
+
+    /// Reads host memory, so it takes system frames only. The allocation
+    /// cascade turns that into a download demand on a GPU producer.
+    fn input_domains(&self) -> g2g_core::memory::DomainSet {
+        g2g_core::memory::DomainSet::only(g2g_core::memory::MemoryDomainKind::System)
+    }
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
         // Consumes the configured codec at any geometry; intersecting narrows the
@@ -631,7 +637,8 @@ unsafe extern "C-unwind" fn output_callback(
     if image_buffer.is_null() {
         return; // dropped frame, not an error
     }
-    // A CVPixelBufferRef IS a CVImageBufferRef in CoreVideo (typedef), so this
+    // SAFETY: non-null checked above and valid for the callback. A
+    // CVPixelBufferRef IS a CVImageBufferRef in CoreVideo (typedef), so this
     // reinterpret is sound.
     let pb = unsafe { &*(image_buffer as *const CVPixelBuffer) };
 
@@ -726,8 +733,9 @@ unsafe fn build_session(
     if st != 0 {
         return Err(G2gError::Hardware(HardwareError::Other));
     }
-    // Adopt the +1 Create result (the CoreFoundation Create rule);
-    // CMVideoFormatDescription is an alias of CMFormatDescription.
+    // SAFETY: the create returned 0, so `fmt` holds a +1 reference. Adopt it
+    // (the CoreFoundation Create rule). CMVideoFormatDescription is an alias
+    // of CMFormatDescription.
     let format = unsafe {
         CFRetained::from_raw(
             NonNull::new(fmt as *mut CMFormatDescription)
@@ -779,6 +787,7 @@ unsafe fn build_session(
     if st != 0 {
         return Err(G2gError::Hardware(HardwareError::Other));
     }
+    // SAFETY: the create returned 0, so `session` is a +1 reference we adopt.
     let session = unsafe {
         CFRetained::from_raw(NonNull::new(session).ok_or(G2gError::Hardware(HardwareError::Other))?)
     };
@@ -800,6 +809,8 @@ unsafe fn decode_into(state: &DecoderState, avcc: &[u8], pts_ns: u64) -> Result<
     // Block buffer that owns a copy of the AVCC bytes (null memory_block + a
     // length lets VT allocate; ReplaceDataBytes fills it).
     let mut block: *mut CMBlockBuffer = ptr::null_mut();
+    // SAFETY: a null memory block plus a length asks VT to allocate the backing
+    // store, the other pointers are null (allowed) or the valid `block` out slot.
     let st = unsafe {
         CMBlockBuffer::create_with_memory_block(
             None,
@@ -816,6 +827,7 @@ unsafe fn decode_into(state: &DecoderState, avcc: &[u8], pts_ns: u64) -> Result<
     if st != 0 {
         return Err(G2gError::Hardware(HardwareError::Other));
     }
+    // SAFETY: the create returned 0, so `block` is a +1 reference we adopt.
     let block = unsafe {
         CFRetained::from_raw(NonNull::new(block).ok_or(G2gError::Hardware(HardwareError::Other))?)
     };
@@ -859,6 +871,7 @@ unsafe fn decode_into(state: &DecoderState, avcc: &[u8], pts_ns: u64) -> Result<
     if st != 0 {
         return Err(G2gError::Hardware(HardwareError::Other));
     }
+    // SAFETY: the create returned 0, so `sample` is a +1 reference we adopt.
     let sample = unsafe {
         CFRetained::from_raw(NonNull::new(sample).ok_or(G2gError::Hardware(HardwareError::Other))?)
     };

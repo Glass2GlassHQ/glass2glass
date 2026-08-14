@@ -130,8 +130,8 @@ pub struct WebRtcWhepSrc {
     turn_pass: String,
     /// Which track to subscribe to (H.264 video by default, or Opus audio).
     media: Media,
-    /// Stop after this many access units and emit EOS (0 = unbounded). The
-    /// bounded path is for tests / smoke runs.
+    /// Stop after this many access units and emit EOS (`u64::MAX` = unbounded).
+    /// The bounded path is for tests / smoke runs.
     frame_limit: u64,
     configured: bool,
 }
@@ -157,7 +157,7 @@ impl WebRtcWhepSrc {
             turn_user: String::new(),
             turn_pass: String::new(),
             media: Media::Video,
-            frame_limit: 0,
+            frame_limit: u64::MAX,
             configured: false,
         }
     }
@@ -200,7 +200,8 @@ impl WebRtcWhepSrc {
         self
     }
 
-    /// Stop after `n` access units (then EOS). For tests / bounded runs.
+    /// Stop after `n` access units (then EOS). 0 emits EOS without POSTing to
+    /// the server. For tests / bounded runs.
     pub fn with_frame_limit(mut self, n: u64) -> Self {
         self.frame_limit = n;
         self
@@ -301,6 +302,7 @@ impl SourceLoop for WebRtcWhepSrc {
                 };
                 Ok(())
             }
+            "num-buffers" => crate::numbuffers::set_num_buffers(&mut self.frame_limit, &value),
             _ => Err(PropError::Unknown),
         }
     }
@@ -320,6 +322,7 @@ impl SourceLoop for WebRtcWhepSrc {
                 }
                 .into(),
             )),
+            "num-buffers" => Some(crate::numbuffers::get_num_buffers(self.frame_limit)),
             _ => None,
         }
     }
@@ -328,6 +331,9 @@ impl SourceLoop for WebRtcWhepSrc {
         Box::pin(async move {
             if !self.configured {
                 return Err(G2gError::NotConfigured);
+            }
+            if crate::numbuffers::finished_at_zero_limit(self.frame_limit, out).await? {
+                return Ok(0);
             }
             let hw = || G2gError::Hardware(HardwareError::Other);
 
@@ -482,7 +488,7 @@ impl SourceLoop for WebRtcWhepSrc {
                     };
                     out.push(PipelinePacket::DataFrame(frame)).await?;
                     seq += 1;
-                    if self.frame_limit != 0 && seq >= self.frame_limit {
+                    if seq >= self.frame_limit {
                         finish!();
                     }
                 }
@@ -560,6 +566,13 @@ static WEBRTCSRC_PROPS: &[PropertySpec] = &[
         PropKind::Str,
         "track to subscribe to: video (H.264) or audio (Opus)",
     ),
+    PropertySpec::new(
+        "num-buffers",
+        PropKind::Int,
+        "access units to emit then EOS (-1 = until the session ends)",
+    )
+    .with_default("-1")
+    .with_range("-1", "9223372036854775807"),
 ];
 
 #[cfg(test)]

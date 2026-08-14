@@ -803,7 +803,7 @@
                 </div>
                 <div class="chip-group">
                     <span class="chip-label">Codecs</span>
-                    <div class="chip-row"><span class="chip">ffmpeg</span><span class="chip">VAAPI</span><span class="chip">MF</span><span class="chip">VideoToolbox</span><span class="chip">MediaCodec</span><span class="chip">AV1</span><span class="chip">MJPEG</span></div>
+                    <div class="chip-row"><span class="chip">ffmpeg</span><span class="chip">VAAPI</span><span class="chip">MF</span><span class="chip">VideoToolbox</span><span class="chip">MediaCodec</span><span class="chip">AV1</span><span class="chip">MJPEG</span><span class="chip">PNG / WebP</span></div>
                 </div>
                 <div class="chip-group">
                     <span class="chip-label">Mux / sink / more</span>
@@ -960,7 +960,7 @@
             <div class="feature-card">
                 <span class="f-icon">&#128230;</span>
                 <h3>Containers</h3>
-                <p class="f-lead">Pure-Rust demux + mux on the typed <code>Caps::ByteStream</code> link, with <code>typefind</code> sniffing. KLV telemetry (STANAG 4609 / MISB ST 0601) and per-program SDT service text + ISO-639 language tags ride the TS both ways.</p>
+                <p class="f-lead">Pure-Rust demux + mux on the typed <code>Caps::ByteStream</code> link, with <code>typefind</code> sniffing. KLV telemetry (STANAG 4609 / MISB ST 0601), AV1 carriage and per-program SDT service text + ISO-639 language tags ride the TS both ways; DVB EIT now/next event text posts as tags on demux.</p>
                 <div class="chip-group">
                     <span class="chip-label">Demux</span>
                     <div class="chip-row"><span class="chip">mp4src</span><span class="chip">fmp4demux</span><span class="chip">tsdemux</span><span class="chip">matroskademux</span><span class="chip">flvdemux</span><span class="chip">oggdemux</span><span class="chip">mpegpsdemux</span><span class="chip">klvdecode</span></div>

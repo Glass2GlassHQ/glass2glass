@@ -417,8 +417,24 @@ impl MultiInputElement for WebRtcSessionSink {
     where
         Self: 'a;
 
+    /// Copies each frame's bytes into the media unit it hands the session task,
+    /// so every pad takes system frames only. The allocation cascade turns that
+    /// into a download demand on a GPU encoder.
+    fn input_domains(&self) -> g2g_core::memory::DomainSet {
+        g2g_core::memory::DomainSet::only(g2g_core::memory::MemoryDomainKind::System)
+    }
+
     fn input_count(&self) -> usize {
         self.pads.input_count()
+    }
+
+    fn metadata(&self) -> g2g_core::ElementMetadata {
+        g2g_core::ElementMetadata::new(
+            "WebRTC session sink",
+            "Sink/Network/WebRTC",
+            "Publishes a multi-track WHIP session (video simulcast layers + audio) via str0m",
+            "g2g",
+        )
     }
 
     fn intercept_caps(&self, _input: usize, upstream_caps: &Caps) -> Result<Caps, G2gError> {

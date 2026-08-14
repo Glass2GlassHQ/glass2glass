@@ -27,9 +27,10 @@ use alloc::vec::Vec;
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
-    ElementMetadata, FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
-    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, TagList, VideoCodec,
+    AsyncElement, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, Chapter, ConfigureOutcome,
+    Dim, ElementMetadata, FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate,
+    PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, TagList,
+    VideoCodec,
 };
 
 use crate::fmp4mux::Fmp4Muxer;
@@ -53,6 +54,8 @@ pub struct Mp4Mux {
     width: u32,
     height: u32,
     tags: TagList,
+    /// The table of contents, written as the `moov`'s `udta/chpl` (M1046).
+    chapters: Vec<Chapter>,
     mux: Option<Fmp4Muxer>,
     configured: bool,
     emitted: u64,
@@ -83,6 +86,7 @@ impl Mp4Mux {
             width: 0,
             height: 0,
             tags: TagList::new(),
+            chapters: Vec::new(),
             mux: None,
             configured: false,
             emitted: 0,
@@ -97,6 +101,15 @@ impl Mp4Mux {
     /// segment.
     pub fn with_tags(mut self, tags: TagList) -> Self {
         self.tags = tags;
+        self
+    }
+
+    /// Attach the table of contents, written as the init segment's
+    /// `moov/udta/chpl` Nero chapter list (M1046). Chapter times are stream-time
+    /// nanoseconds. Builder only: a launch line has no syntax for a chapter
+    /// list.
+    pub fn with_chapters(mut self, chapters: Vec<Chapter>) -> Self {
+        self.chapters = chapters;
         self
     }
 
@@ -198,6 +211,12 @@ impl AsyncElement for Mp4Mux {
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
     where
         Self: 'a;
+
+    /// Reads host memory, so it takes system frames only. The allocation
+    /// cascade turns that into a download demand on a GPU producer.
+    fn input_domains(&self) -> g2g_core::memory::DomainSet {
+        g2g_core::memory::DomainSet::only(g2g_core::memory::MemoryDomainKind::System)
+    }
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
         for alt in Self::input_alternatives() {
@@ -312,6 +331,7 @@ impl AsyncElement for Mp4Mux {
                         .then_some(crate::rtcp::ntp_now as fn() -> u64);
                     let mux = self.mux.get_or_insert_with(|| {
                         Fmp4Muxer::new(self.codec, self.width, self.height, self.tags.clone())
+                            .with_chapters(self.chapters.clone())
                             .with_fragment_duration_ns(frag_ns)
                             .with_cmaf(cmaf)
                             .with_chunk_duration_ns(chunk_ns)

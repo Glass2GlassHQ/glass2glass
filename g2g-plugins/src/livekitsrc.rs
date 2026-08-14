@@ -86,7 +86,7 @@ pub struct LiveKitSrc {
     api_secret: String,
     token: Option<String>,
     /// Stop after this many access units across both tracks and emit EOS
-    /// (0 = unbounded). For tests / bounded runs.
+    /// (`u64::MAX` = unbounded). For tests / bounded runs.
     frame_limit: u64,
 }
 
@@ -117,7 +117,7 @@ impl LiveKitSrc {
             api_key: String::new(),
             api_secret: String::new(),
             token: None,
-            frame_limit: 0,
+            frame_limit: u64::MAX,
         }
     }
 
@@ -134,7 +134,8 @@ impl LiveKitSrc {
         self
     }
 
-    /// Stop after `n` access units across both tracks (then EOS on both).
+    /// Stop after `n` access units across both tracks (then EOS on both). 0 emits
+    /// EOS on both without joining the room.
     pub fn with_frame_limit(mut self, n: u64) -> Self {
         self.frame_limit = n;
         self
@@ -260,6 +261,13 @@ static LIVEKITSRC_PROPS: &[PropertySpec] = &[
         PropKind::Str,
         "pre-minted access token (overrides api-key/secret)",
     ),
+    PropertySpec::new(
+        "num-buffers",
+        PropKind::Int,
+        "access units to emit across both tracks then EOS (-1 = until the room ends)",
+    )
+    .with_default("-1")
+    .with_range("-1", "9223372036854775807"),
 ];
 
 impl MultiOutputSource for LiveKitSrc {
@@ -285,6 +293,9 @@ impl MultiOutputSource for LiveKitSrc {
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        if name == "num-buffers" {
+            return crate::numbuffers::set_num_buffers(&mut self.frame_limit, &value);
+        }
         let v = value.as_str().ok_or(PropError::Type)?;
         match name {
             "url" => self.url = v.into(),
@@ -306,12 +317,22 @@ impl MultiOutputSource for LiveKitSrc {
             "api-key" => Some(PropValue::Str(self.api_key.clone())),
             "api-secret" => Some(PropValue::Str(self.api_secret.clone())),
             "token" => Some(PropValue::Str(self.token.clone().unwrap_or_default())),
+            "num-buffers" => Some(crate::numbuffers::get_num_buffers(self.frame_limit)),
             _ => None,
         }
     }
 
     fn run<'a>(&'a mut self, out: &'a mut dyn MultiOutputSink) -> Self::RunFuture<'a> {
         Box::pin(async move {
+            if crate::numbuffers::finished_at_zero_limit_multi(
+                self.frame_limit,
+                self.output_count(),
+                out,
+            )
+            .await?
+            {
+                return Ok(0);
+            }
             let hw = || G2gError::Hardware(HardwareError::Other);
             let token = self.access_token()?;
             let ws_url = signal_ws_url(&self.url, &token, true);
@@ -444,7 +465,7 @@ impl MultiOutputSource for LiveKitSrc {
                     };
                     out.push_to(port, PipelinePacket::DataFrame(frame)).await?;
                     seq += 1;
-                    if self.frame_limit != 0 && seq >= self.frame_limit {
+                    if seq >= self.frame_limit {
                         finish!();
                     }
                 }

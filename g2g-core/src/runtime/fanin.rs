@@ -387,6 +387,11 @@ pub trait DynMultiInputElement: ElementBound {
     fn input_pad_index(&self, req: &PadRequest, ordinal: usize) -> Option<usize>;
     fn caps_constraint_as_input(&self, input: usize) -> CapsConstraint<'_>;
     fn caps_constraint_for_output(&self) -> Result<CapsConstraint<'_>, G2gError>;
+    /// Dyn-safe mirror of [`MultiInputElement::input_domains`]. Default
+    /// [`DomainSet::ALL`].
+    fn input_domains(&self) -> DomainSet {
+        DomainSet::ALL
+    }
     /// Dyn-safe mirror of [`MultiInputElement::propose_allocation_for_input`].
     fn propose_allocation_for_input(&self, input: usize, caps: &Caps) -> Option<AllocationParams>;
     /// Dyn-safe mirror of [`MultiInputElement::propose_allocation_for_output`].
@@ -503,6 +508,10 @@ impl<T: MultiInputElement> DynMultiInputElement for T {
 
     fn caps_constraint_for_output(&self) -> Result<CapsConstraint<'_>, G2gError> {
         MultiInputElement::caps_constraint_for_output(self)
+    }
+
+    fn input_domains(&self) -> DomainSet {
+        MultiInputElement::input_domains(self)
     }
 
     fn propose_allocation_for_input(&self, input: usize, caps: &Caps) -> Option<AllocationParams> {
@@ -689,6 +698,10 @@ impl MultiInputElement for MuxRef<'_> {
         self.0.is_terminal()
     }
 
+    fn input_domains(&self) -> DomainSet {
+        self.0.input_domains()
+    }
+
     fn propose_allocation_for_input(&self, input: usize, caps: &Caps) -> Option<AllocationParams> {
         self.0.propose_allocation_for_input(input, caps)
     }
@@ -766,6 +779,10 @@ impl<'b> DynMultiInputElement for &'b mut (dyn DynMultiInputElement + 'b) {
 
     fn caps_constraint_for_output(&self) -> Result<CapsConstraint<'_>, G2gError> {
         (**self).caps_constraint_for_output()
+    }
+
+    fn input_domains(&self) -> DomainSet {
+        (**self).input_domains()
     }
 
     fn propose_allocation_for_input(&self, input: usize, caps: &Caps) -> Option<AllocationParams> {
@@ -1157,6 +1174,13 @@ struct TaggingSink {
     staged: Option<(usize, PipelinePacket)>,
     /// Size of the staged packet, measured before the send moves it away.
     staged_bytes: u64,
+    /// `DataFrame`s this input got into the channel, the count its arm reports
+    /// when the session ends under it (the source's own count dies with the
+    /// error that stopped it).
+    delivered_data_frames: u64,
+    /// Whether a push found the shared channel closed. The session arm holds the
+    /// only receiver, so that can only happen once the session has returned.
+    channel_closed: bool,
 }
 
 impl OutputSink for TaggingSink {
@@ -1185,9 +1209,13 @@ impl OutputSink for TaggingSink {
             self.staged_bytes = packet_bytes(&packet);
             self.staged = Some((self.idx, packet));
         }
+        let is_data = matches!(self.staged, Some((_, PipelinePacket::DataFrame(_))));
         match self.tx.poll_send(cx, &mut self.staged) {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Ok(())) => {
+                if is_data {
+                    self.delivered_data_frames += 1;
+                }
                 if let Some(c) = &self.counters {
                     c.record_packet(self.staged_bytes, 0);
                 }
@@ -1199,9 +1227,47 @@ impl OutputSink for TaggingSink {
             }
             Poll::Ready(Err(_)) => {
                 self.staged = None;
+                self.channel_closed = true;
                 Poll::Ready(Err(G2gError::Shutdown))
             }
         }
+    }
+}
+
+impl TaggingSink {
+    fn new(
+        idx: usize,
+        tx: Sender<(usize, PipelinePacket)>,
+        reverse: Option<crate::fanout::ReverseChannel>,
+        counters: Option<Arc<EdgeCounters>>,
+        probe: Option<ProbeSlot>,
+    ) -> Self {
+        Self {
+            idx,
+            tx,
+            reverse,
+            counters,
+            probe,
+            staged: None,
+            staged_bytes: 0,
+            delivered_data_frames: 0,
+            channel_closed: false,
+        }
+    }
+}
+
+/// The result of a send-side arm, with a session that ended under it read as a
+/// clean wind-down rather than a failed run. Only the session arm holds the
+/// shared inbound receiver, so a source whose push found the channel closed was
+/// still streaming when the session returned: it has nowhere left to push, and
+/// the session's own result is what decides the run. Any other error stands.
+fn wind_down_when_session_ended(
+    result: Result<u64, G2gError>,
+    adapter: &TaggingSink,
+) -> Result<u64, G2gError> {
+    match result {
+        Err(G2gError::Shutdown) if adapter.channel_closed => Ok(adapter.delivered_data_frames),
+        other => other,
     }
 }
 
@@ -1357,16 +1423,9 @@ where
         let counters_i = counters[i].clone();
         let probe_i = probes[i].clone();
         source_arms.push(Box::pin(async move {
-            let mut adapter = TaggingSink {
-                idx: i,
-                tx: tx_i,
-                reverse: reverse_i,
-                counters: counters_i,
-                probe: probe_i,
-                staged: None,
-                staged_bytes: 0,
-            };
-            source.run(&mut adapter).await
+            let mut adapter = TaggingSink::new(i, tx_i, reverse_i, counters_i, probe_i);
+            let result = source.run(&mut adapter).await;
+            wind_down_when_session_ended(result, &adapter)
         }));
     }
     // Drop the runner's own sender so the channel closes once all sources end.
@@ -1729,16 +1788,9 @@ where
         let counters_i = in_counters[i].clone();
         let probe_i = in_probes[i].clone();
         source_arms.push(Box::pin(async move {
-            let mut adapter = TaggingSink {
-                idx: i,
-                tx: tx_i,
-                reverse: reverse_i,
-                counters: counters_i,
-                probe: probe_i,
-                staged: None,
-                staged_bytes: 0,
-            };
-            source.run(&mut adapter).await
+            let mut adapter = TaggingSink::new(i, tx_i, reverse_i, counters_i, probe_i);
+            let result = source.run(&mut adapter).await;
+            wind_down_when_session_ended(result, &adapter)
         }));
     }
     // Drop the runner's own sender so the inbound channel closes once all sources
@@ -2623,17 +2675,10 @@ async fn attach_input<'a>(
 
     let tx = tagged_tx.clone();
     let arm: BoxFuture<'a, Result<FaninArmOut, G2gError>> = Box::pin(async move {
-        let mut sink = TaggingSink {
-            idx: pad,
-            tx,
-            reverse: None,
-            counters,
-            probe: slot,
-            staged: None,
-            staged_bytes: 0,
-        };
+        let mut sink = TaggingSink::new(pad, tx, None, counters, slot);
         let mut source = source;
-        source.run(&mut sink).await.map(FaninArmOut::Source)
+        let result = source.run(&mut sink).await;
+        wind_down_when_session_ended(result, &sink).map(FaninArmOut::Source)
     });
     new_arm_tx.try_send(arm).map_err(|_| G2gError::Shutdown)?;
     let _ = verdict.try_send(Ok(()));
@@ -3058,16 +3103,9 @@ where
             let counters_i = in_counters[i].clone();
             let probe_i = in_probes[i].clone();
             source_arms.push(Box::pin(async move {
-                let mut adapter = TaggingSink {
-                    idx: i,
-                    tx: tx_i,
-                    reverse: reverse_i,
-                    counters: counters_i,
-                    probe: probe_i,
-                    staged: None,
-                    staged_bytes: 0,
-                };
-                source.run(&mut adapter).await.map(DuplexArmOut::Source)
+                let mut adapter = TaggingSink::new(i, tx_i, reverse_i, counters_i, probe_i);
+                let result = source.run(&mut adapter).await;
+                wind_down_when_session_ended(result, &adapter).map(DuplexArmOut::Source)
             }));
         }
 
@@ -3287,20 +3325,16 @@ async fn attach_send_track<'a>(
 
     let tx = in_tx.clone();
     let arm: BoxFuture<'a, Result<DuplexArmOut, G2gError>> = Box::pin(async move {
-        let mut adapter = TaggingSink {
-            idx: input,
-            tx,
-            reverse: Some(channel),
-            counters,
-            probe: slot,
-            staged: None,
-            staged_bytes: 0,
-        };
+        let mut adapter = TaggingSink::new(input, tx, Some(channel), counters, slot);
         // The session has no other way to learn the pad exists, so its caps go out
         // before the source can push a frame on the index.
-        adapter.push(PipelinePacket::CapsChanged(fixated)).await?;
+        let announced = adapter.push(PipelinePacket::CapsChanged(fixated)).await;
         let mut source = source;
-        source.run(&mut adapter).await.map(DuplexArmOut::Source)
+        let result = match announced {
+            Ok(_) => source.run(&mut adapter).await,
+            Err(e) => Err(e),
+        };
+        wind_down_when_session_ended(result, &adapter).map(DuplexArmOut::Source)
     });
     // Await capacity rather than failing: a burst of adds larger than the arm
     // channel is backpressure on the control arm, not a session teardown. The

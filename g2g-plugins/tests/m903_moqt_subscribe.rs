@@ -366,7 +366,7 @@ fn properties_round_trip_and_moqtsrc_resolves_for_launch() {
     set(&mut src, "max-groups", PropValue::Uint(4));
     set(&mut src, "max-buffer-bytes", PropValue::Uint(1 << 20));
     set(&mut src, "max-object-size", PropValue::Uint(1 << 19));
-    set(&mut src, "num-buffers", PropValue::Uint(12));
+    set(&mut src, "num-buffers", PropValue::Int(12));
     set(&mut src, "timeout", PropValue::Uint(2500));
     set(
         &mut src,
@@ -388,7 +388,7 @@ fn properties_round_trip_and_moqtsrc_resolves_for_launch() {
         ("max-groups", PropValue::Uint(4)),
         ("max-buffer-bytes", PropValue::Uint(1 << 20)),
         ("max-object-size", PropValue::Uint(1 << 19)),
-        ("num-buffers", PropValue::Uint(12)),
+        ("num-buffers", PropValue::Int(12)),
         ("timeout", PropValue::Uint(2500)),
     ] {
         assert_eq!(

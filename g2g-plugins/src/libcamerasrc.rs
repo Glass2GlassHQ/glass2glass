@@ -170,7 +170,8 @@ pub struct LibCameraSrc {
     /// comes from the sensor timestamps instead, so it holds even when the
     /// camera misses this rate. `0` lets the camera run at its default cadence.
     req_fps: u32,
-    /// Stop after this many frames; `0` = run until the pipeline shuts down.
+    /// Stop after this many frames; `u64::MAX` runs until the pipeline shuts
+    /// down.
     frame_limit: u64,
     /// Request MJPEG (compressed) output instead of raw NV12/YUYV. MJPEG fits
     /// high frame rates / resolutions over USB that uncompressed YUYV cannot;
@@ -211,7 +212,7 @@ impl LibCameraSrc {
             req_width: 0,
             req_height: 0,
             req_fps: DEFAULT_FPS,
-            frame_limit: 0,
+            frame_limit: u64::MAX,
             prefer_mjpeg: false,
             ae_enable: None,
             exposure_us: None,
@@ -255,7 +256,7 @@ impl LibCameraSrc {
         self
     }
 
-    /// Stop after `n` frames (`0` = unlimited).
+    /// Stop after `n` frames (0 emits EOS without opening the camera).
     pub fn with_frame_limit(mut self, n: u64) -> Self {
         self.frame_limit = n;
         self
@@ -551,6 +552,7 @@ impl SourceLoop for LibCameraSrc {
                 self.saturation = Some(value.as_double().ok_or(PropError::Type)? as f32);
                 Ok(())
             }
+            "num-buffers" => crate::numbuffers::set_num_buffers(&mut self.frame_limit, &value),
             _ => Err(PropError::Unknown),
         }
     }
@@ -571,6 +573,7 @@ impl SourceLoop for LibCameraSrc {
             "brightness" => self.brightness.map(|b| PropValue::Double(b as f64)),
             "contrast" => self.contrast.map(|c| PropValue::Double(c as f64)),
             "saturation" => self.saturation.map(|s| PropValue::Double(s as f64)),
+            "num-buffers" => Some(crate::numbuffers::get_num_buffers(self.frame_limit)),
             _ => None,
         }
     }
@@ -579,6 +582,9 @@ impl SourceLoop for LibCameraSrc {
         Box::pin(async move {
             if !self.configured {
                 return Err(G2gError::NotConfigured);
+            }
+            if crate::numbuffers::finished_at_zero_limit(self.frame_limit, out).await? {
+                return Ok(0);
             }
             let (kind, w, h, fps) = self.negotiated.ok_or(G2gError::NotConfigured)?;
             let setup = CaptureSetup {
@@ -831,7 +837,7 @@ fn capture_loop(
     }
 
     let mut count = 0u64;
-    while limit == 0 || count < limit {
+    while count < limit {
         // First frame can be slow (exposure/AGC settle); allow generous time.
         let mut req = match done_rx.recv_timeout(Duration::from_secs(5)) {
             Ok(r) => r,
@@ -955,6 +961,13 @@ static LIBCAMERA_PROPS: &[PropertySpec] = &[
         PropKind::Double,
         "colour saturation (1.0 = default, 0 = grey)",
     ),
+    PropertySpec::new(
+        "num-buffers",
+        PropKind::Int,
+        "frames to capture then EOS (-1 = forever)",
+    )
+    .with_default("-1")
+    .with_range("-1", "9223372036854775807"),
 ];
 
 #[cfg(test)]

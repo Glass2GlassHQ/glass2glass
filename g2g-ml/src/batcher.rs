@@ -170,6 +170,14 @@ impl MultiInputElement for TensorBatcher {
     where
         Self: 'a;
 
+    /// Stacks a round by concatenating each slot's bytes on the CPU, so every
+    /// pad takes system frames only (`process` rejects anything else as
+    /// `UnsupportedDomain`). A GPU-resident tensor stays on the device by going
+    /// straight to `WgpuInference` instead of through a batch.
+    fn input_domains(&self) -> g2g_core::memory::DomainSet {
+        g2g_core::memory::DomainSet::only(g2g_core::memory::MemoryDomainKind::System)
+    }
+
     fn input_count(&self) -> usize {
         self.agg.input_count()
     }

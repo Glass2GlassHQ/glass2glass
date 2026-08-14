@@ -175,10 +175,7 @@ impl SourceLoop for WasapiSrc {
                 self.loopback = value.as_bool().ok_or(PropError::Type)?;
                 self.config = None;
             }
-            "num-buffers" => {
-                let n = value.as_int().ok_or(PropError::Type)?;
-                self.target_buffers = if n < 0 { u64::MAX } else { n as u64 };
-            }
+            "num-buffers" => crate::numbuffers::set_num_buffers(&mut self.target_buffers, &value)?,
             _ => return Err(PropError::Unknown),
         }
         Ok(())
@@ -188,11 +185,7 @@ impl SourceLoop for WasapiSrc {
         match name {
             "device" => Some(PropValue::Str(self.device.clone())),
             "loopback" => Some(PropValue::Bool(self.loopback)),
-            "num-buffers" => Some(PropValue::Int(if self.target_buffers == u64::MAX {
-                -1
-            } else {
-                self.target_buffers as i64
-            })),
+            "num-buffers" => Some(crate::numbuffers::get_num_buffers(self.target_buffers)),
             _ => None,
         }
     }

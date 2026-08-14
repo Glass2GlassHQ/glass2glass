@@ -984,3 +984,172 @@ fn v4l2src_io_mode() {
         "userptr is not implemented, so it must not be accepted"
     );
 }
+
+/// M1038: the Android mic source's PCM shape and run length are settable from a
+/// launch line, and a shape AAudio cannot open is refused.
+#[cfg(all(target_os = "android", feature = "aaudio"))]
+#[test]
+fn aaudiosrc_shape_and_num_buffers() {
+    use g2g_core::runtime::SourceLoop;
+    use g2g_core::PropError;
+    use g2g_plugins::aaudio::AAudioSrc;
+    let mut s = AAudioSrc::new(48_000, 2, u64::MAX);
+    for name in ["samplerate", "channels", "num-buffers"] {
+        assert!(declares(s.properties(), name), "{name} must be declared");
+    }
+    assert_eq!(s.get_property("num-buffers"), Some(PropValue::Int(-1)));
+    s.set_property("samplerate", PropValue::Uint(16_000))
+        .unwrap();
+    s.set_property("channels", PropValue::Uint(1)).unwrap();
+    s.set_property("num-buffers", PropValue::Int(25)).unwrap();
+    assert_eq!(s.get_property("samplerate"), Some(PropValue::Uint(16_000)));
+    assert_eq!(s.get_property("channels"), Some(PropValue::Uint(1)));
+    assert_eq!(s.get_property("num-buffers"), Some(PropValue::Int(25)));
+    assert_eq!(
+        s.set_property("samplerate", PropValue::Uint(0)),
+        Err(PropError::Value),
+        "a zero rate is not a stream AAudio can open"
+    );
+    assert_eq!(
+        s.set_property("channels", PropValue::Uint(0)),
+        Err(PropError::Value)
+    );
+}
+
+/// M1038: the Android camera source's id, geometry and run length are settable
+/// from a launch line, and the geometry reaches the produced caps.
+#[cfg(all(target_os = "android", feature = "camera2"))]
+#[test]
+fn camera2src_device_geometry_and_num_buffers() {
+    use g2g_core::runtime::{block_on, SourceLoop};
+    use g2g_core::{Caps, Dim, Interlace, PropError, Rate, RawVideoFormat};
+    use g2g_plugins::camera2src::Camera2Src;
+    let mut s = Camera2Src::new(640, 480, u64::MAX);
+    for name in ["device", "width", "height", "num-buffers"] {
+        assert!(declares(s.properties(), name), "{name} must be declared");
+    }
+    s.set_property("device", PropValue::Str("1".into()))
+        .unwrap();
+    s.set_property("width", PropValue::Uint(1280)).unwrap();
+    s.set_property("height", PropValue::Uint(720)).unwrap();
+    s.set_property("num-buffers", PropValue::Int(90)).unwrap();
+    assert_eq!(s.get_property("device"), Some(PropValue::Str("1".into())));
+    assert_eq!(s.get_property("num-buffers"), Some(PropValue::Int(90)));
+    // The geometry properties feed negotiation, not just the readback. Caps
+    // come straight off the fields here, so this opens no camera.
+    assert_eq!(
+        block_on(s.intercept_caps()).expect("caps"),
+        Caps::RawVideo {
+            format: RawVideoFormat::Nv12,
+            width: Dim::Fixed(1280),
+            height: Dim::Fixed(720),
+            framerate: Rate::Any,
+            interlace: Interlace::Any,
+        }
+    );
+    // Empty returns to the first camera the manager reports.
+    s.set_property("device", PropValue::Str(String::new()))
+        .unwrap();
+    assert_eq!(
+        s.get_property("device"),
+        Some(PropValue::Str(String::new()))
+    );
+    assert_eq!(
+        s.set_property("width", PropValue::Uint(0)),
+        Err(PropError::Value),
+        "an ImageReader the camera can never fill is refused"
+    );
+}
+
+/// M1038: the Core Audio capture source's PCM shape and run length join its
+/// device UID as launch-line properties.
+#[cfg(all(target_os = "macos", feature = "coreaudio"))]
+#[test]
+fn coreaudiosrc_shape_and_num_buffers() {
+    use g2g_core::runtime::SourceLoop;
+    use g2g_core::PropError;
+    use g2g_plugins::coreaudio::CoreAudioSrc;
+    let mut s = CoreAudioSrc::new(48_000, 2, u64::MAX);
+    for name in ["device", "samplerate", "channels", "num-buffers"] {
+        assert!(declares(s.properties(), name), "{name} must be declared");
+    }
+    assert_eq!(s.get_property("num-buffers"), Some(PropValue::Int(-1)));
+    s.set_property("samplerate", PropValue::Uint(44_100))
+        .unwrap();
+    s.set_property("channels", PropValue::Uint(1)).unwrap();
+    s.set_property("num-buffers", PropValue::Int(50)).unwrap();
+    assert_eq!(s.get_property("samplerate"), Some(PropValue::Uint(44_100)));
+    assert_eq!(s.get_property("channels"), Some(PropValue::Uint(1)));
+    assert_eq!(s.get_property("num-buffers"), Some(PropValue::Int(50)));
+    assert_eq!(
+        s.set_property("samplerate", PropValue::Uint(0)),
+        Err(PropError::Value),
+        "a zero rate would divide by zero in the run loop"
+    );
+}
+
+/// M1038: the AVFoundation camera source's run length is settable from a launch
+/// line, alongside the device id and zero-copy switch it already took.
+#[cfg(all(target_os = "macos", feature = "avfoundation"))]
+#[test]
+fn avfvideosrc_num_buffers() {
+    use g2g_core::runtime::SourceLoop;
+    use g2g_plugins::avf::AvfVideoSrc;
+    let mut s = AvfVideoSrc::new(u64::MAX);
+    assert!(declares(s.properties(), "num-buffers"));
+    assert_eq!(s.get_property("num-buffers"), Some(PropValue::Int(-1)));
+    s.set_property("num-buffers", PropValue::Int(300)).unwrap();
+    assert_eq!(s.get_property("num-buffers"), Some(PropValue::Int(300)));
+    s.set_property("num-buffers", PropValue::Int(-1)).unwrap();
+    assert_eq!(s.get_property("num-buffers"), Some(PropValue::Int(-1)));
+}
+
+/// M1038: the AVFoundation mic source takes properties at all, matching its
+/// camera sibling and the Core Audio capture source.
+#[cfg(all(target_os = "macos", feature = "avfoundation"))]
+#[test]
+fn avfaudiosrc_device_shape_and_num_buffers() {
+    use g2g_core::runtime::SourceLoop;
+    use g2g_core::PropError;
+    use g2g_plugins::avf::AvfAudioSrc;
+    let mut s = AvfAudioSrc::new(48_000, 2, u64::MAX);
+    for name in ["device", "samplerate", "channels", "num-buffers"] {
+        assert!(declares(s.properties(), name), "{name} must be declared");
+    }
+    s.set_property("device", PropValue::Str("uid-1".into()))
+        .unwrap();
+    s.set_property("samplerate", PropValue::Uint(16_000))
+        .unwrap();
+    s.set_property("channels", PropValue::Uint(1)).unwrap();
+    s.set_property("num-buffers", PropValue::Int(10)).unwrap();
+    assert_eq!(
+        s.get_property("device"),
+        Some(PropValue::Str("uid-1".into()))
+    );
+    assert_eq!(s.get_property("samplerate"), Some(PropValue::Uint(16_000)));
+    assert_eq!(s.get_property("channels"), Some(PropValue::Uint(1)));
+    assert_eq!(s.get_property("num-buffers"), Some(PropValue::Int(10)));
+    assert_eq!(
+        s.set_property("channels", PropValue::Uint(0)),
+        Err(PropError::Value),
+        "a zero channel count would divide by zero in the run loop"
+    );
+}
+
+/// M1038: the ScreenCaptureKit source's run length is settable from a launch
+/// line. Its geometry stays display-derived, so it is not a property.
+#[cfg(all(target_os = "macos", feature = "screencapture"))]
+#[test]
+fn screencapturesrc_num_buffers() {
+    use g2g_core::runtime::SourceLoop;
+    use g2g_plugins::sck::ScreenCaptureSrc;
+    let mut s = ScreenCaptureSrc::new(u64::MAX);
+    assert!(declares(s.properties(), "num-buffers"));
+    assert!(
+        !declares(s.properties(), "width"),
+        "geometry comes from the display, so it must not look settable"
+    );
+    assert_eq!(s.get_property("num-buffers"), Some(PropValue::Int(-1)));
+    s.set_property("num-buffers", PropValue::Int(120)).unwrap();
+    assert_eq!(s.get_property("num-buffers"), Some(PropValue::Int(120)));
+}

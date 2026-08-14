@@ -134,6 +134,12 @@ impl AsyncElement for WavEnc {
         true
     }
 
+    /// Reads host memory, so it takes system frames only. The allocation
+    /// cascade turns that into a download demand on a GPU producer.
+    fn input_domains(&self) -> g2g_core::memory::DomainSet {
+        g2g_core::memory::DomainSet::only(g2g_core::memory::MemoryDomainKind::System)
+    }
+
     /// The input side: the PCM this can describe in a `fmt ` chunk, at the rate
     /// and channel count upstream negotiated.
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {

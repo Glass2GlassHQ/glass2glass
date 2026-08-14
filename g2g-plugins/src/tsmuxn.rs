@@ -43,7 +43,7 @@ use g2g_core::{
 use crate::dvbsub::DEFAULT_PAGE_ID;
 use crate::mpegts::{TsMuxer, STREAM_TYPE_H264, STREAM_TYPE_H265};
 use crate::tsmux::{
-    is_dvbsub, language_from_tags, service_from_tags, stream_type_for, DvbSubDecl,
+    is_av1, is_dvbsub, language_from_tags, service_from_tags, stream_type_for, DvbSubDecl,
     UNDETERMINED_LANGUAGE,
 };
 
@@ -100,6 +100,9 @@ pub struct TsMux {
     /// The `dvbsub-page-id` property, the page every DVB subtitle pad that
     /// carries no page-id config blob is declared on.
     dvbsub_page_id: u16,
+    /// Which pads carry AV1 (M1049), so their PMT entries get the AV1
+    /// registration descriptor rather than the private PES default of KLV.
+    av1: Vec<bool>,
 }
 
 impl TsMux {
@@ -123,6 +126,7 @@ impl TsMux {
             track_tags: alloc::vec![TagList::new(); inputs],
             dvbsub: alloc::vec![None; inputs],
             dvbsub_page_id: DEFAULT_PAGE_ID,
+            av1: alloc::vec![false; inputs],
         }
     }
 
@@ -292,6 +296,12 @@ impl MultiInputElement for TsMux {
     where
         Self: 'a;
 
+    /// Reads host memory, so every pad takes system frames only. The allocation
+    /// cascade turns that into a download demand on a GPU producer.
+    fn input_domains(&self) -> g2g_core::memory::DomainSet {
+        g2g_core::memory::DomainSet::only(g2g_core::memory::MemoryDomainKind::System)
+    }
+
     fn input_count(&self) -> usize {
         self.inputs
     }
@@ -341,6 +351,7 @@ impl MultiInputElement for TsMux {
         if is_dvbsub(absolute_caps) {
             self.dvbsub[input] = Some(DvbSubDecl::on_page(self.dvbsub_page_id));
         }
+        self.av1[input] = is_av1(absolute_caps);
         Ok(ConfigureOutcome::Accepted)
     }
 
@@ -529,6 +540,9 @@ impl MultiInputElement for TsMux {
                     }
                 }
                 for i in 0..self.inputs {
+                    if self.av1[i] {
+                        mux.set_stream_av1(i);
+                    }
                     let effective = self.effective_tags(i);
                     let language = language_from_tags(&effective);
                     // A DVB subtitle stream's language rides its

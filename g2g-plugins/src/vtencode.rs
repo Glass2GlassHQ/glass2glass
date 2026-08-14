@@ -235,6 +235,7 @@ impl VtEncode {
         // whole call; the session is live and the encode is completed
         // synchronously before we return.
         let pb = unsafe { &*(buf.pixel_buffer as *const CVPixelBuffer) };
+        // SAFETY: as above, `pb` stays pinned and the session is live.
         unsafe { encode_pixel_buffer(state, pb, pts_ns)? };
         if let Some(err) = state.collector.error.take() {
             return Err(err);
@@ -529,8 +530,11 @@ unsafe extern "C-unwind" fn output_callback(
     if sample_buffer.is_null() {
         return; // dropped frame, not an error
     }
+    // SAFETY: non-null checked above, and VideoToolbox keeps the sample valid
+    // for the duration of this callback.
     let sample = unsafe { &*sample_buffer };
     let codec = collector.codec;
+    // SAFETY: `sample` is that same valid encoded CMSampleBuffer.
     match unsafe { sample_to_annexb(codec, sample) } {
         Ok((annexb, pts_ns, keyframe)) => collector.frames.push(EncodedFrame {
             annexb,
@@ -553,6 +557,8 @@ unsafe fn sample_to_annexb(
     let hw = || G2gError::Hardware(HardwareError::Other);
 
     // The encoded bytes live in the sample's block buffer in AVCC framing.
+    // SAFETY: `sample` is valid per this function's contract, and the block
+    // buffer comes back retained.
     let block: CFRetained<CMBlockBuffer> = unsafe { sample.data_buffer() }.ok_or_else(hw)?;
     let mut total_len: usize = 0;
     let mut len_at: usize = 0;
@@ -560,6 +566,8 @@ unsafe fn sample_to_annexb(
     let mut data_ptr: *mut c_char = ptr::null_mut();
     // objc2 exposes this as `CMBlockBuffer::data_pointer` (associated fn taking
     // &CMBlockBuffer); the out-params are usize lengths.
+    // SAFETY: `block` is live, offset 0 is in range, and the out-params are
+    // valid stack slots.
     let st = unsafe {
         CMBlockBuffer::data_pointer(&block, 0, &mut len_at, &mut total_len, &mut data_ptr)
     };
@@ -571,11 +579,15 @@ unsafe fn sample_to_annexb(
     let avcc = unsafe { core::slice::from_raw_parts(data_ptr as *const u8, total_len) };
     let mut annexb = avcc_to_annexb(avcc);
 
+    // SAFETY: `sample` is valid, and `sample_pts` only reads its timestamp.
     let pts_ns = cmtime_to_ns(unsafe { sample_pts(sample) });
     let keyframe = au_is_keyframe(codec, &annexb);
     if keyframe {
         // Prepend the parameter sets (Annex-B framed) ahead of the IRAP picture.
+        // SAFETY: `sample` is valid, and the format description comes back retained.
         if let Some(fmt) = unsafe { sample.format_description() } {
+            // SAFETY: `fmt` is the sample's own description, so it describes
+            // `codec`, and the retain holds it for this scope.
             let mut prefix = unsafe { parameter_sets_annexb(codec, &fmt)? };
             prefix.append(&mut annexb);
             annexb = prefix;
@@ -594,13 +606,14 @@ unsafe fn parameter_sets_annexb(
 ) -> Result<Vec<u8>, G2gError> {
     let hw = || G2gError::Hardware(HardwareError::Other);
     // The H.264 and HEVC accessors share the exact same signature; pick by codec.
-    // SAFETY: all pointers are valid stack slots / null (allowed by the API).
     let get = |fmt: &CMFormatDescription,
                i: usize,
                p: *mut *const u8,
                sz: *mut usize,
                count: *mut usize|
      -> OSStatus {
+        // SAFETY: `fmt` is valid for `codec`, and every pointer the callers below
+        // pass is a stack slot or null (allowed by the API).
         unsafe {
             match codec {
                 VideoCodec::H265 => CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
@@ -674,6 +687,8 @@ unsafe fn build_session(
     let mut session: *mut VTCompressionSession = ptr::null_mut();
     // objc2 exposes this as `VTCompressionSession::create` (associated fn).
     // `output_callback` is the `VTCompressionOutputCallback`.
+    // SAFETY: `refcon` points at the boxed collector the returned state keeps
+    // alive for the session, and `session` is a valid out slot.
     let st = unsafe {
         VTCompressionSession::create(
             None,
@@ -691,10 +706,12 @@ unsafe fn build_session(
     if st != 0 {
         return Err(hw());
     }
+    // SAFETY: the create returned 0, so `session` is a +1 reference we adopt.
     let session = unsafe { CFRetained::from_raw(NonNull::new(session).ok_or_else(hw)?) };
 
     // Low-latency tuning. VTSessionSetProperty takes the session as a VTSession,
     // a CFString key, and a CFType value.
+    // SAFETY: the session was just created and each key is a static CFString.
     unsafe {
         set_bool(&session, kVTCompressionPropertyKey_RealTime, true)?;
         set_bool(
@@ -723,7 +740,11 @@ unsafe fn build_session(
 ///
 /// SAFETY: `state.session` is live; `nv12` outlives the synchronous encode.
 unsafe fn encode_into(state: &EncoderState, nv12: &[u8], pts_ns: u64) -> Result<(), G2gError> {
+    // SAFETY: make_pixel_buffer rejects an `nv12` shorter than w*h*3/2 before it
+    // copies anything.
     let pixel_buffer = unsafe { make_pixel_buffer(nv12, state.width, state.height)? };
+    // SAFETY: the session is live per this function's contract, and the staging
+    // buffer outlives the synchronous encode.
     unsafe { encode_pixel_buffer(state, &pixel_buffer, pts_ns) }
 }
 
@@ -743,7 +764,10 @@ unsafe fn encode_pixel_buffer(
     // `encode_frame` takes the image buffer, PTS, duration, optional
     // frame-properties dict, source refcon, and an info-flags out-param. A
     // CVPixelBuffer is a CVImageBuffer (typedef).
+    // SAFETY: that typedef makes the two layout-identical, and `pb` outlives the borrow.
     let image: &CVImageBuffer = unsafe { &*(pb as *const CVPixelBuffer as *const CVImageBuffer) };
+    // SAFETY: session and image buffer are live for the call, `info` is a valid
+    // out slot, and a null source refcon is allowed.
     let st = unsafe {
         state.session.encode_frame(
             image,
@@ -759,6 +783,7 @@ unsafe fn encode_pixel_buffer(
     }
     // Drain this frame (no reordering, so one input yields one output promptly).
     // A pipelined drain that doesn't complete every frame is a follow-up.
+    // SAFETY: the session is live per this function's contract.
     unsafe { complete_frames(&state.session) };
     Ok(())
 }
@@ -768,6 +793,7 @@ unsafe fn encode_pixel_buffer(
 /// SAFETY: `session` is live.
 unsafe fn complete_frames(session: &VTCompressionSession) {
     // Completing up to an invalid PTS flushes everything.
+    // SAFETY: `session` is live per this function's contract.
     let _ = unsafe { session.complete_frames(cm_time_invalid()) };
 }
 
@@ -788,6 +814,7 @@ unsafe fn make_pixel_buffer(
     let mut pb: *mut CVPixelBuffer = ptr::null_mut();
     // CVPixelBufferCreate(allocator, w, h, fourcc, attrs, out). None attributes
     // lets CoreVideo pick the plane strides.
+    // SAFETY: the fourcc is a CoreVideo constant and `pb` is a valid out slot.
     let st = unsafe {
         CVPixelBufferCreate(
             None,
@@ -801,6 +828,7 @@ unsafe fn make_pixel_buffer(
     if st != 0 {
         return Err(hw());
     }
+    // SAFETY: the create returned 0, so `pb` is a +1 reference we adopt.
     let pb = unsafe { CFRetained::from_raw(NonNull::new(pb).ok_or_else(hw)?) };
 
     // SAFETY: lock for write, copy the planes in (stripping into the buffer's own
@@ -813,6 +841,8 @@ unsafe fn make_pixel_buffer(
     for plane in 0..2usize {
         let base = CVPixelBufferGetBaseAddressOfPlane(&pb, plane) as *mut u8;
         if base.is_null() {
+            // SAFETY: the lock above succeeded, so this unlock balances it before
+            // we bail out.
             unsafe { CVPixelBufferUnlockBaseAddress(&pb, CVPixelBufferLockFlags::empty()) };
             return Err(hw());
         }
@@ -830,6 +860,7 @@ unsafe fn make_pixel_buffer(
             src += row_bytes;
         }
     }
+    // SAFETY: balances the lock above, and no plane pointer is used after it.
     unsafe { CVPixelBufferUnlockBaseAddress(&pb, CVPixelBufferLockFlags::empty()) };
     Ok(pb)
 }
@@ -842,6 +873,7 @@ unsafe fn set_bool(
 ) -> Result<(), G2gError> {
     // `CFBoolean::new` returns the shared `&'static CFBoolean` singleton.
     let v = objc2_core_foundation::CFBoolean::new(value);
+    // SAFETY: session and key are live for the call, and `v` is `'static`.
     let st = unsafe { VTSessionSetProperty(session, key, Some(v as &_)) };
     if st != 0 {
         return Err(G2gError::Hardware(HardwareError::Other));
@@ -856,6 +888,7 @@ unsafe fn set_u32(
     value: u32,
 ) -> Result<(), G2gError> {
     let n = value as i64;
+    // SAFETY: `n` is a live i64 stack slot matching the SInt64Type we declare.
     let num = unsafe {
         objc2_core_foundation::CFNumber::new(
             None,
@@ -863,6 +896,7 @@ unsafe fn set_u32(
             &n as *const i64 as *const c_void,
         )
     };
+    // SAFETY: session and key are live, and `num` outlives the call.
     let st = unsafe { VTSessionSetProperty(session, key, num.as_deref().map(|x| x as &_)) };
     if st != 0 {
         return Err(G2gError::Hardware(HardwareError::Other));
@@ -894,6 +928,7 @@ fn cm_time_invalid() -> CMTime {
 ///
 /// SAFETY: `sample` is a valid `CMSampleBuffer`.
 unsafe fn sample_pts(sample: &CMSampleBuffer) -> CMTime {
+    // SAFETY: `sample` is valid per this function's contract.
     unsafe { sample.presentation_time_stamp() }
 }
 

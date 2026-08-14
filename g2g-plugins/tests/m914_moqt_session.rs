@@ -251,7 +251,7 @@ fn properties_round_trip_and_moqtsessionsrc_resolves_for_launch() {
         ("namespace", PropValue::Str("live/cam".into())),
         ("catalog", PropValue::Bool(false)),
         ("catchup-groups", PropValue::Uint(2)),
-        ("num-buffers", PropValue::Uint(9)),
+        ("num-buffers", PropValue::Int(9)),
         ("timeout", PropValue::Uint(2500)),
         ("max-groups", PropValue::Uint(4)),
     ] {

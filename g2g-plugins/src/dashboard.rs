@@ -147,9 +147,10 @@ pub fn event_json(msg: &BusMessage) -> Option<String> {
         BusMessage::ClockLost => json!({"kind": "clock-lost"}),
         BusMessage::Custom(code) => json!({"kind": "custom", "code": code}),
         // Skip the large structured payloads the dashboard has no view for.
-        BusMessage::Tag { .. } | BusMessage::StreamTag { .. } | BusMessage::StreamCollection(_) => {
-            return None
-        }
+        BusMessage::Tag { .. }
+        | BusMessage::StreamTag { .. }
+        | BusMessage::StreamCollection(_)
+        | BusMessage::Chapters(_) => return None,
     };
     let mut obj = v;
     obj["type"] = json!("event");

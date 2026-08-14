@@ -55,6 +55,8 @@ pub struct MoqtSessionSrc {
     /// take the catalog's tracks in order.
     tracks: String,
     outputs: usize,
+    /// `u64::MAX` runs until the broadcast ends; otherwise stop after this many
+    /// frames across all pads and emit EOS.
     num_buffers: u64,
 
     /// The track each pad played, once the run has started.
@@ -80,7 +82,7 @@ impl MoqtSessionSrc {
             },
             tracks: String::new(),
             outputs: 0,
-            num_buffers: 0,
+            num_buffers: u64::MAX,
             selected: Vec::new(),
             objects_received: 0,
         }
@@ -108,6 +110,7 @@ impl MoqtSessionSrc {
     }
 
     /// Stop after this many frames across all pads (init segments included).
+    /// 0 emits EOS on every pad without subscribing.
     pub fn with_num_buffers(mut self, n: u64) -> Self {
         self.num_buffers = n;
         self
@@ -165,6 +168,9 @@ impl MultiOutputSource for MoqtSessionSrc {
     fn run<'a>(&'a mut self, out: &'a mut dyn MultiOutputSink) -> Self::RunFuture<'a> {
         Box::pin(async move {
             let pads = self.output_count();
+            if crate::numbuffers::finished_at_zero_limit_multi(self.num_buffers, pads, out).await? {
+                return Ok(0);
+            }
             let mut driver = connect(&self.cfg).await?;
             let listed = driver.read_catalog(&self.cfg).await?;
 
@@ -204,24 +210,28 @@ impl MultiOutputSource for MoqtSessionSrc {
                 );
             }
 
+            let limit = self.num_buffers;
             let mut emitted = 0u64;
             for port in 0..pads {
                 out.push_to(port, PipelinePacket::CapsChanged(Self::output_caps()))
                     .await?;
-                // A pad with no track still gets its caps and its EOS below, so
-                // the branch is never left hanging.
-                if port < subs.len() {
+                // A pad with no track, or one the limit already ran out on,
+                // still gets its caps and its EOS below, so the branch is never
+                // left hanging.
+                if port < subs.len() && emitted < limit {
                     out.push_to(port, PipelinePacket::DataFrame(byte_frame(init.clone(), 0)))
                         .await?;
                     emitted += 1;
                 }
             }
 
-            let limit = self.num_buffers;
             'run: loop {
                 let mut moved = false;
                 for (port, at) in subs.iter().copied().enumerate() {
-                    while let Some(payload) = driver.state().subs[at].next_payload() {
+                    while emitted < limit {
+                        let Some(payload) = driver.state().subs[at].next_payload() else {
+                            break;
+                        };
                         out.push_to(
                             port,
                             PipelinePacket::DataFrame(byte_frame(payload, emitted)),
@@ -229,9 +239,9 @@ impl MultiOutputSource for MoqtSessionSrc {
                         .await?;
                         emitted += 1;
                         moved = true;
-                        if limit != 0 && emitted >= limit {
-                            break 'run;
-                        }
+                    }
+                    if emitted >= limit {
+                        break 'run;
                     }
                 }
                 if subs.iter().all(|at| driver.state().subs[*at].drained()) {
@@ -285,7 +295,7 @@ impl MultiOutputSource for MoqtSessionSrc {
             "max-buffer-bytes" => self.cfg.max_buffer_bytes = uint(&value)?,
             "max-object-size" => self.cfg.max_object_bytes = uint(&value)?,
             "catchup-groups" => self.cfg.catchup_groups = uint(&value)?,
-            "num-buffers" => self.num_buffers = uint(&value)?,
+            "num-buffers" => crate::numbuffers::set_num_buffers(&mut self.num_buffers, &value)?,
             "timeout" => self.cfg.timeout_ms = uint(&value)?,
             _ => return Err(PropError::Unknown),
         }
@@ -307,7 +317,7 @@ impl MultiOutputSource for MoqtSessionSrc {
             "max-buffer-bytes" => Some(PropValue::Uint(self.cfg.max_buffer_bytes)),
             "max-object-size" => Some(PropValue::Uint(self.cfg.max_object_bytes)),
             "catchup-groups" => Some(PropValue::Uint(self.cfg.catchup_groups)),
-            "num-buffers" => Some(PropValue::Uint(self.num_buffers)),
+            "num-buffers" => Some(crate::numbuffers::get_num_buffers(self.num_buffers)),
             "timeout" => Some(PropValue::Uint(self.cfg.timeout_ms)),
             _ => None,
         }
@@ -388,10 +398,11 @@ static MOQTSESSIONSRC_PROPS: &[PropertySpec] = &[
     .with_default("0"),
     PropertySpec::new(
         "num-buffers",
-        PropKind::Uint,
-        "stop after this many frames across all pads, init segments included (0 = unlimited)",
+        PropKind::Int,
+        "frames to emit across all pads then EOS, init segments included (-1 = until the broadcast ends)",
     )
-    .with_default("0"),
+    .with_default("-1")
+    .with_range("-1", "9223372036854775807"),
     PropertySpec::new(
         "timeout",
         PropKind::Uint,

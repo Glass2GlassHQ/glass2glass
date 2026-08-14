@@ -83,7 +83,7 @@ parse error: unknown element: theoraenc
 
 - **`g2g-launch -v ...`** prints each link's negotiated caps + memory domain (the `gst-launch -v` analog); **`--dot`** dumps a Graphviz graph.
 - **`g2g-inspect`** is `gst-inspect-1.0`: list elements, dump one's properties/pads, or map a GStreamer name with `g2g-inspect --gst x264enc`. Scan an app's source with `--gst-scan app.c`.
-- **`g2g-device-monitor`** is `gst-device-monitor-1.0`: list cameras, audio devices, PipeWire nodes, and (a g2g extension) `Compute/GPU` devices, with probed caps and the launch fragment that opens each (`v4l2src device=/dev/video0`). Filter by class (`g2g-device-monitor Video/Source`), `--json` for tooling, `--follow` for live hotplug (native PipeWire and WASAPI events, poll-and-diff elsewhere). Backends: V4L2 / ALSA / PipeWire / GPU on Linux, Media Foundation + WASAPI on Windows, AVFoundation + Core Audio on macOS. Every device's id is what its element's selection property takes, so a saved launch line reopens the same hardware after a replug (`v4l2src` takes the id as `device-id=`, since a `/dev/videoN` path is not stable).
+- **`g2g-device-monitor`** is `gst-device-monitor-1.0`: list cameras, audio devices, PipeWire nodes, and (a g2g extension) `Compute/GPU` devices, with probed caps and the launch fragment that opens each (`v4l2src device=/dev/video0`). Filter by class (`g2g-device-monitor Video/Source`), `--json` for tooling, `--follow` for live hotplug (native PipeWire and WASAPI events, poll-and-diff elsewhere). Backends: V4L2 / ALSA / PipeWire / GPU on Linux, Media Foundation + WASAPI on Windows, AVFoundation + Core Audio on macOS. Every device's id is what its element's selection property takes, so a saved launch line reopens the same hardware after a replug (`v4l2src` takes the id as `device-id=`, since a `/dev/videoN` path is not stable). A V4L2 camera's listing also carries the controls it reports and the range each accepts, under the names `v4l2src extra-controls=` matches them by.
 - Migrate incrementally in either direction: `g2g-bridge` embeds a g2g sub-graph inside a GStreamer pipeline; `gstwrap` hosts an un-ported GStreamer element inside a g2g graph.
 
 Full guide, including the equivalence cookbook and application/element porting:
@@ -377,6 +377,8 @@ OS-coupled elements live behind cargo features:
 | `Av1Enc` (pure-Rust `rav1e`) | `av1-encode` | — |
 | `VpxEnc` (VP8 / VP9 via libvpx) | `vpx` | libvpx |
 | `MjpegDec` / `MjpegEnc` (pure Rust) | `mjpeg`, `mjpeg-encode` | — |
+| `PngDec` / `PngEnc` (still images, pure Rust) | `png` | — |
+| `WebPDec` (lossy + lossless stills, pure Rust) | `webp` | — |
 | `AnalyticsOverlay` (CPU) / `VelloAnalyticsOverlay` (GPU) (detection boxes, segmentation masks, ROIs) / `WgpuSink` | `analytics`, `vello-overlay`, `wgpu-sink` | wgpu (GPU variants) |
 | `VelloTextOverlay` (subtitle cues drawn on the GPU, `WgpuTexture` out) | `vello-text-overlay` | wgpu |
 | `OrtInference` (+ CUDA / DirectML EPs) | `ort`, `cuda`, `directml` (in `g2g-ml`) | onnxruntime |

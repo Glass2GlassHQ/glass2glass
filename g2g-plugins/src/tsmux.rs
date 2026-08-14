@@ -110,6 +110,12 @@ pub(crate) fn stream_type_for(caps: &Caps, klv_sync: bool) -> Option<u8> {
             codec: VideoCodec::H265,
             ..
         } => Some(STREAM_TYPE_H265),
+        // AV1 has no stream_type of its own: it rides a private PES told apart by
+        // the AV1 registration descriptor the muxer writes for it (M1049).
+        Caps::CompressedVideo {
+            codec: VideoCodec::Av1,
+            ..
+        } => Some(STREAM_TYPE_PRIVATE_PES),
         Caps::Audio {
             format: AudioFormat::Aac,
             ..
@@ -127,6 +133,18 @@ pub(crate) fn stream_type_for(caps: &Caps, klv_sync: bool) -> Option<u8> {
         } => Some(STREAM_TYPE_PRIVATE_PES),
         _ => None,
     }
+}
+
+/// Whether an input caps is the AV1 pad, whose PMT entry needs the AV1
+/// registration descriptor to be anything other than an unidentified private PES.
+pub(crate) fn is_av1(caps: &Caps) -> bool {
+    matches!(
+        caps,
+        Caps::CompressedVideo {
+            codec: VideoCodec::Av1,
+            ..
+        }
+    )
 }
 
 /// Whether an input caps is the DVB subtitle pad, whose PMT entry needs the
@@ -301,6 +319,7 @@ impl TsMux {
         Vec::from([
             video(VideoCodec::H264),
             video(VideoCodec::H265),
+            video(VideoCodec::Av1),
             Caps::Audio {
                 format: AudioFormat::Aac,
                 channels: 0,
@@ -342,6 +361,12 @@ impl AsyncElement for TsMux {
     where
         Self: 'a;
 
+    /// Reads host memory, so it takes system frames only. The allocation
+    /// cascade turns that into a download demand on a GPU producer.
+    fn input_domains(&self) -> g2g_core::memory::DomainSet {
+        g2g_core::memory::DomainSet::only(g2g_core::memory::MemoryDomainKind::System)
+    }
+
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
         if stream_type_for(upstream_caps, self.klv_sync).is_some() {
             Ok(upstream_caps.clone())
@@ -378,6 +403,9 @@ impl AsyncElement for TsMux {
             if let Some(language) = language_from_tags(&self.tags) {
                 mux.set_stream_language(0, language);
             }
+        }
+        if is_av1(absolute_caps) {
+            mux.set_stream_av1(0);
         }
         self.mux = Some(mux);
         if is_dvbsub(absolute_caps) {

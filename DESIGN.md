@@ -609,9 +609,11 @@ depending on backend.
 
 #### 4.11.1 cros-codecs (Linux VAAPI)
 
-`VaapiH264Dec` (`g2g-plugins/src/vaapidec.rs`, feature `vaapi`, `cfg(target_os = "linux")`) is built on `cros-codecs` (`vaapi` backend). The crate is maintained by the ChromeOS team and exposes a stateless decoder framework that parses H.264 bitstreams and manages the DPB; the actual decode runs on the GPU through libva.
+`VaapiDec<C>` (`g2g-plugins/src/vaapidec.rs`, feature `vaapi`, `cfg(target_os = "linux")`) is built on `cros-codecs` (`vaapi` backend); the `VaapiCodec` binding picks the stateless decoder and NAL splitter, giving the two elements `VaapiH264Dec` and `VaapiH265Dec` (M1036). The crate is maintained by the ChromeOS team and exposes a stateless decoder framework that parses the bitstream and manages the DPB; the actual decode runs on the GPU through libva.
 
-- **Input caps:** `Caps::CompressedVideo { codec: H264, .. }` — `intercept_caps` intersects with H.264 and rejects everything else.
+**Status (2026-08): Intel-only candidate, not the AMD path.** cros-codecs allocates output surfaces through ChromeOS GBM extensions (`GBM_BO_USE_HW_VIDEO_DECODER`, contiguous NV12) that Mesa `radeonsi` does not provide, so the element cannot start on AMD desktop GPUs, and the path is not being revived. The Linux hardware-decode ranking is `VulkanVideoDec` (vendor-neutral, picked by the domain-aware search for GPU-domain consumers) with ffmpeg's VAAPI hwaccel (`Backend::Vaapi`, 4.11.3) as the hardware route into system memory.
+
+- **Input caps:** `Caps::CompressedVideo { codec: C::CODEC, .. }` — `intercept_caps` intersects with the element's codec and rejects everything else.
 - **Output caps:** `Caps::RawVideo { format: Nv12, .. }` backed by `MemoryDomain::System` (CPU copy out of the GBM-allocated surface).
 - **Frame allocation:** `GbmDevice::open("/dev/dri/renderD128")` (configurable via `VaapiH264Dec::with_render_node`) allocates `GenericDmaVideoFrame` surfaces; the decoder's allocator callback returns one per output picture.
 - **Format negotiation:** the first `decode()` call surfaces `DecodeError::CheckEvents`; the element drains events, picks up the SPS-derived `StreamInfo` on `FormatChanged`, and re-feeds the same NAL.
@@ -705,7 +707,7 @@ RtspSrc ──► H264Parse ──► [decoder] ──► [ML / display / encode
 | :--- | :--- | :--- | :--- |
 | Linux software | `FfmpegH264Dec` (`Software`) | `ffmpeg` | `System` / I420 |
 | Linux + NVIDIA | `FfmpegH264Dec` (`NvdecCuvid` / `NvdecCuda`) | `ffmpeg` + `cuda` | `System` / `Cuda` / NV12 |
-| Linux + VAAPI | `VaapiH264Dec` | `vaapi` | `System` / NV12 |
+| Linux + VAAPI | `VaapiH264Dec` / `VaapiH265Dec` | `vaapi` | `System` / NV12 |
 | Windows | `MfDecode` | `mf-decode` | `System` / NV12 |
 
 `RtspSrc` connects via `retina` using standard RTSP/RTP over TCP, negotiates H.264 with `FrameFormat::SIMPLE` (Annex-B) or accepts AVCC framing detected per buffer. The first SPS the parser sees provides geometry; framerate is recovered from the VUI `timing_info` (`time_scale / (2 * num_units_in_tick)`) when present, or left as `Rate::Any` when the VUI is absent. `RtspSrc::with_credentials` supplies the DESCRIBE/SETUP account (threaded into retina's `SessionOptions`).
@@ -1347,17 +1349,35 @@ chosen (the capture node on every UVC device). An id nothing carries fails the
 negotiation with `HardwareError::V4l2(ENODEV)` rather than silently falling
 back to `device`.
 
-**V4L2 camera controls (M944).** `v4l2src` exposes exposure, focus and white
-balance as runtime properties under the names `v4l2-ctl` uses
-(`exposure-auto`, `exposure-absolute`, `focus-auto`, `focus-absolute`,
-`white-balance-temperature-auto`, `white-balance-temperature`; GStreamer's
-analog is the `extra-controls` structure). One table drives both the property
-specs and the `VIDIOC_S_EXT_CTRLS` ids, and its order is the apply order: an
-auto switch precedes the manual value it gates, because a driver rejects a
-manual exposure while auto exposure is on. Each is applied with its own ioctl,
-since a batch may not span the user and camera control classes. Only a control
-that was set is touched, and one the camera does not implement fails the
-negotiation instead of being quietly ignored.
+**V4L2 camera controls (M944, M1047).** `v4l2src` exposes the user and camera
+control classes as runtime properties under the names `v4l2-ctl` uses:
+exposure, focus and white balance (`exposure-auto`, `exposure-absolute`,
+`focus-auto`, `focus-absolute`, `white-balance-temperature-auto`,
+`white-balance-temperature`), the picture controls GStreamer's `v4l2src` also
+names (`brightness`, `contrast`, `saturation`, `hue`, `gamma`, `gain`,
+`sharpness`, `backlight-compensation`, `power-line-frequency`), and pan / tilt
+/ zoom (`pan-absolute`, `tilt-absolute`, `zoom-absolute`). One table drives
+both the property specs and the `VIDIOC_S_EXT_CTRLS` ids, and its order is the
+apply order: an auto switch precedes the manual value it gates, because a
+driver rejects a manual exposure while auto exposure is on. Each is applied
+with its own ioctl, since a batch may not span the user and camera control
+classes. Only a control that was set is touched, and one the camera does not
+implement fails the negotiation instead of being quietly ignored. A control's
+property kind follows its range: a switch is `Bool`; the four picture controls
+GStreamer also gives a signed property to, plus pan / tilt, are `Int`; the rest,
+whose range starts at zero on every device that has them, are `Uint`.
+
+Anything past that table is reachable through `extra-controls`, GStreamer's own
+spelling, as a comma-separated `name=value` list. The names are the driver's
+own, kebab-cased, which is how `g2g-device-monitor` lists them: the provider
+walks `VIDIOC_QUERY_EXT_CTRL` and records every numeric control as a
+`control.<name>` detail entry with the range and default the driver reports, so
+a listing tells the caller exactly what an `extra-controls` entry may say. The
+walk is g2g's own rather than the `v4l` crate's `query_controls`, which panics
+on a control type its enum predates (uvcvideo's region-of-interest rectangle).
+A malformed list fails the property; a name this device does not offer, or a
+value outside its reported range, fails the negotiation and logs the names the
+device does carry.
 
 ### 4.12b Live Ingress (UDP / RTP)
 
@@ -2144,6 +2164,36 @@ streams (global, then program, then track). The SDT describes the whole
 multiplex, so a demuxer posts one `BusMessage::Tag` per service it names, each
 carrying that service's `program_number`, whichever program the element routes.
 
+AV1 rides TS on the same private PES (stream_type 0x06) the KLV carriage uses,
+told apart by its `registration_descriptor` (M1049): AV1 has no `stream_type` of
+its own, so a 0x06 stream is AV1 only when its PMT entry names one. The mux writes
+the 'AV1G' format_identifier and the demux accepts that and the AOM spec's
+'AV01', because only 'AV1G' has a reader: GStreamer's `mpegtsmux` / `tsdemux`
+predate the spec and still call the mapping custom
+(`enable-custom-mappings=true`), while ffmpeg's muxer writes AV1 with no
+descriptor at all, a bare 0x06 not even its own demuxer identifies (it reports
+`bin_data`). Each PES payload is one temporal unit in the low-overhead OBU format,
+which `av1parse` and the AV1 decoders read unchanged, and `TsStream::Av1`
+(`tsdemux stream=av1`) selects it; the seek resume point reads the AV1 frame
+header rather than Annex-B start codes. Both directions are validated against
+GStreamer: a `svtav1enc ! mpegtsmux` stream demuxes to units ffmpeg's `obu`
+demuxer decodes at full size, and `tsdemux ! av1parse ! dav1ddec` decodes the g2g
+mux's output.
+
+The DVB EIT (PID 0x12) adds what a service is showing (M1049): the demuxers parse
+the present/following table (`table_id` 0x4E, sections 0 and 1) and post each
+service's `short_event_descriptor` name and text as a `BusMessage::Tag` scoped to
+its `program_number`, under the `event_name` / `event_text` and
+`next_event_name` / `next_event_text` keys (`Tag::Title` on that program is
+already the SDT service name). Unlike the PAT / PMT / SDT this table changes
+during the stream, so a section is read when its `version_number` differs from the
+one last accepted for the same `(service_id, section_number)`, and a table
+repeating itself costs nothing; unlike them a section routinely outgrows one
+packet, so sections reassemble across packets behind a `table_id` filter that
+keeps the far larger schedule tables sharing the PID out of the buffer. Event text
+goes through the same annex A decoder as the SDT names, which now also decodes the
+UTF-8 character table.
+
 The TS stack also carries KLV metadata (STANAG 4609, the airborne-ISR profile of
 MPEG-TS): `Caps::Klv` is the metadata elementary-stream caps (GStreamer
 `meta/x-klv`), each frame one SMPTE ST 336 key-length-value packet. On the mux
@@ -2274,7 +2324,7 @@ for the WebM codec subset. Scope is one Segment / one track with definite-size
 Clusters (multi-track A/V muxing is the sibling `mkvmuxn`). Both muxers also
 have a `seekable` (two-pass) mode (M770): the element buffers the file and
 finalizes it at EOS with a front `SeekHead` (fixed-layout entries indexing
-Info / Tracks / Tags / Cues, the Cues position patched in place once known), so
+Info / Tracks / Chapters / Tags / Cues, the Cues position patched in place once known), so
 the file seeks from byte 0 without reading past the Clusters; mutually
 exclusive with `streamable`, and the default streaming output is unchanged. The
 same finalize fills an `Info` `Duration` reserved beside them (M794): the value
@@ -2297,6 +2347,26 @@ them and where a player reads them, so the muxers route `Tag::Title` /
 `Tag::Language` there instead of writing a `SimpleTag`, and the demuxers merge
 both sources into one `StreamTag` per stream (M788). A missing `Language` stays
 absent rather than becoming the spec's implicit `eng`.
+
+Chapters (the table of contents, GStreamer's `GstToc`) travel the same
+out-of-band route in both containers (M1046). `g2g_core::Chapter` is the shared
+shape: a stream-time start in nanoseconds, an optional end, a title, an optional
+language, and nested sub-chapters. A demuxer posts what it parsed as
+`BusMessage::Chapters` (once, like the tags), so an application builds a chapter
+menu and seeks to a start without touching the data path; a muxer takes the same
+list through `with_chapters`. Matroska is the container that holds the whole
+shape: the `Chapters` element's `EditionEntry` / `ChapterAtom` tree, whose times
+are unscaled nanoseconds rather than `TimestampScale` ticks, with nesting and a
+per-chapter `ChapLanguage`. The muxers write one default edition; the demuxer
+skips a hidden edition or atom, since it is not meant to reach a menu, and bounds
+both the nesting depth and the chapter count because the file supplies them. MP4
+carries less: the reader prefers the QuickTime chapter *text* track (a media
+`trak` points at it with `tref/chap`, and its samples are the titles timed by its
+own sample table, so each chapter gets an end) and falls back to the Nero
+`udta/chpl` list, which is a flat array of starts in 100 ns ticks with no ends
+and no nesting. The writers emit `chpl` only, in the version-1 shape ffmpeg's
+`mov` muxer produces, so a g2g-written MP4 round-trips titles and starts but
+reports the chapters open-ended.
 
 The Ogg demuxer is the third, the same parser + element split on
 `Caps::ByteStream{Ogg}`. `g2g-plugins::ogg::OggDemuxer` parses RFC 3533 pages
@@ -2692,6 +2762,36 @@ hostile length fails the fetch instead of buffering on it. Every byte comes out
 exactly once in order, so the demuxer sees the same byte stream a whole-response
 fetch delivers. Byte-range segments and a set `prebuffer-ms` (which owns emission
 order) stay on the whole-response path.
+
+**Still images** are the smallest case of a byte stream carrying coded frames, and
+they take the same shape as a container (M1050). A PNG or WebP file is
+`CompressedVideo{Png}` / `CompressedVideo{WebP}`, one access unit per file, so
+`pngdec` / `webpdec` are ordinary decoders that `decodebin` auto-plugs and a
+still is one frame of a video stream rather than a separate kind of media.
+`typefind::sniff_caps` types both by magic (the PNG signature, `RIFF`+`WEBP`),
+which is what a `.png` or `.webp` extension resolves through, since filesrc arms
+content sniffing on an extension it does not know. JPEG is deliberately not typed
+by content: `mjpegdec` takes one whole access unit per buffer, so a `.jpg` would
+plug a decoder that fails past the source's read size until a `jpegparse` exists.
+
+The decoders do not assume one file per buffer, because a byte source hands over
+read-sized chunks (`filesrc`) or whole files (`multifilesrc`). Both cases go
+through `stillimage::ImageAssembler`, which accumulates until the format's own
+self-describing length says an image is complete: a PNG's chunk list walked to the
+end of `IEND`, a WebP's RIFF size field. A stream that ends mid-image reports it at
+EOS rather than decoding a partial file, and the bytes held while waiting are
+bounded, so a plausible signature followed by silence cannot grow the buffer for
+as long as the stream flows. Geometry is the file's word, so it is checked against
+a per-side and a total-byte budget (`stillimage::rgba_byte_size`) before any
+buffer is sized: both decoder crates size their output from the header, and a
+100000x100000 `IHDR` or a 20000x20000 `VP8X` canvas would otherwise ask for tens
+of gigabytes from a file of a few dozen bytes. Output is always 8-bit RGBA
+(palette and sub-byte grayscale expanded, 16-bit narrowed to its high byte, alpha
+added where the file has none), announced by a `CapsChanged` before the first frame
+and on any change, since a sequence of stills can change size mid-stream. `pngenc`
+is the inverse: RGBA or RGB in, one lossless PNG per frame, `compression-level` as
+zlib's 0..=9. There is no WebP encoder: the only pure-Rust one does VP8L lossless
+alone, with none of `webpenc`'s quality / speed / preset knobs.
 
 ### 4.18 Subtitle Overlay (`textoverlay`)
 

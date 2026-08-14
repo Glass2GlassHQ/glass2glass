@@ -35,7 +35,8 @@ use g2g_core::{
 
 use crate::filesink::path_io_err;
 use crate::fmp4::{
-    parse_fragments, parse_header, parse_progressive, starts_with_param_set, Header, Sample,
+    parse_chapters, parse_fragments, parse_header, parse_progressive, starts_with_param_set,
+    Header, Sample,
 };
 use crate::mp4box::{find_box, parse_ilst_tags};
 use g2g_core::log::short_type_name;
@@ -175,6 +176,10 @@ impl SourceLoop for Mp4Src {
                             program: None,
                         });
                     }
+                }
+                let chapters = parse_chapters(&data);
+                if !chapters.is_empty() {
+                    bus.try_post(BusMessage::Chapters(chapters));
                 }
                 // Announce the (single) video track as a StreamCollection (M386),
                 // the discovery half of the multi-stream model. Mp4Src is a

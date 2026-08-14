@@ -302,9 +302,7 @@ pub(crate) fn seq_header_obu(data: &[u8]) -> Option<(Av1SeqHeader, &[u8])> {
 #[cfg(feature = "std")]
 const OBU_TEMPORAL_DELIMITER: u8 = 2;
 /// `OBU_FRAME_HEADER` / `OBU_FRAME` types (the ones opening a coded frame).
-#[cfg(feature = "std")]
 const OBU_FRAME_HEADER: u8 = 3;
-#[cfg(feature = "std")]
 const OBU_FRAME: u8 = 6;
 
 /// A temporal unit with its temporal-delimiter OBUs stripped, as the ISOBMFF /
@@ -324,11 +322,11 @@ pub(crate) fn strip_temporal_delimiters(data: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Whether a temporal unit is a random-access (sync) sample for a muxer's
-/// keyframe flag: it carries a sequence header (encoders re-send it on key
-/// frames), or its first frame OBU codes `frame_type == KEY` with
-/// `show_existing_frame == 0`. Malformed framing is not a sync point.
-#[cfg(feature = "std")]
+/// Whether a temporal unit is a random-access (sync) sample: it carries a
+/// sequence header (encoders re-send it on key frames), or its first frame OBU
+/// codes `frame_type == KEY` with `show_existing_frame == 0`. Malformed framing
+/// is not a sync point. Used for a muxer's keyframe flag and for the MPEG-TS
+/// demuxer's seek resume point.
 pub(crate) fn av1_keyframe(data: &[u8]) -> bool {
     let Some(obus) = obu_ranges(data) else {
         return false;

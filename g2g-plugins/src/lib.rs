@@ -81,6 +81,8 @@ pub mod vp9parse;
 mod mathf;
 mod paint;
 mod xmlutil;
+// Shared gst `num-buffers` property conversion used by the source elements.
+mod numbuffers;
 
 // Software RGBA8 compositor (fan-in pixel mixer): PiP / grids / overlays.
 pub mod compositor;
@@ -807,6 +809,21 @@ pub mod mjpegdec;
 #[cfg(feature = "mjpeg-encode")]
 pub mod mjpegenc;
 
+// PNG stills via the pure-Rust png crate (no system deps).
+#[cfg(feature = "png")]
+pub mod pngdec;
+#[cfg(feature = "png")]
+pub mod pngenc;
+
+// WebP stills via the pure-Rust image-webp crate (no system deps).
+#[cfg(feature = "webp")]
+pub mod webpdec;
+
+// Geometry bounds, byte-stream reassembly, and RGBA output shared by the
+// still-image codec elements.
+#[cfg(any(feature = "png", feature = "webp"))]
+mod stillimage;
+
 // Opus audio encode + decode via libopus (FFI through audiopus). Not pure Rust;
 // links libopus (system or bundled-and-built), gated behind the `opus` feature.
 #[cfg(feature = "opus")]
@@ -934,7 +951,7 @@ pub mod mfvideosrc;
 #[cfg(all(target_os = "windows", feature = "mf-video-src"))]
 pub mod mfdevice;
 
-// VAAPI H.264 decode via cros-codecs is Linux-only. The dependency is
+// VAAPI H.264 / H.265 decode via cros-codecs is Linux-only. The dependency is
 // target-gated; enabling the feature on other platforms is a no-op.
 #[cfg(all(target_os = "linux", feature = "vaapi"))]
 pub mod vaapidec;

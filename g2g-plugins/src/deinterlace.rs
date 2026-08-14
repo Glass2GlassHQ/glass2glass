@@ -1,20 +1,22 @@
 //! Deinterlace (`deinterlace`). Removes interlacing combs from a raw video frame,
-//! preserving format and geometry, one frame out per frame in (single rate: no
-//! field doubling). CPU-only `no_std`. Packed RGBA / BGRA and planar I420 / NV12.
+//! preserving format and geometry. CPU-only `no_std`. Packed RGBA / BGRA,
+//! semi-planar NV12 / P010, and the fully-planar I420 / I422 / I444 family at 8,
+//! 10 and 12 bits.
 //!
 //! Three methods (a subset of GStreamer's `deinterlace`):
-//! - `yadif` (default): the ffmpeg / GStreamer yadif kernel, single-rate. Each
-//!   line of the discarded field is rebuilt from a spatial edge-directed
-//!   interpolation clamped to a temporal window, so static areas keep full
-//!   vertical detail and moving ones lose the comb. Needs the previous and next
-//!   frames, so it runs one frame behind the input.
-//! - `linear`: keep the top field's lines, replace each bottom-field line with the
-//!   average of the lines above and below it. No temporal state.
+//! - `yadif` (default): the ffmpeg / GStreamer yadif kernel. Each line of the
+//!   discarded field is rebuilt from a spatial edge-directed interpolation
+//!   clamped to a temporal window, so static areas keep full vertical detail and
+//!   moving ones lose the comb. Needs the previous and next frames, so it runs
+//!   one frame behind the input.
+//! - `linear`: keep the surviving field's lines, replace each line of the other
+//!   field with the average of the lines above and below it. No temporal state.
 //! - `blend`: each output line is the average of it and the line below, a soft
-//!   vertical blur that suppresses combing without dropping a field.
+//!   vertical blur that suppresses combing without dropping a field. It mixes
+//!   the two fields uniformly, so unlike the other two it has no field parity to
+//!   flip and `tff` does not change what it produces.
 //!
-//! Field order is assumed top-field-first, matching ffmpeg's default for a stream
-//! that declares nothing. The `mode` property (M935) mirrors GStreamer's:
+//! The `mode` property (M935) mirrors GStreamer's:
 //! `interlaced` (default) always weaves, `auto` weaves only when the incoming
 //! caps say `Interlace::Interleaved` (the ffmpeg decoder latches that from the
 //! per-picture flag) and passes everything else through untouched, `disabled` is
@@ -23,9 +25,19 @@
 //! `deinterlace` under `auto` would silently do nothing. `playbin` inserts this
 //! element with `auto` on every video branch.
 //!
+//! `fields` (M1048) selects how many output frames one input frame becomes and
+//! `tff` the field order, both named after GStreamer's properties. `fields=all`
+//! emits one frame per field and doubles the output framerate; the default
+//! `auto` emits one frame per input frame, built from whichever field comes
+//! first in time. That default deviates from GStreamer's `all`, which would
+//! double the rate of every pipeline that already has this element. `tff=auto`
+//! means top-field-first: `Caps::Interlace` carries no field order, so there is
+//! nothing to detect, and top-first is ffmpeg's assumption for a stream that
+//! declares none.
+//!
 //! In `auto` mode negotiation is transparent (any raw video is accepted and
-//! passed through, including formats the kernels cannot process, e.g. 10-bit
-//! planar), so inserting the element never narrows what a branch can play; an
+//! passed through, including formats the kernels cannot process, e.g. packed
+//! YUYV), so inserting the element never narrows what a branch can play; an
 //! interleaved stream in an unsupported format stays combed rather than failing.
 
 use core::future::Future;
@@ -45,11 +57,20 @@ use g2g_core::{
 
 use crate::pixel::{even_dims_required, frame_byte_size, planar_planes};
 
-const FORMATS: [RawVideoFormat; 4] = [
+const FORMATS: [RawVideoFormat; 13] = [
     RawVideoFormat::Rgba8,
     RawVideoFormat::Bgra8,
     RawVideoFormat::Nv12,
+    RawVideoFormat::P010,
     RawVideoFormat::I420,
+    RawVideoFormat::I420p10,
+    RawVideoFormat::I420p12,
+    RawVideoFormat::I422,
+    RawVideoFormat::I422p10,
+    RawVideoFormat::I422p12,
+    RawVideoFormat::I444,
+    RawVideoFormat::I444p10,
+    RawVideoFormat::I444p12,
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,6 +131,144 @@ impl DeinterlaceMode {
     }
 }
 
+/// How many output frames one input frame becomes, and which field each is built
+/// from (GStreamer's `fields`). See the module docs for why the default is
+/// `Auto`, not GStreamer's `All`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeinterlaceFields {
+    /// One output frame per field: the output framerate doubles.
+    All,
+    /// One output frame per input frame, keeping the top field.
+    Top,
+    /// One output frame per input frame, keeping the bottom field.
+    Bottom,
+    /// One output frame per input frame, keeping whichever field the field order
+    /// puts first in time.
+    Auto,
+}
+
+impl DeinterlaceFields {
+    fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "all" => Some(Self::All),
+            "top" => Some(Self::Top),
+            "bottom" => Some(Self::Bottom),
+            "auto" => Some(Self::Auto),
+            _ => None,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Top => "top",
+            Self::Bottom => "bottom",
+            Self::Auto => "auto",
+        }
+    }
+}
+
+/// Which field of an interleaved frame comes first in time (GStreamer's `tff`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FieldOrder {
+    /// Nothing to detect: `Caps::Interlace` carries no field order, so this
+    /// reads as top-field-first, ffmpeg's assumption for an undeclared stream.
+    Auto,
+    TopFirst,
+    BottomFirst,
+}
+
+impl FieldOrder {
+    fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "auto" => Some(Self::Auto),
+            "tff" => Some(Self::TopFirst),
+            "bff" => Some(Self::BottomFirst),
+            _ => None,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::TopFirst => "tff",
+            Self::BottomFirst => "bff",
+        }
+    }
+}
+
+/// What the kernels need to know to produce one output frame, in the same two
+/// flags ffmpeg's yadif takes.
+#[derive(Debug, Clone, Copy)]
+struct FieldPass {
+    /// The field whose lines survive; the other field's lines are rebuilt.
+    keep_top: bool,
+    /// Whether the stream's top field is the earlier one. Only yadif reads it,
+    /// to pick which temporal pair brackets the rebuilt field.
+    top_field_first: bool,
+}
+
+impl FieldPass {
+    /// The first row this pass rebuilds; every second row after it follows.
+    fn first_rebuilt_row(self) -> usize {
+        usize::from(self.keep_top)
+    }
+
+    /// ffmpeg's `parity ^ tff`: true takes the temporal pair from (prev, cur),
+    /// false from (cur, next). Rebuilding the field that comes second in time
+    /// reads forward instead of back.
+    fn reads_backward(self) -> bool {
+        self.keep_top == self.top_field_first
+    }
+}
+
+/// One sample as the kernels see it. The 10- and 12-bit formats store each
+/// sample in a little-endian 16-bit word, and deinterlacing never converts
+/// depth, so the kernels run on the stored word: whether the value sits in the
+/// word's low bits (the planar `p10` / `p12` family) or its top ones (P010)
+/// never reaches them.
+trait Sample {
+    /// Largest value the storage holds. Every kernel result is already an
+    /// average or a copy of its inputs, so this clamp only bounds the cast.
+    const MAX: i32;
+    fn load(buf: &[u8], offset: usize) -> i32;
+    fn store(buf: &mut [u8], offset: usize, value: i32);
+}
+
+#[derive(Debug)]
+struct Eight;
+
+impl Sample for Eight {
+    const MAX: i32 = u8::MAX as i32;
+
+    #[inline]
+    fn load(buf: &[u8], offset: usize) -> i32 {
+        buf[offset] as i32
+    }
+
+    #[inline]
+    fn store(buf: &mut [u8], offset: usize, value: i32) {
+        buf[offset] = value as u8;
+    }
+}
+
+#[derive(Debug)]
+struct SixteenLittleEndian;
+
+impl Sample for SixteenLittleEndian {
+    const MAX: i32 = u16::MAX as i32;
+
+    #[inline]
+    fn load(buf: &[u8], offset: usize) -> i32 {
+        u16::from_le_bytes([buf[offset], buf[offset + 1]]) as i32
+    }
+
+    #[inline]
+    fn store(buf: &mut [u8], offset: usize, value: i32) {
+        buf[offset..offset + 2].copy_from_slice(&(value as u16).to_le_bytes());
+    }
+}
+
 /// One deinterlaceable component of a frame: a 2D grid of samples addressed
 /// inside the packed buffer. `step` is the byte distance between horizontally
 /// adjacent samples, so an interleaved component (one RGBA channel, one half of
@@ -134,9 +293,10 @@ impl Component {
     }
 }
 
-/// The component grid of one `w x h` frame in `format`. Only the four formats
+/// The component grid of one `w x h` frame in `format`. Only the formats
 /// `FORMATS` admits reach here.
 fn components(format: RawVideoFormat, w: usize, h: usize) -> Vec<Component> {
+    let sample = format.bytes_per_sample();
     match format {
         RawVideoFormat::Rgba8 | RawVideoFormat::Bgra8 => (0..4)
             .map(|c| Component {
@@ -147,40 +307,42 @@ fn components(format: RawVideoFormat, w: usize, h: usize) -> Vec<Component> {
                 rows: h,
             })
             .collect(),
-        RawVideoFormat::Nv12 => {
+        // Semi-planar: the Cb / Cr pair shares one plane, so each half is its own
+        // component with the pair's pitch as its step.
+        RawVideoFormat::Nv12 | RawVideoFormat::P010 => {
             let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
-            let luma = w * h;
+            let luma = w * h * sample;
             Vec::from([
                 Component {
                     base: 0,
-                    stride: w,
-                    step: 1,
+                    stride: w * sample,
+                    step: sample,
                     width: w,
                     rows: h,
                 },
                 Component {
                     base: luma,
-                    stride: cw * 2,
-                    step: 2,
+                    stride: cw * 2 * sample,
+                    step: 2 * sample,
                     width: cw,
                     rows: ch,
                 },
                 Component {
-                    base: luma + 1,
-                    stride: cw * 2,
-                    step: 2,
+                    base: luma + sample,
+                    stride: cw * 2 * sample,
+                    step: 2 * sample,
                     width: cw,
                     rows: ch,
                 },
             ])
         }
-        // Fully planar (I420 here): one component per plane.
+        // Fully planar (the I420 / I422 / I444 family): one component per plane.
         _ => planar_planes(format, w, h)
             .into_iter()
             .map(|(base, pw, ph)| Component {
                 base,
-                stride: pw,
-                step: 1,
+                stride: pw * sample,
+                step: sample,
                 width: pw,
                 rows: ph,
             })
@@ -209,6 +371,8 @@ struct Held {
 pub struct Deinterlace {
     method: DeinterlaceMethod,
     mode: DeinterlaceMode,
+    fields: DeinterlaceFields,
+    field_order: FieldOrder,
     /// Whether the current caps get woven (vs forwarded untouched). Decided at
     /// every (re)configure from `mode` and the incoming `Interlace` field.
     active: bool,
@@ -217,7 +381,13 @@ pub struct Deinterlace {
     incoming_caps: Option<Caps>,
     input: Option<(RawVideoFormat, u32, u32, Rate)>,
     layout: Vec<Component>,
+    /// Whether the configured format stores samples as 16-bit words.
+    wide_samples: bool,
     frame_bytes: usize,
+    /// Nanoseconds between the two outputs of one input frame under
+    /// `fields=all`, from the negotiated framerate. Zero when the caps leave the
+    /// rate open, and then the frame's own duration stands in.
+    field_step_ns: u64,
     configured: bool,
     last_caps: Option<Caps>,
     emitted: u64,
@@ -239,11 +409,15 @@ impl Deinterlace {
         Self {
             method: DeinterlaceMethod::Yadif,
             mode: DeinterlaceMode::Interlaced,
+            fields: DeinterlaceFields::Auto,
+            field_order: FieldOrder::Auto,
             active: false,
             incoming_caps: None,
             input: None,
             layout: Vec::new(),
+            wide_samples: false,
             frame_bytes: 0,
+            field_step_ns: 0,
             configured: false,
             last_caps: None,
             emitted: 0,
@@ -263,9 +437,61 @@ impl Deinterlace {
         self
     }
 
+    pub fn with_fields(mut self, fields: DeinterlaceFields) -> Self {
+        self.fields = fields;
+        self
+    }
+
+    pub fn with_field_order(mut self, field_order: FieldOrder) -> Self {
+        self.field_order = field_order;
+        self
+    }
+
+    fn top_field_first(&self) -> bool {
+        self.field_order != FieldOrder::BottomFirst
+    }
+
+    /// The output frames one input frame becomes, in emission order, as the
+    /// first `count` entries of the returned array.
+    fn passes(&self) -> ([FieldPass; 2], usize) {
+        let top_field_first = self.top_field_first();
+        let pass = |keep_top| FieldPass {
+            keep_top,
+            top_field_first,
+        };
+        match self.fields {
+            // Earlier field first, so the two outputs stay in presentation order.
+            DeinterlaceFields::All => ([pass(top_field_first), pass(!top_field_first)], 2),
+            DeinterlaceFields::Auto => ([pass(top_field_first); 2], 1),
+            DeinterlaceFields::Top => ([pass(true); 2], 1),
+            DeinterlaceFields::Bottom => ([pass(false); 2], 1),
+        }
+    }
+
+    /// Timing of output `index` built from an input frame timed `base`. Under
+    /// `fields=all` each output covers one field's worth of time and the second
+    /// one starts half a frame period later.
+    fn field_timing(&self, base: FrameTiming, index: usize) -> FrameTiming {
+        if self.fields != DeinterlaceFields::All {
+            return base;
+        }
+        let mut timing = base;
+        timing.duration_ns = base.duration_ns / 2;
+        if index > 0 {
+            let step = if self.field_step_ns > 0 {
+                self.field_step_ns
+            } else {
+                base.duration_ns / 2
+            };
+            timing.pts_ns = base.pts_ns.saturating_add(step);
+            timing.dts_ns = base.dts_ns.saturating_add(step);
+        }
+        timing
+    }
+
     /// The weave path's input contract: a fixed, even geometry in one of the
-    /// four kernel formats. `None` when the caps are raw video the kernels
-    /// cannot process (only an error for the modes that must process).
+    /// kernel formats. `None` when the caps are raw video the kernels cannot
+    /// process (only an error for the modes that must process).
     fn weavable(caps: &Caps) -> Option<(RawVideoFormat, u32, u32, Rate)> {
         let Caps::RawVideo {
             format,
@@ -290,27 +516,16 @@ impl Deinterlace {
     }
 
     fn reconfigure(&mut self, caps: &Caps) -> Result<(), G2gError> {
-        let Caps::RawVideo { interlace, .. } = caps else {
+        if !matches!(caps, Caps::RawVideo { .. }) {
             return Err(G2gError::CapsMismatch);
-        };
+        }
         let weavable = Self::weavable(caps);
-        let active = match self.mode {
-            DeinterlaceMode::Disabled => false,
-            // The pre-M935 contract: an explicit always-on deinterlace rejects
-            // caps it cannot process, loud.
-            DeinterlaceMode::Interlaced => {
-                if weavable.is_none() {
-                    return Err(G2gError::CapsMismatch);
-                }
-                true
-            }
-            // Auto: weave only a declared-interleaved stream in a format the
-            // kernels handle; anything else (progressive, undeclared, 10-bit)
-            // forwards untouched.
-            DeinterlaceMode::Auto => {
-                *interlace == g2g_core::Interlace::Interleaved && weavable.is_some()
-            }
-        };
+        // The pre-M935 contract: an explicit always-on deinterlace rejects caps
+        // it cannot process, loud.
+        if self.mode == DeinterlaceMode::Interlaced && weavable.is_none() {
+            return Err(G2gError::CapsMismatch);
+        }
+        let active = weaves(self.mode, caps);
         if active {
             let (format, w, h, rate) = weavable.ok_or(G2gError::CapsMismatch)?;
             // A geometry change invalidates the held window: its frames are the
@@ -321,7 +536,9 @@ impl Deinterlace {
                 self.next = None;
             }
             self.layout = components(format, w as usize, h as usize);
+            self.wide_samples = format.bytes_per_sample() == 2;
             self.frame_bytes = frame_byte_size(format, w, h);
+            self.field_step_ns = half_frame_period_ns(&rate);
             self.input = Some((format, w, h, rate));
         } else {
             self.prev = None;
@@ -349,8 +566,16 @@ impl Deinterlace {
             return Some(incoming.clone());
         }
         let mut caps = incoming.clone();
-        if let Caps::RawVideo { interlace, .. } = &mut caps {
+        if let Caps::RawVideo {
+            interlace,
+            framerate,
+            ..
+        } = &mut caps
+        {
             *interlace = g2g_core::Interlace::Progressive;
+            if self.fields == DeinterlaceFields::All {
+                *framerate = doubled_rate(framerate);
+            }
         }
         Some(caps)
     }
@@ -378,14 +603,83 @@ impl Deinterlace {
         Ok(())
     }
 
-    /// Run yadif over the held window and emit the result for `cur`.
-    fn yadif_current(&self) -> Option<(Vec<u8>, FrameTiming)> {
+    /// Run yadif over the held window for one output frame of `cur`.
+    fn yadif_current(&self, pass: FieldPass) -> Option<Vec<u8>> {
         let (prev, cur, next) = (self.prev.as_ref()?, self.cur.as_ref()?, self.next.as_ref()?);
         let mut dst = cur.data.clone();
         for c in &self.layout {
-            yadif_component(&prev.data, &cur.data, &next.data, &mut dst, *c);
+            if self.wide_samples {
+                yadif_component::<SixteenLittleEndian>(
+                    &prev.data, &cur.data, &next.data, &mut dst, *c, pass,
+                );
+            } else {
+                yadif_component::<Eight>(&prev.data, &cur.data, &next.data, &mut dst, *c, pass);
+            }
         }
-        Some((dst, cur.timing))
+        Some(dst)
+    }
+
+    /// Emit every output frame the held yadif window is ready to produce, one
+    /// per field under `fields=all`. A window short of `prev` / `next` yields
+    /// nothing yet.
+    async fn emit_yadif_window(&mut self, out: &mut dyn OutputSink) -> Result<(), G2gError> {
+        let Some(base) = self.cur.as_ref().map(|f| f.timing) else {
+            return Ok(());
+        };
+        let (passes, count) = self.passes();
+        for (index, pass) in passes[..count].iter().enumerate() {
+            let Some(data) = self.yadif_current(*pass) else {
+                return Ok(());
+            };
+            let timing = self.field_timing(base, index);
+            self.emit(data, timing, out).await?;
+        }
+        Ok(())
+    }
+}
+
+/// Whether `caps` reach the kernels rather than passing through. The `auto`
+/// answer is provisional at negotiation time: a stream the decoder only later
+/// declares interleaved starts weaving mid-run, and the runtime `CapsChanged`
+/// carries the corrected output caps.
+fn weaves(mode: DeinterlaceMode, caps: &Caps) -> bool {
+    match mode {
+        DeinterlaceMode::Disabled => false,
+        DeinterlaceMode::Interlaced => Deinterlace::weavable(caps).is_some(),
+        // Only a declared-interleaved stream in a format the kernels handle:
+        // progressive, undeclared and unsupported all forward untouched.
+        DeinterlaceMode::Auto => {
+            matches!(
+                caps,
+                Caps::RawVideo {
+                    interlace: g2g_core::Interlace::Interleaved,
+                    ..
+                }
+            ) && Deinterlace::weavable(caps).is_some()
+        }
+    }
+}
+
+/// One output frame per field means twice the frames per second. An open rate
+/// stays open: doubling an unconstrained span says nothing new.
+fn doubled_rate(rate: &Rate) -> Rate {
+    match rate {
+        Rate::Fixed(v) => Rate::Fixed(v.saturating_mul(2)),
+        Rate::Range { min_q16, max_q16 } => Rate::Range {
+            min_q16: min_q16.saturating_mul(2),
+            max_q16: max_q16.saturating_mul(2),
+        },
+        Rate::Any => Rate::Any,
+    }
+}
+
+/// Nanoseconds per field at a Q16 frames-per-second rate, zero when the rate is
+/// not fixed.
+fn half_frame_period_ns(rate: &Rate) -> u64 {
+    const HALF_SECOND_NS_Q16: u64 = 500_000_000 * 65536;
+    match rate {
+        Rate::Fixed(q16) if *q16 > 0 => HALF_SECOND_NS_Q16 / *q16 as u64,
+        _ => 0,
     }
 }
 
@@ -427,25 +721,33 @@ impl AsyncElement for Deinterlace {
 
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         let mode = self.mode;
-        CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| match input {
-            // The output never declares interlacing: weaving produces
-            // progressive frames, and a passthrough of an unweavable stream is
-            // the runtime exception the mid-stream CapsChanged corrects.
-            Caps::RawVideo { .. } if mode != DeinterlaceMode::Interlaced => {
-                let mut out = input.clone();
-                if let Caps::RawVideo { interlace, .. } = &mut out {
-                    *interlace = g2g_core::Interlace::Progressive;
-                }
-                CapsSet::one(out)
+        let doubles = self.fields == DeinterlaceFields::All;
+        CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| {
+            let Caps::RawVideo { format, .. } = input else {
+                return CapsSet::from_alternatives(Vec::new());
+            };
+            if mode == DeinterlaceMode::Interlaced && !FORMATS.contains(format) {
+                return CapsSet::from_alternatives(Vec::new());
             }
-            Caps::RawVideo { format, .. } if FORMATS.contains(format) => {
-                let mut out = input.clone();
-                if let Caps::RawVideo { interlace, .. } = &mut out {
-                    *interlace = g2g_core::Interlace::Progressive;
+            let mut out = input.clone();
+            if let Caps::RawVideo {
+                interlace,
+                framerate,
+                ..
+            } = &mut out
+            {
+                // The output never declares interlacing: weaving produces
+                // progressive frames, and a passthrough of an unweavable stream
+                // is the runtime exception the mid-stream CapsChanged corrects.
+                *interlace = g2g_core::Interlace::Progressive;
+                // Only a stream that actually reaches the kernels gains frames,
+                // and the same CapsChanged corrects an `auto` guess that the
+                // decoder later contradicts.
+                if doubles && weaves(mode, input) {
+                    *framerate = doubled_rate(framerate);
                 }
-                CapsSet::one(out)
             }
-            _ => CapsSet::from_alternatives(Vec::new()),
+            CapsSet::one(out)
         }))
     }
 
@@ -504,16 +806,35 @@ impl AsyncElement for Deinterlace {
                                 timing: f.timing,
                             });
                         }
-                        if let Some((data, timing)) = self.yadif_current() {
-                            self.emit(data, timing, out).await?;
-                        }
+                        self.emit_yadif_window(out).await?;
                     } else {
-                        let mut dst = vec![0u8; n];
-                        dst.copy_from_slice(&src[..n]);
-                        for c in &self.layout {
-                            blend_component(&src[..n], &mut dst, *c, self.method);
+                        let base = frame.timing;
+                        let (passes, count) = self.passes();
+                        for (index, pass) in passes[..count].iter().enumerate() {
+                            let mut dst = vec![0u8; n];
+                            dst.copy_from_slice(&src[..n]);
+                            for c in &self.layout {
+                                if self.wide_samples {
+                                    blend_component::<SixteenLittleEndian>(
+                                        &src[..n],
+                                        &mut dst,
+                                        *c,
+                                        self.method,
+                                        *pass,
+                                    );
+                                } else {
+                                    blend_component::<Eight>(
+                                        &src[..n],
+                                        &mut dst,
+                                        *c,
+                                        self.method,
+                                        *pass,
+                                    );
+                                }
+                            }
+                            let timing = self.field_timing(base, index);
+                            self.emit(dst, timing, out).await?;
                         }
-                        self.emit(dst, frame.timing, out).await?;
                     }
                 }
                 PipelinePacket::CapsChanged(c) => {
@@ -547,9 +868,7 @@ impl AsyncElement for Deinterlace {
                         data: f.data.clone(),
                         timing: f.timing,
                     });
-                    if let Some((data, timing)) = self.yadif_current() {
-                        self.emit(data, timing, out).await?;
-                    }
+                    self.emit_yadif_window(out).await?;
                     self.prev = None;
                     self.cur = None;
                     self.next = None;
@@ -585,6 +904,14 @@ impl AsyncElement for Deinterlace {
                 let s = value.as_str().ok_or(PropError::Type)?;
                 self.mode = DeinterlaceMode::from_str(s).ok_or(PropError::Value)?;
             }
+            "fields" => {
+                let s = value.as_str().ok_or(PropError::Type)?;
+                self.fields = DeinterlaceFields::from_str(s).ok_or(PropError::Value)?;
+            }
+            "tff" => {
+                let s = value.as_str().ok_or(PropError::Type)?;
+                self.field_order = FieldOrder::from_str(s).ok_or(PropError::Value)?;
+            }
             _ => return Err(PropError::Unknown),
         }
         Ok(())
@@ -594,6 +921,8 @@ impl AsyncElement for Deinterlace {
         match name {
             "method" => Some(PropValue::Str(self.method.as_str().into())),
             "mode" => Some(PropValue::Str(self.mode.as_str().into())),
+            "fields" => Some(PropValue::Str(self.fields.as_str().into())),
+            "tff" => Some(PropValue::Str(self.field_order.as_str().into())),
             _ => None,
         }
     }
@@ -612,6 +941,18 @@ static DEINTERLACE_PROPS: &[PropertySpec] = &[
         "when to deinterlace: auto (only caps-declared interleaved) | interlaced (always) | disabled",
     )
     .with_enum_values("auto | interlaced | disabled"),
+    PropertySpec::new(
+        "fields",
+        PropKind::Str,
+        "fields to output: all (one frame per field, double rate) | top | bottom | auto (the field that comes first in time)",
+    )
+    .with_enum_values("all | top | bottom | auto"),
+    PropertySpec::new(
+        "tff",
+        PropKind::Str,
+        "field order: auto (top field first) | tff | bff",
+    )
+    .with_enum_values("auto | tff | bff"),
 ];
 
 impl PadTemplates for Deinterlace {
@@ -628,29 +969,37 @@ impl PadTemplates for Deinterlace {
     }
 }
 
-fn avg(a: u8, b: u8) -> u8 {
-    ((a as u16 + b as u16) / 2) as u8
-}
-
 /// The `linear` / `blend` methods over one component. `dst` already holds a copy
 /// of `src`, so a row either method leaves alone needs no write.
-fn blend_component(src: &[u8], dst: &mut [u8], c: Component, method: DeinterlaceMethod) {
+fn blend_component<S: Sample>(
+    src: &[u8],
+    dst: &mut [u8],
+    c: Component,
+    method: DeinterlaceMethod,
+    pass: FieldPass,
+) {
+    let avg = |a: i32, b: i32| ((a + b) / 2).clamp(0, S::MAX);
     match method {
         DeinterlaceMethod::Linear => {
-            // Odd rows (the bottom field) are rebuilt from their neighbours; the
-            // last row has no row below, so it stays.
-            let mut y = 1;
+            // The rows of the field this pass discards are rebuilt from their
+            // neighbours. A rebuilt row at the very top or bottom has only one
+            // neighbour, so it stays as it came in.
+            let mut y = if pass.keep_top { 1 } else { 2 };
             while y + 1 < c.rows {
                 for x in 0..c.width {
-                    dst[c.at(y, x)] = avg(src[c.at(y - 1, x)], src[c.at(y + 1, x)]);
+                    let value = avg(S::load(src, c.at(y - 1, x)), S::load(src, c.at(y + 1, x)));
+                    S::store(dst, c.at(y, x), value);
                 }
                 y += 2;
             }
         }
+        // A uniform vertical blur over both fields: no field parity to follow, so
+        // `pass` does not change the result.
         DeinterlaceMethod::Blend => {
             for y in 0..c.rows.saturating_sub(1) {
                 for x in 0..c.width {
-                    dst[c.at(y, x)] = avg(src[c.at(y, x)], src[c.at(y + 1, x)]);
+                    let value = avg(S::load(src, c.at(y, x)), S::load(src, c.at(y + 1, x)));
+                    S::store(dst, c.at(y, x), value);
                 }
             }
         }
@@ -658,40 +1007,56 @@ fn blend_component(src: &[u8], dst: &mut [u8], c: Component, method: Deinterlace
     }
 }
 
-/// yadif over one component, single-rate and top-field-first, a port of ffmpeg's
+/// yadif over one component for one output frame, a port of ffmpeg's
 /// `vf_yadif.c` `FILTER` / `CHECK` kernel.
 ///
-/// Single-rate is ffmpeg's `mode=0`, which always passes `parity ^ tff == 1` down
-/// to the line filter, so the temporal pair is `(prev, cur)`: the two samples of
-/// the discarded field that bracket the kept field in time. `dst` already holds a
-/// copy of `cur`, so the kept field's rows need no write.
+/// `pass` names the field whose rows survive (`dst` already holds a copy of
+/// `cur`, so those rows need no write) and the field order. Together they pick
+/// the temporal pair bracketing the rebuilt field: `(prev, cur)` when it comes
+/// first in time, `(cur, next)` when it comes second, which is ffmpeg's
+/// `parity ^ tff` reaching its line filter.
 ///
 /// The first and last three columns take the plain `(above + below) / 2` spatial
 /// predictor instead of the edge-directed search, exactly as ffmpeg's
 /// `filter_edges` does, because the search reads three samples to either side.
-fn yadif_component(prev: &[u8], cur: &[u8], next: &[u8], dst: &mut [u8], c: Component) {
+fn yadif_component<S: Sample>(
+    prev: &[u8],
+    cur: &[u8],
+    next: &[u8],
+    dst: &mut [u8],
+    c: Component,
+    pass: FieldPass,
+) {
     // Two rows are the minimum the row mirroring below is defined for.
     if c.rows < 2 {
         return;
     }
-    // Top field first: only the odd rows are rebuilt, and `y >= 1` is what makes
-    // every neighbour index below non-negative.
-    for y in (1..c.rows).step_by(2) {
-        // ffmpeg mirrors at the bottom edge: prefs is -1 row on the last row.
-        let above = y - 1;
-        let below = if y + 1 < c.rows { y + 1 } else { y - 1 };
+    let (prev2, next2) = if pass.reads_backward() {
+        (prev, cur)
+    } else {
+        (cur, next)
+    };
+    for y in (pass.first_rebuilt_row()..c.rows).step_by(2) {
+        // ffmpeg mirrors at both edges: the row above the first row is the one
+        // below it, and the row below the last row is the one above it.
+        let up: isize = if y > 0 { -1 } else { 1 };
+        let down: isize = if y + 1 < c.rows { 1 } else { -1 };
+        let above = (y as isize + up) as usize;
+        let below = (y as isize + down) as usize;
         // ffmpeg forces mode 2 on the rows whose second-order neighbours would
         // fall outside the frame, which drops the b / f interval check. That is
         // also what keeps `above2` / `below2` inside the component.
-        let interval = y != 1 && y + 2 != c.rows;
-        let (above2, below2) = (y.saturating_sub(2), if below > y { y + 2 } else { y - 2 });
+        let second_order = (y != 1 && y + 2 != c.rows).then(|| {
+            (
+                (y as isize + 2 * up) as usize,
+                (y as isize + 2 * down) as usize,
+            )
+        });
         for x in 0..c.width {
-            let s = |buf: &[u8], yy: usize, xx: usize| buf[c.at(yy, xx)] as i32;
+            let s = |buf: &[u8], yy: usize, xx: usize| S::load(buf, c.at(yy, xx));
             let cc = s(cur, above, x);
             let e = s(cur, below, x);
-            // Single-rate yadif reads its temporal pair from prev and cur: the
-            // two samples of the discarded field bracketing this field in time.
-            let (p0, n0) = (s(prev, y, x), s(cur, y, x));
+            let (p0, n0) = (s(prev2, y, x), s(next2, y, x));
             let d = (p0 + n0) >> 1;
             let td0 = (p0 - n0).abs();
             let td1 = ((s(prev, above, x) - cc).abs() + (s(prev, below, x) - e).abs()) >> 1;
@@ -701,7 +1066,7 @@ fn yadif_component(prev: &[u8], cur: &[u8], next: &[u8], dst: &mut [u8], c: Comp
 
             if x >= 3 && x + 3 < c.width {
                 let xi = x as isize;
-                let sx = |yy: usize, xx: isize| cur[c.at(yy, xx as usize)] as i32;
+                let sx = |yy: usize, xx: isize| S::load(cur, c.at(yy, xx as usize));
                 let score = |j: isize| -> i32 {
                     (sx(above, xi - 1 + j) - sx(below, xi - 1 - j)).abs()
                         + (sx(above, xi + j) - sx(below, xi - j)).abs()
@@ -725,9 +1090,9 @@ fn yadif_component(prev: &[u8], cur: &[u8], next: &[u8], dst: &mut [u8], c: Comp
                 }
             }
 
-            if interval {
-                let b = (s(prev, above2, x) + s(cur, above2, x)) >> 1;
-                let f = (s(prev, below2, x) + s(cur, below2, x)) >> 1;
+            if let Some((above2, below2)) = second_order {
+                let b = (s(prev2, above2, x) + s(next2, above2, x)) >> 1;
+                let f = (s(prev2, below2, x) + s(next2, below2, x)) >> 1;
                 let max = (d - e).max(d - cc).max((b - cc).min(f - e));
                 let min = (d - e).min(d - cc).min((b - cc).max(f - e));
                 diff = diff.max(min).max(-max);
@@ -738,7 +1103,7 @@ fn yadif_component(prev: &[u8], cur: &[u8], next: &[u8], dst: &mut [u8], c: Comp
             } else if pred < d - diff {
                 pred = d - diff;
             }
-            dst[c.at(y, x)] = pred.clamp(0, 255) as u8;
+            S::store(dst, c.at(y, x), pred.clamp(0, S::MAX));
         }
     }
 }
@@ -767,10 +1132,15 @@ mod tests {
         v
     }
 
+    const KEEP_TOP: FieldPass = FieldPass {
+        keep_top: true,
+        top_field_first: true,
+    };
+
     fn run(src: &[u8], w: usize, h: usize, method: DeinterlaceMethod) -> Vec<u8> {
         let mut dst = src.to_vec();
         for c in components(RawVideoFormat::Rgba8, w, h) {
-            blend_component(src, &mut dst, c, method);
+            blend_component::<Eight>(src, &mut dst, c, method, KEEP_TOP);
         }
         dst
     }
@@ -807,8 +1177,55 @@ mod tests {
             }
         }
         let mut dst = src.clone();
-        yadif_component(&src, &src, &src, &mut dst, rgba(w, h));
+        yadif_component::<Eight>(&src, &src, &src, &mut dst, rgba(w, h), KEEP_TOP);
         assert_eq!(dst, src, "a frame identical to its neighbours is unchanged");
+    }
+
+    /// Every rebuilt row indexes its first- and second-order neighbours through
+    /// the same mirroring, so no component shape can walk off either edge.
+    #[test]
+    fn every_shape_and_parity_stays_inside_the_component() {
+        for rows in 2..12usize {
+            for keep_top in [true, false] {
+                let w = 8usize;
+                let src = vec![7u8; w * rows * 4];
+                let mut dst = src.clone();
+                let pass = FieldPass {
+                    keep_top,
+                    top_field_first: true,
+                };
+                yadif_component::<Eight>(&src, &src, &src, &mut dst, rgba(w, rows), pass);
+                assert_eq!(dst, src, "flat input, {rows} rows, keep_top {keep_top}");
+            }
+        }
+    }
+
+    #[test]
+    fn bottom_field_first_keeps_the_other_field() {
+        let mut element = Deinterlace::new();
+        assert!(element.top_field_first());
+        let (passes, count) = element.passes();
+        assert_eq!((passes[0].keep_top, count), (true, 1));
+
+        element.field_order = FieldOrder::BottomFirst;
+        let (passes, count) = element.passes();
+        assert_eq!((passes[0].keep_top, count), (false, 1));
+        assert_eq!(passes[0].first_rebuilt_row(), 0);
+        assert!(passes[0].reads_backward(), "the earlier field reads back");
+
+        element.fields = DeinterlaceFields::All;
+        let (passes, count) = element.passes();
+        assert_eq!(count, 2);
+        assert_eq!((passes[0].keep_top, passes[1].keep_top), (false, true));
+        assert!(!passes[1].reads_backward(), "the later field reads forward");
+    }
+
+    #[test]
+    fn all_fields_doubles_the_rate_and_halves_the_step() {
+        assert_eq!(doubled_rate(&Rate::Fixed(25 << 16)), Rate::Fixed(50 << 16));
+        assert_eq!(doubled_rate(&Rate::Any), Rate::Any);
+        assert_eq!(half_frame_period_ns(&Rate::Fixed(25 << 16)), 20_000_000);
+        assert_eq!(half_frame_period_ns(&Rate::Any), 0);
     }
 
     #[test]

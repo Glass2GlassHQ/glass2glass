@@ -68,9 +68,10 @@ pub struct PipeWireSrc {
     format: AudioFormat,
     channels: u8,
     rate: u32,
-    /// `None` = run until error or downstream shutdown; else stop after N frames
-    /// (PipeWire buffers) and emit EOS. The bounded-capture / test path.
-    frame_limit: Option<u64>,
+    /// `u64::MAX` = run until error or downstream shutdown; else stop after this
+    /// many frames (PipeWire buffers) and emit EOS. The bounded-capture / test
+    /// path.
+    frame_limit: u64,
     configured: bool,
 }
 
@@ -97,7 +98,7 @@ impl PipeWireSrc {
             format: AudioFormat::PcmS16Le,
             channels: DEFAULT_CHANNELS,
             rate: DEFAULT_RATE,
-            frame_limit: None,
+            frame_limit: u64::MAX,
             configured: false,
         }
     }
@@ -126,10 +127,11 @@ impl PipeWireSrc {
         self
     }
 
-    /// Stop after `n` captured buffers and emit EOS (`0` = no limit). Without
-    /// this the source runs until an error or until downstream drops.
+    /// Stop after `n` captured buffers and emit EOS (0 emits EOS without opening
+    /// the stream). Without this the source runs until an error or until
+    /// downstream drops.
     pub fn with_frame_limit(mut self, n: u64) -> Self {
-        self.frame_limit = (n > 0).then_some(n);
+        self.frame_limit = n;
         self
     }
 
@@ -205,10 +207,7 @@ impl SourceLoop for PipeWireSrc {
             }
             "samplerate" => self.rate = value.as_uint().ok_or(PropError::Type)? as u32,
             "channels" => self.channels = value.as_uint().ok_or(PropError::Type)? as u8,
-            "num-buffers" => {
-                let n = value.as_int().ok_or(PropError::Type)?;
-                self.frame_limit = (n >= 0).then_some(n as u64);
-            }
+            "num-buffers" => crate::numbuffers::set_num_buffers(&mut self.frame_limit, &value)?,
             _ => return Err(PropError::Unknown),
         }
         Ok(())
@@ -220,7 +219,7 @@ impl SourceLoop for PipeWireSrc {
             "format" => Some(PropValue::Str(audio_format_to_str(self.format).into())),
             "samplerate" => Some(PropValue::Uint(u64::from(self.rate))),
             "channels" => Some(PropValue::Uint(u64::from(self.channels))),
-            "num-buffers" => Some(PropValue::Int(self.frame_limit.map_or(-1, |n| n as i64))),
+            "num-buffers" => Some(crate::numbuffers::get_num_buffers(self.frame_limit)),
             _ => None,
         }
     }
@@ -229,6 +228,9 @@ impl SourceLoop for PipeWireSrc {
         Box::pin(async move {
             if !self.configured {
                 return Err(G2gError::NotConfigured);
+            }
+            if crate::numbuffers::finished_at_zero_limit(self.frame_limit, out).await? {
+                return Ok(0);
             }
             let (spa_format, channels, rate) =
                 pw_params(&self.caps()?).map_err(|_| G2gError::NotConfigured)?;
@@ -280,7 +282,7 @@ impl SourceLoop for PipeWireSrc {
             let mut downstream_open = true;
             let mut failure = None;
 
-            while limit.is_none_or(|n| seq < n) {
+            while seq < limit {
                 let Some(msg) = audio_rx.recv().await else {
                     break; // worker ended
                 };
@@ -375,7 +377,8 @@ static PIPEWIRESRC_PROPS: &[PropertySpec] = &[
         PropKind::Int,
         "buffers to capture then EOS (-1 = forever)",
     )
-    .with_default("-1"),
+    .with_default("-1")
+    .with_range("-1", "9223372036854775807"),
 ];
 
 // =================================================================
@@ -495,8 +498,11 @@ mod tests {
         assert_eq!(src.target, "g2g-node");
         assert_eq!(src.format, AudioFormat::PcmF32Le);
         assert_eq!((src.channels, src.rate), (1, 44_100));
-        assert_eq!(src.frame_limit, Some(5));
-        assert_eq!(PipeWireSrc::new().with_frame_limit(0).frame_limit, None);
+        assert_eq!(src.frame_limit, 5);
+        // The builder spells the limit the way the property does: 0 is a count
+        // of zero, not a second way to say "forever".
+        assert_eq!(PipeWireSrc::new().with_frame_limit(0).frame_limit, 0);
+        assert_eq!(PipeWireSrc::new().frame_limit, u64::MAX);
     }
 
     #[test]
@@ -515,11 +521,11 @@ mod tests {
         assert_eq!(src.target, "mic0");
         assert_eq!(src.format, AudioFormat::PcmF32Le);
         assert_eq!((src.channels, src.rate), (1, 44_100));
-        assert_eq!(src.frame_limit, Some(20));
+        assert_eq!(src.frame_limit, 20);
         // -1 is no limit, in both directions
         src.set_property("num-buffers", PropValue::Int(-1))
             .expect("known prop");
-        assert_eq!(src.frame_limit, None);
+        assert_eq!(src.frame_limit, u64::MAX);
         assert_eq!(src.get_property("num-buffers"), Some(PropValue::Int(-1)));
         // a sample format the element cannot open a stream with is an error
         assert_eq!(

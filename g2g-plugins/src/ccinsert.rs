@@ -273,6 +273,13 @@ impl MultiInputElement for CcInsert {
     where
         Self: 'a;
 
+    /// Walks the access unit's bytes to place the SEI and reads the cue pad's
+    /// text, so every pad takes system frames only. The allocation cascade turns
+    /// that into a download demand on a GPU producer.
+    fn input_domains(&self) -> g2g_core::memory::DomainSet {
+        g2g_core::memory::DomainSet::only(g2g_core::memory::MemoryDomainKind::System)
+    }
+
     fn input_count(&self) -> usize {
         // Meta-sourced mode has no cue pad: the captions ride the video frames.
         #[cfg(feature = "metadata")]

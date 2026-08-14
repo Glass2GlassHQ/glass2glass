@@ -81,9 +81,9 @@ pub struct RtspServerSrcN {
     width: u32,
     height: u32,
     fps: u32,
-    /// 0 means run until downstream shuts down; otherwise each pad stops after
-    /// this many access units and emits EOS (the test / bounded path), and the
-    /// element stops once every pad has.
+    /// `u64::MAX` means run until downstream shuts down; otherwise each pad
+    /// stops after this many access units and emits EOS (the test / bounded
+    /// path), and the element stops once every pad has.
     frame_limit: u64,
     /// Receive-path tuning (jitter reorder + optional RTCP/NACK), shared with
     /// [`UdpSrc`](crate::udpsrc) via [`crate::rtprecv`], applied to every pad.
@@ -112,7 +112,7 @@ impl RtspServerSrcN {
             width: DEFAULT_WIDTH,
             height: DEFAULT_HEIGHT,
             fps: DEFAULT_FPS,
-            frame_limit: 0,
+            frame_limit: u64::MAX,
             recv: RtpRecvConfig {
                 jitter: JitterConfig::default(),
                 // Off until a separate RTCP port / rtcp-mux is negotiated.
@@ -162,8 +162,9 @@ impl RtspServerSrcN {
     }
 
     /// Stop each pad after `n` access units and emit EOS on it; the element ends
-    /// once every pad has. Without this the source runs until downstream shuts
-    /// down (RTP has no in-band end marker).
+    /// once every pad has (0 emits EOS on every pad without receiving). Without
+    /// this the source runs until downstream shuts down (RTP has no in-band end
+    /// marker).
     pub fn with_frame_limit(mut self, n: u64) -> Self {
         self.frame_limit = n;
         self
@@ -342,6 +343,9 @@ async fn pad_worker(
         tx,
         staged: None,
     };
+    if crate::numbuffers::finished_at_zero_limit(cfg.frame_limit, &mut sink).await? {
+        return Ok((0, true));
+    }
     let activity = Cell::new(g2g_core::metrics::monotonic_ns());
     // One tap for the pad's whole life: a publisher taking the pad over continues
     // the sequence numbering and the timeline of the previous one.
@@ -374,10 +378,7 @@ async fn pad_worker(
         // Remaining budget, so `num-buffers` counts over this pad's publishers and
         // the sequence numbering continues over a takeover.
         let seq_base = tap.frames();
-        let remaining = match cfg.frame_limit {
-            0 => 0,
-            limit => limit.saturating_sub(seq_base),
-        };
+        let remaining = cfg.frame_limit.saturating_sub(seq_base);
         let end = match session {
             // UDP: the jitter + (optional) RTCP + depayload path shared with
             // UdpSrc, while the control channel is watched for the publisher
@@ -619,7 +620,7 @@ impl MultiOutputSource for RtspServerSrcN {
                 self.fps = value.as_uint().ok_or(PropError::Type)? as u32;
                 Ok(())
             }
-            "num-buffers" => crate::netprop::set_frame_limit(&mut self.frame_limit, &value),
+            "num-buffers" => crate::numbuffers::set_num_buffers(&mut self.frame_limit, &value),
             "max-sessions" => {
                 let n = value.as_uint().ok_or(PropError::Type)?;
                 if n == 0 || n > u16::MAX as u64 {
@@ -656,7 +657,7 @@ impl MultiOutputSource for RtspServerSrcN {
             "width" => Some(PropValue::Uint(self.width as u64)),
             "height" => Some(PropValue::Uint(self.height as u64)),
             "framerate" => Some(PropValue::Uint(self.fps as u64)),
-            "num-buffers" => Some(crate::netprop::get_frame_limit(self.frame_limit)),
+            "num-buffers" => Some(crate::numbuffers::get_num_buffers(self.frame_limit)),
             "max-sessions" => Some(PropValue::Uint(self.output_count() as u64)),
             "timeout" => Some(PropValue::Uint(match self.session_timeout_ns {
                 u64::MAX => 0,

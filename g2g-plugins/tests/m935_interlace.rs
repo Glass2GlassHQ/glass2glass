@@ -217,19 +217,19 @@ async fn auto_weaves_interleaved_input_like_the_forced_mode() {
 
 #[tokio::test]
 async fn auto_passes_unweavable_formats_through_even_when_interleaved() {
-    // 10-bit planar is outside the kernel formats: an interleaved declaration
-    // must not fail the branch, it stays a byte-exact passthrough.
-    let bytes = vec![vec![0x5Au8; W * H * 3]; 2];
+    // Packed YUYV is outside the kernel formats: an interleaved declaration must
+    // not fail the branch, it stays a byte-exact passthrough.
+    let bytes = vec![vec![0x5Au8; W * H * 2]; 2];
     let out = run_mode(
         DeinterlaceMode::Auto,
-        &raw_caps(RawVideoFormat::I420p10, Interlace::Interleaved),
+        &raw_caps(RawVideoFormat::Yuyv, Interlace::Interleaved),
         &bytes,
     )
     .await;
     assert_eq!(out.frames(), bytes);
     assert_eq!(
         out.caps_changes(),
-        vec![raw_caps(RawVideoFormat::I420p10, Interlace::Interleaved)]
+        vec![raw_caps(RawVideoFormat::Yuyv, Interlace::Interleaved)]
     );
 }
 

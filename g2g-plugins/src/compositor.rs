@@ -1198,6 +1198,12 @@ impl MultiInputElement for Compositor {
     where
         Self: 'a;
 
+    /// Blits on the CPU, so every pad takes system frames only. The allocation
+    /// cascade turns that into a download demand on a GPU producer.
+    fn input_domains(&self) -> g2g_core::memory::DomainSet {
+        g2g_core::memory::DomainSet::only(g2g_core::memory::MemoryDomainKind::System)
+    }
+
     fn input_count(&self) -> usize {
         self.pads.len()
     }

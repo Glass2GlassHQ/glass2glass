@@ -82,6 +82,8 @@ pub mod caps_transform;
 // Conformance vocabulary + derived maturity (M614): a maturity level computed from
 // evidence produced by passing conformance cases, never hand-authored. Pure.
 #[cfg(feature = "alloc")]
+pub mod chapter;
+#[cfg(feature = "alloc")]
 pub mod clock;
 #[cfg(feature = "alloc")]
 pub mod conformance;
@@ -158,6 +160,8 @@ pub use channels::{ChannelLayout, ChannelPosition};
 pub use caps::CapsSet;
 #[cfg(feature = "alloc")]
 pub use caps_transform::{AudioShape, CapsTransform, FieldTransform, RawVideoShape};
+#[cfg(feature = "alloc")]
+pub use chapter::Chapter;
 #[cfg(feature = "runtime")]
 pub use clock::DriftClock;
 #[cfg(feature = "std")]

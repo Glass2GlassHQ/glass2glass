@@ -1,8 +1,8 @@
-//! M13: hardware-gated smoke test for `VaapiH264Dec`.
+//! M13: hardware-gated smoke test for `VaapiH264Dec`, and its M1036 H.265 twin.
 //!
 //! Ignored by default — requires:
 //! - Linux with a libva-capable render node (default `/dev/dri/renderD128`).
-//! - An H.264 Annex-B fixture file path in `G2G_H264_FIXTURE`.
+//! - An Annex-B fixture file path in `G2G_H264_FIXTURE` / `G2G_H265_FIXTURE`.
 //!
 //! Run with:
 //!
@@ -13,13 +13,11 @@
 
 #![cfg(all(target_os = "linux", feature = "vaapi"))]
 
-use std::sync::Arc;
-
-use g2g_core::element::{AsyncElement, OutputSink, PushOutcome};
+use g2g_core::element::{AsyncElement, OutputSink, PushOutcome, Reconfigure};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
-use g2g_core::{Caps, ConfigureOutcome, Dim, G2gError, Rate, RawVideoFormat, VideoCodec};
-use g2g_plugins::vaapidec::VaapiH264Dec;
+use g2g_core::{Caps, ConfigureOutcome, Dim, G2gError, Rate, RawVideoFormat};
+use g2g_plugins::vaapidec::{H264Codec, H265Codec, VaapiCodec, VaapiDec};
 
 /// `OutputSink` that records every packet it receives. The decoder feeds it
 /// `CapsChanged` (once per geometry change) followed by `DataFrame`s.
@@ -45,31 +43,38 @@ impl OutputSink for Collect {
 #[tokio::test]
 #[ignore = "requires libva-capable hardware and a G2G_H264_FIXTURE path"]
 async fn vaapi_h264_decodes_fixture() {
-    let Some(path) = std::env::var_os("G2G_H264_FIXTURE") else {
-        eprintln!("skipping: set G2G_H264_FIXTURE=/path/to/clip.h264 to run");
+    decode_fixture::<H264Codec>("G2G_H264_FIXTURE").await;
+}
+
+#[tokio::test]
+#[ignore = "requires libva-capable hardware and a G2G_H265_FIXTURE path"]
+async fn vaapi_h265_decodes_fixture() {
+    decode_fixture::<H265Codec>("G2G_H265_FIXTURE").await;
+}
+
+/// Feed one whole Annex-B file through the decoder and check what came out.
+/// Returns early (skips) when the fixture is unset or the host has no usable
+/// VAAPI decoder.
+async fn decode_fixture<C: VaapiCodec>(fixture_var: &str) {
+    let Some(path) = std::env::var_os(fixture_var) else {
+        eprintln!("skipping: set {fixture_var}=/path/to/clip to run");
         return;
     };
-    let bitstream = std::fs::read(&path).expect("read H.264 fixture");
+    let bitstream = std::fs::read(&path).expect("read fixture");
     assert!(!bitstream.is_empty(), "fixture is empty");
 
-    let mut dec = VaapiH264Dec::new();
+    let mut dec = VaapiDec::<C>::new();
 
-    // Phase 1/2 negotiation surrogates: we know the upstream is H.264 with
-    // unknown geometry until SPS lands.
+    // Phase 1/2 negotiation surrogates: we know the upstream codec, with
+    // unknown geometry until the SPS lands.
     let upstream = Caps::CompressedVideo {
-        codec: VideoCodec::H264,
+        codec: C::CODEC,
         width: Dim::Any,
         height: Dim::Any,
         framerate: Rate::Any,
     };
-    let narrowed = dec.intercept_caps(&upstream).expect("intercept H.264");
-    assert!(matches!(
-        narrowed,
-        Caps::CompressedVideo {
-            codec: VideoCodec::H264,
-            ..
-        }
-    ));
+    let narrowed = dec.intercept_caps(&upstream).expect("intercept the codec");
+    assert_eq!(narrowed, upstream);
     let outcome = match dec.configure_pipeline(&narrowed) {
         Ok(o) => o,
         Err(e) => {
@@ -159,6 +164,19 @@ async fn vaapi_h264_decodes_fixture() {
         other => panic!("expected NV12 fixed caps, got {:?}", other),
     }
 
-    // Suppress unused warning when the test ever moves to multiple inputs.
-    let _ = Arc::<()>::new(());
+    // M1036: a fixture whose resolution changes mid-stream must also leave an
+    // upstream proposal behind. A single-resolution fixture (the usual case)
+    // must leave none.
+    let reconfigure = dec.take_reconfigure();
+    if caps_changes.len() > 1 {
+        assert!(
+            matches!(reconfigure, Some(Reconfigure::Propose(_))),
+            "a mid-stream resolution change must propose new input caps upstream, got {reconfigure:?}"
+        );
+    } else {
+        assert_eq!(
+            reconfigure, None,
+            "a fixed-resolution stream must not ask upstream to renegotiate"
+        );
+    }
 }

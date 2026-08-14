@@ -171,7 +171,8 @@ pub struct MfVideoSrc {
     /// Symbolic link, empty when the device is chosen by index.
     device_path: String,
     format: MfPixelFormat,
-    /// 0 = run until error or downstream shutdown; else stop after N frames.
+    /// `u64::MAX` = run until error or downstream shutdown; else stop after N
+    /// frames.
     frame_limit: u64,
     config: Option<VideoConfig>,
     configured: bool,
@@ -190,7 +191,7 @@ impl MfVideoSrc {
             device_index: 0,
             device_path: String::new(),
             format: MfPixelFormat::Nv12,
-            frame_limit: 0,
+            frame_limit: u64::MAX,
             config: None,
             configured: false,
         }
@@ -223,8 +224,8 @@ impl MfVideoSrc {
         self
     }
 
-    /// Stop after `n` frames and emit EOS. Without it the source runs until an
-    /// error or until downstream drops.
+    /// Stop after `n` frames and emit EOS (0 emits EOS without capturing).
+    /// Without it the source runs until an error or until downstream drops.
     pub fn with_frame_limit(mut self, n: u64) -> Self {
         self.frame_limit = n;
         self
@@ -301,8 +302,7 @@ impl SourceLoop for MfVideoSrc {
                 self.format = MfPixelFormat::parse(text).ok_or(PropError::Value)?;
             }
             "num-buffers" => {
-                let n = value.as_int().ok_or(PropError::Type)?;
-                self.frame_limit = if n < 0 { 0 } else { n as u64 };
+                crate::numbuffers::set_num_buffers(&mut self.frame_limit, &value)?;
             }
             _ => return Err(PropError::Unknown),
         }
@@ -316,11 +316,7 @@ impl SourceLoop for MfVideoSrc {
             "device-index" => Some(PropValue::Uint(u64::from(self.device_index))),
             "device-path" => Some(PropValue::Str(self.device_path.clone())),
             "format" => Some(PropValue::Str(self.format.as_str().into())),
-            "num-buffers" => Some(PropValue::Int(if self.frame_limit == 0 {
-                -1
-            } else {
-                self.frame_limit as i64
-            })),
+            "num-buffers" => Some(crate::numbuffers::get_num_buffers(self.frame_limit)),
             _ => None,
         }
     }
@@ -342,8 +338,11 @@ impl SourceLoop for MfVideoSrc {
                 return Err(G2gError::NotConfigured);
             }
             let config = self.config.ok_or(G2gError::NotConfigured)?;
-            let selector = self.selector();
             let limit = self.frame_limit;
+            if crate::numbuffers::finished_at_zero_limit(limit, out).await? {
+                return Ok(0);
+            }
+            let selector = self.selector();
 
             // Worker captures and streams frame payloads here; a ready signal
             // reports whether the device opened.
@@ -404,7 +403,8 @@ impl SourceLoop for MfVideoSrc {
             }
 
             // Close the receiver so the worker's next send fails and it stops,
-            // instead of capturing forever (frame_limit==0) and hanging join().
+            // instead of capturing forever (an unlimited frame_limit) and
+            // hanging join().
             drop(frame_rx);
             let _ = worker.join();
             if downstream_open {
@@ -758,7 +758,7 @@ unsafe fn run_capture(
 
         let stream = first_video_stream();
         let mut emitted = 0u64;
-        while limit == 0 || emitted < limit {
+        while emitted < limit {
             let mut flags: u32 = 0;
             let mut timestamp: i64 = 0;
             let mut sample = None;

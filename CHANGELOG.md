@@ -6,6 +6,22 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1050: still-image codecs: `pngdec` / `pngenc` and `webpdec` (pure Rust), typed by magic so `filesrc location=X.png ! decodebin` decodes to RGBA.
+- M1049: MPEG-TS carries AV1 both ways (the AOM private-PES mapping, GStreamer-validated), and the demuxers post DVB EIT present/following event text as per-program tags.
+- M1048: `deinterlace` gains `fields` (field-rate doubling) and `tff` (bff support), plus the planar YUV formats at 10 and 12 bits.
+- M1047: `v4l2src` takes the picture, gain and pan/tilt/zoom controls as properties plus an `extra-controls` list, and the device monitor lists each camera's own controls with their ranges.
+- M1046: the Matroska and MP4 muxers write container chapters and the demuxers post the parsed table of contents on the bus as `BusMessage::Chapters`.
+- M1045: decodebin now has a real-media run test: the committed A/V MP4 decodes to EOS bit-exact against ffmpeg, single-line and A/V fan-out both.
+- M1044: live hardware tee test: one RTSP feed fans out to a Wayland display branch and an MP4 recording branch, the file read back with the in-repo demuxer.
+- M1043: the remaining sources (pipewire, libcamera, WHEP, LiveKit, local IPC) spell `num-buffers` like gst `basesrc`, gaining the property where it was builder-only.
+- M1042: the MoQ and WHEP sources spell `num-buffers` like gst `basesrc` (-1 unlimited, 0 emits nothing then EOS).
+- M1041: the overlay, caption, network-sink, and tensor-batching multi-pad elements declare their memory domains too.
+- M1040: `num-buffers=0` on the capture and ingest sources emits nothing then EOS, matching gst `basesrc`, instead of reading 0 as unlimited or rejecting it.
+- M1039: fan-in and fan-out elements declare their memory domains too, so a muxer or demux reading host memory gets its GPU download planned at negotiation.
+- M1038: the platform capture sources (`aaudiosrc`, `camera2src`, `coreaudiosrc`, `avfaudiosrc`, `avfvideosrc`, `screencapturesrc`) take their constructor knobs as properties, so a launch line can set them.
+- M1037: a fan-in or duplex session that ends while its send sources still stream winds the run down cleanly instead of failing with a shutdown error.
+- M1036: `vaapidech265` decodes H.265 via VA-API, and a VA-API decoder's mid-stream resolution change reaches the upstream producer as a caps proposal.
+- M1035: every CPU element that reads host memory declares it, so the allocation cascade plans a GPU download at negotiation instead of failing mid-run.
 - M1034: `filesrc` takes `num-buffers`, so a launch line can cap the chunks a file source emits before EOS.
 - M1030: WAV is a container g2g reads and writes: a `.wav` file types by its RIFF header and `decodebin` plugs `wavparse`, and `wavenc` wraps PCM back up for a file sink.
 - M1029: `videoconvertscale` converts and resizes in one pass over the output, and packed 24-bit `RGB` is a raw video format, so a gst-python-ml pipeline reaches an inference element in the format it asks for.

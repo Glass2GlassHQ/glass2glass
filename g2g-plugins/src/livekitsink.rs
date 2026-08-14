@@ -647,6 +647,13 @@ impl MultiInputElement for LiveKitSink {
     where
         Self: 'a;
 
+    /// Copies each frame's bytes into the media unit it hands the session task,
+    /// so every pad takes system frames only. The allocation cascade turns that
+    /// into a download demand on a GPU encoder.
+    fn input_domains(&self) -> g2g_core::memory::DomainSet {
+        g2g_core::memory::DomainSet::only(g2g_core::memory::MemoryDomainKind::System)
+    }
+
     fn input_count(&self) -> usize {
         self.pads.input_count()
     }

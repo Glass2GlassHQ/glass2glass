@@ -220,13 +220,11 @@ Phased plan:
 
 ## Negotiation
 
-- **Hardware `tee -> {decode, mux}` integration test** on real Linux
-  (`rtsp ffmpeg wayland-sink`); only fake-element coverage today.
+_(No open negotiation items.)_
 
 ## Seek and auto-plug
 
-- A hardware-backed end-to-end decode-through-`decodebin` run (current tests
-  read templates / assert splicing, decode no real media).
+_(No open seek / auto-plug items.)_
 
 ## Platform: macOS
 
@@ -235,16 +233,6 @@ Phased plan:
   the probe paths are validated).
 
 ## Receive / decode
-
-- **`VaapiH264Dec` on AMD** (cros-codecs path). Hard-codes ChromeOS GBM flags
-  that fail on Mesa `radeonsi`; the clean fix is an upstream libva
-  (`vaCreateSurfaces`) surface backend. The ffmpeg `Backend::Vaapi` hwaccel path
-  is the working AMD / Intel decode route in the meantime (validated on a
-  Rembrandt 680M); this item is only for reviving the pure cros-codecs backend.
-- Zero-copy `MemoryDomain::DmaBuf` from `VaapiH264Dec` (needs a surface-keepalive
-  refcount).
-- H.265 in `VaapiH264Dec` (sibling element on `VideoCodec::H265`).
-- Upstream `Reconfigure` driven by `VaapiH264Dec` `FormatChanged`.
 
 - **`VulkanVideoDec` residuals.** AMD (RADV) and Intel (ANV) validation runs of
   the `vulkanvideo` GPU tests (the element is vendor-neutral; hardware-gated,
@@ -348,9 +336,7 @@ Phased plan:
     run (genuine remote NAT + STUN/TURN on the LiveKit elements); then Janus /
     Kinesis as wanted.
   - **T5: advanced.** FEC is blocked upstream (str0m has no FEC payload;
-    loss recovery is NACK/RTX). A send source still streaming when the duplex
-    session ends makes the run return `Shutdown` rather than winding down
-    gracefully (both runners). Data-channel loose ends
+    loss recovery is NACK/RTX). Data-channel loose ends
     (str0m surfaces no remote-close event, so EOS rides an explicit marker
     message; a WHIP/SFU-signalled data channel vs the P2P `SdpChannel` seam).
   Recommended order: T1 remainders -> T2 -> T4 -> T5.
@@ -391,9 +377,13 @@ Phased plan:
 - **FLV:** Speex decode (carriage lands M831; no Speex encoder exists anywhere
   to build a validated decode vector, and gst's header-in-tag layout is
   rejected by libavcodec, so wiring a decoder would be an unvalidated claim).
-- **AV1 in MPEG-TS** (AOM mapping): blocked on a validatable reference peer.
-  ffmpeg writes it but cannot demux its own output, and GStreamer has no
-  support, so a mux/demux today would only ever round-trip against itself.
+- **AV1 in MPEG-TS:** write the AOM spec's 'AV01' `registration_descriptor`
+  instead of GStreamer's 'AV1G' once any demuxer reads the former (GStreamer's
+  `tsdemux` activates no program for an 'AV01' stream, and ffmpeg's muxer writes
+  no descriptor at all, so it identifies neither).
+- **DVB EIT schedule tables** (`table_id` 0x50..=0x6F) and the event
+  `start_time` / `duration` fields: present/following event text is what the tag
+  posting carries.
 - **WebVTT track writing** (mkv, mp4 `wvtt`): blocked on a reference peer.
   ffmpeg reads only the WebM `D_WEBVTT/*` carriage (different block payload)
   and cannot write WebVTT into MP4 at all; reading both stays supported.
@@ -557,10 +547,6 @@ _(No open parser items.)_
 _(No open bus items.)_
 ## Properties / introspection / DSL
 
-- Properties on the platform capture sources (`aaudiosrc` / `camera2src` /
-  `coreaudiosrc` / `avfvideosrc` / `avfaudiosrc` / `screencapturesrc`): their
-  constructor knobs (samplerate, channels, geometry, num-buffers) are
-  unreachable from a launch line today. Platform-gated (Android / macOS).
 - A GUI / tooling introspection surface beyond the text dump.
 
 ## Tag system
