@@ -7,6 +7,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 ## Unreleased
 
 - M1048: `deinterlace` gains `fields` (field-rate doubling) and `tff` (bff support), plus the planar YUV formats at 10 and 12 bits.
+- M1047: `v4l2src` takes the picture, gain and pan/tilt/zoom controls as properties plus an `extra-controls` list, and the device monitor lists each camera's own controls with their ranges.
 - M1046: the Matroska and MP4 muxers write container chapters and the demuxers post the parsed table of contents on the bus as `BusMessage::Chapters`.
 - M1045: decodebin now has a real-media run test: the committed A/V MP4 decodes to EOS bit-exact against ffmpeg, single-line and A/V fan-out both.
 - M1044: live hardware tee test: one RTSP feed fans out to a Wayland display branch and an MP4 recording branch, the file read back with the in-repo demuxer.

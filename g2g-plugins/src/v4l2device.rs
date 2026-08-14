@@ -7,7 +7,9 @@
 //! [`MAX_ALTERNATIVES`] on its own, so the budget is handed out round-robin:
 //! each format keeps its leading modes and no one of them starves the rest.
 //! Fourccs the node advertises that no `Caps` covers are kept in `detail` so
-//! the information is not lost.
+//! the information is not lost, alongside the controls the node reports: each
+//! under the kebab-case name `v4l2src extra-controls=` matches it by, valued
+//! with the range the driver accepts.
 //!
 //! V4L2 has no hotplug event source here (udev would be a separate backend),
 //! so the provider offers no native watch and the monitor polls and diffs.
@@ -32,7 +34,7 @@ use v4l::video::Capture;
 use v4l::FourCC;
 
 use crate::capturepixelformat::CapturePixelFormat;
-use crate::v4l2src::FOURCCS;
+use crate::v4l2src::{query_controls, DeviceControl, FOURCCS};
 
 /// The size / rate grid a driver reports for one pixel format.
 type FormatModes = (
@@ -45,6 +47,15 @@ type FormatModes = (
 /// stepwise scalers), and every one of them would be cloned into each hotplug
 /// event; 32 covers the useful modes of real hardware.
 const MAX_ALTERNATIVES: usize = 32;
+
+/// Upper bound on the controls one device describes. A driver with a long
+/// private control class would otherwise fill the listing; 64 covers the user
+/// and camera classes of real hardware.
+const MAX_CONTROLS: usize = 64;
+
+/// The `detail` key prefix of one control, so a control named `driver` or
+/// `formats` cannot collide with the node's own entries.
+const CONTROL_DETAIL_PREFIX: &str = "control.";
 
 /// Discovers V4L2 capture devices for the `v4l2src` element.
 #[derive(Debug, Default)]
@@ -112,6 +123,13 @@ fn probe_node(path: &str) -> Option<Device> {
         caps.card.clone()
     };
 
+    let mut detail = Vec::from([
+        ("driver".to_string(), caps.driver.clone()),
+        ("bus".to_string(), caps.bus.clone()),
+        ("formats".to_string(), fourccs.join(" ")),
+    ]);
+    detail.extend(control_details(&query_controls(&dev)));
+
     Some(Device {
         display_name,
         klass: "Video/Source".to_string(),
@@ -119,13 +137,40 @@ fn probe_node(path: &str) -> Option<Device> {
         caps: device_caps(&carried),
         element: "v4l2src",
         props: Vec::from([("device".to_string(), path.to_string())]),
-        detail: Vec::from([
-            ("driver".to_string(), caps.driver.clone()),
-            ("bus".to_string(), caps.bus.clone()),
-            ("formats".to_string(), fourccs.join(" ")),
-        ]),
+        detail,
         provider: "v4l2",
     })
+}
+
+/// The device's controls as `detail` entries, keyed by the same kebab-case
+/// name `v4l2src extra-controls=` matches on and valued with the range the
+/// driver reports.
+fn control_details(described: &[DeviceControl]) -> Vec<(String, String)> {
+    described
+        .iter()
+        .take(MAX_CONTROLS)
+        .map(|control| {
+            (
+                alloc::format!("{CONTROL_DETAIL_PREFIX}{}", control.name),
+                control_range(control),
+            )
+        })
+        .collect()
+}
+
+/// One control's settable range, as the monitor prints it.
+fn control_range(control: &DeviceControl) -> String {
+    let mut range = alloc::format!(
+        "{}..{} step {} default {}",
+        control.minimum,
+        control.maximum,
+        control.step,
+        control.default
+    );
+    if control.read_only {
+        range.push_str(" (read-only)");
+    }
+    range
 }
 
 /// `bus_info:card:path` where the driver reports a bus (stable across reboots
@@ -649,6 +694,45 @@ mod tests {
         }]);
         assert_eq!(match_device_id(&bare, "/dev/video0"), Some("/dev/video0"));
         assert_eq!(match_device_id(&bare, "/dev/video1"), None);
+    }
+
+    fn control(name: &str, read_only: bool) -> DeviceControl {
+        DeviceControl {
+            name: name.to_string(),
+            id: 1,
+            boolean: false,
+            minimum: -64,
+            maximum: 64,
+            step: 2,
+            default: 0,
+            read_only,
+        }
+    }
+
+    #[test]
+    fn controls_are_described_by_the_name_extra_controls_matches() {
+        let details = control_details(&Vec::from([
+            control("brightness", false),
+            control("privacy", true),
+        ]));
+        assert_eq!(
+            details,
+            Vec::from([
+                (
+                    "control.brightness".to_string(),
+                    "-64..64 step 2 default 0".to_string()
+                ),
+                (
+                    "control.privacy".to_string(),
+                    "-64..64 step 2 default 0 (read-only)".to_string()
+                ),
+            ])
+        );
+        // a driver with a long private control class cannot fill the listing.
+        let many: Vec<DeviceControl> = (0..MAX_CONTROLS + 10)
+            .map(|i| control(&format!("control{i}"), false))
+            .collect();
+        assert_eq!(control_details(&many).len(), MAX_CONTROLS);
     }
 
     #[test]

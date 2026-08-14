@@ -53,9 +53,15 @@ use v4l::prelude::{Device, MmapStream};
 use v4l::timestamp::Timestamp;
 use v4l::v4l2::vidioc;
 use v4l::v4l_sys::{
-    v4l2_buffer, v4l2_exportbuffer, v4l2_requestbuffers, V4L2_CID_AUTO_WHITE_BALANCE,
-    V4L2_CID_EXPOSURE_ABSOLUTE, V4L2_CID_EXPOSURE_AUTO, V4L2_CID_FOCUS_ABSOLUTE,
-    V4L2_CID_FOCUS_AUTO, V4L2_CID_WHITE_BALANCE_TEMPERATURE,
+    v4l2_buffer, v4l2_ctrl_type_V4L2_CTRL_TYPE_BOOLEAN, v4l2_ctrl_type_V4L2_CTRL_TYPE_INTEGER,
+    v4l2_ctrl_type_V4L2_CTRL_TYPE_INTEGER64, v4l2_ctrl_type_V4L2_CTRL_TYPE_INTEGER_MENU,
+    v4l2_ctrl_type_V4L2_CTRL_TYPE_MENU, v4l2_exportbuffer, v4l2_query_ext_ctrl,
+    v4l2_requestbuffers, V4L2_CID_AUTO_WHITE_BALANCE, V4L2_CID_BACKLIGHT_COMPENSATION,
+    V4L2_CID_BRIGHTNESS, V4L2_CID_CONTRAST, V4L2_CID_EXPOSURE_ABSOLUTE, V4L2_CID_EXPOSURE_AUTO,
+    V4L2_CID_FOCUS_ABSOLUTE, V4L2_CID_FOCUS_AUTO, V4L2_CID_GAIN, V4L2_CID_GAMMA, V4L2_CID_HUE,
+    V4L2_CID_PAN_ABSOLUTE, V4L2_CID_POWER_LINE_FREQUENCY, V4L2_CID_SATURATION, V4L2_CID_SHARPNESS,
+    V4L2_CID_TILT_ABSOLUTE, V4L2_CID_WHITE_BALANCE_TEMPERATURE, V4L2_CID_ZOOM_ABSOLUTE,
+    V4L2_CTRL_FLAG_DISABLED, V4L2_CTRL_FLAG_NEXT_CTRL, V4L2_CTRL_FLAG_READ_ONLY,
 };
 use v4l::video::capture::Parameters;
 use v4l::video::Capture;
@@ -168,10 +174,19 @@ const ENODEV: i32 = 19;
 
 /// How a camera control's value is carried, which decides both the property
 /// kind and the V4L2 control payload.
+///
+/// V4L2 carries every one of these as a `__s32`. [`Amount`](Self::Amount) is
+/// for the controls whose range starts at zero on any device that has them (a
+/// menu index, a colour temperature, a duration, a distance);
+/// [`SignedAmount`](Self::SignedAmount) for the picture controls GStreamer also
+/// gives a signed property to, and for the ones a driver centres on zero and
+/// reports a negative minimum for. A device that disagrees is still reachable
+/// through `extra-controls`, which takes a signed value for any control.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ControlKind {
     Switch,
     Amount,
+    SignedAmount,
 }
 
 impl ControlKind {
@@ -179,6 +194,25 @@ impl ControlKind {
         match self {
             ControlKind::Switch => PropKind::Bool,
             ControlKind::Amount => PropKind::Uint,
+            ControlKind::SignedAmount => PropKind::Int,
+        }
+    }
+
+    /// The V4L2 payload carrying `value` for a control of this kind.
+    fn payload(self, value: i64) -> ControlValue {
+        match self {
+            ControlKind::Switch => ControlValue::Boolean(value != 0),
+            ControlKind::Amount | ControlKind::SignedAmount => ControlValue::Integer(value),
+        }
+    }
+
+    /// `value` as the property reads it back, in the kind [`Self::prop_kind`]
+    /// declares.
+    fn prop_value(self, value: i64) -> PropValue {
+        match self {
+            ControlKind::Switch => PropValue::Bool(value != 0),
+            ControlKind::Amount => PropValue::Uint(value as u64),
+            ControlKind::SignedAmount => PropValue::Int(value),
         }
     }
 }
@@ -197,10 +231,15 @@ struct ControlSpec {
 /// the manual value it gates, because a driver rejects a manual exposure or
 /// focus while its automatic mode is still on.
 ///
+/// Names follow `v4l2-ctl`, which is also what GStreamer's `v4l2src` spells
+/// `brightness` / `contrast` / `saturation` / `hue` as, and those four take a
+/// signed value there too. Anything the device reports that is not here is
+/// reachable through `extra-controls`.
+///
 /// `exposure-auto` is a menu, not a switch: 0 auto, 1 manual, 2 shutter
 /// priority, 3 aperture priority (`V4L2_EXPOSURE_*`), and most UVC cameras
 /// implement only 1 and 3.
-const CONTROLS: [ControlSpec; 6] = [
+const CONTROLS: [ControlSpec; 18] = [
     ControlSpec {
         name: "white-balance-temperature-auto",
         id: V4L2_CID_AUTO_WHITE_BALANCE,
@@ -237,6 +276,78 @@ const CONTROLS: [ControlSpec; 6] = [
         kind: ControlKind::Amount,
         blurb: "focus distance, driver-defined units (needs focus-auto=false)",
     },
+    ControlSpec {
+        name: "brightness",
+        id: V4L2_CID_BRIGHTNESS,
+        kind: ControlKind::SignedAmount,
+        blurb: "picture brightness, driver-defined units",
+    },
+    ControlSpec {
+        name: "contrast",
+        id: V4L2_CID_CONTRAST,
+        kind: ControlKind::SignedAmount,
+        blurb: "picture contrast, driver-defined units",
+    },
+    ControlSpec {
+        name: "saturation",
+        id: V4L2_CID_SATURATION,
+        kind: ControlKind::SignedAmount,
+        blurb: "colour saturation, driver-defined units",
+    },
+    ControlSpec {
+        name: "hue",
+        id: V4L2_CID_HUE,
+        kind: ControlKind::SignedAmount,
+        blurb: "hue rotation, driver-defined units",
+    },
+    ControlSpec {
+        name: "gamma",
+        id: V4L2_CID_GAMMA,
+        kind: ControlKind::Amount,
+        blurb: "gamma adjustment, driver-defined units",
+    },
+    ControlSpec {
+        name: "gain",
+        id: V4L2_CID_GAIN,
+        kind: ControlKind::Amount,
+        blurb: "sensor gain, driver-defined units",
+    },
+    ControlSpec {
+        name: "sharpness",
+        id: V4L2_CID_SHARPNESS,
+        kind: ControlKind::Amount,
+        blurb: "sharpening strength, driver-defined units",
+    },
+    ControlSpec {
+        name: "backlight-compensation",
+        id: V4L2_CID_BACKLIGHT_COMPENSATION,
+        kind: ControlKind::Amount,
+        blurb: "backlight compensation strength, driver-defined units",
+    },
+    ControlSpec {
+        name: "power-line-frequency",
+        id: V4L2_CID_POWER_LINE_FREQUENCY,
+        kind: ControlKind::Amount,
+        blurb: "anti-flicker filter: 0 disabled, 1 50 Hz, 2 60 Hz, 3 auto",
+    },
+    ControlSpec {
+        name: "zoom-absolute",
+        id: V4L2_CID_ZOOM_ABSOLUTE,
+        kind: ControlKind::Amount,
+        blurb: "zoom position, driver-defined units",
+    },
+    ControlSpec {
+        name: "pan-absolute",
+        id: V4L2_CID_PAN_ABSOLUTE,
+        kind: ControlKind::SignedAmount,
+        blurb: "pan angle in arc seconds, positive is right",
+    },
+    ControlSpec {
+        name: "tilt-absolute",
+        id: V4L2_CID_TILT_ABSOLUTE,
+        kind: ControlKind::SignedAmount,
+        blurb: "tilt angle in arc seconds, positive is up",
+    },
 ];
 
 /// The property spec of control `index`, so the table above is the only place
@@ -249,23 +360,318 @@ const fn control_prop(index: usize) -> PropertySpec {
     )
 }
 
+/// Everything settable on this element that is not a camera control.
+const CAPTURE_PROPS: [PropertySpec; 8] = [
+    PropertySpec::new(
+        "device",
+        PropKind::Str,
+        "V4L2 device node (e.g. /dev/video0)",
+    )
+    .with_default("/dev/video0"),
+    PropertySpec::new(
+        "device-id",
+        PropKind::Str,
+        "persistent device id from the device monitor; resolved to a node path at \
+         negotiation, so a saved pipeline survives a replug",
+    ),
+    PropertySpec::new(
+        "width",
+        PropKind::Uint,
+        "requested capture width (driver may snap)",
+    ),
+    PropertySpec::new(
+        "height",
+        PropKind::Uint,
+        "requested capture height (driver may snap)",
+    ),
+    PropertySpec::new(
+        "framerate",
+        PropKind::Uint,
+        "requested capture rate, fps (best effort)",
+    ),
+    PropertySpec::new(
+        "num-buffers",
+        PropKind::Int,
+        "frames to emit then EOS (-1 = forever)",
+    )
+    .with_default("-1"),
+    PropertySpec::new(
+        "io-mode",
+        PropKind::Str,
+        "how buffers leave the element: auto | mmap (copy to system memory) | dmabuf \
+         (export the capture buffer, raw formats only)",
+    )
+    .with_default("auto")
+    .with_enum_values("auto | mmap | dmabuf"),
+    PropertySpec::new(
+        "extra-controls",
+        PropKind::Str,
+        "any further V4L2 control, as a comma-separated name=value list \
+         (extra-controls=\"exposure-metering=1,privacy=0\"). Names are the driver's own, \
+         lower-cased with every gap as a dash, which is how g2g-device-monitor lists them. \
+         Applied after the named control properties; a name this device does not offer, or \
+         a value outside the range it accepts, fails the pipeline",
+    ),
+];
+
+/// Every declared property: the capture ones, then one per [`CONTROLS`] entry,
+/// so a control added to that table is settable without touching this list.
+const PROPS: [PropertySpec; CAPTURE_PROPS.len() + CONTROLS.len()] = build_props();
+
+const fn build_props() -> [PropertySpec; CAPTURE_PROPS.len() + CONTROLS.len()] {
+    let mut props = [CAPTURE_PROPS[0]; CAPTURE_PROPS.len() + CONTROLS.len()];
+    let mut i = 0;
+    while i < CAPTURE_PROPS.len() {
+        props[i] = CAPTURE_PROPS[i];
+        i += 1;
+    }
+    let mut control = 0;
+    while control < CONTROLS.len() {
+        props[CAPTURE_PROPS.len() + control] = control_prop(control);
+        control += 1;
+    }
+    props
+}
+
 /// The values set on this element, `None` for a control left alone. Indexed
 /// like [`CONTROLS`].
 type ControlValues = [Option<i64>; CONTROLS.len()];
+
+/// The separators of an `extra-controls` list, `"name=value,name=value"`.
+const EXTRA_CONTROL_SEPARATOR: char = ',';
+const EXTRA_CONTROL_ASSIGN: char = '=';
+
+/// EINVAL, reported for an `extra-controls` entry this camera has no control
+/// for or cannot take the value of.
+const EINVAL: i32 = 22;
+
+/// Where the control enumeration gives up on a driver that keeps answering.
+/// `VIDIOC_QUERY_EXT_CTRL` walks the ids in increasing order and ends with
+/// EINVAL, so this only bounds one that never does.
+const MAX_ENUMERATED_CONTROLS: usize = 1024;
+
+/// One control a device reports, as both the element and the device monitor
+/// describe it. Only the controls that carry a number are described: an
+/// `extra-controls` entry is a number, and the monitor lists what can be set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DeviceControl {
+    /// The driver's name, kebab-cased ([`kebab_control_name`]).
+    pub name: String,
+    pub id: u32,
+    /// Whether the driver takes the value as a boolean rather than an integer.
+    pub boolean: bool,
+    pub minimum: i64,
+    pub maximum: i64,
+    pub step: u64,
+    pub default: i64,
+    pub read_only: bool,
+}
+
+impl DeviceControl {
+    /// The V4L2 payload carrying `value` for this control.
+    fn payload(&self, value: i64) -> ControlValue {
+        if self.boolean {
+            ControlValue::Boolean(value != 0)
+        } else {
+            ControlValue::Integer(value)
+        }
+    }
+}
+
+/// Every numeric control the device reports, in driver order. A device that
+/// answers nothing describes no controls, which is what a driver too old for
+/// the query looks like.
+///
+/// This walks `VIDIOC_QUERY_EXT_CTRL` itself rather than calling the `v4l`
+/// crate's `query_controls`, which panics on a control type its enum predates
+/// (uvcvideo's region-of-interest rectangle, on any current kernel). Asking
+/// without `NEXT_COMPOUND` leaves every payload-carrying control out, which is
+/// exactly the set no `extra-controls` entry could set anyway.
+pub(crate) fn query_controls(dev: &Device) -> Vec<DeviceControl> {
+    let fd = dev.handle().fd();
+    let mut controls = Vec::new();
+    let mut id = 0u32;
+    while controls.len() < MAX_ENUMERATED_CONTROLS {
+        let mut query: v4l2_query_ext_ctrl = zeroed_arg();
+        query.id = id | V4L2_CTRL_FLAG_NEXT_CTRL;
+        // SAFETY: `v4l2_query_ext_ctrl` is VIDIOC_QUERY_EXT_CTRL's argument type.
+        // EINVAL on the id past the last control is how the walk ends.
+        if unsafe { capture_ioctl(fd, vidioc::VIDIOC_QUERY_EXT_CTRL, &mut query) }.is_err() {
+            break;
+        }
+        // The ids come from the driver and must climb, or the walk never ends.
+        if query.id <= id {
+            break;
+        }
+        id = query.id;
+        if query.flags & V4L2_CTRL_FLAG_DISABLED != 0 {
+            continue;
+        }
+        let Some(boolean) = numeric_control_payload(query.type_) else {
+            continue;
+        };
+        controls.push(DeviceControl {
+            name: kebab_control_name(&control_name(&query.name)),
+            id: query.id,
+            boolean,
+            minimum: query.minimum,
+            maximum: query.maximum,
+            step: query.step,
+            default: query.default_value,
+            read_only: query.flags & V4L2_CTRL_FLAG_READ_ONLY != 0,
+        });
+    }
+    controls
+}
+
+/// The V4L2 control types a number can set, each with whether the driver takes
+/// that number as a boolean. A type absent here takes no number (a button, a
+/// string, a class marker, a compound payload).
+const NUMERIC_CONTROL_TYPES: [(u32, bool); 5] = [
+    (v4l2_ctrl_type_V4L2_CTRL_TYPE_BOOLEAN, true),
+    (v4l2_ctrl_type_V4L2_CTRL_TYPE_INTEGER, false),
+    (v4l2_ctrl_type_V4L2_CTRL_TYPE_INTEGER64, false),
+    (v4l2_ctrl_type_V4L2_CTRL_TYPE_MENU, false),
+    (v4l2_ctrl_type_V4L2_CTRL_TYPE_INTEGER_MENU, false),
+];
+
+/// Whether a V4L2 control type carries a number, and whether that number is a
+/// boolean.
+fn numeric_control_payload(control_type: u32) -> Option<bool> {
+    NUMERIC_CONTROL_TYPES
+        .iter()
+        .find(|(known, _)| *known == control_type)
+        .map(|(_, boolean)| *boolean)
+}
+
+/// The driver's NUL-padded control name as text. A byte outside ASCII is
+/// dropped rather than decoded: `c_char` is signed on some targets and a
+/// control name is ASCII on every driver.
+fn control_name(name: &[core::ffi::c_char]) -> String {
+    name.iter()
+        .take_while(|c| **c != 0)
+        .filter_map(|c| u8::try_from(*c).ok())
+        .map(char::from)
+        .collect()
+}
+
+/// A driver's control name (`"White Balance Temperature, Auto"`) as the
+/// kebab-case name a property or an `extra-controls` entry spells it with:
+/// every run of characters that is not a letter or a digit becomes one `-`.
+pub(crate) fn kebab_control_name(name: &str) -> String {
+    let mut kebab = String::with_capacity(name.len());
+    for ch in name.chars() {
+        if ch.is_ascii_alphanumeric() {
+            kebab.push(ch.to_ascii_lowercase());
+        } else if !kebab.ends_with('-') {
+            kebab.push('-');
+        }
+    }
+    kebab.trim_matches('-').to_string()
+}
+
+/// An `extra-controls` list as the pairs it names. Every entry must be
+/// `name=value` with a whole-number value, so a typo is refused here rather
+/// than dropped silently; the names themselves are only checkable against a
+/// device, which happens in [`apply_extra_controls`].
+fn parse_extra_controls(text: &str) -> Result<Vec<(String, i64)>, PropError> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut pairs = Vec::new();
+    for entry in text.split(EXTRA_CONTROL_SEPARATOR) {
+        let (name, value) = entry
+            .split_once(EXTRA_CONTROL_ASSIGN)
+            .ok_or(PropError::Value)?;
+        let name = name.trim();
+        let value: i64 = value.trim().parse().map_err(|_| PropError::Value)?;
+        if name.is_empty() {
+            return Err(PropError::Value);
+        }
+        pairs.push((name.to_string(), value));
+    }
+    Ok(pairs)
+}
+
+/// An `extra-controls` list as the text it was written with, so the property
+/// reads back what was set without keeping a second copy of it.
+fn format_extra_controls(pairs: &[(String, i64)]) -> String {
+    let mut text = String::new();
+    for (name, value) in pairs {
+        if !text.is_empty() {
+            text.push(EXTRA_CONTROL_SEPARATOR);
+        }
+        text.push_str(&alloc::format!("{name}{EXTRA_CONTROL_ASSIGN}{value}"));
+    }
+    text
+}
+
+/// Say which control was asked for and what the device does offer: a
+/// `G2gError` can only carry an errno, and an `extra-controls` typo is
+/// otherwise indistinguishable from a camera that lacks the control.
+fn log_unknown_extra_control(name: &str, described: &[DeviceControl]) {
+    let offered: Vec<&str> = described.iter().map(|c| c.name.as_str()).collect();
+    g2g_core::g2g_error!(
+        g2g_core::log::Target::category(g2g_core::log::short_type_name::<V4l2Src>()),
+        "extra-controls names '{name}', which this device does not offer; it has: {}",
+        offered.join(" ")
+    );
+}
 
 /// Apply every set control in table order, one ioctl each (`set_controls`
 /// refuses a batch spanning two control classes, and these span the user and
 /// camera classes). A driver that rejects one fails the negotiation: the
 /// caller asked for a control this camera does not have.
-fn apply_controls(dev: &Device, values: &ControlValues) -> Result<(), G2gError> {
+///
+/// The `extra-controls` entries go last, so a list can override a control the
+/// element also names.
+fn apply_controls(
+    dev: &Device,
+    values: &ControlValues,
+    extra: &[(String, i64)],
+) -> Result<(), G2gError> {
     for (spec, value) in CONTROLS.iter().zip(values) {
         let Some(value) = *value else { continue };
-        let value = match spec.kind {
-            ControlKind::Switch => ControlValue::Boolean(value != 0),
-            ControlKind::Amount => ControlValue::Integer(value),
+        dev.set_control(Control {
+            id: spec.id,
+            value: spec.kind.payload(value),
+        })
+        .map_err(|e| v4l2_err(&e))?;
+    }
+    apply_extra_controls(dev, extra)
+}
+
+/// Apply the `extra-controls` entries, matched by kebab-case name against the
+/// controls this device enumerates. A name it does not offer, or a value
+/// outside the range it reports, fails the negotiation rather than being
+/// dropped.
+fn apply_extra_controls(dev: &Device, extra: &[(String, i64)]) -> Result<(), G2gError> {
+    if extra.is_empty() {
+        return Ok(());
+    }
+    let described = query_controls(dev);
+    for (name, value) in extra {
+        let Some(control) = described.iter().find(|c| c.name == *name) else {
+            log_unknown_extra_control(name, &described);
+            return Err(G2gError::Hardware(HardwareError::V4l2(EINVAL)));
         };
-        dev.set_control(Control { id: spec.id, value })
-            .map_err(|e| v4l2_err(&e))?;
+        // A driver clamps an out-of-range value on one path and refuses it on
+        // another, so neither says what the camera ended up at.
+        if *value < control.minimum || *value > control.maximum {
+            g2g_core::g2g_error!(
+                g2g_core::log::Target::category(g2g_core::log::short_type_name::<V4l2Src>()),
+                "extra-controls sets {name}={value}, outside the {}..{} this device accepts",
+                control.minimum,
+                control.maximum
+            );
+            return Err(G2gError::Hardware(HardwareError::V4l2(EINVAL)));
+        }
+        dev.set_control(Control {
+            id: control.id,
+            value: control.payload(*value),
+        })
+        .map_err(|e| v4l2_err(&e))?;
     }
     Ok(())
 }
@@ -548,6 +954,9 @@ pub struct V4l2Src {
     device_id: String,
     device_resolved: bool,
     controls: ControlValues,
+    /// The `extra-controls` entries, kebab-case name and value, applied after
+    /// the named controls.
+    extra_controls: Vec<(String, i64)>,
     req_width: u32,
     req_height: u32,
     req_fps: u32,
@@ -573,6 +982,7 @@ impl V4l2Src {
             device_id: String::new(),
             device_resolved: false,
             controls: [None; CONTROLS.len()],
+            extra_controls: Vec::new(),
             req_width: DEFAULT_WIDTH,
             req_height: DEFAULT_HEIGHT,
             req_fps: DEFAULT_FPS,
@@ -657,7 +1067,7 @@ impl V4l2Src {
         let dev = Device::with_path(&self.device).map_err(|e| v4l2_err(&e))?;
         // Controls are device state, not per-fd, so applying them on the probe
         // handle holds for the capture thread's own open.
-        apply_controls(&dev, &self.controls)?;
+        apply_controls(&dev, &self.controls, &self.extra_controls)?;
         let reported = dev.enum_formats().map_err(|e| v4l2_err(&e))?;
 
         // Kept so a probe that confirms nothing reports why (a camera already
@@ -793,56 +1203,7 @@ impl SourceLoop for V4l2Src {
     }
 
     fn properties(&self) -> &'static [PropertySpec] {
-        const PROPS: &[PropertySpec] = &[
-            PropertySpec::new(
-                "device",
-                PropKind::Str,
-                "V4L2 device node (e.g. /dev/video0)",
-            )
-            .with_default("/dev/video0"),
-            PropertySpec::new(
-                "device-id",
-                PropKind::Str,
-                "persistent device id from the device monitor; resolved to a node path at \
-                 negotiation, so a saved pipeline survives a replug",
-            ),
-            PropertySpec::new(
-                "width",
-                PropKind::Uint,
-                "requested capture width (driver may snap)",
-            ),
-            PropertySpec::new(
-                "height",
-                PropKind::Uint,
-                "requested capture height (driver may snap)",
-            ),
-            PropertySpec::new(
-                "framerate",
-                PropKind::Uint,
-                "requested capture rate, fps (best effort)",
-            ),
-            PropertySpec::new(
-                "num-buffers",
-                PropKind::Int,
-                "frames to emit then EOS (-1 = forever)",
-            )
-            .with_default("-1"),
-            PropertySpec::new(
-                "io-mode",
-                PropKind::Str,
-                "how buffers leave the element: auto | mmap (copy to system memory) | dmabuf \
-                 (export the capture buffer, raw formats only)",
-            )
-            .with_default("auto")
-            .with_enum_values("auto | mmap | dmabuf"),
-            control_prop(0),
-            control_prop(1),
-            control_prop(2),
-            control_prop(3),
-            control_prop(4),
-            control_prop(5),
-        ];
-        PROPS
+        &PROPS
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
@@ -854,6 +1215,7 @@ impl SourceLoop for V4l2Src {
                 ControlKind::Switch => i64::from(value.as_bool().ok_or(PropError::Type)?),
                 ControlKind::Amount => i64::try_from(value.as_uint().ok_or(PropError::Type)?)
                     .map_err(|_| PropError::Value)?,
+                ControlKind::SignedAmount => value.as_int().ok_or(PropError::Type)?,
             });
             return Ok(());
         }
@@ -880,6 +1242,10 @@ impl SourceLoop for V4l2Src {
                 Ok(())
             }
             "num-buffers" => crate::numbuffers::set_num_buffers(&mut self.frame_limit, &value),
+            "extra-controls" => {
+                self.extra_controls = parse_extra_controls(value.as_str().ok_or(PropError::Type)?)?;
+                Ok(())
+            }
             "io-mode" => {
                 let name = value.as_str().ok_or(PropError::Type)?;
                 // A V4L2 method this element does not implement is refused, not
@@ -898,10 +1264,7 @@ impl SourceLoop for V4l2Src {
     fn get_property(&self, name: &str) -> Option<PropValue> {
         if let Some(index) = CONTROLS.iter().position(|c| c.name == name) {
             let value = self.controls[index]?;
-            return Some(match CONTROLS[index].kind {
-                ControlKind::Switch => PropValue::Bool(value != 0),
-                ControlKind::Amount => PropValue::Uint(value as u64),
-            });
+            return Some(CONTROLS[index].kind.prop_value(value));
         }
         match name {
             "device" => Some(PropValue::Str(self.device.clone())),
@@ -911,6 +1274,7 @@ impl SourceLoop for V4l2Src {
             "framerate" => Some(PropValue::Uint(self.req_fps as u64)),
             "num-buffers" => Some(crate::numbuffers::get_num_buffers(self.frame_limit)),
             "io-mode" => Some(PropValue::Str(self.io_mode.name().to_string())),
+            "extra-controls" => Some(PropValue::Str(format_extra_controls(&self.extra_controls))),
             _ => None,
         }
     }
@@ -1121,6 +1485,18 @@ impl PadTemplates for V4l2Src {
 mod tests {
     use super::*;
 
+    /// The live tests set controls on the one camera this host has, so they take
+    /// turns: a control another test is mid-way through changing reads back as
+    /// that test's value, not this one's. A failed test leaves the lock
+    /// poisoned, which says nothing about the camera.
+    static LIVE_CAMERA: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn live_camera_turn() -> std::sync::MutexGuard<'static, ()> {
+        LIVE_CAMERA
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     #[test]
     fn builders_set_requested_config() {
         let src = V4l2Src::new("/dev/video0")
@@ -1149,7 +1525,272 @@ mod tests {
         // ids must be distinct, or one control silently overwrites another.
         for (i, a) in CONTROLS.iter().enumerate() {
             assert!(!CONTROLS[..i].iter().any(|b| b.id == a.id), "{}", a.name);
+            assert!(
+                !CONTROLS[..i].iter().any(|b| b.name == a.name),
+                "{}",
+                a.name
+            );
         }
+        // and no control may shadow a capture property, or one of the two is
+        // unreachable from a launch line.
+        for spec in CAPTURE_PROPS {
+            assert!(
+                !CONTROLS.iter().any(|c| c.name == spec.name),
+                "{}",
+                spec.name
+            );
+        }
+        assert_eq!(specs.len(), CAPTURE_PROPS.len() + CONTROLS.len());
+        // the four picture controls GStreamer names take a signed value there,
+        // so a line written for gst reaches the same driver value here.
+        for name in ["brightness", "contrast", "saturation", "hue"] {
+            let spec = CONTROLS.iter().find(|c| c.name == name).expect(name);
+            assert_eq!(spec.kind.prop_kind(), PropKind::Int, "{name}");
+        }
+    }
+
+    #[test]
+    fn driver_control_names_become_the_names_a_property_spells() {
+        // the names uvcvideo reports, old and current kernel spellings.
+        for (reported, kebab) in [
+            ("Brightness", "brightness"),
+            ("Backlight Compensation", "backlight-compensation"),
+            (
+                "White Balance Temperature, Auto",
+                "white-balance-temperature-auto",
+            ),
+            ("White Balance, Automatic", "white-balance-automatic"),
+            ("Exposure (Absolute)", "exposure-absolute"),
+            ("Exposure, Dynamic Framerate", "exposure-dynamic-framerate"),
+            ("Power Line Frequency", "power-line-frequency"),
+        ] {
+            assert_eq!(kebab_control_name(reported), kebab);
+        }
+        // a name that is nothing but separators has no kebab form to match on.
+        assert_eq!(kebab_control_name(" , "), "");
+    }
+
+    #[test]
+    fn extra_controls_parse_as_pairs_and_refuse_a_typo() {
+        let parsed = parse_extra_controls("contrast=40, sharpness=3,pan-absolute=-3600")
+            .expect("a well-formed list");
+        assert_eq!(
+            parsed,
+            Vec::from([
+                ("contrast".to_string(), 40),
+                ("sharpness".to_string(), 3),
+                ("pan-absolute".to_string(), -3600),
+            ])
+        );
+        // the property reads back the list it was set with, so a `gst-inspect`
+        // dump of a running graph shows what was asked for.
+        assert_eq!(
+            format_extra_controls(&parsed),
+            "contrast=40,sharpness=3,pan-absolute=-3600"
+        );
+        assert!(parse_extra_controls("   ").expect("empty").is_empty());
+
+        // a typo must fail the property, never be dropped: without an `=` there
+        // is no value, with no name there is no control, and a value that is
+        // not a whole number is not a V4L2 control value.
+        for bad in [
+            "contrast",
+            "contrast=",
+            "=40",
+            "contrast=high",
+            "contrast=4.5",
+            "contrast=40,",
+            "contrast=40,sharpness",
+        ] {
+            assert_eq!(
+                parse_extra_controls(bad),
+                Err(PropError::Value),
+                "{bad} must not parse"
+            );
+        }
+    }
+
+    #[test]
+    fn extra_controls_round_trip_through_the_property() {
+        let mut src = V4l2Src::new("/dev/video0");
+        assert_eq!(
+            SourceLoop::get_property(&src, "extra-controls"),
+            Some(PropValue::Str(String::new()))
+        );
+        SourceLoop::set_property(
+            &mut src,
+            "extra-controls",
+            PropValue::Str("contrast=40,privacy=1".to_string()),
+        )
+        .expect("a well-formed list");
+        assert_eq!(
+            SourceLoop::get_property(&src, "extra-controls"),
+            Some(PropValue::Str("contrast=40,privacy=1".to_string()))
+        );
+        assert_eq!(
+            SourceLoop::set_property(
+                &mut src,
+                "extra-controls",
+                PropValue::Str("contrast".to_string())
+            ),
+            Err(PropError::Value)
+        );
+        // the refusal left the accepted list alone.
+        assert_eq!(
+            src.extra_controls,
+            Vec::from([("contrast".to_string(), 40), ("privacy".to_string(), 1)])
+        );
+    }
+
+    /// A control's current value, whatever payload the driver reports it with.
+    fn current_value(dev: &Device, control: &DeviceControl) -> i64 {
+        match dev.control(control.id).expect("read a control").value {
+            ControlValue::Integer(v) => v,
+            ControlValue::Boolean(on) => i64::from(on),
+            other => panic!("{} reported {other:?}", control.name),
+        }
+    }
+
+    /// The end of `control`'s range that `before` is not sitting on, so a value
+    /// that reached the driver is visible.
+    fn other_end_of_range(control: &DeviceControl, before: i64) -> i64 {
+        if before == control.minimum {
+            control.maximum
+        } else {
+            control.minimum
+        }
+    }
+
+    /// Every numeric control this camera reports is described and settable by
+    /// the name the device monitor lists it under. Self-skips where no camera
+    /// (CI). The value is restored, so the camera is left as it was found.
+    #[test]
+    fn live_camera_applies_an_extra_control_by_its_reported_name() {
+        use g2g_core::runtime::DeviceProvider;
+        let _turn = live_camera_turn();
+        let devices = crate::v4l2device::V4l2DeviceProvider::new()
+            .probe()
+            .unwrap_or_default();
+        let Some(camera) = devices.first() else {
+            return;
+        };
+        let path = camera.props[0].1.clone();
+        let dev = Device::with_path(&path).expect("open the probed camera");
+        let described = query_controls(&dev);
+
+        // a writable control with room to move, so a changed value is visible.
+        let Some(control) = described
+            .iter()
+            .find(|c| !c.read_only && c.maximum > c.minimum)
+        else {
+            return;
+        };
+        let before = current_value(&dev, control);
+        let wanted = other_end_of_range(control, before);
+
+        let mut src = V4l2Src::new(&path);
+        SourceLoop::set_property(
+            &mut src,
+            "extra-controls",
+            PropValue::Str(alloc::format!("{}={wanted}", control.name)),
+        )
+        .expect("extra-controls");
+        g2g_core::runtime::block_on(SourceLoop::intercept_caps(&mut src))
+            .expect("negotiate the camera");
+        assert_eq!(
+            current_value(&dev, control),
+            wanted,
+            "{} did not reach the driver",
+            control.name
+        );
+
+        // a name no control carries, and a value outside the reported range,
+        // both fail the negotiation rather than being dropped.
+        for refused in [
+            alloc::format!("no-such-control={wanted}"),
+            alloc::format!("{}={}", control.name, control.maximum.saturating_add(1)),
+        ] {
+            let mut src = V4l2Src::new(&path);
+            SourceLoop::set_property(&mut src, "extra-controls", PropValue::Str(refused.clone()))
+                .expect("extra-controls");
+            assert!(
+                g2g_core::runtime::block_on(SourceLoop::intercept_caps(&mut src)).is_err(),
+                "{refused} must fail negotiation"
+            );
+        }
+
+        dev.set_control(Control {
+            id: control.id,
+            value: control.payload(before),
+        })
+        .expect("restore");
+    }
+
+    /// Every control [`CONTROLS`] names that this camera reports reaches the
+    /// driver when set by its property name. Only real hardware can say that a
+    /// table entry's id and payload kind are the ones the driver wants.
+    /// Self-skips where no camera (CI); every value is restored.
+    #[test]
+    fn live_camera_applies_every_named_control_it_reports() {
+        use g2g_core::runtime::DeviceProvider;
+        let _turn = live_camera_turn();
+        let writable = |described: &[DeviceControl], spec: &ControlSpec| {
+            described
+                .iter()
+                .find(|c| c.id == spec.id && !c.read_only && c.maximum > c.minimum)
+                .cloned()
+        };
+        let devices = crate::v4l2device::V4l2DeviceProvider::new()
+            .probe()
+            .unwrap_or_default();
+        // a multi-node camera has an IR / depth node carrying no named control.
+        let Some((path, dev, described)) = devices.iter().find_map(|camera| {
+            let path = camera.props[0].1.clone();
+            let dev = Device::with_path(&path).ok()?;
+            let described = query_controls(&dev);
+            CONTROLS
+                .iter()
+                .any(|spec| writable(&described, spec).is_some())
+                .then_some((path, dev, described))
+        }) else {
+            return;
+        };
+
+        let mut applied = 0;
+        for spec in &CONTROLS {
+            let Some(control) = writable(&described, spec) else {
+                continue;
+            };
+            let before = current_value(&dev, &control);
+            let wanted = other_end_of_range(&control, before);
+            let set_directly = |value| {
+                dev.set_control(Control {
+                    id: control.id,
+                    value: spec.kind.payload(value),
+                })
+            };
+            // a manual value whose auto mode still gates it is refused however
+            // it is set, so it is not this test's to check.
+            if set_directly(wanted).is_err() {
+                continue;
+            }
+            set_directly(before).expect("restore before the element sets it");
+
+            let mut src = V4l2Src::new(&path);
+            SourceLoop::set_property(&mut src, spec.name, spec.kind.prop_value(wanted))
+                .expect(spec.name);
+            g2g_core::runtime::block_on(SourceLoop::intercept_caps(&mut src))
+                .expect("negotiate the camera");
+            assert_eq!(
+                current_value(&dev, &control),
+                wanted,
+                "{} did not reach the driver",
+                spec.name
+            );
+            set_directly(before).expect("restore");
+            applied += 1;
+        }
+        assert!(applied > 0, "the camera reports a control the table names");
     }
 
     #[test]
@@ -1175,6 +1816,24 @@ mod tests {
         // silently coerced control value.
         assert_eq!(
             SourceLoop::set_property(&mut src, "focus-auto", PropValue::Uint(1)),
+            Err(PropError::Type)
+        );
+
+        // a signed control keeps the sign, and takes neither an unsigned value
+        // nor a switch in its place.
+        SourceLoop::set_property(&mut src, "brightness", PropValue::Int(-64)).expect("signed");
+        assert_eq!(
+            SourceLoop::get_property(&src, "brightness"),
+            Some(PropValue::Int(-64))
+        );
+        assert_eq!(
+            SourceLoop::set_property(&mut src, "hue", PropValue::Uint(10)),
+            Err(PropError::Type)
+        );
+        // and an unsigned control still refuses a signed value rather than
+        // wrapping it into a huge one.
+        assert_eq!(
+            SourceLoop::set_property(&mut src, "zoom-absolute", PropValue::Int(-1)),
             Err(PropError::Type)
         );
 
@@ -1238,6 +1897,7 @@ mod tests {
     #[test]
     fn live_camera_resolves_its_id_and_applies_a_control() {
         use g2g_core::runtime::DeviceProvider;
+        let _turn = live_camera_turn();
         let devices = crate::v4l2device::V4l2DeviceProvider::new()
             .probe()
             .unwrap_or_default();
