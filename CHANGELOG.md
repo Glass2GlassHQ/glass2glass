@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1038: the platform capture sources (`aaudiosrc`, `camera2src`, `coreaudiosrc`, `avfaudiosrc`, `avfvideosrc`, `screencapturesrc`) take their constructor knobs as properties, so a launch line can set them.
 - M1037: a fan-in or duplex session that ends while its send sources still stream winds the run down cleanly instead of failing with a shutdown error.
 - M1036: `vaapidech265` decodes H.265 via VA-API, and a VA-API decoder's mid-stream resolution change reaches the upstream producer as a caps proposal.
 - M1035: every CPU element that reads host memory declares it, so the allocation cascade plans a GPU download at negotiation instead of failing mid-run.

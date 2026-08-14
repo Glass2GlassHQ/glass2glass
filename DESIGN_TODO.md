@@ -545,10 +545,6 @@ _(No open parser items.)_
 _(No open bus items.)_
 ## Properties / introspection / DSL
 
-- Properties on the platform capture sources (`aaudiosrc` / `camera2src` /
-  `coreaudiosrc` / `avfvideosrc` / `avfaudiosrc` / `screencapturesrc`): their
-  constructor knobs (samplerate, channels, geometry, num-buffers) are
-  unreachable from a launch line today. Platform-gated (Android / macOS).
 - A GUI / tooling introspection surface beyond the text dump.
 
 ## Tag system
