@@ -934,7 +934,7 @@ pub mod mfvideosrc;
 #[cfg(all(target_os = "windows", feature = "mf-video-src"))]
 pub mod mfdevice;
 
-// VAAPI H.264 decode via cros-codecs is Linux-only. The dependency is
+// VAAPI H.264 / H.265 decode via cros-codecs is Linux-only. The dependency is
 // target-gated; enabling the feature on other platforms is a no-op.
 #[cfg(all(target_os = "linux", feature = "vaapi"))]
 pub mod vaapidec;
