@@ -224,8 +224,7 @@ _(No open negotiation items.)_
 
 ## Seek and auto-plug
 
-- A hardware-backed end-to-end decode-through-`decodebin` run (current tests
-  read templates / assert splicing, decode no real media).
+_(No open seek / auto-plug items.)_
 
 ## Platform: macOS
 
