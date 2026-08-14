@@ -35,22 +35,16 @@ fn start_binder_threadpool() {
     // SAFETY: libbinder_ndk.so is loadable; the dlsym'd symbols have the C
     // signatures from <android/binder_process.h>.
     unsafe {
-        let lib = dlopen(b"libbinder_ndk.so\0".as_ptr() as *const c_char, RTLD_NOW);
+        let lib = dlopen(c"libbinder_ndk.so".as_ptr(), RTLD_NOW);
         if lib.is_null() {
             return;
         }
-        let set = dlsym(
-            lib,
-            b"ABinderProcess_setThreadPoolMaxThreadCount\0".as_ptr() as *const c_char,
-        );
+        let set = dlsym(lib, c"ABinderProcess_setThreadPoolMaxThreadCount".as_ptr());
         if !set.is_null() {
             let set: extern "C" fn(u32) -> bool = core::mem::transmute(set);
             set(4);
         }
-        let start = dlsym(
-            lib,
-            b"ABinderProcess_startThreadPool\0".as_ptr() as *const c_char,
-        );
+        let start = dlsym(lib, c"ABinderProcess_startThreadPool".as_ptr());
         if !start.is_null() {
             let start: extern "C" fn() = core::mem::transmute(start);
             start();
