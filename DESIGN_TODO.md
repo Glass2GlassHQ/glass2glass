@@ -220,8 +220,7 @@ Phased plan:
 
 ## Negotiation
 
-- **Hardware `tee -> {decode, mux}` integration test** on real Linux
-  (`rtsp ffmpeg wayland-sink`); only fake-element coverage today.
+_(No open negotiation items.)_
 
 ## Seek and auto-plug
 
