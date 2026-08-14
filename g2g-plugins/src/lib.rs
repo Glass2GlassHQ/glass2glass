@@ -809,6 +809,21 @@ pub mod mjpegdec;
 #[cfg(feature = "mjpeg-encode")]
 pub mod mjpegenc;
 
+// PNG stills via the pure-Rust png crate (no system deps).
+#[cfg(feature = "png")]
+pub mod pngdec;
+#[cfg(feature = "png")]
+pub mod pngenc;
+
+// WebP stills via the pure-Rust image-webp crate (no system deps).
+#[cfg(feature = "webp")]
+pub mod webpdec;
+
+// Geometry bounds, byte-stream reassembly, and RGBA output shared by the
+// still-image codec elements.
+#[cfg(any(feature = "png", feature = "webp"))]
+mod stillimage;
+
 // Opus audio encode + decode via libopus (FFI through audiopus). Not pure Rust;
 // links libopus (system or bundled-and-built), gated behind the `opus` feature.
 #[cfg(feature = "opus")]

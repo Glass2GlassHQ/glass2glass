@@ -29,7 +29,7 @@ linux-full = [
     "remote", "remote-ws", "webtransport", "moqt",
     "http-src", "hls", "dash",
     "ffmpeg", "vaapi", "v4l2",
-    "opus", "vorbis", "vpx", "av1-encode", "mjpeg", "mjpeg-encode",
+    "opus", "vorbis", "vpx", "av1-encode", "mjpeg", "mjpeg-encode", "png", "webp",
     "alsa-sink", "alsa-src", "pulse-sink", "pulse-src", "pipewire", "portal",
     "wayland-sink", "kms-sink", "wgpu-sink", "wgpu-present", "vello-overlay", "analytics",
     "declarative-yaml", "script-rhai", "observe", "tui",
@@ -611,6 +611,15 @@ mjpeg = ["std", "dep:zune-jpeg"]
 # RawVideo{Rgba8|I420} -> CompressedVideo{Mjpeg}). The jpegenc analog: intra-only
 # JPEG per frame for snapshot / thumbnail / low-latency capture. No system deps.
 mjpeg-encode = ["std", "dep:jpeg-encoder"]
+# PNG still-image decode + encode via the pure-Rust `png` crate (PngDec / PngEnc,
+# CompressedVideo{Png} <-> RawVideo{Rgba8|Rgb8}). The pngdec / pngenc analog. No
+# system deps; implies std (the crate reads through std::io).
+png = ["std", "dep:png"]
+# WebP still-image decode via the pure-Rust `image-webp` crate (WebPDec,
+# CompressedVideo{WebP} -> RawVideo{Rgba8}), lossy and lossless both. The webpdec
+# analog. There is no encoder: image-webp does VP8L lossless only, with none of
+# webpenc's quality / speed / preset knobs. No system deps; implies std.
+webp = ["std", "dep:image-webp"]
 # libjpeg-turbo / mozjpeg backend for MjpegDec + MjpegEnc, selected at runtime by
 # `decoder=mozjpeg` / `encoder=mozjpeg` (the pure-Rust crates stay the default, so
 # the feature alone changes no behavior). NOT pure Rust: `mozjpeg-sys` builds the
@@ -765,6 +774,14 @@ vpx-encode = { version = "0.6", optional = true, features = ["vp9", "ffi-generat
 zune-jpeg = { version = "0.5", optional = true }
 # Pure-Rust JPEG encoder (mjpeg-encode feature). No system dependency.
 jpeg-encoder = { version = "0.7", optional = true }
+# Pure-Rust PNG decoder + encoder (png feature). No unsafe, fuzzed on OSS-Fuzz;
+# deflate comes from flate2's default miniz_oxide backend, so no C either. MSRV
+# 1.73. No system dependency.
+png = { version = "0.18", optional = true }
+# Pure-Rust WebP decoder (webp feature), lossy VP8 and lossless VP8L both. Two
+# trivial pure-Rust deps (byteorder-lite, quick-error). MSRV 1.80.1. No system
+# dependency.
+image-webp = { version = "0.2", optional = true }
 # libopus encode + decode wrapper (opus feature) for OpusEnc / OpusDec. Not pure
 # Rust (there is no mature pure-Rust Opus codec): `audiopus` wraps libopus via
 # `audiopus_sys`. It prefers a pkg-config-discovered system libopus, so install

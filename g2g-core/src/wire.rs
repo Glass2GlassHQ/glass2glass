@@ -202,6 +202,8 @@ fn video_codec_to_u8(c: VideoCodec) -> u8 {
         VideoCodec::Vp6 { alpha: false } => 9,
         VideoCodec::Vp6 { alpha: true } => 10,
         VideoCodec::Mpeg2 => 11,
+        VideoCodec::Png => 12,
+        VideoCodec::WebP => 13,
     }
 }
 fn video_codec_from_u8(v: u8) -> Result<VideoCodec, WireError> {
@@ -218,6 +220,8 @@ fn video_codec_from_u8(v: u8) -> Result<VideoCodec, WireError> {
         9 => VideoCodec::Vp6 { alpha: false },
         10 => VideoCodec::Vp6 { alpha: true },
         11 => VideoCodec::Mpeg2,
+        12 => VideoCodec::Png,
+        13 => VideoCodec::WebP,
         _ => return Err(WireError::BadTag),
     })
 }
