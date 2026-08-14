@@ -1349,17 +1349,35 @@ chosen (the capture node on every UVC device). An id nothing carries fails the
 negotiation with `HardwareError::V4l2(ENODEV)` rather than silently falling
 back to `device`.
 
-**V4L2 camera controls (M944).** `v4l2src` exposes exposure, focus and white
-balance as runtime properties under the names `v4l2-ctl` uses
-(`exposure-auto`, `exposure-absolute`, `focus-auto`, `focus-absolute`,
-`white-balance-temperature-auto`, `white-balance-temperature`; GStreamer's
-analog is the `extra-controls` structure). One table drives both the property
-specs and the `VIDIOC_S_EXT_CTRLS` ids, and its order is the apply order: an
-auto switch precedes the manual value it gates, because a driver rejects a
-manual exposure while auto exposure is on. Each is applied with its own ioctl,
-since a batch may not span the user and camera control classes. Only a control
-that was set is touched, and one the camera does not implement fails the
-negotiation instead of being quietly ignored.
+**V4L2 camera controls (M944, M1047).** `v4l2src` exposes the user and camera
+control classes as runtime properties under the names `v4l2-ctl` uses:
+exposure, focus and white balance (`exposure-auto`, `exposure-absolute`,
+`focus-auto`, `focus-absolute`, `white-balance-temperature-auto`,
+`white-balance-temperature`), the picture controls GStreamer's `v4l2src` also
+names (`brightness`, `contrast`, `saturation`, `hue`, `gamma`, `gain`,
+`sharpness`, `backlight-compensation`, `power-line-frequency`), and pan / tilt
+/ zoom (`pan-absolute`, `tilt-absolute`, `zoom-absolute`). One table drives
+both the property specs and the `VIDIOC_S_EXT_CTRLS` ids, and its order is the
+apply order: an auto switch precedes the manual value it gates, because a
+driver rejects a manual exposure while auto exposure is on. Each is applied
+with its own ioctl, since a batch may not span the user and camera control
+classes. Only a control that was set is touched, and one the camera does not
+implement fails the negotiation instead of being quietly ignored. A control's
+property kind follows its range: a switch is `Bool`; the four picture controls
+GStreamer also gives a signed property to, plus pan / tilt, are `Int`; the rest,
+whose range starts at zero on every device that has them, are `Uint`.
+
+Anything past that table is reachable through `extra-controls`, GStreamer's own
+spelling, as a comma-separated `name=value` list. The names are the driver's
+own, kebab-cased, which is how `g2g-device-monitor` lists them: the provider
+walks `VIDIOC_QUERY_EXT_CTRL` and records every numeric control as a
+`control.<name>` detail entry with the range and default the driver reports, so
+a listing tells the caller exactly what an `extra-controls` entry may say. The
+walk is g2g's own rather than the `v4l` crate's `query_controls`, which panics
+on a control type its enum predates (uvcvideo's region-of-interest rectangle).
+A malformed list fails the property; a name this device does not offer, or a
+value outside its reported range, fails the negotiation and logs the names the
+device does carry.
 
 ### 4.12b Live Ingress (UDP / RTP)
 
