@@ -83,7 +83,8 @@ pub struct LiveKitDuplex {
     inputs: Vec<Option<Track>>,
     /// Per send-input reverse channel (remote PLI / BWE back to the source).
     reverse: Vec<ReverseChannel>,
-    /// Stop after this many RECEIVED access units and emit EOS (0 = unbounded).
+    /// Stop after this many RECEIVED access units and emit EOS (`u64::MAX` =
+    /// unbounded).
     frame_limit: u64,
     /// How long to keep draining the peer after the local send side ends.
     linger: Duration,
@@ -117,7 +118,7 @@ impl LiveKitDuplex {
             token: None,
             inputs: alloc::vec![None; 2],
             reverse: (0..2).map(|_| ReverseChannel::new()).collect(),
-            frame_limit: 0,
+            frame_limit: u64::MAX,
             linger: Duration::from_millis(1500),
         }
     }
@@ -135,7 +136,8 @@ impl LiveKitDuplex {
         self
     }
 
-    /// Stop after `n` received access units (then EOS on both outputs).
+    /// Stop after `n` received access units (then EOS on both outputs). 0 emits
+    /// EOS on both without joining the room, so nothing is published either.
     pub fn with_frame_limit(mut self, n: u64) -> Self {
         self.frame_limit = n;
         self
@@ -229,6 +231,15 @@ impl MultiDuplexSession for LiveKitDuplex {
         out: &'a mut dyn MultiOutputSink,
     ) -> Self::RunFuture<'a> {
         Box::pin(async move {
+            if crate::numbuffers::finished_at_zero_limit_multi(
+                self.frame_limit,
+                self.output_count(),
+                out,
+            )
+            .await?
+            {
+                return Ok(0);
+            }
             let hw = || G2gError::Hardware(HardwareError::Other);
             let token = self.access_token()?;
             let ws_url = signal_ws_url(&self.url, &token, true);
@@ -463,7 +474,7 @@ impl MultiDuplexSession for LiveKitDuplex {
                     };
                     out.push_to(port, PipelinePacket::DataFrame(frame)).await?;
                     received += 1;
-                    if self.frame_limit != 0 && received >= self.frame_limit {
+                    if received >= self.frame_limit {
                         finish!();
                     }
                 }

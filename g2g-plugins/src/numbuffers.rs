@@ -32,6 +32,11 @@ pub(crate) fn get_num_buffers(limit: u64) -> PropValue {
     feature = "v4l2",
     feature = "mf-video-src",
     feature = "moqt",
+    feature = "webrtc",
+    feature = "pipewire",
+    feature = "libcamera",
+    feature = "local-ipc",
+    feature = "local-dmabuf",
 ))]
 pub(crate) async fn finished_at_zero_limit(
     limit: u64,
@@ -46,7 +51,7 @@ pub(crate) async fn finished_at_zero_limit(
 
 /// [`finished_at_zero_limit`] for a multi-pad source: every pad gets the EOS,
 /// since a branch left without one never finishes.
-#[cfg(any(feature = "moqt", feature = "webrtc"))]
+#[cfg(any(feature = "moqt", feature = "webrtc", feature = "webrtc-livekit"))]
 pub(crate) async fn finished_at_zero_limit_multi(
     limit: u64,
     pads: usize,

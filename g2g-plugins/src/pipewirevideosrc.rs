@@ -191,9 +191,9 @@ pub struct PipeWireVideoSrc {
     /// table and take what the node settles on.
     pin_format: Option<RawVideoFormat>,
     io_mode: IoMode,
-    /// `None` = run until error or downstream shutdown; else stop after N frames
-    /// and emit EOS. The bounded-capture / test path.
-    frame_limit: Option<u64>,
+    /// `u64::MAX` = run until error or downstream shutdown; else stop after this
+    /// many frames and emit EOS. The bounded-capture / test path.
+    frame_limit: u64,
     /// Ask xdg-desktop-portal for a screen share instead of capturing a node on
     /// the session's PipeWire remote. Exclusive with `target`.
     #[cfg(feature = "portal")]
@@ -225,7 +225,7 @@ impl PipeWireVideoSrc {
             req_fps: DEFAULT_FPS,
             pin_format: None,
             io_mode: IoMode::MemoryMap,
-            frame_limit: None,
+            frame_limit: u64::MAX,
             #[cfg(feature = "portal")]
             portal: false,
             #[cfg(feature = "portal")]
@@ -266,10 +266,11 @@ impl PipeWireVideoSrc {
         self
     }
 
-    /// Stop after `n` frames and emit EOS (`0` = no limit). Without this the
-    /// source runs until an error or until downstream drops.
+    /// Stop after `n` frames and emit EOS (0 emits EOS without opening the
+    /// stream). Without this the source runs until an error or until downstream
+    /// drops.
     pub fn with_frame_limit(mut self, n: u64) -> Self {
-        self.frame_limit = (n > 0).then_some(n);
+        self.frame_limit = n;
         self
     }
 
@@ -458,7 +459,8 @@ impl SourceLoop for PipeWireVideoSrc {
                 PropKind::Int,
                 "frames to capture then EOS (-1 = forever)",
             )
-            .with_default("-1"),
+            .with_default("-1")
+            .with_range("-1", "9223372036854775807"),
             #[cfg(feature = "portal")]
             PropertySpec::new(
                 "portal",
@@ -534,11 +536,7 @@ impl SourceLoop for PipeWireVideoSrc {
                 self.io_mode = IoMode::from_name(name).ok_or(PropError::Value)?;
                 Ok(())
             }
-            "num-buffers" => {
-                let n = value.as_int().ok_or(PropError::Type)?;
-                self.frame_limit = (n >= 0).then_some(n as u64);
-                Ok(())
-            }
+            "num-buffers" => crate::numbuffers::set_num_buffers(&mut self.frame_limit, &value),
             #[cfg(feature = "portal")]
             "portal" => {
                 let on = value.as_bool().ok_or(PropError::Type)?;
@@ -584,7 +582,7 @@ impl SourceLoop for PipeWireVideoSrc {
                 self.pin_format.map_or("", raw_format_to_str).into(),
             )),
             "io-mode" => Some(PropValue::Str(self.io_mode.as_str().into())),
-            "num-buffers" => Some(PropValue::Int(self.frame_limit.map_or(-1, |n| n as i64))),
+            "num-buffers" => Some(crate::numbuffers::get_num_buffers(self.frame_limit)),
             #[cfg(feature = "portal")]
             "portal" => Some(PropValue::Bool(self.portal)),
             #[cfg(feature = "portal")]
@@ -621,6 +619,9 @@ impl SourceLoop for PipeWireVideoSrc {
         Box::pin(async move {
             if !self.configured {
                 return Err(G2gError::NotConfigured);
+            }
+            if crate::numbuffers::finished_at_zero_limit(self.frame_limit, out).await? {
+                return Ok(0);
             }
             let mut advertised = self.caps()?;
             let pod = format_pod_bytes(
@@ -690,7 +691,7 @@ impl SourceLoop for PipeWireVideoSrc {
             let mut downstream_open = true;
             let mut failure = None;
 
-            while limit.is_none_or(|n| seq < n) {
+            while seq < limit {
                 let Some(msg) = rx.recv().await else {
                     break; // worker ended
                 };
@@ -1250,12 +1251,11 @@ mod tests {
             (1280, 720, 60)
         );
         assert_eq!(src.pin_format, Some(RawVideoFormat::Nv12));
-        assert_eq!(src.frame_limit, Some(7));
-        // no limit is the default and what a 0 limit means
-        assert_eq!(
-            PipeWireVideoSrc::new().with_frame_limit(0).frame_limit,
-            None
-        );
+        assert_eq!(src.frame_limit, 7);
+        // no limit is the default; the builder spells 0 the way the property
+        // does, as a count of zero rather than "forever"
+        assert_eq!(PipeWireVideoSrc::new().frame_limit, u64::MAX);
+        assert_eq!(PipeWireVideoSrc::new().with_frame_limit(0).frame_limit, 0);
         // mapped buffers unless the caller asks for dma-buf
         assert_eq!(src.io_mode, IoMode::MemoryMap);
         assert_eq!(
@@ -1403,11 +1403,11 @@ mod tests {
         );
         assert_eq!(src.target, "cam0");
         assert_eq!(src.pin_format, Some(RawVideoFormat::Yuyv));
-        assert_eq!(src.frame_limit, Some(30));
+        assert_eq!(src.frame_limit, 30);
         // -1 is no limit, in both directions
         src.set_property("num-buffers", PropValue::Int(-1))
             .expect("known prop");
-        assert_eq!(src.frame_limit, None);
+        assert_eq!(src.frame_limit, u64::MAX);
         assert_eq!(src.get_property("num-buffers"), Some(PropValue::Int(-1)));
         assert_eq!(
             src.set_property("nope", PropValue::Uint(1)),

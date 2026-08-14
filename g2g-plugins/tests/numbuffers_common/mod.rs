@@ -1,10 +1,13 @@
 //! Helpers shared by the `num-buffers` batteries (`m1040_num_buffers_zero`,
-//! `m1042_moqt_whep_num_buffers`): the gst `basesrc` property round-trip and the
-//! collect-into-Vec sinks a zero-limit run pushes its EOS into. One definition,
-//! included per test binary via `mod numbuffers_common;`.
-#![allow(dead_code)] // no one battery uses every helper here
+//! `m1042_moqt_whep_num_buffers`, `m1043_num_buffers_sweep`): the gst `basesrc`
+//! property round-trip and the collect-into-Vec sinks a zero-limit run pushes
+//! its EOS into. One definition, included per test binary via
+//! `mod numbuffers_common;`.
+// No one battery uses every helper here.
+#![allow(dead_code, unused_macros, unused_imports)]
 
-use g2g_core::{G2gError, MultiOutputSink, OutputSink, PipelinePacket, PushOutcome};
+use g2g_core::element::BoxFuture;
+use g2g_core::{DuplexInbound, G2gError, MultiOutputSink, OutputSink, PipelinePacket, PushOutcome};
 
 /// -1 reads back as -1, n as n, and 0 as 0: a real count, not a rejected value
 /// and not a second spelling of "forever". The element's property trait
@@ -42,6 +45,33 @@ macro_rules! assert_num_buffers_round_trips {
     }};
 }
 pub(crate) use assert_num_buffers_round_trips;
+
+/// The builder half spells the limit the way the property does. Takes a closure
+/// so each element keeps its own builder name, and reads the result back through
+/// `num-buffers`, which is the only place the two halves can disagree.
+macro_rules! assert_builder_matches_num_buffers {
+    ($build:expr) => {{
+        let build = $build;
+        for n in [0i64, 7] {
+            assert_eq!(
+                build(n as u64).get_property("num-buffers"),
+                Some(g2g_core::PropValue::Int(n)),
+                "the builder's {n} must read back as num-buffers={n}"
+            );
+        }
+    }};
+}
+pub(crate) use assert_builder_matches_num_buffers;
+
+/// Send side of a duplex session that ends at once: the session sees every local
+/// source as already finished, so a zero-limit run is the only thing under test.
+pub(crate) struct NoInbound;
+
+impl DuplexInbound for NoInbound {
+    fn recv(&mut self) -> BoxFuture<'_, Option<(usize, PipelinePacket)>> {
+        Box::pin(core::future::ready(None))
+    }
+}
 
 /// Collects every packet a directly-driven source pushes.
 #[derive(Default)]

@@ -55,11 +55,21 @@ use g2g_core::{
 };
 
 /// The `location` property shared by both ends: the Unix socket path.
-const LOCATION_PROP: &[PropertySpec] = &[PropertySpec::new(
-    "location",
-    PropKind::Str,
-    "Unix socket path",
-)];
+const LOCATION_SPEC: PropertySpec =
+    PropertySpec::new("location", PropKind::Str, "Unix socket path");
+const LOCATION_PROP: &[PropertySpec] = &[LOCATION_SPEC];
+
+/// The receive end also takes gst `basesrc`'s frame count.
+const SRC_PROPS: &[PropertySpec] = &[
+    LOCATION_SPEC,
+    PropertySpec::new(
+        "num-buffers",
+        PropKind::Int,
+        "frames to emit then EOS (-1 = until the sender ends the stream)",
+    )
+    .with_default("-1")
+    .with_range("-1", "9223372036854775807"),
+];
 
 use crate::localipc;
 
@@ -493,6 +503,8 @@ pub struct LocalCudaSrc {
     discovered: Option<Caps>,
     ctx: Option<Arc<SrcCtx>>,
     configured: bool,
+    /// `u64::MAX` runs until the sender ends the stream; otherwise stop after
+    /// this many frames and emit EOS.
     frame_limit: u64,
     /// When set, emit the producer's mapped VRAM directly (true zero copy) and
     /// ack only once the frame is fully consumed downstream, instead of taking a
@@ -511,12 +523,13 @@ impl LocalCudaSrc {
             discovered: None,
             ctx: None,
             configured: false,
-            frame_limit: 0,
+            frame_limit: u64::MAX,
             direct: false,
         }
     }
 
-    /// Stop after `n` frames and emit EOS (the bounded / test path).
+    /// Stop after `n` frames and emit EOS (the bounded / test path). 0 emits EOS
+    /// without reading from the sender.
     pub fn with_frame_limit(mut self, n: u64) -> Self {
         self.frame_limit = n;
         self
@@ -598,7 +611,7 @@ impl SourceLoop for LocalCudaSrc {
     }
 
     fn properties(&self) -> &'static [PropertySpec] {
-        LOCATION_PROP
+        SRC_PROPS
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
@@ -607,6 +620,7 @@ impl SourceLoop for LocalCudaSrc {
                 self.path = value.as_str().ok_or(PropError::Type)?.into();
                 Ok(())
             }
+            "num-buffers" => crate::numbuffers::set_num_buffers(&mut self.frame_limit, &value),
             _ => Err(PropError::Unknown),
         }
     }
@@ -614,6 +628,7 @@ impl SourceLoop for LocalCudaSrc {
     fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
             "location" => Some(PropValue::Str(self.path.clone())),
+            "num-buffers" => Some(crate::numbuffers::get_num_buffers(self.frame_limit)),
             _ => None,
         }
     }
@@ -631,6 +646,9 @@ impl SourceLoop for LocalCudaSrc {
         Box::pin(async move {
             if !self.configured {
                 return Err(G2gError::NotConfigured);
+            }
+            if crate::numbuffers::finished_at_zero_limit(self.frame_limit, out).await? {
+                return Ok(0);
             }
             let caps = self.discovered.clone().ok_or(G2gError::NotConfigured)?;
             let ctx = self.ctx.clone().ok_or(G2gError::NotConfigured)?;
@@ -770,7 +788,7 @@ impl SourceLoop for LocalCudaSrc {
                             .await?;
                         }
                         emitted += 1;
-                        if limit != 0 && emitted >= limit {
+                        if emitted >= limit {
                             out.push(PipelinePacket::Eos).await?;
                             break;
                         }
