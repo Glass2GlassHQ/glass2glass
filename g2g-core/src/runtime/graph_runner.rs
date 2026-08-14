@@ -3590,6 +3590,13 @@ pub async fn transform_arm<E: AsyncElement>(
                     // journey's work segment is compute.
                     p.record_visit(seq, wait_ns, t0, push_wait_ns);
                 }
+                // M1036: renegotiation a transform originates rather than
+                // relays (a decoder that read a new resolution out of the
+                // bitstream); store it on the input link, where the upstream
+                // producer observes it as `PushOutcome::Reconfigure`.
+                if let Some(reconf) = elem.take_reconfigure() {
+                    in_rx.request_reconfigure(reconf);
+                }
             }
             None => return Ok(0),
         }
