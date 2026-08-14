@@ -569,6 +569,8 @@ unsafe extern "C-unwind" fn src_callback(
 ) {
     // SAFETY: see above; the buffer is ours until re-enqueued.
     let shared = unsafe { &*(user as *const SrcShared) };
+    // SAFETY: the queue hands us `buf` filled and ours until the re-enqueue
+    // below, with mAudioDataByteSize valid bytes at mAudioData.
     let bytes = unsafe {
         let b = &*buf;
         core::slice::from_raw_parts(

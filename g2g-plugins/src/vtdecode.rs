@@ -637,7 +637,8 @@ unsafe extern "C-unwind" fn output_callback(
     if image_buffer.is_null() {
         return; // dropped frame, not an error
     }
-    // A CVPixelBufferRef IS a CVImageBufferRef in CoreVideo (typedef), so this
+    // SAFETY: non-null checked above and valid for the callback. A
+    // CVPixelBufferRef IS a CVImageBufferRef in CoreVideo (typedef), so this
     // reinterpret is sound.
     let pb = unsafe { &*(image_buffer as *const CVPixelBuffer) };
 
@@ -732,8 +733,9 @@ unsafe fn build_session(
     if st != 0 {
         return Err(G2gError::Hardware(HardwareError::Other));
     }
-    // Adopt the +1 Create result (the CoreFoundation Create rule);
-    // CMVideoFormatDescription is an alias of CMFormatDescription.
+    // SAFETY: the create returned 0, so `fmt` holds a +1 reference. Adopt it
+    // (the CoreFoundation Create rule). CMVideoFormatDescription is an alias
+    // of CMFormatDescription.
     let format = unsafe {
         CFRetained::from_raw(
             NonNull::new(fmt as *mut CMFormatDescription)
@@ -785,6 +787,7 @@ unsafe fn build_session(
     if st != 0 {
         return Err(G2gError::Hardware(HardwareError::Other));
     }
+    // SAFETY: the create returned 0, so `session` is a +1 reference we adopt.
     let session = unsafe {
         CFRetained::from_raw(NonNull::new(session).ok_or(G2gError::Hardware(HardwareError::Other))?)
     };
@@ -806,6 +809,8 @@ unsafe fn decode_into(state: &DecoderState, avcc: &[u8], pts_ns: u64) -> Result<
     // Block buffer that owns a copy of the AVCC bytes (null memory_block + a
     // length lets VT allocate; ReplaceDataBytes fills it).
     let mut block: *mut CMBlockBuffer = ptr::null_mut();
+    // SAFETY: a null memory block plus a length asks VT to allocate the backing
+    // store, the other pointers are null (allowed) or the valid `block` out slot.
     let st = unsafe {
         CMBlockBuffer::create_with_memory_block(
             None,
@@ -822,6 +827,7 @@ unsafe fn decode_into(state: &DecoderState, avcc: &[u8], pts_ns: u64) -> Result<
     if st != 0 {
         return Err(G2gError::Hardware(HardwareError::Other));
     }
+    // SAFETY: the create returned 0, so `block` is a +1 reference we adopt.
     let block = unsafe {
         CFRetained::from_raw(NonNull::new(block).ok_or(G2gError::Hardware(HardwareError::Other))?)
     };
@@ -865,6 +871,7 @@ unsafe fn decode_into(state: &DecoderState, avcc: &[u8], pts_ns: u64) -> Result<
     if st != 0 {
         return Err(G2gError::Hardware(HardwareError::Other));
     }
+    // SAFETY: the create returned 0, so `sample` is a +1 reference we adopt.
     let sample = unsafe {
         CFRetained::from_raw(NonNull::new(sample).ok_or(G2gError::Hardware(HardwareError::Other))?)
     };
