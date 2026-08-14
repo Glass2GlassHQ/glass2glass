@@ -916,6 +916,13 @@ impl MultiInputElement for WgpuCompositor {
     where
         Self: 'a;
 
+    /// Samples a wgpu texture where it lies and copies a system frame out of its
+    /// slice, so a pad may deliver either; anything else is `UnsupportedDomain`.
+    fn input_domains(&self) -> g2g_core::memory::DomainSet {
+        g2g_core::memory::DomainSet::only(g2g_core::memory::MemoryDomainKind::WgpuTexture)
+            .with(g2g_core::memory::MemoryDomainKind::System)
+    }
+
     fn input_count(&self) -> usize {
         self.pads.len()
     }

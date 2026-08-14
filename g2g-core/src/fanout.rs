@@ -31,6 +31,7 @@ use crate::element::{
 use crate::error::G2gError;
 use crate::format_element::CapsConstraint;
 use crate::frame::PipelinePacket;
+use crate::memory::DomainSet;
 use crate::property::{ElementMetadata, PropError, PropValue, PropertySpec};
 use crate::runtime::SenderSink;
 use crate::runtime::{PadKind, PadRequest};
@@ -532,6 +533,15 @@ pub trait MultiOutputElement: ElementBound {
         None
     }
 
+    /// The memory domains this fan-out accepts on its single input pad,
+    /// mirroring [`AsyncElement::input_domains`](crate::AsyncElement::input_domains).
+    /// Default [`DomainSet::ALL`] (no requirement). A demux that parses host
+    /// bytes narrows it to `System`, and the allocation cascade turns that into a
+    /// download demand on a GPU producer feeding it.
+    fn input_domains(&self) -> DomainSet {
+        DomainSet::ALL
+    }
+
     /// Receive this instance's log name and a per-instance log category
     /// override, mirroring
     /// [`AsyncElement::set_instance_name`](crate::AsyncElement::set_instance_name)
@@ -783,6 +793,18 @@ pub trait MultiInputElement: ElementBound {
     /// carry the constraint and the runner re-cascades it up the pads whose demand
     /// actually moved.
     fn configure_allocation_for_output(&mut self, _params: &crate::query::AllocationParams) {}
+
+    /// The memory domains this fan-in accepts on **every** input pad, mirroring
+    /// [`AsyncElement::input_domains`](crate::AsyncElement::input_domains).
+    /// Default [`DomainSet::ALL`] (no requirement). A muxer that reads host
+    /// memory narrows it to `System`, and the allocation cascade turns that into
+    /// a download demand on each GPU producer feeding a pad. Per-pad domains are
+    /// not expressible: a fan-in whose pads differ declares the union it can take
+    /// on any pad and rejects the rest at
+    /// [`configure_pipeline`](Self::configure_pipeline).
+    fn input_domains(&self) -> DomainSet {
+        DomainSet::ALL
+    }
 
     /// Receive this instance's log name and a per-instance log category
     /// override, mirroring

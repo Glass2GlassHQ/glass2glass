@@ -387,6 +387,11 @@ pub trait DynMultiInputElement: ElementBound {
     fn input_pad_index(&self, req: &PadRequest, ordinal: usize) -> Option<usize>;
     fn caps_constraint_as_input(&self, input: usize) -> CapsConstraint<'_>;
     fn caps_constraint_for_output(&self) -> Result<CapsConstraint<'_>, G2gError>;
+    /// Dyn-safe mirror of [`MultiInputElement::input_domains`]. Default
+    /// [`DomainSet::ALL`].
+    fn input_domains(&self) -> DomainSet {
+        DomainSet::ALL
+    }
     /// Dyn-safe mirror of [`MultiInputElement::propose_allocation_for_input`].
     fn propose_allocation_for_input(&self, input: usize, caps: &Caps) -> Option<AllocationParams>;
     /// Dyn-safe mirror of [`MultiInputElement::propose_allocation_for_output`].
@@ -503,6 +508,10 @@ impl<T: MultiInputElement> DynMultiInputElement for T {
 
     fn caps_constraint_for_output(&self) -> Result<CapsConstraint<'_>, G2gError> {
         MultiInputElement::caps_constraint_for_output(self)
+    }
+
+    fn input_domains(&self) -> DomainSet {
+        MultiInputElement::input_domains(self)
     }
 
     fn propose_allocation_for_input(&self, input: usize, caps: &Caps) -> Option<AllocationParams> {
@@ -689,6 +698,10 @@ impl MultiInputElement for MuxRef<'_> {
         self.0.is_terminal()
     }
 
+    fn input_domains(&self) -> DomainSet {
+        self.0.input_domains()
+    }
+
     fn propose_allocation_for_input(&self, input: usize, caps: &Caps) -> Option<AllocationParams> {
         self.0.propose_allocation_for_input(input, caps)
     }
@@ -766,6 +779,10 @@ impl<'b> DynMultiInputElement for &'b mut (dyn DynMultiInputElement + 'b) {
 
     fn caps_constraint_for_output(&self) -> Result<CapsConstraint<'_>, G2gError> {
         (**self).caps_constraint_for_output()
+    }
+
+    fn input_domains(&self) -> DomainSet {
+        (**self).input_domains()
     }
 
     fn propose_allocation_for_input(&self, input: usize, caps: &Caps) -> Option<AllocationParams> {
