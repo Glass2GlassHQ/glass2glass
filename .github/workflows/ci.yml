@@ -161,7 +161,7 @@ jobs:
       - name: check g2g-plugins (linux feature set)
         run: >
           cargo check -p g2g-plugins --locked --all-targets --features
-          rtsp,onvif,srt,udp-egress,udp-ingress,rtmp,http-src,hls,dash,av1-encode,dav1d,rav1d,mjpeg,mjpeg-encode,opus,vorbis,alsa-sink,pulse-sink,alsa-src,pulse-src,wayland-sink,kms-sink,v4l2,analytics,vello-overlay,wgpu-sink,plugin-loader,declarative-yaml,script-rhai,webtransport,moqt
+          rtsp,onvif,srt,udp-egress,udp-ingress,rtmp,http-src,hls,dash,av1-encode,dav1d,rav1d,mjpeg,mjpeg-encode,png,webp,opus,vorbis,alsa-sink,pulse-sink,alsa-src,pulse-src,wayland-sink,kms-sink,v4l2,analytics,vello-overlay,wgpu-sink,plugin-loader,declarative-yaml,script-rhai,webtransport,moqt
       # Plugin loading v1 (same-toolchain dlopen) + v2 (frozen C ABI, M1010):
       # each test builds its fixture cdylib (v2 also compiles the plain-C
       # plugin with cc), so the dynamic boundary is exercised, not just checked.
@@ -216,6 +216,11 @@ jobs:
       # (needs nasm above) so the feature-gated C path cannot rot silently.
       - name: test g2g-plugins (mjpeg codecs)
         run: cargo test -p g2g-plugins --locked --features std,mozjpeg --test m152_mjpegdec --test m153_mjpegenc
+      # Still-image codecs (M1050): the pure-Rust PNG / WebP paths, the byte-stream
+      # reassembly, the header bounds, and the `filesrc ! decodebin` auto-plug.
+      # The ffmpeg comparison legs self-skip here and run in the conformance job.
+      - name: test g2g-plugins (still-image codecs)
+        run: cargo test -p g2g-plugins --locked --features png,webp,mjpeg-encode --test m1050_still_images
       # Compositor properties + launch registration (M876): the wgpu-gated
       # property table and launch tests are adapter-free, so they run here.
       - name: test g2g-plugins (compositor launch + properties)
@@ -550,6 +555,11 @@ jobs:
       # AV1 decode is bit-exact by spec, so that leg must agree sample for sample.
       - name: decode PSNR oracle (rav1ddec + mjpegdec vs ffmpeg)
         run: cargo test -p g2g-plugins --locked --features std,rav1d,mjpeg --test m1001_psnr_oracle -- --nocapture
+      # Still images both ways (M1050): ffmpeg decodes what pngenc / jpegenc write,
+      # and ffmpeg-authored PNG / libwebp WebP fixtures decode through pngdec /
+      # webpdec. PNG is lossless, so those legs must agree byte for byte.
+      - name: still-image oracles (pngenc / pngdec / webpdec vs ffmpeg)
+        run: cargo test -p g2g-plugins --locked --features png,webp,mjpeg-encode --test m1050_still_images -- --nocapture
       # MPEG-TS PSI metadata (M783/M872/M878): ffprobe reads the multi-program PAT
       # / PMT layout, the SDT service text (one entry per program) and the
       # per-stream ISO-639 languages g2g writes, and g2g demuxes an ffmpeg-authored

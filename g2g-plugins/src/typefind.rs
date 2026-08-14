@@ -8,7 +8,8 @@
 //! matching `Caps` ([`sniff_caps`]). Container magic yields a
 //! `Caps::ByteStream{encoding}`; a raw Annex-B H.264/H.265 elementary stream
 //! yields a `Caps::CompressedVideo{..}` (so `filesrc ! decodebin` types a bare
-//! `.264` / `.jsv` recording by content); a subtitle document yields a
+//! `.264` / `.jsv` recording by content), as does a still image (PNG / WebP, one
+//! frame per file); a subtitle document yields a
 //! `Caps::Text{format}` (so `filesrc ! subparse` types without an explicit
 //! source). The sniff functions themselves are pure `no_std`, no allocation.
 //!
@@ -46,8 +47,17 @@ const IVF_MAGIC: [u8; 4] = *b"DKIF";
 /// MPEG-2 `.vob`) opens on one, and packs recur throughout.
 const PS_PACK_MAGIC: [u8; 4] = [0x00, 0x00, 0x01, 0xBA];
 /// RIFF/WAVE: the `RIFF` container magic, with `WAVE` after the 4-byte size.
-const RIFF_MAGIC: [u8; 4] = *b"RIFF";
+pub(crate) const RIFF_MAGIC: [u8; 4] = *b"RIFF";
 const WAVE_MAGIC: [u8; 4] = *b"WAVE";
+/// WebP rides the same RIFF header as WAVE, tagged `WEBP` after the size.
+pub(crate) const WEBP_MAGIC: [u8; 4] = *b"WEBP";
+/// PNG signature (ISO/IEC 15948 5.2): the 8 bytes every PNG opens with.
+const PNG_MAGIC: [u8; 8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+/// Every RIFF tag is a four-character code, and the 4-byte size sits between the
+/// magic and the form type, so a complete RIFF header is three of them.
+const FOURCC_LEN: usize = 4;
+pub(crate) const RIFF_FORM_OFFSET: usize = FOURCC_LEN * 2;
+pub(crate) const RIFF_HEADER_LEN: usize = RIFF_FORM_OFFSET + FOURCC_LEN;
 
 /// Header bytes [`sniff_caps`] needs to decide: enough to confirm an MPEG-TS
 /// sync byte across several packets, the longest signature here.
@@ -66,10 +76,43 @@ pub fn sniff_caps(header: &[u8]) -> Option<Caps> {
     if header.starts_with(b"fLaC") {
         return Some(elementary_flac_caps());
     }
+    if let Some(codec) = sniff_still_image(header) {
+        return Some(still_image_caps(codec));
+    }
     if let Some(codec) = sniff_annexb_video(header) {
         return Some(elementary_video_caps(codec));
     }
     sniff_text(header).map(|format| Caps::Text { format })
+}
+
+/// The form type of a RIFF file (`WAVE`, `WEBP`, ...), or `None` when the header
+/// is not RIFF or is too short to carry one.
+pub(crate) fn riff_form(header: &[u8]) -> Option<[u8; 4]> {
+    if !header.starts_with(&RIFF_MAGIC) {
+        return None;
+    }
+    header
+        .get(RIFF_FORM_OFFSET..RIFF_HEADER_LEN)?
+        .try_into()
+        .ok()
+}
+
+/// Guess a still-image codec from a file's magic bytes, or `None` if it is not
+/// one we decode. A still image is a one-frame `CompressedVideo` stream here, so
+/// `filesrc location=x.png ! decodebin` plugs the matching image decoder.
+///
+/// JPEG is deliberately absent: `mjpegdec` takes one whole access unit per
+/// buffer, and nothing here reassembles a JPEG that a byte source split across
+/// reads, so typing a `.jpg` by content would plug a decoder that fails on any
+/// file past the source's chunk size. It needs a `jpegparse` first.
+fn sniff_still_image(header: &[u8]) -> Option<VideoCodec> {
+    if header.starts_with(&PNG_MAGIC) {
+        return Some(VideoCodec::Png);
+    }
+    if riff_form(header) == Some(WEBP_MAGIC) {
+        return Some(VideoCodec::WebP);
+    }
+    None
 }
 
 /// Caps for a native FLAC byte stream at the channels/rate placeholders
@@ -88,14 +131,28 @@ pub fn elementary_flac_caps() -> Caps {
 /// the SPS (M676). Shared by content sniffing and `FileSrc`'s extension typing so
 /// the two never drift.
 pub fn elementary_video_caps(codec: VideoCodec) -> Caps {
+    /// A coded video stream is at least one macroblock.
+    const MIN_DIM: u32 = 16;
+    placeholder_video_caps(codec, MIN_DIM)
+}
+
+/// Caps for a still image (PNG / WebP) at a fixable `Range` placeholder geometry,
+/// the same shape as [`elementary_video_caps`] but down to a single pixel.
+pub fn still_image_caps(codec: VideoCodec) -> Caps {
+    /// An icon is a legitimate still, where a coded video stream has a floor.
+    const MIN_DIM: u32 = 1;
+    placeholder_video_caps(codec, MIN_DIM)
+}
+
+fn placeholder_video_caps(codec: VideoCodec, min_dim: u32) -> Caps {
     Caps::CompressedVideo {
         codec,
         width: Dim::Range {
-            min: 16,
+            min: min_dim,
             max: 65535,
         },
         height: Dim::Range {
-            min: 16,
+            min: min_dim,
             max: 65535,
         },
         framerate: Rate::Range {
@@ -124,7 +181,7 @@ pub fn sniff(header: &[u8]) -> Option<ByteStreamEncoding> {
     if header.starts_with(&PS_PACK_MAGIC) {
         return Some(ByteStreamEncoding::MpegPs);
     }
-    if header.starts_with(&RIFF_MAGIC) && header.len() >= 12 && header[8..12] == WAVE_MAGIC {
+    if riff_form(header) == Some(WAVE_MAGIC) {
         return Some(ByteStreamEncoding::Wav);
     }
     // ISO-BMFF (MP4 / QuickTime): both progressive (`moov`-based) and fragmented
@@ -501,6 +558,57 @@ mod tests {
         data[0] = 0x47;
         // offset 188 is 0x00, so the stride check fails.
         assert_eq!(sniff(&data), None);
+    }
+
+    #[test]
+    fn detects_still_images_by_magic() {
+        assert_eq!(
+            sniff_still_image(&PNG_MAGIC),
+            Some(VideoCodec::Png),
+            "the 8-byte PNG signature types as PNG"
+        );
+        assert_eq!(
+            sniff_still_image(b"RIFF\x24\0\0\0WEBPVP8L"),
+            Some(VideoCodec::WebP)
+        );
+        // JPEG is not typed by content: see the note on `sniff_still_image`.
+        assert_eq!(sniff_still_image(b"\xff\xd8\xff\xe0\0\x10JFIF"), None);
+        // A RIFF file that is not WebP, a truncated RIFF header, and a PNG
+        // signature with one byte wrong are all misses.
+        assert_eq!(sniff_still_image(b"RIFF\0\0\0\0AVI "), None);
+        assert_eq!(sniff_still_image(b"RIFF\0\0\0"), None);
+        assert_eq!(
+            sniff_still_image(&[0x89, 0x50, 0x4E, 0x46, 0, 0, 0, 0]),
+            None
+        );
+        assert_eq!(sniff_still_image(&[]), None);
+    }
+
+    #[test]
+    fn sniff_caps_types_a_still_image_as_one_frame_video() {
+        // A PNG must reach the caps layer as CompressedVideo{Png} at a fixable
+        // placeholder geometry, or `filesrc ! decodebin` cannot plug pngdec.
+        let caps = sniff_caps(&PNG_MAGIC).expect("PNG types");
+        assert_eq!(caps, still_image_caps(VideoCodec::Png));
+        assert!(matches!(
+            caps,
+            Caps::CompressedVideo {
+                codec: VideoCodec::Png,
+                width: Dim::Range { min: 1, .. },
+                ..
+            }
+        ));
+        assert_eq!(
+            sniff_caps(b"RIFF\x24\0\0\0WEBPVP8 "),
+            Some(still_image_caps(VideoCodec::WebP))
+        );
+        // RIFF/WAVE still wins the shared RIFF header.
+        assert_eq!(
+            sniff_caps(b"RIFF\x24\0\0\0WAVEfmt "),
+            Some(Caps::ByteStream {
+                encoding: ByteStreamEncoding::Wav
+            })
+        );
     }
 
     #[test]

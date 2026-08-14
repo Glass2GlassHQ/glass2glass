@@ -103,6 +103,11 @@ overrides; a mislabeled file *without* `auto` is trusted by its extension.
 A progressive (whole-file) `.mp4` decodes through `decodebin` too
 (`filesrc location=X.mp4 ! decodebin ! …`, or explicitly `! qtdemux ! h264parse
 ! …`); the streaming fragmented form (CMAF, from HLS / DASH) stays on `fmp4demux`.
+A still image needs no hint either: `filesrc location=X.png ! decodebin` and the
+`.webp` equivalent type by magic and reach `pngdec` / `webpdec`, which decode to
+RGBA. `pngenc` writes one lossless PNG per frame; the single-image JPEG encoder is
+`mjpegenc` (gst's `jpegenc`), and there is no WebP encoder.
+
 There is also a `typefind` element for a byte stream that is not a file
 (`srtsrc ! typefind ! …`): it sniffs the flowing bytes and re-declares the caps
 mid-stream, so the source's guess is corrected before the data passes on. A

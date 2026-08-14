@@ -2695,6 +2695,36 @@ exactly once in order, so the demuxer sees the same byte stream a whole-response
 fetch delivers. Byte-range segments and a set `prebuffer-ms` (which owns emission
 order) stay on the whole-response path.
 
+**Still images** are the smallest case of a byte stream carrying coded frames, and
+they take the same shape as a container (M1050). A PNG or WebP file is
+`CompressedVideo{Png}` / `CompressedVideo{WebP}`, one access unit per file, so
+`pngdec` / `webpdec` are ordinary decoders that `decodebin` auto-plugs and a
+still is one frame of a video stream rather than a separate kind of media.
+`typefind::sniff_caps` types both by magic (the PNG signature, `RIFF`+`WEBP`),
+which is what a `.png` or `.webp` extension resolves through, since filesrc arms
+content sniffing on an extension it does not know. JPEG is deliberately not typed
+by content: `mjpegdec` takes one whole access unit per buffer, so a `.jpg` would
+plug a decoder that fails past the source's read size until a `jpegparse` exists.
+
+The decoders do not assume one file per buffer, because a byte source hands over
+read-sized chunks (`filesrc`) or whole files (`multifilesrc`). Both cases go
+through `stillimage::ImageAssembler`, which accumulates until the format's own
+self-describing length says an image is complete: a PNG's chunk list walked to the
+end of `IEND`, a WebP's RIFF size field. A stream that ends mid-image reports it at
+EOS rather than decoding a partial file, and the bytes held while waiting are
+bounded, so a plausible signature followed by silence cannot grow the buffer for
+as long as the stream flows. Geometry is the file's word, so it is checked against
+a per-side and a total-byte budget (`stillimage::rgba_byte_size`) before any
+buffer is sized: both decoder crates size their output from the header, and a
+100000x100000 `IHDR` or a 20000x20000 `VP8X` canvas would otherwise ask for tens
+of gigabytes from a file of a few dozen bytes. Output is always 8-bit RGBA
+(palette and sub-byte grayscale expanded, 16-bit narrowed to its high byte, alpha
+added where the file has none), announced by a `CapsChanged` before the first frame
+and on any change, since a sequence of stills can change size mid-stream. `pngenc`
+is the inverse: RGBA or RGB in, one lossless PNG per frame, `compression-level` as
+zlib's 0..=9. There is no WebP encoder: the only pure-Rust one does VP8L lossless
+alone, with none of `webpenc`'s quality / speed / preset knobs.
+
 ### 4.18 Subtitle Overlay (`textoverlay`)
 
 `textoverlay::TextOverlay` is the `textoverlay` / `subtitleoverlay`

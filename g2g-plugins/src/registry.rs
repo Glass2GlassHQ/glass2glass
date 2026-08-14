@@ -133,6 +133,10 @@ use crate::pipewiresink::PipeWireSink;
 use crate::pipewiresrc::PipeWireSrc;
 #[cfg(all(target_os = "linux", feature = "pipewire"))]
 use crate::pipewirevideosrc::PipeWireVideoSrc;
+#[cfg(feature = "png")]
+use crate::pngdec::PngDec;
+#[cfg(feature = "png")]
+use crate::pngenc::PngEnc;
 #[cfg(all(target_os = "linux", feature = "pulse-sink"))]
 use crate::pulsesink::PulseSink;
 #[cfg(all(target_os = "linux", feature = "pulse-src"))]
@@ -185,6 +189,8 @@ use crate::vorbisdec::VorbisDec;
 use crate::vpxenc::VpxEnc;
 #[cfg(all(target_os = "linux", feature = "wayland-sink"))]
 use crate::waylandsink::WaylandSink;
+#[cfg(feature = "webp")]
+use crate::webpdec::WebPDec;
 #[cfg(feature = "webrtc")]
 use crate::webrtcsink::WebRtcSink;
 #[cfg(feature = "webrtc")]
@@ -1030,6 +1036,17 @@ fn register_autoplug_candidates(reg: &mut Registry) {
     reg.register(ElementFactory::of::<MjpegDec>("mjpegdec", |_| {
         Box::new(MjpegDec::new())
     }));
+    // Still images (M1050): typefind types a `.png` / `.webp` file as a
+    // one-frame CompressedVideo stream, and these are what `decodebin` plugs
+    // behind it to reach raw RGBA.
+    #[cfg(feature = "png")]
+    reg.register(ElementFactory::of::<PngDec>("pngdec", |_| {
+        Box::new(PngDec::new())
+    }));
+    #[cfg(feature = "webp")]
+    reg.register(ElementFactory::of::<WebPDec>("webpdec", |_| {
+        Box::new(WebPDec::new())
+    }));
     // AV1 decode via libdav1d (software, System memory): an auto-plug candidate
     // for AV1 -> I420, alongside av1parse.
     #[cfg(feature = "dav1d")]
@@ -1404,6 +1421,9 @@ pub static FEATURE_GATED_ELEMENTS: &[FeatureGatedElement] = &{
         "vpxenc" => "vpx";
         "mjpegdec" => "mjpeg";
         "mjpegenc" => "mjpeg-encode";
+        "pngdec" => "png";
+        "pngenc" => "png";
+        "webpdec" => "webp";
         "dav1ddec" => "dav1d";
         "rav1ddec" => "rav1d";
         "vulkanvideodec" => "vulkan-video";
@@ -1565,6 +1585,18 @@ fn register_feature_gated(reg: &mut Registry) {
     #[cfg(feature = "mjpeg-encode")]
     reg.register_launch(LaunchFactory::of::<MjpegEnc>("mjpegenc", || {
         Box::new(MjpegEnc::new())
+    }));
+    #[cfg(feature = "png")]
+    reg.register_launch(LaunchFactory::of::<PngDec>("pngdec", || {
+        Box::new(PngDec::new())
+    }));
+    #[cfg(feature = "png")]
+    reg.register_launch(LaunchFactory::of::<PngEnc>("pngenc", || {
+        Box::new(PngEnc::new())
+    }));
+    #[cfg(feature = "webp")]
+    reg.register_launch(LaunchFactory::of::<WebPDec>("webpdec", || {
+        Box::new(WebPDec::new())
     }));
 
     // Network sources / sinks.

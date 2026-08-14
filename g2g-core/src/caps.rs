@@ -519,6 +519,8 @@ fn codec_gst_media_type(c: VideoCodec) -> &'static str {
         VideoCodec::Vp8 => "video/x-vp8",
         VideoCodec::Vp9 => "video/x-vp9",
         VideoCodec::Mjpeg => "image/jpeg",
+        VideoCodec::Png => "image/png",
+        VideoCodec::WebP => "image/webp",
         // GStreamer distinguishes MPEG versions with a `mpegversion` field on
         // `video/mpeg`; g2g's media-type string carries no fields, so MPEG-1/2
         // video and MPEG-4 Part 2 share it here the way mp2 and AAC share
@@ -972,6 +974,15 @@ pub enum VideoCodec {
     /// Motion JPEG: each frame an independent baseline JPEG. The near-universal
     /// fallback output of cheap UVC webcams, decoded by `MjpegDec`.
     Mjpeg,
+    /// PNG (ISO/IEC 15948): a lossless still image, one frame per buffer, decoded
+    /// by `PngDec` and produced by `PngEnc`. A still-image codec sits in
+    /// `CompressedVideo` for the same reason MJPEG does: the pipeline shape is
+    /// one compressed access unit in, one raw frame out.
+    Png,
+    /// WebP (RIFF `WEBP`, VP8 lossy or VP8L lossless bitstream): a still image,
+    /// one frame per buffer, decoded by `WebPDec`. Animated WebP is not handled;
+    /// the decoder takes the first frame only.
+    WebP,
     /// MPEG-4 Part 2 (Visual, ISO/IEC 14496-2): the DivX / Xvid family. A legacy
     /// codec with no hardware decode path on modern GPUs, decoded in software via
     /// `FfmpegVideoDec`. Carried in MP4 as an `mp4v` sample entry (esds
