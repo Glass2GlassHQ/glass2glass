@@ -428,6 +428,15 @@ impl MultiInputElement for WebRtcSessionSink {
         self.pads.input_count()
     }
 
+    fn metadata(&self) -> g2g_core::ElementMetadata {
+        g2g_core::ElementMetadata::new(
+            "WebRTC session sink",
+            "Sink/Network/WebRTC",
+            "Publishes a multi-track WHIP session (video simulcast layers + audio) via str0m",
+            "g2g",
+        )
+    }
+
     fn intercept_caps(&self, _input: usize, upstream_caps: &Caps) -> Result<Caps, G2gError> {
         match track_of(upstream_caps) {
             Some(_) => Ok(upstream_caps.clone()),
