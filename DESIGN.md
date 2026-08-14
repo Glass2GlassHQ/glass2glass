@@ -2164,6 +2164,36 @@ streams (global, then program, then track). The SDT describes the whole
 multiplex, so a demuxer posts one `BusMessage::Tag` per service it names, each
 carrying that service's `program_number`, whichever program the element routes.
 
+AV1 rides TS on the same private PES (stream_type 0x06) the KLV carriage uses,
+told apart by its `registration_descriptor` (M1049): AV1 has no `stream_type` of
+its own, so a 0x06 stream is AV1 only when its PMT entry names one. The mux writes
+the 'AV1G' format_identifier and the demux accepts that and the AOM spec's
+'AV01', because only 'AV1G' has a reader: GStreamer's `mpegtsmux` / `tsdemux`
+predate the spec and still call the mapping custom
+(`enable-custom-mappings=true`), while ffmpeg's muxer writes AV1 with no
+descriptor at all, a bare 0x06 not even its own demuxer identifies (it reports
+`bin_data`). Each PES payload is one temporal unit in the low-overhead OBU format,
+which `av1parse` and the AV1 decoders read unchanged, and `TsStream::Av1`
+(`tsdemux stream=av1`) selects it; the seek resume point reads the AV1 frame
+header rather than Annex-B start codes. Both directions are validated against
+GStreamer: a `svtav1enc ! mpegtsmux` stream demuxes to units ffmpeg's `obu`
+demuxer decodes at full size, and `tsdemux ! av1parse ! dav1ddec` decodes the g2g
+mux's output.
+
+The DVB EIT (PID 0x12) adds what a service is showing (M1049): the demuxers parse
+the present/following table (`table_id` 0x4E, sections 0 and 1) and post each
+service's `short_event_descriptor` name and text as a `BusMessage::Tag` scoped to
+its `program_number`, under the `event_name` / `event_text` and
+`next_event_name` / `next_event_text` keys (`Tag::Title` on that program is
+already the SDT service name). Unlike the PAT / PMT / SDT this table changes
+during the stream, so a section is read when its `version_number` differs from the
+one last accepted for the same `(service_id, section_number)`, and a table
+repeating itself costs nothing; unlike them a section routinely outgrows one
+packet, so sections reassemble across packets behind a `table_id` filter that
+keeps the far larger schedule tables sharing the PID out of the buffer. Event text
+goes through the same annex A decoder as the SDT names, which now also decodes the
+UTF-8 character table.
+
 The TS stack also carries KLV metadata (STANAG 4609, the airborne-ISR profile of
 MPEG-TS): `Caps::Klv` is the metadata elementary-stream caps (GStreamer
 `meta/x-klv`), each frame one SMPTE ST 336 key-length-value packet. On the mux
