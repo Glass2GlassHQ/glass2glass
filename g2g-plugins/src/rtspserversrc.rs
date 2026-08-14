@@ -460,7 +460,7 @@ impl SourceLoop for RtspServerSrc {
                 self.fps = value.as_uint().ok_or(PropError::Type)? as u32;
                 Ok(())
             }
-            "num-buffers" => crate::netprop::set_frame_limit(&mut self.frame_limit, &value),
+            "num-buffers" => crate::numbuffers::set_frame_limit(&mut self.frame_limit, &value),
             "max-sessions" => {
                 self.max_sessions = value.as_uint().ok_or(PropError::Type)?;
                 Ok(())
@@ -493,7 +493,7 @@ impl SourceLoop for RtspServerSrc {
             "width" => Some(PropValue::Uint(self.width as u64)),
             "height" => Some(PropValue::Uint(self.height as u64)),
             "framerate" => Some(PropValue::Uint(self.fps as u64)),
-            "num-buffers" => Some(crate::netprop::get_frame_limit(self.frame_limit)),
+            "num-buffers" => Some(crate::numbuffers::get_frame_limit(self.frame_limit)),
             "max-sessions" => Some(PropValue::Uint(self.max_sessions)),
             "timeout" => Some(PropValue::Uint(match self.session_timeout_ns {
                 u64::MAX => 0,

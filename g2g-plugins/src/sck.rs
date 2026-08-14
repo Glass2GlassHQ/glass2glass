@@ -328,10 +328,7 @@ impl SourceLoop for ScreenCaptureSrc {
             "cv-output" => {
                 self.cv_output = value.as_bool().ok_or(PropError::Type)?;
             }
-            "num-buffers" => {
-                let n = value.as_int().ok_or(PropError::Type)?;
-                self.target_buffers = if n < 0 { u64::MAX } else { n as u64 };
-            }
+            "num-buffers" => crate::numbuffers::set_num_buffers(&mut self.target_buffers, &value)?,
             _ => return Err(PropError::Unknown),
         }
         Ok(())
@@ -340,11 +337,7 @@ impl SourceLoop for ScreenCaptureSrc {
     fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
             "cv-output" => Some(PropValue::Bool(self.cv_output)),
-            "num-buffers" => Some(PropValue::Int(if self.target_buffers == u64::MAX {
-                -1
-            } else {
-                self.target_buffers as i64
-            })),
+            "num-buffers" => Some(crate::numbuffers::get_num_buffers(self.target_buffers)),
             _ => None,
         }
     }

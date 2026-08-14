@@ -448,10 +448,7 @@ impl SourceLoop for AAudioSrc {
                 }
                 self.req_channels = channels as u8;
             }
-            "num-buffers" => {
-                let n = value.as_int().ok_or(PropError::Type)?;
-                self.target_buffers = if n < 0 { u64::MAX } else { n as u64 };
-            }
+            "num-buffers" => crate::numbuffers::set_num_buffers(&mut self.target_buffers, &value)?,
             _ => return Err(PropError::Unknown),
         }
         Ok(())
@@ -461,11 +458,7 @@ impl SourceLoop for AAudioSrc {
         match name {
             "samplerate" => Some(PropValue::Uint(u64::from(self.req_sample_rate))),
             "channels" => Some(PropValue::Uint(u64::from(self.req_channels))),
-            "num-buffers" => Some(PropValue::Int(if self.target_buffers == u64::MAX {
-                -1
-            } else {
-                self.target_buffers as i64
-            })),
+            "num-buffers" => Some(crate::numbuffers::get_num_buffers(self.target_buffers)),
             _ => None,
         }
     }

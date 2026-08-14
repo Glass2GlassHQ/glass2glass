@@ -224,10 +224,7 @@ impl SourceLoop for AlsaSrc {
             "channels" => self.channels = value.as_uint().ok_or(PropError::Type)? as u8,
             "buffer-time" => self.buffer_us = value.as_uint().ok_or(PropError::Type)? as u32,
             "latency-time" => self.latency_us = value.as_uint().ok_or(PropError::Type)? as u32,
-            "num-buffers" => {
-                let n = value.as_int().ok_or(PropError::Type)?;
-                self.num_buffers = if n < 0 { u64::MAX } else { n as u64 };
-            }
+            "num-buffers" => crate::numbuffers::set_num_buffers(&mut self.num_buffers, &value)?,
             _ => return Err(PropError::Unknown),
         }
         Ok(())
@@ -241,11 +238,7 @@ impl SourceLoop for AlsaSrc {
             "channels" => Some(PropValue::Uint(u64::from(self.channels))),
             "buffer-time" => Some(PropValue::Uint(u64::from(self.buffer_us))),
             "latency-time" => Some(PropValue::Uint(u64::from(self.latency_us))),
-            "num-buffers" => Some(PropValue::Int(if self.num_buffers == u64::MAX {
-                -1
-            } else {
-                self.num_buffers as i64
-            })),
+            "num-buffers" => Some(crate::numbuffers::get_num_buffers(self.num_buffers)),
             _ => None,
         }
     }

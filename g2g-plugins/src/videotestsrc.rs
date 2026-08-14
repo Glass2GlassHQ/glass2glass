@@ -324,12 +324,7 @@ impl SourceLoop for VideoTestSrc {
                 self.pattern = pattern_from_str(s).ok_or(PropError::Value)?;
                 Ok(())
             }
-            "num-buffers" => {
-                let n = value.as_int().ok_or(PropError::Type)?;
-                // GStreamer convention: -1 means "no limit".
-                self.target_frames = if n < 0 { u64::MAX } else { n as u64 };
-                Ok(())
-            }
+            "num-buffers" => crate::numbuffers::set_num_buffers(&mut self.target_frames, &value),
             "width" => {
                 self.width = value.as_uint().ok_or(PropError::Type)? as u32;
                 Ok(())
@@ -354,11 +349,7 @@ impl SourceLoop for VideoTestSrc {
     fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
             "pattern" => Some(PropValue::Str(pattern_to_str(self.pattern).into())),
-            "num-buffers" => Some(PropValue::Int(if self.target_frames == u64::MAX {
-                -1
-            } else {
-                self.target_frames as i64
-            })),
+            "num-buffers" => Some(crate::numbuffers::get_num_buffers(self.target_frames)),
             "width" => Some(PropValue::Uint(self.width as u64)),
             "height" => Some(PropValue::Uint(self.height as u64)),
             // Report the integral fps numerator over /1 (Q16 stores fps*65536).

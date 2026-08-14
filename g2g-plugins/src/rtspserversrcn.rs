@@ -619,7 +619,7 @@ impl MultiOutputSource for RtspServerSrcN {
                 self.fps = value.as_uint().ok_or(PropError::Type)? as u32;
                 Ok(())
             }
-            "num-buffers" => crate::netprop::set_frame_limit(&mut self.frame_limit, &value),
+            "num-buffers" => crate::numbuffers::set_frame_limit(&mut self.frame_limit, &value),
             "max-sessions" => {
                 let n = value.as_uint().ok_or(PropError::Type)?;
                 if n == 0 || n > u16::MAX as u64 {
@@ -656,7 +656,7 @@ impl MultiOutputSource for RtspServerSrcN {
             "width" => Some(PropValue::Uint(self.width as u64)),
             "height" => Some(PropValue::Uint(self.height as u64)),
             "framerate" => Some(PropValue::Uint(self.fps as u64)),
-            "num-buffers" => Some(crate::netprop::get_frame_limit(self.frame_limit)),
+            "num-buffers" => Some(crate::numbuffers::get_frame_limit(self.frame_limit)),
             "max-sessions" => Some(PropValue::Uint(self.output_count() as u64)),
             "timeout" => Some(PropValue::Uint(match self.session_timeout_ns {
                 u64::MAX => 0,

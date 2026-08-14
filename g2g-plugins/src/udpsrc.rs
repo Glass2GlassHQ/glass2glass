@@ -392,7 +392,7 @@ impl SourceLoop for UdpSrc {
                 self.sdp = Some(raw.to_string());
                 Ok(())
             }
-            "num-buffers" => crate::netprop::set_frame_limit(&mut self.frame_limit, &value),
+            "num-buffers" => crate::numbuffers::set_frame_limit(&mut self.frame_limit, &value),
             _ => Err(PropError::Unknown),
         }
     }
@@ -409,7 +409,7 @@ impl SourceLoop for UdpSrc {
             "height" => Some(PropValue::Uint(self.height as u64)),
             "framerate" => Some(PropValue::Uint(self.fps as u64)),
             "sdp" => Some(PropValue::Str(self.sdp.clone().unwrap_or_default())),
-            "num-buffers" => Some(crate::netprop::get_frame_limit(self.frame_limit)),
+            "num-buffers" => Some(crate::numbuffers::get_frame_limit(self.frame_limit)),
             _ => None,
         }
     }

@@ -355,12 +355,7 @@ impl SourceLoop for FileSrc {
                 self.chunk_size = bytes.min(1 << 30) as usize;
                 Ok(())
             }
-            "num-buffers" => {
-                let n = value.as_int().ok_or(PropError::Type)?;
-                // GStreamer convention: -1 means "no limit".
-                self.target_chunks = if n < 0 { u64::MAX } else { n as u64 };
-                Ok(())
-            }
+            "num-buffers" => crate::numbuffers::set_num_buffers(&mut self.target_chunks, &value),
             _ => Err(PropError::Unknown),
         }
     }
@@ -369,11 +364,7 @@ impl SourceLoop for FileSrc {
         match name {
             "location" => Some(PropValue::Str(self.path.to_string_lossy().into_owned())),
             "blocksize" => Some(PropValue::Uint(self.chunk_size as u64)),
-            "num-buffers" => Some(PropValue::Int(if self.target_chunks == u64::MAX {
-                -1
-            } else {
-                self.target_chunks as i64
-            })),
+            "num-buffers" => Some(crate::numbuffers::get_num_buffers(self.target_chunks)),
             "bytestream-format" => {
                 if self.auto_detect {
                     Some(PropValue::Str("auto".into()))

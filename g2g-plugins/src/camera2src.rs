@@ -409,10 +409,7 @@ impl SourceLoop for Camera2Src {
             }
             "width" => self.width = positive_dimension(&value)?,
             "height" => self.height = positive_dimension(&value)?,
-            "num-buffers" => {
-                let n = value.as_int().ok_or(PropError::Type)?;
-                self.target_buffers = if n < 0 { u64::MAX } else { n as u64 };
-            }
+            "num-buffers" => crate::numbuffers::set_num_buffers(&mut self.target_buffers, &value)?,
             _ => return Err(PropError::Unknown),
         }
         Ok(())
@@ -423,11 +420,7 @@ impl SourceLoop for Camera2Src {
             "device" => Some(PropValue::Str(self.camera_id.clone().unwrap_or_default())),
             "width" => Some(PropValue::Uint(u64::from(self.width))),
             "height" => Some(PropValue::Uint(u64::from(self.height))),
-            "num-buffers" => Some(PropValue::Int(if self.target_buffers == u64::MAX {
-                -1
-            } else {
-                self.target_buffers as i64
-            })),
+            "num-buffers" => Some(crate::numbuffers::get_num_buffers(self.target_buffers)),
             _ => None,
         }
     }

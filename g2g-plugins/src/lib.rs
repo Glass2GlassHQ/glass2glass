@@ -81,6 +81,8 @@ pub mod vp9parse;
 mod mathf;
 mod paint;
 mod xmlutil;
+// Shared gst `num-buffers` property conversion used by the source elements.
+mod numbuffers;
 
 // Software RGBA8 compositor (fan-in pixel mixer): PiP / grids / overlays.
 pub mod compositor;
