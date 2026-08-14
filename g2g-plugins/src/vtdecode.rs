@@ -289,8 +289,8 @@ impl VtDecode {
         // SPS(7)/PPS(8)/AUD(9); H.265 excludes VPS(32)/SPS(33)/PPS(34)/AUD(35).
         let codec = self.codec;
         let avcc = to_avcc(au, |nal| match codec {
-            VideoCodec::H265 => !matches!(h265_nal_type(nal), Some(32 | 33 | 34 | 35)),
-            _ => !matches!(h264_nal_type(nal), Some(7 | 8 | 9)),
+            VideoCodec::H265 => !matches!(h265_nal_type(nal), Some(32..=35)),
+            _ => !matches!(h264_nal_type(nal), Some(7..=9)),
         });
         if avcc.is_empty() {
             return Ok(()); // parameter-set-only access unit, nothing to decode
