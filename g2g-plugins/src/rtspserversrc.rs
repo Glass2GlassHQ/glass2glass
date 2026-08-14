@@ -82,8 +82,9 @@ pub struct RtspServerSrc {
     width: u32,
     height: u32,
     fps: u32,
-    /// 0 means run until the connection drops / downstream shuts down; otherwise
-    /// stop after this many access units and emit EOS (the test / bounded path).
+    /// `u64::MAX` means run until the connection drops / downstream shuts down;
+    /// otherwise stop after this many access units and emit EOS (the test /
+    /// bounded path).
     frame_limit: u64,
     /// Receive-path tuning (jitter reorder + optional RTCP/NACK), shared with
     /// [`UdpSrc`](crate::udpsrc) via [`crate::rtprecv`]. RTCP defaults off: a
@@ -116,7 +117,7 @@ impl RtspServerSrc {
             width: DEFAULT_WIDTH,
             height: DEFAULT_HEIGHT,
             fps: DEFAULT_FPS,
-            frame_limit: 0,
+            frame_limit: u64::MAX,
             recv: RtpRecvConfig {
                 jitter: JitterConfig::default(),
                 // Off until a separate RTCP port / rtcp-mux is negotiated.
@@ -166,8 +167,9 @@ impl RtspServerSrc {
         self
     }
 
-    /// Stop after `n` access units and emit EOS. Without this the source runs
-    /// until the publisher disconnects (RTP has no in-band end marker).
+    /// Stop after `n` access units and emit EOS (0 emits EOS without
+    /// listening). Without this the source runs until the publisher disconnects
+    /// (RTP has no in-band end marker).
     pub fn with_frame_limit(mut self, n: u64) -> Self {
         self.frame_limit = n;
         self
@@ -460,7 +462,7 @@ impl SourceLoop for RtspServerSrc {
                 self.fps = value.as_uint().ok_or(PropError::Type)? as u32;
                 Ok(())
             }
-            "num-buffers" => crate::numbuffers::set_frame_limit(&mut self.frame_limit, &value),
+            "num-buffers" => crate::numbuffers::set_num_buffers(&mut self.frame_limit, &value),
             "max-sessions" => {
                 self.max_sessions = value.as_uint().ok_or(PropError::Type)?;
                 Ok(())
@@ -493,7 +495,7 @@ impl SourceLoop for RtspServerSrc {
             "width" => Some(PropValue::Uint(self.width as u64)),
             "height" => Some(PropValue::Uint(self.height as u64)),
             "framerate" => Some(PropValue::Uint(self.fps as u64)),
-            "num-buffers" => Some(crate::numbuffers::get_frame_limit(self.frame_limit)),
+            "num-buffers" => Some(crate::numbuffers::get_num_buffers(self.frame_limit)),
             "max-sessions" => Some(PropValue::Uint(self.max_sessions)),
             "timeout" => Some(PropValue::Uint(match self.session_timeout_ns {
                 u64::MAX => 0,
@@ -522,6 +524,9 @@ impl SourceLoop for RtspServerSrc {
         Box::pin(async move {
             if !self.configured {
                 return Err(G2gError::NotConfigured);
+            }
+            if crate::numbuffers::finished_at_zero_limit(self.frame_limit, out).await? {
+                return Ok(0);
             }
             let std_listener = self.listener.take().ok_or(G2gError::NotConfigured)?;
             std_listener.set_nonblocking(true).map_err(io_err)?;
@@ -568,10 +573,7 @@ impl SourceLoop for RtspServerSrc {
                     // Remaining budget, so `num-buffers` counts across sessions and
                     // the sequence numbering continues over a re-publish.
                     let seq_base = tap.frames();
-                    let remaining = match frame_limit {
-                        0 => 0,
-                        limit => limit.saturating_sub(seq_base),
-                    };
+                    let remaining = frame_limit.saturating_sub(seq_base);
                     let end = match session {
                         // UDP: the jitter + (optional) RTCP + depayload path shared
                         // with UdpSrc, while the control channel is watched for the

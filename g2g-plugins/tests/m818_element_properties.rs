@@ -62,11 +62,12 @@ fn rtspserversrc_full_property_set() {
     assert_eq!(s.get_property("width"), Some(PropValue::Uint(1920)));
     assert_eq!(s.get_property("height"), Some(PropValue::Uint(1080)));
     assert_eq!(s.get_property("framerate"), Some(PropValue::Uint(60)));
-    // num-buffers: -1 = unlimited (internal 0), 0 rejected.
+    // num-buffers: gst basesrc's -1 = unlimited, 0 = emit nothing.
     assert_eq!(s.get_property("num-buffers"), Some(PropValue::Int(-1)));
     s.set_property("num-buffers", PropValue::Int(25)).unwrap();
     assert_eq!(s.get_property("num-buffers"), Some(PropValue::Int(25)));
-    assert!(s.set_property("num-buffers", PropValue::Int(0)).is_err());
+    s.set_property("num-buffers", PropValue::Int(0)).unwrap();
+    assert_eq!(s.get_property("num-buffers"), Some(PropValue::Int(0)));
     s.set_property("num-buffers", PropValue::Int(-1)).unwrap();
     assert_eq!(s.get_property("num-buffers"), Some(PropValue::Int(-1)));
     // Receive-path tuning (shared dispatch with UdpSrc).
@@ -282,7 +283,8 @@ fn srtsrc_num_buffers() {
     assert_eq!(s.get_property("num-buffers"), Some(PropValue::Int(-1)));
     s.set_property("num-buffers", PropValue::Int(10)).unwrap();
     assert_eq!(s.get_property("num-buffers"), Some(PropValue::Int(10)));
-    assert!(s.set_property("num-buffers", PropValue::Int(0)).is_err());
+    s.set_property("num-buffers", PropValue::Int(0)).unwrap();
+    assert_eq!(s.get_property("num-buffers"), Some(PropValue::Int(0)));
 }
 
 #[cfg(feature = "std")]

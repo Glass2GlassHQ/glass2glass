@@ -61,8 +61,8 @@ pub struct UdpSrc {
     width: u32,
     height: u32,
     fps: u32,
-    /// 0 means run until error / downstream shutdown; otherwise stop after this
-    /// many access units and emit EOS (the test / bounded path).
+    /// `u64::MAX` means run until error / downstream shutdown; otherwise stop
+    /// after this many access units and emit EOS (the test / bounded path).
     frame_limit: u64,
     /// Receive-path tuning (jitter reorder, RTCP RR/NACK, RTX, ULPFEC/FlexFEC),
     /// the shared-path config handed to [`crate::rtprecv::receive_rtp_h264`].
@@ -85,7 +85,7 @@ impl UdpSrc {
             width: DEFAULT_WIDTH,
             height: DEFAULT_HEIGHT,
             fps: DEFAULT_FPS,
-            frame_limit: 0,
+            frame_limit: u64::MAX,
             recv: RtpRecvConfig::default(),
             sdp: None,
             std_socket: None,
@@ -158,8 +158,9 @@ impl UdpSrc {
         true
     }
 
-    /// Stop after `n` access units and emit EOS. Without this the source runs
-    /// until a socket error (RTP has no in-band end marker).
+    /// Stop after `n` access units and emit EOS (0 emits EOS without
+    /// receiving). Without this the source runs until a socket error (RTP has
+    /// no in-band end marker).
     pub fn with_frame_limit(mut self, n: u64) -> Self {
         self.frame_limit = n;
         self
@@ -392,7 +393,7 @@ impl SourceLoop for UdpSrc {
                 self.sdp = Some(raw.to_string());
                 Ok(())
             }
-            "num-buffers" => crate::numbuffers::set_frame_limit(&mut self.frame_limit, &value),
+            "num-buffers" => crate::numbuffers::set_num_buffers(&mut self.frame_limit, &value),
             _ => Err(PropError::Unknown),
         }
     }
@@ -409,7 +410,7 @@ impl SourceLoop for UdpSrc {
             "height" => Some(PropValue::Uint(self.height as u64)),
             "framerate" => Some(PropValue::Uint(self.fps as u64)),
             "sdp" => Some(PropValue::Str(self.sdp.clone().unwrap_or_default())),
-            "num-buffers" => Some(crate::numbuffers::get_frame_limit(self.frame_limit)),
+            "num-buffers" => Some(crate::numbuffers::get_num_buffers(self.frame_limit)),
             _ => None,
         }
     }

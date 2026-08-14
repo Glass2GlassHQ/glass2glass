@@ -6,7 +6,7 @@
 //! once rather than being copied into every element's `set_property` /
 //! `get_property`.
 
-use g2g_core::property::{PropError, PropValue};
+use g2g_core::{PropError, PropValue};
 
 /// Set a `u64` buffer-limit field from a gst-style `num-buffers` value:
 /// negative selects unlimited (`u64::MAX`), n >= 0 a bounded run (0 emits
@@ -22,29 +22,23 @@ pub(crate) fn get_num_buffers(limit: u64) -> PropValue {
     PropValue::Int(if limit == u64::MAX { -1 } else { limit as i64 })
 }
 
-/// Set a `frame_limit: u64` field (0 = unlimited) from a gst-style
-/// `num-buffers` value: -1 selects unlimited, positive n a bounded run. 0 is
-/// rejected, since the internal sentinel cannot express "emit none".
-#[cfg(any(feature = "rtsp-server", feature = "srt", feature = "udp-ingress"))]
-pub(crate) fn set_frame_limit(limit: &mut u64, value: &PropValue) -> Result<(), PropError> {
-    match value.as_int().ok_or(PropError::Type)? {
-        n if n < 0 => {
-            *limit = 0;
-            Ok(())
-        }
-        0 => Err(PropError::Value),
-        n => {
-            *limit = n as u64;
-            Ok(())
-        }
+/// A zero limit means "emit nothing, EOS at once", so a source checks this
+/// first and never opens its device. Pushes the EOS and reports `true` when the
+/// run is already over.
+#[cfg(any(
+    feature = "rtsp-server",
+    feature = "srt",
+    feature = "udp-ingress",
+    feature = "v4l2",
+    feature = "mf-video-src",
+))]
+pub(crate) async fn finished_at_zero_limit(
+    limit: u64,
+    out: &mut dyn g2g_core::OutputSink,
+) -> Result<bool, g2g_core::G2gError> {
+    if limit != 0 {
+        return Ok(false);
     }
-}
-
-/// The read half of [`set_frame_limit`]: unlimited reads back as -1.
-#[cfg(any(feature = "rtsp-server", feature = "srt", feature = "udp-ingress"))]
-pub(crate) fn get_frame_limit(limit: u64) -> PropValue {
-    PropValue::Int(match limit {
-        0 => -1,
-        n => n as i64,
-    })
+    out.push(g2g_core::PipelinePacket::Eos).await?;
+    Ok(true)
 }

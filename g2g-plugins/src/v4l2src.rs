@@ -552,8 +552,8 @@ pub struct V4l2Src {
     req_height: u32,
     req_fps: u32,
     io_mode: IoMode,
-    /// 0 means run until error or downstream shutdown; otherwise stop after
-    /// this many frames and emit EOS (the test / bounded-capture path).
+    /// `u64::MAX` means run until error or downstream shutdown; otherwise stop
+    /// after this many frames and emit EOS (the test / bounded-capture path).
     frame_limit: u64,
     /// Every mode the device confirmed during the probe, in advertised
     /// preference order. Cached: negotiation runs more than once, and each
@@ -577,7 +577,7 @@ impl V4l2Src {
             req_height: DEFAULT_HEIGHT,
             req_fps: DEFAULT_FPS,
             io_mode: IoMode::default(),
-            frame_limit: 0,
+            frame_limit: u64::MAX,
             modes: Vec::new(),
             chosen: None,
             configured: false,
@@ -603,8 +603,9 @@ impl V4l2Src {
         self
     }
 
-    /// Stop after `n` frames and emit EOS. Without this the source runs until
-    /// an error or until downstream drops (no EOS on its own).
+    /// Stop after `n` frames and emit EOS (0 emits EOS without capturing).
+    /// Without this the source runs until an error or until downstream drops
+    /// (no EOS on its own).
     pub fn with_frame_limit(mut self, n: u64) -> Self {
         self.frame_limit = n;
         self
@@ -878,11 +879,7 @@ impl SourceLoop for V4l2Src {
                 self.req_fps = value.as_uint().ok_or(PropError::Type)? as u32;
                 Ok(())
             }
-            "num-buffers" => {
-                let n = value.as_int().ok_or(PropError::Type)?;
-                self.frame_limit = if n < 0 { 0 } else { n as u64 };
-                Ok(())
-            }
+            "num-buffers" => crate::numbuffers::set_num_buffers(&mut self.frame_limit, &value),
             "io-mode" => {
                 let name = value.as_str().ok_or(PropError::Type)?;
                 // A V4L2 method this element does not implement is refused, not
@@ -912,11 +909,7 @@ impl SourceLoop for V4l2Src {
             "width" => Some(PropValue::Uint(self.req_width as u64)),
             "height" => Some(PropValue::Uint(self.req_height as u64)),
             "framerate" => Some(PropValue::Uint(self.req_fps as u64)),
-            "num-buffers" => Some(PropValue::Int(if self.frame_limit == 0 {
-                -1
-            } else {
-                self.frame_limit as i64
-            })),
+            "num-buffers" => Some(crate::numbuffers::get_num_buffers(self.frame_limit)),
             "io-mode" => Some(PropValue::Str(self.io_mode.name().to_string())),
             _ => None,
         }
@@ -953,8 +946,11 @@ impl SourceLoop for V4l2Src {
                 return Err(G2gError::NotConfigured);
             }
             let mode = self.chosen.ok_or(G2gError::NotConfigured)?;
-            let (w, h, fps) = (mode.width, mode.height, mode.fps);
             let limit = self.frame_limit;
+            if crate::numbuffers::finished_at_zero_limit(limit, out).await? {
+                return Ok(0);
+            }
+            let (w, h, fps) = (mode.width, mode.height, mode.fps);
             let device = self.device.clone();
             // A fixed-size format's short frame (a driver hiccup) cannot be
             // unpacked, so it is dropped. MJPEG's length varies per frame, so
@@ -1068,7 +1064,7 @@ impl SourceLoop for V4l2Src {
                 seq += 1;
                 // The limit counts emitted frames, so a skipped short buffer
                 // is captured again rather than lost from the count.
-                if limit > 0 && seq >= limit {
+                if seq >= limit {
                     break;
                 }
             }

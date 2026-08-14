@@ -207,6 +207,7 @@ pub(crate) fn get_recv_prop(cfg: &RtpRecvConfig, name: &str) -> Option<PropValue
 /// tracking the RTP-timestamp rebase (`ts_base`, so downstream PTS starts near
 /// zero) and the emitted sequence counter. Returns `Ok(true)` once `frame_limit`
 /// access units have been emitted (after pushing `Eos`), so the caller stops.
+/// `u64::MAX` never reaches the limit, which is how "run forever" is spelled.
 /// Shared by the UDP ([`receive_rtp_h264`]) and TCP-interleaved
 /// ([`crate::rtspserversrc`]) ingest paths, which differ only in how they obtain
 /// each RTP packet.
@@ -239,7 +240,7 @@ pub(crate) async fn push_access_unit(
     };
     out.push(PipelinePacket::DataFrame(frame)).await?;
     *seq += 1;
-    if frame_limit != 0 && seq.saturating_sub(seq_base) >= frame_limit {
+    if seq.saturating_sub(seq_base) >= frame_limit {
         out.push(PipelinePacket::Eos).await?;
         return Ok(true);
     }
@@ -247,10 +248,10 @@ pub(crate) async fn push_access_unit(
 }
 
 /// Run the RTP H.264 receive loop on `socket` until `frame_limit` access units
-/// have been emitted (0 = run until a socket error or downstream shutdown),
-/// pushing each completed access unit downstream and emitting `Eos` on the
-/// bounded path. `seq_base` is the sequence number the first emitted frame
-/// carries. Returns the number of access units pushed.
+/// have been emitted (`u64::MAX` = run until a socket error or downstream
+/// shutdown, 0 = emit nothing), pushing each completed access unit downstream
+/// and emitting `Eos` on the bounded path. `seq_base` is the sequence number the
+/// first emitted frame carries. Returns the number of access units pushed.
 pub async fn receive_rtp_h264(
     socket: &tokio::net::UdpSocket,
     cfg: &RtpRecvConfig,
@@ -258,6 +259,9 @@ pub async fn receive_rtp_h264(
     seq_base: u64,
     out: &mut dyn OutputSink,
 ) -> Result<u64, G2gError> {
+    if crate::numbuffers::finished_at_zero_limit(frame_limit, out).await? {
+        return Ok(0);
+    }
     let mut depay = RtpH264Depayloader::new();
     let mut jitter = RtpJitterBuffer::new(cfg.jitter);
     let mut stats = ReceptionStats::new(0, RTP_CLOCK_HZ as u32);

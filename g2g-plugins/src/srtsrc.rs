@@ -73,7 +73,7 @@ impl SrtSrc {
         Self {
             bind,
             latency_ms: DEFAULT_LATENCY_MS,
-            frame_limit: 0,
+            frame_limit: u64::MAX,
             passphrase: None,
             std_socket: None,
             configured: false,
@@ -91,7 +91,8 @@ impl SrtSrc {
         })
     }
 
-    /// Stop after `n` payloads and emit EOS (the bounded / test path).
+    /// Stop after `n` payloads and emit EOS (the bounded / test path). 0 emits
+    /// EOS without receiving.
     pub fn with_frame_limit(mut self, n: u64) -> Self {
         self.frame_limit = n;
         self
@@ -212,7 +213,7 @@ impl SourceLoop for SrtSrc {
                 self.passphrase = (!s.is_empty()).then(|| s.to_string());
                 Ok(())
             }
-            "num-buffers" => crate::numbuffers::set_frame_limit(&mut self.frame_limit, &value),
+            "num-buffers" => crate::numbuffers::set_num_buffers(&mut self.frame_limit, &value),
             _ => Err(PropError::Unknown),
         }
     }
@@ -224,7 +225,7 @@ impl SourceLoop for SrtSrc {
         match name {
             "latency" => Some(PropValue::Uint(self.latency_ms as u64)),
             "passphrase" => Some(PropValue::Str(self.passphrase.clone().unwrap_or_default())),
-            "num-buffers" => Some(crate::numbuffers::get_frame_limit(self.frame_limit)),
+            "num-buffers" => Some(crate::numbuffers::get_num_buffers(self.frame_limit)),
             _ => None,
         }
     }
@@ -233,6 +234,9 @@ impl SourceLoop for SrtSrc {
         Box::pin(async move {
             if !self.configured {
                 return Err(G2gError::NotConfigured);
+            }
+            if crate::numbuffers::finished_at_zero_limit(self.frame_limit, out).await? {
+                return Ok(0);
             }
             let std = self.std_socket.take().ok_or(G2gError::NotConfigured)?;
             std.set_nonblocking(true).map_err(io_err)?;
@@ -334,7 +338,7 @@ impl SourceLoop for SrtSrc {
                     out.push(PipelinePacket::DataFrame(ts_frame(payload, emitted)))
                         .await?;
                     emitted += 1;
-                    if limit != 0 && emitted >= limit {
+                    if emitted >= limit {
                         out.push(PipelinePacket::Eos).await?;
                         return Ok(emitted);
                     }
