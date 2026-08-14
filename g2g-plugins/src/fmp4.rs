@@ -8,9 +8,12 @@
 //! payload (what `Mp4Mux` writes and CMAF single-track files share). Anything
 //! else fails loud rather than emitting a corrupt bitstream.
 
+use alloc::string::String;
 use alloc::vec::Vec;
 
-use g2g_core::{AudioFormat, ClosedCaptionFormat, G2gError, TagList, TextFormat, VideoCodec};
+use g2g_core::{
+    AudioFormat, Chapter, ClosedCaptionFormat, G2gError, TagList, TextFormat, VideoCodec,
+};
 
 use crate::cea::{parse_cdp, write_cc_data, CcTriple};
 use crate::cenc::{
@@ -19,7 +22,8 @@ use crate::cenc::{
 #[cfg(any(test, feature = "dash"))]
 use crate::mp4box::next_box_len;
 use crate::mp4box::{
-    be32, be64, boxes, boxes_at, find_box, find_path, parse_esds, parse_esds_video, parse_ilst_tags,
+    be32, be64, boxes, boxes_at, find_box, find_path, parse_chpl, parse_esds, parse_esds_video,
+    parse_ilst_tags,
 };
 use crate::opusparse::{opus_head_from_dops, parse_opus_head};
 
@@ -1208,6 +1212,112 @@ pub(crate) fn parse_progressive_multi(
         }
     }
     Ok(out)
+}
+
+/// Cap on the chapters a QuickTime chapter track yields. Its sample count is
+/// the file's claim, and each sample costs a whole [`Chapter`], so the walk
+/// stops rather than sizing the list from the file. (The `chpl` path needs no
+/// cap: its count field is one byte.)
+const MAX_CHAPTER_TRACK_CHAPTERS: usize = 4096;
+
+/// The chapters a progressive MP4 declares (M1046): the QuickTime chapter text
+/// track when the file has one and `data` holds its samples, else the Nero
+/// `chpl` list in `moov/udta`. The text track is preferred because it carries a
+/// duration per chapter, which `chpl` cannot express; a `moov`-first (faststart)
+/// file being read before its `mdat` lands falls back to `chpl`.
+pub(crate) fn parse_chapters(data: &[u8]) -> Vec<Chapter> {
+    let Some(moov) = find_box(data, b"moov") else {
+        return Vec::new();
+    };
+    let from_track = chapter_track_chapters(data, moov);
+    if !from_track.is_empty() {
+        return from_track;
+    }
+    parse_chpl(moov)
+}
+
+/// The chapters of the QuickTime chapter text track, empty when the file has
+/// none. A media `trak` points at it with a `tref/chap` naming its `track_ID`;
+/// that track's samples are the chapter titles, timed by its own sample table,
+/// so one sample is one chapter running for that sample's duration.
+fn chapter_track_chapters(data: &[u8], moov: &[u8]) -> Vec<Chapter> {
+    let chapter_track_id = boxes(moov)
+        .filter(|(kind, _)| *kind == b"trak")
+        // A `tref/chap` may name several tracks; the first is the chapter track.
+        .find_map(|(_, trak)| be32(find_path(trak, &[b"tref", b"chap"])?, 0).ok());
+    let Some(chapter_track_id) = chapter_track_id else {
+        return Vec::new();
+    };
+    let Some(trak) = find_trak_by_id(moov, chapter_track_id) else {
+        return Vec::new();
+    };
+    let Some(mdia) = find_box(trak, b"mdia") else {
+        return Vec::new();
+    };
+    // mdhd v0: timescale at payload offset 12, like every other track here.
+    let Some(mdhd) = find_box(mdia, b"mdhd").filter(|m| m.first() == Some(&0)) else {
+        return Vec::new();
+    };
+    let Ok(timescale) = be32(mdhd, 12) else {
+        return Vec::new();
+    };
+    if timescale == 0 {
+        return Vec::new();
+    }
+    let Some(stbl) = find_path(mdia, &[b"minf", b"stbl"]) else {
+        return Vec::new();
+    };
+    let Ok(samples) = parse_progressive_track(data, stbl, timescale, SampleFraming::PassThrough)
+    else {
+        return Vec::new();
+    };
+    samples
+        .iter()
+        .take(MAX_CHAPTER_TRACK_CHAPTERS)
+        .filter_map(|sample| {
+            let title = chapter_sample_title(&sample.annexb)?;
+            Some(Chapter {
+                start_ns: sample.pts_ns,
+                end_ns: Some(sample.pts_ns.saturating_add(sample.duration_ns)),
+                title,
+                language: None,
+                sub_chapters: Vec::new(),
+            })
+        })
+        .collect()
+}
+
+/// The title out of one QuickTime chapter-track sample: a big-endian `u16` byte
+/// length, the text, then trailing atoms (an `encd` text encoding) this ignores.
+/// The text is UTF-8 unless it opens with a byte-order mark, which is how
+/// QuickTime and iTunes store a non-ASCII title.
+fn chapter_sample_title(sample: &[u8]) -> Option<String> {
+    let length = u16::from_be_bytes(sample.get(0..2)?.try_into().ok()?) as usize;
+    let text = sample.get(2..2 + length)?;
+    match text {
+        [0xFE, 0xFF, rest @ ..] => decode_utf16(rest, true),
+        [0xFF, 0xFE, rest @ ..] => decode_utf16(rest, false),
+        _ => core::str::from_utf8(text).ok().map(String::from),
+    }
+}
+
+/// Decode UTF-16 code units of the given endianness, or `None` for an odd byte
+/// count or an unpaired surrogate.
+fn decode_utf16(bytes: &[u8], big_endian: bool) -> Option<String> {
+    if !bytes.len().is_multiple_of(2) {
+        return None;
+    }
+    let units = bytes.chunks_exact(2).map(|pair| {
+        let pair = [pair[0], pair[1]];
+        if big_endian {
+            u16::from_be_bytes(pair)
+        } else {
+            u16::from_le_bytes(pair)
+        }
+    });
+    char::decode_utf16(units)
+        .collect::<Result<String, _>>()
+        .ok()
 }
 
 /// The `trak` box (payload) in `moov` whose `tkhd` carries `track_id`, or `None`.

@@ -118,8 +118,8 @@ pub struct MkvDemux {
     emitted: u64,
     last_caps: Option<Caps>,
     bus: Option<BusHandle>,
-    /// Bus posting of the container's whole-stream and per-track tags, once each.
-    tags: TagPoster,
+    /// Bus posting of the container's tags and chapters, once each.
+    metadata: MetadataPoster,
     /// Set once the `StreamCollection` has been announced (M376), so the demuxer
     /// posts the available-streams list once, when the `Tracks` element parses.
     collection_posted: bool,
@@ -161,7 +161,7 @@ impl MkvDemux {
             emitted: 0,
             last_caps: None,
             bus: None,
-            tags: TagPoster::default(),
+            metadata: MetadataPoster::default(),
             collection_posted: false,
             stream_select: None,
             seek: DemuxSeek::default(),
@@ -416,7 +416,8 @@ impl MkvDemux {
     /// [`BusMessage::Tag`], `Targets`-scoped ones as a [`BusMessage::StreamTag`].
     /// A no-op without a bus attached or when nothing new has been parsed.
     fn post_tags(&mut self) {
-        self.tags.post(&self.demux, self.bus.as_ref());
+        self.metadata.post(&self.demux, self.bus.as_ref());
+        self.metadata.post_chapters(&self.demux, self.bus.as_ref());
     }
 
     /// Announce every elementary stream the container declares as a
@@ -1063,16 +1064,17 @@ fn stream_id(number: u64) -> alloc::string::String {
     alloc::format!("{STREAM_ID_PREFIX}{number}")
 }
 
-/// Posts a container's tags on the bus once each: the whole-stream ones as
-/// [`BusMessage::Tag`], the per-track ones as [`BusMessage::StreamTag`] on that
-/// track's stream id. A track's metadata reaches the file two ways, its
-/// `TrackEntry` (`Name` / `Language`, M788) and a `Targets`-scoped `Tag` (M787);
-/// both merge into one message per stream, so the application sees one view
-/// however the file stored it. Shared by the single- and multi-output demuxers,
-/// which both parse with one [`MatroskaDemuxer`]; the counts survive a
-/// mid-segment seek (same file, so nothing re-posts).
+/// Posts a container's out-of-band metadata on the bus once each: the
+/// whole-stream tags as [`BusMessage::Tag`], the per-track ones as
+/// [`BusMessage::StreamTag`] on that track's stream id, and the `Chapters`
+/// table of contents as [`BusMessage::Chapters`] (M1046). A track's metadata
+/// reaches the file two ways, its `TrackEntry` (`Name` / `Language`, M788) and a
+/// `Targets`-scoped `Tag` (M787); both merge into one message per stream, so the
+/// application sees one view however the file stored it. Shared by the single-
+/// and multi-output demuxers, which both parse with one [`MatroskaDemuxer`]; the
+/// counts survive a mid-segment seek (same file, so nothing re-posts).
 #[derive(Debug, Default)]
-struct TagPoster {
+struct MetadataPoster {
     /// Tags already posted, so a `Tags` element trailing the `Info` `Title` posts
     /// only its own entries.
     posted: usize,
@@ -1080,9 +1082,11 @@ struct TagPoster {
     entry_posted: usize,
     /// Track-scoped tag groups already posted (one per scoped `Tag` element).
     track_posted: usize,
+    /// Chapters already posted, so a second call re-posts nothing.
+    chapters_posted: usize,
 }
 
-impl TagPoster {
+impl MetadataPoster {
     /// Post whatever the demuxer has parsed since the last call; a no-op when
     /// nothing is new.
     fn post(&mut self, demux: &MatroskaDemuxer, bus: Option<&BusHandle>) {
@@ -1126,6 +1130,21 @@ impl TagPoster {
             for (stream_id, tags) in fresh {
                 bus.try_post(BusMessage::StreamTag { stream_id, tags });
             }
+        }
+    }
+
+    /// Post the `Chapters` table of contents once it has parsed. Separate from
+    /// the tag walk because it needs neither `Tracks` nor a stream id: the
+    /// chapters describe the timeline, not a track.
+    fn post_chapters(&mut self, demux: &MatroskaDemuxer, bus: Option<&BusHandle>) {
+        let total = demux.chapters().len();
+        if total <= self.chapters_posted {
+            return;
+        }
+        let fresh = demux.chapters()[self.chapters_posted..].to_vec();
+        self.chapters_posted = total;
+        if let Some(bus) = bus {
+            bus.try_post(BusMessage::Chapters(fresh));
         }
     }
 }
@@ -1255,8 +1274,8 @@ pub struct MkvDemuxN {
     /// (see [`config_header`]). Re-armed on a flush, like the caps.
     config_sent: Vec<bool>,
     bus: Option<BusHandle>,
-    /// Bus posting of the container's whole-stream and per-track tags, once each.
-    tags: TagPoster,
+    /// Bus posting of the container's tags and chapters, once each.
+    metadata: MetadataPoster,
     /// Set once the `StreamCollection` has been announced (M376), so it posts once.
     collection_posted: bool,
     /// App-driven stream selection (M381): the app names the stream id each port
@@ -1291,7 +1310,7 @@ impl MkvDemuxN {
             segment_base: None,
             segment_sent,
             bus: None,
-            tags: TagPoster::default(),
+            metadata: MetadataPoster::default(),
             collection_posted: false,
             stream_select: None,
             emitted: 0,
@@ -1394,7 +1413,8 @@ impl MkvDemuxN {
     /// whole-stream ones as [`BusMessage::Tag`], the `Targets`-scoped ones as
     /// [`BusMessage::StreamTag`] per track.
     fn post_tags(&mut self) {
-        self.tags.post(&self.demux, self.bus.as_ref());
+        self.metadata.post(&self.demux, self.bus.as_ref());
+        self.metadata.post_chapters(&self.demux, self.bus.as_ref());
     }
 }
 

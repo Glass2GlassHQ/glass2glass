@@ -134,6 +134,13 @@ pub enum BusMessage {
         /// The tags scoped to that stream.
         tags: TagList,
     },
+    /// The chapter list (table of contents) a demuxer recovered from the
+    /// container, in file order (the GStreamer `GST_MESSAGE_TOC` analog, M1046).
+    /// Posted out of band once the container's chapter element is parsed, like
+    /// [`Tag`](BusMessage::Tag), so an application can build a chapter menu and
+    /// seek to [`Chapter::start_ns`](crate::chapter::Chapter::start_ns) without
+    /// intercepting the data path.
+    Chapters(alloc::vec::Vec<crate::chapter::Chapter>),
     /// The elementary streams a demuxer found in the container (the GStreamer
     /// `GST_MESSAGE_STREAM_COLLECTION` analog, M376, the data model playbin is
     /// built on). Posted out of band once the demuxer has parsed its track list,
