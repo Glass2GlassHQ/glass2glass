@@ -20,72 +20,20 @@
     all(target_os = "linux", feature = "v4l2")
 ))]
 
-use g2g_core::PropValue;
+mod numbuffers_common;
 
-/// -1 reads back as -1, n as n, and 0 as 0: a real count now, not a rejected
-/// value and not a second spelling of "forever".
-macro_rules! assert_num_buffers_round_trips {
-    ($source:expr) => {{
-        let source = &mut $source;
-        assert_eq!(
-            source.get_property("num-buffers"),
-            Some(PropValue::Int(-1)),
-            "a fresh source is unlimited"
-        );
-        source
-            .set_property("num-buffers", PropValue::Int(7))
-            .unwrap();
-        assert_eq!(source.get_property("num-buffers"), Some(PropValue::Int(7)));
-        source
-            .set_property("num-buffers", PropValue::Int(0))
-            .unwrap();
-        assert_eq!(
-            source.get_property("num-buffers"),
-            Some(PropValue::Int(0)),
-            "0 is a count of zero, not unlimited"
-        );
-        source
-            .set_property("num-buffers", PropValue::Int(-1))
-            .unwrap();
-        assert_eq!(source.get_property("num-buffers"), Some(PropValue::Int(-1)));
-    }};
-}
+use numbuffers_common::assert_num_buffers_round_trips;
 
 #[cfg(any(feature = "udp-ingress", feature = "srt", feature = "rtsp-server"))]
 mod zero_limit_run {
     use core::time::Duration;
 
-    use g2g_core::element::PushOutcome;
-    use g2g_core::{G2gError, OutputSink, PipelinePacket, PropValue};
+    use crate::numbuffers_common::{assert_only_eos, Collect};
+    use g2g_core::PropValue;
 
     /// How long a zero-limit `run` may take before we call it hung. Generous:
     /// the correct path does no IO at all.
     const ZERO_LIMIT_DEADLINE: Duration = Duration::from_secs(5);
-
-    /// Collects every packet a directly-driven source pushes.
-    #[derive(Default)]
-    struct Collect {
-        packets: Vec<PipelinePacket>,
-    }
-
-    impl OutputSink for Collect {
-        fn poll_push(
-            &mut self,
-            _cx: &mut core::task::Context<'_>,
-            packet_slot: &mut Option<PipelinePacket>,
-        ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
-            let packet = packet_slot.take().expect("poll_push without a packet");
-            self.packets.push(packet);
-            core::task::Poll::Ready(Ok(PushOutcome::Accepted))
-        }
-    }
-
-    /// A zero limit produced exactly one packet and it was the EOS.
-    fn assert_only_eos(out: &Collect, emitted: u64) {
-        assert_eq!(emitted, 0, "a zero limit emits no buffers");
-        assert_eq!(out.packets.len(), 1, "Eos is the only packet");
-        assert!(matches!(out.packets[0], PipelinePacket::Eos));
-    }
 
     #[cfg(feature = "udp-ingress")]
     #[tokio::test]

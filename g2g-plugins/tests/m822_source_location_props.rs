@@ -100,7 +100,7 @@ fn whepsessionsrc_endpoint_and_ice_round_trip() {
         .unwrap();
     s.set_property("turn-pass", PropValue::Str("p".into()))
         .unwrap();
-    s.set_property("num-buffers", PropValue::Uint(20)).unwrap();
+    s.set_property("num-buffers", PropValue::Int(20)).unwrap();
 
     assert_eq!(
         s.get_property("location"),
@@ -126,7 +126,7 @@ fn whepsessionsrc_endpoint_and_ice_round_trip() {
         s.get_property("turn-pass"),
         Some(PropValue::Str("p".into()))
     );
-    assert_eq!(s.get_property("num-buffers"), Some(PropValue::Uint(20)));
+    assert_eq!(s.get_property("num-buffers"), Some(PropValue::Int(20)));
 
     // An empty string clears an optional field.
     s.set_property("turn-server", PropValue::Str(String::new()))

@@ -31,6 +31,7 @@ pub(crate) fn get_num_buffers(limit: u64) -> PropValue {
     feature = "udp-ingress",
     feature = "v4l2",
     feature = "mf-video-src",
+    feature = "moqt",
 ))]
 pub(crate) async fn finished_at_zero_limit(
     limit: u64,
@@ -40,5 +41,22 @@ pub(crate) async fn finished_at_zero_limit(
         return Ok(false);
     }
     out.push(g2g_core::PipelinePacket::Eos).await?;
+    Ok(true)
+}
+
+/// [`finished_at_zero_limit`] for a multi-pad source: every pad gets the EOS,
+/// since a branch left without one never finishes.
+#[cfg(any(feature = "moqt", feature = "webrtc"))]
+pub(crate) async fn finished_at_zero_limit_multi(
+    limit: u64,
+    pads: usize,
+    out: &mut dyn g2g_core::MultiOutputSink,
+) -> Result<bool, g2g_core::G2gError> {
+    if limit != 0 {
+        return Ok(false);
+    }
+    for port in 0..pads {
+        out.push_to(port, g2g_core::PipelinePacket::Eos).await?;
+    }
     Ok(true)
 }
