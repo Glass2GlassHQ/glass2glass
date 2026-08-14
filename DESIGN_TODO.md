@@ -243,8 +243,6 @@ Phased plan:
   Rembrandt 680M); this item is only for reviving the pure cros-codecs backend.
 - Zero-copy `MemoryDomain::DmaBuf` from `VaapiH264Dec` (needs a surface-keepalive
   refcount).
-- H.265 in `VaapiH264Dec` (sibling element on `VideoCodec::H265`).
-- Upstream `Reconfigure` driven by `VaapiH264Dec` `FormatChanged`.
 
 - **`VulkanVideoDec` residuals.** AMD (RADV) and Intel (ANV) validation runs of
   the `vulkanvideo` GPU tests (the element is vendor-neutral; hardware-gated,
@@ -348,9 +346,7 @@ Phased plan:
     run (genuine remote NAT + STUN/TURN on the LiveKit elements); then Janus /
     Kinesis as wanted.
   - **T5: advanced.** FEC is blocked upstream (str0m has no FEC payload;
-    loss recovery is NACK/RTX). A send source still streaming when the duplex
-    session ends makes the run return `Shutdown` rather than winding down
-    gracefully (both runners). Data-channel loose ends
+    loss recovery is NACK/RTX). Data-channel loose ends
     (str0m surfaces no remote-close event, so EOS rides an explicit marker
     message; a WHIP/SFU-signalled data channel vs the P2P `SdpChannel` seam).
   Recommended order: T1 remainders -> T2 -> T4 -> T5.
