@@ -199,6 +199,12 @@ impl AsyncElement for Mp4Mux {
     where
         Self: 'a;
 
+    /// Reads host memory, so it takes system frames only. The allocation
+    /// cascade turns that into a download demand on a GPU producer.
+    fn input_domains(&self) -> g2g_core::memory::DomainSet {
+        g2g_core::memory::DomainSet::only(g2g_core::memory::MemoryDomainKind::System)
+    }
+
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
         for alt in Self::input_alternatives() {
             if let Ok(c) = upstream_caps.intersect(&alt) {

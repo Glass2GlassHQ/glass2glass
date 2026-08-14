@@ -525,6 +525,12 @@ impl AsyncElement for OpusEnc {
     where
         Self: 'a;
 
+    /// Reads host memory, so it takes system frames only. The allocation
+    /// cascade turns that into a download demand on a GPU producer.
+    fn input_domains(&self) -> g2g_core::memory::DomainSet {
+        g2g_core::memory::DomainSet::only(g2g_core::memory::MemoryDomainKind::System)
+    }
+
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
         Self::pcm_shape(upstream_caps)
             .map(|_| upstream_caps.clone())
