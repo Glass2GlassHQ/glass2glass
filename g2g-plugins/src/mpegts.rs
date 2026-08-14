@@ -35,6 +35,19 @@ const PID_SDT: u16 = 0x0011;
 /// SDT `table_id` for this transport stream (0x46 is the other-TS variant, which
 /// describes services carried elsewhere and is ignored).
 const TABLE_ID_SDT: u8 = 0x42;
+/// The DVB SI PID the EIT rides (ETSI EN 300 468). It carries the present/following
+/// tables and the much larger schedule tables (0x50..=0x6F), which the `table_id`
+/// filter drops.
+const PID_EIT: u16 = 0x0012;
+/// EIT `table_id` for the present/following events of this transport stream. 0x4F
+/// is the other-TS variant (events of a service carried elsewhere) and is ignored.
+const TABLE_ID_EIT_PRESENT_FOLLOWING: u8 = 0x4E;
+/// DVB `short_event_descriptor` tag: a language code then the length-prefixed
+/// event name and short description.
+const DESC_TAG_SHORT_EVENT: u8 = 0x4D;
+/// `registration_descriptor` tag: a 4-byte format_identifier naming what a
+/// stream_type on its own does not say (which is every use of a private PES).
+const DESC_TAG_REGISTRATION: u8 = 0x05;
 /// DVB `service_descriptor` tag: service_type, then the length-prefixed provider
 /// and service name.
 const DESC_TAG_SERVICE: u8 = 0x48;
@@ -66,6 +79,15 @@ pub const TAG_KEY_SERVICE_PROVIDER: &str = "service_provider";
 /// [`g2g_core::Tag::Title`] because it is what ffmpeg's `-metadata` takes and
 /// ffprobe reports.
 pub const TAG_KEY_SERVICE_NAME: &str = "service_name";
+
+/// The [`g2g_core::Tag::Other`] keys the DVB EIT present/following event text
+/// rides under (M1049). `Tag` has no typed event variant, and the SDT service
+/// name already owns [`g2g_core::Tag::Title`] for the same program, so the four
+/// fields keep their own keys: the event on air now, and the one after it.
+pub const TAG_KEY_EVENT_NAME: &str = "event_name";
+pub const TAG_KEY_EVENT_TEXT: &str = "event_text";
+pub const TAG_KEY_NEXT_EVENT_NAME: &str = "next_event_name";
+pub const TAG_KEY_NEXT_EVENT_TEXT: &str = "next_event_text";
 
 /// Cap on a single reassembled PES payload. A video PES carries no declared
 /// length and is delimited only by the next payload-unit-start, so a stream that
@@ -127,7 +149,21 @@ const KLV_METADATA_DESCRIPTOR: &[u8] = &[
 
 /// The MISB ST 1402 `registration_descriptor` marking a private PES (0x06) as
 /// asynchronous KLV, which is how this muxer writes an unqualified private stream.
-const KLVA_REGISTRATION: &[u8] = &[0x05, 4, b'K', b'L', b'V', b'A'];
+const KLVA_REGISTRATION: &[u8] = &[DESC_TAG_REGISTRATION, 4, b'K', b'L', b'V', b'A'];
+
+/// The `registration_descriptor` format_identifier the AOM "Carriage of AV1 in
+/// MPEG-2 TS" spec assigns AV1 on a private PES (0x06). AV1 has no `stream_type`
+/// of its own, so this is what tells it apart from every other 0x06 use.
+const AV1_REGISTRATION_ID: &[u8; 4] = b"AV01";
+/// The format_identifier GStreamer's `tsdemux` / `mpegtsmux` actually read and
+/// write for the same carriage. It predates the AOM spec (the muxer still calls
+/// the mapping "custom", refusing it without `enable-custom-mappings`), and no
+/// shipping demuxer accepts 'AV01': GStreamer's own `tsdemux` activates no program
+/// for a stream carrying it, and ffmpeg's muxer writes AV1 with no descriptor at
+/// all, a bare 0x06 nothing (its own demuxer included) can identify. Both are
+/// accepted on the demux side; the mux writes this one so a real receiver plays
+/// the result.
+const AV1_REGISTRATION_ID_GSTREAMER: &[u8; 4] = b"AV1G";
 
 /// The first 4 bytes of every SMPTE ST 336 KLV key (the SMPTE UL designator).
 const KLV_UL_PREFIX: [u8; 4] = [0x06, 0x0E, 0x2B, 0x34];
@@ -149,6 +185,11 @@ pub struct ElementaryStream {
     /// (0x06) stream carrying a 'KLVA' registration descriptor (asynchronous
     /// KLV), or any metadata-in-PES (0x15) stream (synchronous KLV).
     pub klv: bool,
+    /// True for a private (0x06) stream carrying an AV1 `registration_descriptor`
+    /// (M1049), the AOM carriage of AV1 (disambiguating the generic 0x06). The PES
+    /// payload is then one AV1 temporal unit in the low-overhead OBU format, which
+    /// is what [`crate::av1parse::Av1Parse`] and the AV1 decoders read.
+    pub av1: bool,
     /// The 3-letter code of the ES-info `ISO_639_language_descriptor` (tag 0x0A),
     /// if it carried one. Read it as text with
     /// [`language_code`](Self::language_code).
@@ -221,6 +262,35 @@ pub struct ServiceInfo {
     /// `service_provider_name`, the broadcaster.
     pub provider: String,
 }
+
+/// One DVB EIT present/following event (M1049): what a service is showing now,
+/// or what it shows next. The text comes from the `short_event_descriptor`, so an
+/// event announced without one is not reported at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EitEvent {
+    /// The service the event belongs to. A `service_id` is a `program_number`,
+    /// the same join the SDT uses.
+    pub service_id: u16,
+    pub event_id: u16,
+    /// `false` for the event on air now (section 0), `true` for the one after it
+    /// (section 1). EIT present/following carries exactly these two per service.
+    pub following: bool,
+    /// `event_name_char`, empty when the field was empty or its DVB character
+    /// table was one this parser will not decode (see `dvb_text`).
+    pub name: String,
+    /// `text_char`, the short description under the name; empty on the same terms.
+    pub text: String,
+}
+
+/// Cap on the EIT events held (M1049). Present/following is two per service, so
+/// this holds a large multiplex; past it, later services go unreported rather than
+/// growing the table on a stream that churns `service_id`s.
+const MAX_EIT_EVENTS: usize = 64;
+
+/// Cap on the EIT section being reassembled, the limit EN 300 468 sets on an EIT
+/// section. The declared `section_length` cannot be trusted before the section is
+/// whole, so the buffer is capped rather than sized from it.
+const MAX_PSI_SECTION_BYTES: usize = 4096;
 
 /// A reassembled PES payload: one access unit of an elementary stream.
 #[derive(Debug, Clone, PartialEq)]
@@ -501,6 +571,20 @@ pub struct TsDemuxer {
     /// from `programs` because the SDT may parse before the PAT; a service_id is a
     /// `program_number`, so [`service`](Self::service) joins the two.
     services: Vec<(u16, ServiceInfo)>,
+    /// EIT present/following events (M1049), at most one per
+    /// `(service_id, following)` slot: a later section of the same slot replaces
+    /// the earlier one, so this always holds the current schedule.
+    eit_events: Vec<EitEvent>,
+    /// The `version_number` last accepted per `(service_id, section_number)`. A
+    /// section repeating its version carries the events already held, so it is
+    /// dropped rather than re-reported.
+    eit_versions: Vec<(u16, u8, u8)>,
+    /// Bumped whenever [`eit_events`](Self::eit_events) changes, so the element
+    /// layer can re-post without diffing.
+    eit_generation: u64,
+    /// The EIT section being reassembled across TS packets. Unlike the PAT / PMT /
+    /// SDT, an EIT section routinely outgrows one packet.
+    eit_section: Vec<u8>,
     pending: Vec<PendingPes>,
     completed: Vec<EsUnit>,
     /// Video PTS synthesis state, one entry per video PID (M948).
@@ -563,6 +647,19 @@ impl TsDemuxer {
         self.services.iter().map(|(id, s)| (*id, s))
     }
 
+    /// Every EIT present/following event parsed so far (M1049), in arrival order.
+    /// Empty for a stream with no EIT, or before the table parses.
+    pub fn eit_events(&self) -> &[EitEvent] {
+        &self.eit_events
+    }
+
+    /// A counter bumped every time [`eit_events`](Self::eit_events) changes. A
+    /// caller that posts the events compares it with the value it last posted at,
+    /// so a table repeating its `version_number` costs nothing.
+    pub fn eit_generation(&self) -> u64 {
+        self.eit_generation
+    }
+
     /// Opus channel count for `pid`, if its PMT entry is a private (0x06) stream
     /// carrying the 'Opus' registration descriptor; `None` for any other stream.
     pub fn opus_channels(&self, pid: u16) -> Option<u8> {
@@ -588,6 +685,15 @@ impl TsDemuxer {
             .iter()
             .find(|s| s.pid == pid)
             .is_some_and(|s| s.klv)
+    }
+
+    /// Whether `pid` is an AV1 video stream (a private 0x06 stream with an AV1
+    /// registration descriptor, M1049); `false` for any other stream.
+    pub fn is_av1(&self, pid: u16) -> bool {
+        self.streams()
+            .iter()
+            .find(|s| s.pid == pid)
+            .is_some_and(|s| s.av1)
     }
 
     /// The DVB `subtitling_descriptor` entry of `pid`, if its PMT entry is a
@@ -643,6 +749,8 @@ impl TsDemuxer {
             self.parse_pat(payload, pusi);
         } else if pid == PID_SDT {
             self.parse_sdt(payload, pusi);
+        } else if pid == PID_EIT {
+            self.parse_eit(payload, pusi);
         } else if let Some(idx) = self.programs.iter().position(|p| p.pmt_pid == pid) {
             self.parse_pmt(idx, payload, pusi);
         } else if let Some(stream_type) = self.stream_type_of(pid) {
@@ -728,9 +836,9 @@ impl TsDemuxer {
 
     /// The section body of a section whose trailing MPEG-2 CRC-32 checks out (the
     /// CRC over a section including its own 4 CRC bytes is 0 when it matches),
-    /// else `None`. Used for the SDT: its PID carries several tables, a section can
-    /// start mid-stream, and unlike a PAT/PMT PID nothing later cross-checks the
-    /// text it carries, so a bad section must not become a tag.
+    /// else `None`. Used for the SDT and the EIT: their PIDs carry several tables, a
+    /// section can start mid-stream, and unlike a PAT/PMT PID nothing later
+    /// cross-checks the text they carry, so a bad section must not become a tag.
     fn checked_section_body(section: &[u8]) -> Option<&[u8]> {
         let body = Self::section_body(section)?;
         let whole = section.get(..body.len() + 4)?;
@@ -805,6 +913,154 @@ impl TsDemuxer {
         }
     }
 
+    /// Collect one EIT section across TS packets (M1049), returning it once whole.
+    /// The PAT / PMT / SDT are read from a single packet, which holds for those
+    /// small tables, but an EIT event carries free text and routinely spans
+    /// several. A section is only buffered once its `table_id` is the
+    /// present/following one, which keeps the far larger schedule tables sharing
+    /// this PID out of the buffer entirely.
+    ///
+    /// The declared `section_length` is attacker-controlled, so the buffer is
+    /// capped and a section that overruns is abandoned; the next
+    /// payload-unit-start resyncs.
+    fn collect_eit_section(&mut self, payload: &[u8], pusi: bool) -> Option<Vec<u8>> {
+        if pusi {
+            self.eit_section.clear();
+            let pointer = *payload.first()? as usize;
+            let start = payload.get(1 + pointer..)?;
+            if start.first() != Some(&TABLE_ID_EIT_PRESENT_FOLLOWING) {
+                return None; // a schedule table, an other-TS EIT, or stuffing
+            }
+            self.eit_section.extend_from_slice(start);
+        } else if self.eit_section.is_empty() {
+            return None; // no section open on this PID
+        } else {
+            self.eit_section.extend_from_slice(payload);
+        }
+        if self.eit_section.len() > MAX_PSI_SECTION_BYTES {
+            self.eit_section.clear();
+            return None;
+        }
+        if self.eit_section.len() < 3 {
+            return None;
+        }
+        let total =
+            3 + ((((self.eit_section[1] & 0x0F) as usize) << 8) | self.eit_section[2] as usize);
+        if total > MAX_PSI_SECTION_BYTES {
+            self.eit_section.clear();
+            return None;
+        }
+        if self.eit_section.len() < total {
+            return None; // more packets to come
+        }
+        let mut section = core::mem::take(&mut self.eit_section);
+        section.truncate(total); // drop the 0xFF stuffing after the section
+        Some(section)
+    }
+
+    /// Parse a DVB EIT present/following section (PID 0x12, `table_id` 0x4E) into
+    /// the per-service event text (M1049). The event loop follows the 14-byte
+    /// header, and each entry's descriptor loop carries the
+    /// `short_event_descriptor`. Section 0 is the event on air, section 1 the one
+    /// after it, so the two arrive as separate sections.
+    ///
+    /// Unlike the PAT / PMT / SDT this table updates mid-stream, so rather than
+    /// "first wins" a section is read when its `version_number` differs from the
+    /// one last accepted for the same `(service_id, section_number)`. The CRC is
+    /// verified ([`checked_section_body`](Self::checked_section_body)) and every
+    /// length is bounds-checked, so a malformed section is ignored rather than
+    /// yielding garbled text.
+    fn parse_eit(&mut self, payload: &[u8], pusi: bool) {
+        let Some(section) = self.collect_eit_section(payload, pusi) else {
+            return;
+        };
+        let Some(body) = Self::checked_section_body(&section) else {
+            return;
+        };
+        // The 14-byte EIT header: the 8-byte PSI common header, then
+        // transport_stream_id, original_network_id, segment_last_section_number
+        // and last_table_id.
+        if body.len() < 14 {
+            return;
+        }
+        let service_id = ((body[3] as u16) << 8) | body[4] as u16;
+        // current_next_indicator 0 marks a version not yet in force: its events
+        // are not what the service is showing.
+        if body[5] & 0x01 == 0 {
+            return;
+        }
+        let version = (body[5] >> 1) & 0x1F;
+        let section_number = body[6];
+        // Present/following is sections 0 and 1 only.
+        if section_number > 1 {
+            return;
+        }
+        if !self.accept_eit_version(service_id, section_number, version) {
+            return;
+        }
+        let following = section_number == 1;
+        let mut i = 14usize;
+        // Each event: event_id, a 5-byte start_time, a 3-byte duration, then
+        // running_status / free_CA_mode / descriptors_loop_length.
+        while i + 12 <= body.len() {
+            let event_id = ((body[i] as u16) << 8) | body[i + 1] as u16;
+            let loop_len = (((body[i + 10] & 0x0F) as usize) << 8) | body[i + 11] as usize;
+            // A descriptor loop declared past the section end abandons the walk:
+            // the count is attacker-controlled.
+            let Some(desc) = body.get(i + 12..i + 12 + loop_len) else {
+                return;
+            };
+            if let Some((name, text)) = parse_short_event_descriptor(desc) {
+                self.record_eit_event(EitEvent {
+                    service_id,
+                    event_id,
+                    following,
+                    name,
+                    text,
+                });
+            }
+            i = i.saturating_add(12).saturating_add(loop_len);
+        }
+    }
+
+    /// Whether an EIT section carries a version not yet read, recording it when so.
+    /// Past [`MAX_EIT_EVENTS`] slots the table stops growing, so a stream churning
+    /// `service_id`s cannot cost unbounded memory.
+    fn accept_eit_version(&mut self, service_id: u16, section_number: u8, version: u8) -> bool {
+        if let Some(slot) = self
+            .eit_versions
+            .iter_mut()
+            .find(|(id, section, _)| *id == service_id && *section == section_number)
+        {
+            if slot.2 == version {
+                return false;
+            }
+            slot.2 = version;
+            return true;
+        }
+        if self.eit_versions.len() >= MAX_EIT_EVENTS {
+            return false;
+        }
+        self.eit_versions
+            .push((service_id, section_number, version));
+        true
+    }
+
+    /// Record one event, replacing whatever the same `(service_id, following)`
+    /// slot held, and bump the generation so the element layer re-posts.
+    fn record_eit_event(&mut self, event: EitEvent) {
+        let slot = self
+            .eit_events
+            .iter()
+            .position(|e| e.service_id == event.service_id && e.following == event.following);
+        match slot {
+            Some(i) => self.eit_events[i] = event,
+            None if self.eit_events.len() < MAX_EIT_EVENTS => self.eit_events.push(event),
+            None => return,
+        }
+        self.eit_generation = self.eit_generation.saturating_add(1);
+    }
+
     fn parse_pmt(&mut self, prog_idx: usize, payload: &[u8], pusi: bool) {
         if !self.programs[prog_idx].streams.is_empty() {
             return; // first PMT per program wins
@@ -846,6 +1102,7 @@ impl TsDemuxer {
                 opus_channels,
                 ac3,
                 klv,
+                av1: private.is_some_and(has_av1_registration),
                 subtitling: private.and_then(parse_subtitling_descriptor),
                 teletext: private.and_then(parse_teletext_descriptor),
                 language: descriptors.and_then(parse_iso639_language),
@@ -956,7 +1213,7 @@ fn parse_opus_descriptors(mut desc: &[u8]) -> Option<u8> {
         let body = desc.get(2..2 + len)?;
         match tag {
             // registration_descriptor: format_identifier is the first 4 bytes.
-            0x05 if body.len() >= 4 && &body[..4] == b"Opus" => is_opus = true,
+            DESC_TAG_REGISTRATION if body.len() >= 4 && &body[..4] == b"Opus" => is_opus = true,
             // DVB extension_descriptor: ext tag 0x80 (provisional Opus) + code.
             0x7F if body.len() >= 2 && body[0] == 0x80 => {
                 let code = body[1];
@@ -982,7 +1239,7 @@ fn has_ac3_descriptor(mut desc: &[u8]) -> bool {
         };
         match tag {
             0x6A => return true, // DVB AC-3_descriptor
-            0x05 if body.len() >= 4 && &body[..4] == b"AC-3" => return true,
+            DESC_TAG_REGISTRATION if body.len() >= 4 && &body[..4] == b"AC-3" => return true,
             _ => {}
         }
         desc = &desc[2 + len..];
@@ -1001,12 +1258,63 @@ fn has_klv_registration(mut desc: &[u8]) -> bool {
         let Some(body) = desc.get(2..2 + len) else {
             return false;
         };
-        if tag == 0x05 && body.len() >= 4 && &body[..4] == b"KLVA" {
+        if tag == DESC_TAG_REGISTRATION && body.len() >= 4 && &body[..4] == b"KLVA" {
             return true;
         }
         desc = &desc[2 + len..];
     }
     false
+}
+
+/// Whether a PMT ES-info descriptor list carries an AV1 `registration_descriptor`
+/// (tag 0x05), the AOM marker for AV1 video on a private (0x06) stream (M1049).
+/// Both the spec's 'AV01' and GStreamer's 'AV1G' are accepted, since only the
+/// latter has a live reader. The AV1_video_descriptor (tag 0x80) the spec pairs
+/// with the registration is not required: it carries profile / bit-depth fields
+/// the bitstream repeats in its sequence header, which is where `av1parse` reads
+/// them, and GStreamer's demuxer likewise keys on the registration alone. Every
+/// field is bounds-checked so a malformed loop returns `false`, never panics.
+fn has_av1_registration(mut desc: &[u8]) -> bool {
+    while desc.len() >= 2 {
+        let tag = desc[0];
+        let len = desc[1] as usize;
+        let Some(body) = desc.get(2..2 + len) else {
+            return false;
+        };
+        if tag == DESC_TAG_REGISTRATION
+            && (body.starts_with(AV1_REGISTRATION_ID)
+                || body.starts_with(AV1_REGISTRATION_ID_GSTREAMER))
+        {
+            return true;
+        }
+        desc = &desc[2 + len..];
+    }
+    false
+}
+
+/// The name and short description of an EIT event's DVB `short_event_descriptor`
+/// (tag 0x4D, M1049): a 3-letter language code, then the length-prefixed
+/// `event_name_char` and `text_char`. `None` when the loop names no such
+/// descriptor or a field runs past it; a field this parser will not decode comes
+/// back empty rather than garbled (see [`dvb_text`]). Bounds-checked throughout.
+fn parse_short_event_descriptor(mut desc: &[u8]) -> Option<(String, String)> {
+    while desc.len() >= 2 {
+        let tag = desc[0];
+        let len = desc[1] as usize;
+        let body = desc.get(2..2 + len)?;
+        if tag == DESC_TAG_SHORT_EVENT {
+            let name_len = *body.get(3)? as usize;
+            let name = body.get(4..4 + name_len)?;
+            let text_len = *body.get(4 + name_len)? as usize;
+            let text = body.get(5 + name_len..5 + name_len + text_len)?;
+            return Some((
+                dvb_text(name).unwrap_or_default(),
+                dvb_text(text).unwrap_or_default(),
+            ));
+        }
+        desc = &desc[2 + len..];
+    }
+    None
 }
 
 /// The first entry of a PMT ES-info DVB `subtitling_descriptor` (tag 0x59), the
@@ -1113,22 +1421,38 @@ fn parse_service_descriptor(mut desc: &[u8]) -> Option<ServiceInfo> {
     None
 }
 
-/// Decode one DVB text field (ETSI EN 300 468 annex A). A field opening with a
+/// The character-table selection byte selecting UTF-8 for the rest of a DVB text
+/// field (ETSI EN 300 468 table A.3).
+const DVB_CHAR_TABLE_UTF8: u8 = 0x15;
+
+/// Decode one DVB text field (ETSI EN 300 468 annex A). A field opening with the
+/// UTF-8 selection byte is decoded as UTF-8, and one opening with any other
 /// character-table selection byte (0x01..=0x1F) is rejected with `None`: those
-/// tables are non-Latin or multi-byte, and reporting no name beats reporting a
-/// mis-decoded one. The default table (ISO 6937) is read as Latin-1, which agrees
-/// for the ASCII real service names use and leaves its accent escapes uncomposed;
-/// control codes inside the text are dropped.
+/// tables are non-Latin single- or multi-byte, and reporting no name beats
+/// reporting a mis-decoded one. The default table (ISO 6937) is read as Latin-1,
+/// which agrees for the ASCII real service and event names use and leaves its
+/// accent escapes uncomposed; control codes inside the text are dropped.
 fn dvb_text(raw: &[u8]) -> Option<String> {
+    if raw.first() == Some(&DVB_CHAR_TABLE_UTF8) {
+        let text = core::str::from_utf8(raw.get(1..)?).ok()?;
+        return Some(text.chars().filter(|c| !is_dvb_control(*c)).collect());
+    }
     if raw.first().is_some_and(|&b| b < 0x20) {
         return None;
     }
     Some(
         raw.iter()
-            .filter(|&&b| b >= 0x20 && !(0x80..=0x9F).contains(&b))
             .map(|&b| b as char)
+            .filter(|c| !is_dvb_control(*c))
             .collect(),
     )
+}
+
+/// Whether a character is one of the DVB text control codes: C0 (below 0x20) or
+/// C1 (0x80..=0x9F), both of which select formatting rather than carrying text.
+fn is_dvb_control(c: char) -> bool {
+    let code = c as u32;
+    code < 0x20 || (0x80..=0x9F).contains(&code)
 }
 
 /// Unwrap the ISO 13818-1 metadata access-unit cells of one metadata-in-PES
@@ -1257,6 +1581,10 @@ struct MuxStream {
     /// synchronous KLV, an `ISO_639_language_descriptor` when
     /// [`TsMuxer::set_stream_language`] added one; empty otherwise).
     es_info: Vec<u8>,
+    /// How many leading bytes of `es_info` are the private stream's identifying
+    /// descriptor, so re-declaring the identity replaces exactly those and leaves
+    /// any descriptor added separately (a language) in place.
+    identity_len: usize,
     /// Set by [`TsMuxer::set_stream_subtitling`]: each access unit is a DVB
     /// display set, so it goes out wrapped in the PES data field EN 300 743
     /// carries it in rather than bare.
@@ -1398,6 +1726,7 @@ impl TsMuxer {
                 program,
                 meta_seq: 0,
                 es_info: es_info.to_vec(),
+                identity_len: es_info.len(),
                 dvb_subtitle: false,
             });
         }
@@ -1544,10 +1873,25 @@ impl TsMuxer {
         }
     }
 
+    /// Declare elementary stream `index` as AV1 video in its PMT entry (M1049),
+    /// as the AOM carriage's `registration_descriptor`, with the format_identifier
+    /// a live receiver reads (see [`AV1_REGISTRATION_ID_GSTREAMER`]). Without this
+    /// the stream is asynchronous KLV, the muxer's default reading of a private
+    /// PES. An out-of-range index or a stream that is not a private PES is
+    /// ignored. Call before the first access unit (the PMT goes out then).
+    pub fn set_stream_av1(&mut self, index: usize) {
+        let mut descriptor = Vec::from([
+            DESC_TAG_REGISTRATION,
+            AV1_REGISTRATION_ID_GSTREAMER.len() as u8,
+        ]);
+        descriptor.extend_from_slice(AV1_REGISTRATION_ID_GSTREAMER);
+        self.set_private_identity(index, &descriptor);
+    }
+
     /// Replace a private-PES stream's identifying descriptor. A bare 0x06 means
     /// nothing on its own, so this muxer writes the 'KLVA' registration by
-    /// default; a stream that is teletext or DVB subtitles instead says so with
-    /// its own descriptor, which leads the ES-info loop. Descriptors added
+    /// default; a stream that is teletext, DVB subtitles or AV1 instead says so
+    /// with its own descriptor, which leads the ES-info loop. Descriptors added
     /// separately (a language) are kept whichever order the calls come in, and
     /// setting the identity twice replaces it rather than writing both.
     fn set_private_identity(&mut self, index: usize, descriptor: &[u8]) {
@@ -1557,15 +1901,9 @@ impl TsMuxer {
         if s.stream_type != STREAM_TYPE_PRIVATE_PES {
             return;
         }
-        if s.es_info.starts_with(KLVA_REGISTRATION) {
-            s.es_info.drain(..KLVA_REGISTRATION.len());
-        } else if s.es_info.first() == descriptor.first() && s.es_info.len() >= 2 {
-            let previous = 2 + s.es_info[1] as usize;
-            if previous <= s.es_info.len() {
-                s.es_info.drain(..previous);
-            }
-        }
+        s.es_info.drain(..s.identity_len);
         s.es_info.splice(0..0, descriptor.iter().copied());
+        s.identity_len = descriptor.len();
     }
 
     /// Set the PAT/PMT re-emission cadence in 90 kHz ticks (`0` = once up front).
@@ -2150,6 +2488,7 @@ mod tests {
                 opus_channels: None,
                 ac3: false,
                 klv: false,
+                av1: false,
                 subtitling: None,
                 teletext: None,
                 language: None

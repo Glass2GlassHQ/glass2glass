@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1049: MPEG-TS carries AV1 both ways (the AOM private-PES mapping, GStreamer-validated), and the demuxers post DVB EIT present/following event text as per-program tags.
 - M1045: decodebin now has a real-media run test: the committed A/V MP4 decodes to EOS bit-exact against ffmpeg, single-line and A/V fan-out both.
 - M1044: live hardware tee test: one RTSP feed fans out to a Wayland display branch and an MP4 recording branch, the file read back with the in-repo demuxer.
 - M1043: the remaining sources (pipewire, libcamera, WHEP, LiveKit, local IPC) spell `num-buffers` like gst `basesrc`, gaining the property where it was builder-only.

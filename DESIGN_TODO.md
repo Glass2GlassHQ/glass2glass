@@ -377,9 +377,13 @@ _(No open seek / auto-plug items.)_
 - **FLV:** Speex decode (carriage lands M831; no Speex encoder exists anywhere
   to build a validated decode vector, and gst's header-in-tag layout is
   rejected by libavcodec, so wiring a decoder would be an unvalidated claim).
-- **AV1 in MPEG-TS** (AOM mapping): blocked on a validatable reference peer.
-  ffmpeg writes it but cannot demux its own output, and GStreamer has no
-  support, so a mux/demux today would only ever round-trip against itself.
+- **AV1 in MPEG-TS:** write the AOM spec's 'AV01' `registration_descriptor`
+  instead of GStreamer's 'AV1G' once any demuxer reads the former (GStreamer's
+  `tsdemux` activates no program for an 'AV01' stream, and ffmpeg's muxer writes
+  no descriptor at all, so it identifies neither).
+- **DVB EIT schedule tables** (`table_id` 0x50..=0x6F) and the event
+  `start_time` / `duration` fields: present/following event text is what the tag
+  posting carries.
 - **WebVTT track writing** (mkv, mp4 `wvtt`): blocked on a reference peer.
   ffmpeg reads only the WebM `D_WEBVTT/*` carriage (different block payload)
   and cannot write WebVTT into MP4 at all; reading both stays supported.
