@@ -1772,6 +1772,13 @@ impl MultiInputElement for TextOverlayN {
     where
         Self: 'a;
 
+    /// Rasterizes into the video frame's own buffer on the CPU and decodes the
+    /// text pad's bytes as UTF-8, so every pad takes system frames only. The
+    /// allocation cascade turns that into a download demand on a GPU producer.
+    fn input_domains(&self) -> g2g_core::memory::DomainSet {
+        g2g_core::memory::DomainSet::only(g2g_core::memory::MemoryDomainKind::System)
+    }
+
     fn input_count(&self) -> usize {
         2
     }

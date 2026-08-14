@@ -177,6 +177,13 @@ impl MultiInputElement for SubPictureOverlay {
     where
         Self: 'a;
 
+    /// Blends into the video frame's own buffer on the CPU and reads the canvas
+    /// pad's bytes, so every pad takes system frames only. The allocation
+    /// cascade turns that into a download demand on a GPU producer.
+    fn input_domains(&self) -> g2g_core::memory::DomainSet {
+        g2g_core::memory::DomainSet::only(g2g_core::memory::MemoryDomainKind::System)
+    }
+
     fn metadata(&self) -> ElementMetadata {
         ElementMetadata::new(
             "Subpicture overlay",
