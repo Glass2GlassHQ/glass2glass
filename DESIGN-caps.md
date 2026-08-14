@@ -444,7 +444,12 @@ Two fan structures have non-trivial joins:
   fails loud.
 - **Muxer boundary.** A muxer states its per-pad demand through
   `MultiInputElement::propose_allocation_for_input(pad, caps)` (default `None`,
-  so a plain container muxer imposes nothing). At startup the runner stores it on
+  so a plain container muxer imposes nothing). The declaration half holds here
+  too: `MultiInputElement` / `MultiOutputElement` carry the same `input_domains`
+  hook (default `DomainSet::ALL`), the graph node delegates to it instead of
+  hardcoding accept-everything, and the fan-in/fan-out elements that read host
+  memory declare `System`, so a GPU producer feeding a muxer gets its download
+  planned at negotiation. At startup the runner stores it on
   each input edge so the demand crosses the boundary and re-cascades up that
   branch independently (a device-resident interleave muxer asking each video pad
   for GPU buffers). Mid-stream the same crossing holds: a `CapsChanged` on one
