@@ -609,9 +609,11 @@ depending on backend.
 
 #### 4.11.1 cros-codecs (Linux VAAPI)
 
-`VaapiH264Dec` (`g2g-plugins/src/vaapidec.rs`, feature `vaapi`, `cfg(target_os = "linux")`) is built on `cros-codecs` (`vaapi` backend). The crate is maintained by the ChromeOS team and exposes a stateless decoder framework that parses H.264 bitstreams and manages the DPB; the actual decode runs on the GPU through libva.
+`VaapiDec<C>` (`g2g-plugins/src/vaapidec.rs`, feature `vaapi`, `cfg(target_os = "linux")`) is built on `cros-codecs` (`vaapi` backend); the `VaapiCodec` binding picks the stateless decoder and NAL splitter, giving the two elements `VaapiH264Dec` and `VaapiH265Dec` (M1036). The crate is maintained by the ChromeOS team and exposes a stateless decoder framework that parses the bitstream and manages the DPB; the actual decode runs on the GPU through libva.
 
-- **Input caps:** `Caps::CompressedVideo { codec: H264, .. }` — `intercept_caps` intersects with H.264 and rejects everything else.
+**Status (2026-08): Intel-only candidate, not the AMD path.** cros-codecs allocates output surfaces through ChromeOS GBM extensions (`GBM_BO_USE_HW_VIDEO_DECODER`, contiguous NV12) that Mesa `radeonsi` does not provide, so the element cannot start on AMD desktop GPUs, and the path is not being revived. The Linux hardware-decode ranking is `VulkanVideoDec` (vendor-neutral, picked by the domain-aware search for GPU-domain consumers) with ffmpeg's VAAPI hwaccel (`Backend::Vaapi`, 4.11.3) as the hardware route into system memory.
+
+- **Input caps:** `Caps::CompressedVideo { codec: C::CODEC, .. }` — `intercept_caps` intersects with the element's codec and rejects everything else.
 - **Output caps:** `Caps::RawVideo { format: Nv12, .. }` backed by `MemoryDomain::System` (CPU copy out of the GBM-allocated surface).
 - **Frame allocation:** `GbmDevice::open("/dev/dri/renderD128")` (configurable via `VaapiH264Dec::with_render_node`) allocates `GenericDmaVideoFrame` surfaces; the decoder's allocator callback returns one per output picture.
 - **Format negotiation:** the first `decode()` call surfaces `DecodeError::CheckEvents`; the element drains events, picks up the SPS-derived `StreamInfo` on `FormatChanged`, and re-feeds the same NAL.
@@ -705,7 +707,7 @@ RtspSrc ──► H264Parse ──► [decoder] ──► [ML / display / encode
 | :--- | :--- | :--- | :--- |
 | Linux software | `FfmpegH264Dec` (`Software`) | `ffmpeg` | `System` / I420 |
 | Linux + NVIDIA | `FfmpegH264Dec` (`NvdecCuvid` / `NvdecCuda`) | `ffmpeg` + `cuda` | `System` / `Cuda` / NV12 |
-| Linux + VAAPI | `VaapiH264Dec` | `vaapi` | `System` / NV12 |
+| Linux + VAAPI | `VaapiH264Dec` / `VaapiH265Dec` | `vaapi` | `System` / NV12 |
 | Windows | `MfDecode` | `mf-decode` | `System` / NV12 |
 
 `RtspSrc` connects via `retina` using standard RTSP/RTP over TCP, negotiates H.264 with `FrameFormat::SIMPLE` (Annex-B) or accepts AVCC framing detected per buffer. The first SPS the parser sees provides geometry; framerate is recovered from the VUI `timing_info` (`time_scale / (2 * num_units_in_tick)`) when present, or left as `Rate::Any` when the VUI is absent. `RtspSrc::with_credentials` supplies the DESCRIBE/SETUP account (threaded into retina's `SessionOptions`).

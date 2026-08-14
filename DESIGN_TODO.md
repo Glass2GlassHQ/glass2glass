@@ -236,14 +236,6 @@ Phased plan:
 
 ## Receive / decode
 
-- **`VaapiH264Dec` on AMD** (cros-codecs path). Hard-codes ChromeOS GBM flags
-  that fail on Mesa `radeonsi`; the clean fix is an upstream libva
-  (`vaCreateSurfaces`) surface backend. The ffmpeg `Backend::Vaapi` hwaccel path
-  is the working AMD / Intel decode route in the meantime (validated on a
-  Rembrandt 680M); this item is only for reviving the pure cros-codecs backend.
-- Zero-copy `MemoryDomain::DmaBuf` from `VaapiH264Dec` (needs a surface-keepalive
-  refcount).
-
 - **`VulkanVideoDec` residuals.** AMD (RADV) and Intel (ANV) validation runs of
   the `vulkanvideo` GPU tests (the element is vendor-neutral; hardware-gated,
   `VERIFY:` markers in-tree). Optional extra output domains (multiplanar NV12 /
