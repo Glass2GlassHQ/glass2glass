@@ -1,5 +1,8 @@
 //! Python bindings to drive glass2glass pipelines (the inverse of `g2g-python`,
-//! which hosts Python *elements* inside a pipeline). Sits on the same
+//! which hosts Python *elements* inside a pipeline).
+//!
+//! Experimental (Tier 3 in `STABILITY.md`): tracks `g2g-core`, no stability
+//! promise of its own. Sits on the same
 //! language-neutral waist as `g2g-capi`: describe a pipeline as a string, run
 //! it, watch the bus, and push/pull buffers via `appsrc` / `appsink`.
 //!

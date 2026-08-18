@@ -3,6 +3,11 @@
 //! Per the spec (§2), this crate is `no_std + alloc` at baseline. Network
 //! and OS-coupled elements (RTSP source via `retina`, V4L2, wgpu sinks)
 //! live behind cargo features that imply `std`.
+//!
+//! OS-, GPU-, and device-coupled elements are experimental (Tier 3 in
+//! `STABILITY.md`): they compile, and some have host tests, but their runtime
+//! is not a CI promise. `g2g-inspect` prints `Stability   experimental` on
+//! those factories. The pure-Rust set is provisional, not frozen.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]

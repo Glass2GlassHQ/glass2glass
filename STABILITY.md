@@ -1,6 +1,6 @@
 # API Stability Audit & Policy
 
-Status: **pre-1.0, tagged `0.2.0`**. This document is both the audit that answers
+Status: **pre-1.0, tagged `0.5.0`**. This document is both the audit that answers
 "when is `g2g` ready for a 1.0 version indicator" and the **stability policy now in
 effect** (see "Versioning & MSRV policy" below). **Update (M561):** the
 `#[non_exhaustive]` pass has landed - the growth-prone vocabulary enums are now
@@ -26,10 +26,10 @@ is: **can we freeze the public vocabulary and treat changes to it as breaking?**
 - The cheap, high-leverage fix, **now done (M561)**: the growth-prone vocabulary
   enums are marked `#[non_exhaustive]`, converting their ongoing growth from
   breaking to non-breaking and removing the biggest 1.0 obstacle.
-- Recommendation: **cut a tagged `0.2` now**, apply the `#[non_exhaustive]` +
-  stability-split work below, land one real external adopter, and reserve `1.0`
-  for when the vocabulary is frozen-and-extensible and someone depends on it.
-  Consider `g2g-core` reaching 1.0 ahead of the sprawling plugin set.
+- Recommendation: `0.5.0` is tagged (the `#[non_exhaustive]` + stability-split
+  work below is in). Land one real external adopter, and reserve `1.0` for when
+  the vocabulary is frozen-and-extensible and someone depends on it. Consider
+  `g2g-core` reaching 1.0 ahead of the sprawling plugin set.
 
 ## Churn evidence (g2g-core public-surface files)
 
@@ -157,15 +157,17 @@ The type tiers above translate to per-crate promises:
    policy, how versions bump).~~ **DONE (0.2.0)** — the crate→tier mapping and the
    versioning/MSRV policy above are now in effect; the traits are de-facto frozen
    since M354.
-3. **Claims match validation**: every advertised capability is either in CI or
-   marked experimental. (The macOS-unbuilt worry is resolved: CI compiles VtDecode
-   on macOS - see the Tier 3 correction above. What remains is labelling the
-   host-/device-only-*runtime*-validated items as experimental.)
+3. ~~**Claims match validation**: every advertised capability is either in CI or
+   marked experimental.~~ **DONE (M1051)** — `LaunchFactory` / `SourceFactory`
+   take `with_experimental()`; `g2g-inspect` prints `Stability   experimental`
+   on host-/device-only runtime paths (capture, display, hardware codecs, ML
+   device EPs). Crate rustdocs and the README match. CI-tested pure-Rust and
+   software-ffmpeg paths stay unmarked.
 4. **One real external adopter** — a downstream project (bindings, embedded, or a
    wgpu-viewer/game-engine consumer) that ships on g2g. 1.0 without a consumer is
    a promise nobody asked for.
-5. ~~**Intermediate release first**: tag `0.2`.~~ **DONE (0.2.0)** — tagged
-   in-repo (not yet published to crates.io); the crates carry publish metadata
+5. ~~**Intermediate release first**: tag `0.2`.~~ **DONE (`0.2.0`, current `0.5.0`)** —
+   tagged in-repo (not yet published to crates.io); the crates carry publish metadata
    (description/license) and are crates.io-ready when an adopter warrants it.
    `g2g-core` may reach 1.0 before `g2g-plugins`.
 

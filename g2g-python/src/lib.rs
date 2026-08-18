@@ -1,5 +1,7 @@
 //! Host gst-python-ml elements as first-class glass2glass elements (M198).
 //!
+//! Experimental (Tier 3 in `STABILITY.md`): no stability promise.
+//!
 //! gst-python-ml factored its ML logic away from GStreamer: the inference
 //! `tasks/`, the engine `MLEngineMixin`, and the per-frame work all run with no
 //! framework types, behind three seams selected by the `PYML_BACKEND` env var:
