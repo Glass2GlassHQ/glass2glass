@@ -89,7 +89,7 @@ const GST_VERSION_MINOR: i32 = 26;
 // 'static NUL-terminated C strings.
 const NAME: &[u8] = b"glass2glass\0";
 const DESCRIPTION: &[u8] = b"Embed glass2glass sub-graphs in a GStreamer pipeline\0";
-const VERSION: &[u8] = b"0.2.0\0";
+const VERSION: &[u8] = b"0.5.0\0";
 const LICENSE: &[u8] = b"MPL-2.0\0";
 const SOURCE: &[u8] = b"glass2glass\0";
 const PACKAGE: &[u8] = b"glass2glass\0";

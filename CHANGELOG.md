@@ -6,6 +6,11 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+## 0.5.0 - 2026-08-18
+
+Second tagged release. Everything since 0.2.0 (M563–M1050), still pre-1.0.
+Breaking: `run_graph_with_progress` / `run_graph_recorded` take a bus.
+
 - M1050: still-image codecs: `pngdec` / `pngenc` and `webpdec` (pure Rust), typed by magic so `filesrc location=X.png ! decodebin` decodes to RGBA.
 - M1049: MPEG-TS carries AV1 both ways (the AOM private-PES mapping, GStreamer-validated), and the demuxers post DVB EIT present/following event text as per-program tags.
 - M1048: `deinterlace` gains `fields` (field-rate doubling) and `tff` (bff support), plus the planar YUV formats at 10 and 12 bits.

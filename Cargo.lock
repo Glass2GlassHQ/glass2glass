@@ -3864,7 +3864,7 @@ dependencies = [
 
 [[package]]
 name = "g2g-bridge"
-version = "0.2.0"
+version = "0.5.0"
 dependencies = [
  "cc",
  "g2g-core",
@@ -3875,7 +3875,7 @@ dependencies = [
 
 [[package]]
 name = "g2g-capi"
-version = "0.2.0"
+version = "0.5.0"
 dependencies = [
  "g2g-core",
  "g2g-plugins",
@@ -3884,7 +3884,7 @@ dependencies = [
 
 [[package]]
 name = "g2g-core"
-version = "0.2.0"
+version = "0.5.0"
 dependencies = [
  "arc-swap",
  "loom",
@@ -3896,7 +3896,7 @@ dependencies = [
 
 [[package]]
 name = "g2g-mcu"
-version = "0.2.0"
+version = "0.5.0"
 dependencies = [
  "embedded-hal 1.0.0",
  "g2g-core",
@@ -3905,7 +3905,7 @@ dependencies = [
 
 [[package]]
 name = "g2g-mcugen"
-version = "0.2.0"
+version = "0.5.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -3914,7 +3914,7 @@ dependencies = [
 
 [[package]]
 name = "g2g-ml"
-version = "0.2.0"
+version = "0.5.0"
 dependencies = [
  "burn",
  "g2g-core",
@@ -3927,7 +3927,7 @@ dependencies = [
 
 [[package]]
 name = "g2g-plugin"
-version = "0.2.0"
+version = "0.5.0"
 dependencies = [
  "async-ffi",
  "g2g-core",
@@ -3935,7 +3935,7 @@ dependencies = [
 
 [[package]]
 name = "g2g-plugins"
-version = "0.2.0"
+version = "0.5.0"
 dependencies = [
  "ab_glyph",
  "aes",
@@ -4046,7 +4046,7 @@ dependencies = [
 
 [[package]]
 name = "g2g-pyapi"
-version = "0.2.0"
+version = "0.5.0"
 dependencies = [
  "g2g-core",
  "g2g-plugins",
@@ -4056,7 +4056,7 @@ dependencies = [
 
 [[package]]
 name = "g2g-python"
-version = "0.2.0"
+version = "0.5.0"
 dependencies = [
  "g2g-core",
  "g2g-ml",
@@ -11627,7 +11627,7 @@ checksum = "3ae8337f8a065cfc972643663ea4279e04e7256de865aa66fe25cec5fb912d3f"
 
 [[package]]
 name = "xtask"
-version = "0.2.0"
+version = "0.5.0"
 
 [[package]]
 name = "xxhash-rust"
