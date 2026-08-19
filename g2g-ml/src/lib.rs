@@ -1,5 +1,8 @@
 //! ML inference elements for `glass2glass`.
 //!
+//! Experimental (Tier 3 in `STABILITY.md`): no stability promise. Device
+//! execution providers and GPU preprocess are host-validated, not CI-run.
+//!
 //! Two backends, both implementing the same `AsyncElement` contract and
 //! negotiating `Caps::Tensor` on their output pads:
 //! - `burn`: pure-Rust, `wgpu`-backed, for embedded / Wasm / RTOS targets.

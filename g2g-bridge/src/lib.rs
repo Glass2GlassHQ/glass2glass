@@ -1,5 +1,7 @@
 //! GStreamer bridge for `glass2glass`.
 //!
+//! Experimental (Tier 3 in `STABILITY.md`): no stability promise.
+//!
 //! Embeds an isolated `g2g` processing sub-graph inside a legacy GStreamer
 //! pipeline (DESIGN.md §7), so an existing GStreamer application can adopt one
 //! g2g element (a wgpu filter, an ML inference stage) at a time instead of

@@ -38,6 +38,9 @@ fn search_key(d: &ElementDoc) -> String {
     k.push_str(&d.klass);
     k.push(' ');
     k.push_str(&d.description);
+    if d.experimental {
+        k.push_str(" experimental");
+    }
     for p in &d.properties {
         k.push(' ');
         k.push_str(&p.name);
@@ -104,11 +107,16 @@ fn render_card(out: &mut String, d: &ElementDoc) {
     let _ = write!(
         out,
         "<div class=\"el-head\"><h3><a href=\"#el-{}\">{}</a></h3>\
-         <span class=\"badge {}\">{}</span></div>",
+         <span class=\"badge {}\">{}</span>{}</div>",
         esc(&d.name),
         esc(&d.name),
         role_class(&d.role),
-        esc(&d.role)
+        esc(&d.role),
+        if d.experimental {
+            " <span class=\"badge exp\">experimental</span>"
+        } else {
+            ""
+        }
     );
     if !d.klass.is_empty() {
         let _ = write!(out, "<div class=\"klass\">{}</div>", esc(&d.klass));
@@ -199,6 +207,7 @@ header.top .wrap {{ display:flex; align-items:center; justify-content:space-betw
 .role-src {{ background:rgba(52,211,153,0.15); color:var(--green); }}
 .role-el  {{ background:rgba(34,211,238,0.15); color:var(--accent); }}
 .role-mux {{ background:rgba(167,139,250,0.15); color:var(--purple); }}
+.exp {{ background:rgba(251,191,36,0.15); color:var(--amber); }}
 .klass {{ margin-top:4px; font-family:'JetBrains Mono',monospace; font-size:0.72rem; color:var(--t3); }}
 .desc {{ margin-top:10px; font-size:0.85rem; color:var(--t2); }}
 .seg {{ margin-top:14px; }}

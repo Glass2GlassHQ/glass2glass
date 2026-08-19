@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1051: host- and device-only elements declare `experimental`; `g2g-inspect` prints it.
+
 ## 0.5.0 - 2026-08-18
 
 Second tagged release. Everything since 0.2.0 (M563–M1050), still pre-1.0.

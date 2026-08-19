@@ -85,6 +85,12 @@ fn default_registry_inspects_new_elements() {
     assert!(reg.inspect("videoscale").unwrap().contains("width"));
     assert!(reg.inspect("videocrop").unwrap().contains("height"));
     assert!(reg.inspect("videoconvert").unwrap().contains("format"));
+    assert!(
+        !reg.inspect("videoconvert")
+            .unwrap()
+            .contains("experimental"),
+        "pure-Rust videoconvert is not experimental"
+    );
     assert!(reg.inspect("audiotestsrc").unwrap().contains("freq"));
     assert!(reg.inspect("audioconvert").unwrap().contains("channels"));
     assert!(reg.inspect("audioresample").unwrap().contains("samplerate"));

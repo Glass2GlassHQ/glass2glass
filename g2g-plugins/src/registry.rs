@@ -274,29 +274,35 @@ pub fn default_registry() -> Registry {
     // Android AAudio mic capture (M307); the device may open with different
     // actuals, reported as the produced caps. `aaudiosrc` is the gst analog.
     #[cfg(all(target_os = "android", feature = "aaudio"))]
-    reg.register_source(SourceFactory::new(
-        "aaudiosrc",
-        Caps::Audio {
-            format: AudioFormat::PcmS16Le,
-            channels: 2,
-            sample_rate: 48_000,
-        },
-        || Box::new(AAudioSrc::new(48_000, 2, u64::MAX)),
-    ));
+    reg.register_source(
+        SourceFactory::new(
+            "aaudiosrc",
+            Caps::Audio {
+                format: AudioFormat::PcmS16Le,
+                channels: 2,
+                sample_rate: 48_000,
+            },
+            || Box::new(AAudioSrc::new(48_000, 2, u64::MAX)),
+        )
+        .with_experimental(),
+    );
     // Android camera capture (M308); 640x480 NV12 default. `camerasrc` /
     // `ahcsrc` are the gst analogs.
     #[cfg(all(target_os = "android", feature = "camera2"))]
-    reg.register_source(SourceFactory::new(
-        "camera2src",
-        Caps::RawVideo {
-            format: RawVideoFormat::Nv12,
-            width: Dim::Fixed(640),
-            height: Dim::Fixed(480),
-            framerate: Rate::Any,
-            interlace: g2g_core::Interlace::Any,
-        },
-        || Box::new(Camera2Src::new(640, 480, u64::MAX)),
-    ));
+    reg.register_source(
+        SourceFactory::new(
+            "camera2src",
+            Caps::RawVideo {
+                format: RawVideoFormat::Nv12,
+                width: Dim::Fixed(640),
+                height: Dim::Fixed(480),
+                framerate: Rate::Any,
+                interlace: g2g_core::Interlace::Any,
+            },
+            || Box::new(Camera2Src::new(640, 480, u64::MAX)),
+        )
+        .with_experimental(),
+    );
     // The output caps are a nominal default; a bare launch `filesrc` derives its
     // type from the `location` extension (M478), and the `bytestream-format`
     // property (incl. `auto`) overrides that per instance before negotiation.
@@ -1150,14 +1156,15 @@ fn register_autoplug_candidates(reg: &mut Registry) {
     // (encoders are not auto-plug candidates), one factory per codec. The gst
     // analog is `amcvidenc-<component>`.
     #[cfg(all(target_os = "android", feature = "mediacodec"))]
-    reg.register_launch(LaunchFactory::of::<MediaCodecEnc>("mediacodecenc", || {
-        Box::new(MediaCodecEnc::h264())
-    }));
+    reg.register_launch(
+        LaunchFactory::of::<MediaCodecEnc>("mediacodecenc", || Box::new(MediaCodecEnc::h264()))
+            .with_experimental(),
+    );
     #[cfg(all(target_os = "android", feature = "mediacodec"))]
-    reg.register_launch(LaunchFactory::of::<MediaCodecEnc>(
-        "mediacodecench265",
-        || Box::new(MediaCodecEnc::h265()),
-    ));
+    reg.register_launch(
+        LaunchFactory::of::<MediaCodecEnc>("mediacodecench265", || Box::new(MediaCodecEnc::h265()))
+            .with_experimental(),
+    );
     // macOS hardware video decode via VideoToolbox (M218/M534); one factory per
     // codec, like the MediaCodec pair. `vtdec` matches the gst applemedia name.
     // Registered twice like `ffmpegdec`: as an auto-plug candidate and as a
@@ -1177,122 +1184,154 @@ fn register_autoplug_candidates(reg: &mut Registry) {
         .hardware(),
     );
     #[cfg(all(target_os = "macos", feature = "vtdecode"))]
-    reg.register_launch(LaunchFactory::of::<crate::vtdecode::VtDecode>(
-        "vtdec",
-        || Box::new(crate::vtdecode::VtDecode::h264()),
-    ));
+    reg.register_launch(
+        LaunchFactory::of::<crate::vtdecode::VtDecode>("vtdec", || {
+            Box::new(crate::vtdecode::VtDecode::h264())
+        })
+        .with_experimental(),
+    );
     #[cfg(all(target_os = "macos", feature = "vtdecode"))]
-    reg.register_launch(LaunchFactory::of::<crate::vtdecode::VtDecode>(
-        "vtdech265",
-        || Box::new(crate::vtdecode::VtDecode::h265()),
-    ));
+    reg.register_launch(
+        LaunchFactory::of::<crate::vtdecode::VtDecode>("vtdech265", || {
+            Box::new(crate::vtdecode::VtDecode::h265())
+        })
+        .with_experimental(),
+    );
     // macOS hardware video encode via VideoToolbox (M231/M534); launch-only
     // (encoders are not auto-plug candidates), under the gst applemedia names.
     #[cfg(all(target_os = "macos", feature = "vtencode"))]
-    reg.register_launch(LaunchFactory::of::<crate::vtencode::VtEncode>(
-        "vtenc_h264",
-        || Box::new(crate::vtencode::VtEncode::h264()),
-    ));
+    reg.register_launch(
+        LaunchFactory::of::<crate::vtencode::VtEncode>("vtenc_h264", || {
+            Box::new(crate::vtencode::VtEncode::h264())
+        })
+        .with_experimental(),
+    );
     #[cfg(all(target_os = "macos", feature = "vtencode"))]
-    reg.register_launch(LaunchFactory::of::<crate::vtencode::VtEncode>(
-        "vtenc_h265",
-        || Box::new(crate::vtencode::VtEncode::h265()),
-    ));
+    reg.register_launch(
+        LaunchFactory::of::<crate::vtencode::VtEncode>("vtenc_h265", || {
+            Box::new(crate::vtencode::VtEncode::h265())
+        })
+        .with_experimental(),
+    );
     // macOS Metal present sink (M736); the display sink on this platform, so
     // it also backs the `autovideosink` alias below.
     #[cfg(all(target_os = "macos", feature = "metal-sink"))]
-    reg.register_launch(LaunchFactory::of::<crate::metalvideosink::MetalVideoSink>(
-        "metalvideosink",
-        || Box::new(crate::metalvideosink::MetalVideoSink::new()),
-    ));
+    reg.register_launch(
+        LaunchFactory::of::<crate::metalvideosink::MetalVideoSink>("metalvideosink", || {
+            Box::new(crate::metalvideosink::MetalVideoSink::new())
+        })
+        .with_experimental(),
+    );
     // macOS Core Audio render (M737); `osxaudiosink` is the gst analog and an
     // alias below, and `autoaudiosink` falls back to it on this platform.
     #[cfg(all(target_os = "macos", feature = "coreaudio"))]
-    reg.register_launch(LaunchFactory::of::<crate::coreaudio::CoreAudioSink>(
-        "coreaudiosink",
-        || Box::new(crate::coreaudio::CoreAudioSink::new()),
-    ));
+    reg.register_launch(
+        LaunchFactory::of::<crate::coreaudio::CoreAudioSink>("coreaudiosink", || {
+            Box::new(crate::coreaudio::CoreAudioSink::new())
+        })
+        .with_experimental(),
+    );
     // macOS Core Audio mic capture (M737); `osxaudiosrc` is the gst analog.
     #[cfg(all(target_os = "macos", feature = "coreaudio"))]
-    reg.register_source(SourceFactory::new(
-        "coreaudiosrc",
-        Caps::Audio {
-            format: AudioFormat::PcmS16Le,
-            channels: 2,
-            sample_rate: 48_000,
-        },
-        || Box::new(crate::coreaudio::CoreAudioSrc::new(48_000, 2, u64::MAX)),
-    ));
+    reg.register_source(
+        SourceFactory::new(
+            "coreaudiosrc",
+            Caps::Audio {
+                format: AudioFormat::PcmS16Le,
+                channels: 2,
+                sample_rate: 48_000,
+            },
+            || Box::new(crate::coreaudio::CoreAudioSrc::new(48_000, 2, u64::MAX)),
+        )
+        .with_experimental(),
+    );
     // AVFoundation camera capture (M738), VGA NV12; `avfvideosrc` matches gst.
     #[cfg(all(target_os = "macos", feature = "avfoundation"))]
-    reg.register_source(SourceFactory::new(
-        "avfvideosrc",
-        Caps::RawVideo {
-            format: RawVideoFormat::Nv12,
-            width: Dim::Fixed(640),
-            height: Dim::Fixed(480),
-            framerate: Rate::Fixed(30 << 16),
-            interlace: g2g_core::Interlace::Any,
-        },
-        || Box::new(crate::avf::AvfVideoSrc::new(u64::MAX)),
-    ));
+    reg.register_source(
+        SourceFactory::new(
+            "avfvideosrc",
+            Caps::RawVideo {
+                format: RawVideoFormat::Nv12,
+                width: Dim::Fixed(640),
+                height: Dim::Fixed(480),
+                framerate: Rate::Fixed(30 << 16),
+                interlace: g2g_core::Interlace::Any,
+            },
+            || Box::new(crate::avf::AvfVideoSrc::new(u64::MAX)),
+        )
+        .with_experimental(),
+    );
     // AVFoundation mic capture (M738); `avfaudiosrc` matches gst's osxaudiosrc
     // sibling naming.
     #[cfg(all(target_os = "macos", feature = "avfoundation"))]
-    reg.register_source(SourceFactory::new(
-        "avfaudiosrc",
-        Caps::Audio {
-            format: AudioFormat::PcmS16Le,
-            channels: 2,
-            sample_rate: 48_000,
-        },
-        || Box::new(crate::avf::AvfAudioSrc::new(48_000, 2, u64::MAX)),
-    ));
+    reg.register_source(
+        SourceFactory::new(
+            "avfaudiosrc",
+            Caps::Audio {
+                format: AudioFormat::PcmS16Le,
+                channels: 2,
+                sample_rate: 48_000,
+            },
+            || Box::new(crate::avf::AvfAudioSrc::new(48_000, 2, u64::MAX)),
+        )
+        .with_experimental(),
+    );
     // ScreenCaptureKit display capture (M739). The registered caps are nominal;
     // the source reports the real display geometry at negotiation.
     #[cfg(all(target_os = "macos", feature = "screencapture"))]
-    reg.register_source(SourceFactory::new(
-        "screencapturesrc",
-        Caps::RawVideo {
-            format: RawVideoFormat::Nv12,
-            width: Dim::Fixed(1920),
-            height: Dim::Fixed(1080),
-            framerate: Rate::Fixed(30 << 16),
-            interlace: g2g_core::Interlace::Any,
-        },
-        || Box::new(crate::sck::ScreenCaptureSrc::new(u64::MAX)),
-    ));
+    reg.register_source(
+        SourceFactory::new(
+            "screencapturesrc",
+            Caps::RawVideo {
+                format: RawVideoFormat::Nv12,
+                width: Dim::Fixed(1920),
+                height: Dim::Fixed(1080),
+                framerate: Rate::Fixed(30 << 16),
+                interlace: g2g_core::Interlace::Any,
+            },
+            || Box::new(crate::sck::ScreenCaptureSrc::new(u64::MAX)),
+        )
+        .with_experimental(),
+    );
     // Windows capture / render (M943): registered so the device monitor's
     // `Device::create` can build what it discovered, and so a launch line can
     // name them. The registered caps are nominal; each element reports the real
     // endpoint / camera shape at negotiation.
     #[cfg(all(target_os = "windows", feature = "mf-video-src"))]
-    reg.register_source(SourceFactory::new(
-        "mfvideosrc",
-        Caps::RawVideo {
-            format: RawVideoFormat::Nv12,
-            width: Dim::Fixed(640),
-            height: Dim::Fixed(480),
-            framerate: Rate::Fixed(30 << 16),
-            interlace: g2g_core::Interlace::Any,
-        },
-        || Box::new(crate::mfvideosrc::MfVideoSrc::new()),
-    ));
+    reg.register_source(
+        SourceFactory::new(
+            "mfvideosrc",
+            Caps::RawVideo {
+                format: RawVideoFormat::Nv12,
+                width: Dim::Fixed(640),
+                height: Dim::Fixed(480),
+                framerate: Rate::Fixed(30 << 16),
+                interlace: g2g_core::Interlace::Any,
+            },
+            || Box::new(crate::mfvideosrc::MfVideoSrc::new()),
+        )
+        .with_experimental(),
+    );
     #[cfg(all(target_os = "windows", feature = "wasapi-src"))]
-    reg.register_source(SourceFactory::new(
-        "wasapisrc",
-        Caps::Audio {
-            format: AudioFormat::PcmF32Le,
-            channels: 2,
-            sample_rate: 48_000,
-        },
-        || Box::new(crate::wasapisrc::WasapiSrc::new(u64::MAX)),
-    ));
+    reg.register_source(
+        SourceFactory::new(
+            "wasapisrc",
+            Caps::Audio {
+                format: AudioFormat::PcmF32Le,
+                channels: 2,
+                sample_rate: 48_000,
+            },
+            || Box::new(crate::wasapisrc::WasapiSrc::new(u64::MAX)),
+        )
+        .with_experimental(),
+    );
     #[cfg(all(target_os = "windows", feature = "wasapi-sink"))]
-    reg.register_launch(LaunchFactory::of::<crate::wasapisink::WasapiSink>(
-        "wasapisink",
-        || Box::new(crate::wasapisink::WasapiSink::new()),
-    ));
+    reg.register_launch(
+        LaunchFactory::of::<crate::wasapisink::WasapiSink>("wasapisink", || {
+            Box::new(crate::wasapisink::WasapiSink::new())
+        })
+        .with_experimental(),
+    );
 }
 
 /// Register gst-canonical-name aliases (M192) so pasted `gst-launch` lines using
@@ -1808,37 +1847,49 @@ fn register_feature_gated(reg: &mut Registry) {
     // the declared caps here are a nominal catalog default; the `location` property
     // sets the Unix socket path.
     #[cfg(all(target_os = "linux", feature = "local-ipc"))]
-    reg.register_source(SourceFactory::new(
-        "localcudasrc",
-        Caps::RawVideo {
-            format: RawVideoFormat::Nv12,
-            width: Dim::Any,
-            height: Dim::Any,
-            framerate: Rate::Any,
-            interlace: g2g_core::Interlace::Any,
-        },
-        || Box::new(LocalCudaSrc::new("/tmp/g2g-localcuda.sock")),
-    ));
+    reg.register_source(
+        SourceFactory::new(
+            "localcudasrc",
+            Caps::RawVideo {
+                format: RawVideoFormat::Nv12,
+                width: Dim::Any,
+                height: Dim::Any,
+                framerate: Rate::Any,
+                interlace: g2g_core::Interlace::Any,
+            },
+            || Box::new(LocalCudaSrc::new("/tmp/g2g-localcuda.sock")),
+        )
+        .with_experimental(),
+    );
     #[cfg(all(target_os = "linux", feature = "local-ipc"))]
-    reg.register_launch(LaunchFactory::of::<LocalCudaSink>("localcudasink", || {
-        Box::new(LocalCudaSink::new("/tmp/g2g-localcuda.sock"))
-    }));
+    reg.register_launch(
+        LaunchFactory::of::<LocalCudaSink>("localcudasink", || {
+            Box::new(LocalCudaSink::new("/tmp/g2g-localcuda.sock"))
+        })
+        .with_experimental(),
+    );
     #[cfg(all(target_os = "linux", feature = "local-dmabuf"))]
-    reg.register_source(SourceFactory::new(
-        "dmabufsrc",
-        Caps::RawVideo {
-            format: RawVideoFormat::Nv12,
-            width: Dim::Any,
-            height: Dim::Any,
-            framerate: Rate::Any,
-            interlace: g2g_core::Interlace::Any,
-        },
-        || Box::new(DmaBufSrc::new("/tmp/g2g-dmabuf.sock")),
-    ));
+    reg.register_source(
+        SourceFactory::new(
+            "dmabufsrc",
+            Caps::RawVideo {
+                format: RawVideoFormat::Nv12,
+                width: Dim::Any,
+                height: Dim::Any,
+                framerate: Rate::Any,
+                interlace: g2g_core::Interlace::Any,
+            },
+            || Box::new(DmaBufSrc::new("/tmp/g2g-dmabuf.sock")),
+        )
+        .with_experimental(),
+    );
     #[cfg(all(target_os = "linux", feature = "local-dmabuf"))]
-    reg.register_launch(LaunchFactory::of::<DmaBufSink>("dmabufsink", || {
-        Box::new(DmaBufSink::new("/tmp/g2g-dmabuf.sock"))
-    }));
+    reg.register_launch(
+        LaunchFactory::of::<DmaBufSink>("dmabufsink", || {
+            Box::new(DmaBufSink::new("/tmp/g2g-dmabuf.sock"))
+        })
+        .with_experimental(),
+    );
     #[cfg(feature = "http-src")]
     reg.register_source(SourceFactory::new(
         "httpsrc",
@@ -1881,31 +1932,37 @@ fn register_feature_gated(reg: &mut Registry) {
 
     // Linux capture / decode / display.
     #[cfg(all(target_os = "linux", feature = "v4l2"))]
-    reg.register_source(SourceFactory::new(
-        "v4l2src",
-        Caps::RawVideo {
-            format: RawVideoFormat::Yuyv,
-            width: Dim::Any,
-            height: Dim::Any,
-            framerate: Rate::Any,
-            interlace: g2g_core::Interlace::Any,
-        },
-        || Box::new(V4l2Src::new("/dev/video0")),
-    ));
+    reg.register_source(
+        SourceFactory::new(
+            "v4l2src",
+            Caps::RawVideo {
+                format: RawVideoFormat::Yuyv,
+                width: Dim::Any,
+                height: Dim::Any,
+                framerate: Rate::Any,
+                interlace: g2g_core::Interlace::Any,
+            },
+            || Box::new(V4l2Src::new("/dev/video0")),
+        )
+        .with_experimental(),
+    );
     // libcamera capture: NV12 (else YUYV). Geometry/format are negotiated with
     // the camera at startup, so the declared caps are fully open.
     #[cfg(all(target_os = "linux", feature = "libcamera"))]
-    reg.register_source(SourceFactory::new(
-        "libcamerasrc",
-        Caps::RawVideo {
-            format: RawVideoFormat::Nv12,
-            width: Dim::Any,
-            height: Dim::Any,
-            framerate: Rate::Any,
-            interlace: g2g_core::Interlace::Any,
-        },
-        || Box::new(LibCameraSrc::new()),
-    ));
+    reg.register_source(
+        SourceFactory::new(
+            "libcamerasrc",
+            Caps::RawVideo {
+                format: RawVideoFormat::Nv12,
+                width: Dim::Any,
+                height: Dim::Any,
+                framerate: Rate::Any,
+                interlace: g2g_core::Interlace::Any,
+            },
+            || Box::new(LibCameraSrc::new()),
+        )
+        .with_experimental(),
+    );
     #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
     reg.register_launch(LaunchFactory::of::<FfmpegH264Dec>("ffmpegdec", || {
         // Auto preserves source chroma (M685/M686): a `decodebin` chain whose
@@ -1920,19 +1977,24 @@ fn register_feature_gated(reg: &mut Registry) {
         || Box::new(crate::ffmpegaudiodec::FfmpegAudioDec::new()),
     ));
     #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
-    reg.register_launch(LaunchFactory::of::<FfmpegH264Dec>("ffmpegvaapidec", || {
-        Box::new(FfmpegH264Dec::new().with_backend(FfmpegBackend::Vaapi))
-    }));
+    reg.register_launch(
+        LaunchFactory::of::<FfmpegH264Dec>("ffmpegvaapidec", || {
+            Box::new(FfmpegH264Dec::new().with_backend(FfmpegBackend::Vaapi))
+        })
+        .with_experimental(),
+    );
     // Vendor-neutral Vulkan Video hardware decoder (M493; H.264 / H.265 / AV1 since
     // M517): compressed video in, NV12 system memory or (zero-copy) RGBA
     // WgpuTexture out, on the same Vulkan device wgpu runs (AMD/NVIDIA/Intel). The
     // launch name; it is also an auto-plug candidate (registered in
     // `register_autoplug_candidates`, preferred for a WgpuTexture consumer).
     #[cfg(feature = "vulkan-video")]
-    reg.register_launch(LaunchFactory::of::<crate::vulkanvideo::VulkanVideoDec>(
-        "vulkanvideodec",
-        || Box::new(crate::vulkanvideo::VulkanVideoDec::new()),
-    ));
+    reg.register_launch(
+        LaunchFactory::of::<crate::vulkanvideo::VulkanVideoDec>("vulkanvideodec", || {
+            Box::new(crate::vulkanvideo::VulkanVideoDec::new())
+        })
+        .with_experimental(),
+    );
     // ffmpeg / libavcodec H.264 *encoder* (M266 / M274), the encode-side mirror of
     // ffmpegdec. `ffmpegenc` defaults to the NVENC backend (`h264_nvenc`); the
     // explicit `x264enc` name opens the libx264 software encoder for hosts without
@@ -1954,57 +2016,69 @@ fn register_feature_gated(reg: &mut Registry) {
         || Box::new(crate::ffmpegaacenc::FfmpegAacEnc::new()),
     ));
     #[cfg(all(target_os = "linux", feature = "vaapi"))]
-    reg.register_launch(LaunchFactory::of::<VaapiH264Dec>("vaapidec", || {
-        Box::new(VaapiH264Dec::new())
-    }));
+    reg.register_launch(
+        LaunchFactory::of::<VaapiH264Dec>("vaapidec", || Box::new(VaapiH264Dec::new()))
+            .with_experimental(),
+    );
     #[cfg(all(target_os = "linux", feature = "vaapi"))]
-    reg.register_launch(LaunchFactory::of::<VaapiH265Dec>("vaapidech265", || {
-        Box::new(VaapiH265Dec::new())
-    }));
+    reg.register_launch(
+        LaunchFactory::of::<VaapiH265Dec>("vaapidech265", || Box::new(VaapiH265Dec::new()))
+            .with_experimental(),
+    );
     // Native NVIDIA Video Codec SDK elements (M269 / M270): zero-copy CUDA NV12
     // <-> H.264, the gst-`nvcodec`-style pair. Explicit-select by name.
     #[cfg(all(target_os = "linux", feature = "nvdec"))]
-    reg.register_launch(LaunchFactory::of::<NvDec>("nvdec", || {
-        Box::new(NvDec::new())
-    }));
+    reg.register_launch(
+        LaunchFactory::of::<NvDec>("nvdec", || Box::new(NvDec::new())).with_experimental(),
+    );
     #[cfg(all(target_os = "linux", feature = "nvenc"))]
-    reg.register_launch(LaunchFactory::of::<NvEnc>("nvenc", || {
-        Box::new(NvEnc::new())
-    }));
+    reg.register_launch(
+        LaunchFactory::of::<NvEnc>("nvenc", || Box::new(NvEnc::new())).with_experimental(),
+    );
     // JPEG XS codec (M605): the ST 2110-22 compressed essence, via SVT-JPEG-XS.
     #[cfg(all(target_os = "linux", feature = "jpegxs"))]
-    reg.register_launch(LaunchFactory::of::<SvtJpegXsEnc>("jpegxsenc", || {
-        Box::new(SvtJpegXsEnc::new())
-    }));
+    reg.register_launch(
+        LaunchFactory::of::<SvtJpegXsEnc>("jpegxsenc", || Box::new(SvtJpegXsEnc::new()))
+            .with_experimental(),
+    );
     #[cfg(all(target_os = "linux", feature = "jpegxs"))]
-    reg.register_launch(LaunchFactory::of::<SvtJpegXsDec>("jpegxsdec", || {
-        Box::new(SvtJpegXsDec::new())
-    }));
+    reg.register_launch(
+        LaunchFactory::of::<SvtJpegXsDec>("jpegxsdec", || Box::new(SvtJpegXsDec::new()))
+            .with_experimental(),
+    );
     #[cfg(all(target_os = "linux", feature = "dmabuf-wgpu"))]
-    reg.register_launch(LaunchFactory::of::<crate::dmabufwgpu::DmaBufToWgpu>(
-        "dmabuftowgpu",
-        || Box::new(crate::dmabufwgpu::DmaBufToWgpu::new()),
-    ));
+    reg.register_launch(
+        LaunchFactory::of::<crate::dmabufwgpu::DmaBufToWgpu>("dmabuftowgpu", || {
+            Box::new(crate::dmabufwgpu::DmaBufToWgpu::new())
+        })
+        .with_experimental(),
+    );
     // Export mirror (M559): a GPU-resident wgpu buffer out to a dma-buf fd.
     #[cfg(all(target_os = "linux", feature = "dmabuf-wgpu"))]
-    reg.register_launch(LaunchFactory::of::<crate::wgpudmabuf::WgpuToDmaBuf>(
-        "wgputodmabuf",
-        || Box::new(crate::wgpudmabuf::WgpuToDmaBuf::new()),
-    ));
+    reg.register_launch(
+        LaunchFactory::of::<crate::wgpudmabuf::WgpuToDmaBuf>("wgputodmabuf", || {
+            Box::new(crate::wgpudmabuf::WgpuToDmaBuf::new())
+        })
+        .with_experimental(),
+    );
     // Reverse GStreamer bridge: host an unported GStreamer element in a g2g graph.
     // No pad templates (caps are what the negotiation settles + the `output-caps`
     // property declares), like `identity`.
     #[cfg(feature = "gstreamer")]
-    reg.register_launch(LaunchFactory::new("gstwrap", Vec::new(), || {
-        Box::new(crate::gstwrap::GstWrap::new())
-    }));
+    reg.register_launch(
+        LaunchFactory::new("gstwrap", Vec::new(), || {
+            Box::new(crate::gstwrap::GstWrap::new())
+        })
+        .with_experimental(),
+    );
     // Each of the three presents on Wayland, so each declares the same
     // compositor check; it only changes what the `auto*sink` aliases fall
     // through to, never what a pipeline naming the sink outright does.
     #[cfg(all(target_os = "linux", feature = "wayland-sink"))]
     reg.register_launch(
         LaunchFactory::new("waylandsink", Vec::new(), || Box::new(WaylandSink::new()))
-            .with_usable(crate::waylanddisplay::compositor_reachable),
+            .with_usable(crate::waylanddisplay::compositor_reachable)
+            .with_experimental(),
     );
     // Vendor-neutral EGL / GL ES display sink under its gst name; it declares
     // NV12 + RGBA pad templates, so decodebin can auto-plug onto it.
@@ -2013,7 +2087,8 @@ fn register_feature_gated(reg: &mut Registry) {
         LaunchFactory::of::<crate::glsink::GlSink>("glimagesink", || {
             Box::new(crate::glsink::GlSink::new())
         })
-        .with_usable(crate::waylanddisplay::compositor_reachable),
+        .with_usable(crate::waylanddisplay::compositor_reachable)
+        .with_experimental(),
     );
     // Windowed wgpu display sink: it takes GPU-resident frames as they are, so a
     // decoder that keeps them on the GPU reaches the screen with no upload. Its
@@ -2023,7 +2098,8 @@ fn register_feature_gated(reg: &mut Registry) {
         LaunchFactory::of::<crate::wgpupresent::WgpuPresentSink>("wgpusink", || {
             Box::new(crate::wgpupresent::WgpuPresentSink::new())
         })
-        .with_usable(crate::waylanddisplay::compositor_reachable),
+        .with_usable(crate::waylanddisplay::compositor_reachable)
+        .with_experimental(),
     );
     // WebRTC WHIP egress; the `location` property targets the endpoint. The URL
     // defaults empty (set it via `webrtcsink location=...`); publishing starts
@@ -2060,73 +2136,88 @@ fn register_feature_gated(reg: &mut Registry) {
         |_n| Box::new(crate::webrtcwhepsession::WebRtcWhepSessionSrc::new("")),
     ));
     #[cfg(all(target_os = "linux", feature = "kms-sink"))]
-    reg.register_launch(LaunchFactory::new("kmssink", Vec::new(), || {
-        Box::new(KmsSink::new())
-    }));
+    reg.register_launch(
+        LaunchFactory::new("kmssink", Vec::new(), || Box::new(KmsSink::new())).with_experimental(),
+    );
     #[cfg(all(target_os = "linux", feature = "alsa-sink"))]
-    reg.register_launch(LaunchFactory::of::<AlsaSink>("alsasink", || {
-        Box::new(AlsaSink::new())
-    }));
+    reg.register_launch(
+        LaunchFactory::of::<AlsaSink>("alsasink", || Box::new(AlsaSink::new())).with_experimental(),
+    );
     #[cfg(all(target_os = "linux", feature = "pulse-sink"))]
-    reg.register_launch(LaunchFactory::of::<PulseSink>("pulsesink", || {
-        Box::new(PulseSink::new())
-    }));
+    reg.register_launch(
+        LaunchFactory::of::<PulseSink>("pulsesink", || Box::new(PulseSink::new()))
+            .with_experimental(),
+    );
     // Linux audio capture (M886), the non-PipeWire mic paths.
     #[cfg(all(target_os = "linux", feature = "alsa-src"))]
-    reg.register_source(SourceFactory::new(
-        "alsasrc",
-        Caps::Audio {
-            format: AudioFormat::PcmS16Le,
-            channels: 2,
-            sample_rate: 48_000,
-        },
-        || Box::new(AlsaSrc::new()),
-    ));
+    reg.register_source(
+        SourceFactory::new(
+            "alsasrc",
+            Caps::Audio {
+                format: AudioFormat::PcmS16Le,
+                channels: 2,
+                sample_rate: 48_000,
+            },
+            || Box::new(AlsaSrc::new()),
+        )
+        .with_experimental(),
+    );
     #[cfg(all(target_os = "linux", feature = "pulse-src"))]
-    reg.register_source(SourceFactory::new(
-        "pulsesrc",
-        Caps::Audio {
-            format: AudioFormat::PcmS16Le,
-            channels: 2,
-            sample_rate: 48_000,
-        },
-        || Box::new(PulseSrc::new()),
-    ));
+    reg.register_source(
+        SourceFactory::new(
+            "pulsesrc",
+            Caps::Audio {
+                format: AudioFormat::PcmS16Le,
+                channels: 2,
+                sample_rate: 48_000,
+            },
+            || Box::new(PulseSrc::new()),
+        )
+        .with_experimental(),
+    );
     // PipeWire: audio render / capture plus video capture (M890). The audio
     // capture element opens S16LE stereo at 48 kHz.
     #[cfg(all(target_os = "linux", feature = "pipewire"))]
-    reg.register_launch(LaunchFactory::of::<PipeWireSink>("pipewiresink", || {
-        Box::new(PipeWireSink::new())
-    }));
+    reg.register_launch(
+        LaunchFactory::of::<PipeWireSink>("pipewiresink", || Box::new(PipeWireSink::new()))
+            .with_experimental(),
+    );
     #[cfg(all(target_os = "linux", feature = "pipewire"))]
-    reg.register_source(SourceFactory::new(
-        "pipewiresrc",
-        Caps::Audio {
-            format: AudioFormat::PcmS16Le,
-            channels: 2,
-            sample_rate: 48_000,
-        },
-        || Box::new(PipeWireSrc::new()),
-    ));
+    reg.register_source(
+        SourceFactory::new(
+            "pipewiresrc",
+            Caps::Audio {
+                format: AudioFormat::PcmS16Le,
+                channels: 2,
+                sample_rate: 48_000,
+            },
+            || Box::new(PipeWireSrc::new()),
+        )
+        .with_experimental(),
+    );
     // Geometry and format are negotiated with the node at startup, so the
     // declared caps stay open (like v4l2src / libcamerasrc).
     #[cfg(all(target_os = "linux", feature = "pipewire"))]
-    reg.register_source(SourceFactory::new(
-        "pipewirevideosrc",
-        Caps::RawVideo {
-            format: RawVideoFormat::I420,
-            width: Dim::Any,
-            height: Dim::Any,
-            framerate: Rate::Any,
-            interlace: g2g_core::Interlace::Any,
-        },
-        || Box::new(PipeWireVideoSrc::new()),
-    ));
+    reg.register_source(
+        SourceFactory::new(
+            "pipewirevideosrc",
+            Caps::RawVideo {
+                format: RawVideoFormat::I420,
+                width: Dim::Any,
+                height: Dim::Any,
+                framerate: Rate::Any,
+                interlace: g2g_core::Interlace::Any,
+            },
+            || Box::new(PipeWireVideoSrc::new()),
+        )
+        .with_experimental(),
+    );
     // Android AAudio PCM render (M307); the gst analog is `aaudiosink`.
     #[cfg(all(target_os = "android", feature = "aaudio"))]
-    reg.register_launch(LaunchFactory::of::<AAudioSink>("aaudiosink", || {
-        Box::new(AAudioSink::new())
-    }));
+    reg.register_launch(
+        LaunchFactory::of::<AAudioSink>("aaudiosink", || Box::new(AAudioSink::new()))
+            .with_experimental(),
+    );
 }
 
 #[cfg(all(test, target_os = "linux", feature = "nvenc", feature = "nvdec"))]

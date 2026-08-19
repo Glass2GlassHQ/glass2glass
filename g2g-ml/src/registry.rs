@@ -27,16 +27,21 @@ use g2g_core::runtime::Registry;
 /// Returns the registry so the call can chain onto a builder expression.
 pub fn register(reg: &mut Registry) -> &mut Registry {
     #[cfg(feature = "ort")]
-    reg.register_launch(LaunchFactory::of::<crate::ortinfer::OrtInference>(
-        "ortinfer",
-        // Model-less: the `model` property loads the session (M820).
-        || Box::new(crate::ortinfer::OrtInference::new()),
-    ));
+    reg.register_launch(
+        LaunchFactory::of::<crate::ortinfer::OrtInference>(
+            "ortinfer",
+            // Model-less: the `model` property loads the session (M820).
+            || Box::new(crate::ortinfer::OrtInference::new()),
+        )
+        .with_experimental(),
+    );
     #[cfg(feature = "wgpu")]
-    reg.register_launch(LaunchFactory::of::<crate::wgpupreprocess::WgpuPreprocess>(
-        "wgpupreprocess",
-        || Box::new(crate::wgpupreprocess::WgpuPreprocess::new()),
-    ));
+    reg.register_launch(
+        LaunchFactory::of::<crate::wgpupreprocess::WgpuPreprocess>("wgpupreprocess", || {
+            Box::new(crate::wgpupreprocess::WgpuPreprocess::new())
+        })
+        .with_experimental(),
+    );
     #[cfg(feature = "analytics")]
     reg.register_launch(LaunchFactory::of::<crate::detect::DetectionPostprocess>(
         "detectionpostprocess",
@@ -45,10 +50,13 @@ pub fn register(reg: &mut Registry) -> &mut Registry {
         || Box::new(crate::detect::DetectionPostprocess::new(0.25, 0.45)),
     ));
     #[cfg(all(feature = "ort", feature = "analytics"))]
-    reg.register_launch(LaunchFactory::of::<crate::ortsegment::OrtSegmentation>(
-        "ortsegment",
-        // Model-less: the `model` property loads the session.
-        || Box::new(crate::ortsegment::OrtSegmentation::new()),
-    ));
+    reg.register_launch(
+        LaunchFactory::of::<crate::ortsegment::OrtSegmentation>(
+            "ortsegment",
+            // Model-less: the `model` property loads the session.
+            || Box::new(crate::ortsegment::OrtSegmentation::new()),
+        )
+        .with_experimental(),
+    );
     reg
 }

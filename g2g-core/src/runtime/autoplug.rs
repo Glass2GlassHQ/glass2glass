@@ -403,6 +403,9 @@ mod factory {
         pub author: String,
         /// `"source"`, `"element"`, or `"muxer (fan-in)"`.
         pub role: String,
+        /// Host- or device-only runtime path: compiled, not promised in CI.
+        /// See `STABILITY.md` (Tier 3).
+        pub experimental: bool,
         /// Output caps (sources / muxers), the debug spelling; `None` for a
         /// transform / sink, which advertises pad templates instead.
         pub caps: Option<String>,
@@ -548,6 +551,7 @@ mod factory {
         templates: Vec<PadTemplate>,
         build: fn() -> Box<dyn DynAsyncElement>,
         usable: Option<fn() -> bool>,
+        experimental: bool,
     }
 
     impl LaunchFactory {
@@ -563,6 +567,7 @@ mod factory {
                 templates,
                 build,
                 usable: None,
+                experimental: false,
             }
         }
 
@@ -585,6 +590,18 @@ mod factory {
         pub fn with_usable(mut self, usable: fn() -> bool) -> Self {
             self.usable = Some(usable);
             self
+        }
+
+        /// Mark this element experimental: its runtime path is host- or
+        /// device-validated, not a CI promise. `g2g-inspect` prints it.
+        pub fn with_experimental(mut self) -> Self {
+            self.experimental = true;
+            self
+        }
+
+        /// Whether this factory declared [`with_experimental`].
+        pub fn experimental(&self) -> bool {
+            self.experimental
         }
 
         /// This factory's element name.
@@ -761,6 +778,7 @@ mod factory {
         name: &'static str,
         output: Caps,
         build: fn() -> Box<dyn DynSourceLoop>,
+        experimental: bool,
     }
 
     impl SourceFactory {
@@ -774,7 +792,20 @@ mod factory {
                 name,
                 output,
                 build,
+                experimental: false,
             }
+        }
+
+        /// Mark this source experimental: its runtime path is host- or
+        /// device-validated, not a CI promise. `g2g-inspect` prints it.
+        pub fn with_experimental(mut self) -> Self {
+            self.experimental = true;
+            self
+        }
+
+        /// Whether this factory declared [`with_experimental`].
+        pub fn experimental(&self) -> bool {
+            self.experimental
         }
     }
 
@@ -1566,29 +1597,41 @@ mod factory {
         /// [`inspect`](Self::inspect)).
         pub fn element_listing(&self) -> Vec<String> {
             use alloc::string::ToString;
-            let line = |name: &str, long: &str| {
-                if long.is_empty() {
+            let line = |name: &str, long: &str, experimental: bool| {
+                let mut s = if long.is_empty() {
                     name.to_string()
                 } else {
                     let mut s = name.to_string();
                     s.push_str(": ");
                     s.push_str(long);
                     s
+                };
+                if experimental {
+                    s.push_str(" [experimental]");
                 }
+                s
             };
             let mut lines = Vec::new();
             for s in &self.sources {
-                lines.push(line(s.name, (s.build)().metadata().long_name));
+                lines.push(line(
+                    s.name,
+                    (s.build)().metadata().long_name,
+                    s.experimental,
+                ));
             }
             for f in &self.launch {
-                lines.push(line(f.name, (f.build)().metadata().long_name));
+                lines.push(line(
+                    f.name,
+                    (f.build)().metadata().long_name,
+                    f.experimental,
+                ));
             }
             for m in &self.muxers {
                 // Skip a muxer already listed as a launch element above. A
                 // one-input instance carries the metadata, the way `inspect`
                 // reads a muxer's.
                 if !self.launch.iter().any(|f| f.name == m.name) {
-                    lines.push(line(m.name, (m.build)(1).metadata().long_name));
+                    lines.push(line(m.name, (m.build)(1).metadata().long_name, false));
                 }
             }
             lines
@@ -1608,6 +1651,9 @@ mod factory {
                 let src = (s.build)();
                 out.push_str(&format_metadata(name, &src.metadata()));
                 let _ = writeln!(out, "  Role        source");
+                if s.experimental {
+                    let _ = writeln!(out, "  Stability   experimental");
+                }
                 let _ = writeln!(out, "\nOutput caps:\n  {:?}", s.output);
                 let _ = write!(
                     out,
@@ -1619,6 +1665,9 @@ mod factory {
                 let el = (f.build)();
                 out.push_str(&format_metadata(name, &el.metadata()));
                 let _ = writeln!(out, "  Role        element");
+                if f.experimental {
+                    let _ = writeln!(out, "  Stability   experimental");
+                }
                 let _ = write!(out, "\nPad Templates:\n{}", format_templates(&f.templates));
                 let _ = write!(
                     out,
@@ -1666,6 +1715,7 @@ mod factory {
                     description: m.description.to_string(),
                     author: m.author.to_string(),
                     role: "source".to_string(),
+                    experimental: s.experimental,
                     caps: Some(format!("{:?}", s.output)),
                     pads: Vec::new(),
                     properties: property_docs(src.properties()),
@@ -1680,6 +1730,7 @@ mod factory {
                     description: m.description.to_string(),
                     author: m.author.to_string(),
                     role: "element".to_string(),
+                    experimental: f.experimental,
                     caps: None,
                     pads: pad_docs(&f.templates),
                     properties: property_docs(el.properties()),
@@ -1694,6 +1745,7 @@ mod factory {
                     description: m.description.to_string(),
                     author: m.author.to_string(),
                     role: "muxer (fan-in)".to_string(),
+                    experimental: false,
                     caps: mux.output_caps().ok().map(|c| format!("{c:?}")),
                     pads: Vec::new(),
                     properties: property_docs(mux.properties()),
@@ -2743,5 +2795,34 @@ mod tests {
         reg.register_alias("autosink", &["plainsink"]);
 
         assert_eq!(reg.resolve_alias("autosink"), "plainsink");
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn inspect_prints_experimental_only_when_declared() {
+        let mut reg = Registry::new();
+        reg.register_launch(named_sink("gpusink").with_experimental());
+        reg.register_launch(named_sink("plainsink"));
+
+        let gpu = reg.inspect("gpusink").expect("registered");
+        assert!(
+            gpu.contains("Stability   experimental"),
+            "declared experimental: {gpu}"
+        );
+        assert!(
+            reg.element_listing()
+                .iter()
+                .any(|l| l.contains("gpusink") && l.contains("[experimental]")),
+            "listing tags the name"
+        );
+        let doc = reg.describe("gpusink").expect("described");
+        assert!(doc.experimental);
+
+        let plain = reg.inspect("plainsink").expect("registered");
+        assert!(
+            !plain.contains("experimental"),
+            "unmarked factory stays quiet: {plain}"
+        );
+        assert!(!reg.describe("plainsink").expect("described").experimental);
     }
 }

@@ -1760,7 +1760,10 @@ the last:
   registers a transform / sink under a name with a parameterless constructor and
   its pad templates (sources reuse the parameterless `SourceFactory`).
   `make_source` / `make_element` build by name; `inspect(name)` dumps an element's
-  role, properties, and pad templates, the `gst-inspect` analog. The dump is
+  role, properties, and pad templates, the `gst-inspect` analog. A factory can
+  declare `with_experimental()` when its runtime is host- or device-validated
+  rather than a CI promise; the dump then includes `Stability   experimental`
+  and the listing suffixes `[experimental]`. The dump is
   GStreamer-shaped: a "Factory Details" header from the element type's
   `metadata()` (`ElementMetadata { long_name, klass, description, author }`, the
   `gst_element_class_set_static_metadata` analog, a zero-cost opt-in like

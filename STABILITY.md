@@ -157,10 +157,12 @@ The type tiers above translate to per-crate promises:
    policy, how versions bump).~~ **DONE (0.2.0)** — the crate→tier mapping and the
    versioning/MSRV policy above are now in effect; the traits are de-facto frozen
    since M354.
-3. **Claims match validation**: every advertised capability is either in CI or
-   marked experimental. (The macOS-unbuilt worry is resolved: CI compiles VtDecode
-   on macOS - see the Tier 3 correction above. What remains is labelling the
-   host-/device-only-*runtime*-validated items as experimental.)
+3. ~~**Claims match validation**: every advertised capability is either in CI or
+   marked experimental.~~ **DONE (M1051)** — `LaunchFactory` / `SourceFactory`
+   take `with_experimental()`; `g2g-inspect` prints `Stability   experimental`
+   on host-/device-only runtime paths (capture, display, hardware codecs, ML
+   device EPs). Crate rustdocs and the README match. CI-tested pure-Rust and
+   software-ffmpeg paths stay unmarked.
 4. **One real external adopter** — a downstream project (bindings, embedded, or a
    wgpu-viewer/game-engine consumer) that ships on g2g. 1.0 without a consumer is
    a promise nobody asked for.

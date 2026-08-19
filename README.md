@@ -42,6 +42,12 @@ gives reproducible evidence for each target (Cortex-M footprint, Embassy smoke,
 CPU render, GPU-resident wgpu, in-browser canvas). See also
 [The four pillars](#the-four-pillars).
 
+OS-, GPU-, and device-coupled elements (camera, display, NVDEC/VA-API/Vulkan
+Video, VideoToolbox, MediaCodec, ML device EPs) are **experimental**: they
+compile, and some have host tests, but their runtime is not a CI promise.
+`g2g-inspect` prints `Stability   experimental` on those factories. See
+[STABILITY.md](STABILITY.md).
+
 ### Also: QNX (safety-certified RTOS)
 
 Beyond the five, the portable core is one spike away from QNX, the POSIX

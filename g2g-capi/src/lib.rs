@@ -1,6 +1,9 @@
 //! C ABI for glass2glass: the language-neutral waist over the `gst-launch`-style
 //! DSL + element registry (PORTING.md §5, DESIGN.md §4.16).
 //!
+//! Experimental (Tier 3 in `STABILITY.md`): tracks `g2g-core`, no stability
+//! promise of its own.
+//!
 //! A non-Rust caller (C, and through it Python/C#/Swift/...) describes a
 //! pipeline as a string, runs it, and watches the pipeline bus, without holding
 //! any typed Rust element value. This is the by-string usage model GStreamer
