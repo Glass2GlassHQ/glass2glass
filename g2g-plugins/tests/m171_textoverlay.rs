@@ -5,7 +5,9 @@
 use g2g_core::runtime::{parse_launch, run_graph};
 use g2g_core::PipelineClock;
 use g2g_plugins::registry::default_registry;
-use g2g_plugins::subparse::{parse_webvtt, Cue, CueSettings, TextAlign};
+use g2g_plugins::subparse::{
+    parse_webvtt, Cue, CueSettings, SpanStyle, TextAlign, BOLD_FONT_WEIGHT,
+};
 use g2g_plugins::textoverlay::TextOverlay;
 
 /// A clock pinned at zero (the parsed pipelines don't depend on wall time).
@@ -30,8 +32,17 @@ fn webvtt_round_trips_through_the_parser() {
             Cue {
                 start_ns: 1_000_000_000,
                 end_ns: 3_000_000_000,
+                // The tag leaves the text alone and styles the run it wrapped.
                 text: "First line".into(),
-                settings: CueSettings::default(),
+                settings: CueSettings {
+                    spans: vec![SpanStyle {
+                        start: 0,
+                        end: 5,
+                        font_weight: Some(BOLD_FONT_WEIGHT),
+                        ..SpanStyle::default()
+                    }],
+                    ..CueSettings::default()
+                },
             },
             Cue {
                 start_ns: 3_000_000_000,

@@ -102,10 +102,29 @@ pub struct TextShadow {
     pub color: [u8; 4],
 }
 
+/// CSS `font-stretch` as a keyword: how condensed or expanded a face the rule
+/// asks for. Percentages are not read, so a rule giving one keeps the face the
+/// cue already selected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FontStretch {
+    UltraCondensed,
+    ExtraCondensed,
+    Condensed,
+    SemiCondensed,
+    #[default]
+    Normal,
+    SemiExpanded,
+    Expanded,
+    ExtraExpanded,
+    UltraExpanded,
+}
+
 /// One styled run of a cue's text: the `[start, end)` byte range of
-/// [`Cue::text`] that a class-carrying WebVTT span (`<c.loud>...</c>`) covers,
-/// and what the `::cue(.loud)` rules resolved for it. Runs are in document
-/// order and may nest, so where two overlap the later one wins, per property.
+/// [`Cue::text`] that a WebVTT span covers, and the style resolved for it. A
+/// span is either class-carrying (`<c.loud>...</c>`, styled by the matching
+/// `::cue(.loud)` rules) or one of the presentational tags `<b>` / `<i>` /
+/// `<u>`. Runs are in document order and may nest, so where two overlap the
+/// later one wins, per property.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct SpanStyle {
     /// Byte offset of the span's first character in [`Cue::text`].
@@ -120,6 +139,14 @@ pub struct SpanStyle {
     pub shadow: Option<TextShadow>,
     /// Fill drawn behind this run's glyphs alone, over the cue's backing box.
     pub background: Option<[u8; 4]>,
+    /// CSS `font-weight` for this run (`<b>` asks for [`BOLD_FONT_WEIGHT`]).
+    pub font_weight: Option<u16>,
+    /// Whether this run asks for an italic face (`font-style`, `<i>`).
+    pub italic: Option<bool>,
+    /// Whether this run is underlined (`text-decoration`, `<u>`).
+    pub underline: Option<bool>,
+    /// Face width for this run (`font-stretch`).
+    pub stretch: Option<FontStretch>,
 }
 
 /// WebVTT cue placement settings, the subset the bitmap overlay honours. `None`
@@ -151,8 +178,17 @@ pub struct CueSettings {
     pub font_size: Option<CueFontSize>,
     /// Drop shadow from a whole-cue `text-shadow:` rule, if any.
     pub shadow: Option<TextShadow>,
-    /// Per-span styling from `::cue(.class)` rules, each covering only the span
-    /// it came from. Empty unless a span-scoped rule matched.
+    /// Text weight from a whole-cue `font-weight:` rule, if any.
+    pub font_weight: Option<u16>,
+    /// Whether a whole-cue `font-style:` rule asked for an italic face.
+    pub italic: Option<bool>,
+    /// Whether a whole-cue `text-decoration:` rule underlines the cue.
+    pub underline: Option<bool>,
+    /// Face width from a whole-cue `font-stretch:` rule, if any.
+    pub stretch: Option<FontStretch>,
+    /// Per-span styling from `::cue(.class)` rules and the `<b>` / `<i>` /
+    /// `<u>` tags, each covering only the span it came from. Empty unless a
+    /// span-scoped rule matched or the cue carries one of those tags.
     pub spans: Vec<SpanStyle>,
 }
 
@@ -192,6 +228,32 @@ impl CueSettings {
     /// cue-wide fallback: that is the backing box (`background`).
     pub fn span_background_at(&self, at: usize) -> Option<[u8; 4]> {
         self.innermost(at, |s| s.background)
+    }
+
+    /// The `font-weight` for the character at byte offset `at`, or `None` where
+    /// neither a covering run nor the cue asks for one (the renderer keeps
+    /// whatever weight its font configuration already selects).
+    pub fn font_weight_at(&self, at: usize) -> Option<u16> {
+        self.innermost(at, |s| s.font_weight).or(self.font_weight)
+    }
+
+    /// Whether the character at byte offset `at` is drawn in an italic face.
+    pub fn italic_at(&self, at: usize) -> bool {
+        self.innermost(at, |s| s.italic)
+            .or(self.italic)
+            .unwrap_or(false)
+    }
+
+    /// Whether the character at byte offset `at` is underlined.
+    pub fn underline_at(&self, at: usize) -> bool {
+        self.innermost(at, |s| s.underline)
+            .or(self.underline)
+            .unwrap_or(false)
+    }
+
+    /// The face width for the character at byte offset `at`.
+    pub fn stretch_at(&self, at: usize) -> Option<FontStretch> {
+        self.innermost(at, |s| s.stretch).or(self.stretch)
     }
 }
 
@@ -256,10 +318,12 @@ pub fn parse_srt(input: &str) -> Vec<Cue> {
 /// Parse WebVTT (`.vtt`) text into cues, in file order. The `WEBVTT` header and
 /// `NOTE` / `REGION` blocks are skipped and inline markup is removed; `STYLE`
 /// blocks are read for `::cue`, `::cue(#id)` and `::cue(.a[.b...])`
-/// `color` / `background-color` / `font-size` / `text-shadow` rules, which are
+/// `color` / `background-color` / `font-size` / `text-shadow` / `font-weight` /
+/// `font-style` / `text-decoration` / `font-stretch` rules, which are
 /// resolved onto each cue's [`CueSettings`] (the subset the overlay can apply;
 /// other CSS properties are ignored). A span-scoped `::cue(.class)` rule covers
-/// only the `<c.class>` span it matched, as a [`SpanStyle`] run. A header
+/// only the `<c.class>` span it matched, as a [`SpanStyle`] run, as do the
+/// presentational `<b>` / `<i>` / `<u>` tags. A header
 /// block's `X-TIMESTAMP-MAP` (RFC 8216 §3.5) rebases the cue
 /// times that follow it onto the MPEG-2 media timeline, so the concatenated
 /// segments of an HLS rendition land where the video does.
@@ -305,9 +369,7 @@ pub fn parse_webvtt(input: &str) -> Vec<Cue> {
         }
         if let Some((mut cue, spans)) = block_to_cue(b, true) {
             rebase_cue(&mut cue, offset_ns);
-            if !sheet.is_empty() {
-                apply_cue_style(&sheet, block_cue_id(b), &spans, &mut cue.settings);
-            }
+            apply_cue_style(&sheet, block_cue_id(b), &spans, &mut cue.settings);
             cues.push(cue);
         }
     }
@@ -367,14 +429,40 @@ fn block_cue_id<'a>(block: &[&'a str]) -> Option<&'a str> {
     (timing_idx > 0).then(|| block[timing_idx - 1].trim())
 }
 
-/// One class-carrying span of a cue's text: where it lands in the stripped text
-/// and the classes its tag named (`<c.loud.narrator>`, `<v.loud Bob>`). What
-/// `::cue(.class)` selects.
+/// One styling span of a cue's text: where it lands in the stripped text, the
+/// element name its tag opened with, and the classes that tag named
+/// (`<c.loud.narrator>`, `<v.loud Bob>`). The classes are what `::cue(.class)`
+/// selects; the name is what makes `<b>` / `<i>` / `<u>` presentational.
 #[derive(Debug)]
 struct CueSpan {
     start: usize,
     end: usize,
+    tag: String,
     classes: Vec<String>,
+}
+
+/// The `font-weight` `<b>` and CSS `bold` ask for.
+pub const BOLD_FONT_WEIGHT: u16 = 700;
+/// The `font-weight` CSS `normal` asks for.
+const NORMAL_FONT_WEIGHT: u16 = 400;
+/// CSS puts a numeric `font-weight` in `1..=1000`; a value outside it drops the
+/// declaration.
+const FONT_WEIGHT_RANGE: core::ops::RangeInclusive<u16> = 1..=1000;
+
+/// The style a presentational tag carries, folded onto a span's run where the
+/// CSS did not already set that property.
+fn fold_inline_tag(tag: &str, run: &mut CueSettings) {
+    match tag {
+        "b" if run.font_weight.is_none() => run.font_weight = Some(BOLD_FONT_WEIGHT),
+        "i" if run.italic.is_none() => run.italic = Some(true),
+        "u" if run.underline.is_none() => run.underline = Some(true),
+        _ => {}
+    }
+}
+
+/// Whether a tag styles the span it opens on its own, with no CSS rule.
+fn is_presentational_tag(tag: &str) -> bool {
+    matches!(tag, "b" | "i" | "u")
 }
 
 /// The `.class` parts of an open span tag's name (`c.loud.narrator`), empty for
@@ -405,8 +493,8 @@ enum CueSelector {
     Classes(Vec<String>),
 }
 
-/// One parsed `::cue` rule: its selectors and the `color` / `background-color` /
-/// `font-size` / `text-shadow` it sets (the properties the overlay can honour).
+/// One parsed `::cue` rule: its selectors and the properties the overlay can
+/// honour.
 #[derive(Debug)]
 struct CueStyleRule {
     selectors: Vec<CueSelector>,
@@ -414,6 +502,10 @@ struct CueStyleRule {
     background: Option<[u8; 4]>,
     font_size: Option<CueFontSize>,
     shadow: Option<TextShadow>,
+    font_weight: Option<u16>,
+    italic: Option<bool>,
+    underline: Option<bool>,
+    stretch: Option<FontStretch>,
 }
 
 /// Parse the WebVTT `STYLE` CSS into the supported `::cue` rules. Comments are
@@ -441,6 +533,10 @@ fn parse_cue_styles(css: &str) -> Vec<CueStyleRule> {
         let mut background = None;
         let mut font_size = None;
         let mut shadow = None;
+        let mut font_weight = None;
+        let mut italic = None;
+        let mut underline = None;
+        let mut stretch = None;
         for decl in decl_str.split(';') {
             let Some((prop, val)) = decl.split_once(':') else {
                 continue;
@@ -450,6 +546,10 @@ fn parse_cue_styles(css: &str) -> Vec<CueStyleRule> {
                 "background-color" | "background" => background = parse_css_color(val.trim()),
                 "font-size" => font_size = parse_css_font_size(val.trim()),
                 "text-shadow" => shadow = parse_text_shadow(val.trim()),
+                "font-weight" => font_weight = parse_css_font_weight(val.trim()),
+                "font-style" => italic = parse_css_font_style(val.trim()),
+                "text-decoration" => underline = parse_css_text_decoration(val.trim()),
+                "font-stretch" => stretch = parse_css_font_stretch(val.trim()),
                 _ => {}
             }
         }
@@ -459,6 +559,10 @@ fn parse_cue_styles(css: &str) -> Vec<CueStyleRule> {
             background,
             font_size,
             shadow,
+            font_weight,
+            italic,
+            underline,
+            stretch,
         });
     }
     rules
@@ -491,7 +595,8 @@ fn parse_cue_selector(sel: &str) -> Option<CueSelector> {
 /// Resolve a cue's style from the sheet. Whole-cue rules (`::cue`, then
 /// `::cue(#id)`, in increasing specificity) set the cue's properties; a
 /// span-scoped `::cue(.class)` rule sets them for just the spans that carry its
-/// classes, as a [`SpanStyle`] run.
+/// classes, as a [`SpanStyle`] run. A `<b>` / `<i>` / `<u>` span styles itself
+/// where no rule matching it set that property.
 fn apply_cue_style(
     sheet: &[CueStyleRule],
     id: Option<&str>,
@@ -524,10 +629,15 @@ fn apply_cue_style(
         for (_, rule) in matched {
             fold_rule(rule, &mut run);
         }
+        fold_inline_tag(&span.tag, &mut run);
         if run.color.is_some()
             || run.font_size.is_some()
             || run.shadow.is_some()
             || run.background.is_some()
+            || run.font_weight.is_some()
+            || run.italic.is_some()
+            || run.underline.is_some()
+            || run.stretch.is_some()
         {
             settings.spans.push(SpanStyle {
                 start: span.start,
@@ -536,6 +646,10 @@ fn apply_cue_style(
                 font_size: run.font_size,
                 shadow: run.shadow,
                 background: run.background,
+                font_weight: run.font_weight,
+                italic: run.italic,
+                underline: run.underline,
+                stretch: run.stretch,
             });
         }
     }
@@ -576,6 +690,18 @@ fn fold_rule(rule: &CueStyleRule, settings: &mut CueSettings) {
     }
     if rule.shadow.is_some() {
         settings.shadow = rule.shadow;
+    }
+    if rule.font_weight.is_some() {
+        settings.font_weight = rule.font_weight;
+    }
+    if rule.italic.is_some() {
+        settings.italic = rule.italic;
+    }
+    if rule.underline.is_some() {
+        settings.underline = rule.underline;
+    }
+    if rule.stretch.is_some() {
+        settings.stretch = rule.stretch;
     }
 }
 
@@ -652,6 +778,66 @@ fn parse_css_font_size(value: &str) -> Option<CueFontSize> {
     Some(CueFontSize::Pixels(
         round_to_u32(px).clamp(1, MAX_CUE_FONT_PX),
     ))
+}
+
+/// Parse a `font-weight` value: `bold`, `normal`, or a number in
+/// [`FONT_WEIGHT_RANGE`]. `None` for `bolder` / `lighter` (relative to a parent
+/// weight this parser does not track) and for anything else.
+fn parse_css_font_weight(value: &str) -> Option<u16> {
+    let value = value.trim();
+    if value.eq_ignore_ascii_case("bold") {
+        return Some(BOLD_FONT_WEIGHT);
+    }
+    if value.eq_ignore_ascii_case("normal") {
+        return Some(NORMAL_FONT_WEIGHT);
+    }
+    let weight = round_to_u32(positive_length(value)?);
+    let weight = u16::try_from(weight).ok()?;
+    FONT_WEIGHT_RANGE.contains(&weight).then_some(weight)
+}
+
+/// Parse a `font-style` value: `italic` / `oblique` ask for a slanted face,
+/// `normal` for an upright one. `None` for anything else (an `oblique 14deg`
+/// angle included, which needs a synthetic slant nothing here does).
+fn parse_css_font_style(value: &str) -> Option<bool> {
+    let value = value.trim();
+    if value.eq_ignore_ascii_case("italic") || value.eq_ignore_ascii_case("oblique") {
+        return Some(true);
+    }
+    value.eq_ignore_ascii_case("normal").then_some(false)
+}
+
+/// Parse a `text-decoration` value: `underline` (in a shorthand with a style or
+/// colour too) turns the underline on, `none` off. `None` for a decoration the
+/// overlay cannot draw (`line-through`, `overline`), which leaves the cue as it
+/// was.
+fn parse_css_text_decoration(value: &str) -> Option<bool> {
+    let value = value.trim();
+    if value.eq_ignore_ascii_case("none") {
+        return Some(false);
+    }
+    value
+        .split_whitespace()
+        .any(|part| part.eq_ignore_ascii_case("underline"))
+        .then_some(true)
+}
+
+/// Parse a `font-stretch` keyword. `None` for a percentage or anything else,
+/// which leaves the face the cue already selected.
+fn parse_css_font_stretch(value: &str) -> Option<FontStretch> {
+    let value = value.trim().to_ascii_lowercase();
+    Some(match value.as_str() {
+        "ultra-condensed" => FontStretch::UltraCondensed,
+        "extra-condensed" => FontStretch::ExtraCondensed,
+        "condensed" => FontStretch::Condensed,
+        "semi-condensed" => FontStretch::SemiCondensed,
+        "normal" => FontStretch::Normal,
+        "semi-expanded" => FontStretch::SemiExpanded,
+        "expanded" => FontStretch::Expanded,
+        "extra-expanded" => FontStretch::ExtraExpanded,
+        "ultra-expanded" => FontStretch::UltraExpanded,
+        _ => return None,
+    })
 }
 
 /// Parse a `text-shadow` value: `offset-x offset-y [blur] [color]`, the colour
@@ -1831,8 +2017,12 @@ fn parse_blocks_rebased(input: &str, webvtt: bool, offset_ns: &mut i64) -> Vec<C
                 *offset_ns = off;
             }
         }
-        if let Some((mut cue, _spans)) = block_to_cue(block, webvtt) {
+        if let Some((mut cue, spans)) = block_to_cue(block, webvtt) {
             rebase_cue(&mut cue, *offset_ns);
+            // No stylesheet reaches this path (SRT, and the streaming WebVTT
+            // parser, which sees cue blocks one at a time), but `<b>` / `<i>` /
+            // `<u>` still style their spans.
+            apply_cue_style(&[], None, &spans, &mut cue.settings);
             cues.push(cue);
         }
     };
@@ -1891,7 +2081,8 @@ fn block_to_cue(block: &[&str], webvtt: bool) -> Option<(Cue, Vec<CueSpan>)> {
 }
 
 /// Join a cue's text lines with the `<...>` markup removed, recording the byte
-/// range each class-carrying span covers in the result. Spans nest, so the stack
+/// range each class-carrying or presentational span covers in the result (the
+/// rest of the markup leaves nothing behind). Spans nest, so the stack
 /// pairs each close tag with the innermost open one; a span left unclosed at the
 /// end of the cue runs to the end of the text (a stray `</c>` is ignored).
 fn strip_cue_text(lines: &[&str]) -> (String, Vec<CueSpan>) {
@@ -1923,6 +2114,7 @@ fn strip_cue_text(lines: &[&str]) -> (String, Vec<CueSpan>) {
                 spans.push(CueSpan {
                     start: text.len(),
                     end: text.len(),
+                    tag: tag_name(tag).to_ascii_lowercase(),
                     classes: tag_classes(tag),
                 });
             }
@@ -1933,7 +2125,7 @@ fn strip_cue_text(lines: &[&str]) -> (String, Vec<CueSpan>) {
     for idx in open {
         spans[idx].end = text.len();
     }
-    spans.retain(|s| !s.classes.is_empty());
+    spans.retain(|s| !s.classes.is_empty() || is_presentational_tag(&s.tag));
     (text, spans)
 }
 
@@ -2567,6 +2759,10 @@ mod tests {
                 background: None,
                 font_size: None,
                 shadow: None,
+                font_weight: None,
+                italic: None,
+                underline: None,
+                stretch: None,
                 spans: Vec::new(),
             }
         );
@@ -2582,6 +2778,10 @@ mod tests {
                 background: None,
                 font_size: None,
                 shadow: None,
+                font_weight: None,
+                italic: None,
+                underline: None,
+                stretch: None,
                 spans: Vec::new(),
             }
         );
@@ -2773,6 +2973,121 @@ mod tests {
     }
 
     #[test]
+    fn webvtt_inline_style_tags_span_their_own_text() {
+        // `<b>` / `<i>` / `<u>` need no stylesheet: each covers the byte range
+        // of the text it wraps in the stripped cue, and nesting composes, the
+        // inner span setting its own property and inheriting the outer one.
+        let input = "WEBVTT\n\n\
+            00:00:00.000 --> 00:00:01.000\n\
+            ab <b>cd</b> <i>e</i><u>f</u>\n\n\
+            00:00:01.000 --> 00:00:02.000\n<b>x<i>y</i></b>\n";
+        let cues = parse_webvtt(input);
+        assert_eq!(cues[0].text, "ab cd ef");
+        assert_eq!(
+            cues[0].settings.spans,
+            alloc::vec![
+                SpanStyle {
+                    start: 3,
+                    end: 5,
+                    font_weight: Some(BOLD_FONT_WEIGHT),
+                    ..SpanStyle::default()
+                },
+                SpanStyle {
+                    start: 6,
+                    end: 7,
+                    italic: Some(true),
+                    ..SpanStyle::default()
+                },
+                SpanStyle {
+                    start: 7,
+                    end: 8,
+                    underline: Some(true),
+                    ..SpanStyle::default()
+                },
+            ]
+        );
+        assert_eq!(cues[0].settings.font_weight_at(0), None);
+        assert_eq!(cues[0].settings.font_weight_at(3), Some(BOLD_FONT_WEIGHT));
+        assert!(!cues[0].settings.italic_at(3));
+        assert!(cues[0].settings.italic_at(6));
+        assert!(cues[0].settings.underline_at(7));
+        assert!(!cues[0].settings.underline_at(6));
+
+        // The nested italic keeps the enclosing bold.
+        assert_eq!(cues[1].text, "xy");
+        assert_eq!(cues[1].settings.font_weight_at(1), Some(BOLD_FONT_WEIGHT));
+        assert!(cues[1].settings.italic_at(1));
+        assert!(!cues[1].settings.italic_at(0));
+    }
+
+    #[test]
+    fn webvtt_text_style_rules_parse_on_every_selector() {
+        // `font-weight` / `font-style` / `text-decoration` / `font-stretch` on
+        // the whole cue, on an id, and on a span class. A `text-decoration` the
+        // overlay cannot draw is ignored, as is a relative `font-weight`.
+        let input = "WEBVTT\n\n\
+            STYLE\n\
+            ::cue { font-weight: bold; font-stretch: condensed; }\n\
+            ::cue(#slanted) { font-style: italic; font-weight: 600; }\n\
+            ::cue(.marked) { text-decoration: underline; font-stretch: ultra-expanded; }\n\
+            ::cue(.struck) { text-decoration: line-through; }\n\
+            ::cue(.plain) { font-weight: normal; font-style: normal; }\n\
+            ::cue(.relative) { font-weight: bolder; }\n\
+            ::cue(.overweight) { font-weight: 1200; }\n\n\
+            00:00:00.000 --> 00:00:01.000\n\
+            a<c.marked>b</c><c.struck>c</c><c.plain>d</c><c.relative>e</c><c.overweight>f</c>\n\n\
+            slanted\n00:00:01.000 --> 00:00:02.000\nsloped\n";
+        let cues = parse_webvtt(input);
+        let s = &cues[0].settings;
+        assert_eq!(cues[0].text, "abcdef");
+        assert_eq!(s.font_weight, Some(BOLD_FONT_WEIGHT));
+        assert_eq!(s.stretch, Some(FontStretch::Condensed));
+        assert_eq!(s.underline, None);
+        // The span rule underlines and widens only its own byte.
+        assert!(s.underline_at(1));
+        assert!(!s.underline_at(0));
+        assert_eq!(s.stretch_at(1), Some(FontStretch::UltraExpanded));
+        assert_eq!(s.stretch_at(0), Some(FontStretch::Condensed));
+        // `line-through` is not a decoration this draws, so the span keeps the
+        // cue's (absent) one rather than turning something on.
+        assert!(!s.underline_at(2));
+        // A span may turn the cue-wide weight and slant back off.
+        assert_eq!(s.font_weight_at(3), Some(NORMAL_FONT_WEIGHT));
+        assert!(!s.italic_at(3));
+        // `bolder` and an out-of-range number leave the cue-wide weight in place.
+        assert_eq!(s.font_weight_at(4), Some(BOLD_FONT_WEIGHT));
+        assert_eq!(s.font_weight_at(5), Some(BOLD_FONT_WEIGHT));
+
+        // The id rule is more specific than `::cue`, so it wins for the cue.
+        let s = &cues[1].settings;
+        assert_eq!(s.font_weight, Some(600));
+        assert_eq!(s.italic, Some(true));
+        assert!(s.italic_at(0));
+        assert_eq!(s.stretch, Some(FontStretch::Condensed));
+    }
+
+    #[test]
+    fn webvtt_cue_css_beats_an_inline_style_tag() {
+        // `<b>` is presentational, so a rule matching the same span decides the
+        // weight; a property the rule leaves alone still comes from the tag.
+        let input = "WEBVTT\n\n\
+            STYLE\n::cue(.quiet) { font-weight: normal; }\n\n\
+            00:00:00.000 --> 00:00:01.000\n<b><c.quiet>hush</c></b>\n";
+        let cues = parse_webvtt(input);
+        assert_eq!(cues[0].text, "hush");
+        assert_eq!(cues[0].settings.font_weight_at(0), Some(NORMAL_FONT_WEIGHT));
+    }
+
+    #[test]
+    fn srt_inline_style_tags_span_their_own_text() {
+        // SRT has no stylesheet, but the same presentational tags apply.
+        let cues = parse_srt("1\n00:00:00,000 --> 00:00:01,000\nplain <i>tilted</i>\n");
+        assert_eq!(cues[0].text, "plain tilted");
+        assert!(cues[0].settings.italic_at(6));
+        assert!(!cues[0].settings.italic_at(0));
+    }
+
+    #[test]
     fn webvtt_cue_text_shadow_is_parsed() {
         // The `offset-x offset-y [blur] [colour]` forms, cue-wide and per span.
         let input = "WEBVTT\n\n\
@@ -2869,6 +3184,10 @@ mod tests {
                 background: None,
                 font_size: None,
                 shadow: None,
+                font_weight: None,
+                italic: None,
+                underline: None,
+                stretch: None,
                 spans: Vec::new(),
             }
         );
@@ -3573,6 +3892,10 @@ mod tests {
                 background: None,
                 font_size: None,
                 shadow: None,
+                font_weight: None,
+                italic: None,
+                underline: None,
+                stretch: None,
                 spans: Vec::new(),
             }
         );

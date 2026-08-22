@@ -16,8 +16,11 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use cosmic_text::{
-    Attrs, Buffer, Family, FontSystem, Metrics, Shaping, SwashCache, SwashContent, Weight, Wrap,
+    Attrs, Buffer, Family, FontSystem, Metrics, Shaping, Stretch, Style, SwashCache, SwashContent,
+    Weight, Wrap,
 };
+
+use crate::subparse::FontStretch;
 
 /// Identifies one rasterized glyph (face, glyph index, size, subpixel bin).
 pub use cosmic_text::CacheKey as GlyphKey;
@@ -45,7 +48,7 @@ pub struct ShapedGlyph {
     /// Whether the glyph sits in a right-to-left bidi run.
     pub rtl: bool,
     /// Size this glyph was shaped at, which is the block's `px` unless a
-    /// [`SizedSpan`] covered it.
+    /// [`StyledSpan`] covered it.
     pub font_size: f32,
     /// Horizontal advance of this glyph's cluster, for a caller measuring the
     /// pixels a byte range covers (a span background fill).
@@ -59,17 +62,58 @@ pub struct ShapedLine {
     pub width: f32,
     pub top: f32,
     pub height: f32,
+    /// Baseline of this line, relative to the block's top-left. What an
+    /// underline is measured down from.
+    pub baseline: f32,
     pub glyphs: Vec<ShapedGlyph>,
 }
 
-/// A byte range of the text to lay out at a size other than the block's. Ranges
-/// must be non-overlapping and ascending; the bytes between them take the
-/// block's size.
-#[derive(Debug, Clone, Copy)]
-pub struct SizedSpan {
+/// A byte range of the text to lay out with its own font attributes rather than
+/// the block's. Ranges must be non-overlapping and ascending; the bytes between
+/// them take the block's attributes. A `None` field keeps the block's value.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct StyledSpan {
     pub start: usize,
     pub end: usize,
-    pub px: f32,
+    pub font_size: Option<f32>,
+    pub weight: Option<u16>,
+    pub italic: Option<bool>,
+    pub stretch: Option<FontStretch>,
+}
+
+impl StyledSpan {
+    /// Whether this span asks for anything at all (an empty one would only
+    /// split the shaped run).
+    pub fn styles_anything(&self) -> bool {
+        self.font_size.is_some()
+            || self.weight.is_some()
+            || self.italic.is_some()
+            || self.stretch.is_some()
+    }
+
+    /// Whether two spans ask for the same attributes, so an adjacent pair can be
+    /// laid out as one run.
+    pub fn same_style(&self, other: &Self) -> bool {
+        self.font_size == other.font_size
+            && self.weight == other.weight
+            && self.italic == other.italic
+            && self.stretch == other.stretch
+    }
+}
+
+/// The cosmic-text face width a CSS `font-stretch` keyword selects.
+fn stretch_of(stretch: FontStretch) -> Stretch {
+    match stretch {
+        FontStretch::UltraCondensed => Stretch::UltraCondensed,
+        FontStretch::ExtraCondensed => Stretch::ExtraCondensed,
+        FontStretch::Condensed => Stretch::Condensed,
+        FontStretch::SemiCondensed => Stretch::SemiCondensed,
+        FontStretch::Normal => Stretch::Normal,
+        FontStretch::SemiExpanded => Stretch::SemiExpanded,
+        FontStretch::Expanded => Stretch::Expanded,
+        FontStretch::ExtraExpanded => Stretch::ExtraExpanded,
+        FontStretch::UltraExpanded => Stretch::UltraExpanded,
+    }
 }
 
 /// A laid-out text block: `width` is the widest line, `height` the sum of the
@@ -96,36 +140,50 @@ pub struct GlyphImage<'a> {
 }
 
 /// Split `text` into the `(slice, attrs)` pairs `set_rich_text` wants: the
-/// ranges `sizes` names carry a `Metrics` override, the bytes between them carry
-/// `base`. A range that runs backwards, is empty, or lands inside a codepoint is
-/// skipped rather than shifting the text.
-fn sized_spans<'text, 'attrs>(
+/// ranges `styled` names carry their own attributes over `base`, the bytes
+/// between them carry `base` itself. A range that runs backwards, is empty, or
+/// lands inside a codepoint is skipped rather than shifting the text.
+fn styled_attrs<'text, 'attrs>(
     text: &'text str,
     px: f32,
     line_height: f32,
     base: &Attrs<'attrs>,
-    sizes: &[SizedSpan],
+    styled: &[StyledSpan],
 ) -> Vec<(&'text str, Attrs<'attrs>)> {
     let mut spans = Vec::new();
     let mut at = 0usize;
-    for span in sizes {
+    for span in styled {
         let usable = span.start >= at
             && span.end > span.start
             && span.end <= text.len()
             && text.is_char_boundary(span.start)
             && text.is_char_boundary(span.end)
-            && span.px > 0.0;
+            && span.font_size.is_none_or(|size| size > 0.0)
+            && span.styles_anything();
         if !usable {
             continue;
         }
         if at < span.start {
             spans.push((&text[at..span.start], base.clone()));
         }
-        // Scale the line height with the size, so a larger span asks for a
-        // proportionally taller line box (cosmic-text takes the line's tallest).
-        let scale = if px > 0.0 { span.px / px } else { 1.0 };
-        let metrics = Metrics::new(span.px, line_height * scale);
-        spans.push((&text[span.start..span.end], base.clone().metrics(metrics)));
+        let mut attrs = base.clone();
+        if let Some(size) = span.font_size {
+            // Scale the line height with the size, so a larger span asks for a
+            // proportionally taller line box (cosmic-text takes the line's
+            // tallest).
+            let scale = if px > 0.0 { size / px } else { 1.0 };
+            attrs = attrs.metrics(Metrics::new(size, line_height * scale));
+        }
+        if let Some(weight) = span.weight {
+            attrs = attrs.weight(Weight(weight));
+        }
+        if let Some(italic) = span.italic {
+            attrs = attrs.style(if italic { Style::Italic } else { Style::Normal });
+        }
+        if let Some(stretch) = span.stretch {
+            attrs = attrs.stretch(stretch_of(stretch));
+        }
+        spans.push((&text[span.start..span.end], attrs));
         at = span.end;
     }
     if at < text.len() {
@@ -218,17 +276,22 @@ impl TextShaper {
 
     /// Shape and lay out `text` at `px` (one visual line per logical line, no
     /// wrapping), optionally at variable-font weight `wght`. Ranges named in
-    /// `sizes` are laid out at their own size instead, which cosmic-text carries
-    /// as a per-span `Metrics` override on the line's `AttrsList`, so a line
-    /// mixing sizes is still one shaped, bidi-reordered run and takes the tallest
-    /// span's line height. Line positions are relative to the block's top-left.
+    /// `styled` are laid out with their own size / weight / slant / width
+    /// instead, which cosmic-text carries as per-span attributes on the line's
+    /// `AttrsList`, so a line mixing them is still one shaped, bidi-reordered
+    /// run and takes the tallest span's line height. A span's weight, slant or
+    /// width selects a face from the font database, so a family with a real
+    /// bold or italic face renders in it; a weight with no such face still
+    /// reaches the `wght` variation axis, but a slant with no italic face
+    /// renders upright (there is no synthetic oblique here). Line positions are
+    /// relative to the block's top-left.
     pub fn layout(
         &mut self,
         text: &str,
         px: f32,
         line_height: f32,
         wght: Option<f32>,
-        sizes: &[SizedSpan],
+        styled: &[StyledSpan],
     ) -> ShapedBlock {
         let mut attrs = Attrs::new();
         if let Some(family) = &self.primary {
@@ -243,10 +306,10 @@ impl TextShaper {
         // ab_glyph path, rather than reflowed.
         buffer.set_wrap(&mut self.fonts, Wrap::None);
         buffer.set_size(&mut self.fonts, None, None);
-        if sizes.is_empty() {
+        if styled.is_empty() {
             buffer.set_text(&mut self.fonts, text, &attrs, Shaping::Advanced, None);
         } else {
-            let spans = sized_spans(text, px, line_height, &attrs, sizes);
+            let spans = styled_attrs(text, px, line_height, &attrs, styled);
             buffer.set_rich_text(&mut self.fonts, spans, &attrs, Shaping::Advanced, None);
         }
         buffer.shape_until_scroll(&mut self.fonts, false);
@@ -278,6 +341,7 @@ impl TextShaper {
                 width: run.line_w,
                 top: run.line_top,
                 height: run.line_height,
+                baseline: run.line_y,
                 glyphs,
             });
         }
@@ -286,6 +350,13 @@ impl TextShaper {
             height,
             lines,
         }
+    }
+
+    /// Whether any face was discovered at all, so a test can skip on a host
+    /// with no fonts installed.
+    #[cfg(test)]
+    fn has_faces(&self) -> bool {
+        !self.fonts.db().is_empty()
     }
 
     /// Rasterize (or fetch from the cache) one shaped glyph. `None` for a glyph
@@ -306,5 +377,42 @@ impl TextShaper {
             data: &image.data,
             color,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A styled span reaches the shaped glyphs: the run it covers is shaped at
+    /// its own weight (which the raster key carries, so swash scales the `wght`
+    /// axis for it), the bytes outside it at the block's.
+    #[test]
+    fn a_styled_span_shapes_its_own_run_at_its_own_weight() {
+        let mut shaper = TextShaper::new(&[]);
+        if !shaper.has_faces() {
+            std::eprintln!("no system font; skipping");
+            return;
+        }
+        let px = 32.0;
+        let block = shaper.layout(
+            "ab",
+            px,
+            px * 1.25,
+            None,
+            &[StyledSpan {
+                start: 0,
+                end: 1,
+                weight: Some(700),
+                ..StyledSpan::default()
+            }],
+        );
+        let line = block.lines.first().expect("one line");
+        assert_eq!(line.glyphs.len(), 2, "one glyph per character");
+        assert_eq!(line.glyphs[0].key.font_weight.0, 700);
+        assert_eq!(line.glyphs[1].key.font_weight.0, Weight::NORMAL.0);
+        // The baseline sits inside the line box, which is what an underline is
+        // measured down from.
+        assert!(line.baseline > line.top && line.baseline < line.top + line.height);
     }
 }

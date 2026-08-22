@@ -30,6 +30,14 @@
 //! set, else the system face the shaper resolved). `font-variations=` axes other
 //! than `wght` reach only that column path.
 //!
+//! A cue's `font-weight` / `font-style` / `font-stretch` (M1055, from a `::cue`
+//! rule or a `<b>` / `<i>` tag) selects a face on the shaped path only, so a
+//! vertical cue renders at whatever weight the element's own
+//! `font-variations=` asks for. cosmic-text has no synthetic oblique, so an
+//! italic run of a family with no italic face installed renders upright.
+//! `text-decoration: underline` (and `<u>`) draws on both paths: under the
+//! baseline horizontally, along the column's right edge vertically.
+//!
 //! [`bitmapfont`]: crate::bitmapfont
 
 use core::future::Future;
@@ -107,53 +115,78 @@ struct TtfGlyph {
     shadow: Option<TextShadow>,
 }
 
-/// The byte ranges of `text` a `::cue(.class)` rule sizes differently from
-/// `cue_px`, flattened to the non-overlapping, ascending runs the shaper takes
-/// (nested spans have already resolved to one size per character).
+/// The font attributes the cue's `::cue` rules and its `<b>` / `<i>` / `<u>`
+/// tags ask for, per character, flattened to the non-overlapping, ascending
+/// runs the shaper takes (nested spans have already resolved to one value per
+/// character). Sizes resolve against `cue_px`, the size the cue itself draws at.
 #[cfg(feature = "text-shaping")]
-fn sized_spans(
+fn styled_spans(
     text: &str,
     settings: &crate::subparse::CueSettings,
     cue_px: f32,
-) -> Vec<crate::textshape::SizedSpan> {
-    let mut spans: Vec<crate::textshape::SizedSpan> = Vec::new();
+) -> Vec<crate::textshape::StyledSpan> {
+    let mut spans: Vec<crate::textshape::StyledSpan> = Vec::new();
     for (offset, c) in text.char_indices() {
-        let Some(size) = settings.span_font_size_at(offset) else {
-            continue;
+        let span = crate::textshape::StyledSpan {
+            start: offset,
+            end: offset + c.len_utf8(),
+            font_size: settings
+                .span_font_size_at(offset)
+                .map(|size| size.resolve(cue_px)),
+            weight: settings.font_weight_at(offset),
+            // Upright is the base attributes' slant already, so `normal` needs
+            // no run of its own.
+            italic: settings.italic_at(offset).then_some(true),
+            stretch: settings.stretch_at(offset),
         };
-        let px = size.resolve(cue_px);
-        let end = offset + c.len_utf8();
         match spans.last_mut() {
-            Some(open) if open.end == offset && open.px == px => open.end = end,
-            _ => spans.push(crate::textshape::SizedSpan {
-                start: offset,
-                end,
-                px,
-            }),
+            Some(open) if open.end == offset && open.same_style(&span) => open.end = span.end,
+            _ if span.styles_anything() => spans.push(span),
+            _ => {}
         }
     }
     spans
 }
 
-/// Merge consecutive glyphs asking for the same span background into one fill
-/// each. Cells are `(colour, low, high)` along the direction the line advances
-/// in (x for a horizontal line, y for a vertical column); the result is one
-/// `(colour, low, high)` per run.
+/// Gap between the baseline and the top of an underline, as a fraction of the
+/// underlined run's text size.
 #[cfg(feature = "truetype-overlay")]
-fn merge_span_fills(
-    cells: impl IntoIterator<Item = (Option<[u8; 4]>, i32, i32)>,
-) -> Vec<([u8; 4], i32, i32)> {
-    let mut runs: Vec<([u8; 4], i32, i32)> = Vec::new();
-    for (color, low, high) in cells {
-        let Some(color) = color else {
+const UNDERLINE_GAP_FRACTION: f32 = 0.13;
+
+/// Underline thickness as a fraction of the underlined run's text size.
+#[cfg(feature = "truetype-overlay")]
+const UNDERLINE_THICKNESS_FRACTION: f32 = 0.07;
+
+/// How far below the baseline an underline of `px` text starts, and how thick it
+/// is, both at least one pixel so a small cue still shows the bar.
+#[cfg(feature = "truetype-overlay")]
+fn underline_bar(px: f32) -> (i32, i32) {
+    (
+        ((px * UNDERLINE_GAP_FRACTION) as i32).max(1),
+        ((px * UNDERLINE_THICKNESS_FRACTION) as i32).max(1),
+    )
+}
+
+/// Merge consecutive glyphs asking for the same fill into one run each. Cells
+/// are `(fill, low, high)` along the direction the line advances in (x for a
+/// horizontal line, y for a vertical column), `None` for a glyph asking for no
+/// fill; the result is one `(fill, low, high)` per run. A span background keys
+/// on its colour, an underline on colour plus the size that sizes the bar.
+#[cfg(feature = "truetype-overlay")]
+fn merge_span_fills<Fill: Copy + PartialEq>(
+    cells: impl IntoIterator<Item = (Option<Fill>, i32, i32)>,
+) -> Vec<(Fill, i32, i32)> {
+    let mut runs: Vec<(Fill, i32, i32)> = Vec::new();
+    for (fill, low, high) in cells {
+        let Some(fill) = fill else {
             continue;
         };
         match runs.last_mut() {
-            Some(open) if open.0 == color && open.2 >= low => {
+            Some(open) if open.0 == fill && open.2 >= low => {
                 open.1 = open.1.min(low);
                 open.2 = open.2.max(high);
             }
-            _ => runs.push((color, low, high)),
+            _ => runs.push((fill, low, high)),
         }
     }
     runs
@@ -283,6 +316,9 @@ pub(crate) struct PlacedCue {
     /// Fills behind the spans that asked for one, one per run of a span on a
     /// line. Drawn over the backing box and under the glyphs.
     pub span_backgrounds: Vec<SpanFill>,
+    /// Underline bars, one per underlined run on a line, in the run's text
+    /// colour. Drawn in the glyph layer, so a neighbour's shadow stays under it.
+    pub underlines: Vec<SpanFill>,
     pub glyphs: Vec<PlacedGlyph>,
 }
 
@@ -902,6 +938,10 @@ impl TextOverlay {
             let line_h = lm.new_line_size.max(tallest_px);
             let mut glyphs: Vec<TtfGlyph> = Vec::new();
             let mut fills: Vec<SpanFill> = Vec::new();
+            let mut underlines: Vec<SpanFill> = Vec::new();
+            // The bar is sized by the run's own text size, so an underlined
+            // `font-size` span gets a proportional one.
+            let underline_at = |off: usize| s.underline_at(off).then(|| (fg_at(off), px_at(off)));
 
             if matches!(
                 s.vertical,
@@ -950,6 +990,7 @@ impl TextOverlay {
                         };
                     let base = bases.get(ci).copied().unwrap_or(0);
                     let mut cells = Vec::new();
+                    let mut underline_cells = Vec::new();
                     for (j, &(off, c)) in chars.iter().enumerate() {
                         let (m, cov) = self.glyph_font(c).rasterize(c, px_at(base + off));
                         let gx = col_x + (col_w - m.advance_width) / 2.0 + m.xmin as f32;
@@ -958,6 +999,11 @@ impl TextOverlay {
                         let cell_top = start_y + j as f32 * cell_h;
                         cells.push((
                             s.span_background_at(base + off),
+                            cell_top as i32,
+                            (cell_top + cell_h) as i32,
+                        ));
+                        underline_cells.push((
+                            underline_at(base + off),
                             cell_top as i32,
                             (cell_top + cell_h) as i32,
                         ));
@@ -973,6 +1019,13 @@ impl TextOverlay {
                     // A span's fill runs down the column it is in.
                     for (color, top, bottom) in merge_span_fills(cells) {
                         fills.push(((col_x as i32, top, col_w as i32, bottom - top), color));
+                    }
+                    // In a vertical writing mode the underline runs down the
+                    // column's right edge instead of along a baseline.
+                    for ((color, run_px), top, bottom) in merge_span_fills(underline_cells) {
+                        let (_, thickness) = underline_bar(run_px);
+                        let bar_x = (col_x + col_w) as i32 - thickness;
+                        underlines.push(((bar_x, top, thickness, bottom - top), color));
                     }
                 }
             } else {
@@ -1025,12 +1078,18 @@ impl TextOverlay {
                     let base = bases.get(row).copied().unwrap_or(0);
                     let mut pen = x0;
                     let mut cells = Vec::new();
+                    let mut underline_cells = Vec::new();
                     for (off, c) in line.char_indices() {
                         let (m, cov) = self.glyph_font(c).rasterize(c, px_at(base + off));
                         let gx = pen + m.xmin as f32;
                         let gy = baseline - m.ymin as f32 - m.height as f32;
                         cells.push((
                             s.span_background_at(base + off),
+                            pen as i32,
+                            (pen + m.advance_width) as i32,
+                        ));
+                        underline_cells.push((
+                            underline_at(base + off),
                             pen as i32,
                             (pen + m.advance_width) as i32,
                         ));
@@ -1047,6 +1106,13 @@ impl TextOverlay {
                     // A span's fill covers the line box behind its own glyphs.
                     for (color, left, right) in merge_span_fills(cells) {
                         fills.push(((left, line_top as i32, right - left, line_h as i32), color));
+                    }
+                    for ((color, run_px), left, right) in merge_span_fills(underline_cells) {
+                        let (gap, thickness) = underline_bar(run_px);
+                        underlines.push((
+                            (left, baseline as i32 + gap, right - left, thickness),
+                            color,
+                        ));
                     }
                 }
             }
@@ -1066,6 +1132,9 @@ impl TextOverlay {
                     &g.coverage,
                     shadow,
                 );
+            }
+            for (rect, color) in underlines {
+                self.fill_rect(buf, rect.0, rect.1, rect.2, rect.3, color);
             }
             for g in &glyphs {
                 self.blit_coverage(buf, g.x, g.y, g.size, &g.coverage, g.color);
@@ -1210,8 +1279,8 @@ impl TextOverlay {
             // so a mixed-size line is still one shaped run.
             let cue_px = s.font_size.map_or(px, |size| size.resolve(px));
             let line_h = cue_px * 1.25;
-            let sizes = sized_spans(&cue.text, s, cue_px);
-            let block = shaper.layout(&cue.text, cue_px, line_h, wght, &sizes);
+            let styled = styled_spans(&cue.text, s, cue_px);
+            let block = shaper.layout(&cue.text, cue_px, line_h, wght, &styled);
             if block.lines.is_empty() {
                 continue;
             }
@@ -1238,6 +1307,7 @@ impl TextOverlay {
             };
             let mut glyphs = Vec::new();
             let mut span_backgrounds = Vec::new();
+            let mut underlines = Vec::new();
             for (row, line) in block.lines.iter().enumerate() {
                 let x0 = match s.align {
                     TextAlign::Center => block_left + (block_w - line.width) / 2.0,
@@ -1246,13 +1316,18 @@ impl TextOverlay {
                 };
                 let base = bases.get(row).copied().unwrap_or(0);
                 let mut cells = Vec::new();
+                let mut underline_cells = Vec::new();
                 for g in &line.glyphs {
                     let at = base + g.start;
                     let left = x0 as i32 + g.x;
-                    cells.push((
-                        s.span_background_at(at),
+                    let right = left + g.advance.ceil() as i32;
+                    cells.push((s.span_background_at(at), left, right));
+                    // The bar is sized by the run's own text size, so an
+                    // underlined `font-size` span gets a proportional one.
+                    underline_cells.push((
+                        s.underline_at(at).then(|| (fg_at(at), g.font_size)),
                         left,
-                        left + g.advance.ceil() as i32,
+                        right,
                     ));
                     glyphs.push(PlacedGlyph {
                         key: g.key,
@@ -1270,6 +1345,11 @@ impl TextOverlay {
                     span_backgrounds
                         .push(((left, line_top, right - left, line.height as i32), color));
                 }
+                let baseline = block_top as i32 + line.baseline as i32;
+                for ((color, run_px), left, right) in merge_span_fills(underline_cells) {
+                    let (gap, thickness) = underline_bar(run_px);
+                    underlines.push(((left, baseline + gap, right - left, thickness), color));
+                }
             }
             placed.push(PlacedCue {
                 background: (
@@ -1280,6 +1360,7 @@ impl TextOverlay {
                 ),
                 background_color: bg,
                 span_backgrounds,
+                underlines,
                 glyphs,
             });
         }
@@ -1288,8 +1369,9 @@ impl TextOverlay {
     }
 
     /// Blit the cues [`place_shaped_cues`](Self::place_shaped_cues) laid out:
-    /// the backing box, the span fills over it, the shadows, then each glyph's
-    /// rasterized coverage (or its colour bitmap for an emoji face).
+    /// the backing box, the span fills over it, the shadows, then the underline
+    /// bars and each glyph's rasterized coverage (or its colour bitmap for an
+    /// emoji face).
     #[cfg(feature = "text-shaping")]
     fn render_active_shaped(&mut self, buf: &mut [u8], t_ns: u64) {
         let placed = self.place_shaped_cues(t_ns);
@@ -1323,6 +1405,9 @@ impl TextOverlay {
                     img.data,
                     shadow,
                 );
+            }
+            for &(rect, color) in &cue.underlines {
+                self.fill_rect(buf, rect.0, rect.1, rect.2, rect.3, color);
             }
             for g in &cue.glyphs {
                 let Some(img) = shaper.image(g.key) else {
