@@ -4581,8 +4581,11 @@ The browser element surface comprises:
   / `RtspSrc`.
 - `WebRtcSrc` (`web` feature) — ingest over a provided `RtcDataChannel`.
 - `WebCodecsDecode` (`web-codecs` feature) — wraps the browser `VideoDecoder`;
-  H.264 Annex-B access units in, `VideoFrame` copied to `System` RGBA out.
-  Build needs `--cfg=web_sys_unstable_apis`.
+  H.264 or H.265 Annex-B access units in, `VideoFrame` copied to `System` RGBA
+  out. The codec comes from the negotiated caps and picks the WebCodecs codec
+  string built from the in-band SPS (`avc1.` / `hev1.`, ISO/IEC 14496-15 Annex
+  E.3); chunks stay Annex-B, which is what a config without a `description`
+  means. Build needs `--cfg=web_sys_unstable_apis`.
 - `CanvasSink` — presents decoded RGBA to an HTML canvas via the 2D context.
   A WebGPU-texture zero-copy variant uses `MemoryDomain::WebGPUBuffer` into
   a `GPUTexture` once the async device handshake lands in the keep-alive.

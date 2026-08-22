@@ -594,7 +594,6 @@ _(No open tag items.)_
 - WebGPU-texture zero-copy sink (`MemoryDomain::WebGPUBuffer` into a
   `GPUTexture`; needs the async device handshake in the keepalive).
 - Web Workers executor (off-main-thread; needs JS bootstrap).
-- HEVC in `WebCodecsDecode`.
 - Raw-`web_sys` WebGPU path (only if the GPU-resident browser claim is revived):
   external-texture import + compute + `ort.Tensor.fromGpuBuffer` on one
   ORT-owned `GPUDevice`. Large, browser-unverifiable on the dev host.

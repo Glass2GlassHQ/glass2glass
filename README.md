@@ -32,7 +32,7 @@ hardware elements) changes.
 | **RTOS** | the same static pipeline under a real RTOS task | one graph runs bit-exact under **bare-metal, Embassy, FreeRTOS, and Zephyr**; `embassy-sync` stack channels (`embassy` / `embassy-link` features) |
 | **CPU** | the full media + protocol stack | Tokio, multi-thread on servers or current-thread on edge; the whole element library |
 | **GPU** | zero-copy hardware pipelines | frames stay in Vulkan / CUDA / wgpu / DMABUF domains: Vulkan Video decode → `wgpu::Texture`, NVDEC / NVENC, CUDA ↔ wgpu bridge, no PCIe round-trip; embeddable in an app's own wgpu device (`GpuContext::from_wgpu`, packaged for Bevy as the `bevy-g2g` crate) |
-| **WASM** | the same graph in the browser | `wasm32`, single-threaded (no cross-origin isolation): WebCodecs decode, WebGPU present, in-browser or server-offloaded ML |
+| **WASM** | the same graph in the browser | `wasm32`, single-threaded (no cross-origin isolation): WebCodecs H.264 / H.265 decode, WebGPU present, in-browser or server-offloaded ML |
 
 Same `AsyncElement`, same `Caps`, same runner on all five. This is proven, not
 asserted: **[PORTABILITY.md](PORTABILITY.md)** runs one detection-overlay pipeline
