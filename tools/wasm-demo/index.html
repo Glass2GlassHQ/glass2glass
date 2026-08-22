@@ -39,7 +39,16 @@
       </select>
     </label>
     <button id="start">Start</button>
+    <label><input type="checkbox" id="worker" /> run in worker</label>
   </div>
+  <p>
+    <b>run in worker</b> runs the whole graph inside a dedicated module worker
+    (<code>worker.js</code>): the canvas is handed over with
+    <code>transferControlToOffscreen()</code> and the g2g elements read their
+    globals from the worker scope. Covers the <b>Canvas 2D</b>, <b>Detect
+    (synthetic box)</b> and <b>WebGPU</b> modes. A transferred canvas can never
+    be drawn on from the page again, so reload before switching modes.
+  </p>
 
   <p>
     <b>Canvas 2D, HEVC stream</b> is the same graph over an H.265 elementary
@@ -117,9 +126,23 @@
       // installs the panic hook.
       await init();
       log("wasm module initialized. WebGPU available: " + !!navigator.gpu);
+      // Worker modes and the canvas each one draws to. A canvas' context type
+      // is fixed on first use, so WebGPU gets its own.
+      const workerModes = { "2d": ["canvas", "video"], detect: ["detect", "video"], webgpu: ["webgpu", "video-gpu"] };
       document.getElementById("start").onclick = () => {
         const url = document.getElementById("url").value;
         const mode = document.getElementById("mode").value;
+        if (document.getElementById("worker").checked) {
+          const entry = workerModes[mode];
+          if (!entry) { log("no worker path for mode " + mode); return; }
+          const [workerMode, canvasId] = entry;
+          const offscreen = document.getElementById(canvasId).transferControlToOffscreen();
+          const worker = new Worker("./worker.js", { type: "module" });
+          worker.onmessage = (e) => log("worker: " + e.data.log);
+          log("starting in worker: " + url + " -> " + workerMode + " -> OffscreenCanvas#" + canvasId);
+          worker.postMessage({ mode: workerMode, url, canvas: offscreen }, [offscreen]);
+          return;
+        }
         // Returns immediately; the g2g graph runs as a spawned task on the event loop.
         if (mode === "webgpu-cnn") {
           log("starting: " + url + " -> WebCodecsDecode(gpu) -> WebGpuCanvasSink(cnn)#video-gpu");

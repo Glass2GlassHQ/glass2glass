@@ -1,8 +1,10 @@
-//! Pure, target-independent helpers for the browser/wasm elements
-//! (`WasmClock`, `WebSocketSrc`). Kept free of JS bindings so the logic is
+//! Helpers shared by the browser/wasm elements (`WasmClock`, `WebSocketSrc`,
+//! the canvas sinks). The pure half carries no JS bindings so it is
 //! unit-testable on the host: the `performance.now()` millisecond-to-nanosecond
 //! conversion, and the callback-to-async `Inbox` that turns a JS event handler
-//! (`WebSocket.onmessage`) into an awaitable stream.
+//! (`WebSocket.onmessage`) into an awaitable stream. The wasm-only half resolves
+//! the global scope and the presentation canvas, both of which differ between
+//! the page's main thread and a dedicated worker.
 
 use alloc::collections::VecDeque;
 use alloc::rc::Rc;
@@ -126,6 +128,138 @@ impl<T> Future for NextItem<'_, T> {
         } else {
             st.waker = Some(cx.waker().clone());
             Poll::Pending
+        }
+    }
+}
+
+/// The global scope this wasm instance runs in. A graph driven from the page
+/// gets a `Window`; one driven from a dedicated worker gets a
+/// `WorkerGlobalScope`, which has no `window` and no `document`, so every
+/// global lookup goes through here rather than `web_sys::window()`.
+#[cfg(all(target_arch = "wasm32", feature = "web"))]
+pub(crate) enum GlobalScope {
+    Window(web_sys::Window),
+    Worker(web_sys::WorkerGlobalScope),
+}
+
+/// Resolve `globalThis` to whichever scope it is. `None` in neither (a bare
+/// wasm host), which every caller degrades on rather than failing.
+#[cfg(all(target_arch = "wasm32", feature = "web"))]
+pub(crate) fn global_scope() -> Option<GlobalScope> {
+    use wasm_bindgen::JsCast;
+
+    let global = js_sys::global();
+    match global.dyn_into::<web_sys::Window>() {
+        Ok(window) => Some(GlobalScope::Window(window)),
+        Err(global) => global
+            .dyn_into::<web_sys::WorkerGlobalScope>()
+            .ok()
+            .map(GlobalScope::Worker),
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "web"))]
+impl GlobalScope {
+    pub(crate) fn performance(&self) -> Option<web_sys::Performance> {
+        match self {
+            Self::Window(window) => window.performance(),
+            Self::Worker(worker) => worker.performance(),
+        }
+    }
+
+    /// `setTimeout(handler, delay_ms)`, ignoring the timer id (nothing cancels).
+    pub(crate) fn set_timeout(&self, handler: &js_sys::Function, delay_ms: i32) {
+        let _ = match self {
+            Self::Window(window) => {
+                window.set_timeout_with_callback_and_timeout_and_arguments_0(handler, delay_ms)
+            }
+            Self::Worker(worker) => {
+                worker.set_timeout_with_callback_and_timeout_and_arguments_0(handler, delay_ms)
+            }
+        };
+    }
+
+    /// `navigator.gpu`, which both scopes expose.
+    #[cfg(feature = "web-gpu")]
+    pub(crate) fn navigator_gpu(&self) -> web_sys::Gpu {
+        match self {
+            Self::Window(window) => window.navigator().gpu(),
+            Self::Worker(worker) => worker.navigator().gpu(),
+        }
+    }
+}
+
+/// Where a browser sink presents: a `<canvas>` on the page, named by its `id`
+/// and looked up in the document, or an `OffscreenCanvas` transferred into a
+/// worker (`canvas.transferControlToOffscreen()`), which is the only way to
+/// draw to the page from off the main thread.
+#[cfg(all(target_arch = "wasm32", feature = "web"))]
+#[derive(Debug, Clone)]
+pub(crate) enum CanvasTarget {
+    ElementId(alloc::string::String),
+    Offscreen(web_sys::OffscreenCanvas),
+}
+
+/// A [`CanvasTarget`] resolved to the canvas object itself.
+#[cfg(all(target_arch = "wasm32", feature = "web"))]
+#[derive(Debug, Clone)]
+pub(crate) enum Canvas {
+    Element(web_sys::HtmlCanvasElement),
+    Offscreen(web_sys::OffscreenCanvas),
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "web"))]
+impl CanvasTarget {
+    /// Look the canvas up, which for an id needs the document (so it only works
+    /// on the main thread). Called from `configure_pipeline`.
+    pub(crate) fn resolve(&self) -> Result<Canvas, g2g_core::G2gError> {
+        use wasm_bindgen::JsCast;
+
+        let err = || g2g_core::G2gError::Hardware(g2g_core::HardwareError::Other);
+        match self {
+            Self::Offscreen(canvas) => Ok(Canvas::Offscreen(canvas.clone())),
+            Self::ElementId(id) => {
+                let Some(GlobalScope::Window(window)) = global_scope() else {
+                    return Err(err());
+                };
+                let element = window
+                    .document()
+                    .ok_or_else(err)?
+                    .get_element_by_id(id)
+                    .ok_or_else(err)?;
+                Ok(Canvas::Element(element.dyn_into().map_err(|_| err())?))
+            }
+        }
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "web"))]
+impl Canvas {
+    /// `canvas.getContext(context_id)`, whichever canvas kind this is.
+    pub(crate) fn context(&self, context_id: &str) -> Result<js_sys::Object, g2g_core::G2gError> {
+        let err = || g2g_core::G2gError::Hardware(g2g_core::HardwareError::Other);
+        match self {
+            Self::Element(canvas) => canvas.get_context(context_id),
+            Self::Offscreen(canvas) => canvas.get_context(context_id),
+        }
+        .map_err(|_| err())?
+        .ok_or_else(err)
+    }
+
+    /// Size the drawing buffer to the video. Only the WebGPU sink needs it: the
+    /// swap-chain texture is sized from these, while the 2D sink keeps whatever
+    /// size the page declared.
+    #[cfg(feature = "web-gpu")]
+    pub(crate) fn set_size(&self, width: u32, height: u32) {
+        match self {
+            Self::Element(canvas) => {
+                canvas.set_width(width);
+                canvas.set_height(height);
+            }
+            Self::Offscreen(canvas) => {
+                canvas.set_width(width);
+                canvas.set_height(height);
+            }
         }
     }
 }

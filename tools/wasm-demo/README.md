@@ -45,6 +45,12 @@ Open <http://127.0.0.1:8000/>, pick a presentation mode, click **Start**:
   browser analog of the native Vulkan&nbsp;Video&rarr;wgpu wedge). Needs a
   WebGPU-capable browser (`navigator.gpu`).
 
+Tick **run in worker** and the whole graph runs inside a dedicated module worker
+(`worker.js`) instead of on the page: the canvas is handed over with
+`transferControlToOffscreen()` and the sinks draw to that `OffscreenCanvas`.
+Covers the Canvas 2D, synthetic-detect and WebGPU modes. A transferred canvas can
+never be drawn on from the page again, so reload before switching modes.
+
 ## Send (browser encode &rarr; egress)
 
 The reverse direction: the browser captures, encodes, and sends. Click **Send** on
@@ -108,6 +114,20 @@ yields two decoded detections, and the overlay boxes render to the canvas. It ne
 node headless/run-ortdetect.mjs   # -> PASS ...
 ```
 
+### Headless test (worker executor)
+
+`headless/run-worker.mjs` runs the same chain minus the model inside a dedicated
+worker (`headless/worker.html` transfers the canvas, `worker.js` runs the graph)
+and asserts the graph consumed frames, finished ok, and left the decoded video
+plus the overlay box on the transferred canvas (read back inside the worker, the
+only place it is reachable). Same prereqs and env overrides as above, plus
+`G2G_MODE` (`detect`, the default, `canvas`, or `webgpu`; the WebGPU graph skips
+where the browser hands back no adapter).
+
+```sh
+node headless/run-worker.mjs      # -> PASS ...
+```
+
 ## Pieces
 
 | File | Role |
@@ -115,11 +135,12 @@ node headless/run-ortdetect.mjs   # -> PASS ...
 | `../../g2g-web/` | the deployable cdylib: `#[wasm_bindgen]` entry points wiring g2g elements |
 | `build.sh` | `wasm-pack build g2g-web --target web` into `pkg/` (sets the WebCodecs unstable cfg) |
 | `index.html` | canvas + `run_websocket_to_canvas(url, "video")` |
+| `worker.js` | dedicated module worker: runs a whole graph off the main thread against a transferred `OffscreenCanvas` |
 | `ws-fixture-server/` | native tokio + tokio-tungstenite server; splits the Annex-B fixture into access units and streams them on a timer (the receive demo's source) |
 | `ws-recv-server/` | native receiver for the send demo; appends the browser's encoded access units to `received.h264` |
 | `serve.sh` | `python3 -m http.server` (no special headers) |
 | `fixtures/` | committed tiny deterministic ONNX detector (`tiny-detect.onnx`) + `gen-tiny-detect.py` |
-| `headless/` | `run-ortdetect.mjs` + `ortdetect.html`: headless validation of the ort-web chain |
+| `headless/` | `run-ortdetect.mjs` + `ortdetect.html` (ort-web chain), `run-worker.mjs` + `worker.html` (worker executor) |
 
 ## Notes
 

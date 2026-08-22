@@ -294,6 +294,58 @@ pub fn run_websocket_to_webgpu_canvas(url: String, canvas_id: String) {
     });
 }
 
+/// Run a whole graph **inside a dedicated worker**, presenting to an
+/// `OffscreenCanvas` the page transferred in (M1054). Same elements, same
+/// single-threaded executor, one wasm instance per worker: the worker has no
+/// `window` and no `document`, so the clock reads its globals off
+/// `WorkerGlobalScope` and the sinks take the canvas object instead of an id.
+/// No SharedArrayBuffer and no cross-origin isolation are involved.
+///
+/// `mode` is `"canvas"` (2D readback), `"detect"` (decode -> detect -> overlay
+/// -> 2D canvas) or `"webgpu"` (zero-copy `GPUExternalTexture` present). A
+/// transferred canvas belongs to the worker for good, so the page must reload
+/// to run a different graph on it.
+#[wasm_bindgen]
+pub fn run_worker_graph(mode: String, url: String, canvas: web_sys::OffscreenCanvas) {
+    use g2g_plugins::webgpucanvassink::WebGpuCanvasSink;
+
+    spawn_local(async move {
+        let clock = WasmClock::new();
+        let mut src = WebSocketSrc::new(url, h264_ingest_caps());
+        let mut dec = WebCodecsDecode::new();
+        match mode.as_str() {
+            "webgpu" => {
+                let mut gpu_dec = WebCodecsDecode::new().with_gpu_output();
+                let mut sink = WebGpuCanvasSink::from_offscreen_canvas(canvas);
+                report(
+                    "worker ws->decode->webgpu",
+                    run_source_transform_sink(&mut src, &mut gpu_dec, &mut sink, &clock, 8).await,
+                );
+            }
+            "detect" => {
+                let mut stages = overlay_stages(3);
+                let mut sink = CanvasSink::from_offscreen_canvas(canvas);
+                let transforms: Vec<&mut dyn DynAsyncElement> =
+                    vec![&mut dec, &mut stages.detect, &mut stages.overlay];
+                report(
+                    "worker ws->decode->detect->overlay->canvas",
+                    run_linear_chain(&mut src, transforms, &mut sink, &clock, 8).await,
+                );
+            }
+            "canvas" => {
+                let mut sink = CanvasSink::from_offscreen_canvas(canvas);
+                report(
+                    "worker ws->decode->canvas",
+                    run_source_transform_sink(&mut src, &mut dec, &mut sink, &clock, 8).await,
+                );
+            }
+            other => web_sys::console::error_1(&JsValue::from_str(&format!(
+                "g2g: unknown worker mode {other:?}"
+            ))),
+        }
+    });
+}
+
 /// Browser EGRESS: synthetic capture -> WebCodecs encode -> WebSocket send.
 /// Generates an animated 320x240 RGBA test pattern, encodes it to H.264 Annex-B with
 /// the browser `VideoEncoder`, and streams each access unit to `url` over a WebSocket
