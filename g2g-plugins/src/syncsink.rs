@@ -221,7 +221,6 @@ where
             }
             match packet {
                 PipelinePacket::DataFrame(f) => {
-                    let pts = f.timing.pts_ns;
                     // Trick-mode KEY_UNIT: under a `key_units_only` segment, present
                     // only keyframes (fast scrub), dropping dependent frames before
                     // the deadline math so they are never scheduled.
@@ -233,6 +232,13 @@ where
                         self.trick_dropped += 1;
                         return Ok(());
                     }
+                    // No presentation time: nothing to hold the frame to, so it
+                    // presents on arrival instead of counting as a segment clip.
+                    let Some(pts) = f.timing.pts() else {
+                        self.last_sequence = Some(f.sequence);
+                        self.received += 1;
+                        return Ok(());
+                    };
                     // The deadline maps PTS to running time through the segment
                     // (PTS directly when there is none) and adds the anchor. `None`
                     // means the frame is outside the segment, ie one of the decoded
@@ -483,6 +489,26 @@ mod tests {
             Some(120_000_000),
             "lateness measured on the elected timeline travels upstream"
         );
+    }
+
+    /// A buffer with no presentation time (`FrameTiming::PTS_NONE`) is presented
+    /// as it arrives. It looks like a segment clip to the deadline math, so it
+    /// used to be counted clipped and never presented.
+    #[tokio::test]
+    async fn a_frame_with_no_pts_is_presented_not_clipped() {
+        let mut sink = SyncSink::new(InstantClock);
+        sink.configure_pipeline(&Caps::ByteStream {
+            encoding: g2g_core::ByteStreamEncoding::Ogg,
+        })
+        .unwrap();
+        let mut out = NullSink;
+        sink.process(frame(FrameTiming::PTS_NONE, 0), &mut out)
+            .await
+            .unwrap();
+
+        assert_eq!(sink.received(), 1);
+        assert_eq!(sink.clipped(), 0);
+        assert_eq!(sink.last_sequence(), Some(0));
     }
 
     #[tokio::test]

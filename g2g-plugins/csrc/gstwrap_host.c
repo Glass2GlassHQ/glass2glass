@@ -157,7 +157,8 @@ int g2g_gstwrap_try_pull(G2gGstWrap *w, uint8_t **out_data, size_t *out_len,
   memcpy(copy, map.data, map.size);
   *out_data = copy;
   *out_len = map.size;
-  /* GST_BUFFER_PTS may be GST_CLOCK_TIME_NONE; the Rust side treats that as 0. */
+  /* GST_BUFFER_PTS may be GST_CLOCK_TIME_NONE; it passes through as-is, which
+   * the Rust side reads as FrameTiming::PTS_NONE. */
   *out_pts = (uint64_t)GST_BUFFER_PTS(buf);
   gst_buffer_unmap(buf, &map);
   gst_sample_unref(sample);

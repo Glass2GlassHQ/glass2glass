@@ -111,6 +111,18 @@ pub struct FrameTiming {
     pub keyframe: bool,
 }
 
+impl FrameTiming {
+    /// `pts_ns` marking a frame with no presentation time: it is presented as
+    /// soon as it arrives rather than held for a deadline. The same value
+    /// GStreamer spells `GST_CLOCK_TIME_NONE`.
+    pub const PTS_NONE: u64 = u64::MAX;
+
+    /// The presentation time, `None` when it is unset ([`Self::PTS_NONE`]).
+    pub fn pts(&self) -> Option<u64> {
+        (self.pts_ns != Self::PTS_NONE).then_some(self.pts_ns)
+    }
+}
+
 #[cfg(all(test, feature = "alloc"))]
 mod tests {
     use super::*;
