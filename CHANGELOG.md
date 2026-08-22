@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1055: cue text styling adds `font-weight` / `font-style` / `text-decoration` / `font-stretch` and the `<b>` / `<i>` / `<u>` tags.
 - M1054: a whole browser graph runs inside a dedicated Worker, presenting to an `OffscreenCanvas` the page transfers in.
 - M1053: `WebCodecsDecode` decodes H.265 as well as H.264, taking the codec from the negotiated caps.
 - M1052: hosted Python elements stamp each emitted buffer's own `pts_ns`, and `FrameTiming::PTS_NONE` marks an unset presentation time.

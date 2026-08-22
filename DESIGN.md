@@ -2866,9 +2866,12 @@ A WebVTT `STYLE` block reaches the pixels. `parse_cue_styles` resolves `::cue`,
 `::cue(#id)` and `::cue(.class)` rules onto each cue's `CueSettings`, and a
 span-scoped rule lands as a `SpanStyle` run over the byte range its `<c.class>`
 tag covers, so nested spans resolve per property (the innermost run that sets one
-wins). Beyond `color` the properties honoured are `font-size` (`px`, or a percent
-of the size the cue itself draws at), `text-shadow` and `background-color`, and
-all three render paths apply them. On the shaped path the sized runs become
+wins). The presentational `<b>` / `<i>` / `<u>` tags make the same kind of run
+with no stylesheet at all, and a rule matching the same span overrides them.
+Beyond `color` the properties honoured are `font-size` (`px`, or a percent
+of the size the cue itself draws at), `text-shadow`, `background-color`,
+`font-weight`, `font-style`, `text-decoration: underline` and `font-stretch`,
+and all three render paths apply them. On the shaped path the sized runs become
 cosmic-text `Metrics` overrides on the line's `AttrsList`, so a line mixing sizes
 is still one shaped, bidi-reordered run and takes the tallest span's line height;
 the `ab_glyph` renderer rasterizes each character at its own size on a shared
@@ -2881,7 +2884,17 @@ colour. Vello has no filter that blurs a glyph run, so the GPU backend draws a
 blurred shadow as one tinted mask image per glyph, blurred by the same code, and
 falls back to a glyph run when the radius is 0. A whole-cue
 `background-color` is the backing box; a span-scoped one fills the line box
-behind that span's own glyphs, over the box and under the text. Sizes and offsets
+behind that span's own glyphs, over the box and under the text. Weight, slant
+and width are carried as per-span cosmic-text `Attrs`, so they pick a face out
+of the font database (a real bold or italic face where the family has one, else
+the `wght` variation axis for weight; there is no synthetic oblique, so an
+italic run with no italic face installed renders upright) and reach the Vello
+backend in the glyph ids and the face each run names. That face selection is
+the shaped path only: a `vertical:rl` / `lr` cue on the `ab_glyph` column
+renderer keeps the element's own `font-variations=` weight. An underline is a
+filled bar in the run's text colour, drawn in the glyph layer so a neighbour's
+shadow stays under it, below the baseline horizontally and down the column's
+right edge vertically. Sizes and offsets
 are clamped at parse time, because a stylesheet is as untrusted as the rest of
 the subtitle file and the size becomes a glyph raster.
 

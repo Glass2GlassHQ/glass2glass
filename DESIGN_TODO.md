@@ -470,8 +470,9 @@ _(No open parser items.)_
     the per-count `ChannelLayout` convention) once a real source needs one.
   Glyph
   rendering (incl. `vertical:rl` / `lr` layout) is the `truetype-overlay` feature
-  above. Still open in cue CSS: further properties beyond per-span `font-size` /
-  `text-shadow` (blurred) / `background-color`.
+  above. Still open in cue CSS: a glyph outline (`-webkit-text-stroke`), the
+  `::cue(b)` / `::cue(i)` type selectors, `ruby` / `ruby-text` annotations, and
+  `font-family` on a rule.
 - **Tensor substrate orientation descriptor (M181).** A deferred
   rotate/mirror descriptor the sink can absorb in hardware (DRM/KMS, Wayland
   `set_buffer_transform`, VAAPI VPP, D3D11 VideoProcessor), with eager strided /
