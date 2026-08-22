@@ -4587,13 +4587,25 @@ The browser element surface comprises:
   E.3); chunks stay Annex-B, which is what a config without a `description`
   means. Build needs `--cfg=web_sys_unstable_apis`.
 - `CanvasSink` — presents decoded RGBA to an HTML canvas via the 2D context.
-  A WebGPU-texture zero-copy variant uses `MemoryDomain::WebGPUBuffer` into
-  a `GPUTexture` once the async device handshake lands in the keep-alive.
+  `WebGpuCanvasSink` (`web-gpu` feature) is the zero-copy variant: it imports
+  the decoded `VideoFrame` as a `GPUExternalTexture` and samples it in a render
+  pass, with no readback into wasm memory.
 
 A complete in-browser glass-to-glass pipeline is
 `WebSocketSrc → H264Parse → WebCodecsDecode → CanvasSink`. The local gate
 for the wasm build is
 `cargo check --target wasm32-unknown-unknown -p g2g-plugins --features web`.
+
+**Off the main thread (M1054).** A whole graph can run inside a dedicated module
+worker: one wasm instance per worker, the same single-threaded executor, no
+SharedArrayBuffer and no cross-origin isolation. The page hands the worker an
+`OffscreenCanvas` (`canvas.transferControlToOffscreen()`), which the sinks take
+through `CanvasSink::from_offscreen_canvas` /
+`WebGpuCanvasSink::from_offscreen_canvas` instead of looking an element id up in
+`document`. A worker has neither `window` nor `document`, so `WasmClock` and the
+WebGPU sink resolve `performance` / `setTimeout` / `navigator.gpu` off
+`js_sys::global()`, cast to `Window` or `WorkerGlobalScope`. A transferred canvas
+belongs to the worker for good, so a page switches graphs by reloading.
 
 **In-browser ONNX inference (`WebOrtDetect`).** The chain
 `WebSocketSrc → WebCodecsDecode → WebOrtDetect → AnalyticsOverlay → CanvasSink`
