@@ -77,7 +77,9 @@ fn path<'a>(mut payload: &'a [u8], kinds: &[&[u8; 4]]) -> Option<&'a [u8]> {
 fn brands(payload: &[u8]) -> (String, Vec<String>) {
     let major = String::from_utf8_lossy(&payload[0..4]).into_owned();
     let compat = payload[8..]
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|c| String::from_utf8_lossy(c).into_owned())
         .collect();
     (major, compat)

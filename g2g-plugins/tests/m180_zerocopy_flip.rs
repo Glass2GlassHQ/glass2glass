@@ -21,7 +21,9 @@ impl PipelineClock for NullClock {
 /// Split a contiguous RGBA8 byte buffer into per-pixel `[r,g,b,a]` chunks.
 fn pixels(bytes: &[u8]) -> Vec<[u8; 4]> {
     bytes
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|c| [c[0], c[1], c[2], c[3]])
         .collect()
 }

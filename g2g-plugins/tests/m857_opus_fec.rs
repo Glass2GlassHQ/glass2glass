@@ -197,7 +197,9 @@ async fn decode(plc: bool, fec: bool, packets: &[Pkt]) -> Vec<Out> {
 }
 
 fn samples_of(pcm: &[u8]) -> Vec<i16> {
-    pcm.chunks_exact(2)
+    pcm.as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| i16::from_le_bytes([c[0], c[1]]))
         .collect()
 }

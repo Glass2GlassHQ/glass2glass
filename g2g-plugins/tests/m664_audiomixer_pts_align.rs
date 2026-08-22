@@ -28,7 +28,7 @@ fn out_caps() -> Caps {
 /// A mono S16LE frame of `samples` at `pts_ms`.
 fn frame(pts_ms: u64, samples: &[i16]) -> PipelinePacket {
     let mut bytes = alloc_bytes(samples.len() * 2);
-    for (s, chunk) in samples.iter().zip(bytes.chunks_exact_mut(2)) {
+    for (s, chunk) in samples.iter().zip(bytes.as_chunks_mut::<2>().0.iter_mut()) {
         chunk.copy_from_slice(&s.to_le_bytes());
     }
     PipelinePacket::DataFrame(Frame {
@@ -63,7 +63,9 @@ impl OutputSink for Collect {
             if let PipelinePacket::DataFrame(f) = packet {
                 if let Some(s) = f.domain.as_system_slice() {
                     let samples = s
-                        .chunks_exact(2)
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
                         .map(|c| i16::from_le_bytes([c[0], c[1]]))
                         .collect();
                     self.frames

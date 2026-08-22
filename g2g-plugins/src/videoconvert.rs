@@ -946,7 +946,7 @@ fn swizzle_rb(src: &[u8], w: usize, h: usize, src_stride: usize) -> Box<[u8]> {
         let row = y * src_stride;
         dst.extend_from_slice(&src[row..row + w * 4]);
     }
-    for px in dst.chunks_exact_mut(4) {
+    for px in dst.as_chunks_mut::<4>().0 {
         px.swap(0, 2);
     }
     dst.into_boxed_slice()
@@ -957,7 +957,7 @@ fn widen_rgb(src: &[u8], w: usize, h: usize, src_stride: usize) -> Box<[u8]> {
     let mut dst = Vec::with_capacity(w * h * 4);
     for y in 0..h {
         let row = y * src_stride;
-        for px in src[row..row + w * 3].chunks_exact(3) {
+        for px in src[row..row + w * 3].as_chunks::<3>().0 {
             dst.extend_from_slice(&[px[0], px[1], px[2], 255]);
         }
     }
@@ -969,7 +969,7 @@ fn narrow_rgba(src: &[u8], w: usize, h: usize, src_stride: usize) -> Box<[u8]> {
     let mut dst = Vec::with_capacity(w * h * 3);
     for y in 0..h {
         let row = y * src_stride;
-        for px in src[row..row + w * 4].chunks_exact(4) {
+        for px in src[row..row + w * 4].as_chunks::<4>().0 {
             dst.extend_from_slice(&px[..3]);
         }
     }
@@ -1188,7 +1188,7 @@ mod tests {
             let src: Vec<u8> = (0..4).flat_map(|_| [r, g, b, 255]).collect();
             let nv12 = rgb_to_yuv420(&src, 2, 2, 0, 2, true, 8);
             let rgba = yuv420_to_rgb(&nv12, 2, 2, true, 0, 2);
-            for px in rgba.chunks_exact(4) {
+            for px in rgba.as_chunks::<4>().0 {
                 assert!(
                     (px[0] as i32 - r as i32).abs() <= 4
                         && (px[1] as i32 - g as i32).abs() <= 4
@@ -1261,7 +1261,7 @@ mod tests {
         let src: Vec<u8> = plane(512).chain(plane(512)).chain(plane(512)).collect();
         let out = convert(&src, RawVideoFormat::I444p10, RawVideoFormat::Rgba8, 2, 2);
         assert_eq!(out.len(), 2 * 2 * 4);
-        for px in out.chunks_exact(4) {
+        for px in out.as_chunks::<4>().0 {
             assert_eq!(px[0], px[1], "grey: R == G");
             assert_eq!(px[1], px[2], "grey: G == B");
             assert_eq!(px[3], 255, "alpha opaque");

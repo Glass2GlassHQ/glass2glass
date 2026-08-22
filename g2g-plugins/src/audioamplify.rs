@@ -286,7 +286,12 @@ fn fold(scaled: i64, method: AmplifyMethod) -> i16 {
 /// Scale each interleaved S16LE sample by `amplification`, folding out-of-range
 /// results per `method`. `dst` is the same length as `src`.
 fn apply_amplify(src: &[u8], dst: &mut [u8], amplification: f64, method: AmplifyMethod) {
-    for (s, d) in src.chunks_exact(2).zip(dst.chunks_exact_mut(2)) {
+    for (s, d) in src
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .zip(dst.as_chunks_mut::<2>().0.iter_mut())
+    {
         let sample = i16::from_le_bytes([s[0], s[1]]);
         let scaled = (sample as f64) * amplification;
         // round half away from zero without libm.
@@ -313,7 +318,9 @@ mod tests {
 
     fn unpack(bytes: &[u8]) -> Vec<i16> {
         bytes
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|c| i16::from_le_bytes([c[0], c[1]]))
             .collect()
     }

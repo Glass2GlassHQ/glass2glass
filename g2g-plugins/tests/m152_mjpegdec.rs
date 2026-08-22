@@ -171,14 +171,14 @@ async fn decode_with(mut dec: MjpegDec, jpeg: &[u8]) -> Vec<u8> {
 async fn grayscale_jpeg_decodes_through_the_rgba_fallback() {
     let rgba = decode_once(GRAY16, RawVideoFormat::Rgba8).await;
     assert_eq!(rgba.len(), 16 * 16 * 4);
-    for px in rgba.chunks_exact(4) {
+    for px in rgba.as_chunks::<4>().0 {
         assert!(
             px[0] == px[1] && px[1] == px[2],
             "grayscale replicates luma across R/G/B, got {px:?}"
         );
     }
     assert!(
-        rgba.chunks_exact(4).any(|px| px[0] != rgba[0]),
+        rgba.as_chunks::<4>().0.iter().any(|px| px[0] != rgba[0]),
         "the fixture is a gradient, not a flat grey"
     );
 

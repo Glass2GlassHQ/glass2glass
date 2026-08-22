@@ -1026,7 +1026,7 @@ mod tests {
             "readback is the resized target"
         );
         // Scaled to fill: every pixel of the larger target is the source green.
-        for (i, px) in out.chunks_exact(4).enumerate() {
+        for (i, px) in out.as_chunks::<4>().0.iter().enumerate() {
             assert!(
                 px[1] > 200 && px[0] < 50,
                 "pixel {i} of the resized target is the blitted source: {px:?}"

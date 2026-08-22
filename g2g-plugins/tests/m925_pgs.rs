@@ -373,7 +373,7 @@ fn reference_canvases(sup: &PathBuf, raw: &PathBuf) -> Vec<Vec<u8>> {
     assert_eq!(bytes.len() % stride, 0, "whole RGBA frames");
     let mut out: Vec<Vec<u8>> = Vec::new();
     for frame in bytes.chunks(stride) {
-        if frame.chunks_exact(4).all(|p| p[3] == 0) {
+        if frame.as_chunks::<4>().0.iter().all(|p| p[3] == 0) {
             continue;
         }
         if out.last().map(|p| p.as_slice()) == Some(frame) {
@@ -493,8 +493,10 @@ fn px(rgba: &[u8], x: u32, y: u32) -> [u8; 4] {
 /// coordinate is what a failure can actually be read from.
 fn first_difference(got: &[u8], want: &[u8]) -> Option<(u32, u32)> {
     assert_eq!(got.len(), want.len(), "canvas size");
-    got.chunks_exact(4)
-        .zip(want.chunks_exact(4))
+    got.as_chunks::<4>()
+        .0
+        .iter()
+        .zip(want.as_chunks::<4>().0.iter())
         .position(|(a, b)| a != b)
         .map(|i| (i as u32 % W, i as u32 / W))
 }
@@ -628,8 +630,10 @@ async fn ffmpeg_muxed_pgs_display_sets_demux_and_decode_pixel_for_pixel() {
         let got = &canvases[1 + i * 2].rgba;
         assert_eq!(got.len(), want.len(), "cue {i} canvas size");
         let differing = got
-            .chunks_exact(4)
-            .zip(want.chunks_exact(4))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(want.as_chunks::<4>().0.iter())
             .filter(|(a, b)| a != b)
             .count();
         assert_eq!(

@@ -69,7 +69,7 @@ impl SourceLoop for ColorSrc {
             let bytes = (self.w * self.h) as usize * 4;
             for seq in 0..self.count {
                 let mut buf = alloc_vec(bytes);
-                for px in buf.chunks_exact_mut(4) {
+                for px in buf.as_chunks_mut::<4>().0 {
                     px.copy_from_slice(&self.color);
                 }
                 let frame = Frame {

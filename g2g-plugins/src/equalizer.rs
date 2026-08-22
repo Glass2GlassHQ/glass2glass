@@ -158,7 +158,13 @@ impl Equalizer3Bands {
 
     fn filter(&mut self, src: &[u8], dst: &mut [u8]) {
         let ch = self.channels.max(1);
-        for (i, (s, d)) in src.chunks_exact(2).zip(dst.chunks_exact_mut(2)).enumerate() {
+        for (i, (s, d)) in src
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .zip(dst.as_chunks_mut::<2>().0.iter_mut())
+            .enumerate()
+        {
             let c = i % ch;
             let mut x = i16::from_le_bytes([s[0], s[1]]) as f64;
             for b in 0..3 {
@@ -310,7 +316,9 @@ mod tests {
 
     fn unpack(bytes: &[u8]) -> Vec<i16> {
         bytes
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|c| i16::from_le_bytes([c[0], c[1]]))
             .collect()
     }

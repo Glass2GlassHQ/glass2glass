@@ -364,7 +364,12 @@ fn balance_pixel(format: RawVideoFormat, px: &[u8], bal: &Balance) -> [u8; 4] {
 
 /// Apply the balance to every pixel of a packed 4-channel frame.
 fn apply_balance(format: RawVideoFormat, src: &[u8], dst: &mut [u8], bal: &Balance) {
-    for (s, d) in src.chunks_exact(4).zip(dst.chunks_exact_mut(4)) {
+    for (s, d) in src
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(dst.as_chunks_mut::<4>().0.iter_mut())
+    {
         d.copy_from_slice(&balance_pixel(format, s, bal));
     }
 }

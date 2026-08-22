@@ -616,5 +616,9 @@ async fn compositing_the_decoded_cues_matches_ffmpegs_dvbsub_burn_in() {
 }
 
 fn rgba_to_rgb(rgba: &[u8]) -> Vec<u8> {
-    rgba.chunks_exact(4).flat_map(|p| p[..3].to_vec()).collect()
+    rgba.as_chunks::<4>()
+        .0
+        .iter()
+        .flat_map(|p| p[..3].to_vec())
+        .collect()
 }

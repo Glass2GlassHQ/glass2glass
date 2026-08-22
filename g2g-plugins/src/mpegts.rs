@@ -1354,7 +1354,7 @@ fn parse_teletext_descriptor(mut desc: &[u8]) -> Option<TeletextService> {
         let body = desc.get(2..2 + len)?;
         if tag == DESC_TAG_TELETEXT || tag == DESC_TAG_VBI_TELETEXT {
             let mut first = None;
-            for entry in body.chunks_exact(5) {
+            for entry in body.as_chunks::<5>().0 {
                 let service = TeletextService {
                     language: [entry[0], entry[1], entry[2]],
                     teletext_type: entry[3] >> 3,

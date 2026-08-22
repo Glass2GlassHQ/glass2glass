@@ -1233,7 +1233,7 @@ mod tests {
         src[4] = 128; // U
         src[5] = 128; // V
         let out = nv12_to_xrgb8888(&src, 2, 2).unwrap();
-        for px in out.chunks_exact(4) {
+        for px in out.as_chunks::<4>().0 {
             assert!((125..=131).contains(&px[0]), "blue out of range: {}", px[0]);
             assert!(
                 (125..=131).contains(&px[1]),

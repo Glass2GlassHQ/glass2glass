@@ -131,7 +131,7 @@ pub fn build_misp_time_sei(micros: u64, status: u8, codec: VideoCodec) -> Vec<u8
     let mut payload = Vec::with_capacity(MISP_PAYLOAD_LEN);
     payload.extend_from_slice(&uuid);
     payload.push(status);
-    for (pair, chunk) in t.chunks_exact(2).enumerate() {
+    for (pair, chunk) in t.as_chunks::<2>().0.iter().enumerate() {
         if pair > 0 {
             payload.push(0xFF);
         }

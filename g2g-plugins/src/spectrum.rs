@@ -334,7 +334,7 @@ mod tests {
         s.channels = 1;
         // 8 mono samples fill one window.
         let mut bytes = vec![0u8; 8 * 2];
-        for (i, chunk) in bytes.chunks_exact_mut(2).enumerate() {
+        for (i, chunk) in bytes.as_chunks_mut::<2>().0.iter_mut().enumerate() {
             let v = ((i as i16) * 1000) - 3500;
             chunk.copy_from_slice(&v.to_le_bytes());
         }

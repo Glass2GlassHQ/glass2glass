@@ -564,7 +564,7 @@ mod tests {
         // planar -> packed and byte -> 10-bit-MSB-first and back.
         let (w, h) = (4usize, 2usize);
         let mut frame = alloc::vec![0u8; w * h * 4];
-        for (i, word) in frame.chunks_exact_mut(2).enumerate() {
+        for (i, word) in frame.as_chunks_mut::<2>().0.iter_mut().enumerate() {
             let val = ((i * 13 + 7) as u16) & 0x03FF;
             word.copy_from_slice(&val.to_le_bytes());
         }

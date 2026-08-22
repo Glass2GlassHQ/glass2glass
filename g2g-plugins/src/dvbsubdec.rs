@@ -572,7 +572,9 @@ mod tests {
         f.domain
             .as_system_slice()
             .unwrap()
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .filter(|px| px[3] != 0)
             .count()
     }

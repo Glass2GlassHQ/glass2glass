@@ -210,7 +210,7 @@ mod mjpeg {
 
         let ours = deinterleave_rgb(&sink.frames[0]);
         let mut theirs = [Vec::new(), Vec::new(), Vec::new()];
-        for pixel in reference.chunks_exact(3) {
+        for pixel in reference.as_chunks::<3>().0 {
             for (channel, value) in theirs.iter_mut().zip(pixel) {
                 channel.push(*value);
             }

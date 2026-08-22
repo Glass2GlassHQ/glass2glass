@@ -612,7 +612,9 @@ mod tests {
         let src: Vec<u8> = [0u16, 1000].iter().flat_map(|s| s.to_le_bytes()).collect();
         let out = resample_plane16(&src, 2, 1, 4, 1);
         let got: Vec<u16> = out
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|c| u16::from_le_bytes([c[0], c[1]]))
             .collect();
         assert_eq!(got, vec![0, 250, 750, 1000]);
@@ -664,7 +666,7 @@ mod tests {
         let out = scale(&nv12, RawVideoFormat::Nv12, 2, 2, 4, 4);
         assert_eq!(out.len(), 4 * 4 + 2 * 2 * 2);
         // the lone chroma sample replicates across the 2x2 upscaled chroma.
-        for pair in out[16..].chunks_exact(2) {
+        for pair in out[16..].as_chunks::<2>().0 {
             assert_eq!(pair, &[70, 200]);
         }
     }

@@ -329,7 +329,7 @@ impl PgsDecoder {
         } else {
             YcbcrMatrix::Bt601
         };
-        for e in body[2..].chunks_exact(5) {
+        for e in body[2..].as_chunks::<5>().0 {
             let (r, g, b) = ycbcr_to_rgb(e[1], e[2], e[3], matrix);
             self.palettes[idx].clut[e[0] as usize] = [r, g, b, e[4]];
         }
@@ -650,7 +650,13 @@ mod tests {
         buf.extend_from_slice(&bare(SEG_OBJECT, &ods(1, 6, 3, &solid_rle(6, 3))));
         buf.extend_from_slice(&bare(SEG_END, &[]));
         let set = dec.feed(&buf).remove(0);
-        let opaque = set.canvas.chunks_exact(4).filter(|p| p[3] != 0).count();
+        let opaque = set
+            .canvas
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|p| p[3] != 0)
+            .count();
         assert_eq!(opaque, 2, "only the 2x1 crop rectangle paints");
     }
 
@@ -706,7 +712,12 @@ mod tests {
         buf.extend_from_slice(&bare(SEG_END, &[]));
         let set = PgsDecoder::new().feed(&buf).remove(0);
         assert_eq!(
-            set.canvas.chunks_exact(4).filter(|p| p[3] != 0).count(),
+            set.canvas
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .filter(|p| p[3] != 0)
+                .count(),
             18,
             "the 6x3 object paints once both fragments are in"
         );

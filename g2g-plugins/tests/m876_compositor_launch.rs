@@ -70,7 +70,7 @@ impl SourceLoop for ColorSrc {
         Box::pin(async move {
             for sequence in 0..2u64 {
                 let mut buf = vec![0u8; (self.w * self.h) as usize * 4];
-                for px in buf.chunks_exact_mut(4) {
+                for px in buf.as_chunks_mut::<4>().0 {
                     px.copy_from_slice(&self.color);
                 }
                 out.push(PipelinePacket::DataFrame(Frame::new(

@@ -141,7 +141,7 @@ impl Cutter {
             return;
         }
         let mut sumsq = 0.0f64;
-        for s in src.chunks_exact(2) {
+        for s in src.as_chunks::<2>().0 {
             let v = (i16::from_le_bytes([s[0], s[1]]) as f64) / 32768.0;
             sumsq += v * v;
         }

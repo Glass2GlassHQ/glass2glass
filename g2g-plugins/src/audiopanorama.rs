@@ -226,7 +226,12 @@ fn apply_pan(src: &[u8], dst: &mut [u8], panorama: f64) {
     let pan = panorama.clamp(-1.0, 1.0);
     let left_gain = if pan > 0.0 { 1.0 - pan } else { 1.0 };
     let right_gain = if pan < 0.0 { 1.0 + pan } else { 1.0 };
-    for (s, d) in src.chunks_exact(4).zip(dst.chunks_exact_mut(4)) {
+    for (s, d) in src
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(dst.as_chunks_mut::<4>().0.iter_mut())
+    {
         let l = scale(i16::from_le_bytes([s[0], s[1]]), left_gain);
         let r = scale(i16::from_le_bytes([s[2], s[3]]), right_gain);
         d[0..2].copy_from_slice(&l.to_le_bytes());

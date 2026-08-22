@@ -279,8 +279,10 @@ fn assert_samples_agree(pcm: &[u8], reference: &[u8]) {
     let shared = pcm.len().min(reference.len());
     let mut max_diff = 0i32;
     for (a, b) in pcm[..shared]
-        .chunks_exact(2)
-        .zip(reference[..shared].chunks_exact(2))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .zip(reference[..shared].as_chunks::<2>().0.iter())
     {
         let x = i16::from_le_bytes([a[0], a[1]]) as i32;
         let y = i16::from_le_bytes([b[0], b[1]]) as i32;

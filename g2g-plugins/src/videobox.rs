@@ -424,7 +424,7 @@ fn build_boxed(
     let (left, top) = (left as i64, top as i64);
     let fc = fill_bytes(format, fill);
     let mut dst = vec![0u8; out_w * out_h * 4].into_boxed_slice();
-    for px in dst.chunks_exact_mut(4) {
+    for px in dst.as_chunks_mut::<4>().0 {
         px.copy_from_slice(&fc);
     }
     for oy in 0..out_h {

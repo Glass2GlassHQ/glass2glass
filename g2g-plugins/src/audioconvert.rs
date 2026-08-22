@@ -720,8 +720,8 @@ mod tests {
         let s16 =
             convert_pcm(&src_f32, AudioFormat::PcmF32Le, 1, AudioFormat::PcmS16Le, 1).unwrap();
         let back = convert_pcm(&s16, AudioFormat::PcmS16Le, 1, AudioFormat::PcmF32Le, 1).unwrap();
-        for (i, chunk) in back.chunks_exact(4).enumerate() {
-            let got = f32::from_le_bytes(chunk.try_into().unwrap());
+        for (i, chunk) in back.as_chunks::<4>().0.iter().enumerate() {
+            let got = f32::from_le_bytes(*chunk);
             let want = [0.0f32, 0.5, -0.5, 1.0, -1.0][i];
             assert!(
                 (got - want).abs() < 1.0 / 32767.0 + 1e-6,
@@ -771,8 +771,8 @@ mod tests {
                 "{format:?}"
             );
             let back = convert_pcm(&packed, format, 1, AudioFormat::PcmF32Le, 1).unwrap();
-            for (i, chunk) in back.chunks_exact(4).enumerate() {
-                let got = f32::from_le_bytes(chunk.try_into().unwrap());
+            for (i, chunk) in back.as_chunks::<4>().0.iter().enumerate() {
+                let got = f32::from_le_bytes(*chunk);
                 assert!(
                     (got - values[i]).abs() <= tol,
                     "{format:?} sample {i}: {got} vs {}",
@@ -866,7 +866,9 @@ mod tests {
             out_ch,
         )
         .unwrap();
-        out.chunks_exact(4)
+        out.as_chunks::<4>()
+            .0
+            .iter()
             .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .collect()
     }
