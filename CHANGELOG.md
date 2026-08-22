@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1052: hosted Python elements stamp each emitted buffer's own `pts_ns`, and `FrameTiming::PTS_NONE` marks an unset presentation time.
 - M1051: host- and device-only elements declare `experimental`; `g2g-inspect` prints it.
 
 ## 0.5.0 - 2026-08-18

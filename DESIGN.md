@@ -395,6 +395,8 @@ pub trait AsyncClock: PipelineClock {
 }
 ```
 
+A `pts_ns` of `FrameTiming::PTS_NONE` (`u64::MAX`, the value GStreamer spells `GST_CLOCK_TIME_NONE`) marks a frame with no presentation time: `FrameTiming::pts()` reads it as `None`, and `PresentationPacer` answers `Pace::Now` for it without latching its anchor, so a sink presents the frame as it arrives rather than holding it to a deadline or counting it a late drop.
+
 Sink elements compare `pts_ns` against `now_ns()` to schedule presentation, and `capture_ns` against `now_ns()` to report true glass-to-glass latency without ambiguity about which clock domain a timestamp lives in. Backends provide concrete implementations: a `WallClock` (`std::time::Instant` + `tokio::time::sleep`) for std targets, `embassy-time` for RTOS, performance.now() for Wasm.
 
 A free-running source feeding a sync sink is paced automatically by upstream backpressure (§4.5): the sink only consumes after `sleep_until_ns(pts)` resolves, which throttles the channel, which throttles the source. No explicit source-side pacing is required for sync playback.
@@ -1982,6 +1984,16 @@ either of two paths:
   fails the frame if the element kept a view past return (its pointer would dangle
   once the frame is freed downstream). `g2g_process_batch` and `g2g_produce` are
   the aggregator / source shapes of the same contract.
+- **Payloads with no picture shape.** Audio into a transcriber, text into speech:
+  the frame reaches `g2g_process_payload(buffers, caps, meta)`, and the element
+  hands back buffers of its own through
+  `meta.emit(payload, duration_ns=None, pts_ns=None)` instead of overwriting the
+  one it read. Each emitted buffer inherits the anchor's timing unless it says
+  otherwise: a streaming element gives every chunk its own `pts_ns` (usually the
+  previous chunk's pts plus its duration) so the chunks play one after another,
+  while outputs that run in parallel (the separation family's stems) leave it
+  unset and share the anchor's. `g2g.PTS_NONE` (`FrameTiming::PTS_NONE`, §4.4)
+  emits a buffer with no presentation time, which a sink presents on arrival.
 - **CUDA device memory (M984).** A `MemoryDomain::Cuda` frame has no CPU bytes, so
   its two semi-planar planes are described to
   `g2g_process_cuda(luma, chroma, width, height, meta)` as `g2g.CudaPlane` objects
