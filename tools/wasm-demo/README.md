@@ -35,6 +35,10 @@ Open <http://127.0.0.1:8000/>, pick a presentation mode, click **Start**:
 
 - **Canvas 2D (readback)** &mdash; `WebCodecsDecode` copies each frame to system RGBA;
   `CanvasSink` paints it with `putImageData`.
+- **Canvas 2D, HEVC stream** &mdash; the same graph over H.265: the decoder takes its
+  codec from the negotiated caps. Point the fixture server at an `.h265` file. It
+  needs a browser that has an HEVC decoder; Chrome decodes HEVC in hardware only, so
+  a machine without HEVC hardware support fails to configure the decoder.
 - **WebGPU (zero-copy)** &mdash; `WebCodecsDecode` keeps the frame GPU-resident
   (`with_gpu_output`); `WebGpuCanvasSink` imports the `VideoFrame` as a
   `GPUExternalTexture` and samples it in a render pass, **no CPU readback** (the

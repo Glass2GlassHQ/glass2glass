@@ -68,11 +68,27 @@ fn report<T: core::fmt::Debug>(n: &str, r: Result<T, g2g_core::G2gError>) {
 /// `RtspSrc`'s placeholder (1..240 fps). See the `intercept_caps must survive
 /// fixate` design note.
 fn h264_ingest_caps() -> Caps {
+    ingest_caps(VideoCodec::H264)
+}
+
+/// The same placeholder-geometry elementary-stream caps for any codec
+/// `WebCodecsDecode` accepts. The decoder follows whichever codec these name.
+fn ingest_caps(codec: VideoCodec) -> Caps {
     Caps::CompressedVideo {
-        codec: VideoCodec::H264,
+        codec,
         width: Dim::Range { min: 0, max: 8192 },
         height: Dim::Range { min: 0, max: 8192 },
         framerate: Rate::Range { min_q16: 1 << 16, max_q16: 240 << 16 },
+    }
+}
+
+/// Map a codec name from JS to the ingest codec. `None` for anything the
+/// browser `VideoDecoder` path does not handle here.
+fn ingest_codec(name: &str) -> Option<VideoCodec> {
+    match name {
+        "h264" | "avc" => Some(VideoCodec::H264),
+        "h265" | "hevc" => Some(VideoCodec::H265),
+        _ => None,
     }
 }
 
@@ -117,6 +133,31 @@ pub fn run_websocket_to_canvas(url: String, canvas_id: String) {
         let mut sink = CanvasSink::new(canvas_id);
         let clock = WasmClock::new();
         report("ws->decode->canvas", run_source_transform_sink(&mut src, &mut dec, &mut sink, &clock, 8).await);
+    });
+}
+
+/// WebSocket ingest -> WebCodecs decode -> canvas for a named codec: `"h264"`
+/// (or `"avc"`) and `"h265"` (or `"hevc"`). The same graph as
+/// [`run_websocket_to_canvas`]; only the ingest caps differ, and the decoder
+/// takes its WebCodecs `codec` string from them. HEVC needs a browser with an
+/// HEVC decoder (Chrome decodes it in hardware only).
+#[wasm_bindgen]
+pub fn run_websocket_to_canvas_with_codec(url: String, canvas_id: String, codec: String) {
+    spawn_local(async move {
+        let Some(video_codec) = ingest_codec(&codec) else {
+            web_sys::console::error_1(&JsValue::from_str(&format!(
+                "g2g: unknown ingest codec {codec:?}"
+            )));
+            return;
+        };
+        let mut src = WebSocketSrc::new(url, ingest_caps(video_codec));
+        let mut dec = WebCodecsDecode::new();
+        let mut sink = CanvasSink::new(canvas_id);
+        let clock = WasmClock::new();
+        report(
+            "ws->decode->canvas",
+            run_source_transform_sink(&mut src, &mut dec, &mut sink, &clock, 8).await,
+        );
     });
 }
 

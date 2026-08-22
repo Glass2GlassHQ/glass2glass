@@ -22,6 +22,10 @@
 
 use alloc::vec::Vec;
 
+// Only `h265_codec_string` (WebCodecs / wasm) needs an owned String.
+#[cfg(any(test, all(target_arch = "wasm32", feature = "web-codecs")))]
+use alloc::string::String;
+
 use g2g_core::{PropKind, PropertySpec, VideoCodec};
 
 use crate::annexb::{h265_nal_type, next_start_code, strip_emulation_prevention, BitReader};
@@ -76,10 +80,10 @@ const SPS_NUT: u8 = 33;
 const VPS_NUT: u8 = 32;
 const PPS_NUT: u8 = 34;
 
-/// Walk the NALs of `au` (Annex-B or AVCC, auto-detected), returning the info
-/// from the first SPS NAL we can parse. H.265 NAL type is bits `[1..7]` of the
-/// first header byte.
-fn extract_sps_info(au: &[u8]) -> Option<SpsGeometry> {
+/// Walk the NALs of `au` (Annex-B or AVCC, auto-detected), running `parse` over
+/// the de-emulated RBSP of each SPS NAL and returning the first result it
+/// yields. H.265 NAL type is bits `[1..7]` of the first header byte.
+fn with_sps_rbsp<T>(au: &[u8], parse: impl Fn(&[u8]) -> Option<T>) -> Option<T> {
     for nal in crate::annexb::nal_units_any(au) {
         if nal.len() < 2 {
             continue;
@@ -90,11 +94,15 @@ fn extract_sps_info(au: &[u8]) -> Option<SpsGeometry> {
         }
         // Strip the 2-byte NAL header, then de-emulate the RBSP.
         let rbsp = strip_emulation_prevention(&nal[2..]);
-        if let Some(info) = parse_sps(&rbsp) {
-            return Some(info);
+        if let Some(value) = parse(&rbsp) {
+            return Some(value);
         }
     }
     None
+}
+
+fn extract_sps_info(au: &[u8]) -> Option<SpsGeometry> {
+    with_sps_rbsp(au, parse_sps)
 }
 
 /// Start-code offsets in an Annex-B buffer at which a new H.265 access unit
@@ -138,12 +146,56 @@ fn h265_au_starts(data: &[u8]) -> Vec<usize> {
 
 /// True if the access unit contains an IRAP (random-access) picture: a keyframe.
 /// HEVC IRAP `nal_unit_type`s are 16..=23 (BLA / IDR / CRA / reserved IRAP).
-fn h265_au_is_keyframe(au: &[u8]) -> bool {
+pub(crate) fn h265_au_is_keyframe(au: &[u8]) -> bool {
     crate::annexb::nal_units_any(au).any(|nal| {
         nal.first()
             .map(|b| (16..=23).contains(&((b >> 1) & 0x3F)))
             .unwrap_or(false)
     })
+}
+
+/// Build the WebCodecs `codec` string for an H.265 stream from its SPS
+/// (ISO/IEC 14496-15 Annex E.3, registered for WebCodecs by the W3C HEVC
+/// registration): `"hev1."`, the profile space letter and profile_idc, the
+/// compatibility flags in reverse bit order as hex, the tier letter and
+/// level_idc, then the constraint bytes. Main profile, progressive, main tier,
+/// level 3.1 gives `"hev1.1.6.L93.B0"`. `None` if the access unit carries no
+/// parsable SPS.
+// Only the WebCodecs decoder (wasm) needs this; the parser itself uses the
+// geometry. Gated so the always-compiled module stays warning-clean elsewhere.
+#[cfg(any(test, all(target_arch = "wasm32", feature = "web-codecs")))]
+pub(crate) fn h265_codec_string(au: &[u8]) -> Option<String> {
+    let ptl = with_sps_rbsp(au, parse_general_profile_tier_level)?;
+    let space = match ptl.profile_space {
+        0 => "",
+        1 => "A",
+        2 => "B",
+        3 => "C",
+        _ => return None,
+    };
+    let tier = if ptl.tier_flag == 0 { "L" } else { "H" };
+    let compatibility = ptl.compatibility_flags.reverse_bits();
+    let profile_idc = ptl.profile_idc;
+    let level_idc = ptl.level_idc;
+    let mut codec = alloc::format!("hev1.{space}{profile_idc}.{compatibility:X}.{tier}{level_idc}");
+    // trailing zero constraint bytes are omitted, so an all-zero set ends the
+    // string at the level
+    if let Some(last) = ptl.constraint_bytes.iter().rposition(|byte| *byte != 0) {
+        for byte in &ptl.constraint_bytes[..=last] {
+            codec.push_str(&alloc::format!(".{byte:02X}"));
+        }
+    }
+    Some(codec)
+}
+
+/// The SPS head up to and including the general `profile_tier_level` block.
+#[cfg(any(test, all(target_arch = "wasm32", feature = "web-codecs")))]
+fn parse_general_profile_tier_level(rbsp: &[u8]) -> Option<GeneralProfileTierLevel> {
+    let mut br = BitReader::new(rbsp);
+    let _sps_video_parameter_set_id = br.read_bits(4)?;
+    let _sps_max_sub_layers_minus1 = br.read_bits(3)?;
+    let _sps_temporal_id_nesting_flag = br.read_bit()?;
+    read_general_profile_tier_level(&mut br)
 }
 
 /// Parse the SPS RBSP (H.265 7.3.2.2): the cropped picture dimensions from the
@@ -381,12 +433,55 @@ fn skip_scaling_list_data(br: &mut BitReader) -> Option<()> {
     Some(())
 }
 
+/// Number of constraint / reserved flag bytes in a general
+/// `profile_tier_level`, between the compatibility flags and the level.
+const GENERAL_CONSTRAINT_BYTES: usize = 6;
+
+/// The general `profile_tier_level` fields (H.265 7.3.3), which the WebCodecs
+/// codec string is built from. Without that build the block is only crossed on
+/// the way to the geometry, so nothing reads the fields.
+#[cfg_attr(
+    not(any(test, all(target_arch = "wasm32", feature = "web-codecs"))),
+    allow(dead_code)
+)]
+#[derive(Debug, Clone, Copy)]
+struct GeneralProfileTierLevel {
+    profile_space: u8,
+    tier_flag: u8,
+    profile_idc: u8,
+    compatibility_flags: u32,
+    constraint_bytes: [u8; GENERAL_CONSTRAINT_BYTES],
+    level_idc: u8,
+}
+
+/// Read the general block of `profile_tier_level`: a fixed 96 bits (2 + 1 + 5
+/// profile space/tier/idc, 32 compatibility flags, 48 constraint/reserved bits,
+/// 8-bit level).
+fn read_general_profile_tier_level(br: &mut BitReader) -> Option<GeneralProfileTierLevel> {
+    let profile_space = br.read_bits(2)? as u8;
+    let tier_flag = br.read_bit()? as u8;
+    let profile_idc = br.read_bits(5)? as u8;
+    let compatibility_flags = br.read_bits(32)?;
+    let mut constraint_bytes = [0u8; GENERAL_CONSTRAINT_BYTES];
+    for byte in &mut constraint_bytes {
+        *byte = br.read_bits(8)? as u8;
+    }
+    let level_idc = br.read_bits(8)? as u8;
+    Some(GeneralProfileTierLevel {
+        profile_space,
+        tier_flag,
+        profile_idc,
+        compatibility_flags,
+        constraint_bytes,
+        level_idc,
+    })
+}
+
 /// Skip `profile_tier_level(1, max_sub_layers_minus1)` (H.265 7.3.3). The
 /// general block is a fixed 96 bits (88-bit profile/tier/constraints + 8-bit
 /// level); per-sub-layer blocks follow only when `max_sub_layers_minus1 > 0`.
 fn skip_profile_tier_level(br: &mut BitReader, max_sub_layers_minus1: u32) -> Option<()> {
-    br.skip_bits(88)?; // general profile/tier + constraint/reserved/inbld
-    br.skip_bits(8)?; // general_level_idc
+    read_general_profile_tier_level(br)?;
 
     let mut sub_profile_present = [false; 8];
     let mut sub_level_present = [false; 8];
@@ -596,8 +691,19 @@ mod tests {
         chroma_format_idc: u32,
         conf: Option<(u32, u32, u32, u32)>,
     ) -> Vec<u8> {
-        finish_sps(sps_head(pic_w, pic_h, chroma_format_idc, conf))
+        finish_sps(sps_head(pic_w, pic_h, chroma_format_idc, conf, &ZERO_PTL))
     }
+
+    /// A `profile_tier_level` of all-zero fields: what the geometry tests wrote
+    /// before the codec-string parse read the block's contents.
+    const ZERO_PTL: GeneralProfileTierLevel = GeneralProfileTierLevel {
+        profile_space: 0,
+        tier_flag: 0,
+        profile_idc: 0,
+        compatibility_flags: 0,
+        constraint_bytes: [0; GENERAL_CONSTRAINT_BYTES],
+        level_idc: 0,
+    };
 
     /// The SPS fields up to the conformance window, as a bit writer the caller
     /// can extend (the M663 VUI variant) before wrapping into a NAL.
@@ -606,14 +712,13 @@ mod tests {
         pic_h: u32,
         chroma_format_idc: u32,
         conf: Option<(u32, u32, u32, u32)>,
+        ptl: &GeneralProfileTierLevel,
     ) -> BitWriter {
         let mut w = BitWriter::default();
         w.write_bits(0, 4); // sps_video_parameter_set_id
         w.write_bits(0, 3); // sps_max_sub_layers_minus1
         w.write_bit(1); // sps_temporal_id_nesting_flag
-        for _ in 0..96 {
-            w.write_bit(0); // profile_tier_level (single layer = 96 bits)
-        }
+        write_profile_tier_level(&mut w, ptl); // single layer = 96 bits
         w.write_ue(0); // sps_seq_parameter_set_id
         w.write_ue(chroma_format_idc);
         if chroma_format_idc == 3 {
@@ -632,6 +737,25 @@ mod tests {
             None => w.write_bit(0),
         }
         w
+    }
+
+    /// The inverse of [`read_general_profile_tier_level`]: 96 bits of general
+    /// profile / tier / compatibility / constraint / level fields.
+    fn write_profile_tier_level(w: &mut BitWriter, ptl: &GeneralProfileTierLevel) {
+        w.write_bits(u32::from(ptl.profile_space), 2);
+        w.write_bit(u32::from(ptl.tier_flag));
+        w.write_bits(u32::from(ptl.profile_idc), 5);
+        w.write_bits(ptl.compatibility_flags, 32);
+        for byte in &ptl.constraint_bytes {
+            w.write_bits(u32::from(*byte), 8);
+        }
+        w.write_bits(u32::from(ptl.level_idc), 8);
+    }
+
+    /// A 640x480 Annex-B SPS carrying `ptl` in its general
+    /// `profile_tier_level`, for the codec-string tests.
+    fn build_annexb_sps_with_ptl(ptl: &GeneralProfileTierLevel) -> Vec<u8> {
+        finish_sps(sps_head(640, 480, 1, None, ptl))
     }
 
     /// Close the RBSP (stop bit + alignment), emulation-prevent it, and wrap it
@@ -657,7 +781,7 @@ mod tests {
         num_units_in_tick: u32,
         time_scale: u32,
     ) -> Vec<u8> {
-        let mut w = sps_head(pic_w, pic_h, 1, None);
+        let mut w = sps_head(pic_w, pic_h, 1, None, &ZERO_PTL);
         w.write_ue(0); // bit_depth_luma_minus8
         w.write_ue(0); // bit_depth_chroma_minus8
         w.write_ue(0); // log2_max_pic_order_cnt_lsb_minus4
@@ -708,6 +832,69 @@ mod tests {
             zeros = if b == 0 { zeros + 1 } else { 0 };
         }
         out
+    }
+
+    /// Main profile, main tier, level 3.1, progressive + non-packed +
+    /// frame-only: the everyday HEVC stream, whose codec string the WebCodecs
+    /// HEVC registration (ISO/IEC 14496-15 Annex E.3) spells `hev1.1.6.L93.B0`.
+    #[test]
+    fn codec_string_for_main_profile_level_3_1() {
+        let ptl = GeneralProfileTierLevel {
+            profile_idc: 1,
+            // Compatible with profiles 1 and 2; reverse bit order makes it 0x6.
+            compatibility_flags: 0x6000_0000,
+            constraint_bytes: [0xB0, 0, 0, 0, 0, 0],
+            level_idc: 93,
+            ..ZERO_PTL
+        };
+        let stream = build_annexb_sps_with_ptl(&ptl);
+        assert_eq!(
+            h265_codec_string(&stream).as_deref(),
+            Some("hev1.1.6.L93.B0")
+        );
+        // The geometry parse still crosses the block it now reads.
+        let info = extract_sps_info(&stream).expect("SPS must parse");
+        assert_eq!((info.width, info.height), (640, 480));
+    }
+
+    /// Profile space 1 ("A"), high tier ("H"), and a second nonzero constraint
+    /// byte, which must be emitted after the first.
+    #[test]
+    fn codec_string_keeps_constraint_bytes_up_to_the_last_nonzero() {
+        let ptl = GeneralProfileTierLevel {
+            profile_space: 1,
+            tier_flag: 1,
+            profile_idc: 4,
+            compatibility_flags: 0x0800_0000,
+            constraint_bytes: [0x90, 0x08, 0, 0, 0, 0],
+            level_idc: 120,
+        };
+        let stream = build_annexb_sps_with_ptl(&ptl);
+        assert_eq!(
+            h265_codec_string(&stream).as_deref(),
+            Some("hev1.A4.10.H120.90.08")
+        );
+    }
+
+    /// All six constraint bytes zero: every one is a trailing zero, so the
+    /// string ends at the level.
+    #[test]
+    fn codec_string_omits_all_zero_constraint_bytes() {
+        let ptl = GeneralProfileTierLevel {
+            profile_idc: 2,
+            compatibility_flags: 0x4000_0000,
+            level_idc: 63,
+            ..ZERO_PTL
+        };
+        let stream = build_annexb_sps_with_ptl(&ptl);
+        assert_eq!(h265_codec_string(&stream).as_deref(), Some("hev1.2.2.L63"));
+    }
+
+    #[test]
+    fn codec_string_none_without_sps() {
+        // A lone IDR_W_RADL slice NAL (type 19), no SPS.
+        let au = [0u8, 0, 0, 1, 0x26, 0x01, 0xAF];
+        assert_eq!(h265_codec_string(&au), None);
     }
 
     #[test]

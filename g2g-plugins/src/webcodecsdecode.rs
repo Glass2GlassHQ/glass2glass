@@ -22,7 +22,9 @@
 //! ready; `process(Eos)` awaits `flush()` then drains the reorder tail.
 //!
 //! Build requires `--cfg=web_sys_unstable_apis` (the WebCodecs web-sys bindings
-//! are unstable). H.264 only for M40; the HEVC `codec` string is a follow-up.
+//! are unstable). H.264 and H.265 are both accepted; which one is in play comes
+//! from the upstream caps at negotiation, so `websocketsrc ! webcodecsdecode`
+//! follows the stream without a codec setting.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -47,7 +49,12 @@ use web_sys::{
 };
 
 use crate::h264util::{h264_au_is_keyframe, h264_codec_string};
+use crate::h265parse::{h265_au_is_keyframe, h265_codec_string};
 use crate::webutil::Inbox;
+
+/// The codecs this element has a WebCodecs `codec`-string builder for. The one
+/// in play is whichever the upstream caps name.
+const SUPPORTED_CODECS: [VideoCodec; 2] = [VideoCodec::H264, VideoCodec::H265];
 
 /// # Example
 ///
@@ -57,6 +64,8 @@ use crate::webutil::Inbox;
 /// let decoder = WebCodecsDecode::new().with_gpu_output();
 /// ```
 pub struct WebCodecsDecode {
+    /// The codec negotiated from the upstream caps, one of [`SUPPORTED_CODECS`].
+    /// H.264 until `configure_pipeline` runs.
     codec: VideoCodec,
     /// When set, hand the `VideoFrame` forward as a GPU-resident external
     /// texture instead of copying it out to system RGBA.
@@ -116,9 +125,15 @@ impl WebCodecsDecode {
     /// carrying an SPS supplies the `codec` string; AUs before that are
     /// undecodable and skipped.
     fn feed(&mut self, au: &[u8], pts_ns: u64) -> Result<(), G2gError> {
+        let hevc = self.codec == VideoCodec::H265;
         let decoder = self.decoder.as_ref().ok_or(G2gError::NotConfigured)?;
         if !self.decoder_configured {
-            let Some(codec_str) = h264_codec_string(au) else {
+            let built = if hevc {
+                h265_codec_string(au)
+            } else {
+                h264_codec_string(au)
+            };
+            let Some(codec_str) = built else {
                 return Ok(()); // no SPS yet: cannot configure, skip until a keyframe
             };
             let config = VideoDecoderConfig::new(&codec_str);
@@ -134,7 +149,12 @@ impl WebCodecsDecode {
 
         let data = js_sys::Uint8Array::new_with_length(au.len() as u32);
         data.copy_from(au);
-        let chunk_type = if h264_au_is_keyframe(au) {
+        let keyframe = if hevc {
+            h265_au_is_keyframe(au)
+        } else {
+            h264_au_is_keyframe(au)
+        };
+        let chunk_type = if keyframe {
             EncodedVideoChunkType::Key
         } else {
             EncodedVideoChunkType::Delta
@@ -260,9 +280,11 @@ impl AsyncElement for WebCodecsDecode {
         g2g_core::memory::DomainSet::only(g2g_core::memory::MemoryDomainKind::System)
     }
 
+    /// The codec is whichever supported one upstream offers; an unsupported
+    /// codec falls back to H.264 so the intersection rejects it.
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
         let supported = Caps::CompressedVideo {
-            codec: self.codec,
+            codec: upstream_codec(upstream_caps).unwrap_or(VideoCodec::H264),
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
@@ -270,31 +292,27 @@ impl AsyncElement for WebCodecsDecode {
         upstream_caps.intersect(&supported)
     }
 
-    /// Native `DerivedOutput`: accepts H.264 at any geometry and produces RGBA
-    /// at the same dims/framerate, mirroring `MfDecode` (which emits NV12). The
-    /// closure rejects a non-matching codec with an empty set so the solver
-    /// fails non-H.264 upstream at negotiation time.
+    /// Native `DerivedOutput`: accepts H.264 or H.265 at any geometry and
+    /// produces RGBA at the same dims/framerate, mirroring `MfDecode` (which
+    /// emits NV12). The closure rejects any other codec with an empty set so the
+    /// solver fails it at negotiation time.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
-        let codec = self.codec;
-        CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| {
-            derive_output_caps(codec, input)
-        }))
+        CapsConstraint::DerivedOutput(Box::new(derive_output_caps))
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        let (w, h) = match absolute_caps {
+        let (codec, w, h) = match absolute_caps {
             Caps::CompressedVideo {
                 codec,
                 width,
                 height,
                 ..
-            } if *codec == self.codec => (fixed_or_zero(width), fixed_or_zero(height)),
+            } if SUPPORTED_CODECS.contains(codec) => {
+                (*codec, fixed_or_zero(width), fixed_or_zero(height))
+            }
             _ => return Err(G2gError::CapsMismatch),
         };
-        // Only H.264 has a `codec`-string builder wired for M40.
-        if self.codec != VideoCodec::H264 {
-            return Err(G2gError::CapsMismatch);
-        }
+        self.codec = codec;
         self.width = w;
         self.height = h;
 
@@ -382,16 +400,19 @@ impl AsyncElement for WebCodecsDecode {
 }
 
 impl PadTemplates for WebCodecsDecode {
-    /// Consumes H.264 and produces RGBA, both at any geometry (the decoder
-    /// derives the output dims from the stream). The memory domain (System) is
-    /// not encoded in caps.
+    /// Consumes H.264 or H.265 and produces RGBA, all at any geometry (the
+    /// decoder derives the output dims from the stream). The memory domain
+    /// (System) is not encoded in caps.
     fn pad_templates() -> Vec<PadTemplate> {
-        let h264 = Caps::CompressedVideo {
-            codec: VideoCodec::H264,
-            width: Dim::Any,
-            height: Dim::Any,
-            framerate: Rate::Any,
-        };
+        let compressed: Vec<Caps> = SUPPORTED_CODECS
+            .iter()
+            .map(|codec| Caps::CompressedVideo {
+                codec: *codec,
+                width: Dim::Any,
+                height: Dim::Any,
+                framerate: Rate::Any,
+            })
+            .collect();
         let rgba = Caps::RawVideo {
             format: RawVideoFormat::Rgba8,
             width: Dim::Any,
@@ -400,7 +421,7 @@ impl PadTemplates for WebCodecsDecode {
             interlace: Interlace::Any,
         };
         Vec::from([
-            PadTemplate::sink(CapsSet::one(h264)),
+            PadTemplate::sink(CapsSet::from_alternatives(compressed)),
             PadTemplate::source(CapsSet::one(rgba)),
         ])
     }
@@ -475,17 +496,25 @@ fn rgba_caps(w: u32, h: u32) -> Caps {
     }
 }
 
-/// Output-side caps derivation: H.264 at any geometry maps to RGBA at the same
-/// dims/framerate; a non-matching codec yields an empty set so the solver
+/// The supported codec the caps name, if any.
+fn upstream_codec(caps: &Caps) -> Option<VideoCodec> {
+    match caps {
+        Caps::CompressedVideo { codec, .. } if SUPPORTED_CODECS.contains(codec) => Some(*codec),
+        _ => None,
+    }
+}
+
+/// Output-side caps derivation: a supported codec at any geometry maps to RGBA
+/// at the same dims/framerate; any other codec yields an empty set so the solver
 /// rejects it. Shared by the `DerivedOutput` constraint closure.
-fn derive_output_caps(codec: VideoCodec, input: &Caps) -> CapsSet {
+fn derive_output_caps(input: &Caps) -> CapsSet {
     match input {
         Caps::CompressedVideo {
-            codec: c,
+            codec,
             width,
             height,
             framerate,
-        } if *c == codec => CapsSet::one(Caps::RawVideo {
+        } if SUPPORTED_CODECS.contains(codec) => CapsSet::one(Caps::RawVideo {
             format: RawVideoFormat::Rgba8,
             width: width.clone(),
             height: height.clone(),
