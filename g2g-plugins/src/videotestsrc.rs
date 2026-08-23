@@ -426,7 +426,7 @@ fn fill_pattern(pattern: Pattern, buf: &mut [u8], width: u32, seq: u64) {
         // Per-pixel hash of (pixel index, frame): full-frame churn. Alpha stays
         // opaque so the noise is visible through a compositor's blend.
         Pattern::Snow => {
-            for (p, px) in buf.chunks_exact_mut(4).enumerate() {
+            for (p, px) in buf.as_chunks_mut::<4>().0.iter_mut().enumerate() {
                 // Cheap integer hash, reseeded per frame via `seq`.
                 let mut h = (p as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
                     ^ seq.wrapping_mul(0x2545_F491_4F6C_DD1D);
@@ -446,7 +446,7 @@ fn fill_pattern(pattern: Pattern, buf: &mut [u8], width: u32, seq: u64) {
             let w = width.max(1) as usize;
             let bar_w = (w / 8).max(1);
             let bar_x = (seq as usize).wrapping_mul(4) % w;
-            for (p, px) in buf.chunks_exact_mut(4).enumerate() {
+            for (p, px) in buf.as_chunks_mut::<4>().0.iter_mut().enumerate() {
                 let x = p % w;
                 // Distance from the bar's left edge, modulo width (so it wraps).
                 // Add `w` before subtracting so x < bar_x stays modular in w
@@ -471,7 +471,7 @@ fn fill_pattern(pattern: Pattern, buf: &mut [u8], width: u32, seq: u64) {
                 [0, 0, 192],     // blue
             ];
             let w = width.max(1) as usize;
-            for (p, px) in buf.chunks_exact_mut(4).enumerate() {
+            for (p, px) in buf.as_chunks_mut::<4>().0.iter_mut().enumerate() {
                 let x = p % w;
                 let [r, g, b] = BARS[(x * BARS.len() / w).min(BARS.len() - 1)];
                 px[0] = r;
@@ -484,7 +484,7 @@ fn fill_pattern(pattern: Pattern, buf: &mut [u8], width: u32, seq: u64) {
         Pattern::Checkerboard => {
             let w = width.max(1) as usize;
             let square = (w / 8).max(1);
-            for (p, px) in buf.chunks_exact_mut(4).enumerate() {
+            for (p, px) in buf.as_chunks_mut::<4>().0.iter_mut().enumerate() {
                 let (x, y) = (p % w, p / w);
                 let v = if ((x / square) + (y / square)) & 1 == 0 {
                     255
@@ -506,7 +506,7 @@ fn fill_pattern(pattern: Pattern, buf: &mut [u8], width: u32, seq: u64) {
             let cx = bounce(seq, w, 3) as i64;
             let cy = bounce(seq, h, 2) as i64;
             let r2 = radius * radius;
-            for (p, px) in buf.chunks_exact_mut(4).enumerate() {
+            for (p, px) in buf.as_chunks_mut::<4>().0.iter_mut().enumerate() {
                 let (dx, dy) = ((p % w) as i64 - cx, (p / w) as i64 - cy);
                 let v = if dx * dx + dy * dy <= r2 { 255 } else { 32 };
                 px[0] = v;
@@ -525,7 +525,7 @@ fn fill_pattern(pattern: Pattern, buf: &mut [u8], width: u32, seq: u64) {
             let w = width.max(1) as usize;
             let h = ((buf.len() / 4) / w).max(1);
             let (cx, cy) = ((w / 2) as i64, (h / 2) as i64);
-            for (p, px) in buf.chunks_exact_mut(4).enumerate() {
+            for (p, px) in buf.as_chunks_mut::<4>().0.iter_mut().enumerate() {
                 let (dx, dy) = ((p % w) as i64 - cx, (p / w) as i64 - cy);
                 let d2 = (dx * dx + dy * dy) as u64;
                 let phase = (d2.wrapping_add(seq.wrapping_mul(8)) % PERIOD) as f32 / PERIOD as f32;
@@ -593,7 +593,7 @@ mod tests {
             assert_ne!(a, b, "{pattern:?} must animate between consecutive frames");
             // Alpha stays opaque so the content survives a compositor blend.
             assert!(
-                a.chunks_exact(4).all(|px| px[3] == 255),
+                a.as_chunks::<4>().0.iter().all(|px| px[3] == 255),
                 "{pattern:?} opaque"
             );
         }
@@ -606,7 +606,7 @@ mod tests {
         // 8 is bright; the buggy code also lit column 2.
         let mut buf = [0u8; 40];
         fill_pattern(Pattern::MovingBar, &mut buf, 10, 2);
-        for (x, px) in buf.chunks_exact(4).enumerate() {
+        for (x, px) in buf.as_chunks::<4>().0.iter().enumerate() {
             let expected = if x == 8 { 255 } else { 32 };
             assert_eq!(px[0], expected, "column {x}");
         }
@@ -621,7 +621,7 @@ mod tests {
             fill_pattern(pattern, &mut b, W, 1);
             assert_ne!(a, b, "{pattern:?} must animate between consecutive frames");
             assert!(
-                a.chunks_exact(4).all(|px| px[3] == 255),
+                a.as_chunks::<4>().0.iter().all(|px| px[3] == 255),
                 "{pattern:?} opaque"
             );
         }
@@ -638,7 +638,7 @@ mod tests {
         // BTreeSet, not HashSet: the crate is no_std + alloc, and this test also
         // compiles in the no-default-features config where `std` is not linked.
         let levels: alloc::collections::BTreeSet<u8> =
-            buf.chunks_exact(4).map(|px| px[0]).collect();
+            buf.as_chunks::<4>().0.iter().map(|px| px[0]).collect();
         assert!(
             levels.len() > 16,
             "sinusoid should span many grey levels, got {}",

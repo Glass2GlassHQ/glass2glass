@@ -157,6 +157,31 @@ async fn ts_offset_delays_the_schedule() {
     assert_eq!(elapsed, 26_000_000, "the first two deadlines clamp to zero");
 }
 
+/// A buffer with no presentation time has no deadline, so it goes straight out
+/// and leaves the schedule to the buffers that do carry one.
+#[tokio::test]
+async fn a_buffer_with_no_pts_is_forwarded_immediately() {
+    let clock = Arc::new(VirtualClock::default());
+    let mut e = ClockSyncTransform::new();
+    e.configure_pipeline(&caps()).expect("transparent caps");
+    e.set_clock_sync(ClockSync::new(clock.clone(), 0));
+    let mut sink = CaptureSink::default();
+
+    e.process(frame(FrameTiming::PTS_NONE), &mut sink)
+        .await
+        .expect("forwarded");
+    assert_eq!(sink.frames, vec![FrameTiming::PTS_NONE], "not dropped");
+    assert_eq!(clock.now_ns(), 0, "nothing waited");
+
+    // The stamped buffer that follows keeps its own deadline, exactly as if the
+    // unstamped one had never passed through.
+    e.process(frame(33_000_000), &mut sink)
+        .await
+        .expect("forwarded");
+    assert_eq!(clock.now_ns(), 33_000_000);
+    assert_eq!(e.forwarded(), 2);
+}
+
 /// Caps are none of this element's business: whatever arrives is what leaves.
 #[tokio::test]
 async fn caps_pass_through_unchanged() {

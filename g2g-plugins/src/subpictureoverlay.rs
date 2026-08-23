@@ -50,7 +50,7 @@ impl Canvas {
     /// a decoder emits at a cue's hide time has none, and dropping it here is
     /// what takes the cue off the picture.
     fn visible(width: u32, height: u32, pixels: Vec<u8>) -> Option<Self> {
-        if !pixels.chunks_exact(4).any(|px| px[3] != 0) {
+        if !pixels.as_chunks::<4>().0.iter().any(|px| px[3] != 0) {
             return None;
         }
         Some(Self {
@@ -82,7 +82,7 @@ impl Canvas {
         }
         // Same geometry: blend pixel for pixel, skipping the transparent run a
         // subpicture canvas is mostly made of.
-        for (i, px) in self.pixels.chunks_exact(4).enumerate() {
+        for (i, px) in self.pixels.as_chunks::<4>().0.iter().enumerate() {
             if px[3] != 0 {
                 blend_px(video, i * 4, [px[0], px[1], px[2], px[3]], 255);
             }
@@ -504,8 +504,8 @@ mod tests {
             .unwrap();
 
         let frames = out_pixels(&sink);
-        for px in frames[0].chunks_exact(4) {
-            assert_eq!(px, [0, 255, 0, 255], "the canvas covers the scaled frame");
+        for px in frames[0].as_chunks::<4>().0 {
+            assert_eq!(px, &[0, 255, 0, 255], "the canvas covers the scaled frame");
         }
     }
 

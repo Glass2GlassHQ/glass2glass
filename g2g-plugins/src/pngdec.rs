@@ -186,7 +186,12 @@ fn to_rgba8(src: &[u8], color: ColorType, width: u32, height: u32) -> Result<Vec
         .into_vec()),
         ColorType::Grayscale | ColorType::GrayscaleAlpha => {
             let mut rgba = vec![0u8; pixels * 4];
-            for (out, gray) in rgba.chunks_exact_mut(4).zip(src.chunks_exact(samples)) {
+            for (out, gray) in rgba
+                .as_chunks_mut::<4>()
+                .0
+                .iter_mut()
+                .zip(src.chunks_exact(samples))
+            {
                 out[0] = gray[0];
                 out[1] = gray[0];
                 out[2] = gray[0];

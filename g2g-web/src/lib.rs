@@ -68,11 +68,27 @@ fn report<T: core::fmt::Debug>(n: &str, r: Result<T, g2g_core::G2gError>) {
 /// `RtspSrc`'s placeholder (1..240 fps). See the `intercept_caps must survive
 /// fixate` design note.
 fn h264_ingest_caps() -> Caps {
+    ingest_caps(VideoCodec::H264)
+}
+
+/// The same placeholder-geometry elementary-stream caps for any codec
+/// `WebCodecsDecode` accepts. The decoder follows whichever codec these name.
+fn ingest_caps(codec: VideoCodec) -> Caps {
     Caps::CompressedVideo {
-        codec: VideoCodec::H264,
+        codec,
         width: Dim::Range { min: 0, max: 8192 },
         height: Dim::Range { min: 0, max: 8192 },
         framerate: Rate::Range { min_q16: 1 << 16, max_q16: 240 << 16 },
+    }
+}
+
+/// Map a codec name from JS to the ingest codec. `None` for anything the
+/// browser `VideoDecoder` path does not handle here.
+fn ingest_codec(name: &str) -> Option<VideoCodec> {
+    match name {
+        "h264" | "avc" => Some(VideoCodec::H264),
+        "h265" | "hevc" => Some(VideoCodec::H265),
+        _ => None,
     }
 }
 
@@ -117,6 +133,31 @@ pub fn run_websocket_to_canvas(url: String, canvas_id: String) {
         let mut sink = CanvasSink::new(canvas_id);
         let clock = WasmClock::new();
         report("ws->decode->canvas", run_source_transform_sink(&mut src, &mut dec, &mut sink, &clock, 8).await);
+    });
+}
+
+/// WebSocket ingest -> WebCodecs decode -> canvas for a named codec: `"h264"`
+/// (or `"avc"`) and `"h265"` (or `"hevc"`). The same graph as
+/// [`run_websocket_to_canvas`]; only the ingest caps differ, and the decoder
+/// takes its WebCodecs `codec` string from them. HEVC needs a browser with an
+/// HEVC decoder (Chrome decodes it in hardware only).
+#[wasm_bindgen]
+pub fn run_websocket_to_canvas_with_codec(url: String, canvas_id: String, codec: String) {
+    spawn_local(async move {
+        let Some(video_codec) = ingest_codec(&codec) else {
+            web_sys::console::error_1(&JsValue::from_str(&format!(
+                "g2g: unknown ingest codec {codec:?}"
+            )));
+            return;
+        };
+        let mut src = WebSocketSrc::new(url, ingest_caps(video_codec));
+        let mut dec = WebCodecsDecode::new();
+        let mut sink = CanvasSink::new(canvas_id);
+        let clock = WasmClock::new();
+        report(
+            "ws->decode->canvas",
+            run_source_transform_sink(&mut src, &mut dec, &mut sink, &clock, 8).await,
+        );
     });
 }
 
@@ -250,6 +291,58 @@ pub fn run_websocket_to_webgpu_canvas(url: String, canvas_id: String) {
         let mut sink = WebGpuCanvasSink::new(canvas_id);
         let clock = WasmClock::new();
         report("ws->decode->webgpu", run_source_transform_sink(&mut src, &mut dec, &mut sink, &clock, 8).await);
+    });
+}
+
+/// Run a whole graph **inside a dedicated worker**, presenting to an
+/// `OffscreenCanvas` the page transferred in (M1054). Same elements, same
+/// single-threaded executor, one wasm instance per worker: the worker has no
+/// `window` and no `document`, so the clock reads its globals off
+/// `WorkerGlobalScope` and the sinks take the canvas object instead of an id.
+/// No SharedArrayBuffer and no cross-origin isolation are involved.
+///
+/// `mode` is `"canvas"` (2D readback), `"detect"` (decode -> detect -> overlay
+/// -> 2D canvas) or `"webgpu"` (zero-copy `GPUExternalTexture` present). A
+/// transferred canvas belongs to the worker for good, so the page must reload
+/// to run a different graph on it.
+#[wasm_bindgen]
+pub fn run_worker_graph(mode: String, url: String, canvas: web_sys::OffscreenCanvas) {
+    use g2g_plugins::webgpucanvassink::WebGpuCanvasSink;
+
+    spawn_local(async move {
+        let clock = WasmClock::new();
+        let mut src = WebSocketSrc::new(url, h264_ingest_caps());
+        let mut dec = WebCodecsDecode::new();
+        match mode.as_str() {
+            "webgpu" => {
+                let mut gpu_dec = WebCodecsDecode::new().with_gpu_output();
+                let mut sink = WebGpuCanvasSink::from_offscreen_canvas(canvas);
+                report(
+                    "worker ws->decode->webgpu",
+                    run_source_transform_sink(&mut src, &mut gpu_dec, &mut sink, &clock, 8).await,
+                );
+            }
+            "detect" => {
+                let mut stages = overlay_stages(3);
+                let mut sink = CanvasSink::from_offscreen_canvas(canvas);
+                let transforms: Vec<&mut dyn DynAsyncElement> =
+                    vec![&mut dec, &mut stages.detect, &mut stages.overlay];
+                report(
+                    "worker ws->decode->detect->overlay->canvas",
+                    run_linear_chain(&mut src, transforms, &mut sink, &clock, 8).await,
+                );
+            }
+            "canvas" => {
+                let mut sink = CanvasSink::from_offscreen_canvas(canvas);
+                report(
+                    "worker ws->decode->canvas",
+                    run_source_transform_sink(&mut src, &mut dec, &mut sink, &clock, 8).await,
+                );
+            }
+            other => web_sys::console::error_1(&JsValue::from_str(&format!(
+                "g2g: unknown worker mode {other:?}"
+            ))),
+        }
     });
 }
 

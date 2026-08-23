@@ -95,9 +95,11 @@ fn bare_decodebin_selects_the_av1_track() {
     std::fs::write(&path, mkv_with_video(b"V_AV1")).unwrap();
     let line = format!("filesrc location={} ! decodebin ! fakesink", path.display());
     let names = chain_names(&line);
+    // either AV1 decoder proves the track was selected; dav1ddec outranks
+    // rav1ddec when both are built
     assert!(
-        names.iter().any(|n| n == "Rav1dDec"),
-        "the AV1 decoder is plugged from the selected track, got {names:?}"
+        names.iter().any(|n| n == "Rav1dDec" || n == "Dav1dDec"),
+        "an AV1 decoder is plugged from the selected track, got {names:?}"
     );
     let _ = std::fs::remove_file(&path);
 }

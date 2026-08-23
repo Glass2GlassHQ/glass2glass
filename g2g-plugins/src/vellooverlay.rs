@@ -682,11 +682,13 @@ impl VelloTextOverlay {
         gpu.render_scene(&scene, w, h)
     }
 
-    /// Draw each active cue's backing box, span fills, shadows and glyphs,
-    /// batching the glyphs into runs of one face, colour and size (a
+    /// Draw each active cue's backing box, span fills, shadows, underlines and
+    /// glyphs, batching the glyphs into runs of one face, colour and size (a
     /// `::cue(.class)` span or a fallback face starts a new run). Every shadow
     /// is drawn before any glyph, so a neighbour's shadow never lands on top of
-    /// a glyph.
+    /// a glyph. A span's weight, slant and width reach the shaper's face
+    /// selection, so they arrive here in the glyph ids and the face the run
+    /// names, with nothing extra to do.
     fn draw_cues(&mut self, scene: &mut Scene, t_ns: u64) {
         let placed = self.text.place_shaped_cues(t_ns);
         for cue in placed {
@@ -697,8 +699,13 @@ impl VelloTextOverlay {
             for (rect, color) in &cue.span_backgrounds {
                 fill_rect(scene, *rect, *color);
             }
-            // Shadows first, then the glyphs over them.
+            // Shadows first, then the underline bars and the glyphs over them.
             for drawing_shadows in [true, false] {
+                if !drawing_shadows {
+                    for (rect, color) in &cue.underlines {
+                        fill_rect(scene, *rect, *color);
+                    }
+                }
                 let mut start = 0;
                 while start < cue.glyphs.len() {
                     let head = &cue.glyphs[start];

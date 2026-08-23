@@ -1159,6 +1159,13 @@ wasm-bindgen-futures = { version = "0.4", optional = true }
 web-sys = { version = "0.3", optional = true, features = [
     "Window",
     "Performance",
+    # A graph driven from a dedicated worker (M1054) has no `window`: its
+    # globals (performance, setTimeout, navigator) come off the worker scope,
+    # and it presents to an OffscreenCanvas the page transferred in.
+    "WorkerGlobalScope",
+    "WorkerNavigator",
+    "OffscreenCanvas",
+    "OffscreenCanvasRenderingContext2d",
     "console",
     "WebSocket",
     "MessageEvent",

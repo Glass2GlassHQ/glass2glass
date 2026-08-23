@@ -286,7 +286,7 @@ async fn pngdec_narrows_16_bit_grayscale() {
     assert_eq!(decoded_geometry(&sink), (W, H));
     let decoded = &sink.frames[0];
     assert_eq!(decoded.len(), RGBA_BYTES);
-    for pixel in decoded.chunks_exact(4) {
+    for pixel in decoded.as_chunks::<4>().0 {
         assert_eq!(
             (pixel[0], pixel[1], pixel[2]),
             (pixel[0], pixel[0], pixel[0]),
@@ -314,8 +314,8 @@ async fn pngdec_narrows_16_bit_grayscale() {
         eprintln!("skipping the ffmpeg half: no ffmpeg");
         return;
     };
-    let high_bytes: Vec<u8> = reference.chunks_exact(2).map(|s| s[0]).collect();
-    let ours: Vec<u8> = decoded.chunks_exact(4).map(|p| p[0]).collect();
+    let high_bytes: Vec<u8> = reference.as_chunks::<2>().0.iter().map(|s| s[0]).collect();
+    let ours: Vec<u8> = decoded.as_chunks::<4>().0.iter().map(|p| p[0]).collect();
     assert_eq!(ours, high_bytes, "STRIP_16 keeps the high byte");
 }
 

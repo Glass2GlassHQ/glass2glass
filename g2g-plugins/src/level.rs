@@ -83,7 +83,7 @@ impl Level {
         let mut peak = vec![0.0f64; ch];
         let mut sumsq = vec![0.0f64; ch];
         let mut counts = vec![0u64; ch];
-        for (i, s) in src.chunks_exact(2).enumerate() {
+        for (i, s) in src.as_chunks::<2>().0.iter().enumerate() {
             let c = i % ch;
             let v = (i16::from_le_bytes([s[0], s[1]]) as f64) / FULL_SCALE;
             let a = v.abs();

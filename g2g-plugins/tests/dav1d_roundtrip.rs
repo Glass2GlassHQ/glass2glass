@@ -325,7 +325,9 @@ async fn roundtrip_high_depth(format: RawVideoFormat) {
         assert_eq!(plane.len(), expected_len, "tight {format:?} LE-u16 buffer");
         let y = &plane[..(W * H) as usize * 2];
         let mean = y
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|c| u16::from_le_bytes([c[0], c[1]]) as u64)
             .sum::<u64>()
             / (W * H) as u64;

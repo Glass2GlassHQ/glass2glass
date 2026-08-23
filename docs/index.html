@@ -1245,7 +1245,7 @@ g2g-launch <span class="flag">--script</span> build.rhai</div>
             <div class="feature-card">
                 <span class="f-icon">&#127760;</span>
                 <h3>Browser / Wasm</h3>
-                <p class="f-lead">First in-browser glass-to-glass pipeline: WS &rarr; WebCodecs &rarr; Canvas.</p>
+                <p class="f-lead">First in-browser glass-to-glass pipeline: WS &rarr; WebCodecs (H.264 / H.265) &rarr; Canvas.</p>
                 <div class="chip-group">
                     <span class="chip-label">Elements</span>
                     <div class="chip-row"><span class="chip">WasmClock</span><span class="chip">WebSocketSrc</span><span class="chip">WebCodecsDecode</span><span class="chip">CanvasSink</span></div>
@@ -1321,7 +1321,7 @@ g2g-launch <span class="flag">--script</span> build.rhai</div>
             <div class="target-card">
                 <div class="t-icon">&#127760;</div>
                 <h3>WASM (browser)</h3>
-                <p><code>wasm32</code>, single-threaded (no cross-origin isolation). WebSocket / WebRTC ingest, WebCodecs decode, Canvas / WebGPU present, in-browser or server-offloaded ML.</p>
+                <p><code>wasm32</code>, single-threaded (no cross-origin isolation); a whole graph can run in a dedicated Worker, presenting to an <code>OffscreenCanvas</code>. WebSocket / WebRTC ingest, WebCodecs H.264 / H.265 decode, Canvas / WebGPU present, in-browser or server-offloaded ML.</p>
             </div>
             <div class="target-card">
                 <div class="t-icon">&#128737;&#65039;</div>

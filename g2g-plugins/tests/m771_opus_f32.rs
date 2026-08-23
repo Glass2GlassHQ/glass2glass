@@ -76,7 +76,9 @@ fn sine_f32(n: usize, amp: f32) -> Vec<u8> {
 
 fn f32_samples(bytes: &[u8]) -> Vec<f32> {
     bytes
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect()
 }
@@ -155,7 +157,9 @@ async fn f32_decode_matches_s16_decode_within_quantization() {
 
     let f = f32_samples(&f32_bytes);
     let s: Vec<i16> = s16_bytes
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| i16::from_le_bytes([c[0], c[1]]))
         .collect();
     assert_eq!(f.len(), s.len(), "same sample count on both paths");

@@ -47,10 +47,14 @@ use web_sys::{
     GpuRenderPassDescriptor, GpuRenderPipeline, GpuRenderPipelineDescriptor,
     GpuRequestAdapterOptions, GpuSampler, GpuSamplerBindingLayout, GpuSamplerBindingType,
     GpuShaderModuleDescriptor, GpuStoreOp, GpuTextureFormat, GpuUncapturedErrorEvent,
-    GpuVertexState, HtmlCanvasElement,
+    GpuVertexState,
 };
 
+/// The canvas context id for WebGPU presentation.
+const CONTEXT_WEBGPU: &str = "webgpu";
+
 use crate::webcodecsdecode::VideoFrameOwner;
+use crate::webutil::{global_scope, Canvas, CanvasTarget};
 
 /// WGSL: a fullscreen triangle sampling an external (YUV) texture. `texture_external`
 /// is the binding for an imported `VideoFrame`; `textureSampleBaseClampToEdge` is the
@@ -180,8 +184,8 @@ struct GpuState {
 /// let sink = WebGpuCanvasSink::new("video-canvas").with_cnn();
 /// ```
 pub struct WebGpuCanvasSink {
-    canvas_id: String,
-    canvas: Option<HtmlCanvasElement>,
+    target: CanvasTarget,
+    canvas: Option<Canvas>,
     gpu: Option<GpuState>,
     width: u32,
     height: u32,
@@ -198,7 +202,7 @@ pub struct WebGpuCanvasSink {
 impl core::fmt::Debug for WebGpuCanvasSink {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("WebGpuCanvasSink")
-            .field("canvas_id", &self.canvas_id)
+            .field("target", &self.target)
             .field("configured", &self.configured)
             .field("gpu_ready", &self.gpu.is_some())
             .field("width", &self.width)
@@ -211,9 +215,21 @@ impl core::fmt::Debug for WebGpuCanvasSink {
 impl WebGpuCanvasSink {
     /// `canvas_id` is the `id` of an existing `<canvas>`; the WebGPU device and
     /// context are acquired lazily on the first frame (the handshake is async).
+    /// Main thread only, since the id is looked up in `document`.
     pub fn new(canvas_id: impl Into<String>) -> Self {
+        Self::with_target(CanvasTarget::ElementId(canvas_id.into()))
+    }
+
+    /// Present to an `OffscreenCanvas` the page transferred in
+    /// (`canvas.transferControlToOffscreen()`), which is how a graph running
+    /// inside a worker draws to the page.
+    pub fn from_offscreen_canvas(canvas: web_sys::OffscreenCanvas) -> Self {
+        Self::with_target(CanvasTarget::Offscreen(canvas))
+    }
+
+    fn with_target(target: CanvasTarget) -> Self {
         Self {
-            canvas_id: canvas_id.into(),
+            target,
             canvas: None,
             gpu: None,
             width: 0,
@@ -258,8 +274,7 @@ impl WebGpuCanvasSink {
         let err = || G2gError::Hardware(HardwareError::Other);
         let canvas = self.canvas.as_ref().ok_or(G2gError::NotConfigured)?;
 
-        let navigator = web_sys::window().ok_or_else(err)?.navigator();
-        let gpu = navigator.gpu();
+        let gpu = global_scope().ok_or_else(err)?.navigator_gpu();
 
         // navigator.gpu.requestAdapter() then adapter.requestDevice(): both async.
         // Ask for the high-performance adapter so a hybrid-GPU host (integrated +
@@ -301,9 +316,7 @@ impl WebGpuCanvasSink {
 
         // Configure the canvas' WebGPU context with the device's preferred format.
         let context = canvas
-            .get_context("webgpu")
-            .map_err(|_| err())?
-            .ok_or_else(err)?
+            .context(CONTEXT_WEBGPU)?
             .dyn_into::<GpuCanvasContext>()
             .map_err(|_| err())?;
         let format: GpuTextureFormat = gpu.get_preferred_canvas_format();
@@ -402,14 +415,7 @@ impl AsyncElement for WebGpuCanvasSink {
     }
 
     fn configure_pipeline(&mut self, _absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        let err = || G2gError::Hardware(HardwareError::Other);
-        let window = web_sys::window().ok_or_else(err)?;
-        let document = window.document().ok_or_else(err)?;
-        let element = document
-            .get_element_by_id(&self.canvas_id)
-            .ok_or_else(err)?;
-        let canvas: HtmlCanvasElement = element.dyn_into().map_err(|_| err())?;
-        self.canvas = Some(canvas);
+        self.canvas = Some(self.target.resolve()?);
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
     }
@@ -436,8 +442,7 @@ impl AsyncElement for WebGpuCanvasSink {
                     // swap-chain texture matches (get_current_texture reads these).
                     if let Some(canvas) = &self.canvas {
                         if self.width != 0 && self.height != 0 {
-                            canvas.set_width(self.width);
-                            canvas.set_height(self.height);
+                            canvas.set_size(self.width, self.height);
                         }
                     }
                 }

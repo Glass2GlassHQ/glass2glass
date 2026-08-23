@@ -16,6 +16,7 @@
 
 use crate::clock::ClockSync;
 use crate::element::QosMessage;
+use crate::frame::FrameTiming;
 use crate::property::{PropError, PropKind, PropValue, PropertySpec};
 use crate::qos::QosTracker;
 use crate::segment::Segment;
@@ -152,12 +153,19 @@ impl PresentationPacer {
     }
 
     /// Clock time a frame's PTS is due at: the anchor (latched here on the first
-    /// frame) plus its running time. `None` when there is nothing to wait for,
-    /// either because no clock is elected or because the frame is clipped
-    /// outside the segment. A caller that wants the wait, the QoS verdict and
+    /// frame) plus its running time. `None` when there is nothing to wait for:
+    /// no clock is elected, the PTS is unset ([`FrameTiming::PTS_NONE`], present
+    /// it on arrival) or the frame is clipped outside the segment. A caller that
+    /// distinguishes the clip from the other two reads
+    /// [`FrameTiming::pts`] itself first. A caller that wants the wait, the QoS verdict and
     /// the drop counted wants [`judge`](PresentationPacer::judge) instead; this
     /// is for one that shifts the deadline itself (`clocksync`'s `ts-offset`).
     pub fn deadline_ns(&mut self, pts_ns: u64) -> Option<u64> {
+        // An unset PTS has no deadline, and must not latch the anchor either:
+        // the anchor belongs to the first frame that carries a real one.
+        if pts_ns == FrameTiming::PTS_NONE {
+            return None;
+        }
         let sync = self.clock_sync.clone()?;
         let rt = self.running_time(pts_ns)?;
         Some(self.presentation_anchor(&sync, rt).saturating_add(rt))
@@ -167,6 +175,11 @@ impl PresentationPacer {
     /// presented. `presented` is the sink's running presented count, reported
     /// in [`BusMessage::Qos`](crate::BusMessage::Qos).
     pub fn judge(&mut self, pts_ns: u64, presented: u64) -> Pace {
+        // A frame with no presentation time is due on arrival: never late, so
+        // never a QoS drop.
+        if pts_ns == FrameTiming::PTS_NONE {
+            return Pace::Now;
+        }
         let Some(sync) = self.clock_sync.clone() else {
             return Pace::Now;
         };
@@ -374,6 +387,36 @@ mod tests {
         clock.store(u64::MAX, Ordering::Relaxed);
         assert_eq!(p.judge(0, 1), Pace::Now, "presented, however late");
         assert_eq!(p.late_dropped(), 0);
+    }
+
+    #[test]
+    fn a_frame_with_no_pts_presents_now_and_does_not_anchor() {
+        let (clock, sync) = manual();
+        let mut p = PresentationPacer::new();
+        p.set_clock_sync(sync);
+        clock.store(10_000_000, Ordering::Relaxed);
+        assert_eq!(p.judge(FrameTiming::PTS_NONE, 0), Pace::Now);
+        assert!(p.anchor_ns.is_none(), "an unset PTS latches no anchor");
+        assert_eq!(p.deadline_ns(FrameTiming::PTS_NONE), None);
+        assert!(p.anchor_ns.is_none());
+
+        // The next real frame is the one that anchors, on itself: it presents
+        // immediately rather than waiting out the PTS the no-pts frame skipped.
+        assert_eq!(p.judge(4_000_000, 1), Pace::Now);
+        assert_eq!(p.anchor_ns, Some(6_000_000));
+    }
+
+    #[test]
+    fn a_frame_with_no_pts_is_never_a_late_drop() {
+        let (clock, sync) = manual();
+        let mut p = PresentationPacer::new();
+        p.set_clock_sync(sync);
+        p.set_max_lateness_ns(0);
+        assert_eq!(p.judge(0, 0), Pace::Now);
+        clock.store(u64::MAX, Ordering::Relaxed);
+        assert_eq!(p.judge(FrameTiming::PTS_NONE, 1), Pace::Now);
+        assert_eq!(p.late_dropped(), 0);
+        assert!(p.take_qos().is_none());
     }
 
     #[test]

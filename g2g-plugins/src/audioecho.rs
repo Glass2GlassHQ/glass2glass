@@ -57,7 +57,12 @@ impl EchoState {
         let delay = delay_frames.clamp(1, self.max_delay_frames);
         let back = delay * self.channels;
         let len = self.ring.len();
-        for (s, d) in src.chunks_exact(2).zip(dst.chunks_exact_mut(2)) {
+        for (s, d) in src
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .zip(dst.as_chunks_mut::<2>().0.iter_mut())
+        {
             let input = i16::from_le_bytes([s[0], s[1]]) as f64;
             let echo = self.ring[(self.pos + len - back) % len] as f64;
             let out = clamp_i16(input + intensity * echo);
@@ -313,7 +318,9 @@ mod tests {
 
     fn unpack(bytes: &[u8]) -> Vec<i16> {
         bytes
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|c| i16::from_le_bytes([c[0], c[1]]))
             .collect()
     }

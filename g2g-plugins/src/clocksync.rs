@@ -102,7 +102,8 @@ impl ClockSyncTransform {
     }
 
     /// Hold the buffer until its deadline. A buffer with no deadline (clipped
-    /// outside the segment) is forwarded now instead: see the module note.
+    /// outside the segment, or carrying `FrameTiming::PTS_NONE`) is forwarded
+    /// now instead: see the module note.
     async fn hold_until_due(&mut self, pts_ns: u64) {
         let sync = self.clock_sync();
         let Some(deadline) = self.pacer.deadline_ns(pts_ns) else {

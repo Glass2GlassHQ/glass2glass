@@ -239,7 +239,7 @@ pub(crate) fn deinterleave_rgb(rgba: &[u8]) -> [Vec<u8>; 3] {
         Vec::with_capacity(pixels),
         Vec::with_capacity(pixels),
     ];
-    for pixel in rgba.chunks_exact(4) {
+    for pixel in rgba.as_chunks::<4>().0 {
         for (channel, value) in channels.iter_mut().zip(&pixel[..3]) {
             channel.push(*value);
         }

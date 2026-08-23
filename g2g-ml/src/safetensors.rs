@@ -174,17 +174,23 @@ impl TensorRef<'_> {
         Ok(match self.dtype {
             Dtype::F32 => self
                 .bytes
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
                 .collect(),
             Dtype::F16 => self
                 .bytes
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|b| f16_to_f32(u16::from_le_bytes([b[0], b[1]])))
                 .collect(),
             Dtype::Bf16 => self
                 .bytes
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|b| bf16_to_f32(u16::from_le_bytes([b[0], b[1]])))
                 .collect(),
             // Guarded by the elem_size match above.

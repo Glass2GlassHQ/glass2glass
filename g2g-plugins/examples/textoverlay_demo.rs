@@ -210,7 +210,7 @@ mod still {
         use std::io::Write;
         let mut out = Vec::with_capacity((w * h * 3) as usize + 32);
         write!(out, "P6\n{w} {h}\n255\n")?;
-        for px in rgba.chunks_exact(4) {
+        for px in rgba.as_chunks::<4>().0 {
             out.extend_from_slice(&px[..3]);
         }
         std::fs::write(path, out)

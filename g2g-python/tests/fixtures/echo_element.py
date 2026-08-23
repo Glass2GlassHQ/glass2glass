@@ -80,6 +80,33 @@ class ChunkedSynthesizer:
             meta.emit(text + str(chunk).encode("utf-8"))
 
 
+class StreamingSynthesizer:
+    """Chunked speech whose chunks play one after another, not all at once.
+
+    Each chunk states the presentation time it starts at, counted from the
+    element properties the test sets (chunks, chunk_duration, first_pts).
+    """
+
+    def g2g_process_payload(self, buffers, caps, meta):
+        text = bytes(memoryview(buffers[0]))
+        for chunk in range(self.chunks):
+            meta.emit(
+                text + str(chunk).encode("utf-8"),
+                duration_ns=self.chunk_duration,
+                pts_ns=self.first_pts + chunk * self.chunk_duration,
+            )
+
+
+class UnstampedSynthesizer:
+    """Emits one buffer with no presentation time, for a sink to present on
+    arrival."""
+
+    def g2g_process_payload(self, buffers, caps, meta):
+        import g2g
+
+        meta.emit(bytes(memoryview(buffers[0])), pts_ns=g2g.PTS_NONE)
+
+
 class ThreadedTransform:
     """Stages a detection from a *worker thread*, not the calling thread.
 

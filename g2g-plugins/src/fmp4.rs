@@ -598,7 +598,7 @@ fn deframe_c608(raw: &[u8]) -> Vec<u8> {
             if !body.len().is_multiple_of(2) {
                 break;
             }
-            for pair in body.chunks_exact(2) {
+            for pair in body.as_chunks::<2>().0 {
                 triples.push(CcTriple {
                     cc_type,
                     b0: pair[0],
@@ -1307,7 +1307,7 @@ fn decode_utf16(bytes: &[u8], big_endian: bool) -> Option<String> {
     if !bytes.len().is_multiple_of(2) {
         return None;
     }
-    let units = bytes.chunks_exact(2).map(|pair| {
+    let units = bytes.as_chunks::<2>().0.iter().map(|pair| {
         let pair = [pair[0], pair[1]];
         if big_endian {
             u16::from_be_bytes(pair)

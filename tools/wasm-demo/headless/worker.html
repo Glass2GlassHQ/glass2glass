@@ -1,0 +1,27 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>g2g worker executor headless test</title>
+<!--
+  Headless test page for the Web Worker executor (M1054). Transfers the canvas
+  to a dedicated module worker, which runs the whole g2g graph off the main
+  thread and presents to the OffscreenCanvas. Driven by run-worker.mjs; not part
+  of the interactive demo (index.html).
+-->
+<canvas id="view" width="640" height="480"></canvas>
+<script type="module">
+  const q = new URLSearchParams(location.search);
+  const ws = q.get("ws");
+  const mode = q.get("mode") || "detect";
+  const offscreen = document.getElementById("view").transferControlToOffscreen();
+  const worker = new Worker("../worker.js", { type: "module" });
+  // Worker console output does not reach page console events, so the worker
+  // posts each line back and the page re-logs it for the harness.
+  worker.onmessage = (e) => {
+    if (e.data.probe) { console.log("g2g[probe]: " + JSON.stringify(e.data.probe)); return; }
+    console.log(e.data.log);
+  };
+  self.probeWorker = () => worker.postMessage({ probe: true });
+  worker.onerror = (e) => console.log("g2g[worker-error]: " + e.message);
+  console.log("g2g[test]: page transferred canvas, mode=" + mode + " ws=" + ws);
+  worker.postMessage({ mode, url: ws, canvas: offscreen }, [offscreen]);
+</script>

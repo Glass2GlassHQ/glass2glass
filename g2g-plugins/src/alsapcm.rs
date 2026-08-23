@@ -200,7 +200,9 @@ mod tests {
         let src: Vec<u8> = (0i16..6).flat_map(|c| c.to_le_bytes()).collect();
         let out = permute(&src, &perm, 2);
         let got: Vec<i16> = out
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|c| i16::from_le_bytes([c[0], c[1]]))
             .collect();
         assert_eq!(got, [0, 1, 4, 5, 2, 3]);

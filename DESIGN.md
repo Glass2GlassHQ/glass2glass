@@ -395,6 +395,8 @@ pub trait AsyncClock: PipelineClock {
 }
 ```
 
+A `pts_ns` of `FrameTiming::PTS_NONE` (`u64::MAX`, the value GStreamer spells `GST_CLOCK_TIME_NONE`) marks a frame with no presentation time: `FrameTiming::pts()` reads it as `None`, and `PresentationPacer` answers `Pace::Now` for it without latching its anchor, so a sink presents the frame as it arrives rather than holding it to a deadline or counting it a late drop.
+
 Sink elements compare `pts_ns` against `now_ns()` to schedule presentation, and `capture_ns` against `now_ns()` to report true glass-to-glass latency without ambiguity about which clock domain a timestamp lives in. Backends provide concrete implementations: a `WallClock` (`std::time::Instant` + `tokio::time::sleep`) for std targets, `embassy-time` for RTOS, performance.now() for Wasm.
 
 A free-running source feeding a sync sink is paced automatically by upstream backpressure (§4.5): the sink only consumes after `sleep_until_ns(pts)` resolves, which throttles the channel, which throttles the source. No explicit source-side pacing is required for sync playback.
@@ -1982,6 +1984,16 @@ either of two paths:
   fails the frame if the element kept a view past return (its pointer would dangle
   once the frame is freed downstream). `g2g_process_batch` and `g2g_produce` are
   the aggregator / source shapes of the same contract.
+- **Payloads with no picture shape.** Audio into a transcriber, text into speech:
+  the frame reaches `g2g_process_payload(buffers, caps, meta)`, and the element
+  hands back buffers of its own through
+  `meta.emit(payload, duration_ns=None, pts_ns=None)` instead of overwriting the
+  one it read. Each emitted buffer inherits the anchor's timing unless it says
+  otherwise: a streaming element gives every chunk its own `pts_ns` (usually the
+  previous chunk's pts plus its duration) so the chunks play one after another,
+  while outputs that run in parallel (the separation family's stems) leave it
+  unset and share the anchor's. `g2g.PTS_NONE` (`FrameTiming::PTS_NONE`, §4.4)
+  emits a buffer with no presentation time, which a sink presents on arrival.
 - **CUDA device memory (M984).** A `MemoryDomain::Cuda` frame has no CPU bytes, so
   its two semi-planar planes are described to
   `g2g_process_cuda(luma, chroma, width, height, meta)` as `g2g.CudaPlane` objects
@@ -2854,9 +2866,12 @@ A WebVTT `STYLE` block reaches the pixels. `parse_cue_styles` resolves `::cue`,
 `::cue(#id)` and `::cue(.class)` rules onto each cue's `CueSettings`, and a
 span-scoped rule lands as a `SpanStyle` run over the byte range its `<c.class>`
 tag covers, so nested spans resolve per property (the innermost run that sets one
-wins). Beyond `color` the properties honoured are `font-size` (`px`, or a percent
-of the size the cue itself draws at), `text-shadow` and `background-color`, and
-all three render paths apply them. On the shaped path the sized runs become
+wins). The presentational `<b>` / `<i>` / `<u>` tags make the same kind of run
+with no stylesheet at all, and a rule matching the same span overrides them.
+Beyond `color` the properties honoured are `font-size` (`px`, or a percent
+of the size the cue itself draws at), `text-shadow`, `background-color`,
+`font-weight`, `font-style`, `text-decoration: underline` and `font-stretch`,
+and all three render paths apply them. On the shaped path the sized runs become
 cosmic-text `Metrics` overrides on the line's `AttrsList`, so a line mixing sizes
 is still one shaped, bidi-reordered run and takes the tallest span's line height;
 the `ab_glyph` renderer rasterizes each character at its own size on a shared
@@ -2869,7 +2884,17 @@ colour. Vello has no filter that blurs a glyph run, so the GPU backend draws a
 blurred shadow as one tinted mask image per glyph, blurred by the same code, and
 falls back to a glyph run when the radius is 0. A whole-cue
 `background-color` is the backing box; a span-scoped one fills the line box
-behind that span's own glyphs, over the box and under the text. Sizes and offsets
+behind that span's own glyphs, over the box and under the text. Weight, slant
+and width are carried as per-span cosmic-text `Attrs`, so they pick a face out
+of the font database (a real bold or italic face where the family has one, else
+the `wght` variation axis for weight; there is no synthetic oblique, so an
+italic run with no italic face installed renders upright) and reach the Vello
+backend in the glyph ids and the face each run names. That face selection is
+the shaped path only: a `vertical:rl` / `lr` cue on the `ab_glyph` column
+renderer keeps the element's own `font-variations=` weight. An underline is a
+filled bar in the run's text colour, drawn in the glyph layer so a neighbour's
+shadow stays under it, below the baseline horizontally and down the column's
+right edge vertically. Sizes and offsets
 are clamped at parse time, because a stylesheet is as untrusted as the rest of
 the subtitle file and the size becomes a glyph raster.
 
@@ -4569,16 +4594,31 @@ The browser element surface comprises:
   / `RtspSrc`.
 - `WebRtcSrc` (`web` feature) — ingest over a provided `RtcDataChannel`.
 - `WebCodecsDecode` (`web-codecs` feature) — wraps the browser `VideoDecoder`;
-  H.264 Annex-B access units in, `VideoFrame` copied to `System` RGBA out.
-  Build needs `--cfg=web_sys_unstable_apis`.
+  H.264 or H.265 Annex-B access units in, `VideoFrame` copied to `System` RGBA
+  out. The codec comes from the negotiated caps and picks the WebCodecs codec
+  string built from the in-band SPS (`avc1.` / `hev1.`, ISO/IEC 14496-15 Annex
+  E.3); chunks stay Annex-B, which is what a config without a `description`
+  means. Build needs `--cfg=web_sys_unstable_apis`.
 - `CanvasSink` — presents decoded RGBA to an HTML canvas via the 2D context.
-  A WebGPU-texture zero-copy variant uses `MemoryDomain::WebGPUBuffer` into
-  a `GPUTexture` once the async device handshake lands in the keep-alive.
+  `WebGpuCanvasSink` (`web-gpu` feature) is the zero-copy variant: it imports
+  the decoded `VideoFrame` as a `GPUExternalTexture` and samples it in a render
+  pass, with no readback into wasm memory.
 
 A complete in-browser glass-to-glass pipeline is
 `WebSocketSrc → H264Parse → WebCodecsDecode → CanvasSink`. The local gate
 for the wasm build is
 `cargo check --target wasm32-unknown-unknown -p g2g-plugins --features web`.
+
+**Off the main thread (M1054).** A whole graph can run inside a dedicated module
+worker: one wasm instance per worker, the same single-threaded executor, no
+SharedArrayBuffer and no cross-origin isolation. The page hands the worker an
+`OffscreenCanvas` (`canvas.transferControlToOffscreen()`), which the sinks take
+through `CanvasSink::from_offscreen_canvas` /
+`WebGpuCanvasSink::from_offscreen_canvas` instead of looking an element id up in
+`document`. A worker has neither `window` nor `document`, so `WasmClock` and the
+WebGPU sink resolve `performance` / `setTimeout` / `navigator.gpu` off
+`js_sys::global()`, cast to `Window` or `WorkerGlobalScope`. A transferred canvas
+belongs to the worker for good, so a page switches graphs by reloading.
 
 **In-browser ONNX inference (`WebOrtDetect`).** The chain
 `WebSocketSrc → WebCodecsDecode → WebOrtDetect → AnalyticsOverlay → CanvasSink`

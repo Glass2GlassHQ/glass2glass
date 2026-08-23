@@ -776,7 +776,7 @@ impl Compositor {
     fn compose_packed(&self, base0: &[u8]) -> Box<[u8]> {
         let (cw, ch) = (self.out_w as usize, self.out_h as usize);
         let mut canvas = vec![0u8; cw * ch * 4];
-        for px in canvas.chunks_exact_mut(4) {
+        for px in canvas.as_chunks_mut::<4>().0 {
             px.copy_from_slice(&self.background);
         }
         for i in paint_order(&self.pads) {

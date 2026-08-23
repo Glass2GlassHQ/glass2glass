@@ -333,7 +333,12 @@ fn apply_alpha(
     method: AlphaMethod,
     set_alpha: u8,
 ) {
-    for (s, d) in src.chunks_exact(4).zip(dst.chunks_exact_mut(4)) {
+    for (s, d) in src
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(dst.as_chunks_mut::<4>().0.iter_mut())
+    {
         d[0] = s[0];
         d[1] = s[1];
         d[2] = s[2];

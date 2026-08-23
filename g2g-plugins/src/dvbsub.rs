@@ -514,7 +514,7 @@ impl DvbSubDecoder {
             self.cluts.clear();
         }
         self.page_regions.clear();
-        for entry in body[2..].chunks_exact(6) {
+        for entry in body[2..].as_chunks::<6>().0 {
             self.page_regions.push(PageRegion {
                 id: entry[0],
                 x: u16::from_be_bytes([entry[2], entry[3]]) as u32,
@@ -563,7 +563,7 @@ impl DvbSubDecoder {
 
         let count = width as usize * height as usize;
         let mut objects = Vec::new();
-        for entry in body[10..].chunks_exact(6) {
+        for entry in body[10..].as_chunks::<6>().0 {
             let x = (u16::from_be_bytes([entry[2], entry[3]]) & 0x0fff) as u32;
             let y = (u16::from_be_bytes([entry[4], entry[5]]) & 0x0fff) as u32;
             if x >= width || y >= height {

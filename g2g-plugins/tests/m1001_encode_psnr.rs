@@ -367,7 +367,9 @@ mod mjpeg {
             channels.push(deinterleave_rgb(measured));
         }
         let planes: Vec<(&[u8], &[u8])> = channels
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .flat_map(|pair| (0..3).map(|c| (pair[0][c].as_slice(), pair[1][c].as_slice())))
             .collect();
         let psnr = plane_psnr(&planes);

@@ -1,0 +1,437 @@
+//! M1055 - the cue text styling the overlay renders beyond colour and size:
+//! `<b>` / `<i>` / `<u>` and the `font-weight` / `font-style` /
+//! `text-decoration` / `font-stretch` rules that back them. Each test renders a
+//! frame and asserts on the pixels.
+//!
+//! The file runs on either CPU font path: with `truetype-overlay` alone the
+//! horizontal cues go through the `ab_glyph` renderer, with `text-shaping` they
+//! go through cosmic-text, and the vertical cue is always `ab_glyph`. Face
+//! selection (bold, italic) is the shaper's, so those two tests need
+//! `text-shaping` and an installed face to select.
+
+#![cfg(feature = "truetype-overlay")]
+
+use g2g_core::frame::Frame;
+use g2g_core::memory::SystemSlice;
+use g2g_core::{
+    AsyncElement, Caps, Dim, FrameTiming, G2gError, MemoryDomain, OutputSink, PipelinePacket,
+    PushOutcome, Rate, RawVideoFormat,
+};
+use g2g_plugins::subparse::parse_webvtt;
+use g2g_plugins::textoverlay::TextOverlay;
+
+const W: u32 = 480;
+const H: u32 = 160;
+const FONT_PX: u32 = 32;
+
+/// Cue-wide declarations every document here starts from: the backing box off,
+/// so the only painted pixels are the ones under test.
+const NO_BOX: &str = "::cue { background-color: transparent; }";
+
+/// First available Latin system font, or `None` to skip (a host with no fonts).
+/// These are the Fedora paths the dev host has.
+fn latin_font() -> Option<Vec<u8>> {
+    read_first(&[
+        "/usr/share/fonts/liberation-sans-fonts/LiberationSans-Regular.ttf",
+        "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf",
+        "/usr/share/fonts/google-noto/NotoSans-Regular.ttf",
+    ])
+}
+
+/// First available `wght`-variable system font, or `None` to skip: a weight the
+/// font database cannot satisfy with a real bold face reaches that axis.
+#[cfg(feature = "text-shaping")]
+fn variable_font() -> Option<Vec<u8>> {
+    read_first(&[
+        "/usr/share/fonts/abattis-cantarell-vf-fonts/Cantarell-VF.otf",
+        "/usr/share/fonts/vazirmatn-vf-fonts/Vazirmatn[wght].ttf",
+        "/usr/share/fonts/google-noto-sans-cjk-vf-fonts/NotoSansCJK-VF.ttc",
+    ])
+}
+
+fn read_first(paths: &[&str]) -> Option<Vec<u8>> {
+    paths.iter().find_map(|path| std::fs::read(path).ok())
+}
+
+fn caps() -> Caps {
+    Caps::RawVideo {
+        format: RawVideoFormat::Rgba8,
+        width: Dim::Fixed(W),
+        height: Dim::Fixed(H),
+        framerate: Rate::Fixed(30 << 16),
+        interlace: g2g_core::Interlace::Any,
+    }
+}
+
+/// A one-cue WebVTT document: `style` declarations, then `text` as the cue body.
+fn document(style: &str, text: &str) -> String {
+    format!("WEBVTT\n\nSTYLE\n{style}\n\n00:00:00.000 --> 00:00:10.000\n{text}\n")
+}
+
+/// A cue whose middle run is red and its neighbours green and blue, so each
+/// run's pixels are told apart by colour. `mark_style` adds declarations to the
+/// middle run's rule, `mark_text` is its markup.
+fn marked_document(mark_style: &str, mark_text: &str) -> String {
+    document(
+        &format!(
+            "{NO_BOX}\n\
+             ::cue(.before) {{ color: lime; }}\n\
+             ::cue(.mark) {{ color: red; {mark_style} }}\n\
+             ::cue(.after) {{ color: blue; }}"
+        ),
+        &format!("<c.before>ab</c> {mark_text} <c.after>ef</c>"),
+    )
+}
+
+/// A `vertical:rl` cue drawn in red, whose `text` carries the markup under test.
+fn vertical_document(text: &str) -> String {
+    format!(
+        "WEBVTT\n\nSTYLE\n{NO_BOX}\n::cue {{ color: red; }}\n\n\
+         00:00:00.000 --> 00:00:10.000 vertical:rl\n{text}\n"
+    )
+}
+
+fn black_frame() -> Frame {
+    let mut bytes = Vec::with_capacity((W * H * 4) as usize);
+    for _ in 0..W * H {
+        bytes.extend_from_slice(&[0, 0, 0, 255]);
+    }
+    Frame::new(
+        MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
+        FrameTiming::default(),
+        0,
+    )
+}
+
+#[derive(Default)]
+struct FrameSink {
+    last: Option<Frame>,
+}
+impl OutputSink for FrameSink {
+    fn poll_push(
+        &mut self,
+        _cx: &mut core::task::Context<'_>,
+        packet: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        if let Some(PipelinePacket::DataFrame(frame)) = packet.take() {
+            self.last = Some(frame);
+        }
+        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
+    }
+}
+
+/// Render the document's cue over a black frame, as RGBA8 bytes. With no `font`
+/// the shaper picks the system sans-serif itself.
+async fn render(font: Option<&[u8]>, vtt: &str) -> Vec<u8> {
+    let mut overlay = TextOverlay::new()
+        .with_cues(parse_webvtt(vtt))
+        .with_font_size(FONT_PX);
+    if let Some(font) = font {
+        overlay = overlay.with_font_bytes(font, 0).expect("font parses");
+    }
+    overlay.configure_pipeline(&caps()).expect("caps accepted");
+    let mut sink = FrameSink::default();
+    overlay
+        .process(PipelinePacket::DataFrame(black_frame()), &mut sink)
+        .await
+        .expect("frame rendered");
+    sink.last
+        .expect("frame forwarded")
+        .domain
+        .as_system_slice()
+        .expect("system memory out")
+        .to_vec()
+}
+
+/// Whether a pixel is dominated by one channel, which is how a coloured glyph or
+/// bar reads once it is alpha-blended onto the black frame.
+fn is_red(px: &[u8]) -> bool {
+    dominates(px[0], px[1], px[2])
+}
+fn is_green(px: &[u8]) -> bool {
+    dominates(px[1], px[0], px[2])
+}
+fn is_blue(px: &[u8]) -> bool {
+    dominates(px[2], px[0], px[1])
+}
+fn dominates(channel: u8, other: u8, third: u8) -> bool {
+    let (channel, other, third) = (u32::from(channel), u32::from(other), u32::from(third));
+    channel > 60 && other * 3 < channel && third * 3 < channel
+}
+
+/// Count of painted (non-black) pixels, a proxy for how much ink a weight or a
+/// slant puts on the canvas.
+#[cfg(feature = "text-shaping")]
+fn ink(pixels: &[u8]) -> usize {
+    pixels
+        .chunks_exact(4)
+        .filter(|px| px[0] != 0 || px[1] != 0 || px[2] != 0)
+        .count()
+}
+
+/// Bounding box `(left, top, right, bottom)` of the pixels `pick` accepts,
+/// inclusive on every edge. `None` when it accepted none.
+fn bounds(pixels: &[u8], pick: fn(&[u8]) -> bool) -> Option<(u32, u32, u32, u32)> {
+    let mut found: Option<(u32, u32, u32, u32)> = None;
+    for (i, px) in pixels.chunks_exact(4).enumerate() {
+        if !pick(px) {
+            continue;
+        }
+        let (x, y) = (i as u32 % W, i as u32 / W);
+        found = Some(match found {
+            None => (x, y, x, y),
+            Some((l, t, r, b)) => (l.min(x), t.min(y), r.max(x), b.max(y)),
+        });
+    }
+    found
+}
+
+/// The longest unbroken run of `pick` pixels along a row, as `(row, first, last)`.
+/// The underline bar is the widest one a cue draws: it spans its whole run,
+/// where a glyph only ever fills part of one letter.
+fn widest_row_run(pixels: &[u8], pick: fn(&[u8]) -> bool) -> Option<(u32, u32, u32)> {
+    longest_run(pixels, pick, |offset, line| (offset, line), W, H)
+}
+
+/// The longest unbroken run of `pick` pixels down a column, as
+/// `(column, first, last)`.
+fn tallest_column_run(pixels: &[u8], pick: fn(&[u8]) -> bool) -> Option<(u32, u32, u32)> {
+    longest_run(pixels, pick, |offset, line| (line, offset), H, W)
+}
+
+/// The longest unbroken run of `pick` pixels along one axis: `lines` scans of
+/// `len` pixels each, `at` mapping a scan position to `(line, offset)`.
+fn longest_run(
+    pixels: &[u8],
+    pick: fn(&[u8]) -> bool,
+    at: fn(u32, u32) -> (u32, u32),
+    len: u32,
+    lines: u32,
+) -> Option<(u32, u32, u32)> {
+    let mut best: Option<(u32, u32, u32)> = None;
+    for line in 0..lines {
+        let mut run_start: Option<u32> = None;
+        for offset in 0..=len {
+            let hit = offset < len && {
+                let (x, y) = at(offset, line);
+                pick(&pixels[((y * W + x) * 4) as usize..][..4])
+            };
+            match (hit, run_start) {
+                (true, None) => run_start = Some(offset),
+                (false, Some(start)) => {
+                    let run = (line, start, offset - 1);
+                    if best.is_none_or(|(_, b_start, b_end)| b_end - b_start < run.2 - run.1) {
+                        best = Some(run);
+                    }
+                    run_start = None;
+                }
+                _ => {}
+            }
+        }
+    }
+    best
+}
+
+/// The underline bar of a [`marked_document`] cue: a red run below the baseline
+/// its neighbours share, covering the marked run's width and neither neighbour.
+fn assert_bar_under_the_marked_run(pixels: &[u8]) {
+    let (_, _, before_right, before_bottom) = bounds(pixels, is_green).expect("the run before");
+    let (after_left, _, _, _) = bounds(pixels, is_blue).expect("the run after");
+    let (row, left, right) = widest_row_run(pixels, is_red).expect("the marked run's ink");
+    assert!(
+        row > before_bottom,
+        "the bar sits below the baseline the neighbouring run shares: row {row} vs {before_bottom}"
+    );
+    assert!(
+        left > before_right && right < after_left,
+        "the bar stays inside its own run: {left}..{right} between {before_right} and {after_left}"
+    );
+    assert!(
+        right - left > FONT_PX / 2,
+        "the bar spans the run rather than one glyph stem: {left}..{right}"
+    );
+}
+
+/// `<u>` underlines its own run, with no stylesheet involved.
+#[tokio::test]
+async fn inline_underline_tag_draws_a_bar_under_its_run() {
+    let Some(font) = latin_font() else {
+        std::eprintln!("no system font; skipping");
+        return;
+    };
+    let pixels = render(Some(&font), &marked_document("", "<u><c.mark>cd</c></u>")).await;
+    assert_bar_under_the_marked_run(&pixels);
+}
+
+/// The same bar through the CSS route: `::cue(.mark) { text-decoration:
+/// underline }` on the span the class names.
+#[tokio::test]
+async fn cue_css_text_decoration_underlines_its_span() {
+    let Some(font) = latin_font() else {
+        std::eprintln!("no system font; skipping");
+        return;
+    };
+    let pixels = render(
+        Some(&font),
+        &marked_document("text-decoration: underline;", "<c.mark>cd</c>"),
+    )
+    .await;
+    assert_bar_under_the_marked_run(&pixels);
+}
+
+/// A `vertical:rl` cue underlines down the column's right edge, clear of the
+/// glyphs the column centres.
+#[tokio::test]
+async fn vertical_cue_underlines_along_the_column_right_edge() {
+    let Some(font) = latin_font() else {
+        std::eprintln!("no system font; skipping");
+        return;
+    };
+    let plain = render(Some(&font), &vertical_document("ab")).await;
+    let underlined = render(Some(&font), &vertical_document("<u>ab</u>")).await;
+    let (_, _, glyph_right, _) = bounds(&plain, is_red).expect("column glyphs");
+    let (column, top, bottom) = tallest_column_run(&underlined, is_red).expect("the bar");
+    assert!(
+        column > glyph_right,
+        "the bar sits right of every glyph pixel: column {column} vs {glyph_right}"
+    );
+    assert!(
+        bottom - top > FONT_PX,
+        "the bar runs down both characters of the column: {top}..{bottom}"
+    );
+}
+
+/// `<b>` bolds its own run: with a `wght`-variable face the shaper reaches that
+/// axis, so the same word paints more ink than it does unstyled.
+#[cfg(feature = "text-shaping")]
+#[tokio::test]
+async fn bold_span_paints_more_ink_than_the_unstyled_run() {
+    let Some(font) = variable_font() else {
+        std::eprintln!("no variable system font; skipping");
+        return;
+    };
+    let style = format!("{NO_BOX}\n::cue {{ color: white; }}");
+    let plain = render(Some(&font), &document(&style, "Hamburg")).await;
+    let bold = render(Some(&font), &document(&style, "<b>Hamburg</b>")).await;
+    assert!(ink(&plain) > 0, "the unstyled run renders");
+    assert!(
+        ink(&bold) > ink(&plain),
+        "the bold run is heavier: {} px vs {} px",
+        ink(&bold),
+        ink(&plain)
+    );
+}
+
+/// The file `fc-match` resolves a query to, or `None` where fontconfig is not
+/// installed.
+#[cfg(feature = "text-shaping")]
+fn fc_match_file(query: &str) -> Option<String> {
+    let out = std::process::Command::new("fc-match")
+        .args([query, "file"])
+        .output()
+        .ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// `font-style: italic` selects an italic face where the default sans-serif
+/// family has one. cosmic-text has no synthetic oblique, so with no such face
+/// installed the run renders upright and only its ink is asserted.
+#[cfg(feature = "text-shaping")]
+#[tokio::test]
+async fn italic_span_selects_an_italic_face_when_one_is_installed() {
+    let style = format!("{NO_BOX}\n::cue {{ color: white; }}");
+    let upright = render(None, &document(&style, "Hamburg")).await;
+    let italic = render(None, &document(&style, "<i>Hamburg</i>")).await;
+    assert!(ink(&italic) > 0, "the italic run renders");
+
+    let sans = fc_match_file("sans-serif");
+    let slanted = fc_match_file("sans-serif:style=Italic");
+    match (sans, slanted) {
+        (Some(sans), Some(slanted)) if sans != slanted => assert_ne!(
+            upright, italic,
+            "the italic run is drawn from {slanted} rather than {sans}"
+        ),
+        (Some(sans), _) => std::eprintln!(
+            "skip the difference check: fontconfig resolves the italic sans-serif to {sans} too"
+        ),
+        _ => std::eprintln!("skip the difference check: no fontconfig on this host"),
+    }
+}
+
+// -- The Vello GPU backend draws the same styling. -----------------------------
+
+#[cfg(feature = "vello-text-overlay")]
+mod gpu {
+    use super::*;
+    use g2g_plugins::gpu::{read_rgba_texture, texture_of, GpuContext};
+    use g2g_plugins::vellooverlay::VelloTextOverlay;
+
+    // Parallel per-test device creation intermittently segfaults in the NVIDIA
+    // driver (the recorded wgpu gotcha), so the GPU tests take one lock for
+    // their whole body.
+    static GPU_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    async fn gpu_context() -> Option<GpuContext> {
+        match GpuContext::headless().await {
+            Ok(ctx) => Some(ctx),
+            Err(_) => {
+                std::eprintln!("no wgpu adapter; skipping the GPU underline test");
+                None
+            }
+        }
+    }
+
+    /// The GPU overlay's rendering of the document, read back from the texture.
+    async fn gpu_render(ctx: &GpuContext, font: &[u8], vtt: &str) -> Vec<u8> {
+        let mut overlay = VelloTextOverlay::new()
+            .with_context(ctx.clone())
+            .with_font_bytes(font, 0)
+            .expect("font parses")
+            .with_cues(parse_webvtt(vtt))
+            .with_font_size(FONT_PX);
+        overlay.configure_pipeline(&caps()).expect("caps accepted");
+        let mut sink = FrameSink::default();
+        overlay
+            .process(PipelinePacket::DataFrame(black_frame()), &mut sink)
+            .await
+            .expect("frame rendered");
+        let frame = sink.last.expect("frame forwarded");
+        let MemoryDomain::WgpuTexture(owned) = &frame.domain else {
+            panic!("output is a GPU texture domain");
+        };
+        read_rgba_texture(ctx, texture_of(owned).expect("texture keep-alive"))
+    }
+
+    /// The GPU backend draws the underline bar too, in the pixels the CPU
+    /// overlay puts it in.
+    #[tokio::test]
+    async fn gpu_draws_the_underline_bar() {
+        let _gpu = GPU_LOCK.lock().await;
+        let Some(ctx) = gpu_context().await else {
+            return;
+        };
+        let Some(font) = latin_font() else {
+            std::eprintln!("no system font; skipping");
+            return;
+        };
+        let vtt = marked_document("", "<u><c.mark>cd</c></u>");
+        let on_gpu = gpu_render(&ctx, &font, &vtt).await;
+        assert_bar_under_the_marked_run(&on_gpu);
+
+        let on_cpu = render(Some(&font), &vtt).await;
+        let (gpu_row, gpu_left, gpu_right) = widest_row_run(&on_gpu, is_red).expect("the GPU bar");
+        let (cpu_row, cpu_left, cpu_right) = widest_row_run(&on_cpu, is_red).expect("the CPU bar");
+        for (edge, (g, c)) in [
+            ("row", (gpu_row, cpu_row)),
+            ("left", (gpu_left, cpu_left)),
+            ("right", (gpu_right, cpu_right)),
+        ] {
+            assert!(
+                g.abs_diff(c) <= 3,
+                "the bar's {edge} matches the CPU overlay: {g} vs {c}"
+            );
+        }
+    }
+}

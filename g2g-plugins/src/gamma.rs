@@ -268,7 +268,12 @@ impl PadTemplates for Gamma {
 /// Apply the LUT to R/G/B of every packed pixel, leaving alpha (byte 3) as is.
 /// The LUT is symmetric in R/G/B, so RGBA and BGRA both map channels 0/1/2.
 fn apply_gamma(src: &[u8], dst: &mut [u8], lut: &[u8; 256]) {
-    for (s, d) in src.chunks_exact(4).zip(dst.chunks_exact_mut(4)) {
+    for (s, d) in src
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(dst.as_chunks_mut::<4>().0.iter_mut())
+    {
         d[0] = lut[s[0] as usize];
         d[1] = lut[s[1] as usize];
         d[2] = lut[s[2] as usize];

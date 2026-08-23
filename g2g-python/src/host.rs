@@ -29,9 +29,16 @@
 //! `buffers` are the same writable views and `caps` is the negotiated caps as a
 //! `gst-launch` string. Those elements (transcription reading audio and writing
 //! text, speech synthesis the other way) rarely produce output the size of their
-//! input, so they return bytes through `meta.emit(payload, duration_ns=None)`:
-//! the host wraps them in a new frame that replaces the one they were given,
-//! keeping its timing but for a duration the element states.
+//! input, so they return bytes through
+//! `meta.emit(payload, duration_ns=None, pts_ns=None)`: the host wraps them in a
+//! new frame that replaces the one they were given, keeping its timing but for
+//! the duration and presentation time the element states. A streaming element
+//! (speech synthesized a chunk at a time) passes each chunk's own `pts_ns`,
+//! usually the previous chunk's pts plus its duration, so the chunks play one
+//! after another; an element whose outputs run in parallel (the separation
+//! family's stems) leaves it unset so they all share the anchor's.
+//! `g2g.PTS_NONE` means the buffer has no presentation time and a sink presents
+//! it on arrival.
 //!
 //! GPU-resident frames take their own entry points (M984, M986). A
 //! [`MemoryDomain::Cuda`] frame has no CPU bytes to wrap, so its two semi-planar
@@ -95,8 +102,8 @@ use pyo3::prelude::*;
 use g2g_core::log::Target;
 use g2g_core::runtime::{bounded, Receiver};
 use g2g_core::{
-    g2g_warn, Caps, Dim, Frame, G2gError, HardwareError, MemoryDomain, PropValue, RawVideoFormat,
-    SystemSlice,
+    g2g_warn, Caps, Dim, Frame, FrameTiming, G2gError, HardwareError, MemoryDomain, PropValue,
+    RawVideoFormat, SystemSlice,
 };
 
 use crate::cuda_plane::{nv12_planes, produced_cuda_buffer, CudaPlane};
@@ -304,6 +311,11 @@ struct Emitted {
     /// duration: synthesized speech lasts as long as its samples, not as long as
     /// the text it was generated from. `None` inherits the anchor's.
     duration_ns: Option<u64>,
+    /// When the produced buffer is presented, when that is not the anchor's
+    /// time: each chunk of streaming speech starts where the previous one ended,
+    /// rather than all of them stacking at the instant the text arrived. `None`
+    /// inherits the anchor's.
+    pts_ns: Option<u64>,
 }
 
 impl MetaSink {
@@ -377,16 +389,22 @@ impl MetaSink {
     /// the output covers the same stretch of the stream as the input. An element
     /// whose output runs for its own length (speech synthesized from a text
     /// buffer) passes `duration_ns` to say how long, keeping the presentation
-    /// time it was generated at. The frame number is the host's, counted over
-    /// what this element emitted, not the number of the buffer it read.
-    #[pyo3(signature = (payload, duration_ns = None))]
-    fn emit(&self, payload: Vec<u8>, duration_ns: Option<u64>) {
+    /// time it was generated at. An element whose buffers play one after another
+    /// (streaming speech, a chunk at a time) passes each one's `pts_ns` too,
+    /// usually the previous chunk's pts plus its duration; one whose buffers run
+    /// in parallel (the separation family's stems) leaves it unset so they share
+    /// the anchor's. `g2g.PTS_NONE` says the buffer has no presentation time, and
+    /// a sink presents it on arrival. The frame number is the host's, counted
+    /// over what this element emitted, not the number of the buffer it read.
+    #[pyo3(signature = (payload, duration_ns = None, pts_ns = None))]
+    fn emit(&self, payload: Vec<u8>, duration_ns: Option<u64>, pts_ns: Option<u64>) {
         self.emitted
             .lock()
             .expect("MetaSink emitted lock poisoned")
             .push(Emitted {
                 payload,
                 duration_ns,
+                pts_ns,
             });
     }
 }
@@ -405,6 +423,8 @@ impl MetaSink {
 fn g2g(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<MetaSink>()?;
     m.add_class::<CudaPlane>()?;
+    // The `pts_ns=` an element passes to emit a buffer with no presentation time.
+    m.add("PTS_NONE", FrameTiming::PTS_NONE)?;
     Ok(())
 }
 
@@ -840,6 +860,12 @@ fn process_job(
                         let mut timing = anchor_timing;
                         if let Some(duration_ns) = emitted.duration_ns {
                             timing.duration_ns = duration_ns;
+                        }
+                        // An emitted buffer is never reordered, so its decode
+                        // time is its presentation time.
+                        if let Some(pts_ns) = emitted.pts_ns {
+                            timing.pts_ns = pts_ns;
+                            timing.dts_ns = pts_ns;
                         }
                         let sequence = *emitted_sequence;
                         *emitted_sequence += 1;

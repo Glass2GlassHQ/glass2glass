@@ -410,7 +410,9 @@ impl TensorConvert {
             Conversion::Identity => src[..count * in_dtype.size()].to_vec(),
             Conversion::Quantize => {
                 let floats: Vec<f32> = src
-                    .chunks_exact(4)
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
                     .take(count)
                     .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
                     .collect();
@@ -429,7 +431,7 @@ impl TensorConvert {
             }
             Conversion::NarrowF16 => {
                 let mut bytes = Vec::with_capacity(count * 2);
-                for c in src.chunks_exact(4).take(count) {
+                for c in src.as_chunks::<4>().0.iter().take(count) {
                     let f = f32::from_le_bytes([c[0], c[1], c[2], c[3]]);
                     bytes.extend_from_slice(&f32_to_f16_bits(f).to_le_bytes());
                 }
@@ -437,7 +439,7 @@ impl TensorConvert {
             }
             Conversion::WidenF16 => {
                 let mut bytes = Vec::with_capacity(count * 4);
-                for c in src.chunks_exact(2).take(count) {
+                for c in src.as_chunks::<2>().0.iter().take(count) {
                     let f = f16_bits_to_f32(u16::from_le_bytes([c[0], c[1]]));
                     bytes.extend_from_slice(&f.to_le_bytes());
                 }
@@ -946,7 +948,9 @@ mod tests {
         let out = first_data(&sink);
         assert_eq!(out.len(), 4 * 2, "one f16 (2 bytes) per element");
         let halves: Vec<u16> = out
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|c| u16::from_le_bytes([c[0], c[1]]))
             .collect();
         assert_eq!(halves, vec![0x3C00, 0x3800, 0xC000, 0x0000]);

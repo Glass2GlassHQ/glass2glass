@@ -290,7 +290,7 @@ fn frame_to_ns(frame: u64, sample_rate: u32) -> u64 {
 /// Add S16LE `bytes` into an i32 accumulator lane-for-lane; excess bytes past
 /// `acc` are ignored.
 fn accumulate(acc: &mut [i32], bytes: &[u8]) {
-    for (dst, chunk) in acc.iter_mut().zip(bytes.chunks_exact(2)) {
+    for (dst, chunk) in acc.iter_mut().zip(bytes.as_chunks::<2>().0.iter()) {
         *dst += i16::from_le_bytes([chunk[0], chunk[1]]) as i32;
     }
 }
@@ -298,7 +298,7 @@ fn accumulate(acc: &mut [i32], bytes: &[u8]) {
 /// Clamp an i32 accumulator to the i16 range as S16LE bytes.
 fn clamp_to_bytes(acc: &[i32]) -> Box<[u8]> {
     let mut out = vec![0u8; acc.len() * 2].into_boxed_slice();
-    for (v, chunk) in acc.iter().zip(out.chunks_exact_mut(2)) {
+    for (v, chunk) in acc.iter().zip(out.as_chunks_mut::<2>().0.iter_mut()) {
         let s = (*v).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
         chunk.copy_from_slice(&s.to_le_bytes());
     }
@@ -332,7 +332,9 @@ mod tests {
 
     fn unpack(bytes: &[u8]) -> Vec<i16> {
         bytes
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|c| i16::from_le_bytes([c[0], c[1]]))
             .collect()
     }

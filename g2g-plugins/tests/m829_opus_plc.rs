@@ -314,7 +314,7 @@ async fn deleted_packet_is_a_hole_without_plc_and_an_exact_fill_with_it() {
     // Concealment is synthesized audio, not a silent patch: libopus extrapolates
     // the tone from its decoder state.
     assert!(
-        with[2].pcm.chunks_exact(2).any(|s| s != [0, 0]),
+        with[2].pcm.as_chunks::<2>().0.iter().any(|s| s != &[0, 0]),
         "the concealed run carries a signal"
     );
 

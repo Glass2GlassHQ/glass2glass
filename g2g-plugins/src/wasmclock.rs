@@ -14,7 +14,7 @@ use g2g_core::{AsyncClock, DynAsyncClock, Pace, PipelineClock};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
 
-use crate::webutil::ms_to_ns;
+use crate::webutil::{global_scope, ms_to_ns};
 
 #[derive(Debug, Clone)]
 pub struct WasmClock {
@@ -77,26 +77,22 @@ pub async fn wait_to_present(pace: Pace) -> bool {
     }
 }
 
-/// `window.performance.now()`, or 0.0 if unavailable (no `window`). A missing
-/// clock degrades to a zero reading rather than panicking.
+/// `performance.now()` from whichever global scope this runs in (a worker has
+/// no `window`), or 0.0 if unavailable. A missing clock degrades to a zero
+/// reading rather than panicking.
 fn performance_now_ms() -> f64 {
-    web_sys::window()
-        .and_then(|w| w.performance())
+    global_scope()
+        .and_then(|scope| scope.performance())
         .map(|p| p.now())
         .unwrap_or(0.0)
 }
 
 /// Await `setTimeout(delay_ms)` as a future. Resolves immediately if there is
-/// no `window` to schedule on, so a pipeline never hangs on a missing timer.
+/// no scope to schedule on, so a pipeline never hangs on a missing timer.
 async fn sleep_ms(delay_ms: f64) {
     let promise = js_sys::Promise::new(&mut |resolve, _reject| {
-        match web_sys::window() {
-            Some(win) => {
-                let _ = win.set_timeout_with_callback_and_timeout_and_arguments_0(
-                    &resolve,
-                    delay_ms as i32,
-                );
-            }
+        match global_scope() {
+            Some(scope) => scope.set_timeout(&resolve, delay_ms as i32),
             // No scheduler: resolve now so the await completes.
             None => {
                 let _ = resolve.call0(&JsValue::NULL);

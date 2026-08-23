@@ -165,7 +165,7 @@ pub fn parse_cc_data(data: &[u8]) -> Vec<CcTriple> {
 /// allocation-free core of [`parse_cc_data`], shared with the ATSC user-data
 /// parser.
 fn append_cc_data(data: &[u8], out: &mut Vec<CcTriple>) {
-    for t in data.chunks_exact(3) {
+    for t in data.as_chunks::<3>().0 {
         if t[0] & 0x04 != 0 {
             out.push(CcTriple {
                 cc_type: t[0] & 0x03,

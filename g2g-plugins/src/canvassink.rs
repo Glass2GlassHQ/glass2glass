@@ -3,10 +3,14 @@
 //! (`ImageData` + `putImageData`), completing the in-browser glass-to-glass
 //! path `WebSocketSrc -> WebCodecsDecode -> CanvasSink` (M41).
 //!
-//! 2D presentation is the robust, dependency-free path. A WebGPU zero-copy sink
-//! (decoded `MemoryDomain::WebGPUBuffer` straight into a `GPUTexture`) is a
-//! follow-up: it needs an async adapter/device handshake and a core keep-alive
-//! for the WebGPU domain (the §5.1 wgpu compute pillar builds on the same).
+//! 2D presentation is the robust, dependency-free path;
+//! [`WebGpuCanvasSink`](crate::webgpucanvassink::WebGpuCanvasSink) is the
+//! zero-copy one, sampling the decoded `VideoFrame` as a `GPUExternalTexture`
+//! with no readback into wasm memory.
+//!
+//! [`CanvasSink::from_offscreen_canvas`] takes an `OffscreenCanvas` instead of
+//! a canvas id, which is how the sink presents from inside a worker (M1054):
+//! a worker has no `document` to look an id up in.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -24,9 +28,12 @@ use g2g_core::{
 };
 
 use crate::wasmclock::wait_to_present;
+use crate::webutil::{Canvas, CanvasTarget};
 
 use wasm_bindgen::{Clamped, JsCast};
-use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement, ImageData};
+use web_sys::{
+    CanvasRenderingContext2d, ImageData, OffscreenCanvas, OffscreenCanvasRenderingContext2d,
+};
 
 /// # Example
 ///
@@ -37,8 +44,8 @@ use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement, ImageData};
 /// ```
 #[derive(Debug)]
 pub struct CanvasSink {
-    canvas_id: String,
-    ctx: Option<CanvasRenderingContext2d>,
+    target: CanvasTarget,
+    ctx: Option<Context2d>,
     width: u32,
     height: u32,
     configured: bool,
@@ -50,10 +57,22 @@ pub struct CanvasSink {
 
 impl CanvasSink {
     /// `canvas_id` is the `id` of an existing `<canvas>` element in the DOM;
-    /// the context is acquired in `configure_pipeline`.
+    /// the context is acquired in `configure_pipeline`. Main thread only, since
+    /// the id is looked up in `document`.
     pub fn new(canvas_id: impl Into<String>) -> Self {
+        Self::with_target(CanvasTarget::ElementId(canvas_id.into()))
+    }
+
+    /// Present to an `OffscreenCanvas` the page transferred in
+    /// (`canvas.transferControlToOffscreen()`), which is how a graph running
+    /// inside a worker draws to the page.
+    pub fn from_offscreen_canvas(canvas: OffscreenCanvas) -> Self {
+        Self::with_target(CanvasTarget::Offscreen(canvas))
+    }
+
+    fn with_target(target: CanvasTarget) -> Self {
         Self {
-            canvas_id: canvas_id.into(),
+            target,
             ctx: None,
             width: 0,
             height: 0,
@@ -164,19 +183,12 @@ impl AsyncElement for CanvasSink {
 
     fn configure_pipeline(&mut self, _absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         let err = || G2gError::Hardware(HardwareError::Other);
-        let window = web_sys::window().ok_or_else(err)?;
-        let document = window.document().ok_or_else(err)?;
-        let element = document
-            .get_element_by_id(&self.canvas_id)
-            .ok_or_else(err)?;
-        let canvas: HtmlCanvasElement = element.dyn_into().map_err(|_| err())?;
-        let ctx = canvas
-            .get_context("2d")
-            .map_err(|_| err())?
-            .ok_or_else(err)?
-            .dyn_into::<CanvasRenderingContext2d>()
-            .map_err(|_| err())?;
-        self.ctx = Some(ctx);
+        let canvas = self.target.resolve()?;
+        let object = canvas.context(CONTEXT_2D)?;
+        self.ctx = Some(match canvas {
+            Canvas::Element(_) => Context2d::Element(object.dyn_into().map_err(|_| err())?),
+            Canvas::Offscreen(_) => Context2d::Offscreen(object.dyn_into().map_err(|_| err())?),
+        });
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
     }
@@ -242,18 +254,32 @@ fn rgba_any() -> Caps {
     }
 }
 
+/// The 2D context id, and the two context types it yields: an `OffscreenCanvas`
+/// hands back its own context type, not a `CanvasRenderingContext2d`.
+const CONTEXT_2D: &str = "2d";
+
+#[derive(Debug)]
+enum Context2d {
+    Element(CanvasRenderingContext2d),
+    Offscreen(OffscreenCanvasRenderingContext2d),
+}
+
 /// `putImageData(image, 0, 0)`. The dx/dy argument type differs by web-sys cfg
 /// (`f64` on the stable bindings, `i32` under `web_sys_unstable_apis`, which the
 /// `web-codecs` build sets globally), so the overload is selected at compile
 /// time. The `allow` keeps the custom cfg quiet across the 1.75 MSRV (where the
 /// lint name itself is unknown) and newer toolchains alike.
 #[allow(unknown_lints, unexpected_cfgs)]
-fn put_image_data(ctx: &CanvasRenderingContext2d, image: &ImageData) -> Result<(), G2gError> {
+fn put_image_data(ctx: &Context2d, image: &ImageData) -> Result<(), G2gError> {
     #[cfg(web_sys_unstable_apis)]
-    let r = ctx.put_image_data(image, 0, 0);
+    let (x, y) = (0, 0);
     #[cfg(not(web_sys_unstable_apis))]
-    let r = ctx.put_image_data(image, 0.0, 0.0);
-    r.map_err(|_| G2gError::Hardware(HardwareError::Other))
+    let (x, y) = (0.0, 0.0);
+    match ctx {
+        Context2d::Element(ctx) => ctx.put_image_data(image, x, y),
+        Context2d::Offscreen(ctx) => ctx.put_image_data(image, x, y),
+    }
+    .map_err(|_| G2gError::Hardware(HardwareError::Other))
 }
 
 fn fixed_or_zero(d: &Dim) -> u32 {

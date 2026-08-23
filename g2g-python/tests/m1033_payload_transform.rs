@@ -108,11 +108,11 @@ fn transcriber() -> PyTransform {
     el
 }
 
-/// The text-to-speech shape, the transcriber run backwards: text on the sink
-/// pad, generated audio on the source pad.
-fn synthesizer() -> PyTransform {
+/// A text-to-speech element hosting `class`: text on the sink pad, generated
+/// audio on the source pad.
+fn text_to_speech(class: &str) -> PyTransform {
     fixtures_on_path();
-    let mut el = PyTransform::new("echo_element", "SpeechSynthesizer");
+    let mut el = PyTransform::new("echo_element", class);
     el.set_property(
         "input-caps",
         PropValue::Str("text/x-raw,format=utf8".into()),
@@ -126,20 +126,26 @@ fn synthesizer() -> PyTransform {
     el
 }
 
+/// The text-to-speech shape, the transcriber run backwards: text on the sink
+/// pad, generated audio on the source pad.
+fn synthesizer() -> PyTransform {
+    text_to_speech("SpeechSynthesizer")
+}
+
 /// The streaming shape: one text buffer in, several audio buffers out.
 fn chunking_synthesizer() -> PyTransform {
-    fixtures_on_path();
-    let mut el = PyTransform::new("echo_element", "ChunkedSynthesizer");
-    el.set_property(
-        "input-caps",
-        PropValue::Str("text/x-raw,format=utf8".into()),
-    )
-    .unwrap();
-    el.set_property(
-        "output-caps",
-        PropValue::Str("audio/x-raw,format=S16LE,rate=16000,channels=1".into()),
-    )
-    .unwrap();
+    text_to_speech("ChunkedSynthesizer")
+}
+
+/// The streaming shape with a schedule: `chunks` buffers, each `chunk_ns` long,
+/// the first presented at the anchor's PTS.
+fn streaming_synthesizer(chunks: u64, chunk_ns: u64) -> PyTransform {
+    let mut el = text_to_speech("StreamingSynthesizer");
+    el.set_property("chunks", PropValue::Uint(chunks)).unwrap();
+    el.set_property("chunk-duration", PropValue::Uint(chunk_ns))
+        .unwrap();
+    el.set_property("first-pts", PropValue::Uint(anchor_timing().pts_ns))
+        .unwrap();
     el
 }
 
@@ -157,6 +163,18 @@ fn pushed_frame(sink: &CollectSink) -> &Frame {
         panic!("expected a DataFrame downstream");
     };
     frame
+}
+
+fn pushed_frames(sink: &CollectSink) -> Vec<&Frame> {
+    sink.packets
+        .iter()
+        .map(|packet| {
+            let PipelinePacket::DataFrame(frame) = packet else {
+                panic!("expected a DataFrame downstream");
+            };
+            frame
+        })
+        .collect()
 }
 
 fn payload_of(frame: &Frame) -> &[u8] {
@@ -318,6 +336,61 @@ fn an_emitted_duration_replaces_the_anchors() {
     );
     assert_eq!(frame.timing.dts_ns, anchor_timing().dts_ns);
     assert_eq!(frame.sequence, 3);
+}
+
+/// Streaming speech plays chunk after chunk, so each emitted buffer states the
+/// time it starts at. Without that they all inherit the anchor's PTS and the
+/// whole utterance stacks at the instant the text arrived.
+#[test]
+fn each_emitted_buffer_can_carry_its_own_pts() {
+    const TEXT: &[u8] = b"say ";
+    const CHUNKS: u64 = 4;
+    const CHUNK_NS: u64 = 250_000_000;
+
+    let mut el = streaming_synthesizer(CHUNKS, CHUNK_NS);
+    el.configure_pipeline(&text_caps()).unwrap();
+    let sink = push(
+        &mut el,
+        PipelinePacket::DataFrame(payload_frame(TEXT.to_vec())),
+    );
+
+    let frames = pushed_frames(&sink);
+    let expected: Vec<u64> = (0..CHUNKS)
+        .map(|chunk| anchor_timing().pts_ns + chunk * CHUNK_NS)
+        .collect();
+    assert_eq!(
+        frames.iter().map(|f| f.timing.pts_ns).collect::<Vec<_>>(),
+        expected,
+        "one chunk after another, not all at the anchor's PTS"
+    );
+    assert!(
+        frames.iter().all(|f| f.timing.dts_ns == f.timing.pts_ns),
+        "an emitted buffer is never reordered"
+    );
+    assert!(
+        frames.iter().all(|f| f.timing.duration_ns == CHUNK_NS),
+        "each chunk runs for the length it states"
+    );
+    assert_eq!(el.emitted_count(), CHUNKS);
+}
+
+/// An element with nothing to say about when its buffer is presented emits it
+/// with no presentation time at all, and a sink presents it on arrival.
+#[test]
+fn an_emitted_buffer_can_have_no_pts() {
+    const TEXT: &[u8] = b"say ";
+
+    let mut el = text_to_speech("UnstampedSynthesizer");
+    el.configure_pipeline(&text_caps()).unwrap();
+    let sink = push(
+        &mut el,
+        PipelinePacket::DataFrame(payload_frame(TEXT.to_vec())),
+    );
+
+    let frame = pushed_frame(&sink);
+    assert_eq!(frame.timing.pts_ns, FrameTiming::PTS_NONE);
+    assert!(frame.timing.pts().is_none());
+    assert_ne!(frame.timing.pts_ns, anchor_timing().pts_ns);
 }
 
 /// Negotiation has to agree with what the element actually pushes, or a text
