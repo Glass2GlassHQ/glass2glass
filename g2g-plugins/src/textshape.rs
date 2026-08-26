@@ -72,16 +72,20 @@ pub struct ShapedLine {
 /// the block's. Ranges must be non-overlapping and ascending; the bytes between
 /// them take the block's attributes. A `None` field keeps the block's value.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct StyledSpan {
+pub struct StyledSpan<'a> {
     pub start: usize,
     pub end: usize,
     pub font_size: Option<f32>,
     pub weight: Option<u16>,
     pub italic: Option<bool>,
     pub stretch: Option<FontStretch>,
+    /// CSS `font-family` name for this run: a generic family (`serif`,
+    /// `sans-serif`, `monospace`, `cursive`, `fantasy`) or a family the font
+    /// database is queried for by name.
+    pub family: Option<&'a str>,
 }
 
-impl StyledSpan {
+impl StyledSpan<'_> {
     /// Whether this span asks for anything at all (an empty one would only
     /// split the shaped run).
     pub fn styles_anything(&self) -> bool {
@@ -89,6 +93,7 @@ impl StyledSpan {
             || self.weight.is_some()
             || self.italic.is_some()
             || self.stretch.is_some()
+            || self.family.is_some()
     }
 
     /// Whether two spans ask for the same attributes, so an adjacent pair can be
@@ -98,7 +103,26 @@ impl StyledSpan {
             && self.weight == other.weight
             && self.italic == other.italic
             && self.stretch == other.stretch
+            && self.family == other.family
     }
+}
+
+/// The CSS generic family names, and the cosmic-text family each selects. Any
+/// other name is asked for as a family name.
+const GENERIC_FAMILIES: [(&str, Family<'static>); 5] = [
+    ("serif", Family::Serif),
+    ("sans-serif", Family::SansSerif),
+    ("monospace", Family::Monospace),
+    ("cursive", Family::Cursive),
+    ("fantasy", Family::Fantasy),
+];
+
+/// The cosmic-text family a CSS `font-family` name selects.
+fn family_of(name: &str) -> Family<'_> {
+    GENERIC_FAMILIES
+        .iter()
+        .find(|(generic, _)| generic.eq_ignore_ascii_case(name))
+        .map_or(Family::Name(name), |&(_, family)| family)
 }
 
 /// The cosmic-text face width a CSS `font-stretch` keyword selects.
@@ -148,7 +172,7 @@ fn styled_attrs<'text, 'attrs>(
     px: f32,
     line_height: f32,
     base: &Attrs<'attrs>,
-    styled: &[StyledSpan],
+    styled: &[StyledSpan<'attrs>],
 ) -> Vec<(&'text str, Attrs<'attrs>)> {
     let mut spans = Vec::new();
     let mut at = 0usize;
@@ -182,6 +206,9 @@ fn styled_attrs<'text, 'attrs>(
         }
         if let Some(stretch) = span.stretch {
             attrs = attrs.stretch(stretch_of(stretch));
+        }
+        if let Some(family) = span.family {
+            attrs = attrs.family(family_of(family));
         }
         spans.push((&text[span.start..span.end], attrs));
         at = span.end;
@@ -283,7 +310,8 @@ impl TextShaper {
     /// width selects a face from the font database, so a family with a real
     /// bold or italic face renders in it; a weight with no such face still
     /// reaches the `wght` variation axis, but a slant with no italic face
-    /// renders upright (there is no synthetic oblique here). Line positions are
+    /// renders upright (there is no synthetic oblique here). A span's family
+    /// queries the database the same way, generic names included. Line positions are
     /// relative to the block's top-left.
     pub fn layout(
         &mut self,
@@ -291,7 +319,7 @@ impl TextShaper {
         px: f32,
         line_height: f32,
         wght: Option<f32>,
-        styled: &[StyledSpan],
+        styled: &[StyledSpan<'_>],
     ) -> ShapedBlock {
         let mut attrs = Attrs::new();
         if let Some(family) = &self.primary {

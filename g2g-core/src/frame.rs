@@ -78,9 +78,6 @@ impl Frame {
     /// chain with no tee.
     #[cfg(feature = "alloc")]
     pub fn share(&self) -> Frame {
-        // When `metadata` is off, FrameMetaSet is a Copy ZST and this is a no-op
-        // copy (clippy's clone_on_copy fires only in that config).
-        #[allow(clippy::clone_on_copy)]
         let meta = self.meta.clone();
         Frame {
             domain: self.domain.share(),

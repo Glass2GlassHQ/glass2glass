@@ -462,8 +462,9 @@ fn caps_from_extension(path: &std::path::Path) -> Option<Caps> {
 }
 
 /// Parse a `bytestream-format` value to an encoding (the `auto` value is handled
-/// separately in `set_property`).
-fn encoding_from_str(s: &str) -> Option<ByteStreamEncoding> {
+/// separately in `set_property`). Shared with the TCP byte-stream sources, which
+/// take the same property.
+pub(crate) fn encoding_from_str(s: &str) -> Option<ByteStreamEncoding> {
     match s {
         "mpegts" | "ts" => Some(ByteStreamEncoding::MpegTs),
         "matroska" | "mkv" | "webm" => Some(ByteStreamEncoding::Matroska),
@@ -480,7 +481,7 @@ fn encoding_from_str(s: &str) -> Option<ByteStreamEncoding> {
 }
 
 /// The canonical `bytestream-format` string for an encoding.
-fn encoding_to_str(encoding: ByteStreamEncoding) -> &'static str {
+pub(crate) fn encoding_to_str(encoding: ByteStreamEncoding) -> &'static str {
     match encoding {
         ByteStreamEncoding::MpegTs => "mpegts",
         ByteStreamEncoding::Matroska => "matroska",

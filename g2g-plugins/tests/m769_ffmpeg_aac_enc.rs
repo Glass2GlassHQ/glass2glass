@@ -118,8 +118,10 @@ async fn encodes_a_tone_ffmpeg_can_decode() {
     let _ = std::fs::remove_file(&out);
 
     let samples: Vec<i16> = decoded
-        .chunks_exact(2)
-        .map(|c| i16::from_le_bytes([c[0], c[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|c| i16::from_le_bytes(*c))
         .collect();
     assert!(
         (TOTAL as i64 - samples.len() as i64).unsigned_abs() < 4096,

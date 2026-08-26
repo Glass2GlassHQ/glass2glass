@@ -158,8 +158,10 @@ async fn gpu_render(ctx: &GpuContext, font: &[u8], text: &str, pts_ns: u64) -> V
 /// colour).
 fn coverage(pixels: &[u8]) -> Vec<bool> {
     pixels
-        .chunks_exact(4)
-        .map(|px| px != BACKDROP)
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|px| px != &BACKDROP)
         .collect::<Vec<bool>>()
 }
 

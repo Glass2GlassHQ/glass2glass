@@ -19,6 +19,27 @@ use alloc::boxed::Box;
 use g2g_core::memory::OwnedWgpuTexture;
 use g2g_core::{G2gError, HardwareError, WgpuKeepAlive};
 
+/// Byte size of the push-constant block both YCbCr -> RGBA compute shaders
+/// declare (`shaders/mediacodec_ycbcr*.comp`): `uint xfer, srcWidth, srcHeight`.
+#[cfg(any(feature = "vulkan-video", feature = "mediacodec-wgpu"))]
+pub(crate) const YCBCR_PUSH_CONSTANT_SIZE: u32 = 12;
+
+/// Pack the YCbCr -> RGBA shaders' push constants: the HDR transfer selector (0
+/// passthrough, 1 PQ, 2 HLG) and the extent of the image being sampled, which
+/// exceeds the output extent when the decoder rounded the picture up to the
+/// device's picture access granularity.
+#[cfg(any(feature = "vulkan-video", feature = "mediacodec-wgpu"))]
+pub(crate) fn ycbcr_push_constants(
+    transfer: u32,
+    source_extent: (u32, u32),
+) -> [u8; YCBCR_PUSH_CONSTANT_SIZE as usize] {
+    let mut bytes = [0u8; YCBCR_PUSH_CONSTANT_SIZE as usize];
+    bytes[0..4].copy_from_slice(&transfer.to_ne_bytes());
+    bytes[4..8].copy_from_slice(&source_extent.0.to_ne_bytes());
+    bytes[8..12].copy_from_slice(&source_extent.1.to_ne_bytes());
+    bytes
+}
+
 /// A shared wgpu device context. Clone it into each GPU element so they render
 /// and present on the same device (the prerequisite for a copy-free
 /// `WgpuTexture` handoff between a producer and a sink).

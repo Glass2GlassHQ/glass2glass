@@ -36,12 +36,15 @@ const PID_SDT: u16 = 0x0011;
 /// describes services carried elsewhere and is ignored).
 const TABLE_ID_SDT: u8 = 0x42;
 /// The DVB SI PID the EIT rides (ETSI EN 300 468). It carries the present/following
-/// tables and the much larger schedule tables (0x50..=0x6F), which the `table_id`
-/// filter drops.
+/// tables and the much larger schedule tables.
 const PID_EIT: u16 = 0x0012;
 /// EIT `table_id` for the present/following events of this transport stream. 0x4F
 /// is the other-TS variant (events of a service carried elsewhere) and is ignored.
 const TABLE_ID_EIT_PRESENT_FOLLOWING: u8 = 0x4E;
+/// EIT `table_id` range for the schedule events of this transport stream (M1056):
+/// what a service shows over the coming days, segmented across many sections.
+/// 0x60..=0x6F is the other-TS variant and is ignored like 0x4F.
+const TABLE_ID_EIT_SCHEDULE: core::ops::RangeInclusive<u8> = 0x50..=0x5F;
 /// DVB `short_event_descriptor` tag: a language code then the length-prefixed
 /// event name and short description.
 const DESC_TAG_SHORT_EVENT: u8 = 0x4D;
@@ -81,13 +84,30 @@ pub const TAG_KEY_SERVICE_PROVIDER: &str = "service_provider";
 pub const TAG_KEY_SERVICE_NAME: &str = "service_name";
 
 /// The [`g2g_core::Tag::Other`] keys the DVB EIT present/following event text
-/// rides under (M1049). `Tag` has no typed event variant, and the SDT service
-/// name already owns [`g2g_core::Tag::Title`] for the same program, so the four
-/// fields keep their own keys: the event on air now, and the one after it.
+/// rides under (M1049), and the [`g2g_core::Tag::Number`] keys its start time
+/// (Unix seconds, UTC) and duration (seconds) ride under (M1056). `Tag` has no
+/// typed event variant, and the SDT service name already owns
+/// [`g2g_core::Tag::Title`] for the same program, so the fields keep their own
+/// keys: the event on air now, and the one after it.
 pub const TAG_KEY_EVENT_NAME: &str = "event_name";
 pub const TAG_KEY_EVENT_TEXT: &str = "event_text";
+pub const TAG_KEY_EVENT_START: &str = "event_start";
+pub const TAG_KEY_EVENT_DURATION: &str = "event_duration";
 pub const TAG_KEY_NEXT_EVENT_NAME: &str = "next_event_name";
 pub const TAG_KEY_NEXT_EVENT_TEXT: &str = "next_event_text";
+pub const TAG_KEY_NEXT_EVENT_START: &str = "next_event_start";
+pub const TAG_KEY_NEXT_EVENT_DURATION: &str = "next_event_duration";
+
+/// The keys one EIT schedule event posts under (M1056). A schedule table names
+/// far more than the two events present/following holds, so each event posts as
+/// its own tag list (one [`g2g_core::BusMessage::Tag`] per event) and the keys do
+/// not distinguish a slot: the event id, the name and short description, the
+/// start time in Unix seconds (UTC) and the duration in seconds.
+pub const TAG_KEY_SCHEDULE_EVENT_ID: &str = "schedule_event_id";
+pub const TAG_KEY_SCHEDULE_EVENT_NAME: &str = "schedule_event_name";
+pub const TAG_KEY_SCHEDULE_EVENT_TEXT: &str = "schedule_event_text";
+pub const TAG_KEY_SCHEDULE_EVENT_START: &str = "schedule_event_start";
+pub const TAG_KEY_SCHEDULE_EVENT_DURATION: &str = "schedule_event_duration";
 
 /// Cap on a single reassembled PES payload. A video PES carries no declared
 /// length and is delimited only by the next payload-unit-start, so a stream that
@@ -263,29 +283,98 @@ pub struct ServiceInfo {
     pub provider: String,
 }
 
-/// One DVB EIT present/following event (M1049): what a service is showing now,
-/// or what it shows next. The text comes from the `short_event_descriptor`, so an
-/// event announced without one is not reported at all.
+/// Which EIT table an event came from (M1056).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EitSlot {
+    /// The event on air now: present/following, section 0.
+    Present,
+    /// The event after it: present/following, section 1.
+    Following,
+    /// An event of a schedule table (`table_id` 0x50..=0x5F), which announces
+    /// what a service shows over the coming days.
+    Schedule,
+}
+
+/// One DVB EIT event (M1049): what a service is showing now, what it shows next,
+/// or an entry of its schedule. The text comes from the `short_event_descriptor`,
+/// so an event announced without one is not reported at all.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EitEvent {
     /// The service the event belongs to. A `service_id` is a `program_number`,
     /// the same join the SDT uses.
     pub service_id: u16,
     pub event_id: u16,
-    /// `false` for the event on air now (section 0), `true` for the one after it
-    /// (section 1). EIT present/following carries exactly these two per service.
-    pub following: bool,
+    /// Which table the event came from.
+    pub slot: EitSlot,
     /// `event_name_char`, empty when the field was empty or its DVB character
     /// table was one this parser will not decode (see `dvb_text`).
     pub name: String,
     /// `text_char`, the short description under the name; empty on the same terms.
     pub text: String,
+    /// `start_time` as seconds since the Unix epoch, UTC (M1056). `None` when the
+    /// stream declared the field undefined (all ones) or encoded it invalidly.
+    pub start_unix_secs: Option<u64>,
+    /// `duration` in seconds, 0 when the stream encoded it invalidly.
+    pub duration_secs: u32,
 }
 
-/// Cap on the EIT events held (M1049). Present/following is two per service, so
-/// this holds a large multiplex; past it, later services go unreported rather than
-/// growing the table on a stream that churns `service_id`s.
+/// Cap on the EIT present/following events held (M1049). Present/following is two
+/// per service, so this holds a large multiplex; past it, later services go
+/// unreported rather than growing the table on a stream that churns `service_id`s.
 const MAX_EIT_EVENTS: usize = 64;
+
+/// Cap on the queued EIT schedule events (M1056). A whole multiplex's 8-day EPG
+/// runs to a few thousand events, so a consumer that drains between feeds sees a
+/// full one; past it, later events are dropped rather than growing the queue
+/// without bound on a stream that never stops announcing new ones.
+pub const MAX_EIT_SCHEDULE_EVENTS: usize = 4096;
+
+/// Cap on the `(service_id, table_id, section_number)` version slots tracked
+/// (M1056). Present/following is two sections per service, but a schedule table
+/// is segmented into up to 256 sections across 16 `table_id`s, so the version
+/// bookkeeping needs far more room than the present/following table itself. Past
+/// this a further section is ignored rather than growing the list.
+const MAX_EIT_VERSION_SLOTS: usize = 4096;
+
+/// MJD 40587 is 1970-01-01, so it is the Modified Julian Date of the Unix epoch
+/// (EN 300 468 Annex C).
+const MJD_UNIX_EPOCH: u16 = 40587;
+const SECONDS_PER_DAY: u64 = 86_400;
+const SECONDS_PER_HOUR: u64 = 3600;
+const SECONDS_PER_MINUTE: u64 = 60;
+
+/// Decode an EIT 5-byte `start_time` (EN 300 468 §5.2.4 and Annex C): a 16-bit
+/// Modified Julian Date, then three BCD bytes of UTC hh:mm:ss. `None` for the
+/// all-ones value the spec defines as undefined, for a date before the Unix
+/// epoch, and for a byte that is not BCD.
+fn mjd_bcd_to_unix_secs(field: [u8; 5]) -> Option<u64> {
+    if field == [0xFF; 5] {
+        return None;
+    }
+    let mjd = u16::from_be_bytes([field[0], field[1]]);
+    let days = u64::from(mjd.checked_sub(MJD_UNIX_EPOCH)?);
+    let time = bcd_hms_secs([field[2], field[3], field[4]])?;
+    days.checked_mul(SECONDS_PER_DAY)?.checked_add(time)
+}
+
+/// Decode three BCD bytes of hh:mm:ss into seconds. `None` when a nibble is above
+/// 9, which is not BCD.
+fn bcd_hms_secs(field: [u8; 3]) -> Option<u64> {
+    let hours = u64::from(bcd_byte(field[0])?);
+    let minutes = u64::from(bcd_byte(field[1])?);
+    let seconds = u64::from(bcd_byte(field[2])?);
+    hours
+        .checked_mul(SECONDS_PER_HOUR)?
+        .checked_add(minutes.checked_mul(SECONDS_PER_MINUTE)?)?
+        .checked_add(seconds)
+}
+
+/// One packed BCD byte as its decimal value, `None` when either nibble is above 9.
+fn bcd_byte(byte: u8) -> Option<u8> {
+    let tens = byte >> 4;
+    let units = byte & 0x0F;
+    (tens <= 9 && units <= 9).then_some(tens * 10 + units)
+}
 
 /// Cap on the EIT section being reassembled, the limit EN 300 468 sets on an EIT
 /// section. The declared `section_length` cannot be trusted before the section is
@@ -572,13 +661,19 @@ pub struct TsDemuxer {
     /// `program_number`, so [`service`](Self::service) joins the two.
     services: Vec<(u16, ServiceInfo)>,
     /// EIT present/following events (M1049), at most one per
-    /// `(service_id, following)` slot: a later section of the same slot replaces
-    /// the earlier one, so this always holds the current schedule.
+    /// `(service_id, slot)`: a later section of the same slot replaces the
+    /// earlier one, so this always holds what the services are showing.
     eit_events: Vec<EitEvent>,
-    /// The `version_number` last accepted per `(service_id, section_number)`. A
-    /// section repeating its version carries the events already held, so it is
-    /// dropped rather than re-reported.
-    eit_versions: Vec<(u16, u8, u8)>,
+    /// EIT schedule events (M1056), queued in arrival order for
+    /// [`take_eit_schedule`](Self::take_eit_schedule) to drain. A schedule table
+    /// names days of events rather than the two present/following holds, so they
+    /// are handed over once instead of kept in a replace-in-place table.
+    eit_schedule: Vec<EitEvent>,
+    /// The `version_number` last accepted per
+    /// `(service_id, table_id, section_number)`. A section repeating its version
+    /// carries the events already reported, so it is dropped rather than
+    /// re-reported.
+    eit_versions: Vec<(u16, u8, u8, u8)>,
     /// Bumped whenever [`eit_events`](Self::eit_events) changes, so the element
     /// layer can re-post without diffing.
     eit_generation: u64,
@@ -651,6 +746,13 @@ impl TsDemuxer {
     /// Empty for a stream with no EIT, or before the table parses.
     pub fn eit_events(&self) -> &[EitEvent] {
         &self.eit_events
+    }
+
+    /// Take every EIT schedule event parsed since the last call, in arrival order
+    /// (M1056), leaving the queue empty. Empty for a stream carrying no schedule
+    /// table, and for one whose schedule sections have all been read already.
+    pub fn take_eit_schedule(&mut self) -> Vec<EitEvent> {
+        core::mem::take(&mut self.eit_schedule)
     }
 
     /// A counter bumped every time [`eit_events`](Self::eit_events) changes. A
@@ -917,8 +1019,8 @@ impl TsDemuxer {
     /// The PAT / PMT / SDT are read from a single packet, which holds for those
     /// small tables, but an EIT event carries free text and routinely spans
     /// several. A section is only buffered once its `table_id` is the
-    /// present/following one, which keeps the far larger schedule tables sharing
-    /// this PID out of the buffer entirely.
+    /// present/following one or a schedule one of this transport stream, which
+    /// keeps the other-TS tables sharing this PID out of the buffer entirely.
     ///
     /// The declared `section_length` is attacker-controlled, so the buffer is
     /// capped and a section that overruns is abandoned; the next
@@ -928,8 +1030,11 @@ impl TsDemuxer {
             self.eit_section.clear();
             let pointer = *payload.first()? as usize;
             let start = payload.get(1 + pointer..)?;
-            if start.first() != Some(&TABLE_ID_EIT_PRESENT_FOLLOWING) {
-                return None; // a schedule table, an other-TS EIT, or stuffing
+            let table_id = *start.first()?;
+            if table_id != TABLE_ID_EIT_PRESENT_FOLLOWING
+                && !TABLE_ID_EIT_SCHEDULE.contains(&table_id)
+            {
+                return None; // an other-TS EIT or stuffing
             }
             self.eit_section.extend_from_slice(start);
         } else if self.eit_section.is_empty() {
@@ -958,18 +1063,20 @@ impl TsDemuxer {
         Some(section)
     }
 
-    /// Parse a DVB EIT present/following section (PID 0x12, `table_id` 0x4E) into
-    /// the per-service event text (M1049). The event loop follows the 14-byte
+    /// Parse a DVB EIT section (PID 0x12) into the per-service event text, start
+    /// time and duration (M1049, M1056). The event loop follows the 14-byte
     /// header, and each entry's descriptor loop carries the
-    /// `short_event_descriptor`. Section 0 is the event on air, section 1 the one
-    /// after it, so the two arrive as separate sections.
+    /// `short_event_descriptor`. `table_id` 0x4E is present/following, whose
+    /// section 0 is the event on air and section 1 the one after it; 0x50..=0x5F
+    /// are the schedule tables, which carry many events per section and are
+    /// segmented, so any `section_number` is valid there.
     ///
-    /// Unlike the PAT / PMT / SDT this table updates mid-stream, so rather than
+    /// Unlike the PAT / PMT / SDT these tables update mid-stream, so rather than
     /// "first wins" a section is read when its `version_number` differs from the
-    /// one last accepted for the same `(service_id, section_number)`. The CRC is
-    /// verified ([`checked_section_body`](Self::checked_section_body)) and every
-    /// length is bounds-checked, so a malformed section is ignored rather than
-    /// yielding garbled text.
+    /// one last accepted for the same `(service_id, table_id, section_number)`.
+    /// The CRC is verified ([`checked_section_body`](Self::checked_section_body))
+    /// and every length is bounds-checked, so a malformed section is ignored
+    /// rather than yielding garbled text.
     fn parse_eit(&mut self, payload: &[u8], pusi: bool) {
         let Some(section) = self.collect_eit_section(payload, pusi) else {
             return;
@@ -983,6 +1090,7 @@ impl TsDemuxer {
         if body.len() < 14 {
             return;
         }
+        let table_id = body[0];
         let service_id = ((body[3] as u16) << 8) | body[4] as u16;
         // current_next_indicator 0 marks a version not yet in force: its events
         // are not what the service is showing.
@@ -991,19 +1099,32 @@ impl TsDemuxer {
         }
         let version = (body[5] >> 1) & 0x1F;
         let section_number = body[6];
-        // Present/following is sections 0 and 1 only.
-        if section_number > 1 {
+        let slot = if TABLE_ID_EIT_SCHEDULE.contains(&table_id) {
+            EitSlot::Schedule
+        } else if section_number == 0 {
+            EitSlot::Present
+        } else if section_number == 1 {
+            EitSlot::Following
+        } else {
+            return; // present/following is sections 0 and 1 only
+        };
+        if !self.accept_eit_version(service_id, table_id, section_number, version) {
             return;
         }
-        if !self.accept_eit_version(service_id, section_number, version) {
-            return;
-        }
-        let following = section_number == 1;
         let mut i = 14usize;
         // Each event: event_id, a 5-byte start_time, a 3-byte duration, then
         // running_status / free_CA_mode / descriptors_loop_length.
         while i + 12 <= body.len() {
             let event_id = ((body[i] as u16) << 8) | body[i + 1] as u16;
+            let start_unix_secs = mjd_bcd_to_unix_secs([
+                body[i + 2],
+                body[i + 3],
+                body[i + 4],
+                body[i + 5],
+                body[i + 6],
+            ]);
+            let duration_secs =
+                bcd_hms_secs([body[i + 7], body[i + 8], body[i + 9]]).unwrap_or(0) as u32;
             let loop_len = (((body[i + 10] & 0x0F) as usize) << 8) | body[i + 11] as usize;
             // A descriptor loop declared past the section end abandons the walk:
             // the count is attacker-controlled.
@@ -1014,9 +1135,11 @@ impl TsDemuxer {
                 self.record_eit_event(EitEvent {
                     service_id,
                     event_id,
-                    following,
+                    slot,
                     name,
                     text,
+                    start_unix_secs,
+                    duration_secs,
                 });
             }
             i = i.saturating_add(12).saturating_add(loop_len);
@@ -1024,36 +1147,52 @@ impl TsDemuxer {
     }
 
     /// Whether an EIT section carries a version not yet read, recording it when so.
-    /// Past [`MAX_EIT_EVENTS`] slots the table stops growing, so a stream churning
+    /// Past [`MAX_EIT_VERSION_SLOTS`] the list stops growing, so a stream churning
     /// `service_id`s cannot cost unbounded memory.
-    fn accept_eit_version(&mut self, service_id: u16, section_number: u8, version: u8) -> bool {
+    fn accept_eit_version(
+        &mut self,
+        service_id: u16,
+        table_id: u8,
+        section_number: u8,
+        version: u8,
+    ) -> bool {
         if let Some(slot) = self
             .eit_versions
             .iter_mut()
-            .find(|(id, section, _)| *id == service_id && *section == section_number)
+            .find(|(id, table, section, _)| {
+                *id == service_id && *table == table_id && *section == section_number
+            })
         {
-            if slot.2 == version {
+            if slot.3 == version {
                 return false;
             }
-            slot.2 = version;
+            slot.3 = version;
             return true;
         }
-        if self.eit_versions.len() >= MAX_EIT_EVENTS {
+        if self.eit_versions.len() >= MAX_EIT_VERSION_SLOTS {
             return false;
         }
         self.eit_versions
-            .push((service_id, section_number, version));
+            .push((service_id, table_id, section_number, version));
         true
     }
 
-    /// Record one event, replacing whatever the same `(service_id, following)`
-    /// slot held, and bump the generation so the element layer re-posts.
+    /// Record one event. A present/following event replaces whatever the same
+    /// `(service_id, slot)` held and bumps the generation so the element layer
+    /// re-posts; a schedule event joins the drain queue, and is dropped once that
+    /// queue is full so the older events survive.
     fn record_eit_event(&mut self, event: EitEvent) {
-        let slot = self
+        if event.slot == EitSlot::Schedule {
+            if self.eit_schedule.len() < MAX_EIT_SCHEDULE_EVENTS {
+                self.eit_schedule.push(event);
+            }
+            return;
+        }
+        let held = self
             .eit_events
             .iter()
-            .position(|e| e.service_id == event.service_id && e.following == event.following);
-        match slot {
+            .position(|e| e.service_id == event.service_id && e.slot == event.slot);
+        match held {
             Some(i) => self.eit_events[i] = event,
             None if self.eit_events.len() < MAX_EIT_EVENTS => self.eit_events.push(event),
             None => return,
@@ -3402,5 +3541,43 @@ mod tests {
             Some(klv),
             "and unwraps back to the packet"
         );
+    }
+
+    /// EN 300 468 Annex C's worked example: MJD 45218 is 1982-09-06, so with the
+    /// BCD time 12:45:00 the field is 1982-09-06 12:45:00 UTC. The expected value
+    /// is what `date -u -d @400164300` prints.
+    #[test]
+    fn eit_start_time_decodes_the_annex_c_example() {
+        assert_eq!(
+            mjd_bcd_to_unix_secs([0xB0, 0xA2, 0x12, 0x45, 0x00]),
+            Some(400_164_300)
+        );
+    }
+
+    /// The all-ones start_time the spec defines as undefined, a date before the
+    /// Unix epoch, and a byte that is not BCD all report no time rather than a
+    /// wrapped or garbled one.
+    #[test]
+    fn eit_start_time_declines_undefined_and_invalid_fields() {
+        assert_eq!(mjd_bcd_to_unix_secs([0xFF; 5]), None, "undefined");
+        let before_epoch = (MJD_UNIX_EPOCH - 1).to_be_bytes();
+        assert_eq!(
+            mjd_bcd_to_unix_secs([before_epoch[0], before_epoch[1], 0x00, 0x00, 0x00]),
+            None,
+            "1969 has no Unix seconds"
+        );
+        assert_eq!(
+            mjd_bcd_to_unix_secs([0xB0, 0xA2, 0x1A, 0x45, 0x00]),
+            None,
+            "0xA is not a BCD nibble"
+        );
+    }
+
+    /// The 3-byte BCD duration in seconds, and the same nibble check.
+    #[test]
+    fn eit_duration_decodes_bcd_hours_minutes_seconds() {
+        assert_eq!(bcd_hms_secs([0x01, 0x30, 0x00]), Some(5400));
+        assert_eq!(bcd_hms_secs([0x00, 0x00, 0x45]), Some(45));
+        assert_eq!(bcd_hms_secs([0x0F, 0x00, 0x00]), None);
     }
 }

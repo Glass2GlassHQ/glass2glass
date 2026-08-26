@@ -69,6 +69,7 @@ const SRC_PROPS: &[PropertySpec] = &[
     )
     .with_default("-1")
     .with_range("-1", "9223372036854775807"),
+    crate::cudadeviceid::CUDA_DEVICE_ID_PROP,
 ];
 
 use crate::localipc;
@@ -78,10 +79,6 @@ use crate::localipc;
 const TAG_CAPS: u8 = 0;
 const TAG_FRAME: u8 = 1;
 const TAG_EOS: u8 = 2;
-
-/// CUDA device both ends work on. Carried onto every received frame so a
-/// consumer knows which GPU the mapped surface lives on.
-const IPC_DEVICE_ORDINAL: i32 = 0;
 
 /// Fixed length of a serialized frame descriptor (see `encode_desc`).
 const DESC_LEN: usize = 8 * 3      // alloc_size, luma_off, chroma_off
@@ -510,6 +507,10 @@ pub struct LocalCudaSrc {
     /// ack only once the frame is fully consumed downstream, instead of taking a
     /// receive-side device->device copy and acking immediately.
     direct: bool,
+    /// CUDA device the receive context is opened on, carried onto every received
+    /// frame. The sender's frames live on this device: an IPC handle only opens
+    /// on the device that exported it.
+    cuda_device_id: i32,
 }
 
 impl LocalCudaSrc {
@@ -525,7 +526,17 @@ impl LocalCudaSrc {
             configured: false,
             frame_limit: u64::MAX,
             direct: false,
+            cuda_device_id: crate::cudadeviceid::DEFAULT_CUDA_DEVICE_ID,
         }
+    }
+
+    /// Receive on CUDA device `ordinal` instead of device 0. Also the
+    /// `cuda-device-id` property; must name the device the sender's frames were
+    /// allocated on, or opening their IPC handles fails. Read when the context
+    /// opens at configure.
+    pub fn with_cuda_device_id(mut self, ordinal: i32) -> Self {
+        self.cuda_device_id = ordinal;
+        self
     }
 
     /// Stop after `n` frames and emit EOS (the bounded / test path). 0 emits EOS
@@ -601,10 +612,10 @@ impl SourceLoop for LocalCudaSrc {
     }
 
     fn configure_pipeline(&mut self, _absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        // Our own CUDA context on device 0 (same device as the sender). Created
-        // on this executor thread; the context is thread-affine, so the runner
-        // must be single-thread (documented).
-        let ctx = localipc::init_context(IPC_DEVICE_ORDINAL)?;
+        // Our own CUDA context on `cuda-device-id` (same device as the sender).
+        // Created on this executor thread; the context is thread-affine, so the
+        // runner must be single-thread (documented).
+        let ctx = localipc::init_context(self.cuda_device_id)?;
         self.ctx = Some(Arc::new(SrcCtx(ctx)));
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
@@ -621,6 +632,11 @@ impl SourceLoop for LocalCudaSrc {
                 Ok(())
             }
             "num-buffers" => crate::numbuffers::set_num_buffers(&mut self.frame_limit, &value),
+            "cuda-device-id" => crate::cudadeviceid::set_cuda_device_id(
+                &mut self.cuda_device_id,
+                self.ctx.is_some(),
+                &value,
+            ),
             _ => Err(PropError::Unknown),
         }
     }
@@ -629,6 +645,7 @@ impl SourceLoop for LocalCudaSrc {
         match name {
             "location" => Some(PropValue::Str(self.path.clone())),
             "num-buffers" => Some(crate::numbuffers::get_num_buffers(self.frame_limit)),
+            "cuda-device-id" => Some(crate::cudadeviceid::get_cuda_device_id(self.cuda_device_id)),
             _ => None,
         }
     }
@@ -653,6 +670,7 @@ impl SourceLoop for LocalCudaSrc {
             let caps = self.discovered.clone().ok_or(G2gError::NotConfigured)?;
             let ctx = self.ctx.clone().ok_or(G2gError::NotConfigured)?;
             let direct = self.direct;
+            let device_ordinal = self.cuda_device_id;
             // Split so a frame descriptor can be read while the ack for the
             // previous frame is written (the zero-copy path waits on consumption
             // between the read and the ack).
@@ -701,7 +719,7 @@ impl SourceLoop for LocalCudaSrc {
                                 desc.width,
                                 desc.height,
                                 ctx.0,
-                                IPC_DEVICE_ORDINAL,
+                                device_ordinal,
                                 Arc::new(IpcMapping {
                                     base,
                                     _ctx: Arc::clone(&ctx),
@@ -773,7 +791,7 @@ impl SourceLoop for LocalCudaSrc {
                                 desc.width,
                                 desc.height,
                                 ctx.0,
-                                IPC_DEVICE_ORDINAL,
+                                device_ordinal,
                                 Arc::new(DestAlloc {
                                     dptr: dest,
                                     _ctx: Arc::clone(&ctx),

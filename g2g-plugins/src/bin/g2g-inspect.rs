@@ -10,49 +10,76 @@
 //!   g2g-inspect --gst <name>     # what a GStreamer element name maps to in g2g
 //!   g2g-inspect --gst-map        # gst-name/g2g-runtime-name pairs, TSV
 //!   g2g-inspect --plugin <path>  # load a plugin first, so its elements list
+//!   g2g-inspect --trusted-key <path>  # only load plugins signed by this key
 //!
 //! Backed by [`g2g_plugins::registry::default_registry`] and
 //! [`g2g_core::runtime::Registry::inspect`] (M105/M107). Requires the `std`
 //! feature (the registry is std-only). With the `plugin-loader` feature, plugins
 //! from `$G2G_PLUGIN_PATH` and `--plugin <path>` are loaded first so their
-//! elements appear in the listing and dumps (M201).
+//! elements appear in the listing and dumps (M201). With `plugin-signing`, each
+//! `--trusted-key <path>` (and each key file in `$G2G_PLUGIN_TRUSTED_KEYS`) adds
+//! an Ed25519 public key, and once any key is trusted every plugin must carry a
+//! signature from one of them (M1061).
 
 use std::process;
 
 use g2g_plugins::gst_compat::{gst_equivalent, gst_name_synonyms, GstEquivalent};
 use g2g_plugins::registry::default_registry;
 
-/// Pull every `--plugin <path>` / `--plugin=<path>` out of `raw`, returning the
-/// plugin paths and the remaining arguments (the element name / mode flags).
-fn split_plugin_args(raw: Vec<String>) -> (Vec<String>, Vec<String>) {
-    let mut plugins = Vec::new();
+/// The plugin arguments, split out of the command line so what is left is the
+/// element name / mode flags.
+#[derive(Default)]
+struct PluginArgs {
+    /// Each `--plugin <path>`: a shared object to load.
+    plugins: Vec<String>,
+    /// Each `--trusted-key <path>`: an Ed25519 public key file.
+    trusted_keys: Vec<String>,
+}
+
+/// Pull every `--plugin` / `--trusted-key` (either spelling) out of `raw`,
+/// returning them and the remaining arguments.
+fn split_plugin_args(raw: Vec<String>) -> (PluginArgs, Vec<String>) {
+    let mut found = PluginArgs::default();
     let mut rest = Vec::new();
     let mut iter = raw.into_iter();
     while let Some(arg) = iter.next() {
-        if let Some(path) = arg.strip_prefix("--plugin=") {
-            plugins.push(path.to_string());
-        } else if arg == "--plugin" {
-            match iter.next() {
-                Some(path) => plugins.push(path),
-                None => eprintln!("g2g-inspect: --plugin needs a path argument"),
-            }
-        } else {
+        let flag = ["--plugin", "--trusted-key"]
+            .into_iter()
+            .find(|f| arg == *f || arg.starts_with(&format!("{f}=")));
+        let Some(flag) = flag else {
             rest.push(arg);
+            continue;
+        };
+        let value = match arg.strip_prefix(&format!("{flag}=")) {
+            Some(inline) => Some(inline.to_string()),
+            None => iter.next(),
+        };
+        match value {
+            Some(path) if flag == "--plugin" => found.plugins.push(path),
+            Some(path) => found.trusted_keys.push(path),
+            None => eprintln!("g2g-inspect: {flag} needs a path argument"),
         }
     }
-    (plugins, rest)
+    (found, rest)
 }
 
 /// Load `$G2G_PLUGIN_PATH` + each `--plugin` path into `reg` so plugin elements
 /// are introspectable. Compiled out without `plugin-loader`.
-#[cfg(feature = "plugin-loader")]
-fn load_plugins(reg: &mut g2g_core::runtime::Registry, plugins: &[String]) {
+#[cfg(all(feature = "plugin-loader", not(feature = "plugin-signing")))]
+fn load_plugins(reg: &mut g2g_core::runtime::Registry, args: &PluginArgs) {
     use g2g_plugins::plugin_loader;
+    if !args.trusted_keys.is_empty() {
+        eprintln!(
+            "g2g-inspect: built without the `plugin-signing` feature; \
+             --trusted-key cannot be honoured"
+        );
+        process::exit(1);
+    }
     if let Err(err) = plugin_loader::load_from_env(reg) {
         eprintln!("g2g-inspect: {err}");
         process::exit(1);
     }
-    for path in plugins {
+    for path in &args.plugins {
         if let Err(err) = plugin_loader::load_plugin(path, reg) {
             eprintln!("g2g-inspect: {err}");
             process::exit(1);
@@ -60,12 +87,42 @@ fn load_plugins(reg: &mut g2g_core::runtime::Registry, plugins: &[String]) {
     }
 }
 
+/// The same with signature verification: `--trusted-key` adds to whatever
+/// `$G2G_PLUGIN_TRUSTED_KEYS` names, and the resulting set gates both the path
+/// scan and each explicit `--plugin`.
+#[cfg(feature = "plugin-signing")]
+fn load_plugins(reg: &mut g2g_core::runtime::Registry, args: &PluginArgs) {
+    use g2g_plugins::plugin_loader::{self, default_policy};
+    let fatal = |err: &dyn std::fmt::Display| -> ! {
+        eprintln!("g2g-inspect: {err}");
+        process::exit(1)
+    };
+    let mut trusted = plugin_loader::trusted_keys_from_env().unwrap_or_else(|e| fatal(&e));
+    for path in &args.trusted_keys {
+        if let Err(err) = trusted.trust_key_file(path) {
+            fatal(&err);
+        }
+    }
+    if let Err(err) = plugin_loader::load_from_env_verified(reg, &trusted) {
+        fatal(&err);
+    }
+    for path in &args.plugins {
+        if let Err(err) = plugin_loader::load_plugin_verified(path, reg, &trusted, &default_policy)
+        {
+            fatal(&err);
+        }
+    }
+}
+
 #[cfg(not(feature = "plugin-loader"))]
-fn load_plugins(_reg: &mut g2g_core::runtime::Registry, plugins: &[String]) {
-    if !plugins.is_empty() || std::env::var_os("G2G_PLUGIN_PATH").is_some() {
+fn load_plugins(_reg: &mut g2g_core::runtime::Registry, args: &PluginArgs) {
+    if !args.plugins.is_empty()
+        || !args.trusted_keys.is_empty()
+        || std::env::var_os("G2G_PLUGIN_PATH").is_some()
+    {
         eprintln!(
             "g2g-inspect: built without the `plugin-loader` feature; \
-             --plugin / $G2G_PLUGIN_PATH ignored"
+             --plugin / --trusted-key / $G2G_PLUGIN_PATH ignored"
         );
     }
 }
@@ -96,9 +153,9 @@ fn dump_json(_reg: &g2g_core::runtime::Registry, _name: Option<&str>) {
 }
 
 fn main() {
-    let (plugins, rest) = split_plugin_args(std::env::args().skip(1).collect());
+    let (plugin_args, rest) = split_plugin_args(std::env::args().skip(1).collect());
     let mut reg = default_registry();
-    load_plugins(&mut reg, &plugins);
+    load_plugins(&mut reg, &plugin_args);
     let mut args = rest.into_iter();
     match args.next() {
         // No element named: list them all, `name: Long-name` per line, the

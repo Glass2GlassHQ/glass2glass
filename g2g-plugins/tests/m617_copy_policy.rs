@@ -14,8 +14,9 @@ use g2g_core::graph::Graph;
 use g2g_core::runtime::{run_graph, run_graph_with_copy_policy, GraphNodeRef};
 use g2g_core::{G2gError, PipelineClock};
 
+use g2g_core::meta::Orientation;
 use g2g_plugins::fakesink::FakeSink;
-use g2g_plugins::videoflip::{FlipMethod, VideoFlip};
+use g2g_plugins::videoflip::VideoFlip;
 use g2g_plugins::videotestsrc::VideoTestSrc;
 
 struct ZeroClock;
@@ -30,7 +31,9 @@ fn system_pipeline() -> Graph<GraphNodeRef<'static>> {
     // so the copy plan finds zero frame copies).
     let mut g: Graph<GraphNodeRef<'static>> = Graph::new();
     let src = g.add_source(GraphNodeRef::source(VideoTestSrc::new(16, 16, 30, 2)));
-    let flip = g.add_transform(GraphNodeRef::element(VideoFlip::new(FlipMethod::Rotate180)));
+    let flip = g.add_transform(GraphNodeRef::element(VideoFlip::new(
+        Orientation::Rotate180,
+    )));
     let sink = g.add_sink(GraphNodeRef::element(FakeSink::new()));
     g.link(src, flip).unwrap();
     g.link(flip, sink).unwrap();

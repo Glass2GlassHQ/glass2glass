@@ -541,8 +541,8 @@ fn to_s16_interleaved(frame: &FfAudio) -> Result<DecodedAudio, G2gError> {
         }
         Sample::F32(Type::Packed) => {
             let data = packed_bytes::<f32>(frame, samples, channels)?;
-            for (i, b) in data.chunks_exact(4).enumerate() {
-                out[i] = f32_to_i16(f32::from_ne_bytes([b[0], b[1], b[2], b[3]]));
+            for (i, b) in data.as_chunks::<4>().0.iter().enumerate() {
+                out[i] = f32_to_i16(f32::from_ne_bytes(*b));
             }
         }
         Sample::I16(Type::Planar) => {
@@ -555,8 +555,8 @@ fn to_s16_interleaved(frame: &FfAudio) -> Result<DecodedAudio, G2gError> {
         }
         Sample::I16(Type::Packed) => {
             let data = packed_bytes::<i16>(frame, samples, channels)?;
-            for (i, b) in data.chunks_exact(2).enumerate() {
-                out[i] = i16::from_ne_bytes([b[0], b[1]]);
+            for (i, b) in data.as_chunks::<2>().0.iter().enumerate() {
+                out[i] = i16::from_ne_bytes(*b);
             }
         }
         Sample::I32(Type::Planar) => {
@@ -569,8 +569,8 @@ fn to_s16_interleaved(frame: &FfAudio) -> Result<DecodedAudio, G2gError> {
         }
         Sample::I32(Type::Packed) => {
             let data = packed_bytes::<i32>(frame, samples, channels)?;
-            for (i, b) in data.chunks_exact(4).enumerate() {
-                out[i] = (i32::from_ne_bytes([b[0], b[1], b[2], b[3]]) >> 16) as i16;
+            for (i, b) in data.as_chunks::<4>().0.iter().enumerate() {
+                out[i] = (i32::from_ne_bytes(*b) >> 16) as i16;
             }
         }
         _ => return Err(G2gError::CapsMismatch),

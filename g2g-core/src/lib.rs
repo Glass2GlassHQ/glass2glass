@@ -162,8 +162,6 @@ pub use caps::CapsSet;
 pub use caps_transform::{AudioShape, CapsTransform, FieldTransform, RawVideoShape};
 #[cfg(feature = "alloc")]
 pub use chapter::Chapter;
-#[cfg(feature = "runtime")]
-pub use clock::DriftClock;
 #[cfg(feature = "std")]
 pub use clock::MonotonicClock;
 #[cfg(feature = "alloc")]
@@ -171,6 +169,8 @@ pub use clock::{
     elect_clock, AsyncClock, ClockCandidate, ClockPriority, ClockSync, DynAsyncClock, ElectedClock,
     PipelineClock,
 };
+#[cfg(feature = "runtime")]
+pub use clock::{DriftClock, DriftObservation};
 #[cfg(feature = "alloc")]
 pub use conformance::{
     ConformanceDimension, ConformanceReport, Evidence, MaturityLevel, MaturityRecord,

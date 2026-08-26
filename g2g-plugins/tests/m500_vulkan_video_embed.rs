@@ -205,7 +205,9 @@ impl EngineRenderer {
 
 /// Rec.601 luma of an RGBA buffer, one byte per pixel, matching the shader.
 fn luma(rgba: &[u8]) -> Vec<u8> {
-    rgba.chunks_exact(4)
+    rgba.as_chunks::<4>()
+        .0
+        .iter()
         .map(|c| (0.299 * c[0] as f32 + 0.587 * c[1] as f32 + 0.114 * c[2] as f32).round() as u8)
         .collect()
 }
@@ -269,13 +271,15 @@ fn m500_vulkan_video_embed() {
         // 1. The app's grayscale shader ran: every output pixel is R==G==B.
         assert!(
             out_rgba
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .all(|c| c[0].abs_diff(c[1]) <= 1 && c[1].abs_diff(c[2]) <= 1),
             "frame {p}: engine output must be grayscale (R==G==B), proving its shader ran",
         );
 
         // 2. It sampled real content, not a blank/cleared target.
-        let out_gray: Vec<u8> = out_rgba.chunks_exact(4).map(|c| c[0]).collect();
+        let out_gray: Vec<u8> = out_rgba.as_chunks::<4>().0.iter().map(|c| c[0]).collect();
         let (min, max) = out_gray
             .iter()
             .fold((255u8, 0u8), |(lo, hi), &g| (lo.min(g), hi.max(g)));

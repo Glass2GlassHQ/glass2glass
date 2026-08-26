@@ -5,6 +5,7 @@
 use core::future::Future;
 use core::pin::Pin;
 
+use g2g_core::meta::Orientation;
 use g2g_core::runtime::{run_graph, GraphNode};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, ConfigureOutcome, Dim, G2gError, Graph, OutputSink,
@@ -12,7 +13,7 @@ use g2g_core::{
 };
 use g2g_plugins::mux::InterleaveMux;
 use g2g_plugins::videocrop::VideoCrop;
-use g2g_plugins::videoflip::{FlipMethod, VideoFlip};
+use g2g_plugins::videoflip::VideoFlip;
 use g2g_plugins::videotestsrc::VideoTestSrc;
 
 struct NullClock;
@@ -92,7 +93,7 @@ async fn tee_to_muxer_diamond_runs() {
     let mut g: Graph<GraphNode> = Graph::new();
     let src = g.add_source(GraphNode::source(VideoTestSrc::new(8, 8, 30, 4)));
     let tee = g.add_tee(2);
-    let flip = g.add_transform(GraphNode::element(VideoFlip::new(FlipMethod::Rotate180)));
+    let flip = g.add_transform(GraphNode::element(VideoFlip::new(Orientation::Rotate180)));
     let crop = g.add_transform(GraphNode::element(VideoCrop::new(0, 4, 0, 4)));
     let mux = g.add_muxer(GraphNode::muxer(InterleaveMux::new(2, rgba(8, 8))), 2);
     let sink = g.add_sink(GraphNode::element(AnySink));

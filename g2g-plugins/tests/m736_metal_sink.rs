@@ -145,7 +145,7 @@ async fn present_and_check(frames: Vec<Frame>) -> u64 {
     assert_eq!(rgba.len(), 640 * 480 * 4, "full RGBA surface");
     let mut min = u8::MAX;
     let mut max = 0u8;
-    for px in rgba.chunks_exact(4) {
+    for px in rgba.as_chunks::<4>().0 {
         // Luma-ish check on the green channel (present in both extremes).
         min = min.min(px[1]);
         max = max.max(px[1]);

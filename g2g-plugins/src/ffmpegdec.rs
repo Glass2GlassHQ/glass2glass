@@ -409,6 +409,10 @@ pub struct FfmpegVideoDec {
     /// on a multi-GPU host may not be the intended GPU. Ignored by the other
     /// backends.
     vaapi_device: Option<String>,
+    /// CUDA device ordinal the `NvdecCuda` hwdevice is created on, and the
+    /// ordinal every emitted `OwnedCudaBuffer` carries. Read when the decoder
+    /// opens. Ignored by the other backends.
+    cuda_device_id: i32,
     /// Codec resolved at `configure_pipeline`; the libavcodec decoder is opened
     /// lazily on the first access unit so its parameter sets can seed the decoder
     /// as `extradata` (see [`Self::open_decoder`]).
@@ -480,6 +484,7 @@ impl FfmpegVideoDec {
             cuda_context: 0,
             requested_alloc: None,
             vaapi_device: None,
+            cuda_device_id: crate::cudadeviceid::DEFAULT_CUDA_DEVICE_ID,
             codec_kind: None,
             saw_interlaced: false,
             qos: false,
@@ -582,6 +587,19 @@ impl FfmpegVideoDec {
 
     pub fn vaapi_device(&self) -> Option<&str> {
         self.vaapi_device.as_deref()
+    }
+
+    /// Pin the CUDA device the `Backend::NvdecCuda` hwdevice opens, on a host
+    /// with more than one NVIDIA GPU. Also the `cuda-device-id` property; read
+    /// when the decoder opens (on the first access unit), and the ordinal every
+    /// emitted frame carries. Only consulted by the `NvdecCuda` backend.
+    pub fn with_cuda_device_id(mut self, ordinal: i32) -> Self {
+        self.cuda_device_id = ordinal;
+        self
+    }
+
+    pub fn cuda_device_id(&self) -> i32 {
+        self.cuda_device_id
     }
 
     /// Override the `h264_cuvid` `surfaces` AVOption. Higher = more
@@ -759,6 +777,7 @@ impl FfmpegVideoDec {
             output_format: self.output_format,
             backend: self.backend,
             cuda_context: self.cuda_context,
+            cuda_device_id: self.cuda_device_id,
         }
     }
 }
@@ -770,6 +789,7 @@ struct DecodeConfig {
     output_format: OutputFormat,
     backend: Backend,
     cuda_context: u64,
+    cuda_device_id: i32,
 }
 
 /// State the M760 offload moves onto the blocking pool and hands back: the
@@ -837,6 +857,7 @@ fn drain_frames_into(
     let outputs_cuda = matches!(cfg.backend, Backend::NvdecCuda);
     let transfers_from_hw = matches!(cfg.backend, Backend::Vaapi);
     let cuda_context = cfg.cuda_context;
+    let cuda_device_id = cfg.cuda_device_id;
     loop {
         // Fresh frame per iteration: the CUDA path moves the whole
         // `AVFrame` into the emitted buffer's keep-alive, so it cannot be
@@ -883,7 +904,8 @@ fn drain_frames_into(
                     // `CUcontext` its hwdevice was created with. The
                     // helper reads the device pointers and moves the
                     // frame into the buffer's keep-alive.
-                    let buf = unsafe { cuda_buffer_from_frame(frame, cuda_context)? };
+                    let buf =
+                        unsafe { cuda_buffer_from_frame(frame, cuda_context, cuda_device_id)? };
                     (DecodedPayload::Cuda(buf), OutputFormat::Nv12)
                 } else if transfers_from_hw {
                     // VAAPI: the decoded frame is a GPU surface
@@ -1032,19 +1054,24 @@ impl FfmpegVideoDec {
         // so decoded NV12 stays in device memory. Done on the raw
         // AVCodecContext before open, the canonical `hw_decode.c` setup.
         if self.backend == Backend::NvdecCuda {
+            // ffmpeg names a CUDA device by its ordinal in decimal (null would
+            // also mean 0, but then the ordinal could not be pinned).
+            let device = alloc::ffi::CString::new(alloc::format!("{}", self.cuda_device_id))
+                .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
             // SAFETY: standard ffmpeg hwaccel init on a freshly-allocated,
             // not-yet-opened context. `av_hwdevice_ctx_create` initialises
             // `hw_device_ctx`; we read the CUcontext out of the device's
             // hwctx, hand the codec its own ref, drop ours, and install the
             // get_format callback. A successful create guarantees the device
             // `data` and CUDA `hwctx` are non-null, so only `hw_device_ctx`
-            // itself is checked explicitly below.
+            // itself is checked explicitly below. `device` outlives the create
+            // call.
             unsafe {
                 let mut hw_device_ctx: *mut ffmpeg::ffi::AVBufferRef = core::ptr::null_mut();
                 let ret = ffmpeg::ffi::av_hwdevice_ctx_create(
                     &mut hw_device_ctx,
                     ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_CUDA,
-                    core::ptr::null(),     // default CUDA device
+                    device.as_ptr(),
                     core::ptr::null_mut(), // no options
                     0,
                 );
@@ -1340,6 +1367,11 @@ impl AsyncElement for FfmpegVideoDec {
                 self.apply_backend(backend);
                 Ok(())
             }
+            "cuda-device-id" => crate::cudadeviceid::set_cuda_device_id(
+                &mut self.cuda_device_id,
+                self.decoder.is_some(),
+                &value,
+            ),
             "cuvid-surfaces" => {
                 let n = value.as_uint().ok_or(PropError::Type)?;
                 if n > 64 {
@@ -1397,6 +1429,7 @@ impl AsyncElement for FfmpegVideoDec {
                 }
                 .into(),
             )),
+            "cuda-device-id" => Some(crate::cudadeviceid::get_cuda_device_id(self.cuda_device_id)),
             "cuvid-surfaces" => Some(PropValue::Uint(self.cuvid_surfaces.unwrap_or(0) as u64)),
             "low-delay" => Some(PropValue::Bool(self.low_delay)),
             "qos" => Some(PropValue::Bool(self.qos)),
@@ -1670,8 +1703,9 @@ const SUPPORTED_CODECS: [VideoCodec; 10] = [
 ];
 
 /// `FfmpegVideoDec`'s settable properties: the VAAPI render node (for the
-/// `Backend::Vaapi` / `ffmpegvaapidec` path) and the decoded output layout, so a
-/// `gst-launch` line can pin the GPU and pick I420 / NV12 without the builder.
+/// `Backend::Vaapi` / `ffmpegvaapidec` path), the CUDA ordinal (for
+/// `Backend::NvdecCuda`) and the decoded output layout, so a `gst-launch` line
+/// can pin the GPU and pick I420 / NV12 without the builder.
 static FFMPEGDEC_PROPS: &[PropertySpec] = &[
     PropertySpec::new(
         "device",
@@ -1696,6 +1730,7 @@ static FFMPEGDEC_PROPS: &[PropertySpec] = &[
     )
     .with_enum_values("software | nvdec-cuvid | cuvid | h264_cuvid | nvdec-cuda | cuda | vaapi")
     .with_default("software"),
+    crate::cudadeviceid::CUDA_DEVICE_ID_PROP,
     PropertySpec::new(
         "cuvid-surfaces",
         PropKind::Uint,
@@ -2287,11 +2322,6 @@ fn transfer_hw_to_sw(hw: &FfVideo) -> Result<FfVideo, G2gError> {
     Ok(sw)
 }
 
-/// Device the CUDA hwdevice is created on: `av_hwdevice_ctx_create` is called
-/// with no device string, which selects ordinal 0, and the context it builds
-/// carries no ordinal to read back.
-const CUDA_DEFAULT_DEVICE_ORDINAL: i32 = 0;
-
 /// Read the NV12 plane device pointers out of a decoded `AV_PIX_FMT_CUDA`
 /// frame and wrap them in an [`OwnedCudaBuffer`], moving the `AVFrame` into the
 /// buffer's keep-alive so the device memory stays referenced until a
@@ -2304,6 +2334,7 @@ const CUDA_DEFAULT_DEVICE_ORDINAL: i32 = 0;
 unsafe fn cuda_buffer_from_frame(
     frame: FfVideo,
     cuda_context: u64,
+    device_ordinal: i32,
 ) -> Result<OwnedCudaBuffer, G2gError> {
     // SAFETY: `as_ptr` yields the owned AVFrame pointer; reading these public
     // fields is sound while we hold the frame. The reads copy into locals, so
@@ -2335,7 +2366,7 @@ unsafe fn cuda_buffer_from_frame(
         width,
         height,
         cuda_context,
-        CUDA_DEFAULT_DEVICE_ORDINAL,
+        device_ordinal,
         keep_alive,
     ))
 }

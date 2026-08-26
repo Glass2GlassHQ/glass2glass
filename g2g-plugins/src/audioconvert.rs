@@ -158,6 +158,99 @@ pub(crate) fn sample_bytes(format: AudioFormat) -> usize {
     }
 }
 
+const NS_PER_SECOND: u64 = 1_000_000_000;
+
+/// The sample format an element declares when the solver needs its caps before
+/// the pads negotiate (a fan-in's merged output, a fan-out's ports). Matches
+/// `audiotestsrc` and `audiomixer`'s nominal output.
+pub(crate) const DEFAULT_PCM_FORMAT: AudioFormat = AudioFormat::PcmS16Le;
+
+/// The same value as declared text, for `gst-inspect`.
+pub(crate) const DEFAULT_PCM_FORMAT_TEXT: &str = "S16LE";
+
+/// The sample rate that goes with [`DEFAULT_PCM_FORMAT`].
+pub(crate) const DEFAULT_PCM_RATE: u32 = 48_000;
+
+/// The same value as declared text, for `gst-inspect`.
+pub(crate) const DEFAULT_PCM_RATE_TEXT: &str = "48000";
+
+/// The `format` / `rate` properties an element exposes when it declares its PCM
+/// shape rather than learning it from the pads ([`DEFAULT_PCM_FORMAT`]).
+pub(crate) static PCM_SHAPE_PROPS: &[PropertySpec] = &[
+    PropertySpec::new(
+        "format",
+        PropKind::Str,
+        "sample format on every pad: S16LE | F32LE | S24LE | S32LE | U8",
+    )
+    .with_default(DEFAULT_PCM_FORMAT_TEXT),
+    PropertySpec::new("rate", PropKind::Uint, "sample rate on every pad")
+        .with_default(DEFAULT_PCM_RATE_TEXT),
+];
+
+/// Apply one [`PCM_SHAPE_PROPS`] property to the shape an element declares.
+pub(crate) fn set_pcm_shape_property(
+    format: &mut AudioFormat,
+    rate: &mut u32,
+    name: &str,
+    value: PropValue,
+) -> Result<(), PropError> {
+    match name {
+        "format" => {
+            let text = value.as_str().ok_or(PropError::Type)?;
+            *format = audio_format_from_str(text).ok_or(PropError::Value)?;
+        }
+        "rate" => {
+            let value = value.as_uint().ok_or(PropError::Type)? as u32;
+            if value == 0 {
+                return Err(PropError::Value);
+            }
+            *rate = value;
+        }
+        _ => return Err(PropError::Unknown),
+    }
+    Ok(())
+}
+
+/// Read one [`PCM_SHAPE_PROPS`] property back.
+pub(crate) fn get_pcm_shape_property(
+    format: AudioFormat,
+    rate: u32,
+    name: &str,
+) -> Option<PropValue> {
+    match name {
+        "format" => Some(PropValue::Str(audio_format_to_str(format).into())),
+        "rate" => Some(PropValue::Uint(rate as u64)),
+        _ => None,
+    }
+}
+
+/// Byte a silent sample of this format is made of: `PcmU8` is offset-binary
+/// (silence at the 0x80 midpoint), the signed and float formats are all-zero.
+pub(crate) fn silence_byte(format: AudioFormat) -> u8 {
+    match format {
+        AudioFormat::PcmU8 => 0x80,
+        _ => 0,
+    }
+}
+
+/// Nanoseconds `samples` sample frames occupy at `rate`.
+pub(crate) fn samples_to_ns(samples: u64, rate: u32) -> u64 {
+    if rate == 0 {
+        return 0;
+    }
+    (samples as u128 * NS_PER_SECOND as u128 / rate as u128) as u64
+}
+
+/// Sample frames spanning `ns` at `rate`, rounded to nearest so half a sample
+/// of jitter does not leave a permanent one-sample offset.
+pub(crate) fn ns_to_samples(ns: u64, rate: u32) -> u64 {
+    if rate == 0 {
+        return 0;
+    }
+    let scale = NS_PER_SECOND as u128;
+    ((ns as u128 * rate as u128 + scale / 2) / scale) as u64
+}
+
 impl AsyncElement for AudioConvert {
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>

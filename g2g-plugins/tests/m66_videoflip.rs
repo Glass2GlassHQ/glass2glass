@@ -2,10 +2,11 @@
 //! rotated 90 degrees clockwise, the swapped 4x8 geometry announced via
 //! `CapsChanged`.
 
+use g2g_core::meta::Orientation;
 use g2g_core::runtime::run_source_transform_sink;
 use g2g_core::{Caps, Dim, PipelineClock, Rate, RawVideoFormat};
 use g2g_plugins::fakesink::FakeSink;
-use g2g_plugins::videoflip::{FlipMethod, VideoFlip};
+use g2g_plugins::videoflip::VideoFlip;
 use g2g_plugins::videotestsrc::VideoTestSrc;
 
 struct NullClock;
@@ -18,7 +19,7 @@ impl PipelineClock for NullClock {
 #[tokio::test]
 async fn rotates_rgba_source_swapping_geometry() {
     let mut src = VideoTestSrc::new(8, 4, 30, 4);
-    let mut flip = VideoFlip::new(FlipMethod::Rotate90Cw);
+    let mut flip = VideoFlip::new(Orientation::Rotate90Cw);
     let mut sink = FakeSink::new();
 
     run_source_transform_sink(&mut src, &mut flip, &mut sink, &NullClock, 4)

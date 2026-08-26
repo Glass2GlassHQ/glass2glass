@@ -26,6 +26,8 @@ use g2g_core::{
     MemoryDomain, MultiInputElement, OutputSink, PipelinePacket,
 };
 
+use crate::audioconvert::{ns_to_samples, samples_to_ns};
+
 /// # Example
 ///
 /// ```no_run
@@ -103,7 +105,7 @@ impl AudioMixer {
         // Continuous append when the PTS is at or behind the input's own
         // position (zero / duplicate / slightly-behind PTS); honor a forward
         // gap otherwise.
-        let pts_frame = pts_to_frame(pts_ns, self.sample_rate);
+        let pts_frame = ns_to_samples(pts_ns, self.sample_rate);
         let start = pts_frame.max(self.end_frame[input]);
 
         if !self.started {
@@ -151,8 +153,8 @@ impl AudioMixer {
         }
 
         let n_samples = ((safe - self.acc_start) as usize * self.channels).min(self.acc.len());
-        let pts_ns = frame_to_ns(self.acc_start, self.sample_rate);
-        let duration_ns = frame_to_ns(safe, self.sample_rate).saturating_sub(pts_ns);
+        let pts_ns = samples_to_ns(self.acc_start, self.sample_rate);
+        let duration_ns = samples_to_ns(safe, self.sample_rate).saturating_sub(pts_ns);
         let bytes = clamp_to_bytes(&self.acc[..n_samples]);
         self.acc.drain(0..n_samples);
         self.acc_start = safe;
@@ -269,22 +271,6 @@ impl MultiInputElement for AudioMixer {
             self.emit_ready(out).await
         })
     }
-}
-
-/// The absolute output sample-frame a PTS maps to, rounded to nearest.
-fn pts_to_frame(pts_ns: u64, sample_rate: u32) -> u64 {
-    if sample_rate == 0 {
-        return 0;
-    }
-    ((pts_ns as u128 * sample_rate as u128 + 500_000_000) / 1_000_000_000) as u64
-}
-
-/// The PTS of an absolute output sample-frame.
-fn frame_to_ns(frame: u64, sample_rate: u32) -> u64 {
-    if sample_rate == 0 {
-        return 0;
-    }
-    (frame as u128 * 1_000_000_000 / sample_rate as u128) as u64
 }
 
 /// Add S16LE `bytes` into an i32 accumulator lane-for-lane; excess bytes past

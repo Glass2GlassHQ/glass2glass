@@ -409,7 +409,7 @@ A pipeline runs against one elected clock (`elect_clock` over `ClockPriority`: a
 
 **Pacing mid-graph (`clocksync`).** Presentation is not the only place a stream needs to run at real time: a publisher muxing to a live transport (the MoQ Transport demo's `videotestsrc ! x264enc ! mp4mux ! moqtsink`) has no sync sink at all, so nothing stops it producing minutes of media per minute of wall clock. `ClockSyncTransform` (`clocksync`) is the sink's pacing as a pass-through transform: it holds each buffer until its PTS, anchored on the first one, is due on the clock, and forwards everything else unchanged. It shares the display sinks' `PresentationPacer`, so the anchor, the segment mapping and the seek re-anchor behave identically, and differs in two ways. It never drops: a late or segment-clipped buffer is forwarded immediately, because a hole in a transform's output is one downstream cannot recover. And it supplies its own monotonic clock when none was handed to it, which is both GStreamer's fallback to the pipeline system clock and a necessity here, since the runners deliver `ClockSync` to sink nodes only, and a `clocksync` sits mid-graph. `sync=false` reduces it to an identity; `ts-offset` shifts the whole schedule.
 
-**Audio as the sync master.** For playback the audio sink should drive timing, because samples leave the DAC at the hardware's real rate, which drifts from wall time by tens to hundreds of ppm. `DriftClock` (`g2g-core`) turns that into a usable pipeline clock: it is fed `(local_ns, master_ns)` observations (`local_ns` from a monotonic reference, `master_ns` the true playout position) and fits `master ≈ slope·local + offset` by least squares over a sliding window, so `now_ns()` projects the current reference time through the fit, both estimating the playout rate and smoothing the coarse, jittery per-observation readings. `AlsaSink`'s worker samples `frames_written − snd_pcm_delay()` after each blocking `writei` and feeds the clock, offering it to election at the `AudioProvider` tier (gated by a `provide-clock` property). A video sink then slaves to it: because the elected clock is the disciplined audio timeline rather than raw wall time, video presentation follows audio, giving true A/V sync. A `LiveSource` capture clock still wins when present, so a live pipeline paces to capture.
+**Audio as the sync master.** For playback the audio sink should drive timing, because samples leave the DAC at the hardware's real rate, which drifts from wall time by tens to hundreds of ppm. `DriftClock` (`g2g-core`) turns that into a usable pipeline clock: it is fed `(local_ns, master_ns)` observations (`local_ns` from a monotonic reference, `master_ns` the true playout position) and fits `master ≈ slope·local + offset` by least squares over a sliding window, so `now_ns()` projects the current reference time through the fit, both estimating the playout rate and smoothing the coarse, jittery per-observation readings. The fit is exponentially weighted (each sample 0.95x the weight of the one after it, newest first), so half of a rate step is taken up 24 samples after it rather than 32, at the cost of 37% more slope noise. An observation landing further from the current fit than the outlier gate (10 ms by default, 20 ms for the PTP servo below, which sees delayed packets rather than delay jitter) is dropped rather than folded in, so an underrun recovery or a stale `snd_pcm_delay()` reading cannot bend the fit for a whole window. Eight rejections in a row mean the timeline genuinely moved (a device re-open), so the window clears and the fit restarts from the new samples. `AlsaSink`'s worker samples `frames_written − snd_pcm_delay()` after each blocking `writei` and feeds the clock, offering it to election at the `AudioProvider` tier (gated by a `provide-clock` property). A video sink then slaves to it: because the elected clock is the disciplined audio timeline rather than raw wall time, video presentation follows audio, giving true A/V sync. A `LiveSource` capture clock still wins when present, so a live pipeline paces to capture.
 
 **Networked sync (PTP).** For facility-wide sync (Pro AV / SMPTE ST 2110), the shared reference is a PTP grandmaster, and every device slaves to it, so a `PtpGrandmaster` clock outranks all of the above. `PtpServo` (`g2g-core::ptp`) is the servo: fed the four timestamps of each PTP delay request-response, it computes the standard `offset` / `mean_path_delay` and folds `(local, master)` into the same `DriftClock` machinery, disciplining the local monotonic reference to the grandmaster's TAI timeline with lock / holdover / outlier-rejection state. `PtpClock` wraps it (interior-mutable, so one worker drives it while sinks read `now_ns` through a shared `Arc`) and offers itself to election only once locked. Because the elected timeline is grandmaster-derived, two machines locked to the same grandmaster read the same clock, so the A/V pacing above holds *across* devices, not just within one process. Two sources feed the servo: raw PTP message timestamps (`sync_exchange`), or a direct absolute-time observation (`observe_master`). Two backends supply them: `PtpSystemClock` (`g2g-plugins`, Linux) delegates to an OS PTP-disciplined `CLOCK_TAI` (from `linuxptp` / `phc2sys`), sampled on a worker; `PtpClient` (`g2g-plugins`) is a from-scratch software PTP SLAVE that speaks PTP over UDP itself (the `ptp::wire` message parser + the `ptp::slave` delay-request-response state machine + a UDP transport), so an endpoint with no OS PTP daemon can still lock. The wire parser and slave state machine are `no_std` and CI-tested end to end (parse -> slave -> servo) without sockets. Both backends coexist with a host `ptp4l`: `PtpClient`'s sockets take `SO_REUSEADDR` + `SO_REUSEPORT` so the daemon keeps receiving its own copy of each multicast message, and `PtpSystemClock` polls the daemon over its management socket (`ptp::management` builds the same GET `pmc` sends; `g2g-plugins::ptp4l` carries it over the Unix datagram socket) so `grandmaster_locked` reports the port state behind `CLOCK_TAI` rather than trusting a clock that is readable either way.
 
@@ -694,6 +694,7 @@ A sibling `MfEncode` (feature `mf-encode`) wraps `CLSID_MSH264EncoderMFT` with `
 - **Callback model:** NVCUVID is callback-driven. A parser (`cuvidCreateVideoParser`) is fed the elementary stream and synchronously invokes three callbacks from inside `cuvidParseVideoData`: a *sequence* callback (creates the `CUvideodecoder` once the SPS geometry is known), a *decode* callback (`cuvidDecodePicture`), and a *display* callback (a frame is ready in display order). The display callback cannot `await`, so it maps the surface (`cuvidMapVideoFrame64`) and pushes a ready frame onto a queue that `process` drains and emits after the parse returns. The callbacks reach element state through a `*mut DecoderState` passed as the parser user-data; that pointer targets a heap `Box` so it survives the runner moving the element between worker threads.
 - **Bindings: hand-rolled FFI.** Links `libnvcuvid` + `libcuda` directly (no `cudarc`). NVCUVID exports real symbols (no `CreateInstance` dispatch table, unlike NVENC), so the calls are plain `extern "C"`; the structs are transcribed `#[repr(C)]` with compile-time size assertions against the installed `cuviddec.h` / `nvcuvid.h`, and the per-picture `CUVIDPICPARAMS` is opaque (the parser fills it, we pass the pointer straight to `cuvidDecodePicture`).
 - **Frame lifetime:** each output frame carries a `CudaKeepAlive` that `cuvidUnmapVideoFrame64`s on drop plus an `Arc` to the decoder, so the decoder and its CUDA context outlive any frame still in flight; the decoder, context lock, and context are destroyed (in that order) only once the last frame is released. The element owns its own CUDA context (created at configure).
+- **Device selection.** Every element that creates its own CUDA context takes the ordinal from a `cuda-device-id` property (`NvDec`, `CudaUpload`, `LocalCudaSrc`, `FfmpegVideoDec` on `Backend::NvdecCuda`, and read-only on the `WgpuToCuda` bridge, whose device is fixed by the wgpu device it was built over). The spec is declared once in `g2g-plugins/src/cudadeviceid.rs` so the name, range and default cannot drift. It defaults to 0, is read when the context opens, and a set after that is refused (`PropError::ReadOnly`): the frames already in flight carry the old ordinal. That ordinal is what each emitted `OwnedCudaBuffer` reports as `device_ordinal`, so a consumer can tell which GPU a surface lives on.
 - **Validation:** an on-hardware test on the RTX 3060 runs the full native loop, a synthesized CUDA NV12 surface encoded by `NvEnc` to Annex-B and decoded by `NvDec` back to CUDA NV12, asserting geometry and (via a small device->host copy) that the decoded luma holds real content; it skips with no NVIDIA GPU. The `nvdec` feature is CI-excluded. **HEVC (H.265) and AV1** are supported alongside H.264: the input caps accept `CompressedVideo{H264|H265|Av1}`, the codec is inferred and mapped to the `cudaVideoCodec` the NVCUVID parser + decoder are created for. A 10-bit stream decodes to a `P016` surface announced as `RawVideoFormat::P010`; a mid-stream resolution change reconfigures the live decoder in place (`cuvidReconfigureDecoder`) when the new size fits, else rebuilds it (the CUDA context rides a separate `Arc` so in-flight frames survive the rebuild). The display delay defaults to a low-latency 1, settable via `max-display-delay` (0..=16).
 
 #### 4.11.4 End-to-End RTSP Pipeline
@@ -824,7 +825,13 @@ YCbCr pass with an in-flight ring. A session's `maxCodedExtent` is the device's
 maximum, not the stream's geometry (M1027): it is only an upper bound, each
 picture resource carries its real extent, and sizing the session to the picture
 made the NVIDIA driver refuse whole small geometries with
-`ERROR_INVALID_VIDEO_STD_PARAMETERS_KHR`. The session + DPB rebuild mid-stream on *any*
+`ERROR_INVALID_VIDEO_STD_PARAMETERS_KHR`. Every image the session writes (DPB
+slot, decode output) is created at the picture extent rounded up to the device's
+`pictureAccessGranularity` (M1060), the unit in which a decode accesses a
+picture resource. The readback copy takes the picture's own extent back out of
+that image, and the YCbCr compute pass is given the padded extent so its
+normalized coordinates still land on the picture's texels. The padding never
+reaches an output frame. The session + DPB rebuild mid-stream on *any*
 in-band parameter-set change, keyed by a byte fingerprint of the AU's parameter
 sets (M519 geometry / M764 same-geometry content, e.g. a profile or entropy-mode
 switch; byte-identical keyframe re-sends keep the session), flushing the outgoing
@@ -1943,15 +1950,45 @@ FFI-safe `Future` (`FfiPoll` / `FfiContext` / a three-pointer future struct), so
   refused rather than silently dropping an element. Slots are never freed,
   matching the loaded-forever library.
 
+**Detached signatures (M1061).** A host built with the `plugin-signing` feature
+can be handed a set of trusted Ed25519 public keys, from
+`$G2G_PLUGIN_TRUSTED_KEYS` (a `:`-separated list of key files),
+`g2g-inspect --trusted-key`, or `TrustedKeys` in code. An empty set is the
+default and means no verification: signed and unsigned plugins load exactly as
+before. One key or more and every plugin the host loads must carry a sibling
+`<plugin>.sig` verifying under one of them, checked before `dlopen`, so a refusal
+happens with none of the plugin's code run, initialisers included. The `.sig` is
+103 fixed bytes (magic, format version, the signer's 32-byte public key, the
+64-byte signature over the plugin file), with the signer's key present so one
+directory can hold plugins from several signers and an error can name the
+offending one; that key is a selector, not a credential, since it must already be
+in the trust set for its signature to be checked. `ring` supplies the Ed25519,
+the same implementation the TLS stack already links. `g2g-plugin-sign` does
+keygen / sign / verify, writing private keys 0600.
+
+Verifying bytes read from a path and then handing `dlopen` the same path would
+leave a window to swap the file. On Linux the verified bytes are written to a
+`memfd_create` object, sealed against shrink / grow / write / further seals, and
+loaded through `/proc/self/fd/N`, so what runs is what was checked; a plugin's
+`$ORIGIN` rpath then resolves against `/proc/self` rather than its directory,
+which is the price of that closure and applies only on the verified path. Other
+platforms verify and then open the path, with the window left open and documented.
+A trust set that cannot be read (a missing or malformed key file, or keys
+configured in a build without `plugin-signing`) is an error, never a silently
+empty set.
+
 **Security posture of the loader.** It defends against a *malformed* plugin, not
 a *malicious* one, and the difference is worth stating plainly. `dlopen` runs the
 library's initialisers before the loader reads a single field, and a loaded
 plugin shares the host's address space with no boundary at all: it can make any
 syscall the host can, read the host's memory, and ignore every rule in the ABI.
+A signature proves the bytes came from a holder of a trusted key and that they
+did not change afterwards; it says nothing about what those bytes do, so a signed
+malicious plugin is still malicious, and a trusted key that leaks signs anything.
 The capability gate decides whether to load a file and what it may register; it
 cannot constrain what loaded code does. It is policy, not sandboxing. Anything
-stronger (a separate process, seccomp, signature verification) is out of scope
-and deliberately has no half-built stubs. What the loader *does* do is treat
+stronger (a separate process, seccomp) is out of scope and deliberately has no
+half-built stubs. What the loader *does* do is treat
 every byte reachable from the descriptor as untrusted input, on the same rules as
 a bitstream parser: bound every count before using it as a length, null-check
 before dereferencing, UTF-8 check before a byte range becomes a `str`, restrict
@@ -1965,9 +2002,12 @@ threads), so a thread-affine plugin is outside the ABI.
 
 Exercised by `g2g-plugins/tests/plugin_loader_v2.rs` (a Rust plugin built with a
 deliberately mismatched `g2g-core` feature set, which v1 refuses and v2 does not
-care about) and `tests/plugin_c_abi.rs` (a plugin written in C, compiled against
+care about), `tests/plugin_c_abi.rs` (a plugin written in C, compiled against
 the hand-written header, including a `sizeof` comparison of every ABI struct
-against its Rust type so the two cannot drift).
+against its Rust type so the two cannot drift), and
+`tests/m1061_plugin_signing.rs` (the same fixture signed, unsigned, signed by an
+untrusted key, and modified after signing, each case checking that the element
+never reached the registry).
 
 **Hosted Python elements (`pyelement` / `pysrc` / `pyaggregator`, `g2g-python`).**
 A gst-python-ml element shell runs as a first-class g2g element: `g2g-python`
@@ -2005,8 +2045,12 @@ either of two paths:
   the decoder's surface with no PCIe round-trip. The `data` flag is read-only: the
   device memory belongs to the producer and a teed frame shares it under a
   read-only guarantee, with no copy-on-write to fall back on as the System path
-  has. CAI carries no CUDA context, so the pointers are valid only in the context
-  the producer decoded into, exposed as the plane's `cuda_context` property for a
+  has. cupy treats the flag as advisory and aliases anyway; torch's CAI importer
+  refuses a read-only export, so a torch consumer takes the plane's DLPack export
+  instead, which carries the same read-only bit and torch accepts. The flag stays
+  set rather than being cleared to widen torch's CAI path, because the surface is
+  the producer's and the flag is what says so. CAI carries no CUDA context, so
+  the pointers are valid only in the context the producer decoded into, exposed as the plane's `cuda_context` property for a
   consumer that must push it (cupy and torch use the device's primary context).
   Plane lifetime is the call, enforced by a refcount check after it (a retained
   plane, including one a cupy array holds as its base or a consumed DLPack tensor
@@ -2202,12 +2246,25 @@ its `program_number`, under the `event_name` / `event_text` and
 `next_event_name` / `next_event_text` keys (`Tag::Title` on that program is
 already the SDT service name). Unlike the PAT / PMT / SDT this table changes
 during the stream, so a section is read when its `version_number` differs from the
-one last accepted for the same `(service_id, section_number)`, and a table
-repeating itself costs nothing; unlike them a section routinely outgrows one
+one last accepted for the same `(service_id, table_id, section_number)`, and a
+table repeating itself costs nothing; unlike them a section routinely outgrows one
 packet, so sections reassemble across packets behind a `table_id` filter that
-keeps the far larger schedule tables sharing the PID out of the buffer. Event text
-goes through the same annex A decoder as the SDT names, which now also decodes the
-UTF-8 character table.
+keeps the other-transport-stream tables sharing the PID out of the buffer. Event
+text goes through the same annex A decoder as the SDT names, which now also
+decodes the UTF-8 character table.
+
+Each event's timing rides the same tags (M1056): the 5-byte `start_time` (a
+Modified Julian Date and BCD hh:mm:ss, EN 300 468 Annex C) posts as `event_start`
+/ `next_event_start` in seconds since the Unix epoch, UTC, and the BCD `duration`
+as `event_duration` / `next_event_duration` in seconds, each omitted when the
+stream declared the field undefined or encoded it invalidly rather than posting a
+zero. The schedule tables (`table_id` 0x50..=0x5F) parse too, into a separate
+bounded queue the demuxers drain (`TsDemuxer::take_eit_schedule`): a schedule
+section names days of events rather than the two present/following holds, so each
+event posts as its own `BusMessage::Tag` under the `schedule_event_id` /
+`schedule_event_name` / `schedule_event_text` / `schedule_event_start` /
+`schedule_event_duration` keys, which is what lets a consumer building an EPG tell
+whose start time is whose.
 
 The TS stack also carries KLV metadata (STANAG 4609, the airborne-ISR profile of
 MPEG-TS): `Caps::Klv` is the metadata elementary-stream caps (GStreamer
@@ -2894,7 +2951,22 @@ the shaped path only: a `vertical:rl` / `lr` cue on the `ab_glyph` column
 renderer keeps the element's own `font-variations=` weight. An underline is a
 filled bar in the run's text colour, drawn in the glyph layer so a neighbour's
 shadow stays under it, below the baseline horizontally and down the column's
-right edge vertically. Sizes and offsets
+right edge vertically. `-webkit-text-stroke` (shorthand and longhands, the
+unprefixed spelling too) is a dilation of the same coverage mask the shadow
+blits: the mask goes down in the stroke colour at every integer offset inside
+the stroke radius, over the shadows and under the fills, which the Vello backend
+draws as one glyph run per offset. `font-family` reaches the shaped path as a
+cosmic-text `Attrs::family` (the CSS generic names map to `Family::Serif` and
+its siblings, any other name is queried by name); the `ab_glyph` column renderer
+has one loaded face and ignores it. Selectors also cover the cue-text element
+names: `::cue(b)`, `::cue(i)`, `::cue(u)`, `::cue(c)`, `::cue(v)`,
+`::cue(ruby)` and `::cue(rt)` match a run by its enclosing tag, scoring below
+any class per CSS specificity; a compound like `::cue(b.loud)` is not supported
+and its rule is dropped. `<ruby>base<rt>annotation</rt></ruby>` takes the `rt`
+text out of the line flow into a `RubyRun` carrying the base run's byte range,
+which both renderers draw at half the cue size centred over that range's
+horizontal extent, or beside the base column in a vertical cue (right of it for
+`vertical:rl`), so the base keeps the baseline it would have had alone. Sizes and offsets
 are clamped at parse time, because a stylesheet is as untrusted as the rest of
 the subtitle file and the size becomes a glyph raster.
 
@@ -4429,16 +4501,66 @@ picture. Two pieces, both `no_std`-friendly:
   `bytesperline`) has to repack them row by row. `WgpuCompositor` asks
   `wants::<PlaneLayout>()` when the cascade configures its output: when a
   consumer downstream requested one it hands over the canvas as the GPU wrote it
-  and declares the pitch, and the per-frame repack disappears. `VideoConvert` is
-  that consumer: it requests the layout and reads a packed RGBA / BGRA input's
-  rows where they lie (a padded planar input it packs out first, which is correct
-  and costs what the producer skipped). It is the `EveryConsumer` request the
+  and declares the pitch, and the per-frame repack disappears. `V4l2Src`,
+  `PipeWireVideoSrc` and `VaapiDec` ask the same question of the same cascade:
+  the capture sources hand over the driver's / daemon's mapped buffer at its
+  `bytesperline`, deriving each later plane's stride from plane 0's (the same
+  pitch for NV12's interleaved chroma, half of it for I420's), and the VAAPI
+  decoder copies the surface out at its own `y_pitch` / `uv_pitch` in one pass
+  per plane rather than row by row. A frame in a dma-buf carries the layout
+  whether or not anyone asked, since its rows sit at the producer's pitch either
+  way and a consumer that maps the buffer has no other way to find them.
+  `VideoConvert` is that consumer: it requests the layout and reads a packed
+  RGBA / BGRA input's rows where they lie (a padded planar input it packs out
+  first, which is correct and costs what the producer skipped). It is the `EveryConsumer` request the
   policy above exists for: `VideoConvert` asks with
   `request_from_every_consumer`, so any consumer or hop that would take the
   padded rows for tightly packed ones vetoes the padding and the producer repacks
   as it always did. The meta is dropped by every `meta_transform`, since an
   element only declares one when it writes a new buffer; a tee's clone shares the
   described buffer and keeps it.
+- **The turn that was never applied (`OrientationMeta`).** One member of
+  `Orientation`, the dihedral group of the square (four rotations, four mirrors,
+  with `compose` / `inverse` / `swaps_dims`), saying how the buffer as stored has
+  to be turned to be shown the right way up. It exists so a rotation upstream of
+  a display sink that can turn a picture for free does not have to remap every
+  pixel. The turn is relative to the buffer, so a consumer working in display
+  coordinates applies it itself; it survives a scale or a colour convert
+  (`Propagation::Keep`) and dies under a crop, whose rectangle is chosen in the
+  coordinates the turn has not been applied to yet.
+
+  A sink that can apply it says so with `AsyncElement::absorbs_orientation`, and
+  each runner's sink arm sends `Reconfigure::AbsorbOrientation` up that sink's
+  input link while the arms are still being wired, before any frame is pulled.
+  The advertisement travels the reverse channel the same way a keyframe request
+  does, but the relay decision is per variant (`ReconfigureAnswered`): a
+  transform relays it toward the source unless `handles_orientation` says it
+  answers the signal itself. `VideoFlip` answers it (it is the element the
+  advertisement is aimed at) and `VideoCrop` answers it to stop it (a crop
+  rectangle means something else once the picture is turned). Relaying costs one
+  push per hop, so a transform between the flip and the sink delays the switch by
+  the frames already in flight; nothing is lost, they arrive rotated.
+
+  `VideoFlip` sees the advertisement as `PushOutcome::Reconfigure` from its own
+  push. The pre-send check holds that packet back rather than enqueuing it, so
+  the flip re-announces the output caps (now the input's, no dimension swap) and
+  sends the packet again as a descriptor: the buffer goes through in the same
+  memory domain with `OrientationMeta` attached, composed with any turn already
+  on the input. Negotiation still solves for the swapped shape, which the runtime
+  `CapsChanged` corrects on the mid-stream re-solve path. Two rules follow from
+  the hold-back: a `Reconfigure::AbsorbOrientation` only ever surfaces from the
+  pre-send check (a post-send one is held for the next push, or the producer
+  would resend a packet that already crossed), and an `Eos` is never held back at
+  all, since nothing sends one twice.
+
+  `WaylandSink` is the sink that absorbs today: it maps the descriptor to a
+  `wl_surface::set_buffer_transform` argument, re-issued only when the turn
+  changes, and swaps the window's size hint for a turn that transposes the
+  picture (the buffer and its damage stay in buffer coordinates). The argument is
+  the *inverse* of the descriptor, because `set_buffer_transform` names the
+  transform already applied to the buffer and the compositor applies its inverse.
+  `KmsSink` / `CudaKmsSink` do not advertise, so a flip in front of them keeps
+  realizing the rotation.
 - **The overlay.** The visible end of the detector chain reads the
   `AnalyticsMeta` carried onto the *display* frame (via the fan-out path) and
   draws it, so `decode -> tee -> {detect, video} -> overlay -> display`

@@ -142,7 +142,7 @@ fn shadow_alpha(px: &[u8]) -> u8 {
 fn shadow_rings(pixels: &[u8], core: (u32, u32, u32, u32)) -> (usize, Vec<u8>) {
     let (left, top, right, bottom) = core;
     let mut rings = vec![0u8; SHADOW_BLUR as usize * 3 + 2];
-    for (i, px) in pixels.chunks_exact(4).enumerate() {
+    for (i, px) in pixels.as_chunks::<4>().0.iter().enumerate() {
         let (x, y) = (i as u32 % W, i as u32 / W);
         let outside = [
             left.saturating_sub(x),
@@ -178,7 +178,7 @@ fn shadow_document(blur: &str) -> String {
 /// inclusive on every edge. `None` when it accepted none.
 fn bounds(pixels: &[u8], pick: fn(&[u8]) -> bool) -> Option<(u32, u32, u32, u32)> {
     let mut found: Option<(u32, u32, u32, u32)> = None;
-    for (i, px) in pixels.chunks_exact(4).enumerate() {
+    for (i, px) in pixels.as_chunks::<4>().0.iter().enumerate() {
         if !pick(px) {
             continue;
         }
@@ -192,7 +192,12 @@ fn bounds(pixels: &[u8], pick: fn(&[u8]) -> bool) -> Option<(u32, u32, u32, u32)
 }
 
 fn count(pixels: &[u8], pick: fn(&[u8]) -> bool) -> usize {
-    pixels.chunks_exact(4).filter(|px| pick(px)).count()
+    pixels
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .filter(|px| pick(*px))
+        .count()
 }
 
 fn height_of(pixels: &[u8], pick: fn(&[u8]) -> bool) -> u32 {

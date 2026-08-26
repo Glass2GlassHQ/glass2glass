@@ -17,7 +17,7 @@ use crate::frame::PipelinePacket;
 use crate::memory::{DomainSet, MemoryDomainKind};
 use crate::property::{ElementMetadata, PropError, PropValue, PropertySpec};
 use crate::query::{AllocationParams, LatencyReport};
-use crate::runtime::channel::{link, SenderSink};
+use crate::runtime::channel::{advertise_orientation, link, ReconfigureAnswered, SenderSink};
 #[cfg(feature = "std")]
 use crate::runtime::coordinator::realloc_local_dyn;
 use crate::runtime::coordinator::{
@@ -727,6 +727,7 @@ where
     }
 
     let (link_tx, link_rx) = link(link_capacity);
+    advertise_orientation(&link_rx, AsyncElement::absorbs_orientation(sink));
 
     let source_fut = async move {
         let mut adapter = SenderSink::new(link_tx);
@@ -2173,6 +2174,7 @@ where
 
     let (link1_tx, link1_rx) = link(link_capacity);
     let (link2_tx, link2_rx) = link(link_capacity);
+    advertise_orientation(&link2_rx, AsyncElement::absorbs_orientation(sink));
 
     // M18 β: a single coordinator task owns the cross-element re-cascade.
     // The sink arm reports an applied mid-stream `CapsChanged` (with its
@@ -2226,9 +2228,13 @@ where
         if !transform.handles_qos() {
             adapter.relay_qos_to(link1_rx.qos_slot());
         }
-        if !transform.handles_keyframe_requests() {
-            adapter.relay_reconfigure_to(link1_rx.reconfigure_slot());
-        }
+        adapter.relay_reconfigure_to(
+            link1_rx.reconfigure_slot(),
+            ReconfigureAnswered {
+                keyframe: transform.handles_keyframe_requests(),
+                orientation: transform.handles_orientation(),
+            },
+        );
         if !transform.handles_bitrate_requests() {
             adapter.relay_bitrate_to(link1_rx.bitrate_slot());
         }

@@ -157,8 +157,9 @@ enum Ctrl {
 enum FromWorker {
     /// The negotiated format, sent on every change (so before the first frame).
     Format(VideoInfo),
-    /// One tightly packed frame, copied out of a mapped buffer.
-    Frame(Vec<u8>),
+    /// One frame copied out of a mapped buffer, and the row pitch it carries.
+    /// A pitch of 0 means the rows were packed tight on the way out.
+    Frame { bytes: Vec<u8>, first_stride: usize },
     /// One frame still in the producer's dma-buf. The loop thread keeps a share of
     /// its own and recycles the buffer once this one is dropped.
     DmaBuf(OwnedDmaBuf),
@@ -206,6 +207,9 @@ pub struct PipeWireVideoSrc {
     portal_restore_token: String,
     #[cfg(feature = "portal")]
     portal_timeout_secs: u64,
+    /// Whether a consumer asked where the rows are (M1059), so a padded mapped
+    /// buffer travels as it is instead of being packed tight.
+    keep_row_padding: bool,
     configured: bool,
 }
 
@@ -234,6 +238,7 @@ impl PipeWireVideoSrc {
             portal_restore_token: String::new(),
             #[cfg(feature = "portal")]
             portal_timeout_secs: DEFAULT_PORTAL_TIMEOUT_SECS,
+            keep_row_padding: false,
             configured: false,
         }
     }
@@ -604,6 +609,18 @@ impl SourceLoop for PipeWireVideoSrc {
         }
     }
 
+    /// M1059: a producer whose rows are padded normally has them packed tight
+    /// on the way out of a mapped buffer. A consumer that asked for a
+    /// `PlaneLayout` reads rows where they lie, so that copy can go.
+    fn configure_allocation(&mut self, params: &g2g_core::AllocationParams) {
+        #[cfg(feature = "metadata")]
+        {
+            self.keep_row_padding = params.meta_requests.wants::<g2g_core::meta::PlaneLayout>();
+        }
+        #[cfg(not(feature = "metadata"))]
+        let _ = params;
+    }
+
     /// Live source: contributes one frame period so the sink keeps a frame in
     /// hand and never runs dry waiting on capture (same as `V4l2Src`).
     fn latency(&self) -> LatencyReport {
@@ -633,7 +650,10 @@ impl SourceLoop for PipeWireVideoSrc {
             )?;
             let target = self.target.clone();
             let limit = self.frame_limit;
-            let io_mode = self.io_mode;
+            let policy = BufferPolicy {
+                io_mode: self.io_mode,
+                keep_row_padding: self.keep_row_padding,
+            };
             #[cfg(feature = "portal")]
             let portal: PortalSetup = self.portal_request();
             #[cfg(not(feature = "portal"))]
@@ -649,7 +669,7 @@ impl SourceLoop for PipeWireVideoSrc {
             let handle = std::thread::Builder::new()
                 .name(String::from("g2g-pipewirevideosrc"))
                 .spawn(move || {
-                    match build_and_run(&target, &pod, io_mode, portal, tx, ctrl_rx, &ready_tx) {
+                    match build_and_run(&target, &pod, policy, portal, tx, ctrl_rx, &ready_tx) {
                         Ok(()) => {}
                         Err(code) => {
                             let _ = ready_tx.send(Err(code));
@@ -690,18 +710,24 @@ impl SourceLoop for PipeWireVideoSrc {
             let mut pts = 0u64;
             let mut downstream_open = true;
             let mut failure = None;
+            // The format the frames arriving now are in, so a padded frame can
+            // say where its rows are.
+            let mut current_format: Option<VideoInfo> = None;
 
             while seq < limit {
                 let Some(msg) = rx.recv().await else {
                     break; // worker ended
                 };
-                let domain = match msg {
+                // The domain the frame travels in, plus where plane 0 starts in
+                // its buffer and how far apart the rows are (0 means tight).
+                let (domain, plane0_offset, first_stride) = match msg {
                     FromWorker::Failed(e) => {
                         failure = Some(e);
                         break;
                     }
                     FromWorker::Format(info) => {
                         period_ns = info.frame_period_ns();
+                        current_format = Some(info);
                         let caps = info.caps();
                         if caps != advertised {
                             if out
@@ -716,13 +742,25 @@ impl SourceLoop for PipeWireVideoSrc {
                         }
                         continue;
                     }
-                    FromWorker::Frame(bytes) => {
-                        MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice()))
+                    FromWorker::Frame {
+                        bytes,
+                        first_stride,
+                    } => (
+                        MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
+                        0,
+                        first_stride,
+                    ),
+                    // The producer's own buffer, so its rows sit at the
+                    // producer's pitch whether or not anybody asked: a consumer
+                    // that maps it reads them off the frame instead of the
+                    // domain type.
+                    FromWorker::DmaBuf(dmabuf) => {
+                        let (offset, stride) = (dmabuf.offset as usize, dmabuf.stride as usize);
+                        (MemoryDomain::DmaBuf(dmabuf), offset, stride)
                     }
-                    FromWorker::DmaBuf(dmabuf) => MemoryDomain::DmaBuf(dmabuf),
                 };
                 let arrival_ns = g2g_core::metrics::monotonic_ns();
-                let frame = Frame {
+                let mut frame = Frame {
                     domain,
                     timing: FrameTiming {
                         pts_ns: pts,
@@ -736,6 +774,16 @@ impl SourceLoop for PipeWireVideoSrc {
                     sequence: seq,
                     meta: Default::default(),
                 };
+                if let Some(info) = current_format.as_ref() {
+                    crate::paddedrows::declare_padded_rows(
+                        &mut frame,
+                        info.format,
+                        info.width as usize,
+                        info.height as usize,
+                        plane0_offset,
+                        first_stride,
+                    );
+                }
                 if out.push(PipelinePacket::DataFrame(frame)).await.is_err() {
                     downstream_open = false;
                     break;
@@ -873,17 +921,27 @@ struct HeldBuffer {
 /// allowed to touch the stream's buffer queues.
 type HeldBuffers = Rc<RefCell<Vec<HeldBuffer>>>;
 
+/// How the worker turns a dequeued buffer into a frame: which buffer type the
+/// stream negotiates, and whether a padded mapped buffer goes out as it is.
+#[derive(Debug, Clone, Copy)]
+struct BufferPolicy {
+    io_mode: IoMode,
+    /// Whether a consumer asked where the rows are, so a padded mapped buffer
+    /// goes out as it is instead of being packed tight.
+    keep_row_padding: bool,
+}
+
 struct UserData {
     negotiated: Option<Negotiated>,
     tx: tokio::sync::mpsc::UnboundedSender<FromWorker>,
-    io_mode: IoMode,
+    policy: BufferPolicy,
     held: HeldBuffers,
 }
 
 fn build_and_run(
     target: &str,
     pod: &[u8],
-    io_mode: IoMode,
+    policy: BufferPolicy,
     portal: PortalSetup,
     tx: tokio::sync::mpsc::UnboundedSender<FromWorker>,
     ctrl_rx: pw::channel::Receiver<Ctrl>,
@@ -937,7 +995,7 @@ fn build_and_run(
     let user_data = UserData {
         negotiated: None,
         tx,
-        io_mode,
+        policy,
         held: Rc::clone(&held),
     };
 
@@ -978,7 +1036,7 @@ fn build_and_run(
                     user_data.negotiated = Some(Negotiated { info, layout });
                     // The buffers are allocated after this callback, so this is
                     // where the dma-buf demand has to be announced.
-                    if user_data.io_mode == IoMode::DmaBuf {
+                    if user_data.policy.io_mode == IoMode::DmaBuf {
                         let bytes = dmabuf_buffers_pod_bytes();
                         if let Some(pod) = spa::pod::Pod::from_bytes(&bytes) {
                             let _ = stream.update_params(&mut [pod]);
@@ -994,7 +1052,7 @@ fn build_and_run(
                 }
             }
         })
-        .process(|stream, user_data| match user_data.io_mode {
+        .process(|stream, user_data| match user_data.policy.io_mode {
             IoMode::MemoryMap => copy_mapped_frame(stream, user_data),
             IoMode::DmaBuf => share_dmabuf_frame(stream, user_data),
         })
@@ -1004,7 +1062,7 @@ fn build_and_run(
     // The dma-buf path holds buffers, so it must not run `process` on the realtime
     // thread: the dequeue and the recycling below have to share one thread. It also
     // wants no mapping (`MAP_BUFFERS` skips dma-buf anyway).
-    let flags = match io_mode {
+    let flags = match policy.io_mode {
         IoMode::MemoryMap => {
             pw::stream::StreamFlags::AUTOCONNECT
                 | pw::stream::StreamFlags::MAP_BUFFERS
@@ -1025,7 +1083,7 @@ fn build_and_run(
     // `process` only runs when the producer has a buffer to fill, so a stream whose
     // buffers are all downstream would never be called again: recycle on a timer
     // too, or a slow consumer stalls the capture for good.
-    let _recycle_timer = match io_mode {
+    let _recycle_timer = match policy.io_mode {
         IoMode::MemoryMap => None,
         IoMode::DmaBuf => {
             let recycle_stream = Rc::clone(&stream);
@@ -1053,7 +1111,28 @@ fn build_and_run(
     Ok(())
 }
 
-/// Copy one mapped buffer out, tightly packed: the `mmap` path's frame.
+/// The bytes one mapped chunk hands downstream and the row pitch they carry:
+/// the producer's rows where they lie when a consumer asked for a
+/// `PlaneLayout`, packed tight otherwise. `None` when the chunk disagrees with
+/// the negotiated geometry.
+fn take_mapped_rows(
+    src: &[u8],
+    info: &VideoInfo,
+    layout: &PlaneLayout,
+    stride: usize,
+    keep_row_padding: bool,
+) -> Option<(Vec<u8>, usize)> {
+    let (w, h) = (info.width as usize, info.height as usize);
+    if keep_row_padding && stride > crate::pixel::row_bytes(info.format, w) {
+        let needed = crate::paddedrows::padded_frame_bytes(info.format, w, h, 0, stride)?;
+        return (src.len() >= needed).then(|| (src.to_vec(), stride));
+    }
+    let mut packed = Vec::with_capacity(layout.frame_bytes());
+    layout.copy_tight(src, stride, &mut packed)?;
+    Some((packed, 0))
+}
+
+/// Copy one mapped buffer out: the `mmap` path's frame.
 fn copy_mapped_frame(stream: &pw::stream::StreamRef, user_data: &mut UserData) {
     let Some(negotiated) = user_data.negotiated.as_ref() else {
         return; // no usable format: drop the buffer rather than guess
@@ -1085,13 +1164,18 @@ fn copy_mapped_frame(stream: &pw::stream::StreamRef, user_data: &mut UserData) {
     let fits = offset
         .checked_add(size)
         .is_some_and(|end| end <= mapped.len());
-    let mut frame = Vec::with_capacity(negotiated.layout.frame_bytes());
-    if !fits
-        || negotiated
-            .layout
-            .copy_tight(&mapped[offset..offset + size], stride, &mut frame)
-            .is_none()
-    {
+    let taken = fits
+        .then(|| {
+            take_mapped_rows(
+                &mapped[offset..offset + size],
+                &negotiated.info,
+                &negotiated.layout,
+                stride,
+                user_data.policy.keep_row_padding,
+            )
+        })
+        .flatten();
+    let Some((bytes, first_stride)) = taken else {
         // The buffer disagrees with the negotiated geometry: fail the
         // capture instead of pushing a malformed frame downstream.
         let _ = user_data
@@ -1099,8 +1183,11 @@ fn copy_mapped_frame(stream: &pw::stream::StreamRef, user_data: &mut UserData) {
             .send(FromWorker::Failed(G2gError::CapsMismatch));
         user_data.negotiated = None;
         return;
-    }
-    let _ = user_data.tx.send(FromWorker::Frame(frame));
+    };
+    let _ = user_data.tx.send(FromWorker::Frame {
+        bytes,
+        first_stride,
+    });
 }
 
 /// Share one dma-buf buffer downstream and hold it until every share of the frame
@@ -1236,6 +1323,79 @@ fn parse_format(param: &spa::pod::Pod) -> Result<VideoInfo, G2gError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A 4x2 BGRA frame the daemon wrote at a 24-byte pitch: 16 bytes of picture
+    /// and 8 of padding per row. Returned padded, then tight.
+    fn padded_bgra() -> (Vec<u8>, Vec<u8>) {
+        let mut padded = Vec::new();
+        let mut tight = Vec::new();
+        for row in 0..2u8 {
+            let picture: Vec<u8> = (0..16).map(|i| row * 16 + i).collect();
+            tight.extend_from_slice(&picture);
+            padded.extend_from_slice(&picture);
+            padded.extend_from_slice(&[0xff; 8]);
+        }
+        (padded, tight)
+    }
+
+    fn bgra_info() -> VideoInfo {
+        VideoInfo {
+            format: RawVideoFormat::Bgra8,
+            width: 4,
+            height: 2,
+            fps_num: 30,
+            fps_denom: 1,
+        }
+    }
+
+    /// M1059: a mapped chunk is packed tight on the way out, unless a consumer
+    /// asked to read the rows where the daemon left them.
+    #[test]
+    fn a_mapped_chunk_is_packed_unless_a_consumer_asked_for_its_pitch() {
+        let (padded, tight) = padded_bgra();
+        let info = bgra_info();
+        let layout = PlaneLayout::new(info.format, info.width, info.height).expect("a layout");
+
+        let (bytes, stride) =
+            take_mapped_rows(&padded, &info, &layout, 24, false).expect("the chunk holds a frame");
+        assert_eq!(bytes, tight);
+        assert_eq!(stride, 0, "packed rows carry no pitch");
+
+        let (bytes, stride) =
+            take_mapped_rows(&padded, &info, &layout, 24, true).expect("the chunk holds a frame");
+        assert_eq!(bytes, padded, "the daemon's rows travel untouched");
+        assert_eq!(stride, 24);
+    }
+
+    /// Rows that are already tight have nothing to declare, so the demand
+    /// changes nothing about them.
+    #[test]
+    fn tight_rows_are_handed_over_the_same_either_way() {
+        let (_, tight) = padded_bgra();
+        let info = bgra_info();
+        let layout = PlaneLayout::new(info.format, info.width, info.height).expect("a layout");
+        for requested in [false, true] {
+            assert_eq!(
+                take_mapped_rows(&tight, &info, &layout, 16, requested),
+                Some((tight.clone(), 0))
+            );
+        }
+    }
+
+    /// A chunk shorter than the frame its pitch claims fails the capture rather
+    /// than handing downstream a buffer that reads out of bounds.
+    #[test]
+    fn a_chunk_short_of_the_frame_is_rejected() {
+        let (padded, _) = padded_bgra();
+        let info = bgra_info();
+        let layout = PlaneLayout::new(info.format, info.width, info.height).expect("a layout");
+        for requested in [false, true] {
+            assert_eq!(
+                take_mapped_rows(&padded[..39], &info, &layout, 24, requested),
+                None
+            );
+        }
+    }
 
     #[test]
     fn builders_set_requested_config() {

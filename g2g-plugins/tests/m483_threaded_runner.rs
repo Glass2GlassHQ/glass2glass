@@ -7,13 +7,14 @@
 
 use std::collections::BTreeSet;
 
+use g2g_core::meta::Orientation;
 use g2g_core::runtime::{
     parse_launch, run_graph, run_graph_threaded, run_graph_threaded_with_bus, run_graph_with_bus,
     LaunchFactory, Registry, SourceFactory, ThreadSpawner,
 };
 use g2g_core::{Bus, BusMessage, Caps, Dim, PipelineClock, Rate, RawVideoFormat};
 use g2g_plugins::fakesink::FakeSink;
-use g2g_plugins::videoflip::{FlipMethod, VideoFlip};
+use g2g_plugins::videoflip::VideoFlip;
 use g2g_plugins::videorate::VideoRate;
 use g2g_plugins::videotestsrc::VideoTestSrc;
 use g2g_plugins::TokioThreadSpawner;
@@ -41,7 +42,7 @@ fn registry() -> Registry {
         Box::new(VideoTestSrc::new(64, 48, 30, 0))
     }));
     reg.register_launch(LaunchFactory::of::<VideoFlip>("videoflip", || {
-        Box::new(VideoFlip::new(FlipMethod::HorizontalMirror))
+        Box::new(VideoFlip::new(Orientation::HorizontalMirror))
     }));
     reg.register_launch(LaunchFactory::new("videorate", Vec::new(), || {
         Box::new(VideoRate::new(30.0))

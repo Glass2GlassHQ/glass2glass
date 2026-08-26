@@ -2760,10 +2760,12 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "std")]
     fn named_sink(name: &'static str) -> LaunchFactory {
         LaunchFactory::new(name, Vec::new(), || alloc::boxed::Box::new(Dummy))
     }
 
+    #[cfg(feature = "std")]
     #[test]
     fn an_alias_falls_past_a_target_that_cannot_run_here() {
         let mut reg = Registry::new();
@@ -2778,6 +2780,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "std")]
     #[test]
     fn an_alias_takes_the_first_target_that_can_run_here() {
         let mut reg = Registry::new();
@@ -2788,6 +2791,7 @@ mod tests {
         assert_eq!(reg.resolve_alias("autosink"), "displaysink");
     }
 
+    #[cfg(feature = "std")]
     #[test]
     fn a_target_declaring_no_check_stays_usable() {
         let mut reg = Registry::new();

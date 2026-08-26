@@ -252,8 +252,10 @@ async fn nnapi_claims_the_classifier() {
     // The uint8 input TensorConvert::quantize would produce.
     let f32_bytes = read_input_f32_bytes();
     let floats: Vec<f32> = f32_bytes
-        .chunks_exact(4)
-        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| f32::from_le_bytes(*c))
         .collect();
     let u8_input = quantize_f32(&floats, TensorDType::U8, scale, zp).expect("quantize to u8");
 

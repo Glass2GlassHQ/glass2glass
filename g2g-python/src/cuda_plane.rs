@@ -44,6 +44,8 @@ const CAI_VERSION: u32 = 3;
 /// copy-on-write to fall back on here, so a plane is exported read-only. cupy
 /// treats the flag as advisory and aliases anyway; torch's CAI importer refuses
 /// a read-only export outright, so a torch consumer takes the DLPack path.
+/// Clearing the flag to widen torch's CAI path would be a false declaration
+/// about a surface the element still owns, so it stays set.
 const PLANE_READ_ONLY: bool = true;
 
 /// DLPack, as the `dlpack.h` the installed consumers bundle defines it (v1.0;

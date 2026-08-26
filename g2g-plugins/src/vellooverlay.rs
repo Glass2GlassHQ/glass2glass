@@ -57,7 +57,7 @@ use vello::Glyph;
 #[cfg(feature = "vello-text-overlay")]
 use crate::subparse::{Cue, TextShadow};
 #[cfg(feature = "vello-text-overlay")]
-use crate::textoverlay::{PlacedGlyph, TextOverlay};
+use crate::textoverlay::{stroke_offsets, PlacedGlyph, TextOverlay};
 #[cfg(feature = "vello-text-overlay")]
 use crate::textshape::FontId;
 
@@ -699,9 +699,10 @@ impl VelloTextOverlay {
             for (rect, color) in &cue.span_backgrounds {
                 fill_rect(scene, *rect, *color);
             }
-            // Shadows first, then the underline bars and the glyphs over them.
-            for drawing_shadows in [true, false] {
-                if !drawing_shadows {
+            // Shadows first, then the outlines, then the underline bars and
+            // the glyph fills over them.
+            for layer in [GlyphLayer::Shadow, GlyphLayer::Stroke, GlyphLayer::Fill] {
+                if layer == GlyphLayer::Fill {
                     for (rect, color) in &cue.underlines {
                         fill_rect(scene, *rect, *color);
                     }
@@ -709,8 +710,8 @@ impl VelloTextOverlay {
                 let mut start = 0;
                 while start < cue.glyphs.len() {
                     let head = &cue.glyphs[start];
-                    let (font_id, size, shadow) = (head.key.font_id, head.font_size, head.shadow);
-                    let color = head.color;
+                    let (font_id, size) = (head.key.font_id, head.font_size);
+                    let (shadow, stroke, color) = (head.shadow, head.stroke, head.color);
                     let end = cue.glyphs[start..]
                         .iter()
                         .position(|g| {
@@ -718,33 +719,52 @@ impl VelloTextOverlay {
                                 || g.color != color
                                 || g.font_size != size
                                 || g.shadow != shadow
+                                || g.stroke != stroke
                         })
                         .map_or(cue.glyphs.len(), |n| start + n);
                     let batch = &cue.glyphs[start..end];
                     start = end;
-                    let (offset, brush) = match (drawing_shadows, shadow) {
-                        // Vello has no filter that blurs a glyph run, so a
-                        // blurred shadow goes down as one tinted mask image per
-                        // glyph, blurred by the same code as the CPU paths.
-                        (true, Some(shadow)) if shadow.blur > 0 => {
-                            for glyph in batch {
-                                draw_blurred_shadow(scene, &mut self.text, glyph, shadow);
+                    // Each copy of the run this layer puts down: where it goes
+                    // and what it is drawn in.
+                    let copies: Vec<((f32, f32), [u8; 4])> = match layer {
+                        GlyphLayer::Shadow => match shadow {
+                            // Vello has no filter that blurs a glyph run, so a
+                            // blurred shadow goes down as one tinted mask image
+                            // per glyph, blurred by the same code as the CPU
+                            // paths.
+                            Some(shadow) if shadow.blur > 0 => {
+                                for glyph in batch {
+                                    draw_blurred_shadow(scene, &mut self.text, glyph, shadow);
+                                }
+                                continue;
                             }
-                            continue;
-                        }
-                        (true, Some(shadow)) => (
-                            (shadow.offset_x as f32, shadow.offset_y as f32),
-                            shadow.color,
-                        ),
-                        (true, None) => continue,
-                        (false, _) => ((0.0, 0.0), color),
+                            Some(shadow) => alloc::vec![(
+                                (shadow.offset_x as f32, shadow.offset_y as f32),
+                                shadow.color
+                            )],
+                            None => continue,
+                        },
+                        // The outline is the run drawn once per offset inside
+                        // the stroke radius, the same dilation the CPU paths do
+                        // on the coverage mask.
+                        GlyphLayer::Stroke => match stroke {
+                            Some(stroke) => stroke_offsets(stroke.width_px)
+                                .into_iter()
+                                .map(|(dx, dy)| ((dx as f32, dy as f32), stroke.color))
+                                .collect(),
+                            None => continue,
+                        },
+                        GlyphLayer::Fill => alloc::vec![((0.0, 0.0), color)],
                     };
-                    let run = batch.iter().map(|g| Glyph {
-                        id: g.key.glyph_id as u32,
-                        x: g.x as f32 + offset.0,
-                        y: g.y as f32 + offset.1,
-                    });
-                    if let Some(font) = font_handle(&mut self.fonts, &mut self.text, font_id) {
+                    let Some(font) = font_handle(&mut self.fonts, &mut self.text, font_id) else {
+                        continue;
+                    };
+                    for (offset, brush) in copies {
+                        let run = batch.iter().map(|g| Glyph {
+                            id: g.key.glyph_id as u32,
+                            x: g.x as f32 + offset.0,
+                            y: g.y as f32 + offset.1,
+                        });
                         scene
                             .draw_glyphs(font)
                             .font_size(size)
@@ -755,6 +775,16 @@ impl VelloTextOverlay {
             }
         }
     }
+}
+
+/// Which pass over a cue's glyphs is being drawn: the shadow copies under
+/// everything, the outline copies over them, then the fills on top.
+#[cfg(feature = "vello-text-overlay")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GlyphLayer {
+    Shadow,
+    Stroke,
+    Fill,
 }
 
 /// Draw one glyph's blurred drop shadow as an image: the blurred coverage mask

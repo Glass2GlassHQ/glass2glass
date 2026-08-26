@@ -222,7 +222,9 @@ async fn nvdec_frames_reach_the_wgpu_sink_on_the_gpu() {
     let pixels = pixels.lock().unwrap();
     assert_eq!(pixels.len(), (WIDTH * HEIGHT * 4) as usize);
     let lit = pixels
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .filter(|px| px[0] > 16 || px[1] > 16 || px[2] > 16)
         .count();
     assert!(

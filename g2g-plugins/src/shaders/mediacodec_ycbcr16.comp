@@ -20,8 +20,13 @@ layout(local_size_x = 8, local_size_y = 8) in;
 layout(set = 0, binding = 0) uniform sampler2D ycbcrTex;
 layout(set = 0, binding = 1, rgba16f) uniform writeonly image2D outImg;
 
+// `srcWidth` / `srcHeight` are the sampled image's extent, which can exceed the
+// output extent when the decoder rounded the picture up to the device's picture
+// access granularity. A ycbcr sampler forbids textureSize, so the size is pushed.
 layout(push_constant) uniform Pc {
     uint xfer; // 0 passthrough, 1 PQ, 2 HLG
+    uint srcWidth;
+    uint srcHeight;
 } pc;
 
 // Source mastering peak and SDR target peak in nits (no mastering metadata is
@@ -126,7 +131,7 @@ void main() {
     if (p.x >= sz.x || p.y >= sz.y) {
         return;
     }
-    vec2 uv = (vec2(p) + 0.5) / vec2(sz);
+    vec2 uv = (vec2(p) + 0.5) / vec2(pc.srcWidth, pc.srcHeight);
     vec3 rgb = textureLod(ycbcrTex, uv, 0.0).rgb;
     if (pc.xfer != 0u) {
         rgb = tonemap_hdr(rgb);

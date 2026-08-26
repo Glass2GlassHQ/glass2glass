@@ -8,6 +8,7 @@
 use core::future::Future;
 use core::pin::Pin;
 
+use g2g_core::meta::Orientation;
 use g2g_core::runtime::{run_graph, GraphNode};
 use g2g_core::{
     AsyncElement, Bin, Caps, CapsConstraint, ConfigureOutcome, G2gError, Graph, OutputSink,
@@ -15,7 +16,7 @@ use g2g_core::{
 };
 use g2g_plugins::identity::IdentityTransform;
 use g2g_plugins::videocrop::VideoCrop;
-use g2g_plugins::videoflip::{FlipMethod, VideoFlip};
+use g2g_plugins::videoflip::VideoFlip;
 use g2g_plugins::videotestsrc::VideoTestSrc;
 
 struct NullClock;
@@ -62,7 +63,7 @@ async fn flattened_bin_runs_source_to_sink() {
     // A bin wrapping flip -> crop, exposing flip's input and crop's output as
     // ghost pads, sits between a source and a sink: src -> [bin] -> sink.
     let mut bin: Bin<GraphNode> = Bin::new();
-    let flip = bin.add_transform(GraphNode::element(VideoFlip::new(FlipMethod::Rotate180)));
+    let flip = bin.add_transform(GraphNode::element(VideoFlip::new(Orientation::Rotate180)));
     let crop = bin.add_transform(GraphNode::element(VideoCrop::new(0, 4, 0, 4)));
     bin.link(flip, crop).unwrap();
     bin.ghost_input(flip).unwrap();

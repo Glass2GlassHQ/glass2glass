@@ -38,9 +38,14 @@ pub(crate) fn fuzz_block_on<F: core::future::Future>(f: F) -> F::Output {
 }
 
 pub mod aacparse;
+// IMA ADPCM codec elements (M1073), wrapping the heap-free `g2g-mcu` block math.
+pub mod adpcm;
 // Native FLAC stream parser (M774): frame-splits a `.flac` byte stream (the
 // re-framing `h264parse` analog for audio) and refines caps from STREAMINFO.
 pub mod flacparse;
+// G.711 (mu-law / A-law) codec elements (M1073), wrapping the heap-free
+// `g2g-mcu` companding math.
+pub mod g711;
 
 pub mod appsink;
 pub mod appsrc;
@@ -49,6 +54,7 @@ pub mod audioconvert;
 pub mod audioecho;
 pub mod audiomixer;
 pub mod audiopanorama;
+pub mod audiorate;
 pub mod audioresample;
 pub mod audiotestsrc;
 pub mod av1parse;
@@ -59,14 +65,18 @@ pub mod capsfilter;
 pub mod capturepixelformat;
 pub mod concat;
 pub mod cutter;
+pub mod deinterleave;
 pub mod equalizer;
 pub mod fakesink;
+pub mod fakesrc;
 // Decoded-GOP reverser (M897): the presentation half of reverse playback.
 pub mod gopreverse;
 pub mod h264parse;
 pub mod h265parse;
 pub mod identity;
+pub mod imagefreeze;
 pub mod inputselector;
+pub mod interleave;
 pub mod level;
 pub mod mux;
 pub mod nalparse;
@@ -76,9 +86,12 @@ pub mod opusparse;
 pub mod outputselector;
 pub mod poc;
 pub mod progressreport;
+pub mod scaletempo;
 pub mod spectrum;
 pub mod streamdemux;
 pub mod tsmuxn;
+// Closable pass-through: drops data while `drop=true`, for muting one tee branch.
+pub mod valve;
 pub mod volume;
 pub mod vp8parse;
 pub mod vp9parse;
@@ -88,6 +101,9 @@ mod paint;
 mod xmlutil;
 // Shared gst `num-buffers` property conversion used by the source elements.
 mod numbuffers;
+// Shared `cuda-device-id` property used by the elements that open a CUDA context.
+#[cfg(all(target_os = "linux", any(feature = "cuda", feature = "ffmpeg")))]
+mod cudadeviceid;
 
 // Software RGBA8 compositor (fan-in pixel mixer): PiP / grids / overlays.
 pub mod compositor;
@@ -206,6 +222,10 @@ pub mod misptime;
 // Shared pixel-format helpers: packed-RGBA layout (videobalance, alpha) and the
 // planar plane / frame sizing the format-agnostic filters need (deinterlace).
 mod pixel;
+// Where a capture driver's / decoder's padded rows sit, shared by the producers
+// that either declare them (`PlaneLayout`) or pack them tight.
+#[cfg(any(feature = "metadata", feature = "v4l2", feature = "pipewire"))]
+mod paddedrows;
 // Sans-IO RFC 4566 SDP: the shared media-section scanner plus the RTP/AVP
 // mapping from a media description to Caps (payload type, codec, clock rate,
 // fmtp parameter-set geometry), so an RTP receiver configures from the SDP a
@@ -342,6 +362,15 @@ mod graphthreads;
 pub use graphthreads::TokioThreadSpawner;
 // Annex-B NAL splitting shared by rtppay (RTP) and h264util (WebCodecs).
 mod annexb;
+// RIFF chunk walking shared by the WAVE and AVI elements.
+mod riff;
+// AVI container parsing / writing (M1071), behind `avidemux` and `avimux`.
+mod avi;
+// AVI demuxer elements (M1071): one `ByteStream{Avi}` in, its streams out.
+pub mod avidemux;
+// AVI muxer elements (M1071): one video plus an optional audio stream in, a
+// `ByteStream{Avi}` out.
+pub mod avimux;
 // Shared seek helper for byte-stream demuxers (M362): drives an upstream
 // byte-seek (FileSrc) and re-syncs from the returned Flush.
 mod demuxseek;
@@ -357,9 +386,17 @@ pub mod tsmux;
 // elementary stream, the `.mpg` / `.vob` sibling of tsdemux.
 pub mod mpeg2video;
 pub mod psdemux;
-// Frame lengths of the self-syncing audio bitstreams (AC-3, MPEG audio), shared
-// by the audio decoder's frame splitting and psdemux's frame realignment.
+// Frame headers of the self-syncing audio bitstreams (AC-3, MPEG audio), shared
+// by the audio decoder's frame splitting, psdemux's frame realignment and
+// mpegaudioparse.
 mod audioframe;
+// ID3v1 / ID3v2 tag parsing (no_std), shared by id3demux and mpegaudioparse.
+mod id3;
+// ID3 tag stripper element (no_std): a tagged byte stream in, the payload out.
+pub mod id3demux;
+// MPEG audio parser element (no_std): an `.mp3` / `.mp2` byte stream -> one
+// MPEG audio frame per buffer, the framing ffmpegaudiodec takes.
+pub mod mpegaudioparse;
 // Non-blocking link to a blocking audio device worker thread, shared by the
 // ALSA and PulseAudio sinks.
 #[cfg(any(feature = "alsa-sink", feature = "pulse-sink"))]
@@ -425,6 +462,10 @@ pub mod clocksync;
 pub mod filesink;
 #[cfg(feature = "std")]
 pub mod filesrc;
+// Raw file-descriptor source and sink: unix only, a `RawFd` is what the `fd`
+// property names.
+#[cfg(all(feature = "std", unix))]
+pub mod fd;
 // Spill-to-storage byte buffer (M861): turns a pushed, non-seekable byte stream
 // into a seekable one by absorbing it into a temp file.
 #[cfg(feature = "std")]
@@ -553,6 +594,12 @@ pub mod livekitsrc;
 // UdpSink. Caps come from a published SDP or the stream's SPS; see module docs.
 #[cfg(feature = "udp-ingress")]
 pub mod udpsrc;
+
+// Plain TCP byte-stream elements (M1068): TcpServerSrc / TcpClientSrc read a
+// socket into DataFrame chunks the way FileSrc reads a file, TcpServerSink /
+// TcpClientSink write those bytes back out. Raw bytes, no framing of their own.
+#[cfg(feature = "tcp")]
+pub mod tcp;
 
 // Distributed-graph transport pair (M551): RemoteSink (TCP client) serializes
 // the PipelinePacket stream (g2g-core wire codec) and RemoteSrc (TCP listener)

@@ -67,3 +67,21 @@ async fn nv12_only_filter_rejects_rgba_source_without_converter() {
         .expect_err("RGBA into an NV12-only filter must fail negotiation");
     assert_eq!(err, G2gError::CapsMismatch);
 }
+
+/// A shared-memory source hands the converter an `Arc`-backed `SystemView`
+/// (what `videoflip` emits on its zero-copy path); the convert reads it instead
+/// of refusing the domain.
+#[tokio::test]
+async fn shared_memory_source_reaches_nv12_sink_through_converter() {
+    let frames = 4;
+    let mut src = VideoTestSrc::new(32, 16, 30, frames).with_shared_memory();
+    let mut conv = VideoConvert::new(RawVideoFormat::Nv12);
+    let mut sink = FakeSink::new();
+
+    run_source_transform_sink(&mut src, &mut conv, &mut sink, &NullClock, 4)
+        .await
+        .expect("shared RGBA -> convert -> NV12 chain negotiates and flows");
+
+    assert_eq!(sink.received(), frames, "every shared frame converted");
+    assert!(sink.eos_seen());
+}

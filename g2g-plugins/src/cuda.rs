@@ -38,12 +38,13 @@ use g2g_core::memory::{CudaKeepAlive, MemoryDomainKind, OwnedCudaBuffer};
 use g2g_core::runtime::{auto_plug_domain_converters, GraphNode};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, Frame, G2gError, Graph,
-    HardwareError, MemoryDomain, OutputSink, PipelinePacket, Rate, RawVideoFormat, SystemSlice,
+    HardwareError, MemoryDomain, OutputSink, PipelinePacket, PropError, PropValue, PropertySpec,
+    Rate, RawVideoFormat, SystemSlice,
 };
 
-/// CUDA device the upload context is created on, carried onto every uploaded
-/// frame so a consumer knows which GPU the surface lives on.
-const UPLOAD_DEVICE_ORDINAL: i32 = 0;
+use crate::cudadeviceid::{
+    get_cuda_device_id, set_cuda_device_id, CUDA_DEVICE_ID_PROP, DEFAULT_CUDA_DEVICE_ID,
+};
 
 /// Pass-through transform that copies CUDA device-memory NV12 frames to
 /// system memory. See the module docs.
@@ -248,7 +249,7 @@ impl CudaKeepAlive for DevAlloc {}
 /// let upload = CudaUpload::new();
 /// assert_eq!(upload.uploaded(), 0);
 /// ```
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct CudaUpload {
     configured: bool,
     width: u32,
@@ -257,11 +258,35 @@ pub struct CudaUpload {
     context: Option<Arc<UploadCtx>>,
     uploaded: u64,
     forwarded: u64,
+    /// Device the upload context is created on, carried onto every uploaded
+    /// frame so a consumer knows which GPU the surface lives on.
+    cuda_device_id: i32,
+}
+
+impl Default for CudaUpload {
+    fn default() -> Self {
+        Self {
+            configured: false,
+            width: 0,
+            height: 0,
+            context: None,
+            uploaded: 0,
+            forwarded: 0,
+            cuda_device_id: DEFAULT_CUDA_DEVICE_ID,
+        }
+    }
 }
 
 impl CudaUpload {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Upload onto CUDA device `ordinal` instead of device 0. Read at configure,
+    /// when the context is created; a later change is refused.
+    pub fn with_cuda_device_id(mut self, ordinal: i32) -> Self {
+        self.cuda_device_id = ordinal;
+        self
     }
 
     /// Frames copied host->device into CUDA memory so far.
@@ -274,6 +299,9 @@ impl CudaUpload {
         self.forwarded
     }
 }
+
+/// The upload context's device, so a `gst-launch` line can pin the GPU.
+static CUDA_UPLOAD_PROPS: &[PropertySpec] = &[CUDA_DEVICE_ID_PROP];
 
 impl AsyncElement for CudaUpload {
     type ProcessFuture<'a>
@@ -316,7 +344,7 @@ impl AsyncElement for CudaUpload {
         let ctx = unsafe {
             check(ffi::cu_init(0))?;
             let mut dev: ffi::CuDevice = 0;
-            check(ffi::cu_device_get(&mut dev, UPLOAD_DEVICE_ORDINAL))?;
+            check(ffi::cu_device_get(&mut dev, self.cuda_device_id))?;
             let mut ctx: ffi::CuContext = core::ptr::null_mut();
             check(ffi::cu_ctx_create(&mut ctx, 0, dev))?;
             // `cu_ctx_create` leaves the new context current on this thread; pop
@@ -329,6 +357,26 @@ impl AsyncElement for CudaUpload {
         self.context = Some(Arc::new(UploadCtx(ctx)));
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        CUDA_UPLOAD_PROPS
+    }
+
+    fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        match name {
+            "cuda-device-id" => {
+                set_cuda_device_id(&mut self.cuda_device_id, self.context.is_some(), &value)
+            }
+            _ => Err(PropError::Unknown),
+        }
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "cuda-device-id" => Some(get_cuda_device_id(self.cuda_device_id)),
+            _ => None,
+        }
     }
 
     /// Emits CUDA NV12 (the uploaded frames; a passed-through Cuda frame keeps its
@@ -355,7 +403,13 @@ impl AsyncElement for CudaUpload {
                             // the configured geometry (checked in `upload_nv12`);
                             // `ctx` is a live context owned by this element.
                             let buf = unsafe {
-                                upload_nv12(&ctx, slice.as_slice(), self.width, self.height)?
+                                upload_nv12(
+                                    &ctx,
+                                    slice.as_slice(),
+                                    self.width,
+                                    self.height,
+                                    self.cuda_device_id,
+                                )?
                             };
                             self.uploaded += 1;
                             Frame {
@@ -406,6 +460,7 @@ unsafe fn upload_nv12(
     src: &[u8],
     width: u32,
     height: u32,
+    device_ordinal: i32,
 ) -> Result<OwnedCudaBuffer, G2gError> {
     let total = nv12_byte_size(width, height);
     if src.len() < total {
@@ -461,7 +516,7 @@ unsafe fn upload_nv12(
             width,
             height,
             ctx.0,
-            UPLOAD_DEVICE_ORDINAL,
+            device_ordinal,
             Arc::new(DevAlloc {
                 dptr,
                 ctx: Arc::clone(ctx),

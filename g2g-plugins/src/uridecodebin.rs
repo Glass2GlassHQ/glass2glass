@@ -1728,6 +1728,86 @@ pub fn mp4_decodebin_select(
     mp4_select(location, pads)
 }
 
+/// Probe an AVI file and build an [`AviDemuxN`](crate::avidemux::AviDemuxN) with
+/// one port per pad request (M1071). Shared by `avidemux` demux-select and
+/// `decodebin` fan-out. Declines a non-AVI file or an unsatisfiable request.
+#[cfg(feature = "std")]
+fn avi_select(
+    location: &str,
+    pads: &[PadRequest],
+) -> Option<(Box<dyn DynMultiOutputElement>, Vec<Caps>)> {
+    let prefix = read_prefix(location)?;
+    let infos = crate::avidemux::forwardable_streams(&prefix);
+    if infos.is_empty() {
+        return None;
+    }
+    let kinds: Vec<PadKind> = infos
+        .iter()
+        .map(|i| {
+            if i.video {
+                PadKind::Video
+            } else {
+                PadKind::Audio
+            }
+        })
+        .collect();
+    let sel = resolve_pads(&kinds, pads)?;
+    let ports: Vec<_> = sel.iter().map(|&i| infos[i].clone()).collect();
+    let caps: Vec<Caps> = ports.iter().map(|p| p.caps.clone()).collect();
+    Some((Box::new(crate::avidemux::AviDemuxN::new(ports)), caps))
+}
+
+/// `avidemux` explicit fan-out (M1071).
+#[cfg(feature = "std")]
+pub fn avi_demux_select(
+    name: &str,
+    location: &str,
+    pads: &[PadRequest],
+) -> Option<Box<dyn DynMultiOutputElement>> {
+    (name == "avidemux")
+        .then(|| avi_select(location, pads).map(|(d, _)| d))
+        .flatten()
+}
+
+/// `decodebin` fan-out over an AVI file (M1071): the demuxer + per-port caps.
+#[cfg(feature = "std")]
+pub fn avi_decodebin_select(
+    location: &str,
+    pads: &[PadRequest],
+) -> Option<(Box<dyn DynMultiOutputElement>, Vec<Caps>)> {
+    avi_select(location, pads)
+}
+
+/// Bare-`decodebin` primary-stream hook for AVI (M1071):
+/// [`AviDemux`](crate::avidemux::AviDemux) defaults to the file's video stream,
+/// so an audio-only AVI, or one whose codec is not the nominal H.264, needs the
+/// `stream=` selection naming what the file actually carries. Declines a
+/// non-AVI file and one whose first stream has no `stream=` name.
+#[cfg(feature = "std")]
+pub fn avi_primary_stream(location: &str, caps: &Caps) -> Option<PrimaryStream> {
+    if !matches!(
+        caps,
+        Caps::ByteStream {
+            encoding: ByteStreamEncoding::Avi
+        }
+    ) {
+        return None;
+    }
+    let prefix = read_prefix(location)?;
+    let infos = crate::avidemux::forwardable_streams(&prefix);
+    let selected = infos.iter().find(|i| i.video).or_else(|| infos.first())?;
+    let stream = match &selected.caps {
+        Caps::CompressedVideo { codec, .. } => crate::avidemux::video_stream_str(*codec)?,
+        Caps::Audio { format, .. } => crate::avidemux::audio_stream_str(*format)?,
+        _ => return None,
+    };
+    Some(PrimaryStream {
+        demux: "avidemux",
+        props: alloc::vec![("stream".to_string(), stream.to_string())],
+        caps: selected.caps.clone(),
+    })
+}
+
 /// Fetch a text resource synchronously on a throwaway current-thread runtime, for
 /// the `playbin uri=hls://...` probe (M395). Returns `None` on any failure, so the
 /// hook declines to the single-stream `hls` handler. Network-coupled: validated

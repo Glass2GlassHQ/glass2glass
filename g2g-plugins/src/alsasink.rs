@@ -399,15 +399,17 @@ fn discipline_clock(pcm: &PCM, rate: u32, rendered: &AtomicU64, clock: &DriftClo
         return;
     }
     let master_ns = (u128::from(played) * 1_000_000_000 / u128::from(rate)) as u64;
-    clock.observe(local_ns, master_ns);
-    // Pacing diagnosis: how the DAC clock the video slaves to actually moves.
+    let outcome = clock.observe(local_ns, master_ns);
+    // Pacing diagnosis: how the DAC clock the video slaves to actually moves,
+    // and whether the outlier gate dropped this reading.
     g2g_core::g2g_log!(
         g2g_core::log::Target::category("AlsaSink"),
-        "clock local={}ms master={}ms buffered={} slope={:.6}",
+        "clock local={}ms master={}ms buffered={} slope={:.6} {:?}",
         local_ns / 1_000_000,
         master_ns / 1_000_000,
         buffered,
-        clock.slope()
+        clock.slope(),
+        outcome
     );
 }
 

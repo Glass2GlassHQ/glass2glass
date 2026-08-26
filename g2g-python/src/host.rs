@@ -644,7 +644,7 @@ fn instantiate(
         for (name, value) in params {
             let attr = name.replace('-', "_");
             if let Some(declared) = &declared {
-                if !declared.iter().any(|d| *d == attr) {
+                if !declared.contains(&attr) {
                     return Err(PyValueError::new_err(format!(
                         "{class} has no property {name}; it declares {}",
                         declared.join(", ").replace('_', "-")
@@ -1199,7 +1199,7 @@ fn attach_metadata(frame: &mut Frame, staged: Vec<Staged>, frame_dims: Option<(u
 /// Without the `analytics` feature `FrameMetaSet` is the ZST, so staged results
 /// are dropped.
 #[cfg(not(feature = "analytics"))]
-fn attach_metadata(_frame: &mut Frame, _staged: Vec<Staged>, _frame_w: u32, _frame_h: u32) {}
+fn attach_metadata(_frame: &mut Frame, _staged: Vec<Staged>, _frame_dims: Option<(u32, u32)>) {}
 
 /// Describe the negotiated caps for a job: raw video keeps its fixed geometry,
 /// anything else travels as an opaque payload.

@@ -244,8 +244,10 @@ async fn live_camera_quantize_to_edge_tpu() {
 
     let out_bytes = inf_out.bytes.expect("inference output tensor");
     let out: Vec<f32> = out_bytes
-        .chunks_exact(4)
-        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| f32::from_le_bytes(*c))
         .collect();
     assert_eq!(out.len(), 64, "conv output [1,4,4,4]");
     assert!(

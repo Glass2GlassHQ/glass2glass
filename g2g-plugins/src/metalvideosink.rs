@@ -354,7 +354,7 @@ impl MetalVideoSink {
                 unsafe { core::slice::from_raw_parts(buf.contents().as_ptr() as *const u8, len) };
             // Drawables are BGRA; swizzle to RGBA for the accessor.
             let mut rgba = bytes.to_vec();
-            for px in rgba.chunks_exact_mut(4) {
+            for px in rgba.as_chunks_mut::<4>().0 {
                 px.swap(0, 2);
             }
             self.last_rgba = Some(rgba);

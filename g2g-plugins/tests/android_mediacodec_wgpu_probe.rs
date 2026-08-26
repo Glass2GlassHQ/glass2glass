@@ -280,12 +280,12 @@ async fn probe_ahb_vulkan_format() {
     // Every pixel's alpha is forced to 255 by the shader; the conversion must
     // produce a real image, not a constant. Sample the channels: alpha all 255,
     // and the RGB content has variance (a decoded frame is not a flat colour).
-    let alpha_all_opaque = rgba.chunks_exact(4).all(|px| px[3] == 255);
+    let alpha_all_opaque = rgba.as_chunks::<4>().0.iter().all(|px| px[3] == 255);
     assert!(alpha_all_opaque, "shader writes opaque alpha");
     let mut min = [255u8; 3];
     let mut max = [0u8; 3];
     let mut sum = [0u64; 3];
-    for px in rgba.chunks_exact(4) {
+    for px in rgba.as_chunks::<4>().0 {
         for c in 0..3 {
             min[c] = min[c].min(px[c]);
             max[c] = max[c].max(px[c]);
@@ -404,12 +404,12 @@ async fn mediacodec_gpu_output_emits_wgpu_texture() {
     let rgba = readback_rgba_texture(owner).expect("read RGBA texture back through wgpu");
     assert_eq!(rgba.len(), (w * h * 4) as usize, "RGBA byte length");
 
-    let alpha_all_opaque = rgba.chunks_exact(4).all(|px| px[3] == 255);
+    let alpha_all_opaque = rgba.as_chunks::<4>().0.iter().all(|px| px[3] == 255);
     assert!(alpha_all_opaque, "shader writes opaque alpha");
     let mut min = [255u8; 3];
     let mut max = [0u8; 3];
     let mut sum = [0u64; 3];
-    for px in rgba.chunks_exact(4) {
+    for px in rgba.as_chunks::<4>().0 {
         for c in 0..3 {
             min[c] = min[c].min(px[c]);
             max[c] = max[c].max(px[c]);

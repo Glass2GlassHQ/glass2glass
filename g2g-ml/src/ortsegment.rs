@@ -160,10 +160,8 @@ impl OrtSegmentation {
     }
 
     fn supported_input(&self) -> Option<Caps> {
-        let (width, height) = match self.model.as_ref() {
-            Some(m) => (m.geometry.input_width, m.geometry.input_height),
-            None => return None,
-        };
+        let model = self.model.as_ref()?;
+        let (width, height) = (model.geometry.input_width, model.geometry.input_height);
         Some(if self.tensor_input {
             Caps::Tensor {
                 dtype: TensorDType::F32,

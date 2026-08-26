@@ -25,7 +25,7 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
     MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
-    PropValue, PropertySpec, Rate, RawVideoFormat,
+    PropValue, PropertySpec, PushOutcome, Rate, RawVideoFormat, Reconfigure,
 };
 
 const FORMATS: [RawVideoFormat; 12] = [
@@ -148,6 +148,16 @@ impl VideoCrop {
     }
 }
 
+/// Whether the pre-send check held the packet just pushed back rather than
+/// enqueuing it, to hand this element a downstream `AbsorbOrientation` (see
+/// [`VideoCrop::handles_orientation`]). The packet has to be pushed again.
+fn held_back(outcome: PushOutcome) -> bool {
+    matches!(
+        outcome,
+        PushOutcome::Reconfigure(Reconfigure::AbsorbOrientation)
+    )
+}
+
 impl AsyncElement for VideoCrop {
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
@@ -257,8 +267,13 @@ impl AsyncElement for VideoCrop {
                         interlace: g2g_core::Interlace::Any,
                     };
                     if self.last_caps.as_ref() != Some(&new_caps) {
-                        out.push(PipelinePacket::CapsChanged(new_caps.clone()))
+                        let outcome = out
+                            .push(PipelinePacket::CapsChanged(new_caps.clone()))
                             .await?;
+                        if held_back(outcome) {
+                            out.push(PipelinePacket::CapsChanged(new_caps.clone()))
+                                .await?;
+                        }
                         self.last_caps = Some(new_caps);
                     }
                     let out_frame = Frame {
@@ -276,16 +291,25 @@ impl AsyncElement for VideoCrop {
                     // record last_caps to suppress the data path's duplicate
                     // emit; do NOT accept_input, which would clobber the input
                     // with our own (cropped) output and corrupt the next frame.
-                    out.push(PipelinePacket::CapsChanged(c.clone())).await?;
+                    let outcome = out.push(PipelinePacket::CapsChanged(c.clone())).await?;
+                    if held_back(outcome) {
+                        out.push(PipelinePacket::CapsChanged(c.clone())).await?;
+                    }
                     self.last_caps = Some(c);
                 }
                 PipelinePacket::Flush => {
                     self.last_caps = None;
-                    out.push(PipelinePacket::Flush).await?;
+                    let outcome = out.push(PipelinePacket::Flush).await?;
+                    if held_back(outcome) {
+                        out.push(PipelinePacket::Flush).await?;
+                    }
                 }
                 // Segment is control: forward unchanged.
                 PipelinePacket::Segment(seg) => {
-                    out.push(PipelinePacket::Segment(seg)).await?;
+                    let outcome = out.push(PipelinePacket::Segment(seg)).await?;
+                    if held_back(outcome) {
+                        out.push(PipelinePacket::Segment(seg)).await?;
+                    }
                 }
                 PipelinePacket::Eos => {}
                 other => {
@@ -294,6 +318,14 @@ impl AsyncElement for VideoCrop {
             }
             Ok(())
         })
+    }
+
+    /// A crop rectangle is chosen in the buffer's stored coordinates, so it
+    /// means something different once the picture is turned. The sink's
+    /// `AbsorbOrientation` stops here rather than reaching a `videoflip`
+    /// upstream, which would leave the crop applied to the un-turned picture.
+    fn handles_orientation(&self) -> bool {
+        true
     }
 
     fn properties(&self) -> &'static [PropertySpec] {

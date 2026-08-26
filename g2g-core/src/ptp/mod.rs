@@ -47,7 +47,7 @@ use alloc::sync::Arc;
 
 use spin::Mutex;
 
-use crate::clock::{ClockCandidate, ClockPriority, DriftClock, PipelineClock};
+use crate::clock::{ClockCandidate, ClockPriority, DriftClock, DriftObservation, PipelineClock};
 use crate::time::{RefNs, TaiNs};
 
 // PTP-over-UDP wire format (M594): parse the messages a SLAVE ordinary clock
@@ -121,8 +121,6 @@ pub struct PtpServo {
     locked: bool,
     /// Whether lock was ever achieved (distinguishes Holdover from FreeRunning).
     ever_locked: bool,
-    /// Consecutive outlier rejections while locked; enough of them drops lock.
-    consecutive_rejects: u32,
 }
 
 impl core::fmt::Debug for PtpServo {
@@ -145,11 +143,11 @@ impl PtpServo {
     /// Max servo error across the window to be considered locked (software
     /// timestamping is good to well under this).
     pub const LOCK_THRESHOLD_NS: u64 = 1_000_000;
-    /// A single sample landing this far from the fit while locked is treated as
-    /// a delayed / queued packet and dropped, not folded in.
+    /// A single sample landing this far from the fit is treated as a delayed /
+    /// queued packet and dropped, not folded in. Wider than the
+    /// [`DriftClock::DEFAULT_OUTLIER_GATE_NS`] an audio sink runs: a queued
+    /// packet is a much bigger excursion than a DAC's delay jitter.
     pub const OUTLIER_GATE_NS: u64 = 20_000_000;
-    /// Consecutive outlier rejections that drop lock (the fit is genuinely stale).
-    pub const MAX_CONSECUTIVE_REJECTS: u32 = 8;
     /// Reference time without an accepted sample before a locked servo enters
     /// holdover.
     pub const HOLDOVER_TIMEOUT_NS: u64 = 5_000_000_000;
@@ -158,7 +156,7 @@ impl PtpServo {
     /// `t2` / `t3` against).
     pub fn new(reference: Arc<dyn PipelineClock + Send + Sync>) -> Self {
         Self {
-            drift: DriftClock::new(reference.clone()),
+            drift: DriftClock::with_gate(reference.clone(), Self::OUTLIER_GATE_NS),
             reference,
             errors: VecDeque::with_capacity(Self::ERROR_WINDOW),
             samples: 0,
@@ -167,7 +165,6 @@ impl PtpServo {
             last_delay_ns: 0,
             locked: false,
             ever_locked: false,
-            consecutive_rejects: 0,
         }
     }
 
@@ -223,29 +220,31 @@ impl PtpServo {
     }
 
     /// Score a `(reference, master)` sample against the current fit and, unless
-    /// it is a gross outlier while locked, fold it in and update lock state.
-    /// Shared by [`sync_exchange`](Self::sync_exchange) and
+    /// the [`DriftClock`] rejects it as a gross outlier, fold it in and update
+    /// lock state. Shared by [`sync_exchange`](Self::sync_exchange) and
     /// [`observe_master`](Self::observe_master).
     fn fold(&mut self, local: u64, master: u64) -> ExchangeResult {
-        // Score against the current fit (only once one exists). A gross outlier
-        // while locked is a delayed packet / glitch, not a real step: drop it,
-        // and only let a run of them break lock.
-        let error = if self.samples >= 1 {
+        // Score against the current fit (only once one exists). This is the
+        // servo error the lock window is built from.
+        let mut error = if self.samples >= 1 {
             master as i64 - self.drift.project_ns(local) as i64
         } else {
             0
         };
-        if self.locked && error.unsigned_abs() > Self::OUTLIER_GATE_NS {
-            self.consecutive_rejects += 1;
-            if self.consecutive_rejects >= Self::MAX_CONSECUTIVE_REJECTS {
+        // The gate itself lives in the DriftClock, so the audio sinks feeding
+        // one get the same protection.
+        match self.drift.observe(local, master) {
+            DriftObservation::Folded => {}
+            DriftObservation::Rejected => return ExchangeResult::RejectedOutlier,
+            DriftObservation::Restarted => {
+                // The window was cleared, so lock has to be re-acquired against
+                // the new timeline and the old servo errors mean nothing.
                 self.locked = false;
+                self.errors.clear();
+                self.samples = 0;
+                error = 0;
             }
-            return ExchangeResult::RejectedOutlier;
         }
-
-        // Fold the sample in.
-        self.consecutive_rejects = 0;
-        self.drift.observe(local, master);
         self.samples += 1;
         self.last_update_ns = local;
         self.last_error_ns = error;

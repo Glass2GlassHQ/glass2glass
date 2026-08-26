@@ -102,6 +102,9 @@ use crate::worker_ready::Handshake;
 use g2g_core::element::{PresentationStats, QosMessage};
 use g2g_core::frame::Frame;
 use g2g_core::memory::{DomainSet, MemoryDomainKind};
+use g2g_core::meta::Orientation;
+#[cfg(feature = "metadata")]
+use g2g_core::meta::OrientationMeta;
 use g2g_core::metrics::{monotonic_ns, LatencyHistogram, LatencySnapshot};
 use g2g_core::{
     AsyncElement, BusHandle, Caps, CapsConstraint, CapsSet, ClockCandidate, ClockPriority,
@@ -117,16 +120,22 @@ use g2g_core::{
 /// that's the signal we use to pace the producer to refresh.
 /// `Shutdown` exits the worker's event loop.
 enum WorkerCmd {
-    Frame {
-        bytes: Vec<u8>,
-        /// Source-side wall-clock stamp from `FrameTiming::arrival_ns`.
-        /// The worker records `monotonic_ns() - arrival_ns` into the
-        /// latency histogram when the matching `frame` callback fires.
-        /// Zero means the frame was untimed; latency is not recorded.
-        arrival_ns: u64,
-        ack: tokio::sync::oneshot::Sender<()>,
-    },
+    Frame(QueuedFrame),
     Shutdown,
+}
+
+/// One converted frame on its way to the surface.
+struct QueuedFrame {
+    bytes: Vec<u8>,
+    /// Source-side wall-clock stamp from `FrameTiming::arrival_ns`.
+    /// The worker records `monotonic_ns() - arrival_ns` into the
+    /// latency histogram when the matching `frame` callback fires.
+    /// Zero means the frame was untimed; latency is not recorded.
+    arrival_ns: u64,
+    /// The turn an upstream `videoflip` left for the compositor to apply
+    /// (M1058). `Identity` for a frame with no `OrientationMeta`.
+    orientation: Orientation,
+    ack: tokio::sync::oneshot::Sender<()>,
 }
 
 /// How the sink reacts when the producer pushes faster than the
@@ -343,6 +352,14 @@ impl AsyncElement for WaylandSink {
         DomainSet::only(MemoryDomainKind::System)
     }
 
+    /// The compositor turns the picture for us through
+    /// `wl_surface::set_buffer_transform`, so a `videoflip` upstream should
+    /// attach an `OrientationMeta` rather than remap every pixel (M1058). Needs
+    /// the `metadata` feature: without it a frame has nowhere to carry the turn.
+    fn absorbs_orientation(&self) -> bool {
+        cfg!(feature = "metadata")
+    }
+
     /// Adopt the elected clock + base time so frames present at their PTS
     /// deadline. When the elected clock is our own `WaylandClock` (the common
     /// audio-less case) its `now_ns()` shares the monotonic domain we sleep on.
@@ -522,7 +539,9 @@ impl AsyncElement for WaylandSink {
     ) -> Self::ProcessFuture<'a> {
         Box::pin(async move {
             match packet {
-                PipelinePacket::DataFrame(Frame { domain, timing, .. }) => {
+                PipelinePacket::DataFrame(frame) => {
+                    let orientation = frame_orientation(&frame);
+                    let Frame { domain, timing, .. } = frame;
                     let slice =
                         domain.require_system_slice(g2g_core::log::short_type_name::<Self>())?;
 
@@ -558,11 +577,12 @@ impl AsyncElement for WaylandSink {
                     let xrgb = nv12_to_xrgb8888(slice, self.width, self.height)?;
                     let tx = self.cmd_tx.as_ref().ok_or(G2gError::NotConfigured)?;
                     let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
-                    tx.send(WorkerCmd::Frame {
+                    tx.send(WorkerCmd::Frame(QueuedFrame {
                         bytes: xrgb,
                         arrival_ns: timing.arrival_ns,
+                        orientation,
                         ack: ack_tx,
-                    })
+                    }))
                     .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
                     match self.pacing {
                         PacingPolicy::Block => {
@@ -649,7 +669,11 @@ struct WorkerState {
     /// lands we drain this into the first draw. With blocking pacing the
     /// producer is throttled to one in-flight frame, so under steady
     /// state this is None.
-    pending: Option<(Vec<u8>, u64, tokio::sync::oneshot::Sender<()>)>,
+    pending: Option<QueuedFrame>,
+    /// Buffer transform currently committed on the surface. `set_buffer_transform`
+    /// is double-buffered state the compositor keeps, so it is re-issued only
+    /// when the descriptor on the frames changes.
+    orientation: Orientation,
     /// Ack for the most recently committed frame plus its source-side
     /// arrival timestamp. Signalled when the compositor's matching
     /// `frame` callback fires, at which point we record the latency.
@@ -710,23 +734,20 @@ fn worker_main(
         dropped,
         latency,
         pending: None,
+        orientation: Orientation::Identity,
         pending_ack: None,
     };
 
     // Wire the cmd channel into calloop so we wake on frame arrival.
     loop_handle.insert_source(rx, |event, _, state: &mut WorkerState| match event {
-        ChanEvent::Msg(WorkerCmd::Frame {
-            bytes,
-            arrival_ns,
-            ack,
-        }) => {
+        ChanEvent::Msg(WorkerCmd::Frame(queued)) => {
             // Producer is blocked on `ack` until our `frame` callback
             // fires, so we should only ever see one in flight. If the
             // surface isn't mappable yet, stash it; otherwise draw now.
             if state.configured {
-                state.draw(bytes, arrival_ns, ack);
+                state.draw(queued);
             } else {
-                state.pending = Some((bytes, arrival_ns, ack));
+                state.pending = Some(queued);
             }
         }
         ChanEvent::Msg(WorkerCmd::Shutdown) | ChanEvent::Closed => {
@@ -746,7 +767,13 @@ impl WorkerState {
     /// and commit. The producer's `ack` is stashed in `pending_ack`; we
     /// signal it when the matching `frame` callback fires in
     /// `CompositorHandler::frame`.
-    fn draw(&mut self, bytes: Vec<u8>, arrival_ns: u64, ack: tokio::sync::oneshot::Sender<()>) {
+    fn draw(&mut self, queued: QueuedFrame) {
+        let QueuedFrame {
+            bytes,
+            arrival_ns,
+            orientation,
+            ack,
+        } = queued;
         let width = self.width as i32;
         let height = self.height as i32;
         let stride = self.width as i32 * 4;
@@ -782,6 +809,18 @@ impl WorkerState {
         canvas[..needed].copy_from_slice(&bytes[..needed]);
 
         let surface = self.window.wl_surface();
+        if orientation != self.orientation {
+            surface.set_buffer_transform(buffer_transform(orientation));
+            // The surface is what the compositor lays out, and a turn that
+            // transposes the picture transposes it. The buffer, and
+            // `damage_buffer` with it, stays in buffer coordinates.
+            let (surface_w, surface_h) = if orientation.swaps_dims() {
+                (self.height, self.width)
+            } else {
+                (self.width, self.height)
+            };
+            self.window.set_min_size(Some((surface_w, surface_h)));
+        }
         // Subscribe to the compositor's `frame` callback for this commit.
         // SCTK's CompositorHandler::frame routes by the WlSurface udata,
         // so we pass a clone of the surface as the callback's user data.
@@ -789,6 +828,7 @@ impl WorkerState {
         surface.damage_buffer(0, 0, width, height);
         buffer.attach_to(surface).expect("attach_to");
         self.window.commit();
+        self.orientation = orientation;
         self.presented.fetch_add(1, Ordering::Relaxed);
 
         // If a prior ack is still outstanding the compositor never sent
@@ -875,8 +915,8 @@ impl WindowHandler for WorkerState {
                 ready.notify();
             }
             // Drain any frame that arrived before we were mappable.
-            if let Some((bytes, arrival_ns, ack)) = self.pending.take() {
-                self.draw(bytes, arrival_ns, ack);
+            if let Some(queued) = self.pending.take() {
+                self.draw(queued);
             }
         }
     }
@@ -910,6 +950,52 @@ delegate_shm!(WorkerState);
 delegate_xdg_shell!(WorkerState);
 delegate_xdg_window!(WorkerState);
 delegate_registry!(WorkerState);
+
+// =================================================================
+// Orientation descriptor -> wl_surface buffer transform
+// =================================================================
+
+/// The turn an upstream `videoflip` left for us to apply, `Identity` when the
+/// frame carries no descriptor.
+#[cfg(feature = "metadata")]
+fn frame_orientation(frame: &Frame) -> Orientation {
+    frame
+        .meta
+        .get::<OrientationMeta>()
+        .map_or(Orientation::Identity, |m| m.orientation)
+}
+
+#[cfg(not(feature = "metadata"))]
+fn frame_orientation(_frame: &Frame) -> Orientation {
+    Orientation::Identity
+}
+
+/// The `wl_surface::set_buffer_transform` argument that makes the compositor
+/// display a buffer turned by `orientation`.
+///
+/// `set_buffer_transform` takes "the transformation that the client has already
+/// applied to the content of the buffer", and the compositor applies the
+/// inverse; `wl_output::transform`'s rotations are counter-clockwise, and its
+/// `flipped_*` entries are "an initial flip around a vertical axis followed by
+/// rotation" (wayland.xml). An `OrientationMeta` says the opposite thing: the
+/// turn a consumer still has to apply. So the argument is the inverse of the
+/// descriptor, which moves only the two quarter rotations (every mirror is its
+/// own inverse).
+fn buffer_transform(orientation: Orientation) -> wl_output::Transform {
+    match orientation.inverse() {
+        Orientation::Identity => wl_output::Transform::Normal,
+        // 90 counter-clockwise.
+        Orientation::Rotate90Ccw => wl_output::Transform::_90,
+        Orientation::Rotate180 => wl_output::Transform::_180,
+        Orientation::Rotate90Cw => wl_output::Transform::_270,
+        // Flip around a vertical axis, i.e. left to right.
+        Orientation::HorizontalMirror => wl_output::Transform::Flipped,
+        // That flip then 90 counter-clockwise is the upper-left diagonal.
+        Orientation::Transpose => wl_output::Transform::Flipped90,
+        Orientation::VerticalMirror => wl_output::Transform::Flipped180,
+        Orientation::Transverse => wl_output::Transform::Flipped270,
+    }
+}
 
 // =================================================================
 // NV12 -> XRGB8888 (BT.601 limited-range)
@@ -970,6 +1056,46 @@ fn nv12_to_xrgb8888(src: &[u8], width: u32, height: u32) -> Result<Vec<u8>, G2gE
 mod tests {
     use super::*;
     use g2g_core::{BusMessage, Rate, VideoCodec};
+
+    /// Pins all eight descriptors to the transform that makes the compositor
+    /// show the picture the way the descriptor asked for. The turn is the
+    /// inverse of the argument, so getting the two quarter rotations backwards
+    /// (the easy mistake, `wl_output`'s names are counter-clockwise) shows up
+    /// here rather than upside down on a screen.
+    #[test]
+    fn buffer_transform_inverts_the_descriptor() {
+        use wl_output::Transform;
+        assert_eq!(buffer_transform(Orientation::Identity), Transform::Normal);
+        assert_eq!(buffer_transform(Orientation::Rotate90Cw), Transform::_90);
+        assert_eq!(buffer_transform(Orientation::Rotate180), Transform::_180);
+        assert_eq!(buffer_transform(Orientation::Rotate90Ccw), Transform::_270);
+        assert_eq!(
+            buffer_transform(Orientation::HorizontalMirror),
+            Transform::Flipped
+        );
+        assert_eq!(
+            buffer_transform(Orientation::Transpose),
+            Transform::Flipped90
+        );
+        assert_eq!(
+            buffer_transform(Orientation::VerticalMirror),
+            Transform::Flipped180
+        );
+        assert_eq!(
+            buffer_transform(Orientation::Transverse),
+            Transform::Flipped270
+        );
+    }
+
+    /// The sink is the one in-tree element that answers a `videoflip`'s
+    /// question, so this is what keeps the rotation deferred.
+    #[test]
+    fn advertises_that_it_absorbs_orientation() {
+        assert_eq!(
+            WaylandSink::new().absorbs_orientation(),
+            cfg!(feature = "metadata")
+        );
+    }
 
     /// The sink converts on the CPU into `wl_shm`, so it has to tell a GPU decoder to
     /// download. The allocation cascade reads this declaration, so getting it

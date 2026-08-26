@@ -15,12 +15,105 @@
 //!
 //! [`Frame`]: crate::frame::Frame
 
+/// One of the eight ways a picture can be turned without resampling it: the
+/// four quarter rotations and the four mirrors (the dihedral group of the
+/// square). Named after GStreamer's `videoflip` methods, and the vocabulary
+/// [`OrientationMeta`] carries.
+///
+/// Not gated on the `metadata` feature: the enum is what `videoflip` runs on
+/// either way. Only the meta wrapper needs the feature.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Orientation {
+    /// No turn (GStreamer `none`).
+    Identity,
+    /// A quarter turn clockwise (`clockwise`).
+    Rotate90Cw,
+    /// A half turn (`rotate-180`).
+    Rotate180,
+    /// A quarter turn counter-clockwise (`counterclockwise`).
+    Rotate90Ccw,
+    /// Mirrored left to right, i.e. reflected in the vertical axis
+    /// (`horizontal-flip`).
+    HorizontalMirror,
+    /// Mirrored top to bottom, i.e. reflected in the horizontal axis
+    /// (`vertical-flip`).
+    VerticalMirror,
+    /// Reflected in the diagonal from the upper-left corner
+    /// (`upper-left-diagonal`): the pixel at `(x, y)` reads as `(y, x)`.
+    Transpose,
+    /// Reflected in the diagonal from the upper-right corner
+    /// (`upper-right-diagonal`).
+    Transverse,
+}
+
+impl Orientation {
+    /// This orientation as `(quarter turns clockwise, mirrored first)`: every
+    /// member is a horizontal mirror (or not) followed by a rotation, which is
+    /// what makes [`compose`](Self::compose) a few lines of arithmetic instead
+    /// of a 64-entry table.
+    const fn parts(self) -> (u8, bool) {
+        match self {
+            Orientation::Identity => (0, false),
+            Orientation::Rotate90Cw => (1, false),
+            Orientation::Rotate180 => (2, false),
+            Orientation::Rotate90Ccw => (3, false),
+            Orientation::HorizontalMirror => (0, true),
+            Orientation::Transverse => (1, true),
+            Orientation::VerticalMirror => (2, true),
+            Orientation::Transpose => (3, true),
+        }
+    }
+
+    /// Inverse of [`parts`](Self::parts). `quarter_turns` must already be
+    /// reduced mod 4.
+    const fn from_parts(quarter_turns: u8, mirrored: bool) -> Orientation {
+        match (quarter_turns, mirrored) {
+            (0, false) => Orientation::Identity,
+            (1, false) => Orientation::Rotate90Cw,
+            (2, false) => Orientation::Rotate180,
+            (3, false) => Orientation::Rotate90Ccw,
+            (0, true) => Orientation::HorizontalMirror,
+            (1, true) => Orientation::Transverse,
+            (2, true) => Orientation::VerticalMirror,
+            _ => Orientation::Transpose,
+        }
+    }
+
+    /// Whether this orientation exchanges width and height. True for the two
+    /// quarter rotations and the two diagonal mirrors.
+    pub const fn swaps_dims(self) -> bool {
+        self.parts().0 % 2 == 1
+    }
+
+    /// The single orientation that does what applying `self` and then `then`
+    /// does.
+    pub const fn compose(self, then: Orientation) -> Orientation {
+        let (turns, mirrored) = self.parts();
+        let (then_turns, then_mirrored) = then.parts();
+        // A mirror reverses the sense of any rotation it is applied after, so
+        // pushing `self`'s rotation through `then`'s mirror negates it.
+        let carried = if then_mirrored { 4 - turns } else { turns };
+        Orientation::from_parts((then_turns + carried) % 4, mirrored != then_mirrored)
+    }
+
+    /// The orientation that undoes this one.
+    pub const fn inverse(self) -> Orientation {
+        let (turns, mirrored) = self.parts();
+        if mirrored {
+            // Every mirror is its own inverse.
+            self
+        } else {
+            Orientation::from_parts((4 - turns) % 4, false)
+        }
+    }
+}
+
 // ---- feature off: the zero-sized placeholder ----
 
 /// Per-frame attachable metadata set (feature `metadata` **off**): a zero-sized
 /// unit, so the baseline pays nothing. See the module docs.
 #[cfg(not(feature = "metadata"))]
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FrameMetaSet;
 
 #[cfg(not(feature = "metadata"))]
@@ -1000,6 +1093,45 @@ mod on {
         /// is exactly what a re-encode should carry into the new bitstream.
         fn propagate(&self, _transform: Transform) -> Propagation {
             Propagation::Keep
+        }
+    }
+
+    /// How the picture in this frame's buffer has to be turned to be shown the
+    /// right way up. The orientation is relative to the buffer **as stored**:
+    /// the rows and columns are exactly what the producer wrote, and a consumer
+    /// that works in display coordinates has to apply this itself.
+    ///
+    /// It is what lets a rotation stay unrealized. `videoflip` in front of a
+    /// display sink that can turn the picture for free (a Wayland
+    /// `set_buffer_transform`, a KMS plane rotation) attaches this instead of
+    /// remapping every pixel; in front of a sink that cannot, it rotates as it
+    /// always did and attaches nothing.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct OrientationMeta {
+        pub orientation: super::Orientation,
+    }
+
+    impl FrameMeta for OrientationMeta {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+        fn as_any_mut(&mut self) -> &mut dyn Any {
+            self
+        }
+        fn clone_box(&self) -> Box<dyn FrameMeta> {
+            Box::new(*self)
+        }
+        /// A scale or a colour convert rewrites the samples but keeps every row
+        /// a row and every column a column, so the turn still applies. A crop
+        /// picks its rectangle in the *stored* coordinates, so what comes out is
+        /// no longer the picture this described: keeping the turn would rotate a
+        /// region the caller chose un-rotated. A re-encode keeps it, since that
+        /// is the display matrix a container writes.
+        fn propagate(&self, transform: Transform) -> Propagation {
+            match transform {
+                Transform::Crop => Propagation::Drop,
+                _ => Propagation::Keep,
+            }
         }
     }
 

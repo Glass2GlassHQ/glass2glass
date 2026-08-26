@@ -53,7 +53,7 @@ pub(crate) fn single_plane_formats() -> impl Iterator<Item = RawVideoFormat> {
 /// formats are planar.
 pub(crate) fn single_plane_row_bytes(format: RawVideoFormat, width: u32) -> Option<usize> {
     let layout = PlaneLayout::new(format, width, 1)?;
-    (layout.count == 1).then_some(layout.planes[0].0)
+    (layout.count() == 1).then(|| layout.first_row_bytes())
 }
 
 /// The SPA format for one of our raw formats, or `None` when the element cannot
@@ -368,43 +368,52 @@ fn dmabuf_descriptor(block: &DataBlock, info: &VideoInfo) -> Option<(i32, u32, u
     (end <= block.maxsize).then_some((fd, stride, block.offset))
 }
 
-/// Tight plane geometry of a captured frame: `(row bytes, rows, stride shift)`
-/// per plane, where the shift derives a plane's stride from plane 0's (the only
-/// stride PipeWire reports for a single mapped block).
+/// Tight plane geometry of a captured frame, the shape a mapped buffer is read
+/// against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct PlaneLayout {
-    planes: [(usize, usize, u32); 3],
-    count: usize,
+    format: RawVideoFormat,
+    width: usize,
+    height: usize,
 }
 
 impl PlaneLayout {
-    /// Layout of `format` at `width` x `height`, or `None` for geometry we will
-    /// not size a buffer from.
+    /// Layout of `format` at `width` x `height`, or `None` for a format this
+    /// element does not carry and geometry we will not size a buffer from.
     pub(crate) fn new(format: RawVideoFormat, width: u32, height: u32) -> Option<Self> {
         if width == 0 || height == 0 || width > MAX_DIM || height > MAX_DIM {
             return None;
         }
-        let (w, h) = (width as usize, height as usize);
-        // rounded up, so an odd-sized frame keeps a full chroma row / column
-        let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
-        let (planes, count) = match format {
-            RawVideoFormat::I420 => ([(w, h, 0), (cw, ch, 1), (cw, ch, 1)], 3),
-            RawVideoFormat::Nv12 => ([(w, h, 0), (cw * 2, ch, 0), (0, 0, 0)], 2),
-            RawVideoFormat::Yuyv => ([(w * 2, h, 0), (0, 0, 0), (0, 0, 0)], 1),
-            RawVideoFormat::Rgba8 | RawVideoFormat::Bgra8 => {
-                ([(w * 4, h, 0), (0, 0, 0), (0, 0, 0)], 1)
-            }
-            _ => return None,
-        };
-        Some(Self { planes, count })
+        supported_formats().any(|f| f == format).then_some(Self {
+            format,
+            width: width as usize,
+            height: height as usize,
+        })
+    }
+
+    /// Per-plane `(row bytes, rows, stride shift)`, where the shift derives a
+    /// plane's stride from plane 0's (the only stride PipeWire reports for a
+    /// single mapped block).
+    fn planes(&self) -> Vec<(usize, usize, u32)> {
+        crate::paddedrows::plane_shapes_with_stride_shift(self.format, self.width, self.height)
     }
 
     /// Bytes of a tightly packed frame in this layout.
     pub(crate) fn frame_bytes(&self) -> usize {
-        self.planes[..self.count]
+        self.planes()
             .iter()
             .map(|(row_bytes, rows, _)| row_bytes * rows)
             .sum()
+    }
+
+    /// How many planes the frame has.
+    pub(crate) fn count(&self) -> usize {
+        self.planes().len()
+    }
+
+    /// Row bytes of plane 0.
+    pub(crate) fn first_row_bytes(&self) -> usize {
+        self.planes()[0].0
     }
 
     /// Append the frame in `src` to `dst`, tightly packed. `stride` is plane 0's
@@ -413,27 +422,7 @@ impl PlaneLayout {
     /// yields `None` instead of a short or out-of-range copy. `dst` may hold a
     /// partial frame on `None`, so discard it.
     pub(crate) fn copy_tight(&self, src: &[u8], stride: usize, dst: &mut Vec<u8>) -> Option<()> {
-        let mut plane_start = 0usize;
-        for &(row_bytes, rows, shift) in &self.planes[..self.count] {
-            let stride = if stride == 0 {
-                row_bytes
-            } else {
-                stride >> shift
-            };
-            if stride < row_bytes {
-                return None;
-            }
-            for row in 0..rows {
-                let start = plane_start.checked_add(stride.checked_mul(row)?)?;
-                let end = start.checked_add(row_bytes)?;
-                if end > src.len() {
-                    return None;
-                }
-                dst.extend_from_slice(&src[start..end]);
-            }
-            plane_start = plane_start.checked_add(stride.checked_mul(rows)?)?;
-        }
-        Some(())
+        crate::paddedrows::pack_tight(src, self.format, self.width, self.height, stride, dst)
     }
 }
 
@@ -687,6 +676,50 @@ mod tests {
             panic!("buffers is a range choice");
         };
         assert_eq!((default, min), (DMABUF_BUFFERS.0, DMABUF_BUFFERS.1));
+    }
+
+    /// M1059: the descriptor a dma-buf block yields is what the emitted frame
+    /// declares, so a consumer that maps the buffer finds the producer's rows
+    /// without going through the domain type.
+    #[cfg(feature = "metadata")]
+    #[test]
+    fn a_dmabuf_descriptor_becomes_the_frames_plane_layout() {
+        let info = VideoInfo {
+            format: RawVideoFormat::Bgra8,
+            width: 4,
+            height: 2,
+            fps_num: 30,
+            fps_denom: 1,
+        };
+        let block = DataBlock {
+            data_type: spa_sys::SPA_DATA_DmaBuf,
+            fd: 7,
+            offset: 8,
+            size: 56,
+            stride: 24,
+            maxsize: 64,
+        };
+        let DmaBufFrame::Ready { stride, offset, .. } = dmabuf_frame(&[block], &info) else {
+            panic!("a usable dma-buf block");
+        };
+        let layout = crate::paddedrows::padded_plane_layout(
+            info.format,
+            info.width as usize,
+            info.height as usize,
+            offset as usize,
+            stride as usize,
+        )
+        .expect("a layout for the descriptor");
+        assert_eq!(layout.count(), 1, "one dma-buf block is one plane");
+        assert_eq!(
+            layout.plane(0),
+            Some(g2g_core::meta::Plane {
+                offset: 8,
+                stride: 24
+            })
+        );
+        // row 1 sits one pitch past the block offset, not one row width
+        assert_eq!(layout.row_range(0, 1, 16), Some(32..48));
     }
 
     /// A dequeued dma-buf buffer yields the descriptor to share downstream, and

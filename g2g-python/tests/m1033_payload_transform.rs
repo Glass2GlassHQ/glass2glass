@@ -6,7 +6,7 @@
 //! `PyTransform` gets the same `input-caps` / `output-caps` split M1031 gave the
 //! aggregator, declares the boundary its output caps make it, and pushes the
 //! payload the hosted element emitted (M1032) rather than the buffer it read.
-#![cfg(feature = "python")]
+#![cfg(feature = "analytics")]
 
 use g2g_core::memory::SystemSlice;
 use g2g_core::{

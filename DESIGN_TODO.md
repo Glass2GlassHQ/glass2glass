@@ -42,10 +42,9 @@ Sequenced next:
 
 - **Grow the conformance matrix.** Persist evidence from the resource-owning
   tests still uncovered as they are validated (`vaapi` decode, the Android and
-  macOS device paths), and add in-process batteries for further sans-IO cores.
-  Get the device-tagged `Hardware` rows into CI by wiring a runner that has the
-  hardware: a `Hardware` row can only come from a run on the device, so a runner
-  without a GPU or a camera will never produce one.
+  macOS device paths). Get the device-tagged `Hardware` rows into CI by wiring a
+  runner that has the hardware: a `Hardware` row can only come from a run on the
+  device, so a runner without a GPU or a camera will never produce one.
 - **Boundary-scoped time newtypes (landed, M618 + M622).** `TaiNs` / `RtpTs` in
   `g2g-core::time`; `MediaClock` takes a `TaiNs`, returns an `RtpTs`. M622 added
   `RefNs` (the monotonic reference) and typed the PTP servo's reference-vs-master
@@ -238,10 +237,6 @@ _(No open seek / auto-plug items.)_
   the `vulkanvideo` GPU tests (the element is vendor-neutral; hardware-gated,
   `VERIFY:` markers in-tree). Optional extra output domains (multiplanar NV12 /
   `VulkanTexture`).
-- A device whose `pictureAccessGranularity` exceeds 16 needs the coded extent
-  rounded up to it (and the decoded picture cropped back), which the AMD / Intel
-  runs above would be the first to hit: every extent g2g derives is a multiple of
-  16, and this host reports exactly 16, so nothing exercises it.
 
 ## CUDA / display
 
@@ -381,9 +376,6 @@ _(No open seek / auto-plug items.)_
   instead of GStreamer's 'AV1G' once any demuxer reads the former (GStreamer's
   `tsdemux` activates no program for an 'AV01' stream, and ffmpeg's muxer writes
   no descriptor at all, so it identifies neither).
-- **DVB EIT schedule tables** (`table_id` 0x50..=0x6F) and the event
-  `start_time` / `duration` fields: present/following event text is what the tag
-  posting carries.
 - **WebVTT track writing** (mkv, mp4 `wvtt`): blocked on a reference peer.
   ffmpeg reads only the WebM `D_WEBVTT/*` carriage (different block payload)
   and cannot write WebVTT into MP4 at all; reading both stays supported.
@@ -470,15 +462,10 @@ _(No open parser items.)_
     the per-count `ChannelLayout` convention) once a real source needs one.
   Glyph
   rendering (incl. `vertical:rl` / `lr` layout) is the `truetype-overlay` feature
-  above. Still open in cue CSS: a glyph outline (`-webkit-text-stroke`), the
-  `::cue(b)` / `::cue(i)` type selectors, `ruby` / `ruby-text` annotations, and
-  `font-family` on a rule.
-- **Tensor substrate orientation descriptor (M181).** A deferred
-  rotate/mirror descriptor the sink can absorb in hardware (DRM/KMS, Wayland
-  `set_buffer_transform`, VAAPI VPP, D3D11 VideoProcessor), with eager strided /
-  CPU realization as the fallback. Pieces: descriptor on the frame; sink
-  capability advertisement; `VideoFlip` branching; one sink (KMS / Wayland)
-  wired. (Eager strided views defeat hardware flip silicon.)
+  above.
+- Apply an `OrientationMeta` in `kmssink` (a DRM plane rotation), on the VAAPI
+  VPP path and on the D3D11 VideoProcessor path, so those sinks advertise
+  `Reconfigure::AbsorbOrientation` too.
 
 ## Compositor
 
@@ -486,8 +473,6 @@ _(No open parser items.)_
 
 ## Metadata (FrameMeta / AnalyticsMeta)
 
-- Further `PlaneLayout` producers (v4l2 `bytesperline` padding, decoder DMA-BUF
-  pitches); only the wgpu compositor readback emits it today.
 - `NvEnc` AV1 encode (needs RTX 40-series hardware).
 
 ## Clock-synchronised presentation
@@ -500,9 +485,8 @@ _(No open parser items.)_
   the lip-sync payoff are done and CI-validated (M590/M591/M592). Still owed:
   extend the same clock discipline to `PipeWireSink` (blocked on the pinned
   `pipewire` 0.8 binding lacking `pw_stream_get_time`, plus playout accounting
-  in its leaky realtime callback); an on-display lip-sync soak on real hardware;
-  and optionally a tighter drift model (outlier rejection on a glitchy
-  `delay()`, faster convergence).
+  in its leaky realtime callback), and an on-display lip-sync soak on real
+  hardware.
 - **PTP clock (`PtpClock`)** DONE (M593 A/B/C + M594): `PtpServo`
   (offset/delay -> `DriftClock`, lock/holdover/outlier), `PtpClock` +
   `ClockPriority::PtpGrandmaster` (elected over audio/video, slaved to sinks via
@@ -556,11 +540,6 @@ _(No open tag items.)_
 
 ## Python-element host (M198+)
 
-- Decide whether the CUDA-array-interface export drops its advisory read-only
-  flag: torch's `torch.as_tensor` rejects `data[1] = True` outright (cupy
-  ignores it), and clearing it licenses writes into tee-shared GPU surfaces.
-- Device selection to go with the carried ordinal: a `cuda-device` property on
-  the CUDA producers feeding the ordinal they open.
 - `bytestream-format=` names container encodings only, so a plain-text file with
   no `.txt` extension has no escape hatch: `filesrc` types text by extension, and
   content sniffing deliberately refuses prose because any "is this text" rule
@@ -579,8 +558,6 @@ _(No open tag items.)_
 
 - Whether the distro ships `g2g-core` in a local cargo registry for offline
   plugin builds.
-- Plugin signing (a detached signature the loader verifies before `dlopen`,
-  on top of the v2 capability declaration).
 
 ## Embedded
 

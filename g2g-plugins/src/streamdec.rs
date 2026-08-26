@@ -592,7 +592,7 @@ fn nv12_to_i420(nv12: &Nv12Frame) -> Vec<u8> {
     let n = cw * ch;
     let mut u = Vec::with_capacity(n);
     let mut v = Vec::with_capacity(n);
-    for px in nv12.chroma.chunks_exact(2) {
+    for px in nv12.chroma.as_chunks::<2>().0 {
         u.push(px[0]);
         v.push(px[1]);
     }

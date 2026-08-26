@@ -1,12 +1,19 @@
 //! Software flip / rotate (Tier-1 A). Mirrors or rotates a raw video frame by
-//! a fixed `FlipMethod`, preserving the pixel format, for portrait-mode mobile
+//! a fixed `Orientation`, preserving the pixel format, for portrait-mode mobile
 //! sources fed to a landscape pipeline. No resampling, a per-plane coordinate
 //! remap.
 //!
-//! `Rotate90Cw` / `Rotate90Ccw` swap width and height; the mirrors and
-//! `Rotate180` keep the geometry. 4:2:0 (`Nv12`, `I420`) needs even input dims
-//! since chroma is subsampled 2x2; odd dims fail negotiation/configure loud.
-//! Packed formats (`Rgba8`, `Bgra8`) take any dims. CPU-only `no_std` baseline.
+//! The quarter rotations and the two diagonal mirrors swap width and height;
+//! `Rotate180` and the axis mirrors keep the geometry. 4:2:0 (`Nv12`, `I420`)
+//! needs even input dims since chroma is subsampled 2x2; odd dims fail
+//! negotiation/configure loud. Packed formats (`Rgba8`, `Bgra8`) take any dims.
+//! CPU-only `no_std` baseline.
+//!
+//! When the sink downstream answers the first push with
+//! `Reconfigure::AbsorbOrientation` (M1058), the frame goes through untouched
+//! with an `OrientationMeta` on it instead and the output caps stay the input
+//! caps: the sink turns the picture at present time and the pixel work
+//! disappears.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -20,12 +27,13 @@ use alloc::string::String;
 use g2g_core::frame::Frame;
 use g2g_core::log::{short_type_name, LogName, LogSource};
 use g2g_core::memory::{SystemSlice, SystemView};
+pub use g2g_core::meta::Orientation;
 use g2g_core::tensor::TensorView;
 use g2g_core::{g2g_info, g2g_trace};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
     MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
-    PropValue, PropertySpec, Rate, RawVideoFormat,
+    PropValue, PropertySpec, PushOutcome, Rate, RawVideoFormat, Reconfigure,
 };
 
 const FORMATS: [RawVideoFormat; 12] = [
@@ -43,58 +51,44 @@ const FORMATS: [RawVideoFormat; 12] = [
     RawVideoFormat::I444p12,
 ];
 
-/// The geometric operation `VideoFlip` applies. The two 90-degree rotations
-/// transpose the frame and so swap width and height; the rest preserve it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FlipMethod {
-    /// Pass-through (GStreamer `none`). The default, matching `gst videoflip`.
-    Identity,
-    HorizontalMirror,
-    VerticalMirror,
-    Rotate90Cw,
-    Rotate180,
-    Rotate90Ccw,
-}
-
-impl FlipMethod {
-    fn swaps_dims(self) -> bool {
-        matches!(self, FlipMethod::Rotate90Cw | FlipMethod::Rotate90Ccw)
-    }
-}
-
 /// # Example
 ///
 /// ```no_run
-/// use g2g_plugins::videoflip::{FlipMethod, VideoFlip};
+/// use g2g_plugins::videoflip::{Orientation, VideoFlip};
 ///
-/// let flip = VideoFlip::new(FlipMethod::Rotate90Cw);
+/// let flip = VideoFlip::new(Orientation::Rotate90Cw);
 /// ```
 #[derive(Debug)]
 pub struct VideoFlip {
-    method: FlipMethod,
+    method: Orientation,
     /// Format, dims, and framerate of the configured input stream, updated by
     /// a mid-stream `CapsChanged`.
     input: Option<(RawVideoFormat, u32, u32, Rate)>,
     configured: bool,
     last_caps: Option<Caps>,
     emitted: u64,
+    /// Set once downstream answered a push with `Reconfigure::AbsorbOrientation`
+    /// (M1058): frames then pass through with an `OrientationMeta` attached and
+    /// the output caps are the input caps.
+    descriptor_mode: bool,
     /// Instance name assigned by the runner (M179), for this element's log lines.
     log_name: LogName,
 }
 
 impl VideoFlip {
-    pub fn new(method: FlipMethod) -> Self {
+    pub fn new(method: Orientation) -> Self {
         Self {
             method,
             input: None,
             configured: false,
             last_caps: None,
             emitted: 0,
+            descriptor_mode: false,
             log_name: LogName::new(),
         }
     }
 
-    pub fn method(&self) -> FlipMethod {
+    pub fn method(&self) -> Orientation {
         self.method
     }
 
@@ -130,14 +124,170 @@ impl VideoFlip {
         Ok((*format, *w, *h, framerate.clone()))
     }
 
-    /// Output geometry for the configured method: the 90-degree rotations
-    /// transpose, the mirrors and 180 preserve.
+    /// Output geometry for the configured method: the quarter rotations and the
+    /// diagonal mirrors transpose, the axis mirrors and 180 preserve. In
+    /// descriptor mode nothing is remapped, so the geometry is the input's.
     fn output_dims(&self, w: u32, h: u32) -> (u32, u32) {
-        if self.method.swaps_dims() {
+        if self.method.swaps_dims() && !self.descriptor_mode {
             (h, w)
         } else {
             (w, h)
         }
+    }
+
+    /// The caps this element emits for an input stream, under the mode it is in.
+    fn output_caps(&self, format: RawVideoFormat, w: u32, h: u32, rate: &Rate) -> Caps {
+        let (out_w, out_h) = self.output_dims(w, h);
+        Caps::RawVideo {
+            format,
+            width: Dim::Fixed(out_w),
+            height: Dim::Fixed(out_h),
+            framerate: rate.clone(),
+            interlace: g2g_core::Interlace::Any,
+        }
+    }
+
+    /// The descriptor-mode output for `frame`: the very same buffer, in the
+    /// same memory domain, with this element's turn recorded on it. An
+    /// orientation already on the input composes with ours, so two flips in a
+    /// row reach the sink as the one turn they add up to.
+    fn describe(&self, frame: Frame) -> Frame {
+        #[cfg_attr(not(feature = "metadata"), allow(unused_mut))]
+        let mut meta = frame.meta;
+        #[cfg(feature = "metadata")]
+        if self.method != Orientation::Identity {
+            use g2g_core::meta::OrientationMeta;
+            let carried = meta
+                .get::<OrientationMeta>()
+                .map_or(Orientation::Identity, |m| m.orientation);
+            meta.attach(OrientationMeta {
+                orientation: carried.compose(self.method),
+            });
+        }
+        Frame {
+            domain: frame.domain,
+            timing: frame.timing,
+            sequence: self.emitted,
+            meta,
+        }
+    }
+
+    /// The eager output for `frame`: the pixels remapped by `method`.
+    ///
+    /// Packed RGBA/BGRA already in shared CPU memory is the zero-copy case: a
+    /// flip is a pure coordinate remap, so we compose strides on the *same*
+    /// `Arc` backing and copy nothing. Planar (4:2:0) is excluded because its
+    /// subsampled planes aren't one strided tensor (see tensor.rs), and an owned
+    /// `System` buffer has no shared backing to alias, so both fall through to
+    /// the copy path.
+    fn flip_frame(
+        &self,
+        frame: &Frame,
+        format: RawVideoFormat,
+        in_w: u32,
+        in_h: u32,
+    ) -> Result<Frame, G2gError> {
+        let (out_w, out_h) = self.output_dims(in_w, in_h);
+        let packed = matches!(format, RawVideoFormat::Rgba8 | RawVideoFormat::Bgra8);
+        let out_frame = match &frame.domain {
+            MemoryDomain::SystemView(sv) if packed => {
+                let out_view = flip_view(*sv.view(), self.method);
+                g2g_trace!(
+                    self,
+                    "zero-copy flip frame #{} {}x{} -> {}x{}",
+                    self.emitted,
+                    in_w,
+                    in_h,
+                    out_w,
+                    out_h
+                );
+                Frame {
+                    domain: MemoryDomain::SystemView(SystemView::new(
+                        sv.backing().clone(),
+                        out_view,
+                    )),
+                    timing: frame.timing,
+                    sequence: self.emitted,
+                    meta: Default::default(),
+                }
+            }
+            _ => {
+                // Copy path: owned `System` bytes, or a non-packed
+                // `SystemView` materialized to contiguous first.
+                let flipped = match &frame.domain {
+                    MemoryDomain::System(slice) => {
+                        let src = slice.as_slice();
+                        if src.len() < frame_byte_size(format, in_w, in_h) {
+                            return Err(G2gError::CapsMismatch);
+                        }
+                        flip(src, format, (in_w as usize, in_h as usize), self.method)
+                    }
+                    MemoryDomain::SystemView(sv) => {
+                        let src = sv.materialize();
+                        if src.len() < frame_byte_size(format, in_w, in_h) {
+                            return Err(G2gError::CapsMismatch);
+                        }
+                        flip(&src, format, (in_w as usize, in_h as usize), self.method)
+                    }
+                    _ => return Err(G2gError::UnsupportedDomain),
+                };
+                g2g_trace!(
+                    self,
+                    "flip frame #{} {}x{} -> {}x{}",
+                    self.emitted,
+                    in_w,
+                    in_h,
+                    out_w,
+                    out_h
+                );
+                Frame {
+                    domain: MemoryDomain::System(SystemSlice::from_boxed(flipped)),
+                    timing: frame.timing,
+                    sequence: self.emitted,
+                    meta: Default::default(),
+                }
+            }
+        };
+        Ok(out_frame)
+    }
+
+    /// Answer a downstream `AbsorbOrientation` seen on `outcome`: stop remapping
+    /// pixels, let the turn ride along as metadata instead, and re-announce the
+    /// output shape, which is now the input's. Returns false when `outcome` was
+    /// anything else.
+    ///
+    /// The pre-send check holds the packet that carried the advertisement back
+    /// rather than enqueuing it, so the caller has to send that packet again.
+    async fn absorb(
+        &mut self,
+        out: &mut dyn OutputSink,
+        outcome: PushOutcome,
+    ) -> Result<bool, G2gError> {
+        if !matches!(
+            outcome,
+            PushOutcome::Reconfigure(Reconfigure::AbsorbOrientation)
+        ) {
+            return Ok(false);
+        }
+        if !self.descriptor_mode {
+            self.descriptor_mode = true;
+            g2g_info!(
+                self,
+                "downstream absorbs orientation: attaching {:?} instead of rotating",
+                self.method
+            );
+        }
+        // The shape announced before the switch was the rotated one, which no
+        // frame will now carry: a display sink configured on it would open a
+        // window at the wrong size and rebuild it on the first frame.
+        if let Some((format, w, h, rate)) = self.input.clone() {
+            let caps = self.output_caps(format, w, h, &rate);
+            if self.last_caps.as_ref() != Some(&caps) {
+                out.push(PipelinePacket::CapsChanged(caps.clone())).await?;
+            }
+            self.last_caps = Some(caps);
+        }
+        Ok(true)
     }
 }
 
@@ -233,87 +383,32 @@ impl AsyncElement for VideoFlip {
                         None => return Err(G2gError::NotConfigured),
                     };
 
-                    let (out_w, out_h) = self.output_dims(in_w, in_h);
-                    let new_caps = Caps::RawVideo {
-                        format,
-                        width: Dim::Fixed(out_w),
-                        height: Dim::Fixed(out_h),
-                        framerate: rate,
-                        interlace: g2g_core::Interlace::Any,
-                    };
+                    // Announce the shape for the mode we are in. A sink's
+                    // `AbsorbOrientation` lands on the first push this element
+                    // makes, and the pre-send check holds that packet back, so
+                    // the announcement is re-made under the mode it switched us
+                    // to and no frame is ever rotated first.
+                    let new_caps = self.output_caps(format, in_w, in_h, &rate);
                     if self.last_caps.as_ref() != Some(&new_caps) {
-                        out.push(PipelinePacket::CapsChanged(new_caps.clone()))
+                        let outcome = out
+                            .push(PipelinePacket::CapsChanged(new_caps.clone()))
                             .await?;
-                        self.last_caps = Some(new_caps);
+                        if !self.absorb(out, outcome).await? {
+                            self.last_caps = Some(new_caps);
+                        }
                     }
 
-                    // Packed RGBA/BGRA already in shared CPU memory is the
-                    // zero-copy case: a flip is a pure coordinate remap, so we
-                    // compose strides on the *same* `Arc` backing and copy
-                    // nothing. Planar (4:2:0) is excluded because its subsampled
-                    // planes aren't one strided tensor (see tensor.rs), and an
-                    // owned `System` buffer has no shared backing to alias, so
-                    // both fall through to the copy path below.
-                    let packed = matches!(format, RawVideoFormat::Rgba8 | RawVideoFormat::Bgra8);
-                    let out_frame = match &frame.domain {
-                        MemoryDomain::SystemView(sv) if packed => {
-                            let out_view = flip_view(*sv.view(), self.method);
-                            g2g_trace!(
-                                self,
-                                "zero-copy flip frame #{} {}x{} -> {}x{}",
-                                self.emitted,
-                                in_w,
-                                in_h,
-                                out_w,
-                                out_h
-                            );
-                            Frame {
-                                domain: MemoryDomain::SystemView(SystemView::new(
-                                    sv.backing().clone(),
-                                    out_view,
-                                )),
-                                timing: frame.timing,
-                                sequence: self.emitted,
-                                meta: Default::default(),
-                            }
+                    if !self.descriptor_mode {
+                        let out_frame = self.flip_frame(&frame, format, in_w, in_h)?;
+                        let outcome = out.push(PipelinePacket::DataFrame(out_frame)).await?;
+                        if !self.absorb(out, outcome).await? {
+                            self.emitted += 1;
+                            return Ok(());
                         }
-                        _ => {
-                            // Copy path: owned `System` bytes, or a non-packed
-                            // `SystemView` materialized to contiguous first.
-                            let flipped = match &frame.domain {
-                                MemoryDomain::System(slice) => {
-                                    let src = slice.as_slice();
-                                    if src.len() < frame_byte_size(format, in_w, in_h) {
-                                        return Err(G2gError::CapsMismatch);
-                                    }
-                                    flip(src, format, (in_w as usize, in_h as usize), self.method)
-                                }
-                                MemoryDomain::SystemView(sv) => {
-                                    let src = sv.materialize();
-                                    if src.len() < frame_byte_size(format, in_w, in_h) {
-                                        return Err(G2gError::CapsMismatch);
-                                    }
-                                    flip(&src, format, (in_w as usize, in_h as usize), self.method)
-                                }
-                                _ => return Err(G2gError::UnsupportedDomain),
-                            };
-                            g2g_trace!(
-                                self,
-                                "flip frame #{} {}x{} -> {}x{}",
-                                self.emitted,
-                                in_w,
-                                in_h,
-                                out_w,
-                                out_h
-                            );
-                            Frame {
-                                domain: MemoryDomain::System(SystemSlice::from_boxed(flipped)),
-                                timing: frame.timing,
-                                sequence: self.emitted,
-                                meta: Default::default(),
-                            }
-                        }
-                    };
+                        // The remapped frame was held back, so `frame` is still
+                        // the one downstream is owed: send it as a descriptor.
+                    }
+                    let out_frame = self.describe(frame);
                     self.emitted += 1;
                     out.push(PipelinePacket::DataFrame(out_frame)).await?;
                 }
@@ -323,16 +418,27 @@ impl AsyncElement for VideoFlip {
                     // record last_caps to suppress the data path's duplicate
                     // emit; do NOT accept_input, which would clobber the input
                     // with our own (rotated) output and corrupt the next frame.
-                    out.push(PipelinePacket::CapsChanged(c.clone())).await?;
-                    self.last_caps = Some(c);
+                    // A sink that absorbs the orientation answers here, and
+                    // `absorb` re-announces the corrected shape in place of the
+                    // packet the pre-send check held back.
+                    let outcome = out.push(PipelinePacket::CapsChanged(c.clone())).await?;
+                    if !self.absorb(out, outcome).await? {
+                        self.last_caps = Some(c);
+                    }
                 }
                 PipelinePacket::Flush => {
                     self.last_caps = None;
-                    out.push(PipelinePacket::Flush).await?;
+                    let outcome = out.push(PipelinePacket::Flush).await?;
+                    if self.absorb(out, outcome).await? {
+                        out.push(PipelinePacket::Flush).await?;
+                    }
                 }
                 // Segment is control: forward unchanged.
                 PipelinePacket::Segment(seg) => {
-                    out.push(PipelinePacket::Segment(seg)).await?;
+                    let outcome = out.push(PipelinePacket::Segment(seg)).await?;
+                    if self.absorb(out, outcome).await? {
+                        out.push(PipelinePacket::Segment(seg)).await?;
+                    }
                 }
                 PipelinePacket::Eos => {}
                 other => {
@@ -341,6 +447,14 @@ impl AsyncElement for VideoFlip {
             }
             Ok(())
         })
+    }
+
+    /// This is the element a sink's `AbsorbOrientation` is aimed at, so the
+    /// advertisement stops here rather than travelling on toward the source.
+    /// Without the `metadata` feature there is no meta set to record the turn
+    /// on, so the advertisement passes through and the flip stays eager.
+    fn handles_orientation(&self) -> bool {
+        cfg!(feature = "metadata")
     }
 
     fn properties(&self) -> &'static [PropertySpec] {
@@ -383,36 +497,41 @@ static VIDEOFLIP_PROPS: &[PropertySpec] = &[PropertySpec::new(
 )
 .with_enum_values(
     "none | identity | clockwise | rotate-90cw | rotate-180 | counterclockwise | rotate-90ccw \
-     | horizontal-flip | horizontal-mirror | vertical-flip | vertical-mirror",
+     | horizontal-flip | horizontal-mirror | vertical-flip | vertical-mirror \
+     | upper-left-diagonal | transpose | upper-right-diagonal | transverse",
 )
 .with_default("none")];
 
-/// Parse a `method` property string to a [`FlipMethod`]. Canonical names are
+/// Parse a `method` property string to an [`Orientation`]. Canonical names are
 /// GStreamer's `videoflip` nicknames; the historical g2g spellings are accepted
-/// as aliases so both port. GStreamer's `upper-left-diagonal` /
-/// `upper-right-diagonal` / `automatic` have no g2g equivalent and return `None`
-/// (a loud "unsupported method" rather than silent wrong behavior).
-fn flip_method_from_str(s: &str) -> Option<FlipMethod> {
+/// as aliases so both port. GStreamer's `automatic` (take the turn from the
+/// image's own tag) has no g2g equivalent and returns `None` (a loud
+/// "unsupported method" rather than silent wrong behavior).
+fn flip_method_from_str(s: &str) -> Option<Orientation> {
     match s {
-        "none" | "identity" => Some(FlipMethod::Identity),
-        "horizontal-flip" | "horizontal-mirror" => Some(FlipMethod::HorizontalMirror),
-        "vertical-flip" | "vertical-mirror" => Some(FlipMethod::VerticalMirror),
-        "clockwise" | "rotate-90cw" => Some(FlipMethod::Rotate90Cw),
-        "rotate-180" => Some(FlipMethod::Rotate180),
-        "counterclockwise" | "rotate-90ccw" => Some(FlipMethod::Rotate90Ccw),
+        "none" | "identity" => Some(Orientation::Identity),
+        "horizontal-flip" | "horizontal-mirror" => Some(Orientation::HorizontalMirror),
+        "vertical-flip" | "vertical-mirror" => Some(Orientation::VerticalMirror),
+        "clockwise" | "rotate-90cw" => Some(Orientation::Rotate90Cw),
+        "rotate-180" => Some(Orientation::Rotate180),
+        "counterclockwise" | "rotate-90ccw" => Some(Orientation::Rotate90Ccw),
+        "upper-left-diagonal" | "transpose" => Some(Orientation::Transpose),
+        "upper-right-diagonal" | "transverse" => Some(Orientation::Transverse),
         _ => None,
     }
 }
 
-/// The canonical (GStreamer) `method` property string for a [`FlipMethod`].
-fn flip_method_to_str(m: FlipMethod) -> &'static str {
+/// The canonical (GStreamer) `method` property string for an [`Orientation`].
+fn flip_method_to_str(m: Orientation) -> &'static str {
     match m {
-        FlipMethod::Identity => "none",
-        FlipMethod::HorizontalMirror => "horizontal-flip",
-        FlipMethod::VerticalMirror => "vertical-flip",
-        FlipMethod::Rotate90Cw => "clockwise",
-        FlipMethod::Rotate180 => "rotate-180",
-        FlipMethod::Rotate90Ccw => "counterclockwise",
+        Orientation::Identity => "none",
+        Orientation::HorizontalMirror => "horizontal-flip",
+        Orientation::VerticalMirror => "vertical-flip",
+        Orientation::Rotate90Cw => "clockwise",
+        Orientation::Rotate180 => "rotate-180",
+        Orientation::Rotate90Ccw => "counterclockwise",
+        Orientation::Transpose => "upper-left-diagonal",
+        Orientation::Transverse => "upper-right-diagonal",
     }
 }
 
@@ -450,28 +569,32 @@ impl LogSource for VideoFlip {
 /// one spatial axis; a 90-degree rotation transposes the H/W axes then reverses
 /// one. The channel axis (2) is never touched, so each pixel's bytes stay
 /// intact. Matches [`src_coord`]'s mapping exactly, verified by the m180 test.
-fn flip_view(view: TensorView, method: FlipMethod) -> TensorView {
+fn flip_view(view: TensorView, method: Orientation) -> TensorView {
     match method {
-        FlipMethod::Identity => view,
-        FlipMethod::HorizontalMirror => view.reversed_axis(1),
-        FlipMethod::VerticalMirror => view.reversed_axis(0),
-        FlipMethod::Rotate180 => view.reversed_axis(0).reversed_axis(1),
-        FlipMethod::Rotate90Cw => view.transposed(0, 1).reversed_axis(1),
-        FlipMethod::Rotate90Ccw => view.transposed(0, 1).reversed_axis(0),
+        Orientation::Identity => view,
+        Orientation::HorizontalMirror => view.reversed_axis(1),
+        Orientation::VerticalMirror => view.reversed_axis(0),
+        Orientation::Rotate180 => view.reversed_axis(0).reversed_axis(1),
+        Orientation::Rotate90Cw => view.transposed(0, 1).reversed_axis(1),
+        Orientation::Rotate90Ccw => view.transposed(0, 1).reversed_axis(0),
+        Orientation::Transpose => view.transposed(0, 1),
+        Orientation::Transverse => view.transposed(0, 1).reversed_axis(0).reversed_axis(1),
     }
 }
 
 /// Source coordinate that feeds output `(ox, oy)` for one plane of input dims
 /// `(pw, ph)`. The 90-degree rotations read from a transposed position; the
 /// mirrors and 180 reflect within the same dims.
-fn src_coord(method: FlipMethod, ox: usize, oy: usize, pw: usize, ph: usize) -> (usize, usize) {
+fn src_coord(method: Orientation, ox: usize, oy: usize, pw: usize, ph: usize) -> (usize, usize) {
     match method {
-        FlipMethod::Identity => (ox, oy),
-        FlipMethod::HorizontalMirror => (pw - 1 - ox, oy),
-        FlipMethod::VerticalMirror => (ox, ph - 1 - oy),
-        FlipMethod::Rotate180 => (pw - 1 - ox, ph - 1 - oy),
-        FlipMethod::Rotate90Cw => (oy, ph - 1 - ox),
-        FlipMethod::Rotate90Ccw => (pw - 1 - oy, ox),
+        Orientation::Identity => (ox, oy),
+        Orientation::HorizontalMirror => (pw - 1 - ox, oy),
+        Orientation::VerticalMirror => (ox, ph - 1 - oy),
+        Orientation::Rotate180 => (pw - 1 - ox, ph - 1 - oy),
+        Orientation::Rotate90Cw => (oy, ph - 1 - ox),
+        Orientation::Rotate90Ccw => (pw - 1 - oy, ox),
+        Orientation::Transpose => (oy, ox),
+        Orientation::Transverse => (pw - 1 - oy, ph - 1 - ox),
     }
 }
 
@@ -482,7 +605,7 @@ fn transform_plane(
     pw: usize,
     ph: usize,
     channels: usize,
-    method: FlipMethod,
+    method: Orientation,
 ) -> Vec<u8> {
     let (ow, oh) = if method.swaps_dims() {
         (ph, pw)
@@ -503,7 +626,12 @@ fn transform_plane(
 
 /// Flip one frame by `method`, preserving `format`. `src` is validated to hold
 /// the input frame; dims are even when the format is 4:2:0.
-fn flip(src: &[u8], format: RawVideoFormat, dims: (usize, usize), method: FlipMethod) -> Box<[u8]> {
+fn flip(
+    src: &[u8],
+    format: RawVideoFormat,
+    dims: (usize, usize),
+    method: Orientation,
+) -> Box<[u8]> {
     let (in_w, in_h) = dims;
     match format {
         RawVideoFormat::Rgba8 | RawVideoFormat::Bgra8 => {
@@ -572,23 +700,23 @@ mod tests {
         // 2x2 single-channel plane: row0 [0,1], row1 [2,3].
         let src = vec![0u8, 1, 2, 3];
         assert_eq!(
-            transform_plane(&src, 2, 2, 1, FlipMethod::HorizontalMirror),
+            transform_plane(&src, 2, 2, 1, Orientation::HorizontalMirror),
             vec![1, 0, 3, 2]
         );
         assert_eq!(
-            transform_plane(&src, 2, 2, 1, FlipMethod::VerticalMirror),
+            transform_plane(&src, 2, 2, 1, Orientation::VerticalMirror),
             vec![2, 3, 0, 1]
         );
         assert_eq!(
-            transform_plane(&src, 2, 2, 1, FlipMethod::Rotate180),
+            transform_plane(&src, 2, 2, 1, Orientation::Rotate180),
             vec![3, 2, 1, 0]
         );
         assert_eq!(
-            transform_plane(&src, 2, 2, 1, FlipMethod::Rotate90Cw),
+            transform_plane(&src, 2, 2, 1, Orientation::Rotate90Cw),
             vec![2, 0, 3, 1]
         );
         assert_eq!(
-            transform_plane(&src, 2, 2, 1, FlipMethod::Rotate90Ccw),
+            transform_plane(&src, 2, 2, 1, Orientation::Rotate90Ccw),
             vec![1, 3, 0, 2]
         );
     }
@@ -597,7 +725,7 @@ mod tests {
     fn transform_plane_rotate90_swaps_dims() {
         // 3x2 plane: row0 [0,1,2], row1 [3,4,5]. Rotate 90 CW -> 2x3.
         let src: Vec<u8> = (0..6).collect();
-        let out = transform_plane(&src, 3, 2, 1, FlipMethod::Rotate90Cw);
+        let out = transform_plane(&src, 3, 2, 1, Orientation::Rotate90Cw);
         assert_eq!(out, vec![3, 0, 4, 1, 5, 2]);
     }
 
@@ -609,7 +737,7 @@ mod tests {
             &src,
             RawVideoFormat::Rgba8,
             (2, 2),
-            FlipMethod::HorizontalMirror,
+            Orientation::HorizontalMirror,
         );
         // row 0 swaps pixel 0 and 1: [4,5,6,7, 0,1,2,3].
         assert_eq!(&out[0..4], &[4, 5, 6, 7]);
@@ -624,7 +752,7 @@ mod tests {
         for (i, b) in src.iter_mut().enumerate() {
             *b = i as u8;
         }
-        let out = flip(&src, RawVideoFormat::Nv12, (4, 2), FlipMethod::Rotate90Cw);
+        let out = flip(&src, RawVideoFormat::Nv12, (4, 2), Orientation::Rotate90Cw);
         assert_eq!(out.len(), 2 * 4 * 3 / 2);
         // luma plane is the 4x2 [0..8] rotated to 2x4: first output row is the
         // input's left column bottom-to-top -> src[4], src[0].
@@ -633,7 +761,7 @@ mod tests {
 
     #[test]
     fn derived_output_swaps_dims_for_rotation() {
-        let flip = VideoFlip::new(FlipMethod::Rotate90Cw);
+        let flip = VideoFlip::new(Orientation::Rotate90Cw);
         let CapsConstraint::DerivedOutput(f) = flip.caps_constraint_as_transform() else {
             panic!("expected DerivedOutput");
         };
@@ -658,7 +786,7 @@ mod tests {
 
     #[test]
     fn derived_output_preserves_dims_for_mirror_and_rejects_compressed() {
-        let flip = VideoFlip::new(FlipMethod::HorizontalMirror);
+        let flip = VideoFlip::new(Orientation::HorizontalMirror);
         let CapsConstraint::DerivedOutput(f) = flip.caps_constraint_as_transform() else {
             panic!("expected DerivedOutput");
         };
@@ -685,17 +813,17 @@ mod tests {
     #[test]
     fn configure_rejects_odd_yuv420_and_compressed() {
         // odd-width 4:2:0 fails.
-        let mut f = VideoFlip::new(FlipMethod::Rotate90Cw);
+        let mut f = VideoFlip::new(Orientation::Rotate90Cw);
         assert_eq!(
             f.configure_pipeline(&nv12_caps(5, 4))
                 .expect_err("odd width for 4:2:0"),
             G2gError::CapsMismatch
         );
         // even 4:2:0 is accepted.
-        let mut f = VideoFlip::new(FlipMethod::Rotate90Cw);
+        let mut f = VideoFlip::new(Orientation::Rotate90Cw);
         assert!(f.configure_pipeline(&nv12_caps(4, 4)).is_ok());
         // packed RGBA at any dims is accepted.
-        let mut f = VideoFlip::new(FlipMethod::Rotate180);
+        let mut f = VideoFlip::new(Orientation::Rotate180);
         assert!(f.configure_pipeline(&rgba_caps(5, 3)).is_ok());
     }
 
@@ -721,7 +849,7 @@ mod tests {
             &src,
             RawVideoFormat::I444p10,
             (2, 2),
-            FlipMethod::HorizontalMirror,
+            Orientation::HorizontalMirror,
         );
         assert_eq!(out.len(), 3 * 2 * 2 * 2);
         let rd = |o: usize| u16::from_le_bytes([out[o], out[o + 1]]);
@@ -734,18 +862,18 @@ mod tests {
     fn rotate90_rejects_4_2_2_but_accepts_4_4_4() {
         // A 90-degree rotation transposes chroma subsampling: invalid for 4:2:2
         // (not a representable I422), fine for symmetric 4:4:4 / 4:2:0.
-        let mut f = VideoFlip::new(FlipMethod::Rotate90Cw);
+        let mut f = VideoFlip::new(Orientation::Rotate90Cw);
         assert_eq!(
             f.configure_pipeline(&planar_caps(RawVideoFormat::I422, 4, 4))
                 .expect_err("4:2:2 transpose"),
             G2gError::CapsMismatch
         );
-        let mut f = VideoFlip::new(FlipMethod::Rotate90Cw);
+        let mut f = VideoFlip::new(Orientation::Rotate90Cw);
         assert!(f
             .configure_pipeline(&planar_caps(RawVideoFormat::I444p10, 4, 4))
             .is_ok());
         // A non-swapping method accepts 4:2:2 fine.
-        let mut f = VideoFlip::new(FlipMethod::HorizontalMirror);
+        let mut f = VideoFlip::new(Orientation::HorizontalMirror);
         assert!(f
             .configure_pipeline(&planar_caps(RawVideoFormat::I422, 4, 4))
             .is_ok());

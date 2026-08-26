@@ -115,8 +115,10 @@ async fn directml_session_infers_identically() {
                 let slice = f.domain.as_system_slice()?;
                 Some(
                     slice
-                        .chunks_exact(4)
-                        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .map(|c| f32::from_le_bytes(*c))
                         .collect(),
                 )
             }
@@ -158,8 +160,10 @@ async fn cuda_session_infers_identically() {
                 let slice = f.domain.as_system_slice()?;
                 Some(
                     slice
-                        .chunks_exact(4)
-                        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .map(|c| f32::from_le_bytes(*c))
                         .collect(),
                 )
             }
@@ -239,8 +243,10 @@ async fn inference_emits_tensor_caps_and_normalized_values() {
     let bytes = slice;
     assert_eq!(bytes.len(), 12 * 4, "1x3x2x2 f32 tensor");
     let values: Vec<f32> = bytes
-        .chunks_exact(4)
-        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| f32::from_le_bytes(*c))
         .collect();
     let expected: Vec<f32> = [0u8, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14]
         .iter()
@@ -289,8 +295,10 @@ async fn tensor_input_mode_feeds_preprocessed_tensor_directly() {
                 let slice = f.domain.as_system_slice()?;
                 Some(
                     slice
-                        .chunks_exact(4)
-                        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .map(|c| f32::from_le_bytes(*c))
                         .collect(),
                 )
             }
@@ -342,8 +350,10 @@ async fn uint8_tensor_input_runs_a_quantized_model() {
                 let slice = f.domain.as_system_slice()?;
                 Some(
                     slice
-                        .chunks_exact(4)
-                        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .map(|c| f32::from_le_bytes(*c))
                         .collect(),
                 )
             }

@@ -269,7 +269,7 @@ fn write_ppm(path: &std::path::Path, w: u32, h: u32, rgba: &[u8]) {
     let mut f = std::fs::File::create(path).unwrap_or_else(|e| panic!("create {path:?}: {e}"));
     write!(f, "P6\n{w} {h}\n255\n").expect("ppm header");
     let mut rgb = Vec::with_capacity((w * h * 3) as usize);
-    for px in rgba.chunks_exact(4) {
+    for px in rgba.as_chunks::<4>().0 {
         rgb.extend_from_slice(&px[..3]);
     }
     f.write_all(&rgb).expect("ppm body");

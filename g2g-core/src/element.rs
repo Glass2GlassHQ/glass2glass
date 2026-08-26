@@ -44,6 +44,14 @@ pub enum Reconfigure {
     /// channel to the encoder. The GStreamer `GstForceKeyUnit` upstream-event
     /// analog.
     ForceKeyframe,
+    /// The sink downstream applies an
+    /// [`OrientationMeta`](crate::meta::OrientationMeta) itself, so a rotation
+    /// upstream should attach the descriptor rather than remap the pixels. Sent
+    /// once by a display sink that can turn a buffer for free (a Wayland
+    /// `set_buffer_transform`, a KMS plane rotation) before the first frame is
+    /// pulled, and relayed past any transform that does not answer it (see
+    /// [`AsyncElement::handles_orientation`]).
+    AbsorbOrientation,
 }
 
 /// Downstream-originated quality-of-service signal: a synchronising sink is
@@ -349,6 +357,32 @@ pub trait AsyncElement: ElementBound {
         false
     }
 
+    /// Whether this sink applies an
+    /// [`OrientationMeta`](crate::meta::OrientationMeta) itself, i.e. it can
+    /// turn the picture for free at present time. The runner sends
+    /// [`Reconfigure::AbsorbOrientation`] up this sink's input link before the
+    /// first frame is pulled, so a `videoflip` upstream attaches the descriptor
+    /// instead of remapping pixels. Default `false`: the flip realizes the
+    /// rotation as it always did.
+    fn absorbs_orientation(&self) -> bool {
+        false
+    }
+
+    /// Whether [`Reconfigure::AbsorbOrientation`] stops at this element instead
+    /// of being relayed toward the source. `true` for `videoflip`, which answers
+    /// it by switching to the descriptor, and for any transform whose output
+    /// geometry is chosen in the buffer's stored coordinates (a crop), which
+    /// would mean something different once the picture is turned. Default
+    /// `false`: the advertisement crosses.
+    ///
+    /// An element that returns `true` sees the signal as
+    /// [`PushOutcome::Reconfigure`] from its own `push`, and the pre-send check
+    /// holds that packet back rather than enqueuing it, so it has to push the
+    /// packet again.
+    fn handles_orientation(&self) -> bool {
+        false
+    }
+
     /// Whether this element acts on a downstream QoS report itself, ie it sheds
     /// work when the sink is behind (a decoder skipping non-reference frames).
     /// Default `false`: the runner relays the report onto the element's input
@@ -640,6 +674,16 @@ pub trait DynAsyncElement: ElementBound {
         false
     }
 
+    /// Dyn-safe mirror of [`AsyncElement::absorbs_orientation`] (M1058).
+    fn absorbs_orientation(&self) -> bool {
+        false
+    }
+
+    /// Dyn-safe mirror of [`AsyncElement::handles_orientation`] (M1058).
+    fn handles_orientation(&self) -> bool {
+        false
+    }
+
     /// Dyn-safe mirror of [`AsyncElement::handles_qos`] (M997).
     fn handles_qos(&self) -> bool {
         false
@@ -814,6 +858,14 @@ impl<T: AsyncElement> DynAsyncElement for T {
         AsyncElement::handles_bitrate_requests(self)
     }
 
+    fn absorbs_orientation(&self) -> bool {
+        AsyncElement::absorbs_orientation(self)
+    }
+
+    fn handles_orientation(&self) -> bool {
+        AsyncElement::handles_orientation(self)
+    }
+
     fn handles_qos(&self) -> bool {
         AsyncElement::handles_qos(self)
     }
@@ -981,6 +1033,14 @@ impl<'b> AsyncElement for DynRef<'b> {
         self.0.handles_bitrate_requests()
     }
 
+    fn absorbs_orientation(&self) -> bool {
+        self.0.absorbs_orientation()
+    }
+
+    fn handles_orientation(&self) -> bool {
+        self.0.handles_orientation()
+    }
+
     fn handles_qos(&self) -> bool {
         self.0.handles_qos()
     }
@@ -1116,6 +1176,14 @@ impl<'b> DynAsyncElement for &'b mut (dyn DynAsyncElement + 'b) {
 
     fn handles_bitrate_requests(&self) -> bool {
         (**self).handles_bitrate_requests()
+    }
+
+    fn absorbs_orientation(&self) -> bool {
+        (**self).absorbs_orientation()
+    }
+
+    fn handles_orientation(&self) -> bool {
+        (**self).handles_orientation()
     }
 
     fn handles_qos(&self) -> bool {

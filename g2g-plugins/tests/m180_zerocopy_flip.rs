@@ -5,10 +5,11 @@
 //! flip* (zero-copy witness), and the sink's materialized image is a correct
 //! rotate-180 of the source's pattern (correctness).
 
+use g2g_core::meta::Orientation;
 use g2g_core::runtime::run_source_transform_sink;
 use g2g_core::{Caps, Dim, PipelineClock, Rate, RawVideoFormat};
 use g2g_plugins::fakesink::FakeSink;
-use g2g_plugins::videoflip::{FlipMethod, VideoFlip};
+use g2g_plugins::videoflip::VideoFlip;
 use g2g_plugins::videotestsrc::{Pattern, VideoTestSrc};
 
 struct NullClock;
@@ -34,7 +35,7 @@ async fn rotate180_flips_through_shared_memory_with_zero_copies() {
     let mut src = VideoTestSrc::new(w, h, 30, frames)
         .with_pattern(Pattern::SmpteBars)
         .with_shared_memory();
-    let mut flip = VideoFlip::new(FlipMethod::Rotate180);
+    let mut flip = VideoFlip::new(Orientation::Rotate180);
     let mut sink = FakeSink::new();
 
     run_source_transform_sink(&mut src, &mut flip, &mut sink, &NullClock, 4)

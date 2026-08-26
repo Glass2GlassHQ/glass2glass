@@ -6,6 +6,25 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1075: `scaletempo` stretches audio to the segment rate without changing its pitch.
+- M1073: G.711 and IMA ADPCM codec elements: `mulawenc` / `mulawdec` / `alawenc` / `alawdec` / `adpcmenc` / `adpcmdec`, and `wavparse` reads their WAV payloads.
+- M1072: `interleave` merges N mono PCM streams into one N-channel stream and `deinterleave` splits one back into its channels.
+- M1071: `avidemux` and `avimux` read and write the AVI container.
+- M1070: `valve`, `fakesrc`, and the unix `fdsrc` / `fdsink` pair join the core elements.
+- M1069: `autovideosrc` / `autoaudiosrc` aliases, plain decoder and mixer aliases, and `rtp*` / `gl*` / `cuda*` family hints in `g2g-inspect --gst`.
+- M1068: plain TCP byte-stream elements: `tcpserversrc`, `tcpclientsrc`, `tcpserversink` and `tcpclientsink`.
+- M1067: `imagefreeze` repeats one still frame as a video stream at a configured framerate.
+- M1066: `audiorate` fills timestamp gaps with silence and drops overlapping samples to keep a PCM stream contiguous.
+- M1065: `mpegaudioparse` and `id3demux` frame MPEG audio and read its ID3 tags, and `typefind` types an MP3 by content.
+- M1064: the audio-master `DriftClock` rejects outlier observations and weights recent samples more heavily in its fit.
+- M1063: in-process conformance batteries cover the container, ancillary-data and parser cores.
+- M1062: the elements that open a CUDA context take the device ordinal from a `cuda-device-id` property.
+- M1061: the plugin loader verifies a detached Ed25519 signature before `dlopen` when the host is given trusted keys.
+- M1060: Vulkan Video DPB and decode-output images round up to the device's picture access granularity.
+- M1059: `v4l2src`, `pipewirevideosrc` and `vaapidec` declare a `PlaneLayout` for their padded rows instead of repacking them when a consumer asks.
+- M1058: `videoflip` attaches an orientation descriptor instead of rotating when the sink applies it itself, and `waylandsink` does.
+- M1057: cue CSS adds `-webkit-text-stroke`, the `::cue(b)` type selectors, `<ruby>` annotations and `font-family`.
+- M1056: the TS demuxers read the DVB EIT schedule tables and each event's start time and duration.
 - M1055: cue text styling adds `font-weight` / `font-style` / `text-decoration` / `font-stretch` and the `<b>` / `<i>` / `<u>` tags.
 - M1054: a whole browser graph runs inside a dedicated Worker, presenting to an `OffscreenCanvas` the page transfers in.
 - M1053: `WebCodecsDecode` decodes H.265 as well as H.264, taking the codec from the negotiated caps.

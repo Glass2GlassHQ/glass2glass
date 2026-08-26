@@ -13,13 +13,24 @@ layout(local_size_x = 8, local_size_y = 8) in;
 layout(set = 0, binding = 0) uniform sampler2D ycbcrTex;
 layout(set = 0, binding = 1, rgba8) uniform writeonly image2D outImg;
 
+// `srcWidth` / `srcHeight` are the sampled image's extent, which can exceed the
+// output extent when the decoder rounded the picture up to the device's picture
+// access granularity. A ycbcr sampler forbids textureSize, so the size is pushed.
+// `xfer` is unused here (the 10-bit sibling branches on it); the two shaders
+// share one push-constant layout.
+layout(push_constant) uniform Pc {
+    uint xfer;
+    uint srcWidth;
+    uint srcHeight;
+} pc;
+
 void main() {
     ivec2 p = ivec2(gl_GlobalInvocationID.xy);
     ivec2 sz = imageSize(outImg);
     if (p.x >= sz.x || p.y >= sz.y) {
         return;
     }
-    vec2 uv = (vec2(p) + 0.5) / vec2(sz);
+    vec2 uv = (vec2(p) + 0.5) / vec2(pc.srcWidth, pc.srcHeight);
     vec4 rgb = textureLod(ycbcrTex, uv, 0.0);
     imageStore(outImg, p, vec4(rgb.rgb, 1.0));
 }

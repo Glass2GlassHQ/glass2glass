@@ -183,8 +183,14 @@ of any line with `g2g-launch -v`, or a Graphviz graph with `--dot`.
 Most names match GStreamer. Differences are handled two ways:
 
 - **Aliases** resolve automatically in the registry (e.g. `autovideosink`,
-  `avdec_h264` → `ffmpegdec`, `vah264dec` → `vaapidec`, `vp8enc`/`vp9enc` →
-  `vpxenc`). See `default_registry` in [g2g-plugins/src/registry.rs](g2g-plugins/src/registry.rs).
+  `autovideosrc`/`autoaudiosrc`, `avdec_h264` → `ffmpegdec`, `vah264dec` →
+  `vaapidec`, `vp8enc`/`vp9enc` → `vpxenc`, `webmmux` → `matroskamux`,
+  `adder`/`liveadder` → `audiomixer`, `videomixer` → `compositor`, `rtmp2sink` →
+  `rtmpsink`, and the plain decoder names `vp8dec`/`vp9dec`/`mpeg2dec` →
+  `ffmpegdec`, `mpg123audiodec`/`flacdec`/`a52dec`/`faad` → `ffmpegaudiodec`).
+  See `default_registry` in [g2g-plugins/src/registry.rs](g2g-plugins/src/registry.rs).
+  `autovideosrc`/`autoaudiosrc` have no test-source fallback, so a build with no
+  capture element leaves the name unresolved rather than producing a test pattern.
 - **Look up any gst name**: `g2g-inspect --gst <name>` tells you whether g2g has
   it, renames it, or has no equivalent (with a suggestion):
 
@@ -202,6 +208,25 @@ channel=<name>`, the application registers the matching feed/sink before launch)
 as programmatic graph nodes, or via the Python host (`pysrc`/`pyelement`). The
 table lives in [g2g-plugins/src/gst_compat.rs](g2g-plugins/src/gst_compat.rs)
 and is easy to extend.
+
+Whole plugins answer by family rather than name:
+
+| gst names | g2g |
+| :--- | :--- |
+| `rtp*pay` / `rtp*depay` | payloading is inside `udpsink` / `udpsrc` (and `rtspsrc`, `webrtcsink`) |
+| `rtpbin`, `rtpsession`, `rtpjitterbuffer`, `rtprtx*`, `rtpulpfec*`, `rtpst2022-1-fec*` | `udpsrc` properties (`jitter-latency`, `jitter-depth`, `rtcp-rr-interval`, `nack`, `rtx-payload-type`, `fec-payload-type`, `flexfec-payload-type`) and `udpsink` properties (`rtcp-sr-interval`, `retransmit`, `fec-columns`, `fec-rows`) |
+| `gl*` | no OpenGL elements; `wgpusink`, `wgpucompositor`, `dmabuftowgpu` / `wgputodmabuf` |
+| `cuda*` | `nvdec` / `nvenc`, and `localcudasrc` / `localcudasink` for cross-process CUDA memory |
+| `vulkan*` | `vulkanvideodec` decodes, `wgpusink` presents |
+| `va*dec` / `vaapi*dec` | `vaapidec` |
+| `nv*dec` / `nv*enc` | `nvdec` / `nvenc` |
+| `ladspa*` | no LADSPA host; `volume`, `audiopanorama`, `equalizer-3bands`, `level`, `cutter` |
+| effectv (`*tv`) and geometrictransform (`bulge`, `fisheye`, ...) | no effects plugins; `videoflip`, `videocrop`, `videobox`, `videoscale` are the geometry elements |
+| `qml*` / `gtk*` sinks | no toolkit sinks; render with `wgpusink` or pull frames with `appsink` |
+| `decklink*` | no DeckLink support |
+
+Registered names and the exact table always win over a family rule, so `nvdec`
+and `vaapidec` still answer for themselves.
 
 ### STANAG 4609 / KLV metadata: beyond parity
 
@@ -408,6 +433,13 @@ directory from `$G2G_PLUGIN_PATH` (`:`-separated), then resolves the element by
 name: `g2g-launch --plugin libmy_plugin.so ... ! myfilter ! ...`. `g2g-inspect`
 loads plugins the same way so their elements list. A complete, buildable example
 is `g2g-plugins/tests/fixtures/example-plugin`.
+
+**Signatures.** A host built with `plugin-signing` and given Ed25519 public keys,
+through `$G2G_PLUGIN_TRUSTED_KEYS` (`:`-separated key files) or
+`g2g-inspect --trusted-key <path>`, loads only plugins carrying a matching
+`<plugin>.sig`, checked before the `dlopen`. Produce the keys and signatures with
+`g2g-plugin-sign keygen | sign | verify`. With no keys configured nothing is
+verified, which is the default.
 
 **ABI lock.** Rust has no stable ABI, so a plugin and the host must share the
 same `g2g-core` version, the same `rustc`, and the same layout-affecting features

@@ -606,9 +606,15 @@ pub struct SenderSink {
     /// slot instead, forwarding it one hop toward the source. A generic
     /// transform thus relays QoS without having to observe it in `process`.
     upstream_qos: Option<QosSlot>,
-    /// As `upstream_qos`, for downstream keyframe requests (M720): set on a
-    /// transform whose element does not consume `PushOutcome::Reconfigure`.
+    /// As `upstream_qos`, for downstream reverse-channel `Reconfigure`s the
+    /// producer does not answer (M720): set on a transform's output adapter.
     upstream_reconfigure: Option<ReconfigureSlot>,
+    /// Which `Reconfigure` variants this adapter's own producer answers, i.e.
+    /// which ones surface as `PushOutcome::Reconfigure` instead of travelling
+    /// on. Per variant because one element answers one signal and passes the
+    /// other: `videoflip` takes `AbsorbOrientation` and still relays a
+    /// keyframe request.
+    reconfigure_answered: ReconfigureAnswered,
     /// As `upstream_qos`, for downstream bitrate targets (M720).
     upstream_bitrate: Option<BitrateSlot>,
     /// M759 auto-propagation: the propagated metadata set the owning transform
@@ -634,6 +640,46 @@ pub struct SenderSink {
     /// In-flight push phase, so `poll_push` runs the pre-send steps exactly
     /// once per packet and a blocked send resumes where it left off.
     push_phase: PushPhase,
+}
+
+/// Tell the producer feeding `in_rx` that this sink applies an
+/// [`OrientationMeta`](crate::meta::OrientationMeta) itself, so a `videoflip`
+/// upstream attaches the descriptor instead of remapping pixels.
+///
+/// Called while the runner is still wiring arms, not from inside the sink arm:
+/// the arms are polled source-first, so an advertisement made once the sink arm
+/// runs would arrive a linkful of already-rotated frames late.
+pub(crate) fn advertise_orientation(in_rx: &LinkReceiver, absorbs: bool) {
+    if absorbs {
+        in_rx.request_reconfigure(crate::element::Reconfigure::AbsorbOrientation);
+    }
+}
+
+/// Which [`Reconfigure`](crate::element::Reconfigure) variants a
+/// [`SenderSink`]'s producer answers itself. A variant it does not answer goes
+/// onto the upstream link when one is wired, and is dropped otherwise: the
+/// pre-send check never enqueues the packet it intercepts, so surfacing a signal
+/// to a producer that ignores it would cost that packet.
+///
+/// `Propose` / `Renegotiate` are not listed: every producer answers those.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ReconfigureAnswered {
+    /// [`Reconfigure::ForceKeyframe`](crate::element::Reconfigure::ForceKeyframe).
+    pub keyframe: bool,
+    /// [`Reconfigure::AbsorbOrientation`](crate::element::Reconfigure::AbsorbOrientation).
+    pub orientation: bool,
+}
+
+impl Default for ReconfigureAnswered {
+    fn default() -> Self {
+        // A source adapter's defaults: a keyframe request reaches the source
+        // element (an encoder-less live source may act on it), an orientation
+        // advertisement never does, since only a flip answers one.
+        ReconfigureAnswered {
+            keyframe: true,
+            orientation: false,
+        }
+    }
 }
 
 /// See [`SenderSink::push_phase`].
@@ -663,6 +709,7 @@ impl SenderSink {
             probe,
             upstream_qos: None,
             upstream_reconfigure: None,
+            reconfigure_answered: ReconfigureAnswered::default(),
             upstream_bitrate: None,
             #[cfg(feature = "metadata")]
             meta_stash: None,
@@ -723,11 +770,17 @@ impl SenderSink {
         self.upstream_qos = Some(upstream);
     }
 
-    /// Relay a downstream keyframe-request (reconfigure) onto the upstream link
-    /// (M720), for a transform whose element does not consume it, so a PLI
-    /// crosses any number of pass-through transforms to reach the encoder.
-    pub(crate) fn relay_reconfigure_to(&mut self, upstream: ReconfigureSlot) {
+    /// Relay onto the upstream link (M720) every downstream `Reconfigure` the
+    /// owning transform does not answer itself (`answered`), so a PLI or an
+    /// orientation advertisement crosses any number of pass-through transforms
+    /// to reach the encoder / the flip.
+    pub(crate) fn relay_reconfigure_to(
+        &mut self,
+        upstream: ReconfigureSlot,
+        answered: ReconfigureAnswered,
+    ) {
         self.upstream_reconfigure = Some(upstream);
+        self.reconfigure_answered = answered;
     }
 
     /// Relay a downstream bitrate target onto the upstream link (M720).
@@ -740,24 +793,39 @@ impl SenderSink {
     /// priority because it is negotiation-critical; QoS is advisory. When a
     /// relay target is set (a transform adapter), an observed QoS is forwarded
     /// upstream and the outcome stays `Accepted` rather than surfacing `Qos`.
-    /// Drain a pending downstream reconfigure: `ForceKeyframe` is relayed onto
-    /// the upstream link when a relay target is set (M720, a transform that
-    /// does not consume it), so a PLI crosses pass-through elements; anything
-    /// else (or no relay target) is returned for the producer to observe.
-    /// Shared by the pre-send check and the post-send outcome.
-    fn take_reconfigure_or_relay(&self) -> Option<crate::element::Reconfigure> {
+    /// Drain a pending downstream reconfigure. A variant this adapter's
+    /// producer answers ([`ReconfigureAnswered`]) is returned for it to observe;
+    /// anything else goes onto the upstream link when a relay target is set
+    /// (M720 for a PLI, M1058 for an orientation advertisement), so it crosses
+    /// pass-through elements, and is otherwise dropped. Shared by the pre-send
+    /// check and the post-send outcome, which pass `pre_send` accordingly.
+    fn take_reconfigure_or_relay(&self, pre_send: bool) -> Option<crate::element::Reconfigure> {
+        use crate::element::Reconfigure;
         let r = self.link.reconfigure.take()?;
-        match (&self.upstream_reconfigure, &r) {
-            (Some(upstream), crate::element::Reconfigure::ForceKeyframe) => {
-                upstream.store(r);
-                None
+        let answered = match &r {
+            Reconfigure::ForceKeyframe => self.reconfigure_answered.keyframe,
+            Reconfigure::AbsorbOrientation => self.reconfigure_answered.orientation,
+            Reconfigure::Propose(_) | Reconfigure::Renegotiate => true,
+        };
+        if answered {
+            // A producer answering `AbsorbOrientation` sends the packet again,
+            // because the pre-send check holds it back. Surfacing the same
+            // signal after a send would have it resend a packet that already
+            // crossed, so hold it for the next push's pre-send check instead.
+            if !pre_send && matches!(r, Reconfigure::AbsorbOrientation) {
+                self.link.reconfigure.store(r);
+                return None;
             }
-            _ => Some(r),
+            return Some(r);
         }
+        if let Some(upstream) = &self.upstream_reconfigure {
+            upstream.store(r);
+        }
+        None
     }
 
     fn post_send_outcome(&self) -> PushOutcome {
-        if let Some(r) = self.take_reconfigure_or_relay() {
+        if let Some(r) = self.take_reconfigure_or_relay(false) {
             return PushOutcome::Reconfigure(r);
         }
         if let Some(q) = self.link.qos.take() {
@@ -862,9 +930,14 @@ impl OutputSink for SenderSink {
         // link. Caller renegotiates and decides what to do with
         // `packet` (resend under agreed caps, drop, etc.). A relayed
         // ForceKeyframe hops upstream instead (M720).
-        if let Some(r) = self.take_reconfigure_or_relay() {
-            packet_slot.take();
-            return Poll::Ready(Ok(PushOutcome::Reconfigure(r)));
+        // An Eos is exempt: the producer that would resend the held-back packet
+        // has already finished, so holding one back loses it and the consumer
+        // waits for an end of stream that never comes.
+        if !matches!(packet, PipelinePacket::Eos) {
+            if let Some(r) = self.take_reconfigure_or_relay(true) {
+                packet_slot.take();
+                return Poll::Ready(Ok(PushOutcome::Reconfigure(r)));
+            }
         }
         // Past the pre-send checks the packet is committed to the link, so
         // an Eos here is one the consumer will see (M909).
@@ -1131,6 +1204,132 @@ mod link_tests {
         drop(tx);
         assert_eq!(rx.try_recv(), Some(1), "remaining value still drains");
         assert_eq!(rx.try_recv(), None, "empty and closed");
+    }
+
+    /// The adapter of a transform that answers keyframe requests but not the
+    /// orientation advertisement: the advertisement crosses toward the source,
+    /// the keyframe request stops at the element.
+    #[test]
+    fn relay_is_decided_per_variant() {
+        let (up_tx, up_rx) = link(2);
+        let (down_tx, down_rx) = link(2);
+        // The upstream link's sender is never used; only its reverse slot is.
+        drop(up_tx);
+        let mut adapter = SenderSink::new(down_tx);
+        adapter.relay_reconfigure_to(
+            up_rx.reconfigure_slot(),
+            ReconfigureAnswered {
+                keyframe: true,
+                orientation: false,
+            },
+        );
+
+        down_rx.request_reconfigure(Reconfigure::ForceKeyframe);
+        let outcome = run_to_ready(adapter.push(dummy_frame())).expect("push ok");
+        assert!(
+            matches!(
+                outcome,
+                PushOutcome::Reconfigure(Reconfigure::ForceKeyframe)
+            ),
+            "an answered variant surfaces to the producer, got {outcome:?}"
+        );
+        assert!(
+            up_rx.reconfigure.take().is_none(),
+            "an answered variant must not also travel upstream"
+        );
+
+        down_rx.request_reconfigure(Reconfigure::AbsorbOrientation);
+        let outcome = run_to_ready(adapter.push(dummy_frame())).expect("push ok");
+        assert_eq!(
+            outcome,
+            PushOutcome::Accepted,
+            "an unanswered variant is relayed, not surfaced"
+        );
+        assert!(
+            matches!(
+                up_rx.reconfigure.take(),
+                Some(Reconfigure::AbsorbOrientation)
+            ),
+            "the advertisement must reach the upstream link"
+        );
+        assert!(
+            down_rx.try_recv().is_some(),
+            "a relayed variant does not hold the packet back"
+        );
+    }
+
+    /// The mirror case: a `videoflip`'s adapter answers the advertisement and
+    /// relays a keyframe request past itself toward the encoder.
+    #[test]
+    fn an_answered_orientation_surfaces_while_a_keyframe_relays() {
+        let (up_tx, up_rx) = link(2);
+        let (down_tx, down_rx) = link(2);
+        drop(up_tx);
+        let mut adapter = SenderSink::new(down_tx);
+        adapter.relay_reconfigure_to(
+            up_rx.reconfigure_slot(),
+            ReconfigureAnswered {
+                keyframe: false,
+                orientation: true,
+            },
+        );
+
+        down_rx.request_reconfigure(Reconfigure::AbsorbOrientation);
+        let outcome = run_to_ready(adapter.push(dummy_frame())).expect("push ok");
+        assert!(
+            matches!(
+                outcome,
+                PushOutcome::Reconfigure(Reconfigure::AbsorbOrientation)
+            ),
+            "the flip has to see the advertisement, got {outcome:?}"
+        );
+        assert!(
+            down_rx.try_recv().is_none(),
+            "the pre-send check holds the packet back for the producer to resend"
+        );
+
+        down_rx.request_reconfigure(Reconfigure::ForceKeyframe);
+        let outcome = run_to_ready(adapter.push(dummy_frame())).expect("push ok");
+        assert_eq!(outcome, PushOutcome::Accepted);
+        assert!(matches!(
+            up_rx.reconfigure.take(),
+            Some(Reconfigure::ForceKeyframe)
+        ));
+    }
+
+    /// A held-back packet is the producer's to send again, and nothing sends an
+    /// end of stream twice: holding one back would leave the consumer waiting
+    /// for a stream end that never comes. Eos skips the pre-send hold.
+    #[test]
+    fn an_eos_crosses_even_with_a_reconfigure_pending() {
+        let (tx, rx) = link(2);
+        let mut sink = SenderSink::new(tx);
+        rx.request_reconfigure(Reconfigure::AbsorbOrientation);
+        let outcome = run_to_ready(sink.push(PipelinePacket::Eos)).expect("push ok");
+        assert_eq!(outcome, PushOutcome::Accepted);
+        assert!(
+            matches!(rx.try_recv(), Some(PipelinePacket::Eos)),
+            "the end of stream must still reach the consumer"
+        );
+    }
+
+    /// Without a relay target (a source's adapter) an unanswered variant is
+    /// dropped rather than surfaced: the pre-send check does not enqueue the
+    /// packet it intercepts, so handing the signal to a producer that ignores it
+    /// would cost that frame.
+    #[test]
+    fn an_unanswered_variant_without_a_relay_target_is_dropped() {
+        let (tx, rx) = link(2);
+        let mut adapter = SenderSink::new(tx);
+        adapter.reconfigure_answered = ReconfigureAnswered {
+            keyframe: true,
+            orientation: false,
+        };
+
+        rx.request_reconfigure(Reconfigure::AbsorbOrientation);
+        let outcome = run_to_ready(adapter.push(dummy_frame())).expect("push ok");
+        assert_eq!(outcome, PushOutcome::Accepted);
+        assert!(rx.try_recv().is_some(), "the frame still crossed");
     }
 
     #[test]

@@ -860,7 +860,7 @@ mod tests {
 
         // A planar I422p10 buffer of distinct 10-bit samples.
         let mut input = alloc::vec![0u8; w * h * 4];
-        for (i, word) in input.chunks_exact_mut(2).enumerate() {
+        for (i, word) in input.as_chunks_mut::<2>().0.iter_mut().enumerate() {
             word.copy_from_slice(&(((i * 17 + 3) as u16) & 0x03FF).to_le_bytes());
         }
         let mut null = Capture::default();

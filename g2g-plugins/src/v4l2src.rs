@@ -163,6 +163,81 @@ impl Mode {
     }
 }
 
+/// What the capture loop does with the rows the driver wrote.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowHandling {
+    /// The rows are already tight (or the buffer holds a compressed frame,
+    /// which has no rows): hand it over untouched, declaring nothing.
+    AsIs,
+    /// Padded rows a consumer asked to read where they lie: hand the buffer
+    /// over untouched and declare `first_stride`.
+    Declare {
+        format: g2g_core::RawVideoFormat,
+        first_stride: usize,
+    },
+    /// Padded rows nobody asked for: copy them into tight ones, which is what
+    /// every consumer assumes a raw frame is.
+    Repack {
+        format: g2g_core::RawVideoFormat,
+        first_stride: usize,
+    },
+}
+
+/// What to do with a captured buffer whose plane 0 rows sit `stride` bytes
+/// apart (the driver's `bytesperline`), given whether a consumer downstream
+/// asked for a [`PlaneLayout`](g2g_core::meta::PlaneLayout).
+pub fn row_handling(
+    format: CapturePixelFormat,
+    width: u32,
+    stride: u32,
+    layout_requested: bool,
+) -> RowHandling {
+    let Some(raw) = format.raw_format() else {
+        return RowHandling::AsIs;
+    };
+    let first_stride = stride as usize;
+    if first_stride <= crate::pixel::row_bytes(raw, width as usize) {
+        return RowHandling::AsIs;
+    }
+    match layout_requested {
+        true => RowHandling::Declare {
+            format: raw,
+            first_stride,
+        },
+        false => RowHandling::Repack {
+            format: raw,
+            first_stride,
+        },
+    }
+}
+
+/// Take one captured buffer's `w x h` frame out of the driver's memory the way
+/// `handling` says, returning the bytes to send on and the row pitch they carry
+/// (0 for tight rows). `None` when the buffer is shorter than the frame it is
+/// supposed to hold.
+pub fn take_rows(buf: &[u8], handling: RowHandling, w: u32, h: u32) -> Option<(Vec<u8>, usize)> {
+    let (w, h) = (w as usize, h as usize);
+    match handling {
+        RowHandling::AsIs => Some((buf.to_vec(), 0)),
+        RowHandling::Declare {
+            format,
+            first_stride,
+        } => {
+            let needed = crate::paddedrows::padded_frame_bytes(format, w, h, 0, first_stride)?;
+            (buf.len() >= needed).then(|| (buf.to_vec(), first_stride))
+        }
+        RowHandling::Repack {
+            format,
+            first_stride,
+        } => {
+            let mut packed =
+                Vec::with_capacity(crate::pixel::frame_byte_size(format, w as u32, h as u32));
+            crate::paddedrows::pack_tight(buf, format, w, h, first_stride, &mut packed)?;
+            Some((packed, 0))
+        }
+    }
+}
+
 /// Map a V4L2 / OS error to the reserved `G2gError::V4l2` arm, preserving the
 /// errno where one exists.
 fn v4l2_err(e: &std::io::Error) -> G2gError {
@@ -691,6 +766,10 @@ enum CapturedPayload {
 struct Captured {
     payload: CapturedPayload,
     timestamp_ns: Option<u64>,
+    /// Row pitch of the payload's first plane, or 0 when its rows are tight.
+    /// Nonzero means the padding was kept and the frame has to say where the
+    /// rows are.
+    first_stride: usize,
 }
 
 /// The driver's `timeval` capture time as nanoseconds. All-zero means the
@@ -925,6 +1004,10 @@ fn capture_dmabuf(
         let captured = Captured {
             payload: CapturedPayload::DmaBuf(queue.buffers[index].clone()),
             timestamp_ns,
+            // The exported buffer is the driver's own, so its rows sit at the
+            // driver's pitch whether or not anybody asked: a consumer that maps
+            // it reads them off the frame instead of the domain type.
+            first_stride: actual.stride as usize,
         };
         // Err means the receiver was dropped (limit reached or the pipeline shut
         // down).
@@ -971,6 +1054,9 @@ pub struct V4l2Src {
     /// The mode negotiation settled on, filled by `configure_pipeline` from the
     /// caps the solver fixed. The capture thread runs exactly this.
     chosen: Option<Mode>,
+    /// Whether a consumer asked where the rows are (M1059), so a driver that
+    /// pads them can hand its buffer over as it is instead of packing it tight.
+    keep_row_padding: bool,
     configured: bool,
 }
 
@@ -990,6 +1076,7 @@ impl V4l2Src {
             frame_limit: u64::MAX,
             modes: Vec::new(),
             chosen: None,
+            keep_row_padding: false,
             configured: false,
         }
     }
@@ -1288,6 +1375,19 @@ impl SourceLoop for V4l2Src {
         }
     }
 
+    /// M1059: a driver that pads its rows normally has them packed tight before
+    /// the frame goes downstream. A consumer that asked for a `PlaneLayout`
+    /// reads rows where they lie, so that copy can go and the driver's own
+    /// buffer travels with its pitch declared.
+    fn configure_allocation(&mut self, params: &g2g_core::AllocationParams) {
+        #[cfg(feature = "metadata")]
+        {
+            self.keep_row_padding = params.meta_requests.wants::<g2g_core::meta::PlaneLayout>();
+        }
+        #[cfg(not(feature = "metadata"))]
+        let _ = params;
+    }
+
     /// Live source: contributes one frame period of latency so the sink keeps a
     /// frame in hand and never runs dry waiting on capture.
     fn latency(&self) -> LatencyReport {
@@ -1326,6 +1426,7 @@ impl SourceLoop for V4l2Src {
             // The dmabuf path bounds it lower, since a queued frame there holds a
             // capture buffer the driver still needs.
             let io_mode = self.io_mode;
+            let keep_row_padding = self.keep_row_padding;
             let queued_frames = match io_mode {
                 IoMode::DmaBuf => DMABUF_INFLIGHT,
                 IoMode::Auto | IoMode::Mmap => BUFFER_COUNT as usize,
@@ -1341,20 +1442,30 @@ impl SourceLoop for V4l2Src {
                     return capture_dmabuf(&device, mode, min_bytes, &tx);
                 }
                 let dev = Device::with_path(&device).map_err(|e| v4l2_err(&e))?;
-                dev.set_format(&Format::new(w, h, FourCC::new(&mode.fourcc)))
+                // The driver's own bytesperline for the format it accepted: a
+                // device may pad rows, and reading them as tight ones shears
+                // the picture.
+                let actual = dev
+                    .set_format(&Format::new(w, h, FourCC::new(&mode.fourcc)))
                     .map_err(|e| v4l2_err(&e))?;
                 let _ = dev.set_params(&Parameters::with_fps(fps));
                 let mut stream = MmapStream::with_buffers(&dev, Type::VideoCapture, BUFFER_COUNT)
                     .map_err(|e| v4l2_err(&e))?;
+                let handling = row_handling(mode.format, w, actual.stride, keep_row_padding);
 
                 loop {
                     let (buf, meta) = stream.next().map_err(|e| v4l2_err(&e))?;
                     let n = (meta.bytesused as usize).min(buf.len());
-                    let mut payload = Vec::with_capacity(n);
-                    payload.extend_from_slice(&buf[..n]);
+                    let Some((payload, first_stride)) = take_rows(&buf[..n], handling, w, h) else {
+                        // The buffer does not hold the frame the geometry
+                        // claims. Skipping it captures again rather than
+                        // pushing a malformed frame downstream.
+                        continue;
+                    };
                     let captured = Captured {
                         payload: CapturedPayload::Bytes(payload),
                         timestamp_ns: buffer_timestamp_ns(&meta.timestamp),
+                        first_stride,
                     };
                     // Err means the receiver was dropped (limit reached or the
                     // pipeline shut down).
@@ -1408,7 +1519,7 @@ impl SourceLoop for V4l2Src {
                     }
                     CapturedPayload::DmaBuf(buffer) => MemoryDomain::DmaBuf(buffer),
                 };
-                let frame = Frame {
+                let mut frame = Frame {
                     domain,
                     timing: FrameTiming {
                         pts_ns: pts,
@@ -1423,6 +1534,16 @@ impl SourceLoop for V4l2Src {
                     sequence: seq,
                     meta: Default::default(),
                 };
+                if let Some(raw) = mode.format.raw_format() {
+                    crate::paddedrows::declare_padded_rows(
+                        &mut frame,
+                        raw,
+                        w as usize,
+                        h as usize,
+                        0,
+                        captured.first_stride,
+                    );
+                }
                 out.push(PipelinePacket::DataFrame(frame)).await?;
                 prev_pts = pts;
                 seq += 1;
@@ -1495,6 +1616,100 @@ mod tests {
         LIVE_CAMERA
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    #[test]
+    fn tight_rows_are_never_touched() {
+        // bytesperline == the packed row: nothing to declare and nothing to
+        // copy, whether or not a consumer asked.
+        for requested in [false, true] {
+            assert_eq!(
+                row_handling(CapturePixelFormat::Yuyv, 8, 16, requested),
+                RowHandling::AsIs
+            );
+        }
+        // MJPEG's buffer is a compressed frame, so `bytesperline` says nothing
+        // about it.
+        assert_eq!(
+            row_handling(CapturePixelFormat::Mjpeg, 8, 4096, true),
+            RowHandling::AsIs
+        );
+    }
+
+    #[test]
+    fn padded_rows_are_packed_unless_a_consumer_asked_for_them() {
+        assert_eq!(
+            row_handling(CapturePixelFormat::Yuyv, 8, 24, false),
+            RowHandling::Repack {
+                format: g2g_core::RawVideoFormat::Yuyv,
+                first_stride: 24
+            }
+        );
+        assert_eq!(
+            row_handling(CapturePixelFormat::Nv12, 8, 12, true),
+            RowHandling::Declare {
+                format: g2g_core::RawVideoFormat::Nv12,
+                first_stride: 12
+            }
+        );
+    }
+
+    /// A 4x2 NV12 frame at a 6-byte pitch: 2 luma rows then 1 chroma row, each
+    /// with 2 bytes of padding after the 4 that count.
+    fn padded_nv12() -> (Vec<u8>, Vec<u8>) {
+        let padded = std::vec![
+            1, 2, 3, 4, 0xff, 0xff, // Y row 0
+            5, 6, 7, 8, 0xff, 0xff, // Y row 1
+            9, 10, 11, 12, 0xff, 0xff, // interleaved UV row
+        ];
+        let tight = std::vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+        (padded, tight)
+    }
+
+    #[test]
+    fn a_repack_packs_every_plane_and_declares_nothing() {
+        let (padded, tight) = padded_nv12();
+        let handling = row_handling(CapturePixelFormat::Nv12, 4, 6, false);
+        let (bytes, stride) = take_rows(&padded, handling, 4, 2).expect("the buffer holds a frame");
+        assert_eq!(bytes, tight);
+        assert_eq!(stride, 0, "packed rows carry no pitch");
+    }
+
+    #[test]
+    fn a_declared_frame_keeps_the_driver_bytes_and_its_pitch() {
+        let (padded, _) = padded_nv12();
+        let handling = row_handling(CapturePixelFormat::Nv12, 4, 6, true);
+        let (bytes, stride) = take_rows(&padded, handling, 4, 2).expect("the buffer holds a frame");
+        assert_eq!(bytes, padded, "the driver's buffer travels untouched");
+        assert_eq!(stride, 6);
+
+        // And the rows it declares are the ones a consumer would read.
+        #[cfg(feature = "metadata")]
+        {
+            let layout = crate::paddedrows::padded_plane_layout(
+                g2g_core::RawVideoFormat::Nv12,
+                4,
+                2,
+                0,
+                stride,
+            )
+            .expect("a layout for the driver's pitch");
+            let rows: Vec<u8> = (0..2)
+                .flat_map(|row| bytes[layout.row_range(0, row, 4).unwrap()].to_vec())
+                .chain(bytes[layout.row_range(1, 0, 4).unwrap()].to_vec())
+                .collect();
+            assert_eq!(rows, padded_nv12().1);
+        }
+    }
+
+    #[test]
+    fn a_buffer_short_of_the_frame_is_dropped() {
+        // The chroma row ends at byte 16, so 15 bytes cannot hold the frame.
+        let (padded, _) = padded_nv12();
+        for requested in [false, true] {
+            let handling = row_handling(CapturePixelFormat::Nv12, 4, 6, requested);
+            assert_eq!(take_rows(&padded[..15], handling, 4, 2), None);
+        }
     }
 
     #[test]

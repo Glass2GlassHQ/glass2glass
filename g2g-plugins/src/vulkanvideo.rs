@@ -109,6 +109,11 @@ pub struct VulkanVideoDecodeCaps {
     pub max_active_reference_pictures: u32,
     pub min_bitstream_buffer_offset_alignment: u64,
     pub min_bitstream_buffer_size_alignment: u64,
+    /// The unit in which the device accesses video picture resources. A DPB or
+    /// output image must be at least the coded picture rounded up to this, since
+    /// the decode may touch the whole granularity block containing the last row
+    /// or column ([`aligned_extent`]).
+    pub picture_access_granularity: (u32, u32),
     /// The decoded picture can alias its DPB reference image (no extra copy).
     pub dpb_and_output_coincide: bool,
     /// The codec Std header version the driver implements; a video session must
@@ -326,6 +331,10 @@ pub unsafe fn probe_physical_device(
     let max_active_reference_pictures = caps.max_active_reference_pictures;
     let min_bitstream_buffer_offset_alignment = caps.min_bitstream_buffer_offset_alignment;
     let min_bitstream_buffer_size_alignment = caps.min_bitstream_buffer_size_alignment;
+    let picture_access_granularity = (
+        caps.picture_access_granularity.width,
+        caps.picture_access_granularity.height,
+    );
     let std_header_version = caps.std_header_version;
     // `caps` (Copy) is last used above; NLL ends its `push_next` borrow of
     // `decode_caps` here, so the decode-specific flags read below.
@@ -341,9 +350,27 @@ pub unsafe fn probe_physical_device(
         max_active_reference_pictures,
         min_bitstream_buffer_offset_alignment,
         min_bitstream_buffer_size_alignment,
+        picture_access_granularity,
         dpb_and_output_coincide,
         std_header_version,
     })
+}
+
+/// Round a coded picture extent up to whole `granularity` blocks. The device
+/// accesses video picture resources a block at a time, so every image a decode
+/// session writes (DPB slots, decode output) must be at least this big even when
+/// the picture itself is smaller; the picture still occupies the top-left corner
+/// and is copied out at its own extent. A zero granularity is treated as 1: the
+/// spec forbids it, but a driver reporting it must not divide by zero here.
+pub fn aligned_extent(extent: (u32, u32), granularity: (u32, u32)) -> (u32, u32) {
+    let round_up_dim = |value: u32, granularity: u32| {
+        let granularity = granularity.max(1);
+        value.div_ceil(granularity).saturating_mul(granularity)
+    };
+    (
+        round_up_dim(extent.0, granularity.0),
+        round_up_dim(extent.1, granularity.1),
+    )
 }
 
 // ============================================================================
@@ -5539,6 +5566,10 @@ unsafe fn alloc_bind_image_raw(
 /// reference for subsequent pictures (the DPB loop needs this; the one-shot IDR
 /// path, which throws the image away, does not).
 ///
+/// `nv12_extent` is the sampled image's own extent, which exceeds `w` x `h` when
+/// the picture was rounded up to the device's picture access granularity; the
+/// shader needs it to address texel (x, y) of a padded image.
+///
 /// # Safety
 /// `nv12` must be a valid image on `raw_device`, decoded and idle (its decode
 /// fence was waited), in `VIDEO_DECODE_DPB_KHR` layout, and accessible from
@@ -5552,6 +5583,7 @@ unsafe fn nv12_to_wgpu_texture(
     compute_queue: vk::Queue,
     compute_family: u32,
     nv12: vk::Image,
+    nv12_extent: (u32, u32),
     w: u32,
     h: u32,
     restore_to_dpb: bool,
@@ -5648,7 +5680,13 @@ unsafe fn nv12_to_wgpu_texture(
             .create_descriptor_set_layout(&dsl_ci, None)
             .map_err(err)?;
         let set_layouts = [dsl];
-        let pl_ci = vk::PipelineLayoutCreateInfo::default().set_layouts(&set_layouts);
+        let pc_ranges = [vk::PushConstantRange::default()
+            .stage_flags(vk::ShaderStageFlags::COMPUTE)
+            .offset(0)
+            .size(crate::gpu::YCBCR_PUSH_CONSTANT_SIZE)];
+        let pl_ci = vk::PipelineLayoutCreateInfo::default()
+            .set_layouts(&set_layouts)
+            .push_constant_ranges(&pc_ranges);
         let pipeline_layout = dev.create_pipeline_layout(&pl_ci, None).map_err(err)?;
 
         let code = ash::util::read_spv(&mut std::io::Cursor::new(YCBCR_COMP_SPV))
@@ -5753,6 +5791,13 @@ unsafe fn nv12_to_wgpu_texture(
             0,
             &[set],
             &[],
+        );
+        dev.cmd_push_constants(
+            cb,
+            pipeline_layout,
+            vk::ShaderStageFlags::COMPUTE,
+            0,
+            &crate::gpu::ycbcr_push_constants(0, nv12_extent),
         );
         dev.cmd_dispatch(cb, w.div_ceil(8), h.div_ceil(8), 1);
         // RGBA general -> shader-read for wgpu sampling. When this NV12 image is a
@@ -5887,6 +5932,10 @@ struct YcbcrConverter {
     /// HDR transfer selector pushed to the shader: 0 passthrough, 1 PQ, 2 HLG.
     /// Nonzero only on the 10-bit path with [`HdrOutput::TonemapSdr`].
     xfer: u32,
+    /// Extent of the DPB slot images this converter samples. Larger than the
+    /// picture when the pictures were rounded up to the picture access
+    /// granularity, so the shader cannot derive it from the output extent.
+    slot_extent: (u32, u32),
 }
 
 impl core::fmt::Debug for YcbcrConverter {
@@ -5945,6 +5994,7 @@ impl YcbcrConverter {
         color: VideoColorSpace,
         bit_depth: u8,
         hdr_output: HdrOutput,
+        slot_extent: (u32, u32),
     ) -> Result<Self, VulkanVideoError> {
         let dev = raw_device;
         let err = VulkanVideoError::QueryFailed;
@@ -6011,14 +6061,13 @@ impl YcbcrConverter {
                 .create_descriptor_set_layout(&dsl_ci, None)
                 .map_err(err)?;
             let set_layouts = [dsl];
-            // A 4-byte COMPUTE push constant carries the HDR transfer selector
-            // (`xfer`: 0 passthrough / 1 PQ / 2 HLG). The 8-bit shader ignores it
-            // (a layout may declare a range no shader uses); the 16-bit shader
-            // branches on it for the tone-map pipeline.
+            // COMPUTE push constants: the HDR transfer selector (`xfer`: 0
+            // passthrough / 1 PQ / 2 HLG, which only the 16-bit shader branches
+            // on) and the sampled slot image's extent.
             let pc_ranges = [vk::PushConstantRange::default()
                 .stage_flags(vk::ShaderStageFlags::COMPUTE)
                 .offset(0)
-                .size(4)];
+                .size(crate::gpu::YCBCR_PUSH_CONSTANT_SIZE)];
             let pl_ci = vk::PipelineLayoutCreateInfo::default()
                 .set_layouts(&set_layouts)
                 .push_constant_ranges(&pc_ranges);
@@ -6094,6 +6143,7 @@ impl YcbcrConverter {
                 rgba_format,
                 wgpu_format,
                 xfer,
+                slot_extent,
             })
         }
     }
@@ -6253,13 +6303,14 @@ impl YcbcrConverter {
                 &[t.set],
                 &[],
             );
-            // HDR transfer selector (0 for the 8-bit / passthrough path).
+            // HDR transfer selector (0 for the 8-bit / passthrough path) plus the
+            // sampled slot extent the shader normalizes its coordinates by.
             dev.cmd_push_constants(
                 cb,
                 self.pipeline_layout,
                 vk::ShaderStageFlags::COMPUTE,
                 0,
-                &self.xfer.to_ne_bytes(),
+                &crate::gpu::ycbcr_push_constants(self.xfer, self.slot_extent),
             );
             dev.cmd_dispatch(cb, w.div_ceil(8), h.div_ceil(8), 1);
             let mut after = alloc::vec::Vec::with_capacity(2);
@@ -7117,6 +7168,22 @@ impl VulkanVideoDevice {
         }
     }
 
+    /// The extent every image a decode session writes must be created at for a
+    /// picture of `coded_extent`: the picture rounded up to the device's picture
+    /// access granularity.
+    fn picture_image_extent(&self, coded_extent: (u32, u32)) -> (u32, u32) {
+        aligned_extent(coded_extent, self.caps.picture_access_granularity)
+    }
+
+    /// Test hook: pretend the device reports `granularity` as its picture access
+    /// granularity, so the over-aligned DPB path can be exercised on hardware
+    /// whose real granularity is 16x16.
+    #[doc(hidden)]
+    pub fn with_picture_access_granularity(mut self, granularity: (u32, u32)) -> Self {
+        self.caps.picture_access_granularity = granularity;
+        self
+    }
+
     /// Create an H.264 decode session + parameters for `ps`, whose pictures are
     /// `max_w`x`max_h` (clamped to the device's coded-extent range). Session
     /// parameter creation validates the `Std*` SPS/PPS mapping.
@@ -7571,6 +7638,7 @@ impl VulkanVideoDevice {
         idr_au: &[u8],
     ) -> Result<Nv12Frame, VulkanVideoError> {
         let (w, h) = session.coded_extent;
+        let (image_w, image_h) = self.picture_image_extent((w, h));
         let slice = extract_first_idr_slice(idr_au).ok_or(VulkanVideoError::NoDecodableSlice)?;
         let dev = &self.raw_device;
         let prof = h264_profile();
@@ -7582,8 +7650,8 @@ impl VulkanVideoDevice {
             .image_type(vk::ImageType::TYPE_2D)
             .format(session.picture_format)
             .extent(vk::Extent3D {
-                width: w,
-                height: h,
+                width: image_w,
+                height: image_h,
                 depth: 1,
             })
             .mip_levels(1)
@@ -8160,6 +8228,7 @@ impl VulkanVideoDevice {
     ) -> Result<wgpu::Texture, VulkanVideoError> {
         let compute_queue = self.compute_queue.ok_or(VulkanVideoError::NoComputeQueue)?;
         let (w, h) = session.coded_extent;
+        let (image_w, image_h) = self.picture_image_extent((w, h));
         let slice = extract_first_idr_slice(idr_au).ok_or(VulkanVideoError::NoDecodableSlice)?;
         let dev = &self.raw_device;
         let prof = h264_profile();
@@ -8173,8 +8242,8 @@ impl VulkanVideoDevice {
             .image_type(vk::ImageType::TYPE_2D)
             .format(session.picture_format)
             .extent(vk::Extent3D {
-                width: w,
-                height: h,
+                width: image_w,
+                height: image_h,
                 depth: 1,
             })
             .mip_levels(1)
@@ -8222,7 +8291,7 @@ impl VulkanVideoDevice {
         // SAFETY: all handles are created from `dev` and destroyed exactly once
         // (here or in the wgpu drop callback); the compute submission is waited
         // on before teardown.
-        let result = unsafe { self.ycbcr_to_wgpu(nv12, compute_queue, w, h) };
+        let result = unsafe { self.ycbcr_to_wgpu(nv12, (image_w, image_h), compute_queue, w, h) };
 
         // SAFETY: NV12 image + decode view are done with once the compute pass
         // finished (inside ycbcr_to_wgpu); free them regardless of outcome.
@@ -8243,6 +8312,7 @@ impl VulkanVideoDevice {
     unsafe fn ycbcr_to_wgpu(
         &self,
         nv12: vk::Image,
+        nv12_extent: (u32, u32),
         compute_queue: vk::Queue,
         w: u32,
         h: u32,
@@ -8256,6 +8326,7 @@ impl VulkanVideoDevice {
                 compute_queue,
                 self.compute_queue_family,
                 nv12,
+                nv12_extent,
                 w,
                 h,
                 false,
@@ -8263,7 +8334,8 @@ impl VulkanVideoDevice {
         }
     }
 
-    /// Create one NV12 (coincide) DPB image sized to the coded extent: it is
+    /// Create one NV12 (coincide) DPB image of `w` x `h` (the coded extent
+    /// rounded up to the picture access granularity): it is
     /// simultaneously a decode-output target and a DPB reference slot, and is
     /// `TRANSFER_SRC` so its decoded content can be read back. `profile` supplies
     /// the video-profile list the video-usage image needs.
@@ -8380,7 +8452,8 @@ impl VulkanVideoDevice {
     }
 
     /// Build the codec-independent [`DpbCore`] every `*DpbDecoder` embeds: the DPB
-    /// image pool (`num_slots` images at `coded_extent` in `picture_format`), the
+    /// image pool (`num_slots` images at the granularity-aligned `coded_extent`
+    /// in `picture_format`), the
     /// persistent host-visible NV12 readback buffer, and the decode-queue command
     /// pool. `gpu` selects `SAMPLED` + `CONCURRENT` DPB images (texture output) over
     /// plain system readback; `profile` is the codec profile the images and
@@ -8400,6 +8473,9 @@ impl VulkanVideoDevice {
         hdr_output: HdrOutput,
     ) -> Result<DpbCore, VulkanVideoError> {
         let (w, h) = coded_extent;
+        // Slot images are rounded up to the device's picture access granularity;
+        // the picture stays in the top-left corner and is copied out at `(w, h)`.
+        let image_extent = self.picture_image_extent(coded_extent);
         // 8-bit NV12 (`G8_B8R8`, 1 byte/sample) or 10-bit (`G10X6`, 2). The GPU
         // converter picks its ycbcr conversion + RGBA target from this (10-bit ->
         // `R16G16B16A16_SFLOAT`); the system readback scales its buffer lengths.
@@ -8419,7 +8495,13 @@ impl VulkanVideoDevice {
             }
         };
         for _ in 0..num_slots {
-            match self.create_dpb_image(w, h, picture_format, profile, gpu) {
+            match self.create_dpb_image(
+                image_extent.0,
+                image_extent.1,
+                picture_format,
+                profile,
+                gpu,
+            ) {
                 Ok(img) => slots.push(img),
                 Err(e) => {
                     free_slots(&slots);
@@ -8589,6 +8671,7 @@ impl VulkanVideoDevice {
                     color,
                     bit_depth,
                     hdr_output,
+                    image_extent,
                 )
             } {
                 Ok(converter) => {
@@ -8633,6 +8716,7 @@ impl VulkanVideoDevice {
             session,
             parameters,
             coded_extent,
+            image_extent,
             size_align: self.caps.min_bitstream_buffer_size_alignment.max(1),
             slots,
             pool,
@@ -9072,6 +9156,10 @@ struct DpbCore {
     session: vk::VideoSessionKHR,
     parameters: vk::VideoSessionParametersKHR,
     coded_extent: (u32, u32),
+    /// Extent the DPB slot images were created at: `coded_extent` rounded up to
+    /// the device's picture access granularity. Every copy out of a slot still
+    /// uses `coded_extent`, so the padding never reaches an output frame.
+    image_extent: (u32, u32),
     size_align: u64,
     slots: alloc::vec::Vec<DpbImage>,
     pool: vk::CommandPool,
@@ -9124,6 +9212,7 @@ impl core::fmt::Debug for DpbCore {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("DpbCore")
             .field("coded_extent", &self.coded_extent)
+            .field("image_extent", &self.image_extent)
             .field("dpb_slots", &self.slots.len())
             .finish_non_exhaustive()
     }
@@ -9908,6 +9997,13 @@ impl H264DpbDecoder {
         self.core.slots.len()
     }
 
+    /// Test hook: the extent the DPB slot images were created at (the coded
+    /// picture rounded up to the device's picture access granularity).
+    #[doc(hidden)]
+    pub fn dpb_image_extent(&self) -> (u32, u32) {
+        self.core.image_extent
+    }
+
     /// Streaming (pipelined) decode: submit every picture in `stream` into the
     /// decode ring WITHOUT draining, returning only the frames that have already
     /// retired. Access units are split on VCL NALs with `first_mb_in_slice == 0`;
@@ -10062,9 +10158,7 @@ impl H264DpbDecoder {
         // Discard any pipelined system-path decodes still in flight (a seek drops
         // pending output) before reusing the ring.
         self.core.abort_ring();
-        for r in &mut self.refs {
-            *r = None;
-        }
+        self.refs.fill(None);
         self.poc = crate::poc::H264PocState::default();
         // Re-issue the session RESET control on the next decode (a discontinuity).
         self.core.first = true;
@@ -10245,9 +10339,7 @@ impl H264DpbDecoder {
                     self.free_short_term(pic_num_x, hdr.frame_num);
                 }
                 crate::poc::H264Mmco::AllUnused => {
-                    for r in &mut self.refs {
-                        *r = None;
-                    }
+                    self.refs.fill(None);
                 }
                 // "no long-term references in use" is the state this DPB is
                 // always in, so it asks for nothing.
@@ -10311,9 +10403,7 @@ impl H264DpbDecoder {
         // An IDR resets the reference state: all DPB slots are freed before the
         // picture is decoded (it uses no references).
         if hdr.is_idr {
-            for r in &mut self.refs {
-                *r = None;
-            }
+            self.refs.fill(None);
         }
 
         // The active references for this decode are every slot currently holding
@@ -10631,6 +10721,13 @@ impl H265DpbDecoder {
         self.core.slots.len()
     }
 
+    /// Test hook: the extent the DPB slot images were created at (the coded
+    /// picture rounded up to the device's picture access granularity).
+    #[doc(hidden)]
+    pub fn dpb_image_extent(&self) -> (u32, u32) {
+        self.core.image_extent
+    }
+
     /// Reset the reference / POC state so the next decode begins a fresh coded
     /// sequence, re-arming the session `RESET` control (seek). Cheap; DPB slot
     /// images are reused and overwritten by the next decode. Mirrors
@@ -10638,9 +10735,7 @@ impl H265DpbDecoder {
     pub fn reset(&mut self) {
         // Discard any pipelined system-path decodes still in flight before reuse.
         self.core.abort_ring();
-        for r in &mut self.refs {
-            *r = None;
-        }
+        self.refs.fill(None);
         self.poc = crate::poc::H265PocState::default();
         self.seen_picture = false;
         // The next IRAP sets this; a stray RASL before any IRAP is not skipped.
@@ -10981,9 +11076,7 @@ impl H265DpbDecoder {
         }
 
         if hdr.is_irap && no_rasl_output {
-            for r in &mut self.refs {
-                *r = None;
-            }
+            self.refs.fill(None);
         } else {
             let mut keep: alloc::vec::Vec<i32> = alloc::vec::Vec::new();
             for i in 0..hdr.st_rps.num_negative_pics as usize {
@@ -11343,6 +11436,13 @@ impl Av1DpbDecoder {
         self.core.slots.len()
     }
 
+    /// Test hook: the extent the DPB slot images were created at (the coded
+    /// picture rounded up to the device's picture access granularity).
+    #[doc(hidden)]
+    pub fn dpb_image_extent(&self) -> (u32, u32) {
+        self.core.image_extent
+    }
+
     /// Reset the reference state so the next decode begins a fresh coded sequence,
     /// re-arming the session `RESET` control. This is how a seek works: after a
     /// reset, decoding from a key frame reconstructs pictures correctly regardless
@@ -11353,12 +11453,8 @@ impl Av1DpbDecoder {
     pub fn reset(&mut self) {
         // Discard any pipelined system-path decodes still in flight before reuse.
         self.core.abort_ring();
-        for r in &mut self.ref_slot {
-            *r = None;
-        }
-        for s in &mut self.phys_state {
-            *s = None;
-        }
+        self.ref_slot.fill(None);
+        self.phys_state.fill(None);
         self.core.first = true;
     }
 
@@ -14021,6 +14117,32 @@ mod tests {
     // A real 640x480 baseline Annex-B clip (SPS + PPS + frames). GPU-free:
     // exercises the bitstream parse + `Std*` mapping without a Vulkan device.
     const CLIP: &[u8] = include_bytes!("../tests/fixtures/h264_640x480.h264");
+
+    #[test]
+    fn rounds_picture_extent_up_to_granularity() {
+        // 1080 is not a multiple of any of these, so the height grows every time.
+        assert_eq!(aligned_extent((1920, 1080), (16, 16)), (1920, 1088));
+        assert_eq!(aligned_extent((1920, 1080), (32, 32)), (1920, 1088));
+        assert_eq!(aligned_extent((1920, 1080), (64, 64)), (1920, 1088));
+        assert_eq!(aligned_extent((1920, 1080), (128, 128)), (1920, 1152));
+
+        // 640x480 needs no padding until the granularity passes 32.
+        assert_eq!(aligned_extent((640, 480), (16, 16)), (640, 480));
+        assert_eq!(aligned_extent((640, 480), (32, 32)), (640, 480));
+        assert_eq!(aligned_extent((640, 480), (64, 64)), (640, 512));
+
+        // An already-aligned extent is returned unchanged, and the two dimensions
+        // round independently.
+        assert_eq!(aligned_extent((1280, 720), (16, 16)), (1280, 720));
+        assert_eq!(aligned_extent((1000, 720), (64, 16)), (1024, 720));
+    }
+
+    #[test]
+    fn zero_granularity_leaves_the_extent_alone() {
+        // The spec forbids a zero granularity; a driver reporting one must not
+        // make the alignment divide by zero.
+        assert_eq!(aligned_extent((640, 480), (0, 0)), (640, 480));
+    }
 
     #[test]
     fn parses_sps_pps_geometry_from_real_clip() {

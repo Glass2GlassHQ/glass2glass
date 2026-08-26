@@ -179,7 +179,7 @@ impl AsyncElement for VideoConvert {
     /// only. The allocation cascade turns that into a download demand on a GPU
     /// producer, which is what lets a decoder feed this at all.
     fn input_domains(&self) -> DomainSet {
-        DomainSet::only(MemoryDomainKind::System)
+        DomainSet::only(MemoryDomainKind::System).with(MemoryDomainKind::SystemView)
     }
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
@@ -287,9 +287,14 @@ impl AsyncElement for VideoConvert {
                 PipelinePacket::DataFrame(frame) => {
                     let (format, w, h, framerate) =
                         self.input.clone().ok_or(G2gError::NotConfigured)?;
-                    let src = frame
+                    let bytes = frame
                         .domain
-                        .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
+                        .require_system_bytes(g2g_core::log::short_type_name::<Self>())?;
+                    let src: &[u8] = &bytes;
+                    // A materialized `SystemView` is dense, so a `PlaneLayout`
+                    // describing the view's backing no longer applies.
+                    #[cfg(feature = "metadata")]
+                    let dense = matches!(frame.domain, MemoryDomain::SystemView(_));
                     // Effective output format: property, or caps-resolved (auto).
                     // Auto without a delivered output caps (a runner that doesn't
                     // call configure_output) is unfixed.
@@ -302,7 +307,10 @@ impl AsyncElement for VideoConvert {
                     // when it cannot (a multi-plane layout), which is correct and
                     // costs what the producer skipped.
                     #[cfg(feature = "metadata")]
-                    let layout = frame.meta.get::<g2g_core::meta::PlaneLayout>().copied();
+                    let layout = match dense {
+                        true => None,
+                        false => frame.meta.get::<g2g_core::meta::PlaneLayout>().copied(),
+                    };
                     #[cfg(feature = "metadata")]
                     let packed: Option<Box<[u8]>> = match layout {
                         Some(l) if !reads_in_place(format, wu, hu, &l) => Some(

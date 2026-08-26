@@ -272,6 +272,24 @@ impl MemoryDomain {
         }
     }
 
+    /// As [`require_system_slice`](Self::require_system_slice), but a shared
+    /// [`SystemView`] is accepted too: it is materialized into a dense buffer
+    /// (the one copy a strided chain pays), an owned `System` slice is borrowed.
+    #[cfg(feature = "alloc")]
+    pub fn require_system_bytes(
+        &self,
+        category: &'static str,
+    ) -> Result<alloc::borrow::Cow<'_, [u8]>, crate::G2gError> {
+        match self {
+            MemoryDomain::SystemView(view) => {
+                Ok(alloc::borrow::Cow::Owned(view.materialize().into_vec()))
+            }
+            _ => self
+                .require_system_slice(category)
+                .map(alloc::borrow::Cow::Borrowed),
+        }
+    }
+
     pub fn as_system_slice(&self) -> Option<&[u8]> {
         match self {
             MemoryDomain::System(s) => Some(s.as_slice()),

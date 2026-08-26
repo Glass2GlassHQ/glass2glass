@@ -40,11 +40,14 @@ use g2g_core::{
 
 use crate::demuxseek::{Admit, DemuxSeek};
 use crate::mpegts::{
-    unwrap_metadata_au_cells, EsUnit, TsDemuxer, STREAM_TYPE_AAC, STREAM_TYPE_AC3,
+    unwrap_metadata_au_cells, EitSlot, EsUnit, TsDemuxer, STREAM_TYPE_AAC, STREAM_TYPE_AC3,
     STREAM_TYPE_H264, STREAM_TYPE_H265, STREAM_TYPE_METADATA_PES, STREAM_TYPE_MPEG1_AUDIO,
     STREAM_TYPE_MPEG1_VIDEO, STREAM_TYPE_MPEG2_AUDIO, STREAM_TYPE_MPEG2_VIDEO, STREAM_TYPE_MPEG4P2,
-    STREAM_TYPE_PRIVATE_PES, TAG_KEY_EVENT_NAME, TAG_KEY_EVENT_TEXT, TAG_KEY_NEXT_EVENT_NAME,
-    TAG_KEY_NEXT_EVENT_TEXT, TAG_KEY_SERVICE_PROVIDER, TS_PACKET_LEN,
+    STREAM_TYPE_PRIVATE_PES, TAG_KEY_EVENT_DURATION, TAG_KEY_EVENT_NAME, TAG_KEY_EVENT_START,
+    TAG_KEY_EVENT_TEXT, TAG_KEY_NEXT_EVENT_DURATION, TAG_KEY_NEXT_EVENT_NAME,
+    TAG_KEY_NEXT_EVENT_START, TAG_KEY_NEXT_EVENT_TEXT, TAG_KEY_SCHEDULE_EVENT_DURATION,
+    TAG_KEY_SCHEDULE_EVENT_ID, TAG_KEY_SCHEDULE_EVENT_NAME, TAG_KEY_SCHEDULE_EVENT_START,
+    TAG_KEY_SCHEDULE_EVENT_TEXT, TAG_KEY_SERVICE_PROVIDER, TS_PACKET_LEN,
 };
 
 const TS_SYNC: u8 = 0x47;
@@ -81,8 +84,9 @@ struct TagPoster {
 
 impl TagPoster {
     /// Post whatever the demuxer has parsed since the last call; a no-op until the
-    /// SDT / PMT parse, and once each thereafter.
-    fn post(&mut self, demux: &TsDemuxer, bus: Option<&BusHandle>) {
+    /// SDT / PMT parse, and once each thereafter. Takes the demuxer by `&mut`
+    /// because the EIT schedule events are drained rather than kept (M1056).
+    fn post(&mut self, demux: &mut TsDemuxer, bus: Option<&BusHandle>) {
         if !self.service_posted {
             for (program, service) in demux.services() {
                 let mut list = TagList::new();
@@ -125,12 +129,50 @@ impl TagPoster {
         }
     }
 
-    /// Post each service's EIT present/following text as a [`BusMessage::Tag`]
-    /// scoped to its program (M1049), the way the SDT service name posts: a
-    /// `service_id` is a `program_number`, so the two describe the same program.
-    /// The event on air and the one after it share one tag list per service, under
-    /// their own keys, since [`Tag::Title`] there is already the service name.
-    fn post_events(&mut self, demux: &TsDemuxer, bus: Option<&BusHandle>) {
+    /// Post each service's EIT present/following text, start time and duration as
+    /// a [`BusMessage::Tag`] scoped to its program (M1049, M1056), the way the SDT
+    /// service name posts: a `service_id` is a `program_number`, so the two
+    /// describe the same program. The event on air and the one after it share one
+    /// tag list per service, under their own keys, since [`Tag::Title`] there is
+    /// already the service name.
+    ///
+    /// A schedule table names days of events rather than those two, so each of its
+    /// events posts as a message of its own: one tag list holds one event's
+    /// fields, which is what lets a consumer tell whose start time is whose.
+    fn post_events(&mut self, demux: &mut TsDemuxer, bus: Option<&BusHandle>) {
+        for event in demux.take_eit_schedule() {
+            let mut list = TagList::new();
+            list.push(Tag::Number {
+                key: TAG_KEY_SCHEDULE_EVENT_ID.into(),
+                value: event.event_id.into(),
+            });
+            if !event.name.is_empty() {
+                list.push(Tag::Other {
+                    key: TAG_KEY_SCHEDULE_EVENT_NAME.into(),
+                    value: event.name,
+                });
+            }
+            if !event.text.is_empty() {
+                list.push(Tag::Other {
+                    key: TAG_KEY_SCHEDULE_EVENT_TEXT.into(),
+                    value: event.text,
+                });
+            }
+            push_event_timing(
+                &mut list,
+                TAG_KEY_SCHEDULE_EVENT_START,
+                TAG_KEY_SCHEDULE_EVENT_DURATION,
+                event.start_unix_secs,
+                event.duration_secs,
+            );
+            if let Some(bus) = bus {
+                bus.try_post(BusMessage::Tag {
+                    tags: list,
+                    program: Some(event.service_id),
+                });
+            }
+        }
+
         let generation = demux.eit_generation();
         if generation == self.eit_generation_posted {
             return;
@@ -148,23 +190,40 @@ impl TagPoster {
                 .iter()
                 .filter(|e| e.service_id == service)
             {
-                let (name_key, text_key) = if event.following {
-                    (TAG_KEY_NEXT_EVENT_NAME, TAG_KEY_NEXT_EVENT_TEXT)
+                let keys = if event.slot == EitSlot::Following {
+                    [
+                        TAG_KEY_NEXT_EVENT_NAME,
+                        TAG_KEY_NEXT_EVENT_TEXT,
+                        TAG_KEY_NEXT_EVENT_START,
+                        TAG_KEY_NEXT_EVENT_DURATION,
+                    ]
                 } else {
-                    (TAG_KEY_EVENT_NAME, TAG_KEY_EVENT_TEXT)
+                    [
+                        TAG_KEY_EVENT_NAME,
+                        TAG_KEY_EVENT_TEXT,
+                        TAG_KEY_EVENT_START,
+                        TAG_KEY_EVENT_DURATION,
+                    ]
                 };
                 if !event.name.is_empty() {
                     list.push(Tag::Other {
-                        key: name_key.into(),
+                        key: keys[0].into(),
                         value: event.name.clone(),
                     });
                 }
                 if !event.text.is_empty() {
                     list.push(Tag::Other {
-                        key: text_key.into(),
+                        key: keys[1].into(),
                         value: event.text.clone(),
                     });
                 }
+                push_event_timing(
+                    &mut list,
+                    keys[2],
+                    keys[3],
+                    event.start_unix_secs,
+                    event.duration_secs,
+                );
             }
             if list.is_empty() {
                 continue;
@@ -176,6 +235,31 @@ impl TagPoster {
                 });
             }
         }
+    }
+}
+
+/// Append an EIT event's start time (Unix seconds, UTC) and duration (seconds) to
+/// a tag list (M1056). A stream that declared either field undefined or encoded it
+/// invalidly posts no tag for it, rather than a zero a consumer would read as a
+/// real time.
+fn push_event_timing(
+    list: &mut TagList,
+    start_key: &str,
+    duration_key: &str,
+    start_unix_secs: Option<u64>,
+    duration_secs: u32,
+) {
+    if let Some(start) = start_unix_secs {
+        list.push(Tag::Number {
+            key: start_key.into(),
+            value: start,
+        });
+    }
+    if duration_secs != 0 {
+        list.push(Tag::Number {
+            key: duration_key.into(),
+            value: duration_secs.into(),
+        });
     }
 }
 
@@ -854,7 +938,7 @@ impl AsyncElement for TsDemux {
                     self.drain_packets();
                     if self.bus.is_some() {
                         self.post_stream_collection();
-                        self.tags.post(&self.demux, self.bus.as_ref());
+                        self.tags.post(&mut self.demux, self.bus.as_ref());
                     }
                     let units = self.demux.take_units();
                     self.emit_units(units, out).await?;
@@ -1480,7 +1564,7 @@ impl MultiOutputElement for TsDemuxN {
                     self.drain_packets();
                     if self.bus.is_some() {
                         self.post_stream_collection();
-                        self.tags.post(&self.demux, self.bus.as_ref());
+                        self.tags.post(&mut self.demux, self.bus.as_ref());
                     }
                     // Honor an app selection before routing this batch, so a re-map
                     // (and its re-armed CapsChanged) takes effect for the frames now.

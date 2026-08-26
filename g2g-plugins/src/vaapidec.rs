@@ -181,6 +181,10 @@ struct DecodedNv12 {
     width: u32,
     height: u32,
     pts_ns: u64,
+    /// Where the surface's rows sit when its pitches were kept, `None` when the
+    /// copy packed them tight.
+    #[cfg(feature = "metadata")]
+    layout: Option<g2g_core::meta::PlaneLayout>,
 }
 
 /// # Example
@@ -203,6 +207,11 @@ pub struct VaapiDec<C: VaapiCodec> {
     /// Upstream request parked by a mid-stream resolution change, handed to
     /// the runner by `take_reconfigure`.
     pending_reconfigure: Option<Reconfigure>,
+    /// M1059: a downstream consumer asked for a `PlaneLayout`, so a decoded
+    /// surface is copied out at the hardware's own pitches with those declared
+    /// instead of being repacked into tight rows.
+    #[cfg(feature = "metadata")]
+    keep_row_padding: bool,
     configured: bool,
     emitted: u64,
     codec: PhantomData<C>,
@@ -247,6 +256,8 @@ impl<C: VaapiCodec> VaapiDec<C> {
             last_caps: None,
             input_caps: None,
             pending_reconfigure: None,
+            #[cfg(feature = "metadata")]
+            keep_row_padding: false,
             configured: false,
             emitted: 0,
             codec: PhantomData,
@@ -256,6 +267,20 @@ impl<C: VaapiCodec> VaapiDec<C> {
     /// Count of decoded `DataFrame`s pushed downstream. Useful in tests.
     pub fn decoded_count(&self) -> u64 {
         self.emitted
+    }
+
+    /// Whether a decoded surface keeps the hardware's row padding (M1059).
+    /// Always false without the `metadata` feature, since nothing can then
+    /// declare the layout.
+    fn keeps_row_padding(&self) -> bool {
+        #[cfg(feature = "metadata")]
+        {
+            self.keep_row_padding
+        }
+        #[cfg(not(feature = "metadata"))]
+        {
+            false
+        }
     }
 
     /// Iterate Annex-B NAL units out of one access unit and feed each one.
@@ -335,6 +360,7 @@ impl<C: VaapiCodec> VaapiDec<C> {
     }
 
     fn drain_events(&mut self, decoded: &mut Vec<DecodedNv12>) -> Result<(), G2gError> {
+        let keep_row_padding = self.keeps_row_padding();
         loop {
             let decoder = self.decoder.as_mut().ok_or(G2gError::NotConfigured)?;
             let Some(event) = decoder.next_event() else {
@@ -358,13 +384,15 @@ impl<C: VaapiCodec> VaapiDec<C> {
                 DecoderEvent::FrameReady(handle) => {
                     let pts_ns = handle.timestamp();
                     let frame = handle.video_frame();
-                    let bytes = copy_nv12(&*frame)?;
+                    let copied = copy_nv12(&*frame, keep_row_padding)?;
                     let res = frame.resolution();
                     decoded.push(DecodedNv12 {
-                        bytes,
+                        bytes: copied.bytes,
                         width: res.width,
                         height: res.height,
                         pts_ns,
+                        #[cfg(feature = "metadata")]
+                        layout: copied.layout,
                     });
                 }
             }
@@ -500,6 +528,15 @@ impl<C: VaapiCodec> AsyncElement for VaapiDec<C> {
         }
     }
 
+    /// M1059: the decoder copies every surface row by row into a tightly packed
+    /// buffer. When a consumer downstream has asked for a `PlaneLayout`, the
+    /// hardware's own pitches are kept and declared, and the per-row copy
+    /// becomes one bulk copy per plane.
+    #[cfg(feature = "metadata")]
+    fn configure_allocation(&mut self, params: &g2g_core::AllocationParams) {
+        self.keep_row_padding = params.meta_requests.wants::<g2g_core::meta::PlaneLayout>();
+    }
+
     fn process<'a>(
         &'a mut self,
         packet: PipelinePacket,
@@ -567,7 +604,8 @@ impl<C: VaapiCodec> AsyncElement for VaapiDec<C> {
                         .await?;
                     self.last_caps = Some(new_caps.clone());
                 }
-                let frame = Frame {
+                #[allow(unused_mut)]
+                let mut frame = Frame {
                     domain: MemoryDomain::System(SystemSlice::from_boxed(d.bytes)),
                     timing: FrameTiming {
                         pts_ns: d.pts_ns,
@@ -579,6 +617,10 @@ impl<C: VaapiCodec> AsyncElement for VaapiDec<C> {
                     sequence: self.emitted,
                     meta: Default::default(),
                 };
+                #[cfg(feature = "metadata")]
+                if let Some(layout) = d.layout {
+                    frame.meta.attach(layout);
+                }
                 self.emitted += 1;
                 out.push(PipelinePacket::DataFrame(frame)).await?;
             }
@@ -643,11 +685,53 @@ fn nv12_caps(w: u32, h: u32) -> Caps {
     }
 }
 
+/// Where the two planes of an NV12 frame sit once the surface's rows have been
+/// copied out at the hardware's own pitches: luma from byte 0, then the
+/// interleaved chroma plane after the luma rows. `None` when the pitches cannot
+/// hold a `w`-wide row or the offsets overflow.
+#[cfg(feature = "metadata")]
+fn padded_nv12_layout(
+    w: usize,
+    h: usize,
+    y_pitch: usize,
+    uv_pitch: usize,
+) -> Option<g2g_core::meta::PlaneLayout> {
+    use g2g_core::meta::{Plane, PlaneLayout};
+    if y_pitch < w || uv_pitch < w {
+        return None;
+    }
+    let uv_offset = y_pitch.checked_mul(h)?;
+    PlaneLayout::new(&[
+        Plane {
+            offset: 0,
+            stride: y_pitch,
+        },
+        Plane {
+            offset: uv_offset,
+            stride: uv_pitch,
+        },
+    ])
+}
+
+/// One decoded surface copied out of the hardware's mapping.
+struct CopiedNv12 {
+    bytes: Box<[u8]>,
+    /// Where the rows sit when the surface's pitches were kept, `None` when the
+    /// copy packed them tight.
+    #[cfg(feature = "metadata")]
+    layout: Option<g2g_core::meta::PlaneLayout>,
+}
+
 /// Copy NV12 pixels out of a decoded VAAPI surface into a packed
 /// `width * height * 3 / 2` buffer (Y plane followed by interleaved UV).
 /// The source plane pitch may exceed `width` due to hardware alignment, so
 /// each row is copied individually.
-fn copy_nv12<F: VideoFrame>(frame: &F) -> Result<Box<[u8]>, G2gError> {
+///
+/// M1059: with `keep_row_padding` the surface's rows travel at its own pitches
+/// instead, one bulk copy per plane, and the returned layout says where they
+/// are. The mapping is not addressable downstream, so the frame is still a
+/// copy; what goes away is the per-row pass.
+fn copy_nv12<F: VideoFrame>(frame: &F, keep_row_padding: bool) -> Result<CopiedNv12, G2gError> {
     let res = frame.resolution();
     let w = res.width as usize;
     let h = res.height as usize;
@@ -671,6 +755,26 @@ fn copy_nv12<F: VideoFrame>(frame: &F) -> Result<Box<[u8]>, G2gError> {
     let y_src = planes[Y_PLANE];
     let uv_src = planes[UV_PLANE];
 
+    #[cfg(feature = "metadata")]
+    if keep_row_padding {
+        // A driver only has to map the rows the picture occupies, so a mapping
+        // short of the full pitched planes falls through to the tight copy.
+        let (y_bytes, uv_bytes) = (y_pitch * h, uv_pitch * (h / 2));
+        if let Some(layout) = padded_nv12_layout(w, h, y_pitch, uv_pitch) {
+            if y_src.len() >= y_bytes && uv_src.len() >= uv_bytes {
+                let mut out = alloc::vec![0u8; y_bytes + uv_bytes];
+                out[..y_bytes].copy_from_slice(&y_src[..y_bytes]);
+                out[y_bytes..].copy_from_slice(&uv_src[..uv_bytes]);
+                return Ok(CopiedNv12 {
+                    bytes: out.into_boxed_slice(),
+                    layout: Some(layout),
+                });
+            }
+        }
+    }
+    #[cfg(not(feature = "metadata"))]
+    let _ = keep_row_padding;
+
     let mut out = alloc::vec![0u8; y_size + uv_size];
 
     for row in 0..h {
@@ -684,12 +788,47 @@ fn copy_nv12<F: VideoFrame>(frame: &F) -> Result<Box<[u8]>, G2gError> {
         out[dst_start..dst_start + w].copy_from_slice(&uv_src[src_start..src_start + w]);
     }
 
-    Ok(out.into_boxed_slice())
+    Ok(CopiedNv12 {
+        bytes: out.into_boxed_slice(),
+        #[cfg(feature = "metadata")]
+        layout: None,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// M1059: the layout a kept-padding copy declares addresses the rows the
+    /// copy actually wrote, chroma plane included.
+    #[cfg(feature = "metadata")]
+    #[test]
+    fn the_padded_layout_addresses_both_planes() {
+        use g2g_core::meta::Plane;
+        // 16x4 NV12 at a 64-byte luma pitch and a 32-byte chroma one.
+        let layout = padded_nv12_layout(16, 4, 64, 32).expect("a layout for the pitches");
+        assert_eq!(layout.count(), 2);
+        assert_eq!(
+            layout.plane(1),
+            Some(Plane {
+                offset: 64 * 4,
+                stride: 32
+            })
+        );
+        // the last luma row and the last chroma row of the copied buffer
+        assert_eq!(layout.row_range(0, 3, 16), Some(192..208));
+        assert_eq!(layout.row_range(1, 1, 16), Some(288..304));
+    }
+
+    /// A pitch too narrow for the picture is a surface we cannot describe, so
+    /// the decoder repacks instead of declaring a layout that reads sideways.
+    #[cfg(feature = "metadata")]
+    #[test]
+    fn a_pitch_narrower_than_the_picture_has_no_layout() {
+        assert!(padded_nv12_layout(16, 4, 8, 32).is_none());
+        assert!(padded_nv12_layout(16, 4, 64, 8).is_none());
+        assert!(padded_nv12_layout(16, 4, usize::MAX, 64).is_none());
+    }
 
     #[test]
     fn nv12_caps_are_fixed() {

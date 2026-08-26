@@ -42,9 +42,12 @@ use core::pin::Pin;
 use alloc::boxed::Box;
 use ash::vk;
 
+use g2g_core::g2g_error;
+use g2g_core::log::{short_type_name, Target};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError, HardwareError,
-    MemoryDomain, OutputSink, PipelinePacket, Rate, RawVideoFormat,
+    MemoryDomain, OutputSink, PipelinePacket, PropError, PropValue, PropertySpec, Rate,
+    RawVideoFormat,
 };
 
 /// Map any wgpu request/poll error to a structured hardware failure.
@@ -1321,7 +1324,7 @@ pub unsafe fn import_rgba_into_cuda(
 /// async fn bridge() -> Result<WgpuToCuda, g2g_core::G2gError> {
 ///     let interop = create_interop_device().await?;
 ///     // SAFETY: the device is opened with VK_KHR_external_memory_fd.
-///     unsafe { WgpuToCuda::new(interop.device, interop.queue, 1920, 1080) }
+///     unsafe { WgpuToCuda::new(interop.device, interop.queue, 1920, 1080, 0) }
 /// }
 /// ```
 pub struct WgpuToCuda {
@@ -1348,7 +1351,7 @@ pub struct WgpuToCuda {
     _ctx_release: PrimaryCtxRelease,
 }
 
-/// Releases a retained CUDA primary context on drop (the device ordinal it was
+/// Releases a retained CUDA primary context on drop (the `CUdevice` handle it was
 /// retained on). Held as the last field of [`WgpuToCuda`] so the release is
 /// ordered after the CUDA import and Vulkan image teardown.
 #[derive(Debug)]
@@ -1375,11 +1378,14 @@ impl core::fmt::Debug for WgpuToCuda {
 
 impl WgpuToCuda {
     /// Build the bridge on an interop `device`: retain the CUDA primary context on
-    /// device 0 (the NVIDIA GPU the interop device also selects), allocate an
-    /// exportable RGBA image, import it into CUDA, and wrap it as the render
-    /// target texture. The retained context is the one `NvEnc` runs in (the
-    /// bridge's frames are valid there) and is released on drop, so the bridge
-    /// must outlive any frame it produced.
+    /// `cuda_device_id`, allocate an exportable RGBA image, import it into CUDA,
+    /// and wrap it as the render target texture. The retained context is the one
+    /// `NvEnc` runs in (the bridge's frames are valid there) and is released on
+    /// drop, so the bridge must outlive any frame it produced.
+    ///
+    /// `cuda_device_id` must be the ordinal of the same GPU `device` runs on
+    /// (0 on a single-GPU host, and the `cuda-device-id` property reads it back):
+    /// the CUDA import of the Vulkan image fails on any other device.
     ///
     /// # Safety
     /// `device` must be a `VK_KHR_external_memory_fd` interop device (see
@@ -1389,16 +1395,25 @@ impl WgpuToCuda {
         queue: wgpu::Queue,
         width: u32,
         height: u32,
+        cuda_device_id: i32,
     ) -> Result<Self, G2gError> {
         use cuda_ffi as c;
-        let device_ordinal = 0i32;
-        // SAFETY: retain the primary context on device 0; released in `Drop`.
+        let mut cuda_device = 0i32;
+        // SAFETY: retain the primary context on `cuda_device_id`; released in `Drop`.
         let context = unsafe {
             check(c::cuInit(0))?;
-            let mut dev = 0i32;
-            check(c::cuDeviceGet(&mut dev, device_ordinal))?;
+            let rc = c::cuDeviceGet(&mut cuda_device, cuda_device_id);
+            if rc != 0 {
+                g2g_error!(
+                    Target::category(short_type_name::<WgpuToCuda>()),
+                    "no CUDA device {} (cuDeviceGet returned {}): pass the ordinal of the GPU this wgpu device runs on",
+                    cuda_device_id,
+                    rc
+                );
+                return Err(G2gError::Hardware(HardwareError::Cuda(rc)));
+            }
             let mut ctx: c::CuContext = core::ptr::null_mut();
-            check(c::cuDevicePrimaryCtxRetain(&mut ctx, dev))?;
+            check(c::cuDevicePrimaryCtxRetain(&mut ctx, cuda_device))?;
             ctx as u64
         };
         // SAFETY: interop device per the contract; `shared` is exported, imported
@@ -1416,18 +1431,18 @@ impl WgpuToCuda {
                 mapping,
                 texture,
                 context,
-                device_ordinal,
+                device_ordinal: cuda_device_id,
                 width,
                 height,
                 pool: LinearBufferPool::new(),
                 configured: false,
                 frames: core::sync::atomic::AtomicU64::new(0),
-                _ctx_release: PrimaryCtxRelease(device_ordinal),
+                _ctx_release: PrimaryCtxRelease(cuda_device),
             }),
             Err(e) => {
                 // SAFETY: balance the retain above on the build failure path.
                 unsafe {
-                    let _ = c::cuDevicePrimaryCtxRelease(device_ordinal);
+                    let _ = c::cuDevicePrimaryCtxRelease(cuda_device);
                 }
                 Err(e)
             }
@@ -1601,6 +1616,12 @@ fn rgba_any() -> CapsSet {
     })
 }
 
+/// The bridge's CUDA device, read-only: the context is retained in
+/// [`WgpuToCuda::new`], which is also where the wgpu device it must match is
+/// handed over, so there is no later point a set could take effect.
+static WGPU_TO_CUDA_PROPS: &[PropertySpec] =
+    &[crate::cudadeviceid::CUDA_DEVICE_ID_PROP.read_only()];
+
 /// `WgpuToCuda` as a pipeline transform (M275): a `MemoryDomain::WgpuTexture`
 /// RGBA frame (rendered on this bridge's interop [`device`](WgpuToCuda::device))
 /// in, a `MemoryDomain::Cuda` RGBA frame `NvEnc` can encode out, with no
@@ -1638,6 +1659,24 @@ impl AsyncElement for WgpuToCuda {
         }
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
+    }
+
+    fn properties(&self) -> &'static [PropertySpec] {
+        WGPU_TO_CUDA_PROPS
+    }
+
+    fn set_property(&mut self, name: &str, _value: PropValue) -> Result<(), PropError> {
+        match name {
+            "cuda-device-id" => Err(PropError::ReadOnly),
+            _ => Err(PropError::Unknown),
+        }
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "cuda-device-id" => Some(crate::cudadeviceid::get_cuda_device_id(self.device_ordinal)),
+            _ => None,
+        }
     }
 
     fn process<'a>(

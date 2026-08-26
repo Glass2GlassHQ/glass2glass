@@ -136,8 +136,10 @@ async fn dmabuf_import_with_gpu_output_stays_resident() {
     let got: Vec<f32> = owner
         .read_back()
         .expect("read back the GPU tensor")
-        .chunks_exact(4)
-        .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|b| f32::from_le_bytes(*b))
         .collect();
     assert_matches_reference(&got, &nv12);
     eprintln!("PASS: dma-buf in, GPU-resident tensor out, never touched the CPU");

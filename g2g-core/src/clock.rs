@@ -421,6 +421,19 @@ impl core::fmt::Debug for ElectedClock {
 /// video sink reads is continuous even though the underlying `snd_pcm_delay`
 /// readings step.
 ///
+/// The fit is exponentially weighted: the newest sample carries weight 1 and
+/// each older one [`RECENCY_DECAY`](DriftClock::RECENCY_DECAY) times its
+/// successor, so half of a rate step is taken up 24 samples after it rather
+/// than 32. The window is however many observations have arrived, up to its
+/// capacity, so the slope is usable from the second one.
+///
+/// A sample landing further than the outlier gate from the current fit is
+/// dropped rather than folded in: an underrun recovery or a stale
+/// `snd_pcm_delay()` reading would otherwise bend the fit for a whole window.
+/// [`MAX_CONSECUTIVE_REJECTS`](DriftClock::MAX_CONSECUTIVE_REJECTS) rejections
+/// in a row mean the timeline genuinely moved (a device re-open), so the window
+/// is cleared and the fit restarts from the new samples.
+///
 /// Single-writer by contract: one worker (the audio sink) calls
 /// [`observe`](DriftClock::observe); any number of sinks call `now_ns`. Both are
 /// serialised by an internal spin lock, so it is `Send + Sync` and shares as an
@@ -432,6 +445,8 @@ pub struct DriftClock {
     /// projects `reference.now_ns()`; the writer must sample its `local_ns`
     /// from the same source (see [`reference_now`](DriftClock::reference_now)).
     reference: Arc<dyn PipelineClock + Send + Sync>,
+    /// How far from the current fit a sample may land before it is rejected.
+    outlier_gate_ns: u64,
     inner: spin::Mutex<DriftState>,
 }
 
@@ -446,6 +461,23 @@ struct DriftState {
     /// recent sample's `local_ns` (exact `u64`) so the large subtraction in the
     /// projection stays precise; `master` and `slope` are `f64`.
     fit: Option<DriftFit>,
+    /// Samples rejected by the outlier gate since the last accepted one.
+    consecutive_rejects: u32,
+}
+
+/// What [`DriftClock::observe`] did with a sample.
+#[cfg(feature = "runtime")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DriftObservation {
+    /// Folded into the fit.
+    Folded,
+    /// Further from the current fit than the outlier gate: dropped, the fit is
+    /// unchanged.
+    Rejected,
+    /// [`MAX_CONSECUTIVE_REJECTS`](DriftClock::MAX_CONSECUTIVE_REJECTS)
+    /// rejections in a row, so the timeline really moved: the window was
+    /// cleared and this sample is the first of the new one.
+    Restarted,
 }
 
 /// `master_est(local) = master + slope * (local - anchor_local)`.
@@ -464,7 +496,29 @@ impl DriftClock {
     /// without lagging a real rate change.
     pub const DEFAULT_WINDOW: usize = 64;
 
-    /// A drift clock over `reference` with the [`DEFAULT_WINDOW`](Self::DEFAULT_WINDOW).
+    /// Default outlier gate. An audio sink's `snd_pcm_delay()` jitters by a few
+    /// milliseconds in normal running, so 10 ms only catches a real glitch (an
+    /// underrun recovery, a stale delay reading).
+    pub const DEFAULT_OUTLIER_GATE_NS: u64 = 10_000_000;
+
+    /// Weight of each sample relative to the one after it, newest first. Chosen
+    /// against the alternative of no weighting at all: over a full 64-sample
+    /// window a rate step is taken up twice as fast (0.29 of it after 16 more
+    /// samples, against 0.15 unweighted) for 37% more slope noise. 0.9 doubles
+    /// the speed again but costs 2.6x the noise.
+    pub const RECENCY_DECAY: f64 = 0.95;
+
+    /// Samples the window must hold before the outlier gate applies. Below this
+    /// the slope is still noisy enough that a good sample could be scored as an
+    /// outlier against it.
+    pub const MIN_SAMPLES_TO_GATE: usize = 8;
+
+    /// Rejections in a row that mean the timeline moved rather than one sample
+    /// glitching, so the window restarts.
+    pub const MAX_CONSECUTIVE_REJECTS: u32 = 8;
+
+    /// A drift clock over `reference` with the [`DEFAULT_WINDOW`](Self::DEFAULT_WINDOW)
+    /// and [`DEFAULT_OUTLIER_GATE_NS`](Self::DEFAULT_OUTLIER_GATE_NS).
     pub fn new(reference: Arc<dyn PipelineClock + Send + Sync>) -> Self {
         Self::with_window(reference, Self::DEFAULT_WINDOW)
     }
@@ -472,13 +526,34 @@ impl DriftClock {
     /// A drift clock keeping the last `window` observations (clamped to at
     /// least 2, since a slope needs two points).
     pub fn with_window(reference: Arc<dyn PipelineClock + Send + Sync>, window: usize) -> Self {
+        Self::with_window_and_gate(reference, window, Self::DEFAULT_OUTLIER_GATE_NS)
+    }
+
+    /// A drift clock whose outlier gate is `outlier_gate_ns` rather than the
+    /// default. A servo over a noisier medium sets its own width: the PTP servo
+    /// runs at 20 ms, since a queued packet is a much bigger excursion than a
+    /// DAC's delay jitter.
+    pub fn with_gate(
+        reference: Arc<dyn PipelineClock + Send + Sync>,
+        outlier_gate_ns: u64,
+    ) -> Self {
+        Self::with_window_and_gate(reference, Self::DEFAULT_WINDOW, outlier_gate_ns)
+    }
+
+    fn with_window_and_gate(
+        reference: Arc<dyn PipelineClock + Send + Sync>,
+        window: usize,
+        outlier_gate_ns: u64,
+    ) -> Self {
         let capacity = window.max(2);
         Self {
             reference,
+            outlier_gate_ns,
             inner: spin::Mutex::new(DriftState {
                 samples: alloc::collections::VecDeque::with_capacity(capacity),
                 capacity,
                 fit: None,
+                consecutive_rejects: 0,
             }),
         }
     }
@@ -492,13 +567,34 @@ impl DriftClock {
     /// Record one `(local_ns, master_ns)` observation and refit. `local_ns`
     /// must come from [`reference_now`](Self::reference_now); `master_ns` is the
     /// true playout position. Call this from a single worker.
-    pub fn observe(&self, local_ns: u64, master_ns: u64) {
+    ///
+    /// A sample past the outlier gate is dropped and the fit left alone. A run
+    /// of them restarts the window. See [`DriftObservation`].
+    pub fn observe(&self, local_ns: u64, master_ns: u64) -> DriftObservation {
         let mut st = self.inner.lock();
+
+        let gated = st.samples.len() >= Self::MIN_SAMPLES_TO_GATE
+            && st.fit.is_some_and(|fit| {
+                (master_ns as f64 - Self::project_through(&fit, local_ns)).abs()
+                    > self.outlier_gate_ns as f64
+            });
+        let mut outcome = DriftObservation::Folded;
+        if gated {
+            st.consecutive_rejects += 1;
+            if st.consecutive_rejects < Self::MAX_CONSECUTIVE_REJECTS {
+                return DriftObservation::Rejected;
+            }
+            st.samples.clear();
+            outcome = DriftObservation::Restarted;
+        }
+
+        st.consecutive_rejects = 0;
         if st.samples.len() == st.capacity {
             st.samples.pop_front();
         }
         st.samples.push_back((local_ns, master_ns));
         st.fit = Some(Self::compute_fit(&st.samples));
+        outcome
     }
 
     /// The current playout-rate estimate: `d(master)/d(local)`. `1.0` means no
@@ -525,7 +621,7 @@ impl DriftClock {
         match self.inner.lock().fit {
             None => local_ns,
             Some(f) => {
-                let est = f.master + f.slope * (local_ns as i128 - f.anchor_local as i128) as f64;
+                let est = Self::project_through(&f, local_ns);
                 if est <= 0.0 {
                     0
                 } else {
@@ -535,9 +631,16 @@ impl DriftClock {
         }
     }
 
-    /// Least-squares fit of the window. Centres on the integer means so the
-    /// `f64` sums stay well-conditioned, anchors the published fit on the most
-    /// recent (exact `u64`) local time.
+    fn project_through(fit: &DriftFit, local_ns: u64) -> f64 {
+        fit.master + fit.slope * (local_ns as i128 - fit.anchor_local as i128) as f64
+    }
+
+    /// Exponentially weighted least-squares fit of the window: sample weights
+    /// run `1, RECENCY_DECAY, RECENCY_DECAY², ...` newest to oldest, so recent
+    /// observations set the rate while the older tail still lengthens the
+    /// baseline. Centres on the integer means so the `f64` sums stay
+    /// well-conditioned, anchors the published fit on the most recent (exact
+    /// `u64`) local time.
     fn compute_fit(samples: &alloc::collections::VecDeque<(u64, u64)>) -> DriftFit {
         let n = samples.len();
         let &(anchor_local, anchor_master) = samples.back().expect("observe pushed a sample");
@@ -558,20 +661,41 @@ impl DriftClock {
         let sum_y: i128 = samples.iter().map(|&(_, y)| y as i128).sum();
         let mean_x = sum_x / n as i128;
         let mean_y = sum_y / n as i128;
+        let centred = |x: u64, y: u64| ((x as i128 - mean_x) as f64, (y as i128 - mean_y) as f64);
+
+        // Weighted centroid first, so the second pass subtracts it exactly
+        // rather than recovering it from a difference of large sums.
+        let mut weight_total = 0.0f64;
+        let mut weighted_x = 0.0f64;
+        let mut weighted_y = 0.0f64;
+        let mut weight = 1.0f64;
+        for &(x, y) in samples.iter().rev() {
+            let (dx, dy) = centred(x, y);
+            weight_total += weight;
+            weighted_x += weight * dx;
+            weighted_y += weight * dy;
+            weight *= Self::RECENCY_DECAY;
+        }
+        let centroid_x = weighted_x / weight_total;
+        let centroid_y = weighted_y / weight_total;
 
         let mut sxx = 0.0f64;
         let mut sxy = 0.0f64;
-        for &(x, y) in samples {
-            let dx = (x as i128 - mean_x) as f64;
-            let dy = (y as i128 - mean_y) as f64;
-            sxx += dx * dx;
-            sxy += dx * dy;
+        let mut weight = 1.0f64;
+        for &(x, y) in samples.iter().rev() {
+            let (dx, dy) = centred(x, y);
+            let ex = dx - centroid_x;
+            let ey = dy - centroid_y;
+            sxx += weight * ex * ex;
+            sxy += weight * ex * ey;
+            weight *= Self::RECENCY_DECAY;
         }
         // Degenerate spread (all local times equal): fall back to no drift.
         let slope = if sxx > 0.0 { sxy / sxx } else { 1.0 };
 
-        // Evaluate the fitted line at the anchor: master = ȳ + slope*(anchor - x̄).
-        let master = mean_y as f64 + slope * (anchor_local as i128 - mean_x) as f64;
+        // Evaluate the fitted line at the anchor, in centred coordinates.
+        let anchor_dx = (anchor_local as i128 - mean_x) as f64;
+        let master = mean_y as f64 + centroid_y + slope * (anchor_dx - centroid_x);
         DriftFit {
             anchor_local,
             master,
@@ -742,26 +866,48 @@ mod drift_tests {
         assert_eq!(drift.slope(), 1.0);
     }
 
+    /// Master running 0.1% fast (1.001x) relative to the reference, plus a
+    /// fixed offset, exactly the shape of a DAC drifting from wall time. The
+    /// reference base is well above zero so the f64 conditioning is realistic.
+    const BASE: u64 = 1_000_000_000_000_000;
+    const PERIOD: u64 = 100_000_000;
+    const RATE: f64 = 1.001;
+    const OFFSET: f64 = 5_000_000.0;
+    fn master_at(local: u64) -> u64 {
+        (BASE as f64 * RATE + OFFSET + RATE * (local - BASE) as f64) as u64
+    }
+
+    /// Deterministic pseudo-random jitter in `[-range, range]` (splitmix64),
+    /// standing in for the spread of a real `snd_pcm_delay()` reading.
+    fn jitter(step: u64, range: i64) -> i64 {
+        let mut z = step.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0xD1B5_4A32_D192_ED03;
+        z ^= z >> 30;
+        z = z.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z ^= z >> 27;
+        z = z.wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^= z >> 31;
+        (z % (2 * range as u64 + 1)) as i64 - range
+    }
+
     #[test]
     fn converges_to_the_master_playout_rate() {
-        // Master runs 0.1% fast (1.001x) relative to the reference, plus a
-        // fixed offset, exactly the shape of a DAC drifting from wall time.
         let tick = Arc::new(Tick::default());
         let drift = DriftClock::new(tick.clone());
 
-        const RATE: f64 = 1.001;
-        const OFFSET: i64 = 5_000_000;
-        // Base the reference well above zero so the f64 conditioning is realistic.
-        const BASE: u64 = 1_000_000_000_000_000;
-        let master_at = |local: u64| -> u64 {
-            (BASE as f64 * RATE + OFFSET as f64 + RATE * (local - BASE) as f64) as u64
-        };
-
         // Discipline once every 100 ms for a few seconds.
         for i in 0..40u64 {
-            let local = BASE + i * 100_000_000;
+            let local = BASE + i * PERIOD;
             tick.set(local);
             drift.observe(drift.reference_now(), master_at(local));
+            // The fit must already be usable one second in, not only once the
+            // window has filled.
+            if i == 9 {
+                assert!(
+                    (drift.slope() - RATE).abs() < 1e-3,
+                    "slope {} after 10 samples is not within 1e-3 of {RATE}",
+                    drift.slope()
+                );
+            }
         }
 
         // Slope should track the 1.001x playout rate closely.
@@ -781,6 +927,173 @@ mod drift_tests {
         assert!(
             (est - truth).abs() < 1_000_000,
             "projected {est} vs true master {truth} differ by more than 1ms",
+        );
+    }
+
+    #[test]
+    fn converges_under_delay_jitter() {
+        // The bars of `converges_to_the_master_playout_rate`, but on readings
+        // that jitter +-200 us the way a real playout position does. Weighting
+        // costs slope noise, so the bars have to survive that cost.
+        const JITTER_NS: i64 = 200_000;
+        let tick = Arc::new(Tick::default());
+        let drift = DriftClock::new(tick.clone());
+
+        for i in 0..40u64 {
+            let local = BASE + i * PERIOD;
+            tick.set(local);
+            let master = (master_at(local) as i64 + jitter(i, JITTER_NS)) as u64;
+            drift.observe(drift.reference_now(), master);
+            if i == 9 {
+                assert!(
+                    (drift.slope() - RATE).abs() < 1e-3,
+                    "jittered slope {} after 10 samples is not within 1e-3 of {RATE}",
+                    drift.slope()
+                );
+            }
+        }
+        assert!(
+            (drift.slope() - RATE).abs() < 1e-4,
+            "jittered slope {} after 40 samples is not within 1e-4 of {RATE}",
+            drift.slope()
+        );
+    }
+
+    #[test]
+    fn tracks_a_rate_change_before_the_window_turns_over() {
+        // What the recency weighting is for. Fill the window at one rate, then
+        // move the master to another (a device re-clocking, a resampler
+        // changing its ratio) and check how much of the step the slope has
+        // taken up a quarter of a window later. An unweighted fit over the same
+        // 64 samples reaches 0.15 of the step after 16, the weighted one
+        // reaches 0.29, so this bar fails if the weighting goes.
+        const FROM: f64 = 1.000;
+        const TO: f64 = 1.002;
+        const AFTER: u64 = 16;
+        const MIN_UPTAKE: f64 = 0.25;
+
+        let tick = Arc::new(Tick::default());
+        let drift = DriftClock::new(tick.clone());
+
+        let mut local = BASE;
+        let mut master = BASE as f64;
+        for _ in 0..DriftClock::DEFAULT_WINDOW {
+            tick.set(local);
+            drift.observe(local, master as u64);
+            local += PERIOD;
+            master += FROM * PERIOD as f64;
+        }
+        for _ in 0..AFTER {
+            tick.set(local);
+            assert_eq!(
+                drift.observe(local, master as u64),
+                DriftObservation::Folded,
+                "a rate change is not an outlier: its residual stays inside the gate"
+            );
+            local += PERIOD;
+            master += TO * PERIOD as f64;
+        }
+
+        let uptake = (drift.slope() - FROM) / (TO - FROM);
+        assert!(
+            uptake > MIN_UPTAKE,
+            "slope {} took up only {uptake} of the {FROM} -> {TO} step after {AFTER} samples",
+            drift.slope()
+        );
+    }
+
+    #[test]
+    fn rejects_a_glitched_delay_sample() {
+        let tick = Arc::new(Tick::default());
+        let drift = DriftClock::new(tick.clone());
+
+        let mut local = BASE;
+        for _ in 0..16 {
+            tick.set(local);
+            assert_eq!(
+                drift.observe(local, master_at(local)),
+                DriftObservation::Folded
+            );
+            local += PERIOD;
+        }
+        let slope_before = drift.slope();
+        let observations_before = drift.observations();
+
+        // One glitch: an underrun recovery leaves `delay()` stale, so the
+        // playout position reads 50 ms ahead of the line.
+        tick.set(local);
+        assert_eq!(
+            drift.observe(local, master_at(local) + 50_000_000),
+            DriftObservation::Rejected
+        );
+        assert_eq!(
+            drift.observations(),
+            observations_before,
+            "a rejected sample must not enter the window"
+        );
+        assert!(
+            (drift.slope() - slope_before).abs() < 1e-6,
+            "slope moved from {slope_before} to {} on a rejected sample",
+            drift.slope()
+        );
+
+        // The next good reading is folded as normal: one glitch is not a state.
+        local += PERIOD;
+        tick.set(local);
+        assert_eq!(
+            drift.observe(local, master_at(local)),
+            DriftObservation::Folded
+        );
+    }
+
+    #[test]
+    fn resets_after_a_sustained_jump() {
+        // The playout timeline really moves (a device re-open restarts the
+        // sample counter), so every reading is off by the same step.
+        const JUMP: u64 = 200_000_000;
+        let tick = Arc::new(Tick::default());
+        let drift = DriftClock::new(tick.clone());
+
+        let mut local = BASE;
+        for _ in 0..16 {
+            tick.set(local);
+            drift.observe(local, master_at(local));
+            local += PERIOD;
+        }
+
+        for i in 1..DriftClock::MAX_CONSECUTIVE_REJECTS {
+            tick.set(local);
+            assert_eq!(
+                drift.observe(local, master_at(local) + JUMP),
+                DriftObservation::Rejected,
+                "sample {i} of the jump is still a suspected glitch"
+            );
+            local += PERIOD;
+        }
+        tick.set(local);
+        assert_eq!(
+            drift.observe(local, master_at(local) + JUMP),
+            DriftObservation::Restarted,
+            "past the reject cap the window has to follow the new timeline"
+        );
+        assert_eq!(drift.observations(), 1, "the window restarted");
+
+        // Re-disciplined on the new timeline, the clock reads it, not the old
+        // one it would still be projecting had the window never reset.
+        for _ in 0..16 {
+            local += PERIOD;
+            tick.set(local);
+            assert_eq!(
+                drift.observe(local, master_at(local) + JUMP),
+                DriftObservation::Folded
+            );
+        }
+        let truth = (master_at(local) + JUMP) as i64;
+        let est = drift.now_ns() as i64;
+        assert!(
+            (est - truth).abs() < 1_000_000,
+            "projected {est} vs jumped master {truth}, off by {}",
+            est - truth
         );
     }
 

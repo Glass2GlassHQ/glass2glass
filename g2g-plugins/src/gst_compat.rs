@@ -71,14 +71,108 @@ static GST_MAP: &[(&str, GstEquivalent)] = &[
     ("vp9enc", GstEquivalent::Renamed("vpxenc")),
     ("jpegenc", GstEquivalent::Renamed("mjpegenc")),
     ("jpegdec", GstEquivalent::Renamed("mjpegdec")),
-    ("avenc_aac", GstEquivalent::Renamed("mfaacencode")),
-    ("faac", GstEquivalent::Renamed("mfaacencode")),
+    // `avenc_aac` is a g2g element name itself, so it needs no row; the other
+    // gst AAC encoder names point at it.
+    ("faac", GstEquivalent::Renamed("avenc_aac")),
     ("souphttpsrc", GstEquivalent::Renamed("httpsrc")),
     // appsrc / appsink are registered elements, so gst_equivalent resolves them
     // to Available before this table; no row is needed (and an Unsupported one
     // would contradict reality).
     ("rtph264depay", GstEquivalent::Unsupported("RTP depayloading is built into `udpsrc` / `rtspsrc`")),
-    ("rtph264pay", GstEquivalent::Unsupported("RTP payloading is built into `udpsink`")),
+    // The auto-capture aliases only speak when a capture element is compiled in,
+    // and they never fall back to a test source.
+    ("autovideosrc", GstEquivalent::Unsupported(
+        "no capture source is compiled into this build; the alias picks the first of `v4l2src`, \
+         `libcamerasrc`, `pipewirevideosrc`, `avfvideosrc`, `mfvideosrc`, `camera2src`, so build \
+         one of their features (it never falls back to `videotestsrc`)",
+    )),
+    ("autoaudiosrc", GstEquivalent::Unsupported(
+        "no capture source is compiled into this build; the alias picks the first of `alsasrc`, \
+         `pulsesrc`, `pipewiresrc`, `coreaudiosrc`, `wasapisrc`, `avfaudiosrc`, `aaudiosrc`, so \
+         build one of their features (it never falls back to `audiotestsrc`)",
+    )),
+    // The libav / plain decoder names g2g answers with one ffmpeg decoder. Each
+    // is also a registry alias (like `avdec_h264`), so the row only speaks when
+    // the `ffmpeg` feature is off. Codecs confirmed against `ffmpegdec`'s
+    // `VideoCodec` match and `ffmpegaudiodec`'s `AudioFormat` match.
+    ("vp8dec", GstEquivalent::Renamed("ffmpegdec")),
+    ("vp9dec", GstEquivalent::Renamed("ffmpegdec")),
+    ("mpeg2dec", GstEquivalent::Renamed("ffmpegdec")),
+    ("avdec_vp8", GstEquivalent::Renamed("ffmpegdec")),
+    ("avdec_vp9", GstEquivalent::Renamed("ffmpegdec")),
+    ("avdec_mpeg2video", GstEquivalent::Renamed("ffmpegdec")),
+    ("avdec_mpeg4", GstEquivalent::Renamed("ffmpegdec")),
+    ("mpg123audiodec", GstEquivalent::Renamed("ffmpegaudiodec")),
+    ("flacdec", GstEquivalent::Renamed("ffmpegaudiodec")),
+    ("a52dec", GstEquivalent::Renamed("ffmpegaudiodec")),
+    ("faad", GstEquivalent::Renamed("ffmpegaudiodec")),
+    ("fdkaacdec", GstEquivalent::Renamed("ffmpegaudiodec")),
+    ("avdec_mp3", GstEquivalent::Renamed("ffmpegaudiodec")),
+    ("avdec_aac", GstEquivalent::Renamed("ffmpegaudiodec")),
+    ("avdec_ac3", GstEquivalent::Renamed("ffmpegaudiodec")),
+    ("avdec_flac", GstEquivalent::Renamed("ffmpegaudiodec")),
+    ("theoradec", GstEquivalent::Unsupported(
+        "no Theora decoder; `oggdemux` reads the container but only its Opus / Vorbis / \
+         FLAC audio decodes, so transcode Theora video to VP9 (`vpxenc`) or AV1 first",
+    )),
+    ("dtsdec", GstEquivalent::Unsupported(
+        "no DTS decoder; `ffmpegaudiodec` covers AAC, MP2, MP3, AC-3 and FLAC only",
+    )),
+    // Adaptive streaming: g2g's clients fetch the manifest themselves, so there is
+    // no separate demuxer to place after an HTTP source.
+    ("hlsdemux", GstEquivalent::Unsupported(
+        "`hlssrc` fetches the playlist and the segments itself; replace `souphttpsrc ! hlsdemux` \
+         with `hlssrc location=<playlist url>`",
+    )),
+    ("hlsdemux2", GstEquivalent::Unsupported(
+        "`hlssrc` fetches the playlist and the segments itself; replace `souphttpsrc ! hlsdemux2` \
+         with `hlssrc location=<playlist url>`",
+    )),
+    ("dashdemux", GstEquivalent::Unsupported(
+        "`dashsrc` fetches the MPD and the segments itself; replace `souphttpsrc ! dashdemux` \
+         with `dashsrc location=<mpd url>`",
+    )),
+    ("dashdemux2", GstEquivalent::Unsupported(
+        "`dashsrc` fetches the MPD and the segments itself; replace `souphttpsrc ! dashdemux2` \
+         with `dashsrc location=<mpd url>`",
+    )),
+    ("mssdemux", GstEquivalent::Unsupported(
+        "no Smooth Streaming client; `hlssrc` (HLS) and `dashsrc` (DASH) are the adaptive sources",
+    )),
+    ("mssdemux2", GstEquivalent::Unsupported(
+        "no Smooth Streaming client; `hlssrc` (HLS) and `dashsrc` (DASH) are the adaptive sources",
+    )),
+    // SRT: g2g has one source (always a listener) and one sink (always a caller),
+    // so the gst client/server split collapses onto the property set.
+    ("srtclientsrc", GstEquivalent::Unsupported(
+        "`srtsrc` is the only SRT source and always listens; set `address` and `port` for the \
+         listen socket (there is no caller-mode receive)",
+    )),
+    ("srtserversrc", GstEquivalent::Unsupported(
+        "use `srtsrc`; `address` and `port` select the listen socket",
+    )),
+    ("srtclientsink", GstEquivalent::Unsupported(
+        "use `srtsink`; `host` and `port` select the listener it calls",
+    )),
+    ("srtserversink", GstEquivalent::Unsupported(
+        "`srtsink` is the only SRT sink and always calls out to a listener (`host` / `port`); \
+         there is no listen-mode send",
+    )),
+    // Launch keywords, not elements: the parser accepts `queue` / `queue2` /
+    // `decodebin` / `uridecodebin` / `playbin` and nothing else, so the gst
+    // variants name the keyword they should be spelled as.
+    ("multiqueue", GstEquivalent::Renamed("queue")),
+    ("decodebin3", GstEquivalent::Renamed("decodebin")),
+    ("parsebin", GstEquivalent::Renamed("decodebin")),
+    ("uridecodebin3", GstEquivalent::Renamed("uridecodebin")),
+    ("urisourcebin", GstEquivalent::Renamed("uridecodebin")),
+    ("playbin3", GstEquivalent::Renamed("playbin")),
+    // `rtmp2sink` is an alias (`location` on both); `rtmpsrc` instead listens for
+    // a publisher on `address` / `port`, so the source name only gets a pointer.
+    ("rtmp2src", GstEquivalent::Renamed("rtmpsrc")),
+    // gst's X11 screen grab; g2g's screen source is the ScreenCaptureKit one and
+    // shares none of ximagesrc's region / pointer properties.
+    ("ximagesrc", GstEquivalent::Renamed("screencapturesrc")),
     // `equalizer-3bands` / `spectrum` / `clockoverlay` / `splitmuxsink` are
     // registered elements, so gst_equivalent resolves them to Available before this
     // table; only the wider N-band equalizers need a pointer.
@@ -86,11 +180,171 @@ static GST_MAP: &[(&str, GstEquivalent)] = &[
     ("equalizer-nbands", GstEquivalent::Renamed("equalizer-3bands")),
 ];
 
+/// The GStreamer plugins whose element names come in whole families (90 `rtp*pay`
+/// / `rtp*depay` names, 48 `gl*` names, one `*tv` name per effectv filter), where
+/// one answer serves every member. Each row is `(prefix, suffix, guidance)` and
+/// matches a name that starts with `prefix` and ends with `suffix`; an empty
+/// half matches anything. First match wins, so a narrower row goes above the
+/// wider one it sits inside.
+static GST_FAMILY_MAP: &[(&str, &str, GstEquivalent)] = &[
+    // RTP: payloading and depayloading are inside the transports, not separate
+    // elements, and the session / jitter / RTX / FEC knobs are their properties.
+    (
+        "rtp",
+        "depay",
+        GstEquivalent::Unsupported(
+            "RTP depayloading is built into `udpsrc`, `rtspsrc` and `webrtcsrc`; \
+         drop the depayloader and read from the transport directly",
+        ),
+    ),
+    (
+        "rtp",
+        "pay",
+        GstEquivalent::Unsupported(
+            "RTP payloading is built into `udpsink`, `rtspserversink` and `webrtcsink`; \
+         drop the payloader and set `payload-type` / `max-payload` on the transport",
+        ),
+    ),
+    (
+        "rtp",
+        "",
+        GstEquivalent::Unsupported(
+            "RTP session, jitter buffer, retransmission and FEC are `udpsrc` properties \
+         (`jitter-latency`, `jitter-depth`, `rtcp-rr-interval`, `nack`, `rtx-payload-type`, \
+         `rtx-apt`, `fec-payload-type`, `flexfec-payload-type`) and `udpsink` properties \
+         (`rtcp-sr-interval`, `retransmit`, `retx-capacity`, `rtx-payload-type`, \
+         `fec-columns`, `fec-rows`, `fec-payload-type`)",
+        ),
+    ),
+    // GPU: g2g has no OpenGL elements at all; wgpu is the GPU path.
+    (
+        "gl",
+        "",
+        GstEquivalent::Unsupported(
+            "no OpenGL elements; the GPU path is wgpu: `wgpusink` presents, `wgpucompositor` \
+         mixes, and `dmabuftowgpu` / `wgputodmabuf` move frames in and out",
+        ),
+    ),
+    (
+        "cuda",
+        "",
+        GstEquivalent::Unsupported(
+            "no generic CUDA filters; `nvdec` / `nvenc` are the CUDA codecs and \
+         `localcudasrc` / `localcudasink` share CUDA memory between processes",
+        ),
+    ),
+    (
+        "vulkan",
+        "",
+        GstEquivalent::Unsupported(
+            "`vulkanvideodec` is the only Vulkan element (decode); present with `wgpusink`",
+        ),
+    ),
+    ("nv", "dec", GstEquivalent::Renamed("nvdec")),
+    ("nv", "enc", GstEquivalent::Renamed("nvenc")),
+    // Only the decoders map; a bare `va` prefix would also catch `valve`.
+    ("vaapi", "dec", GstEquivalent::Renamed("vaapidec")),
+    ("va", "dec", GstEquivalent::Renamed("vaapidec")),
+    (
+        "vaapi",
+        "enc",
+        GstEquivalent::Unsupported("no VA-API encoder; use `ffmpegenc`, `nvenc` or `vpxenc`"),
+    ),
+    (
+        "va",
+        "enc",
+        GstEquivalent::Unsupported("no VA-API encoder; use `ffmpegenc`, `nvenc` or `vpxenc`"),
+    ),
+    (
+        "ladspa",
+        "",
+        GstEquivalent::Unsupported(
+            "no LADSPA host; the built-in audio filters are `volume`, `audiopanorama`, \
+         `equalizer-3bands`, `level` and `cutter`",
+        ),
+    ),
+    // effectv: every one of its filters is named `<something>tv`.
+    (
+        "",
+        "tv",
+        GstEquivalent::Unsupported("no video-effects plugin"),
+    ),
+    (
+        "qml",
+        "",
+        GstEquivalent::Unsupported(
+            "no toolkit sinks; render with `wgpusink` or pull frames out with `appsink`",
+        ),
+    ),
+    (
+        "gtk",
+        "",
+        GstEquivalent::Unsupported(
+            "no toolkit sinks; render with `wgpusink` or pull frames out with `appsink`",
+        ),
+    ),
+    (
+        "decklink",
+        "",
+        GstEquivalent::Unsupported("no DeckLink support"),
+    ),
+];
+
+/// The geometrictransform filters, whose names share neither a prefix nor a
+/// suffix, as full-name [`GST_FAMILY_MAP`] prefixes with one shared answer.
+static GST_GEOMETRIC_TRANSFORM_NAMES: &[&str] = &[
+    "bulge",
+    "circle",
+    "diffuse",
+    "fisheye",
+    "kaleidoscope",
+    "marble",
+    "mirror",
+    "perspective",
+    "pinch",
+    "rotate",
+    "sphere",
+    "square",
+    "stretch",
+    "tunnel",
+    "twirl",
+    "waterripple",
+];
+
+/// The answer for every [`GST_GEOMETRIC_TRANSFORM_NAMES`] name.
+const GEOMETRIC_TRANSFORM_HINT: &str =
+    "no geometric-distortion filters; `videoflip`, `videocrop`, `videobox` and `videoscale` \
+     are the geometry elements";
+
+/// The family guidance for `gst_name`, `None` when no family covers it.
+///
+/// A name that is itself a g2g element declines every family rule, so a build
+/// with `nvdec` or `vaapidec` switched off still answers with its cargo feature
+/// instead of a hint pointing back at the same name.
+fn family_equivalent(gst_name: &str) -> Option<GstEquivalent> {
+    if crate::registry::required_feature(gst_name).is_some() {
+        return None;
+    }
+    if GST_GEOMETRIC_TRANSFORM_NAMES.contains(&gst_name) {
+        return Some(GstEquivalent::Unsupported(GEOMETRIC_TRANSFORM_HINT));
+    }
+    GST_FAMILY_MAP
+        .iter()
+        .find(|(prefix, suffix, _)| {
+            gst_name.len() >= prefix.len() + suffix.len()
+                && gst_name.starts_with(prefix)
+                && gst_name.ends_with(suffix)
+        })
+        .map(|(_, _, equivalent)| equivalent.clone())
+}
+
 /// Map a GStreamer element name to its g2g equivalent, consulting the live
 /// `registry` first (so aliases resolve and feature-gated elements that ARE
 /// compiled in show as `Available`), then the launch keywords, then the static
-/// guidance table, then the feature catalog (the name is a g2g element this build
-/// left out), and finally the nearest known name (a spelling mistake).
+/// guidance table, then the family rules ([`GST_FAMILY_MAP`], for the plugins
+/// whose names come by the dozen), then the feature catalog (the name is a g2g
+/// element this build left out), and finally the nearest known name (a spelling
+/// mistake).
 ///
 /// The hand-written table outranks the feature catalog: both know `x264enc`, and
 /// the table's entry also lists the alternatives for a platform where the feature
@@ -101,6 +355,9 @@ pub fn gst_equivalent(registry: &Registry, gst_name: &str) -> GstEquivalent {
     }
     if let Some((_, equivalent)) = GST_MAP.iter().find(|(name, _)| *name == gst_name) {
         return equivalent.clone();
+    }
+    if let Some(equivalent) = family_equivalent(gst_name) {
+        return equivalent;
     }
     if let Some(feature) = crate::registry::required_feature(gst_name) {
         return GstEquivalent::NotCompiled(feature);
@@ -458,6 +715,7 @@ mod tests {
     use super::*;
     use crate::capsfilter::parse_caps;
     use crate::registry::default_registry;
+    use alloc::boxed::Box;
     use g2g_core::{Caps, Dim, Rate, RawVideoFormat};
 
     #[test]
@@ -632,6 +890,181 @@ mod tests {
         let reg = default_registry();
         assert_eq!(gst_equivalent(&reg, "appsrc"), GstEquivalent::Available);
         assert_eq!(gst_equivalent(&reg, "appsink"), GstEquivalent::Available);
+    }
+
+    #[test]
+    fn auto_capture_aliases_resolve_when_a_capture_element_is_built() {
+        const WIDTH: u32 = 320;
+        const HEIGHT: u32 = 240;
+        const FRAMERATE: u32 = 30;
+        const FRAMES: u64 = 1;
+        let mut reg = default_registry();
+        // A stand-in for whichever platform capture element a build has: the
+        // alias must land on it rather than staying unknown.
+        reg.register_source(g2g_core::runtime::SourceFactory::new(
+            "v4l2src",
+            Caps::RawVideo {
+                format: RawVideoFormat::I420,
+                width: Dim::Fixed(WIDTH),
+                height: Dim::Fixed(HEIGHT),
+                framerate: Rate::Fixed(FRAMERATE << 16),
+                interlace: g2g_core::Interlace::Any,
+            },
+            || {
+                Box::new(crate::videotestsrc::VideoTestSrc::new(
+                    WIDTH, HEIGHT, FRAMERATE, FRAMES,
+                ))
+            },
+        ));
+        reg.register_alias("autovideosrc", &["v4l2src"]);
+        assert_eq!(
+            gst_equivalent(&reg, "autovideosrc"),
+            GstEquivalent::Available
+        );
+    }
+
+    #[test]
+    fn container_and_mixer_aliases_resolve_to_their_g2g_targets() {
+        let reg = default_registry();
+        for name in ["webmmux", "adder", "liveadder", "videomixer"] {
+            assert_eq!(
+                gst_equivalent(&reg, name),
+                GstEquivalent::Available,
+                "`{name}` must resolve through its alias"
+            );
+        }
+    }
+
+    #[test]
+    fn the_extra_decoder_names_point_at_the_ffmpeg_decoders() {
+        let reg = default_registry();
+        let compiled = cfg!(all(target_os = "linux", feature = "ffmpeg"));
+        for name in ["vp8dec", "mpeg2dec", "avdec_vp9", "avdec_mpeg4"] {
+            let expected = if compiled {
+                GstEquivalent::Available
+            } else {
+                GstEquivalent::Renamed("ffmpegdec")
+            };
+            assert_eq!(gst_equivalent(&reg, name), expected, "`{name}`");
+        }
+        for name in ["mpg123audiodec", "a52dec", "faad", "avdec_flac"] {
+            let expected = if compiled {
+                GstEquivalent::Available
+            } else {
+                GstEquivalent::Renamed("ffmpegaudiodec")
+            };
+            assert_eq!(gst_equivalent(&reg, name), expected, "`{name}`");
+        }
+    }
+
+    #[test]
+    fn adaptive_and_srt_rows_name_the_g2g_path() {
+        let reg = default_registry();
+        for (name, needle) in [
+            ("hlsdemux", "hlssrc"),
+            ("dashdemux2", "dashsrc"),
+            ("mssdemux", "dashsrc"),
+            ("srtserversrc", "srtsrc"),
+            ("srtclientsink", "srtsink"),
+        ] {
+            let GstEquivalent::Unsupported(hint) = gst_equivalent(&reg, name) else {
+                panic!("`{name}` must carry a hint");
+            };
+            assert!(hint.contains(needle), "`{name}`: {hint}");
+        }
+    }
+
+    #[test]
+    fn bin_names_point_at_the_launch_keyword_the_parser_accepts() {
+        let reg = default_registry();
+        assert_eq!(
+            gst_equivalent(&reg, "decodebin3"),
+            GstEquivalent::Renamed("decodebin")
+        );
+        assert_eq!(
+            gst_equivalent(&reg, "playbin3"),
+            GstEquivalent::Renamed("playbin")
+        );
+        assert_eq!(gst_equivalent(&reg, "queue2"), GstEquivalent::Available);
+    }
+
+    #[test]
+    fn family_rules_answer_the_names_that_come_by_the_dozen() {
+        let reg = default_registry();
+        let GstEquivalent::Unsupported(pay) = gst_equivalent(&reg, "rtph264pay") else {
+            panic!("rtph264pay must hit the rtp payload family");
+        };
+        assert!(pay.contains("udpsink"), "{pay}");
+        let GstEquivalent::Unsupported(session) = gst_equivalent(&reg, "rtpjitterbuffer") else {
+            panic!("rtpjitterbuffer must hit the rtp session family");
+        };
+        assert!(session.contains("jitter-latency"), "{session}");
+        let GstEquivalent::Unsupported(gl) = gst_equivalent(&reg, "gleffects_blur") else {
+            panic!("gleffects_blur must hit the gl family");
+        };
+        assert!(gl.contains("wgpusink"), "{gl}");
+        assert_eq!(
+            gst_equivalent(&reg, "nvav1dec"),
+            GstEquivalent::Renamed("nvdec")
+        );
+        let GstEquivalent::Unsupported(effect) = gst_equivalent(&reg, "warptv") else {
+            panic!("warptv must hit the effectv family");
+        };
+        assert!(effect.contains("effects"), "{effect}");
+        let GstEquivalent::Unsupported(geometry) = gst_equivalent(&reg, "kaleidoscope") else {
+            panic!("kaleidoscope must hit the geometrictransform family");
+        };
+        assert!(geometry.contains("videoflip"), "{geometry}");
+    }
+
+    #[test]
+    fn an_exact_row_beats_a_family_rule() {
+        let reg = default_registry();
+        // Both the `rtph264depay` row and the rtp depay family would answer;
+        // the row's wording is the one that must come out.
+        let GstEquivalent::Unsupported(hint) = gst_equivalent(&reg, "rtph264depay") else {
+            panic!("rtph264depay has an exact row");
+        };
+        assert_eq!(hint, "RTP depayloading is built into `udpsrc` / `rtspsrc`");
+    }
+
+    #[test]
+    fn a_g2g_element_name_is_never_shadowed_by_a_family_rule() {
+        let reg = default_registry();
+        // `nvdec` matches the `nv*dec` family and `videoconvert` is registered:
+        // neither may come back as a family hint.
+        let expected = if cfg!(all(target_os = "linux", feature = "nvdec")) {
+            GstEquivalent::Available
+        } else {
+            GstEquivalent::NotCompiled("nvdec")
+        };
+        assert_eq!(gst_equivalent(&reg, "nvdec"), expected);
+        assert_eq!(
+            gst_equivalent(&reg, "videoconvert"),
+            GstEquivalent::Available
+        );
+    }
+
+    #[test]
+    fn every_renamed_target_still_exists() {
+        let reg = default_registry();
+        let targets = GST_MAP
+            .iter()
+            .map(|(_, equivalent)| equivalent)
+            .chain(GST_FAMILY_MAP.iter().map(|(_, _, equivalent)| equivalent))
+            .filter_map(|equivalent| match equivalent {
+                GstEquivalent::Renamed(target) => Some(*target),
+                _ => None,
+            });
+        for target in targets {
+            assert!(
+                registry_has(&reg, target)
+                    || LAUNCH_KEYWORDS.contains(&target)
+                    || crate::registry::required_feature(target).is_some(),
+                "`{target}` is named as a g2g equivalent but is neither registered, \
+                 a launch keyword, nor a feature-gated element"
+            );
+        }
     }
 
     #[test]

@@ -1,6 +1,8 @@
-//! WAV parser: a RIFF/WAVE byte stream in (`Caps::ByteStream{Wav}`), the raw
-//! PCM it carries out (`Caps::Audio`), so `filesrc location=x.wav ! decodebin`
-//! reaches an audio element. The read side of [`crate::wavenc::WavEnc`].
+//! WAV parser: a RIFF/WAVE byte stream in (`Caps::ByteStream{Wav}`), the audio
+//! it carries out (`Caps::Audio`), so `filesrc location=x.wav ! decodebin`
+//! reaches an audio element. The read side of [`crate::wavenc::WavEnc`]. A
+//! G.711 or IMA ADPCM payload comes out coded, for [`crate::g711`] /
+//! [`crate::adpcm`] to decode.
 //!
 //! RIFF is a chunk list: a 12-byte `RIFF....WAVE` header, then `id` + `size`
 //! chunks. Only `fmt ` (the sample format) and `data` (the samples) matter here;
@@ -26,16 +28,24 @@ use g2g_core::{
     PadTemplate, PadTemplates, PipelinePacket, ANY_CHANNELS, ANY_SAMPLE_RATE,
 };
 
-/// `RIFF` + size + `WAVE`.
-const RIFF_HEADER_LEN: usize = 12;
-/// A chunk's 4-byte id plus its 4-byte size.
-const CHUNK_HEADER_LEN: usize = 8;
+use crate::riff::{
+    padded_len, read_fourcc, read_u16, read_u32, CHUNK_HEADER_LEN, FOURCC_LEN, RIFF_FOURCC,
+    RIFF_HEADER_LEN,
+};
+
 /// The fields of a `fmt ` chunk this reads: tag, channels, rate, byte rate,
 /// block align, bit depth.
 const FMT_CHUNK_MIN_LEN: usize = 16;
 
 const FORMAT_PCM: u16 = 1;
 const FORMAT_IEEE_FLOAT: u16 = 3;
+const FORMAT_ALAW: u16 = 6;
+const FORMAT_MULAW: u16 = 7;
+const FORMAT_IMA_ADPCM: u16 = 0x11;
+/// Bits per sample of the companded G.711 payloads.
+const G711_BITS: u16 = 8;
+/// Bits per sample of an IMA ADPCM nibble.
+const IMA_ADPCM_BITS: u16 = 4;
 /// WAVE_FORMAT_EXTENSIBLE: the real tag sits in the chunk's extension GUID, whose
 /// first two bytes are the tag it extends.
 const FORMAT_EXTENSIBLE: u16 = 0xFFFE;
@@ -50,8 +60,8 @@ struct WaveFormat {
     sample_rate: u32,
 }
 
-/// The g2g format for a `(wFormatTag, bits per sample)` pair, `None` for a
-/// compressed or unmodeled WAV payload (ADPCM, A-law, 64-bit float).
+/// The g2g format for a `(wFormatTag, bits per sample)` pair, `None` for an
+/// unmodeled WAV payload (64-bit float, MS ADPCM).
 fn audio_format(tag: u16, bits: u16) -> Option<AudioFormat> {
     match (tag, bits) {
         (FORMAT_PCM, 8) => Some(AudioFormat::PcmU8),
@@ -59,8 +69,21 @@ fn audio_format(tag: u16, bits: u16) -> Option<AudioFormat> {
         (FORMAT_PCM, 24) => Some(AudioFormat::PcmS24Le),
         (FORMAT_PCM, 32) => Some(AudioFormat::PcmS32Le),
         (FORMAT_IEEE_FLOAT, 32) => Some(AudioFormat::PcmF32Le),
+        (FORMAT_ALAW, G711_BITS) => Some(AudioFormat::Alaw),
+        (FORMAT_MULAW, G711_BITS) => Some(AudioFormat::Mulaw),
+        (FORMAT_IMA_ADPCM, IMA_ADPCM_BITS) => Some(AudioFormat::ImaAdpcm),
         _ => None,
     }
+}
+
+/// The coded payloads a WAV file can carry, at the unknown-layout sentinels a
+/// decoder negotiates against before the `fmt ` chunk is read.
+fn coded_alternatives() -> [Caps; 3] {
+    [AudioFormat::Alaw, AudioFormat::Mulaw, AudioFormat::ImaAdpcm].map(|format| Caps::Audio {
+        format,
+        channels: ANY_CHANNELS,
+        sample_rate: ANY_SAMPLE_RATE,
+    })
 }
 
 /// Read a `fmt ` chunk body. `None` when it is too short or names a payload this
@@ -69,18 +92,13 @@ fn parse_fmt(body: &[u8]) -> Option<WaveFormat> {
     if body.len() < FMT_CHUNK_MIN_LEN {
         return None;
     }
-    let u16le = |o: usize| u16::from_le_bytes([body[o], body[o + 1]]);
-    let u32le = |o: usize| u32::from_le_bytes([body[o], body[o + 1], body[o + 2], body[o + 3]]);
-    let mut tag = u16le(0);
+    let mut tag = read_u16(body, 0)?;
     if tag == FORMAT_EXTENSIBLE {
-        if body.len() < EXTENSIBLE_TAG_OFFSET + 2 {
-            return None;
-        }
-        tag = u16le(EXTENSIBLE_TAG_OFFSET);
+        tag = read_u16(body, EXTENSIBLE_TAG_OFFSET)?;
     }
-    let channels = u16le(2);
-    let sample_rate = u32le(4);
-    let bits = u16le(14);
+    let channels = read_u16(body, 2)?;
+    let sample_rate = read_u32(body, 4)?;
+    let bits = read_u16(body, 14)?;
     if channels == 0 || channels > u8::MAX as u16 || sample_rate == 0 {
         return None;
     }
@@ -126,14 +144,16 @@ impl WavParse {
         }
     }
 
-    /// The PCM formats a WAV file can carry, advertised at negotiation; the
+    /// The formats a WAV file can carry, advertised at negotiation; the
     /// concrete one is fixed via `CapsChanged` once `fmt ` is read.
     fn output_alternatives() -> CapsSet {
-        CapsSet::from_alternatives(Vec::from(pcm_formats().map(|format| Caps::Audio {
+        let mut alternatives = Vec::from(pcm_formats().map(|format| Caps::Audio {
             format,
             channels: ANY_CHANNELS,
             sample_rate: ANY_SAMPLE_RATE,
-        })))
+        }));
+        alternatives.extend(coded_alternatives());
+        CapsSet::from_alternatives(alternatives)
     }
 
     /// Read the RIFF header and the chunks ahead of `data`, then push everything
@@ -143,7 +163,9 @@ impl WavParse {
             if self.buf.len() < RIFF_HEADER_LEN {
                 return Ok(());
             }
-            if &self.buf[0..4] != b"RIFF" || &self.buf[8..12] != b"WAVE" {
+            if read_fourcc(&self.buf, 0) != Some(RIFF_FOURCC)
+                || read_fourcc(&self.buf, CHUNK_HEADER_LEN) != Some(*b"WAVE")
+            {
                 return Err(G2gError::CapsMismatch);
             }
             self.buf.drain(..RIFF_HEADER_LEN);
@@ -153,9 +175,8 @@ impl WavParse {
             if self.buf.len() < CHUNK_HEADER_LEN {
                 return Ok(());
             }
-            let id = [self.buf[0], self.buf[1], self.buf[2], self.buf[3]];
-            let size =
-                u32::from_le_bytes([self.buf[4], self.buf[5], self.buf[6], self.buf[7]]) as usize;
+            let id = read_fourcc(&self.buf, 0).ok_or(G2gError::CapsMismatch)?;
+            let size = read_u32(&self.buf, FOURCC_LEN).ok_or(G2gError::CapsMismatch)? as usize;
             if &id == b"data" {
                 self.buf.drain(..CHUNK_HEADER_LEN);
                 let format = self.format.ok_or(G2gError::CapsMismatch)?;
@@ -171,7 +192,7 @@ impl WavParse {
             // A chunk body is padded to an even length, and the size comes from
             // the file: a chunk claiming more than the stream holds waits rather
             // than indexing past the buffer.
-            let padded = size.checked_add(size % 2).ok_or(G2gError::CapsMismatch)?;
+            let padded = padded_len(size).ok_or(G2gError::CapsMismatch)?;
             let total = padded
                 .checked_add(CHUNK_HEADER_LEN)
                 .ok_or(G2gError::CapsMismatch)?;
@@ -230,7 +251,9 @@ impl AsyncElement for WavParse {
     /// what the audio decoder does (M754): a concrete default rate first, the
     /// `ANY_SAMPLE_RATE` wildcard second so a downstream `rate=` pin intersects
     /// to it. A lone wildcard cannot fixate. The real rate, channel count and
-    /// format arrive with the `CapsChanged` the parsed header emits.
+    /// format arrive with the `CapsChanged` the parsed header emits. The coded
+    /// payloads (M1073) come last, so a downstream that takes anything still
+    /// gets PCM.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
             Caps::ByteStream {
@@ -241,7 +264,9 @@ impl AsyncElement for WavParse {
                     channels: ANY_CHANNELS,
                     sample_rate,
                 };
-                CapsSet::from_alternatives(alloc::vec![pcm(48_000), pcm(ANY_SAMPLE_RATE)])
+                let mut alternatives = alloc::vec![pcm(48_000), pcm(ANY_SAMPLE_RATE)];
+                alternatives.extend(coded_alternatives());
+                CapsSet::from_alternatives(alternatives)
             }
             _ => CapsSet::from_alternatives(Vec::new()),
         }))

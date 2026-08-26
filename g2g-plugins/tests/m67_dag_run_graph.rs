@@ -3,12 +3,13 @@
 //! Pure-fake elements (no hardware); the `rtspsrc -> tee -> {decode, mux}`
 //! integration is owed a Linux run.
 
+use g2g_core::meta::Orientation;
 use g2g_core::runtime::{run_graph, GraphNode};
 use g2g_core::{Caps, Dim, G2gError, Graph, PipelineClock, Rate, RawVideoFormat};
 use g2g_plugins::capsfilter::CapsFilter;
 use g2g_plugins::fakesink::FakeSink;
 use g2g_plugins::videocrop::VideoCrop;
-use g2g_plugins::videoflip::{FlipMethod, VideoFlip};
+use g2g_plugins::videoflip::VideoFlip;
 use g2g_plugins::videotestsrc::VideoTestSrc;
 
 struct NullClock;
@@ -22,7 +23,7 @@ impl PipelineClock for NullClock {
 async fn linear_chain_flows_through_run_graph() {
     let mut g: Graph<GraphNode> = Graph::new();
     let src = g.add_source(GraphNode::source(VideoTestSrc::new(8, 8, 30, 4)));
-    let flip = g.add_transform(GraphNode::element(VideoFlip::new(FlipMethod::Rotate180)));
+    let flip = g.add_transform(GraphNode::element(VideoFlip::new(Orientation::Rotate180)));
     let sink = g.add_sink(GraphNode::element(FakeSink::new()));
     g.link(src, flip).unwrap();
     g.link(flip, sink).unwrap();
@@ -60,7 +61,7 @@ async fn tee_branches_run_independent_transforms() {
     let mut g: Graph<GraphNode> = Graph::new();
     let src = g.add_source(GraphNode::source(VideoTestSrc::new(8, 8, 30, 4)));
     let tee = g.add_tee(2);
-    let flip = g.add_transform(GraphNode::element(VideoFlip::new(FlipMethod::Rotate90Cw)));
+    let flip = g.add_transform(GraphNode::element(VideoFlip::new(Orientation::Rotate90Cw)));
     let crop = g.add_transform(GraphNode::element(VideoCrop::new(2, 2, 2, 2)));
     let s0 = g.add_sink(GraphNode::element(FakeSink::new()));
     let s1 = g.add_sink(GraphNode::element(FakeSink::new()));

@@ -15,8 +15,9 @@ use g2g_core::log::{self, LogLevel, LogRecord, LogSink};
 use g2g_core::runtime::{run_graph, GraphNodeRef};
 use g2g_core::{AsyncElement, PipelineClock};
 
+use g2g_core::meta::Orientation;
 use g2g_plugins::fakesink::FakeSink;
-use g2g_plugins::videoflip::{FlipMethod, VideoFlip};
+use g2g_plugins::videoflip::VideoFlip;
 use g2g_plugins::videotestsrc::VideoTestSrc;
 
 struct ZeroClock;
@@ -59,7 +60,9 @@ async fn run_graph_names_instances_and_elements_self_log() {
     // videotestsrc -> videoflip -> fakesink, two frames then EOS.
     let mut g: Graph<GraphNodeRef<'static>> = Graph::new();
     let src = g.add_source(GraphNodeRef::source(VideoTestSrc::new(16, 16, 30, 2)));
-    let flip = g.add_transform(GraphNodeRef::element(VideoFlip::new(FlipMethod::Rotate180)));
+    let flip = g.add_transform(GraphNodeRef::element(VideoFlip::new(
+        Orientation::Rotate180,
+    )));
     let sink = g.add_sink(GraphNodeRef::element(FakeSink::new()));
     g.link(src, flip).unwrap();
     g.link(flip, sink).unwrap();
@@ -117,7 +120,9 @@ async fn run_graph_names_instances_and_elements_self_log() {
 
     let mut g: Graph<GraphNodeRef<'static>> = Graph::new();
     let src = g.add_source(GraphNodeRef::source(VideoTestSrc::new(16, 16, 30, 1)));
-    let flip = g.add_transform(GraphNodeRef::element(VideoFlip::new(FlipMethod::Rotate180)));
+    let flip = g.add_transform(GraphNodeRef::element(VideoFlip::new(
+        Orientation::Rotate180,
+    )));
     let sink = g.add_sink(GraphNodeRef::element(FakeSink::new()));
     g.link(src, flip).unwrap();
     g.link(flip, sink).unwrap();
@@ -148,11 +153,11 @@ async fn run_graph_names_instances_and_elements_self_log() {
     log::set_sink(Box::new(CaptureSink(captured.clone())));
     log::configure("*:off,flip-a:debug");
 
-    let mut renamed = VideoFlip::new(FlipMethod::Rotate180);
+    let mut renamed = VideoFlip::new(Orientation::Rotate180);
     AsyncElement::set_log_category(&mut renamed, "flip-a".to_string());
     let mut g: Graph<GraphNodeRef<'static>> = Graph::new();
     let src = g.add_source(GraphNodeRef::source(VideoTestSrc::new(16, 16, 30, 1)));
-    let plain = g.add_transform(GraphNodeRef::element(VideoFlip::new(FlipMethod::Identity)));
+    let plain = g.add_transform(GraphNodeRef::element(VideoFlip::new(Orientation::Identity)));
     let flip = g.add_transform(GraphNodeRef::element(renamed));
     let sink = g.add_sink(GraphNodeRef::element(FakeSink::new()));
     g.link(src, plain).unwrap();

@@ -4,9 +4,10 @@
 //! transforms (`VideoFlip` / `VideoRate`, on `AsyncElement`), plus the dyn-erased
 //! path that `Box<dyn DynSourceLoop>` / `Box<dyn DynAsyncElement>` take.
 
+use g2g_core::meta::Orientation;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{AsyncElement, PropError, PropKind, PropValue};
-use g2g_plugins::videoflip::{FlipMethod, VideoFlip};
+use g2g_plugins::videoflip::VideoFlip;
 use g2g_plugins::videorate::VideoRate;
 use g2g_plugins::videotestsrc::VideoTestSrc;
 
@@ -81,7 +82,7 @@ fn spec_tables_describe_each_property() {
         .unwrap();
     assert_eq!(fr.kind, PropKind::Fraction);
 
-    let flip = VideoFlip::new(FlipMethod::Rotate180);
+    let flip = VideoFlip::new(Orientation::Rotate180);
     let m = AsyncElement::properties(&flip)
         .iter()
         .find(|s| s.name == "method")
@@ -91,11 +92,11 @@ fn spec_tables_describe_each_property() {
 
 #[test]
 fn videoflip_method_enum_property() {
-    let mut flip = VideoFlip::new(FlipMethod::HorizontalMirror);
+    let mut flip = VideoFlip::new(Orientation::HorizontalMirror);
     // Canonical GStreamer nickname round-trips unchanged (M182).
     flip.set_property("method", PropValue::Str("clockwise".into()))
         .unwrap();
-    assert_eq!(flip.method(), FlipMethod::Rotate90Cw);
+    assert_eq!(flip.method(), Orientation::Rotate90Cw);
     assert_eq!(
         flip.get_property("method"),
         Some(PropValue::Str("clockwise".into()))
@@ -104,7 +105,7 @@ fn videoflip_method_enum_property() {
     // the gst name on read.
     flip.set_property("method", PropValue::Str("rotate-90ccw".into()))
         .unwrap();
-    assert_eq!(flip.method(), FlipMethod::Rotate90Ccw);
+    assert_eq!(flip.method(), Orientation::Rotate90Ccw);
     assert_eq!(
         flip.get_property("method"),
         Some(PropValue::Str("counterclockwise".into()))
@@ -138,7 +139,7 @@ fn set_property_through_dyn_erasure() {
     );
     assert!(src.properties().iter().any(|s| s.name == "pattern"));
 
-    let mut flip: Box<dyn DynAsyncElement> = Box::new(VideoFlip::new(FlipMethod::Rotate180));
+    let mut flip: Box<dyn DynAsyncElement> = Box::new(VideoFlip::new(Orientation::Rotate180));
     flip.set_property("method", PropValue::Str("vertical-mirror".into()))
         .unwrap();
     assert_eq!(

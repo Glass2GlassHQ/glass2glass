@@ -26,10 +26,12 @@ use g2g_core::runtime::{ElementFactory, LaunchFactory, MuxerFactory, Registry, S
 use g2g_core::{AudioFormat, ByteStreamEncoding, Caps, Dim, Rate, RawVideoFormat};
 
 use crate::aacparse::AacParse;
+use crate::adpcm::{AdpcmDec, AdpcmEnc};
 use crate::alpha::Alpha;
 use crate::audioconvert::AudioConvert;
 use crate::audiomixer::AudioMixer;
 use crate::audiopanorama::AudioPanorama;
+use crate::audiorate::AudioRate;
 use crate::audioresample::AudioResample;
 use crate::audiotestsrc::AudioTestSrc;
 use crate::av1parse::Av1Parse;
@@ -37,19 +39,23 @@ use crate::capsfilter::CapsFilter;
 use crate::compositor::{Compositor, CompositorPad};
 use crate::downloadbuffer::DownloadBuffer;
 use crate::fakesink::FakeSink;
+use crate::fakesrc::FakeSrc;
 use crate::filesink::FileSink;
 use crate::filesrc::FileSrc;
 use crate::flacparse::FlacParse;
 use crate::flvdemux::FlvDemux;
 use crate::flvmux::FlvMux;
+use crate::g711::{AlawDec, AlawEnc, MulawDec, MulawEnc};
 use crate::h264parse::H264Parse;
 use crate::h265parse::H265Parse;
+use crate::id3demux::Id3Demux;
 use crate::identity::IdentityTransform;
 use crate::ivfdemux::IvfDemux;
 use crate::mkvdemux::MkvDemux;
 use crate::mkvmux::MkvMux;
 #[cfg(feature = "std")]
 use crate::mp4mux::Mp4Mux;
+use crate::mpegaudioparse::MpegAudioParse;
 use crate::mux::InterleaveMux;
 use crate::oggdemux::OggDemux;
 use crate::oggmux::OggMux;
@@ -59,12 +65,13 @@ use crate::tensorconvert::TensorConvert;
 use crate::textoverlay::TextOverlay;
 use crate::tsdemux::TsDemux;
 use crate::tsmux::TsMux;
+use crate::valve::Valve;
 use crate::videobalance::VideoBalance;
 use crate::videobox::VideoBox;
 use crate::videoconvert::VideoConvert;
 use crate::videoconvertscale::VideoConvertScale;
 use crate::videocrop::VideoCrop;
-use crate::videoflip::{FlipMethod, VideoFlip};
+use crate::videoflip::{Orientation, VideoFlip};
 use crate::videorate::VideoRate;
 use crate::videoscale::VideoScale;
 use crate::videotestsrc::VideoTestSrc;
@@ -169,12 +176,15 @@ use crate::rtspserversink::RtspServerSink;
 use crate::rtspserversrc::RtspServerSrc;
 #[cfg(feature = "rtsp")]
 use crate::rtspsrc::RtspSrc;
+use crate::scaletempo::ScaleTempo;
 #[cfg(feature = "srt")]
 use crate::srtsink::SrtSink;
 #[cfg(feature = "srt")]
 use crate::srtsrc::SrtSrc;
 #[cfg(all(target_os = "linux", feature = "jpegxs"))]
 use crate::svtjpegxs::{SvtJpegXsDec, SvtJpegXsEnc};
+#[cfg(feature = "tcp")]
+use crate::tcp::{TcpClientSink, TcpClientSrc, TcpServerSink, TcpServerSrc};
 #[cfg(feature = "udp-egress")]
 use crate::udpsink::UdpSink;
 #[cfg(feature = "udp-ingress")]
@@ -214,7 +224,8 @@ use crate::{opusdec::OpusDec, opusenc::OpusEnc};
 /// re-framing form). Returns `None` for codecs without a re-framing parser (the
 /// input decodes directly). H.264 (M421) and H.265 (M425) re-frame to one access
 /// unit per packet; FLAC frame-aligns via `flacparse` (M775, a bare `.flac` byte
-/// stream carries no frame lengths); other audio decodes directly.
+/// stream carries no frame lengths) and MPEG audio via `mpegaudioparse` (M1065,
+/// one self-syncing frame per packet); other audio decodes directly.
 fn decode_parser_provider(input: &Caps) -> Option<&'static str> {
     match input {
         Caps::CompressedVideo {
@@ -229,6 +240,10 @@ fn decode_parser_provider(input: &Caps) -> Option<&'static str> {
             format: AudioFormat::Flac,
             ..
         } => Some("flacparse"),
+        Caps::Audio {
+            format: AudioFormat::Mp2 | AudioFormat::Mp3,
+            ..
+        } => Some("mpegaudioparse"),
         _ => None,
     }
 }
@@ -313,6 +328,27 @@ pub fn default_registry() -> Registry {
         },
         || Box::new(FileSrc::untyped()),
     ));
+    // Synthetic byte source (M1070): `fakesrc num-buffers=20 sizemax=4096 ! ...`
+    // drives a graph without a file, a device or a network. Same byte-stream type
+    // as an untyped `filesrc`, so a `typefind` after it behaves the same.
+    reg.register_source(SourceFactory::new(
+        "fakesrc",
+        Caps::ByteStream {
+            encoding: ByteStreamEncoding::MpegTs,
+        },
+        || Box::new(FakeSrc::new()),
+    ));
+    // File-descriptor source (M1070): reads an already-open descriptor, so a
+    // pipeline can sit in a shell pipe (`fdsrc fd=0 ! typefind ! decodebin`).
+    // Unix only, like the module.
+    #[cfg(unix)]
+    reg.register_source(SourceFactory::new(
+        "fdsrc",
+        Caps::ByteStream {
+            encoding: ByteStreamEncoding::MpegTs,
+        },
+        || Box::new(crate::fd::FdSrc::default()),
+    ));
     // Subtitle / text file source (M433): a `.srt` / `.vtt` / `.ssa` / `.ttml`
     // file as a `Text` stream, feeding `subparse` (overlay or caption authoring).
     // The `format` is sniffed from the `location` extension unless set explicitly.
@@ -390,7 +426,7 @@ pub fn default_registry() -> Registry {
         Box::new(VideoCrop::new(0, 0, 0, 0))
     }));
     reg.register_launch(LaunchFactory::of::<VideoFlip>("videoflip", || {
-        Box::new(VideoFlip::new(FlipMethod::Identity))
+        Box::new(VideoFlip::new(Orientation::Identity))
     }));
     reg.register_launch(LaunchFactory::of::<VideoBalance>("videobalance", || {
         Box::new(VideoBalance::new())
@@ -491,6 +527,12 @@ pub fn default_registry() -> Registry {
     reg.register_launch(LaunchFactory::new("analyticsoverlay", Vec::new(), || {
         Box::new(crate::analyticsoverlay::AnalyticsOverlay::new())
     }));
+    // Still-frame stream generator (M1067): `imagefreeze num-buffers=N` bounds
+    // the run, a bare `imagefreeze` repeats the first frame indefinitely. No pad
+    // templates declared (caps-driven via intercept_caps).
+    reg.register_launch(LaunchFactory::new("imagefreeze", Vec::new(), || {
+        Box::new(crate::imagefreeze::ImageFreeze::new())
+    }));
     // VideoRate / IdentityTransform have no pad templates declared.
     reg.register_launch(LaunchFactory::new("videorate", Vec::new(), || {
         // Caps-driven by default (M290): `videorate ! caps,framerate=N` sets the
@@ -510,6 +552,24 @@ pub fn default_registry() -> Registry {
         // rate from a downstream capsfilter, or passes through.
         Box::new(AudioResample::auto())
     }));
+    // Timestamp corrector (M1066): silence fills a gap, overlapping samples are
+    // dropped, so the PCM stream downstream is contiguous.
+    reg.register_launch(LaunchFactory::of::<AudioRate>("audiorate", || {
+        Box::new(AudioRate::new())
+    }));
+    // Pitch-preserving time stretcher (M1075): a segment rate other than 1 is
+    // played at the original pitch.
+    reg.register_launch(LaunchFactory::of::<ScaleTempo>("scaletempo", || {
+        Box::new(ScaleTempo::new())
+    }));
+    // Channel picker (M1072): the single-output form of `deinterleave`, so
+    // `... ! deinterleave channel=1 ! ...` takes one channel without pad syntax.
+    // The fan-out form of the same name is registered below; the parser picks by
+    // link degree.
+    reg.register_launch(LaunchFactory::of::<crate::deinterleave::Deinterleave>(
+        "deinterleave",
+        || Box::new(crate::deinterleave::Deinterleave::new()),
+    ));
     reg.register_launch(LaunchFactory::of::<Volume>("volume", || {
         Box::new(Volume::new())
     }));
@@ -554,6 +614,16 @@ pub fn default_registry() -> Registry {
     }));
     reg.register_launch(LaunchFactory::of::<IvfDemux>("ivfdemux", || {
         Box::new(IvfDemux::new())
+    }));
+    // AVI (M1071): `filesrc location=X.avi ! avidemux ! ...` (the video stream,
+    // or the `stream=` selection). A multi-branch `avidemux name=d  d.video_0 !
+    // ...  d.audio_0 ! ...` fans out via the demux-select hook (AviDemuxN).
+    reg.register_launch(LaunchFactory::of::<crate::avidemux::AviDemux>(
+        "avidemux",
+        || Box::new(crate::avidemux::AviDemux::new()),
+    ));
+    reg.register_launch(LaunchFactory::of::<crate::avimux::AviMux>("avimux", || {
+        Box::new(crate::avimux::AviMux::new())
     }));
     reg.register_launch(LaunchFactory::of::<TsMux>("mpegtsmux", || {
         Box::new(TsMux::new())
@@ -606,6 +676,15 @@ pub fn default_registry() -> Registry {
     reg.register_launch(LaunchFactory::of::<FlacParse>("flacparse", || {
         Box::new(FlacParse::new())
     }));
+    reg.register_launch(LaunchFactory::of::<MpegAudioParse>(
+        "mpegaudioparse",
+        || Box::new(MpegAudioParse::new()),
+    ));
+    // Takes any byte stream (the tags are not part of the media type), so it
+    // declares no pad templates, the way `typefind` does.
+    reg.register_launch(LaunchFactory::new("id3demux", Vec::new(), || {
+        Box::new(Id3Demux::new())
+    }));
     reg.register_launch(LaunchFactory::of::<OpusParse>("opusparse", || {
         Box::new(OpusParse::new())
     }));
@@ -620,6 +699,11 @@ pub fn default_registry() -> Registry {
     }));
     reg.register_launch(LaunchFactory::new("identity", Vec::new(), || {
         Box::new(IdentityTransform::new())
+    }));
+    // Closable pass-through (M1070): `valve drop=true` mutes one branch of a tee
+    // without rebuilding the graph. No pad templates, like `identity`.
+    reg.register_launch(LaunchFactory::new("valve", Vec::new(), || {
+        Box::new(Valve::new())
     }));
     // Mid-graph content sniffing: re-declares the caps of a byte stream from its
     // own leading bytes, for a source that could only guess (`srtsrc ! typefind !
@@ -688,6 +772,15 @@ pub fn default_registry() -> Registry {
         "output-selector",
         |outputs| Box::new(crate::outputselector::OutputSelector::new(outputs)),
     ));
+    // Channel splitter fan-out (M1072): one N-channel PCM stream in, one mono
+    // stream per port out, port count from the `d.` link degree:
+    // `audiotestsrc channels=2 ! deinterleave name=d  d.src_0 ! fakesink
+    // d.src_1 ! fakesink`. Each port announces its mono caps at run time, so the
+    // input's channel count has to equal the port count.
+    reg.register_demux(g2g_core::runtime::DemuxFactory::new(
+        "deinterleave",
+        |outputs| Box::new(crate::deinterleave::DeinterleaveN::new(outputs)),
+    ));
     // Subtitle-overlay fan-in (M477): the launch-line sibling of the single-input
     // `textoverlay` above, the analog of GStreamer's `textoverlay` text_sink
     // request pad. A `TextOverlayN` merges an RGBA8 video pad (input 0) and a timed
@@ -746,6 +839,13 @@ pub fn default_registry() -> Registry {
             },
         ))
     }));
+    // Channel interleaver fan-in (M1072): N mono pads in, one N-channel stream
+    // out, pad count from the link degree. The output shape is declared before
+    // the pads negotiate, so a non-default one is set on the element:
+    // `interleave name=i format=F32LE rate=44100`.
+    reg.register_muxer(MuxerFactory::new("interleave", |inputs| {
+        Box::new(crate::interleave::Interleave::new(inputs))
+    }));
     // Multi-stream MPEG-TS fan-in (M208): the A+V container case. `mpegtsmux` is
     // registered both as a single-input launch element (the `tsmux::TsMux` above)
     // and here as a fan-in muxer (`tsmuxn::TsMux`); the parser picks by link
@@ -781,6 +881,14 @@ pub fn default_registry() -> Registry {
     // parser picks by link degree, so one name covers `! oggmux !` and
     // `a.! m.  b.! m.  oggmux name=m`. Each pad becomes its own logical
     // bitstream; packets interleave by PTS (M204).
+    // AVI fan-in (M1071): one video stream plus an optional audio one. Like
+    // `mpegtsmux`, `avimux` is both a single-input launch element
+    // (`avimux::AviMux` above) and this fan-in muxer (`avimux::AviMuxN`); the
+    // parser picks by link degree, so one name covers `! avimux !` and
+    // `v.! m.video_0  a.! m.audio_0  avimux name=m`.
+    reg.register_muxer(MuxerFactory::new("avimux", |inputs| {
+        Box::new(crate::avimux::AviMuxN::new(inputs))
+    }));
     reg.register_muxer(MuxerFactory::new("oggmux", |inputs| {
         Box::new(crate::oggmuxn::OggMuxN::new(inputs))
     }));
@@ -806,6 +914,12 @@ pub fn default_registry() -> Registry {
     ));
     reg.register_launch(LaunchFactory::of::<FileSink>("filesink", || {
         Box::new(FileSink::new(""))
+    }));
+    // File-descriptor sink (M1070): writes to an already-open descriptor, the
+    // other half of a shell pipe. Unix only, like the module.
+    #[cfg(unix)]
+    reg.register_launch(LaunchFactory::of::<crate::fd::FdSink>("fdsink", || {
+        Box::new(crate::fd::FdSink::default())
     }));
     // Raw-PCM WAV file sink: `... ! audioconvert ! wavsink location=out.wav`.
     reg.register_launch(LaunchFactory::of::<crate::wavsink::WavSink>(
@@ -875,6 +989,7 @@ fn register_uri_handlers(reg: &mut Registry) {
     reg.register_demux_select(crate::uridecodebin::mp4_demux_select);
     reg.register_demux_select(crate::uridecodebin::ogg_demux_select);
     reg.register_demux_select(crate::uridecodebin::ps_demux_select);
+    reg.register_demux_select(crate::uridecodebin::avi_demux_select);
     // `decodebin` fan-out (M482): `filesrc location=x ! decodebin name=d  d.video_0
     // ! ...  d.audio_0 ! ...` probes the file, builds the multi-output demuxer, and
     // auto-plugs a decoder onto each port (the decode-per-port sibling of the above).
@@ -882,6 +997,7 @@ fn register_uri_handlers(reg: &mut Registry) {
     reg.register_decodebin_select(crate::uridecodebin::ts_decodebin_select);
     reg.register_decodebin_select(crate::uridecodebin::mp4_decodebin_select);
     reg.register_decodebin_select(crate::uridecodebin::ps_decodebin_select);
+    reg.register_decodebin_select(crate::uridecodebin::avi_decodebin_select);
     // Bare `filesrc location=X ! decodebin` primary-stream selection (M746): an
     // audio-only container's single-stream demux defaults to a video port; the hook
     // sniffs the file and selects the real (audio) stream instead.
@@ -890,6 +1006,7 @@ fn register_uri_handlers(reg: &mut Registry) {
     reg.register_primary_stream(crate::uridecodebin::mkv_primary_stream);
     reg.register_primary_stream(crate::uridecodebin::ogg_primary_stream);
     reg.register_primary_stream(crate::uridecodebin::ps_primary_stream);
+    reg.register_primary_stream(crate::uridecodebin::avi_primary_stream);
     // hls:// fan-out (M395): probe the master playlist, fan its variant's muxed TS
     // streams out; the hls_handler is the single-stream fallback it declines to.
     #[cfg(feature = "hls")]
@@ -972,6 +1089,10 @@ fn register_autoplug_candidates(reg: &mut Registry) {
     reg.register(ElementFactory::of::<FlacParse>("flacparse", |_| {
         Box::new(FlacParse::new())
     }));
+    reg.register(ElementFactory::of::<MpegAudioParse>(
+        "mpegaudioparse",
+        |_| Box::new(MpegAudioParse::new()),
+    ));
     reg.register(ElementFactory::of::<AacParse>("aacparse", |_| {
         Box::new(AacParse::new())
     }));
@@ -1008,6 +1129,12 @@ fn register_autoplug_candidates(reg: &mut Registry) {
     reg.register(ElementFactory::of::<IvfDemux>("ivfdemux", |_| {
         Box::new(IvfDemux::new())
     }));
+    // AVI (M1071): `ByteStream{Avi}` -> the stream it selects, so
+    // `filesrc location=x.avi ! decodebin` auto-plugs this.
+    reg.register(ElementFactory::of::<crate::avidemux::AviDemux>(
+        "avidemux",
+        |_| Box::new(crate::avidemux::AviDemux::new()),
+    ));
     // RIFF/WAVE (M1030): `ByteStream{Wav}` -> the PCM it carries, so
     // `filesrc location=x.wav ! decodebin` auto-plugs this.
     reg.register(ElementFactory::of::<WavParse>("wavparse", |_| {
@@ -1030,6 +1157,18 @@ fn register_autoplug_candidates(reg: &mut Registry) {
     }));
 
     // Decoders (feature- + platform-gated, same gate as the launch registration).
+    // Telephony codecs (M1073): baseline, so `rtspsrc ! decodebin` reaches PCM
+    // on a PCMU / PCMA camera and `filesrc ! wavparse ! decodebin` on an
+    // ADPCM WAV.
+    reg.register(ElementFactory::of::<MulawDec>("mulawdec", |_| {
+        Box::new(MulawDec::new())
+    }));
+    reg.register(ElementFactory::of::<AlawDec>("alawdec", |_| {
+        Box::new(AlawDec::new())
+    }));
+    reg.register(ElementFactory::of::<AdpcmDec>("adpcmdec", |_| {
+        Box::new(AdpcmDec::new())
+    }));
     #[cfg(feature = "opus")]
     reg.register(ElementFactory::of::<OpusDec>("opusdec", |_| {
         Box::new(OpusDec::new())
@@ -1364,6 +1503,32 @@ fn register_aliases(reg: &mut Registry) {
             "fakesink",
         ],
     );
+    // Auto sources: the first capture element this build actually has, in
+    // platform order. No `videotestsrc` / `audiotestsrc` last resort: a capture
+    // line that silently produced a test pattern would look like it worked.
+    reg.register_alias(
+        "autovideosrc",
+        &[
+            "v4l2src",
+            "libcamerasrc",
+            "pipewirevideosrc",
+            "avfvideosrc",
+            "mfvideosrc",
+            "camera2src",
+        ],
+    );
+    reg.register_alias(
+        "autoaudiosrc",
+        &[
+            "alsasrc",
+            "pulsesrc",
+            "pipewiresrc",
+            "coreaudiosrc",
+            "wasapisrc",
+            "avfaudiosrc",
+            "aaudiosrc",
+        ],
+    );
     // gst's name for the DVD subpicture decoder.
     reg.register_alias("dvdsubdec", &["vobsubdec"]);
     // gst's macOS audio element names.
@@ -1419,6 +1584,44 @@ fn register_aliases(reg: &mut Registry) {
     reg.register_alias("nvh264dec", &["nvdec"]);
     reg.register_alias("nvh264enc", &["nvenc"]);
     reg.register_alias("nvv4l2h264enc", &["nvenc"]);
+    // WebM is Matroska, and `matroskamux` carries the `streamable` property the
+    // gst name shares.
+    reg.register_alias("webmmux", &["matroskamux"]);
+    // gst's audio and video mixers -> the one mixer / compositor each. The
+    // compositor takes videomixer's per-pad `xpos` / `ypos` / `zorder` / `alpha`.
+    reg.register_alias("adder", &["audiomixer"]);
+    reg.register_alias("liveadder", &["audiomixer"]);
+    reg.register_alias("videomixer", &["compositor"]);
+    // The remaining libav / plain decoder names the one ffmpeg decoder covers:
+    // `ffmpegdec` decodes VP8, VP9, MPEG-2 and MPEG-4 part 2, `ffmpegaudiodec`
+    // decodes AAC, MP2, MP3, AC-3 and FLAC.
+    for name in [
+        "vp8dec",
+        "vp9dec",
+        "mpeg2dec",
+        "avdec_vp8",
+        "avdec_vp9",
+        "avdec_mpeg2video",
+        "avdec_mpeg4",
+    ] {
+        reg.register_alias(name, &["ffmpegdec"]);
+    }
+    for name in [
+        "mpg123audiodec",
+        "flacdec",
+        "a52dec",
+        "faad",
+        "fdkaacdec",
+        "avdec_mp3",
+        "avdec_aac",
+        "avdec_ac3",
+        "avdec_flac",
+    ] {
+        reg.register_alias(name, &["ffmpegaudiodec"]);
+    }
+    // gst's rtmp2 sink takes the same `location` URL as `rtmpsink`. `rtmp2src`
+    // has no alias: `rtmpsrc` listens for a publisher on `address` / `port`.
+    reg.register_alias("rtmp2sink", &["rtmpsink"]);
 }
 
 /// One feature-gated launch element: the name a pipeline writes, the cargo
@@ -1476,6 +1679,10 @@ pub static FEATURE_GATED_ELEMENTS: &[FeatureGatedElement] = &{
         "rtspserversrcn" => "rtsp-server";
         "srtsrc" => "srt";
         "srtsink" => "srt";
+        "tcpserversrc" => "tcp";
+        "tcpclientsrc" => "tcp";
+        "tcpserversink" => "tcp";
+        "tcpclientsink" => "tcp";
         "remotesrc" => "remote";
         "remotesink" => "remote";
         "remotewssrc" => "remote-ws";
@@ -1588,6 +1795,24 @@ fn register_feature_gated(reg: &mut Registry) {
     }));
 
     // Codecs (cross-platform).
+    reg.register_launch(LaunchFactory::of::<MulawEnc>("mulawenc", || {
+        Box::new(MulawEnc::new())
+    }));
+    reg.register_launch(LaunchFactory::of::<MulawDec>("mulawdec", || {
+        Box::new(MulawDec::new())
+    }));
+    reg.register_launch(LaunchFactory::of::<AlawEnc>("alawenc", || {
+        Box::new(AlawEnc::new())
+    }));
+    reg.register_launch(LaunchFactory::of::<AlawDec>("alawdec", || {
+        Box::new(AlawDec::new())
+    }));
+    reg.register_launch(LaunchFactory::of::<AdpcmEnc>("adpcmenc", || {
+        Box::new(AdpcmEnc::new())
+    }));
+    reg.register_launch(LaunchFactory::of::<AdpcmDec>("adpcmdec", || {
+        Box::new(AdpcmDec::new())
+    }));
     #[cfg(feature = "opus")]
     {
         reg.register_launch(LaunchFactory::of::<OpusEnc>("opusenc", || {
@@ -1664,6 +1889,26 @@ fn register_feature_gated(reg: &mut Registry) {
         },
         || Box::new(OnvifSrc::new("")),
     ));
+    // Plain TCP byte streams (M1068). The declared caps are nominal, like
+    // `srtsrc`'s: nothing on the wire says what the bytes are, so
+    // `bytestream-format` names the container and a downstream `typefind` can
+    // re-declare it from the content.
+    #[cfg(feature = "tcp")]
+    reg.register_source(SourceFactory::new(
+        "tcpserversrc",
+        Caps::ByteStream {
+            encoding: ByteStreamEncoding::MpegTs,
+        },
+        || Box::new(TcpServerSrc::default()),
+    ));
+    #[cfg(feature = "tcp")]
+    reg.register_source(SourceFactory::new(
+        "tcpclientsrc",
+        Caps::ByteStream {
+            encoding: ByteStreamEncoding::MpegTs,
+        },
+        || Box::new(TcpClientSrc::default()),
+    ));
     #[cfg(feature = "udp-ingress")]
     reg.register_source(SourceFactory::new(
         "udpsrc",
@@ -1689,6 +1934,14 @@ fn register_feature_gated(reg: &mut Registry) {
         },
         || Box::new(WebRtcWhepSrc::new("")),
     ));
+    #[cfg(feature = "tcp")]
+    reg.register_launch(LaunchFactory::of::<TcpServerSink>("tcpserversink", || {
+        Box::new(TcpServerSink::default())
+    }));
+    #[cfg(feature = "tcp")]
+    reg.register_launch(LaunchFactory::of::<TcpClientSink>("tcpclientsink", || {
+        Box::new(TcpClientSink::default())
+    }));
     #[cfg(feature = "udp-egress")]
     reg.register_launch(LaunchFactory::of::<UdpSink>("udpsink", || {
         Box::new(UdpSink::new("127.0.0.1:5004".parse().unwrap()))

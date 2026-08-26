@@ -46,7 +46,10 @@
 //! Dynamic plugins: with the `plugin-loader` feature, every directory in
 //! `$G2G_PLUGIN_PATH` plus each `--plugin <path>` is `dlopen`ed and its elements
 //! registered before the pipeline parses, so a packaged binary extends without a
-//! rebuild (M201). The plugin's ABI tag must match this build's.
+//! rebuild (M201). The plugin's ABI tag must match this build's. With the
+//! `plugin-signing` feature, listing Ed25519 public key files in
+//! `$G2G_PLUGIN_TRUSTED_KEYS` makes a matching `<plugin>.sig` mandatory for
+//! every one of them (M1061).
 //!
 //! Compatibility notes: g2g sources run to their natural EOS (e.g.
 //! `num-buffers`) or until the process is killed; there is no run-time
@@ -279,7 +282,7 @@ fn parse_opts(args: impl Iterator<Item = String>) -> (Opts, Vec<String>) {
 /// is fatal: a pipeline naming a plugin element would otherwise fail later with
 /// a more confusing "unknown element". Compiled out without `plugin-loader`,
 /// where a `--plugin` request is reported rather than silently ignored.
-#[cfg(feature = "plugin-loader")]
+#[cfg(all(feature = "plugin-loader", not(feature = "plugin-signing")))]
 fn load_plugins(reg: &mut g2g_core::runtime::Registry, plugins: &[String]) {
     use g2g_plugins::plugin_loader;
     match plugin_loader::load_from_env(reg) {
@@ -297,6 +300,34 @@ fn load_plugins(reg: &mut g2g_core::runtime::Registry, plugins: &[String]) {
         if let Err(err) = plugin_loader::load_plugin(path, reg) {
             eprintln!("g2g-launch: {err}");
             process::exit(1);
+        }
+        eprintln!("g2g-launch: loaded plugin {path}");
+    }
+}
+
+/// The same with signature verification (M1061): the keys
+/// `$G2G_PLUGIN_TRUSTED_KEYS` names gate the scanned directories and each
+/// explicit `--plugin` alike, so neither route is the unverified one.
+#[cfg(feature = "plugin-signing")]
+fn load_plugins(reg: &mut g2g_core::runtime::Registry, plugins: &[String]) {
+    use g2g_plugins::plugin_loader::{self, default_policy};
+    let fatal = |err: &dyn std::fmt::Display| -> ! {
+        eprintln!("g2g-launch: {err}");
+        process::exit(1)
+    };
+    let trusted = plugin_loader::trusted_keys_from_env().unwrap_or_else(|e| fatal(&e));
+    match plugin_loader::load_from_env_verified(reg, &trusted) {
+        Ok(loaded) => {
+            for p in loaded {
+                eprintln!("g2g-launch: loaded plugin {}", p.display());
+            }
+        }
+        Err(err) => fatal(&err),
+    }
+    for path in plugins {
+        if let Err(err) = plugin_loader::load_plugin_verified(path, reg, &trusted, &default_policy)
+        {
+            fatal(&err);
         }
         eprintln!("g2g-launch: loaded plugin {path}");
     }

@@ -3,10 +3,11 @@
 //! `run_graph` without taking ownership). The caller keeps its elements and can
 //! inspect them after the run.
 
+use g2g_core::meta::Orientation;
 use g2g_core::runtime::{run_graph, GraphNodeRef};
 use g2g_core::{Graph, PipelineClock};
 use g2g_plugins::fakesink::FakeSink;
-use g2g_plugins::videoflip::{FlipMethod, VideoFlip};
+use g2g_plugins::videoflip::VideoFlip;
 use g2g_plugins::videotestsrc::VideoTestSrc;
 
 struct NullClock;
@@ -19,7 +20,7 @@ impl PipelineClock for NullClock {
 #[tokio::test]
 async fn borrowing_graph_runs_and_caller_keeps_elements() {
     let mut src = VideoTestSrc::new(8, 8, 30, 4);
-    let mut flip = VideoFlip::new(FlipMethod::Rotate180);
+    let mut flip = VideoFlip::new(Orientation::Rotate180);
     let mut sink = FakeSink::new();
 
     let stats = {

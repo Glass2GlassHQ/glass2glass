@@ -20,6 +20,10 @@ use g2g_plugins::nvenc::NvEnc;
 
 use super::StreamSettings;
 
+/// CUDA ordinal of the GPU the interop device is created on: `create_interop_device_full`
+/// takes the first NVIDIA adapter, so the bridge retains its context on device 0.
+const CUDA_DEVICE_ID: i32 = 0;
+
 /// Create g2g's interop device (Vulkan + VK_KHR_external_memory_fd, opened
 /// with the adapter's full features so Bevy's renderer is happy on it) and
 /// wrap it for `RenderCreation::Manual`. Bevy adopting it means every texture
@@ -66,7 +70,15 @@ impl EncodeState {
         // SAFETY: `device` is the VK_KHR_external_memory_fd interop device
         // created by `create_interop_device_full` and handed to Bevy, so the
         // bridge's exportable-image allocation and CUDA import are valid on it.
-        let bridge = unsafe { WgpuToCuda::new(device, queue, settings.width, settings.height) }?;
+        let bridge = unsafe {
+            WgpuToCuda::new(
+                device,
+                queue,
+                settings.width,
+                settings.height,
+                CUDA_DEVICE_ID,
+            )
+        }?;
         let mut nvenc = NvEnc::new().with_bitrate(settings.bitrate);
         let caps = Caps::RawVideo {
             format: RawVideoFormat::Rgba8,

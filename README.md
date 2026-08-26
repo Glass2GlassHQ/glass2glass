@@ -77,7 +77,7 @@ cargo run -p g2g-plugins --bin g2g-launch --features std -- \
 ```
 
 Element names mostly match (with aliases: `avdec_h264`→`ffmpegdec`,
-`qtmux`→`mp4mux`, `autovideosink`→`waylandsink`/`kmssink`, ...). Inline caps
+`qtmux`→`mp4mux`, `autovideosink`→`waylandsink`/`kmssink`, `autovideosrc`→`v4l2src`/`libcamerasrc`, ...). Inline caps
 filters, `tee name=t` fan-out, muxer fan-in, and `decodebin`/`uridecodebin`/`playbin`
 all parse. When a line *doesn't* port, you get a hint, not a bare error:
 
@@ -363,6 +363,7 @@ OS-coupled elements live behind cargo features:
 | `CudaToWgpu` / `WgpuToCuda` (CUDA ↔ wgpu zero-copy bridge) | `cuda-wgpu` | Linux + NVIDIA + Vulkan |
 | `UdpSink` + RTP packetizer | `udp-egress` | — |
 | `UdpSrc` (RTP ingest + jitter buffer + RTCP/NACK) | `udp-ingress` | — |
+| `TcpServerSrc` / `TcpClientSrc` / `TcpServerSink` / `TcpClientSink` (plain TCP byte streams) | `tcp` | — |
 | `RtmpSrc` (RTMP publisher ingest) | `rtmp` | — |
 | `WebRtcSink` (WHIP egress, H.264 + Opus) / `WebRtcWhepSrc` (WHEP ingest, H.264), via str0m: ICE/DTLS/SRTP, trickle ICE + ICE restart, NACK/RTX | `webrtc` | str0m (rust-crypto) + reqwest |
 | `WebRtcDataSrc` / `WebRtcDataSink` (P2P data channels on SCTP) | `webrtc` | str0m |
@@ -396,17 +397,17 @@ OS-coupled elements live behind cargo features:
 The container parsers and muxers (`mp4src` / `mp4sink`, `tsdemux` / `mpegtsmux`,
 `matroskademux` / `matroskamux`, `flvdemux` / `flvmux`, `oggdemux` / `oggmux`,
 `fmp4demux`, `mpegpsdemux`), the bitstream parsers (`h264parse`, `h265parse`, `aacparse`,
-`opusparse`, `vp8parse`, `vp9parse`, `av1parse`), the software video/audio
-transforms (`videoscale` / `videorate` / `videocrop` / `videoflip` /
+`mpegaudioparse` + `id3demux`, `opusparse`, `vp8parse`, `vp9parse`, `av1parse`), the software video/audio
+transforms (`videoscale` / `videorate` / `imagefreeze` / `videocrop` / `videoflip` /
 `videobalance` / `videobox` / `alpha` / `gamma` / `deinterlace` / `timeoverlay`,
-`audioconvert` / `audioresample` / `audiomixer` / `volume` / `audiopanorama` /
+`audioconvert` / `audioresample` / `audiorate` / `audiomixer` / `volume` / `audiopanorama` /
 `audioamplify` / `audioecho` / `level` / `cutter` / `equalizer-3bands` /
 `spectrum`), the KLV telemetry codec (`klvdecode`, MISB ST 0601 / STANAG 4609),
 the bitmap-subtitle decoders (`vobsubdec`, alias `dvdsubdec`, `dvbsubdec` and
 `pgsdec`) with the `subpictureoverlay` that blends their cues onto video,
 and the EBU teletext subtitle decoder (`teletextdec`),
 the flow-control elements (`concat` / `input-selector` /
-`output-selector` / `progressreport`), the `compositor`, the tag system, and the
+`output-selector` / `valve` / `progressreport`), the `compositor`, the tag system, and the
 `gst-launch` text DSL (`parse_launch` / `gst-inspect`) are all in the pure
 `no_std + alloc` default build. The std build adds `clockoverlay`, the
 `multifilesink` / `multifilesrc` image-sequence pair, `vobsubsrc` (a DVD
@@ -473,7 +474,8 @@ Features: `nvenc` (`nvdec` for the decoder). Linux + NVIDIA only. `NvDec`
 itself is multi-domain: driven by downstream demand it keeps frames on the GPU
 (zero-copy) or downloads to System. It decodes H.264 / H.265 / AV1, emits P010
 for a 10-bit stream, reconfigures in place on a mid-stream resolution change, and
-takes `max-display-delay` to trade latency for decode/display pipelining. `NvEnc`
+takes `max-display-delay` to trade latency for decode/display pipelining and
+`cuda-device-id` to pick the GPU on a multi-card host. `NvEnc`
 encodes P010 as HEVC Main 10 and takes `gop-size` / `repeat-sequence-header` for
 periodic IDRs carrying their own SPS/PPS.
 

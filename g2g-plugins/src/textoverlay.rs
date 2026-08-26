@@ -61,7 +61,7 @@ use crate::paint::Canvas;
 use crate::paint::blend_px;
 use crate::subparse::{parse_srt, parse_ssa, parse_ttml, parse_webvtt, Cue, TextAlign};
 #[cfg(feature = "truetype-overlay")]
-use crate::subparse::{TextShadow, WritingMode};
+use crate::subparse::{RubyRun, TextShadow, TextStroke, WritingMode};
 
 /// A parsed TrueType / OpenType face used by the [`truetype-overlay`](crate)
 /// render path. Wraps `ab_glyph` (glyf + CFF/CFF2 outlines) behind a small shim
@@ -113,6 +113,7 @@ struct TtfGlyph {
     coverage: Vec<u8>,
     color: [u8; 4],
     shadow: Option<TextShadow>,
+    stroke: Option<TextStroke>,
 }
 
 /// The font attributes the cue's `::cue` rules and its `<b>` / `<i>` / `<u>`
@@ -120,12 +121,12 @@ struct TtfGlyph {
 /// runs the shaper takes (nested spans have already resolved to one value per
 /// character). Sizes resolve against `cue_px`, the size the cue itself draws at.
 #[cfg(feature = "text-shaping")]
-fn styled_spans(
+fn styled_spans<'a>(
     text: &str,
-    settings: &crate::subparse::CueSettings,
+    settings: &'a crate::subparse::CueSettings,
     cue_px: f32,
-) -> Vec<crate::textshape::StyledSpan> {
-    let mut spans: Vec<crate::textshape::StyledSpan> = Vec::new();
+) -> Vec<crate::textshape::StyledSpan<'a>> {
+    let mut spans: Vec<crate::textshape::StyledSpan<'a>> = Vec::new();
     for (offset, c) in text.char_indices() {
         let span = crate::textshape::StyledSpan {
             start: offset,
@@ -138,6 +139,7 @@ fn styled_spans(
             // no run of its own.
             italic: settings.italic_at(offset).then_some(true),
             stretch: settings.stretch_at(offset),
+            family: settings.font_family_at(offset),
         };
         match spans.last_mut() {
             Some(open) if open.end == offset && open.same_style(&span) => open.end = span.end,
@@ -165,6 +167,89 @@ fn underline_bar(px: f32) -> (i32, i32) {
         ((px * UNDERLINE_GAP_FRACTION) as i32).max(1),
         ((px * UNDERLINE_THICKNESS_FRACTION) as i32).max(1),
     )
+}
+
+/// The integer offsets a glyph mask is painted at to dilate it into a
+/// `-webkit-text-stroke` outline: every pixel within `width_px` of the origin,
+/// measured round so the outline has no square corners.
+#[cfg(feature = "truetype-overlay")]
+pub(crate) fn stroke_offsets(width_px: u32) -> Vec<(i32, i32)> {
+    let radius = width_px as i32;
+    let mut offsets = Vec::new();
+    for dy in -radius..=radius {
+        for dx in -radius..=radius {
+            if dx * dx + dy * dy <= radius * radius {
+                offsets.push((dx, dy));
+            }
+        }
+    }
+    offsets
+}
+
+/// Cell height of one character of a vertical column, as a fraction of the
+/// column's text size.
+#[cfg(feature = "truetype-overlay")]
+const VERTICAL_CELL_FRACTION: f32 = 1.15;
+
+/// Width of a vertical column, as a fraction of its text size.
+#[cfg(feature = "truetype-overlay")]
+const VERTICAL_COLUMN_FRACTION: f32 = 1.3;
+
+/// The paint one run of glyphs takes: the fill colour plus the shadow and the
+/// outline drawn under it.
+#[cfg(feature = "truetype-overlay")]
+#[derive(Debug, Clone, Copy)]
+struct GlyphPaint {
+    color: [u8; 4],
+    shadow: Option<TextShadow>,
+    stroke: Option<TextStroke>,
+}
+
+/// Baseline-to-baseline advance of a shaped block, as a fraction of its text
+/// size.
+#[cfg(feature = "text-shaping")]
+const LINE_HEIGHT_FRACTION: f32 = 1.25;
+
+/// Size of a ruby annotation as a fraction of the size its base draws at, the
+/// WebVTT default rendering.
+#[cfg(feature = "truetype-overlay")]
+const RUBY_SIZE_FRACTION: f32 = 0.5;
+
+/// Where each of a cue's ruby annotations sits along the line it is on: the low
+/// and high edge of the base run's glyphs, grown as they are placed. `None`
+/// while no glyph of that base has landed on this line.
+#[cfg(feature = "truetype-overlay")]
+#[derive(Debug)]
+struct RubyExtents(Vec<Option<(f32, f32)>>);
+
+#[cfg(feature = "truetype-overlay")]
+impl RubyExtents {
+    fn new(ruby: &[RubyRun]) -> Self {
+        Self(alloc::vec![None; ruby.len()])
+    }
+
+    /// Grow the extent of every annotation whose base run covers byte offset
+    /// `at` to include `low..high`.
+    fn cover(&mut self, ruby: &[RubyRun], at: usize, low: f32, high: f32) {
+        for (extent, run) in self.0.iter_mut().zip(ruby) {
+            if at < run.style.start || at >= run.style.end {
+                continue;
+            }
+            *extent = Some(match *extent {
+                None => (low, high),
+                Some((have_low, have_high)) => (have_low.min(low), have_high.max(high)),
+            });
+        }
+    }
+
+    /// The annotations that got an extent on this line, each with the centre of
+    /// its base run.
+    fn placed<'a>(&'a self, ruby: &'a [RubyRun]) -> impl Iterator<Item = (&'a RubyRun, f32)> {
+        self.0
+            .iter()
+            .zip(ruby)
+            .filter_map(|(extent, run)| extent.map(|(low, high)| (run, (low + high) / 2.0)))
+    }
 }
 
 /// Merge consecutive glyphs asking for the same fill into one run each. Cells
@@ -302,6 +387,9 @@ pub(crate) struct PlacedGlyph {
     /// The `text-shadow` in effect here, drawn as an offset copy, blurred when
     /// the rule asked for a radius, under every glyph of the cue.
     pub shadow: Option<TextShadow>,
+    /// The `-webkit-text-stroke` in effect here, drawn as an outline under the
+    /// glyph fills of the cue.
+    pub stroke: Option<TextStroke>,
 }
 
 /// One cue laid out on the canvas: the backing box as `(x, y, width, height)`
@@ -858,6 +946,91 @@ impl TextOverlay {
         }
     }
 
+    /// Width `text` takes rasterized at `px` on the `ab_glyph` path.
+    #[cfg(feature = "truetype-overlay")]
+    fn run_width(&self, text: &str, px: f32) -> f32 {
+        text.chars()
+            .map(|c| self.glyph_font(c).metrics(c, px).advance_width)
+            .sum()
+    }
+
+    /// Rasterize `text` at `px` and push it as glyphs advancing right from pen
+    /// `x` on `baseline`. Used for a ruby annotation, which is placed against
+    /// its base run rather than laid out in the line.
+    #[cfg(feature = "truetype-overlay")]
+    fn push_horizontal_run(
+        &self,
+        glyphs: &mut Vec<TtfGlyph>,
+        text: &str,
+        px: f32,
+        x: f32,
+        baseline: f32,
+        paint: GlyphPaint,
+    ) {
+        let mut pen = x;
+        for c in text.chars() {
+            let (m, coverage) = self.glyph_font(c).rasterize(c, px);
+            glyphs.push(TtfGlyph {
+                x: (pen + m.xmin as f32) as i32,
+                y: (baseline - m.ymin as f32 - m.height as f32) as i32,
+                size: (m.width, m.height),
+                coverage,
+                color: paint.color,
+                shadow: paint.shadow,
+                stroke: paint.stroke,
+            });
+            pen += m.advance_width;
+        }
+    }
+
+    /// Rasterize `text` at `px` and push it as a column of glyphs centred on
+    /// `x`, the first cell starting at `top`. The vertical-writing-mode
+    /// companion to [`push_horizontal_run`](Self::push_horizontal_run).
+    #[cfg(feature = "truetype-overlay")]
+    fn push_vertical_run(
+        &self,
+        glyphs: &mut Vec<TtfGlyph>,
+        text: &str,
+        px: f32,
+        x: f32,
+        top: f32,
+        paint: GlyphPaint,
+    ) {
+        let ascent = self.fonts[0].line_metrics(px).ascent;
+        let cell_h = px * VERTICAL_CELL_FRACTION;
+        for (i, c) in text.chars().enumerate() {
+            let (m, coverage) = self.glyph_font(c).rasterize(c, px);
+            let baseline = top + ascent + i as f32 * cell_h;
+            glyphs.push(TtfGlyph {
+                x: (x - m.advance_width / 2.0 + m.xmin as f32) as i32,
+                y: (baseline - m.ymin as f32 - m.height as f32) as i32,
+                size: (m.width, m.height),
+                coverage,
+                color: paint.color,
+                shadow: paint.shadow,
+                stroke: paint.stroke,
+            });
+        }
+    }
+
+    /// Blit one glyph's coverage as a `-webkit-text-stroke` outline: the same
+    /// mask the shadow blits, at every offset inside the stroke radius, so the
+    /// dilated copies show as an outline once the fill lands on top.
+    #[cfg(feature = "truetype-overlay")]
+    fn blit_stroke(
+        &self,
+        buf: &mut [u8],
+        x0: i32,
+        y0: i32,
+        size: (usize, usize),
+        coverage: &[u8],
+        stroke: TextStroke,
+    ) {
+        for (dx, dy) in stroke_offsets(stroke.width_px) {
+            self.blit_coverage(buf, x0 + dx, y0 + dy, size, coverage, stroke.color);
+        }
+    }
+
     /// Blit one glyph's coverage as a drop shadow at `(x0, y0)`, in the shadow
     /// colour. A `text-shadow` blur radius grows the mask, so the blit starts
     /// that much up and to the left of where the hard-edged copy would.
@@ -942,14 +1115,26 @@ impl TextOverlay {
             // The bar is sized by the run's own text size, so an underlined
             // `font-size` span gets a proportional one.
             let underline_at = |off: usize| s.underline_at(off).then(|| (fg_at(off), px_at(off)));
+            // An annotation inherits its base run's paint where `::cue(rt)`
+            // set none of its own.
+            let ruby_paint = |run: &RubyRun| GlyphPaint {
+                color: run.style.color.unwrap_or_else(|| fg_at(run.style.start)),
+                shadow: run.style.shadow.or_else(|| s.shadow_at(run.style.start)),
+                stroke: run.style.stroke.or_else(|| s.stroke_at(run.style.start)),
+            };
+            let ruby_px = |run: &RubyRun| {
+                run.style
+                    .font_size
+                    .map_or(cue_px * RUBY_SIZE_FRACTION, |size| size.resolve(cue_px))
+            };
 
             if matches!(
                 s.vertical,
                 WritingMode::VerticalRl | WritingMode::VerticalLr
             ) {
                 let rl = matches!(s.vertical, WritingMode::VerticalRl);
-                let col_w = tallest_px * 1.3;
-                let cell_h = tallest_px * 1.15;
+                let col_w = tallest_px * VERTICAL_COLUMN_FRACTION;
+                let cell_h = tallest_px * VERTICAL_CELL_FRACTION;
                 let n_cols = lines.len();
                 let max_len = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0) as f32;
                 let block_w = n_cols as f32 * col_w;
@@ -991,6 +1176,7 @@ impl TextOverlay {
                     let base = bases.get(ci).copied().unwrap_or(0);
                     let mut cells = Vec::new();
                     let mut underline_cells = Vec::new();
+                    let mut ruby = RubyExtents::new(&s.ruby);
                     for (j, &(off, c)) in chars.iter().enumerate() {
                         let (m, cov) = self.glyph_font(c).rasterize(c, px_at(base + off));
                         let gx = col_x + (col_w - m.advance_width) / 2.0 + m.xmin as f32;
@@ -1007,6 +1193,7 @@ impl TextOverlay {
                             cell_top as i32,
                             (cell_top + cell_h) as i32,
                         ));
+                        ruby.cover(&s.ruby, base + off, cell_top, cell_top + cell_h);
                         glyphs.push(TtfGlyph {
                             x: gx as i32,
                             y: gy as i32,
@@ -1014,7 +1201,30 @@ impl TextOverlay {
                             coverage: cov,
                             color: fg_at(base + off),
                             shadow: s.shadow_at(base + off),
+                            stroke: s.stroke_at(base + off),
                         });
+                    }
+                    // A vertical cue puts the annotation beside its base column,
+                    // on the side the columns advance away from.
+                    for (run, centre) in ruby.placed(&s.ruby) {
+                        let annotation_px = ruby_px(run);
+                        let column_w = annotation_px * VERTICAL_COLUMN_FRACTION;
+                        let annotation_h = run.text.chars().count() as f32
+                            * annotation_px
+                            * VERTICAL_CELL_FRACTION;
+                        let x = if rl {
+                            col_x + col_w + column_w / 2.0
+                        } else {
+                            col_x - column_w / 2.0
+                        };
+                        self.push_vertical_run(
+                            &mut glyphs,
+                            &run.text,
+                            annotation_px,
+                            x,
+                            centre - annotation_h / 2.0,
+                            ruby_paint(run),
+                        );
                     }
                     // A span's fill runs down the column it is in.
                     for (color, top, bottom) in merge_span_fills(cells) {
@@ -1079,6 +1289,7 @@ impl TextOverlay {
                     let mut pen = x0;
                     let mut cells = Vec::new();
                     let mut underline_cells = Vec::new();
+                    let mut ruby = RubyExtents::new(&s.ruby);
                     for (off, c) in line.char_indices() {
                         let (m, cov) = self.glyph_font(c).rasterize(c, px_at(base + off));
                         let gx = pen + m.xmin as f32;
@@ -1093,6 +1304,7 @@ impl TextOverlay {
                             pen as i32,
                             (pen + m.advance_width) as i32,
                         ));
+                        ruby.cover(&s.ruby, base + off, pen, pen + m.advance_width);
                         glyphs.push(TtfGlyph {
                             x: gx as i32,
                             y: gy as i32,
@@ -1100,8 +1312,23 @@ impl TextOverlay {
                             coverage: cov,
                             color: fg_at(base + off),
                             shadow: s.shadow_at(base + off),
+                            stroke: s.stroke_at(base + off),
                         });
                         pen += m.advance_width;
+                    }
+                    // The annotation is centred over its base run, sitting on
+                    // the line box's top edge so the base keeps its baseline.
+                    for (run, centre) in ruby.placed(&s.ruby) {
+                        let annotation_px = ruby_px(run);
+                        let width = self.run_width(&run.text, annotation_px);
+                        self.push_horizontal_run(
+                            &mut glyphs,
+                            &run.text,
+                            annotation_px,
+                            centre - width / 2.0,
+                            line_top,
+                            ruby_paint(run),
+                        );
                     }
                     // A span's fill covers the line box behind its own glyphs.
                     for (color, left, right) in merge_span_fills(cells) {
@@ -1132,6 +1359,12 @@ impl TextOverlay {
                     &g.coverage,
                     shadow,
                 );
+            }
+            // Outlines go over every shadow and under every fill, so a
+            // neighbour's outline never covers this glyph.
+            for g in &glyphs {
+                let Some(stroke) = g.stroke else { continue };
+                self.blit_stroke(buf, g.x, g.y, g.size, &g.coverage, stroke);
             }
             for (rect, color) in underlines {
                 self.fill_rect(buf, rect.0, rect.1, rect.2, rect.3, color);
@@ -1278,7 +1511,7 @@ impl TextOverlay {
             // sizes its span alone; the shaper takes the spans as size overrides
             // so a mixed-size line is still one shaped run.
             let cue_px = s.font_size.map_or(px, |size| size.resolve(px));
-            let line_h = cue_px * 1.25;
+            let line_h = cue_px * LINE_HEIGHT_FRACTION;
             let styled = styled_spans(&cue.text, s, cue_px);
             let block = shaper.layout(&cue.text, cue_px, line_h, wght, &styled);
             if block.lines.is_empty() {
@@ -1317,6 +1550,7 @@ impl TextOverlay {
                 let base = bases.get(row).copied().unwrap_or(0);
                 let mut cells = Vec::new();
                 let mut underline_cells = Vec::new();
+                let mut ruby = RubyExtents::new(&s.ruby);
                 for g in &line.glyphs {
                     let at = base + g.start;
                     let left = x0 as i32 + g.x;
@@ -1329,6 +1563,7 @@ impl TextOverlay {
                         left,
                         right,
                     ));
+                    ruby.cover(&s.ruby, at, left as f32, right as f32);
                     glyphs.push(PlacedGlyph {
                         key: g.key,
                         x: left,
@@ -1337,6 +1572,7 @@ impl TextOverlay {
                         #[cfg(feature = "vello-text-overlay")]
                         font_size: g.font_size,
                         shadow: s.shadow_at(at),
+                        stroke: s.stroke_at(at),
                     });
                 }
                 // A span's fill covers the line box behind its own glyphs.
@@ -1349,6 +1585,54 @@ impl TextOverlay {
                 for ((color, run_px), left, right) in merge_span_fills(underline_cells) {
                     let (gap, thickness) = underline_bar(run_px);
                     underlines.push(((left, baseline + gap, right - left, thickness), color));
+                }
+                // The annotation is shaped as its own block and sat on the line
+                // box's top edge, so the base run keeps its baseline.
+                for (run, centre) in ruby.placed(&s.ruby) {
+                    let at = run.style.start;
+                    let annotation_px = run
+                        .style
+                        .font_size
+                        .map_or(cue_px * RUBY_SIZE_FRACTION, |size| size.resolve(cue_px));
+                    // The annotation inherits its base run's attributes where
+                    // `::cue(rt)` set none of its own.
+                    let attrs = [crate::textshape::StyledSpan {
+                        start: 0,
+                        end: run.text.len(),
+                        font_size: None,
+                        weight: run.style.font_weight.or_else(|| s.font_weight_at(at)),
+                        italic: run.style.italic.or(s.italic_at(at).then_some(true)),
+                        stretch: run.style.stretch.or_else(|| s.stretch_at(at)),
+                        family: run
+                            .style
+                            .font_family
+                            .as_deref()
+                            .or_else(|| s.font_family_at(at)),
+                    }];
+                    let annotation = shaper.layout(
+                        &run.text,
+                        annotation_px,
+                        annotation_px * LINE_HEIGHT_FRACTION,
+                        wght,
+                        &attrs,
+                    );
+                    let Some(first) = annotation.lines.first() else {
+                        continue;
+                    };
+                    let left = centre - annotation.width / 2.0;
+                    let top = line_top as f32 - first.baseline;
+                    for g in &first.glyphs {
+                        glyphs.push(PlacedGlyph {
+                            key: g.key,
+                            x: left as i32 + g.x,
+                            y: top as i32 + g.y,
+                            color: run.style.color.unwrap_or_else(|| fg_at(at)),
+                            #[cfg(feature = "vello-text-overlay")]
+                            font_size: g.font_size,
+                            shadow: run.style.shadow.or_else(|| s.shadow_at(at)),
+                            stroke: run.style.stroke.or_else(|| s.stroke_at(at)),
+                        });
+                    }
                 }
             }
             placed.push(PlacedCue {
@@ -1404,6 +1688,25 @@ impl TextOverlay {
                     (img.width, img.height),
                     img.data,
                     shadow,
+                );
+            }
+            // Outlines go over every shadow and under every fill, so a
+            // neighbour's outline never covers this glyph.
+            for g in &cue.glyphs {
+                let Some(stroke) = g.stroke else { continue };
+                let Some(img) = shaper.image(g.key) else {
+                    continue;
+                };
+                if img.color {
+                    continue;
+                }
+                self.blit_stroke(
+                    buf,
+                    g.x + img.left,
+                    g.y - img.top,
+                    (img.width, img.height),
+                    img.data,
+                    stroke,
                 );
             }
             for &(rect, color) in &cue.underlines {

@@ -3,10 +3,11 @@
 //! pad-template tables, and constructs them by name with properties applied (the
 //! path the M106 `gst-launch` parser drives).
 
+use g2g_core::meta::Orientation;
 use g2g_core::runtime::{LaunchFactory, MuxerFactory, Registry, SourceFactory};
 use g2g_core::{Caps, Dim, PropValue, Rate, RawVideoFormat};
 use g2g_plugins::fakesink::FakeSink;
-use g2g_plugins::videoflip::{FlipMethod, VideoFlip};
+use g2g_plugins::videoflip::VideoFlip;
 use g2g_plugins::videotestsrc::VideoTestSrc;
 
 fn rgba_any() -> Caps {
@@ -25,7 +26,7 @@ fn registry() -> Registry {
         Box::new(VideoTestSrc::new(320, 240, 30, 0))
     }));
     reg.register_launch(LaunchFactory::of::<VideoFlip>("videoflip", || {
-        Box::new(VideoFlip::new(FlipMethod::Rotate180))
+        Box::new(VideoFlip::new(Orientation::Rotate180))
     }));
     reg.register_launch(LaunchFactory::new("fakesink", Vec::new(), || {
         Box::new(FakeSink::new())

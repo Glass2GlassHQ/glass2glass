@@ -28,9 +28,12 @@ use alloc::vec::Vec;
 use g2g_core::frame::Frame;
 use g2g_core::log::{short_type_name, LogName, LogSource};
 use g2g_core::{
-    g2g_error, g2g_info, AsyncElement, ByteStreamEncoding, Caps, CapsConstraint, ConfigureOutcome,
-    Dim, ElementMetadata, G2gError, OutputSink, PipelinePacket, Rate, TextFormat, VideoCodec,
+    g2g_error, g2g_info, AsyncElement, AudioFormat, ByteStreamEncoding, Caps, CapsConstraint,
+    ConfigureOutcome, Dim, ElementMetadata, G2gError, OutputSink, PipelinePacket, Rate, TextFormat,
+    VideoCodec,
 };
+
+use crate::audioframe::{mpa_header, MpaHeader, MpaLayer, MPA_HEADER_LEN};
 
 /// MPEG-TS packet stride; the sync byte recurs at this interval.
 const TS_PACKET_LEN: usize = 188;
@@ -49,6 +52,8 @@ const PS_PACK_MAGIC: [u8; 4] = [0x00, 0x00, 0x01, 0xBA];
 /// RIFF/WAVE: the `RIFF` container magic, with `WAVE` after the 4-byte size.
 pub(crate) const RIFF_MAGIC: [u8; 4] = *b"RIFF";
 const WAVE_MAGIC: [u8; 4] = *b"WAVE";
+/// AVI rides the same RIFF header as WAVE, tagged `AVI ` after the size.
+const AVI_MAGIC: [u8; 4] = *b"AVI ";
 /// WebP rides the same RIFF header as WAVE, tagged `WEBP` after the size.
 pub(crate) const WEBP_MAGIC: [u8; 4] = *b"WEBP";
 /// PNG signature (ISO/IEC 15948 5.2): the 8 bytes every PNG opens with.
@@ -82,7 +87,63 @@ pub fn sniff_caps(header: &[u8]) -> Option<Caps> {
     if let Some(codec) = sniff_annexb_video(header) {
         return Some(elementary_video_caps(codec));
     }
+    // MPEG audio last of the binary sniffs: an `0xFFE` sync pattern occurs
+    // inside the formats above, so each of them gets to claim the stream first.
+    if let Some(format) = sniff_mpeg_audio(header) {
+        return Some(elementary_mpeg_audio_caps(format));
+    }
     sniff_text(header).map(|format| Caps::Text { format })
+}
+
+/// Caps for an MPEG audio elementary stream at the channels/rate placeholders
+/// (`mpegaudioparse` refines them from the frame header). Shared by content
+/// sniffing and the parser's own caps so the two never drift.
+pub fn elementary_mpeg_audio_caps(format: AudioFormat) -> Caps {
+    Caps::Audio {
+        format,
+        channels: 0,
+        sample_rate: 0,
+    }
+}
+
+/// Sniff an MPEG audio elementary stream (`.mp3` / `.mp2`), or `None` when the
+/// header is not one.
+///
+/// Two entries: an ID3v2 tag, and a bare frame stream. A bare stream is typed
+/// only when a valid frame header at offset 0 is confirmed by a second valid
+/// header at its frame length describing the same stream, the same two-header
+/// rule `mpegaudioparse` resynchronizes with; one header alone is 11 sync bits
+/// and a handful of field values, which unrelated data hits often.
+///
+/// Behind an ID3v2 tag a single valid header is enough: the tag has already
+/// said the stream is tagged audio. A tag longer than the sniff window (one
+/// carrying artwork, routinely) leaves no audio to look at, and the stream is
+/// typed MP3 on the strength of the tag alone, MP3 being the only elementary
+/// stream ID3 tags are commonly glued to.
+fn sniff_mpeg_audio(header: &[u8]) -> Option<AudioFormat> {
+    if let Some(tag_len) = crate::id3::id3v2_len(header) {
+        let Some(audio) = header.get(tag_len..).filter(|a| a.len() >= MPA_HEADER_LEN) else {
+            return Some(AudioFormat::Mp3);
+        };
+        return mpa_header(audio).and_then(|h| mpeg_audio_format(&h));
+    }
+    let first = mpa_header(header)?;
+    let second = mpa_header(header.get(first.frame_len..)?)?;
+    second
+        .same_stream(&first)
+        .then(|| mpeg_audio_format(&first))
+        .flatten()
+}
+
+/// The caps format a frame header codes to, or `None` for Layer I (which
+/// nothing here decodes, so typing a stream as it would only plug a decoder
+/// that fails).
+fn mpeg_audio_format(header: &MpaHeader) -> Option<AudioFormat> {
+    match header.layer {
+        MpaLayer::Three => Some(AudioFormat::Mp3),
+        MpaLayer::Two => Some(AudioFormat::Mp2),
+        MpaLayer::One => None,
+    }
 }
 
 /// The form type of a RIFF file (`WAVE`, `WEBP`, ...), or `None` when the header
@@ -183,6 +244,9 @@ pub fn sniff(header: &[u8]) -> Option<ByteStreamEncoding> {
     }
     if riff_form(header) == Some(WAVE_MAGIC) {
         return Some(ByteStreamEncoding::Wav);
+    }
+    if riff_form(header) == Some(AVI_MAGIC) {
+        return Some(ByteStreamEncoding::Avi);
     }
     // ISO-BMFF (MP4 / QuickTime): both progressive (`moov`-based) and fragmented
     // (CMAF) map to the one `IsoBmff` encoding; the demuxer handles either.
@@ -615,8 +679,22 @@ mod tests {
     fn returns_none_for_unknown() {
         assert_eq!(sniff(&[0xDE, 0xAD, 0xBE, 0xEF]), None);
         assert_eq!(sniff(&[]), None);
-        // RIFF/AVI, not a container we sniff.
-        assert_eq!(sniff(b"RIFF\0\0\0\0AVI "), None);
+        // A RIFF file whose form type is neither WAVE, WebP nor AVI.
+        assert_eq!(sniff(b"RIFF\0\0\0\0RMID"), None);
+    }
+
+    #[test]
+    fn detects_avi_by_its_riff_form_type() {
+        assert_eq!(
+            sniff(b"RIFF\x24\0\0\0AVI LIST"),
+            Some(ByteStreamEncoding::Avi)
+        );
+        assert_eq!(
+            sniff_caps(b"RIFF\x24\0\0\0AVI LIST"),
+            Some(Caps::ByteStream {
+                encoding: ByteStreamEncoding::Avi
+            })
+        );
     }
 
     #[test]
@@ -723,6 +801,68 @@ mod tests {
         assert_eq!(sniff_annexb_video(&[0x00, 0x00, 0x01, 0x80, 0x00]), None);
         // HEVC VPS type but temporal_id_plus1 = 0 (invalid): not accepted.
         assert_eq!(sniff_annexb_video(&[0x00, 0x00, 0x01, 0x40, 0x00]), None);
+    }
+
+    /// An ID3v2.3 tag of `body_len` zero bytes, the head an `.mp3` opens with.
+    fn id3v2_tag(body_len: usize) -> Vec<u8> {
+        let mut tag = Vec::from(*b"ID3\x03\x00\x00");
+        for shift in [21, 14, 7, 0] {
+            tag.push(((body_len as u32 >> shift) & 0x7F) as u8);
+        }
+        tag.resize(tag.len() + body_len, 0);
+        tag
+    }
+
+    fn mp3_stream(frames: usize) -> Vec<u8> {
+        let mut stream = Vec::new();
+        for fill in 0..frames {
+            stream.extend(crate::audioframe::test_frames::mp3_frame(false, fill as u8));
+        }
+        stream
+    }
+
+    #[test]
+    fn detects_a_bare_mpeg_audio_stream() {
+        let mp3 = elementary_mpeg_audio_caps(AudioFormat::Mp3);
+        assert_eq!(sniff_caps(&mp3_stream(2)), Some(mp3.clone()));
+        // One frame with nothing behind it to confirm the sync is not typed: an
+        // `0xFFE` byte pair alone is too weak.
+        assert_eq!(sniff_caps(&mp3_stream(1)), None);
+        // A sync pattern followed by data that is not a frame header: not typed.
+        let mut lying = mp3_stream(2);
+        lying[crate::audioframe::test_frames::MP3_128K_44100_LEN] = 0x00;
+        assert_eq!(sniff_caps(&lying), None);
+    }
+
+    #[test]
+    fn detects_mpeg_audio_behind_an_id3v2_tag() {
+        let mp3 = elementary_mpeg_audio_caps(AudioFormat::Mp3);
+        let mut tagged = id3v2_tag(64);
+        tagged.extend(mp3_stream(1));
+        assert_eq!(sniff_caps(&tagged), Some(mp3.clone()));
+        // A tag the sniff window does not reach past: MP3 on the tag alone.
+        let long_tag = id3v2_tag(SNIFF_LEN * 2);
+        assert_eq!(sniff_caps(&long_tag[..SNIFF_LEN]), Some(mp3));
+        // A tag in front of something else does not become MP3.
+        let mut tagged_flac = id3v2_tag(16);
+        tagged_flac.extend_from_slice(b"fLaC\0\0\0\x22");
+        assert_eq!(sniff_caps(&tagged_flac), None);
+    }
+
+    #[test]
+    fn container_magic_wins_over_a_frame_sync() {
+        // An MPEG-TS stream whose packet payload opens on a frame sync stays TS.
+        let mut ts = vec![0u8; TS_PACKET_LEN * 2 + 1];
+        ts[0] = TS_SYNC;
+        ts[TS_PACKET_LEN] = TS_SYNC;
+        ts[TS_PACKET_LEN * 2] = TS_SYNC;
+        ts[4..4 + 2].copy_from_slice(&[0xFF, 0xFB]);
+        assert_eq!(
+            sniff_caps(&ts),
+            Some(Caps::ByteStream {
+                encoding: ByteStreamEncoding::MpegTs
+            })
+        );
     }
 
     #[test]

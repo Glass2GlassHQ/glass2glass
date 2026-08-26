@@ -102,6 +102,18 @@ pub struct TextShadow {
     pub color: [u8; 4],
 }
 
+/// A `-webkit-text-stroke` a `::cue` rule asked for: an outline painted under
+/// the glyph fill by dilating its coverage mask, so the text reads over a busy
+/// picture without a backing box.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextStroke {
+    /// Outline half-width in pixels: the mask is painted at every integer offset
+    /// this far from the glyph. A fractional value rounds at parse time.
+    pub width_px: u32,
+    /// Outline RGBA; CSS defaults it to the text colour, we default it to black.
+    pub color: [u8; 4],
+}
+
 /// CSS `font-stretch` as a keyword: how condensed or expanded a face the rule
 /// asks for. Percentages are not read, so a rule giving one keeps the face the
 /// cue already selected.
@@ -122,10 +134,10 @@ pub enum FontStretch {
 /// One styled run of a cue's text: the `[start, end)` byte range of
 /// [`Cue::text`] that a WebVTT span covers, and the style resolved for it. A
 /// span is either class-carrying (`<c.loud>...</c>`, styled by the matching
-/// `::cue(.loud)` rules) or one of the presentational tags `<b>` / `<i>` /
-/// `<u>`. Runs are in document order and may nest, so where two overlap the
-/// later one wins, per property.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// `::cue(.loud)` rules), one of the presentational tags `<b>` / `<i>` / `<u>`,
+/// or a tag a `::cue(b)` type selector named. Runs are in document order and
+/// may nest, so where two overlap the later one wins, per property.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SpanStyle {
     /// Byte offset of the span's first character in [`Cue::text`].
     pub start: usize,
@@ -147,6 +159,44 @@ pub struct SpanStyle {
     pub underline: Option<bool>,
     /// Face width for this run (`font-stretch`).
     pub stretch: Option<FontStretch>,
+    /// Family this run asks for (`font-family`, first name of the list). Only
+    /// the shaped path selects a face by name; the `ab_glyph` path has one
+    /// loaded font and draws the run in it whatever this says.
+    pub font_family: Option<String>,
+    /// Outline painted under this run's glyphs (`-webkit-text-stroke`).
+    pub stroke: Option<TextStroke>,
+}
+
+impl SpanStyle {
+    /// Whether this run sets any property at all (an empty one is dropped
+    /// rather than pushed, so nothing looks it up per character).
+    fn styles_anything(&self) -> bool {
+        self.color.is_some()
+            || self.font_size.is_some()
+            || self.shadow.is_some()
+            || self.background.is_some()
+            || self.font_weight.is_some()
+            || self.italic.is_some()
+            || self.underline.is_some()
+            || self.stretch.is_some()
+            || self.font_family.is_some()
+            || self.stroke.is_some()
+    }
+}
+
+/// A ruby annotation (`<ruby>base<rt>text</rt></ruby>`): the `rt` text, taken
+/// out of the cue's line flow, and the style resolved for it. The renderers
+/// draw it at half the cue's size, centred over the base run in a horizontal
+/// cue and beside the base column in a vertical one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RubyRun {
+    /// The annotation text. It is not part of [`Cue::text`].
+    pub text: String,
+    /// What `::cue(rt)` (and any class on the `rt` tag) set for the annotation.
+    /// `start` / `end` are the base run's byte range in [`Cue::text`], which is
+    /// the extent the annotation centres over; every unset property takes the
+    /// base run's value.
+    pub style: SpanStyle,
 }
 
 /// WebVTT cue placement settings, the subset the bitmap overlay honours. `None`
@@ -186,10 +236,17 @@ pub struct CueSettings {
     pub underline: Option<bool>,
     /// Face width from a whole-cue `font-stretch:` rule, if any.
     pub stretch: Option<FontStretch>,
-    /// Per-span styling from `::cue(.class)` rules and the `<b>` / `<i>` /
-    /// `<u>` tags, each covering only the span it came from. Empty unless a
-    /// span-scoped rule matched or the cue carries one of those tags.
+    /// Family from a whole-cue `font-family:` rule, if any.
+    pub font_family: Option<String>,
+    /// Outline from a whole-cue `-webkit-text-stroke:` rule, if any.
+    pub stroke: Option<TextStroke>,
+    /// Per-span styling from `::cue(.class)` / `::cue(b)` rules and the `<b>` /
+    /// `<i>` / `<u>` tags, each covering only the span it came from. Empty
+    /// unless a span-scoped rule matched or the cue carries one of those tags.
     pub spans: Vec<SpanStyle>,
+    /// The cue's ruby annotations, in document order. Empty for a cue with no
+    /// `<ruby>` markup.
+    pub ruby: Vec<RubyRun>,
 }
 
 impl CueSettings {
@@ -255,6 +312,22 @@ impl CueSettings {
     pub fn stretch_at(&self, at: usize) -> Option<FontStretch> {
         self.innermost(at, |s| s.stretch).or(self.stretch)
     }
+
+    /// The outline to paint under the character at byte offset `at`.
+    pub fn stroke_at(&self, at: usize) -> Option<TextStroke> {
+        self.innermost(at, |s| s.stroke).or(self.stroke)
+    }
+
+    /// The family to draw the character at byte offset `at` in, or `None` where
+    /// neither a covering run nor the cue names one.
+    pub fn font_family_at(&self, at: usize) -> Option<&str> {
+        self.spans
+            .iter()
+            .rev()
+            .find(|s| at >= s.start && at < s.end && s.font_family.is_some())
+            .and_then(|s| s.font_family.as_deref())
+            .or(self.font_family.as_deref())
+    }
 }
 
 /// One timed subtitle cue: a half-open `[start_ns, end_ns)` running-time span, its
@@ -317,13 +390,15 @@ pub fn parse_srt(input: &str) -> Vec<Cue> {
 
 /// Parse WebVTT (`.vtt`) text into cues, in file order. The `WEBVTT` header and
 /// `NOTE` / `REGION` blocks are skipped and inline markup is removed; `STYLE`
-/// blocks are read for `::cue`, `::cue(#id)` and `::cue(.a[.b...])`
-/// `color` / `background-color` / `font-size` / `text-shadow` / `font-weight` /
-/// `font-style` / `text-decoration` / `font-stretch` rules, which are
+/// blocks are read for `::cue`, `::cue(#id)`, `::cue(.a[.b...])` and
+/// `::cue(b)` `color` / `background-color` / `font-size` / `text-shadow` /
+/// `font-weight` / `font-style` / `text-decoration` / `font-stretch` /
+/// `font-family` / `-webkit-text-stroke` rules, which are
 /// resolved onto each cue's [`CueSettings`] (the subset the overlay can apply;
 /// other CSS properties are ignored). A span-scoped `::cue(.class)` rule covers
 /// only the `<c.class>` span it matched, as a [`SpanStyle`] run, as do the
-/// presentational `<b>` / `<i>` / `<u>` tags. A header
+/// presentational `<b>` / `<i>` / `<u>` tags. `<ruby>` markup becomes a
+/// [`RubyRun`] over its base instead of inline text. A header
 /// block's `X-TIMESTAMP-MAP` (RFC 8216 §3.5) rebases the cue
 /// times that follow it onto the MPEG-2 media timeline, so the concatenated
 /// segments of an HLS rendition land where the video does.
@@ -439,6 +514,10 @@ struct CueSpan {
     end: usize,
     tag: String,
     classes: Vec<String>,
+    /// For an `rt` span inside a `<ruby>`: the annotation text, which was taken
+    /// out of the cue text, and `start` / `end` are then the base run it
+    /// annotates rather than its own characters.
+    ruby_text: Option<String>,
 }
 
 /// The `font-weight` `<b>` and CSS `bold` ask for.
@@ -460,9 +539,14 @@ fn fold_inline_tag(tag: &str, run: &mut CueSettings) {
     }
 }
 
-/// Whether a tag styles the span it opens on its own, with no CSS rule.
-fn is_presentational_tag(tag: &str) -> bool {
-    matches!(tag, "b" | "i" | "u")
+/// The WebVTT cue-text element names a `::cue(b)` type selector can name. A
+/// span opened by one of these is kept even with no classes on it, so such a
+/// rule has something to match.
+const CUE_TYPE_SELECTOR_TAGS: [&str; 7] = ["b", "i", "u", "c", "v", "ruby", "rt"];
+
+/// Whether a `::cue(...)` type selector can name this tag.
+fn is_type_selector_tag(tag: &str) -> bool {
+    CUE_TYPE_SELECTOR_TAGS.contains(&tag)
 }
 
 /// The `.class` parts of an open span tag's name (`c.loud.narrator`), empty for
@@ -484,13 +568,15 @@ fn tag_classes(tag: &str) -> Vec<String> {
 }
 
 /// A `::cue` selector we apply: all cues (`::cue`), one identifier
-/// (`::cue(#id)`), or a span class list (`::cue(.a)`, `::cue(.a.b)` requiring
-/// both). Element and descendant selectors are not supported.
+/// (`::cue(#id)`), a span class list (`::cue(.a)`, `::cue(.a.b)` requiring
+/// both), or a cue-text element name (`::cue(b)`). A compound of the two
+/// (`::cue(b.a)`) and descendant selectors are not supported.
 #[derive(Debug)]
 enum CueSelector {
     All,
     Id(String),
     Classes(Vec<String>),
+    Tag(String),
 }
 
 /// One parsed `::cue` rule: its selectors and the properties the overlay can
@@ -506,6 +592,10 @@ struct CueStyleRule {
     italic: Option<bool>,
     underline: Option<bool>,
     stretch: Option<FontStretch>,
+    /// First family of a `font-family` list, quotes stripped. Only the shaped
+    /// renderer selects a face by name.
+    font_family: Option<String>,
+    stroke: Option<TextStroke>,
 }
 
 /// Parse the WebVTT `STYLE` CSS into the supported `::cue` rules. Comments are
@@ -537,6 +627,11 @@ fn parse_cue_styles(css: &str) -> Vec<CueStyleRule> {
         let mut italic = None;
         let mut underline = None;
         let mut stretch = None;
+        let mut font_family = None;
+        // The shorthand sets both halves, a longhand one of them, so they are
+        // gathered across the whole block and folded once at the end.
+        let mut stroke_width = None;
+        let mut stroke_color = None;
         for decl in decl_str.split(';') {
             let Some((prop, val)) = decl.split_once(':') else {
                 continue;
@@ -550,6 +645,19 @@ fn parse_cue_styles(css: &str) -> Vec<CueStyleRule> {
                 "font-style" => italic = parse_css_font_style(val.trim()),
                 "text-decoration" => underline = parse_css_text_decoration(val.trim()),
                 "font-stretch" => stretch = parse_css_font_stretch(val.trim()),
+                "font-family" => font_family = parse_css_font_family(val.trim()),
+                "-webkit-text-stroke" | "text-stroke" => {
+                    if let Some(stroke) = parse_text_stroke(val.trim()) {
+                        stroke_width = Some(stroke.width_px);
+                        stroke_color = Some(stroke.color);
+                    }
+                }
+                "-webkit-text-stroke-width" | "text-stroke-width" => {
+                    stroke_width = parse_stroke_width(val.trim())
+                }
+                "-webkit-text-stroke-color" | "text-stroke-color" => {
+                    stroke_color = parse_css_color(val.trim())
+                }
                 _ => {}
             }
         }
@@ -563,23 +671,32 @@ fn parse_cue_styles(css: &str) -> Vec<CueStyleRule> {
             italic,
             underline,
             stretch,
+            font_family,
+            stroke: stroke_width.map(|width_px| TextStroke {
+                width_px,
+                color: stroke_color.unwrap_or(BLACK_RGBA),
+            }),
         });
     }
     rules
 }
 
-/// A `::cue`, `::cue(#id)` or `::cue(.a[.b...])` selector, or `None` for
-/// anything else.
+/// A `::cue`, `::cue(#id)`, `::cue(.a[.b...])` or `::cue(b)` selector, or
+/// `None` for anything else.
 fn parse_cue_selector(sel: &str) -> Option<CueSelector> {
     if sel == "::cue" {
         return Some(CueSelector::All);
     }
     let inner = sel.strip_prefix("::cue(")?.strip_suffix(')')?.trim();
-    // Only a bare `#id` / `.class` chain is supported (no element or descendant
-    // selectors), so a name must be non-empty and unbroken.
+    // Only a bare `#id` / `.class` chain or one element name is supported (no
+    // compound `b.a` and no descendant selectors), so a name must be non-empty
+    // and unbroken.
     let named = |n: &str| !n.is_empty() && !n.contains(|c: char| c.is_whitespace());
     if let Some(id) = inner.strip_prefix('#') {
         return named(id).then(|| CueSelector::Id(id.into()));
+    }
+    if is_type_selector_tag(&inner.to_ascii_lowercase()) {
+        return Some(CueSelector::Tag(inner.to_ascii_lowercase()));
     }
     let classes: Vec<String> = inner
         .strip_prefix('.')?
@@ -594,9 +711,11 @@ fn parse_cue_selector(sel: &str) -> Option<CueSelector> {
 
 /// Resolve a cue's style from the sheet. Whole-cue rules (`::cue`, then
 /// `::cue(#id)`, in increasing specificity) set the cue's properties; a
-/// span-scoped `::cue(.class)` rule sets them for just the spans that carry its
-/// classes, as a [`SpanStyle`] run. A `<b>` / `<i>` / `<u>` span styles itself
-/// where no rule matching it set that property.
+/// span-scoped `::cue(.class)` or `::cue(b)` rule sets them for just the spans
+/// it matches, as a [`SpanStyle`] run. A `<b>` / `<i>` / `<u>` span styles
+/// itself where no rule matching it set that property. An `rt` span becomes a
+/// [`RubyRun`] instead: its text is out of the line flow, so it never joins the
+/// per-character lookups.
 fn apply_cue_style(
     sheet: &[CueStyleRule],
     id: Option<&str>,
@@ -605,8 +724,9 @@ fn apply_cue_style(
 ) {
     apply_matching(sheet, settings, |sel| matches!(sel, CueSelector::All));
     for span in spans {
-        // CSS specificity: a compound `::cue(.a.b)` beats a one-class rule
-        // whatever the sheet order; equal specificity falls back to that order.
+        // CSS specificity: a compound `::cue(.a.b)` beats a one-class rule and
+        // both beat a type selector, whatever the sheet order; equal
+        // specificity falls back to that order.
         let mut matched: Vec<(usize, &CueStyleRule)> = sheet
             .iter()
             .filter_map(|rule| {
@@ -618,6 +738,7 @@ fn apply_cue_style(
                         {
                             Some(want.len())
                         }
+                        CueSelector::Tag(name) if *name == span.tag => Some(TYPE_SPECIFICITY),
                         _ => None,
                     })
                     .max()
@@ -630,27 +751,14 @@ fn apply_cue_style(
             fold_rule(rule, &mut run);
         }
         fold_inline_tag(&span.tag, &mut run);
-        if run.color.is_some()
-            || run.font_size.is_some()
-            || run.shadow.is_some()
-            || run.background.is_some()
-            || run.font_weight.is_some()
-            || run.italic.is_some()
-            || run.underline.is_some()
-            || run.stretch.is_some()
-        {
-            settings.spans.push(SpanStyle {
-                start: span.start,
-                end: span.end,
-                color: run.color,
-                font_size: run.font_size,
-                shadow: run.shadow,
-                background: run.background,
-                font_weight: run.font_weight,
-                italic: run.italic,
-                underline: run.underline,
-                stretch: run.stretch,
-            });
+        let style = span_style(&run, span.start, span.end);
+        match &span.ruby_text {
+            Some(text) => settings.ruby.push(RubyRun {
+                text: text.clone(),
+                style,
+            }),
+            None if style.styles_anything() => settings.spans.push(style),
+            None => {}
         }
     }
     if let Some(id) = id {
@@ -659,6 +767,29 @@ fn apply_cue_style(
             settings,
             |sel| matches!(sel, CueSelector::Id(rid) if rid == id),
         );
+    }
+}
+
+/// Specificity of a `::cue(b)` type selector. CSS puts it below any class, and
+/// a class list scores one per class, so zero is the slot below all of them.
+const TYPE_SPECIFICITY: usize = 0;
+
+/// The properties a span's matched rules resolved to, as a run over
+/// `start..end`.
+fn span_style(run: &CueSettings, start: usize, end: usize) -> SpanStyle {
+    SpanStyle {
+        start,
+        end,
+        color: run.color,
+        font_size: run.font_size,
+        shadow: run.shadow,
+        background: run.background,
+        font_weight: run.font_weight,
+        italic: run.italic,
+        underline: run.underline,
+        stretch: run.stretch,
+        font_family: run.font_family.clone(),
+        stroke: run.stroke,
     }
 }
 
@@ -702,6 +833,12 @@ fn fold_rule(rule: &CueStyleRule, settings: &mut CueSettings) {
     }
     if rule.stretch.is_some() {
         settings.stretch = rule.stretch;
+    }
+    if rule.font_family.is_some() {
+        settings.font_family = rule.font_family.clone();
+    }
+    if rule.stroke.is_some() {
+        settings.stroke = rule.stroke;
     }
 }
 
@@ -763,6 +900,13 @@ const MAX_CUE_FONT_PX: u32 = 512;
 const MAX_CUE_FONT_PERCENT: u32 = 1000;
 /// Largest shadow offset or blur radius a cue rule can ask for, in pixels.
 const MAX_SHADOW_PX: i32 = 256;
+/// Largest `-webkit-text-stroke` width a cue rule can ask for, in pixels. The
+/// outline is painted once per integer offset inside the radius, so the cap
+/// bounds that per glyph.
+const MAX_TEXT_STROKE_PX: u32 = 16;
+/// Opaque black, the colour a shadow or an outline takes when the rule names
+/// none (CSS says the text colour, which is not resolved at parse time).
+const BLACK_RGBA: [u8; 4] = [0, 0, 0, 255];
 
 /// Parse a `font-size` value: `24px` or `150%`. `None` for any other unit or a
 /// keyword (`larger`, `medium`), which leaves the size the overlay chose.
@@ -871,8 +1015,49 @@ fn parse_text_shadow(value: &str) -> Option<TextShadow> {
         offset_x: round_to_i32(lengths[0]).clamp(-MAX_SHADOW_PX, MAX_SHADOW_PX),
         offset_y: round_to_i32(lengths[1]).clamp(-MAX_SHADOW_PX, MAX_SHADOW_PX),
         blur,
-        color: color.unwrap_or([0, 0, 0, 255]),
+        color: color.unwrap_or(BLACK_RGBA),
     })
+}
+
+/// Parse a `-webkit-text-stroke` shorthand: `<width> <color>`, either order,
+/// the colour defaulting to black. A token that is neither a `px` length nor a
+/// colour, or a second of either, drops the whole declaration.
+fn parse_text_stroke(value: &str) -> Option<TextStroke> {
+    let value = value.trim().to_ascii_lowercase();
+    let mut width = None;
+    let mut color = None;
+    for part in css_components(first_css_value(&value)) {
+        if let Some(px) = parse_stroke_width(part) {
+            if width.replace(px).is_some() {
+                return None;
+            }
+            continue;
+        }
+        if color.is_some() {
+            return None;
+        }
+        color = parse_css_color(part);
+        color?;
+    }
+    Some(TextStroke {
+        width_px: width?,
+        color: color.unwrap_or(BLACK_RGBA),
+    })
+}
+
+/// Parse a `-webkit-text-stroke-width` value: a non-negative `px` length,
+/// clamped to [`MAX_TEXT_STROKE_PX`]. `None` for another unit or a negative.
+fn parse_stroke_width(value: &str) -> Option<u32> {
+    let px = parse_px_length(value.trim())?;
+    (px >= 0.0).then(|| round_to_u32(px).min(MAX_TEXT_STROKE_PX))
+}
+
+/// Parse a `font-family` value to the first family of the list, quotes
+/// stripped. `None` for an empty list.
+fn parse_css_font_family(value: &str) -> Option<String> {
+    let first = first_css_value(value).trim();
+    let name = first.trim_matches(['"', '\'']).trim();
+    (!name.is_empty()).then(|| String::from(name))
 }
 
 /// A CSS `px` length, or a bare `0`. `None` for another unit or a non-number.
@@ -2081,23 +2266,33 @@ fn block_to_cue(block: &[&str], webvtt: bool) -> Option<(Cue, Vec<CueSpan>)> {
 }
 
 /// Join a cue's text lines with the `<...>` markup removed, recording the byte
-/// range each class-carrying or presentational span covers in the result (the
-/// rest of the markup leaves nothing behind). Spans nest, so the stack
-/// pairs each close tag with the innermost open one; a span left unclosed at the
-/// end of the cue runs to the end of the text (a stray `</c>` is ignored).
+/// range each class-carrying, presentational or type-selectable span covers in
+/// the result (the rest of the markup leaves nothing behind). Spans nest, so
+/// the stack pairs each close tag with the innermost open one; a span left
+/// unclosed at the end of the cue runs to the end of the text (a stray `</c>`
+/// is ignored).
+///
+/// The `rt` of a `<ruby>` is the exception: its characters go to the
+/// annotation instead of the cue text, and its span records the base run
+/// before it. An `<rt>` outside a `<ruby>` stays inline like any other tag.
 fn strip_cue_text(lines: &[&str]) -> (String, Vec<CueSpan>) {
     let mut text = String::new();
     // Spans in document order (an enclosing span before the ones it contains),
     // with `open` holding the indices of the ones still to be closed.
     let mut spans: Vec<CueSpan> = Vec::new();
     let mut open: Vec<usize> = Vec::new();
+    // Where the base run of the innermost open `<ruby>` starts, the span index
+    // of the `<rt>` currently capturing, and what it has captured.
+    let mut ruby_base_start: Option<usize> = None;
+    let mut rt_span: Option<usize> = None;
+    let mut annotation: Option<String> = None;
     for (i, raw) in lines.iter().enumerate() {
         if i > 0 {
-            text.push('\n');
+            push_cue_text(&mut text, &mut annotation, "\n");
         }
         let mut rest = *raw;
         while let Some(lt) = rest.find('<') {
-            text.push_str(&rest[..lt]);
+            push_cue_text(&mut text, &mut annotation, &rest[..lt]);
             let after = &rest[lt + 1..];
             let Some(gt) = after.find('>') else {
                 rest = "";
@@ -2107,26 +2302,58 @@ fn strip_cue_text(lines: &[&str]) -> (String, Vec<CueSpan>) {
             rest = &after[gt + 1..];
             if tag.starts_with('/') {
                 if let Some(idx) = open.pop() {
-                    spans[idx].end = text.len();
+                    if rt_span == Some(idx) {
+                        spans[idx].ruby_text = annotation.take();
+                        rt_span = None;
+                        // A second `<rt>` in the same ruby annotates the base
+                        // run that starts here.
+                        ruby_base_start = Some(text.len());
+                    } else {
+                        spans[idx].end = text.len();
+                    }
                 }
             } else if is_span_tag(tag) {
+                let name = tag_name(tag).to_ascii_lowercase();
+                let base = ruby_base_start.filter(|_| name == "rt" && rt_span.is_none());
+                if name == "ruby" {
+                    ruby_base_start = Some(text.len());
+                }
+                if base.is_some() {
+                    rt_span = Some(spans.len());
+                    annotation = Some(String::new());
+                }
                 open.push(spans.len());
                 spans.push(CueSpan {
-                    start: text.len(),
+                    // An `rt` keeps the base run's range: its own characters
+                    // never reach the cue text.
+                    start: base.unwrap_or(text.len()),
                     end: text.len(),
-                    tag: tag_name(tag).to_ascii_lowercase(),
+                    tag: name,
                     classes: tag_classes(tag),
+                    ruby_text: None,
                 });
             }
         }
-        text.push_str(rest);
+        push_cue_text(&mut text, &mut annotation, rest);
     }
     // A span the cue never closes (the common unclosed `<v Speaker>`) runs to the end.
     for idx in open {
-        spans[idx].end = text.len();
+        if rt_span == Some(idx) {
+            spans[idx].ruby_text = annotation.take();
+        } else {
+            spans[idx].end = text.len();
+        }
     }
-    spans.retain(|s| !s.classes.is_empty() || is_presentational_tag(&s.tag));
+    spans.retain(|s| !s.classes.is_empty() || is_type_selector_tag(&s.tag));
     (text, spans)
+}
+
+/// Append cue characters to the annotation being captured, else to the cue text.
+fn push_cue_text(text: &mut String, annotation: &mut Option<String>, s: &str) {
+    match annotation {
+        Some(buf) => buf.push_str(s),
+        None => text.push_str(s),
+    }
 }
 
 /// Whether an open tag is a span (`c`, `i`, `v.narrator`, ...) rather than an
@@ -2763,7 +2990,10 @@ mod tests {
                 italic: None,
                 underline: None,
                 stretch: None,
+                font_family: None,
+                stroke: None,
                 spans: Vec::new(),
+                ruby: Vec::new(),
             }
         );
         // Bare `align:right` maps to End; position / line stay auto.
@@ -2782,7 +3012,10 @@ mod tests {
                 italic: None,
                 underline: None,
                 stretch: None,
+                font_family: None,
+                stroke: None,
                 spans: Vec::new(),
+                ruby: Vec::new(),
             }
         );
     }
@@ -3142,6 +3375,99 @@ mod tests {
     }
 
     #[test]
+    fn webvtt_cue_text_stroke_is_parsed() {
+        // The shorthand in either order, the longhands, the unprefixed spelling,
+        // and the width clamp.
+        let input = "WEBVTT\n\n\
+            STYLE\n\
+            ::cue { -webkit-text-stroke: 2px; }\n\
+            ::cue(.lead) { -webkit-text-stroke: red 3px; }\n\
+            ::cue(.parts) { -webkit-text-stroke-width: 1px; -webkit-text-stroke-color: lime; }\n\
+            ::cue(.plain) { text-stroke: 4px blue; }\n\
+            ::cue(.huge) { -webkit-text-stroke: 999px; }\n\
+            ::cue(.bad) { -webkit-text-stroke: 1em red; }\n\n\
+            00:00:00.000 --> 00:00:01.000\n\
+            a<c.lead>b</c><c.parts>c</c><c.plain>d</c><c.huge>e</c><c.bad>f</c>\n";
+        let cues = parse_webvtt(input);
+        let s = &cues[0].settings;
+        // The cue-wide rule, with the black default colour.
+        assert_eq!(
+            s.stroke,
+            Some(TextStroke {
+                width_px: 2,
+                color: BLACK_RGBA,
+            })
+        );
+        assert_eq!(s.stroke_at(0), s.stroke);
+        assert_eq!(
+            s.stroke_at(1),
+            Some(TextStroke {
+                width_px: 3,
+                color: [255, 0, 0, 255],
+            })
+        );
+        assert_eq!(
+            s.stroke_at(2),
+            Some(TextStroke {
+                width_px: 1,
+                color: [0, 255, 0, 255],
+            })
+        );
+        assert_eq!(
+            s.stroke_at(3),
+            Some(TextStroke {
+                width_px: 4,
+                color: [0, 0, 255, 255],
+            })
+        );
+        assert_eq!(
+            s.stroke_at(4).map(|stroke| stroke.width_px),
+            Some(MAX_TEXT_STROKE_PX)
+        );
+        // An unsupported unit leaves the cue-wide stroke in place.
+        assert_eq!(s.stroke_at(5), s.stroke);
+    }
+
+    #[test]
+    fn webvtt_cue_font_family_takes_the_first_name() {
+        let input = "WEBVTT\n\n\
+            STYLE\n\
+            ::cue { font-family: monospace; }\n\
+            ::cue(.quoted) { font-family: \"Noto Sans\", serif; }\n\
+            ::cue(.empty) { font-family: ; }\n\n\
+            00:00:00.000 --> 00:00:01.000\n\
+            a<c.quoted>b</c><c.empty>c</c>\n";
+        let cues = parse_webvtt(input);
+        let s = &cues[0].settings;
+        assert_eq!(s.font_family_at(0), Some("monospace"));
+        assert_eq!(s.font_family_at(1), Some("Noto Sans"));
+        assert_eq!(s.font_family_at(2), Some("monospace"));
+    }
+
+    #[test]
+    fn webvtt_ruby_annotation_leaves_the_line_flow() {
+        // The `rt` characters are not cue text, and the annotation carries the
+        // byte range of the base run it sits over.
+        let input = "WEBVTT\n\n\
+            STYLE\n::cue(rt) { color: red; }\n\n\
+            00:00:00.000 --> 00:00:01.000\n\
+            say <ruby>kanji<rt>kana</rt></ruby> now\n";
+        let cues = parse_webvtt(input);
+        assert_eq!(cues[0].text, "say kanji now");
+        let ruby = &cues[0].settings.ruby;
+        assert_eq!(ruby.len(), 1);
+        assert_eq!(ruby[0].text, "kana");
+        assert_eq!(
+            (ruby[0].style.start, ruby[0].style.end),
+            (4, 9),
+            "the annotation spans the base run"
+        );
+        assert_eq!(ruby[0].style.color, Some([255, 0, 0, 255]));
+        // The annotation never joins the per-character lookups.
+        assert_eq!(cues[0].settings.color_at(4), None);
+    }
+
+    #[test]
     fn webvtt_span_background_stays_on_its_span() {
         // A span-scoped `background-color` fills behind that span alone; the
         // cue's own backing box comes from the whole-cue rule.
@@ -3188,7 +3514,10 @@ mod tests {
                 italic: None,
                 underline: None,
                 stretch: None,
+                font_family: None,
+                stroke: None,
                 spans: Vec::new(),
+                ruby: Vec::new(),
             }
         );
         assert_eq!(cues[1].settings.vertical, WritingMode::VerticalLr);
@@ -3896,7 +4225,10 @@ mod tests {
                 italic: None,
                 underline: None,
                 stretch: None,
+                font_family: None,
+                stroke: None,
                 spans: Vec::new(),
+                ruby: Vec::new(),
             }
         );
     }

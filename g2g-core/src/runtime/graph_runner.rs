@@ -75,8 +75,8 @@ use crate::meta::MetaRequests;
 use crate::property::{PropError, PropValue, PropertySpec};
 use crate::query::{with_meta_demand, AllocationParams, LatencyReport};
 use crate::runtime::channel::{
-    bounded, link, link_with_transit, LinkReceiver, LinkSender, Receiver, RecvFuture, Sender,
-    SenderSink,
+    advertise_orientation, bounded, link, link_with_transit, LinkReceiver, LinkSender, Receiver,
+    ReconfigureAnswered, RecvFuture, Sender, SenderSink,
 };
 use crate::runtime::coordinator::{
     log_caps_forward, log_caps_rejected, realloc_local_dyn, report_nego_failure, ArmDirective,
@@ -1899,6 +1899,7 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
                 };
                 let in_rx = in_rxs.pop().expect("sink input edge");
                 let arm_rx = arm_ctrl_rx[node.0 as usize].take().expect("sink ctrl rx");
+                advertise_orientation(&in_rx, elem.absorbs_orientation());
                 elem.drive_sink_arm(SinkArmIo {
                     in_rx,
                     arm_rx,
@@ -2345,6 +2346,7 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
                     return Err(G2gError::CapsMismatch);
                 };
                 let in_rx = in_rxs.pop().expect("sink input edge");
+                advertise_orientation(&in_rx, elem.absorbs_orientation());
                 let bm = branch_mode(&vg, node);
                 let bus_c = bus.cloned();
                 let state_c = state.clone();
@@ -3430,9 +3432,13 @@ pub async fn transform_arm<E: AsyncElement>(
     if !elem.handles_qos() {
         adapter.relay_qos_to(in_rx.qos_slot());
     }
-    if !elem.handles_keyframe_requests() {
-        adapter.relay_reconfigure_to(in_rx.reconfigure_slot());
-    }
+    adapter.relay_reconfigure_to(
+        in_rx.reconfigure_slot(),
+        ReconfigureAnswered {
+            keyframe: elem.handles_keyframe_requests(),
+            orientation: elem.handles_orientation(),
+        },
+    );
     if !elem.handles_bitrate_requests() {
         adapter.relay_bitrate_to(in_rx.bitrate_slot());
     }

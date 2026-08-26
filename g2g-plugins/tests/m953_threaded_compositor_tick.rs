@@ -69,8 +69,8 @@ fn rgba(w: u32, h: u32) -> Caps {
 
 fn solid(w: u32, h: u32, color: [u8; 4], pts_ns: u64) -> PipelinePacket {
     let mut buf = vec![0u8; (w * h) as usize * 4];
-    for px in buf.chunks_exact_mut(4) {
-        px.copy_from_slice(&color);
+    for px in buf.as_chunks_mut::<4>().0 {
+        *px = color;
     }
     PipelinePacket::DataFrame(Frame::new(
         MemoryDomain::System(SystemSlice::from_boxed(buf.into_boxed_slice())),

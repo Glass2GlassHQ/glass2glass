@@ -24,8 +24,8 @@ default = []
 # NVIDIA Video Codec stack (needs the SDK + hardware: add `nvenc,nvdec,cuda,...`
 # explicitly), and the no_std `embassy*` RTOS backends.
 linux-full = [
-    "multi-thread", "plugin-loader",
-    "rtsp", "rtsp-server", "srt", "udp-egress", "udp-ingress", "rtmp", "webrtc",
+    "multi-thread", "plugin-loader", "plugin-signing",
+    "rtsp", "rtsp-server", "srt", "tcp", "udp-egress", "udp-ingress", "rtmp", "webrtc",
     "remote", "remote-ws", "webtransport", "moqt",
     "http-src", "hls", "dash",
     "ffmpeg", "vaapi", "v4l2",
@@ -61,6 +61,10 @@ script-rhai = ["declarative", "dep:rhai"]
 # `g2g-launch` / `g2g-inspect` is built with this so `--plugin` / $G2G_PLUGIN_PATH
 # extend it without a rebuild.
 plugin-loader = ["std", "dep:libloading", "dep:g2g-plugin", "dep:async-ffi"]
+# Detached Ed25519 plugin signatures (M1061), verified before `dlopen` when the
+# host is given trusted keys. Pulls `ring` (already in the tree via rustls) for
+# the crypto and `libc` for the Linux memfd the verified bytes are loaded from.
+plugin-signing = ["plugin-loader", "dep:ring", "dep:libc"]
 # RTSP source element wrapping the `retina` crate. Pulls retina, futures, url; implies std + tokio.
 rtsp = ["std", "dep:retina", "dep:futures-util", "dep:url", "dep:bytes"]
 # RTSP server sink (RtspServerSink): hosts a pipeline's H.264 as an RTSP endpoint,
@@ -85,6 +89,11 @@ rtmp = ["std", "tokio/net", "tokio/io-util", "dep:sha2", "dep:hmac", "dep:getran
 # depayloads H.264 to Annex-B access units, with caps taken from a published SDP
 # or the stream's SPS. Implies std and adds tokio's net feature.
 udp-ingress = ["std", "tokio/net"]
+# Plain TCP byte-stream elements (M1068): the `tcpserversrc` / `tcpclientsrc`
+# sources and the `tcpserversink` / `tcpclientsink` sinks of GStreamer's `tcp`
+# plugin. They carry raw bytes with no framing of their own, so any peer that
+# speaks a socket can sit on the other end. Implies std + tokio net/io-util.
+tcp = ["std", "tokio/net", "tokio/io-util"]
 # Distributed-graph transport pair (M551): RemoteSink (TCP client, egress) +
 # RemoteSrc (TCP listener, ingress) serialize the whole PipelinePacket stream
 # via g2g-core's wire codec and ship it over TCP, so any graph edge can be cut
@@ -716,6 +725,10 @@ mf-video-src = ["std", "dep:windows"]
 
 [dependencies]
 g2g-core = { workspace = true, features = ["runtime"] }
+# The MCU-fit fixed-point codecs (G.711 companding, IMA ADPCM blocks) the
+# `g711` / `adpcm` elements wrap. no_std, no alloc, embedded-hal only, so it
+# fits the baseline.
+g2g-mcu = { workspace = true, default-features = false }
 # no_std mutex for the appsrc/appsink named-channel globals (the app<->element
 # bridge). Same crate the core's runtime channel uses.
 spin = { version = "0.9", default-features = false, features = ["mutex", "spin_mutex"] }
@@ -734,6 +747,10 @@ socket2 = { version = "0.6", features = ["all"], optional = true }
 # over the loaded `cdylib`. The host keeps each `Library` alive for the process
 # lifetime (dropping it unmaps the code the registered elements run from).
 libloading = { version = "0.8", optional = true }
+# Ed25519 over the plugin bytes for the `plugin-signing` feature. Already in the
+# workspace graph under rustls / quinn, and a BoringSSL-derived implementation
+# rather than a hand-rolled one.
+ring = { version = "0.17", optional = true }
 # The frozen v2 plugin ABI types + validation (M1010), shared with the SDK a
 # plugin author builds against, and the FFI-safe `Future` its poll boundary
 # uses. Both are plugin-loader-only, so the no_std baseline never sees them.
@@ -1250,6 +1267,11 @@ required-features = ["std"]
 name = "g2g-mcp"
 required-features = ["tooling-json"]
 
+# Keygen / sign / verify for detached plugin signatures (M1061).
+[[bin]]
+name = "g2g-plugin-sign"
+required-features = ["plugin-signing"]
+
 # Porting reference: a third-party element registered and run via the launcher.
 [[example]]
 name = "third_party_element"
@@ -1365,6 +1387,11 @@ required-features = ["plugin-loader"]
 name = "plugin_c_abi"
 required-features = ["plugin-loader"]
 
+# M1061: detached Ed25519 signatures checked before the dlopen.
+[[test]]
+name = "m1061_plugin_signing"
+required-features = ["plugin-signing"]
+
 # M214: zero-copy GPU fan-out (overlay -> tee -> {sink, sink}) on a real wgpu
 # device. Needs the overlay producer and the wgpu present sink.
 [[test]]
@@ -1397,4 +1424,4 @@ workspace = true
 # `all-features`, which would need ffmpeg, ALSA, Wayland, libcamera, libvpx,
 # libopus and the NVIDIA SDK installed.
 [package.metadata.docs.rs]
-features = ["std", "declarative-yaml", "script-rhai", "plugin-loader", "tooling-json"]
+features = ["std", "declarative-yaml", "script-rhai", "plugin-loader", "plugin-signing", "tooling-json"]

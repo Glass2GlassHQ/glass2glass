@@ -69,19 +69,25 @@ fn wire_depth(format: AudioFormat) -> Option<SampleDepth> {
 fn pcm_to_samples(format: AudioFormat, bytes: &[u8]) -> Vec<i32> {
     match format {
         AudioFormat::PcmS16Le => bytes
-            .chunks_exact(2)
-            .map(|c| i32::from(i16::from_le_bytes([c[0], c[1]])))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| i32::from(i16::from_le_bytes(*c)))
             .collect(),
         AudioFormat::PcmF32Le => bytes
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|c| {
-                let f = f32::from_le_bytes([c[0], c[1], c[2], c[3]]);
+                let f = f32::from_le_bytes(*c);
                 (f * 8_388_608.0).clamp(-8_388_608.0, 8_388_607.0) as i32
             })
             .collect(),
         // 24-bit little-endian, sign-extended from the top byte.
         AudioFormat::PcmS24Le => bytes
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .map(|c| i32::from(c[0]) | (i32::from(c[1]) << 8) | (i32::from(c[2] as i8) << 16))
             .collect(),
         _ => Vec::new(),
@@ -569,8 +575,10 @@ mod tests {
                     PipelinePacket::DataFrame(f) => {
                         if let Some(s) = f.domain.as_system_slice() {
                             self.frames.push(
-                                s.chunks_exact(2)
-                                    .map(|c| i16::from_le_bytes([c[0], c[1]]))
+                                s.as_chunks::<2>()
+                                    .0
+                                    .iter()
+                                    .map(|c| i16::from_le_bytes(*c))
                                     .collect(),
                             );
                         }
@@ -746,8 +754,10 @@ mod tests {
         block_on(src.run(&mut cap)).expect("src runs");
         let received: Vec<f32> = cap
             .bytes
-            .chunks_exact(4)
-            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| f32::from_le_bytes(*c))
             .collect();
         assert_eq!(received.len(), input.len(), "all float samples returned");
         for (got, want) in received.iter().zip(&input) {

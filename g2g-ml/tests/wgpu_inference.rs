@@ -149,8 +149,10 @@ fn logits_from_system(f: &Frame) -> Vec<f32> {
         );
     };
     slice
-        .chunks_exact(4)
-        .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|b| f32::from_le_bytes(*b))
         .collect()
 }
 
@@ -314,8 +316,10 @@ async fn gpu_output_logits_stay_resident_and_match() {
         .expect("recover the wgpu buffer owner");
     let bytes = owner.read_back().expect("read logits back");
     let got: Vec<f32> = bytes
-        .chunks_exact(4)
-        .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|b| f32::from_le_bytes(*b))
         .collect();
 
     let cpu_tensor = nv12_to_rgb_tensor(&nv12, W as usize, H as usize);
@@ -1138,7 +1142,7 @@ async fn layer_norm_on_gpu_matches_cpu_reference() {
     // With the affine removed each row is zero-mean and unit-variance: proves the
     // per-row statistics were used, not a global or per-column normalization.
     let plain = layer_norm_reference(&x, S as usize, D as usize, &[1.0; 6], &[0.0; 6], EPS);
-    for row in plain.chunks_exact(D as usize) {
+    for row in plain.as_chunks::<{ D as usize }>().0 {
         let mean: f32 = row.iter().sum::<f32>() / D as f32;
         let var: f32 = row.iter().map(|v| (v - mean) * (v - mean)).sum::<f32>() / D as f32;
         assert!(mean.abs() < 1e-4, "row mean {mean} must be ~0");
@@ -1170,7 +1174,7 @@ async fn softmax_on_gpu_matches_cpu_reference() {
             "softmax {i}: gpu {g} vs cpu reference {e}"
         );
     }
-    for (r, row) in got.chunks_exact(D as usize).enumerate() {
+    for (r, row) in got.as_chunks::<{ D as usize }>().0.iter().enumerate() {
         let sum: f32 = row.iter().sum();
         assert!((sum - 1.0).abs() < 1e-5, "row {r} sums to {sum}, not 1");
     }

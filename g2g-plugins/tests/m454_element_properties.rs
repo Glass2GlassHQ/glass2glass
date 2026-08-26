@@ -12,6 +12,21 @@ fn declares(specs: &[PropertySpec], name: &str) -> bool {
     specs.iter().any(|s| s.name == name)
 }
 
+/// The value a spec's declared `default` text parses to. A `gst-inspect` dump
+/// prints it, so it has to be what a freshly built element actually reports.
+#[cfg(feature = "tcp")]
+fn declared_default(specs: &[PropertySpec], name: &str) -> PropValue {
+    let spec = specs
+        .iter()
+        .find(|s| s.name == name)
+        .unwrap_or_else(|| panic!("`{name}` is declared"));
+    let text = spec
+        .default
+        .unwrap_or_else(|| panic!("`{name}` declares a default"));
+    spec.parse_value(text)
+        .unwrap_or_else(|_| panic!("`{name}`'s default parses for its kind"))
+}
+
 /// M888: the CMAF chunked-consumption switch is settable from a launch line.
 #[cfg(feature = "dash")]
 #[test]
@@ -143,6 +158,40 @@ fn opusenc_audio_type() {
         low.lookahead().unwrap() < voice_lookahead,
         "restricted-lowdelay drops the SILK lookahead"
     );
+}
+
+/// The block size both ADPCM halves are written / read with. It is the only
+/// property they have, and out-of-range values are refused rather than clamped.
+#[test]
+fn adpcm_blockalign() {
+    use g2g_plugins::adpcm::{AdpcmDec, AdpcmEnc};
+    let mut encoder = AdpcmEnc::new();
+    assert!(declares(encoder.properties(), "blockalign"));
+    encoder
+        .set_property("blockalign", PropValue::Uint(512))
+        .unwrap();
+    assert_eq!(
+        encoder.get_property("blockalign"),
+        Some(PropValue::Uint(512))
+    );
+    assert_eq!(encoder.block_align(), 512);
+    assert!(encoder
+        .set_property("blockalign", PropValue::Uint(16))
+        .is_err());
+
+    let mut decoder = AdpcmDec::new();
+    assert!(declares(decoder.properties(), "blockalign"));
+    decoder
+        .set_property("blockalign", PropValue::Uint(2048))
+        .unwrap();
+    assert_eq!(
+        decoder.get_property("blockalign"),
+        Some(PropValue::Uint(2048))
+    );
+    assert_eq!(decoder.block_align(), 2048);
+    assert!(decoder
+        .set_property("blockalign", PropValue::Uint(65_536))
+        .is_err());
 }
 
 #[cfg(feature = "mjpeg-encode")]
@@ -339,6 +388,219 @@ fn srtsrc_latency_and_passphrase() {
     assert_eq!(
         s.get_property("passphrase"),
         Some(PropValue::Str("hunter2hunter2".into()))
+    );
+}
+
+/// M1068: `tcpserversrc` takes the gst `tcp` property set, and reports the port
+/// it actually bound through the read-only `current-port`.
+#[cfg(feature = "tcp")]
+#[test]
+fn tcpserversrc_endpoint_blocksize_and_format() {
+    use g2g_core::runtime::SourceLoop;
+    use g2g_plugins::tcp::TcpServerSrc;
+    let mut s = TcpServerSrc::default();
+    for name in [
+        "host",
+        "port",
+        "current-port",
+        "blocksize",
+        "num-buffers",
+        "bytestream-format",
+    ] {
+        assert!(declares(s.properties(), name), "{name} must be declared");
+    }
+    for name in [
+        "host",
+        "port",
+        "blocksize",
+        "num-buffers",
+        "bytestream-format",
+    ] {
+        assert_eq!(
+            s.get_property(name),
+            Some(declared_default(s.properties(), name)),
+            "a fresh element reports `{name}`'s declared default"
+        );
+    }
+    assert!(
+        !s.properties()
+            .iter()
+            .find(|spec| spec.name == "current-port")
+            .unwrap()
+            .flags
+            .writable,
+        "current-port is derived from the socket, so it must not look settable"
+    );
+    assert_eq!(
+        s.get_property("current-port"),
+        Some(PropValue::Uint(0)),
+        "no port is bound before the pipeline configures"
+    );
+
+    s.set_property("host", PropValue::Str("127.0.0.1".into()))
+        .unwrap();
+    s.set_property("port", PropValue::Uint(0)).unwrap();
+    s.set_property("blocksize", PropValue::Uint(8192)).unwrap();
+    s.set_property("num-buffers", PropValue::Int(12)).unwrap();
+    s.set_property("bytestream-format", PropValue::Str("matroska".into()))
+        .unwrap();
+    assert_eq!(
+        s.get_property("host"),
+        Some(PropValue::Str("127.0.0.1".into()))
+    );
+    assert_eq!(s.get_property("port"), Some(PropValue::Uint(0)));
+    assert_eq!(s.get_property("blocksize"), Some(PropValue::Uint(8192)));
+    assert_eq!(s.get_property("num-buffers"), Some(PropValue::Int(12)));
+    assert_eq!(
+        s.get_property("bytestream-format"),
+        Some(PropValue::Str("matroska".into()))
+    );
+
+    assert!(
+        s.set_property("port", PropValue::Uint(70_000)).is_err(),
+        "rejects an out-of-range port"
+    );
+    assert!(
+        s.set_property("blocksize", PropValue::Uint(0)).is_err(),
+        "a zero read size would make no progress"
+    );
+    assert!(
+        s.set_property("bytestream-format", PropValue::Str("mp3".into()))
+            .is_err(),
+        "rejects a container it cannot declare"
+    );
+
+    // The port only exists once something bound; `port=0` binds one the OS picks.
+    let bound = s.bind().expect("bind an ephemeral port");
+    assert_ne!(bound, 0);
+    assert_eq!(
+        s.get_property("current-port"),
+        Some(PropValue::Uint(bound as u64))
+    );
+}
+
+/// M1068: `tcpclientsrc` takes the same read properties, minus the bind-only
+/// `current-port`.
+#[cfg(feature = "tcp")]
+#[test]
+fn tcpclientsrc_endpoint_blocksize_and_format() {
+    use g2g_core::runtime::SourceLoop;
+    use g2g_plugins::tcp::TcpClientSrc;
+    let mut s = TcpClientSrc::default();
+    for name in [
+        "host",
+        "port",
+        "blocksize",
+        "num-buffers",
+        "bytestream-format",
+    ] {
+        assert!(declares(s.properties(), name), "{name} must be declared");
+        assert_eq!(
+            s.get_property(name),
+            Some(declared_default(s.properties(), name)),
+            "a fresh element reports `{name}`'s declared default"
+        );
+    }
+    assert!(
+        !declares(s.properties(), "current-port"),
+        "a client binds nothing, so it must not look like it reports a bound port"
+    );
+
+    s.set_property("host", PropValue::Str("example.test".into()))
+        .unwrap();
+    s.set_property("port", PropValue::Uint(5000)).unwrap();
+    s.set_property("blocksize", PropValue::Uint(1500)).unwrap();
+    s.set_property("num-buffers", PropValue::Int(3)).unwrap();
+    s.set_property("bytestream-format", PropValue::Str("flv".into()))
+        .unwrap();
+    assert_eq!(
+        s.get_property("host"),
+        Some(PropValue::Str("example.test".into())),
+        "a host name is kept as written, since it is resolved at connect time"
+    );
+    assert_eq!(s.get_property("port"), Some(PropValue::Uint(5000)));
+    assert_eq!(s.get_property("blocksize"), Some(PropValue::Uint(1500)));
+    assert_eq!(s.get_property("num-buffers"), Some(PropValue::Int(3)));
+    assert_eq!(
+        s.get_property("bytestream-format"),
+        Some(PropValue::Str("flv".into()))
+    );
+}
+
+/// M1068: `tcpserversink` takes the endpoint, reports its bound port, and lets
+/// the head-of-stream wait be turned off.
+#[cfg(feature = "tcp")]
+#[test]
+fn tcpserversink_endpoint_and_wait_for_connection() {
+    use g2g_plugins::tcp::TcpServerSink;
+    let mut e = TcpServerSink::default();
+    for name in ["host", "port", "current-port", "wait-for-connection"] {
+        assert!(declares(e.properties(), name), "{name} must be declared");
+    }
+    for name in ["host", "port", "wait-for-connection"] {
+        assert_eq!(
+            e.get_property(name),
+            Some(declared_default(e.properties(), name)),
+            "a fresh element reports `{name}`'s declared default"
+        );
+    }
+    assert_eq!(
+        e.get_property("current-port"),
+        Some(PropValue::Uint(0)),
+        "no port is bound before the pipeline configures"
+    );
+
+    e.set_property("host", PropValue::Str("127.0.0.1".into()))
+        .unwrap();
+    e.set_property("port", PropValue::Uint(0)).unwrap();
+    e.set_property("wait-for-connection", PropValue::Bool(false))
+        .unwrap();
+    assert_eq!(
+        e.get_property("host"),
+        Some(PropValue::Str("127.0.0.1".into()))
+    );
+    assert_eq!(
+        e.get_property("wait-for-connection"),
+        Some(PropValue::Bool(false))
+    );
+    assert!(
+        e.set_property("port", PropValue::Uint(70_000)).is_err(),
+        "rejects an out-of-range port"
+    );
+
+    let bound = e.bind().expect("bind an ephemeral port");
+    assert_ne!(bound, 0);
+    assert_eq!(
+        e.get_property("current-port"),
+        Some(PropValue::Uint(bound as u64))
+    );
+}
+
+/// M1068: `tcpclientsink` takes the endpoint it dials.
+#[cfg(feature = "tcp")]
+#[test]
+fn tcpclientsink_endpoint() {
+    use g2g_plugins::tcp::TcpClientSink;
+    let mut e = TcpClientSink::default();
+    for name in ["host", "port"] {
+        assert!(declares(e.properties(), name), "{name} must be declared");
+        assert_eq!(
+            e.get_property(name),
+            Some(declared_default(e.properties(), name)),
+            "a fresh element reports `{name}`'s declared default"
+        );
+    }
+    e.set_property("host", PropValue::Str("10.0.0.5".into()))
+        .unwrap();
+    e.set_property("port", PropValue::Uint(5000)).unwrap();
+    assert_eq!(
+        e.get_property("host"),
+        Some(PropValue::Str("10.0.0.5".into()))
+    );
+    assert_eq!(e.get_property("port"), Some(PropValue::Uint(5000)));
+    assert!(
+        e.set_property("port", PropValue::Uint(70_000)).is_err(),
+        "rejects an out-of-range port"
     );
 }
 
@@ -801,6 +1063,96 @@ async fn pipewiresrc_format_rate_and_channels() {
     );
 }
 
+/// M1067: `imagefreeze` takes its output rate and length from properties, and
+/// declares nothing it cannot honour.
+#[test]
+fn imagefreeze_framerate_and_num_buffers() {
+    use g2g_plugins::imagefreeze::ImageFreeze;
+    let mut e = ImageFreeze::new();
+    assert!(declares(e.properties(), "framerate"));
+    assert!(declares(e.properties(), "num-buffers"));
+    assert_eq!(
+        e.get_property("framerate"),
+        Some(PropValue::Fraction(25, 1)),
+        "25/1 with no property set"
+    );
+    e.set_property("framerate", PropValue::Fraction(30, 1))
+        .unwrap();
+    assert_eq!(
+        e.get_property("framerate"),
+        Some(PropValue::Fraction(30, 1))
+    );
+    assert_eq!(
+        e.get_property("num-buffers"),
+        Some(PropValue::Int(-1)),
+        "gst's unlimited default"
+    );
+    e.set_property("num-buffers", PropValue::Int(10)).unwrap();
+    assert_eq!(e.get_property("num-buffers"), Some(PropValue::Int(10)));
+    // neither can be honoured in this model, so neither is offered.
+    for name in ["allow-replace", "is-live"] {
+        assert!(!declares(e.properties(), name), "{name}");
+    }
+}
+
+/// M1066: `audiorate`'s two settings round-trip, and its four sample counters
+/// read back but refuse a write.
+#[test]
+fn audiorate_tolerance_skip_to_first_and_counters() {
+    use g2g_core::PropError;
+    use g2g_plugins::audiorate::AudioRate;
+    let mut e = AudioRate::new();
+    assert!(declares(e.properties(), "tolerance"));
+    assert!(declares(e.properties(), "skip-to-first"));
+    // gst's default, in ns.
+    assert_eq!(
+        e.get_property("tolerance"),
+        Some(PropValue::Uint(40_000_000))
+    );
+    e.set_property("tolerance", PropValue::Uint(0)).unwrap();
+    assert_eq!(e.get_property("tolerance"), Some(PropValue::Uint(0)));
+    e.set_property("skip-to-first", PropValue::Bool(true))
+        .unwrap();
+    assert_eq!(e.get_property("skip-to-first"), Some(PropValue::Bool(true)));
+    for name in ["in", "out", "add", "drop"] {
+        assert_eq!(e.get_property(name), Some(PropValue::Uint(0)), "{name}");
+        assert_eq!(
+            e.set_property(name, PropValue::Uint(1)),
+            Err(PropError::Value),
+            "{name} is a counter, not a knob"
+        );
+    }
+    // gst's `silent` notify switch has no analog here, so it is not declared.
+    assert!(!declares(e.properties(), "silent"));
+}
+
+/// M1075: `scaletempo`'s three window settings round-trip, and the current
+/// playback rate reads back but refuses a write.
+#[test]
+fn scaletempo_windows_and_read_only_rate() {
+    use g2g_core::PropError;
+    use g2g_plugins::scaletempo::ScaleTempo;
+    let mut e = ScaleTempo::new();
+    // gst's defaults: 30 ms strides, 20 % overlap, 14 ms of search.
+    assert_eq!(e.get_property("stride"), Some(PropValue::Uint(30)));
+    assert_eq!(e.get_property("overlap"), Some(PropValue::Double(0.2)));
+    assert_eq!(e.get_property("search"), Some(PropValue::Uint(14)));
+    e.set_property("stride", PropValue::Uint(20)).unwrap();
+    assert_eq!(e.get_property("stride"), Some(PropValue::Uint(20)));
+    e.set_property("overlap", PropValue::Double(0.5)).unwrap();
+    assert_eq!(e.get_property("overlap"), Some(PropValue::Double(0.5)));
+    e.set_property("search", PropValue::Uint(0)).unwrap();
+    assert_eq!(e.get_property("search"), Some(PropValue::Uint(0)));
+    // the rate comes from the segment, so it reports but does not take one.
+    assert_eq!(e.get_property("rate"), Some(PropValue::Double(1.0)));
+    assert_eq!(
+        e.set_property("rate", PropValue::Double(2.0)),
+        Err(PropError::Value)
+    );
+    // gst's `mode` (fit-down) has no analog here, so it is not declared.
+    assert!(!declares(e.properties(), "mode"));
+}
+
 /// The sink takes its format, rate and channels from the negotiated caps, so it
 /// declares none of them rather than knobs it would have to ignore (same shape
 /// as `alsasink` / `pulsesink`).
@@ -1152,4 +1504,209 @@ fn screencapturesrc_num_buffers() {
     assert_eq!(s.get_property("num-buffers"), Some(PropValue::Int(-1)));
     s.set_property("num-buffers", PropValue::Int(120)).unwrap();
     assert_eq!(s.get_property("num-buffers"), Some(PropValue::Int(120)));
+}
+
+/// M1070: the valve's two knobs, both of which change what a closed valve does.
+#[test]
+fn valve_drop_and_drop_mode() {
+    use g2g_plugins::valve::Valve;
+    let mut e = Valve::new();
+    assert!(declares(e.properties(), "drop"));
+    assert!(declares(e.properties(), "drop-mode"));
+    assert_eq!(
+        e.get_property("drop"),
+        Some(PropValue::Bool(false)),
+        "gst valve's default"
+    );
+    e.set_property("drop", PropValue::Bool(true)).unwrap();
+    assert_eq!(e.get_property("drop"), Some(PropValue::Bool(true)));
+    assert_eq!(
+        e.get_property("drop-mode"),
+        Some(PropValue::Str("drop-all".into())),
+        "gst valve's default"
+    );
+    e.set_property("drop-mode", PropValue::Str("forward-sticky-events".into()))
+        .unwrap();
+    assert_eq!(
+        e.get_property("drop-mode"),
+        Some(PropValue::Str("forward-sticky-events".into()))
+    );
+    assert!(
+        e.set_property("drop-mode", PropValue::Str("transform-to-gap".into()))
+            .is_err(),
+        "rejects the gst mode g2g has no gap packet for"
+    );
+}
+
+/// M1070: `fakesrc`'s run length, buffer size and fill.
+#[test]
+fn fakesrc_num_buffers_sizemax_and_filltype() {
+    use g2g_core::runtime::SourceLoop;
+    use g2g_plugins::fakesrc::FakeSrc;
+    let mut e = FakeSrc::new();
+    for name in ["num-buffers", "sizemax", "filltype"] {
+        assert!(declares(e.properties(), name), "{name} must be declared");
+    }
+    assert_eq!(e.get_property("num-buffers"), Some(PropValue::Int(-1)));
+    assert_eq!(
+        e.get_property("sizemax"),
+        Some(PropValue::Uint(4096)),
+        "gst fakesrc's default"
+    );
+    assert_eq!(
+        e.get_property("filltype"),
+        Some(PropValue::Str("nothing".into())),
+        "gst fakesrc's default"
+    );
+    e.set_property("num-buffers", PropValue::Int(20)).unwrap();
+    e.set_property("sizemax", PropValue::Uint(100)).unwrap();
+    e.set_property("filltype", PropValue::Str("pattern".into()))
+        .unwrap();
+    assert_eq!(e.get_property("num-buffers"), Some(PropValue::Int(20)));
+    assert_eq!(e.get_property("sizemax"), Some(PropValue::Uint(100)));
+    assert_eq!(
+        e.get_property("filltype"),
+        Some(PropValue::Str("pattern".into()))
+    );
+    assert!(
+        e.set_property("filltype", PropValue::Str("pattern-span".into()))
+            .is_err(),
+        "rejects a fill it does not implement"
+    );
+}
+
+/// M1070: the descriptor `fdsrc` reads and how much it reads at a time.
+#[cfg(all(feature = "std", unix))]
+#[test]
+fn fdsrc_fd_blocksize_and_num_buffers() {
+    use g2g_core::runtime::SourceLoop;
+    use g2g_plugins::fd::FdSrc;
+    let mut e = FdSrc::default();
+    for name in ["fd", "blocksize", "num-buffers"] {
+        assert!(declares(e.properties(), name), "{name} must be declared");
+    }
+    assert_eq!(
+        e.get_property("fd"),
+        Some(PropValue::Int(0)),
+        "gst fdsrc reads stdin by default"
+    );
+    assert_eq!(
+        e.get_property("blocksize"),
+        Some(PropValue::Uint(4096)),
+        "gst basesrc's default"
+    );
+    e.set_property("fd", PropValue::Int(7)).unwrap();
+    e.set_property("blocksize", PropValue::Uint(512)).unwrap();
+    e.set_property("num-buffers", PropValue::Int(3)).unwrap();
+    assert_eq!(e.get_property("fd"), Some(PropValue::Int(7)));
+    assert_eq!(e.get_property("blocksize"), Some(PropValue::Uint(512)));
+    assert_eq!(e.get_property("num-buffers"), Some(PropValue::Int(3)));
+    assert!(
+        e.set_property("fd", PropValue::Int(-1)).is_err(),
+        "rejects a descriptor that names nothing"
+    );
+    assert!(
+        e.set_property("blocksize", PropValue::Uint(0)).is_err(),
+        "a zero read would spin without progress"
+    );
+}
+
+/// M1070: the descriptor `fdsink` writes to.
+#[cfg(all(feature = "std", unix))]
+#[test]
+fn fdsink_fd() {
+    use g2g_plugins::fd::FdSink;
+    let mut e = FdSink::default();
+    assert!(declares(e.properties(), "fd"));
+    assert_eq!(
+        e.get_property("fd"),
+        Some(PropValue::Int(1)),
+        "gst fdsink writes stdout by default"
+    );
+    e.set_property("fd", PropValue::Int(9)).unwrap();
+    assert_eq!(e.get_property("fd"), Some(PropValue::Int(9)));
+    assert!(
+        e.set_property("fd", PropValue::Int(-1)).is_err(),
+        "rejects a descriptor that names nothing"
+    );
+}
+
+/// M1072: the interleaver declares the PCM shape of its pads and merged output,
+/// since a fan-in names its output caps before the pads negotiate.
+#[test]
+fn interleave_format_and_rate() {
+    use g2g_core::{AudioFormat, Caps, MultiInputElement};
+    use g2g_plugins::interleave::Interleave;
+    let mut element = Interleave::new(2);
+    for name in ["format", "rate"] {
+        assert!(
+            declares(element.properties(), name),
+            "{name} must be declared"
+        );
+    }
+    assert_eq!(
+        element.get_property("format"),
+        Some(PropValue::Str("S16LE".into()))
+    );
+    element
+        .set_property("format", PropValue::Str("F32LE".into()))
+        .unwrap();
+    element
+        .set_property("rate", PropValue::Uint(44_100))
+        .unwrap();
+    assert_eq!(
+        element.get_property("format"),
+        Some(PropValue::Str("F32LE".into()))
+    );
+    assert_eq!(element.get_property("rate"), Some(PropValue::Uint(44_100)));
+    assert_eq!(
+        element.output_caps().unwrap(),
+        Caps::Audio {
+            format: AudioFormat::PcmF32Le,
+            channels: 2,
+            sample_rate: 44_100,
+        },
+        "the properties are what the merged output declares"
+    );
+}
+
+/// M1072: the splitter's fan-out form declares the same shape, one channel per
+/// port, and its single-output form picks a channel instead.
+#[test]
+fn deinterleave_format_rate_and_channel() {
+    use g2g_core::{AudioFormat, Caps, MultiOutputElement};
+    use g2g_plugins::deinterleave::{Deinterleave, DeinterleaveN};
+    let mut fanout = DeinterleaveN::new(2);
+    for name in ["format", "rate"] {
+        assert!(
+            declares(fanout.properties(), name),
+            "{name} must be declared"
+        );
+    }
+    fanout
+        .set_property("format", PropValue::Str("S32LE".into()))
+        .unwrap();
+    fanout
+        .set_property("rate", PropValue::Uint(16_000))
+        .unwrap();
+    assert_eq!(
+        fanout.get_property("format"),
+        Some(PropValue::Str("S32LE".into()))
+    );
+    assert_eq!(fanout.get_property("rate"), Some(PropValue::Uint(16_000)));
+    assert_eq!(
+        fanout.port_output_caps(1),
+        Some(Caps::Audio {
+            format: AudioFormat::PcmS32Le,
+            channels: 1,
+            sample_rate: 16_000,
+        }),
+        "every port carries one channel of the declared shape"
+    );
+
+    let mut picker = Deinterleave::new();
+    assert!(declares(AsyncElement::properties(&picker), "channel"));
+    assert_eq!(picker.get_property("channel"), Some(PropValue::Uint(0)));
+    picker.set_property("channel", PropValue::Uint(3)).unwrap();
+    assert_eq!(picker.get_property("channel"), Some(PropValue::Uint(3)));
 }

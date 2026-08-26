@@ -576,6 +576,7 @@ fn bytestream_gst_media_type(e: ByteStreamEncoding) -> &'static str {
         ByteStreamEncoding::Ivf => "video/x-ivf",
         ByteStreamEncoding::MpegPs => "video/mpeg",
         ByteStreamEncoding::Wav => "audio/x-wav",
+        ByteStreamEncoding::Avi => "video/x-msvideo",
     }
 }
 
@@ -1064,6 +1065,10 @@ pub enum ByteStreamEncoding {
     /// `data` chunk of interleaved PCM. The uncompressed file container, and the
     /// one an audio tool reads without a demuxer.
     Wav,
+    /// AVI (`.avi`): the RIFF sibling of WAVE, a `hdrl` list describing one
+    /// stream per `strl` and a `movi` list of the interleaved data chunks, with
+    /// an `idx1` at the end. Demuxed by `avidemux`, written by `avimux`.
+    Avi,
 }
 
 /// Format of a [`Caps::Text`] stream. Generalizes "subtitles": a `Text` link

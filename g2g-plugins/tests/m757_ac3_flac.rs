@@ -261,8 +261,8 @@ async fn stereo_flac_decodes_bit_exact_flow() {
     assert_eq!(pcm.len(), 48_000 / 4 * 2 * 2, "0.25 s stereo S16");
     // both channels carry the tone (a channel-collapse bug would zero/garble one).
     let mut max = [0i16; 2];
-    for (i, ch) in pcm.chunks_exact(2).enumerate() {
-        let v = i16::from_le_bytes([ch[0], ch[1]]).unsigned_abs() as i16;
+    for (i, ch) in pcm.as_chunks::<2>().0.iter().enumerate() {
+        let v = i16::from_le_bytes(*ch).unsigned_abs() as i16;
         max[i % 2] = max[i % 2].max(v);
     }
     assert!(
@@ -296,8 +296,8 @@ async fn stereo_ac3_decodes_flow() {
         pcm.len()
     );
     let mut max = [0i16; 2];
-    for (i, ch) in pcm.chunks_exact(2).enumerate() {
-        let v = i16::from_le_bytes([ch[0], ch[1]]).unsigned_abs() as i16;
+    for (i, ch) in pcm.as_chunks::<2>().0.iter().enumerate() {
+        let v = i16::from_le_bytes(*ch).unsigned_abs() as i16;
         max[i % 2] = max[i % 2].max(v);
     }
     assert!(

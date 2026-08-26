@@ -25,6 +25,8 @@ use g2g_plugins::nvenc::NvEnc;
 
 const W: u32 = 320;
 const H: u32 = 240;
+/// The interop device's GPU: this host has one NVIDIA card.
+const CUDA_DEVICE_ID: i32 = 0;
 
 #[derive(Default)]
 struct CaptureSink {
@@ -84,7 +86,9 @@ async fn wgpu_rgba_texture_encodes_through_nvenc_no_readback() {
     // also selects) and owns the exportable render-target texture.
     // SAFETY: `dev.device` is a VK_KHR_external_memory_fd interop device; the
     // clones share it (wgpu handles are Arc-backed) and `dev` outlives the bridge.
-    let bridge = match unsafe { WgpuToCuda::new(dev.device.clone(), dev.queue.clone(), W, H) } {
+    let bridge = match unsafe {
+        WgpuToCuda::new(dev.device.clone(), dev.queue.clone(), W, H, CUDA_DEVICE_ID)
+    } {
         Ok(b) => b,
         Err(e) => {
             eprintln!("skipping: WgpuToCuda unavailable (no CUDA? {e:?})");
@@ -255,7 +259,9 @@ async fn wgpu_to_cuda_element_bridges_and_recycles() {
     };
     // SAFETY: `dev.device` is a VK_KHR_external_memory_fd interop device; the clones
     // share it and `dev` outlives the bridge.
-    let mut bridge = match unsafe { WgpuToCuda::new(dev.device.clone(), dev.queue.clone(), W, H) } {
+    let mut bridge = match unsafe {
+        WgpuToCuda::new(dev.device.clone(), dev.queue.clone(), W, H, CUDA_DEVICE_ID)
+    } {
         Ok(b) => b,
         Err(e) => {
             eprintln!("skipping: WgpuToCuda unavailable (no CUDA? {e:?})");

@@ -51,8 +51,10 @@ fn frame_f32(f: &Frame) -> Vec<f32> {
         panic!("tensor frame must be System memory");
     };
     slice
-        .chunks_exact(4)
-        .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|b| f32::from_le_bytes(*b))
         .collect()
 }
 
@@ -216,8 +218,10 @@ async fn gpu_output_keeps_tensor_on_device_and_matches_reference() {
         .expect("recover the wgpu buffer owner");
     let bytes = owner.read_back().expect("read tensor back");
     let got: Vec<f32> = bytes
-        .chunks_exact(4)
-        .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|b| f32::from_le_bytes(*b))
         .collect();
 
     let expected = nv12_to_rgb_tensor(&nv12, w, h);
@@ -364,8 +368,10 @@ async fn surface_import_with_gpu_output_stays_resident() {
         .expect("recover the buffer owner");
     let bytes = owner.read_back().expect("read tensor back");
     let got: Vec<f32> = bytes
-        .chunks_exact(4)
-        .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|b| f32::from_le_bytes(*b))
         .collect();
 
     let expected = nv12_to_rgb_tensor(&nv12, w, h);

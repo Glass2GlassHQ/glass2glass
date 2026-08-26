@@ -31,7 +31,6 @@
 use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
-use core::ffi::CStr;
 
 use ash::vk;
 
@@ -530,7 +529,13 @@ pub unsafe fn ahb_to_rgba_readback(
             .create_descriptor_set_layout(&dsl_info, None)
             .map_err(gpu_err)?;
         let set_layouts = [dsl];
-        let pl_info = vk::PipelineLayoutCreateInfo::default().set_layouts(&set_layouts);
+        let pc_ranges = [vk::PushConstantRange::default()
+            .stage_flags(vk::ShaderStageFlags::COMPUTE)
+            .offset(0)
+            .size(crate::gpu::YCBCR_PUSH_CONSTANT_SIZE)];
+        let pl_info = vk::PipelineLayoutCreateInfo::default()
+            .set_layouts(&set_layouts)
+            .push_constant_ranges(&pc_ranges);
         let pipeline_layout = d.create_pipeline_layout(&pl_info, None).map_err(gpu_err)?;
 
         // ---- compute pipeline ----
@@ -538,7 +543,7 @@ pub unsafe fn ahb_to_rgba_readback(
             ash::util::read_spv(&mut std::io::Cursor::new(YCBCR_COMP_SPV)).map_err(gpu_err)?;
         let sm_info = vk::ShaderModuleCreateInfo::default().code(&code);
         let shader = d.create_shader_module(&sm_info, None).map_err(gpu_err)?;
-        let entry = CStr::from_bytes_with_nul(b"main\0").map_err(gpu_err)?;
+        let entry = c"main";
         let stage = vk::PipelineShaderStageCreateInfo::default()
             .stage(vk::ShaderStageFlags::COMPUTE)
             .module(shader)
@@ -645,6 +650,13 @@ pub unsafe fn ahb_to_rgba_readback(
             0,
             &[set],
             &[],
+        );
+        d.cmd_push_constants(
+            cb,
+            pipeline_layout,
+            vk::ShaderStageFlags::COMPUTE,
+            0,
+            &crate::gpu::ycbcr_push_constants(0, (width, height)),
         );
         d.cmd_dispatch(cb, width.div_ceil(8), height.div_ceil(8), 1);
 
@@ -960,9 +972,15 @@ impl YcbcrToRgba {
                 )
                 .map_err(gpu_err)?;
             let set_layouts = [dsl];
+            let pc_ranges = [vk::PushConstantRange::default()
+                .stage_flags(vk::ShaderStageFlags::COMPUTE)
+                .offset(0)
+                .size(crate::gpu::YCBCR_PUSH_CONSTANT_SIZE)];
             let pipeline_layout = d
                 .create_pipeline_layout(
-                    &vk::PipelineLayoutCreateInfo::default().set_layouts(&set_layouts),
+                    &vk::PipelineLayoutCreateInfo::default()
+                        .set_layouts(&set_layouts)
+                        .push_constant_ranges(&pc_ranges),
                     None,
                 )
                 .map_err(gpu_err)?;
@@ -972,7 +990,7 @@ impl YcbcrToRgba {
             let shader = d
                 .create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&code), None)
                 .map_err(gpu_err)?;
-            let entry = CStr::from_bytes_with_nul(b"main\0").map_err(gpu_err)?;
+            let entry = c"main";
             let stage = vk::PipelineShaderStageCreateInfo::default()
                 .stage(vk::ShaderStageFlags::COMPUTE)
                 .module(shader)
@@ -1320,6 +1338,13 @@ impl YcbcrToRgba {
                 0,
                 &[desc_set],
                 &[],
+            );
+            d.cmd_push_constants(
+                cb,
+                self.pipeline_layout,
+                vk::ShaderStageFlags::COMPUTE,
+                0,
+                &crate::gpu::ycbcr_push_constants(0, (self.width, self.height)),
             );
             d.cmd_dispatch(cb, self.width.div_ceil(8), self.height.div_ceil(8), 1);
             // Leave the output in SHADER_READ_ONLY_OPTIMAL: a tidy layout for the

@@ -56,19 +56,10 @@ pub(crate) fn plane_shapes(
     w: usize,
     h: usize,
 ) -> alloc::vec::Vec<(usize, usize)> {
-    let bps = format.bytes_per_sample();
-    if let Some((hs, vs)) = format.chroma_shift() {
-        let (cw, ch) = (w.div_ceil(1 << hs), h.div_ceil(1 << vs));
-        return alloc::vec![(w * bps, h), (cw * bps, ch), (cw * bps, ch)];
-    }
-    match format {
-        // Semi-planar: luma, then one interleaved Cb,Cr plane at half height and
-        // the same byte width (half the samples, two of them per position).
-        RawVideoFormat::Nv12 => alloc::vec![(w, h), (w, h.div_ceil(2))],
-        RawVideoFormat::P010 => alloc::vec![(w * 2, h), (w * 2, h.div_ceil(2))],
-        // Everything else is one packed plane.
-        _ => alloc::vec![(row_bytes(format, w), h)],
-    }
+    crate::paddedrows::plane_shapes_with_stride_shift(format, w, h)
+        .into_iter()
+        .map(|(row_bytes, rows, _)| (row_bytes, rows))
+        .collect()
 }
 
 /// Byte width of one row of `format`'s **first** plane at `w` pixels: the row

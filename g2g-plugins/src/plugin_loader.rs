@@ -22,6 +22,15 @@
 //! the caller's `Registry`. This is **policy, not sandboxing**, see the
 //! "Security" note below.
 //!
+//! **Signatures (M1061).** With the `plugin-signing` feature a caller can hand
+//! the loader a set of trusted Ed25519 public keys ([`signing::TrustedKeys`],
+//! or the `G2G_PLUGIN_TRUSTED_KEYS` path list). While that set is empty nothing
+//! changes: signed and unsigned plugins load alike. Once it holds a key, every
+//! plugin must carry a sibling `<plugin>.sig` that verifies under one of those
+//! keys, checked before `dlopen`, and on Linux the verified bytes are what gets
+//! loaded (a sealed `memfd`), not the path they came from. See
+//! [`signing`] for the file format and the TOCTOU argument.
+//!
 //! # Security
 //!
 //! The loader defends against a *malformed* plugin, not a *malicious* one.
@@ -29,11 +38,13 @@
 //! `dlopen` runs the library's initialisers before the loader reads a single
 //! field, and once loaded a plugin shares the host's address space with no
 //! boundary at all: it can call any syscall the host process can, read the
-//! host's memory, and ignore every rule in this module. The capability gate
-//! decides *whether to load a file at all* and *what it may register*; it
-//! cannot constrain what loaded code does. Anything stronger (a separate
-//! process, a seccomp filter, a signature check) is out of scope here, and
-//! there are no stubs for it.
+//! host's memory, and ignore every rule in this module. A signature says the
+//! bytes came from a holder of a trusted key; it says nothing about what those
+//! bytes then do, so a signed malicious plugin is still malicious. The
+//! capability gate decides *whether to load a file at all* and *what it may
+//! register*; it cannot constrain what loaded code does. Anything stronger (a
+//! separate process, a seccomp filter) is out of scope here, and there are no
+//! stubs for it.
 //!
 //! What the loader does do is treat every byte reachable from the descriptor as
 //! untrusted input: counts are bounded before they are used as lengths,
@@ -77,7 +88,13 @@ use g2g_plugin::abi::{
 
 mod v2;
 
+#[cfg(feature = "plugin-signing")]
+pub mod signing;
+
 pub use v2::MAX_V2_ELEMENT_SLOTS;
+
+#[cfg(feature = "plugin-signing")]
+pub use signing::{SigningError, TrustedKeys};
 
 /// The C-ABI symbol names a `g2g-plugin` `cdylib` exports. Kept in sync with the
 /// `declare_plugin!` expansion in the SDK.
@@ -87,6 +104,12 @@ const REGISTER_SYMBOL: &[u8] = b"g2g_plugin_register";
 /// The environment variable a packaged `g2g-launch` / `g2g-inspect` scans for
 /// plugin directories (`:`-separated, like `PATH`).
 pub const PLUGIN_PATH_ENV: &str = "G2G_PLUGIN_PATH";
+
+/// The environment variable holding the trusted signing keys, one hex public
+/// key file per entry, `:`-separated like `PATH`. Set it and every plugin this
+/// host loads must carry a signature from one of those keys; leave it unset and
+/// nothing is verified.
+pub const TRUSTED_KEYS_ENV: &str = "G2G_PLUGIN_TRUSTED_KEYS";
 
 /// Loaded libraries, kept resident for the life of the process. See the
 /// module-level "Keep-alive" note: dropping a `Library` would unmap the code the
@@ -141,6 +164,25 @@ pub enum PluginError {
     V2RegisterFailed { path: PathBuf, status: i32 },
     /// The process has already registered [`MAX_V2_ELEMENT_SLOTS`] v2 elements.
     V2NoSlots { path: PathBuf },
+    /// The trust set is non-empty and this plugin's detached signature is
+    /// absent, malformed, from an untrusted key, or does not verify. Refused
+    /// before `dlopen`, so none of the plugin's code has run.
+    #[cfg(feature = "plugin-signing")]
+    SignatureRejected {
+        path: PathBuf,
+        error: signing::SigningError,
+    },
+    /// Signing keys are configured but this build has no `plugin-signing`
+    /// feature, so it cannot check them. Refused rather than loaded unverified.
+    SigningUnsupported,
+    /// A configured trusted-key file could not be read or parsed. Refused
+    /// rather than falling back to loading nothing-is-verified.
+    #[cfg(feature = "plugin-signing")]
+    TrustedKeyFile { error: signing::SigningError },
+    /// The verified bytes could not be turned into a sealed in-memory image to
+    /// load from (Linux `memfd`). A host failure, not a plugin one.
+    #[cfg(all(feature = "plugin-signing", target_os = "linux"))]
+    Seal { path: PathBuf, message: String },
 }
 
 impl core::fmt::Display for PluginError {
@@ -190,6 +232,25 @@ impl core::fmt::Display for PluginError {
             PluginError::V2NoSlots { path } => write!(
                 f,
                 "plugin {} cannot load: all {MAX_V2_ELEMENT_SLOTS} v2 element slots are taken",
+                path.display()
+            ),
+            #[cfg(feature = "plugin-signing")]
+            PluginError::SignatureRejected { path, error } => {
+                write!(f, "plugin {} is refused: {error}", path.display())
+            }
+            #[cfg(feature = "plugin-signing")]
+            PluginError::TrustedKeyFile { error } => {
+                write!(f, "cannot use the configured signing keys: {error}")
+            }
+            PluginError::SigningUnsupported => write!(
+                f,
+                "${TRUSTED_KEYS_ENV} names signing keys, but this build has no \
+                 `plugin-signing` feature to check them with"
+            ),
+            #[cfg(all(feature = "plugin-signing", target_os = "linux"))]
+            PluginError::Seal { path, message } => write!(
+                f,
+                "cannot load verified plugin {} from memory: {message}",
                 path.display()
             ),
         }
@@ -281,6 +342,51 @@ pub fn load_plugin_with_policy(
         message: e.to_string(),
     })?;
 
+    load_opened(path, lib, reg, policy)
+}
+
+/// [`load_plugin_with_policy`] with signature verification in front of the
+/// `dlopen`.
+///
+/// An empty `trusted` set is the unverified path, identical to
+/// [`load_plugin_with_policy`]. A non-empty one requires a `<plugin>.sig` that
+/// verifies under one of the keys; anything else is a
+/// [`PluginError::SignatureRejected`] raised before the library is opened, so no
+/// plugin code, not even an initialiser, has run. On Linux the bytes that
+/// verified are the bytes loaded (see [`signing`]).
+#[cfg(feature = "plugin-signing")]
+pub fn load_plugin_verified(
+    path: impl AsRef<Path>,
+    reg: &mut Registry,
+    trusted: &TrustedKeys,
+    policy: CapabilityPolicy<'_>,
+) -> Result<(), PluginError> {
+    let path = path.as_ref();
+    if trusted.is_empty() {
+        return load_plugin_with_policy(path, reg, policy);
+    }
+    let bytes = std::fs::read(path).map_err(|e| PluginError::Open {
+        path: path.to_path_buf(),
+        message: e.to_string(),
+    })?;
+    signing::verify_plugin(path, &bytes, trusted).map_err(|error| {
+        PluginError::SignatureRejected {
+            path: path.to_path_buf(),
+            error,
+        }
+    })?;
+    let lib = signing::open_verified(path, &bytes)?;
+    load_opened(path, lib, reg, policy)
+}
+
+/// Everything after the library is open, shared by the verified and unverified
+/// entry points: probe v2, else fall back to the v1 tag pair.
+fn load_opened(
+    path: &Path,
+    lib: Library,
+    reg: &mut Registry,
+    policy: CapabilityPolicy<'_>,
+) -> Result<(), PluginError> {
     // v2 first: a plugin that exports the descriptor symbol is a v2 plugin and
     // never falls through to the v1 tag check.
     // SAFETY: we assert the symbol's type matches the SDK's exported static.
@@ -402,14 +508,16 @@ fn is_dylib(path: &Path) -> bool {
         .is_some_and(|e| e.eq_ignore_ascii_case(ext))
 }
 
-/// Load every dynamic library in `dir` (non-recursive), registering each into
-/// `reg`. Returns the loaded paths on success; the first per-file error aborts
-/// the scan. Files without this platform's library extension are skipped.
-pub fn load_plugin_dir(
-    dir: impl AsRef<Path>,
+/// One plugin load, so the directory and environment scans can be written once
+/// and differ only in whether they verify a signature. `reg` travels through the
+/// call rather than being captured, so the closure does not hold the borrow.
+type LoadOne<'a> = &'a mut dyn FnMut(&Path, &mut Registry) -> Result<(), PluginError>;
+
+fn scan_dir(
+    dir: &Path,
     reg: &mut Registry,
+    load: LoadOne<'_>,
 ) -> Result<Vec<PathBuf>, PluginError> {
-    let dir = dir.as_ref();
     let entries = std::fs::read_dir(dir).map_err(|e| PluginError::DirRead {
         path: dir.to_path_buf(),
         message: e.to_string(),
@@ -418,18 +526,14 @@ pub fn load_plugin_dir(
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_file() && is_dylib(&path) {
-            load_plugin(&path, reg)?;
+            load(&path, reg)?;
             loaded.push(path);
         }
     }
     Ok(loaded)
 }
 
-/// Scan every directory in the `G2G_PLUGIN_PATH` environment variable
-/// (`:`-separated on Unix, `;` on Windows, matching the OS path convention) and
-/// load the plugins found, registering them into `reg`. A no-op (returns an
-/// empty list) when the variable is unset. The first error aborts.
-pub fn load_from_env(reg: &mut Registry) -> Result<Vec<PathBuf>, PluginError> {
+fn scan_env(reg: &mut Registry, load: LoadOne<'_>) -> Result<Vec<PathBuf>, PluginError> {
     let Some(var) = std::env::var_os(PLUGIN_PATH_ENV) else {
         return Ok(Vec::new());
     };
@@ -438,9 +542,91 @@ pub fn load_from_env(reg: &mut Registry) -> Result<Vec<PathBuf>, PluginError> {
         if dir.as_os_str().is_empty() {
             continue;
         }
-        loaded.extend(load_plugin_dir(&dir, reg)?);
+        loaded.extend(scan_dir(&dir, reg, load)?);
     }
     Ok(loaded)
+}
+
+/// Whether `G2G_PLUGIN_TRUSTED_KEYS` names at least one key file. Only a build
+/// that cannot check them needs to ask.
+#[cfg(not(feature = "plugin-signing"))]
+fn trusted_keys_configured() -> bool {
+    std::env::var_os(TRUSTED_KEYS_ENV)
+        .is_some_and(|list| std::env::split_paths(&list).any(|p| !p.as_os_str().is_empty()))
+}
+
+/// The trust set named by `G2G_PLUGIN_TRUSTED_KEYS`, empty when the variable is
+/// unset. An unreadable or malformed key file is an error, never a silently
+/// smaller trust set.
+#[cfg(feature = "plugin-signing")]
+pub fn trusted_keys_from_env() -> Result<TrustedKeys, PluginError> {
+    let mut trusted = TrustedKeys::new();
+    if let Some(list) = std::env::var_os(TRUSTED_KEYS_ENV) {
+        trusted
+            .trust_key_files(&list)
+            .map_err(|error| PluginError::TrustedKeyFile { error })?;
+    }
+    Ok(trusted)
+}
+
+/// Load every dynamic library in `dir` (non-recursive), registering each into
+/// `reg`. Returns the loaded paths on success; the first per-file error aborts
+/// the scan. Files without this platform's library extension are skipped.
+pub fn load_plugin_dir(
+    dir: impl AsRef<Path>,
+    reg: &mut Registry,
+) -> Result<Vec<PathBuf>, PluginError> {
+    scan_dir(dir.as_ref(), reg, &mut |path, reg| load_plugin(path, reg))
+}
+
+/// [`load_plugin_dir`] with signature verification, on the rules
+/// [`load_plugin_verified`] documents.
+#[cfg(feature = "plugin-signing")]
+pub fn load_plugin_dir_verified(
+    dir: impl AsRef<Path>,
+    reg: &mut Registry,
+    trusted: &TrustedKeys,
+) -> Result<Vec<PathBuf>, PluginError> {
+    scan_dir(dir.as_ref(), reg, &mut |path, reg| {
+        load_plugin_verified(path, reg, trusted, &default_policy)
+    })
+}
+
+/// Scan every directory in the `G2G_PLUGIN_PATH` environment variable
+/// (`:`-separated on Unix, `;` on Windows, matching the OS path convention) and
+/// load the plugins found, registering them into `reg`. A no-op (returns an
+/// empty list) when the variable is unset. The first error aborts.
+///
+/// Signing keys named by `G2G_PLUGIN_TRUSTED_KEYS` are honoured: with the
+/// `plugin-signing` feature each plugin must then carry a signature from one of
+/// them, and without that feature a set variable is a hard error rather than an
+/// unverified load.
+pub fn load_from_env(reg: &mut Registry) -> Result<Vec<PathBuf>, PluginError> {
+    #[cfg(feature = "plugin-signing")]
+    {
+        let trusted = trusted_keys_from_env()?;
+        load_from_env_verified(reg, &trusted)
+    }
+    #[cfg(not(feature = "plugin-signing"))]
+    {
+        if trusted_keys_configured() {
+            return Err(PluginError::SigningUnsupported);
+        }
+        scan_env(reg, &mut |path, reg| load_plugin(path, reg))
+    }
+}
+
+/// [`load_from_env`] with a caller-supplied trust set instead of the one
+/// `G2G_PLUGIN_TRUSTED_KEYS` names, for a host that also takes keys on its
+/// command line.
+#[cfg(feature = "plugin-signing")]
+pub fn load_from_env_verified(
+    reg: &mut Registry,
+    trusted: &TrustedKeys,
+) -> Result<Vec<PathBuf>, PluginError> {
+    scan_env(reg, &mut |path, reg| {
+        load_plugin_verified(path, reg, trusted, &default_policy)
+    })
 }
 
 #[cfg(test)]
