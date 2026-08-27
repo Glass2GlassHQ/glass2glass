@@ -325,6 +325,8 @@ fn bytestream_to_u8(e: ByteStreamEncoding) -> u8 {
         ByteStreamEncoding::MpegPs => 7,
         ByteStreamEncoding::Wav => 8,
         ByteStreamEncoding::Avi => 9,
+        ByteStreamEncoding::Y4m => 10,
+        ByteStreamEncoding::Multipart => 11,
     }
 }
 fn bytestream_from_u8(v: u8) -> Result<ByteStreamEncoding, WireError> {
@@ -339,6 +341,8 @@ fn bytestream_from_u8(v: u8) -> Result<ByteStreamEncoding, WireError> {
         7 => ByteStreamEncoding::MpegPs,
         8 => ByteStreamEncoding::Wav,
         9 => ByteStreamEncoding::Avi,
+        10 => ByteStreamEncoding::Y4m,
+        11 => ByteStreamEncoding::Multipart,
         _ => return Err(WireError::BadTag),
     })
 }

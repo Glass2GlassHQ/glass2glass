@@ -309,7 +309,7 @@ static HTTPSRC_PROPS: &[PropertySpec] = &[
     PropertySpec::new(
         "bytestream-format",
         PropKind::Str,
-        "container of the fetched byte stream: mpegts | matroska | ogg | flv",
+        "container of the fetched byte stream: mpegts | matroska | ogg | flv | multipart",
     ),
     PropertySpec::new(
         "prebuffer-bytes",
@@ -327,6 +327,7 @@ fn encoding_from_str(s: &str) -> Option<ByteStreamEncoding> {
         "ogg" | "opus" => Some(ByteStreamEncoding::Ogg),
         "flv" => Some(ByteStreamEncoding::Flv),
         "mp4" | "isobmff" | "cmaf" | "fmp4" => Some(ByteStreamEncoding::IsoBmff),
+        "multipart" | "mpjpeg" => Some(ByteStreamEncoding::Multipart),
         _ => None,
     }
 }
@@ -338,6 +339,7 @@ fn encoding_to_str(encoding: ByteStreamEncoding) -> &'static str {
         ByteStreamEncoding::Ogg => "ogg",
         ByteStreamEncoding::Flv => "flv",
         ByteStreamEncoding::IsoBmff => "mp4",
+        ByteStreamEncoding::Multipart => "multipart",
         ByteStreamEncoding::Mp4 => "mp4",
         _ => unreachable!("httpsrc encoding is set only via encoding_from_str"),
     }

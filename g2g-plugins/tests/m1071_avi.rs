@@ -19,7 +19,7 @@
 //!
 //! No expected value is typed into this file: geometry, codec, framerate,
 //! sample rate, channel count, per-stream frame counts, keyframe positions and
-//! the container tags are all read back from `ffprobe` when the test runs.
+//! the container tags are all read from the checked-in `ffprobe` output beside each fixture.
 //! `ffprobe -of flat` carries the same fields as `-of json` as `key=value`
 //! lines, which this parses without a JSON dependency in the test crate.
 //!
@@ -87,7 +87,20 @@ impl Probe {
             path.display(),
             String::from_utf8_lossy(&output.stderr)
         );
-        let entries = String::from_utf8_lossy(&output.stdout)
+        Probe::parse(&String::from_utf8_lossy(&output.stdout))
+    }
+
+    /// The checked-in `ffprobe -of flat -show_streams -show_format -count_frames
+    /// -count_packets` output of a fixture (`<name>.probe`), so the test needs no
+    /// ffprobe on the machine running it.
+    fn of_fixture(name: &str) -> Probe {
+        let text = std::fs::read_to_string(fixture(&format!("{name}.probe")))
+            .unwrap_or_else(|e| panic!("{name}.probe is checked in beside the fixture: {e}"));
+        Probe::parse(&text)
+    }
+
+    fn parse(text: &str) -> Probe {
+        let entries = text
             .lines()
             .filter_map(|line| line.split_once('='))
             .map(|(k, v)| (k.to_string(), v.trim_matches('"').to_string()))
@@ -146,24 +159,13 @@ impl Probe {
         NANOS_PER_SECOND * den / num
     }
 
-    /// How many packets of a stream ffprobe flags as keyframes: the `idx1`
-    /// `AVIIF_KEYFRAME` bits, read through a reference demuxer.
-    fn keyframe_packets(path: &Path, index: usize) -> usize {
-        let output = Command::new("ffprobe")
-            .args(["-v", "error", "-select_streams"])
-            .arg(index.to_string())
-            .args([
-                "-show_entries",
-                "packet=flags",
-                "-of",
-                "csv=p=0",
-                "-read_intervals",
-                "%+#100000",
-            ])
-            .arg(path)
-            .output()
-            .expect("ffprobe runs");
-        String::from_utf8_lossy(&output.stdout)
+    /// How many video packets ffprobe flags as keyframes: the `idx1`
+    /// `AVIIF_KEYFRAME` bits read through a reference demuxer, checked in as
+    /// `<name>.video_flags` (`ffprobe -select_streams 0 -show_entries
+    /// packet=flags -of csv=p=0`).
+    fn keyframe_packets(name: &str) -> usize {
+        std::fs::read_to_string(fixture(&format!("{name}.video_flags")))
+            .unwrap_or_else(|e| panic!("{name}.video_flags is checked in beside the fixture: {e}"))
             .lines()
             .filter(|line| line.starts_with('K'))
             .count()
@@ -309,7 +311,7 @@ fn audio_stream_name(probe: &Probe) -> &'static str {
 fn demuxes_each_fixture_to_the_streams_ffprobe_reports() {
     for name in [MJPEG_PCM, H264_MP3] {
         let path = fixture(name);
-        let probe = Probe::of(&path);
+        let probe = Probe::of_fixture(name);
         let bytes = std::fs::read(&path).expect("the fixture is checked in");
         let sink = demux(&bytes);
 
@@ -393,7 +395,7 @@ fn demuxes_each_fixture_to_the_streams_ffprobe_reports() {
                 .iter()
                 .filter(|t| t.keyframe)
                 .count(),
-            Probe::keyframe_packets(&path, VIDEO_INDEX),
+            Probe::keyframe_packets(name),
             "{name}: keyframe count matches idx1"
         );
         assert!(
@@ -407,7 +409,7 @@ fn demuxes_each_fixture_to_the_streams_ffprobe_reports() {
 async fn a_launch_line_demuxes_each_stream_and_the_fan_out() {
     for name in [MJPEG_PCM, H264_MP3] {
         let path = fixture(name);
-        let probe = Probe::of(&path);
+        let probe = Probe::of_fixture(name);
         let location = path.display();
         let video = probe.packets(VIDEO_INDEX);
         let audio = probe.packets(AUDIO_INDEX);
@@ -439,7 +441,7 @@ async fn a_launch_line_demuxes_each_stream_and_the_fan_out() {
 #[tokio::test]
 async fn types_an_avi_by_content_and_auto_plugs_the_demuxer() {
     let path = fixture(MJPEG_PCM);
-    let probe = Probe::of(&path);
+    let probe = Probe::of_fixture(MJPEG_PCM);
     let bytes = std::fs::read(&path).expect("the fixture is checked in");
 
     // The RIFF `AVI ` magic alone types the stream.
@@ -518,7 +520,7 @@ async fn a_mux_round_trip_preserves_every_chunk() {
 #[test]
 fn posts_the_container_tags_ffprobe_reports() {
     let path = fixture(MJPEG_PCM);
-    let probe = Probe::of(&path);
+    let probe = Probe::of_fixture(MJPEG_PCM);
     let bytes = std::fs::read(&path).expect("the fixture is checked in");
     let tags = g2g_plugins::avidemux::probe_tags(&bytes).expect("the file parses");
     for (key, field) in [

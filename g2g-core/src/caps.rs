@@ -577,6 +577,8 @@ fn bytestream_gst_media_type(e: ByteStreamEncoding) -> &'static str {
         ByteStreamEncoding::MpegPs => "video/mpeg",
         ByteStreamEncoding::Wav => "audio/x-wav",
         ByteStreamEncoding::Avi => "video/x-msvideo",
+        ByteStreamEncoding::Y4m => "application/x-yuv4mpeg",
+        ByteStreamEncoding::Multipart => "multipart/x-mixed-replace",
     }
 }
 
@@ -1069,6 +1071,15 @@ pub enum ByteStreamEncoding {
     /// stream per `strl` and a `movi` list of the interleaved data chunks, with
     /// an `idx1` at the end. Demuxed by `avidemux`, written by `avimux`.
     Avi,
+    /// YUV4MPEG2 (`.y4m`): a `YUV4MPEG2 W.. H.. F..` text header then a `FRAME`
+    /// line before each frame's planes. The uncompressed video counterpart of
+    /// WAV, and what encoders and quality tools exchange raw frames in.
+    Y4m,
+    /// MIME multipart (`multipart/x-mixed-replace`, RFC 2046): a `--boundary`
+    /// line, MIME headers, and a body, repeated. What an IP camera or an
+    /// `mjpg-streamer`-style server pushes MJPEG over HTTP with, demuxed by
+    /// `multipartdemux` and written by `multipartmux`.
+    Multipart,
 }
 
 /// Format of a [`Caps::Text`] stream. Generalizes "subtitles": a `Text` link

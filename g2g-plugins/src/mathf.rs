@@ -2,6 +2,10 @@
 //! sine (Bhaskara I's approximation, max error ~0.0016) covers the elements that
 //! need a little trig (test-signal synthesis, hue rotation) without pulling a
 //! math dep into the baseline.
+//!
+//! The f64 group below ([`sin`], [`exp`], [`asinh`] and friends) is accurate to
+//! within a few ULP instead: filter coefficients need that, since an error of a
+//! part in a thousand in a kernel tap lifts a stop band to -60 dB.
 
 /// sin(2*pi*t) for any real `t` (reduced modulo one turn), via Bhaskara I.
 pub(crate) fn sin_turns(t: f32) -> f32 {
@@ -121,6 +125,149 @@ pub(crate) fn powf(x: f64, y: f64) -> f64 {
     exp2(y * log2(x))
 }
 
+/// e^y, via `exp2(y * log2(e))`.
+pub(crate) fn exp(y: f64) -> f64 {
+    exp2(y * LOG2_E)
+}
+
+/// ln(x) for x > 0 (returns 0 for x <= 0).
+pub(crate) fn ln(x: f64) -> f64 {
+    log2(x) * LN2
+}
+
+/// Round to the nearest integer, halves away from zero.
+fn round_to_i64(v: f64) -> i64 {
+    if v >= 0.0 {
+        (v + 0.5) as i64
+    } else {
+        (v - 0.5) as i64
+    }
+}
+
+/// sin(x) in radians. The angle is first reduced by whole turns, which costs the
+/// low bits of very large arguments, then evaluated by its Taylor series.
+pub(crate) fn sin(x: f64) -> f64 {
+    let turns = round_to_i64(x / core::f64::consts::TAU);
+    let r = x - turns as f64 * core::f64::consts::TAU;
+    let r2 = r * r;
+    let mut term = r;
+    let mut sum = 0.0;
+    let mut n = 1.0;
+    for _ in 0..16 {
+        sum += term;
+        term *= -r2 / ((n + 1.0) * (n + 2.0));
+        n += 2.0;
+    }
+    sum
+}
+
+/// cos(x) in radians.
+pub(crate) fn cos(x: f64) -> f64 {
+    sin(x + core::f64::consts::FRAC_PI_2)
+}
+
+/// tan(x) in radians (infinite at the poles).
+pub(crate) fn tan(x: f64) -> f64 {
+    sin(x) / cos(x)
+}
+
+pub(crate) fn sinh(x: f64) -> f64 {
+    0.5 * (exp(x) - exp(-x))
+}
+
+pub(crate) fn cosh(x: f64) -> f64 {
+    0.5 * (exp(x) + exp(-x))
+}
+
+/// asinh(x) = ln(x + sqrt(x^2 + 1)), evaluated on |x| so a negative argument
+/// does not cancel the two terms against each other.
+pub(crate) fn asinh(x: f64) -> f64 {
+    let a = x.abs();
+    let r = ln(a + sqrt(a * a + 1.0));
+    if x < 0.0 {
+        -r
+    } else {
+        r
+    }
+}
+
+/// Largest integer not above `x` (core has no `f64::floor`). The `i64` cast
+/// saturates, so a magnitude past `i64::MAX` comes back clamped.
+pub(crate) fn floor(x: f64) -> f64 {
+    let truncated = x as i64 as f64;
+    if x < truncated {
+        truncated - 1.0
+    } else {
+        truncated
+    }
+}
+
+/// Smallest integer not below `x`.
+pub(crate) fn ceil(x: f64) -> f64 {
+    let truncated = x as i64 as f64;
+    if x > truncated {
+        truncated + 1.0
+    } else {
+        truncated
+    }
+}
+
+#[cfg(test)]
+mod transcendental_tests {
+    use super::{asinh, cos, cosh, exp, ln, sin, sinh, tan};
+
+    #[test]
+    fn sin_cos_match_known_angles() {
+        let pi = core::f64::consts::PI;
+        assert!(sin(0.0).abs() < 1e-12);
+        assert!((sin(pi / 6.0) - 0.5).abs() < 1e-12);
+        assert!((sin(pi / 2.0) - 1.0).abs() < 1e-12);
+        assert!(sin(pi).abs() < 1e-12);
+        assert!((cos(0.0) - 1.0).abs() < 1e-12);
+        assert!((cos(pi) + 1.0).abs() < 1e-12);
+        // an argument many turns out still reduces.
+        assert!((sin(100.0 * pi + pi / 6.0) - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn sin_squared_plus_cos_squared_is_one() {
+        for step in 0..64 {
+            let x = -8.0 + step as f64 * 0.25;
+            let s = sin(x);
+            let c = cos(x);
+            assert!((s * s + c * c - 1.0).abs() < 1e-12, "at {x}");
+        }
+    }
+
+    #[test]
+    fn tan_matches_the_ratio() {
+        let x = 0.5;
+        assert!((tan(x) - sin(x) / cos(x)).abs() < 1e-15);
+        // tan(pi/4) == 1.
+        assert!((tan(core::f64::consts::FRAC_PI_4) - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn exp_and_ln_round_trip() {
+        assert!((exp(0.0) - 1.0).abs() < 1e-12);
+        assert!((exp(1.0) - core::f64::consts::E).abs() < 1e-12);
+        assert!((ln(core::f64::consts::E) - 1.0).abs() < 1e-12);
+        for &x in &[0.1f64, 1.0, 7.5, 1000.0] {
+            assert!((exp(ln(x)) - x).abs() < 1e-9 * x, "at {x}");
+        }
+    }
+
+    #[test]
+    fn hyperbolics_satisfy_their_identities() {
+        for &x in &[0.0f64, 0.3, 1.7, -2.5] {
+            let s = sinh(x);
+            let c = cosh(x);
+            assert!((c * c - s * s - 1.0).abs() < 1e-9, "at {x}");
+            assert!((asinh(s) - x).abs() < 1e-9, "at {x}");
+        }
+    }
+}
+
 #[cfg(test)]
 mod sqrt_tests {
     use super::{exp2, log2, powf, sqrt};
@@ -180,5 +327,16 @@ mod tests {
         }
         // a multi-turn argument wraps to its fractional part.
         assert!((sin_turns(3.25) - sin_turns(0.25)).abs() < 1e-4);
+    }
+
+    #[test]
+    fn floor_and_ceil_bracket_a_fraction() {
+        assert_eq!(floor(2.5), 2.0);
+        assert_eq!(ceil(2.5), 3.0);
+        assert_eq!(floor(-0.45), -1.0);
+        assert_eq!(ceil(-0.45), 0.0);
+        // an exact integer is its own floor and ceiling.
+        assert_eq!(floor(-3.0), -3.0);
+        assert_eq!(ceil(-3.0), -3.0);
     }
 }

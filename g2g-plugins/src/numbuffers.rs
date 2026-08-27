@@ -29,6 +29,7 @@ pub(crate) fn get_num_buffers(limit: u64) -> PropValue {
     feature = "rtsp-server",
     feature = "srt",
     feature = "tcp",
+    feature = "shm",
     feature = "udp-ingress",
     feature = "v4l2",
     feature = "mf-video-src",

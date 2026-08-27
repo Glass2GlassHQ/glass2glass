@@ -203,6 +203,17 @@ jobs:
       # the launch registration. The gst interop legs are ignored here.
       - name: test g2g-plugins (tcp)
         run: cargo test -p g2g-plugins --locked --features tcp --test m1068_tcp
+      - name: test g2g-plugins (raw udp)
+        run: cargo test -p g2g-plugins --locked --features udp-ingress,udp-egress --test m1079_raw_udp
+      # Shared-memory IPC pair (M1081): the two loopbacks over one control
+      # socket and the command codec. The gst interop legs are ignored here.
+      - name: test g2g-plugins (shm)
+        run: cargo test -p g2g-plugins --locked --features shm --test m1081_shm
+      # Debug and test elements (M1083): the byte corrupters, the digest sink and
+      # the fps reporter. `std` builds the registry the fps sink takes its child
+      # from, so the file is gated on it.
+      - name: test g2g-plugins (debug elements)
+        run: cargo test -p g2g-plugins --locked --features std --test m1083_debug_elements
       # Opus encode properties + codec round-trip (M177 / M454 / M868): the
       # feature set above is only checked, so the opus-gated tests run here.
       - name: test g2g-plugins (opus codec + properties)

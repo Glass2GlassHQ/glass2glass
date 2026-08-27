@@ -25,7 +25,7 @@ default = []
 # explicitly), and the no_std `embassy*` RTOS backends.
 linux-full = [
     "multi-thread", "plugin-loader", "plugin-signing",
-    "rtsp", "rtsp-server", "srt", "tcp", "udp-egress", "udp-ingress", "rtmp", "webrtc",
+    "rtsp", "rtsp-server", "srt", "tcp", "shm", "udp-egress", "udp-ingress", "rtmp", "webrtc",
     "remote", "remote-ws", "webtransport", "moqt",
     "http-src", "hls", "dash",
     "ffmpeg", "vaapi", "v4l2",
@@ -75,7 +75,7 @@ rtsp-server = ["std", "tokio/net", "tokio/io-util", "tokio/macros"]
 # MPEG-TS byte stream over UDP, with the HSv5 handshake + NAK-based ARQ. The sans-IO
 # `srt` wire/handshake/reliability layer is always compiled; only the tokio UDP
 # elements need this. Implies std + tokio net.
-srt = ["std", "tokio/net", "dep:aes", "dep:ctr", "dep:sha1", "dep:hmac", "dep:pbkdf2", "dep:aes-kw", "dep:getrandom"]
+srt = ["std", "tokio/net", "dep:aes", "dep:ctr", "dep:hmac", "dep:pbkdf2", "dep:aes-kw", "dep:getrandom"]
 # UDP egress sink (M47): drives the sans-IO RtpH264Packetizer (M46) and sends
 # the RTP packets over a tokio UdpSocket. The I/O half of the live-egress path;
 # implies std and adds tokio's net feature. RTCP + RTSP ANNOUNCE/RECORD owed.
@@ -84,7 +84,7 @@ udp-egress = ["std", "tokio/net"]
 # and streams the demuxed FLV byte stream for `flvdemux`. The `rtmp` sans-IO
 # protocol module is pure no_std and always compiled; only the tokio TCP element
 # needs this feature. Implies std + tokio net/io-util.
-rtmp = ["std", "tokio/net", "tokio/io-util", "dep:sha2", "dep:hmac", "dep:getrandom"]
+rtmp = ["std", "tokio/net", "tokio/io-util", "dep:hmac", "dep:getrandom"]
 # UDP ingress source (M91): UdpSrc receives RTP on a tokio UdpSocket and
 # depayloads H.264 to Annex-B access units, with caps taken from a published SDP
 # or the stream's SPS. Implies std and adds tokio's net feature.
@@ -94,6 +94,11 @@ udp-ingress = ["std", "tokio/net"]
 # plugin. They carry raw bytes with no framing of their own, so any peer that
 # speaks a socket can sit on the other end. Implies std + tokio net/io-util.
 tcp = ["std", "tokio/net", "tokio/io-util"]
+# Shared-memory IPC pair (M1081): ShmSink / ShmSrc speak the `shmpipe` protocol
+# of GStreamer's `shm` plugin, a unix control socket plus a POSIX shm area, so
+# either end can be a gst `shmsink` / `shmsrc`. Unix only; libc supplies the
+# shm_open / mmap calls. Implies std + tokio net/io-util.
+shm = ["std", "dep:libc", "tokio/net", "tokio/io-util"]
 # Distributed-graph transport pair (M551): RemoteSink (TCP client, egress) +
 # RemoteSrc (TCP listener, ingress) serialize the whole PipelinePacket stream
 # via g2g-core's wire codec and ship it over TCP, so any graph edge can be cut
@@ -149,7 +154,7 @@ tui = ["std", "tokio/time", "tokio/macros", "dep:ratatui"]
 # system dep. WHIP signaling (HTTP offer/answer) reuses reqwest. Implies std +
 # tokio. str0m 0.22 requires rustc 1.85, within the workspace MSRV; the feature
 # is off by default, so the no_std baseline is unaffected.
-webrtc = ["std", "tokio/net", "tokio/time", "tokio/macros", "tokio/io-util", "dep:str0m", "dep:reqwest", "dep:sha1", "dep:hmac", "dep:md-5", "dep:tokio-native-tls"]
+webrtc = ["std", "tokio/net", "tokio/time", "tokio/macros", "tokio/io-util", "dep:str0m", "dep:reqwest", "dep:hmac", "dep:tokio-native-tls"]
 # Native LiveKit publisher (LiveKitSink, T4): joins a LiveKit room and publishes
 # H.264 (+ optional Opus) over the str0m PeerConnection, with a hand-rolled
 # WebSocket + protobuf signaller (livekit_rtc.proto subset) and an HS256 JWT
@@ -157,14 +162,14 @@ webrtc = ["std", "tokio/net", "tokio/time", "tokio/macros", "tokio/io-util", "de
 # (tokio-tungstenite, shared with remote-ws) + JWT crypto (sha2 + base64). Implies
 # std. `wss://` (LiveKit Cloud) works natively: tungstenite's native-tls is the
 # same TLS stack reqwest (the `webrtc` WHIP client) already links.
-webrtc-livekit = ["webrtc", "dep:tokio-tungstenite", "tokio-tungstenite/native-tls", "futures-util/sink", "dep:sha2", "dep:base64"]
+webrtc-livekit = ["webrtc", "dep:tokio-tungstenite", "tokio-tungstenite/native-tls", "futures-util/sink", "dep:base64"]
 # ONVIF camera discovery + RTSP stream-URI resolution (OnvifSrc). Hand-rolled
 # WS-Discovery Probe (UDP multicast) and the two media SOAP calls
 # (GetProfiles / GetStreamUri) with a WS-Security UsernameToken digest header.
 # Reuses reqwest for the SOAP HTTP POST, roxmltree to read the responses, sha1
 # for the password digest, getrandom for the nonce, and base64. Resolves a URI
 # then delegates to RtspSrc (so it implies the `rtsp` feature). Implies std.
-onvif = ["std", "rtsp", "tokio/net", "dep:reqwest", "dep:roxmltree", "dep:sha1", "dep:getrandom", "dep:base64"]
+onvif = ["std", "rtsp", "tokio/net", "dep:reqwest", "dep:roxmltree", "dep:getrandom", "dep:base64"]
 # Windows hardware/software H.264 decode via the Media Foundation H.264 Decoder
 # MFT (IMFTransform). Pulls the windows crate; Windows-only, implies std.
 mf-decode = ["std", "dep:windows"]
@@ -835,16 +840,23 @@ cbc = { version = "0.1", optional = true }
 # (PBKDF2-HMAC-SHA1), and RFC 3394 AES key wrap for the stream key exchanged in
 # the KM handshake extension. Same cipher-0.4 line as the HLS aes/cbc above.
 ctr = { version = "0.9", optional = true }
-sha1 = { version = "0.10", optional = true }
-# SHA-256 for the RTMP "genuine FMS/FP" digest handshake (rtmp feature): the
-# C1/S1 HMAC-SHA256 digest + the C2 signature strict CDNs require.
-sha2 = { version = "0.10", optional = true }
+# The three RustCrypto digests below are the `hash` values `checksumsink` offers,
+# so none of them is optional any more and no feature list names them.
+# `default-features = false` drops their `std`, which is what keeps that sink in
+# the no_std baseline.
+# SHA-1 also derives the SRT KEK (PBKDF2-HMAC-SHA1) and the ONVIF WS-Security
+# password digest.
+sha1 = { version = "0.10", default-features = false }
+# SHA-256 also signs the RTMP "genuine FMS/FP" digest handshake (rtmp feature):
+# the C1/S1 HMAC-SHA256 digest + the C2 signature strict CDNs require. SHA-512
+# comes from the same crate.
+sha2 = { version = "0.10", default-features = false }
 hmac = { version = "0.12", optional = true }
 pbkdf2 = { version = "0.12", optional = true, default-features = false }
-# MD5 for the TURN long-term credential key MD5(username:realm:password) (RFC
-# 5766/8656), used by the webrtc feature's TURN client. RustCrypto `md-5` (lib
+# MD5 also builds the TURN long-term credential key MD5(username:realm:password)
+# (RFC 5766/8656) the webrtc feature's TURN client sends. RustCrypto `md-5` (lib
 # name `md5`), distinct from the unrelated `md5` 0.7 crate elsewhere in the tree.
-md-5 = { version = "0.10", optional = true }
+md-5 = { version = "0.10", default-features = false }
 aes-kw = { version = "0.2", optional = true, features = ["alloc"] }
 # OS RNG for the random stream key + salt the SRT caller generates, and the
 # WS-Security nonce the ONVIF UsernameToken digest needs.

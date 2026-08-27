@@ -25,12 +25,11 @@ use g2g_core::{
     PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
 
+use crate::bytestream::TS_DATAGRAM_PAYLOAD;
 use crate::filesink::io_err;
 use crate::srt::{self, LiveCc, SrtHandshake, SrtSender, CC_DEFAULT_OVERHEAD};
 use crate::srtcrypto::{AesKeySize, SrtCrypto, KM_KK_EVEN};
 
-/// Max SRT payload bytes per packet: 7 x 188-byte TS packets, the SRT default.
-const SRT_PAYLOAD: usize = 1316;
 /// Our SRT socket id (caller).
 const CALLER_SOCKET_ID: u32 = 0x6732_7363; // "g2sc"
 /// Initial data sequence number.
@@ -433,7 +432,7 @@ impl AsyncElement for SrtSink {
                     let mut sent = Vec::new();
                     {
                         let sender = self.sender.as_mut().ok_or(G2gError::NotConfigured)?;
-                        for chunk in bytes.chunks(SRT_PAYLOAD) {
+                        for chunk in bytes.chunks(TS_DATAGRAM_PAYLOAD) {
                             sent.push(sender.send(chunk, timestamp));
                         }
                     }

@@ -39,6 +39,7 @@ pub(crate) fn fuzz_block_on<F: core::future::Future>(f: F) -> F::Output {
 
 pub mod aacparse;
 // IMA ADPCM codec elements (M1073), wrapping the heap-free `g2g-mcu` block math.
+pub mod ac3parse;
 pub mod adpcm;
 // Native FLAC stream parser (M774): frame-splits a `.flac` byte stream (the
 // re-framing `h264parse` analog for audio) and refines caps from STREAMINFO.
@@ -50,23 +51,50 @@ pub mod g711;
 pub mod appsink;
 pub mod appsrc;
 pub mod audioamplify;
+pub mod audiobuffersplit;
+pub mod audiochannelmix;
+pub mod audiochebband;
+pub mod audiocheblimit;
 pub mod audioconvert;
+pub mod audiodynamic;
 pub mod audioecho;
+pub mod audiofirfilter;
+// Filter kernels the audiofx transforms share (windowed-sinc FIR, Chebyshev
+// IIR) plus their common PCM boundary.
+pub mod audiofx;
+pub mod audioiirfilter;
+pub mod audioinvert;
+pub mod audiokaraoke;
 pub mod audiomixer;
+pub mod audiomixmatrix;
 pub mod audiopanorama;
 pub mod audiorate;
 pub mod audioresample;
 pub mod audiotestsrc;
+pub mod audiowsincband;
+pub mod audiowsinclimit;
 pub mod av1parse;
 pub mod avoffset;
+// Byte corrupter: overwrites bytes at random, to prove a parser survives them.
+pub mod breakmydata;
 pub mod capsfilter;
+// Caps rewriter: overwrites the caps travelling with a stream, data untouched.
+pub mod capssetter;
 // What a capture source's pixel format means on a link, shared by the capture
 // sources so their fourcc tables map to one set of caps.
 pub mod capturepixelformat;
+// Buffer digests, for checking a codec change is bit-exact.
+pub mod checksumsink;
+// Byte-stream re-chunker: step-aligned random buffer sizes.
+pub mod chopmydata;
 pub mod concat;
 pub mod cutter;
 pub mod deinterleave;
 pub mod equalizer;
+// Pass-through that turns a failure from downstream into a dropped buffer.
+pub mod errorignore;
+// The media-typed fake sinks: raw video only, raw audio only.
+pub mod fakemediasink;
 pub mod fakesink;
 pub mod fakesrc;
 // Decoded-GOP reverser (M897): the presentation half of reverse playback.
@@ -87,8 +115,20 @@ pub mod outputselector;
 pub mod poc;
 pub mod progressreport;
 pub mod scaletempo;
+// Deterministic pseudo-randomness shared by the test / debug elements.
+mod random;
+// Byte re-chunking shared by the random / step-aligned buffer-size transforms.
+mod rechunk;
+// Byte-stream re-chunker: random buffer sizes, for shaking out parsers that
+// depend on where their input is cut.
+pub mod removesilence;
+pub mod rndbuffersize;
 pub mod spectrum;
+pub mod speed;
+pub mod stereo;
 pub mod streamdemux;
+// Bus tag injector: posts a hand-written tag list for a stream that carries none.
+pub mod taginject;
 pub mod tsmuxn;
 // Closable pass-through: drops data while `drop=true`, for muting one tee branch.
 pub mod valve;
@@ -145,10 +185,15 @@ pub mod vellooverlay;
 // GPU presentation sink (M103): presents MemoryDomain::WgpuTexture frames by
 // blitting onto an offscreen target or a caller-provided wgpu::Surface.
 pub mod alpha;
+pub mod aspectratiocrop;
+pub mod chromahold;
 #[cfg(feature = "std")]
 pub mod clockoverlay;
+pub mod coloreffects;
 pub mod deinterlace;
 pub mod gamma;
+pub mod gaussianblur;
+pub mod smooth;
 pub mod tensorconvert;
 pub mod timeoverlay;
 pub mod videobalance;
@@ -156,11 +201,19 @@ pub mod videobox;
 pub mod videoconvert;
 pub mod videoconvertscale;
 pub mod videocrop;
+pub mod videodiff;
 pub mod videoflip;
+// Shared negotiation and frame loop behind the CPU video-effect transforms.
+pub(crate) mod videofx;
+pub mod videomedian;
 pub mod videorate;
 pub mod videoscale;
 pub mod wavenc;
 pub mod wavparse;
+pub mod zebrastripe;
+// MIME multipart (`multipart/x-mixed-replace`) reader + writer: the MJPEG-over-
+// HTTP transport an IP camera pushes.
+pub mod multipart;
 // wgpu compute companion to `compositor` (M853): RGBA8 fan-in blending in one
 // compute dispatch, System or MemoryDomain::WgpuTexture out. Shares the wgpu
 // GPU feature with the sink that consumes its textures.
@@ -172,6 +225,9 @@ pub mod wgpusink;
 // xdg_toplevel, builds the wgpu::Surface over it, and drives WgpuSink on it.
 #[cfg(all(target_os = "linux", feature = "wgpu-present"))]
 pub mod wgpupresent;
+// YUV4MPEG2 (`.y4m`) reader + writer: raw planar YUV in a file, WAV's video
+// counterpart.
+pub mod y4m;
 // Subtitle cue parsing (SRT / WebVTT) and the embedded bitmap font, both no_std,
 // feeding the `textoverlay` element below.
 pub mod bitmapfont;
@@ -458,10 +514,18 @@ pub mod clock;
 // an as-fast-as-possible upstream into a live-paced stream.
 #[cfg(feature = "std")]
 pub mod clocksync;
+// Stall detector: fails the run when no data crosses it within `timeout`. std
+// because the deadline is wall time and the timer is a tokio task.
 #[cfg(feature = "std")]
 pub mod filesink;
 #[cfg(feature = "std")]
 pub mod filesrc;
+#[cfg(feature = "std")]
+pub mod watchdog;
+// Frame-rate reporter around a child display sink. std (it reads a clock and
+// builds its child through the Registry).
+#[cfg(feature = "std")]
+pub mod fpsdisplaysink;
 // Raw file-descriptor source and sink: unix only, a `RawFd` is what the `fd`
 // property names.
 #[cfg(all(feature = "std", unix))]
@@ -601,6 +665,15 @@ pub mod udpsrc;
 #[cfg(feature = "tcp")]
 pub mod tcp;
 
+// Shared-memory IPC pair (M1081): ShmSink serves frames through a POSIX shm
+// area announced over a unix control socket, ShmSrc maps that area and copies
+// each announced block out. The wire is GStreamer's shmpipe protocol, so either
+// end can be a gst shmsink / shmsrc.
+#[cfg(all(unix, feature = "shm"))]
+pub mod shm;
+#[cfg(all(unix, feature = "shm"))]
+pub mod shmpipe;
+
 // Distributed-graph transport pair (M551): RemoteSink (TCP client) serializes
 // the PipelinePacket stream (g2g-core wire codec) and RemoteSrc (TCP listener)
 // reconstructs it, so any graph edge can be cut and the downstream subgraph run
@@ -677,6 +750,17 @@ pub mod remotetransform;
     feature = "udp-egress",
 ))]
 mod netprop;
+
+// Shared byte-stream carrier pieces (M1068, M1079): the frame shape a received
+// chunk takes, the MPEG-TS packet geometry a datagram is cut on, and the
+// container list a raw wire sink advertises.
+#[cfg(any(
+    feature = "tcp",
+    feature = "srt",
+    feature = "udp-ingress",
+    feature = "udp-egress",
+))]
+pub mod bytestream;
 
 // WebSocket sibling of the M551 pair (M554): RemoteWsSink (WebSocket client) +
 // RemoteWsSrc (WebSocket server) carry the same wire-codec PipelinePacket stream,

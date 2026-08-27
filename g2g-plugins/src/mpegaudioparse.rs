@@ -36,7 +36,9 @@ use g2g_core::{
     PadTemplate, PadTemplates, PipelinePacket, TagList,
 };
 
-use crate::audioframe::{mpa_header, MpaHeader, MpaLayer, MpaVersion, MPA_HEADER_LEN};
+use crate::audioframe::{
+    locate_frame, mpa_header, Located, MpaHeader, MpaLayer, MpaVersion, MPA_HEADER_LEN,
+};
 use crate::id3::{id3v2_len, parse_id3v1, parse_id3v2, ID3V1_LEN, ID3V2_HEADER_LEN};
 
 /// Nanoseconds per second, the presentation-time unit.
@@ -55,13 +57,6 @@ const VBRI_OFFSET: usize = 36;
 /// stream, `Info` on a constant-bitrate one.
 const XING_TAGS: [&[u8; 4]; 2] = [b"Xing", b"Info"];
 const VBRI_TAG: &[u8; 4] = b"VBRI";
-
-/// Where the next frame starts and how long it is, or that the buffer does not
-/// yet hold enough to say.
-enum Located {
-    Frame { start: usize, len: usize },
-    NeedMore,
-}
 
 /// # Example
 ///
@@ -197,7 +192,8 @@ impl MpegAudioParse {
             } else {
                 self.buf.len().saturating_sub(ID3V1_LEN)
             };
-            let Located::Frame { start, len } = locate_frame(&self.buf[..limit], eos) else {
+            let Located::Frame { start, len } = locate_frame::<MpaHeader>(&self.buf[..limit], eos)
+            else {
                 return Ok(());
             };
             if start > 0 {
@@ -277,41 +273,6 @@ fn audio_format(layer: MpaLayer) -> AudioFormat {
         MpaLayer::Three => AudioFormat::Mp3,
         _ => AudioFormat::Mp2,
     }
-}
-
-/// Find the next frame in `buf`, confirming a candidate header against the one
-/// at its frame length: a stray `0xFFE` in audio data is common, and a
-/// mis-framed buffer feeds the decoder noise. At `eos` the last frame has no
-/// successor to confirm it against, so a complete frame at the end of the
-/// stream is taken as it stands and a truncated one is left behind.
-fn locate_frame(buf: &[u8], eos: bool) -> Located {
-    let mut start = 0;
-    while start + MPA_HEADER_LEN <= buf.len() {
-        let Some(header) = mpa_header(&buf[start..]) else {
-            start += 1;
-            continue;
-        };
-        let end = start + header.frame_len;
-        if end + MPA_HEADER_LEN > buf.len() {
-            if eos && end <= buf.len() {
-                return Located::Frame {
-                    start,
-                    len: header.frame_len,
-                };
-            }
-            return Located::NeedMore;
-        }
-        match mpa_header(&buf[end..]) {
-            Some(next) if next.same_stream(&header) => {
-                return Located::Frame {
-                    start,
-                    len: header.frame_len,
-                }
-            }
-            _ => start += 1,
-        }
-    }
-    Located::NeedMore
 }
 
 /// Whether this frame is the Xing / Info / VBRI header rather than audio: a

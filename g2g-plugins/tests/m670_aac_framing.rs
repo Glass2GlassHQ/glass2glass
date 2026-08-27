@@ -1,7 +1,10 @@
 //! M670 `AacParse` validated against real ffmpeg-encoded AAC in both framings:
 //! ADTS (elementary stream) and LOAS/LATM (broadcast). Each fixture is a short
 //! sine encoded by ffmpeg; the parser must recover the channel count and sample
-//! rate and emit a `CapsChanged` before forwarding the frame.
+//! rate and emit a `CapsChanged` before the frames it describes. The ADTS
+//! fixture is also split into one access unit per buffer (M1074), so its frame
+//! count is the number of ADTS headers in the file; the LATM stream is framed by
+//! its container already and is forwarded buffer for buffer.
 
 use g2g_core::element::PushOutcome;
 use g2g_core::frame::{Frame, FrameTiming};
@@ -63,7 +66,35 @@ async fn refine(stream: &[u8]) -> Collect {
         .process(PipelinePacket::DataFrame(frame), &mut sink)
         .await
         .expect("process");
+    parse
+        .process(PipelinePacket::Eos, &mut sink)
+        .await
+        .expect("eos");
     sink
+}
+
+/// Walk the ADTS headers of `stream` and count the access units, the framing the
+/// parser has to reproduce. The 13-bit `aac_frame_length` spans bytes 3..6.
+fn adts_access_units(stream: &[u8]) -> usize {
+    const ADTS_HEADER_LEN: usize = 7;
+    let mut units = 0;
+    let mut pos = 0;
+    while pos + ADTS_HEADER_LEN <= stream.len() {
+        assert_eq!(
+            (stream[pos], stream[pos + 1] & 0xF6),
+            (0xFF, 0xF0),
+            "the fixture is back-to-back ADTS"
+        );
+        let len = (((stream[pos + 3] & 0x03) as usize) << 11)
+            | ((stream[pos + 4] as usize) << 3)
+            | ((stream[pos + 5] >> 5) as usize);
+        if pos + len > stream.len() {
+            break;
+        }
+        units += 1;
+        pos += len;
+    }
+    units
 }
 
 #[tokio::test]
@@ -74,7 +105,11 @@ async fn adts_stream_refines_to_stereo_44100() {
         vec![(2, 44_100)],
         "real ADTS refined to stereo/44100"
     );
-    assert_eq!(sink.data_frames, 1, "the frame is forwarded after the caps");
+    assert_eq!(
+        sink.data_frames,
+        adts_access_units(ADTS),
+        "one buffer per ADTS access unit"
+    );
 }
 
 #[tokio::test]

@@ -10,22 +10,30 @@
 //! receiver sync the RTP clock to wall time. The RTSP `ANNOUNCE`/`RECORD`
 //! handshake for Wowza-style ingest is the remaining live-egress follow-up (it
 //! needs the network port the sandbox blocks).
+//!
+//! An incoming `Caps::ByteStream` selects raw mode instead (M1079), the
+//! broadcast `mpegtsmux ! udpsink host=... port=...` case: the bytes go out as
+//! plain datagrams of at most `max-payload`, an MPEG-TS stream cut on whole
+//! 188-byte packets. `clients` (gst `multiudpsink` syntax) replaces the single
+//! `host`:`port` destination with a list, in either mode.
 
 use core::future::Future;
 use core::pin::Pin;
 
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use std::net::{SocketAddr, UdpSocket as StdUdpSocket};
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs, UdpSocket as StdUdpSocket};
 
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
-    OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue,
-    PropertySpec, Rate, VideoCodec,
+    AsyncElement, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
+    ElementMetadata, G2gError, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
+    PropKind, PropValue, PropertySpec, Rate, VideoCodec,
 };
 
+use crate::bytestream::{carried_bytestream_caps, datagram_chunk};
 use crate::filesink::io_err;
 use crate::flexfec::FlexFecEncoder;
 use crate::rtcp::{self, RtcpPacket};
@@ -127,6 +135,12 @@ const DEFAULT_MAX_PAYLOAD: usize = 1400;
 /// Default depth of the retransmission history (recently sent packets kept for
 /// NACK-triggered resend).
 const DEFAULT_RETX_CAPACITY: usize = 1024;
+/// gst `udpsink ttl-mc` default: a multicast datagram stays on the local link.
+const DEFAULT_MULTICAST_TTL: u32 = 1;
+/// gst `udpsink auto-multicast` default: join a multicast destination group.
+const DEFAULT_AUTO_MULTICAST: bool = true;
+/// Separator between the `host:port` entries of the `clients` property.
+const CLIENTS_SEPARATOR: &str = ",";
 
 /// The H.264-at-any-geometry caps the sink accepts. Geometry rides in-band in
 /// the SPS, so the sink imposes no concrete dimensions.
@@ -137,6 +151,41 @@ fn h264_any() -> Caps {
         height: Dim::Any,
         framerate: Rate::Any,
     }
+}
+
+/// Everything the sink takes: H.264 to RTP-payload, or a byte stream to send
+/// as raw datagrams. H.264 leads, so an ambiguous solve keeps the RTP path.
+fn accepted_caps() -> CapsSet {
+    let mut alternatives = Vec::from([h264_any()]);
+    alternatives.extend(carried_bytestream_caps());
+    CapsSet::from_alternatives(alternatives)
+}
+
+/// Parse the gst `multiudpsink clients` syntax, `host:port,host:port`. A name is
+/// resolved here rather than at send time, so a bad entry fails the property set.
+fn parse_clients(text: &str) -> Result<Vec<SocketAddr>, PropError> {
+    let mut clients = Vec::new();
+    for entry in text
+        .split(CLIENTS_SEPARATOR)
+        .map(str::trim)
+        .filter(|e| !e.is_empty())
+    {
+        let addr = entry
+            .to_socket_addrs()
+            .map_err(|_| PropError::Value)?
+            .next()
+            .ok_or(PropError::Value)?;
+        clients.push(addr);
+    }
+    Ok(clients)
+}
+
+fn render_clients(clients: &[SocketAddr]) -> String {
+    clients
+        .iter()
+        .map(|c| c.to_string())
+        .collect::<Vec<_>>()
+        .join(CLIENTS_SEPARATOR)
 }
 
 /// # Example
@@ -194,6 +243,16 @@ pub struct UdpSink {
     rtp_octets: u32,
     /// The most recent media RTP timestamp, reported in the SR alongside NTP now.
     last_rtp_ts: u32,
+    /// Extra destinations from the `clients` property. Non-empty replaces the
+    /// single `dest`, the way gst `multiudpsink` works.
+    clients: Vec<SocketAddr>,
+    /// Join a multicast destination group.
+    auto_multicast: bool,
+    /// `ttl-mc`, the hop count a multicast datagram gets.
+    multicast_ttl: u32,
+    /// Set from the negotiated caps: raw datagram mode carrying this container.
+    /// `None` is the RTP payloader path.
+    bytestream: Option<ByteStreamEncoding>,
     packets_sent: u64,
     bytes_sent: u64,
     frames_sent: u64,
@@ -219,6 +278,10 @@ impl UdpSink {
             fec: FecMode::None,
             retx_buf: VecDeque::new(),
             retx_cap: DEFAULT_RETX_CAPACITY,
+            clients: Vec::new(),
+            auto_multicast: DEFAULT_AUTO_MULTICAST,
+            multicast_ttl: DEFAULT_MULTICAST_TTL,
+            bytestream: None,
             rtcp_sr_interval_ns: None,
             last_sr_ns: 0,
             rtp_packets: 0,
@@ -241,9 +304,25 @@ impl UdpSink {
         self
     }
 
-    /// Max RTP payload bytes per packet; larger NALs fragment into FU-A.
+    /// Max payload bytes per datagram; larger H.264 NALs fragment into FU-A, and
+    /// a raw byte stream is split (MPEG-TS on whole 188-byte packets).
     pub fn with_max_payload(mut self, bytes: usize) -> Self {
         self.max_payload = bytes;
+        self
+    }
+
+    /// Send every datagram to each of these destinations instead of the single
+    /// `host`:`port`, the gst `multiudpsink` fan-out. An empty list restores it.
+    pub fn with_clients(mut self, clients: Vec<SocketAddr>) -> Self {
+        self.clients = clients;
+        self
+    }
+
+    /// Join a multicast destination group (default on) and set the multicast hop
+    /// count sent datagrams get (gst `ttl-mc`, default 1).
+    pub fn with_multicast(mut self, auto_join: bool, ttl: u32) -> Self {
+        self.auto_multicast = auto_join;
+        self.multicast_ttl = ttl;
         self
     }
 
@@ -376,6 +455,29 @@ impl UdpSink {
         ((pts_ns as u128 * RTP_CLOCK_HZ as u128) / 1_000_000_000) as u32
     }
 
+    /// Where each datagram goes: the `clients` list when set, else `host`:`port`.
+    fn destinations(&self) -> &[SocketAddr] {
+        if self.clients.is_empty() {
+            core::slice::from_ref(&self.dest)
+        } else {
+            &self.clients
+        }
+    }
+
+    /// Send one datagram to every destination, returning how many it reached.
+    /// The single-destination socket is connected, so it uses `send`.
+    async fn send_datagram(&self, bytes: &[u8]) -> Result<u64, G2gError> {
+        let socket = self.socket.as_ref().ok_or(G2gError::NotConfigured)?;
+        if self.clients.is_empty() {
+            socket.send(bytes).await.map_err(io_err)?;
+            return Ok(1);
+        }
+        for client in &self.clients {
+            socket.send_to(bytes, client).await.map_err(io_err)?;
+        }
+        Ok(self.clients.len() as u64)
+    }
+
     fn ensure_socket(&mut self) -> Result<(), G2gError> {
         if self.socket.is_none() {
             let std = self.std_socket.take().ok_or(G2gError::NotConfigured)?;
@@ -388,11 +490,11 @@ impl UdpSink {
     /// blocking, and retransmit every requested-and-still-buffered packet.
     /// Returns the number of packets resent.
     async fn service_nacks(&mut self) -> Result<u64, G2gError> {
-        let socket = self.socket.as_ref().ok_or(G2gError::NotConfigured)?;
         // Collect requested packets first so the resend loop does not borrow the
         // history while sending.
         let mut to_resend: Vec<Vec<u8>> = Vec::new();
         let mut rb = [0u8; 1500];
+        let socket = self.socket.as_ref().ok_or(G2gError::NotConfigured)?;
         loop {
             match socket.try_recv(&mut rb) {
                 Ok(0) => break,
@@ -421,11 +523,11 @@ impl UdpSink {
             if let Some((rtx_pt, rtx_ssrc)) = self.rtx.filter(|(pt, _)| *pt != 0) {
                 if let Some(wrapped) = rtx::build_rtx_packet(pkt, rtx_pt, rtx_ssrc, self.rtx_seq) {
                     self.rtx_seq = self.rtx_seq.wrapping_add(1);
-                    socket.send(&wrapped).await.map_err(io_err)?;
+                    self.send_datagram(&wrapped).await?;
                     continue;
                 }
             }
-            socket.send(pkt).await.map_err(io_err)?;
+            self.send_datagram(pkt).await?;
         }
         Ok(to_resend.len() as u64)
     }
@@ -444,11 +546,16 @@ impl AsyncElement for UdpSink {
     }
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
+        // A byte stream goes out verbatim; everything else is RTP-payloaded
+        // H.264.
+        if matches!(upstream_caps, Caps::ByteStream { .. }) {
+            return Ok(upstream_caps.clone());
+        }
         upstream_caps.intersect(&h264_any())
     }
 
     fn caps_constraint_as_sink(&self) -> CapsConstraint<'_> {
-        CapsConstraint::Accepts(CapsSet::one(h264_any()))
+        CapsConstraint::Accepts(accepted_caps())
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -456,25 +563,45 @@ impl AsyncElement for UdpSink {
             Caps::CompressedVideo {
                 codec: VideoCodec::H264,
                 ..
-            } => {}
+            } => {
+                self.bytestream = None;
+                self.packetizer = Some(
+                    RtpH264Packetizer::new(self.payload_type, self.ssrc)
+                        .with_max_payload(self.max_payload),
+                );
+                self.fec = self.fec_config.build();
+            }
+            Caps::ByteStream { encoding } => self.bytestream = Some(*encoding),
             _ => return Err(G2gError::CapsMismatch),
         }
-        self.packetizer = Some(
-            RtpH264Packetizer::new(self.payload_type, self.ssrc).with_max_payload(self.max_payload),
-        );
-        self.fec = self.fec_config.build();
         let socket = StdUdpSocket::bind(("0.0.0.0", 0)).map_err(io_err)?;
         socket.set_nonblocking(true).map_err(io_err)?;
-        socket.connect(self.dest).map_err(io_err)?;
+        socket
+            .set_multicast_ttl_v4(self.multicast_ttl)
+            .map_err(io_err)?;
+        for dest in self.destinations() {
+            if let (true, IpAddr::V4(ip)) = (self.auto_multicast, dest.ip()) {
+                if ip.is_multicast() {
+                    socket
+                        .join_multicast_v4(&ip, &std::net::Ipv4Addr::UNSPECIFIED)
+                        .map_err(io_err)?;
+                }
+            }
+        }
+        // One destination gets a connected socket, so the RTP path can read the
+        // peer's RTCP back off it; a client list has no single peer.
+        if self.clients.is_empty() {
+            socket.connect(self.dest).map_err(io_err)?;
+        }
         self.std_socket = Some(socket);
         Ok(ConfigureOutcome::Accepted)
     }
 
     fn metadata(&self) -> ElementMetadata {
         ElementMetadata::new(
-            "UDP RTP sink",
+            "UDP sink",
             "Sink/Network",
-            "Sends RTP H.264 over UDP, honoring NACK retransmit",
+            "Sends RTP H.264 over UDP honoring NACK retransmit, or a byte stream as raw datagrams",
             "g2g",
         )
     }
@@ -519,10 +646,29 @@ impl AsyncElement for UdpSink {
             PropertySpec::new(
                 "max-payload",
                 PropKind::Uint,
-                "max RTP payload bytes per packet; larger NALs fragment into FU-A",
+                "max payload bytes per datagram; larger NALs fragment into FU-A, a byte stream is split (MPEG-TS on whole 188-byte packets)",
             )
             .with_default("1400")
             .with_range("1", "65507"),
+            PropertySpec::new(
+                "clients",
+                PropKind::Str,
+                "comma separated host:port destinations; when set it replaces host/port",
+            )
+            .with_default(""),
+            PropertySpec::new(
+                "auto-multicast",
+                PropKind::Bool,
+                "join the group of a multicast destination",
+            )
+            .with_default("true"),
+            PropertySpec::new(
+                "ttl-mc",
+                PropKind::Uint,
+                "multicast time-to-live of the sent datagrams",
+            )
+            .with_default("1")
+            .with_range("0", "255"),
             PropertySpec::new(
                 "retransmit",
                 PropKind::Bool,
@@ -569,6 +715,22 @@ impl AsyncElement for UdpSink {
             }
             "ssrc" => {
                 self.ssrc = value.as_uint().ok_or(PropError::Type)? as u32;
+                Ok(())
+            }
+            "clients" => {
+                self.clients = parse_clients(value.as_str().ok_or(PropError::Type)?)?;
+                Ok(())
+            }
+            "auto-multicast" => {
+                self.auto_multicast = value.as_bool().ok_or(PropError::Type)?;
+                Ok(())
+            }
+            "ttl-mc" => {
+                let ttl = value.as_uint().ok_or(PropError::Type)?;
+                if ttl > u8::MAX as u64 {
+                    return Err(PropError::Value);
+                }
+                self.multicast_ttl = ttl as u32;
                 Ok(())
             }
             "fec-mode" => {
@@ -664,6 +826,9 @@ impl AsyncElement for UdpSink {
         match name {
             "payload-type" => Some(PropValue::Uint(self.payload_type as u64)),
             "ssrc" => Some(PropValue::Uint(self.ssrc as u64)),
+            "clients" => Some(PropValue::Str(render_clients(&self.clients))),
+            "auto-multicast" => Some(PropValue::Bool(self.auto_multicast)),
+            "ttl-mc" => Some(PropValue::Uint(self.multicast_ttl as u64)),
             "fec-mode" => Some(PropValue::Str(self.fec_config.mode_str().into())),
             "fec-columns" => Some(PropValue::Uint(self.fec_config.columns as u64)),
             "fec-rows" => Some(PropValue::Uint(self.fec_config.rows as u64)),
@@ -694,6 +859,21 @@ impl AsyncElement for UdpSink {
                     let slice = frame
                         .domain
                         .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
+                    if let Some(encoding) = self.bytestream {
+                        self.ensure_socket()?;
+                        let chunk = datagram_chunk(encoding, self.max_payload);
+                        let mut sent = 0u64;
+                        let mut bytes = 0u64;
+                        for datagram in slice.chunks(chunk) {
+                            let reached = self.send_datagram(datagram).await?;
+                            sent += reached;
+                            bytes += reached * datagram.len() as u64;
+                        }
+                        self.packets_sent += sent;
+                        self.bytes_sent += bytes;
+                        self.frames_sent += 1;
+                        return Ok(());
+                    }
                     let timestamp = Self::rtp_timestamp(frame.timing.pts_ns);
                     self.last_rtp_ts = timestamp;
                     let packets = {
@@ -729,25 +909,22 @@ impl AsyncElement for UdpSink {
                     }
                     let mut sent = 0u64;
                     let mut bytes = 0u64;
-                    {
-                        let socket = self.socket.as_ref().ok_or(G2gError::NotConfigured)?;
-                        for pkt in &packets {
-                            socket.send(pkt).await.map_err(io_err)?;
-                            sent += 1;
-                            bytes += pkt.len() as u64;
-                            // SR sender counters: this SSRC's media packets and
-                            // their RTP payload octets (past the 12-byte header).
-                            self.rtp_packets = self.rtp_packets.wrapping_add(1);
-                            self.rtp_octets = self
-                                .rtp_octets
-                                .wrapping_add(pkt.len().saturating_sub(12) as u32);
-                        }
-                        // Repair packets follow the media they protect.
-                        for repair in &fec_packets {
-                            socket.send(repair).await.map_err(io_err)?;
-                            sent += 1;
-                            bytes += repair.len() as u64;
-                        }
+                    for pkt in &packets {
+                        let reached = self.send_datagram(pkt).await?;
+                        sent += reached;
+                        bytes += reached * pkt.len() as u64;
+                        // SR sender counters: this SSRC's media packets and
+                        // their RTP payload octets (past the 12-byte header).
+                        self.rtp_packets = self.rtp_packets.wrapping_add(1);
+                        self.rtp_octets = self
+                            .rtp_octets
+                            .wrapping_add(pkt.len().saturating_sub(12) as u32);
+                    }
+                    // Repair packets follow the media they protect.
+                    for repair in &fec_packets {
+                        let reached = self.send_datagram(repair).await?;
+                        sent += reached;
+                        bytes += reached * repair.len() as u64;
                     }
                     // Keep each sent packet in the bounded retransmission history,
                     // keyed by its RTP sequence, for NACK-triggered resend.
@@ -785,8 +962,7 @@ impl AsyncElement for UdpSink {
                                 self.rtp_octets,
                                 &[],
                             );
-                            let socket = self.socket.as_ref().ok_or(G2gError::NotConfigured)?;
-                            socket.send(&sr).await.map_err(io_err)?;
+                            self.send_datagram(&sr).await?;
                             self.last_sr_ns = now;
                             self.sender_reports_sent += 1;
                         }
@@ -813,7 +989,7 @@ impl AsyncElement for UdpSink {
 
 impl PadTemplates for UdpSink {
     fn pad_templates() -> Vec<PadTemplate> {
-        Vec::from([PadTemplate::sink(CapsSet::one(h264_any()))])
+        Vec::from([PadTemplate::sink(accepted_caps())])
     }
 }
 

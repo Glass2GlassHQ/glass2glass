@@ -425,15 +425,21 @@ impl AsyncElement for VideoRate {
             // Report the stored Q16 rate as a reduced fraction, not the floored
             // integer, so a fractional target (e.g. 30000/1001) round-trips.
             "framerate" => {
-                let g = gcd(self.rate_q16, 1 << 16).max(1);
-                Some(PropValue::Fraction(
-                    (self.rate_q16 / g) as i32,
-                    ((1u32 << 16) / g) as i32,
-                ))
+                let (num, den) = rate_fraction(self.rate_q16);
+                Some(PropValue::Fraction(num as i32, den as i32))
             }
             _ => None,
         }
     }
+}
+
+/// A Q16 fixed-point framerate as the `num/den` fraction it stands for, reduced
+/// by the gcd: the raw ratio is `q16 / 65536`. A whole-number fps comes back as
+/// `fps/1`; a rate that was not exactly representable in Q16 (30000/1001) comes
+/// back as the Q16 value over 65536, not as the fraction it was built from.
+pub(crate) fn rate_fraction(rate_q16: u32) -> (u32, u32) {
+    let divisor = gcd(rate_q16, 1 << 16).max(1);
+    (rate_q16 / divisor, (1u32 << 16) / divisor)
 }
 
 fn gcd(mut a: u32, mut b: u32) -> u32 {

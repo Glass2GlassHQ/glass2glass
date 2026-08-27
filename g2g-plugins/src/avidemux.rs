@@ -659,17 +659,7 @@ impl PadTemplates for AviDemux {
 }
 
 /// Multi-output AVI demuxer: one byte stream in, one elementary stream per
-/// output port.
-///
-/// # Example
-///
-/// ```no_run
-/// use g2g_plugins::avidemux::AviDemuxN;
-///
-/// // gst-launch equivalent: avidemux name=d  d.video_0 ! ...  d.audio_0 ! ...
-/// let demux = AviDemuxN::new(alloc_ports());
-/// # fn alloc_ports() -> Vec<usize> { Vec::new() }
-/// ```
+/// output port (`avidemux name=d  d.video_0 ! ...  d.audio_0 ! ...`).
 #[derive(Debug)]
 pub struct AviDemuxN {
     buffer: Vec<u8>,

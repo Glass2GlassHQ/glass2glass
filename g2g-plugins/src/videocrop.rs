@@ -28,7 +28,7 @@ use g2g_core::{
     PropValue, PropertySpec, PushOutcome, Rate, RawVideoFormat, Reconfigure,
 };
 
-const FORMATS: [RawVideoFormat; 12] = [
+pub(crate) const FORMATS: [RawVideoFormat; 12] = [
     RawVideoFormat::Rgba8,
     RawVideoFormat::Bgra8,
     RawVideoFormat::Nv12,
@@ -432,7 +432,7 @@ fn crop_plane(
 /// Crop one frame to the `w x h` rect at `(x, y)`, preserving `format`. `src`
 /// is validated to hold the input frame; all coords are even when the format
 /// is 4:2:0.
-fn crop(
+pub(crate) fn crop(
     src: &[u8],
     format: RawVideoFormat,
     dims: (usize, usize),

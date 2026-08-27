@@ -11,6 +11,13 @@
 //! authoritative and covers the no-SDP case. The declared hint
 //! (`with_video_size` / `with_framerate`, default 1280x720@30) is the fallback
 //! until one of those lands, and stays in force for the fields neither supplies.
+//!
+//! Setting `bytestream-format` switches the source to raw datagram mode (M1079),
+//! the broadcast `udpsrc port=5000 ! tsdemux` case: every datagram becomes one
+//! `DataFrame` of `Caps::ByteStream` with no RTP header, no depayloading and no
+//! jitter buffer. The RTP-only properties are rejected in that mode rather than
+//! silently ignored. A multicast `address` is joined on every interface when
+//! `auto-multicast` is left on.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -18,15 +25,17 @@ use core::pin::Pin;
 use alloc::boxed::Box;
 use alloc::string::{String, ToString};
 
-use std::net::{SocketAddr, UdpSocket as StdUdpSocket};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket as StdUdpSocket};
 
+use g2g_core::log::LogSource;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
-    Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError, LatencyReport,
-    OutputSink, PadTemplate, PadTemplates, PropError, PropKind, PropValue, PropertySpec, Rate,
-    VideoCodec,
+    ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata,
+    G2gError, LatencyReport, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
+    PropKind, PropValue, PropertySpec, Rate, VideoCodec,
 };
 
+use crate::bytestream::byte_frame;
 use crate::filesink::io_err;
 use crate::rtpjitter::JitterConfig;
 use crate::rtprecv::RtpRecvConfig;
@@ -45,6 +54,11 @@ fn read_sdp(value: &str) -> Result<String, G2gError> {
 const DEFAULT_WIDTH: u32 = 1280;
 const DEFAULT_HEIGHT: u32 = 720;
 const DEFAULT_FPS: u32 = 30;
+/// Largest payload an IPv4 UDP datagram can carry, so one receive buffer always
+/// holds a whole datagram (a short read would silently truncate it).
+const MAX_DATAGRAM: usize = 65_507;
+/// gst `udpsrc auto-multicast` default: join the group named by `address`.
+const DEFAULT_AUTO_MULTICAST: bool = true;
 
 /// # Example
 ///
@@ -75,6 +89,11 @@ pub struct UdpSrc {
     /// context is guaranteed.
     std_socket: Option<StdUdpSocket>,
     configured: bool,
+    /// Set by `bytestream-format`: each datagram is pushed as it arrived, typed
+    /// with this container. `None` is RTP mode, the default.
+    bytestream: Option<ByteStreamEncoding>,
+    /// Join the group when `bind` names a multicast address.
+    auto_multicast: bool,
 }
 
 impl UdpSrc {
@@ -90,6 +109,8 @@ impl UdpSrc {
             sdp: None,
             std_socket: None,
             configured: false,
+            bytestream: None,
+            auto_multicast: DEFAULT_AUTO_MULTICAST,
         }
     }
 
@@ -218,6 +239,20 @@ impl UdpSrc {
             .map(|a| a.port())
     }
 
+    /// Receive raw datagrams instead of RTP: each one becomes a `DataFrame` of
+    /// `Caps::ByteStream { encoding }`, the `udpsrc ! tsdemux` broadcast case.
+    pub fn with_bytestream(mut self, encoding: ByteStreamEncoding) -> Self {
+        self.bytestream = Some(encoding);
+        self
+    }
+
+    /// Join the multicast group named by the bind address (default on). Off
+    /// leaves the join to whoever set the socket up.
+    pub fn with_auto_multicast(mut self, enabled: bool) -> Self {
+        self.auto_multicast = enabled;
+        self
+    }
+
     fn caps(&self) -> Caps {
         Caps::CompressedVideo {
             codec: VideoCodec::H264,
@@ -226,6 +261,76 @@ impl UdpSrc {
             framerate: Rate::Fixed(self.fps << 16),
         }
     }
+
+    /// What this source puts on its pad: the raw container in datagram mode, the
+    /// declared H.264 hint in RTP mode.
+    fn output_caps(&self) -> Caps {
+        match self.bytestream {
+            Some(encoding) => Caps::ByteStream { encoding },
+            None => self.caps(),
+        }
+    }
+
+    /// Names that do nothing outside RTP mode: the receive-path tuning, the SDP,
+    /// and the geometry hints (a byte stream carries no geometry). `framerate`
+    /// is not one of them, it still sets the live latency report.
+    fn is_rtp_only(&self, name: &str) -> bool {
+        matches!(name, "sdp" | "width" | "height")
+            || crate::rtprecv::get_recv_prop(&self.recv, name).is_some()
+    }
+
+    /// The multicast group to join, when the bind address names one and
+    /// `auto-multicast` is on.
+    fn multicast_group(&self) -> Option<Ipv4Addr> {
+        match self.bind.ip() {
+            IpAddr::V4(ip) if self.auto_multicast && ip.is_multicast() => Some(ip),
+            _ => None,
+        }
+    }
+
+    fn bind_socket(&self) -> Result<StdUdpSocket, G2gError> {
+        let group = self.multicast_group();
+        // A multicast receiver binds the port on every interface and then joins
+        // the group; binding the group address itself drops unicast to the port.
+        let socket = match group {
+            Some(_) => StdUdpSocket::bind((Ipv4Addr::UNSPECIFIED, self.bind.port())),
+            None => StdUdpSocket::bind(self.bind),
+        }
+        .map_err(io_err)?;
+        if let Some(group) = group {
+            socket
+                .join_multicast_v4(&group, &Ipv4Addr::UNSPECIFIED)
+                .map_err(io_err)?;
+        }
+        socket.set_nonblocking(true).map_err(io_err)?;
+        Ok(socket)
+    }
+}
+
+impl LogSource for UdpSrc {
+    fn log_category(&self) -> &'static str {
+        "udpsrc"
+    }
+}
+
+/// Push every datagram as it arrived, one `DataFrame` each, until `limit`
+/// datagrams have been emitted. Raw UDP has no in-band end, so EOS comes only
+/// from that limit (`num-buffers`).
+async fn receive_datagrams(
+    socket: &tokio::net::UdpSocket,
+    limit: u64,
+    out: &mut dyn OutputSink,
+) -> Result<u64, G2gError> {
+    let mut buf = alloc::vec![0u8; MAX_DATAGRAM];
+    let mut sequence = 0u64;
+    while sequence < limit {
+        let (filled, _from) = socket.recv_from(&mut buf).await.map_err(io_err)?;
+        let frame = byte_frame(buf[..filled].to_vec(), sequence);
+        sequence += 1;
+        out.push(PipelinePacket::DataFrame(frame)).await?;
+    }
+    out.push(PipelinePacket::Eos).await?;
+    Ok(sequence)
 }
 
 impl SourceLoop for UdpSrc {
@@ -240,23 +345,32 @@ impl SourceLoop for UdpSrc {
         Self: 'a;
 
     fn intercept_caps<'a>(&'a mut self) -> Self::CapsFuture<'a> {
-        core::future::ready(Ok(self.caps()))
+        core::future::ready(Ok(self.output_caps()))
     }
 
-    /// Produces the declared H.264 hint caps (no I/O at negotiation; the socket
-    /// binds in `configure_pipeline`). A downstream decoder corrects the real
-    /// geometry from the in-band SPS via a mid-stream `CapsChanged`.
+    /// Produces the declared H.264 hint caps in RTP mode, or the container
+    /// `bytestream-format` names in raw mode (no I/O at negotiation; the socket
+    /// binds in `configure_pipeline`). In RTP mode a downstream decoder corrects
+    /// the real geometry from the in-band SPS via a mid-stream `CapsChanged`.
     fn caps_constraint<'a>(
         &'a mut self,
     ) -> impl Future<Output = Result<CapsConstraint<'a>, G2gError>> + 'a {
-        core::future::ready(Ok(CapsConstraint::Produces(CapsSet::one(self.caps()))))
+        core::future::ready(Ok(CapsConstraint::Produces(CapsSet::one(
+            self.output_caps(),
+        ))))
+    }
+
+    /// The container is a property, so the auto-plug parser can read the raw
+    /// output type without negotiating. RTP mode keeps the registry's declared
+    /// H.264 caps.
+    fn configured_output_caps(&self) -> Option<Caps> {
+        self.bytestream
+            .map(|encoding| Caps::ByteStream { encoding })
     }
 
     fn configure_pipeline(&mut self, _absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         if self.std_socket.is_none() {
-            let socket = StdUdpSocket::bind(self.bind).map_err(io_err)?;
-            socket.set_nonblocking(true).map_err(io_err)?;
-            self.std_socket = Some(socket);
+            self.std_socket = Some(self.bind_socket()?);
         }
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
@@ -264,9 +378,9 @@ impl SourceLoop for UdpSrc {
 
     fn metadata(&self) -> ElementMetadata {
         ElementMetadata::new(
-            "UDP RTP source",
+            "UDP source",
             "Source/Network",
-            "Receives raw RTP H.264 over UDP with a jitter buffer, caps from an SDP or the stream's SPS",
+            "Receives RTP H.264 over UDP with a jitter buffer, or raw datagrams as a byte stream",
             "g2g",
         )
     }
@@ -301,9 +415,33 @@ impl SourceLoop for UdpSrc {
                 "SDP describing the stream (document text or a .sdp file path): sets geometry, frame rate, and port",
             ),
             PropertySpec::new(
+                "bytestream-format",
+                PropKind::Str,
+                "receive raw datagrams as this container instead of RTP: mpegts | matroska | ogg | flv | mp4 (unset = RTP)",
+            ),
+            PropertySpec::new(
+                "multicast-group",
+                PropKind::Str,
+                "multicast group to join, the same setting as address",
+            )
+            .with_default("0.0.0.0"),
+            PropertySpec::new(
+                "auto-multicast",
+                PropKind::Bool,
+                "join the multicast group named by address",
+            )
+            .with_default("true"),
+            PropertySpec::new(
+                "current-port",
+                PropKind::Uint,
+                "the port the socket is actually bound to (port=0 picks one)",
+            )
+            .with_range("0", "65535")
+            .read_only(),
+            PropertySpec::new(
                 "num-buffers",
                 PropKind::Int,
-                "access units to emit then EOS (-1 = until error/shutdown)",
+                "datagrams (raw) or access units (RTP) to emit then EOS (-1 = until error/shutdown)",
             )
             .with_default("-1")
             .with_range("-1", "9223372036854775807"),
@@ -364,6 +502,14 @@ impl SourceLoop for UdpSrc {
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        if self.bytestream.is_some() && self.is_rtp_only(name) {
+            g2g_core::g2g_warn!(self, "`{name}` needs RTP mode, not bytestream-format");
+            return Err(PropError::Value);
+        }
+        if name == "multicast-group" {
+            return crate::netprop::set_addr_prop(&mut self.bind, name, name, &value)
+                .unwrap_or(Err(PropError::Unknown));
+        }
         if let Some(r) = crate::netprop::set_addr_prop(&mut self.bind, "address", name, &value) {
             return r;
         }
@@ -394,12 +540,26 @@ impl SourceLoop for UdpSrc {
                 Ok(())
             }
             "num-buffers" => crate::numbuffers::set_num_buffers(&mut self.frame_limit, &value),
+            "bytestream-format" => {
+                let text = value.as_str().ok_or(PropError::Type)?;
+                self.bytestream =
+                    Some(crate::filesrc::encoding_from_str(text).ok_or(PropError::Value)?);
+                Ok(())
+            }
+            "auto-multicast" => {
+                self.auto_multicast = value.as_bool().ok_or(PropError::Type)?;
+                Ok(())
+            }
+            "current-port" => Err(PropError::ReadOnly),
             _ => Err(PropError::Unknown),
         }
     }
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
         if let Some(v) = crate::netprop::get_addr_prop(&self.bind, "address", name) {
+            return Some(v);
+        }
+        if let Some(v) = crate::netprop::get_addr_prop(&self.bind, "multicast-group", name) {
             return Some(v);
         }
         if let Some(v) = crate::rtprecv::get_recv_prop(&self.recv, name) {
@@ -411,6 +571,13 @@ impl SourceLoop for UdpSrc {
             "framerate" => Some(PropValue::Uint(self.fps as u64)),
             "sdp" => Some(PropValue::Str(self.sdp.clone().unwrap_or_default())),
             "num-buffers" => Some(crate::numbuffers::get_num_buffers(self.frame_limit)),
+            "bytestream-format" => Some(PropValue::Str(
+                self.bytestream
+                    .map(|e| crate::filesrc::encoding_to_str(e).into())
+                    .unwrap_or_default(),
+            )),
+            "auto-multicast" => Some(PropValue::Bool(self.auto_multicast)),
+            "current-port" => Some(PropValue::Uint(self.local_port().unwrap_or(0) as u64)),
             _ => None,
         }
     }
@@ -434,6 +601,10 @@ impl SourceLoop for UdpSrc {
             let std = self.std_socket.take().ok_or(G2gError::NotConfigured)?;
             let socket = tokio::net::UdpSocket::from_std(std).map_err(io_err)?;
 
+            if self.bytestream.is_some() {
+                return receive_datagrams(&socket, self.frame_limit, out).await;
+            }
+
             // The jitter + RTCP RR/NACK + FEC/RTX + depayload receive path is
             // shared with RtspServerSrc; the caps in force ride along so the
             // stream's SPS can refine them mid-flight.
@@ -445,15 +616,18 @@ impl SourceLoop for UdpSrc {
 }
 
 impl PadTemplates for UdpSrc {
-    /// Produces H.264 at any geometry; an instance fixes the declared hint.
+    /// Produces H.264 at any geometry (RTP mode), or a raw byte stream in any
+    /// carried container; an instance fixes one via `bytestream-format`.
     fn pad_templates() -> alloc::vec::Vec<PadTemplate> {
-        alloc::vec::Vec::from([PadTemplate::source(g2g_core::CapsSet::one(
-            Caps::CompressedVideo {
-                codec: VideoCodec::H264,
-                width: Dim::Any,
-                height: Dim::Any,
-                framerate: Rate::Any,
-            },
+        let mut alternatives = alloc::vec::Vec::from([Caps::CompressedVideo {
+            codec: VideoCodec::H264,
+            width: Dim::Any,
+            height: Dim::Any,
+            framerate: Rate::Any,
+        }]);
+        alternatives.extend(crate::bytestream::carried_bytestream_caps());
+        alloc::vec::Vec::from([PadTemplate::source(CapsSet::from_alternatives(
+            alternatives,
         ))])
     }
 }

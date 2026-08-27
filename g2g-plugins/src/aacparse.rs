@@ -1,10 +1,20 @@
-//! AAC ADTS access-unit parser that refines source-side `Caps`.
+//! AAC access-unit parser that frames an ADTS stream and refines source-side
+//! `Caps`.
 //!
-//! The audio sibling of `h264parse` / `h265parse`: it scans each `DataFrame`
-//! for an ADTS header (12-bit `0xFFF` syncword) and recovers the channel count
-//! and sample rate, emitting a `CapsChanged` before forwarding the frame. This
-//! lets a raw ADTS AAC elementary stream be restreamed or muxed with concrete
-//! channel/rate caps.
+//! The audio sibling of `h264parse` / `h265parse`: it reads the ADTS header
+//! (12-bit `0xFFF` syncword) for the channel count and sample rate and emits a
+//! `CapsChanged` before the frames it describes. This lets a raw ADTS AAC
+//! elementary stream be restreamed or muxed with concrete channel/rate caps.
+//!
+//! An ADTS stream is also split into one access unit per buffer, the way
+//! `mpegaudioparse` splits MPEG audio: a bare `.aac` file arrives from `filesrc`
+//! in arbitrary chunks, and `ffmpegaudiodec` takes one access unit per packet.
+//! Partial frames are carried across input buffers, and a candidate sync is
+//! trusted only when a valid header sits at its frame length (or the stream ends
+//! there), which is also how the parser resynchronizes after garbage.
+//! Presentation time runs off a sample counter at 1024 samples per access unit,
+//! re-based whenever an upstream buffer carries a real time, so a demuxer's own
+//! timestamps survive.
 //!
 //! `Caps::Audio` has no open (`Any`) field, so a source advertising AAC before
 //! the first header lands uses sentinel `channels`/`sample_rate` 0; the
@@ -19,18 +29,40 @@
 //! bails safely (caps unrefined, never wrong) on the rare version-1 / config-reuse
 //! variants. Neither framing needs exp-Golomb or emulation prevention, so this
 //! shares none of the `annexb` machinery the H.264 / H.265 parsers use (just a
-//! small local MSB-first bit reader for the LATM fields).
+//! small local MSB-first bit reader for the LATM fields). A LATM stream is
+//! forwarded buffer for buffer: its frames come from the broadcast container
+//! already, not from a byte stream this has to cut up.
 
 use core::future::Future;
 use core::pin::Pin;
 
 use alloc::boxed::Box;
+use alloc::string::String;
 use alloc::vec::Vec;
 
+use g2g_core::frame::Frame;
+use g2g_core::log::{short_type_name, LogName, LogSource};
+use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
-    G2gError, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    g2g_warn, AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
+    ElementMetadata, FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
+    PipelinePacket,
 };
+
+use crate::audioframe::{locate_frame, Located, SyncFrameHeader};
+
+/// Nanoseconds per second, the presentation-time unit.
+const NS_PER_SECOND: u128 = 1_000_000_000;
+
+/// Samples per channel one AAC access unit decodes to. An SBR / HE-AAC stream
+/// doubles this against its ADTS-declared rate, which the header cannot tell us,
+/// so the core-rate figure is used throughout.
+const SAMPLES_PER_ACCESS_UNIT: u32 = 1024;
+
+/// Bytes of ADTS header before the payload, without and with the CRC that
+/// `protection_absent == 0` adds.
+const ADTS_HEADER_LEN: usize = 7;
+const ADTS_HEADER_LEN_CRC: usize = 9;
 
 /// ADTS sampling-frequency-index table (ISO/IEC 14496-3). Indices 13/14 are
 /// reserved and 15 (explicit rate) is forbidden in ADTS, so only 0..=12 map.
@@ -41,7 +73,7 @@ pub(crate) const SAMPLE_RATES: [u32; 13] = [
 
 /// Synthesise the 2-byte AAC AudioSpecificConfig from an ADTS header.
 pub(crate) fn asc_from_adts(au: &[u8]) -> Option<[u8; 2]> {
-    if au.len() < 7 || au[0] != 0xFF || (au[1] & 0xF0) != 0xF0 {
+    if au.len() < ADTS_HEADER_LEN || au[0] != 0xFF || (au[1] & 0xF0) != 0xF0 {
         return None;
     }
     let object_type = ((au[2] >> 6) & 0x03) + 1; // profile + 1
@@ -55,9 +87,8 @@ pub(crate) fn asc_from_adts(au: &[u8]) -> Option<[u8; 2]> {
 
 /// Strip the ADTS header (7 bytes, or 9 with CRC) from an AAC access unit.
 pub(crate) fn strip_adts(au: &[u8]) -> &[u8] {
-    if au.len() >= 7 && au[0] == 0xFF && (au[1] & 0xF0) == 0xF0 {
-        let header = if au[1] & 0x01 == 0 { 9 } else { 7 }; // protection_absent==0 -> CRC
-        au.get(header..).unwrap_or(&[])
+    if au.len() >= ADTS_HEADER_LEN && au[0] == 0xFF && (au[1] & 0xF0) == 0xF0 {
+        au.get(adts_header_len(au[1])..).unwrap_or(&[])
     } else {
         au
     }
@@ -82,7 +113,7 @@ pub(crate) fn adts_from_asc(asc: &[u8], au: &[u8]) -> Option<Vec<u8>> {
         return None; // reserved/explicit rate or "config in stream": not ADTS-able
     }
     let profile = aot.saturating_sub(1) & 0x03; // ADTS profile = AOT - 1
-    let frame_len = au.len() + 7;
+    let frame_len = au.len() + ADTS_HEADER_LEN;
     if frame_len > 0x1FFF {
         return None; // ADTS frame_length is 13 bits
     }
@@ -113,6 +144,30 @@ pub struct AacParse {
     configured: bool,
     last_emitted_caps: Option<Caps>,
     headers_emitted: u64,
+    framing: Framing,
+    /// Unconsumed ADTS bytes, starting at stream offset `buf_offset`.
+    buf: Vec<u8>,
+    buf_offset: u64,
+    /// Samples emitted since the last time base, the presentation-time counter.
+    samples: u64,
+    base_ns: u64,
+    /// A presentation time from upstream and the stream offset its buffer began
+    /// at, applied to the first access unit that starts at or past it.
+    pending_rebase: Option<(u64, u64)>,
+    sequence: u64,
+    log_name: LogName,
+}
+
+/// Which framing the stream turned out to carry. Decided from the first buffer
+/// that parses as one, and held for the rest of the stream.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum Framing {
+    #[default]
+    Undecided,
+    /// ADTS: a byte stream this splits into one access unit per buffer.
+    Adts,
+    /// LOAS/LATM: already framed by the broadcast container, forwarded as is.
+    Latm,
 }
 
 impl AacParse {
@@ -124,6 +179,80 @@ impl AacParse {
     /// re-emission is suppressed when the ADTS parameters are unchanged.
     pub fn caps_changes_emitted(&self) -> u64 {
         self.headers_emitted
+    }
+
+    /// Count of access units emitted, once the stream framed as ADTS.
+    pub fn frames_emitted(&self) -> u64 {
+        self.sequence
+    }
+
+    /// Announce `caps` if they differ from what downstream was last told.
+    async fn announce(&mut self, caps: Caps, out: &mut dyn OutputSink) -> Result<(), G2gError> {
+        if self.last_emitted_caps.as_ref() == Some(&caps) {
+            return Ok(());
+        }
+        out.push(PipelinePacket::CapsChanged(caps.clone())).await?;
+        self.last_emitted_caps = Some(caps);
+        self.headers_emitted += 1;
+        Ok(())
+    }
+
+    /// Emit every access unit the buffer holds whole.
+    async fn drain(&mut self, eos: bool, out: &mut dyn OutputSink) -> Result<(), G2gError> {
+        loop {
+            let Located::Frame { start, len } = locate_frame::<AdtsHeader>(&self.buf, eos) else {
+                return Ok(());
+            };
+            if start > 0 {
+                g2g_warn!(self, "resynchronized past {start} bytes of non-ADTS");
+                self.buf.drain(..start);
+                self.buf_offset += start as u64;
+            }
+            let header = adts_header(&self.buf).ok_or(G2gError::CapsMismatch)?;
+            let start_offset = self.buf_offset;
+            let data: Vec<u8> = self.buf.drain(..len).collect();
+            self.buf_offset += len as u64;
+            self.emit(data, &header, start_offset, out).await?;
+        }
+    }
+
+    /// Push one access unit with the caps its header declares and a presentation
+    /// time from the running sample count.
+    async fn emit(
+        &mut self,
+        data: Vec<u8>,
+        header: &AdtsHeader,
+        start_offset: u64,
+        out: &mut dyn OutputSink,
+    ) -> Result<(), G2gError> {
+        self.announce(header.info().caps(), out).await?;
+        if let Some((at, pts_ns)) = self.pending_rebase {
+            if start_offset >= at {
+                self.base_ns = pts_ns;
+                self.samples = 0;
+                self.pending_rebase = None;
+            }
+        }
+        let rate = u128::from(header.sample_rate);
+        let ns = |samples: u64| (u128::from(samples) * NS_PER_SECOND / rate) as u64;
+        let pts_ns = self.base_ns + ns(self.samples);
+        let duration_ns = ns(u64::from(SAMPLES_PER_ACCESS_UNIT));
+        self.samples += u64::from(SAMPLES_PER_ACCESS_UNIT);
+        let frame = Frame::new(
+            MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
+            FrameTiming {
+                pts_ns,
+                dts_ns: pts_ns,
+                duration_ns,
+                // Every AAC access unit decodes on its own.
+                keyframe: true,
+                ..FrameTiming::default()
+            },
+            self.sequence,
+        );
+        self.sequence += 1;
+        out.push(PipelinePacket::DataFrame(frame)).await?;
+        Ok(())
     }
 }
 
@@ -184,41 +313,81 @@ impl AsyncElement for AacParse {
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    if let g2g_core::MemoryDomain::System(slice) = &frame.domain {
-                        if let Some(info) = parse_aac(slice.as_slice()) {
-                            let new_caps = Caps::Audio {
-                                format: AudioFormat::Aac,
-                                channels: info.channels,
-                                sample_rate: info.sample_rate,
-                            };
-                            if self.last_emitted_caps.as_ref() != Some(&new_caps) {
-                                out.push(PipelinePacket::CapsChanged(new_caps.clone()))
-                                    .await?;
-                                self.last_emitted_caps = Some(new_caps);
-                                self.headers_emitted += 1;
-                            }
-                        }
+                    let bytes = frame.domain.as_system_slice().unwrap_or(&[]);
+                    if self.framing == Framing::Undecided && !bytes.is_empty() {
+                        self.framing = if parse_adts(bytes).is_some() {
+                            Framing::Adts
+                        } else {
+                            Framing::Latm
+                        };
                     }
-                    out.push(PipelinePacket::DataFrame(frame)).await?;
+                    if self.framing == Framing::Adts {
+                        // A byte source stamps every chunk 0, so only a real time
+                        // (a demuxer's) re-bases the counter.
+                        if let Some(pts) = frame.timing.pts().filter(|pts| *pts != 0) {
+                            self.pending_rebase =
+                                Some((self.buf_offset + self.buf.len() as u64, pts));
+                        }
+                        self.buf.extend_from_slice(bytes);
+                        self.drain(false, out).await?;
+                    } else {
+                        if let Some(info) = parse_aac(bytes) {
+                            self.announce(info.caps(), out).await?;
+                        }
+                        out.push(PipelinePacket::DataFrame(frame)).await?;
+                    }
                 }
                 PipelinePacket::CapsChanged(c) => {
                     out.push(PipelinePacket::CapsChanged(c)).await?;
                 }
                 PipelinePacket::Flush => {
                     self.last_emitted_caps = None;
+                    self.buf.clear();
+                    self.pending_rebase = None;
                     out.push(PipelinePacket::Flush).await?;
                 }
                 // Segment is control: forward unchanged.
                 PipelinePacket::Segment(seg) => {
                     out.push(PipelinePacket::Segment(seg)).await?;
                 }
-                PipelinePacket::Eos => {}
+                // The last access unit ends at the end of the stream, so it has
+                // no successor to confirm its sync against.
+                PipelinePacket::Eos => {
+                    if self.framing == Framing::Adts {
+                        self.drain(true, out).await?;
+                    }
+                }
                 other => {
                     out.push(other).await?;
                 }
             }
             Ok(())
         })
+    }
+
+    /// Reads host memory, so it takes system frames only.
+    fn input_domains(&self) -> g2g_core::memory::DomainSet {
+        g2g_core::memory::DomainSet::only(g2g_core::memory::MemoryDomainKind::System)
+    }
+
+    fn set_instance_name(&mut self, name: String) {
+        self.log_name.set_instance(name);
+    }
+
+    fn set_log_category(&mut self, category: String) {
+        self.log_name.set_category(category);
+    }
+}
+
+impl LogSource for AacParse {
+    fn log_category(&self) -> &'static str {
+        short_type_name::<Self>()
+    }
+    fn log_instance(&self) -> Option<&str> {
+        self.log_name.instance()
+    }
+    fn log_category_override(&self) -> Option<&str> {
+        self.log_name.category()
     }
 }
 
@@ -244,42 +413,121 @@ struct AacInfo {
     sample_rate: u32,
 }
 
+impl AacInfo {
+    fn caps(&self) -> Caps {
+        Caps::Audio {
+            format: AudioFormat::Aac,
+            channels: self.channels,
+            sample_rate: self.sample_rate,
+        }
+    }
+}
+
+/// The decoded fields of one ADTS header.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct AdtsHeader {
+    sample_rate: u32,
+    channels: u8,
+    /// Bytes this access unit occupies, header and any CRC included.
+    pub(crate) frame_len: usize,
+    profile: u8,
+    freq_index: u8,
+    channel_config: u8,
+}
+
+impl AdtsHeader {
+    fn info(&self) -> AacInfo {
+        AacInfo {
+            channels: self.channels,
+            sample_rate: self.sample_rate,
+        }
+    }
+
+    /// Whether two headers declare the same coding: the profile, sampling
+    /// frequency index and channel configuration an ADTS stream repeats in every
+    /// header. The content sniffer wants this stricter agreement before it types
+    /// a file off two headers alone.
+    pub(crate) fn same_configuration(&self, other: &Self) -> bool {
+        self.profile == other.profile
+            && self.freq_index == other.freq_index
+            && self.channel_config == other.channel_config
+    }
+}
+
+impl SyncFrameHeader for AdtsHeader {
+    const HEADER_LEN: usize = ADTS_HEADER_LEN;
+
+    fn parse(buf: &[u8]) -> Option<Self> {
+        adts_header(buf)
+    }
+
+    fn coded_bytes(&self) -> usize {
+        self.frame_len
+    }
+
+    /// A parsed ADTS header at the frame length is confirmation enough: it is 12
+    /// sync bits plus a rate index, a channel configuration and a length that
+    /// lands exactly here. Demanding the same coding as well would drop the
+    /// frame ahead of a mid-stream parameter change, which this parser reports
+    /// through `CapsChanged` instead.
+    fn confirms_sync(&self, _next: &Self) -> bool {
+        true
+    }
+}
+
+/// Bytes of ADTS header ahead of the payload, from byte 1 of the header:
+/// `protection_absent == 0` puts a 2-byte CRC behind the fixed fields.
+fn adts_header_len(byte1: u8) -> usize {
+    if byte1 & 0x01 == 0 {
+        ADTS_HEADER_LEN_CRC
+    } else {
+        ADTS_HEADER_LEN
+    }
+}
+
+/// Decode the ADTS header at the start of `buf`, or `None` when `buf` does not
+/// open on a usable one: too short, no `0xFFF` syncword with layer 00, a
+/// reserved sampling-frequency index, a channel configuration that does not pin
+/// a channel count, or an `aac_frame_length` shorter than its own header.
+pub(crate) fn adts_header(buf: &[u8]) -> Option<AdtsHeader> {
+    let head = buf.get(..ADTS_HEADER_LEN)?;
+    // Syncword 0xFFF (12 bits) + layer 00: byte0 all ones, byte1 high nibble all
+    // ones and the two layer bits zero.
+    if head[0] != 0xFF || (head[1] & 0xF6) != 0xF0 {
+        return None;
+    }
+    let profile = (head[2] >> 6) & 0x03;
+    let freq_index = (head[2] >> 2) & 0x0F;
+    let channel_config = ((head[2] & 0x01) << 2) | (head[3] >> 6);
+    let &sample_rate = SAMPLE_RATES.get(freq_index as usize)?;
+    let channels = match channel_config {
+        1..=6 => channel_config, // 1ch..5.1
+        7 => 8,                  // 7.1
+        _ => return None,        // 0 = carried in the AOT config, not ADTS
+    };
+    let frame_len =
+        (((head[3] & 0x03) as usize) << 11) | ((head[4] as usize) << 3) | ((head[5] >> 5) as usize);
+    (frame_len >= adts_header_len(head[1])).then_some(AdtsHeader {
+        sample_rate,
+        channels,
+        frame_len,
+        profile,
+        freq_index,
+        channel_config,
+    })
+}
+
 /// Recover the channel count and sample rate from either AAC framing: ADTS (the
 /// elementary-stream sync) first, then LOAS/LATM (the MPEG-TS / broadcast sync).
 fn parse_aac(au: &[u8]) -> Option<AacInfo> {
     parse_adts(au).or_else(|| parse_loas(au))
 }
 
-/// Scan `au` for the first valid ADTS header and decode its channel count and
-/// sample rate. `None` if no header parses (no syncword, reserved sampling
-/// index, or a channel configuration that doesn't pin a channel count).
+/// Scan `au` for the first valid ADTS header and take its channel count and
+/// sample rate. `None` if no header parses.
 fn parse_adts(au: &[u8]) -> Option<AacInfo> {
-    // The fixed header is 7 bytes; we read fields up to byte 3.
-    let last = au.len().checked_sub(7)?;
-    for i in 0..=last {
-        // Syncword 0xFFF (12 bits) + layer 00: byte0 all ones, byte1 high
-        // nibble all ones and the two layer bits zero.
-        if au[i] != 0xFF || (au[i + 1] & 0xF6) != 0xF0 {
-            continue;
-        }
-        let b2 = au[i + 2];
-        let b3 = au[i + 3];
-        let freq_index = ((b2 >> 2) & 0x0F) as usize;
-        let channel_config = ((b2 & 0x01) << 2) | (b3 >> 6);
-        let Some(&sample_rate) = SAMPLE_RATES.get(freq_index) else {
-            continue;
-        };
-        let channels = match channel_config {
-            1..=6 => channel_config, // 1ch..5.1
-            7 => 8,                  // 7.1
-            _ => continue,           // 0 = carried in the AOT config, not ADTS
-        };
-        return Some(AacInfo {
-            channels,
-            sample_rate,
-        });
-    }
-    None
+    let last = au.len().checked_sub(ADTS_HEADER_LEN)?;
+    (0..=last).find_map(|i| adts_header(&au[i..]).map(|h| h.info()))
 }
 
 /// A minimal MSB-first bit reader over a byte slice, for the LATM fields (no
@@ -385,26 +633,47 @@ pub fn fuzz_parse(data: &[u8]) {
     let _ = parse_aac(data);
 }
 
+/// Synthetic ADTS access units, shared by the tests of the parser and of the
+/// content sniffer (both need a stream that frames the way a real one does).
 #[cfg(test)]
-mod tests {
-    use super::*;
+pub(crate) mod test_frames {
     use alloc::vec;
+    use alloc::vec::Vec;
 
     /// Build a 7-byte (no-CRC) ADTS header for `channel_config` at
-    /// `freq_index`, followed by `payload_len` zero bytes, framed as one AAC-LC
-    /// access unit.
-    fn adts_frame(channel_config: u8, freq_index: u8, payload_len: usize) -> Vec<u8> {
-        let frame_len = 7 + payload_len;
-        let profile = 1u8; // AAC-LC (AOT 2, profile = AOT - 1)
-        let mut f = vec![0u8; frame_len];
+    /// `freq_index`, followed by `payload_len` bytes of `fill`, framed as one
+    /// AAC-LC access unit.
+    pub(crate) fn adts_frame(
+        channel_config: u8,
+        freq_index: u8,
+        payload_len: usize,
+        fill: u8,
+    ) -> Vec<u8> {
+        /// AAC-LC is AOT 2, and the ADTS profile field is AOT - 1.
+        const PROFILE_AAC_LC: u8 = 1;
+        let frame_len = super::ADTS_HEADER_LEN + payload_len;
+        let mut f = vec![fill; frame_len];
         f[0] = 0xFF;
         f[1] = 0xF1; // syncword low, MPEG-4, layer 00, protection_absent = 1
-        f[2] = (profile << 6) | ((freq_index & 0x0F) << 2) | ((channel_config >> 2) & 0x01);
+        f[2] = (PROFILE_AAC_LC << 6) | ((freq_index & 0x0F) << 2) | ((channel_config >> 2) & 0x01);
         f[3] = ((channel_config & 0x03) << 6) | (((frame_len >> 11) & 0x03) as u8);
         f[4] = ((frame_len >> 3) & 0xFF) as u8;
         f[5] = (((frame_len & 0x07) << 5) as u8) | 0x1F;
         f[6] = 0xFC; // buffer fullness low + num_raw_blocks (0)
         f
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::vec;
+
+    use test_frames::adts_frame as build_adts;
+
+    /// One access unit with a zero payload, the shape most tests here want.
+    fn adts_frame(channel_config: u8, freq_index: u8, payload_len: usize) -> Vec<u8> {
+        build_adts(channel_config, freq_index, payload_len, 0)
     }
 
     #[test]
@@ -579,17 +848,52 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn emits_caps_changed_before_first_data_frame() {
+    /// Push every buffer in `buffers`, then end the stream.
+    async fn run(buffers: &[Vec<u8>]) -> (AacParse, RecordingSink) {
         let mut parse = AacParse::new();
         parse.configure_pipeline(&aac_caps()).unwrap();
         let mut sink = RecordingSink::default();
+        for (seq, bytes) in buffers.iter().enumerate() {
+            parse
+                .process(
+                    PipelinePacket::DataFrame(frame_with_bytes(seq as u64, bytes.clone())),
+                    &mut sink,
+                )
+                .await
+                .unwrap();
+        }
+        parse.process(PipelinePacket::Eos, &mut sink).await.unwrap();
+        (parse, sink)
+    }
 
-        let frame = frame_with_bytes(0, adts_frame(2, 4, 16));
-        parse
-            .process(PipelinePacket::DataFrame(frame), &mut sink)
-            .await
-            .unwrap();
+    /// The (channels, rate) of every `CapsChanged` pushed, in order.
+    fn caps_params(sink: &RecordingSink) -> Vec<(u8, u32)> {
+        sink.packets
+            .iter()
+            .filter_map(|p| match p {
+                PipelinePacket::CapsChanged(Caps::Audio {
+                    channels,
+                    sample_rate,
+                    ..
+                }) => Some((*channels, *sample_rate)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn data_frames(sink: &RecordingSink) -> Vec<&Frame> {
+        sink.packets
+            .iter()
+            .filter_map(|p| match p {
+                PipelinePacket::DataFrame(f) => Some(f),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn emits_caps_changed_before_first_data_frame() {
+        let (parse, sink) = run(&[adts_frame(2, 4, 16)]).await;
 
         assert_eq!(sink.packets.len(), 2, "expected CapsChanged then DataFrame");
         match &sink.packets[0] {
@@ -609,66 +913,98 @@ mod tests {
 
     #[tokio::test]
     async fn does_not_re_emit_caps_when_unchanged() {
-        let mut parse = AacParse::new();
-        parse.configure_pipeline(&aac_caps()).unwrap();
-        let mut sink = RecordingSink::default();
+        let unit = adts_frame(2, 4, 16);
+        let (parse, sink) = run(&[unit.clone(), unit.clone(), unit]).await;
 
-        for seq in 0..3 {
-            let frame = frame_with_bytes(seq, adts_frame(2, 4, 16));
-            parse
-                .process(PipelinePacket::DataFrame(frame), &mut sink)
-                .await
-                .unwrap();
-        }
-
-        let caps_count = sink
-            .packets
-            .iter()
-            .filter(|p| matches!(p, PipelinePacket::CapsChanged(_)))
-            .count();
         assert_eq!(
-            caps_count, 1,
+            caps_params(&sink),
+            vec![(2, 44_100)],
             "CapsChanged fires once for identical ADTS params"
         );
         assert_eq!(parse.caps_changes_emitted(), 1);
+        assert_eq!(parse.frames_emitted(), 3);
     }
 
     #[tokio::test]
     async fn re_emits_caps_on_parameter_change() {
+        // stereo/44100 then mono/48000.
+        let (parse, sink) = run(&[adts_frame(2, 4, 16), adts_frame(1, 3, 8)]).await;
+
+        assert_eq!(caps_params(&sink), vec![(2, 44_100), (1, 48_000)]);
+        assert_eq!(parse.caps_changes_emitted(), 2);
+    }
+
+    #[tokio::test]
+    async fn splits_a_byte_stream_into_access_units() {
+        // An odd chunk size, so access units straddle buffer boundaries.
+        const CHUNK_LEN: usize = 13;
+        const PAYLOAD_LEN: usize = 24;
+        let mut stream = Vec::new();
+        for fill in 0..5u8 {
+            stream.extend(build_adts(2, 4, PAYLOAD_LEN, fill));
+        }
+        let buffers: Vec<Vec<u8>> = stream.chunks(CHUNK_LEN).map(<[u8]>::to_vec).collect();
+        let (parse, sink) = run(&buffers).await;
+
+        assert_eq!(parse.frames_emitted(), 5);
+        let frames = data_frames(&sink);
+        assert!(frames
+            .iter()
+            .all(|f| f.domain.as_system_slice().map(<[u8]>::len)
+                == Some(ADTS_HEADER_LEN + PAYLOAD_LEN)));
+        // Presentation time comes off the running sample count at 1024 samples
+        // an access unit, not a sum of rounded durations.
+        const FRAME_RATE_HZ: u64 = 44_100;
+        let pts = |units: u64| {
+            units * u64::from(SAMPLES_PER_ACCESS_UNIT) * NS_PER_SECOND as u64 / FRAME_RATE_HZ
+        };
+        let times: Vec<u64> = frames.iter().map(|f| f.timing.pts_ns).collect();
+        assert_eq!(times, (0..5).map(pts).collect::<Vec<_>>());
+    }
+
+    #[tokio::test]
+    async fn resynchronizes_past_leading_garbage() {
+        let mut stream = vec![0u8; 20];
+        // A lone sync byte pair that no valid header follows: skipped too.
+        stream.extend_from_slice(&[0xFF, 0xF1, 0x00, 0x00, 0x00, 0x00, 0x00]);
+        for fill in 0..3u8 {
+            stream.extend(build_adts(2, 4, 16, fill));
+        }
+        let (parse, _) = run(&[stream]).await;
+        assert_eq!(parse.frames_emitted(), 3, "every unit behind the garbage");
+    }
+
+    #[tokio::test]
+    async fn drops_a_truncated_tail() {
+        let mut stream = build_adts(2, 4, 16, 0);
+        stream.extend(build_adts(2, 4, 16, 1));
+        stream.extend_from_slice(&build_adts(2, 4, 16, 2)[..10]);
+        let (parse, _) = run(&[stream]).await;
+        assert_eq!(parse.frames_emitted(), 2, "the half unit is not emitted");
+    }
+
+    #[tokio::test]
+    async fn re_bases_on_an_upstream_presentation_time() {
+        const DEMUXER_PTS_NS: u64 = 3_000_000_000;
         let mut parse = AacParse::new();
         parse.configure_pipeline(&aac_caps()).unwrap();
         let mut sink = RecordingSink::default();
-
-        // stereo/44100 then mono/48000.
+        let mut stream = adts_frame(2, 4, 16);
+        stream.extend(adts_frame(2, 4, 16));
+        let frame = Frame::new(
+            MemoryDomain::System(SystemSlice::from_boxed(stream.into_boxed_slice())),
+            FrameTiming {
+                pts_ns: DEMUXER_PTS_NS,
+                ..FrameTiming::default()
+            },
+            0,
+        );
         parse
-            .process(
-                PipelinePacket::DataFrame(frame_with_bytes(0, adts_frame(2, 4, 16))),
-                &mut sink,
-            )
+            .process(PipelinePacket::DataFrame(frame), &mut sink)
             .await
             .unwrap();
-        parse
-            .process(
-                PipelinePacket::DataFrame(frame_with_bytes(1, adts_frame(1, 3, 8))),
-                &mut sink,
-            )
-            .await
-            .unwrap();
-
-        let params: Vec<(u8, u32)> = sink
-            .packets
-            .iter()
-            .filter_map(|p| match p {
-                PipelinePacket::CapsChanged(Caps::Audio {
-                    channels,
-                    sample_rate,
-                    ..
-                }) => Some((*channels, *sample_rate)),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(params, vec![(2, 44_100), (1, 48_000)]);
-        assert_eq!(parse.caps_changes_emitted(), 2);
+        parse.process(PipelinePacket::Eos, &mut sink).await.unwrap();
+        assert_eq!(data_frames(&sink)[0].timing.pts_ns, DEMUXER_PTS_NS);
     }
 
     #[tokio::test]

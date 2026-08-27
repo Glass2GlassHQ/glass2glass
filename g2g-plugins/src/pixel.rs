@@ -13,6 +13,18 @@ pub(crate) fn rgba_rb_offsets(format: RawVideoFormat) -> (usize, usize) {
     }
 }
 
+/// BT.709 luma of an 8-bit RGB triple: 0.2126 R + 0.7152 G + 0.0722 B in 16-bit
+/// fixed point. The grey a packed-RGBA element writes when it drops colour, and
+/// the brightness it tests a pixel by.
+pub(crate) fn bt709_luma(r: u8, g: u8, b: u8) -> u8 {
+    const LUMA_R: u32 = 13938;
+    const LUMA_G: u32 = 46869;
+    const LUMA_B: u32 = 4730;
+    const LUMA_SHIFT: u32 = 16;
+    let luma = (LUMA_R * r as u32 + LUMA_G * g as u32 + LUMA_B * b as u32) >> LUMA_SHIFT;
+    luma.min(u8::MAX as u32) as u8
+}
+
 /// Whether a format's chroma subsampling forces an even (width, height): a
 /// horizontally-subsampled format needs even width, a vertically-subsampled one
 /// needs even height, so a crop / scale stays on chroma-sample boundaries. NV12

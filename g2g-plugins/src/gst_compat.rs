@@ -178,7 +178,89 @@ static GST_MAP: &[(&str, GstEquivalent)] = &[
     // table; only the wider N-band equalizers need a pointer.
     ("equalizer-10bands", GstEquivalent::Renamed("equalizer-3bands")),
     ("equalizer-nbands", GstEquivalent::Renamed("equalizer-3bands")),
+    // gst's `ccextractor` passes the video through and puts the captions on a
+    // second source pad; `ccextract` consumes the access units, so it sits on a
+    // tee branch instead of in line.
+    ("ccextractor", GstEquivalent::Unsupported(
+        "`ccextract` mines the same CEA-608 / CEA-708 `cc_data`, but it consumes the access \
+         units instead of passing the video through: tee the parser output, one branch to the \
+         decoder and one to `ccextract`",
+    )),
+    // WebRTC is one element per role rather than one bin with request pads, and
+    // the SRTP / DTLS elements have no standalone counterpart at all.
+    ("webrtcbin", GstEquivalent::Unsupported(
+        "no WebRTC bin; publish with `webrtcsink` (one stream) or `webrtcsessionsink` (one \
+         session, one pad per stream), and receive with `webrtcsrc` (WHEP) or \
+         `webrtcwhepsessionsrc` (one pad per track)",
+    )),
+    ("srtpenc", GstEquivalent::Unsupported(WEBRTC_SECURITY_HINT)),
+    ("srtpdec", GstEquivalent::Unsupported(WEBRTC_SECURITY_HINT)),
+    ("dtlsenc", GstEquivalent::Unsupported(WEBRTC_SECURITY_HINT)),
+    ("dtlsdec", GstEquivalent::Unsupported(WEBRTC_SECURITY_HINT)),
+    ("dtlssrtpenc", GstEquivalent::Unsupported(WEBRTC_SECURITY_HINT)),
+    ("dtlssrtpdec", GstEquivalent::Unsupported(WEBRTC_SECURITY_HINT)),
+    // Subtitle overlays: g2g splits by cue type (text or bitmap) and takes the
+    // decoder as a separate element, so no one name covers gst's bins.
+    ("subtitleoverlay", GstEquivalent::Unsupported(
+        "pick the overlay the cues need: `textoverlay` for timed text (video on input 0, \
+         `Text{Utf8}` on input 1) and `subpictureoverlay` for bitmap subpictures",
+    )),
+    ("dvbsuboverlay", GstEquivalent::Unsupported(
+        "decode the subpictures first: `dvbsubdec ! subpictureoverlay`, with the video on the \
+         overlay's other input",
+    )),
+    ("dvdspu", GstEquivalent::Unsupported(
+        "decode the subpictures first: `vobsubdec ! subpictureoverlay`, with the video on the \
+         overlay's other input",
+    )),
+    ("ssaparse", GstEquivalent::Unsupported(
+        "`subparse` reads SRT and WebVTT only; convert SSA / ASS cues to SRT first",
+    )),
+    ("subparse_typefind", GstEquivalent::Unsupported(
+        "a gst typefind function, not an element; `typefind` sniffs the stream and `subparse` \
+         parses the SRT / WebVTT cues",
+    )),
+    // Inference lives in `g2g-ml`, which the standard registry does not carry.
+    ("onnxinference", GstEquivalent::Unsupported(
+        "ONNX inference is the `g2g-ml` crate's `ortinfer` element (its `ort` feature), not a \
+         `g2g-plugins` one",
+    )),
+    ("streamiddemux", GstEquivalent::Unsupported(
+        "no stream-id splitter; a demuxer's output pads are already one per stream \
+         (`tsdemux name=d  d.video_0 ! ...`), and `output-selector` switches one input between \
+         output pads at run time",
+    )),
+    ("dashsink", GstEquivalent::Unsupported(
+        "no DASH packager; `hlssink` is the packaging sink (`... ! tsmux ! hlssink`) and \
+         `dashsrc` is the DASH client",
+    )),
+    ("sdpsrc", GstEquivalent::Unsupported(SDP_HINT)),
+    ("sdpdemux", GstEquivalent::Unsupported(SDP_HINT)),
+    // `av1dec` is also a registry alias (like `avdec_av1`), so this row only
+    // speaks when neither AV1 decoder feature is built.
+    ("av1dec", GstEquivalent::Renamed("dav1ddec")),
+    ("dynudpsink", GstEquivalent::Unsupported(
+        "`udpsink` sends to destinations fixed at configure time (`host` / `port`, or the \
+         `clients` list); it reads no per-buffer destination",
+    )),
+    ("bin", GstEquivalent::Unsupported(BIN_HINT)),
+    ("pipeline", GstEquivalent::Unsupported(BIN_HINT)),
 ];
+
+/// The answer for every gst SRTP / DTLS element name.
+const WEBRTC_SECURITY_HINT: &str =
+    "SRTP and DTLS are inside the `webrtc*` elements (`webrtcsink`, `webrtcsessionsink`, \
+     `webrtcsrc`, `webrtcwhepsessionsrc`), which run the handshake and key the media \
+     themselves; there is no standalone encryption element";
+
+/// The answer for the gst SDP source names.
+const SDP_HINT: &str =
+    "`udpsrc sdp=<document text or .sdp path>` reads the description and takes its codec, \
+     geometry, frame rate and receive port from it";
+
+/// The answer for gst's `bin` / `pipeline` grouping keywords.
+const BIN_HINT: &str = "g2g flattens bins, and the parser does not accept the `bin.( ... )` \
+                        grouping syntax: write the elements in line";
 
 /// The GStreamer plugins whose element names come in whole families (90 `rtp*pay`
 /// / `rtp*depay` names, 48 `gl*` names, one `*tv` name per effectv filter), where
@@ -471,11 +553,16 @@ fn same_word(left: &str, right: &str) -> bool {
 }
 
 /// Whether `name` resolves to a registered element of any role (transform/sink,
-/// source, or muxer), aliases included.
+/// source, muxer, fan-out demuxer, or terminal fan-out source), aliases
+/// included. The fan-in / fan-out roles are built with the smallest pad count
+/// the parser would ever give them, since only their existence is asked here.
 fn registry_has(registry: &Registry, name: &str) -> bool {
+    const PROBE_PADS: usize = 2;
     registry.make_element(name).is_some()
         || registry.make_source(name).is_some()
-        || registry.make_muxer(name, 2).is_some()
+        || registry.make_muxer(name, PROBE_PADS).is_some()
+        || registry.make_demux(name, PROBE_PADS).is_some()
+        || registry.make_fanout_src(name, PROBE_PADS).is_some()
 }
 
 /// The result of linting a `gst-launch` line for g2g portability.
@@ -921,6 +1008,109 @@ mod tests {
             gst_equivalent(&reg, "autovideosrc"),
             GstEquivalent::Available
         );
+    }
+
+    /// The fan-out roles are registered through their own factory lists, so the
+    /// registry lookup has to ask those too or a registered demuxer reads as
+    /// unknown.
+    #[test]
+    fn fan_out_factories_count_as_registered() {
+        let reg = default_registry();
+        for name in ["output-selector", "deinterleave"] {
+            assert_eq!(
+                gst_equivalent(&reg, name),
+                GstEquivalent::Available,
+                "`{name}` is a registered fan-out factory"
+            );
+        }
+    }
+
+    /// Every gst name g2g covers under another name has to reach an answer: a
+    /// typo suggestion or a blank "unknown" is not one.
+    #[test]
+    fn the_covered_gst_names_all_reach_an_answer() {
+        let reg = default_registry();
+        for name in [
+            "ccextractor",
+            "webrtcbin",
+            "subtitleoverlay",
+            "dvbsuboverlay",
+            "dvdspu",
+            "ssaparse",
+            "subparse_typefind",
+            "onnxinference",
+            "output-selector",
+            "streamiddemux",
+            "dashsink",
+            "sdpsrc",
+            "sdpdemux",
+            "srtpenc",
+            "srtpdec",
+            "dtlsenc",
+            "dtlsdec",
+            "dtlssrtpenc",
+            "dtlssrtpdec",
+            "av1dec",
+            "multiudpsink",
+            "dynudpsink",
+            "bin",
+            "pipeline",
+        ] {
+            let answer = gst_equivalent(&reg, name);
+            assert!(
+                !matches!(
+                    answer,
+                    GstEquivalent::Unknown | GstEquivalent::DidYouMean(_)
+                ),
+                "`{name}` answered {answer:?}"
+            );
+        }
+    }
+
+    /// The guidance rows have to name the g2g path, not just say no.
+    #[test]
+    fn the_covered_name_hints_name_the_g2g_path() {
+        let reg = default_registry();
+        for (name, needle) in [
+            ("ccextractor", "ccextract"),
+            ("webrtcbin", "webrtcsessionsink"),
+            ("subtitleoverlay", "subpictureoverlay"),
+            ("dvbsuboverlay", "dvbsubdec"),
+            ("dvdspu", "vobsubdec"),
+            ("ssaparse", "subparse"),
+            ("subparse_typefind", "typefind"),
+            ("onnxinference", "ortinfer"),
+            ("streamiddemux", "output-selector"),
+            ("dashsink", "hlssink"),
+            ("sdpdemux", "udpsrc sdp="),
+            ("dtlssrtpenc", "webrtcsink"),
+            ("dynudpsink", "udpsink"),
+            ("pipeline", "flattens bins"),
+        ] {
+            let GstEquivalent::Unsupported(hint) = gst_equivalent(&reg, name) else {
+                panic!("`{name}` must carry a hint");
+            };
+            assert!(hint.contains(needle), "`{name}`: {hint}");
+        }
+    }
+
+    /// `av1dec` and `multiudpsink` are registry aliases, so they answer
+    /// `Available` in a build with the target and name the way to it otherwise.
+    #[test]
+    fn the_av1_and_multicast_aliases_answer_either_way() {
+        let reg = default_registry();
+        let expected = if cfg!(any(feature = "dav1d", feature = "rav1d")) {
+            GstEquivalent::Available
+        } else {
+            GstEquivalent::Renamed("dav1ddec")
+        };
+        assert_eq!(gst_equivalent(&reg, "av1dec"), expected);
+        let expected = if cfg!(feature = "udp-egress") {
+            GstEquivalent::Available
+        } else {
+            GstEquivalent::NotCompiled("udp-egress")
+        };
+        assert_eq!(gst_equivalent(&reg, "multiudpsink"), expected);
     }
 
     #[test]

@@ -35,6 +35,9 @@ use g2g_plugins::id3demux::Id3Demux;
 use g2g_plugins::mpegaudioparse::MpegAudioParse;
 use g2g_plugins::registry::default_registry;
 
+mod ffprobe;
+use ffprobe::{fixture_path, Probe};
+
 /// The stereo fixture: an ID3v2.3 tag, a Xing header frame, then the audio.
 const STEREO_FIXTURE: &str = "mp3_stereo_44100_id3v2.mp3";
 /// The mono fixture: an ID3v2.4 tag and an ID3v1 trailer around the audio.
@@ -48,68 +51,6 @@ struct ZeroClock;
 impl PipelineClock for ZeroClock {
     fn now_ns(&self) -> u64 {
         0
-    }
-}
-
-fn fixture_path(name: &str) -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures")
-        .join(name)
-}
-
-/// What the checked-in `ffprobe` output says about a fixture.
-struct Probe {
-    sample_rate: u32,
-    channels: u8,
-    /// Frames ffmpeg's demuxer reads, the count the parser must match (its
-    /// demuxer drops the Xing header frame too).
-    frames: u64,
-    duration_seconds: f64,
-    title: String,
-    artist: String,
-}
-
-impl Probe {
-    /// Read the `ffprobe -of json` output checked in beside a fixture. The
-    /// fixtures are single-stream, so the first value of each key is the one
-    /// wanted and the reader needs no JSON object model.
-    fn read(name: &str) -> Probe {
-        let path = fixture_path(name).with_extension("json");
-        let json = std::fs::read_to_string(&path).expect("the probe output is checked in");
-        let value =
-            |key: &str| json_value(&json, key).unwrap_or_else(|| panic!("{key} in {path:?}"));
-        Probe {
-            sample_rate: value("sample_rate").parse().expect("a sample rate"),
-            channels: value("channels").parse().expect("a channel count"),
-            frames: value("nb_read_frames").parse().expect("a frame count"),
-            duration_seconds: value("duration").parse().expect("a duration"),
-            title: value("title"),
-            artist: value("artist"),
-        }
-    }
-
-    fn caps(&self) -> Caps {
-        Caps::Audio {
-            format: AudioFormat::Mp3,
-            channels: self.channels,
-            sample_rate: self.sample_rate,
-        }
-    }
-}
-
-/// The value of `"key"` in `json`, as text: a quoted string without its quotes,
-/// or a bare number.
-fn json_value(json: &str, key: &str) -> Option<String> {
-    let at = json.find(&format!("\"{key}\""))? + key.len() + 2;
-    let rest = json[at..].trim_start().strip_prefix(':')?.trim_start();
-    match rest.strip_prefix('"') {
-        Some(quoted) => Some(quoted[..quoted.find('"')?].to_string()),
-        None => Some(
-            rest[..rest.find([',', '\n', '}'])?]
-                .trim()
-                .trim_end_matches(',')
-                .to_string(),
-        ),
     }
 }
 
@@ -226,7 +167,7 @@ async fn parsed_frames_carry_the_probed_caps_timing_and_tags() {
     assert_eq!(sink.frames.len() as u64, probe.frames);
     assert_eq!(
         sink.caps,
-        vec![probe.caps()],
+        vec![probe.audio_caps(AudioFormat::Mp3)],
         "the concrete caps are announced once, before the first frame"
     );
 
@@ -254,8 +195,8 @@ async fn parsed_frames_carry_the_probed_caps_timing_and_tags() {
     assert_eq!(
         posted[0].tags()[..2],
         [
-            Tag::Title(probe.title.clone()),
-            Tag::Artist(probe.artist.clone())
+            Tag::Title(probe.text("title")),
+            Tag::Artist(probe.text("artist"))
         ],
         "the ID3v2 text frames reach the bus"
     );
@@ -289,11 +230,11 @@ async fn id3demux_posts_the_tags_and_the_parser_then_finds_none() {
     feed(&mut parser, &payload, &mut parsed).await;
 
     assert_eq!(parsed.frames.len() as u64, probe.frames);
-    assert_eq!(parsed.caps, vec![probe.caps()]);
+    assert_eq!(parsed.caps, vec![probe.audio_caps(AudioFormat::Mp3)]);
     let demuxed = posted_tags(&demux_bus);
     assert_eq!(demuxed.len(), 1, "id3demux posts the tags once");
-    assert_eq!(demuxed[0].tags()[0], Tag::Title(probe.title.clone()));
-    assert_eq!(demuxed[0].tags()[1], Tag::Artist(probe.artist.clone()));
+    assert_eq!(demuxed[0].tags()[0], Tag::Title(probe.text("title")));
+    assert_eq!(demuxed[0].tags()[1], Tag::Artist(probe.text("artist")));
     assert!(
         posted_tags(&parser_bus).is_empty(),
         "the stripped stream carries no tags, so nothing is posted twice"
@@ -443,7 +384,7 @@ mod decode {
 
         let mut decoder = FfmpegAudioDec::new();
         decoder
-            .configure_pipeline(&probe.caps())
+            .configure_pipeline(&probe.audio_caps(AudioFormat::Mp3))
             .expect("the decoder takes the parsed caps");
         let mut pcm = CaptureSink::default();
         for frame in parsed.frames {

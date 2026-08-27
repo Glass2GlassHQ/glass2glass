@@ -33,15 +33,14 @@ use std::net::{
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
-use g2g_core::frame::Frame;
-use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
     AsyncElement, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
-    ElementMetadata, FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
-    PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
+    ElementMetadata, G2gError, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
+    PropKind, PropValue, PropertySpec,
 };
 
+use crate::bytestream::byte_frame;
 use crate::filesink::io_err;
 use crate::filesrc::{encoding_from_str, encoding_to_str};
 
@@ -230,20 +229,6 @@ impl BoundListener {
             self.adopted = Some(TcpListener::from_std(bound).map_err(io_err)?);
         }
         self.adopted.as_ref().ok_or(G2gError::NotConfigured)
-    }
-}
-
-/// A frame carrying `bytes`, stamped and sequenced the way [`FileSrc`] stamps a
-/// file chunk, so both byte sources look identical downstream.
-fn byte_frame(bytes: Vec<u8>, sequence: u64) -> Frame {
-    Frame {
-        domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
-        timing: FrameTiming {
-            arrival_ns: g2g_core::metrics::monotonic_ns(),
-            ..FrameTiming::default()
-        },
-        sequence,
-        meta: Default::default(),
     }
 }
 

@@ -25,12 +25,10 @@ use g2g_core::{
     PropValue, PropertySpec,
 };
 
+use crate::random::{next_random, XORSHIFT_BASE_STATE};
+
 /// gst `fakesrc`'s `sizemax` default.
 const DEFAULT_BUFFER_SIZE: usize = 4096;
-
-/// Seed of the `filltype=random` generator, fixed so two runs of the same
-/// pipeline produce the same bytes.
-const RANDOM_SEED: u32 = 0x2545_f491;
 
 /// How each emitted buffer is filled.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -41,7 +39,7 @@ pub enum FillType {
     Nothing,
     /// Zeros.
     Zero,
-    /// A deterministic xorshift sequence, seeded from [`RANDOM_SEED`].
+    /// A deterministic xorshift sequence, the same bytes on every run.
     Random,
     /// A byte counter `0x00 -> 0xff`, restarting at each buffer.
     Pattern,
@@ -120,7 +118,7 @@ impl SourceLoop for FakeSrc {
             if !self.configured {
                 return Err(G2gError::NotConfigured);
             }
-            let mut random_state = RANDOM_SEED;
+            let mut random_state = XORSHIFT_BASE_STATE;
             let mut sequence = 0u64;
             while sequence < self.target_buffers {
                 let mut buf = vec![0u8; self.buffer_size].into_boxed_slice();
@@ -250,15 +248,4 @@ fn fill_buffer(fill: FillType, buf: &mut [u8], random_state: &mut u32) {
             }
         }
     }
-}
-
-/// Marsaglia xorshift32. Deterministic and dependency-free, which is all a fill
-/// pattern needs; it is not a source of randomness for anything else.
-fn next_random(state: &mut u32) -> u32 {
-    let mut x = *state;
-    x ^= x << 13;
-    x ^= x >> 17;
-    x ^= x << 5;
-    *state = x;
-    x
 }

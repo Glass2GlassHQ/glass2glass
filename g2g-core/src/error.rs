@@ -40,6 +40,9 @@ pub enum G2gError {
     /// mid-run. The offending node and property are named on the log's runtime
     /// category.
     ControlBinding,
+    /// No data reached an element within the time it was given: the `watchdog`
+    /// transform's `timeout` elapsed with the stream stalled.
+    Timeout,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

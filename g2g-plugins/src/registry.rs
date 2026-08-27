@@ -26,6 +26,7 @@ use g2g_core::runtime::{ElementFactory, LaunchFactory, MuxerFactory, Registry, S
 use g2g_core::{AudioFormat, ByteStreamEncoding, Caps, Dim, Rate, RawVideoFormat};
 
 use crate::aacparse::AacParse;
+use crate::ac3parse::Ac3Parse;
 use crate::adpcm::{AdpcmDec, AdpcmEnc};
 use crate::alpha::Alpha;
 use crate::audioconvert::AudioConvert;
@@ -80,6 +81,7 @@ use crate::vp8parse::Vp8Parse;
 use crate::vp9parse::Vp9Parse;
 use crate::wavenc::WavEnc;
 use crate::wavparse::WavParse;
+use crate::y4m::{Y4mDec, Y4mEnc};
 
 // Feature- (and platform-) gated elements, registered when their feature is on so
 // `gst-inspect`, `gst-inspect --all`, and `parse_launch` see them. Each registers
@@ -177,6 +179,8 @@ use crate::rtspserversrc::RtspServerSrc;
 #[cfg(feature = "rtsp")]
 use crate::rtspsrc::RtspSrc;
 use crate::scaletempo::ScaleTempo;
+#[cfg(all(unix, feature = "shm"))]
+use crate::shm::{ShmSink, ShmSrc};
 #[cfg(feature = "srt")]
 use crate::srtsink::SrtSink;
 #[cfg(feature = "srt")]
@@ -224,8 +228,9 @@ use crate::{opusdec::OpusDec, opusenc::OpusEnc};
 /// re-framing form). Returns `None` for codecs without a re-framing parser (the
 /// input decodes directly). H.264 (M421) and H.265 (M425) re-frame to one access
 /// unit per packet; FLAC frame-aligns via `flacparse` (M775, a bare `.flac` byte
-/// stream carries no frame lengths) and MPEG audio via `mpegaudioparse` (M1065,
-/// one self-syncing frame per packet); other audio decodes directly.
+/// stream carries no frame lengths), and MPEG audio, AAC and AC-3 frame-align via
+/// `mpegaudioparse` / `aacparse` / `ac3parse` (M1065, M1074: one self-syncing
+/// frame per packet); other audio decodes directly.
 fn decode_parser_provider(input: &Caps) -> Option<&'static str> {
     match input {
         Caps::CompressedVideo {
@@ -244,6 +249,14 @@ fn decode_parser_provider(input: &Caps) -> Option<&'static str> {
             format: AudioFormat::Mp2 | AudioFormat::Mp3,
             ..
         } => Some("mpegaudioparse"),
+        Caps::Audio {
+            format: AudioFormat::Aac,
+            ..
+        } => Some("aacparse"),
+        Caps::Audio {
+            format: AudioFormat::Ac3,
+            ..
+        } => Some("ac3parse"),
         _ => None,
     }
 }
@@ -422,6 +435,20 @@ pub fn default_registry() -> Registry {
     reg.register_launch(LaunchFactory::of::<WavParse>("wavparse", || {
         Box::new(WavParse::new())
     }));
+    reg.register_launch(LaunchFactory::of::<Y4mEnc>("y4menc", || {
+        Box::new(Y4mEnc::new())
+    }));
+    reg.register_launch(LaunchFactory::of::<Y4mDec>("y4mdec", || {
+        Box::new(Y4mDec::new())
+    }));
+    reg.register_launch(LaunchFactory::of::<crate::multipart::MultipartDemux>(
+        "multipartdemux",
+        || Box::new(crate::multipart::MultipartDemux::new()),
+    ));
+    reg.register_launch(LaunchFactory::of::<crate::multipart::MultipartMux>(
+        "multipartmux",
+        || Box::new(crate::multipart::MultipartMux::new()),
+    ));
     reg.register_launch(LaunchFactory::of::<VideoCrop>("videocrop", || {
         Box::new(VideoCrop::new(0, 0, 0, 0))
     }));
@@ -431,6 +458,39 @@ pub fn default_registry() -> Registry {
     reg.register_launch(LaunchFactory::of::<VideoBalance>("videobalance", || {
         Box::new(VideoBalance::new())
     }));
+    // Software video effects (M1084).
+    reg.register_launch(
+        LaunchFactory::of::<crate::aspectratiocrop::AspectRatioCrop>("aspectratiocrop", || {
+            Box::new(crate::aspectratiocrop::AspectRatioCrop::new())
+        }),
+    );
+    reg.register_launch(LaunchFactory::of::<crate::chromahold::ChromaHold>(
+        "chromahold",
+        || Box::new(crate::chromahold::ChromaHold::new()),
+    ));
+    reg.register_launch(LaunchFactory::of::<crate::coloreffects::ColorEffects>(
+        "coloreffects",
+        || Box::new(crate::coloreffects::ColorEffects::new()),
+    ));
+    reg.register_launch(LaunchFactory::of::<crate::gaussianblur::GaussianBlur>(
+        "gaussianblur",
+        || Box::new(crate::gaussianblur::GaussianBlur::new()),
+    ));
+    reg.register_launch(LaunchFactory::of::<crate::smooth::Smooth>("smooth", || {
+        Box::new(crate::smooth::Smooth::new())
+    }));
+    reg.register_launch(LaunchFactory::of::<crate::videodiff::VideoDiff>(
+        "videodiff",
+        || Box::new(crate::videodiff::VideoDiff::new()),
+    ));
+    reg.register_launch(LaunchFactory::of::<crate::videomedian::VideoMedian>(
+        "videomedian",
+        || Box::new(crate::videomedian::VideoMedian::new()),
+    ));
+    reg.register_launch(LaunchFactory::of::<crate::zebrastripe::ZebraStripe>(
+        "zebrastripe",
+        || Box::new(crate::zebrastripe::ZebraStripe::new()),
+    ));
     reg.register_launch(LaunchFactory::of::<Alpha>("alpha", || {
         Box::new(Alpha::new())
     }));
@@ -584,6 +644,71 @@ pub fn default_registry() -> Registry {
         "audioecho",
         || Box::new(crate::audioecho::AudioEcho::new()),
     ));
+    reg.register_launch(LaunchFactory::of::<crate::audiodynamic::AudioDynamic>(
+        "audiodynamic",
+        || Box::new(crate::audiodynamic::AudioDynamic::new()),
+    ));
+    reg.register_launch(LaunchFactory::of::<crate::audioinvert::AudioInvert>(
+        "audioinvert",
+        || Box::new(crate::audioinvert::AudioInvert::new()),
+    ));
+    reg.register_launch(LaunchFactory::of::<crate::audiokaraoke::AudioKaraoke>(
+        "audiokaraoke",
+        || Box::new(crate::audiokaraoke::AudioKaraoke::new()),
+    ));
+    reg.register_launch(
+        LaunchFactory::of::<crate::audiowsinclimit::AudioWsincLimit>("audiowsinclimit", || {
+            Box::new(crate::audiowsinclimit::AudioWsincLimit::new())
+        }),
+    );
+    reg.register_launch(LaunchFactory::of::<crate::audiowsincband::AudioWsincBand>(
+        "audiowsincband",
+        || Box::new(crate::audiowsincband::AudioWsincBand::new()),
+    ));
+    reg.register_launch(LaunchFactory::of::<crate::audiocheblimit::AudioChebLimit>(
+        "audiocheblimit",
+        || Box::new(crate::audiocheblimit::AudioChebLimit::new()),
+    ));
+    reg.register_launch(LaunchFactory::of::<crate::audiochebband::AudioChebBand>(
+        "audiochebband",
+        || Box::new(crate::audiochebband::AudioChebBand::new()),
+    ));
+    // Channel mixers, generic-coefficient filters, re-framer and rate changer
+    // (M1085). `audiofirfilter` / `audioiirfilter` take their coefficients as
+    // comma-separated lists and `audiomixmatrix` its rows separated by `;`,
+    // since `PropKind` has no array kind.
+    reg.register_launch(
+        LaunchFactory::of::<crate::audiochannelmix::AudioChannelMix>("audiochannelmix", || {
+            Box::new(crate::audiochannelmix::AudioChannelMix::new())
+        }),
+    );
+    reg.register_launch(LaunchFactory::of::<crate::audiomixmatrix::AudioMixMatrix>(
+        "audiomixmatrix",
+        || Box::new(crate::audiomixmatrix::AudioMixMatrix::new()),
+    ));
+    reg.register_launch(LaunchFactory::of::<crate::stereo::Stereo>("stereo", || {
+        Box::new(crate::stereo::Stereo::new())
+    }));
+    reg.register_launch(LaunchFactory::of::<crate::audiofirfilter::AudioFirFilter>(
+        "audiofirfilter",
+        || Box::new(crate::audiofirfilter::AudioFirFilter::new()),
+    ));
+    reg.register_launch(LaunchFactory::of::<crate::audioiirfilter::AudioIirFilter>(
+        "audioiirfilter",
+        || Box::new(crate::audioiirfilter::AudioIirFilter::new()),
+    ));
+    reg.register_launch(LaunchFactory::of::<crate::removesilence::RemoveSilence>(
+        "removesilence",
+        || Box::new(crate::removesilence::RemoveSilence::new()),
+    ));
+    reg.register_launch(
+        LaunchFactory::of::<crate::audiobuffersplit::AudioBufferSplit>("audiobuffersplit", || {
+            Box::new(crate::audiobuffersplit::AudioBufferSplit::new())
+        }),
+    );
+    reg.register_launch(LaunchFactory::of::<crate::speed::Speed>("speed", || {
+        Box::new(crate::speed::Speed::new())
+    }));
     // Level meter + silence detector (passthrough analyzers): measurements are
     // read via getters, the g2g analog of gst posting them on the bus.
     reg.register_launch(LaunchFactory::of::<crate::level::Level>("level", || {
@@ -680,6 +805,9 @@ pub fn default_registry() -> Registry {
         "mpegaudioparse",
         || Box::new(MpegAudioParse::new()),
     ));
+    reg.register_launch(LaunchFactory::of::<Ac3Parse>("ac3parse", || {
+        Box::new(Ac3Parse::new())
+    }));
     // Takes any byte stream (the tags are not part of the media type), so it
     // declares no pad templates, the way `typefind` does.
     reg.register_launch(LaunchFactory::new("id3demux", Vec::new(), || {
@@ -732,6 +860,40 @@ pub fn default_registry() -> Registry {
     // Progress report passthrough: counts frames / bytes, logs periodically.
     reg.register_launch(LaunchFactory::new("progressreport", Vec::new(), || {
         Box::new(crate::progressreport::ProgressReport::new())
+    }));
+    // Stall detector (M1077): `watchdog timeout=2000` fails a run whose source
+    // went silent. No pad templates, like `identity`.
+    reg.register_launch(LaunchFactory::new("watchdog", Vec::new(), || {
+        Box::new(crate::watchdog::Watchdog::new())
+    }));
+    // Caps rewriter (M1077): `capssetter caps="video/x-raw,framerate=60/1"`
+    // corrects what a source declared, without touching the data.
+    reg.register_launch(LaunchFactory::new("capssetter", Vec::new(), || {
+        Box::new(crate::capssetter::CapsSetter::new())
+    }));
+    // Tag injector (M1077): posts a hand-written tag list on the bus.
+    reg.register_launch(LaunchFactory::new("taginject", Vec::new(), || {
+        Box::new(crate::taginject::TagInject::new())
+    }));
+    // Byte-stream re-chunker (M1077): randomly sized buffers, for shaking out a
+    // parser that depends on where its input is cut.
+    reg.register_launch(LaunchFactory::new("rndbuffersize", Vec::new(), || {
+        Box::new(crate::rndbuffersize::RndBufferSize::new())
+    }));
+    // Byte-stream re-chunker (M1083): the step-aligned sibling of
+    // `rndbuffersize`, so every cut lands on `step-size`.
+    reg.register_launch(LaunchFactory::new("chopmydata", Vec::new(), || {
+        Box::new(crate::chopmydata::ChopMyData::new())
+    }));
+    // Byte corrupter (M1083): `breakmydata probability=0.01 seed=7` proves a
+    // parser downstream fails the parse instead of panicking.
+    reg.register_launch(LaunchFactory::new("breakmydata", Vec::new(), || {
+        Box::new(crate::breakmydata::BreakMyData::new())
+    }));
+    // Failure absorber (M1083): keeps the run going when the branch below it
+    // dies. No pad templates, like `identity`.
+    reg.register_launch(LaunchFactory::new("errorignore", Vec::new(), || {
+        Box::new(crate::errorignore::ErrorIgnore::new())
     }));
     // A/V offset (M385): shifts PTS/DTS by `offset=` ns; the av-offset sync knob.
     reg.register_launch(LaunchFactory::new("avoffset", Vec::new(), || {
@@ -905,6 +1067,28 @@ pub fn default_registry() -> Registry {
     // Sinks.
     reg.register_launch(LaunchFactory::of::<FakeSink>("fakesink", || {
         Box::new(FakeSink::new())
+    }));
+    // The media-typed fake sinks (M1083): `fakesink` behind a pad that takes
+    // only decoded video / only PCM, so a branch whose decode is missing fails
+    // to negotiate instead of being silently swallowed.
+    reg.register_launch(LaunchFactory::of::<crate::fakemediasink::FakeVideoSink>(
+        "fakevideosink",
+        || Box::new(crate::fakemediasink::FakeVideoSink::new()),
+    ));
+    reg.register_launch(LaunchFactory::of::<crate::fakemediasink::FakeAudioSink>(
+        "fakeaudiosink",
+        || Box::new(crate::fakemediasink::FakeAudioSink::new()),
+    ));
+    // Digest sink (M1083): one `<pts> <digest>` line per buffer, for checking a
+    // codec change is bit-exact.
+    reg.register_launch(LaunchFactory::of::<crate::checksumsink::ChecksumSink>(
+        "checksumsink",
+        || Box::new(crate::checksumsink::ChecksumSink::new()),
+    ));
+    // Frame-rate reporter (M1083): wraps the display sink `video-sink` names and
+    // reports the rate it achieves.
+    reg.register_launch(LaunchFactory::new("fpsdisplaysink", Vec::new(), || {
+        Box::new(crate::fpsdisplaysink::FpsDisplaySink::new())
     }));
     // Application pull/callback sink (M233): hands buffers to a callback set via
     // `appsink::set_appsink_callback`.
@@ -1093,6 +1277,9 @@ fn register_autoplug_candidates(reg: &mut Registry) {
         "mpegaudioparse",
         |_| Box::new(MpegAudioParse::new()),
     ));
+    reg.register(ElementFactory::of::<Ac3Parse>("ac3parse", |_| {
+        Box::new(Ac3Parse::new())
+    }));
     reg.register(ElementFactory::of::<AacParse>("aacparse", |_| {
         Box::new(AacParse::new())
     }));
@@ -1140,6 +1327,18 @@ fn register_autoplug_candidates(reg: &mut Registry) {
     reg.register(ElementFactory::of::<WavParse>("wavparse", |_| {
         Box::new(WavParse::new())
     }));
+    // YUV4MPEG2 (M1076): `ByteStream{Y4m}` -> the raw frames it carries, so
+    // `filesrc location=x.y4m ! decodebin` auto-plugs this.
+    reg.register(ElementFactory::of::<Y4mDec>("y4mdec", |_| {
+        Box::new(Y4mDec::new())
+    }));
+    // MIME multipart (M1080): `ByteStream{Multipart}` -> the JPEG parts it
+    // carries, so `httpsrc bytestream-format=multipart ! decodebin` auto-plugs
+    // this ahead of the JPEG decoder.
+    reg.register(ElementFactory::of::<crate::multipart::MultipartDemux>(
+        "multipartdemux",
+        |_| Box::new(crate::multipart::MultipartDemux::new()),
+    ));
     reg.register(ElementFactory::of::<Fmp4Demux>("fmp4demux", |_| {
         Box::new(Fmp4Demux::new())
     }));
@@ -1531,6 +1730,10 @@ fn register_aliases(reg: &mut Registry) {
     );
     // gst's name for the DVD subpicture decoder.
     reg.register_alias("dvdsubdec", &["vobsubdec"]);
+    // `udpsink` takes the `clients` list gst splits into a second element.
+    // `dynudpsink` is not an alias: its destination rides on per-buffer metadata,
+    // which this sink has no equivalent of.
+    reg.register_alias("multiudpsink", &["udpsink"]);
     // gst's macOS audio element names.
     reg.register_alias("osxaudiosink", &["coreaudiosink", "fakesink"]);
     reg.register_alias("osxaudiosrc", &["coreaudiosrc"]);
@@ -1554,9 +1757,11 @@ fn register_aliases(reg: &mut Registry) {
     // the ffmpeg feature.
     reg.register_alias("avdec_h264", &["ffmpegdec", "vtdec"]);
     reg.register_alias("vaapih264dec", &["ffmpegvaapidec", "vaapidec"]);
-    // AV1 decode: gst's libav name -> the libdav1d decoder, falling back to the
-    // pure-Rust re_rav1d decoder when only the `rav1d` feature is built.
+    // AV1 decode: gst's libav name and its aom plugin name -> the libdav1d
+    // decoder, falling back to the pure-Rust re_rav1d decoder when only the
+    // `rav1d` feature is built.
     reg.register_alias("avdec_av1", &["dav1ddec", "rav1ddec"]);
+    reg.register_alias("av1dec", &["dav1ddec", "rav1ddec"]);
     reg.register_alias("vah264dec", &["ffmpegvaapidec", "vaapidec"]);
     // H.265 has no ffmpeg VAAPI hwaccel element here, so both gst names go
     // straight to the cros-codecs decoder.
@@ -1673,6 +1878,9 @@ pub static FEATURE_GATED_ELEMENTS: &[FeatureGatedElement] = &{
         "onvifsrc" => "onvif";
         "udpsrc" => "udp-ingress";
         "udpsink" => "udp-egress";
+        // The alias needs its own row: without `udp-egress` there is no
+        // `udpsink` for it to resolve to, so the name reads as unknown.
+        "multiudpsink" => "udp-egress";
         "cotsink" => "udp-egress";
         "rtspserversink" => "rtsp-server";
         "rtspserversrc" => "rtsp-server";
@@ -1683,6 +1891,8 @@ pub static FEATURE_GATED_ELEMENTS: &[FeatureGatedElement] = &{
         "tcpclientsrc" => "tcp";
         "tcpserversink" => "tcp";
         "tcpclientsink" => "tcp";
+        "shmsrc" => "shm";
+        "shmsink" => "shm";
         "remotesrc" => "remote";
         "remotesink" => "remote";
         "remotewssrc" => "remote-ws";
@@ -1909,6 +2119,17 @@ fn register_feature_gated(reg: &mut Registry) {
         },
         || Box::new(TcpClientSrc::default()),
     ));
+    // Shared memory (M1081). The declared caps are nominal for the same reason
+    // as the TCP sources': the shmpipe protocol has no field for caps, so
+    // `bytestream-format` or `caps` says what the bytes are.
+    #[cfg(all(unix, feature = "shm"))]
+    reg.register_source(SourceFactory::new(
+        "shmsrc",
+        Caps::ByteStream {
+            encoding: ByteStreamEncoding::MpegTs,
+        },
+        || Box::new(ShmSrc::default()),
+    ));
     #[cfg(feature = "udp-ingress")]
     reg.register_source(SourceFactory::new(
         "udpsrc",
@@ -1941,6 +2162,10 @@ fn register_feature_gated(reg: &mut Registry) {
     #[cfg(feature = "tcp")]
     reg.register_launch(LaunchFactory::of::<TcpClientSink>("tcpclientsink", || {
         Box::new(TcpClientSink::default())
+    }));
+    #[cfg(all(unix, feature = "shm"))]
+    reg.register_launch(LaunchFactory::of::<ShmSink>("shmsink", || {
+        Box::new(ShmSink::default())
     }));
     #[cfg(feature = "udp-egress")]
     reg.register_launch(LaunchFactory::of::<UdpSink>("udpsink", || {

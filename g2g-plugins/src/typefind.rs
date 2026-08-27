@@ -33,7 +33,10 @@ use g2g_core::{
     VideoCodec,
 };
 
-use crate::audioframe::{mpa_header, MpaHeader, MpaLayer, MPA_HEADER_LEN};
+use crate::aacparse::adts_header;
+use crate::audioframe::{
+    ac3_header, mpa_header, MpaHeader, MpaLayer, AC3_MAX_FRAME_LEN, MPA_HEADER_LEN,
+};
 
 /// MPEG-TS packet stride; the sync byte recurs at this interval.
 const TS_PACKET_LEN: usize = 188;
@@ -56,6 +59,9 @@ const WAVE_MAGIC: [u8; 4] = *b"WAVE";
 const AVI_MAGIC: [u8; 4] = *b"AVI ";
 /// WebP rides the same RIFF header as WAVE, tagged `WEBP` after the size.
 pub(crate) const WEBP_MAGIC: [u8; 4] = *b"WEBP";
+/// YUV4MPEG2 (`.y4m`) stream signature, the separating space included so a file
+/// that merely starts with the word does not match.
+const Y4M_MAGIC: [u8; 10] = *b"YUV4MPEG2 ";
 /// PNG signature (ISO/IEC 15948 5.2): the 8 bytes every PNG opens with.
 const PNG_MAGIC: [u8; 8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
 /// Every RIFF tag is a four-character code, and the 4-byte size sits between the
@@ -64,9 +70,11 @@ const FOURCC_LEN: usize = 4;
 pub(crate) const RIFF_FORM_OFFSET: usize = FOURCC_LEN * 2;
 pub(crate) const RIFF_HEADER_LEN: usize = RIFF_FORM_OFFSET + FOURCC_LEN;
 
-/// Header bytes [`sniff_caps`] needs to decide: enough to confirm an MPEG-TS
-/// sync byte across several packets, the longest signature here.
-pub const SNIFF_LEN: usize = 4 * TS_PACKET_LEN;
+/// Header bytes [`sniff_caps`] needs to decide. The AC-3 sniff is the hungriest:
+/// it confirms a syncframe against the header behind it, so two frames at the
+/// largest size AC-3 codes have to fit. That covers the MPEG-TS stride check's
+/// several packets many times over.
+pub const SNIFF_LEN: usize = 2 * AC3_MAX_FRAME_LEN;
 
 /// Guess a media type from a stream's leading bytes, or `None` if nothing matches
 /// (a `typefind` failure). Tries container magic first (binary signatures), then a
@@ -79,7 +87,7 @@ pub fn sniff_caps(header: &[u8]) -> Option<Caps> {
     }
     // Native FLAC: the `fLaC` stream marker (M774); `flacparse` frames it.
     if header.starts_with(b"fLaC") {
-        return Some(elementary_flac_caps());
+        return Some(elementary_audio_caps(AudioFormat::Flac));
     }
     if let Some(codec) = sniff_still_image(header) {
         return Some(still_image_caps(codec));
@@ -87,23 +95,61 @@ pub fn sniff_caps(header: &[u8]) -> Option<Caps> {
     if let Some(codec) = sniff_annexb_video(header) {
         return Some(elementary_video_caps(codec));
     }
-    // MPEG audio last of the binary sniffs: an `0xFFE` sync pattern occurs
-    // inside the formats above, so each of them gets to claim the stream first.
+    // The self-syncing audio streams last of the binary sniffs: their sync
+    // patterns occur inside the formats above, so each of those claims the
+    // stream first. ADTS leads MPEG audio because `0xFFF` is inside MPEG audio's
+    // `0xFFE` sync space (an ADTS header carries layer bits 00, which
+    // `mpa_header` rejects, so the two cannot both match either way).
+    if sniff_adts_aac(header) {
+        return Some(elementary_audio_caps(AudioFormat::Aac));
+    }
+    if sniff_ac3(header) {
+        return Some(elementary_audio_caps(AudioFormat::Ac3));
+    }
     if let Some(format) = sniff_mpeg_audio(header) {
-        return Some(elementary_mpeg_audio_caps(format));
+        return Some(elementary_audio_caps(format));
     }
     sniff_text(header).map(|format| Caps::Text { format })
 }
 
-/// Caps for an MPEG audio elementary stream at the channels/rate placeholders
-/// (`mpegaudioparse` refines them from the frame header). Shared by content
-/// sniffing and the parser's own caps so the two never drift.
-pub fn elementary_mpeg_audio_caps(format: AudioFormat) -> Caps {
+/// Caps for a compressed audio elementary stream at the channels/rate
+/// placeholders (its parser refines them from the frame header). Shared by
+/// content sniffing, `FileSrc`'s extension typing and the parsers' own caps so
+/// the three never drift.
+pub fn elementary_audio_caps(format: AudioFormat) -> Caps {
     Caps::Audio {
         format,
         channels: 0,
         sample_rate: 0,
     }
+}
+
+/// Sniff an ADTS AAC elementary stream (`.aac`), or `false` when the header is
+/// not one. A valid ADTS header at offset 0 is trusted only when the header at
+/// its frame length is valid too and declares the same profile, sampling
+/// frequency index and channel configuration, the same two-header rule the other
+/// self-syncing audio sniffs use.
+fn sniff_adts_aac(header: &[u8]) -> bool {
+    let Some(first) = adts_header(header) else {
+        return false;
+    };
+    header
+        .get(first.frame_len..)
+        .and_then(adts_header)
+        .is_some_and(|second| first.same_configuration(&second))
+}
+
+/// Sniff an AC-3 elementary stream (`.ac3`), or `false` when the header is not
+/// one: the `0x0B77` syncword with a usable `fscod` / `frmsizecod`, confirmed by
+/// a second syncframe at the frame size those two code for.
+fn sniff_ac3(header: &[u8]) -> bool {
+    let Some(first) = ac3_header(header) else {
+        return false;
+    };
+    header
+        .get(first.frame_len..)
+        .and_then(ac3_header)
+        .is_some_and(|second| first.same_stream(&second))
 }
 
 /// Sniff an MPEG audio elementary stream (`.mp3` / `.mp2`), or `None` when the
@@ -176,17 +222,6 @@ fn sniff_still_image(header: &[u8]) -> Option<VideoCodec> {
     None
 }
 
-/// Caps for a native FLAC byte stream at the channels/rate placeholders
-/// (`flacparse` refines them from STREAMINFO). Shared by content sniffing and
-/// `FileSrc`'s extension typing so the two never drift.
-pub fn elementary_flac_caps() -> Caps {
-    Caps::Audio {
-        format: g2g_core::AudioFormat::Flac,
-        channels: 0,
-        sample_rate: 0,
-    }
-}
-
 /// Caps for a raw Annex-B video elementary stream at a fixable `Range` placeholder
 /// geometry: never `Dim::Any` (which cannot fixate), the parser refines it from
 /// the SPS (M676). Shared by content sniffing and `FileSrc`'s extension typing so
@@ -247,6 +282,13 @@ pub fn sniff(header: &[u8]) -> Option<ByteStreamEncoding> {
     }
     if riff_form(header) == Some(AVI_MAGIC) {
         return Some(ByteStreamEncoding::Avi);
+    }
+    if header.starts_with(&Y4M_MAGIC) {
+        return Some(ByteStreamEncoding::Y4m);
+    }
+    // MIME multipart (M1080): a `--boundary` line and the part header behind it.
+    if crate::multipart::looks_like_multipart(header) {
+        return Some(ByteStreamEncoding::Multipart);
     }
     // ISO-BMFF (MP4 / QuickTime): both progressive (`moov`-based) and fragmented
     // (CMAF) map to the one `IsoBmff` encoding; the demuxer handles either.
@@ -598,6 +640,19 @@ mod tests {
     }
 
     #[test]
+    fn detects_y4m_by_stream_signature() {
+        assert_eq!(
+            sniff_caps(b"YUV4MPEG2 W64 H48 F25:1 Ip A1:1 C420jpeg\nFRAME\n"),
+            Some(Caps::ByteStream {
+                encoding: ByteStreamEncoding::Y4m
+            })
+        );
+        // The word alone is not the signature: a y4m header always separates it
+        // from the first parameter with a space.
+        assert_eq!(sniff(b"YUV4MPEG2\n"), None);
+    }
+
+    #[test]
     fn detects_flv_by_signature() {
         assert_eq!(
             sniff(b"FLV\x01\x05\0\0\0\x09"),
@@ -823,7 +878,7 @@ mod tests {
 
     #[test]
     fn detects_a_bare_mpeg_audio_stream() {
-        let mp3 = elementary_mpeg_audio_caps(AudioFormat::Mp3);
+        let mp3 = elementary_audio_caps(AudioFormat::Mp3);
         assert_eq!(sniff_caps(&mp3_stream(2)), Some(mp3.clone()));
         // One frame with nothing behind it to confirm the sync is not typed: an
         // `0xFFE` byte pair alone is too weak.
@@ -836,7 +891,7 @@ mod tests {
 
     #[test]
     fn detects_mpeg_audio_behind_an_id3v2_tag() {
-        let mp3 = elementary_mpeg_audio_caps(AudioFormat::Mp3);
+        let mp3 = elementary_audio_caps(AudioFormat::Mp3);
         let mut tagged = id3v2_tag(64);
         tagged.extend(mp3_stream(1));
         assert_eq!(sniff_caps(&tagged), Some(mp3.clone()));
@@ -847,6 +902,66 @@ mod tests {
         let mut tagged_flac = id3v2_tag(16);
         tagged_flac.extend_from_slice(b"fLaC\0\0\0\x22");
         assert_eq!(sniff_caps(&tagged_flac), None);
+    }
+
+    /// Bytes an ADTS access unit carries behind its header in these tests.
+    const ADTS_PAYLOAD_LEN: usize = 32;
+    /// Sampling-frequency index 4 is 44100 Hz, channel configuration 2 is stereo.
+    const ADTS_RATE_INDEX_44100: u8 = 4;
+    const ADTS_CHANNELS_STEREO: u8 = 2;
+
+    fn adts_stream(frames: usize) -> Vec<u8> {
+        let mut stream = Vec::new();
+        for fill in 0..frames {
+            stream.extend(crate::aacparse::test_frames::adts_frame(
+                ADTS_CHANNELS_STEREO,
+                ADTS_RATE_INDEX_44100,
+                ADTS_PAYLOAD_LEN,
+                fill as u8,
+            ));
+        }
+        stream
+    }
+
+    fn ac3_stream(frames: usize) -> Vec<u8> {
+        let mut stream = Vec::new();
+        for fill in 0..frames {
+            stream.extend(crate::audioframe::test_frames::ac3_frame(fill as u8));
+        }
+        stream
+    }
+
+    #[test]
+    fn detects_a_bare_adts_aac_stream() {
+        let aac = elementary_audio_caps(AudioFormat::Aac);
+        assert_eq!(sniff_caps(&adts_stream(2)), Some(aac));
+        // One access unit with nothing behind it to confirm the sync is not
+        // typed, nor is a stream whose second header is corrupt.
+        assert_eq!(sniff_caps(&adts_stream(1)), None);
+        let frame_len = adts_stream(1).len();
+        let mut lying = adts_stream(2);
+        lying[frame_len + 1] = 0x00;
+        assert_eq!(sniff_caps(&lying), None);
+    }
+
+    #[test]
+    fn adts_is_not_typed_as_mpeg_audio() {
+        // An ADTS header passes MPEG audio's 11-bit sync but carries layer bits
+        // 00, which no MPEG audio frame ever does.
+        let stream = adts_stream(2);
+        assert_eq!(sniff_mpeg_audio(&stream), None);
+        assert_eq!(mpa_header(&stream), None);
+    }
+
+    #[test]
+    fn detects_a_bare_ac3_stream() {
+        let ac3 = elementary_audio_caps(AudioFormat::Ac3);
+        assert_eq!(sniff_caps(&ac3_stream(2)), Some(ac3));
+        assert_eq!(sniff_caps(&ac3_stream(1)), None);
+        // A syncword whose second frame is not one: not typed.
+        let mut lying = ac3_stream(2);
+        lying[crate::audioframe::test_frames::AC3_192K_48000_LEN] = 0x00;
+        assert_eq!(sniff_caps(&lying), None);
     }
 
     #[test]

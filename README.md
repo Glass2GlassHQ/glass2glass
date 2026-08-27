@@ -361,9 +361,10 @@ OS-coupled elements live behind cargo features:
 | `CudaDownload` (CUDA → System), `CudaUpload` (System → CUDA) | `cuda` | Linux + NVIDIA driver (libcuda) |
 | `CudaGlSink` (CUDA-GL present), `CudaKmsSink` (CUDA-GL on KMS) | `cuda-gl`, `cuda-kms` | Linux + NVIDIA + EGL + GL (+ libdrm for KMS) |
 | `CudaToWgpu` / `WgpuToCuda` (CUDA ↔ wgpu zero-copy bridge) | `cuda-wgpu` | Linux + NVIDIA + Vulkan |
-| `UdpSink` + RTP packetizer | `udp-egress` | — |
-| `UdpSrc` (RTP ingest + jitter buffer + RTCP/NACK) | `udp-ingress` | — |
+| `UdpSink` + RTP packetizer, or raw datagrams (`multiudpsink` `clients=`) | `udp-egress` | — |
+| `UdpSrc` (RTP ingest + jitter buffer + RTCP/NACK, or raw MPEG-TS datagrams) | `udp-ingress` | — |
 | `TcpServerSrc` / `TcpClientSrc` / `TcpServerSink` / `TcpClientSink` (plain TCP byte streams) | `tcp` | — |
+| `ShmSink` / `ShmSrc` (GStreamer's `shm` protocol: shared-memory frames + unix control socket) | `shm` | Linux |
 | `RtmpSrc` (RTMP publisher ingest) | `rtmp` | — |
 | `WebRtcSink` (WHIP egress, H.264 + Opus) / `WebRtcWhepSrc` (WHEP ingest, H.264), via str0m: ICE/DTLS/SRTP, trickle ICE + ICE restart, NACK/RTX | `webrtc` | str0m (rust-crypto) + reqwest |
 | `WebRtcDataSrc` / `WebRtcDataSink` (P2P data channels on SCTP) | `webrtc` | str0m |
@@ -396,20 +397,30 @@ OS-coupled elements live behind cargo features:
 
 The container parsers and muxers (`mp4src` / `mp4sink`, `tsdemux` / `mpegtsmux`,
 `matroskademux` / `matroskamux`, `flvdemux` / `flvmux`, `oggdemux` / `oggmux`,
-`fmp4demux`, `mpegpsdemux`), the bitstream parsers (`h264parse`, `h265parse`, `aacparse`,
-`mpegaudioparse` + `id3demux`, `opusparse`, `vp8parse`, `vp9parse`, `av1parse`), the software video/audio
+`avidemux` / `avimux`, `fmp4demux`, `mpegpsdemux`, `multipartdemux` / `multipartmux`,
+`y4mdec` / `y4menc`), the bitstream parsers (`h264parse`, `h265parse`, `aacparse`,
+`mpegaudioparse` + `id3demux`, `ac3parse`, `opusparse`, `vp8parse`, `vp9parse`, `av1parse`),
+the G.711 / IMA ADPCM codecs (`mulawenc` / `mulawdec`, `alawenc` / `alawdec`,
+`adpcmenc` / `adpcmdec`), the software video/audio
 transforms (`videoscale` / `videorate` / `imagefreeze` / `videocrop` / `videoflip` /
-`videobalance` / `videobox` / `alpha` / `gamma` / `deinterlace` / `timeoverlay`,
-`audioconvert` / `audioresample` / `audiorate` / `audiomixer` / `volume` / `audiopanorama` /
-`audioamplify` / `audioecho` / `level` / `cutter` / `equalizer-3bands` /
-`spectrum`), the KLV telemetry codec (`klvdecode`, MISB ST 0601 / STANAG 4609),
+`videobalance` / `videobox` / `alpha` / `gamma` / `deinterlace` / `timeoverlay` /
+`aspectratiocrop` / `gaussianblur` / `videomedian` / `smooth` / `coloreffects` /
+`chromahold` / `zebrastripe` / `videodiff`,
+`audioconvert` / `audioresample` / `audiorate` / `audiomixer` / `interleave` /
+`deinterleave` / `scaletempo` / `volume` / `audiopanorama` /
+`audioamplify` / `audioecho` / `audiodynamic` / `audiowsinclimit` / `audiocheblimit` /
+`audiochannelmix` / `audiomixmatrix` / `stereo` / `audiofirfilter` / `audioiirfilter` /
+`removesilence` / `audiobuffersplit` / `speed` /
+`level` / `cutter` / `equalizer-3bands` / `spectrum`), the KLV telemetry codec (`klvdecode`, MISB ST 0601 / STANAG 4609),
 the bitmap-subtitle decoders (`vobsubdec`, alias `dvdsubdec`, `dvbsubdec` and
 `pgsdec`) with the `subpictureoverlay` that blends their cues onto video,
 and the EBU teletext subtitle decoder (`teletextdec`),
-the flow-control elements (`concat` / `input-selector` /
-`output-selector` / `valve` / `progressreport`), the `compositor`, the tag system, and the
+the flow-control and debug elements (`concat` / `input-selector` /
+`output-selector` / `valve` / `fakesrc` / `fdsrc` / `fdsink` / `watchdog` /
+`capssetter` / `taginject` / `rndbuffersize` / `errorignore` / `breakmydata` /
+`chopmydata` / `checksumsink` / `fakevideosink` / `fakeaudiosink` / `progressreport`), the `compositor`, the tag system, and the
 `gst-launch` text DSL (`parse_launch` / `gst-inspect`) are all in the pure
-`no_std + alloc` default build. The std build adds `clockoverlay`, the
+`no_std + alloc` default build. The std build adds `clockoverlay`, `fpsdisplaysink`, the
 `multifilesink` / `multifilesrc` image-sequence pair, `vobsubsrc` (a DVD
 subtitle `.idx` / `.sub` sidecar pair), `splitmuxsink`
 (segmented recording, `muxer=mp4|matroska|mpegts`), and `hlssink` (HLS

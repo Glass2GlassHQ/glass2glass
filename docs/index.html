@@ -552,7 +552,7 @@
 
         <div class="stats-row">
             <div class="stat-cell"><h3>MCU&rarr;WASM</h3><p>one pipeline</p></div>
-            <div class="stat-cell"><h3>150+</h3><p>Elements</p></div>
+            <div class="stat-cell"><h3>200+</h3><p>Elements</p></div>
             <div class="stat-cell"><h3>5</h3><p>Target profiles</p></div>
             <div class="stat-cell"><h3>100%</h3><p>Pure Rust</p></div>
         </div>
@@ -864,7 +864,7 @@
                 <p class="f-lead">Every ingest a production stack needs, each a real element.</p>
                 <div class="chip-group">
                     <span class="chip-label">Streaming</span>
-                    <div class="chip-row"><span class="chip">RtspSrc</span><span class="chip">UdpSrc</span><span class="chip">TcpClientSrc</span><span class="chip">RtmpSrc</span><span class="chip">WebRtcWhepSrc</span></div>
+                    <div class="chip-row"><span class="chip">RtspSrc</span><span class="chip">UdpSrc</span><span class="chip">TcpClientSrc</span><span class="chip">ShmSrc</span><span class="chip">RtmpSrc</span><span class="chip">WebRtcWhepSrc</span></div>
                 </div>
                 <div class="chip-group">
                     <span class="chip-label">Adaptive</span>
@@ -963,7 +963,7 @@
                 <p class="f-lead">Pure-Rust demux + mux on the typed <code>Caps::ByteStream</code> link, with <code>typefind</code> sniffing. KLV telemetry (STANAG 4609 / MISB ST 0601), AV1 carriage and per-program SDT service text + ISO-639 language tags ride the TS both ways; DVB EIT now/next and schedule events post as tags on demux, with each event's start time and duration.</p>
                 <div class="chip-group">
                     <span class="chip-label">Demux</span>
-                    <div class="chip-row"><span class="chip">mp4src</span><span class="chip">fmp4demux</span><span class="chip">tsdemux</span><span class="chip">matroskademux</span><span class="chip">flvdemux</span><span class="chip">oggdemux</span><span class="chip">mpegpsdemux</span><span class="chip">klvdecode</span></div>
+                    <div class="chip-row"><span class="chip">avidemux</span><span class="chip">mp4src</span><span class="chip">fmp4demux</span><span class="chip">tsdemux</span><span class="chip">matroskademux</span><span class="chip">flvdemux</span><span class="chip">oggdemux</span><span class="chip">mpegpsdemux</span><span class="chip">klvdecode</span></div>
                 </div>
                 <div class="chip-group">
                     <span class="chip-label">Mux</span>
@@ -986,15 +986,15 @@
                 <h3>Parsers + transforms</h3>
                 <div class="chip-group">
                     <span class="chip-label">Parsers &mdash; feed negotiation</span>
-                    <div class="chip-row"><span class="chip">h264parse</span><span class="chip">h265parse</span><span class="chip">aacparse</span><span class="chip">mpegaudioparse</span><span class="chip">opusparse</span><span class="chip">av1parse</span></div>
+                    <div class="chip-row"><span class="chip">h264parse</span><span class="chip">h265parse</span><span class="chip">aacparse</span><span class="chip">mpegaudioparse</span><span class="chip">ac3parse</span><span class="chip">opusparse</span><span class="chip">av1parse</span></div>
                 </div>
                 <div class="chip-group">
                     <span class="chip-label">Video</span>
-                    <div class="chip-row"><span class="chip">videoscale</span><span class="chip">videorate</span><span class="chip">imagefreeze</span><span class="chip">videocrop</span><span class="chip">videoflip</span><span class="chip">videobalance</span><span class="chip">alpha</span><span class="chip">deinterlace</span></div>
+                    <div class="chip-row"><span class="chip">videoscale</span><span class="chip">videorate</span><span class="chip">imagefreeze</span><span class="chip">videocrop</span><span class="chip">videoflip</span><span class="chip">videobalance</span><span class="chip">gaussianblur</span><span class="chip">coloreffects</span><span class="chip">alpha</span><span class="chip">deinterlace</span></div>
                 </div>
                 <div class="chip-group">
                     <span class="chip-label">Audio</span>
-                    <div class="chip-row"><span class="chip">audioconvert</span><span class="chip">audioresample</span><span class="chip">audiorate</span><span class="chip">audiomixer</span><span class="chip">volume</span></div>
+                    <div class="chip-row"><span class="chip">audioconvert</span><span class="chip">audioresample</span><span class="chip">audiorate</span><span class="chip">scaletempo</span><span class="chip">audiomixmatrix</span><span class="chip">audiofirfilter</span><span class="chip">interleave</span><span class="chip">audiomixer</span><span class="chip">volume</span></div>
                 </div>
                 <span class="feature-tag tag-core">Core</span>
             </div>

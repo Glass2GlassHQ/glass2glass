@@ -6,7 +6,19 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1083: `fpsdisplaysink`, `checksumsink`, `fakevideosink` / `fakeaudiosink`, `errorignore`, `breakmydata` and `chopmydata` join the debug elements.
+- M1084: `aspectratiocrop`, `gaussianblur`, `videomedian`, `smooth`, `coloreffects`, `chromahold`, `zebrastripe` and `videodiff` join the software video transforms.
+- M1085: `audiochannelmix`, `audiomixmatrix`, `stereo`, `audiofirfilter`, `audioiirfilter`, `removesilence`, `audiobuffersplit` and `speed` join the audio filters.
+- M1082: `g2g-inspect --gst` answers for twenty more GStreamer names g2g covers under another name or inside another element.
+
+- M1081: `shmsink` and `shmsrc` carry frames over POSIX shared memory in GStreamer's `shmpipe` protocol.
+- M1080: `multipartdemux` and `multipartmux` read and write the `multipart/x-mixed-replace` stream MJPEG-over-HTTP cameras push.
+- M1079: raw (non-RTP) UDP byte streams: `udpsrc bytestream-format=mpegts`, `udpsink` sending a byte stream as datagrams, and the `multiudpsink` `clients` fan-out.
+- M1078: `audiodynamic`, `audioinvert`, `audiokaraoke`, `audiowsinclimit`, `audiowsincband`, `audiocheblimit` and `audiochebband` complete the `audiofx` filter set.
+- M1077: debug transforms `watchdog`, `capssetter`, `taginject` and `rndbuffersize` join the core elements.
+- M1076: `y4mdec` and `y4menc` read and write YUV4MPEG2 (`.y4m`) raw video, and `typefind` types one by content.
 - M1075: `scaletempo` stretches audio to the segment rate without changing its pitch.
+- M1074: `ac3parse`, ADTS framing in `aacparse`, and content typing for raw `.aac` / `.ac3` files.
 - M1073: G.711 and IMA ADPCM codec elements: `mulawenc` / `mulawdec` / `alawenc` / `alawdec` / `adpcmenc` / `adpcmdec`, and `wavparse` reads their WAV payloads.
 - M1072: `interleave` merges N mono PCM streams into one N-channel stream and `deinterleave` splits one back into its channels.
 - M1071: `avidemux` and `avimux` read and write the AVI container.

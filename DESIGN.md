@@ -1459,6 +1459,17 @@ the publish ladder before sending media. Validated sans-IO by pitting the
 publisher against the server session (an access unit survives the RTMP round
 trip); live publish to a real endpoint is operator-validated.
 
+Both RTMP halves also speak the HMAC-SHA256 "genuine FMS / FP" digest handshake
+strict CDNs require (`rtmphandshake.rs`): `RtmpPublisher` sends a digest C1 and
+response C2 by default and `RtmpSession` answers and validates it, each falling
+back to the simple handshake against a non-genuine peer. Window-acknowledgement
+back-pressure runs in both directions: `RtmpSession` emits an `Acknowledgement`
+every Window-Ack-Size bytes received (`with_window_ack_size`), and
+`RtmpPublisher` tracks the server's window against the acknowledged sequence
+and exposes `throttled()`, on which `RtmpSink` blocks feeding media, so a slow
+server back-pressures the pipeline instead of bloating the socket buffer.
+Ingest is validated against a real peer (`rtmp_ffmpeg_interop`: ffmpeg publishing into `RtmpSrc`).
+
 **RTSP server.** `RtspServerSink` (`rtspserversink.rs`, `rtsp-server` feature)
 hosts the server side of RTSP: a player connects over TCP, runs OPTIONS /
 DESCRIBE / SETUP / PLAY, and the sink streams the pipeline's H.264 to the
@@ -1496,7 +1507,11 @@ data + a dropped packet recovered via NAK). The wire format follows the SRT
 draft so real-peer interop is the design target. AES-256 encryption
 (`with_aes256`), mid-stream key rotation (`with_key_rotation`), the TSBPD timing
 model, and live-mode congestion control / pacing (`with_max_bandwidth`) are in
-place.
+place. A rotated key's KM message is retransmitted until the peer answers with
+a KMRSP, so a rekey survives KM-packet loss. Real-peer interop with libsrt /
+ffmpeg is validated for the full matrix by the ignored `srt_ffmpeg_interop` test (needs ffmpeg built
+with libsrt): both directions (ffmpeg caller into `SrtSrc` listener, `SrtSink`
+caller into an ffmpeg listener) across plaintext, AES-128 and AES-256.
 
 ### 4.13 CSP Caps Negotiation
 
@@ -3055,6 +3070,17 @@ same way for a muxed-TS variant (`build_hls_ts_cc_overlay`), an fMP4 / CMAF vari
 a separate audio rendition (`build_hls_separate_cc_overlay`, the audio merged in as
 its own source). In every case the explicit caption request wins over an
 auto-selected subtitle track (there is one overlay text pad).
+
+**HLS subtitle renditions.** `HlsSrc::variant_streams` surfaces a master
+playlist's `SUBTITLES` renditions as `Caps::Text`, and
+`MasterPlaylist::pick_rendition` selects one by the `#audio-lang=` /
+`#subtitle-lang=` URI hint (the audio fan-out honours the same hint).
+`HlsSrc::with_text` emits `Caps::Text { WebVtt }` from a raw `.vtt` rendition,
+and `build_hls_subtitle_overlay` joins it through `SubParse` into the video's
+`TextOverlayN` across sources, wired by `hls_playbin` for a muxed-A/V TS
+variant plus a `SUBTITLES` rendition. `build_hls_separate_subtitle_overlay`
+covers the three-source shape: the variant's video TS, a distinct audio
+rendition and a distinct WebVTT rendition in one graph.
 
 The encode direction is the mirror image, for caption authoring and
 broadcast egress. `cea::Cc608Enc` is the inverse of the `Cea608` decoder: fed cues
@@ -4769,6 +4795,18 @@ detach now runs on every exit; `tools/wasm-demo/headless/repro-unbounded.mjs` is
 the repro harness.)
 
 ---
+
+### 6.4 QNX (Safety-Certified Microkernel)
+- **Target Hardware:** QNX 8 on Cortex-A / x86-64 application processors, the
+  reference platform for ISO 26262 / IEC 62304 automotive and medical systems.
+- **Portable surface:** the pure-Rust core (`g2g-core` no-alloc and
+  `alloc` / `runtime`, `g2g-mcu`, the `g2g-plugins` `no_std` baseline) compiles
+  for `aarch64-` / `x86_64-unknown-nto-qnx800` with zero source changes; Linux
+  hardware elements are excluded by `target_os` gating. The spike and its build
+  recipe are in `PORTABILITY.md`.
+- **Next tiers:** the `std` transports over the free QNX SDP (the open question
+  is `tokio` on QNX 8), then a QNX Screen display sink and vendor VPU through
+  the C-callback seam as `target_os = "nto"` elements.
 
 ## 7. Ecosystem Coexistence Strategy: GStreamer Bridge
 To drive early enterprise adoption without forcing full system redesigns, `g2g` provides the `g2g-bridge` wrapper library, compiled as a compliant C dynamic library (`libgstglass2glass.so`). An isolated `g2g` processing sub-graph executes inside a legacy GStreamer pipeline.
