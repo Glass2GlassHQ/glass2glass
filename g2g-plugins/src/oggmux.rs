@@ -67,9 +67,6 @@ use crate::opusparse::{
 /// file, and this muxer writes one stream.
 pub(crate) const DEFAULT_SERIAL: u32 = 0x6732_6732; // "g2g2"
 
-/// The vendor string written into synthesized comment headers.
-const VENDOR: &[u8] = b"g2g";
-
 /// The Ogg byte stream both muxers produce.
 pub(crate) fn ogg_caps() -> Caps {
     Caps::ByteStream {
@@ -516,18 +513,14 @@ fn declared_samples(duration_ns: u64, rate: u32) -> Option<u64> {
     Some((ns / 1_000_000_000) as u64)
 }
 
-/// A minimal VorbisComment header behind `magic`: the vendor string and an empty
-/// field list (RFC 7845 §5.2). The Vorbis flavour needs the framing bit that its
-/// own mapping mandates; `OpusTags` does not carry one.
+/// A minimal VorbisComment header behind `magic`: the vendor string and no
+/// fields, for a mapping that mandates the packet when the source carried none.
 fn vorbis_comment(magic: &[u8]) -> Vec<u8> {
-    let mut p = Vec::from(magic);
-    p.extend_from_slice(&(VENDOR.len() as u32).to_le_bytes());
-    p.extend_from_slice(VENDOR);
-    p.extend_from_slice(&0u32.to_le_bytes()); // no user comments
-    if magic.starts_with(b"\x03") {
-        p.push(1); // framing bit
-    }
-    p
+    crate::vorbiscomment::vorbis_comment(
+        magic,
+        crate::vorbiscomment::VENDOR,
+        &g2g_core::TagList::new(),
+    )
 }
 
 /// Split a native FLAC header (`fLaC` + metadata blocks) into the Ogg-FLAC

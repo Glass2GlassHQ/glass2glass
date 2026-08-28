@@ -133,33 +133,7 @@ impl FileSrc {
         if !self.auto_detect {
             return Ok(());
         }
-        let mut file = File::open(&self.path)
-            .map_err(|e| path_io_err(short_type_name::<Self>(), "open", &self.path, e))?;
-        let mut header = alloc::vec![0u8; crate::typefind::SNIFF_LEN];
-        let mut filled = 0;
-        while filled < header.len() {
-            let n = file.read(&mut header[filled..]).map_err(io_err)?;
-            if n == 0 {
-                break;
-            }
-            filled += n;
-        }
-        header.truncate(filled);
-        // Sniff a container (-> ByteStream) or a subtitle document (-> Text), so
-        // `filesrc location=subs.vtt bytestream-format=auto ! subparse` types too.
-        let mut caps = crate::typefind::sniff_caps(&header).ok_or(G2gError::CapsMismatch)?;
-        // A `filesrc` is always a seekable file, so a sniffed ISO-BMFF stream is the
-        // whole-file `Mp4` form (demuxed by `mp4demux`), not the streaming `IsoBmff`
-        // form (which `fmp4demux` consumes for live HLS / DASH).
-        if let Caps::ByteStream {
-            encoding: ByteStreamEncoding::IsoBmff,
-        } = caps
-        {
-            caps = Caps::ByteStream {
-                encoding: ByteStreamEncoding::Mp4,
-            };
-        }
-        self.caps = caps;
+        self.caps = sniff_file_caps(&self.path, short_type_name::<Self>())?;
         self.auto_detect = false;
         Ok(())
     }
@@ -386,7 +360,7 @@ static FILESRC_PROPS: &[PropertySpec] = &[
     PropertySpec::new(
         "bytestream-format",
         PropKind::Str,
-        "container of a raw byte stream: mpegts | matroska | ogg | flv | auto (sniff the header)",
+        "container of a raw byte stream: mpegts | matroska | ogg | flv | raw | auto (sniff the header)",
     ),
     PropertySpec::new(
         "blocksize",
@@ -404,6 +378,42 @@ static FILESRC_PROPS: &[PropertySpec] = &[
     .with_default("-1"),
 ];
 
+/// Sniff a file's own header for its media type: a container (-> `ByteStream`),
+/// a subtitle document (-> `Text`) or an elementary stream, so
+/// `bytestream-format=auto` and `splitfilesrc`'s first part both type from
+/// content rather than a possibly-wrong extension. Shared so the two cannot
+/// drift, including the seekable-file correction below.
+pub(crate) fn sniff_file_caps(
+    path: &std::path::Path,
+    element: &'static str,
+) -> Result<Caps, G2gError> {
+    let mut file = File::open(path).map_err(|e| path_io_err(element, "open", path, e))?;
+    let mut header = alloc::vec![0u8; crate::typefind::SNIFF_LEN];
+    let mut filled = 0;
+    while filled < header.len() {
+        let n = file.read(&mut header[filled..]).map_err(io_err)?;
+        if n == 0 {
+            break;
+        }
+        filled += n;
+    }
+    header.truncate(filled);
+    let caps = crate::typefind::sniff_caps(&header).ok_or(G2gError::CapsMismatch)?;
+    // A file is seekable, so a sniffed ISO-BMFF stream is the whole-file `Mp4`
+    // form (demuxed by `mp4demux`), not the streaming `IsoBmff` form (which
+    // `fmp4demux` consumes for live HLS / DASH).
+    if caps
+        == (Caps::ByteStream {
+            encoding: ByteStreamEncoding::IsoBmff,
+        })
+    {
+        return Ok(Caps::ByteStream {
+            encoding: ByteStreamEncoding::Mp4,
+        });
+    }
+    Ok(caps)
+}
+
 /// Derive the media type from a file extension (M478), so a bare launch
 /// `filesrc location=X` types without an explicit `bytestream-format`. Containers
 /// map to `Caps::ByteStream`, subtitle documents and plain text to `Caps::Text`,
@@ -412,7 +422,7 @@ static FILESRC_PROPS: &[PropertySpec] = &[
 /// via SPS, M676); an unknown extension returns `None`, and the caller then
 /// content-sniffs the header. String-only, so it costs no filesystem read at
 /// parse time.
-fn caps_from_extension(path: &std::path::Path) -> Option<Caps> {
+pub(crate) fn caps_from_extension(path: &std::path::Path) -> Option<Caps> {
     let ext = path.extension()?.to_str()?.to_ascii_lowercase();
     let encoding = match ext.as_str() {
         "ts" | "m2ts" | "mts" => ByteStreamEncoding::MpegTs,
@@ -423,11 +433,19 @@ fn caps_from_extension(path: &std::path::Path) -> Option<Caps> {
         "ivf" => ByteStreamEncoding::Ivf,
         "mpg" | "mpeg" | "vob" => ByteStreamEncoding::MpegPs,
         "y4m" => ByteStreamEncoding::Y4m,
+        // A headerless dump: the shape comes from `rawvideoparse` /
+        // `rawaudioparse` properties, not from the file.
+        "yuv" | "pcm" | "raw" => ByteStreamEncoding::Raw,
         "flac" => {
             return Some(crate::typefind::elementary_audio_caps(
                 g2g_core::AudioFormat::Flac,
             ))
         }
+        // `.mjpg` / `.mjpeg` are deliberately absent: a multipart MJPEG stream
+        // uses them, and sniffing types that correctly.
+        "jpg" | "jpeg" => return Some(crate::typefind::still_image_caps(VideoCodec::Mjpeg)),
+        "png" => return Some(crate::typefind::still_image_caps(VideoCodec::Png)),
+        "webp" => return Some(crate::typefind::still_image_caps(VideoCodec::WebP)),
         "h264" | "264" | "avc" => {
             return Some(crate::typefind::elementary_video_caps(VideoCodec::H264))
         }
@@ -484,6 +502,12 @@ pub(crate) fn encoding_from_str(s: &str) -> Option<ByteStreamEncoding> {
         "wav" => Some(ByteStreamEncoding::Wav),
         "y4m" | "yuv4mpeg" => Some(ByteStreamEncoding::Y4m),
         "multipart" | "mpjpeg" => Some(ByteStreamEncoding::Multipart),
+        "rtp" => Some(ByteStreamEncoding::Rtp),
+        "srtp" => Some(ByteStreamEncoding::Srtp),
+        "rtcp" => Some(ByteStreamEncoding::Rtcp),
+        "srtcp" => Some(ByteStreamEncoding::Srtcp),
+        "dtls" => Some(ByteStreamEncoding::Dtls),
+        "raw" | "yuv" | "pcm" => Some(ByteStreamEncoding::Raw),
         _ => None,
     }
 }
@@ -502,6 +526,12 @@ pub(crate) fn encoding_to_str(encoding: ByteStreamEncoding) -> &'static str {
         ByteStreamEncoding::Wav => "wav",
         ByteStreamEncoding::Y4m => "y4m",
         ByteStreamEncoding::Multipart => "multipart",
+        ByteStreamEncoding::Rtp => "rtp",
+        ByteStreamEncoding::Srtp => "srtp",
+        ByteStreamEncoding::Rtcp => "rtcp",
+        ByteStreamEncoding::Srtcp => "srtcp",
+        ByteStreamEncoding::Dtls => "dtls",
+        ByteStreamEncoding::Raw => "raw",
         // Only encodings produced by `encoding_from_str` / sniffing are stored,
         // so any future `ByteStreamEncoding` variant cannot reach here.
         _ => unreachable!("filesrc names only encodings it recognized"),

@@ -288,6 +288,9 @@ pub(crate) struct MpaHeader {
     pub(crate) layer: MpaLayer,
     pub(crate) sample_rate: u32,
     pub(crate) channels: u8,
+    /// Coded bitrate in bits per second. Constant across a CBR stream, which is
+    /// how `xingmux` decides between the `Xing` and `Info` marks.
+    pub(crate) bitrate: u32,
     /// Samples per channel this frame decodes to, the presentation-time step.
     pub(crate) samples_per_frame: u32,
     pub(crate) frame_len: usize,
@@ -363,6 +366,7 @@ pub(crate) fn mpa_header(buf: &[u8]) -> Option<MpaHeader> {
         layer,
         sample_rate,
         channels,
+        bitrate,
         samples_per_frame,
         frame_len,
     })
@@ -382,6 +386,42 @@ impl SyncFrameHeader for MpaHeader {
     fn confirms_sync(&self, next: &Self) -> bool {
         self.same_stream(next)
     }
+}
+
+/// The tags a VBR header frame is marked with: `Xing` on a variable-bitrate
+/// stream, `Info` on a constant-bitrate one.
+pub(crate) const XING_TAG_VBR: &[u8; 4] = b"Xing";
+pub(crate) const XING_TAG_CBR: &[u8; 4] = b"Info";
+const VBRI_TAG: &[u8; 4] = b"VBRI";
+
+/// Offset of the VBRI header within its frame, counted from the frame's first
+/// byte (the Fraunhofer encoder writes it at a fixed offset, unlike Xing).
+const VBRI_OFFSET: usize = 36;
+
+/// Bytes of side information between the header and the Xing tag. The size
+/// follows from the version and channel mode.
+pub(crate) fn side_info_len(header: &MpaHeader) -> usize {
+    match (header.version, header.channels) {
+        (MpaVersion::Mpeg1, 1) => 17,
+        (MpaVersion::Mpeg1, _) => 32,
+        (_, 1) => 9,
+        (_, _) => 17,
+    }
+}
+
+/// Whether this frame is the Xing / Info / VBRI header rather than audio: a
+/// Layer III frame whose payload opens, right after the side information, on
+/// one of the VBR tags.
+pub(crate) fn is_vbr_header_frame(data: &[u8], header: &MpaHeader) -> bool {
+    if header.layer != MpaLayer::Three {
+        return false;
+    }
+    let tag_at = |offset: usize| data.get(offset..offset.checked_add(4)?);
+    let xing = tag_at(MPA_HEADER_LEN + side_info_len(header));
+    [XING_TAG_VBR, XING_TAG_CBR]
+        .iter()
+        .any(|tag| xing == Some(&tag[..]))
+        || tag_at(VBRI_OFFSET) == Some(&VBRI_TAG[..])
 }
 
 /// Length in bytes of the MPEG audio frame starting at `buf`, for the callers
@@ -444,6 +484,23 @@ pub(crate) mod test_frames {
             mode << 6,
         ];
         frame.resize(MP3_128K_44100_LEN, fill);
+        frame
+    }
+
+    /// One stereo 44100 Hz Layer III frame at whatever bitrate `bitrate_index`
+    /// codes, for a test that needs a stream whose frames differ in length.
+    pub(crate) fn mp3_frame_at(bitrate_index: u8, fill: u8) -> Vec<u8> {
+        let header = [
+            0xFF,
+            0xFB,
+            (bitrate_index << 4) | (RATE_INDEX_44100 << 2),
+            0,
+        ];
+        let len = super::mpa_header(&header)
+            .expect("a bitrate index the table codes")
+            .frame_len;
+        let mut frame = Vec::from(header);
+        frame.resize(len, fill);
         frame
     }
 }

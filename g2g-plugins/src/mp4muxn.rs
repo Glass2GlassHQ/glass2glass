@@ -62,9 +62,6 @@ const VIDEO_TIMESCALE: u32 = 90_000;
 /// Timed-text tracks use a 1 kHz media timescale (ffmpeg's for `mov_text`), so a
 /// cue's millisecond timing lands on a tick exactly.
 const TEXT_TIMESCALE: u32 = 1_000;
-/// CEA-708 frame-rate code for 29.97 fps, the rate a muxed CDP declares (the
-/// North-American caption norm, and what `st2110ancrtp` defaults to).
-const CDP_FRAME_RATE_2997: u8 = 4;
 /// The `mvhd` timescale, so movie-level durations are milliseconds.
 const MOVIE_TIMESCALE: u32 = 1000;
 const DEFAULT_VIDEO_DURATION_NS: u64 = 33_333_333;
@@ -429,7 +426,13 @@ impl Mp4MuxN {
                 channels: *channels,
                 rate: *sample_rate,
             }),
-            Caps::ClosedCaption { format } => Some(PadKind::ClosedCaption(*format)),
+            // Only the packed `cc_data` layouts: the caption sample entries are
+            // framed from the triples, so a pad already in the CDP / ST 334-1 /
+            // bare-pair layout is declined rather than mis-framed (`ccconverter`
+            // converts it).
+            Caps::ClosedCaption {
+                format: format @ (ClosedCaptionFormat::Cea608 | ClosedCaptionFormat::Cea708),
+            } => Some(PadKind::ClosedCaption(*format)),
             // Only the elementary cue form: a `Text` pad of a document format
             // (`Srt` / `Ssa` / `Ttml`) carries whole-file bytes, not timed cues.
             Caps::Text {
@@ -1566,7 +1569,10 @@ fn cc_sample(cc_data: &[u8], format: ClosedCaptionFormat, seq: u16) -> Vec<u8> {
             if dtvcc.is_empty() {
                 return Vec::new();
             }
-            mp4_box(b"ccdp", &build_cdp(&dtvcc, CDP_FRAME_RATE_2997, seq))
+            mp4_box(
+                b"ccdp",
+                &build_cdp(&dtvcc, crate::cea::CDP_FRAME_RATE_29_97, seq),
+            )
         }
         // 608 (and any carriage this writer does not know, which the caps solver
         // never negotiates onto the pad).

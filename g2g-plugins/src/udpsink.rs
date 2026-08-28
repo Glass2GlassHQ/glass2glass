@@ -33,7 +33,7 @@ use g2g_core::{
     PropKind, PropValue, PropertySpec, Rate, VideoCodec,
 };
 
-use crate::bytestream::{carried_bytestream_caps, datagram_chunk};
+use crate::bytestream::{carried_bytestream_caps, datagram_chunk, is_packet_encoding};
 use crate::filesink::io_err;
 use crate::flexfec::FlexFecEncoder;
 use crate::rtcp::{self, RtcpPacket};
@@ -861,6 +861,13 @@ impl AsyncElement for UdpSink {
                         .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
                     if let Some(encoding) = self.bytestream {
                         self.ensure_socket()?;
+                        if is_packet_encoding(encoding) {
+                            let reached = self.send_datagram(slice).await?;
+                            self.packets_sent += reached;
+                            self.bytes_sent += reached * slice.len() as u64;
+                            self.frames_sent += 1;
+                            return Ok(());
+                        }
                         let chunk = datagram_chunk(encoding, self.max_payload);
                         let mut sent = 0u64;
                         let mut bytes = 0u64;

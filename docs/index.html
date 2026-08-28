@@ -922,10 +922,10 @@
             <div class="feature-card">
                 <span class="f-icon">&#128226;</span>
                 <h3>Egress</h3>
-                <p class="f-lead">Sans-IO RTP with 90 kHz PTS and receive-side NACK; WHIP publish over <code>str0m</code> (ICE / DTLS / SRTP, pure-Rust crypto); IETF MoQ Transport draft-16 and draft-18 publish and subscribe over WebTransport, implemented in-tree and negotiated per session, on reliable subgroup streams or unreliable datagram objects, and played back in a browser by a third-party draft-16 client.</p>
+                <p class="f-lead">Sans-IO RTP with 90 kHz PTS and receive-side NACK, SRTP / SRTCP (RFC 3711 and RFC 7714) and DTLS-SRTP in pure Rust; WHIP publish over <code>str0m</code> (ICE / DTLS / SRTP, pure-Rust crypto); IETF MoQ Transport draft-16 and draft-18 publish and subscribe over WebTransport, implemented in-tree and negotiated per session, on reliable subgroup streams or unreliable datagram objects, and played back in a browser by a third-party draft-16 client.</p>
                 <div class="chip-group">
                     <span class="chip-label">RTP / UDP</span>
-                    <div class="chip-row"><span class="chip">RtpH264Packetizer</span><span class="chip">UdpSink</span></div>
+                    <div class="chip-row"><span class="chip">RtpH264Packetizer</span><span class="chip">UdpSink</span><span class="chip">SrtpEnc</span><span class="chip">SrtpDec</span><span class="chip">DtlsSrtpEnc</span><span class="chip">DtlsSrtpDec</span></div>
                 </div>
                 <div class="chip-group">
                     <span class="chip-label">WebRTC</span>
@@ -977,7 +977,7 @@
                 <p class="f-lead">HLS (TS + CMAF, live reload, AES-128 + SAMPLE-AES), DASH (SegmentTemplate / Timeline, dynamic MPDs, CMAF chunked low-latency consumption), duration-keyed prebuffering with Buffering reports, RTMP publisher ingest.</p>
                 <div class="chip-group">
                     <span class="chip-label">Sources</span>
-                    <div class="chip-row"><span class="chip">HlsSrc</span><span class="chip">DashSrc</span><span class="chip">RtmpSrc</span><span class="chip">HttpSrc</span></div>
+                    <div class="chip-row"><span class="chip">HlsSrc</span><span class="chip">DashSrc</span><span class="chip">RtmpSrc</span><span class="chip">HttpSrc</span><span class="chip">DataUriSrc</span></div>
                 </div>
                 <span class="feature-tag tag-core">Core</span>
             </div>
@@ -985,8 +985,12 @@
                 <span class="f-icon">&#128209;</span>
                 <h3>Parsers + transforms</h3>
                 <div class="chip-group">
+                    <span class="chip-label">Bins &mdash; parse-time macros</span>
+                    <div class="chip-row"><span class="chip">decodebin</span><span class="chip">uridecodebin</span><span class="chip">playbin</span><span class="chip">encodebin</span><span class="chip">transcodebin</span></div>
+                </div>
+                <div class="chip-group">
                     <span class="chip-label">Parsers &mdash; feed negotiation</span>
-                    <div class="chip-row"><span class="chip">h264parse</span><span class="chip">h265parse</span><span class="chip">aacparse</span><span class="chip">mpegaudioparse</span><span class="chip">ac3parse</span><span class="chip">opusparse</span><span class="chip">av1parse</span></div>
+                    <div class="chip-row"><span class="chip">h264parse</span><span class="chip">h265parse</span><span class="chip">aacparse</span><span class="chip">mpegaudioparse</span><span class="chip">ac3parse</span><span class="chip">opusparse</span><span class="chip">av1parse</span><span class="chip">jpegparse</span><span class="chip">pngparse</span><span class="chip">rawvideoparse</span><span class="chip">rawaudioparse</span></div>
                 </div>
                 <div class="chip-group">
                     <span class="chip-label">Video</span>

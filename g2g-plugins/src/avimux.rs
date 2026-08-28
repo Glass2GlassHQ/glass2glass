@@ -36,6 +36,32 @@ fn output_caps() -> Caps {
     }
 }
 
+/// A negotiated side, or [`GEOMETRY_UNKNOWN`] when the solve left it open. A
+/// decoded still-image or MJPEG stream carries its real size only at runtime (as
+/// a `CapsChanged`), and the whole AVI is written at `Eos`, so an open geometry
+/// at negotiation is fine as long as it is known before the first frame.
+fn fixed_or_unknown(dim: &Dim) -> u32 {
+    match dim {
+        Dim::Fixed(value) => *value,
+        _ => GEOMETRY_UNKNOWN,
+    }
+}
+
+/// The width / height a video stream carries before its real caps arrive. AVI
+/// has no way to write it, so the mux fails loud rather than emit a 0x0 header.
+const GEOMETRY_UNKNOWN: u32 = 0;
+
+/// Whether every stream the writer is about to describe has the geometry AVI's
+/// headers need.
+fn geometry_known(streams: &[AviWriteStream]) -> bool {
+    streams.iter().all(|stream| match stream {
+        AviWriteStream::Video { width, height, .. } => {
+            *width != GEOMETRY_UNKNOWN && *height != GEOMETRY_UNKNOWN
+        }
+        AviWriteStream::Audio { .. } => true,
+    })
+}
+
 /// The stream an input pad's caps describe, or `None` for a media type AVI
 /// cannot carry (raw video, text, a codec with no `BITMAPINFOHEADER` FourCC or
 /// `WAVEFORMATEX` tag).
@@ -47,13 +73,13 @@ fn write_stream_of(caps: &Caps) -> Option<AviWriteStream> {
     match caps {
         Caps::CompressedVideo {
             codec,
-            width: Dim::Fixed(width),
-            height: Dim::Fixed(height),
+            width,
+            height,
             ..
         } => Some(AviWriteStream::Video {
             codec: *codec,
-            width: *width,
-            height: *height,
+            width: fixed_or_unknown(width),
+            height: fixed_or_unknown(height),
         }),
         Caps::Audio {
             format,
@@ -142,6 +168,22 @@ impl AviMux {
     pub fn new() -> Self {
         Self::default()
     }
+
+    /// The writer, built on first use from the stream descriptor as it stands by
+    /// then (a runtime `CapsChanged` may have filled in the geometry). A video
+    /// stream whose size is still unknown fails here: AVI's headers have no way
+    /// to leave it out.
+    fn writer(&mut self) -> Result<&mut AviWriter, G2gError> {
+        if self.writer.is_none() {
+            let stream = self.stream.clone().ok_or(G2gError::NotConfigured)?;
+            let streams = Vec::from([stream]);
+            if !geometry_known(&streams) {
+                return Err(G2gError::CapsMismatch);
+            }
+            self.writer = Some(AviWriter::new(streams));
+        }
+        self.writer.as_mut().ok_or(G2gError::NotConfigured)
+    }
 }
 
 impl AsyncElement for AviMux {
@@ -183,9 +225,7 @@ impl AsyncElement for AviMux {
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        let stream = write_stream_for(absolute_caps).ok_or(G2gError::CapsMismatch)?;
-        self.writer = Some(AviWriter::new(Vec::from([stream.clone()])));
-        self.stream = Some(stream);
+        self.stream = Some(write_stream_for(absolute_caps).ok_or(G2gError::CapsMismatch)?);
         Ok(ConfigureOutcome::Accepted)
     }
 
@@ -195,32 +235,37 @@ impl AsyncElement for AviMux {
         out: &'a mut dyn OutputSink,
     ) -> Self::ProcessFuture<'a> {
         Box::pin(async move {
-            let (Some(writer), Some(stream)) = (self.writer.as_mut(), self.stream.as_ref()) else {
-                return Err(G2gError::NotConfigured);
-            };
             match packet {
                 PipelinePacket::DataFrame(frame) => {
+                    let stream = self.stream.clone().ok_or(G2gError::NotConfigured)?;
                     let slice = frame
                         .domain
                         .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
-                    writer.push(
-                        0,
-                        Vec::from(slice),
-                        frame.timing.pts_ns,
-                        is_keyframe(stream, &frame.timing),
-                    )?;
+                    let keyframe = is_keyframe(&stream, &frame.timing);
+                    let pts_ns = frame.timing.pts_ns;
+                    let data = Vec::from(slice);
+                    self.writer()?.push(0, data, pts_ns, keyframe)?;
                 }
                 PipelinePacket::Eos => {
                     if !self.finished {
                         self.finished = true;
-                        let bytes = writer.finish()?;
+                        let bytes = self.writer()?.finish()?;
                         out.push(PipelinePacket::DataFrame(file_frame(bytes)))
                             .await?;
                     }
                 }
-                // A muxed container carries its own timing, so a per-stream
-                // segment and the input's caps are consumed here.
-                PipelinePacket::CapsChanged(_) | PipelinePacket::Segment(_) => {}
+                // A decoder refines the geometry (and compressed audio its
+                // layout) at runtime, and the headers need the real one, so take
+                // it while the file can still change.
+                PipelinePacket::CapsChanged(caps) => {
+                    if self.writer.is_none() {
+                        if let Some(stream) = write_stream_for(&caps) {
+                            self.stream = Some(stream);
+                        }
+                    }
+                }
+                // A muxed container carries its own timing.
+                PipelinePacket::Segment(_) => {}
                 other => {
                     out.push(other).await?;
                 }
@@ -274,10 +319,14 @@ impl AviMuxN {
 
     /// Build the writer once every pad has declared its stream, so the `strl`
     /// list is in pad order.
+    /// Built on first use, so a runtime `CapsChanged` on any pad has had its
+    /// chance to fill in what negotiation left open. `None` while a pad has no
+    /// stream yet, or while a video stream's size is still unknown.
     fn writer(&mut self) -> Option<&mut AviWriter> {
         if self.writer.is_none() {
             let streams: Option<Vec<AviWriteStream>> = self.streams.iter().cloned().collect();
-            self.writer = Some(AviWriter::new(streams?));
+            let streams = streams.filter(|streams| geometry_known(streams))?;
+            self.writer = Some(AviWriter::new(streams));
         }
         self.writer.as_mut()
     }
@@ -552,6 +601,74 @@ mod tests {
             mux.configure_pipeline(1, &video).is_err(),
             "AVI's avih describes one video stream"
         );
+    }
+
+    /// A decoded still-image stream negotiates an open geometry and states its
+    /// real size at runtime, so the mux accepts the caps and takes the size from
+    /// the `CapsChanged` that precedes the first frame.
+    #[test]
+    fn takes_a_geometry_that_only_arrives_at_runtime() {
+        const WIDTH: u32 = 64;
+        const HEIGHT: u32 = 48;
+        let open = Caps::CompressedVideo {
+            codec: VideoCodec::Mjpeg,
+            width: Dim::Any,
+            height: Dim::Any,
+            framerate: Rate::Any,
+        };
+        let mut mux = AviMux::new();
+        mux.configure_pipeline(&open)
+            .expect("an open geometry negotiates");
+        let mut sink = ByteCapture::default();
+        block_on(async {
+            mux.process(
+                PipelinePacket::CapsChanged(Caps::CompressedVideo {
+                    codec: VideoCodec::Mjpeg,
+                    width: Dim::Fixed(WIDTH),
+                    height: Dim::Fixed(HEIGHT),
+                    framerate: Rate::Fixed(25 << 16),
+                }),
+                &mut sink,
+            )
+            .await
+            .expect("the refinement is taken");
+            mux.process(frame(vec![0xFF, 0xD8, 0xFF, 0xD9], 0, true), &mut sink)
+                .await
+                .expect("the frame is queued");
+            mux.process(PipelinePacket::Eos, &mut sink)
+                .await
+                .expect("the file is written");
+        });
+        let file = parse(&sink.bytes).expect("the file parses");
+        assert_eq!(
+            file.streams[0].kind,
+            AviStreamKind::Video {
+                codec: VideoCodec::Mjpeg,
+                width: WIDTH,
+                height: HEIGHT
+            },
+            "the runtime geometry reached the header"
+        );
+    }
+
+    /// Without that refinement there is no size to write, and AVI cannot leave
+    /// it out, so the mux fails instead of writing a 0x0 header.
+    #[test]
+    fn refuses_a_geometry_that_never_arrives() {
+        let open = Caps::CompressedVideo {
+            codec: VideoCodec::Mjpeg,
+            width: Dim::Any,
+            height: Dim::Any,
+            framerate: Rate::Any,
+        };
+        let mut mux = AviMux::new();
+        mux.configure_pipeline(&open).expect("negotiates");
+        let mut sink = ByteCapture::default();
+        let pushed = block_on(async {
+            mux.process(frame(vec![0xFF, 0xD8, 0xFF, 0xD9], 0, true), &mut sink)
+                .await
+        });
+        assert_eq!(pushed.err(), Some(G2gError::CapsMismatch));
     }
 
     #[test]

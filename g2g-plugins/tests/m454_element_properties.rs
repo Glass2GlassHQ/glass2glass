@@ -26,6 +26,24 @@ fn declared_default(specs: &[PropertySpec], name: &str) -> PropValue {
         .unwrap_or_else(|_| panic!("`{name}`'s default parses for its kind"))
 }
 
+/// The `(min, max)` a spec declares for an unsigned property, as numbers, so a
+/// test can hold the declared text and the value the element enforces together.
+#[cfg(feature = "srtp")]
+fn declared_range(specs: &[PropertySpec], name: &str) -> (usize, usize) {
+    let spec = specs
+        .iter()
+        .find(|s| s.name == name)
+        .unwrap_or_else(|| panic!("`{name}` is declared"));
+    let (minimum, maximum) = spec
+        .range
+        .unwrap_or_else(|| panic!("`{name}` declares a range"));
+    let parse = |text: &str| {
+        text.parse::<usize>()
+            .unwrap_or_else(|_| panic!("`{name}` declares `{text}` as a number"))
+    };
+    (parse(minimum), parse(maximum))
+}
+
 /// M888: the CMAF chunked-consumption switch is settable from a launch line.
 #[cfg(feature = "dash")]
 #[test]
@@ -388,6 +406,288 @@ fn srtsrc_latency_and_passphrase() {
         s.get_property("passphrase"),
         Some(PropValue::Str("hunter2hunter2".into()))
     );
+}
+
+/// M1098: `srtpenc` takes its key as hexadecimal digits, at any of the four
+/// cipher lengths, and never reads it back. A length matching none of them is
+/// refused rather than silently truncated.
+#[cfg(feature = "srtp")]
+#[test]
+fn srtpenc_key_and_rtcp_encrypt() {
+    use g2g_plugins::srtpenc::SrtpEnc;
+    /// 16 key bytes then the 12-byte salt, and 32 key bytes then the same salt.
+    const AES_128_KEY: &str = "000102030405060708090a0b0c0d0e0f517569642070726f2071756f";
+    const AES_256_KEY: &str = "000102030405060708090a0b0c0d0e0f\
+                               101112131415161718191a1b1c1d1e1f\
+                               517569642070726f2071756f";
+
+    let mut e = SrtpEnc::default();
+    assert!(declares(e.properties(), "key"));
+    for key in [AES_128_KEY, AES_256_KEY] {
+        e.set_property("key", PropValue::Str(key.into())).unwrap();
+    }
+    // Reads back empty: the element never hands key material out.
+    assert_eq!(e.get_property("key"), Some(PropValue::Str(String::new())));
+    // One byte short of a cipher, and a non-hexadecimal digit.
+    assert!(e
+        .set_property("key", PropValue::Str(AES_128_KEY[..54].into()))
+        .is_err());
+    assert!(e
+        .set_property("key", PropValue::Str(AES_128_KEY.replace("0a", "0z")))
+        .is_err());
+
+    assert_eq!(
+        e.get_property("rtcp-encrypt"),
+        Some(declared_default(e.properties(), "rtcp-encrypt"))
+    );
+    e.set_property("rtcp-encrypt", PropValue::Bool(false))
+        .unwrap();
+    assert_eq!(e.get_property("rtcp-encrypt"), Some(PropValue::Bool(false)));
+}
+
+/// M1101: the cipher and authentication pair of each flow, on both SRTP
+/// elements. A fresh element reports the declared gst defaults; a key length
+/// moves them; a value the key length cannot key is refused.
+#[cfg(feature = "srtp")]
+#[test]
+fn srtp_elements_carry_a_cipher_and_authentication_per_flow() {
+    use g2g_plugins::srtp::{AUTHENTICATION_VALUES, CIPHER_VALUES};
+    use g2g_plugins::srtpdec::SrtpDec;
+    use g2g_plugins::srtpenc::SrtpEnc;
+
+    /// 16 key bytes then the 14-byte salt: the AES-128-ICM length gst defaults
+    /// to, and the 12-byte-salt AES-128-GCM one beside it.
+    const COUNTER_MODE_KEY: &str = "000102030405060708090a0b0c0d0e0f517569642070726f2071756f2121";
+    const GCM_KEY: &str = "000102030405060708090a0b0c0d0e0f517569642070726f2071756f";
+    const PROTECTION_PROPERTIES: [&str; 4] = ["rtp-cipher", "rtcp-cipher", "rtp-auth", "rtcp-auth"];
+
+    fn check<E: AsyncElement>(label: &str, element: &mut E) {
+        for name in PROTECTION_PROPERTIES {
+            assert!(
+                declares(element.properties(), name),
+                "{label} must declare {name}"
+            );
+            assert_eq!(
+                element.get_property(name),
+                Some(declared_default(element.properties(), name)),
+                "{label} {name} reports its declared default"
+            );
+        }
+        // The declared choice list is the closed set the parser validates
+        // against, so it has to name every value the element takes.
+        for (name, values) in [
+            ("rtp-cipher", CIPHER_VALUES),
+            ("rtp-auth", AUTHENTICATION_VALUES),
+        ] {
+            let spec = element
+                .properties()
+                .iter()
+                .find(|spec| spec.name == name)
+                .expect("the property is declared");
+            assert_eq!(spec.enum_values, Some(values), "{label} {name}");
+        }
+
+        element
+            .set_property("key", PropValue::Str(GCM_KEY.into()))
+            .unwrap_or_else(|_| panic!("{label} takes an AES-128-GCM key"));
+        assert_eq!(
+            element.get_property("rtp-cipher"),
+            Some(PropValue::Str("aes-128-gcm".into())),
+            "{label}: an unset cipher follows the key length"
+        );
+        assert_eq!(
+            element.get_property("rtp-auth"),
+            Some(PropValue::Str("null".into())),
+            "{label}: an AEAD cipher carries its own tag"
+        );
+        // A separate transform beside an AEAD cipher, and a cipher this key
+        // length cannot key.
+        assert!(element
+            .set_property("rtp-auth", PropValue::Str("hmac-sha1-80".into()))
+            .is_err());
+        assert!(element
+            .set_property("rtp-cipher", PropValue::Str("aes-128-icm".into()))
+            .is_err());
+
+        element
+            .set_property("key", PropValue::Str(COUNTER_MODE_KEY.into()))
+            .unwrap_or_else(|_| panic!("{label} takes an AES-128-ICM key"));
+        assert_eq!(
+            element.get_property("rtcp-cipher"),
+            Some(PropValue::Str("aes-128-icm".into())),
+            "{label}"
+        );
+        assert_eq!(
+            element.get_property("rtcp-auth"),
+            Some(PropValue::Str("hmac-sha1-80".into())),
+            "{label}"
+        );
+        // Only the flow that was set moves.
+        element
+            .set_property("rtcp-auth", PropValue::Str("hmac-sha1-32".into()))
+            .unwrap_or_else(|_| panic!("{label} takes an RTCP tag length"));
+        assert_eq!(
+            element.get_property("rtp-auth"),
+            Some(PropValue::Str("hmac-sha1-80".into())),
+            "{label}: the RTP pair is untouched"
+        );
+        // A value the enum does not name.
+        assert!(element
+            .set_property("rtp-cipher", PropValue::Str("aes-192-icm".into()))
+            .is_err());
+        assert!(element
+            .set_property("rtp-auth", PropValue::Str("hmac-sha256-80".into()))
+            .is_err());
+    }
+
+    check("srtpenc", &mut SrtpEnc::default());
+    check("srtpdec", &mut SrtpDec::default());
+}
+
+/// M1099: the session knobs `srtpenc` shares with gst. `stats` stays
+/// programmatic (g2g has no structure-valued property kind), so it is unknown
+/// here.
+#[cfg(feature = "srtp")]
+#[test]
+fn srtpenc_replay_window_repeat_transmission_and_mki() {
+    use g2g_plugins::srtp::{
+        DEFAULT_REPLAY_WINDOW, MAXIMUM_MKI_LENGTH, MAXIMUM_REPLAY_WINDOW, MINIMUM_REPLAY_WINDOW,
+    };
+    use g2g_plugins::srtpenc::SrtpEnc;
+
+    let mut e = SrtpEnc::default();
+    let window = |packets: usize| PropValue::Uint(packets as u64);
+
+    assert_eq!(
+        e.get_property("replay-window-size"),
+        Some(window(DEFAULT_REPLAY_WINDOW))
+    );
+    assert_eq!(
+        declared_default(e.properties(), "replay-window-size"),
+        window(DEFAULT_REPLAY_WINDOW),
+        "the declared default is the one a fresh element reports"
+    );
+    assert_eq!(
+        declared_range(e.properties(), "replay-window-size"),
+        (MINIMUM_REPLAY_WINDOW, MAXIMUM_REPLAY_WINDOW),
+        "the declared range is the one the element enforces"
+    );
+    for packets in [MINIMUM_REPLAY_WINDOW, MAXIMUM_REPLAY_WINDOW] {
+        e.set_property("replay-window-size", window(packets))
+            .unwrap();
+        assert_eq!(e.get_property("replay-window-size"), Some(window(packets)));
+    }
+    for packets in [MINIMUM_REPLAY_WINDOW - 1, MAXIMUM_REPLAY_WINDOW + 1] {
+        assert!(
+            e.set_property("replay-window-size", window(packets))
+                .is_err(),
+            "{packets} is outside the declared range"
+        );
+    }
+
+    assert_eq!(
+        e.get_property("allow-repeat-tx"),
+        Some(declared_default(e.properties(), "allow-repeat-tx"))
+    );
+    e.set_property("allow-repeat-tx", PropValue::Bool(true))
+        .unwrap();
+    assert_eq!(
+        e.get_property("allow-repeat-tx"),
+        Some(PropValue::Bool(true))
+    );
+
+    // The MKI is hexadecimal in and hexadecimal back out: it names the key, it
+    // is not the key.
+    assert_eq!(
+        e.get_property("mki"),
+        Some(declared_default(e.properties(), "mki"))
+    );
+    e.set_property("mki", PropValue::Str("00ff10".into()))
+        .unwrap();
+    assert_eq!(e.get_property("mki"), Some(PropValue::Str("00ff10".into())));
+    e.set_property("mki", PropValue::Str(String::new()))
+        .unwrap();
+    assert_eq!(e.get_property("mki"), Some(PropValue::Str(String::new())));
+    // An odd digit count, and one byte past libsrtp's SRTP_MAX_MKI_LEN.
+    assert!(e.set_property("mki", PropValue::Str("00f".into())).is_err());
+    assert!(e
+        .set_property("mki", PropValue::Str("aa".repeat(MAXIMUM_MKI_LENGTH + 1)))
+        .is_err());
+
+    assert!(e
+        .set_property("stats", PropValue::Str(String::new()))
+        .is_err());
+}
+
+/// M1099: `srtpdec`'s replay window sizes the contexts it creates afterwards.
+#[cfg(feature = "srtp")]
+#[test]
+fn srtpdec_replay_window() {
+    use g2g_plugins::srtp::{DEFAULT_REPLAY_WINDOW, MAXIMUM_REPLAY_WINDOW, MINIMUM_REPLAY_WINDOW};
+    use g2g_plugins::srtpdec::SrtpDec;
+
+    let mut d = SrtpDec::default();
+    let window = |packets: usize| PropValue::Uint(packets as u64);
+
+    assert_eq!(
+        d.get_property("replay-window-size"),
+        Some(window(DEFAULT_REPLAY_WINDOW))
+    );
+    assert_eq!(
+        declared_default(d.properties(), "replay-window-size"),
+        window(DEFAULT_REPLAY_WINDOW)
+    );
+    assert_eq!(
+        declared_range(d.properties(), "replay-window-size"),
+        (MINIMUM_REPLAY_WINDOW, MAXIMUM_REPLAY_WINDOW)
+    );
+    for packets in [MINIMUM_REPLAY_WINDOW, MAXIMUM_REPLAY_WINDOW] {
+        d.set_property("replay-window-size", window(packets))
+            .unwrap();
+        assert_eq!(d.get_property("replay-window-size"), Some(window(packets)));
+    }
+    for packets in [MINIMUM_REPLAY_WINDOW - 1, MAXIMUM_REPLAY_WINDOW + 1] {
+        assert!(
+            d.set_property("replay-window-size", window(packets))
+                .is_err(),
+            "{packets} is outside the declared range"
+        );
+    }
+    assert!(d
+        .set_property("stats", PropValue::Str(String::new()))
+        .is_err());
+}
+
+/// M1098: `srtpdec` takes the same key plus the rollover counter a context
+/// created later starts from.
+#[cfg(feature = "srtp")]
+#[test]
+fn srtpdec_key_and_rollover_counter() {
+    use g2g_plugins::srtpdec::SrtpDec;
+    const AES_128_KEY: &str = "000102030405060708090a0b0c0d0e0f517569642070726f2071756f";
+
+    let mut d = SrtpDec::default();
+    assert!(declares(d.properties(), "key"));
+    d.set_property("key", PropValue::Str(AES_128_KEY.into()))
+        .unwrap();
+    assert_eq!(d.get_property("key"), Some(PropValue::Str(String::new())));
+    assert!(d
+        .set_property("key", PropValue::Str(AES_128_KEY[..54].into()))
+        .is_err());
+
+    assert_eq!(
+        d.get_property("roc"),
+        Some(declared_default(d.properties(), "roc"))
+    );
+    d.set_property("roc", PropValue::Uint(u64::from(u32::MAX)))
+        .unwrap();
+    assert_eq!(
+        d.get_property("roc"),
+        Some(PropValue::Uint(u64::from(u32::MAX)))
+    );
+    assert!(d
+        .set_property("roc", PropValue::Uint(u64::from(u32::MAX) + 1))
+        .is_err());
 }
 
 /// M1068: `tcpserversrc` takes the gst `tcp` property set, and reports the port
@@ -2976,4 +3276,600 @@ fn fpsdisplaysink_child_interval_and_counters() {
     assert!(e
         .set_property("frames-rendered", PropValue::Uint(9))
         .is_err());
+}
+
+/// M1086: the shape `rawvideoparse` cuts a headerless dump into, and the
+/// per-frame stride of a dump whose frames are spaced apart.
+#[test]
+fn rawvideoparse_shape_and_frame_size() {
+    use g2g_plugins::rawvideoparse::RawVideoParse;
+    let mut e = RawVideoParse::new();
+    for name in ["format", "width", "height", "framerate", "frame-size"] {
+        assert!(declares(e.properties(), name), "{name} must be declared");
+        assert_eq!(
+            e.get_property(name),
+            Some(declared_default(e.properties(), name)),
+            "{name} reports its declared default"
+        );
+    }
+    e.set_property("format", PropValue::Str("NV12".into()))
+        .unwrap();
+    assert_eq!(
+        e.get_property("format"),
+        Some(PropValue::Str("NV12".into()))
+    );
+    e.set_property("width", PropValue::Uint(640)).unwrap();
+    e.set_property("height", PropValue::Uint(480)).unwrap();
+    assert_eq!(e.get_property("width"), Some(PropValue::Uint(640)));
+    assert_eq!(e.get_property("height"), Some(PropValue::Uint(480)));
+    e.set_property("framerate", PropValue::Fraction(30000, 1001))
+        .unwrap();
+    assert_eq!(
+        e.get_property("framerate"),
+        Some(PropValue::Fraction(30000, 1001))
+    );
+    e.set_property("frame-size", PropValue::Uint(460_800))
+        .unwrap();
+    assert_eq!(e.get_property("frame-size"), Some(PropValue::Uint(460_800)));
+    // M1093: the padded-plane lists, as comma-separated byte counts.
+    for name in ["plane-strides", "plane-offsets"] {
+        assert!(declares(e.properties(), name), "{name} must be declared");
+        assert_eq!(
+            e.get_property(name),
+            Some(PropValue::Str(String::new())),
+            "{name} is empty until a padded layout is declared"
+        );
+        e.set_property(name, PropValue::Str("704,352,352".into()))
+            .unwrap();
+        assert_eq!(
+            e.get_property(name),
+            Some(PropValue::Str("704,352,352".into()))
+        );
+        assert!(e
+            .set_property(name, PropValue::Str("704,nope".into()))
+            .is_err());
+    }
+    assert!(e
+        .set_property("framerate", PropValue::Fraction(25, 0))
+        .is_err());
+}
+
+/// M1086: the sample shape `rawaudioparse` cuts a headerless dump into. The
+/// `format` / `pcm-format` pair is gst's: the first names the encoding, the
+/// second the PCM sample layout.
+#[test]
+fn rawaudioparse_format_rate_and_channels() {
+    use g2g_plugins::rawaudioparse::RawAudioParse;
+    let mut e = RawAudioParse::new();
+    for name in ["format", "pcm-format", "sample-rate", "num-channels"] {
+        assert!(declares(e.properties(), name), "{name} must be declared");
+        assert_eq!(
+            e.get_property(name),
+            Some(declared_default(e.properties(), name)),
+            "{name} reports its declared default"
+        );
+    }
+    e.set_property("pcm-format", PropValue::Str("F32LE".into()))
+        .unwrap();
+    assert_eq!(
+        e.get_property("pcm-format"),
+        Some(PropValue::Str("F32LE".into()))
+    );
+    e.set_property("sample-rate", PropValue::Uint(48_000))
+        .unwrap();
+    e.set_property("num-channels", PropValue::Uint(1)).unwrap();
+    assert_eq!(e.get_property("sample-rate"), Some(PropValue::Uint(48_000)));
+    assert_eq!(e.get_property("num-channels"), Some(PropValue::Uint(1)));
+    e.set_property("format", PropValue::Str("alaw".into()))
+        .unwrap();
+    assert_eq!(
+        e.get_property("format"),
+        Some(PropValue::Str("alaw".into()))
+    );
+    assert!(e
+        .set_property("format", PropValue::Str("adpcm".into()))
+        .is_err());
+}
+
+/// M1088: `splitfilesrc`'s pattern, read size and container override.
+#[cfg(feature = "std")]
+#[test]
+fn splitfilesrc_location_blocksize_and_format() {
+    use g2g_core::runtime::SourceLoop;
+    use g2g_plugins::splitfilesrc::SplitFileSrc;
+    let mut e = SplitFileSrc::new("clip.ts.part*");
+    for name in ["location", "blocksize", "bytestream-format"] {
+        assert!(declares(e.properties(), name), "{name} must be declared");
+    }
+    assert_eq!(
+        e.get_property("blocksize"),
+        Some(declared_default(e.properties(), "blocksize"))
+    );
+    assert_eq!(
+        e.get_property("location"),
+        Some(PropValue::Str("clip.ts.part*".into()))
+    );
+    e.set_property("blocksize", PropValue::Uint(4096)).unwrap();
+    assert_eq!(e.get_property("blocksize"), Some(PropValue::Uint(4096)));
+    e.set_property("bytestream-format", PropValue::Str("mpegts".into()))
+        .unwrap();
+    assert_eq!(
+        e.get_property("bytestream-format"),
+        Some(PropValue::Str("mpegts".into()))
+    );
+    assert!(e.set_property("blocksize", PropValue::Uint(0)).is_err());
+    assert!(e
+        .set_property("bytestream-format", PropValue::Str("nosuch".into()))
+        .is_err());
+}
+
+/// M1088: `dataurisrc`'s URI and push size.
+#[cfg(feature = "std")]
+#[test]
+fn dataurisrc_uri_and_blocksize() {
+    use g2g_core::runtime::SourceLoop;
+    use g2g_plugins::dataurisrc::DataUriSrc;
+    let mut e = DataUriSrc::new("data:,hello");
+    for name in ["uri", "blocksize"] {
+        assert!(declares(e.properties(), name), "{name} must be declared");
+    }
+    assert_eq!(
+        e.get_property("blocksize"),
+        Some(declared_default(e.properties(), "blocksize"))
+    );
+    e.set_property("uri", PropValue::Str("data:text/plain;base64,aGk=".into()))
+        .unwrap();
+    assert_eq!(
+        e.get_property("uri"),
+        Some(PropValue::Str("data:text/plain;base64,aGk=".into()))
+    );
+    e.set_property("blocksize", PropValue::Uint(128)).unwrap();
+    assert_eq!(e.get_property("blocksize"), Some(PropValue::Uint(128)));
+    assert!(e.set_property("blocksize", PropValue::Uint(0)).is_err());
+}
+
+/// M1088: the framerate that turns `multifilesrc` into `imagesequencesrc`,
+/// unstamped until it is set.
+#[cfg(feature = "std")]
+#[test]
+fn multifilesrc_framerate() {
+    use g2g_core::runtime::SourceLoop;
+    use g2g_plugins::multifilesrc::MultiFileSrc;
+    let mut e = MultiFileSrc::new("img%05d.jpg");
+    assert!(declares(e.properties(), "framerate"));
+    assert_eq!(
+        e.get_property("framerate"),
+        Some(PropValue::Fraction(0, 1)),
+        "a plain multifilesrc leaves the files unstamped"
+    );
+    e.set_property("framerate", PropValue::Fraction(30, 1))
+        .unwrap();
+    assert_eq!(
+        e.get_property("framerate"),
+        Some(PropValue::Fraction(30, 1))
+    );
+    assert!(e
+        .set_property("framerate", PropValue::Fraction(30, 0))
+        .is_err());
+}
+
+/// M1094: the audio tag writers take their tags from a `tags=` property, in the
+/// gst taglist syntax `taginject` accepts, because a `TagList` reaches an
+/// application only on the bus and an element cannot read the bus. `id3v2mux`
+/// adds the ID3v2 version to write and the ID3v1 trailer switch.
+#[test]
+fn m1094_audio_tag_writer_properties() {
+    use g2g_core::Tag;
+    use g2g_plugins::apev2mux::ApeV2Mux;
+    use g2g_plugins::flactag::FlacTag;
+    use g2g_plugins::id3v2mux::Id3V2Mux;
+    use g2g_plugins::vorbistag::VorbisTag;
+    use g2g_plugins::xingmux::XingMux;
+
+    /// A quoted value holding a comma, the case the syntax needs quotes for.
+    const TAGS: &str = "title=\"A, Title\",artist=Someone";
+    let expected = [Tag::Title("A, Title".into()), Tag::Artist("Someone".into())];
+
+    /// The `tags` half every writer shares: declared, unset until written, and
+    /// rejecting a pair with no `=`.
+    fn check_tags_property(element: &mut impl AsyncElement) {
+        assert!(
+            declares(element.properties(), "tags"),
+            "`tags` must be declared"
+        );
+        assert_eq!(
+            element.get_property("tags"),
+            None,
+            "unset until it is written"
+        );
+        element
+            .set_property("tags", PropValue::Str(TAGS.into()))
+            .unwrap();
+        assert_eq!(
+            element.get_property("tags"),
+            Some(PropValue::Str(TAGS.into()))
+        );
+        assert!(element
+            .set_property("tags", PropValue::Str("no equals sign".into()))
+            .is_err());
+    }
+
+    let mut id3 = Id3V2Mux::new();
+    check_tags_property(&mut id3);
+    assert_eq!(id3.tags().tags(), expected, "the property feeds the writer");
+
+    let mut ape = ApeV2Mux::new();
+    check_tags_property(&mut ape);
+    assert_eq!(ape.tags().tags(), expected);
+
+    let mut vorbis = VorbisTag::new();
+    check_tags_property(&mut vorbis);
+    assert_eq!(vorbis.tags().tags(), expected);
+
+    let mut flac = FlacTag::new();
+    check_tags_property(&mut flac);
+    assert_eq!(flac.tags().tags(), expected);
+
+    let mut id3 = Id3V2Mux::new();
+    for name in ["v2-version", "write-v1"] {
+        assert!(declares(id3.properties(), name), "{name} must be declared");
+        assert_eq!(
+            id3.get_property(name),
+            Some(declared_default(id3.properties(), name))
+        );
+    }
+    id3.set_property("v2-version", PropValue::Uint(4)).unwrap();
+    assert_eq!(id3.get_property("v2-version"), Some(PropValue::Uint(4)));
+    // ID3v2.2 frame ids are three bytes, which nothing here reads or writes.
+    assert!(id3.set_property("v2-version", PropValue::Uint(2)).is_err());
+    id3.set_property("write-v1", PropValue::Bool(true)).unwrap();
+    assert_eq!(id3.get_property("write-v1"), Some(PropValue::Bool(true)));
+
+    // `xingmux` takes no tags: a Xing header is a seek table, not metadata, and
+    // gst's element has no properties either.
+    assert!(XingMux::new().properties().is_empty());
+}
+
+/// M1095: the legacy video parsers. `mpeg4videoparse` takes gst's
+/// `config-interval`; all three report the sample aspect their sequence header
+/// signalled through a read-only `pixel-aspect-ratio`, since caps carry no field
+/// for it.
+#[test]
+fn legacy_video_parsers_properties() {
+    use g2g_plugins::mpeg4videoparse::Mpeg4VideoParse;
+    use g2g_plugins::mpegvideoparse::MpegVideoParse;
+    use g2g_plugins::vc1parse::Vc1Parse;
+
+    let mut mpeg4 = Mpeg4VideoParse::new();
+    assert!(declares(mpeg4.properties(), "config-interval"));
+    assert_eq!(
+        mpeg4.get_property("config-interval"),
+        Some(declared_default(mpeg4.properties(), "config-interval"))
+    );
+    mpeg4
+        .set_property("config-interval", PropValue::Int(-1))
+        .unwrap();
+    assert_eq!(
+        mpeg4.get_property("config-interval"),
+        Some(PropValue::Int(-1))
+    );
+    assert!(mpeg4
+        .set_property("config-interval", PropValue::Int(-2))
+        .is_err());
+    assert!(mpeg4
+        .set_property("config-interval", PropValue::Int(3601))
+        .is_err());
+
+    // The other two apply no configuration re-insertion, so they declare none.
+    assert!(!declares(
+        MpegVideoParse::new().properties(),
+        "config-interval"
+    ));
+    assert!(!declares(Vc1Parse::new().properties(), "config-interval"));
+
+    for properties in [
+        MpegVideoParse::new().properties(),
+        Mpeg4VideoParse::new().properties(),
+        Vc1Parse::new().properties(),
+    ] {
+        assert!(declares(properties, "pixel-aspect-ratio"));
+    }
+    let mut mpeg2 = MpegVideoParse::new();
+    assert_eq!(
+        mpeg2.get_property("pixel-aspect-ratio"),
+        Some(PropValue::Fraction(0, 1)),
+        "unknown until a sequence header has been parsed"
+    );
+    assert!(mpeg2
+        .set_property("pixel-aspect-ratio", PropValue::Fraction(1, 1))
+        .is_err());
+}
+
+/// M1096: the subtitle writers' cue-window offsets, the caption converter's
+/// layout pair, and the combiner's scheduling / meta-merge knobs.
+#[test]
+fn srtenc_and_webvttenc_cue_window_offsets() {
+    use g2g_plugins::srtenc::SrtEnc;
+    use g2g_plugins::webvttenc::WebVttEnc;
+    let mut srt = SrtEnc::new();
+    let mut vtt = WebVttEnc::new();
+    for name in ["timestamp", "duration"] {
+        assert!(declares(srt.properties(), name), "srtenc {name}");
+        assert!(declares(vtt.properties(), name), "webvttenc {name}");
+        assert_eq!(
+            srt.get_property(name),
+            Some(declared_default(srt.properties(), name))
+        );
+    }
+    srt.set_property("timestamp", PropValue::Int(-500_000_000))
+        .unwrap();
+    assert_eq!(
+        srt.get_property("timestamp"),
+        Some(PropValue::Int(-500_000_000))
+    );
+    vtt.set_property("duration", PropValue::Int(250_000_000))
+        .unwrap();
+    assert_eq!(
+        vtt.get_property("duration"),
+        Some(PropValue::Int(250_000_000))
+    );
+    assert!(srt.set_property("timestamp", PropValue::Uint(1)).is_err());
+}
+
+/// M1096: `ccconverter`'s input / output layouts, the line-21 field and the
+/// frame rate a written CDP declares.
+#[test]
+fn ccconverter_layout_pair_field_and_framerate() {
+    use g2g_plugins::ccconverter::CcConverter;
+    let mut e = CcConverter::new();
+    for name in ["in-format", "out-format", "field", "framerate"] {
+        assert!(declares(e.properties(), name), "{name} must be declared");
+        assert_eq!(
+            e.get_property(name),
+            Some(declared_default(e.properties(), name)),
+            "{name} reports its declared default"
+        );
+    }
+    e.set_property("in-format", PropValue::Str("s334-1a".into()))
+        .unwrap();
+    assert_eq!(
+        e.get_property("in-format"),
+        Some(PropValue::Str("s334-1a".into()))
+    );
+    e.set_property("out-format", PropValue::Str("raw".into()))
+        .unwrap();
+    assert_eq!(
+        e.get_property("out-format"),
+        Some(PropValue::Str("raw".into()))
+    );
+    e.set_property("field", PropValue::Uint(1)).unwrap();
+    assert_eq!(e.get_property("field"), Some(PropValue::Uint(1)));
+    e.set_property("framerate", PropValue::Fraction(25, 1))
+        .unwrap();
+    assert_eq!(
+        e.get_property("framerate"),
+        Some(PropValue::Fraction(25, 1))
+    );
+    assert!(e
+        .set_property("in-format", PropValue::Str("nosuch".into()))
+        .is_err());
+    assert!(e.set_property("field", PropValue::Uint(2)).is_err());
+    assert!(e
+        .set_property("framerate", PropValue::Fraction(25, 0))
+        .is_err());
+}
+
+/// M1096: `cccombiner`'s caption queue cap and how it merges with caption meta
+/// the video frame already carries.
+#[cfg(feature = "metadata")]
+#[test]
+fn cccombiner_scheduling_and_meta_merge() {
+    use g2g_core::MultiInputElement;
+    use g2g_plugins::cccombiner::CcCombiner;
+    let mut e = CcCombiner::new();
+    for name in ["max-scheduled", "input-meta-processing", "field"] {
+        assert!(declares(e.properties(), name), "{name} must be declared");
+        assert_eq!(
+            e.get_property(name),
+            Some(declared_default(e.properties(), name)),
+            "{name} reports its declared default"
+        );
+    }
+    e.set_property("max-scheduled", PropValue::Uint(4)).unwrap();
+    assert_eq!(e.get_property("max-scheduled"), Some(PropValue::Uint(4)));
+    e.set_property("input-meta-processing", PropValue::Str("favor".into()))
+        .unwrap();
+    assert_eq!(
+        e.get_property("input-meta-processing"),
+        Some(PropValue::Str("favor".into()))
+    );
+    e.set_property("field", PropValue::Uint(1)).unwrap();
+    assert_eq!(e.get_property("field"), Some(PropValue::Uint(1)));
+    assert!(e
+        .set_property("input-meta-processing", PropValue::Str("nosuch".into()))
+        .is_err());
+    assert!(e.set_property("field", PropValue::Uint(2)).is_err());
+}
+
+/// M1100: the DTLS-SRTP pair's `connection-id` / `is-client` / `pem` knobs and
+/// the two read-only ones. The gst `key` / `srtp-cipher` / `srtp-auth` overrides
+/// that would disable DTLS are not accepted: a fixed key is `srtpenc` /
+/// `srtpdec`'s job.
+#[cfg(feature = "dtls-srtp")]
+#[test]
+fn dtls_srtp_pair_carries_its_connection_knobs() {
+    use g2g_core::{MultiInputElement, MultiOutputElement};
+    use g2g_plugins::dtlssrtpdec::DtlsSrtpDec;
+    use g2g_plugins::dtlssrtpenc::DtlsSrtpEnc;
+
+    let mut encoder = DtlsSrtpEnc::new(2);
+    for name in [
+        "connection-id",
+        "is-client",
+        "connection-state",
+        "peer-pem",
+        "peer-fingerprint",
+    ] {
+        assert!(
+            declares(MultiInputElement::properties(&encoder), name),
+            "dtlssrtpenc must declare {name}"
+        );
+        assert_eq!(
+            MultiInputElement::get_property(&encoder, name),
+            Some(declared_default(
+                MultiInputElement::properties(&encoder),
+                name
+            )),
+            "dtlssrtpenc {name} reports its declared default"
+        );
+    }
+    MultiInputElement::set_property(
+        &mut encoder,
+        "connection-id",
+        PropValue::Str("session-a".into()),
+    )
+    .unwrap();
+    MultiInputElement::set_property(&mut encoder, "is-client", PropValue::Bool(true)).unwrap();
+    assert_eq!(
+        MultiInputElement::get_property(&encoder, "connection-id"),
+        Some(PropValue::Str("session-a".into()))
+    );
+    assert_eq!(
+        MultiInputElement::get_property(&encoder, "is-client"),
+        Some(PropValue::Bool(true))
+    );
+    // Read-only, and no key override: DTLS delivers the key.
+    assert!(MultiInputElement::set_property(
+        &mut encoder,
+        "connection-state",
+        PropValue::Str("connected".into())
+    )
+    .is_err());
+    for name in [
+        "key",
+        "srtp-cipher",
+        "srtp-auth",
+        "srtcp-cipher",
+        "srtcp-auth",
+    ] {
+        assert!(
+            MultiInputElement::set_property(&mut encoder, name, PropValue::Str(String::new()))
+                .is_err(),
+            "dtlssrtpenc must not accept {name}"
+        );
+    }
+
+    let mut decoder = DtlsSrtpDec::default();
+    for name in [
+        "connection-id",
+        "pem",
+        "connection-state",
+        "peer-pem",
+        "peer-fingerprint",
+    ] {
+        assert!(
+            declares(MultiOutputElement::properties(&decoder), name),
+            "dtlssrtpdec must declare {name}"
+        );
+        assert_eq!(
+            MultiOutputElement::get_property(&decoder, name),
+            Some(declared_default(
+                MultiOutputElement::properties(&decoder),
+                name
+            )),
+            "dtlssrtpdec {name} reports its declared default"
+        );
+    }
+    MultiOutputElement::set_property(
+        &mut decoder,
+        "connection-id",
+        PropValue::Str("session-a".into()),
+    )
+    .unwrap();
+    MultiOutputElement::set_property(
+        &mut decoder,
+        "pem",
+        PropValue::Str("-----BEGIN CERTIFICATE-----".into()),
+    )
+    .unwrap();
+    assert_eq!(
+        MultiOutputElement::get_property(&decoder, "connection-id"),
+        Some(PropValue::Str("session-a".into()))
+    );
+    assert!(MultiOutputElement::set_property(
+        &mut decoder,
+        "peer-pem",
+        PropValue::Str(String::new())
+    )
+    .is_err());
+    for name in ["key", "roc", "srtp-cipher", "srtcp-auth"] {
+        assert!(
+            MultiOutputElement::set_property(&mut decoder, name, PropValue::Str(String::new()))
+                .is_err(),
+            "dtlssrtpdec must not accept {name}"
+        );
+    }
+
+    // M1101: the pinned peer certificate, in the SDP `a=fingerprint` value
+    // form. It reads back with the hash name and uppercase octets whichever
+    // way it was written, and an unparseable value is refused.
+    const LOWERCASE_FINGERPRINT: &str = "sha-256 \
+                                         ab:cd:ef:01:23:45:67:89:ab:cd:ef:01:23:45:67:89:\
+                                         ab:cd:ef:01:23:45:67:89:ab:cd:ef:01:23:45:67:89";
+    let expected = PropValue::Str(
+        LOWERCASE_FINGERPRINT
+            .to_uppercase()
+            .replace("SHA-256", "sha-256"),
+    );
+    MultiInputElement::set_property(
+        &mut encoder,
+        "peer-fingerprint",
+        PropValue::Str(LOWERCASE_FINGERPRINT.into()),
+    )
+    .expect("dtlssrtpenc takes a fingerprint");
+    assert_eq!(
+        MultiInputElement::get_property(&encoder, "peer-fingerprint"),
+        Some(expected.clone())
+    );
+    // The hash name is optional: the digest alone names the same certificate.
+    let digest_only = LOWERCASE_FINGERPRINT
+        .split_once(' ')
+        .expect("the hash name and the digest")
+        .1;
+    MultiOutputElement::set_property(
+        &mut decoder,
+        "peer-fingerprint",
+        PropValue::Str(digest_only.into()),
+    )
+    .expect("dtlssrtpdec takes a bare digest");
+    assert_eq!(
+        MultiOutputElement::get_property(&decoder, "peer-fingerprint"),
+        Some(expected)
+    );
+    // Empty clears the pin, and a short or misnamed digest is refused.
+    MultiOutputElement::set_property(
+        &mut decoder,
+        "peer-fingerprint",
+        PropValue::Str(String::new()),
+    )
+    .expect("an empty fingerprint accepts any peer");
+    assert_eq!(
+        MultiOutputElement::get_property(&decoder, "peer-fingerprint"),
+        Some(PropValue::Str(String::new()))
+    );
+    for refused in [
+        &digest_only[..digest_only.len() - 3],
+        &format!("sha-1 {digest_only}"),
+        &digest_only.replace(':', ""),
+    ] {
+        assert!(
+            MultiOutputElement::set_property(
+                &mut decoder,
+                "peer-fingerprint",
+                PropValue::Str(refused.to_string())
+            )
+            .is_err(),
+            "dtlssrtpdec must refuse `{refused}`"
+        );
+    }
 }

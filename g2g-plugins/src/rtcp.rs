@@ -23,10 +23,17 @@ pub const PT_BYE: u8 = 203;
 pub const PT_RTPFB: u8 = 205;
 pub const FMT_GENERIC_NACK: u8 = 1;
 
-/// True if a datagram on an RTP/RTCP-muxed socket (RFC 5761) is RTCP: the
-/// packet-type byte lands in the 200..=207 range that RTP payload types avoid.
+/// The seven bits byte 1 spends on the RTP payload type, above the marker bit.
+/// An RTCP packet type occupies the whole byte, so the mask reads its low bits.
+const RTP_PAYLOAD_TYPE_MASK: u8 = 0x7f;
+/// The payload types RFC 5761 reserves so RTCP can share the socket: an RTCP
+/// packet type (192..=223) masks into this range and no RTP payload type may.
+const MUXED_RTCP_TYPES: core::ops::RangeInclusive<u8> = 64..=95;
+
+/// True if a datagram on an RTP/RTCP-muxed socket (RFC 5761) is RTCP: byte 1
+/// without the marker bit lands in the range RTP payload types avoid.
 pub fn is_rtcp(buf: &[u8]) -> bool {
-    buf.len() >= 2 && (200..=207).contains(&buf[1])
+    buf.len() >= 2 && MUXED_RTCP_TYPES.contains(&(buf[1] & RTP_PAYLOAD_TYPE_MASK))
 }
 
 /// One RFC 3550 report block: per-source reception quality, carried in SR/RR.
@@ -458,6 +465,31 @@ impl ReceptionStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The RFC 5761 split covers every RTCP packet type, not only the SR..XR
+    /// range: the legacy 192 / 193 feedback types and the reserved ones above
+    /// 207 are RTCP too, and no RTP payload type may land in 64..=95.
+    #[test]
+    fn the_muxed_split_follows_the_rfc_5761_payload_type_rule() {
+        const RTP_VERSION_AND_FLAGS: u8 = 0x80;
+        const RTP_MARKER: u8 = 0x80;
+        for packet_type in [192_u8, 193, PT_SR, PT_RTPFB, 207, 223] {
+            assert!(
+                is_rtcp(&[RTP_VERSION_AND_FLAGS, packet_type]),
+                "{packet_type} is an RTCP packet type"
+            );
+        }
+        // Dynamic and static RTP payload types, with and without the marker bit.
+        for payload_type in [0_u8, 8, 96, 111, 127] {
+            for first_byte in [payload_type, payload_type | RTP_MARKER] {
+                assert!(
+                    !is_rtcp(&[RTP_VERSION_AND_FLAGS, first_byte]),
+                    "payload type {payload_type} is RTP"
+                );
+            }
+        }
+        assert!(!is_rtcp(&[RTP_VERSION_AND_FLAGS]), "a one-byte datagram");
+    }
 
     #[test]
     fn receiver_report_round_trips() {

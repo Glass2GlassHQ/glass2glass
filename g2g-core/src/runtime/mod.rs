@@ -49,7 +49,8 @@ mod observe;
 
 pub use autoplug::{
     find_chain, find_chain_preferring, find_chain_with, is_raw_audio, is_raw_video, Acceleration,
-    CapabilityDescriptor, ChainLink, ElementDesc, SelectionContext,
+    CapabilityDescriptor, ChainLink, ElementDesc, EncoderChoice, EncoderProvider, MuxerProvider,
+    SelectionContext,
 };
 pub use channel::{
     bounded, link, BitrateSlot, LinkInterceptor, LinkReceiver, LinkSender, ProbeAction, ProbeSlot,

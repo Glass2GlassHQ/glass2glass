@@ -38,6 +38,9 @@ pub enum GstEquivalent {
 /// Launch keywords the parser handles that are not registry elements.
 static LAUNCH_KEYWORDS: &[&str] = &[
     "decodebin",
+    "encodebin",
+    "encodebin2",
+    "transcodebin",
     "uridecodebin",
     "playbin",
     "queue",
@@ -71,6 +74,9 @@ static GST_MAP: &[(&str, GstEquivalent)] = &[
     ("vp9enc", GstEquivalent::Renamed("vpxenc")),
     ("jpegenc", GstEquivalent::Renamed("mjpegenc")),
     ("jpegdec", GstEquivalent::Renamed("mjpegdec")),
+    // gst's IVF reader is a parser; here the same job is a demuxer, since IVF
+    // frames the elementary stream it carries.
+    ("ivfparse", GstEquivalent::Renamed("ivfdemux")),
     // `avenc_aac` is a g2g element name itself, so it needs no row; the other
     // gst AAC encoder names point at it.
     ("faac", GstEquivalent::Renamed("avenc_aac")),
@@ -186,6 +192,16 @@ static GST_MAP: &[(&str, GstEquivalent)] = &[
          units instead of passing the video through: tee the parser output, one branch to the \
          decoder and one to `ccextract`",
     )),
+    // The line-21 VBI waveform is not written or sliced anywhere in g2g, so the
+    // captions have to leave the raw picture and travel beside it.
+    ("line21encoder", GstEquivalent::Unsupported(
+        "no line-21 VBI waveform writer; carry the captions beside the video instead, as a \
+         `Caps::ClosedCaption` stream `cccombiner` attaches to the frames",
+    )),
+    ("line21decoder", GstEquivalent::Unsupported(
+        "no line-21 VBI waveform slicer; take the captions from the bitstream with `ccextract`, \
+         or from a container caption track",
+    )),
     // WebRTC is one element per role rather than one bin with request pads, and
     // the SRTP / DTLS elements have no standalone counterpart at all.
     ("webrtcbin", GstEquivalent::Unsupported(
@@ -193,12 +209,8 @@ static GST_MAP: &[(&str, GstEquivalent)] = &[
          session, one pad per stream), and receive with `webrtcsrc` (WHEP) or \
          `webrtcwhepsessionsrc` (one pad per track)",
     )),
-    ("srtpenc", GstEquivalent::Unsupported(WEBRTC_SECURITY_HINT)),
-    ("srtpdec", GstEquivalent::Unsupported(WEBRTC_SECURITY_HINT)),
     ("dtlsenc", GstEquivalent::Unsupported(WEBRTC_SECURITY_HINT)),
     ("dtlsdec", GstEquivalent::Unsupported(WEBRTC_SECURITY_HINT)),
-    ("dtlssrtpenc", GstEquivalent::Unsupported(WEBRTC_SECURITY_HINT)),
-    ("dtlssrtpdec", GstEquivalent::Unsupported(WEBRTC_SECURITY_HINT)),
     // Subtitle overlays: g2g splits by cue type (text or bitmap) and takes the
     // decoder as a separate element, so no one name covers gst's bins.
     ("subtitleoverlay", GstEquivalent::Unsupported(
@@ -247,11 +259,12 @@ static GST_MAP: &[(&str, GstEquivalent)] = &[
     ("pipeline", GstEquivalent::Unsupported(BIN_HINT)),
 ];
 
-/// The answer for every gst SRTP / DTLS element name.
+/// The answer for the gst DTLS element names that carry no media of their own.
 const WEBRTC_SECURITY_HINT: &str =
-    "SRTP and DTLS are inside the `webrtc*` elements (`webrtcsink`, `webrtcsessionsink`, \
-     `webrtcsrc`, `webrtcwhepsessionsrc`), which run the handshake and key the media \
-     themselves; there is no standalone encryption element";
+    "there is no bare DTLS tunnel; `dtlssrtpenc` / `dtlssrtpdec` run the handshake and key the \
+     RTP and RTCP it protects, the `webrtc*` elements (`webrtcsink`, `webrtcsessionsink`, \
+     `webrtcsrc`, `webrtcwhepsessionsrc`) do the same inside a session, and `srtpenc` / \
+     `srtpdec` protect packets with a key you already have";
 
 /// The answer for the gst SDP source names.
 const SDP_HINT: &str =
@@ -1032,6 +1045,8 @@ mod tests {
         let reg = default_registry();
         for name in [
             "ccextractor",
+            "line21encoder",
+            "line21decoder",
             "webrtcbin",
             "subtitleoverlay",
             "dvbsuboverlay",
@@ -1044,8 +1059,6 @@ mod tests {
             "dashsink",
             "sdpsrc",
             "sdpdemux",
-            "srtpenc",
-            "srtpdec",
             "dtlsenc",
             "dtlsdec",
             "dtlssrtpenc",
@@ -1073,6 +1086,8 @@ mod tests {
         let reg = default_registry();
         for (name, needle) in [
             ("ccextractor", "ccextract"),
+            ("line21encoder", "cccombiner"),
+            ("line21decoder", "ccextract"),
             ("webrtcbin", "webrtcsessionsink"),
             ("subtitleoverlay", "subpictureoverlay"),
             ("dvbsuboverlay", "dvbsubdec"),
@@ -1083,7 +1098,7 @@ mod tests {
             ("streamiddemux", "output-selector"),
             ("dashsink", "hlssink"),
             ("sdpdemux", "udpsrc sdp="),
-            ("dtlssrtpenc", "webrtcsink"),
+            ("dtlsenc", "dtlssrtpenc"),
             ("dynudpsink", "udpsink"),
             ("pipeline", "flattens bins"),
         ] {

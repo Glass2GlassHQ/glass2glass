@@ -32,53 +32,8 @@ use g2g_core::{
 
 use png::{ColorType, Decoder, Limits, Transformations};
 
-use crate::stillimage::{
-    rgba_byte_size, ImageAssembler, StillImageOutput, MAX_ENCODED_BYTES, MAX_IMAGE_BYTES,
-};
-
-const PNG_SIGNATURE: [u8; 8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
-/// Each chunk opens with a 4-byte payload length and a 4-byte type, and closes
-/// with a 4-byte CRC.
-const PNG_CHUNK_HEADER: usize = 8;
-const PNG_CHUNK_CRC: usize = 4;
-const PNG_CHUNK_OVERHEAD: usize = PNG_CHUNK_HEADER + PNG_CHUNK_CRC;
-/// The last chunk of every PNG.
-const PNG_END_CHUNK: [u8; 4] = *b"IEND";
-
-/// Walk a PNG's chunk list to the end of its `IEND` chunk, so a byte stream that
-/// splits or joins files is framed back into whole images. Every length read is
-/// the file's own, so each step is folded with checked arithmetic and the total is
-/// held under `MAX_ENCODED_BYTES`.
-fn png_frame_length(data: &[u8]) -> Result<Option<usize>, G2gError> {
-    if data.len() < PNG_SIGNATURE.len() {
-        // Not yet enough to tell a PNG from anything else.
-        if PNG_SIGNATURE.starts_with(data) {
-            return Ok(None);
-        }
-        return Err(G2gError::CapsMismatch);
-    }
-    if !data.starts_with(&PNG_SIGNATURE) {
-        return Err(G2gError::CapsMismatch);
-    }
-
-    let mut offset = PNG_SIGNATURE.len();
-    loop {
-        let Some(header) = data.get(offset..offset + PNG_CHUNK_HEADER) else {
-            return Ok(None);
-        };
-        let payload = u32::from_be_bytes([header[0], header[1], header[2], header[3]]) as usize;
-        let chunk_type: [u8; 4] = [header[4], header[5], header[6], header[7]];
-        let end = offset
-            .checked_add(PNG_CHUNK_OVERHEAD)
-            .and_then(|used| used.checked_add(payload))
-            .filter(|end| *end <= MAX_ENCODED_BYTES)
-            .ok_or(G2gError::CapsMismatch)?;
-        if chunk_type == PNG_END_CHUNK {
-            return Ok((data.len() >= end).then_some(end));
-        }
-        offset = end;
-    }
-}
+use crate::stillframe::{png_frame_length, ImageAssembler};
+use crate::stillimage::{rgba_byte_size, StillImageOutput, MAX_IMAGE_BYTES};
 
 /// Decodes PNG stills into raw RGBA video.
 ///
@@ -312,56 +267,5 @@ impl PadTemplates for PngDec {
                 interlace: g2g_core::Interlace::Any,
             })),
         ])
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A PNG shaped file: signature, one `IHDR` chunk of `payload` bytes, then an
-    /// empty `IEND`. The CRCs are zeroed, since framing never checks them.
-    fn png_bytes(payload: usize) -> Vec<u8> {
-        let zero_crc = [0u8; PNG_CHUNK_CRC];
-        let mut file = Vec::from(PNG_SIGNATURE);
-        file.extend_from_slice(&(payload as u32).to_be_bytes());
-        file.extend_from_slice(b"IHDR");
-        file.extend_from_slice(&vec![0u8; payload]);
-        file.extend_from_slice(&zero_crc);
-        file.extend_from_slice(&0u32.to_be_bytes());
-        file.extend_from_slice(&PNG_END_CHUNK);
-        file.extend_from_slice(&zero_crc);
-        file
-    }
-
-    #[test]
-    fn frame_length_walks_the_chunk_list() {
-        let file = png_bytes(13);
-        assert_eq!(png_frame_length(&file), Ok(Some(file.len())));
-        // Every prefix is "need more", never a wrong length.
-        for cut in 0..file.len() {
-            assert_eq!(png_frame_length(&file[..cut]), Ok(None), "prefix of {cut}");
-        }
-        // Trailing bytes do not extend the image.
-        let mut two = file.clone();
-        two.extend_from_slice(&file);
-        assert_eq!(png_frame_length(&two), Ok(Some(file.len())));
-    }
-
-    #[test]
-    fn frame_length_refuses_a_non_png_and_an_absurd_chunk() {
-        assert_eq!(
-            png_frame_length(b"not a png at all"),
-            Err(G2gError::CapsMismatch)
-        );
-        assert_eq!(
-            png_frame_length(&[0x89, b'P', b'X']),
-            Err(G2gError::CapsMismatch)
-        );
-        // A chunk claiming 4 GB, past the encoded-byte ceiling.
-        let mut huge = Vec::from(PNG_SIGNATURE);
-        huge.extend_from_slice(&u32::MAX.to_be_bytes());
-        huge.extend_from_slice(b"IDAT");
-        assert_eq!(png_frame_length(&huge), Err(G2gError::CapsMismatch));
     }
 }

@@ -7,8 +7,8 @@
 use alloc::vec::Vec;
 
 use crate::caps::{
-    pcm_from_gst_format, AudioFormat, Caps, CapsSet, Dim, Interlace, Rate, RawVideoFormat,
-    SubPictureFormat, TextFormat, VideoCodec, PCM_FORMATS,
+    pcm_from_gst_format, AudioFormat, ByteStreamEncoding, Caps, CapsSet, Dim, Interlace, Rate,
+    RawVideoFormat, SubPictureFormat, TextFormat, VideoCodec, PCM_FORMATS,
 };
 
 /// The raw pixel formats a format-less `video/x-raw` expands to (M184). Order is
@@ -43,7 +43,7 @@ enum FieldVal<'a> {
 
 /// Split on top-level commas only, so the commas inside a `[..]` range or `{..}`
 /// list are not mistaken for field separators.
-fn split_top_commas(s: &str) -> Vec<&str> {
+pub(crate) fn split_top_commas(s: &str) -> Vec<&str> {
     let mut out = Vec::new();
     let mut depth = 0i32;
     let mut start = 0;
@@ -220,6 +220,9 @@ impl CapsSet {
             }
             Some(CapsSet::from_alternatives(alts))
         };
+        let bytestream = |encoding: ByteStreamEncoding| -> Option<CapsSet> {
+            Some(CapsSet::one(Caps::ByteStream { encoding }))
+        };
         let audio_set = |formats: &[AudioFormat]| -> Option<CapsSet> {
             let (channels, rates) = (
                 expand_u8(fv("channels"), 2)?,
@@ -286,6 +289,9 @@ impl CapsSet {
             "image/jpeg" => compressed_set(VideoCodec::Mjpeg),
             "image/png" => compressed_set(VideoCodec::Png),
             "image/webp" => compressed_set(VideoCodec::WebP),
+            // gst tells VC-1 from the older WMV versions with `wmvversion` /
+            // `format`, fields this caps string carries no room for.
+            "video/x-wmv" => compressed_set(VideoCodec::Vc1),
             // The legacy Flash codecs, under the names gst's flvdemux emits.
             "video/x-flash-video" => compressed_set(VideoCodec::SorensonH263),
             "video/x-vp6-flash" => compressed_set(VideoCodec::Vp6 { alpha: false }),
@@ -294,6 +300,12 @@ impl CapsSet {
             "audio/x-opus" => audio_set(&[AudioFormat::Opus]),
             "audio/x-ac3" => audio_set(&[AudioFormat::Ac3]),
             "audio/x-flac" => audio_set(&[AudioFormat::Flac]),
+            // The companded / ADPCM telephony formats, under the names the
+            // printer emits, so a caps string round-trips.
+            "audio/x-mulaw" => audio_set(&[AudioFormat::Mulaw]),
+            "audio/x-alaw" => audio_set(&[AudioFormat::Alaw]),
+            "audio/x-adpcm" => audio_set(&[AudioFormat::ImaAdpcm]),
+            "audio/x-vorbis" => audio_set(&[AudioFormat::Vorbis]),
             // gst names AAC `audio/mpeg` (with mpegversion=4, which we don't require).
             "audio/mpeg" => audio_set(&[AudioFormat::Aac]),
             // The text media types `Caps::to_gst_string` prints, so a caps a g2g
@@ -310,6 +322,30 @@ impl CapsSet {
             "application/ttml+xml" => text_set(TextFormat::Ttml),
             "private/teletext" => text_set(TextFormat::Teletext),
             "meta/x-klv" => Some(CapsSet::one(Caps::Klv)),
+            // The container media types, the inverse of what `to_gst_string`
+            // prints for a `ByteStream`, so a caps string round-trips and an
+            // encoding profile can name its container. `video/quicktime` parses
+            // as the whole-file `Mp4` form (what a muxer writes and a file
+            // carries); the streaming `IsoBmff` form is named by the CMAF
+            // spelling, since the two share gst's media type.
+            "video/mpegts" => bytestream(ByteStreamEncoding::MpegTs),
+            "video/x-matroska" | "video/webm" => bytestream(ByteStreamEncoding::Matroska),
+            "application/ogg" => bytestream(ByteStreamEncoding::Ogg),
+            "video/x-flv" => bytestream(ByteStreamEncoding::Flv),
+            "video/quicktime" => bytestream(ByteStreamEncoding::Mp4),
+            "video/x-cmaf" => bytestream(ByteStreamEncoding::IsoBmff),
+            "video/x-ivf" => bytestream(ByteStreamEncoding::Ivf),
+            "video/mpeg-ps" => bytestream(ByteStreamEncoding::MpegPs),
+            "audio/x-wav" => bytestream(ByteStreamEncoding::Wav),
+            "video/x-msvideo" => bytestream(ByteStreamEncoding::Avi),
+            "application/x-yuv4mpeg" => bytestream(ByteStreamEncoding::Y4m),
+            "multipart/x-mixed-replace" => bytestream(ByteStreamEncoding::Multipart),
+            "application/octet-stream" => bytestream(ByteStreamEncoding::Raw),
+            "application/x-rtp" => bytestream(ByteStreamEncoding::Rtp),
+            "application/x-srtp" => bytestream(ByteStreamEncoding::Srtp),
+            "application/x-rtcp" => bytestream(ByteStreamEncoding::Rtcp),
+            "application/x-srtcp" => bytestream(ByteStreamEncoding::Srtcp),
+            "application/x-dtls" => bytestream(ByteStreamEncoding::Dtls),
             "subpicture/x-dvd" => Some(CapsSet::one(Caps::SubPicture {
                 format: SubPictureFormat::VobSub,
             })),
@@ -517,6 +553,24 @@ mod tests {
             }]
         );
         assert!(CapsSet::from_gst_string("text/x-raw,format=nonesuch").is_none());
+    }
+
+    #[test]
+    fn packet_media_types_round_trip() {
+        for (media_type, encoding) in [
+            ("application/x-rtp", ByteStreamEncoding::Rtp),
+            ("application/x-srtp", ByteStreamEncoding::Srtp),
+            ("application/x-rtcp", ByteStreamEncoding::Rtcp),
+            ("application/x-srtcp", ByteStreamEncoding::Srtcp),
+            ("application/x-dtls", ByteStreamEncoding::Dtls),
+        ] {
+            let caps = Caps::ByteStream { encoding };
+            assert_eq!(caps.to_gst_string(), media_type);
+            assert_eq!(
+                CapsSet::from_gst_string(media_type).unwrap().alternatives(),
+                &[caps]
+            );
+        }
     }
 
     #[test]

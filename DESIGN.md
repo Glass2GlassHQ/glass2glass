@@ -1140,6 +1140,54 @@ and a thin sink does the UDP I/O.
   (`with_retransmit(enabled, capacity)`); see the receive-side feedback loop in
   §4.12b.
 
+The `srtp` module (`srtp` feature) protects raw RTP and RTCP packets under an
+`SrtpPolicy` of cipher (NULL, AES-128-CM, AES-256-CM, AES-128-GCM, AES-256-GCM)
+and authentication (NULL, HMAC-SHA1-32, HMAC-SHA1-80), RFC 3711, RFC 6188 and
+RFC 7714. `SrtpSender` and `SrtpReceiver` derive separate RTP and RTCP session
+keys with the RFC 3711 KDF, track one SSRC's rollover and SRTCP indices, and
+reject replayed packets. `SrtpReceiverSet` keeps one receiver per SSRC and asks
+an `SrtpKeyProvider` for the master key and initial rollover counter when a new
+SSRC appears. `srtpenc` and `srtpdec` are the pipeline elements. Each instance
+carries one flow, RTP or RTCP, chosen by the negotiated `ByteStreamEncoding`.
+The `key` property is the hex master key followed by the master salt (12 bytes
+for GCM, 14 for counter mode), and `rtp-cipher` / `rtcp-cipher` / `rtp-auth` /
+`rtcp-auth` take GStreamer's names: unset, the cipher follows the key length
+(28 or 44 bytes GCM, 30 or 46 counter mode) and the authentication is
+HMAC-SHA1-80 for the non-AEAD ciphers. The encoder takes its SSRC from the first
+packet, keeps its packet indices and resets its usage counters on
+`replace_key`, and posts a bus `Info` once the soft key-use limit is reached.
+The decoder keys every SSRC from `key` and `roc` or from a programmatic
+provider, drops packets that fail authentication or replay checks, and keeps
+its indices across a rekey. SRTCP supports encrypted and authentication-only
+packets. The replay window is `replay-window-size` (64 to 32768 packets,
+default 128, a `Vec<u64>` bitmap sized once), `allow-repeat-tx` lets the
+sender protect a repeated index again under the same nonce, an MKI (after the
+AES-GCM tag, or between the body and the HMAC tag for RFC 3711) selects among
+the receive keys a provider returns for one SSRC, and `stats()` on both elements reports packet counts and each
+context's rollover counter. The module uses `no_std + alloc` and software AES,
+with no socket, thread, or OS dependency. RFC 6904 encrypted header
+extensions, hardware AES, and heapless packet storage remain outside this
+layer.
+
+`dtlssrtpenc` and `dtlssrtpdec` (`dtls-srtp` feature, `std`) key that layer
+from a DTLS 1.2 handshake run over the media socket, RFC 5764, on the
+`dimpl` Sans-IO DTLS stack. Both elements share one `DtlsSrtpConnection`,
+found by `connection-id` or passed in. `dtlssrtpenc` is a fan-in with one
+`rtp_%u` / `rtcp_%u` pad per flow and one `application/x-dtls` output: its
+tick services the handshake (retransmits, outbound flights) and it holds a
+bounded queue of media per input until the keys arrive. `dtlssrtpdec` is a
+fan-out taking that datagram stream, splitting DTLS from SRTP on the first
+byte (RFC 7983) and RTP from RTCP by payload type (RFC 5761), with RTP on
+port 0 and RTCP on port 1. The exporter block splits into client and server
+key and salt for the negotiated profile (the two GCM ones or
+`SRTP_AES128_CM_SHA1_80`, the only one GStreamer's `dtls` plugin offers); the
+client sends under the client key. The local certificate is a self-signed
+ECDSA P-256 one unless `pem` supplies it, `peer-pem` reads the peer's, and
+`peer-fingerprint` (the SDP `a=fingerprint` value form) aborts a handshake
+whose peer certificate does not match. Any DTLS failure stops the run: nothing falls
+back to clear media. [PORTING.md](PORTING.md#srtp-gaps) compares
+the host integration surface with GStreamer's SRTP elements.
+
 ### 4.12a Live Capture (V4L2, libcamera)
 
 `V4l2Src` (`v4l2src.rs`, `v4l2` feature, Linux-only) is the first real capture
@@ -2191,6 +2239,53 @@ byte-stream-level analog of the codec/raw video split. A byte source declares it
 (`FileSrc::new(path, Caps::ByteStream{MpegTs})`), and the demuxer's transform
 constraint maps it to the elementary stream type.
 
+A still image is a one-frame `CompressedVideo` stream, and its decoders
+(`MjpegDec`, `PngDec`, `WebPDec`) take one whole image per buffer, so a byte
+source that hands over read-sized chunks needs a framer between them:
+`jpegparse` / `pngparse` walk the format's own structure (JPEG markers, PNG
+chunks) and emit one image per buffer with the geometry its header declares. The
+auto-plug chain splices the framer ahead of the decoder, which is what lets a
+`.jpg` be typed by content at all.
+
+**Encoding profiles.** The encode direction of `decodebin` is `encodebin`
+(M1089), and it is a parse-time macro for the same reason: bins are flattened
+here. `profile="<container-caps>:<stream-caps>[:<stream-caps>...]"` (gst's own
+string form) expands into one encoder per stream plus the muxer for the
+container, chosen through two registry hooks the plugins crate fills in
+(`set_encoder_provider` / `set_muxer_provider`), so the choice is a table of
+launch names rather than a search: the auto-plug candidate set is decode-only,
+and an encoder is picked by codec, not found by walking caps. Anything the
+profile does not name negotiates, and what it does name is applied by an element
+(M1097): a stream part that pins a `width` / `height` splices `videoscale`, one
+that pins a `framerate` splices `videorate`, and a `rate` or `channels` sets the
+`audioresample` / `audioconvert` the audio side already carries. A pinned
+`bitrate` is a property on the encoder, refused when that encoder declares no
+such property. Any other field is refused rather than dropped, so a profile
+never claims a setting the pipeline does not apply. The bin's `name=`
+moves to the muxer, which is what lets a second branch reach it as `e.` through
+the ordinary fan-in path; that branch gets the encoder for its own kind of
+input. `transcodebin` is rewritten to `decodebin ! encodebin` before either
+expands. The expansion also splices the converter an encoder needs (M1091),
+asked of the encoder itself: a profile is written against codecs, so the pixel
+format or sample rate a source happens to produce is the macro's problem, not
+the caller's.
+
+Two sources have no single file behind them and so derive their own type:
+`splitfilesrc` joins the parts a pattern matches into one byte stream, typing it
+from the first part's extension or header (a name like `clip.ts.part003` has no
+usable extension); `dataurisrc` decodes a `data:` URI's payload and types it by
+sniffing the bytes, never by the URI's declared MIME type. Both expose the
+resolved type through `probe_output_caps`, so `decodebin` plans from what the
+source will actually produce.
+
+`ByteStreamEncoding::Raw` is the one encoding with no container and no framing:
+a headerless dump (`.yuv`, `.pcm`) whose shape is declared out of band. Its
+readers are `rawvideoparse` / `rawaudioparse`, which cut the stream into frames
+from their own `format` / geometry / rate properties. Content sniffing never
+answers `Raw`, since every byte sequence matches it, so `filesrc` reaches it only
+by extension or an explicit `bytestream-format=raw`, and no auto-plug candidate
+claims it.
+
 The MPEG-TS demuxer is the first: `g2g-plugins::mpegts::TsDemuxer` is a
 pure `no_std + alloc` parser (sync 188-byte packets, PAT -> PMT -> elementary
 streams, reassemble PES per PID into access units with PTS), and the `TsDemux`
@@ -2685,6 +2780,36 @@ DTS substreams, the program stream map, a PS muxer, and seeking.
 through `TsStream::Mpeg2`, and `au_is_keyframe` reads its sync points (an
 I-picture, or a sequence / GOP header).
 
+`mpegvideoparse`, `mpeg4videoparse` and `vc1parse` (M1095) are the standalone
+parsers for the start-code elementary streams that are not NAL streams, for a
+launch line that feeds a decoder from a raw `.m2v` / `.m4v` / `.vc1` file rather
+than through a demuxer that already frames the video. They share
+`StartCodeParse<C>` (`startcodeparse.rs`), the `NalParse` counterpart for a
+`00 00 01 xx` byte stream: it accumulates input, splits at access-unit
+boundaries (one coded picture plus the headers that lead it), refines caps from
+the sequence header, stamps the keyframe flag, and re-inserts cached
+configuration headers on a `config-interval`. A `StartCodeCodec` marker supplies
+the per-codec start-code classification, geometry parse and keyframe rule.
+Unlike Annex-B the prefix is exactly three bytes, so the scanner never matches
+`00 00 00 01`: a header ending in a zero byte would otherwise lose it.
+`mpegvideoparse` reads the same `mpeg2video::parse_sequence_header` the program-
+and transport-stream demuxers do, now widened to apply the sequence extension's
+size and frame-rate extensions and to derive the sample aspect ratio.
+`mpeg4videoparse` reads the VOL header and carries gst's `config-interval`
+(the VOS / VO / VOL prefix, re-sent before a keyframe that lacks it).
+
+`VideoCodec::Vc1` (SMPTE 421M) is the new codec variant, gst's `video/x-wmv`
+with `format=WVC1`. `vc1parse` covers advanced profile, the start-code byte
+stream: the sequence header gives `MAX_CODED_WIDTH` / `MAX_CODED_HEIGHT` and,
+in its display extension, the frame rate and sample aspect, read after Annex-E
+de-escaping. Simple and main profile carry no start codes, so there is nothing
+in the byte stream to frame or measure and the parser leaves such a stream
+alone. There is no VC-1 decoder yet.
+
+`Caps::CompressedVideo` has no pixel-aspect field, so the sample aspect these
+three headers signal is surfaced as the read-only `pixel-aspect-ratio` property
+rather than in caps.
+
 Disc content is usually interlaced, and presenting its woven frames as-is combs
 on motion. `deinterlace` (M932) is the CPU filter that undoes it: a single-rate
 yadif port (an edge-directed spatial interpolation clamped to a temporal window
@@ -3053,10 +3178,9 @@ against an eight-window model. Both emit the same timed `Cue` `SubParse` produce
 
 `CcExtract` wraps the decoders as a pipeline element: a compressed
 H.264 / H.265 stream in, timed `Text{Utf8}` cue frames out, the same shape
-`SubParse` emits, so the existing overlay consumes either. Because the captions
-ride in the video, no new caps kind is needed (the in-band case taps
-`Caps::CompressedVideo` directly; a `Caps::ClosedCaption` variant would only be
-justified for an MP4 `c608` / `c708` *raw-caption track*, deferred). The element
+`SubParse` emits, so the existing overlay consumes either. The in-band case taps
+`Caps::CompressedVideo` directly, since the captions ride in the video; a
+container caption track arrives on `Caps::ClosedCaption` instead (below). The element
 selects one service at construction (`CcSource`; default CEA-608 CC1). In the
 `playbin` auto-fan-out it sits on a *tee* of the parsed video: one tee
 branch decodes for display, the other reframes to access units (so a TS PES does
@@ -3106,6 +3230,44 @@ is the head of the authoring pipeline, so `subtitlesrc -> subparse -> ccinsert -
 tsmux` (the `examples/cc_author.rs` flow) embeds captions from a subtitle file; the
 whole `subparse -> ccinsert -> ... -> ccextract -> textoverlay` round trip is pure
 in-graph.
+
+**Caption transports.** Out of band, the same triples travel in four byte
+layouts, and each carrier picks a different one, so the layout is part of the
+media type: `ClosedCaptionFormat` names it (`Cea608` / `Cea708` are packed ATSC
+`cc_data`, `Cea708Cdp` a SMPTE ST 334-2 caption distribution packet, `Cea608S334`
+ST 334-1 Annex A triplets, and `Cea608Raw` bare byte pairs of one line-21 field),
+and the `cea` module holds the parse / write pair for each behind
+`parse_caption_transport` / `write_caption_transport`. `CcConverter`
+(`ccconverter`) re-lays a payload from its `in-format` layout into its
+`out-format` one, one output frame per input frame with the timing kept, so an MP4
+caption track feeds an ancillary-data packetizer and back. A conversion is lossy
+exactly where the standards are: bare CEA-608 pairs hold one field, ST 334-1 holds
+no DTVCC, and a triple the target layout cannot carry is dropped rather than
+mistyped.
+
+`CcCombiner` (`cccombiner`) is where a separate caption stream rejoins the
+video it belongs with: a two-pad `MultiInputElement` shaped like
+`SubPictureOverlay`, video on pad 0 (any caps, and the merged output follows it)
+and captions on pad 1, on the runner's `input_pts_ordered` merge. It touches no
+pixels; each video frame leaves carrying the triples queued for it as
+`meta::CaptionMeta`, which is what `CcInsert::from_meta` writes back into the
+bitstream's SEI, so `cccombiner -> encode -> ccinsert` is the authoring path for a
+stream whose captions arrived beside it. `max-scheduled` bounds the queue against
+a stalled video pad and `input-meta-processing` says which set wins when the video
+frame already carries captions of its own. The caption meta is the `metadata`
+feature's typed container, so the element is gated on it.
+
+The **subtitle writers** close the same loop for timed text. `SrtEnc` (`srtenc`)
+and `WebVttEnc` (`webvttenc`) invert `SubParse`: timed `Text{Utf8}` cues in, one
+`Text{Srt}` / `Text{WebVtt}` frame per cue out holding that cue's document block,
+so `... ! srtenc ! filesink location=out.srt` records a subtitle file. The block
+is written by `subparse::write_cue_block`, the inverse of the parsers and the
+same code the HLS WebVTT segment writer uses, so the two halves cannot drift. The
+`timestamp` and `duration` properties shift the written cue window without moving
+the frame the block rides on. A WebVTT document opens with its `WEBVTT`
+signature, written even for a stream that carries no cue; a cue whose text is
+blank writes nothing, since an empty block would end the preceding cue early when
+the document is read back.
 
 **Bitmap subtitles** are the one subtitle family that is not text, so they get
 their own coded media kind: `Caps::SubPicture { format: SubPictureFormat }`, a

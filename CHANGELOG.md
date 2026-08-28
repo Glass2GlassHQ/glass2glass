@@ -6,6 +6,22 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1101: `srtpenc` / `srtpdec` add the RFC 3711 AES-ICM, HMAC-SHA1 and NULL profiles, DTLS-SRTP keys the counter-mode profile, and `peer-fingerprint` pins the DTLS peer.
+- M1100: `dtlssrtpenc` / `dtlssrtpdec` run a DTLS handshake over the media socket and key SRTP from it.
+- M1099: `srtpenc` / `srtpdec` add a configurable replay window, repeated transmission, MKI key selection and statistics.
+- M1098: `srtpenc` / `srtpdec` protect RTP and RTCP packets with the RFC 7714 AES-GCM profiles.
+- M1096: `srtenc` / `webvttenc` write subtitle documents, `ccconverter` converts between the closed-caption transport layouts, and `cccombiner` attaches captions to video.
+- M1097: an encoding profile's stream part can pin a geometry, framerate, sample rate, channel count or bitrate.
+- M1095: `mpegvideoparse`, `mpeg4videoparse` and `vc1parse` frame the legacy start-code video streams and read their geometry, and `VideoCodec::Vc1` joins the codecs.
+- M1094: `id3v2mux`, `apev2mux`, `vorbistag` and `flactag` write a stream's tag block from a `tags=` property, and `xingmux` writes the seek header a VBR `.mp3` needs.
+- M1093: `rawvideoparse` reads a padded dump through `plane-strides` / `plane-offsets`, packing the rows or declaring their layout for a consumer that asked.
+- M1092: `wavenc` writes mu-law, A-law and IMA ADPCM, the payloads `wavparse` already reads.
+- M1091: an encoding profile splices the converter its encoder needs, so a profile encodes whatever raw form the source produces.
+- M1090: `avimux` takes a video geometry that only its runtime caps carry, instead of refusing a decoded stream.
+- M1089: `encodebin` / `encodebin2` / `transcodebin` expand an encoding profile into the encoders it names and the muxer for its container.
+- M1088: `splitfilesrc` reads the parts of a cut recording as one byte stream, `imagesequencesrc` stamps a file sequence on a framerate grid, and `dataurisrc` plays a `data:` URI's payload.
+- M1087: `jpegparse` and `pngparse` frame a still-image byte stream into whole images, and a `.jpg` types by content.
+- M1086: `rawvideoparse` and `rawaudioparse` frame a headerless `.yuv` / `.pcm` dump from the shape their properties declare.
 - M1083: `fpsdisplaysink`, `checksumsink`, `fakevideosink` / `fakeaudiosink`, `errorignore`, `breakmydata` and `chopmydata` join the debug elements.
 - M1084: `aspectratiocrop`, `gaussianblur`, `videomedian`, `smooth`, `coloreffects`, `chromahold`, `zebrastripe` and `videodiff` join the software video transforms.
 - M1085: `audiochannelmix`, `audiomixmatrix`, `stereo`, `audiofirfilter`, `audioiirfilter`, `removesilence`, `audiobuffersplit` and `speed` join the audio filters.

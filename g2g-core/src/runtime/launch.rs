@@ -41,6 +41,22 @@
 //! A pad-name suffix on a reference (`t.src_0`) is accepted but ignored (pads are
 //! positional).
 //!
+//! Encoding profiles (M1089): `encodebin profile="<container>:<stream>[:<stream>]"`
+//! is a macro too, expanding into the encoder each stream names plus the muxer
+//! for the container (`encodebin2` and `transcodebin` are gst's other names for
+//! it, the latter being `decodebin ! encodebin`). The container picks the muxer
+//! and a stream picks its encoder; anything the profile does not name
+//! negotiates. A stream part may also pin what it does care about (M1097): a
+//! `width` / `height`, a `framerate`, a sample `rate` or a `channels` each
+//! splice the converter that applies it, and a `bitrate` is set on the encoder.
+//! Any other field is refused. An uncompressed stream
+//! (`audio/x-raw`) inserts no encoder, and a profile with no container at all is
+//! just the encoder. A converter goes in ahead of an encoder that does not take
+//! what the branch produces (`videoconvert`, or `audioconvert` +
+//! `audioresample`), so a profile works off whatever raw form the source has. With several streams the bin's `name=` moves to the muxer,
+//! so a second branch reaches it as `e.` the way any fan-in does, and that
+//! branch gets the encoder for its own kind of input.
+//!
 //! Two `key=value` pairs are launch keywords rather than properties: `name=` is
 //! the instance name (and the handle pad references resolve against), and
 //! `log-category=` (M847) replaces that instance's `G2G_DEBUG` category, leaving
@@ -50,7 +66,7 @@ use alloc::boxed::Box;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use crate::caps::Caps;
+use crate::caps::{Caps, CapsSet};
 use crate::element::DynAsyncElement;
 use crate::graph::{Graph, GraphError, NodeId, PadId};
 use crate::link::LinkPolicy;
@@ -123,6 +139,15 @@ pub enum ParseError {
     /// feature is compiled in, or the input is a container that needs a demuxer
     /// (auto-plugging through fan-out demuxers is not yet supported).
     NoDecodeChain(String),
+    /// An `encodebin` had no `profile=`, or one that is not
+    /// `container-caps:stream-caps[:stream-caps...]` (the message says which).
+    EncodingProfile(String),
+    /// An `encodebin` profile named a container no registered muxer writes, or a
+    /// stream codec no compiled-in encoder produces (the message quotes it).
+    NoEncoder(String),
+    /// An `encodebin` chain's input is not raw video or audio, or its profile has
+    /// no stream of that kind, so nothing in the profile can encode it.
+    EncodebinInput(String),
     /// A `uridecodebin` / `playbin` was not at the head of its chain. It provides
     /// the source, so it must start the pipeline.
     UriSourceNotAtHead(String),
@@ -226,6 +251,12 @@ impl core::fmt::Display for ParseError {
             ParseError::NoDecodeChain(caps) => {
                 write!(f, "decodebin: no decoder chain from {caps} to raw (no decoder feature compiled in, or a container that needs a demuxer)")
             }
+            ParseError::EncodingProfile(msg) => write!(
+                f,
+                "encodebin profile: {msg} (expected profile=\"container-caps:stream-caps[:stream-caps]\", e.g. profile=\"video/x-matroska:video/x-vp8:audio/x-opus\")"
+            ),
+            ParseError::NoEncoder(msg) => write!(f, "encodebin: {msg}"),
+            ParseError::EncodebinInput(msg) => write!(f, "encodebin: {msg}"),
             ParseError::UriSourceNotAtHead(n) => {
                 write!(f, "{n}: provides the source, so it must start the pipeline (be the first element)")
             }
@@ -307,7 +338,7 @@ fn as_ref_name(tok: &str) -> Option<&str> {
 
 /// Parse a demux output-pad suffix into a [`PadRequest`] (M476): `"video_0"` ->
 /// `{ Video, 0 }`, `"audio_1"` -> `{ Audio, 1 }`, `"text_0"` / `"subtitle_0"` ->
-/// `{ Text, 0 }`, `"src_2"` -> `{ Any, 2 }`. A bare `d.` (empty suffix) or an
+/// `{ Text, 0 }`, `"caption"` -> `{ Text, 0 }`, `"src_2"` -> `{ Any, 2 }`. A bare `d.` (empty suffix) or an
 /// unrecognized prefix is `{ Any, ordinal }`, i.e. positional by reference order.
 fn parse_pad_request(pad: &str, ordinal: usize) -> PadRequest {
     let (prefix, index) = match pad.rsplit_once('_') {
@@ -317,7 +348,9 @@ fn parse_pad_request(pad: &str, ordinal: usize) -> PadRequest {
     let kind = match prefix {
         "video" => PadKind::Video,
         "audio" => PadKind::Audio,
-        "text" | "subtitle" => PadKind::Text,
+        // `caption` is the name a closed-caption fan-in gives its second pad; it
+        // rides the text kind, which is the one every sidecar-cue pad uses.
+        "text" | "subtitle" | "caption" => PadKind::Text,
         _ => PadKind::Any,
     };
     // `src_N` (output) / `sink_N` (input) and unrecognized prefixes select the Nth
@@ -840,6 +873,557 @@ fn expand_decodebin(
     Ok(out)
 }
 
+/// `encodebin`: not an element either, but a macro that expands, at parse time,
+/// into one encoder per profile stream plus the muxer that writes the profile's
+/// container (M1089). `encodebin2` is gst's name for the same thing.
+fn is_encodebin(name: &str) -> bool {
+    matches!(name, "encodebin" | "encodebin2")
+}
+
+/// The separator between an encoding profile's container and its streams, the
+/// same string form gst's `GstEncodingProfile` serializes to.
+const PROFILE_SEPARATOR: char = ':';
+
+/// A parsed `profile=`: the container to mux into (`None` for a container-less
+/// profile, which is one coded stream and no muxer), and each stream it carries.
+struct EncodingProfile {
+    container: Option<Caps>,
+    streams: Vec<ProfileStream>,
+}
+
+/// One stream of a profile: the coded form it names, plus whatever its part
+/// pins (M1097). A pinned raw field is honoured by the converter spliced ahead
+/// of the encoder; a pinned bitrate is a property on the encoder itself.
+struct ProfileStream {
+    caps: Caps,
+    width: Option<u32>,
+    height: Option<u32>,
+    /// Frames per second as the `numerator/denominator` `videorate` takes.
+    framerate: Option<(u32, u32)>,
+    sample_rate: Option<u32>,
+    channels: Option<u8>,
+    /// Bits per second, gst's `bitrate` unit.
+    bitrate: Option<u64>,
+}
+
+/// The encoder property a profile's pinned bitrate is applied through.
+const BITRATE_PROPERTY: &str = "bitrate";
+
+/// Parse `container-caps:stream-caps[:stream-caps...]`.
+///
+/// The media type of each part chooses the element: the container names the
+/// muxer, a stream names the codec its encoder must produce. A stream part may
+/// also pin a width / height / framerate (or a sample `rate` / `channels`),
+/// which splices the converter that reaches it, and a `bitrate`, which is set on
+/// the encoder. Any other field is refused rather than dropped.
+fn parse_encoding_profile(text: &str) -> Result<EncodingProfile, ParseError> {
+    let bad = |msg: &str| ParseError::EncodingProfile(msg.to_string());
+    let mut parts = text.split(PROFILE_SEPARATOR).map(str::trim).peekable();
+    let first = *parts
+        .peek()
+        .filter(|p| !p.is_empty())
+        .ok_or_else(|| bad("empty"))?;
+    let head = single_caps(first).ok_or_else(|| {
+        ParseError::EncodingProfile(alloc::format!("unknown media type `{first}`"))
+    })?;
+    // A leading container is the muxing form; a leading stream is gst's
+    // container-less profile, which encodes and stops.
+    let container = match head {
+        Caps::ByteStream { .. } => {
+            parts.next();
+            Some(head)
+        }
+        _ => None,
+    };
+    let mut streams = Vec::new();
+    for part in parts {
+        if part.is_empty() {
+            return Err(bad("empty stream"));
+        }
+        streams.push(parse_profile_stream(part)?);
+    }
+    if streams.is_empty() {
+        return Err(bad("no stream"));
+    }
+    Ok(EncodingProfile { container, streams })
+}
+
+/// Parse one stream part: its media type plus the fields it pins.
+///
+/// The caps parser ignores a field it has no home for, so the pinned settings
+/// are read from the text here instead: an audio caps carries a channel count
+/// and a sample rate whether or not the part named them, and `bitrate` is not a
+/// caps field at all.
+fn parse_profile_stream(part: &str) -> Result<ProfileStream, ParseError> {
+    let caps = single_caps(part)
+        .ok_or_else(|| ParseError::EncodingProfile(alloc::format!("unknown stream `{part}`")))?;
+    let video = matches!(caps, Caps::CompressedVideo { .. } | Caps::RawVideo { .. });
+    let audio = matches!(caps, Caps::Audio { .. });
+    let mut stream = ProfileStream {
+        caps,
+        width: None,
+        height: None,
+        framerate: None,
+        sample_rate: None,
+        channels: None,
+        bitrate: None,
+    };
+    for field in crate::caps_parse::split_top_commas(part)
+        .into_iter()
+        .skip(1)
+    {
+        let (key, value) = field.split_once('=').ok_or_else(|| {
+            ParseError::EncodingProfile(alloc::format!(
+                "`{part}` has a field `{}` that is not key=value",
+                field.trim()
+            ))
+        })?;
+        let (key, value) = (key.trim(), value.trim());
+        match key {
+            "width" if video => {
+                stream.width = Some(profile_number(part, key, value, MAX_PROFILE_VALUE)? as u32)
+            }
+            "height" if video => {
+                stream.height = Some(profile_number(part, key, value, MAX_PROFILE_VALUE)? as u32)
+            }
+            "framerate" if video => stream.framerate = Some(profile_framerate(part, value)?),
+            "rate" if audio => {
+                stream.sample_rate = Some(profile_number(part, key, value, MAX_PROFILE_VALUE)? as u32)
+            }
+            "channels" if audio => {
+                stream.channels = Some(profile_number(part, key, value, MAX_CHANNELS)? as u8)
+            }
+            BITRATE_PROPERTY => {
+                stream.bitrate = Some(profile_number(part, key, value, MAX_PROFILE_VALUE)?)
+            }
+            _ => {
+                return Err(ParseError::EncodingProfile(alloc::format!(
+                    "`{part}` pins `{key}`, which a profile cannot apply: set it on an element ahead of the encodebin instead"
+                )))
+            }
+        }
+    }
+    // The scaler takes a whole output geometry, so half of one has nothing to
+    // scale to.
+    if stream.width.is_some() != stream.height.is_some() {
+        return Err(ParseError::EncodingProfile(alloc::format!(
+            "`{part}` pins one of width / height: a scale needs both, so pin both or neither"
+        )));
+    }
+    Ok(stream)
+}
+
+/// Upper bounds on a pinned profile field, so a bogus value fails the parse
+/// rather than reaching an element as a truncated cast. Every field but the
+/// channel count is a `u32` where it lands.
+const MAX_PROFILE_VALUE: u64 = u32::MAX as u64;
+const MAX_CHANNELS: u64 = u8::MAX as u64;
+
+/// A pinned profile field's number. Zero is rejected everywhere it appears
+/// (a zero geometry, rate, channel count or bitrate pins nothing).
+fn profile_number(part: &str, key: &str, value: &str, max: u64) -> Result<u64, ParseError> {
+    value
+        .parse::<u64>()
+        .ok()
+        .filter(|n| (1..=max).contains(n))
+        .ok_or_else(|| {
+            ParseError::EncodingProfile(alloc::format!(
+                "`{part}` has a bad `{key}={value}`: expected a whole number 1..={max}"
+            ))
+        })
+}
+
+/// A pinned `framerate=N/D` (or a bare `framerate=N`, gst's shorthand), in the
+/// fraction form `videorate`'s property takes.
+fn profile_framerate(part: &str, value: &str) -> Result<(u32, u32), ParseError> {
+    let (numerator, denominator) = value.split_once('/').unwrap_or((value, "1"));
+    Ok((
+        profile_number(part, "framerate", numerator.trim(), MAX_PROFILE_VALUE)? as u32,
+        profile_number(part, "framerate", denominator.trim(), MAX_PROFILE_VALUE)? as u32,
+    ))
+}
+
+/// One caps from a media-type description. A format-less raw description
+/// (`video/x-raw`, `audio/x-raw`) expands to every format it could be, and an
+/// uncompressed profile stream means "store what arrives" rather than any one of
+/// them, so its first alternative stands for the whole set: the expansion reads
+/// only which kind of stream it is. `None` when the text names no media type
+/// this build knows.
+fn single_caps(desc: &str) -> Option<Caps> {
+    let set = CapsSet::from_gst_string(desc)?;
+    match set.alternatives() {
+        [only] => Some(only.clone()),
+        [first, ..] if is_raw_video(first) || is_raw_audio(first) => Some(first.clone()),
+        _ => None,
+    }
+}
+
+/// The profile stream that encodes `input`: a raw video input takes the first
+/// coded video stream, raw audio the first coded audio one. `None` when the
+/// profile carries nothing of that kind.
+fn stream_for_input<'a>(profile: &'a EncodingProfile, input: &Caps) -> Option<&'a ProfileStream> {
+    let want_video = is_raw_video(input);
+    let want_audio = is_raw_audio(input);
+    profile.streams.iter().find(|stream| match stream.caps {
+        Caps::CompressedVideo { .. } => want_video,
+        Caps::Audio { .. } => want_audio,
+        _ => false,
+    })
+}
+
+/// The converters an encoder needs ahead of it, when the raw stream reaching it
+/// is not in a form it takes: a pixel-format convert for video, a sample-format
+/// convert plus a resampler for audio (either the format or the rate can be the
+/// mismatch). Asked of the encoder itself rather than guessed from a template,
+/// so an encoder that already accepts what arrives gets nothing spliced.
+///
+/// With no upstream caps to check (a decode chain the parser expanded has no
+/// name to ask), the converters go in anyway: they pass a matching format
+/// through, where a missing one fails the negotiation.
+fn conversion_specs(
+    registry: &Registry,
+    encoder: &ElementSpec,
+    input: Option<&Caps>,
+    stream: &Caps,
+) -> Vec<ElementSpec> {
+    let plain = |name: &str| ElementSpec {
+        name: name.to_string(),
+        props: Vec::new(),
+        instance: None,
+        log_category: None,
+    };
+    if let Some(input) = input {
+        let accepted = registry
+            .make_element(&encoder.name)
+            .is_some_and(|element| element.intercept_caps(input).is_ok());
+        if accepted {
+            return Vec::new();
+        }
+    }
+    // Which converters belong to this stream is the stream's own kind: the
+    // encoder for a video stream takes raw video, whatever reaches it.
+    match stream {
+        Caps::CompressedVideo { .. } => Vec::from([plain("videoconvert")]),
+        Caps::Audio { .. } => Vec::from([plain("audioconvert"), plain("audioresample")]),
+        _ => Vec::new(),
+    }
+}
+
+/// The encoder element for one profile stream, as a spec the builder constructs
+/// like any named element. The properties come from the registry's choice (a
+/// multi-codec encoder is pinned to this codec with `codec=`), plus the
+/// profile's own `bitrate` where it pinned one.
+fn encoder_spec(
+    registry: &Registry,
+    stream: &ProfileStream,
+) -> Result<Option<ElementSpec>, ParseError> {
+    // An uncompressed stream profile (`audio/x-raw` in a WAV, `video/x-raw` in a
+    // y4m) stores what arrives, so there is nothing to encode.
+    if is_raw_video(&stream.caps) || is_raw_audio(&stream.caps) {
+        if let Some(bitrate) = stream.bitrate {
+            return Err(ParseError::EncodingProfile(alloc::format!(
+                "pins `bitrate={bitrate}` on an uncompressed stream, which has no encoder to set it on"
+            )));
+        }
+        return Ok(None);
+    }
+    let choice = registry.encoder_choice(&stream.caps).ok_or_else(|| {
+        ParseError::NoEncoder(alloc::format!(
+            "no encoder for {} is compiled in (build the feature for it, or name an encoder explicitly)",
+            stream.caps.to_gst_string()
+        ))
+    })?;
+    let mut props: Vec<(String, String)> = choice
+        .props
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    if let Some(bitrate) = stream.bitrate {
+        if !declares_bitrate(registry, choice.element) {
+            return Err(ParseError::EncodingProfile(alloc::format!(
+                "pins `bitrate={bitrate}`, which `{}` has no property for: drop it, or name the encoder yourself with the knob it does have",
+                choice.element
+            )));
+        }
+        props.push((BITRATE_PROPERTY.to_string(), alloc::format!("{bitrate}")));
+    }
+    Ok(Some(ElementSpec {
+        name: choice.element.to_string(),
+        props,
+        instance: None,
+        log_category: None,
+    }))
+}
+
+/// Whether an encoder takes a target bitrate at all, asked of the element rather
+/// than assumed, so a profile that pins one on a fixed-rate encoder fails the
+/// parse instead of encoding at some other rate.
+fn declares_bitrate(registry: &Registry, element: &str) -> bool {
+    registry.make_element(element).is_some_and(|element| {
+        element
+            .properties()
+            .iter()
+            .any(|spec| spec.name == BITRATE_PROPERTY)
+    })
+}
+
+/// The elements one branch of a profile expands to: the converters its encoder
+/// needs, the converters its pinned settings need, then the encoder itself. A
+/// pinned setting on an uncompressed stream still gets its converter, there is
+/// just nothing after it but the muxer.
+fn stream_specs(
+    registry: &Registry,
+    stream: &ProfileStream,
+    upstream: Option<&(String, Vec<(String, String)>)>,
+) -> Result<Vec<ElementSpec>, ParseError> {
+    let encoder = encoder_spec(registry, stream)?;
+    let mut specs = match &encoder {
+        Some(encoder) => {
+            let input = upstream
+                .and_then(|(name, props)| resolve_upstream_caps(registry, name, props).ok());
+            conversion_specs(registry, encoder, input.as_ref(), &stream.caps)
+        }
+        None => Vec::new(),
+    };
+    splice_pinned_settings(&mut specs, stream);
+    specs.extend(encoder);
+    Ok(specs)
+}
+
+/// Apply a stream's pinned settings to the converters ahead of its encoder: a
+/// geometry sets `videoscale`, a framerate `videorate`, a channel count
+/// `audioconvert` and a sample rate `audioresample`, adding that converter when
+/// the encoder did not already need one.
+fn splice_pinned_settings(specs: &mut Vec<ElementSpec>, stream: &ProfileStream) {
+    if let (Some(width), Some(height)) = (stream.width, stream.height) {
+        pin_on_converter(specs, "videoscale", "width", alloc::format!("{width}"));
+        pin_on_converter(specs, "videoscale", "height", alloc::format!("{height}"));
+    }
+    if let Some((numerator, denominator)) = stream.framerate {
+        pin_on_converter(
+            specs,
+            "videorate",
+            "framerate",
+            alloc::format!("{numerator}/{denominator}"),
+        );
+    }
+    if let Some(channels) = stream.channels {
+        pin_on_converter(
+            specs,
+            "audioconvert",
+            "channels",
+            alloc::format!("{channels}"),
+        );
+    }
+    if let Some(sample_rate) = stream.sample_rate {
+        pin_on_converter(
+            specs,
+            "audioresample",
+            "samplerate",
+            alloc::format!("{sample_rate}"),
+        );
+    }
+}
+
+/// Set a property on the named converter, appending the converter when the list
+/// does not already carry it.
+fn pin_on_converter(specs: &mut Vec<ElementSpec>, element: &str, key: &str, value: String) {
+    match specs.iter_mut().find(|spec| spec.name == element) {
+        Some(spec) => spec.props.push((key.to_string(), value)),
+        None => specs.push(ElementSpec {
+            name: element.to_string(),
+            props: Vec::from([(key.to_string(), value)]),
+            instance: None,
+            log_category: None,
+        }),
+    }
+}
+
+/// `transcodebin`: decode whatever arrives and re-encode it to a profile, which
+/// is exactly `decodebin ! encodebin profile=...`. Rewritten into those two
+/// macros before either expands, so it inherits both behaviours (and both error
+/// messages) rather than repeating them.
+fn expand_transcodebin(chains: Vec<Chain>) -> Vec<Chain> {
+    let mut out = Vec::with_capacity(chains.len());
+    for chain in chains {
+        let mut new_chain: Chain = Vec::with_capacity(chain.len() + 1);
+        for item in chain {
+            match item {
+                Item::Element(spec) if spec.name == "transcodebin" => {
+                    new_chain.push(Item::Element(ElementSpec {
+                        name: "decodebin".to_string(),
+                        props: Vec::new(),
+                        instance: None,
+                        log_category: spec.log_category.clone(),
+                    }));
+                    new_chain.push(Item::Element(ElementSpec {
+                        name: "encodebin".to_string(),
+                        ..spec
+                    }));
+                }
+                other => new_chain.push(other),
+            }
+        }
+        out.push(new_chain);
+    }
+    out
+}
+
+/// Expand every `encodebin` into `<encoder> ! <muxer>`: the encoder for the
+/// stream matching that chain's input, and the muxer for the profile's container.
+/// The muxer inherits the bin's `name=`, so a second branch reaching it as `e.`
+/// links into the muxer the way any fan-in does; each such branch gets the
+/// encoder for its own kind of input inserted ahead of the reference.
+fn expand_encodebin(registry: &Registry, chains: Vec<Chain>) -> Result<Vec<Chain>, ParseError> {
+    // Nothing to do for the common line with no encodebin in it.
+    if !chains
+        .iter()
+        .flatten()
+        .any(|item| matches!(item, Item::Element(spec) if is_encodebin(&spec.name)))
+    {
+        return Ok(chains);
+    }
+
+    // Every encodebin's profile and instance name, so a branch referencing the
+    // name knows which profile to encode for.
+    let mut profiles: Vec<(Option<String>, EncodingProfile)> = Vec::new();
+    for chain in &chains {
+        for item in chain {
+            if let Item::Element(spec) = item {
+                if is_encodebin(&spec.name) {
+                    let text = prop(spec, "profile")
+                        .ok_or_else(|| ParseError::EncodingProfile("missing".to_string()))?;
+                    for (key, _) in &spec.props {
+                        if !matches!(key.as_str(), "profile") {
+                            return Err(ParseError::EncodingProfile(alloc::format!(
+                                "unknown property `{key}`"
+                            )));
+                        }
+                    }
+                    profiles.push((spec.instance.clone(), parse_encoding_profile(text)?));
+                }
+            }
+        }
+    }
+
+    let mut out = Vec::with_capacity(chains.len());
+    for chain in chains {
+        let mut new_chain: Chain = Vec::with_capacity(chain.len() + 1);
+        let mut upstream: Option<(String, Vec<(String, String)>)> = None;
+        for item in chain {
+            match item {
+                Item::Element(spec) if is_encodebin(&spec.name) => {
+                    let profile = profiles
+                        .iter()
+                        .find(|(instance, _)| *instance == spec.instance)
+                        .map(|(_, profile)| profile)
+                        .expect("every encodebin's profile was parsed above");
+                    // The container is the profile's head, so a missing muxer is
+                    // reported before a missing encoder.
+                    let muxer = muxer_spec(registry, profile, &spec)?;
+                    let stream = profile_stream(registry, profile, upstream.as_ref())?;
+                    for element in stream_specs(registry, stream, upstream.as_ref())? {
+                        new_chain.push(Item::Element(element));
+                    }
+                    if let Some(muxer) = muxer {
+                        new_chain.push(Item::Element(muxer));
+                    }
+                    upstream = None;
+                }
+                // A branch feeding an encodebin by name encodes its own input
+                // first: the reference links into the muxer, which takes coded
+                // streams.
+                Item::Ref { name, pad } => {
+                    if let Some((_, profile)) = profiles
+                        .iter()
+                        .find(|(instance, _)| instance.as_deref() == Some(name.as_str()))
+                    {
+                        let stream = profile_stream(registry, profile, upstream.as_ref())?;
+                        for element in stream_specs(registry, stream, upstream.as_ref())? {
+                            new_chain.push(Item::Element(element));
+                        }
+                    }
+                    upstream = None;
+                    new_chain.push(Item::Ref { name, pad });
+                }
+                Item::Element(spec) => {
+                    upstream = Some((spec.name.clone(), spec.props.clone()));
+                    new_chain.push(Item::Element(spec));
+                }
+                prebuilt @ Item::Prebuilt(_) => {
+                    upstream = None;
+                    new_chain.push(prebuilt);
+                }
+            }
+        }
+        out.push(new_chain);
+    }
+    Ok(out)
+}
+
+/// The profile stream a branch encodes into. A single-stream profile leaves no
+/// choice, so it needs no input caps at all (which is what lets `decodebin !
+/// encodebin` work: an expanded decode chain has no name to ask for caps). With
+/// several streams the branch's own input decides which one, so the element
+/// ahead of it has to declare its output.
+fn profile_stream<'a>(
+    registry: &Registry,
+    profile: &'a EncodingProfile,
+    upstream: Option<&(String, Vec<(String, String)>)>,
+) -> Result<&'a ProfileStream, ParseError> {
+    if let [only] = &profile.streams[..] {
+        return Ok(only);
+    }
+    let input = encodebin_input_caps(registry, upstream)?;
+    stream_for_input(profile, &input).ok_or_else(|| {
+        ParseError::EncodebinInput(alloc::format!(
+            "the profile carries no stream that encodes {}",
+            input.to_gst_string()
+        ))
+    })
+}
+
+/// The raw caps reaching an `encodebin` (or a branch that references one): the
+/// declared output of the element ahead of it.
+fn encodebin_input_caps(
+    registry: &Registry,
+    upstream: Option<&(String, Vec<(String, String)>)>,
+) -> Result<Caps, ParseError> {
+    let (name, props) = upstream.ok_or_else(|| {
+        ParseError::EncodebinInput(
+            "no upstream element to encode; it must follow a source or element with declared caps"
+                .to_string(),
+        )
+    })?;
+    resolve_upstream_caps(registry, name, props).map_err(|_| {
+        ParseError::EncodebinInput(alloc::format!("`{name}` declares no output caps to encode"))
+    })
+}
+
+/// The muxer element for a profile's container, carrying the bin's instance name
+/// so a `name.` reference resolves to it.
+fn muxer_spec(
+    registry: &Registry,
+    profile: &EncodingProfile,
+    bin: &ElementSpec,
+) -> Result<Option<ElementSpec>, ParseError> {
+    let Some(container) = &profile.container else {
+        return Ok(None);
+    };
+    let name = registry.muxer_name(container).ok_or_else(|| {
+        ParseError::NoEncoder(alloc::format!(
+            "no muxer for {} is compiled in",
+            container.to_gst_string()
+        ))
+    })?;
+    Ok(Some(ElementSpec {
+        name: name.to_string(),
+        props: Vec::new(),
+        instance: bin.instance.clone(),
+        log_category: bin.log_category.clone(),
+    }))
+}
+
 /// The caps a `decodebin` predecessor produces, used as the auto-plug input
 /// (M195). For a registered source, build it and apply its properties so a
 /// property that re-types the output (a `filesrc`'s `bytestream-format`) is
@@ -961,8 +1545,10 @@ fn build_graph(
     // Expand the source-providing (uridecodebin / playbin) and mid-chain
     // (decodebin) macros into concrete nodes before the structural build, so the
     // rest of the builder sees only real elements and pre-built nodes.
+    let chains = expand_transcodebin(chains);
     let chains = expand_uri_sources(registry, chains, avoided)?;
     let chains = expand_decodebin(registry, chains, avoided)?;
+    let chains = expand_encodebin(registry, chains)?;
 
     // A chain endpoint after flattening: a concrete element index, or a still
     // unresolved reference by name.
@@ -1542,7 +2128,14 @@ pub fn parse_launch_avoiding(
         registry.knows_element(name)
             || matches!(
                 name,
-                "queue" | "queue2" | "decodebin" | "uridecodebin" | "playbin"
+                "queue"
+                    | "queue2"
+                    | "decodebin"
+                    | "uridecodebin"
+                    | "playbin"
+                    | "encodebin"
+                    | "encodebin2"
+                    | "transcodebin"
             )
     };
     let chains = parse_chains_with(pipeline, &knows)?;

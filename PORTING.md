@@ -88,6 +88,11 @@ filesrc location=movie.mkv ! matroskademux name=d
 subtitlesrc location=subs.srt ! subparse ! o.   # or an out-of-band .srt/.vtt
 ```
 
+The write direction is `srtenc` / `webvttenc`, which take the same timed cues and
+write a `.srt` / `.vtt` file, so a subtitle track is extracted with
+`filesrc location=movie.mkv ! matroskademux name=d   d.text_0 ! srtenc ! filesink
+location=subs.srt`.
+
 **Typefind.** GStreamer's `filesrc` emits untyped bytes and a downstream
 `typefind` sniffs the media type at runtime. g2g negotiates types statically, so a
 byte source must announce its type up front, but you rarely name it by hand: a bare
@@ -227,6 +232,38 @@ Whole plugins answer by family rather than name:
 
 Registered names and the exact table always win over a family rule, so `nvdec`
 and `vaapidec` still answer for themselves.
+
+### SRTP gaps
+
+GStreamer's [`srtpenc`](https://gstreamer.freedesktop.org/documentation/srtp/srtpenc.html)
+and [`srtpdec`](https://gstreamer.freedesktop.org/documentation/srtp/srtpdec.html)
+are host pipeline elements backed by libsrtp. g2g's `srtp` feature is a pure
+Rust, Sans-IO RFC 3711 / RFC 7714 packet layer plus the `srtpenc` / `srtpdec`
+elements, and `dtls-srtp` adds `dtlssrtpenc` / `dtlssrtpdec`. It runs on
+`no_std + alloc` targets. `rtp-cipher`, `rtcp-cipher`, `rtp-auth` and
+`rtcp-auth` take gst's values; left unset, the cipher follows the key length
+(28 or 44 bytes GCM, 30 or 46 counter mode). Every leg below is validated
+against gst's libsrtp and `dtls` elements on a host that has them.
+
+| Area | GStreamer | g2g | Status |
+| :--- | :--- | :--- | :--- |
+| RFC 7714 profiles | AES-128-GCM and AES-256-GCM | Both profiles, full 16-byte tags | Complete |
+| RTP / SRTCP processing | RTP and RTCP element pads | Raw packet methods, including encrypted and authentication-only SRTCP | Complete |
+| Stream contexts | Encoder pads share one SSRC. The decoder creates contexts per SSRC | `srtpenc` takes its SSRC from the first packet. `srtpdec` creates a context per SSRC | Complete |
+| Pipeline integration | `srtpenc` and `srtpdec` elements with RTP and RTCP pads | `srtpenc` and `srtpdec` elements, one flow each (RTP or RTCP by caps) | Complete |
+| Key delivery | Key property and decoder key-request signal | `key` property, or an `SrtpKeyProvider` on `srtpdec` | Complete |
+| Initial ROC | Decoder caps can supply the current rollover counter | `roc` property, or the provider's keying material | Complete |
+| Rekeying and limits | Soft-limit and hard-limit signals replace exhausted keys | `replace_key` or a new `key` at runtime. The soft limit posts a bus `Info`, the hard limit stops the stream | Complete |
+| Replay policy | Configurable window, default 128 packets | `replay-window-size`, 64 to 32768, default 128 | Complete |
+| Repeated transmission | Optional repeated transmission of an identical RTP packet | `allow-repeat-tx`, off by default | Complete |
+| MKI | One send key and up to 15 receive keys selected by MKI | `mki` on `srtpenc`. `srtpdec` selects among the keys its provider returns | Complete |
+| Statistics | Per-stream receive, drop, and protection statistics | `stats()` on both elements: packet counts and each stream's rollover counter | Complete |
+| DTLS-SRTP | Separate DTLS-SRTP encoder and decoder elements deliver keys | `dtlssrtpenc` / `dtlssrtpdec` on the pure-Rust `dimpl` stack, paired by `connection-id`, `peer-fingerprint` pins the peer | Complete |
+| Legacy profiles | AES-ICM, HMAC-SHA1, and NULL modes | The same cipher and auth values on `rtp-cipher` / `rtcp-cipher` / `rtp-auth` / `rtcp-auth` | Complete |
+
+Not carried over: gst's `key` / `srtp-cipher` overrides that turn DTLS off on
+`dtlssrtpenc` / `dtlssrtpdec` (use `srtpenc` / `srtpdec` for a fixed key),
+`random-key`, and the `stats` property (`stats()` is programmatic).
 
 ### STANAG 4609 / KLV metadata: beyond parity
 

@@ -89,6 +89,8 @@ pub mod checksumsink;
 pub mod chopmydata;
 pub mod concat;
 pub mod cutter;
+// Source reading the payload carried inside a `data:` URI.
+pub mod dataurisrc;
 pub mod deinterleave;
 pub mod equalizer;
 // Pass-through that turns a failure from downstream into a dropped buffer.
@@ -108,13 +110,30 @@ pub mod interleave;
 pub mod level;
 pub mod mux;
 pub mod nalparse;
+// Shared access-unit framing for the start-code elementary streams that are not
+// NAL streams (MPEG-1/2 video, MPEG-4 Part 2, VC-1).
+pub mod startcodeparse;
+// Legacy video parsers over that core.
+pub mod mpeg4videoparse;
+pub mod mpegvideoparse;
 #[cfg(feature = "offload")]
 pub mod offload;
 pub mod opusparse;
 pub mod outputselector;
 pub mod poc;
 pub mod progressreport;
+pub mod vc1parse;
+// Headerless raw framers: a `.pcm` / `.yuv` dump cut into buffers from the
+// format and geometry its properties declare.
+pub mod rawaudioparse;
+pub mod rawvideoparse;
 pub mod scaletempo;
+// Split-file source: the files matching a pattern read as one byte stream.
+// Reads a directory, so std.
+#[cfg(feature = "std")]
+pub mod splitfilesrc;
+// Still-image framing: a JPEG / PNG byte stream cut into whole images.
+pub mod stillparse;
 // Deterministic pseudo-randomness shared by the test / debug elements.
 mod random;
 // Byte re-chunking shared by the random / step-aligned buffer-size transforms.
@@ -129,6 +148,8 @@ pub mod stereo;
 pub mod streamdemux;
 // Bus tag injector: posts a hand-written tag list for a stream that carries none.
 pub mod taginject;
+// The `tags=` property, gst taglist syntax, shared by taginject and the tag writers.
+pub mod tagproperty;
 pub mod tsmuxn;
 // Closable pass-through: drops data while `drop=true`, for muting one tee branch.
 pub mod valve;
@@ -233,6 +254,11 @@ pub mod y4m;
 pub mod bitmapfont;
 pub mod subparse;
 pub mod textoverlay;
+// The writers that invert `subparse`: timed cues out as a SubRip / WebVTT
+// document, over the cue bookkeeping both share.
+pub mod srtenc;
+pub mod subenc;
+pub mod webvttenc;
 // Shaping / bidi / system-font discovery behind the overlay's horizontal path.
 #[cfg(feature = "text-shaping")]
 pub mod textshape;
@@ -272,6 +298,11 @@ pub mod cotsink;
 pub mod ccextract;
 // Closed-caption insertion element: compressed video + cues in, SEI'd video out.
 pub mod ccinsert;
+// Closed-caption transport converter: cc_data / CDP / S334-1A / raw CEA-608.
+pub mod ccconverter;
+// Closed-caption combiner: video + captions in, video carrying caption meta out.
+#[cfg(feature = "metadata")]
+pub mod cccombiner;
 // MISB ST 0604 MISP time stamps in H.264 / H.265 SEI (STANAG 4609): codec +
 // misptimeinsert / misptimeextract elements (no_std).
 pub mod misptime;
@@ -365,6 +396,22 @@ pub mod rtpjitter;
 // Sans-IO RTCP (RFC 3550 SR/RR/BYE + RFC 4585 Generic NACK) and RFC 3550
 // reception statistics: the RTP control / feedback channel.
 pub mod rtcp;
+// Sans-IO RFC 7714 AES-GCM protection for RTP and RTCP. The feature keeps
+// cryptographic dependencies out of builds that use plain RTP only.
+#[cfg(feature = "srtp")]
+pub mod srtp;
+#[cfg(feature = "srtp")]
+pub mod srtpdec;
+#[cfg(feature = "srtp")]
+pub mod srtpenc;
+// DTLS-SRTP (RFC 5764): the handshake that keys the RFC 7714 layer, and the
+// element pair that runs it over the media socket.
+#[cfg(feature = "dtls-srtp")]
+pub mod dtlssrtp;
+#[cfg(feature = "dtls-srtp")]
+pub mod dtlssrtpdec;
+#[cfg(feature = "dtls-srtp")]
+pub mod dtlssrtpenc;
 // Sans-IO RFC 4588 RTP retransmission (RTX) framing: wraps a resent packet in a
 // distinct payload type with the original sequence number prepended.
 pub mod rtx;
@@ -446,10 +493,25 @@ pub mod psdemux;
 // by the audio decoder's frame splitting, psdemux's frame realignment and
 // mpegaudioparse.
 mod audioframe;
-// ID3v1 / ID3v2 tag parsing (no_std), shared by id3demux and mpegaudioparse.
+// ID3v1 / ID3v2 tag parsing and writing (no_std), shared by id3demux,
+// mpegaudioparse and id3v2mux.
 mod id3;
 // ID3 tag stripper element (no_std): a tagged byte stream in, the payload out.
 pub mod id3demux;
+// ID3v2 tag writer element (no_std): the same byte stream with its leading tag
+// rewritten from the `tags` property.
+pub mod id3v2mux;
+// APEv2 tag writer element (no_std): the tag block appended at the tail.
+pub mod apev2mux;
+// Xing/Info VBR header writer (no_std): the seek header a VBR `.mp3` needs.
+pub mod xingmux;
+// VorbisComment parsing and writing (no_std), shared by the Ogg demuxer and
+// muxer and the vorbistag / flactag writers.
+mod vorbiscomment;
+// Vorbis comment-header rewriter element (no_std).
+pub mod vorbistag;
+// Native FLAC VORBIS_COMMENT block rewriter element (no_std).
+pub mod flactag;
 // MPEG audio parser element (no_std): an `.mp3` / `.mp2` byte stream -> one
 // MPEG audio frame per buffer, the framing ffmpegaudiodec takes.
 pub mod mpegaudioparse;
@@ -955,8 +1017,9 @@ pub mod pngenc;
 #[cfg(feature = "webp")]
 pub mod webpdec;
 
-// Geometry bounds, byte-stream reassembly, and RGBA output shared by the
-// still-image codec elements.
+// Byte-stream framing and header geometry for the still-image formats.
+mod stillframe;
+// Geometry bounds and RGBA output shared by the still-image codec elements.
 #[cfg(any(feature = "png", feature = "webp"))]
 mod stillimage;
 

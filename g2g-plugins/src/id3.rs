@@ -1,5 +1,5 @@
-//! ID3 metadata parsing, shared by [`crate::id3demux`] and
-//! [`crate::mpegaudioparse`].
+//! ID3 metadata parsing and writing, shared by [`crate::id3demux`],
+//! [`crate::mpegaudioparse`] and [`crate::id3v2mux`].
 //!
 //! An MPEG audio elementary stream carries its metadata outside the audio: an
 //! ID3v2 tag ahead of the first frame, an ID3v1 128-byte block after the last.
@@ -29,9 +29,9 @@ const ID3V2_FLAG_EXTENDED: u8 = 0x40;
 const ID3V2_FLAG_UNSYNC: u8 = 0x80;
 /// A syncsafe integer carries 7 bits per byte, the 8th always clear.
 const SYNCSAFE_BITS: u32 = 7;
-/// The ID3v2 major versions whose frames this parses: 2.3 and 2.4.
-const ID3V2_VERSION_2_3: u8 = 3;
-const ID3V2_VERSION_2_4: u8 = 4;
+/// The ID3v2 major versions whose frames this parses and writes: 2.3 and 2.4.
+pub(crate) const ID3V2_VERSION_2_3: u8 = 3;
+pub(crate) const ID3V2_VERSION_2_4: u8 = 4;
 /// Frame header of ID3v2.3 / 2.4: 4-byte id, 4-byte size, 2 flag bytes.
 const ID3V2_FRAME_HEADER_LEN: usize = 10;
 /// ID3v2.3 frame flags (second flag byte): compressed, encrypted, grouped.
@@ -194,13 +194,140 @@ fn frame_to_tag(id: &[u8], data: &[u8]) -> Option<Tag> {
             key: String::from_utf8_lossy(id).into_owned(),
             value: text,
         }),
-        b"TYER" | b"TDRC" | b"TCON" | b"TPE2" | b"TCOM" => Tag::Other {
+        _ if is_verbatim_frame(id) => Tag::Other {
             key: String::from_utf8_lossy(id).into_owned(),
             value: text,
         },
         _ => return None,
     };
     Some(tag)
+}
+
+/// The text frames with no typed [`Tag`] variant, which keep their frame id as
+/// the key of a [`Tag::Other`] in both directions.
+const VERBATIM_FRAMES: [&[u8; 4]; 5] = [b"TYER", b"TDRC", b"TCON", b"TPE2", b"TCOM"];
+
+fn is_verbatim_frame(id: &[u8]) -> bool {
+    VERBATIM_FRAMES.iter().any(|frame| frame.as_slice() == id)
+}
+
+/// The frame id one tag is written as, or `None` for a tag this writes no frame
+/// for. The inverse of [`frame_to_tag`], so a tag written here reads back as the
+/// tag that went in.
+fn tag_frame_id(tag: &Tag) -> Option<&'static [u8; 4]> {
+    match tag {
+        Tag::Title(_) => Some(b"TIT2"),
+        Tag::Artist(_) => Some(b"TPE1"),
+        Tag::Album(_) => Some(b"TALB"),
+        Tag::Encoder(_) => Some(b"TSSE"),
+        Tag::Number { key, .. } if key == Tag::TRACK_NUMBER => Some(b"TRCK"),
+        Tag::Other { key, .. } => VERBATIM_FRAMES
+            .iter()
+            .find(|frame| frame.as_slice() == key.as_bytes())
+            .copied(),
+        _ => None,
+    }
+}
+
+/// Write a complete ID3v2 tag (header plus one text frame per writable tag) in
+/// major `version`, 2.3 or 2.4. Tags with no frame id are dropped: an ID3v2 tag
+/// has no verbatim key/value slot to put them in.
+pub(crate) fn write_id3v2(tags: &TagList, version: u8) -> Vec<u8> {
+    let mut frames = Vec::new();
+    for tag in tags.tags() {
+        let Some(id) = tag_frame_id(tag) else {
+            continue;
+        };
+        let data = encode_text(&tag.value_string(), version);
+        frames.extend_from_slice(id);
+        frames.extend_from_slice(&frame_size_bytes(data.len(), version));
+        frames.extend_from_slice(&[0, 0]); // no frame flags
+        frames.extend_from_slice(&data);
+    }
+    let mut tag = Vec::from(ID3V2_MAGIC);
+    tag.extend_from_slice(&[version, 0, 0]); // revision 0, no header flags
+    tag.extend_from_slice(&syncsafe_bytes(frames.len()));
+    tag.extend_from_slice(&frames);
+    tag
+}
+
+/// A frame's data size as its version codes it: syncsafe in 2.4, a plain
+/// big-endian integer in 2.3.
+fn frame_size_bytes(size: usize, version: u8) -> [u8; 4] {
+    match version {
+        ID3V2_VERSION_2_4 => syncsafe_bytes(size),
+        _ => (size as u32).to_be_bytes(),
+    }
+}
+
+/// A 4-byte syncsafe integer, 7 bits per byte. A tag past 2^28 bytes cannot be
+/// coded at all, so the value saturates there rather than wrapping into a size
+/// that would frame the tag short.
+fn syncsafe_bytes(value: usize) -> [u8; 4] {
+    const SYNCSAFE_MAX: usize = (1 << (4 * SYNCSAFE_BITS)) - 1;
+    let value = value.min(SYNCSAFE_MAX) as u32;
+    let mut out = [0u8; 4];
+    for (i, byte) in out.iter_mut().enumerate() {
+        *byte = ((value >> (SYNCSAFE_BITS * (3 - i as u32))) & 0x7F) as u8;
+    }
+    out
+}
+
+/// One text frame's payload: the encoding byte then the text. ID3v2.4 takes
+/// UTF-8; ID3v2.3 defines only ISO-8859-1 and UTF-16, so text that is not
+/// Latin-1 goes out as UTF-16 with a byte-order mark.
+fn encode_text(text: &str, version: u8) -> Vec<u8> {
+    if version == ID3V2_VERSION_2_4 {
+        let mut data = Vec::from([ENCODING_UTF8]);
+        data.extend_from_slice(text.as_bytes());
+        return data;
+    }
+    if text.chars().all(|c| (c as u32) <= 0xFF) {
+        let mut data = Vec::from([ENCODING_LATIN1]);
+        data.extend(text.chars().map(|c| c as u8));
+        return data;
+    }
+    let mut data = Vec::from([ENCODING_UTF16_BOM, 0xFF, 0xFE]);
+    for unit in text.encode_utf16() {
+        data.extend_from_slice(&unit.to_le_bytes());
+    }
+    data
+}
+
+/// Write the 128-byte ID3v1 block for `tags`. Every field is ISO-8859-1 and
+/// fixed width, so a longer value is cut and a non-Latin-1 character is dropped:
+/// the block is a lossy summary of the ID3v2 tag beside it, which is why
+/// [`parse_id3v1`] is only consulted when there is no v2 tag.
+pub(crate) fn write_id3v1(tags: &TagList) -> Vec<u8> {
+    /// Genre byte 255 is "unknown"; this writes no genre.
+    const GENRE_UNKNOWN: u8 = 255;
+    let text_of = |want: &str| -> String {
+        tags.tags()
+            .iter()
+            .find(|t| t.key() == want)
+            .map(|t| t.value_string().into_owned())
+            .unwrap_or_default()
+    };
+    let mut block = Vec::from(ID3V1_MAGIC);
+    for (key, len) in [
+        ("title", ID3V1_TEXT_LEN),
+        ("artist", ID3V1_TEXT_LEN),
+        ("album", ID3V1_TEXT_LEN),
+        (ID3V1_YEAR_KEY, ID3V1_YEAR_LEN),
+        ("comment", ID3V1_TEXT_LEN),
+    ] {
+        let start = block.len();
+        block.extend(
+            text_of(key)
+                .chars()
+                .filter(|c| (*c as u32) <= 0xFF)
+                .map(|c| c as u8)
+                .take(len),
+        );
+        block.resize(start + len, 0);
+    }
+    block.push(GENRE_UNKNOWN);
+    block
 }
 
 /// The leading integer of a `TRCK` value (`"3"` or `"3/12"`) as the typed track
@@ -474,6 +601,112 @@ mod tests {
         let mut lying = tag.clone();
         lying[ID3V2_HEADER_LEN + 4] = 0x7F;
         assert!(parse_id3v2(&lying).is_empty());
+    }
+
+    /// The writer's tag read back by the parser beside it, in both versions: the
+    /// frame ids, sizes and text encodings have to agree in both directions.
+    #[test]
+    fn written_id3v2_reads_back_as_the_tags_that_went_in() {
+        let written: TagList = [
+            Tag::Title("Sinus \u{e4}".into()),
+            Tag::Artist("g2g".into()),
+            Tag::Album("Set".into()),
+            Tag::Number {
+                key: Tag::TRACK_NUMBER.into(),
+                value: 3,
+            },
+            Tag::Other {
+                key: "TCON".into(),
+                value: "Ambient".into(),
+            },
+        ]
+        .into_iter()
+        .collect();
+        for version in [ID3V2_VERSION_2_3, ID3V2_VERSION_2_4] {
+            let tag = write_id3v2(&written, version);
+            assert_eq!(id3v2_len(&tag), Some(tag.len()), "the declared size fits");
+            assert_eq!(
+                parse_id3v2(&tag).tags(),
+                written.tags(),
+                "version {version}"
+            );
+        }
+    }
+
+    /// A frame past 127 bytes is the case where the 2.3 and 2.4 size codings
+    /// differ, so a writer that used the wrong one would frame the tag short.
+    #[test]
+    fn written_frame_sizes_survive_a_long_value() {
+        let long = "x".repeat(300);
+        let written: TagList = [Tag::Album(long.clone()), Tag::Artist("g2g".into())]
+            .into_iter()
+            .collect();
+        for version in [ID3V2_VERSION_2_3, ID3V2_VERSION_2_4] {
+            let tags = parse_id3v2(&write_id3v2(&written, version));
+            assert_eq!(
+                tags.tags(),
+                [Tag::Album(long.clone()), Tag::Artist("g2g".into())],
+                "version {version}"
+            );
+        }
+    }
+
+    /// A tag with no ID3v2 frame is dropped rather than written under a guessed
+    /// id, so nothing reads back that did not go in.
+    #[test]
+    fn tags_without_a_frame_id_are_not_written() {
+        let written: TagList = [
+            Tag::Language("eng".into()),
+            Tag::Other {
+                key: "REPLAYGAIN_TRACK_GAIN".into(),
+                value: "-3.2 dB".into(),
+            },
+        ]
+        .into_iter()
+        .collect();
+        let tag = write_id3v2(&written, ID3V2_VERSION_2_4);
+        assert_eq!(tag.len(), ID3V2_HEADER_LEN, "header only, no frames");
+        assert!(parse_id3v2(&tag).is_empty());
+    }
+
+    #[test]
+    fn written_id3v1_block_reads_back() {
+        let written: TagList = [
+            Tag::Title("Sine".into()),
+            Tag::Artist("g2g".into()),
+            Tag::Comment("hi".into()),
+            Tag::Other {
+                key: ID3V1_YEAR_KEY.into(),
+                value: "2026".into(),
+            },
+        ]
+        .into_iter()
+        .collect();
+        let block = write_id3v1(&written);
+        assert_eq!(block.len(), ID3V1_LEN);
+        let read = parse_id3v1(&block).expect("a TAG block parses");
+        assert_eq!(
+            read.tags(),
+            [
+                Tag::Title("Sine".into()),
+                Tag::Artist("g2g".into()),
+                Tag::Comment("hi".into()),
+                Tag::Other {
+                    key: ID3V1_YEAR_KEY.into(),
+                    value: "2026".into()
+                },
+            ]
+        );
+        // A value longer than the field is cut, not spilled into the next field.
+        let long: TagList = [Tag::Title("t".repeat(ID3V1_TEXT_LEN + 10))]
+            .into_iter()
+            .collect();
+        let block = write_id3v1(&long);
+        assert_eq!(block.len(), ID3V1_LEN);
+        assert_eq!(
+            parse_id3v1(&block).expect("parses").tags(),
+            [Tag::Title("t".repeat(ID3V1_TEXT_LEN))]
+        );
     }
 
     #[test]

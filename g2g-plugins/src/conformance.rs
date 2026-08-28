@@ -824,14 +824,12 @@ fn ogg_demux(bytes: &[u8]) -> Vec<Vec<u8>> {
 /// rather than carried (`RoundTrip`). No `Oracle` evidence: no reference -40 gear
 /// has read this, so it tops out at `UnitTested`.
 pub fn st2110_anc() -> MaturityRecord {
-    use crate::cea::{build_cdp, parse_cdp, CcTriple};
+    use crate::cea::{build_cdp, parse_cdp, CcTriple, CDP_FRAME_RATE_29_97};
     use crate::st2110anc::{AncField, AncPacket, St2110AncDepacketizer, St2110AncPacketizer};
 
     /// DID / SDID of a CEA-708 caption ANC packet (SMPTE ST 334).
     const ANC_DID_CAPTIONS: u8 = 0x61;
     const ANC_SDID_CEA708: u8 = 0x01;
-    /// CDP frame-rate code 4: 29.97 fps.
-    const CDP_FRAME_RATE_29_97: u8 = 4;
     const CDP_SEQUENCE: u16 = 0x1234;
     const PAYLOAD_TYPE: u8 = 96;
     const SSRC: u32 = 0x0ACC_0ACC;
@@ -1195,7 +1193,7 @@ pub fn sub_parse() -> MaturityRecord {
 pub fn cea_captions() -> MaturityRecord {
     use crate::cea::{
         build_cc_sei, build_cdp, extract_cc_data, parse_cdp, Cc608Enc, Cc708Enc, CcTriple, Cea608,
-        Cea708,
+        Cea708, CDP_FRAME_RATE_29_97,
     };
     use crate::subparse::{Cue, CueSettings};
     use g2g_core::VideoCodec;
@@ -1204,7 +1202,6 @@ pub fn cea_captions() -> MaturityRecord {
     const FIRST_FRAME_NS: u64 = 1_000;
     const FRAME_PERIOD_NS: u64 = 33_000;
     const IDLE_FRAMES: usize = 3;
-    const CDP_FRAME_RATE_29_97: u8 = 4;
     const CDP_SEQUENCE: u16 = 0x1234;
 
     let mut rec = MaturityRecord::new("cea");

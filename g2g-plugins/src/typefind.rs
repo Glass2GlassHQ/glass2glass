@@ -64,6 +64,10 @@ pub(crate) const WEBP_MAGIC: [u8; 4] = *b"WEBP";
 const Y4M_MAGIC: [u8; 10] = *b"YUV4MPEG2 ";
 /// PNG signature (ISO/IEC 15948 5.2): the 8 bytes every PNG opens with.
 const PNG_MAGIC: [u8; 8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+
+/// `SOI` then a marker prefix: two bytes alone are a common byte pair, so the
+/// third is required before a file is called a JPEG.
+const JPEG_MAGIC: [u8; 3] = [0xFF, 0xD8, 0xFF];
 /// Every RIFF tag is a four-character code, and the 4-byte size sits between the
 /// magic and the form type, so a complete RIFF header is three of them.
 const FOURCC_LEN: usize = 4;
@@ -208,13 +212,15 @@ pub(crate) fn riff_form(header: &[u8]) -> Option<[u8; 4]> {
 /// one we decode. A still image is a one-frame `CompressedVideo` stream here, so
 /// `filesrc location=x.png ! decodebin` plugs the matching image decoder.
 ///
-/// JPEG is deliberately absent: `mjpegdec` takes one whole access unit per
-/// buffer, and nothing here reassembles a JPEG that a byte source split across
-/// reads, so typing a `.jpg` by content would plug a decoder that fails on any
-/// file past the source's chunk size. It needs a `jpegparse` first.
+/// A JPEG types as `Mjpeg`: an auto-plugged decode chain splices `jpegparse`
+/// ahead of `mjpegdec` (M1087), so a file a byte source split across reads is
+/// framed back into whole images before it reaches the decoder.
 fn sniff_still_image(header: &[u8]) -> Option<VideoCodec> {
     if header.starts_with(&PNG_MAGIC) {
         return Some(VideoCodec::Png);
+    }
+    if header.starts_with(&JPEG_MAGIC) {
+        return Some(VideoCodec::Mjpeg);
     }
     if riff_form(header) == Some(WEBP_MAGIC) {
         return Some(VideoCodec::WebP);
@@ -690,8 +696,12 @@ mod tests {
             sniff_still_image(b"RIFF\x24\0\0\0WEBPVP8L"),
             Some(VideoCodec::WebP)
         );
-        // JPEG is not typed by content: see the note on `sniff_still_image`.
-        assert_eq!(sniff_still_image(b"\xff\xd8\xff\xe0\0\x10JFIF"), None);
+        assert_eq!(
+            sniff_still_image(b"\xff\xd8\xff\xe0\0\x10JFIF"),
+            Some(VideoCodec::Mjpeg)
+        );
+        // `SOI` with no marker prefix behind it is not enough.
+        assert_eq!(sniff_still_image(b"\xff\xd8\x00\x00"), None);
         // A RIFF file that is not WebP, a truncated RIFF header, and a PNG
         // signature with one byte wrong are all misses.
         assert_eq!(sniff_still_image(b"RIFF\0\0\0\0AVI "), None);

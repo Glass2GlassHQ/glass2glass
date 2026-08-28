@@ -9,6 +9,9 @@
 //! Every offset here comes off the wire, so the scans are bounds-checked and a
 //! truncated or malformed header yields `None` rather than panicking.
 
+use crate::annexb::BitReader;
+use crate::startcodeparse::reduce_ratio;
+
 /// The video geometry an MPEG sequence header declares.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SequenceHeader {
@@ -22,6 +25,11 @@ pub struct SequenceHeader {
     /// missing or malformed, so an unreadable stream plays untouched rather than
     /// being filtered on a guess.
     pub progressive: bool,
+    /// One sample's `(width, height)`, reduced. `Caps` has no field for it, so
+    /// it reaches a pipeline through `mpegvideoparse`'s read-only
+    /// `pixel-aspect-ratio` property. `None` when `aspect_ratio_information` is
+    /// forbidden or reserved.
+    pub pixel_aspect: Option<(u32, u32)>,
 }
 
 /// The MPEG frame_rate_code table (ISO 13818-2 Table 6-4), as exact
@@ -38,72 +46,184 @@ const FRAME_RATES: [(u32, u32); 9] = [
     (60, 1),
 ];
 
+/// MPEG-1 `pel_aspect_ratio` (ISO/IEC 11172-2 Table 2-16), one pel's height
+/// divided by its width, in ten-thousandths (the precision the table itself is
+/// written to). Code 0 is forbidden and 15 reserved, both left at 0.
+const MPEG1_PEL_ASPECT_TEN_THOUSANDTHS: [u32; 16] = [
+    0, 10000, 6735, 7031, 7615, 8055, 8437, 8935, 9157, 9815, 10255, 10695, 10950, 11575, 12015, 0,
+];
+
+/// The denominator [`MPEG1_PEL_ASPECT_TEN_THOUSANDTHS`] is expressed against.
+const PEL_ASPECT_SCALE: u32 = 10000;
+
+/// MPEG-2 `aspect_ratio_information` (ISO/IEC 13818-2 Table 6-3) as the coded
+/// frame's display aspect ratio. Code 1 means square samples and is handled
+/// without the table; 0 and 5..=15 are forbidden or reserved.
+const MPEG2_DISPLAY_ASPECT_BY_CODE: [(u32, u32); 16] = [
+    (0, 0),
+    (0, 0),
+    (4, 3),
+    (16, 9),
+    (221, 100),
+    (0, 0),
+    (0, 0),
+    (0, 0),
+    (0, 0),
+    (0, 0),
+    (0, 0),
+    (0, 0),
+    (0, 0),
+    (0, 0),
+    (0, 0),
+    (0, 0),
+];
+
+/// `aspect_ratio_information` for square samples, which needs no table.
+const ASPECT_RATIO_SQUARE: u32 = 1;
+/// Bytes of fixed-length fields at the head of a sequence header, before the
+/// optional quantiser matrices.
+const SEQUENCE_HEADER_FIXED_BYTES: usize = 8;
+/// `extension_start_code`.
+const EXTENSION_START_CODE: u8 = 0xB5;
+/// `extension_start_code_identifier` of the sequence extension.
+const SEQUENCE_EXTENSION_ID: u32 = 1;
+
 /// Parse the first MPEG sequence header (`00 00 01 B3`) in an access unit: the
-/// 12-bit horizontal and vertical sizes and the 4-bit frame_rate_code that
-/// follow it, plus `progressive_sequence` from the MPEG-2 sequence extension
-/// after it. Returns `None` when the unit carries no sequence header, when it
-/// is truncated, or when a field is out of range (a zero dimension, a reserved
-/// frame rate), so a malformed header leaves the placeholder caps standing
-/// rather than fixating on nonsense.
+/// 12-bit horizontal and vertical sizes, the 4-bit aspect_ratio_information and
+/// the 4-bit frame_rate_code that follow it, plus the sequence extension after
+/// it (which widens the sizes, scales the frame rate, and carries
+/// `progressive_sequence`). Returns `None` when the unit carries no sequence
+/// header, when it is truncated, or when a field is out of range (a zero
+/// dimension, a reserved frame rate), so a malformed header leaves the
+/// placeholder caps standing rather than fixating on nonsense.
 pub fn parse_sequence_header(au: &[u8]) -> Option<SequenceHeader> {
     // The start code prefix is unique in an MPEG video bitstream, so a plain
     // scan for it needs no emulation-prevention handling.
     let found = au.windows(4).position(|w| w == [0x00, 0x00, 0x01, 0xB3])?;
     let body = found.checked_add(4)?;
     let h = au.get(body..body.checked_add(4)?)?;
-    let width = ((h[0] as u32) << 4) | ((h[1] as u32) >> 4);
-    let height = (((h[1] & 0x0F) as u32) << 8) | h[2] as u32;
+    let horizontal_size_value = ((h[0] as u32) << 4) | ((h[1] as u32) >> 4);
+    let vertical_size_value = (((h[1] & 0x0F) as u32) << 8) | h[2] as u32;
+    let aspect_ratio_information = (h[3] >> 4) as u32;
     let (num, den) = *FRAME_RATES.get((h[3] & 0x0F) as usize)?;
+
+    let extension = parse_sequence_extension(au, body);
+    let width = horizontal_size_value | extension.map_or(0, |e| e.horizontal_size_extension << 12);
+    let height = vertical_size_value | extension.map_or(0, |e| e.vertical_size_extension << 12);
     if width == 0 || height == 0 || num == 0 {
         return None;
     }
-    // num is at most 60000, so the shift stays well inside u64 and the quotient
-    // inside u32 (60 << 16 at the top of the table).
-    let framerate_q16 = (((num as u64) << 16) / den as u64) as u32;
+    // The extension's scale terms are at most 4 and 32, and num at most 60000,
+    // so the product stays well inside u64 and the quotient inside u32.
+    let (scale_n, scale_d) = extension.map_or((1, 1), |e| {
+        (
+            e.frame_rate_extension_n.saturating_add(1),
+            e.frame_rate_extension_d.saturating_add(1),
+        )
+    });
+    let framerate_q16 =
+        ((((num as u64) << 16) * scale_n as u64) / ((den as u64) * scale_d as u64)) as u32;
+    // MPEG-1's table gives the pel's own aspect; MPEG-2's gives the frame's
+    // display aspect, from which the sample's follows.
+    let pixel_aspect = match extension {
+        Some(_) => mpeg2_pixel_aspect(aspect_ratio_information, width, height),
+        None => mpeg1_pixel_aspect(aspect_ratio_information),
+    };
     Some(SequenceHeader {
         width,
         height,
         framerate_q16,
-        progressive: parse_progressive_sequence(au, body),
+        progressive: extension.is_none_or(|e| e.progressive),
+        pixel_aspect,
     })
 }
 
-/// `progressive_sequence` from the MPEG-2 sequence extension (ISO 13818-2
-/// 6.2.2.3), the extension that must directly follow a sequence header. `body` is
-/// the first byte after the sequence header's start code.
+/// One sample's `(width, height)` for an MPEG-1 `aspect_ratio_information`: the
+/// reciprocal of the table's pel aspect ratio, which is coded height over width.
+fn mpeg1_pixel_aspect(aspect_ratio_information: u32) -> Option<(u32, u32)> {
+    let pel = *MPEG1_PEL_ASPECT_TEN_THOUSANDTHS.get(aspect_ratio_information as usize)?;
+    reduce_ratio(PEL_ASPECT_SCALE, pel)
+}
+
+/// One sample's `(width, height)` for an MPEG-2 `aspect_ratio_information`,
+/// whose table gives the frame's display aspect ratio: the sample aspect is the
+/// display aspect divided by the coded aspect.
+fn mpeg2_pixel_aspect(
+    aspect_ratio_information: u32,
+    width: u32,
+    height: u32,
+) -> Option<(u32, u32)> {
+    if aspect_ratio_information == ASPECT_RATIO_SQUARE {
+        return Some((1, 1));
+    }
+    let (display_n, display_d) =
+        *MPEG2_DISPLAY_ASPECT_BY_CODE.get(aspect_ratio_information as usize)?;
+    // The table terms are under 256 and the sizes under 2^14, so the products
+    // stay far inside u32; saturate anyway rather than trust the header.
+    reduce_ratio(
+        display_n.saturating_mul(height),
+        display_d.saturating_mul(width),
+    )
+}
+
+/// The fields of the MPEG-2 sequence extension (ISO 13818-2 6.2.2.3) that reach
+/// the caps.
+#[derive(Clone, Copy, Debug)]
+struct SequenceExtension {
+    progressive: bool,
+    horizontal_size_extension: u32,
+    vertical_size_extension: u32,
+    frame_rate_extension_n: u32,
+    frame_rate_extension_d: u32,
+}
+
+/// The sequence extension that must directly follow the sequence header whose
+/// body starts at `body`. `None` for MPEG-1 (no extension), a truncation before
+/// one, or a different extension.
 ///
 /// The header's own length is variable (either quantiser matrix may be present,
 /// and the second one is not byte aligned), so the extension is found by scanning
-/// for the next start code past the 8-byte fixed part instead of computing an
-/// offset. No start code can be emulated inside the header: its marker bit
-/// forbids the pattern in the fixed part, and quantiser matrix values are never
-/// zero. Anything unexpected (truncation, a different extension, MPEG-1's absent
-/// one) reads as progressive, so the stream plays unfiltered.
-fn parse_progressive_sequence(au: &[u8], body: usize) -> bool {
-    let Some(from) = body.checked_add(8) else {
-        return true;
-    };
-    let Some(rest) = au.get(from..) else {
-        return true;
-    };
-    let Some(at) = rest.windows(4).position(|w| w[..3] == [0x00, 0x00, 0x01]) else {
-        return true;
-    };
-    if rest[at + 3] != 0xB5 {
-        return true;
+/// for the next start code past the fixed part instead of computing an offset.
+/// No start code can be emulated inside the header: its marker bit forbids the
+/// pattern in the fixed part, and quantiser matrix values are never zero.
+///
+/// A field the extension is cut short of keeps a default that changes nothing:
+/// no size or frame-rate scaling, and progressive, so an unreadable stream plays
+/// unfiltered.
+fn parse_sequence_extension(au: &[u8], body: usize) -> Option<SequenceExtension> {
+    let from = body.checked_add(SEQUENCE_HEADER_FIXED_BYTES)?;
+    let rest = au.get(from..)?;
+    let at = rest.windows(4).position(|w| w[..3] == START_CODE_PREFIX)?;
+    if rest[at + 3] != EXTENSION_START_CODE {
+        return None;
     }
-    // extension_start_code_identifier (4 bits) then profile_and_level_indication
-    // (8 bits), so progressive_sequence is bit 3 of the second payload byte.
-    let Some(id) = rest.get(at + 4) else {
-        return true;
+    let mut bits = BitReader::new(rest.get(at + 4..)?);
+    if bits.read_bits(4)? != SEQUENCE_EXTENSION_ID {
+        return None;
+    }
+    let mut extension = SequenceExtension {
+        progressive: true,
+        horizontal_size_extension: 0,
+        vertical_size_extension: 0,
+        frame_rate_extension_n: 0,
+        frame_rate_extension_d: 0,
     };
-    if id >> 4 != 0b0001 {
-        return true;
-    }
-    match rest.get(at + 5) {
-        Some(b) => b & 0x08 != 0,
-        None => true,
-    }
+    let mut read = || -> Option<()> {
+        bits.skip_bits(8)?; // profile_and_level_indication
+        extension.progressive = bits.read_bit()? == 1;
+        bits.skip_bits(2)?; // chroma_format
+        extension.horizontal_size_extension = bits.read_bits(2)?;
+        extension.vertical_size_extension = bits.read_bits(2)?;
+        bits.skip_bits(12)?; // bit_rate_extension
+        bits.skip_bits(1)?; // marker_bit
+        bits.skip_bits(8)?; // vbv_buffer_size_extension
+        bits.skip_bits(1)?; // low_delay
+        extension.frame_rate_extension_n = bits.read_bits(2)?;
+        extension.frame_rate_extension_d = bits.read_bits(5)?;
+        Some(())
+    };
+    let _ = read();
+    Some(extension)
 }
 
 /// The start-code prefix every MPEG header is introduced by.

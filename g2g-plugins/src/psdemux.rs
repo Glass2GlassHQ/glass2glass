@@ -18,7 +18,8 @@
 //!
 //! Video geometry comes from the MPEG sequence header (`00 00 01 B3`), which the
 //! demuxer parses to refine the video pad's caps via `CapsChanged` before the
-//! first access unit; there is no separate MPEG-2 parse element. Scope: video,
+//! first access unit, so the chain needs no `mpegvideoparse` ahead of the
+//! decoder (the demuxer already cuts the video at picture boundaries). Scope: video,
 //! MPEG audio, AC-3 and DVD subpictures. LPCM (0xA0..=0xA7) and DTS
 //! (0x88..=0x8F) substreams, the program stream map (0xBC) and seeking are not
 //! handled. CPU, `no_std` baseline.

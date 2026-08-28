@@ -165,6 +165,12 @@ _(No open seek / auto-plug items.)_
 
 ## Containers
 
+- **ADPCM from a placeholder-stereo source:** `adpcmenc` takes mono only, and a
+  source whose real layout arrives at runtime negotiates at the stereo
+  placeholder, so `wavparse ! adpcmenc` fails the solve (and again on the runtime
+  re-solve through an `audioconvert` pinned to mono). Needs either a
+  channel-count-agnostic ADPCM path or a converter that renegotiates on the
+  refinement.
 - **FLV:** Speex decode (no Speex encoder exists anywhere to build a validated
   decode vector, and gst's header-in-tag layout is rejected by libavcodec, so
   wiring a decoder would be an unvalidated claim).
@@ -252,9 +258,7 @@ unless it says otherwise.
   `sbcdec`, `lc3dec`, `musepackdec`, `sfdec`, `gmedec` / `openmptdec` / `modplug`,
   `dvdlpcmdec`, `dsdconvert`, `sirendec` / `isacdec`.
 - **Audio parsers:** `amrparse`, `dcaparse`, `sbcparse`, `wavpackparse`,
-  `vorbisparse`, `theoraparse`, `rawaudioparse` / `unalignedaudioparse`,
-  `audioparse`, `auparse`, `aiffparse` / `aiffmux`, `xingmux`, `flactag` /
-  `vorbistag` / `id3mux` / `id3v2mux` / `apev2mux` (tag writers), `apedemux`,
+  `vorbisparse`, `theoraparse`, `auparse`, `aiffparse` / `aiffmux`, `apedemux`,
   `icydemux` (SHOUTcast metadata in `httpsrc`).
 - **Audio filters:** `audiointerleave`, `audiolatency`, `rganalysis` /
   `rgvolume` / `rglimiter`, `bs2b`, `freeverb`, `pitch` / `bpmdetect`,
@@ -262,10 +266,9 @@ unless it says otherwise.
   `dtmfsrc`, `accurip`, `chromaprint`.
 - **Audio visualisers:** `wavescope`, `spacescope`, `spectrascope`, `synaescope`,
   `goom` / `goom2k1`.
-- **Video parsers:** `mpegvideoparse`, `mpeg4videoparse`, `h263parse`,
-  `h266parse`, `vc1parse`, `diracparse`, `jpeg2000parse`, `jpegparse` / `jifmux`,
-  `pngparse`, `ivfparse`, `rawvideoparse` / `unalignedvideoparse`, `videoparse`,
-  `h264timestamper` / `h265timestamper`, `codec2json` (`h2642json` ...).
+- **Video parsers:** `h263parse`, `h266parse`, `diracparse`, `jpeg2000parse`,
+  `jifmux`, `h264timestamper` / `h265timestamper`, `codec2json`
+  (`h2642json` ...).
 - **Video codecs:** `openh264enc` / `openh264dec`, `svtav1enc`, `mpeg2enc`,
   `theoraparse`-side Theora decode, `openjpegenc` / `openjpegdec`, `openexrdec`,
   `pnmenc` / `pnmdec`, `gdkpixbufdec`, `rsvgdec`, `flxdec`, `vmncdec`,
@@ -277,12 +280,18 @@ unless it says otherwise.
   `ogmtextparse` / `oggaviparse`, `3gppmux` / `ismlmux` / `mj2mux` (mp4mux
   brands), `qtmoovrecover`, `avisubtitle`, `gdppay` / `gdpdepay`, `pcapparse` /
   `irtspparse`, `bz2enc` / `bz2dec`, `midiparse`.
-- **Multi-file sources:** `splitmuxsrc`, `splitfilesrc`, `imagesequencesrc`.
-- **Subtitles / captions:** `srtenc` / `webvttenc`, `ttmlparse` / `ttmlrender`,
-  `assrender`, `textrender`, `dvbsubenc`, `dvdsubparse`, `cccombiner` /
-  `ccconverter` / `cea608mux` / `cc708overlay`, `line21decoder` /
-  `line21encoder`, `h264ccinserter` / `h265ccinserter` / `h264ccextractor` /
-  `h265ccextractor`.
+- **Multi-file sources:** `splitmuxsrc` (each part its own container, so the
+  parts have to be demuxed separately and their timestamps joined, unlike
+  `splitfilesrc`'s byte join).
+- **Subtitles / captions:** `ttmlparse` / `ttmlrender`, `assrender`,
+  `textrender`, `dvbsubenc`, `dvdsubparse`, `cea608mux` / `cc708overlay`,
+  `h264ccinserter` / `h265ccinserter` / `h264ccextractor` / `h265ccextractor`.
+- **Line-21 VBI captions:** `line21encoder` / `line21decoder`. Writing the
+  waveform means the biphase signal itself (7 clock run-in cycles at 32x the
+  line rate, 240 ns rise/fall shaping, a 50 IRE swing) and reading it back means
+  a bit slicer with threshold tracking. Both also need a raw-video convention
+  that includes the VBI lines: `Caps::RawVideo` here is active picture, and no
+  source produces the 720x525 interleaved frame line 21 sits in.
 - **Overlays:** `cairooverlay`, `rsvgoverlay`, `gdkpixbufoverlay`, `qroverlay` /
   `debugqroverlay`, `overlaycomposition`, `faceoverlay`, `zxing`,
   `objectdetectionoverlay` (vs `analyticsoverlay`).
@@ -293,13 +302,15 @@ unless it says otherwise.
   `videoanalyse` / `simplevideomark` / `simplevideomarkdetect`,
   `videoframe-audiolevel`, `timecodestamper` / `avwait`, `audiosegmentclip` /
   `videosegmentclip`, `navigationtest`.
-- **Flow / bins:** `encodebin` / `encodebin2` / `transcodebin` /
-  `uritranscodebin` (encoding profiles), `autoconvert` / `autovideoconvert` /
-  `autodeinterlace` / `autovideoflip`, `switchbin`, `insertbin`, `roundrobin`,
-  `playsink` / `streamsynchronizer` (playbin internals), `nlecomposition` /
+- **Flow / bins:** `uritranscodebin` (a URI in, an encoding profile out),
+  encoder presets (a named quality / speed set an encoding profile's stream part
+  selects, which needs a `preset` property on the encoders first), `autoconvert`
+  / `autovideoconvert` / `autodeinterlace` / `autovideoflip`, `switchbin`,
+  `insertbin`, `roundrobin`, `playsink` / `streamsynchronizer` (playbin
+  internals), `nlecomposition` /
   `nlesource` / `nleoperation` / `nleurisource` and `gessrc` / `gesdemux`
   (editing), `camerabin` / `viewfinderbin` / `wrappercamerabinsrc`, `bin` /
-  `pipeline` as launch keywords, `dataurisrc`, `msesrc`.
+  `pipeline` as launch keywords, `msesrc`.
 - **IPC:** `proxysink` / `proxysrc`, `intervideosink` / `intervideosrc` /
   `interaudiosink` / `interaudiosrc` / `intersubsink` / `intersubsrc`,
   `ipcpipelinesink` / `ipcpipelinesrc` / `ipcslavepipeline`, `unixfdsink` /

@@ -1,5 +1,7 @@
-//! Shared geometry bounds and byte-stream framing for the still-image codec
-//! elements (`PngDec`, `PngEnc`, `WebPDec`).
+//! Shared geometry bounds and RGBA output for the still-image codec elements
+//! (`PngDec`, `PngEnc`, `WebPDec`). The byte-stream framing they also share is
+//! in [`crate::stillframe`], which the still-image parsers use without a
+//! decoder.
 //!
 //! A PNG `IHDR` or a WebP `VP8X` header carries dimensions up to 2^31 / 2^24,
 //! and both decoder crates size their output buffer from those numbers. The
@@ -7,11 +9,6 @@
 //! budget here before anything allocates: a bogus 100000x100000 header fails the
 //! parse instead of asking for 40 GB.
 //!
-//! The framing side exists because a byte source hands over whatever a read
-//! returned, not whole files: `filesrc` emits 64 KiB chunks, so an image larger
-//! than that arrives in pieces, while `multifilesrc` hands over one complete
-//! image per buffer. [`ImageAssembler`] covers both; the length function it walks
-//! with is each format's own, and lives with that format's decoder.
 
 use alloc::vec::Vec;
 
@@ -51,62 +48,6 @@ pub(crate) fn rgba_byte_size(width: u32, height: u32) -> Result<usize, G2gError>
         return Err(G2gError::CapsMismatch);
     }
     Ok(bytes)
-}
-
-/// Ceiling on the encoded bytes held while waiting for the rest of an image.
-/// Bounds a byte stream that opens with a plausible signature and then never
-/// completes, which would otherwise grow the buffer for as long as it flows.
-pub(crate) const MAX_ENCODED_BYTES: usize = 64 * 1024 * 1024;
-
-/// Length of the complete image at the start of `data`, or `None` when more
-/// bytes are needed. `Err` when the bytes cannot be an image of this format at
-/// all, or when the length it claims is past [`MAX_ENCODED_BYTES`].
-pub(crate) type FrameLength = fn(&[u8]) -> Result<Option<usize>, G2gError>;
-
-/// Reassembles whole encoded images from a byte stream.
-///
-/// A buffer that already holds exactly one image passes through with a single
-/// copy; anything else accumulates until the format's own length says the image
-/// is complete, so a source's read size never decides whether a file decodes.
-#[derive(Debug, Default)]
-pub(crate) struct ImageAssembler {
-    pending: Vec<u8>,
-}
-
-impl ImageAssembler {
-    /// Take one buffer of the stream and hand back every image it completed.
-    pub(crate) fn push(
-        &mut self,
-        bytes: &[u8],
-        frame_length: FrameLength,
-    ) -> Result<Vec<Vec<u8>>, G2gError> {
-        if self.pending.len().saturating_add(bytes.len()) > MAX_ENCODED_BYTES {
-            return Err(G2gError::CapsMismatch);
-        }
-        self.pending.extend_from_slice(bytes);
-
-        let mut images = Vec::new();
-        while let Some(length) = frame_length(&self.pending)? {
-            let rest = self.pending.split_off(length);
-            images.push(core::mem::replace(&mut self.pending, rest));
-        }
-        Ok(images)
-    }
-
-    /// End of stream: bytes still held are an image that never completed.
-    pub(crate) fn finish(&mut self) -> Result<(), G2gError> {
-        if self.pending.is_empty() {
-            Ok(())
-        } else {
-            self.pending = Vec::new();
-            Err(G2gError::CapsMismatch)
-        }
-    }
-
-    /// Drop what a flushing seek made stale.
-    pub(crate) fn reset(&mut self) {
-        self.pending = Vec::new();
-    }
 }
 
 /// The downstream half every still-image decoder shares: each decoded image is
@@ -154,29 +95,6 @@ impl StillImageOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::vec;
-
-    /// A stand-in image format for the assembler's own behaviour, which does not
-    /// depend on PNG or WebP: a 4-byte big-endian length, then that many bytes.
-    const LENGTH_PREFIX: usize = 4;
-
-    fn prefixed_frame_length(data: &[u8]) -> Result<Option<usize>, G2gError> {
-        let Some(header) = data.get(..LENGTH_PREFIX) else {
-            return Ok(None);
-        };
-        let payload = u32::from_be_bytes([header[0], header[1], header[2], header[3]]) as usize;
-        let total = payload
-            .checked_add(LENGTH_PREFIX)
-            .filter(|total| *total <= MAX_ENCODED_BYTES)
-            .ok_or(G2gError::CapsMismatch)?;
-        Ok((data.len() >= total).then_some(total))
-    }
-
-    fn prefixed_bytes(payload: usize) -> Vec<u8> {
-        let mut file = Vec::from((payload as u32).to_be_bytes());
-        file.extend_from_slice(&vec![0u8; payload]);
-        file
-    }
 
     #[test]
     fn accepts_ordinary_geometry_and_rejects_absurd() {
@@ -197,78 +115,5 @@ mod tests {
             rgba_byte_size(u32::MAX, u32::MAX),
             Err(G2gError::CapsMismatch)
         );
-    }
-
-    #[test]
-    fn assembler_rejoins_a_split_image_and_splits_a_joined_one() {
-        let file = prefixed_bytes(40);
-        // Split across three buffers, the `filesrc` case: nothing comes out
-        // until the last piece lands, and then it is the whole file.
-        let mut assembler = ImageAssembler::default();
-        let (a, rest) = file.split_at(2);
-        let (b, c) = rest.split_at(20);
-        assert_eq!(assembler.push(a, prefixed_frame_length), Ok(Vec::new()));
-        assert_eq!(assembler.push(b, prefixed_frame_length), Ok(Vec::new()));
-        assert_eq!(
-            assembler.push(c, prefixed_frame_length),
-            Ok(vec![file.clone()])
-        );
-        assert_eq!(assembler.finish(), Ok(()));
-
-        // Two whole images in one buffer come out as two.
-        let mut joined = file.clone();
-        joined.extend_from_slice(&file);
-        let mut assembler = ImageAssembler::default();
-        assert_eq!(
-            assembler.push(&joined, prefixed_frame_length),
-            Ok(vec![file.clone(), file.clone()])
-        );
-    }
-
-    #[test]
-    fn assembler_reports_a_stream_that_ends_mid_image() {
-        let file = prefixed_bytes(40);
-        let mut assembler = ImageAssembler::default();
-        assert_eq!(
-            assembler.push(&file[..12], prefixed_frame_length),
-            Ok(Vec::new())
-        );
-        assert_eq!(
-            assembler.finish(),
-            Err(G2gError::CapsMismatch),
-            "a half-received image is not silently dropped"
-        );
-        // The failed image is cleared, so the next one starts clean.
-        assert_eq!(assembler.push(&file, prefixed_frame_length), Ok(vec![file]));
-    }
-
-    #[test]
-    fn assembler_bounds_a_stream_that_never_completes() {
-        // A length claiming almost the whole ceiling, so the length itself is
-        // allowed and only the held bytes can stop the stream. Feeding it
-        // forever must hit the ceiling rather than growing with the stream.
-        const CHUNK_BYTES: usize = 8 * 1024 * 1024;
-        let header = (MAX_ENCODED_BYTES as u32 - 32).to_be_bytes();
-
-        let mut assembler = ImageAssembler::default();
-        assert_eq!(
-            assembler.push(&header, prefixed_frame_length),
-            Ok(Vec::new())
-        );
-        let chunk = vec![0u8; CHUNK_BYTES];
-        let mut pushes = 0;
-        loop {
-            match assembler.push(&chunk, prefixed_frame_length) {
-                Ok(images) => {
-                    assert!(images.is_empty());
-                    pushes += 1;
-                    assert!(pushes <= MAX_ENCODED_BYTES / CHUNK_BYTES, "must stop");
-                }
-                Err(e) => {
-                    assert_eq!(e, G2gError::CapsMismatch);
-                    break;
-                }
-            }
-        }
     }
 }

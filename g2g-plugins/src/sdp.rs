@@ -337,7 +337,7 @@ fn parse_q16_fps(s: &str) -> Option<u32> {
 /// character outside the alphabet or a truncated final group, so a malformed
 /// `sprop` never yields half a parameter set. Hand-rolled to keep this module on
 /// the `no_std` baseline instead of pulling an optional dependency into it.
-fn base64_decode(s: &str) -> Option<Vec<u8>> {
+pub(crate) fn base64_decode(s: &str) -> Option<Vec<u8>> {
     fn sextet(c: u8) -> Option<u32> {
         Some(match c {
             b'A'..=b'Z' => (c - b'A') as u32,

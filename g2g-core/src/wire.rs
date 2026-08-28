@@ -204,6 +204,7 @@ fn video_codec_to_u8(c: VideoCodec) -> u8 {
         VideoCodec::Mpeg2 => 11,
         VideoCodec::Png => 12,
         VideoCodec::WebP => 13,
+        VideoCodec::Vc1 => 14,
     }
 }
 fn video_codec_from_u8(v: u8) -> Result<VideoCodec, WireError> {
@@ -222,6 +223,7 @@ fn video_codec_from_u8(v: u8) -> Result<VideoCodec, WireError> {
         11 => VideoCodec::Mpeg2,
         12 => VideoCodec::Png,
         13 => VideoCodec::WebP,
+        14 => VideoCodec::Vc1,
         _ => return Err(WireError::BadTag),
     })
 }
@@ -327,6 +329,12 @@ fn bytestream_to_u8(e: ByteStreamEncoding) -> u8 {
         ByteStreamEncoding::Avi => 9,
         ByteStreamEncoding::Y4m => 10,
         ByteStreamEncoding::Multipart => 11,
+        ByteStreamEncoding::Raw => 12,
+        ByteStreamEncoding::Rtp => 13,
+        ByteStreamEncoding::Srtp => 14,
+        ByteStreamEncoding::Rtcp => 15,
+        ByteStreamEncoding::Srtcp => 16,
+        ByteStreamEncoding::Dtls => 17,
     }
 }
 fn bytestream_from_u8(v: u8) -> Result<ByteStreamEncoding, WireError> {
@@ -343,6 +351,12 @@ fn bytestream_from_u8(v: u8) -> Result<ByteStreamEncoding, WireError> {
         9 => ByteStreamEncoding::Avi,
         10 => ByteStreamEncoding::Y4m,
         11 => ByteStreamEncoding::Multipart,
+        12 => ByteStreamEncoding::Raw,
+        13 => ByteStreamEncoding::Rtp,
+        14 => ByteStreamEncoding::Srtp,
+        15 => ByteStreamEncoding::Rtcp,
+        16 => ByteStreamEncoding::Srtcp,
+        17 => ByteStreamEncoding::Dtls,
         _ => return Err(WireError::BadTag),
     })
 }
@@ -375,12 +389,18 @@ fn cc_format_to_u8(f: ClosedCaptionFormat) -> u8 {
     match f {
         ClosedCaptionFormat::Cea608 => 0,
         ClosedCaptionFormat::Cea708 => 1,
+        ClosedCaptionFormat::Cea608Raw => 2,
+        ClosedCaptionFormat::Cea608S334 => 3,
+        ClosedCaptionFormat::Cea708Cdp => 4,
     }
 }
 fn cc_format_from_u8(v: u8) -> Result<ClosedCaptionFormat, WireError> {
     Ok(match v {
         0 => ClosedCaptionFormat::Cea608,
         1 => ClosedCaptionFormat::Cea708,
+        2 => ClosedCaptionFormat::Cea608Raw,
+        3 => ClosedCaptionFormat::Cea608S334,
+        4 => ClosedCaptionFormat::Cea708Cdp,
         _ => return Err(WireError::BadTag),
     })
 }
@@ -1187,6 +1207,10 @@ mod tests {
             VideoCodec::SorensonH263,
             VideoCodec::Vp6 { alpha: false },
             VideoCodec::Vp6 { alpha: true },
+            VideoCodec::Mpeg2,
+            VideoCodec::Png,
+            VideoCodec::WebP,
+            VideoCodec::Vc1,
         ];
         for c in video {
             assert_eq!(video_codec_from_u8(video_codec_to_u8(c)), Ok(c));
@@ -1211,6 +1235,19 @@ mod tests {
         ];
         for f in audio {
             assert_eq!(audio_format_from_u8(audio_format_to_u8(f)), Ok(f));
+        }
+    }
+
+    #[test]
+    fn packet_bytestream_tags_round_trip() {
+        for encoding in [
+            ByteStreamEncoding::Rtp,
+            ByteStreamEncoding::Srtp,
+            ByteStreamEncoding::Rtcp,
+            ByteStreamEncoding::Srtcp,
+            ByteStreamEncoding::Dtls,
+        ] {
+            assert_eq!(bytestream_from_u8(bytestream_to_u8(encoding)), Ok(encoding));
         }
     }
 

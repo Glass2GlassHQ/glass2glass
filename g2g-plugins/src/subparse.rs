@@ -2496,6 +2496,77 @@ fn frac_millis(frac: &str) -> u64 {
     ms
 }
 
+/// Nanoseconds as the `HH:MM:SS,mmm` (SRT) or `HH:MM:SS.mmm` (WebVTT) cue clock,
+/// the inverse of [`parse_timestamp`]. `millisecond_separator` is `,` or `.`.
+/// Sub-millisecond precision is truncated, the resolution both formats carry.
+pub fn format_timestamp(ns: u64, millisecond_separator: char) -> String {
+    let ms = ns / 1_000_000;
+    let mut s = String::new();
+    let _ = core::fmt::Write::write_fmt(
+        &mut s,
+        format_args!(
+            "{:02}:{:02}:{:02}{}{:03}",
+            ms / 3_600_000,
+            (ms / 60_000) % 60,
+            (ms / 1_000) % 60,
+            millisecond_separator,
+            ms % 1_000
+        ),
+    );
+    s
+}
+
+/// The WebVTT file signature, the first line of every `.vtt` document.
+pub const WEBVTT_HEADER: &str = "WEBVTT";
+
+/// The millisecond separator in an SRT cue clock (`HH:MM:SS,mmm`).
+pub const SRT_MILLISECOND_SEPARATOR: char = ',';
+/// The millisecond separator in a WebVTT cue clock (`HH:MM:SS.mmm`).
+pub const WEBVTT_MILLISECOND_SEPARATOR: char = '.';
+
+/// Render one cue as the SRT / WebVTT block [`parse_srt`] / [`parse_webvtt`] read
+/// back: an SRT sequence number line (WebVTT has none), the
+/// `start --> end` timing line, the text, then the blank line ending the block.
+///
+/// `text` is cue text, not a document: a blank line inside it would end the block
+/// early when re-parsed, so blank lines are dropped and a cue whose text is
+/// entirely blank yields an empty string (nothing to write).
+pub fn write_cue_block(
+    sequence: u64,
+    start_ns: u64,
+    end_ns: u64,
+    text: &str,
+    format: TextFormat,
+) -> String {
+    let mut lines = text.lines().filter(|l| !l.trim().is_empty()).peekable();
+    if lines.peek().is_none() {
+        return String::new();
+    }
+    let separator = if matches!(format, TextFormat::Srt) {
+        SRT_MILLISECOND_SEPARATOR
+    } else {
+        WEBVTT_MILLISECOND_SEPARATOR
+    };
+    let mut out = String::new();
+    if matches!(format, TextFormat::Srt) {
+        let _ = core::fmt::Write::write_fmt(&mut out, format_args!("{sequence}\n"));
+    }
+    let _ = core::fmt::Write::write_fmt(
+        &mut out,
+        format_args!(
+            "{} --> {}\n",
+            format_timestamp(start_ns, separator),
+            format_timestamp(end_ns, separator)
+        ),
+    );
+    for line in lines {
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.push('\n');
+    out
+}
+
 /// Append `line` to `out` with any `<...>` markup removed. Handles `<i>`, `<b>`,
 /// `<c.class>`, and `<00:00:01.000>` inline cue timestamps uniformly.
 fn push_stripped(line: &str, out: &mut String) {

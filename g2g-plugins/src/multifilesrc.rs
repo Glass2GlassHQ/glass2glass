@@ -6,7 +6,13 @@
 //!
 //! Each file is one independently-decodable unit, so every frame is marked a
 //! keyframe. The output media type defaults to Motion-JPEG (the common case); a
-//! different sequence type is set at construction.
+//! `location` whose extension names a still-image format types the sequence
+//! from it, and a different type can also be set at construction.
+//!
+//! With a `framerate` the source is gst's `imagesequencesrc`: the same file
+//! walk, but the output rate is stated and each file is stamped on that grid,
+//! so a sequence of stills plays as a clip. Without one the files carry no
+//! timing, which is `multifilesrc`.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -44,6 +50,9 @@ pub struct MultiFileSrc {
     start_index: i64,
     stop_index: i64,
     loop_seq: bool,
+    /// gst `imagesequencesrc`'s output rate. `None` (a plain `multifilesrc`)
+    /// leaves the files unstamped.
+    framerate: Option<(u32, u32)>,
     configured: bool,
 }
 
@@ -52,7 +61,7 @@ impl MultiFileSrc {
     /// geometry is a fixable `Range` placeholder (never `Any`, which cannot
     /// fixate); the real per-image dimensions arrive from the decoder downstream.
     pub fn new(location: impl Into<String>) -> Self {
-        Self {
+        let mut src = Self {
             location: location.into(),
             caps: Caps::CompressedVideo {
                 codec: VideoCodec::Mjpeg,
@@ -73,14 +82,60 @@ impl MultiFileSrc {
             // -1 means "until the first missing file".
             stop_index: -1,
             loop_seq: false,
+            framerate: None,
             configured: false,
-        }
+        };
+        src.type_from_location();
+        src
     }
 
     /// Set the sequence's media type (e.g. a raw byte stream) explicitly.
     pub fn with_caps(mut self, caps: Caps) -> Self {
         self.caps = caps;
         self
+    }
+
+    /// State the output framerate and stamp each file on that grid, which is
+    /// what `imagesequencesrc` does.
+    pub fn with_framerate(mut self, numerator: u32, denominator: u32) -> Self {
+        if denominator > 0 {
+            self.framerate = Some((numerator, denominator));
+        }
+        self
+    }
+
+    /// The stated rate in the Q16 fixed-point fps `Rate` carries, `None` when
+    /// the files are unstamped.
+    fn rate_q16(&self) -> Option<u32> {
+        let (numerator, denominator) = self.framerate?;
+        if denominator == 0 {
+            return None;
+        }
+        u32::try_from((u64::from(numerator) << 16) / u64::from(denominator)).ok()
+    }
+
+    /// The declared output caps: the sequence's media type, at the stated rate
+    /// when there is one.
+    fn output_caps(&self) -> Caps {
+        let Some(rate_q16) = self.rate_q16() else {
+            return self.caps.clone();
+        };
+        let mut caps = self.caps.clone();
+        if let Caps::CompressedVideo { framerate, .. } = &mut caps {
+            *framerate = Rate::Fixed(rate_q16);
+        }
+        caps
+    }
+
+    /// Type the sequence from the `location` pattern's extension, so
+    /// `img%05d.png` is a PNG sequence without a caps argument. Leaves the
+    /// current type alone for a pattern with no still-image extension.
+    fn type_from_location(&mut self) {
+        if let Some(caps @ Caps::CompressedVideo { .. }) =
+            crate::filesrc::caps_from_extension(std::path::Path::new(&self.location))
+        {
+            self.caps = caps;
+        }
     }
 }
 
@@ -96,14 +151,14 @@ impl SourceLoop for MultiFileSrc {
         Self: 'a;
 
     fn intercept_caps<'a>(&'a mut self) -> Self::CapsFuture<'a> {
-        core::future::ready(Ok(self.caps.clone()))
+        core::future::ready(Ok(self.output_caps()))
     }
 
     fn caps_constraint<'a>(
         &'a mut self,
     ) -> impl Future<Output = Result<CapsConstraint<'a>, G2gError>> + 'a {
         core::future::ready(Ok(CapsConstraint::Produces(CapsSet::one(
-            self.caps.clone(),
+            self.output_caps(),
         ))))
     }
 
@@ -113,7 +168,7 @@ impl SourceLoop for MultiFileSrc {
     }
 
     fn configured_output_caps(&self) -> Option<Caps> {
-        Some(self.caps.clone())
+        Some(self.output_caps())
     }
 
     fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a> {
@@ -146,9 +201,16 @@ impl SourceLoop for MultiFileSrc {
                 };
                 let mut buf = alloc::vec::Vec::new();
                 file.read_to_end(&mut buf).map_err(io_err)?;
+                let period_ns = self
+                    .rate_q16()
+                    .map_or(0, crate::compositor::frame_period_ns);
+                let pts_ns = sequence.saturating_mul(period_ns);
                 let frame = Frame {
                     domain: MemoryDomain::System(SystemSlice::from_boxed(buf.into_boxed_slice())),
                     timing: FrameTiming {
+                        pts_ns,
+                        dts_ns: pts_ns,
+                        duration_ns: period_ns,
                         keyframe: true,
                         ..FrameTiming::default()
                     },
@@ -179,10 +241,20 @@ impl SourceLoop for MultiFileSrc {
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
         match name {
-            "location" => self.location = value.as_str().ok_or(PropError::Type)?.into(),
+            "location" => {
+                self.location = value.as_str().ok_or(PropError::Type)?.into();
+                self.type_from_location();
+            }
             "start-index" => self.start_index = value.as_int().ok_or(PropError::Type)?,
             "stop-index" => self.stop_index = value.as_int().ok_or(PropError::Type)?,
             "loop" => self.loop_seq = value.as_bool().ok_or(PropError::Type)?,
+            "framerate" => {
+                let (numerator, denominator) = value.as_fraction().ok_or(PropError::Type)?;
+                if numerator <= 0 || denominator <= 0 {
+                    return Err(PropError::Value);
+                }
+                self.framerate = Some((numerator as u32, denominator as u32));
+            }
             _ => return Err(PropError::Unknown),
         }
         Ok(())
@@ -194,6 +266,10 @@ impl SourceLoop for MultiFileSrc {
             "start-index" => Some(PropValue::Int(self.start_index)),
             "stop-index" => Some(PropValue::Int(self.stop_index)),
             "loop" => Some(PropValue::Bool(self.loop_seq)),
+            "framerate" => {
+                let (numerator, denominator) = self.framerate.unwrap_or((0, 1));
+                Some(PropValue::Fraction(numerator as i32, denominator as i32))
+            }
             _ => None,
         }
     }
@@ -212,6 +288,11 @@ static MULTIFILESRC_PROPS: &[PropertySpec] = &[
         "last index (-1 = until a file is missing)",
     ),
     PropertySpec::new("loop", PropKind::Bool, "restart the sequence at the end"),
+    PropertySpec::new(
+        "framerate",
+        PropKind::Fraction,
+        "output framerate, stamping each file on that grid (0/1 = unstamped)",
+    ),
 ];
 
 #[cfg(test)]

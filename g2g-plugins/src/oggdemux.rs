@@ -63,12 +63,13 @@ use g2g_core::{
     Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, FrameTiming, G2gError,
     MemoryDomain, MultiOutputElement, MultiOutputSink, OutputSink, PadTemplate, PadTemplates,
     PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Seek, Segment, Stream,
-    StreamCollection, StreamType, Tag, TagList,
+    StreamCollection, StreamType, TagList,
 };
 
 use crate::demuxseek::{Admit, DemuxSeek};
 use crate::ogg::{OggCodec, OggDemuxer, OggLogicalStream};
 use crate::opusparse::packet_samples as opus_packet_samples;
+use crate::vorbiscomment::parse_vorbis_comment;
 
 /// Convert a 48 kHz sample count to nanoseconds.
 fn opus_samples_to_ns(samples: u64) -> u64 {
@@ -1392,65 +1393,10 @@ impl PadTemplates for OggDemux {
     }
 }
 
-/// Parse a VorbisComment metadata block into a [`TagList`]. Accepts the comment
-/// header with its codec prefix (`OpusTags`, the Vorbis `\x03vorbis`, or a FLAC
-/// VORBIS_COMMENT metadata block, type 4, whose 4-byte block header wraps the
-/// same body): vendor string, then a count-prefixed list of `KEY=VALUE` UTF-8
-/// fields (RFC 7845 §5.2 for Opus). Unparseable / truncated input yields
-/// whatever was read so far.
-fn parse_vorbis_comment(packet: &[u8]) -> TagList {
-    let body = if let Some(rest) = packet.strip_prefix(b"OpusTags".as_slice()) {
-        rest
-    } else if let Some(rest) = packet.strip_prefix(b"\x03vorbis".as_slice()) {
-        rest
-    } else if packet.len() >= 4 && packet[0] & 0x7F == 4 {
-        &packet[4..]
-    } else {
-        return TagList::new();
-    };
-
-    fn read_u32_le(b: &[u8], pos: &mut usize) -> Option<u32> {
-        let s = b.get(*pos..*pos + 4)?;
-        *pos += 4;
-        Some(u32::from_le_bytes([s[0], s[1], s[2], s[3]]))
-    }
-
-    let mut list = TagList::new();
-    let mut pos = 0usize;
-    let Some(vendor_len) = read_u32_le(body, &mut pos) else {
-        return list;
-    };
-    pos = match pos.checked_add(vendor_len as usize) {
-        Some(p) if p <= body.len() => p, // skip the vendor string
-        _ => return list,
-    };
-    let Some(count) = read_u32_le(body, &mut pos) else {
-        return list;
-    };
-    for _ in 0..count {
-        let Some(len) = read_u32_le(body, &mut pos) else {
-            break;
-        };
-        let Some(end) = pos.checked_add(len as usize) else {
-            break;
-        };
-        let Some(field) = body.get(pos..end) else {
-            break;
-        };
-        pos = end;
-        if let Ok(s) = core::str::from_utf8(field) {
-            if let Some((key, value)) = s.split_once('=') {
-                list.push(Tag::from_key_value(key, value));
-            }
-        }
-    }
-    list
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use g2g_core::{Dim, PushOutcome, Rate, RawVideoFormat};
+    use g2g_core::{Dim, PushOutcome, Rate, RawVideoFormat, Tag};
 
     /// Build one Ogg page carrying `packets` for `serial` (mirrors the parser
     /// test helper).

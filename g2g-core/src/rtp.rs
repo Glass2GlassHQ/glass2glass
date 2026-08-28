@@ -40,6 +40,17 @@ pub struct RtpParsed {
     pub payload_len: usize,
 }
 
+/// The fields and byte length of an RTP header. Unlike [`RtpParsed`], this
+/// does not inspect the payload or its padding count, so SRTP can parse the
+/// authenticated header before decrypting the payload and padding.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RtpParsedHeader {
+    /// The fixed-header fields (`RtpHeader::to_bytes` round-trips these).
+    pub header: RtpHeader,
+    /// Byte offset immediately after the CSRC list and extension header.
+    pub payload_offset: usize,
+}
+
 impl RtpHeader {
     /// Parse an RTP datagram received from an arbitrary peer, returning the
     /// fixed-header fields and the payload's byte range. The inverse of
@@ -54,11 +65,34 @@ impl RtpHeader {
     /// rejected. Heap-free (part of the no-alloc subset), so an MCU RTP source
     /// uses it directly.
     pub fn parse(buf: &[u8]) -> Option<RtpParsed> {
+        let parsed_header = Self::parse_header(buf)?;
+        let b0 = *buf.first()?;
+        let has_padding = b0 & 0x20 != 0;
+
+        // Padding, if present, is counted by the datagram's last byte.
+        let mut end = buf.len();
+        if has_padding {
+            let pad = *buf.get(end.checked_sub(1)?)? as usize;
+            end = end.checked_sub(pad)?;
+        }
+        if parsed_header.payload_offset > end {
+            return None; // header (and padding) overrun the datagram
+        }
+        Some(RtpParsed {
+            header: parsed_header.header,
+            payload_offset: parsed_header.payload_offset,
+            payload_len: end - parsed_header.payload_offset,
+        })
+    }
+
+    /// Parse the authenticated RTP header without reading the payload. This
+    /// accepts CSRC identifiers and an RTP extension and rejects any header
+    /// whose declared fields exceed `buf`.
+    pub fn parse_header(buf: &[u8]) -> Option<RtpParsedHeader> {
         let b0 = *buf.first()?;
         if b0 >> 6 != 2 {
-            return None; // only RTP version 2
+            return None;
         }
-        let has_padding = b0 & 0x20 != 0;
         let has_extension = b0 & 0x10 != 0;
         let csrc_count = (b0 & 0x0F) as usize;
         let b1 = *buf.get(1)?;
@@ -69,29 +103,21 @@ impl RtpHeader {
             u32::from_be_bytes([*buf.get(4)?, *buf.get(5)?, *buf.get(6)?, *buf.get(7)?]);
         let ssrc = u32::from_be_bytes([*buf.get(8)?, *buf.get(9)?, *buf.get(10)?, *buf.get(11)?]);
 
-        // Fixed header + the CSRC list (CC 32-bit identifiers).
-        let mut offset = RTP_HEADER_LEN.checked_add(csrc_count.checked_mul(4)?)?;
+        let mut payload_offset = RTP_HEADER_LEN.checked_add(csrc_count.checked_mul(4)?)?;
         if has_extension {
-            // The extension header is a 2-byte profile id + a 2-byte length in
-            // 32-bit words, then that many words of extension data.
-            let len_hi = *buf.get(offset.checked_add(2)?)?;
-            let len_lo = *buf.get(offset.checked_add(3)?)?;
-            let ext_words = u16::from_be_bytes([len_hi, len_lo]) as usize;
-            offset = offset
+            let extension_length_high = *buf.get(payload_offset.checked_add(2)?)?;
+            let extension_length_low = *buf.get(payload_offset.checked_add(3)?)?;
+            let extension_words =
+                u16::from_be_bytes([extension_length_high, extension_length_low]) as usize;
+            payload_offset = payload_offset
                 .checked_add(4)?
-                .checked_add(ext_words.checked_mul(4)?)?;
+                .checked_add(extension_words.checked_mul(4)?)?;
+        }
+        if payload_offset > buf.len() {
+            return None;
         }
 
-        // Padding, if present, is counted by the datagram's last byte.
-        let mut end = buf.len();
-        if has_padding {
-            let pad = *buf.get(end.checked_sub(1)?)? as usize;
-            end = end.checked_sub(pad)?;
-        }
-        if offset > end {
-            return None; // header (and padding) overrun the datagram
-        }
-        Some(RtpParsed {
+        Some(RtpParsedHeader {
             header: RtpHeader {
                 payload_type,
                 marker,
@@ -99,8 +125,7 @@ impl RtpHeader {
                 timestamp,
                 ssrc,
             },
-            payload_offset: offset,
-            payload_len: end - offset,
+            payload_offset,
         })
     }
 
@@ -232,6 +257,14 @@ mod tests {
         assert_eq!(
             &dg[p.payload_offset..p.payload_offset + p.payload_len],
             &[0x55, 0x66]
+        );
+
+        dg[27] = 0xFF;
+        let header = RtpHeader::parse_header(&dg).expect("payload is opaque to header parsing");
+        assert_eq!(header.payload_offset, 24);
+        assert!(
+            RtpHeader::parse(&dg).is_none(),
+            "full parsing checks padding"
         );
     }
 

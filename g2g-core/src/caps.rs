@@ -469,7 +469,10 @@ fn text_format_gst_media_type(f: TextFormat) -> &'static str {
 fn cc_format_gst_media_type(f: ClosedCaptionFormat) -> &'static str {
     match f {
         ClosedCaptionFormat::Cea608 => "closedcaption/x-cea-608,format=cc_data",
+        ClosedCaptionFormat::Cea608Raw => "closedcaption/x-cea-608,format=raw",
+        ClosedCaptionFormat::Cea608S334 => "closedcaption/x-cea-608,format=s334-1a",
         ClosedCaptionFormat::Cea708 => "closedcaption/x-cea-708,format=cc_data",
+        ClosedCaptionFormat::Cea708Cdp => "closedcaption/x-cea-708,format=cdp",
     }
 }
 
@@ -531,6 +534,10 @@ fn codec_gst_media_type(c: VideoCodec) -> &'static str {
         VideoCodec::SorensonH263 => "video/x-flash-video",
         VideoCodec::Vp6 { alpha: false } => "video/x-vp6-flash",
         VideoCodec::Vp6 { alpha: true } => "video/x-vp6-alpha",
+        // GStreamer keeps VC-1 under the Windows Media Video type, told apart
+        // by `wmvversion=3, format=WVC1`; the fields do not survive here, so the
+        // codec split stays in the caps.
+        VideoCodec::Vc1 => "video/x-wmv",
     }
 }
 
@@ -579,6 +586,12 @@ fn bytestream_gst_media_type(e: ByteStreamEncoding) -> &'static str {
         ByteStreamEncoding::Avi => "video/x-msvideo",
         ByteStreamEncoding::Y4m => "application/x-yuv4mpeg",
         ByteStreamEncoding::Multipart => "multipart/x-mixed-replace",
+        ByteStreamEncoding::Raw => "application/octet-stream",
+        ByteStreamEncoding::Rtp => "application/x-rtp",
+        ByteStreamEncoding::Srtp => "application/x-srtp",
+        ByteStreamEncoding::Rtcp => "application/x-rtcp",
+        ByteStreamEncoding::Srtcp => "application/x-srtcp",
+        ByteStreamEncoding::Dtls => "application/x-dtls",
     }
 }
 
@@ -1020,6 +1033,12 @@ pub enum VideoCodec {
     /// -20's bandwidth while keeping sub-frame latency. Encoded / decoded via
     /// `FfmpegJpegXsEnc` / `FfmpegJpegXsDec` (libavcodec `Id::JPEGXS`).
     JpegXs,
+    /// VC-1 (SMPTE 421M), the standardised Windows Media Video 9 bitstream. The
+    /// Blu-ray and Silverlight codec, carried in ASF and in MPEG-TS under
+    /// stream_type 0xEA. Advanced profile is a start-code byte stream that
+    /// `Vc1Parse` frames; simple and main profile carry no start codes and take
+    /// their sequence layer from the container's codec-configuration block.
+    Vc1,
 }
 
 /// Wire format of a [`Caps::ByteStream`] link, so a demuxer accepts only the
@@ -1080,6 +1099,22 @@ pub enum ByteStreamEncoding {
     /// `mjpg-streamer`-style server pushes MJPEG over HTTP with, demuxed by
     /// `multipartdemux` and written by `multipartmux`.
     Multipart,
+    /// No container and no framing: a headerless dump whose shape is declared
+    /// out of band, the `.yuv` / `.pcm` file `rawvideoparse` / `rawaudioparse`
+    /// frame from their properties. Content sniffing never answers `Raw`, since
+    /// any byte sequence matches it.
+    Raw,
+    /// One complete RTP packet per frame.
+    Rtp,
+    /// One complete SRTP packet per frame.
+    Srtp,
+    /// One complete RTCP packet per frame.
+    Rtcp,
+    /// One complete SRTCP packet per frame.
+    Srtcp,
+    /// One datagram per frame carrying DTLS records multiplexed with SRTP
+    /// and SRTCP, split on the first byte per RFC 7983.
+    Dtls,
 }
 
 /// Format of a [`Caps::Text`] stream. Generalizes "subtitles": a `Text` link
@@ -1120,21 +1155,33 @@ pub enum TextFormat {
     Teletext,
 }
 
-/// Which closed-caption carriage a [`Caps::ClosedCaption`] track declared. The
-/// payload layout is the same `cc_data` triple stream either way (see the variant
-/// docs); this names the service family, so a decoder knows whether to look for
-/// 608 line-21 fields or 708 DTVCC packets, and a muxer knows which sample entry
-/// to write.
+/// Which closed-caption carriage a [`Caps::ClosedCaption`] frame holds. It names
+/// the service family (608 line-21 fields or 708 DTVCC packets) and the byte
+/// layout the payload is in, since the same captions travel in four of them: a
+/// converter reads one and writes another, and a muxer knows which sample entry to
+/// write. Every layout carries the same underlying `(cc_type, cc_data_1,
+/// cc_data_2)` triples.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum ClosedCaptionFormat {
-    /// CEA-608 line-21 captions, `cc_type` 0/1 (the MP4 `c608` sample entry, whose
-    /// samples hold `cdat` / `cdt2` byte-pair atoms).
+    /// CEA-608 line-21 captions as packed ATSC `cc_data` triples, `cc_type` 0/1
+    /// (the MP4 `c608` sample entry, whose samples hold `cdat` / `cdt2` byte-pair
+    /// atoms).
     Cea608,
-    /// CEA-708 DTVCC captions, `cc_type` 2/3 (the MP4 `c708` sample entry, whose
-    /// samples hold a `ccdp` atom with a SMPTE ST 334-2 caption distribution
-    /// packet).
+    /// CEA-608 line-21 captions as bare byte pairs, one line-21 field's worth per
+    /// frame with no `cc_type` byte (GStreamer's `format=raw`). Which field they
+    /// came from travels beside the stream, as the reader's `field` property.
+    Cea608Raw,
+    /// CEA-608 line-21 captions as SMPTE ST 334-1 Annex A triplets: a
+    /// field / line-offset byte then the two data bytes (GStreamer's
+    /// `format=s334-1a`), the form an ancillary-data packet carries.
+    Cea608S334,
+    /// CEA-708 DTVCC captions as packed ATSC `cc_data` triples, `cc_type` 2/3.
     Cea708,
+    /// CEA-708 DTVCC captions in a SMPTE ST 334-2 caption distribution packet
+    /// (GStreamer's `format=cdp`), the payload of a DID 0x61 ancillary packet and
+    /// of the MP4 `c708` sample entry's `ccdp` atom.
+    Cea708Cdp,
 }
 
 /// Which bitmap-subtitle coding a [`Caps::SubPicture`] stream carries. Each

@@ -25,7 +25,7 @@ use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use g2g_core::VideoCodec;
+use g2g_core::{ClosedCaptionFormat, VideoCodec};
 
 use crate::annexb::add_emulation_prevention;
 use crate::subparse::{Cue, CueSettings, TextAlign};
@@ -1755,6 +1755,174 @@ pub fn parse_cdp(data: &[u8]) -> Option<Vec<CcTriple>> {
         }
     }
     Some(out)
+}
+
+// ---------------------------------------------------------------------------
+// Caption transports
+// ---------------------------------------------------------------------------
+//
+// The same triples travel in four byte layouts, the set
+// [`ClosedCaptionFormat`] names and a `ccconverter` moves between: packed ATSC
+// `cc_data` (above), a CDP (above), SMPTE ST 334-1 Annex A triplets, and bare
+// CEA-608 byte pairs. The two remaining layouts and the layout-keyed dispatch
+// both sides of a converter call are here.
+
+/// The field flag in an ST 334-1 Annex A triplet's first byte: set for line-21
+/// field 1 (`cc_type` 0), clear for field 2. The low bits are a line offset from
+/// the standard caption line, which g2g writes as zero and ignores on read.
+const S334_FIELD_1_FLAG: u8 = 0x80;
+
+/// `cc_type` of the CEA-608 line-21 field a [`ClosedCaptionFormat::Cea608Raw`]
+/// stream may carry. Bare byte pairs have no type byte, so the field travels
+/// beside the data.
+pub const CEA608_FIELD_1: u8 = 0;
+/// See [`CEA608_FIELD_1`].
+pub const CEA608_FIELD_2: u8 = 1;
+
+/// The CEA-708 `cdp_frame_rate` nibble [`build_cdp`] writes for 29.97 fps, the
+/// rate a caption distribution packet most often carries.
+pub const CDP_FRAME_RATE_29_97: u8 = 4;
+
+/// The `cdp_frame_rate` nibble for a `numerator / denominator` frame rate. The
+/// standard enumerates the broadcast rates only; any other rate falls back to
+/// [`CDP_FRAME_RATE_29_97`], so a caption packet is still well formed.
+pub fn cdp_frame_rate_code(numerator: u32, denominator: u32) -> u8 {
+    match (numerator, denominator) {
+        (24_000, 1_001) => 1,
+        (24, 1) => 2,
+        (25, 1) => 3,
+        (30_000, 1_001) => CDP_FRAME_RATE_29_97,
+        (30, 1) => 5,
+        (50, 1) => 6,
+        (60_000, 1_001) => 7,
+        (60, 1) => 8,
+        _ => CDP_FRAME_RATE_29_97,
+    }
+}
+
+/// Serialize the line-21 triples of `triples` as SMPTE ST 334-1 Annex A
+/// triplets: a field / line-offset byte then the two data bytes. DTVCC triples
+/// (`cc_type` 2/3) have no line-21 field, so they are dropped.
+pub fn write_s334_1a(triples: &[CcTriple]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(triples.len() * 3);
+    for t in triples.iter().filter(|t| t.cc_type <= CEA608_FIELD_2) {
+        out.push(if t.cc_type == CEA608_FIELD_1 {
+            S334_FIELD_1_FLAG
+        } else {
+            0
+        });
+        out.push(t.b0);
+        out.push(t.b1);
+    }
+    out
+}
+
+/// Parse ST 334-1 Annex A triplets back into line-21 triples, the inverse of
+/// [`write_s334_1a`]. The line offset is not represented downstream, so only the
+/// field flag is read; a trailing partial triplet is ignored.
+pub fn parse_s334_1a(data: &[u8]) -> Vec<CcTriple> {
+    data.as_chunks::<3>()
+        .0
+        .iter()
+        .map(|t| CcTriple {
+            cc_type: if t[0] & S334_FIELD_1_FLAG != 0 {
+                CEA608_FIELD_1
+            } else {
+                CEA608_FIELD_2
+            },
+            b0: t[1],
+            b1: t[2],
+        })
+        .collect()
+}
+
+/// Serialize the `field` line-21 triples of `triples` as bare CEA-608 byte pairs,
+/// the layout with no type byte at all. Triples of the other field, and the DTVCC
+/// ones, are dropped: the stream carries one field.
+pub fn write_cea608_raw(triples: &[CcTriple], field: u8) -> Vec<u8> {
+    let mut out = Vec::with_capacity(triples.len() * 2);
+    for t in triples.iter().filter(|t| t.cc_type == field) {
+        out.push(t.b0);
+        out.push(t.b1);
+    }
+    out
+}
+
+/// Parse bare CEA-608 byte pairs back into triples of `field`, the inverse of
+/// [`write_cea608_raw`]. A trailing odd byte is ignored.
+pub fn parse_cea608_raw(data: &[u8], field: u8) -> Vec<CcTriple> {
+    data.as_chunks::<2>()
+        .0
+        .iter()
+        .map(|p| CcTriple {
+            cc_type: field,
+            b0: p[0],
+            b1: p[1],
+        })
+        .collect()
+}
+
+/// How a caption transport that carries no type byte is read and written: which
+/// line-21 field bare CEA-608 pairs belong to, and the frame rate a CDP header
+/// declares. The knobs [`parse_caption_transport`] and
+/// [`write_caption_transport`] need beyond the layout itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TransportParams {
+    /// The line-21 field of a [`ClosedCaptionFormat::Cea608Raw`] stream.
+    pub field: u8,
+    /// The [`cdp_frame_rate_code`] a written CDP header declares.
+    pub frame_rate_code: u8,
+    /// The CDP sequence counter, which rises once per written packet.
+    pub sequence: u16,
+}
+
+impl Default for TransportParams {
+    fn default() -> Self {
+        Self {
+            field: CEA608_FIELD_1,
+            frame_rate_code: CDP_FRAME_RATE_29_97,
+            sequence: 0,
+        }
+    }
+}
+
+/// Read one caption payload in the `format` layout into its triples. Every layout
+/// is bounds-checked (a caption payload is attacker-controlled), so a malformed
+/// packet yields the triples it did hold, or none.
+pub fn parse_caption_transport(
+    data: &[u8],
+    format: ClosedCaptionFormat,
+    params: TransportParams,
+) -> Vec<CcTriple> {
+    match format {
+        ClosedCaptionFormat::Cea608Raw => parse_cea608_raw(data, params.field),
+        ClosedCaptionFormat::Cea608S334 => parse_s334_1a(data),
+        ClosedCaptionFormat::Cea708Cdp => parse_cdp(data).unwrap_or_default(),
+        // Cea608 and Cea708 are both the packed `cc_data` layout, and a carriage
+        // this build does not know yields nothing rather than a guessed framing.
+        ClosedCaptionFormat::Cea608 | ClosedCaptionFormat::Cea708 => parse_cc_data(data),
+        _ => Vec::new(),
+    }
+}
+
+/// Write `triples` as one caption payload in the `format` layout, the inverse of
+/// [`parse_caption_transport`]. A layout that cannot carry a triple drops it (bare
+/// CEA-608 pairs hold one field; ST 334-1 holds no DTVCC), so a conversion is
+/// lossy exactly where the standards are.
+pub fn write_caption_transport(
+    triples: &[CcTriple],
+    format: ClosedCaptionFormat,
+    params: TransportParams,
+) -> Vec<u8> {
+    match format {
+        ClosedCaptionFormat::Cea608Raw => write_cea608_raw(triples, params.field),
+        ClosedCaptionFormat::Cea608S334 => write_s334_1a(triples),
+        ClosedCaptionFormat::Cea708Cdp => {
+            build_cdp(triples, params.frame_rate_code, params.sequence)
+        }
+        ClosedCaptionFormat::Cea608 | ClosedCaptionFormat::Cea708 => write_cc_data(triples),
+        _ => Vec::new(),
+    }
 }
 
 #[cfg(test)]

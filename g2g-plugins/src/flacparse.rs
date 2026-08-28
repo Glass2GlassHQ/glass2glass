@@ -173,8 +173,9 @@ impl FlacParse {
 
 /// Byte length of the complete `fLaC` header (marker + all metadata blocks), or
 /// `None` while it is still arriving. `Err` when the stream does not open with
-/// the marker (not a FLAC stream: fail loud, not silent).
-fn complete_header_len(buf: &[u8]) -> Result<Option<usize>, G2gError> {
+/// the marker (not a FLAC stream: fail loud, not silent). Shared with
+/// [`crate::flactag`], which rewrites one of those metadata blocks.
+pub(crate) fn complete_header_len(buf: &[u8]) -> Result<Option<usize>, G2gError> {
     if buf.len() < 4 {
         return Ok(None);
     }

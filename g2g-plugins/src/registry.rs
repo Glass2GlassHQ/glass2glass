@@ -22,7 +22,9 @@ use alloc::vec::Vec;
 
 #[cfg(feature = "script-rhai")]
 use g2g_core::runtime::DemuxFactory;
-use g2g_core::runtime::{ElementFactory, LaunchFactory, MuxerFactory, Registry, SourceFactory};
+use g2g_core::runtime::{
+    ElementFactory, EncoderChoice, LaunchFactory, MuxerFactory, Registry, SourceFactory,
+};
 use g2g_core::{AudioFormat, ByteStreamEncoding, Caps, Dim, Rate, RawVideoFormat};
 
 use crate::aacparse::AacParse;
@@ -56,17 +58,23 @@ use crate::mkvdemux::MkvDemux;
 use crate::mkvmux::MkvMux;
 #[cfg(feature = "std")]
 use crate::mp4mux::Mp4Mux;
+use crate::mpeg4videoparse::Mpeg4VideoParse;
 use crate::mpegaudioparse::MpegAudioParse;
+use crate::mpegvideoparse::MpegVideoParse;
 use crate::mux::InterleaveMux;
 use crate::oggdemux::OggDemux;
 use crate::oggmux::OggMux;
 use crate::opusparse::OpusParse;
+use crate::rawaudioparse::RawAudioParse;
+use crate::rawvideoparse::RawVideoParse;
 use crate::record::{RecordSink, ReplaySrc};
+use crate::stillparse::{JpegParse, PngParse};
 use crate::tensorconvert::TensorConvert;
 use crate::textoverlay::TextOverlay;
 use crate::tsdemux::TsDemux;
 use crate::tsmux::TsMux;
 use crate::valve::Valve;
+use crate::vc1parse::Vc1Parse;
 use crate::videobalance::VideoBalance;
 use crate::videobox::VideoBox;
 use crate::videoconvert::VideoConvert;
@@ -181,6 +189,10 @@ use crate::rtspsrc::RtspSrc;
 use crate::scaletempo::ScaleTempo;
 #[cfg(all(unix, feature = "shm"))]
 use crate::shm::{ShmSink, ShmSrc};
+#[cfg(feature = "srtp")]
+use crate::srtpdec::SrtpDec;
+#[cfg(feature = "srtp")]
+use crate::srtpenc::SrtpEnc;
 #[cfg(feature = "srt")]
 use crate::srtsink::SrtSink;
 #[cfg(feature = "srt")]
@@ -230,7 +242,9 @@ use crate::{opusdec::OpusDec, opusenc::OpusEnc};
 /// unit per packet; FLAC frame-aligns via `flacparse` (M775, a bare `.flac` byte
 /// stream carries no frame lengths), and MPEG audio, AAC and AC-3 frame-align via
 /// `mpegaudioparse` / `aacparse` / `ac3parse` (M1065, M1074: one self-syncing
-/// frame per packet); other audio decodes directly.
+/// frame per packet); other audio decodes directly. JPEG and PNG frame into
+/// whole images via `jpegparse` / `pngparse` (M1087), which the still-image
+/// decoders need: they take one complete image per buffer.
 fn decode_parser_provider(input: &Caps) -> Option<&'static str> {
     match input {
         Caps::CompressedVideo {
@@ -257,8 +271,93 @@ fn decode_parser_provider(input: &Caps) -> Option<&'static str> {
             format: AudioFormat::Ac3,
             ..
         } => Some("ac3parse"),
+        Caps::CompressedVideo {
+            codec: g2g_core::VideoCodec::Mjpeg,
+            ..
+        } => Some("jpegparse"),
+        Caps::CompressedVideo {
+            codec: g2g_core::VideoCodec::Png,
+            ..
+        } => Some("pngparse"),
         _ => None,
     }
+}
+
+/// gst `imagesequencesrc`'s default output rate.
+const IMAGE_SEQUENCE_FPS: u32 = 30;
+
+/// Encoders that produce each coded stream an encoding profile can name, most
+/// preferred first (hardware before software, native before FFI), for the
+/// `encodebin` expansion. The registry takes the first candidate this build
+/// compiled in; the props pin a multi-codec encoder to that codec.
+fn encode_provider(target: &Caps) -> Option<&'static [EncoderChoice]> {
+    use g2g_core::VideoCodec as V;
+    static H264: &[EncoderChoice] = &[
+        EncoderChoice::with_props("nvenc", &[("codec", "h264")]),
+        EncoderChoice::plain("vtenc_h264"),
+        EncoderChoice::plain("mediacodecenc"),
+        EncoderChoice::plain("x264enc"),
+        EncoderChoice::plain("ffmpegenc"),
+    ];
+    static H265: &[EncoderChoice] = &[
+        EncoderChoice::with_props("nvenc", &[("codec", "hevc")]),
+        EncoderChoice::plain("vtenc_h265"),
+        EncoderChoice::plain("mediacodecench265"),
+    ];
+    static VP8: &[EncoderChoice] = &[EncoderChoice::with_props("vpxenc", &[("codec", "vp8")])];
+    static VP9: &[EncoderChoice] = &[EncoderChoice::with_props("vpxenc", &[("codec", "vp9")])];
+    static AV1: &[EncoderChoice] = &[EncoderChoice::plain("av1enc")];
+    static MJPEG: &[EncoderChoice] = &[EncoderChoice::plain("mjpegenc")];
+    static PNG: &[EncoderChoice] = &[EncoderChoice::plain("pngenc")];
+    static JPEGXS: &[EncoderChoice] = &[EncoderChoice::plain("jpegxsenc")];
+    static AAC: &[EncoderChoice] = &[EncoderChoice::plain("avenc_aac")];
+    static OPUS: &[EncoderChoice] = &[EncoderChoice::plain("opusenc")];
+    static MULAW: &[EncoderChoice] = &[EncoderChoice::plain("mulawenc")];
+    static ALAW: &[EncoderChoice] = &[EncoderChoice::plain("alawenc")];
+    static ADPCM: &[EncoderChoice] = &[EncoderChoice::plain("adpcmenc")];
+    Some(match target {
+        Caps::CompressedVideo { codec, .. } => match codec {
+            V::H264 => H264,
+            V::H265 => H265,
+            V::Vp8 => VP8,
+            V::Vp9 => VP9,
+            V::Av1 => AV1,
+            V::Mjpeg => MJPEG,
+            V::Png => PNG,
+            V::JpegXs => JPEGXS,
+            _ => return None,
+        },
+        Caps::Audio { format, .. } => match format {
+            AudioFormat::Aac => AAC,
+            AudioFormat::Opus => OPUS,
+            AudioFormat::Mulaw => MULAW,
+            AudioFormat::Alaw => ALAW,
+            AudioFormat::ImaAdpcm => ADPCM,
+            _ => return None,
+        },
+        _ => return None,
+    })
+}
+
+/// Muxers that write each container an encoding profile can name, for the
+/// `encodebin` expansion. IVF and the raw byte stream have no writer here, so a
+/// profile naming one fails loud.
+fn container_muxer_provider(container: &Caps) -> Option<&'static [&'static str]> {
+    let Caps::ByteStream { encoding } = container else {
+        return None;
+    };
+    Some(match encoding {
+        ByteStreamEncoding::MpegTs => &["mpegtsmux"],
+        ByteStreamEncoding::Matroska => &["matroskamux"],
+        ByteStreamEncoding::Mp4 | ByteStreamEncoding::IsoBmff => &["mp4mux"],
+        ByteStreamEncoding::Avi => &["avimux"],
+        ByteStreamEncoding::Ogg => &["oggmux"],
+        ByteStreamEncoding::Flv => &["flvmux"],
+        ByteStreamEncoding::Wav => &["wavenc"],
+        ByteStreamEncoding::Y4m => &["y4menc"],
+        ByteStreamEncoding::Multipart => &["multipartmux"],
+        _ => return None,
+    })
 }
 
 pub fn default_registry() -> Registry {
@@ -267,6 +366,9 @@ pub fn default_registry() -> Registry {
     // (M421), so a decoder fed un-access-unit-aligned input (e.g. one MPEG-TS PES
     // that is not one coded picture) does not mis-parse.
     reg.set_parser_provider(decode_parser_provider);
+    // M1089: `encodebin profile=` picks its encoders and muxer through these.
+    reg.set_encoder_provider(encode_provider);
+    reg.set_muxer_provider(container_muxer_provider);
     // A parsed pipeline whose producer and consumer disagree on a memory domain
     // gets the bridge spliced in (M354): `nvdec ! wgpusink` keeps the frame on
     // the GPU, `nvdec ! waylandsink` downloads it.
@@ -400,6 +502,43 @@ pub fn default_registry() -> Registry {
         },
         || Box::new(crate::multifilesrc::MultiFileSrc::new("")),
     ));
+    // Image-sequence source with a stated rate (M1088): the same file walk as
+    // `multifilesrc`, stamped on a framerate grid so a folder of stills plays
+    // as a clip. gst's default pattern and rate.
+    reg.register_source(SourceFactory::new(
+        "imagesequencesrc",
+        Caps::CompressedVideo {
+            codec: g2g_core::VideoCodec::Mjpeg,
+            width: Dim::Any,
+            height: Dim::Any,
+            framerate: Rate::Fixed(IMAGE_SEQUENCE_FPS << 16),
+        },
+        || {
+            Box::new(
+                crate::multifilesrc::MultiFileSrc::new("%05d")
+                    .with_framerate(IMAGE_SEQUENCE_FPS, 1),
+            )
+        },
+    ));
+    // Split-file source (M1088): the parts of one recording read back as one
+    // byte stream. The declared caps are a placeholder: the real type comes from
+    // the first part's extension at negotiation.
+    reg.register_source(SourceFactory::new(
+        "splitfilesrc",
+        Caps::ByteStream {
+            encoding: g2g_core::ByteStreamEncoding::MpegTs,
+        },
+        || Box::new(crate::splitfilesrc::SplitFileSrc::new("")),
+    ));
+    // `data:` URI source (M1088): the payload inside the URI, typed by sniffing
+    // it. The declared caps are a placeholder, replaced once the URI is read.
+    reg.register_source(SourceFactory::new(
+        "dataurisrc",
+        Caps::ByteStream {
+            encoding: g2g_core::ByteStreamEncoding::Raw,
+        },
+        || Box::new(crate::dataurisrc::DataUriSrc::new("")),
+    ));
     // Application push source (M233): the real caps come from its `caps`
     // property; buffers arrive from `appsrc::register_appsrc`.
     reg.register_source(SourceFactory::new(
@@ -524,6 +663,24 @@ pub fn default_registry() -> Registry {
     reg.register_launch(LaunchFactory::of::<crate::subparse::SubParse>(
         "subparse",
         || Box::new(crate::subparse::SubParse::new()),
+    ));
+    // Subtitle writers (M1096), the inverse of `subparse`: timed `Text{Utf8}` cues
+    // in, a SubRip / WebVTT document out, e.g.
+    // `subtitlesrc location=x.vtt ! subparse ! srtenc ! filesink location=x.srt`.
+    reg.register_launch(LaunchFactory::of::<crate::srtenc::SrtEnc>("srtenc", || {
+        Box::new(crate::srtenc::SrtEnc::new())
+    }));
+    reg.register_launch(LaunchFactory::of::<crate::webvttenc::WebVttEnc>(
+        "webvttenc",
+        || Box::new(crate::webvttenc::WebVttEnc::new()),
+    ));
+    // Closed-caption transport converter (M1096): the same triples re-laid from
+    // one byte layout into another, e.g. an MP4 caption track's packed `cc_data`
+    // out as the CDPs an ancillary-data packetizer sends:
+    // `... ! ccconverter in-format=cc_data out-format=cdp ! ...`.
+    reg.register_launch(LaunchFactory::of::<crate::ccconverter::CcConverter>(
+        "ccconverter",
+        || Box::new(crate::ccconverter::CcConverter::new()),
     ));
     // Closed-caption extractor (M429): mines CEA-608 / CEA-708 captions from a
     // compressed H.264 / H.265 stream's SEI into timed text cues (default CC1),
@@ -808,11 +965,49 @@ pub fn default_registry() -> Registry {
     reg.register_launch(LaunchFactory::of::<Ac3Parse>("ac3parse", || {
         Box::new(Ac3Parse::new())
     }));
+    // Still-image framers (M1087): a JPEG / PNG byte stream into whole images,
+    // which is what `mjpegdec` / `pngdec` need (they take one image per buffer).
+    reg.register_launch(LaunchFactory::of::<JpegParse>("jpegparse", || {
+        Box::new(JpegParse::new())
+    }));
+    reg.register_launch(LaunchFactory::of::<PngParse>("pngparse", || {
+        Box::new(PngParse::new())
+    }));
+    // Headerless raw framers (M1086): the file declares nothing, so the shape
+    // comes from the properties. Named explicitly, never auto-plugged: a
+    // `ByteStream{Raw}` link carries no geometry to pick them by.
+    reg.register_launch(LaunchFactory::of::<RawVideoParse>("rawvideoparse", || {
+        Box::new(RawVideoParse::new())
+    }));
+    reg.register_launch(LaunchFactory::of::<RawAudioParse>("rawaudioparse", || {
+        Box::new(RawAudioParse::new())
+    }));
     // Takes any byte stream (the tags are not part of the media type), so it
     // declares no pad templates, the way `typefind` does.
     reg.register_launch(LaunchFactory::new("id3demux", Vec::new(), || {
         Box::new(Id3Demux::new())
     }));
+    // Tag writers (M1094). The three that take any byte stream declare no pad
+    // templates, like `id3demux`; `xingmux` / `vorbistag` / `flactag` are pinned
+    // to the format whose header they rewrite.
+    reg.register_launch(LaunchFactory::new("id3v2mux", Vec::new(), || {
+        Box::new(crate::id3v2mux::Id3V2Mux::new())
+    }));
+    reg.register_launch(LaunchFactory::new("apev2mux", Vec::new(), || {
+        Box::new(crate::apev2mux::ApeV2Mux::new())
+    }));
+    reg.register_launch(LaunchFactory::of::<crate::xingmux::XingMux>(
+        "xingmux",
+        || Box::new(crate::xingmux::XingMux::new()),
+    ));
+    reg.register_launch(LaunchFactory::of::<crate::vorbistag::VorbisTag>(
+        "vorbistag",
+        || Box::new(crate::vorbistag::VorbisTag::new()),
+    ));
+    reg.register_launch(LaunchFactory::of::<crate::flactag::FlacTag>(
+        "flactag",
+        || Box::new(crate::flactag::FlacTag::new()),
+    ));
     reg.register_launch(LaunchFactory::of::<OpusParse>("opusparse", || {
         Box::new(OpusParse::new())
     }));
@@ -824,6 +1019,20 @@ pub fn default_registry() -> Registry {
     }));
     reg.register_launch(LaunchFactory::of::<Av1Parse>("av1parse", || {
         Box::new(Av1Parse::new())
+    }));
+    // Legacy video parsers (M1095): the start-code elementary streams that are
+    // not NAL streams. `vc1parse` frames advanced profile only; simple / main
+    // carry no start codes.
+    reg.register_launch(LaunchFactory::of::<MpegVideoParse>(
+        "mpegvideoparse",
+        || Box::new(MpegVideoParse::new()),
+    ));
+    reg.register_launch(LaunchFactory::of::<Mpeg4VideoParse>(
+        "mpeg4videoparse",
+        || Box::new(Mpeg4VideoParse::new()),
+    ));
+    reg.register_launch(LaunchFactory::of::<Vc1Parse>("vc1parse", || {
+        Box::new(Vc1Parse::new())
     }));
     reg.register_launch(LaunchFactory::new("identity", Vec::new(), || {
         Box::new(IdentityTransform::new())
@@ -963,6 +1172,15 @@ pub fn default_registry() -> Registry {
     // 2-input, so link exactly the video and subpicture branches.
     reg.register_muxer(MuxerFactory::new("subpictureoverlay", |_inputs| {
         Box::new(crate::subpictureoverlay::SubPictureOverlay::new())
+    }));
+    // Closed-caption fan-in (M1096): a video branch on `c.video` (input 0, whose
+    // caps the output follows) and a closed-caption branch on `c.caption` (input
+    // 1), merged by PTS so each video frame leaves carrying the caption triples
+    // that belong with it, ready for a `ccinsert` in meta-sourced mode. Always
+    // 2-input, so link exactly the video and caption branches.
+    #[cfg(feature = "metadata")]
+    reg.register_muxer(MuxerFactory::new("cccombiner", |_inputs| {
+        Box::new(crate::cccombiner::CcCombiner::new())
     }));
     // Picture-in-picture / grid video fan-in (M876): the gst `compositor` analog,
     // built by link degree like the muxers above (one pad per branch linked in,
@@ -1730,6 +1948,15 @@ fn register_aliases(reg: &mut Registry) {
     );
     // gst's name for the DVD subpicture decoder.
     reg.register_alias("dvdsubdec", &["vobsubdec"]);
+    // gst ships the ID3v2 writer twice under two names.
+    reg.register_alias("id3mux", &["id3v2mux"]);
+    // gst's older names for the raw framers, and its `unaligned*parse` bins:
+    // those exist there to re-cut a stream whose buffers do not land on frame
+    // boundaries, which these framers do for any input chunking.
+    reg.register_alias("videoparse", &["rawvideoparse"]);
+    reg.register_alias("unalignedvideoparse", &["rawvideoparse"]);
+    reg.register_alias("audioparse", &["rawaudioparse"]);
+    reg.register_alias("unalignedaudioparse", &["rawaudioparse"]);
     // `udpsink` takes the `clients` list gst splits into a second element.
     // `dynudpsink` is not an alias: its destination rides on per-buffer metadata,
     // which this sink has no equivalent of.
@@ -1861,6 +2088,7 @@ pub static FEATURE_GATED_ELEMENTS: &[FeatureGatedElement] = &{
     rows! {
         "scriptelement" => "script-rhai";
         "scriptrouter" => "script-rhai";
+        "cccombiner" => "metadata";
         "opusenc" => "opus";
         "opusdec" => "opus";
         "vorbisdec" => "vorbis";
@@ -1887,6 +2115,10 @@ pub static FEATURE_GATED_ELEMENTS: &[FeatureGatedElement] = &{
         "rtspserversrcn" => "rtsp-server";
         "srtsrc" => "srt";
         "srtsink" => "srt";
+        "srtpenc" => "srtp";
+        "srtpdec" => "srtp";
+        "dtlssrtpenc" => "dtls-srtp";
+        "dtlssrtpdec" => "dtls-srtp";
         "tcpserversrc" => "tcp";
         "tcpclientsrc" => "tcp";
         "tcpserversink" => "tcp";
@@ -2171,6 +2403,33 @@ fn register_feature_gated(reg: &mut Registry) {
     reg.register_launch(LaunchFactory::of::<UdpSink>("udpsink", || {
         Box::new(UdpSink::new("127.0.0.1:5004".parse().unwrap()))
     }));
+    // RFC 7714 packet protection (M1098): both build keyless and refuse to
+    // configure until `key=` supplies one.
+    #[cfg(feature = "srtp")]
+    reg.register_launch(LaunchFactory::of::<SrtpEnc>("srtpenc", || {
+        Box::new(SrtpEnc::default())
+    }));
+    #[cfg(feature = "srtp")]
+    reg.register_launch(LaunchFactory::of::<SrtpDec>("srtpdec", || {
+        Box::new(SrtpDec::default())
+    }));
+    // DTLS-SRTP key delivery (M1100): the pair runs a handshake over the media
+    // socket, so neither takes a `key=`. `dtlssrtpenc` is a fan-in, one pad per
+    // flow with the flow read from each pad's caps, and `dtlssrtpdec` a fan-out
+    // with RTP on port 0 and RTCP on port 1. The two find each other by
+    // `connection-id`:
+    // `rtp. ! e.  rtcp. ! e.  dtlssrtpenc name=e connection-id=x is-client=true
+    //  ! udpsink   udpsrc bytestream-format=dtls ! dtlssrtpdec name=d
+    //  connection-id=x  d. ! ...  d. ! ...`.
+    #[cfg(feature = "dtls-srtp")]
+    reg.register_muxer(MuxerFactory::new("dtlssrtpenc", |inputs| {
+        Box::new(crate::dtlssrtpenc::DtlsSrtpEnc::new(inputs))
+    }));
+    #[cfg(feature = "dtls-srtp")]
+    reg.register_demux(g2g_core::runtime::DemuxFactory::new(
+        "dtlssrtpdec",
+        |outputs| Box::new(crate::dtlssrtpdec::DtlsSrtpDec::new(outputs)),
+    ));
     // Cursor-on-Target bridge (M811): a demuxed STANAG 4609 metadata stream's ST
     // 0601 local sets become CoT events on a TAK network, e.g.
     // `tsdemux stream=klv ! cotsink host=239.2.3.1 port=6969`.

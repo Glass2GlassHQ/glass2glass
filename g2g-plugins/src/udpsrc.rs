@@ -417,7 +417,7 @@ impl SourceLoop for UdpSrc {
             PropertySpec::new(
                 "bytestream-format",
                 PropKind::Str,
-                "receive raw datagrams as this container instead of RTP: mpegts | matroska | ogg | flv | mp4 (unset = RTP)",
+                "receive raw datagrams in this format instead of depayloading RTP: mpegts | matroska | ogg | flv | mp4 | rtp | srtp | rtcp | srtcp | dtls (unset = H.264 over RTP)",
             ),
             PropertySpec::new(
                 "multicast-group",

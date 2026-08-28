@@ -489,7 +489,7 @@ fn webvtt_from_fmp4(data: &[u8], tracks: &[TrackHeader]) -> Vec<u8> {
     let Ok(samples) = crate::fmp4::parse_fragments_multi(data, tracks, 0, None) else {
         return Vec::new();
     };
-    let mut out = String::from("WEBVTT\n\n");
+    let mut out = alloc::format!("{}\n\n", crate::subparse::WEBVTT_HEADER);
     for (track_id, sample) in samples {
         let is_text = tracks
             .iter()
@@ -498,43 +498,17 @@ fn webvtt_from_fmp4(data: &[u8], tracks: &[TrackHeader]) -> Vec<u8> {
             continue;
         }
         let text = String::from_utf8_lossy(&sample.annexb);
-        let mut lines = text.lines().filter(|l| !l.trim().is_empty()).peekable();
-        if lines.peek().is_none() {
-            continue;
-        }
         let end = sample.pts_ns.saturating_add(sample.duration_ns);
-        let _ = core::fmt::Write::write_fmt(
-            &mut out,
-            format_args!(
-                "{} --> {}\n",
-                webvtt_timestamp(sample.pts_ns),
-                webvtt_timestamp(end)
-            ),
-        );
-        for line in lines {
-            out.push_str(line);
-            out.push('\n');
-        }
-        out.push('\n');
+        // WebVTT cues carry no sequence number, so the index is unused.
+        out.push_str(&crate::subparse::write_cue_block(
+            0,
+            sample.pts_ns,
+            end,
+            &text,
+            g2g_core::TextFormat::WebVtt,
+        ));
     }
     out.into_bytes()
-}
-
-/// Nanoseconds as the `HH:MM:SS.mmm` WebVTT cue time the parser reads back.
-fn webvtt_timestamp(ns: u64) -> String {
-    let ms = ns / 1_000_000;
-    let mut s = String::new();
-    let _ = core::fmt::Write::write_fmt(
-        &mut s,
-        format_args!(
-            "{:02}:{:02}:{:02}.{:03}",
-            ms / 3_600_000,
-            (ms / 60_000) % 60,
-            (ms / 1000) % 60,
-            ms % 1000
-        ),
-    );
-    s
 }
 
 /// The default HLS IV when `#EXT-X-KEY` carries none: the segment media-sequence

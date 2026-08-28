@@ -14,10 +14,10 @@ pub const TS_PACKETS_PER_DATAGRAM: usize = 7;
 /// That payload, 1316 bytes.
 pub const TS_DATAGRAM_PAYLOAD: usize = TS_PACKET_SIZE * TS_PACKETS_PER_DATAGRAM;
 
-/// Containers a raw wire sink carries. `ByteStreamEncoding` is `#[non_exhaustive]`
+/// Formats a raw wire sink carries. `ByteStreamEncoding` is `#[non_exhaustive]`
 /// from another crate, so this is the sink's own enumeration of it: a variant
 /// added later is simply not advertised until it is listed here.
-pub const CARRIED_ENCODINGS: [ByteStreamEncoding; 10] = [
+pub const CARRIED_ENCODINGS: [ByteStreamEncoding; 15] = [
     ByteStreamEncoding::MpegTs,
     ByteStreamEncoding::Matroska,
     ByteStreamEncoding::Ogg,
@@ -28,7 +28,25 @@ pub const CARRIED_ENCODINGS: [ByteStreamEncoding; 10] = [
     ByteStreamEncoding::MpegPs,
     ByteStreamEncoding::Wav,
     ByteStreamEncoding::Avi,
+    ByteStreamEncoding::Rtp,
+    ByteStreamEncoding::Srtp,
+    ByteStreamEncoding::Rtcp,
+    ByteStreamEncoding::Srtcp,
+    ByteStreamEncoding::Dtls,
 ];
+
+/// Whether each frame is one complete network packet and must remain one
+/// datagram.
+pub fn is_packet_encoding(encoding: ByteStreamEncoding) -> bool {
+    matches!(
+        encoding,
+        ByteStreamEncoding::Rtp
+            | ByteStreamEncoding::Srtp
+            | ByteStreamEncoding::Rtcp
+            | ByteStreamEncoding::Srtcp
+            | ByteStreamEncoding::Dtls
+    )
+}
 
 /// [`CARRIED_ENCODINGS`] as caps, for a pad template or an `Accepts` set.
 pub fn carried_bytestream_caps() -> Vec<Caps> {
@@ -94,5 +112,19 @@ mod tests {
     #[test]
     fn other_containers_use_the_whole_payload() {
         assert_eq!(datagram_chunk(ByteStreamEncoding::Matroska, 1400), 1400);
+    }
+
+    #[test]
+    fn packet_formats_are_carried_without_container_conversion() {
+        for encoding in [
+            ByteStreamEncoding::Rtp,
+            ByteStreamEncoding::Srtp,
+            ByteStreamEncoding::Rtcp,
+            ByteStreamEncoding::Srtcp,
+            ByteStreamEncoding::Dtls,
+        ] {
+            assert!(CARRIED_ENCODINGS.contains(&encoding));
+            assert!(is_packet_encoding(encoding));
+        }
     }
 }

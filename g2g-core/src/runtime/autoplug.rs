@@ -365,6 +365,41 @@ pub struct PadRequest {
     pub index: usize,
 }
 
+/// Names the encoders that produce a coded target caps, most preferred first
+/// (the `encodebin` expansion takes the first one this build registered).
+pub type EncoderProvider = fn(&Caps) -> Option<&'static [EncoderChoice]>;
+
+/// Names the muxers that write a container caps, most preferred first.
+pub type MuxerProvider = fn(&Caps) -> Option<&'static [&'static str]>;
+
+/// One encoder an encoding profile's stream can be produced by: the launch
+/// element and the properties that pin it to that codec (a multi-codec encoder
+/// like `vpxenc` or `nvenc` selects with `codec=`). The `encodebin` expansion
+/// takes the first choice whose element this build registered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EncoderChoice {
+    pub element: &'static str,
+    pub props: &'static [(&'static str, &'static str)],
+}
+
+impl EncoderChoice {
+    /// An encoder that needs no property to produce this codec.
+    pub const fn plain(element: &'static str) -> Self {
+        Self {
+            element,
+            props: &[],
+        }
+    }
+
+    /// An encoder whose codec is selected by properties.
+    pub const fn with_props(
+        element: &'static str,
+        props: &'static [(&'static str, &'static str)],
+    ) -> Self {
+        Self { element, props }
+    }
+}
+
 #[cfg(feature = "std")]
 mod factory {
     use super::*;
@@ -1221,6 +1256,11 @@ mod factory {
         /// `None` (the default) decodes directly, preserving the prior behaviour
         /// for registries that do not set it.
         parser_provider: Option<fn(&Caps) -> Option<&'static str>>,
+        /// Encoder candidates for a coded target caps, in preference order
+        /// (hardware before software), consulted by the `encodebin` expansion.
+        encoder_provider: Option<EncoderProvider>,
+        /// Muxer candidates for a container caps, in preference order.
+        muxer_provider: Option<MuxerProvider>,
         /// The memory-domain converter factory `parse_launch` splices with (M354,
         /// M1017). The converter elements live outside this crate, so the registry
         /// carries the factory; `None` (the default) leaves a domain mismatch to
@@ -1375,6 +1415,57 @@ mod factory {
         ) -> &mut Self {
             self.parser_provider = Some(provider);
             self
+        }
+
+        /// Set the encoder chooser consulted by the `encodebin` expansion: for a
+        /// coded target caps (a stream of an encoding profile), `provider(target)`
+        /// names the launch elements that can produce it, most preferred first, and
+        /// [`encoder_name`](Self::encoder_name) takes the first one this build
+        /// actually registered. Returns `&mut self` to chain calls.
+        pub fn set_encoder_provider(&mut self, provider: EncoderProvider) -> &mut Self {
+            self.encoder_provider = Some(provider);
+            self
+        }
+
+        /// Set the muxer chooser consulted by the `encodebin` expansion: for a
+        /// container caps, `provider(container)` names the muxers that write it,
+        /// most preferred first. Returns `&mut self` to chain calls.
+        pub fn set_muxer_provider(&mut self, provider: MuxerProvider) -> &mut Self {
+            self.muxer_provider = Some(provider);
+            self
+        }
+
+        /// The encoder that produces `target`: the first candidate this build
+        /// registered and can run, with the properties that pin it to this codec.
+        /// `None` when no provider is set, the target has no candidates, or every
+        /// candidate is compiled out (the "no encoder for this profile" a caller
+        /// reports).
+        pub fn encoder_choice(&self, target: &Caps) -> Option<&'static EncoderChoice> {
+            let candidates = self
+                .encoder_provider
+                .and_then(|provider| provider(target))?;
+            candidates
+                .iter()
+                .find(|choice| self.has_usable_launch(choice.element))
+        }
+
+        /// The launch name of the muxer that writes `container`, chosen the way
+        /// [`encoder_name`](Self::encoder_name) chooses an encoder.
+        pub fn muxer_name(&self, container: &Caps) -> Option<&'static str> {
+            let candidates = self
+                .muxer_provider
+                .and_then(|provider| provider(container))?;
+            candidates.iter().copied().find(|name| {
+                self.has_usable_launch(name) || self.muxers.iter().any(|m| m.name == *name)
+            })
+        }
+
+        /// Whether a launch factory of this name is registered and its
+        /// `with_usable` check (if any) passes here.
+        fn has_usable_launch(&self, name: &str) -> bool {
+            self.launch
+                .iter()
+                .any(|factory| factory.name == name && factory.usable())
         }
 
         /// Set the memory-domain converter factory a parsed pipeline is spliced

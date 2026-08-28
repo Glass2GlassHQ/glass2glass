@@ -78,8 +78,11 @@ cargo run -p g2g-plugins --bin g2g-launch --features std -- \
 
 Element names mostly match (with aliases: `avdec_h264`→`ffmpegdec`,
 `qtmux`→`mp4mux`, `autovideosink`→`waylandsink`/`kmssink`, `autovideosrc`→`v4l2src`/`libcamerasrc`, ...). Inline caps
-filters, `tee name=t` fan-out, muxer fan-in, and `decodebin`/`uridecodebin`/`playbin`
-all parse. When a line *doesn't* port, you get a hint, not a bare error:
+filters, `tee name=t` fan-out, muxer fan-in, `decodebin`/`uridecodebin`/`playbin`
+and the encode-side `encodebin`/`transcodebin`
+(`encodebin profile="video/x-matroska:video/x-vp8,width=1280,height=720,bitrate=2000000:audio/x-opus"`,
+which expands into those encoders plus `matroskamux`, splicing the scaler a
+pinned geometry needs) all parse. When a line *doesn't* port, you get a hint, not a bare error:
 
 ```
 $ g2g-launch videotestsrc ! theoraenc ! fakesink
@@ -363,6 +366,8 @@ OS-coupled elements live behind cargo features:
 | `CudaToWgpu` / `WgpuToCuda` (CUDA ↔ wgpu zero-copy bridge) | `cuda-wgpu` | Linux + NVIDIA + Vulkan |
 | `UdpSink` + RTP packetizer, or raw datagrams (`multiudpsink` `clients=`) | `udp-egress` | — |
 | `UdpSrc` (RTP ingest + jitter buffer + RTCP/NACK, or raw MPEG-TS datagrams) | `udp-ingress` | — |
+| `SrtpEnc` / `SrtpDec` (RFC 3711 / RFC 7714 SRTP and SRTCP, per-SSRC receive contexts) | `srtp` | — |
+| `DtlsSrtpEnc` / `DtlsSrtpDec` (DTLS-SRTP handshake over the media socket keys SRTP) | `dtls-srtp` | — |
 | `TcpServerSrc` / `TcpClientSrc` / `TcpServerSink` / `TcpClientSink` (plain TCP byte streams) | `tcp` | — |
 | `ShmSink` / `ShmSrc` (GStreamer's `shm` protocol: shared-memory frames + unix control socket) | `shm` | Linux |
 | `RtmpSrc` (RTMP publisher ingest) | `rtmp` | — |
@@ -399,7 +404,10 @@ The container parsers and muxers (`mp4src` / `mp4sink`, `tsdemux` / `mpegtsmux`,
 `matroskademux` / `matroskamux`, `flvdemux` / `flvmux`, `oggdemux` / `oggmux`,
 `avidemux` / `avimux`, `fmp4demux`, `mpegpsdemux`, `multipartdemux` / `multipartmux`,
 `y4mdec` / `y4menc`), the bitstream parsers (`h264parse`, `h265parse`, `aacparse`,
-`mpegaudioparse` + `id3demux`, `ac3parse`, `opusparse`, `vp8parse`, `vp9parse`, `av1parse`),
+`mpegaudioparse` + `id3demux`, `ac3parse`, `opusparse`, `vp8parse`, `vp9parse`, `av1parse`,
+`jpegparse`, `pngparse`) and the headerless framers (`rawvideoparse` /
+`rawaudioparse`, a `.yuv` / `.pcm` dump cut into buffers from declared
+properties),
 the G.711 / IMA ADPCM codecs (`mulawenc` / `mulawdec`, `alawenc` / `alawdec`,
 `adpcmenc` / `adpcmdec`), the software video/audio
 transforms (`videoscale` / `videorate` / `imagefreeze` / `videocrop` / `videoflip` /
@@ -415,13 +423,18 @@ transforms (`videoscale` / `videorate` / `imagefreeze` / `videocrop` / `videofli
 the bitmap-subtitle decoders (`vobsubdec`, alias `dvdsubdec`, `dvbsubdec` and
 `pgsdec`) with the `subpictureoverlay` that blends their cues onto video,
 and the EBU teletext subtitle decoder (`teletextdec`),
+the subtitle reader and writers (`subparse`, `srtenc`, `webvttenc`) and the
+closed-caption elements (`ccextract` / `ccinsert` and the `ccconverter` that
+moves captions between the cc_data, CDP, S334-1A and raw CEA-608 layouts),
 the flow-control and debug elements (`concat` / `input-selector` /
 `output-selector` / `valve` / `fakesrc` / `fdsrc` / `fdsink` / `watchdog` /
 `capssetter` / `taginject` / `rndbuffersize` / `errorignore` / `breakmydata` /
 `chopmydata` / `checksumsink` / `fakevideosink` / `fakeaudiosink` / `progressreport`), the `compositor`, the tag system, and the
 `gst-launch` text DSL (`parse_launch` / `gst-inspect`) are all in the pure
 `no_std + alloc` default build. The std build adds `clockoverlay`, `fpsdisplaysink`, the
-`multifilesink` / `multifilesrc` image-sequence pair, `vobsubsrc` (a DVD
+`multifilesink` / `multifilesrc` image-sequence pair (`imagesequencesrc` when it
+stamps a framerate), `splitfilesrc` (the parts of a cut recording read as one
+byte stream), `dataurisrc` (a `data:` URI's payload), `vobsubsrc` (a DVD
 subtitle `.idx` / `.sub` sidecar pair), `splitmuxsink`
 (segmented recording, `muxer=mp4|matroska|mpegts`), and `hlssink` (HLS
 packaging: segment files plus an `.m3u8` playlist, fed by `tsmux` or `mp4mux`).

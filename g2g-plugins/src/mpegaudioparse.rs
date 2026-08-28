@@ -37,7 +37,7 @@ use g2g_core::{
 };
 
 use crate::audioframe::{
-    locate_frame, mpa_header, Located, MpaHeader, MpaLayer, MpaVersion, MPA_HEADER_LEN,
+    is_vbr_header_frame, locate_frame, mpa_header, Located, MpaHeader, MpaLayer,
 };
 use crate::id3::{id3v2_len, parse_id3v1, parse_id3v2, ID3V1_LEN, ID3V2_HEADER_LEN};
 
@@ -48,15 +48,6 @@ const NS_PER_SECOND: u128 = 1_000_000_000;
 /// its size, but reading one means holding it whole, and a tag past this is
 /// carrying artwork rather than text.
 const MAX_ID3V2_TAG_PARSED: usize = 1 << 20;
-
-/// Offset of the VBRI header within its frame, counted from the frame's first
-/// byte (the Fraunhofer encoder writes it at a fixed offset, unlike Xing).
-const VBRI_OFFSET: usize = 36;
-
-/// The tags a VBR header frame is marked with: `Xing` on a variable-bitrate
-/// stream, `Info` on a constant-bitrate one.
-const XING_TAGS: [&[u8; 4]; 2] = [b"Xing", b"Info"];
-const VBRI_TAG: &[u8; 4] = b"VBRI";
 
 /// # Example
 ///
@@ -275,25 +266,6 @@ fn audio_format(layer: MpaLayer) -> AudioFormat {
     }
 }
 
-/// Whether this frame is the Xing / Info / VBRI header rather than audio: a
-/// Layer III frame whose payload opens, right after the side information, on
-/// one of the VBR tags. The side information's size follows from the version
-/// and channel mode.
-fn is_vbr_header_frame(data: &[u8], header: &MpaHeader) -> bool {
-    if header.layer != MpaLayer::Three {
-        return false;
-    }
-    let side_info = match (header.version, header.channels) {
-        (MpaVersion::Mpeg1, 1) => 17,
-        (MpaVersion::Mpeg1, _) => 32,
-        (_, 1) => 9,
-        (_, _) => 17,
-    };
-    let tag_at = |offset: usize| data.get(offset..offset + 4);
-    let xing = tag_at(MPA_HEADER_LEN + side_info);
-    XING_TAGS.iter().any(|tag| xing == Some(&tag[..])) || tag_at(VBRI_OFFSET) == Some(&VBRI_TAG[..])
-}
-
 impl AsyncElement for MpegAudioParse {
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
@@ -433,6 +405,7 @@ mod tests {
     use g2g_core::PushOutcome;
 
     use crate::audioframe::test_frames::{mp3_frame, MP3_128K_44100_LEN};
+    use crate::audioframe::MPA_HEADER_LEN;
 
     /// The sample rate and channel count [`mp3_frame`] codes.
     const FRAME_RATE_HZ: u64 = 44_100;

@@ -205,6 +205,18 @@ jobs:
         run: cargo test -p g2g-plugins --locked --features tcp --test m1068_tcp
       - name: test g2g-plugins (raw udp)
         run: cargo test -p g2g-plugins --locked --features udp-ingress,udp-egress --test m1079_raw_udp
+      # SRTP elements (M1098, M1099, M1101): the protected round trips under
+      # every cipher and authentication pair, the drop paths, the session
+      # controls and the properties. The gst interop legs are ignored here.
+      - name: test g2g-plugins (srtp)
+        run: cargo test -p g2g-plugins --locked --features srtp,std --test m1098_srtp --test m1099_srtp_session --test m1101_srtp_legacy --test m454_element_properties
+      - name: test g2g-plugins (srtp packet layer)
+        run: cargo test -p g2g-plugins --locked --features srtp --lib srtp
+      # DTLS-SRTP key delivery (M1100): the handshake, the RFC 5764 key split,
+      # the UDP loopback between a client and a server graph, and the launch
+      # line. The GStreamer interop legs are ignored here.
+      - name: test g2g-plugins (dtls-srtp)
+        run: cargo test -p g2g-plugins --locked --features dtls-srtp,udp-ingress,udp-egress --test m1100_dtls_srtp
       # Shared-memory IPC pair (M1081): the two loopbacks over one control
       # socket and the command codec. The gst interop legs are ignored here.
       - name: test g2g-plugins (shm)
@@ -214,6 +226,17 @@ jobs:
       # from, so the file is gated on it.
       - name: test g2g-plugins (debug elements)
         run: cargo test -p g2g-plugins --locked --features std --test m1083_debug_elements
+      # Headerless raw framers (M1086), still-image framers (M1087) and the
+      # file-less sources (M1088): all need the std registry, and the
+      # still-image legs cross-check the framed geometry against the decoders.
+      - name: test g2g-plugins (raw + still framers, file-less sources)
+        run: cargo test -p g2g-plugins --locked --features std,png,mjpeg --test m1086_raw_parse --test m1087_still_parse --test m1088_split_and_data
+      # Encoding profiles (M1089): each profile line must write byte for byte
+      # what the hand-written encoder / muxer chain writes, so the expansion
+      # cannot drift from the elements it names. `mjpeg-encode` gives it a
+      # pure-Rust encoder to choose.
+      - name: test g2g-plugins (encoding profiles)
+        run: cargo test -p g2g-plugins --locked --features std,mjpeg,mjpeg-encode,opus --test m1089_encodebin --test m1071_avi --test m1092_wav_companded
       # Opus encode properties + codec round-trip (M177 / M454 / M868): the
       # feature set above is only checked, so the opus-gated tests run here.
       - name: test g2g-plugins (opus codec + properties)

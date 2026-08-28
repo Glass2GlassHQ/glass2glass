@@ -25,7 +25,7 @@ default = []
 # explicitly), and the no_std `embassy*` RTOS backends.
 linux-full = [
     "multi-thread", "plugin-loader", "plugin-signing",
-    "rtsp", "rtsp-server", "srt", "tcp", "shm", "udp-egress", "udp-ingress", "rtmp", "webrtc",
+    "rtsp", "rtsp-server", "srt", "srtp", "dtls-srtp", "tcp", "shm", "udp-egress", "udp-ingress", "rtmp", "webrtc",
     "remote", "remote-ws", "webtransport", "moqt",
     "http-src", "hls", "dash",
     "ffmpeg", "vaapi", "v4l2",
@@ -76,6 +76,19 @@ rtsp-server = ["std", "tokio/net", "tokio/io-util", "tokio/macros"]
 # `srt` wire/handshake/reliability layer is always compiled; only the tokio UDP
 # elements need this. Implies std + tokio net.
 srt = ["std", "tokio/net", "dep:aes", "dep:ctr", "dep:hmac", "dep:pbkdf2", "dep:aes-kw", "dep:getrandom"]
+# Sans-IO SRTP/SRTCP protection: the RFC 7714 AES-GCM profiles and the RFC 3711
+# / RFC 6188 AES counter-mode and HMAC-SHA1 ones. RustCrypto supplies AES-GCM,
+# HMAC-SHA1 and secret erasure; counter mode is driven from the AES block cipher
+# `aes-gcm` already re-exports, so the two families share one AES build. The
+# protocol state itself remains no_std + alloc.
+srtp = ["dep:aes-gcm", "dep:hmac", "dep:zeroize"]
+# DTLS-SRTP key delivery (RFC 5764): the `dtlssrtpenc` / `dtlssrtpdec` pair run a
+# DTLS 1.2/1.3 handshake over the media socket and key the RFC 7714 layer from
+# the exported block. `dimpl` is the Sans-IO DTLS state machine (no socket of its
+# own), the same one str0m's pure-Rust backend drives. Implies std: the process
+# global that pairs the two elements by `connection-id`, and `Instant` for the
+# retransmission timers, are both std.
+dtls-srtp = ["srtp", "std", "dep:dimpl", "dep:base64"]
 # UDP egress sink (M47): drives the sans-IO RtpH264Packetizer (M46) and sends
 # the RTP packets over a tokio UdpSocket. The I/O half of the live-egress path;
 # implies std and adds tokio's net feature. RTCP + RTSP ANNOUNCE/RECORD owed.
@@ -858,10 +871,22 @@ pbkdf2 = { version = "0.12", optional = true, default-features = false }
 # name `md5`), distinct from the unrelated `md5` 0.7 crate elsewhere in the tree.
 md-5 = { version = "0.10", default-features = false }
 aes-kw = { version = "0.2", optional = true, features = ["alloc"] }
+# RFC 7714 AEAD_AES_128_GCM / AEAD_AES_256_GCM. The allocating AEAD API is
+# used because this crate already has alloc, while default-features off keeps
+# OS randomness out of the Sans-IO module. zeroize clears derived key material.
+aes-gcm = { version = "0.11.1", optional = true, default-features = false, features = ["aes", "alloc", "zeroize"] }
+zeroize = { version = "1.9", optional = true, default-features = false, features = ["alloc"] }
+# Sans-IO DTLS 1.2 / 1.3 for the DTLS-SRTP handshake (dtls-srtp feature). The
+# feature set matches what str0m's `rust-crypto` backend already asks of dimpl, so
+# a build with both resolves one copy. `rcgen` supplies the self-signed ECDSA
+# certificate an element generates when no `pem` is set, and pulls aws-lc-rs,
+# which dimpl then prefers as its crypto provider.
+dimpl = { version = "0.7", optional = true, default-features = false, features = ["rust-crypto", "rcgen"] }
 # OS RNG for the random stream key + salt the SRT caller generates, and the
 # WS-Security nonce the ONVIF UsernameToken digest needs.
 getrandom = { version = "0.2", optional = true }
-# Base64 for the ONVIF WS-Security nonce + PasswordDigest (onvif feature).
+# Base64 for the ONVIF WS-Security nonce + PasswordDigest (onvif feature) and the
+# PEM bodies the DTLS-SRTP certificate properties carry (dtls-srtp feature).
 base64 = { version = "0.22", optional = true }
 tokio = { version = "1", features = ["rt", "time", "sync"], optional = true }
 retina = { version = "0.4", optional = true, default-features = false }
@@ -1293,6 +1318,11 @@ required-features = ["std"]
 [[example]]
 name = "cc_author"
 required-features = ["std"]
+
+# Sans-IO H.264 RTP packetization through RFC 7714 protection and recovery.
+[[example]]
+name = "srtp_roundtrip"
+required-features = ["srtp"]
 
 # M584: live appsink egress. A scriptrouter splits one stream onto two appsink
 # pull channels, drained live while the pipeline runs (real pull() timing).

@@ -125,8 +125,8 @@ impl Default for CcInsert {
 
 impl CcInsert {
     /// Input pad indices: compressed video on 0, the text-cue stream on 1.
-    const VIDEO: usize = 0;
-    const CUE: usize = 1;
+    pub const VIDEO: usize = 0;
+    pub const CUE: usize = 1;
 
     /// A CEA-608 caption inserter (channel CC1).
     pub fn new() -> Self {

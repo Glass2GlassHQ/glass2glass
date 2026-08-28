@@ -31,9 +31,8 @@ use g2g_core::{
 
 use image_webp::{UpsamplingMethod, WebPDecodeOptions, WebPDecoder};
 
-use crate::stillimage::{
-    rgba_byte_size, ImageAssembler, StillImageOutput, MAX_ENCODED_BYTES, MAX_IMAGE_BYTES,
-};
+use crate::stillframe::{ImageAssembler, MAX_ENCODED_BYTES};
+use crate::stillimage::{rgba_byte_size, StillImageOutput, MAX_IMAGE_BYTES};
 use crate::typefind::{riff_form, RIFF_FORM_OFFSET, RIFF_HEADER_LEN, RIFF_MAGIC, WEBP_MAGIC};
 
 /// A WebP's length is its RIFF size field plus the header bytes that field
