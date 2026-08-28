@@ -13,8 +13,8 @@ Highest leverage first:
    Mac.
 2. **Egress / transports.** Real-peer FlexFEC interop when a peer
    implementation is available (GStreamer here lacks `rtpflexfecenc`).
-3. **Depth.** Pure-Rust codec paths to cut the remaining ffmpeg FFI reliance:
-   blocked as of 2026-08. No credible pure-Rust VP8 / VP9 decoder exists (a
+3. **Depth.** Pure-Rust codec paths to cut the remaining ffmpeg FFI reliance.
+   No credible pure-Rust VP8 / VP9 decoder exists (a
    libvpx-FFI `VpxDec` stays deferred: it would only duplicate the ffmpeg
    path), and the one complete pure-Rust Opus, `opus-rs` 0.1.26, fails the
    RFC 8251 vectors (re-run `tools/opus-rs-gate` to revisit on a new release).
@@ -37,30 +37,18 @@ Highest leverage first:
 
 ## Alloc-optional (heap-free) MCU core
 
-What is left needs real hardware or is a small follow-up:
-
-- **On-device `Hardware` rows (ARM).** NUCLEO-H743ZI2 (Cortex-M7 =
-  `thumbv7em`, the proofs' ISA; also the JPEG codec seam's native silicon) and
-  NXP i.MX RT, reusing the conformance evidence mechanism (also the home of
-  real-silicon timing, the on-device complement of the QEMU icount report).
-  `examples/g2g-stm32h743` is the H743 harness: the flagship audio graph
-  egressing RTP over on-chip Ethernet via `embassy-net`. It compiles for
-  `thumbv7em`; only runtime config (RCC/clock, RMII pins, RTP destination)
-  needs finalizing on the board. Silicon rows also turn the `docs/safety`
-  artifacts from emulation-backed into silicon-backed. The same rows would
-  give the `HwJpegDec` seam its real-silicon tier.
-- **ESP32-P4X board bring-up (RISC-V on-device).** The link-time no-alloc /
-  panic-free / footprint proofs exist for `riscv32imafc`; putting a pipeline
-  on the P4X-EYE board is two tiers of integration on top. Verify these
+- **On-device `Hardware` rows (ARM).** Finalize the RCC, clock, RMII pin, and
+  RTP destination settings in `examples/g2g-stm32h743`, then run the flagship
+  audio graph and `HwJpegDec` on a NUCLEO-H743ZI2. Add the same conformance and
+  timing evidence for an NXP i.MX RT board.
+- **ESP32-P4X board bring-up (RISC-V on-device).** Put a pipeline on the
+  P4X-EYE board in two tiers. Verify these
   unknowns before committing to a toolchain: whether `esp-hal` has any
   pure-Rust MIPI-CSI / ISP / HW-H.264 support (expect C-only, so the C-seam),
   and whether bare `no_std` Rust can reach the on-board ESP32-C6 WiFi stack
   without pulling in `esp-idf`/`std` (this decides Tier 2's toolchain).
-  - **Tier 1: esp-hal harness + display.** `examples/g2g-esp32p4` is drafted
-    (esp-hal `#[main]` init + SPI2 / GPIO panel wiring + a call into
-    `run_display_banded_with`), excluded from CI. Blocked on esp-hal shipping a
-    released `esp32p4` (git `main` only today, so the git dep cannot enter the
-    normal build); when released, switch the dep to the version. Then verify
+  - **Tier 1: esp-hal harness + display.** When esp-hal publishes an `esp32p4`
+    release, switch `examples/g2g-esp32p4` to it. Then verify
     the GPIO map + esp-hal API calls on the board and light the ST7789. Add an
     esp-hal `I2c` adapter to reuse `Sht3xSrc` on metal, and the on-device
     evidence row (a checksum verified on the P4 plus a real-silicon timing
@@ -83,14 +71,6 @@ What is left needs real hardware or is a small follow-up:
   (non-commercial SDP); commercial use is license-gated (confirm the
   open-source-interop clause).
 
-## Negotiation
-
-_(No open negotiation items.)_
-
-## Seek and auto-plug
-
-_(No open seek / auto-plug items.)_
-
 ## Platform: macOS
 
 - `AvfVideoSrc` / `ScreenCaptureSrc`: real capture validation on a Mac with a
@@ -99,24 +79,18 @@ _(No open seek / auto-plug items.)_
 
 ## Receive / decode
 
-- **`VulkanVideoDec` residuals.** AMD (RADV) and Intel (ANV) validation runs of
-  the `vulkanvideo` GPU tests (the element is vendor-neutral; hardware-gated,
-  `VERIFY:` markers in-tree). Optional extra output domains (multiplanar NV12 /
-  `VulkanTexture`).
+- **`VulkanVideoDec` residuals.** Run the `vulkanvideo` GPU tests on AMD RADV
+  and Intel ANV. Add multiplanar NV12 and `VulkanTexture` output domains.
 
 ## CUDA / display
 
-- `CudaKmsSink` on-tty validation: the GL-on-KMS present path is authored and
-  compiles (render half shared with the validated `CudaGlSink`), but the
-  GBM/EGL/DRM present needs a real run from a bare VT (DRM master), which the dev
-  session's compositor holds. Verify the `// VERIFY:` spots there.
+- Run `CudaKmsSink` from a bare VT with DRM master and verify the in-tree
+  `// VERIFY:` points.
 
 ## Egress / transports
 
-- **RTP over QUIC (RoQ):** blocked on the spec. draft-ietf-avtcore-rtp-over-quic
-  expired at -14 (its ALPN is forbidden until an RFC exists) and the WG missed
-  its milestone; revisit only if the draft revives. Peers if it does:
-  mengelbart/roq (Go), meetecho/imquic.
+- **RTP over QUIC (RoQ):** implement after the draft becomes an RFC with an
+  assigned ALPN. Candidate peers: mengelbart/roq (Go), meetecho/imquic.
 - **RTMP:** multiple NetStreams over one connection. Deferred by design: it needs
   a dynamic-arity multi-output `RtmpSrc` (the stream count is only known once the
   client `createStream`s at runtime), which collides with g2g's fixed-arity-from-caps
@@ -131,12 +105,16 @@ _(No open seek / auto-plug items.)_
   - Data-channel loose ends: str0m surfaces no remote-close event, so EOS rides
     an explicit marker message; a WHIP/SFU-signalled data channel vs the P2P
     `SdpChannel` seam.
+- **Remote graph carriers.** Add a native WebSocket server that pushes an
+  unsolicited stream to `WsWireSrc`, a wrapper that remotes a whole `Bin`, a
+  WebTransport datagram carrier, and a metadata-only response for remote
+  transforms whose pixels are unchanged.
 
 ## Adaptive streaming (HLS / DASH)
 
 - **HLS / CENC:** the multi-key shapes (`senc` v1/v2, multi-key `seig`
   entries) stay declined fail-loud: the 23001-7:2023 syntax is paywalled and
-  the two available sources (the 2016 MPEG proposal, GPAC) contradict each
+  the two available sources (the MPEG proposal and GPAC) contradict each
   other on the flag position and field widths, so a decode would be an
   unvalidated claim. Revisit with the published spec text or a second
   independent implementation.
@@ -150,6 +128,7 @@ _(No open seek / auto-plug items.)_
   providers.
 - Camera controls (exposure, focus, white balance) as element properties on
   AVCaptureDevice and Camera2.
+- ONVIF PTZ and event subscriptions.
 - Run the Windows (`mfdevice` / `wasapidevice`) and macOS (`avfdevice` /
   `coreaudiodevice`) device providers on a real host: enumeration against
   attached hardware, endpoint selection by id through each element's `device`
@@ -159,9 +138,8 @@ _(No open seek / auto-plug items.)_
 
 ## Sinks
 
-- Linux audio sinks (`alsasink` / `pulsesink` / `pipewiresink`): DMABUF /
-  zero-copy. `wasapisink` U8/S24/S32 acceptance is driver-decided at configure;
-  validate on a Windows host.
+- Add DMABUF zero-copy to `alsasink`, `pulsesink`, and `pipewiresink`.
+- Validate `wasapisink` U8, S24, and S32 acceptance on a Windows host.
 
 ## Containers
 
@@ -194,19 +172,14 @@ _(No open seek / auto-plug items.)_
 - **Pure-Rust / wasm decode** to drop the ffmpeg FFI: VP8 / VP9 decode and a
   pure-Rust Opus path (see the roadmap for why both are blocked).
 
-## Parsers
-
-_(No open parser items.)_
-
 ## Transforms and effects
 
 - **`textoverlay` font backend:** font-variation axes beyond `wght` on the
   shaped horizontal path (cosmic-text exposes only weight); vertical-mode
   shaping if cosmic-text ever grows writing modes.
-- **Audio breadth.** The audio sink needs the `pulse-sink` (or `alsa-sink`)
-  feature built in, else `autoaudiosink` falls back to `fakesink`. A carrier
-  for non-default channel orders (a stream whose interleave order differs from
-  the per-count `ChannelLayout` convention) once a real source needs one.
+- Add a carrier for non-default channel orders when a source needs an
+  interleave order outside the per-count `ChannelLayout` convention.
+- Add vertical cue rendering to `VelloTextOverlay`.
 - Apply an `OrientationMeta` in `kmssink` (a DRM plane rotation), on the VAAPI
   VPP path and on the D3D11 VideoProcessor path, so those sinks advertise
   `Reconfigure::AbsorbOrientation` too.
@@ -236,13 +209,10 @@ _(No open parser items.)_
   validated against reference gear (built from the RFCs, not yet
   interop-tested).
 
-## Bus and logging
-
-_(No open bus items.)_
-
 ## Properties / introspection / DSL
 
 - A GUI / tooling introspection surface beyond the text dump.
+- Text muxer fan-in in `parse_launch`.
 
 ## GStreamer element coverage
 
@@ -329,44 +299,20 @@ unless it says otherwise.
 - **Debug:** `fakevideodec`, `testsink` / `testsrcbin` / `videocodectestsink`,
   `clockselect`, `compare`, `debugspy`, `cpureport`, `navseek`, `pushfilesrc`,
   `flitetestsrc` / `festival`, `ssdobjectdetector`.
-- **Answered with a hint, not planned:** the `rtp*pay` / `rtp*depay` and
-  `rtpbin` family (payloading lives inside the transports), `gl*`, `cuda*`
-  filters, `vulkan*` beyond decode, `ladspa*`, `effectv` and
-  `geometrictransform` filters, `qml*` / `gtk*` sinks, `decklink*`,
-  `theoradec` / `dtsdec`, `mssdemux`.
+## Python-element host
 
-## Tag system
+- Add an explicit plain-text format override for files with no `.txt` extension.
+- Include hosted Python class properties in inspection output without requiring
+  `properties()` to return a `&'static` slice.
 
-_(No open tag items.)_
+## Dynamic plugin loading
 
-## Python-element host (M198+)
-
-- `bytestream-format=` names container encodings only, so a plain-text file with
-  no `.txt` extension has no escape hatch: `filesrc` types text by extension, and
-  content sniffing deliberately refuses prose because any "is this text" rule
-  reduces to "valid UTF-8" and would claim most small binaries. Widening that
-  property is a vocabulary change, not a bugfix.
-- A `gst-inspect` dump of `pyelement` / `pyaggregator` lists only the host's own
-  properties plus the marker saying the rest come from the hosted class. The real
-  set is known once the class loads, but `properties()` returns a `&'static`
-  slice, so there is nowhere to put an introspected one without changing that
-  signature across ~200 implementors.
-- The staged metadata of a call that emits several buffers goes on the first of
-  them. Repeating it would count each detection several times downstream, and
-  nothing in the Python API says which buffer a record belongs to.
-
-## Dynamic plugin loading (M201+)
-
-- Whether the distro ships `g2g-core` in a local cargo registry for offline
-  plugin builds.
+- Define how a distribution supplies `g2g-core` for offline plugin builds.
 
 ## Embedded
 
-- `EmbassyClock` HAL tick on real hardware (host verification via `block_on` is
-  in place).
-- A real HAL-backed DMA capture: wire a DMA-completion ISR into the
-  `StaticLendRing` (M260 proved the no-alloc lend path on the host via a fill
-  stand-in; the ISR / vendor HAL plug-in is hardware-gated).
+- Connect `EmbassyClock` to a HAL tick on real hardware.
+- Wire a vendor HAL DMA-completion ISR into `StaticLendRing`.
 
 ## Browser / Wasm
 
@@ -385,6 +331,12 @@ _(No open tag items.)_
   autoregressive use case ever appears (unmasked full attention is in).
 - D3D11 decoder surface import into `WgpuPreprocess` (bind the surface directly
   into the compute pass, the Windows counterpart of the dma-buf import).
+- Run the QNN and CoreML execution providers on Qualcomm and Apple hardware.
+
+## GStreamer bridge
+
+- Add `WgpuBuffer` download or dma-buf export at the GStreamer bridge output.
+- Add dma-buf zero-copy to `gstwrap`.
 
 ## Developer tooling
 
@@ -395,7 +347,3 @@ _(No open tag items.)_
 
 - calliope: AAC decode is not bit-exact across decoders, so it wants a golden /
   determinism check instead of the cross-engine differential Opus uses.
-
-## Documentation
-
-_(No open documentation items.)_

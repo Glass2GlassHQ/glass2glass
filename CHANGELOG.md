@@ -59,7 +59,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M1052: hosted Python elements stamp each emitted buffer's own `pts_ns`, and `FrameTiming::PTS_NONE` marks an unset presentation time.
 - M1051: host- and device-only elements declare `experimental`; `g2g-inspect` prints it.
 
-## 0.5.0 - 2026-08-18
+## 0.5.0
 
 Second tagged release. Everything since 0.2.0 (M563–M1050), still pre-1.0.
 Breaking: `run_graph_with_progress` / `run_graph_recorded` take a bus.
@@ -756,7 +756,7 @@ Breaking: `run_graph_with_progress` / `run_graph_recorded` take a bus.
 - M564: adds Vulkan Video AV1 multi-tile decode: av1_tile_layout parses tile_group_obu headers into the driver's tile offset/size arrays.
 - M563: adds MPEG-4 Part 2 (Visual) software decode via libavcodec, with MP4/TS demux support for mp4v/esds and elementary-stream framing.
 
-## 0.2.0 - 2026-07-06
+## 0.2.0
 
 First tagged release. Closes the 1.0 extensibility gate (`#[non_exhaustive]` vocabulary,
 M561) and publishes the stability policy (`STABILITY.md`). Contains all milestone work to
