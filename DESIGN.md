@@ -2282,6 +2282,13 @@ answers `Raw`, since every byte sequence matches it, so `filesrc` reaches it onl
 by extension or an explicit `bytestream-format=raw`, and no auto-plug candidate
 claims it.
 
+Uncompressed audio files sit next to WAVE: `ByteStreamEncoding::Aiff` is EA IFF
+85 (`FORM`/`AIFF` or `AIFC`, a `COMM` descriptor and an `SSND` sample chunk) and
+`ByteStreamEncoding::Au` is the Sun / NeXT `.snd` header. Both carry multi-byte
+PCM big-endian; `aiffparse` / `auparse` swap to the little-endian `AudioFormat`
+the rest of the graph uses, and `aiffmux` / `avmux_au` swap back. `typefind` and
+`filesrc` type them by magic or extension (`aiff` / `aif` / `aifc`, `au` / `snd`).
+
 The MPEG-TS demuxer is the first: `g2g-plugins::mpegts::TsDemuxer` is a
 pure `no_std + alloc` parser (sync 188-byte packets, PAT -> PMT -> elementary
 streams, reassemble PES per PID into access units with PTS), and the `TsDemux`

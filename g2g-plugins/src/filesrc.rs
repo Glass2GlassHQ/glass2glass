@@ -433,6 +433,8 @@ pub(crate) fn caps_from_extension(path: &std::path::Path) -> Option<Caps> {
         "ivf" => ByteStreamEncoding::Ivf,
         "mpg" | "mpeg" | "vob" => ByteStreamEncoding::MpegPs,
         "y4m" => ByteStreamEncoding::Y4m,
+        "aiff" | "aif" | "aifc" => ByteStreamEncoding::Aiff,
+        "au" | "snd" => ByteStreamEncoding::Au,
         // A headerless dump: the shape comes from `rawvideoparse` /
         // `rawaudioparse` properties, not from the file.
         "yuv" | "pcm" | "raw" => ByteStreamEncoding::Raw,
@@ -500,6 +502,8 @@ pub(crate) fn encoding_from_str(s: &str) -> Option<ByteStreamEncoding> {
         "ivf" => Some(ByteStreamEncoding::Ivf),
         "mpegps" | "ps" | "mpg" | "vob" => Some(ByteStreamEncoding::MpegPs),
         "wav" => Some(ByteStreamEncoding::Wav),
+        "aiff" | "aif" | "aifc" => Some(ByteStreamEncoding::Aiff),
+        "au" | "snd" => Some(ByteStreamEncoding::Au),
         "y4m" | "yuv4mpeg" => Some(ByteStreamEncoding::Y4m),
         "multipart" | "mpjpeg" => Some(ByteStreamEncoding::Multipart),
         "rtp" => Some(ByteStreamEncoding::Rtp),
@@ -524,6 +528,8 @@ pub(crate) fn encoding_to_str(encoding: ByteStreamEncoding) -> &'static str {
         ByteStreamEncoding::Ivf => "ivf",
         ByteStreamEncoding::MpegPs => "mpegps",
         ByteStreamEncoding::Wav => "wav",
+        ByteStreamEncoding::Aiff => "aiff",
+        ByteStreamEncoding::Au => "au",
         ByteStreamEncoding::Y4m => "y4m",
         ByteStreamEncoding::Multipart => "multipart",
         ByteStreamEncoding::Rtp => "rtp",

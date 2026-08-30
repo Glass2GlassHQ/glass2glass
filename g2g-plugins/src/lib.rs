@@ -232,6 +232,16 @@ pub mod videoscale;
 pub mod wavenc;
 pub mod wavparse;
 pub mod zebrastripe;
+// AIFF / AU PCM containers, the APEv2 tag reader, and the wire conversion and
+// mux loop they share.
+pub mod aiff;
+pub mod apedemux;
+pub mod au;
+mod audiocontainer;
+pub mod gaudieffects;
+mod pcmendian;
+#[cfg(test)]
+mod testutil;
 // MIME multipart (`multipart/x-mixed-replace`) reader + writer: the MJPEG-over-
 // HTTP transport an IP camera pushes.
 pub mod multipart;

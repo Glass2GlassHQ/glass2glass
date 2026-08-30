@@ -264,6 +264,15 @@ fn placeholder_video_caps(codec: VideoCodec, min_dim: u32) -> Caps {
     }
 }
 
+/// True when the header is an AIFF / AIFC file: `FORM` at offset 0 and `AIFF`
+/// or `AIFC` at offset 8, the EA IFF 85 counterpart of RIFF/WAVE.
+fn looks_like_aiff(header: &[u8]) -> bool {
+    header.starts_with(b"FORM")
+        && header
+            .get(8..12)
+            .is_some_and(|form| form == b"AIFF" || form == b"AIFC")
+}
+
 /// Guess the container encoding from a stream's leading bytes, or `None` if no
 /// container signature matches. Pass at least a few hundred bytes so MPEG-TS can
 /// be confirmed across packet boundaries (a lone `0x47` is too weak to trust).
@@ -288,6 +297,14 @@ pub fn sniff(header: &[u8]) -> Option<ByteStreamEncoding> {
     }
     if riff_form(header) == Some(AVI_MAGIC) {
         return Some(ByteStreamEncoding::Avi);
+    }
+    // EA IFF 85: `FORM` + size + `AIFF` / `AIFC`.
+    if looks_like_aiff(header) {
+        return Some(ByteStreamEncoding::Aiff);
+    }
+    // Sun / NeXT AU: the four-byte `.snd` magic.
+    if header.starts_with(b".snd") {
+        return Some(ByteStreamEncoding::Au);
     }
     if header.starts_with(&Y4M_MAGIC) {
         return Some(ByteStreamEncoding::Y4m);
@@ -643,6 +660,25 @@ mod tests {
     #[test]
     fn detects_ogg_by_capture_pattern() {
         assert_eq!(sniff(b"OggS\0\x02\0\0"), Some(ByteStreamEncoding::Ogg));
+    }
+
+    #[test]
+    fn detects_aiff_by_form_magic() {
+        let mut aiff = Vec::from(*b"FORM\0\0\0\0AIFF");
+        aiff.extend_from_slice(&[0u8; 8]);
+        assert_eq!(sniff(&aiff), Some(ByteStreamEncoding::Aiff));
+        let mut aifc = Vec::from(*b"FORM\0\0\0\0AIFC");
+        aifc.extend_from_slice(&[0u8; 8]);
+        assert_eq!(sniff(&aifc), Some(ByteStreamEncoding::Aiff));
+        // A FORM that is not audio is not AIFF.
+        assert_eq!(sniff(b"FORM\0\0\0\0ILBM"), None);
+    }
+
+    #[test]
+    fn detects_au_by_snd_magic() {
+        let mut au = Vec::from(*b".snd");
+        au.extend_from_slice(&[0u8; 20]);
+        assert_eq!(sniff(&au), Some(ByteStreamEncoding::Au));
     }
 
     #[test]

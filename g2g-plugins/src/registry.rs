@@ -30,7 +30,10 @@ use g2g_core::{AudioFormat, ByteStreamEncoding, Caps, Dim, Rate, RawVideoFormat}
 use crate::aacparse::AacParse;
 use crate::ac3parse::Ac3Parse;
 use crate::adpcm::{AdpcmDec, AdpcmEnc};
+use crate::aiff::{AiffMux, AiffParse};
 use crate::alpha::Alpha;
+use crate::apedemux::ApeDemux;
+use crate::au::{AuMux, AuParse};
 use crate::audioconvert::AudioConvert;
 use crate::audiomixer::AudioMixer;
 use crate::audiopanorama::AudioPanorama;
@@ -49,6 +52,7 @@ use crate::flacparse::FlacParse;
 use crate::flvdemux::FlvDemux;
 use crate::flvmux::FlvMux;
 use crate::g711::{AlawDec, AlawEnc, MulawDec, MulawEnc};
+use crate::gaudieffects::{Burn, Chromium, Dilate, Dodge, Exclusion, Solarize};
 use crate::h264parse::H264Parse;
 use crate::h265parse::H265Parse;
 use crate::id3demux::Id3Demux;
@@ -354,6 +358,8 @@ fn container_muxer_provider(container: &Caps) -> Option<&'static [&'static str]>
         ByteStreamEncoding::Ogg => &["oggmux"],
         ByteStreamEncoding::Flv => &["flvmux"],
         ByteStreamEncoding::Wav => &["wavenc"],
+        ByteStreamEncoding::Aiff => &["aiffmux"],
+        ByteStreamEncoding::Au => &["avmux_au"],
         ByteStreamEncoding::Y4m => &["y4menc"],
         ByteStreamEncoding::Multipart => &["multipartmux"],
         _ => return None,
@@ -574,6 +580,18 @@ pub fn default_registry() -> Registry {
     reg.register_launch(LaunchFactory::of::<WavParse>("wavparse", || {
         Box::new(WavParse::new())
     }));
+    reg.register_launch(LaunchFactory::of::<AiffMux>("aiffmux", || {
+        Box::new(AiffMux::new())
+    }));
+    reg.register_launch(LaunchFactory::of::<AiffParse>("aiffparse", || {
+        Box::new(AiffParse::new())
+    }));
+    reg.register_launch(LaunchFactory::of::<AuMux>("avmux_au", || {
+        Box::new(AuMux::new())
+    }));
+    reg.register_launch(LaunchFactory::of::<AuParse>("auparse", || {
+        Box::new(AuParse::new())
+    }));
     reg.register_launch(LaunchFactory::of::<Y4mEnc>("y4menc", || {
         Box::new(Y4mEnc::new())
     }));
@@ -630,6 +648,23 @@ pub fn default_registry() -> Registry {
         "zebrastripe",
         || Box::new(crate::zebrastripe::ZebraStripe::new()),
     ));
+    // GStreamer gaudieffects (M1103).
+    reg.register_launch(LaunchFactory::of::<Solarize>("solarize", || {
+        Box::new(Solarize::new())
+    }));
+    reg.register_launch(LaunchFactory::of::<Chromium>("chromium", || {
+        Box::new(Chromium::new())
+    }));
+    reg.register_launch(LaunchFactory::of::<Exclusion>("exclusion", || {
+        Box::new(Exclusion::new())
+    }));
+    reg.register_launch(LaunchFactory::of::<Dodge>("dodge", || {
+        Box::new(Dodge::new())
+    }));
+    reg.register_launch(LaunchFactory::of::<Burn>("burn", || Box::new(Burn::new())));
+    reg.register_launch(LaunchFactory::of::<Dilate>("dilate", || {
+        Box::new(Dilate::new())
+    }));
     reg.register_launch(LaunchFactory::of::<Alpha>("alpha", || {
         Box::new(Alpha::new())
     }));
@@ -995,6 +1030,9 @@ pub fn default_registry() -> Registry {
     }));
     reg.register_launch(LaunchFactory::new("apev2mux", Vec::new(), || {
         Box::new(crate::apev2mux::ApeV2Mux::new())
+    }));
+    reg.register_launch(LaunchFactory::new("apedemux", Vec::new(), || {
+        Box::new(ApeDemux::new())
     }));
     reg.register_launch(LaunchFactory::of::<crate::xingmux::XingMux>(
         "xingmux",
@@ -1544,6 +1582,13 @@ fn register_autoplug_candidates(reg: &mut Registry) {
     // `filesrc location=x.wav ! decodebin` auto-plugs this.
     reg.register(ElementFactory::of::<WavParse>("wavparse", |_| {
         Box::new(WavParse::new())
+    }));
+    // AIFF / AU (M1102): the same auto-plug for `.aiff` / `.au`.
+    reg.register(ElementFactory::of::<AiffParse>("aiffparse", |_| {
+        Box::new(AiffParse::new())
+    }));
+    reg.register(ElementFactory::of::<AuParse>("auparse", |_| {
+        Box::new(AuParse::new())
     }));
     // YUV4MPEG2 (M1076): `ByteStream{Y4m}` -> the raw frames it carries, so
     // `filesrc location=x.y4m ! decodebin` auto-plugs this.

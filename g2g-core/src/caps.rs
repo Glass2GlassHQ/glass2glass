@@ -583,6 +583,8 @@ fn bytestream_gst_media_type(e: ByteStreamEncoding) -> &'static str {
         ByteStreamEncoding::Ivf => "video/x-ivf",
         ByteStreamEncoding::MpegPs => "video/mpeg",
         ByteStreamEncoding::Wav => "audio/x-wav",
+        ByteStreamEncoding::Aiff => "audio/x-aiff",
+        ByteStreamEncoding::Au => "audio/x-au",
         ByteStreamEncoding::Avi => "video/x-msvideo",
         ByteStreamEncoding::Y4m => "application/x-yuv4mpeg",
         ByteStreamEncoding::Multipart => "multipart/x-mixed-replace",
@@ -1086,6 +1088,16 @@ pub enum ByteStreamEncoding {
     /// `data` chunk of interleaved PCM. The uncompressed file container, and the
     /// one an audio tool reads without a demuxer.
     Wav,
+    /// AIFF / AIFC (`.aiff` / `.aif` / `.aifc`): an EA IFF 85 `FORM` of type
+    /// `AIFF` or `AIFC` holding a `COMM` descriptor and an `SSND` sample chunk.
+    /// The Mac / interchange sibling of WAVE, parsed by `aiffparse` and written
+    /// by `aiffmux`. Multi-byte PCM is big-endian on the wire and swapped to the
+    /// little-endian `AudioFormat` the rest of the graph uses.
+    Aiff,
+    /// Sun / NeXT AU (`.au` / `.snd`): a 24-byte big-endian `.snd` header then
+    /// the samples. The Unix sibling of WAVE, parsed by `auparse` and written by
+    /// `avmux_au`. Multi-byte PCM is big-endian on the wire, same swap as AIFF.
+    Au,
     /// AVI (`.avi`): the RIFF sibling of WAVE, a `hdrl` list describing one
     /// stream per `strl` and a `movi` list of the interleaved data chunks, with
     /// an `idx1` at the end. Demuxed by `avidemux`, written by `avimux`.

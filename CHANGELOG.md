@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1103: `solarize`, `chromium`, `dilate`, `dodge`, `exclusion` and `burn` join the software video effects.
+- M1102: `aiffparse` / `aiffmux`, `auparse` / `avmux_au` and `apedemux` add uncompressed audio containers and APEv2 tags.
 - M1101: `srtpenc` / `srtpdec` add the RFC 3711 AES-ICM, HMAC-SHA1 and NULL profiles, DTLS-SRTP keys the counter-mode profile, and `peer-fingerprint` pins the DTLS peer.
 - M1100: `dtlssrtpenc` / `dtlssrtpdec` run a DTLS handshake over the media socket and key SRTP from it.
 - M1099: `srtpenc` / `srtpdec` add a configurable replay window, repeated transmission, MKI key selection and statistics.

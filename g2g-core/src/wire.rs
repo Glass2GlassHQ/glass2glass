@@ -326,6 +326,8 @@ fn bytestream_to_u8(e: ByteStreamEncoding) -> u8 {
         ByteStreamEncoding::Ivf => 6,
         ByteStreamEncoding::MpegPs => 7,
         ByteStreamEncoding::Wav => 8,
+        ByteStreamEncoding::Aiff => 18,
+        ByteStreamEncoding::Au => 19,
         ByteStreamEncoding::Avi => 9,
         ByteStreamEncoding::Y4m => 10,
         ByteStreamEncoding::Multipart => 11,
@@ -349,6 +351,8 @@ fn bytestream_from_u8(v: u8) -> Result<ByteStreamEncoding, WireError> {
         7 => ByteStreamEncoding::MpegPs,
         8 => ByteStreamEncoding::Wav,
         9 => ByteStreamEncoding::Avi,
+        18 => ByteStreamEncoding::Aiff,
+        19 => ByteStreamEncoding::Au,
         10 => ByteStreamEncoding::Y4m,
         11 => ByteStreamEncoding::Multipart,
         12 => ByteStreamEncoding::Raw,
@@ -1246,6 +1250,8 @@ mod tests {
             ByteStreamEncoding::Rtcp,
             ByteStreamEncoding::Srtcp,
             ByteStreamEncoding::Dtls,
+            ByteStreamEncoding::Aiff,
+            ByteStreamEncoding::Au,
         ] {
             assert_eq!(bytestream_from_u8(bytestream_to_u8(encoding)), Ok(encoding));
         }

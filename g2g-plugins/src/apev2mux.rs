@@ -45,10 +45,10 @@ use crate::id3::{parse_id3v1, ID3V1_LEN};
 use crate::tagproperty::TagsProperty;
 
 /// The 8 bytes an APEv2 header and footer both open with.
-const APE_PREAMBLE: &[u8; 8] = b"APETAGEX";
+pub(crate) const APE_PREAMBLE: &[u8; 8] = b"APETAGEX";
 /// Header / footer length: preamble, version, tag size, item count, flags, and
 /// 8 reserved bytes.
-const APE_FOOTER_LEN: usize = 32;
+pub(crate) const APE_FOOTER_LEN: usize = 32;
 /// Version field value of an APEv2 tag.
 const APE_VERSION_2: u32 = 2000;
 /// Tag flag bit 31: the tag carries a header as well as a footer.
@@ -58,14 +58,15 @@ const APE_FLAG_IS_HEADER: u32 = 1 << 29;
 /// Item flags: value type 00 (UTF-8 text), not read-only.
 const APE_ITEM_FLAGS_UTF8: u32 = 0;
 
-/// The longest APEv2 tag this replaces. Replacing one means holding it whole,
-/// and a tag past this is carrying artwork rather than text; a longer one is
-/// left where it is, behind the new tag whose footer a reader finds first.
-const MAX_REPLACED_APE_TAG: usize = 1 << 16;
+/// The longest APEv2 tag these elements hold whole: `apev2mux` to replace one,
+/// `apedemux` to read one. A tag past this is carrying artwork rather than
+/// text; the muxer leaves it where it is, behind the new tag whose footer a
+/// reader finds first.
+pub(crate) const MAX_REPLACED_APE_TAG: usize = 1 << 16;
 
 /// Bytes held back until EOS: enough for an ID3v1 block plus the largest APEv2
-/// tag this replaces.
-const TAIL_HELD: usize = MAX_REPLACED_APE_TAG + ID3V1_LEN;
+/// tag these elements handle.
+pub(crate) const TAIL_HELD: usize = MAX_REPLACED_APE_TAG + ID3V1_LEN;
 
 /// # Example
 ///
@@ -145,6 +146,92 @@ fn split_id3v1(tail: &mut Vec<u8>) -> Vec<u8> {
         return Vec::new();
     }
     tail.split_off(start)
+}
+
+/// Parse a trailing APEv2 tag: the tags it carries and how many bytes at the
+/// end of `data` they occupy (header, items, and footer). `None` when there is
+/// no tag, the footer is truncated, or a declared size would overrun.
+pub(crate) fn parse_apev2_tail(data: &[u8]) -> Option<(TagList, usize)> {
+    let footer_at = data.len().checked_sub(APE_FOOTER_LEN)?;
+    let footer = data.get(footer_at..)?;
+    if &footer[..APE_PREAMBLE.len()] != APE_PREAMBLE {
+        return None;
+    }
+    let version = u32::from_le_bytes(footer[VERSION_AT..VERSION_AT + 4].try_into().ok()?);
+    if version != APE_VERSION_2 {
+        return None;
+    }
+    let size = u32::from_le_bytes(footer[SIZE_AT..SIZE_AT + 4].try_into().ok()?) as usize;
+    let count = u32::from_le_bytes(footer[COUNT_AT..COUNT_AT + 4].try_into().ok()?);
+    let flags = u32::from_le_bytes(footer[FLAGS_AT..FLAGS_AT + 4].try_into().ok()?);
+    if !(APE_FOOTER_LEN..=MAX_REPLACED_APE_TAG).contains(&size) || count > MAX_APE_ITEMS {
+        return None;
+    }
+    let header = if flags & APE_FLAG_HAS_HEADER != 0 {
+        APE_FOOTER_LEN
+    } else {
+        0
+    };
+    let total = size.checked_add(header)?;
+    let start = data.len().checked_sub(total)?;
+    let items = data.get(start + header..footer_at)?;
+    let tags = parse_ape_items(items, count)?;
+    Some((tags, total))
+}
+
+/// Return the total length declared by an APEv2 header at the start of a
+/// stream. The returned length includes the header, items, and footer.
+pub(crate) fn apev2_start_len(data: &[u8]) -> Option<usize> {
+    let header = data.get(..APE_FOOTER_LEN)?;
+    if &header[..APE_PREAMBLE.len()] != APE_PREAMBLE {
+        return None;
+    }
+    let version = u32::from_le_bytes(header[VERSION_AT..VERSION_AT + 4].try_into().ok()?);
+    let size = u32::from_le_bytes(header[SIZE_AT..SIZE_AT + 4].try_into().ok()?) as usize;
+    let count = u32::from_le_bytes(header[COUNT_AT..COUNT_AT + 4].try_into().ok()?);
+    let flags = u32::from_le_bytes(header[FLAGS_AT..FLAGS_AT + 4].try_into().ok()?);
+    if version != APE_VERSION_2
+        || !(APE_FOOTER_LEN..=MAX_REPLACED_APE_TAG).contains(&size)
+        || count > MAX_APE_ITEMS
+        || flags & APE_FLAG_HAS_HEADER == 0
+        || flags & APE_FLAG_IS_HEADER == 0
+    {
+        return None;
+    }
+    size.checked_add(APE_FOOTER_LEN)
+}
+
+/// Field offsets within a 32-byte APEv2 header / footer, shared with the tests.
+const VERSION_AT: usize = 8;
+const SIZE_AT: usize = 12;
+const COUNT_AT: usize = 16;
+const FLAGS_AT: usize = 20;
+/// An item count past this is artwork or a corrupt footer, not a text tag.
+const MAX_APE_ITEMS: u32 = 256;
+
+fn parse_ape_items(mut items: &[u8], count: u32) -> Option<TagList> {
+    let mut tags = TagList::new();
+    for _ in 0..count {
+        if items.len() < 8 {
+            return None;
+        }
+        let value_size = u32::from_le_bytes(items[0..4].try_into().ok()?) as usize;
+        let flags = u32::from_le_bytes(items[4..8].try_into().ok()?);
+        items = items.get(8..)?;
+        let key_end = items.iter().position(|&b| b == 0)?;
+        let key = core::str::from_utf8(items.get(..key_end)?).ok()?;
+        items = items.get(key_end + 1..)?;
+        let value = items.get(..value_size)?;
+        items = items.get(value_size..)?;
+        // Bits 1-2 of the item flags are the type: 00 is UTF-8 text. Binary
+        // (artwork) and locator items are skipped, not posted as tags.
+        if flags & 0x6 != 0 {
+            continue;
+        }
+        let text = core::str::from_utf8(value).ok()?;
+        tags.push(Tag::from_key_value(key, text));
+    }
+    Some(tags)
 }
 
 /// Drop a trailing APEv2 tag from `tail`, so rewriting does not leave the old
@@ -323,12 +410,6 @@ mod tests {
     /// Payload bytes standing in for the coded stream the tag rides behind.
     const PAYLOAD: &[u8] = b"\xff\xfb\x90\x00 audio bytes";
 
-    /// Field offsets within a 32-byte APEv2 header / footer.
-    const VERSION_AT: usize = 8;
-    const SIZE_AT: usize = 12;
-    const COUNT_AT: usize = 16;
-    const FLAGS_AT: usize = 20;
-
     #[derive(Default)]
     struct RecordingSink {
         bytes: Vec<u8>,
@@ -387,9 +468,9 @@ mod tests {
         out.bytes
     }
 
-    /// No APEv2 reader exists here, so the layout is asserted field by field:
-    /// preamble, version, the size that counts items plus one 32-byte block, the
-    /// item count, and the two flag words that tell the header from the footer.
+    /// Layout asserted field by field: preamble, version, the size that counts
+    /// items plus one 32-byte block, the item count, and the two flag words that
+    /// tell the header from the footer.
     #[tokio::test]
     async fn writes_a_header_items_and_a_footer() {
         let written = run(&mut with_tags(), PAYLOAD, PAYLOAD.len()).await;

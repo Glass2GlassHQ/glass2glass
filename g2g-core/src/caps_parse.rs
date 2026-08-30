@@ -337,6 +337,8 @@ impl CapsSet {
             "video/x-ivf" => bytestream(ByteStreamEncoding::Ivf),
             "video/mpeg-ps" => bytestream(ByteStreamEncoding::MpegPs),
             "audio/x-wav" => bytestream(ByteStreamEncoding::Wav),
+            "audio/x-aiff" => bytestream(ByteStreamEncoding::Aiff),
+            "audio/x-au" => bytestream(ByteStreamEncoding::Au),
             "video/x-msvideo" => bytestream(ByteStreamEncoding::Avi),
             "application/x-yuv4mpeg" => bytestream(ByteStreamEncoding::Y4m),
             "multipart/x-mixed-replace" => bytestream(ByteStreamEncoding::Multipart),
@@ -563,6 +565,8 @@ mod tests {
             ("application/x-rtcp", ByteStreamEncoding::Rtcp),
             ("application/x-srtcp", ByteStreamEncoding::Srtcp),
             ("application/x-dtls", ByteStreamEncoding::Dtls),
+            ("audio/x-aiff", ByteStreamEncoding::Aiff),
+            ("audio/x-au", ByteStreamEncoding::Au),
         ] {
             let caps = Caps::ByteStream { encoding };
             assert_eq!(caps.to_gst_string(), media_type);

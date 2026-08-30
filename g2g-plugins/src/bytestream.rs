@@ -17,7 +17,7 @@ pub const TS_DATAGRAM_PAYLOAD: usize = TS_PACKET_SIZE * TS_PACKETS_PER_DATAGRAM;
 /// Formats a raw wire sink carries. `ByteStreamEncoding` is `#[non_exhaustive]`
 /// from another crate, so this is the sink's own enumeration of it: a variant
 /// added later is simply not advertised until it is listed here.
-pub const CARRIED_ENCODINGS: [ByteStreamEncoding; 15] = [
+pub const CARRIED_ENCODINGS: [ByteStreamEncoding; 17] = [
     ByteStreamEncoding::MpegTs,
     ByteStreamEncoding::Matroska,
     ByteStreamEncoding::Ogg,
@@ -27,6 +27,8 @@ pub const CARRIED_ENCODINGS: [ByteStreamEncoding; 15] = [
     ByteStreamEncoding::Ivf,
     ByteStreamEncoding::MpegPs,
     ByteStreamEncoding::Wav,
+    ByteStreamEncoding::Aiff,
+    ByteStreamEncoding::Au,
     ByteStreamEncoding::Avi,
     ByteStreamEncoding::Rtp,
     ByteStreamEncoding::Srtp,

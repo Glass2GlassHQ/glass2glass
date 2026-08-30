@@ -963,11 +963,11 @@
                 <p class="f-lead">Pure-Rust demux + mux on the typed <code>Caps::ByteStream</code> link, with <code>typefind</code> sniffing. KLV telemetry (STANAG 4609 / MISB ST 0601), AV1 carriage and per-program SDT service text + ISO-639 language tags ride the TS both ways; DVB EIT now/next and schedule events post as tags on demux, with each event's start time and duration.</p>
                 <div class="chip-group">
                     <span class="chip-label">Demux</span>
-                    <div class="chip-row"><span class="chip">avidemux</span><span class="chip">mp4src</span><span class="chip">fmp4demux</span><span class="chip">tsdemux</span><span class="chip">matroskademux</span><span class="chip">flvdemux</span><span class="chip">oggdemux</span><span class="chip">mpegpsdemux</span><span class="chip">klvdecode</span></div>
+                    <div class="chip-row"><span class="chip">avidemux</span><span class="chip">mp4src</span><span class="chip">fmp4demux</span><span class="chip">tsdemux</span><span class="chip">matroskademux</span><span class="chip">flvdemux</span><span class="chip">oggdemux</span><span class="chip">mpegpsdemux</span><span class="chip">aiffparse</span><span class="chip">auparse</span><span class="chip">klvdecode</span></div>
                 </div>
                 <div class="chip-group">
                     <span class="chip-label">Mux</span>
-                    <div class="chip-row"><span class="chip">mp4sink</span><span class="chip">mpegtsmux</span><span class="chip">matroskamux</span><span class="chip">flvmux</span><span class="chip">oggmux</span></div>
+                    <div class="chip-row"><span class="chip">mp4sink</span><span class="chip">mpegtsmux</span><span class="chip">matroskamux</span><span class="chip">flvmux</span><span class="chip">oggmux</span><span class="chip">aiffmux</span><span class="chip">avmux_au</span></div>
                 </div>
                 <span class="feature-tag tag-core">Core</span>
             </div>
@@ -994,7 +994,7 @@
                 </div>
                 <div class="chip-group">
                     <span class="chip-label">Video</span>
-                    <div class="chip-row"><span class="chip">videoscale</span><span class="chip">videorate</span><span class="chip">imagefreeze</span><span class="chip">videocrop</span><span class="chip">videoflip</span><span class="chip">videobalance</span><span class="chip">gaussianblur</span><span class="chip">coloreffects</span><span class="chip">alpha</span><span class="chip">deinterlace</span></div>
+                    <div class="chip-row"><span class="chip">videoscale</span><span class="chip">videorate</span><span class="chip">imagefreeze</span><span class="chip">videocrop</span><span class="chip">videoflip</span><span class="chip">videobalance</span><span class="chip">gaussianblur</span><span class="chip">coloreffects</span><span class="chip">solarize</span><span class="chip">chromium</span><span class="chip">dilate</span><span class="chip">dodge</span><span class="chip">exclusion</span><span class="chip">burn</span><span class="chip">alpha</span><span class="chip">deinterlace</span></div>
                 </div>
                 <div class="chip-group">
                     <span class="chip-label">Audio</span>

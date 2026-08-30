@@ -45,6 +45,16 @@ const PORTABLE: &[&str] = &[
     "videotestsrc ! tee name=t ! queue ! fakesink t. ! queue ! videoconvert ! fakesink",
     // An audio chain with a property.
     "audiotestsrc ! volume volume=0.5 ! audioconvert ! audioresample ! fakesink",
+    // M1102 / M1103: GStreamer names for the new containers and gaudieffects.
+    "audiotestsrc ! aiffmux ! aiffparse ! fakesink",
+    "audiotestsrc ! avmux_au ! auparse ! fakesink",
+    "audiotestsrc ! apev2mux tags=title=g2g ! apedemux ! fakesink",
+    "videotestsrc ! solarize ! fakesink",
+    "videotestsrc ! chromium ! fakesink",
+    "videotestsrc ! dilate ! fakesink",
+    "videotestsrc ! dodge ! fakesink",
+    "videotestsrc ! exclusion ! fakesink",
+    "videotestsrc ! burn ! fakesink",
     // A file source feeding a sink (parses without the file present).
     "filesrc location=/tmp/input.ts ! fakesink",
 ];
@@ -59,6 +69,17 @@ const RUNNABLE: &[(&str, u64)] = &[
     ("videotestsrc num-buffers=3 ! videoflip method=horizontal-flip ! videobalance saturation=0.5 ! fakesink", 3),
     ("videotestsrc num-buffers=3 ! tee name=t ! queue ! fakesink t. ! queue ! fakesink", 6),
     ("audiotestsrc num-buffers=3 ! audioconvert ! audioresample ! fakesink", 3),
+    ("audiotestsrc num-buffers=3 ! aiffmux ! aiffparse ! fakesink", 1),
+    ("audiotestsrc num-buffers=3 ! avmux_au ! auparse ! fakesink", 3),
+    // apev2mux holds the tail until EOS so it can rewrite the tag, so three
+    // input buffers leave as one.
+    ("audiotestsrc num-buffers=3 ! apev2mux tags=title=g2g ! apedemux ! fakesink", 1),
+    ("videotestsrc num-buffers=3 ! solarize ! fakesink", 3),
+    ("videotestsrc num-buffers=3 ! chromium ! fakesink", 3),
+    ("videotestsrc num-buffers=3 ! dilate ! fakesink", 3),
+    ("videotestsrc num-buffers=3 ! dodge ! fakesink", 3),
+    ("videotestsrc num-buffers=3 ! exclusion ! fakesink", 3),
+    ("videotestsrc num-buffers=3 ! burn ! fakesink", 3),
 ];
 
 #[test]
@@ -144,4 +165,29 @@ fn unportable_elements_map_to_guidance() {
         gst_equivalent(&reg, "videoconvert"),
         GstEquivalent::Available
     );
+}
+
+#[test]
+fn new_elements_are_available_under_their_gst_names() {
+    let reg = default_registry();
+    for name in [
+        "aiffparse",
+        "aiffmux",
+        "auparse",
+        "avmux_au",
+        "apedemux",
+        "apev2mux",
+        "solarize",
+        "chromium",
+        "dilate",
+        "dodge",
+        "exclusion",
+        "burn",
+    ] {
+        assert_eq!(
+            gst_equivalent(&reg, name),
+            GstEquivalent::Available,
+            "g2g-inspect --gst {name} must accept the GStreamer name"
+        );
+    }
 }

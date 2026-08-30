@@ -403,8 +403,8 @@ OS-coupled elements live behind cargo features:
 The container parsers and muxers (`mp4src` / `mp4sink`, `tsdemux` / `mpegtsmux`,
 `matroskademux` / `matroskamux`, `flvdemux` / `flvmux`, `oggdemux` / `oggmux`,
 `avidemux` / `avimux`, `fmp4demux`, `mpegpsdemux`, `multipartdemux` / `multipartmux`,
-`y4mdec` / `y4menc`), the bitstream parsers (`h264parse`, `h265parse`, `aacparse`,
-`mpegaudioparse` + `id3demux`, `ac3parse`, `opusparse`, `vp8parse`, `vp9parse`, `av1parse`,
+`y4mdec` / `y4menc`, `aiffparse` / `aiffmux`, `auparse` / `avmux_au`), the bitstream parsers (`h264parse`, `h265parse`, `aacparse`,
+`mpegaudioparse` + `id3demux` / `apedemux`, `ac3parse`, `opusparse`, `vp8parse`, `vp9parse`, `av1parse`,
 `jpegparse`, `pngparse`) and the headerless framers (`rawvideoparse` /
 `rawaudioparse`, a `.yuv` / `.pcm` dump cut into buffers from declared
 properties),
@@ -413,7 +413,8 @@ the G.711 / IMA ADPCM codecs (`mulawenc` / `mulawdec`, `alawenc` / `alawdec`,
 transforms (`videoscale` / `videorate` / `imagefreeze` / `videocrop` / `videoflip` /
 `videobalance` / `videobox` / `alpha` / `gamma` / `deinterlace` / `timeoverlay` /
 `aspectratiocrop` / `gaussianblur` / `videomedian` / `smooth` / `coloreffects` /
-`chromahold` / `zebrastripe` / `videodiff`,
+`chromahold` / `zebrastripe` / `videodiff` / `solarize` / `chromium` / `dilate` / `dodge` /
+`exclusion` / `burn`,
 `audioconvert` / `audioresample` / `audiorate` / `audiomixer` / `interleave` /
 `deinterleave` / `scaletempo` / `volume` / `audiopanorama` /
 `audioamplify` / `audioecho` / `audiodynamic` / `audiowsinclimit` / `audiocheblimit` /

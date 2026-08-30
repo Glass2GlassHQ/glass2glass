@@ -228,8 +228,7 @@ unless it says otherwise.
   `sbcdec`, `lc3dec`, `musepackdec`, `sfdec`, `gmedec` / `openmptdec` / `modplug`,
   `dvdlpcmdec`, `dsdconvert`, `sirendec` / `isacdec`.
 - **Audio parsers:** `amrparse`, `dcaparse`, `sbcparse`, `wavpackparse`,
-  `vorbisparse`, `theoraparse`, `auparse`, `aiffparse` / `aiffmux`, `apedemux`,
-  `icydemux` (SHOUTcast metadata in `httpsrc`).
+  `vorbisparse`, `theoraparse`, `icydemux` (SHOUTcast metadata in `httpsrc`).
 - **Audio filters:** `audiointerleave`, `audiolatency`, `rganalysis` /
   `rgvolume` / `rglimiter`, `bs2b`, `freeverb`, `pitch` / `bpmdetect`,
   `webrtcdsp` / `webrtcechoprobe`, `spanplc` / `dtmfdetect` / `tonegeneratesrc` /
@@ -266,8 +265,7 @@ unless it says otherwise.
   `debugqroverlay`, `overlaycomposition`, `faceoverlay`, `zxing`,
   `objectdetectionoverlay` (vs `analyticsoverlay`).
 - **Video transforms:** `interlace`, `ivtc` / `combdetect`, `fieldanalysis`,
-  the `gaudieffects` set (`burn`, `chromium`, `dilate`, `dodge`, `exclusion`,
-  `solarize`), `smpte` / `smptealpha`, `shapewipe`, `alphacolor`, `lcms`,
+  `smpte` / `smptealpha`, `shapewipe`, `alphacolor`, `lcms`,
   `scenechange`,
   `videoanalyse` / `simplevideomark` / `simplevideomarkdetect`,
   `videoframe-audiolevel`, `timecodestamper` / `avwait`, `audiosegmentclip` /

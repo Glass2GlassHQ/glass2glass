@@ -3873,3 +3873,66 @@ fn dtls_srtp_pair_carries_its_connection_knobs() {
         );
     }
 }
+
+/// M1103: gaudieffects knobs round-trip through `set_property` / `get_property`.
+#[test]
+fn solarize_threshold_start_end() {
+    use g2g_plugins::gaudieffects::Solarize;
+    let mut e = Solarize::new();
+    for name in ["threshold", "start", "end"] {
+        assert!(declares(e.properties(), name), "{name} must be declared");
+        assert_eq!(
+            e.get_property(name),
+            Some(declared_default(e.properties(), name)),
+            "{name} reports its declared default"
+        );
+    }
+    e.set_property("threshold", PropValue::Uint(100)).unwrap();
+    assert_eq!(e.get_property("threshold"), Some(PropValue::Uint(100)));
+    assert!(e.set_property("threshold", PropValue::Uint(257)).is_err());
+}
+
+#[test]
+fn chromium_edge_a_and_edge_b() {
+    use g2g_plugins::gaudieffects::Chromium;
+    let mut e = Chromium::new();
+    assert!(declares(e.properties(), "edge-a"));
+    assert!(declares(e.properties(), "edge-b"));
+    e.set_property("edge-a", PropValue::Uint(10)).unwrap();
+    e.set_property("edge-b", PropValue::Uint(20)).unwrap();
+    assert_eq!(e.get_property("edge-a"), Some(PropValue::Uint(10)));
+    assert_eq!(e.get_property("edge-b"), Some(PropValue::Uint(20)));
+}
+
+#[test]
+fn exclusion_factor_and_burn_adjustment() {
+    use g2g_plugins::gaudieffects::{Burn, Exclusion};
+    let mut exclusion = Exclusion::new();
+    assert!(declares(exclusion.properties(), "factor"));
+    exclusion
+        .set_property("factor", PropValue::Uint(50))
+        .unwrap();
+    assert_eq!(exclusion.get_property("factor"), Some(PropValue::Uint(50)));
+    assert!(exclusion
+        .set_property("factor", PropValue::Uint(0))
+        .is_err());
+
+    let mut burn = Burn::new();
+    assert!(declares(burn.properties(), "adjustment"));
+    burn.set_property("adjustment", PropValue::Uint(10))
+        .unwrap();
+    assert_eq!(burn.get_property("adjustment"), Some(PropValue::Uint(10)));
+}
+
+#[test]
+fn dilate_erode() {
+    use g2g_plugins::gaudieffects::Dilate;
+    let mut e = Dilate::new();
+    assert!(declares(e.properties(), "erode"));
+    assert_eq!(
+        e.get_property("erode"),
+        Some(declared_default(e.properties(), "erode"))
+    );
+    e.set_property("erode", PropValue::Bool(true)).unwrap();
+    assert_eq!(e.get_property("erode"), Some(PropValue::Bool(true)));
+}
