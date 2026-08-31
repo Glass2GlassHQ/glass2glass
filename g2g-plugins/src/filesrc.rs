@@ -448,6 +448,9 @@ pub(crate) fn caps_from_extension(path: &std::path::Path) -> Option<Caps> {
         "jpg" | "jpeg" => return Some(crate::typefind::still_image_caps(VideoCodec::Mjpeg)),
         "png" => return Some(crate::typefind::still_image_caps(VideoCodec::Png)),
         "webp" => return Some(crate::typefind::still_image_caps(VideoCodec::WebP)),
+        "pnm" | "ppm" | "pgm" | "pbm" => {
+            return Some(crate::typefind::still_image_caps(VideoCodec::Pnm))
+        }
         "h264" | "264" | "avc" => {
             return Some(crate::typefind::elementary_video_caps(VideoCodec::H264))
         }

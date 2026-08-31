@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1105: `hsvfilter`, `hsvdetector` and `roundedcorners`, plus launch aliases for the gst-plugins-rs names of existing elements.
+- M1104: `pnmenc` / `pnmdec`, `tonegeneratesrc`, `dtmfsrc` / `dtmfdetect`, `videoanalyse`, `scenechange` and `debugspy`.
 - M1103: `solarize`, `chromium`, `dilate`, `dodge`, `exclusion` and `burn` join the software video effects.
 - M1102: `aiffparse` / `aiffmux`, `auparse` / `avmux_au` and `apedemux` add uncompressed audio containers and APEv2 tags.
 - M1101: `srtpenc` / `srtpdec` add the RFC 3711 AES-ICM, HMAC-SHA1 and NULL profiles, DTLS-SRTP keys the counter-mode profile, and `peer-fingerprint` pins the DTLS peer.

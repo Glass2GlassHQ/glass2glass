@@ -55,6 +55,19 @@ const PORTABLE: &[&str] = &[
     "videotestsrc ! dodge ! fakesink",
     "videotestsrc ! exclusion ! fakesink",
     "videotestsrc ! burn ! fakesink",
+    // M1104: PNM, DTMF, analysis and debug.
+    "videotestsrc ! pnmenc ! pnmdec ! fakesink",
+    "videotestsrc ! pnmenc ascii=true ! pnmdec ! fakesink",
+    "tonegeneratesrc freq=1000 volume=0.5 ! fakesink",
+    "dtmfsrc number=5 ! dtmfdetect ! fakesink",
+    "videotestsrc ! videoanalyse ! fakesink",
+    "videotestsrc ! scenechange ! fakesink",
+    "videotestsrc ! debugspy checksum-type=md5 silent=true ! fakesink",
+    // M1105: hsv, roundedcorners, plugin-name aliases.
+    "videotestsrc ! hsvfilter hue-shift=180 ! fakesink",
+    "videotestsrc ! hsvdetector hue-ref=0 hue-var=20 ! fakesink",
+    "videotestsrc ! roundedcorners border-radius-px=8 ! fakesink",
+    "audiotestsrc ! rsaudioecho delay=50000000 ! fakesink",
     // A file source feeding a sink (parses without the file present).
     "filesrc location=/tmp/input.ts ! fakesink",
 ];
@@ -80,6 +93,13 @@ const RUNNABLE: &[(&str, u64)] = &[
     ("videotestsrc num-buffers=3 ! dodge ! fakesink", 3),
     ("videotestsrc num-buffers=3 ! exclusion ! fakesink", 3),
     ("videotestsrc num-buffers=3 ! burn ! fakesink", 3),
+    ("videotestsrc num-buffers=1 ! pnmenc ! pnmdec ! fakesink", 1),
+    ("tonegeneratesrc num-buffers=3 ! fakesink", 3),
+    ("dtmfsrc number=5 num-buffers=4 ! dtmfdetect ! fakesink", 4),
+    ("videotestsrc num-buffers=3 ! videoanalyse ! scenechange ! debugspy ! fakesink", 3),
+    ("videotestsrc num-buffers=3 ! hsvfilter hue-shift=90 ! fakesink", 3),
+    ("videotestsrc num-buffers=3 ! hsvdetector saturation-ref=1 saturation-var=1 value-ref=1 value-var=1 ! fakesink", 3),
+    ("videotestsrc num-buffers=3 ! roundedcorners border-radius-px=4 ! fakesink", 3),
 ];
 
 #[test]
@@ -183,6 +203,18 @@ fn new_elements_are_available_under_their_gst_names() {
         "dodge",
         "exclusion",
         "burn",
+        "pnmenc",
+        "pnmdec",
+        "tonegeneratesrc",
+        "dtmfsrc",
+        "dtmfdetect",
+        "videoanalyse",
+        "scenechange",
+        "debugspy",
+        "hsvfilter",
+        "hsvdetector",
+        "roundedcorners",
+        "rsaudioecho",
     ] {
         assert_eq!(
             gst_equivalent(&reg, name),

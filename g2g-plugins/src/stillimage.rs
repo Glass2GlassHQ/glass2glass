@@ -1,7 +1,7 @@
-//! Shared geometry bounds and RGBA output for the still-image codec elements
-//! (`PngDec`, `PngEnc`, `WebPDec`). The byte-stream framing they also share is
-//! in [`crate::stillframe`], which the still-image parsers use without a
-//! decoder.
+//! Shared geometry bounds and packed-RGB(A) output for the still-image codec
+//! elements (`PngDec`, `PngEnc`, `WebPDec`, `PnmDec`). The byte-stream framing
+//! they also share is in [`crate::stillframe`], which the still-image parsers
+//! use without a decoder.
 //!
 //! A PNG `IHDR` or a WebP `VP8X` header carries dimensions up to 2^31 / 2^24,
 //! and both decoder crates size their output buffer from those numbers. The
@@ -29,20 +29,26 @@ pub(crate) const MAX_IMAGE_DIMENSION: u32 = 16384;
 /// per-side bound alone would let through (16384 x 16384 RGBA is 1 GiB).
 pub(crate) const MAX_IMAGE_BYTES: usize = 256 * 1024 * 1024;
 
-/// Validate a decoded image's geometry and return its packed RGBA8 byte size.
+/// Validate a decoded image's geometry and return its packed byte size at
+/// `samples` bytes per pixel (4 for RGBA, 3 for RGB).
 ///
 /// Rejects a zero side (nothing to decode, and the WebP encoder underflows on
-/// one), a side past [`MAX_IMAGE_DIMENSION`], and a pixel count whose RGBA size
-/// passes [`MAX_IMAGE_BYTES`]. The product is folded with checked arithmetic so
-/// a header that would overflow `usize` fails here rather than wrapping to a
-/// small allocation.
-pub(crate) fn rgba_byte_size(width: u32, height: u32) -> Result<usize, G2gError> {
-    if width == 0 || height == 0 || width > MAX_IMAGE_DIMENSION || height > MAX_IMAGE_DIMENSION {
+/// one), a side past [`MAX_IMAGE_DIMENSION`], and a pixel count whose packed
+/// size passes [`MAX_IMAGE_BYTES`]. The product is folded with checked
+/// arithmetic so a header that would overflow `usize` fails here rather than
+/// wrapping to a small allocation.
+pub(crate) fn packed_byte_size(width: u32, height: u32, samples: usize) -> Result<usize, G2gError> {
+    if width == 0
+        || height == 0
+        || samples == 0
+        || width > MAX_IMAGE_DIMENSION
+        || height > MAX_IMAGE_DIMENSION
+    {
         return Err(G2gError::CapsMismatch);
     }
     let bytes = (width as usize)
         .checked_mul(height as usize)
-        .and_then(|pixels| pixels.checked_mul(4))
+        .and_then(|pixels| pixels.checked_mul(samples))
         .ok_or(G2gError::CapsMismatch)?;
     if bytes > MAX_IMAGE_BYTES {
         return Err(G2gError::CapsMismatch);
@@ -50,17 +56,25 @@ pub(crate) fn rgba_byte_size(width: u32, height: u32) -> Result<usize, G2gError>
     Ok(bytes)
 }
 
+/// Packed RGBA8 byte size of a decoded image, the common still-decoder output.
+#[cfg(any(feature = "png", feature = "webp", test))]
+pub(crate) fn rgba_byte_size(width: u32, height: u32) -> Result<usize, G2gError> {
+    packed_byte_size(width, height, 4)
+}
+
 /// The downstream half every still-image decoder shares: each decoded image is
-/// an RGBA system frame, preceded by a `CapsChanged` whenever the geometry
-/// differs from the last one emitted (a still's real size comes from the file,
-/// not from negotiation, and a sequence of files can change size mid-stream).
+/// a packed RGB(A) system frame, preceded by a `CapsChanged` whenever the
+/// geometry or format differs from the last one emitted (a still's real size
+/// comes from the file, not from negotiation, and a sequence of files can
+/// change size mid-stream).
 #[derive(Debug, Default)]
 pub(crate) struct StillImageOutput {
-    out_dims: Option<(u32, u32)>,
+    out_dims: Option<(RawVideoFormat, u32, u32)>,
     sequence: u64,
 }
 
 impl StillImageOutput {
+    #[cfg(any(feature = "png", feature = "webp"))]
     pub(crate) async fn push_rgba(
         &mut self,
         out: &mut dyn OutputSink,
@@ -70,16 +84,37 @@ impl StillImageOutput {
         framerate: &Rate,
         timing: FrameTiming,
     ) -> Result<(), G2gError> {
-        if self.out_dims != Some((width, height)) {
+        self.push(
+            out,
+            pixels,
+            RawVideoFormat::Rgba8,
+            (width, height),
+            framerate,
+            timing,
+        )
+        .await
+    }
+
+    pub(crate) async fn push(
+        &mut self,
+        out: &mut dyn OutputSink,
+        pixels: Vec<u8>,
+        format: RawVideoFormat,
+        dims: (u32, u32),
+        framerate: &Rate,
+        timing: FrameTiming,
+    ) -> Result<(), G2gError> {
+        let (width, height) = dims;
+        if self.out_dims != Some((format, width, height)) {
             out.push(PipelinePacket::CapsChanged(Caps::RawVideo {
-                format: RawVideoFormat::Rgba8,
+                format,
                 width: Dim::Fixed(width),
                 height: Dim::Fixed(height),
                 framerate: framerate.clone(),
                 interlace: g2g_core::Interlace::Any,
             }))
             .await?;
-            self.out_dims = Some((width, height));
+            self.out_dims = Some((format, width, height));
         }
         let frame = Frame::new(
             MemoryDomain::System(SystemSlice::from_boxed(pixels.into_boxed_slice())),

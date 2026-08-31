@@ -225,6 +225,14 @@ fn sniff_still_image(header: &[u8]) -> Option<VideoCodec> {
     if riff_form(header) == Some(WEBP_MAGIC) {
         return Some(VideoCodec::WebP);
     }
+    // Netpbm: `P1`..`P6` then whitespace or a comment, so `PNG` / `PS` do not match.
+    if header.len() >= 3
+        && header[0] == b'P'
+        && (b'1'..=b'6').contains(&header[1])
+        && (header[2] == b'#' || matches!(header[2], b' ' | b'\t' | b'\r' | b'\n'))
+    {
+        return Some(VideoCodec::Pnm);
+    }
     None
 }
 
@@ -747,6 +755,8 @@ mod tests {
             None
         );
         assert_eq!(sniff_still_image(&[]), None);
+        assert_eq!(sniff_still_image(b"P6\n2 1\n255\n"), Some(VideoCodec::Pnm));
+        assert_eq!(sniff_still_image(b"PNG"), None);
     }
 
     #[test]

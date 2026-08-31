@@ -122,6 +122,7 @@ code_table! {
         10 => VideoCodec::Vp6 { alpha: false },
         11 => VideoCodec::Vp6 { alpha: true },
         12 => VideoCodec::JpegXs,
+        13 => VideoCodec::Pnm,
     }
 }
 

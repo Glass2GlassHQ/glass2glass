@@ -3008,6 +3008,18 @@ is the inverse: RGBA or RGB in, one lossless PNG per frame, `compression-level` 
 zlib's 0..=9. There is no WebP encoder: the only pure-Rust one does VP8L lossless
 alone, with none of `webpenc`'s quality / speed / preset knobs.
 
+`hsvfilter`, `hsvdetector` and `roundedcorners` work on packed RGBA / BGRA.
+`hsvfilter` applies `hue-shift` / `saturation-mul` / `saturation-off` /
+`value-mul` / `value-off` in HSV. `hsvdetector` writes alpha 255 inside the
+configured HSV box, 0 outside. `roundedcorners border-radius-px=` punches the corners transparent.
+
+PNM (`pnmenc` / `pnmdec`, `VideoCodec::Pnm`) is the same still-image shape with
+no extra crate: a Netpbm PBM / PGM / PPM (`P1`..`P6`). `pnmenc ascii=` writes
+ASCII P3 instead of binary P6. Decode always emits packed
+RGB8 (PGM / PBM expand to grey / black-white) because there is no GRAY8 raw
+format. `.pnm` / `.ppm` / `.pgm` / `.pbm` type by extension and `P1`..`P6` by
+magic, so `filesrc location=x.ppm ! decodebin` plugs `pnmdec`.
+
 ### 4.18 Subtitle Overlay (`textoverlay`)
 
 `textoverlay::TextOverlay` is the `textoverlay` / `subtitleoverlay`

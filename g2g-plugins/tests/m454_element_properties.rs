@@ -3936,3 +3936,148 @@ fn dilate_erode() {
     e.set_property("erode", PropValue::Bool(true)).unwrap();
     assert_eq!(e.get_property("erode"), Some(PropValue::Bool(true)));
 }
+
+/// M1104: knobs round-trip through `set_property` / `get_property`.
+#[test]
+fn pnmenc_ascii() {
+    use g2g_plugins::pnm::PnmEnc;
+    let mut e = PnmEnc::new();
+    assert!(declares(e.properties(), "ascii"));
+    assert_eq!(
+        e.get_property("ascii"),
+        Some(declared_default(e.properties(), "ascii"))
+    );
+    e.set_property("ascii", PropValue::Bool(true)).unwrap();
+    assert_eq!(e.get_property("ascii"), Some(PropValue::Bool(true)));
+}
+
+#[test]
+fn tonegeneratesrc_freq_volume_samplesperbuffer() {
+    use g2g_core::runtime::SourceLoop;
+    use g2g_plugins::tonegeneratesrc::ToneGenerateSrc;
+    let mut e = ToneGenerateSrc::new();
+    assert!(declares(e.properties(), "freq"));
+    assert!(declares(e.properties(), "volume"));
+    assert!(declares(e.properties(), "samplesperbuffer"));
+    assert_eq!(
+        e.get_property("freq"),
+        Some(declared_default(e.properties(), "freq"))
+    );
+    e.set_property("freq", PropValue::Double(1000.0)).unwrap();
+    assert_eq!(e.get_property("freq"), Some(PropValue::Double(1000.0)));
+    e.set_property("volume", PropValue::Double(0.5)).unwrap();
+    assert_eq!(e.get_property("volume"), Some(PropValue::Double(0.5)));
+    e.set_property("samplesperbuffer", PropValue::Int(256))
+        .unwrap();
+    assert_eq!(
+        e.get_property("samplesperbuffer"),
+        Some(PropValue::Int(256))
+    );
+    assert!(e.set_property("volume", PropValue::Double(1.5)).is_err());
+}
+
+#[test]
+fn dtmfsrc_interval_number_volume() {
+    use g2g_core::runtime::SourceLoop;
+    use g2g_plugins::dtmf::DtmfSrc;
+    let mut e = DtmfSrc::new();
+    for name in [
+        "interval",
+        "min-pulse-duration",
+        "min-inter-digit-interval",
+        "number",
+        "volume",
+    ] {
+        assert!(declares(e.properties(), name), "{name} must be declared");
+        assert_eq!(
+            e.get_property(name),
+            Some(declared_default(e.properties(), name)),
+            "{name} reports its declared default"
+        );
+    }
+    e.set_property("interval", PropValue::Uint(40)).unwrap();
+    assert_eq!(e.get_property("interval"), Some(PropValue::Uint(40)));
+    e.set_property("number", PropValue::Uint(11)).unwrap();
+    assert_eq!(e.get_property("number"), Some(PropValue::Uint(11)));
+    assert!(e.set_property("number", PropValue::Uint(17)).is_err());
+    e.set_property("volume", PropValue::Uint(8)).unwrap();
+    assert_eq!(e.get_property("volume"), Some(PropValue::Uint(8)));
+}
+
+#[test]
+fn debugspy_checksum_type_and_silent() {
+    use g2g_plugins::debugspy::DebugSpy;
+    let mut e = DebugSpy::new();
+    assert!(declares(e.properties(), "checksum-type"));
+    assert!(declares(e.properties(), "silent"));
+    assert_eq!(
+        e.get_property("checksum-type"),
+        Some(declared_default(e.properties(), "checksum-type"))
+    );
+    e.set_property("checksum-type", PropValue::Str("md5".into()))
+        .unwrap();
+    assert_eq!(
+        e.get_property("checksum-type"),
+        Some(PropValue::Str("md5".into()))
+    );
+    assert!(e
+        .set_property("checksum-type", PropValue::Str("crc32".into()))
+        .is_err());
+    e.set_property("silent", PropValue::Bool(true)).unwrap();
+    assert_eq!(e.get_property("silent"), Some(PropValue::Bool(true)));
+}
+
+#[test]
+fn videoanalyse_message() {
+    use g2g_plugins::videoanalyse::VideoAnalyse;
+    let mut e = VideoAnalyse::new();
+    assert!(declares(e.properties(), "message"));
+    assert_eq!(
+        e.get_property("message"),
+        Some(declared_default(e.properties(), "message"))
+    );
+    e.set_property("message", PropValue::Bool(false)).unwrap();
+    assert_eq!(e.get_property("message"), Some(PropValue::Bool(false)));
+}
+
+/// M1105: hsv / roundedcorners knobs.
+#[test]
+fn hsvfilter_hue_shift() {
+    use g2g_plugins::hsv::HsvFilter;
+    let mut e = HsvFilter::new();
+    assert!(declares(e.properties(), "hue-shift"));
+    assert_eq!(
+        e.get_property("hue-shift"),
+        Some(declared_default(e.properties(), "hue-shift"))
+    );
+    e.set_property("hue-shift", PropValue::Double(180.0))
+        .unwrap();
+    assert_eq!(e.get_property("hue-shift"), Some(PropValue::Double(180.0)));
+}
+
+#[test]
+fn hsvdetector_hue_var_range() {
+    use g2g_plugins::hsv::HsvDetector;
+    let mut e = HsvDetector::new();
+    assert!(declares(e.properties(), "hue-var"));
+    e.set_property("hue-var", PropValue::Double(45.0)).unwrap();
+    assert_eq!(e.get_property("hue-var"), Some(PropValue::Double(45.0)));
+    assert!(e.set_property("hue-var", PropValue::Double(181.0)).is_err());
+}
+
+#[test]
+fn roundedcorners_border_radius_px() {
+    use g2g_plugins::roundedcorners::RoundedCorners;
+    let mut e = RoundedCorners::new();
+    assert!(declares(e.properties(), "border-radius-px"));
+    assert_eq!(
+        e.get_property("border-radius-px"),
+        Some(declared_default(e.properties(), "border-radius-px"))
+    );
+    e.set_property("border-radius-px", PropValue::Uint(16))
+        .unwrap();
+    assert_eq!(
+        e.get_property("border-radius-px"),
+        Some(PropValue::Uint(16))
+    );
+}

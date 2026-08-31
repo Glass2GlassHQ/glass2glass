@@ -13,6 +13,22 @@ pub(crate) fn rgba_rb_offsets(format: RawVideoFormat) -> (usize, usize) {
     }
 }
 
+/// Luma of pixel `(x, y)` in a tightly packed `w x h` frame of `format`.
+/// Packed RGBA / BGRA use BT.709; I420 reads the Y plane. Other formats are
+/// not admitted by the callers.
+pub(crate) fn luma_at(format: RawVideoFormat, w: u32, src: &[u8], x: u32, y: u32) -> u8 {
+    let (w, x, y) = (w as usize, x as usize, y as usize);
+    match format {
+        RawVideoFormat::I420 => src[y * w + x],
+        RawVideoFormat::Rgba8 | RawVideoFormat::Bgra8 => {
+            let i = (y * w + x) * 4;
+            let (r_idx, b_idx) = rgba_rb_offsets(format);
+            bt709_luma(src[i + r_idx], src[i + 1], src[i + b_idx])
+        }
+        _ => unreachable!("luma_at: I420 / packed RGBA only"),
+    }
+}
+
 /// BT.709 luma of an 8-bit RGB triple: 0.2126 R + 0.7152 G + 0.0722 B in 16-bit
 /// fixed point. The grey a packed-RGBA element writes when it drops colour, and
 /// the brightness it tests a pixel by.

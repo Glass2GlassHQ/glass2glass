@@ -538,6 +538,9 @@ fn codec_gst_media_type(c: VideoCodec) -> &'static str {
         // by `wmvversion=3, format=WVC1`; the fields do not survive here, so the
         // codec split stays in the caps.
         VideoCodec::Vc1 => "video/x-wmv",
+        // The four Netpbm media types collapse onto one codec; the PBM / PGM /
+        // PPM split lives in the file magic, not in caps.
+        VideoCodec::Pnm => "image/x-portable-anymap",
     }
 }
 
@@ -1041,6 +1044,10 @@ pub enum VideoCodec {
     /// `Vc1Parse` frames; simple and main profile carry no start codes and take
     /// their sequence layer from the container's codec-configuration block.
     Vc1,
+    /// Netpbm still image (PBM / PGM / PPM, magic `P1`..`P6`): one frame per
+    /// buffer, decoded by `PnmDec` and produced by `PnmEnc`. Media type
+    /// `image/x-portable-anymap` and the bitmap / graymap / pixmap variants.
+    Pnm,
 }
 
 /// Wire format of a [`Caps::ByteStream`] link, so a demuxer accepts only the

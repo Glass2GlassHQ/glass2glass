@@ -231,8 +231,7 @@ unless it says otherwise.
   `vorbisparse`, `theoraparse`, `icydemux` (SHOUTcast metadata in `httpsrc`).
 - **Audio filters:** `audiointerleave`, `audiolatency`, `rganalysis` /
   `rgvolume` / `rglimiter`, `bs2b`, `freeverb`, `pitch` / `bpmdetect`,
-  `webrtcdsp` / `webrtcechoprobe`, `spanplc` / `dtmfdetect` / `tonegeneratesrc` /
-  `dtmfsrc`, `accurip`, `chromaprint`.
+  `webrtcdsp` / `webrtcechoprobe`, `spanplc`, `accurip`, `chromaprint`.
 - **Audio visualisers:** `wavescope`, `spacescope`, `spectrascope`, `synaescope`,
   `goom` / `goom2k1`.
 - **Video parsers:** `h263parse`, `h266parse`, `diracparse`, `jpeg2000parse`,
@@ -240,7 +239,7 @@ unless it says otherwise.
   (`h2642json` ...).
 - **Video codecs:** `openh264enc` / `openh264dec`, `svtav1enc`, `mpeg2enc`,
   `theoraparse`-side Theora decode, `openjpegenc` / `openjpegdec`, `openexrdec`,
-  `pnmenc` / `pnmdec`, `gdkpixbufdec`, `rsvgdec`, `flxdec`, `vmncdec`,
+  `gdkpixbufdec`, `rsvgdec`, `flxdec`, `vmncdec`,
   `bayer2rgb` / `rgb2bayer`, `codecalpha` (`alphacombine`, `codecalphademux`,
   `vp8alphadecodebin`), `jp2kdecimator`.
 - **Containers:** `mxfdemux` / `mxfmux`, `asfdemux` / `asfmux` / `asfparse`,
@@ -266,8 +265,7 @@ unless it says otherwise.
   `objectdetectionoverlay` (vs `analyticsoverlay`).
 - **Video transforms:** `interlace`, `ivtc` / `combdetect`, `fieldanalysis`,
   `smpte` / `smptealpha`, `shapewipe`, `alphacolor`, `lcms`,
-  `scenechange`,
-  `videoanalyse` / `simplevideomark` / `simplevideomarkdetect`,
+  `simplevideomark` / `simplevideomarkdetect`,
   `videoframe-audiolevel`, `timecodestamper` / `avwait`, `audiosegmentclip` /
   `videosegmentclip`, `navigationtest`.
 - **Flow / bins:** `uritranscodebin` (a URI in, an encoding profile out),
@@ -295,8 +293,13 @@ unless it says otherwise.
   `vaapisink` / `vaapipostproc` / `vapostproc` / `vacompositor` /
   `vadeinterlace` / `vaapidecodebin`.
 - **Debug:** `fakevideodec`, `testsink` / `testsrcbin` / `videocodectestsink`,
-  `clockselect`, `compare`, `debugspy`, `cpureport`, `navseek`, `pushfilesrc`,
+  `clockselect`, `compare`, `cpureport`, `navseek`, `pushfilesrc`,
   `flitetestsrc` / `festival`, `ssdobjectdetector`.
+- **gst-plugins-rs:** `gifenc` / `gifdec`, `gopbuffer`,
+  `togglerecord`, `livesync`, `fallbackswitch` / `fallbacksrc`, `textwrap`,
+  `jsongstenc` / `jsongstparse`, `gstregex`, `zlibcompress` / `zlibdecompress`,
+  `colordetect`, `videocompare`, `uriplaylistbin`, `ndisrc` / `ndisink`,
+  `intersink` / `intersrc`, `originalbuffersave` / `originalbufferrestore`.
 ## Python-element host
 
 - Add an explicit plain-text format override for files with no `.txt` extension.

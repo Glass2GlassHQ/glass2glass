@@ -31,9 +31,9 @@ use g2g_core::{
 };
 
 /// The `hash` choices, gst's `GstChecksumSinkHash` nicks.
-const HASH_VALUES: &str = "md5 | sha1 | sha256 | sha512";
+pub(crate) const HASH_VALUES: &str = "md5 | sha1 | sha256 | sha512";
 /// gst `checksumsink`'s `hash` default.
-const DEFAULT_HASH: &str = "sha1";
+pub(crate) const DEFAULT_HASH: &str = "sha1";
 
 const NS_PER_SECOND: u64 = 1_000_000_000;
 const SECONDS_PER_MINUTE: u64 = 60;

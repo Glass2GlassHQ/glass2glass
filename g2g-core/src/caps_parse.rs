@@ -289,6 +289,10 @@ impl CapsSet {
             "image/jpeg" => compressed_set(VideoCodec::Mjpeg),
             "image/png" => compressed_set(VideoCodec::Png),
             "image/webp" => compressed_set(VideoCodec::WebP),
+            "image/x-portable-anymap"
+            | "image/x-portable-bitmap"
+            | "image/x-portable-graymap"
+            | "image/x-portable-pixmap" => compressed_set(VideoCodec::Pnm),
             // gst tells VC-1 from the older WMV versions with `wmvversion` /
             // `format`, fields this caps string carries no room for.
             "video/x-wmv" => compressed_set(VideoCodec::Vc1),

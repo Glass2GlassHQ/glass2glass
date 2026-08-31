@@ -120,7 +120,12 @@ pub(crate) fn same_caps_constraint<F: PixelFilter>() -> CapsConstraint<'static> 
 
 /// Sink and source templates covering the filter's formats at any geometry.
 pub(crate) fn pad_templates<F: PixelFilter>() -> Vec<PadTemplate> {
-    let set = CapsSet::from_alternatives(F::FORMATS.iter().copied().map(any_geometry).collect());
+    pad_templates_for(F::FORMATS)
+}
+
+/// Sink and source templates for a passthrough analyser that keeps `formats`.
+pub(crate) fn pad_templates_for(formats: &[RawVideoFormat]) -> Vec<PadTemplate> {
+    let set = CapsSet::from_alternatives(formats.iter().copied().map(any_geometry).collect());
     Vec::from([PadTemplate::sink(set.clone()), PadTemplate::source(set)])
 }
 

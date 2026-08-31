@@ -43,7 +43,9 @@ use crate::audiotestsrc::AudioTestSrc;
 use crate::av1parse::Av1Parse;
 use crate::capsfilter::CapsFilter;
 use crate::compositor::{Compositor, CompositorPad};
+use crate::debugspy::DebugSpy;
 use crate::downloadbuffer::DownloadBuffer;
+use crate::dtmf::{DtmfDetect, DtmfSrc};
 use crate::fakesink::FakeSink;
 use crate::fakesrc::FakeSrc;
 use crate::filesink::FileSink;
@@ -55,6 +57,7 @@ use crate::g711::{AlawDec, AlawEnc, MulawDec, MulawEnc};
 use crate::gaudieffects::{Burn, Chromium, Dilate, Dodge, Exclusion, Solarize};
 use crate::h264parse::H264Parse;
 use crate::h265parse::H265Parse;
+use crate::hsv::{HsvDetector, HsvFilter};
 use crate::id3demux::Id3Demux;
 use crate::identity::IdentityTransform;
 use crate::ivfdemux::IvfDemux;
@@ -69,16 +72,21 @@ use crate::mux::InterleaveMux;
 use crate::oggdemux::OggDemux;
 use crate::oggmux::OggMux;
 use crate::opusparse::OpusParse;
+use crate::pnm::{PnmDec, PnmEnc};
 use crate::rawaudioparse::RawAudioParse;
 use crate::rawvideoparse::RawVideoParse;
 use crate::record::{RecordSink, ReplaySrc};
+use crate::roundedcorners::RoundedCorners;
+use crate::scenechange::SceneChange;
 use crate::stillparse::{JpegParse, PngParse};
 use crate::tensorconvert::TensorConvert;
 use crate::textoverlay::TextOverlay;
+use crate::tonegeneratesrc::ToneGenerateSrc;
 use crate::tsdemux::TsDemux;
 use crate::tsmux::TsMux;
 use crate::valve::Valve;
 use crate::vc1parse::Vc1Parse;
+use crate::videoanalyse::VideoAnalyse;
 use crate::videobalance::VideoBalance;
 use crate::videobox::VideoBox;
 use crate::videoconvert::VideoConvert;
@@ -313,6 +321,7 @@ fn encode_provider(target: &Caps) -> Option<&'static [EncoderChoice]> {
     static AV1: &[EncoderChoice] = &[EncoderChoice::plain("av1enc")];
     static MJPEG: &[EncoderChoice] = &[EncoderChoice::plain("mjpegenc")];
     static PNG: &[EncoderChoice] = &[EncoderChoice::plain("pngenc")];
+    static PNM: &[EncoderChoice] = &[EncoderChoice::plain("pnmenc")];
     static JPEGXS: &[EncoderChoice] = &[EncoderChoice::plain("jpegxsenc")];
     static AAC: &[EncoderChoice] = &[EncoderChoice::plain("avenc_aac")];
     static OPUS: &[EncoderChoice] = &[EncoderChoice::plain("opusenc")];
@@ -328,6 +337,7 @@ fn encode_provider(target: &Caps) -> Option<&'static [EncoderChoice]> {
             V::Av1 => AV1,
             V::Mjpeg => MJPEG,
             V::Png => PNG,
+            V::Pnm => PNM,
             V::JpegXs => JPEGXS,
             _ => return None,
         },
@@ -406,6 +416,26 @@ pub fn default_registry() -> Registry {
         // num-buffers defaults to forever (the property's documented `-1`),
         // matching gst audiotestsrc; a launch line bounds it with `num-buffers=N`.
         || Box::new(AudioTestSrc::new(48_000, 2, 440, u64::MAX)),
+    ));
+    // `tonegeneratesrc`: 44100 Hz stereo sine at `freq` / `volume`.
+    reg.register_source(SourceFactory::new(
+        "tonegeneratesrc",
+        Caps::Audio {
+            format: AudioFormat::PcmS16Le,
+            channels: 2,
+            sample_rate: 44_100,
+        },
+        || Box::new(ToneGenerateSrc::new()),
+    ));
+    // `dtmfsrc`: 8 kHz mono DTMF, packetized at `interval` ms.
+    reg.register_source(SourceFactory::new(
+        "dtmfsrc",
+        Caps::Audio {
+            format: AudioFormat::PcmS16Le,
+            channels: 1,
+            sample_rate: 8_000,
+        },
+        || Box::new(DtmfSrc::new()),
     ));
     // Android AAudio mic capture (M307); the device may open with different
     // actuals, reported as the produced caps. `aaudiosrc` is the gst analog.
@@ -648,6 +678,22 @@ pub fn default_registry() -> Registry {
         "zebrastripe",
         || Box::new(crate::zebrastripe::ZebraStripe::new()),
     ));
+    reg.register_launch(LaunchFactory::of::<VideoAnalyse>("videoanalyse", || {
+        Box::new(VideoAnalyse::new())
+    }));
+    reg.register_launch(LaunchFactory::of::<SceneChange>("scenechange", || {
+        Box::new(SceneChange::new())
+    }));
+    // `dtmfdetect`: 8 kHz mono Goertzel.
+    reg.register_launch(LaunchFactory::of::<DtmfDetect>("dtmfdetect", || {
+        Box::new(DtmfDetect::new())
+    }));
+    reg.register_launch(LaunchFactory::of::<PnmEnc>("pnmenc", || {
+        Box::new(PnmEnc::new())
+    }));
+    reg.register_launch(LaunchFactory::of::<PnmDec>("pnmdec", || {
+        Box::new(PnmDec::new())
+    }));
     // GStreamer gaudieffects (M1103).
     reg.register_launch(LaunchFactory::of::<Solarize>("solarize", || {
         Box::new(Solarize::new())
@@ -665,6 +711,16 @@ pub fn default_registry() -> Registry {
     reg.register_launch(LaunchFactory::of::<Dilate>("dilate", || {
         Box::new(Dilate::new())
     }));
+    reg.register_launch(LaunchFactory::of::<HsvFilter>("hsvfilter", || {
+        Box::new(HsvFilter::new())
+    }));
+    reg.register_launch(LaunchFactory::of::<HsvDetector>("hsvdetector", || {
+        Box::new(HsvDetector::new())
+    }));
+    reg.register_launch(LaunchFactory::of::<RoundedCorners>(
+        "roundedcorners",
+        || Box::new(RoundedCorners::new()),
+    ));
     reg.register_launch(LaunchFactory::of::<Alpha>("alpha", || {
         Box::new(Alpha::new())
     }));
@@ -1074,6 +1130,10 @@ pub fn default_registry() -> Registry {
     }));
     reg.register_launch(LaunchFactory::new("identity", Vec::new(), || {
         Box::new(IdentityTransform::new())
+    }));
+    // `debugspy`: passthrough hasher, any caps.
+    reg.register_launch(LaunchFactory::new("debugspy", Vec::new(), || {
+        Box::new(DebugSpy::new())
     }));
     // Closable pass-through (M1070): `valve drop=true` mutes one branch of a tee
     // without rebuilding the graph. No pad templates, like `identity`.
@@ -1650,6 +1710,9 @@ fn register_autoplug_candidates(reg: &mut Registry) {
     reg.register(ElementFactory::of::<PngDec>("pngdec", |_| {
         Box::new(PngDec::new())
     }));
+    reg.register(ElementFactory::of::<PnmDec>("pnmdec", |_| {
+        Box::new(PnmDec::new())
+    }));
     #[cfg(feature = "webp")]
     reg.register(ElementFactory::of::<WebPDec>("webpdec", |_| {
         Box::new(WebPDec::new())
@@ -2053,6 +2116,23 @@ fn register_aliases(reg: &mut Registry) {
     for name in ["hlssink2", "hlssink3", "hlscmafsink"] {
         reg.register_alias(name, &["hlssink"]);
     }
+    // gst-plugins-rs names for elements g2g has under the C plugin name.
+    reg.register_alias("rsaudioecho", &["audioecho"]);
+    reg.register_alias("rspngenc", &["pngenc"]);
+    reg.register_alias("rav1enc", &["av1enc"]);
+    reg.register_alias("reqwesthttpsrc", &["httpsrc"]);
+    reg.register_alias("rsfilesrc", &["filesrc"]);
+    reg.register_alias("rsfilesink", &["filesink"]);
+    reg.register_alias("rsflvdemux", &["flvdemux"]);
+    reg.register_alias("rswebpdec", &["webpdec"]);
+    reg.register_alias("claxondec", &["ffmpegaudiodec"]);
+    reg.register_alias("lewtondec", &["vorbisdec"]);
+    reg.register_alias("isomp4mux", &["mp4mux"]);
+    reg.register_alias("isofmp4mux", &["mp4mux"]);
+    reg.register_alias("cmafmux", &["mp4mux"]);
+    reg.register_alias("dashmp4mux", &["mp4mux"]);
+    reg.register_alias("whepsrc", &["webrtcsrc"]);
+    reg.register_alias("whipsink", &["webrtcsink"]);
     // gst's short AAC encoder name -> the libavcodec AAC encoder.
     reg.register_alias("aacenc", &["avenc_aac"]);
     // GStreamer's nvcodec names -> the native g2g NVENC / NVDEC elements. Resolve

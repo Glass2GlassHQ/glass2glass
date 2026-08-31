@@ -71,10 +71,14 @@ pub mod audiopanorama;
 pub mod audiorate;
 pub mod audioresample;
 pub mod audiotestsrc;
+// `tonegeneratesrc`: a sine at `freq` / `volume`.
 pub mod audiowsincband;
 pub mod audiowsinclimit;
 pub mod av1parse;
 pub mod avoffset;
+pub mod tonegeneratesrc;
+// `dtmfsrc` / `dtmfdetect`: ITU-T Q.23 tones and a Goertzel detector.
+pub mod dtmf;
 // Byte corrupter: overwrites bytes at random, to prove a parser survives them.
 pub mod breakmydata;
 pub mod capsfilter;
@@ -85,6 +89,8 @@ pub mod capssetter;
 pub mod capturepixelformat;
 // Buffer digests, for checking a codec change is bit-exact.
 pub mod checksumsink;
+// `debugspy`: passthrough that hashes each buffer.
+pub mod debugspy;
 // Byte-stream re-chunker: step-aligned random buffer sizes.
 pub mod chopmydata;
 pub mod concat;
@@ -223,6 +229,10 @@ pub mod videoconvert;
 pub mod videoconvertscale;
 pub mod videocrop;
 pub mod videodiff;
+// `videoanalyse`: luma average / variance of each frame.
+pub mod videoanalyse;
+// `scenechange`: SAD-based shot-change detector.
+pub mod scenechange;
 pub mod videoflip;
 // Shared negotiation and frame loop behind the CPU video-effect transforms.
 pub(crate) mod videofx;
@@ -239,7 +249,11 @@ pub mod apedemux;
 pub mod au;
 mod audiocontainer;
 pub mod gaudieffects;
+// `hsvfilter` / `hsvdetector`: HSV transform and colour-box detector.
+pub mod hsv;
 mod pcmendian;
+// `roundedcorners`: transparent corner arcs.
+pub mod roundedcorners;
 #[cfg(test)]
 mod testutil;
 // MIME multipart (`multipart/x-mixed-replace`) reader + writer: the MJPEG-over-
@@ -1029,9 +1043,10 @@ pub mod webpdec;
 
 // Byte-stream framing and header geometry for the still-image formats.
 mod stillframe;
-// Geometry bounds and RGBA output shared by the still-image codec elements.
-#[cfg(any(feature = "png", feature = "webp"))]
+// Geometry bounds and packed RGB(A) output shared by the still-image codecs.
 mod stillimage;
+// Netpbm stills (PBM / PGM / PPM): `pnmenc` / `pnmdec`, no extra crate.
+pub mod pnm;
 
 // Opus audio encode + decode via libopus (FFI through audiopus). Not pure Rust;
 // links libopus (system or bundled-and-built), gated behind the `opus` feature.
