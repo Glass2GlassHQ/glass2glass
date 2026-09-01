@@ -25,6 +25,7 @@ fn h264_any() -> Caps {
         width: Dim::Any,
         height: Dim::Any,
         framerate: Rate::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
 }
 fn raw_video() -> Caps {
@@ -34,6 +35,7 @@ fn raw_video() -> Caps {
         height: Dim::Any,
         framerate: Rate::Any,
         interlace: g2g_core::Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
 }
 

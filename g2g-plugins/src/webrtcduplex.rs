@@ -328,6 +328,7 @@ fn video_caps() -> Caps {
             min_q16: 1 << 16,
             max_q16: 240 << 16,
         },
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
 }
 
@@ -1015,6 +1016,7 @@ mod tests {
             width: Dim::Fixed(640),
             height: Dim::Fixed(480),
             framerate: Rate::Fixed(30 << 16),
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 
@@ -1083,6 +1085,7 @@ mod tests {
             height: Dim::Fixed(2),
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         assert_eq!(s.intercept_caps(0, &raw), Err(G2gError::CapsMismatch));
     }

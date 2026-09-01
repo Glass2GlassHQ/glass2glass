@@ -56,6 +56,7 @@ fn caps() -> Caps {
         height: Dim::Fixed(H),
         framerate: Rate::Fixed(30 << 16),
         interlace: g2g_core::Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
 }
 

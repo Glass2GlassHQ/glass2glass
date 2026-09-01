@@ -60,6 +60,7 @@ fn fourccs_map_to_the_caps_they_produce() {
             width: Dim::Fixed(1280),
             height: Dim::Fixed(720),
             framerate: Rate::Fixed(30 << 16),
+            colorimetry: g2g_core::Colorimetry::UNKNOWN
         }
     );
     assert!(matches!(
@@ -187,6 +188,7 @@ async fn mjpeg_pinned_chain_captures_jpeg_frames() {
         width: Dim::Any,
         height: Dim::Any,
         framerate: Rate::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     });
     let mut sink = FirstFrameSink::default();
 

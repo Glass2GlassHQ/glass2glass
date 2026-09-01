@@ -122,18 +122,21 @@ impl CcExtract {
                 width: g2g_core::Dim::Any,
                 height: g2g_core::Dim::Any,
                 framerate: g2g_core::Rate::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
             },
             Caps::CompressedVideo {
                 codec: VideoCodec::H265,
                 width: g2g_core::Dim::Any,
                 height: g2g_core::Dim::Any,
                 framerate: g2g_core::Rate::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
             },
             Caps::CompressedVideo {
                 codec: VideoCodec::Mpeg2,
                 width: g2g_core::Dim::Any,
                 height: g2g_core::Dim::Any,
                 framerate: g2g_core::Rate::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
             },
             Caps::ClosedCaption {
                 format: ClosedCaptionFormat::Cea608,
@@ -396,6 +399,7 @@ mod tests {
             width: g2g_core::Dim::Any,
             height: g2g_core::Dim::Any,
             framerate: g2g_core::Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 

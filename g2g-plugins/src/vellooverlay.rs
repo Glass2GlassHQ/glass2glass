@@ -980,6 +980,7 @@ mod tests {
             height: Dim::Fixed(h),
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 
@@ -1082,6 +1083,7 @@ mod tests {
             height: Dim::Fixed(8),
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         assert!(ov.intercept_caps(&nv12).is_err());
         assert!(ov.intercept_caps(&rgba_caps(8, 8)).is_ok());

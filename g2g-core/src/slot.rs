@@ -394,6 +394,7 @@ mod tests {
             width: Dim::Fixed(640),
             height: Dim::Fixed(480),
             framerate: Rate::Any,
+            colorimetry: crate::Colorimetry::UNKNOWN,
         };
         let caps = AsyncElement::intercept_caps(&slot, &upstream).unwrap();
         assert_eq!(caps, upstream);

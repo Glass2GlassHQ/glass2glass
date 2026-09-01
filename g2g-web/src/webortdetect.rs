@@ -33,8 +33,8 @@ use core::pin::Pin;
 
 use g2g_core::{
     AnalyticsMeta, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError,
-    HardwareError, OutputSink, PipelinePacket, RawVideoFormat, TensorDType,
-    TensorLayout, TensorShape,
+    HardwareError, OutputSink, PipelinePacket, RawVideoFormat, TensorDType, TensorLayout,
+    TensorShape,
 };
 use g2g_ml::detect::DetectionPostprocess;
 
@@ -99,7 +99,13 @@ impl WebOrtDetect {
 
     /// Whether `caps` is RGBA8 (geometry may still be unfixed at negotiation).
     fn accepts(caps: &Caps) -> bool {
-        matches!(caps, Caps::RawVideo { format: RawVideoFormat::Rgba8, .. })
+        matches!(
+            caps,
+            Caps::RawVideo {
+                format: RawVideoFormat::Rgba8,
+                ..
+            }
+        )
     }
 
     /// Resize the RGBA8 frame (whole-to-whole, nearest-neighbour) into a

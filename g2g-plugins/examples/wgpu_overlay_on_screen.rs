@@ -59,6 +59,7 @@ fn video_caps() -> Caps {
         height: Dim::Fixed(HEIGHT),
         framerate: Rate::Fixed(FRAMERATE << 16),
         interlace: Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
 }
 

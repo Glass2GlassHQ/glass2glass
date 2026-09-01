@@ -114,6 +114,7 @@ impl Mp4Src {
                 min_q16: 1 << 16,
                 max_q16: 240 << 16,
             },
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         })
     }
 }
@@ -190,6 +191,7 @@ impl SourceLoop for Mp4Src {
                         width: Dim::Fixed(h.width),
                         height: Dim::Fixed(h.height),
                         framerate: Rate::Any,
+                        colorimetry: g2g_core::Colorimetry::UNKNOWN,
                     };
                     let stream = Stream::new("mp4-track-0", StreamType::Video, caps);
                     bus.try_post(BusMessage::StreamCollection(StreamCollection::new(

@@ -84,7 +84,25 @@ pub(crate) struct DynamicJoin<'a, T> {
     arms: Vec<Option<BoxFuture<'a, T>>>,
     /// `None` once the control channel has closed; no more arms can arrive.
     new_arms: Option<Receiver<BoxFuture<'a, T>>>,
-    outputs: Vec<T>,
+    /// Resolved outputs, in the order [`JoinMode`] keeps them.
+    outputs: Vec<Option<T>>,
+    mode: JoinMode,
+}
+
+/// When a [`DynamicJoin`] finishes and in what order its outputs come back.
+#[cfg(feature = "std")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum JoinMode {
+    /// Finish once the control channel has closed and every arm has resolved;
+    /// outputs in completion order. What the dynamic fan-out / fan-in runners
+    /// want: their control sender lives on the arm that ends the run, and their
+    /// arm identity rides in `T`.
+    UntilClosed,
+    /// Finish as soon as every arm has resolved, whether or not more could
+    /// arrive; outputs in arm order. What the graph mutator (M1115) wants: its
+    /// control sender belongs to a handle that outlives the run, and its caller
+    /// indexes results by arm position.
+    UntilIdle,
 }
 
 /// Build a [`DynamicJoin`] from an initial arm set plus a control channel that
@@ -98,6 +116,26 @@ pub(crate) fn dynamic_join<'a, T: Unpin>(
         arms: initial.into_iter().map(Some).collect(),
         new_arms: Some(new_arms),
         outputs: Vec::new(),
+        mode: JoinMode::UntilClosed,
+    }
+}
+
+/// As [`dynamic_join`], but the join ends as soon as every arm has resolved,
+/// whether or not more arms could still be sent, and outputs keep arm order (the
+/// initial arms first, in the order given, then each later arm in the order it
+/// arrived). The graph mutator (M1115) holds its control sender for as long as
+/// the caller holds the handle, which is typically past the end of the run, and
+/// a graph whose every arm has ended has nothing left to splice onto.
+#[cfg(feature = "std")]
+pub(crate) fn dynamic_join_open<'a, T: Unpin>(
+    initial: Vec<BoxFuture<'a, T>>,
+    new_arms: Receiver<BoxFuture<'a, T>>,
+) -> DynamicJoin<'a, T> {
+    DynamicJoin {
+        arms: initial.into_iter().map(Some).collect(),
+        new_arms: Some(new_arms),
+        outputs: Vec::new(),
+        mode: JoinMode::UntilIdle,
     }
 }
 
@@ -132,13 +170,23 @@ impl<'a, T: Unpin> Future for DynamicJoin<'a, T> {
             }
         }
 
-        // 2. Poll every live arm; buffer outputs in completion order.
+        // 2. Poll every live arm and buffer its output. `UntilIdle` parks each
+        // one in its own arm's slot, so the initial arms keep their input order
+        // (the graph runner indexes its per-arm bookkeeping by position);
+        // `UntilClosed` appends, which is the completion order its callers have
+        // always seen.
         let mut all_done = true;
-        for arm in this.arms.iter_mut() {
+        if this.mode == JoinMode::UntilIdle {
+            this.outputs.resize_with(this.arms.len(), || None);
+        }
+        for (index, arm) in this.arms.iter_mut().enumerate() {
             if let Some(fut) = arm {
                 match fut.as_mut().poll(cx) {
                     Poll::Ready(v) => {
-                        this.outputs.push(v);
+                        match this.mode {
+                            JoinMode::UntilIdle => this.outputs[index] = Some(v),
+                            JoinMode::UntilClosed => this.outputs.push(Some(v)),
+                        }
                         *arm = None;
                     }
                     Poll::Pending => all_done = false,
@@ -146,9 +194,11 @@ impl<'a, T: Unpin> Future for DynamicJoin<'a, T> {
             }
         }
 
-        // 3. Done only once no more arms can arrive and all have resolved.
-        if this.new_arms.is_none() && all_done {
-            Poll::Ready(mem::take(&mut this.outputs))
+        // 3. Done once every arm has resolved, and, for `UntilClosed`, once no
+        // more can arrive. Every slot holding an output is filled by then, so
+        // flattening drops nothing.
+        if all_done && (this.mode == JoinMode::UntilIdle || this.new_arms.is_none()) {
+            Poll::Ready(mem::take(&mut this.outputs).into_iter().flatten().collect())
         } else {
             Poll::Pending
         }

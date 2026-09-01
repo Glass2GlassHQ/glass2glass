@@ -130,6 +130,7 @@ fn decode_to_texture_then_present_zero_copy() {
         width: Dim::Fixed(640),
         height: Dim::Fixed(480),
         framerate: Rate::Fixed(30 << 16),
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     };
     dec.configure_pipeline(&in_caps)
         .expect("configure opens the decode device");
@@ -144,6 +145,7 @@ fn decode_to_texture_then_present_zero_copy() {
         height: Dim::Fixed(480),
         framerate: Rate::Fixed(30 << 16),
         interlace: g2g_core::Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     };
     sink.configure_pipeline(&rgba_caps).expect("sink configure");
 

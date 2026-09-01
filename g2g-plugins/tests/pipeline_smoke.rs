@@ -155,6 +155,7 @@ async fn h264parse_identity_negotiates_in_mixed_chain() {
                 width: Dim::Fixed(1280),
                 height: Dim::Fixed(720),
                 framerate: Rate::Fixed(30 << 16),
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
             }))
         }
         fn configure_pipeline(&mut self, _: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -241,6 +242,7 @@ async fn format_changing_transform_receives_input_side_caps() {
                     height: height.clone(),
                     framerate: framerate.clone(),
                     interlace: g2g_core::Interlace::Any,
+                    colorimetry: g2g_core::Colorimetry::UNKNOWN,
                 },
                 other => other.clone(),
             }
@@ -288,6 +290,7 @@ async fn capsfilter_passes_matching_format_in_native_chain() {
         height: Dim::Any,
         framerate: Rate::Any,
         interlace: g2g_core::Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     });
     let mut snk = FakeSink::new();
     let clock = ZeroClock;
@@ -316,6 +319,7 @@ async fn capsfilter_rejects_incompatible_format() {
         height: Dim::Any,
         framerate: Rate::Any,
         interlace: g2g_core::Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     });
     let mut snk = FakeSink::new();
     let clock = ZeroClock;

@@ -108,6 +108,7 @@ fn demuxer_then_decoder_is_a_two_hop_chain() {
         width: Dim::Any,
         height: Dim::Any,
         framerate: Rate::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     };
     let raw = Caps::RawVideo {
         format: RawVideoFormat::Nv12,
@@ -115,6 +116,7 @@ fn demuxer_then_decoder_is_a_two_hop_chain() {
         height: Dim::Any,
         framerate: Rate::Any,
         interlace: g2g_core::Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     };
     reg.register(ElementFactory::new(
         "stubdec",

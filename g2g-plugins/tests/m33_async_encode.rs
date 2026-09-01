@@ -91,6 +91,7 @@ fn nv12_caps() -> Caps {
         height: Dim::Fixed(HEIGHT),
         framerate: Rate::Fixed(FPS_Q16),
         interlace: Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
 }
 

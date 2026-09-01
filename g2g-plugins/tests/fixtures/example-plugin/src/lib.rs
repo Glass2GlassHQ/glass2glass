@@ -78,6 +78,7 @@ impl PadTemplates for ExampleFilter {
             height: Dim::Any,
             framerate: Rate::Any,
             interlace: Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         });
         Vec::from([PadTemplate::sink(any.clone()), PadTemplate::source(any)])
     }

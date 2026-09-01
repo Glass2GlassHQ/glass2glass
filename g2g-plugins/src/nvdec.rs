@@ -305,6 +305,7 @@ impl NvDec {
                     width: Dim::Any,
                     height: Dim::Any,
                     framerate: Rate::Any,
+                    colorimetry: g2g_core::Colorimetry::UNKNOWN,
                 })
                 .collect(),
         )
@@ -328,6 +329,7 @@ impl NvDec {
             height: Dim::Fixed(h),
             framerate: self.framerate.clone(),
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 
@@ -898,6 +900,7 @@ impl AsyncElement for NvDec {
                 width,
                 height,
                 framerate,
+                ..
             } => CapsSet::from_alternatives(
                 [RawVideoFormat::Nv12, RawVideoFormat::P010]
                     .into_iter()
@@ -907,6 +910,7 @@ impl AsyncElement for NvDec {
                         height: height.clone(),
                         framerate: framerate.clone(),
                         interlace: g2g_core::Interlace::Any,
+                        colorimetry: g2g_core::Colorimetry::UNKNOWN,
                     })
                     .collect(),
             ),
@@ -920,6 +924,7 @@ impl AsyncElement for NvDec {
             width,
             height,
             framerate,
+            ..
         } = absolute_caps
         else {
             return Err(G2gError::CapsMismatch);
@@ -1061,6 +1066,7 @@ impl PadTemplates for NvDec {
                     height: Dim::Any,
                     framerate: Rate::Any,
                     interlace: g2g_core::Interlace::Any,
+                    colorimetry: g2g_core::Colorimetry::UNKNOWN,
                 })
                 .collect(),
         );
@@ -1339,6 +1345,7 @@ mod tests {
             width: Dim::Fixed(w),
             height: Dim::Fixed(h),
             framerate: Rate::Fixed(30 << 16),
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 
@@ -1359,6 +1366,7 @@ mod tests {
                 height: Dim::Fixed(1080),
                 framerate: Rate::Fixed(30 << 16),
                 interlace: g2g_core::Interlace::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN
             }));
         }
         // AV1 decodes too (Ampere+).
@@ -1367,6 +1375,7 @@ mod tests {
             width: Dim::Fixed(640),
             height: Dim::Fixed(480),
             framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         assert!(!derive(&av1).alternatives().is_empty());
         // A codec NVDEC has no decoder for yields an empty set, rejected at solve.
@@ -1375,6 +1384,7 @@ mod tests {
             width: Dim::Fixed(640),
             height: Dim::Fixed(480),
             framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         assert!(derive(&vp9).alternatives().is_empty());
     }
@@ -1391,6 +1401,7 @@ mod tests {
                 height: Dim::Fixed(720),
                 framerate: Rate::Fixed(30 << 16),
                 interlace: g2g_core::Interlace::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN
             }
         );
         // A 10-bit stream announces the semi-planar 16-bit surface instead.
@@ -1650,6 +1661,7 @@ mod tests {
             width: Dim::Fixed(w),
             height: Dim::Fixed(h),
             framerate: Rate::Fixed(30 << 16),
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         match dec.configure_pipeline(&caps) {
             Ok(_) => Some(dec),
@@ -1742,6 +1754,7 @@ mod tests {
                 height: Dim::Fixed(480),
                 framerate: Rate::Fixed(30 << 16),
                 interlace: g2g_core::Interlace::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN
             }],
             "a 10-bit stream announces the P010 surface"
         );
@@ -1802,6 +1815,7 @@ mod tests {
                 height: Dim::Fixed(480),
                 framerate: Rate::Fixed(30 << 16),
                 interlace: g2g_core::Interlace::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN
             }]
         );
         let head = sink.luma_head.expect("luma read back");
@@ -2037,6 +2051,7 @@ mod tests {
             height: Dim::Fixed(H),
             framerate: Rate::Fixed(30 << 16),
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         let mut enc = NvEnc::new().with_codec(codec);
         enc.configure_pipeline(&nv12_caps).unwrap();
@@ -2123,6 +2138,7 @@ mod tests {
             width: Dim::Fixed(W),
             height: Dim::Fixed(H),
             framerate: Rate::Fixed(30 << 16),
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         if dec.configure_pipeline(&in_caps).is_err() {
             std::eprintln!("skipping: NVDEC unavailable on this host");
@@ -2155,6 +2171,7 @@ mod tests {
                 height: Dim::Fixed(H),
                 framerate: Rate::Fixed(30 << 16),
                 interlace: g2g_core::Interlace::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN
             }],
             "NV12 output caps announced once at the decoded geometry"
         );

@@ -94,6 +94,7 @@ impl Probe {
             height: Dim::Fixed(self.height),
             framerate: Rate::Fixed(self.framerate_q16),
             interlace: Interlace::Progressive,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 

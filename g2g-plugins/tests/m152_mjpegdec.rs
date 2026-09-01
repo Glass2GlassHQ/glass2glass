@@ -55,6 +55,7 @@ fn mjpeg_caps() -> Caps {
         width: Dim::Any,
         height: Dim::Any,
         framerate: Rate::Fixed(30 << 16),
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
 }
 
@@ -90,6 +91,7 @@ async fn decodes_mjpeg_to_rgba8_with_recovered_geometry() {
             height: Dim::Fixed(16),
             framerate: Rate::Fixed(30 << 16),
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN
         }],
         "one CapsChanged with the decoded 16x16 RGBA geometry"
     );
@@ -129,6 +131,7 @@ async fn decodes_mjpeg_to_i420() {
             height: Dim::Fixed(16),
             framerate: Rate::Fixed(30 << 16),
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN
         }],
         "CapsChanged announces the I420 output format"
     );
@@ -216,6 +219,7 @@ async fn gradient_jpeg(w: u32, h: u32) -> Vec<u8> {
         height: Dim::Fixed(h),
         framerate: Rate::Fixed(30 << 16),
         interlace: g2g_core::Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     })
     .unwrap();
     let mut sink = CaptureSink::default();
@@ -248,6 +252,7 @@ async fn direct_i420_matches_the_rgba_conversion_route() {
         RawVideoFormat::I420,
         w as usize,
         h as usize,
+        g2g_core::Colorimetry::UNKNOWN,
     );
 
     let expect = (w * h * 3 / 2) as usize;

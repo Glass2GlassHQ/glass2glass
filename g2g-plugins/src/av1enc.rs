@@ -170,6 +170,7 @@ impl Av1Enc {
             width: Dim::Fixed(self.width),
             height: Dim::Fixed(self.height),
             framerate: self.framerate.clone(),
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 
@@ -469,6 +470,7 @@ impl AsyncElement for Av1Enc {
                     height: Dim::Any,
                     framerate: Rate::Any,
                     interlace: g2g_core::Interlace::Any,
+                    colorimetry: g2g_core::Colorimetry::UNKNOWN,
                 });
             }
         }
@@ -483,11 +485,13 @@ impl AsyncElement for Av1Enc {
                 height,
                 framerate,
                 interlace: _,
+                ..
             } if chroma_for(*format).is_some() => CapsSet::one(Caps::CompressedVideo {
                 codec: VideoCodec::Av1,
                 width: width.clone(),
                 height: height.clone(),
                 framerate: framerate.clone(),
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
             }),
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
@@ -500,6 +504,7 @@ impl AsyncElement for Av1Enc {
             height,
             framerate,
             interlace: _,
+            ..
         } = absolute_caps
         else {
             return Err(G2gError::CapsMismatch);
@@ -636,6 +641,7 @@ impl PadTemplates for Av1Enc {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         let any = |format| Caps::RawVideo {
             format,
@@ -643,6 +649,7 @@ impl PadTemplates for Av1Enc {
             height: Dim::Any,
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         let sink = CapsSet::from_alternatives(Vec::from([
             any(RawVideoFormat::I420),
@@ -694,6 +701,7 @@ mod tests {
             height: Dim::Fixed(h),
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 
@@ -758,6 +766,7 @@ mod tests {
                 width: Dim::Fixed(64),
                 height: Dim::Fixed(64),
                 framerate: Rate::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN
             }]
         );
 

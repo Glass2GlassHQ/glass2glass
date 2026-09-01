@@ -73,6 +73,7 @@ fn element_properties_reach_the_python_instance() {
         height: Dim::Fixed(1),
         framerate: Rate::Fixed(30),
         interlace: g2g_core::Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     };
     el.configure_pipeline(&caps).unwrap();
 
@@ -127,6 +128,7 @@ fn rgba_2x1() -> Caps {
         height: Dim::Fixed(1),
         framerate: Rate::Fixed(30),
         interlace: g2g_core::Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
 }
 
@@ -220,6 +222,7 @@ fn a_per_element_property_reaches_the_python_instance() {
         height: Dim::Fixed(1),
         framerate: Rate::Fixed(30),
         interlace: g2g_core::Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     };
     el.configure_pipeline(&caps).unwrap();
 

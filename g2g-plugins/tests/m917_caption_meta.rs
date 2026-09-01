@@ -45,6 +45,7 @@ fn h264() -> Caps {
         width: Dim::Fixed(64),
         height: Dim::Fixed(64),
         framerate: Rate::Fixed(30 << 16),
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
 }
 

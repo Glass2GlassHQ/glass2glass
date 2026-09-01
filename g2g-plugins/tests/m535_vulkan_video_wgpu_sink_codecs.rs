@@ -102,6 +102,7 @@ fn drive_wedge(codec: VideoCodec, clip: &[u8]) {
         width: Dim::Fixed(W),
         height: Dim::Fixed(H),
         framerate: Rate::Fixed(30 << 16),
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     };
     dec.configure_pipeline(&in_caps)
         .expect("configure opens the decode device");
@@ -116,6 +117,7 @@ fn drive_wedge(codec: VideoCodec, clip: &[u8]) {
         height: Dim::Fixed(H),
         framerate: Rate::Fixed(30 << 16),
         interlace: g2g_core::Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     };
     sink.configure_pipeline(&rgba_caps).expect("sink configure");
 

@@ -540,6 +540,7 @@ impl AsyncElement for KmsSink {
             height: Dim::Any,
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }))
     }
 
@@ -758,6 +759,7 @@ mod tests {
             width: Dim::Fixed(640),
             height: Dim::Fixed(480),
             framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         assert_eq!(sink.intercept_caps(&h264), Ok(h264));
     }
@@ -771,6 +773,7 @@ mod tests {
             height: Dim::Fixed(720),
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         assert_eq!(sink.intercept_caps(&nv12), Ok(nv12));
     }
@@ -792,6 +795,7 @@ mod tests {
                 height: Dim::Any,
                 framerate: Rate::Any,
                 interlace: g2g_core::Interlace::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN
             }]
         );
     }
@@ -804,6 +808,7 @@ mod tests {
             width: Dim::Fixed(640),
             height: Dim::Fixed(480),
             framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         // A native decoder lands NV12 on this link; non-NV12 is a real
         // error (e.g. an undecoded display chain), not a deferred no-op.
@@ -827,6 +832,7 @@ mod tests {
             height: Dim::Fixed(480),
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         // `ConfigureOutcome` doesn't implement `PartialEq`, so match the
         // Err arm explicitly rather than using assert_eq!.

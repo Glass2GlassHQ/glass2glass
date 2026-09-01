@@ -152,6 +152,7 @@ fn imports_a_gpu_dmabuf_into_a_wgpu_buffer() {
         height: Dim::Fixed(height),
         framerate: Rate::Fixed(30 << 16),
         interlace: g2g_core::Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     };
     let mut elem = DmaBufToWgpu::new();
     elem.configure_pipeline(&caps)

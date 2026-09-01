@@ -1038,6 +1038,7 @@ impl PsDemux {
                     min_q16: 1 << 16,
                     max_q16: 240 << 16,
                 },
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
             },
             PsStream::Mp2 => Caps::Audio {
                 format: AudioFormat::Mp2,
@@ -1067,6 +1068,7 @@ impl PsDemux {
             width: Dim::Fixed(seq.width),
             height: Dim::Fixed(seq.height),
             framerate: Rate::Fixed(seq.framerate_q16),
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         })
     }
 
@@ -1631,6 +1633,7 @@ impl PsDemuxN {
                         width: Dim::Fixed(seq.width),
                         height: Dim::Fixed(seq.height),
                         framerate: Rate::Fixed(seq.framerate_q16),
+                        colorimetry: g2g_core::Colorimetry::UNKNOWN,
                     },
                     _ => PsDemux::output_caps(kind),
                 };
@@ -1670,6 +1673,7 @@ impl PsDemuxN {
                                 width: Dim::Fixed(seq.width),
                                 height: Dim::Fixed(seq.height),
                                 framerate: Rate::Fixed(seq.framerate_q16),
+                                colorimetry: g2g_core::Colorimetry::UNKNOWN,
                             }),
                         )
                         .await?;
@@ -1722,6 +1726,7 @@ impl MultiOutputElement for PsDemuxN {
                 width: Dim::Fixed(seq.width),
                 height: Dim::Fixed(seq.height),
                 framerate: Rate::Fixed(seq.framerate_q16),
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
             }),
             _ => Some(PsDemux::output_caps(stream)),
         }

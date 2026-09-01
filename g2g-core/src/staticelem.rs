@@ -1,6 +1,6 @@
 //! Static (heap-free) element model for the no-alloc / MCU path (Phase 2 of the
-//! alloc-optional core): the generic twin of the object-safe [`AsyncElement`] /
-//! [`OutputSink`], which box a future per frame (`element.rs`, the honest
+//! alloc-optional core): the generic twin of the object-safe `AsyncElement` /
+//! `OutputSink`, which box a future per frame (`element.rs`, the honest
 //! per-frame allocation boundary pinned by M616). Elements here are concrete types
 //! wired by direct calls and driven by a const-arity runner, so a whole pipeline
 //! monomorphizes to unboxed `async` state machines: no `dyn`, no `Box`, no
@@ -12,9 +12,6 @@
 //! host `block_on` drives them. Because nothing here allocates, a chain built from
 //! these traits links on a target with no global allocator (proven end to end by
 //! `examples/g2g-noalloc`).
-//!
-//! [`AsyncElement`]: crate::element::AsyncElement
-//! [`OutputSink`]: crate::element::OutputSink
 
 use core::future::Future;
 use core::pin::pin;

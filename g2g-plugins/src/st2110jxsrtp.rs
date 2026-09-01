@@ -371,6 +371,7 @@ impl PadTemplates for St2110JxsSink {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }))])
     }
 }
@@ -473,6 +474,7 @@ impl St2110JxsSrc {
             width: Dim::Fixed(self.width),
             height: Dim::Fixed(self.height),
             framerate: Rate::Fixed(self.framerate_fps << 16),
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 }
@@ -555,6 +557,7 @@ impl PadTemplates for St2110JxsSrc {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }))])
     }
 }
@@ -666,6 +669,7 @@ mod tests {
             width: Dim::Fixed(1920),
             height: Dim::Fixed(1080),
             framerate: Rate::Fixed(60 << 16),
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 
@@ -762,6 +766,7 @@ mod tests {
             width: Dim::Fixed(1920),
             height: Dim::Fixed(1080),
             framerate: Rate::Fixed(50 << 16), // 20 ms period
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         let rx = UdpSocket::bind(("127.0.0.1", 0)).unwrap();
         rx.set_nonblocking(true).unwrap();

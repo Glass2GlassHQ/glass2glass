@@ -179,6 +179,7 @@ fn rgba_caps(w: u32, h: u32) -> Caps {
         height: Dim::Fixed(h),
         framerate: Rate::Any,
         interlace: g2g_core::Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
 }
 
@@ -224,6 +225,7 @@ async fn present_decoded_frames_to_android_surface() {
         width: Dim::Fixed(w),
         height: Dim::Fixed(h),
         framerate: Rate::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     };
     let narrowed = dec.intercept_caps(&upstream).expect("intercept caps");
     assert!(matches!(

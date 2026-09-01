@@ -45,6 +45,9 @@ mod graph_runner;
 mod launch;
 
 #[cfg(feature = "std")]
+mod mutate;
+
+#[cfg(feature = "std")]
 mod observe;
 
 pub use autoplug::{
@@ -106,10 +109,13 @@ pub use gapless::{GaplessController, GaplessInstantWait, GaplessWait};
 #[cfg(feature = "std")]
 pub use graph_runner::{
     auto_plug_domain_converters, copy_plan, negotiate_graph, negotiate_graph_explained, run_graph,
-    run_graph_observed, run_graph_observed_recorded, run_graph_recorded, run_graph_stateful,
-    run_graph_with_bus, run_graph_with_copy_policy, run_graph_with_progress, DynMultiOutputElement,
-    GraphNode, GraphNodeRef, GraphTemplate, NegotiateError,
+    run_graph_mutable, run_graph_observed, run_graph_observed_recorded, run_graph_recorded,
+    run_graph_stateful, run_graph_with_bus, run_graph_with_copy_policy, run_graph_with_progress,
+    DynMultiOutputElement, GraphNode, GraphNodeRef, GraphTemplate, NegotiateError,
 };
+
+#[cfg(feature = "std")]
+pub use mutate::{GraphMutator, MutationError};
 
 // The monomorphized-arm seam (M1000, extended to the fan-in / fan-out arms in
 // M1009): the drive hooks on `DynAsyncElement` / `DynMultiInputElement` /
@@ -135,9 +141,9 @@ pub use observe::{
 // future stays on its thread); `std` for the OS-thread spawner it drives.
 #[cfg(all(feature = "std", feature = "multi-thread"))]
 pub use graph_runner::{
-    run_graph_threaded, run_graph_threaded_observed, run_graph_threaded_recorded,
-    run_graph_threaded_ticked, run_graph_threaded_with_bus, run_graph_threaded_with_progress,
-    GraphSpawner, LocalArmFuture, ThreadSpawner,
+    run_graph_threaded, run_graph_threaded_mutable, run_graph_threaded_observed,
+    run_graph_threaded_recorded, run_graph_threaded_ticked, run_graph_threaded_with_bus,
+    run_graph_threaded_with_progress, GraphSpawner, LocalArmFuture, ThreadSpawner,
 };
 
 // `PadKind` / `PadRequest` are not std-gated: the `no_std` fan-in trait

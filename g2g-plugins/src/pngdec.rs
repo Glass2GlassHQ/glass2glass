@@ -74,6 +74,7 @@ impl PngDec {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 
@@ -137,6 +138,7 @@ fn to_rgba8(src: &[u8], color: ColorType, width: u32, height: u32) -> Result<Vec
             RawVideoFormat::Rgba8,
             width as usize,
             height as usize,
+            g2g_core::Colorimetry::UNKNOWN,
         )
         .into_vec()),
         ColorType::Grayscale | ColorType::GrayscaleAlpha => {
@@ -181,12 +183,14 @@ impl AsyncElement for PngDec {
                 width,
                 height,
                 framerate,
+                ..
             } => CapsSet::one(Caps::RawVideo {
                 format: RawVideoFormat::Rgba8,
                 width: width.clone(),
                 height: height.clone(),
                 framerate: framerate.clone(),
                 interlace: g2g_core::Interlace::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
             }),
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
@@ -265,6 +269,7 @@ impl PadTemplates for PngDec {
                 height: Dim::Any,
                 framerate: Rate::Any,
                 interlace: g2g_core::Interlace::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
             })),
         ])
     }

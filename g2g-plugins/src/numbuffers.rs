@@ -53,7 +53,12 @@ pub(crate) async fn finished_at_zero_limit(
 
 /// [`finished_at_zero_limit`] for a multi-pad source: every pad gets the EOS,
 /// since a branch left without one never finishes.
-#[cfg(any(feature = "moqt", feature = "webrtc", feature = "webrtc-livekit"))]
+#[cfg(any(
+    feature = "moqt",
+    feature = "rtsp",
+    feature = "webrtc",
+    feature = "webrtc-livekit"
+))]
 pub(crate) async fn finished_at_zero_limit_multi(
     limit: u64,
     pads: usize,

@@ -19,6 +19,7 @@ fn rgba(w: u32, h: u32) -> Caps {
         height: Dim::Fixed(h),
         framerate: Rate::Fixed(30 << 16),
         interlace: g2g_core::Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
 }
 
@@ -29,6 +30,7 @@ fn raw(format: RawVideoFormat, w: u32, h: u32) -> Caps {
         height: Dim::Fixed(h),
         framerate: Rate::Fixed(30 << 16),
         interlace: g2g_core::Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
 }
 
@@ -50,14 +52,14 @@ fn assert_passthrough_preserved(inp: &Caps, out: &Caps, mask: PassthroughFields)
                 width: wi,
                 height: hi,
                 framerate: ri,
-                interlace: _,
+                ..
             },
             Caps::RawVideo {
                 format: fo,
                 width: wo,
                 height: ho,
                 framerate: ro,
-                interlace: _,
+                ..
             },
         ) => {
             if mask.format {

@@ -56,6 +56,7 @@ fn h264_caps() -> Caps {
         width: Dim::Fixed(WIDTH),
         height: Dim::Fixed(HEIGHT),
         framerate: Rate::Fixed(FRAMERATE),
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
 }
 
@@ -67,6 +68,7 @@ fn nv12_caps() -> Caps {
         height: Dim::Fixed(HEIGHT),
         framerate: Rate::Any,
         interlace: Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
 }
 
@@ -256,6 +258,7 @@ impl AsyncElement for PresentOffscreen {
             height: Dim::Any,
             framerate: Rate::Any,
             interlace: Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }))
     }
     fn input_domains(&self) -> DomainSet {

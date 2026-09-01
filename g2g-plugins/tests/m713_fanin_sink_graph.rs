@@ -289,6 +289,7 @@ async fn launch_line_builds_terminal_fanin() {
             height: Dim::Fixed(8),
             framerate: Rate::Fixed(30 << 16),
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 

@@ -154,6 +154,7 @@ impl CapsTransform {
                     height,
                     framerate,
                     interlace,
+                    ..
                 },
             ) => {
                 if !accept.is_empty() && !accept.contains(format) {
@@ -173,6 +174,9 @@ impl CapsTransform {
                             framerate: s.framerate.apply(framerate),
                             // A format/geometry reshape leaves scan structure alone.
                             interlace: *interlace,
+                            // Unknown, not passthrough: a format reshape (YUV ->
+                            // RGB) changes what colorimetry means for the output.
+                            colorimetry: crate::Colorimetry::UNKNOWN,
                         },
                     );
                 }
@@ -258,6 +262,7 @@ mod tests {
             height: Dim::Fixed(h),
             framerate: Rate::Fixed(fps << 16),
             interlace: crate::Interlace::Any,
+            colorimetry: crate::Colorimetry::UNKNOWN,
         }
     }
 

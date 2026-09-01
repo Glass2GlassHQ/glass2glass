@@ -1242,8 +1242,8 @@ use alloc::boxed::Box;
 
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
-    Caps, ConfigureOutcome, Dim, G2gError, Interlace, OutputSink, PipelinePacket, Rate,
-    RawVideoFormat,
+    Caps, Colorimetry, ConfigureOutcome, Dim, G2gError, Interlace, OutputSink, PipelinePacket,
+    Rate, RawVideoFormat,
 };
 
 #[derive(Debug, Default)]
@@ -1264,6 +1264,7 @@ impl __TYPE__ {
             height: Dim::Fixed(240),
             framerate: Rate::Fixed(30 << 16),
             interlace: Interlace::Any,
+            colorimetry: Colorimetry::UNKNOWN,
         }
     }
 }

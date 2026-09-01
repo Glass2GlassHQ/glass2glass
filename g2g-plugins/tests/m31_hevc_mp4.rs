@@ -77,6 +77,7 @@ fn hevc_caps() -> Caps {
         width: Dim::Fixed(WIDTH),
         height: Dim::Fixed(HEIGHT),
         framerate: Rate::Fixed(30 << 16),
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
 }
 
@@ -155,6 +156,7 @@ async fn hevc_round_trips_through_the_fmp4_container() {
                 min_q16: 1 << 16,
                 max_q16: 240 << 16
             },
+            colorimetry: g2g_core::Colorimetry::UNKNOWN
         },
         "probe recovers HEVC codec and geometry"
     );

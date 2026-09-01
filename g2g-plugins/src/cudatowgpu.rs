@@ -62,6 +62,7 @@ fn nv12_any() -> CapsSet {
         height: Dim::Any,
         framerate: Rate::Any,
         interlace: g2g_core::Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     })
 }
 

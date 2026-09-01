@@ -50,12 +50,13 @@ use alloc::vec::Vec;
 
 use crate::paint::blend_px;
 use crate::pixel::{frame_byte_size, planar_planes};
+use crate::yuvmatrix::YuvRgbMatrix;
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, FrameTiming, G2gError,
-    InputAggregator, MemoryDomain, MultiInputElement, OutputSink, PipelinePacket, PropError,
-    PropKind, PropValue, PropertySpec, Rate, RawVideoFormat, Segment,
+    Caps, CapsConstraint, CapsSet, Colorimetry, ConfigureOutcome, Dim, ElementMetadata,
+    FrameTiming, G2gError, InputAggregator, MemoryDomain, MultiInputElement, OutputSink,
+    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat, Segment,
 };
 
 /// Placement of one input stream on the output canvas.
@@ -155,6 +156,13 @@ pub struct Compositor {
     state: CompositorState<Box<[u8]>>,
     /// The canvas fill behind all inputs (RGBA8), default opaque black.
     background: [u8; 4],
+    /// Colorimetry input 0 negotiated, which is the space the inputs are mixed
+    /// in and so the space the output is in. Drives the YUV background fill and
+    /// the output caps.
+    colorimetry: Colorimetry,
+    /// The output caps last announced downstream, so a colorimetry that firms up
+    /// after negotiation is announced once rather than per frame.
+    announced_output: Option<Caps>,
     /// The last `Segment` forwarded downstream. Output frames carry input 0's
     /// PTS, so input 0's segment is the one that maps them to running time and a
     /// paced sink needs it: without it the sink paces against the raw PTS base (a
@@ -682,6 +690,8 @@ impl Compositor {
             pads,
             state: CompositorState::new(n),
             background: [0, 0, 0, 255],
+            colorimetry: Colorimetry::UNKNOWN,
+            announced_output: None,
             last_segment: None,
         }
     }
@@ -747,7 +757,25 @@ impl Compositor {
             height: Dim::Fixed(self.out_h),
             framerate: Rate::Fixed(self.framerate_q16),
             interlace: g2g_core::Interlace::Any,
+            colorimetry: self.colorimetry,
         }
+    }
+
+    /// Announce the output caps when the colorimetry input 0 settled on refines
+    /// what negotiation fixed. Negotiation runs before any input is configured,
+    /// so downstream only ever saw the unknown colorimetry this element starts
+    /// with; an untagged input leaves it there and nothing is sent.
+    async fn announce_output(&mut self, out: &mut dyn OutputSink) -> Result<(), G2gError> {
+        if self.colorimetry == Colorimetry::UNKNOWN {
+            return Ok(());
+        }
+        let caps = self.output();
+        if self.announced_output.as_ref() == Some(&caps) {
+            return Ok(());
+        }
+        out.push(PipelinePacket::CapsChanged(caps.clone())).await?;
+        self.announced_output = Some(caps);
+        Ok(())
     }
 
     /// The format the compositor accepts on every input, at any geometry.
@@ -758,6 +786,7 @@ impl Compositor {
             height: Dim::Any,
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 
@@ -835,7 +864,7 @@ impl Compositor {
         let mut canvas = vec![0u8; frame_byte_size(self.format, self.out_w, self.out_h)];
 
         let dst_chans = channels(self.format, w, h);
-        let bg = rgba_to_yuv(self.background);
+        let bg = rgba_to_yuv(self.background, &YuvRgbMatrix::new(self.colorimetry));
         for (chan, &val) in dst_chans.iter().zip(bg.iter()) {
             fill_channel(&mut canvas, chan, val);
         }
@@ -1084,14 +1113,11 @@ fn channels(format: RawVideoFormat, w: usize, h: usize) -> [Chan; 3] {
     }
 }
 
-/// Rec.601 full-range (JFIF) conversion of the RGBA background to `[Y, U, V]`.
-fn rgba_to_yuv(rgba: [u8; 4]) -> [u8; 3] {
-    let (r, g, b) = (rgba[0] as f32, rgba[1] as f32, rgba[2] as f32);
-    let clamp = |v: f32| v.clamp(0.0, 255.0) as u8;
-    let y = 0.299 * r + 0.587 * g + 0.114 * b;
-    let u = -0.168_736 * r - 0.331_264 * g + 0.5 * b + 128.0;
-    let v = 0.5 * r - 0.418_688 * g - 0.081_312 * b + 128.0;
-    [clamp(y), clamp(u), clamp(v)]
+/// The RGBA background as `[Y, U, V]` in the output's colorimetry, so the fill
+/// matches the samples the inputs carry.
+fn rgba_to_yuv(rgba: [u8; 4], matrix: &YuvRgbMatrix) -> [u8; 3] {
+    let (y, u, v) = matrix.rgb_to_yuv(rgba[0] as i32, rgba[1] as i32, rgba[2] as i32);
+    [y as u8, u as u8, v as u8]
 }
 
 /// Fill one plane with a constant sample value.
@@ -1292,6 +1318,7 @@ impl MultiInputElement for Compositor {
             format,
             width: Dim::Fixed(w),
             height: Dim::Fixed(h),
+            colorimetry,
             ..
         } = absolute_caps
         else {
@@ -1299,6 +1326,11 @@ impl MultiInputElement for Compositor {
         };
         if *format != self.format {
             return Err(G2gError::CapsMismatch);
+        }
+        // Inputs are mixed sample for sample, so input 0's colour space is the
+        // output's. The overlays are assumed to be in it too.
+        if input == 0 {
+            self.colorimetry = *colorimetry;
         }
         self.state.set_geometry(input, *w, *h);
         Ok(ConfigureOutcome::Accepted)
@@ -1327,6 +1359,7 @@ impl MultiInputElement for Compositor {
                     }
                     self.state.ingest(input, frame.timing, src[..need].into());
 
+                    self.announce_output(out).await?;
                     while let Some((timing, base)) = self.state.take_due() {
                         let canvas = self.compose(&base);
                         let frame = self.output_frame(canvas, timing);
@@ -1346,14 +1379,19 @@ impl MultiInputElement for Compositor {
                         out.push(PipelinePacket::DataFrame(frame)).await?;
                     }
                 }
-                // A per-input caps refinement updates that input's geometry; the
-                // output caps are fixed, so nothing is forwarded.
+                // A per-input caps refinement updates that input's geometry, and
+                // input 0's colorimetry the output's; the refined output caps go
+                // out with the next frame.
                 PipelinePacket::CapsChanged(Caps::RawVideo {
                     format,
                     width: Dim::Fixed(w),
                     height: Dim::Fixed(h),
+                    colorimetry,
                     ..
                 }) if format == self.format => {
+                    if input == 0 {
+                        self.colorimetry = colorimetry;
+                    }
                     // A geometry change invalidates that input's queued frames:
                     // compose() would otherwise read the old (smaller) bytes
                     // at the new dims and panic out of bounds. For an overlay
@@ -1428,6 +1466,7 @@ mod tests {
             height: Dim::Fixed(h),
             framerate: Rate::Fixed(30 << 16),
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 
@@ -1765,19 +1804,81 @@ mod tests {
         );
     }
 
+    /// The background fill is converted with the output's colorimetry, so an
+    /// untagged mix gets limited-range black (Y16), the black the sinks decode
+    /// as black, rather than the full-range Y0 that used to leak through as
+    /// crushed shadows.
     #[test]
     fn planar_background_fills_uncovered_area() {
-        // A 4x4 NV12 canvas with a 2x2 input at (0,0): the uncovered area is the
-        // default opaque-black background (Y0, U128, V128 full-range).
         let mut comp = Compositor::new(4, 4, Vec::from([CompositorPad::at(0, 0)]))
             .with_format(RawVideoFormat::Nv12);
         comp.state.set_geometry(0, 2, 2);
         let out = comp.compose(&solid_yuv(RawVideoFormat::Nv12, 2, 2, [90, 40, 200]));
         let f = RawVideoFormat::Nv12;
+        let black = YuvRgbMatrix::new(Colorimetry::UNKNOWN).rgb_to_yuv(0, 0, 0);
         assert_eq!(yuv_at(&out, f, 4, 4, 0, 0, 0), 90, "input paints its luma");
-        assert_eq!(yuv_at(&out, f, 4, 4, 0, 3, 3), 0, "uncovered luma is black");
-        assert_eq!(yuv_at(&out, f, 4, 4, 1, 3, 3), 128, "uncovered U neutral");
-        assert_eq!(yuv_at(&out, f, 4, 4, 2, 3, 3), 128, "uncovered V neutral");
+        assert_eq!(
+            yuv_at(&out, f, 4, 4, 0, 3, 3),
+            black.0 as u8,
+            "uncovered luma is limited-range black"
+        );
+        assert_eq!(
+            yuv_at(&out, f, 4, 4, 1, 3, 3),
+            black.1 as u8,
+            "uncovered U neutral"
+        );
+        assert_eq!(
+            yuv_at(&out, f, 4, 4, 2, 3, 3),
+            black.2 as u8,
+            "uncovered V neutral"
+        );
+    }
+
+    /// A tagged input drives the background convert and the output caps: BT.709
+    /// full range moves the black point to 0 and the fill to that matrix, and the
+    /// element declares what it produced.
+    #[test]
+    fn background_and_output_caps_follow_input_colorimetry() {
+        let colorimetry = Colorimetry {
+            range: g2g_core::ColorRange::Full,
+            ..Colorimetry::BT709
+        };
+        let mut comp = Compositor::new(4, 4, Vec::from([CompositorPad::at(0, 0)]))
+            .with_format(RawVideoFormat::Nv12)
+            .with_background([255, 0, 0, 255]);
+        comp.configure_pipeline(
+            0,
+            &Caps::RawVideo {
+                format: RawVideoFormat::Nv12,
+                width: Dim::Fixed(2),
+                height: Dim::Fixed(2),
+                framerate: Rate::Any,
+                interlace: g2g_core::Interlace::Any,
+                colorimetry,
+            },
+        )
+        .unwrap();
+
+        let Ok(Caps::RawVideo {
+            colorimetry: declared,
+            ..
+        }) = comp.output_caps()
+        else {
+            panic!("expected raw-video output caps");
+        };
+        assert_eq!(declared, colorimetry, "the output declares what it mixed");
+
+        let out = comp.compose(&solid_yuv(RawVideoFormat::Nv12, 2, 2, [90, 40, 200]));
+        let f = RawVideoFormat::Nv12;
+        let red = YuvRgbMatrix::new(colorimetry).rgb_to_yuv(255, 0, 0);
+        assert_eq!(yuv_at(&out, f, 4, 4, 0, 3, 3), red.0 as u8);
+        assert_eq!(yuv_at(&out, f, 4, 4, 1, 3, 3), red.1 as u8);
+        assert_eq!(yuv_at(&out, f, 4, 4, 2, 3, 3), red.2 as u8);
+        assert_ne!(
+            red,
+            YuvRgbMatrix::new(Colorimetry::UNKNOWN).rgb_to_yuv(255, 0, 0),
+            "BT.709 full range differs from the untagged default"
+        );
     }
 
     #[test]
@@ -1829,6 +1930,7 @@ mod tests {
             height: Dim::Fixed(480),
             framerate: Rate::Fixed(30 << 16),
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         assert!(
             comp.configure_pipeline(0, &nv12).is_ok(),
@@ -1849,6 +1951,7 @@ mod tests {
             height: Dim::Fixed(480),
             framerate: Rate::Fixed(30 << 16),
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         assert!(matches!(
             comp.configure_pipeline(0, &rgba),
@@ -2091,6 +2194,7 @@ mod tests {
                 height: Dim::Fixed(1080),
                 framerate: Rate::Fixed(60 << 16),
                 interlace: g2g_core::Interlace::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN
             }]
         );
         // A non-RGBA input is rejected at configure.
@@ -2100,6 +2204,7 @@ mod tests {
             height: Dim::Fixed(480),
             framerate: Rate::Fixed(30 << 16),
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         let mut comp = comp;
         assert!(matches!(

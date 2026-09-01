@@ -112,6 +112,7 @@ impl StillImageOutput {
                 height: Dim::Fixed(height),
                 framerate: framerate.clone(),
                 interlace: g2g_core::Interlace::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
             }))
             .await?;
             self.out_dims = Some((format, width, height));

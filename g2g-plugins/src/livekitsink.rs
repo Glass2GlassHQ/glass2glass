@@ -622,6 +622,7 @@ fn h264_any() -> Caps {
         width: Dim::Any,
         height: Dim::Any,
         framerate: Rate::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
 }
 
@@ -1031,12 +1032,14 @@ mod tests {
             width: Dim::Fixed(640),
             height: Dim::Fixed(480),
             framerate: Rate::Fixed(30 << 16),
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         let lo = Caps::CompressedVideo {
             codec: VideoCodec::H264,
             width: Dim::Fixed(320),
             height: Dim::Fixed(240),
             framerate: Rate::Fixed(30 << 16),
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         assert!(s.configure_pipeline(0, &hi).is_ok());
         assert!(s.configure_pipeline(1, &lo).is_ok());
@@ -1067,6 +1070,7 @@ mod tests {
             height: Dim::Fixed(2),
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         assert_eq!(s.intercept_caps(0, &raw), Err(G2gError::CapsMismatch));
         assert!(s.intercept_caps(0, &h264_any()).is_ok());

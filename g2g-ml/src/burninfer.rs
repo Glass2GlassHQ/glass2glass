@@ -195,6 +195,7 @@ impl BurnInference {
             height: Dim::Fixed(self.height),
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 
@@ -366,6 +367,7 @@ mod tests {
             height: Dim::Fixed(h),
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 
@@ -376,6 +378,7 @@ mod tests {
             height: Dim::Fixed(h),
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 

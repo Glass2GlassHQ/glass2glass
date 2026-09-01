@@ -75,15 +75,18 @@ use crate::meta::MetaRequests;
 use crate::property::{PropError, PropValue, PropertySpec};
 use crate::query::{with_meta_demand, AllocationParams, LatencyReport};
 use crate::runtime::channel::{
-    advertise_orientation, bounded, link, link_with_transit, LinkReceiver, LinkSender, Receiver,
-    ReconfigureAnswered, RecvFuture, Sender, SenderSink,
+    advertise_orientation, bounded, link, link_with_transit, LinkReceiver, LinkSender,
+    ProducerEndpoint, Receiver, ReconfigureAnswered, RecvFuture, Sender, SenderSink,
 };
 use crate::runtime::coordinator::{
     log_caps_forward, log_caps_rejected, realloc_local_dyn, report_nego_failure, ArmDirective,
 };
 use crate::runtime::fanin::{DynMultiInputElement, DynSourceLoop};
 use crate::runtime::instrument::{snapshot_all, ElementProbe, Probe};
-use crate::runtime::join::{join_all, select2, Either};
+use crate::runtime::join::{dynamic_join_open, join_all, select2, Either};
+use crate::runtime::mutate::{
+    mutation_channel, spliced_arm, GraphMutator, LiveNode, MutationRequest, MutationService,
+};
 use crate::runtime::progress::PipelineProgress;
 use crate::runtime::runner::{
     re_solve_downstream_dyn_sink, LinkCapacity, NullSink, RunStats, SourceLoop,
@@ -523,6 +526,15 @@ impl GraphCoordHandle {
     async fn report(&self, event: Recascade) {
         let _ = self.tx.send(event).await;
     }
+
+    /// A handle with no coordinator behind it, for an arm the graph mutator
+    /// spliced in (M1115): it takes no part in the β cascade, so its reports go
+    /// nowhere and never block.
+    pub(crate) fn detached() -> Self {
+        let (tx, rx) = bounded(1);
+        drop(rx);
+        Self { tx }
+    }
 }
 
 /// Node-keyed β coordinator for the DAG (the DAG analog of the linear
@@ -866,8 +878,45 @@ pub async fn run_graph<'a, Clk: PipelineClock>(
         None,
         None,
         None,
+        None,
     )
     .await
+}
+
+/// As [`run_graph`], but hands back a [`GraphMutator`] over the running graph
+/// (M1115): a transform can be spliced onto a live edge, or lifted back off,
+/// while frames keep flowing. Drive the returned future and use the handle from
+/// another task, as with
+/// [`run_source_router_dynamic`](crate::runtime::run_source_router_dynamic).
+///
+/// A mutable run keeps every transform's element reachable so a remove can hand
+/// it back, which costs that element the unboxed `process` future the ordinary
+/// run gives it. Nothing else changes: the per-frame cost of the splice point
+/// itself is one relaxed atomic load.
+pub fn run_graph_mutable<'a, Clk: PipelineClock>(
+    graph: Graph<GraphNodeRef<'a>>,
+    clock: &'a Clk,
+    link_capacity: impl Into<LinkCapacity>,
+) -> (
+    GraphMutator<'a>,
+    impl core::future::Future<Output = Result<RunStats, G2gError>> + 'a,
+) {
+    let capacity: LinkCapacity = link_capacity.into();
+    let (mutator, requests) = mutation_channel(MUTATION_QUEUE_DEPTH);
+    let run = run_graph_inner(
+        graph,
+        clock,
+        capacity,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(requests),
+    );
+    (mutator, run)
 }
 
 /// As [`run_graph`], but enforces a memory-domain [`CopyPolicy`](crate::copyplan::CopyPolicy)
@@ -893,6 +942,7 @@ pub async fn run_graph_with_copy_policy<'a, Clk: PipelineClock>(
         None,
         None,
         Some(policy),
+        None,
         None,
         None,
         None,
@@ -1000,6 +1050,7 @@ pub async fn run_graph_with_bus<'a, Clk: PipelineClock>(
         None,
         None,
         None,
+        None,
     )
     .await
 }
@@ -1027,6 +1078,7 @@ pub async fn run_graph_observed<'a, Clk: PipelineClock>(
         None,
         None,
         Some(observer),
+        None,
         None,
         None,
     )
@@ -1059,6 +1111,7 @@ pub async fn run_graph_with_progress<'a, Clk: PipelineClock>(
         bus,
         None,
         Some(progress),
+        None,
         None,
         None,
         None,
@@ -1120,6 +1173,7 @@ pub async fn run_graph_stateful<'a, Clk: PipelineClock>(
         None,
         None,
         None,
+        None,
     )
     .await
 }
@@ -1152,6 +1206,7 @@ pub async fn run_graph_recorded<'a, Clk: PipelineClock>(
         None,
         Some(recorder),
         None,
+        None,
     )
     .await
 }
@@ -1176,6 +1231,7 @@ pub async fn run_graph_observed_recorded<'a, Clk: PipelineClock>(
         None,
         Some(observer),
         Some(recorder),
+        None,
         None,
     )
     .await
@@ -1456,6 +1512,16 @@ async fn prepare_graph<'a>(
         }
     }
     let latency = LatencyReport::aggregate(latencies);
+
+    // M1123: hand the fold's liveness back down to every element, before any
+    // arm starts. Unconditional, unlike the clock below: a path with no live
+    // source is told `false` rather than left to assume one.
+    for &node in topo {
+        if let Some(GraphNodeRef::Element(elem)) = vg.element_mut(node) {
+            elem.configure_liveness(latency.live);
+        }
+    }
+
     let elected = elect_clock(clocks.iter().cloned());
     let (clock_priority, base_time_ns) = match &elected {
         Some(c) => (c.priority, c.clock.now_ns()),
@@ -1535,6 +1601,62 @@ struct GraphChannels {
     arm_ctrl_rx: Vec<Option<Receiver<ArmDirective>>>,
     coord_handle: GraphCoordHandle,
     coordinator: GraphCoordinator,
+    /// Per edge, the retargetable producing end a [`GraphMutator`] splices at
+    /// (M1115). All `None` unless the run was asked for one.
+    endpoints: Vec<Option<alloc::sync::Arc<ProducerEndpoint>>>,
+}
+
+/// Whether an edge is a mutation position: a 1:1 link from a source or transform
+/// into a transform or sink. A tee / demux / muxer end is not one, so a splice
+/// there is refused rather than half-supported.
+fn mutable_edge<E>(vg: &ValidatedGraph<E>, edge: usize) -> bool {
+    matches!(
+        vg.kind(vg.edge(edge).src.node),
+        NodeKind::Source | NodeKind::Transform
+    ) && matches!(
+        vg.kind(vg.edge(edge).dst.node),
+        NodeKind::Transform | NodeKind::Sink
+    )
+}
+
+/// The mutator's view of the running graph: every node that can be addressed,
+/// the producing end of the edge below it, and who is on either side of it. The
+/// arm loop fills in each transform's element-return channel as it builds it.
+fn live_nodes<'a>(
+    vg: &ValidatedGraph<GraphNodeRef<'a>>,
+    names: &[alloc::string::String],
+    endpoints: &[Option<alloc::sync::Arc<ProducerEndpoint>>],
+    feasibility: &[Option<CapsSet>],
+    link_capacity: usize,
+) -> Vec<LiveNode<'a>> {
+    (0..vg.node_count())
+        .map(|i| {
+            let node = NodeId(i as u32);
+            let out = vg
+                .out_edges(node)
+                .first()
+                .copied()
+                .filter(|&e| endpoints[e].is_some());
+            let inbound = vg
+                .in_edges(node)
+                .first()
+                .copied()
+                .filter(|&e| endpoints[e].is_some());
+            LiveNode {
+                name: names[i].clone(),
+                endpoint: out.and_then(|e| endpoints[e].clone()),
+                next: out.map(|e| vg.edge(e).dst.node.0 as usize),
+                prev: inbound.map(|e| vg.edge(e).src.node.0 as usize),
+                feasible: out.and_then(|e| feasibility[e].clone()),
+                policy: out.map_or(crate::link::LinkPolicy::Block, |e| vg.edge(e).policy),
+                capacity: out.map_or(link_capacity, |e| {
+                    vg.edge(e).capacity.unwrap_or(link_capacity)
+                }),
+                done: None,
+                removable: matches!(vg.kind(node), NodeKind::Transform),
+            }
+        })
+        .collect()
 }
 
 fn build_channels<'a>(
@@ -1542,6 +1664,7 @@ fn build_channels<'a>(
     topo: &[NodeId],
     link_capacity: usize,
     instrument: bool,
+    mutable: bool,
 ) -> GraphChannels {
     let n = vg.node_count();
     // Phase 4: one bounded channel per edge, then one arm per node. Each arm
@@ -1550,6 +1673,7 @@ fn build_channels<'a>(
     let ne = vg.edge_count();
     let mut txs: Vec<Option<LinkSender>> = Vec::with_capacity(ne);
     let mut rxs: Vec<Option<LinkReceiver>> = Vec::with_capacity(ne);
+    let mut endpoints: Vec<Option<alloc::sync::Arc<ProducerEndpoint>>> = Vec::with_capacity(ne);
     // Shared drop counter: leaky links (`LinkPolicy::DropOldest`/`DropNewest`)
     // increment it per dropped frame, so the total surfaces in `RunStats`.
     let dropped = alloc::sync::Arc::new(spin::Mutex::new(0u64));
@@ -1581,6 +1705,10 @@ fn build_channels<'a>(
                 crate::runtime::instrument::EdgeCounters::default(),
             ));
         }
+        // M1115: the mutation gate, on the edges a splice can address.
+        let endpoint = (mutable && mutable_edge(vg, eid)).then(ProducerEndpoint::new);
+        tx.set_mutation(endpoint.clone());
+        endpoints.push(endpoint);
         txs.push(Some(tx));
         rxs.push(Some(rx));
     }
@@ -1634,6 +1762,7 @@ fn build_channels<'a>(
         arm_ctrl_rx,
         coord_handle,
         coordinator,
+        endpoints,
     }
 }
 
@@ -1695,6 +1824,7 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
     observer: Option<&Observer>,
     recorder: Option<&crate::runtime::FlightRecorder>,
     ticker: Option<&'a dyn DynAsyncClock>,
+    mutation: Option<Receiver<MutationRequest<'a>>>,
 ) -> Result<RunStats, G2gError> {
     // A pipeline clock that can sleep on a deadline is the fan-in tick timer
     // (M880), so every entry point ticks without one of its own. An explicit
@@ -1762,7 +1892,25 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
         mut arm_ctrl_rx,
         coord_handle,
         coordinator,
-    } = build_channels(&vg, &topo, link_capacity, observer.is_some());
+        endpoints,
+    } = build_channels(
+        &vg,
+        &topo,
+        link_capacity,
+        observer.is_some(),
+        mutation.is_some(),
+    );
+
+    // M1115: the mutation gates open on the negotiated shape; from here each one
+    // tracks the caps its edge is actually carrying.
+    for (eid, endpoint) in endpoints.iter().enumerate() {
+        if let Some(endpoint) = endpoint {
+            endpoint.set_caps(&solution[eid]);
+        }
+    }
+    let mut live = mutation
+        .is_some()
+        .then(|| live_nodes(&vg, &names, &endpoints, &feasibility, link_capacity));
 
     // Dev-tooling edge tap: hand the observer each edge's content-inspection slot
     // (shared with the arm's `SenderSink`), its negotiated caps, and its live
@@ -1879,7 +2027,7 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
                     .expect("transform ctrl rx");
                 let out_caps = solution[out_edge].clone();
                 let downstream_feasible = feasibility[out_edge].clone();
-                elem.drive_transform_arm(TransformArmIo {
+                let io = TransformArmIo {
                     in_rx,
                     out_tx,
                     arm_rx,
@@ -1891,7 +2039,19 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
                     bus: bus.cloned(),
                     probe: probes[node.0 as usize].clone(),
                     control: controllers[node.0 as usize].take(),
-                })
+                };
+                match live.as_mut() {
+                    // A mutable run keeps every transform's element reachable, so
+                    // a remove can hand it back once its arm has drained. The
+                    // element is driven through its erased handle here, which
+                    // boxes its `process` future the way a borrowing graph does.
+                    Some(nodes) => {
+                        let (done_tx, done_rx) = bounded(1);
+                        nodes[node.0 as usize].done = Some(done_rx);
+                        Box::pin(spliced_arm(elem, io, done_tx))
+                    }
+                    None => elem.drive_transform_arm(io),
+                }
             }
             NodeKind::Sink => {
                 let Some(GraphNodeRef::Element(elem)) = element else {
@@ -1960,17 +2120,48 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
     let coord_arm_index = arms.len();
     arms.push(Box::pin(async move { Ok(coordinator.run().await) }));
 
-    // M1004: with a swappable elected clock installed, the health monitor runs
-    // alongside the arms and is dropped once they finish (it never ends itself).
-    let results = match (elected_clock, bus, ticker) {
-        (Some(handle), Some(b), Some(t)) => {
-            let monitor = clock_health_monitor(clock_candidates, handle, b.clone(), t);
-            match select2(join_all(arms), monitor).await {
-                Either::Left(results) => results,
-                Either::Right(never) => match never {},
-            }
+    // M1115: a spliced element's arm joins the set while the run is going, so a
+    // mutable run joins its arms growably.
+    let (new_arm_tx, new_arm_rx) = match live.is_some() {
+        true => {
+            let (tx, rx) = bounded(MUTATION_QUEUE_DEPTH);
+            (Some(tx), Some(rx))
         }
-        _ => join_all(arms).await,
+        false => (None, None),
+    };
+    let service = match (mutation, live, new_arm_tx) {
+        (Some(rx), Some(nodes), Some(tx)) => Some(
+            MutationService::new(
+                rx,
+                nodes,
+                tx,
+                Box::new(|elem, io, done| Box::pin(spliced_arm(elem, io, done))),
+                bus.cloned(),
+                dropped.clone(),
+                latency.live,
+            )
+            .run(),
+        ),
+        _ => None,
+    };
+
+    // M1004: with a swappable elected clock installed, the health monitor runs
+    // alongside the arms and is dropped once they finish (it never ends itself),
+    // as does the mutation service.
+    let monitor = match (elected_clock, bus, ticker) {
+        (Some(handle), Some(b), Some(t)) => {
+            Some(clock_health_monitor(clock_candidates, handle, b.clone(), t))
+        }
+        _ => None,
+    };
+    let results = match select2(
+        join_arms(arms, new_arm_rx),
+        select2(never_or(monitor), never_or(service)),
+    )
+    .await
+    {
+        Either::Left(results) => results,
+        Either::Right(Either::Left(never) | Either::Right(never)) => match never {},
     };
     fold_run_stats(
         results,
@@ -1985,6 +2176,36 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
         base_time_ns,
         bus,
     )
+}
+
+/// Depth of the mutator's request and new-arm channels: how many structural
+/// operations can be in flight at once before a caller waits its turn.
+const MUTATION_QUEUE_DEPTH: usize = 4;
+
+/// Join the arms, growably when the run can be mutated (M1115): a spliced
+/// element's arm arrives on `new_arms` and is folded in mid-run. Results keep
+/// arm order, so the per-arm bookkeeping [`fold_run_stats`] indexes by position
+/// still lines up and a spliced arm's result lands past it.
+async fn join_arms<'f>(
+    arms: Vec<BoxFuture<'f, Result<u64, G2gError>>>,
+    new_arms: Option<Receiver<BoxFuture<'f, Result<u64, G2gError>>>>,
+) -> Vec<Result<u64, G2gError>> {
+    match new_arms {
+        Some(rx) => dynamic_join_open(arms, rx).await,
+        None => join_all(arms).await,
+    }
+}
+
+/// Run `f` if there is one, and otherwise nothing, forever. Lets the run select
+/// over its optional never-ending companions (the clock-health monitor, the
+/// mutation service) without a case per combination.
+async fn never_or<F: core::future::Future<Output = core::convert::Infallible>>(
+    f: Option<F>,
+) -> core::convert::Infallible {
+    match f {
+        Some(f) => f.await,
+        None => core::future::pending().await,
+    }
 }
 
 /// Fold each arm's per-node frame count into the final [`RunStats`], shared by
@@ -2161,6 +2382,7 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
     recorder: Option<&FlightRecorder>,
     ticker: Option<alloc::sync::Arc<dyn DynAsyncClock + Send + Sync>>,
     spawner: &S,
+    mutation: Option<Receiver<MutationRequest<'static>>>,
 ) -> Result<RunStats, G2gError> {
     // Same rule as the cooperative runner (M880), through the shared handle the
     // arm threads can own: a pipeline clock that can sleep on a deadline is the
@@ -2210,7 +2432,25 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
         mut arm_ctrl_rx,
         coord_handle,
         coordinator,
-    } = build_channels(&vg, &topo, link_capacity, observer.is_some());
+        endpoints,
+    } = build_channels(
+        &vg,
+        &topo,
+        link_capacity,
+        observer.is_some(),
+        mutation.is_some(),
+    );
+
+    // M1115: the mutation gates, seeded with the negotiated shape (see the
+    // cooperative path).
+    for (eid, endpoint) in endpoints.iter().enumerate() {
+        if let Some(endpoint) = endpoint {
+            endpoint.set_caps(&solution[eid]);
+        }
+    }
+    let mut live = mutation
+        .is_some()
+        .then(|| live_nodes(&vg, &names, &endpoints, &feasibility, link_capacity));
 
     // Dev-tooling edge tap: same as the cooperative path.
     if let Some(obs) = observer {
@@ -2325,8 +2565,13 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
                 let probe = probes[node.0 as usize].clone();
                 let ch = coord_handle.clone();
                 let control = controllers[node.0 as usize].take();
+                let done = live.as_mut().map(|nodes| {
+                    let (done_tx, done_rx) = bounded(1);
+                    nodes[node.0 as usize].done = Some(done_rx);
+                    done_tx
+                });
                 alloc::boxed::Box::new(move || -> LocalArmFuture {
-                    elem.drive_transform_arm(TransformArmIo {
+                    let io = TransformArmIo {
                         in_rx,
                         out_tx,
                         arm_rx,
@@ -2338,7 +2583,13 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
                         bus: bus_c,
                         probe,
                         control,
-                    })
+                    };
+                    // See the cooperative path: a mutable run keeps the element
+                    // reachable so a remove can hand it back.
+                    match done {
+                        Some(done) => Box::pin(spliced_arm(elem, io, done)),
+                        None => elem.drive_transform_arm(io),
+                    }
                 })
             }
             NodeKind::Sink => {
@@ -2431,17 +2682,57 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
         }),
     )));
 
+    // M1115: a spliced arm goes onto its own worker thread like every other one;
+    // only its handle joins the set here.
+    let (new_arm_tx, new_arm_rx) = match live.is_some() {
+        true => {
+            let (tx, rx) = bounded(MUTATION_QUEUE_DEPTH);
+            (Some(tx), Some(rx))
+        }
+        false => (None, None),
+    };
+    let service = match (mutation, live, new_arm_tx) {
+        (Some(rx), Some(nodes), Some(tx)) => {
+            let bus_c = bus.cloned();
+            Some(
+                MutationService::new(
+                    rx,
+                    nodes,
+                    tx,
+                    alloc::boxed::Box::new(move |elem, io, done| {
+                        let build: alloc::boxed::Box<dyn FnOnce() -> LocalArmFuture + Send> =
+                            alloc::boxed::Box::new(move || Box::pin(spliced_arm(elem, io, done)));
+                        spawner.spawn_arm(with_stream_status(bus_c.clone(), build))
+                    }),
+                    bus.cloned(),
+                    dropped.clone(),
+                    latency.live,
+                )
+                .run(),
+            )
+        }
+        _ => None,
+    };
+
     // M1004: same clock-health watch as the cooperative runner, driven on the
     // caller's executor rather than a worker thread (it only sleeps and reads).
-    let results = match (elected_clock, bus, &ticker) {
-        (Some(handle), Some(b), Some(t)) => {
-            let monitor = clock_health_monitor(clock_candidates, handle, b.clone(), &**t);
-            match select2(join_all(handles), monitor).await {
-                Either::Left(results) => results,
-                Either::Right(never) => match never {},
-            }
-        }
-        _ => join_all(handles).await,
+    let monitor = match (elected_clock, bus, &ticker) {
+        (Some(handle), Some(b), Some(t)) => Some(clock_health_monitor(
+            clock_candidates,
+            handle,
+            b.clone(),
+            &**t,
+        )),
+        _ => None,
+    };
+    let results = match select2(
+        join_arms(handles, new_arm_rx),
+        select2(never_or(monitor), never_or(service)),
+    )
+    .await
+    {
+        Either::Left(results) => results,
+        Either::Right(Either::Left(never) | Either::Right(never)) => match never {},
     };
     fold_run_stats(
         results,
@@ -2486,8 +2777,40 @@ pub async fn run_graph_threaded<Clk: PipelineClock, S: GraphSpawner>(
         None,
         None,
         spawner,
+        None,
     )
     .await
+}
+
+/// As [`run_graph_threaded`], but hands back a [`GraphMutator`] over the running
+/// graph (M1115), the thread-per-arm sibling of [`run_graph_mutable`]. A spliced
+/// element's arm gets its own worker thread from `spawner`, like every other arm.
+#[cfg(all(feature = "std", feature = "multi-thread"))]
+pub fn run_graph_threaded_mutable<'s, Clk: PipelineClock, S: GraphSpawner>(
+    graph: Graph<GraphNode>,
+    clock: &'s Clk,
+    link_capacity: impl Into<LinkCapacity>,
+    spawner: &'s S,
+) -> (
+    GraphMutator<'static>,
+    impl core::future::Future<Output = Result<RunStats, G2gError>> + 's,
+) {
+    let capacity: LinkCapacity = link_capacity.into();
+    let (mutator, requests) = mutation_channel(MUTATION_QUEUE_DEPTH);
+    let run = run_graph_threaded_inner(
+        graph,
+        clock,
+        capacity,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        spawner,
+        Some(requests),
+    );
+    (mutator, run)
 }
 
 /// As [`run_graph_threaded`], but takes the arms' **deadline tick** timer
@@ -2520,6 +2843,7 @@ pub async fn run_graph_threaded_ticked<S: GraphSpawner>(
         None,
         Some(clock.clone()),
         spawner,
+        None,
     )
     .await
 }
@@ -2547,6 +2871,7 @@ pub async fn run_graph_threaded_with_bus<Clk: PipelineClock, S: GraphSpawner>(
         None,
         None,
         spawner,
+        None,
     )
     .await
 }
@@ -2573,6 +2898,7 @@ pub async fn run_graph_threaded_with_progress<Clk: PipelineClock, S: GraphSpawne
         None,
         None,
         spawner,
+        None,
     )
     .await
 }
@@ -2601,6 +2927,7 @@ pub async fn run_graph_threaded_observed<Clk: PipelineClock, S: GraphSpawner>(
         None,
         None,
         spawner,
+        None,
     )
     .await
 }
@@ -2633,6 +2960,7 @@ pub async fn run_graph_threaded_recorded<Clk: PipelineClock, S: GraphSpawner>(
         Some(recorder),
         None,
         spawner,
+        None,
     )
     .await
 }

@@ -7,8 +7,8 @@
 use alloc::vec::Vec;
 
 use crate::caps::{
-    pcm_from_gst_format, AudioFormat, ByteStreamEncoding, Caps, CapsSet, Dim, Interlace, Rate,
-    RawVideoFormat, SubPictureFormat, TextFormat, VideoCodec, PCM_FORMATS,
+    pcm_from_gst_format, AudioFormat, ByteStreamEncoding, Caps, CapsSet, Colorimetry, Dim,
+    Interlace, Rate, RawVideoFormat, SubPictureFormat, TextFormat, VideoCodec, PCM_FORMATS,
 };
 
 /// The raw pixel formats a format-less `video/x-raw` expands to (M184). Order is
@@ -157,6 +157,18 @@ fn expand_audio_format(fv: Option<&FieldVal>) -> Option<Vec<AudioFormat>> {
     })
 }
 
+// An absent `colorimetry` is the wildcard (matching `to_gst_string`, which
+// omits an unknown one); a present value must parse (preset name or 4-part
+// form) or the whole caps is rejected. No list/range: GStreamer's colorimetry
+// is one flat string value.
+fn expand_colorimetry(fv: Option<&FieldVal>) -> Option<Colorimetry> {
+    match fv {
+        None => Some(Colorimetry::UNKNOWN),
+        Some(FieldVal::One(s)) => Colorimetry::from_gst_string(s),
+        Some(_) => None,
+    }
+}
+
 // `Caps::Audio` holds scalar channels (u8) / sample_rate (u32) with no range
 // type, so a range is rejected; a list expands to alternatives.
 fn expand_u8(fv: Option<&FieldVal>, default: u8) -> Option<Vec<u8>> {
@@ -210,11 +222,18 @@ impl CapsSet {
                 expand_dim(fv("height"))?,
                 expand_rate(fv("framerate"))?,
             );
+            let colorimetry = expand_colorimetry(fv("colorimetry"))?;
             let mut alts = Vec::new();
             for w in &widths {
                 for h in &heights {
                     for r in &rates {
-                        alts.push(compressed(codec, w.clone(), h.clone(), r.clone()));
+                        alts.push(compressed(
+                            codec,
+                            w.clone(),
+                            h.clone(),
+                            r.clone(),
+                            colorimetry,
+                        ));
                     }
                 }
             }
@@ -262,6 +281,7 @@ impl CapsSet {
                     Some(FieldVal::One(s)) if *s == "interleaved" => Interlace::Interleaved,
                     Some(_) => return None,
                 };
+                let colorimetry = expand_colorimetry(fv("colorimetry"))?;
                 let mut alts = Vec::new();
                 for &format in &formats {
                     for w in &widths {
@@ -273,6 +293,7 @@ impl CapsSet {
                                     height: h.clone(),
                                     framerate: r.clone(),
                                     interlace,
+                                    colorimetry,
                                 });
                             }
                         }
@@ -366,12 +387,19 @@ impl CapsSet {
     }
 }
 
-fn compressed(codec: VideoCodec, width: Dim, height: Dim, framerate: Rate) -> Caps {
+fn compressed(
+    codec: VideoCodec,
+    width: Dim,
+    height: Dim,
+    framerate: Rate,
+    colorimetry: Colorimetry,
+) -> Caps {
     Caps::CompressedVideo {
         codec,
         width,
         height,
         framerate,
+        colorimetry,
     }
 }
 
@@ -579,6 +607,44 @@ mod tests {
                 &[caps]
             );
         }
+    }
+
+    #[test]
+    fn parse_caps_reads_colorimetry() {
+        let set = CapsSet::from_gst_string("video/x-raw,format=NV12,colorimetry=bt709").unwrap();
+        let Caps::RawVideo { colorimetry, .. } = &set.alternatives()[0] else {
+            panic!()
+        };
+        assert_eq!(*colorimetry, Colorimetry::BT709);
+        // The compressed media types take the field too (a caps filter can pin
+        // the bitstream's declared colorimetry).
+        let set = CapsSet::from_gst_string("video/x-h264,colorimetry=bt601").unwrap();
+        let Caps::CompressedVideo { colorimetry, .. } = &set.alternatives()[0] else {
+            panic!()
+        };
+        assert_eq!(*colorimetry, Colorimetry::BT601);
+        // Absent = wildcard; unparseable = the whole caps is rejected.
+        let set = CapsSet::from_gst_string("video/x-raw,format=NV12").unwrap();
+        let Caps::RawVideo { colorimetry, .. } = &set.alternatives()[0] else {
+            panic!()
+        };
+        assert_eq!(*colorimetry, Colorimetry::UNKNOWN);
+        assert!(CapsSet::from_gst_string("video/x-raw,colorimetry=banana").is_none());
+        // What the printer emits parses back to the same caps.
+        let caps = Caps::RawVideo {
+            format: RawVideoFormat::I420,
+            width: Dim::Fixed(1920),
+            height: Dim::Fixed(1080),
+            framerate: Rate::Fixed(30 << 16),
+            interlace: Interlace::Any,
+            colorimetry: Colorimetry::BT709,
+        };
+        let printed = caps.to_gst_string();
+        assert_eq!(
+            CapsSet::from_gst_string(&printed).unwrap().alternatives(),
+            &[caps],
+            "{printed}"
+        );
     }
 
     #[test]

@@ -125,6 +125,7 @@ fn element_decodes_stream_to_nv12_frames() {
         width: Dim::Fixed(640),
         height: Dim::Fixed(480),
         framerate: Rate::Fixed(30 << 16),
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     };
     dec.configure_pipeline(&in_caps)
         .expect("configure opens the decode device");
@@ -159,6 +160,7 @@ fn element_decodes_stream_to_nv12_frames() {
             height: Dim::Fixed(480),
             framerate: Rate::Fixed(30 << 16),
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN
         },
         "emits NV12 640x480 at the input framerate"
     );

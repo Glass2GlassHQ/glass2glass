@@ -356,6 +356,7 @@ impl PadTemplates for St2110VideoSink {
             height: Dim::Any,
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         })
         .to_vec();
         Vec::from([PadTemplate::sink(CapsSet::from_alternatives(alts))])
@@ -511,6 +512,7 @@ impl St2110VideoSrc {
             height: Dim::Fixed(self.height as u32),
             framerate: Rate::Fixed(self.framerate_fps << 16),
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 }
@@ -630,6 +632,7 @@ impl PadTemplates for St2110VideoSrc {
             height: Dim::Any,
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         })
         .to_vec();
         Vec::from([PadTemplate::source(CapsSet::from_alternatives(alts))])
@@ -785,6 +788,7 @@ mod tests {
             height: Dim::Fixed(h as u32),
             framerate: Rate::Fixed(30 << 16),
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
 
         let mut src = St2110VideoSrc::new();
@@ -837,6 +841,7 @@ mod tests {
             height: Dim::Fixed(h as u32),
             framerate: Rate::Fixed(60 << 16),
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
 
         let mut src = St2110VideoSrc::new();
@@ -889,6 +894,7 @@ mod tests {
             height: Dim::Fixed(h as u32),
             framerate: Rate::Fixed(30 << 16),
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
 
         let mut src = St2110VideoSrc::new();
@@ -1001,6 +1007,7 @@ mod tests {
             height: Dim::Fixed(1080),
             framerate: Rate::Fixed(60 << 16),
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         let mut sink = St2110VideoSink::new();
         sink.host = String::from("239.20.30.40");
@@ -1085,6 +1092,7 @@ mod tests {
             height: Dim::Fixed(h as u32),
             framerate: Rate::Fixed(50 << 16), // 20 ms period
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         // A receiver to count the packets that actually arrive.
         let rx = UdpSocket::bind(("127.0.0.1", 0)).unwrap();

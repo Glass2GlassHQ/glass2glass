@@ -58,6 +58,7 @@ impl PySource {
                 height: Dim::Fixed(240),
                 framerate: Rate::Fixed(30),
                 interlace: g2g_core::Interlace::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
             },
             num_buffers: None,
             cuda_frames: false,
@@ -100,7 +101,7 @@ impl PySource {
             width,
             height,
             framerate,
-            interlace: _,
+            ..
         } = &mut self.caps
         {
             f(format, width, height, framerate);
@@ -320,7 +321,7 @@ impl SourceLoop for PySource {
                 width,
                 height,
                 framerate,
-                interlace: _,
+                ..
             } => Some((format, width, height, framerate)),
             _ => None,
         };

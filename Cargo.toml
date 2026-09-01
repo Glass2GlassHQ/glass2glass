@@ -31,6 +31,10 @@ exclude = [
     # Android NativeActivity present harness (M742): NDK-built cdylib APK,
     # packaged by tools/android-apk-present-smoke.sh, never in the host build.
     "examples/g2g-android-present",
+    # Live splice demo (M1120): needs rtsp + ffmpeg + wayland-sink (libavcodec,
+    # a Wayland session), so it stays out of the workspace's default-feature
+    # build. Standalone, own Cargo.lock. See its README.
+    "examples/g2g-mutate-demo",
     # Cortex-M footprint-measurement harness (M268): a no_std staticlib measured
     # with size+gc-sections, kept out of the normal build.
     "examples/g2g-size",

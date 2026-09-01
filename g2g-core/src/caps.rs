@@ -61,6 +61,9 @@ pub enum Caps {
         width: Dim,
         height: Dim,
         framerate: Rate,
+        /// Colour description from the bitstream (VUI / `color_config`),
+        /// [`Colorimetry::UNKNOWN`] until a parser reads it.
+        colorimetry: Colorimetry,
     },
     /// Raw pixel buffer in `format`. Geometry is authoritative.
     RawVideo {
@@ -69,6 +72,9 @@ pub enum Caps {
         height: Dim,
         framerate: Rate,
         interlace: Interlace,
+        /// How the samples map to colour, [`Colorimetry::UNKNOWN`] when the
+        /// producer does not know (a sink then applies its own default).
+        colorimetry: Colorimetry,
     },
     Audio {
         format: AudioFormat,
@@ -160,18 +166,21 @@ impl Caps {
                     width: wa,
                     height: ha,
                     framerate: ra,
+                    colorimetry: cla,
                 },
                 Caps::CompressedVideo {
                     codec: cb,
                     width: wb,
                     height: hb,
                     framerate: rb,
+                    colorimetry: clb,
                 },
             ) if ca == cb => Ok(Caps::CompressedVideo {
                 codec: *ca,
                 width: wa.intersect(wb).ok_or(G2gError::CapsMismatch)?,
                 height: ha.intersect(hb).ok_or(G2gError::CapsMismatch)?,
                 framerate: ra.intersect(rb).ok_or(G2gError::CapsMismatch)?,
+                colorimetry: cla.intersect(clb).ok_or(G2gError::CapsMismatch)?,
             }),
             (
                 Caps::RawVideo {
@@ -180,6 +189,7 @@ impl Caps {
                     height: ha,
                     framerate: ra,
                     interlace: ia,
+                    colorimetry: cla,
                 },
                 Caps::RawVideo {
                     format: fb,
@@ -187,6 +197,7 @@ impl Caps {
                     height: hb,
                     framerate: rb,
                     interlace: ib,
+                    colorimetry: clb,
                 },
             ) if fa == fb => Ok(Caps::RawVideo {
                 format: *fa,
@@ -194,6 +205,7 @@ impl Caps {
                 height: ha.intersect(hb).ok_or(G2gError::CapsMismatch)?,
                 framerate: ra.intersect(rb).ok_or(G2gError::CapsMismatch)?,
                 interlace: ia.intersect(ib).ok_or(G2gError::CapsMismatch)?,
+                colorimetry: cla.intersect(clb).ok_or(G2gError::CapsMismatch)?,
             }),
             (
                 Caps::Audio {
@@ -283,7 +295,7 @@ impl Caps {
     /// single `Fixed` value. `Range` fixates to its **minimum**, reflecting
     /// the latency-first design (less data is lower latency); an element
     /// preferring a different value counter-proposes via
-    /// [`ConfigureOutcome::ReFixate`](crate::element::ConfigureOutcome).
+    /// `ConfigureOutcome::ReFixate`.
     /// `Any` carries no information to fixate against and yields
     /// `CapsMismatch`.
     pub fn fixate(&self) -> Result<Caps, G2gError> {
@@ -293,11 +305,16 @@ impl Caps {
                 width,
                 height,
                 framerate,
+                colorimetry,
             } => Ok(Caps::CompressedVideo {
                 codec: *codec,
                 width: width.fixate().ok_or(G2gError::CapsMismatch)?,
                 height: height.fixate().ok_or(G2gError::CapsMismatch)?,
                 framerate: framerate.fixate().ok_or(G2gError::CapsMismatch)?,
+                // Colorimetry `Unknown` survives fixation like `Interlace::Any`
+                // below: the bitstream refines it later, and collapsing it to a
+                // guess is exactly the wrong-matrix bug this field exists to fix.
+                colorimetry: *colorimetry,
             }),
             Caps::RawVideo {
                 format,
@@ -305,6 +322,7 @@ impl Caps {
                 height,
                 framerate,
                 interlace,
+                colorimetry,
             } => Ok(Caps::RawVideo {
                 format: *format,
                 width: width.fixate().ok_or(G2gError::CapsMismatch)?,
@@ -314,6 +332,7 @@ impl Caps {
                 // (GStreamer's absent field), so it is concrete enough to keep:
                 // collapsing it would only churn solved-caps equalities.
                 interlace: *interlace,
+                colorimetry: *colorimetry,
             }),
             // A raw-PCM "any" sample rate carries no value to fixate against
             // (M187); compressed audio's nominal `0` fixates as-is.
@@ -386,6 +405,7 @@ impl Caps {
                 height,
                 framerate,
                 interlace,
+                colorimetry,
             } => {
                 let mut s = format!("video/x-raw,format={}", raw_format_gst_name(*format));
                 push_dim(&mut s, "width", width);
@@ -396,6 +416,7 @@ impl Caps {
                 if *interlace == Interlace::Interleaved {
                     s.push_str(",interlace-mode=interleaved");
                 }
+                push_colorimetry(&mut s, colorimetry);
                 s
             }
             Caps::CompressedVideo {
@@ -403,11 +424,13 @@ impl Caps {
                 width,
                 height,
                 framerate,
+                colorimetry,
             } => {
                 let mut s = String::from(codec_gst_media_type(*codec));
                 push_dim(&mut s, "width", width);
                 push_dim(&mut s, "height", height);
                 push_rate(&mut s, framerate);
+                push_colorimetry(&mut s, colorimetry);
                 s
             }
             Caps::Audio {
@@ -623,6 +646,15 @@ fn push_rate(s: &mut String, r: &Rate) {
     }
 }
 
+/// Append `,colorimetry=value` for a non-`UNKNOWN` colorimetry (an unknown one
+/// is the absent field, like a wildcard dimension).
+#[cfg(feature = "alloc")]
+fn push_colorimetry(s: &mut String, c: &Colorimetry) {
+    if let Some(v) = c.to_gst_string() {
+        s.push_str(&format!(",colorimetry={v}"));
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Dim {
     Any,
@@ -756,6 +788,511 @@ impl Interlace {
     }
 }
 
+/// YUV <-> RGB matrix coefficients of a video stream, the CICP
+/// `matrix_coefficients` vocabulary (H.273, shared by the H.264 / H.265 VUI and
+/// the AV1 `color_config`). `Unknown` is the wildcard every untagged stream
+/// carries; a codepoint outside the modeled set also maps to `Unknown`, so a
+/// malformed stream cannot smuggle a bogus value into caps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum MatrixCoefficients {
+    Unknown,
+    /// Identity: the "YUV" planes are actually GBR (CICP 0, sRGB video).
+    Identity,
+    /// BT.601 (BT.470BG / SMPTE 170M, CICP 5 / 6): same coefficients, so the
+    /// two codepoints share one variant (the primaries keep them apart).
+    Bt601,
+    /// BT.709 (CICP 1).
+    Bt709,
+    /// BT.2020 non-constant luminance (CICP 9), the HDR / wide-gamut matrix.
+    Bt2020Ncl,
+}
+
+/// The codepoint every CICP colour field spells "unspecified", what `Unknown`
+/// writes out and what `from_cicp` reads back as `Unknown`.
+const CICP_UNSPECIFIED: u8 = 2;
+
+impl MatrixCoefficients {
+    /// The variant a CICP `matrix_coefficients` codepoint names; anything not
+    /// modeled (unspecified 2 included) is `Unknown`.
+    pub const fn from_cicp(codepoint: u8) -> Self {
+        match codepoint {
+            0 => MatrixCoefficients::Identity,
+            1 => MatrixCoefficients::Bt709,
+            5 | 6 => MatrixCoefficients::Bt601,
+            9 => MatrixCoefficients::Bt2020Ncl,
+            _ => MatrixCoefficients::Unknown,
+        }
+    }
+
+    /// The CICP `matrix_coefficients` codepoint an encoder writes for this
+    /// variant. `Bt601` writes 6 (SMPTE 170M) of the two codepoints that share
+    /// its coefficients.
+    pub const fn to_cicp(self) -> u8 {
+        match self {
+            MatrixCoefficients::Unknown => CICP_UNSPECIFIED,
+            MatrixCoefficients::Identity => 0,
+            MatrixCoefficients::Bt709 => 1,
+            MatrixCoefficients::Bt601 => 6,
+            MatrixCoefficients::Bt2020Ncl => 9,
+        }
+    }
+}
+
+/// The luma weights `(Kr, Kb)` that define a YUV matrix; the green weight is
+/// [`kg`](Self::kg), whatever the other two leave. Every YUV <-> RGB coefficient
+/// a converter, sink or shader uses is derived from this pair, and these are the
+/// only place the numbers appear.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LumaCoefficients {
+    pub kr: f32,
+    pub kb: f32,
+}
+
+impl LumaCoefficients {
+    /// BT.601 (BT.470BG / SMPTE 170M).
+    pub const BT601: Self = Self {
+        kr: 0.299,
+        kb: 0.114,
+    };
+    /// BT.709.
+    pub const BT709: Self = Self {
+        kr: 0.2126,
+        kb: 0.0722,
+    };
+    /// BT.2020 non-constant luminance.
+    pub const BT2020_NCL: Self = Self {
+        kr: 0.2627,
+        kb: 0.0593,
+    };
+
+    /// The green weight, `1 - Kr - Kb`.
+    pub const fn kg(self) -> f32 {
+        1.0 - self.kr - self.kb
+    }
+}
+
+/// The YUV <-> RGB conversion a converter or sink applies to one stream, as
+/// [`Colorimetry::yuv_conversion`] resolves it: which matrix, its luma weights,
+/// and whether the samples span 0..255 (full) or the studio range (limited).
+/// Transfer and primaries are not part of it: nothing here tone-maps or
+/// gamut-maps.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct YuvConversion {
+    /// The matrix the weights came from, for a converter that has to declare
+    /// what it produced.
+    pub matrix: MatrixCoefficients,
+    pub luma: LumaCoefficients,
+    pub full_range: bool,
+}
+
+/// Opto-electronic transfer function of a video stream, the CICP
+/// `transfer_characteristics` vocabulary. See [`MatrixCoefficients`] for the
+/// `Unknown` / unmodeled-codepoint rule.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum TransferCharacteristics {
+    Unknown,
+    /// sRGB (IEC 61966-2-1, CICP 13).
+    Srgb,
+    /// BT.601 (SMPTE 170M, CICP 6).
+    Bt601,
+    /// BT.709 (CICP 1).
+    Bt709,
+    /// BT.2020 10- / 12-bit (CICP 14 / 15): the same curve as BT.709, kept as
+    /// its own variant because streams tag it distinctly.
+    Bt2020,
+    /// PQ (SMPTE ST 2084 / BT.2100, CICP 16), the HDR10 transfer.
+    Pq,
+    /// HLG (ARIB STD-B67 / BT.2100, CICP 18).
+    Hlg,
+}
+
+impl TransferCharacteristics {
+    /// The variant a CICP `transfer_characteristics` codepoint names; anything
+    /// not modeled is `Unknown`.
+    pub const fn from_cicp(codepoint: u8) -> Self {
+        match codepoint {
+            1 => TransferCharacteristics::Bt709,
+            6 => TransferCharacteristics::Bt601,
+            13 => TransferCharacteristics::Srgb,
+            14 | 15 => TransferCharacteristics::Bt2020,
+            16 => TransferCharacteristics::Pq,
+            18 => TransferCharacteristics::Hlg,
+            _ => TransferCharacteristics::Unknown,
+        }
+    }
+
+    /// The CICP `transfer_characteristics` codepoint an encoder writes for this
+    /// variant. `Bt2020` writes 14 (the 10-bit codepoint) of the two it covers.
+    pub const fn to_cicp(self) -> u8 {
+        match self {
+            TransferCharacteristics::Unknown => CICP_UNSPECIFIED,
+            TransferCharacteristics::Bt709 => 1,
+            TransferCharacteristics::Bt601 => 6,
+            TransferCharacteristics::Srgb => 13,
+            TransferCharacteristics::Bt2020 => 14,
+            TransferCharacteristics::Pq => 16,
+            TransferCharacteristics::Hlg => 18,
+        }
+    }
+}
+
+/// Colour primaries of a video stream, the CICP `colour_primaries` vocabulary.
+/// See [`MatrixCoefficients`] for the `Unknown` / unmodeled-codepoint rule.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum ColorPrimaries {
+    Unknown,
+    /// BT.709 (CICP 1), also sRGB's primaries.
+    Bt709,
+    /// BT.470BG (CICP 5), 625-line BT.601.
+    Bt470bg,
+    /// SMPTE 170M (CICP 6), 525-line BT.601.
+    Smpte170m,
+    /// BT.2020 (CICP 9), the wide-gamut / HDR primaries.
+    Bt2020,
+}
+
+impl ColorPrimaries {
+    /// The variant a CICP `colour_primaries` codepoint names; anything not
+    /// modeled is `Unknown`.
+    pub const fn from_cicp(codepoint: u8) -> Self {
+        match codepoint {
+            1 => ColorPrimaries::Bt709,
+            5 => ColorPrimaries::Bt470bg,
+            6 => ColorPrimaries::Smpte170m,
+            9 => ColorPrimaries::Bt2020,
+            _ => ColorPrimaries::Unknown,
+        }
+    }
+
+    /// The CICP `colour_primaries` codepoint an encoder writes for this variant.
+    pub const fn to_cicp(self) -> u8 {
+        match self {
+            ColorPrimaries::Unknown => CICP_UNSPECIFIED,
+            ColorPrimaries::Bt709 => 1,
+            ColorPrimaries::Bt470bg => 5,
+            ColorPrimaries::Smpte170m => 6,
+            ColorPrimaries::Bt2020 => 9,
+        }
+    }
+}
+
+/// Quantization range of a video stream's samples: `Limited` is studio swing
+/// (Y 16..235 at 8 bit), `Full` is 0..255.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum ColorRange {
+    Unknown,
+    Limited,
+    Full,
+}
+
+/// Colorimetry of a video caps (both [`Caps::RawVideo`] and
+/// [`Caps::CompressedVideo`]): the four fields of GStreamer's `colorimetry`
+/// caps value, each with an `Unknown` wildcard. Like [`Interlace`], `Unknown`
+/// survives `fixate` and counts as fixed, so an untagged stream negotiates
+/// exactly as before the field existed: a bitstream parser refines it from the
+/// VUI / `color_config` via `CapsChanged`, and a converter or sink consumes the
+/// concrete value through [`yuv_conversion`](Self::yuv_conversion), which
+/// resolves the matrix and range it converts with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Colorimetry {
+    pub range: ColorRange,
+    pub matrix: MatrixCoefficients,
+    pub transfer: TransferCharacteristics,
+    pub primaries: ColorPrimaries,
+}
+
+impl Default for Colorimetry {
+    /// [`Colorimetry::UNKNOWN`]: no colour information.
+    fn default() -> Self {
+        Colorimetry::UNKNOWN
+    }
+}
+
+impl Colorimetry {
+    /// Fully unknown: what every construction site that has no colour
+    /// information declares, and the wildcard that intersects with anything.
+    pub const UNKNOWN: Self = Self {
+        range: ColorRange::Unknown,
+        matrix: MatrixCoefficients::Unknown,
+        transfer: TransferCharacteristics::Unknown,
+        primaries: ColorPrimaries::Unknown,
+    };
+
+    /// GStreamer's `bt601` preset: limited range, BT.601 matrix + transfer,
+    /// SMPTE 170M primaries. The SD default.
+    pub const BT601: Self = Self {
+        range: ColorRange::Limited,
+        matrix: MatrixCoefficients::Bt601,
+        transfer: TransferCharacteristics::Bt601,
+        primaries: ColorPrimaries::Smpte170m,
+    };
+
+    /// GStreamer's `bt709` preset: limited range, BT.709 throughout. The HD
+    /// default.
+    pub const BT709: Self = Self {
+        range: ColorRange::Limited,
+        matrix: MatrixCoefficients::Bt709,
+        transfer: TransferCharacteristics::Bt709,
+        primaries: ColorPrimaries::Bt709,
+    };
+
+    /// GStreamer's `bt2020` preset: limited range, BT.2020 NCL matrix, BT.2020
+    /// transfer and primaries. SDR wide-gamut UHD.
+    pub const BT2020: Self = Self {
+        range: ColorRange::Limited,
+        matrix: MatrixCoefficients::Bt2020Ncl,
+        transfer: TransferCharacteristics::Bt2020,
+        primaries: ColorPrimaries::Bt2020,
+    };
+
+    /// GStreamer's `bt2100-pq` preset: BT.2020 with the PQ transfer (HDR10).
+    pub const BT2100_PQ: Self = Self {
+        range: ColorRange::Limited,
+        matrix: MatrixCoefficients::Bt2020Ncl,
+        transfer: TransferCharacteristics::Pq,
+        primaries: ColorPrimaries::Bt2020,
+    };
+
+    /// GStreamer's `bt2100-hlg` preset: BT.2020 with the HLG transfer.
+    pub const BT2100_HLG: Self = Self {
+        range: ColorRange::Limited,
+        matrix: MatrixCoefficients::Bt2020Ncl,
+        transfer: TransferCharacteristics::Hlg,
+        primaries: ColorPrimaries::Bt2020,
+    };
+
+    /// GStreamer's `sRGB` preset: full range, identity (GBR) matrix, sRGB
+    /// transfer, BT.709 primaries. What an RGB source or converter output is.
+    pub const SRGB: Self = Self {
+        range: ColorRange::Full,
+        matrix: MatrixCoefficients::Identity,
+        transfer: TransferCharacteristics::Srgb,
+        primaries: ColorPrimaries::Bt709,
+    };
+
+    /// Resolve from raw CICP codepoints + the coded full-range flag, the shape
+    /// an H.264 / H.265 VUI colour description or an AV1 `color_config`
+    /// carries. Unmodeled codepoints (unspecified 2 included) become `Unknown`
+    /// per field; the range is always concrete, since the flag is coded.
+    pub const fn from_cicp(
+        colour_primaries: u8,
+        transfer_characteristics: u8,
+        matrix_coefficients: u8,
+        video_full_range_flag: bool,
+    ) -> Self {
+        Self {
+            range: if video_full_range_flag {
+                ColorRange::Full
+            } else {
+                ColorRange::Limited
+            },
+            matrix: MatrixCoefficients::from_cicp(matrix_coefficients),
+            transfer: TransferCharacteristics::from_cicp(transfer_characteristics),
+            primaries: ColorPrimaries::from_cicp(colour_primaries),
+        }
+    }
+
+    /// Field-wise intersection: `Unknown` is the identity on each field, equal
+    /// concrete values pass, two different concrete values are an empty
+    /// overlap (`None`). So an untagged link never blocks a tagged peer, and a
+    /// wrongly tagged link fails loud instead of silently converting with the
+    /// wrong matrix.
+    pub fn intersect(&self, other: &Colorimetry) -> Option<Colorimetry> {
+        fn field<T: PartialEq + Copy>(a: T, b: T, unknown: T) -> Option<T> {
+            if a == unknown {
+                Some(b)
+            } else if b == unknown || a == b {
+                Some(a)
+            } else {
+                None
+            }
+        }
+        Some(Colorimetry {
+            range: field(self.range, other.range, ColorRange::Unknown)?,
+            matrix: field(self.matrix, other.matrix, MatrixCoefficients::Unknown)?,
+            transfer: field(
+                self.transfer,
+                other.transfer,
+                TransferCharacteristics::Unknown,
+            )?,
+            primaries: field(self.primaries, other.primaries, ColorPrimaries::Unknown)?,
+        })
+    }
+
+    /// The matrix and range a YUV <-> RGB converter or sink applies to a stream
+    /// carrying this colorimetry. An `Unknown` matrix or range falls back to
+    /// BT.601 limited, what every converter assumed before caps carried colour;
+    /// `Identity` names GBR planes, which no converter here handles, and takes
+    /// the same fallback. This is the only place that fallback lives, so a
+    /// better guess (BT.709 above SD, say) is a change to this function alone.
+    pub const fn yuv_conversion(self) -> YuvConversion {
+        let (matrix, luma) = match self.matrix {
+            MatrixCoefficients::Bt709 => (MatrixCoefficients::Bt709, LumaCoefficients::BT709),
+            MatrixCoefficients::Bt2020Ncl => {
+                (MatrixCoefficients::Bt2020Ncl, LumaCoefficients::BT2020_NCL)
+            }
+            _ => (MatrixCoefficients::Bt601, LumaCoefficients::BT601),
+        };
+        YuvConversion {
+            matrix,
+            luma,
+            full_range: matches!(self.range, ColorRange::Full),
+        }
+    }
+
+    /// The `(preset, colorimetry)` pairs of GStreamer's named colorimetries.
+    /// One table so printing and parsing cannot drift.
+    const GST_PRESETS: [(&'static str, Colorimetry); 6] = [
+        ("bt709", Colorimetry::BT709),
+        ("bt601", Colorimetry::BT601),
+        ("bt2020", Colorimetry::BT2020),
+        ("bt2100-pq", Colorimetry::BT2100_PQ),
+        ("bt2100-hlg", Colorimetry::BT2100_HLG),
+        ("sRGB", Colorimetry::SRGB),
+    ];
+
+    /// Render as a GStreamer `colorimetry=` value: a preset name when the four
+    /// fields match one (`bt709`, `sRGB`, ...), the numeric
+    /// `range:matrix:transfer:primaries` 4-part form otherwise, and `None` for
+    /// fully [`UNKNOWN`](Self::UNKNOWN) (the field is omitted, GStreamer's
+    /// spelling of an absent constraint).
+    #[cfg(feature = "alloc")]
+    pub fn to_gst_string(&self) -> Option<String> {
+        if *self == Colorimetry::UNKNOWN {
+            return None;
+        }
+        for (name, preset) in Self::GST_PRESETS {
+            if *self == preset {
+                return Some(String::from(name));
+            }
+        }
+        Some(format!(
+            "{}:{}:{}:{}",
+            gst_range_num(self.range),
+            gst_matrix_num(self.matrix),
+            gst_transfer_num(self.transfer),
+            gst_primaries_num(self.primaries)
+        ))
+    }
+
+    /// Parse a GStreamer `colorimetry=` value: a preset name
+    /// (case-insensitive, so `srgb` works) or the numeric
+    /// `range:matrix:transfer:primaries` form. `None` on anything else,
+    /// including a GStreamer enum number this model does not carry: a filter
+    /// pinning e.g. SMPTE 240M cannot be honored, so it fails loud rather than
+    /// widening to a wildcard.
+    pub fn from_gst_string(s: &str) -> Option<Colorimetry> {
+        let s = s.trim();
+        for (name, preset) in Self::GST_PRESETS {
+            if s.eq_ignore_ascii_case(name) {
+                return Some(preset);
+            }
+        }
+        let mut parts = s.split(':');
+        let range = gst_range_from_num(parts.next()?.parse().ok()?)?;
+        let matrix = gst_matrix_from_num(parts.next()?.parse().ok()?)?;
+        let transfer = gst_transfer_from_num(parts.next()?.parse().ok()?)?;
+        let primaries = gst_primaries_from_num(parts.next()?.parse().ok()?)?;
+        if parts.next().is_some() {
+            return None;
+        }
+        Some(Colorimetry {
+            range,
+            matrix,
+            transfer,
+            primaries,
+        })
+    }
+}
+
+// GStreamer numeric codes for the 4-part colorimetry string. These are
+// GStreamer's own enum values (GstVideoColorRange etc.), NOT CICP codepoints.
+#[cfg(feature = "alloc")]
+fn gst_range_num(v: ColorRange) -> u8 {
+    match v {
+        ColorRange::Unknown => 0,
+        ColorRange::Full => 1,
+        ColorRange::Limited => 2,
+    }
+}
+fn gst_range_from_num(v: u8) -> Option<ColorRange> {
+    Some(match v {
+        0 => ColorRange::Unknown,
+        1 => ColorRange::Full,
+        2 => ColorRange::Limited,
+        _ => return None,
+    })
+}
+#[cfg(feature = "alloc")]
+fn gst_matrix_num(v: MatrixCoefficients) -> u8 {
+    match v {
+        MatrixCoefficients::Unknown => 0,
+        MatrixCoefficients::Identity => 1,
+        MatrixCoefficients::Bt709 => 3,
+        MatrixCoefficients::Bt601 => 4,
+        MatrixCoefficients::Bt2020Ncl => 6,
+    }
+}
+fn gst_matrix_from_num(v: u8) -> Option<MatrixCoefficients> {
+    Some(match v {
+        0 => MatrixCoefficients::Unknown,
+        1 => MatrixCoefficients::Identity,
+        3 => MatrixCoefficients::Bt709,
+        4 => MatrixCoefficients::Bt601,
+        6 => MatrixCoefficients::Bt2020Ncl,
+        _ => return None,
+    })
+}
+#[cfg(feature = "alloc")]
+fn gst_transfer_num(v: TransferCharacteristics) -> u8 {
+    match v {
+        TransferCharacteristics::Unknown => 0,
+        TransferCharacteristics::Bt709 => 5,
+        TransferCharacteristics::Srgb => 7,
+        // BT2020_12; the 10-bit sibling (13) parses to the same variant.
+        TransferCharacteristics::Bt2020 => 11,
+        TransferCharacteristics::Pq => 14,
+        TransferCharacteristics::Hlg => 15,
+        TransferCharacteristics::Bt601 => 16,
+    }
+}
+fn gst_transfer_from_num(v: u8) -> Option<TransferCharacteristics> {
+    Some(match v {
+        0 => TransferCharacteristics::Unknown,
+        5 => TransferCharacteristics::Bt709,
+        7 => TransferCharacteristics::Srgb,
+        11 | 13 => TransferCharacteristics::Bt2020,
+        14 => TransferCharacteristics::Pq,
+        15 => TransferCharacteristics::Hlg,
+        16 => TransferCharacteristics::Bt601,
+        _ => return None,
+    })
+}
+#[cfg(feature = "alloc")]
+fn gst_primaries_num(v: ColorPrimaries) -> u8 {
+    match v {
+        ColorPrimaries::Unknown => 0,
+        ColorPrimaries::Bt709 => 1,
+        ColorPrimaries::Bt470bg => 3,
+        ColorPrimaries::Smpte170m => 4,
+        ColorPrimaries::Bt2020 => 7,
+    }
+}
+fn gst_primaries_from_num(v: u8) -> Option<ColorPrimaries> {
+    Some(match v {
+        0 => ColorPrimaries::Unknown,
+        1 => ColorPrimaries::Bt709,
+        3 => ColorPrimaries::Bt470bg,
+        4 => ColorPrimaries::Smpte170m,
+        7 => ColorPrimaries::Bt2020,
+        _ => return None,
+    })
+}
+
 /// Every raw (uncompressed) PCM sample format, with the `format=` gst spells it.
 ///
 /// One list, so a format g2g prints into a caps description is one it can parse
@@ -820,7 +1357,7 @@ pub(crate) fn intersect_channels(a: u8, b: u8) -> Option<u8> {
 
 /// Which caps fields a transform passes through unchanged (output field ==
 /// input field). Read off a
-/// [`CapsTransform`](crate::caps_transform::CapsTransform) declaration (the
+/// `CapsTransform` declaration (the
 /// fields every output shape derives with `Identity`), or probed from a
 /// `DerivedOutput` closure. The solver uses them to couple input and
 /// output *field by field* in both directions, so a downstream pin on a
@@ -1675,6 +2212,7 @@ mod tests {
             height,
             framerate,
             interlace: crate::Interlace::Any,
+            colorimetry: crate::Colorimetry::UNKNOWN,
         }
     }
 
@@ -1822,6 +2360,7 @@ mod tests {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            colorimetry: crate::Colorimetry::UNKNOWN,
         };
         let b = video(Dim::Any, Dim::Any, Rate::Any); // Rgba8
         assert_eq!(a.intersect(&b), Err(G2gError::CapsMismatch));
@@ -1993,12 +2532,14 @@ mod tests {
             height: Dim::Any,
             framerate: Rate::Any,
             interlace: crate::Interlace::Any,
+            colorimetry: crate::Colorimetry::UNKNOWN,
         };
         let h264 = |w| Caps::CompressedVideo {
             codec: VideoCodec::H264,
             width: w,
             height: Dim::Any,
             framerate: Rate::Any,
+            colorimetry: crate::Colorimetry::UNKNOWN,
         };
         let a = CapsSet::from_alternatives(alloc::vec![rgba(Dim::Any), h264(Dim::Any)]);
         let b =
@@ -2184,6 +2725,181 @@ mod tests {
 
         // A width that overflows its stride yields nothing, never a short buffer.
         assert_eq!(Rgba8.unpadded_frame_bytes(u32::MAX, 4), None);
+    }
+
+    fn video_with_colorimetry(colorimetry: Colorimetry) -> Caps {
+        Caps::RawVideo {
+            format: RawVideoFormat::Nv12,
+            width: Dim::Fixed(1920),
+            height: Dim::Fixed(1080),
+            framerate: Rate::Fixed(30 << 16),
+            interlace: crate::Interlace::Any,
+            colorimetry,
+        }
+    }
+
+    #[test]
+    fn cicp_codepoints_round_trip_through_from_cicp() {
+        // What an encoder writes must read back as the value it was handed, so
+        // a re-encode cannot rename a stream's colour description.
+        for matrix in [
+            MatrixCoefficients::Identity,
+            MatrixCoefficients::Bt601,
+            MatrixCoefficients::Bt709,
+            MatrixCoefficients::Bt2020Ncl,
+        ] {
+            assert_eq!(MatrixCoefficients::from_cicp(matrix.to_cicp()), matrix);
+        }
+        for transfer in [
+            TransferCharacteristics::Srgb,
+            TransferCharacteristics::Bt601,
+            TransferCharacteristics::Bt709,
+            TransferCharacteristics::Bt2020,
+            TransferCharacteristics::Pq,
+            TransferCharacteristics::Hlg,
+        ] {
+            assert_eq!(
+                TransferCharacteristics::from_cicp(transfer.to_cicp()),
+                transfer
+            );
+        }
+        for primaries in [
+            ColorPrimaries::Bt709,
+            ColorPrimaries::Bt470bg,
+            ColorPrimaries::Smpte170m,
+            ColorPrimaries::Bt2020,
+        ] {
+            assert_eq!(ColorPrimaries::from_cicp(primaries.to_cicp()), primaries);
+        }
+    }
+
+    #[test]
+    fn unknown_writes_the_unspecified_codepoint() {
+        // CICP 2 on every field: an untagged stream stays untagged through an
+        // encoder rather than picking up a guessed description.
+        assert_eq!(MatrixCoefficients::Unknown.to_cicp(), 2);
+        assert_eq!(TransferCharacteristics::Unknown.to_cicp(), 2);
+        assert_eq!(ColorPrimaries::Unknown.to_cicp(), 2);
+    }
+
+    /// The bt709 preset writes the 1/1/1 description an H.264 VUI carries for
+    /// HD, the codepoints `h264parse` reads back as `Colorimetry::BT709`.
+    #[test]
+    fn bt709_preset_writes_the_hd_codepoints() {
+        assert_eq!(Colorimetry::BT709.primaries.to_cicp(), 1);
+        assert_eq!(Colorimetry::BT709.transfer.to_cicp(), 1);
+        assert_eq!(Colorimetry::BT709.matrix.to_cicp(), 1);
+        assert_eq!(
+            Colorimetry::from_cicp(
+                Colorimetry::BT709.primaries.to_cicp(),
+                Colorimetry::BT709.transfer.to_cicp(),
+                Colorimetry::BT709.matrix.to_cicp(),
+                false,
+            ),
+            Colorimetry::BT709
+        );
+    }
+
+    #[test]
+    fn colorimetry_unknown_is_a_wildcard_in_intersect() {
+        let unknown = video_with_colorimetry(Colorimetry::UNKNOWN);
+        let bt709 = video_with_colorimetry(Colorimetry::BT709);
+        // Unknown yields to the concrete side, in both directions.
+        assert_eq!(unknown.intersect(&bt709), Ok(bt709.clone()));
+        assert_eq!(bt709.intersect(&unknown), Ok(bt709.clone()));
+        assert_eq!(unknown.intersect(&unknown), Ok(unknown.clone()));
+        assert_eq!(bt709.intersect(&bt709), Ok(bt709.clone()));
+        // Two different concrete colorimetries are disjoint: converting with
+        // the wrong matrix must fail the link, not silently pick one.
+        let bt601 = video_with_colorimetry(Colorimetry::BT601);
+        assert_eq!(bt709.intersect(&bt601), Err(G2gError::CapsMismatch));
+    }
+
+    #[test]
+    fn colorimetry_intersects_field_wise() {
+        // A matrix-only constraint meets a range-only constraint: the result
+        // carries both, since Unknown is per-field, not all-or-nothing.
+        let matrix_only = Colorimetry {
+            matrix: MatrixCoefficients::Bt709,
+            ..Colorimetry::UNKNOWN
+        };
+        let range_only = Colorimetry {
+            range: ColorRange::Full,
+            ..Colorimetry::UNKNOWN
+        };
+        assert_eq!(
+            matrix_only.intersect(&range_only),
+            Some(Colorimetry {
+                matrix: MatrixCoefficients::Bt709,
+                range: ColorRange::Full,
+                ..Colorimetry::UNKNOWN
+            })
+        );
+        assert_eq!(
+            matrix_only.intersect(&Colorimetry {
+                matrix: MatrixCoefficients::Bt601,
+                ..Colorimetry::UNKNOWN
+            }),
+            None
+        );
+    }
+
+    #[test]
+    fn colorimetry_survives_fixate() {
+        let bt709 = video_with_colorimetry(Colorimetry::BT709);
+        assert!(bt709.is_fixed());
+        assert_eq!(bt709.fixate(), Ok(bt709.clone()));
+        // Unknown stays Unknown: fixation never invents a colour description.
+        let unknown = video_with_colorimetry(Colorimetry::UNKNOWN);
+        assert_eq!(unknown.fixate(), Ok(unknown.clone()));
+    }
+
+    #[test]
+    fn colorimetry_gst_string_presets_and_4_part_form() {
+        assert_eq!(Colorimetry::BT709.to_gst_string().as_deref(), Some("bt709"));
+        assert_eq!(Colorimetry::BT601.to_gst_string().as_deref(), Some("bt601"));
+        assert_eq!(
+            Colorimetry::BT2020.to_gst_string().as_deref(),
+            Some("bt2020")
+        );
+        assert_eq!(Colorimetry::SRGB.to_gst_string().as_deref(), Some("sRGB"));
+        assert_eq!(Colorimetry::UNKNOWN.to_gst_string(), None);
+        // A combo with no preset name prints GStreamer's numeric 4-part form
+        // (range:matrix:transfer:primaries) and parses back to itself.
+        let mixed = Colorimetry {
+            range: ColorRange::Limited,
+            matrix: MatrixCoefficients::Bt709,
+            transfer: TransferCharacteristics::Bt601,
+            primaries: ColorPrimaries::Bt709,
+        };
+        let printed = mixed.to_gst_string().unwrap();
+        assert_eq!(printed, "2:3:16:1");
+        assert_eq!(Colorimetry::from_gst_string(&printed), Some(mixed));
+        // Preset names parse case-insensitively; garbage and unmodeled
+        // GStreamer numbers are rejected, not widened to a wildcard.
+        assert_eq!(
+            Colorimetry::from_gst_string("srgb"),
+            Some(Colorimetry::SRGB)
+        );
+        assert_eq!(Colorimetry::from_gst_string("banana"), None);
+        assert_eq!(Colorimetry::from_gst_string("2:5:16:1"), None); // smpte240m matrix
+    }
+
+    #[test]
+    fn caps_to_gst_string_carries_colorimetry() {
+        let caps = video_with_colorimetry(Colorimetry::BT709);
+        assert!(caps.to_gst_string().contains(",colorimetry=bt709"));
+        // Unknown is the absent field, like a wildcard dimension.
+        let caps = video_with_colorimetry(Colorimetry::UNKNOWN);
+        assert!(!caps.to_gst_string().contains("colorimetry"));
+        let compressed = Caps::CompressedVideo {
+            codec: VideoCodec::H264,
+            width: Dim::Fixed(1920),
+            height: Dim::Fixed(1080),
+            framerate: Rate::Fixed(30 << 16),
+            colorimetry: Colorimetry::BT709,
+        };
+        assert!(compressed.to_gst_string().contains(",colorimetry=bt709"));
     }
 
     #[test]

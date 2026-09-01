@@ -145,6 +145,8 @@ impl HlsSink {
                 map_uri: None,
                 map_byte_range: None,
                 end_list: false,
+                part_target_ms: None,
+                server_control: None,
             },
             on_disk: VecDeque::new(),
             segments_written: 0,
@@ -251,6 +253,8 @@ impl HlsSink {
             duration_ms: (self.open_duration_ns / 1_000_000) as u32,
             key: None,
             byte_range: None,
+            gap: false,
+            parts: Vec::new(),
         });
         self.open_segment.clear();
         self.open_duration_ns = 0;

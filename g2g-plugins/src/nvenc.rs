@@ -303,6 +303,7 @@ impl NvEnc {
                     height: Dim::Any,
                     framerate: Rate::Any,
                     interlace: g2g_core::Interlace::Any,
+                    colorimetry: g2g_core::Colorimetry::UNKNOWN,
                 })
                 .collect(),
         )
@@ -326,6 +327,7 @@ impl NvEnc {
             width: Dim::Fixed(self.width),
             height: Dim::Fixed(self.height),
             framerate: self.framerate.clone(),
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 
@@ -909,11 +911,13 @@ impl AsyncElement for NvEnc {
                 height,
                 framerate,
                 interlace: _,
+                ..
             } => CapsSet::one(Caps::CompressedVideo {
                 codec,
                 width: width.clone(),
                 height: height.clone(),
                 framerate: framerate.clone(),
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
             }),
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
@@ -933,6 +937,7 @@ impl AsyncElement for NvEnc {
             height,
             framerate,
             interlace: _,
+            ..
         } = absolute_caps
         else {
             return Err(G2gError::CapsMismatch);
@@ -1065,6 +1070,7 @@ impl PadTemplates for NvEnc {
                     width: Dim::Any,
                     height: Dim::Any,
                     framerate: Rate::Any,
+                    colorimetry: g2g_core::Colorimetry::UNKNOWN,
                 })
                 .collect(),
         );
@@ -1603,6 +1609,7 @@ pub(crate) mod tests {
             height: Dim::Fixed(h),
             framerate: Rate::Fixed(30 << 16),
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 
@@ -1648,6 +1655,7 @@ pub(crate) mod tests {
             width: Dim::Fixed(1920),
             height: Dim::Fixed(1080),
             framerate: Rate::Fixed(30 << 16),
+            colorimetry: g2g_core::Colorimetry::UNKNOWN
         }));
         // Non-NV12 (I420) yields an empty set, rejected at solve.
         let i420 = Caps::RawVideo {
@@ -1656,6 +1664,7 @@ pub(crate) mod tests {
             height: Dim::Fixed(480),
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         assert!(derive(&i420).alternatives().is_empty());
     }
@@ -1676,12 +1685,14 @@ pub(crate) mod tests {
             width: Dim::Fixed(1280),
             height: Dim::Fixed(720),
             framerate: Rate::Fixed(30 << 16),
+            colorimetry: g2g_core::Colorimetry::UNKNOWN
         }));
         assert!(!out.accepts(&Caps::CompressedVideo {
             codec: VideoCodec::H264,
             width: Dim::Fixed(1280),
             height: Dim::Fixed(720),
             framerate: Rate::Fixed(30 << 16),
+            colorimetry: g2g_core::Colorimetry::UNKNOWN
         }));
     }
 
@@ -1735,6 +1746,7 @@ pub(crate) mod tests {
             height: Dim::Fixed(480),
             framerate: Rate::Fixed(30 << 16),
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         e.configure_pipeline(&p010).unwrap();
         assert_eq!(e.nv_buffer_format(), ffi::NV_ENC_BUFFER_FORMAT_YUV420_10BIT);
@@ -1776,6 +1788,7 @@ pub(crate) mod tests {
             height: Dim::Fixed(720),
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         assert_eq!(
             bad.configure_pipeline(&i420).err(),
@@ -2087,6 +2100,7 @@ pub(crate) mod tests {
                 width: Dim::Fixed(W),
                 height: Dim::Fixed(H),
                 framerate: Rate::Fixed(30 << 16),
+                colorimetry: g2g_core::Colorimetry::UNKNOWN
             }],
             "output caps announced once"
         );
@@ -2105,6 +2119,7 @@ pub(crate) mod tests {
             width: Dim::Fixed(W),
             height: Dim::Fixed(H),
             framerate: Rate::Fixed(30 << 16),
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         })
         .expect("open H.264 decoder");
         let mut dsink = CaptureSink::default();
@@ -2248,6 +2263,7 @@ pub(crate) mod tests {
             height: Dim::Fixed(H),
             framerate: Rate::Fixed(30 << 16),
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         // 10-bit is HEVC-only on NVENC.
         assert_eq!(
@@ -2284,6 +2300,7 @@ pub(crate) mod tests {
             width: Dim::Fixed(W),
             height: Dim::Fixed(H),
             framerate: Rate::Fixed(30 << 16),
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         })
         .expect("open NVDEC");
         let mut decoded = 0usize;
@@ -2339,6 +2356,7 @@ pub(crate) mod tests {
                 height: Dim::Fixed(H),
                 framerate: Rate::Fixed(30 << 16),
                 interlace: g2g_core::Interlace::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN
             }],
             "the encoded stream is 10-bit end to end"
         );

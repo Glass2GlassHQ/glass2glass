@@ -525,6 +525,7 @@ fn rgba_any() -> Caps {
         height: Dim::Any,
         framerate: Rate::Any,
         interlace: Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
 }
 

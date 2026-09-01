@@ -349,6 +349,7 @@ mod tests {
                 height: Dim::Fixed(64),
                 framerate: Rate::Fixed(30 << 16),
                 interlace: crate::Interlace::Any,
+                colorimetry: crate::Colorimetry::UNKNOWN,
             },
         }
     }
@@ -363,6 +364,7 @@ mod tests {
                 width: Dim::Fixed(64),
                 height: Dim::Fixed(64),
                 framerate: Rate::Fixed(30 << 16),
+                colorimetry: crate::Colorimetry::UNKNOWN,
             },
         }
     }

@@ -28,6 +28,7 @@ fn raw(format: RawVideoFormat, w: u32, h: u32, framerate: Rate) -> Caps {
         height: Dim::Fixed(h),
         framerate,
         interlace: g2g_core::Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
 }
 
@@ -91,6 +92,7 @@ fn each_declarative_shape_derives_its_field() {
                 max_q16: 60 << 16,
             },
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN
         }]
     );
 
@@ -226,6 +228,7 @@ fn geometry_pin_solves_back_through_scale_and_convert() {
         height: Dim::Fixed(120),
         framerate: Rate::Any,
         interlace: g2g_core::Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }));
     let (sc, cv) = (
         scale.caps_constraint_as_transform(),

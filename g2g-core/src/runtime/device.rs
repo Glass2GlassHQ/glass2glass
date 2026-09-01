@@ -54,7 +54,7 @@ pub struct Device {
     /// Launch name of the element that drives this device, e.g. `"v4l2src"`.
     pub element: &'static str,
     /// Properties selecting this device on that element, textual `key=value`
-    /// pairs parsed through the element's own [`PropertySpec`]s.
+    /// pairs parsed through the element's own [`PropertySpec`](crate::property::PropertySpec)s.
     pub props: Vec<(String, String)>,
     /// Backend detail for display only (bus path, driver, sample formats),
     /// never fed to the element.

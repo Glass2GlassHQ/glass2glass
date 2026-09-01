@@ -186,6 +186,17 @@ Highest leverage first:
 - Carry an explicit channel mask/positions in `Caps::Audio` rather than only a
   count with the per-count `ChannelLayout` convention.
 
+## Colorimetry
+
+- Write the caps colorimetry into the colour description the remaining encoders
+  emit (`nvenc`, `av1enc`, `mjpegenc`, the platform encoders), so a tagged
+  stream survives a re-encode there too.
+- Tag the raw output of the decoders that still leave colorimetry unknown: AV1
+  (`dav1d`, `Rav1dDec`), MJPEG (full-range BT.601 by JFIF), and the platform
+  decoders (Media Foundation, VideoToolbox, MediaCodec, VAAPI).
+- A colorspace conversion element that converts transfer and primaries (tone
+  and gamut mapping), the fields `VideoConvert` passes through untouched.
+
 ## Transforms and effects
 
 - **`textoverlay` font backend:** font-variation axes beyond `wght` on the
@@ -211,8 +222,6 @@ Highest leverage first:
 - **KMS vblank reconciliation** + Wayland frame-callback co-scheduling. Needs a
   DRM/KMS presentation sink (current `WaylandSink` is SHM software). Validate on
   a real display.
-- **A/V clock slaving** remaining piece: an on-display lip-sync soak on real
-  hardware.
 - **PTP clock polish** (not blocking): a live multi-machine / `ptp4l`-grandmaster
   soak of `PtpClient` (host/root/reference-gear gated); a direct PHC
   (`/dev/ptpN`) read; hardware RX/TX timestamping for uncompressed ST 2110-20

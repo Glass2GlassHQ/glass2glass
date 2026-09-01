@@ -555,6 +555,7 @@ impl PnmEnc {
             height: Dim::Any,
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         Vec::from([raw(RawVideoFormat::Rgb8), raw(RawVideoFormat::Rgba8)])
     }
@@ -565,6 +566,7 @@ impl PnmEnc {
             width: Dim::Fixed(self.width),
             height: Dim::Fixed(self.height),
             framerate: self.framerate.clone(),
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 }
@@ -600,12 +602,13 @@ impl AsyncElement for PnmEnc {
                 width,
                 height,
                 framerate,
-                interlace: _,
+                ..
             } => CapsSet::one(Caps::CompressedVideo {
                 codec: VideoCodec::Pnm,
                 width: width.clone(),
                 height: height.clone(),
                 framerate: framerate.clone(),
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
             }),
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
@@ -617,7 +620,7 @@ impl AsyncElement for PnmEnc {
             width,
             height,
             framerate,
-            interlace: _,
+            ..
         } = absolute_caps
         else {
             return Err(G2gError::CapsMismatch);
@@ -717,6 +720,7 @@ impl PadTemplates for PnmEnc {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         Vec::from([
             PadTemplate::sink(CapsSet::from_alternatives(Self::input_alternatives())),
@@ -764,6 +768,7 @@ impl PnmDec {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 }
@@ -789,12 +794,14 @@ impl AsyncElement for PnmDec {
                 width,
                 height,
                 framerate,
+                ..
             } => CapsSet::one(Caps::RawVideo {
                 format: RawVideoFormat::Rgb8,
                 width: width.clone(),
                 height: height.clone(),
                 framerate: framerate.clone(),
                 interlace: g2g_core::Interlace::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
             }),
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
@@ -876,6 +883,7 @@ impl PadTemplates for PnmDec {
                 height: Dim::Any,
                 framerate: Rate::Any,
                 interlace: g2g_core::Interlace::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
             })),
         ])
     }

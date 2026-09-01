@@ -103,6 +103,7 @@ unsafe fn describe(camera: &AVCaptureDevice) -> Device {
             height: Dim::Fixed(PRESET_HEIGHT),
             framerate: Rate::Fixed(PRESET_FPS << 16),
             interlace: Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }),
         element: "avfvideosrc",
         props: Vec::from([("device".to_string(), unique_id.clone())]),

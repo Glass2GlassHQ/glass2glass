@@ -417,6 +417,7 @@ async fn the_fan_in_ts_muxer_declares_a_subtitle_pad_in_its_language() {
             width: Dim::Fixed(320),
             height: Dim::Fixed(240),
             framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         },
     )
     .unwrap();

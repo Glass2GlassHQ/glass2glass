@@ -42,7 +42,7 @@ pub struct AllocationParams {
     /// Per-frame metadata every consumer downstream of this link asked for
     /// (M976). Rides the same cascade as the buffer parameters, unioned at each
     /// hop, so a producer several elements upstream can ask
-    /// [`MetaRequests::wants`] before it decides whether to attach optional
+    /// `MetaRequests::wants` before it decides whether to attach optional
     /// metadata. Empty unless some element declared a request.
     pub meta_requests: MetaRequests,
 }
@@ -144,7 +144,7 @@ impl AllocationParams {
     /// domain is the most-preferred survivor, and the rest is the most-restrictive
     /// per parameter (the larger size, count, and alignment). An empty
     /// intersection (no domain satisfies, say, a CUDA-only branch and a
-    /// D3D11-only branch) fails loud with [`G2gError::AllocationConflict`] rather
+    /// D3D11-only branch) fails loud with [`G2gError::AllocationConflict`](crate::G2gError::AllocationConflict) rather
     /// than silently honouring one branch.
     ///
     /// Single-domain branches reduce to the old behavior exactly: two matching
@@ -190,7 +190,7 @@ impl AllocationParams {
     /// capability and settle on the most-preferred common domain. This turns the
     /// allocation handoff from a one-sided dictate (consumer names a domain, the
     /// producer silently obeys or mismatches) into a real two-sided negotiation.
-    /// Fails [`G2gError::AllocationConflict`] when producer and consumer share no
+    /// Fails [`G2gError::AllocationConflict`](crate::G2gError::AllocationConflict) when producer and consumer share no
     /// domain, which is a genuine conflict needing an auto-plugged converter
     /// rather than something either side can resolve alone.
     ///

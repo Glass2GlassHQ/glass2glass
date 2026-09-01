@@ -170,6 +170,7 @@ async fn capture_one() -> Option<Vec<u8>> {
         height: g2g_core::Dim::Fixed(CAM_H),
         framerate: g2g_core::Rate::Any,
         interlace: g2g_core::Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     };
     if let Err(e) = src.configure_pipeline(&caps) {
         eprintln!(">>> camera open failed ({e:?}); falling back to a synthetic frame");

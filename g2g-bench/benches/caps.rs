@@ -20,6 +20,7 @@ fn raw(fmt: RawVideoFormat, w: u32, h: u32) -> Caps {
         height: Dim::Fixed(h),
         framerate: Rate::Fixed(30 << 16),
         interlace: Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
 }
 
@@ -30,6 +31,7 @@ fn raw_ranged(fmt: RawVideoFormat) -> Caps {
         height: Dim::Range { min: 16, max: 8192 },
         framerate: Rate::Any,
         interlace: Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
 }
 
@@ -39,6 +41,7 @@ fn h264(w: u32, h: u32) -> Caps {
         width: Dim::Fixed(w),
         height: Dim::Fixed(h),
         framerate: Rate::Fixed(30 << 16),
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
 }
 

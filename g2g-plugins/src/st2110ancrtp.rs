@@ -286,12 +286,14 @@ impl PadTemplates for St2110AncSink {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         let h265 = Caps::CompressedVideo {
             codec: VideoCodec::H265,
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         Vec::from([PadTemplate::sink(CapsSet::from_alternatives(Vec::from([
             h264, h265,
@@ -532,6 +534,7 @@ mod tests {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 

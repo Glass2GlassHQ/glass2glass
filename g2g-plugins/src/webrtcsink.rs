@@ -400,6 +400,7 @@ fn h264_any() -> Caps {
         width: Dim::Any,
         height: Dim::Any,
         framerate: Rate::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
 }
 
@@ -758,6 +759,7 @@ mod tests {
             height: Dim::Fixed(480),
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         assert_eq!(sink.intercept_caps(&rgba), Err(G2gError::CapsMismatch));
     }
@@ -773,6 +775,7 @@ mod tests {
             height: Dim::Fixed(2),
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         assert!(matches!(
             sink2.configure_pipeline(&raw),

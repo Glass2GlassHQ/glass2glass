@@ -65,6 +65,7 @@ impl PatternSrc {
             height: Dim::Fixed(self.height),
             framerate: Rate::Fixed(self.fps << 16),
             interlace: Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 }

@@ -31,6 +31,7 @@ fn caps_at(width: u32, height: u32) -> Caps {
         height: Dim::Fixed(height),
         framerate: Rate::Fixed(30 << 16),
         interlace: g2g_core::Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
 }
 
@@ -577,6 +578,7 @@ async fn range_negotiation_intersects_then_fixates_to_minimum() {
         height: Dim::Fixed(480),
         framerate: Rate::Fixed(30 << 16),
         interlace: g2g_core::Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     };
     let supported = Caps::RawVideo {
         format: RawVideoFormat::Rgba8,
@@ -587,6 +589,7 @@ async fn range_negotiation_intersects_then_fixates_to_minimum() {
         height: Dim::Any,
         framerate: Rate::Any,
         interlace: g2g_core::Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     };
     let mut src = StaticCapsSrc { proposal };
     let mut snk = IntersectingRecordingSink::new(supported);

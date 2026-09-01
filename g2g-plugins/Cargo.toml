@@ -32,7 +32,7 @@ linux-full = [
     "opus", "vorbis", "vpx", "av1-encode", "mjpeg", "mjpeg-encode", "png", "webp",
     "alsa-sink", "alsa-src", "pulse-sink", "pulse-src", "pipewire", "portal",
     "wayland-sink", "kms-sink", "wgpu-sink", "wgpu-present", "vello-overlay", "analytics",
-    "declarative-yaml", "script-rhai", "observe", "tui",
+    "declarative-yaml", "script-rhai", "observe", "tui", "latency-bench",
 ]
 std = ["g2g-core/std", "dep:tokio"]
 multi-thread = ["g2g-core/multi-thread"]
@@ -712,6 +712,12 @@ jpegxs = ["std"]
 # client (PtpClient), which speaks PTP over UDP itself. Linux-only (CLOCK_TAI);
 # implies std; pulls libc for clock_gettime and socket2 for the shared port bind.
 ptp = ["std", "dep:libc", "dep:socket2"]
+# Same-metric latency instrument (M1114): the `timestampburn` element writes
+# CLOCK_MONOTONIC nanoseconds into an I420 luma plane as a block strip, and the
+# `g2g-latency-reader` binary decodes it off raw frames on stdin. Both stacks
+# under `tools/latency-bench-e2e.sh` are read by that one binary. Unix-only
+# (clock_gettime); implies std; pulls libc.
+latency-bench = ["std", "dep:libc"]
 # Linux PulseAudio render sink (PulseSink): plays interleaved PCM on the default
 # PulseAudio / PipeWire-pulse server via the blocking libpulse "simple" API on a
 # worker thread. Pulls libpulse-binding + libpulse-simple-binding (link libpulse).
@@ -1313,6 +1319,11 @@ required-features = ["tooling-json"]
 name = "g2g-plugin-sign"
 required-features = ["plugin-signing"]
 
+# Reader half of the same-metric latency bench (M1114).
+[[bin]]
+name = "g2g-latency-reader"
+required-features = ["latency-bench"]
+
 # Porting reference: a third-party element registered and run via the launcher.
 [[example]]
 name = "third_party_element"
@@ -1462,6 +1473,12 @@ required-features = ["pipewire"]
 [[test]]
 name = "m1106_pipewiresink_drift_clock"
 required-features = ["pipewire"]
+
+# M1118: live A/V lip-sync soak on a real display and a real audio device. Needs
+# a Wayland session, a PipeWire daemon and an HLS feed; run locally, not in CI.
+[[test]]
+name = "av_lipsync_soak"
+required-features = ["hls", "ffmpeg", "wayland-sink", "pipewire"]
 
 # M636: asserts a process-global allocation counter stays flat, so it must be
 # the only thread in its process (libtest's harness threads allocate mid-test).

@@ -193,6 +193,7 @@ impl Mp4Mux {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         Vec::from([video(VideoCodec::H264), video(VideoCodec::H265)])
     }
@@ -409,6 +410,7 @@ mod tests {
             width: Dim::Fixed(w),
             height: Dim::Fixed(h),
             framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 
@@ -468,6 +470,7 @@ mod tests {
             height: Dim::Fixed(2),
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         assert!(m.intercept_caps(&raw).is_err());
         let CapsConstraint::DerivedOutput(f) = m.caps_constraint_as_transform() else {

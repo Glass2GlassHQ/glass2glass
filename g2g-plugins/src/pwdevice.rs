@@ -232,6 +232,7 @@ fn video_caps() -> CapsSet {
                 max_q16: MAX_FPS << 16,
             },
             interlace: Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         })
         .collect();
     CapsSet::from_alternatives(alternatives)

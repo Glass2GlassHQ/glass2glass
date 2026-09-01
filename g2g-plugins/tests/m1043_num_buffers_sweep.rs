@@ -51,6 +51,7 @@ fn raw_video_caps() -> g2g_core::Caps {
         height: g2g_core::Dim::Fixed(480),
         framerate: g2g_core::Rate::Fixed(30 << 16),
         interlace: g2g_core::Interlace::Progressive,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
 }
 

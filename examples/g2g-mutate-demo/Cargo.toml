@@ -1,0 +1,30 @@
+# Live splice demo (M1120): NOT a workspace member (see root Cargo.toml
+# `exclude`). It needs the `rtsp` + `ffmpeg` + `wayland-sink` feature set, which
+# pulls libavcodec and a Wayland session, so keeping it standalone leaves the
+# workspace build (and CI) on the pure-Rust default features. Builds against g2g
+# as path packages with its own Cargo.lock. See README.md.
+[package]
+name = "g2g-mutate-demo"
+version = "0.1.0"
+edition = "2021"
+license = "MPL-2.0"
+publish = false
+
+# Its own workspace root, so cargo does not fold it into the parent.
+[workspace]
+
+[dependencies]
+g2g-core = { path = "../../g2g-core", features = ["std", "runtime"] }
+g2g-plugins = { path = "../../g2g-plugins", features = [
+    "rtsp",
+    "ffmpeg",
+    "wayland-sink",
+] }
+# `rtspsrc` runs on retina, which needs a reactor; `time` drives the demo's
+# phases and `signal` its ctrl-c.
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "time",
+    "signal",
+] }

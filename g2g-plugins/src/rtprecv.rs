@@ -125,6 +125,7 @@ impl SpsCapsRefiner {
             // Keep the declared rate when the SPS has no VUI timing: a live
             // source must never hand downstream a wildcard rate.
             framerate: sps.framerate.map_or(framerate, Rate::Fixed),
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         if refined == self.current {
             return None;

@@ -22,15 +22,15 @@ pub enum G2gError {
     Hardware(HardwareError),
     /// Pipeline is shutting down; element should drain and propagate `Eos`.
     Shutdown,
-    /// A [`CopyPolicy`](crate::copyplan::CopyPolicy) enforced on the graph was
+    /// A `CopyPolicy` enforced on the graph was
     /// violated: the negotiated pipeline performs more memory-domain frame copies
     /// (device<->host or cross-device transfers of a raw buffer) than the budget
     /// allows. Raised before any frame flows, so a pipeline that must stay
     /// zero-copy refuses to start rather than paying the copy at runtime. Inspect
-    /// [`copy_plan`](crate::runtime::copy_plan) for the offending transfers.
+    /// `copy_plan` for the offending transfers.
     CopyBudget,
     /// A fan-in element refused an input added at runtime
-    /// ([`MultiInputElement::accepts_runtime_input`](crate::MultiInputElement::accepts_runtime_input)):
+    /// (`MultiInputElement::accepts_runtime_input`):
     /// it has no pad for that source, so the add fails and the run continues on
     /// the inputs it already has.
     InputRefused,

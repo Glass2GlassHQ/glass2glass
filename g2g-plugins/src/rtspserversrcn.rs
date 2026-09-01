@@ -240,6 +240,7 @@ impl RtspServerSrcN {
             width: Dim::Fixed(self.width),
             height: Dim::Fixed(self.height),
             framerate: Rate::Fixed(self.fps << 16),
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 
@@ -278,7 +279,8 @@ impl PadConfig {
     /// handed the same session identity.
     fn responder(&self, port: usize, server_rtp_port: u16) -> RtspResponder {
         RtspResponder::new(
-            sdp_h264(self.payload_type),
+            // Ingest: the publisher describes the stream, not this end.
+            sdp_h264(self.payload_type, None, None),
             server_rtp_port,
             self.ssrc.wrapping_add(port as u32),
         )

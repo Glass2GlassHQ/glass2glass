@@ -113,16 +113,65 @@ pub struct ByteRange {
     pub length: u64,
 }
 
+/// One partial segment (`#EXT-X-PART`, RFC 8216bis §4.4.4.9): a fraction of a
+/// media segment a low-latency server publishes before the whole segment is
+/// ready. Its position in [`Segment::parts`] is the Part Index the
+/// `_HLS_part` delivery directive names, so a malformed tag fails the parse
+/// rather than shifting every index after it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Part {
+    pub uri: String,
+    /// `DURATION` in milliseconds.
+    pub duration_ms: u32,
+    /// `BYTERANGE` sub-range of `uri`, `None` for a whole-resource part.
+    pub byte_range: Option<ByteRange>,
+    /// `INDEPENDENT=YES`: the part starts with an independently decodable frame,
+    /// so playback can join on it.
+    pub independent: bool,
+    /// `GAP=YES`: the part is missing and its URI must not be fetched.
+    pub gap: bool,
+}
+
 /// One media segment in a media playlist.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Segment {
+    /// Empty for the still-being-produced segment at the end of a low-latency
+    /// playlist: its `#EXT-X-PART`s are published but its `#EXTINF` and URI are
+    /// not, so only [`parts`](Self::parts) can be fetched.
     pub uri: String,
-    /// Segment duration in milliseconds (from `#EXTINF`, seconds * 1000).
+    /// Segment duration in milliseconds (from `#EXTINF`, seconds * 1000), or the
+    /// summed part durations for a segment still being produced.
     pub duration_ms: u32,
     /// Decryption context from the `#EXT-X-KEY` in effect, `None` if unencrypted.
     pub key: Option<SegmentKey>,
     /// `#EXT-X-BYTERANGE` sub-range of `uri`, `None` for a whole-resource segment.
     pub byte_range: Option<ByteRange>,
+    /// `#EXT-X-GAP`: the segment is missing and its URI must not be fetched
+    /// (RFC 8216bis §4.4.4.7). A live packager pads a freshly started playlist
+    /// with these, so a client that loads them gets a 404 instead of a stream.
+    pub gap: bool,
+    /// `#EXT-X-PART` partial segments, in Part Index order. Empty on a plain
+    /// playlist; a low-latency one carries them for the segments near the live
+    /// edge.
+    pub parts: Vec<Part>,
+}
+
+impl Segment {
+    /// The segment is still being produced: only its published parts exist.
+    pub fn incomplete(&self) -> bool {
+        self.uri.is_empty()
+    }
+}
+
+/// `#EXT-X-SERVER-CONTROL` (RFC 8216bis §4.4.3.8): the delivery directives the
+/// server accepts, which is what tells a client low-latency playback is on offer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ServerControl {
+    /// `CAN-BLOCK-RELOAD=YES`: a playlist request carrying `_HLS_msn` /
+    /// `_HLS_part` is held until that part is published, replacing timed polling.
+    pub can_block_reload: bool,
+    /// `PART-HOLD-BACK` in ms: how far behind the live edge a client should start.
+    pub part_hold_back_ms: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -158,6 +207,38 @@ pub struct MediaPlaylist {
     pub map_byte_range: Option<ByteRange>,
     /// `#EXT-X-ENDLIST` present: a complete VOD playlist (no live reload).
     pub end_list: bool,
+    /// `#EXT-X-PART-INF:PART-TARGET` in ms, present only on a playlist that
+    /// publishes partial segments.
+    pub part_target_ms: Option<u32>,
+    pub server_control: Option<ServerControl>,
+}
+
+/// Three part targets is the `PART-HOLD-BACK` a client assumes when the server
+/// declares none (RFC 8216bis §4.4.3.8 sets that as the minimum).
+const PART_HOLD_BACK_TARGETS: u32 = 3;
+
+impl MediaPlaylist {
+    /// Whether the playlist offers low-latency delivery: partial segments plus a
+    /// server that holds a playlist request until the next part is published.
+    /// Both halves are needed, since parts a client can only poll for on the
+    /// `TARGETDURATION` timer arrive no sooner than whole segments.
+    pub fn low_latency(&self) -> bool {
+        self.part_target_ms.is_some()
+            && self
+                .server_control
+                .is_some_and(|control| control.can_block_reload)
+    }
+
+    /// How far behind the live edge to start playing: `PART-HOLD-BACK`, else
+    /// three part targets. `0` when the playlist publishes no parts.
+    pub fn part_hold_back_ms(&self) -> u32 {
+        let default = self
+            .part_target_ms
+            .map_or(0, |t| t.saturating_mul(PART_HOLD_BACK_TARGETS));
+        self.server_control
+            .and_then(|control| control.part_hold_back_ms)
+            .unwrap_or(default)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -172,6 +253,10 @@ pub enum HlsError {
     NotAPlaylist,
     /// A tag that requires a following URI line had none.
     DanglingTag,
+    /// An `#EXT-X-PART` missing its `DURATION` or `URI`. Part Indices are
+    /// positional (the `_HLS_part` directive names one), so a part that cannot
+    /// be read fails the playlist instead of shifting the ones after it.
+    MalformedPart,
 }
 
 impl MasterPlaylist {
@@ -260,6 +345,14 @@ pub fn parse(text: &str) -> Result<Playlist, HlsError> {
     // `#EXT-X-BYTERANGE` for the next segment: (length, explicit offset). An
     // absent offset is resolved from the previous sub-range of the same URI.
     let mut pending_byterange: Option<(u64, Option<u64>)> = None;
+    // `#EXT-X-GAP` applies to the next segment.
+    let mut pending_gap = false;
+    let mut part_target_ms = None;
+    let mut server_control = None;
+    // `#EXT-X-PART`s seen since the last segment: they precede the `#EXTINF` of
+    // the segment they belong to, and a run left over at the end is the segment
+    // still being produced.
+    let mut pending_parts: Vec<Part> = Vec::new();
 
     for line in lines {
         if let Some(attrs) = line.strip_prefix("#EXT-X-STREAM-INF:") {
@@ -294,8 +387,24 @@ pub fn parse(text: &str) -> Result<Playlist, HlsError> {
                 });
         } else if let Some(attrs) = line.strip_prefix("#EXT-X-KEY:") {
             current_key = parse_key(attrs);
+        } else if let Some(attrs) = line.strip_prefix("#EXT-X-PART:") {
+            pending_parts.push(parse_part(attrs, &pending_parts).ok_or(HlsError::MalformedPart)?);
+        } else if let Some(attrs) = line.strip_prefix("#EXT-X-PART-INF:") {
+            part_target_ms = attr_pairs(attrs)
+                .iter()
+                .find(|(k, _)| *k == "PART-TARGET")
+                .and_then(|(_, v)| parse_secs_ms(v));
+        } else if let Some(attrs) = line.strip_prefix("#EXT-X-SERVER-CONTROL:") {
+            let pairs = attr_pairs(attrs);
+            let find = |name: &str| pairs.iter().find(|(k, _)| *k == name).map(|(_, v)| *v);
+            server_control = Some(ServerControl {
+                can_block_reload: find("CAN-BLOCK-RELOAD") == Some("YES"),
+                part_hold_back_ms: find("PART-HOLD-BACK").and_then(parse_secs_ms),
+            });
         } else if line == "#EXT-X-ENDLIST" {
             end_list = true;
+        } else if line == "#EXT-X-GAP" {
+            pending_gap = true;
         } else if line.starts_with('#') {
             // any other tag / comment: ignored
         } else if let Some(mut variant) = pending_variant.take() {
@@ -320,6 +429,8 @@ pub fn parse(text: &str) -> Result<Playlist, HlsError> {
                 duration_ms,
                 key: current_key.clone(),
                 byte_range,
+                gap: core::mem::take(&mut pending_gap),
+                parts: core::mem::take(&mut pending_parts),
             });
         }
         // a bare URI with no pending tag is ignored
@@ -327,6 +438,22 @@ pub fn parse(text: &str) -> Result<Playlist, HlsError> {
 
     if pending_variant.is_some() || pending_segment.is_some() {
         return Err(HlsError::DanglingTag);
+    }
+
+    // Parts with no `#EXTINF` after them are the segment the server is still
+    // producing: it plays as a segment whose only fetchable pieces are its parts.
+    if !pending_parts.is_empty() {
+        let duration_ms = pending_parts
+            .iter()
+            .fold(0u32, |sum, p| sum.saturating_add(p.duration_ms));
+        segments.push(Segment {
+            uri: String::new(),
+            duration_ms,
+            key: current_key.clone(),
+            byte_range: None,
+            gap: pending_gap,
+            parts: pending_parts,
+        });
     }
 
     if !variants.is_empty() || !renditions.is_empty() {
@@ -342,8 +469,40 @@ pub fn parse(text: &str) -> Result<Playlist, HlsError> {
             map_uri,
             map_byte_range,
             end_list,
+            part_target_ms,
+            server_control,
         }))
     }
+}
+
+/// Parse an `#EXT-X-PART` attribute list. `DURATION` and `URI` are required
+/// (`None` without them, which the caller turns into a parse failure);
+/// `prev_parts` resolves a `BYTERANGE` that omits its `@offset`, which continues
+/// from the previous part of the same resource.
+fn parse_part(attrs: &str, prev_parts: &[Part]) -> Option<Part> {
+    let pairs = attr_pairs(attrs);
+    let find = |name: &str| pairs.iter().find(|(k, _)| *k == name).map(|(_, v)| *v);
+    let duration_ms = parse_secs_ms(find("DURATION")?)?;
+    let uri = String::from(find("URI")?.trim_matches('"'));
+    let byte_range = find("BYTERANGE").and_then(|v| {
+        let (length, offset) = parse_byterange(v.trim_matches('"'));
+        let offset = offset.unwrap_or_else(|| {
+            prev_parts
+                .iter()
+                .rev()
+                .find(|p| p.uri == uri)
+                .and_then(|p| p.byte_range)
+                .map_or(0, |r| r.offset.saturating_add(r.length))
+        });
+        (length > 0).then_some(ByteRange { offset, length })
+    });
+    Some(Part {
+        uri,
+        duration_ms,
+        byte_range,
+        independent: find("INDEPENDENT") == Some("YES"),
+        gap: find("GAP") == Some("YES"),
+    })
 }
 
 /// Parse an `#EXT-X-STREAM-INF` attribute list. Unknown attributes are ignored;
@@ -487,10 +646,18 @@ fn parse_byterange(rest: &str) -> (u64, Option<u64>) {
 
 /// `#EXTINF:<seconds>[,<title>]` -> duration in ms. Seconds may be fractional.
 fn parse_extinf_ms(rest: &str) -> u32 {
-    let secs = rest.split(',').next().unwrap_or("").trim();
-    match secs.parse::<f32>() {
-        Ok(s) if s.is_finite() && s >= 0.0 => (s * 1000.0) as u32,
-        _ => 0,
+    parse_secs_ms(rest.split(',').next().unwrap_or("")).unwrap_or(0)
+}
+
+/// A fractional-seconds attribute (`#EXTINF`, `PART-TARGET`, `PART-HOLD-BACK`,
+/// `DURATION`) -> milliseconds. `None` for anything not a finite non-negative
+/// number, and a value beyond `u32::MAX` ms saturates rather than wrapping. The
+/// `+ 0.5` rounds: `9.009` is not exactly representable, and truncating it would
+/// lose a millisecond off every segment duration (`round` is std-only).
+fn parse_secs_ms(value: &str) -> Option<u32> {
+    match value.trim().parse::<f64>() {
+        Ok(s) if s.is_finite() && s >= 0.0 => Some((s * 1000.0 + 0.5).min(u32::MAX as f64) as u32),
+        _ => None,
     }
 }
 
@@ -616,7 +783,9 @@ mod tests {
                 uri: "seg0.ts".into(),
                 duration_ms: 9009,
                 key: None,
-                byte_range: None
+                byte_range: None,
+                gap: false,
+                parts: Vec::new(),
             }
         );
         assert_eq!(m.segments[2].duration_ms, 3003);
@@ -639,6 +808,30 @@ mod tests {
             "EXT-X-MAP init segment recovered"
         );
         assert_eq!(m.segments[0].uri, "seg0.m4s");
+    }
+
+    /// A live packager pads a freshly started playlist with `#EXT-X-GAP`
+    /// placeholders whose URI it never wrote (mediamtx names them all
+    /// `gap.mp4`). The flag has to survive the parse or `HlsSrc` fetches them and
+    /// takes a 404.
+    #[test]
+    fn marks_ext_x_gap_segments() {
+        let text = "#EXTM3U\n\
+            #EXT-X-TARGETDURATION:1\n\
+            #EXT-X-MEDIA-SEQUENCE:1\n\
+            #EXT-X-GAP\n\
+            #EXTINF:1.0,\n\
+            gap.mp4\n\
+            #EXTINF:1.0,\n\
+            seg2.mp4\n";
+        let Playlist::Media(m) = parse(text).unwrap() else {
+            panic!("expected media playlist");
+        };
+        assert!(m.segments[0].gap, "the tagged segment is a gap");
+        assert!(
+            !m.segments[1].gap,
+            "the tag applies to one segment, not the rest of the playlist"
+        );
     }
 
     #[test]
@@ -880,6 +1073,8 @@ mod tests {
                     duration_ms: 4000,
                     key: None,
                     byte_range: None,
+                    gap: false,
+                    parts: Vec::new(),
                 },
                 Segment {
                     uri: "seg1.m4s".into(),
@@ -889,17 +1084,23 @@ mod tests {
                         offset: 900,
                         length: 250,
                     }),
+                    gap: false,
+                    parts: Vec::new(),
                 },
                 Segment {
                     uri: "seg2.m4s".into(),
                     duration_ms: 120,
                     key: Some(key),
                     byte_range: None,
+                    gap: false,
+                    parts: Vec::new(),
                 },
             ],
             map_uri: Some("init.mp4".into()),
             map_byte_range: None,
             end_list: true,
+            part_target_ms: None,
+            server_control: None,
         };
         let text = write_media(&original);
         assert!(
@@ -925,5 +1126,168 @@ mod tests {
     fn flags_dangling_segment_tag() {
         let text = "#EXTM3U\n#EXTINF:5.0,\n";
         assert_eq!(parse(text), Err(HlsError::DanglingTag));
+    }
+
+    /// The low-latency shape a real LL-HLS packager (mediamtx) publishes: parts
+    /// precede the `#EXTINF` of the segment they belong to, and the run of parts
+    /// left at the end is the segment still being produced.
+    const PART_SECS: f64 = 0.2;
+    const SEGMENT_SECS: f64 = 1.0;
+    const HOLD_BACK_SECS: f64 = 0.5;
+
+    fn ll_playlist(hold_back: Option<f64>) -> String {
+        let control = match hold_back {
+            Some(h) => alloc::format!("CAN-BLOCK-RELOAD=YES,PART-HOLD-BACK={h:.5}"),
+            None => String::from("CAN-BLOCK-RELOAD=YES"),
+        };
+        alloc::format!(
+            "#EXTM3U\n\
+             #EXT-X-VERSION:10\n\
+             #EXT-X-TARGETDURATION:1\n\
+             #EXT-X-SERVER-CONTROL:{control},CAN-SKIP-UNTIL=6.00000\n\
+             #EXT-X-PART-INF:PART-TARGET={PART_SECS:.5}\n\
+             #EXT-X-MEDIA-SEQUENCE:79\n\
+             #EXT-X-MAP:URI=\"init.mp4\"\n\
+             #EXTINF:{SEGMENT_SECS:.5},\n\
+             seg79.mp4\n\
+             #EXT-X-PART:DURATION={PART_SECS:.5},URI=\"part400.mp4\",INDEPENDENT=YES\n\
+             #EXT-X-PART:DURATION={PART_SECS:.5},URI=\"part401.mp4\"\n\
+             #EXTINF:{SEGMENT_SECS:.5},\n\
+             seg80.mp4\n\
+             #EXT-X-PART:DURATION={PART_SECS:.5},URI=\"part402.mp4\",INDEPENDENT=YES\n\
+             #EXT-X-PART:DURATION={PART_SECS:.5},URI=\"part403.mp4\",GAP=YES\n\
+             #EXT-X-PRELOAD-HINT:TYPE=PART,URI=\"part404.mp4\"\n"
+        )
+    }
+
+    #[test]
+    fn parses_low_latency_tags_and_trailing_partial_segment() {
+        let part_ms = (PART_SECS * 1000.0) as u32;
+        let Playlist::Media(m) = parse(&ll_playlist(Some(HOLD_BACK_SECS))).unwrap() else {
+            panic!("expected media playlist");
+        };
+        assert_eq!(
+            m.part_target_ms,
+            Some(part_ms),
+            "EXT-X-PART-INF PART-TARGET"
+        );
+        assert_eq!(
+            m.server_control,
+            Some(ServerControl {
+                can_block_reload: true,
+                part_hold_back_ms: Some((HOLD_BACK_SECS * 1000.0) as u32),
+            })
+        );
+        assert!(m.low_latency(), "parts plus a blocking-reload server");
+        assert_eq!(m.part_hold_back_ms(), (HOLD_BACK_SECS * 1000.0) as u32);
+
+        // Three segments: two complete, then the one being produced.
+        assert_eq!(m.segments.len(), 3);
+        assert!(
+            m.segments[0].parts.is_empty(),
+            "an older segment lost its parts"
+        );
+        assert!(!m.segments[0].incomplete());
+
+        // The parts before an #EXTINF belong to that segment, not the previous one.
+        let seg80 = &m.segments[1];
+        assert_eq!(seg80.uri, "seg80.mp4");
+        assert_eq!(seg80.parts.len(), 2);
+        assert_eq!(seg80.parts[0].uri, "part400.mp4");
+        assert_eq!(seg80.parts[0].duration_ms, part_ms);
+        assert!(seg80.parts[0].independent);
+        assert!(!seg80.parts[1].independent);
+
+        // The trailing run of parts is the segment still being produced: no URI,
+        // duration summed from its parts, and the GAP part flagged.
+        let open = &m.segments[2];
+        assert!(open.incomplete(), "no #EXTINF yet, so only its parts exist");
+        assert_eq!(open.parts.len(), 2);
+        assert_eq!(open.duration_ms, part_ms * 2);
+        assert!(!open.parts[0].gap);
+        assert!(open.parts[1].gap, "GAP=YES part must not be fetched");
+    }
+
+    #[test]
+    fn part_hold_back_falls_back_to_three_part_targets() {
+        let Playlist::Media(m) = parse(&ll_playlist(None)).unwrap() else {
+            panic!("expected media playlist");
+        };
+        assert_eq!(m.server_control.unwrap().part_hold_back_ms, None);
+        assert_eq!(m.part_hold_back_ms(), (PART_SECS * 1000.0) as u32 * 3);
+    }
+
+    #[test]
+    fn plain_playlist_offers_no_low_latency() {
+        let text = "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4.0,\nseg0.ts\n";
+        let Playlist::Media(m) = parse(text).unwrap() else {
+            panic!("expected media playlist");
+        };
+        assert!(!m.low_latency());
+        assert_eq!(m.part_target_ms, None);
+        assert_eq!(m.server_control, None);
+        assert_eq!(m.part_hold_back_ms(), 0);
+        assert!(m.segments[0].parts.is_empty());
+    }
+
+    /// A server that declares SERVER-CONTROL without publishing parts (a plain
+    /// playlist with delta updates) is not a low-latency one: blocking a reload
+    /// on a part index that does not exist would hang.
+    #[test]
+    fn server_control_without_parts_is_not_low_latency() {
+        let text = "#EXTM3U\n#EXT-X-TARGETDURATION:4\n\
+                    #EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=YES\n\
+                    #EXTINF:4.0,\nseg0.ts\n";
+        let Playlist::Media(m) = parse(text).unwrap() else {
+            panic!("expected media playlist");
+        };
+        assert!(!m.low_latency());
+    }
+
+    #[test]
+    fn malformed_part_fails_the_parse() {
+        // A Part Index is positional (the `_HLS_part` directive names it), so a
+        // part that cannot be read has to fail the playlist, not be skipped.
+        for attrs in [
+            "URI=\"p.mp4\"",               // no DURATION
+            "DURATION=0.2",                // no URI
+            "DURATION=abc,URI=\"p.mp4\"",  // unparseable DURATION
+            "DURATION=-0.2,URI=\"p.mp4\"", // negative DURATION
+        ] {
+            let text = alloc::format!("#EXTM3U\n#EXT-X-PART:{attrs}\n");
+            assert_eq!(
+                parse(&text),
+                Err(HlsError::MalformedPart),
+                "must reject #EXT-X-PART:{attrs}"
+            );
+        }
+    }
+
+    #[test]
+    fn part_byterange_continues_from_the_previous_part_of_the_resource() {
+        // Single-file CMAF: consecutive parts are sub-ranges of one resource, the
+        // second omitting its @offset.
+        let text = "#EXTM3U\n\
+            #EXT-X-PART-INF:PART-TARGET=0.2\n\
+            #EXT-X-PART:DURATION=0.2,URI=\"all.mp4\",BYTERANGE=\"200@800\"\n\
+            #EXT-X-PART:DURATION=0.2,URI=\"all.mp4\",BYTERANGE=\"300\"\n";
+        let Playlist::Media(m) = parse(text).unwrap() else {
+            panic!("expected media playlist");
+        };
+        let parts = &m.segments[0].parts;
+        assert_eq!(
+            parts[0].byte_range,
+            Some(ByteRange {
+                offset: 800,
+                length: 200
+            })
+        );
+        assert_eq!(
+            parts[1].byte_range,
+            Some(ByteRange {
+                offset: 1000,
+                length: 300
+            })
+        );
     }
 }

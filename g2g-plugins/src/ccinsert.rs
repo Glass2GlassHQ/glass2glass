@@ -194,12 +194,14 @@ impl CcInsert {
                 width: Dim::Any,
                 height: Dim::Any,
                 framerate: Rate::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
             },
             Caps::CompressedVideo {
                 codec: VideoCodec::H265,
                 width: Dim::Any,
                 height: Dim::Any,
                 framerate: Rate::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
             },
         ]))
     }
@@ -491,6 +493,7 @@ mod tests {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 

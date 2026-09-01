@@ -81,6 +81,7 @@ macro_rules! av1_decoder {
                     width: Dim::Any,
                     height: Dim::Any,
                     framerate: Rate::Any,
+                    colorimetry: g2g_core::Colorimetry::UNKNOWN,
                 }
             }
 
@@ -90,7 +91,9 @@ macro_rules! av1_decoder {
                     width: Dim::Fixed(w),
                     height: Dim::Fixed(h),
                     framerate: self.framerate.clone(),
-                 interlace: g2g_core::Interlace::Any, }
+                    interlace: g2g_core::Interlace::Any,
+                    colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                }
             }
 
             /// Feed one AV1 temporal unit and collect every picture now decodable,
@@ -229,13 +232,15 @@ macro_rules! av1_decoder {
 
             fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
                 CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
-                    Caps::CompressedVideo { codec: VideoCodec::Av1, width, height, framerate } => {
+                    Caps::CompressedVideo { codec: VideoCodec::Av1, width, height, framerate, .. } => {
                         CapsSet::one(Caps::RawVideo {
                             format: RawVideoFormat::I420,
                             width: width.clone(),
                             height: height.clone(),
                             framerate: framerate.clone(),
-                         interlace: g2g_core::Interlace::Any, })
+                            interlace: g2g_core::Interlace::Any,
+                            colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                        })
                     }
                     _ => CapsSet::from_alternatives(Vec::new()),
                 }))
@@ -307,7 +312,9 @@ macro_rules! av1_decoder {
                     width: Dim::Any,
                     height: Dim::Any,
                     framerate: Rate::Any,
-                 interlace: g2g_core::Interlace::Any, };
+                    interlace: g2g_core::Interlace::Any,
+                    colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                };
                 Vec::from([
                     PadTemplate::sink(CapsSet::one(av1)),
                     PadTemplate::source(CapsSet::one(raw)),

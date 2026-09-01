@@ -2,8 +2,9 @@
 //!
 //! Builds a GL ES 3 program plus the textures for one pixel layout ([`GlMode`])
 //! and a fullscreen quad, then per frame gets the pixels into those textures and
-//! draws. NV12 uses the Y (`R8`) + interleaved UV (`RG8`) pair and the BT.601
-//! convert shader; RGBA uses one `RGBA8` texture and a passthrough shader.
+//! draws. NV12 uses the Y (`R8`) + interleaved UV (`RG8`) pair and a convert
+//! shader carrying the caps colorimetry's weights; RGBA uses one `RGBA8` texture
+//! and a passthrough shader.
 //! Pixels arrive either from CUDA device memory (`upload_and_draw`, the CUDA-GL
 //! interop registered lazily on the first frame) or from a system-memory slice
 //! (`upload_system_and_draw`).
@@ -17,11 +18,14 @@
 
 use core::mem::size_of;
 
-use alloc::string::ToString;
+use alloc::format;
+use alloc::string::{String, ToString};
 
 use glow::HasContext;
 
-use g2g_core::G2gError;
+use g2g_core::{Colorimetry, G2gError};
+
+use crate::yuvmatrix::YuvToRgbWeights;
 
 #[cfg(any(feature = "cuda-gl", feature = "cuda-kms"))]
 use crate::cuda::{make_context_current, CudaGlInterop};
@@ -41,26 +45,38 @@ void main() {
 ";
 
 /// GLSL ES 1.00 fragment shader: sample the NV12 luma (`R8`) and interleaved
-/// chroma (`RG8`) textures and convert BT.601 limited-range YCbCr -> RGB.
-/// Verbatim from DESIGN-C3-cuda.md Appendix A (swap the matrix for BT.709 on
-/// HD sources once a colour-metadata field exists on `Caps`).
-pub(crate) const FRAGMENT_SHADER_NV12: &str = "\
+/// chroma (`RG8`) textures and convert YCbCr -> RGB with `colorimetry`'s matrix
+/// and range. The sampler pair is verbatim from DESIGN-C3-cuda.md Appendix A;
+/// the weights are compiled in, so a mid-stream colorimetry change rebuilds the
+/// program.
+pub(crate) fn fragment_shader_nv12(colorimetry: Colorimetry) -> String {
+    let w = YuvToRgbWeights::new(colorimetry);
+    format!(
+        "\
 precision mediump float;
 varying vec2 v_uv;
 uniform sampler2D y_tex;
 uniform sampler2D uv_tex;
-void main() {
+void main() {{
     float y = texture2D(y_tex, v_uv).r;
     vec2  c = texture2D(uv_tex, v_uv).rg;
-    y = 1.1643 * (y - 0.0625);
+    y = {luma_gain:?} * (y - {luma_floor:?});
     float cb = c.x - 0.5;
     float cr = c.y - 0.5;
-    float r = y + 1.5958 * cr;
-    float g = y - 0.3917 * cb - 0.8129 * cr;
-    float b = y + 2.0170 * cb;
+    float r = y + ({red_from_cr:?}) * cr;
+    float g = y + ({green_from_cb:?}) * cb + ({green_from_cr:?}) * cr;
+    float b = y + ({blue_from_cb:?}) * cb;
     gl_FragColor = vec4(r, g, b, 1.0);
+}}
+",
+        luma_gain = w.luma_gain,
+        luma_floor = w.luma_floor,
+        red_from_cr = w.red_from_cr,
+        green_from_cb = w.green_from_cb,
+        green_from_cr = w.green_from_cr,
+        blue_from_cb = w.blue_from_cb,
+    )
 }
-";
 
 /// GLSL ES 1.00 fragment shader for the already-RGBA path: straight texture
 /// fetch, no convert.
@@ -134,15 +150,16 @@ impl GlState {
         width: u32,
         height: u32,
         mode: GlMode,
+        colorimetry: Colorimetry,
     ) -> Result<GlState, alloc::boxed::Box<dyn std::error::Error>> {
         // SAFETY: the caller guarantees a current GL ES 3 context.
         unsafe {
             let fragment = match mode {
-                GlMode::Nv12 => FRAGMENT_SHADER_NV12,
+                GlMode::Nv12 => fragment_shader_nv12(colorimetry),
                 #[cfg(feature = "gl-sink")]
-                GlMode::Rgba => FRAGMENT_SHADER_RGBA,
+                GlMode::Rgba => String::from(FRAGMENT_SHADER_RGBA),
             };
-            let program = link_program(&gl, VERTEX_SHADER, fragment)?;
+            let program = link_program(&gl, VERTEX_SHADER, &fragment)?;
             let pos_loc = gl.get_attrib_location(program, "a_pos").unwrap_or(0);
             let uv_loc = gl.get_attrib_location(program, "a_uv").unwrap_or(1);
 
@@ -474,10 +491,29 @@ mod tests {
     fn shaders_declare_the_nv12_sampler_pair() {
         // Lock the Appendix A contract the CUDA upload side relies on: a
         // full-res luma sampler and a half-res interleaved chroma sampler.
-        assert!(FRAGMENT_SHADER_NV12.contains("uniform sampler2D y_tex"));
-        assert!(FRAGMENT_SHADER_NV12.contains("uniform sampler2D uv_tex"));
+        let shader = fragment_shader_nv12(Colorimetry::UNKNOWN);
+        assert!(shader.contains("uniform sampler2D y_tex"));
+        assert!(shader.contains("uniform sampler2D uv_tex"));
         // Vertex shader feeds the fragment shader's texcoord varying.
         assert!(VERTEX_SHADER.contains("varying vec2 v_uv"));
-        assert!(FRAGMENT_SHADER_NV12.contains("varying vec2 v_uv"));
+        assert!(shader.contains("varying vec2 v_uv"));
+    }
+
+    /// Every weight is written as a float literal, whatever the colorimetry:
+    /// GLSL ES 1.00 rejects `y - 0` (an int) where a float belongs, which is
+    /// what a full-range stream's zero luma floor would print as.
+    #[test]
+    fn full_range_weights_stay_float_literals() {
+        let shader = fragment_shader_nv12(Colorimetry {
+            range: g2g_core::ColorRange::Full,
+            ..Colorimetry::BT709
+        });
+        assert!(shader.contains("(y - 0.0)"), "{shader}");
+        assert!(shader.contains("y = 1.0 *"), "{shader}");
+        // At the same range, the matrix still reaches the shader.
+        assert_ne!(
+            fragment_shader_nv12(Colorimetry::BT709),
+            fragment_shader_nv12(Colorimetry::BT601)
+        );
     }
 }

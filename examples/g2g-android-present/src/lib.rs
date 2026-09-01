@@ -94,10 +94,12 @@ impl OutputSink for PresentRelay<'_> {
         packet: &mut Option<PipelinePacket>,
     ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
         let packet = packet.take().expect("poll_push without a packet");
-            let mut nil = Discard;
+        let mut nil = Discard;
         let mut fut = self.sink.process(packet, &mut nil);
         match fut.as_mut().poll(cx) {
-            core::task::Poll::Ready(r) => core::task::Poll::Ready(r.map(|()| PushOutcome::Accepted)),
+            core::task::Poll::Ready(r) => {
+                core::task::Poll::Ready(r.map(|()| PushOutcome::Accepted))
+            }
             // In-memory test elements never block: their only awaits are
             // pushes into always-ready capture sinks.
             core::task::Poll::Pending => panic!("element future did not resolve in one poll"),
@@ -111,6 +113,7 @@ fn h264_caps(w: u32, h: u32) -> Caps {
         width: Dim::Fixed(w),
         height: Dim::Fixed(h),
         framerate: Rate::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
 }
 
@@ -121,6 +124,7 @@ fn rgba_caps(w: u32, h: u32) -> Caps {
         height: Dim::Fixed(h),
         framerate: Rate::Any,
         interlace: g2g_core::Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
 }
 

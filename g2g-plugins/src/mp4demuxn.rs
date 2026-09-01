@@ -98,6 +98,7 @@ fn nego_caps(kind: &TrackKind) -> (Caps, bool) {
                     min_q16: 1 << 16,
                     max_q16: 240 << 16,
                 },
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
             },
             true,
         ),
@@ -982,6 +983,7 @@ mod tests {
                     width: Dim::Fixed(320),
                     height: Dim::Fixed(240),
                     framerate: Rate::Fixed(30 << 16),
+                    colorimetry: g2g_core::Colorimetry::UNKNOWN,
                 },
             )
             .unwrap();
@@ -1063,6 +1065,7 @@ mod tests {
                     width: Dim::Fixed(320),
                     height: Dim::Fixed(240),
                     framerate: Rate::Fixed(30 << 16),
+                    colorimetry: g2g_core::Colorimetry::UNKNOWN,
                 },
             )
             .unwrap();

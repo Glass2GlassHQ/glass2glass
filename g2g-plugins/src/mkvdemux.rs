@@ -332,6 +332,7 @@ impl MkvDemux {
                 min_q16: 1 << 16,
                 max_q16: 240 << 16,
             },
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 
@@ -374,6 +375,7 @@ impl MkvDemux {
                     width: Dim::Fixed(track.width),
                     height: Dim::Fixed(track.height),
                     framerate: Rate::Any,
+                    colorimetry: g2g_core::Colorimetry::UNKNOWN,
                 })
             }
             Caps::Audio { format, .. } if track.sample_rate > 0 => Some(Caps::Audio {
@@ -467,6 +469,7 @@ impl MkvDemux {
                 Dim::Any
             },
             framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         let audio = |format| Caps::Audio {
             format,
@@ -1759,6 +1762,7 @@ mod tests {
             height: Dim::Fixed(2),
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         assert!(d.intercept_caps(&raw).is_err());
         // A TS byte stream is the wrong container.
@@ -1781,6 +1785,7 @@ mod tests {
                 width: Dim::Fixed(320),
                 height: Dim::Fixed(240),
                 framerate: Rate::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN
             }]
         );
         assert_eq!(

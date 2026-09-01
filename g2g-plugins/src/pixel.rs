@@ -41,6 +41,16 @@ pub(crate) fn bt709_luma(r: u8, g: u8, b: u8) -> u8 {
     luma.min(u8::MAX as u32) as u8
 }
 
+/// Whether a format's samples are YUV, so its caps colorimetry names the matrix
+/// a converter has to apply or undo. The packed RGB formats are the only ones
+/// that are not.
+pub(crate) fn carries_yuv(format: RawVideoFormat) -> bool {
+    !matches!(
+        format,
+        RawVideoFormat::Rgba8 | RawVideoFormat::Bgra8 | RawVideoFormat::Rgb8
+    )
+}
+
 /// Whether a format's chroma subsampling forces an even (width, height): a
 /// horizontally-subsampled format needs even width, a vertically-subsampled one
 /// needs even height, so a crop / scale stays on chroma-sample boundaries. NV12

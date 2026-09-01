@@ -143,6 +143,7 @@ async fn decode_gpu_to_preprocess_tensor() {
         width: Dim::Fixed(w),
         height: Dim::Fixed(h),
         framerate: Rate::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     };
     let narrowed = dec.intercept_caps(&upstream).expect("intercept caps");
     assert!(matches!(
@@ -201,6 +202,7 @@ async fn decode_gpu_to_preprocess_tensor() {
         height: Dim::Fixed(h),
         framerate: Rate::Any,
         interlace: g2g_core::Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     };
     // Negotiation (#3): WgpuPreprocess accepts RGBA input.
     assert_eq!(

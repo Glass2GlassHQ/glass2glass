@@ -15,7 +15,7 @@ use wayland_egl::WlEglSurface;
 
 use crate::glnv12::{GlMode, GlState};
 use crate::waylandwindow::{run_window, WindowParams, WindowRenderer, WorkerChannels};
-use g2g_core::{G2gError, HardwareError};
+use g2g_core::{Colorimetry, G2gError, HardwareError};
 
 /// The per-sink half of the worker: which pixel layout to build the GL state
 /// for, and how to get one frame's pixels into it. The draw itself (program,
@@ -26,6 +26,9 @@ pub(crate) trait FramePresenter: 'static {
 
     /// Pixel layout the [`GlState`] is built for, from the negotiated caps.
     fn mode(&self) -> GlMode;
+
+    /// Colorimetry the convert shader is compiled for, from the negotiated caps.
+    fn colorimetry(&self) -> Colorimetry;
 
     /// Upload `frame` into `gl`'s textures and draw it. The worker presents.
     fn present(&mut self, gl: &mut GlState, frame: &Self::Frame) -> Result<(), G2gError>;
@@ -44,7 +47,9 @@ pub(crate) fn run_gl_window<P: FramePresenter>(
             let (egl, gl) = EglWindow::new(conn, wl_surface, width, height)?;
             // SAFETY: `gl` wraps the GL ES 3 context `EglWindow::new` made
             // current on this thread.
-            let state = unsafe { GlState::build(gl, width, height, presenter.mode()) }?;
+            let state = unsafe {
+                GlState::build(gl, width, height, presenter.mode(), presenter.colorimetry())
+            }?;
             Ok(GlRenderer {
                 gl: state,
                 egl,

@@ -126,6 +126,7 @@ impl FlvMux {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         let audio = |format| Caps::Audio {
             format,
@@ -298,6 +299,7 @@ mod tests {
             width: Dim::Fixed(320),
             height: Dim::Fixed(240),
             framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 
@@ -344,6 +346,7 @@ mod tests {
             height: Dim::Fixed(2),
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         assert!(m.intercept_caps(&raw).is_err());
 

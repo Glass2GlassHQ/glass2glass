@@ -29,6 +29,7 @@ fn h264_any() -> Caps {
         width: Dim::Any,
         height: Dim::Any,
         framerate: Rate::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
 }
 fn aac_any() -> Caps {
@@ -45,6 +46,7 @@ fn raw_video() -> Caps {
         height: Dim::Any,
         framerate: Rate::Any,
         interlace: g2g_core::Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
 }
 fn raw_audio() -> Caps {
@@ -185,6 +187,7 @@ async fn av_mp4() -> Vec<u8> {
             width: Dim::Fixed(320),
             height: Dim::Fixed(240),
             framerate: Rate::Fixed(30 << 16),
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         },
     )
     .unwrap();

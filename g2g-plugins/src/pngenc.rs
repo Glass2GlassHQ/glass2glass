@@ -86,6 +86,7 @@ impl PngEnc {
             height: Dim::Any,
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         Vec::from([raw(RawVideoFormat::Rgba8), raw(RawVideoFormat::Rgb8)])
     }
@@ -96,6 +97,7 @@ impl PngEnc {
             width: Dim::Fixed(self.width),
             height: Dim::Fixed(self.height),
             framerate: self.framerate.clone(),
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 
@@ -173,11 +175,13 @@ impl AsyncElement for PngEnc {
                 height,
                 framerate,
                 interlace: _,
+                ..
             } => CapsSet::one(Caps::CompressedVideo {
                 codec: VideoCodec::Png,
                 width: width.clone(),
                 height: height.clone(),
                 framerate: framerate.clone(),
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
             }),
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
@@ -190,6 +194,7 @@ impl AsyncElement for PngEnc {
             height,
             framerate,
             interlace: _,
+            ..
         } = absolute_caps
         else {
             return Err(G2gError::CapsMismatch);
@@ -295,6 +300,7 @@ impl PadTemplates for PngEnc {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         Vec::from([
             PadTemplate::sink(CapsSet::from_alternatives(Self::input_alternatives())),

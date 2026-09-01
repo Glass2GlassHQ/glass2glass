@@ -59,6 +59,7 @@ fn retained_buffer_view_is_rejected_not_use_after_free() {
         height: Dim::Fixed(1),
         framerate: Rate::Fixed(30),
         interlace: g2g_core::Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     };
     el.configure_pipeline(&caps).unwrap();
 

@@ -199,6 +199,7 @@ impl VtEncode {
             height: Dim::Any,
             framerate: Rate::Any,
             interlace: Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 
@@ -354,6 +355,7 @@ impl AsyncElement for VtEncode {
                 height: Dim::Fixed(h),
                 framerate,
                 interlace: _,
+                ..
             } if *w % 2 == 0 && *h % 2 == 0 => (*w, *h, framerate.clone()),
             _ => return Err(G2gError::CapsMismatch),
         };
@@ -462,12 +464,14 @@ impl PadTemplates for VtEncode {
             height: Dim::Any,
             framerate: Rate::Any,
             interlace: Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         let compressed = |codec| Caps::CompressedVideo {
             codec,
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         Vec::from([
             PadTemplate::sink(CapsSet::one(nv12)),
@@ -485,6 +489,7 @@ fn h264_caps(codec: VideoCodec, w: u32, h: u32, framerate: Rate) -> Caps {
         width: Dim::Fixed(w),
         height: Dim::Fixed(h),
         framerate,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
 }
 
@@ -496,11 +501,13 @@ fn derive_output_caps(codec: VideoCodec, input: &Caps) -> CapsSet {
             height,
             framerate,
             interlace: _,
+            ..
         } => CapsSet::one(Caps::CompressedVideo {
             codec,
             width: width.clone(),
             height: height.clone(),
             framerate: framerate.clone(),
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }),
         _ => CapsSet::from_alternatives(Vec::new()),
     }

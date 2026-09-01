@@ -269,6 +269,7 @@ fn placeholder_video_caps(codec: VideoCodec, min_dim: u32) -> Caps {
             min_q16: 1 << 16,
             max_q16: 240 << 16,
         },
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
 }
 

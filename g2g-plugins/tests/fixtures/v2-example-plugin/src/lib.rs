@@ -123,6 +123,7 @@ impl PadTemplates for V2Counter {
             height: Dim::Any,
             framerate: Rate::Any,
             interlace: Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         });
         Vec::from([PadTemplate::sink(any.clone()), PadTemplate::source(any)])
     }
@@ -160,11 +161,7 @@ mod undeclared {
         let registrar = unsafe { &*registrar };
         // SAFETY: the SDK builds a registration whose pointers it leaks.
         let status = unsafe {
-            g2g_plugin::v2::register_element::<V2Counter>(
-                registrar,
-                "v2counter",
-                ELEMENT_TRANSFORM,
-            )
+            g2g_plugin::v2::register_element::<V2Counter>(registrar, "v2counter", ELEMENT_TRANSFORM)
         };
         if !status.is_ok() {
             return status;

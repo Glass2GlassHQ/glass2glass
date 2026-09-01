@@ -86,6 +86,7 @@ fn caps() -> Caps {
         height: g2g_core::Dim::Fixed(2),
         framerate: g2g_core::Rate::Fixed(30 << 16),
         interlace: g2g_core::Interlace::Progressive,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
 }
 
@@ -173,13 +174,28 @@ async fn a_buffer_with_no_pts_is_forwarded_immediately() {
     assert_eq!(sink.frames, vec![FrameTiming::PTS_NONE], "not dropped");
     assert_eq!(clock.now_ns(), 0, "nothing waited");
 
-    // The stamped buffer that follows keeps its own deadline, exactly as if the
-    // unstamped one had never passed through.
+    // The stamped buffer that follows anchors the stream on itself and goes
+    // straight out, exactly as if the unstamped one had never passed through.
     e.process(frame(33_000_000), &mut sink)
         .await
         .expect("forwarded");
-    assert_eq!(clock.now_ns(), 33_000_000);
+    assert_eq!(
+        clock.now_ns(),
+        0,
+        "the unstamped buffer left no deadline behind"
+    );
     assert_eq!(e.forwarded(), 2);
+
+    // The schedule then runs from that anchor: the next buffer is held its PTS
+    // delta, not its raw PTS.
+    e.process(frame(66_000_000), &mut sink)
+        .await
+        .expect("forwarded");
+    assert_eq!(
+        clock.now_ns(),
+        33_000_000,
+        "33 ms after the anchoring buffer"
+    );
 }
 
 /// Caps are none of this element's business: whatever arrives is what leaves.

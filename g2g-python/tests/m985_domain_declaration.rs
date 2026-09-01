@@ -27,6 +27,7 @@ fn nv12() -> Caps {
         height: Dim::Fixed(HEIGHT),
         framerate: Rate::Fixed(30),
         interlace: g2g_core::Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
 }
 
@@ -37,6 +38,7 @@ fn nv12_any() -> CapsSet {
         height: Dim::Any,
         framerate: Rate::Any,
         interlace: g2g_core::Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     })
 }
 
@@ -221,6 +223,7 @@ fn the_upstream_allocation_proposal_names_the_domain_the_hosted_code_reads() {
         height: Dim::Fixed(HEIGHT),
         framerate: Rate::Any,
         interlace: g2g_core::Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     };
     assert!(nv12_element().propose_allocation(&unfixed).is_none());
 }

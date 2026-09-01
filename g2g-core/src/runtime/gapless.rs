@@ -67,7 +67,7 @@ struct GaplessInner {
 
 /// Cloneable gapless-playback channel. Every clone shares one playlist queue, one
 /// about-to-finish back-channel, and one finished flag. The app holds one handle;
-/// a clone lives in the [`GaplessSrc`] (the same app-holds / source-holds-a-clone
+/// a clone lives in the `GaplessSrc` (the same app-holds / source-holds-a-clone
 /// shape as [`SeekController`](crate::runtime::SeekController)).
 #[derive(Clone, Default)]
 pub struct GaplessController {
@@ -93,7 +93,7 @@ impl GaplessController {
     }
 
     /// Application side: enqueue the next source to play (a constructed, *not yet*
-    /// configured [`DynSourceLoop`]; the [`GaplessSrc`] negotiates and configures
+    /// configured [`DynSourceLoop`]; the `GaplessSrc` negotiates and configures
     /// it before playing). Items play in enqueue order.
     pub fn enqueue(&self, source: Box<dyn DynSourceLoop>) {
         self.inner.queue.lock().push_back(source);

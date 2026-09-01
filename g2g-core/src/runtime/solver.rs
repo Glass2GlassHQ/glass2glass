@@ -2222,6 +2222,7 @@ mod tests {
             height: h,
             framerate: r,
             interlace: crate::Interlace::Any,
+            colorimetry: crate::Colorimetry::UNKNOWN,
         }
     }
 
@@ -2340,6 +2341,7 @@ mod tests {
             width: w,
             height: h,
             framerate: r,
+            colorimetry: crate::Colorimetry::UNKNOWN,
         }
     }
 
@@ -2500,6 +2502,7 @@ mod tests {
                 height: height.clone(),
                 framerate: framerate.clone(),
                 interlace: crate::Interlace::Any,
+                colorimetry: crate::Colorimetry::UNKNOWN,
             }),
             _ => CapsSet::from_alternatives(Vec::new()),
         }));
@@ -2545,6 +2548,7 @@ mod tests {
                 height: height.clone(),
                 framerate: framerate.clone(),
                 interlace: crate::Interlace::Any,
+                colorimetry: crate::Colorimetry::UNKNOWN,
             }),
             _ => CapsSet::from_alternatives(Vec::new()),
         }));
@@ -2674,6 +2678,7 @@ mod tests {
                     height: height.clone(),
                     framerate: framerate.clone(),
                     interlace: crate::Interlace::Any,
+                    colorimetry: crate::Colorimetry::UNKNOWN,
                 },
                 other => other.clone(),
             }),
@@ -2758,6 +2763,7 @@ mod tests {
                     height: height.clone(),
                     framerate: framerate.clone(),
                     interlace: crate::Interlace::Any,
+                    colorimetry: crate::Colorimetry::UNKNOWN,
                 },
                 other => other.clone(),
             }),
@@ -2954,7 +2960,7 @@ mod tests {
                 width,
                 height,
                 framerate,
-                interlace: _,
+                ..
             } = input
             else {
                 return CapsSet::from_alternatives(vec![]);
@@ -3144,7 +3150,7 @@ mod tests {
                 width,
                 height,
                 framerate,
-                interlace: _,
+                ..
             } = input
             else {
                 return CapsSet::from_alternatives(vec![]);
@@ -3767,6 +3773,7 @@ mod tests {
                 height: height.clone(),
                 framerate: framerate.clone(),
                 interlace: crate::Interlace::Any,
+                colorimetry: crate::Colorimetry::UNKNOWN,
             }),
             _ => CapsSet::from_alternatives(Vec::new()),
         };

@@ -36,6 +36,7 @@ fn video_caps(width: u32) -> Caps {
         height: Dim::Fixed(16),
         framerate: Rate::Fixed(30 << 16),
         interlace: g2g_core::Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
 }
 
@@ -56,6 +57,7 @@ fn pad_caps() -> Caps {
         height: Dim::Any,
         framerate: Rate::Any,
         interlace: g2g_core::Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
 }
 

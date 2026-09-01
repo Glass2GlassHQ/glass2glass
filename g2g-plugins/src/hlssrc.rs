@@ -36,9 +36,19 @@
 //! HTTP `Range` request (M368), the offset continuing from the previous
 //! sub-range of the same resource when the tag omits an explicit `@offset`.
 //!
-//! Scope: in-order segment fetch, one `DataFrame` per segment. Throughput-driven
-//! ABR mid-stream is opt-in ([`with_abr`](HlsSrc::with_abr)); a plain run keeps
-//! one variant.
+//! Low-latency HLS (RFC 8216bis) is followed whenever the playlist offers it:
+//! `#EXT-X-PART` partial segments plus `#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD`.
+//! The reload then holds the playlist request open with the `_HLS_msn` /
+//! `_HLS_part` delivery directives instead of polling on the `TARGETDURATION`
+//! timer, each part is fetched and emitted as its own `DataFrame` as it appears,
+//! and playback starts `PART-HOLD-BACK` behind the live edge rather than three
+//! target durations. `low-latency=false` forces the whole-segment path, and a
+//! server that answers a blocking reload with nothing new drops the run back to
+//! timed reloads.
+//!
+//! Scope: in-order segment fetch, one `DataFrame` per segment (per part in
+//! low-latency mode). Throughput-driven ABR mid-stream is opt-in
+//! ([`with_abr`](HlsSrc::with_abr)); a plain run keeps one variant.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -56,8 +66,8 @@ use g2g_core::{
 
 use crate::abr::BandwidthEstimator;
 use crate::fetch::{
-    byte_frame, get_bytes, get_range_bytes, get_text, resolve_url, MAX_MANIFEST_BYTES,
-    MAX_SEGMENT_BYTES,
+    byte_frame, get_bytes, get_range_bytes, get_text, get_text_query, resolve_url,
+    MAX_MANIFEST_BYTES, MAX_SEGMENT_BYTES,
 };
 use crate::fmp4::{TrackHeader, TrackKind};
 use crate::hls::{parse, KeyMethod, MasterPlaylist, MediaPlaylist, MediaType, Playlist, Variant};
@@ -93,6 +103,7 @@ fn codec_to_stream(codec: &str) -> Option<(StreamType, Caps, bool)> {
                 width: Dim::Any,
                 height: Dim::Any,
                 framerate: Rate::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
             },
             true,
         )
@@ -213,6 +224,28 @@ pub fn variant_streams(master: &MasterPlaylist, variant: &Variant) -> Vec<HlsStr
 ///     .with_max_bandwidth(4_000_000)
 ///     .with_prebuffer_ms(2_000);
 /// ```
+/// Default `prebuffer-ms` on a plain playlist: roughly two segments of a live
+/// playlist, so playback does not starve at every segment boundary while the
+/// next one is fetched. `with_prebuffer_ms(0)` restores unbuffered emission. A
+/// low-latency playlist derives its default from `PART-HOLD-BACK` instead, which
+/// is a fraction of this.
+pub const DEFAULT_PREBUFFER_MS: u64 = 2_000;
+
+/// Delivery directives on a blocking playlist reload (RFC 8216bis §6.2.5.2):
+/// the media sequence number and Part Index the client wants next. The server
+/// holds the response until that partial segment is published.
+const HLS_MSN_PARAM: &str = "_HLS_msn";
+const HLS_PART_PARAM: &str = "_HLS_part";
+
+/// Headroom over one target duration for a blocking reload's deadline: the
+/// server should answer within a part duration, so a request outstanding this
+/// long means it is not honouring the directives.
+const BLOCKING_RELOAD_MARGIN_MS: u64 = 1_000;
+
+/// Blocking reloads that returned nothing new before the run gives up on them
+/// and goes back to timed polling.
+const BLOCKING_MISS_LIMIT: u32 = 3;
+
 #[derive(Debug)]
 pub struct HlsSrc {
     url: String,
@@ -258,8 +291,16 @@ pub struct HlsSrc {
     /// the available window. No effect on VOD (always from the front).
     full_replay: bool,
     /// Duration-keyed prebuffer target in ms (0 = off): fetch this much media
-    /// ahead before emitting, posting `Buffering` on the attached bus.
-    prebuffer_ms: u64,
+    /// ahead before emitting, posting `Buffering` on the attached bus. `None`
+    /// derives it from the playlist: `PART-HOLD-BACK` in low-latency mode, else
+    /// [`DEFAULT_PREBUFFER_MS`].
+    prebuffer_ms: Option<u64>,
+    /// Follow the playlist's low-latency tags when it publishes them (M1125):
+    /// fetch and emit `#EXT-X-PART` partial segments and block the reload on the
+    /// next part. On by default, since a playlist advertising parts and
+    /// `CAN-BLOCK-RELOAD` is a server that expects a client to use them; `false`
+    /// keeps the whole-segment path on such a playlist.
+    low_latency: bool,
     bus: Option<BusHandle>,
     configured: bool,
 }
@@ -277,7 +318,8 @@ impl HlsSrc {
             abr: false,
             text: false,
             full_replay: false,
-            prebuffer_ms: 0,
+            prebuffer_ms: None,
+            low_latency: true,
             bus: None,
             configured: false,
         }
@@ -286,8 +328,19 @@ impl HlsSrc {
     /// Buffer this many milliseconds of media (summed `#EXTINF` durations)
     /// before emitting, and again after a flushing seek. `0` disables
     /// prebuffering. The duration-keyed sibling of `HttpSrc::prebuffer-bytes`.
+    /// Unset, it is [`DEFAULT_PREBUFFER_MS`], or the playlist's `PART-HOLD-BACK`
+    /// in low-latency mode.
     pub fn with_prebuffer_ms(mut self, ms: u64) -> Self {
-        self.prebuffer_ms = ms;
+        self.prebuffer_ms = Some(ms);
+        self
+    }
+
+    /// Ignore the playlist's low-latency tags: fetch whole segments and reload
+    /// on the `TARGETDURATION` timer even where the server offers partial
+    /// segments and blocking reloads. The comparison baseline for a
+    /// low-latency run, and the escape hatch for a server whose parts misbehave.
+    pub fn without_low_latency(mut self) -> Self {
+        self.low_latency = false;
         self
     }
 
@@ -583,6 +636,58 @@ fn live_edge_start(media: &MediaPlaylist) -> usize {
     start
 }
 
+/// The `(media sequence, part index)` to start a low-latency playlist at:
+/// `PART-HOLD-BACK` back from the last published part (RFC 8216bis §6.2.4),
+/// where a plain client starts three target durations back. The walk continues
+/// past the hold-back point to the nearest `INDEPENDENT` part (or the segment
+/// start, which always begins with a keyframe), so the decoder joins on a frame
+/// it can decode. Clamped to the front of the window.
+fn ll_edge_start(media: &MediaPlaylist) -> (u64, usize) {
+    let hold_back_ns = u64::from(media.part_hold_back_ms()).saturating_mul(1_000_000);
+    let mut behind_ns = 0u64;
+    let mut start = (media.media_sequence, 0usize);
+    'walk: for (idx, segment) in media.segments.iter().enumerate().rev() {
+        let seq = media.media_sequence + idx as u64;
+        // A segment whose parts the server has already dropped steps as a whole.
+        for step in (0..segment.parts.len().max(1)).rev() {
+            let part = segment.parts.get(step);
+            let duration_ms = part.map_or(segment.duration_ms, |p| p.duration_ms);
+            behind_ns = behind_ns.saturating_add(u64::from(duration_ms).saturating_mul(1_000_000));
+            start = (seq, if part.is_some() { step } else { 0 });
+            let joinable = step == 0 || part.is_none_or(|p| p.independent);
+            if behind_ns >= hold_back_ns && joinable {
+                break 'walk;
+            }
+        }
+    }
+    start
+}
+
+/// The startup prebuffer target in ms: an explicit `prebuffer-ms` wins, else the
+/// playlist's `PART-HOLD-BACK` in low-latency mode (holding the two-segment
+/// default there would put playback further behind the live edge than the parts
+/// gained), else [`DEFAULT_PREBUFFER_MS`].
+fn prebuffer_target_ms(explicit: Option<u64>, media: &MediaPlaylist, low_latency: bool) -> u64 {
+    explicit.unwrap_or(if low_latency {
+        u64::from(media.part_hold_back_ms())
+    } else {
+        DEFAULT_PREBUFFER_MS
+    })
+}
+
+/// Whether the playlist publishes anything at or past `(seq, part)`, which is
+/// what a blocking reload was asked to wait for. A server that ignores the
+/// delivery directives answers at once with the playlist the client already has,
+/// and this is how the run notices.
+fn has_media_from(media: &MediaPlaylist, seq: u64, part: usize) -> bool {
+    media.segments.iter().enumerate().any(|(idx, segment)| {
+        let seg_seq = media.media_sequence + idx as u64;
+        seg_seq > seq
+            || (seg_seq == seq
+                && (segment.parts.len() > part || (part == 0 && !segment.incomplete())))
+    })
+}
+
 impl SourceLoop for HlsSrc {
     type RunFuture<'a>
         = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
@@ -661,10 +766,22 @@ impl SourceLoop for HlsSrc {
             };
 
             let mut sequence = 0u64;
+            // Low latency: the playlist publishes partial segments and the server
+            // holds a reload until the next one, so parts are fetched and emitted
+            // as they appear. A subtitle rendition stays on the segment path (its
+            // text is rewritten per segment, not per part).
+            let mut ll = self.low_latency && !text_mode && media.low_latency();
+            // Blocking reloads answered with nothing new: a server that ignores
+            // the delivery directives drops the run back to timed reloads.
+            let mut blocking_misses = 0u32;
+            // Next timed reload on an absolute schedule (None until the first).
+            let mut next_reload: Option<tokio::time::Instant> = None;
             // Duration-keyed prebuffer window (0 = pass-through); init segments
             // ride it with duration 0 so ordering survives an ABR re-init.
-            let mut window =
-                crate::segprebuf::SegmentPrebuffer::new(self.prebuffer_ms, self.bus.clone());
+            let mut window = crate::segprebuf::SegmentPrebuffer::new(
+                prebuffer_target_ms(self.prebuffer_ms, &media, ll),
+                self.bus.clone(),
+            );
             // AES-128 keys fetched once per URI and reused across segments.
             let mut keys: Vec<(String, [u8; 16])> = Vec::new();
             // Sample-encryption key per queued segment, in emit order (`None` for
@@ -673,17 +790,19 @@ impl SourceLoop for HlsSrc {
             let mut pending_keys: alloc::collections::VecDeque<Option<SampleAesKey>> =
                 alloc::collections::VecDeque::new();
             let mut emitted_bytes = 0u64;
-            // Next HLS media-sequence number to play; segments below it on a live
-            // reload were already delivered. A live playlist starts near the live
-            // edge (skipping the stale front of the window) instead of its start, so
+            // Next HLS media-sequence number to play, and the Part Index within it
+            // (0 = the whole segment); media below that on a live reload was
+            // already delivered. A live playlist starts near the live edge
+            // (skipping the stale front of the window) instead of its start, so
             // playback follows what is being published; VOD starts at the front. The
             // `full_replay` opt-in starts a live playlist from the window front too.
-            let edge = if self.full_replay {
-                0
+            let (mut next_seq, mut next_part) = if self.full_replay {
+                (media.media_sequence, 0usize)
+            } else if ll {
+                ll_edge_start(&media)
             } else {
-                live_edge_start(&media)
+                (media.media_sequence + live_edge_start(&media) as u64, 0)
             };
-            let mut next_seq = media.media_sequence + edge as u64;
             // fMP4: the EXT-X-MAP init segment (ftyp+moov) is emitted once, before
             // any media fragment, so a downstream fmp4demux sees the moov first.
             let mut init_emitted = false;
@@ -717,6 +836,7 @@ impl SourceLoop for HlsSrc {
                             out.push(PipelinePacket::Flush).await?;
                             idx = target_idx;
                             next_seq = media.media_sequence + target_idx as u64;
+                            next_part = 0;
                             init_emitted = false;
                             out.push(PipelinePacket::Segment(Segment::for_flush_seek(
                                 &Seek::flush_to(seg_start_ns),
@@ -764,7 +884,73 @@ impl SourceLoop for HlsSrc {
                         let mut measured: Option<(usize, u64)> = None;
                         let segment = &media.segments[idx];
                         let duration_ns = (segment.duration_ms as u64).saturating_mul(1_000_000);
-                        if seg_seq >= next_seq {
+                        // Fetch this segment's parts rather than the whole thing
+                        // when it is still being produced (only its parts exist) or
+                        // when it was joined part-way; a complete segment nothing
+                        // was taken from is one request instead of several. An
+                        // encrypted segment stays whole: the key covers the segment,
+                        // not the part. Finishing a segment already joined part-way
+                        // does not need low latency still on: dropping back to timed
+                        // reloads mid-segment must not leave a hole.
+                        let joined_part_way = seg_seq == next_seq && next_part > 0;
+                        let use_parts = !segment.parts.is_empty()
+                            && segment.key.is_none()
+                            && (joined_part_way || (ll && segment.incomplete()));
+                        // RFC 8216bis 4.4.4.7: an `#EXT-X-GAP` segment has no media
+                        // behind its URI, so step over it instead of fetching a 404.
+                        // A live packager pads a freshly started playlist with them.
+                        if segment.gap {
+                            next_seq = next_seq.max(seg_seq + 1);
+                            next_part = 0;
+                        } else if seg_seq < next_seq {
+                            // already delivered
+                        } else if use_parts {
+                            let first = if seg_seq == next_seq { next_part } else { 0 };
+                            for part in segment.parts.iter().skip(first) {
+                                if part.gap {
+                                    continue;
+                                }
+                                let part_url = resolve_url(&media_url, &part.uri);
+                                let bytes = match part.byte_range {
+                                    Some(r) => {
+                                        get_range_bytes(
+                                            &client,
+                                            &part_url,
+                                            r.offset,
+                                            r.length,
+                                            MAX_SEGMENT_BYTES,
+                                        )
+                                        .await?
+                                    }
+                                    None => {
+                                        get_bytes(&client, &part_url, MAX_SEGMENT_BYTES).await?
+                                    }
+                                };
+                                if !bytes.is_empty() {
+                                    pending_keys.push_back(None);
+                                    window.admit(
+                                        bytes,
+                                        u64::from(part.duration_ms).saturating_mul(1_000_000),
+                                    );
+                                }
+                            }
+                            if segment.incomplete() {
+                                next_seq = seg_seq;
+                                next_part = segment.parts.len();
+                            } else {
+                                next_seq = seg_seq + 1;
+                                next_part = 0;
+                            }
+                        } else if segment.incomplete() {
+                            // Being produced and not part-fetchable here: wait for
+                            // the reload that publishes its `#EXTINF` and URI.
+                        } else if joined_part_way {
+                            // Its remaining parts have aged out of the playlist.
+                            // Refetching the whole segment would replay what was
+                            // already emitted, so step over the tail.
+                            next_seq = seg_seq + 1;
+                            next_part = 0;
+                        } else {
                             let seg_url = resolve_url(&media_url, &segment.uri);
                             let t0 = g2g_core::metrics::monotonic_ns();
                             let bytes = match segment.byte_range {
@@ -833,6 +1019,7 @@ impl SourceLoop for HlsSrc {
                                 window.admit(bytes, duration_ns);
                             }
                             next_seq = seg_seq + 1;
+                            next_part = 0;
                         }
                         idx += 1;
 
@@ -895,18 +1082,71 @@ impl SourceLoop for HlsSrc {
                 if media.end_list {
                     break;
                 }
-                // Live: wait a reload interval, then refetch the media playlist.
-                let interval_ms = if self.reload_interval_ms != 0 {
-                    self.reload_interval_ms
+                // Live reload. Low latency holds the request open until the part
+                // the run wants next is published (`_HLS_msn` / `_HLS_part`),
+                // which is what delivers a part as soon as it exists; a plain
+                // playlist waits a reload interval and refetches.
+                let target_ms = u64::from(media.target_duration_secs.max(1)) * 1000;
+                let held = if ll {
+                    get_text_query(
+                        &client,
+                        &media_url,
+                        &[
+                            (HLS_MSN_PARAM, next_seq),
+                            (HLS_PART_PARAM, next_part as u64),
+                        ],
+                        core::time::Duration::from_millis(
+                            target_ms.saturating_add(BLOCKING_RELOAD_MARGIN_MS),
+                        ),
+                        MAX_MANIFEST_BYTES,
+                    )
+                    .await
+                    .ok()
                 } else {
-                    u64::from(media.target_duration_secs.max(1)) * 1000
+                    None
                 };
-                tokio::time::sleep(core::time::Duration::from_millis(interval_ms)).await;
-                let text = get_text(&client, &media_url, MAX_MANIFEST_BYTES).await?;
+                let text = match held {
+                    Some(text) => text,
+                    None => {
+                        if ll {
+                            // The held request failed or ran past its deadline.
+                            blocking_misses += 1;
+                        }
+                        let interval_ms = if self.reload_interval_ms != 0 {
+                            self.reload_interval_ms
+                        } else {
+                            target_ms
+                        };
+                        let interval = core::time::Duration::from_millis(interval_ms);
+                        // Absolute cadence: sleeping for the interval after the
+                        // fetch and emit work makes the true period interval
+                        // plus work, and a live client then falls behind the
+                        // publisher by the work time every cycle.
+                        let due =
+                            next_reload.unwrap_or_else(|| tokio::time::Instant::now() + interval);
+                        tokio::time::sleep_until(due).await;
+                        let now = tokio::time::Instant::now();
+                        let scheduled = due + interval;
+                        // A full interval behind: reload now, do not burst.
+                        next_reload = Some(scheduled.max(now + interval / 2));
+                        get_text(&client, &media_url, MAX_MANIFEST_BYTES).await?
+                    }
+                };
                 media = match parse(&text).map_err(|_| G2gError::CapsMismatch)? {
                     Playlist::Media(m) => m,
                     Playlist::Master(_) => return Err(G2gError::CapsMismatch),
                 };
+                if ll {
+                    if has_media_from(&media, next_seq, next_part) {
+                        blocking_misses = 0;
+                    } else {
+                        blocking_misses += 1;
+                    }
+                }
+                ll = self.low_latency
+                    && !text_mode
+                    && media.low_latency()
+                    && blocking_misses < BLOCKING_MISS_LIMIT;
             }
 
             out.push(PipelinePacket::Eos).await?;
@@ -963,7 +1203,14 @@ impl SourceLoop for HlsSrc {
             },
             "prebuffer-ms" => match value {
                 PropValue::Uint(v) => {
-                    self.prebuffer_ms = v;
+                    self.prebuffer_ms = Some(v);
+                    Ok(())
+                }
+                _ => Err(PropError::Type),
+            },
+            "low-latency" => match value {
+                PropValue::Bool(v) => {
+                    self.low_latency = v;
                     Ok(())
                 }
                 _ => Err(PropError::Type),
@@ -979,7 +1226,10 @@ impl SourceLoop for HlsSrc {
             "reload-interval-ms" => Some(PropValue::Uint(self.reload_interval_ms)),
             "full-replay" => Some(PropValue::Bool(self.full_replay)),
             "abr" => Some(PropValue::Bool(self.abr)),
-            "prebuffer-ms" => Some(PropValue::Uint(self.prebuffer_ms)),
+            "prebuffer-ms" => Some(PropValue::Uint(
+                self.prebuffer_ms.unwrap_or(DEFAULT_PREBUFFER_MS),
+            )),
+            "low-latency" => Some(PropValue::Bool(self.low_latency)),
             _ => None,
         }
     }
@@ -1013,7 +1263,13 @@ static HLSSRC_PROPS: &[PropertySpec] = &[
         PropKind::Uint,
         "media to buffer ahead before emitting, ms; posts Buffering bus messages (0 = off)",
     )
-    .with_default("0"),
+    .with_default("2000"),
+    PropertySpec::new(
+        "low-latency",
+        PropKind::Bool,
+        "follow the playlist's LL-HLS tags: fetch EXT-X-PART partial segments and block the reload on the next part",
+    )
+    .with_default("true"),
 ];
 
 #[cfg(test)]
@@ -1026,6 +1282,96 @@ mod tests {
             Playlist::Master(m) => m,
             Playlist::Media(_) => panic!("expected master playlist"),
         }
+    }
+
+    fn media(text: &str) -> MediaPlaylist {
+        match parse(text).unwrap() {
+            Playlist::Media(m) => m,
+            Playlist::Master(_) => panic!("expected media playlist"),
+        }
+    }
+
+    /// Two complete one-second segments of five 200 ms parts each, then two
+    /// parts of the segment being produced: the shape a live LL-HLS packager
+    /// publishes. Only part 0 of a segment is `INDEPENDENT` (it carries the
+    /// keyframe), as mediamtx marks them.
+    fn ll_media(hold_back: &str) -> MediaPlaylist {
+        let mut text = alloc::string::String::from(
+            "#EXTM3U\n\
+             #EXT-X-TARGETDURATION:1\n\
+             #EXT-X-PART-INF:PART-TARGET=0.2\n\
+             #EXT-X-MEDIA-SEQUENCE:10\n",
+        );
+        text.push_str(&alloc::format!(
+            "#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=YES{hold_back}\n"
+        ));
+        for segment in 0..2 {
+            for part in 0..5 {
+                let independent = if part == 0 { ",INDEPENDENT=YES" } else { "" };
+                text.push_str(&alloc::format!(
+                    "#EXT-X-PART:DURATION=0.2,URI=\"s{segment}p{part}.mp4\"{independent}\n"
+                ));
+            }
+            text.push_str(&alloc::format!("#EXTINF:1.0,\nseg{segment}.mp4\n"));
+        }
+        text.push_str(
+            "#EXT-X-PART:DURATION=0.2,URI=\"s2p0.mp4\",INDEPENDENT=YES\n\
+             #EXT-X-PART:DURATION=0.2,URI=\"s2p1.mp4\"\n",
+        );
+        media(&text)
+    }
+
+    #[test]
+    fn ll_start_snaps_back_to_an_independent_part() {
+        // The open segment (12) holds 0.4 s of parts, so a 0.4 s hold-back starts
+        // exactly at its part 0.
+        assert_eq!(ll_edge_start(&ll_media(",PART-HOLD-BACK=0.4")), (12, 0));
+
+        // 0.5 s reaches one part into the previous segment, whose part 4 is not
+        // independently decodable: the start walks back to that segment's part 0,
+        // the nearest frame a decoder can join on, rather than stopping there.
+        assert_eq!(ll_edge_start(&ll_media(",PART-HOLD-BACK=0.5")), (11, 0));
+    }
+
+    /// The whole point of low-latency start: three target durations back (what a
+    /// plain client uses) is several segments, PART-HOLD-BACK is a fraction of one.
+    #[test]
+    fn ll_start_is_nearer_the_live_edge_than_the_plain_one() {
+        let m = ll_media(",PART-HOLD-BACK=0.5");
+        let (ll_seq, _) = ll_edge_start(&m);
+        let plain_seq = m.media_sequence + live_edge_start(&m) as u64;
+        assert!(
+            ll_seq > plain_seq,
+            "low latency starts at {ll_seq}, a plain client at {plain_seq}"
+        );
+    }
+
+    #[test]
+    fn prebuffer_defaults_to_part_hold_back_in_low_latency_mode() {
+        let m = ll_media(",PART-HOLD-BACK=0.5");
+        assert_eq!(prebuffer_target_ms(None, &m, true), 500);
+        // Same playlist with low latency off keeps the two-segment default.
+        assert_eq!(
+            prebuffer_target_ms(None, &m, false),
+            DEFAULT_PREBUFFER_MS,
+            "a plain run is unaffected by the LL tags"
+        );
+        // An explicit prebuffer-ms overrides both.
+        assert_eq!(prebuffer_target_ms(Some(120), &m, true), 120);
+        assert_eq!(prebuffer_target_ms(Some(120), &m, false), 120);
+        // No PART-HOLD-BACK: three part targets.
+        assert_eq!(prebuffer_target_ms(None, &ll_media(""), true), 600);
+    }
+
+    #[test]
+    fn blocking_reload_progress_is_measured_against_the_wanted_part() {
+        let m = ll_media(",PART-HOLD-BACK=0.5");
+        // The open segment (12) has published parts 0 and 1.
+        assert!(has_media_from(&m, 12, 1));
+        assert!(!has_media_from(&m, 12, 2), "part 2 is not published yet");
+        assert!(!has_media_from(&m, 13, 0), "nor is the next segment");
+        // A complete segment counts as media at part index 0.
+        assert!(has_media_from(&m, 11, 0));
     }
 
     #[test]

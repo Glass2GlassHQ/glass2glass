@@ -243,6 +243,7 @@ async fn mux_av() -> Vec<u8> {
             width: Dim::Fixed(320),
             height: Dim::Fixed(240),
             framerate: Rate::Fixed(30 << 16),
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         },
     )
     .unwrap();

@@ -191,7 +191,7 @@ impl CoordinatorHandle {
 /// [`CoordinatorHandle`] has dropped (channel close), counting observed
 /// events for [`RunStats`](crate::runtime::RunStats).
 ///
-/// β: it owns one [`ArmDirective`] sender per interior arm (`arm_ctrl`,
+/// β: it owns one `ArmDirective` sender per interior arm (`arm_ctrl`,
 /// ordered source-to-sink). The cascade is purely reactive, so it never
 /// blocks on a walk: a [`CoordinatorEvent::CapsChanged`] kicks it off by
 /// forwarding the sink's proposal to the *last* interior arm; each interior
@@ -535,6 +535,7 @@ mod tests {
             height: Dim::Fixed(h),
             framerate: Rate::Fixed(30 << 16),
             interlace: crate::Interlace::Any,
+            colorimetry: crate::Colorimetry::UNKNOWN,
         }
     }
 

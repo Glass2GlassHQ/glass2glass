@@ -105,6 +105,7 @@ fn ortinfer_without_a_model_fails_loud() {
         height: Dim::Fixed(2),
         framerate: Rate::Any,
         interlace: g2g_core::Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     };
     let mut e = OrtInference::new();
     assert_eq!(e.intercept_caps(&rgba), Err(G2gError::NotConfigured));

@@ -167,6 +167,7 @@ impl SubPictureOverlay {
             height: Dim::Any,
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 }
@@ -367,6 +368,7 @@ mod tests {
             height: Dim::Fixed(h),
             framerate: Rate::Fixed(25 << 16),
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 

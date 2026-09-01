@@ -113,6 +113,7 @@ mod demo {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         let mut parse = H264Parse::reframing();
         parse.configure_pipeline(&caps).expect("configure parser");
@@ -164,6 +165,7 @@ mod demo {
             width: Dim::Fixed(w),
             height: Dim::Fixed(h),
             framerate: Rate::Fixed(30 << 16),
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         let narrowed = dec.intercept_caps(&dec_caps).expect("intercept H.264");
         dec.configure_pipeline(&narrowed).expect("decoder session");
@@ -270,6 +272,7 @@ mod demo {
                 height: Dim::Fixed(self.height),
                 framerate: Rate::Fixed(30 << 16),
                 interlace: Interlace::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
             };
             sink.configure_pipeline(&caps).expect("sink configure");
             self.sink = Some(sink);

@@ -286,6 +286,7 @@ impl SourceLoop for BlackVideoSrc {
             height: Dim::Fixed(H),
             framerate: Rate::Fixed(30 << 16),
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }))
     }
     fn configure_pipeline(&mut self, _caps: &Caps) -> Result<ConfigureOutcome, G2gError> {

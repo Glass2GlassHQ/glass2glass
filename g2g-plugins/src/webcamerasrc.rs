@@ -79,6 +79,7 @@ impl WebCameraSrc {
             // and the paired encoder just needs a sane rate to configure with.
             framerate: Rate::Fixed(30 << 16),
             interlace: Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 
@@ -93,6 +94,7 @@ impl WebCameraSrc {
                 height: Dim::Fixed(h),
                 framerate: Rate::Fixed(30 << 16),
                 interlace: Interlace::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
             };
             out.push(PipelinePacket::CapsChanged(caps)).await?;
             self.last_dims = Some((w, h));

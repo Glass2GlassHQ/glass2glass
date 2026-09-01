@@ -67,6 +67,7 @@ async fn unconfigured_source_errors_cleanly() {
         width: g2g_core::Dim::Fixed(1920),
         height: g2g_core::Dim::Fixed(1080),
         framerate: g2g_core::Rate::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     };
     match src.configure_pipeline(&caps) {
         Err(G2gError::NotConfigured) => {}

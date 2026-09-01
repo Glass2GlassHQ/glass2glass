@@ -4,14 +4,14 @@
 //! module adds the *measured* counterpart: each instrumented arm holds an
 //! `Arc<ElementProbe>`, times the wall-clock cost of every `DataFrame`
 //! `process()` call, and samples its input link's fill at each pull. After the
-//! run the runner snapshots every probe into [`RunStats::per_element`], turning
+//! run the runner snapshots every probe into [`RunStats::per_element`](crate::runtime::RunStats::per_element), turning
 //! the by-hand glass-to-glass analyses (the NVDEC-floor / `link_capacity`
 //! studies) into a number the runner prints.
 //!
 //! `std`-gated where it counts: measured timing needs a real monotonic clock
 //! ([`monotonic_ns`](crate::metrics::monotonic_ns), `std`-only). Under `no_std`
 //! the timing calls compile to no-ops and the histogram stays empty (fill
-//! sampling still works, it needs no clock); [`RunStats::per_element`] is then
+//! sampling still works, it needs no clock); [`RunStats::per_element`](crate::runtime::RunStats::per_element) is then
 //! whatever the arms recorded, typically empty.
 
 use alloc::collections::VecDeque;
@@ -315,7 +315,7 @@ pub struct StageVisit {
     pub push_wait_ns: u64,
 }
 
-/// A measured per-element summary, one row of [`RunStats::per_element`].
+/// A measured per-element summary, one row of [`RunStats::per_element`](crate::runtime::RunStats::per_element).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ElementLatency {
     /// Instance name (`<category>N` from the graph runner, the element's log

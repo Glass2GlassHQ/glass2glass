@@ -87,6 +87,7 @@ async fn recovers_geometry_and_vui_framerate_from_a_libx265_stream() {
         width: Dim::Any,
         height: Dim::Any,
         framerate: Rate::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     };
     // Re-framing mode: byte chunks in, one access unit per DataFrame out (the
     // shape the TS/HLS auto-plug inserts). Feed uneven chunks to exercise
@@ -108,6 +109,8 @@ async fn recovers_geometry_and_vui_framerate_from_a_libx265_stream() {
     parse.process(PipelinePacket::Eos, &mut sink).await.unwrap();
 
     // The refined caps carry the concrete geometry and the VUI framerate.
+    // libx265 writes a video_signal_type block with the full-range flag off and
+    // no colour description, so the colorimetry is limited range, rest unknown.
     assert_eq!(
         sink.caps,
         vec![Caps::CompressedVideo {
@@ -115,6 +118,10 @@ async fn recovers_geometry_and_vui_framerate_from_a_libx265_stream() {
             width: Dim::Fixed(320),
             height: Dim::Fixed(240),
             framerate: Rate::Fixed(25 << 16),
+            colorimetry: g2g_core::Colorimetry {
+                range: g2g_core::ColorRange::Limited,
+                ..g2g_core::Colorimetry::UNKNOWN
+            }
         }],
         "one CapsChanged with geometry + VUI timing_info framerate"
     );

@@ -23,6 +23,7 @@ fn h264_caps() -> Caps {
         width: Dim::Fixed(640),
         height: Dim::Fixed(480),
         framerate: Rate::Fixed(30 << 16),
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
 }
 
@@ -63,6 +64,7 @@ fn registry() -> g2g_core::runtime::Registry {
             width: Dim::Fixed(640),
             height: Dim::Fixed(480),
             framerate: Rate::Fixed(30 << 16),
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }))
     }));
     reg.register_source(SourceFactory::new("opussrc", opus_caps(), || {

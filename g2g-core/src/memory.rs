@@ -210,7 +210,7 @@ impl DomainSet {
         self.0 == 0
     }
 
-    /// The most-preferred member per [`DOMAIN_PREFERENCE`] (GPU-resident before
+    /// The most-preferred member per `DOMAIN_PREFERENCE` (GPU-resident before
     /// `System`), or `None` if the set is empty. The single concrete domain the
     /// negotiation settles on.
     pub fn preferred(self) -> Option<MemoryDomainKind> {
@@ -404,7 +404,7 @@ impl SystemSlice {
     /// Wrap foreign-owned CPU bytes zero-copy: no copy is made, the pipeline
     /// reads `ptr[..len]` directly, and on drop `free(user)` is invoked (if
     /// `free` is `Some`) to hand the buffer back to its owner. A mutating
-    /// consumer ([`as_mut_slice`](Self::as_mut_slice)) transparently copies the
+    /// consumer (`as_mut_slice`) transparently copies the
     /// bytes out first, so the lend stays read-only.
     ///
     /// # Safety
@@ -558,7 +558,7 @@ impl SystemSlice {
 
 /// Foreign-owned CPU bytes lent to the pipeline (M234). Pointers are stored as
 /// `usize` so the type is `Send`/`Sync` without an `unsafe impl`, the same
-/// convention [`OwnedCudaBuffer`] uses for device pointers; the lender's
+/// convention `OwnedCudaBuffer` uses for device pointers; the lender's
 /// contract (documented on [`SystemSlice::from_foreign`]) certifies the bytes
 /// are valid and safe to read from the pipeline thread. Dropping it invokes the
 /// free callback, returning the buffer to its owner.

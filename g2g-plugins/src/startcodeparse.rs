@@ -383,6 +383,7 @@ impl<C: StartCodeCodec> StartCodeParse<C> {
             width: Dim::Fixed(info.width),
             height: Dim::Fixed(info.height),
             framerate: info.framerate.map_or(Rate::Any, Rate::Fixed),
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         if self.last_emitted_caps.as_ref() != Some(&new_caps) {
             out.push(PipelinePacket::CapsChanged(new_caps.clone()))
@@ -468,6 +469,7 @@ impl<C: StartCodeCodec> StartCodeParse<C> {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 }

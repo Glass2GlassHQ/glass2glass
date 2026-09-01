@@ -680,6 +680,7 @@ async fn make_fmp4(aus: &[Vec<u8>]) -> Vec<u8> {
         width: Dim::Fixed(64),
         height: Dim::Fixed(48),
         framerate: Rate::Fixed(30 << 16),
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     })
     .unwrap();
     let mut out = CaptureSink::default();

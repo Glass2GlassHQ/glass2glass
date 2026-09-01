@@ -23,6 +23,7 @@ fn compressed(codec: VideoCodec, width: u32, height: u32) -> Caps {
         width: Dim::Fixed(width),
         height: Dim::Fixed(height),
         framerate: Rate::Fixed(30 << 16),
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
 }
 
@@ -62,6 +63,7 @@ fn h265_derives_nv12_output_at_the_input_geometry() {
             height: Dim::Fixed(2160),
             framerate: Rate::Fixed(30 << 16),
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN
         }]
     );
     // H.264 into the H.265 element has no solution.

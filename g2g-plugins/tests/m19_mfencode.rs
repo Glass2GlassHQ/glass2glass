@@ -101,6 +101,7 @@ fn input_caps() -> Caps {
         height: Dim::Fixed(HEIGHT),
         framerate: Rate::Fixed(FPS_Q16),
         interlace: Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
 }
 
@@ -139,6 +140,7 @@ async fn encode_emits_h264_caps_and_annexb_access_units() {
             width: Dim::Fixed(WIDTH),
             height: Dim::Fixed(HEIGHT),
             framerate: Rate::Fixed(FPS_Q16),
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }],
         "one CapsChanged with the encoded geometry"
     );

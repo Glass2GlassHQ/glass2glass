@@ -127,6 +127,7 @@ fn hosted_objectdetector_loads_model_and_detects() {
         height: Dim::Fixed(H),
         framerate: Rate::Fixed(30),
         interlace: g2g_core::Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     };
     el.configure_pipeline(&caps).unwrap();
 

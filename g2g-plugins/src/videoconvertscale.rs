@@ -24,8 +24,9 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use crate::pixel::frame_byte_size;
-use crate::videoconvert::{yuv_to_rgb, VideoConvert};
+use crate::videoconvert::VideoConvert;
 use crate::videoscale::{bilerp, map_axis, VideoScale};
+use crate::yuvmatrix::YuvRgbMatrix;
 use alloc::vec;
 use g2g_core::frame::Frame;
 use g2g_core::memory::{DomainSet, SystemSlice};
@@ -44,6 +45,7 @@ use g2g_core::{
 /// two elements in sequence. The sampling weights and the color math are the
 /// ones `videoscale` and `videoconvert` use, so a fused frame equals the
 /// two-step one.
+#[allow(clippy::too_many_arguments)]
 fn fused_resample_convert(
     src: &[u8],
     from: RawVideoFormat,
@@ -52,6 +54,7 @@ fn fused_resample_convert(
     in_h: usize,
     out_w: usize,
     out_h: usize,
+    matrix: &YuvRgbMatrix,
 ) -> Option<Box<[u8]>> {
     let out_channels = packed_channels(to)?;
     let (r_off, b_off) = channel_order(to)?;
@@ -123,7 +126,7 @@ fn fused_resample_convert(
             let (u10, v10) = chroma_at(crow0 + cx1);
             let (u01, v01) = chroma_at(crow1 + cx0);
             let (u11, v11) = chroma_at(crow1 + cx1);
-            let (r, g, b) = yuv_to_rgb(
+            let (r, g, b) = matrix.yuv_to_rgb(
                 luma_sample as i32,
                 bilerp(u00, u10, u01, u11, cfx, cfy) as i32,
                 bilerp(v00, v10, v01, v11, cfx, cfy) as i32,
@@ -227,13 +230,16 @@ pub struct VideoConvertScale {
     emitted: u64,
 }
 
-/// `caps` with its format and geometry replaced, keeping framerate and
-/// interlacing. Anything but a raw-video caps comes back unchanged.
+/// `caps` with its format and geometry replaced, keeping framerate, interlacing
+/// and colorimetry. The colorimetry rides along so the halfway caps still name
+/// the matrix the inner convert has to use. Anything but a raw-video caps comes
+/// back unchanged.
 fn retarget(caps: &Caps, format: RawVideoFormat, width: u32, height: u32) -> Caps {
     match caps {
         Caps::RawVideo {
             framerate,
             interlace,
+            colorimetry,
             ..
         } => Caps::RawVideo {
             format,
@@ -241,8 +247,17 @@ fn retarget(caps: &Caps, format: RawVideoFormat, width: u32, height: u32) -> Cap
             height: Dim::Fixed(height),
             framerate: framerate.clone(),
             interlace: *interlace,
+            colorimetry: *colorimetry,
         },
         other => other.clone(),
+    }
+}
+
+/// The colorimetry a raw-video caps declares, unknown for anything else.
+fn colorimetry_of(caps: &Caps) -> g2g_core::Colorimetry {
+    match caps {
+        Caps::RawVideo { colorimetry, .. } => *colorimetry,
+        _ => g2g_core::Colorimetry::UNKNOWN,
     }
 }
 
@@ -347,8 +362,11 @@ impl VideoConvertScale {
         if src.len() < frame_byte_size(from, in_w as u32, in_h as u32) {
             return Err(G2gError::CapsMismatch);
         }
+        // The YUV side names the matrix; a fused pair always has an RGB output,
+        // so that side is the input's colorimetry.
+        let matrix = YuvRgbMatrix::new(colorimetry_of(input));
         Ok(fused_resample_convert(
-            src, from, to, in_w, in_h, out_w, out_h,
+            src, from, to, in_w, in_h, out_w, out_h, &matrix,
         ))
     }
 }

@@ -13,7 +13,6 @@
 //! (`element="videoflip method=horizontal-flip"`). It asserts the pixels come
 //! back horizontally flipped, which only a real GStreamer `videoflip` produces.
 
-use g2g_core::element::BoxFuture;
 use g2g_core::frame::{Frame, FrameTiming};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::{parse_launch, run_graph};

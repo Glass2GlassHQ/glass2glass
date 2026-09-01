@@ -2,9 +2,9 @@
 //!
 //! Opens an `xdg_toplevel` window on the running Wayland compositor and
 //! presents NV12 `DataFrame`s into it. The pixel path is software:
-//! NV12 → XRGB8888 conversion (BT.601 limited range) into a `wl_shm`
-//! pool, then `attach` + `commit` per frame. Slow but universal; every
-//! Wayland compositor supports `wl_shm`.
+//! NV12 → XRGB8888 conversion (in the caps colorimetry's matrix and
+//! range) into a `wl_shm` pool, then `attach` + `commit` per frame. Slow
+//! but universal; every Wayland compositor supports `wl_shm`.
 //!
 //! This is the **dev sink**, not the production sink:
 //! - Latency is whatever the compositor's frame callback delivers (one
@@ -12,8 +12,7 @@
 //! - The XRGB8888 conversion runs on the same thread that drives the
 //!   pipeline; at 1080p30 the CPU cost is real (each frame is ~2 ms of
 //!   YUV→RGB on a modern x86 core).
-//! - No GPU upload, no `zwp_linux_dmabuf_v1` zero-copy, no colour-space
-//!   metadata propagation.
+//! - No GPU upload and no `zwp_linux_dmabuf_v1` zero-copy.
 //!
 //! The production sink is [`crate::kmssink::KmsSink`], which scans NV12
 //! out directly through KMS without colour conversion. Use the KMS sink
@@ -99,6 +98,7 @@ use smithay_client_toolkit::{
 
 use crate::clock::wait_to_present;
 use crate::worker_ready::Handshake;
+use crate::yuvmatrix::YuvRgbMatrix;
 use g2g_core::element::{PresentationStats, QosMessage};
 use g2g_core::frame::Frame;
 use g2g_core::memory::{DomainSet, MemoryDomainKind};
@@ -108,9 +108,9 @@ use g2g_core::meta::OrientationMeta;
 use g2g_core::metrics::{monotonic_ns, LatencyHistogram, LatencySnapshot};
 use g2g_core::{
     AsyncElement, BusHandle, Caps, CapsConstraint, CapsSet, ClockCandidate, ClockPriority,
-    ClockSync, ConfigureOutcome, Dim, ElementMetadata, G2gError, HardwareError, OutputSink,
-    PipelineClock, PipelinePacket, PresentationPacer, PropError, PropKind, PropValue, PropertySpec,
-    Rate, RawVideoFormat, MAX_LATENESS_PROPERTY, QOS_INTERVAL_PROPERTY,
+    ClockSync, Colorimetry, ConfigureOutcome, Dim, ElementMetadata, G2gError, HardwareError,
+    OutputSink, PipelineClock, PipelinePacket, PresentationPacer, PropError, PropKind, PropValue,
+    PropertySpec, Rate, RawVideoFormat, MAX_LATENESS_PROPERTY, QOS_INTERVAL_PROPERTY,
 };
 
 /// Worker-thread message. `Frame` carries the pre-converted XRGB8888
@@ -169,9 +169,10 @@ pub enum PacingPolicy {
 ///     .with_title("preview")
 ///     .with_pacing(PacingPolicy::DropOldest);
 /// ```
-/// Raw samples kept beside the histogram stop at this count (8 bytes each,
-/// about 2.4 hours at 30 fps). The histogram keeps counting past it.
-const LATENCY_SAMPLE_CAPACITY: usize = 1 << 18;
+/// Raw per-frame samples (glass-to-glass latency, presentation deadline error)
+/// stop at this count (8 bytes each, about 2.4 hours at 30 fps). The latency
+/// histogram keeps counting past it.
+const PER_FRAME_SAMPLE_CAPACITY: usize = 1 << 18;
 
 /// Glass-to-glass histogram plus the raw per-frame samples behind it, so a
 /// bench can read exact percentiles instead of log2 bucket edges.
@@ -192,9 +193,63 @@ impl LatencyRecorder {
     fn record(&self, dur_ns: u64) {
         self.histogram.record(dur_ns);
         let mut samples = self.samples.lock().expect("latency samples lock");
-        if samples.len() < LATENCY_SAMPLE_CAPACITY {
+        if samples.len() < PER_FRAME_SAMPLE_CAPACITY {
             samples.push(dur_ns);
         }
+    }
+}
+
+/// How far the elected clock, the media timeline and the frame deadline have
+/// each moved against this host's monotonic clock since the first paced frame,
+/// in nanoseconds. All three stay flat on a healthy run:
+///
+/// - `clock_ns` walking off is the elected clock running at the wrong rate.
+/// - `deadline_ns` parting from `media_ns` is the presentation anchor moving
+///   under the stream.
+/// - `media_ns` sagging while `clock_ns` holds is the sink failing to keep the
+///   schedule: the feed ran dry, so frames present on arrival instead of on
+///   their deadline.
+#[derive(Clone, Copy, Debug)]
+struct ScheduleDrift {
+    clock_ns: i64,
+    media_ns: i64,
+    deadline_ns: i64,
+}
+
+/// Once-per-second sampler behind [`ScheduleDrift`]. The per-frame trace shows
+/// what one frame did; this shows which of the three timelines is losing ground,
+/// which is the only way to tell a bad clock from a slow feed.
+#[derive(Debug, Default)]
+struct ScheduleDriftTrace {
+    /// `(monotonic, clock, pts, deadline)` at the first paced frame.
+    base: Option<(u64, u64, u64, u64)>,
+    last_log_ns: u64,
+}
+
+impl ScheduleDriftTrace {
+    const INTERVAL_NS: u64 = 1_000_000_000;
+
+    fn sample(
+        &mut self,
+        mono_ns: u64,
+        clock_ns: u64,
+        pts_ns: u64,
+        deadline_ns: u64,
+    ) -> Option<ScheduleDrift> {
+        let base = *self
+            .base
+            .get_or_insert((mono_ns, clock_ns, pts_ns, deadline_ns));
+        if self.last_log_ns != 0 && mono_ns.saturating_sub(self.last_log_ns) < Self::INTERVAL_NS {
+            return None;
+        }
+        self.last_log_ns = mono_ns;
+        let elapsed = |now: u64, then: u64| now as i64 - then as i64;
+        let mono = elapsed(mono_ns, base.0);
+        Some(ScheduleDrift {
+            clock_ns: elapsed(clock_ns, base.1) - mono,
+            media_ns: elapsed(pts_ns, base.2) - mono,
+            deadline_ns: elapsed(deadline_ns, base.3) - mono,
+        })
     }
 }
 
@@ -205,6 +260,9 @@ pub struct WaylandSink {
     worker: Option<JoinHandle<()>>,
     width: u32,
     height: u32,
+    /// NV12 -> XRGB coefficients for the negotiated caps' colorimetry, re-derived
+    /// whenever `configure_pipeline` runs.
+    matrix: YuvRgbMatrix,
     frames_presented: Arc<AtomicU64>,
     latency: Arc<LatencyRecorder>,
     frames_dropped: Arc<AtomicU64>,
@@ -218,6 +276,14 @@ pub struct WaylandSink {
     /// Monotonic stamp when the previous frame's present completed, for the
     /// per-frame pacing log (the inter-present gap is what stutter looks like).
     last_present_done_ns: u64,
+    /// Signed presentation error per presented frame, nanoseconds: the elected
+    /// clock's reading once the frame is up, minus the frame's deadline on that
+    /// clock. Positive is late. Empty for an unpaced run (no clock, no
+    /// deadlines), capped at `PER_FRAME_SAMPLE_CAPACITY`.
+    deadline_errors: Vec<i64>,
+    /// Once-per-second clock / media / deadline drift trace, logged under
+    /// `G2G_DEBUG`.
+    schedule_drift: ScheduleDriftTrace,
 }
 
 impl g2g_core::log::LogSource for WaylandSink {
@@ -256,12 +322,15 @@ impl WaylandSink {
             worker: None,
             width: 0,
             height: 0,
+            matrix: YuvRgbMatrix::new(Colorimetry::UNKNOWN),
             frames_presented: Arc::new(AtomicU64::new(0)),
             latency: Arc::new(LatencyRecorder::new()),
             frames_dropped: Arc::new(AtomicU64::new(0)),
             pacing: PacingPolicy::default(),
             pacer: PresentationPacer::new(),
             last_present_done_ns: 0,
+            deadline_errors: Vec::new(),
+            schedule_drift: ScheduleDriftTrace::default(),
         }
     }
 
@@ -327,7 +396,7 @@ impl WaylandSink {
     }
 
     /// The raw per-frame samples behind [`latency_snapshot`], nanoseconds in
-    /// presentation order, capped at `LATENCY_SAMPLE_CAPACITY`.
+    /// presentation order, capped at `PER_FRAME_SAMPLE_CAPACITY`.
     ///
     /// [`latency_snapshot`]: Self::latency_snapshot
     pub fn latency_samples(&self) -> Vec<u64> {
@@ -336,6 +405,26 @@ impl WaylandSink {
             .lock()
             .expect("latency samples lock")
             .clone()
+    }
+
+    /// Signed presentation error per presented frame, nanoseconds in
+    /// presentation order: the elected clock's reading once the frame is on
+    /// screen minus the deadline the pacer held it to. Positive is late. Empty
+    /// for an unpaced run, since a clockless sink presents on arrival and has no
+    /// deadline to miss. Capped at `PER_FRAME_SAMPLE_CAPACITY`.
+    ///
+    /// In an A/V graph the elected clock is the audio sink's, so this is the
+    /// video-against-audio sync error: its drift over a long run is lip sync.
+    pub fn deadline_error_samples(&self) -> Vec<i64> {
+        self.deadline_errors.clone()
+    }
+
+    /// The elected clock the runner handed over, `None` until one arrives (or
+    /// for a graph that elects none). An A/V graph hands the video sink the
+    /// audio sink's `DriftClock`, so this is how a test confirms the video is
+    /// slaved to the audio timeline.
+    pub fn clock_sync(&self) -> Option<&ClockSync> {
+        self.pacer.clock_sync()
     }
 
     fn shutdown(&mut self) {
@@ -444,6 +533,7 @@ impl AsyncElement for WaylandSink {
             height: Dim::Any,
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }))
     }
 
@@ -453,18 +543,23 @@ impl AsyncElement for WaylandSink {
         // accept-H.264-as-no-op workaround is gone: a non-NV12 sink input
         // is a real pipeline error (e.g. an undecoded display chain) and
         // fails loud here.
-        let (w, h) = match absolute_caps {
+        let (w, h, colorimetry) = match absolute_caps {
             Caps::RawVideo {
                 format: RawVideoFormat::Nv12,
                 width: Dim::Fixed(w),
                 height: Dim::Fixed(h),
+                colorimetry,
                 ..
-            } => (*w, *h),
+            } => (*w, *h, *colorimetry),
             _ => return Err(G2gError::CapsMismatch),
         };
         if w % 2 != 0 || h % 2 != 0 {
             return Err(G2gError::CapsMismatch);
         }
+        // A mid-stream colorimetry refinement (the parser's VUI colour
+        // description) only re-derives the convert table: the worker's surface
+        // is unaffected.
+        self.matrix = YuvRgbMatrix::new(colorimetry);
 
         // Mid-stream geometry change: same dims is a no-op; different
         // dims means we tear down the existing worker and spawn a fresh
@@ -593,6 +688,10 @@ impl AsyncElement for WaylandSink {
                     let t_in = monotonic_ns();
                     let presented = self.frames_presented.load(Ordering::Relaxed);
                     let pace = self.pacer.judge(timing.pts_ns, presented);
+                    // Taken here rather than re-derived after the present: the
+                    // anchor this frame was judged against is the only one its
+                    // error means anything against.
+                    let deadline_ns = self.pacer.last_deadline_ns();
                     // Positive slack the pacer asked us to sleep; 0 = already due.
                     let wait_ns = match pace {
                         g2g_core::Pace::Wait(n) => n,
@@ -611,11 +710,13 @@ impl AsyncElement for WaylandSink {
                     #[cfg(feature = "offload")]
                     let xrgb = {
                         let (w, h) = (self.width, self.height);
+                        let matrix = self.matrix;
                         let src: Vec<u8> = slice.to_vec();
-                        crate::offload::run_blocking(move || nv12_to_xrgb8888(&src, w, h)).await?
+                        crate::offload::run_blocking(move || nv12_to_xrgb8888(&src, w, h, &matrix))
+                            .await?
                     };
                     #[cfg(not(feature = "offload"))]
-                    let xrgb = nv12_to_xrgb8888(slice, self.width, self.height)?;
+                    let xrgb = nv12_to_xrgb8888(slice, self.width, self.height, &self.matrix)?;
                     let tx = self.cmd_tx.as_ref().ok_or(G2gError::NotConfigured)?;
                     let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
                     tx.send(WorkerCmd::Frame(QueuedFrame {
@@ -649,6 +750,35 @@ impl AsyncElement for WaylandSink {
                     let t_done = monotonic_ns();
                     let gap = t_done.saturating_sub(self.last_present_done_ns);
                     self.last_present_done_ns = t_done;
+                    // How far off its deadline the frame actually landed, read on
+                    // the elected clock (not `t_done`, which is this host's
+                    // monotonic timeline, a different one whenever audio is the
+                    // master).
+                    let clock_now_ns = self.pacer.clock_sync().map(|s| s.now_ns());
+                    if let (Some(deadline), Some(clock_now)) = (deadline_ns, clock_now_ns) {
+                        let error = clock_now as i64 - deadline as i64;
+                        if self.deadline_errors.len() < PER_FRAME_SAMPLE_CAPACITY {
+                            self.deadline_errors.push(error);
+                        }
+                        // Once a second: which of the three timelines is losing
+                        // ground against wall time. See `ScheduleDrift`.
+                        if let Some(drift) =
+                            self.schedule_drift
+                                .sample(t_done, clock_now, timing.pts_ns, deadline)
+                        {
+                            g2g_core::g2g_log!(
+                                self,
+                                "pace clock-mono={}us media-mono={}us deadline-mono={}us \
+                                 wait={}us age_in={}us late_dropped={}",
+                                drift.clock_ns / 1_000,
+                                drift.media_ns / 1_000,
+                                drift.deadline_ns / 1_000,
+                                wait_ns / 1_000,
+                                t_in.saturating_sub(timing.arrival_ns) / 1_000,
+                                self.pacer.late_dropped()
+                            );
+                        }
+                    }
                     g2g_core::g2g_log!(
                         self,
                         "pts={} age_in={}us wait={}us slept={}us conv+ack={}us gap={}us",
@@ -1040,19 +1170,23 @@ fn buffer_transform(orientation: Orientation) -> wl_output::Transform {
 }
 
 // =================================================================
-// NV12 -> XRGB8888 (BT.601 limited-range)
+// NV12 -> XRGB8888
 // =================================================================
 
 /// Convert a packed NV12 source buffer (`width * height` Y plane
 /// followed by `width * height / 2` UV plane, interleaved as U,V,U,V)
 /// into a packed XRGB8888 buffer (`width * height * 4` bytes, little-
-/// endian per pixel: `[B, G, R, 0xFF]`). Uses BT.601 limited-range
-/// coefficients, which is what H.264 SD content usually carries. HDR
-/// and BT.709 paths are deferred.
+/// endian per pixel: `[B, G, R, 0xFF]`). `matrix` carries the negotiated
+/// colorimetry's coefficients.
 // The `col` index drives both the luma read and the subsampled-chroma pair
 // arithmetic (`col / 2`), so an iterator rewrite would not be clearer.
 #[allow(clippy::needless_range_loop)]
-fn nv12_to_xrgb8888(src: &[u8], width: u32, height: u32) -> Result<Vec<u8>, G2gError> {
+fn nv12_to_xrgb8888(
+    src: &[u8],
+    width: u32,
+    height: u32,
+    matrix: &YuvRgbMatrix,
+) -> Result<Vec<u8>, G2gError> {
     let w = width as usize;
     let h = height as usize;
     let y_size = w * h;
@@ -1075,19 +1209,12 @@ fn nv12_to_xrgb8888(src: &[u8], width: u32, height: u32) -> Result<Vec<u8>, G2gE
             let u = uv_row[uv_pair] as i32;
             let v = uv_row[uv_pair + 1] as i32;
 
-            let c = y - 16;
-            let d = u - 128;
-            let e = v - 128;
-
-            // Integer-fixed-point BT.601: coefficients * 256 then >> 8.
-            let r = (298 * c + 409 * e + 128) >> 8;
-            let g = (298 * c - 100 * d - 208 * e + 128) >> 8;
-            let b = (298 * c + 516 * d + 128) >> 8;
+            let (r, g, b) = matrix.yuv_to_rgb(y, u, v);
 
             let dst = dst_row_off + col * 4;
-            out[dst] = b.clamp(0, 255) as u8;
-            out[dst + 1] = g.clamp(0, 255) as u8;
-            out[dst + 2] = r.clamp(0, 255) as u8;
+            out[dst] = b as u8;
+            out[dst + 1] = g as u8;
+            out[dst + 2] = r as u8;
             out[dst + 3] = 0xFF;
         }
     }
@@ -1162,6 +1289,7 @@ mod tests {
             width: Dim::Fixed(640),
             height: Dim::Fixed(480),
             framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         assert_eq!(sink.intercept_caps(&h264), Ok(h264));
     }
@@ -1175,6 +1303,7 @@ mod tests {
             height: Dim::Fixed(720),
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         assert_eq!(sink.intercept_caps(&nv12), Ok(nv12));
     }
@@ -1196,6 +1325,7 @@ mod tests {
                 height: Dim::Any,
                 framerate: Rate::Any,
                 interlace: g2g_core::Interlace::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN
             }]
         );
     }
@@ -1208,6 +1338,7 @@ mod tests {
             width: Dim::Fixed(640),
             height: Dim::Fixed(480),
             framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         // A native decoder lands NV12 on this link; a non-NV12 sink input
         // is a real error (e.g. an undecoded display chain), not a no-op.
@@ -1383,7 +1514,7 @@ mod tests {
     fn nv12_to_xrgb_yields_correct_byte_count() {
         // 4x2 NV12: Y=8 bytes, UV=4 bytes. Output = 4*2*4 = 32 bytes.
         let src = alloc::vec![16u8; 12];
-        let out = nv12_to_xrgb8888(&src, 4, 2).unwrap();
+        let out = nv12_to_xrgb8888(&src, 4, 2, &YuvRgbMatrix::new(Colorimetry::UNKNOWN)).unwrap();
         assert_eq!(out.len(), 32);
     }
 
@@ -1400,7 +1531,7 @@ mod tests {
         }
         src[4] = 128; // U
         src[5] = 128; // V
-        let out = nv12_to_xrgb8888(&src, 2, 2).unwrap();
+        let out = nv12_to_xrgb8888(&src, 2, 2, &YuvRgbMatrix::new(Colorimetry::UNKNOWN)).unwrap();
         for px in out.as_chunks::<4>().0 {
             assert!((125..=131).contains(&px[0]), "blue out of range: {}", px[0]);
             assert!(
@@ -1413,10 +1544,37 @@ mod tests {
         }
     }
 
+    /// The caps colorimetry reaches the convert table: the same NV12 bytes come
+    /// out different pixels once the caps say BT.709, and an untagged stream
+    /// keeps the BT.601 limited-range conversion it always had.
+    #[test]
+    fn configure_takes_the_convert_matrix_from_the_caps() {
+        let src = alloc::vec![81u8, 81, 81, 81, 90, 240];
+        let nv12_caps = |colorimetry| Caps::RawVideo {
+            format: RawVideoFormat::Nv12,
+            width: Dim::Fixed(2),
+            height: Dim::Fixed(2),
+            framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
+            colorimetry,
+        };
+        // The worker never spawns: only the table is under test, and a failed
+        // worker spawn (no compositor in CI) would mask it.
+        let mut sink = WaylandSink::new();
+        let convert = |sink: &WaylandSink| nv12_to_xrgb8888(&src, 2, 2, &sink.matrix).unwrap();
+
+        let _ = sink.configure_pipeline(&nv12_caps(Colorimetry::UNKNOWN));
+        let untagged = convert(&sink);
+        let _ = sink.configure_pipeline(&nv12_caps(Colorimetry::BT601));
+        assert_eq!(untagged, convert(&sink), "untagged converts as BT.601");
+        let _ = sink.configure_pipeline(&nv12_caps(Colorimetry::BT709));
+        assert_ne!(untagged, convert(&sink), "BT.709 converts differently");
+    }
+
     #[test]
     fn nv12_to_xrgb_rejects_truncated_source() {
         let src = alloc::vec![0u8; 8]; // Need 12 for 4x2 NV12.
-        assert!(nv12_to_xrgb8888(&src, 4, 2).is_err());
+        assert!(nv12_to_xrgb8888(&src, 4, 2, &YuvRgbMatrix::new(Colorimetry::UNKNOWN)).is_err());
     }
 
     #[test]
@@ -1428,6 +1586,7 @@ mod tests {
             height: Dim::Fixed(480),
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         match sink.configure_pipeline(&odd) {
             Err(G2gError::CapsMismatch) => {}

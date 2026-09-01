@@ -5,9 +5,9 @@
 //! Gated behind the `metadata` cargo feature. When **off** (the default, and the
 //! only configuration the `no_std` / Cortex-M baseline uses) [`FrameMetaSet`] is
 //! a zero-sized unit: the `Frame::meta` field exists for API stability but costs
-//! nothing per frame. When **on** it is a list of typed [`FrameMeta`] trait
+//! nothing per frame. When **on** it is a list of typed `FrameMeta` trait
 //! objects with attach / typed-get / iterate / propagate, and the standard
-//! [`AnalyticsMeta`] is available for detection pipelines.
+//! `AnalyticsMeta` is available for detection pipelines.
 //!
 //! **Why now:** the field was reserved at M88; the trait body and the relation
 //! graph land with the first metadata-producing element (a YOLO-style detection
@@ -18,7 +18,7 @@
 /// One of the eight ways a picture can be turned without resampling it: the
 /// four quarter rotations and the four mirrors (the dihedral group of the
 /// square). Named after GStreamer's `videoflip` methods, and the vocabulary
-/// [`OrientationMeta`] carries.
+/// `OrientationMeta` carries.
 ///
 /// Not gated on the `metadata` feature: the enum is what `videoflip` runs on
 /// either way. Only the meta wrapper needs the feature.

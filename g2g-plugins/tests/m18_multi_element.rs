@@ -31,6 +31,7 @@ fn rgba_any() -> Caps {
         height: Dim::Any,
         framerate: Rate::Any,
         interlace: g2g_core::Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
 }
 
@@ -106,6 +107,7 @@ async fn incompatible_capsfilter_fails_negotiation() {
         height: Dim::Any,
         framerate: Rate::Any,
         interlace: g2g_core::Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     });
     let mut sink = FakeSink::new();
     let clock = ZeroClock;
@@ -132,6 +134,7 @@ async fn incompatible_chain_posts_negotiation_failure_to_bus() {
         height: Dim::Any,
         framerate: Rate::Any,
         interlace: g2g_core::Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     });
     let mut sink = FakeSink::new();
     let clock = ZeroClock;

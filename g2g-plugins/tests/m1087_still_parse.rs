@@ -177,6 +177,7 @@ fn still_caps(codec: VideoCodec, width: u32, height: u32) -> Caps {
         height: Dim::Fixed(height),
         // A still negotiated on its own gets the placeholder rate's floor.
         framerate: Rate::Fixed(1 << 16),
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
 }
 

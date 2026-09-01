@@ -74,6 +74,7 @@ impl AsyncElement for Vp8Parse {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         upstream_caps.intersect(&supported)
     }
@@ -86,6 +87,7 @@ impl AsyncElement for Vp8Parse {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }))
     }
 
@@ -120,6 +122,7 @@ impl AsyncElement for Vp8Parse {
                                 width: Dim::Fixed(info.width),
                                 height: Dim::Fixed(info.height),
                                 framerate: Rate::Any,
+                                colorimetry: g2g_core::Colorimetry::UNKNOWN,
                             };
                             if self.last_emitted_caps.as_ref() != Some(&new_caps) {
                                 out.push(PipelinePacket::CapsChanged(new_caps.clone()))
@@ -159,6 +162,7 @@ impl PadTemplates for Vp8Parse {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         Vec::from([
             PadTemplate::sink(CapsSet::one(vp8.clone())),
@@ -331,6 +335,7 @@ mod tests {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 
@@ -440,6 +445,7 @@ mod tests {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         assert_eq!(parse.intercept_caps(&vp9), Err(G2gError::CapsMismatch));
     }
@@ -457,6 +463,7 @@ mod tests {
                         width: Dim::Any,
                         height: Dim::Any,
                         framerate: Rate::Any,
+                        colorimetry: g2g_core::Colorimetry::UNKNOWN
                     }]
                 );
             }

@@ -253,6 +253,7 @@ async fn flvmux_output_probes_as_playable_h264_flv() {
         width: Dim::Fixed(320),
         height: Dim::Fixed(240),
         framerate: Rate::Fixed(25 << 16),
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     };
     let mut mux = FlvMux::new();
     mux.configure_pipeline(&caps).unwrap();

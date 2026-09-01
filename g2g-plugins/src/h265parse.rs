@@ -26,7 +26,7 @@ use alloc::vec::Vec;
 #[cfg(any(test, all(target_arch = "wasm32", feature = "web-codecs")))]
 use alloc::string::String;
 
-use g2g_core::{PropKind, PropertySpec, VideoCodec};
+use g2g_core::{Colorimetry, PropKind, PropertySpec, VideoCodec};
 
 use crate::annexb::{h265_nal_type, next_start_code, strip_emulation_prevention, BitReader};
 use crate::nalparse::{NalCodec, NalParse, SpsGeometry};
@@ -259,6 +259,7 @@ fn parse_sps(rbsp: &[u8]) -> Option<SpsGeometry> {
         width,
         height,
         framerate,
+        colorimetry: tail.colorimetry,
         // H.265 codes the `time_code` SEI self-contained, so nothing from the
         // SPS is needed to read it.
         pic_timing: None,
@@ -277,6 +278,9 @@ fn parse_sps(rbsp: &[u8]) -> Option<SpsGeometry> {
 #[derive(Debug, Default)]
 struct SpsTail {
     max_num_reorder_pics: Option<u32>,
+    /// Colour description from the VUI `video_signal_type` block,
+    /// [`Colorimetry::UNKNOWN`] when absent or the walk ends before it.
+    colorimetry: Colorimetry,
     /// `log2_max_pic_order_cnt_lsb_minus4 + 4`, the width of the slice header's
     /// order-count lsb.
     log2_max_pic_order_cnt_lsb: Option<u32>,
@@ -378,10 +382,17 @@ fn parse_vui_framerate(
     if br.read_bit()? == 1 {
         // video_signal_type_present_flag
         br.read_bits(3)?; // video_format
-        br.read_bit()?; // video_full_range_flag
+        let video_full_range_flag = br.read_bit()? == 1;
+        // colour_description_present_flag; absent leaves the CICP codepoints
+        // at unspecified (2), which maps to Unknown.
+        let (mut primaries, mut transfer, mut matrix) = (2u8, 2u8, 2u8);
         if br.read_bit()? == 1 {
-            br.read_bits(24)?; // colour primaries / transfer / matrix
+            primaries = br.read_bits(8)? as u8;
+            transfer = br.read_bits(8)? as u8;
+            matrix = br.read_bits(8)? as u8;
         }
+        tail.colorimetry =
+            Colorimetry::from_cicp(primaries, transfer, matrix, video_full_range_flag);
     }
     if br.read_bit()? == 1 {
         // chroma_loc_info_present_flag
@@ -774,12 +785,15 @@ mod tests {
 
     /// [`build_annexb_sps`] continued through the whole SPS tail to a VUI with
     /// `timing_info` (M663): zero/absent optional blocks, then
-    /// `vui_num_units_in_tick` / `vui_time_scale`.
+    /// `vui_num_units_in_tick` / `vui_time_scale`. `color` optionally writes a
+    /// `video_signal_type` block with a CICP colour description
+    /// `(primaries, transfer, matrix, full_range)` ahead of the timing.
     fn build_annexb_sps_with_vui(
         pic_w: u32,
         pic_h: u32,
         num_units_in_tick: u32,
         time_scale: u32,
+        color: Option<(u8, u8, u8, bool)>,
     ) -> Vec<u8> {
         let mut w = sps_head(pic_w, pic_h, 1, None, &ZERO_PTL);
         w.write_ue(0); // bit_depth_luma_minus8
@@ -806,7 +820,18 @@ mod tests {
         w.write_bit(1); // vui_parameters_present_flag
         w.write_bit(0); // aspect_ratio_info_present_flag
         w.write_bit(0); // overscan_info_present_flag
-        w.write_bit(0); // video_signal_type_present_flag
+        match color {
+            Some((primaries, transfer, matrix, full_range)) => {
+                w.write_bit(1); // video_signal_type_present_flag
+                w.write_bits(5, 3); // video_format (unspecified)
+                w.write_bit(u32::from(full_range));
+                w.write_bit(1); // colour_description_present_flag
+                w.write_bits(u32::from(primaries), 8);
+                w.write_bits(u32::from(transfer), 8);
+                w.write_bits(u32::from(matrix), 8);
+            }
+            None => w.write_bit(0), // video_signal_type_present_flag
+        }
         w.write_bit(0); // chroma_loc_info_present_flag
         w.write_bit(0); // neutral_chroma_indication_flag
         w.write_bit(0); // field_seq_flag
@@ -908,16 +933,48 @@ mod tests {
     }
 
     #[test]
+    fn recovers_bt709_colorimetry_from_vui() {
+        // CICP 1/1/1 + limited range is exactly the bt709 preset.
+        let stream = build_annexb_sps_with_vui(1920, 1080, 1, 25, Some((1, 1, 1, false)));
+        let info = extract_sps_info(&stream).expect("SPS with colour must parse");
+        assert_eq!(info.colorimetry, Colorimetry::BT709);
+    }
+
+    #[test]
+    fn absent_signal_type_colorimetry_stays_unknown() {
+        let stream = build_annexb_sps_with_vui(1920, 1080, 1, 25, None);
+        let info = extract_sps_info(&stream).expect("SPS must parse");
+        assert_eq!(info.colorimetry, Colorimetry::UNKNOWN);
+    }
+
+    #[test]
+    fn garbage_colour_codepoints_map_unknown_without_panic() {
+        // Unmodeled CICP codepoints fall back to Unknown per field; only the
+        // coded full-range flag stays concrete.
+        let stream = build_annexb_sps_with_vui(1920, 1080, 1, 25, Some((222, 199, 33, true)));
+        let info = extract_sps_info(&stream).expect("SPS must parse");
+        assert_eq!(
+            info.colorimetry,
+            Colorimetry {
+                range: g2g_core::ColorRange::Full,
+                matrix: g2g_core::MatrixCoefficients::Unknown,
+                transfer: g2g_core::TransferCharacteristics::Unknown,
+                primaries: g2g_core::ColorPrimaries::Unknown,
+            }
+        );
+    }
+
+    #[test]
     fn recovers_framerate_from_vui_timing_info() {
         // 25 fps: one tick per picture at a 25 Hz time scale (no H.264-style
         // field doubling in HEVC).
-        let stream = build_annexb_sps_with_vui(1920, 1080, 1, 25);
+        let stream = build_annexb_sps_with_vui(1920, 1080, 1, 25, None);
         let info = extract_sps_info(&stream).expect("SPS with VUI must parse");
         assert_eq!((info.width, info.height), (1920, 1080));
         assert_eq!(info.framerate, Some(25 << 16), "Q16 fps from timing_info");
 
         // 29.97 fps (30000/1001): the Q16 value is the truncated division.
-        let ntsc = build_annexb_sps_with_vui(720, 480, 1001, 30_000);
+        let ntsc = build_annexb_sps_with_vui(720, 480, 1001, 30_000, None);
         let info = extract_sps_info(&ntsc).expect("NTSC SPS must parse");
         assert_eq!(info.framerate, Some(((30_000u64 << 16) / 1001) as u32));
     }
@@ -1024,6 +1081,7 @@ mod tests {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 
@@ -1128,6 +1186,7 @@ mod tests {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         assert_eq!(parse.intercept_caps(&h264), Err(G2gError::CapsMismatch));
     }
@@ -1145,6 +1204,7 @@ mod tests {
                         width: Dim::Any,
                         height: Dim::Any,
                         framerate: Rate::Any,
+                        colorimetry: g2g_core::Colorimetry::UNKNOWN
                     }]
                 );
             }

@@ -1587,12 +1587,14 @@ impl PadTemplates for V4l2Src {
                     height: Dim::Any,
                     framerate: Rate::Any,
                     interlace: g2g_core::Interlace::Any,
+                    colorimetry: g2g_core::Colorimetry::UNKNOWN,
                 },
                 None => Caps::CompressedVideo {
                     codec: g2g_core::VideoCodec::Mjpeg,
                     width: Dim::Any,
                     height: Dim::Any,
                     framerate: Rate::Any,
+                    colorimetry: g2g_core::Colorimetry::UNKNOWN,
                 },
             })
             .collect();

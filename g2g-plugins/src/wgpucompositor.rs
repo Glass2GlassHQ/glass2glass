@@ -467,6 +467,7 @@ impl WgpuCompositor {
             height: Dim::Fixed(self.out_h),
             framerate: Rate::Fixed(self.framerate_q16),
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 
@@ -477,6 +478,7 @@ impl WgpuCompositor {
             height: Dim::Any,
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 
@@ -1122,6 +1124,7 @@ mod tests {
             height: Dim::Fixed(h),
             framerate: Rate::Fixed(30 << 16),
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 
@@ -1897,6 +1900,7 @@ mod tests {
             height: Dim::Fixed(64),
             framerate: Rate::Fixed(30 << 16),
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         assert!(matches!(
             comp.configure_pipeline(0, &nv12),

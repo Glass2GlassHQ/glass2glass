@@ -155,7 +155,7 @@ pub trait OutputSinkExt: OutputSink + Sized {
 impl<S: OutputSink> OutputSinkExt for S {}
 
 impl<'e> dyn OutputSink + 'e {
-    /// [`OutputSink::push`] for trait objects (the provided method needs
+    /// [`OutputSinkExt::push`] for trait objects (the provided method needs
     /// `Self: Sized`).
     pub fn push(&mut self, packet: PipelinePacket) -> PushFuture<'_, dyn OutputSink + 'e> {
         self.begin_push();
@@ -166,7 +166,7 @@ impl<'e> dyn OutputSink + 'e {
     }
 }
 
-/// Concrete future behind [`OutputSink::push`]: the packet slot
+/// Concrete future behind [`OutputSinkExt::push`]: the packet slot
 /// [`OutputSink::poll_push`] drains. No heap.
 #[allow(missing_debug_implementations)]
 pub struct PushFuture<'a, S: OutputSink + ?Sized> {
@@ -217,7 +217,7 @@ pub trait AsyncElement: ElementBound {
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError>;
 
     /// Receive this element's negotiated OUTPUT (source-pad) caps after the
-    /// solve, alongside the input caps from [`configure_pipeline`] (M185). A
+    /// solve, alongside the input caps from [`AsyncElement::configure_pipeline`] (M185). A
     /// geometry / format / rate-changing transform (videoscale, videoconvert,
     /// audioresample) uses this to take its target from a downstream capsfilter
     /// instead of its own properties, the gst caps-driven idiom. Default: no-op,
@@ -241,6 +241,15 @@ pub trait AsyncElement: ElementBound {
     fn latency(&self) -> LatencyReport {
         LatencyReport::ZERO
     }
+
+    /// The path's aggregated liveness (M1123): the inbound half of the latency
+    /// query, where [`latency`](Self::latency) is the outbound one. True when
+    /// any element on the path is a live source. The runner calls this once on
+    /// every element after it folds the chain and before the first `process`,
+    /// unconditionally, so an all-offline path is told `false` rather than left
+    /// to assume. An element that would trade output delay for throughput (a
+    /// decoder choosing frame threading) reads it to decide. Default: ignore.
+    fn configure_liveness(&mut self, _live: bool) {}
 
     /// The memory domain of the frames this element emits on its output pad.
     /// Default [`System`](MemoryDomainKind::System); a GPU producer (a hardware
@@ -599,6 +608,10 @@ pub trait DynAsyncElement: ElementBound {
         LatencyReport::ZERO
     }
 
+    /// Dyn-safe mirror of [`AsyncElement::configure_liveness`], so an erased
+    /// element is told whether the path it sits on is live. Defaults to ignore.
+    fn configure_liveness(&mut self, _live: bool) {}
+
     /// Dyn-safe mirror of [`AsyncElement::output_memory`]. Default
     /// [`System`](MemoryDomainKind::System).
     fn output_memory(&self) -> MemoryDomainKind {
@@ -805,6 +818,10 @@ impl<T: AsyncElement> DynAsyncElement for T {
         AsyncElement::latency(self)
     }
 
+    fn configure_liveness(&mut self, live: bool) {
+        AsyncElement::configure_liveness(self, live)
+    }
+
     fn output_memory(&self) -> MemoryDomainKind {
         AsyncElement::output_memory(self)
     }
@@ -980,6 +997,10 @@ impl<'b> AsyncElement for DynRef<'b> {
         self.0.latency()
     }
 
+    fn configure_liveness(&mut self, live: bool) {
+        self.0.configure_liveness(live)
+    }
+
     fn output_memory(&self) -> MemoryDomainKind {
         self.0.output_memory()
     }
@@ -1123,6 +1144,10 @@ impl<'b> DynAsyncElement for &'b mut (dyn DynAsyncElement + 'b) {
 
     fn latency(&self) -> LatencyReport {
         (**self).latency()
+    }
+
+    fn configure_liveness(&mut self, live: bool) {
+        (**self).configure_liveness(live)
     }
 
     fn output_memory(&self) -> MemoryDomainKind {

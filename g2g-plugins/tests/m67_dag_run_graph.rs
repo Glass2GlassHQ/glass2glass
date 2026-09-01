@@ -93,6 +93,7 @@ async fn incompatible_branch_fails_negotiation() {
         height: Dim::Any,
         framerate: Rate::Any,
         interlace: g2g_core::Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     });
     let filter = g.add_transform(GraphNode::element(nv12_only));
     let sink = g.add_sink(GraphNode::element(FakeSink::new()));

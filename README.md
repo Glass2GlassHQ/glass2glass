@@ -391,7 +391,7 @@ OS-coupled elements live behind cargo features:
 
 | Element | Feature | Platform / system dep |
 | :--- | :--- | :--- |
-| `RtspSrc` | `rtsp` | retina |
+| `RtspSrc` (video) / `RtspSrcN` (video + audio) | `rtsp` | retina |
 | `H264Parse` | (default) | — |
 | `FfmpegH264Dec` (sw / `NvdecCuvid` / `NvdecCuda` / `Vaapi`) | `ffmpeg` | Linux + libavcodec |
 | `VaapiH264Dec` | `vaapi` | Linux + libva + GBM |
@@ -421,7 +421,7 @@ OS-coupled elements live behind cargo features:
 | `MoqtSrc` (IETF MoQ Transport draft-16/18 subscriber: catalog read, stream + datagram reassembly → fMP4) | `moqt` | web-transport-quinn |
 | `LiveKitSink` (publish into a LiveKit room: JWT + protobuf signalling) | `webrtc-livekit` | + tokio-tungstenite |
 | `HttpSrc` (HTTP(S) byte-stream source) | `http-src` | reqwest |
-| `HlsSrc` (HLS: TS + fMP4/CMAF, live, AES-128 / SAMPLE-AES) | `hls` | reqwest + aes |
+| `HlsSrc` (HLS: TS + fMP4/CMAF, live, LL-HLS parts + blocking reload, AES-128 / SAMPLE-AES) | `hls` | reqwest + aes |
 | `DashSrc` (DASH: SegmentTemplate / SegmentTimeline, live, CMAF chunked low latency) | `dash` | reqwest + roxmltree |
 | `V4l2Src` | `v4l2` | Linux + V4L2 (`/dev/videoN`) |
 | `WasapiSink` / `WasapiSrc` | `wasapi-sink`, `wasapi-src` | Windows |
@@ -672,7 +672,10 @@ run_linear_chain(src, vec![&mut demux, &mut parse, &mut dec], sink,
 ```
 
 Features: `hls ffmpeg wayland-sink` (`dash` for the DASH front end). `HlsSrc`
-follows live playlist reloads and decrypts AES-128 / SAMPLE-AES segments;
+follows live playlist reloads and decrypts AES-128 / SAMPLE-AES segments, and on
+a low-latency playlist (`#EXT-X-PART` plus `CAN-BLOCK-RELOAD`) it blocks the
+reload on the next partial segment and emits each part as it is published
+(`low-latency=false` forces whole segments);
 `DashSrc` handles `SegmentTemplate` / `SegmentTimeline` and dynamic (live) MPDs,
 and with `low-latency=true` consumes a CMAF segment chunk by chunk as the packager
 writes it. Both prebuffer ahead by duration (`prebuffer-ms`), posting `Buffering`
@@ -811,6 +814,21 @@ ffmpeg -re -f lavfi -i testsrc=size=1280x720:rate=30 \
 A public RTSP feed (Wowza demo, IP camera on the LAN, etc.) also works —
 the smoke tests don't care where the stream comes from.
 
+The multi-track tests want audio in the same stream, so add an AAC track:
+
+```sh
+ffmpeg -re -f lavfi -i testsrc=size=1280x720:rate=30 -f lavfi -i sine=frequency=440 \
+       -c:v libx264 -pix_fmt yuv420p -preset ultrafast -tune zerolatency -g 30 \
+       -c:a aac -ar 48000 -ac 1 \
+       -f rtsp -rtsp_transport tcp rtsp://localhost:8554/avpattern
+```
+
+```sh
+G2G_RTSP_AV_TEST_URL=rtsp://localhost:8554/avpattern \
+  cargo test -p g2g-plugins --features "rtsp ffmpeg" \
+  --test m1122_rtsp_audio_track -- --ignored --nocapture
+```
+
 ### Software decode + Wayland
 
 ```sh
@@ -821,6 +839,21 @@ G2G_RTSP_TEST_URL=rtsp://localhost:8554/pattern \
 ```
 
 A window titled "glass2glass" appears showing the feed.
+
+### Splicing an element into the running pipeline
+
+```sh
+cd examples/g2g-mutate-demo && cargo run --release
+```
+
+The same RTSP feed in a window, with a `videoflip` spliced onto the decoded-video
+edge every few seconds, held, and lifted back off, while the stream keeps
+running: the picture turns over and back with no gap and no restart, and each
+operation prints as it happens. This is `GraphMutator` (M1115) on a live graph,
+the structural counterpart to a GStreamer pad block plus relink; see
+[PORTING.md](PORTING.md) §5.2. Standalone crate (workspace-excluded, its own
+lockfile) because it needs the `rtsp` + `ffmpeg` + `wayland-sink` feature set.
+`G2G_RTSP_URL` picks the feed, `G2G_DEMO_SECONDS` bounds the run, ctrl-c ends it.
 
 ### NVIDIA NVDEC (system memory) + Wayland
 
@@ -891,6 +924,24 @@ End-to-end over localhost: depayload round-trip, the jitter buffer reordering
 out-of-order packets, and NACK-driven recovery (a lossy relay drops chosen
 sequences; the receiver NACKs, the sender retransmits, every access unit is
 recovered in order).
+
+### Benchmarks against GStreamer
+
+`tools/latency-bench-e2e.sh` measures receive latency on both stacks with the
+same code over the same span. A g2g publisher burns the current
+`CLOCK_MONOTONIC` into each frame's luma plane (`timestampburn`) before the
+encoder and serves it over RTSP; a g2g consumer and a `gst-launch-1.0` consumer
+each decode to raw I420 and pipe it into `g2g-latency-reader`, which subtracts
+the burned value from its own clock and prints n / p50 / p95 / p99 / max. No
+display server is involved. `DECODER=software|nvdec` picks the decode path,
+`PARSE=0` drops `h264parse` from both lines, and `NETEM="delay 20ms loss 1%"`
+reruns everything inside an unprivileged network namespace with that qdisc on
+`lo`. The older `tools/latency-bench.sh` stays: it covers arrival to present,
+which the two stacks cannot report over one span.
+
+`tools/throughput-bench.sh` races the two offline on a cached ffmpeg fixture,
+decoding 1800 frames of 1080p H.264 to I420 with libavcodec on both sides and
+reporting wall, CPU seconds, peak RSS, and fps from `/usr/bin/time -v`.
 
 ## Android on-device testing
 

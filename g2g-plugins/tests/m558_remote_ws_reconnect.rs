@@ -78,6 +78,7 @@ fn test_caps() -> Caps {
         height: Dim::Fixed(2),
         framerate: Rate::Fixed(30 << 16),
         interlace: g2g_core::Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
 }
 

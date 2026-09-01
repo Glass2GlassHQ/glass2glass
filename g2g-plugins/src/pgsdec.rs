@@ -134,6 +134,7 @@ impl PgsDec {
             height: Dim::Fixed(self.height),
             framerate: Rate::Fixed(self.framerate_q16),
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 
@@ -369,6 +370,7 @@ impl PadTemplates for PgsDec {
                 height: Dim::Fixed(DEFAULT_VIDEO_HEIGHT),
                 framerate: Rate::Fixed(25 << 16),
                 interlace: g2g_core::Interlace::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
             })),
         ])
     }
@@ -492,6 +494,7 @@ mod tests {
                 height: Dim::Fixed(16),
                 framerate: Rate::Fixed(25 << 16),
                 interlace: g2g_core::Interlace::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN
             }],
             "the presentation composition refines the output geometry once"
         );

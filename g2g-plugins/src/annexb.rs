@@ -177,10 +177,13 @@ fn mpeg2_start_is_sync(n: &[u8]) -> bool {
 /// (either framing), returned as owned copies so the caller can cache them across
 /// frames. VideoToolbox builds its `CMVideoFormatDescription` from the parameter
 /// sets (supplied out of band), not from NALs inside the decode sample, so the
-/// decoder pulls these out and feeds only the VCL NALs to each frame.
+/// decoder pulls these out and feeds only the VCL NALs to each frame. The RTSP
+/// server sink caches them for the same reason: its SDP offers them as
+/// `sprop-parameter-sets`.
 #[cfg(any(
     all(target_os = "macos", feature = "vtdecode"),
     all(target_os = "android", feature = "mediacodec"),
+    feature = "rtsp-server",
     test
 ))]
 pub(crate) fn h264_parameter_sets(au: &[u8]) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {

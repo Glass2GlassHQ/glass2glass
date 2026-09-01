@@ -17,7 +17,7 @@
 
 use alloc::vec::Vec;
 
-use g2g_core::{PropKind, PropertySpec, VideoCodec};
+use g2g_core::{Colorimetry, PropKind, PropertySpec, VideoCodec};
 
 use crate::annexb::{h264_nal_type, next_start_code, strip_emulation_prevention, BitReader};
 use crate::nalparse::{NalCodec, NalParse, SpsGeometry};
@@ -240,6 +240,7 @@ fn parse_sps(rbsp: &[u8]) -> Option<SpsGeometry> {
         width,
         height,
         framerate: vui.framerate,
+        colorimetry: vui.colorimetry,
         pic_timing: vui.pic_timing,
         // POC type 2 derives the picture order count from frame_num alone
         // (H.264 8.2.1.3), so coded order is display order by construction. The
@@ -251,11 +252,14 @@ fn parse_sps(rbsp: &[u8]) -> Option<SpsGeometry> {
     })
 }
 
-/// What the SPS VUI yields: the framerate, and the context an H.264 `pic_timing`
-/// SEI needs to be parseable.
+/// What the SPS VUI yields: the framerate, the colour description, and the
+/// context an H.264 `pic_timing` SEI needs to be parseable.
 #[derive(Default)]
 struct Vui {
     framerate: Option<u32>,
+    /// From the `video_signal_type` block; [`Colorimetry::UNKNOWN`] when the
+    /// block is absent or the VUI is truncated before it, never a guess.
+    colorimetry: Colorimetry,
     pic_timing: Option<crate::sei::PicTimingContext>,
 }
 
@@ -306,13 +310,17 @@ fn parse_vui(br: &mut BitReader) -> Vui {
         // video_signal_type_present_flag
         if br.read_bit()? == 1 {
             br.read_bits(3)?; // video_format
-            br.read_bit()?; // video_full_range_flag
+            let video_full_range_flag = br.read_bit()? == 1;
+            // colour_description_present_flag; absent leaves the CICP
+            // codepoints at unspecified (2), which maps to Unknown.
+            let (mut primaries, mut transfer, mut matrix) = (2u8, 2u8, 2u8);
             if br.read_bit()? == 1 {
-                // colour_description_present_flag
-                br.read_bits(8)?; // colour_primaries
-                br.read_bits(8)?; // transfer_characteristics
-                br.read_bits(8)?; // matrix_coefficients
+                primaries = br.read_bits(8)? as u8;
+                transfer = br.read_bits(8)? as u8;
+                matrix = br.read_bits(8)? as u8;
             }
+            out.colorimetry =
+                Colorimetry::from_cicp(primaries, transfer, matrix, video_full_range_flag);
         }
         // chroma_loc_info_present_flag
         if br.read_bit()? == 1 {
@@ -689,6 +697,104 @@ mod tests {
         out
     }
 
+    /// Build an Annex-B SPS whose VUI carries a `video_signal_type` block with
+    /// the given CICP colour description (and no timing info).
+    fn build_annexb_sps_with_color(
+        primaries: u8,
+        transfer: u8,
+        matrix: u8,
+        full_range: bool,
+    ) -> Vec<u8> {
+        let mut w = BitWriter::default();
+        w.write_ue(0); // seq_parameter_set_id
+        w.write_ue(0); // log2_max_frame_num_minus4
+        w.write_ue(0); // pic_order_cnt_type
+        w.write_ue(0); // log2_max_pic_order_cnt_lsb_minus4
+        w.write_ue(1); // max_num_ref_frames
+        w.write_bit(0); // gaps_in_frame_num_value_allowed_flag
+        w.write_ue(1920 / 16 - 1); // pic_width_in_mbs_minus1
+        w.write_ue(1088 / 16 - 1); // pic_height_in_map_units_minus1
+        w.write_bit(1); // frame_mbs_only_flag
+        w.write_bit(0); // direct_8x8_inference_flag
+        w.write_bit(0); // frame_cropping_flag
+        w.write_bit(1); // vui_parameters_present_flag
+        w.write_bit(0); // aspect_ratio_info_present_flag
+        w.write_bit(0); // overscan_info_present_flag
+        w.write_bit(1); // video_signal_type_present_flag
+        w.write_bits(5, 3); // video_format (unspecified)
+        w.write_bit(u32::from(full_range)); // video_full_range_flag
+        w.write_bit(1); // colour_description_present_flag
+        w.write_bits(u32::from(primaries), 8);
+        w.write_bits(u32::from(transfer), 8);
+        w.write_bits(u32::from(matrix), 8);
+        w.write_bit(0); // chroma_loc_info_present_flag
+        w.write_bit(0); // timing_info_present_flag
+        w.write_bit(1); // rbsp_trailing_bits
+        w.align_to_byte();
+        let mut payload = vec![66u8, 0, 40];
+        payload.extend_from_slice(&w.into_bytes());
+        let payload = crate::annexb::add_emulation_prevention(&payload);
+        let mut out = vec![0u8, 0, 0, 1, 0x67];
+        out.extend_from_slice(&payload);
+        out
+    }
+
+    #[test]
+    fn recovers_bt709_colorimetry_from_vui() {
+        // CICP 1/1/1 + limited range is exactly the bt709 preset.
+        let stream = build_annexb_sps_with_color(1, 1, 1, false);
+        let info = extract_sps_info(&stream).expect("SPS with colour must parse");
+        assert_eq!(info.colorimetry, Colorimetry::BT709);
+    }
+
+    #[test]
+    fn absent_vui_colorimetry_stays_unknown() {
+        let stream = build_test_annexb_sps(1280, 720);
+        let info = extract_sps_info(&stream).expect("SPS must parse");
+        assert_eq!(info.colorimetry, Colorimetry::UNKNOWN);
+    }
+
+    #[test]
+    fn garbage_colour_codepoints_map_unknown_without_panic() {
+        // Codepoints outside the modeled CICP set must not panic or leak a
+        // guess into caps: each field falls back to Unknown. The coded
+        // full-range flag is real, so the range stays concrete.
+        let stream = build_annexb_sps_with_color(200, 250, 77, true);
+        let info = extract_sps_info(&stream).expect("SPS must parse");
+        assert_eq!(
+            info.colorimetry,
+            Colorimetry {
+                range: g2g_core::ColorRange::Full,
+                matrix: g2g_core::MatrixCoefficients::Unknown,
+                transfer: g2g_core::TransferCharacteristics::Unknown,
+                primaries: g2g_core::ColorPrimaries::Unknown,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn emits_colorimetry_in_refined_caps() {
+        // The 1080p BT.709 case this track exists for: the parser's CapsChanged
+        // must carry the VUI colour description, not discard it.
+        let mut parse = H264Parse::new();
+        parse.configure_pipeline(&h264_parse_caps()).unwrap();
+        let mut sink = RecordingSink::default();
+        let stream = build_annexb_sps_with_color(1, 1, 1, false);
+        parse
+            .process(
+                PipelinePacket::DataFrame(frame_with_bytes(0, stream)),
+                &mut sink,
+            )
+            .await
+            .unwrap();
+        match &sink.packets[0] {
+            PipelinePacket::CapsChanged(Caps::CompressedVideo { colorimetry, .. }) => {
+                assert_eq!(*colorimetry, Colorimetry::BT709);
+            }
+            other => panic!("expected CapsChanged first, got {other:?}"),
+        }
+    }
+
     #[test]
     fn round_trips_a_1280x720_sps() {
         let stream = build_test_annexb_sps(1280, 720);
@@ -839,6 +945,7 @@ mod tests {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 
@@ -963,6 +1070,7 @@ mod tests {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         assert_eq!(parse.intercept_caps(&vp9), Err(G2gError::CapsMismatch));
     }
@@ -984,6 +1092,7 @@ mod tests {
                         width: Dim::Any,
                         height: Dim::Any,
                         framerate: Rate::Any,
+                        colorimetry: g2g_core::Colorimetry::UNKNOWN
                     }]
                 );
             }
@@ -1061,6 +1170,69 @@ mod tests {
         );
         assert_eq!(payloads[0], au0, "first AU emitted whole");
         assert_eq!(payloads[1], au1, "second AU emitted whole on EOS");
+    }
+
+    /// M1116: an upstream that hands over one access unit per buffer (RtspSrc, the
+    /// depayloader, the demuxers) must not have its trailing picture held back for
+    /// the next buffer's start code, which cost a frame period of latency on every
+    /// live stream.
+    #[tokio::test]
+    async fn reframing_stops_holding_once_the_input_proves_au_aligned() {
+        let mut parse = H264Parse::reframing();
+        parse.configure_pipeline(&h264_parse_caps()).unwrap();
+        let mut sink = RecordingSink::default();
+
+        let aus: Vec<Vec<u8>> = (0..4).map(|tag| annexb_vcl(true, tag as u8)).collect();
+        for (seq, au) in aus.iter().enumerate() {
+            parse
+                .process(
+                    PipelinePacket::DataFrame(frame_with_bytes(seq as u64, au.clone())),
+                    &mut sink,
+                )
+                .await
+                .unwrap();
+        }
+
+        // No Eos: everything fed must already be downstream.
+        let payloads = data_payloads(&sink);
+        assert_eq!(
+            payloads.len(),
+            aus.len(),
+            "every access unit is out without waiting for a successor"
+        );
+        assert_eq!(payloads, aus, "and each one whole, in order");
+    }
+
+    /// The other half of M1116: a chunked byte stream (filesrc) still waits, since
+    /// a buffer boundary there says nothing about where an access unit ends.
+    #[tokio::test]
+    async fn reframing_still_holds_the_tail_of_a_chunked_byte_stream() {
+        let mut parse = H264Parse::reframing();
+        parse.configure_pipeline(&h264_parse_caps()).unwrap();
+        let mut sink = RecordingSink::default();
+
+        let aus: Vec<Vec<u8>> = (0..4).map(|tag| annexb_vcl(true, tag as u8)).collect();
+        let stream: Vec<u8> = aus.concat();
+        // A chunk size coprime with the access-unit size, so no chunk boundary ever
+        // lands on an access-unit start.
+        let chunk = aus[0].len() + 3;
+        for (seq, part) in stream.chunks(chunk).enumerate() {
+            parse
+                .process(
+                    PipelinePacket::DataFrame(frame_with_bytes(seq as u64, part.to_vec())),
+                    &mut sink,
+                )
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(
+            data_payloads(&sink).len(),
+            aus.len() - 1,
+            "the last access unit is still open until its successor or Eos"
+        );
+        parse.process(PipelinePacket::Eos, &mut sink).await.unwrap();
+        assert_eq!(data_payloads(&sink), aus, "Eos flushes it, bytes intact");
     }
 
     #[tokio::test]

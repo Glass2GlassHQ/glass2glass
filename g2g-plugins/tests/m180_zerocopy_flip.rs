@@ -54,7 +54,7 @@ async fn rotate180_flips_through_shared_memory_with_zero_copies() {
                 width: Dim::Fixed(8),
                 height: Dim::Fixed(4),
                 framerate: Rate::Fixed(_),
-                interlace: _
+                ..
             }
         )),
         "sink saw RGBA 8x4, got {:?}",

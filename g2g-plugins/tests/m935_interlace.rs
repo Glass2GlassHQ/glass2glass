@@ -69,6 +69,7 @@ fn raw_caps(format: RawVideoFormat, interlace: Interlace) -> Caps {
         height: Dim::Fixed(H as u32),
         framerate: Rate::Fixed(25 << 16),
         interlace,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
 }
 
@@ -374,6 +375,7 @@ mod ffmpeg_latch {
             width: Dim::Fixed(160),
             height: Dim::Fixed(128),
             framerate: Rate::Fixed(25 << 16),
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         })
         .unwrap();
         let mut out = Collect::default();

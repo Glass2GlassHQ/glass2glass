@@ -71,6 +71,7 @@ fn raw_video_caps() -> CapsSet {
                 height: Dim::Any,
                 framerate: Rate::Any,
                 interlace: Interlace::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
             })
             .collect(),
     )

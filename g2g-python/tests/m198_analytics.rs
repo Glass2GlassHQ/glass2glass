@@ -61,6 +61,7 @@ fn detection_from_python_lands_in_frame_metadata() {
         height: Dim::Fixed(1),
         framerate: Rate::Fixed(30),
         interlace: g2g_core::Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     };
     el.configure_pipeline(&caps).unwrap();
 

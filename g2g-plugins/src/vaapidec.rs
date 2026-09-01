@@ -418,6 +418,7 @@ impl<C: VaapiCodec> PadTemplates for VaapiDec<C> {
                 width: Dim::Any,
                 height: Dim::Any,
                 framerate: Rate::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
             })),
             PadTemplate::source(CapsSet::one(Caps::RawVideo {
                 format: RawVideoFormat::Nv12,
@@ -425,6 +426,7 @@ impl<C: VaapiCodec> PadTemplates for VaapiDec<C> {
                 height: Dim::Any,
                 framerate: Rate::Any,
                 interlace: g2g_core::Interlace::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
             })),
         ])
     }
@@ -444,6 +446,7 @@ impl<C: VaapiCodec> AsyncElement for VaapiDec<C> {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         upstream_caps.intersect(&supported)
     }
@@ -640,12 +643,14 @@ fn derive_output_caps<C: VaapiCodec>(input: &Caps) -> CapsSet {
             width,
             height,
             framerate,
+            ..
         } if *codec == C::CODEC => CapsSet::one(Caps::RawVideo {
             format: RawVideoFormat::Nv12,
             width: width.clone(),
             height: height.clone(),
             framerate: framerate.clone(),
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }),
         _ => CapsSet::from_alternatives(Vec::new()),
     }
@@ -672,6 +677,7 @@ fn geometry_reconfigure<C: VaapiCodec>(
         width: Dim::Fixed(current.width),
         height: Dim::Fixed(current.height),
         framerate,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }))
 }
 
@@ -682,6 +688,7 @@ fn nv12_caps(w: u32, h: u32) -> Caps {
         height: Dim::Fixed(h),
         framerate: Rate::Any,
         interlace: g2g_core::Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
 }
 
@@ -840,6 +847,7 @@ mod tests {
                 height: Dim::Fixed(480),
                 framerate: Rate::Any,
                 interlace: g2g_core::Interlace::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN
             }
         );
     }
@@ -852,6 +860,7 @@ mod tests {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         assert_eq!(dec.intercept_caps(&vp9), Err(G2gError::CapsMismatch));
     }
@@ -864,6 +873,7 @@ mod tests {
             width: Dim::Fixed(1280),
             height: Dim::Fixed(720),
             framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         assert_eq!(dec.intercept_caps(&proposal), Ok(proposal));
     }
@@ -885,6 +895,7 @@ mod tests {
             width: Dim::Fixed(1280),
             height: Dim::Fixed(720),
             framerate: Rate::Fixed(30 << 16),
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         // First format: nothing to renegotiate.
         assert_eq!(
@@ -904,6 +915,7 @@ mod tests {
                 width: Dim::Fixed(1920),
                 height: Dim::Fixed(1080),
                 framerate: Rate::Fixed(30 << 16),
+                colorimetry: g2g_core::Colorimetry::UNKNOWN
             }))
         );
     }
@@ -921,6 +933,7 @@ mod tests {
             width: Dim::Fixed(1920),
             height: Dim::Fixed(1080),
             framerate: Rate::Fixed(30 << 16),
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         assert_eq!(
             f(&h264).alternatives(),
@@ -930,6 +943,7 @@ mod tests {
                 height: Dim::Fixed(1080),
                 framerate: Rate::Fixed(30 << 16),
                 interlace: g2g_core::Interlace::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN
             }]
         );
 
@@ -938,6 +952,7 @@ mod tests {
             width: Dim::Fixed(1920),
             height: Dim::Fixed(1080),
             framerate: Rate::Fixed(30 << 16),
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         assert!(f(&vp9).is_empty());
     }

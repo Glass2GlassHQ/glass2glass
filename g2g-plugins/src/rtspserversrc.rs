@@ -251,12 +251,19 @@ impl RtspServerSrc {
             width: Dim::Fixed(self.width),
             height: Dim::Fixed(self.height),
             framerate: Rate::Fixed(self.fps << 16),
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 
     fn responder(&self, server_rtp_port: u16) -> RtspResponder {
-        RtspResponder::new(sdp_h264(self.payload_type), server_rtp_port, self.ssrc)
-            .with_session_timeout_secs(self.session_timeout_secs())
+        // An ingest server: the publisher describes the stream, not this end, so
+        // there are no parameter sets of its own to offer.
+        RtspResponder::new(
+            sdp_h264(self.payload_type, None, None),
+            server_rtp_port,
+            self.ssrc,
+        )
+        .with_session_timeout_secs(self.session_timeout_secs())
     }
 }
 
@@ -634,6 +641,7 @@ impl PadTemplates for RtspServerSrc {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }))])
     }
 }

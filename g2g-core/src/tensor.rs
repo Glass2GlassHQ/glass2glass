@@ -4,7 +4,7 @@
 //! offset, so a layout-preserving transform (flip, transpose, crop, channel
 //! reorder) is expressed as a *new view over the same bytes* rather than a
 //! copy. The bytes themselves live in a [`MemoryDomain`](crate::memory), eg the
-//! shared-CPU [`SystemView`](crate::memory::SystemView); this type is pure
+//! shared-CPU `SystemView`; this type is pure
 //! metadata.
 //!
 //! Why a view and not just `Caps::Tensor`: `Caps` is the *negotiated logical*

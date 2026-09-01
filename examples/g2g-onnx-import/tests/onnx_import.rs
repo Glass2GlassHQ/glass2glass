@@ -14,7 +14,7 @@
 //! Skips when burn's wgpu backend finds no adapter. There is no ndarray-backend
 //! variant: `BurnInference` is pinned to the wgpu backend.
 
-use g2g_core::element::{PushOutcome};
+use g2g_core::element::PushOutcome;
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{
@@ -76,6 +76,7 @@ fn rgba_caps() -> Caps {
         height: Dim::Fixed(HEIGHT),
         framerate: Rate::Fixed(30 << 16),
         interlace: g2g_core::Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
 }
 

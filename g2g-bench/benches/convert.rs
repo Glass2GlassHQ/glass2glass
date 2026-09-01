@@ -8,7 +8,7 @@
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
 
-use g2g_core::RawVideoFormat;
+use g2g_core::{Colorimetry, RawVideoFormat};
 use g2g_plugins::videoconvert::convert;
 
 const W: usize = 1920;
@@ -39,7 +39,16 @@ fn bench_convert(c: &mut Criterion) {
     ];
     for (name, from, to) in cases {
         group.bench_function(name, |b| {
-            b.iter(|| convert(black_box(&src), black_box(from), black_box(to), W, H))
+            b.iter(|| {
+                convert(
+                    black_box(&src),
+                    black_box(from),
+                    black_box(to),
+                    W,
+                    H,
+                    Colorimetry::UNKNOWN,
+                )
+            })
         });
     }
     group.finish();

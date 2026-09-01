@@ -70,6 +70,7 @@ async fn mux_ts() -> Vec<u8> {
         width: Dim::Fixed(320),
         height: Dim::Fixed(240),
         framerate: Rate::Fixed(30 << 16),
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     };
     let mut mux = TsMux::new();
     mux.configure_pipeline(&caps).unwrap();

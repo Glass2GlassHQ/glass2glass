@@ -149,9 +149,10 @@ pub mod slot;
 pub use aggregator::InputAggregator;
 pub use caps::{
     pcm_formats, pcm_from_gst_format, pcm_gst_format, AudioFormat, ByteStreamEncoding, Caps,
-    ClosedCaptionFormat, Dim, Interlace, PassthroughFields, Rate, RawVideoFormat, SubPictureFormat,
-    TensorDType, TensorLayout, TensorShape, TextFormat, VideoCodec, ANY_CHANNELS, ANY_SAMPLE_RATE,
-    PCM_FORMATS,
+    ClosedCaptionFormat, ColorPrimaries, ColorRange, Colorimetry, Dim, Interlace, LumaCoefficients,
+    MatrixCoefficients, PassthroughFields, Rate, RawVideoFormat, SubPictureFormat, TensorDType,
+    TensorLayout, TensorShape, TextFormat, TransferCharacteristics, VideoCodec, YuvConversion,
+    ANY_CHANNELS, ANY_SAMPLE_RATE, PCM_FORMATS,
 };
 pub use channels::{ChannelLayout, ChannelPosition};
 // `CapsSet` (negotiation-time alternatives) needs alloc; `TensorShape` is

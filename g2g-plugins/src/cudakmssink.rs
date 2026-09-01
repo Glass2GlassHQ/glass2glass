@@ -73,9 +73,10 @@ use g2g_core::memory::OwnedCudaBuffer;
 use g2g_core::metrics::{monotonic_ns, LatencyHistogram, LatencySnapshot};
 use g2g_core::{
     AllocationParams, AsyncElement, BusHandle, Caps, CapsConstraint, CapsSet, ClockCandidate,
-    ClockPriority, ClockSync, ConfigureOutcome, Dim, Frame, G2gError, HardwareError, MemoryDomain,
-    OutputSink, PipelineClock, PipelinePacket, PresentationPacer, PropError, PropKind, PropValue,
-    PropertySpec, Rate, RawVideoFormat, MAX_LATENESS_PROPERTY, QOS_INTERVAL_PROPERTY,
+    ClockPriority, ClockSync, Colorimetry, ConfigureOutcome, Dim, Frame, G2gError, HardwareError,
+    MemoryDomain, OutputSink, PipelineClock, PipelinePacket, PresentationPacer, PropError,
+    PropKind, PropValue, PropertySpec, Rate, RawVideoFormat, MAX_LATENESS_PROPERTY,
+    QOS_INTERVAL_PROPERTY,
 };
 
 use crate::clock::wait_to_present;
@@ -169,6 +170,8 @@ pub struct CudaKmsSink {
     worker: Option<JoinHandle<()>>,
     width: u32,
     height: u32,
+    /// Colorimetry the worker built its convert program for.
+    colorimetry: Colorimetry,
     frames_presented: Arc<AtomicU64>,
     latency: Arc<LatencyHistogram>,
     /// PTS pacing + QoS late-drop, on top of the worker's flip-paced ack: idle
@@ -205,6 +208,7 @@ impl CudaKmsSink {
             worker: None,
             width: 0,
             height: 0,
+            colorimetry: Colorimetry::UNKNOWN,
             frames_presented: Arc::new(AtomicU64::new(0)),
             latency: Arc::new(LatencyHistogram::new()),
             pacer: PresentationPacer::new(),
@@ -308,6 +312,7 @@ impl AsyncElement for CudaKmsSink {
             height: Dim::Any,
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }))
     }
 
@@ -380,22 +385,25 @@ impl AsyncElement for CudaKmsSink {
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        let (w, h) = match absolute_caps {
+        let (w, h, colorimetry) = match absolute_caps {
             Caps::RawVideo {
                 format: RawVideoFormat::Nv12,
                 width: Dim::Fixed(w),
                 height: Dim::Fixed(h),
+                colorimetry,
                 ..
-            } => (*w, *h),
+            } => (*w, *h, *colorimetry),
             _ => return Err(G2gError::CapsMismatch),
         };
         if w % 2 != 0 || h % 2 != 0 {
             return Err(G2gError::CapsMismatch);
         }
 
-        // Mid-stream geometry change: same dims is a no-op; new dims respawn.
+        // Mid-stream geometry change: same dims is a no-op; new dims respawn, and
+        // so does a colorimetry refinement (its weights are compiled into the
+        // worker convert program).
         if self.worker.is_some() {
-            if w == self.width && h == self.height {
+            if w == self.width && h == self.height && colorimetry == self.colorimetry {
                 return Ok(ConfigureOutcome::Accepted);
             }
             self.shutdown();
@@ -410,7 +418,16 @@ impl AsyncElement for CudaKmsSink {
         let join = thread::Builder::new()
             .name(String::from("g2g-cudakmssink"))
             .spawn(move || {
-                if let Err(e) = worker_main(device_path, w, h, rx, presented, latency, &ready_tx) {
+                if let Err(e) = worker_main(
+                    device_path,
+                    w,
+                    h,
+                    colorimetry,
+                    rx,
+                    presented,
+                    latency,
+                    &ready_tx,
+                ) {
                     std::eprintln!("g2g-cudakmssink worker error: {e:?}");
                     let _ = ready_tx.send(Err(()));
                 }
@@ -431,6 +448,7 @@ impl AsyncElement for CudaKmsSink {
         self.worker = Some(join);
         self.width = w;
         self.height = h;
+        self.colorimetry = colorimetry;
         Ok(ConfigureOutcome::Accepted)
     }
 
@@ -527,16 +545,18 @@ struct WorkerState {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn worker_main(
     device_path: PathBuf,
     width: u32,
     height: u32,
+    colorimetry: Colorimetry,
     rx: Receiver<WorkerCmd>,
     presented: Arc<AtomicU64>,
     latency: Arc<LatencyHistogram>,
     ready_tx: &Sender<Result<(), ()>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut state = match WorkerState::setup(&device_path, width, height) {
+    let mut state = match WorkerState::setup(&device_path, width, height, colorimetry) {
         Ok(s) => s,
         Err(e) => {
             let _ = ready_tx.send(Err(()));
@@ -583,6 +603,7 @@ impl WorkerState {
         device_path: &Path,
         width: u32,
         height: u32,
+        colorimetry: Colorimetry,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let card = Card::open(device_path).map_err(|_| "open DRM card")?;
 
@@ -665,7 +686,7 @@ impl WorkerState {
             })
         };
         // SAFETY: `gl` wraps the GL ES 3 context made current above.
-        let gl_state = unsafe { GlState::build(gl, width, height, GlMode::Nv12) }?;
+        let gl_state = unsafe { GlState::build(gl, width, height, GlMode::Nv12, colorimetry) }?;
 
         Ok(WorkerState {
             gl: gl_state,
@@ -826,6 +847,7 @@ mod tests {
             height: Dim::Fixed(h),
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 
@@ -837,6 +859,7 @@ mod tests {
             width: Dim::Fixed(640),
             height: Dim::Fixed(480),
             framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         assert_eq!(sink.intercept_caps(&h264), Ok(h264));
     }
@@ -850,6 +873,7 @@ mod tests {
             height: Dim::Fixed(480),
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         assert_eq!(
             sink.configure_pipeline(&i420).err(),

@@ -127,6 +127,7 @@ impl Mp4Demux {
             width,
             height,
             framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 
@@ -160,6 +161,7 @@ impl Mp4Demux {
                 min_q16: 1 << 16,
                 max_q16: 240 << 16,
             },
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 

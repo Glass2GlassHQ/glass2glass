@@ -3,9 +3,9 @@
 //! Mirrors GStreamer's `NULL → READY → PAUSED → PLAYING` ladder. The state
 //! enum and the change-return code are pure data (no allocation, no OS), so
 //! they live in the `no_std` baseline and the bus can carry a
-//! [`BusMessage::StateChanged`](crate::BusMessage::StateChanged). The
+//! `BusMessage::StateChanged`. The
 //! controller that elements / runners actually gate on lives in
-//! [`crate::runtime::StateController`] (feature `runtime`, needs a `Waker`
+//! `crate::runtime::StateController` (feature `runtime`, needs a `Waker`
 //! registry).
 //!
 //! Semantics, matching GStreamer where it costs nothing to:
@@ -69,8 +69,8 @@ pub enum StateChangeReturn {
     /// The change took effect immediately.
     Success,
     /// The change is in progress: a non-live sink is prerolling. Completes on
-    /// [`BusMessage::AsyncDone`](crate::BusMessage::AsyncDone) /
-    /// [`StateController::await_prerolled`](crate::runtime::StateController::await_prerolled).
+    /// `BusMessage::AsyncDone` /
+    /// `StateController::await_prerolled`.
     Async,
     /// The change succeeded but no preroll buffer is expected (live pipeline).
     NoPreroll,

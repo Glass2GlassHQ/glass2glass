@@ -114,6 +114,7 @@ impl MjpegDec {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 
@@ -124,6 +125,7 @@ impl MjpegDec {
             height: Dim::Fixed(h),
             framerate: self.framerate.clone(),
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 
@@ -178,6 +180,7 @@ impl MjpegDec {
                     RawVideoFormat::I420,
                     w as usize,
                     h as usize,
+                    g2g_core::Colorimetry::UNKNOWN,
                 )
                 .into_vec())
             }
@@ -297,12 +300,14 @@ impl AsyncElement for MjpegDec {
                 width,
                 height,
                 framerate,
+                ..
             } => CapsSet::one(Caps::RawVideo {
                 format: out_format,
                 width: width.clone(),
                 height: height.clone(),
                 framerate: framerate.clone(),
                 interlace: g2g_core::Interlace::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
             }),
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
@@ -449,6 +454,7 @@ impl PadTemplates for MjpegDec {
             height: Dim::Any,
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         Vec::from([
             PadTemplate::sink(CapsSet::one(Self::input_template())),

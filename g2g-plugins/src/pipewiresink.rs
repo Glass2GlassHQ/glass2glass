@@ -53,6 +53,10 @@ use g2g_core::{
 
 use crate::pwaudio::{format_pod_bytes, frame_bytes, pw_params};
 
+/// How often the clock-discipline trace prints, out of the once-per-quantum
+/// stream of observations.
+const CLOCK_LOG_INTERVAL_NS: u64 = 1_000_000_000;
+
 /// Control message to the loop thread. Only `Terminate` for now (quit the loop).
 enum Ctrl {
     Terminate,
@@ -437,11 +441,12 @@ fn build_and_run(
 
     let q = Arc::clone(&queue);
     let drift = cfg.clock.clone();
+    let mut last_clock_log_ns = 0u64;
     let _listener = stream
         .add_local_listener_with_user_data(())
         .process(move |stream, ()| {
             if let Some(clock) = drift.as_deref() {
-                discipline_clock(stream, clock);
+                discipline_clock(stream, clock, &mut last_clock_log_ns);
             }
             let Some(mut buffer) = stream.dequeue_buffer() else {
                 return;
@@ -512,7 +517,11 @@ fn build_and_run(
 /// leaky byte queue, so producer-side drops never skew it; the constant graph
 /// delay to the speaker lands in the affine offset the fit absorbs. The local
 /// time is sampled next to the probe so the pair lines up.
-fn discipline_clock(stream: &pw::stream::StreamRef, clock: &DriftClock) {
+///
+/// The callback runs once per graph quantum (~47 Hz at 1024 frames / 48 kHz),
+/// so the trace is throttled to [`CLOCK_LOG_INTERVAL_NS`]; `last_log_ns` carries
+/// the caller's stamp of the last line.
+fn discipline_clock(stream: &pw::stream::StreamRef, clock: &DriftClock, last_log_ns: &mut u64) {
     let local_ns = clock.reference_now();
     // SAFETY: zero is a valid bit pattern for `pw_time` (plain numeric fields);
     // the call only writes into it.
@@ -535,13 +544,18 @@ fn discipline_clock(stream: &pw::stream::StreamRef, clock: &DriftClock) {
     let master_ns = (u128::from(time.ticks) * u128::from(time.rate.num) * 1_000_000_000
         / u128::from(time.rate.denom)) as u64;
     let outcome = clock.observe(local_ns, master_ns);
+    if local_ns.saturating_sub(*last_log_ns) < CLOCK_LOG_INTERVAL_NS {
+        return;
+    }
+    *last_log_ns = local_ns;
     g2g_core::g2g_log!(
         g2g_core::log::Target::category("PipeWireSink"),
-        "clock local={}ms master={}ms delay={} slope={:.6} {:?}",
+        "clock local={}ms master={}ms delay={} slope={:.6} observations={} {:?}",
         local_ns / 1_000_000,
         master_ns / 1_000_000,
         time.delay,
         clock.slope(),
+        clock.observations(),
         outcome
     );
 }

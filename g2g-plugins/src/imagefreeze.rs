@@ -125,6 +125,7 @@ impl ImageFreeze {
             height: Dim::Fixed(height),
             framerate: Rate::Fixed(self.rate_q16()),
             interlace: Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 }
@@ -301,6 +302,7 @@ mod tests {
             height: Dim::Fixed(32),
             framerate,
             interlace: Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 
@@ -358,6 +360,7 @@ mod tests {
             width: Dim::Fixed(64),
             height: Dim::Fixed(32),
             framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         assert_eq!(
             element.configure_pipeline(&h264).unwrap_err(),

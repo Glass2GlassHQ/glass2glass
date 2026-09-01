@@ -220,6 +220,7 @@ impl SdpMedia {
                         .and_then(parse_q16_fps)
                         .or(sps_fps)
                         .map_or(Rate::Any, Rate::Fixed),
+                    colorimetry: g2g_core::Colorimetry::UNKNOWN,
                 }
             }
             Encoding::Audio(format) => Caps::Audio {
@@ -399,6 +400,7 @@ mod tests {
                 width: Dim::Fixed(320),
                 height: Dim::Fixed(240),
                 framerate: Rate::Fixed(15 << 16),
+                colorimetry: g2g_core::Colorimetry::UNKNOWN
             },
             "geometry comes from the sprop SPS, rate from a=framerate"
         );
@@ -454,6 +456,7 @@ mod tests {
                 width: Dim::Any,
                 height: Dim::Any,
                 framerate: Rate::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN
             }
         );
     }

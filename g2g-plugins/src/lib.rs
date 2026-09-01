@@ -333,6 +333,9 @@ pub mod misptime;
 // Shared pixel-format helpers: packed-RGBA layout (videobalance, alpha) and the
 // planar plane / frame sizing the format-agnostic filters need (deinterlace).
 mod pixel;
+// YUV <-> RGB coefficients for a stream's caps colorimetry, shared by every CPU
+// converter and shader here.
+mod yuvmatrix;
 // Where a capture driver's / decoder's padded rows sit, shared by the producers
 // that either declare them (`PlaneLayout`) or pack them tight.
 #[cfg(any(feature = "metadata", feature = "v4l2", feature = "pipewire"))]
@@ -668,6 +671,10 @@ pub mod wavsink;
 
 #[cfg(feature = "rtsp")]
 pub mod rtspsrc;
+// Multi-track RTSP playback: one session, a video pad and (when the SDP offers
+// one) an audio pad.
+#[cfg(feature = "rtsp")]
+pub mod rtspsrcn;
 
 // ONVIF camera discovery + RTSP stream-URI resolution (OnvifSrc). Resolves a
 // camera's RTSP URL over SOAP, then delegates to RtspSrc; implies `rtsp`.
@@ -1214,6 +1221,12 @@ mod yuv;
 // target-gated). Requires DRM master at runtime; see module docs.
 #[cfg(all(target_os = "linux", feature = "kms-sink"))]
 pub mod kmssink;
+
+// Timestamp burn-in (M1114): writes CLOCK_MONOTONIC nanoseconds into an I420
+// luma plane as a block strip, and decodes it back. The instrument the
+// same-metric latency bench measures both stacks with. Unix-only; needs libc.
+#[cfg(all(unix, feature = "latency-bench"))]
+pub mod timestampburn;
 
 // PTP system clock (M593 phase C): reads the OS PTP-disciplined CLOCK_TAI on a
 // worker and drives a g2g-core PtpClock, so a linuxptp-synced host offers a

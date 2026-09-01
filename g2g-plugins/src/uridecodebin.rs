@@ -36,6 +36,7 @@ fn h264_any() -> Caps {
         width: Dim::Any,
         height: Dim::Any,
         framerate: Rate::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
 }
 
@@ -58,6 +59,55 @@ pub fn rtsp_handler() -> UriSourceFactory {
         let src = crate::rtspsrc::RtspSrc::new(uri.raw);
         Ok((Box::new(src) as Box<dyn DynSourceLoop>, h264_any()))
     })
+}
+
+/// Assemble the A/V fan-out for an RTSP stream that carries both tracks (M1122):
+/// one [`RtspSrcN`](crate::rtspsrcn::RtspSrcN) session with a video pad and an
+/// audio pad, each decoding to its own auto sink. `Ok(None)` (decline, so the
+/// single-stream [`rtsp_handler`] takes over) when the SDP offered no audio.
+/// Network-free assembly: `tracks` comes from a DESCRIBE the caller already did.
+#[cfg(all(feature = "rtsp", feature = "std"))]
+pub fn build_rtsp_av_fanout(
+    reg: &Registry,
+    url: &str,
+    tracks: &crate::rtspsrcn::RtspTracks,
+) -> Result<Option<Graph<GraphNode>>, ParseError> {
+    use crate::rtspsrcn::{negotiation_audio_caps, RtspSrcN, AUDIO_PORT, VIDEO_PORT};
+
+    let Some(audio) = tracks.audio.as_ref().map(negotiation_audio_caps) else {
+        return Ok(None);
+    };
+    let mut graph: Graph<GraphNode> = Graph::new();
+    let src = graph.add_fanout_src(
+        GraphNodeRef::fanout_source(RtspSrcN::new(url).with_tracks(tracks)),
+        2,
+    );
+    let ports = [src.output(VIDEO_PORT as u8), src.output(AUDIO_PORT as u8)];
+    let av = [(tracks.video.clone(), true), (audio, false)];
+    wire_av_ports(reg, &mut graph, &ports, &av)?;
+    Ok(Some(graph))
+}
+
+/// The `playbin uri=rtsp://...` fan-out hook (M1122): DESCRIBE the stream and,
+/// when it carries audio as well as video, build the two-pad graph over one
+/// session. Declines (`Ok(None)`) for a non-`rtsp` URI, an unreachable server,
+/// or a video-only stream, leaving the single-stream [`rtsp_handler`] to plug
+/// the plain video chain. Network-coupled: validated against a live server, not
+/// in CI.
+#[cfg(all(feature = "rtsp", feature = "std"))]
+pub fn rtsp_playbin(reg: &Registry, uri: &str) -> Result<Option<Graph<GraphNode>>, ParseError> {
+    let Some(parsed) = Uri::parse(uri) else {
+        return Ok(None);
+    };
+    if parsed.scheme != "rtsp" || parsed.rest.is_empty() {
+        return Ok(None);
+    }
+    let Some(tracks) =
+        crate::rtspsrcn::blocking_probe_tracks(parsed.raw, crate::rtspsrcn::DEFAULT_USER_AGENT)
+    else {
+        return Ok(None);
+    };
+    build_rtsp_av_fanout(reg, parsed.raw, &tracks)
 }
 
 /// `file:///path` -> the source matching what the file's header says it is: an
@@ -134,6 +184,7 @@ pub fn v4l2_handler() -> UriSourceFactory {
                 height: Dim::Any,
                 framerate: Rate::Any,
                 interlace: g2g_core::Interlace::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
             },
         ))
     })
@@ -531,6 +582,7 @@ fn build_ps_subpicture_overlay(
                 width: g2g_core::Dim::Fixed(geometry.width),
                 height: g2g_core::Dim::Fixed(geometry.height),
                 framerate: g2g_core::Rate::Fixed(geometry.framerate_q16),
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
             };
             // Deinterlace on the decoder's own planar output, before the RGBA
             // convert the compositor needs (M932; `auto` since M935, weaving
@@ -820,24 +872,34 @@ fn wire_av_fanout(
     demux: g2g_core::graph::Demux,
     av: &[(Caps, bool)],
 ) -> Result<(), ParseError> {
+    let ports: Vec<g2g_core::graph::PadId> = (0..av.len()).map(|i| demux.out(i as u8)).collect();
+    wire_av_ports(reg, graph, &ports, av)
+}
+
+/// Wire one decode branch per producing pad: video to an auto video sink through
+/// the auto-plugged decoder and the deinterlacer, audio through
+/// [`wire_audio_branch`]. Takes the pads themselves rather than a demux, so a
+/// terminal fan-out *source* (`rtspsrcn`, whose pads are its own) gets the same
+/// branches a demux port does.
+#[cfg(feature = "std")]
+fn wire_av_ports(
+    reg: &Registry,
+    graph: &mut Graph<GraphNode>,
+    ports: &[g2g_core::graph::PadId],
+    av: &[(Caps, bool)],
+) -> Result<(), ParseError> {
     for (i, (caps, video)) in av.iter().enumerate() {
+        let port = ports[i];
         if *video {
             let sink = reg
                 .make_element("autovideosink")
                 .ok_or_else(|| ParseError::UnknownElement("autovideosink".to_string()))?;
             let vsnk = graph.add_sink(GraphNodeRef::Element(sink));
             let head = deinterlace_into(graph, vsnk)?;
-            reg.decodebin(
-                graph,
-                demux.out(i as u8),
-                head,
-                caps,
-                &is_raw_video,
-                PLAYBIN_MAX_DEPTH,
-            )
-            .map_err(|e| map_decode_err(caps, e))?;
+            reg.decodebin(graph, port, head, caps, &is_raw_video, PLAYBIN_MAX_DEPTH)
+                .map_err(|e| map_decode_err(caps, e))?;
         } else {
-            wire_audio_branch(reg, graph, demux.out(i as u8), caps)?;
+            wire_audio_branch(reg, graph, port, caps)?;
         }
     }
     Ok(())

@@ -259,6 +259,7 @@ fn any_dmabuf_caps() -> CapsSet {
         height: Dim::Any,
         framerate: Rate::Any,
         interlace: g2g_core::Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     };
     CapsSet::from_alternatives(FORMATS.map(any).to_vec())
 }
@@ -273,6 +274,7 @@ fn caps_of(format: RawVideoFormat, width: u32, height: u32) -> Caps {
         // only satisfies fixation (the transport is rate-agnostic).
         framerate: Rate::Fixed(30 << 16),
         interlace: g2g_core::Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
 }
 

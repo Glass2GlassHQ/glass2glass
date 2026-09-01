@@ -356,7 +356,8 @@ is DESIGN.md §4.9; the patterns an app developer hits most:
 | `appsrc` `need-data`/`push-buffer` | `appsrc channel=<name>` + `register_appsrc` → `AppSrcFeed::push`, or `g2g-bridge`'s `BridgeGraph` for a whole embedded sub-graph |
 | `appsink` `new-sample`/pull | `appsink channel=<name>` + `set_appsink_callback` (callback) or `register_appsink_pull` (pull) |
 | `pad-added` relink (decodebin) | bounded dynamic pads: `decodebin`/`uridecodebin` auto-plug, or `StreamDemux` / `register_demux` with N typed output ports ("dark slots" populated on discovery) |
-| `gst_pad_add_probe(BLOCK)` / `pad_idle` | a `LinkInterceptor` registered on a slot (the probe analog) |
+| `gst_pad_add_probe(BUFFER)` | a `LinkInterceptor` registered on a slot (the probe analog) |
+| `gst_pad_add_probe(BLOCK)` / `pad_idle`, then relink | no block to install: name the position instead (§5.2) |
 | add / remove a branch at runtime | runtime fan-out via `DynamicFanoutHandle::add_branch`, fan-in via `DynamicFaninHandle`; a swappable sub-graph is a `BranchSlot` |
 | enable/disable a branch, A/B switch | `Router` + `Gate` (and their `RouterHandle` / `GateHandle`) |
 | element hot-swap | `ElementSlot::swap` (ArcSwap; no use-after-free with a frame in flight) |
@@ -371,6 +372,47 @@ hot-swap and pad-block choreography that is famously race-prone in GStreamer is
 memory-safe here by construction. Boundary-aligned switches (bitrate / codec
 change at a segment or keyframe) are part of the §4.9 design surface; check what
 is wired today before relying on them.
+
+### 5.2 Pad blocking: changing a graph that is running
+
+The GStreamer recipe for changing a live pipeline is `gst_pad_add_probe` with
+`GST_PAD_PROBE_TYPE_BLOCK`, `gst_element_unlink` / `gst_element_link` inside the
+callback, then removing the probe. The block buys the quiet moment; blocking the
+wrong pad, losing the buffer already in flight, or racing EOS is where dynamic
+pipelines earn their reputation.
+
+g2g has no pad to block, so there is no probe to install. The quiet moment is the
+runner's, taken between packets on the producing side of the edge you name, and
+which handle you want depends on what is changing:
+
+| What you are doing | GStreamer | glass2glass |
+| :--- | :--- | :--- |
+| Swap one element for another in place | block, unlink, add, link, unblock | `ElementSlot::swap` (an atomic store, no block) |
+| Add or drop an element on an edge | block, unlink, add, two links, unblock | `GraphMutator::insert_after` / `remove` |
+| Add or drop a whole branch | block the tee pad, request / release a pad | `DynamicFanoutHandle::add_branch`, `DynamicFaninHandle::add_input` |
+| Watch or drop buffers in passing | `GST_PAD_PROBE_TYPE_BUFFER` | a `LinkInterceptor` on the edge's probe slot |
+
+[`GraphMutator`](g2g-core/src/runtime/mutate.rs) is the direct analog of the
+block-and-relink dance, from `run_graph_mutable` / `run_graph_threaded_mutable`
+alongside the run future: `insert_after("dec", element)` splices onto the edge
+below `dec`, `remove("videoflip0")` lifts the element back out and hands it to
+you. The ordering is the runner's problem rather than yours. An insert needs no
+drain, because the new element is given the very link its producer was pushing
+to, so whatever is queued stays ahead of anything the new element emits; a remove
+closes the element's input and lets it drain through before the bypass takes
+effect. Caps consent is settled before anything moves, and a refusal leaves the
+graph running unchanged, which is the case a mis-ordered `unlink` / `link` turns
+into a stall or a crash. The protocol is DESIGN.md §4.8.6; a working demo that
+splices a `videoflip` in and out of a live RTSP window is
+[examples/g2g-mutate-demo](examples/g2g-mutate-demo).
+
+Know the scope before you port to it: a transform position on a 1:1 edge, between
+a source or transform and a transform or sink. Tee, demux and muxer positions are
+refused (`MutationError::NotMutable`), as are the two ends of the chain, so reach
+for the fan-out / fan-in handles for a branch and `ElementSlot` for an end. A
+removed element is not flushed, so one holding frames internally loses them. Each
+operation lands at the producer's next packet boundary, which means a source that
+has gone quiet defers it rather than failing it.
 
 ---
 

@@ -41,6 +41,7 @@ fn video(fmt: RawVideoFormat, w: u32, h: u32) -> Caps {
         height: Dim::Fixed(h),
         framerate: Rate::Fixed(30 << 16),
         interlace: g2g_core::Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
 }
 
@@ -51,6 +52,7 @@ fn nv12_any() -> Caps {
         height: Dim::Any,
         framerate: Rate::Any,
         interlace: g2g_core::Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
 }
 
@@ -131,7 +133,7 @@ impl AsyncElement for FormatConverter {
                 width,
                 height,
                 framerate,
-                interlace: _,
+                ..
             } = input
             {
                 if nv12_from.contains(format) {
@@ -141,6 +143,7 @@ impl AsyncElement for FormatConverter {
                         height: height.clone(),
                         framerate: framerate.clone(),
                         interlace: g2g_core::Interlace::Any,
+                        colorimetry: g2g_core::Colorimetry::UNKNOWN,
                     });
                 }
             }

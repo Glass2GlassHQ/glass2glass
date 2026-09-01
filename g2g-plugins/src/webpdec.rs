@@ -111,6 +111,7 @@ impl WebPDec {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 
@@ -151,6 +152,7 @@ impl WebPDec {
             RawVideoFormat::Rgba8,
             width as usize,
             height as usize,
+            g2g_core::Colorimetry::UNKNOWN,
         );
         Ok((rgba.into_vec(), width, height))
     }
@@ -179,12 +181,14 @@ impl AsyncElement for WebPDec {
                 width,
                 height,
                 framerate,
+                ..
             } => CapsSet::one(Caps::RawVideo {
                 format: RawVideoFormat::Rgba8,
                 width: width.clone(),
                 height: height.clone(),
                 framerate: framerate.clone(),
                 interlace: g2g_core::Interlace::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
             }),
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
@@ -290,6 +294,7 @@ impl PadTemplates for WebPDec {
                 height: Dim::Any,
                 framerate: Rate::Any,
                 interlace: g2g_core::Interlace::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
             })),
         ])
     }

@@ -96,6 +96,7 @@ impl Media {
                     min_q16: 1 << 16,
                     max_q16: 240 << 16,
                 },
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
             },
             Media::Audio => Caps::Audio {
                 format: AudioFormat::Opus,

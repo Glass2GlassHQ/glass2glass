@@ -32,13 +32,14 @@ use alloc::vec::Vec;
 use g2g_core::element::QosMessage;
 use g2g_core::memory::{DomainSet, MemoryDomainKind};
 use g2g_core::{
-    AsyncElement, BusHandle, Caps, CapsConstraint, CapsSet, ClockSync, ConfigureOutcome, Dim,
-    G2gError, Interlace, MemoryDomain, OutputSink, PipelinePacket, PresentationPacer, PropError,
-    PropValue, PropertySpec, Rate, RawVideoFormat, PACING_PROPERTIES,
+    AsyncElement, BusHandle, Caps, CapsConstraint, CapsSet, ClockSync, Colorimetry,
+    ConfigureOutcome, Dim, G2gError, Interlace, MemoryDomain, OutputSink, PipelinePacket,
+    PresentationPacer, PropError, PropValue, PropertySpec, Rate, RawVideoFormat, PACING_PROPERTIES,
 };
 
 use crate::clock::wait_to_present;
 use crate::gpu::{gpu_err, texture_layout, texture_of, GpuContext, WgpuTextureLayout};
+use crate::yuvmatrix::YuvToRgbWeights;
 
 /// Fullscreen-triangle vertex stage, shared by both fragment stages below. The
 /// UV flips Y so a top-left-origin source (Vello / video) lands top-left on the
@@ -76,38 +77,49 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
 "#;
 
 /// Blit a packed-NV12 R8Uint plane (`width x height*3/2`: Y rows, then
-/// interleaved CbCr), converting BT.601 limited-range YCbCr -> RGB with the same
-/// coefficients the GL sink's shader uses. A uint texture is not filterable, so
-/// this fetches texels instead of sampling; the picture height comes from the
-/// texture (the packed plane is exactly 3/2 of it).
-const FRAGMENT_NV12: &str = r#"
+/// interleaved CbCr), converting YCbCr -> RGB with `colorimetry`'s matrix and
+/// range (the same weights the GL sink's shader gets). A uint texture is not
+/// filterable, so this fetches texels instead of sampling; the picture height
+/// comes from the texture (the packed plane is exactly 3/2 of it).
+fn fragment_nv12(colorimetry: Colorimetry) -> alloc::string::String {
+    let w = YuvToRgbWeights::new(colorimetry);
+    alloc::format!(
+        r#"
 @group(0) @binding(0) var nv12_tex: texture_2d<u32>;
 
-fn plane_value(x: u32, y: u32) -> f32 {
+fn plane_value(x: u32, y: u32) -> f32 {{
     return f32(textureLoad(nv12_tex, vec2<u32>(x, y), 0).r) / 255.0;
-}
+}}
 
 @fragment
-fn fs(in: VsOut) -> @location(0) vec4<f32> {
+fn fs(in: VsOut) -> @location(0) vec4<f32> {{
     let packed = textureDimensions(nv12_tex);
     let luma_height = packed.y * 2u / 3u;
     let x = min(u32(in.uv.x * f32(packed.x)), packed.x - 1u);
     let y = min(u32(in.uv.y * f32(luma_height)), luma_height - 1u);
 
-    let luma = 1.1643 * (plane_value(x, y) - 0.0625);
+    let luma = {luma_gain:?} * (plane_value(x, y) - {luma_floor:?});
     let chroma_x = (x / 2u) * 2u;
     let chroma_y = luma_height + y / 2u;
     let cb = plane_value(chroma_x, chroma_y) - 0.5;
     let cr = plane_value(chroma_x + 1u, chroma_y) - 0.5;
 
     return vec4<f32>(
-        luma + 1.5958 * cr,
-        luma - 0.3917 * cb - 0.8129 * cr,
-        luma + 2.0170 * cb,
+        luma + ({red_from_cr:?}) * cr,
+        luma + ({green_from_cb:?}) * cb + ({green_from_cr:?}) * cr,
+        luma + ({blue_from_cb:?}) * cb,
         1.0,
     );
+}}
+"#,
+        luma_gain = w.luma_gain,
+        luma_floor = w.luma_floor,
+        red_from_cr = w.red_from_cr,
+        green_from_cb = w.green_from_cb,
+        green_from_cr = w.green_from_cr,
+        blue_from_cb = w.blue_from_cb,
+    )
 }
-"#;
 
 /// The offscreen target texture: a render attachment the blit writes, readable
 /// (`COPY_SRC`) and re-samplable.
@@ -269,6 +281,7 @@ fn any_geometry(format: RawVideoFormat) -> Caps {
         height: Dim::Any,
         framerate: Rate::Any,
         interlace: Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
 }
 
@@ -346,6 +359,11 @@ pub struct WgpuSink {
     /// from the texture, so a sink fed RGBA and NV12 in turn needs no rebuild.
     rgba_blit: BlitPipeline,
     nv12_blit: BlitPipeline,
+    /// Colorimetry the NV12 pipeline's shader was built with, so a mid-stream
+    /// refinement rebuilds it.
+    nv12_colorimetry: Colorimetry,
+    /// Format of whatever the blits render into, needed to rebuild a pipeline.
+    target_format: wgpu::TextureFormat,
     sampler: wgpu::Sampler,
     target: Target,
     /// Pixel format + geometry negotiated for the incoming frames, which a
@@ -428,8 +446,10 @@ impl WgpuSink {
                 device,
                 target_format,
                 WgpuTextureLayout::PackedNv12,
-                FRAGMENT_NV12,
+                &fragment_nv12(Colorimetry::UNKNOWN),
             ),
+            nv12_colorimetry: Colorimetry::UNKNOWN,
+            target_format,
             ctx,
             sampler,
             target,
@@ -439,6 +459,21 @@ impl WgpuSink {
             presented: 0,
             pacer: PresentationPacer::new(),
         }
+    }
+
+    /// Rebuild the NV12 blit for a new colorimetry. The weights are compiled
+    /// into the shader, so a mid-stream refinement means a new pipeline.
+    fn set_nv12_colorimetry(&mut self, colorimetry: Colorimetry) {
+        if colorimetry == self.nv12_colorimetry {
+            return;
+        }
+        self.nv12_blit = BlitPipeline::build(
+            &self.ctx.device,
+            self.target_format,
+            WgpuTextureLayout::PackedNv12,
+            &fragment_nv12(colorimetry),
+        );
+        self.nv12_colorimetry = colorimetry;
     }
 
     /// Count of frames presented.
@@ -787,6 +822,9 @@ impl AsyncElement for WgpuSink {
         {
             self.upload = None;
         }
+        if let Caps::RawVideo { colorimetry, .. } = absolute_caps {
+            self.set_nv12_colorimetry(*colorimetry);
+        }
         self.source = Some(source);
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
@@ -955,6 +993,7 @@ mod tests {
             height: g2g_core::Dim::Fixed(h),
             framerate: g2g_core::Rate::Any,
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         })
         .unwrap();
         let frame = wgpu_frame(&ctx, w, h, src, 0);
@@ -997,6 +1036,7 @@ mod tests {
             height: g2g_core::Dim::Fixed(h),
             framerate: g2g_core::Rate::Any,
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         let mut sink = WgpuSink::offscreen(ctx.clone(), w, h);
         sink.configure_pipeline(&caps).unwrap();
@@ -1044,6 +1084,7 @@ mod tests {
             height: g2g_core::Dim::Fixed(h),
             framerate: g2g_core::Rate::Any,
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 
@@ -1062,6 +1103,26 @@ mod tests {
             for _ in 0..w / 2 {
                 bytes.extend_from_slice(&[cb, cr]);
             }
+        }
+        bytes
+    }
+
+    /// A `w` x `h` NV12 frame with a luma triangle wave over one constant chroma
+    /// pair. Flat chroma is deliberate: the shader fetches the chroma pair
+    /// nearest each pixel, so a chroma edge would compare a texel-selection
+    /// difference rather than the colour math.
+    fn nv12_luma_ramp(w: u32, h: u32, cb: u8, cr: u8) -> Vec<u8> {
+        let (w, h) = (w as usize, h as usize);
+        let mut bytes = alloc::vec![0u8; w * h + w * h / 2];
+        for row in 0..h {
+            for col in 0..w {
+                let t = (row * 7 + col * 3) % 510;
+                bytes[row * w + col] = if t < 255 { t } else { 509 - t } as u8;
+            }
+        }
+        for pair in 0..(w * h / 4) {
+            bytes[w * h + pair * 2] = cb;
+            bytes[w * h + pair * 2 + 1] = cr;
         }
         bytes
     }
@@ -1150,6 +1211,61 @@ mod tests {
 
         assert_red_over_blue(&sink.read_target().unwrap(), w, h);
         assert_eq!(sink.presented_count(), 1);
+    }
+
+    /// The shader converts with the caps colorimetry: one NV12 frame rendered
+    /// under the untagged default and under BT.709 must each match the CPU
+    /// reference of that colorimetry (within a per-channel LSB or two, the
+    /// shader working in floats where the reference is 8-bit fixed point), and
+    /// the two renders must differ, which a shader ignoring the caps could not
+    /// manage.
+    #[tokio::test]
+    async fn nv12_shader_converts_with_the_caps_colorimetry() {
+        let Some(ctx) = shared_ctx().await else {
+            std::eprintln!("no wgpu adapter; skipping WgpuSink colorimetry test");
+            return;
+        };
+        let (w, h) = (8u32, 8u32);
+        let bytes = nv12_luma_ramp(w, h, 90, 200);
+        let mut rendered = Vec::new();
+        for colorimetry in [g2g_core::Colorimetry::UNKNOWN, g2g_core::Colorimetry::BT709] {
+            let mut nv12_caps = caps(g2g_core::RawVideoFormat::Nv12, w, h);
+            if let Caps::RawVideo { colorimetry: c, .. } = &mut nv12_caps {
+                *c = colorimetry;
+            }
+            let mut sink = WgpuSink::offscreen(ctx.clone(), w, h);
+            sink.configure_pipeline(&nv12_caps).unwrap();
+            sink.process(
+                PipelinePacket::DataFrame(system_frame(bytes.clone())),
+                &mut NullSink,
+            )
+            .await
+            .unwrap();
+            let out = sink.read_target().unwrap();
+
+            let matrix = crate::yuvmatrix::YuvRgbMatrix::new(colorimetry);
+            let mut max_delta = 0i32;
+            for y in 0..h as usize {
+                for x in 0..w as usize {
+                    let luma = bytes[y * w as usize + x] as i32;
+                    let want = matrix.yuv_to_rgb(luma, 90, 200);
+                    let px = (y * w as usize + x) * 4;
+                    for (channel, reference) in [want.0, want.1, want.2].into_iter().enumerate() {
+                        let got = out[px + channel] as i32;
+                        max_delta = max_delta.max((got - reference).abs());
+                    }
+                }
+            }
+            assert!(
+                max_delta <= 2,
+                "GPU NV12 convert ({colorimetry:?}) is off the CPU reference by {max_delta}"
+            );
+            rendered.push(out);
+        }
+        assert_ne!(
+            rendered[0], rendered[1],
+            "BT.709 caps must render differently from the untagged default"
+        );
     }
 
     /// The zero-copy input the CUDA / GPU-decode bridges emit: an R8Uint packed
@@ -1270,6 +1386,7 @@ mod tests {
             height: g2g_core::Dim::Fixed(h),
             framerate: g2g_core::Rate::Any,
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
 
         // The play anchor stamped at clock 0 makes each frame's deadline its PTS.
@@ -1355,6 +1472,7 @@ mod tests {
             height: Dim::Fixed(h),
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         overlay.configure_pipeline(&rgba_caps).unwrap();
         let mut sink = WgpuSink::offscreen(ctx.clone(), w, h);

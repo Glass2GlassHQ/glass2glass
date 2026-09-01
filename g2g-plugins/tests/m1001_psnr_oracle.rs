@@ -106,6 +106,7 @@ mod av1 {
                 width: Dim::Fixed(WIDTH as u32),
                 height: Dim::Fixed(HEIGHT as u32),
                 framerate: Rate::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
             })
             .expect("rav1d configures");
         let mut sink = CaptureSink::default();
@@ -183,6 +184,7 @@ mod mjpeg {
                 width: Dim::Any,
                 height: Dim::Any,
                 framerate: Rate::Fixed(30 << 16),
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
             })
             .expect("mjpegdec configures");
         let mut sink = CaptureSink::default();

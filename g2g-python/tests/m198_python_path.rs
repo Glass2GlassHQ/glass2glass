@@ -67,6 +67,7 @@ fn python_writes_into_frame_memory_in_place() {
         height: Dim::Fixed(1),
         framerate: Rate::Fixed(30),
         interlace: g2g_core::Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     };
     // Instantiates the Python class under the GIL.
     el.configure_pipeline(&caps).unwrap();
@@ -104,6 +105,7 @@ fn worker_is_reused_across_frames() {
         height: Dim::Fixed(1),
         framerate: Rate::Fixed(30),
         interlace: g2g_core::Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     };
     el.configure_pipeline(&caps).unwrap();
 

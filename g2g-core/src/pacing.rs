@@ -57,6 +57,14 @@ pub const QOS_INTERVAL_PROPERTY: PropertySpec = PropertySpec::new(
 /// [`get_property`](PresentationPacer::get_property).
 pub const PACING_PROPERTIES: &[PropertySpec] = &[MAX_LATENESS_PROPERTY, QOS_INTERVAL_PROPERTY];
 
+/// A clock reading or running time as a signed nanosecond count, so anchor
+/// arithmetic can go below zero. Saturates rather than wrapping: a PTS past
+/// `i64::MAX` is a bogus timestamp, and pinning it at the far end of the
+/// timeline keeps the frame late rather than turning it negative.
+fn as_signed(ns: u64) -> i64 {
+    i64::try_from(ns).unwrap_or(i64::MAX)
+}
+
 /// Per-sink presentation timing: the elected clock, the segment mapping, the
 /// deadline anchor, and the QoS tracker.
 #[derive(Debug, Default)]
@@ -73,7 +81,14 @@ pub struct PresentationPacer {
     /// running_time`. Latched on the first frame (or re-based onto the play
     /// edge), so the stream paces by PTS deltas regardless of how long the
     /// source took to start.
-    anchor_ns: Option<u64>,
+    ///
+    /// Signed because a first-frame anchor is `clock - running_time`, and a
+    /// stream whose PTS epoch is ahead of the elected clock's puts that below
+    /// zero: an audio `DriftClock` reads the playout position (seconds since the
+    /// device opened) while an HLS feed's PTS is the publisher's uptime. Clamping
+    /// it at zero would push every deadline that far into the future and the sink
+    /// would never present.
+    anchor_ns: Option<i64>,
     /// The anchor was set provisionally from a preroll frame consumed during
     /// `Paused`, before `Playing` stamped the base time. The next frame once
     /// `Playing` is anchored re-bases onto the play edge and clears this.
@@ -85,6 +100,11 @@ pub struct PresentationPacer {
     /// The last late-drop report, for the sink's `take_qos` (the upstream
     /// reverse channel); latest wins.
     pending_qos: Option<QosMessage>,
+    /// Deadline the most recent [`judge`](Self::judge) measured against, so a
+    /// sink can score its own presentation error without re-deriving it.
+    /// Cleared by a `judge` that reaches no deadline (unpaced, unset PTS, or a
+    /// clipped frame).
+    last_deadline_ns: Option<u64>,
 }
 
 impl PresentationPacer {
@@ -118,7 +138,7 @@ impl PresentationPacer {
     /// time); [`set_clock_sync`](Self::set_clock_sync) drops the pin, since an
     /// elected clock brings its own epoch.
     pub fn set_anchor_ns(&mut self, anchor_ns: u64) {
-        self.anchor_ns = Some(anchor_ns);
+        self.anchor_ns = Some(as_signed(anchor_ns));
         self.anchor_pre_play = false;
     }
 
@@ -168,17 +188,19 @@ impl PresentationPacer {
         }
         let sync = self.clock_sync.clone()?;
         let rt = self.running_time(pts_ns)?;
-        Some(
-            self.presentation_anchor(&sync, rt)
-                .saturating_add(rt)
-                .saturating_add(sync.path_latency_min_ns()),
-        )
+        let deadline = self
+            .presentation_anchor(&sync, rt)
+            .saturating_add(as_signed(rt))
+            .saturating_add(as_signed(sync.path_latency_min_ns()));
+        // A deadline below the clock's zero is simply already due.
+        Some(deadline.max(0) as u64)
     }
 
     /// Verdict for one frame: how long to hold it, or that it is not to be
     /// presented. `presented` is the sink's running presented count, reported
     /// in [`BusMessage::Qos`](crate::BusMessage::Qos).
     pub fn judge(&mut self, pts_ns: u64, presented: u64) -> Pace {
+        self.last_deadline_ns = None;
         // A frame with no presentation time is due on arrival: never late, so
         // never a QoS drop.
         if pts_ns == FrameTiming::PTS_NONE {
@@ -190,6 +212,7 @@ impl PresentationPacer {
         let Some(deadline) = self.deadline_ns(pts_ns) else {
             return Pace::Drop;
         };
+        self.last_deadline_ns = Some(deadline);
         let now = sync.now_ns();
         // A frame already late beyond the bound is dropped, not presented late,
         // so the sink catches up instead of accumulating lag. The same call
@@ -203,6 +226,15 @@ impl PresentationPacer {
             Some(0) | None => Pace::Now,
             Some(wait) => Pace::Wait(wait),
         }
+    }
+
+    /// The deadline the most recent [`judge`](Self::judge) call measured its
+    /// frame against, on the elected clock. A sink reads it once the frame is on
+    /// screen and subtracts it from the clock then, giving the signed
+    /// presentation error. `None` when that frame had no deadline: unpaced, an
+    /// unset PTS, or clipped outside the segment.
+    pub fn last_deadline_ns(&self) -> Option<u64> {
+        self.last_deadline_ns
     }
 
     /// The QoS report a late drop left for the sink's
@@ -282,7 +314,7 @@ impl PresentationPacer {
     ///   seek target presents immediately, ignoring the stale play-edge base.
     /// - **Otherwise** (slow start, live, or pre-`Playing` preroll): first-frame
     ///   anchor, then pace by PTS deltas.
-    fn presentation_anchor(&mut self, sync: &ClockSync, rt: u64) -> u64 {
+    fn presentation_anchor(&mut self, sync: &ClockSync, rt: u64) -> i64 {
         // A live path anchors on the base time, stamped or eager, never on the
         // first frame (GStreamer's model). A startup stall (decoder init) then
         // makes the opening frames late, rendered immediately, instead of
@@ -290,12 +322,12 @@ impl PresentationPacer {
         // paused, so the file-pacing concern behind first-frame anchoring does
         // not apply to a live path.
         if sync.path_live() {
-            return sync.base_time();
+            return as_signed(sync.base_time());
         }
         // Re-base a provisional preroll anchor onto the play edge once `Playing`
         // has stamped the base time.
         if self.anchor_pre_play && sync.play_anchored() && !self.seek_reanchor {
-            self.anchor_ns = Some(sync.base_time());
+            self.anchor_ns = Some(as_signed(sync.base_time()));
             self.anchor_pre_play = false;
         }
         if let Some(a) = self.anchor_ns {
@@ -305,9 +337,9 @@ impl PresentationPacer {
         // unless a seek just flushed (then present the target now).
         let use_play = sync.play_anchored() && !self.seek_reanchor;
         let anchor = if use_play {
-            sync.base_time()
+            as_signed(sync.base_time())
         } else {
-            sync.now_ns().saturating_sub(rt)
+            as_signed(sync.now_ns()).saturating_sub(as_signed(rt))
         };
         self.anchor_ns = Some(anchor);
         // Mark provisional only if anchored before `Playing` stamped, so it
@@ -510,6 +542,54 @@ mod tests {
         p.flush();
         assert_eq!(p.presentation_anchor(&sync, 200), 7_800);
         assert!(!p.seek_reanchor, "seek re-anchor consumed");
+    }
+
+    #[test]
+    fn a_pts_epoch_ahead_of_the_clock_still_presents_the_first_frame_now() {
+        // An A/V graph slaved to an audio DriftClock reads the playout position
+        // (a few ms in), while an HLS feed's PTS is the publisher's uptime (here
+        // 5286 s). The first-frame anchor goes negative; clamping it at zero
+        // would put every deadline 88 minutes out and nothing would present.
+        let (clock, sync) = manual();
+        clock.store(100_000_000, Ordering::Relaxed);
+        let mut p = PresentationPacer::new();
+        p.set_clock_sync(sync);
+
+        let first_pts = 5_286_000_000_000;
+        assert_eq!(p.judge(first_pts, 0), Pace::Now);
+        assert_eq!(p.last_deadline_ns(), Some(100_000_000));
+        // And the stream paces by PTS deltas from there: 33 ms later is due 33 ms
+        // later on the clock.
+        assert_eq!(p.judge(first_pts + 33_000_000, 1), Pace::Wait(33_000_000));
+    }
+
+    #[test]
+    fn judge_records_the_deadline_it_measured_against() {
+        let (clock, sync) = manual();
+        let mut p = PresentationPacer::new();
+        assert_eq!(p.judge(0, 0), Pace::Now);
+        assert_eq!(
+            p.last_deadline_ns(),
+            None,
+            "unpaced frames have no deadline"
+        );
+
+        p.set_clock_sync(sync);
+        // First frame anchors at clock 0, so PTS 33 ms is due at clock 33 ms.
+        assert_eq!(p.judge(0, 0), Pace::Now);
+        assert_eq!(p.last_deadline_ns(), Some(0));
+        assert_eq!(p.judge(33_000_000, 1), Pace::Wait(33_000_000));
+        assert_eq!(p.last_deadline_ns(), Some(33_000_000));
+
+        // The sink reads the clock once the frame is up: 2 ms past its deadline.
+        clock.store(35_000_000, Ordering::Relaxed);
+        let error = clock.load(Ordering::Relaxed) as i64 - p.last_deadline_ns().unwrap() as i64;
+        assert_eq!(error, 2_000_000);
+
+        // A frame with no deadline of its own clears it rather than leaving the
+        // previous frame's for the sink to misattribute.
+        assert_eq!(p.judge(FrameTiming::PTS_NONE, 2), Pace::Now);
+        assert_eq!(p.last_deadline_ns(), None);
     }
 
     #[test]

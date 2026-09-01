@@ -252,6 +252,7 @@ impl App {
             height: Dim::Fixed(self.height),
             framerate: Rate::Fixed(30 << 16),
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         sink.configure_pipeline(&rgba).expect("sink configure");
         sink

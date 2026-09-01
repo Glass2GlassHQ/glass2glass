@@ -58,15 +58,10 @@ pub(crate) async fn get_response(
     Ok(resp)
 }
 
-/// Fetch `url`, accumulating the body but never allocating past `max` bytes.
-/// The running total over the streamed chunks is the real bound (see
-/// [`get_response`] for the advisory header check).
-pub(crate) async fn get_bytes(
-    client: &reqwest::Client,
-    url: &str,
-    max: usize,
-) -> Result<Vec<u8>, G2gError> {
-    let mut resp = get_response(client, url, max).await?;
+/// Accumulate a response body, never allocating past `max` bytes: the running
+/// total over the streamed chunks is the real bound (see [`get_response`] for
+/// the advisory header check).
+async fn read_capped(mut resp: reqwest::Response, max: usize) -> Result<Vec<u8>, G2gError> {
     let mut body = Vec::new();
     while let Some(chunk) = resp.chunk().await.map_err(net_err)? {
         if body.len().saturating_add(chunk.len()) > max {
@@ -75,6 +70,15 @@ pub(crate) async fn get_bytes(
         body.extend_from_slice(&chunk);
     }
     Ok(body)
+}
+
+/// Fetch `url`, accumulating the body but never allocating past `max` bytes.
+pub(crate) async fn get_bytes(
+    client: &reqwest::Client,
+    url: &str,
+    max: usize,
+) -> Result<Vec<u8>, G2gError> {
+    read_capped(get_response(client, url, max).await?, max).await
 }
 
 /// Fetch the byte sub-range `[offset, offset + length)` of `url` via an HTTP
@@ -112,14 +116,7 @@ pub(crate) async fn get_range_bytes(
     // 200 means the server ignored the Range and sent the whole resource; 206 is
     // exactly the requested span. Either way bound the accumulation by `max`.
     let range_ignored = resp.status() == reqwest::StatusCode::OK;
-    let mut resp = resp;
-    let mut body = Vec::new();
-    while let Some(chunk) = resp.chunk().await.map_err(net_err)? {
-        if body.len().saturating_add(chunk.len()) > max {
-            return Err(body_too_large());
-        }
-        body.extend_from_slice(&chunk);
-    }
+    let mut body = read_capped(resp, max).await?;
     if range_ignored {
         let start = (offset as usize).min(body.len());
         let stop = start.saturating_add(length as usize).min(body.len());
@@ -137,6 +134,33 @@ pub(crate) async fn get_text(
     max: usize,
 ) -> Result<String, G2gError> {
     let bytes = get_bytes(client, url, max).await?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// Capped text fetch with `query` appended to the URL and a hard `timeout`, for
+/// the LL-HLS blocking playlist reload: the `_HLS_msn` / `_HLS_part` delivery
+/// directives ask the server to hold the response open until that partial
+/// segment is published, so the request needs its own deadline rather than the
+/// client's (absent) default. Existing query parameters on `url` are kept, so a
+/// signed CDN playlist URL still works.
+#[cfg(feature = "hls")]
+pub(crate) async fn get_text_query(
+    client: &reqwest::Client,
+    url: &str,
+    query: &[(&str, u64)],
+    timeout: core::time::Duration,
+    max: usize,
+) -> Result<String, G2gError> {
+    let resp = client
+        .get(url)
+        .query(query)
+        .timeout(timeout)
+        .send()
+        .await
+        .map_err(net_err)?
+        .error_for_status()
+        .map_err(net_err)?;
+    let bytes = read_capped(resp, max).await?;
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 

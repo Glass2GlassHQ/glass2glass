@@ -354,6 +354,7 @@ impl AsyncElement for SvtJpegXsEnc {
             width: Dim::Fixed(w),
             height: Dim::Fixed(h),
             framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         })
     }
 
@@ -484,6 +485,7 @@ impl AsyncElement for SvtJpegXsEnc {
                             width: Dim::Fixed(self.width),
                             height: Dim::Fixed(self.height),
                             framerate: Rate::Any,
+                            colorimetry: g2g_core::Colorimetry::UNKNOWN,
                         }))
                         .await?;
                         self.caps_sent = true;
@@ -574,6 +576,7 @@ impl PadTemplates for SvtJpegXsEnc {
             height: Dim::Any,
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         })
         .to_vec();
         Vec::from([
@@ -583,6 +586,7 @@ impl PadTemplates for SvtJpegXsEnc {
                 width: Dim::Any,
                 height: Dim::Any,
                 framerate: Rate::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
             })),
         ])
     }
@@ -690,6 +694,7 @@ impl AsyncElement for SvtJpegXsDec {
                     height: height.clone(),
                     framerate: Rate::Any,
                     interlace: g2g_core::Interlace::Any,
+                    colorimetry: g2g_core::Colorimetry::UNKNOWN,
                 })
             }
             _ => Err(G2gError::CapsMismatch),
@@ -737,6 +742,7 @@ impl AsyncElement for SvtJpegXsDec {
                             height: Dim::Fixed(self.height),
                             framerate: Rate::Any,
                             interlace: g2g_core::Interlace::Any,
+                            colorimetry: g2g_core::Colorimetry::UNKNOWN,
                         }))
                         .await?;
                         self.caps_sent = true;
@@ -859,6 +865,7 @@ impl PadTemplates for SvtJpegXsDec {
             height: Dim::Any,
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         })
         .to_vec();
         Vec::from([
@@ -867,6 +874,7 @@ impl PadTemplates for SvtJpegXsDec {
                 width: Dim::Any,
                 height: Dim::Any,
                 framerate: Rate::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
             })),
             PadTemplate::source(CapsSet::from_alternatives(alts)),
         ])
@@ -945,6 +953,7 @@ mod tests {
             height: Dim::Fixed(h as u32),
             framerate: Rate::Fixed(60 << 16),
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         let input = i422p10_ramp(w, h);
 
@@ -968,6 +977,7 @@ mod tests {
                 width: Dim::Fixed(w as u32),
                 height: Dim::Fixed(h as u32),
                 framerate: Rate::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN
             }
         );
 
@@ -986,6 +996,7 @@ mod tests {
                 height: Dim::Fixed(h as u32),
                 framerate: Rate::Any,
                 interlace: g2g_core::Interlace::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN
             }
         );
 

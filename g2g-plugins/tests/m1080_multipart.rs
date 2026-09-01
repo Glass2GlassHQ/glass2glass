@@ -352,6 +352,7 @@ async fn an_http_server_feeds_the_demuxer() {
     let graph = parse_launch(&reg, &line).expect("the line parses and negotiates");
     let stats = run_graph(graph, &ZeroClock, 4).await;
     let _ = server.kill();
+    let _ = server.wait();
     let _ = std::fs::remove_dir_all(&served);
 
     let stats = stats.expect("the pipeline runs");

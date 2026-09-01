@@ -162,6 +162,7 @@ impl AsyncElement for WebCodecsEncode {
                 height,
                 framerate,
                 interlace: _,
+                ..
             } => (
                 fixed_or_zero(width),
                 fixed_or_zero(height),
@@ -308,11 +309,13 @@ fn derive_output_caps(input: &Caps) -> CapsSet {
             height,
             framerate,
             interlace: _,
+            ..
         } => CapsSet::one(Caps::CompressedVideo {
             codec: VideoCodec::H264,
             width: width.clone(),
             height: height.clone(),
             framerate: framerate.clone(),
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }),
         _ => CapsSet::from_alternatives(Vec::new()),
     }
@@ -325,6 +328,7 @@ fn rgba_any() -> Caps {
         height: Dim::Any,
         framerate: Rate::Any,
         interlace: Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
 }
 
@@ -334,6 +338,7 @@ fn h264_any() -> Caps {
         width: Dim::Any,
         height: Dim::Any,
         framerate: Rate::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
 }
 
@@ -343,6 +348,7 @@ fn h264_caps(w: u32, h: u32, fps: u32) -> Caps {
         width: Dim::Fixed(w),
         height: Dim::Fixed(h),
         framerate: Rate::Fixed(fps << 16),
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
 }
 

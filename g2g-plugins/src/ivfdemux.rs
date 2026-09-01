@@ -91,6 +91,7 @@ impl IvfDemux {
                 min_q16: 1 << 16,
                 max_q16: 240 << 16,
             },
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 
@@ -137,6 +138,7 @@ impl IvfDemux {
                 width: Dim::Fixed(header.width),
                 height: Dim::Fixed(header.height),
                 framerate: Rate::Fixed(fps_q16.max(1)),
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
             }))
             .await?;
             self.caps_sent = true;

@@ -176,6 +176,7 @@ pub(crate) fn video_caps() -> Caps {
             min_q16: 1 << 16,
             max_q16: 240 << 16,
         },
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
 }
 

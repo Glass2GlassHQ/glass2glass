@@ -161,6 +161,7 @@ impl UdpSrc {
             width,
             height,
             framerate,
+            ..
         } = &media.caps
         else {
             return false;
@@ -259,6 +260,7 @@ impl UdpSrc {
             width: Dim::Fixed(self.width),
             height: Dim::Fixed(self.height),
             framerate: Rate::Fixed(self.fps << 16),
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 
@@ -624,6 +626,7 @@ impl PadTemplates for UdpSrc {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }]);
         alternatives.extend(crate::bytestream::carried_bytestream_caps());
         alloc::vec::Vec::from([PadTemplate::source(CapsSet::from_alternatives(

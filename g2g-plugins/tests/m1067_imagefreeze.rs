@@ -88,6 +88,7 @@ fn caps(framerate: Rate) -> Caps {
         height: Dim::Fixed(HEIGHT),
         framerate,
         interlace: Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
 }
 

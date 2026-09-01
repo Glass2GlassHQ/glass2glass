@@ -23,9 +23,9 @@ use alloc::vec::Vec;
 use g2g_core::frame::{Frame, FrameTiming};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
-    OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropValue, PropertySpec,
-    Rate, VideoCodec,
+    AsyncElement, Caps, CapsConstraint, CapsSet, Colorimetry, ConfigureOutcome, Dim,
+    ElementMetadata, G2gError, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
+    PropValue, PropertySpec, Rate, VideoCodec,
 };
 
 use crate::annexb::nal_units;
@@ -37,6 +37,12 @@ use crate::annexb::nal_units;
 /// without limit. A single intra access unit at 4K stays well under it.
 const MAX_REFRAME_BYTES: usize = 16 * 1024 * 1024;
 
+/// Consecutive buffers that must arrive on an access-unit boundary before
+/// re-framing stops holding the trailing access unit back (see
+/// [`NalParse::au_aligned_runs`]). Two, so a byte-stream chunk boundary that
+/// lands on an access-unit start by chance does not switch the mode on its own.
+const AU_ALIGNED_CONFIRMATIONS: u8 = 2;
+
 /// Coded-picture geometry recovered from an SPS (post conformance-window
 /// cropping), plus the framerate when the codec recovers one.
 #[derive(Debug)]
@@ -46,6 +52,9 @@ pub struct SpsGeometry {
     /// Framerate as Q16 fixed-point fps (e.g. from the H.264 VUI `timing_info`),
     /// `None` when the SPS carries none or the codec does not recover it.
     pub framerate: Option<u32>,
+    /// Colour description from the VUI `video_signal_type` block,
+    /// [`Colorimetry::UNKNOWN`] when the SPS carries none.
+    pub colorimetry: Colorimetry,
     /// SPS VUI context an H.264 `pic_timing` SEI needs to be parseable. `None`
     /// for H.265, whose `time_code` SEI is self-contained.
     pub pic_timing: Option<crate::sei::PicTimingContext>,
@@ -117,6 +126,16 @@ pub struct NalParse<C: NalCodec> {
     /// once: a per-frame guess misclassifies a mid-AU Annex-B continuation buffer
     /// (no leading start code) as length-prefixed and mangles it. Re-framing only.
     input_is_annexb: Option<bool>,
+    /// Consecutive input buffers that began exactly where an access unit begins,
+    /// judged with the preceding bytes as context. At
+    /// [`AU_ALIGNED_CONFIRMATIONS`] the re-framer stops holding the trailing
+    /// access unit for the next buffer's start code and emits it with the buffer
+    /// it arrived in, which is the difference between a frame period of latency
+    /// and none on a live stream. Every access-unit-per-buffer upstream
+    /// (`RtspSrc`, the RTP depayloader, the mp4 / fMP4 / TS demuxers) earns it
+    /// within two buffers; a raw byte stream never does, because a chunk
+    /// boundary landing on an access-unit start twice running does not happen.
+    au_aligned_runs: u8,
     /// Parameter-set re-insertion interval (the gst `config-interval`), in
     /// seconds: `0` = never (default), `-1` = prepend the cached parameter sets to
     /// every keyframe AU, `N > 0` = prepend at the first keyframe once `N` seconds
@@ -156,6 +175,7 @@ impl<C: NalCodec> Default for NalParse<C> {
             au_timing: FrameTiming::default(),
             seq: 0,
             input_is_annexb: None,
+            au_aligned_runs: 0,
             config_interval: 0,
             cached: C::PARAM_SET_TYPES.iter().map(|_| Vec::new()).collect(),
             last_config_pts_ns: None,
@@ -292,6 +312,7 @@ impl<C: NalCodec> NalParse<C> {
                 width: Dim::Fixed(info.width),
                 height: Dim::Fixed(info.height),
                 framerate: info.framerate.map_or(Rate::Any, Rate::Fixed),
+                colorimetry: info.colorimetry,
             };
             if self.last_emitted_caps.as_ref() != Some(&new_caps) {
                 out.push(PipelinePacket::CapsChanged(new_caps.clone()))
@@ -304,10 +325,13 @@ impl<C: NalCodec> NalParse<C> {
     }
 
     /// Re-framing path for one input `DataFrame`: normalize to Annex-B,
-    /// accumulate, and emit every access unit whose end is now known (its
-    /// successor's start code has arrived). The trailing, possibly-incomplete AU
-    /// stays buffered until the next call or `Eos`. Non-`System` domains pass
-    /// through unchanged (the byte re-framer only applies to host memory).
+    /// accumulate, and emit every access unit whose end is known. An upstream
+    /// that hands over one access unit per buffer (proved by
+    /// [`au_aligned_runs`](Self::au_aligned_runs)) has its trailing access unit
+    /// emitted with the buffer it arrived in; otherwise the trailing,
+    /// possibly-incomplete AU stays buffered until its successor's start code
+    /// arrives, or `Eos`. Non-`System` domains pass through unchanged (the byte
+    /// re-framer only applies to host memory).
     async fn reframe_frame(
         &mut self,
         frame: Frame,
@@ -327,6 +351,7 @@ impl<C: NalCodec> NalParse<C> {
         if self.accum.is_empty() {
             self.au_timing = frame.timing;
         }
+        let boundary = self.accum.len();
         if is_annexb {
             self.accum.extend_from_slice(bytes);
         } else {
@@ -343,18 +368,44 @@ impl<C: NalCodec> NalParse<C> {
             return Ok(());
         }
 
-        // Access-unit start offsets in the accumulator. Emit each complete AU
-        // (everything before the last start), then retain the trailing AU.
+        // Access-unit start offsets in the accumulator.
         let starts = C::au_starts(&self.accum);
-        if starts.len() < 2 {
-            return Ok(()); // at most one (still-open) AU buffered so far
+        if starts.is_empty() {
+            return Ok(());
         }
+        // Whether this buffer began a new access unit. `au_starts` calls the first
+        // start code of a buffer an AU start unconditionally, so the question only
+        // has an answer with the preceding bytes in front of it, which is why it is
+        // asked here and not on the buffer alone.
+        if boundary > 0 {
+            if starts.contains(&boundary) {
+                self.au_aligned_runs = self.au_aligned_runs.saturating_add(1);
+            } else {
+                self.au_aligned_runs = 0;
+            }
+        }
+
+        // With the upstream's alignment established, everything buffered is
+        // complete. Otherwise the last AU is still open: hold it back.
+        let emit_through = if self.au_aligned_runs >= AU_ALIGNED_CONFIRMATIONS {
+            self.accum.len()
+        } else if starts.len() >= 2 {
+            starts[starts.len() - 1]
+        } else {
+            return Ok(()); // at most one (still-open) AU buffered so far
+        };
+
         let frame_timing = frame.timing;
-        let tail = starts[starts.len() - 1];
-        // Split off the still-open tail, leaving the complete AUs in `done`.
-        let done = self.accum[..tail].to_vec();
-        self.accum.drain(..tail);
-        for w in starts.windows(2) {
+        // Split off what is complete, leaving any still-open tail behind.
+        let done = self.accum[..emit_through].to_vec();
+        self.accum.drain(..emit_through);
+        let mut bounds: Vec<usize> = starts
+            .iter()
+            .copied()
+            .filter(|&s| s < emit_through)
+            .collect();
+        bounds.push(emit_through);
+        for w in bounds.windows(2) {
             let (lo, hi) = (w[0], w[1]);
             // The head AU carries the timing captured when it began; AUs that both
             // begin and end inside this buffer take this buffer's timing.
@@ -365,7 +416,7 @@ impl<C: NalCodec> NalParse<C> {
             };
             self.emit_au(done[lo..hi].to_vec(), timing, out).await?;
         }
-        // The retained tail began within this buffer (its predecessor ended here).
+        // A retained tail began within this buffer (its predecessor ended here).
         self.au_timing = frame_timing;
         Ok(())
     }
@@ -443,6 +494,7 @@ impl<C: NalCodec> NalParse<C> {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 }

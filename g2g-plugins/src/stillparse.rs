@@ -150,6 +150,7 @@ impl<F: StillImageFormat> StillImageParse<F> {
             width,
             height,
             framerate,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 
@@ -410,6 +411,7 @@ mod tests {
             width: Dim::Fixed(WIDTH),
             height: Dim::Fixed(HEIGHT),
             framerate: Rate::Fixed(FRAMERATE_FPS << 16),
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 
@@ -535,6 +537,7 @@ mod tests {
                 width: Dim::Fixed(WIDTH),
                 height: Dim::Fixed(HEIGHT),
                 framerate: Rate::Fixed(FRAMERATE_FPS << 16),
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
             })
             .expect("JPEG at a fixed rate");
         let mut sink = RecordingSink::default();

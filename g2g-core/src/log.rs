@@ -21,17 +21,19 @@
 //! when `level <= threshold`. The common no-override case is checked against an
 //! atomic without locking, so a disabled `g2g_trace!` in a hot loop is cheap.
 //!
-//! **Macros.** [`g2g_error!`] / [`g2g_warn!`] / [`g2g_fixme!`] / [`g2g_info!`] /
-//! [`g2g_debug!`] / [`g2g_log!`] / [`g2g_trace!`] take a [`LogSource`] then a
+//! **Macros.** [`g2g_error!`](crate::g2g_error) / [`g2g_warn!`](crate::g2g_warn) /
+//! [`g2g_fixme!`](crate::g2g_fixme) / [`g2g_info!`](crate::g2g_info) /
+//! [`g2g_debug!`](crate::g2g_debug) / [`g2g_log!`](crate::g2g_log) /
+//! [`g2g_trace!`](crate::g2g_trace) take a [`LogSource`] then a
 //! `format_args!` message; they check the threshold *before* formatting.
-//! [`g2g_log_fields!`] adds structured [`LogField`]s a sink can render or ship
+//! [`g2g_log_fields!`](crate::g2g_log_fields) adds structured [`LogField`]s a sink can render or ship
 //! without re-parsing the message.
 //!
 //! **Timestamps.** Core has no clock, so a record's `timestamp_ns` is filled
 //! from a host-installed [`set_time_source`] (on `std`, [`init_from_env`]
 //! installs the UNIX-epoch one) and is `None` otherwise.
 //!
-//! **Sinks.** [`StderrSink`] (`std`), [`TracingSink`] (`tracing` feature), and
+//! **Sinks.** [`StderrSink`] (`std`), `TracingSink` (`tracing` feature), and
 //! [`RingSink`], a bounded in-memory flight recorder for postmortem dumps.
 
 #[cfg(feature = "std")]

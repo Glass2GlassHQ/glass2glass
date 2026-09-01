@@ -90,7 +90,7 @@ pub trait SourceLoop: ElementBound {
     where
         Self: 'a;
 
-    /// Future returned by [`intercept_caps`]. Async so a source can perform
+    /// Future returned by [`SourceLoop::intercept_caps`]. Async so a source can perform
     /// I/O during negotiation (e.g. RTSP DESCRIBE + SDP parse, hardware
     /// capability probe). Sources that produce caps without I/O can return
     /// [`core::future::Ready`] and the runner pays no cost.
@@ -688,6 +688,9 @@ where
 
     // M12 latency query: fold the configured chain source → sink.
     let latency = LatencyReport::aggregate([source.latency(), AsyncElement::latency(sink)]);
+    // M1123: hand the fold's liveness back down, so an element that tunes for
+    // throughput only when nothing is pacing the stream knows which it is.
+    AsyncElement::configure_liveness(sink, latency.live);
 
     // M12 allocation query: the sink proposes buffers; the source allocates
     // its output pool to match (zero-copy handoff when it can honor them). M351:
@@ -2038,6 +2041,7 @@ where
         None,
         None,
         None,
+        None,
     )
     .await
 }
@@ -2164,6 +2168,9 @@ where
         AsyncElement::latency(transform),
         AsyncElement::latency(sink),
     ]);
+    // M1123: the fold's liveness back down to both interior elements.
+    AsyncElement::configure_liveness(transform, latency.live);
+    AsyncElement::configure_liveness(sink, latency.live);
 
     // M12 clock distribution: elect the pipeline clock from any element that
     // offers one (live source > provider > system fallback) and read its epoch.

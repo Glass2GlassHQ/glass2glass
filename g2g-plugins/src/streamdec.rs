@@ -220,6 +220,8 @@ impl VulkanStreamDecoder {
                     extract_h264_parameter_sets(init).ok_or(VulkanVideoError::UnsupportedStream)?;
                 let width = (ps.sps.pic_width_in_mbs_minus1 + 1) * 16;
                 let height = (ps.sps.pic_height_in_map_units_minus1 + 1) * 16;
+                let (range, coefficients) =
+                    h26x_colorimetry(ps.sps.matrix_coefficients, ps.sps.video_full_range_flag);
                 let session = device.create_h264_session(&ps, width, height)?;
                 let decoder = device.create_h264_dpb_decoder(&session, &ps)?;
                 Ok(Self {
@@ -229,12 +231,8 @@ impl VulkanStreamDecoder {
                     },
                     width,
                     height,
-                    // H.264/H.265 VUI colorimetry is not parsed yet; default to
-                    // BT.601 limited, which matches the decoder's NV12 output and
-                    // is the safe SD default. A fork can override from container
-                    // metadata (the container's sample-entry description).
-                    range: VideoColorRange::Limited,
-                    coefficients: VideoMatrixCoefficients::Bt601,
+                    range,
+                    coefficients,
                     gpu_mode: false,
                     nal_length_size: None,
                     _device: device,
@@ -246,6 +244,8 @@ impl VulkanStreamDecoder {
                 let width = ps.sps.pic_width_in_luma_samples;
                 let height = ps.sps.pic_height_in_luma_samples;
                 let std = to_std_h265_params(&ps);
+                let (range, coefficients) =
+                    h26x_colorimetry(ps.sps.matrix_coefficients, ps.sps.video_full_range_flag);
                 let session = device.create_h265_session(&std, width, height)?;
                 let decoder = device.create_h265_dpb_decoder(&session, &ps)?;
                 Ok(Self {
@@ -255,8 +255,8 @@ impl VulkanStreamDecoder {
                     },
                     width,
                     height,
-                    range: VideoColorRange::Limited,
-                    coefficients: VideoMatrixCoefficients::Bt601,
+                    range,
+                    coefficients,
                     gpu_mode: false,
                     nal_length_size: None,
                     _device: device,
@@ -305,6 +305,8 @@ impl VulkanStreamDecoder {
                     extract_h264_parameter_sets(init).ok_or(VulkanVideoError::UnsupportedStream)?;
                 let width = (ps.sps.pic_width_in_mbs_minus1 + 1) * 16;
                 let height = (ps.sps.pic_height_in_map_units_minus1 + 1) * 16;
+                let (range, coefficients) =
+                    h26x_colorimetry(ps.sps.matrix_coefficients, ps.sps.video_full_range_flag);
                 let session = device.create_h264_session(&ps, width, height)?;
                 let decoder = device.create_h264_dpb_decoder_gpu(&session, &ps)?;
                 Ok(Self {
@@ -314,8 +316,8 @@ impl VulkanStreamDecoder {
                     },
                     width,
                     height,
-                    range: VideoColorRange::Limited,
-                    coefficients: VideoMatrixCoefficients::Bt601,
+                    range,
+                    coefficients,
                     gpu_mode: true,
                     nal_length_size: None,
                     _device: device,
@@ -327,6 +329,8 @@ impl VulkanStreamDecoder {
                 let width = ps.sps.pic_width_in_luma_samples;
                 let height = ps.sps.pic_height_in_luma_samples;
                 let std = to_std_h265_params(&ps);
+                let (range, coefficients) =
+                    h26x_colorimetry(ps.sps.matrix_coefficients, ps.sps.video_full_range_flag);
                 let session = device.create_h265_session(&std, width, height)?;
                 let decoder = device.create_h265_dpb_decoder_gpu(&session, &ps)?;
                 Ok(Self {
@@ -336,8 +340,8 @@ impl VulkanStreamDecoder {
                     },
                     width,
                     height,
-                    range: VideoColorRange::Limited,
-                    coefficients: VideoMatrixCoefficients::Bt601,
+                    range,
+                    coefficients,
                     gpu_mode: true,
                     nal_length_size: None,
                     _device: device,
@@ -711,6 +715,29 @@ fn parse_av1c_config(av1c: &[u8]) -> Option<Vec<u8>> {
 /// Map an AV1 sequence header's color config to (range, coefficients). Matrix
 /// coefficients follow the AV1 / ISO 23091-2 codepoints; unspecified (2) is
 /// guessed as BT.709, matching what players (mpv/VLC) do.
+/// Colorimetry for an H.264 / H.265 stream from its VUI colour description
+/// (parsed into the SPS as CICP codepoints). A concrete matrix is required
+/// here (the converter has to pick one), so an unknown or unmodeled codepoint
+/// falls back to BT.601 limited, the value this adapter always used before the
+/// VUI was consulted.
+fn h26x_colorimetry(
+    matrix_coefficients: u8,
+    video_full_range_flag: bool,
+) -> (VideoColorRange, VideoMatrixCoefficients) {
+    let range = if video_full_range_flag {
+        VideoColorRange::Full
+    } else {
+        VideoColorRange::Limited
+    };
+    let coefficients = match g2g_core::MatrixCoefficients::from_cicp(matrix_coefficients) {
+        g2g_core::MatrixCoefficients::Identity => VideoMatrixCoefficients::Identity,
+        g2g_core::MatrixCoefficients::Bt709 => VideoMatrixCoefficients::Bt709,
+        g2g_core::MatrixCoefficients::Bt601 => VideoMatrixCoefficients::Bt601,
+        _ => VideoMatrixCoefficients::Bt601,
+    };
+    (range, coefficients)
+}
+
 fn av1_colorimetry(seq: &Av1SequenceHeader) -> (VideoColorRange, VideoMatrixCoefficients) {
     let range = if seq.color.color_range {
         VideoColorRange::Full

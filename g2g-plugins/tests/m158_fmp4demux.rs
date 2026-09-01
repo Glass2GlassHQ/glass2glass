@@ -20,6 +20,7 @@ fn h264_caps(w: u32, h: u32) -> Caps {
         width: Dim::Fixed(w),
         height: Dim::Fixed(h),
         framerate: Rate::Fixed(30 << 16),
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
 }
 
@@ -131,6 +132,7 @@ async fn demuxes_fmp4_from_mp4mux_roundtrip() {
             width: Dim::Fixed(64),
             height: Dim::Fixed(48),
             framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN
         }],
         "moov drives one CapsChanged with the real codec + geometry"
     );

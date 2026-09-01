@@ -121,9 +121,9 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::{OwnedCudaBuffer, SystemSlice};
 use g2g_core::{
     AllocationParams, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, CudaKeepAlive,
-    Dim, ElementMetadata, FrameTiming, G2gError, HardwareError, Interlace, MemoryDomain,
-    OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue,
-    PropertySpec, PushOutcome, QosMessage, Rate, RawVideoFormat, VideoCodec,
+    Dim, ElementMetadata, FrameTiming, G2gError, HardwareError, Interlace, LatencyReport,
+    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
+    PropValue, PropertySpec, PushOutcome, QosMessage, Rate, RawVideoFormat, VideoCodec,
 };
 
 /// Cap on pending input-pts -> arrival entries, so frames the decoder drops
@@ -137,6 +137,15 @@ const DEFAULT_MAX_SKIP_FRAMES: u64 = 30;
 
 /// Framerate assumed when the input caps carry none, for turning a QoS report's
 /// lateness into a count of pictures. Q16 fixed-point, as `Rate::Fixed`.
+/// `max-threads` value meaning "let libavcodec choose", which it does per core
+/// with its own cap. gst `avdec_*` spells auto the same way.
+pub const AUTO_MAX_THREADS: u32 = 0;
+
+/// Upper bound accepted for `max-threads`. libavcodec caps its own auto choice
+/// well below this; the limit is here so a launch line cannot ask for a
+/// thread count that is a resource exhaustion rather than a decode setting.
+const MAX_DECODE_THREADS: u32 = 256;
+
 const DEFAULT_FRAMERATE_Q16: u32 = 30 << 16;
 
 const NS_PER_SECOND: u64 = 1_000_000_000;
@@ -281,6 +290,62 @@ fn accepts_output(requested: OutputFormat, format: RawVideoFormat) -> bool {
     }
 }
 
+/// How the software decoder is allowed to spread work over its threads. gst
+/// `avdec_*`'s `thread-type`, same three nicks.
+///
+/// The two methods are not interchangeable. Slice threading splits work inside
+/// one picture and releases it as soon as it is done. Frame threading pipelines
+/// whole pictures across the threads, which is far faster on single-slice
+/// content but makes libavcodec hold `thread_count - 1` pictures before
+/// releasing the first: auto-sized to a 16-core machine that is half a second at
+/// 30 fps. [`FfmpegVideoDec::latency`] reports that delay so a paced sink
+/// buffers for it rather than dropping late frames.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ThreadType {
+    /// Let the element choose, from the liveness the runner hands down
+    /// (`AsyncElement::configure_liveness`): [`Slice`](Self::Slice) off a live
+    /// source, which holds no pictures back, [`Frame`](Self::Frame) otherwise,
+    /// where the throughput is worth the delay. gst's `auto` picks the same way.
+    /// Asking for `frame` or `slice` stays a fixed instruction either way.
+    #[default]
+    Auto,
+    /// `FF_THREAD_FRAME | FF_THREAD_SLICE`, as gst's `frame` sets. Fastest, and
+    /// the only setting that adds output delay.
+    Frame,
+    /// `FF_THREAD_SLICE`. No added delay at any thread count.
+    Slice,
+}
+
+impl ThreadType {
+    /// The `AVCodecContext.thread_type` bits, with `Auto` resolved against the
+    /// path's liveness.
+    fn ff_bits(self, live: bool) -> i32 {
+        match self {
+            Self::Frame => ffmpeg::ffi::FF_THREAD_FRAME | ffmpeg::ffi::FF_THREAD_SLICE,
+            Self::Auto if !live => ffmpeg::ffi::FF_THREAD_FRAME | ffmpeg::ffi::FF_THREAD_SLICE,
+            Self::Auto | Self::Slice => ffmpeg::ffi::FF_THREAD_SLICE,
+        }
+    }
+
+    /// The gst nick, which is also the launch-line spelling.
+    fn nick(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Frame => "frame",
+            Self::Slice => "slice",
+        }
+    }
+
+    fn from_nick(nick: &str) -> Option<Self> {
+        match nick {
+            "auto" => Some(Self::Auto),
+            "frame" => Some(Self::Frame),
+            "slice" => Some(Self::Slice),
+            _ => None,
+        }
+    }
+}
+
 /// libavcodec decoder backend. The element shape (input H.264 Annex-B,
 /// output NV12 / I420 in system memory) is identical across variants —
 /// only the codec used internally and the path through libavcodec change.
@@ -378,6 +443,23 @@ pub struct FfmpegVideoDec {
     /// happily pipelines several frames before releasing the first), off
     /// for software (correctness on B-frame streams).
     low_delay: bool,
+    /// Worker threads the software decoder may spawn (`thread_count`), `0` =
+    /// let libavcodec pick one per core the way it caps that itself. gst
+    /// `avdec_*`'s `max-threads`, same name and same meaning. Only the software
+    /// decoder threads; cuvid and VAAPI decode on the device.
+    max_threads: u32,
+    /// Which threading method the software decoder may use. See [`ThreadType`].
+    thread_type: ThreadType,
+    /// Whether the path this decoder sits on has a live source, from the
+    /// runner's latency fold (M1123). Only [`ThreadType::Auto`] reads it. True
+    /// until the runner says otherwise, so an element driven without one keeps
+    /// the threading that holds no pictures back.
+    live: bool,
+    /// Pictures the opened decoder holds back before releasing the first, read
+    /// off `AVCodecContext.delay` after open. Nonzero only under frame
+    /// threading; folded into [`latency`](Self::latency) so a paced sink
+    /// anchors on it.
+    thread_delay_frames: u32,
     /// M16 workaround #3 Phase A: most recent input caps, from
     /// `PipelinePacket::CapsChanged` or from a mid-stream
     /// `configure_pipeline`. Used to validate the format on
@@ -479,6 +561,10 @@ impl FfmpegVideoDec {
             backend: Backend::Software,
             cuvid_surfaces: None,
             low_delay: false,
+            max_threads: AUTO_MAX_THREADS,
+            thread_type: ThreadType::Auto,
+            live: true,
+            thread_delay_frames: 0,
             input_caps: None,
             pts_to_arrival: alloc::collections::BTreeMap::new(),
             cuda_context: 0,
@@ -627,6 +713,35 @@ impl FfmpegVideoDec {
 
     pub fn low_delay(&self) -> bool {
         self.low_delay
+    }
+
+    /// Worker threads the software decoder may spawn, [`AUTO_MAX_THREADS`] (the
+    /// default) to let libavcodec pick. gst `avdec_*`'s `max-threads`.
+    pub fn with_max_threads(mut self, threads: u32) -> Self {
+        self.max_threads = threads.min(MAX_DECODE_THREADS);
+        self
+    }
+
+    pub fn max_threads(&self) -> u32 {
+        self.max_threads
+    }
+
+    /// Which threading method the software decoder may use, gst `avdec_*`'s
+    /// `thread-type`. See [`ThreadType`] for what each costs.
+    pub fn with_thread_type(mut self, thread_type: ThreadType) -> Self {
+        self.thread_type = thread_type;
+        self
+    }
+
+    pub fn thread_type(&self) -> ThreadType {
+        self.thread_type
+    }
+
+    /// Pictures the opened decoder holds back before releasing the first. Zero
+    /// until the decoder is open, and zero at every thread count unless frame
+    /// threading is in force (see [`ThreadType`]).
+    pub fn thread_delay_frames(&self) -> u32 {
+        self.thread_delay_frames
     }
 
     /// Act on a downstream QoS report by skipping non-reference pictures until
@@ -981,6 +1096,19 @@ impl FfmpegVideoDec {
         .ok_or(G2gError::Hardware(HardwareError::Other))?;
 
         let mut decoder_ctx = codec::decoder::new();
+        // Threading. libavcodec defaults to one thread, so without this the
+        // software decoder runs on a single core. Which method is allowed is
+        // `thread-type`; the default resolves against the path's liveness, to
+        // slice threading (no pictures held back) on a live one (see
+        // `ThreadType`).
+        // SAFETY: `decoder_ctx` is freshly allocated and not yet opened;
+        // `thread_count` and `thread_type` are plain int fields libavcodec reads
+        // at open.
+        unsafe {
+            let raw = decoder_ctx.as_mut_ptr();
+            (*raw).thread_count = self.max_threads as i32;
+            (*raw).thread_type = self.thread_type.ff_bits(self.live);
+        }
         if self.low_delay {
             // `AV_CODEC_FLAG_LOW_DELAY` tells the codec to release each
             // picture as soon as it's decoded rather than holding it for
@@ -1153,11 +1281,16 @@ impl FfmpegVideoDec {
             }
         }
 
-        let decoder = decoder_ctx
+        let mut decoder = decoder_ctx
             .open_as_with(codec, opts)
             .map_err(|_| G2gError::Hardware(HardwareError::Other))?
             .video()
             .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+        // What the codec settled on: with frame threading it holds
+        // `thread_count - 1` pictures, and the latency query has to say so.
+        // SAFETY: an opened `AVCodecContext`; `delay` is a plain int field
+        // libavcodec fills in at open.
+        self.thread_delay_frames = unsafe { (*decoder.as_mut_ptr()).delay.max(0) as u32 };
         self.decoder = Some(decoder);
         Ok(())
     }
@@ -1178,12 +1311,14 @@ impl PadTemplates for FfmpegVideoDec {
             height: Dim::Any,
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         let any_codec = |codec| Caps::CompressedVideo {
             codec,
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         Vec::from([
             PadTemplate::sink(CapsSet::from_alternatives(
@@ -1232,6 +1367,7 @@ impl AsyncElement for FfmpegVideoDec {
                 width: Dim::Any,
                 height: Dim::Any,
                 framerate: Rate::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
             };
             if let Ok(narrowed) = upstream_caps.intersect(&candidate) {
                 return Ok(narrowed);
@@ -1311,6 +1447,24 @@ impl AsyncElement for FfmpegVideoDec {
         )
     }
 
+    /// The pictures frame threading holds back, as time on the negotiated
+    /// framerate. A paced sink that knows about them waits; one that does not
+    /// would call every frame late and drop it. Zero on the default threading,
+    /// and zero until the decoder has opened and reported its `delay`.
+    fn latency(&self) -> LatencyReport {
+        if self.thread_delay_frames == 0 {
+            return LatencyReport::ZERO;
+        }
+        let ns = self.frame_period_ns() * u64::from(self.thread_delay_frames);
+        LatencyReport::buffered(ns, Some(ns))
+    }
+
+    /// M1123: what `thread-type=auto` resolves against. The decoder opens on
+    /// the first frame, so this still lands before the threading is chosen.
+    fn configure_liveness(&mut self, live: bool) {
+        self.live = live;
+    }
+
     fn properties(&self) -> &'static [PropertySpec] {
         FFMPEGDEC_PROPS
     }
@@ -1384,6 +1538,19 @@ impl AsyncElement for FfmpegVideoDec {
                 self.low_delay = value.as_bool().ok_or(PropError::Type)?;
                 Ok(())
             }
+            "max-threads" => {
+                let n = value.as_uint().ok_or(PropError::Type)?;
+                if n > MAX_DECODE_THREADS as u64 {
+                    return Err(PropError::Value);
+                }
+                self.max_threads = n as u32;
+                Ok(())
+            }
+            "thread-type" => {
+                let nick = value.as_str().ok_or(PropError::Type)?;
+                self.thread_type = ThreadType::from_nick(nick).ok_or(PropError::Value)?;
+                Ok(())
+            }
             "qos" => {
                 self.qos = value.as_bool().ok_or(PropError::Type)?;
                 Ok(())
@@ -1432,6 +1599,8 @@ impl AsyncElement for FfmpegVideoDec {
             "cuda-device-id" => Some(crate::cudadeviceid::get_cuda_device_id(self.cuda_device_id)),
             "cuvid-surfaces" => Some(PropValue::Uint(self.cuvid_surfaces.unwrap_or(0) as u64)),
             "low-delay" => Some(PropValue::Bool(self.low_delay)),
+            "max-threads" => Some(PropValue::Uint(self.max_threads as u64)),
+            "thread-type" => Some(PropValue::Str(self.thread_type.nick().into())),
             "qos" => Some(PropValue::Bool(self.qos)),
             "max-skip-frames" => Some(PropValue::Uint(self.max_skip_frames)),
             _ => None,
@@ -1590,6 +1759,12 @@ impl AsyncElement for FfmpegVideoDec {
                 }) => Rate::Fixed(*q),
                 _ => Rate::Fixed(30 << 16),
             };
+            // The bitstream's colour description rides through decode unchanged
+            // (Unknown when the input caps carry none, never a guess here).
+            let out_colorimetry = match &self.input_caps {
+                Some(Caps::CompressedVideo { colorimetry, .. }) => *colorimetry,
+                _ => g2g_core::Colorimetry::UNKNOWN,
+            };
             for d in decoded {
                 self.saw_interlaced |= d.interlaced;
                 // `Any` (not `Progressive`) until the latch trips: it equals the
@@ -1609,6 +1784,7 @@ impl AsyncElement for FfmpegVideoDec {
                     d.height,
                     out_framerate.clone(),
                     interlace,
+                    out_colorimetry,
                 );
                 if self.last_caps.as_ref() != Some(&new_caps) {
                     // M16 workaround #3 Phase A debug assertion: the
@@ -1745,6 +1921,21 @@ static FFMPEGDEC_PROPS: &[PropertySpec] = &[
     )
     .with_default("false"),
     PropertySpec::new(
+        "max-threads",
+        PropKind::Uint,
+        "worker threads the software decoder may spawn (0 = one per core, libavcodec's choice)",
+    )
+    .with_default("0")
+    .with_range("0", "256"),
+    PropertySpec::new(
+        "thread-type",
+        PropKind::Str,
+        "threading method: auto (slice off a live source, frame otherwise) | frame (fastest, \
+         holds max-threads-1 pictures) | slice (holds none)",
+    )
+    .with_enum_values("auto | frame | slice")
+    .with_default("auto"),
+    PropertySpec::new(
         "qos",
         PropKind::Bool,
         "act on downstream QoS reports by skipping non-reference pictures",
@@ -1819,6 +2010,7 @@ fn derive_output_caps(input: &Caps, out: OutputFormat) -> CapsSet {
             width,
             height,
             framerate,
+            colorimetry,
         } if SUPPORTED_CODECS.contains(codec) => {
             let mk = |f: RawVideoFormat| Caps::RawVideo {
                 format: f,
@@ -1826,6 +2018,9 @@ fn derive_output_caps(input: &Caps, out: OutputFormat) -> CapsSet {
                 height: height.clone(),
                 framerate: framerate.clone(),
                 interlace: g2g_core::Interlace::Any,
+                // Decode does not change how the samples map to colour, so the
+                // bitstream's colorimetry rides through onto the raw output.
+                colorimetry: *colorimetry,
             };
             match out {
                 // Auto emits whichever chroma / depth the stream carries;
@@ -1859,6 +2054,7 @@ fn yuv420_caps(
     h: u32,
     framerate: Rate,
     interlace: Interlace,
+    colorimetry: g2g_core::Colorimetry,
 ) -> Caps {
     Caps::RawVideo {
         format: format.raw_format(),
@@ -1866,6 +2062,7 @@ fn yuv420_caps(
         height: Dim::Fixed(h),
         framerate,
         interlace,
+        colorimetry,
     }
 }
 
@@ -2727,6 +2924,7 @@ mod tests {
             width: Dim::Fixed(16),
             height: Dim::Fixed(16),
             framerate: Rate::Fixed(30 << 16),
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         let set = f(&input);
         // I420, I422, I444 are all offered so a flexible downstream links; the
@@ -2742,6 +2940,7 @@ mod tests {
                 height: Dim::Fixed(16),
                 framerate: Rate::Fixed(30 << 16),
                 interlace: g2g_core::Interlace::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
             });
             assert!(!set.intersect(&one).is_empty(), "Auto advertises {fmt:?}");
         }
@@ -2775,6 +2974,7 @@ mod tests {
             width: Dim::Fixed(1920),
             height: Dim::Fixed(1080),
             framerate: Rate::Fixed(30 << 16),
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         let out = f(&h264);
         assert_eq!(
@@ -2785,6 +2985,7 @@ mod tests {
                 height: Dim::Fixed(1080),
                 framerate: Rate::Fixed(30 << 16),
                 interlace: g2g_core::Interlace::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN
             }]
         );
 
@@ -2794,6 +2995,7 @@ mod tests {
             width: Dim::Fixed(1920),
             height: Dim::Fixed(1080),
             framerate: Rate::Fixed(30 << 16),
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         assert_eq!(
             f(&vp9).alternatives(),
@@ -2803,6 +3005,7 @@ mod tests {
                 height: Dim::Fixed(1080),
                 framerate: Rate::Fixed(30 << 16),
                 interlace: g2g_core::Interlace::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN
             }]
         );
         // A non-compressed input has no codec to decode → empty CapsSet.
@@ -2812,6 +3015,7 @@ mod tests {
             height: Dim::Fixed(64),
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         assert!(f(&raw).is_empty());
     }
@@ -2824,7 +3028,8 @@ mod tests {
                 640,
                 480,
                 Rate::Fixed(30 << 16),
-                Interlace::Progressive
+                Interlace::Progressive,
+                g2g_core::Colorimetry::UNKNOWN
             ),
             Caps::RawVideo {
                 format: RawVideoFormat::I420,
@@ -2832,6 +3037,7 @@ mod tests {
                 height: Dim::Fixed(480),
                 framerate: Rate::Fixed(30 << 16),
                 interlace: Interlace::Progressive,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN
             }
         );
     }
@@ -2844,7 +3050,8 @@ mod tests {
                 1280,
                 720,
                 Rate::Fixed(30 << 16),
-                Interlace::Progressive
+                Interlace::Progressive,
+                g2g_core::Colorimetry::UNKNOWN
             ),
             Caps::RawVideo {
                 format: RawVideoFormat::Nv12,
@@ -2852,6 +3059,7 @@ mod tests {
                 height: Dim::Fixed(720),
                 framerate: Rate::Fixed(30 << 16),
                 interlace: Interlace::Progressive,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN
             }
         );
     }
@@ -2882,6 +3090,7 @@ mod tests {
                 width: Dim::Any,
                 height: Dim::Any,
                 framerate: Rate::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
             };
             assert_eq!(dec.intercept_caps(&caps), Ok(caps));
         }
@@ -2892,6 +3101,7 @@ mod tests {
             height: Dim::Any,
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         assert_eq!(dec.intercept_caps(&raw), Err(G2gError::CapsMismatch));
     }
@@ -2904,6 +3114,7 @@ mod tests {
             width: Dim::Fixed(1280),
             height: Dim::Fixed(720),
             framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         assert_eq!(dec.intercept_caps(&proposal), Ok(proposal));
     }
@@ -3034,6 +3245,7 @@ mod tests {
             width: Dim::Fixed(1920),
             height: Dim::Fixed(1080),
             framerate: Rate::Fixed(30 << 16),
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         let CapsConstraint::DerivedOutput(f_sw) = sw.caps_constraint_as_transform() else {
             panic!("expected DerivedOutput");
@@ -3042,6 +3254,136 @@ mod tests {
             panic!("expected DerivedOutput");
         };
         assert_eq!(f_sw(&h264).alternatives(), f_nv(&h264).alternatives());
+    }
+
+    /// Open a software H.264 decoder with the given threading and hand back the
+    /// element, so a test can read what libavcodec settled on: the thread count
+    /// it will run, the pictures it holds back, and the latency that implies.
+    fn opened_with_threading(threads: u32, thread_type: ThreadType) -> FfmpegVideoDec {
+        opened_on_path(threads, thread_type, true)
+    }
+
+    /// As [`opened_with_threading`], with the runner's liveness delivered first,
+    /// the way the latency fold delivers it before the first frame opens the
+    /// decoder.
+    fn opened_on_path(threads: u32, thread_type: ThreadType, live: bool) -> FfmpegVideoDec {
+        let mut dec = FfmpegVideoDec::new()
+            .with_max_threads(threads)
+            .with_thread_type(thread_type);
+        dec.configure_liveness(live);
+        dec.open_decoder(VideoCodec::H264, None, None)
+            .expect("the software H.264 decoder opens");
+        dec
+    }
+
+    /// The opened context's `thread_count`: what libavcodec settled on, not what
+    /// was asked for.
+    fn opened_thread_count(dec: &mut FfmpegVideoDec) -> i32 {
+        let decoder = dec.decoder.as_mut().expect("open_decoder stored it");
+        // SAFETY: an opened `AVCodecContext`; `thread_count` is a plain int
+        // field libavcodec fills in at open.
+        unsafe { (*decoder.as_mut_ptr()).thread_count }
+    }
+
+    /// M1119: the property has to reach libavcodec, not just the struct. Reading
+    /// `thread_count` back off the opened context is the only proof it applied.
+    #[test]
+    fn max_threads_reaches_the_codec_context() {
+        let mut explicit = opened_with_threading(3, ThreadType::Auto);
+        assert_eq!(
+            opened_thread_count(&mut explicit),
+            3,
+            "an explicit count is honoured"
+        );
+        let mut auto = opened_with_threading(AUTO_MAX_THREADS, ThreadType::Auto);
+        assert!(
+            opened_thread_count(&mut auto) > 1,
+            "auto spreads the decode over the cores"
+        );
+    }
+
+    /// M1119 / M1123: on a live path the default threading must not buy
+    /// throughput with latency. libavcodec reports the pictures it will hold
+    /// back in `delay`, and slice threading holds none at any count. This fails
+    /// the moment `auto` starts resolving to frame threading off a live source.
+    #[test]
+    fn the_default_threading_holds_no_pictures_back_on_a_live_path() {
+        for thread_type in [ThreadType::Auto, ThreadType::Slice] {
+            for threads in [1, 2, 3, 8, AUTO_MAX_THREADS] {
+                let dec = opened_on_path(threads, thread_type, true);
+                assert_eq!(
+                    dec.thread_delay_frames(),
+                    0,
+                    "no pictures held back at {thread_type:?} / max-threads={threads}"
+                );
+                assert_eq!(
+                    dec.latency(),
+                    LatencyReport::ZERO,
+                    "so no latency to report"
+                );
+            }
+        }
+    }
+
+    /// M1123: nothing paces a file pipeline, so `auto` there takes the frame
+    /// threading, and declares the pictures that holds.
+    #[test]
+    fn auto_frame_threads_off_a_non_live_path() {
+        for threads in [2u32, 3, 8] {
+            let mut dec = opened_on_path(threads, ThreadType::Auto, false);
+            assert_eq!(
+                opened_thread_count(&mut dec) as u32 - 1,
+                dec.thread_delay_frames(),
+                "frame threading engaged, holding one picture per thread bar the first"
+            );
+            let expected = dec.frame_period_ns() * u64::from(dec.thread_delay_frames());
+            assert_eq!(
+                dec.latency(),
+                LatencyReport::buffered(expected, Some(expected)),
+                "and reported so a paced sink anchors on it"
+            );
+        }
+    }
+
+    /// M1123: only `auto` reads the liveness. `frame` and `slice` are
+    /// instructions and hold whatever they hold on either kind of path.
+    #[test]
+    fn explicit_threading_ignores_liveness() {
+        for live in [true, false] {
+            let slice = opened_on_path(4, ThreadType::Slice, live);
+            assert_eq!(
+                slice.thread_delay_frames(),
+                0,
+                "slice holds no pictures back at live={live}"
+            );
+            let mut frame = opened_on_path(4, ThreadType::Frame, live);
+            assert_eq!(
+                opened_thread_count(&mut frame) as u32 - 1,
+                frame.thread_delay_frames(),
+                "frame holds one per thread bar the first at live={live}"
+            );
+        }
+    }
+
+    /// M1119: opting into frame threading is opting into holding
+    /// `thread_count - 1` pictures, and the element has to declare that, or a
+    /// paced sink calls every frame late and drops it.
+    #[test]
+    fn frame_threading_declares_the_pictures_it_holds() {
+        for threads in [2u32, 3, 8] {
+            let mut dec = opened_with_threading(threads, ThreadType::Frame);
+            assert_eq!(
+                opened_thread_count(&mut dec) as u32 - 1,
+                dec.thread_delay_frames(),
+                "libavcodec holds one picture per thread bar the first"
+            );
+            let expected = dec.frame_period_ns() * u64::from(dec.thread_delay_frames());
+            assert_eq!(
+                dec.latency(),
+                LatencyReport::buffered(expected, Some(expected)),
+                "reported as time on the negotiated framerate"
+            );
+        }
     }
 
     #[test]
@@ -3126,6 +3468,7 @@ mod tests {
             width: Dim::Fixed(1920),
             height: Dim::Fixed(1080),
             framerate: Rate::Fixed(30 << 16),
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         assert_eq!(
             f(&h264).alternatives(),
@@ -3135,6 +3478,7 @@ mod tests {
                 height: Dim::Fixed(1080),
                 framerate: Rate::Fixed(30 << 16),
                 interlace: g2g_core::Interlace::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN
             }]
         );
     }
@@ -3182,6 +3526,7 @@ mod tests {
             width: Dim::Fixed(w),
             height: Dim::Fixed(h),
             framerate: Rate::Fixed(30 << 16),
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 
@@ -3208,6 +3553,7 @@ mod tests {
             height: Dim::Fixed(720),
             framerate: Rate::Fixed(30 << 16),
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         let log = core::cell::RefCell::new(Vec::new());
         let mut rec = RecSink(&log);
@@ -3262,6 +3608,7 @@ mod tests {
             height: Dim::Fixed(480),
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         let log = core::cell::RefCell::new(Vec::new());
         let mut rec = RecSink(&log);

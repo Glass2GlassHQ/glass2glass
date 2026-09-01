@@ -1197,6 +1197,7 @@ mod tests {
             height: g2g_core::Dim::Fixed(h),
             framerate: g2g_core::Rate::Any,
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 
@@ -1237,7 +1238,7 @@ mod tests {
             &mut self,
             _cx: &mut core::task::Context<'_>,
             packet_slot: &mut Option<PipelinePacket>,
-        ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        ) -> core::task::Poll<Result<g2g_core::PushOutcome, G2gError>> {
             packet_slot.take();
             core::task::Poll::Ready(Ok(g2g_core::PushOutcome::Accepted))
         }

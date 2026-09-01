@@ -644,6 +644,7 @@ mod tests {
             width: Dim::Fixed(320),
             height: Dim::Fixed(240),
             framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 

@@ -130,6 +130,7 @@ fn video_caps(codec: VideoCodec, width: Dim, height: Dim) -> Caps {
             min_q16: MIN_RATE_Q16,
             max_q16: MAX_RATE_Q16,
         },
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
 }
 

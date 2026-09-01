@@ -87,6 +87,7 @@ fn h265_caps() -> Caps {
         width: Dim::Any,
         height: Dim::Any,
         framerate: Rate::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
 }
 
@@ -143,6 +144,7 @@ async fn timeoverlay_burns_in_the_carried_timecode() {
         height: Dim::Fixed(32),
         framerate: Rate::Fixed(25 << 16),
         interlace: g2g_core::Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     };
     let tc = parse_timecode(1, 2, 3, 14)
         .await

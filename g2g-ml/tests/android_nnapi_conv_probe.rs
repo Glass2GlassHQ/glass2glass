@@ -140,6 +140,7 @@ async fn conv_runs_through_android_ep_stack() {
         height: Dim::Fixed(4),
         framerate: Rate::Any,
         interlace: Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     };
     let narrowed = inf.intercept_caps(&caps).expect("4x4 accepted");
     inf.configure_pipeline(&narrowed).expect("configure");

@@ -94,6 +94,7 @@ async fn mux_fmp4() -> Vec<u8> {
         width: Dim::Fixed(320),
         height: Dim::Fixed(240),
         framerate: Rate::Fixed(30 << 16),
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     };
     let aac = Caps::Audio {
         format: AudioFormat::Aac,

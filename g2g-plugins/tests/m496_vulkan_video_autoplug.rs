@@ -23,6 +23,7 @@ fn compressed_in(codec: VideoCodec) -> Caps {
         width: Dim::Fixed(640),
         height: Dim::Fixed(480),
         framerate: Rate::Fixed(30 << 16),
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
 }
 

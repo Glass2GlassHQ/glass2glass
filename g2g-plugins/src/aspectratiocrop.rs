@@ -201,7 +201,7 @@ impl AsyncElement for AspectRatioCrop {
                 width: Dim::Fixed(w),
                 height: Dim::Fixed(h),
                 framerate,
-                interlace: _,
+                ..
             } if FORMATS.contains(format) => {
                 let (out_w, out_h) = cropped_dims(aspect, *format, *w, *h);
                 CapsSet::one(Caps::RawVideo {
@@ -210,6 +210,7 @@ impl AsyncElement for AspectRatioCrop {
                     height: Dim::Fixed(out_h),
                     framerate: framerate.clone(),
                     interlace: g2g_core::Interlace::Any,
+                    colorimetry: g2g_core::Colorimetry::UNKNOWN,
                 })
             }
             _ => CapsSet::from_alternatives(Vec::new()),

@@ -12640,16 +12640,20 @@ impl VideoColorSpace {
         full_range: bool,
         height: u32,
     ) -> Self {
-        let matrix = match matrix_coefficients {
-            1 => ColorMatrix::Bt709,
-            9 => ColorMatrix::Bt2020Ncl,
-            5 | 6 => ColorMatrix::Bt601,
+        // The codepoint -> vocabulary mapping is g2g-core's (the same one caps
+        // colorimetry uses); this only resolves its wildcards to the concrete
+        // conversion the shader needs.
+        let matrix = match g2g_core::MatrixCoefficients::from_cicp(matrix_coefficients) {
+            g2g_core::MatrixCoefficients::Bt709 => ColorMatrix::Bt709,
+            g2g_core::MatrixCoefficients::Bt2020Ncl => ColorMatrix::Bt2020Ncl,
+            g2g_core::MatrixCoefficients::Bt601 => ColorMatrix::Bt601,
             _ if height >= 720 => ColorMatrix::Bt709,
             _ => ColorMatrix::Bt601,
         };
-        let transfer = match transfer_characteristics {
-            16 => TransferFunction::Pq,
-            18 => TransferFunction::Hlg,
+        let transfer = match g2g_core::TransferCharacteristics::from_cicp(transfer_characteristics)
+        {
+            g2g_core::TransferCharacteristics::Pq => TransferFunction::Pq,
+            g2g_core::TransferCharacteristics::Hlg => TransferFunction::Hlg,
             _ => TransferFunction::Sdr,
         };
         Self {
@@ -13274,6 +13278,10 @@ pub struct VulkanVideoDec {
     /// What the open device was opened for, so a later `configure_pipeline` with
     /// the same codec on the same GPU keeps it.
     opened_device: Option<(VideoCodec, Option<u32>)>,
+    /// Colour description from the stream's parameter sets (H.26x VUI / AV1
+    /// `color_config`), exported into the output caps. `UNKNOWN` until the
+    /// first parameter sets parse.
+    stream_colorimetry: g2g_core::Colorimetry,
 }
 
 impl core::fmt::Debug for VulkanVideoDec {
@@ -13318,6 +13326,7 @@ impl VulkanVideoDec {
             device_index: None,
             dpb_slots: None,
             opened_device: None,
+            stream_colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 
@@ -13399,94 +13408,113 @@ impl VulkanVideoDec {
         // sets re-sent on a keyframe) keep the session, any change rebuilds.
         let fp = parameter_set_fingerprint(self.codec, au);
 
-        let (session, decoder, emit_wgpu, geometry, reorder_bound) = match self.codec {
-            VideoCodec::H264 => {
-                let Some(ps) = extract_h264_parameter_sets(au) else {
-                    // No parameter sets here: keep decoding if already built (a
-                    // non-keyframe AU), else wait for the keyframe that carries them.
-                    return Ok(built);
-                };
-                let width = (ps.sps.pic_width_in_mbs_minus1 + 1) * 16;
-                let height = (ps.sps.pic_height_in_map_units_minus1 + 1) * 16;
-                if built && self.ps_fingerprint == fp {
-                    return Ok(true);
+        let (session, decoder, emit_wgpu, geometry, reorder_bound, stream_colorimetry) =
+            match self.codec {
+                VideoCodec::H264 => {
+                    let Some(ps) = extract_h264_parameter_sets(au) else {
+                        // No parameter sets here: keep decoding if already built (a
+                        // non-keyframe AU), else wait for the keyframe that carries them.
+                        return Ok(built);
+                    };
+                    let width = (ps.sps.pic_width_in_mbs_minus1 + 1) * 16;
+                    let height = (ps.sps.pic_height_in_map_units_minus1 + 1) * 16;
+                    if built && self.ps_fingerprint == fp {
+                        return Ok(true);
+                    }
+                    let session = device
+                        .create_h264_session(&ps, width, height)
+                        .map_err(decode_refused)?;
+                    let (decoder, emit_wgpu) = Self::build_with_fallback(
+                        want_gpu,
+                        || device.create_h264_dpb_decoder_gpu(&session, &ps),
+                        || device.create_h264_dpb_decoder(&session, &ps),
+                    )?;
+                    (
+                        DecodeSessionKind::H264(session),
+                        DpbDecoderKind::H264(decoder),
+                        emit_wgpu,
+                        (width, height),
+                        ps.sps.max_num_reorder_frames.map(usize::from),
+                        g2g_core::Colorimetry::from_cicp(
+                            ps.sps.color_primaries,
+                            ps.sps.transfer_characteristics,
+                            ps.sps.matrix_coefficients,
+                            ps.sps.video_full_range_flag,
+                        ),
+                    )
                 }
-                let session = device
-                    .create_h264_session(&ps, width, height)
-                    .map_err(decode_refused)?;
-                let (decoder, emit_wgpu) = Self::build_with_fallback(
-                    want_gpu,
-                    || device.create_h264_dpb_decoder_gpu(&session, &ps),
-                    || device.create_h264_dpb_decoder(&session, &ps),
-                )?;
-                (
-                    DecodeSessionKind::H264(session),
-                    DpbDecoderKind::H264(decoder),
-                    emit_wgpu,
-                    (width, height),
-                    ps.sps.max_num_reorder_frames.map(usize::from),
-                )
-            }
-            VideoCodec::H265 => {
-                let Some(ps) = extract_h265_parameter_sets(au) else {
-                    return Ok(built);
-                };
-                let width = ps.sps.pic_width_in_luma_samples;
-                let height = ps.sps.pic_height_in_luma_samples;
-                if built && self.ps_fingerprint == fp {
-                    return Ok(true);
+                VideoCodec::H265 => {
+                    let Some(ps) = extract_h265_parameter_sets(au) else {
+                        return Ok(built);
+                    };
+                    let width = ps.sps.pic_width_in_luma_samples;
+                    let height = ps.sps.pic_height_in_luma_samples;
+                    if built && self.ps_fingerprint == fp {
+                        return Ok(true);
+                    }
+                    // The SPS's own reorder bound for the stream's top temporal layer
+                    // (the sub-layer ordering parse fills at least that entry).
+                    let reorder_bound = Some(usize::from(
+                        ps.sps.max_num_reorder_pics[usize::from(ps.sps.sps_max_sub_layers_minus1)],
+                    ));
+                    let std = to_std_h265_params(&ps);
+                    let session = device
+                        .create_h265_session(&std, width, height)
+                        .map_err(decode_refused)?;
+                    let (decoder, emit_wgpu) = Self::build_with_fallback(
+                        want_gpu,
+                        || device.create_h265_dpb_decoder_gpu(&session, &ps),
+                        || device.create_h265_dpb_decoder(&session, &ps),
+                    )?;
+                    (
+                        DecodeSessionKind::H265(session),
+                        DpbDecoderKind::H265(decoder),
+                        emit_wgpu,
+                        (width, height),
+                        reorder_bound,
+                        g2g_core::Colorimetry::from_cicp(
+                            ps.sps.color_primaries,
+                            ps.sps.transfer_characteristics,
+                            ps.sps.matrix_coefficients,
+                            ps.sps.video_full_range_flag,
+                        ),
+                    )
                 }
-                // The SPS's own reorder bound for the stream's top temporal layer
-                // (the sub-layer ordering parse fills at least that entry).
-                let reorder_bound = Some(usize::from(
-                    ps.sps.max_num_reorder_pics[usize::from(ps.sps.sps_max_sub_layers_minus1)],
-                ));
-                let std = to_std_h265_params(&ps);
-                let session = device
-                    .create_h265_session(&std, width, height)
-                    .map_err(decode_refused)?;
-                let (decoder, emit_wgpu) = Self::build_with_fallback(
-                    want_gpu,
-                    || device.create_h265_dpb_decoder_gpu(&session, &ps),
-                    || device.create_h265_dpb_decoder(&session, &ps),
-                )?;
-                (
-                    DecodeSessionKind::H265(session),
-                    DpbDecoderKind::H265(decoder),
-                    emit_wgpu,
-                    (width, height),
-                    reorder_bound,
-                )
-            }
-            VideoCodec::Av1 => {
-                let Some(seq) = extract_av1_sequence_header(au) else {
-                    return Ok(built);
-                };
-                let width = seq.max_frame_width_minus_1 + 1;
-                let height = seq.max_frame_height_minus_1 + 1;
-                if built && self.ps_fingerprint == fp {
-                    return Ok(true);
+                VideoCodec::Av1 => {
+                    let Some(seq) = extract_av1_sequence_header(au) else {
+                        return Ok(built);
+                    };
+                    let width = seq.max_frame_width_minus_1 + 1;
+                    let height = seq.max_frame_height_minus_1 + 1;
+                    if built && self.ps_fingerprint == fp {
+                        return Ok(true);
+                    }
+                    let std = to_std_av1_seq_header(&seq);
+                    let session = device
+                        .create_av1_session(&std, width, height)
+                        .map_err(decode_refused)?;
+                    let (decoder, emit_wgpu) = Self::build_with_fallback(
+                        want_gpu,
+                        || device.create_av1_dpb_decoder_gpu(&session, &seq),
+                        || device.create_av1_dpb_decoder(&session, &seq),
+                    )?;
+                    (
+                        DecodeSessionKind::Av1(session),
+                        DpbDecoderKind::Av1(decoder),
+                        emit_wgpu,
+                        (width, height),
+                        // AV1 output order is the op order, no reorder buffer.
+                        None,
+                        g2g_core::Colorimetry::from_cicp(
+                            seq.color.color_primaries,
+                            seq.color.transfer_characteristics,
+                            seq.color.matrix_coefficients,
+                            seq.color.color_range,
+                        ),
+                    )
                 }
-                let std = to_std_av1_seq_header(&seq);
-                let session = device
-                    .create_av1_session(&std, width, height)
-                    .map_err(decode_refused)?;
-                let (decoder, emit_wgpu) = Self::build_with_fallback(
-                    want_gpu,
-                    || device.create_av1_dpb_decoder_gpu(&session, &seq),
-                    || device.create_av1_dpb_decoder(&session, &seq),
-                )?;
-                (
-                    DecodeSessionKind::Av1(session),
-                    DpbDecoderKind::Av1(decoder),
-                    emit_wgpu,
-                    (width, height),
-                    // AV1 output order is the op order, no reorder buffer.
-                    None,
-                )
-            }
-            _ => return Err(G2gError::CapsMismatch),
-        };
+                _ => return Err(G2gError::CapsMismatch),
+            };
 
         // Flush the outgoing decoder's pipelined tail before it drops, so a
         // mid-stream reconfig does not lose the frames still in its ring (`process`
@@ -13517,6 +13545,7 @@ impl VulkanVideoDec {
         self.session = Some(session);
         self.coded_geometry = Some(geometry);
         self.ps_fingerprint = fp;
+        self.stream_colorimetry = stream_colorimetry;
         Ok(true)
     }
 
@@ -13554,6 +13583,9 @@ impl VulkanVideoDec {
             height: Dim::Fixed(f.height),
             framerate: self.framerate.clone(),
             interlace: g2g_core::Interlace::Any,
+            // NV12 leaves the decoder unconverted, so the stream's own colour
+            // description applies to these samples.
+            colorimetry: self.stream_colorimetry,
         };
         if self.last_caps.as_ref() != Some(&caps) {
             out.push(PipelinePacket::CapsChanged(caps.clone())).await?;
@@ -13651,6 +13683,15 @@ impl VulkanVideoDec {
                 height: Dim::Fixed(h),
                 framerate: self.framerate.clone(),
                 interlace: g2g_core::Interlace::Any,
+                // The ycbcr pass already applied the stream's matrix + range
+                // (passthrough transfer), so the RGBA is full-range GBR with
+                // the stream's transfer and primaries.
+                colorimetry: g2g_core::Colorimetry {
+                    range: g2g_core::ColorRange::Full,
+                    matrix: g2g_core::MatrixCoefficients::Identity,
+                    transfer: self.stream_colorimetry.transfer,
+                    primaries: self.stream_colorimetry.primaries,
+                },
             };
             if self.last_caps.as_ref() != Some(&caps) {
                 out.push(PipelinePacket::CapsChanged(caps.clone())).await?;
@@ -13678,6 +13719,7 @@ impl PadTemplates for VulkanVideoDec {
             height: Dim::Any,
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         alloc::vec::Vec::from([
             // Any of the codecs this element decodes (H.264 / H.265 / AV1).
@@ -13689,6 +13731,7 @@ impl PadTemplates for VulkanVideoDec {
                         width: Dim::Any,
                         height: Dim::Any,
                         framerate: Rate::Any,
+                        colorimetry: g2g_core::Colorimetry::UNKNOWN,
                     })
                     .collect(),
             )),
@@ -13725,6 +13768,7 @@ impl AsyncElement for VulkanVideoDec {
                     width: Dim::Any,
                     height: Dim::Any,
                     framerate: Rate::Any,
+                    colorimetry: g2g_core::Colorimetry::UNKNOWN,
                 };
                 upstream_caps
                     .intersect(&candidate)
@@ -13748,12 +13792,14 @@ impl AsyncElement for VulkanVideoDec {
                 width,
                 height,
                 framerate,
+                ..
             } if VULKAN_DEC_CODECS.contains(codec) => CapsSet::one(Caps::RawVideo {
                 format,
                 width: width.clone(),
                 height: height.clone(),
                 framerate: framerate.clone(),
                 interlace: g2g_core::Interlace::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
             }),
             _ => CapsSet::from_alternatives(alloc::vec::Vec::new()),
         }))

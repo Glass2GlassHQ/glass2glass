@@ -401,6 +401,7 @@ pub fn default_registry() -> Registry {
             height: Dim::Any,
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         },
         // num-buffers defaults to forever (the property's documented `-1`),
         // matching gst videotestsrc; a launch line bounds it with `num-buffers=N`.
@@ -464,6 +465,7 @@ pub fn default_registry() -> Registry {
                 height: Dim::Fixed(480),
                 framerate: Rate::Any,
                 interlace: g2g_core::Interlace::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
             },
             || Box::new(Camera2Src::new(640, 480, u64::MAX)),
         )
@@ -535,6 +537,7 @@ pub fn default_registry() -> Registry {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         },
         || Box::new(crate::multifilesrc::MultiFileSrc::new("")),
     ));
@@ -548,6 +551,7 @@ pub fn default_registry() -> Registry {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Fixed(IMAGE_SEQUENCE_FPS << 16),
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         },
         || {
             Box::new(
@@ -1225,6 +1229,7 @@ pub fn default_registry() -> Registry {
                 height: Dim::Fixed(240),
                 framerate: Rate::Fixed(30 << 16),
                 interlace: g2g_core::Interlace::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
             },
         ))
     }));
@@ -1516,8 +1521,14 @@ fn register_uri_handlers(reg: &mut Registry) {
     }
     #[cfg(feature = "udp-ingress")]
     reg.register_uri(crate::uridecodebin::udp_handler());
+    // rtsp:// fan-out (M1122): DESCRIBE the stream and, when it carries audio as
+    // well as video, play both off one session; the rtsp_handler is the
+    // video-only fallback it declines to.
     #[cfg(feature = "rtsp")]
-    reg.register_uri(crate::uridecodebin::rtsp_handler());
+    {
+        reg.register_uri(crate::uridecodebin::rtsp_handler());
+        reg.register_playbin(crate::uridecodebin::rtsp_playbin);
+    }
     #[cfg(all(target_os = "linux", feature = "v4l2"))]
     reg.register_uri(crate::uridecodebin::v4l2_handler());
 }
@@ -1920,6 +1931,7 @@ fn register_autoplug_candidates(reg: &mut Registry) {
                 height: Dim::Fixed(480),
                 framerate: Rate::Fixed(30 << 16),
                 interlace: g2g_core::Interlace::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
             },
             || Box::new(crate::avf::AvfVideoSrc::new(u64::MAX)),
         )
@@ -1952,6 +1964,7 @@ fn register_autoplug_candidates(reg: &mut Registry) {
                 height: Dim::Fixed(1080),
                 framerate: Rate::Fixed(30 << 16),
                 interlace: g2g_core::Interlace::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
             },
             || Box::new(crate::sck::ScreenCaptureSrc::new(u64::MAX)),
         )
@@ -1971,6 +1984,7 @@ fn register_autoplug_candidates(reg: &mut Registry) {
                 height: Dim::Fixed(480),
                 framerate: Rate::Fixed(30 << 16),
                 interlace: g2g_core::Interlace::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
             },
             || Box::new(crate::mfvideosrc::MfVideoSrc::new()),
         )
@@ -2228,6 +2242,7 @@ pub static FEATURE_GATED_ELEMENTS: &[FeatureGatedElement] = &{
         "rav1ddec" => "rav1d";
         "vulkanvideodec" => "vulkan-video";
         "rtspsrc" => "rtsp";
+        "rtspsrcn" => "rtsp";
         "onvifsrc" => "onvif";
         "udpsrc" => "udp-ingress";
         "udpsink" => "udp-egress";
@@ -2361,6 +2376,15 @@ fn register_feature_gated(reg: &mut Registry) {
         Box::new(crate::script::ScriptRouter::new(outputs))
     }));
 
+    // Timestamp burn-in (M1114): `videotestsrc ! timestampburn ! x264enc` marks
+    // each frame with the CLOCK_MONOTONIC time it left, for the same-metric
+    // latency bench to read back after the stream has crossed a network.
+    #[cfg(all(unix, feature = "latency-bench"))]
+    reg.register_launch(LaunchFactory::of::<crate::timestampburn::TimestampBurn>(
+        "timestampburn",
+        || Box::new(crate::timestampburn::TimestampBurn::new()),
+    ));
+
     // Codecs (cross-platform).
     reg.register_launch(LaunchFactory::of::<MulawEnc>("mulawenc", || {
         Box::new(MulawEnc::new())
@@ -2439,8 +2463,17 @@ fn register_feature_gated(reg: &mut Registry) {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         },
         || Box::new(RtspSrc::new("")),
+    ));
+    // Multi-track playback of the same stream (M1122): one session, video on the
+    // first linked pad and the SDP's audio on the second
+    // (`rtspsrcn name=s location=...  s. ! ...  s. ! ...`).
+    #[cfg(feature = "rtsp")]
+    reg.register_fanout_src(g2g_core::runtime::FanoutSrcFactory::new(
+        "rtspsrcn",
+        |outputs| Box::new(crate::rtspsrcn::RtspSrcN::new("").with_outputs(outputs)),
     ));
     // ONVIF camera source: set the device service URL + account via
     // `onvifsrc location=... user=... password=...`. The H.264 output caps
@@ -2453,6 +2486,7 @@ fn register_feature_gated(reg: &mut Registry) {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         },
         || Box::new(OnvifSrc::new("")),
     ));
@@ -2495,6 +2529,7 @@ fn register_feature_gated(reg: &mut Registry) {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         },
         || Box::new(UdpSrc::new("0.0.0.0:5004".parse().unwrap())),
     ));
@@ -2509,6 +2544,7 @@ fn register_feature_gated(reg: &mut Registry) {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         },
         || Box::new(WebRtcWhepSrc::new("")),
     ));
@@ -2580,6 +2616,7 @@ fn register_feature_gated(reg: &mut Registry) {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         },
         || Box::new(RtspServerSrc::new("0.0.0.0:8554".parse().unwrap())),
     ));
@@ -2619,6 +2656,7 @@ fn register_feature_gated(reg: &mut Registry) {
             height: Dim::Any,
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         },
         || Box::new(RemoteSrc::new("0.0.0.0:9600".parse().unwrap())),
     ));
@@ -2638,6 +2676,7 @@ fn register_feature_gated(reg: &mut Registry) {
             height: Dim::Any,
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         },
         || Box::new(RemoteWsSrc::new("0.0.0.0:9601".parse().unwrap())),
     ));
@@ -2664,6 +2703,7 @@ fn register_feature_gated(reg: &mut Registry) {
             height: Dim::Any,
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         },
         || Box::new(RemoteWtSrc::new("0.0.0.0:9603".parse().unwrap())),
     ));
@@ -2718,6 +2758,7 @@ fn register_feature_gated(reg: &mut Registry) {
                 height: Dim::Any,
                 framerate: Rate::Any,
                 interlace: g2g_core::Interlace::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
             },
             || Box::new(LocalCudaSrc::new("/tmp/g2g-localcuda.sock")),
         )
@@ -2740,6 +2781,7 @@ fn register_feature_gated(reg: &mut Registry) {
                 height: Dim::Any,
                 framerate: Rate::Any,
                 interlace: g2g_core::Interlace::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
             },
             || Box::new(DmaBufSrc::new("/tmp/g2g-dmabuf.sock")),
         )
@@ -2803,6 +2845,7 @@ fn register_feature_gated(reg: &mut Registry) {
                 height: Dim::Any,
                 framerate: Rate::Any,
                 interlace: g2g_core::Interlace::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
             },
             || Box::new(V4l2Src::new("/dev/video0")),
         )
@@ -2820,6 +2863,7 @@ fn register_feature_gated(reg: &mut Registry) {
                 height: Dim::Any,
                 framerate: Rate::Any,
                 interlace: g2g_core::Interlace::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
             },
             || Box::new(LibCameraSrc::new()),
         )
@@ -3069,6 +3113,7 @@ fn register_feature_gated(reg: &mut Registry) {
                 height: Dim::Any,
                 framerate: Rate::Any,
                 interlace: g2g_core::Interlace::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
             },
             || Box::new(PipeWireVideoSrc::new()),
         )
@@ -3119,6 +3164,7 @@ mod domain_aware_autoplug_tests {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 

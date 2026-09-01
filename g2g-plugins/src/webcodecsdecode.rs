@@ -288,6 +288,7 @@ impl AsyncElement for WebCodecsDecode {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         upstream_caps.intersect(&supported)
     }
@@ -411,6 +412,7 @@ impl PadTemplates for WebCodecsDecode {
                 width: Dim::Any,
                 height: Dim::Any,
                 framerate: Rate::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
             })
             .collect();
         let rgba = Caps::RawVideo {
@@ -419,6 +421,7 @@ impl PadTemplates for WebCodecsDecode {
             height: Dim::Any,
             framerate: Rate::Any,
             interlace: Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         Vec::from([
             PadTemplate::sink(CapsSet::from_alternatives(compressed)),
@@ -493,6 +496,7 @@ fn rgba_caps(w: u32, h: u32) -> Caps {
         height: Dim::Fixed(h),
         framerate: Rate::Any,
         interlace: Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
 }
 
@@ -514,12 +518,14 @@ fn derive_output_caps(input: &Caps) -> CapsSet {
             width,
             height,
             framerate,
+            ..
         } if SUPPORTED_CODECS.contains(codec) => CapsSet::one(Caps::RawVideo {
             format: RawVideoFormat::Rgba8,
             width: width.clone(),
             height: height.clone(),
             framerate: framerate.clone(),
             interlace: Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }),
         _ => CapsSet::from_alternatives(Vec::new()),
     }

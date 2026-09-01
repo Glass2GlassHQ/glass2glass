@@ -103,6 +103,7 @@ fn caps(format: RawVideoFormat, w: usize, h: usize) -> Caps {
         height: Dim::Fixed(h as u32),
         framerate: Rate::Fixed(FPS_Q16),
         interlace: Interlace::Interleaved,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
 }
 
@@ -387,6 +388,7 @@ async fn all_fields_doubles_the_declared_framerate() {
             height: Dim::Fixed(H as u32),
             framerate: Rate::Fixed(50 << 16),
             interlace: Interlace::Progressive,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN
         }]
     );
 
@@ -408,6 +410,7 @@ async fn all_fields_doubles_the_declared_framerate() {
             height: Dim::Fixed(H as u32),
             framerate: Rate::Fixed(FPS_Q16),
             interlace: Interlace::Progressive,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN
         }],
         "the default rate is untouched"
     );
@@ -434,6 +437,7 @@ fn the_derived_output_caps_carry_the_doubled_rate() {
             height: Dim::Fixed(H as u32),
             framerate: Rate::Fixed(50 << 16),
             interlace: Interlace::Progressive,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN
         }]
     );
 
@@ -445,6 +449,7 @@ fn the_derived_output_caps_carry_the_doubled_rate() {
         height: Dim::Fixed(H as u32),
         framerate: Rate::Fixed(FPS_Q16),
         interlace: Interlace::Progressive,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     };
     assert_eq!(derive(&progressive).alternatives(), &[progressive]);
 }

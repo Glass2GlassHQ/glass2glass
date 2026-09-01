@@ -528,6 +528,7 @@ impl AsyncElement for MfEncode {
             height: Dim::Any,
             framerate: Rate::Any,
             interlace: Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         upstream_caps.intersect(&supported)
     }
@@ -560,6 +561,7 @@ impl AsyncElement for MfEncode {
                 height: Dim::Fixed(h),
                 framerate,
                 interlace: _,
+                ..
             } => (*w, *h, framerate.clone()),
             _ => return Err(G2gError::CapsMismatch),
         };
@@ -622,6 +624,7 @@ impl AsyncElement for MfEncode {
                             height: Dim::Fixed(h),
                             framerate,
                             interlace: _,
+                            ..
                         } => (*w, *h, framerate.clone()),
                         _ => return Err(G2gError::CapsMismatch),
                     };
@@ -737,12 +740,14 @@ impl PadTemplates for MfEncode {
             height: Dim::Any,
             framerate: Rate::Any,
             interlace: Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         let compressed = |codec| Caps::CompressedVideo {
             codec,
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         Vec::from([
             PadTemplate::sink(CapsSet::one(nv12)),
@@ -1082,6 +1087,7 @@ fn compressed_caps(codec: VideoCodec, w: u32, h: u32, framerate: Rate) -> Caps {
         width: Dim::Fixed(w),
         height: Dim::Fixed(h),
         framerate,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
 }
 
@@ -1097,11 +1103,13 @@ fn derive_output_caps(codec: VideoCodec, input: &Caps) -> CapsSet {
             height,
             framerate,
             interlace: _,
+            ..
         } => CapsSet::one(Caps::CompressedVideo {
             codec,
             width: width.clone(),
             height: height.clone(),
             framerate: framerate.clone(),
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }),
         _ => CapsSet::from_alternatives(Vec::new()),
     }
@@ -1158,6 +1166,7 @@ mod tests {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         assert_eq!(enc.intercept_caps(&h264), Err(G2gError::CapsMismatch));
     }
@@ -1171,6 +1180,7 @@ mod tests {
             height: Dim::Fixed(720),
             framerate: Rate::Any,
             interlace: Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         assert_eq!(enc.intercept_caps(&proposal), Ok(proposal));
     }
@@ -1187,6 +1197,7 @@ mod tests {
             height: Dim::Fixed(1080),
             framerate: Rate::Fixed(30 << 16),
             interlace: Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         assert_eq!(
             f(&nv12).alternatives(),
@@ -1195,6 +1206,7 @@ mod tests {
                 width: Dim::Fixed(1920),
                 height: Dim::Fixed(1080),
                 framerate: Rate::Fixed(30 << 16),
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
             }]
         );
 
@@ -1204,6 +1216,7 @@ mod tests {
             height: Dim::Fixed(1080),
             framerate: Rate::Fixed(30 << 16),
             interlace: Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         assert!(f(&rgba).is_empty());
     }
@@ -1219,12 +1232,14 @@ mod tests {
             height: Dim::Fixed(1080),
             framerate: Rate::Any,
             interlace: Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         let h264 = Caps::CompressedVideo {
             codec: VideoCodec::H264,
             width: Dim::Fixed(1920),
             height: Dim::Fixed(1080),
             framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         assert!(matches!(sink.caps, g2g_core::PadCaps::Fixed(ref s) if s.accepts(&nv12)));
         assert!(matches!(source.caps, g2g_core::PadCaps::Fixed(ref s) if s.accepts(&h264)));
@@ -1281,6 +1296,7 @@ mod tests {
             height: Dim::Fixed(720),
             framerate: Rate::Fixed(30 << 16),
             interlace: Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         assert_eq!(
             f(&nv12).alternatives(),
@@ -1289,6 +1305,7 @@ mod tests {
                 width: Dim::Fixed(1280),
                 height: Dim::Fixed(720),
                 framerate: Rate::Fixed(30 << 16),
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
             }]
         );
     }

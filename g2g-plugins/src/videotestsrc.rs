@@ -172,6 +172,7 @@ impl VideoTestSrc {
             height: Dim::Fixed(self.height),
             framerate: Rate::Fixed(self.framerate_q16),
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 }
@@ -562,6 +563,7 @@ impl PadTemplates for VideoTestSrc {
             height: Dim::Any,
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }))])
     }
 }

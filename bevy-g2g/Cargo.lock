@@ -2824,6 +2824,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "embedded-hal"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "361a90feb7004eca4019fb28352a9465666b24f840f5c3cddf0ff13920590b89"
+
+[[package]]
 name = "encase"
 version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3245,6 +3251,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "g2g-mcu"
+version = "0.5.0"
+dependencies = [
+ "embedded-hal",
+ "g2g-core",
+]
+
+[[package]]
 name = "g2g-plugins"
 version = "0.5.0"
 dependencies = [
@@ -3252,12 +3266,14 @@ dependencies = [
  "cc",
  "ffmpeg-next",
  "g2g-core",
+ "g2g-mcu",
  "hmac",
  "md-5",
  "miniz_oxide",
  "pkg-config",
  "reqwest",
  "sha1",
+ "sha2",
  "spin 0.9.9",
  "str0m",
  "tokio",
@@ -5497,7 +5513,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5971,7 +5987,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

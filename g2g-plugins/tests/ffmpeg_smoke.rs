@@ -110,6 +110,7 @@ async fn decode_fixture_with(
         width: Dim::Any,
         height: Dim::Any,
         framerate: Rate::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     };
     let narrowed = dec
         .intercept_caps(&upstream)
@@ -243,6 +244,7 @@ async fn autoplug_builds_nv12_decoder_for_strict_nv12_sink() {
         width: Dim::Fixed(640),
         height: Dim::Fixed(480),
         framerate: Rate::Fixed(30 << 16),
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     };
     // A strict-NV12 sink target, mirroring `CudaKmsSink` / `waylandsink`'s
     // `Accepts(NV12)` constraint.
@@ -279,6 +281,7 @@ async fn autoplug_builds_nv12_decoder_for_strict_nv12_sink() {
         height: Dim::Fixed(480),
         framerate: Rate::Fixed(30 << 16),
         interlace: g2g_core::Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     };
     let mut sink = Collect::default();
     DynAsyncElement::process(dec, PipelinePacket::CapsChanged(nv12), &mut sink)

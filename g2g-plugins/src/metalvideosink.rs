@@ -488,6 +488,7 @@ impl AsyncElement for MetalVideoSink {
             height: Dim::Any,
             framerate: Rate::Any,
             interlace: Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         })
     }
 
@@ -608,6 +609,7 @@ impl PadTemplates for MetalVideoSink {
             height: Dim::Any,
             framerate: Rate::Any,
             interlace: Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }))])
     }
 }

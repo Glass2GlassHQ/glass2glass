@@ -4,8 +4,9 @@
 //! boundaries: `VideoTestSrc (RGBA) -> VideoConvert -> MfEncode (NV12)`, or
 //! `decoder (NV12) -> VideoConvert -> OrtInference (RGBA)`.
 //!
-//! Color math is integer-only BT.601 limited range (the convention the
-//! display sinks use). Same-family conversions skip it: RGBA<->BGRA is a
+//! Color math is integer fixed-point, with the matrix and range taken from the
+//! caps colorimetry of whichever side carries YUV (BT.601 limited range when the
+//! stream says nothing). Same-family conversions skip it: RGBA<->BGRA is a
 //! channel swizzle and NV12<->I420 a chroma-plane repack, both lossless.
 //! 4:2:0 formats require even dims (chroma is subsampled 2x2); odd dims
 //! fail negotiation loud. CPU-only and `no_std`: this element lives in the
@@ -20,14 +21,15 @@ use alloc::vec::Vec;
 
 #[cfg(feature = "metadata")]
 use crate::pixel::plane_shapes;
-use crate::pixel::{even_dims_required, frame_byte_size, planar_planes, row_bytes};
+use crate::pixel::{carries_yuv, even_dims_required, frame_byte_size, planar_planes, row_bytes};
+use crate::yuvmatrix::YuvRgbMatrix;
 use g2g_core::frame::Frame;
 use g2g_core::memory::{DomainSet, MemoryDomainKind, SystemSlice};
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, CapsSet, CapsTransform, ConfigureOutcome, Dim,
-    ElementMetadata, FieldTransform, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
-    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat,
-    RawVideoShape,
+    AsyncElement, Caps, CapsConstraint, CapsSet, CapsTransform, ColorRange, Colorimetry,
+    ConfigureOutcome, Dim, ElementMetadata, FieldTransform, G2gError, MatrixCoefficients,
+    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
+    PropValue, PropertySpec, Rate, RawVideoFormat, RawVideoShape,
 };
 
 /// Formats this element can both consume and produce. The convert `target`
@@ -83,20 +85,32 @@ pub struct VideoConvert {
     /// take the output format from the negotiated caps (a downstream
     /// capsfilter), the gst caps-driven idiom (M186).
     target: Option<RawVideoFormat>,
-    /// Format, geometry, and framerate of the configured input stream, updated
-    /// by a mid-stream `CapsChanged`. The framerate is carried through to the
-    /// output caps unchanged (a convert does not retime), so downstream sees a
-    /// fixed rate rather than `Rate::Any` (which a fixating peer, e.g. a
-    /// compositor input, would reject).
-    input: Option<(RawVideoFormat, u32, u32, Rate)>,
+    /// The configured input stream, updated by a mid-stream `CapsChanged`.
+    input: Option<InputStream>,
     /// Output format resolved from the negotiated output caps (M186), set by
     /// `configure_output`. Used in auto mode; `None` until then so `process`
     /// falls back to the property and runners that don't deliver output caps
     /// keep the property-driven behavior.
     resolved: Option<RawVideoFormat>,
+    /// Colorimetry of the negotiated output caps: what an RGB input is encoded
+    /// with, since the input caps then name no YUV matrix.
+    output_colorimetry: Colorimetry,
     configured: bool,
     last_caps: Option<Caps>,
     emitted: u64,
+}
+
+/// Format, geometry, framerate and colorimetry of the stream a convert is
+/// configured for. The framerate is carried through to the output caps unchanged
+/// (a convert does not retime), so downstream sees a fixed rate rather than
+/// `Rate::Any` (which a fixating peer, e.g. a compositor input, would reject).
+#[derive(Clone, Debug)]
+struct InputStream {
+    format: RawVideoFormat,
+    width: u32,
+    height: u32,
+    framerate: Rate,
+    colorimetry: Colorimetry,
 }
 
 impl VideoConvert {
@@ -106,6 +120,7 @@ impl VideoConvert {
             target: Some(target),
             input: None,
             resolved: None,
+            output_colorimetry: Colorimetry::UNKNOWN,
             configured: false,
             last_caps: None,
             emitted: 0,
@@ -120,6 +135,7 @@ impl VideoConvert {
             target: None,
             input: None,
             resolved: None,
+            output_colorimetry: Colorimetry::UNKNOWN,
             configured: false,
             last_caps: None,
             emitted: 0,
@@ -137,15 +153,56 @@ impl VideoConvert {
         self.target.or(self.resolved)
     }
 
-    /// Validate a raw-video caps as a convertible input and return its
-    /// format and dims. 4:2:0 endpoints need even dims on either side.
-    fn accept_input(&self, caps: &Caps) -> Result<(RawVideoFormat, u32, u32, Rate), G2gError> {
+    /// The colorimetry of whichever side of this conversion carries YUV: the
+    /// input's when it does, else the negotiated output's (an RGB input being
+    /// encoded). An all-RGB pair has no matrix to apply and lands on the
+    /// unknown-resolves-to-BT.601 default nothing then reads.
+    fn conversion_colorimetry(&self, out_format: RawVideoFormat) -> Colorimetry {
+        match &self.input {
+            Some(input) if carries_yuv(input.format) => input.colorimetry,
+            _ if carries_yuv(out_format) => self.output_colorimetry,
+            _ => Colorimetry::UNKNOWN,
+        }
+    }
+
+    /// What the emitted frames carry: transfer and primaries ride through
+    /// untouched (nothing here tone-maps or gamut-maps), the matrix and range
+    /// describe the samples written. A YUV target keeps the matrix + range of the
+    /// YUV side, an RGB target has neither. An untagged stream stays untagged:
+    /// the BT.601 fallback is this element's assumption, not a fact about the
+    /// stream.
+    fn emitted_colorimetry(&self, out_format: RawVideoFormat) -> Colorimetry {
+        let source = self.conversion_colorimetry(out_format);
+        let input = self.input.as_ref().map(|i| i.colorimetry);
+        let (transfer, primaries) = input.map_or(
+            (
+                Colorimetry::UNKNOWN.transfer,
+                Colorimetry::UNKNOWN.primaries,
+            ),
+            |c| (c.transfer, c.primaries),
+        );
+        let (matrix, range) = match carries_yuv(out_format) {
+            true => (source.matrix, source.range),
+            false => (MatrixCoefficients::Unknown, ColorRange::Unknown),
+        };
+        Colorimetry {
+            range,
+            matrix,
+            transfer,
+            primaries,
+        }
+    }
+
+    /// Validate a raw-video caps as a convertible input and return the stream it
+    /// describes. 4:2:0 endpoints need even dims on either side.
+    fn accept_input(&self, caps: &Caps) -> Result<InputStream, G2gError> {
         let Caps::RawVideo {
             format,
             width: Dim::Fixed(w),
             height: Dim::Fixed(h),
             framerate,
-            interlace: _,
+            colorimetry,
+            ..
         } = caps
         else {
             return Err(G2gError::CapsMismatch);
@@ -165,7 +222,13 @@ impl VideoConvert {
         if (ew && *w % 2 != 0) || (eh && *h % 2 != 0) {
             return Err(G2gError::CapsMismatch);
         }
-        Ok((*format, *w, *h, framerate.clone()))
+        Ok(InputStream {
+            format: *format,
+            width: *w,
+            height: *h,
+            framerate: framerate.clone(),
+            colorimetry: *colorimetry,
+        })
     }
 }
 
@@ -192,6 +255,7 @@ impl AsyncElement for VideoConvert {
                 height: Dim::Any,
                 framerate: Rate::Any,
                 interlace: g2g_core::Interlace::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
             };
             if let Ok(narrowed) = upstream_caps.intersect(&candidate) {
                 return Ok(narrowed);
@@ -248,8 +312,7 @@ impl AsyncElement for VideoConvert {
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        let (format, w, h, framerate) = self.accept_input(absolute_caps)?;
-        self.input = Some((format, w, h, framerate));
+        self.input = Some(self.accept_input(absolute_caps)?);
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
     }
@@ -258,19 +321,25 @@ impl AsyncElement for VideoConvert {
     /// `format` property is unset (caps-driven). Validates the format is
     /// producible and, if 4:2:0, that the input dims are even.
     fn configure_output(&mut self, output_caps: &Caps) -> Result<(), G2gError> {
-        let Caps::RawVideo { format, .. } = output_caps else {
+        let Caps::RawVideo {
+            format,
+            colorimetry,
+            ..
+        } = output_caps
+        else {
             return Err(G2gError::CapsMismatch);
         };
         if !FORMATS.contains(format) {
             return Err(G2gError::CapsMismatch);
         }
         let (ew, eh) = even_dims_required(*format);
-        if let Some((_, w, h, _)) = self.input {
-            if (ew && w % 2 != 0) || (eh && h % 2 != 0) {
+        if let Some(input) = &self.input {
+            if (ew && input.width % 2 != 0) || (eh && input.height % 2 != 0) {
                 return Err(G2gError::CapsMismatch);
             }
         }
         self.resolved = Some(*format);
+        self.output_colorimetry = *colorimetry;
         Ok(())
     }
 
@@ -285,8 +354,13 @@ impl AsyncElement for VideoConvert {
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let (format, w, h, framerate) =
-                        self.input.clone().ok_or(G2gError::NotConfigured)?;
+                    let InputStream {
+                        format,
+                        width: w,
+                        height: h,
+                        framerate,
+                        ..
+                    } = self.input.clone().ok_or(G2gError::NotConfigured)?;
                     let bytes = frame
                         .domain
                         .require_system_bytes(g2g_core::log::short_type_name::<Self>())?;
@@ -299,6 +373,7 @@ impl AsyncElement for VideoConvert {
                     // Auto without a delivered output caps (a runner that doesn't
                     // call configure_output) is unfixed.
                     let out_fmt = self.out_format().ok_or(G2gError::NotConfigured)?;
+                    let matrix = YuvRgbMatrix::new(self.conversion_colorimetry(out_fmt));
                     let (wu, hu) = (w as usize, h as usize);
                     let tight = row_bytes(format, wu);
                     // M977: a producer that was asked for a `PlaneLayout` hands
@@ -345,12 +420,13 @@ impl AsyncElement for VideoConvert {
                     let converted = {
                         let owned: Vec<u8> = src[..needed].to_vec();
                         crate::offload::run_blocking(move || {
-                            convert_strided(&owned, format, out_fmt, wu, hu, src_stride)
+                            convert_strided(&owned, format, out_fmt, wu, hu, src_stride, &matrix)
                         })
                         .await
                     };
                     #[cfg(not(feature = "offload"))]
-                    let converted = convert_strided(src, format, out_fmt, wu, hu, src_stride);
+                    let converted =
+                        convert_strided(src, format, out_fmt, wu, hu, src_stride, &matrix);
 
                     // A convert changes format/geometry but not rate: carry the
                     // input framerate so a fixating downstream peer (e.g. a
@@ -361,6 +437,7 @@ impl AsyncElement for VideoConvert {
                         height: Dim::Fixed(h),
                         framerate,
                         interlace: g2g_core::Interlace::Any,
+                        colorimetry: self.emitted_colorimetry(out_fmt),
                     };
                     if self.last_caps.as_ref() != Some(&new_caps) {
                         out.push(PipelinePacket::CapsChanged(new_caps.clone()))
@@ -503,6 +580,7 @@ impl PadTemplates for VideoConvert {
             height: Dim::Any,
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         let set = CapsSet::from_alternatives(FORMATS.map(any_geometry).to_vec());
         Vec::from([PadTemplate::sink(set.clone()), PadTemplate::source(set)])
@@ -510,16 +588,27 @@ impl PadTemplates for VideoConvert {
 }
 
 /// Dispatch one frame conversion. `src` is validated to hold at least the
-/// input frame; dims are even whenever a 4:2:0 format is involved. Public so the
-/// `convert` benchmark (M284) can exercise this hot path directly.
+/// input frame; dims are even whenever a 4:2:0 format is involved.
+/// `colorimetry` is the YUV side's, from its caps: it picks the matrix and range
+/// the color step uses, and an `UNKNOWN` one converts BT.601 limited. Public so
+/// the `convert` benchmark (M284) can exercise this hot path directly.
 pub fn convert(
     src: &[u8],
     from: RawVideoFormat,
     to: RawVideoFormat,
     w: usize,
     h: usize,
+    colorimetry: Colorimetry,
 ) -> Box<[u8]> {
-    convert_strided(src, from, to, w, h, row_bytes(from, w))
+    convert_strided(
+        src,
+        from,
+        to,
+        w,
+        h,
+        row_bytes(from, w),
+        &YuvRgbMatrix::new(colorimetry),
+    )
 }
 
 /// [`convert`] reading the input's rows `src_stride` bytes apart instead of
@@ -533,6 +622,7 @@ fn convert_strided(
     w: usize,
     h: usize,
     src_stride: usize,
+    matrix: &YuvRgbMatrix,
 ) -> Box<[u8]> {
     use RawVideoFormat::*;
     match (from, to) {
@@ -544,43 +634,56 @@ fn convert_strided(
         // RGB carries no alpha, so it rides the packed 4-byte paths: widen on
         // the way in, narrow on the way out.
         (Rgb8, Rgba8) => widen_rgb(src, w, h, src_stride),
-        (Rgb8, _) => convert(&widen_rgb(src, w, h, src_stride), Rgba8, to, w, h),
+        (Rgb8, _) => convert_strided(
+            &widen_rgb(src, w, h, src_stride),
+            Rgba8,
+            to,
+            w,
+            h,
+            w * 4,
+            matrix,
+        ),
         (Rgba8, Rgb8) => narrow_rgba(src, w, h, src_stride),
         (_, Rgb8) => narrow_rgba(
-            &convert_strided(src, from, Rgba8, w, h, src_stride),
+            &convert_strided(src, from, Rgba8, w, h, src_stride, matrix),
             w,
             h,
             w * 4,
         ),
-        (Rgba8, Nv12) => rgb_to_yuv420(src, w, h, 0, 2, true, src_stride),
-        (Rgba8, I420) => rgb_to_yuv420(src, w, h, 0, 2, false, src_stride),
-        (Bgra8, Nv12) => rgb_to_yuv420(src, w, h, 2, 0, true, src_stride),
-        (Bgra8, I420) => rgb_to_yuv420(src, w, h, 2, 0, false, src_stride),
+        (Rgba8, Nv12) => rgb_to_yuv420(src, w, h, 0, 2, true, src_stride, matrix),
+        (Rgba8, I420) => rgb_to_yuv420(src, w, h, 0, 2, false, src_stride, matrix),
+        (Bgra8, Nv12) => rgb_to_yuv420(src, w, h, 2, 0, true, src_stride, matrix),
+        (Bgra8, I420) => rgb_to_yuv420(src, w, h, 2, 0, false, src_stride, matrix),
         // Every remaining path reads a tightly-packed input, so padded rows are
         // packed out first: correct, at the cost the producer skipped. Must sit
         // above them, or a padded buffer reaches one of them as if it were tight.
-        _ if src_stride != row_bytes(from, w) => convert(
-            &pack_rows(src, h, src_stride, row_bytes(from, w)),
-            from,
-            to,
-            w,
-            h,
-        ),
+        _ if src_stride != row_bytes(from, w) => {
+            let tight = row_bytes(from, w);
+            convert_strided(
+                &pack_rows(src, h, src_stride, tight),
+                from,
+                to,
+                w,
+                h,
+                tight,
+                matrix,
+            )
+        }
         (Nv12, I420) => nv12_to_i420(src, w, h),
         (I420, Nv12) => i420_to_nv12(src, w, h),
-        (Nv12, Rgba8) => yuv420_to_rgb(src, w, h, true, 0, 2),
-        (I420, Rgba8) => yuv420_to_rgb(src, w, h, false, 0, 2),
-        (Nv12, Bgra8) => yuv420_to_rgb(src, w, h, true, 2, 0),
-        (I420, Bgra8) => yuv420_to_rgb(src, w, h, false, 2, 0),
+        (Nv12, Rgba8) => yuv420_to_rgb(src, w, h, true, 0, 2, matrix),
+        (I420, Rgba8) => yuv420_to_rgb(src, w, h, false, 0, 2, matrix),
+        (Nv12, Bgra8) => yuv420_to_rgb(src, w, h, true, 2, 0, matrix),
+        (I420, Bgra8) => yuv420_to_rgb(src, w, h, false, 2, 0, matrix),
         // YUYV (packed 4:2:2) is input-only: unpack to the planar / RGB target.
         (Yuyv, I420) => yuyv_to_yuv420(src, w, h, false),
         (Yuyv, Nv12) => yuyv_to_yuv420(src, w, h, true),
-        (Yuyv, Rgba8) => yuyv_to_rgb(src, w, h, 0, 2),
-        (Yuyv, Bgra8) => yuyv_to_rgb(src, w, h, 2, 0),
+        (Yuyv, Rgba8) => yuyv_to_rgb(src, w, h, 0, 2, matrix),
+        (Yuyv, Bgra8) => yuyv_to_rgb(src, w, h, 2, 0, matrix),
         // Any conversion involving a high-bit-depth / 4:2:2 / 4:4:4 format (the
         // pairs above are the fast 8-bit paths) goes through the general hub:
         // unpack to 4:4:4 YUV at a working depth, then repack to the target.
-        _ => convert_via_hub(src, from, to, w, h),
+        _ => convert_via_hub(src, from, to, w, h, matrix),
     }
 }
 
@@ -643,17 +746,18 @@ fn pack_rows(src: &[u8], rows: usize, src_stride: usize, row_bytes: usize) -> Bo
 /// (4:4:4) planar YUV intermediate at a single working depth, then repacked to the
 /// target: this turns the N x N matrix into N unpackers + N packers. Chroma is
 /// upsampled by replication and downsampled by box-averaging; bit depth is scaled
-/// by the full-range ratio; the YUV <-> RGB color step (BT.601 limited range) runs
-/// at 8-bit, the precision an `Rgba8` endpoint carries anyway.
+/// by the full-range ratio; the YUV <-> RGB color step runs at 8-bit, the
+/// precision an `Rgba8` endpoint carries anyway.
 fn convert_via_hub(
     src: &[u8],
     from: RawVideoFormat,
     to: RawVideoFormat,
     w: usize,
     h: usize,
+    matrix: &YuvRgbMatrix,
 ) -> Box<[u8]> {
-    let (y, u, v, wd) = to_hub(src, from, w, h);
-    from_hub(&y, &u, &v, wd, to, w, h)
+    let (y, u, v, wd) = to_hub(src, from, w, h, matrix);
+    from_hub(&y, &u, &v, wd, to, w, h, matrix)
 }
 
 /// Scale one sample from `from_d`-bit to `to_d`-bit full range, rounded to nearest.
@@ -665,24 +769,6 @@ fn scale_depth(v: i32, from_d: u8, to_d: u8) -> i32 {
     (((v as i64 * tm + fm / 2) / fm) as i32).clamp(0, tm as i32)
 }
 
-/// RGB -> YUV (BT.601 limited range, 8-bit), the per-pixel form of `rgb_to_yuv420`.
-fn rgb_to_yuv(r: i32, g: i32, b: i32) -> (i32, i32, i32) {
-    let y = ((66 * r + 129 * g + 25 * b + 128) >> 8) + 16;
-    let u = ((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128;
-    let v = ((112 * r - 94 * g - 18 * b + 128) >> 8) + 128;
-    (y.clamp(0, 255), u.clamp(0, 255), v.clamp(0, 255))
-}
-
-/// YUV -> RGB (BT.601 limited range, 8-bit), the per-pixel form of `yuv420_to_rgb`.
-pub(crate) fn yuv_to_rgb(y: i32, u: i32, v: i32) -> (i32, i32, i32) {
-    let c = y - 16;
-    let (d, e) = (u - 128, v - 128);
-    let r = (298 * c + 409 * e + 128) >> 8;
-    let g = (298 * c - 100 * d - 208 * e + 128) >> 8;
-    let b = (298 * c + 516 * d + 128) >> 8;
-    (r.clamp(0, 255), g.clamp(0, 255), b.clamp(0, 255))
-}
-
 /// Unpack any format to full-resolution (4:4:4) planar Y, U, V plus the working
 /// bit depth: RGB is color-converted to 8-bit YUV; YUYV / NV12 / the planar family
 /// are read at their own depth with chroma replicated up to full resolution.
@@ -691,6 +777,7 @@ fn to_hub(
     from: RawVideoFormat,
     w: usize,
     h: usize,
+    matrix: &YuvRgbMatrix,
 ) -> (Vec<i32>, Vec<i32>, Vec<i32>, u8) {
     let n = w * h;
     let mut y = vec![0i32; n];
@@ -701,7 +788,7 @@ fn to_hub(
             let (r_off, b_off) = crate::pixel::rgba_rb_offsets(from);
             for i in 0..n {
                 let p = i * 4;
-                let (yy, uu, vv) = rgb_to_yuv(
+                let (yy, uu, vv) = matrix.rgb_to_yuv(
                     src[p + r_off] as i32,
                     src[p + 1] as i32,
                     src[p + b_off] as i32,
@@ -774,6 +861,7 @@ fn to_hub(
 /// Repack full-resolution (4:4:4) planar Y, U, V at working depth `wd` into `to`:
 /// RGB is color-converted from 8-bit YUV; the YUV targets downsample chroma by
 /// box-averaging and scale the depth.
+#[allow(clippy::too_many_arguments)]
 fn from_hub(
     y: &[i32],
     u: &[i32],
@@ -782,6 +870,7 @@ fn from_hub(
     to: RawVideoFormat,
     w: usize,
     h: usize,
+    matrix: &YuvRgbMatrix,
 ) -> Box<[u8]> {
     let n = w * h;
     match to {
@@ -794,7 +883,7 @@ fn from_hub(
                     scale_depth(u[i], wd, 8),
                     scale_depth(v[i], wd, 8),
                 );
-                let (r, g, b) = yuv_to_rgb(yy, uu, vv);
+                let (r, g, b) = matrix.yuv_to_rgb(yy, uu, vv);
                 let p = i * 4;
                 dst[p + r_off] = r as u8;
                 dst[p + 1] = g as u8;
@@ -916,11 +1005,17 @@ fn yuyv_to_yuv420(src: &[u8], w: usize, h: usize, interleaved: bool) -> Box<[u8]
     dst.into_boxed_slice()
 }
 
-/// Packed YUYV (4:2:2) -> packed 4-byte RGB(A), BT.601 limited range, integer
-/// math (same coefficients as [`yuv420_to_rgb`]). Each macropixel's two Y
-/// samples share its U/V; alpha is opaque. `r_off`/`b_off` pick the channel
-/// order (RGBA: 0/2, BGRA: 2/0).
-fn yuyv_to_rgb(src: &[u8], w: usize, h: usize, r_off: usize, b_off: usize) -> Box<[u8]> {
+/// Packed YUYV (4:2:2) -> packed 4-byte RGB(A) through `matrix`. Each
+/// macropixel's two Y samples share its U/V; alpha is opaque. `r_off`/`b_off`
+/// pick the channel order (RGBA: 0/2, BGRA: 2/0).
+fn yuyv_to_rgb(
+    src: &[u8],
+    w: usize,
+    h: usize,
+    r_off: usize,
+    b_off: usize,
+    matrix: &YuvRgbMatrix,
+) -> Box<[u8]> {
     let mut dst = vec![0u8; w * h * 4];
     for y in 0..h {
         for mx in 0..(w / 2) {
@@ -931,14 +1026,12 @@ fn yuyv_to_rgb(src: &[u8], w: usize, h: usize, r_off: usize, b_off: usize) -> Bo
                 src[s + 2] as i32,
                 src[s + 3] as i32,
             );
-            let d = u - 128;
-            let e = v - 128;
             for (yi, luma) in [y0, y1].into_iter().enumerate() {
-                let c = luma - 16;
+                let (r, g, b) = matrix.yuv_to_rgb(luma, u, v);
                 let p = (y * w + mx * 2 + yi) * 4;
-                dst[p + r_off] = ((298 * c + 409 * e + 128) >> 8).clamp(0, 255) as u8;
-                dst[p + 1] = ((298 * c - 100 * d - 208 * e + 128) >> 8).clamp(0, 255) as u8;
-                dst[p + b_off] = ((298 * c + 516 * d + 128) >> 8).clamp(0, 255) as u8;
+                dst[p + r_off] = r as u8;
+                dst[p + 1] = g as u8;
+                dst[p + b_off] = b as u8;
                 dst[p + 3] = 255;
             }
         }
@@ -1010,10 +1103,11 @@ fn i420_to_nv12(src: &[u8], w: usize, h: usize) -> Box<[u8]> {
     dst.into_boxed_slice()
 }
 
-/// Packed 4-byte RGB(A) -> 4:2:0 YUV, BT.601 limited range, integer math.
-/// `r_off`/`b_off` select the source channel order (RGBA: 0/2, BGRA: 2/0);
-/// `interleaved` picks NV12 (true) vs I420 (false) chroma layout. Chroma is
-/// the average of each 2x2 block.
+/// Packed 4-byte RGB(A) -> 4:2:0 YUV through `matrix`. `r_off`/`b_off` select
+/// the source channel order (RGBA: 0/2, BGRA: 2/0); `interleaved` picks NV12
+/// (true) vs I420 (false) chroma layout. Chroma is the average of each 2x2
+/// block.
+#[allow(clippy::too_many_arguments)]
 fn rgb_to_yuv420(
     src: &[u8],
     w: usize,
@@ -1022,6 +1116,7 @@ fn rgb_to_yuv420(
     b_off: usize,
     interleaved: bool,
     src_stride: usize,
+    matrix: &YuvRgbMatrix,
 ) -> Box<[u8]> {
     let luma = w * h;
     let mut dst = vec![0u8; luma + luma / 2];
@@ -1033,7 +1128,7 @@ fn rgb_to_yuv420(
                 src[p + 1] as i32,
                 src[p + b_off] as i32,
             );
-            dst[y * w + x] = (((66 * r + 129 * g + 25 * b + 128) >> 8) + 16).clamp(0, 255) as u8;
+            dst[y * w + x] = matrix.rgb_to_yuv(r, g, b).0 as u8;
         }
     }
     let (cw, ch) = (w / 2, h / 2);
@@ -1049,9 +1144,8 @@ fn rgb_to_yuv420(
                     b += src[p + b_off] as i32;
                 }
             }
-            let (r, g, b) = (r / 4, g / 4, b / 4);
-            let u = (((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128).clamp(0, 255) as u8;
-            let v = (((112 * r - 94 * g - 18 * b + 128) >> 8) + 128).clamp(0, 255) as u8;
+            let (_, u, v) = matrix.rgb_to_yuv(r / 4, g / 4, b / 4);
+            let (u, v) = (u as u8, v as u8);
             let ci = cy * cw + cx;
             if interleaved {
                 dst[luma + 2 * ci] = u;
@@ -1065,9 +1159,9 @@ fn rgb_to_yuv420(
     dst.into_boxed_slice()
 }
 
-/// 4:2:0 YUV -> packed 4-byte RGB(A), BT.601 limited range, integer math.
-/// Alpha is set opaque. `interleaved` selects NV12 vs I420 chroma layout;
-/// `r_off`/`b_off` the destination channel order.
+/// 4:2:0 YUV -> packed 4-byte RGB(A) through `matrix`. Alpha is set opaque.
+/// `interleaved` selects NV12 vs I420 chroma layout; `r_off`/`b_off` the
+/// destination channel order.
 fn yuv420_to_rgb(
     src: &[u8],
     w: usize,
@@ -1075,6 +1169,7 @@ fn yuv420_to_rgb(
     interleaved: bool,
     r_off: usize,
     b_off: usize,
+    matrix: &YuvRgbMatrix,
 ) -> Box<[u8]> {
     let luma = w * h;
     let cw = w / 2;
@@ -1087,7 +1182,7 @@ fn yuv420_to_rgb(
             } else {
                 (src[luma + ci] as i32, src[luma + luma / 4 + ci] as i32)
             };
-            let (r, g, b) = yuv_to_rgb(src[y * w + x] as i32, u, v);
+            let (r, g, b) = matrix.yuv_to_rgb(src[y * w + x] as i32, u, v);
             let p = (y * w + x) * 4;
             dst[p + r_off] = r as u8;
             dst[p + 1] = g as u8;
@@ -1110,6 +1205,7 @@ mod tests {
             height: Dim::Fixed(h),
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 
@@ -1136,6 +1232,7 @@ mod tests {
                 height: Dim::Fixed(48),
                 framerate: Rate::Any,
                 interlace: g2g_core::Interlace::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN
             }]
         );
         // compressed input is not convertible
@@ -1144,6 +1241,7 @@ mod tests {
             width: Dim::Fixed(64),
             height: Dim::Fixed(48),
             framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         assert!(f(&h264).is_empty());
     }
@@ -1183,6 +1281,7 @@ mod tests {
 
     #[test]
     fn bt601_primaries_round_trip_within_tolerance() {
+        let matrix = YuvRgbMatrix::new(Colorimetry::UNKNOWN);
         // uniform 2x2 blocks survive 4:2:0 subsampling, so RGBA -> NV12 ->
         // RGBA must come back close (BT.601 integer rounding only).
         for &(r, g, b) in &[
@@ -1194,8 +1293,8 @@ mod tests {
             (128, 64, 32),
         ] {
             let src: Vec<u8> = (0..4).flat_map(|_| [r, g, b, 255]).collect();
-            let nv12 = rgb_to_yuv420(&src, 2, 2, 0, 2, true, 8);
-            let rgba = yuv420_to_rgb(&nv12, 2, 2, true, 0, 2);
+            let nv12 = rgb_to_yuv420(&src, 2, 2, 0, 2, true, 8, &matrix);
+            let rgba = yuv420_to_rgb(&nv12, 2, 2, true, 0, 2, &matrix);
             for px in rgba.as_chunks::<4>().0 {
                 assert!(
                     (px[0] as i32 - r as i32).abs() <= 4
@@ -1215,7 +1314,16 @@ mod tests {
     fn grey_maps_to_neutral_chroma() {
         // pure grey has no chroma: U = V = 128 exactly in BT.601.
         let src: Vec<u8> = (0..4).flat_map(|_| [128u8, 128, 128, 255]).collect();
-        let nv12 = rgb_to_yuv420(&src, 2, 2, 0, 2, true, 8);
+        let nv12 = rgb_to_yuv420(
+            &src,
+            2,
+            2,
+            0,
+            2,
+            true,
+            8,
+            &YuvRgbMatrix::new(Colorimetry::UNKNOWN),
+        );
         assert_eq!(&nv12[4..], &[128, 128], "neutral chroma for grey");
     }
 
@@ -1241,7 +1349,7 @@ mod tests {
         // Y0 == Y1, U = V = 128: both unpacked pixels are the same neutral grey
         // and alpha is opaque.
         let yuyv = [128u8, 128, 128, 128];
-        let rgba = yuyv_to_rgb(&yuyv, 2, 1, 0, 2);
+        let rgba = yuyv_to_rgb(&yuyv, 2, 1, 0, 2, &YuvRgbMatrix::new(Colorimetry::UNKNOWN));
         assert_eq!(rgba.len(), 2 * 1 * 4);
         let (p0, p1) = (&rgba[0..4], &rgba[4..8]);
         assert_eq!(p0, p1, "equal luma -> identical pixels");
@@ -1255,7 +1363,14 @@ mod tests {
         // 2x2 I420 (8-bit): luma all 255, chroma 128. Converting to I420p10 scales
         // each sample to 10-bit full range (luma 255 -> 1023) as little-endian u16.
         let src = vec![255u8, 255, 255, 255, 128, 128];
-        let out = convert(&src, RawVideoFormat::I420, RawVideoFormat::I420p10, 2, 2);
+        let out = convert(
+            &src,
+            RawVideoFormat::I420,
+            RawVideoFormat::I420p10,
+            2,
+            2,
+            Colorimetry::UNKNOWN,
+        );
         assert_eq!(out.len(), (4 + 1 + 1) * 2);
         let rd = |o: usize| u16::from_le_bytes([out[o], out[o + 1]]);
         assert_eq!(rd(0), 1023, "luma 255 -> 10-bit 1023");
@@ -1267,7 +1382,14 @@ mod tests {
         // mid luma converts to an opaque grey RGBA (R == G == B).
         let plane = |val: u16| (0..4).flat_map(move |_| val.to_le_bytes());
         let src: Vec<u8> = plane(512).chain(plane(512)).chain(plane(512)).collect();
-        let out = convert(&src, RawVideoFormat::I444p10, RawVideoFormat::Rgba8, 2, 2);
+        let out = convert(
+            &src,
+            RawVideoFormat::I444p10,
+            RawVideoFormat::Rgba8,
+            2,
+            2,
+            Colorimetry::UNKNOWN,
+        );
         assert_eq!(out.len(), 2 * 2 * 4);
         for px in out.as_chunks::<4>().0 {
             assert_eq!(px[0], px[1], "grey: R == G");
@@ -1285,8 +1407,22 @@ mod tests {
         let mut src = vec![100u8; n];
         src.extend(vec![120u8; n]);
         src.extend(vec![140u8; n]);
-        let i420 = convert(&src, RawVideoFormat::I444, RawVideoFormat::I420, 4, 4);
-        let back = convert(&i420, RawVideoFormat::I420, RawVideoFormat::I444, 4, 4);
+        let i420 = convert(
+            &src,
+            RawVideoFormat::I444,
+            RawVideoFormat::I420,
+            4,
+            4,
+            Colorimetry::UNKNOWN,
+        );
+        let back = convert(
+            &i420,
+            RawVideoFormat::I420,
+            RawVideoFormat::I444,
+            4,
+            4,
+            Colorimetry::UNKNOWN,
+        );
         assert_eq!(back.len(), 3 * n);
         assert_eq!(
             (back[0], back[n], back[2 * n]),

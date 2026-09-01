@@ -109,21 +109,76 @@ impl RtspRequest {
 }
 
 /// Build the SDP an RTSP server offers for one H.264 stream over RTP/AVP at the
-/// given dynamic payload type (90 kHz clock). Geometry rides in-band in the SPS,
-/// so no `sprop-parameter-sets` are emitted (Annex-B/SIMPLE clients tune in on
-/// the next keyframe).
-pub fn sdp_h264(payload_type: u8) -> String {
-    format!(
+/// given dynamic payload type (90 kHz clock).
+///
+/// `sps` and `pps` are the parameter-set NAL bodies (no start code, NAL header
+/// byte included) taken from the stream. With both in hand the offer carries the
+/// RFC 6184 §8.1 `a=fmtp` line, so a client that reads geometry and profile out
+/// of band (retina, and anything that will not decode before it has parameter
+/// sets) can set up from the DESCRIBE alone instead of waiting for the next
+/// in-band keyframe. Without them the media line is offered bare, which is what
+/// a client tuning in on Annex-B in-band parameter sets needs anyway.
+pub fn sdp_h264(payload_type: u8, sps: Option<&[u8]>, pps: Option<&[u8]>) -> String {
+    let pt = payload_type & 0x7F;
+    let mut sdp = format!(
         "v=0\r\n\
          o=- 0 0 IN IP4 0.0.0.0\r\n\
          s=g2g\r\n\
          c=IN IP4 0.0.0.0\r\n\
          t=0 0\r\n\
          m=video 0 RTP/AVP {pt}\r\n\
-         a=rtpmap:{pt} H264/90000\r\n\
-         a=control:streamid=0\r\n",
-        pt = payload_type & 0x7F,
-    )
+         a=rtpmap:{pt} H264/90000\r\n",
+    );
+    if let Some(fmtp) = h264_fmtp(pt, sps, pps) {
+        sdp.push_str(&fmtp);
+    }
+    sdp.push_str("a=control:streamid=0\r\n");
+    sdp
+}
+
+/// The RFC 6184 §8.1 `a=fmtp` line for an H.264 stream: `packetization-mode=1`
+/// (the packetizer emits single-NAL and FU-A packets), the base64 parameter
+/// sets, and the profile / level the SPS declares. `None` when either parameter
+/// set is missing or the SPS is too short to carry
+/// `profile_idc / profile_iop / level_idc`, so a malformed stream leaves the
+/// offer bare rather than advertising a profile nothing can honour.
+fn h264_fmtp(payload_type: u8, sps: Option<&[u8]>, pps: Option<&[u8]>) -> Option<String> {
+    let (sps, pps) = (sps?, pps?);
+    // profile_idc, profile_iop (the constraint-set flags), level_idc: the three
+    // bytes after the NAL header byte.
+    let profile_level = sps.get(1..4)?;
+    let mut hex = String::with_capacity(6);
+    for b in profile_level {
+        hex.push_str(&format!("{b:02X}"));
+    }
+    Some(format!(
+        "a=fmtp:{payload_type} packetization-mode=1; \
+         sprop-parameter-sets={},{}; profile-level-id={hex}\r\n",
+        base64(sps),
+        base64(pps),
+    ))
+}
+
+/// Base64 with the RFC 4648 §4 standard alphabet and `=` padding, which is what
+/// `sprop-parameter-sets` is coded in. Hand-rolled: this module is in the
+/// `no_std` baseline and one SDP attribute is not worth a dependency there.
+fn base64(data: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let group = (u32::from(chunk[0]) << 16)
+            | (u32::from(chunk.get(1).copied().unwrap_or(0)) << 8)
+            | u32::from(chunk.get(2).copied().unwrap_or(0));
+        for sextet in 0..4 {
+            // A chunk of n bytes codes n+1 characters; the rest is padding.
+            out.push(if sextet <= chunk.len() {
+                ALPHABET[((group >> (18 - 6 * sextet)) & 0x3F) as usize] as char
+            } else {
+                '='
+            });
+        }
+    }
+    out
 }
 
 /// Sans-IO RTSP server responder for one session.
@@ -379,7 +434,78 @@ mod tests {
     }
 
     fn responder() -> RtspResponder {
-        RtspResponder::new(sdp_h264(96), 6000, 0x1234_5678)
+        RtspResponder::new(sdp_h264(96, None, None), 6000, 0x1234_5678)
+    }
+
+    /// A High profile SPS header: NAL header 0x67 then profile_idc 100,
+    /// profile_iop 0, level_idc 40, so profile-level-id must read 640028.
+    const SPS: &[u8] = &[0x67, 0x64, 0x00, 0x28, 0xAC, 0xD9];
+    const PPS: &[u8] = &[0x68, 0xEB, 0xEC, 0xB2];
+
+    /// The RFC 4648 §10 test vectors, so the encoder is checked against the spec
+    /// rather than against itself.
+    #[test]
+    fn base64_matches_the_rfc_vectors() {
+        for (input, expected) in [
+            ("", ""),
+            ("f", "Zg=="),
+            ("fo", "Zm8="),
+            ("foo", "Zm9v"),
+            ("foob", "Zm9vYg=="),
+            ("fooba", "Zm9vYmE="),
+            ("foobar", "Zm9vYmFy"),
+        ] {
+            assert_eq!(base64(input.as_bytes()), expected, "base64 of {input:?}");
+        }
+    }
+
+    /// M1117: without the fmtp line a client that will not decode before it has
+    /// parameter sets (retina) cannot set up from the DESCRIBE at all. The
+    /// expected base64 is hand-computed from the bytes above, not re-encoded
+    /// here, so a broken encoder fails the test.
+    #[test]
+    fn sdp_offers_the_parameter_sets_as_fmtp() {
+        let sdp = sdp_h264(96, Some(SPS), Some(PPS));
+        assert!(
+            sdp.contains(
+                "a=fmtp:96 packetization-mode=1; \
+                 sprop-parameter-sets=Z2QAKKzZ,aOvssg==; profile-level-id=640028\r\n"
+            ),
+            "fmtp line per RFC 6184 §8.1, got:\n{sdp}"
+        );
+        // The attribute order the media line needs: rtpmap, then fmtp, then control.
+        let (rtpmap, fmtp) = (
+            sdp.find("a=rtpmap:").expect("rtpmap present"),
+            sdp.find("a=fmtp:").expect("fmtp present"),
+        );
+        assert!(rtpmap < fmtp && fmtp < sdp.find("a=control:").expect("control present"));
+    }
+
+    #[test]
+    fn sdp_stays_bare_without_usable_parameter_sets() {
+        for (sps, pps) in [
+            (None, None),
+            (Some(SPS), None),
+            (None, Some(PPS)),
+            // An SPS too short to carry profile_idc / profile_iop / level_idc.
+            (Some(&SPS[..3]), Some(PPS)),
+        ] {
+            let sdp = sdp_h264(96, sps, pps);
+            assert!(!sdp.contains("a=fmtp:"), "no fmtp to offer, got:\n{sdp}");
+            assert!(sdp.contains("a=rtpmap:96 H264/90000"), "media line intact");
+        }
+    }
+
+    #[test]
+    fn describe_serves_the_fmtp_line() {
+        let mut s = RtspResponder::new(sdp_h264(96, Some(SPS), Some(PPS)), 6000, 1);
+        let (response, _) =
+            s.handle_request(&request("DESCRIBE rtsp://h/s RTSP/1.0\r\nCSeq: 2\r\n\r\n"));
+        let text = String::from_utf8(response).expect("utf8");
+        assert!(
+            text.contains("sprop-parameter-sets=Z2QAKKzZ,aOvssg=="),
+            "the DESCRIBE body carries the parameter sets, got:\n{text}"
+        );
     }
 
     #[test]

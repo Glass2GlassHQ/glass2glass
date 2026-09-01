@@ -57,18 +57,66 @@ use g2g_core::{
 /// is emitted to downstream between sessions to signal the discontinuity
 /// (the decoder flushes its state, the sink resets `last_sequence`).
 #[derive(Debug, Clone, Copy)]
-struct ReconnectPolicy {
-    max_attempts: u32,
-    initial_backoff_ms: u64,
-    max_backoff_ms: u64,
+pub(crate) struct ReconnectPolicy {
+    pub(crate) max_attempts: u32,
+    pub(crate) initial_backoff_ms: u64,
+    pub(crate) max_backoff_ms: u64,
 }
 
 impl ReconnectPolicy {
-    const DISABLED: Self = Self {
+    pub(crate) const DISABLED: Self = Self {
         max_attempts: 0,
         initial_backoff_ms: 0,
         max_backoff_ms: 0,
     };
+
+    /// Fill the backoff bounds a bare `with_reconnect(n)` / `reconnect=n`
+    /// leaves at zero, so a caller that only asks for retries gets the
+    /// documented 250 ms .. 5 s doubling.
+    pub(crate) fn fill_backoff_defaults(&mut self) {
+        if self.initial_backoff_ms == 0 {
+            self.initial_backoff_ms = DEFAULT_INITIAL_BACKOFF_MS;
+        }
+        if self.max_backoff_ms == 0 {
+            self.max_backoff_ms = DEFAULT_MAX_BACKOFF_MS;
+        }
+    }
+}
+
+/// Wait before the first retry when only an attempt count was asked for.
+const DEFAULT_INITIAL_BACKOFF_MS: u64 = 250;
+/// Cap on the doubling retry backoff.
+const DEFAULT_MAX_BACKOFF_MS: u64 = 5_000;
+
+/// Retry counter for one [`ReconnectPolicy`], shared by the probe loop, the
+/// session loop, and [`RtspSrcN`](crate::rtspsrcn::RtspSrcN)'s loop so all
+/// three count attempts and double the backoff the same way.
+#[derive(Debug)]
+pub(crate) struct ReconnectState {
+    /// Retries taken so far, for the log line.
+    pub(crate) attempt: u32,
+    backoff_ms: u64,
+}
+
+impl ReconnectState {
+    pub(crate) fn new(policy: &ReconnectPolicy) -> Self {
+        Self {
+            attempt: 0,
+            backoff_ms: policy.initial_backoff_ms.max(1),
+        }
+    }
+
+    /// Milliseconds to wait before the next attempt, or `None` once
+    /// `max_attempts` retries have been handed out.
+    pub(crate) fn next_delay_ms(&mut self, policy: &ReconnectPolicy) -> Option<u64> {
+        if self.attempt >= policy.max_attempts {
+            return None;
+        }
+        self.attempt += 1;
+        let wait = self.backoff_ms;
+        self.backoff_ms = wait.saturating_mul(2).min(policy.max_backoff_ms.max(wait));
+        Some(wait)
+    }
 }
 
 /// Post-SETUP retina session stashed by `intercept_caps`, consumed by
@@ -135,20 +183,29 @@ pub struct RtspSrc {
 /// An RTP lower transport a SETUP may request, the subset of gst's
 /// `GstRTSPLowerTrans` retina implements.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LowerTransport {
+pub(crate) enum LowerTransport {
     Udp,
     Tcp,
 }
 
 impl LowerTransport {
-    fn nick(self) -> &'static str {
+    pub(crate) fn nick(self) -> &'static str {
         match self {
             LowerTransport::Udp => "udp",
             LowerTransport::Tcp => "tcp",
         }
     }
 
-    fn retina(self) -> retina::client::Transport {
+    /// Parse a `protocols=` flag nick.
+    pub(crate) fn from_nick(nick: &str) -> Option<Self> {
+        match nick {
+            "udp" => Some(LowerTransport::Udp),
+            "tcp" => Some(LowerTransport::Tcp),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn retina(self) -> retina::client::Transport {
         match self {
             LowerTransport::Udp => {
                 retina::client::Transport::Udp(retina::client::UdpTransportOptions::default())
@@ -226,12 +283,7 @@ impl RtspSrc {
     /// and the source emits EOS without retrying.
     pub fn with_reconnect(mut self, max_attempts: u32) -> Self {
         self.reconnect.max_attempts = max_attempts;
-        if self.reconnect.initial_backoff_ms == 0 {
-            self.reconnect.initial_backoff_ms = 250;
-        }
-        if self.reconnect.max_backoff_ms == 0 {
-            self.reconnect.max_backoff_ms = 5_000;
-        }
+        self.reconnect.fill_backoff_defaults();
         self
     }
 
@@ -281,6 +333,7 @@ impl SourceLoop for RtspSrc {
                         min_q16: 1 << 16,
                         max_q16: 240 << 16,
                     },
+                    colorimetry: g2g_core::Colorimetry::UNKNOWN,
                 });
             }
             // Memoized probe: a re-fixate retry skips the second DESCRIBE.
@@ -444,12 +497,7 @@ impl SourceLoop for RtspSrc {
                 self.reconnect.max_attempts = n.min(u32::MAX as u64) as u32;
                 // Fill the backoff defaults like with_reconnect, so a bare
                 // `reconnect=3` retries sensibly.
-                if self.reconnect.initial_backoff_ms == 0 {
-                    self.reconnect.initial_backoff_ms = 250;
-                }
-                if self.reconnect.max_backoff_ms == 0 {
-                    self.reconnect.max_backoff_ms = 5_000;
-                }
+                self.reconnect.fill_backoff_defaults();
                 Ok(())
             }
             "reconnect-backoff" => {
@@ -463,11 +511,7 @@ impl SourceLoop for RtspSrc {
             "protocols" => {
                 let mut order = Vec::new();
                 for nick in value.as_flags().ok_or(PropError::Type)? {
-                    let t = match nick.as_str() {
-                        "udp" => LowerTransport::Udp,
-                        "tcp" => LowerTransport::Tcp,
-                        _ => return Err(PropError::Value),
-                    };
+                    let t = LowerTransport::from_nick(nick.as_str()).ok_or(PropError::Value)?;
                     if !order.contains(&t) {
                         order.push(t);
                     }
@@ -548,8 +592,7 @@ async fn run_rtsp(src: &mut RtspSrc, out: &mut dyn OutputSink) -> Result<u64, G2
     let limit = src.target_frames.unwrap_or(u64::MAX);
     let mut total_emitted: u64 = 0;
     let mut pts_base_ns: u64 = 0;
-    let mut attempt: u32 = 0;
-    let mut backoff_ms = src.reconnect.initial_backoff_ms.max(1);
+    let mut retry = ReconnectState::new(&src.reconnect);
     let mut last_session_max_pts: u64 = 0;
 
     loop {
@@ -573,17 +616,13 @@ async fn run_rtsp(src: &mut RtspSrc, out: &mut dyn OutputSink) -> Result<u64, G2
                 return Err(e);
             }
             SessionOutcome::NetworkError(e) => {
-                if src.reconnect.max_attempts == 0 {
+                let Some(backoff_ms) = retry.next_delay_ms(&src.reconnect) else {
                     return Err(e);
-                }
-                attempt += 1;
-                if attempt > src.reconnect.max_attempts {
-                    return Err(e);
-                }
+                };
                 std::eprintln!(
                     "rtsp: session ended ({:?}); reconnect {}/{} after {}ms",
                     e,
-                    attempt,
+                    retry.attempt,
                     src.reconnect.max_attempts,
                     backoff_ms,
                 );
@@ -602,9 +641,6 @@ async fn run_rtsp(src: &mut RtspSrc, out: &mut dyn OutputSink) -> Result<u64, G2
                 }
 
                 tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
-                backoff_ms = backoff_ms
-                    .saturating_mul(2)
-                    .min(src.reconnect.max_backoff_ms.max(backoff_ms));
             }
         }
     }
@@ -777,9 +813,7 @@ async fn probe_session_with_reconnect(
     policy: &ReconnectPolicy,
     transports: &[LowerTransport],
 ) -> Result<StashedSession, G2gError> {
-    let mut attempt: u32 = 0;
-    let mut backoff_ms = policy.initial_backoff_ms.max(1);
-    let max_attempts = policy.max_attempts;
+    let mut retry = ReconnectState::new(policy);
     loop {
         match probe_session(url, user_agent, creds, transports).await {
             Ok(stashed) => return Ok(stashed),
@@ -787,14 +821,10 @@ async fn probe_session_with_reconnect(
             // stream): retrying won't help, surface immediately.
             Err(G2gError::CapsMismatch) => return Err(G2gError::CapsMismatch),
             Err(e) => {
-                if attempt >= max_attempts {
+                let Some(backoff_ms) = retry.next_delay_ms(policy) else {
                     return Err(e);
-                }
+                };
                 tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
-                attempt += 1;
-                backoff_ms = backoff_ms
-                    .saturating_mul(2)
-                    .min(policy.max_backoff_ms.max(backoff_ms));
             }
         }
     }
@@ -836,20 +866,8 @@ async fn connect_describe_setup(
     creds: Option<&retina::client::Credentials>,
     transports: &[LowerTransport],
 ) -> Result<(Session<Described>, usize), G2gError> {
-    let url = url::Url::parse(url).map_err(|_| G2gError::CapsMismatch)?;
-    let session_group = Arc::new(SessionGroup::default());
-    let opts = SessionOptions::default()
-        .session_group(session_group)
-        .creds(creds.cloned())
-        .user_agent(user_agent.to_string());
-    let mut session = Session::describe(url, opts)
-        .await
-        .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
-    let video_idx = session
-        .streams()
-        .iter()
-        .position(|s| s.media() == "video" && matches!(s.encoding_name(), "h264" | "h265"))
-        .ok_or(G2gError::CapsMismatch)?;
+    let mut session = connect_describe(url, user_agent, creds).await?;
+    let video_idx = video_stream_index(session.streams()).ok_or(G2gError::CapsMismatch)?;
     // Try each requested lower transport in order, keeping the last failure if
     // none is accepted (a server may refuse UDP but allow interleaved TCP).
     let mut setup_err = None;
@@ -874,14 +892,43 @@ async fn connect_describe_setup(
     })
 }
 
-fn video_params_for(streams: &[retina::client::Stream], idx: usize) -> Option<&VideoParameters> {
+/// Connect and DESCRIBE, leaving every stream un-SETUP. Split out so
+/// [`RtspSrcN`](crate::rtspsrcn::RtspSrcN) can SETUP a video *and* an audio
+/// stream on the same session.
+pub(crate) async fn connect_describe(
+    url: &str,
+    user_agent: &str,
+    creds: Option<&retina::client::Credentials>,
+) -> Result<Session<Described>, G2gError> {
+    let url = url::Url::parse(url).map_err(|_| G2gError::CapsMismatch)?;
+    let session_group = Arc::new(SessionGroup::default());
+    let opts = SessionOptions::default()
+        .session_group(session_group)
+        .creds(creds.cloned())
+        .user_agent(user_agent.to_string());
+    Session::describe(url, opts)
+        .await
+        .map_err(|_| G2gError::Hardware(HardwareError::Other))
+}
+
+/// The first stream g2g decodes as video: H.264 or H.265.
+pub(crate) fn video_stream_index(streams: &[retina::client::Stream]) -> Option<usize> {
+    streams
+        .iter()
+        .position(|s| s.media() == "video" && matches!(s.encoding_name(), "h264" | "h265"))
+}
+
+pub(crate) fn video_params_for(
+    streams: &[retina::client::Stream],
+    idx: usize,
+) -> Option<&VideoParameters> {
     match streams[idx].parameters() {
         Some(ParametersRef::Video(v)) => Some(v),
         _ => None,
     }
 }
 
-fn caps_from_video_params(params: Option<&VideoParameters>) -> Option<Caps> {
+pub(crate) fn caps_from_video_params(params: Option<&VideoParameters>) -> Option<Caps> {
     let p = params?;
     let (w, h) = p.pixel_dimensions();
     Some(Caps::CompressedVideo {
@@ -889,6 +936,7 @@ fn caps_from_video_params(params: Option<&VideoParameters>) -> Option<Caps> {
         width: Dim::Fixed(w),
         height: Dim::Fixed(h),
         framerate: rate_from_frame_rate(p.frame_rate()),
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     })
 }
 

@@ -139,6 +139,7 @@ impl StreamHeader {
             height: Dim::Fixed(self.height),
             framerate: Rate::Fixed(rate_q16(self.framerate_num, self.framerate_den)),
             interlace: self.interlace,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 
@@ -296,6 +297,7 @@ impl Y4mDec {
                         max_q16: 240 << 16,
                     },
                     interlace: Interlace::Any,
+                    colorimetry: g2g_core::Colorimetry::UNKNOWN,
                 })
                 .collect::<Vec<_>>(),
         )
@@ -529,6 +531,7 @@ impl Y4mEnc {
                     height: Dim::Any,
                     framerate: Rate::Any,
                     interlace: Interlace::Any,
+                    colorimetry: g2g_core::Colorimetry::UNKNOWN,
                 })
                 .collect::<Vec<_>>(),
         )
@@ -589,6 +592,7 @@ impl AsyncElement for Y4mEnc {
             height: Dim::Fixed(height),
             framerate: Rate::Fixed(framerate_q16),
             interlace,
+            ..
         } = absolute_caps
         else {
             return Err(G2gError::CapsMismatch);
@@ -874,6 +878,7 @@ mod tests {
                     height: Dim::Fixed(48),
                     framerate: Rate::Fixed(25 << 16),
                     interlace: Interlace::Any,
+                    colorimetry: g2g_core::Colorimetry::UNKNOWN
                 }),
                 Err(G2gError::CapsMismatch),
                 "{format:?}"

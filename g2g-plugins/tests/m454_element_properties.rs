@@ -28,7 +28,7 @@ fn declared_default(specs: &[PropertySpec], name: &str) -> PropValue {
 
 /// The `(min, max)` a spec declares for an unsigned property, as numbers, so a
 /// test can hold the declared text and the value the element enforces together.
-#[cfg(feature = "srtp")]
+#[cfg(any(feature = "srtp", feature = "ffmpeg"))]
 fn declared_range(specs: &[PropertySpec], name: &str) -> (usize, usize) {
     let spec = specs
         .iter()
@@ -1025,6 +1025,7 @@ fn shmsrc_socket_and_declared_caps() {
             height: g2g_core::Dim::Fixed(240),
             framerate: g2g_core::Rate::Fixed(30 << 16),
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN
         }),
         "the caps property is what the source declares"
     );
@@ -1645,6 +1646,7 @@ async fn pipewirevideosrc_format_pin_and_geometry() {
             height: Dim::Fixed(720),
             framerate: Rate::Fixed(60 << 16),
             interlace: Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN
         })
     );
     // an empty pin is the open negotiation the element defaults to
@@ -1828,6 +1830,7 @@ fn camera2src_device_geometry_and_num_buffers() {
             height: Dim::Fixed(720),
             framerate: Rate::Any,
             interlace: Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN
         }
     );
     // Empty returns to the first camera the manager reports.
@@ -4079,5 +4082,71 @@ fn roundedcorners_border_radius_px() {
     assert_eq!(
         e.get_property("border-radius-px"),
         Some(PropValue::Uint(16))
+    );
+}
+
+/// M1119: the software decoder's worker-thread count, gst `avdec_*`'s
+/// `max-threads`. That the value reaches libavcodec's `thread_count` is proved
+/// in `ffmpegdec`'s own `max_threads_reaches_the_codec_context`, which opens a
+/// decoder and reads it back; this is the launch-line half, plus the bound that
+/// keeps a pasted line from asking for a thread count that is a resource
+/// exhaustion rather than a decode setting.
+#[cfg(feature = "ffmpeg")]
+#[test]
+fn ffmpegdec_max_threads() {
+    use g2g_plugins::ffmpegdec::FfmpegVideoDec;
+    let mut e = FfmpegVideoDec::new();
+    assert!(declares(e.properties(), "max-threads"));
+    assert_eq!(
+        e.get_property("max-threads"),
+        Some(declared_default(e.properties(), "max-threads")),
+        "gst's default is auto, spelled 0"
+    );
+    e.set_property("max-threads", PropValue::Uint(4)).unwrap();
+    assert_eq!(e.get_property("max-threads"), Some(PropValue::Uint(4)));
+    assert_eq!(e.max_threads(), 4, "onto the field the decoder opens with");
+
+    let (_, maximum) = declared_range(e.properties(), "max-threads");
+    e.set_property("max-threads", PropValue::Uint(maximum as u64))
+        .expect("the declared maximum is accepted");
+    assert!(
+        e.set_property("max-threads", PropValue::Uint(maximum as u64 + 1))
+            .is_err(),
+        "past the declared maximum is refused"
+    );
+}
+
+/// M1119: which threading method the decoder may use, gst `avdec_*`'s
+/// `thread-type` with its three nicks. `frame` is the one that trades latency
+/// for throughput, so the launch line has to be able to ask for it by name.
+#[cfg(feature = "ffmpeg")]
+#[test]
+fn ffmpegdec_thread_type() {
+    use g2g_plugins::ffmpegdec::{FfmpegVideoDec, ThreadType};
+    let mut e = FfmpegVideoDec::new();
+    assert!(declares(e.properties(), "thread-type"));
+    assert_eq!(
+        e.get_property("thread-type"),
+        Some(declared_default(e.properties(), "thread-type")),
+        "gst's default nick is auto"
+    );
+    for (nick, expected) in [
+        ("frame", ThreadType::Frame),
+        ("slice", ThreadType::Slice),
+        ("auto", ThreadType::Auto),
+    ] {
+        e.set_property("thread-type", PropValue::Str(nick.into()))
+            .unwrap();
+        assert_eq!(e.thread_type(), expected, "`{nick}` onto the field");
+        assert_eq!(
+            e.get_property("thread-type"),
+            Some(PropValue::Str(nick.into())),
+            "and reads back as the nick it was set with"
+        );
+    }
+    assert!(
+        e.set_property("thread-type", PropValue::Str("frame+slice".into()))
+            .is_err(),
+        "gst's flag-combining spelling is not one of our nicks"
     );
 }

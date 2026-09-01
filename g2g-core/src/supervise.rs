@@ -1,6 +1,6 @@
 //! Runtime fault recovery for the static heap-free MCU path: a supervisor that
 //! wraps a `source -> sink` chain and turns a returned fault
-//! ([`G2gError`](crate::error::G2gError)) into a *bounded, deterministic*
+//! ([`G2gError`]) into a *bounded, deterministic*
 //! recovery action instead of aborting the pipeline.
 //!
 //! The static runners ([`run_source_sink`](crate::staticelem::run_source_sink),
@@ -331,8 +331,8 @@ where
 ///
 /// Bounded: resolves in at most [`MAX_ATTEMPTS`] internal iterations whatever the
 /// policy does. Compose a transform tail into the sink with
-/// [`SinkChain`](crate::staticelem::SinkChain) (and a head with
-/// [`SourceChain`](crate::staticelem::SourceChain)) so this steps any linear
+/// [`SinkChain`] (and a head with
+/// [`SourceChain`]) so this steps any linear
 /// graph; both combinators forward [`Recover`] to their parts.
 pub fn step_supervised<S, K, P, W>(
     src: &mut S,

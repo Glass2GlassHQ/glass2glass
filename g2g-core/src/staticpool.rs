@@ -1,5 +1,5 @@
 //! Strict no-heap buffer pool for `no_std` RTOS targets that cannot tolerate
-//! `alloc`, the counterpart of [`crate::pool::BufferPool`] (which is
+//! `alloc`, the counterpart of `crate::pool::BufferPool` (which is
 //! `Arc`/`Vec`-backed). Sized at construction with a fixed `[T; N]`; acquiring
 //! moves a buffer out and the RAII handle returns it on drop. Pure `core`: no
 //! `alloc`, no `Arc`, no OS.

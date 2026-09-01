@@ -128,6 +128,7 @@ fn h264_caps() -> Caps {
         width: Dim::Fixed(WIDTH),
         height: Dim::Fixed(HEIGHT),
         framerate: Rate::Fixed(25 << 16),
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
 }
 

@@ -343,7 +343,7 @@ pub fn find_chain_with(
 /// input side M481): `video_0` -> [`Video`](PadKind::Video), `audio_1` ->
 /// [`Audio`](PadKind::Audio), a bare `d.` / `m.` or `src_2` / `sink_2` ->
 /// [`Any`](PadKind::Any). Defined outside the std-gated `factory` module because
-/// the `no_std` fan-in trait ([`MultiInputElement::input_pad_index`]) uses it.
+/// the `no_std` fan-in trait ([`MultiInputElement::input_pad_index`](crate::fanout::MultiInputElement::input_pad_index)) uses it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PadKind {
     Video,
@@ -634,7 +634,7 @@ mod factory {
             self
         }
 
-        /// Whether this factory declared [`with_experimental`].
+        /// Whether this factory declared [`Self::with_experimental`].
         pub fn experimental(&self) -> bool {
             self.experimental
         }
@@ -838,7 +838,7 @@ mod factory {
             self
         }
 
-        /// Whether this factory declared [`with_experimental`].
+        /// Whether this factory declared [`Self::with_experimental`].
         pub fn experimental(&self) -> bool {
             self.experimental
         }
@@ -1281,7 +1281,7 @@ mod factory {
             self
         }
 
-        /// Register one source factory (a graph root for [`build_playbin`]),
+        /// Register one source factory (a graph root for [`Self::build_playbin`]),
         /// returning `&mut self` to chain calls.
         pub fn register_source(&mut self, source: SourceFactory) -> &mut Self {
             self.sources.push(source);
@@ -1420,7 +1420,7 @@ mod factory {
         /// Set the encoder chooser consulted by the `encodebin` expansion: for a
         /// coded target caps (a stream of an encoding profile), `provider(target)`
         /// names the launch elements that can produce it, most preferred first, and
-        /// [`encoder_name`](Self::encoder_name) takes the first one this build
+        /// [`encoder_choice`](Self::encoder_choice) takes the first one this build
         /// actually registered. Returns `&mut self` to chain calls.
         pub fn set_encoder_provider(&mut self, provider: EncoderProvider) -> &mut Self {
             self.encoder_provider = Some(provider);
@@ -1450,7 +1450,7 @@ mod factory {
         }
 
         /// The launch name of the muxer that writes `container`, chosen the way
-        /// [`encoder_name`](Self::encoder_name) chooses an encoder.
+        /// [`encoder_choice`](Self::encoder_choice) chooses an encoder.
         pub fn muxer_name(&self, container: &Caps) -> Option<&'static str> {
             let candidates = self
                 .muxer_provider
@@ -2487,6 +2487,7 @@ mod tests {
             width,
             height: Dim::Any,
             framerate: Rate::Any,
+            colorimetry: crate::Colorimetry::UNKNOWN,
         }
     }
 
@@ -2497,6 +2498,7 @@ mod tests {
             height: Dim::Any,
             framerate: Rate::Any,
             interlace: crate::Interlace::Any,
+            colorimetry: crate::Colorimetry::UNKNOWN,
         }
     }
 

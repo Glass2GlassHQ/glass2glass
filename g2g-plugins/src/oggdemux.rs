@@ -1492,6 +1492,7 @@ mod tests {
             height: Dim::Fixed(2),
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         assert!(d.intercept_caps(&raw).is_err());
         // The Matroska byte stream is the wrong container.

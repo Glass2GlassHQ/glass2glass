@@ -45,7 +45,7 @@ const NO_BITRATE: u64 = u64::MAX;
 /// a signal that originates on one track (a WebRTC PLI or BWE estimate arriving
 /// for a given m-line) reaches the *matching* upstream source rather than being
 /// broadcast or lost. It is the multi-input analog of the single-track
-/// [`AsyncElement::take_reconfigure`](crate::AsyncElement::take_reconfigure) /
+/// [`AsyncElement::take_reconfigure`] /
 /// [`take_bitrate`](crate::AsyncElement::take_bitrate) the linear runner polls.
 ///
 /// Cloneable and `Send` (`Arc`-backed atomics): the session task (which owns the
@@ -152,7 +152,7 @@ pub trait MultiOutputSinkExt: MultiOutputSink + Sized {
 impl<S: MultiOutputSink> MultiOutputSinkExt for S {}
 
 impl<'e> dyn MultiOutputSink + 'e {
-    /// [`MultiOutputSink::push_to`] for trait objects (the provided method
+    /// [`MultiOutputSinkExt::push_to`] for trait objects (the provided method
     /// needs `Self: Sized`).
     pub fn push_to(
         &mut self,
@@ -168,7 +168,7 @@ impl<'e> dyn MultiOutputSink + 'e {
     }
 }
 
-/// Concrete future behind [`MultiOutputSink::push_to`]: the packet slot
+/// Concrete future behind [`MultiOutputSinkExt::push_to`]: the packet slot
 /// [`MultiOutputSink::poll_push_to`] drains. No heap.
 #[allow(missing_debug_implementations)]
 pub struct PushToFuture<'a, S: MultiOutputSink + ?Sized> {
@@ -294,7 +294,7 @@ pub trait MultiOutputSource: ElementBound {
 
     /// Receive this instance's log name and a per-instance log category
     /// override, mirroring
-    /// [`AsyncElement::set_instance_name`](crate::AsyncElement::set_instance_name)
+    /// [`AsyncElement::set_instance_name`]
     /// / [`set_log_category`](crate::AsyncElement::set_log_category). Default:
     /// ignore. A session source that logs about itself stores them in a
     /// [`LogName`](crate::log::LogName).
@@ -534,7 +534,7 @@ pub trait MultiOutputElement: ElementBound {
     }
 
     /// The memory domains this fan-out accepts on its single input pad,
-    /// mirroring [`AsyncElement::input_domains`](crate::AsyncElement::input_domains).
+    /// mirroring [`AsyncElement::input_domains`].
     /// Default [`DomainSet::ALL`] (no requirement). A demux that parses host
     /// bytes narrows it to `System`, and the allocation cascade turns that into a
     /// download demand on a GPU producer feeding it.
@@ -544,7 +544,7 @@ pub trait MultiOutputElement: ElementBound {
 
     /// Receive this instance's log name and a per-instance log category
     /// override, mirroring
-    /// [`AsyncElement::set_instance_name`](crate::AsyncElement::set_instance_name)
+    /// [`AsyncElement::set_instance_name`]
     /// / [`set_log_category`](crate::AsyncElement::set_log_category). Default:
     /// ignore. A demux that logs about itself stores them in a
     /// [`LogName`](crate::log::LogName).
@@ -554,7 +554,7 @@ pub trait MultiOutputElement: ElementBound {
     fn set_log_category(&mut self, _category: alloc::string::String) {}
 
     /// Runtime properties this demux exposes (M104), mirroring
-    /// [`AsyncElement::properties`](crate::AsyncElement::properties). Default:
+    /// [`AsyncElement::properties`]. Default:
     /// none. A demux overrides this (with `set_property` / `get_property`) to be
     /// settable by name from a `gst-launch` line, the same as a transform.
     fn properties(&self) -> &'static [PropertySpec] {
@@ -754,7 +754,7 @@ pub trait MultiInputElement: ElementBound {
     /// and re-cascades up that branch independently (a CUDA-resident interleave
     /// muxer asking each video pad for device buffers, say). Default `None`: a
     /// plain container muxer imposes no per-pad allocation, so the branch keeps
-    /// its own. Mirrors [`AsyncElement::propose_allocation`](crate::AsyncElement::propose_allocation),
+    /// its own. Mirrors [`AsyncElement::propose_allocation`],
     /// but per input pad rather than on the single input.
     fn propose_allocation_for_input(
         &self,
@@ -795,7 +795,7 @@ pub trait MultiInputElement: ElementBound {
     fn configure_allocation_for_output(&mut self, _params: &crate::query::AllocationParams) {}
 
     /// The memory domains this fan-in accepts on **every** input pad, mirroring
-    /// [`AsyncElement::input_domains`](crate::AsyncElement::input_domains).
+    /// [`AsyncElement::input_domains`].
     /// Default [`DomainSet::ALL`] (no requirement). A muxer that reads host
     /// memory narrows it to `System`, and the allocation cascade turns that into
     /// a download demand on each GPU producer feeding a pad. Per-pad domains are
@@ -808,7 +808,7 @@ pub trait MultiInputElement: ElementBound {
 
     /// Receive this instance's log name and a per-instance log category
     /// override, mirroring
-    /// [`AsyncElement::set_instance_name`](crate::AsyncElement::set_instance_name)
+    /// [`AsyncElement::set_instance_name`]
     /// / [`set_log_category`](crate::AsyncElement::set_log_category). Default:
     /// ignore. A muxer that logs about itself stores them in a
     /// [`LogName`](crate::log::LogName).
@@ -818,7 +818,7 @@ pub trait MultiInputElement: ElementBound {
     fn set_log_category(&mut self, _category: alloc::string::String) {}
 
     /// Runtime properties this muxer exposes (M104), mirroring
-    /// [`AsyncElement::properties`](crate::AsyncElement::properties). Default:
+    /// [`AsyncElement::properties`]. Default:
     /// none. A muxer overrides this (with `set_property` / `get_property`) to be
     /// settable by name from a `gst-launch` line, the same as a transform.
     fn properties(&self) -> &'static [PropertySpec] {
@@ -837,7 +837,7 @@ pub trait MultiInputElement: ElementBound {
 
     /// Static introspection metadata for this muxer (M178), the `gst-inspect`
     /// "Factory Details" (long-name / classification / description / author),
-    /// mirroring [`AsyncElement::metadata`](crate::AsyncElement::metadata).
+    /// mirroring [`AsyncElement::metadata`].
     /// Default: empty. A muxer overrides it with a `const ElementMetadata`.
     fn metadata(&self) -> ElementMetadata {
         ElementMetadata::default()
@@ -1150,6 +1150,7 @@ mod tests {
             height: Dim::Fixed(16),
             framerate: Rate::Fixed(30 << 16),
             interlace: crate::Interlace::Any,
+            colorimetry: crate::Colorimetry::UNKNOWN,
         }
     }
 

@@ -306,6 +306,7 @@ impl AsyncElement for D3D11Sink {
             height: Dim::Any,
             framerate: Rate::Any,
             interlace: Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }))
     }
 
@@ -441,6 +442,7 @@ impl PadTemplates for D3D11Sink {
             height: Dim::Any,
             framerate: Rate::Any,
             interlace: Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         Vec::from([PadTemplate::sink(CapsSet::one(nv12))])
     }
@@ -746,6 +748,7 @@ mod tests {
             height: Dim::Fixed(h),
             framerate: Rate::Any,
             interlace: Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 
@@ -757,6 +760,7 @@ mod tests {
             width: Dim::Fixed(640),
             height: Dim::Fixed(480),
             framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         assert_eq!(sink.intercept_caps(&h264), Ok(h264));
     }
@@ -778,6 +782,7 @@ mod tests {
                 height: Dim::Any,
                 framerate: Rate::Any,
                 interlace: Interlace::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
             }]
         );
     }
@@ -791,6 +796,7 @@ mod tests {
             height: Dim::Fixed(480),
             framerate: Rate::Any,
             interlace: Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         assert_eq!(
             sink.configure_pipeline(&i420).err(),
@@ -828,6 +834,7 @@ mod tests {
                     height: Dim::Any,
                     framerate: Rate::Any,
                     interlace: Interlace::Any,
+                    colorimetry: g2g_core::Colorimetry::UNKNOWN,
                 }))])
             }
         }
@@ -840,6 +847,7 @@ mod tests {
                     height: Dim::Any,
                     framerate: Rate::Any,
                     interlace: Interlace::Any,
+                    colorimetry: g2g_core::Colorimetry::UNKNOWN,
                 }))])
             }
         }

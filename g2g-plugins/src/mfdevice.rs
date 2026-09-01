@@ -146,6 +146,7 @@ fn mode_caps(modes: &[VideoConfig]) -> CapsSet {
             height: Dim::Fixed(mode.height),
             framerate,
             interlace: Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         });
     }
     CapsSet::from_alternatives(alternatives)
@@ -218,6 +219,7 @@ mod tests {
                 height: Dim::Fixed(720),
                 framerate: Rate::Fixed(30 << 16),
                 interlace: Interlace::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
             }
         );
         assert!(matches!(

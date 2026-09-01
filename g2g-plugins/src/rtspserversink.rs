@@ -72,6 +72,7 @@ fn h264_any() -> Caps {
         width: Dim::Any,
         height: Dim::Any,
         framerate: Rate::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
 }
 
@@ -310,6 +311,11 @@ pub struct RtspServerSink {
     packets_sent: u64,
     sender_reports_sent: u64,
     eos_seen: bool,
+    /// Last SPS and PPS seen in the stream, offered in the SDP as
+    /// `sprop-parameter-sets`. Refreshed as they flow, so a mid-stream
+    /// resolution change reaches players that DESCRIBE after it.
+    sps: Option<Vec<u8>>,
+    pps: Option<Vec<u8>>,
 }
 
 impl RtspServerSink {
@@ -333,6 +339,8 @@ impl RtspServerSink {
             packets_sent: 0,
             sender_reports_sent: 0,
             eos_seen: false,
+            sps: None,
+            pps: None,
         }
     }
 
@@ -378,8 +386,23 @@ impl RtspServerSink {
     }
 
     fn responder(&self, server_rtp_port: u16) -> RtspResponder {
-        RtspResponder::new(sdp_h264(self.payload_type), server_rtp_port, self.ssrc)
+        let sdp = sdp_h264(self.payload_type, self.sps.as_deref(), self.pps.as_deref());
+        RtspResponder::new(sdp, server_rtp_port, self.ssrc)
             .with_session_timeout_secs(self.session_timeout_secs())
+    }
+
+    /// Cache the parameter sets an access unit carries, so the SDP offered to the
+    /// next player describes the stream. Called before the handshake work in
+    /// `process`, so the very first buffer's SPS / PPS are already in hand when
+    /// the first DESCRIBE is answered.
+    fn latch_parameter_sets(&mut self, au: &[u8]) {
+        let (sps, pps) = crate::annexb::h264_parameter_sets(au);
+        if let Some(s) = sps.into_iter().next() {
+            self.sps = Some(s);
+        }
+        if let Some(p) = pps.into_iter().next() {
+            self.pps = Some(p);
+        }
     }
 
     pub fn frames_sent(&self) -> u64 {
@@ -761,6 +784,10 @@ impl AsyncElement for RtspServerSink {
                     let slice = frame
                         .domain
                         .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
+                    // Before any handshake: the SDP a DESCRIBE gets back has to
+                    // describe this stream, and the first DESCRIBE is answered
+                    // while the first buffer blocks below.
+                    self.latch_parameter_sets(slice);
                     // Block on the first buffer until one player connects + PLAYs,
                     // then serve every connected player without blocking.
                     if !self.started {
@@ -821,7 +848,7 @@ mod tests {
         let (server, _) = listener.accept().await.unwrap();
         let client = Client::new(
             server,
-            RtspResponder::new(sdp_h264(96), 6000, 0x1234_5678),
+            RtspResponder::new(sdp_h264(96, None, None), 6000, 0x1234_5678),
             std::net::IpAddr::from([127, 0, 0, 1]),
         );
         (client, peer)

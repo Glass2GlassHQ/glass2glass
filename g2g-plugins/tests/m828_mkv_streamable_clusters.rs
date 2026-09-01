@@ -89,6 +89,7 @@ fn vp9_caps() -> Caps {
         width: Dim::Fixed(320),
         height: Dim::Fixed(240),
         framerate: Rate::Fixed(25 << 16),
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
 }
 

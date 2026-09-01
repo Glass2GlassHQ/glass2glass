@@ -78,6 +78,7 @@ mod av1 {
                 width: Dim::Fixed(WIDTH),
                 height: Dim::Fixed(HEIGHT),
                 framerate: Rate::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
             })
             .expect("rav1d configures for the fixture geometry");
 
@@ -154,6 +155,7 @@ mod mjpeg {
                 width: Dim::Any,
                 height: Dim::Any,
                 framerate: Rate::Fixed(30 << 16),
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
             })
             .expect("mjpegdec configures with recovered geometry");
 
@@ -295,6 +297,7 @@ mod ffmpeg_codecs {
                 width: Dim::Any,
                 height: Dim::Any,
                 framerate: Rate::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
             })
             .expect("h264parse configures");
         let mut sink = CaptureSink::default();
@@ -318,6 +321,7 @@ mod ffmpeg_codecs {
             width: Dim::Fixed(WIDTH),
             height: Dim::Fixed(HEIGHT),
             framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         let narrowed = decoder.intercept_caps(&upstream).expect("h264 supported");
         decoder

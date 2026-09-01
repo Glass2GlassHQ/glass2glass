@@ -72,6 +72,7 @@ fn h264_caps() -> Caps {
         width: Dim::Any,
         height: Dim::Any,
         framerate: Rate::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
 }
 
@@ -254,6 +255,7 @@ async fn autoplug_builds_a_p010_decoder_for_a_p010_sink() {
         width: Dim::Fixed(W as u32),
         height: Dim::Fixed(H as u32),
         framerate: Rate::Fixed(25 << 16),
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     };
     let strict_p010 = |c: &Caps| {
         matches!(
@@ -276,6 +278,7 @@ async fn autoplug_builds_a_p010_decoder_for_a_p010_sink() {
         height: Dim::Fixed(H as u32),
         framerate: Rate::Fixed(25 << 16),
         interlace: g2g_core::Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     };
     let mut sink = Collect::default();
     DynAsyncElement::process(dec, PipelinePacket::CapsChanged(p010), &mut sink)

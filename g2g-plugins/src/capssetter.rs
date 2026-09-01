@@ -119,6 +119,7 @@ impl CapsSetter {
                     height,
                     framerate,
                     interlace,
+                    ..
                 },
                 Caps::RawVideo {
                     format: set_format,
@@ -126,6 +127,7 @@ impl CapsSetter {
                     height: set_height,
                     framerate: set_framerate,
                     interlace: set_interlace,
+                    ..
                 },
             ) => Ok(Caps::RawVideo {
                 format: if self.names(FORMAT_FIELD) {
@@ -153,6 +155,7 @@ impl CapsSetter {
                 } else {
                     *interlace
                 },
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
             }),
             (
                 Caps::Audio {

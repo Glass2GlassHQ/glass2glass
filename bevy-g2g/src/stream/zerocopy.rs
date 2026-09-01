@@ -86,6 +86,7 @@ impl EncodeState {
             height: Dim::Fixed(settings.height),
             framerate: Rate::Fixed(settings.fps << 16),
             interlace: Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         AsyncElement::configure_pipeline(&mut nvenc, &caps)?;
         Ok(Self {

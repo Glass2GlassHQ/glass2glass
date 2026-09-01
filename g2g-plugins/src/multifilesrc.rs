@@ -77,6 +77,7 @@ impl MultiFileSrc {
                     min_q16: 1 << 16,
                     max_q16: 240 << 16,
                 },
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
             },
             start_index: 0,
             // -1 means "until the first missing file".

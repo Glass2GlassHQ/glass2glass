@@ -35,7 +35,7 @@ async fn crops_rgba_source_to_rect() {
                 format: RawVideoFormat::Rgba8,
                 width: Dim::Fixed(4),
                 height: Dim::Fixed(4),
-                framerate: Rate::Fixed(r), interlace: _ } if *r == 30 << 16
+                framerate: Rate::Fixed(r), .. } if *r == 30 << 16
         )),
         "sink saw RGBA at the crop geometry with framerate preserved, got {changes:?}"
     );

@@ -96,7 +96,7 @@ impl Alpha {
             width: Dim::Fixed(w),
             height: Dim::Fixed(h),
             framerate,
-            interlace: _,
+            ..
         } = caps
         else {
             return Err(G2gError::CapsMismatch);
@@ -136,6 +136,7 @@ impl AsyncElement for Alpha {
                 height: Dim::Any,
                 framerate: Rate::Any,
                 interlace: g2g_core::Interlace::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
             };
             if let Ok(narrowed) = upstream_caps.intersect(&candidate) {
                 return Ok(narrowed);
@@ -198,6 +199,7 @@ impl AsyncElement for Alpha {
                         height: Dim::Fixed(h),
                         framerate: rate,
                         interlace: g2g_core::Interlace::Any,
+                        colorimetry: g2g_core::Colorimetry::UNKNOWN,
                     };
                     if self.last_caps.as_ref() != Some(&new_caps) {
                         out.push(PipelinePacket::CapsChanged(new_caps.clone()))
@@ -294,6 +296,7 @@ impl PadTemplates for Alpha {
             height: Dim::Any,
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         let set = CapsSet::from_alternatives(FORMATS.map(any_geometry).to_vec());
         Vec::from([PadTemplate::sink(set.clone()), PadTemplate::source(set)])

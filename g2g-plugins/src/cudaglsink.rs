@@ -71,9 +71,9 @@ use g2g_core::memory::OwnedCudaBuffer;
 use g2g_core::metrics::{monotonic_ns, LatencyHistogram, LatencySnapshot};
 use g2g_core::{
     AllocationParams, AsyncElement, BusHandle, Caps, CapsConstraint, CapsSet, ClockCandidate,
-    ClockPriority, ClockSync, ConfigureOutcome, Dim, Frame, G2gError, HardwareError, MemoryDomain,
-    OutputSink, PipelineClock, PipelinePacket, PresentationPacer, PropError, PropValue,
-    PropertySpec, Rate, RawVideoFormat, PACING_PROPERTIES,
+    ClockPriority, ClockSync, Colorimetry, ConfigureOutcome, Dim, Frame, G2gError, HardwareError,
+    MemoryDomain, OutputSink, PipelineClock, PipelinePacket, PresentationPacer, PropError,
+    PropValue, PropertySpec, Rate, RawVideoFormat, PACING_PROPERTIES,
 };
 
 use crate::clock::wait_to_present;
@@ -114,6 +114,8 @@ pub struct CudaGlSink {
     worker: Option<JoinHandle<()>>,
     width: u32,
     height: u32,
+    /// Colorimetry the worker built its convert program for.
+    colorimetry: Colorimetry,
     frames_presented: Arc<AtomicU64>,
     latency: Arc<LatencyHistogram>,
     /// PTS pacing + QoS late-drop, on top of the worker's swap-paced ack: idle
@@ -151,6 +153,7 @@ impl CudaGlSink {
             worker: None,
             width: 0,
             height: 0,
+            colorimetry: Colorimetry::UNKNOWN,
             frames_presented: Arc::new(AtomicU64::new(0)),
             latency: Arc::new(LatencyHistogram::new()),
             pacer: PresentationPacer::new(),
@@ -262,6 +265,7 @@ impl AsyncElement for CudaGlSink {
             height: Dim::Any,
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }))
     }
 
@@ -318,13 +322,14 @@ impl AsyncElement for CudaGlSink {
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         // NV12 only. Caps do not encode the memory domain, so the Cuda-vs-
         // System distinction is checked per frame in `process`.
-        let (w, h) = match absolute_caps {
+        let (w, h, colorimetry) = match absolute_caps {
             Caps::RawVideo {
                 format: RawVideoFormat::Nv12,
                 width: Dim::Fixed(w),
                 height: Dim::Fixed(h),
+                colorimetry,
                 ..
-            } => (*w, *h),
+            } => (*w, *h, *colorimetry),
             _ => return Err(G2gError::CapsMismatch),
         };
         if w % 2 != 0 || h % 2 != 0 {
@@ -332,9 +337,11 @@ impl AsyncElement for CudaGlSink {
         }
 
         // Mid-stream geometry change: same dims is a no-op; new dims tear down
-        // the worker and respawn (M16 5j), as WaylandSink does.
+        // the worker and respawn (M16 5j), as WaylandSink does. A colorimetry
+        // refinement goes the same way: its weights are compiled into the
+        // worker's convert program.
         if self.worker.is_some() {
-            if w == self.width && h == self.height {
+            if w == self.width && h == self.height && colorimetry == self.colorimetry {
                 return Ok(ConfigureOutcome::Accepted);
             }
             self.shutdown();
@@ -364,7 +371,8 @@ impl AsyncElement for CudaGlSink {
                     latency,
                     ready: ready_for_worker,
                 };
-                if let Err(e) = run_gl_window(CudaPresenter, params, channels) {
+                let presenter = CudaPresenter { colorimetry };
+                if let Err(e) = run_gl_window(presenter, params, channels) {
                     std::eprintln!("{WORKER_NAME} worker error: {e:?}");
                 }
             })
@@ -380,6 +388,7 @@ impl AsyncElement for CudaGlSink {
         self.worker = Some(join);
         self.width = w;
         self.height = h;
+        self.colorimetry = colorimetry;
         Ok(ConfigureOutcome::Accepted)
     }
 
@@ -448,13 +457,19 @@ impl AsyncElement for CudaGlSink {
 /// The decoded planes are already in device memory, so this sink's "upload" is
 /// the CUDA-GL interop copy into the NV12 textures; the window, the EGL context
 /// and the present are the shared worker's ([`crate::glwindow`]).
-struct CudaPresenter;
+struct CudaPresenter {
+    colorimetry: Colorimetry,
+}
 
 impl FramePresenter for CudaPresenter {
     type Frame = OwnedCudaBuffer;
 
     fn mode(&self) -> GlMode {
         GlMode::Nv12
+    }
+
+    fn colorimetry(&self) -> Colorimetry {
+        self.colorimetry
     }
 
     fn present(&mut self, gl: &mut GlState, frame: &OwnedCudaBuffer) -> Result<(), G2gError> {
@@ -474,6 +489,7 @@ mod tests {
             height: Dim::Fixed(h),
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 
@@ -485,6 +501,7 @@ mod tests {
             width: Dim::Fixed(640),
             height: Dim::Fixed(480),
             framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         assert_eq!(sink.intercept_caps(&h264), Ok(h264));
     }
@@ -498,6 +515,7 @@ mod tests {
             height: Dim::Fixed(480),
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         assert_eq!(
             sink.configure_pipeline(&i420).err(),

@@ -35,6 +35,7 @@ fn raw(format: RawVideoFormat, w: u32, h: u32) -> Caps {
         height: Dim::Fixed(h),
         framerate: Rate::Fixed(30),
         interlace: g2g_core::Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
 }
 
@@ -127,6 +128,7 @@ fn matches_videoconvert_then_videoscale() {
         RawVideoFormat::Rgb8,
         8,
         8,
+        g2g_core::Colorimetry::UNKNOWN,
     );
 
     let mut element = VideoConvertScale::new(RawVideoFormat::Rgb8, 8, 8);
@@ -174,6 +176,7 @@ fn the_fused_pass_matches_scaling_then_converting() {
         RawVideoFormat::Rgb8,
         4,
         4,
+        g2g_core::Colorimetry::UNKNOWN,
     );
 
     let mut element = VideoConvertScale::auto();

@@ -89,6 +89,7 @@ impl PyTransform {
                 height: Dim::Any,
                 framerate: Rate::Any,
                 interlace: g2g_core::Interlace::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
             },
             produce: None,
             draw_label: false,
@@ -418,6 +419,7 @@ impl PadTemplates for PyTransform {
             height: Dim::Any,
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         let set = CapsSet::one(rgba);
         Vec::from([PadTemplate::sink(set.clone()), PadTemplate::source(set)])

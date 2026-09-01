@@ -147,6 +147,7 @@ impl VideoRate {
             height: Dim::Fixed(h),
             framerate: Rate::Fixed(self.rate_q16),
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 
@@ -566,6 +567,7 @@ mod tests {
             height: Dim::Fixed(32),
             framerate: Rate::Fixed(30 << 16),
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         assert_eq!(
             bad.configure_pipeline(&caps).expect_err("zero fps"),
@@ -578,6 +580,7 @@ mod tests {
             width: Dim::Fixed(64),
             height: Dim::Fixed(32),
             framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         assert_eq!(
             r.configure_pipeline(&h264).expect_err("compressed"),
@@ -593,6 +596,7 @@ mod tests {
             height: Dim::Fixed(240),
             framerate: rate,
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 

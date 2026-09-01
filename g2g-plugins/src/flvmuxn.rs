@@ -370,6 +370,7 @@ mod tests {
             width: Dim::Fixed(320),
             height: Dim::Fixed(240),
             framerate: g2g_core::Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 
@@ -492,6 +493,7 @@ mod tests {
             height: Dim::Fixed(2),
             framerate: g2g_core::Rate::Any,
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         assert!(mux.intercept_caps(0, &raw).is_err());
     }

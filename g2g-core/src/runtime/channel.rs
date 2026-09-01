@@ -6,6 +6,8 @@ use core::task::{Context, Poll, Waker};
 
 use spin::Mutex;
 
+#[cfg(feature = "std")]
+use crate::caps::Caps;
 use crate::element::{OutputSink, PushOutcome, QosMessage, Reconfigure};
 use crate::error::G2gError;
 use crate::frame::PipelinePacket;
@@ -73,13 +75,25 @@ impl<T> Drop for Sender<T> {
 
 impl<T> Drop for Receiver<T> {
     fn drop(&mut self) {
-        let mut g = self.inner.lock();
-        g.receivers -= 1;
-        if g.receivers == 0 {
-            if let Some(w) = g.send_waker.take() {
-                w.wake();
+        // Whatever is still queued can never be received now, so it is released
+        // here rather than living on until the last sender drops. A queued value
+        // can own the only handle something else is waiting on (a mutation
+        // request carries the reply sender its caller is parked on), and that
+        // wait would otherwise never end. Taken under the lock and dropped
+        // outside it: a value's own `Drop` may lock another channel.
+        let orphaned = {
+            let mut g = self.inner.lock();
+            g.receivers -= 1;
+            if g.receivers == 0 {
+                if let Some(w) = g.send_waker.take() {
+                    w.wake();
+                }
+                core::mem::take(&mut g.queue)
+            } else {
+                VecDeque::new()
             }
-        }
+        };
+        drop(orphaned);
     }
 }
 
@@ -309,6 +323,188 @@ pub struct LinkSender {
     /// observer tap so a live consumer reads this edge's traffic mid-run.
     /// `None` (zero cost) unless the runner installed them.
     pub(crate) counters: Option<Arc<EdgeCounters>>,
+    /// The mutation endpoint the [`SenderSink`] built over this link adopts
+    /// (M1115). `None` (one relaxed load per push, no gate) unless the runner
+    /// was asked for a [`GraphMutator`](crate::runtime::GraphMutator).
+    #[cfg(feature = "std")]
+    pub(crate) mutation: Option<Arc<ProducerEndpoint>>,
+}
+
+/// The retargetable producing end of one edge (M1115). The arm pushing into the
+/// edge holds it through its [`SenderSink`]; the graph mutator holds the same
+/// `Arc` and uses it to stop that producer at a packet boundary, take its
+/// [`LinkSender`] away, and hand back a different one, so a transform can be
+/// spliced onto or lifted off a running edge.
+///
+/// Per push the producer pays one relaxed load of `pending`; everything else
+/// happens only while a mutation is in flight. `caps` is the shape flowing on
+/// the edge right now, updated as each `CapsChanged` crosses, because the
+/// negotiated solution is stale once a mid-stream re-solve has moved it.
+#[cfg(feature = "std")]
+#[derive(Debug, Default)]
+pub(crate) struct ProducerEndpoint {
+    pending: core::sync::atomic::AtomicBool,
+    state: Mutex<EndpointState>,
+}
+
+#[cfg(feature = "std")]
+#[derive(Debug, Default)]
+struct EndpointState {
+    /// The mutator wants the producer to stop at its next packet boundary.
+    park: bool,
+    /// The producer has stopped and left its link in `detached`.
+    parked: bool,
+    /// The link the producer gave up (on parking, or on its arm ending).
+    detached: Option<LinkSender>,
+    /// The link the producer picks up when it resumes.
+    staged: Option<LinkSender>,
+    /// The producer's arm has ended; nothing will park again.
+    gone: bool,
+    /// The mutator wants this link when the producer's arm ends (a remove
+    /// waiting for the element it closed to finish draining). Without it an
+    /// ending arm drops its link, which is what closes the channel and ends the
+    /// consumer below it, so the claim is never taken by default.
+    claimed: bool,
+    producer: Option<Waker>,
+    mutator: Option<Waker>,
+    caps: Option<Caps>,
+}
+
+#[cfg(feature = "std")]
+impl ProducerEndpoint {
+    pub(crate) fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    /// Whether the producer must take the slow path on its next packet: the
+    /// whole per-push cost of being mutable.
+    #[inline]
+    fn pending(&self) -> bool {
+        self.pending.load(core::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// The caps flowing on this edge right now.
+    pub(crate) fn caps(&self) -> Option<Caps> {
+        self.state.lock().caps.clone()
+    }
+
+    pub(crate) fn set_caps(&self, caps: &Caps) {
+        self.state.lock().caps = Some(caps.clone());
+    }
+
+    /// Ask for this producer's link when its arm ends, rather than letting the
+    /// arm drop it. Called before the mutator closes the element's input.
+    pub(crate) fn claim_on_end(&self) {
+        self.state.lock().claimed = true;
+    }
+
+    /// Ask the producer to stop at its next packet boundary and leave its link
+    /// behind. Pairs with [`poll_detached`](Self::poll_detached).
+    pub(crate) fn request_park(&self) {
+        let mut guard = self.state.lock();
+        guard.park = true;
+        // Raised under the lock, like every other write to it, so it cannot land
+        // after a producer that is concurrently clearing it decides there is
+        // nothing to do (see `poll_producer`).
+        self.pending
+            .store(true, core::sync::atomic::Ordering::Release);
+    }
+
+    /// The link the producer gave up, once it has. `Err` once the producer's arm
+    /// has ended without leaving one, i.e. the run is over.
+    pub(crate) fn poll_detached(&self, cx: &mut Context<'_>) -> Poll<Result<LinkSender, G2gError>> {
+        let mut g = self.state.lock();
+        if let Some(link) = g.detached.take() {
+            return Poll::Ready(Ok(link));
+        }
+        if g.gone {
+            return Poll::Ready(Err(G2gError::Shutdown));
+        }
+        g.mutator = Some(cx.waker().clone());
+        Poll::Pending
+    }
+
+    /// Let the producer run again, on `replacement`. Without one it resumes on
+    /// the dead link it parked with and fails its arm on the next push, so a
+    /// mutation that has already taken a link away passes back what the producer
+    /// should use, its own included when it is rolling back.
+    pub(crate) fn unpark(&self, replacement: Option<LinkSender>) {
+        let waker = {
+            let mut g = self.state.lock();
+            // Clears only the request this call answers. A park asked for after
+            // this point is a later operation's and belongs to whoever set it.
+            g.park = false;
+            g.staged = replacement;
+            self.pending
+                .store(true, core::sync::atomic::Ordering::Release);
+            g.producer.take()
+        };
+        if let Some(w) = waker {
+            w.wake();
+        }
+    }
+
+    /// The producer's own side of the gate: parks, resumes, or retargets. `link`
+    /// is the [`SenderSink`]'s current link, replaced in place on a retarget.
+    ///
+    /// Taking the staged link and parking again are separate steps on purpose.
+    /// A producer running on its own thread can still be on its way back from a
+    /// resume when the next operation asks it to park, so it arrives here with
+    /// both a staged link and a standing request; the request has to survive,
+    /// since it was never the one `unpark` answered. (Cooperatively the two
+    /// cannot cross: the arms are polled before the mutation service, so the
+    /// producer has always taken the staged link by the time the next operation
+    /// runs.)
+    fn poll_producer(&self, cx: &mut Context<'_>, link: &mut LinkSender) -> Poll<()> {
+        let mut g = self.state.lock();
+        if let Some(staged) = g.staged.take() {
+            *link = staged;
+            g.parked = false;
+        }
+        if g.park {
+            if !g.parked {
+                // The producer must really give the link up: a remove closes the
+                // parked element's input by dropping this, the last sender.
+                g.detached = Some(core::mem::replace(link, closed_link()));
+                g.parked = true;
+                if let Some(w) = g.mutator.take() {
+                    w.wake();
+                }
+            }
+            g.producer = Some(cx.waker().clone());
+            return Poll::Pending;
+        }
+        self.pending
+            .store(false, core::sync::atomic::Ordering::Relaxed);
+        Poll::Ready(())
+    }
+
+    /// The producing arm has ended. A claimed link is left here (a clone, so the
+    /// count of senders on the channel is unchanged) for the remove waiting on
+    /// it; an unclaimed one is not, so an arm that ends on its own still closes
+    /// the channel behind it.
+    fn producer_gone(&self, link: &LinkSender) {
+        let waker = {
+            let mut g = self.state.lock();
+            g.gone = true;
+            if g.claimed && g.detached.is_none() {
+                g.detached = Some(link.clone());
+            }
+            g.mutator.take()
+        };
+        if let Some(w) = waker {
+            w.wake();
+        }
+    }
+}
+
+/// A sender whose receiver is already gone, parked in a [`SenderSink`] while its
+/// producer is stopped so the real link can be handed to the mutator.
+#[cfg(feature = "std")]
+fn closed_link() -> LinkSender {
+    let (tx, rx) = link(1);
+    drop(rx);
+    tx
 }
 
 /// Send-time stamps for the packets queued on one link, shared between its
@@ -352,6 +548,26 @@ impl LinkSender {
         self.counters = Some(counters);
     }
 
+    /// Give (or take away) the mutation endpoint the [`SenderSink`] built over
+    /// this link adopts. Set by the runner per mutable edge, and cleared by the
+    /// mutator on a link it re-homes, so an endpoint is never adopted twice.
+    #[cfg(feature = "std")]
+    pub(crate) fn set_mutation(&mut self, endpoint: Option<Arc<ProducerEndpoint>>) {
+        self.mutation = endpoint;
+    }
+
+    /// Queue a `CapsChanged` on this link from outside any element's push path:
+    /// the mutator announcing the shape a splice changed the edge to, ordered
+    /// behind everything already queued and ahead of everything the retargeted
+    /// producer sends next.
+    #[cfg(feature = "std")]
+    pub(crate) async fn send_caps(&self, caps: Caps) -> Result<(), G2gError> {
+        self.data
+            .send(PipelinePacket::CapsChanged(caps))
+            .await
+            .map_err(|_| G2gError::Shutdown)
+    }
+
     /// Record one dropped frame, if a counter is installed.
     fn record_drop(&self) {
         if let Some(c) = &self.dropped {
@@ -392,7 +608,7 @@ pub(crate) fn packet_bytes(packet: &PipelinePacket) -> u64 {
 /// Downstream end of a bidirectional inter-element link. Held by the
 /// consuming element (or the runner loop driving it). `request_reconfigure`
 /// fires an upstream signal that the producer observes on its next
-/// [`OutputSink::push`].
+/// [`OutputSinkExt::push`](crate::element::OutputSinkExt::push).
 #[derive(Debug)]
 pub struct LinkReceiver {
     pub(crate) data: Receiver<PipelinePacket>,
@@ -447,7 +663,7 @@ impl LinkReceiver {
     }
 
     /// Latest-wins QoS signal (M174): the consuming sink reports it ran behind
-    /// the clock; the producer observes it on its next [`OutputSink::push`] as
+    /// the clock; the producer observes it on its next [`OutputSinkExt::push`](crate::element::OutputSinkExt::push) as
     /// [`PushOutcome::Qos`] and may skip ahead to shed load.
     pub fn request_qos(&self, q: QosMessage) {
         self.qos.store(q);
@@ -455,7 +671,7 @@ impl LinkReceiver {
 
     /// Latest-wins target bitrate (bits/second): a downstream WebRTC sink reports
     /// its congestion-control / BWE estimate; the producing encoder observes it on
-    /// its next [`OutputSink::push`] as [`PushOutcome::Bitrate`] and retargets.
+    /// its next [`OutputSinkExt::push`](crate::element::OutputSinkExt::push) as [`PushOutcome::Bitrate`] and retargets.
     pub fn request_bitrate(&self, bps: u32) {
         self.bitrate.store(bps);
     }
@@ -511,6 +727,8 @@ fn build_link(capacity: usize, transit: Option<TransitRing>) -> (LinkSender, Lin
             probe: ProbeSlot::default(),
             transit: transit.clone(),
             counters: None,
+            #[cfg(feature = "std")]
+            mutation: None,
         },
         LinkReceiver {
             data: data_rx,
@@ -640,6 +858,11 @@ pub struct SenderSink {
     /// In-flight push phase, so `poll_push` runs the pre-send steps exactly
     /// once per packet and a blocked send resumes where it left off.
     push_phase: PushPhase,
+    /// M1115: the mutation gate this producer pushes through, when the run was
+    /// started with a [`GraphMutator`](crate::runtime::GraphMutator). Adopted
+    /// from the link this adapter was built over, and kept across a retarget.
+    #[cfg(feature = "std")]
+    endpoint: Option<Arc<ProducerEndpoint>>,
 }
 
 /// Tell the producer feeding `in_rx` that this sink applies an
@@ -704,6 +927,8 @@ impl SenderSink {
         // interceptor on the edge (via the runner/observer) sees this adapter's
         // packets. A bare link has an empty slot: pass-through, no cost.
         let probe = link.probe.clone();
+        #[cfg(feature = "std")]
+        let endpoint = link.mutation.clone();
         Self {
             link,
             probe,
@@ -716,6 +941,8 @@ impl SenderSink {
             eos_forwarded: false,
             push_wait_probe: None,
             push_phase: PushPhase::Idle,
+            #[cfg(feature = "std")]
+            endpoint,
         }
     }
 
@@ -887,6 +1114,18 @@ impl SenderSink {
     }
 }
 
+/// M1115: an arm that ends leaves its link on its mutation endpoint, so a
+/// remove waiting for the removed element to drain gets the output link it was
+/// pushing through and can hand it to the producer that now bypasses it.
+#[cfg(feature = "std")]
+impl Drop for SenderSink {
+    fn drop(&mut self) {
+        if let Some(endpoint) = &self.endpoint {
+            endpoint.producer_gone(&self.link);
+        }
+    }
+}
+
 impl OutputSink for SenderSink {
     fn begin_push(&mut self) {
         // A cancelled push may have parked mid-send; its packet died with its
@@ -906,6 +1145,23 @@ impl OutputSink for SenderSink {
         } = self.push_phase
         {
             return self.poll_blocking_send(cx, packet_slot, bytes, blocked_since, stamped);
+        }
+        // M1115: the mutation gate, between packets. One relaxed load while no
+        // mutation is in flight; a parked producer waits here holding the packet
+        // it has not sent, and resumes on whichever link the mutator staged.
+        #[cfg(feature = "std")]
+        if self.endpoint.as_ref().is_some_and(|e| e.pending()) {
+            // Cloned only here, so an ordinary push pays the load and nothing
+            // else: the gate needs the endpoint while the link it retargets is
+            // borrowed mutably.
+            let endpoint = self.endpoint.clone().expect("checked above");
+            if endpoint.poll_producer(cx, &mut self.link).is_pending() {
+                return Poll::Pending;
+            }
+            // The link may have been swapped (possibly more than once, if
+            // operations came back to back), so the probe is re-read here rather
+            // than tracked: this runs once per operation, not per packet.
+            self.probe = self.link.probe.clone();
         }
         let packet = packet_slot
             .as_mut()
@@ -945,9 +1201,17 @@ impl OutputSink for SenderSink {
             self.eos_forwarded = true;
         }
         // M980: keep the caps this link is carrying, so an observer reads the
-        // shape data actually flows under, not just the solved one.
-        if let (PipelinePacket::CapsChanged(caps), Some(c)) = (&*packet, &self.link.counters) {
-            c.record_caps(caps);
+        // shape data actually flows under, not just the solved one. M1115 keeps
+        // the same shape on the mutation endpoint, where a splice reads what is
+        // flowing right now rather than what negotiation settled.
+        if let PipelinePacket::CapsChanged(caps) = &*packet {
+            if let Some(c) = &self.link.counters {
+                c.record_caps(caps);
+            }
+            #[cfg(feature = "std")]
+            if let Some(endpoint) = &self.endpoint {
+                endpoint.set_caps(caps);
+            }
         }
         // The frame's age as its element emits it, the number that catches an
         // element buffering frames internally. Skipped for unstamped frames.
@@ -1095,6 +1359,7 @@ mod link_tests {
             width: Dim::Fixed(1280),
             height: Dim::Fixed(720),
             framerate: Rate::Any,
+            colorimetry: crate::Colorimetry::UNKNOWN,
         }
     }
 

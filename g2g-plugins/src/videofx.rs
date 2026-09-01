@@ -71,7 +71,7 @@ pub(crate) fn accept_input<F: PixelFilter>(
         width: Dim::Fixed(w),
         height: Dim::Fixed(h),
         framerate,
-        interlace: _,
+        ..
     } = caps
     else {
         return Err(G2gError::CapsMismatch);
@@ -136,6 +136,7 @@ pub(crate) fn any_geometry(format: RawVideoFormat) -> Caps {
         height: Dim::Any,
         framerate: Rate::Any,
         interlace: Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
 }
 
@@ -192,6 +193,7 @@ pub(crate) fn drive<'a, F: PixelFilter>(
                     height: Dim::Fixed(out_h),
                     framerate: rate,
                     interlace: Interlace::Any,
+                    colorimetry: g2g_core::Colorimetry::UNKNOWN,
                 };
                 if filter.state().last_caps.as_ref() != Some(&new_caps) {
                     push_control(out, || PipelinePacket::CapsChanged(new_caps.clone())).await?;

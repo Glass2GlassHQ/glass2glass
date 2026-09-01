@@ -400,6 +400,7 @@ mod combiner {
             width: g2g_core::Dim::Any,
             height: g2g_core::Dim::Any,
             framerate: g2g_core::Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 

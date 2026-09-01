@@ -616,6 +616,7 @@ mod tests {
             height: g2g_core::Dim::Fixed(h),
             framerate: g2g_core::Rate::Any,
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 

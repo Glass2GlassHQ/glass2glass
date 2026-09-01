@@ -66,6 +66,7 @@ fn metasink_accepts_cross_thread_staging() {
         height: Dim::Fixed(1),
         framerate: Rate::Fixed(30),
         interlace: g2g_core::Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     };
     el.configure_pipeline(&caps).unwrap();
 

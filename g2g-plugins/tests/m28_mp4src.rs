@@ -23,6 +23,7 @@ fn h264_caps(w: u32, h: u32) -> Caps {
         width: Dim::Fixed(w),
         height: Dim::Fixed(h),
         framerate: Rate::Fixed(30 << 16),
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
 }
 
@@ -166,6 +167,7 @@ async fn round_trip_recovers_access_units_and_timing() {
                 min_q16: 1 << 16,
                 max_q16: 240 << 16
             },
+            colorimetry: g2g_core::Colorimetry::UNKNOWN
         }
     );
 
@@ -681,6 +683,7 @@ async fn encode_mux_demux_decode_full_circle() {
         height: Dim::Fixed(H),
         framerate: Rate::Fixed(30 << 16),
         interlace: g2g_core::Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     };
     enc.configure_pipeline(&nv12).expect("encoder init");
     let mut encoded = Collect::default();

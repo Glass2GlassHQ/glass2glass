@@ -184,6 +184,7 @@ impl Fmp4Demux {
             width,
             height,
             framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 

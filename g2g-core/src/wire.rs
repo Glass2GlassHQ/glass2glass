@@ -42,9 +42,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::caps::{
-    AudioFormat, ByteStreamEncoding, Caps, ClosedCaptionFormat, Dim, Interlace, Rate,
-    RawVideoFormat, SubPictureFormat, TensorDType, TensorLayout, TensorShape, TextFormat,
-    VideoCodec,
+    AudioFormat, ByteStreamEncoding, Caps, ClosedCaptionFormat, ColorPrimaries, ColorRange,
+    Colorimetry, Dim, Interlace, MatrixCoefficients, Rate, RawVideoFormat, SubPictureFormat,
+    TensorDType, TensorLayout, TensorShape, TextFormat, TransferCharacteristics, VideoCodec,
 };
 use crate::frame::{Frame, FrameTiming, PipelinePacket};
 use crate::memory::{MemoryDomain, SystemSlice};
@@ -54,8 +54,9 @@ use crate::tensor::MAX_TENSOR_RANK;
 
 /// Wire format version, the first byte of every encoded packet. Bumped on any
 /// incompatible layout change so a decoder rejects a mismatched peer up front
-/// rather than mis-parsing.
-pub const WIRE_VERSION: u8 = 1;
+/// rather than mis-parsing. Version 2 added the four colorimetry bytes to both
+/// video caps (M1111).
+pub const WIRE_VERSION: u8 = 2;
 
 /// Failure decoding (or encoding) a [`PipelinePacket`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -529,6 +530,79 @@ fn interlace_from_u8(v: u8) -> Result<Interlace, WireError> {
     })
 }
 
+// The four colorimetry fields, one byte each in struct order. The bytes are
+// this codec's own tags, not CICP or GStreamer numbers.
+fn put_colorimetry(w: &mut Writer, c: &Colorimetry) {
+    w.u8(match c.range {
+        ColorRange::Unknown => 0,
+        ColorRange::Limited => 1,
+        ColorRange::Full => 2,
+    });
+    w.u8(match c.matrix {
+        MatrixCoefficients::Unknown => 0,
+        MatrixCoefficients::Identity => 1,
+        MatrixCoefficients::Bt601 => 2,
+        MatrixCoefficients::Bt709 => 3,
+        MatrixCoefficients::Bt2020Ncl => 4,
+    });
+    w.u8(match c.transfer {
+        TransferCharacteristics::Unknown => 0,
+        TransferCharacteristics::Srgb => 1,
+        TransferCharacteristics::Bt601 => 2,
+        TransferCharacteristics::Bt709 => 3,
+        TransferCharacteristics::Bt2020 => 4,
+        TransferCharacteristics::Pq => 5,
+        TransferCharacteristics::Hlg => 6,
+    });
+    w.u8(match c.primaries {
+        ColorPrimaries::Unknown => 0,
+        ColorPrimaries::Bt709 => 1,
+        ColorPrimaries::Bt470bg => 2,
+        ColorPrimaries::Smpte170m => 3,
+        ColorPrimaries::Bt2020 => 4,
+    });
+}
+fn get_colorimetry(r: &mut Reader) -> Result<Colorimetry, WireError> {
+    let range = match r.u8()? {
+        0 => ColorRange::Unknown,
+        1 => ColorRange::Limited,
+        2 => ColorRange::Full,
+        _ => return Err(WireError::BadTag),
+    };
+    let matrix = match r.u8()? {
+        0 => MatrixCoefficients::Unknown,
+        1 => MatrixCoefficients::Identity,
+        2 => MatrixCoefficients::Bt601,
+        3 => MatrixCoefficients::Bt709,
+        4 => MatrixCoefficients::Bt2020Ncl,
+        _ => return Err(WireError::BadTag),
+    };
+    let transfer = match r.u8()? {
+        0 => TransferCharacteristics::Unknown,
+        1 => TransferCharacteristics::Srgb,
+        2 => TransferCharacteristics::Bt601,
+        3 => TransferCharacteristics::Bt709,
+        4 => TransferCharacteristics::Bt2020,
+        5 => TransferCharacteristics::Pq,
+        6 => TransferCharacteristics::Hlg,
+        _ => return Err(WireError::BadTag),
+    };
+    let primaries = match r.u8()? {
+        0 => ColorPrimaries::Unknown,
+        1 => ColorPrimaries::Bt709,
+        2 => ColorPrimaries::Bt470bg,
+        3 => ColorPrimaries::Smpte170m,
+        4 => ColorPrimaries::Bt2020,
+        _ => return Err(WireError::BadTag),
+    };
+    Ok(Colorimetry {
+        range,
+        matrix,
+        transfer,
+        primaries,
+    })
+}
+
 // ---- Caps ----
 
 fn put_caps(w: &mut Writer, c: &Caps) {
@@ -538,12 +612,14 @@ fn put_caps(w: &mut Writer, c: &Caps) {
             width,
             height,
             framerate,
+            colorimetry,
         } => {
             w.u8(0);
             w.u8(video_codec_to_u8(*codec));
             put_dim(w, width);
             put_dim(w, height);
             put_rate(w, framerate);
+            put_colorimetry(w, colorimetry);
         }
         Caps::RawVideo {
             format,
@@ -551,6 +627,7 @@ fn put_caps(w: &mut Writer, c: &Caps) {
             height,
             framerate,
             interlace,
+            colorimetry,
         } => {
             w.u8(1);
             w.u8(raw_format_to_u8(*format));
@@ -558,6 +635,7 @@ fn put_caps(w: &mut Writer, c: &Caps) {
             put_dim(w, height);
             put_rate(w, framerate);
             w.u8(interlace_to_u8(*interlace));
+            put_colorimetry(w, colorimetry);
         }
         Caps::Audio {
             format,
@@ -609,6 +687,7 @@ fn get_caps(r: &mut Reader) -> Result<Caps, WireError> {
             width: get_dim(r)?,
             height: get_dim(r)?,
             framerate: get_rate(r)?,
+            colorimetry: get_colorimetry(r)?,
         },
         1 => Caps::RawVideo {
             format: raw_format_from_u8(r.u8()?)?,
@@ -616,6 +695,7 @@ fn get_caps(r: &mut Reader) -> Result<Caps, WireError> {
             height: get_dim(r)?,
             framerate: get_rate(r)?,
             interlace: interlace_from_u8(r.u8()?)?,
+            colorimetry: get_colorimetry(r)?,
         },
         2 => Caps::Audio {
             format: audio_format_from_u8(r.u8()?)?,
@@ -1271,6 +1351,7 @@ mod tests {
                     max: 1080,
                 },
                 framerate: Rate::Fixed(30 << 16),
+                colorimetry: crate::Colorimetry::BT709,
             },
             Caps::RawVideo {
                 format: RawVideoFormat::Nv12,
@@ -1278,6 +1359,15 @@ mod tests {
                 height: Dim::Fixed(480),
                 framerate: Rate::Any,
                 interlace: crate::Interlace::Any,
+                colorimetry: crate::Colorimetry::UNKNOWN,
+            },
+            Caps::RawVideo {
+                format: RawVideoFormat::P010,
+                width: Dim::Fixed(3840),
+                height: Dim::Fixed(2160),
+                framerate: Rate::Fixed(60 << 16),
+                interlace: crate::Interlace::Any,
+                colorimetry: crate::Colorimetry::BT2100_PQ,
             },
             Caps::Audio {
                 format: AudioFormat::Opus,
@@ -1333,6 +1423,7 @@ mod tests {
             width: Dim::Fixed(720),
             height: Dim::Fixed(576),
             framerate: Rate::Fixed(25 << 16),
+            colorimetry: crate::Colorimetry::UNKNOWN,
         };
         match roundtrip(&PipelinePacket::CapsChanged(caps.clone())) {
             PipelinePacket::CapsChanged(got) => assert_eq!(got, caps),

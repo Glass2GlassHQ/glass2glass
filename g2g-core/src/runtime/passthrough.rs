@@ -9,8 +9,8 @@
 //! the std graph runner's backward-feasibility sweep and stays `std`-gated.
 
 use crate::caps::{
-    intersect_channels, intersect_sample_rate, AudioFormat, Caps, CapsSet, Dim, Interlace,
-    PassthroughFields, Rate, RawVideoFormat, VideoCodec, ANY_SAMPLE_RATE,
+    intersect_channels, intersect_sample_rate, AudioFormat, Caps, CapsSet, Colorimetry, Dim,
+    Interlace, PassthroughFields, Rate, RawVideoFormat, VideoCodec, ANY_SAMPLE_RATE,
 };
 
 /// Narrow `input` by intersecting each *passthrough* field against the
@@ -33,6 +33,7 @@ pub(crate) fn couple_passthrough(
                 height: hi,
                 framerate: ri,
                 interlace: ii,
+                colorimetry: cli,
             },
             Caps::RawVideo {
                 format: fp,
@@ -74,6 +75,8 @@ pub(crate) fn couple_passthrough(
                 // coupling it backward could only kill a link over a value the
                 // decoder has not produced yet, so the input keeps its own.
                 interlace: *ii,
+                // Colorimetry is the same kind of runtime-refined hint.
+                colorimetry: *cli,
             })
         }
         (
@@ -82,12 +85,14 @@ pub(crate) fn couple_passthrough(
                 width: wi,
                 height: hi,
                 framerate: ri,
+                colorimetry: cli,
             },
             Caps::CompressedVideo {
                 codec: cp,
                 width: wp,
                 height: hp,
                 framerate: rp,
+                ..
             },
         ) => {
             let codec = if mask.format {
@@ -118,6 +123,8 @@ pub(crate) fn couple_passthrough(
                 width,
                 height,
                 framerate,
+                // Kept from the input like RawVideo's (see there).
+                colorimetry: *cli,
             })
         }
         (
@@ -204,19 +211,26 @@ pub(crate) fn couple_passthrough_derived(
     };
     match input {
         Caps::RawVideo {
-            format, interlace, ..
+            format,
+            interlace,
+            colorimetry,
+            ..
         } => Some(Caps::RawVideo {
             format: *format,
             width,
             height,
             framerate,
             interlace: *interlace,
+            colorimetry: *colorimetry,
         }),
-        Caps::CompressedVideo { codec, .. } => Some(Caps::CompressedVideo {
+        Caps::CompressedVideo {
+            codec, colorimetry, ..
+        } => Some(Caps::CompressedVideo {
             codec: *codec,
             width,
             height,
             framerate,
+            colorimetry: *colorimetry,
         }),
         _ => None,
     }
@@ -256,8 +270,10 @@ pub(crate) fn project_passthrough(out: &Caps, mask: PassthroughFields) -> Option
                 } else {
                     Rate::Any
                 },
-                // A feasibility projection imposes no scan constraint upstream.
+                // A feasibility projection imposes no scan constraint upstream,
+                // and no colorimetry one either.
                 interlace: Interlace::Any,
+                colorimetry: Colorimetry::UNKNOWN,
             })
         }
         Caps::CompressedVideo {
@@ -265,6 +281,7 @@ pub(crate) fn project_passthrough(out: &Caps, mask: PassthroughFields) -> Option
             width,
             height,
             framerate,
+            ..
         } => {
             if !mask.format {
                 return None;
@@ -282,6 +299,7 @@ pub(crate) fn project_passthrough(out: &Caps, mask: PassthroughFields) -> Option
                 } else {
                     Rate::Any
                 },
+                colorimetry: Colorimetry::UNKNOWN,
             })
         }
         Caps::Audio {
@@ -351,12 +369,14 @@ pub(crate) fn project_passthrough_derived(
             height,
             framerate,
             interlace: Interlace::Any,
+            colorimetry: Colorimetry::UNKNOWN,
         }),
         Caps::CompressedVideo { codec, .. } => Some(Caps::CompressedVideo {
             codec: *codec,
             width,
             height,
             framerate,
+            colorimetry: Colorimetry::UNKNOWN,
         }),
         _ => None,
     }
@@ -427,12 +447,14 @@ fn concrete_probe_base(sample: &Caps) -> Caps {
             height: Dim::Fixed(64),
             framerate: Rate::Fixed(30 << 16),
             interlace: Interlace::Any,
+            colorimetry: Colorimetry::UNKNOWN,
         },
         Caps::CompressedVideo { codec, .. } => Caps::CompressedVideo {
             codec: *codec,
             width: Dim::Fixed(64),
             height: Dim::Fixed(64),
             framerate: Rate::Fixed(30 << 16),
+            colorimetry: Colorimetry::UNKNOWN,
         },
         Caps::Audio { format, .. } => Caps::Audio {
             format: *format,
@@ -582,6 +604,7 @@ mod tests {
             height,
             framerate,
             interlace: crate::Interlace::Any,
+            colorimetry: crate::Colorimetry::UNKNOWN,
         }
     }
 
@@ -600,6 +623,7 @@ mod tests {
                 height: height.clone(),
                 framerate: framerate.clone(),
                 interlace: crate::Interlace::Any,
+                colorimetry: crate::Colorimetry::UNKNOWN,
             }),
             _ => CapsSet::from_alternatives(Vec::new()),
         };
@@ -608,6 +632,7 @@ mod tests {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            colorimetry: crate::Colorimetry::UNKNOWN,
         };
         let pt = discover_passthrough(&dec, &sample);
         assert!(
@@ -627,6 +652,7 @@ mod tests {
                 height: Dim::Fixed(480),
                 framerate: Rate::Fixed(30 << 16),
                 interlace: crate::Interlace::Any,
+                colorimetry: crate::Colorimetry::UNKNOWN,
             })
         };
         let sample = Caps::CompressedVideo {
@@ -634,6 +660,7 @@ mod tests {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            colorimetry: crate::Colorimetry::UNKNOWN,
         };
         assert_eq!(discover_passthrough(&dec, &sample), PassthroughFields::NONE);
     }
@@ -659,6 +686,7 @@ mod tests {
                 height: Dim::Fixed(240),
                 framerate: framerate.clone(),
                 interlace: crate::Interlace::Any,
+                colorimetry: crate::Colorimetry::UNKNOWN,
             }),
             _ => CapsSet::from_alternatives(Vec::new()),
         };
@@ -686,7 +714,7 @@ mod tests {
                 width,
                 height,
                 framerate,
-                interlace: _,
+                ..
             } = input
             {
                 if from.contains(format) {
@@ -696,6 +724,7 @@ mod tests {
                         height: height.clone(),
                         framerate: framerate.clone(),
                         interlace: crate::Interlace::Any,
+                        colorimetry: crate::Colorimetry::UNKNOWN,
                     });
                 }
             }
@@ -707,6 +736,7 @@ mod tests {
             height: Dim::Fixed(480),
             framerate: Rate::Fixed(30 << 16),
             interlace: crate::Interlace::Any,
+            colorimetry: crate::Colorimetry::UNKNOWN,
         };
         assert_eq!(
             discover_passthrough(&conv, &sample),

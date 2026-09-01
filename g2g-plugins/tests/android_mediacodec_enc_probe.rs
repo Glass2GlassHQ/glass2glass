@@ -131,6 +131,7 @@ async fn encode_nv12_to_annexb_h264() {
         height: Dim::Fixed(h),
         framerate: Rate::Any,
         interlace: g2g_core::Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     };
     let narrowed = enc.intercept_caps(&caps).expect("intercept caps");
     assert!(matches!(

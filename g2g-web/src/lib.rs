@@ -78,7 +78,11 @@ fn ingest_caps(codec: VideoCodec) -> Caps {
         codec,
         width: Dim::Range { min: 0, max: 8192 },
         height: Dim::Range { min: 0, max: 8192 },
-        framerate: Rate::Range { min_q16: 1 << 16, max_q16: 240 << 16 },
+        framerate: Rate::Range {
+            min_q16: 1 << 16,
+            max_q16: 240 << 16,
+        },
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
 }
 
@@ -132,7 +136,10 @@ pub fn run_websocket_to_canvas(url: String, canvas_id: String) {
         let mut dec = WebCodecsDecode::new();
         let mut sink = CanvasSink::new(canvas_id);
         let clock = WasmClock::new();
-        report("ws->decode->canvas", run_source_transform_sink(&mut src, &mut dec, &mut sink, &clock, 8).await);
+        report(
+            "ws->decode->canvas",
+            run_source_transform_sink(&mut src, &mut dec, &mut sink, &clock, 8).await,
+        );
     });
 }
 
@@ -208,8 +215,7 @@ pub fn run_websocket_ortdetect_to_canvas(url: String, canvas_id: String, model_u
         let mut overlay = AnalyticsOverlay::new().with_thickness(3);
         let mut sink = CanvasSink::new(canvas_id);
         let clock = WasmClock::new();
-        let transforms: Vec<&mut dyn DynAsyncElement> =
-            vec![&mut dec, &mut det, &mut overlay];
+        let transforms: Vec<&mut dyn DynAsyncElement> = vec![&mut dec, &mut det, &mut overlay];
         report(
             "ws->decode->ortdetect->overlay->canvas",
             run_linear_chain(&mut src, transforms, &mut sink, &clock, 4).await,
@@ -239,8 +245,7 @@ pub fn run_websocket_remotedetect_to_canvas(url: String, canvas_id: String, dete
         let mut overlay = AnalyticsOverlay::new().with_thickness(3);
         let mut sink = CanvasSink::new(canvas_id);
         let clock = WasmClock::new();
-        let transforms: Vec<&mut dyn DynAsyncElement> =
-            vec![&mut dec, &mut det, &mut overlay];
+        let transforms: Vec<&mut dyn DynAsyncElement> = vec![&mut dec, &mut det, &mut overlay];
         report(
             "ws->decode->remotedetect->overlay->canvas",
             run_linear_chain(&mut src, transforms, &mut sink, &clock, 4).await,
@@ -290,7 +295,10 @@ pub fn run_websocket_to_webgpu_canvas(url: String, canvas_id: String) {
         let mut dec = WebCodecsDecode::new().with_gpu_output();
         let mut sink = WebGpuCanvasSink::new(canvas_id);
         let clock = WasmClock::new();
-        report("ws->decode->webgpu", run_source_transform_sink(&mut src, &mut dec, &mut sink, &clock, 8).await);
+        report(
+            "ws->decode->webgpu",
+            run_source_transform_sink(&mut src, &mut dec, &mut sink, &clock, 8).await,
+        );
     });
 }
 
@@ -362,7 +370,10 @@ pub fn run_pattern_encode_to_websocket(url: String) {
         let mut enc = WebCodecsEncode::new();
         let mut sink = WebSocketSink::new(url);
         let clock = WasmClock::new();
-        report("pattern->encode->ws", run_source_transform_sink(&mut src, &mut enc, &mut sink, &clock, 8).await);
+        report(
+            "pattern->encode->ws",
+            run_source_transform_sink(&mut src, &mut enc, &mut sink, &clock, 8).await,
+        );
     });
 }
 
@@ -381,7 +392,10 @@ pub fn run_websocket_to_webgpu_inference(url: String, canvas_id: String) {
         let mut dec = WebCodecsDecode::new().with_gpu_output();
         let mut sink = WebGpuCanvasSink::new(canvas_id).with_inference();
         let clock = WasmClock::new();
-        report("ws->decode->webgpu-infer", run_source_transform_sink(&mut src, &mut dec, &mut sink, &clock, 8).await);
+        report(
+            "ws->decode->webgpu-infer",
+            run_source_transform_sink(&mut src, &mut dec, &mut sink, &clock, 8).await,
+        );
     });
 }
 
@@ -399,7 +413,10 @@ pub fn run_websocket_to_webgpu_cnn(url: String, canvas_id: String) {
         let mut dec = WebCodecsDecode::new().with_gpu_output();
         let mut sink = WebGpuCanvasSink::new(canvas_id).with_cnn();
         let clock = WasmClock::new();
-        report("ws->decode->webgpu-cnn", run_source_transform_sink(&mut src, &mut dec, &mut sink, &clock, 8).await);
+        report(
+            "ws->decode->webgpu-cnn",
+            run_source_transform_sink(&mut src, &mut dec, &mut sink, &clock, 8).await,
+        );
     });
 }
 
@@ -420,7 +437,10 @@ pub fn run_camera_encode_to_websocket(url: String, width: u32, height: u32, fram
         let mut enc = WebCodecsEncode::new();
         let mut sink = WebSocketSink::new(url);
         let clock = WasmClock::new();
-        report("camera->encode->ws", run_source_transform_sink(&mut src, &mut enc, &mut sink, &clock, 8).await);
+        report(
+            "camera->encode->ws",
+            run_source_transform_sink(&mut src, &mut enc, &mut sink, &clock, 8).await,
+        );
     });
 }
 
@@ -436,6 +456,9 @@ pub fn run_datachannel_to_canvas(channel: web_sys::RtcDataChannel, canvas_id: St
         let mut dec = WebCodecsDecode::new();
         let mut sink = CanvasSink::new(canvas_id);
         let clock = WasmClock::new();
-        report("ws->decode->canvas", run_source_transform_sink(&mut src, &mut dec, &mut sink, &clock, 8).await);
+        report(
+            "ws->decode->canvas",
+            run_source_transform_sink(&mut src, &mut dec, &mut sink, &clock, 8).await,
+        );
     });
 }

@@ -4,6 +4,24 @@ Pre-release. Work is tracked by milestone (Mn) following the roadmap in `DESIGN.
 Versioning and the stability tiers are defined in `STABILITY.md`; `g2g-core` is the
 semver-covered surface, the plugin/binding crates are provisional or experimental.
 
+## Unreleased
+
+- M1126: `HlsSrc` reloads live playlists on an absolute schedule instead of drifting behind the publisher by the per-cycle work time, and `WaylandSink` traces the clock, media and deadline timelines once a second.
+- M1125: `hlssrc` plays low-latency HLS, blocking the playlist reload on the next `#EXT-X-PART` and emitting each partial segment as it is published.
+- M1123: the runner hands its aggregated liveness down to every element, and `ffmpegdec`'s `thread-type=auto` frame-threads on a non-live pipeline.
+- M1124: `ffmpegenc` writes the caps colorimetry into the H.264 VUI colour description and carries it on its output caps.
+- M1122: `rtspsrcn` plays an RTSP stream's audio track alongside its video off one session, and `playbin uri=rtsp://...` fans both out.
+- M1121: `HlsSrc` prebuffers two segments by default, so live playback no longer starves at segment boundaries (`prebuffer-ms=0` restores unbuffered).
+- M1120: `examples/g2g-mutate-demo` splices a `videoflip` in and out of a live RTSP window, and PORTING.md maps pad-block reconfiguration onto the mutator.
+- M1119: `ffmpegdec` threads its software decode, with gst's `max-threads` and `thread-type`; frame threading is opt-in and reports the pictures it holds back as latency.
+- M1118: `WaylandSink` records per-frame presentation deadline error and a live A/V soak bounds it and its drift against the audio clock.
+- M1117: `rtspserversink` offers the stream's parameter sets and profile in its SDP, so a player can negotiate from the DESCRIBE alone.
+- M1116: `h264parse` / `h265parse` emit an access unit with the buffer it arrived in once the input proves access-unit aligned, instead of always holding it for the next start code.
+- M1115: `GraphMutator` splices a transform onto a running graph's edge and lifts one back off, on both the cooperative and thread-per-arm runners.
+- M1114: `timestampburn` plus the `g2g-latency-reader` binary measure g2g and GStreamer over one identical span, driving a same-metric latency bench (with a netem mode) and a throughput / CPU bench.
+- M1113: the CPU converters and the display sinks convert with the caps colorimetry's matrix and range instead of a hardcoded BT.601 limited.
+- M1111: caps carry colorimetry (matrix, transfer, primaries, range) with Unknown as a wildcard; `h264parse` / `h265parse` read it from the VUI and the decoders propagate it.
+
 ## 0.6.0
 
 - M1112: live paths anchor presentation on the pipeline base time plus declared latency, so a decoder's startup stall drains instead of becoming the run's standing latency (nvdec live p50 265 ms to 50 ms).

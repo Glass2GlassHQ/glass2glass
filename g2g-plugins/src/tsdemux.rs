@@ -475,6 +475,7 @@ impl TsDemux {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         let audio = |format| {
             (
@@ -610,6 +611,7 @@ impl TsDemux {
                 min_q16: 1 << 16,
                 max_q16: 240 << 16,
             },
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 
@@ -1874,6 +1876,7 @@ mod tests {
             height: Dim::Fixed(2),
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         assert!(d.intercept_caps(&raw).is_err());
     }

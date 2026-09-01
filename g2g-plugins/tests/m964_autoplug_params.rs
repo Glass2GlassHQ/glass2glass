@@ -33,6 +33,7 @@ fn h264() -> Caps {
         width: Dim::Any,
         height: Dim::Any,
         framerate: Rate::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
 }
 
@@ -43,6 +44,7 @@ fn rgba_any() -> Caps {
         height: Dim::Any,
         framerate: Rate::Any,
         interlace: g2g_core::Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
 }
 
@@ -82,6 +84,7 @@ fn decoder_factory() -> ElementFactory {
             height: Dim::Any,
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         })),
     ]);
     ElementFactory::new("h264dec", templates, |_| Box::new(IdentityTransform::new()))

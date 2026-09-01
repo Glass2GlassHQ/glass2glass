@@ -3,7 +3,7 @@
 //! Transport-agnostic: fed each received PTP message (raw bytes + the local time
 //! it arrived) and the TX time of each Delay_Req it asks the transport to send,
 //! it assembles the four timestamps of one synchronisation cycle and yields them
-//! for the [`PtpServo`](super::PtpServo). A [`PtpClient`] provides the UDP
+//! for the [`PtpServo`](super::PtpServo). A `PtpClient` provides the UDP
 //! transport; this module is pure logic, so the whole slave path is CI-testable
 //! by injecting message bytes with no sockets.
 //!

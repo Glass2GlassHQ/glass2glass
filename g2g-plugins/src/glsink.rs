@@ -21,8 +21,9 @@
 //!
 //! NV12 (the decoders' output) and RGBA (a GPU/overlay element's output),
 //! whichever negotiation settles on; the layout is fixed at
-//! `configure_pipeline` and picks the GL program. NV12 is converted BT.601
-//! limited-range on the GPU; BT.709 awaits colour metadata on `Caps`.
+//! `configure_pipeline` and picks the GL program. NV12 is converted on the GPU
+//! with the matrix and range the caps colorimetry names (BT.601 limited when the
+//! stream says nothing).
 //!
 //! ## Threading
 //!
@@ -35,11 +36,11 @@
 //! ## Verification status
 //!
 //! The GL render path (program, `R8`/`RG8`/`RGBA8` textures, quad, NV12->RGB
-//! convert) is tested headlessly against a CPU BT.601 reference: the tests below
-//! bring up a surfaceless EGL device, render a synthetic frame through the real
-//! [`GlState`] program into an FBO, and compare `glReadPixels` output. The
-//! on-screen present (Wayland surface + `eglSwapBuffers`) is validated by the
-//! display smoke tests, not in CI.
+//! convert) is tested headlessly against a CPU reference of the same
+//! colorimetry: the tests below bring up a surfaceless EGL device, render a
+//! synthetic frame through the real [`GlState`] program into an FBO, and compare
+//! `glReadPixels` output. The on-screen present (Wayland surface +
+//! `eglSwapBuffers`) is validated by the display smoke tests, not in CI.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -64,9 +65,9 @@ use g2g_core::memory::{DomainSet, MemoryDomainKind};
 use g2g_core::metrics::{monotonic_ns, LatencyHistogram, LatencySnapshot};
 use g2g_core::{
     AsyncElement, BusHandle, Caps, CapsConstraint, CapsSet, ClockCandidate, ClockPriority,
-    ClockSync, ConfigureOutcome, Dim, ElementMetadata, Frame, G2gError, HardwareError, OutputSink,
-    PadTemplate, PadTemplates, PipelineClock, PipelinePacket, PresentationPacer, PropError,
-    PropKind, PropValue, PropertySpec, Rate, RawVideoFormat, MAX_LATENESS_PROPERTY,
+    ClockSync, Colorimetry, ConfigureOutcome, Dim, ElementMetadata, Frame, G2gError, HardwareError,
+    OutputSink, PadTemplate, PadTemplates, PipelineClock, PipelinePacket, PresentationPacer,
+    PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat, MAX_LATENESS_PROPERTY,
     QOS_INTERVAL_PROPERTY,
 };
 
@@ -93,6 +94,8 @@ pub struct GlSink {
     worker: Option<JoinHandle<()>>,
     width: u32,
     height: u32,
+    /// Colorimetry the worker built its convert program for.
+    colorimetry: Colorimetry,
     frames_presented: Arc<AtomicU64>,
     latency: Arc<LatencyHistogram>,
     /// PTS pacing + QoS late-drop, on top of the worker's swap-paced ack: idle
@@ -130,6 +133,7 @@ impl GlSink {
             worker: None,
             width: 0,
             height: 0,
+            colorimetry: Colorimetry::UNKNOWN,
             frames_presented: Arc::new(AtomicU64::new(0)),
             latency: Arc::new(LatencyHistogram::new()),
             pacer: PresentationPacer::new(),
@@ -225,6 +229,7 @@ fn any_geometry(format: RawVideoFormat) -> Caps {
         height: Dim::Any,
         framerate: Rate::Any,
         interlace: g2g_core::Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
 }
 
@@ -325,13 +330,14 @@ impl AsyncElement for GlSink {
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        let (format, w, h) = match absolute_caps {
+        let (format, w, h, colorimetry) = match absolute_caps {
             Caps::RawVideo {
                 format,
                 width: Dim::Fixed(w),
                 height: Dim::Fixed(h),
+                colorimetry,
                 ..
-            } => (*format, *w, *h),
+            } => (*format, *w, *h, *colorimetry),
             _ => return Err(G2gError::CapsMismatch),
         };
         let mode = match format {
@@ -348,9 +354,11 @@ impl AsyncElement for GlSink {
         }
 
         // Mid-stream geometry change: same dims is a no-op; new dims tear down
-        // the worker and respawn, as WaylandSink does.
+        // the worker and respawn, as WaylandSink does. A colorimetry refinement
+        // goes the same way: the convert weights are compiled into the worker's
+        // program, so a new matrix means a new program.
         if self.worker.is_some() {
-            if w == self.width && h == self.height {
+            if w == self.width && h == self.height && colorimetry == self.colorimetry {
                 return Ok(ConfigureOutcome::Accepted);
             }
             self.shutdown();
@@ -380,7 +388,8 @@ impl AsyncElement for GlSink {
                     latency,
                     ready: ready_for_worker,
                 };
-                if let Err(e) = run_gl_window(SystemPresenter { mode }, params, channels) {
+                let presenter = SystemPresenter { mode, colorimetry };
+                if let Err(e) = run_gl_window(presenter, params, channels) {
                     std::eprintln!("{WORKER_NAME} worker error: {e:?}");
                 }
             })
@@ -397,6 +406,7 @@ impl AsyncElement for GlSink {
         self.worker = Some(join);
         self.width = w;
         self.height = h;
+        self.colorimetry = colorimetry;
         Ok(ConfigureOutcome::Accepted)
     }
 
@@ -459,6 +469,7 @@ impl AsyncElement for GlSink {
 /// textures with `glTexSubImage2D`, in the layout negotiation settled on.
 struct SystemPresenter {
     mode: GlMode,
+    colorimetry: Colorimetry,
 }
 
 impl FramePresenter for SystemPresenter {
@@ -466,6 +477,10 @@ impl FramePresenter for SystemPresenter {
 
     fn mode(&self) -> GlMode {
         self.mode
+    }
+
+    fn colorimetry(&self) -> Colorimetry {
+        self.colorimetry
     }
 
     fn present(&mut self, gl: &mut GlState, frame: &Self::Frame) -> Result<(), G2gError> {
@@ -485,6 +500,7 @@ mod tests {
             height: Dim::Fixed(h),
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 
@@ -508,6 +524,7 @@ mod tests {
             width: Dim::Fixed(640),
             height: Dim::Fixed(480),
             framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         assert_eq!(sink.intercept_caps(&h264), Ok(h264));
     }
@@ -619,6 +636,23 @@ mod tests {
         context: egl::Context,
         /// How the context came up, for the test's evidence line.
         how: String,
+    }
+
+    impl Headless {
+        /// Another `glow::Context` over the same current EGL context: each
+        /// [`GlState`] owns the one it was built with, and the EGL display does
+        /// not survive being torn down and brought up again inside one process,
+        /// so a test rendering twice reloads the entry points instead.
+        fn gl(&self) -> glow::Context {
+            // SAFETY: this thread's current context resolves the GL ES entry
+            // points glow asks for by name.
+            unsafe {
+                glow::Context::from_loader_function(|s| match self.egl.get_proc_address(s) {
+                    Some(p) => p as *const core::ffi::c_void,
+                    None => core::ptr::null(),
+                })
+            }
+        }
     }
 
     impl Drop for Headless {
@@ -752,13 +786,15 @@ mod tests {
         w: u32,
         h: u32,
         mode: GlMode,
+        colorimetry: Colorimetry,
         frame: &[u8],
     ) -> Result<Vec<u8>, String> {
         // SAFETY: the caller's context is current on this thread; the FBO and its
         // colour texture are created here and sized w x h, which is also the
         // viewport GlState draws with and the extent read back below.
         unsafe {
-            let mut state = GlState::build(gl, w, h, mode).map_err(|e| alloc::format!("{e}"))?;
+            let mut state =
+                GlState::build(gl, w, h, mode, colorimetry).map_err(|e| alloc::format!("{e}"))?;
             let gl = state.gl();
             let color = gl.create_texture()?;
             gl.bind_texture(glow::TEXTURE_2D, Some(color));
@@ -818,25 +854,24 @@ mod tests {
         }
     }
 
-    /// BT.601 limited-range NV12 -> RGB reference, the integer-fixed-point math
+    /// NV12 -> RGB reference in `colorimetry`, the integer-fixed-point math
     /// `WaylandSink` converts with on the CPU. Chroma is nearest (`col / 2`).
-    fn nv12_to_rgb_reference(src: &[u8], w: usize, h: usize) -> Vec<u8> {
+    fn nv12_to_rgb_reference(src: &[u8], w: usize, h: usize, colorimetry: Colorimetry) -> Vec<u8> {
+        let matrix = crate::yuvmatrix::YuvRgbMatrix::new(colorimetry);
         let (y_plane, uv_plane) = src.split_at(w * h);
         let mut out = alloc::vec![0u8; w * h * 3];
         for row in 0..h {
             for col in 0..w {
-                let y = y_plane[row * w + col] as i32;
                 let uv = (row / 2) * w + (col / 2) * 2;
-                let c = y - 16;
-                let d = uv_plane[uv] as i32 - 128;
-                let e = uv_plane[uv + 1] as i32 - 128;
-                let r = (298 * c + 409 * e + 128) >> 8;
-                let g = (298 * c - 100 * d - 208 * e + 128) >> 8;
-                let b = (298 * c + 516 * d + 128) >> 8;
+                let (r, g, b) = matrix.yuv_to_rgb(
+                    y_plane[row * w + col] as i32,
+                    uv_plane[uv] as i32,
+                    uv_plane[uv + 1] as i32,
+                );
                 let dst = (row * w + col) * 3;
-                out[dst] = r.clamp(0, 255) as u8;
-                out[dst + 1] = g.clamp(0, 255) as u8;
-                out[dst + 2] = b.clamp(0, 255) as u8;
+                out[dst] = r as u8;
+                out[dst + 1] = g as u8;
+                out[dst + 2] = b as u8;
             }
         }
         out
@@ -866,11 +901,15 @@ mod tests {
     }
 
     /// The milestone's correctness check: one synthetic NV12 frame through the
-    /// real GL program must match the CPU BT.601 reference within a per-channel
-    /// LSB or two. Two, not zero, because the shader centres chroma on 0.5 while
-    /// the integer reference centres it on 128/255, a systematic ~1 LSB (worst on
-    /// blue, whose chroma coefficient is 2.017) on top of float-vs-fixed-point
-    /// rounding.
+    /// real GL program must match the CPU reference of the same colorimetry
+    /// within a per-channel LSB or two. Two, not zero, because the shader centres
+    /// chroma on 0.5 while the integer reference centres it on 128/255, a
+    /// systematic ~1 LSB (worst on blue, whose chroma coefficient is 2.017) on
+    /// top of float-vs-fixed-point rounding.
+    ///
+    /// BT.709 runs alongside the untagged (BT.601 limited) default, and the two
+    /// renders must differ: a shader that ignored the caps would pass the
+    /// per-colorimetry comparison by converting both the same way.
     #[test]
     fn nv12_gpu_convert_matches_cpu_reference() {
         let (headless, gl) = match headless_context() {
@@ -882,25 +921,36 @@ mod tests {
         };
         let (w, h) = (64u32, 32u32);
         let frame = nv12_ramp(w as usize, h as usize, 90, 200);
-        let rgba = render_to_rgba(gl, w, h, GlMode::Nv12, &frame).expect("headless NV12 render");
-        let reference = nv12_to_rgb_reference(&frame, w as usize, h as usize);
+        let mut rendered = Vec::new();
+        let mut gl = Some(gl);
+        for colorimetry in [Colorimetry::UNKNOWN, Colorimetry::BT709] {
+            let gl = gl.take().unwrap_or_else(|| headless.gl());
+            let rgba = render_to_rgba(gl, w, h, GlMode::Nv12, colorimetry, &frame)
+                .expect("headless NV12 render");
+            let reference = nv12_to_rgb_reference(&frame, w as usize, h as usize, colorimetry);
 
-        let mut max_delta = 0i32;
-        for px in 0..(w * h) as usize {
-            for ch in 0..3 {
-                let got = rgba[px * 4 + ch] as i32;
-                let want = reference[px * 3 + ch] as i32;
-                max_delta = max_delta.max((got - want).abs());
+            let mut max_delta = 0i32;
+            for px in 0..(w * h) as usize {
+                for ch in 0..3 {
+                    let got = rgba[px * 4 + ch] as i32;
+                    let want = reference[px * 3 + ch] as i32;
+                    max_delta = max_delta.max((got - want).abs());
+                }
+                assert_eq!(rgba[px * 4 + 3], 255, "NV12 shader writes opaque alpha");
             }
-            assert_eq!(rgba[px * 4 + 3], 255, "NV12 shader writes opaque alpha");
+            std::println!(
+                "headless NV12 convert ({colorimetry:?}) via {}: max per-channel delta {max_delta}",
+                headless.how
+            );
+            assert!(
+                max_delta <= 2,
+                "GPU NV12 convert ({colorimetry:?}) is off the CPU reference by {max_delta}"
+            );
+            rendered.push(rgba);
         }
-        std::println!(
-            "headless NV12 convert via {}: max per-channel delta {max_delta}",
-            headless.how
-        );
-        assert!(
-            max_delta <= 2,
-            "GPU NV12 convert is off the CPU reference by {max_delta}"
+        assert_ne!(
+            rendered[0], rendered[1],
+            "BT.709 caps must render differently from the untagged default"
         );
     }
 
@@ -926,9 +976,16 @@ mod tests {
                 frame[i + 1] = 80;
             }
         }
-        let rgba = render_to_rgba(gl, w as u32, h as u32, GlMode::Nv12, &frame)
-            .expect("headless NV12 render");
-        let reference = nv12_to_rgb_reference(&frame, w, h);
+        let rgba = render_to_rgba(
+            gl,
+            w as u32,
+            h as u32,
+            GlMode::Nv12,
+            Colorimetry::UNKNOWN,
+            &frame,
+        )
+        .expect("headless NV12 render");
+        let reference = nv12_to_rgb_reference(&frame, w, h, Colorimetry::UNKNOWN);
 
         let mut max_delta = 0i32;
         for row in 0..h {
@@ -977,7 +1034,8 @@ mod tests {
                 frame[px + 3] = 255;
             }
         }
-        let rgba = render_to_rgba(gl, w, h, GlMode::Rgba, &frame).expect("headless RGBA render");
+        let rgba = render_to_rgba(gl, w, h, GlMode::Rgba, Colorimetry::UNKNOWN, &frame)
+            .expect("headless RGBA render");
         let mismatches = rgba
             .iter()
             .zip(frame.iter())

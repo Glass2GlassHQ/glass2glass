@@ -23,7 +23,7 @@ pub enum PipelinePacket {
     Segment(Segment),
     /// Deadline tick: the runner's fan-in arm reached the tick deadline the
     /// element declared via
-    /// [`MultiInputElement::tick_interval_ns`](crate::fanout::MultiInputElement::tick_interval_ns),
+    /// `MultiInputElement::tick_interval_ns`,
     /// delivered as `process(0, Tick)`. It lets a fan-in element emit output when
     /// its inputs stall (a compositor holding the last frame of a stalled pad,
     /// zero-order-hold) instead of waiting for a packet that may never come.
@@ -44,7 +44,7 @@ pub struct Frame {
     /// (the GstMeta / GstAnalyticsRelationMeta analog). Empty on construction. A
     /// zero-sized unit when the `metadata` feature is off, so the no_std / RTOS
     /// baseline pays nothing; with the feature on it is a typed
-    /// [`FrameMetaSet`](crate::meta::FrameMetaSet) carrying e.g.
+    /// [`FrameMetaSet`] carrying e.g.
     /// [`AnalyticsMeta`](crate::meta) detections. See `crate::meta`.
     pub meta: FrameMetaSet,
 }

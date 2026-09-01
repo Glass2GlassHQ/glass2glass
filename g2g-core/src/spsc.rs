@@ -172,7 +172,7 @@ impl<const N: usize, const BYTES: usize> SpscFrameRing<N, BYTES> {
     /// ring slot (no copy); it stays valid until [`release`](Self::release)
     /// advances past it.
     ///
-    /// Contract: borrow at most one frame at a time and [`release`] it before the
+    /// Contract: borrow at most one frame at a time and [`release`](Self::release) it before the
     /// next borrow, after the frame (and its slice) is dropped, the single-frame-
     /// in-flight discipline the static runners already follow (each frame is
     /// dropped before the next `next()`). Releasing a still-referenced slice
@@ -180,7 +180,7 @@ impl<const N: usize, const BYTES: usize> SpscFrameRing<N, BYTES> {
     ///
     /// Not built under `--cfg loom`: the lend hands out a raw pointer that
     /// outlives any scoped cell access, which loom's `UnsafeCell` cannot model.
-    /// The loom consumer reads through [`Self::loom_peek0`] instead.
+    /// The loom consumer reads through `loom_peek0` instead.
     #[cfg(not(loom))]
     pub fn borrow(&self) -> Option<SystemSlice> {
         let head = self.head.load(Ordering::Relaxed); // sole consumer owns head
@@ -213,7 +213,7 @@ impl<const N: usize, const BYTES: usize> SpscFrameRing<N, BYTES> {
             .map(|cell| cell.with(|ptr| unsafe { (*ptr)[0] }))
     }
 
-    /// CONSUMER side: reclaim the slot last returned by [`borrow`], freeing it for
+    /// CONSUMER side: reclaim the slot last returned by [`borrow`](Self::borrow), freeing it for
     /// the producer to refill. Call once per consumed frame, after the frame is
     /// dropped. A `release` with nothing borrowed is a no-op.
     pub fn release(&self) {

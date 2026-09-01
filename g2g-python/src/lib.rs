@@ -76,6 +76,7 @@ pub fn register(registry: &mut g2g_core::runtime::Registry) {
         height: Dim::Fixed(240),
         framerate: Rate::Fixed(30),
         interlace: g2g_core::Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     };
     registry.register_source(SourceFactory::new("pysrc", default_caps, || {
         Box::new(PySource::new("", ""))

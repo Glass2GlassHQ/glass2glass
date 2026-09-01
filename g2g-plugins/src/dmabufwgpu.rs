@@ -274,6 +274,7 @@ impl PadTemplates for DmaBufToWgpu {
             height: Dim::Any,
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         let set = CapsSet::from_alternatives(FORMATS.map(any).to_vec());
         alloc::vec![PadTemplate::sink(set.clone()), PadTemplate::source(set)]

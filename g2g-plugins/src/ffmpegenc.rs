@@ -46,6 +46,10 @@
 //! on NVENC (whose H.264 encoder is 8-bit only, whatever the shared pixel-format
 //! list claims) fails negotiation loud rather than encoding garbage.
 //!
+//! Colorimetry (M1124): the negotiated input's colour description goes onto the
+//! encoder context before open, so libx264 and NVENC write it into the SPS VUI,
+//! and onto the H.264 output caps. An untagged input stays untagged.
+//!
 //! Known driver issue: two NVENC instances in one process crash intermittently
 //! inside a libnvcuvid worker thread under concurrent load (observed on driver
 //! 580.173.02 / ffmpeg 7.1.5, same faulting instruction each time; single
@@ -69,9 +73,9 @@ use ffmpeg::Rational;
 use ffmpeg_next as ffmpeg;
 
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
-    HardwareError, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
-    PropValue, PropertySpec, Rate, RawVideoFormat, VideoCodec,
+    AsyncElement, Caps, CapsConstraint, CapsSet, ColorRange, Colorimetry, ConfigureOutcome, Dim,
+    ElementMetadata, G2gError, HardwareError, OutputSink, PadTemplate, PadTemplates,
+    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat, VideoCodec,
 };
 
 /// Default constant target bitrate (bits/second) when the caller sets none. 4
@@ -128,6 +132,42 @@ fn plane_layout(format: RawVideoFormat, w: usize, h: usize) -> Option<Vec<(usize
     })
 }
 
+/// Write the negotiated colorimetry onto the encoder context, which libx264 and
+/// NVENC copy into the SPS VUI colour description. libavcodec's colour enums are
+/// the CICP codepoints (H.273), so each field goes in as the codepoint the caps
+/// value names; an `Unknown` field passes CICP 2 (unspecified), leaving the
+/// context at its default so nothing is written.
+fn set_color_description(
+    video: &mut ffmpeg::encoder::video::Video,
+    colorimetry: Colorimetry,
+) -> Result<(), G2gError> {
+    video.set_color_range(match colorimetry.range {
+        ColorRange::Full => ffmpeg::color::Range::JPEG,
+        ColorRange::Limited => ffmpeg::color::Range::MPEG,
+        _ => ffmpeg::color::Range::Unspecified,
+    });
+    for (option, codepoint) in [
+        (c"color_primaries", colorimetry.primaries.to_cicp()),
+        (c"color_trc", colorimetry.transfer.to_cicp()),
+        (c"colorspace", colorimetry.matrix.to_cicp()),
+    ] {
+        // SAFETY: `video` owns a live AVCodecContext that is not yet open, and
+        // each name is one of its int options.
+        let set = unsafe {
+            ffmpeg::ffi::av_opt_set_int(
+                video.as_mut_ptr().cast(),
+                option.as_ptr(),
+                codepoint as i64,
+                0,
+            )
+        };
+        if set < 0 {
+            return Err(G2gError::Hardware(HardwareError::Other));
+        }
+    }
+    Ok(())
+}
+
 /// Encodes raw I420 / NV12 / I420_10LE video into an H.264 Annex-B elementary
 /// stream.
 ///
@@ -148,6 +188,9 @@ pub struct FfmpegH264Enc {
     /// encoder opens with and the per-frame plane copy.
     format: RawVideoFormat,
     framerate: Rate,
+    /// The negotiated input colour description, written into the VUI and onto
+    /// the output caps. `UNKNOWN` for an untagged input: nothing is tagged.
+    colorimetry: Colorimetry,
     /// Target constant bitrate (bits/second).
     bitrate_bps: usize,
     /// The opened video encoder. Derefs to the base `Encoder` for
@@ -211,6 +254,7 @@ impl FfmpegH264Enc {
             height: 0,
             format: RawVideoFormat::I420,
             framerate: Rate::Any,
+            colorimetry: Colorimetry::UNKNOWN,
             bitrate_bps: DEFAULT_BITRATE_BPS,
             encoder: None,
             pts_by_frameno: alloc::collections::BTreeMap::new(),
@@ -254,6 +298,7 @@ impl FfmpegH264Enc {
             height: Dim::Any,
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 
@@ -263,6 +308,7 @@ impl FfmpegH264Enc {
             width: Dim::Fixed(self.width),
             height: Dim::Fixed(self.height),
             framerate: self.framerate.clone(),
+            colorimetry: self.colorimetry,
         }
     }
 
@@ -344,6 +390,7 @@ impl FfmpegH264Enc {
         // No B-frames: output stays in presentation order (no reorder latency),
         // which the low-latency streaming path wants.
         video.set_max_b_frames(0);
+        set_color_description(&mut video, self.colorimetry)?;
 
         let opened = video
             .open_as_with(codec, self.open_options())
@@ -552,12 +599,14 @@ impl AsyncElement for FfmpegH264Enc {
                 width,
                 height,
                 framerate,
-                interlace: _,
+                colorimetry,
+                ..
             } if pixel_for(*format).is_some() => CapsSet::one(Caps::CompressedVideo {
                 codec: VideoCodec::H264,
                 width: width.clone(),
                 height: height.clone(),
                 framerate: framerate.clone(),
+                colorimetry: *colorimetry,
             }),
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
@@ -569,7 +618,8 @@ impl AsyncElement for FfmpegH264Enc {
             width,
             height,
             framerate,
-            interlace: _,
+            colorimetry,
+            ..
         } = absolute_caps
         else {
             return Err(G2gError::CapsMismatch);
@@ -586,6 +636,7 @@ impl AsyncElement for FfmpegH264Enc {
         self.height = *h;
         self.format = *format;
         self.framerate = framerate.clone();
+        self.colorimetry = *colorimetry;
         self.open_encoder()?;
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
@@ -688,6 +739,7 @@ impl PadTemplates for FfmpegH264Enc {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
         let sink = CapsSet::from_alternatives(Vec::from([
             Self::input_template(RawVideoFormat::I420),
@@ -801,6 +853,7 @@ mod tests {
             height: Dim::Fixed(h),
             framerate: Rate::Fixed(30 << 16),
             interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
     }
 
@@ -1028,6 +1081,7 @@ mod tests {
                 width: Dim::Fixed(W),
                 height: Dim::Fixed(H),
                 framerate: Rate::Fixed(30 << 16),
+                colorimetry: g2g_core::Colorimetry::UNKNOWN
             }],
             "output caps announced once"
         );
@@ -1048,6 +1102,7 @@ mod tests {
             width: Dim::Fixed(W),
             height: Dim::Fixed(H),
             framerate: Rate::Fixed(30 << 16),
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         })
         .expect("open H.264 decoder");
         let mut dsink = CaptureSink::default();
@@ -1125,6 +1180,7 @@ mod tests {
             width: Dim::Fixed(W),
             height: Dim::Fixed(H),
             framerate: Rate::Fixed(30 << 16),
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
         })
         .expect("open H.264 decoder");
         let mut sink = CaptureSink::default();
