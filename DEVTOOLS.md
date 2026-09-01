@@ -233,7 +233,10 @@ double-click) to frame the whole graph, so a large pipeline stays navigable.
 The sidebar shows a per-stage latency waterfall: each element's input-link wait
 (measured queue-residency, p50) stacked with its `process()` cost (p50), so you
 see where a frame's time goes. The end-of-run summary prints the same as
-`wait p50/p99` beside `proc`.
+`wait p50/p99` beside `proc`, plus `age-out p50/p99`: the frame's total age
+(source arrival to that element's output push). `age-out` is the column that
+catches an element buffering frames internally, a decoder's reorder queue reads
+as cheap `proc` yet an `age-out` several frame-periods high.
 
 Click any edge to tap its content: the dashboard streams a live preview of the
 packets crossing it, a downscaled thumbnail for RGBA/BGRA and planar NV12/I420

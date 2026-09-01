@@ -23,9 +23,10 @@ use alloc::vec::Vec;
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    pcm_formats, AsyncElement, AudioFormat, ByteStreamEncoding, Caps, CapsConstraint, CapsSet,
-    ConfigureOutcome, ElementMetadata, FrameTiming, G2gError, MemoryDomain, OutputSink,
-    PadTemplate, PadTemplates, PipelinePacket, ANY_CHANNELS, ANY_SAMPLE_RATE,
+    pcm_formats, AsyncElement, AudioFormat, BusHandle, BusMessage, ByteStreamEncoding, Caps,
+    CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, FrameTiming, G2gError,
+    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, ANY_CHANNELS,
+    ANY_SAMPLE_RATE,
 };
 
 use crate::riff::{
@@ -52,12 +53,20 @@ const FORMAT_EXTENSIBLE: u16 = 0xFFFE;
 /// Offset of that GUID within a `fmt ` chunk (16 fixed bytes, then `cbSize`).
 const EXTENSIBLE_TAG_OFFSET: usize = 24;
 
+const NANOS_PER_SECOND: u64 = 1_000_000_000;
+/// The `data` chunk size a streaming writer stamps when the length is not known
+/// ahead of time (what `wavenc` writes), so it is not a real length.
+const UNKNOWN_DATA_LEN: usize = u32::MAX as usize;
+
 /// The PCM stream a `fmt ` chunk describes.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct WaveFormat {
     format: AudioFormat,
     channels: u8,
     sample_rate: u32,
+    /// `nAvgBytesPerSec`, what the `data` chunk length divides by to give the
+    /// stream's duration. `0` when the file declares none.
+    byte_rate: u32,
 }
 
 /// The g2g format for a `(wFormatTag, bits per sample)` pair, `None` for an
@@ -98,6 +107,7 @@ fn parse_fmt(body: &[u8]) -> Option<WaveFormat> {
     }
     let channels = read_u16(body, 2)?;
     let sample_rate = read_u32(body, 4)?;
+    let byte_rate = read_u32(body, 8)?;
     let bits = read_u16(body, 14)?;
     if channels == 0 || channels > u8::MAX as u16 || sample_rate == 0 {
         return None;
@@ -106,6 +116,7 @@ fn parse_fmt(body: &[u8]) -> Option<WaveFormat> {
         format: audio_format(tag, bits)?,
         channels: channels as u8,
         sample_rate,
+        byte_rate,
     })
 }
 
@@ -127,6 +138,7 @@ pub struct WavParse {
     buf: Vec<u8>,
     riff_seen: bool,
     format: Option<WaveFormat>,
+    bus: Option<BusHandle>,
     /// True once the `data` chunk header has been consumed: everything after it
     /// is samples.
     in_data: bool,
@@ -136,6 +148,16 @@ pub struct WavParse {
 impl WavParse {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Attach the pipeline bus so the stream's length, computed from the `data`
+    /// chunk and the `fmt ` byte rate, posts as a
+    /// [`BusMessage::DurationChanged`] once the `data` header is read. WAV is
+    /// demuxed rather than sourced, so the runner's `query_duration` path never
+    /// sees it.
+    pub fn with_bus(mut self, bus: BusHandle) -> Self {
+        self.bus = Some(bus);
+        self
     }
 
     fn input_caps() -> Caps {
@@ -154,6 +176,23 @@ impl WavParse {
         }));
         alternatives.extend(coded_alternatives());
         CapsSet::from_alternatives(alternatives)
+    }
+
+    /// Post the stream's duration from the `data` chunk length and the byte
+    /// rate. Both come from the file, so a zero rate or a streaming file's
+    /// unknown-length sentinel reports nothing rather than a bogus number.
+    fn post_duration(&self, data_len: usize, format: WaveFormat) {
+        let Some(bus) = &self.bus else {
+            return;
+        };
+        if format.byte_rate == 0 || data_len == 0 || data_len == UNKNOWN_DATA_LEN {
+            return;
+        }
+        let duration_ns =
+            (data_len as u64).saturating_mul(NANOS_PER_SECOND) / u64::from(format.byte_rate);
+        if duration_ns > 0 {
+            bus.try_post(BusMessage::DurationChanged { duration_ns });
+        }
     }
 
     /// Read the RIFF header and the chunks ahead of `data`, then push everything
@@ -180,6 +219,7 @@ impl WavParse {
             if &id == b"data" {
                 self.buf.drain(..CHUNK_HEADER_LEN);
                 let format = self.format.ok_or(G2gError::CapsMismatch)?;
+                self.post_duration(size, format);
                 out.push(PipelinePacket::CapsChanged(Caps::Audio {
                     format: format.format,
                     channels: format.channels,

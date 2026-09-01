@@ -102,8 +102,8 @@ jobs:
   # enables just the sink. These unions are deliberately ASYMMETRIC (a sink
   # without its source, one display without the others) and deliberately small,
   # which is what makes them catch that class. They install nothing beyond what
-  # `features-linux` already does. The `ffmpeg` union is not here for the same
-  # reason it is excluded below: it needs version-pinned libav* dev packages.
+  # `features-linux` already does. The `ffmpeg` feature has its own
+  # `ffmpeg-decode` job below rather than a union slot here.
   feature-unions:
     name: feature unions (rot guard)
     runs-on: ubuntu-latest
@@ -135,10 +135,34 @@ jobs:
           cargo check -p g2g-plugins --locked --all-targets --features
           dav1d,rav1d,mjpeg,opus,vorbis
 
+  # The libavcodec decode path (`ffmpeg` feature) and its latency guard.
+  # `ffmpeg-sys-next` probes the installed libav* version and gates its
+  # bindings on it, so the distro's libavcodec is acceptable where a hardcoded
+  # binding would not be. The depth test self-skips without an x264-capable
+  # ffmpeg CLI, so the encoder probe step keeps a skip from passing as green.
+  ffmpeg-decode:
+    name: ffmpeg decode (depth guard)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: install libav* and the ffmpeg CLI
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ffmpeg libavcodec-dev libavformat-dev libavutil-dev libswscale-dev clang
+      - name: the fixture encoder must exist (a missing one self-skips the test)
+        run: ffmpeg -hide_banner -h encoder=libx264 >/dev/null
+      - name: decoder unit tests (ffmpeg feature)
+        run: cargo test -p g2g-plugins --locked --features ffmpeg --lib
+      - name: decoder pipeline-depth guard
+        run: cargo test -p g2g-plugins --locked --features ffmpeg --test m1109_decoder_depth -- --nocapture
+
   # Linux platform / feature build. Compiles the OS-coupled and GPU/ML elements
   # that build with stable, apt-installable system libraries. Intentionally
   # omitted (need version-pinned or proprietary deps, add separately):
-  #   ffmpeg (libav* version-sensitive), vaapi (libva + GBM + bindgen),
+  #   vaapi (libva + GBM + bindgen),
   #   pipewire (libpipewire version-sensitive), vpx (env-libvpx-sys ships
   #   bindings only for specific libvpx versions, needs its `generate` feature +
   #   clang against the system libvpx), cuda / cuda-gl (NVIDIA driver),

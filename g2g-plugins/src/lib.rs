@@ -454,6 +454,10 @@ pub mod st2022fec;
 // each gated to its source's feature.
 #[cfg(feature = "std")]
 pub mod uridecodebin;
+// Media discovery (M1107): what a file holds, from a headless probe graph.
+// std (reads the file and uses the Registry's primary-stream hooks).
+#[cfg(feature = "std")]
+pub mod discover;
 // A Registry pre-populated with the standard elements for parse_launch /
 // gst-inspect (M107). std (the Registry is std).
 #[cfg(feature = "std")]

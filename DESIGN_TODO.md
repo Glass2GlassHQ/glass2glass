@@ -172,6 +172,20 @@ Highest leverage first:
 - **Pure-Rust / wasm decode** to drop the ffmpeg FFI: VP8 / VP9 decode and a
   pure-Rust Opus path (see the roadmap for why both are blocked).
 
+## Audio depth
+
+- Windowed-sinc / polyphase resampler in `audioresample` (currently linear
+  interpolation, which rolls off high frequencies).
+- Dither (and optionally noise shaping) in `audioconvert` on bit-depth
+  reduction.
+- Audio reverse playback (the audio analog of `GopReverse`).
+- Loudness / analysis metering: `spectrum` and EBU R128 (`ebur128`) analogs
+  beside `level`.
+- Capture-side drift clock on `alsasrc` / `pipewiresrc`, so a duplex
+  capture-plus-playback graph can slave one direction to the other.
+- Carry an explicit channel mask/positions in `Caps::Audio` rather than only a
+  count with the per-count `ChannelLayout` convention.
+
 ## Transforms and effects
 
 - **`textoverlay` font backend:** font-variation axes beyond `wght` on the
@@ -197,10 +211,8 @@ Highest leverage first:
 - **KMS vblank reconciliation** + Wayland frame-callback co-scheduling. Needs a
   DRM/KMS presentation sink (current `WaylandSink` is SHM software). Validate on
   a real display.
-- **A/V clock slaving** remaining pieces: extend the audio-master `DriftClock`
-  discipline to `PipeWireSink` (blocked on the pinned `pipewire` 0.8 binding
-  lacking `pw_stream_get_time`, plus playout accounting in its leaky realtime
-  callback), and an on-display lip-sync soak on real hardware.
+- **A/V clock slaving** remaining piece: an on-display lip-sync soak on real
+  hardware.
 - **PTP clock polish** (not blocking): a live multi-machine / `ptp4l`-grandmaster
   soak of `PtpClient` (host/root/reference-gear gated); a direct PHC
   (`/dev/ptpN`) read; hardware RX/TX timestamping for uncompressed ST 2110-20

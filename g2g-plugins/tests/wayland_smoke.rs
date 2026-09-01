@@ -59,6 +59,7 @@ impl PipelineClock for ZeroClock {
 #[tokio::test]
 #[ignore = "needs a Wayland session + an RTSP feed (set G2G_RTSP_TEST_URL)"]
 async fn wayland_sink_shows_rtsp_h264_in_a_window() {
+    g2g_core::log::init_from_env();
     if std::env::var_os("WAYLAND_DISPLAY").is_none() {
         eprintln!("skipping: no WAYLAND_DISPLAY in env (run under a Wayland session)");
         return;
@@ -130,7 +131,8 @@ async fn wayland_sink_shows_rtsp_h264_in_a_window() {
     let elapsed = start.elapsed();
 
     let fps = stats.frames_emitted as f64 / elapsed.as_secs_f64();
-    let lat = snk.latency_snapshot();
+    let mut samples = snk.latency_samples();
+    samples.sort_unstable();
     eprintln!(
         "stats: emitted={} decoded={} presented={} elapsed={:.2}s effective_fps={:.1}",
         stats.frames_emitted,
@@ -139,18 +141,21 @@ async fn wayland_sink_shows_rtsp_h264_in_a_window() {
         elapsed.as_secs_f64(),
         fps,
     );
-    eprintln!(
-        "glass-to-glass latency: n={} mean={:.1}ms p50={:.1}ms p95={:.1}ms p99={:.1}ms max={:.1}ms",
-        lat.count,
-        lat.mean_ns as f64 / 1e6,
-        lat.p50_ns as f64 / 1e6,
-        lat.p95_ns as f64 / 1e6,
-        lat.p99_ns as f64 / 1e6,
-        lat.max_ns as f64 / 1e6,
-    );
     assert!(
-        lat.count > 0,
+        !samples.is_empty(),
         "no latency samples — arrival_ns not threaded through"
+    );
+    // Exact percentiles from the sink's raw samples (nearest rank), not the
+    // log2-bucket histogram estimates, which are a bucket edge at this scale.
+    let pct = |p: usize| samples[(samples.len() - 1) * p / 100] as f64 / 1e6;
+    let mean = samples.iter().sum::<u64>() as f64 / samples.len() as f64 / 1e6;
+    eprintln!(
+        "glass-to-glass latency: n={} mean={mean:.1}ms p50={:.1}ms p95={:.1}ms p99={:.1}ms max={:.1}ms",
+        samples.len(),
+        pct(50),
+        pct(95),
+        pct(99),
+        samples[samples.len() - 1] as f64 / 1e6,
     );
 
     assert!(dec.decoded_count() > 0, "decoder produced no NV12 frames");

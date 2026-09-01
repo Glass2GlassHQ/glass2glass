@@ -6,7 +6,7 @@
 ## 1. Executive Summary & Design Philosophy
 `glass2glass` (`g2g`) is an open-source, ultra-low-latency multimedia graph framework written in 100% pure Rust. It is built around one idea: **a pure-Rust core so the same typed pipeline runs, unchanged, across the whole hardware spectrum: MCU, RTOS, CPU, GPU, and WASM.** A `no_std + alloc`, sans-IO core means the graph, the element traits, the caps negotiation, and the runner are identical on a bare-metal microcontroller, a real-time (Embassy) target, a CPU server, a GPU-resident zero-copy pipeline, and the web browser; only the deployment shell (which executor, which hardware elements) changes.
 
-The project prioritizes minimizing **glass-to-glass latency** — the exact time elapsed between physical photon/audio capture and hardware presentation.
+The project prioritizes minimizing **glass-to-glass latency**: the exact time elapsed between physical photon/audio capture and hardware presentation.
 
 ### The Four Pillars of `g2g`:
 1. **Asynchronous Execution:** Every element is a cooperative async task (`Future`). No internal OS thread management; the framework is runtime-agnostic.
@@ -85,7 +85,79 @@ The project is structured as a Cargo Workspace to enforce clean boundaries betwe
 
 The `no_std + alloc` baseline is deliberate: it admits cooperative async executors (which need a heap for futures) and `Arc` reference counting, while still excluding the OS-dependent surface of `std`. Targets requiring strict no-heap allocation use the static `BufferPool` (§3.3) and avoid the `dyn`-safe element wrappers (§4.3).
 
-**Heap-free (`alloc`-optional) core.** For the safety / no-heap MCU market that forbids a heap outright, `alloc` itself is an optional cargo feature: `g2g-core` built `--no-default-features` links no allocator and carries only the data-plane subset (`Frame`, the `Caps` enum + `intersect` / `fixate` including `Caps::Tensor` (M636: `TensorShape` is a fixed-rank inline array, at most `MAX_TENSOR_RANK` dims, so the ML caps kind is heap-free and `Copy` like the media kinds), `MemoryDomain::System` lending a `StaticLendRing` slot zero-copy, and the pure clock / time / error / state modules). The dynamic layer, negotiation solver, `parse_launch`, the `dyn` element traits, and the tooling live behind `alloc`; `std` / `runtime` / `metadata` imply it, so host consumers are unaffected. In the heap-free build a pipeline is a compile-time-static graph of concrete elements using the static element model (`g2g_core::staticelem`: `StaticSource` / `StaticTransform` / `StaticSink` with `async fn` in trait, so each stage's future is unboxed, plus const-arity runners and a `Chain` combinator), the generic twin of the object-safe `AsyncElement` (which boxes a future per frame). The guarantee is machine-checked, not asserted: `examples/g2g-noalloc` links a full source -> transform -> sink pipeline for `thumbv7em-none-eabihf` with no `#[global_allocator]` and no `alloc` crate dependency (so any heap use fails the build), and `tools/noalloc-check.sh` asserts the archive references zero allocator symbols; a counting-allocator test (`m624`) confirms the runner allocates nothing over 100k frames at runtime. The same archive is also panic-free: every reachable path avoids unwrap / slice-index / overflow panics, and the single-poll executor lets the optimizer discharge the compiler's resumed-after-completion guard, so the archive contains zero `core::panicking` symbols (the mandatory `#[panic_handler]` is provably dead code); the check script asserts that too, then runs the pipeline on the host through a C harness so the symbol proofs describe code that demonstrably executes. Finally the footprint is reported and budget-enforced at build time (`tools/footprint-report.sh` + `footprint.py`): the pipeline linked as a gc-sectioned ELF measures ~4 KB ROM, 0 bytes static RAM, and a worst-case stack (~1.25 KB, dominated by the entry frame holding the capture ring + the monomorphized pipeline state machine) computed from the disassembly call graph, so an MCU integrator gets hard RAM / stack / ROM numbers, not estimates. The same pipeline (shared as the `noalloc-pipeline` rlib) also *executes* on the Cortex-M ISA: `examples/g2g-qemu` boots it on QEMU's MPS2-AN386 Cortex-M4 and verifies the checksum on-target (`tools/qemu-check.sh`, in CI), with the conformance row marked as emulated. MCU peripheral elements live in `g2g-mcu` (`no_std`, no `alloc`): heap-free `staticelem` elements written against portable trait seams rather than chip registers, so the driver logic is host-tested against the datasheet with mock peripherals, and a board port is only the vendor HAL's trait impls. The peripheral elements are `SpiDisplaySink` (ST7789 / ILI9341 over `embedded-hal` `SpiDevice` + D/C pin: DCS command sequences, window addressing, streaming RGBA -> RGB565 through a fixed stack chunk), the `FrameGrabber` camera seam + `GrabberSrc` (the DCMI/CSI shape: capture into a lent `StaticLendRing` slot, published downstream zero-copy with sequence/PTS; safe over a `'static` ring, `unsafe` over a borrowed one), and the `PcmWriter` audio seam + `PcmSink` (I2S/SAI shape, S16LE interleaved decode through a fixed chunk). MCU-fit codecs live there too: the G.711 (mu-law / A-law) fixed-point codec (M638), pure-integer `const fn` conversions validated bit-exact against ffmpeg over the entire domain (every encoder input, every decoder code), and the IMA ADPCM codec (M639, the WAV / DVI4 block layout, validated bit-exact against ffmpeg in encode, decode, and cross-decode), both with persisted `Oracle` evidence, wrapped as `G711Enc` / `G711Dec` / `AdpcmEnc` / `AdpcmDec`, payload-producing static transforms (they lend output frames from a `StaticLendRing`, the capture source's zero-copy model, through one shared helper). The reference audio chain uses a fixed-point polyphase resampler over the {8, 16, 48} kHz set (generated Q14 Blackman-sinc tables with exactly-unity phase sums, so DC gain is exact; streaming state makes chunking byte-invisible; validated analytically, ~86 dB tone SNR / ~120 dB alias rejection). Its mix stage uses the const-arity multi-input surface: the `StaticFanIn2` trait plus the `run_sources_fanin_sink` runner (lockstep pull, EOS when either source ends, monomorphized like the linear runners), and `g2g-mcu`'s `Mixer` implements it (saturating Q15 gains per input via the `const fn mix_q15`, i64 accumulator because two full-scale-negative products overflow i32, unequal payloads rejected rather than truncated, input `a` the timing master). The chain's egress uses the RFC 3550 fixed header is defined once for the whole workspace (`g2g_core::rtp::RtpHeader`, a heap-free `const fn` shared across `rtppay` and the ST 2110 cores), and `g2g-mcu`'s `RtpSink` emits one RTP packet per frame through the `PacketSender` seam (a header + payload scatter-gather datagram, the lwIP / Zephyr-sendmsg shape; PTS -> timestamp via `MediaClock`, over-MTU payloads rejected rather than fragmented), validated against ffmpeg as the receiving RTP peer byte-for-byte in the CI conformance job. These compose into the flagship demo graph (M644): `capture -> convert -> resample -> mix -> encode -> RTP` as one static pipeline (`noalloc-pipeline::audio`; `SourceChain` / `SinkChain` fuse transforms into the fan-in runner's source and sink slots, the static bin analog, and `PcmConvert` narrows left-justified 24-in-32 I2S capture slots to S16), host-validated against an independent float reference and checksum-pinned, then re-verified bit-exactly on QEMU Cortex-M4 and Cortex-M3 under all four executors (bare, Embassy, FreeRTOS, Zephyr) with its own footprint budget row (10572 B ROM, 0 B static RAM, 6504 B worst-case stack). The same graph is also emitted by the host graph compiler (M646, `g2g-mcugen`): a declarative YAML/JSON document compiles to the monomorphized static pipeline with every ring sized from the graph's frame geometry (plus a ring-memory budget report), and the generated flagship graph reproduces the hand-written reference's RTP wire byte-for-byte (`examples/mcugen-graphs`, checked in CI against `AUDIO_EXPECTED_CHECKSUM`), which is the develop-on-host-compile-to-MCU story made concrete. The compiler is not audio-specific (M648): frame geometry is a sum of audio (rate / width / channels) and raster (pixels / bpp), the sink seam varies per sink kind (an RTP `PacketSender`, or an SPI bus + D/C pin + delay bound on `embedded-hal`), and a second catalog compiles a `camera -> SPI display` graph (`g2g-mcugen/examples/display.yaml`) whose generated pipeline reproduces the hand-written display reference's panel wire byte-for-byte (`EXPECTED_CHECKSUM`, the reference's byte no-op transform makes camera->display equivalent), so "one declarative graph compiles to a bounded static build" is proven for video / display as well as audio and a timing / jitter row measured under QEMU icount (M645: deterministic virtual time, two boots must report identically; steady-state worst case ~764 us of a 10 ms frame with ~360 ns jitter, budget-enforced in CI like the memory numbers): the deterministic-audio wedge's one-graph-everywhere claim, machine-checked in space and time. The hardware-codec-peripheral seam uses `JpegDecoder`, the STM32H7-shaped whole-bitstream contract, and `HwJpegDec`, which validates JFIF framing before the peripheral, cross-checks the emitted byte count against the header-derived MCU tiling with checked math, and surfaces a self-contradicting peripheral as a fault; datasheet-tested on mocks. The camera and display elements are the proof pipeline's source and sink, so every guarantee above covers real peripheral elements (whole pipeline: 4286 B ROM, 0 B static RAM, 1508 B worst-case stack; the transform link negotiates `Caps::Tensor` and validates each frame against it, so the tensor caps kind is covered by the same proofs, M636), and the same pipeline runs under a real Embassy task (`examples/g2g-embassy`, the future awaited directly) and under a FreeRTOS task (`examples/g2g-freertos`, the C-ABI staticlib linked into a static-allocation-only FreeRTOS image) on the emulated Cortex-M, and as a Zephyr application (`examples/g2g-zephyr`: the same staticlib, built for the `qemu_cortex_m3` board's soft-float thumbv7m, and consumed through a reusable Zephyr *module* (`examples/g2g-zephyr-module`: `module.yml` + CMake that import the archive and expose `include/g2g.h`, so the app `#include <g2g.h>` and links nothing g2g itself, the drop-in packaging a Zephyr shop lists in its west manifest), booted on QEMU's lm3s6965evb, so the *build-system* integration a Zephyr shop uses is proven too, not just the C call): the static element model needs no adaptation layer for an RTOS executor, from either the Rust or the C side. Real capture uses an interrupt/DMA concurrency model. A DMA-completion (or timer) ISR produces frames in interrupt context while the pipeline consumes them in the main/task context, so the two hand frames across the ISR boundary through `g2g_core::SpscFrameRing<N, BYTES>`, a fixed-capacity single-producer / single-consumer FIFO. The producer's `produce` (called from the ISR) fills the next free slot and publishes it; the consumer's `borrow` / `release` drains it in capture order, zero-copy (the frame borrows the ring slot, released after it is dropped). It uses only atomic load/store, no compare-and-swap, so it builds on Cortex-M targets without atomic CAS (`thumbv6m`), and back-pressure is explicit and non-blocking because an interrupt cannot wait: a full ring drops the frame and bumps an overrun counter the consumer reads. `g2g_core::SpscCaptureSrc` is the consumer-side `StaticSource` (the concurrent twin of the synchronous `GrabberSrc`): it drains the ring and, while empty, calls a caller-supplied idle hook (`cortex_m::asm::wfi` on hardware, so the consumer sleeps until the capture interrupt) and retries. Proven on the Cortex-M ISA (`examples/g2g-qemu`'s `isr_capture` bin, in `tools/qemu-check.sh`): a SysTick interrupt is the producer, the main-context pipeline drains it through `SpscCaptureSrc -> G.711 -> checksum` sleeping on `wfi`, and the wire equals synchronous delivery frame-for-frame (`captured=64 overruns=0 OK`), with host thread tests covering lossless-when-paced and drop-and-count-under-back-pressure. The C integration also supports peripheral callbacks through `g2g-mcu::cffi`: `CFrameGrabber` / `CPacketSender` implement the `FrameGrabber` / `PacketSender` seams over C function pointers (`CaptureFn` / `SendFn` + an opaque `ctx`), so a board registers its existing C capture routine and C network stack and g2g calls them back. `g2g_core::step_source_sink` (with the `Step` enum) is the frame-at-a-time runner that hands control back to the caller after one frame, so a C superloop owns the loop (compose a tail with `SinkChain` to step any linear graph). `examples/g2g-cffi` proves it: a `no_std` staticlib exposing `g2g_audio_egress_init` / `_step` / `_reset` (a `capture -> G.711 -> RTP` pipeline over the C seams) plus `include/g2g_cffi.h`, linked for `thumbv7em` with zero allocator and zero data-panic symbols (the one-frame-step future leaves only a benign, runtime-unreachable async re-poll guard the run-to-EOS runners discharge; `tools/cffi-check.sh` permits that alone), then driven from a real C caller (`harness.c`) whose wire matches the pipeline's Rust reference byte-for-byte, so the C seams are proven byte-transparent. Application code on this surface also needs no `unsafe`: `StaticLendRing::new` is `const` (the ring lives in a `static`, making the zero-copy lend sound by construction via `GrabberSrc`'s safe constructor) and the single-poll executor is the safe `drive_ready`; `m634_forbid_unsafe` proves it by building a full pipeline under `#![forbid(unsafe_code)]`. On top of all this sits the runtime-fault-recovery supervisor the safety / cert market requires (M652, `g2g_core::supervise`, in the no-alloc subset): the static runners propagate a returned fault straight out (the first glitch ends the pipeline), so the supervisor supplies the opposite default, bounded and deterministic recovery. A `FaultPolicy` maps each fault to a `Recovery` action, `Retry` (re-drive a transient fault), `Skip` (drop the frame, keep cadence, degraded mode), `Reset` (re-initialize the stages), or `Escalate`; the supplied `RetryThenReset` and `SkipBounded` cover recover-in-place and degrade-and-continue and both escalate a persistent fault in finite steps. `Recover` is the per-stage re-init seam (default no-op; `GrabberSrc` re-arms via a new `FrameGrabber::reset`, `RtpSink` re-opens via a new `PacketSender::reset`, `SpscCaptureSrc` flushes stale buffered frames so real-time capture resumes from live data), so a supervised pipeline declares each stage's recovery behavior, the traceability a safety case wants, and `SupervisorReport` accounts the faults / retries / resets / skips / escalation. A `Watchdog` is petted only on real forward progress, so a wedged or escalated pipeline stops petting and a hardware watchdog resets the chip (`g2g-mcu::watchdog` supplies the `WatchdogTimer` HAL seam, embedded-hal 1.0 having dropped its watchdog trait, plus the `SupervisorWatchdog` adapter). `step_supervised` (a C superloop / RTOS task owns the loop) and `run_supervised` drive it, bounded by a hard `MAX_ATTEMPTS` cap so even a buggy never-escalating policy cannot hang. Proven on the Cortex-M ISA (`examples/g2g-qemu`'s `supervised` bin, in `tools/qemu-check.sh`): a `capture -> G.711 -> checksum` pipeline recovers a mid-stream latched capture fault (retry, then reset via the `FrameGrabber::reset` seam, then continue, all 64 frames delivered, wire checksum equal to a clean reference, watchdog fed once per frame) and then escalates a dead peripheral within its bounded ladder without hanging, watchdog never fed (`delivered=64 resets=1 wd=64 escalated=4 OK`). The receive direction is the inverse of the capture-to-egress flagship (M653): `g2g_core::rtp::RtpHeader::parse` is the wire-tolerant inverse of `to_bytes` (CSRC list, extension header, and padding, every offset checked and bounds-guarded so a malformed datagram returns `None`, the demuxer discipline; the std H.264 depayloader shares it now), `g2g-mcu::rtprecv` adds the `PacketReceiver` ingress seam and `RtpSrc`, the heap-free `StaticSource` that receives a datagram, parses it, and lends the payload downstream with `Frame::sequence` set to the RTP sequence number, and `g2g-mcu::jitter::JitterBuffer<N, BYTES>` is the reorder element: a fixed `N`-slot reorder window that absorbs arrival jitter, emits the next-in-sequence packet after a prime depth, and handles reorder / duplicate / late / loss explicitly and countably (a packet more than `depth` ahead marks the missing head lost and advances, so one loss never stalls the stream), its output frame borrowing the buffer's own slot zero-copy under the single-frame-in-flight discipline. These compose into the RX flagship `RtpSrc -> JitterBuffer -> G.711 decode`, validated on mocks (a reordered / duplicated / lossy wire reconstructs the ordered decoded PCM byte-for-byte) and on the Cortex-M ISA (`examples/g2g-qemu`'s `rx` bin, proved by an order-sensitive rolling hash equal to an independent in-order decode, `played=14 reordered=3 lost=0 OK`). Both RX elements are `Recover`-capable for the supervisor (the source re-opens its socket, the buffer flushes and re-syncs). The catalog also reaches beyond the media pipeline into the I2C sensor and UART transport a real product needs, with real datasheet-anchored driver logic (M654): `g2g-mcu::sht3x::Sht3xSrc` reads a Sensirion SHT3x temperature/humidity sensor over the `embedded-hal` `I2c` seam, issuing the datasheet single-shot command, validating the two CRC-8 check bytes (polynomial `0x31`, the datasheet `0xBEEF -> 0x92` vector is a test), and converting per the datasheet transfer functions (`i64`-widened so the fixed-point multiply cannot overflow); a CRC mismatch is rejected as a bus-integrity fault rather than trusted. `g2g-mcu::uart` adds local `SerialTx` / `SerialRx` seams (embedded-hal 1.0 keeps blocking serial in `embedded-io`, so a local seam like the packet transports), `UartSink` (frame payload as a byte-stream egress) and `UartSrc` (fixed-size frame ingress), round-tripping over a link. Proven on the Cortex-M ISA (`examples/g2g-qemu`'s `sensor` bin): a mock SHT3x returns a datasheet response and the `Sht3xSrc -> UartSink` pipeline streams each converted reading out a mock UART, the bytes asserted equal to the datasheet conversion (`g2g-sensor: uart-bytes=32 OK`). Finally, the safety / cert market's process artifacts are assembled and, characteristically, made checkable (M655): `docs/safety/REQUIREMENTS.md` is a requirements traceability matrix (15 requirements across memory, timing, faults, concurrency, input validation, and data integrity, each linked to the proof script, test, or CI job that verifies it), and `tools/traceability-check.sh` fails if any cited evidence is missing or if a cited proof script is not wired into CI, so the matrix is a checked claim rather than a document that can drift, run in CI alongside the proofs it indexes; `docs/safety/SAFETY_MANUAL.md` documents the conditions of use, per-property assumptions, the localized `unsafe` inventory, and integrator responsibilities; and `tools/qualification-kit.sh` runs the whole proof set and emits a consolidated requirement-to-evidence-to-result report. This is a down-payment on a product safety case (emulated not silicon, pre-1.0, not a certificate), not a substitute for one. All of the above is also proven to be **not ARM-specific** (M656): because the static element model is ISA-agnostic pure Rust (only the QEMU harness bins carry ARM startup), the `g2g-core` no-alloc subset and `g2g-mcu` build unchanged for `riscv32imafc-unknown-none-elf` (the ESP32-P4 class), and `tools/noalloc-check.sh` asserts the zero-allocator / zero-panic guarantees on both `thumbv7em` and RISC-V archives while `tools/footprint.py` (with an `--isa riscv` stack-frame model) budgets the RISC-V video-pipeline footprint (3718 B ROM / 0 B static RAM / 1328 B stack). The RISC-V footprint model also budgets the flagship audio graph: rustc encodes that frame as a constant too large for `addi`'s 12-bit immediate, so it materializes the size into a register and does `sub sp, sp, <reg>`; the stack model now resolves that register to its compile-time constant (following the `lui` / `addi` / `slli` materialization chain, and failing rather than under-reporting if it is ever not a known constant), so the RISC-V audio graph is budgeted exactly like the others (10852 B ROM / 0 B static RAM / 6432 B stack, within the ARM audio budgets). The portability claim, a pure-Rust media core across ARM and RISC-V, is machine-checked, not asserted. The RISC-V board path includes two additional capabilities. `SpiDisplaySink::with_stripe` (M659) streams a panel too large to ring-buffer whole (240x240 RGBA is 230 KB) in horizontal bands: each frame is one `width x rows` band written to the next vertical sub-window, so the pipeline ring holds a single 15 KB band, and `noalloc_pipeline::run_display_banded_with` is the board-agnostic full-panel runner (the whole-frame path stays byte-identical, so the existing proofs are unchanged). `g2g-mcu::hwh264` (M660) adds the hardware-H.264-encoder seam, the encode twin of `HwJpegDec`: the `H264Encoder` contract (one raw I420 frame in, one Annex-B access unit out, byte count + keyframe flag reported) and `HwH264Enc`, which validates 4:2:0 geometry with checked sizing, cross-checks the reported byte count, and surfaces a faulting peripheral, plus the `CH264Encoder` C bridge so the vendor's hardware encoder driver *is* the peripheral (alongside `CFrameGrabber` / `CPacketSender`); host-tested through a mock and a real `extern "C"` callback (byte-identical, proving the C seam transparent) including a `camera -> encode` pipeline. The `camera -> encode` path uses a color convert, since a DCMI/DVP camera emits packed YUYV 4:2:2 but `HwH264Enc` wants planar I420: `g2g-mcu::videoconvert::YuyvToI420` (M661) is the heap-free `StaticTransform` for exactly that (the MCU twin of the `alloc`-based host `VideoConvert`), converting in place through a ring slot with checked geometry, host-tested including a `camera -> convert` pipeline whose output is exactly `HwH264Enc`'s expected I420 size. The convert, encoder, and RTP elements compose: an integration test drives `camera -> YuyvToI420 -> HwH264Enc -> RtpSink` as one static pipeline and traces a camera-stamped byte to the RTP payload. On the ARM side, `examples/g2g-stm32h743` (M661) targets a NUCLEO-H743ZI2: it runs the flagship audio graph and egresses RTP over the H743's on-chip Ethernet through a pure-Rust `embassy-net`/smoltcp stack, the whole g2g-to-network bridge being one `EmbassyNetSender: PacketSender` that maps the RTP egress seam onto an embassy-net `UdpSocket` (no C in the network path, unlike the P4's WiFi). It compiles for `thumbv7em` and stays outside CI because of embassy's build weight.
+**Heap-free (`alloc`-optional) core.** For the safety / no-heap MCU market that forbids a heap outright, `alloc` itself is an optional cargo feature. `g2g-core` built `--no-default-features` links no allocator and carries only the data-plane subset: `Frame`, the `Caps` enum + `intersect` / `fixate` including `Caps::Tensor` (`TensorShape` is a fixed-rank inline array, at most `MAX_TENSOR_RANK` dims, so the ML caps kind is heap-free and `Copy` like the media kinds), `MemoryDomain::System` lending a `StaticLendRing` slot zero-copy, and the pure clock / time / error / state modules. The dynamic layer, negotiation solver, `parse_launch`, the `dyn` element traits, and the tooling live behind `alloc`; `std` / `runtime` / `metadata` imply it, so host consumers are unaffected.
+
+In the heap-free build a pipeline is a compile-time-static graph of concrete elements using the static element model (`g2g_core::staticelem`: `StaticSource` / `StaticTransform` / `StaticSink` with `async fn` in trait, so each stage's future is unboxed, plus const-arity runners and a `Chain` combinator), the generic twin of the object-safe `AsyncElement` (which boxes a future per frame).
+
+**The heap-free guarantee is machine-checked, not asserted.** `examples/g2g-noalloc` links a full source -> transform -> sink pipeline for `thumbv7em-none-eabihf` with no `#[global_allocator]` and no `alloc` crate dependency (so any heap use fails the build), and `tools/noalloc-check.sh` asserts the archive references zero allocator symbols; a counting-allocator test (`m624`) confirms the runner allocates nothing over 100k frames at runtime.
+
+The same archive is also panic-free: every reachable path avoids unwrap / slice-index / overflow panics, and the single-poll executor lets the optimizer discharge the compiler's resumed-after-completion guard, so the archive contains zero `core::panicking` symbols (the mandatory `#[panic_handler]` is provably dead code). The check script asserts that too, then runs the pipeline on the host through a C harness so the symbol proofs describe code that demonstrably executes.
+
+The footprint is reported and budget-enforced at build time (`tools/footprint-report.sh` + `footprint.py`): the pipeline linked as a gc-sectioned ELF measures ~4 KB ROM, 0 bytes static RAM, and a worst-case stack (~1.25 KB, dominated by the entry frame holding the capture ring + the monomorphized pipeline state machine) computed from the disassembly call graph, so an MCU integrator gets hard RAM / stack / ROM numbers, not estimates. The same pipeline (shared as the `noalloc-pipeline` rlib) also *executes* on the Cortex-M ISA: `examples/g2g-qemu` boots it on QEMU's MPS2-AN386 Cortex-M4 and verifies the checksum on-target (`tools/qemu-check.sh`, in CI), with the conformance row marked as emulated.
+
+**MCU peripheral elements** live in `g2g-mcu` (`no_std`, no `alloc`): heap-free `staticelem` elements written against portable trait seams rather than chip registers, so the driver logic is host-tested against the datasheet with mock peripherals, and a board port is only the vendor HAL's trait impls. The peripheral elements are:
+
+- `SpiDisplaySink` (ST7789 / ILI9341 over `embedded-hal` `SpiDevice` + D/C pin: DCS command sequences, window addressing, streaming RGBA -> RGB565 through a fixed stack chunk),
+- the `FrameGrabber` camera seam + `GrabberSrc` (the DCMI/CSI shape: capture into a lent `StaticLendRing` slot, published downstream zero-copy with sequence/PTS; safe over a `'static` ring, `unsafe` over a borrowed one),
+- the `PcmWriter` audio seam + `PcmSink` (I2S/SAI shape, S16LE interleaved decode through a fixed chunk).
+
+MCU-fit codecs live there too: the G.711 (mu-law / A-law) fixed-point codec, pure-integer `const fn` conversions validated bit-exact against ffmpeg over the entire domain (every encoder input, every decoder code), and the IMA ADPCM codec (the WAV / DVI4 block layout, validated bit-exact against ffmpeg in encode, decode, and cross-decode), both with persisted `Oracle` evidence, wrapped as `G711Enc` / `G711Dec` / `AdpcmEnc` / `AdpcmDec`, payload-producing static transforms (they lend output frames from a `StaticLendRing`, the capture source's zero-copy model, through one shared helper).
+
+The reference audio chain uses a fixed-point polyphase resampler over the {8, 16, 48} kHz set (generated Q14 Blackman-sinc tables with exactly-unity phase sums, so DC gain is exact; streaming state makes chunking byte-invisible; validated analytically, ~86 dB tone SNR / ~120 dB alias rejection).
+
+Its mix stage uses the const-arity multi-input surface: the `StaticFanIn2` trait plus the `run_sources_fanin_sink` runner (lockstep pull, EOS when either source ends, monomorphized like the linear runners), and `g2g-mcu`'s `Mixer` implements it (saturating Q15 gains per input via the `const fn mix_q15`, i64 accumulator because two full-scale-negative products overflow i32, unequal payloads rejected rather than truncated, input `a` the timing master).
+
+The chain's egress uses the RFC 3550 fixed header defined once for the whole workspace (`g2g_core::rtp::RtpHeader`, a heap-free `const fn` shared across `rtppay` and the ST 2110 cores), and `g2g-mcu`'s `RtpSink` emits one RTP packet per frame through the `PacketSender` seam (a header + payload scatter-gather datagram, the lwIP / Zephyr-sendmsg shape; PTS -> timestamp via `MediaClock`, over-MTU payloads rejected rather than fragmented), validated against ffmpeg as the receiving RTP peer byte-for-byte in the CI conformance job.
+
+**The flagship demo graph** composes these into `capture -> convert -> resample -> mix -> encode -> RTP` as one static pipeline (`noalloc-pipeline::audio`; `SourceChain` / `SinkChain` fuse transforms into the fan-in runner's source and sink slots, the static bin analog, and `PcmConvert` narrows left-justified 24-in-32 I2S capture slots to S16), host-validated against an independent float reference and checksum-pinned, then re-verified bit-exactly on QEMU Cortex-M4 and Cortex-M3 under all four executors (bare, Embassy, FreeRTOS, Zephyr) with its own footprint budget row (10572 B ROM, 0 B static RAM, 6504 B worst-case stack).
+
+The same graph is also emitted by the host graph compiler `g2g-mcugen`: a declarative YAML/JSON document compiles to the monomorphized static pipeline with every ring sized from the graph's frame geometry (plus a ring-memory budget report), and the generated flagship graph reproduces the hand-written reference's RTP wire byte-for-byte (`examples/mcugen-graphs`, checked in CI against `AUDIO_EXPECTED_CHECKSUM`), which is the develop-on-host-compile-to-MCU story made concrete.
+
+The compiler is not audio-specific: frame geometry is a sum of audio (rate / width / channels) and raster (pixels / bpp), the sink seam varies per sink kind (an RTP `PacketSender`, or an SPI bus + D/C pin + delay bound on `embedded-hal`), and a second catalog compiles a `camera -> SPI display` graph (`g2g-mcugen/examples/display.yaml`) whose generated pipeline reproduces the hand-written display reference's panel wire byte-for-byte (`EXPECTED_CHECKSUM`, the reference's byte no-op transform makes camera->display equivalent), so "one declarative graph compiles to a bounded static build" is proven for video / display as well as audio. A timing / jitter row is measured under QEMU icount (deterministic virtual time, two boots must report identically; steady-state worst case ~764 us of a 10 ms frame with ~360 ns jitter, budget-enforced in CI like the memory numbers), so the deterministic-audio wedge's one-graph-everywhere claim is machine-checked in space and in time.
+
+**The hardware-codec-peripheral seam** uses `JpegDecoder`, the STM32H7-shaped whole-bitstream contract, and `HwJpegDec`, which validates JFIF framing before the peripheral, cross-checks the emitted byte count against the header-derived MCU tiling with checked math, and surfaces a self-contradicting peripheral as a fault; datasheet-tested on mocks.
+
+The camera and display elements are the proof pipeline's source and sink, so every guarantee above covers real peripheral elements (whole pipeline: 4286 B ROM, 0 B static RAM, 1508 B worst-case stack; the transform link negotiates `Caps::Tensor` and validates each frame against it, so the tensor caps kind is covered by the same proofs).
+
+**RTOS executors.** The same pipeline runs under a real Embassy task (`examples/g2g-embassy`, the future awaited directly) and under a FreeRTOS task (`examples/g2g-freertos`, the C-ABI staticlib linked into a static-allocation-only FreeRTOS image) on the emulated Cortex-M, and as a Zephyr application (`examples/g2g-zephyr`: the same staticlib, built for the `qemu_cortex_m3` board's soft-float thumbv7m, and consumed through a reusable Zephyr *module* (`examples/g2g-zephyr-module`: `module.yml` + CMake that import the archive and expose `include/g2g.h`, so the app `#include <g2g.h>` and links nothing g2g itself, the drop-in packaging a Zephyr shop lists in its west manifest), booted on QEMU's lm3s6965evb, so the *build-system* integration a Zephyr shop uses is proven too, not just the C call). The static element model needs no adaptation layer for an RTOS executor, from either the Rust or the C side.
+
+**Real capture uses an interrupt/DMA concurrency model.** A DMA-completion (or timer) ISR produces frames in interrupt context while the pipeline consumes them in the main/task context, so the two hand frames across the ISR boundary through `g2g_core::SpscFrameRing<N, BYTES>`, a fixed-capacity single-producer / single-consumer FIFO. The producer's `produce` (called from the ISR) fills the next free slot and publishes it; the consumer's `borrow` / `release` drains it in capture order, zero-copy (the frame borrows the ring slot, released after it is dropped). It uses only atomic load/store, no compare-and-swap, so it builds on Cortex-M targets without atomic CAS (`thumbv6m`), and back-pressure is explicit and non-blocking because an interrupt cannot wait: a full ring drops the frame and bumps an overrun counter the consumer reads.
+
+`g2g_core::SpscCaptureSrc` is the consumer-side `StaticSource` (the concurrent twin of the synchronous `GrabberSrc`): it drains the ring and, while empty, calls a caller-supplied idle hook (`cortex_m::asm::wfi` on hardware, so the consumer sleeps until the capture interrupt) and retries. Proven on the Cortex-M ISA (`examples/g2g-qemu`'s `isr_capture` bin, in `tools/qemu-check.sh`): a SysTick interrupt is the producer, the main-context pipeline drains it through `SpscCaptureSrc -> G.711 -> checksum` sleeping on `wfi`, and the wire equals synchronous delivery frame-for-frame (`captured=64 overruns=0 OK`), with host thread tests covering lossless-when-paced and drop-and-count-under-back-pressure.
+
+**C integration** also supports peripheral callbacks through `g2g-mcu::cffi`: `CFrameGrabber` / `CPacketSender` implement the `FrameGrabber` / `PacketSender` seams over C function pointers (`CaptureFn` / `SendFn` + an opaque `ctx`), so a board registers its existing C capture routine and C network stack and g2g calls them back. `g2g_core::step_source_sink` (with the `Step` enum) is the frame-at-a-time runner that hands control back to the caller after one frame, so a C superloop owns the loop (compose a tail with `SinkChain` to step any linear graph).
+
+`examples/g2g-cffi` proves it: a `no_std` staticlib exposing `g2g_audio_egress_init` / `_step` / `_reset` (a `capture -> G.711 -> RTP` pipeline over the C seams) plus `include/g2g_cffi.h`, linked for `thumbv7em` with zero allocator and zero data-panic symbols (the one-frame-step future leaves only a benign, runtime-unreachable async re-poll guard the run-to-EOS runners discharge; `tools/cffi-check.sh` permits that alone), then driven from a real C caller (`harness.c`) whose wire matches the pipeline's Rust reference byte-for-byte, so the C seams are proven byte-transparent.
+
+Application code on this surface also needs no `unsafe`: `StaticLendRing::new` is `const` (the ring lives in a `static`, making the zero-copy lend sound by construction via `GrabberSrc`'s safe constructor) and the single-poll executor is the safe `drive_ready`; `m634_forbid_unsafe` proves it by building a full pipeline under `#![forbid(unsafe_code)]`.
+
+**Runtime fault recovery** for the safety / cert market is `g2g_core::supervise`, in the no-alloc subset. The static runners propagate a returned fault straight out (the first glitch ends the pipeline), so the supervisor supplies the opposite default, bounded and deterministic recovery. A `FaultPolicy` maps each fault to a `Recovery` action, `Retry` (re-drive a transient fault), `Skip` (drop the frame, keep cadence, degraded mode), `Reset` (re-initialize the stages), or `Escalate`; the supplied `RetryThenReset` and `SkipBounded` cover recover-in-place and degrade-and-continue and both escalate a persistent fault in finite steps.
+
+`Recover` is the per-stage re-init seam (default no-op; `GrabberSrc` re-arms via `FrameGrabber::reset`, `RtpSink` re-opens via `PacketSender::reset`, `SpscCaptureSrc` flushes stale buffered frames so real-time capture resumes from live data), so a supervised pipeline declares each stage's recovery behavior, the traceability a safety case wants, and `SupervisorReport` accounts the faults / retries / resets / skips / escalation. A `Watchdog` is petted only on real forward progress, so a wedged or escalated pipeline stops petting and a hardware watchdog resets the chip (`g2g-mcu::watchdog` supplies the `WatchdogTimer` HAL seam, embedded-hal 1.0 having dropped its watchdog trait, plus the `SupervisorWatchdog` adapter). `step_supervised` (a C superloop / RTOS task owns the loop) and `run_supervised` drive it, bounded by a hard `MAX_ATTEMPTS` cap so even a buggy never-escalating policy cannot hang.
+
+Proven on the Cortex-M ISA (`examples/g2g-qemu`'s `supervised` bin, in `tools/qemu-check.sh`): a `capture -> G.711 -> checksum` pipeline recovers a mid-stream latched capture fault (retry, then reset via the `FrameGrabber::reset` seam, then continue, all 64 frames delivered, wire checksum equal to a clean reference, watchdog fed once per frame) and then escalates a dead peripheral within its bounded ladder without hanging, watchdog never fed (`delivered=64 resets=1 wd=64 escalated=4 OK`).
+
+**The receive direction** is the inverse of the capture-to-egress flagship. `g2g_core::rtp::RtpHeader::parse` is the wire-tolerant inverse of `to_bytes` (CSRC list, extension header, and padding, every offset checked and bounds-guarded so a malformed datagram returns `None`, the demuxer discipline; the std H.264 depayloader shares it). `g2g-mcu::rtprecv` adds the `PacketReceiver` ingress seam and `RtpSrc`, the heap-free `StaticSource` that receives a datagram, parses it, and lends the payload downstream with `Frame::sequence` set to the RTP sequence number.
+
+`g2g-mcu::jitter::JitterBuffer<N, BYTES>` is the reorder element: a fixed `N`-slot reorder window that absorbs arrival jitter, emits the next-in-sequence packet after a prime depth, and handles reorder / duplicate / late / loss explicitly and countably (a packet more than `depth` ahead marks the missing head lost and advances, so one loss never stalls the stream), its output frame borrowing the buffer's own slot zero-copy under the single-frame-in-flight discipline. These compose into the RX flagship `RtpSrc -> JitterBuffer -> G.711 decode`, validated on mocks (a reordered / duplicated / lossy wire reconstructs the ordered decoded PCM byte-for-byte) and on the Cortex-M ISA (`examples/g2g-qemu`'s `rx` bin, proved by an order-sensitive rolling hash equal to an independent in-order decode, `played=14 reordered=3 lost=0 OK`). Both RX elements are `Recover`-capable for the supervisor (the source re-opens its socket, the buffer flushes and re-syncs).
+
+**Sensor and serial transport.** The catalog also reaches beyond the media pipeline into the I2C sensor and UART transport a real product needs, with real datasheet-anchored driver logic. `g2g-mcu::sht3x::Sht3xSrc` reads a Sensirion SHT3x temperature/humidity sensor over the `embedded-hal` `I2c` seam, issuing the datasheet single-shot command, validating the two CRC-8 check bytes (polynomial `0x31`, the datasheet `0xBEEF -> 0x92` vector is a test), and converting per the datasheet transfer functions (`i64`-widened so the fixed-point multiply cannot overflow); a CRC mismatch is rejected as a bus-integrity fault rather than trusted.
+
+`g2g-mcu::uart` adds local `SerialTx` / `SerialRx` seams (embedded-hal 1.0 keeps blocking serial in `embedded-io`, so a local seam like the packet transports), `UartSink` (frame payload as a byte-stream egress) and `UartSrc` (fixed-size frame ingress), round-tripping over a link. Proven on the Cortex-M ISA (`examples/g2g-qemu`'s `sensor` bin): a mock SHT3x returns a datasheet response and the `Sht3xSrc -> UartSink` pipeline streams each converted reading out a mock UART, the bytes asserted equal to the datasheet conversion (`g2g-sensor: uart-bytes=32 OK`).
+
+**Safety process artifacts** are assembled and, characteristically, made checkable. `docs/safety/REQUIREMENTS.md` is a requirements traceability matrix (15 requirements across memory, timing, faults, concurrency, input validation, and data integrity, each linked to the proof script, test, or CI job that verifies it), and `tools/traceability-check.sh` fails if any cited evidence is missing or if a cited proof script is not wired into CI, so the matrix is a checked claim rather than a document that can drift, run in CI alongside the proofs it indexes. `docs/safety/SAFETY_MANUAL.md` documents the conditions of use, per-property assumptions, the localized `unsafe` inventory, and integrator responsibilities, and `tools/qualification-kit.sh` runs the whole proof set and emits a consolidated requirement-to-evidence-to-result report. This is a down-payment on a product safety case (emulated not silicon, pre-1.0, not a certificate), not a substitute for one.
+
+**None of the above is ARM-specific.** Because the static element model is ISA-agnostic pure Rust (only the QEMU harness bins carry ARM startup), the `g2g-core` no-alloc subset and `g2g-mcu` build unchanged for `riscv32imafc-unknown-none-elf` (the ESP32-P4 class), and `tools/noalloc-check.sh` asserts the zero-allocator / zero-panic guarantees on both `thumbv7em` and RISC-V archives while `tools/footprint.py` (with an `--isa riscv` stack-frame model) budgets the RISC-V video-pipeline footprint (3718 B ROM / 0 B static RAM / 1328 B stack).
+
+The RISC-V footprint model also budgets the flagship audio graph: rustc encodes that frame as a constant too large for `addi`'s 12-bit immediate, so it materializes the size into a register and does `sub sp, sp, <reg>`; the stack model resolves that register to its compile-time constant (following the `lui` / `addi` / `slli` materialization chain, and failing rather than under-reporting if it is ever not a known constant), so the RISC-V audio graph is budgeted exactly like the others (10852 B ROM / 0 B static RAM / 6432 B stack, within the ARM audio budgets). The portability claim, a pure-Rust media core across ARM and RISC-V, is machine-checked, not asserted.
+
+**The RISC-V board path** includes two additional capabilities. `SpiDisplaySink::with_stripe` streams a panel too large to ring-buffer whole (240x240 RGBA is 230 KB) in horizontal bands: each frame is one `width x rows` band written to the next vertical sub-window, so the pipeline ring holds a single 15 KB band, and `noalloc_pipeline::run_display_banded_with` is the board-agnostic full-panel runner (the whole-frame path is byte-identical, so the same proofs cover it).
+
+`g2g-mcu::hwh264` adds the hardware-H.264-encoder seam, the encode twin of `HwJpegDec`: the `H264Encoder` contract (one raw I420 frame in, one Annex-B access unit out, byte count + keyframe flag reported) and `HwH264Enc`, which validates 4:2:0 geometry with checked sizing, cross-checks the reported byte count, and surfaces a faulting peripheral, plus the `CH264Encoder` C bridge so the vendor's hardware encoder driver *is* the peripheral (alongside `CFrameGrabber` / `CPacketSender`); host-tested through a mock and a real `extern "C"` callback (byte-identical, proving the C seam transparent) including a `camera -> encode` pipeline.
+
+The `camera -> encode` path uses a color convert, since a DCMI/DVP camera emits packed YUYV 4:2:2 but `HwH264Enc` wants planar I420: `g2g-mcu::videoconvert::YuyvToI420` is the heap-free `StaticTransform` for exactly that (the MCU twin of the `alloc`-based host `VideoConvert`), converting in place through a ring slot with checked geometry, host-tested including a `camera -> convert` pipeline whose output is exactly `HwH264Enc`'s expected I420 size. The convert, encoder, and RTP elements compose: an integration test drives `camera -> YuyvToI420 -> HwH264Enc -> RtpSink` as one static pipeline and traces a camera-stamped byte to the RTP payload.
+
+On the ARM side, `examples/g2g-stm32h743` targets a NUCLEO-H743ZI2: it runs the flagship audio graph and egresses RTP over the H743's on-chip Ethernet through a pure-Rust `embassy-net`/smoltcp stack, the whole g2g-to-network bridge being one `EmbassyNetSender: PacketSender` that maps the RTP egress seam onto an embassy-net `UdpSocket` (no C in the network path, unlike the P4's WiFi). It compiles for `thumbv7em` and stays outside CI because of embassy's build weight.
 
 ---
 
@@ -145,7 +217,7 @@ not break call sites. The tee fan-out path gives each clone a fresh empty set
 `PipelinePacket::CapsChanged(Caps)` packet to arrive; every subsequent
 `DataFrame` on that link is implicitly under those caps until the next
 `CapsChanged` arrives. The runner guarantees `CapsChanged` is **ordered**
-in the stream — it sits between the last old-caps `DataFrame` and the
+in the stream, it sits between the last old-caps `DataFrame` and the
 first new-caps `DataFrame`, which is the load-bearing correctness
 property for mid-stream format changes (§4.13.4).
 
@@ -154,7 +226,13 @@ See §4.4 for the definition of `FrameTiming` and the pipeline clock model.
 ### 3.2 Memory Domains
 `g2g` treats system RAM as a fallback. Buffers track hardware descriptors to allow cross-process and cross-hardware zero-copy manipulation. Every hardware handle is reference-counted (an `Arc`-held keep-alive owner, or an `Arc`-shared fd for DMABUF): the underlying file descriptor or GPU allocation is released on the *last* drop. `MemoryDomain::share()` produces a second handle for a fan-out branch, a zero-copy refcount bump for the GPU domains and the shared-CPU `SystemView`, a deep copy only for owned-CPU `System` bytes. So a tee broadcasts a GPU-resident frame to several consumers (decode-on-GPU -> {inference, display}) with no device-to-host copy; branches treat the shared memory as read-only (a mutating branch copies first, as the per-frame metadata does copy-on-write).
 
-**Copy / allocation plan.** Because negotiation resolves the memory domain of every link before a frame flows, "is this pipeline zero-copy?" is answerable at construction time, not only measurable after. `copyplan` (pure, like `dot`) turns the negotiated per-edge domains + fixated caps into a `CopyPlan`: the sequence of memory hops (the domain a frame occupies on each edge) and the transfers between differing domains. A transfer is recorded at any node whose output domain differs from the domain it consumed; `classify` sorts it into `None` / `Interop` (dma-buf import/export or a device-to-device bridge) / `DeviceHost` (a GPU download/upload over the bus) / `CrossDevice`, and it counts as a real *frame copy* only when a raw heavy buffer (`Caps::is_raw_media`: raw video, PCM audio, or a tensor) crosses on both sides, so a decode (`CompressedVideo` -> `RawVideo`) or an off-GPU encode is shown in the trace but not miscounted. `CopyPlan::check(CopyPolicy)` (`Allow` / `AtMost(n)` / `DenyAll`) enforces a copy budget as a graph-level contract: a pipeline meant to stay resident on the GPU fails the check the moment an accidental host round-trip appears, rather than silently paying for it at runtime. `g2g-launch --copy-plan` prints the report; `runtime::copy_plan(vg, caps, memory)` builds it from a negotiated graph. The runner enforces it directly: `run_graph_with_copy_policy` runs the plan after negotiation and, *before any frame flows*, refuses to start a graph that exceeds the budget (`G2gError::CopyBudget`), so the guarantee is checked at construction, not measured after. This is what GStreamer cannot state: not "zero-copy is possible" but "this graph is proven zero-copy, or it will not start." The check is scoped precisely, to memory-domain transfers of a raw frame (a device<->host or cross-device copy): an intra-domain algorithmic copy (a `videoconvert` allocating a new System buffer) stays within one domain and is not a domain transfer, and the plan trusts each element's declared `output_memory` / `input_domains`. So "zero-copy" here means "no raw frame crosses a memory-domain boundary," the property that governs GPU-resident and DMA pipelines.
+**Copy / allocation plan.** Because negotiation resolves the memory domain of every link before a frame flows, "is this pipeline zero-copy?" is answerable at construction time, not only measurable after. `copyplan` (pure, like `dot`) turns the negotiated per-edge domains + fixated caps into a `CopyPlan`: the sequence of memory hops (the domain a frame occupies on each edge) and the transfers between differing domains.
+
+A transfer is recorded at any node whose output domain differs from the domain it consumed; `classify` sorts it into `None` / `Interop` (dma-buf import/export or a device-to-device bridge) / `DeviceHost` (a GPU download/upload over the bus) / `CrossDevice`, and it counts as a real *frame copy* only when a raw heavy buffer (`Caps::is_raw_media`: raw video, PCM audio, or a tensor) crosses on both sides, so a decode (`CompressedVideo` -> `RawVideo`) or an off-GPU encode is shown in the trace but not miscounted.
+
+`CopyPlan::check(CopyPolicy)` (`Allow` / `AtMost(n)` / `DenyAll`) enforces a copy budget as a graph-level contract: a pipeline meant to stay resident on the GPU fails the check the moment an accidental host round-trip appears, rather than silently paying for it at runtime. `g2g-launch --copy-plan` prints the report; `runtime::copy_plan(vg, caps, memory)` builds it from a negotiated graph. The runner enforces it directly: `run_graph_with_copy_policy` runs the plan after negotiation and, *before any frame flows*, refuses to start a graph that exceeds the budget (`G2gError::CopyBudget`), so the guarantee is checked at construction, not measured after. This is what GStreamer cannot state: not "zero-copy is possible" but "this graph is proven zero-copy, or it will not start."
+
+The check is scoped precisely, to memory-domain transfers of a raw frame (a device<->host or cross-device copy): an intra-domain algorithmic copy (a `videoconvert` allocating a new System buffer) stays within one domain and is not a domain transfer, and the plan trusts each element's declared `output_memory` / `input_domains`. So "zero-copy" here means "no raw frame crosses a memory-domain boundary," the property that governs GPU-resident and DMA pipelines.
 
 ```rust
 pub enum MemoryDomain {
@@ -193,7 +271,15 @@ let mut frame = SystemSlice::from_pool(buf, frame_len);  // valid payload length
 ```
 
 - **`no_std + alloc` environments (and `std`):** `BufferPool<T>` wraps `Arc<Mutex<Vec<T>>>` plus a `VecDeque<Waker>` of acquire waiters. `acquire().await` resolves the moment a `PooledBuffer` elsewhere is dropped. `try_acquire()` is the sync fast path for non-blocking contexts.
-- **Strict `no_std` (no heap) environments:** two pure-`core` pools sized at construction, no `alloc`. `StaticBufferPool::<[u8; N], 8>` is the *move-out* pool: `acquire` takes an owned buffer out and the RAII handle returns it on drop, the no-heap analog of `BufferPool`. `StaticLendRing::<N, BYTES>` is the *zero-copy lend* sibling for the capture path (a DMA ring): `N` inline slots, the producer fills the next free slot and `publish`es it as a `SystemSlice` that *borrows* the slot, and a per-slot lease (an `AtomicBool`, plain store, no CAS so it builds on `thumbv6m`) is cleared when the lent frame drops, so the slot is reused only after the consumer is done, the genuine ring back-pressure (the producer stalls when every slot is in flight). The borrow is runtime-guarded, not a Rust lifetime: a `PipelinePacket` crosses the `OutputSink` / stack channel by value (`'static`), so the lend reuses the `'static` foreign-buffer carrier (`SystemSlice::from_foreign`) with the lease standing in for the borrow. This keeps `Frame` / `MemoryDomain` lifetime-free (every element signature stays clean) while still proving a heap-free capture-to-consumer path end to end (validated under `block_on` over the embassy stack channel; a DMA-completion ISR or HAL publishes into the same ring). The heap-free claim is *measured*, not asserted: a counting `#[global_allocator]` test (`m616_no_steady_state_alloc`) runs the `StaticLendRing` capture -> frame -> drop hot path for 100k frames and confirms zero heap allocations across the loop. The control plane carries the same contract: `OutputSink` is poll-based (its required method is `poll_push`; `push` wraps it in a stack `PushFuture`), so a push through `&mut dyn OutputSink` costs no heap either, and a sibling counting test (`m616_dyn_push_allocates`) pins that at zero. The element's own `ProcessFuture` is opt-in: an element that declares a boxed one pays one box per `process` call; one that declares a concrete future type runs heap-free through the whole dyn runner (`m1000_dyn_graph_noalloc` proves a 3-stage `run_graph` steady state at zero allocations).
+- **Strict `no_std` (no heap) environments:** two pure-`core` pools sized at construction, no `alloc`. `StaticBufferPool::<[u8; N], 8>` is the *move-out* pool: `acquire` takes an owned buffer out and the RAII handle returns it on drop, the no-heap analog of `BufferPool`.
+
+  `StaticLendRing::<N, BYTES>` is the *zero-copy lend* sibling for the capture path (a DMA ring): `N` inline slots, the producer fills the next free slot and `publish`es it as a `SystemSlice` that *borrows* the slot, and a per-slot lease (an `AtomicBool`, plain store, no CAS so it builds on `thumbv6m`) is cleared when the lent frame drops, so the slot is reused only after the consumer is done, the genuine ring back-pressure (the producer stalls when every slot is in flight).
+
+  The borrow is runtime-guarded, not a Rust lifetime: a `PipelinePacket` crosses the `OutputSink` / stack channel by value (`'static`), so the lend reuses the `'static` foreign-buffer carrier (`SystemSlice::from_foreign`) with the lease standing in for the borrow. This keeps `Frame` / `MemoryDomain` lifetime-free (every element signature stays clean) while still proving a heap-free capture-to-consumer path end to end (validated under `block_on` over the embassy stack channel; a DMA-completion ISR or HAL publishes into the same ring).
+
+  The heap-free claim is *measured*, not asserted: a counting `#[global_allocator]` test (`m616_no_steady_state_alloc`) runs the `StaticLendRing` capture -> frame -> drop hot path for 100k frames and confirms zero heap allocations across the loop.
+
+  The control plane carries the same contract: `OutputSink` is poll-based (its required method is `poll_push`; `push` wraps it in a stack `PushFuture`), so a push through `&mut dyn OutputSink` costs no heap either, and a sibling counting test (`m616_dyn_push_allocates`) pins that at zero. The element's own `ProcessFuture` is opt-in: an element that declares a boxed one pays one box per `process` call; one that declares a concrete future type runs heap-free through the whole dyn runner (`m1000_dyn_graph_noalloc` proves a 3-stage `run_graph` steady state at zero allocations).
 
 The `SystemSlice` carrier transparently supports these ownership models: `SystemSlice::from_boxed(Box<[u8]>)` for one-off frames, `SystemSlice::from_pool(PooledBuffer<Box<[u8]>>, len)` for recycled frames (the buffer may exceed the frame, so the valid length is carried), and `SystemSlice::from_foreign(ptr, len, free, user)` for a zero-copy lend of borrowed bytes (a `StaticLendRing` slot, or an application buffer through the C ABI). Downstream elements treat them identically.
 
@@ -230,9 +316,9 @@ pub enum Dim { Any, Range { min: u32, max: u32 }, Fixed(u32) }
 pub enum Rate { Any, Range { min_q16: u32, max_q16: u32 }, Fixed(u32) }
 ```
 
-The `Tensor` variant is first-class because ML elements (§5) negotiate caps the same way video elements do — they don't sit outside the graph model. (The sketch above is conceptual; the real enum splits video into `CompressedVideo` / `RawVideo` per the codec-vs-raw distinction, and adds `ByteStream` for not-yet-demuxed container links.)
+The `Tensor` variant is first-class because ML elements (§5) negotiate caps the same way video elements do, they don't sit outside the graph model. (The sketch above is conceptual; the real enum splits video into `CompressedVideo` / `RawVideo` per the codec-vs-raw distinction, and adds `ByteStream` for not-yet-demuxed container links.)
 
-`Text` is likewise a first-class media kind (`Caps::Text { format: TextFormat }`), not a bolted-on subtitle path. It generalizes "subtitles": a `Text` link carries any text payload — a subtitle cue, a caption, a transcription, an OCR result, an overlay string — with `TextFormat` naming the syntax (`Utf8`, `PangoMarkup`, and the structured `Srt` / `WebVtt` / `Ssa` / `Ttml`). "Subtitle" is not a separate variant: it is just *timed* `Text`, the cue's on-screen window carried as the frame's PTS + duration, so one caps kind serves overlay rendering, captioning, and text analytics. A subtitle parser (`SubParse`) is the text-domain analog of a codec decoder, taking a structured format on its sink pad and emitting plain `Utf8` cues via the same `DerivedOutput` negotiation a decoder uses for compressed -> raw, so subtitle text flows through the graph as a typed stream rather than being loaded out-of-band.
+`Text` is likewise a first-class media kind (`Caps::Text { format: TextFormat }`), not a bolted-on subtitle path. It generalizes "subtitles": a `Text` link carries any text payload (a subtitle cue, a caption, a transcription, an OCR result, an overlay string) with `TextFormat` naming the syntax (`Utf8`, `PangoMarkup`, and the structured `Srt` / `WebVtt` / `Ssa` / `Ttml`). "Subtitle" is not a separate variant: it is just *timed* `Text`, the cue's on-screen window carried as the frame's PTS + duration, so one caps kind serves overlay rendering, captioning, and text analytics. A subtitle parser (`SubParse`) is the text-domain analog of a codec decoder, taking a structured format on its sink pad and emitting plain `Utf8` cues via the same `DerivedOutput` negotiation a decoder uses for compressed -> raw, so subtitle text flows through the graph as a typed stream rather than being loaded out-of-band.
 
 ### 4.2 The Capability Negotiation Lifecycle
 Because `g2g` enforces a Sans-IO and asynchronous execution model, capability negotiation happens in a clear, deterministic handshake before any data frame processing begins. This replaces GStreamer's complex query/event system with a simple, state-machine-driven future matrix.
@@ -254,14 +340,14 @@ Because `g2g` enforces a Sans-IO and asynchronous execution model, capability ne
                       counter-propose 720p."
 ```
 
-**Phase 1 — Downstream Query (Intersection):** The runner invokes `intercept_caps()` on the source, passing initial configuration or upstream hardware constraints. Each element returns a `Caps` value containing ranges or `Any` where parameters are flexible. The downstream peer intersects against its own internal capabilities and returns a narrowed set.
+**Phase 1, Downstream Query (Intersection):** The runner invokes `intercept_caps()` on the source, passing initial configuration or upstream hardware constraints. Each element returns a `Caps` value containing ranges or `Any` where parameters are flexible. The downstream peer intersects against its own internal capabilities and returns a narrowed set.
 
-**Phase 2 — Upstream Selection (Fixation):** Once an intersection is found, the final caps are fixated (all `Dim`/`Rate` values become `Fixed`). The fixated `Caps` travel back upstream via `configure_pipeline()`. Each element allocates exact byte arrays or VRAM texture sizes, ensuring zero dynamic allocations during steady-state streaming.
+**Phase 2, Upstream Selection (Fixation):** Once an intersection is found, the final caps are fixated (all `Dim`/`Rate` values become `Fixed`). The fixated `Caps` travel back upstream via `configure_pipeline()`. Each element allocates exact byte arrays or VRAM texture sizes, ensuring zero dynamic allocations during steady-state streaming.
 
-**Phase 3 — Re-fixation (rare):** If an element's allocation fails (VRAM budget, driver limit), `configure_pipeline()` returns `ConfigureOutcome::ReFixate(Caps)` with a counter-proposal. The runner restarts Phase 2 from that element. This bounded backtrack avoids the GStreamer pattern of failing the entire pipeline on allocation pressure.
+**Phase 3, Re-fixation (rare):** If an element's allocation fails (VRAM budget, driver limit), `configure_pipeline()` returns `ConfigureOutcome::ReFixate(Caps)` with a counter-proposal. The runner restarts Phase 2 from that element. This bounded backtrack avoids the GStreamer pattern of failing the entire pipeline on allocation pressure.
 
 ### 4.3 The `AsyncElement` and `SourceLoop` Traits
-Transform and sink elements implement `AsyncElement` — packet in, 0..N packets out. Source elements have no input pad and instead implement `SourceLoop`, which is called once and iterates internally until EOS. The two traits share `intercept_caps` / `configure_pipeline` semantics.
+Transform and sink elements implement `AsyncElement`: packet in, 0..N packets out. Source elements have no input pad and instead implement `SourceLoop`, which is called once and iterates internally until EOS. The two traits share `intercept_caps` / `configure_pipeline` semantics.
 
 ```rust
 use core::future::Future;
@@ -314,8 +400,7 @@ pub enum ConfigureOutcome {
 /// elements await downstream capacity rather than failing fast on a full
 /// bounded link. Dyn-safe via the poll form: `push` (provided for concrete
 /// sinks and on the trait object) wraps `poll_push` in a concrete stack
-/// `PushFuture`, so a push through `&mut dyn OutputSink` allocates nothing
-/// (M1000).
+/// `PushFuture`, so a push through `&mut dyn OutputSink` allocates nothing.
 pub trait OutputSink {
     fn poll_push(
         &mut self,
@@ -403,25 +488,82 @@ A free-running source feeding a sync sink is paced automatically by upstream bac
 
 #### Clock distribution to sinks
 
-A pipeline runs against one elected clock (`elect_clock` over `ClockPriority`: a PTP grandmaster-disciplined clock (`PtpGrandmaster`) outranks a live source's hardware clock (`LiveSource`), which outranks an audio sink's DAC clock (`AudioProvider`), which outranks a plain monotonic provider such as a video display sink (`Provider`), which outranks the system fallback). The runner samples the elected clock's `now_ns()` once at startup as the **base time** (the clock reading at running-time zero) and hands both to each sink via `set_clock_sync(ClockSync { clock, base_time_ns })`, called once after election. Both the linear runners and the DAG runner `run_graph` deliver it (the latter walks its sink nodes after election), so a display sink PTS-paces in any topology. A sink that synchronises presents a frame when the elected clock reaches `base_time_ns + running_time`, where running time is the frame's `pts_ns` mapped through the active `Segment`; a sink that ignores the hook presents as fast as backpressure allows.
+A pipeline runs against one elected clock (`elect_clock` over `ClockPriority`: a PTP grandmaster-disciplined clock (`PtpGrandmaster`) outranks a live source's hardware clock (`LiveSource`), which outranks an audio sink's DAC clock (`AudioProvider`), which outranks a plain monotonic provider such as a video display sink (`Provider`), which outranks the system fallback).
 
-**Clock loss and re-election.** An elected clock can lose the reference it is disciplined to (a PTP servo going free-running when its grandmaster disappears), which `PipelineClock::healthy` reports: true by default, since a clock reading a monotonic counter or a DAC has nothing to lose, and overridden by `PtpClock` (healthy in `Locked` and `Holdover`, not in `FreeRunning`). When a bus is attached and the runner has a timer to sleep on, `run_graph` (cooperative and thread-per-arm alike) runs a health monitor alongside the arms: it reads the elected clock once a second and, on a loss, posts `BusMessage::ClockLost`, elects again over the candidates that are still healthy, and retargets every sink. The retarget works because in that mode the sinks' `ClockSync` points at an `ElectedClock`, a shared handle over a swappable target, rather than at the clock itself: the elements are already inside their arms (on other threads under the thread-per-arm runner), so there is no second `set_clock_sync`. A sink re-anchors on its next frame, as it does for any epoch change. `ElectedClock` answers `shared_ticker` (owned) but not `as_ticker` (a borrow into a target that can be replaced), which is why the indirection is installed only when the monitor runs. With no healthy candidate left the pipeline keeps the clock it has: it still tells time, it is just no longer disciplined, and a later re-lock is picked up by the same check.
+The runner samples the elected clock's `now_ns()` once at startup as the **base time** (the clock reading at running-time zero) and hands both to each sink via `set_clock_sync(ClockSync { clock, base_time_ns })`, called once after election. Both the linear runners and the DAG runner `run_graph` deliver it (the latter walks its sink nodes after election), so a display sink PTS-paces in any topology. A sink that synchronises presents a frame when the elected clock reaches `base_time_ns + running_time`, where running time is the frame's `pts_ns` mapped through the active `Segment`; a sink that ignores the hook presents as fast as backpressure allows.
 
-**Pacing mid-graph (`clocksync`).** Presentation is not the only place a stream needs to run at real time: a publisher muxing to a live transport (the MoQ Transport demo's `videotestsrc ! x264enc ! mp4mux ! moqtsink`) has no sync sink at all, so nothing stops it producing minutes of media per minute of wall clock. `ClockSyncTransform` (`clocksync`) is the sink's pacing as a pass-through transform: it holds each buffer until its PTS, anchored on the first one, is due on the clock, and forwards everything else unchanged. It shares the display sinks' `PresentationPacer`, so the anchor, the segment mapping and the seek re-anchor behave identically, and differs in two ways. It never drops: a late or segment-clipped buffer is forwarded immediately, because a hole in a transform's output is one downstream cannot recover. And it supplies its own monotonic clock when none was handed to it, which is both GStreamer's fallback to the pipeline system clock and a necessity here, since the runners deliver `ClockSync` to sink nodes only, and a `clocksync` sits mid-graph. `sync=false` reduces it to an identity; `ts-offset` shifts the whole schedule.
+**Clock loss and re-election.** An elected clock can lose the reference it is disciplined to (a PTP servo going free-running when its grandmaster disappears), which `PipelineClock::healthy` reports: true by default, since a clock reading a monotonic counter or a DAC has nothing to lose, and overridden by `PtpClock` (healthy in `Locked` and `Holdover`, not in `FreeRunning`).
 
-**Audio as the sync master.** For playback the audio sink should drive timing, because samples leave the DAC at the hardware's real rate, which drifts from wall time by tens to hundreds of ppm. `DriftClock` (`g2g-core`) turns that into a usable pipeline clock: it is fed `(local_ns, master_ns)` observations (`local_ns` from a monotonic reference, `master_ns` the true playout position) and fits `master ≈ slope·local + offset` by least squares over a sliding window, so `now_ns()` projects the current reference time through the fit, both estimating the playout rate and smoothing the coarse, jittery per-observation readings. The fit is exponentially weighted (each sample 0.95x the weight of the one after it, newest first), so half of a rate step is taken up 24 samples after it rather than 32, at the cost of 37% more slope noise. An observation landing further from the current fit than the outlier gate (10 ms by default, 20 ms for the PTP servo below, which sees delayed packets rather than delay jitter) is dropped rather than folded in, so an underrun recovery or a stale `snd_pcm_delay()` reading cannot bend the fit for a whole window. Eight rejections in a row mean the timeline genuinely moved (a device re-open), so the window clears and the fit restarts from the new samples. `AlsaSink`'s worker samples `frames_written − snd_pcm_delay()` after each blocking `writei` and feeds the clock, offering it to election at the `AudioProvider` tier (gated by a `provide-clock` property). A video sink then slaves to it: because the elected clock is the disciplined audio timeline rather than raw wall time, video presentation follows audio, giving true A/V sync. A `LiveSource` capture clock still wins when present, so a live pipeline paces to capture.
+When a bus is attached and the runner has a timer to sleep on, `run_graph` (cooperative and thread-per-arm alike) runs a health monitor alongside the arms: it reads the elected clock once a second and, on a loss, posts `BusMessage::ClockLost`, elects again over the candidates that are still healthy, and retargets every sink.
 
-**Networked sync (PTP).** For facility-wide sync (Pro AV / SMPTE ST 2110), the shared reference is a PTP grandmaster, and every device slaves to it, so a `PtpGrandmaster` clock outranks all of the above. `PtpServo` (`g2g-core::ptp`) is the servo: fed the four timestamps of each PTP delay request-response, it computes the standard `offset` / `mean_path_delay` and folds `(local, master)` into the same `DriftClock` machinery, disciplining the local monotonic reference to the grandmaster's TAI timeline with lock / holdover / outlier-rejection state. `PtpClock` wraps it (interior-mutable, so one worker drives it while sinks read `now_ns` through a shared `Arc`) and offers itself to election only once locked. Because the elected timeline is grandmaster-derived, two machines locked to the same grandmaster read the same clock, so the A/V pacing above holds *across* devices, not just within one process. Two sources feed the servo: raw PTP message timestamps (`sync_exchange`), or a direct absolute-time observation (`observe_master`). Two backends supply them: `PtpSystemClock` (`g2g-plugins`, Linux) delegates to an OS PTP-disciplined `CLOCK_TAI` (from `linuxptp` / `phc2sys`), sampled on a worker; `PtpClient` (`g2g-plugins`) is a from-scratch software PTP SLAVE that speaks PTP over UDP itself (the `ptp::wire` message parser + the `ptp::slave` delay-request-response state machine + a UDP transport), so an endpoint with no OS PTP daemon can still lock. The wire parser and slave state machine are `no_std` and CI-tested end to end (parse -> slave -> servo) without sockets. Both backends coexist with a host `ptp4l`: `PtpClient`'s sockets take `SO_REUSEADDR` + `SO_REUSEPORT` so the daemon keeps receiving its own copy of each multicast message, and `PtpSystemClock` polls the daemon over its management socket (`ptp::management` builds the same GET `pmc` sends; `g2g-plugins::ptp4l` carries it over the Unix datagram socket) so `grandmaster_locked` reports the port state behind `CLOCK_TAI` rather than trusting a clock that is readable either way.
+The retarget works because in that mode the sinks' `ClockSync` points at an `ElectedClock`, a shared handle over a swappable target, rather than at the clock itself: the elements are already inside their arms (on other threads under the thread-per-arm runner), so there is no second `set_clock_sync`. A sink re-anchors on its next frame, as it does for any epoch change. `ElectedClock` answers `shared_ticker` (owned) but not `as_ticker` (a borrow into a target that can be replaced), which is why the indirection is installed only when the monitor runs. With no healthy candidate left the pipeline keeps the clock it has: it still tells time, it is just not disciplined, and a later re-lock is picked up by the same check.
 
-**ST 2110 media transport** rides on this shared clock. Distinct time newtypes guard the seam where three "just an integer" times meet: `TaiNs` (PTP/TAI nanoseconds, absolute), `RtpTs` (the 32-bit wrapping RTP media-clock timestamp on the wire), and `RefNs` (the pipeline's monotonic reference nanoseconds, a relative timeline with an arbitrary epoch). `MediaClock` takes a `TaiNs` and returns an `RtpTs`, so the compiler rejects handing it the wrong clock (the confusion the PTP servo work hit: a monotonic reference minus a TAI master is meaningless); the PTP servo's own seam is typed the same way, `PtpServo` / `PtpClock` `sync_exchange` take `(TaiNs, RefNs, RefNs, TaiNs)` and `observe_master` takes `(RefNs, TaiNs)`, so master and reference can no longer be swapped. Durations stay a plain `u64`. `MediaClock` (`g2g-core`, ST 2110-10) maps a PTP/TAI time to a 32-bit wrapping RTP timestamp and back (a media clock counting at 90 kHz for video / the sample rate for audio from the PTP epoch), so two receivers on the same grandmaster compute the same timestamp for the same sampling instant. `st2110audio` (`g2g-plugins`, ST 2110-30) is the sans-IO PCM payloader/depayloader (L16 / L24 big-endian in the RTP payload, timestamps off the media clock), and `st2110anc` (ST 2110-40 / RFC 8331) carries SMPTE ST 291 ancillary data (closed captions, timecode) as bit-packed 10-bit words with parity + checksum validation, so the caption stack can ride 2110. The sans-IO cores get network element wrappers: `st2110audiortp` (`St2110AudioSink` / `St2110AudioSrc`, behind the `st2110` feature) puts -30 audio on the wire over UDP, the sink mapping each frame's PTS through the elected (PTP) clock to the media-clock timestamp and the source reconstructing PTS from it, so a receiver on the same grandmaster stays in sync. `st2110ancrtp` does the same for -40 captions: `St2110AncSink` taps a compressed H.264 / H.265 stream (a teed branch leaf like `CcExtract`), mines each access unit's caption triples, wraps them in a Caption Distribution Packet (CDP, CEA-708 / SMPTE ST 334-2) carried in a DID 0x61 ANC packet, and sends the RFC 8331 RTP timestamped at the frame's PTP time; `St2110AncSrc` depacketizes -40 back into triples and, through the shared `CaptionDecoder` (the decode core factored out of `CcExtract`, driving the same CEA-608/708 state machines from triples mined from SEI or carried in a CDP), emits timed `Caps::Text{Utf8}` cues. So captions travel end to end over 2110 and stay frame-aligned on a common grandmaster. `st2110video` (ST 2110-20 / RFC 4175) carries uncompressed active video: the packetizer slices a packed frame into Sample Row Data (SRD) line runs (an Extended Sequence Number then per-run headers giving scan line, pixel offset, octet length) sized to the MTU, and the depacketizer writes each run back into the frame, completing it on the RTP marker bit; `st2110videortp` (`St2110VideoSink` / `St2110VideoSrc`) puts it on UDP with the 90 kHz media-clock timestamp shared by every packet of a frame. Each sampling is a `Layout` reading / writing one pgroup at a time, so the packetizer / depacketizer stay layout-agnostic across three mappings: RGBA 8-bit (packed, byte-identical), YCbCr-4:2:2 8-bit (packed `Yuyv`, luma / chroma bytes swapped to the wire), and YCbCr-4:2:2 10-bit (the broadcast norm, from the planar `I422p10` buffer: the four 10-bit samples Cb0 Y0 Cr0 Y1 are MSB-first bit-packed into a 5-octet pgroup, crossing both a planar-to-packed and a byte-to-bit boundary). The source's geometry comes from properties, or from the stream's SDP: `st2110sdp` (RFC 4566 + SMPTE ST 2110-10/-20/-30/-40) is the sans-IO generator / parser for the out-of-band description a receiver configures from, carrying the essence (video sampling / size / rate, audio depth / rate / channels / ptime, or ancillary), the payload type, the multicast group and port, and the `a=ts-refclk` PTP grandmaster all the streams share. every sink has an `sdp()` that publishes its stream and every source an `apply_sdp()` that auto-configures from a parsed one, so a stream self-describes end to end across video, audio, and ancillary. On the audio side `PcmS16Le` rides as L16 and `PcmF32Le` as L24 (float scaled to the 24-bit wire). `st2110jxs` (ST 2110-22 / RFC 9134) carries the compressed mezzanine essence, JPEG XS: the packetizer slices an opaque codestream into codestream-mode packets (the 4-octet RFC 9134 payload header carrying transmode / packetmode / last-packet / frame counter / packet counter), the marker bit ending the frame, every packet on the same 90 kHz media clock; `st2110jxsrtp` (`St2110JxsSink` / `St2110JxsSrc`) puts it on UDP, taking / emitting `Caps::CompressedVideo{JpegXs}` frames. The JPEG XS codec itself is `SvtJpegXsEnc` / `SvtJpegXsDec` (`jpegxs` feature): hand-rolled FFI to Intel SVT-JPEG-XS (ISO/IEC 21122, no libavcodec), planar 4:2:0 / 4:2:2 8-bit and 4:2:2 10-bit, the encoder targeting a bits-per-pixel budget and the decoder discovering geometry from the first codestream. So a plant can move visually lossless video at a fraction of -20's bandwidth with sub-frame latency, end to end (raw -> encode -> -22 -> decode). SDP covers all essences, including -22 (`jxsv`), and `St2110Session` bundles video + audio + ancillary into one multi-section session document (each media tagged with `a=mid`, a shared `a=ts-refclk`), so a whole program self-describes. `AudioFormat::PcmS24Le` (integer 24-bit) rides the -30 L24 wire directly, alongside the float path. `st2110dup` implements ST 2110-7 seamless protection: a receive-side sequence-number merge of two identical redundant streams (first arrival wins, so a loss on one path is filled by the other), with `a=group:DUP` in the session SDP. Its `SeamlessDedup` is the sans-IO core; `RedundantRtpReceiver` (behind the `st2110` feature) is the socket-bound sibling that binds several receive paths, polls them round-robin so two in-order streams merge back into sequence order, and yields deduplicated packets. `St2110VideoSrc` adopts it behind a `redundant` property (a second "blue" path); being essence-agnostic it can serve the other essences the same way. `st2110pacing` implements ST 2110-21 sender pacing: a schedule spreading a frame's packets across the frame period (linear or gapped), which both `St2110VideoSink` and the -22 `St2110JxsSink` realize over the tokio timer (through a shared `pace_send`) so the network sees a smooth flow instead of a burst. `VrxValidator` is the full per-format -21 compliance check: the leaky-bucket virtual-receive-buffer model (a receiver draining one packet every `TRS` after a `TR_OFFSET` head start) that, over a run of actual emission offsets, reports the peak buffer occupancy, whether a packet arrived late (starving the receiver), and whether it stays within the profile's `Cmax`. What is built (from the RFCs, loopback-tested, not yet interop-validated against reference gear) now spans -10/-20/-21/-22/-30/-40/-7 plus SDP; multicast interop remains.
+**Pacing mid-graph (`clocksync`).** Presentation is not the only place a stream needs to run at real time: a publisher muxing to a live transport (the MoQ Transport demo's `videotestsrc ! x264enc ! mp4mux ! moqtsink`) has no sync sink at all, so nothing stops it producing minutes of media per minute of wall clock. `ClockSyncTransform` (`clocksync`) is the sink's pacing as a pass-through transform: it holds each buffer until its PTS, anchored on the first one, is due on the clock, and forwards everything else unchanged.
 
-`WaylandSink` is the first display sink to use it: it holds each frame until its running-time deadline, tracking the `Segment` (clipping pre-target frames after an accurate seek) and re-anchoring on `Flush`. It also does **QoS late-drop** (matching `SyncSink`): a frame already past its deadline by more than a configurable `max_lateness` bound is dropped instead of presented late, so the sink catches up instead of accumulating lag, posting a `BusMessage::Qos` (running time, jitter, cumulative processed/dropped) per drop.
+It shares the display sinks' `PresentationPacer`, so the anchor, the segment mapping and the seek re-anchor behave identically, and differs in two ways. It never drops: a late or segment-clipped buffer is forwarded immediately, because a hole in a transform's output is one downstream cannot recover. And it supplies its own monotonic clock when none was handed to it, which is both GStreamer's fallback to the pipeline system clock and a necessity here, since the runners deliver `ClockSync` to sink nodes only, and a `clocksync` sits mid-graph. `sync=false` reduces it to an identity; `ts-offset` shifts the whole schedule.
+
+**Audio as the sync master.** For playback the audio sink should drive timing, because samples leave the DAC at the hardware's real rate, which drifts from wall time by tens to hundreds of ppm. `DriftClock` (`g2g-core`) turns that into a usable pipeline clock: it is fed `(local_ns, master_ns)` observations (`local_ns` from a monotonic reference, `master_ns` the true playout position) and fits `master ≈ slope·local + offset` by least squares over a sliding window, so `now_ns()` projects the current reference time through the fit, both estimating the playout rate and smoothing the coarse, jittery per-observation readings.
+
+The fit is exponentially weighted (each sample 0.95x the weight of the one after it, newest first), so half of a rate step is taken up 24 samples after it rather than 32, at the cost of 37% more slope noise. An observation landing further from the current fit than the outlier gate (10 ms by default, 20 ms for the PTP servo below, which sees delayed packets rather than delay jitter) is dropped rather than folded in, so an underrun recovery or a stale `snd_pcm_delay()` reading cannot bend the fit for a whole window. Eight rejections in a row mean the timeline genuinely moved (a device re-open), so the window clears and the fit restarts from the new samples.
+
+`AlsaSink`'s worker samples `frames_written − snd_pcm_delay()` after each blocking `writei` and feeds the clock, offering it to election at the `AudioProvider` tier (gated by a `provide-clock` property). A video sink then slaves to it: because the elected clock is the disciplined audio timeline rather than raw wall time, video presentation follows audio, giving true A/V sync. A `LiveSource` capture clock still wins when present, so a live pipeline paces to capture.
+
+`PipeWireSink` offers the same `AudioProvider` clock on the PipeWire path. Its realtime process callback probes `pw_stream_get_time_n` (via `pipewire-sys`, the 0.8 safe binding has no wrapper) and feeds the graph tick counter, scaled through the stream rate, as `master_ns`. The tick counter is the graph driver's sample position, advancing at the device's real rate and independent of the sink's leaky byte queue, so producer-side drops never skew the fit and the constant graph-to-speaker delay lands in the affine offset.
+**Networked sync (PTP).** For facility-wide sync (Pro AV / SMPTE ST 2110), the shared reference is a PTP grandmaster, and every device slaves to it, so a `PtpGrandmaster` clock outranks all of the above. `PtpServo` (`g2g-core::ptp`) is the servo: fed the four timestamps of each PTP delay request-response, it computes the standard `offset` / `mean_path_delay` and folds `(local, master)` into the same `DriftClock` machinery, disciplining the local monotonic reference to the grandmaster's TAI timeline with lock / holdover / outlier-rejection state.
+
+`PtpClock` wraps it (interior-mutable, so one worker drives it while sinks read `now_ns` through a shared `Arc`) and offers itself to election only once locked. Because the elected timeline is grandmaster-derived, two machines locked to the same grandmaster read the same clock, so the A/V pacing above holds *across* devices, not just within one process.
+
+Two sources feed the servo: raw PTP message timestamps (`sync_exchange`), or a direct absolute-time observation (`observe_master`). Two backends supply them: `PtpSystemClock` (`g2g-plugins`, Linux) delegates to an OS PTP-disciplined `CLOCK_TAI` (from `linuxptp` / `phc2sys`), sampled on a worker; `PtpClient` (`g2g-plugins`) is a from-scratch software PTP SLAVE that speaks PTP over UDP itself (the `ptp::wire` message parser + the `ptp::slave` delay-request-response state machine + a UDP transport), so an endpoint with no OS PTP daemon can still lock. The wire parser and slave state machine are `no_std` and CI-tested end to end (parse -> slave -> servo) without sockets.
+
+Both backends coexist with a host `ptp4l`: `PtpClient`'s sockets take `SO_REUSEADDR` + `SO_REUSEPORT` so the daemon keeps receiving its own copy of each multicast message, and `PtpSystemClock` polls the daemon over its management socket (`ptp::management` builds the same GET `pmc` sends; `g2g-plugins::ptp4l` carries it over the Unix datagram socket) so `grandmaster_locked` reports the port state behind `CLOCK_TAI` rather than trusting a clock that is readable either way.
+
+**ST 2110 media transport** rides on this shared clock. Distinct time newtypes guard the seam where three "just an integer" times meet: `TaiNs` (PTP/TAI nanoseconds, absolute), `RtpTs` (the 32-bit wrapping RTP media-clock timestamp on the wire), and `RefNs` (the pipeline's monotonic reference nanoseconds, a relative timeline with an arbitrary epoch). `MediaClock` takes a `TaiNs` and returns an `RtpTs`, so the compiler rejects handing it the wrong clock (a monotonic reference minus a TAI master is meaningless); the PTP servo's own seam is typed the same way, `PtpServo` / `PtpClock` `sync_exchange` take `(TaiNs, RefNs, RefNs, TaiNs)` and `observe_master` takes `(RefNs, TaiNs)`, so master and reference cannot be swapped. Durations stay a plain `u64`.
+
+`MediaClock` (`g2g-core`, ST 2110-10) maps a PTP/TAI time to a 32-bit wrapping RTP timestamp and back (a media clock counting at 90 kHz for video / the sample rate for audio from the PTP epoch), so two receivers on the same grandmaster compute the same timestamp for the same sampling instant.
+
+`st2110audio` (`g2g-plugins`, ST 2110-30) is the sans-IO PCM payloader/depayloader (L16 / L24 big-endian in the RTP payload, timestamps off the media clock), and `st2110anc` (ST 2110-40 / RFC 8331) carries SMPTE ST 291 ancillary data (closed captions, timecode) as bit-packed 10-bit words with parity + checksum validation, so the caption stack can ride 2110.
+
+The sans-IO cores get network element wrappers: `st2110audiortp` (`St2110AudioSink` / `St2110AudioSrc`, behind the `st2110` feature) puts -30 audio on the wire over UDP, the sink mapping each frame's PTS through the elected (PTP) clock to the media-clock timestamp and the source reconstructing PTS from it, so a receiver on the same grandmaster stays in sync.
+
+`st2110ancrtp` does the same for -40 captions: `St2110AncSink` taps a compressed H.264 / H.265 stream (a teed branch leaf like `CcExtract`), mines each access unit's caption triples, wraps them in a Caption Distribution Packet (CDP, CEA-708 / SMPTE ST 334-2) carried in a DID 0x61 ANC packet, and sends the RFC 8331 RTP timestamped at the frame's PTP time; `St2110AncSrc` depacketizes -40 back into triples and, through the shared `CaptionDecoder` (the decode core factored out of `CcExtract`, driving the same CEA-608/708 state machines from triples mined from SEI or carried in a CDP), emits timed `Caps::Text{Utf8}` cues. So captions travel end to end over 2110 and stay frame-aligned on a common grandmaster.
+
+`st2110video` (ST 2110-20 / RFC 4175) carries uncompressed active video: the packetizer slices a packed frame into Sample Row Data (SRD) line runs (an Extended Sequence Number then per-run headers giving scan line, pixel offset, octet length) sized to the MTU, and the depacketizer writes each run back into the frame, completing it on the RTP marker bit; `st2110videortp` (`St2110VideoSink` / `St2110VideoSrc`) puts it on UDP with the 90 kHz media-clock timestamp shared by every packet of a frame.
+
+Each sampling is a `Layout` reading / writing one pgroup at a time, so the packetizer / depacketizer stay layout-agnostic across three mappings: RGBA 8-bit (packed, byte-identical), YCbCr-4:2:2 8-bit (packed `Yuyv`, luma / chroma bytes swapped to the wire), and YCbCr-4:2:2 10-bit (the broadcast norm, from the planar `I422p10` buffer: the four 10-bit samples Cb0 Y0 Cr0 Y1 are MSB-first bit-packed into a 5-octet pgroup, crossing both a planar-to-packed and a byte-to-bit boundary).
+
+The source's geometry comes from properties, or from the stream's SDP: `st2110sdp` (RFC 4566 + SMPTE ST 2110-10/-20/-30/-40) is the sans-IO generator / parser for the out-of-band description a receiver configures from, carrying the essence (video sampling / size / rate, audio depth / rate / channels / ptime, or ancillary), the payload type, the multicast group and port, and the `a=ts-refclk` PTP grandmaster all the streams share. Every sink has an `sdp()` that publishes its stream and every source an `apply_sdp()` that auto-configures from a parsed one, so a stream self-describes end to end across video, audio, and ancillary. On the audio side `PcmS16Le` rides as L16 and `PcmF32Le` as L24 (float scaled to the 24-bit wire).
+
+`st2110jxs` (ST 2110-22 / RFC 9134) carries the compressed mezzanine essence, JPEG XS: the packetizer slices an opaque codestream into codestream-mode packets (the 4-octet RFC 9134 payload header carrying transmode / packetmode / last-packet / frame counter / packet counter), the marker bit ending the frame, every packet on the same 90 kHz media clock; `st2110jxsrtp` (`St2110JxsSink` / `St2110JxsSrc`) puts it on UDP, taking / emitting `Caps::CompressedVideo{JpegXs}` frames.
+
+The JPEG XS codec itself is `SvtJpegXsEnc` / `SvtJpegXsDec` (`jpegxs` feature): hand-rolled FFI to Intel SVT-JPEG-XS (ISO/IEC 21122, no libavcodec), planar 4:2:0 / 4:2:2 8-bit and 4:2:2 10-bit, the encoder targeting a bits-per-pixel budget and the decoder discovering geometry from the first codestream. So a plant can move visually lossless video at a fraction of -20's bandwidth with sub-frame latency, end to end (raw -> encode -> -22 -> decode).
+
+SDP covers all essences, including -22 (`jxsv`), and `St2110Session` bundles video + audio + ancillary into one multi-section session document (each media tagged with `a=mid`, a shared `a=ts-refclk`), so a whole program self-describes. `AudioFormat::PcmS24Le` (integer 24-bit) rides the -30 L24 wire directly, alongside the float path.
+
+`st2110dup` implements ST 2110-7 seamless protection: a receive-side sequence-number merge of two identical redundant streams (first arrival wins, so a loss on one path is filled by the other), with `a=group:DUP` in the session SDP. Its `SeamlessDedup` is the sans-IO core; `RedundantRtpReceiver` (behind the `st2110` feature) is the socket-bound sibling that binds several receive paths, polls them round-robin so two in-order streams merge back into sequence order, and yields deduplicated packets. `St2110VideoSrc` adopts it behind a `redundant` property (a second "blue" path); being essence-agnostic it can serve the other essences the same way.
+
+`st2110pacing` implements ST 2110-21 sender pacing: a schedule spreading a frame's packets across the frame period (linear or gapped), which both `St2110VideoSink` and the -22 `St2110JxsSink` realize over the tokio timer (through a shared `pace_send`) so the network sees a smooth flow instead of a burst. `VrxValidator` is the full per-format -21 compliance check: the leaky-bucket virtual-receive-buffer model (a receiver draining one packet every `TRS` after a `TR_OFFSET` head start) that, over a run of actual emission offsets, reports the peak buffer occupancy, whether a packet arrived late (starving the receiver), and whether it stays within the profile's `Cmax`.
+
+What is built (from the RFCs, loopback-tested, not yet interop-validated against reference gear) spans -10/-20/-21/-22/-30/-40/-7 plus SDP; multicast interop remains.
+
+`WaylandSink` uses it: it holds each frame until its running-time deadline, tracking the `Segment` (clipping pre-target frames after an accurate seek) and re-anchoring on `Flush`. It also does **QoS late-drop** (matching `SyncSink`): a frame already past its deadline by more than a configurable `max_lateness` bound is dropped instead of presented late, so the sink catches up instead of accumulating lag, posting a `BusMessage::Qos` (running time, jitter, cumulative processed/dropped) per drop.
 
 `SyncSink` is the same sink without a display, so clock slaving is CI-testable with no hardware: it paces through the shared `PresentationPacer` and adopts the elected `ClockSync`, so in an A/V graph its deadlines land on the audio master's `DriftClock` timeline. Its own clock stays the timer (the only thing that can sleep in `no_std`), and the pacer's wait is relative so the two can be different timelines. Until a clock is elected it paces on its own clock with the anchor pinned at zero (`PresentationPacer::set_anchor_ns`), which makes a frame's deadline its running time and the recorded drift a real end-to-end latency reading; adopting an elected clock drops the pin, since that clock's epoch is its own.
 
-**Playing-transition anchoring.** The startup base time is sampled before the data plane and before the application presses play. For a non-live, prerolled pipeline that sits in `Paused` for a while, that is the wrong epoch: the preroll frame is consumed during `Paused`, so a sink that anchored on the startup base (or on that first frame) then rushes/drops once `Playing` finally arrives. So when a `StateController` drives the run, the runner arms a `PlayAnchor` (a shared cell) on the elected clock and hands each sink `ClockSync::with_play_anchor`; `set_state(Playing)` stamps the anchor with `clock.now_ns()` at the exact play edge (and a transition down to `Ready`/`Null` clears it, so a replay re-bases). `ClockSync::base_time()` then resolves to the play-edge stamp once armed, else the eager startup base time. `WaylandSink` reads it per frame: it first-frame-anchors a preroll frame consumed during `Paused` (presented immediately), then re-bases onto the play edge once `Playing` stamps it; a seek `Flush` forces a first-frame re-anchor so the seek target presents immediately rather than against the stale play base. The non-stateful runners keep the eager base time (no `StateController`, no play edge to anchor to).
+**Playing-transition anchoring.** The startup base time is sampled before the data plane and before the application presses play. For a non-live, prerolled pipeline that sits in `Paused` for a while, that is the wrong epoch: the preroll frame is consumed during `Paused`, so a sink that anchored on the startup base (or on that first frame) then rushes/drops once `Playing` finally arrives.
 
-**Upstream QoS** carries that lateness back to the producer so it sheds load too, not just the sink. It rides the same per-link reverse channel as `Reconfigure`: a sink returns a `QosMessage` from `AsyncElement::take_qos`, the runner stores it into the incoming link's reverse `QosSlot`, and the producer observes it as `PushOutcome::Qos` on its next push (reconfigure wins when both are pending; QoS is advisory and never holds the packet back). `SyncSink` originates it on a late-drop and `VideoTestSrc` reacts by skipping ~`jitter / frame_period` frames (advancing PTS without generating them). **Relay through a transform** carries the report the rest of the way to the source in a multi-element pipeline. A transform observes a downstream QoS as a `PushOutcome::Qos` inside `process`, but that outcome is discarded by a generic transform, and the runner (not the element) owns the reverse slots, so the relay is runner-mediated: the runner wires the transform's *output* `SenderSink` with a relay handle to its *input* link's `QosSlot` (`relay_qos_to`). When the output adapter then sees a downstream QoS it stores it onto the input link instead of surfacing it, so the upstream neighbour observes it on its next push, and across N transforms the report walks one hop at a time back to the source. The element's `process` is unaffected. **Acting on the report** is the other half: an element that returns `true` from `AsyncElement::handles_qos` is not relayed past, so it observes the report as `PushOutcome::Qos` from its own `push` and sheds work itself, the same opt-out `handles_keyframe_requests` / `handles_bitrate_requests` give an encoder. `FfmpegVideoDec` does that under its `qos` property: a report arms a skip budget of `jitter / frame_period` pictures (capped by `max-skip-frames`), during which the codec context runs with `AVDISCARD_NONREF`, so libavcodec stops decoding the pictures nothing references. Decode cost drops without touching a reference chain, so every frame still emitted is bit-identical to a full decode, and the budget counting down to zero is the recovery. This is the same shape as the reverse `Reconfigure` path. Wired in the bespoke `run_source_transform_sink` runner and in the DAG runner (`run_graph` / `run_linear_chain`, which the `WaylandSink` demo uses), so the sink's own load-shed reaches the source through interior transforms (overlay, convert).
+So when a `StateController` drives the run, the runner arms a `PlayAnchor` (a shared cell) on the elected clock and hands each sink `ClockSync::with_play_anchor`; `set_state(Playing)` stamps the anchor with `clock.now_ns()` at the exact play edge (and a transition down to `Ready`/`Null` clears it, so a replay re-bases). `ClockSync::base_time()` then resolves to the play-edge stamp once armed, else the eager startup base time. `WaylandSink` reads it per frame: it first-frame-anchors a preroll frame consumed during `Paused` (presented immediately), then re-bases onto the play edge once `Playing` stamps it; a seek `Flush` forces a first-frame re-anchor so the seek target presents immediately rather than against the stale play base. The non-stateful runners keep the eager base time (no `StateController`, no play edge to anchor to).
+
+**Live paths never first-frame-anchor.** Each runner folds the path's `LatencyReport` into the sink's `ClockSync` (`with_path_latency`). When the aggregate says live, the pacer anchors on `base_time()` unconditionally, stamped or eager, and every deadline adds the aggregated minimum latency: GStreamer's `base_time + running_time + latency` model. A startup stall (a hardware decoder's first-frame initialization) then makes the opening frames late, they present immediately and the backlog drains, instead of the stall being latched into a first-frame anchor as the run's standing latency. First-frame anchoring remains the non-live behavior, where frames arrive at read speed and an absolute anchor would defeat pacing entirely.
+
+**Upstream QoS** carries that lateness back to the producer so it sheds load too, not just the sink. It rides the same per-link reverse channel as `Reconfigure`: a sink returns a `QosMessage` from `AsyncElement::take_qos`, the runner stores it into the incoming link's reverse `QosSlot`, and the producer observes it as `PushOutcome::Qos` on its next push (reconfigure wins when both are pending; QoS is advisory and never holds the packet back).
+
+`SyncSink` originates it on a late-drop and `VideoTestSrc` reacts by skipping ~`jitter / frame_period` frames (advancing PTS without generating them).
+
+**Relay through a transform** carries the report the rest of the way to the source in a multi-element pipeline. A transform observes a downstream QoS as a `PushOutcome::Qos` inside `process`, but that outcome is discarded by a generic transform, and the runner (not the element) owns the reverse slots, so the relay is runner-mediated: the runner wires the transform's *output* `SenderSink` with a relay handle to its *input* link's `QosSlot` (`relay_qos_to`). When the output adapter then sees a downstream QoS it stores it onto the input link instead of surfacing it, so the upstream neighbour observes it on its next push, and across N transforms the report walks one hop at a time back to the source. The element's `process` is unaffected.
+
+**Acting on the report** is the other half: an element that returns `true` from `AsyncElement::handles_qos` is not relayed past, so it observes the report as `PushOutcome::Qos` from its own `push` and sheds work itself, the same opt-out `handles_keyframe_requests` / `handles_bitrate_requests` give an encoder.
+
+`FfmpegVideoDec` does that under its `qos` property: a report arms a skip budget of `jitter / frame_period` pictures (capped by `max-skip-frames`), during which the codec context runs with `AVDISCARD_NONREF`, so libavcodec stops decoding the pictures nothing references. Decode cost drops without touching a reference chain, so every frame still emitted is bit-identical to a full decode, and the budget counting down to zero is the recovery. This is the same shape as the reverse `Reconfigure` path. Wired in the bespoke `run_source_transform_sink` runner and in the DAG runner (`run_graph` / `run_linear_chain`, which the `WaylandSink` demo uses), so the sink's own load-shed reaches the source through interior transforms (overlay, convert).
 
 ### 4.5 Backpressure & Scheduling
 Every link between elements has an explicit `LinkPolicy`, configured at graph construction time. The choice is per-link because a single pipeline may have lossy preview branches and lossless recording branches sharing an upstream source.
@@ -474,21 +616,21 @@ Pads are not a first-class type. An element's input and output endpoints are enc
 
 | Topology | Trait | Input pad | Output pad |
 | :--- | :--- | :--- | :--- |
-| Source (0→1) | `SourceLoop` | — | `&mut dyn OutputSink` arg to `run()` |
+| Source (0→1) | `SourceLoop` | none | `&mut dyn OutputSink` arg to `run()` |
 | Transform / sink (1→0..N) | `AsyncElement` | `PipelinePacket` arg to `process()` | `&mut dyn OutputSink` arg to `process()` |
 | Terminal sink | `AsyncElement` whose `process()` ignores `out` | as above | `NullSink` sentinel |
 
-This is deliberate. GStreamer's `GstPad` is a runtime object because GStreamer composes graphs from string-keyed plugin factories loaded at runtime; `g2g` composes typed graphs at compile time, so pad metadata lives in the trait signatures. The cost is that fan-out (tee), fan-in (muxer), and demuxer-style dynamic pads require additional trait variants rather than runtime pad-list mutation — see §4.10.
+This is deliberate. GStreamer's `GstPad` is a runtime object because GStreamer composes graphs from string-keyed plugin factories loaded at runtime; `g2g` composes typed graphs at compile time, so pad metadata lives in the trait signatures. The cost is that fan-out (tee), fan-in (muxer), and demuxer-style dynamic pads require additional trait variants rather than runtime pad-list mutation, see §4.10.
 
 ### 4.8 Dynamic Graph Reconfiguration
 
 #### 4.8.1 Two-Layer Graph API
 `g2g` exposes two graph APIs sharing the same element traits, the same negotiation lifecycle, the same `PipelinePacket` variants, and the same runner primitives. Only graph construction and slot mutation differ.
 
-- **Static typed graph** — compile-time topology via tuple types; no `dyn`; zero-cost. Right for embedded / RTOS / static cloud pipelines.
-- **Type-erased dynamic graph** — boxed elements (`Box<dyn DynAsyncElement>`) held in `ElementSlot`s and `BranchSlot`s, swappable at runtime. Right for cloud ingestion, desktop applications, and anything that needs runtime topology evolution.
+- **Static typed graph**: compile-time topology via tuple types; no `dyn`; zero-cost. Right for embedded / RTOS / static cloud pipelines.
+- **Type-erased dynamic graph**: boxed elements (`Box<dyn DynAsyncElement>`) held in `ElementSlot`s and `BranchSlot`s, swappable at runtime. Right for cloud ingestion, desktop applications, and anything that needs runtime topology evolution.
 
-#### 4.8.2 `ElementSlot` — Lock-Free Single-Element Swap
+#### 4.8.2 `ElementSlot`: Lock-Free Single-Element Swap
 The dynamic graph holds elements in `arc_swap::ArcSwap<Box<dyn DynAsyncElement>>` cells:
 
 ```rust
@@ -501,7 +643,7 @@ Frames mid-`process()` against the old element complete naturally; the next push
 
 This is the primary response to a Phase 3 `ReFixate` or a mid-stream `Reconfigure` signal: replace the affected slot's contents, do not rebuild the graph. The swap is validated live under load: an `ElementSlot` sits as a transform in `source -> slot -> sink` driven by `run_graph`, and a `SwapHandle::swap` mid-stream reroutes the remaining frames to the replacement element while every frame still reaches the sink, no drain or rebuild.
 
-#### 4.8.3 `BranchSlot` — Multi-Element Sub-Graph Swap
+#### 4.8.3 `BranchSlot`: Multi-Element Sub-Graph Swap
 A branch with one logical input and one logical output is structurally an element. `BranchSlot` is the multi-element analog of `ElementSlot`, with the swap trade-off made explicit at the type level:
 
 ```rust
@@ -541,7 +683,7 @@ Static-graph users at the embedded layer never instantiate `BranchSlot` and don'
 A `Router` is a 1-to-N transform that reads an atomic discriminator per frame and pushes the frame to exactly one of its outputs. A `Gate` is a 1-to-1 transform that reads an atomic boolean and either forwards or discards each frame. A `Merger` is an N-to-1 transform that reads from one of its inputs, switching on a discriminator. Together they cover branch enable/disable, A/B switching, and the routing + cutover halves of `ShadowWarm`. These primitives form the foundation of the dynamic-graph layer.
 
 #### 4.8.5 Runtime Request Pads
-The request-pad analog is a pair of handles over a running graph. `DynamicFanoutHandle::add_branch` (M310) attaches an output branch mid-run, round-robin or broadcast (`FanOutMode`, M319; broadcast duplicates via `Frame::share`, replaying sticky caps to the late branch). `DynamicFaninHandle::add_input` (M320) attaches a source as a new input of a running aggregator/muxer. An input add is a negotiation, not a grant (M975): the runner reserves the pad, validates the source's caps against the pad constraint, then asks the element via `MultiInputElement::accepts_runtime_input` — its veto for what pad count and caps cannot express (no spare pad of that media kind, a container that cannot carry a second track). The caller holds a `PendingInput` whose `accepted()` resolves to the verdict; a refused input fails alone (`InputRefused`, logged under the `fanin` category) and the run continues on the inputs it has.
+The request-pad analog is a pair of handles over a running graph. `DynamicFanoutHandle::add_branch` attaches an output branch mid-run, round-robin or broadcast (`FanOutMode`, M319; broadcast duplicates via `Frame::share`, replaying sticky caps to the late branch). `DynamicFaninHandle::add_input` attaches a source as a new input of a running aggregator/muxer. An input add is a negotiation, not a grant: the runner reserves the pad, validates the source's caps against the pad constraint, then asks the element via `MultiInputElement::accepts_runtime_input`, its veto for what pad count and caps cannot express (no spare pad of that media kind, a container that cannot carry a second track). The caller holds a `PendingInput` whose `accepted()` resolves to the verdict; a refused input fails alone (`InputRefused`, logged under the `fanin` category) and the run continues on the inputs it has.
 
 ### 4.9 GStreamer Dynamic-Feature Mapping
 `g2g`'s dynamic surface is intended to be a superset of GStreamer's dynamic capabilities, achieved through a different set of primitives.
@@ -568,7 +710,7 @@ The request-pad analog is a pair of handles over a running graph. `DynamicFanout
 | EOS aggregation across N inputs | Fan-in / muxer |
 
 #### 4.9.1 Differences Forced by Rust Ownership
-GStreamer relies on parent ↔ child reference cycles via GObject reference counting plus signal callbacks. Rust's strict ownership doesn't allow that shape. Equivalent functionality lives in **message channels** instead of direct back-references: a child element that needs to notify its parent posts a bus message; the parent reads it. Functionally identical; structurally cleaner; no `unref` ordering hazards. Similarly, GStreamer's `gst_pad_link()` performs runtime pointer manipulation; the `g2g` equivalent — moving the receive end of a channel — requires explicit ownership transfer under a brief gate hold. Same outcome, more honest about what's happening.
+GStreamer relies on parent ↔ child reference cycles via GObject reference counting plus signal callbacks. Rust's strict ownership doesn't allow that shape. Equivalent functionality lives in **message channels** instead of direct back-references: a child element that needs to notify its parent posts a bus message; the parent reads it. Functionally identical; structurally cleaner; no `unref` ordering hazards. Similarly, GStreamer's `gst_pad_link()` performs runtime pointer manipulation; the `g2g` equivalent (moving the receive end of a channel) requires explicit ownership transfer under a brief gate hold. Same outcome, more honest about what's happening.
 
 #### 4.9.2 Capabilities That Fall Out For Free
 - **No silent caps mismatch at runtime**: exhaustive typed `Caps` enum, `match` checked at compile time. GStreamer's string-keyed caps regularly fail at runtime with `not-negotiated`.
@@ -577,9 +719,9 @@ GStreamer relies on parent ↔ child reference cycles via GObject reference coun
 - **Memory safety across hot-swap**: ArcSwap guarantees no use-after-free when an element is replaced while a frame is in flight. GStreamer's `pad_block` / `pad_unlink` choreography is famously bug-prone here.
 
 #### 4.9.3 The Single Architectural Trade-Off
-Pre-allocated "dark slots" handle the common dynamic-pad case (a demuxer with at-most-N tracks). If an application genuinely needs runtime-growable pad count without an upper bound — e.g., a session router that accepts new RTP streams indefinitely — the dynamic layer uses a `Slab<Slot>` instead of a fixed array. Per-push slot lookup becomes one extra indirection. Since this only matters inside the already-type-erased dynamic layer, the cost is in the noise.
+Pre-allocated "dark slots" handle the common dynamic-pad case (a demuxer with at-most-N tracks). If an application genuinely needs runtime-growable pad count without an upper bound (e.g., a session router that accepts new RTP streams indefinitely), the dynamic layer uses a `Slab<Slot>` instead of a fixed array. Per-push slot lookup becomes one extra indirection. Since this only matters inside the already-type-erased dynamic layer, the cost is in the noise.
 
-The bounded-N realization is `StreamDemux` (`g2g-plugins`), a `MultiOutputElement` with N typed output ports, driven by `run_source_fanout`. Each port carries its own declared caps and is fed by a caller-supplied classifier (`Fn(&Frame) -> usize`); the first frame routed to a port emits that port's `CapsChanged` so the branch retypes from the demuxer's byte-stream input caps to the elementary stream's, the same announce a single-output demuxer does. The N branch links the runner pre-allocates *are* the dark slots: a port no stream ever routes to simply stays silent and takes the merged EOS at end. This is the multi-output demuxer (one element, several typed downstream branches); the prior fan-out elements (`Router`, `Gate`) only broadcast or A-B-switch a single caps. Container parsers (MPEG-TS multi-PID) wire onto it by keying the classifier on parsed stream identity.
+The bounded-N realization is `StreamDemux` (`g2g-plugins`), a `MultiOutputElement` with N typed output ports, driven by `run_source_fanout`. Each port carries its own declared caps and is fed by a caller-supplied classifier (`Fn(&Frame) -> usize`); the first frame routed to a port emits that port's `CapsChanged` so the branch retypes from the demuxer's byte-stream input caps to the elementary stream's, the same announce a single-output demuxer does. The N branch links the runner pre-allocates *are* the dark slots: a port no stream ever routes to simply stays silent and takes the merged EOS at end. This is the multi-output demuxer (one element, several typed downstream branches); the other fan-out elements (`Router`, `Gate`) only broadcast or A-B-switch a single caps. Container parsers (MPEG-TS multi-PID) wire onto it by keying the classifier on parsed stream identity.
 
 The demux is also a first-class DAG node, the symmetric counterpart to the muxer fan-in. Rather than a new `NodeKind`, a demux reuses `NodeKind::Tee(n)` for the structural/solver view (it negotiates exactly like a tee at startup, per the dark-slot retyping above) and carries a `GraphNodeRef::Demux` payload that the runner dispatches to `demux_arm` (the transpose of `muxer_arm`) instead of the broadcast `tee_arm`. So the solver is unchanged and only the runtime behavior differs. `Graph::add_demux` builds the node; `DynMultiOutputElement` is the dyn-safe mirror of `MultiOutputElement`. In `gst-launch`, a name registered via `register_demux` with several outputs builds a demux (`src ! d.  d. ! …  d. ! …  <demux> name=d`) instead of erroring `FanOutWithoutTee`, the transpose of the muxer's link-degree rule. There is no content-agnostic default demux in the registry: routing is inherently stream-specific (as the muxer side ships specific muxers), so `register_demux` is the surface.
 
@@ -599,8 +741,8 @@ follow describe each track's current architecture.
 ### 4.11 Hardware Decoder Elements
 
 The layers `RtspSrc → H264Parse` cover encoded-bitstream processing
-(mux, re-stream, record). Decoded-pixel output — required for ML inference,
-display, and colour-space conversion — uses a decoder `AsyncElement` that
+(mux, re-stream, record). Decoded-pixel output (required for ML inference,
+display, and colour-space conversion) uses a decoder `AsyncElement` that
 accepts `Caps::CompressedVideo { codec: H264 | H265, .. }` and emits
 `Caps::RawVideo { format: Nv12 | I420, .. }` backed by `MemoryDomain::System`,
 `MemoryDomain::DmaBuf`, `MemoryDomain::Cuda`, or `MemoryDomain::D3D11Texture`
@@ -608,11 +750,11 @@ depending on backend.
 
 #### 4.11.1 cros-codecs (Linux VAAPI)
 
-`VaapiDec<C>` (`g2g-plugins/src/vaapidec.rs`, feature `vaapi`, `cfg(target_os = "linux")`) is built on `cros-codecs` (`vaapi` backend); the `VaapiCodec` binding picks the stateless decoder and NAL splitter, giving the two elements `VaapiH264Dec` and `VaapiH265Dec` (M1036). The crate is maintained by the ChromeOS team and exposes a stateless decoder framework that parses the bitstream and manages the DPB; the actual decode runs on the GPU through libva.
+`VaapiDec<C>` (`g2g-plugins/src/vaapidec.rs`, feature `vaapi`, `cfg(target_os = "linux")`) is built on `cros-codecs` (`vaapi` backend); the `VaapiCodec` binding picks the stateless decoder and NAL splitter, giving the two elements `VaapiH264Dec` and `VaapiH265Dec`. The crate is maintained by the ChromeOS team and exposes a stateless decoder framework that parses the bitstream and manages the DPB; the actual decode runs on the GPU through libva.
 
 `VaapiDec` is an Intel-only candidate. cros-codecs allocates output surfaces through ChromeOS GBM extensions (`GBM_BO_USE_HW_VIDEO_DECODER`, contiguous NV12) that Mesa `radeonsi` does not provide, so the element cannot start on AMD desktop GPUs. The Linux hardware-decode ranking is `VulkanVideoDec` (vendor-neutral, picked by the domain-aware search for GPU-domain consumers) with ffmpeg's VAAPI hwaccel (`Backend::Vaapi`, 4.11.3) as the hardware route into system memory.
 
-- **Input caps:** `Caps::CompressedVideo { codec: C::CODEC, .. }` — `intercept_caps` intersects with the element's codec and rejects everything else.
+- **Input caps:** `Caps::CompressedVideo { codec: C::CODEC, .. }`: `intercept_caps` intersects with the element's codec and rejects everything else.
 - **Output caps:** `Caps::RawVideo { format: Nv12, .. }` backed by `MemoryDomain::System` (CPU copy out of the GBM-allocated surface).
 - **Frame allocation:** `GbmDevice::open("/dev/dri/renderD128")` (configurable via `VaapiH264Dec::with_render_node`) allocates `GenericDmaVideoFrame` surfaces; the decoder's allocator callback returns one per output picture.
 - **Format negotiation:** the first `decode()` call surfaces `DecodeError::CheckEvents`; the element drains events, picks up the SPS-derived `StreamInfo` on `FormatChanged`, and re-feeds the same NAL.
@@ -639,11 +781,11 @@ H.264 Annex-B  (MemoryDomain::System)
 
 `MfDecode` (`g2g-plugins/src/mfdecode.rs`, feature `mf-decode`, `cfg(target_os = "windows")`) wraps `CLSID_MSH264DecoderMFT` via `windows-rs` using an MTA COM apartment.
 
-- **Input caps:** `Caps::CompressedVideo { codec: H264, .. }` — rejects anything else at `intercept_caps`.
+- **Input caps:** `Caps::CompressedVideo { codec: H264, .. }`: rejects anything else at `intercept_caps`.
 - **Output caps:** `Caps::RawVideo { format: Nv12, .. }` backed by `MemoryDomain::System` (CPU copy out of the MFT output buffer).
 - **Flush:** forwards `MFT_MESSAGE_COMMAND_FLUSH` and propagates `PipelinePacket::Flush` downstream.
 - **EOS:** sends `MFT_MESSAGE_COMMAND_DRAIN` to flush the B-frame reorder buffer before emitting `Eos`.
-- **Thread safety:** `!Send` by default (COM); `unsafe impl Send` justified by MTA free-threading — the MS H.264 decoder MFT is callable from any MTA thread without marshaling.
+- **Thread safety:** `!Send` by default (COM); `unsafe impl Send` justified by MTA free-threading: the MS H.264 decoder MFT is callable from any MTA thread without marshaling.
 
 A sibling `MfEncode` (feature `mf-encode`) wraps `CLSID_MSH264EncoderMFT` with `MF_LOW_LATENCY` set (no B-frames) and converts `Caps::RawVideo { format: Nv12 }` to `Caps::CompressedVideo { codec: H264 }`, Annex-B framed. `MfAacEncode` / `MfAacDecode` (feature `mf-aac`) cover the AAC audio path.
 
@@ -740,7 +882,7 @@ device pointers wrapped into `OwnedCudaBuffer`.
 memory (`cuMemCreate` / `cuMemMap`) to a dma-buf fd, and NVDEC decoder frames
 come from libavcodec's CUDA hwframe pool (not VMM); the NVIDIA proprietary
 driver also doesn't import foreign dma-bufs reliably through `nvidia-drm`.
-Presentation therefore uses CUDA↔GL interop — the path GStreamer's `nvcodec`
+Presentation therefore uses CUDA↔GL interop, the path GStreamer's `nvcodec`
 + `glimagesink` and NVIDIA's `FramePresenterGL` sample take:
 
 1. Create an EGL context on the display surface.
@@ -819,18 +961,18 @@ the parsed SPS/PPS/VPS (the correctness-critical part, one mapping module per
 codec, re-emitted on mid-stream change via `CapsChanged`), DPB reference-slot
 management, and the `vkCmdDecodeVideoKHR` recording, output pipelined through the
 YCbCr pass with an in-flight ring. A session's `maxCodedExtent` is the device's
-maximum, not the stream's geometry (M1027): it is only an upper bound, each
+maximum, not the stream's geometry: it is only an upper bound, each
 picture resource carries its real extent, and sizing the session to the picture
 made the NVIDIA driver refuse whole small geometries with
 `ERROR_INVALID_VIDEO_STD_PARAMETERS_KHR`. Every image the session writes (DPB
 slot, decode output) is created at the picture extent rounded up to the device's
-`pictureAccessGranularity` (M1060), the unit in which a decode accesses a
+`pictureAccessGranularity`, the unit in which a decode accesses a
 picture resource. The readback copy takes the picture's own extent back out of
 that image, and the YCbCr compute pass is given the padded extent so its
 normalized coordinates still land on the picture's texels. The padding never
 reaches an output frame. The session + DPB rebuild mid-stream on *any*
 in-band parameter-set change, keyed by a byte fingerprint of the AU's parameter
-sets (M519 geometry / M764 same-geometry content, e.g. a profile or entropy-mode
+sets (geometry, and same-geometry content such as a profile or entropy-mode
 switch; byte-identical keyframe re-sends keep the session), flushing the outgoing
 decoder's pipelined tail first so no frame is lost. Output caps are
 `Caps::RawVideo { format: Rgba8, .. }` in `MemoryDomain::WgpuTexture`
@@ -851,7 +993,7 @@ The player drives H.264 **and** H.265 (the codec is sniffed from the stream,
 `sniff_annexb_codec`, behind a `PlayerDecoder` enum), and its seek point is the
 nearest IRAP (an IDR for H.264; an IDR / CRA / BLA for H.265, `PictureMeta::
 is_random_access`), so scrubbing into a late open-GOP GOP tunes in at that GOP's
-CRA (M587 discards its RASL) rather than decoding from the leading IDR. A leading
+CRA (discarding its RASL) rather than decoding from the leading IDR. A leading
 picture (a CRA's RASL / RADL, whose POC precedes its CRA) instead seeks from the
 random-access point before that CRA and decodes continuously through it, so its
 references exist (`m588`).
@@ -892,7 +1034,7 @@ gotcha: NVIDIA's Vulkan HEVC slice-header parser needs a 3-byte start code (`00
 00 01`); a 4-byte one breaks every non-IDR slice (the IDR tolerates it via the
 picture info), so the H.265 path frames slices with 3 bytes while H.264 keeps 4.
 
-**Long-term reference pictures (M743).** The SPS long-term table rides
+**Long-term reference pictures.** The SPS long-term table rides
 `pLongTermRefPicsSps`; the slice header's long-term entries (SPS-indexed and
 slice-coded, with the accumulated `DeltaPocMsbCycleLt` per 7.4.7.1) resolve
 against the DPB by full POC (MSB cycle present) or POC lsb alone, the RPS prune
@@ -936,26 +1078,28 @@ consumer such as the streaming (`streamdec`) adapter reorders by PTS itself), bu
 returns one `PictureMeta` per submitted picture (the POC the decode already
 computed, no second pass), and the element feeds retired frames through a small
 `ReorderBuffer` keyed by the same (coded-video-sequence, POC). The GPU-texture
-path streams the same way (M744): `decode_push_to_textures` decodes each AU's
+path streams the same way: `decode_push_to_textures` decodes each AU's
 pictures to textures with the DPB/POC state intact across calls (the whole-stream
 `decode_all_to_textures` indexing pass resets it, so it cannot stream), and the
 element reorders them through a texture `ReorderBuffer`. AV1 needs neither
 buffer: its display order is the bitstream's op order, so the element op-walks
 each temporal unit (`decode_display` / `decode_display_to_textures`, the DPB
 persisting across calls), which also makes `show_existing_frame` re-displays and
-per-frame film-grain synthesis work when streamed (the old pipelined path
-silently skipped both). M744 also fixed a latent AV1 use-after-free: NVIDIA's
-driver retains the `pStdSequenceHeader` / `pColorConfig` pointers handed to
+per-frame film-grain synthesis work when streamed.
+
+NVIDIA's driver retains the `pStdSequenceHeader` / `pColorConfig` pointers handed to
 `vkCreateVideoSessionParametersKHR` and dereferences them per decode, so
-`Av1DecodeSession` now owns a stable boxed copy for its lifetime (dropping the
-Std block after creation yielded small, nondeterministic pixel corruption). It releases the whole
+`Av1DecodeSession` owns a stable boxed copy for its lifetime (dropping the
+Std block after creation gives small, nondeterministic pixel corruption).
+
+The `ReorderBuffer` releases the whole
 previous coded video sequence at each keyframe (where POC resets) and bumps the
 lowest-POC held frame once a sequence exceeds the stream's own declared reorder
 depth (H.264 VUI `bitstream_restriction` `max_num_reorder_frames` / H.265
-`sps_max_num_reorder_pics`, M764; the DPB slot count is the fallback bound when
+`sps_max_num_reorder_pics`; the DPB slot count is the fallback bound when
 the stream declares none), so an I/P stream emits without hold and a long GOP
 does not buffer unbounded; `Eos` and a reconfig
-boundary drain it in display order, a `Flush` (seek) discards it (M586, H.264 /
+boundary drain it in display order, a `Flush` (seek) discards it (H.264 /
 H.265). AV1 stays in coding order there (its display order comes from
 `show_existing_frame` / `order_hint`, handled whole-stream by `decode_all`). Verified
 bit-exact vs the software decoder's display-order output for H.264 and closed-GOP
@@ -972,7 +1116,7 @@ decoded against a flushed DPB - `h265_is_rasl` + a `skip_rasl` flag set from eac
 IRAP's `NoRaslOutputFlag`, checked before POC derivation so a dropped RASL leaves
 no trace. The CRA's trailing pictures and the following GOPs decode bit-exact vs a
 full decode. The same flag is 0 in continuous decoding, so full-stream open-GOP is
-unchanged. Long-term references are handled too (M743, above).
+unchanged. Long-term references are handled too (above).
 
 **Colour space.** Decoded YUV is converted to RGB with the stream's actual colour
 space, not a fixed matrix. A `VideoColorSpace` (colour matrix + quantization range)
@@ -1001,7 +1145,7 @@ and is where the transfer stage operates.
 
 **HDR transfer (tone mapping).** The fixed-function ycbcr hardware does the matrix
 + range but NOT the transfer function, so an HDR (PQ / HLG) stream reaches the
-compute pass as its raw transfer-encoded R'G'B'. `VideoColorSpace` now carries a
+compute pass as its raw transfer-encoded R'G'B'. `VideoColorSpace` carries a
 `TransferFunction` (PQ = CICP 16, HLG = 18, else SDR) resolved from the stream, and
 the `create_*_dpb_decoder_gpu_tonemap` constructors turn on a transfer stage in the
 `rgba16f` shader (selected by a push constant): EOTF (PQ ST 2084 / HLG B67) ->
@@ -1061,21 +1205,21 @@ against ours). Multi-tile frames decode too (`av1_tile_layout` parses the
 `OBU_FRAME` tile-group header + the per-tile `TileSizeBytes` size prefixes into
 the driver's per-tile offset / size lists; a 2x2 and a 4x4 libaom clip decode
 bit-exact on the 3060). Alt-ref (invisible) frames + `show_existing_frame` decode
-too (M565): a stream where decode order != display order takes a synchronous
+too: a stream where decode order != display order takes a synchronous
 reorder-aware path (`scan_ops` builds the op list; non-shown frames decode into
 the DPB without emitting; each `show_existing_frame` emits the referenced stored
 slot at its display position), bit-exact on the 3060. Film grain is synthesized on
-the decoded NV12 (M566): the 3060 exposes only `DPB_AND_OUTPUT_COINCIDE` for AV1,
+the decoded NV12: the 3060 exposes only `DPB_AND_OUTPUT_COINCIDE` for AV1,
 so the driver cannot apply grain (that needs a distinct output image), and
 `apply_film_grain_nv12` runs the full AV1 grain synthesis (spec 7.18.3, ported from
 the re_rav1d scalar reference) on the grain-free hardware reconstruction, bit-exact
-vs dav1d (luma + chroma). The GPU-texture path applies the same grain (M568): since
+vs dav1d (luma + chroma). The GPU-texture path applies the same grain: since
 the ycbcr compute pass produces the grain-free reconstruction, `grained_slot_to_texture`
 reads the displayed slot back to NV12 (the GPU DPB images carry `TRANSFER_SRC`),
 runs `apply_film_grain_nv12`, and uploads the result to the RGBA texture, bit-exact
 vs dav1d; grain is output-only, so the read-back leaves the DPB reference untouched
 (a grain-free displayed frame stays on the zero-copy GPU convert). Loop restoration
-(Wiener / SGR) decodes correctly (M567): `StdVideoAV1LoopRestoration::LoopRestorationSize`
+(Wiener / SGR) decodes correctly: `StdVideoAV1LoopRestoration::LoopRestorationSize`
 is the `1 + lr_unit_shift` encoding, not the pixel unit size, matching ffmpeg's
 Vulkan hwaccel (getting it wrong desynced the whole frame).
 
@@ -1211,7 +1355,7 @@ Two design points carry the element:
   device handle in the struct between negotiation and `run` sidesteps `Send` /
   borrow entanglement with the stream. Errors surface as
   `G2gError::Hardware(HardwareError::V4l2(errno))`.
-- **The device offers, negotiation decides (M954).** Every confirmed format
+- **The device offers, negotiation decides.** Every confirmed format
   becomes one alternative of the source's `CapsConstraint::Produces` set, in a
   fixed preference order: YUYV, NV12, I420, then MJPEG last (it needs a
   decoder). A chain that constrains nothing therefore takes YUYV, exactly as
@@ -1223,7 +1367,7 @@ Two design points carry the element:
   `sizeimage`. What a pixel format means on a link (its `Caps`, its frame size)
   lives in `capturepixelformat.rs`, shared with `LibCameraSrc`, which sits on a
   different fourcc registry but agrees on the meaning.
-- **DMABUF output (M956).** The `io-mode` property selects how a buffer leaves
+- **DMABUF output.** The `io-mode` property selects how a buffer leaves
   the element: `auto` / `mmap` copy as above, `dmabuf` exports each MMAP buffer
   once (`VIDIOC_EXPBUF`, at stream start) and emits frames in
   `MemoryDomain::DmaBuf` carrying a share of the fd their buffer was filled into,
@@ -1277,7 +1421,7 @@ the g2g-ml `libcamera-wgpu` feature chains `LibCameraSrc -> VideoConvert(NV12) -
 WgpuPreprocess` to turn live frames into a normalized f32 NCHW tensor on the GPU
 (validated camera-to-tensor on an RTX 3060). A zero-copy dma-buf import of
 libcamera buffers into wgpu (the Linux analog of the CUDA / AHardwareBuffer
-interop) was investigated under the `libcamera-dmabuf` feature: libcamera does
+interop) sits under the `libcamera-dmabuf` feature: libcamera does
 export a real dma-buf fd, but on a USB camera + discrete NVIDIA GPU the driver
 advertises the buffer as importable (`vkGetMemoryFdPropertiesKHR`) yet the actual
 `vkAllocateMemory` import fails to bind, because the buffer is CPU/vmalloc-backed
@@ -1327,8 +1471,7 @@ structurally. Errors surface as `HardwareError::{Alsa,PulseAudio,PipeWire}`.
 
 ### 4.12aa Device Discovery
 
-The `GstDeviceProvider` / `GstDeviceMonitor` analog (M938/M939,
-`g2g-core/src/runtime/device.rs` + `g2g-plugins/src/devicemon.rs`). A
+The `GstDeviceProvider` / `GstDeviceMonitor` analog (`g2g-core/src/runtime/device.rs` + `g2g-plugins/src/devicemon.rs`). A
 `DeviceProvider` probes one backend for the devices it can see; a
 `DeviceMonitor` aggregates providers behind class + caps filters
 (`gst_device_has_classes` semantics: `Video/Source` requires both parts,
@@ -1366,11 +1509,11 @@ empty caps), **PipeWire** (media-class nodes mapped to
 GStreamer's capture/render model: wgpu adapters, CUDA ordinals, VAAPI render
 nodes; only the render nodes name a driving element, the rest are
 informational), **MF** and **WASAPI** on Windows, and **AVF** and **CoreAudio**
-on macOS (M943, below). The `g2g-device-monitor` binary is the CLI over all of
+on macOS (below). The `g2g-device-monitor` binary is the CLI over all of
 this (`gst-device-monitor-1.0` analog): one-shot listing, class filter,
 `--json`, and `--follow` for live hotplug.
 
-**Windows / macOS (M943).** `mfdevice` lists the `MFEnumDeviceSources` video
+**Windows / macOS.** `mfdevice` lists the `MFEnumDeviceSources` video
 capture devices with the NV12 / YUY2 native modes `mfvideosrc` can deliver
 (reading them activates the source, so a camera another application holds open
 lists with empty caps); `wasapidevice` lists the active `IMMDeviceEnumerator`
@@ -1389,11 +1532,11 @@ separate `device-id` is needed: `mfvideosrc device-path=` takes the MF symbolic
 link, `wasapisrc` / `wasapisink device=` the endpoint id, `avfvideosrc` /
 `avfaudiosrc device=` the `AVCaptureDevice` unique id, and `coreaudiosrc` /
 `coreaudiosink device=` the Core Audio device UID (the `AudioDeviceID` is
-reassigned every boot, the UID is not). Each element has that selector as
-part of M943, sharing one open-by-id helper with its provider (`wasapipcm` on
+reassigned every boot, the UID is not). Each element has that selector,
+sharing one open-by-id helper with its provider (`wasapipcm` on
 Windows) so the id a listing reports and the id `device=` accepts cannot drift.
 
-**`v4l2src device-id` (M944).** V4L2 is the exception: its selection handle is
+**`v4l2src device-id`.** V4L2 is the exception: its selection handle is
 the node path, which the kernel renumbers across a replug, so `v4l2src` takes a
 separate `device-id` carrying the provider's `bus_info:card:path` id and
 resolves it against a fresh probe at negotiation. The exact id wins; failing
@@ -1403,7 +1546,7 @@ chosen (the capture node on every UVC device). An id nothing carries fails the
 negotiation with `HardwareError::V4l2(ENODEV)` rather than silently falling
 back to `device`.
 
-**V4L2 camera controls (M944, M1047).** `v4l2src` exposes the user and camera
+**V4L2 camera controls.** `v4l2src` exposes the user and camera
 control classes as runtime properties under the names `v4l2-ctl` uses:
 exposure, focus and white balance (`exposure-auto`, `exposure-absolute`,
 `focus-auto`, `focus-absolute`, `white-balance-temperature-auto`,
@@ -1539,14 +1682,14 @@ silent-client reap).
 
 **SRT (Secure Reliable Transport).** `SrtSink` (caller, egress) and `SrtSrc`
 (listener, ingress, `srt` feature) carry an MPEG-TS byte stream over UDP with
-SRT's reliable-but-low-latency ARQ — the contribution-link transport. The
+SRT's reliable-but-low-latency ARQ, the contribution-link transport. The
 protocol is Sans-IO (`srt.rs`): the 16-byte packet header + data/control wire
 codec (HSv5 HANDSHAKE with the HSREQ-latency and Stream-ID extensions,
 ACK / NAK loss-report / ACKACK / KEEPALIVE / SHUTDOWN), the caller/listener
 handshake driver (`SrtHandshake`, induction → conclusion with a listener cookie
 challenge), and the ARQ pair `SrtSender` / `SrtReceiver` (the sender buffers and
 resends on NAK with the retransmit flag; the receiver reorders by wrap-aware
-sequence, NAKs gaps, and delivers in order) — the same shape as the RTP
+sequence, NAKs gaps, and delivers in order), the same shape as the RTP
 jitter/NACK path. Validated g2g↔g2g end to end over a lossy loopback (handshake +
 data + a dropped packet recovered via NAK). The wire format follows the SRT
 draft so real-peer interop is the design target. AES-256 encryption
@@ -1660,8 +1803,8 @@ source task. `Mp4Src` is the first real source to loop on `SEGMENT`: it
 clips playback to the segment `stop`, reports segment-done at the boundary, and
 parks on `wait_event` for the app's loop seek (non-flushing, snapping to the
 keyframe at or before the target so a decoder resumes cleanly) or `shutdown`. It
-also now honours non-flushing repositioning seeks (accumulating `Segment`, no
-`Flush`), not just flushing ones. **Re-preroll when paused.** A paused,
+honours non-flushing repositioning seeks (accumulating `Segment`, no
+`Flush`) as well as flushing ones. **Re-preroll when paused.** A paused,
 prerolled pipeline backpressures its source, so a flushing seek issued now would
 never take effect (the held sink never drains). `StateController::request_repreroll`
 (called by the app alongside the seek) bumps a preroll generation; `flow_gate`
@@ -1680,7 +1823,7 @@ decoded units until the keyframe at/after the target and emits a resume
 index-derived offset a later optimization). All five carry it
 (`fmp4demux` / `tsdemux` / `mkvdemux` / `flvdemux` / `oggdemux`), each using its
 own keyframe signal (the container flag, or `annexb::au_is_keyframe` for TS whose
-units have none; every audio packet is a resync point, and `oggdemux` now
+units have none; every audio packet is a resync point, and `oggdemux`
 accumulates an Opus PTS from the TOC byte). Where the container has no index at
 all, `oggdemux` guesses the landing byte offset by interpolating through observed
 `(byte offset, stream time)` anchors, clamped a page-max below the byte length
@@ -1703,50 +1846,50 @@ out-of-band events, so an element notifies the application without a
 back-reference. `BusMessage` covers the lifecycle and quality signals an
 application reacts to:
 
-- `StreamStart`, `Eos`, `Error`, `Warning`, `Info(String)` — stream lifecycle,
+- `StreamStart`, `Eos`, `Error`, `Warning`, `Info(String)`: stream lifecycle,
   faults, and non-fatal status. `StreamStart` is posted by the source arm before
   a source produces (one per source), bracketing each stream with its `Eos`
   (`GST_MESSAGE_STREAM_START`); `Info` is the third severity below `Warning`,
   element- / app-posted for status that is not a problem (`GST_MESSAGE_INFO`).
-- `DurationChanged { duration_ns }` — the total stream duration became known
+- `DurationChanged { duration_ns }`: the total stream duration became known
   (§4.15's query handle is the pull side; this is the push notification), posted
   by the source arm from `SourceLoop::query_duration` (`GST_MESSAGE_DURATION_CHANGED`).
-- `Tag { tags, program }` — container / stream metadata, posted out of band
+- `Tag { tags, program }`: container / stream metadata, posted out of band
   (`GST_MESSAGE_TAG`). `program` scopes the tags to one MPEG-TS `program_number`
   (an SDT service entry, so a multi-program multiplex reports each service
   separately) and is `None` for a container with a single metadata scope.
-- `StreamTag { stream_id, tags }` — the same, scoped to one elementary stream
+- `StreamTag { stream_id, tags }`: the same, scoped to one elementary stream
   (a Matroska `Tag` whose `Targets` names a `TagTrackUID`). `stream_id` is the
   id that stream has in the posted `StreamCollection`.
-- `NegotiationFailed(NegotiationFailure)` — structured caps conflict naming the
+- `NegotiationFailed(NegotiationFailure)`: structured caps conflict naming the
   responsible element pair (§4.13), posted by the coordinator on a startup or
   mid-stream negotiation failure.
-- `StateChanged { old, new }` and `AsyncDone` — every effective lifecycle
+- `StateChanged { old, new }` and `AsyncDone`: every effective lifecycle
   transition, and the completion of an async `PAUSED` once preroll aggregates
   (§4.14).
-- `Qos { running_time_ns, jitter_ns, processed, dropped }` — a synchronizing
+- `Qos { running_time_ns, jitter_ns, processed, dropped }`: a synchronizing
   sink (`SyncSink`, `WaylandSink`) that has fallen behind the clock drops a late
   frame and reports it, the `GST_MESSAGE_QOS` analog. The drop decision, count,
   and post live in a shared `QosTracker` (`g2g-core::qos`), which also posts the
   running stats periodically (`with_qos_interval_ns`, pipeline-clock cadence),
   so an app sees sink health without waiting for a drop.
-- `Buffering { percent, element }` — a link's fill (0 = underrun, 100 = full),
+- `Buffering { percent, element }`: a link's fill (0 = underrun, 100 = full),
   posted on a quartile crossing via `run_graph_with_bus` by the sink *and*
   transform arms, tagged with the instance name of the element the link feeds
   (self-posting prebuffer sources leave it `None`). Since g2g has no `queue`
   element, this reports the bounded link channel's own occupancy
   (`fill_percent`), the `GST_MESSAGE_BUFFERING` analog.
-- `SegmentDone { position_ns }` — a `SeekFlags::SEGMENT` seek reached its `stop`
+- `SegmentDone { position_ns }`: a `SeekFlags::SEGMENT` seek reached its `stop`
   (`GST_MESSAGE_SEGMENT_DONE`), posted by `SeekController::notify_segment_done`
   when the app attached a bus to the controller (`set_bus`). The take-once
   back-channel (§4.14) is unchanged; this is the push side of the same event, so
   a looping app drives the next loop seek from the bus instead of polling.
-- `StreamStatus { entered, thread_id }` — a streaming thread started or finished
+- `StreamStatus { entered, thread_id }`: a streaming thread started or finished
   (`GST_MESSAGE_STREAM_STATUS` enter / leave), posted only by the thread-per-arm
   runner, one pair per spawned arm thread (the coordinator's included), so an app
   sees the graph's real thread fan-out. `thread_id` hashes the OS `ThreadId`
   (which has no stable numeric form), so only equality is meaningful.
-- `ClockLost` — the elected clock lost the reference it disciplines to
+- `ClockLost`: the elected clock lost the reference it disciplines to
   (`GST_MESSAGE_CLOCK_LOST`); see the clock health monitor in §4.4.
 
 Posting is non-blocking (`try_post`): a control message never stalls the data
@@ -1859,7 +2002,7 @@ the last:
   (`gstwrap element="x264enc bitrate=4000"`, `filesrc location="/my file.ts"`);
   the surrounding quotes are stripped from the value.
 
-- **ML elements by name (`g2g_ml::register`, `launch` feature, M820).** The
+- **ML elements by name (`g2g_ml::register`, `launch` feature).** The
   stock registry is assembled in `g2g-plugins`, which does not depend on
   `g2g-ml`, so an app that wants the ML elements in a launch line calls
   `g2g_ml::register(&mut reg)` on the registry it built. That adds `ortinfer`
@@ -1873,13 +2016,13 @@ the last:
   `WgpuInference` stays out: it is built from weight tensors and shapes, which a
   text line cannot express.
 - **Declarative graph documents (`g2g_plugins::declarative`, `declarative` /
-  `declarative-yaml` features, M578).** A launch string is the ergonomic
+  `declarative-yaml` features).** A launch string is the ergonomic
   one-liner; a JSON / YAML document is the version-controllable, tool-generated,
   comment-carrying form. A document is `nodes` (each `{ id, element, props }`,
   or a `{ id, caps }` capsfilter shorthand) + `edges` (each `{ from, to }` with an
   optional backpressure `policy` / `capacity`). It reaches the graph through
   exactly the launch parser's machinery: roles follow link degree (no inbound =
-  source, several inbound = a `MuxerFactory` muxer, a fan-out node gets the M473
+  source, several inbound = a `MuxerFactory` muxer, a fan-out node gets the
   auto-tee spliced in), and every property value is typed by the target element's
   `PropertySpec` and parsed with the same `PropValue::parse`, so a
   `num-buffers: 30` in JSON means exactly what `num-buffers=30` does in a launch
@@ -1887,8 +2030,7 @@ the last:
   `parse_launch`. Both formats deserialize into one shared `GraphSpec` (a
   format-agnostic serde model), and `build_spec` turns that into the runnable
   `Graph`. `g2g-launch --graph <file>` runs one.
-- **Rhai graph-building scripts (`g2g_plugins::script`, `script-rhai` feature,
-  M579).** Where a document describes a *fixed* graph, a script *computes* one:
+- **Rhai graph-building scripts (`g2g_plugins::script`, `script-rhai` feature).** Where a document describes a *fixed* graph, a script *computes* one:
   the shape can depend on a loop, a parameter, or the environment (fan N cameras
   into a compositor, gate a branch on a flag). The script drives a small builder
   API (`add` / `caps` / `set` / `link` / `link_leaky`) that accumulates into the
@@ -1902,7 +2044,7 @@ the last:
   fixed graph in Rust). `g2g-launch --script <file>` runs one. These are
   construction-time scripts (run once to emit a graph); the per-frame
   `scriptelement` (§4.16, below) is the runtime complement.
-- **Animated properties (`g2g-core::controller`, `runtime` feature, M882).** The
+- **Animated properties (`g2g-core::controller`, `runtime` feature).** The
   layers above set a property once, at build time; a controller makes it a
   function of stream time, the `gst-controller` analog. A `ControlSource` is a
   keyframed curve over `(pts_ns, value)` pairs, either `Step` (hold each keyframe)
@@ -1954,7 +2096,7 @@ would be a use-after-free with no back-pointer to catch it. The whole path is
 exercised out-of-tree by `g2g-plugins/tests/fixtures/example-plugin` +
 `tests/plugin_loader_dlopen.rs`.
 
-**Plugin ABI v2: the cross-toolchain tier (M1010).** The version lock above is
+**Plugin ABI v2: the cross-toolchain tier.** The version lock above is
 the price of passing Rust types across `dlopen`. v2 is the other trade: a frozen
 `repr(C)` boundary (`g2g-plugin::abi`, header `g2g-plugin/include/g2g_plugin_v2.h`)
 that carries a smaller surface but loads into a host built by a different
@@ -2010,7 +2152,7 @@ FFI-safe `Future` (`FfiPoll` / `FfiContext` / a three-pointer future struct), so
   refused rather than silently dropping an element. Slots are never freed,
   matching the loaded-forever library.
 
-**Detached signatures (M1061).** A host built with the `plugin-signing` feature
+**Detached signatures.** A host built with the `plugin-signing` feature
 can be handed a set of trusted Ed25519 public keys, from
 `$G2G_PLUGIN_TRUSTED_KEYS` (a `:`-separated list of key files),
 `g2g-inspect --trusted-key`, or `TrustedKeys` in code. An empty set is the
@@ -2094,7 +2236,7 @@ either of two paths:
   while outputs that run in parallel (the separation family's stems) leave it
   unset and share the anchor's. `g2g.PTS_NONE` (`FrameTiming::PTS_NONE`, §4.4)
   emits a buffer with no presentation time, which a sink presents on arrival.
-- **CUDA device memory (M984).** A `MemoryDomain::Cuda` frame has no CPU bytes, so
+- **CUDA device memory.** A `MemoryDomain::Cuda` frame has no CPU bytes, so
   its two semi-planar planes are described to
   `g2g_process_cuda(luma, chroma, width, height, meta)` as `g2g.CudaPlane` objects
   exposing `__cuda_array_interface__` v3: luma `(height, width)` and interleaved
@@ -2118,7 +2260,7 @@ either of two paths:
   for its shape gets `UnsupportedDomain` for a GPU frame rather than a silent
   readback: `g2g-python` links no CUDA, so a CPU-only element needs an explicit
   `cudadownload` upstream.
-- **The batch and produce shapes (M986).** A GPU batch reaches a hosted aggregator
+- **The batch and produce shapes.** A GPU batch reaches a hosted aggregator
   as `g2g_process_cuda_batch(planes, width, height, meta)`, one `(luma, chroma)`
   pair per contributing input, so a batched detector reads every stream's decoded
   surface in place; the anchor flows on device-resident. A hosted *source* runs the
@@ -2131,7 +2273,7 @@ either of two paths:
   so the memory outlives it; the source stamps timing, and reports its
   `cuda_context` through an optional attribute for a downstream consumer that must
   push it.
-- **DLPack (M986).** The same plane also answers `__dlpack__` /
+- **DLPack.** The same plane also answers `__dlpack__` /
   `__dlpack_device__`, for the frameworks that prefer it (`torch.from_dlpack`,
   `cupy.from_dlpack`). It carries a device and stream contract CAI does not: the
   device is `(kDLCUDA, 0)`, since the CUDA domain carries the producing context but
@@ -2146,7 +2288,7 @@ either of two paths:
   deleter itself.
 
 The frame is read where it lies and forwarded untouched, so a hosted transform
-carries one memory domain on both pads (M985): System, or CUDA under
+carries one memory domain on both pads: System, or CUDA under
 `cuda-frames=true`, the property that says the hosted class reads device memory.
 Declaring the same domain on input and output keeps the relation honest, since the
 domain a frame leaves in is the one it arrived in. Two things follow. The
@@ -2161,7 +2303,7 @@ too, so a launch-built `pyelement` can accept the NV12 a decoder emits rather th
 only its RGBA default.
 
 One worker thread per element is the free-threading unit, and that is measured
-rather than assumed (M988, the ignored `m988_gil_offload` test, whose module docs
+rather than assumed (the ignored `m988_gil_offload` test, whose module docs
 carry the invocation for each interpreter). Four hosted elements each running one
 compute-bound pure-Python callback recover 3.6x of the ideal 4x on free-threaded
 CPython 3.14 (`sys._is_gil_enabled()` false in-process) and 0.9x on stock 3.14,
@@ -2177,13 +2319,13 @@ one, and `link_capacity` on those links has to absorb the wait while the other
 elements hold the GIL (see the `g2g-python` `host` module docs, next to the worker
 design it follows from).
 
-**Runtime scripting (`scriptelement`, `script-rhai` feature, M580).** The
+**Runtime scripting (`scriptelement`, `script-rhai` feature).** The
 construction scripts above run once to emit a graph; `scriptelement` is the
 per-frame complement: a raw-video transform whose `process(frame)` is a Rhai
 function, the pure-Rust cousin of the `pyelement` CPython host (§4.x). It
 negotiates as a same-format passthrough (`DerivedOutput` constraint, like
 `pyelement`), and on each `System`-memory frame hands the script a **zero-copy**
-handle (`FrameBuf`, M581): the script indexes the live buffer in place
+handle (`FrameBuf`): the script indexes the live buffer in place
 (`frame[i] = 255 - frame[i]`) and reads `frame.width` / `.height` / `.format` /
 `.pts` / `.sequence` / `.len`, no bulk copy in or out. The copy-free path is a
 custom-type receiver rather than a byte blob because Rhai clones a *value*
@@ -2193,7 +2335,7 @@ is passed by reference; the handle reaches the buffer through an atomic guard
 `Send`/`Sync` with no `unsafe impl` and a handle kept past the call reads/writes
 nothing (a clean error) instead of dereferencing freed memory. Per-pixel `frame[i]`
 is interpreted (fine for logic / metadata / small regions), so whole-frame work
-goes through native bulk methods (`invert` / `fill` / `apply_lut`, M582) the script
+goes through native bulk methods (`invert` / `fill` / `apply_lut`) the script
 calls once and Rust loops at native speed, the control-plane / data-plane split.
 Rhai is synchronous pure Rust, so the call runs inline on the pipeline thread (no
 GIL, hence no worker-thread isolation the Python host needs);
@@ -2203,7 +2345,7 @@ registered by name, so `scriptelement script=... ! ...` parses in a launch line 
 a declarative document. A GPU-resident frame yields `UnsupportedDomain` (a script
 cannot touch device memory).
 
-`scriptrouter` (M583) is the fan-out sibling: a Rhai-scripted routing demux (a
+`scriptrouter` is the fan-out sibling: a Rhai-scripted routing demux (a
 `MultiOutputElement` registered via `register_demux`, so `scriptrouter name=r
 r.0 ! …  r.1 ! …` builds a 1-to-N node). Its `route(frame)` returns the output
 port each `DataFrame` goes to: a single index (negative = drop), or an **array**
@@ -2243,16 +2385,14 @@ chunks) and emit one image per buffer with the geometry its header declares. The
 auto-plug chain splices the framer ahead of the decoder, which is what lets a
 `.jpg` be typed by content at all.
 
-**Encoding profiles.** The encode direction of `decodebin` is `encodebin`
-(M1089), and it is a parse-time macro for the same reason: bins are flattened
+**Encoding profiles.** The encode direction of `decodebin` is `encodebin`, and it is a parse-time macro for the same reason: bins are flattened
 here. `profile="<container-caps>:<stream-caps>[:<stream-caps>...]"` (gst's own
 string form) expands into one encoder per stream plus the muxer for the
 container, chosen through two registry hooks the plugins crate fills in
 (`set_encoder_provider` / `set_muxer_provider`), so the choice is a table of
 launch names rather than a search: the auto-plug candidate set is decode-only,
 and an encoder is picked by codec, not found by walking caps. Anything the
-profile does not name negotiates, and what it does name is applied by an element
-(M1097): a stream part that pins a `width` / `height` splices `videoscale`, one
+profile does not name negotiates, and what it does name is applied by an element: a stream part that pins a `width` / `height` splices `videoscale`, one
 that pins a `framerate` splices `videorate`, and a `rate` or `channels` sets the
 `audioresample` / `audioconvert` the audio side already carries. A pinned
 `bitrate` is a property on the encoder, refused when that encoder declares no
@@ -2261,7 +2401,7 @@ never claims a setting the pipeline does not apply. The bin's `name=`
 moves to the muxer, which is what lets a second branch reach it as `e.` through
 the ordinary fan-in path; that branch gets the encoder for its own kind of
 input. `transcodebin` is rewritten to `decodebin ! encodebin` before either
-expands. The expansion also splices the converter an encoder needs (M1091),
+expands. The expansion also splices the converter an encoder needs,
 asked of the encoder itself: a profile is written against codecs, so the pixel
 format or sample rate a source happens to produce is the macro's problem, not
 the caller's.
@@ -2321,7 +2461,7 @@ single-input launch element and as a fan-in muxer, so the text parser
 picks `tsmux::TsMux` for one input and `tsmuxn::TsMux` for several by link degree
 (`v.! m.  a.! m.  mpegtsmux name=m`), mirroring gst's request sink pads.
 
-Tags ride TS through its standard carriers (M872): the muxers' `with_tags` /
+Tags ride TS through its standard carriers: the muxers' `with_tags` /
 `with_track_tags` write the SDT `service_descriptor` (service name from
 `Tag::Title`, provider from the ffprobe-spelled `service_provider` key) and a
 per-stream ISO-639 language descriptor in the PMT; the demuxers CRC-check and
@@ -2329,7 +2469,7 @@ parse both and post `BusMessage::Tag` / `StreamTag` on the `mpegts-pid-{pid}`
 ids, ffmpeg-validated both directions. Nothing else rides TS: it has no
 free-form tag element.
 
-Service text is per program (M878): `with_program_tags(program, tags)` on the
+Service text is per program: `with_program_tags(program, tags)` on the
 fan-in muxer gives a `prog-map` program its own SDT entry, `with_tags` names
 whichever programs do not, and a program's `Tag::Language` is the default for its
 streams (global, then program, then track). The SDT describes the whole
@@ -2337,7 +2477,7 @@ multiplex, so a demuxer posts one `BusMessage::Tag` per service it names, each
 carrying that service's `program_number`, whichever program the element routes.
 
 AV1 rides TS on the same private PES (stream_type 0x06) the KLV carriage uses,
-told apart by its `registration_descriptor` (M1049): AV1 has no `stream_type` of
+told apart by its `registration_descriptor`: AV1 has no `stream_type` of
 its own, so a 0x06 stream is AV1 only when its PMT entry names one. The mux writes
 the 'AV1G' format_identifier and the demux accepts that and the AOM spec's
 'AV01', because only 'AV1G' has a reader: GStreamer's `mpegtsmux` / `tsdemux`
@@ -2352,7 +2492,7 @@ GStreamer: a `svtav1enc ! mpegtsmux` stream demuxes to units ffmpeg's `obu`
 demuxer decodes at full size, and `tsdemux ! av1parse ! dav1ddec` decodes the g2g
 mux's output.
 
-The DVB EIT (PID 0x12) adds what a service is showing (M1049): the demuxers parse
+The DVB EIT (PID 0x12) adds what a service is showing: the demuxers parse
 the present/following table (`table_id` 0x4E, sections 0 and 1) and post each
 service's `short_event_descriptor` name and text as a `BusMessage::Tag` scoped to
 its `program_number`, under the `event_name` / `event_text` and
@@ -2363,10 +2503,10 @@ one last accepted for the same `(service_id, table_id, section_number)`, and a
 table repeating itself costs nothing; unlike them a section routinely outgrows one
 packet, so sections reassemble across packets behind a `table_id` filter that
 keeps the other-transport-stream tables sharing the PID out of the buffer. Event
-text goes through the same annex A decoder as the SDT names, which now also
+text goes through the same annex A decoder as the SDT names, which also
 decodes the UTF-8 character table.
 
-Each event's timing rides the same tags (M1056): the 5-byte `start_time` (a
+Each event's timing rides the same tags: the 5-byte `start_time` (a
 Modified Julian Date and BCD hh:mm:ss, EN 300 468 Annex C) posts as `event_start`
 / `next_event_start` in seconds since the Unix epoch, UTC, and the BCD `duration`
 as `event_duration` / `next_event_duration` in seconds, each omitted when the
@@ -2450,7 +2590,7 @@ Interest event (`b-m-p-s-p-i` at the target location or frame center, linked
 to the platform track by `<link relation="p-p">`, jmisb's `KlvToCot`
 conventions). `st2022fec` is SMPTE 2022-1 (Pro-MPEG COP3) FEC for TS over
 RTP: the wire format only, since the 2D row / column XOR algebra and the
-receiver bookkeeping now live once in `ulpfec` and serve `flexfec` and this
+receiver bookkeeping live once in `ulpfec` and serve `flexfec` and this
 alike. It derives each repair's protected set from that repair's own
 SNBase / offset / NA rather than learning global L / D, so a mid-stream
 geometry change still decodes, and it refuses a repair whose type field is not
@@ -2488,7 +2628,7 @@ without a downstream bitstream parser. An H.264 / H.265 track's blocks are
 converted from the container-native AVCC / HVCC length-prefixed framing
 (declared by the `avcC` / `hvcC` `CodecPrivate`, whose `lengthSizeMinusOne`
 sets the prefix width) to the Annex-B framing the pipeline assumes, with the
-config record's parameter sets prepended on keyframes (M766, ffmpeg's
+config record's parameter sets prepended on keyframes (ffmpeg's
 `h264_mp4toannexb` discipline); the whole-block length walk is validated
 exactly, so a nonstandard Annex-B block passes through unchanged instead of
 being mis-framed. WebM (the VP8/VP9/AV1 + Opus subset) is the browser-delivery motivator. Block
@@ -2507,12 +2647,12 @@ Segment data start, which the parser tracks.) The MKV muxer (`matroskamux`: `Mat
 unknown-size Segment, Tracks, and one Cluster per frame, with the `webm` DocType
 for the WebM codec subset. Scope is one Segment / one track with definite-size
 Clusters (multi-track A/V muxing is the sibling `mkvmuxn`). Both muxers also
-have a `seekable` (two-pass) mode (M770): the element buffers the file and
+have a `seekable` (two-pass) mode: the element buffers the file and
 finalizes it at EOS with a front `SeekHead` (fixed-layout entries indexing
 Info / Tracks / Chapters / Tags / Cues, the Cues position patched in place once known), so
 the file seeks from byte 0 without reading past the Clusters; mutually
 exclusive with `streamable`, and the default streaming output is unchanged. The
-same finalize fills an `Info` `Duration` reserved beside them (M794): the value
+same finalize fills an `Info` `Duration` reserved beside them: the value
 is the highest block end across tracks, each block's timestamp plus its own
 duration rounded to a `TimestampScale` tick, which is how ffmpeg arrives at the
 number it writes, so a remux reports the length ffmpeg's own file does. Only
@@ -2520,7 +2660,7 @@ this mode can carry a duration at all, since a streaming caller has emitted its
 header long before the total is known, and a live stream has no length to
 declare.
 The Segment `Tags` element carries metadata in both directions, per file and per
-track (M787): a `Tag` whose `Targets` names a `TagTrackUID` scopes to that track,
+track: a `Tag` whose `Targets` names a `TagTrackUID` scopes to that track,
 and a nested `SimpleTag` flattens to a `parent/child` key. The muxers take
 per-track metadata from `with_track_tags` and write each track's `TrackUID` in
 its `TrackEntry`; the demuxers map a parsed UID back to its track and post the
@@ -2530,11 +2670,11 @@ exception: they live in the `TrackEntry` itself as `Name` / `Language`
 (`LanguageBCP47` preferred when both are present), which is where ffmpeg writes
 them and where a player reads them, so the muxers route `Tag::Title` /
 `Tag::Language` there instead of writing a `SimpleTag`, and the demuxers merge
-both sources into one `StreamTag` per stream (M788). A missing `Language` stays
+both sources into one `StreamTag` per stream. A missing `Language` stays
 absent rather than becoming the spec's implicit `eng`.
 
 Chapters (the table of contents, GStreamer's `GstToc`) travel the same
-out-of-band route in both containers (M1046). `g2g_core::Chapter` is the shared
+out-of-band route in both containers. `g2g_core::Chapter` is the shared
 shape: a stream-time start in nanoseconds, an optional end, a title, an optional
 language, and nested sub-chapters. A demuxer posts what it parsed as
 `BusMessage::Chapters` (once, like the tags), so an application builds a chapter
@@ -2561,7 +2701,7 @@ headers), and `OggDemux` emits the Opus audio packets as `Caps::Audio{Opus}` wit
 the channel count refined from `OpusHead`. The container is auto-detectable
 (`typefind` "OggS", `filesrc bytestream-format=auto`).
 
-Grouped multi-stream Ogg is handled per serial (M790). A file opens with one
+Grouped multi-stream Ogg is handled per serial. A file opens with one
 beginning-of-stream page per logical bitstream before any other page (RFC 3533
 §4), and the parser keeps an `OggLogicalStream` for each: its own codec mapping,
 headers, packets and granule anchors. A serial joins only from a page in that
@@ -2601,7 +2741,7 @@ also the last: its granule is then the end of the stream and says nothing about
 the head, so the clip is the priming packet's own `blocksize / 2`.
 
 MP4 carries the same two facts in its own spelling, and both directions convert
-to the in-band convention (M791). The `dOps` OpusSpecificBox holds an
+to the in-band convention. The `dOps` OpusSpecificBox holds an
 `OpusHead`'s fields big-endian, so the demuxers rebuild one from it and forward
 it ahead of the audio (`opusparse::opus_head_from_dops`, validated field by
 field: unknown version, zero channel count or truncated channel-mapping table
@@ -2616,7 +2756,7 @@ Opus `trak` also carries the `edts`/`elst` the Opus-in-ISOBMFF binding requires,
 `media_time` = pre-skip.
 
 Which duration a reader then reports depends on the layout, so `Mp4MuxN` writes
-both (M793, the `fragmented` property, default `true`). Fragmented is the
+both (the `fragmented` property, default `true`). Fragmented is the
 streamable one: `ftyp`+`moov` up front, a `moof`+`mdat` per fragment, empty
 sample tables and zero header durations. ffmpeg derives such a file's duration
 by summing the `trun` sample durations and applies an edit list only as a
@@ -2628,8 +2768,7 @@ a `moov` are emitted together at EOS, with real `stts` / `ctts` / `stss` /
 `stsc` / `stsz` / `stco` tables (one sample per chunk, ordered by decode
 timestamp) and real `mvhd`/`tkhd`/`mdhd` durations. That decode timestamp is the
 frame's own: `Mp4DemuxN` reads the source's `ctts` and carries `dts_ns` beside
-`pts_ns`, so a reordered (B-frame) stream's composition offsets survive a remux
-(M972). A frame with no decode timestamp of its own, or one past its PTS, which
+`pts_ns`, so a reordered (B-frame) stream's composition offsets survive a remux. A frame with no decode timestamp of its own, or one past its PTS, which
 `ctts` version 0 cannot express, decodes when it presents. That is enough for ffmpeg to
 apply the edit, so the reported duration is the trimmed presentation length
 exactly. The cost is holding the movie in memory, so a live or long capture
@@ -2643,7 +2782,7 @@ Compressed audio negotiates with the `0/0` "unknown until parsed" caps, so
 remuxed audio track would declare a zero `mdhd` timescale.
 
 Matroska is the third spelling of the same two facts, and converts to the same
-in-band convention (M792). The pre-skip is the `CodecPrivate` `OpusHead` itself,
+in-band convention. The pre-skip is the `CodecPrivate` `OpusHead` itself,
 which the demuxers forward ahead of the audio (validated as a real header first),
 plus a `CodecDelay` on the TrackEntry, the ns form of the same count, which
 `MkvMuxN` derives from the header it is about to write and pairs with the
@@ -2658,7 +2797,7 @@ packet's own length is needed to turn a tail discard into a kept duration, the
 conversion reads the Opus TOC byte and applies to Opus only.
 
 The Ogg muxer (`oggmux`: `g2g-plugins::ogg::OggPageWriter` + the `OggMux`
-element) is the inverse path, on the same three mappings (M789). The writer
+element) is the inverse path, on the same three mappings. The writer
 laces packets into pages (255-byte segments, continuation pages past the
 255-segment limit, the RFC 3533 CRC-32 with polynomial `0x04c11db7` and no
 reflection), holding the last packet back so the end-of-stream flag always has a
@@ -2675,7 +2814,7 @@ the input declared when every packet is timed. That last bound is what carries a
 source's end-of-stream trim through a remux, so ffmpeg decodes a remuxed Opus /
 Vorbis / FLAC stream to the source's samples bit for bit.
 
-`oggmuxn` is the fan-in form (M790): one `OggStreamMux` per input pad, each its
+`oggmuxn` is the fan-in form: one `OggStreamMux` per input pad, each its
 own logical bitstream with its own serial, packets interleaved by PTS through
 the same `InputAggregator` merge the other multi-track muxers use. Grouping
 forces the page order, which is why the per-stream header writing is split in
@@ -2711,7 +2850,7 @@ and `FlvDemux` forwards the H.264 (AVC) video and AAC audio media access units
 with their millisecond timestamps (PTS from the video tag's signed
 composition-time offset, DTS from the tag header), selected per `FlvStream`
 (h264 | aac, default h264) like `TsDemux`. The sequence-header tags are the
-codec-config side channel (M662): the parser retains the
+codec-config side channel: the parser retains the
 `AVCDecoderConfigurationRecord` / `AudioSpecificConfig`, and the element uses
 them the way the MP4 demuxers do, re-framing the AVCC access units to Annex-B
 (honouring the `avcC` NAL length-prefix width) with the SPS/PPS prepended
@@ -2732,7 +2871,7 @@ coverage spans the major containers.
 
 The MPEG program stream demuxer (`mpegpsdemux`, `Caps::ByteStream{MpegPs}`) is
 the `.mpg` / `.vob` read path: VCD-era MPEG-1 program streams and DVD MPEG-2 ones
-through one element (M929). `g2g-plugins::psdemux::PsDemuxer` syncs to pack
+through one element. `g2g-plugins::psdemux::PsDemuxer` syncs to pack
 headers (`00 00 01 BA`, both the MPEG-2 `01`-marker layout with its stuffing and
 the flat 8-byte MPEG-1 one) and reads the PES packets between them; `PsDemux` /
 `PsDemuxN` wrap it with a `PsStream` selection (`Mpeg2` video, `Mp2` audio, `Ac3`,
@@ -2760,11 +2899,10 @@ MPEG-TS needs none of it. Audio and AC-3 are self-syncing and are grouped per
 timestamped packet instead, matching what `TsDemux` emits.
 
 A DVD stamps roughly one PES packet per GOP, so most pictures arrive with no
-timestamp of their own; carrying the last stamp forward gave a dozen frames one
-shared PTS, which a pacing sink plays as a burst then a freeze (the M934 bug,
-found on a real disc as "stutters every half second"). The demuxer instead
-synthesizes each unstamped picture's PTS as `gop_base + temporal_reference *
-frame_period`: the picture header's `temporal_reference` is its display index
+timestamp of their own. Carrying the last stamp forward would give a dozen
+frames one shared PTS, which a pacing sink plays as a burst then a freeze, so
+the demuxer synthesizes each unstamped picture's PTS as `gop_base +
+temporal_reference * frame_period`: the picture header's `temporal_reference` is its display index
 within the GOP, so the arithmetic stays exact across B-frame reordering, a real
 PES PTS re-anchors the base (drift never outlives a GOP), and an unstamped GOP
 header advances it by the span of the GOP just closed. Unstamped DTS advances
@@ -2783,7 +2921,7 @@ DTS substreams, the program stream map, a PS muxer, and seeking.
 through `TsStream::Mpeg2`, and `au_is_keyframe` reads its sync points (an
 I-picture, or a sequence / GOP header).
 
-`mpegvideoparse`, `mpeg4videoparse` and `vc1parse` (M1095) are the standalone
+`mpegvideoparse`, `mpeg4videoparse` and `vc1parse` are the standalone
 parsers for the start-code elementary streams that are not NAL streams, for a
 launch line that feeds a decoder from a raw `.m2v` / `.m4v` / `.vc1` file rather
 than through a demuxer that already frames the video. They share
@@ -2796,8 +2934,8 @@ the per-codec start-code classification, geometry parse and keyframe rule.
 Unlike Annex-B the prefix is exactly three bytes, so the scanner never matches
 `00 00 00 01`: a header ending in a zero byte would otherwise lose it.
 `mpegvideoparse` reads the same `mpeg2video::parse_sequence_header` the program-
-and transport-stream demuxers do, now widened to apply the sequence extension's
-size and frame-rate extensions and to derive the sample aspect ratio.
+and transport-stream demuxers do, applying the sequence extension's
+size and frame-rate extensions and deriving the sample aspect ratio.
 `mpeg4videoparse` reads the VOL header and carries gst's `config-interval`
 (the VOS / VO / VOL prefix, re-sent before a keyframe that lacks it).
 
@@ -2814,7 +2952,7 @@ three headers signal is surfaced as the read-only `pixel-aspect-ratio` property
 rather than in caps.
 
 Disc content is usually interlaced, and presenting its woven frames as-is combs
-on motion. `deinterlace` (M932) is the CPU filter that undoes it: a single-rate
+on motion. `deinterlace` is the CPU filter that undoes it: a single-rate
 yadif port (an edge-directed spatial interpolation clamped to a temporal window
 built from the previous and next frames), plus the cheaper `linear` and `blend`
 methods, over I420 / NV12 / RGBA / BGRA at unchanged format and geometry, one
@@ -2823,7 +2961,7 @@ raw frames, including the 3-column border where ffmpeg drops the directional
 search. Field order is assumed top-field-first (ffmpeg's default for a stream
 that declares nothing).
 
-Interlacing is signalled in the caps (M935): `Caps::RawVideo` carries an
+Interlacing is signalled in the caps: `Caps::RawVideo` carries an
 `Interlace` field (`Any` / `Progressive` / `Interleaved`), where the `Any`
 wildcard intersects with anything, survives `fixate`, and reads as "progressive
 unless declared", so the field never blocks a solve and nearly every caps site
@@ -2832,7 +2970,7 @@ flag and latches `Interleaved` output caps on the first interlaced picture
 (sticky for the stream, so telecine content cannot flap `CapsChanged`), covering
 interlaced MPEG-2 over any container and interlaced H.264 alike. The element's
 `mode` property acts on that declaration: `interlaced` (the default) always
-weaves, the pre-M935 contract for hand-written lines whose upstreams declare
+weaves, the contract for hand-written lines whose upstreams declare
 nothing; `auto` weaves only a caps-declared `Interleaved` stream in a format the
 kernels handle and otherwise forwards packets untouched, with negotiation kept
 transparent (any raw video passes) so inserting it never narrows a branch; and
@@ -2840,8 +2978,9 @@ transparent (any raw video passes) so inserting it never narrows a branch; and
 PS / HLS, plain fan-out and the subtitle / closed-caption / DVD-subpicture
 overlay variants) inserts `deinterlace mode=auto` after the decoder, GStreamer's
 playbin `deinterlace` flag parity: a progressive stream pays only a forwarding
-hop, and the M932 container-probe decision (`progressive_sequence` in the MPEG-2
-sequence extension) is superseded by the decoder's own per-picture report.
+hop, and the interlacing verdict comes from the decoder's own per-picture
+report rather than a container probe (`progressive_sequence` in the MPEG-2
+sequence extension).
 
 Adaptive streaming sits one layer above these demuxers: an HTTP byte source feeds
 a playlist/manifest-driven source that fetches media segments and hands them to
@@ -2856,7 +2995,7 @@ mid-stream underrun (window empty, network not ready), so an application can
 pause until `100` and show a buffering indicator on a stall. The window never
 grows past the target, and `0` (the default) streams straight through. The
 segment loops (`hlssrc` / `dashsrc`) carry the duration-keyed sibling
-(`prebuffer-ms` + `with_bus`, M819): a `segprebuf::SegmentPrebuffer` window the
+(`prebuffer-ms` + `with_bus`): a `segprebuf::SegmentPrebuffer` window the
 loop fetches into while below its duration target (summed `#EXTINF` / MPD
 segment durations) and emits from otherwise, posting the same quartile
 `Buffering` levels during the startup / post-seek fill and staying silent in
@@ -2910,15 +3049,15 @@ For fMP4/CMAF, SAMPLE-AES maps to the `cbcs` Common Encryption scheme
 ranges are AES-128-CBC decrypted (IV reset per subsample, chaining over the
 encrypted blocks only) using the same shared key handle `HlsSrc` fills. The
 sibling schemes decrypt through the same machinery: `cenc` (whole-range AES-CTR),
-`cbc1`, and `cens` (M867: pattern AES-CTR, one IV per sample with the counter
+`cbc1`, and `cens` (pattern AES-CTR, one IV per sample with the counter
 advancing only over encrypted blocks, pattern restarting per protected range).
 Sample groups can re-key mid-fragment: a `traf` `sbgp`/`sgpd` (`seig`) overrides
-the `tenc` defaults per sample run, and M867 added the movie-level `seig` table
-(indices below 0x10001 resolve against the track's `stbl` table, fragment-local
-ones above it, per 14496-12, strictly scoped). A subsample map that overruns its
+the `tenc` defaults per sample run, and the movie-level `seig` table resolves
+alongside it (indices below 0x10001 resolve against the track's `stbl` table,
+fragment-local ones above it, per 14496-12, strictly scoped). A subsample map that overruns its
 sample is an error, never a partial decrypt. A clear
 track stays a normal demux; an encrypted track with no key fails loud.
-`hlssink::HlsSink` (`std`) is the publishing side (M896): it cuts the byte stream
+`hlssink::HlsSink` (`std`) is the publishing side: it cuts the byte stream
 a muxer feeds it into media segment files and writes an `.m3u8` media playlist
 beside them, rendered by the `hls` parser's `write_media` twin. The muxer stays a
 separate element (`... ! tsmux ! hlssink`, `... ! mp4mux ! hlssink`), so one sink
@@ -2979,7 +3118,7 @@ fetch delivers. Byte-range segments and a set `prebuffer-ms` (which owns emissio
 order) stay on the whole-response path.
 
 **Still images** are the smallest case of a byte stream carrying coded frames, and
-they take the same shape as a container (M1050). A PNG or WebP file is
+they take the same shape as a container. A PNG or WebP file is
 `CompressedVideo{Png}` / `CompressedVideo{WebP}`, one access unit per file, so
 `pngdec` / `webpdec` are ordinary decoders that `decodebin` auto-plugs and a
 still is one frame of a video stream rather than a separate kind of media.
@@ -3177,7 +3316,7 @@ holds the decoders. `extract_cc_data` mines the `(cc_type, b0, b1)` caption
 triples from an access unit's SEI `user_data_registered_itu_t_t35` (ATSC A/53
 `GA94` `cc_data`) messages for H.264 (NAL type 6) and H.265 (prefix/suffix SEI),
 and from picture `user_data` blocks (`00 00 01 B2`) for MPEG-1 / MPEG-2, the same
-ATSC block without the T.35 prefix (M963); every count / length / offset
+ATSC block without the T.35 prefix; every count / length / offset
 bounds-checked so a malformed block yields no triples.
 `Cea608` decodes the legacy line-21 path (`cc_type` 0/1): a 15x32 character grid
 with pop-on / roll-up / paint-on modes, PAC row + indent positioning, the
@@ -3407,7 +3546,7 @@ cover it drop the object, an object larger than the video or past
 `MAX_OBJECT_PIXELS` is never allocated, and a truncated segment stops the walk
 with the display sets that did parse intact.
 
-The write paths mirror those two carriages (M927). A `Caps::SubPicture` input pad
+The write paths mirror those two carriages. A `Caps::SubPicture` input pad
 on either Matroska muxer becomes an `S_VOBSUB` or `S_DVBSUB` track, and a
 `Caps::SubPicture{DvbSub}` pad on either TS muxer becomes a private (0x06) stream
 whose PMT entry carries the `subtitling_descriptor` naming its language, type and
@@ -3428,7 +3567,7 @@ finds the segment run by walking its headers rather than trimming bytes. Subtitl
 blocks, bitmap as well as text, are written as a `BlockGroup` so a cue's display
 window rides its `BlockDuration`. Both Matroska muxers take these pads, the
 fan-in `MkvMuxN` beside its A/V tracks and the single-track `MkvMux` on its one
-sink pad (M928), so a sidecar subtitle file muxes over one link
+sink pad, so a sidecar subtitle file muxes over one link
 (`vobsubsrc location=movie.idx ! matroskamux ! filesink`) rather than the `name=m`
 shape. The mapping they share (the codec each format writes, the config-blob
 recognition, the block framing, the `S_TEXT/ASS` script header) lives in
@@ -3489,23 +3628,22 @@ and each maps to a terminal runner from the fan-in / fan-out family (§4.13.6):
 The one-track sink/source keep the `Rtc` on a spawned task and hand access units
 over a bounded channel, so the element itself never touches the `Rtc` and stays
 `Send`. The multi-track session sink is a terminal `MultiInputElement` (no
-downstream sink — the network is the destination); `run_fanin_session` fans N
+downstream sink, the network is the destination); `run_fanin_session` fans N
 sources into it over one tagged `(input, packet)` channel. The session source is
 the mirror: a terminal `MultiOutputSource` (0 inputs → N outputs) driven by
 `run_fanout_session` into N sinks.
 
-**Simulcast (M710-M723).** Send-side simulcast lives in `webrtc_simulcast.rs`,
-shared by `LiveKitSink` and (M723) `WebRtcSessionSink`: `SimulcastPads` (the
+**Simulcast.** Send-side simulcast lives in `webrtc_simulcast.rs`,
+shared by `LiveKitSink` and `WebRtcSessionSink`: `SimulcastPads` (the
 video-layer + audio pad model, pad 0 = highest resolution), rid assignment
 (`f`/`h`/`q` high-to-low), the one-m-line `a=rid`/`a=simulcast` offer,
 per-(mid,rid) `KeyframeRoutes`, and the BWE `LayerAllocator` (whole-layer
-on/off with time hysteresis; per-layer targets, M722). The LiveKit path is
-browser-validated end to end; the WHIP path is validated against Broadcast Box
-(M786), the reference peer for client-simulcast ingest (mediamtx cannot ingest
+on/off with time hysteresis; per-layer targets). The LiveKit path is
+browser-validated end to end; the WHIP path is validated against Broadcast Box, the reference peer for client-simulcast ingest (mediamtx cannot ingest
 it, LiveKit's WHIP ingress transcodes one layer): a three-layer publish shows up
 server-side as three rids with independently growing packet counts.
 
-**Session sources as DAG nodes (M727).** The receive-side mirror:
+**Session sources as DAG nodes.** The receive-side mirror:
 `NodeKind::FanoutSrc(n)` via `Graph::add_fanout_src` runs a terminal
 `MultiOutputSource` (0 inputs, N outputs it generates itself) as a graph node,
 its ports solved from `output_caps` (the demux constraint shape with the input
@@ -3515,7 +3653,7 @@ it into `parse_launch` (`livekitsrc name=s url=...  s. ! ...  s. ! ...`), with
 a properties surface added to `MultiOutputSource` for the launch knobs.
 Validated live: `LiveKitSrc` as a graph node subscribing on a real server.
 
-**Session sinks as DAG nodes (M713).** A terminal fan-in is also a first-class
+**Session sinks as DAG nodes.** A terminal fan-in is also a first-class
 graph node, `NodeKind::FaninSink(n)` via `Graph::add_fanin_sink`, so a transform
 chain can feed each session pad instead of a bare source: the live encoder fan
 graph `src -> tee -> videoscale -> ffmpegenc` per simulcast layer ends on
@@ -3533,7 +3671,7 @@ silently discarded).
 
 **The duplex shape.** Bidirectional sendrecv needs an element that is *at once* a
 sink (for the tracks it publishes) and a source (for the tracks it receives) over
-**one** connection — which neither the fan-in nor the fan-out session runner could
+**one** connection, which neither the fan-in nor the fan-out session runner could
 express. `MultiDuplexSession` is that union: N send inputs **and** M recv outputs,
 driven by `run_duplex_session` (the union of the two session runners). A single
 `run(inbound, out)` owns the connection and `select`s over the inbound send
@@ -3542,7 +3680,7 @@ send and recv halves therefore share `&mut self` directly with **no detached
 task**, unlike the send-only session which spawns the `Rtc` onto its own task to
 dodge `process` / run-loop aliasing.
 
-**Growing the pad count live (M1014).** `run_duplex_session_dynamic` is the
+**Growing the pad count live.** `run_duplex_session_dynamic` is the
 renegotiating sibling: its arms live under a `dynamic_join`, so pads are not
 fixed at build time. A local track enters through `DynamicDuplexHandle::
 add_send_track` (index reserved and enqueued under one lock, so the session
@@ -3556,25 +3694,24 @@ factory for the element that drains it, a factory `None` leaving the port
 counted as drops. Backpressure on the runner's internal add channels delays the
 attach rather than failing the run.
 
-**Signaling.** WHIP (egress) and WHEP (ingress) are the same wire move — an
+**Signaling.** WHIP (egress) and WHEP (ingress) are the same wire move: an
 `application/sdp` POST of the local offer that returns the remote answer (reqwest,
 `webrtc_util::post_sdp`); the media server is the relay in the middle, so there is
 no peer-to-peer mode for WHIP/WHEP. WHIP/WHEP are unidirectional by spec, so
 sendrecv cannot use them: the duplex session instead exchanges SDP **directly**
 between two peers over an `SdpChannel` (an in-process offer/answer transport for a
-P2P loopback; a real SFU signaller — LiveKit, etc. — plugs into the same seam).
-Mid-session renegotiation (M729): a cloneable `DuplexControl` toggles a track,
+P2P loopback; a real SFU signaller (LiveKit, etc.) plugs into the same seam).
+Mid-session renegotiation: a cloneable `DuplexControl` toggles a track,
 batching direction changes (SendRecv <-> Inactive) into one re-offer over the
 `SdpChannel`; the peer answers it in its loop (typed `offer\n` / `answer\n`
 prefixes distinguish the exchange; on glare the answerer role yields).
 
-**Mid-session NEW tracks: spare pads (M784).** The fixed-arity pad model has no
+**Mid-session NEW tracks: spare pads.** The fixed-arity pad model has no
 pad to grow into, so a session reserves them up front:
 `with_spare_tracks(video, audio)` appends declared-but-inactive pads after the
 active ones, and they carry no m-line at the handshake. Each negotiated m-line is
-a *binding* holding its `Mid`, kind, and the input / output pads it serves, which
-replaces the per-kind mid slots: recv routing, PLI, BWE, and the direction
-toggles all resolve through it. A spare binds either when its **send** pad gets
+a *binding* holding its `Mid`, kind, and the input / output pads it serves:
+recv routing, PLI, BWE, and the direction toggles all resolve through it. A spare binds either when its **send** pad gets
 its first frame (the session offers the peer a new sendrecv m-line, one exchange
 at a time, the frame itself dropped like any frame before its m-line exists) or
 when the peer's re-offer lands and `MediaAdded` fires for an unknown mid, which
@@ -3582,7 +3719,7 @@ claims the first free pad of that kind on both sides. A pad bound mid-session
 emits its `CapsChanged` before its first frame; the active pads are announced at
 session start. A track whose kind has no free pad left is rejected (it stays
 unbound and its media is skipped), since the pad count is fixed at graph build
-time. `DuplexControl::remove_track` is the inverse (M785): it `stop_media`s the
+time. `DuplexControl::remove_track` is the inverse: it `stop_media`s the
 m-line (port 0, out of the BUNDLE group), batched into the same re-offer as the
 direction toggles. Both peers then drop that binding by walking their media
 after each SDP application (a stopped m-line stays in the session with
@@ -3596,12 +3733,12 @@ load-bearing: the **offerer** captures its `Mid`s from `SdpApi::add_media`'s
 return, while the **answerer** learns them from `Event::MediaAdded` after
 `accept_offer` (str0m does not emit `MediaAdded` for media the local side added).
 
-**LiveKit signaller (M707/M714).** `livekit_signal` is the protocol seam: an
+**LiveKit signaller.** `livekit_signal` is the protocol seam: an
 HS256 JWT access-token mint and a hand-rolled protobuf codec for the
-`livekit_rtc.proto` subset, over a tokio-tungstenite WebSocket (`ws://` and,
-M715, `wss://` via native-tls, the TLS stack the WHIP reqwest client already
+`livekit_rtc.proto` subset, over a tokio-tungstenite WebSocket (`ws://` and
+`wss://` via native-tls, the TLS stack the WHIP reqwest client already
 links). `LiveKitSink` publishes (client offers, per WHIP habits) and
-`LiveKitSrc` subscribes — where the offer direction REVERSES: the SFU offers the
+`LiveKitSrc` subscribes, where the offer direction REVERSES: the SFU offers the
 subscriber PeerConnection over the signalling socket and re-offers on every
 track-set change, and the element answers each with `accept_offer`, learning its
 mids from `MediaAdded` per the answerer rule above. The source is a terminal
@@ -3609,7 +3746,7 @@ mids from `MediaAdded` per the answerer rule above. The source is a terminal
 until the first keyframe and repeats a PLI until it arrives, and takes the first
 video / audio m-line offered (one-subscription element). Both validated against
 a real LiveKit server, including an in-room sink-to-src A/V loopback and the
-same loopback over a TLS-terminated `wss://` proxy. `LiveKitDuplex` (M728) is
+same loopback over a TLS-terminated `wss://` proxy. `LiveKitDuplex` is
 the full participant: LiveKit has no sendrecv m-lines, so it runs BOTH PCs (a
 publisher it offers, a subscriber the server offers) in one loop over one
 socket, routing trickle by `SignalTarget`, exposed as a `MultiDuplexSession`
@@ -3622,24 +3759,24 @@ the SDP, so a same-host P2P pair connects over localhost with no STUN. For the N
 cases a reflexive candidate cannot punch through, a hand-rolled TURN client
 (`turn.rs`, RFC 5766/8656: Allocate with long-term auth, channel binding,
 periodic Refresh) provides a relay. str0m only offers
-`Candidate::relayed`; the data plane is the run loop's job — a relayed pair's
+`Candidate::relayed`; the data plane is the run loop's job, a relayed pair's
 transmits all carry `source == relay_addr`, which is the routing signal to wrap
 the datagram for the relay (direct host/srflx paths are untouched). The first
-transmit to a new peer sends a ChannelBind (M716), which installs the peer
+transmit to a new peer sends a ChannelBind, which installs the peer
 permission and, once its success lands, upgrades that peer from 36-byte Send /
 Data indications to 4-byte-header ChannelData frames both ways; a `438 Stale
 Nonce` on any authenticated request adopts the error response's nonce and
 un-caches the affected state so the lazy paths retry with it. The
-client-to-server leg also runs over TCP and TLS (M717, `turn:...?transport=tcp`
+client-to-server leg also runs over TCP and TLS (`turn:...?transport=tcp`
 / `turns:` RFC 7065 forms): a local bridge task tunnels the client's datagrams
 over one stream connection, re-delimiting messages (STUN self-describing
 lengths; ChannelData padded to 4 bytes on the stream), so `TurnClient` and
 every element run loop stay transport-agnostic and the allocation still relays
-UDP toward peers. The codec is address-family agnostic (M718): XOR addresses
+UDP toward peers. The codec is address-family agnostic: XOR addresses
 encode/decode IPv6 (cookie + transaction id), and a v6-bound client requests a
 v6 relayed address (RFC 6156). Validated against a real coturn on all three
 transports and over IPv6 (allocate, bind, ChannelData round-trip both
-directions). An element takes a comma-separated server list (M719, each entry
+directions). An element takes a comma-separated server list (each entry
 optionally carrying GStreamer-style `turn://user:pass@host` credentials): a
 `TurnSet` allocates on every server, contributes one relayed candidate each,
 and the data plane routes by which relay a transmit's `source` names. The
@@ -3652,15 +3789,15 @@ via `AsyncElement::take_reconfigure` to the encoder (`Av1Enc` forces a rav1e IDR
 ingress originates PLI on a mid-GOP join. str0m's BWE (`Event::EgressBitrateEstimate`,
 TWCC/REMB) becomes `PushOutcome::Bitrate` via `take_bitrate`, and the encoder
 retargets (rav1e by a hysteresis-gated context rebuild). Both signals hop past
-intervening transforms (M720): an element that does not consume them
+intervening transforms: an element that does not consume them
 (`AsyncElement::handles_keyframe_requests` / `handles_bitrate_requests`, false by
 default; encoders override) has its output adapter relay the pending
 `ForceKeyframe` / bitrate onto its input link, the QoS-relay mechanism
 generalized, so `enc ! h264parse ! webrtc-sink` reaches the encoder. `Propose` /
 `Renegotiate` never relay (they concern the adjacent element's own caps).
-`OpusEnc` retargets live too (M721, `OPUS_SET_BITRATE`, no rebuild), and
-`FfmpegH264Enc` by a hysteresis-gated reopen (M722; zerolatency, nothing in
-flight). Simulcast splits the aggregate BWE estimate per layer (M722): the
+`OpusEnc` retargets live too (`OPUS_SET_BITRATE`, no rebuild), and
+`FfmpegH264Enc` by a hysteresis-gated reopen (zerolatency, nothing in
+flight). Simulcast splits the aggregate BWE estimate per layer: the
 allocator hands each active layer its nominal share of the estimate on that
 layer's reverse channel and a shed layer the `Bitrate(0)` idle hint, on which
 the encoder skips frames unencoded except a sparse 1-in-32 keep-alive (the
@@ -3681,8 +3818,8 @@ recovers the real dimensions.
 
 **Validation status.** On-network validated against a local mediamtx (single-track
 WHIP/WHEP and multi-track A/V) and by in-process P2P loopbacks on localhost (video
-and full A/V sendrecv); the structural `webrtcbin` parity — one connection, N
-tracks, BUNDLE, sendrecv, PLI, BWE — is in place. What remains is maturity rather
+and full A/V sendrecv); the structural `webrtcbin` parity (one connection, N
+tracks, BUNDLE, sendrecv, PLI, BWE) is in place. What remains is maturity rather
 than architecture; `DESIGN_TODO.md`'s "WebRTC" item carries the tiered list.
 
 ### 4.20 Developer Tooling: DOT Visualization
@@ -3726,7 +3863,7 @@ overridden by GPU producers like `NvDec`), the runtime peer of the auto-plug
 ### 4.20a Developer Tooling: Caps-Negotiation Explainer
 
 Caps negotiation is the hardest code in the system (§4.13, with accumulating
-workarounds), and a `CapsMismatch` historically gave no hint *why*. The
+workarounds), and a bare `CapsMismatch` gives no hint *why*. The
 explainer makes the solver narrate itself. `solve_graph` emits under a reserved
 `caps` log category (not an element type, so it filters independently): a setup
 dump of each node's constraint, then per edge the surviving `CapsSet` and its
@@ -3748,7 +3885,7 @@ already call at startup.
 ### 4.20b Developer Tooling: the `xtask` crate
 
 `cargo xtask <command>` (a `.cargo/config.toml` alias onto the `xtask` workspace
-member) is the home for the build / test invocations that were otherwise
+member) is the home for the build / test invocations that would otherwise be
 shell-history knowledge. It is dependency-free, orchestrating only `cargo` and
 toolchain tools. `ci` runs locally what the GitHub workflow runs (workspace
 check / test / clippy, the Linux feature build, the embassy no-alloc tests, the
@@ -3790,7 +3927,7 @@ guard the latency moat's hot paths: the caps algebra + linear / DAG solvers
 paces to PTS so it is unsuitable for a microbench). `cargo xtask bench` drives
 them by manifest path, passing criterion args through (e.g. `--save-baseline`).
 
-`tools/pushtax-bench.sh` (M870) prices the push model against GStreamer's pull
+`tools/pushtax-bench.sh` prices the push model against GStreamer's pull
 on batch demux: the same `filesrc ! tsdemux ! h264parse ! fakesink` line through
 `g2g-launch` (release) and `gst-launch-1.0` over an ffmpeg-authored 60 s 1080p30
 TS, five interleaved timed runs each, results appended per iteration. Measured
@@ -3826,7 +3963,7 @@ avg/max` table, the by-hand glass-to-glass analyses (the NVDEC-to-system-memory
 floor, `link_capacity` dominance) turned into a number the runner emits. The
 graph runner and the two linear runners (`run_simple_pipeline`,
 `run_source_transform_sink`) collect it, and the dynamic fan-out / fan-in /
-muxer-sink runners do too (M869: `_observed` entry points register each arm's
+muxer-sink runners do too (`_observed` entry points register each arm's
 node and edge on the observer incrementally as it attaches, so a late arm
 reports like an initial one); the static session runners leave it empty, like
 their declared latency. It is `std`-gated where it
@@ -3835,7 +3972,7 @@ compiles out (the table is then empty) so the `no_std` baseline pays nothing.
 Sources have no `process()` and so do not appear, their cost surfaces as the
 downstream element's input fill.
 
-A paced display sink also reports what it actually put on screen (M933): the
+A paced display sink also reports what it actually put on screen: the
 element overrides `presentation_stats()` (frames presented, frames overwritten
 before paint under `DropOldest`, frames shed by QoS late-drop), the graph
 runner's sink arm stores it on the probe as the arm ends, and `report()` prints
@@ -4088,10 +4225,9 @@ machine that produced its input. The **distributed-graph primitive** lets any
 edge be cut and the downstream subgraph run in another process or on another
 machine, without rewriting the graph: replace the edge with
 `... ! remotesink host=H port=P` on the near side and `remotesrc port=P ! ...`
-on the far side. This is the general form of the browser-to-server offload the
-web track prototyped (a bespoke RGBA-over-WebSocket shim): the same "move a
+on the far side. This is the general form of a browser-to-server offload, the same "move a
 stage across a boundary by swapping one element" thesis as the portability
-story, now for the *network* axis rather than the target axis.
+story, here for the *network* axis rather than the target axis.
 
 The foundation is a target-agnostic **wire codec** in `g2g-core` (`wire.rs`,
 `no_std + alloc`, no dependency): `encode_packet` / `decode_packet` serialize an
@@ -4148,19 +4284,19 @@ is strictly FIFO so each per-frame read pairs with its frame: the leading
 `CapsChanged` (config, no reply), then one `DataFrame` per frame (one processed
 reply each), then `Eos`; `Segment` / `Flush` pass through locally. The native
 `RemoteWsTransform` (tokio-tungstenite client) offloads a middle stage to another
-machine; the browser `WsWireTransform` is its wasm twin. This is what fully
-collapses the bespoke M549 `WebRemoteDetect` shim (a hand-rolled RGBA-up /
-boxes-down protocol that knew about detection) onto the primitive: the browser
-graph `WebSocketSrc -> WebCodecsDecode -> WsWireTransform -> AnalyticsOverlay ->
+machine; the browser `WsWireTransform` is its wasm twin.
+
+One generic, detection-agnostic element covers what a hand-rolled RGBA-up /
+boxes-down protocol would: the browser graph
+`WebSocketSrc -> WebCodecsDecode -> WsWireTransform -> AnalyticsOverlay ->
 CanvasSink` moves inference to a native peer (a wire server running the real
 `OrtInference -> DetectionPostprocess` chain, attaching the boxes as
-`AnalyticsMeta`) by swapping one generic, detection-agnostic element. The
-tradeoff versus the bespoke shim is bandwidth: the transform round-trips the
-whole frame both ways (the honest cost of a generic packet-in / packet-out
-stage), fine on a LAN.
+`AnalyticsMeta`). The tradeoff against such a bespoke protocol is bandwidth:
+the transform round-trips the whole frame both ways (the honest cost of a
+generic packet-in / packet-out stage), fine on a LAN.
 
 **WebTransport transport (`webtransport`).** `RemoteWtSink` / `RemoteWtSrc` /
-`RemoteWtTransform` (M901) are the third carrier of the same wire codec, over one
+`RemoteWtTransform` are the third carrier of the same wire codec, over one
 reliable bidirectional WebTransport stream per connection (HTTP/3 CONNECT over
 QUIC, via `web-transport-quinn`). A WebTransport stream is a QUIC stream, so it is
 a byte stream with no message boundaries: the framing is the TCP pair's `u32`
@@ -4184,7 +4320,7 @@ transport, so each carrier file supplies only what is transport-specific (how a
 connection is dialed or a listener bound, how one packet is written and read) plus
 its element identity and properties.
 
-Reconnection (M558) makes the edge resilient across the transports.
+Reconnection makes the edge resilient across the transports.
 `RemoteSink` / `RemoteWsSink` / `RemoteWtSink` gain `with_reconnect(attempts)` (and a
 `reconnect-attempts` property): the initial connect is deferred and retried with a
 short backoff, and a mid-stream send failure drops the dead socket, reconnects,
@@ -4204,7 +4340,7 @@ stream across a sender that drops and is replaced).
 The distributed-graph carriers above move g2g's *own* packet stream between g2g
 peers. **MoQ Transport** is the other use of the same WebTransport carrier: a
 published IETF media protocol, so the peer on the far side is a relay and a
-player that know nothing about g2g. `moqt` (M902 / M903) implements it in-tree,
+player that know nothing about g2g. `moqt` implements it in-tree,
 both directions.
 
 **Dialect and version.** The dialect is the IETF draft, not moq-lite: moq-lite
@@ -4220,7 +4356,7 @@ ALPN for WebTransport is always `h3`, so the version rides the HTTP/3 CONNECT
 request as the WebTransport subprotocol `moqt-16`, and CLIENT_SETUP /
 SERVER_SETUP carry parameters only.
 
-**Version negotiation (M907).** The elements offer every version in their
+**Version negotiation.** The elements offer every version in their
 `versions` property (default `18,16`, preference order) as WebTransport
 subprotocols on one CONNECT, and the server's pick selects the codec for the
 session; `moq-relay-ietf` echoes `moqt-16` when offered it. A server that
@@ -4228,7 +4364,7 @@ echoes no subprotocol predates multi-version offers and every such server is a
 draft-16 peer, so the fallback is draft-16 when it was offered; the SETUP
 handshake that follows validates the choice either way.
 
-**Draft-18 (`moqt::v18`, M907).** Between draft-16 and draft-18 the wire was
+**Draft-18 (`moqt::v18`).** Between draft-16 and draft-18 the wire was
 restructured, so draft-18 is a sibling module rather than a flag on the
 draft-16 one: its own `vi64` integer (leading-ones length prefix, 1 to 9 bytes,
 a full `u64`, non-minimal encodings legal), a single SETUP message (`0x2F00`)
@@ -4237,11 +4373,11 @@ request* whose response carries no request id (the stream is the correlation),
 typed control-message parameters in place of KVP parameters (an unknown type
 cannot be skipped and is a session error), bit-table SUBGROUP_HEADER and
 OBJECT_DATAGRAM types, PADDING streams and datagrams to discard, and
-cancellation by stream reset (UNSUBSCRIBE, FETCH_CANCEL and MAX_REQUEST_ID no
-longer exist). What is genuinely version-agnostic is shared, not copied: track
+cancellation by stream reset (draft-18 has no UNSUBSCRIBE, FETCH_CANCEL or
+MAX_REQUEST_ID). What is genuinely version-agnostic is shared, not copied: track
 namespaces, Key-Value-Pairs and the object-id delta rule live in the draft-16
 coding module with a varint flavour on the shared `Reader`, and the reorder
-policy, catalog and the M901 carrier are reused as they are. The publisher
+policy, catalog and the WebTransport carrier are reused as they are. The publisher
 answers each request on its own stream and sends PUBLISH_DONE there at EOS;
 the subscriber drains PUBLISH_DONE's stream count before ending a
 subscription, because the message races the data streams it is counting.
@@ -4257,9 +4393,9 @@ track list, written and read in one place so the two cannot drift) are pure
 `alloc` with no I/O, so the wire layer is unit-testable on byte vectors; the
 layouts are asserted against the byte sequences the reference implementation
 asserts for itself, because a round trip alone cannot catch two fields swapped
-with each other. `moqt::session` adds the live session over the M901 carrier: it
-reuses that carrier's dial (`remotewtio::dial`, which grew a subprotocol
-argument rather than a second copy of the certificate-hash handling), opens the
+with each other. `moqt::session` adds the live session over the WebTransport carrier: it
+reuses that carrier's dial (`remotewtio::dial`, which takes a subprotocol
+argument, so the certificate-hash handling exists in one place), opens the
 control stream as the session's first bidirectional stream, and runs the control
 stream's read half in its own task, so a SUBSCRIBE is decoded as it arrives
 instead of when the element next has a frame to push. A subscriber additionally
@@ -4294,7 +4430,7 @@ extension-header block) and objects whose id delta is measured per stream (the
 first object of a stream takes the delta as its absolute id), which is
 byte-identical to what the reference publisher emits when one stream carries the
 whole group. `subgroups` spreads a group's objects across that many concurrent
-subgroup streams round-robin, so one object's loss no longer holds up the next
+subgroup streams round-robin, so one object's loss does not hold up the next
 inside a GOP. The reference relay cannot carry that: it renumbers each subgroup's
 objects from zero, discarding the delta, so the subgroups collide on one set of
 ids and all but one are dropped as duplicates, so a publisher aimed at that relay
@@ -4308,7 +4444,7 @@ filter field, so `priority` (the publisher-priority byte in every subgroup
 header) is the only delivery knob and there is no group-order property to
 expose.
 
-The control plane runs without frames (M906). `configure_pipeline` dials the
+The control plane runs without frames. `configure_pipeline` dials the
 relay and publishes the namespace in the background (a sync caller without a
 runtime falls back to dialling on the first frame, and a failed dial is retried
 per frame while the relay comes up), and a pump task owns the control stream's
@@ -4386,7 +4522,7 @@ in; `moq-pub` publishes through the same relay into `moqtsrc`; and the g2g round
 trip `mp4mux ! moqtsink` -> relay -> `moqtsrc` is compared byte for byte, over a
 run long enough to span a group boundary.
 
-**The browser leg** (M904, `tools/moqt-demo/`) is the independent one: everything
+**The browser leg** (`tools/moqt-demo/`) is the independent one: everything
 above validates against Cloudflare's Rust or our own, and a JS client is neither.
 The page subscribes with [MOQtail](https://github.com/moqtail/moqtail), a
 third-party draft-16 implementation, reads the `.catalog`, fetches the init track
@@ -4458,7 +4594,7 @@ receiving process).
 `LocalCudaSrc::zero_copy()` removes even that receive-side copy: the source emits
 the producer's *mapped* VRAM directly, so the consumer reads the producer's
 memory in place (e.g. NVENC-from-mapped, no copy anywhere). The lifetime handshake
-copy mode traded away now returns: the emitted frame's keep-alive closes the IPC
+the copy mode trades away is explicit here instead: the emitted frame's keep-alive closes the IPC
 mapping *and signals the run loop on drop*, and the source acks the producer only
 once that fires (the frame is fully consumed downstream), so the producer holds
 the source allocation exactly until the consumer is done. That is real
@@ -4494,7 +4630,7 @@ bytes are mmap-verified in the receiving process.
 
 #### Exporting a GPU frame to a dma-buf
 
-`WgpuToDmaBuf` (M559, the `dmabuf-wgpu` feature) is the GPU producer that pairs
+`WgpuToDmaBuf` (the `dmabuf-wgpu` feature) is the GPU producer that pairs
 with [`DmaBufToWgpu`] across the boundary: it consumes a GPU-resident
 `MemoryDomain::WgpuBuffer` and emits a `MemoryDomain::DmaBuf` referencing the same
 pixels, so a rendered / decoded GPU frame leaves the process with no CPU copy
@@ -4530,7 +4666,7 @@ the receiver's dup). The `gpu_dmabuf_ipc` example proves this cross-process on t
 Cross-device / cross-process synchronisation has two modes. The default is the
 producer-side `device.poll(Wait)` (a small stall, but correct: the copy is fully
 flushed before the fd is handed off). The zero-stall mode
-(`WgpuToDmaBuf::with_external_semaphore(true)`, M562) moves the wait to the
+(`WgpuToDmaBuf::with_external_semaphore(true)`) moves the wait to the
 consumer via an exported `VK_KHR_external_semaphore_fd` *timeline* semaphore: the
 producer creates one exportable timeline semaphore per stream, signals the next
 value on each frame's copy submit (`wgpu_hal::vulkan::Queue::add_signal_semaphore`,
@@ -4559,7 +4695,7 @@ cross-process chain).
 ---
 
 ## 5. First-Class Machine Learning Integration
-To prevent GPU-to-CPU synchronization stalls, tensor execution happens directly inside the VRAM domain. ML elements are `AsyncElement` implementations like any other — they negotiate `Caps::RawVideo` on the input pad and `Caps::Tensor` on the output pad.
+To prevent GPU-to-CPU synchronization stalls, tensor execution happens directly inside the VRAM domain. ML elements are `AsyncElement` implementations like any other: they negotiate `Caps::RawVideo` on the input pad and `Caps::Tensor` on the output pad.
 
 ### 5.1 Inline Tensor Pre-processing via WebGPU (wgpu)
 The ML element sits in the same memory domain context as the hardware decoder. When a `MemoryDomain::DmaBuf` arrives at the ML element:
@@ -4568,15 +4704,66 @@ The ML element sits in the same memory domain context as the hardware decoder. W
 2. An inline compute shader converts color spaces (e.g. NV12 → planar RGB) and performs normalization scales directly in graphics memory.
 3. The resulting tensor handle is emitted as a `Frame { domain: VulkanTexture(...), caps: Caps::Tensor { .. }, .. }`, submitted straight to the inference backend.
 
-`WgpuPreprocess` (`g2g-ml/src/wgpupreprocess.rs`, `wgpu` feature) is the compute-shader half: an NV12 frame is converted and normalized in a wgpu compute shader to a `Caps::Tensor { F32, [1,3,H,W], Nchw }`, the same contract `OrtInference` builds on the CPU. The default system-memory variant uploads NV12 to a storage buffer and reads the f32 tensor back to `MemoryDomain::System`. **GPU-output mode (`with_gpu_output`)** instead leaves the tensor in a `wgpu::Buffer` and emits `MemoryDomain::WgpuBuffer` (an on-device GPU->GPU copy into a fresh per-frame buffer, no map / read-back in the element), so a downstream GPU consumer reads it on-device; a CPU consumer pays the deferred read-back via the buffer owner. This removes the output-side GPU->CPU copy; `WgpuInference` (§5.2) is the consumer that binds the resulting buffer on-device, so `preprocess -> infer` keeps the tensor on the GPU. **Surface-import input** closes the other end: when the NV12 frame arrives already GPU-resident as a `MemoryDomain::WgpuTexture` (a `WgpuNv12Texture` keep-alive wrapping an R8Uint texture of `width x height*3/2` in standard NV12 byte layout), the element adopts that texture's device and samples it with `textureLoad` straight into the compute pass, with no CPU upload, bit-identical to the storage-buffer path. **DMA-BUF import input** (`dmabuf-wgpu` feature, Linux) is the same idea for a `MemoryDomain::DmaBuf` frame from a capture or decode path: the element opens a device carrying `VK_KHR_external_memory_fd` + `VK_EXT_external_memory_dma_buf` on the first such frame and binds the imported buffer as the compute pass's input, sharing the importer (`g2g_plugins::dmabufwgpu::DmaBufImporter`, which also honours a producer's timeline semaphore) with the `dmabuftowgpu` element rather than repeating the handshake. The frame's row stride and plane offset reach the shader in the dims uniform, so a padded capture buffer is read in place with no repack, and the tensor is bit-identical to the same pixels uploaded from system memory (validated on an RTX 3060, including a padded stride). NV12 and packed YUYV both have a compute shader (they share every line but the fetch of one pixel's Y, Cb, Cr), YUYV because that is what a UVC webcam captures, so a camera reaches the tensor with no `videoconvert` in front. Which GPU the import opens on is a real choice, not a default: a discrete GPU binds only GPU-visible dma-bufs, while a CPU-backed one (udmabuf, a USB webcam's capture buffer) binds on an integrated GPU, whose memory is the same system RAM. `ImportAdapter` (the `import-adapter` property on both `wgpupreprocess` and `dmabuftowgpu`) picks between them, `high-performance` by default because that is what a GPU-exported dma-buf needs; `integrated` searches the enumerated Vulkan adapters by device type. Either way an fd the driver cannot bind reports `UnsupportedDomain` and the caller falls back to the upload path. The live camera case is validated on this host (`m993_camera_dmabuf_preprocess`): `v4l2src io-mode=dmabuf` at 640x480 YUYV into `WgpuPreprocess` on the AMD integrated GPU gives the same tensor as that same captured frame taken through the copy path, and the same frame on the RTX 3060 refuses the fd, which is the choice being real. With both ends GPU-resident, `capture / decode -> WgpuPreprocess -> WgpuInference` runs with the pixels never touching the CPU. **CUDA<->wgpu interop (`CudaToWgpu`, `g2g-plugins/src/cudawgpu.rs`)** joins the NVDEC decode side to this surface-import path: there is no portable "share this CUDA pointer with wgpu" call, so the bridge allocates an exportable Vulkan image (`VK_KHR_external_memory_fd`, wrapped as a `wgpu::Texture` via wgpu-hal), CUDA imports the same memory by FD (`cuImportExternalMemory`) and copies the NVDEC NV12 planes into it device->device, and the wgpu device travels on the frame's keep-alive so `WgpuPreprocess` adopts it (the device-identity pattern). The whole `NVDEC -> CudaToWgpu -> WgpuPreprocess -> WgpuInference` chain is validated on an RTX 3060, matching a CPU reference with no PCIe download. Shared images are recycled from a reuse pool: the Vulkan image, its CUDA import, and the `wgpu::Texture` are allocated once and returned to a free list when the downstream frame is released (a drop guard on the emitted keep-alive), so per frame only the two device->device plane copies and a sync run; a recycled entry is drained (`Device::poll`) before reuse since a wgpu submission may still sample it. The pool cut the bridge step ~2.6x at 1080p (p50 0.38 ms pooled vs 0.98 ms per-frame-allocated). **The reverse direction (`WgpuToCuda`)** closes the *encode* side: a renderer writes a packed-RGBA `wgpu::Texture` on FD-exportable Vulkan memory (`export_rgba_image` / `wrap_rgba_as_texture`, the `R8G8B8A8` mirror), CUDA imports it as a 4-channel array, and `to_cuda_frame` copies it device->device into a linear `CUdeviceptr` emitted as a `MemoryDomain::Cuda` `Rgba8` frame that `NvEnc` registers as `ABGR` (§4.11.3). So a GPU render reaches the H.264 encoder with no device->host read-back, validated on an RTX 3060 (`wgpu_to_cuda` test). This is the zero-copy egress for server-side rendering / cloud-gaming, and the `bevy-g2g` crate's `RemoteRenderPlugins` is the packaged Bevy proof (M796): Bevy renders on the interop device, g2g copies the target through `WgpuToCuda`, and `NvEnc` emits H.264 without a full-frame download, egressing to WHIP/WebRTC or a file; without an NVIDIA GPU the plugin falls back to a GPU->CPU readback + libx264 encode so the same app streams on any adapter. The crate completes the remote-rendering loop with a WebSocket input backchannel (M797: viewer keyboard/mouse injected as ordinary Bevy input messages; a WebRTC data channel cannot reach the publisher through a WHIP/WHEP server, the viewer being a separate peer connection) and a windowed mode (M798: the scene camera renders to the stream texture and the window shows it through a fullscreen UI mirror, so desktop view and stream are the same pixels). The bridge retains its own CUDA primary context (the GPU the interop device selects) and owns the exportable render-target texture.
+`WgpuPreprocess` (`g2g-ml/src/wgpupreprocess.rs`, `wgpu` feature) is the compute-shader half: an NV12 frame is converted and normalized in a wgpu compute shader to a `Caps::Tensor { F32, [1,3,H,W], Nchw }`, the same contract `OrtInference` builds on the CPU. The default system-memory variant uploads NV12 to a storage buffer and reads the f32 tensor back to `MemoryDomain::System`.
+
+**GPU-output mode (`with_gpu_output`)** instead leaves the tensor in a `wgpu::Buffer` and emits `MemoryDomain::WgpuBuffer` (an on-device GPU->GPU copy into a fresh per-frame buffer, no map / read-back in the element), so a downstream GPU consumer reads it on-device; a CPU consumer pays the deferred read-back via the buffer owner. This removes the output-side GPU->CPU copy; `WgpuInference` (§5.2) is the consumer that binds the resulting buffer on-device, so `preprocess -> infer` keeps the tensor on the GPU.
+
+**Surface-import input** closes the other end: when the NV12 frame arrives already GPU-resident as a `MemoryDomain::WgpuTexture` (a `WgpuNv12Texture` keep-alive wrapping an R8Uint texture of `width x height*3/2` in standard NV12 byte layout), the element adopts that texture's device and samples it with `textureLoad` straight into the compute pass, with no CPU upload, bit-identical to the storage-buffer path.
+
+**DMA-BUF import input** (`dmabuf-wgpu` feature, Linux) is the same idea for a `MemoryDomain::DmaBuf` frame from a capture or decode path: the element opens a device carrying `VK_KHR_external_memory_fd` + `VK_EXT_external_memory_dma_buf` on the first such frame and binds the imported buffer as the compute pass's input, sharing the importer (`g2g_plugins::dmabufwgpu::DmaBufImporter`, which also honours a producer's timeline semaphore) with the `dmabuftowgpu` element rather than repeating the handshake.
+
+The frame's row stride and plane offset reach the shader in the dims uniform, so a padded capture buffer is read in place with no repack, and the tensor is bit-identical to the same pixels uploaded from system memory (validated on an RTX 3060, including a padded stride). NV12 and packed YUYV both have a compute shader (they share every line but the fetch of one pixel's Y, Cb, Cr), YUYV because that is what a UVC webcam captures, so a camera reaches the tensor with no `videoconvert` in front.
+
+Which GPU the import opens on is a real choice, not a default: a discrete GPU binds only GPU-visible dma-bufs, while a CPU-backed one (udmabuf, a USB webcam's capture buffer) binds on an integrated GPU, whose memory is the same system RAM. `ImportAdapter` (the `import-adapter` property on both `wgpupreprocess` and `dmabuftowgpu`) picks between them, `high-performance` by default because that is what a GPU-exported dma-buf needs; `integrated` searches the enumerated Vulkan adapters by device type. Either way an fd the driver cannot bind reports `UnsupportedDomain` and the caller falls back to the upload path.
+
+The live camera case is validated on this host (`m993_camera_dmabuf_preprocess`): `v4l2src io-mode=dmabuf` at 640x480 YUYV into `WgpuPreprocess` on the AMD integrated GPU gives the same tensor as that same captured frame taken through the copy path, and the same frame on the RTX 3060 refuses the fd, which is the choice being real. With both ends GPU-resident, `capture / decode -> WgpuPreprocess -> WgpuInference` runs with the pixels never touching the CPU.
+
+**CUDA<->wgpu interop (`CudaToWgpu`, `g2g-plugins/src/cudawgpu.rs`)** joins the NVDEC decode side to this surface-import path: there is no portable "share this CUDA pointer with wgpu" call, so the bridge allocates an exportable Vulkan image (`VK_KHR_external_memory_fd`, wrapped as a `wgpu::Texture` via wgpu-hal), CUDA imports the same memory by FD (`cuImportExternalMemory`) and copies the NVDEC NV12 planes into it device->device, and the wgpu device travels on the frame's keep-alive so `WgpuPreprocess` adopts it (the device-identity pattern). The whole `NVDEC -> CudaToWgpu -> WgpuPreprocess -> WgpuInference` chain is validated on an RTX 3060, matching a CPU reference with no PCIe download.
+
+Shared images are recycled from a reuse pool: the Vulkan image, its CUDA import, and the `wgpu::Texture` are allocated once and returned to a free list when the downstream frame is released (a drop guard on the emitted keep-alive), so per frame only the two device->device plane copies and a sync run; a recycled entry is drained (`Device::poll`) before reuse since a wgpu submission may still sample it. The pool cut the bridge step ~2.6x at 1080p (p50 0.38 ms pooled vs 0.98 ms per-frame-allocated).
+
+**The reverse direction (`WgpuToCuda`)** closes the *encode* side: a renderer writes a packed-RGBA `wgpu::Texture` on FD-exportable Vulkan memory (`export_rgba_image` / `wrap_rgba_as_texture`, the `R8G8B8A8` mirror), CUDA imports it as a 4-channel array, and `to_cuda_frame` copies it device->device into a linear `CUdeviceptr` emitted as a `MemoryDomain::Cuda` `Rgba8` frame that `NvEnc` registers as `ABGR` (§4.11.3). So a GPU render reaches the H.264 encoder with no device->host read-back, validated on an RTX 3060 (`wgpu_to_cuda` test).
+
+This is the zero-copy egress for server-side rendering / cloud-gaming, and the `bevy-g2g` crate's `RemoteRenderPlugins` is the packaged Bevy proof: Bevy renders on the interop device, g2g copies the target through `WgpuToCuda`, and `NvEnc` emits H.264 without a full-frame download, egressing to WHIP/WebRTC or a file; without an NVIDIA GPU the plugin falls back to a GPU->CPU readback + libx264 encode so the same app streams on any adapter.
+
+The crate completes the remote-rendering loop with a WebSocket input backchannel (viewer keyboard/mouse injected as ordinary Bevy input messages; a WebRTC data channel cannot reach the publisher through a WHIP/WHEP server, the viewer being a separate peer connection) and a windowed mode (the scene camera renders to the stream texture and the window shows it through a fullscreen UI mirror, so desktop view and stream are the same pixels). The bridge retains its own CUDA primary context (the GPU the interop device selects) and owns the exportable render-target texture.
 
 ### 5.2 Unified Pure-Rust Inference Backends
 `g2g` avoids bundling heavy, unsafe proprietary C++ engines. The `g2g-ml` crate provides wrapper elements targeting two execution paradigms:
 
-- **`g2g-ml::burn`** (Embedded / Wasm / RTOS): leverages the pure-Rust Burn framework with a `wgpu` backend, compiling ONNX workflows into type-safe, compile-time Rust graphics shaders. `BurnInference` (`g2g-ml/src/burninfer.rs`, `burn` feature) is the wgpu-backend inference element over the `RawVideo` → `Tensor` contract, driving an `input · W + b` linear layer on any Vulkan / Metal / DX12 / WebGPU adapter. **An ONNX topology runs through the same element**, but the import is build-time: `burn-onnx` (what `burn-import` 0.21 forwards to) generates a burn `Module` plus an embedded burnpack weight blob from the `.onnx` at compile time, so there is no runtime graph loader to hand the file to. The seam is the `BurnModule` trait: one forward pass from the `[1, 3, H, W]` NCHW f32 tensor the element normalizes to `[1, N]` logits. The importing crate implements it over its generated `Model<Wgpu>` and passes it to `BurnInference::module`, which then drives it frame by frame exactly like the built-in linear layer (a forward pass whose output is not the declared `num_outputs` fails the frame, so the emitted `Caps::Tensor` cannot lie). Because the codegen crate drags burn's whole dependency tree into any lockfile that resolves it, the worked case is a workspace-excluded standalone crate, `examples/g2g-onnx-import`: a `Conv2d -> BatchNorm -> ReLU -> global average pool -> linear` graph whose logits match the ONNX Runtime reference for the same frame on the RTX 3060. Attention imports through the same seam: the standard-domain ONNX `Attention` op (opset 23, one node for a whole multi-head block) is lowered by `burn-onnx` onto `burn::tensor::module::attention`, so the GPU runs burn's own attention kernel rather than a hand-unrolled matmul / softmax chain, validated on the 3060 by a second fixture in that crate (pixels as a token sequence -> multi-head self-attention -> mean pool -> linear). Because that node is opaque in the graph, the fixture generator folds the attention formula in numpy and asserts ONNX Runtime agrees before emitting the reference logits, so the reference is not ORT agreeing with itself. This is the topology half of the Burn story, the counterpart of the runtime `safetensors` weight import below.
-- **`g2g-ml::ort`** (High-Performance Enterprise Server): wraps ONNX Runtime bindings to pass underlying memory domains to hardware-specific execution paths (CUDA / TensorRT / DirectML / Apple CoreML) natively. Each execution provider is a constructor variant on `OrtInference` that registers the EP ahead of the CPU fallback; registration is best-effort, so the session keeps running (on CPU) when the device is absent. Desktop: `from_memory_with_cuda`, `from_memory_with_directml`. **Android edge**: `from_memory_with_nnapi` (the system NeuralNetworks API: NPU / GPU / DSP), `from_memory_with_xnnpack` (ARM-optimized CPU), and `from_memory_for_android`, which registers NNAPI then XNNPACK then the default CPU EP in one call so ORT assigns each node to the first provider that supports it, the MediaPipe delegate-with-fallback shape. The `nnapi` / `xnnpack` features link symbols only the Android ONNX Runtime build carries, so they are Android-target features (a host build / CI never enables them); the EP stack is validated on a device (`tools/android-nnapi-smoke.sh` runs `g2g-ml/tests/android_nnapi_probe.rs` from `/data/local/tmp`, a binder-threadpool shim for the vendor NNAPI HAL, output byte-exact with the CPU reference). **Edge TPU offload is proven**: an int8 QDQ Conv->ReLU fixture run through `from_memory_for_android` is placed on `NnapiExecutionProvider` (read from ORT's profiling JSON), and on a Pixel 10a (Tensor G4) the DarwiNN HAL log confirms the Edge TPU compiled and executed it (`/dev/edgetpu core0` firmware load); the float-typed input-boundary `QuantizeLinear` is the one op the TPU declines, correctly delegated to CPU (`tools/android-nnapi-conv-smoke.sh`, which also greps the `darwinn` logcat to disambiguate the TPU from other NNAPI accelerators). **Full-graph offload**: a uint8-input variant of the model (the boundary `QuantizeLinear` removed, the graph input retyped to uint8) runs *entirely* on the TPU, every node on `NnapiExecutionProvider` with nothing on the CPU, and the DarwiNN log confirms `Ops supported = ..., not supported = 0` / `compilation finished successfully on google-edgetpu`. The f32->uint8 quantization that feeds such a model is `TensorConvert` (`g2g-plugins`), the tensor-domain sibling of `VideoConvert`: it quantizes an f32 tensor to int8 / uint8 (`q = round(x / scale) + zero_point`, clamped) or dequantizes the inverse, shape and layout passing through. So `preprocess -> TensorConvert(quantize) -> inference` keeps the boundary quantize *out* of the model, leaving the whole inference graph accelerator-eligible. `TensorConvert` also transposes NCHW<->NHWC and narrows / widens f32<->F16 in the same pass, so a model that wants `NHWC uint8` (NNAPI / TFLite) is fed straight from an `NCHW f32` source. `OrtInference` itself accepts the integer input: `from_session` reads the model's input element type and `with_tensor_input` on a u8 / i8 model feeds the quantized tensor straight to the session (RGBA mode stays f32-only). **The whole chain is validated live on the device**: `Camera2Src -> TensorConvert(quantize) -> OrtInference(uint8) ` runs a real camera frame onto the Edge TPU (`tools/android-camera-tpu-smoke.sh`; on a Pixel 10a the logcat shows `accelerator name: EDGETPU` and `compilation finished successfully on google-edgetpu`), the g2g answer to "an edge framework that moves inference between CPU and accelerator" demonstrated end to end on real hardware. The same constructor shape extends to the other vendor accelerators: `from_memory_with_qnn` (Qualcomm AI Engine Direct, the Hexagon NPU / Adreno GPU on Snapdragon, the alternative to reaching the Hexagon through NNAPI) and `from_memory_with_coreml` (the Apple Neural Engine / GPU on macOS / iOS), each behind a target-only feature like `nnapi` (a host build never links them); both compile for their target. This is the heterogeneous-device story (a desktop NVIDIA box, a Windows D3D12 GPU, an Android phone NPU, and the Qualcomm / Apple NPUs all run the same element, the EP picked per platform), the architectural answer to MediaPipe's runtime CPU/GPU delegate switch.
+- **`g2g-ml::burn`** (Embedded / Wasm / RTOS): leverages the pure-Rust Burn framework with a `wgpu` backend, compiling ONNX workflows into type-safe, compile-time Rust graphics shaders. `BurnInference` (`g2g-ml/src/burninfer.rs`, `burn` feature) is the wgpu-backend inference element over the `RawVideo` → `Tensor` contract, driving an `input · W + b` linear layer on any Vulkan / Metal / DX12 / WebGPU adapter.
 
-`WgpuInference` (`g2g-ml/src/wgpuinfer.rs`, `wgpu` feature) is the GPU-resident counterpart of `BurnInference`: a raw wgpu compute pass that binds the GPU-resident tensor `WgpuPreprocess::with_gpu_output` (§5.1) produced **directly**, rather than taking `RawVideo` / `System` and uploading. It runs one of a small op zoo on that tensor, selected at construction (each its own WGSL shader behind the shared device-adopt / dispatch / read-back machinery): the original `input · W + b` linear matmul (`linear`); a same-padding stride-1 2D convolution (`conv2d`) over the `[1, Cin, H, W]` NCHW tensor with `[Cout, Cin, KH, KW]` weights, leaving a `[1, Cout, H, W]` feature map; the elementwise activations `relu` / `sigmoid`; and `maxpool2d` / `avgpool2d` spatial pooling. The weighted ops (linear, conv2d) bind a 5-entry group (meta, input, weights, bias, out); the weightless ops (activation, pooling) bind a 3-entry group (meta, input, out), the bind-group layout following the active shader. The conv is the keystone that lets the chain run an actual CNN layer, not just a final classifier; the activation is the nonlinearity that keeps stacked convs from collapsing to one linear map, and the pool the spatial downsampler. Chained GPU-resident (`conv2d -> relu -> maxpool`, each in `with_gpu_output` mode so the data never leaves the device between layers), they are a real small-CNN body, validated on the RTX 3060 against a CPU reference folding the same ops (`conv2d_reference` / `relu_reference` / `maxpool2d_reference`) over the exact tensor the GPU preprocess produced. **Trained weights are imported at runtime** from a `safetensors` file via a dependency-free reader (`g2g-ml::safetensors`, a focused parser for the format's `u64` length + JSON-subset header + raw tensor bytes, no `serde` / no `safetensors` crate): `conv2d_from_safetensors` reads the `[Cout, Cin, KH, KW]` weight and `[Cout]` bias by name and infers the kernel dims, so picking a different trained checkpoint is "parse a different file" while the layer topology stays this compiled element. This is the weights half; the architecture stays Rust (truly dynamic *graphs* at runtime are the `ort` backend's job, and `burn-onnx` build-time codegen is the Burn-side topology path, above). It owns no device: because a `wgpu::Buffer` is bindable only on the device that created it, the element adopts the producer's device / queue (carried by the incoming `WgpuBufferOwner`) on the first frame and submits its compute on the producer's queue, which orders it after the producer's work with no fence or read-back. The logits are read back to `MemoryDomain::System` by default or left GPU-resident (`with_gpu_output`) for a downstream GPU consumer. A burn / ort consumer cannot do this zero-copy: their tensor handles are opaque (no foreign-buffer adopt) and run on their own device, so they would force the GPU->CPU->GPU round-trip the GPU-resident preprocess and inference paths exist to delete.
+  **An ONNX topology runs through the same element**, but the import is build-time: `burn-onnx` (what `burn-import` 0.21 forwards to) generates a burn `Module` plus an embedded burnpack weight blob from the `.onnx` at compile time, so there is no runtime graph loader to hand the file to.
+
+  The seam is the `BurnModule` trait: one forward pass from the `[1, 3, H, W]` NCHW f32 tensor the element normalizes to `[1, N]` logits. The importing crate implements it over its generated `Model<Wgpu>` and passes it to `BurnInference::module`, which then drives it frame by frame exactly like the built-in linear layer (a forward pass whose output is not the declared `num_outputs` fails the frame, so the emitted `Caps::Tensor` cannot lie).
+
+  Because the codegen crate drags burn's whole dependency tree into any lockfile that resolves it, the worked case is a workspace-excluded standalone crate, `examples/g2g-onnx-import`: a `Conv2d -> BatchNorm -> ReLU -> global average pool -> linear` graph whose logits match the ONNX Runtime reference for the same frame on the RTX 3060.
+
+  Attention imports through the same seam: the standard-domain ONNX `Attention` op (opset 23, one node for a whole multi-head block) is lowered by `burn-onnx` onto `burn::tensor::module::attention`, so the GPU runs burn's own attention kernel rather than a hand-unrolled matmul / softmax chain, validated on the 3060 by a second fixture in that crate (pixels as a token sequence -> multi-head self-attention -> mean pool -> linear). Because that node is opaque in the graph, the fixture generator folds the attention formula in numpy and asserts ONNX Runtime agrees before emitting the reference logits, so the reference is not ORT agreeing with itself. This is the topology half of the Burn story, the counterpart of the runtime `safetensors` weight import below.
+
+- **`g2g-ml::ort`** (High-Performance Enterprise Server): wraps ONNX Runtime bindings to pass underlying memory domains to hardware-specific execution paths (CUDA / TensorRT / DirectML / Apple CoreML) natively. Each execution provider is a constructor variant on `OrtInference` that registers the EP ahead of the CPU fallback; registration is best-effort, so the session keeps running (on CPU) when the device is absent. Desktop: `from_memory_with_cuda`, `from_memory_with_directml`.
+
+  **Android edge**: `from_memory_with_nnapi` (the system NeuralNetworks API: NPU / GPU / DSP), `from_memory_with_xnnpack` (ARM-optimized CPU), and `from_memory_for_android`, which registers NNAPI then XNNPACK then the default CPU EP in one call so ORT assigns each node to the first provider that supports it, the MediaPipe delegate-with-fallback shape. The `nnapi` / `xnnpack` features link symbols only the Android ONNX Runtime build carries, so they are Android-target features (a host build / CI never enables them); the EP stack is validated on a device (`tools/android-nnapi-smoke.sh` runs `g2g-ml/tests/android_nnapi_probe.rs` from `/data/local/tmp`, a binder-threadpool shim for the vendor NNAPI HAL, output byte-exact with the CPU reference).
+
+  **Edge TPU offload is proven**: an int8 QDQ Conv->ReLU fixture run through `from_memory_for_android` is placed on `NnapiExecutionProvider` (read from ORT's profiling JSON), and on a Pixel 10a (Tensor G4) the DarwiNN HAL log confirms the Edge TPU compiled and executed it (`/dev/edgetpu core0` firmware load); the float-typed input-boundary `QuantizeLinear` is the one op the TPU declines, correctly delegated to CPU (`tools/android-nnapi-conv-smoke.sh`, which also greps the `darwinn` logcat to disambiguate the TPU from other NNAPI accelerators).
+
+  **Full-graph offload**: a uint8-input variant of the model (the boundary `QuantizeLinear` removed, the graph input retyped to uint8) runs *entirely* on the TPU, every node on `NnapiExecutionProvider` with nothing on the CPU, and the DarwiNN log confirms `Ops supported = ..., not supported = 0` / `compilation finished successfully on google-edgetpu`.
+
+  The f32->uint8 quantization that feeds such a model is `TensorConvert` (`g2g-plugins`), the tensor-domain sibling of `VideoConvert`: it quantizes an f32 tensor to int8 / uint8 (`q = round(x / scale) + zero_point`, clamped) or dequantizes the inverse, shape and layout passing through. So `preprocess -> TensorConvert(quantize) -> inference` keeps the boundary quantize *out* of the model, leaving the whole inference graph accelerator-eligible. `TensorConvert` also transposes NCHW<->NHWC and narrows / widens f32<->F16 in the same pass, so a model that wants `NHWC uint8` (NNAPI / TFLite) is fed straight from an `NCHW f32` source. `OrtInference` itself accepts the integer input: `from_session` reads the model's input element type and `with_tensor_input` on a u8 / i8 model feeds the quantized tensor straight to the session (RGBA mode stays f32-only).
+
+  **The whole chain is validated live on the device**: `Camera2Src -> TensorConvert(quantize) -> OrtInference(uint8) ` runs a real camera frame onto the Edge TPU (`tools/android-camera-tpu-smoke.sh`; on a Pixel 10a the logcat shows `accelerator name: EDGETPU` and `compilation finished successfully on google-edgetpu`), the g2g answer to "an edge framework that moves inference between CPU and accelerator" demonstrated end to end on real hardware.
+
+  The same constructor shape extends to the other vendor accelerators: `from_memory_with_qnn` (Qualcomm AI Engine Direct, the Hexagon NPU / Adreno GPU on Snapdragon, the alternative to reaching the Hexagon through NNAPI) and `from_memory_with_coreml` (the Apple Neural Engine / GPU on macOS / iOS), each behind a target-only feature like `nnapi` (a host build never links them); both compile for their target. This is the heterogeneous-device story (a desktop NVIDIA box, a Windows D3D12 GPU, an Android phone NPU, and the Qualcomm / Apple NPUs all run the same element, the EP picked per platform), the architectural answer to MediaPipe's runtime CPU/GPU delegate switch.
+
+`WgpuInference` (`g2g-ml/src/wgpuinfer.rs`, `wgpu` feature) is the GPU-resident counterpart of `BurnInference`: a raw wgpu compute pass that binds the GPU-resident tensor `WgpuPreprocess::with_gpu_output` (§5.1) produced **directly**, rather than taking `RawVideo` / `System` and uploading.
+
+It runs one of a small op zoo on that tensor, selected at construction (each its own WGSL shader behind the shared device-adopt / dispatch / read-back machinery): the original `input · W + b` linear matmul (`linear`); a same-padding stride-1 2D convolution (`conv2d`) over the `[1, Cin, H, W]` NCHW tensor with `[Cout, Cin, KH, KW]` weights, leaving a `[1, Cout, H, W]` feature map; the elementwise activations `relu` / `sigmoid`; and `maxpool2d` / `avgpool2d` spatial pooling. The weighted ops (linear, conv2d) bind a 5-entry group (meta, input, weights, bias, out); the weightless ops (activation, pooling) bind a 3-entry group (meta, input, out), the bind-group layout following the active shader.
+
+The conv is the keystone that lets the chain run an actual CNN layer, not just a final classifier; the activation is the nonlinearity that keeps stacked convs from collapsing to one linear map, and the pool the spatial downsampler. Chained GPU-resident (`conv2d -> relu -> maxpool`, each in `with_gpu_output` mode so the data never leaves the device between layers), they are a real small-CNN body, validated on the RTX 3060 against a CPU reference folding the same ops (`conv2d_reference` / `relu_reference` / `maxpool2d_reference`) over the exact tensor the GPU preprocess produced.
+
+**Trained weights are imported at runtime** from a `safetensors` file via a dependency-free reader (`g2g-ml::safetensors`, a focused parser for the format's `u64` length + JSON-subset header + raw tensor bytes, no `serde` / no `safetensors` crate): `conv2d_from_safetensors` reads the `[Cout, Cin, KH, KW]` weight and `[Cout]` bias by name and infers the kernel dims, so picking a different trained checkpoint is "parse a different file" while the layer topology stays this compiled element. This is the weights half; the architecture stays Rust (truly dynamic *graphs* at runtime are the `ort` backend's job, and `burn-onnx` build-time codegen is the Burn-side topology path, above).
+
+It owns no device: because a `wgpu::Buffer` is bindable only on the device that created it, the element adopts the producer's device / queue (carried by the incoming `WgpuBufferOwner`) on the first frame and submits its compute on the producer's queue, which orders it after the producer's work with no fence or read-back. The logits are read back to `MemoryDomain::System` by default or left GPU-resident (`with_gpu_output`) for a downstream GPU consumer. A burn / ort consumer cannot do this zero-copy: their tensor handles are opaque (no foreign-buffer adopt) and run on their own device, so they would force the GPU->CPU->GPU round-trip the GPU-resident preprocess and inference paths exist to delete.
 
 ### 5.3 Native Async Batching Engine
 `g2g-ml::batcher` provides a lock-free, multi-channel execution sink that groups separate asynchronous video input streams into a single hardware tensor execution array:
@@ -4804,7 +4991,7 @@ picture. Two pieces, both `no_std`-friendly:
   texture produced through a `from_wgpu` context reads back correctly on the
   embedder's own device handles). The frame still flows to the app through any
   sink, including the `appsink` pull channel, which carries a GPU-domain `Frame`
-  unchanged. The `bevy-g2g` crate's `VideoPlayerPlugin` (M741 -> M796) is the
+  unchanged. The `bevy-g2g` crate's `VideoPlayerPlugin` is the
   packaged proof: a stock Bevy app's render device is adopted into `from_wgpu`
   in the plugin's `finish`, a
   `filesrc -> h264parse -> ffmpegdec -> videoconvert -> vello overlay -> appsink`
@@ -4854,7 +5041,7 @@ The `no_std + alloc` core runs here directly: runner futures are
 executor-agnostic and `ElementBound` is empty without `multi-thread` (§4.3).
 The embedded surface comprises:
 
-- `StaticBufferPool<T, N>` in `g2g-core` (pure `core`, no feature gate) — a
+- `StaticBufferPool<T, N>` in `g2g-core` (pure `core`, no feature gate), a
   compile-time-sized zero-allocation pool yielding bounded mutable references
   checked via compile-time lifetimes. This is the strict no-heap pool the
   `Arc<Mutex<Vec<T>>>` `BufferPool` (§3.3) cannot serve.
@@ -4862,7 +5049,7 @@ The embedded surface comprises:
   of `WallClock`. The tick rate is selected at the feature; a HAL provides
   the time driver at link.
 - `PacketChannel` + `EmbassySink` (`embassy-link` feature) over
-  `embassy-sync`, a zero-allocation inter-task packet link — the §6.2 stack
+  `embassy-sync`, a zero-allocation inter-task packet link, the §6.2 stack
   channel. `SinglePacketChannel` (`NoopRawMutex`) is the single-executor
   default; `SharedPacketChannel` (`CriticalSectionRawMutex`, hence `Sync`) is
   the variant that can live in a `static`, so spawned tasks reach it by
@@ -4898,18 +5085,18 @@ so the `!Send` JS handle types satisfy the empty `ElementBound` (§4.3).
 
 The browser element surface comprises:
 
-- `WasmClock` — `performance.now()` + `setTimeout` sleep, the wasm analog
+- `WasmClock`: `performance.now()` + `setTimeout` sleep, the wasm analog
   of `WallClock`.
-- `WebSocketSrc` — ingest over a browser `WebSocket`, parallel to `FileSrc`
+- `WebSocketSrc`: ingest over a browser `WebSocket`, parallel to `FileSrc`
   / `RtspSrc`.
-- `WebRtcSrc` (`web` feature) — ingest over a provided `RtcDataChannel`.
-- `WebCodecsDecode` (`web-codecs` feature) — wraps the browser `VideoDecoder`;
+- `WebRtcSrc` (`web` feature): ingest over a provided `RtcDataChannel`.
+- `WebCodecsDecode` (`web-codecs` feature): wraps the browser `VideoDecoder`;
   H.264 or H.265 Annex-B access units in, `VideoFrame` copied to `System` RGBA
   out. The codec comes from the negotiated caps and picks the WebCodecs codec
   string built from the in-band SPS (`avc1.` / `hev1.`, ISO/IEC 14496-15 Annex
   E.3); chunks stay Annex-B, which is what a config without a `description`
   means. Build needs `--cfg=web_sys_unstable_apis`.
-- `CanvasSink` — presents decoded RGBA to an HTML canvas via the 2D context.
+- `CanvasSink`: presents decoded RGBA to an HTML canvas via the 2D context.
   `WebGpuCanvasSink` (`web-gpu` feature) is the zero-copy variant: it imports
   the decoded `VideoFrame` as a `GPUExternalTexture` and samples it in a render
   pass, with no readback into wasm memory.
@@ -4919,7 +5106,7 @@ A complete in-browser glass-to-glass pipeline is
 for the wasm build is
 `cargo check --target wasm32-unknown-unknown -p g2g-plugins --features web`.
 
-**Off the main thread (M1054).** A whole graph can run inside a dedicated module
+**Off the main thread.** A whole graph can run inside a dedicated module
 worker: one wasm instance per worker, the same single-threaded executor, no
 SharedArrayBuffer and no cross-origin isolation. The page hands the worker an
 `OffscreenCanvas` (`canvas.transferControlToOffscreen()`), which the sinks take
@@ -4985,14 +5172,28 @@ The bridge intercepts the GStreamer pipeline's internal `GstBuffer`, extracts th
 
 **Implementation (two layers).** The bridge splits into a transport-agnostic core and a GStreamer-facing FFI shell, so the hard, novel part (the sync/async match and lifecycle) is testable on any host without a GStreamer dependency:
 
-1. **`BridgeGraph` (the impedance core, `g2g-bridge`).** Embeds a g2g sub-graph by wrapping a user launch fragment as `appsrc ! <fragment> ! appsink`, parsing it against the standard registry, and running it on a dedicated OS thread with its own current-thread runtime. It exposes a synchronous API: `push(bytes, pts)` feeds the embedded `appsrc`, `try_pull()`/`pull_blocking()` drain the `appsink`, `end_of_stream()`/`finish()`/`Drop` tear down. The `appsrc`/`appsink` elements (§4.x) *are* the boundary the §7 design needs (synchronous external code feeding/draining a running async graph, with bounded-channel backpressure), so the bridge reuses them rather than reinventing the channel plumbing. Per-instance channel names are made collision-free with an atomic counter (the named-feed registries are process-global). On shutdown the drain handle is released before EOS is signalled, so an un-drained graph cannot deadlock the join. Requires the `multi-thread` feature, since the boxed graph must be `Send` to move to the run thread (as in `g2g-capi`).
+1. **`BridgeGraph` (the impedance core, `g2g-bridge`).** Embeds a g2g sub-graph by wrapping a user launch fragment as `appsrc ! <fragment> ! appsink`, parsing it against the standard registry, and running it on a dedicated OS thread with its own current-thread runtime.
 
-2. **The GObject `GstBaseTransform` shell (`libgstglass2glass.so`, the `gstreamer` feature).** A thin C shim (`csrc/gstglass2glass.c`, built by `build.rs` via pkg-config + `cc`) registers `glass2glass` as a real GStreamer element and includes the actual GStreamer headers, so the GObject struct layouts are correct by construction rather than hand-transcribed. It delegates to the C-ABI functions in `src/ffi.rs`, which drive one `BridgeGraph` per instance: `set_caps` builds it from the `fragment` property and the serialized sink/src caps (normalized: the `(type)` annotations and whitespace GStreamer emits are stripped so g2g's caps reader and launch DSL accept them), `stop` destroys it. The element handles both **caps-preserving** and **caps/size-changing** fragments. A preserving fragment (a wgpu effect, `videoflip`, an ML preprocessor keeping the pixel format) runs in place via `transform_ip` (the fast path). A fragment that rescales or reformats declares its result through an `output-caps` property; the shell then advertises it via `transform_caps`, sizes the output buffer via `get_unit_size` (`gst_video_info_from_caps`), and runs the out-of-place `transform` (`inbuf`→`outbuf`). GstBaseTransform dispatches between the two by whether the negotiated caps differ. `BridgeGraph` pins the sub-graph's trailing inline caps filter to the output caps (equal to the input when preserving), which both enforces the contract and gives a caps-driven transform a fixate target.
+   It exposes a synchronous API: `push(bytes, pts)` feeds the embedded `appsrc`, `try_pull()`/`pull_blocking()` drain the `appsink`, `end_of_stream()`/`finish()`/`Drop` tear down. The `appsrc`/`appsink` elements (§4.x) *are* the boundary the §7 design needs (synchronous external code feeding/draining a running async graph, with bounded-channel backpressure), so the bridge reuses them rather than reinventing the channel plumbing. Per-instance channel names are made collision-free with an atomic counter (the named-feed registries are process-global). On shutdown the drain handle is released before EOS is signalled, so an un-drained graph cannot deadlock the join. Requires the `multi-thread` feature, since the boxed graph must be `Send` to move to the run thread (as in `g2g-capi`).
 
-The **zero-copy DMABUF import** path exists at the ingest side: `appsrc` accepts a `MemoryDomain::DmaBuf` frame (`AppSrcFeed::push_dmabuf`), `BridgeGraph::push_dmabuf` feeds it, and the C-ABI `g2g_bridge_push_dmabuf` `dup`s a GStreamer buffer's dma-buf fd (GStreamer keeps the original; g2g's `OwnedDmaBuf` closes only the dup) so no pixel bytes are copied at the boundary. The dma-buf-**consuming** element exists: `dmabuftowgpu` (`g2g-plugins`, the `dmabuf-wgpu` feature) imports a `MemoryDomain::DmaBuf` frame into a GPU-resident `wgpu::Buffer` via `VK_EXT_external_memory_dma_buf` (Vulkan `from_raw_managed` -> `create_buffer_from_hal`), so a bridge fragment like `dmabuftowgpu ! <wgpu compute>` runs the imported buffer on the GPU with no CPU copy. Validated on an RTX 3060 by exporting GPU memory as a dma-buf fd and re-importing it (a discrete GPU binds a GPU-visible dma-buf; a CPU/vmalloc-backed one, e.g. a USB webcam or udmabuf, it cannot, and the element returns `UnsupportedDomain` rather than a wrong result).
+2. **The GObject `GstBaseTransform` shell (`libgstglass2glass.so`, the `gstreamer` feature).** A thin C shim (`csrc/gstglass2glass.c`, built by `build.rs` via pkg-config + `cc`) registers `glass2glass` as a real GStreamer element and includes the actual GStreamer headers, so the GObject struct layouts are correct by construction rather than hand-transcribed. It delegates to the C-ABI functions in `src/ffi.rs`, which drive one `BridgeGraph` per instance: `set_caps` builds it from the `fragment` property and the serialized sink/src caps (normalized: the `(type)` annotations and whitespace GStreamer emits are stripped so g2g's caps reader and launch DSL accept them), `stop` destroys it.
+
+   The element handles both **caps-preserving** and **caps/size-changing** fragments. A preserving fragment (a wgpu effect, `videoflip`, an ML preprocessor keeping the pixel format) runs in place via `transform_ip` (the fast path). A fragment that rescales or reformats declares its result through an `output-caps` property; the shell then advertises it via `transform_caps`, sizes the output buffer via `get_unit_size` (`gst_video_info_from_caps`), and runs the out-of-place `transform` (`inbuf`→`outbuf`). GstBaseTransform dispatches between the two by whether the negotiated caps differ. `BridgeGraph` pins the sub-graph's trailing inline caps filter to the output caps (equal to the input when preserving), which both enforces the contract and gives a caps-driven transform a fixate target.
+
+The **zero-copy DMABUF import** path exists at the ingest side: `appsrc` accepts a `MemoryDomain::DmaBuf` frame (`AppSrcFeed::push_dmabuf`), `BridgeGraph::push_dmabuf` feeds it, and the C-ABI `g2g_bridge_push_dmabuf` `dup`s a GStreamer buffer's dma-buf fd (GStreamer keeps the original; g2g's `OwnedDmaBuf` closes only the dup) so no pixel bytes are copied at the boundary.
+
+The dma-buf-**consuming** element exists: `dmabuftowgpu` (`g2g-plugins`, the `dmabuf-wgpu` feature) imports a `MemoryDomain::DmaBuf` frame into a GPU-resident `wgpu::Buffer` via `VK_EXT_external_memory_dma_buf` (Vulkan `from_raw_managed` -> `create_buffer_from_hal`), so a bridge fragment like `dmabuftowgpu ! <wgpu compute>` runs the imported buffer on the GPU with no CPU copy. Validated on an RTX 3060 by exporting GPU memory as a dma-buf fd and re-importing it (a discrete GPU binds a GPU-visible dma-buf; a CPU/vmalloc-backed one, e.g. a USB webcam or udmabuf, it cannot, and the element returns `UnsupportedDomain` rather than a wrong result).
 
 **The shell's dma-buf round-trip is wired on both sides.** The data path is a single `generate_output` override (not `transform`/`transform_ip`, so the output buffer may differ from the input in size *and* memory kind): on input it checks `gst_is_dmabuf_memory` and imports the fd via `g2g_bridge_push_dmabuf` (else maps and copies bytes); on output the pull returns either system bytes or a dma-buf (the FFI `G2gOut` carries a `kind` discriminant), and the shell wraps a dma-buf frame back into a `GstBuffer` via `gst_dmabuf_allocator_alloc` (the fd dup'ed, so the g2g frame keeps its own). A full `dma-buf in -> glass2glass(identity) -> dma-buf out` round-trip is validated with a memfd-backed dma-buf (`tools/gst-bridge-dmabuf-smoke.sh`), and the system-memory path is unchanged (`tools/gst-bridge-smoke.sh`).
 
    The plugin entry points are subtle: rustc exports only its own `#[no_mangle]` symbols from a cdylib and localizes anything pulled from a statically-linked C archive, so a C `GST_PLUGIN_DEFINE` descriptor is invisible to GStreamer's loader. The `GstPluginDesc` and the `gst_plugin_<name>_get_desc`/`_register` entry points the loader resolves (by the `libgst<name>.so` filename) are therefore authored in Rust (`src/ffi.rs`), pointing at the C `plugin_init` that does the actual element registration. This is the same split `gst-plugins-rs` uses. Because the feature links the system GStreamer, the shell is built and smoke-tested locally (`tools/gst-bridge-smoke.sh`), not in CI.
 
-3. **The reverse direction (`gstwrap`, `g2g-plugins`, the `gstreamer` feature).** The two layers above put a g2g stage inside a GStreamer app; `gstwrap` does the opposite, hosting an unported GStreamer element *inside* a g2g graph. This is the incremental-migration path in the g2g-as-top-framework direction: adopt g2g now and keep the stages you have not ported yet running as real GStreamer elements. It is a normal g2g `AsyncElement` whose `element` property is a GStreamer element description (`x264enc bitrate=4000`, `videoflip method=horizontal-flip`); internally it drives `appsrc ! <element> ! appsink` in a real GStreamer pipeline on GStreamer's own streaming threads. `process` copies each `System` input frame into a `GstBuffer` (`gst_app_src_push_buffer`), drains ready output non-blockingly (`gst_app_sink_try_pull_sample`, 0 timeout), and on EOS flushes the element's buffered frames. The C interop mirrors the shell's: a small helper (`csrc/gstwrap_host.c`, built by the crate's `build.rs` via pkg-config + `cc`) over the gstreamer-1.0 / gstreamer-app-1.0 C API, driven from `src/gstwrap.rs` over a C ABI. Caps translate with the existing `Caps::to_gst_string()` (g2g caps → the appsrc's caps) and `parse_caps()` (an `output-caps` property → the caps a reformatting element like an encoder or `videoscale` produces); a caps-preserving element declares nothing and couples input == output. The pipeline handle is `Send` because the appsrc/appsink APIs are MT-safe (the element drives them from one runner task at a time). The data path uses system memory, with a copy in and a copy out, like the shell's non-dma-buf path. Validated locally (`cargo test -p g2g-plugins --features gstreamer --test gstwrap`, not CI) by hosting a real `videoflip` and asserting the pixels come back flipped, and by running `videotestsrc ! gstwrap element="videoflip method=horizontal-flip" ! fakesink` through `parse_launch`. A multi-word element description reaches `gstwrap` from a `gst-launch` line because the launch tokenizer is quote-aware (it treats a `"..."` region as one token, so spaces and `!` inside a value are literal); see §4.16.
+3. **The reverse direction (`gstwrap`, `g2g-plugins`, the `gstreamer` feature).** The two layers above put a g2g stage inside a GStreamer app; `gstwrap` does the opposite, hosting an unported GStreamer element *inside* a g2g graph. This is the incremental-migration path in the g2g-as-top-framework direction: adopt g2g now and keep the stages you have not ported yet running as real GStreamer elements.
+
+   It is a normal g2g `AsyncElement` whose `element` property is a GStreamer element description (`x264enc bitrate=4000`, `videoflip method=horizontal-flip`); internally it drives `appsrc ! <element> ! appsink` in a real GStreamer pipeline on GStreamer's own streaming threads. `process` copies each `System` input frame into a `GstBuffer` (`gst_app_src_push_buffer`), drains ready output non-blockingly (`gst_app_sink_try_pull_sample`, 0 timeout), and on EOS flushes the element's buffered frames.
+
+   The C interop mirrors the shell's: a small helper (`csrc/gstwrap_host.c`, built by the crate's `build.rs` via pkg-config + `cc`) over the gstreamer-1.0 / gstreamer-app-1.0 C API, driven from `src/gstwrap.rs` over a C ABI. Caps translate with `Caps::to_gst_string()` (g2g caps → the appsrc's caps) and `parse_caps()` (an `output-caps` property → the caps a reformatting element like an encoder or `videoscale` produces); a caps-preserving element declares nothing and couples input == output.
+
+   The pipeline handle is `Send` because the appsrc/appsink APIs are MT-safe (the element drives them from one runner task at a time). The data path uses system memory, with a copy in and a copy out, like the shell's non-dma-buf path.
+
+   Validated locally (`cargo test -p g2g-plugins --features gstreamer --test gstwrap`, not CI) by hosting a real `videoflip` and asserting the pixels come back flipped, and by running `videotestsrc ! gstwrap element="videoflip method=horizontal-flip" ! fakesink` through `parse_launch`. A multi-word element description reaches `gstwrap` from a `gst-launch` line because the launch tokenizer is quote-aware (it treats a `"..."` region as one token, so spaces and `!` inside a value are literal); see §4.16.

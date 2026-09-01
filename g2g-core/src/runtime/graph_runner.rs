@@ -1502,7 +1502,7 @@ async fn prepare_graph<'a>(
                         }
                         None => ClockSync::new(sink_clock.clone(), base_time_ns),
                     };
-                    elem.set_clock_sync(sync);
+                    elem.set_clock_sync(sync.with_path_latency(latency));
                 }
             }
         }

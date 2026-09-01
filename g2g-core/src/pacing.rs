@@ -168,7 +168,11 @@ impl PresentationPacer {
         }
         let sync = self.clock_sync.clone()?;
         let rt = self.running_time(pts_ns)?;
-        Some(self.presentation_anchor(&sync, rt).saturating_add(rt))
+        Some(
+            self.presentation_anchor(&sync, rt)
+                .saturating_add(rt)
+                .saturating_add(sync.path_latency_min_ns()),
+        )
     }
 
     /// Verdict for one frame: how long to hold it, or that it is not to be
@@ -279,6 +283,15 @@ impl PresentationPacer {
     /// - **Otherwise** (slow start, live, or pre-`Playing` preroll): first-frame
     ///   anchor, then pace by PTS deltas.
     fn presentation_anchor(&mut self, sync: &ClockSync, rt: u64) -> u64 {
+        // A live path anchors on the base time, stamped or eager, never on the
+        // first frame (GStreamer's model). A startup stall (decoder init) then
+        // makes the opening frames late, rendered immediately, instead of
+        // becoming the standing latency of the whole run. Reality cannot be
+        // paused, so the file-pacing concern behind first-frame anchoring does
+        // not apply to a live path.
+        if sync.path_live() {
+            return sync.base_time();
+        }
         // Re-base a provisional preroll anchor onto the play edge once `Playing`
         // has stamped the base time.
         if self.anchor_pre_play && sync.play_anchored() && !self.seek_reanchor {
@@ -334,6 +347,39 @@ mod tests {
         assert!(!p.is_paced());
         assert_eq!(p.judge(5_000_000_000, 0), Pace::Now);
         assert_eq!(p.late_dropped(), 0);
+    }
+
+    #[test]
+    fn a_live_path_anchors_on_base_time_not_the_first_frame() {
+        let t = Arc::new(AtomicU64::new(0));
+        let sync = ClockSync::new(Arc::new(ManualClock(t.clone())), 0)
+            .with_path_latency(crate::query::LatencyReport::live(0, None));
+        let mut p = PresentationPacer::new();
+        p.set_clock_sync(sync);
+        // A startup stall: the first frame (rt 0) reaches the sink at 200 ms.
+        // Late against the base-time anchor, so it presents immediately
+        // rather than becoming the anchor.
+        t.store(200_000_000, Ordering::Relaxed);
+        assert_eq!(p.judge(0, 0), Pace::Now);
+        // The backlog frame (rt 33 ms) is judged against the base too: still
+        // late at 210 ms, presented immediately. Under first-frame anchoring
+        // this would have been Wait(23 ms).
+        t.store(210_000_000, Ordering::Relaxed);
+        assert_eq!(p.judge(33_000_000, 1), Pace::Now);
+        // Once real time catches up to PTS the pacer holds frames again.
+        t.store(220_000_000, Ordering::Relaxed);
+        assert_eq!(p.judge(300_000_000, 2), Pace::Wait(80_000_000));
+    }
+
+    #[test]
+    fn a_live_path_adds_the_declared_minimum_latency() {
+        let t = Arc::new(AtomicU64::new(0));
+        let sync = ClockSync::new(Arc::new(ManualClock(t.clone())), 0)
+            .with_path_latency(crate::query::LatencyReport::live(50_000_000, None));
+        let mut p = PresentationPacer::new();
+        p.set_clock_sync(sync);
+        // rt 0 is due at base + declared min latency, not at base.
+        assert_eq!(p.judge(0, 0), Pace::Wait(50_000_000));
     }
 
     #[test]

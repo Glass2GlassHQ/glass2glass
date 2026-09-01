@@ -4,8 +4,14 @@ Pre-release. Work is tracked by milestone (Mn) following the roadmap in `DESIGN.
 Versioning and the stability tiers are defined in `STABILITY.md`; `g2g-core` is the
 semver-covered surface, the plugin/binding crates are provisional or experimental.
 
-## Unreleased
+## 0.6.0
 
+- M1112: live paths anchor presentation on the pipeline base time plus declared latency, so a decoder's startup stall drains instead of becoming the run's standing latency (nvdec live p50 265 ms to 50 ms).
+- M1110: per-element `age_at_emit` telemetry (frame age at each output push), the metric that exposes in-element buffering.
+- M1109: H.264 POC type 2 streams decode with zero reorder seed, cutting live glass-to-glass p50 from 177 ms to 19 ms, with a decoder pipeline-depth test and CI job pinning it.
+- M1108: `WaylandSink` keeps raw glass-to-glass samples so the smoke harness prints exact percentiles.
+- M1107: `g2g-discover` reports a file's container, streams, caps, duration and tags without decoding.
+- M1106: `pipewiresink` provides a playout-disciplined `AudioProvider` clock for A/V sync.
 - M1105: `hsvfilter`, `hsvdetector` and `roundedcorners`, plus launch aliases for the gst-plugins-rs names of existing elements.
 - M1104: `pnmenc` / `pnmdec`, `tonegeneratesrc`, `dtmfsrc` / `dtmfdetect`, `videoanalyse`, `scenechange` and `debugspy`.
 - M1103: `solarize`, `chromium`, `dilate`, `dodge`, `exclusion` and `burn` join the software video effects.

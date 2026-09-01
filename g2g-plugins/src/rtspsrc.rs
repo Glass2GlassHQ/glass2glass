@@ -251,6 +251,14 @@ impl SourceLoop for RtspSrc {
     where
         Self: 'a;
 
+    // Live: a sink downstream anchors presentation on the pipeline base time,
+    // so a startup stall renders late and drains instead of becoming the
+    // run's standing latency. Min 0: TCP-interleaved delivery adds no
+    // jitterbuffer wait of its own.
+    fn latency(&self) -> g2g_core::query::LatencyReport {
+        g2g_core::query::LatencyReport::live(0, None)
+    }
+
     type CapsFuture<'a>
         = Pin<Box<dyn Future<Output = Result<Caps, G2gError>> + 'a>>
     where

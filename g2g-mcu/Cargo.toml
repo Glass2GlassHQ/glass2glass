@@ -27,8 +27,10 @@ embedded-hal = "1"
 
 [dev-dependencies]
 # Host-test only (the ffmpeg conformance oracle persists Oracle evidence via
-# the shared mechanism); does not touch the no-alloc claim above.
-g2g-plugins = { workspace = true, features = ["std"] }
+# the shared mechanism); does not touch the no-alloc claim above. Path-only,
+# no version, so cargo strips it at publish (a versioned dev-dep here would
+# cycle with g2g-plugins' dependency on this crate).
+g2g-plugins = { path = "../g2g-plugins", features = ["std"] }
 
 [lints]
 workspace = true

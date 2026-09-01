@@ -169,6 +169,35 @@ pub enum PacingPolicy {
 ///     .with_title("preview")
 ///     .with_pacing(PacingPolicy::DropOldest);
 /// ```
+/// Raw samples kept beside the histogram stop at this count (8 bytes each,
+/// about 2.4 hours at 30 fps). The histogram keeps counting past it.
+const LATENCY_SAMPLE_CAPACITY: usize = 1 << 18;
+
+/// Glass-to-glass histogram plus the raw per-frame samples behind it, so a
+/// bench can read exact percentiles instead of log2 bucket edges.
+#[derive(Debug)]
+struct LatencyRecorder {
+    histogram: LatencyHistogram,
+    samples: std::sync::Mutex<Vec<u64>>,
+}
+
+impl LatencyRecorder {
+    fn new() -> Self {
+        Self {
+            histogram: LatencyHistogram::new(),
+            samples: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    fn record(&self, dur_ns: u64) {
+        self.histogram.record(dur_ns);
+        let mut samples = self.samples.lock().expect("latency samples lock");
+        if samples.len() < LATENCY_SAMPLE_CAPACITY {
+            samples.push(dur_ns);
+        }
+    }
+}
+
 pub struct WaylandSink {
     title: String,
     app_id: String,
@@ -177,7 +206,7 @@ pub struct WaylandSink {
     width: u32,
     height: u32,
     frames_presented: Arc<AtomicU64>,
-    latency: Arc<LatencyHistogram>,
+    latency: Arc<LatencyRecorder>,
     frames_dropped: Arc<AtomicU64>,
     pacing: PacingPolicy,
     /// PTS pacing + QoS late-drop (M173 / M176), shared with the other
@@ -228,7 +257,7 @@ impl WaylandSink {
             width: 0,
             height: 0,
             frames_presented: Arc::new(AtomicU64::new(0)),
-            latency: Arc::new(LatencyHistogram::new()),
+            latency: Arc::new(LatencyRecorder::new()),
             frames_dropped: Arc::new(AtomicU64::new(0)),
             pacing: PacingPolicy::default(),
             pacer: PresentationPacer::new(),
@@ -294,7 +323,19 @@ impl WaylandSink {
     /// that confirms our commit. Only frames whose timing was stamped
     /// upstream contribute; an untimed pipeline reports `count = 0`.
     pub fn latency_snapshot(&self) -> LatencySnapshot {
-        self.latency.snapshot()
+        self.latency.histogram.snapshot()
+    }
+
+    /// The raw per-frame samples behind [`latency_snapshot`], nanoseconds in
+    /// presentation order, capped at `LATENCY_SAMPLE_CAPACITY`.
+    ///
+    /// [`latency_snapshot`]: Self::latency_snapshot
+    pub fn latency_samples(&self) -> Vec<u64> {
+        self.latency
+            .samples
+            .lock()
+            .expect("latency samples lock")
+            .clone()
     }
 
     fn shutdown(&mut self) {
@@ -610,8 +651,9 @@ impl AsyncElement for WaylandSink {
                     self.last_present_done_ns = t_done;
                     g2g_core::g2g_log!(
                         self,
-                        "pts={} wait={}us slept={}us conv+ack={}us gap={}us",
+                        "pts={} age_in={}us wait={}us slept={}us conv+ack={}us gap={}us",
                         timing.pts_ns,
+                        t_in.saturating_sub(timing.arrival_ns) / 1_000,
                         wait_ns / 1_000,
                         t_ready.saturating_sub(t_in) / 1_000,
                         t_done.saturating_sub(t_ready) / 1_000,
@@ -664,7 +706,7 @@ struct WorkerState {
     ready: Option<Arc<Handshake>>,
     presented: Arc<AtomicU64>,
     dropped: Arc<AtomicU64>,
-    latency: Arc<LatencyHistogram>,
+    latency: Arc<LatencyRecorder>,
     /// Frame queued before the surface is mappable. Once `configure`
     /// lands we drain this into the first draw. With blocking pacing the
     /// producer is throttled to one in-flight frame, so under steady
@@ -691,7 +733,7 @@ fn worker_main(
     rx: Channel<WorkerCmd>,
     presented: Arc<AtomicU64>,
     dropped: Arc<AtomicU64>,
-    latency: Arc<LatencyHistogram>,
+    latency: Arc<LatencyRecorder>,
     ready: Arc<Handshake>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let conn = Connection::connect_to_env()?;

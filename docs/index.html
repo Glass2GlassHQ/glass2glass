@@ -301,6 +301,9 @@
         .feature-card p { font-size: 0.85rem; color: var(--text-secondary); line-height: 1.6; }
         /* A short lead line above the chips. */
         .feature-card .f-lead { font-size: 0.85rem; color: var(--text-secondary); line-height: 1.55; }
+        /* Long card copy is split into short paragraphs; space the stack. */
+        .feature-card .f-lead + .f-lead, .crate-card p + p, .target-card p + p { margin-top: 8px; }
+        .section-desc + .section-desc { margin-top: -40px; }
         /* Element names as airy tag chips under a small label, so a card scans
            as a set of tokens instead of a dense comma-separated paragraph. */
         .chip-group { margin-top: 13px; }
@@ -510,7 +513,7 @@
     <div class="hero-content">
         <div class="hero-badge">
             <div class="badge-dot"></div>
-            <span>Pre-release &middot; 0.5.0</span>
+            <span>Pre-release &middot; 0.6.0</span>
         </div>
         <h1>Hardware-first multimedia,<br><em>glass to glass</em>, in Rust.</h1>
         <p class="hero-sub">
@@ -554,7 +557,7 @@
             <div class="stat-cell"><h3>MCU&rarr;WASM</h3><p>one pipeline</p></div>
             <div class="stat-cell"><h3>200+</h3><p>Elements</p></div>
             <div class="stat-cell"><h3>5</h3><p>Target profiles</p></div>
-            <div class="stat-cell"><h3>100%</h3><p>Pure Rust</p></div>
+            <div class="stat-cell"><h3>no_std</h3><p>pure-Rust core</p></div>
         </div>
     </div>
 </section>
@@ -586,12 +589,12 @@
             <div class="pillar-card">
                 <span class="num">01</span>
                 <h3>Asynchronous execution</h3>
-                <p>Every element is a cooperative <code>Future</code>. No internal OS thread management; runtime-agnostic. Tokio on servers, Embassy on RTOS, <code>wasm-bindgen-futures</code> in the browser.</p>
+                <p>Every element is a cooperative <code>Future</code>. No internal OS thread management; runtime-agnostic. Tokio on servers, Embassy on RTOS, <code>wasm-bindgen-futures</code> in the browser. Per-edge <code>LinkPolicy</code> carries capacity and backpressure, and <code>run_graph_threaded</code> spreads graph arms across OS threads when a pipeline needs multicore.</p>
             </div>
             <div class="pillar-card">
                 <span class="num">02</span>
                 <h3>Hardware-first &amp; zero-copy</h3>
-                <p>Buffers stay in DMABUF, Vulkan, CUDA, D3D11, or WebGPU memory domains. CPU memory copies are treated as system faults, not as the default.</p>
+                <p>Buffers stay in DMABUF, Vulkan, CUDA, D3D11, or WebGPU memory domains. Negotiation settles a zero-copy path per link where one exists and auto-plugs a converter where none does, so every remaining copy is explicit.</p>
             </div>
             <div class="pillar-card">
                 <span class="num">03</span>
@@ -707,7 +710,8 @@
         <span class="section-label">Workspace</span>
         <h2 class="section-title">Ten crates. Clean boundaries.</h2>
         <p class="section-desc">
-            A cargo workspace, MSRV 1.86, edition 2021. OS-coupled elements live
+            A cargo workspace, edition 2021; MSRV 1.86 on the embedded-facing
+            crates, 1.92 elsewhere. OS-coupled elements live
             behind cargo features so the baseline compiles for bare-metal targets.
             A C ABI and Python bindings drive the same graphs from any language.
         </p>
@@ -781,7 +785,11 @@
             <div class="crate-card">
                 <div class="crate-name">g2g-mcu</div>
                 <div class="crate-tag">no_std, no alloc</div>
-                <p>Heap-free MCU peripheral elements over <code>embedded-hal</code> trait seams (host-tested against the datasheet with mocks): <code>SpiDisplaySink</code> (ST7789 / ILI9341, whole-frame or banded streaming for large panels), <code>GrabberSrc</code> (DCMI/CSI camera), <code>PcmSink</code> (I2S/SAI), the fixed-point G.711 / IMA ADPCM codecs, the hardware <code>HwJpegDec</code> / <code>HwH264Enc</code> codec seams, <code>YuyvToI420</code> (camera-4:2:2 &rarr; encoder-4:2:0 convert), and <code>RtpSink</code>. MPL-2.0.</p>
+                <p>Heap-free MCU peripheral elements over <code>embedded-hal</code> trait seams, host-tested against the datasheet with mock peripherals. MPL-2.0.</p>
+                <div class="chip-group">
+                    <span class="chip-label">Elements</span>
+                    <div class="chip-row"><span class="chip">SpiDisplaySink</span><span class="chip">GrabberSrc</span><span class="chip">PcmSink</span><span class="chip">G.711 / ADPCM</span><span class="chip">HwJpegDec</span><span class="chip">HwH264Enc</span><span class="chip">YuyvToI420</span><span class="chip">RtpSink</span></div>
+                </div>
             </div>
             <div class="crate-card">
                 <div class="crate-name">g2g-mcugen</div>
@@ -814,7 +822,12 @@
             <div class="crate-card">
                 <div class="crate-name">g2g-ml</div>
                 <div class="crate-tag">std</div>
-                <p>ONNX Runtime inference (<code>OrtInference</code>) with CUDA + DirectML EPs, pure-Rust Burn inference (<code>BurnInference</code>) on wgpu, running a linear layer or an ONNX topology imported by <code>burn-onnx</code> build-time codegen, the keep-on-GPU wgpu branch (<code>WgpuPreprocess</code> + <code>WgpuInference</code>, GPU-resident tensors end to end), classification head, instance segmentation (<code>OrtSegmentation</code>, a YOLO <code>-seg</code> model's masks and ROIs attached to the frame), and the lock-free multi-stream <code>TensorBatcher</code> (fans N streams into one GPU tensor array). <code>g2g_ml::register</code> puts <code>ortinfer</code> / <code>wgpupreprocess</code> / <code>detectionpostprocess</code> / <code>ortsegment</code> in a <code>gst-launch</code> line. MPL-2.0.</p>
+                <p>ONNX Runtime inference with CUDA + DirectML EPs, pure-Rust Burn inference on wgpu, and the keep-on-GPU wgpu branch: GPU-resident tensors end to end.</p>
+                <p>Instance segmentation attaches a YOLO <code>-seg</code> model's masks and ROIs to the frame; the lock-free <code>TensorBatcher</code> fans N streams into one GPU tensor array. <code>g2g_ml::register</code> puts the elements in a <code>gst-launch</code> line. MPL-2.0.</p>
+                <div class="chip-group">
+                    <span class="chip-label">Elements</span>
+                    <div class="chip-row"><span class="chip">OrtInference</span><span class="chip">BurnInference</span><span class="chip">WgpuPreprocess</span><span class="chip">WgpuInference</span><span class="chip">OrtSegmentation</span><span class="chip">TensorBatcher</span></div>
+                </div>
             </div>
             <div class="crate-card">
                 <div class="crate-name">g2g-bridge</div>
@@ -839,7 +852,7 @@
             <div class="crate-card" style="background: linear-gradient(135deg, var(--bg-secondary), var(--bg-card)); border-color: var(--accent);">
                 <div class="crate-name" style="color: var(--text-primary);">typed by construction</div>
                 <div class="crate-tag">architecture</div>
-                <p>Statically-typed graphs instead of runtime string-keyed factories. CSP caps negotiation with structured failures. Per-link memory-domain policies.</p>
+                <p>Statically-typed graphs at the core, with the registry + launch DSL adding dynamic construction on top. CSP caps negotiation with structured failures. Per-link memory-domain policies.</p>
             </div>
         </div>
     </div>
@@ -853,6 +866,10 @@
         <p class="section-desc">
             Receive, decode, transform, infer, encode, and egress &mdash; with the
             memory-domain handoffs you'd expect from a hardware-first stack.
+            <code>g2g-core</code> is the semver-covered surface. OS-, GPU-, and
+            device-coupled elements are experimental: they compile and many have
+            host tests, but their runtime is not a CI promise
+            (<a href="https://github.com/Glass2GlassHQ/glass2glass/blob/master/STABILITY.md" style="color: var(--accent);">STABILITY.md</a>).
             <br><a href="elements.html" style="color: var(--accent);">Browse the full element reference &rarr;</a>
             &mdash; searchable, generated from the registry (the <code>g2g-inspect</code> data on the web).
         </p>
@@ -922,7 +939,9 @@
             <div class="feature-card">
                 <span class="f-icon">&#128226;</span>
                 <h3>Egress</h3>
-                <p class="f-lead">Sans-IO RTP with 90 kHz PTS and receive-side NACK, SRTP / SRTCP (RFC 3711 and RFC 7714) and DTLS-SRTP in pure Rust; WHIP publish over <code>str0m</code> (ICE / DTLS / SRTP, pure-Rust crypto); IETF MoQ Transport draft-16 and draft-18 publish and subscribe over WebTransport, implemented in-tree and negotiated per session, on reliable subgroup streams or unreliable datagram objects, and played back in a browser by a third-party draft-16 client.</p>
+                <p class="f-lead">Sans-IO RTP with 90 kHz PTS and receive-side NACK; SRTP / SRTCP (RFC 3711 and RFC 7714) and DTLS-SRTP in pure Rust.</p>
+                <p class="f-lead">WHIP publish over <code>str0m</code>: ICE / DTLS / SRTP with pure-Rust crypto.</p>
+                <p class="f-lead">IETF MoQ Transport draft-16/18 publish and subscribe over WebTransport, on reliable subgroup streams or unreliable datagram objects, played back in a browser by a third-party draft-16 client.</p>
                 <div class="chip-group">
                     <span class="chip-label">RTP / UDP</span>
                     <div class="chip-row"><span class="chip">RtpH264Packetizer</span><span class="chip">UdpSink</span><span class="chip">SrtpEnc</span><span class="chip">SrtpDec</span><span class="chip">DtlsSrtpEnc</span><span class="chip">DtlsSrtpDec</span></div>
@@ -950,7 +969,8 @@
             <div class="feature-card">
                 <span class="f-icon">&#127916;</span>
                 <h3>Compositor</h3>
-                <p class="f-lead">Overlays N inputs onto one canvas &mdash; position, z-order, per-pad alpha, bilinear scale &mdash; for picture-in-picture, camera grids, and sub-window UIs. CPU / <code>no_std</code> baseline plus a bit-exact wgpu compute sibling that binds <code>WgpuTexture</code> frames in place (zero-copy in, GPU-resident out). Timed output holds the rate over a stalled input (zero-order-hold on a runner deadline tick), and both are <code>gst-launch</code> elements with per-pad placement properties.</p>
+                <p class="f-lead">Overlays N inputs onto one canvas &mdash; position, z-order, per-pad alpha, bilinear scale &mdash; for picture-in-picture, camera grids, and sub-window UIs.</p>
+                <p class="f-lead">CPU / <code>no_std</code> baseline plus a bit-exact wgpu compute sibling that binds <code>WgpuTexture</code> frames in place. Timed output holds the rate over a stalled input, and both are <code>gst-launch</code> elements with per-pad placement properties.</p>
                 <div class="chip-group">
                     <span class="chip-label">Elements</span>
                     <div class="chip-row"><span class="chip">compositor</span><span class="chip">wgpucompositor</span></div>
@@ -960,21 +980,23 @@
             <div class="feature-card">
                 <span class="f-icon">&#128230;</span>
                 <h3>Containers</h3>
-                <p class="f-lead">Pure-Rust demux + mux on the typed <code>Caps::ByteStream</code> link, with <code>typefind</code> sniffing. KLV telemetry (STANAG 4609 / MISB ST 0601), AV1 carriage and per-program SDT service text + ISO-639 language tags ride the TS both ways; DVB EIT now/next and schedule events post as tags on demux, with each event's start time and duration.</p>
+                <p class="f-lead">Pure-Rust demux + mux on the typed <code>Caps::ByteStream</code> link, with <code>typefind</code> sniffing.</p>
+                <p class="f-lead">KLV telemetry (STANAG 4609 / MISB ST 0601), AV1 carriage, and SDT service text + language tags ride the TS both ways; DVB EIT events post as tags on demux.</p>
                 <div class="chip-group">
                     <span class="chip-label">Demux</span>
                     <div class="chip-row"><span class="chip">avidemux</span><span class="chip">mp4src</span><span class="chip">fmp4demux</span><span class="chip">tsdemux</span><span class="chip">matroskademux</span><span class="chip">flvdemux</span><span class="chip">oggdemux</span><span class="chip">mpegpsdemux</span><span class="chip">aiffparse</span><span class="chip">auparse</span><span class="chip">klvdecode</span></div>
                 </div>
                 <div class="chip-group">
                     <span class="chip-label">Mux</span>
-                    <div class="chip-row"><span class="chip">mp4sink</span><span class="chip">mpegtsmux</span><span class="chip">matroskamux</span><span class="chip">flvmux</span><span class="chip">oggmux</span><span class="chip">aiffmux</span><span class="chip">avmux_au</span></div>
+                    <div class="chip-row"><span class="chip">mp4mux</span><span class="chip">mpegtsmux</span><span class="chip">matroskamux</span><span class="chip">flvmux</span><span class="chip">oggmux</span><span class="chip">aiffmux</span><span class="chip">avmux_au</span></div>
                 </div>
                 <span class="feature-tag tag-core">Core</span>
             </div>
             <div class="feature-card">
                 <span class="f-icon">&#128250;</span>
                 <h3>Adaptive streaming</h3>
-                <p class="f-lead">HLS (TS + CMAF, live reload, AES-128 + SAMPLE-AES), DASH (SegmentTemplate / Timeline, dynamic MPDs, CMAF chunked low-latency consumption), duration-keyed prebuffering with Buffering reports, RTMP publisher ingest.</p>
+                <p class="f-lead">HLS (TS + CMAF, live reload, AES-128 + SAMPLE-AES) and DASH (SegmentTemplate / Timeline, dynamic MPDs, CMAF chunked low latency).</p>
+                <p class="f-lead">Duration-keyed prebuffering with Buffering reports; RTMP publisher ingest.</p>
                 <div class="chip-group">
                     <span class="chip-label">Sources</span>
                     <div class="chip-row"><span class="chip">HlsSrc</span><span class="chip">DashSrc</span><span class="chip">RtmpSrc</span><span class="chip">HttpSrc</span><span class="chip">DataUriSrc</span></div>
@@ -1221,7 +1243,11 @@ g2g-launch <span class="flag">--script</span> build.rhai</div>
             <div class="feature-card">
                 <span class="f-icon">&#128267;</span>
                 <h3>Heap-free MCU pipeline</h3>
-                <p class="f-lead"><code>alloc</code> is optional: the no-alloc build links <strong>no allocator</strong> and is <strong>proven panic-free</strong>, with a budgeted ~KB footprint. A static element model (unboxed async, no <code>dyn</code>/<code>Box</code>) over const-generic lend rings, and the host's dynamic runner holds the same line: <code>run_graph</code> steady state is proven allocation-free by a counting allocator. App code needs zero <code>unsafe</code>. Real <strong>interrupt/DMA-driven capture</strong>: a DMA-completion ISR fills a lock-free <code>SpscFrameRing</code> while the pipeline drains it on <code>wfi</code>, proven on a SysTick interrupt on emulated Cortex-M (lossless, in order, bounded back-pressure). A <strong>fault-recovery supervisor</strong> turns a returned peripheral fault into a bounded retry / degrade / reset / escalate action, re-arms the faulting stage through a <code>Recover</code> seam, and pets a hardware <strong>watchdog</strong> only on real progress, so a wedged pipeline resets the chip. The <strong>receive direction</strong> mirrors the sender: <code>RtpSrc</code> parses RTP (a bounds-checked header parser shared with the std depayloader) and a heap-free <code>JitterBuffer</code> absorbs arrival jitter and reorders by sequence, handling reorder / duplicate / late / loss countably, proven on Cortex-M by reconstructing an ordered PCM stream from a reordered wire. Beyond media, the catalog reaches the <strong>I2C sensor</strong> and <strong>UART</strong> control plane: a real SHT3x driver (datasheet command, CRC-8, conversion) feeds a UART telemetry egress, proven on Cortex-M. For the safety / cert market a <strong>checkable safety case</strong> ships too: a requirements traceability matrix whose every cited proof CI verifies still exists, a conditions-of-use safety manual, and a one-command qualification kit.</p>
+                <p class="f-lead"><code>alloc</code> is optional: the no-alloc build links <strong>no allocator</strong> and is <strong>proven panic-free</strong>, with a budgeted ~KB footprint. A static element model (unboxed async, no <code>dyn</code>/<code>Box</code>) over const-generic lend rings; app code needs zero <code>unsafe</code>. The host's dynamic runner holds the same line: <code>run_graph</code> steady state is proven allocation-free.</p>
+                <p class="f-lead">Real <strong>interrupt/DMA-driven capture</strong>: a DMA-completion ISR fills a lock-free <code>SpscFrameRing</code> while the pipeline drains it on <code>wfi</code>, proven on emulated Cortex-M (lossless, in order, bounded back-pressure).</p>
+                <p class="f-lead">A <strong>fault-recovery supervisor</strong> turns a peripheral fault into a bounded retry / degrade / reset / escalate action and pets a hardware <strong>watchdog</strong> only on real progress, so a wedged pipeline resets the chip.</p>
+                <p class="f-lead">The <strong>receive direction</strong> mirrors the sender: <code>RtpSrc</code> parses RTP and a heap-free <code>JitterBuffer</code> reorders by sequence, proven on Cortex-M by reconstructing an ordered PCM stream from a reordered wire. Beyond media, an <strong>SHT3x I2C sensor</strong> driver feeds a <strong>UART</strong> telemetry egress.</p>
+                <p class="f-lead">For the safety / cert market a <strong>checkable safety case</strong> ships too: a requirements traceability matrix whose every cited proof CI verifies still exists, a conditions-of-use safety manual, and a one-command qualification kit.</p>
                 <div class="chip-group">
                     <span class="chip-label">Peripherals (g2g-mcu, embedded-hal)</span>
                     <div class="chip-row"><span class="chip">SpiDisplaySink</span><span class="chip">banded streaming</span><span class="chip">GrabberSrc</span><span class="chip">PcmSink</span><span class="chip">Sht3xSrc (I2C)</span><span class="chip">UartSink</span><span class="chip">G711Enc</span><span class="chip">HwH264Enc</span><span class="chip">RtpSink</span><span class="chip">RtpSrc</span><span class="chip">JitterBuffer</span></div>
@@ -1235,7 +1261,9 @@ g2g-launch <span class="flag">--script</span> build.rhai</div>
             <div class="feature-card">
                 <span class="f-icon">&#9881;&#65039;</span>
                 <h3>One graph, four executors</h3>
-                <p class="f-lead">The flagship deterministic-audio graph &mdash; <code>capture &rarr; convert &rarr; resample &rarr; mix &rarr; encode &rarr; RTP</code> as one static pipeline, fully fixed-point &mdash; runs <strong>bit-exact</strong> on every target. <code>g2g-mcugen</code> compiles a declarative YAML graph (audio or video/display) to the monomorphized static build; the generated wire matches the hand-written reference byte-for-byte. Integrates with an existing C codebase <strong>both directions</strong>: link the pipeline and call in, or let your C drivers be the peripheral (<code>cffi</code> capture/send callbacks + a frame-stepped <code>step_source_sink</code>) &mdash; zero Rust on the driver side.</p>
+                <p class="f-lead">The reference deterministic-audio graph &mdash; <code>capture &rarr; convert &rarr; resample &rarr; mix &rarr; encode &rarr; RTP</code> as one static pipeline, fully fixed-point &mdash; runs <strong>bit-exact</strong> on every target.</p>
+                <p class="f-lead"><code>g2g-mcugen</code> compiles a declarative YAML graph (audio or video/display) to the monomorphized static build; the generated wire matches the hand-written reference byte-for-byte.</p>
+                <p class="f-lead">Integrates with an existing C codebase <strong>both directions</strong>: link the pipeline and call in, or let your C drivers be the peripheral (<code>cffi</code> capture/send callbacks + a frame-stepped <code>step_source_sink</code>) &mdash; zero Rust on the driver side.</p>
                 <div class="chip-group">
                     <span class="chip-label">Executors</span>
                     <div class="chip-row"><span class="chip">bare-metal</span><span class="chip">Embassy</span><span class="chip">FreeRTOS</span><span class="chip">Zephyr module</span><span class="chip">C seam ABI</span></div>
@@ -1249,7 +1277,7 @@ g2g-launch <span class="flag">--script</span> build.rhai</div>
             <div class="feature-card">
                 <span class="f-icon">&#127760;</span>
                 <h3>Browser / Wasm</h3>
-                <p class="f-lead">First in-browser glass-to-glass pipeline: WS &rarr; WebCodecs (H.264 / H.265) &rarr; Canvas.</p>
+                <p class="f-lead">In-browser glass-to-glass pipeline: WS &rarr; WebCodecs (H.264 / H.265) &rarr; Canvas.</p>
                 <div class="chip-group">
                     <span class="chip-label">Elements</span>
                     <div class="chip-row"><span class="chip">WasmClock</span><span class="chip">WebSocketSrc</span><span class="chip">WebCodecsDecode</span><span class="chip">CanvasSink</span></div>
@@ -1290,13 +1318,15 @@ g2g-launch <span class="flag">--script</span> build.rhai</div>
         <span class="section-label">Portability</span>
         <h2 class="section-title">One pipeline. MCU &rarr; RTOS &rarr; CPU &rarr; GPU &rarr; WASM.</h2>
         <p class="section-desc">
-            Because the processing loop needs only <code>core</code> (<code>alloc</code>
-            is optional), the target changes purely by the deployment shell (which
-            executor, which hardware elements). The graph you write is identical on all five &mdash;
-            proven, not asserted: one detection-overlay pipeline whose processing
-            stages come from a single shared definition, reused verbatim by the
-            native (CPU) runner and the browser (WASM) build, with reproducible
-            evidence per target in
+            The processing loop needs only <code>core</code> (<code>alloc</code> is
+            optional), so the target changes purely by the deployment shell: which
+            executor, which hardware elements. The graph you write is identical on
+            all five.
+        </p>
+        <p class="section-desc">
+            One detection-overlay pipeline's processing stages come from a single
+            shared definition, reused verbatim by the native (CPU) runner and the
+            browser (WASM) build, with reproducible evidence per target in
             <a href="https://github.com/Glass2GlassHQ/glass2glass/blob/master/PORTABILITY.md" style="color: var(--accent);">PORTABILITY.md</a>.
             A sixth is a compile-verified spike: <strong>QNX</strong>, the safety-certified RTOS.
         </p>
@@ -1305,7 +1335,8 @@ g2g-launch <span class="flag">--script</span> build.rhai</div>
             <div class="target-card">
                 <div class="t-icon">&#128268;</div>
                 <h3>MCU (bare-metal, heap-free)</h3>
-                <p><code>alloc</code> is optional: the no-alloc build links <strong>no allocator</strong>, is proven panic-free, and has a budgeted ~KB footprint (ROM / static RAM / worst-case stack). A static element model over const-generic lend rings; <code>g2g-mcu</code> peripheral elements over <code>embedded-hal</code>. Runs on QEMU Cortex-M in CI.</p>
+                <p><code>alloc</code> is optional: the no-alloc build links <strong>no allocator</strong>, is proven panic-free, and has a budgeted ~KB footprint (ROM / static RAM / worst-case stack).</p>
+                <p>A static element model over const-generic lend rings; <code>g2g-mcu</code> peripheral elements over <code>embedded-hal</code>. Runs on QEMU Cortex-M in CI.</p>
             </div>
             <div class="target-card">
                 <div class="t-icon">&#9201;&#65039;</div>
@@ -1320,7 +1351,8 @@ g2g-launch <span class="flag">--script</span> build.rhai</div>
             <div class="target-card">
                 <div class="t-icon">&#9889;</div>
                 <h3>GPU (zero-copy)</h3>
-                <p>Frames stay in Vulkan / CUDA / wgpu / DMABUF domains: Vulkan Video decode &rarr; <code>wgpu::Texture</code>, native NVDEC / NVENC, a CUDA &harr; wgpu bridge &mdash; no PCIe round-trip. Embeds in an app's own wgpu device (<code>GpuContext::from_wgpu</code>; packaged for Bevy as the <code>bevy-g2g</code> crate: remote rendering over WebRTC + zero-copy video playback).</p>
+                <p>Frames stay in Vulkan / CUDA / wgpu / DMABUF domains: Vulkan Video decode &rarr; <code>wgpu::Texture</code>, native NVDEC / NVENC, a CUDA &harr; wgpu bridge &mdash; no PCIe round-trip.</p>
+                <p>Embeds in an app's own wgpu device (<code>GpuContext::from_wgpu</code>); packaged for Bevy as the <code>bevy-g2g</code> crate: remote rendering over WebRTC + zero-copy video playback.</p>
             </div>
             <div class="target-card">
                 <div class="t-icon">&#127760;</div>
@@ -1330,7 +1362,8 @@ g2g-launch <span class="flag">--script</span> build.rhai</div>
             <div class="target-card">
                 <div class="t-icon">&#128737;&#65039;</div>
                 <h3>QNX (safety-cert RTOS)</h3>
-                <p>The reference RTOS for ISO 26262 / IEC 62304 automotive &amp; medical, and the <code>std</code>-capable path (aarch64 / x86-64), not the MCU one. A <strong>Tier-0 portability spike</strong>, compile-checked, not yet run: <code>g2g-core</code> (no-alloc <em>and</em> full <code>alloc</code>&nbsp;+&nbsp;<code>runtime</code>), <code>g2g-mcu</code>, and the <code>g2g-plugins</code> <code>no_std</code> baseline compile for <code>nto-qnx800</code> with zero code changes &mdash; Linux HW is excluded by <code>target_os</code> gating, not pulled in.</p>
+                <p>The reference RTOS for ISO 26262 / IEC 62304 automotive &amp; medical, and the <code>std</code>-capable path (aarch64 / x86-64), not the MCU one.</p>
+                <p>A <strong>Tier-0 portability spike</strong>, compile-checked, not yet run: <code>g2g-core</code> (no-alloc <em>and</em> full <code>alloc</code>&nbsp;+&nbsp;<code>runtime</code>), <code>g2g-mcu</code>, and the <code>g2g-plugins</code> <code>no_std</code> baseline compile for <code>nto-qnx800</code> with zero code changes &mdash; Linux HW is excluded by <code>target_os</code> gating, not pulled in.</p>
             </div>
             <div class="target-card">
                 <div class="t-icon">&#127919;</div>
@@ -1414,7 +1447,7 @@ g2g-plugins = { git = <span class="str">"..."</span>, features = [<span class="s
 <span class="kw">use</span> g2g_plugins::{<span class="ty">VideoTestSrc</span>, <span class="ty">MfEncode</span>, <span class="ty">UdpSink</span>};
 
 <span class="kw">let</span> src  = <span class="ty">VideoTestSrc</span>::<span class="fn">new</span>(<span class="num">1920</span>, <span class="num">1080</span>, <span class="num">30</span>, <span class="num">0</span>);              <span class="cmt">// RGBA test pattern</span>
-<span class="kw">let</span> enc  = <span class="ty">MfEncode</span>::<span class="fn">new_low_latency</span>();                       <span class="cmt">// Windows; on Linux use the bridge</span>
+<span class="kw">let</span> enc  = <span class="ty">MfEncode</span>::<span class="fn">new</span>().<span class="fn">with_hardware</span>();              <span class="cmt">// Windows; on Linux use NvEnc / ffmpeg</span>
 <span class="kw">let</span> sink = <span class="ty">UdpSink</span>::<span class="fn">new</span>(<span class="str">"239.0.0.1:5004"</span>.<span class="fn">parse</span>()?)
             .<span class="fn">with_rtp</span>(<span class="num">96</span>, <span class="num">0x1234_5678</span>);                     <span class="cmt">// payload type, SSRC</span>
 
@@ -1427,10 +1460,10 @@ g2g-plugins = { git = <span class="str">"..."</span>, features = [<span class="s
 <span class="kw">use</span> g2g_plugins::{<span class="ty">WebSocketSrc</span>, <span class="ty">H264Parse</span>, <span class="ty">WebCodecsDecode</span>, <span class="ty">CanvasSink</span>};
 
 <span class="cmt">// Browser glass-to-glass: WS bytes -> parse -> WebCodecs -> canvas.</span>
-<span class="kw">let</span> src    = <span class="ty">WebSocketSrc</span>::<span class="fn">connect</span>(<span class="str">"wss://feed.example.com/h264"</span>).<span class="kw">await</span>?;
-<span class="kw">let</span> parse  = <span class="ty">H264Parse</span>::<span class="fn">new</span>();
-<span class="kw">let</span> decode = <span class="ty">WebCodecsDecode</span>::<span class="fn">new</span>();
-<span class="kw">let</span> sink   = <span class="ty">CanvasSink</span>::<span class="fn">by_id</span>(<span class="str">"video-canvas"</span>);
+<span class="kw">let</span> src        = <span class="ty">WebSocketSrc</span>::<span class="fn">new</span>(<span class="str">"wss://feed.example.com/h264"</span>, h264_caps);
+<span class="kw">let</span> <span class="kw">mut</span> parse  = <span class="ty">H264Parse</span>::<span class="fn">new</span>();
+<span class="kw">let</span> <span class="kw">mut</span> decode = <span class="ty">WebCodecsDecode</span>::<span class="fn">new</span>();
+<span class="kw">let</span> sink       = <span class="ty">CanvasSink</span>::<span class="fn">new</span>(<span class="str">"video-canvas"</span>);
 
 wasm_bindgen_futures::<span class="fn">spawn_local</span>(<span class="kw">async</span> <span class="kw">move</span> {
     <span class="fn">run_linear_chain</span>(src, <span class="kw">vec!</span>[&amp;<span class="kw">mut</span> parse, &amp;<span class="kw">mut</span> decode], sink, &amp;clock, profile)

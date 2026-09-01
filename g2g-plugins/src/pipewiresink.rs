@@ -45,9 +45,10 @@ use pipewire as pw;
 use pw::spa;
 
 use g2g_core::{
-    AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
-    G2gError, HardwareError, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
-    PropKind, PropValue, PropertySpec,
+    AsyncElement, AudioFormat, Caps, CapsConstraint, CapsSet, ClockCandidate, ClockPriority,
+    ConfigureOutcome, DriftClock, ElementMetadata, G2gError, HardwareError, MonotonicClock,
+    OutputSink, PadTemplate, PadTemplates, PipelineClock, PipelinePacket, PropError, PropKind,
+    PropValue, PropertySpec,
 };
 
 use crate::pwaudio::{format_pod_bytes, frame_bytes, pw_params};
@@ -77,6 +78,14 @@ pub struct PipeWireSink {
     high_water: usize,
     caps: Option<Caps>,
     bytes_queued: Arc<AtomicU64>,
+    /// Playout-disciplined master clock (the ALSA sink's M590 analog). The
+    /// realtime callback feeds it `(monotonic_now, graph_ticks_ns)`
+    /// observations from `pw_stream_get_time_n`, so its `now_ns()` tracks the
+    /// device rate; a video sink slaves to it when it is elected.
+    clock: Arc<DriftClock>,
+    /// Whether to offer [`clock`](Self::clock) to the pipeline's clock
+    /// election (the `provide-clock` property, default on).
+    provide_clock: bool,
 }
 
 /// What the loop thread needs to open the playback stream.
@@ -86,6 +95,9 @@ struct StreamCfg {
     rate: u32,
     stride: usize,
     target: String,
+    /// Present when the element offers its clock to election; the process
+    /// callback then disciplines it from the stream time.
+    clock: Option<Arc<DriftClock>>,
 }
 
 impl core::fmt::Debug for PipeWireSink {
@@ -115,6 +127,8 @@ impl PipeWireSink {
             high_water: 0,
             caps: None,
             bytes_queued: Arc::new(AtomicU64::new(0)),
+            clock: Arc::new(DriftClock::new(Arc::new(MonotonicClock))),
+            provide_clock: true,
         }
     }
 
@@ -122,6 +136,13 @@ impl PipeWireSink {
     pub fn with_target(mut self, target: impl Into<String>) -> Self {
         self.target = target.into();
         self
+    }
+
+    /// The playout-disciplined clock this sink offers to election. Exposed for
+    /// tests / introspection; its `now_ns()` tracks the stream's graph time
+    /// once the realtime callback has observed the device.
+    pub fn clock(&self) -> Arc<DriftClock> {
+        Arc::clone(&self.clock)
     }
 
     /// Total PCM bytes accepted from the pipeline (before any leaky drop).
@@ -215,6 +236,9 @@ impl AsyncElement for PipeWireSink {
             rate,
             stride,
             target: self.target.clone(),
+            // Only discipline the clock when we actually offer it; otherwise
+            // the per-callback time probe is wasted work no one reads.
+            clock: self.provide_clock.then(|| Arc::clone(&self.clock)),
         };
         let join = thread::Builder::new()
             .name(String::from("g2g-pipewiresink"))
@@ -241,6 +265,17 @@ impl AsyncElement for PipeWireSink {
         Ok(ConfigureOutcome::Accepted)
     }
 
+    /// Offer the playout-disciplined [`clock`](Self::clock) as an
+    /// [`AudioProvider`](ClockPriority::AudioProvider) so audio becomes the
+    /// pipeline master (video slaves to it), unless `provide-clock` is off.
+    fn provide_clock(&self) -> Option<ClockCandidate> {
+        if !self.provide_clock {
+            return None;
+        }
+        let clock: Arc<dyn PipelineClock + Send + Sync> = self.clock.clone();
+        Some(ClockCandidate::new(ClockPriority::AudioProvider, clock))
+    }
+
     fn metadata(&self) -> ElementMetadata {
         ElementMetadata::new(
             "PipeWire audio sink",
@@ -251,12 +286,20 @@ impl AsyncElement for PipeWireSink {
     }
 
     fn properties(&self) -> &'static [PropertySpec] {
-        const PROPS: &[PropertySpec] = &[PropertySpec::new(
-            "target-object",
-            PropKind::Str,
-            "node name or object serial to play to (empty = default)",
-        )
-        .with_default("")];
+        const PROPS: &[PropertySpec] = &[
+            PropertySpec::new(
+                "target-object",
+                PropKind::Str,
+                "node name or object serial to play to (empty = default)",
+            )
+            .with_default(""),
+            PropertySpec::new(
+                "provide-clock",
+                PropKind::Bool,
+                "Provide a playout-disciplined clock so audio is the A/V sync master",
+            )
+            .with_default("true"),
+        ];
         PROPS
     }
 
@@ -266,6 +309,10 @@ impl AsyncElement for PipeWireSink {
                 self.target = value.as_str().ok_or(PropError::Type)?.into();
                 Ok(())
             }
+            "provide-clock" => {
+                self.provide_clock = value.as_bool().ok_or(PropError::Type)?;
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -273,6 +320,7 @@ impl AsyncElement for PipeWireSink {
     fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
             "target-object" => Some(PropValue::Str(self.target.clone())),
+            "provide-clock" => Some(PropValue::Bool(self.provide_clock)),
             _ => None,
         }
     }
@@ -388,9 +436,13 @@ fn build_and_run(
     let stream = pw::stream::Stream::new(&core, "g2g-pipewiresink", props).map_err(|_| -1)?;
 
     let q = Arc::clone(&queue);
+    let drift = cfg.clock.clone();
     let _listener = stream
         .add_local_listener_with_user_data(())
         .process(move |stream, ()| {
+            if let Some(clock) = drift.as_deref() {
+                discipline_clock(stream, clock);
+            }
             let Some(mut buffer) = stream.dequeue_buffer() else {
                 return;
             };
@@ -451,6 +503,47 @@ fn build_and_run(
     let _ = ready.send(Ok(()));
     mainloop.run();
     Ok(())
+}
+
+/// Feed the drift clock one `(monotonic_now, graph_time_ns)` observation from
+/// the stream's own time report. `pw_time.ticks` is the graph driver's
+/// monotonic sample counter, which advances at the device's real rate, so it
+/// is the master timeline the pipeline slaves to. It is independent of our
+/// leaky byte queue, so producer-side drops never skew it; the constant graph
+/// delay to the speaker lands in the affine offset the fit absorbs. The local
+/// time is sampled next to the probe so the pair lines up.
+fn discipline_clock(stream: &pw::stream::StreamRef, clock: &DriftClock) {
+    let local_ns = clock.reference_now();
+    // SAFETY: zero is a valid bit pattern for `pw_time` (plain numeric fields);
+    // the call only writes into it.
+    let mut time: pw::sys::pw_time = unsafe { core::mem::MaybeUninit::zeroed().assume_init() };
+    // SAFETY: the stream pointer is live for the duration of its own process
+    // callback, and the call is documented RT safe.
+    let res = unsafe {
+        pw::sys::pw_stream_get_time_n(
+            stream.as_raw_ptr(),
+            &mut time,
+            core::mem::size_of::<pw::sys::pw_time>(),
+        )
+    };
+    // A failed probe, a not-yet-running stream (ticks still zero), or a report
+    // with no rate yields no usable position; skip rather than feed a bogus
+    // sample.
+    if res != 0 || time.ticks == 0 || time.rate.denom == 0 {
+        return;
+    }
+    let master_ns = (u128::from(time.ticks) * u128::from(time.rate.num) * 1_000_000_000
+        / u128::from(time.rate.denom)) as u64;
+    let outcome = clock.observe(local_ns, master_ns);
+    g2g_core::g2g_log!(
+        g2g_core::log::Target::category("PipeWireSink"),
+        "clock local={}ms master={}ms delay={} slope={:.6} {:?}",
+        local_ns / 1_000_000,
+        master_ns / 1_000_000,
+        time.delay,
+        clock.slope(),
+        outcome
+    );
 }
 
 #[cfg(test)]

@@ -368,8 +368,9 @@ fn parse_vui(br: &mut BitReader) -> Vui {
 /// / constrained profile that cannot reorder), matching how ffmpeg sizes the
 /// buffer. The VUI `max_num_reorder_frames` is deliberately not trusted: a
 /// stream may declare 0 yet still reorder (JVT conformance vectors do), and a
-/// too-low value is exactly what drops the leading pictures. `None` if there is
-/// no parseable SPS.
+/// too-low value is exactly what drops the leading pictures. POC type 2 is the
+/// one exception, returning 0: it pins output order to decode order by spec, a
+/// proof rather than a declaration. `None` if there is no parseable SPS.
 ///
 /// Consumed by the libavcodec decoder (`ffmpegdec`), so gated on that feature.
 #[cfg(feature = "ffmpeg")]
@@ -420,6 +421,12 @@ fn parse_sps_reorder(rbsp: &[u8]) -> Option<u8> {
 
     br.read_ue()?; // log2_max_frame_num_minus4
     let pic_order_cnt_type = br.read_ue()?;
+    // POC type 2 pins output order to decode order (H.264 8.2.1.3), a proof the
+    // stream cannot reorder, so the level DPB seed below would only buy latency
+    // (5 frames at 720p). Live encoders with B-frames off emit this type.
+    if pic_order_cnt_type == 2 {
+        return Some(0);
+    }
     if pic_order_cnt_type == 0 {
         br.read_ue()?; // log2_max_pic_order_cnt_lsb_minus4
     } else if pic_order_cnt_type == 1 {
@@ -579,6 +586,21 @@ mod tests {
         // DPB bound as a reordering profile (32768 / 8160 = 4 here).
         let au = annexb_sps(66, 40, &sps_body(1920, 1088));
         assert_eq!(sps_reorder_frames(&au), Some(4));
+    }
+
+    #[cfg(feature = "ffmpeg")]
+    #[test]
+    fn sps_reorder_frames_zero_for_poc_type_2() {
+        // POC type 2 pins output order to decode order, so the level DPB bound
+        // does not apply: no reorder seed, whatever the profile / level.
+        let mut w = BitWriter::default();
+        w.write_ue(0); // seq_parameter_set_id
+        w.write_ue(0); // log2_max_frame_num_minus4
+        w.write_ue(2); // pic_order_cnt_type
+        w.write_bit(1); // rbsp_trailing_bits
+        w.align_to_byte();
+        let au = annexb_sps(77, 40, &w.into_bytes());
+        assert_eq!(sps_reorder_frames(&au), Some(0));
     }
 
     #[cfg(feature = "ffmpeg")]

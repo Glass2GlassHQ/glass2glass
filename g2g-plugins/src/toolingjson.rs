@@ -13,12 +13,14 @@ use core::time::Duration;
 
 use serde_json::{json, Value};
 
-use g2g_core::caps::CapsSet;
+use g2g_core::caps::{Caps, CapsSet, Dim, Rate};
 use g2g_core::dot::kind_label;
 use g2g_core::runtime::{
     negotiate_graph_explained, parse_launch, run_graph, run_graph_observed, ElementDoc, GraphNode,
     NegotiateError, NegotiationFailure, NodeRole, Observer, Registry, RunStats, TelemetrySnapshot,
 };
+use g2g_core::stream::StreamType;
+use g2g_core::tag::TagList;
 use g2g_core::{G2gError, Graph, NodeId};
 
 use crate::clock::WallClock;
@@ -375,6 +377,21 @@ pub fn telemetry_json(snap: &TelemetrySnapshot) -> Value {
                     "max_ns": l.transit.max_ns,
                 })
             });
+            // Frame age at this node's output push, the number that exposes
+            // an element buffering frames internally. Null for sinks and
+            // unstamped streams.
+            let age_at_emit = n
+                .latency
+                .as_ref()
+                .filter(|l| l.age_at_emit.count > 0)
+                .map(|l| {
+                    json!({
+                        "count": l.age_at_emit.count,
+                        "p50_ns": l.age_at_emit.p50_ns,
+                        "p99_ns": l.age_at_emit.p99_ns,
+                        "max_ns": l.age_at_emit.max_ns,
+                    })
+                });
             let (fill_mean, fill_max) = n
                 .latency
                 .as_ref()
@@ -387,6 +404,7 @@ pub fn telemetry_json(snap: &TelemetrySnapshot) -> Value {
                 "proc": proc,
                 "push_wait": push_wait,
                 "transit": transit,
+                "age_at_emit": age_at_emit,
                 "fill_mean_pct": fill_mean,
                 "fill_max_pct": fill_max,
             })
@@ -476,6 +494,98 @@ pub fn stats_json(stats: &RunStats) -> Value {
         "frames_dropped": stats.frames_dropped,
         "per_element": per,
     })
+}
+
+/// A media probe as JSON, what `g2g-discover --json` prints: the container, its
+/// duration and tags, and one object per elementary stream. Video and audio
+/// streams carry their shape as named fields alongside the gst caps string, so a
+/// consumer does not have to parse caps text.
+pub fn discovery_json(info: &crate::discover::Discovery) -> Value {
+    let streams: Vec<Value> = info.streams.iter().map(stream_json).collect();
+    json!({
+        "uri": info.uri,
+        "container": info.container,
+        "duration_ns": info.duration_ns,
+        "tags": tags_json(&info.tags),
+        "streams": streams,
+    })
+}
+
+fn stream_json(stream: &crate::discover::DiscoveredStream) -> Value {
+    let mut v = json!({
+        "id": stream.id,
+        "type": stream_type_str(stream.stream_type),
+        "caps": stream.caps.to_gst_string(),
+        "tags": tags_json(&stream.tags),
+    });
+    match &stream.caps {
+        Caps::CompressedVideo {
+            width,
+            height,
+            framerate,
+            ..
+        } => {
+            v["width"] = json!(fixed_dim(width));
+            v["height"] = json!(fixed_dim(height));
+            v["framerate"] = json!(fixed_rate(framerate));
+        }
+        Caps::RawVideo {
+            width,
+            height,
+            framerate,
+            ..
+        } => {
+            v["width"] = json!(fixed_dim(width));
+            v["height"] = json!(fixed_dim(height));
+            v["framerate"] = json!(fixed_rate(framerate));
+        }
+        Caps::Audio {
+            channels,
+            sample_rate,
+            ..
+        } => {
+            v["channels"] = json!(channels);
+            v["sample_rate"] = json!(sample_rate);
+        }
+        _ => {}
+    }
+    v
+}
+
+/// A dimension's value, or null when the stream left it open.
+fn fixed_dim(dim: &Dim) -> Option<u32> {
+    match dim {
+        Dim::Fixed(n) => Some(*n),
+        _ => None,
+    }
+}
+
+/// A framerate in frames per second. The caps carry Q16 fixed point; a range or
+/// wildcard (a container that stamps every frame instead of declaring a rate)
+/// reports null rather than a number nothing measured.
+fn fixed_rate(rate: &Rate) -> Option<f64> {
+    match rate {
+        Rate::Fixed(q16) => Some(f64::from(*q16) / f64::from(1u32 << 16)),
+        _ => None,
+    }
+}
+
+fn tags_json(tags: &TagList) -> Value {
+    let entries: Vec<Value> = tags
+        .tags()
+        .iter()
+        .map(|t| json!({ "key": t.key(), "value": t.value_string() }))
+        .collect();
+    json!(entries)
+}
+
+fn stream_type_str(stream_type: StreamType) -> &'static str {
+    match stream_type {
+        StreamType::Video => "video",
+        StreamType::Audio => "audio",
+        StreamType::Text => "text",
+        StreamType::Unknown => "unknown",
+    }
 }
 
 #[cfg(test)]

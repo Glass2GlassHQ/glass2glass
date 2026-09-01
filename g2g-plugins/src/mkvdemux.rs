@@ -418,6 +418,7 @@ impl MkvDemux {
     fn post_tags(&mut self) {
         self.metadata.post(&self.demux, self.bus.as_ref());
         self.metadata.post_chapters(&self.demux, self.bus.as_ref());
+        self.metadata.post_duration(&self.demux, self.bus.as_ref());
     }
 
     /// Announce every elementary stream the container declares as a
@@ -1084,6 +1085,8 @@ struct MetadataPoster {
     track_posted: usize,
     /// Chapters already posted, so a second call re-posts nothing.
     chapters_posted: usize,
+    /// Set once the Segment `Info` duration has been announced.
+    duration_posted: bool,
 }
 
 impl MetadataPoster {
@@ -1130,6 +1133,23 @@ impl MetadataPoster {
             for (stream_id, tags) in fresh {
                 bus.try_post(BusMessage::StreamTag { stream_id, tags });
             }
+        }
+    }
+
+    /// Post the Segment `Info` `Duration` once, as a
+    /// [`BusMessage::DurationChanged`], so an application knows the file's
+    /// length without waiting for it to play out. A Matroska stream is demuxed,
+    /// not sourced, so the runner's `query_duration` path never sees it.
+    fn post_duration(&mut self, demux: &MatroskaDemuxer, bus: Option<&BusHandle>) {
+        if self.duration_posted {
+            return;
+        }
+        let Some(duration_ns) = demux.duration_ns() else {
+            return;
+        };
+        self.duration_posted = true;
+        if let Some(bus) = bus {
+            bus.try_post(BusMessage::DurationChanged { duration_ns });
         }
     }
 
@@ -1415,6 +1435,7 @@ impl MkvDemuxN {
     fn post_tags(&mut self) {
         self.metadata.post(&self.demux, self.bus.as_ref());
         self.metadata.post_chapters(&self.demux, self.bus.as_ref());
+        self.metadata.post_duration(&self.demux, self.bus.as_ref());
     }
 }
 

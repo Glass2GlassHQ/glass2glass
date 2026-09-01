@@ -57,6 +57,11 @@ pub struct ElementProbe {
     /// (the `process()` cost is the "work" half). Empty on an uninstrumented edge
     /// or under `no_std`.
     transit_ns: LatencyHistogram,
+    /// Age of each `DataFrame` as this element emits it: source-side
+    /// `arrival_ns` to the output push. The one number that exposes an element
+    /// buffering frames internally (a decoder's reorder queue), which `proc_ns`
+    /// misses entirely: every call stays cheap while frames age inside.
+    age_at_emit_ns: LatencyHistogram,
     /// Input-link occupancy sampled at each pull (0-100), an indicator of where
     /// backpressure pools: a consistently-full input means this element is the
     /// bottleneck; a consistently-empty one means it is starved.
@@ -80,6 +85,7 @@ impl ElementProbe {
             push_wait_ns: LatencyHistogram::new(),
             push_wait_accum: AtomicU64::new(0),
             transit_ns: LatencyHistogram::new(),
+            age_at_emit_ns: LatencyHistogram::new(),
             fill: FillGauge::default(),
             journeys: None,
             presentation: Mutex::new(None),
@@ -96,6 +102,7 @@ impl ElementProbe {
             push_wait_ns: LatencyHistogram::new(),
             push_wait_accum: AtomicU64::new(0),
             transit_ns: LatencyHistogram::new(),
+            age_at_emit_ns: LatencyHistogram::new(),
             fill: FillGauge::default(),
             journeys: Some(Mutex::new(VecDeque::with_capacity(JOURNEY_RING))),
             presentation: Mutex::new(None),
@@ -164,6 +171,13 @@ impl ElementProbe {
         self.transit_ns.record(ns);
     }
 
+    /// Record a `DataFrame`'s age (source arrival to output push, ns) as this
+    /// element emits it. Called by the element's output adapter.
+    #[inline]
+    pub fn record_age_at_emit(&self, ns: u64) {
+        self.age_at_emit_ns.record(ns);
+    }
+
     /// Record this element's visit by one frame: its `sequence` id, the
     /// `wait_ns` it spent queued on the input link, the `enter` stamp from
     /// [`mark`](Self::mark) taken just before `process()` (exit is stamped here),
@@ -228,6 +242,7 @@ impl ElementProbe {
             proc: self.proc_ns.snapshot(),
             push_wait: self.push_wait_ns.snapshot(),
             transit: self.transit_ns.snapshot(),
+            age_at_emit: self.age_at_emit_ns.snapshot(),
             fill_mean_pct: self.fill.mean(),
             fill_max_pct: self.fill.max(),
             presentation: *self.presentation.lock(),
@@ -321,6 +336,12 @@ pub struct ElementLatency {
     /// the edge is not instrumented (only the graph runner enables it, on edges
     /// into transform/sink nodes) or under `no_std`.
     pub transit: LatencySnapshot,
+    /// Age of each emitted `DataFrame` (source-side `arrival_ns` to this
+    /// element's output push). The metric that exposes internal buffering: an
+    /// element holding frames (a decoder's reorder queue) reports cheap `proc`
+    /// yet a high age here. `count == 0` for sinks (no output adapter),
+    /// unstamped frames, uninstrumented arms, or under `no_std`.
+    pub age_at_emit: LatencySnapshot,
     /// Mean input-link fill percent observed across the run (0-100).
     pub fill_mean_pct: u8,
     /// Peak input-link fill percent (0-100); 100 means the element's input was

@@ -19,6 +19,47 @@ See [DESIGN.md](DESIGN.md) for the architecture specification and
 [DEVTOOLS.md](DEVTOOLS.md) for the developer tooling (`cargo xtask`, the pipeline
 visualizer, the caps explainer, benchmarks).
 
+## Quick start
+
+A complete program (this exact code compiles and runs):
+
+```toml
+# Cargo.toml
+[dependencies]
+tokio       = { version = "1", features = ["macros", "rt-multi-thread"] }
+g2g-core    = { git = "https://github.com/Glass2GlassHQ/glass2glass" }
+g2g-plugins = { git = "https://github.com/Glass2GlassHQ/glass2glass", features = ["std"] }
+```
+
+```rust
+// src/main.rs
+use g2g_core::runtime::{parse_launch, run_graph, LatencyProfile};
+use g2g_plugins::clock::WallClock;
+use g2g_plugins::registry::default_registry;
+
+#[tokio::main]
+async fn main() {
+    let registry = default_registry();
+    let graph = parse_launch(
+        &registry,
+        "videotestsrc num-buffers=90 pattern=ball ! videoconvert ! autovideosink",
+    )
+    .expect("parse");
+    run_graph(graph, &WallClock::new(), LatencyProfile::Live)
+        .await
+        .expect("run");
+}
+```
+
+With the `wayland-sink` feature enabled `autovideosink` opens a window. Headless
+it falls back to `fakesink`, so the program runs anywhere. Or skip the project
+entirely and run a pipeline from the repo:
+
+```sh
+cargo run -p g2g-plugins --bin g2g-launch --features std -- \
+  "videotestsrc num-buffers=90 pattern=ball ! videoconvert ! autovideosink"
+```
+
 ## Portability: one pipeline, five targets
 
 The core (`g2g-core`) is pure Rust, `no_std` (with `alloc` an optional feature),
@@ -28,14 +69,14 @@ hardware elements) changes.
 
 | Target | What runs | How |
 | :--- | :--- | :--- |
-| **MCU** | a heap-free static pipeline on bare-metal Cortex-M | `alloc` is optional: the no-alloc build links **no allocator at all**, is proven panic-free, and has a budgeted ~KB-scale footprint. `g2g-mcu` peripheral elements (SPI display, camera / PCM capture, G.711 / ADPCM codecs, RTP egress + ingress, jitter buffer) over `embedded-hal` seams, plus interrupt/DMA capture and a bounded fault-recovery supervisor (retry / degrade / reset / watchdog). See [the embedded wedge](#embedded-heap-free-pipelines-on-a-bare-metal-mcu). |
+| **MCU** | a heap-free static pipeline on bare-metal Cortex-M | `alloc` is optional: the no-alloc build links **no allocator at all**, is proven panic-free, and has a budgeted ~KB-scale footprint. `g2g-mcu` peripheral elements (SPI display, camera / PCM capture, G.711 / ADPCM codecs, RTP egress + ingress, jitter buffer) over `embedded-hal` seams, plus interrupt/DMA capture and a bounded fault-recovery supervisor (retry / degrade / reset / watchdog). See [the embedded section](#embedded-heap-free-pipelines-on-a-bare-metal-mcu). |
 | **RTOS** | the same static pipeline under a real RTOS task | one graph runs bit-exact under **bare-metal, Embassy, FreeRTOS, and Zephyr**; `embassy-sync` stack channels (`embassy` / `embassy-link` features) |
 | **CPU** | the full media + protocol stack | Tokio, multi-thread on servers or current-thread on edge; the whole element library |
 | **GPU** | zero-copy hardware pipelines | frames stay in Vulkan / CUDA / wgpu / DMABUF domains: Vulkan Video decode → `wgpu::Texture`, NVDEC / NVENC, CUDA ↔ wgpu bridge, no PCIe round-trip; embeddable in an app's own wgpu device (`GpuContext::from_wgpu`, packaged for Bevy as the `bevy-g2g` crate) |
 | **WASM** | the same graph in the browser | `wasm32`, single-threaded (no cross-origin isolation), graphs can run in a dedicated Worker (presenting to an `OffscreenCanvas`): WebCodecs H.264 / H.265 decode, WebGPU present, in-browser or server-offloaded ML |
 
-Same `AsyncElement`, same `Caps`, same runner on all five. This is proven, not
-asserted: **[PORTABILITY.md](PORTABILITY.md)** runs one detection-overlay pipeline
+Same `AsyncElement`, same `Caps`, same runner on all five.
+**[PORTABILITY.md](PORTABILITY.md)** runs one detection-overlay pipeline
 whose processing stages come from a single shared `overlay_stages()` definition,
 reused verbatim by the native (CPU) runner and the browser (WASM) build, and
 gives reproducible evidence for each target (Cortex-M footprint, Embassy smoke,
@@ -92,6 +133,7 @@ parse error: unknown element: theoraenc
 
 - **`g2g-launch -v ...`** prints each link's negotiated caps + memory domain (the `gst-launch -v` analog); **`--dot`** dumps a Graphviz graph.
 - **`g2g-inspect`** is `gst-inspect-1.0`: list elements, dump one's properties/pads, or map a GStreamer name with `g2g-inspect --gst x264enc`. Scan an app's source with `--gst-scan app.c`.
+- **`g2g-discover`** is `gst-discoverer-1.0`: `g2g-discover clip.mkv` prints the container, each elementary stream with its codec and shape (video geometry, audio channels and sample rate), the duration, and the container's metadata. It sniffs the type, runs a headless probe graph to the first frame, and reads the demuxer's stream collection off the pipeline bus, so nothing is decoded. `--json` for tooling. Local files only (a path or a `file://` URI); any other scheme is refused by name rather than fetched.
 - **`g2g-device-monitor`** is `gst-device-monitor-1.0`: list cameras, audio devices, PipeWire nodes, and (a g2g extension) `Compute/GPU` devices, with probed caps and the launch fragment that opens each (`v4l2src device=/dev/video0`). Filter by class (`g2g-device-monitor Video/Source`), `--json` for tooling, `--follow` for live hotplug (native PipeWire and WASAPI events, poll-and-diff elsewhere). Backends: V4L2 / ALSA / PipeWire / GPU on Linux, Media Foundation + WASAPI on Windows, AVFoundation + Core Audio on macOS. Every device's id is what its element's selection property takes, so a saved launch line reopens the same hardware after a replug (`v4l2src` takes the id as `device-id=`, since a `/dev/videoN` path is not stable). A V4L2 camera's listing also carries the controls it reports and the range each accepts, under the names `v4l2src extra-controls=` matches them by.
 - Migrate incrementally in either direction: `g2g-bridge` embeds a g2g sub-graph inside a GStreamer pipeline; `gstwrap` hosts an un-ported GStreamer element inside a g2g graph.
 
@@ -187,9 +229,9 @@ and negotiation as `parse_launch` (so any element / caps / policy works):
 ## Embedded: heap-free pipelines on a bare-metal MCU
 
 The MCU end of the spectrum is not a stripped-down build, it is the same graph
-with a hard guarantee the rest of the ecosystem can't make: **`alloc` is an
-optional feature, and the default build links no allocator at all.** That is the
-safety / no-heap MCU market (MISRA, cert) GStreamer can't reach.
+with a hard guarantee: **`alloc` is an optional feature, and the default build
+links no allocator at all.** That makes it a fit for safety-critical, no-heap
+targets (MISRA, certification processes).
 
 - **Static element model.** A heap-free pipeline is a compile-time-static graph
   of concrete typed elements (`g2g_core::staticelem`: `StaticSource` /
@@ -245,7 +287,7 @@ safety / no-heap MCU market (MISRA, cert) GStreamer can't reach.
   mid-stream capture fault (all frames still delivered) and escalates a dead
   peripheral within its bounded ladder without hanging.
 - **Receive direction (RTP ingress + jitter buffer).** The inverse of the
-  capture→egress flagship: `RtpSrc` receives and parses RTP (a wire-tolerant,
+  capture→egress reference pipeline: `RtpSrc` receives and parses RTP (a wire-tolerant,
   bounds-checked header parser shared with the std depayloader), a heap-free
   `JitterBuffer<N, BYTES>` absorbs arrival jitter and reorders by sequence
   number, handling reorder / duplicate / late / loss explicitly and countably,
@@ -271,7 +313,7 @@ safety / no-heap MCU market (MISRA, cert) GStreamer can't reach.
   (ESP32-P4 class). The heap-free + panic-free symbol proofs and the footprint
   report run on **both** `thumbv7em` and RISC-V — the portability claim is
   machine-checked, not asserted.
-- **The flagship deterministic-audio graph.** `capture -> convert -> resample ->
+- **The reference deterministic-audio graph.** `capture -> convert -> resample ->
   mix -> encode -> RTP` composed as **one** static heap-free pipeline, fully
   fixed-point, so its RTP wire bytes are bit-exact across every target: pinned by
   a host test (DSP validated against an independent float reference) and
@@ -307,8 +349,10 @@ catalogs, `tools/mcugen-check.sh`).
    framework is runtime-agnostic (Tokio on servers, Embassy on RTOS,
    `wasm-bindgen-futures` in the browser).
 2. **Hardware-first, zero-copy.** Buffers live in DMABUF / Vulkan /
-   CUDA / D3D11 / WebGPU memory domains; CPU memory copies are treated
-   as system faults.
+   CUDA / D3D11 / WebGPU memory domains. Negotiation settles a zero-copy
+   path per link where one exists and auto-plugs a converter where none
+   does, so every remaining copy is explicit (`g2g-launch -v` shows each
+   link's domain).
 3. **`no_std`, `alloc`-optional, sans-IO core.** The same pipeline shape runs on
    a bare-metal Cortex-M with no heap, an RTOS (Embassy / FreeRTOS / Zephyr), a
    multi-threaded server, a GPU-resident pipeline, or `wasm32` (see
@@ -400,7 +444,7 @@ OS-coupled elements live behind cargo features:
 | Embassy / RTOS pool + clock | `embassy`, `embassy-link` | — |
 | Browser elements | `web`, `web-codecs` | `wasm32-unknown-unknown` |
 
-The container parsers and muxers (`mp4src` / `mp4sink`, `tsdemux` / `mpegtsmux`,
+The container parsers and muxers (`mp4src` / `mp4mux`, `tsdemux` / `mpegtsmux`,
 `matroskademux` / `matroskamux`, `flvdemux` / `flvmux`, `oggdemux` / `oggmux`,
 `avidemux` / `avimux`, `fmp4demux`, `mpegpsdemux`, `multipartdemux` / `multipartmux`,
 `y4mdec` / `y4menc`, `aiffparse` / `aiffmux`, `auparse` / `avmux_au`), the bitstream parsers (`h264parse`, `h265parse`, `aacparse`,
@@ -443,9 +487,9 @@ packaging: segment files plus an `.m3u8` playlist, fed by `tsmux` or `mp4mux`).
 ## Sample pipelines
 
 The graph API is `run_source_transform_sink` / `run_linear_chain` /
-`run_source_fanout` / `run_muxer_sink` over typed elements (no string-keyed
-factory lookup). Examples are condensed; full versions live in the integration
-tests under `g2g-plugins/tests/`.
+`run_source_fanout` / `run_muxer_sink` over typed elements. Examples are
+condensed; full versions live in the integration tests under
+`g2g-plugins/tests/`.
 
 ### RTSP → ffmpeg decode → Wayland window
 
@@ -509,7 +553,7 @@ periodic IDRs carrying their own SPS/PPS.
 ```rust
 let src  = RtspSrc::new(url);
 let dec  = FfmpegH264Dec::new().with_output_format(OutputFormat::Nv12);
-let sink = KmsSink::open("/dev/dri/card0")?;
+let sink = KmsSink::new().with_device("/dev/dri/card0");
 
 run_source_transform_sink(src, dec, sink, &clock, LatencyProfile::Live).await?;
 ```
@@ -520,11 +564,11 @@ display manager (KMS sink needs DRM master).
 ### RTSP → decode → ML preprocess → ORT inference → postprocess
 
 ```rust
-let src       = RtspSrc::new(url);
-let dec       = FfmpegH264Dec::new().with_output_format(OutputFormat::Nv12);
-let preproc   = WgpuPreprocess::new(w, h);                 // NV12 -> f32 NCHW on GPU
-let inference = OrtInference::from_memory_with_cuda(model_bytes)?;
-let post      = TensorPostprocess::topk_classification(5);
+let src           = RtspSrc::new(url);
+let mut dec       = FfmpegH264Dec::new().with_output_format(OutputFormat::Nv12);
+let mut preproc   = WgpuPreprocess::new(w, h);             // NV12 -> f32 NCHW on GPU
+let mut inference = OrtInference::from_memory_with_cuda(model_bytes)?;
+let mut post      = TensorPostprocess::topk_classification(5);
 
 run_linear_chain(src, vec![&mut dec, &mut preproc, &mut inference, &mut post],
                  FakeSink::new(), &clock, LatencyProfile::Live).await?;
@@ -549,14 +593,14 @@ and converted to RGBA through an immutable `VkSamplerYcbcrConversion` compute
 pass (the conversion wgpu's bind-group API cannot express), then handed
 downstream as a `wgpu::Texture` &mdash; the frame never touches the CPU.
 
-### File capture → H.264 parse → fMP4 record
+### File → H.264 parse → fMP4 record
 
 ```rust
-let src   = FileSrc::open("in.h264")?;
-let parse = H264Parse::new();
-let sink  = Mp4Sink::open("out.mp4")?;
-
-run_source_transform_sink(src, parse, sink, &clock, LatencyProfile::Live).await?;
+let graph = parse_launch(
+    &default_registry(),
+    "filesrc location=in.h264 ! h264parse ! mp4mux ! filesink location=out.mp4",
+)?;
+run_graph(graph, &clock, LatencyProfile::Live).await?;
 ```
 
 ### MPEG-TS file → demux → H.264 parse → decode → Wayland
@@ -571,11 +615,11 @@ MPEG-2 or H.264 plays clean from any container while progressive content passes
 through untouched.
 
 ```rust
-let src   = FileSrc::new("clip.ts", Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs });
-let demux = TsDemux::new().with_stream(TsStream::H264);   // PAT/PMT/PES -> Annex-B
-let parse = H264Parse::new();
-let dec   = FfmpegH264Dec::new().with_output_format(OutputFormat::Nv12);
-let sink  = WaylandSink::new();
+let src       = FileSrc::new("clip.ts", Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs });
+let mut demux = TsDemux::new().with_stream(TsStream::H264);   // PAT/PMT/PES -> Annex-B
+let mut parse = H264Parse::new();
+let mut dec   = FfmpegH264Dec::new().with_output_format(OutputFormat::Nv12);
+let sink      = WaylandSink::new();
 
 run_linear_chain(src, vec![&mut demux, &mut parse, &mut dec], sink,
                  &clock, LatencyProfile::Live).await?;
@@ -617,11 +661,11 @@ let dec   = KlvDecode::new();   // -> "ts=.. lat=.. lon=.. alt=.. heading=.." li
 ### Adaptive streaming: HLS / DASH → decode → display
 
 ```rust
-let src   = HlsSrc::new("https://example.com/master.m3u8");  // or DashSrc::new(mpd_url)
-let demux = TsDemux::new().with_stream(TsStream::H264);
-let parse = H264Parse::new();
-let dec   = FfmpegH264Dec::new().with_output_format(OutputFormat::Nv12);
-let sink  = WaylandSink::new();
+let src       = HlsSrc::new("https://example.com/master.m3u8");  // or DashSrc::new(mpd_url)
+let mut demux = TsDemux::new().with_stream(TsStream::H264);
+let mut parse = H264Parse::new();
+let mut dec   = FfmpegH264Dec::new().with_output_format(OutputFormat::Nv12);
+let sink      = WaylandSink::new();
 
 run_linear_chain(src, vec![&mut demux, &mut parse, &mut dec], sink,
                  &clock, LatencyProfile::Live).await?;
@@ -642,9 +686,9 @@ fan-in. `Registry::inspect(name)` is the `gst-inspect` analog.
 
 ```rust
 let graph = parse_launch(
+    &default_registry(),
     "videotestsrc num-buffers=90 pattern=ball ! video/x-raw,format=nv12 \
      ! videoflip method=rotate-180 ! matroskamux ! filesink location=out.mkv",
-    &default_registry(),
 )?;
 run_graph(graph, &clock, LatencyProfile::Live).await?;
 ```
@@ -653,7 +697,9 @@ Registered launch elements include `videotestsrc` / `audiotestsrc`, the SW
 transforms, the demuxers (`tsdemux`, `matroskademux`, `flvdemux`, `oggdemux`, `mpegpsdemux`)
 and muxers (`mpegtsmux`, `matroskamux`, `flvmux`, `oggmux`, `funnel`, `audiomixer`),
 `filesrc` / `filesink`, and `fakesink`. Feature-gated capture / decode / display
-elements still need explicit Rust construction.
+elements register their launch factories when their feature is enabled, and the
+`autovideosink` / `autoaudiosink` aliases resolve to whichever sink is built
+(falling back to `fakesink`, so a tutorial line runs headless).
 
 The ML elements live in a separate crate, so an app opts them in after building
 the registry: `g2g_ml::register(&mut reg)` (the `launch` feature) adds
@@ -666,7 +712,7 @@ segmentation), making
 
 ```rust
 let src  = VideoTestSrc::new(1920, 1080, 30, 0);         // RGBA test pattern, unbounded
-let enc  = MfEncode::new_low_latency();                  // Windows; on Linux use the bridge
+let enc  = MfEncode::new().with_hardware();              // Windows; on Linux use NvEnc / ffmpeg
 let sink = UdpSink::new("239.0.0.1:5004".parse()?)
     .with_rtp(96, 0x1234_5678);                          // payload type, SSRC
 
@@ -758,7 +804,7 @@ In a second terminal, push a synthetic H.264 feed into it:
 
 ```sh
 ffmpeg -re -f lavfi -i testsrc=size=1280x720:rate=30 \
-       -c:v libx264 -preset ultrafast -tune zerolatency -g 30 \
+       -c:v libx264 -pix_fmt yuv420p -preset ultrafast -tune zerolatency -g 30 \
        -f rtsp -rtsp_transport tcp rtsp://localhost:8554/pattern
 ```
 

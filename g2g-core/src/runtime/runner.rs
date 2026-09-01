@@ -452,8 +452,20 @@ impl RunStats {
                     } else {
                         alloc::string::String::new()
                     };
+                    // Frame age at this element's output push: the number that
+                    // exposes internal buffering (a decoder's reorder queue),
+                    // which cheap `proc` percentiles hide.
+                    let age = if e.age_at_emit.count > 0 {
+                        format!(
+                            ", age-out p50 {:.2} ms / p99 {:.2} ms",
+                            ms(e.age_at_emit.p50_ns),
+                            ms(e.age_at_emit.p99_ns)
+                        )
+                    } else {
+                        alloc::string::String::new()
+                    };
                     s.push_str(&format!(
-                        "    {:<16} proc p50 {:.2} ms / p99 {:.2} ms (n={}){blocked}{transit}, in-fill {}%/{}% avg/max\n",
+                        "    {:<16} proc p50 {:.2} ms / p99 {:.2} ms (n={}){blocked}{transit}{age}, in-fill {}%/{}% avg/max\n",
                         e.name,
                         ms(e.proc.p50_ns),
                         ms(e.proc.p99_ns),
@@ -723,7 +735,7 @@ where
             ),
             None => ClockSync::new(c.clock.clone(), base_time_ns),
         };
-        AsyncElement::set_clock_sync(sink, sync);
+        AsyncElement::set_clock_sync(sink, sync.with_path_latency(latency));
     }
 
     let (link_tx, link_rx) = link(link_capacity);
@@ -2169,7 +2181,10 @@ where
     // frame at its running-time deadline (PTS pacing). Only when a clock was
     // elected; without one the sink presents as fast as backpressure allows.
     if let Some(c) = &elected {
-        AsyncElement::set_clock_sync(sink, ClockSync::new(c.clock.clone(), base_time_ns));
+        AsyncElement::set_clock_sync(
+            sink,
+            ClockSync::new(c.clock.clone(), base_time_ns).with_path_latency(latency),
+        );
     }
 
     let (link1_tx, link1_rx) = link(link_capacity);

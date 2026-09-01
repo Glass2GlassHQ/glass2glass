@@ -434,6 +434,9 @@ pub struct MatroskaDemuxer {
     buf: Vec<u8>,
     in_segment: bool,
     timestamp_scale: u64,
+    /// The Segment `Info` `Duration`, scaled to nanoseconds. `None` until Info
+    /// parses, or for a file whose Info omits it (a live / open-ended stream).
+    duration_ns: Option<u64>,
     tracks: Vec<MkvTrack>,
     /// Per-track `CodecPrivate` decoder-init bytes (track number, bytes), kept
     /// beside `tracks` so `MkvTrack` stays `Copy`. Empty entries are not stored.
@@ -486,6 +489,7 @@ impl MatroskaDemuxer {
             buf: Vec::new(),
             in_segment: false,
             timestamp_scale: DEFAULT_TIMESTAMP_SCALE,
+            duration_ns: None,
             tracks: Vec::new(),
             codec_privates: Vec::new(),
             compressions: Vec::new(),
@@ -555,6 +559,12 @@ impl MatroskaDemuxer {
     /// The elementary streams announced by `Tracks` (empty until it is seen).
     pub fn tracks(&self) -> &[MkvTrack] {
         &self.tracks
+    }
+
+    /// The container's total duration in nanoseconds, from the Segment `Info`
+    /// `Duration`. `None` until Info parses, or when the file declares none.
+    pub fn duration_ns(&self) -> Option<u64> {
+        self.duration_ns
     }
 
     /// The `CodecPrivate` decoder-init bytes for a track number, if the track
@@ -715,6 +725,10 @@ impl MatroskaDemuxer {
                         if let Some(scale) = parse_timestamp_scale(&self.buf[header..total]) {
                             self.timestamp_scale = scale;
                         }
+                        // Duration is in TimestampScale ticks, so it is read
+                        // after the scale it is expressed in.
+                        self.duration_ns =
+                            parse_info_duration(&self.buf[header..total], self.timestamp_scale);
                         if let Some(title) = parse_info_title(&self.buf[header..total]) {
                             self.tags.push(Tag::Title(title));
                         }
@@ -871,6 +885,22 @@ fn parse_timestamp_scale(info: &[u8]) -> Option<u64> {
         .find(|(id, _)| *id == ID_TIMESTAMP_SCALE)
         .map(|(_, d)| read_uint(d))
 }
+
+/// The Segment `Info` `Duration` in nanoseconds. The element is a float in
+/// `TimestampScale` ticks; a negative, non-finite or absurdly large value is
+/// refused rather than saturating into a nonsense length.
+fn parse_info_duration(info: &[u8], timestamp_scale: u64) -> Option<u64> {
+    let (_, data) = children(info).find(|(id, _)| *id == ID_DURATION)?;
+    let ticks = read_float(data);
+    if !ticks.is_finite() || ticks <= 0.0 || ticks > MAX_DURATION_TICKS {
+        return None;
+    }
+    Some((ticks as u64).saturating_mul(timestamp_scale))
+}
+
+/// Largest `Duration` tick count accepted: at the default 1 ms scale this is a
+/// little over a century, and it keeps the float-to-integer cast in range.
+const MAX_DURATION_TICKS: f64 = 4.0e12;
 
 /// The Segment `Info` `Title` (the whole-file title), if present and valid UTF-8.
 fn parse_info_title(info: &[u8]) -> Option<String> {

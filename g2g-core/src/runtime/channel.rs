@@ -949,6 +949,14 @@ impl OutputSink for SenderSink {
         if let (PipelinePacket::CapsChanged(caps), Some(c)) = (&*packet, &self.link.counters) {
             c.record_caps(caps);
         }
+        // The frame's age as its element emits it, the number that catches an
+        // element buffering frames internally. Skipped for unstamped frames.
+        #[cfg(feature = "std")]
+        if let (Some(probe), PipelinePacket::DataFrame(frame)) = (&self.push_wait_probe, &*packet) {
+            if frame.timing.arrival_ns != 0 {
+                probe.record_age_at_emit(stamp_now_ns().saturating_sub(frame.timing.arrival_ns));
+            }
+        }
         // Leaky links drop *data frames* under a full channel rather than
         // applying backpressure; control packets (caps / segment / flush /
         // eos) are never dropped, they always block so the stream stays

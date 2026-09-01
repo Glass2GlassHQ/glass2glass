@@ -18,6 +18,7 @@ GStreamer to **g2g**. It assumes familiarity with GStreamer (`gst-launch-1.0`,
 | :--- | :--- | :--- |
 | Pipeline text | `gst-launch-1.0 ...` | `g2g-launch ...` ([g2g-plugins/src/bin/g2g-launch.rs](g2g-plugins/src/bin/g2g-launch.rs)) |
 | Introspection | `gst-inspect-1.0` | `g2g-inspect` ([g2g-plugins/src/bin/g2g-inspect.rs](g2g-plugins/src/bin/g2g-inspect.rs)) |
+| Media discovery | `gst-discoverer-1.0` | `g2g-discover` ([g2g-plugins/src/bin/g2g-discover.rs](g2g-plugins/src/bin/g2g-discover.rs)) |
 | Element | `GstElement` (GObject, runtime) | a Rust type implementing `AsyncElement` / `SourceLoop` / `MultiInputElement` |
 | Pads / caps | `GstPad`, `GstCaps` strings | typed `Caps` enum + `intercept_caps`/negotiation |
 | Pipeline object | `GstPipeline` | `Graph` + `run_graph` |
@@ -571,4 +572,5 @@ g2g-inspect <element>             # one element's role, properties, pad template
 g2g-inspect --all                 # full catalog
 g2g-inspect --gst <gst-name>      # map a GStreamer element name to g2g
 g2g-inspect --gst-map             # every gst-name/g2g-name pair, tab separated
+g2g-discover <file> [--json]      # container, streams, caps, duration and tags
 ```

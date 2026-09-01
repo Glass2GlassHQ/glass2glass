@@ -17,11 +17,12 @@ permissions:
   pages: write
   id-token: write
 
-# One deployment at a time; let an in-flight deploy finish rather than cancel it
-# (cancelling mid-deploy is what leaves Pages deployments stuck).
+# One deployment at a time. A newer push cancels the older run: a run can get
+# stuck in "waiting" on the github-pages environment, and with no cancellation
+# it holds this group and blocks every later deploy.
 concurrency:
   group: pages
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   deploy:

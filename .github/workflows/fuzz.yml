@@ -1,0 +1,40 @@
+name: fuzz
+
+# Short scheduled runs of every libFuzzer target in g2g-plugins/fuzz. Not a
+# per-push gate: the parsers are fuzzed for a fixed budget each week, and any
+# crash artifact fails the job with the reproducer in the log.
+on:
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: fuzz
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: g2g-plugins/fuzz
+      - name: install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      - name: build all targets
+        working-directory: g2g-plugins/fuzz
+        run: cargo +nightly fuzz build
+      - name: run each target for 60 s
+        working-directory: g2g-plugins/fuzz
+        run: |
+          for target in $(cargo +nightly fuzz list); do
+            echo "::group::$target"
+            cargo +nightly fuzz run "$target" -- -max_total_time=60 -timeout=10
+            echo "::endgroup::"
+          done

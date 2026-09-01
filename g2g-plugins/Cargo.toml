@@ -772,7 +772,7 @@ ring = { version = "0.17", optional = true }
 # The frozen v2 plugin ABI types + validation (M1010), shared with the SDK a
 # plugin author builds against, and the FFI-safe `Future` its poll boundary
 # uses. Both are plugin-loader-only, so the no_std baseline never sees them.
-g2g-plugin = { version = "0.5.0", path = "../g2g-plugin", optional = true }
+g2g-plugin = { version = "0.6.0", path = "../g2g-plugin", optional = true }
 async-ffi = { version = "0.5", optional = true }
 # Declarative graph format (declarative / declarative-yaml features, M578). serde
 # derive for the spec model; serde_json / serde_yaml are the two front-ends. All
@@ -1292,6 +1292,10 @@ name = "g2g-inspect"
 required-features = ["std"]
 
 [[bin]]
+name = "g2g-discover"
+required-features = ["std"]
+
+[[bin]]
 name = "g2g-docgen"
 required-features = ["std"]
 
@@ -1451,6 +1455,12 @@ required-features = ["gstreamer"]
 # not in CI (the pipewire feature is not built there).
 [[test]]
 name = "m890_pipewire_video_capture"
+required-features = ["pipewire"]
+
+# M1106: PipeWireSink disciplines its provided clock from pw_stream_get_time_n.
+# Needs a running PipeWire daemon; run locally, not in CI.
+[[test]]
+name = "m1106_pipewiresink_drift_clock"
 required-features = ["pipewire"]
 
 # M636: asserts a process-global allocation counter stays flat, so it must be

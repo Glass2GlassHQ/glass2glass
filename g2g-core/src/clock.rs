@@ -257,6 +257,11 @@ pub struct ClockSync {
     /// Optional `Playing`-transition anchor (M176). When armed and stamped it
     /// supersedes `base_time_ns`; `None` on the eager path.
     play_anchor: Option<PlayAnchor>,
+    /// The aggregated path holds a live source (LatencyReport::live). A live
+    /// sink anchors on the base time, never the first frame.
+    path_live: bool,
+    /// Aggregated minimum path latency, added to every presentation deadline.
+    path_latency_min_ns: u64,
 }
 
 impl ClockSync {
@@ -266,6 +271,8 @@ impl ClockSync {
             clock,
             base_time_ns,
             play_anchor: None,
+            path_live: false,
+            path_latency_min_ns: 0,
         }
     }
 
@@ -281,7 +288,32 @@ impl ClockSync {
             clock,
             base_time_ns,
             play_anchor: Some(play_anchor),
+            path_live: false,
+            path_latency_min_ns: 0,
         }
+    }
+
+    /// Carry the negotiated path latency (GStreamer's LATENCY-query result).
+    /// On a live path a sink anchors presentation on the pipeline base time
+    /// plus `min_ns`, never on the first frame, so a startup stall (decoder
+    /// init) makes early frames late once instead of raising the standing
+    /// latency for the whole run.
+    pub fn with_path_latency(mut self, report: crate::query::LatencyReport) -> Self {
+        self.path_live = report.live;
+        self.path_latency_min_ns = report.min_ns;
+        self
+    }
+
+    /// Whether the path holds a live source (from the aggregated
+    /// [`LatencyReport`](crate::query::LatencyReport)).
+    pub fn path_live(&self) -> bool {
+        self.path_live
+    }
+
+    /// The path's aggregated minimum latency, added to every presentation
+    /// deadline so a live sink buffers just enough to never run dry.
+    pub fn path_latency_min_ns(&self) -> u64 {
+        self.path_latency_min_ns
     }
 
     /// Current time on the elected clock.

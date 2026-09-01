@@ -7,7 +7,7 @@
 # Run: `cargo bench --manifest-path g2g-bench/Cargo.toml` (or `cargo xtask bench`).
 [package]
 name = "g2g-bench"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 license = "MPL-2.0"
 publish = false
