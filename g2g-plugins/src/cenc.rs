@@ -109,7 +109,7 @@ impl SampleCrypt {
 }
 
 /// Content keys available to a demuxer, filled by a key publisher
-/// ([`HlsSrc`](crate::hlssrc) fetching `#EXT-X-KEY` material, or an app clear
+/// (`HlsSrc` fetching `#EXT-X-KEY` material, or an app clear
 /// key) and read per sample.
 ///
 /// A sample's key is resolved in this order: the key registered for the sample's

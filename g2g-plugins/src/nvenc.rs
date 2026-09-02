@@ -39,6 +39,13 @@
 //! 10-bit input/output depth in the codec config). NVENC has no 10-bit H.264, so
 //! P010 with `codec=h264` is rejected at configure.
 //!
+//! Colour: the negotiated caps' colorimetry goes into the SPS / VPS VUI colour
+//! description (`NV_ENC_CONFIG_*_VUI_PARAMETERS`, whose colour fields are the CICP
+//! codepoints) and rides onto the compressed output caps. An RGBA input is colour
+//! converted inside NVENC with a matrix the SDK does not expose, so only its
+//! primaries and transfer are written, the matrix as unspecified and the range at
+//! H.264's own default; an untagged input writes no video signal type at all.
+//!
 //! Threading: the encoder is a raw session handle plus a CUDA context, driven
 //! through `&mut self` only and never shared; `unsafe impl Send` rests on the
 //! same ownership-transfer contract as `FfmpegH264Enc` / `FfmpegVideoDec`.
@@ -102,6 +109,10 @@ pub struct NvEnc {
     /// Ampere/3060; AV1 needs RTX 40-series. The encode path is identical bar the
     /// codec GUID and the announced output caps.
     codec: VideoCodec,
+    /// How the negotiated input's samples map to colour, as
+    /// [`coded_colorimetry`] narrows it to what the encoded YUV really is.
+    /// Written into the SPS VUI colour description and carried on the output caps.
+    colorimetry: g2g_core::Colorimetry,
     bitrate_bps: u32,
     /// Frames between IDRs; negative means an infinite GOP (IDRs on demand only).
     gop_size: i32,
@@ -187,6 +198,7 @@ impl NvEnc {
             framerate: Rate::Any,
             input_format: RawVideoFormat::Nv12,
             codec: VideoCodec::H264,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
             bitrate_bps: DEFAULT_BITRATE_BPS,
             gop_size: DEFAULT_GOP_SIZE,
             repeat_sequence_header: false,
@@ -327,7 +339,7 @@ impl NvEnc {
             width: Dim::Fixed(self.width),
             height: Dim::Fixed(self.height),
             framerate: self.framerate.clone(),
-            colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            colorimetry: self.colorimetry,
         }
     }
 
@@ -457,7 +469,8 @@ impl NvEnc {
 
         // The codec-specific arm of the config union: IDR period (NVENC leaves
         // it at the preset's value otherwise, so a finite gopLength alone would
-        // not give periodic IDRs), the repeat-SPS/PPS bit, and the pixel depth.
+        // not give periodic IDRs), the repeat-SPS/PPS bit, the pixel depth, and
+        // the VUI colour description.
         let depth = if self.is_ten_bit() {
             ffi::NV_ENC_BIT_DEPTH_10
         } else {
@@ -482,6 +495,7 @@ impl NvEnc {
                 );
                 hevc.input_bit_depth = depth;
                 hevc.output_bit_depth = depth;
+                fill_vui_color(&mut hevc.vui, self.colorimetry);
             }
             _ => {
                 // SAFETY: as above, for the union's H.264 member.
@@ -496,6 +510,7 @@ impl NvEnc {
                 );
                 h264.input_bit_depth = depth;
                 h264.output_bit_depth = depth;
+                fill_vui_color(&mut h264.vui, self.colorimetry);
             }
         }
     }
@@ -826,6 +841,44 @@ fn set_flag(word: &mut u32, bit: u32, on: bool) {
     }
 }
 
+/// What the encoded YUV's colorimetry is, given the negotiated input `format`
+/// and its caps colorimetry. NV12 / P010 are already the samples NVENC codes, so
+/// their tag carries over whole. RGBA / BGRA are colour converted inside NVENC
+/// with a matrix the SDK does not expose, so the matrix and range of the coded
+/// samples are unknown; the primaries and transfer describe the light and survive
+/// the conversion.
+fn coded_colorimetry(
+    format: RawVideoFormat,
+    colorimetry: g2g_core::Colorimetry,
+) -> g2g_core::Colorimetry {
+    match format {
+        RawVideoFormat::Rgba8 | RawVideoFormat::Bgra8 => g2g_core::Colorimetry {
+            range: g2g_core::ColorRange::Unknown,
+            matrix: g2g_core::MatrixCoefficients::Unknown,
+            ..colorimetry
+        },
+        _ => colorimetry,
+    }
+}
+
+/// Write `colorimetry` into an NVENC VUI block, which the driver copies into the
+/// SPS / VPS colour description. `NV_ENC_VUI_*` are the CICP codepoint values, so
+/// each field goes in as the codepoint the caps value names and an unknown one as
+/// 2 (unspecified). A fully untagged stream leaves the whole block at the preset's
+/// default so no video signal type is written at all.
+fn fill_vui_color(vui: &mut ffi::VuiColor, colorimetry: g2g_core::Colorimetry) {
+    if colorimetry == g2g_core::Colorimetry::UNKNOWN {
+        return;
+    }
+    vui.video_signal_type_present_flag = 1;
+    vui.video_format = ffi::NV_ENC_VUI_VIDEO_FORMAT_UNSPECIFIED;
+    vui.video_full_range_flag = u32::from(colorimetry.range == g2g_core::ColorRange::Full);
+    vui.colour_description_present_flag = 1;
+    vui.colour_primaries = colorimetry.primaries.to_cicp() as u32;
+    vui.transfer_characteristics = colorimetry.transfer.to_cicp() as u32;
+    vui.colour_matrix = colorimetry.matrix.to_cicp() as u32;
+}
+
 /// Map an NVENC status to a `Result`.
 fn nvchk(status: ffi::NvEncStatus) -> Result<(), G2gError> {
     if status == ffi::NV_ENC_SUCCESS {
@@ -903,21 +956,21 @@ impl AsyncElement for NvEnc {
             } if codec != VideoCodec::H265 => CapsSet::from_alternatives(Vec::new()),
             Caps::RawVideo {
                 format:
-                    RawVideoFormat::Nv12
+                    format @ (RawVideoFormat::Nv12
                     | RawVideoFormat::P010
                     | RawVideoFormat::Rgba8
-                    | RawVideoFormat::Bgra8,
+                    | RawVideoFormat::Bgra8),
                 width,
                 height,
                 framerate,
+                colorimetry,
                 interlace: _,
-                ..
             } => CapsSet::one(Caps::CompressedVideo {
                 codec,
                 width: width.clone(),
                 height: height.clone(),
                 framerate: framerate.clone(),
-                colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                colorimetry: coded_colorimetry(*format, *colorimetry),
             }),
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
@@ -936,8 +989,8 @@ impl AsyncElement for NvEnc {
             width,
             height,
             framerate,
+            colorimetry,
             interlace: _,
-            ..
         } = absolute_caps
         else {
             return Err(G2gError::CapsMismatch);
@@ -966,6 +1019,7 @@ impl AsyncElement for NvEnc {
         self.height = *h;
         self.input_format = *format;
         self.framerate = framerate.clone();
+        self.colorimetry = coded_colorimetry(*format, *colorimetry);
         // The NVENC session opens lazily on the first frame (it needs the frame's
         // CUDA context), so configure only records geometry.
         self.configured = true;
@@ -1161,6 +1215,7 @@ mod ffi {
     pub const NV_ENC_BUFFER_FORMAT_YUV420_10BIT: u32 = 0x0001_0000;
     pub const NV_ENC_BIT_DEPTH_8: u32 = 8;
     pub const NV_ENC_BIT_DEPTH_10: u32 = 10;
+    pub const NV_ENC_VUI_VIDEO_FORMAT_UNSPECIFIED: u32 = 5;
     pub const NV_ENC_PIC_STRUCT_FRAME: u32 = 0x1;
     pub const NV_ENC_PARAMS_RC_CBR: u32 = 0x2;
     pub const NV_ENC_TUNING_INFO_LOW_LATENCY: u32 = 0x2;
@@ -1292,18 +1347,40 @@ mod ffi {
     /// union inside [`Config`]. Only the fields this element writes are named; the
     /// runs between them are opaque so the preset's values survive untouched. The
     /// leading C bitfield block is one `u32` (`bitfields`).
+    /// The colour half of `NV_ENC_CONFIG_*_VUI_PARAMETERS`, which both codecs
+    /// embed at their own offset. The fields ahead of it (`overscanInfo*`) and
+    /// behind it (chroma sample location onward) stay with the enclosing struct's
+    /// opaque runs, so the preset's values survive.
+    #[repr(C)]
+    pub struct VuiColor {
+        pub video_signal_type_present_flag: u32,
+        pub video_format: u32,
+        pub video_full_range_flag: u32,
+        pub colour_description_present_flag: u32,
+        /// CICP `colour_primaries` (`NV_ENC_VUI_COLOR_PRIMARIES` is codepoint-valued).
+        pub colour_primaries: u32,
+        /// CICP `transfer_characteristics`.
+        pub transfer_characteristics: u32,
+        /// CICP `matrix_coefficients`.
+        pub colour_matrix: u32,
+    }
+    const _: () = assert!(core::mem::size_of::<VuiColor>() == 28);
+
     #[repr(C)]
     pub struct ConfigH264 {
         pub bitfields: u32,
         pub level: u32,
         pub idr_period: u32,
-        pub opaque1: [u8; 200],
+        pub opaque1: [u8; 68],
+        pub vui: VuiColor,
+        pub opaque2: [u8; 104],
         pub output_bit_depth: u32,
         pub input_bit_depth: u32,
-        pub opaque2: [u8; 1572],
+        pub opaque3: [u8; 1572],
     }
     const _: () = assert!(core::mem::size_of::<ConfigH264>() == 1792);
     const _: () = assert!(core::mem::offset_of!(ConfigH264, idr_period) == 8);
+    const _: () = assert!(core::mem::offset_of!(ConfigH264, vui) == 80);
     const _: () = assert!(core::mem::offset_of!(ConfigH264, output_bit_depth) == 212);
     const _: () = assert!(core::mem::offset_of!(ConfigH264, input_bit_depth) == 216);
 
@@ -1314,14 +1391,17 @@ mod ffi {
         pub opaque0: [u8; 16],
         pub bitfields: u32,
         pub idr_period: u32,
-        pub opaque1: [u8; 176],
+        pub opaque1: [u8; 48],
+        pub vui: VuiColor,
+        pub opaque2: [u8; 100],
         pub output_bit_depth: u32,
         pub input_bit_depth: u32,
-        pub opaque2: [u8; 1352],
+        pub opaque3: [u8; 1352],
     }
     const _: () = assert!(core::mem::size_of::<ConfigHevc>() == 1560);
     const _: () = assert!(core::mem::offset_of!(ConfigHevc, bitfields) == 16);
     const _: () = assert!(core::mem::offset_of!(ConfigHevc, idr_period) == 20);
+    const _: () = assert!(core::mem::offset_of!(ConfigHevc, vui) == 72);
     const _: () = assert!(core::mem::offset_of!(ConfigHevc, output_bit_depth) == 200);
     const _: () = assert!(core::mem::offset_of!(ConfigHevc, input_bit_depth) == 204);
 

@@ -14,7 +14,8 @@ use g2g_core::{
     TensorShape,
 };
 use g2g_ml::wgpupreprocess::{
-    gpu_available, nv12_to_gpu_texture, nv12_to_rgb_tensor, WgpuBufferOwner, WgpuPreprocess,
+    gpu_available, nv12_to_gpu_texture, nv12_to_rgb_tensor, nv12_to_rgb_tensor_tagged,
+    WgpuBufferOwner, WgpuPreprocess,
 };
 
 fn nv12_caps(w: u32, h: u32) -> Caps {
@@ -383,4 +384,70 @@ async fn surface_import_with_gpu_output_stays_resident() {
             "element {i}: resident {g} vs cpu reference {e}"
         );
     }
+}
+
+/// M1127: the shader takes its matrix from the caps colorimetry, not a baked-in
+/// constant. The same NV12 bytes tagged BT.709 must land on the BT.709 host
+/// reference and away from the BT.601 one.
+#[tokio::test]
+async fn gpu_matrix_follows_the_caps_colorimetry() {
+    let _gpu = GPU_LOCK.lock().await;
+    if !gpu_available().await {
+        eprintln!("skipping: no wgpu adapter on this host");
+        return;
+    }
+
+    let (w, h) = (4usize, 2usize);
+    // Off-centre chroma in both blocks: neutral chroma converts identically
+    // under every matrix, so it would prove nothing here.
+    let y_plane = [16u8, 81, 145, 235, 41, 100, 200, 128];
+    let uv_plane = [90u8, 200, 170, 60];
+    let nv12: Vec<u8> = y_plane.iter().chain(&uv_plane).copied().collect();
+
+    let mut caps = nv12_caps(w as u32, h as u32);
+    let Caps::RawVideo {
+        ref mut colorimetry,
+        ..
+    } = caps
+    else {
+        panic!("raw video caps");
+    };
+    *colorimetry = g2g_core::Colorimetry::BT709;
+
+    let mut element = WgpuPreprocess::new();
+    element.configure_pipeline(&caps).expect("configure BT.709");
+    let mut out = Collect::default();
+    element
+        .process(
+            PipelinePacket::DataFrame(nv12_frame(nv12.clone(), 0, 0)),
+            &mut out,
+        )
+        .await
+        .expect("gpu preprocess a tagged frame");
+
+    let frame = out
+        .packets
+        .iter()
+        .find_map(|p| match p {
+            PipelinePacket::DataFrame(f) => Some(f),
+            _ => None,
+        })
+        .expect("one tensor out");
+    let got = frame_f32(frame);
+    let expected = nv12_to_rgb_tensor_tagged(&nv12, w, h, g2g_core::Colorimetry::BT709);
+    for (i, (g, e)) in got.iter().zip(&expected).enumerate() {
+        assert!(
+            (g - e).abs() < 1e-3,
+            "element {i}: gpu {g} vs BT.709 reference {e}"
+        );
+    }
+    // And the BT.601 reference is a different picture, so the tag reached the
+    // shader rather than the two references coinciding.
+    let bt601 = nv12_to_rgb_tensor(&nv12, w, h);
+    let apart = got
+        .iter()
+        .zip(&bt601)
+        .map(|(g, e)| (g - e).abs())
+        .fold(0f32, f32::max);
+    assert!(apart > 1e-2, "BT.601 and BT.709 differ by only {apart}");
 }

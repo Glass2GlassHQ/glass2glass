@@ -8,7 +8,7 @@
 //! identification header is parsed the channels / rate are known, so the demuxer
 //! refines the caps via `CapsChanged` before the first frame. The codec header
 //! goes downstream in-band first (`OpusHead` for the decoder's pre-skip; the
-//! native `fLaC` STREAMINFO as the [`crate::ffmpegaudiodec`] extradata). CPU,
+//! native `fLaC` STREAMINFO as the `ffmpegaudiodec` extradata). CPU,
 //! `no_std` baseline.
 //!
 //! ```text
@@ -386,6 +386,7 @@ impl OggDemux {
             },
             channels: 0,
             sample_rate: 0,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         }
     }
 
@@ -883,6 +884,7 @@ fn concrete_caps(info: crate::ogg::OggStreamInfo) -> Option<Caps> {
         },
         channels: info.channels.max(1),
         sample_rate: info.sample_rate,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     })
 }
 
@@ -1528,7 +1530,8 @@ mod tests {
             alloc::vec![Caps::Audio {
                 format: AudioFormat::Opus,
                 channels: 2,
-                sample_rate: 48_000
+                sample_rate: 48_000,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED
             }]
         );
         // OpusHead is forwarded in-band (the decoder's pre-skip source), ahead of

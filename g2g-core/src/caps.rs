@@ -5,6 +5,7 @@ use alloc::string::String;
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
+use crate::channels::ChannelLayout;
 use crate::error::G2gError;
 use crate::tensor::MAX_TENSOR_RANK;
 
@@ -80,6 +81,12 @@ pub enum Caps {
         format: AudioFormat,
         channels: u8,
         sample_rate: u32,
+        /// Which speaker each interleaved channel feeds,
+        /// [`ChannelLayout::UNSPECIFIED`] when the producer does not know. A
+        /// consumer resolves an unspecified layout with
+        /// [`ChannelLayout::or_default_for`] the channel count, so it behaves
+        /// as a bare count.
+        channel_layout: ChannelLayout,
     },
     /// A tensor stream (ML). Its `shape` ([`TensorShape`]) is a fixed-rank
     /// inline array (M636), so the variant is part of the no-alloc MCU subset
@@ -212,11 +219,13 @@ impl Caps {
                     format: fa,
                     channels: ca,
                     sample_rate: sa,
+                    channel_layout: la,
                 },
                 Caps::Audio {
                     format: fb,
                     channels: cb,
                     sample_rate: sb,
+                    channel_layout: lb,
                 },
             ) if fa == fb => {
                 // Channels use the `ANY_CHANNELS` (0) wildcard in *both* the
@@ -232,11 +241,16 @@ impl Caps {
                 } else {
                     (sa == sb).then_some(*sa)
                 };
-                match (channels, rate) {
-                    (Some(channels), Some(sample_rate)) => Ok(Caps::Audio {
+                // An unspecified layout is the wildcard, so a producer that knows
+                // its speakers pins them onto a peer that does not, and two
+                // different declared layouts refuse the link.
+                let layout = la.intersect(*lb);
+                match (channels, rate, layout) {
+                    (Some(channels), Some(sample_rate), Some(channel_layout)) => Ok(Caps::Audio {
                         format: *fa,
                         channels,
                         sample_rate,
+                        channel_layout,
                     }),
                     _ => Err(G2gError::CapsMismatch),
                 }
@@ -275,6 +289,7 @@ impl Caps {
             format,
             channels,
             sample_rate,
+            ..
         } = self
         {
             // Only raw PCM uses the "any rate" / "any channels" wildcards;
@@ -348,10 +363,15 @@ impl Caps {
                 format,
                 channels,
                 sample_rate,
+                channel_layout,
             } if is_pcm(*format) && *channels == ANY_CHANNELS => Ok(Caps::Audio {
                 format: *format,
                 channels: FIXATE_CHANNELS_PLACEHOLDER,
                 sample_rate: *sample_rate,
+                // An unspecified layout survives fixation like `Colorimetry::UNKNOWN`:
+                // guessing speakers for a count that is itself a placeholder would
+                // only be wrong twice.
+                channel_layout: *channel_layout,
             }),
             Caps::Audio { .. }
             | Caps::ByteStream { .. }
@@ -437,6 +457,7 @@ impl Caps {
                 format,
                 channels,
                 sample_rate,
+                channel_layout,
             } => {
                 let (media_type, fmt) = audio_gst_media_type(*format);
                 let mut s = String::from(media_type);
@@ -449,6 +470,7 @@ impl Caps {
                 if *sample_rate != ANY_SAMPLE_RATE && *sample_rate != 0 {
                     s.push_str(&format!(",rate={sample_rate}"));
                 }
+                push_channel_mask(&mut s, *channel_layout);
                 s
             }
             // No GStreamer media type for tensors; a g2g-specific descriptor.
@@ -652,6 +674,18 @@ fn push_rate(s: &mut String, r: &Rate) {
 fn push_colorimetry(s: &mut String, c: &Colorimetry) {
     if let Some(v) = c.to_gst_string() {
         s.push_str(&format!(",colorimetry={v}"));
+    }
+}
+
+/// Append `,channel-mask=(bitmask)0x...` for a declared layout (an unspecified
+/// one is the absent field). gst prints the mask as 16 hex digits.
+#[cfg(feature = "alloc")]
+fn push_channel_mask(s: &mut String, layout: ChannelLayout) {
+    if !layout.is_unspecified() {
+        s.push_str(&format!(
+            ",channel-mask=(bitmask)0x{:016x}",
+            layout.to_gst_mask()
+        ));
     }
 }
 
@@ -1070,6 +1104,17 @@ impl Colorimetry {
     pub const SRGB: Self = Self {
         range: ColorRange::Full,
         matrix: MatrixCoefficients::Identity,
+        transfer: TransferCharacteristics::Srgb,
+        primaries: ColorPrimaries::Bt709,
+    };
+
+    /// What a JFIF file (ITU-T T.871) pins down: full-range BT.601 YCbCr over
+    /// sRGB. A JPEG bitstream carries no colour signalling of its own, so this
+    /// is the colorimetry of every baseline JPEG, and a JPEG encoder writes it
+    /// on its output whatever the input was tagged.
+    pub const JPEG: Self = Self {
+        range: ColorRange::Full,
+        matrix: MatrixCoefficients::Bt601,
         transfer: TransferCharacteristics::Srgb,
         primaries: ColorPrimaries::Bt709,
     };
@@ -2380,6 +2425,7 @@ mod tests {
             format: AudioFormat::Opus,
             channels: 2,
             sample_rate: 48_000,
+            channel_layout: crate::ChannelLayout::UNSPECIFIED,
         };
         assert_eq!(v.intersect(&a), Err(G2gError::CapsMismatch));
     }
@@ -2390,12 +2436,14 @@ mod tests {
             format: AudioFormat::Opus,
             channels: 2,
             sample_rate: 48_000,
+            channel_layout: crate::ChannelLayout::UNSPECIFIED,
         };
         assert_eq!(a.intersect(&a), Ok(a.clone()));
         let b = Caps::Audio {
             format: AudioFormat::Opus,
             channels: 1,
             sample_rate: 48_000,
+            channel_layout: crate::ChannelLayout::UNSPECIFIED,
         };
         assert_eq!(a.intersect(&b), Err(G2gError::CapsMismatch));
 
@@ -2415,7 +2463,8 @@ mod tests {
         assert!(Caps::Audio {
             format: AudioFormat::Aac,
             channels: 2,
-            sample_rate: 44_100
+            sample_rate: 44_100,
+            channel_layout: crate::ChannelLayout::UNSPECIFIED
         }
         .is_fixed());
     }
@@ -2426,11 +2475,13 @@ mod tests {
             format: AudioFormat::PcmS16Le,
             channels: ch,
             sample_rate: rate,
+            channel_layout: crate::ChannelLayout::UNSPECIFIED,
         };
         let aac = |ch, rate| Caps::Audio {
             format: AudioFormat::Aac,
             channels: ch,
             sample_rate: rate,
+            channel_layout: crate::ChannelLayout::UNSPECIFIED,
         };
         // ANY_CHANNELS (0) is a wildcard for both PCM and compressed: the decoder's
         // concrete output channels coupling back onto a demuxer's unknown 0 input
@@ -2460,6 +2511,7 @@ mod tests {
             format: AudioFormat::PcmS16Le,
             channels: ch,
             sample_rate: rate,
+            channel_layout: crate::ChannelLayout::UNSPECIFIED,
         };
         // A PCM "any channels" is not fixed; it fixates to the stereo placeholder
         // (the real layout arrives via the decoder's CapsChanged).
@@ -2477,9 +2529,115 @@ mod tests {
             format: AudioFormat::Aac,
             channels: ANY_CHANNELS,
             sample_rate: 0,
+            channel_layout: crate::ChannelLayout::UNSPECIFIED,
         };
         assert!(aac0.is_fixed());
         assert_eq!(aac0.fixate(), Ok(aac0.clone()));
+    }
+
+    #[test]
+    fn audio_channel_layout_intersects_as_a_wildcard() {
+        let pcm = |layout| Caps::Audio {
+            format: AudioFormat::PcmS16Le,
+            channels: 6,
+            sample_rate: 48_000,
+            channel_layout: layout,
+        };
+        let any = crate::ChannelLayout::UNSPECIFIED;
+        let five_one = crate::ChannelLayout::SURROUND_5_1;
+        let five_zero = crate::ChannelLayout::default_for(5).unwrap();
+        // Unspecified is the wildcard: a declared layout pins it either way round.
+        assert_eq!(pcm(any).intersect(&pcm(five_one)), Ok(pcm(five_one)));
+        assert_eq!(pcm(five_one).intersect(&pcm(any)), Ok(pcm(five_one)));
+        assert_eq!(pcm(any).intersect(&pcm(any)), Ok(pcm(any)));
+        assert_eq!(pcm(five_one).intersect(&pcm(five_one)), Ok(pcm(five_one)));
+        // Two different declared layouts do not overlap.
+        assert_eq!(
+            pcm(five_one).intersect(&pcm(five_zero)),
+            Err(G2gError::CapsMismatch)
+        );
+    }
+
+    #[test]
+    fn audio_channel_layout_survives_fixation() {
+        let pcm = |ch, layout| Caps::Audio {
+            format: AudioFormat::PcmS16Le,
+            channels: ch,
+            sample_rate: 48_000,
+            channel_layout: layout,
+        };
+        let any = crate::ChannelLayout::UNSPECIFIED;
+        let five_one = crate::ChannelLayout::SURROUND_5_1;
+        // An unspecified layout carries no information to fixate against and is
+        // already concrete enough (it means the count convention), so neither it
+        // nor a declared one blocks or changes fixation.
+        assert!(pcm(6, any).is_fixed());
+        assert!(pcm(6, five_one).is_fixed());
+        assert_eq!(pcm(6, five_one).fixate(), Ok(pcm(6, five_one)));
+        assert_eq!(pcm(ANY_CHANNELS, five_one).fixate(), Ok(pcm(2, five_one)));
+    }
+
+    #[test]
+    fn audio_channel_mask_round_trips_through_the_gst_string() {
+        let caps = Caps::Audio {
+            format: AudioFormat::PcmS16Le,
+            channels: 6,
+            sample_rate: 48_000,
+            channel_layout: crate::ChannelLayout::SURROUND_5_1,
+        };
+        let s = caps.to_gst_string();
+        assert!(
+            s.contains(",channel-mask=(bitmask)0x000000000000003f"),
+            "printed {s}"
+        );
+        assert_eq!(CapsSet::from_gst_string(&s).unwrap().alternatives(), [caps]);
+        // An unspecified layout prints no field, and an absent field parses back
+        // to unspecified.
+        let bare = Caps::Audio {
+            format: AudioFormat::PcmS16Le,
+            channels: 6,
+            sample_rate: 48_000,
+            channel_layout: crate::ChannelLayout::UNSPECIFIED,
+        };
+        let s = bare.to_gst_string();
+        assert!(!s.contains("channel-mask"), "printed {s}");
+        assert_eq!(CapsSet::from_gst_string(&s).unwrap().alternatives(), [bare]);
+        // 7.1 exercises gst's side-left/side-right bits (10/11), which sit one
+        // above the WAV positions the layout stores.
+        let surround = Caps::Audio {
+            format: AudioFormat::PcmS16Le,
+            channels: 8,
+            sample_rate: 48_000,
+            channel_layout: crate::ChannelLayout::SURROUND_7_1,
+        };
+        let s = surround.to_gst_string();
+        assert!(
+            s.contains(",channel-mask=(bitmask)0x0000000000000c3f"),
+            "printed {s}"
+        );
+        assert_eq!(
+            CapsSet::from_gst_string(&s).unwrap().alternatives(),
+            [surround]
+        );
+    }
+
+    #[test]
+    fn a_channel_mask_naming_an_unmodeled_speaker_is_refused() {
+        // gst bit 12 is TOP_FRONT_LEFT and bit 9 is LFE2; neither has a g2g
+        // position, so the caps is rejected rather than losing that channel.
+        assert!(CapsSet::from_gst_string(
+            "audio/x-raw,format=S16LE,channels=8,rate=48000,channel-mask=(bitmask)0x103f"
+        )
+        .is_none());
+        assert!(CapsSet::from_gst_string(
+            "audio/x-raw,format=S16LE,channels=7,rate=48000,channel-mask=(bitmask)0x23f"
+        )
+        .is_none());
+        // A malformed bitmask is refused too, not silently treated as absent.
+        assert!(CapsSet::from_gst_string(
+            "audio/x-raw,format=S16LE,channels=2,rate=48000,channel-mask=(bitmask)0xzz"
+        )
+        .is_none());
     }
 
     #[test]

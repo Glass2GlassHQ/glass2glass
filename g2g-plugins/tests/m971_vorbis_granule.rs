@@ -209,6 +209,7 @@ async fn oggmux_bytes(frames: &CaptureSink, fixture: &Fixture) -> Vec<u8> {
         format: AudioFormat::Vorbis,
         channels: fixture.channels,
         sample_rate: fixture.sample_rate,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     })
     .expect("configure");
     let mut sink = CaptureSink::default();

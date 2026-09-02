@@ -6,7 +6,7 @@
 //! ... ! x264enc ! mp4mux ! filesink location=out.mp4
 //! ```
 //!
-//! The `mp4mux` / `qtmux` analog: wraps the pure [`Fmp4Muxer`] box writer and
+//! The `mp4mux` / `qtmux` analog: wraps the pure `Fmp4Muxer` box writer and
 //! forwards the muxed bytes downstream (to a `filesink`, `udpsink`, an HLS
 //! segmenter, ...), the way gst muxing is a separate element feeding any sink.
 //! `ftyp`+`moov` init segment once, then one `moof`+`mdat` fragment per access
@@ -114,7 +114,7 @@ impl Mp4Mux {
     }
 
     /// Batch access units into fragments of at least `ms` milliseconds (`0` keeps
-    /// one fragment per AU); see [`fragment_duration_ms`](Self::fragment_duration_ms).
+    /// one fragment per AU); see `fragment_duration_ms`.
     pub fn with_fragment_duration_ms(mut self, ms: u64) -> Self {
         self.fragment_duration_ms = ms;
         self

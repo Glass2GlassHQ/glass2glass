@@ -6,6 +6,31 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1150: `Mp4Src` announces every `moov` track in its `StreamCollection`, so `g2g-discover` lists an MP4's audio and text tracks too.
+- M1149: `GraphMutator::replace_source` / `replace_sink` swap the element at either end of a running graph, stitching the new source's timeline onto the running time and finalizing the old sink before it comes back.
+- M1147: `Caps::Audio` carries an explicit channel layout (wire v3, gst `channel-mask` interop); downmix and interleave honor it, and `wavparse` reads it from WAVE_FORMAT_EXTENSIBLE.
+- tests: the vulkan caps expectations follow M1111's colour refinement, and every device-creating vulkan test file runs its cases sequentially (parallel decode devices crash the Vulkan loader).
+- M1146: live splices land on the edge into a tee or demux, broadcast tees carry addressable names, and a refused remove no longer wedges the run; the runner also stops delivering a second `Eos` behind a fan-out element that forwards its own.
+- M1148: `alsasrc` and `pipewiresrc` discipline a drift clock from the device position and offer it to election, below the sinks' priority.
+- M1145: `audioconvert` dithers by default (tpdf, matching gst); byte-exact harnesses pin `dithering=none`.
+- M1144: `tools/host-validation.sh` + systemd timers run the GPU and bench suites on the owner's hosts and post a commit status, replacing the self-hosted-runner idea.
+- M1143: `ffmpegdec` packs decoded pictures into a recycled buffer pool instead of allocating per frame.
+- M1142: `WaylandSink` `Block` pacing stops gating on `frame` callbacks while the compositor is not painting the surface, so an occluded window no longer freezes the video branch.
+- M1140: `ffmpegdec` packs frames without the up-front zero fill and `videoconvert` forwards a same-format tight-pitch frame instead of copying it.
+- M1141: `HlsSrc` no longer replays the live segment's parts on every reload when the playlist front carries `#EXT-X-GAP` padding, and the fetch path logs its cadence and failures under `G2G_DEBUG=hlssrc`/`fetch`.
+- M1137: `Av1Parse` and the AV1 decoders read the sequence-header colour onto their caps, and `mjpegdec` tags its output per JFIF.
+- M1136: `nvenc`, `av1enc` and `mjpegenc` write the caps colorimetry into the streams they encode.
+- M1139: CI runs cargo-semver-checks on `g2g-core` against the latest crates.io release, and the workspace version moves to 0.7.0 (the caps colorimetry field was a breaking change over 0.6.0).
+- M1138: the v2 plugin ABI structs carry compile-time size and offset asserts, so a layout drift fails the build on every target.
+- M1135: CI fails on a stale `docs/elements.html` and on rustdoc warnings, and PORTING's known-gaps section is audited back to true.
+- M1134: `AUTHORING.md` walks a new element author through traits, lifecycle, properties, and registration, with a from-scratch source example.
+- M1133: `GraphMutator` splices on tee/demux branch edges and muxer input edges via the new `insert_before`, not just plain 1:1 edges.
+- M1132: removing an element mid-`Playing` drains its internally buffered frames downstream instead of dropping them.
+- M1127: `colorspace` converts matrix, range, and SDR transfer/primaries between tagged colorimetries, and `WgpuPreprocess` takes its YUV matrix from the caps instead of hardcoding BT.601.
+- M1129: `audioconvert` dithers and noise-shapes bit-depth reduction per its gst-matching `dithering` / `noise-shaping` properties.
+- M1128: `audioresample` interpolates through a windowed-sinc kernel selected by `quality` (default 4, 0 keeps the linear path).
+- M1131: `ebur128` measures momentary, short-term and gated integrated loudness per ITU-R BS.1770 as a passthrough meter.
+- M1130: `audioreverse` re-emits chunks of PCM with the sample frames in reverse order, the audio half of reverse playback.
 - M1126: `HlsSrc` reloads live playlists on an absolute schedule instead of drifting behind the publisher by the per-cycle work time, and `WaylandSink` traces the clock, media and deadline timelines once a second.
 - M1125: `hlssrc` plays low-latency HLS, blocking the playlist reload on the next `#EXT-X-PART` and emitting each partial segment as it is published.
 - M1123: the runner hands its aggregated liveness down to every element, and `ffmpegdec`'s `thread-type=auto` frame-threads on a non-live pipeline.

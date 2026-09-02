@@ -460,6 +460,7 @@ async fn audio_properties_drive_a_live_capture() {
             format: AudioFormat::PcmF32Le,
             channels: 1,
             sample_rate: 44_100,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         },
         "the properties are what the element advertises"
     );

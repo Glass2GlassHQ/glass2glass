@@ -323,7 +323,7 @@ impl Mp4MuxN {
     }
 
     /// Batch access units into fragments of at least `ms` milliseconds (`0` keeps
-    /// one fragment per AU); see [`fragment_duration_ms`](Self::fragment_duration_ms).
+    /// one fragment per AU); see `fragment_duration_ms`.
     pub fn with_fragment_duration_ms(mut self, ms: u64) -> Self {
         self.fragment_duration_ms = ms;
         self
@@ -421,6 +421,7 @@ impl Mp4MuxN {
                 format: format @ (AudioFormat::Aac | AudioFormat::Opus),
                 channels,
                 sample_rate,
+                ..
             } => Some(PadKind::Audio {
                 format: *format,
                 channels: *channels,
@@ -2434,11 +2435,13 @@ mod tests {
             format: AudioFormat::Opus,
             channels: 0,
             sample_rate: 0,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         let refined = Caps::Audio {
             format: AudioFormat::Opus,
             channels: 2,
             sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         let mut mux = Mp4MuxN::new(1).with_fragmented(false);
         mux.configure_pipeline(0, &sentinel).unwrap();

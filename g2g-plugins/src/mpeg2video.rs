@@ -17,7 +17,8 @@ use crate::startcodeparse::reduce_ratio;
 pub struct SequenceHeader {
     pub width: u32,
     pub height: u32,
-    /// Frame rate as a Q16 fixed-point value, matching [`Rate::Fixed`].
+    /// Frame rate as a Q16 fixed-point value, matching
+    /// [`Rate::Fixed`](g2g_core::caps::Rate::Fixed).
     pub framerate_q16: u32,
     /// `progressive_sequence` from the MPEG-2 sequence extension: false means the
     /// stream is interlaced and wants deinterlacing before display. True for

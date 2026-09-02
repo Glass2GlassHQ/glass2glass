@@ -18,10 +18,13 @@
 //! pad.
 //!
 //! gst's `channel-positions` / `channel-positions-from-input` are not exposed:
-//! [`Caps::Audio`] carries a channel count and no positions, so the interleave
-//! order is the default layout for that count
-//! ([`ChannelLayout::default_for`](g2g_core::ChannelLayout::default_for)) and
-//! there is nothing to set.
+//! input pad `i` always becomes interleaved channel `i`, and ascending bit order
+//! is the interleave order of every [`ChannelLayout`](g2g_core::ChannelLayout),
+//! so pad `i` feeds the `i`-th speaker of whatever layout the output caps carry
+//! (the count's [`default_for`](g2g_core::ChannelLayout::default_for)
+//! convention when they carry none). The element declares no layout of its own,
+//! since the pad order is a convention rather than something a stream told it;
+//! a downstream `channel-mask` pins the positions when they matter.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -103,6 +106,7 @@ impl Interleave {
             format: self.format,
             channels: 1,
             sample_rate: self.sample_rate,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         }
     }
 
@@ -221,6 +225,7 @@ impl MultiInputElement for Interleave {
             format: self.format,
             channels: self.inputs as u8,
             sample_rate: self.sample_rate,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         })
     }
 
@@ -303,6 +308,7 @@ mod tests {
                 format: AudioFormat::PcmF32Le,
                 channels: 6,
                 sample_rate: DEFAULT_PCM_RATE,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
             }
         );
     }

@@ -307,6 +307,7 @@ impl PadTemplates for WasapiSink {
             format,
             channels: 2,
             sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         Vec::from([PadTemplate::sink(CapsSet::from_alternatives(Vec::from([
             pcm(AudioFormat::PcmS16Le),
@@ -496,12 +497,14 @@ mod tests {
             format: AudioFormat::PcmS16Le,
             channels: 2,
             sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         assert_eq!(pcm_params(&s16), Ok((WAVE_FORMAT_PCM, 16, 2, 48_000)));
         let f32 = Caps::Audio {
             format: AudioFormat::PcmF32Le,
             channels: 1,
             sample_rate: 44_100,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         assert_eq!(
             pcm_params(&f32),
@@ -511,6 +514,7 @@ mod tests {
             format: AudioFormat::Aac,
             channels: 2,
             sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         assert_eq!(pcm_params(&aac), Err(G2gError::CapsMismatch));
     }
@@ -536,12 +540,14 @@ mod tests {
             format: AudioFormat::PcmS16Le,
             channels: 2,
             sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         assert_eq!(sink.intercept_caps(&pcm), Ok(pcm));
         let opus = Caps::Audio {
             format: AudioFormat::Opus,
             channels: 2,
             sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         assert_eq!(sink.intercept_caps(&opus), Err(G2gError::CapsMismatch));
     }
@@ -554,6 +560,7 @@ mod tests {
             format: AudioFormat::PcmS16Le,
             channels: 2,
             sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         assert!(matches!(sink.caps, g2g_core::PadCaps::Fixed(ref s) if s.accepts(&pcm)));
         assert!(WasapiSink::pad_template(PadDirection::Source).is_none());

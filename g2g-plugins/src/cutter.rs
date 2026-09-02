@@ -130,6 +130,7 @@ impl Cutter {
                 format: AudioFormat::PcmS16Le,
                 channels,
                 sample_rate,
+                ..
             } if *channels > 0 => Ok((*channels as u32, *sample_rate)),
             _ => Err(G2gError::CapsMismatch),
         }
@@ -271,6 +272,7 @@ impl PadTemplates for Cutter {
             format: AudioFormat::PcmS16Le,
             channels: 2,
             sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         alloc::vec::Vec::from([
             PadTemplate::sink(CapsSet::one(pcm.clone())),
@@ -322,6 +324,7 @@ mod tests {
             format: AudioFormat::PcmF32Le,
             channels: 2,
             sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         assert_eq!(
             c.configure_pipeline(&bad).unwrap_err(),
@@ -331,6 +334,7 @@ mod tests {
             format: AudioFormat::PcmS16Le,
             channels: 2,
             sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         assert!(c.configure_pipeline(&ok).is_ok());
     }

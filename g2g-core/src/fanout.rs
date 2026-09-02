@@ -222,6 +222,15 @@ impl MultiSenderSink {
     pub(crate) fn push_port(&mut self, port: SenderSink) {
         self.ports.push(port);
     }
+
+    /// Whether the element already pushed an `Eos` through `port`, so the
+    /// runner's own per-port `Eos` is not delivered a second time behind it.
+    // Only the std runners deliver per-port Eos, so without std this would be
+    // dead code (which the workspace denies).
+    #[cfg(feature = "std")]
+    pub(crate) fn eos_forwarded(&self, port: usize) -> bool {
+        self.ports.get(port).is_some_and(|p| p.eos_forwarded())
+    }
 }
 
 impl MultiOutputSink for MultiSenderSink {

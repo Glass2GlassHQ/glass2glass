@@ -214,6 +214,7 @@ async fn demuxed_packets_match_ffprobe() {
             format: AudioFormat::Vorbis,
             channels: 2,
             sample_rate: 44_100,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         }],
         "identification-header caps"
     );

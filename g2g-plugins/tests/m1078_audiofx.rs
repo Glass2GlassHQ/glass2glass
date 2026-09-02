@@ -85,6 +85,7 @@ fn caps(channels: u8) -> Caps {
         format: AudioFormat::PcmF32Le,
         channels,
         sample_rate: RATE,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     }
 }
 

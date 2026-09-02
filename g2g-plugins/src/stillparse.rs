@@ -6,7 +6,7 @@
 //! This is what lets a still or an MJPEG dump reach a decoder at all: `MjpegDec`
 //! and `PngDec` take one complete image per buffer, and a byte source hands over
 //! whatever a read returned. The framing walks the format's own structure
-//! ([`crate::stillframe`]), so a file split across reads and several files joined
+//! (`stillframe`), so a file split across reads and several files joined
 //! in one buffer both come out as whole images.
 //!
 //! The geometry comes from the image, not from negotiation, so a `CapsChanged`

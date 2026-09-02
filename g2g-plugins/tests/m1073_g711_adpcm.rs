@@ -201,6 +201,7 @@ async fn a_decoder_on_sentinel_caps_announces_the_telephony_layout() {
             format: AudioFormat::Mulaw,
             channels: ANY_CHANNELS,
             sample_rate: ANY_SAMPLE_RATE,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         })
         .expect("the sentinel layout is accepted");
     let mut sink = CollectSink::default();
@@ -219,6 +220,7 @@ async fn a_decoder_on_sentinel_caps_announces_the_telephony_layout() {
             format: AudioFormat::PcmS16Le,
             channels: G711_DEFAULT_CHANNELS,
             sample_rate: G711_CLOCK_RATE_HZ,
+            ..
         }))
     ));
     let PipelinePacket::DataFrame(out) = &sink.packets[1] else {
@@ -244,6 +246,7 @@ fn decodebin_reaches_pcm_from_a_concrete_g711_stream() {
             format,
             channels: G711_DEFAULT_CHANNELS,
             sample_rate: G711_CLOCK_RATE_HZ,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         let chain = reg
             .autoplug_names(&coded, &is_raw_audio, 4)

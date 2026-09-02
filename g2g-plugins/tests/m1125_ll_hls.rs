@@ -51,7 +51,9 @@ fn full_media() -> Vec<u8> {
 /// The playlist with `published` parts available. Complete segments carry their
 /// `#EXTINF` and URI, the run of parts after the last one is the segment still
 /// being produced, and the playlist closes once everything is published.
-fn playlist(published: usize) -> String {
+/// `gap_segments` leading `#EXT-X-GAP` entries stand where a live packager pads
+/// a freshly started playlist; the parts then belong to the segments after them.
+fn playlist(published: usize, gap_segments: usize) -> String {
     let mut text = format!(
         "#EXTM3U\n\
          #EXT-X-VERSION:9\n\
@@ -62,6 +64,11 @@ fn playlist(published: usize) -> String {
          #EXT-X-MAP:URI=\"{INIT_PATH}\"\n",
         PART_SECS * 3.0
     );
+    for gap in 0..gap_segments {
+        text.push_str(&format!(
+            "#EXT-X-GAP\n#EXTINF:{SEGMENT_SECS:.5},\n/gap{gap}.mp4\n"
+        ));
+    }
     for index in 0..published {
         let independent = if index % PARTS_PER_SEGMENT == 0 {
             ",INDEPENDENT=YES"
@@ -95,15 +102,16 @@ struct ServerCounts {
     part_fetches: Arc<AtomicUsize>,
 }
 
-/// The absolute part index a `_HLS_msn` / `_HLS_part` pair names.
-fn requested_part(query: &str) -> Option<usize> {
+/// The absolute part index a `_HLS_msn` / `_HLS_part` pair names, with the
+/// playlist's leading gap segments subtracted out of the sequence number.
+fn requested_part(query: &str, gap_segments: usize) -> Option<usize> {
     let value = |name: &str| {
         query
             .split('&')
             .find_map(|pair| pair.strip_prefix(name)?.strip_prefix('='))
             .and_then(|v| v.parse::<usize>().ok())
     };
-    Some(value("_HLS_msn")? * PARTS_PER_SEGMENT + value("_HLS_part")?)
+    Some(value("_HLS_msn")?.saturating_sub(gap_segments) * PARTS_PER_SEGMENT + value("_HLS_part")?)
 }
 
 /// A local LL-HLS origin: one part every `PART_MS` from the wall clock, and a
@@ -112,6 +120,17 @@ fn requested_part(query: &str) -> Option<usize> {
 /// `CAN-BLOCK-RELOAD` but answers every request at once, the misbehaviour the
 /// client has to notice. Returns the playlist URL and the counters.
 fn serve_low_latency(honour_directives: bool) -> (String, ServerCounts) {
+    serve(honour_directives, 0, INITIAL_PARTS)
+}
+
+/// [`serve_low_latency`] with leading gap padding and a chosen number of parts
+/// already published at start (small enough and the client joins inside the
+/// first real segment, right after the padding, the fresh-packager shape).
+fn serve(
+    honour_directives: bool,
+    gap_segments: usize,
+    initial_parts: usize,
+) -> (String, ServerCounts) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let counts = ServerCounts {
@@ -146,11 +165,11 @@ fn serve_low_latency(honour_directives: bool) -> (String, ServerCounts) {
                     None => (target.as_str(), ""),
                 };
                 let published = || {
-                    (INITIAL_PARTS + (start.elapsed().as_millis() as u64 / PART_MS) as usize)
+                    (initial_parts + (start.elapsed().as_millis() as u64 / PART_MS) as usize)
                         .min(TOTAL_PARTS)
                 };
                 let body: Vec<u8> = if path == PLAYLIST_PATH {
-                    match requested_part(query) {
+                    match requested_part(query, gap_segments) {
                         Some(wanted) => {
                             blocking.fetch_add(1, Ordering::SeqCst);
                             // Hold the response until that part exists.
@@ -160,11 +179,11 @@ fn serve_low_latency(honour_directives: bool) -> (String, ServerCounts) {
                             {
                                 thread::sleep(Duration::from_millis(PART_MS / 4));
                             }
-                            playlist(published()).into_bytes()
+                            playlist(published(), gap_segments).into_bytes()
                         }
                         None => {
                             plain.fetch_add(1, Ordering::SeqCst);
-                            playlist(published()).into_bytes()
+                            playlist(published(), gap_segments).into_bytes()
                         }
                     }
                 } else if path == INIT_PATH {
@@ -337,6 +356,29 @@ async fn a_server_ignoring_the_directives_falls_back_to_timed_reloads() {
     assert!(
         plain > 1,
         "the run reloaded on the timer after giving up on the directives"
+    );
+}
+
+/// A freshly started packager pads the playlist front with `#EXT-X-GAP`
+/// segments and publishes its first real segment part by part. Joining there
+/// puts the delivery cursor right after the padding, and the padding must not
+/// reset it on later scans: each part is fetched and emitted exactly once
+/// (the regression was the gap step-over zeroing `next_part` every reload,
+/// replaying the live segment from part 0).
+#[tokio::test]
+async fn gap_padding_does_not_replay_the_live_segment() {
+    let (url, counts) = serve(true, 3, 2);
+    let sink = play(HlsSrc::new(url).with_prebuffer_ms(0)).await;
+
+    assert!(sink.eos);
+    assert!(
+        full_media().ends_with(&sink.media()),
+        "byte-exact, in order, no replays"
+    );
+    let part_fetches = counts.part_fetches.load(Ordering::SeqCst);
+    assert!(
+        part_fetches <= TOTAL_PARTS,
+        "every part at most once, got {part_fetches} fetches for {TOTAL_PARTS} parts"
     );
 }
 

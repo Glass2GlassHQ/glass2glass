@@ -19,9 +19,20 @@ pub(crate) const MAX_MANIFEST_BYTES: usize = 16 * 1024 * 1024;
 /// that one bogus segment cannot exhaust memory.
 pub(crate) const MAX_SEGMENT_BYTES: usize = 256 * 1024 * 1024;
 
+/// `G2G_DEBUG=fetch:...` names the shared HTTP fetch path in a log spec.
+struct FetchLog;
+
+impl g2g_core::log::LogSource for FetchLog {
+    fn log_category(&self) -> &'static str {
+        "fetch"
+    }
+}
+
 /// reqwest transport / status failures map to a hardware-ish I/O error; the run
-/// fails loud and the pipeline surfaces it.
-pub(crate) fn net_err(_e: reqwest::Error) -> G2gError {
+/// fails loud and the pipeline surfaces it. The URL and status only survive in
+/// the log line: `G2gError` cannot carry them.
+pub(crate) fn net_err(e: reqwest::Error) -> G2gError {
+    g2g_core::g2g_warn!(&FetchLog, "http fetch failed: {e}");
     G2gError::Hardware(HardwareError::Other)
 }
 

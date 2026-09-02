@@ -174,7 +174,8 @@ async fn ffmpeg_flv_demuxes_to_self_describing_elementary_streams() {
         vec![Caps::Audio {
             format: AudioFormat::Aac,
             channels: 2,
-            sample_rate: 44_100
+            sample_rate: 44_100,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED
         }],
         "concrete audio caps from the AudioSpecificConfig"
     );

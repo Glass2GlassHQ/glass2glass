@@ -3,8 +3,8 @@
 //! `textoverlay` / `subtitleoverlay` analog and the visible end of an
 //! SRT / WebVTT subtitle path.
 //!
-//! CPU, `no_std` baseline like [`AnalyticsOverlay`](crate::analyticsoverlay): in
-//! and out are both RGBA8 at the negotiated geometry (put a `VideoConvert`
+//! CPU, `no_std` baseline like `AnalyticsOverlay`: in and out are both RGBA8 at
+//! the negotiated geometry (put a `VideoConvert`
 //! upstream of a non-RGBA source), the pixels pass through untouched except for
 //! the painted text. Cues are held in memory; build them programmatically
 //! ([`TextOverlay::from_srt`] / [`from_webvtt`](TextOverlay::from_webvtt)) or, on
@@ -14,11 +14,11 @@
 //! all-caps ASCII bitmap font is the `no_std` baseline.
 //!
 //! With the `truetype-overlay` feature (M409) the overlay instead rasterizes
-//! glyphs from a loaded `.ttf` / `.otf` / `.ttc` ([`TextOverlay::with_font`] /
+//! glyphs from a loaded `.ttf` / `.otf` / `.ttc` (`TextOverlay::with_font` /
 //! `font=`), so CJK, accented Latin, and mixed-case text render, horizontal and
 //! vertical (`vertical:rl` / `lr`). `ab_glyph` does the parsing / rasterization on
 //! the CPU, covering both glyf and CFF/CFF2 outlines. A variable font renders at
-//! a chosen axis position ([`TextOverlay::with_font_axis`] /
+//! a chosen axis position (`TextOverlay::with_font_axis` /
 //! `font-variations=wght=700`) instead of its default instance.
 //!
 //! The `text-shaping` feature (M892) adds real shaping to that: horizontal cues
@@ -2103,13 +2103,13 @@ impl AsyncElement for TextOverlay {
 /// A [`MultiInputElement`] (video + text in, video out) that opts into
 /// `input_pts_ordered`, so the runner merges the two pads by PTS: every cue
 /// (PTS = its start time) is delivered before the video frame it first covers,
-/// giving correct A/V-text alignment. [`SubParse`] streams each cue as soon as it
+/// giving correct A/V-text alignment. `SubParse` streams each cue as soon as it
 /// is fully parsed (M405), so the merge only buffers video up to the next cue's
 /// start, not to the end of the subtitle stream. The
 /// rendering is reused wholesale from [`TextOverlay`] (composition); the text pad
 /// only feeds it cues. Cue positioning (WebVTT / SSA `position` / `line` / `align`)
-/// rides the stream as [`TextCueMeta`](crate::subparse::TextCueMeta) frame-meta
-/// under the `metadata` feature (M406), so a placed cue renders where it asks; on
+/// rides the stream as `TextCueMeta` frame-meta under the `metadata` feature
+/// (M406), so a placed cue renders where it asks; on
 /// the ZST baseline (no meta) every cue draws at the renderer default (bottom-centre).
 ///
 /// # Example

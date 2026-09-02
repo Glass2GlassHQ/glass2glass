@@ -1,4 +1,4 @@
-//! Splicing a transform onto a live pipeline, on screen (M1120).
+//! Splicing a transform onto a live pipeline, on screen (M1120, M1133).
 //!
 //! `rtspsrc -> ffmpegdec -> waylandsink` plays an RTSP feed in a window. Every
 //! few seconds a `videoflip` is spliced onto the decoded-video edge, held, and
@@ -8,6 +8,11 @@
 //! ```sh
 //! cd examples/g2g-mutate-demo && cargo run --release
 //! ```
+//!
+//! `cargo run --release -- tee` runs the structural variant (M1133): the
+//! decoder feeds a tee with a window on each branch, and the flip is spliced
+//! onto one branch by `insert_before` on that branch's sink, so one window
+//! turns over while its sibling plays on untouched.
 //!
 //! `G2G_RTSP_URL` picks the feed (default `rtsp://localhost:8554/pattern`),
 //! `G2G_DEMO_SECONDS` ends the run after N seconds instead of waiting for
@@ -70,6 +75,42 @@ fn build_graph(url: String) -> Graph<GraphNode> {
     graph
 }
 
+/// The name of the sink whose branch the tee variant splices, addressed with
+/// `insert_before`: a tee has several edges below it, so the branch is named by
+/// its consumer.
+const SPLICE_BEFORE: &str = "flipped";
+
+/// The structural variant: the decoder feeds a tee, each branch its own window.
+/// The splice lands on the edge between the tee and the `SPLICE_BEFORE` sink,
+/// so only that window turns over.
+fn build_tee_graph(url: String) -> Graph<GraphNode> {
+    let mut graph: Graph<GraphNode> = Graph::new();
+
+    let source = graph.add_source(GraphNode::source(RtspSrc::new(url)));
+    graph.set_node_name(source, "src".into());
+    let decoder = graph.add_transform(GraphNode::element(
+        FfmpegH264Dec::new()
+            .with_output_format(OutputFormat::Nv12)
+            .with_backend(Backend::Software),
+    ));
+    graph.set_node_name(decoder, SPLICE_AFTER.into());
+    let tee = graph.add_tee(2);
+    let steady = graph.add_sink(GraphNode::element(
+        WaylandSink::new().with_title(format!("{WINDOW_TITLE}: steady")),
+    ));
+    graph.set_node_name(steady, "steady".into());
+    let flipped = graph.add_sink(GraphNode::element(
+        WaylandSink::new().with_title(format!("{WINDOW_TITLE}: splice target")),
+    ));
+    graph.set_node_name(flipped, SPLICE_BEFORE.into());
+
+    graph.link(source, decoder).expect("src -> dec");
+    graph.link(decoder, tee.input()).expect("dec -> tee");
+    graph.link(tee.out(0), steady).expect("tee -> steady");
+    graph.link(tee.out(1), flipped).expect("tee -> flipped");
+    graph
+}
+
 /// Sleeps for `seconds`, or never when the demo is unbounded.
 async fn time_limit(seconds: Option<u64>) {
     match seconds {
@@ -90,14 +131,24 @@ async fn main() {
     let seconds = std::env::var("G2G_DEMO_SECONDS")
         .ok()
         .and_then(|s| s.parse::<u64>().ok());
-    println!("playing {url} in a window titled {WINDOW_TITLE:?}");
-    println!("splicing a 180-degree videoflip in and out every {PHASE:?}; ctrl-c to stop");
+    let tee_mode = std::env::args().nth(1).as_deref() == Some("tee");
+    if tee_mode {
+        println!("playing {url} in two windows fed by one tee");
+        println!(
+            "splicing a 180-degree videoflip in and out of the {SPLICE_BEFORE:?} branch \
+             every {PHASE:?}; the steady window never changes; ctrl-c to stop"
+        );
+    } else {
+        println!("playing {url} in a window titled {WINDOW_TITLE:?}");
+        println!("splicing a 180-degree videoflip in and out every {PHASE:?}; ctrl-c to stop");
+    }
 
-    let (mutator, run) = run_graph_mutable(
-        build_graph(url),
-        &ZeroClock,
-        LatencyProfile::Live.link_capacity(),
-    );
+    let graph = if tee_mode {
+        build_tee_graph(url)
+    } else {
+        build_graph(url)
+    };
+    let (mutator, run) = run_graph_mutable(graph, &ZeroClock, LatencyProfile::Live.link_capacity());
 
     // Turn the picture over and back, for as long as the stream lasts. Each
     // operation names the element it addresses and what came of it: a refusal
@@ -106,19 +157,24 @@ async fn main() {
     let cycle = async {
         tokio::time::sleep(PHASE).await;
         loop {
-            let spliced = match mutator
-                .insert_after(
-                    SPLICE_AFTER,
-                    Box::new(VideoFlip::new(Orientation::Rotate180)),
-                )
-                .await
-            {
+            let flip = Box::new(VideoFlip::new(Orientation::Rotate180));
+            let (answer, position) = if tee_mode {
+                (mutator.insert_before(SPLICE_BEFORE, flip).await, "before")
+            } else {
+                (mutator.insert_after(SPLICE_AFTER, flip).await, "after")
+            };
+            let addressed = if tee_mode {
+                SPLICE_BEFORE
+            } else {
+                SPLICE_AFTER
+            };
+            let spliced = match answer {
                 Ok(name) => {
-                    println!("insert after {SPLICE_AFTER}: {name} is now turning the picture");
+                    println!("insert {position} {addressed}: {name} is now turning the picture");
                     name
                 }
                 Err(e) => {
-                    println!("insert after {SPLICE_AFTER} refused: {e:?}");
+                    println!("insert {position} {addressed} refused: {e:?}");
                     break;
                 }
             };

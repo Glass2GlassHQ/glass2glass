@@ -373,6 +373,7 @@ fn demuxes_each_fixture_to_the_streams_ffprobe_reports() {
                 ),
                 channels: probe.stream_u64(AUDIO_INDEX, "channels") as u8,
                 sample_rate: probe.stream_u64(AUDIO_INDEX, "sample_rate") as u32,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
             }),
             "{name}: audio caps"
         );

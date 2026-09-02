@@ -75,6 +75,7 @@ impl Mp4AudioSrc {
             format: AudioFormat::Aac,
             channels: h.channels,
             sample_rate: h.sample_rate,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         })
     }
 }

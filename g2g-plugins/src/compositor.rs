@@ -33,7 +33,7 @@
 //! **Startup:** inputs start asynchronously and an overlay branch (camera warm-up,
 //! extra transforms) can lag the background, in the extreme starting only after a
 //! short background has fully drained. So at startup the compositor buffers
-//! input-0 frames (bounded by [`PENDING_CAP`]) until every overlay has delivered
+//! input-0 frames (bounded by `PENDING_CAP`) until every overlay has delivered
 //! its first frame, then flushes them composited with the overlays and runs live.
 //! Two failure modes are avoided: it must not block the background forever on a
 //! slow overlay (so on buffer overflow the oldest input-0 frame is emitted

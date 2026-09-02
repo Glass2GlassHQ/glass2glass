@@ -16,9 +16,9 @@
 //! }
 //! ```
 //!
-//! The macro emits `g2g_plugin_abi` (returns this build's [`abi_version`] as a C
+//! The macro emits `g2g_plugin_abi` (returns this build's [`ABI_VERSION`] as a C
 //! string) and `g2g_plugin_register` (adds each element to the host's
-//! [`Registry`]). The host loader ([`g2g_plugins::plugin_loader`]) reads the ABI
+//! [`Registry`]). The host loader (`g2g_plugins::plugin_loader`) reads the ABI
 //! tag first and refuses to call `register` on a mismatch.
 //!
 //! **Why the ABI tag matters.** Rust has no stable ABI. The plugin and host must

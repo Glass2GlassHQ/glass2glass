@@ -98,6 +98,7 @@ fn opus_caps() -> Caps {
         format: AudioFormat::Opus,
         channels: CHANNELS,
         sample_rate: OPUS_RATE_HZ,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     }
 }
 
@@ -132,6 +133,7 @@ async fn encode(fec: bool, count: usize) -> Vec<Vec<u8>> {
         format: AudioFormat::PcmS16Le,
         channels: CHANNELS,
         sample_rate: OPUS_RATE_HZ,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     })
     .unwrap();
     assert_eq!(enc.inband_fec(), fec, "libopus took the FEC setting");
@@ -294,6 +296,7 @@ fn fec_properties_round_trip() {
         format: AudioFormat::PcmS16Le,
         channels: CHANNELS,
         sample_rate: OPUS_RATE_HZ,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     })
     .unwrap();
     assert!(e.inband_fec(), "libopus reports FEC on");

@@ -69,6 +69,7 @@ impl ToneGenerateSrc {
             format: AudioFormat::PcmS16Le,
             channels: DEFAULT_CHANNELS,
             sample_rate: DEFAULT_RATE,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         }
     }
 
@@ -236,6 +237,7 @@ impl PadTemplates for ToneGenerateSrc {
             format: AudioFormat::PcmS16Le,
             channels: DEFAULT_CHANNELS,
             sample_rate: DEFAULT_RATE,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         }))])
     }
 }

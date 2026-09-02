@@ -85,7 +85,8 @@ use crate::runtime::fanin::{DynMultiInputElement, DynSourceLoop};
 use crate::runtime::instrument::{snapshot_all, ElementProbe, Probe};
 use crate::runtime::join::{dynamic_join_open, join_all, select2, Either};
 use crate::runtime::mutate::{
-    mutation_channel, spliced_arm, GraphMutator, LiveNode, MutationRequest, MutationService,
+    lent_sink_arm, lent_source_arm, mutation_channel, spliced_arm, GraphMutator, Handback,
+    LiveEdge, LiveNode, LiveTopology, MutationRequest, MutationService, MutationSpawn,
 };
 use crate::runtime::progress::PipelineProgress;
 use crate::runtime::runner::{
@@ -1259,10 +1260,14 @@ struct Prepared {
     /// The swappable handle the sinks' [`ClockSync`] points at, so a re-election
     /// retargets them. `Some` exactly when the monitor runs.
     elected_clock: Option<alloc::sync::Arc<ElectedClock>>,
-    /// Every node's instance name, indexed by `NodeId` (empty for a structural
-    /// tee, which carries no element). The arm loop copies these into arm order
-    /// so a failed run can name the element that raised the error.
+    /// Every node's instance name, indexed by `NodeId`. The arm loop copies
+    /// these into arm order so a failed run can name the element that raised the
+    /// error.
     names: Vec<alloc::string::String>,
+    /// The latency-folded [`ClockSync`] the sinks received, kept so a sink the
+    /// mutator splices in later is paced like the ones negotiated at startup
+    /// (M1149). `None` when no clock was elected.
+    sink_clock_sync: Option<ClockSync>,
 }
 
 /// Phases 1-3.5 of the graph runner: name instances + mint probes, probe source
@@ -1301,28 +1306,34 @@ async fn prepare_graph<'a>(
     // M399: while naming, mint a measured-latency probe for each interior element
     // (Transform / Sink: the nodes with a `process()`), keyed by its instance name.
     let mut probes: Vec<Probe> = (0..n).map(|_| None).collect();
-    // Per-node instance names, captured for the observer tap (empty for unnamed
-    // structural tee / muxer nodes). Indexed by `NodeId`, like `probes`.
+    // Per-node instance names, captured for the observer tap. Indexed by
+    // `NodeId`, like `probes`.
     let mut names: Vec<alloc::string::String> = alloc::vec![alloc::string::String::new(); n];
     {
-        let mut namer = crate::log::InstanceNamer::new();
+        let reserved = (0..n).filter_map(|i| {
+            vg.node_name(NodeId(i as u32))
+                .map(alloc::string::String::from)
+        });
+        let mut namer = crate::log::InstanceNamer::with_reserved(reserved);
         for &node in topo {
             // M694: fan-in / fan-out nodes carry a `process()` too, so name and
-            // probe them alongside transforms / sinks (a plain broadcast tee has
-            // no element and no `process()`, so it stays unnamed / unprobed).
+            // probe them alongside transforms / sinks. M1146: a plain broadcast
+            // tee carries no element, and is named all the same, so a mutator can
+            // address the edge into it and the topology dumps show it.
             let category = match vg.kind(node) {
                 // A terminal fan-in carries a `Muxer` payload but is a session
                 // sink, not a merging mux; name it accordingly. The fan-out
                 // source is its receive-side mirror.
                 NodeKind::FaninSink(_) => "session",
                 NodeKind::FanoutSrc(_) => "session-src",
+                NodeKind::Tee(_) if vg.element(node).is_none() => "tee",
                 _ => match vg.element_mut(node) {
                     Some(GraphNodeRef::Source(src)) => src.log_category(),
                     Some(GraphNodeRef::Element(elem)) => elem.log_category(),
                     Some(GraphNodeRef::Muxer(_)) => "mux",
                     Some(GraphNodeRef::FanoutSource(_)) => "session-src",
                     Some(GraphNodeRef::Demux(_)) => "demux",
-                    None => continue, // plain broadcast tee: no element to name
+                    None => continue, // no element and no structural name of its own
                 },
             };
             // M847: a launch line's `log-category=` replaces the type category for
@@ -1547,6 +1558,8 @@ async fn prepare_graph<'a>(
     // runners (M169). Only when a clock was elected; without one the sinks present
     // as fast as backpressure allows. A sink node always holds a
     // `GraphNodeRef::Element` (not a `Source`), so the match below covers them.
+    // The same sync is kept for a sink the mutator later splices in (M1149).
+    let mut sink_clock_sync = None;
     if let Some(c) = &elected {
         let sink_clock: alloc::sync::Arc<dyn PipelineClock + Send + Sync> = match &elected_clock {
             Some(handle) => handle.clone(),
@@ -1559,19 +1572,19 @@ async fn prepare_graph<'a>(
         let anchor = state
             .as_ref()
             .map(|sc| sc.arm_play_anchor(sink_clock.clone()));
+        let sync = match &anchor {
+            Some(a) => ClockSync::with_play_anchor(sink_clock.clone(), base_time_ns, a.clone()),
+            None => ClockSync::new(sink_clock.clone(), base_time_ns),
+        };
+        let sync = sync.with_path_latency(latency);
         for &node in topo {
             if matches!(vg.kind(node), NodeKind::Sink) {
                 if let Some(GraphNodeRef::Element(elem)) = vg.element_mut(node) {
-                    let sync = match &anchor {
-                        Some(a) => {
-                            ClockSync::with_play_anchor(sink_clock.clone(), base_time_ns, a.clone())
-                        }
-                        None => ClockSync::new(sink_clock.clone(), base_time_ns),
-                    };
-                    elem.set_clock_sync(sync.with_path_latency(latency));
+                    elem.set_clock_sync(sync.clone());
                 }
             }
         }
+        sink_clock_sync = Some(sync);
     }
 
     Ok((
@@ -1586,6 +1599,7 @@ async fn prepare_graph<'a>(
             clock_candidates,
             elected_clock,
             names,
+            sink_clock_sync,
         },
     ))
 }
@@ -1606,57 +1620,68 @@ struct GraphChannels {
     endpoints: Vec<Option<alloc::sync::Arc<ProducerEndpoint>>>,
 }
 
-/// Whether an edge is a mutation position: a 1:1 link from a source or transform
-/// into a transform or sink. A tee / demux / muxer end is not one, so a splice
-/// there is refused rather than half-supported.
+/// Whether an edge is a mutation position: a 1:1 link carrying one stream, whose
+/// producing end is a source, a transform or one output of a tee / demux, and
+/// whose consuming end is a transform, a sink, one input pad of a muxer or
+/// terminal fan-in (M1133), or the single input of a tee / demux (M1146). The
+/// structural nodes themselves are not splice points: their caps and pad model is
+/// not a 1:1 transform position, so a tee is addressed from above (the one edge
+/// into it) and from below by each branch's consumer.
 fn mutable_edge<E>(vg: &ValidatedGraph<E>, edge: usize) -> bool {
     matches!(
         vg.kind(vg.edge(edge).src.node),
-        NodeKind::Source | NodeKind::Transform
+        NodeKind::Source | NodeKind::Transform | NodeKind::Tee(_)
     ) && matches!(
         vg.kind(vg.edge(edge).dst.node),
-        NodeKind::Transform | NodeKind::Sink
+        NodeKind::Transform
+            | NodeKind::Sink
+            | NodeKind::Muxer(_)
+            | NodeKind::FaninSink(_)
+            | NodeKind::Tee(_)
     )
 }
 
-/// The mutator's view of the running graph: every node that can be addressed,
-/// the producing end of the edge below it, and who is on either side of it. The
-/// arm loop fills in each transform's element-return channel as it builds it.
-fn live_nodes<'a>(
+/// The mutator's view of the running graph: every mutable edge with its
+/// producing end, and every node with the edges that touch it. The arm loop
+/// fills in each transform's element-return channel as it builds it.
+fn live_topology<'a>(
     vg: &ValidatedGraph<GraphNodeRef<'a>>,
     names: &[alloc::string::String],
     endpoints: &[Option<alloc::sync::Arc<ProducerEndpoint>>],
     feasibility: &[Option<CapsSet>],
     link_capacity: usize,
-) -> Vec<LiveNode<'a>> {
-    (0..vg.node_count())
-        .map(|i| {
-            let node = NodeId(i as u32);
-            let out = vg
-                .out_edges(node)
-                .first()
-                .copied()
-                .filter(|&e| endpoints[e].is_some());
-            let inbound = vg
-                .in_edges(node)
-                .first()
-                .copied()
-                .filter(|&e| endpoints[e].is_some());
-            LiveNode {
-                name: names[i].clone(),
-                endpoint: out.and_then(|e| endpoints[e].clone()),
-                next: out.map(|e| vg.edge(e).dst.node.0 as usize),
-                prev: inbound.map(|e| vg.edge(e).src.node.0 as usize),
-                feasible: out.and_then(|e| feasibility[e].clone()),
-                policy: out.map_or(crate::link::LinkPolicy::Block, |e| vg.edge(e).policy),
-                capacity: out.map_or(link_capacity, |e| {
-                    vg.edge(e).capacity.unwrap_or(link_capacity)
-                }),
-                done: None,
-                removable: matches!(vg.kind(node), NodeKind::Transform),
-            }
+) -> LiveTopology<'a> {
+    let mut nodes: Vec<LiveNode<'a>> = (0..vg.node_count())
+        .map(|i| LiveNode {
+            name: names[i].clone(),
+            out_edges: Vec::new(),
+            in_edges: Vec::new(),
+            total_out_edges: vg.out_edges(NodeId(i as u32)).len(),
+            total_in_edges: vg.in_edges(NodeId(i as u32)).len(),
+            done: None,
+            removable: matches!(vg.kind(NodeId(i as u32)), NodeKind::Transform),
         })
-        .collect()
+        .collect();
+    let mut edges: Vec<LiveEdge> = Vec::new();
+    for eid in 0..vg.edge_count() {
+        let Some(endpoint) = endpoints[eid].clone() else {
+            continue;
+        };
+        let edge = vg.edge(eid);
+        let producer = edge.src.node.0 as usize;
+        let consumer = edge.dst.node.0 as usize;
+        nodes[producer].out_edges.push(edges.len());
+        nodes[consumer].in_edges.push(edges.len());
+        edges.push(LiveEdge {
+            endpoint,
+            consumer,
+            feasible: feasibility[eid].clone(),
+            policy: edge.policy,
+            capacity: edge.capacity.unwrap_or(link_capacity),
+            mode: branch_mode(vg, edge.dst.node),
+        });
+    }
+    LiveTopology { nodes, edges }
 }
 
 fn build_channels<'a>(
@@ -1853,6 +1878,7 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
             clock_candidates,
             elected_clock,
             names,
+            sink_clock_sync,
         },
     ) = prepare_graph(
         &mut vg,
@@ -1910,7 +1936,7 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
     }
     let mut live = mutation
         .is_some()
-        .then(|| live_nodes(&vg, &names, &endpoints, &feasibility, link_capacity));
+        .then(|| live_topology(&vg, &names, &endpoints, &feasibility, link_capacity));
 
     // Dev-tooling edge tap: hand the observer each edge's content-inspection slot
     // (shared with the arm's `SenderSink`), its negotiated caps, and its live
@@ -2013,7 +2039,22 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
                     return Err(G2gError::CapsMismatch);
                 };
                 let out_tx = out_txs.pop().expect("source output edge");
-                Box::pin(source_arm(src, out_tx, bus.cloned(), progress.cloned()))
+                match live.as_mut() {
+                    // M1149: a mutable run keeps the source reachable too, so a
+                    // replace can hand it back once its arm has ended.
+                    Some(topology) => {
+                        let (done_tx, done_rx) = bounded(1);
+                        topology.nodes[node.0 as usize].done = Some(Handback::Source(done_rx));
+                        let io = SourceArmIo {
+                            out_tx,
+                            bus: bus.cloned(),
+                            progress: progress.cloned(),
+                            segment: Segment::new(),
+                        };
+                        Box::pin(lent_source_arm(src, io, done_tx))
+                    }
+                    None => Box::pin(source_arm(src, out_tx, bus.cloned(), progress.cloned())),
+                }
             }
             NodeKind::Transform => {
                 let Some(GraphNodeRef::Element(elem)) = element else {
@@ -2045,9 +2086,9 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
                     // a remove can hand it back once its arm has drained. The
                     // element is driven through its erased handle here, which
                     // boxes its `process` future the way a borrowing graph does.
-                    Some(nodes) => {
+                    Some(topology) => {
                         let (done_tx, done_rx) = bounded(1);
-                        nodes[node.0 as usize].done = Some(done_rx);
+                        topology.nodes[node.0 as usize].done = Some(Handback::Element(done_rx));
                         Box::pin(spliced_arm(elem, io, done_tx))
                     }
                     None => elem.drive_transform_arm(io),
@@ -2060,7 +2101,7 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
                 let in_rx = in_rxs.pop().expect("sink input edge");
                 let arm_rx = arm_ctrl_rx[node.0 as usize].take().expect("sink ctrl rx");
                 advertise_orientation(&in_rx, elem.absorbs_orientation());
-                elem.drive_sink_arm(SinkArmIo {
+                let io = SinkArmIo {
                     in_rx,
                     arm_rx,
                     coord: coord_handle.clone(),
@@ -2071,7 +2112,16 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
                     progress: progress.cloned(),
                     probe: probes[node.0 as usize].clone(),
                     control: controllers[node.0 as usize].take(),
-                })
+                };
+                match live.as_mut() {
+                    // M1149: as for a transform, at the same cost.
+                    Some(topology) => {
+                        let (done_tx, done_rx) = bounded(1);
+                        topology.nodes[node.0 as usize].done = Some(Handback::Element(done_rx));
+                        Box::pin(lent_sink_arm(elem, io, done_tx))
+                    }
+                    None => elem.drive_sink_arm(io),
+                }
             }
             NodeKind::Tee(_) => {
                 let in_rx = in_rxs.pop().expect("tee input edge");
@@ -2130,15 +2180,21 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
         false => (None, None),
     };
     let service = match (mutation, live, new_arm_tx) {
-        (Some(rx), Some(nodes), Some(tx)) => Some(
+        (Some(rx), Some(topology), Some(tx)) => Some(
             MutationService::new(
                 rx,
-                nodes,
+                topology,
                 tx,
-                Box::new(|elem, io, done| Box::pin(spliced_arm(elem, io, done))),
+                MutationSpawn {
+                    transform: Box::new(|elem, io, done| Box::pin(spliced_arm(elem, io, done))),
+                    sink: Box::new(|elem, io, done| Box::pin(lent_sink_arm(elem, io, done))),
+                    source: Box::new(|src, io, done| Box::pin(lent_source_arm(src, io, done))),
+                },
                 bus.cloned(),
+                progress.cloned(),
                 dropped.clone(),
                 latency.live,
+                sink_clock_sync.clone(),
             )
             .run(),
         ),
@@ -2413,6 +2469,7 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
             clock_candidates,
             elected_clock,
             names,
+            sink_clock_sync,
         },
     ) = prepare_graph(
         &mut vg,
@@ -2450,7 +2507,7 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
     }
     let mut live = mutation
         .is_some()
-        .then(|| live_nodes(&vg, &names, &endpoints, &feasibility, link_capacity));
+        .then(|| live_topology(&vg, &names, &endpoints, &feasibility, link_capacity));
 
     // Dev-tooling edge tap: same as the cooperative path.
     if let Some(obs) = observer {
@@ -2544,8 +2601,26 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
                 let out_tx = out_txs.pop().expect("source output edge");
                 let bus_c = bus.cloned();
                 let prog_c = progress.cloned();
+                // See the cooperative path: a mutable run keeps the source
+                // reachable so a replace can hand it back (M1149).
+                let done = live.as_mut().map(|topology| {
+                    let (done_tx, done_rx) = bounded(1);
+                    topology.nodes[node.0 as usize].done = Some(Handback::Source(done_rx));
+                    done_tx
+                });
                 alloc::boxed::Box::new(move || -> LocalArmFuture {
-                    Box::pin(source_arm(src, out_tx, bus_c, prog_c))
+                    match done {
+                        Some(done) => {
+                            let io = SourceArmIo {
+                                out_tx,
+                                bus: bus_c,
+                                progress: prog_c,
+                                segment: Segment::new(),
+                            };
+                            Box::pin(lent_source_arm(src, io, done))
+                        }
+                        None => Box::pin(source_arm(src, out_tx, bus_c, prog_c)),
+                    }
                 })
             }
             NodeKind::Transform => {
@@ -2565,9 +2640,9 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
                 let probe = probes[node.0 as usize].clone();
                 let ch = coord_handle.clone();
                 let control = controllers[node.0 as usize].take();
-                let done = live.as_mut().map(|nodes| {
+                let done = live.as_mut().map(|topology| {
                     let (done_tx, done_rx) = bounded(1);
-                    nodes[node.0 as usize].done = Some(done_rx);
+                    topology.nodes[node.0 as usize].done = Some(Handback::Element(done_rx));
                     done_tx
                 });
                 alloc::boxed::Box::new(move || -> LocalArmFuture {
@@ -2606,8 +2681,13 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
                 let ch = coord_handle.clone();
                 let arm_rx = arm_ctrl_rx[node.0 as usize].take().expect("sink ctrl rx");
                 let control = controllers[node.0 as usize].take();
+                let done = live.as_mut().map(|topology| {
+                    let (done_tx, done_rx) = bounded(1);
+                    topology.nodes[node.0 as usize].done = Some(Handback::Element(done_rx));
+                    done_tx
+                });
                 alloc::boxed::Box::new(move || -> LocalArmFuture {
-                    elem.drive_sink_arm(SinkArmIo {
+                    let io = SinkArmIo {
                         in_rx,
                         arm_rx,
                         coord: ch,
@@ -2618,7 +2698,11 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
                         progress: prog_c,
                         probe,
                         control,
-                    })
+                    };
+                    match done {
+                        Some(done) => Box::pin(lent_sink_arm(elem, io, done)),
+                        None => elem.drive_sink_arm(io),
+                    }
                 })
             }
             NodeKind::Tee(_) => {
@@ -2692,21 +2776,43 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
         false => (None, None),
     };
     let service = match (mutation, live, new_arm_tx) {
-        (Some(rx), Some(nodes), Some(tx)) => {
-            let bus_c = bus.cloned();
+        (Some(rx), Some(topology), Some(tx)) => {
+            let bus_transform = bus.cloned();
+            let bus_sink = bus.cloned();
+            let bus_source = bus.cloned();
             Some(
                 MutationService::new(
                     rx,
-                    nodes,
+                    topology,
                     tx,
-                    alloc::boxed::Box::new(move |elem, io, done| {
-                        let build: alloc::boxed::Box<dyn FnOnce() -> LocalArmFuture + Send> =
-                            alloc::boxed::Box::new(move || Box::pin(spliced_arm(elem, io, done)));
-                        spawner.spawn_arm(with_stream_status(bus_c.clone(), build))
-                    }),
+                    MutationSpawn {
+                        transform: alloc::boxed::Box::new(move |elem, io, done| {
+                            let build: alloc::boxed::Box<dyn FnOnce() -> LocalArmFuture + Send> =
+                                alloc::boxed::Box::new(move || {
+                                    Box::pin(spliced_arm(elem, io, done))
+                                });
+                            spawner.spawn_arm(with_stream_status(bus_transform.clone(), build))
+                        }),
+                        sink: alloc::boxed::Box::new(move |elem, io, done| {
+                            let build: alloc::boxed::Box<dyn FnOnce() -> LocalArmFuture + Send> =
+                                alloc::boxed::Box::new(move || {
+                                    Box::pin(lent_sink_arm(elem, io, done))
+                                });
+                            spawner.spawn_arm(with_stream_status(bus_sink.clone(), build))
+                        }),
+                        source: alloc::boxed::Box::new(move |src, io, done| {
+                            let build: alloc::boxed::Box<dyn FnOnce() -> LocalArmFuture + Send> =
+                                alloc::boxed::Box::new(move || {
+                                    Box::pin(lent_source_arm(src, io, done))
+                                });
+                            spawner.spawn_arm(with_stream_status(bus_source.clone(), build))
+                        }),
+                    },
                     bus.cloned(),
+                    progress.cloned(),
                     dropped.clone(),
                     latency.live,
+                    sink_clock_sync.clone(),
                 )
                 .run(),
             )
@@ -3647,12 +3753,47 @@ fn solve_mux_output_dyn(mux: &dyn DynMultiInputElement) -> Result<Caps, G2gError
     links.last().cloned().ok_or(G2gError::CapsMismatch)
 }
 
+/// Everything a source arm needs besides its element, so a mutable run can
+/// build one for a replacement (M1149) with a different opening segment.
+#[allow(missing_debug_implementations)]
+pub(crate) struct SourceArmIo {
+    pub(crate) out_tx: LinkSender,
+    pub(crate) bus: Option<BusHandle>,
+    pub(crate) progress: Option<PipelineProgress>,
+    /// The segment this source's timestamps are measured against. `Segment::new()`
+    /// for the source a run starts with; a replacement gets one whose `base`
+    /// continues the running time its predecessor reached.
+    pub(crate) segment: Segment,
+}
+
 async fn source_arm<'a>(
     mut src: Box<dyn DynSourceLoop + 'a>,
     out_tx: LinkSender,
     bus: Option<BusHandle>,
     progress: Option<PipelineProgress>,
 ) -> Result<u64, G2gError> {
+    run_source(
+        &mut *src,
+        SourceArmIo {
+            out_tx,
+            bus,
+            progress,
+            segment: Segment::new(),
+        },
+    )
+    .await
+}
+
+pub(crate) async fn run_source(
+    src: &mut dyn DynSourceLoop,
+    io: SourceArmIo,
+) -> Result<u64, G2gError> {
+    let SourceArmIo {
+        out_tx,
+        bus,
+        progress,
+        segment,
+    } = io;
     // M206: announce the stream start before any data, one per source, so an
     // application can bracket each stream's lifetime (StreamStart .. Eos).
     if let Some(b) = &bus {
@@ -3676,9 +3817,7 @@ async fn source_arm<'a>(
     let mut adapter = SenderSink::new(out_tx);
     // M81: open the stream with a SEGMENT ahead of the source's data, so every
     // downstream branch maps timestamps to running time from the first frame.
-    let _ = adapter
-        .push(PipelinePacket::Segment(Segment::new()))
-        .await?;
+    let _ = adapter.push(PipelinePacket::Segment(segment)).await?;
     src.run(&mut adapter).await
 }
 
@@ -3826,8 +3965,13 @@ pub async fn transform_arm<E: AsyncElement>(
                 // Dropping before the drain decouples wind-down from the drain,
                 // so no arm blocks holding the last handle.
                 drop(coord);
-                while let Some(directive) = arm_rx.recv().await {
-                    elem.configure_allocation(directive.params());
+                // M1132: a remove is lifting this element out and has parked its
+                // producer, so no other arm can end and the coordinator cannot
+                // close this channel: waiting on it here would never return.
+                if !adapter.drain_requested() {
+                    while let Some(directive) = arm_rx.recv().await {
+                        elem.configure_allocation(directive.params());
+                    }
                 }
                 return Ok(0);
             }
@@ -3967,7 +4111,18 @@ pub async fn transform_arm<E: AsyncElement>(
                     in_rx.request_reconfigure(reconf);
                 }
             }
-            None => return Ok(0),
+            // M1132: a remove closed this element's input to lift it out, so it
+            // is handed an `Eos` and whatever it was holding internally reaches
+            // the consumer, ahead of the first frame that bypasses it. The
+            // adapter swallows the marker itself: an end of stream crossing here
+            // would end a run that is carrying on.
+            None => {
+                if adapter.drain_requested() {
+                    adapter.strip_terminal();
+                    elem.process(PipelinePacket::Eos, &mut adapter).await?;
+                }
+                return Ok(0);
+            }
         }
     }
 }
@@ -4319,7 +4474,12 @@ pub(crate) async fn demux_arm<E: MultiOutputElement>(
             Some(PipelinePacket::Eos) => {
                 demux.process(PipelinePacket::Eos, &mut multi).await?;
                 for port in 0..branch_count {
-                    multi.push_to(port, PipelinePacket::Eos).await?;
+                    // A demux that forwards Eos itself already ended this
+                    // port; a second Eos behind it breaks the one-terminal
+                    // contract the drain machinery relies on.
+                    if !multi.eos_forwarded(port) {
+                        multi.push_to(port, PipelinePacket::Eos).await?;
+                    }
                 }
                 return Ok(0);
             }

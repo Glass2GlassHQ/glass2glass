@@ -208,7 +208,7 @@ impl<C: NalCodec> NalParse<C> {
 
     /// Construct the parser in access-unit re-framing mode: it accumulates the
     /// input bitstream and emits one access-unit-aligned Annex-B `DataFrame` per
-    /// coded picture (see [`reframe`](Self::reframe)).
+    /// coded picture (see `reframe`).
     pub fn reframing() -> Self {
         Self {
             reframe: true,
@@ -224,7 +224,7 @@ impl<C: NalCodec> NalParse<C> {
     }
 
     /// Set the parameter-set re-insertion interval in seconds (`0` off, `-1` every
-    /// keyframe, `N` every N seconds); see [`config_interval`](Self::config_interval).
+    /// keyframe, `N` every N seconds); see `config_interval`.
     pub fn with_config_interval(mut self, seconds: i32) -> Self {
         self.config_interval = seconds;
         self

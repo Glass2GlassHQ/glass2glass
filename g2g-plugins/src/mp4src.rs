@@ -35,8 +35,8 @@ use g2g_core::{
 
 use crate::filesink::path_io_err;
 use crate::fmp4::{
-    parse_chapters, parse_fragments, parse_header, parse_progressive, starts_with_param_set,
-    Header, Sample,
+    parse_all_tracks, parse_chapters, parse_fragments, parse_header, parse_progressive,
+    starts_with_param_set, Header, Sample, TrackKind,
 };
 use crate::mp4box::{find_box, parse_ilst_tags};
 use g2g_core::log::short_type_name;
@@ -182,21 +182,47 @@ impl SourceLoop for Mp4Src {
                 if !chapters.is_empty() {
                     bus.try_post(BusMessage::Chapters(chapters));
                 }
-                // Announce the (single) video track as a StreamCollection (M386),
-                // the discovery half of the multi-stream model. Mp4Src is a
-                // single-video-track source, so the collection has one stream.
-                if let Some(h) = &self.header {
-                    let caps = Caps::CompressedVideo {
-                        codec: h.codec,
-                        width: Dim::Fixed(h.width),
-                        height: Dim::Fixed(h.height),
-                        framerate: Rate::Any,
-                        colorimetry: g2g_core::Colorimetry::UNKNOWN,
-                    };
-                    let stream = Stream::new("mp4-track-0", StreamType::Video, caps);
+                // Announce every forwardable track as the StreamCollection
+                // (M386 / M1150). Mp4Src forwards only the primary video
+                // stream, but discovery lists what the file holds, the ids and
+                // caps `Mp4DemuxN` would give the same tracks.
+                let streams: Vec<Stream> = match parse_all_tracks(&data) {
+                    Ok(tracks) => tracks
+                        .iter()
+                        .map(|t| {
+                            let stream_type = match &t.kind {
+                                TrackKind::Video { .. } => StreamType::Video,
+                                TrackKind::Audio { .. } => StreamType::Audio,
+                                TrackKind::Text { .. } | TrackKind::ClosedCaption { .. } => {
+                                    StreamType::Text
+                                }
+                            };
+                            Stream::new(
+                                crate::mp4demuxn::stream_id(t.track_id),
+                                stream_type,
+                                crate::mp4demuxn::real_caps(&t.kind),
+                            )
+                        })
+                        .collect(),
+                    // The forwarded video track parsed, so list at least it.
+                    Err(_) => match &self.header {
+                        Some(h) => Vec::from([Stream::new(
+                            "mp4-track-0",
+                            StreamType::Video,
+                            Caps::CompressedVideo {
+                                codec: h.codec,
+                                width: Dim::Fixed(h.width),
+                                height: Dim::Fixed(h.height),
+                                framerate: Rate::Any,
+                                colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                            },
+                        )]),
+                        None => Vec::new(),
+                    },
+                };
+                if !streams.is_empty() {
                     bus.try_post(BusMessage::StreamCollection(StreamCollection::new(
-                        "mp4-0",
-                        Vec::from([stream]),
+                        "mp4-0", streams,
                     )));
                 }
             }

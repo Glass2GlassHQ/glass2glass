@@ -120,10 +120,11 @@ use crate::yuv::downsample_chroma_420;
 use g2g_core::frame::Frame;
 use g2g_core::memory::{OwnedCudaBuffer, SystemSlice};
 use g2g_core::{
-    AllocationParams, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, CudaKeepAlive,
-    Dim, ElementMetadata, FrameTiming, G2gError, HardwareError, Interlace, LatencyReport,
-    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
-    PropValue, PropertySpec, PushOutcome, QosMessage, Rate, RawVideoFormat, VideoCodec,
+    AllocationParams, AsyncElement, BufferPool, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
+    CudaKeepAlive, Dim, ElementMetadata, FrameTiming, G2gError, HardwareError, Interlace,
+    LatencyReport, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    PooledBuffer, PropError, PropKind, PropValue, PropertySpec, PushOutcome, QosMessage, Rate,
+    RawVideoFormat, VideoCodec,
 };
 
 /// Cap on pending input-pts -> arrival entries, so frames the decoder drops
@@ -408,7 +409,7 @@ struct DecodedPicture {
 enum DecodedPayload {
     /// Packed `OutputFormat` bytes in system memory (CPU decode path or
     /// cuvid's system-memory output).
-    System(Box<[u8]>),
+    System(PackedBuffer),
     /// NV12 still in CUDA device memory (NvdecCuda zero-copy path).
     Cuda(OwnedCudaBuffer),
 }
@@ -521,6 +522,10 @@ pub struct FfmpegVideoDec {
     /// Access units fed while skipping. The non-reference pictures among them are
     /// the work shed.
     qos_skipped: u64,
+    /// M1143: recycled destination buffers for the packed pictures, so a decode
+    /// at rate stops paying the kernel's page-zeroing on a fresh multi-megabyte
+    /// allocation per frame.
+    pack_pool: PackPool,
 }
 
 /// Back-compat alias from when this element decoded only H.264. The struct is
@@ -578,6 +583,7 @@ impl FfmpegVideoDec {
             skip_budget: 0,
             skipping_nonref: false,
             qos_skipped: 0,
+            pack_pool: PackPool::default(),
         }
     }
 
@@ -869,22 +875,22 @@ impl FfmpegVideoDec {
         decoded: &mut Vec<DecodedPicture>,
     ) -> Result<(), G2gError> {
         let cfg = self.decode_config();
-        let decoder = self.decoder.as_mut().ok_or(G2gError::NotConfigured)?;
-        feed_access_unit_into(
-            decoder,
-            &mut self.pts_to_arrival,
-            &cfg,
-            bitstream,
-            pts_ns,
-            arrival_ns,
-            decoded,
-        )
+        let mut state = DecodeState {
+            decoder: self.decoder.as_mut().ok_or(G2gError::NotConfigured)?,
+            pts_to_arrival: &mut self.pts_to_arrival,
+            pack_pool: &mut self.pack_pool,
+        };
+        feed_access_unit_into(&mut state, &cfg, bitstream, pts_ns, arrival_ns, decoded)
     }
 
     fn drain_frames(&mut self, decoded: &mut Vec<DecodedPicture>) -> Result<(), G2gError> {
         let cfg = self.decode_config();
-        let decoder = self.decoder.as_mut().ok_or(G2gError::NotConfigured)?;
-        drain_frames_into(decoder, &mut self.pts_to_arrival, &cfg, decoded)
+        let mut state = DecodeState {
+            decoder: self.decoder.as_mut().ok_or(G2gError::NotConfigured)?,
+            pts_to_arrival: &mut self.pts_to_arrival,
+            pack_pool: &mut self.pack_pool,
+        };
+        drain_frames_into(&mut state, &cfg, decoded)
     }
 
     fn decode_config(&self) -> DecodeConfig {
@@ -895,6 +901,15 @@ impl FfmpegVideoDec {
             cuda_device_id: self.cuda_device_id,
         }
     }
+}
+
+/// The mutable state one decode step touches: the libavcodec decoder, the
+/// pts->arrival map, and the pool the pictures are packed into. Borrowed off the
+/// element on the sync path and off the moved bundle under `offload`.
+struct DecodeState<'a> {
+    decoder: &'a mut ffmpeg::decoder::Video,
+    pts_to_arrival: &'a mut alloc::collections::BTreeMap<u64, u64>,
+    pack_pool: &'a mut PackPool,
 }
 
 /// Config the offloadable decode helpers read instead of `&self`, so they can
@@ -913,6 +928,7 @@ struct DecodeConfig {
 struct OffloadDecode {
     decoder: Option<ffmpeg::decoder::Video>,
     pts_to_arrival: alloc::collections::BTreeMap<u64, u64>,
+    pack_pool: PackPool,
     decoded: Vec<DecodedPicture>,
     result: Result<(), G2gError>,
 }
@@ -932,8 +948,7 @@ unsafe impl Send for OffloadDecode {}
 /// yield zero outputs. Free fn (not a method) so the offload path can move the
 /// decoder + pts map into a blocking-pool closure; `feed_access_unit` delegates.
 fn feed_access_unit_into(
-    decoder: &mut ffmpeg::decoder::Video,
-    pts_to_arrival: &mut alloc::collections::BTreeMap<u64, u64>,
+    state: &mut DecodeState<'_>,
     cfg: &DecodeConfig,
     bitstream: &[u8],
     pts_ns: u64,
@@ -947,24 +962,24 @@ fn feed_access_unit_into(
     packet.set_pts(Some(pts_ns as i64));
     packet.set_dts(Some(pts_ns as i64));
     if arrival_ns != 0 {
-        pts_to_arrival.insert(pts_ns, arrival_ns);
+        state.pts_to_arrival.insert(pts_ns, arrival_ns);
         // A decoder-dropped frame never echoes its pts back, so its entry
         // would linger; cap the map and evict the oldest, losing only a
         // latency sample for a frame the decoder discarded.
-        while pts_to_arrival.len() > MAX_PENDING_ARRIVALS {
-            pts_to_arrival.pop_first();
+        while state.pts_to_arrival.len() > MAX_PENDING_ARRIVALS {
+            state.pts_to_arrival.pop_first();
         }
     }
 
-    decoder
+    state
+        .decoder
         .send_packet(&packet)
         .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
-    drain_frames_into(decoder, pts_to_arrival, cfg, decoded)
+    drain_frames_into(state, cfg, decoded)
 }
 
 fn drain_frames_into(
-    decoder: &mut ffmpeg::decoder::Video,
-    pts_to_arrival: &mut alloc::collections::BTreeMap<u64, u64>,
+    state: &mut DecodeState<'_>,
     cfg: &DecodeConfig,
     decoded: &mut Vec<DecodedPicture>,
 ) -> Result<(), G2gError> {
@@ -978,7 +993,7 @@ fn drain_frames_into(
         // `AVFrame` into the emitted buffer's keep-alive, so it cannot be
         // a reused scratch frame. The system path copies out and drops it.
         let mut frame = FfVideo::empty();
-        match decoder.receive_frame(&mut frame) {
+        match state.decoder.receive_frame(&mut frame) {
             Ok(()) => {
                 // Apply the H.264/H.265 conformance cropping window to the
                 // display size. libavcodec leaves an alignment-breaking left/
@@ -1029,15 +1044,18 @@ fn drain_frames_into(
                     // software path.
                     let sw = transfer_hw_to_sw(&frame)?;
                     let resolved = resolve_output_format(format, sw.format())?;
-                    (DecodedPayload::System(copy_yuv(&sw, resolved)?), resolved)
+                    (
+                        DecodedPayload::System(copy_yuv(&sw, resolved, state.pack_pool)?),
+                        resolved,
+                    )
                 } else {
                     let resolved = resolve_output_format(format, frame.format())?;
                     (
-                        DecodedPayload::System(copy_yuv(&frame, resolved)?),
+                        DecodedPayload::System(copy_yuv(&frame, resolved, state.pack_pool)?),
                         resolved,
                     )
                 };
-                let arrival_ns = pts_to_arrival.remove(&pts_ns).unwrap_or(0);
+                let arrival_ns = state.pts_to_arrival.remove(&pts_ns).unwrap_or(0);
                 decoded.push(DecodedPicture {
                     payload,
                     width,
@@ -1656,21 +1674,28 @@ impl AsyncElement for FfmpegVideoDec {
                         let mut bundle = OffloadDecode {
                             decoder: self.decoder.take(),
                             pts_to_arrival: core::mem::take(&mut self.pts_to_arrival),
+                            pack_pool: core::mem::take(&mut self.pack_pool),
                             decoded: Vec::new(),
                             result: Ok(()),
                         };
                         bundle = crate::offload::run_blocking(move || {
                             let mut b = bundle;
                             b.result = match b.decoder.as_mut() {
-                                Some(decoder) => feed_access_unit_into(
-                                    decoder,
-                                    &mut b.pts_to_arrival,
-                                    &cfg,
-                                    &bitstream,
-                                    pts_ns,
-                                    arrival_ns,
-                                    &mut b.decoded,
-                                ),
+                                Some(decoder) => {
+                                    let mut state = DecodeState {
+                                        decoder,
+                                        pts_to_arrival: &mut b.pts_to_arrival,
+                                        pack_pool: &mut b.pack_pool,
+                                    };
+                                    feed_access_unit_into(
+                                        &mut state,
+                                        &cfg,
+                                        &bitstream,
+                                        pts_ns,
+                                        arrival_ns,
+                                        &mut b.decoded,
+                                    )
+                                }
                                 None => Err(G2gError::NotConfigured),
                             };
                             b
@@ -1678,6 +1703,7 @@ impl AsyncElement for FfmpegVideoDec {
                         .await;
                         self.decoder = bundle.decoder.take();
                         self.pts_to_arrival = core::mem::take(&mut bundle.pts_to_arrival);
+                        self.pack_pool = core::mem::take(&mut bundle.pack_pool);
                         bundle.result?;
                         decoded = bundle.decoded;
                     }
@@ -1823,8 +1849,8 @@ impl AsyncElement for FfmpegVideoDec {
                     self.last_caps = Some(new_caps.clone());
                 }
                 let domain = match d.payload {
-                    DecodedPayload::System(bytes) => {
-                        MemoryDomain::System(SystemSlice::from_boxed(bytes))
+                    DecodedPayload::System(packed) => {
+                        MemoryDomain::System(packed.into_system_slice())
                     }
                     DecodedPayload::Cuda(buf) => MemoryDomain::Cuda(buf),
                 };
@@ -2093,34 +2119,96 @@ fn high_depth_source_shift(px: Pixel) -> Option<(u32, u32)> {
     }
 }
 
+/// Buffers in the decoder's pack pool: the frames downstream can hold in flight
+/// plus the one being written. Undersizing costs a recycle, never correctness.
+const PACK_POOL_BUFFERS: usize = 8;
+
+/// The decoder's recycled destinations for packed pictures. Sized at the first
+/// packed frame and rebuilt when the packed size changes (a mid-stream
+/// resolution or format change); buffers outstanding at that point return to the
+/// pool they came from and are freed with it.
+#[derive(Debug, Default)]
+struct PackPool {
+    pool: Option<BufferPool<Box<[u8]>>>,
+    buffer_bytes: usize,
+}
+
+impl PackPool {
+    /// A destination of exactly `bytes`: a recycled buffer whose pages are
+    /// already faulted in, or a fresh zeroed allocation when the pool is
+    /// exhausted. Never blocks: downstream elements (gopreverse, a compositor)
+    /// legitimately hold more frames than the pool has buffers.
+    fn acquire(&mut self, bytes: usize) -> PackedBuffer {
+        if self.pool.is_none() || self.buffer_bytes != bytes {
+            self.pool = Some(BufferPool::new_byte_pool(PACK_POOL_BUFFERS, bytes));
+            self.buffer_bytes = bytes;
+        }
+        match self.pool.as_ref().and_then(|p| p.try_acquire()) {
+            Some(buffer) => PackedBuffer::Pooled { buffer, len: bytes },
+            None => PackedBuffer::Owned(alloc::vec![0u8; bytes].into_boxed_slice()),
+        }
+    }
+}
+
+/// One packed picture's bytes.
+#[derive(Debug)]
+enum PackedBuffer {
+    Pooled {
+        buffer: PooledBuffer<Box<[u8]>>,
+        len: usize,
+    },
+    Owned(Box<[u8]>),
+}
+
+impl PackedBuffer {
+    fn as_mut_slice(&mut self) -> &mut [u8] {
+        match self {
+            Self::Pooled { buffer, len } => &mut buffer.as_mut()[..*len],
+            Self::Owned(bytes) => bytes,
+        }
+    }
+
+    fn into_system_slice(self) -> SystemSlice {
+        match self {
+            Self::Pooled { buffer, len } => SystemSlice::from_pool(buffer, len),
+            Self::Owned(bytes) => SystemSlice::from_boxed(bytes),
+        }
+    }
+}
+
+impl core::ops::Deref for PackedBuffer {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        match self {
+            Self::Pooled { buffer, len } => &buffer.as_ref()[..*len],
+            Self::Owned(bytes) => bytes,
+        }
+    }
+}
+
+/// Take a `total`-byte destination and fill it. `write` covers every byte, so a
+/// recycled buffer never shows a previous picture's samples.
+fn pack_into(pool: &mut PackPool, total: usize, write: impl FnOnce(&mut [u8])) -> PackedBuffer {
+    let mut buffer = pool.acquire(total);
+    write(buffer.as_mut_slice());
+    buffer
+}
+
 /// Pack a high-bit-depth planar frame (Y, then U, then V) into a tightly-packed
 /// buffer of LE 2-byte samples, honouring libavcodec's per-plane row stride.
-fn pack_planar_16(frame: &FfVideo, (sx, sy): (u32, u32)) -> Box<[u8]> {
+fn pack_planar_16(dst: &mut [u8], frame: &FfVideo, (sx, sy): (u32, u32)) {
     let w = frame.width() as usize;
     let h = frame.height() as usize;
     let cw = w.div_ceil(1 << sx);
     let ch = h.div_ceil(1 << sy);
     let y_bytes = w * h * 2;
     let c_bytes = cw * ch * 2;
-    let mut out = alloc::vec![0u8; y_bytes + 2 * c_bytes];
-    copy_plane_16(&mut out, 0, frame.data(0), frame.stride(0), w * 2, h);
-    copy_plane_16(
-        &mut out,
-        y_bytes,
-        frame.data(1),
-        frame.stride(1),
-        cw * 2,
-        ch,
-    );
-    copy_plane_16(
-        &mut out,
-        y_bytes + c_bytes,
-        frame.data(2),
-        frame.stride(2),
-        cw * 2,
-        ch,
-    );
-    out.into_boxed_slice()
+    debug_assert_eq!(dst.len(), y_bytes + 2 * c_bytes);
+    let (y_dst, chroma_dst) = dst.split_at_mut(y_bytes);
+    let (u_dst, v_dst) = chroma_dst.split_at_mut(c_bytes);
+    write_plane_16(y_dst, frame.data(0), frame.stride(0), w * 2, h);
+    write_plane_16(u_dst, frame.data(1), frame.stride(1), cw * 2, ch);
+    write_plane_16(v_dst, frame.data(2), frame.stride(2), cw * 2, ch);
 }
 
 /// A planar 10-bit LE sample (value in the low bits) as a P010 word: the value
@@ -2132,20 +2220,21 @@ fn msb_align(sample: &[u8]) -> u16 {
 
 /// Pack a planar 10-bit 4:2:0 frame into P010: Y as 16-bit MSB-aligned words,
 /// then U/V interleaved the same way. Honours libavcodec's per-plane row stride.
-fn pack_p010_from_planar10(frame: &FfVideo) -> Box<[u8]> {
+fn pack_p010_from_planar10(dst: &mut [u8], frame: &FfVideo) {
     let w = frame.width() as usize;
     let h = frame.height() as usize;
     let cw = w.div_ceil(2);
     let ch = h.div_ceil(2);
     let y_bytes = w * h * 2;
-    let mut out = alloc::vec![0u8; y_bytes + cw * ch * 4];
+    debug_assert_eq!(dst.len(), y_bytes + cw * ch * 4);
+    let (y_dst, uv_dst) = dst.split_at_mut(y_bytes);
     let y_src = frame.data(0);
     let y_pitch = frame.stride(0);
     for row in 0..h {
         for col in 0..w {
             let s = row * y_pitch + col * 2;
             let d = (row * w + col) * 2;
-            out[d..d + 2].copy_from_slice(&msb_align(&y_src[s..]).to_le_bytes());
+            y_dst[d..d + 2].copy_from_slice(&msb_align(&y_src[s..]).to_le_bytes());
         }
     }
     let u_src = frame.data(1);
@@ -2154,107 +2243,105 @@ fn pack_p010_from_planar10(frame: &FfVideo) -> Box<[u8]> {
     let v_pitch = frame.stride(2);
     for row in 0..ch {
         for col in 0..cw {
-            let d = y_bytes + (row * cw + col) * 4;
-            out[d..d + 2]
+            let d = (row * cw + col) * 4;
+            uv_dst[d..d + 2]
                 .copy_from_slice(&msb_align(&u_src[row * u_pitch + col * 2..]).to_le_bytes());
-            out[d + 2..d + 4]
+            uv_dst[d + 2..d + 4]
                 .copy_from_slice(&msb_align(&v_src[row * v_pitch + col * 2..]).to_le_bytes());
         }
     }
-    out.into_boxed_slice()
 }
 
 /// Pack a `P010LE` source frame (hardware download) into a tightly-packed P010
 /// buffer: the layout already matches, so both planes are byte copies.
-fn pack_p010_verbatim(frame: &FfVideo) -> Box<[u8]> {
+fn pack_p010_verbatim(dst: &mut [u8], frame: &FfVideo) {
     let w = frame.width() as usize;
     let h = frame.height() as usize;
     let cw = w.div_ceil(2);
     let ch = h.div_ceil(2);
     let y_bytes = w * h * 2;
-    let mut out = alloc::vec![0u8; y_bytes + cw * ch * 4];
-    copy_plane_16(&mut out, 0, frame.data(0), frame.stride(0), w * 2, h);
-    copy_plane_16(
-        &mut out,
-        y_bytes,
-        frame.data(1),
-        frame.stride(1),
-        cw * 4,
-        ch,
-    );
-    out.into_boxed_slice()
+    debug_assert_eq!(dst.len(), y_bytes + cw * ch * 4);
+    let (y_dst, uv_dst) = dst.split_at_mut(y_bytes);
+    write_plane_16(y_dst, frame.data(0), frame.stride(0), w * 2, h);
+    write_plane_16(uv_dst, frame.data(1), frame.stride(1), cw * 4, ch);
 }
 
 /// Unpack a `P010LE` source frame into planar 10-bit (`I420p10`): each word's
 /// value shifted back into the low bits, the interleaved chroma split into U then
 /// V planes.
-fn unpack_p010_to_planar10(frame: &FfVideo) -> Box<[u8]> {
+fn unpack_p010_to_planar10(dst: &mut [u8], frame: &FfVideo) {
     let w = frame.width() as usize;
     let h = frame.height() as usize;
     let cw = w.div_ceil(2);
     let ch = h.div_ceil(2);
     let y_bytes = w * h * 2;
     let c_bytes = cw * ch * 2;
-    let mut out = alloc::vec![0u8; y_bytes + 2 * c_bytes];
+    debug_assert_eq!(dst.len(), y_bytes + 2 * c_bytes);
     let low = |b: &[u8]| (u16::from_le_bytes([b[0], b[1]]) >> 6).to_le_bytes();
+    let (y_dst, chroma_dst) = dst.split_at_mut(y_bytes);
     let y_src = frame.data(0);
     let y_pitch = frame.stride(0);
     for row in 0..h {
         for col in 0..w {
             let d = (row * w + col) * 2;
-            out[d..d + 2].copy_from_slice(&low(&y_src[row * y_pitch + col * 2..]));
+            y_dst[d..d + 2].copy_from_slice(&low(&y_src[row * y_pitch + col * 2..]));
         }
     }
     let uv_src = frame.data(1);
     let uv_pitch = frame.stride(1);
-    for row in 0..ch {
-        for col in 0..cw {
-            let s = row * uv_pitch + col * 4;
-            let u = y_bytes + (row * cw + col) * 2;
-            let v = y_bytes + c_bytes + (row * cw + col) * 2;
-            out[u..u + 2].copy_from_slice(&low(&uv_src[s..]));
-            out[v..v + 2].copy_from_slice(&low(&uv_src[s + 2..]));
+    let (u_dst, v_dst) = chroma_dst.split_at_mut(c_bytes);
+    // The U word of each source pair, then the V word, into their own planes.
+    for (word_in_pair, plane_dst) in [(0usize, u_dst), (2usize, v_dst)] {
+        for row in 0..ch {
+            for col in 0..cw {
+                let s = row * uv_pitch + col * 4 + word_in_pair;
+                let d = (row * cw + col) * 2;
+                plane_dst[d..d + 2].copy_from_slice(&low(&uv_src[s..]));
+            }
         }
     }
-    out.into_boxed_slice()
 }
 
-/// Copy `rows` rows of `row_bytes` bytes from a strided source plane into `out`
-/// at `dst_off`, packing the rows contiguously. The LE sample bytes are copied
-/// verbatim, so the destination keeps the source's little-endian layout.
-fn copy_plane_16(
-    out: &mut [u8],
-    dst_off: usize,
-    src: &[u8],
-    stride: usize,
-    row_bytes: usize,
-    rows: usize,
-) {
+/// Write `rows` rows of `row_bytes` bytes from a strided source plane into `dst`,
+/// packing the rows contiguously. The LE sample bytes are copied verbatim, so
+/// the destination keeps the source's little-endian layout.
+fn write_plane_16(dst: &mut [u8], src: &[u8], stride: usize, row_bytes: usize, rows: usize) {
+    debug_assert_eq!(dst.len(), row_bytes * rows);
     for row in 0..rows {
         let s = row * stride;
-        let d = dst_off + row * row_bytes;
-        out[d..d + row_bytes].copy_from_slice(&src[s..s + row_bytes]);
+        dst[row * row_bytes..(row + 1) * row_bytes].copy_from_slice(&src[s..s + row_bytes]);
     }
 }
 
-fn copy_yuv(frame: &FfVideo, format: OutputFormat) -> Result<Box<[u8]>, G2gError> {
+fn copy_yuv(
+    frame: &FfVideo,
+    format: OutputFormat,
+    pool: &mut PackPool,
+) -> Result<PackedBuffer, G2gError> {
+    let w = frame.width() as usize;
+    let h = frame.height() as usize;
     // Semi-planar 10-bit output: from a planar 10-bit software decode (interleave
     // the chroma, shift each sample into the word's top bits) or verbatim from a
     // hardware `P010LE` frame, which is already in this layout. Any other source
     // depth / chroma would need a real conversion: reject loud.
     if format == OutputFormat::P010 {
+        let cw = w.div_ceil(2);
+        let ch = h.div_ceil(2);
+        let total = w * h * 2 + cw * ch * 4;
         return match frame.format() {
             Pixel::YUV420P10LE => {
                 if frame.planes() < 3 {
                     return Err(G2gError::Hardware(HardwareError::Other));
                 }
-                Ok(pack_p010_from_planar10(frame))
+                Ok(pack_into(pool, total, |dst| {
+                    pack_p010_from_planar10(dst, frame)
+                }))
             }
             Pixel::P010LE => {
                 if frame.planes() < 2 {
                     return Err(G2gError::Hardware(HardwareError::Other));
                 }
-                Ok(pack_p010_verbatim(frame))
+                Ok(pack_into(pool, total, |dst| pack_p010_verbatim(dst, frame)))
             }
             _ => Err(G2gError::CapsMismatch),
         };
@@ -2268,21 +2355,27 @@ fn copy_yuv(frame: &FfVideo, format: OutputFormat) -> Result<Box<[u8]>, G2gError
         if frame.planes() < 2 {
             return Err(G2gError::Hardware(HardwareError::Other));
         }
-        return Ok(unpack_p010_to_planar10(frame));
+        let total = w * h * 2 + 2 * w.div_ceil(2) * h.div_ceil(2) * 2;
+        return Ok(pack_into(pool, total, |dst| {
+            unpack_p010_to_planar10(dst, frame)
+        }));
     }
     // High-bit-depth planar source (10/12-bit): a lossless 2-byte-per-sample
     // plane copy that preserves depth and chroma. The resolved output must match
     // the source chroma at 2 bytes/sample (Auto guarantees it); the plane bytes
     // are copied verbatim, so 10- vs 12-bit only differs in the emitted caps
     // label, not the packing.
-    if let Some(src_shift) = high_depth_source_shift(frame.format()) {
-        if format.bytes_per_sample() != 2 || format.chroma_shift() != src_shift {
+    if let Some((sx, sy)) = high_depth_source_shift(frame.format()) {
+        if format.bytes_per_sample() != 2 || format.chroma_shift() != (sx, sy) {
             return Err(G2gError::CapsMismatch);
         }
         if frame.planes() < 3 {
             return Err(G2gError::Hardware(HardwareError::Other));
         }
-        return Ok(pack_planar_16(frame, src_shift));
+        let total = w * h * 2 + 2 * w.div_ceil(1 << sx) * h.div_ceil(1 << sy) * 2;
+        return Ok(pack_into(pool, total, |dst| {
+            pack_planar_16(dst, frame, (sx, sy))
+        }));
     }
     let src = match frame.format() {
         // YUVJ*P is the JPEG (full) range sibling; same plane layout, so accept
@@ -2301,8 +2394,6 @@ fn copy_yuv(frame: &FfVideo, format: OutputFormat) -> Result<Box<[u8]>, G2gError
     if frame.planes() < required_planes {
         return Err(G2gError::Hardware(HardwareError::Other));
     }
-    let w = frame.width() as usize;
-    let h = frame.height() as usize;
     // Output chroma dims from the requested format's subsampling.
     let (osx, osy) = format.chroma_shift();
     let cw = w.div_ceil(1 << osx);
@@ -2311,124 +2402,135 @@ fn copy_yuv(frame: &FfVideo, format: OutputFormat) -> Result<Box<[u8]>, G2gError
     let c_size = cw * ch;
     let total = y_size + 2 * c_size;
 
-    let mut out = alloc::vec![0u8; total];
+    // Resolved before the destination is taken, so an unsupported pairing is
+    // rejected rather than leaving a half-written buffer. A mismatch we do not
+    // resample (e.g. requesting I444 from a 4:2:0 source would upsample chroma,
+    // or NV12 from a 4:2:2 source) is loud rather than a wrong-chroma buffer.
+    // Put a `ColorConvert` upstream for a genuine chroma conversion.
+    let chroma = match (src, format) {
+        // --- Matching subsampling: a plane copy (I420 from 4:2:0, I422 from
+        // 4:2:2, I444 from 4:4:4) ---
+        (SourceLayout::Planar420, OutputFormat::I420)
+        | (SourceLayout::Planar422, OutputFormat::I422)
+        | (SourceLayout::Planar444, OutputFormat::I444) => ChromaPack::PlanarCopy,
+        (SourceLayout::Planar420, OutputFormat::Nv12) => ChromaPack::PlanarToInterleaved,
+        (SourceLayout::SemiPlanar420, OutputFormat::Nv12) => ChromaPack::InterleavedCopy,
+        (SourceLayout::SemiPlanar420, OutputFormat::I420) => ChromaPack::InterleavedToPlanar,
+        // 4:4:4 downsampled to 4:2:0 (lossy) for an I420 / NV12 consumer.
+        (SourceLayout::Planar444, OutputFormat::I420) => ChromaPack::DownsampledToPlanar,
+        (SourceLayout::Planar444, OutputFormat::Nv12) => ChromaPack::DownsampledToInterleaved,
+        _ => return Err(G2gError::CapsMismatch),
+    };
 
-    // Y plane (full resolution), honouring source pitch.
-    let y_src = frame.data(0);
-    let y_pitch = frame.stride(0);
-    for row in 0..h {
-        let src_off = row * y_pitch;
-        let dst_off = row * w;
-        out[dst_off..dst_off + w].copy_from_slice(&y_src[src_off..src_off + w]);
-    }
-    match (src, format) {
-        // --- 4:2:0 output (I420 / NV12) from a 4:2:0 source (planar or NV12) ---
-        (SourceLayout::Planar420, OutputFormat::I420) => {
-            copy_planar_chroma(&mut out, frame, y_size, c_size, cw, ch);
+    Ok(pack_into(pool, total, |dst| {
+        let (y_dst, chroma_dst) = dst.split_at_mut(y_size);
+        // Y plane (full resolution), honouring source pitch.
+        let y_src = frame.data(0);
+        let y_pitch = frame.stride(0);
+        for row in 0..h {
+            let s = row * y_pitch;
+            y_dst[row * w..(row + 1) * w].copy_from_slice(&y_src[s..s + w]);
         }
-        (SourceLayout::Planar420, OutputFormat::Nv12) => {
-            interleave_planar_chroma(&mut out, frame, y_size, cw, ch);
+        write_chroma(chroma_dst, chroma, frame, cw, ch);
+    }))
+}
+
+/// How an 8-bit source's chroma becomes the output's chroma plane(s).
+#[derive(Clone, Copy)]
+enum ChromaPack {
+    /// Source and output subsampling match: a lossless U then V plane copy.
+    PlanarCopy,
+    /// Planar U/V interleaved into an NV12 chroma plane.
+    PlanarToInterleaved,
+    /// An NV12 source's chroma plane copied verbatim.
+    InterleavedCopy,
+    /// An NV12 source's chroma split into separate U and V planes.
+    InterleavedToPlanar,
+    /// 4:4:4 chroma box-averaged to 4:2:0, as U then V planes.
+    DownsampledToPlanar,
+    /// 4:4:4 chroma box-averaged to 4:2:0, interleaved.
+    DownsampledToInterleaved,
+}
+
+/// Write the output's `cw`x`ch` chroma, honouring source pitch. `dst` is the
+/// packed buffer past the Y plane, and every byte of it is written.
+fn write_chroma(dst: &mut [u8], pack: ChromaPack, frame: &FfVideo, cw: usize, ch: usize) {
+    let c_size = cw * ch;
+    debug_assert_eq!(dst.len(), 2 * c_size);
+    match pack {
+        ChromaPack::PlanarCopy => {
+            let (u_dst, v_dst) = dst.split_at_mut(c_size);
+            for (plane, plane_dst) in [(1usize, u_dst), (2usize, v_dst)] {
+                let src = frame.data(plane);
+                let pitch = frame.stride(plane);
+                for row in 0..ch {
+                    plane_dst[row * cw..(row + 1) * cw]
+                        .copy_from_slice(&src[row * pitch..row * pitch + cw]);
+                }
+            }
         }
-        (SourceLayout::SemiPlanar420, OutputFormat::Nv12) => {
+        ChromaPack::PlanarToInterleaved => {
+            let u_src = frame.data(1);
+            let u_pitch = frame.stride(1);
+            let v_src = frame.data(2);
+            let v_pitch = frame.stride(2);
+            for row in 0..ch {
+                let u_row = &u_src[row * u_pitch..row * u_pitch + cw];
+                let v_row = &v_src[row * v_pitch..row * v_pitch + cw];
+                let (pairs, _) = dst[2 * row * cw..2 * (row + 1) * cw].as_chunks_mut::<2>();
+                for (col, pair) in pairs.iter_mut().enumerate() {
+                    pair[0] = u_row[col];
+                    pair[1] = v_row[col];
+                }
+            }
+        }
+        ChromaPack::InterleavedCopy => {
             let uv_src = frame.data(1);
             let uv_pitch = frame.stride(1);
             let uv_row_bytes = 2 * cw;
             for row in 0..ch {
-                let dst_base = y_size + row * uv_row_bytes;
-                out[dst_base..dst_base + uv_row_bytes]
+                dst[row * uv_row_bytes..(row + 1) * uv_row_bytes]
                     .copy_from_slice(&uv_src[row * uv_pitch..row * uv_pitch + uv_row_bytes]);
             }
         }
-        (SourceLayout::SemiPlanar420, OutputFormat::I420) => {
+        ChromaPack::InterleavedToPlanar => {
             let uv_src = frame.data(1);
             let uv_pitch = frame.stride(1);
-            for row in 0..ch {
-                let uv_row = &uv_src[row * uv_pitch..row * uv_pitch + 2 * cw];
-                let u_dst_base = y_size + row * cw;
-                let v_dst_base = y_size + c_size + row * cw;
-                for col in 0..cw {
-                    out[u_dst_base + col] = uv_row[2 * col];
-                    out[v_dst_base + col] = uv_row[2 * col + 1];
+            let (u_dst, v_dst) = dst.split_at_mut(c_size);
+            for (byte_in_pair, plane_dst) in [(0usize, u_dst), (1usize, v_dst)] {
+                for row in 0..ch {
+                    let uv_row = &uv_src[row * uv_pitch..row * uv_pitch + 2 * cw];
+                    for (col, out) in plane_dst[row * cw..(row + 1) * cw].iter_mut().enumerate() {
+                        *out = uv_row[2 * col + byte_in_pair];
+                    }
                 }
             }
         }
-        // --- 4:4:4 source ---
-        // Preserve: copy the full-resolution chroma into planar I444.
-        (SourceLayout::Planar444, OutputFormat::I444) => {
-            copy_planar_chroma(&mut out, frame, y_size, c_size, cw, ch);
+        ChromaPack::DownsampledToPlanar => {
+            let (u_ds, v_ds) = downsampled_chroma(frame);
+            let (u_dst, v_dst) = dst.split_at_mut(c_size);
+            u_dst.copy_from_slice(&u_ds);
+            v_dst.copy_from_slice(&v_ds);
         }
-        // Downsample to 4:2:0 (lossy) for an I420 / NV12 consumer.
-        (SourceLayout::Planar444, OutputFormat::I420) => {
-            let u_ds = downsample_chroma_420(frame.data(1), frame.stride(1), w, h);
-            let v_ds = downsample_chroma_420(frame.data(2), frame.stride(2), w, h);
-            out[y_size..y_size + c_size].copy_from_slice(&u_ds);
-            out[y_size + c_size..y_size + 2 * c_size].copy_from_slice(&v_ds);
-        }
-        (SourceLayout::Planar444, OutputFormat::Nv12) => {
-            let u_ds = downsample_chroma_420(frame.data(1), frame.stride(1), w, h);
-            let v_ds = downsample_chroma_420(frame.data(2), frame.stride(2), w, h);
-            for row in 0..ch {
-                let dst_base = y_size + row * 2 * cw;
-                for col in 0..cw {
-                    out[dst_base + 2 * col] = u_ds[row * cw + col];
-                    out[dst_base + 2 * col + 1] = v_ds[row * cw + col];
-                }
+        ChromaPack::DownsampledToInterleaved => {
+            let (u_ds, v_ds) = downsampled_chroma(frame);
+            let (pairs, _) = dst.as_chunks_mut::<2>();
+            for (i, pair) in pairs.iter_mut().enumerate() {
+                pair[0] = u_ds[i];
+                pair[1] = v_ds[i];
             }
         }
-        // --- 4:2:2 source: preserve into planar I422 (half-width, full-height) ---
-        (SourceLayout::Planar422, OutputFormat::I422) => {
-            copy_planar_chroma(&mut out, frame, y_size, c_size, cw, ch);
-        }
-        // A mismatch we do not resample (e.g. requesting I444 from a 4:2:0
-        // source would upsample chroma, or NV12 from a 4:2:2 source): reject
-        // loud rather than emit a wrong-chroma buffer. Put a `ColorConvert`
-        // upstream for a genuine chroma conversion.
-        _ => return Err(G2gError::CapsMismatch),
-    }
-
-    Ok(out.into_boxed_slice())
-}
-
-/// Copy a planar source's U then V plane into the output at `cw`x`ch`, honouring
-/// source pitch. Used when source and output chroma subsampling match (I420 from
-/// 4:2:0, I422 from 4:2:2, I444 from 4:4:4), so it is a lossless plane copy.
-fn copy_planar_chroma(
-    out: &mut [u8],
-    frame: &FfVideo,
-    y_size: usize,
-    c_size: usize,
-    cw: usize,
-    ch: usize,
-) {
-    let u_src = frame.data(1);
-    let u_pitch = frame.stride(1);
-    let v_src = frame.data(2);
-    let v_pitch = frame.stride(2);
-    for row in 0..ch {
-        let dst = y_size + row * cw;
-        out[dst..dst + cw].copy_from_slice(&u_src[row * u_pitch..row * u_pitch + cw]);
-    }
-    for row in 0..ch {
-        let dst = y_size + c_size + row * cw;
-        out[dst..dst + cw].copy_from_slice(&v_src[row * v_pitch..row * v_pitch + cw]);
     }
 }
 
-/// Interleave a planar 4:2:0 source's U/V into the output's NV12 chroma plane.
-fn interleave_planar_chroma(out: &mut [u8], frame: &FfVideo, y_size: usize, cw: usize, ch: usize) {
-    let u_src = frame.data(1);
-    let u_pitch = frame.stride(1);
-    let v_src = frame.data(2);
-    let v_pitch = frame.stride(2);
-    for row in 0..ch {
-        let u_row = &u_src[row * u_pitch..row * u_pitch + cw];
-        let v_row = &v_src[row * v_pitch..row * v_pitch + cw];
-        let dst_base = y_size + row * 2 * cw;
-        for col in 0..cw {
-            out[dst_base + 2 * col] = u_row[col];
-            out[dst_base + 2 * col + 1] = v_row[col];
-        }
-    }
+/// A 4:4:4 source's U and V planes box-averaged down to 4:2:0 (lossy).
+fn downsampled_chroma(frame: &FfVideo) -> (Vec<u8>, Vec<u8>) {
+    let w = frame.width() as usize;
+    let h = frame.height() as usize;
+    (
+        downsample_chroma_420(frame.data(1), frame.stride(1), w, h),
+        downsample_chroma_420(frame.data(2), frame.stride(2), w, h),
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -2647,7 +2749,8 @@ mod tests {
         // Distinct per-plane, per-pixel values so any downsample would show.
         let val = |p: usize, x: usize, y: usize| (p * 40 + y * 4 + x) as u8;
         let frame = planar_frame(Pixel::YUV444P, w as u32, h as u32, (0, 0), val);
-        let out = copy_yuv(&frame, OutputFormat::I444).expect("444 -> I444");
+        let out =
+            copy_yuv(&frame, OutputFormat::I444, &mut PackPool::default()).expect("444 -> I444");
 
         let ysz = w * h;
         assert_eq!(out.len(), ysz * 3, "I444 = 3 full-res planes");
@@ -2669,7 +2772,8 @@ mod tests {
         let (w, h) = (4usize, 2usize);
         let val = |p: usize, x: usize, y: usize| (p * 50 + y * 4 + x) as u8;
         let frame = planar_frame(Pixel::YUV422P, w as u32, h as u32, (1, 0), val);
-        let out = copy_yuv(&frame, OutputFormat::I422).expect("422 -> I422");
+        let out =
+            copy_yuv(&frame, OutputFormat::I422, &mut PackPool::default()).expect("422 -> I422");
 
         let ysz = w * h;
         let cw = w / 2; // half width
@@ -2707,6 +2811,141 @@ mod tests {
         // A fixed request passes through regardless of the source.
         assert_eq!(resolve_output_format(I420, Pixel::YUV444P).unwrap(), I420);
         assert_eq!(resolve_output_format(Nv12, Pixel::YUV420P).unwrap(), Nv12);
+    }
+
+    /// Build an 8-bit `NV12` frame: a Y plane, then interleaved U/V bytes.
+    /// `fill(plane, x, y)` gives the sample, plane 1 = U and plane 2 = V of the
+    /// shared chroma plane.
+    fn nv12_frame(w: u32, h: u32, fill: impl Fn(usize, usize, usize) -> u8) -> FfVideo {
+        let mut frame = FfVideo::new(Pixel::NV12, w, h);
+        let (cw, ch) = ((w / 2) as usize, (h / 2) as usize);
+        let y_stride = frame.stride(0);
+        let y_data = frame.data_mut(0);
+        for y in 0..h as usize {
+            for x in 0..w as usize {
+                y_data[y * y_stride + x] = fill(0, x, y);
+            }
+        }
+        let uv_stride = frame.stride(1);
+        let uv_data = frame.data_mut(1);
+        for y in 0..ch {
+            for x in 0..cw {
+                uv_data[y * uv_stride + 2 * x] = fill(1, x, y);
+                uv_data[y * uv_stride + 2 * x + 1] = fill(2, x, y);
+            }
+        }
+        frame
+    }
+
+    /// Every 8-bit 4:2:0 arm, planar and semi-planar source into planar and
+    /// interleaved output: each writes the whole packed buffer, so no sample is
+    /// left at whatever the allocation happened to hold.
+    #[test]
+    fn eight_bit_chroma_arms_pack_every_sample() {
+        let (w, h) = (4usize, 2usize);
+        let (cw, ch) = (w / 2, h / 2);
+        let (ysz, csz) = (w * h, cw * ch);
+        let val = |p: usize, x: usize, y: usize| (p * 60 + y * 4 + x + 1) as u8;
+        let planar = planar_frame(Pixel::YUV420P, w as u32, h as u32, (1, 1), val);
+        let semi = nv12_frame(w as u32, h as u32, val);
+
+        for src in [&planar, &semi] {
+            let i420 =
+                copy_yuv(src, OutputFormat::I420, &mut PackPool::default()).expect("4:2:0 -> I420");
+            let nv12 =
+                copy_yuv(src, OutputFormat::Nv12, &mut PackPool::default()).expect("4:2:0 -> NV12");
+            assert_eq!(i420.len(), ysz + 2 * csz);
+            assert_eq!(nv12.len(), ysz + 2 * csz);
+            for y in 0..h {
+                for x in 0..w {
+                    assert_eq!(i420[y * w + x], val(0, x, y), "Y");
+                    assert_eq!(nv12[y * w + x], val(0, x, y), "Y");
+                }
+            }
+            for y in 0..ch {
+                for x in 0..cw {
+                    let c = y * cw + x;
+                    assert_eq!(i420[ysz + c], val(1, x, y), "U plane");
+                    assert_eq!(i420[ysz + csz + c], val(2, x, y), "V plane");
+                    assert_eq!(nv12[ysz + 2 * c], val(1, x, y), "U interleaved");
+                    assert_eq!(nv12[ysz + 2 * c + 1], val(2, x, y), "V interleaved");
+                }
+            }
+        }
+    }
+
+    /// The 4:4:4 -> 4:2:0 downsample arms. Chroma is constant across each 2x2
+    /// box, so the box average is that value whatever the rounding.
+    #[test]
+    fn downsampled_chroma_fills_both_four_two_zero_layouts() {
+        let (w, h) = (4usize, 2usize);
+        let (cw, ch) = (w / 2, h / 2);
+        let (ysz, csz) = (w * h, cw * ch);
+        let val = |p: usize, x: usize, y: usize| match p {
+            0 => (y * w + x + 1) as u8,
+            _ => (p * 60 + (y / 2) * 4 + x / 2 + 1) as u8,
+        };
+        let frame = planar_frame(Pixel::YUV444P, w as u32, h as u32, (0, 0), val);
+        let i420 =
+            copy_yuv(&frame, OutputFormat::I420, &mut PackPool::default()).expect("4:4:4 -> I420");
+        let nv12 =
+            copy_yuv(&frame, OutputFormat::Nv12, &mut PackPool::default()).expect("4:4:4 -> NV12");
+        assert_eq!(i420.len(), ysz + 2 * csz);
+        assert_eq!(nv12.len(), ysz + 2 * csz);
+        for y in 0..ch {
+            for x in 0..cw {
+                let c = y * cw + x;
+                let (u, v) = (val(1, 2 * x, 2 * y), val(2, 2 * x, 2 * y));
+                assert_eq!(i420[ysz + c], u, "U plane");
+                assert_eq!(i420[ysz + csz + c], v, "V plane");
+                assert_eq!(nv12[ysz + 2 * c], u, "U interleaved");
+                assert_eq!(nv12[ysz + 2 * c + 1], v, "V interleaved");
+            }
+        }
+    }
+
+    /// M1143: a released picture's buffer is handed back to the next pack, and a
+    /// changed packed size rebuilds the pool at the new size.
+    #[test]
+    fn a_released_picture_returns_its_buffer_to_the_pool() {
+        let val = |p: usize, x: usize, y: usize| (p * 60 + y * 4 + x + 1) as u8;
+        let frame = planar_frame(Pixel::YUV420P, 4, 2, (1, 1), val);
+        let mut pool = PackPool::default();
+
+        let first = copy_yuv(&frame, OutputFormat::I420, &mut pool).expect("first");
+        let recycled = first.as_ptr() as usize;
+        drop(first);
+        let second = copy_yuv(&frame, OutputFormat::I420, &mut pool).expect("second");
+        assert!(matches!(second, PackedBuffer::Pooled { .. }));
+        assert_eq!(
+            second.as_ptr() as usize,
+            recycled,
+            "the second picture packs into the released buffer"
+        );
+
+        let wider = planar_frame(Pixel::YUV420P, 8, 2, (1, 1), val);
+        let resized = copy_yuv(&wider, OutputFormat::I420, &mut pool).expect("resized");
+        assert_eq!(resized.len(), 8 * 2 * 3 / 2, "pool rebuilt at the new size");
+    }
+
+    /// M1143: holding every pooled buffer must not fail or block the next pack,
+    /// and the fallback buffer carries the same pixels.
+    #[test]
+    fn an_exhausted_pool_packs_into_a_fresh_buffer() {
+        let val = |p: usize, x: usize, y: usize| (p * 60 + y * 4 + x + 1) as u8;
+        let frame = planar_frame(Pixel::YUV420P, 4, 2, (1, 1), val);
+        let mut pool = PackPool::default();
+
+        let held: Vec<PackedBuffer> = (0..PACK_POOL_BUFFERS)
+            .map(|_| copy_yuv(&frame, OutputFormat::I420, &mut pool).expect("pooled"))
+            .collect();
+        let extra = copy_yuv(&frame, OutputFormat::I420, &mut pool).expect("fallback");
+        assert!(matches!(extra, PackedBuffer::Owned(_)));
+        assert_eq!(
+            &extra[..],
+            &held[0][..],
+            "same pixels off the fallback path"
+        );
     }
 
     /// Build a planar high-bit-depth (LE `u16`) frame; `fill` gives the sample.
@@ -2754,7 +2993,8 @@ mod tests {
         // values above 8-bit range, so a truncation to 1 byte would show
         let val = |p: usize, x: usize, y: usize| (p * 300 + y * 4 + x) as u16;
         let frame = planar_frame_16(Pixel::YUV420P10LE, w as u32, h as u32, (1, 1), val);
-        let out = copy_yuv(&frame, I420p10).expect("10-bit 4:2:0 -> I420p10");
+        let out =
+            copy_yuv(&frame, I420p10, &mut PackPool::default()).expect("10-bit 4:2:0 -> I420p10");
         let (cw, ch) = (w / 2, h / 2);
         let ysz = w * h * 2;
         let csz = cw * ch * 2;
@@ -2773,7 +3013,7 @@ mod tests {
         }
         // an 8-bit request from a 10-bit source is a loud mismatch, not a silent
         // truncation
-        assert!(copy_yuv(&frame, I420).is_err());
+        assert!(copy_yuv(&frame, I420, &mut PackPool::default()).is_err());
     }
 
     /// Build a `P010LE` frame: Y plane of 16-bit words, then interleaved U/V words.
@@ -2817,7 +3057,7 @@ mod tests {
         let val = |p: usize, x: usize, y: usize| (300 * p + 41 * y + 7 * x + 1) as u16;
 
         let planar = planar_frame_16(Pixel::YUV420P10LE, w as u32, h as u32, (1, 1), val);
-        let out = copy_yuv(&planar, P010).expect("planar 10-bit -> P010");
+        let out = copy_yuv(&planar, P010, &mut PackPool::default()).expect("planar 10-bit -> P010");
         assert_eq!(
             out.len(),
             ysz + cw * ch * 4,
@@ -2842,13 +3082,14 @@ mod tests {
         }
         // 12-bit planar into P010 would silently relabel the depth: rejected.
         let planar12 = planar_frame_16(Pixel::YUV420P12LE, w as u32, h as u32, (1, 1), val);
-        assert!(copy_yuv(&planar12, P010).is_err());
+        assert!(copy_yuv(&planar12, P010, &mut PackPool::default()).is_err());
 
         // A hardware P010 frame: verbatim into P010, shifted back down into I420p10.
         let hw = p010_frame(w as u32, h as u32, |p, x, y| val(p, x, y) << 6);
-        let verbatim = copy_yuv(&hw, P010).expect("P010 source -> P010");
+        let verbatim = copy_yuv(&hw, P010, &mut PackPool::default()).expect("P010 source -> P010");
         assert_eq!(verbatim.as_ref(), out.as_ref(), "same pixels, same layout");
-        let planar_out = copy_yuv(&hw, I420p10).expect("P010 source -> I420p10");
+        let planar_out =
+            copy_yuv(&hw, I420p10, &mut PackPool::default()).expect("P010 source -> I420p10");
         assert_eq!(planar_out.len(), ysz + 2 * cw * ch * 2);
         for y in 0..h {
             for x in 0..w {
@@ -2877,8 +3118,8 @@ mod tests {
             }
         }
         // A P010 source cannot serve an 8-bit or non-4:2:0 request.
-        assert!(copy_yuv(&hw, I420).is_err());
-        assert!(copy_yuv(&hw, I422p10).is_err());
+        assert!(copy_yuv(&hw, I420, &mut PackPool::default()).is_err());
+        assert!(copy_yuv(&hw, I422p10, &mut PackPool::default()).is_err());
 
         // Negotiation: a hardware 10-bit frame's native format under `Auto`, and a
         // format the decoder both advertises and accepts as a pre-fixed output.
@@ -2954,10 +3195,10 @@ mod tests {
     fn upsampling_chroma_is_rejected() {
         // A 4:2:0 source cannot produce 4:4:4 / 4:2:2 output (no chroma upsample).
         let frame = planar_frame(Pixel::YUV420P, 4, 2, (1, 1), |_, _, _| 0);
-        assert!(copy_yuv(&frame, OutputFormat::I444).is_err());
-        assert!(copy_yuv(&frame, OutputFormat::I422).is_err());
+        assert!(copy_yuv(&frame, OutputFormat::I444, &mut PackPool::default()).is_err());
+        assert!(copy_yuv(&frame, OutputFormat::I422, &mut PackPool::default()).is_err());
         // ... but 4:2:0 -> I420 still works.
-        assert!(copy_yuv(&frame, OutputFormat::I420).is_ok());
+        assert!(copy_yuv(&frame, OutputFormat::I420, &mut PackPool::default()).is_ok());
     }
 
     #[test]

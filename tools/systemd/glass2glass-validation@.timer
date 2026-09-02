@@ -1,0 +1,14 @@
+# These hosts are off most of the day, so a wall-clock schedule would mostly fire
+# on a machine that is not running. Starting the user manager is the reliable
+# event: one run a few minutes into every session, then once a day if the session
+# outlives that. On a headless host `loginctl enable-linger` makes that boot.
+
+[Unit]
+Description=glass2glass host validation (%i suite)
+
+[Timer]
+OnStartupSec=10min
+OnUnitActiveSec=1d
+
+[Install]
+WantedBy=timers.target

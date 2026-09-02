@@ -125,6 +125,7 @@ async fn frames_match_ffprobe_packets() {
             format: AudioFormat::Flac,
             channels: 0,
             sample_rate: 0,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         })
         .expect("configure");
     let mut sink = CaptureSink::default();
@@ -147,6 +148,7 @@ async fn frames_match_ffprobe_packets() {
             format: AudioFormat::Flac,
             channels: 2,
             sample_rate: 44_100,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         }),
         "STREAMINFO caps"
     );

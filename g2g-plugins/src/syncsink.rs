@@ -19,7 +19,8 @@
 //! already past by more than that bound is dropped rather than presented late,
 //! so the sink catches up instead of compounding the lag. The decision and its
 //! reporting live in the shared [`PresentationPacer`]: each drop posts a
-//! [`BusMessage::Qos`] to the pipeline bus if one was attached (the GStreamer
+//! [`BusMessage::Qos`](g2g_core::BusMessage::Qos) to the pipeline bus if one was
+//! attached (the GStreamer
 //! `GST_MESSAGE_QOS` analog), and a report interval adds the same running stats
 //! periodically. Default behaviour is unchanged (no bound, no bus): every frame
 //! is presented after its deadline.

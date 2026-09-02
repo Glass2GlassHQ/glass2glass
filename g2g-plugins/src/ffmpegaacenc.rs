@@ -138,6 +138,7 @@ impl FfmpegAacEnc {
             format,
             channels: 0,
             sample_rate: 0,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         CapsSet::from_alternatives(Vec::from([
             pcm(AudioFormat::PcmS16Le),
@@ -150,6 +151,7 @@ impl FfmpegAacEnc {
             format: AudioFormat::Aac,
             channels: self.channels,
             sample_rate: self.sample_rate,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         }
     }
 
@@ -355,10 +357,12 @@ impl AsyncElement for FfmpegAacEnc {
                 format: AudioFormat::PcmS16Le | AudioFormat::PcmF32Le,
                 channels,
                 sample_rate,
+                ..
             } => CapsSet::one(Caps::Audio {
                 format: AudioFormat::Aac,
                 channels: *channels,
                 sample_rate: *sample_rate,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
             }),
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
@@ -369,6 +373,7 @@ impl AsyncElement for FfmpegAacEnc {
             format,
             channels,
             sample_rate,
+            ..
         } = absolute_caps
         else {
             return Err(G2gError::CapsMismatch);
@@ -423,6 +428,7 @@ impl AsyncElement for FfmpegAacEnc {
                         format,
                         channels,
                         sample_rate,
+                        ..
                     } = &c
                     {
                         if *channels != self.channels
@@ -491,6 +497,7 @@ impl PadTemplates for FfmpegAacEnc {
             format: AudioFormat::Aac,
             channels: 0,
             sample_rate: 0,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         Vec::from([
             PadTemplate::sink(Self::input_template()),

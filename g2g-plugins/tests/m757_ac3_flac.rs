@@ -173,7 +173,9 @@ fn atsc_ac3_ts_bare_decodebin_plugs_audio_decoder() {
         "audio decoder plugged: {names:?}"
     );
     assert!(
-        !names.iter().any(|n| n.contains("H264Dec")),
+        !names
+            .iter()
+            .any(|n| n.contains("VideoDec") || n.contains("H264Dec")),
         "no video decoder: {names:?}"
     );
 }

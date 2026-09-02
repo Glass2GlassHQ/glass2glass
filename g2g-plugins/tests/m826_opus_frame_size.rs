@@ -71,6 +71,7 @@ fn pcm_caps(channels: u8) -> Caps {
         format: AudioFormat::PcmS16Le,
         channels,
         sample_rate: OPUS_RATE_HZ,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     }
 }
 
@@ -106,6 +107,7 @@ async fn decode_lengths(channels: u8, packets: &[(Vec<u8>, u64)]) -> Vec<usize> 
         format: AudioFormat::Opus,
         channels,
         sample_rate: OPUS_RATE_HZ,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     })
     .unwrap();
 
@@ -165,7 +167,8 @@ async fn every_frame_size_codes_its_own_duration_sample_exactly() {
             vec![Caps::Audio {
                 format: AudioFormat::Opus,
                 channels,
-                sample_rate: OPUS_RATE_HZ
+                sample_rate: OPUS_RATE_HZ,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED
             }],
             "{frame_size:?}: Opus caps announced once",
         );

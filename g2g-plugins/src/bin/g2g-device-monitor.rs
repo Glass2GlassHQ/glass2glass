@@ -2,10 +2,13 @@
 //! every compiled-in provider can see, and optionally follows hotplug.
 //!
 //! Usage:
-//!   g2g-device-monitor                    # probe once, print every device
-//!   g2g-device-monitor Video/Source       # only devices in that class
-//!   g2g-device-monitor --follow [class]   # keep printing hotplug events
-//!   g2g-device-monitor --json [class]     # machine-readable one-shot dump
+//!
+//! ```text
+//! g2g-device-monitor                    # probe once, print every device
+//! g2g-device-monitor Video/Source       # only devices in that class
+//! g2g-device-monitor --follow [class]   # keep printing hotplug events
+//! g2g-device-monitor --json [class]     # machine-readable one-shot dump
+//! ```
 //!
 //! Backed by [`g2g_plugins::devicemon::default_device_monitor`] (M939). Which
 //! providers exist depends on the build features, so run it with a broad set:

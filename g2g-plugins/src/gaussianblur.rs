@@ -12,7 +12,7 @@
 //! surround. All four components are filtered, alpha included, as GStreamer's
 //! element does.
 //!
-//! `exp` and `sqrt` come from the crate's [`mathf`](crate::mathf), so the
+//! `exp` and `sqrt` come from the crate's `mathf`, so the
 //! baseline needs no libm.
 
 use core::future::Future;

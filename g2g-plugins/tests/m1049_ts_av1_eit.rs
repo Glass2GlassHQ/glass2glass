@@ -364,6 +364,7 @@ async fn a_fan_in_multiplex_carries_av1_on_a_non_zero_pad() {
             format: AudioFormat::Aac,
             channels: 2,
             sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         },
     )
     .expect("the fan-in muxer accepts AAC on input 0");

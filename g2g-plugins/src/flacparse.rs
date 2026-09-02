@@ -9,7 +9,7 @@
 //! (the mandatory first block) provides the concrete sample rate / channels
 //! for the refined `CapsChanged`. The whole header (marker through the last
 //! metadata block) is forwarded in-band as the first `DataFrame`, the
-//! `fLaC`-prefixed extradata convention [`crate::ffmpegaudiodec`] and the
+//! `fLaC`-prefixed extradata convention `ffmpegaudiodec` and the
 //! Matroska `CodecPrivate` path already share. Frames are then split on the
 //! 14-bit sync code, each candidate validated by parsing the whole frame
 //! header and checking its CRC-8 (audio bytes alias the sync pattern, so an
@@ -106,6 +106,7 @@ impl FlacParse {
             format: AudioFormat::Flac,
             channels,
             sample_rate,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         }
     }
 
@@ -409,6 +410,7 @@ impl PadTemplates for FlacParse {
             format: AudioFormat::Flac,
             channels: 2,
             sample_rate: 44_100,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         Vec::from([
             PadTemplate::sink(CapsSet::one(flac.clone())),

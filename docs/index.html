@@ -532,7 +532,7 @@
             <a href="https://github.com/Glass2GlassHQ/glass2glass/actions/workflows/ci.yml">
                 <img src="https://github.com/Glass2GlassHQ/glass2glass/actions/workflows/ci.yml/badge.svg" alt="CI status" style="height: 20px; vertical-align: middle;">
             </a>
-            <span style="font-size: 0.8rem; color: var(--text-tertiary); margin-left: 12px;">CI green across Linux &middot; Windows &middot; macOS &middot; Android &middot; wasm</span>
+            <span style="font-size: 0.8rem; color: var(--text-tertiary); margin-left: 12px;">CI green across Linux &middot; Windows &middot; macOS &middot; wasm (build-checked on Android)</span>
         </div>
 
         <div class="hero-demo">
@@ -878,7 +878,7 @@
             <div class="feature-card">
                 <span class="f-icon">&#127909;</span>
                 <h3>Receive</h3>
-                <p class="f-lead">Every ingest a production stack needs, each a real element.</p>
+                <p class="f-lead">The streaming, adaptive, and capture ingests, each a real element.</p>
                 <div class="chip-group">
                     <span class="chip-label">Streaming</span>
                     <div class="chip-row"><span class="chip">RtspSrc</span><span class="chip">UdpSrc</span><span class="chip">TcpClientSrc</span><span class="chip">ShmSrc</span><span class="chip">RtmpSrc</span><span class="chip">WebRtcWhepSrc</span></div>
@@ -901,7 +901,7 @@
             <div class="feature-card">
                 <span class="f-icon">&#128268;</span>
                 <h3>Decode + encode</h3>
-                <p class="f-lead">H.264/265, VP8/9, AV1 across every platform backend; native <code>NvDec</code>&nbsp;/&nbsp;<code>NvEnc</code> keep frames in CUDA.</p>
+                <p class="f-lead">H.264/265, VP8/9, AV1 across the platform backends (each backend its native codec set); native <code>NvDec</code>&nbsp;/&nbsp;<code>NvEnc</code> keep frames in CUDA.</p>
                 <div class="chip-group">
                     <span class="chip-label">Decoders</span>
                     <div class="chip-row"><span class="chip">FfmpegVideoDec</span><span class="chip">NvDec</span><span class="chip">MfDecode</span><span class="chip">VtDecode</span><span class="chip">MediaCodecDec</span><span class="chip">WebCodecsDecode</span></div>
@@ -1016,11 +1016,11 @@
                 </div>
                 <div class="chip-group">
                     <span class="chip-label">Video</span>
-                    <div class="chip-row"><span class="chip">videoscale</span><span class="chip">videorate</span><span class="chip">imagefreeze</span><span class="chip">videocrop</span><span class="chip">videoflip</span><span class="chip">videobalance</span><span class="chip">gaussianblur</span><span class="chip">coloreffects</span><span class="chip">solarize</span><span class="chip">chromium</span><span class="chip">dilate</span><span class="chip">dodge</span><span class="chip">exclusion</span><span class="chip">burn</span><span class="chip">alpha</span><span class="chip">deinterlace</span></div>
+                    <div class="chip-row"><span class="chip">videoscale</span><span class="chip">videorate</span><span class="chip">imagefreeze</span><span class="chip">videocrop</span><span class="chip">videoflip</span><span class="chip">videobalance</span><span class="chip">colorspace</span><span class="chip">gaussianblur</span><span class="chip">coloreffects</span><span class="chip">solarize</span><span class="chip">chromium</span><span class="chip">dilate</span><span class="chip">dodge</span><span class="chip">exclusion</span><span class="chip">burn</span><span class="chip">alpha</span><span class="chip">deinterlace</span></div>
                 </div>
                 <div class="chip-group">
-                    <span class="chip-label">Audio</span>
-                    <div class="chip-row"><span class="chip">audioconvert</span><span class="chip">audioresample</span><span class="chip">audiorate</span><span class="chip">scaletempo</span><span class="chip">audiomixmatrix</span><span class="chip">audiofirfilter</span><span class="chip">interleave</span><span class="chip">audiomixer</span><span class="chip">volume</span></div>
+                    <span class="chip-label">Audio &mdash; windowed-sinc resample quality, dithering + noise-shaping</span>
+                    <div class="chip-row"><span class="chip">audioconvert</span><span class="chip">audioresample</span><span class="chip">audiorate</span><span class="chip">scaletempo</span><span class="chip">audiomixmatrix</span><span class="chip">audiofirfilter</span><span class="chip">interleave</span><span class="chip">audiomixer</span><span class="chip">volume</span><span class="chip">audioreverse</span><span class="chip">ebur128</span></div>
                 </div>
                 <span class="feature-tag tag-core">Core</span>
             </div>
@@ -1230,7 +1230,7 @@ g2g-launch <span class="flag">--script</span> build.rhai</div>
                 <p class="f-lead">Hot-swap elements with no pipeline stall &mdash; ReFixate, codec change at keyframe, bitrate switch at the next segment.</p>
                 <div class="chip-group">
                     <span class="chip-label">Mechanism</span>
-                    <div class="chip-row"><span class="chip">ElementSlot</span><span class="chip">arc_swap</span></div>
+                    <div class="chip-row"><span class="chip">ElementSlot</span><span class="chip">arc_swap</span><span class="chip">GraphMutator</span></div>
                 </div>
                 <span class="feature-tag tag-core">Core</span>
             </div>

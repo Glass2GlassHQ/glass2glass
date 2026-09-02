@@ -328,6 +328,7 @@ mod tests {
             format: AudioFormat::PcmF32Le,
             channels: KARAOKE_CHANNELS,
             sample_rate: rate,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         }
     }
 
@@ -359,6 +360,7 @@ mod tests {
             format: AudioFormat::PcmS16Le,
             channels: 1,
             sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         assert_eq!(e.configure(&mono).unwrap_err(), G2gError::CapsMismatch);
     }

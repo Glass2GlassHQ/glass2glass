@@ -164,6 +164,7 @@ fn declines_without_a_muxed_video() {
             format: g2g_core::AudioFormat::Aac,
             channels: 0,
             sample_rate: 0,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         },
         video: false,
         uri: None,

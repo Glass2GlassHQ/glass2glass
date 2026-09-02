@@ -85,6 +85,7 @@ fn pipewiresink_disciplines_its_clock_from_the_stream() {
         format: AudioFormat::PcmS16Le,
         channels: 2,
         sample_rate: RATE,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     };
     match sink.configure_pipeline(&caps) {
         Ok(_) => {}

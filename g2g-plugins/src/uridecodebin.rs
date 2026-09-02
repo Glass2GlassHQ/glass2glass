@@ -1230,7 +1230,7 @@ fn build_mkv_subtitle_overlay(
 /// {decode -> auto sink}` with one branch per forwardable track, the MP4 sibling
 /// of [`mkv_playbin`] / [`ts_playbin`]. When the file also carries a subtitle
 /// track and a video track, the video branch routes through a `TextOverlayN` fed
-/// by the subtitle track (M412, [`build_mp4_subtitle_overlay`]) so the subtitles
+/// by the subtitle track (M412, `build_mp4_subtitle_overlay`) so the subtitles
 /// render on screen. Declines (`Ok(None)`) for a non-`file://` URI, an unreadable
 /// file, or a container whose `moov` is not in the probed prefix (a non-MP4, or a
 /// progressive file whose `moov` trails the data, which stays on the single-stream
@@ -1438,6 +1438,7 @@ fn ogg_select(
             },
             channels: infos[k].1.channels.max(1),
             sample_rate: infos[k].1.sample_rate,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         })
         .collect();
     Some((Box::new(OggDemuxN::new(ports)), caps))
@@ -1670,6 +1671,7 @@ pub fn audio_playbin(reg: &Registry, uri: &str) -> Result<Option<Graph<GraphNode
             format,
             channels: 0,
             sample_rate: 0,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         wire_audio_branch(reg, &mut graph, demux, &caps)?;
         return Ok(Some(graph));
@@ -1722,6 +1724,7 @@ pub fn ogg_primary_stream(location: &str, caps: &Caps) -> Option<PrimaryStream> 
             format,
             channels: 0,
             sample_rate: 0,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         },
     })
 }
@@ -2034,6 +2037,7 @@ pub fn build_hls_separate_fanout(
         format: AudioFormat::Aac,
         channels: 0,
         sample_rate: 0,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     };
     let audio_graph = build_av_fanout(
         reg,
@@ -2185,6 +2189,7 @@ pub fn build_hls_separate_subtitle_overlay(
         format: AudioFormat::Aac,
         channels: 0,
         sample_rate: 0,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     };
     reg.decodebin(
         &mut graph,
@@ -2321,6 +2326,7 @@ pub fn build_hls_separate_cc_overlay(
         format: AudioFormat::Aac,
         channels: 0,
         sample_rate: 0,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     };
     let audio_graph = build_av_fanout(
         reg,

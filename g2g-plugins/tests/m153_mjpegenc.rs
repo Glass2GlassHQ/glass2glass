@@ -92,7 +92,7 @@ async fn encodes_rgba_to_mjpeg_that_roundtrips_through_mjpegdec() {
             width: Dim::Fixed(W),
             height: Dim::Fixed(H),
             framerate: Rate::Fixed(30 << 16),
-            colorimetry: g2g_core::Colorimetry::UNKNOWN
+            colorimetry: g2g_core::Colorimetry::JPEG
         }],
         "one CapsChanged announcing the Mjpeg output geometry"
     );
@@ -289,7 +289,7 @@ async fn mozjpeg_backend_encodes_a_decodable_jpeg_honouring_quality() {
             height: Dim::Fixed(H),
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
-            colorimetry: g2g_core::Colorimetry::UNKNOWN
+            colorimetry: g2g_core::Colorimetry::SRGB
         }],
         "decoded geometry matches the mozjpeg-encoded source"
     );

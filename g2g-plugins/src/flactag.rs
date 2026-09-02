@@ -8,7 +8,7 @@
 //! audio frames pass through untouched.
 //!
 //! The tags come from the `tags` property ([`crate::tagproperty`]), not from
-//! upstream: a [`TagList`](g2g_core::TagList) travels out of band on the bus and
+//! upstream: a [`TagList`] travels out of band on the bus and
 //! an element cannot read the bus, so there is no in-band tag event to pick up.
 //!
 //! # Example
@@ -296,6 +296,7 @@ impl PadTemplates for FlacTag {
             format: AudioFormat::Flac,
             channels: 2,
             sample_rate: 44_100,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         Vec::from([
             PadTemplate::sink(CapsSet::one(flac.clone())),
@@ -383,6 +384,7 @@ mod tests {
             format: AudioFormat::Flac,
             channels: 2,
             sample_rate: 44_100,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         }
     }
 

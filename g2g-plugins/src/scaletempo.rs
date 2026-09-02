@@ -16,7 +16,7 @@
 //! (`start + (pts - start) / rate`), so downstream sees an ordinary rate-1
 //! stream whose stream time still recovers the media position.
 //!
-//! A rate of 1 (within [`RATE_PASSTHROUGH_EPSILON`]) is a pure pass-through:
+//! A rate of 1 (within `RATE_PASSTHROUGH_EPSILON`) is a pure pass-through:
 //! frames are forwarded with their bytes and timestamps untouched and nothing
 //! is buffered. Reverse playback (a negative rate) is out of scope and is
 //! forwarded the same untouched way.
@@ -177,6 +177,7 @@ impl ScaleTempo {
             format,
             channels,
             sample_rate,
+            ..
         } = caps
         else {
             return Err(G2gError::CapsMismatch);
@@ -448,6 +449,7 @@ impl AsyncElement for ScaleTempo {
                         format,
                         channels: channel_count,
                         sample_rate,
+                        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
                     };
                     if self.last_caps.as_ref() != Some(&caps) {
                         out.push(PipelinePacket::CapsChanged(caps.clone())).await?;
@@ -581,6 +583,7 @@ impl PadTemplates for ScaleTempo {
             format,
             channels: ANY_CHANNELS,
             sample_rate: ANY_SAMPLE_RATE,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         let set = CapsSet::from_alternatives(STRETCH_FORMATS.map(pcm).to_vec());
         Vec::from([PadTemplate::sink(set.clone()), PadTemplate::source(set)])
@@ -662,6 +665,7 @@ mod tests {
                 format,
                 channels: 2,
                 sample_rate: RATE,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
             };
             assert_eq!(
                 element.configure_pipeline(&caps).unwrap_err(),
@@ -674,6 +678,7 @@ mod tests {
                 format,
                 channels: 2,
                 sample_rate: RATE,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
             };
             assert!(element.configure_pipeline(&caps).is_ok(), "{format:?}");
         }

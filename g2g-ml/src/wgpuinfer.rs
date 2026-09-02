@@ -386,13 +386,13 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 "#;
 
-/// Host reference for [`ADD_SHADER`]: elementwise add of two equal-length
+/// Host reference for `ADD_SHADER`: elementwise add of two equal-length
 /// tensors. Public so a residual block can be checked on the CPU without a GPU.
 pub fn add_reference(a: &[f32], b: &[f32]) -> Vec<f32> {
     a.iter().zip(b).map(|(x, y)| x + y).collect()
 }
 
-/// The host reference matching [`MATMUL_SHADER`]: `[s, k] . [k, n] + [n]`,
+/// The host reference matching `MATMUL_SHADER`: `[s, k] . [k, n] + [n]`,
 /// row-major throughout, returning `[s, n]`. Public so a transformer block can be
 /// folded into a CPU reference.
 pub fn matmul_reference(
@@ -423,7 +423,7 @@ pub fn linear_reference(input: &[f32], weights: &[f32], bias: &[f32]) -> Vec<f32
     matmul_reference(input, 1, input.len(), bias.len(), weights, bias)
 }
 
-/// Host reference matching [`LAYERNORM_SHADER`]: per row of the `[rows, n]`
+/// Host reference matching `LAYERNORM_SHADER`: per row of the `[rows, n]`
 /// matrix, normalize by that row's own mean / variance then apply the `[n]`
 /// affine `gamma` / `beta`.
 pub fn layer_norm_reference(
@@ -454,7 +454,7 @@ pub fn layer_norm_reference(
     out
 }
 
-/// Host reference matching [`SOFTMAX_SHADER`]: max-subtracted softmax over the
+/// Host reference matching `SOFTMAX_SHADER`: max-subtracted softmax over the
 /// last dim of the `[rows, n]` matrix.
 pub fn softmax_reference(input: &[f32], rows: usize, n: usize) -> Vec<f32> {
     let mut out = vec![0f32; rows * n];
@@ -475,7 +475,7 @@ pub fn softmax_reference(input: &[f32], rows: usize, n: usize) -> Vec<f32> {
     out
 }
 
-/// Host reference matching [`ATTN_SHADER`]: unmasked multi-head self-attention
+/// Host reference matching `ATTN_SHADER`: unmasked multi-head self-attention
 /// over the packed `[s, 3*d]` QKV matrix, returning the `[s, d]` context. Walks
 /// the keys in the same order as the shader (max pass, then a fused
 /// exponential / weighted-sum pass) so the two accumulate identically.
@@ -513,7 +513,7 @@ pub fn attention_reference(qkv: &[f32], s: usize, d: usize, heads: usize) -> Vec
     out
 }
 
-/// The host reference matching [`CONV_SHADER`]: a same-padding, stride-1 conv over
+/// The host reference matching `CONV_SHADER`: a same-padding, stride-1 conv over
 /// the NCHW `input` (`[Cin, H, W]`), `weights` `[Cout, Cin, KH, KW]`, `bias`
 /// `[Cout]`, returning `[Cout, H, W]`. Public so the test compares the GPU conv
 /// against it.
@@ -559,13 +559,13 @@ pub fn conv2d_reference(
     out
 }
 
-/// Host reference for [`ACT_SHADER`] ReLU: `max(x, 0)` elementwise. Public so the
+/// Host reference for `ACT_SHADER` ReLU: `max(x, 0)` elementwise. Public so the
 /// chaining test can fold it into a CPU reference.
 pub fn relu_reference(input: &[f32]) -> Vec<f32> {
     input.iter().map(|&x| x.max(0.0)).collect()
 }
 
-/// Host reference for [`ACT_SHADER`] sigmoid: `1 / (1 + e^-x)` elementwise.
+/// Host reference for `ACT_SHADER` sigmoid: `1 / (1 + e^-x)` elementwise.
 pub fn sigmoid_reference(input: &[f32]) -> Vec<f32> {
     input.iter().map(|&x| 1.0 / (1.0 + (-x).exp())).collect()
 }
@@ -607,7 +607,7 @@ fn pool_reference(
     out
 }
 
-/// Host reference matching [`POOL_SHADER`] max-pool. Public for the chaining test.
+/// Host reference matching `POOL_SHADER` max-pool. Public for the chaining test.
 #[allow(clippy::too_many_arguments)]
 pub fn maxpool2d_reference(
     input: &[f32],
@@ -622,7 +622,7 @@ pub fn maxpool2d_reference(
     pool_reference(true, input, c, h, w, kh, kw, sh, sw)
 }
 
-/// Host reference matching [`POOL_SHADER`] average-pool.
+/// Host reference matching `POOL_SHADER` average-pool.
 #[allow(clippy::too_many_arguments)]
 pub fn avgpool2d_reference(
     input: &[f32],
@@ -1196,7 +1196,7 @@ impl WgpuInference {
     /// A single same-padding, stride-1 2D convolution over the `[1, Cin, H, W]`
     /// (NCHW) f32 tensor `WgpuPreprocess` emits, leaving the `[1, Cout, H, W]`
     /// result on the GPU. `weights` is `[Cout, Cin, KH, KW]` row-major, `bias` is
-    /// `[Cout]`; the kernel runs in the [`CONV_SHADER`] compute pass on the
+    /// `[Cout]`; the kernel runs in the `CONV_SHADER` compute pass on the
     /// producer's device, no CPU upload. The keystone op for running an actual CNN
     /// layer on the GPU-resident chain. Fails loud on a dimension mismatch.
     /// `conv2d_reference` is the matching host check.
@@ -1285,7 +1285,7 @@ impl WgpuInference {
     }
 
     /// Import a whole multi-layer model as a chain of GPU ops from `specs` + one
-    /// safetensors file, the generalization of [`conv2d_from_safetensors`] from a
+    /// safetensors file, the generalization of `conv2d_from_safetensors` from a
     /// single layer to a full stack. Walks `specs`, pulling each layer's tensors
     /// by name and tracking the running `[C, H, W]` shape so every layer's dims
     /// follow the previous layer's output; the input shape is `[in_c, in_h, in_w]`.
@@ -1508,7 +1508,7 @@ impl WgpuInference {
 
     /// Import a whole model **with skip/residual connections** as a GPU-resident
     /// [`ResidualStack`], the non-linear-topology generalization of
-    /// [`stack_from_safetensors`]. Beyond the ordinary layers, a `SaveSkip { slot }`
+    /// `stack_from_safetensors`. Beyond the ordinary layers, a `SaveSkip { slot }`
     /// records the running tensor under a name and a later `AddSkip { slot }` adds
     /// it back elementwise (a ResNet-style `y = f(x) + x` block). Tracks the running
     /// `[C, H, W]` shape exactly like the linear builder; an `AddSkip` requires the

@@ -14,6 +14,8 @@
 use core::future::Future;
 use core::pin::Pin;
 
+use std::sync::Arc;
+
 use alloc::boxed::Box;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -22,9 +24,10 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
-    AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, FrameTiming,
-    G2gError, HardwareError, LatencyReport, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
-    PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
+    AudioFormat, Caps, CapsConstraint, CapsSet, ClockCandidate, ClockPriority, ConfigureOutcome,
+    DriftClock, DriftObservation, ElementMetadata, FrameTiming, G2gError, HardwareError,
+    LatencyReport, MemoryDomain, MonotonicClock, OutputSink, PadTemplate, PadTemplates,
+    PipelineClock, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
 
 use pipewire as pw;
@@ -35,6 +38,10 @@ use crate::pwaudio::{format_pod_bytes, frame_bytes, pw_params};
 
 const DEFAULT_RATE: u32 = 48_000;
 const DEFAULT_CHANNELS: u8 = 2;
+
+/// How often the clock-discipline trace prints, out of the once-per-quantum
+/// stream of observations.
+const CLOCK_LOG_INTERVAL_NS: u64 = 1_000_000_000;
 
 /// Control message to the loop thread (quit on teardown).
 enum Ctrl {
@@ -73,6 +80,14 @@ pub struct PipeWireSrc {
     /// path.
     frame_limit: u64,
     configured: bool,
+    /// Capture-disciplined clock. The realtime callback feeds it
+    /// `(monotonic_now, graph_ticks_ns)` observations from
+    /// `pw_stream_get_time_n`, so its `now_ns()` tracks the graph driver's real
+    /// rate rather than wall time.
+    clock: Arc<DriftClock>,
+    /// Whether to offer [`clock`](Self::clock) to the pipeline's clock election
+    /// (the `provide-clock` property, default on).
+    provide_clock: bool,
 }
 
 /// What the loop thread needs to open the capture stream.
@@ -82,6 +97,9 @@ struct StreamCfg {
     rate: u32,
     stride: usize,
     target: String,
+    /// Present when the element offers its clock to election; the process
+    /// callback then disciplines it from the stream time.
+    clock: Option<Arc<DriftClock>>,
 }
 
 impl Default for PipeWireSrc {
@@ -100,7 +118,16 @@ impl PipeWireSrc {
             rate: DEFAULT_RATE,
             frame_limit: u64::MAX,
             configured: false,
+            clock: Arc::new(DriftClock::new(Arc::new(MonotonicClock))),
+            provide_clock: true,
         }
+    }
+
+    /// The capture-disciplined clock this source offers to election. Exposed for
+    /// tests / introspection; its `now_ns()` tracks the graph's real rate once
+    /// the realtime callback has observed the stream.
+    pub fn clock(&self) -> Arc<DriftClock> {
+        Arc::clone(&self.clock)
     }
 
     /// Capture from a specific node: its `node.name` or its object serial.
@@ -140,6 +167,7 @@ impl PipeWireSrc {
             format: self.format,
             channels: self.channels,
             sample_rate: self.rate,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         // Reject a non-PCM request up front (the SPA mapping is PCM-only).
         pw_params(&caps)?;
@@ -185,6 +213,21 @@ impl SourceLoop for PipeWireSrc {
         LatencyReport::live(0, None)
     }
 
+    /// Offer the capture-disciplined [`clock`](Self::clock) as a plain
+    /// [`Provider`](ClockPriority::Provider), one rank below the audio sinks'
+    /// [`AudioProvider`](ClockPriority::AudioProvider): in a duplex pipeline the
+    /// playout rate is the one nobody can adjust, so the sink stays master and
+    /// capture slaves to it. In a capture-only pipeline nothing else offers a
+    /// clock, so this one wins and the pipeline runs on the graph's real rate
+    /// instead of the monotonic fallback.
+    fn provide_clock(&self) -> Option<ClockCandidate> {
+        if !self.provide_clock {
+            return None;
+        }
+        let clock: Arc<dyn PipelineClock + Send + Sync> = self.clock.clone();
+        Some(ClockCandidate::new(ClockPriority::Provider, clock))
+    }
+
     fn metadata(&self) -> ElementMetadata {
         ElementMetadata::new(
             "PipeWire audio source",
@@ -208,6 +251,7 @@ impl SourceLoop for PipeWireSrc {
             "samplerate" => self.rate = value.as_uint().ok_or(PropError::Type)? as u32,
             "channels" => self.channels = value.as_uint().ok_or(PropError::Type)? as u8,
             "num-buffers" => crate::numbuffers::set_num_buffers(&mut self.frame_limit, &value)?,
+            "provide-clock" => self.provide_clock = value.as_bool().ok_or(PropError::Type)?,
             _ => return Err(PropError::Unknown),
         }
         Ok(())
@@ -220,6 +264,7 @@ impl SourceLoop for PipeWireSrc {
             "samplerate" => Some(PropValue::Uint(u64::from(self.rate))),
             "channels" => Some(PropValue::Uint(u64::from(self.channels))),
             "num-buffers" => Some(crate::numbuffers::get_num_buffers(self.frame_limit)),
+            "provide-clock" => Some(PropValue::Bool(self.provide_clock)),
             _ => None,
         }
     }
@@ -241,6 +286,9 @@ impl SourceLoop for PipeWireSrc {
                 rate,
                 stride,
                 target: self.target.clone(),
+                // Only discipline the clock when we actually offer it; otherwise
+                // the per-callback time probe is wasted work no one reads.
+                clock: self.provide_clock.then(|| Arc::clone(&self.clock)),
             };
             let limit = self.frame_limit;
 
@@ -346,6 +394,7 @@ impl PadTemplates for PipeWireSrc {
             format,
             channels: 2,
             sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         Vec::from([PadTemplate::source(CapsSet::from_alternatives(Vec::from(
             [pcm(AudioFormat::PcmS16Le), pcm(AudioFormat::PcmF32Le)],
@@ -379,6 +428,12 @@ static PIPEWIRESRC_PROPS: &[PropertySpec] = &[
     )
     .with_default("-1")
     .with_range("-1", "9223372036854775807"),
+    PropertySpec::new(
+        "provide-clock",
+        PropKind::Bool,
+        "Provide a capture-disciplined clock for the pipeline's clock election",
+    )
+    .with_default("true"),
 ];
 
 // =================================================================
@@ -421,6 +476,8 @@ fn build_and_run(
     let stream = pw::stream::Stream::new(&core, "g2g-pipewiresrc", props).map_err(|_| -1)?;
 
     let error_tx = audio_tx.clone();
+    let drift = cfg.clock.clone();
+    let mut last_clock_log_ns = 0u64;
     let _listener = stream
         .add_local_listener_with_user_data(())
         // A stream the daemon cannot route (a `target-object` it cannot resolve)
@@ -434,6 +491,9 @@ fn build_and_run(
             }
         })
         .process(move |stream, ()| {
+            if let Some(clock) = drift.as_deref() {
+                discipline_clock(stream, clock, &mut last_clock_log_ns);
+            }
             let Some(mut buffer) = stream.dequeue_buffer() else {
                 return;
             };
@@ -481,6 +541,64 @@ fn build_and_run(
     let _ = ready.send(Ok(()));
     mainloop.run();
     Ok(())
+}
+
+/// Feed the drift clock one `(monotonic_now, graph_time_ns)` observation from
+/// the stream's own time report. `pw_time.ticks` is the graph driver's monotonic
+/// sample counter, which advances at the capture device's real rate, so it is
+/// the timeline this source's frame counter actually runs on. It is independent
+/// of how promptly we drain the buffers, so a dropped or late callback never
+/// skews it; the constant graph delay from the microphone lands in the affine
+/// offset the fit absorbs. The local time is sampled next to the probe so the
+/// pair lines up.
+///
+/// The callback runs once per graph quantum (~47 Hz at 1024 frames / 48 kHz),
+/// so the trace is throttled to [`CLOCK_LOG_INTERVAL_NS`]; `last_log_ns` carries
+/// the caller's stamp of the last line.
+fn discipline_clock(stream: &pw::stream::StreamRef, clock: &DriftClock, last_log_ns: &mut u64) {
+    let local_ns = clock.reference_now();
+    let Some(time) = crate::pwaudio::stream_time(stream) else {
+        return;
+    };
+    let Some(outcome) =
+        observe_stream_time(clock, local_ns, time.ticks, time.rate.num, time.rate.denom)
+    else {
+        return;
+    };
+    if local_ns.saturating_sub(*last_log_ns) < CLOCK_LOG_INTERVAL_NS {
+        return;
+    }
+    *last_log_ns = local_ns;
+    g2g_core::g2g_log!(
+        g2g_core::log::Target::category("PipeWireSrc"),
+        "clock local={}ms ticks={} delay={} slope={:.6} observations={} {:?}",
+        local_ns / 1_000_000,
+        time.ticks,
+        time.delay,
+        clock.slope(),
+        clock.observations(),
+        outcome
+    );
+}
+
+/// Fold one stream-time report into the drift fit: `ticks` counted at the
+/// `num / denom` rate is the master timeline, `local_ns` the reference instant
+/// it was read at. `None` when the report carries no usable position (a stream
+/// that has not started still reads zero ticks, and a report with no rate cannot
+/// be converted), so the caller skips instead of feeding a bogus sample.
+fn observe_stream_time(
+    clock: &DriftClock,
+    local_ns: u64,
+    ticks: u64,
+    rate_num: u32,
+    rate_denom: u32,
+) -> Option<DriftObservation> {
+    if ticks == 0 || rate_denom == 0 {
+        return None;
+    }
+    let master_ns =
+        (u128::from(ticks) * u128::from(rate_num) * 1_000_000_000 / u128::from(rate_denom)) as u64;
+    Some(clock.observe(local_ns, master_ns))
 }
 
 #[cfg(test)]
@@ -578,10 +696,75 @@ mod tests {
                 format: AudioFormat::PcmS16Le,
                 channels: 1,
                 sample_rate: 16_000,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
             })
         );
         let bad = PipeWireSrc::new().with_format(AudioFormat::Opus);
         assert_eq!(bad.caps(), Err(G2gError::CapsMismatch));
+    }
+
+    #[test]
+    fn provides_a_capture_clock_below_the_sinks() {
+        let src = PipeWireSrc::new();
+        let cand = src.provide_clock().expect("pipewiresrc offers a clock");
+        // Below AudioProvider so a duplex pipeline keeps the sink's playout
+        // clock as master, above SystemFallback so capture-only elects this.
+        assert_eq!(cand.priority, ClockPriority::Provider);
+        assert!(ClockPriority::Provider < ClockPriority::AudioProvider);
+        assert!(ClockPriority::Provider > ClockPriority::SystemFallback);
+
+        let mut src = src;
+        src.set_property("provide-clock", PropValue::Bool(false))
+            .unwrap();
+        assert!(
+            src.provide_clock().is_none(),
+            "disabled src offers no clock"
+        );
+        assert_eq!(
+            src.set_property("provide-clock", PropValue::Str("yes".into())),
+            Err(PropError::Type)
+        );
+    }
+
+    /// The discipline fold, driven with synthetic `pw_time` reports: a graph
+    /// driver running 100 ppm fast should show up as a slope of ~1.0001, which
+    /// is the whole point of the clock (the pipeline paces to the capture
+    /// device, not wall time).
+    #[test]
+    fn stream_time_reports_fit_the_real_capture_rate() {
+        const RATE_DENOM: u32 = 48_000;
+        const QUANTUM_TICKS: u64 = 1024;
+        const GRAPH_PPM_FAST: f64 = 1.0001;
+        /// One quantum of reference time: the nominal quantum period, ~21.3 ms.
+        /// The graph counts more than `QUANTUM_TICKS` in it, which is the drift.
+        const QUANTUM_NS: u64 = QUANTUM_TICKS * 1_000_000_000 / RATE_DENOM as u64;
+
+        let clock = DriftClock::new(Arc::new(MonotonicClock));
+        let base_local_ns = 5_000_000_000u64;
+        for quantum in 1..=DriftClock::DEFAULT_WINDOW as u64 {
+            let local_ns = base_local_ns + quantum * QUANTUM_NS;
+            let ticks = ((quantum * QUANTUM_TICKS) as f64 * GRAPH_PPM_FAST).round() as u64;
+            assert_eq!(
+                observe_stream_time(&clock, local_ns, ticks, 1, RATE_DENOM),
+                Some(DriftObservation::Folded),
+                "clean ramp sample {quantum} should fold"
+            );
+        }
+        let slope = clock.slope();
+        assert!(
+            (1.00005..1.00015).contains(&slope),
+            "capture-rate estimate {slope} did not converge on 1.0001"
+        );
+    }
+
+    #[test]
+    fn a_report_with_no_position_feeds_no_sample() {
+        let clock = DriftClock::new(Arc::new(MonotonicClock));
+        // A stream that has not started reads zero ticks, and a report with no
+        // rate cannot be converted to a timeline.
+        assert_eq!(observe_stream_time(&clock, 1_000, 0, 1, 48_000), None);
+        assert_eq!(observe_stream_time(&clock, 1_000, 1_024, 1, 0), None);
+        assert_eq!(clock.observations(), 0);
     }
 
     #[test]

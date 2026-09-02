@@ -26,11 +26,16 @@ use g2g_core::{
 /// # Example
 ///
 /// ```no_run
-/// use g2g_core::{AudioFormat, Caps};
+/// use g2g_core::{AudioFormat, Caps, ChannelLayout};
 /// use g2g_plugins::capsfilter::CapsFilter;
 ///
 /// let format = AudioFormat::PcmS16Le;
-/// let element = CapsFilter::new(Caps::Audio { format, channels: 2, sample_rate: 48_000 });
+/// let element = CapsFilter::new(Caps::Audio {
+///     format,
+///     channels: 2,
+///     sample_rate: 48_000,
+///     channel_layout: ChannelLayout::UNSPECIFIED,
+/// });
 /// ```
 #[derive(Debug)]
 pub struct CapsFilter {
@@ -319,7 +324,8 @@ mod tests {
             Some(Caps::Audio {
                 format: g2g_core::AudioFormat::Opus,
                 channels: 2,
-                sample_rate: 48_000
+                sample_rate: 48_000,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED
             })
         );
         assert_eq!(parse_caps("video/x-bogus"), None);

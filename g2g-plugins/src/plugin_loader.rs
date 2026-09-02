@@ -67,7 +67,7 @@
 //! library's mapped code; dropping the [`libloading::Library`] unmaps that code,
 //! so any later element construction or `process` call is a use-after-free. We
 //! therefore move every successfully loaded `Library` into a process-lifetime
-//! list ([`KEEP_ALIVE`]) and never drop it. Elements hold no back-pointer to
+//! list (`KEEP_ALIVE`) and never drop it. Elements hold no back-pointer to
 //! their library, so this is the only thing keeping the code resident.
 
 use alloc::string::{String, ToString};

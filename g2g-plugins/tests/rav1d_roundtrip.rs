@@ -117,7 +117,7 @@ async fn av1_encode_then_rav1d_decode_round_trips_i420() {
             height: Dim::Fixed(H),
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
-            colorimetry: g2g_core::Colorimetry::UNKNOWN
+            colorimetry: DECODED_COLORIMETRY
         }),
         "rav1d announced the 64x64 I420 geometry, got {:?}",
         decoded.caps,
@@ -164,9 +164,17 @@ fn raw_caps(format: RawVideoFormat, w: u32, h: u32) -> Caps {
         height: Dim::Fixed(h),
         framerate: Rate::Any,
         interlace: g2g_core::Interlace::Any,
-        colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        colorimetry: DECODED_COLORIMETRY,
     }
 }
+
+/// What the decoder reads back out of these streams: rav1e writes no colour
+/// description, but AV1 always codes the range bit, and rav1e's default is
+/// limited.
+const DECODED_COLORIMETRY: g2g_core::Colorimetry = g2g_core::Colorimetry {
+    range: g2g_core::ColorRange::Limited,
+    ..g2g_core::Colorimetry::UNKNOWN
+};
 
 /// Encode flat-grey `format` frames with rav1e, decode with `Rav1dDec`, and assert
 /// the decoder announces that exact format/geometry and recovers a tight buffer

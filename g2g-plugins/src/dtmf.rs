@@ -119,6 +119,7 @@ impl DtmfSrc {
             format: AudioFormat::PcmS16Le,
             channels: DTMF_CHANNELS,
             sample_rate: DTMF_RATE,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         }
     }
 }
@@ -309,6 +310,7 @@ impl PadTemplates for DtmfSrc {
             format: AudioFormat::PcmS16Le,
             channels: DTMF_CHANNELS,
             sample_rate: DTMF_RATE,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         }))])
     }
 }
@@ -404,6 +406,7 @@ impl DtmfDetect {
                 format: AudioFormat::PcmS16Le,
                 channels: 1,
                 sample_rate: DTMF_RATE,
+                ..
             } => Ok(()),
             _ => Err(G2gError::CapsMismatch),
         }
@@ -431,6 +434,7 @@ impl AsyncElement for DtmfDetect {
                 format: AudioFormat::PcmS16Le,
                 channels: 1,
                 sample_rate: DTMF_RATE,
+                ..
             } => CapsSet::one(input.clone()),
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
@@ -504,6 +508,7 @@ impl PadTemplates for DtmfDetect {
             format: AudioFormat::PcmS16Le,
             channels: DTMF_CHANNELS,
             sample_rate: DTMF_RATE,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         Vec::from([
             PadTemplate::sink(CapsSet::one(pcm.clone())),

@@ -13,6 +13,8 @@ use crate::error::G2gError;
 use crate::frame::PipelinePacket;
 use crate::link::LinkPolicy;
 use crate::runtime::instrument::{EdgeCounters, Probe};
+#[cfg(feature = "std")]
+use crate::segment::Segment;
 
 pub fn bounded<T>(capacity: usize) -> (Sender<T>, Receiver<T>) {
     assert!(capacity > 0, "channel capacity must be > 0");
@@ -365,9 +367,21 @@ struct EndpointState {
     /// ending arm drops its link, which is what closes the channel and ends the
     /// consumer below it, so the claim is never taken by default.
     claimed: bool,
+    /// A remove is lifting the element pushing here out, so its arm gives it an
+    /// `Eos` once its input closes and forwards whatever it was holding (M1132).
+    drain: bool,
+    /// M1149: a replacement took this producer's link away for good. Its arm is
+    /// resuming onto a dead link so it ends by its own downstream-closed path,
+    /// which is not a run failure.
+    retired: bool,
     producer: Option<Waker>,
     mutator: Option<Waker>,
     caps: Option<Caps>,
+    /// M1149: the segment in force on this edge and the last `DataFrame` that
+    /// crossed under it (PTS, duration), so a source replacement can continue
+    /// the running time its predecessor reached.
+    segment: Option<Segment>,
+    last_frame: Option<(u64, u64)>,
 }
 
 #[cfg(feature = "std")]
@@ -392,10 +406,46 @@ impl ProducerEndpoint {
         self.state.lock().caps = Some(caps.clone());
     }
 
+    /// Follow what crosses this edge: the shape it carries and the timeline it
+    /// carries it on. Called once per push while a run is mutable, and never
+    /// otherwise (the endpoint is `None`), so an ordinary run keeps its single
+    /// branch and the zero-alloc proofs are untouched.
+    pub(crate) fn observe(&self, packet: &PipelinePacket) {
+        match packet {
+            PipelinePacket::CapsChanged(caps) => self.state.lock().caps = Some(caps.clone()),
+            PipelinePacket::Segment(segment) => self.state.lock().segment = Some(*segment),
+            PipelinePacket::DataFrame(frame) => {
+                self.state.lock().last_frame =
+                    Some((frame.timing.pts_ns, frame.timing.duration_ns));
+            }
+            _ => {}
+        }
+    }
+
+    /// The segment the packets on this edge are timed against, and the last
+    /// `DataFrame` (PTS, duration) that crossed under it. Both `None` until
+    /// something crosses (M1149).
+    pub(crate) fn timeline(&self) -> (Option<Segment>, Option<(u64, u64)>) {
+        let g = self.state.lock();
+        (g.segment, g.last_frame)
+    }
+
     /// Ask for this producer's link when its arm ends, rather than letting the
     /// arm drop it. Called before the mutator closes the element's input.
     pub(crate) fn claim_on_end(&self) {
         self.state.lock().claimed = true;
+    }
+
+    /// Ask the arm pushing here to flush its element before it ends (M1132).
+    /// Set before the element's input is closed, so the arm sees it by the time
+    /// it reaches the end of its input.
+    pub(crate) fn begin_drain(&self) {
+        self.state.lock().drain = true;
+    }
+
+    /// Whether a remove asked this producer's element to be flushed.
+    pub(crate) fn draining(&self) -> bool {
+        self.state.lock().drain
     }
 
     /// Ask the producer to stop at its next packet boundary and leave its link
@@ -442,6 +492,42 @@ impl ProducerEndpoint {
         if let Some(w) = waker {
             w.wake();
         }
+    }
+
+    /// End the producer parked here for good (M1149): it resumes on the dead
+    /// link it parked with, so its next push fails and its element leaves by the
+    /// same path it takes when its consumer goes away. The packet it was holding
+    /// at the park dies with it; the packets already queued on the link the
+    /// mutator took do not.
+    pub(crate) fn retire(&self) {
+        self.state.lock().retired = true;
+        self.unpark(None);
+    }
+
+    /// Whether this producer was retired, read by its arm when it ends: an arm
+    /// that failed because a replacement took its link is not a run failure.
+    pub(crate) fn retired(&self) -> bool {
+        self.state.lock().retired
+    }
+
+    /// Hand this endpoint to a fresh producer (M1149). Everything the retired
+    /// one left behind goes: without this the endpoint still reads as ended, and
+    /// the next operation on the edge would be refused as
+    /// [`GraphEnded`](crate::runtime::MutationError::GraphEnded). The timeline is
+    /// cleared too, so the next stitch measures from the new producer's own
+    /// segment.
+    pub(crate) fn rehome(&self) {
+        let mut g = self.state.lock();
+        g.park = false;
+        g.parked = false;
+        g.gone = false;
+        g.claimed = false;
+        g.drain = false;
+        g.retired = false;
+        g.detached = None;
+        g.staged = None;
+        g.segment = None;
+        g.last_frame = None;
     }
 
     /// The producer's own side of the gate: parks, resumes, or retargets. `link`
@@ -548,6 +634,14 @@ impl LinkSender {
         self.counters = Some(counters);
     }
 
+    /// The mutation endpoint a [`SenderSink`] built over this link would adopt.
+    /// A lent source arm reads it to tell a retirement from a real failure
+    /// (M1149).
+    #[cfg(feature = "std")]
+    pub(crate) fn mutation_endpoint(&self) -> Option<Arc<ProducerEndpoint>> {
+        self.mutation.clone()
+    }
+
     /// Give (or take away) the mutation endpoint the [`SenderSink`] built over
     /// this link adopts. Set by the runner per mutable edge, and cleared by the
     /// mutator on a link it re-homes, so an endpoint is never adopted twice.
@@ -562,10 +656,20 @@ impl LinkSender {
     /// producer sends next.
     #[cfg(feature = "std")]
     pub(crate) async fn send_caps(&self, caps: Caps) -> Result<(), G2gError> {
-        self.data
-            .send(PipelinePacket::CapsChanged(caps))
-            .await
-            .map_err(|_| G2gError::Shutdown)
+        self.send_packet(PipelinePacket::CapsChanged(caps)).await
+    }
+
+    /// Queue an `Eos` the same way (M1149): the mutator ending a sink it is
+    /// replacing, behind everything already queued, so that sink's arm drains
+    /// what it was given and then finalizes on its normal end-of-stream path.
+    #[cfg(feature = "std")]
+    pub(crate) async fn send_eos(&self) -> Result<(), G2gError> {
+        self.send_packet(PipelinePacket::Eos).await
+    }
+
+    #[cfg(feature = "std")]
+    async fn send_packet(&self, packet: PipelinePacket) -> Result<(), G2gError> {
+        self.data.send(packet).await.map_err(|_| G2gError::Shutdown)
     }
 
     /// Record one dropped frame, if a counter is installed.
@@ -863,6 +967,12 @@ pub struct SenderSink {
     /// from the link this adapter was built over, and kept across a retarget.
     #[cfg(feature = "std")]
     endpoint: Option<Arc<ProducerEndpoint>>,
+    /// M1132: an `Eos` pushed through here is swallowed instead of enqueued. Set
+    /// for the length of the flush a remove gives an element it is lifting out:
+    /// the element's held frames must reach the consumer, its end of stream must
+    /// not, since that would end the run.
+    #[cfg(feature = "std")]
+    strip_terminal: bool,
 }
 
 /// Tell the producer feeding `in_rx` that this sink applies an
@@ -943,6 +1053,8 @@ impl SenderSink {
             push_phase: PushPhase::Idle,
             #[cfg(feature = "std")]
             endpoint,
+            #[cfg(feature = "std")]
+            strip_terminal: false,
         }
     }
 
@@ -972,6 +1084,21 @@ impl SenderSink {
     /// Whether an `Eos` has already been enqueued through this adapter (M909).
     pub(crate) fn eos_forwarded(&self) -> bool {
         self.eos_forwarded
+    }
+
+    /// Whether a remove asked the element pushing through here to be flushed
+    /// (M1132). Read by the arm when its input closes.
+    #[cfg(feature = "std")]
+    pub(crate) fn drain_requested(&self) -> bool {
+        self.endpoint.as_ref().is_some_and(|e| e.draining())
+    }
+
+    /// Swallow any `Eos` pushed from here on, for the length of a flush
+    /// (M1132). The frames the element releases still cross; its terminal
+    /// marker does not, since the consumer's run continues without it.
+    #[cfg(feature = "std")]
+    pub(crate) fn strip_terminal(&mut self) {
+        self.strip_terminal = true;
     }
 
     /// Stash the propagated metadata set to attach to outgoing meta-empty
@@ -1163,6 +1290,14 @@ impl OutputSink for SenderSink {
             // than tracked: this runs once per operation, not per packet.
             self.probe = self.link.probe.clone();
         }
+        // M1132: during a flush-on-remove the element's end of stream stops
+        // here, ahead of every step that would commit it to the link: the
+        // frames it released cross, the marker that would end the run does not.
+        #[cfg(feature = "std")]
+        if self.strip_terminal && matches!(packet_slot.as_ref(), Some(PipelinePacket::Eos)) {
+            packet_slot.take();
+            return Poll::Ready(Ok(PushOutcome::Accepted));
+        }
         let packet = packet_slot
             .as_mut()
             .expect("poll_push called without a packet");
@@ -1201,17 +1336,19 @@ impl OutputSink for SenderSink {
             self.eos_forwarded = true;
         }
         // M980: keep the caps this link is carrying, so an observer reads the
-        // shape data actually flows under, not just the solved one. M1115 keeps
-        // the same shape on the mutation endpoint, where a splice reads what is
-        // flowing right now rather than what negotiation settled.
+        // shape data actually flows under, not just the solved one.
         if let PipelinePacket::CapsChanged(caps) = &*packet {
             if let Some(c) = &self.link.counters {
                 c.record_caps(caps);
             }
-            #[cfg(feature = "std")]
-            if let Some(endpoint) = &self.endpoint {
-                endpoint.set_caps(caps);
-            }
+        }
+        // M1115 / M1149: the mutation endpoint follows the shape and the
+        // timeline the edge is carrying right now, which is what a splice or a
+        // replacement is configured against rather than what negotiation
+        // settled.
+        #[cfg(feature = "std")]
+        if let Some(endpoint) = &self.endpoint {
+            endpoint.observe(packet);
         }
         // The frame's age as its element emits it, the number that catches an
         // element buffering frames internally. Skipped for unstamped frames.

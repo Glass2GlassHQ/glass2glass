@@ -8,7 +8,7 @@
 //! Two deliberate differences from GStreamer: the time is UTC, because the
 //! baseline carries no timezone database, and it is read through an injectable
 //! [`PipelineClock`] whose `now_ns` is nanoseconds since the UNIX epoch
-//! ([`UnixEpochClock`](crate::clock::UnixEpochClock) by default), so a test can
+//! ([`UnixEpochClock`] by default), so a test can
 //! pin the rendered text to a fixed instant. Only the strftime fields listed on
 //! [`strftime_utc`] are substituted; anything else is drawn literally.
 //!
@@ -324,6 +324,7 @@ mod tests {
             format: g2g_core::AudioFormat::PcmS16Le,
             channels: 2,
             sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         assert_eq!(
             c.configure_pipeline(&bad).unwrap_err(),

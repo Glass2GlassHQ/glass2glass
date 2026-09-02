@@ -24,7 +24,7 @@
 //! ```
 //!
 //! `AppSink.pull()` lends the frame through the buffer protocol (the
-//! [`FrameView`] owns the [`Frame`], so the buffer outlives any `memoryview` /
+//! `FrameView` owns the [`Frame`](g2g_core::Frame), so the buffer outlives any `memoryview` /
 //! numpy array over it). Pass `timeout_ms` for a bounded blocking pull.
 
 #![cfg_attr(not(feature = "python"), allow(unused_crate_dependencies))]

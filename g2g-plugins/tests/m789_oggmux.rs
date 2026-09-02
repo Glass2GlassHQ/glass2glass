@@ -75,6 +75,7 @@ fn audio_caps(format: AudioFormat, channels: u8, sample_rate: u32) -> Caps {
         format,
         channels,
         sample_rate,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     }
 }
 

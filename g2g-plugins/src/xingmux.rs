@@ -325,6 +325,7 @@ impl PadTemplates for XingMux {
             format: AudioFormat::Mp3,
             channels: 2,
             sample_rate: 44_100,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         Vec::from([
             PadTemplate::sink(CapsSet::one(mp3.clone())),
@@ -381,6 +382,7 @@ mod tests {
             format: AudioFormat::Mp3,
             channels: 2,
             sample_rate: 44_100,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         }
     }
 

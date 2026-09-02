@@ -276,6 +276,7 @@ fn opus_caps() -> Caps {
         format: AudioFormat::Opus,
         channels: 2,
         sample_rate: 48_000,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     }
 }
 
@@ -301,6 +302,7 @@ async fn decode_frames(frames: &[(Vec<u8>, FrameTiming)]) -> Vec<u8> {
         format: AudioFormat::PcmF32Le,
         channels: 2,
         sample_rate: 48_000,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     })
     .expect("float output accepted");
     let mut pcm = CaptureSink::default();
@@ -592,6 +594,7 @@ async fn opusenc_into_mkv_declares_the_encoders_own_lookahead() {
         format: AudioFormat::PcmS16Le,
         channels: 2,
         sample_rate: rate,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     })
     .expect("configure opusenc");
     let lookahead = enc.lookahead().expect("the encoder reports its lookahead");

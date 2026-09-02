@@ -2,15 +2,18 @@
 //! registry (the same one the text-launch parser uses).
 //!
 //! Usage:
-//!   g2g-inspect                  # list every registerable element
-//!   g2g-inspect <element>        # dump one element's role, properties, pads
-//!   g2g-inspect --all            # dump every element in full
-//!   g2g-inspect --json [name]    # machine-readable registry dump (all or one)
-//!   g2g-inspect --maturity       # derived conformance maturity per element
-//!   g2g-inspect --gst <name>     # what a GStreamer element name maps to in g2g
-//!   g2g-inspect --gst-map        # gst-name/g2g-runtime-name pairs, TSV
-//!   g2g-inspect --plugin <path>  # load a plugin first, so its elements list
-//!   g2g-inspect --trusted-key <path>  # only load plugins signed by this key
+//!
+//! ```text
+//! g2g-inspect                  # list every registerable element
+//! g2g-inspect <element>        # dump one element's role, properties, pads
+//! g2g-inspect --all            # dump every element in full
+//! g2g-inspect --json [name]    # machine-readable registry dump (all or one)
+//! g2g-inspect --maturity       # derived conformance maturity per element
+//! g2g-inspect --gst <name>     # what a GStreamer element name maps to in g2g
+//! g2g-inspect --gst-map        # gst-name/g2g-runtime-name pairs, TSV
+//! g2g-inspect --plugin <path>  # load a plugin first, so its elements list
+//! g2g-inspect --trusted-key <path>  # only load plugins signed by this key
+//! ```
 //!
 //! Backed by [`g2g_plugins::registry::default_registry`] and
 //! [`g2g_core::runtime::Registry::inspect`] (M105/M107). Requires the `std`

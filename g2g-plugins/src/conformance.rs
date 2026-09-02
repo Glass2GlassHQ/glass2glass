@@ -1346,7 +1346,8 @@ pub fn report() -> ConformanceReport {
 /// Persisted conformance evidence (M615): the `Oracle` (reference-implementation) and
 /// `Hardware` (device) checks that cannot run in-process are produced by the
 /// integration tests that own those resources (ffmpeg, a GPU), which append their
-/// evidence to a shared log. [`full_report`] folds that log into the in-process
+/// evidence to a shared log. [`full_report`](persist::full_report) folds that
+/// log into the in-process
 /// [`report`] so `g2g-inspect --maturity` shows the `InteropTested` /
 /// `HardwareValidated` rows those tests earned, without inspect itself needing the
 /// resources.
@@ -1432,7 +1433,7 @@ pub mod persist {
         report
     }
 
-    /// The in-process [`report`](super::report) with the persisted `Oracle` /
+    /// The in-process [`report`] with the persisted `Oracle` /
     /// `Hardware` evidence folded in. This is what `g2g-inspect --maturity` renders.
     pub fn full_report() -> ConformanceReport {
         let mut report = super::report();

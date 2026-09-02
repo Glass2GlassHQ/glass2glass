@@ -222,6 +222,7 @@ impl AudioMixMatrix {
             format,
             channels: out_channels,
             sample_rate,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         Ok((output, in_channels, out_channels))
     }
@@ -296,6 +297,7 @@ impl AsyncElement for AudioMixMatrix {
                         format: self.format,
                         channels: self.in_channels,
                         sample_rate: self.sample_rate,
+                        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
                     };
                     let (output, in_channels, out_channels) = self.derive(&input)?;
                     let src = frame
@@ -438,6 +440,7 @@ mod tests {
             format: AudioFormat::PcmF32Le,
             channels,
             sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         }
     }
 

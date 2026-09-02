@@ -10,6 +10,7 @@ use crate::caps::{
     pcm_from_gst_format, AudioFormat, ByteStreamEncoding, Caps, CapsSet, Colorimetry, Dim,
     Interlace, Rate, RawVideoFormat, SubPictureFormat, TextFormat, VideoCodec, PCM_FORMATS,
 };
+use crate::channels::ChannelLayout;
 
 /// The raw pixel formats a format-less `video/x-raw` expands to (M184). Order is
 /// the preference the solver fixates by when several survive; in practice the
@@ -169,6 +170,27 @@ fn expand_colorimetry(fv: Option<&FieldVal>) -> Option<Colorimetry> {
     }
 }
 
+// An absent `channel-mask` is the wildcard (matching `to_gst_string`, which
+// omits an unspecified layout). A present one is gst's `(bitmask)0x...` in gst
+// bit order; a mask naming a speaker g2g has no position for rejects the whole
+// caps rather than dropping that channel silently. No list/range: gst's
+// channel-mask is one flat bitmask value.
+fn expand_channel_mask(fv: Option<&FieldVal>) -> Option<ChannelLayout> {
+    let Some(FieldVal::One(s)) = fv else {
+        return match fv {
+            None => Some(ChannelLayout::UNSPECIFIED),
+            Some(_) => None,
+        };
+    };
+    let v = s.trim();
+    let v = v.strip_prefix("(bitmask)").unwrap_or(v).trim();
+    let mask = match v.strip_prefix("0x").or_else(|| v.strip_prefix("0X")) {
+        Some(hex) => u64::from_str_radix(hex, 16).ok()?,
+        None => v.parse::<u64>().ok()?,
+    };
+    ChannelLayout::from_gst_mask(mask)
+}
+
 // `Caps::Audio` holds scalar channels (u8) / sample_rate (u32) with no range
 // type, so a range is rejected; a list expands to alternatives.
 fn expand_u8(fv: Option<&FieldVal>, default: u8) -> Option<Vec<u8>> {
@@ -247,6 +269,7 @@ impl CapsSet {
                 expand_u8(fv("channels"), 2)?,
                 expand_u32(fv("rate"), 48_000)?,
             );
+            let channel_layout = expand_channel_mask(fv("channel-mask"))?;
             let mut alts = Vec::new();
             for &format in formats {
                 for &ch in &channels {
@@ -255,6 +278,7 @@ impl CapsSet {
                             format,
                             channels: ch,
                             sample_rate: sr,
+                            channel_layout,
                         });
                     }
                 }
@@ -473,6 +497,7 @@ mod tests {
                 format,
                 channels: 1,
                 sample_rate: 16_000,
+                channel_layout: crate::ChannelLayout::UNSPECIFIED,
             };
             let printed = caps.to_gst_string();
             let parsed = CapsSet::from_gst_string(&printed)

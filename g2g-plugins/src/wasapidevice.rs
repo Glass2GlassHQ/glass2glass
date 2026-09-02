@@ -272,6 +272,7 @@ unsafe fn mix_format_caps(endpoint: &IMMDevice) -> Option<(Caps, u32, u8)> {
                 format: config.format,
                 channels: config.channels,
                 sample_rate: config.sample_rate,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
             },
             config.sample_rate,
             config.channels,

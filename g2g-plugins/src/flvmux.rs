@@ -132,6 +132,7 @@ impl FlvMux {
             format,
             channels: 0,
             sample_rate: 0,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         Vec::from([
             video(VideoCodec::H264),
@@ -507,6 +508,7 @@ mod tests {
             format: AudioFormat::Aac,
             channels: 2,
             sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         let mut mux = FlvMux::new();
         mux.configure_pipeline(&aac).unwrap();

@@ -19,14 +19,14 @@
 //!
 //! The script drives a small builder API (`add` / `caps` / `set` / `link` /
 //! `link_leaky`) that accumulates into the same [`GraphSpec`] the declarative
-//! loader uses, then the shared [`build_spec`](crate::declarative::build_spec)
+//! loader uses, then the shared [`build_spec`]
 //! turns that into a runnable graph. So a script and a document reach the graph
 //! through one builder, one set of role / caps / policy rules.
 //!
 //! Rhai is pure Rust (no C toolchain, reaches the same wasm / embedded targets
 //! the core does), so scripting does not compromise the portability story.
 //!
-//! This module also hosts the [`scriptelement`](element) runtime transform
+//! This module also hosts the `scriptelement` runtime transform
 //! (M580): an element whose *per-frame* logic is a Rhai `process(frame)`.
 
 use core::future::Future;

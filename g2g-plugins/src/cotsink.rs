@@ -2,7 +2,7 @@
 //! telemetry becomes a track on a TAK / ATAK situational-awareness network.
 //!
 //! The event builder ([`cot_event`]) is pure `no_std + alloc`: a
-//! [`UasDatalink`] local set in, one CoT XML event out. The [`CotSink`] element
+//! [`UasDatalink`] local set in, one CoT XML event out. The `CotSink` element
 //! (`cotsink`) is the I/O half behind the `udp-egress` feature: `Caps::Klv`
 //! packets in, one datagram (UDP unicast / multicast) or one TCP write per
 //! parsed local set out.

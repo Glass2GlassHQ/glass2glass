@@ -115,6 +115,7 @@ fn coded_template<L: G711Law>() -> Caps {
         format: L::LAW.format(),
         channels: ANY_CHANNELS,
         sample_rate: ANY_SAMPLE_RATE,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     }
 }
 
@@ -173,6 +174,7 @@ impl<L: G711Law> G711Enc<L> {
                 format: AudioFormat::PcmS16Le,
                 channels,
                 sample_rate,
+                ..
             } => Some((*channels, *sample_rate)),
             _ => None,
         }
@@ -183,6 +185,7 @@ impl<L: G711Law> G711Enc<L> {
             format: L::LAW.format(),
             channels: self.channels,
             sample_rate: self.sample_rate,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         }
     }
 }
@@ -212,6 +215,7 @@ impl<L: G711Law> AsyncElement for G711Enc<L> {
                 format: L::LAW.format(),
                 channels,
                 sample_rate,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
             }),
             None => CapsSet::from_alternatives(Vec::new()),
         }))
@@ -291,6 +295,7 @@ impl<L: G711Law> AsyncElement for G711Enc<L> {
                         format: AudioFormat::PcmS16Le,
                         channels,
                         sample_rate,
+                        ..
                     } => {
                         self.channels = *channels;
                         self.sample_rate = *sample_rate;
@@ -318,6 +323,7 @@ impl<L: G711Law> PadTemplates for G711Enc<L> {
                 format: AudioFormat::PcmS16Le,
                 channels: ANY_CHANNELS,
                 sample_rate: ANY_SAMPLE_RATE,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
             })),
             PadTemplate::source(CapsSet::one(coded_template::<L>())),
         ])
@@ -367,6 +373,7 @@ impl<L: G711Law> G711Dec<L> {
                 format,
                 channels,
                 sample_rate,
+                ..
             } if *format == L::LAW.format() => Some((*channels, *sample_rate)),
             _ => None,
         }
@@ -377,6 +384,7 @@ impl<L: G711Law> G711Dec<L> {
             format: AudioFormat::PcmS16Le,
             channels: self.channels,
             sample_rate: self.sample_rate,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         }
     }
 }
@@ -412,11 +420,13 @@ impl<L: G711Law> AsyncElement for G711Dec<L> {
                         format: AudioFormat::PcmS16Le,
                         channels,
                         sample_rate,
+                        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
                     },
                     Caps::Audio {
                         format: AudioFormat::PcmS16Le,
                         channels: ANY_CHANNELS,
                         sample_rate: ANY_SAMPLE_RATE,
+                        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
                     },
                 ])
             }
@@ -477,6 +487,7 @@ impl<L: G711Law> AsyncElement for G711Dec<L> {
                         format,
                         channels,
                         sample_rate,
+                        ..
                     } if *format == L::LAW.format() => {
                         (self.channels, self.sample_rate) = resolve_layout(*channels, *sample_rate);
                     }
@@ -511,12 +522,14 @@ impl<L: G711Law> PadTemplates for G711Dec<L> {
                     format: L::LAW.format(),
                     channels: ANY_CHANNELS,
                     sample_rate: G711_CLOCK_RATE_HZ,
+                    channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
                 },
             ])),
             PadTemplate::source(CapsSet::one(Caps::Audio {
                 format: AudioFormat::PcmS16Le,
                 channels: G711_DEFAULT_CHANNELS,
                 sample_rate: G711_CLOCK_RATE_HZ,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
             })),
         ])
     }

@@ -85,6 +85,7 @@ impl AudioTestSrc {
             format: AudioFormat::PcmS16Le,
             channels: self.channels,
             sample_rate: self.sample_rate,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         }
     }
 
@@ -303,6 +304,7 @@ impl PadTemplates for AudioTestSrc {
             format: AudioFormat::PcmS16Le,
             channels: 2,
             sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         }))])
     }
 }
@@ -377,6 +379,7 @@ mod tests {
                 format: AudioFormat::PcmS16Le,
                 channels: 2,
                 sample_rate: 44_100,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
             }
         );
     }

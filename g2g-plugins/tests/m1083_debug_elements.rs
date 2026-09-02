@@ -517,6 +517,7 @@ fn pcm_caps() -> Caps {
         format: AudioFormat::PcmS16Le,
         channels: FAKE_CHANNELS,
         sample_rate: FAKE_SAMPLE_RATE,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     }
 }
 
@@ -525,6 +526,7 @@ fn coded_audio_caps() -> Caps {
         format: AudioFormat::Aac,
         channels: FAKE_CHANNELS,
         sample_rate: FAKE_SAMPLE_RATE,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     }
 }
 

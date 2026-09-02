@@ -53,6 +53,7 @@ async fn refine(stream: &[u8]) -> Collect {
         format: AudioFormat::Aac,
         channels: 0,
         sample_rate: 0,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     };
     parse.configure_pipeline(&sentinel).expect("configures");
     let mut sink = Collect::default();

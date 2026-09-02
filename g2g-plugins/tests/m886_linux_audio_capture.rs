@@ -65,6 +65,7 @@ fn capture<S: SourceLoop>(src: &mut S, channels: u8, format: AudioFormat) -> Opt
             format,
             channels,
             sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         }
     );
     src.configure_pipeline(&caps).expect("configure accepts");
@@ -163,6 +164,7 @@ mod alsa {
                 format: AudioFormat::PcmF32Le,
                 channels: 1,
                 sample_rate: 16_000,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
             })
         );
 
@@ -297,6 +299,7 @@ mod pulse {
                 format: AudioFormat::PcmS32Le,
                 channels: 1,
                 sample_rate: 44_100,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
             })
         );
 

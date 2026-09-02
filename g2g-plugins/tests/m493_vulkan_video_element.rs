@@ -6,6 +6,13 @@
 //! per `process` call, so the DPB reference state must carry across calls -- and
 //! asserts it emits one NV12 frame per coded picture with real content, plus the
 //! output `CapsChanged`. Runs on the RTX 3060; skips with no adapter / support.
+//!
+//! The output caps carry the stream's own colour description, read from the SPS
+//! at the first keyframe. This fixture writes no VUI colour block, so its CICP
+//! codepoints are all "unspecified" and `video_full_range_flag` takes its coded
+//! default of 0: the caps come out `range: Limited` with the other three fields
+//! `Unknown`. The colour never changes mid-stream here, so the ten pictures
+//! still produce exactly one `CapsChanged`.
 #![cfg(all(
     any(target_os = "linux", target_os = "windows"),
     feature = "vulkan-video"
@@ -15,12 +22,42 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::block_on;
 use g2g_core::{
-    AsyncElement, Caps, Dim, FrameTiming, G2gError, MemoryDomain, OutputSink, PipelinePacket,
-    PushOutcome, Rate, RawVideoFormat, VideoCodec,
+    AsyncElement, Caps, ColorRange, Colorimetry, Dim, FrameTiming, G2gError, MatrixCoefficients,
+    MemoryDomain, OutputSink, PipelinePacket, PushOutcome, Rate, RawVideoFormat, VideoCodec,
 };
-use g2g_plugins::vulkanvideo::{open_h264_decode_device, VulkanVideoDec, VulkanVideoError};
+use g2g_plugins::vulkanvideo::{
+    extract_h264_parameter_sets, open_h264_decode_device, VulkanVideoDec, VulkanVideoError,
+};
 
 const CLIP: &[u8] = include_bytes!("fixtures/h264_640x480.h264");
+
+/// The CICP codepoint every colour field spells "unspecified".
+const CICP_UNSPECIFIED: u8 = 2;
+
+/// What the fixture's SPS resolves to: no colour block, so only the range is
+/// concrete (`video_full_range_flag` defaults to 0).
+const EXPECTED_COLORIMETRY: Colorimetry = Colorimetry {
+    range: ColorRange::Limited,
+    matrix: MatrixCoefficients::Unknown,
+    transfer: g2g_core::TransferCharacteristics::Unknown,
+    primaries: g2g_core::ColorPrimaries::Unknown,
+};
+
+/// Read the fixture's declared colour codepoints, so `EXPECTED_COLORIMETRY`
+/// stays tied to the bitstream rather than to a remembered value.
+fn assert_fixture_declares_no_colour_description() {
+    let ps = extract_h264_parameter_sets(CLIP).expect("the fixture carries an SPS");
+    assert_eq!(
+        (
+            ps.sps.color_primaries,
+            ps.sps.transfer_characteristics,
+            ps.sps.matrix_coefficients,
+            ps.sps.video_full_range_flag,
+        ),
+        (CICP_UNSPECIFIED, CICP_UNSPECIFIED, CICP_UNSPECIFIED, false),
+        "fixture colour description changed; update EXPECTED_COLORIMETRY"
+    );
+}
 
 /// A sink that records every packet the element pushes.
 #[derive(Default)]
@@ -118,6 +155,7 @@ fn element_decodes_stream_to_nv12_frames() {
         }
         Err(e) => panic!("probe failed: {e:?}"),
     }
+    assert_fixture_declares_no_colour_description();
 
     let mut dec = VulkanVideoDec::new();
     let in_caps = Caps::CompressedVideo {
@@ -142,7 +180,9 @@ fn element_decodes_stream_to_nv12_frames() {
     // stream must flush the in-flight tail before the frame count is complete.
     block_on(dec.process(PipelinePacket::Eos, &mut sink)).expect("flush at eos");
 
-    // One NV12 DataFrame per coded picture, plus exactly one leading CapsChanged.
+    // One NV12 DataFrame per coded picture, plus exactly one leading CapsChanged:
+    // the colour description is constant across the clip, so the nine pictures
+    // after the first re-emit nothing.
     let caps_changes: Vec<&Caps> = sink
         .packets
         .iter()
@@ -160,9 +200,9 @@ fn element_decodes_stream_to_nv12_frames() {
             height: Dim::Fixed(480),
             framerate: Rate::Fixed(30 << 16),
             interlace: g2g_core::Interlace::Any,
-            colorimetry: g2g_core::Colorimetry::UNKNOWN
+            colorimetry: EXPECTED_COLORIMETRY
         },
-        "emits NV12 640x480 at the input framerate"
+        "emits NV12 640x480 at the input framerate, tagged with the SPS colour"
     );
 
     let frames: Vec<&Frame> = sink

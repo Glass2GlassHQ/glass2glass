@@ -57,6 +57,7 @@ fn input_alternatives() -> Vec<Caps> {
         format,
         channels: 0,
         sample_rate: 0,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     };
     let mut alternatives = Vec::from(pcm_formats().map(any_layout));
     alternatives.extend(CODED_FORMATS.map(any_layout));
@@ -289,6 +290,7 @@ impl AsyncElement for WavEnc {
             format,
             channels,
             sample_rate,
+            ..
         } = absolute_caps
         else {
             return Err(G2gError::CapsMismatch);
@@ -348,6 +350,7 @@ impl AsyncElement for WavEnc {
                             format,
                             channels,
                             sample_rate,
+                            ..
                         } = caps
                         {
                             if wave_format(format).is_some() {

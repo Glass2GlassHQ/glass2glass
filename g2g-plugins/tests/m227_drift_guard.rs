@@ -39,6 +39,7 @@ fn pcm(rate: u32) -> Caps {
         format: AudioFormat::PcmS16Le,
         channels: 2,
         sample_rate: rate,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     }
 }
 
@@ -80,11 +81,13 @@ fn assert_passthrough_preserved(inp: &Caps, out: &Caps, mask: PassthroughFields)
                 format: fi,
                 channels: ci,
                 sample_rate: si,
+                ..
             },
             Caps::Audio {
                 format: fo,
                 channels: co,
                 sample_rate: so,
+                ..
             },
         ) => {
             if mask.format {

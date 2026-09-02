@@ -24,8 +24,8 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     pcm_formats, AsyncElement, AudioFormat, BusHandle, BusMessage, ByteStreamEncoding, Caps,
-    CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, FrameTiming, G2gError,
-    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, ANY_CHANNELS,
+    CapsConstraint, CapsSet, ChannelLayout, ConfigureOutcome, ElementMetadata, FrameTiming,
+    G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, ANY_CHANNELS,
     ANY_SAMPLE_RATE,
 };
 
@@ -52,6 +52,11 @@ const IMA_ADPCM_BITS: u16 = 4;
 const FORMAT_EXTENSIBLE: u16 = 0xFFFE;
 /// Offset of that GUID within a `fmt ` chunk (16 fixed bytes, then `cbSize`).
 const EXTENSIBLE_TAG_OFFSET: usize = 24;
+/// Offset of `dwChannelMask` in a WAVEFORMATEXTENSIBLE `fmt ` chunk: the 18-byte
+/// WAVEFORMATEX, then the 2-byte `wValidBitsPerSample` union.
+const EXTENSIBLE_CHANNEL_MASK_OFFSET: usize = 20;
+/// A `fmt ` chunk short enough to lack the extension fields, so no channel mask.
+const EXTENSIBLE_FMT_MIN_LEN: usize = 40;
 
 const NANOS_PER_SECOND: u64 = 1_000_000_000;
 /// The `data` chunk size a streaming writer stamps when the length is not known
@@ -63,6 +68,9 @@ const UNKNOWN_DATA_LEN: usize = u32::MAX as usize;
 struct WaveFormat {
     format: AudioFormat,
     channels: u8,
+    /// The speakers `dwChannelMask` names, unspecified unless the file is
+    /// WAVE_FORMAT_EXTENSIBLE and the mask agrees with the channel count.
+    channel_layout: ChannelLayout,
     sample_rate: u32,
     /// `nAvgBytesPerSec`, what the `data` chunk length divides by to give the
     /// stream's duration. `0` when the file declares none.
@@ -92,6 +100,7 @@ fn coded_alternatives() -> [Caps; 3] {
         format,
         channels: ANY_CHANNELS,
         sample_rate: ANY_SAMPLE_RATE,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     })
 }
 
@@ -102,8 +111,13 @@ fn parse_fmt(body: &[u8]) -> Option<WaveFormat> {
         return None;
     }
     let mut tag = read_u16(body, 0)?;
+    let mut channel_layout = ChannelLayout::UNSPECIFIED;
     if tag == FORMAT_EXTENSIBLE {
         tag = read_u16(body, EXTENSIBLE_TAG_OFFSET)?;
+        if body.len() >= EXTENSIBLE_FMT_MIN_LEN {
+            let mask = read_u32(body, EXTENSIBLE_CHANNEL_MASK_OFFSET)?;
+            channel_layout = ChannelLayout::from_mask(mask as u16);
+        }
     }
     let channels = read_u16(body, 2)?;
     let sample_rate = read_u32(body, 4)?;
@@ -112,9 +126,16 @@ fn parse_fmt(body: &[u8]) -> Option<WaveFormat> {
     if channels == 0 || channels > u8::MAX as u16 || sample_rate == 0 {
         return None;
     }
+    // A mask whose speaker count disagrees with nChannels (or that named only
+    // positions this does not model) describes a different stream than the one
+    // being read, so fall back to the count convention.
+    if channel_layout.channels() != channels as u8 {
+        channel_layout = ChannelLayout::UNSPECIFIED;
+    }
     Some(WaveFormat {
         format: audio_format(tag, bits)?,
         channels: channels as u8,
+        channel_layout,
         sample_rate,
         byte_rate,
     })
@@ -173,6 +194,7 @@ impl WavParse {
             format,
             channels: ANY_CHANNELS,
             sample_rate: ANY_SAMPLE_RATE,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         }));
         alternatives.extend(coded_alternatives());
         CapsSet::from_alternatives(alternatives)
@@ -224,6 +246,7 @@ impl WavParse {
                     format: format.format,
                     channels: format.channels,
                     sample_rate: format.sample_rate,
+                    channel_layout: format.channel_layout,
                 }))
                 .await?;
                 self.in_data = true;
@@ -303,6 +326,7 @@ impl AsyncElement for WavParse {
                     format: AudioFormat::PcmS16Le,
                     channels: ANY_CHANNELS,
                     sample_rate,
+                    channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
                 };
                 let mut alternatives = alloc::vec![pcm(48_000), pcm(ANY_SAMPLE_RATE)];
                 alternatives.extend(coded_alternatives());

@@ -206,6 +206,7 @@ fn audio_caps() -> CapsSet {
             format: *format,
             channels: 2,
             sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         })
         .filter(|caps| pw_params(caps).is_ok())
         .collect();

@@ -193,6 +193,7 @@ async fn the_adpcm_fmt_chunk_states_the_block_size() {
         format: AudioFormat::ImaAdpcm,
         channels: 1,
         sample_rate: RATE,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     };
     enc.set_property("blockalign", PropValue::Uint(BLOCK_ALIGN))
         .expect("the default block size");
@@ -224,6 +225,7 @@ async fn a_layout_that_never_arrives_fails_the_header() {
         format: AudioFormat::Mulaw,
         channels: 0,
         sample_rate: 0,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     })
     .expect("the sentinels negotiate");
     let mut sink = Collect::default();

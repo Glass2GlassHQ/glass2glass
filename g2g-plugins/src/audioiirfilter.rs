@@ -324,6 +324,7 @@ mod tests {
             format: AudioFormat::PcmF32Le,
             channels: 1,
             sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         }
     }
 
@@ -354,6 +355,7 @@ mod tests {
             format: AudioFormat::PcmF32Le,
             channels: 2,
             sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         let mut element = AudioIirFilter::new().with_b("0.5").with_a("1,-0.5");
         element.configure(&stereo).unwrap();

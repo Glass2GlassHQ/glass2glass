@@ -305,7 +305,7 @@ static APPSRC_PROPS: &[PropertySpec] = &[
     PropertySpec::new("caps", PropKind::Str, "fixed output caps, gst-launch syntax (e.g. video/x-raw,format=RGBA,width=320,height=240,framerate=30/1)"),
 ];
 
-/// The registry needs this source's declared output caps; see [`nominal_caps`].
+/// The registry needs this source's declared output caps; see `nominal_caps`.
 pub fn registered_output_caps() -> Caps {
     nominal_caps()
 }

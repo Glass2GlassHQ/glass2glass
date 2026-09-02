@@ -5,9 +5,16 @@
 //! Each frame encodes to an independent baseline JPEG (intra-only), so this is
 //! the snapshot / thumbnail / low-latency-capture encoder and the inverse of
 //! [`crate::mjpegdec::MjpegDec`]. Quality is builder-configurable; geometry is
-//! fixed at configure. Packed RGBA/BGRA encodes directly; planar I420 (even dims,
-//! BT.601 limited range) converts to RGBA first via the shared `VideoConvert`
-//! path, so a decoder can feed it without an intervening `VideoConvert`.
+//! fixed at configure. Packed RGBA/BGRA encodes directly; planar I420 (even dims)
+//! converts to RGBA first via the shared `VideoConvert` path, with the negotiated
+//! colorimetry's matrix and range, so a decoder can feed it without an intervening
+//! `VideoConvert`.
+//!
+//! JPEG has no colour signalling: a JFIF file is full-range BT.601 over sRGB by
+//! definition ([`Colorimetry::JPEG`](g2g_core::Colorimetry::JPEG)), so that is
+//! what the output caps carry whatever the input was tagged. Nothing is
+//! mislabeled by it: an input tagged otherwise is converted through RGB with its
+//! own matrix first, so the encoded samples really are what the output caps say.
 //!
 //! With the `mozjpeg` feature the `encoder=mozjpeg` property swaps `jpeg-encoder`
 //! for libjpeg-turbo / mozjpeg; the default stays `jpeg-encoder` (pure Rust, no C).
@@ -60,6 +67,9 @@ pub struct MjpegEnc {
     width: u32,
     height: u32,
     framerate: Rate,
+    /// How the negotiated input's samples map to colour, so the I420 -> RGBA
+    /// conversion uses the stream's own matrix and range.
+    colorimetry: g2g_core::Colorimetry,
     sequence: u64,
     caps_sent: bool,
     configured: bool,
@@ -81,6 +91,7 @@ impl MjpegEnc {
             width: 0,
             height: 0,
             framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
             sequence: 0,
             caps_sent: false,
             configured: false,
@@ -122,7 +133,7 @@ impl MjpegEnc {
             width: Dim::Fixed(self.width),
             height: Dim::Fixed(self.height),
             framerate: self.framerate.clone(),
-            colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            colorimetry: g2g_core::Colorimetry::JPEG,
         }
     }
 
@@ -160,7 +171,7 @@ impl MjpegEnc {
                     RawVideoFormat::Rgba8,
                     w,
                     h,
-                    g2g_core::Colorimetry::UNKNOWN,
+                    self.colorimetry,
                 );
                 (alloc::borrow::Cow::Owned(rgba.into_vec()), ColorType::Rgba)
             }
@@ -244,14 +255,13 @@ impl AsyncElement for MjpegEnc {
                 width,
                 height,
                 framerate,
-                interlace: _,
                 ..
             } => CapsSet::one(Caps::CompressedVideo {
                 codec: VideoCodec::Mjpeg,
                 width: width.clone(),
                 height: height.clone(),
                 framerate: framerate.clone(),
-                colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                colorimetry: g2g_core::Colorimetry::JPEG,
             }),
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
@@ -263,8 +273,8 @@ impl AsyncElement for MjpegEnc {
             width,
             height,
             framerate,
+            colorimetry,
             interlace: _,
-            ..
         } = absolute_caps
         else {
             return Err(G2gError::CapsMismatch);
@@ -286,6 +296,7 @@ impl AsyncElement for MjpegEnc {
         self.width = *w;
         self.height = *h;
         self.framerate = framerate.clone();
+        self.colorimetry = *colorimetry;
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
     }
@@ -395,7 +406,7 @@ impl PadTemplates for MjpegEnc {
             width: Dim::Any,
             height: Dim::Any,
             framerate: Rate::Any,
-            colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            colorimetry: g2g_core::Colorimetry::JPEG,
         };
         Vec::from([
             PadTemplate::sink(CapsSet::from_alternatives(Self::input_alternatives())),

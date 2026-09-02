@@ -35,7 +35,8 @@ cargo +nightly fuzz run h264parse
 
 - `g2g-core` and `g2g-plugins` are `no_std` + `alloc` at the baseline. Anything
   needing the OS goes behind a cargo feature that implies `std`.
-- Elements implement `AsyncElement` or `SourceLoop`. Study
+- Elements implement `AsyncElement` or `SourceLoop`. [AUTHORING.md](AUTHORING.md)
+  walks the traits, the negotiation lifecycle and registration. Study
   `g2g-plugins/src/h264parse.rs` and `rtspsrc.rs` as references.
 - Every `with_*` builder knob is also a runtime property (`properties()` +
   `set_property` / `get_property`), named after the matching GStreamer property

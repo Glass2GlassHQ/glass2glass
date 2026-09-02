@@ -3,18 +3,18 @@
 //! buffer out.
 //!
 //! The AC-3 sibling of [`crate::mpegaudioparse`]: an `.ac3` file is a bare
-//! sequence of self-syncing frames, and [`crate::ffmpegaudiodec`] takes one
+//! sequence of self-syncing frames, and `ffmpegaudiodec` takes one
 //! frame per packet, so something has to split the byte stream. Frame lengths
 //! and the channel / rate fields come from
-//! [`ac3_header`](crate::audioframe::ac3_header), shared with the program-stream
+//! `ac3_header`, shared with the program-stream
 //! demuxer, and the resync rule is the two-header one in
-//! [`locate_frame`](crate::audioframe::locate_frame).
+//! `locate_frame`.
 //!
 //! E-AC-3 is rejected rather than parsed. Its syncframe carries `bsid` 16 and
 //! packs the frame size, sample rate and channel fields differently, so the
 //! plain AC-3 decode above would read nonsense out of it; nothing here decodes
 //! E-AC-3 either, so a stream whose head syncframe declares a `bsid` past
-//! [`AC3_MAX_BSID`](crate::audioframe::AC3_MAX_BSID) fails the parse.
+//! `AC3_MAX_BSID` fails the parse.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -114,6 +114,7 @@ impl Ac3Parse {
             format: AudioFormat::Ac3,
             channels: header.channels,
             sample_rate: header.sample_rate,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         if self.last_caps.as_ref() != Some(&caps) {
             out.push(PipelinePacket::CapsChanged(caps.clone())).await?;
@@ -270,6 +271,7 @@ impl PadTemplates for Ac3Parse {
             format: AudioFormat::Ac3,
             channels: 2,
             sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         Vec::from([
             PadTemplate::sink(CapsSet::one(ac3.clone())),
@@ -326,6 +328,7 @@ mod tests {
             format: AudioFormat::Ac3,
             channels: 0,
             sample_rate: 0,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         }
     }
 
@@ -440,6 +443,7 @@ mod tests {
                 format: AudioFormat::Ac3,
                 channels: FRAME_CHANNELS,
                 sample_rate: FRAME_RATE_HZ as u32,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
             }]
         );
     }

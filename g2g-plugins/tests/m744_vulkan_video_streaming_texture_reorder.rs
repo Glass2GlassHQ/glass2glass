@@ -222,7 +222,6 @@ fn element_streaming_output(codec: VideoCodec, aus: Vec<Vec<u8>>, gpu: bool) -> 
         .collect()
 }
 
-#[test]
 fn h264_gpu_texture_streaming_emits_display_order() {
     let device = match block_on(open_h264_decode_device()) {
         Ok(d) => d,
@@ -289,7 +288,6 @@ fn h264_gpu_texture_streaming_emits_display_order() {
     );
 }
 
-#[test]
 fn av1_streaming_emits_show_existing_display_order() {
     let device = match block_on(open_av1_decode_device()) {
         Ok(d) => d,
@@ -365,4 +363,14 @@ fn av1_streaming_emits_show_existing_display_order() {
         "m744 av1 gpu: {} textures streamed AU-by-AU in display order",
         got_tex.len()
     );
+}
+
+// One test for both codecs: libtest runs test functions on parallel threads, and
+// two threads building a `wgpu::Instance` at once fault inside the Vulkan
+// loader's `loader_icd_scan`, which is why this file keeps one device-creating
+// test.
+#[test]
+fn gpu_texture_streaming_emits_display_order() {
+    h264_gpu_texture_streaming_emits_display_order();
+    av1_streaming_emits_show_existing_display_order();
 }

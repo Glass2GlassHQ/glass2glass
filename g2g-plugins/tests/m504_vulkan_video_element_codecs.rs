@@ -8,6 +8,13 @@
 //! in, `RawVideo{Nv12}` system frames out -- and asserts one NV12 frame per
 //! coded picture with real content plus the leading output `CapsChanged`. Runs
 //! on the RTX 3060; skips per codec if the GPU lacks that decode profile.
+//!
+//! The output caps carry the stream's own colour description, read from the
+//! H.265 SPS VUI / AV1 `color_config` at the first keyframe. Neither fixture
+//! writes a colour block, so its CICP codepoints are all "unspecified" and the
+//! coded full-range flag is 0: the caps come out `range: Limited` with the other
+//! three fields `Unknown`. The colour never changes mid-stream, so the ten
+//! pictures still produce exactly one `CapsChanged` per codec.
 #![cfg(all(
     any(target_os = "linux", target_os = "windows"),
     feature = "vulkan-video"
@@ -17,15 +24,55 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::block_on;
 use g2g_core::{
-    AsyncElement, Caps, Dim, FrameTiming, G2gError, MemoryDomain, OutputSink, PipelinePacket,
-    PushOutcome, Rate, RawVideoFormat, VideoCodec,
+    AsyncElement, Caps, ColorRange, Colorimetry, Dim, FrameTiming, G2gError, MatrixCoefficients,
+    MemoryDomain, OutputSink, PipelinePacket, PushOutcome, Rate, RawVideoFormat, VideoCodec,
 };
 use g2g_plugins::vulkanvideo::{
-    open_av1_decode_device, open_h265_decode_device, VulkanVideoDec, VulkanVideoError,
+    extract_av1_sequence_header, extract_h265_parameter_sets, open_av1_decode_device,
+    open_h265_decode_device, VulkanVideoDec, VulkanVideoError,
 };
 
 const H265_CLIP: &[u8] = include_bytes!("fixtures/h265_640x480.h265");
 const AV1_CLIP: &[u8] = include_bytes!("fixtures/av1_640x480.obu");
+
+/// The CICP codepoint every colour field spells "unspecified".
+const CICP_UNSPECIFIED: u8 = 2;
+
+/// What both fixtures resolve to: no colour block, so only the range is concrete
+/// (the coded full-range flag is 0).
+const EXPECTED_COLORIMETRY: Colorimetry = Colorimetry {
+    range: ColorRange::Limited,
+    matrix: MatrixCoefficients::Unknown,
+    transfer: g2g_core::TransferCharacteristics::Unknown,
+    primaries: g2g_core::ColorPrimaries::Unknown,
+};
+
+/// The colour codepoints a fixture actually declares, so `EXPECTED_COLORIMETRY`
+/// stays tied to the bitstreams rather than to a remembered value.
+fn declared_colour(codec: VideoCodec, clip: &[u8]) -> (u8, u8, u8, bool) {
+    match codec {
+        VideoCodec::H265 => {
+            let ps = extract_h265_parameter_sets(clip).expect("the fixture carries an SPS");
+            (
+                ps.sps.color_primaries,
+                ps.sps.transfer_characteristics,
+                ps.sps.matrix_coefficients,
+                ps.sps.video_full_range_flag,
+            )
+        }
+        VideoCodec::Av1 => {
+            let seq =
+                extract_av1_sequence_header(clip).expect("the fixture carries a sequence header");
+            (
+                seq.color.color_primaries,
+                seq.color.transfer_characteristics,
+                seq.color.matrix_coefficients,
+                seq.color.color_range,
+            )
+        }
+        other => panic!("no colour reader for {other:?}"),
+    }
+}
 
 #[derive(Default)]
 struct RecordingSink {
@@ -62,6 +109,12 @@ fn au_frame(bytes: &[u8]) -> Frame {
 /// one `process` call (the element's `decode_all` splits it into pictures), and
 /// assert 10 NV12 640x480 frames with real content plus one leading CapsChanged.
 fn drive_codec(codec: VideoCodec, clip: &[u8]) {
+    assert_eq!(
+        declared_colour(codec, clip),
+        (CICP_UNSPECIFIED, CICP_UNSPECIFIED, CICP_UNSPECIFIED, false),
+        "{codec:?}: fixture colour description changed; update EXPECTED_COLORIMETRY"
+    );
+
     let mut dec = VulkanVideoDec::new();
     let in_caps = Caps::CompressedVideo {
         codec,
@@ -87,6 +140,8 @@ fn drive_codec(codec: VideoCodec, clip: &[u8]) {
             _ => None,
         })
         .collect();
+    // The colour description is constant across the clip, so the nine pictures
+    // after the first re-emit nothing.
     assert_eq!(caps_changes.len(), 1, "{codec:?}: one output CapsChanged");
     assert_eq!(
         caps_changes[0],
@@ -96,9 +151,9 @@ fn drive_codec(codec: VideoCodec, clip: &[u8]) {
             height: Dim::Fixed(480),
             framerate: Rate::Fixed(30 << 16),
             interlace: g2g_core::Interlace::Any,
-            colorimetry: g2g_core::Colorimetry::UNKNOWN
+            colorimetry: EXPECTED_COLORIMETRY
         },
-        "{codec:?}: emits NV12 640x480 at the input framerate"
+        "{codec:?}: emits NV12 640x480 at the input framerate, tagged with the stream colour"
     );
 
     let frames: Vec<&Frame> = sink

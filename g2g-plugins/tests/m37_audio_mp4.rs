@@ -96,6 +96,7 @@ async fn aac_round_trips_through_the_audio_mp4_container() {
         format: AudioFormat::Aac,
         channels: CHANNELS,
         sample_rate: RATE,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     };
 
     // --- mux ---
@@ -149,6 +150,7 @@ async fn pcm_aac_mp4_demux_decode_full_circle() {
         format: AudioFormat::PcmS16Le,
         channels: CHANNELS,
         sample_rate: RATE,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     };
 
     // encode PCM -> AAC
@@ -187,6 +189,7 @@ async fn pcm_aac_mp4_demux_decode_full_circle() {
         format: AudioFormat::Aac,
         channels: CHANNELS,
         sample_rate: RATE,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     };
     sink.configure_pipeline(&aac_caps).expect("mux init");
     for (i, au) in encoded.aus.iter().enumerate() {

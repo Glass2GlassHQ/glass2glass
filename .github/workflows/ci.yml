@@ -47,6 +47,18 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all --check
 
+  # g2g-core is the semver-covered surface (STABILITY.md). A breaking change
+  # against the latest crates.io release must come with the version bump the
+  # pre-1.0 policy requires (minor), or this fails.
+  semver:
+    name: semver (g2g-core)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: obi1kenobi/cargo-semver-checks-action@v2
+        with:
+          package: g2g-core
+
   # Lints, default features, Linux. Not run with `-D warnings`: the workspace
   # carries some intentional warnings, so CI fails only on clippy errors, not
   # warnings.
@@ -60,6 +72,22 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --workspace --all-targets --locked
+      # Intra-doc links rot silently: a renamed item, or one that moved behind a
+      # feature, leaves a dead link nobody notices. The feature set is read out
+      # of each crate's own `[package.metadata.docs.rs]` rather than repeated
+      # here, so this builds the same docs docs.rs publishes and cannot drift
+      # from them. `--document-private-items` is deliberately off: a public doc
+      # linking to a private item renders as dead text on docs.rs, so that is a
+      # finding, not noise.
+      - name: rustdoc (no broken intra-doc links)
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: |
+          features=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | . as $p | (.metadata.docs.rs.features // [])[] | "\($p.name)/\(.)"' \
+            | paste -sd,)
+          echo "docs.rs features: $features"
+          cargo doc --workspace --no-deps --locked --features "$features"
 
   # MSRV floor of the embedded-facing surface (M999). g2g-core / g2g-mcu /
   # g2g-mcugen / g2g-plugin declare rust-version 1.86 while the host crates are
@@ -151,21 +179,28 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            ffmpeg libavcodec-dev libavformat-dev libavutil-dev libswscale-dev clang
+            ffmpeg libavcodec-dev libavformat-dev libavutil-dev libswscale-dev clang \
+            libopus-dev
       - name: the fixture encoder must exist (a missing one self-skips the test)
         run: ffmpeg -hide_banner -h encoder=libx264 >/dev/null
       - name: decoder unit tests (ffmpeg feature)
         run: cargo test -p g2g-plugins --locked --features ffmpeg --lib
       - name: decoder pipeline-depth guard
         run: cargo test -p g2g-plugins --locked --features ffmpeg --test m1109_decoder_depth -- --nocapture
+      - name: test g2g-plugins (ffmpeg encoder colorimetry)
+        run: cargo test -p g2g-plugins --locked --features ffmpeg --test m1124_encoder_colorimetry
+      - name: TS audio codec auto-plug selection
+        run: cargo test -p g2g-plugins --locked --features ffmpeg,opus --test m753_ts_audio_codecs --test m757_ac3_flac
+      # Needs the ffmpeg + ffprobe CLIs for its fixtures and its reference peer.
+      - name: discovery vs ffprobe
+        run: cargo test -p g2g-plugins --locked --features tooling-json --test m1107_discover
 
   # Linux platform / feature build. Compiles the OS-coupled and GPU/ML elements
-  # that build with stable, apt-installable system libraries. Intentionally
-  # omitted (need version-pinned or proprietary deps, add separately):
-  #   vaapi (libva + GBM + bindgen),
-  #   pipewire (libpipewire version-sensitive), vpx (env-libvpx-sys ships
-  #   bindings only for specific libvpx versions, needs its `generate` feature +
-  #   clang against the system libvpx), cuda / cuda-gl (NVIDIA driver),
+  # that build with stable, apt-installable system libraries. The docgen step
+  # below builds the whole `linux-full` union (ffmpeg, vaapi, vpx, pipewire
+  # included); the per-feature steps stay narrower so a failure names one
+  # feature. Intentionally omitted (need proprietary deps, add separately):
+  #   cuda / cuda-gl (NVIDIA driver),
   #   ort (downloads ONNX Runtime binaries at build).
   features-linux:
     name: features (linux)
@@ -181,7 +216,19 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             pkg-config libssl-dev libasound2-dev libpulse-dev \
-            libopus-dev libwayland-dev libxkbcommon-dev libdav1d-dev nasm
+            libopus-dev libwayland-dev libxkbcommon-dev libdav1d-dev nasm \
+            clang libavcodec-dev libavformat-dev libavutil-dev libswscale-dev \
+            libva-dev libdrm-dev libgbm-dev libvpx-dev libpipewire-0.3-dev
+      # docs/elements.html is generated from the registry, so it silently goes
+      # stale every time an element is added. The element list is exactly the
+      # elements compiled in, so this has to use the same feature set the
+      # committed file was generated with (`linux-full`), which is what the
+      # extra libav* / libva / libvpx / libpipewire packages above are for.
+      - name: docs/elements.html is up to date
+        run: |
+          cargo run -p g2g-plugins --locked --features linux-full --bin g2g-docgen
+          git diff --exit-code docs/elements.html \
+            || { echo "::error::docs/elements.html is stale. Regenerate with: cargo run -p g2g-plugins --features linux-full --bin g2g-docgen"; exit 1; }
       - name: check g2g-plugins (linux feature set)
         run: >
           cargo check -p g2g-plugins --locked --all-targets --features
@@ -261,6 +308,13 @@ jobs:
       # pure-Rust encoder to choose.
       - name: test g2g-plugins (encoding profiles)
         run: cargo test -p g2g-plugins --locked --features std,mjpeg,mjpeg-encode,opus --test m1089_encodebin --test m1071_avi --test m1092_wav_companded
+      # Colorimetry round trip (M1136/M1137): rav1e writes it, Av1Parse and the
+      # pure-Rust decoder read it back, JPEG carries JFIF. The NVENC leg
+      # self-skips without a GPU; dav1d needs the system lib and stays local.
+      - name: test g2g-plugins (colorimetry tagging)
+        run: |
+          cargo test -p g2g-plugins --locked --features std,mjpeg,mjpeg-encode,av1-encode --test m1136_encoder_colorimetry
+          cargo test -p g2g-plugins --locked --features std,rav1d,av1-encode,mjpeg --test m1137_decoder_colorimetry
       # Opus encode properties + codec round-trip (M177 / M454 / M868): the
       # feature set above is only checked, so the opus-gated tests run here.
       - name: test g2g-plugins (opus codec + properties)

@@ -44,6 +44,7 @@ fn run(format: AudioFormat, channels: u8, rate: u32, samples: Vec<u8>) -> Vec<Ve
             format,
             channels,
             sample_rate: rate,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         })
         .unwrap();
     let mut sink = CollectSink::default();
@@ -132,6 +133,7 @@ fn the_header_goes_out_once() {
             format: AudioFormat::PcmS16Le,
             channels: 1,
             sample_rate: 8_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         })
         .unwrap();
     let mut sink = CollectSink::default();
@@ -162,6 +164,7 @@ fn a_pcm_input_derives_a_wav_byte_stream_output() {
             format: AudioFormat::PcmS16Le,
             channels: 1,
             sample_rate: 8_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         })
         .alternatives(),
         &[Caps::ByteStream {
@@ -173,6 +176,7 @@ fn a_pcm_input_derives_a_wav_byte_stream_output() {
         format: AudioFormat::Opus,
         channels: 2,
         sample_rate: 48_000,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     })
     .alternatives()
     .is_empty());
@@ -186,6 +190,7 @@ fn a_compressed_input_is_refused() {
             format: AudioFormat::Opus,
             channels: 2,
             sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         })
         .is_err());
 }
@@ -235,6 +240,7 @@ fn a_written_file_types_and_parses_back() {
             format: AudioFormat::PcmS16Le,
             channels: 2,
             sample_rate: 44_100,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         }
     );
     let out: Vec<u8> = sink
@@ -249,6 +255,113 @@ fn a_written_file_types_and_parses_back() {
         .flatten()
         .collect();
     assert_eq!(out, samples, "the samples survive the round trip");
+}
+
+/// Build a WAVE_FORMAT_EXTENSIBLE file: one `fmt ` chunk with a 40-byte body,
+/// then a `data` chunk holding `samples`.
+///
+/// Field offsets within the `fmt ` body are the public WAVEFORMATEXTENSIBLE
+/// layout: the 18-byte WAVEFORMATEX (wFormatTag 0, nChannels 2,
+/// nSamplesPerSec 4, nAvgBytesPerSec 8, nBlockAlign 12, wBitsPerSample 14,
+/// cbSize 16), then wValidBitsPerSample 18, dwChannelMask 20, and the 16-byte
+/// SubFormat GUID at 24 (its first two bytes are the wFormatTag it extends).
+fn extensible_wav(channels: u16, rate: u32, channel_mask: u32, samples: &[u8]) -> Vec<u8> {
+    const FORMAT_EXTENSIBLE: u16 = 0xFFFE;
+    const SUBFORMAT_PCM: u16 = 1;
+    const BITS: u16 = 16;
+    let block_align = channels * BITS / 8;
+
+    let mut fmt = Vec::new();
+    fmt.extend_from_slice(&FORMAT_EXTENSIBLE.to_le_bytes()); // 0
+    fmt.extend_from_slice(&channels.to_le_bytes()); // 2
+    fmt.extend_from_slice(&rate.to_le_bytes()); // 4
+    fmt.extend_from_slice(&(rate * u32::from(block_align)).to_le_bytes()); // 8
+    fmt.extend_from_slice(&block_align.to_le_bytes()); // 12
+    fmt.extend_from_slice(&BITS.to_le_bytes()); // 14
+    fmt.extend_from_slice(&22u16.to_le_bytes()); // 16: cbSize
+    fmt.extend_from_slice(&BITS.to_le_bytes()); // 18: wValidBitsPerSample
+    fmt.extend_from_slice(&channel_mask.to_le_bytes()); // 20: dwChannelMask
+    fmt.extend_from_slice(&SUBFORMAT_PCM.to_le_bytes()); // 24: SubFormat GUID
+    fmt.extend_from_slice(&[0u8; 14]);
+    assert_eq!(fmt.len(), 40);
+
+    let mut body = Vec::new();
+    body.extend_from_slice(b"WAVE");
+    body.extend_from_slice(b"fmt ");
+    body.extend_from_slice(&(fmt.len() as u32).to_le_bytes());
+    body.extend_from_slice(&fmt);
+    body.extend_from_slice(b"data");
+    body.extend_from_slice(&(samples.len() as u32).to_le_bytes());
+    body.extend_from_slice(samples);
+
+    let mut file = Vec::new();
+    file.extend_from_slice(b"RIFF");
+    file.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    file.extend_from_slice(&body);
+    file
+}
+
+fn parse_caps(file: Vec<u8>) -> Caps {
+    use g2g_plugins::wavparse::WavParse;
+
+    let mut parse = WavParse::new();
+    parse
+        .configure_pipeline(&Caps::ByteStream {
+            encoding: ByteStreamEncoding::Wav,
+        })
+        .unwrap();
+    let mut sink = CollectSink::default();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    rt.block_on(parse.process(PipelinePacket::DataFrame(frame(file)), &mut sink))
+        .unwrap();
+    sink.packets
+        .iter()
+        .find_map(|p| match p {
+            PipelinePacket::CapsChanged(c) => Some(c.clone()),
+            _ => None,
+        })
+        .expect("the parsed fmt chunk is announced")
+}
+
+#[test]
+fn an_extensible_fmt_chunk_carries_its_channel_mask_into_the_caps() {
+    use g2g_core::ChannelLayout;
+
+    let samples: Vec<u8> = (0..48u8).collect();
+    // 0x3f = FL FR FC LFE BL BR, the 5.1 mask.
+    assert_eq!(
+        parse_caps(extensible_wav(6, 48_000, 0x3f, &samples)),
+        Caps::Audio {
+            format: AudioFormat::PcmS16Le,
+            channels: 6,
+            sample_rate: 48_000,
+            channel_layout: ChannelLayout::SURROUND_5_1,
+        }
+    );
+    // A mask whose speaker count disagrees with nChannels describes a different
+    // stream, so the parse falls back to the count convention.
+    assert_eq!(
+        parse_caps(extensible_wav(6, 48_000, 0x3, &samples)),
+        Caps::Audio {
+            format: AudioFormat::PcmS16Le,
+            channels: 6,
+            sample_rate: 48_000,
+            channel_layout: ChannelLayout::UNSPECIFIED,
+        }
+    );
+    // A mask of 0 (the "no positions" WAVEFORMATEXTENSIBLE spelling) stays the
+    // wildcard rather than becoming a layout.
+    assert_eq!(
+        parse_caps(extensible_wav(2, 48_000, 0, &(0..32u8).collect::<Vec<_>>())),
+        Caps::Audio {
+            format: AudioFormat::PcmS16Le,
+            channels: 2,
+            sample_rate: 48_000,
+            channel_layout: ChannelLayout::UNSPECIFIED,
+        }
+    );
 }
 
 /// Chunk sizes come from the file, so a chunk claiming more than the stream

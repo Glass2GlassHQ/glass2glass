@@ -176,6 +176,7 @@ impl HwProbe {
                     format,
                     channels,
                     sample_rate,
+                    channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
                 })
                 .collect(),
         )
@@ -309,11 +310,13 @@ mod tests {
                     format: AudioFormat::PcmS16Le,
                     channels: 2,
                     sample_rate: 48_000,
+                    channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
                 },
                 Caps::Audio {
                     format: AudioFormat::PcmF32Le,
                     channels: 2,
                     sample_rate: 48_000,
+                    channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
                 },
             ]
         );
@@ -329,6 +332,7 @@ mod tests {
                 format: AudioFormat::PcmS16Le,
                 channels: 1,
                 sample_rate: 16_000,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
             }]
         );
         // nothing about the real range is lost.
@@ -349,6 +353,7 @@ mod tests {
                 format: AudioFormat::PcmS32Le,
                 channels: 4,
                 sample_rate: 96_000,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
             }]
         );
     }

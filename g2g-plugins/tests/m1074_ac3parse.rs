@@ -232,6 +232,7 @@ fn stub_pcm_caps() -> Caps {
         format: AudioFormat::PcmS16Le,
         channels: ANY_CHANNELS,
         sample_rate: ANY_SAMPLE_RATE,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     }
 }
 
@@ -243,6 +244,7 @@ impl PadTemplates for StubAudioDec {
             format,
             channels: ANY_CHANNELS,
             sample_rate: 0,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         Vec::from([
             PadTemplate::sink(CapsSet::from_alternatives(Vec::from([

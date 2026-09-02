@@ -223,6 +223,7 @@ async fn decoder_clamps_oversized_preskip_and_duration() {
         format: AudioFormat::PcmS16Le,
         channels: 1,
         sample_rate: OPUS_RATE_HZ,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     })
     .unwrap();
     let n = (OPUS_RATE_HZ as usize * 20) / 1000;
@@ -269,6 +270,7 @@ async fn decoder_clamps_oversized_preskip_and_duration() {
         format: AudioFormat::Opus,
         channels: 1,
         sample_rate: OPUS_RATE_HZ,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     })
     .unwrap();
     let mut sink = CaptureSink::default();

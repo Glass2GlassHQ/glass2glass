@@ -220,6 +220,7 @@ impl OpusDec {
             format: AudioFormat::Opus,
             channels: ANY_CHANNELS,
             sample_rate: ANY_SAMPLE_RATE,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         }
     }
 
@@ -228,6 +229,7 @@ impl OpusDec {
             format: self.out_format,
             channels: self.channels,
             sample_rate: OPUS_RATE_HZ,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         }
     }
 
@@ -483,11 +485,13 @@ impl AsyncElement for OpusDec {
                     format: AudioFormat::PcmS16Le,
                     channels: ANY_CHANNELS,
                     sample_rate: OPUS_RATE_HZ,
+                    channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
                 },
                 Caps::Audio {
                     format: AudioFormat::PcmF32Le,
                     channels: ANY_CHANNELS,
                     sample_rate: OPUS_RATE_HZ,
+                    channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
                 },
             ])),
             _ => CapsSet::from_alternatives(Vec::new()),
@@ -707,6 +711,7 @@ impl PadTemplates for OpusDec {
             format,
             channels: 2,
             sample_rate: OPUS_RATE_HZ,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         Vec::from([
             PadTemplate::sink(CapsSet::one(Self::input_template())),

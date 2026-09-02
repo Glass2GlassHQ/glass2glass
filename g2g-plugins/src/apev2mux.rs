@@ -5,10 +5,10 @@
 //! an ID3v1 block when there is one: the ID3v1 block is defined as the last 128
 //! bytes, so nothing may follow it. This element therefore holds the tail of the
 //! stream back until EOS, splits off an ID3v1 block, replaces an APEv2 tag
-//! already there, and writes [tag][ID3v1].
+//! already there, and writes the APEv2 tag ahead of the ID3v1 block.
 //!
 //! The tags come from the `tags` property ([`crate::tagproperty`]), not from
-//! upstream: a [`TagList`](g2g_core::TagList) travels out of band on the bus and
+//! upstream: a [`TagList`] travels out of band on the bus and
 //! an element cannot read the bus, so there is no in-band tag event to pick up.
 //!
 //! # Example

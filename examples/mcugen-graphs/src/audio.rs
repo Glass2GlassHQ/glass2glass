@@ -16,7 +16,7 @@ pub const RING_BYTES_TOTAL: usize = 3440;
 /// Negotiate the fan-in link's `Caps::Audio` (both sides black-boxed so
 /// the audio arm of `Caps::intersect` stays in the archive for the proofs).
 fn negotiate_fanin_link() -> Option<Caps> {
-    let mk = || Caps::Audio { format: AudioFormat::PcmS16Le, channels: 1, sample_rate: 8000 };
+    let mk = || Caps::Audio { format: AudioFormat::PcmS16Le, channels: 1, sample_rate: 8000, channel_layout: g2g_core::ChannelLayout::UNSPECIFIED };
     black_box(mk()).intersect(&black_box(mk())).ok()
 }
 

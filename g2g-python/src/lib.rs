@@ -9,16 +9,18 @@
 //! detection metadata), and the element base classes. Today only a `gst`
 //! backend exists. This crate is the g2g host those seams target: it embeds
 //! CPython in the g2g process, exposes a native `g2g` module that backs
-//! `FrameIO` / `AnalyticsBackend` against the live Rust [`Frame`], and wraps a
-//! hosted element instance in a g2g [`AsyncElement`] so it negotiates caps and
-//! flows frames like any other node.
+//! `FrameIO` / `AnalyticsBackend` against the live Rust
+//! [`Frame`](g2g_core::Frame), and wraps a hosted element instance in a g2g
+//! [`AsyncElement`](g2g_core::AsyncElement) so it negotiates caps and flows
+//! frames like any other node.
 //!
 //! Build layers:
 //! - **default (`std`)**: the [`PyTransform`] shell and the pixel-format
-//!   mapping ([`format`]) compile. Caps negotiation works; the per-frame Python
-//!   call returns [`G2gError::UnsupportedDomain`] because there is no
-//!   interpreter. This keeps the crate in `cargo check --workspace` without
-//!   libpython.
+//!   mapping ([`format`](mod@crate::format)) compile. Caps negotiation works;
+//!   the per-frame Python call returns
+//!   [`G2gError::UnsupportedDomain`](g2g_core::G2gError::UnsupportedDomain)
+//!   because there is no interpreter. This keeps the crate in
+//!   `cargo check --workspace` without libpython.
 //! - **`python`**: pulls pyo3 + numpy, embeds CPython, and runs the hosted
 //!   element for real. OS-coupled, off the no_std / RTOS baseline.
 //!
@@ -53,7 +55,7 @@ pub use source::PySource;
 ///
 /// The parser default-constructs each and applies its `key=value` properties via
 /// the property system, then negotiation + `configure_pipeline` spawn the worker.
-/// Call after [`g2g_plugins::default_registry`] (or any `Registry`). Building the
+/// Call after `g2g_plugins::default_registry` (or any `Registry`). Building the
 /// per-frame path still needs the `python` feature.
 #[cfg(feature = "std")]
 pub fn register(registry: &mut g2g_core::runtime::Registry) {

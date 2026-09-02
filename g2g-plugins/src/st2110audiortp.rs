@@ -47,6 +47,7 @@ fn audio_params(caps: &Caps) -> Result<(AudioFormat, u8, u32), G2gError> {
             format: format @ (AudioFormat::PcmS16Le | AudioFormat::PcmF32Le | AudioFormat::PcmS24Le),
             channels,
             sample_rate,
+            ..
         } => Ok((*format, *channels, *sample_rate)),
         _ => Err(G2gError::CapsMismatch),
     }
@@ -374,6 +375,7 @@ impl PadTemplates for St2110AudioSink {
             format,
             channels: 2,
             sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         })
         .to_vec();
         Vec::from([PadTemplate::sink(CapsSet::from_alternatives(alts))])
@@ -473,6 +475,7 @@ impl St2110AudioSrc {
             format: self.format,
             channels: self.channels,
             sample_rate: self.sample_rate,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         }
     }
 }
@@ -615,6 +618,7 @@ mod tests {
             format: AudioFormat::PcmS16Le,
             channels: 2,
             sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
 
         // Receiver binds an ephemeral port.
@@ -657,6 +661,7 @@ mod tests {
             format: AudioFormat::PcmF32Le,
             channels: 2,
             sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         let mut sink = St2110AudioSink::new();
         sink.host = String::from("239.30.1.1");
@@ -716,6 +721,7 @@ mod tests {
             format: AudioFormat::PcmF32Le,
             channels: 2,
             sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         let mut src = St2110AudioSrc::new();
         src.address = String::from("127.0.0.1");
@@ -777,6 +783,7 @@ mod tests {
             format: AudioFormat::PcmS24Le,
             channels: 2,
             sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         let mut src = St2110AudioSrc::new();
         src.address = String::from("127.0.0.1");

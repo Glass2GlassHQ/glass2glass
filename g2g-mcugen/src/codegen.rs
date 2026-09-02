@@ -552,7 +552,7 @@ fn emit(
             let _ = writeln!(negotiate, "fn negotiate_fanin_link() -> Option<Caps> {{");
             let _ = writeln!(
                 negotiate,
-                "    let mk = || Caps::Audio {{ format: AudioFormat::PcmS16Le, channels: {channels}, sample_rate: {sample_rate} }};"
+                "    let mk = || Caps::Audio {{ format: AudioFormat::PcmS16Le, channels: {channels}, sample_rate: {sample_rate}, channel_layout: g2g_core::ChannelLayout::UNSPECIFIED }};"
             );
             let _ = writeln!(
                 negotiate,

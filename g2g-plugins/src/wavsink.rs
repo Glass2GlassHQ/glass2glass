@@ -246,6 +246,7 @@ impl PadTemplates for WavSink {
             format,
             channels: 2,
             sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         Vec::from([PadTemplate::sink(CapsSet::from_alternatives(Vec::from([
             pcm(AudioFormat::PcmU8),
@@ -301,6 +302,7 @@ mod tests {
             format,
             channels: 2,
             sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         assert_eq!(
             pcm_params(&caps(AudioFormat::PcmU8)),
@@ -356,6 +358,7 @@ mod tests {
             format: AudioFormat::PcmF32Le,
             channels: 2,
             sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         sink.configure_pipeline(&caps).unwrap();
         let mut out = NullSink;
@@ -401,12 +404,14 @@ mod tests {
             format: AudioFormat::Aac,
             channels: 2,
             sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         assert_eq!(pcm_params(&aac), Err(G2gError::CapsMismatch));
         let f32le = Caps::Audio {
             format: AudioFormat::PcmF32Le,
             channels: 1,
             sample_rate: 44_100,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         assert_eq!(pcm_params(&f32le), Ok((3, 32, 1, 44_100)));
     }

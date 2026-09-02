@@ -17,6 +17,10 @@
 //! and the variable-width size fields. AV1 carries no framerate relevant to caps
 //! geometry here, so refined caps report `Rate::Any` (matching mkvdemux).
 //! Frames without a sequence-header OBU forward without a caps change.
+//!
+//! The same walk reads the header's `color_config`, so the refined caps also
+//! carry the stream's colorimetry (`Colorimetry::UNKNOWN` where the header codes
+//! no colour description).
 
 use core::future::Future;
 use core::pin::Pin;
@@ -33,6 +37,10 @@ use crate::annexb::BitReader;
 
 /// `OBU_SEQUENCE_HEADER` type, the only OBU carrying frame geometry.
 const OBU_SEQUENCE_HEADER: u8 = 1;
+
+/// What every CICP colour field spells "unspecified", the value `color_config`
+/// leaves its fields at when it codes no colour description.
+const CICP_UNSPECIFIED: u32 = 2;
 
 /// # Example
 ///
@@ -129,7 +137,7 @@ impl AsyncElement for Av1Parse {
                                 width: Dim::Fixed(info.width),
                                 height: Dim::Fixed(info.height),
                                 framerate: Rate::Any,
-                                colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                                colorimetry: info.colorimetry,
                             };
                             if self.last_emitted_caps.as_ref() != Some(&new_caps) {
                                 out.push(PipelinePacket::CapsChanged(new_caps.clone()))
@@ -199,6 +207,9 @@ pub struct Av1SeqHeader {
     pub subsampling_y: bool,
     /// `chroma_sample_position` (2 bits; 0 = unknown).
     pub chroma_sample_position: u8,
+    /// The `color_config` colour description as caps colorimetry, `UNKNOWN` when
+    /// the header codes none (or its tail was truncated).
+    pub colorimetry: g2g_core::Colorimetry,
 }
 
 /// LEB128 (unsigned, little-endian 7-bit groups) read at `*pos`, advancing it.
@@ -435,17 +446,17 @@ fn parse_sequence_header_at(payload: &[u8], strict: bool) -> Option<Av1SeqHeader
         subsampling_x: true,
         subsampling_y: true,
         chroma_sample_position: 0,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     };
     match parse_color_config(&mut br, reduced_still_picture_header, seq_profile) {
         Some(color) => {
-            (
-                header.high_bitdepth,
-                header.twelve_bit,
-                header.monochrome,
-                header.subsampling_x,
-                header.subsampling_y,
-                header.chroma_sample_position,
-            ) = color;
+            header.high_bitdepth = color.high_bitdepth;
+            header.twelve_bit = color.twelve_bit;
+            header.monochrome = color.monochrome;
+            header.subsampling_x = color.subsampling_x;
+            header.subsampling_y = color.subsampling_y;
+            header.chroma_sample_position = color.chroma_sample_position;
+            header.colorimetry = color.colorimetry;
         }
         None if strict => return None,
         // Truncated tail: the caps parse only needs the geometry.
@@ -454,15 +465,25 @@ fn parse_sequence_header_at(payload: &[u8], strict: bool) -> Option<Av1SeqHeader
     Some(header)
 }
 
+/// What `color_config` (spec 5.5.2) codes: the sample layout the geometry parse
+/// folds into [`Av1SeqHeader`], and the colour description as caps colorimetry.
+struct ColorConfig {
+    high_bitdepth: bool,
+    twelve_bit: bool,
+    monochrome: bool,
+    subsampling_x: bool,
+    subsampling_y: bool,
+    chroma_sample_position: u8,
+    colorimetry: g2g_core::Colorimetry,
+}
+
 /// Skip the flag block between the geometry and `color_config` (spec 5.5.1) and
-/// parse `color_config` (5.5.2): `(high_bitdepth, twelve_bit, monochrome,
-/// subsampling_x, subsampling_y, chroma_sample_position)`. `None` on truncation.
-#[allow(clippy::type_complexity)]
+/// parse `color_config` (5.5.2). `None` on truncation.
 fn parse_color_config(
     br: &mut BitReader,
     reduced_still_picture_header: u32,
     seq_profile: u8,
-) -> Option<(bool, bool, bool, bool, bool, u8)> {
+) -> Option<ColorConfig> {
     if reduced_still_picture_header == 0 && br.read_bit()? == 1 {
         // frame_id_numbers_present_flag
         br.read_bits(4)?; // delta_frame_id_length_minus_2
@@ -513,23 +534,45 @@ fn parse_color_config(
     } else {
         br.read_bit()? == 1
     };
-    let mut identity_matrix = false;
+    // Absent a color_description the three fields are CICP unspecified.
+    let (mut primaries, mut transfer, mut matrix) =
+        (CICP_UNSPECIFIED, CICP_UNSPECIFIED, CICP_UNSPECIFIED);
     if br.read_bit()? == 1 {
         // color_description_present: primaries / transfer / matrix.
-        let primaries = br.read_bits(8)?;
-        let transfer = br.read_bits(8)?;
-        let matrix = br.read_bits(8)?;
-        // CP_BT_709 / TC_SRGB / MC_IDENTITY: the RGB case with no subsampling.
-        identity_matrix = matrix == 0 && primaries == 1 && transfer == 13;
+        primaries = br.read_bits(8)?;
+        transfer = br.read_bits(8)?;
+        matrix = br.read_bits(8)?;
     }
+    // CP_BT_709 / TC_SRGB / MC_IDENTITY: the RGB case with no subsampling.
+    let identity_matrix = matrix == 0 && primaries == 1 && transfer == 13;
+    let colorimetry = |full_range| {
+        g2g_core::Colorimetry::from_cicp(primaries as u8, transfer as u8, matrix as u8, full_range)
+    };
     if monochrome {
-        br.read_bit()?; // color_range
-        return Some((high_bitdepth, twelve_bit, monochrome, true, true, 0));
+        let full_range = br.read_bit()? == 1;
+        return Some(ColorConfig {
+            high_bitdepth,
+            twelve_bit,
+            monochrome,
+            subsampling_x: true,
+            subsampling_y: true,
+            chroma_sample_position: 0,
+            colorimetry: colorimetry(full_range),
+        });
     }
     if identity_matrix {
-        return Some((high_bitdepth, twelve_bit, monochrome, false, false, 0));
+        // The GBR case codes no range bit: it is full by definition.
+        return Some(ColorConfig {
+            high_bitdepth,
+            twelve_bit,
+            monochrome,
+            subsampling_x: false,
+            subsampling_y: false,
+            chroma_sample_position: 0,
+            colorimetry: colorimetry(true),
+        });
     }
-    br.read_bit()?; // color_range
+    let full_range = br.read_bit()? == 1; // color_range
     let (ssx, ssy) = match seq_profile {
         0 => (true, true),
         1 => (false, false),
@@ -548,7 +591,15 @@ fn parse_color_config(
     } else {
         0
     };
-    Some((high_bitdepth, twelve_bit, monochrome, ssx, ssy, csp))
+    Some(ColorConfig {
+        high_bitdepth,
+        twelve_bit,
+        monochrome,
+        subsampling_x: ssx,
+        subsampling_y: ssy,
+        chroma_sample_position: csp,
+        colorimetry: colorimetry(full_range),
+    })
 }
 
 /// AV1 unsigned variable-length code (spec `uvlc()`): count leading zeros, then

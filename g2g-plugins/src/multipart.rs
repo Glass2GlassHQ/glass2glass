@@ -17,8 +17,8 @@
 //! is one output pad here, and mistyping a body is worse than refusing it.
 //!
 //! Everything the demuxer sizes anything from comes off the wire, so the
-//! boundary is capped at [`MAX_BOUNDARY_LEN`], the header block at
-//! [`MAX_HEADER_BYTES`] and a body at [`MAX_PART_BYTES`], each checked before a
+//! boundary is capped at `MAX_BOUNDARY_LEN`, the header block at
+//! `MAX_HEADER_BYTES` and a body at `MAX_PART_BYTES`, each checked before a
 //! byte is buffered against it.
 //!
 //! The transport carries no timestamps, so a part gets no pts; it inherits the
@@ -634,7 +634,7 @@ impl MultipartMux {
         }
     }
 
-    /// Separate the parts with this boundary instead of [`DEFAULT_BOUNDARY`].
+    /// Separate the parts with this boundary instead of `DEFAULT_BOUNDARY`.
     pub fn with_boundary(mut self, boundary: impl Into<String>) -> Self {
         self.boundary = boundary.into();
         self

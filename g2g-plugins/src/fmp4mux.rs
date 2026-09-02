@@ -1,5 +1,5 @@
 //! Pure fragmented-MP4 / CMAF box writer (M24, HEVC in M31): the fMP4 muxing
-//! state machine ([`Fmp4Muxer`]) plus the NAL / `avcC` / `hvcC` helpers shared
+//! state machine (`Fmp4Muxer`) plus the NAL / `avcC` / `hvcC` helpers shared
 //! across the container elements. Annex-B H.264/H.265 access units in, an
 //! `ftyp`+`moov` init segment then one `moof`+`mdat` fragment per access unit
 //! out, so the recording is playable (ffplay/VLC/browsers via MSE) and durable:

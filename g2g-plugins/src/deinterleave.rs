@@ -58,6 +58,7 @@ fn accept_input(caps: &Caps) -> Result<PcmShape, G2gError> {
         format,
         channels,
         sample_rate,
+        ..
     } = caps
     else {
         return Err(G2gError::CapsMismatch);
@@ -78,6 +79,7 @@ fn interleaved_caps(shape: PcmShape) -> Caps {
         format,
         channels,
         sample_rate,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     }
 }
 
@@ -88,6 +90,7 @@ fn mono_caps(shape: PcmShape) -> Caps {
         format,
         channels: 1,
         sample_rate,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     }
 }
 
@@ -463,11 +466,13 @@ impl PadTemplates for Deinterleave {
             format,
             channels: ANY_CHANNELS,
             sample_rate: ANY_SAMPLE_RATE,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         let mono_pcm = |format| Caps::Audio {
             format,
             channels: 1,
             sample_rate: ANY_SAMPLE_RATE,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         Vec::from([
             PadTemplate::sink(CapsSet::from_alternatives(
@@ -491,6 +496,7 @@ mod tests {
             format,
             channels: 2,
             sample_rate: RATE,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         }
     }
 
@@ -539,6 +545,7 @@ mod tests {
             format: AudioFormat::PcmS16Le,
             channels: 1,
             sample_rate: RATE,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         assert_eq!(
             MultiOutputElement::configure_pipeline(&mut element, &mono).unwrap_err(),

@@ -162,11 +162,13 @@ impl CapsSetter {
                     format,
                     channels,
                     sample_rate,
+                    ..
                 },
                 Caps::Audio {
                     format: set_format,
                     channels: set_channels,
                     sample_rate: set_rate,
+                    ..
                 },
             ) => Ok(Caps::Audio {
                 format: if self.names(FORMAT_FIELD) {
@@ -184,6 +186,7 @@ impl CapsSetter {
                 } else {
                     *sample_rate
                 },
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
             }),
             // Same variant, no field-by-field merge to do.
             _ if core::mem::discriminant(incoming) == core::mem::discriminant(setting) => {

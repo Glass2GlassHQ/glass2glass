@@ -33,6 +33,7 @@ pub(crate) fn pw_params(caps: &Caps) -> Result<(AudioFormat, u32, u32), G2gError
         format,
         channels,
         sample_rate,
+        ..
     } = caps
     else {
         return Err(G2gError::CapsMismatch);
@@ -109,6 +110,26 @@ pub(crate) fn format_pod_bytes(format: AudioFormat, channels: u32, rate: u32) ->
         .into_inner()
 }
 
+/// The stream's current `pw_time`, `None` when the probe fails. Call only
+/// while `stream` is live (inside its own process callback, or with the
+/// loop locked): the raw pointer is read without a lifetime tie.
+pub(crate) fn stream_time(stream: &pipewire::stream::StreamRef) -> Option<pipewire::sys::pw_time> {
+    // SAFETY: zero is a valid bit pattern for `pw_time` (plain numeric fields);
+    // the call only writes into it.
+    let mut time: pipewire::sys::pw_time =
+        unsafe { core::mem::MaybeUninit::zeroed().assume_init() };
+    // SAFETY: the caller keeps the stream live for the duration of the call,
+    // and the call is documented RT safe.
+    let res = unsafe {
+        pipewire::sys::pw_stream_get_time_n(
+            stream.as_raw_ptr(),
+            &mut time,
+            core::mem::size_of::<pipewire::sys::pw_time>(),
+        )
+    };
+    (res == 0).then_some(time)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -118,6 +139,7 @@ mod tests {
             format,
             channels,
             sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         }
     }
 

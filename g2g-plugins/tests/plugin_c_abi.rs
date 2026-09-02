@@ -42,6 +42,14 @@ fn manifest_dir() -> PathBuf {
 
 /// Compile the C fixture into a shared library and return its path.
 fn build_c_plugin() -> PathBuf {
+    // One compile per process: the tests run on parallel threads, and a
+    // dlopen against a library the compiler is still writing fails with
+    // "file too short".
+    static BUILT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    BUILT.get_or_init(build_c_plugin_uncached).clone()
+}
+
+fn build_c_plugin_uncached() -> PathBuf {
     let source = manifest_dir().join("tests/fixtures/c-plugin/plugin.c");
     let include = manifest_dir().join("../g2g-plugin/include");
     let out_dir = manifest_dir().join("tests/fixtures/c-plugin/build");

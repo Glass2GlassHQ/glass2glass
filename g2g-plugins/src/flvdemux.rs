@@ -252,6 +252,7 @@ impl FlvDemux {
             format,
             channels: 0,
             sample_rate: 0,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         match stream {
             FlvStream::H264 => video(VideoCodec::H264),
@@ -361,6 +362,7 @@ impl FlvDemux {
                                 format,
                                 channels,
                                 sample_rate,
+                                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
                             };
                             out.push(PipelinePacket::CapsChanged(caps)).await?;
                         }
@@ -947,7 +949,8 @@ mod tests {
             alloc::vec![Caps::Audio {
                 format: AudioFormat::Aac,
                 channels: 2,
-                sample_rate: 48_000
+                sample_rate: 48_000,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED
             }],
             "concrete audio caps announced from the ASC"
         );

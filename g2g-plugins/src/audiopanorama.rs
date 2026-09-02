@@ -201,6 +201,7 @@ impl PadTemplates for AudioPanorama {
             format: AudioFormat::PcmS16Le,
             channels: 2,
             sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         Vec::from([
             PadTemplate::sink(CapsSet::one(stereo.clone())),
@@ -290,6 +291,7 @@ mod tests {
             format: AudioFormat::PcmS16Le,
             channels: 1,
             sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         assert_eq!(
             p.configure_pipeline(&mono).unwrap_err(),
@@ -299,6 +301,7 @@ mod tests {
             format: AudioFormat::PcmS16Le,
             channels: 2,
             sample_rate: 44_100,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         assert!(p.configure_pipeline(&stereo).is_ok());
     }

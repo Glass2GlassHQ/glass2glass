@@ -2,7 +2,10 @@
 //! standard element registry and runs it to completion.
 //!
 //! Usage:
-//!   g2g-launch [OPTIONS] videotestsrc num-buffers=30 ! videoconvert ! fakesink
+//!
+//! ```text
+//! g2g-launch [OPTIONS] videotestsrc num-buffers=30 ! videoconvert ! fakesink
+//! ```
 //!
 //! Leading `gst-launch`-style options are accepted so pasted command lines run
 //! verbatim (M191). The remaining arguments are joined with spaces into one
@@ -12,36 +15,39 @@
 //! feature (registry + wall clock are std-only).
 //!
 //! Options (the common `gst-launch-1.0` set):
-//!   -v, --verbose       print the pipeline with each link's negotiated caps +
-//!                       memory domain (falls back to topology if nego fails)
-//!   -q, --quiet         suppress the PLAYING / Done progress lines
-//!   --dot               dump the parsed pipeline as Graphviz DOT and exit
-//!                       (pipe to `dot -Tsvg`); does not run the pipeline
-//!   --copy-plan         negotiate and print the memory-domain copy plan (per-hop
-//!                       domain trace + transfers + zero-copy verdict), then exit
-//!   --validate-json     negotiate and print the result as JSON (every node and
-//!                       each edge's negotiated caps, or the structured failure),
-//!                       then exit; does not run the pipeline
-//!   --run-json          run the pipeline to EOS and print the same JSON with
-//!                       each edge's caps as observed while it ran, so a stream
-//!                       that refines mid-run reports its real geometry
-//!   --tui               run the pipeline under a live terminal UI (element
-//!                       latency, link traffic, topology, frame journey);
-//!                       needs the `tui` build feature
-//!   --record-on-error <dir>
-//!                       keep a bounded ring of recent packets per link while the
-//!                       run goes, and on failure write each link's ring into
-//!                       <dir> as a `replaysrc` recording (M1016)
-//!   --plugin <path>     load a third-party plugin `.so` before parsing
-//!                       (repeatable; needs the `plugin-loader` build feature)
-//!   --graph <file>      build the graph from a declarative JSON / YAML document
-//!                       instead of a text pipeline (M578; `declarative` /
-//!                       `declarative-yaml` build feature)
-//!   --script <file>     build the graph from a Rhai script that calls the
-//!                       builder API (M579; `script-rhai` build feature)
-//!   -h, --help          print this help and exit
-//!   -e, --eos-on-shutdown, -m, --messages, -f, --no-fault, -t, --tags
-//!                       accepted for compatibility (see notes below)
+//!
+//! ```text
+//! -v, --verbose       print the pipeline with each link's negotiated caps +
+//!                     memory domain (falls back to topology if nego fails)
+//! -q, --quiet         suppress the PLAYING / Done progress lines
+//! --dot               dump the parsed pipeline as Graphviz DOT and exit
+//!                     (pipe to `dot -Tsvg`); does not run the pipeline
+//! --copy-plan         negotiate and print the memory-domain copy plan (per-hop
+//!                     domain trace + transfers + zero-copy verdict), then exit
+//! --validate-json     negotiate and print the result as JSON (every node and
+//!                     each edge's negotiated caps, or the structured failure),
+//!                     then exit; does not run the pipeline
+//! --run-json          run the pipeline to EOS and print the same JSON with
+//!                     each edge's caps as observed while it ran, so a stream
+//!                     that refines mid-run reports its real geometry
+//! --tui               run the pipeline under a live terminal UI (element
+//!                     latency, link traffic, topology, frame journey);
+//!                     needs the `tui` build feature
+//! --record-on-error <dir>
+//!                     keep a bounded ring of recent packets per link while the
+//!                     run goes, and on failure write each link's ring into
+//!                     <dir> as a `replaysrc` recording (M1016)
+//! --plugin <path>     load a third-party plugin `.so` before parsing
+//!                     (repeatable; needs the `plugin-loader` build feature)
+//! --graph <file>      build the graph from a declarative JSON / YAML document
+//!                     instead of a text pipeline (M578; `declarative` /
+//!                     `declarative-yaml` build feature)
+//! --script <file>     build the graph from a Rhai script that calls the
+//!                     builder API (M579; `script-rhai` build feature)
+//! -h, --help          print this help and exit
+//! -e, --eos-on-shutdown, -m, --messages, -f, --no-fault, -t, --tags
+//!                     accepted for compatibility (see notes below)
+//! ```
 //!
 //! Dynamic plugins: with the `plugin-loader` feature, every directory in
 //! `$G2G_PLUGIN_PATH` plus each `--plugin <path>` is `dlopen`ed and its elements

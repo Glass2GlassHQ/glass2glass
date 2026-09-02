@@ -111,7 +111,7 @@ exclude = [
 ]
 
 [workspace.package]
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 license = "MPL-2.0"
 # The host-side floor. The embedded-facing crates (g2g-core, g2g-mcu, g2g-mcugen,
@@ -126,10 +126,10 @@ repository = "https://github.com/boxerab/glass2glass"
 # in the member manifests. g2g-core's `default = []` is the heap-free baseline,
 # so `default-features = false` here keeps that subset the shared starting point.
 [workspace.dependencies]
-g2g-core = { version = "0.6.0", path = "g2g-core", default-features = false }
-g2g-plugins = { version = "0.6.0", path = "g2g-plugins" }
-g2g-ml = { version = "0.6.0", path = "g2g-ml", default-features = false }
-g2g-mcu = { version = "0.6.0", path = "g2g-mcu", default-features = false }
+g2g-core = { version = "0.7.0", path = "g2g-core", default-features = false }
+g2g-plugins = { version = "0.7.0", path = "g2g-plugins" }
+g2g-ml = { version = "0.7.0", path = "g2g-ml", default-features = false }
+g2g-mcu = { version = "0.7.0", path = "g2g-mcu", default-features = false }
 
 [workspace.lints.rust]
 # Treat every compiler warning as an error (the meson `-Werror` analog), so a

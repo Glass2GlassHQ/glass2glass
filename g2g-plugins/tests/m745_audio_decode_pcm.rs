@@ -52,6 +52,7 @@ fn opus_demux_placeholder() -> Caps {
         format: AudioFormat::Opus,
         channels: ANY_CHANNELS,
         sample_rate: ANY_SAMPLE_RATE,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     }
 }
 
@@ -78,6 +79,7 @@ fn opusdec_derives_fixable_pcm_from_demux_placeholder() {
             format,
             channels,
             sample_rate,
+            ..
         } => {
             assert_eq!(format, AudioFormat::PcmS16Le);
             assert_eq!(sample_rate, OPUS_RATE_HZ, "Opus always decodes at 48 kHz");

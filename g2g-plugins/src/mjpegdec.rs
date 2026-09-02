@@ -13,6 +13,10 @@
 //! decoders) so a downstream video encoder needs no intervening `VideoConvert`.
 //! I420 requires even dimensions. System memory.
 //!
+//! A JPEG carries no colour signalling, so the output caps say what JFIF
+//! (ITU-T T.871) defines the samples to be: sRGB out of the RGBA route, and the
+//! same over a BT.601 matrix at limited range out of the I420 one.
+//!
 //! I420 out of a YCbCr JPEG skips the RGBA intermediate: the decoder is asked for
 //! the stream's own colorspace (an identity copy in its color-convert step) and
 //! the interleaved YCbCr is subsampled straight to planar, with only a full ->
@@ -125,7 +129,7 @@ impl MjpegDec {
             height: Dim::Fixed(h),
             framerate: self.framerate.clone(),
             interlace: g2g_core::Interlace::Any,
-            colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            colorimetry: decoded_colorimetry(self.out_format),
         }
     }
 
@@ -180,7 +184,7 @@ impl MjpegDec {
                     RawVideoFormat::I420,
                     w as usize,
                     h as usize,
-                    g2g_core::Colorimetry::UNKNOWN,
+                    decoded_colorimetry(RawVideoFormat::I420),
                 )
                 .into_vec())
             }
@@ -231,10 +235,25 @@ impl MjpegDec {
     }
 }
 
+/// How the decoded samples map to colour. A JFIF file is full-range BT.601 over
+/// sRGB ([`Colorimetry::JPEG`](g2g_core::Colorimetry::JPEG)); the RGBA route ends
+/// in sRGB's identity "matrix", and the I420 route deliberately scales to the
+/// limited range the rest of the pipeline uses.
+fn decoded_colorimetry(out_format: RawVideoFormat) -> g2g_core::Colorimetry {
+    match out_format {
+        RawVideoFormat::I420 => g2g_core::Colorimetry {
+            range: g2g_core::ColorRange::Limited,
+            ..g2g_core::Colorimetry::JPEG
+        },
+        _ => g2g_core::Colorimetry::SRGB,
+    }
+}
+
 /// Interleaved JPEG YCbCr (full-range BT.601) -> planar I420 in the limited range
 /// the rest of the pipeline uses. Chroma is the average of each 2x2 block, taken
-/// before the range scale, which is what the RGBA route does in RGB: both matrices
-/// are BT.601, so the two paths agree to a rounding step. Even dims only.
+/// before the range scale, which is what the RGBA route does in RGB. On saturated
+/// colours the two paths diverge by up to ~20 per sample (the RGBA route clips at
+/// the RGB gamut boundary, this one never leaves YCbCr). Even dims only.
 fn ycbcr_to_i420(src: &[u8], w: usize, h: usize) -> Result<Vec<u8>, G2gError> {
     let luma = w * h;
     if src.len() < luma * 3 {
@@ -307,7 +326,7 @@ impl AsyncElement for MjpegDec {
                 height: height.clone(),
                 framerate: framerate.clone(),
                 interlace: g2g_core::Interlace::Any,
-                colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                colorimetry: decoded_colorimetry(out_format),
             }),
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
@@ -454,7 +473,7 @@ impl PadTemplates for MjpegDec {
             height: Dim::Any,
             framerate: Rate::Any,
             interlace: g2g_core::Interlace::Any,
-            colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            colorimetry: decoded_colorimetry(format),
         };
         Vec::from([
             PadTemplate::sink(CapsSet::one(Self::input_template())),

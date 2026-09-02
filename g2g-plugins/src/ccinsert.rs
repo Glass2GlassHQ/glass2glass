@@ -1,8 +1,8 @@
 //! Closed-caption insertion element (M432, `no_std`): the encode-side counterpart
 //! of [`CcExtract`](crate::ccextract). It takes a compressed H.264 / H.265 access
 //! unit stream and a timed `Caps::Text{Utf8}` cue stream, encodes the cues to
-//! CEA-608 `cc_data` with [`Cc608Enc`](crate::cea::Cc608Enc), and writes a `GA94`
-//! caption SEI ([`build_cc_sei`](crate::cea::build_cc_sei)) into each access unit,
+//! CEA-608 `cc_data` with [`Cc608Enc`], and writes a `GA94`
+//! caption SEI ([`build_cc_sei`]) into each access unit,
 //! so a downstream decoder / TV recovers the captions. Compressed video in (plus a
 //! cue pad), compressed video out, the inverse of `CcExtract`'s extract.
 //!

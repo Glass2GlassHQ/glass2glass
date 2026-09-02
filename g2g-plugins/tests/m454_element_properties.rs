@@ -159,6 +159,7 @@ fn opusenc_audio_type() {
         format: g2g_core::AudioFormat::PcmS16Le,
         channels: 1,
         sample_rate: 48_000,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     };
     e.configure_pipeline(&caps)
         .expect("voice encoder initializes");
@@ -1486,6 +1487,7 @@ async fn pipewiresrc_format_rate_and_channels() {
             format: AudioFormat::PcmF32Le,
             channels: 1,
             sample_rate: 44_100,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         })
     );
     // a format with no PCM stream behind it is rejected, never silently kept
@@ -2099,6 +2101,7 @@ fn interleave_format_and_rate() {
             format: AudioFormat::PcmF32Le,
             channels: 2,
             sample_rate: 44_100,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         },
         "the properties are what the merged output declares"
     );
@@ -2134,6 +2137,7 @@ fn deinterleave_format_rate_and_channel() {
             format: AudioFormat::PcmS32Le,
             channels: 1,
             sample_rate: 16_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         }),
         "every port carries one channel of the declared shape"
     );
@@ -4148,5 +4152,50 @@ fn ffmpegdec_thread_type() {
         e.set_property("thread-type", PropValue::Str("frame+slice".into()))
             .is_err(),
         "gst's flag-combining spelling is not one of our nicks"
+    );
+}
+
+/// M1130: `audioreverse`'s batch size, in nanoseconds.
+#[test]
+fn audioreverse_chunk_duration() {
+    use g2g_plugins::audioreverse::AudioReverse;
+    let mut e = AudioReverse::new();
+    assert!(declares(e.properties(), "chunk-duration"));
+    assert_eq!(
+        e.get_property("chunk-duration"),
+        Some(declared_default(e.properties(), "chunk-duration"))
+    );
+    e.set_property("chunk-duration", PropValue::Uint(250_000_000))
+        .unwrap();
+    assert_eq!(
+        e.get_property("chunk-duration"),
+        Some(PropValue::Uint(250_000_000))
+    );
+}
+
+/// M1131: `ebur128`'s reporting interval and measurement switch.
+#[test]
+fn ebur128_interval_and_post_messages() {
+    use g2g_plugins::ebur128::Ebur128;
+    let mut e = Ebur128::new();
+    for name in ["interval", "post-messages"] {
+        assert!(declares(e.properties(), name), "{name} must be declared");
+        assert_eq!(
+            e.get_property(name),
+            Some(declared_default(e.properties(), name)),
+            "{name} reports its declared default"
+        );
+    }
+    e.set_property("interval", PropValue::Uint(400_000_000))
+        .unwrap();
+    assert_eq!(
+        e.get_property("interval"),
+        Some(PropValue::Uint(400_000_000))
+    );
+    e.set_property("post-messages", PropValue::Bool(false))
+        .unwrap();
+    assert_eq!(
+        e.get_property("post-messages"),
+        Some(PropValue::Bool(false))
     );
 }

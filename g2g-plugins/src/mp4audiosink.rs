@@ -93,6 +93,7 @@ impl Mp4AudioSink {
             format: AudioFormat::Aac,
             channels,
             sample_rate,
+            ..
         } = caps
         else {
             return Err(G2gError::CapsMismatch);
@@ -216,6 +217,7 @@ impl PadTemplates for Mp4AudioSink {
             format: AudioFormat::Aac,
             channels: 2,
             sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         }))])
     }
 }
@@ -439,6 +441,7 @@ mod tests {
             format: AudioFormat::PcmS16Le,
             channels: 2,
             sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         assert!(matches!(
             sink.configure_pipeline(&pcm),
@@ -453,6 +456,7 @@ mod tests {
             format: AudioFormat::Aac,
             channels: 2,
             sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         assert!(matches!(
             sink.configure_pipeline(&aac),

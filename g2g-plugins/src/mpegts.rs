@@ -148,7 +148,7 @@ pub const STREAM_TYPE_AC3: u8 = 0x81;
 /// The mux wraps each KLV access unit in one ISO 13818-1 metadata AU cell, which
 /// is both what ST 1402 calls for and what ffmpeg's demuxer assumes: it skips 5
 /// bytes off every 0x15 PES payload on the metadata stream_id. The demux accepts
-/// a bare payload too (see [`unwrap_metadata_au_cells`]).
+/// a bare payload too (see `unwrap_metadata_au_cells`).
 pub const STREAM_TYPE_METADATA_PES: u8 = 0x15;
 
 /// PMT ES-info for a synchronous-KLV (0x15) stream: a `metadata_descriptor`
@@ -861,7 +861,7 @@ impl TsDemuxer {
     }
 
     /// Drain the access units completed so far, synthesizing a PTS for each
-    /// unstamped video unit that qualifies (see [`VideoPtsSynth`]).
+    /// unstamped video unit that qualifies (see `VideoPtsSynth`).
     pub fn take_units(&mut self) -> Vec<EsUnit> {
         let mut units = core::mem::take(&mut self.completed);
         for unit in units.iter_mut() {
@@ -2014,7 +2014,7 @@ impl TsMuxer {
 
     /// Declare elementary stream `index` as AV1 video in its PMT entry (M1049),
     /// as the AOM carriage's `registration_descriptor`, with the format_identifier
-    /// a live receiver reads (see [`AV1_REGISTRATION_ID_GSTREAMER`]). Without this
+    /// a live receiver reads (see `AV1_REGISTRATION_ID_GSTREAMER`). Without this
     /// the stream is asynchronous KLV, the muxer's default reading of a private
     /// PES. An out-of-range index or a stream that is not a private PES is
     /// ignored. Call before the first access unit (the PMT goes out then).
@@ -2046,7 +2046,7 @@ impl TsMuxer {
     }
 
     /// Set the PAT/PMT re-emission cadence in 90 kHz ticks (`0` = once up front).
-    /// See [`table_interval_90khz`](Self::table_interval_90khz).
+    /// See `table_interval_90khz`.
     pub fn set_table_interval_90khz(&mut self, ticks: u64) {
         self.table_interval_90khz = ticks;
     }

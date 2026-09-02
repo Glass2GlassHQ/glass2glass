@@ -1126,7 +1126,12 @@ where
                 Some(PipelinePacket::Eos) => {
                     MultiOutputElement::process(fanout, PipelinePacket::Eos, &mut multi).await?;
                     for port in 0..branch_count {
-                        multi.push_to(port, PipelinePacket::Eos).await?;
+                        // An element that forwards Eos itself already ended
+                        // this port; a second Eos behind it breaks the
+                        // one-terminal contract the drain machinery relies on.
+                        if !multi.eos_forwarded(port) {
+                            multi.push_to(port, PipelinePacket::Eos).await?;
+                        }
                     }
                     return Ok::<u64, G2gError>(0);
                 }

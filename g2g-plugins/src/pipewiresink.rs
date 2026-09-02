@@ -383,6 +383,7 @@ impl PadTemplates for PipeWireSink {
             format,
             channels: 2,
             sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         Vec::from([PadTemplate::sink(CapsSet::from_alternatives(Vec::from([
             pcm(AudioFormat::PcmU8),
@@ -523,22 +524,12 @@ fn build_and_run(
 /// the caller's stamp of the last line.
 fn discipline_clock(stream: &pw::stream::StreamRef, clock: &DriftClock, last_log_ns: &mut u64) {
     let local_ns = clock.reference_now();
-    // SAFETY: zero is a valid bit pattern for `pw_time` (plain numeric fields);
-    // the call only writes into it.
-    let mut time: pw::sys::pw_time = unsafe { core::mem::MaybeUninit::zeroed().assume_init() };
-    // SAFETY: the stream pointer is live for the duration of its own process
-    // callback, and the call is documented RT safe.
-    let res = unsafe {
-        pw::sys::pw_stream_get_time_n(
-            stream.as_raw_ptr(),
-            &mut time,
-            core::mem::size_of::<pw::sys::pw_time>(),
-        )
+    let Some(time) = crate::pwaudio::stream_time(stream) else {
+        return;
     };
-    // A failed probe, a not-yet-running stream (ticks still zero), or a report
-    // with no rate yields no usable position; skip rather than feed a bogus
-    // sample.
-    if res != 0 || time.ticks == 0 || time.rate.denom == 0 {
+    // A not-yet-running stream (ticks still zero) or a report with no rate
+    // yields no usable position; skip rather than feed a bogus sample.
+    if time.ticks == 0 || time.rate.denom == 0 {
         return;
     }
     let master_ns = (u128::from(time.ticks) * u128::from(time.rate.num) * 1_000_000_000
@@ -571,12 +562,14 @@ mod tests {
             format: AudioFormat::PcmS16Le,
             channels: 2,
             sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         assert_eq!(sink.intercept_caps(&pcm), Ok(pcm));
         let aac = Caps::Audio {
             format: AudioFormat::Aac,
             channels: 2,
             sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         assert_eq!(sink.intercept_caps(&aac), Err(G2gError::CapsMismatch));
     }
@@ -623,6 +616,7 @@ mod tests {
             format: AudioFormat::PcmF32Le,
             channels: 2,
             sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         assert!(matches!(sink.caps, g2g_core::PadCaps::Fixed(ref s) if s.accepts(&pcm)));
         assert!(PipeWireSink::pad_template(PadDirection::Source).is_none());

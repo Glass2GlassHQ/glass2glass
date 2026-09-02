@@ -71,6 +71,7 @@ fn opus_with_concrete_channels_auto_plugs_opusdec() {
         format: AudioFormat::Opus,
         channels: 2,
         sample_rate: 0,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     };
     let names = reg
         .autoplug_names(&opus, &is_raw_audio, 6)
@@ -97,6 +98,7 @@ fn opusdec_defers_placeholder_channels_at_configure() {
         format: AudioFormat::Opus,
         channels: ch,
         sample_rate: 0,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     };
     // The channels-0 placeholder is accepted (decoder deferred), so the
     // OggDemux / decodebin path negotiates before the count is known.

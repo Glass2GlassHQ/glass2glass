@@ -100,6 +100,7 @@ async fn mux_fmp4() -> Vec<u8> {
         format: AudioFormat::Aac,
         channels: 2,
         sample_rate: 48000,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     };
 
     let mut mux = Mp4MuxN::new(2);

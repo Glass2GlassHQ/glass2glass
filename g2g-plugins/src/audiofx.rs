@@ -44,6 +44,7 @@ pub(crate) fn accept_audio(
             format,
             channels,
             sample_rate,
+            ..
         } if AUDIOFX_FORMATS.contains(format)
             && *channels > 0
             && required_channels.is_none_or(|want| want == *channels) =>
@@ -70,6 +71,7 @@ pub(crate) fn pad_templates(channels: u8) -> Vec<PadTemplate> {
         format,
         channels,
         sample_rate: TEMPLATE_RATE,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     };
     let set = CapsSet::from_alternatives(AUDIOFX_FORMATS.map(pcm).to_vec());
     Vec::from([PadTemplate::sink(set.clone()), PadTemplate::source(set)])

@@ -190,6 +190,7 @@ async fn demuxed_frames_match_ffprobe_packets() {
             format: AudioFormat::Flac,
             channels: 2,
             sample_rate: 44_100,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         }],
         "STREAMINFO caps"
     );

@@ -78,6 +78,7 @@ async fn encodes_pcm_to_aac_access_units() {
         format: AudioFormat::PcmS16Le,
         channels: CHANNELS,
         sample_rate: RATE,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     };
     let narrowed = enc.intercept_caps(&caps).expect("intercept s16");
     enc.configure_pipeline(&narrowed)
@@ -111,6 +112,7 @@ async fn encodes_pcm_to_aac_access_units() {
                 format: AudioFormat::Aac,
                 channels: CHANNELS,
                 sample_rate: RATE,
+                ..
             })
         ),
         "emits AAC caps, got {:?}",

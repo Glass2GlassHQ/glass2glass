@@ -1631,11 +1631,13 @@ fn the_source_pad_advertises_every_selection() {
             format: AudioFormat::Mp2,
             channels: 0,
             sample_rate: 0,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         },
         Caps::Audio {
             format: AudioFormat::Ac3,
             channels: 0,
             sample_rate: 0,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         },
         Caps::SubPicture {
             format: SubPictureFormat::VobSub,

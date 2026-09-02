@@ -238,10 +238,12 @@ impl AsyncElement for MfAacDecode {
                 format: AudioFormat::Aac,
                 channels,
                 sample_rate,
+                ..
             } => CapsSet::one(Caps::Audio {
                 format: AudioFormat::PcmS16Le,
                 channels: *channels,
                 sample_rate: *sample_rate,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
             }),
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
@@ -253,6 +255,7 @@ impl AsyncElement for MfAacDecode {
                 format: AudioFormat::Aac,
                 channels,
                 sample_rate,
+                ..
             } => (*channels, *sample_rate),
             _ => return Err(G2gError::CapsMismatch),
         };
@@ -296,6 +299,7 @@ impl AsyncElement for MfAacDecode {
                         format: AudioFormat::Aac,
                         channels,
                         sample_rate,
+                        ..
                     } if *channels == self.channels && *sample_rate == self.sample_rate => {}
                     _ => return Err(G2gError::CapsMismatch),
                 },
@@ -327,6 +331,7 @@ impl AsyncElement for MfAacDecode {
                 format: AudioFormat::PcmS16Le,
                 channels: self.channels,
                 sample_rate: self.sample_rate,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
             };
             let frame_bytes = 2 * self.channels.max(1) as u64; // 16-bit
             for pcm in decoded {
@@ -364,11 +369,13 @@ impl PadTemplates for MfAacDecode {
             format: AudioFormat::Aac,
             channels: 2,
             sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         let pcm = Caps::Audio {
             format: AudioFormat::PcmS16Le,
             channels: 2,
             sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         Vec::from([
             PadTemplate::sink(CapsSet::one(aac)),
@@ -554,12 +561,14 @@ mod tests {
             format: AudioFormat::Aac,
             channels: 2,
             sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         assert_eq!(dec.intercept_caps(&aac), Ok(aac));
         let pcm = Caps::Audio {
             format: AudioFormat::PcmS16Le,
             channels: 2,
             sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         assert_eq!(dec.intercept_caps(&pcm), Err(G2gError::CapsMismatch));
     }
@@ -574,6 +583,7 @@ mod tests {
             format: AudioFormat::Aac,
             channels: 2,
             sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         });
         assert_eq!(
             out.alternatives(),
@@ -581,6 +591,7 @@ mod tests {
                 format: AudioFormat::PcmS16Le,
                 channels: 2,
                 sample_rate: 48_000,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
             }]
         );
     }
@@ -601,6 +612,7 @@ mod tests {
             format: AudioFormat::Aac,
             channels: 2,
             sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         assert!(matches!(
             dec.configure_pipeline(&aac),

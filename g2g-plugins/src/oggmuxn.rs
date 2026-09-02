@@ -5,7 +5,7 @@
 //!
 //! A [`MultiInputElement`]: each pad becomes its own logical bitstream with its
 //! own serial number, and the codec mapping per stream is the shared
-//! [`OggStreamMux`] the single-input muxer also uses. Packets interleave by
+//! `OggStreamMux` the single-input muxer also uses. Packets interleave by
 //! presentation timestamp through the M204
 //! [`InputAggregator::take_earliest_by`](g2g_core::InputAggregator::take_earliest_by)
 //! merge, so the data pages of the streams alternate the way a player expects.
@@ -341,6 +341,7 @@ mod tests {
             format,
             channels,
             sample_rate,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         }
     }
 

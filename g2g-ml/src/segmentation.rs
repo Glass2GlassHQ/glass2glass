@@ -12,7 +12,7 @@
 //! instance's pixels. This module is the pure-Rust decode of that pair (no
 //! inference engine, `analytics` feature only), so an `ort-web` caller in the
 //! browser that already holds both outputs as `Float32Array`s can decode without
-//! routing tensor frames through an element. [`crate::ortsegment::OrtSegmentation`]
+//! routing tensor frames through an element. `ortsegment::OrtSegmentation`
 //! is the in-graph producer built on it.
 //!
 //! Emitted per surviving instance: a `Segmentation` (box, class, confidence, mask)

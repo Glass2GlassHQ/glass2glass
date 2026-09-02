@@ -125,6 +125,7 @@ pub fn elementary_audio_caps(format: AudioFormat) -> Caps {
         format,
         channels: 0,
         sample_rate: 0,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     }
 }
 

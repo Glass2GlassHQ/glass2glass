@@ -541,6 +541,7 @@ impl AvfAudioSrc {
             format: AudioFormat::PcmS16Le,
             channels: self.channels,
             sample_rate: self.sample_rate,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         }
     }
 

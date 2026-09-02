@@ -1679,7 +1679,7 @@ fn strip_ass_markup(raw: &str) -> String {
 /// - [`TextFormat::Ssa`] (`S_TEXT/ASS`): the block is the comma-separated fields
 ///   `ReadOrder,Layer,Style,Name,MarginL,MarginR,MarginV,Effect,Text`; the `Text`
 ///   field (everything after the 8th comma) is taken and its `{...}` override tags
-///   / `\N` line breaks resolved (via [`strip_ass_markup`]).
+///   / `\N` line breaks resolved (via `strip_ass_markup`).
 /// - [`TextFormat::WebVtt`] (`S_TEXT/WEBVTT`): the payload is the cue text with
 ///   inline `<...>` tags, which are stripped.
 ///

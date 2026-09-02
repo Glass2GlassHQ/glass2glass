@@ -85,6 +85,7 @@ mod fanout {
                 format: AudioFormat::Aac,
                 channels: 0,
                 sample_rate: 0,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
             })),
         )
         .expect("the fan-out assembles")
@@ -238,6 +239,7 @@ mod live {
             format: audio_format,
             channels: sdp_channels,
             sample_rate: sdp_sample_rate,
+            ..
         } = audio_caps
         else {
             panic!("audio track caps are not Caps::Audio: {audio_caps:?}");
@@ -314,6 +316,7 @@ mod live {
                 format,
                 channels,
                 sample_rate,
+                ..
             } => {
                 assert!(
                     matches!(

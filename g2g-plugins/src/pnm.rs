@@ -3,7 +3,7 @@
 //!
 //! `pnmenc ascii=` writes ASCII P3 instead of binary P6; `pnmdec` has no
 //! knobs. Geometry is the file's word, so it is
-//! bounded before any buffer is sized (see [`crate::stillimage`]). Output is
+//! bounded before any buffer is sized (see `stillimage`). Output is
 //! packed RGB8: PGM / PBM expand to grey / black-white RGB because g2g has no
 //! GRAY8 raw format. System memory.
 

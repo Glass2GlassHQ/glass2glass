@@ -18,6 +18,13 @@
 //! round-robin fold/replicate so no channel is silently dropped. Sample rate is
 //! preserved (no resampler). CPU-only and `no_std`: this element lives in the
 //! crate baseline.
+//!
+//! A conversion that drops resolution (F32 or a wider integer down to, say,
+//! S16) adds dither before rounding (tpdf by default, as in gst) and can feed
+//! the rounding error back through a noise-shaping filter, per the `dithering`
+//! / `dithering-threshold` / `noise-shaping` properties. Neither runs on a
+//! lossless conversion, so a passthrough or an equal-depth format change stays
+//! byte for byte identical.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -33,6 +40,8 @@ use g2g_core::{
     MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
     PropValue, PropertySpec, ANY_CHANNELS,
 };
+
+use crate::random::{next_random, XORSHIFT_BASE_STATE};
 
 /// The PCM sample formats `AudioConvert` / `AudioResample` read and write: every
 /// one g2g has, since the converter is what makes any of them reachable.
@@ -62,6 +71,14 @@ pub struct AudioConvert {
     /// Input format/channels/rate of the configured stream, updated by a
     /// mid-stream `CapsChanged`.
     input: Option<(AudioFormat, u8, u32)>,
+    /// Speaker layout the input caps declared, `UNSPECIFIED` when they did not.
+    input_layout: ChannelLayout,
+    /// Speaker layout the negotiated output caps pinned (a downstream
+    /// `channel-mask`), `UNSPECIFIED` when they left it open.
+    output_layout: ChannelLayout,
+    /// Dither + noise-shaping settings and their per-channel state, applied
+    /// only where the output format drops resolution.
+    quantizer: Quantizer,
     configured: bool,
     last_caps: Option<Caps>,
     emitted: u64,
@@ -77,11 +94,7 @@ impl AudioConvert {
         Self {
             target_format: Some(target_format),
             target_channels: Some(target_channels),
-            resolved: None,
-            input: None,
-            configured: false,
-            last_caps: None,
-            emitted: 0,
+            ..Self::auto()
         }
     }
 
@@ -94,6 +107,13 @@ impl AudioConvert {
             target_channels: None,
             resolved: None,
             input: None,
+            input_layout: ChannelLayout::UNSPECIFIED,
+            output_layout: ChannelLayout::UNSPECIFIED,
+            quantizer: Quantizer {
+                dither: DEFAULT_DITHER,
+                threshold: DITHERING_THRESHOLD,
+                ..Quantizer::default()
+            },
             configured: false,
             last_caps: None,
             emitted: 0,
@@ -124,16 +144,32 @@ impl AudioConvert {
         self.out_channels(2)
     }
 
+    /// Speaker layout to put on the output caps: the one a downstream
+    /// `channel-mask` pinned, else the input's when the channel count is
+    /// unchanged (nothing was remixed), else unspecified, since a remix lands on
+    /// the target count's conventional layout, which is what an unspecified
+    /// layout already means.
+    fn out_layout(&self, in_channels: u8, out_channels: u8) -> ChannelLayout {
+        if !self.output_layout.is_unspecified() {
+            return self.output_layout;
+        }
+        if in_channels == out_channels {
+            return self.input_layout;
+        }
+        ChannelLayout::UNSPECIFIED
+    }
+
     /// Validate a PCM caps as a convertible input, returning its
     /// format/channels/rate. Any concrete input channel count converts to the
     /// target (identity / fan-out / downmix / layout-agnostic remap);
     /// `ANY_CHANNELS` (0) is the negotiation placeholder, accepted here with the
     /// real count arriving via a `CapsChanged` before the first frame.
-    fn accept_input(&self, caps: &Caps) -> Result<(AudioFormat, u8, u32), G2gError> {
+    fn accept_input(&self, caps: &Caps) -> Result<(AudioFormat, u8, u32, ChannelLayout), G2gError> {
         let Caps::Audio {
             format,
             channels,
             sample_rate,
+            channel_layout,
         } = caps
         else {
             return Err(G2gError::CapsMismatch);
@@ -141,7 +177,7 @@ impl AudioConvert {
         if !pcm_formats().contains(format) {
             return Err(G2gError::CapsMismatch);
         }
-        Ok((*format, *channels, *sample_rate))
+        Ok((*format, *channels, *sample_rate, *channel_layout))
     }
 }
 
@@ -317,8 +353,10 @@ impl AsyncElement for AudioConvert {
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        let (format, channels, rate) = self.accept_input(absolute_caps)?;
+        let (format, channels, rate, channel_layout) = self.accept_input(absolute_caps)?;
         self.input = Some((format, channels, rate));
+        self.input_layout = channel_layout;
+        self.quantizer.reset();
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
     }
@@ -327,7 +365,10 @@ impl AsyncElement for AudioConvert {
     /// output caps when a target is unset (auto). Already fixated, so concrete.
     fn configure_output(&mut self, output_caps: &Caps) -> Result<(), G2gError> {
         let Caps::Audio {
-            format, channels, ..
+            format,
+            channels,
+            channel_layout,
+            ..
         } = output_caps
         else {
             return Err(G2gError::CapsMismatch);
@@ -336,6 +377,7 @@ impl AsyncElement for AudioConvert {
             return Err(G2gError::CapsMismatch);
         }
         self.resolved = Some((*format, *channels));
+        self.output_layout = *channel_layout;
         Ok(())
     }
 
@@ -357,13 +399,27 @@ impl AsyncElement for AudioConvert {
                         .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
                     let out_format = self.out_format(in_format);
                     let out_channels = self.out_channels(in_channels);
-                    let converted =
-                        convert_pcm(slice, in_format, in_channels, out_format, out_channels)?;
+                    let out_layout = self.out_layout(in_channels, out_channels);
+                    let converted = convert_pcm(
+                        slice,
+                        PcmStream {
+                            format: in_format,
+                            channels: in_channels,
+                            layout: self.input_layout,
+                        },
+                        PcmStream {
+                            format: out_format,
+                            channels: out_channels,
+                            layout: out_layout,
+                        },
+                        &mut self.quantizer,
+                    )?;
 
                     let new_caps = Caps::Audio {
                         format: out_format,
                         channels: out_channels,
                         sample_rate: rate,
+                        channel_layout: out_layout,
                     };
                     if self.last_caps.as_ref() != Some(&new_caps) {
                         out.push(PipelinePacket::CapsChanged(new_caps.clone()))
@@ -393,6 +449,7 @@ impl AsyncElement for AudioConvert {
                     self.last_caps = Some(c);
                 }
                 PipelinePacket::Flush => {
+                    self.quantizer.reset();
                     self.last_caps = None;
                     out.push(PipelinePacket::Flush).await?;
                 }
@@ -438,6 +495,28 @@ impl AsyncElement for AudioConvert {
                 self.target_channels = Some(c);
                 Ok(())
             }
+            "dithering" => {
+                let s = value.as_str().ok_or(PropError::Type)?;
+                self.quantizer.dither = dither_from_nick(s).ok_or(PropError::Value)?;
+                self.quantizer.reset();
+                Ok(())
+            }
+            "dithering-threshold" => {
+                let bits = value.as_uint().ok_or(PropError::Type)?;
+                if bits > MAX_DITHERING_THRESHOLD {
+                    return Err(PropError::Value);
+                }
+                self.quantizer.threshold = bits as u8;
+                Ok(())
+            }
+            "noise-shaping" => {
+                let s = value.as_str().ok_or(PropError::Type)?;
+                self.quantizer.shaping = noise_shaping_from_nick(s).ok_or(PropError::Value)?;
+                // the filter history is method-sized; drop it so the next
+                // buffer rebuilds it.
+                self.quantizer.reset();
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -448,6 +527,11 @@ impl AsyncElement for AudioConvert {
                 audio_format_to_str(self.target_format()).into(),
             )),
             "channels" => Some(PropValue::Uint(self.target_channels() as u64)),
+            "dithering" => Some(PropValue::Str(dither_nick(self.quantizer.dither).into())),
+            "dithering-threshold" => Some(PropValue::Uint(u64::from(self.quantizer.threshold))),
+            "noise-shaping" => Some(PropValue::Str(
+                noise_shaping_nick(self.quantizer.shaping).into(),
+            )),
             _ => None,
         }
     }
@@ -461,6 +545,27 @@ static AUDIOCONVERT_PROPS: &[PropertySpec] = &[
         "output sample format: S16LE | F32LE | S24LE | S32LE | U8",
     ),
     PropertySpec::new("channels", PropKind::Uint, "output channel count"),
+    PropertySpec::new(
+        "dithering",
+        PropKind::Str,
+        "dither added before rounding, on a bit-depth reduction",
+    )
+    .with_enum_values(DITHER_NICKS)
+    .with_default(dither_nick(DEFAULT_DITHER)),
+    PropertySpec::new(
+        "dithering-threshold",
+        PropKind::Uint,
+        "output bit depth at or below which to dither",
+    )
+    .with_range(MIN_DITHERING_THRESHOLD_TEXT, MAX_DITHERING_THRESHOLD_TEXT)
+    .with_default(DITHERING_THRESHOLD_TEXT),
+    PropertySpec::new(
+        "noise-shaping",
+        PropKind::Str,
+        "error-feedback filter on the rounding error, on a bit-depth reduction",
+    )
+    .with_enum_values(NOISE_SHAPING_NICKS)
+    .with_default("none"),
 ];
 
 /// Parse an audio-format property string to an [`AudioFormat`]. Shared with the
@@ -493,26 +598,38 @@ impl PadTemplates for AudioConvert {
             format,
             channels: 2,
             sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         let set = CapsSet::from_alternatives(pcm_formats().map(pcm).to_vec());
         Vec::from([PadTemplate::sink(set.clone()), PadTemplate::source(set)])
     }
 }
 
+/// The interleaved PCM on one end of a conversion: its sample format, how many
+/// channels it carries, and which speakers those channels feed
+/// ([`ChannelLayout::UNSPECIFIED`] when the caps did not say).
+#[derive(Clone, Copy, Debug)]
+struct PcmStream {
+    format: AudioFormat,
+    channels: u8,
+    layout: ChannelLayout,
+}
+
 /// Read interleaved PCM and re-emit it in the target format/channel count.
 /// Samples pass through an f32 intermediate; channel mapping is identity,
-/// mono fan-out, or downmix-to-mono average.
+/// mono fan-out, or downmix-to-mono average. `quantizer` carries the dither and
+/// noise-shaping state, and only engages on a conversion that drops resolution.
 fn convert_pcm(
     src: &[u8],
-    in_format: AudioFormat,
-    in_channels: u8,
-    out_format: AudioFormat,
-    out_channels: u8,
+    input: PcmStream,
+    output: PcmStream,
+    quantizer: &mut Quantizer,
 ) -> Result<Box<[u8]>, G2gError> {
+    let (in_format, out_format) = (input.format, output.format);
     let in_bytes = sample_bytes(in_format);
     let out_bytes = sample_bytes(out_format);
-    let in_ch = in_channels as usize;
-    let out_ch = out_channels as usize;
+    let in_ch = input.channels as usize;
+    let out_ch = output.channels as usize;
     let in_frame = in_bytes * in_ch;
     if in_frame == 0 || !src.len().is_multiple_of(in_frame) {
         return Err(G2gError::CapsMismatch);
@@ -520,12 +637,21 @@ fn convert_pcm(
     let frames = src.len() / in_frame;
 
     // Position-aware mixing whenever either side is true multichannel and both
-    // counts have a conventional layout; None keeps the layout-agnostic paths.
+    // sides have a usable layout; None keeps the layout-agnostic paths.
     let matrix = if in_ch != out_ch && in_ch.max(out_ch) > 2 {
-        mix_matrix(in_ch, out_ch)
+        match (
+            mixing_layout(input.layout, in_ch),
+            mixing_layout(output.layout, out_ch),
+        ) {
+            (Some(i), Some(o)) => Some(mix_matrix(i, o)),
+            _ => None,
+        }
     } else {
         None
     };
+
+    let plan = quantizer.plan(in_format, out_format);
+    quantizer.prepare(out_ch, plan);
 
     let mut dst = Vec::with_capacity(frames * out_bytes * out_ch);
     let mut in_samples = alloc::vec![0f32; in_ch];
@@ -543,10 +669,253 @@ fn convert_pcm(
                     .sum(),
                 None => map_channel(&in_samples, oc, out_ch),
             };
-            write_sample(&mut dst, v, out_format);
+            quantizer.write(&mut dst, v, out_format, oc, plan);
         }
     }
     Ok(dst.into_boxed_slice())
+}
+
+/// The `dithering` choices, matching gst audioconvert's `GstAudioDitherMethod`
+/// nicks (`gst-inspect-1.0 audioconvert`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum DitherMethod {
+    #[default]
+    None,
+    /// One uniform draw, rectangular over +/- 1 LSB.
+    Rpdf,
+    /// Two uniform half-LSB draws summed, triangular over +/- 1 LSB.
+    Tpdf,
+    /// A triangular draw differenced against the channel's previous one, which
+    /// tilts the dither noise itself toward high frequency.
+    TpdfHf,
+}
+
+/// The `noise-shaping` choices, matching gst audioconvert's
+/// `GstAudioNoiseShapingMethod` nicks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum NoiseShapingMethod {
+    #[default]
+    None,
+    ErrorFeedback,
+    Simple,
+    Medium,
+    High,
+}
+
+const DITHER_NICKS: &str = "none | rpdf | tpdf | tpdf-hf";
+const NOISE_SHAPING_NICKS: &str = "none | error-feedback | simple | medium | high";
+
+/// gst's `dithering` default.
+const DEFAULT_DITHER: DitherMethod = DitherMethod::Tpdf;
+
+/// gst's `dithering-threshold` default: dither only where the output resolution
+/// is this many bits or fewer.
+const DITHERING_THRESHOLD: u8 = 20;
+const DITHERING_THRESHOLD_TEXT: &str = "20";
+/// gst's declared bound on `dithering-threshold` (Unsigned Integer, 0 - 32).
+const MAX_DITHERING_THRESHOLD: u64 = 32;
+const MIN_DITHERING_THRESHOLD_TEXT: &str = "0";
+const MAX_DITHERING_THRESHOLD_TEXT: &str = "32";
+
+/// The name a [`DitherMethod`] takes in a launch line.
+const fn dither_nick(method: DitherMethod) -> &'static str {
+    match method {
+        DitherMethod::None => "none",
+        DitherMethod::Rpdf => "rpdf",
+        DitherMethod::Tpdf => "tpdf",
+        DitherMethod::TpdfHf => "tpdf-hf",
+    }
+}
+
+fn dither_from_nick(nick: &str) -> Option<DitherMethod> {
+    match nick {
+        "none" => Some(DitherMethod::None),
+        "rpdf" => Some(DitherMethod::Rpdf),
+        "tpdf" => Some(DitherMethod::Tpdf),
+        "tpdf-hf" => Some(DitherMethod::TpdfHf),
+        _ => None,
+    }
+}
+
+fn noise_shaping_nick(method: NoiseShapingMethod) -> &'static str {
+    match method {
+        NoiseShapingMethod::None => "none",
+        NoiseShapingMethod::ErrorFeedback => "error-feedback",
+        NoiseShapingMethod::Simple => "simple",
+        NoiseShapingMethod::Medium => "medium",
+        NoiseShapingMethod::High => "high",
+    }
+}
+
+fn noise_shaping_from_nick(nick: &str) -> Option<NoiseShapingMethod> {
+    match nick {
+        "none" => Some(NoiseShapingMethod::None),
+        "error-feedback" => Some(NoiseShapingMethod::ErrorFeedback),
+        "simple" => Some(NoiseShapingMethod::Simple),
+        "medium" => Some(NoiseShapingMethod::Medium),
+        "high" => Some(NoiseShapingMethod::High),
+        _ => None,
+    }
+}
+
+/// Error-feedback weights per shaping method, oldest error first: the last
+/// entry weights the error made on the previous sample. Taken from GStreamer's
+/// `audio-quantize.c` (`ns_simple_coeffs` / `ns_medium_coeffs` /
+/// `ns_high_coeffs`); `error-feedback` is the plain one-tap case.
+fn shaping_coefficients(method: NoiseShapingMethod) -> &'static [f32] {
+    match method {
+        NoiseShapingMethod::None => &[],
+        NoiseShapingMethod::ErrorFeedback => &[1.0],
+        NoiseShapingMethod::Simple => &[-0.5, 1.0],
+        NoiseShapingMethod::Medium => &[0.6149, -1.590, 1.959, -2.165, 2.033],
+        NoiseShapingMethod::High => &[
+            -0.340122, 0.876066, -1.72008, 2.61339, -3.31399, 3.27918, -2.92975, 2.08484,
+        ],
+    }
+}
+
+/// What the quantizer does over one conversion, decided once from the format
+/// pair: `dither` is `None` where the output loses nothing or is wider than
+/// `dithering-threshold`, `shaping` is `None` where the output loses nothing.
+#[derive(Debug, Clone, Copy)]
+struct QuantizePlan {
+    dither: DitherMethod,
+    shaping: NoiseShapingMethod,
+}
+
+impl QuantizePlan {
+    /// Neither knob applies, so the samples take the plain rounding path and a
+    /// lossless conversion stays byte for byte identical.
+    fn is_plain(&self) -> bool {
+        self.dither == DitherMethod::None && self.shaping == NoiseShapingMethod::None
+    }
+}
+
+/// Quantizes the f32 intermediate to an integer output format, adding dither
+/// and feeding the rounding error back through a shaping filter. The state is
+/// per channel and lives across buffers, so the shaping filter stays continuous
+/// over the stream.
+#[derive(Debug, Default)]
+struct Quantizer {
+    dither: DitherMethod,
+    shaping: NoiseShapingMethod,
+    /// Dither only where the output resolution is at most this many bits.
+    threshold: u8,
+    random_state: u32,
+    /// Per channel, the last `shaping_coefficients().len()` rounding errors in
+    /// output LSBs, oldest first.
+    errors: Vec<Vec<f32>>,
+    /// Per channel, the previous dither draw, for [`DitherMethod::TpdfHf`].
+    previous_draw: Vec<f32>,
+}
+
+impl Quantizer {
+    /// Drop the filter history and restart the generator, so a configure or a
+    /// flush replays the same noise from the top.
+    fn reset(&mut self) {
+        self.random_state = XORSHIFT_BASE_STATE;
+        self.errors.clear();
+        self.previous_draw.clear();
+    }
+
+    /// Size the per-channel state for this conversion, keeping what is already
+    /// there when the shape has not moved.
+    fn prepare(&mut self, channels: usize, plan: QuantizePlan) {
+        let taps = shaping_coefficients(plan.shaping).len();
+        if self.errors.len() == channels && self.errors.first().is_none_or(|e| e.len() == taps) {
+            return;
+        }
+        self.random_state = XORSHIFT_BASE_STATE;
+        self.errors = alloc::vec![alloc::vec![0f32; taps]; channels];
+        self.previous_draw = alloc::vec![0f32; channels];
+    }
+
+    /// The dither and shaping this format pair calls for. Both need the output
+    /// to actually drop resolution: an equal or wider integer output, or a
+    /// float one, loses nothing to shape.
+    fn plan(&self, in_format: AudioFormat, out_format: AudioFormat) -> QuantizePlan {
+        let plain = QuantizePlan {
+            dither: DitherMethod::None,
+            shaping: NoiseShapingMethod::None,
+        };
+        let Some(out_bits) = quantization_bits(out_format) else {
+            return plain;
+        };
+        let reduces = match quantization_bits(in_format) {
+            Some(in_bits) => in_bits > out_bits,
+            // float input carries more resolution than any integer output.
+            None => true,
+        };
+        if !reduces {
+            return plain;
+        }
+        QuantizePlan {
+            dither: if out_bits <= self.threshold {
+                self.dither
+            } else {
+                DitherMethod::None
+            },
+            shaping: self.shaping,
+        }
+    }
+
+    /// One dither draw for `channel`, in output LSBs.
+    fn draw(&mut self, method: DitherMethod, channel: usize) -> f32 {
+        // gst's rpdf spans a whole quantizer step each way; its tpdf sums two
+        // half-step draws, the textbook triangular dither.
+        const RPDF_HALF_WIDTH: f32 = 1.0;
+        const TPDF_HALF_WIDTH: f32 = 0.5;
+        match method {
+            DitherMethod::None => 0.0,
+            DitherMethod::Rpdf => self.uniform(RPDF_HALF_WIDTH),
+            DitherMethod::Tpdf => self.uniform(TPDF_HALF_WIDTH) + self.uniform(TPDF_HALF_WIDTH),
+            DitherMethod::TpdfHf => {
+                let drawn = self.uniform(TPDF_HALF_WIDTH);
+                let shaped = drawn - self.previous_draw[channel];
+                self.previous_draw[channel] = drawn;
+                shaped
+            }
+        }
+    }
+
+    /// A uniform draw over `[-half_width, half_width)`.
+    fn uniform(&mut self, half_width: f32) -> f32 {
+        let unit = next_random(&mut self.random_state) as f32 / (u32::MAX as f32 + 1.0);
+        (unit - 0.5) * 2.0 * half_width
+    }
+
+    /// Encode one sample of `channel` under `plan`.
+    fn write(
+        &mut self,
+        dst: &mut Vec<u8>,
+        v: f32,
+        format: AudioFormat,
+        channel: usize,
+        plan: QuantizePlan,
+    ) {
+        let scale = match (plan.is_plain(), full_scale(format)) {
+            (false, Some(scale)) => scale,
+            _ => return write_sample(dst, v, format),
+        };
+        let coefficients = shaping_coefficients(plan.shaping);
+        // Subtracting the filtered past errors puts the quantization noise
+        // through `1 - sum(coefficient * z^-k)`, which lifts it out of the band
+        // the ear hears best.
+        let feedback: f32 = coefficients
+            .iter()
+            .zip(&self.errors[channel])
+            .map(|(c, e)| c * e)
+            .sum();
+        let target = v.clamp(-1.0, 1.0) * scale - feedback;
+        let dithered = target + self.draw(plan.dither, channel);
+        let quantized = round_to_integer(dithered);
+        if !coefficients.is_empty() {
+            let history = &mut self.errors[channel];
+            history.remove(0);
+            history.push(quantized - dithered);
+        }
+        emit_quantized(dst, quantized, format);
+    }
 }
 
 /// ITU BS.775-style surround coefficient: center and surrounds mix into the
@@ -554,8 +923,7 @@ fn convert_pcm(
 const SURROUND_MIX: f32 = core::f32::consts::FRAC_1_SQRT_2;
 
 /// Build the position-aware mixing matrix (flattened `out_ch` rows of `in_ch`
-/// coefficients) between the conventional layouts of two channel counts, or
-/// `None` when either count has no conventional layout (> 8 channels).
+/// coefficients) between two speaker layouts.
 ///
 /// Each input position routes to the output: itself at 1.0 when present; a
 /// side <-> back counterpart at 1.0; otherwise folded frontward (center and
@@ -564,10 +932,10 @@ const SURROUND_MIX: f32 = core::f32::consts::FRAC_1_SQRT_2;
 /// then normalized by its largest output-row sum so a full-scale input cannot
 /// clip. Coefficients match ffmpeg's default rematrix (verified against
 /// `swr_build_matrix` output for 5.1 / 6.1 / 7.1 to stereo and mono).
-fn mix_matrix(in_ch: usize, out_ch: usize) -> Option<Vec<f32>> {
+fn mix_matrix(in_layout: ChannelLayout, out_layout: ChannelLayout) -> Vec<f32> {
     use ChannelPosition::*;
-    let in_layout = ChannelLayout::default_for(in_ch as u8)?;
-    let out_layout = ChannelLayout::default_for(out_ch as u8)?;
+    let in_ch = in_layout.channels() as usize;
+    let out_ch = out_layout.channels() as usize;
     let mut m = alloc::vec![0f32; in_ch * out_ch];
 
     // Add `gain` of input index `ii` into output position `pos`, if present.
@@ -629,7 +997,18 @@ fn mix_matrix(in_ch: usize, out_ch: usize) -> Option<Vec<f32>> {
             *coef /= max_sum;
         }
     }
-    Some(m)
+    m
+}
+
+/// The layout to mix a side by: the one its caps declared, else the count's
+/// conventional layout. `None` when there is no usable layout (a count over 8
+/// with nothing declared, or a declared layout whose speaker count disagrees
+/// with the caps' channel count), which drops back to the position-unaware path.
+fn mixing_layout(declared: ChannelLayout, channels: usize) -> Option<ChannelLayout> {
+    let count = u8::try_from(channels).ok()?;
+    declared
+        .or_default_for(count)
+        .filter(|layout| layout.channels() == count)
 }
 
 /// Output sample for channel `oc`, given the interleaved input frame: the
@@ -674,6 +1053,60 @@ fn round_away(v: f32) -> f32 {
     }
 }
 
+/// The integer value `round_away` plus the truncating cast in
+/// [`emit_quantized`] land on, so a shaping filter can weigh the error the
+/// emitted sample actually makes.
+fn round_to_integer(v: f32) -> f32 {
+    round_away(v) as i64 as f32
+}
+
+/// Full-scale integer magnitude of a PCM format: the multiplier from the
+/// `[-1, 1]` float intermediate, and the format's largest positive code.
+/// `None` for float output, which has no quantizer.
+fn full_scale(format: AudioFormat) -> Option<f32> {
+    match format {
+        AudioFormat::PcmU8 => Some(127.0),
+        AudioFormat::PcmS16Le => Some(32_767.0),
+        AudioFormat::PcmS24Le => Some(8_388_607.0),
+        AudioFormat::PcmS32Le => Some(2_147_483_647.0),
+        _ => None,
+    }
+}
+
+/// Resolution of a PCM format in bits, what [`DITHERING_THRESHOLD`] compares
+/// against. `None` for float, which is treated as losing nothing.
+fn quantization_bits(format: AudioFormat) -> Option<u8> {
+    match format {
+        AudioFormat::PcmU8 => Some(8),
+        AudioFormat::PcmS16Le => Some(16),
+        AudioFormat::PcmS24Le => Some(24),
+        AudioFormat::PcmS32Le => Some(32),
+        _ => None,
+    }
+}
+
+/// Append an already-rounded integer sample value, clamped to the format's
+/// code range. The clamp matters once dither pushes a full-scale sample past
+/// the top code, where `as u8` would wrap rather than saturate.
+fn emit_quantized(dst: &mut Vec<u8>, quantized: f32, format: AudioFormat) {
+    let Some(scale) = full_scale(format) else {
+        return;
+    };
+    // the negative side has one more code than the positive one.
+    let q = quantized.clamp(-(scale + 1.0), scale);
+    match format {
+        // u8 PCM is offset-binary: silence sits at 0x80.
+        AudioFormat::PcmU8 => dst.push((q as i32 + 128) as u8),
+        AudioFormat::PcmS16Le => dst.extend_from_slice(&(q as i16).to_le_bytes()),
+        // 3-byte packed, little-endian.
+        AudioFormat::PcmS24Le => dst.extend_from_slice(&(q as i32).to_le_bytes()[..3]),
+        // the +0.5 in `round_away` is below the f32 quantum at this magnitude;
+        // `as i32` saturates rather than wrapping at full scale.
+        AudioFormat::PcmS32Le => dst.extend_from_slice(&(q as i32).to_le_bytes()),
+        _ => {}
+    }
+}
+
 /// Decode one sample to f32 in [-1, 1). The slice starts at the sample.
 pub(crate) fn read_sample(at: &[u8], format: AudioFormat) -> f32 {
     match format {
@@ -696,27 +1129,18 @@ pub(crate) fn read_sample(at: &[u8], format: AudioFormat) -> f32 {
     }
 }
 
-/// Encode one f32 sample, appending its little-endian bytes.
+/// Encode one f32 sample, appending its little-endian bytes. Plain rounding,
+/// no dither: the resampler and the audio filters call this, and a
+/// [`Quantizer`] is what carries the per-channel dither state.
 pub(crate) fn write_sample(dst: &mut Vec<u8>, v: f32, format: AudioFormat) {
-    let c = v.clamp(-1.0, 1.0);
-    match format {
-        // u8 PCM is offset-binary: silence sits at 0x80.
-        AudioFormat::PcmU8 => dst.push((round_away(c * 127.0) as i32 + 128) as u8),
-        AudioFormat::PcmS16Le => {
-            dst.extend_from_slice(&(round_away(c * 32767.0) as i16).to_le_bytes());
-        }
-        AudioFormat::PcmS24Le => {
-            let s = round_away(c * 8_388_607.0) as i32;
-            dst.extend_from_slice(&s.to_le_bytes()[..3]);
-        }
-        // the +0.5 is below the f32 quantum at this magnitude; `as i32`
-        // saturates rather than wrapping at full scale.
-        AudioFormat::PcmS32Le => {
-            dst.extend_from_slice(&(round_away(c * 2_147_483_647.0) as i32).to_le_bytes());
-        }
-        AudioFormat::PcmF32Le => dst.extend_from_slice(&v.to_le_bytes()),
-        _ => {}
+    if format == AudioFormat::PcmF32Le {
+        dst.extend_from_slice(&v.to_le_bytes());
+        return;
     }
+    let Some(scale) = full_scale(format) else {
+        return;
+    };
+    emit_quantized(dst, round_away(v.clamp(-1.0, 1.0) * scale), format);
 }
 
 #[cfg(test)]
@@ -729,7 +1153,266 @@ mod tests {
             format,
             channels,
             sample_rate: rate,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         }
+    }
+
+    /// A quantizer with dither and shaping off, so the output is the plain
+    /// rounding these expectations were written against.
+    fn plain_quantizer() -> Quantizer {
+        Quantizer {
+            dither: DitherMethod::None,
+            threshold: DITHERING_THRESHOLD,
+            ..Quantizer::default()
+        }
+    }
+
+    fn convert(
+        src: &[u8],
+        in_format: AudioFormat,
+        in_channels: u8,
+        out_format: AudioFormat,
+        out_channels: u8,
+    ) -> Result<Box<[u8]>, G2gError> {
+        convert_pcm(
+            src,
+            mono_stream(in_format, in_channels),
+            mono_stream(out_format, out_channels),
+            &mut plain_quantizer(),
+        )
+    }
+
+    /// One output LSB of a 16-bit sample, in the `[-1, 1]` float intermediate.
+    fn s16_step() -> f64 {
+        1.0 / f64::from(full_scale(AudioFormat::PcmS16Le).unwrap())
+    }
+
+    fn s16_samples(bytes: &[u8]) -> Vec<i16> {
+        bytes
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|b| i16::from_le_bytes(*b))
+            .collect()
+    }
+
+    #[test]
+    fn dither_off_keeps_a_reduction_on_the_plain_rounding_path() {
+        // With dither off, a float-to-16-bit reduction is exactly what
+        // `write_sample` produces on its own.
+        let src: Vec<u8> = (0..64u8)
+            .flat_map(|i| (f32::from(i) / 64.0 - 0.5).to_le_bytes())
+            .collect();
+        let got = convert(&src, AudioFormat::PcmF32Le, 1, AudioFormat::PcmS16Le, 1).unwrap();
+        let mut want = Vec::new();
+        for chunk in src.as_chunks::<4>().0 {
+            write_sample(&mut want, f32::from_le_bytes(*chunk), AudioFormat::PcmS16Le);
+        }
+        assert_eq!(&got[..], &want[..]);
+    }
+
+    #[test]
+    fn dither_skips_conversions_that_lose_nothing() {
+        let src: Vec<u8> = (-7i16..8).flat_map(|s| (s * 4096).to_le_bytes()).collect();
+        let mut loud = plain_quantizer();
+        loud.dither = DitherMethod::Tpdf;
+        loud.shaping = NoiseShapingMethod::High;
+        let same_depth = |quantizer: &mut Quantizer, out_format| {
+            convert_pcm(
+                &src,
+                mono_stream(AudioFormat::PcmS16Le, 1),
+                mono_stream(out_format, 1),
+                quantizer,
+            )
+            .unwrap()
+        };
+        // Equal depth, and a widening: neither drops a bit, so the requested
+        // dither and shaping must not run.
+        for out_format in [AudioFormat::PcmS16Le, AudioFormat::PcmS32Le] {
+            assert_eq!(
+                same_depth(&mut loud, out_format),
+                same_depth(&mut plain_quantizer(), out_format),
+                "{out_format:?} loses nothing to dither"
+            );
+        }
+    }
+
+    #[test]
+    fn dithering_threshold_gates_the_output_depth() {
+        // S24 is wider than the declared threshold, so a reduction into it is
+        // still left alone; S16 is at or below it.
+        let src: Vec<u8> = (0..64u8)
+            .flat_map(|i| (f32::from(i) / 64.0 - 0.5).to_le_bytes())
+            .collect();
+        let mut tpdf = plain_quantizer();
+        tpdf.dither = DitherMethod::Tpdf;
+        assert!(tpdf.threshold < quantization_bits(AudioFormat::PcmS24Le).unwrap());
+        assert_eq!(
+            tpdf.plan(AudioFormat::PcmF32Le, AudioFormat::PcmS24Le)
+                .dither,
+            DitherMethod::None
+        );
+        let dithered = convert_pcm(
+            &src,
+            mono_stream(AudioFormat::PcmF32Le, 1),
+            mono_stream(AudioFormat::PcmS24Le, 1),
+            &mut tpdf,
+        )
+        .unwrap();
+        let plain = convert(&src, AudioFormat::PcmF32Le, 1, AudioFormat::PcmS24Le, 1).unwrap();
+        assert_eq!(dithered, plain);
+    }
+
+    #[test]
+    fn tpdf_dither_recovers_a_tone_below_the_quantization_step() {
+        // A sine whose peak sits under half an output LSB rounds to nothing:
+        // plain quantization returns silence and the tone is gone. Dither
+        // decorrelates the rounding error from the signal, and the tone comes
+        // back in the average.
+        const TONE_PERIOD: usize = 8;
+        const FRAMES: usize = TONE_PERIOD * 512;
+        const AMPLITUDE_LSB: f64 = 0.3;
+        let phase = |i: usize| core::f64::consts::TAU * i as f64 / TONE_PERIOD as f64;
+        let mut src = Vec::new();
+        for i in 0..FRAMES {
+            let v = AMPLITUDE_LSB * s16_step() * crate::mathf::sin(phase(i));
+            src.extend_from_slice(&(v as f32).to_le_bytes());
+        }
+        let quantized = |dither| {
+            let mut q = plain_quantizer();
+            q.dither = dither;
+            s16_samples(
+                &convert_pcm(
+                    &src,
+                    mono_stream(AudioFormat::PcmF32Le, 1),
+                    mono_stream(AudioFormat::PcmS16Le, 1),
+                    &mut q,
+                )
+                .unwrap(),
+            )
+        };
+
+        assert!(
+            quantized(DitherMethod::None).iter().all(|&s| s == 0),
+            "plain rounding loses the tone entirely"
+        );
+
+        // Project the output onto the tone: for a sine of amplitude A,
+        // (2 / N) * sum(x[i] * sin) estimates A.
+        let dithered = quantized(DitherMethod::Tpdf);
+        let recovered = 2.0 / FRAMES as f64
+            * dithered
+                .iter()
+                .enumerate()
+                .map(|(i, &s)| f64::from(s) * crate::mathf::sin(phase(i)))
+                .sum::<f64>();
+        // What is left over is the dithered quantizer's noise, variance a
+        // quarter of an LSB squared, so this estimator's standard error is
+        // sqrt(2 * 0.25 / FRAMES), about 0.011 LSB. The tolerance is four of
+        // those.
+        const TOLERANCE_LSB: f64 = 0.05;
+        assert!(
+            (recovered - AMPLITUDE_LSB).abs() < TOLERANCE_LSB,
+            "recovered {recovered} LSB from a {AMPLITUDE_LSB} LSB tone"
+        );
+    }
+
+    #[test]
+    fn error_feedback_shaping_carries_a_sub_step_level_into_the_output() {
+        // Error feedback subtracts the previous rounding error from the next
+        // sample, so the errors telescope and only the first and last survive
+        // in the sum. Each is under half an LSB, so over N samples the mean
+        // output is within 1 / N of a DC level plain rounding would erase.
+        const FRAMES: usize = 1000;
+        const LEVEL_LSB: f64 = 0.3;
+        let level = (LEVEL_LSB * s16_step()) as f32;
+        let src: Vec<u8> = (0..FRAMES).flat_map(|_| level.to_le_bytes()).collect();
+        let mut shaped = plain_quantizer();
+        shaped.shaping = NoiseShapingMethod::ErrorFeedback;
+        let got = s16_samples(
+            &convert_pcm(
+                &src,
+                mono_stream(AudioFormat::PcmF32Le, 1),
+                mono_stream(AudioFormat::PcmS16Le, 1),
+                &mut shaped,
+            )
+            .unwrap(),
+        );
+        let mean = got.iter().map(|&s| f64::from(s)).sum::<f64>() / FRAMES as f64;
+        assert!(
+            (mean - LEVEL_LSB).abs() <= 1.0 / FRAMES as f64,
+            "mean {mean} LSB from a {LEVEL_LSB} LSB level"
+        );
+    }
+
+    #[test]
+    fn the_element_dithers_by_default_like_gst() {
+        // gst-inspect-1.0 audioconvert: dithering Default: 2, "tpdf".
+        let conv = AudioConvert::auto();
+        assert_eq!(
+            conv.get_property("dithering"),
+            Some(PropValue::Str("tpdf".into()))
+        );
+        assert_eq!(
+            conv.quantizer
+                .plan(AudioFormat::PcmF32Le, AudioFormat::PcmS16Le)
+                .dither,
+            DitherMethod::Tpdf,
+            "a reduction dithers with nobody setting the property"
+        );
+        assert!(
+            conv.quantizer
+                .plan(AudioFormat::PcmS16Le, AudioFormat::PcmS16Le)
+                .is_plain(),
+            "an equal-depth conversion stays on the plain rounding path"
+        );
+    }
+
+    #[test]
+    fn dither_properties_round_trip_and_report_their_declared_defaults() {
+        let mut conv = AudioConvert::new(AudioFormat::PcmS16Le, 2);
+        for name in ["dithering", "dithering-threshold", "noise-shaping"] {
+            let spec = conv
+                .properties()
+                .iter()
+                .find(|s| s.name == name)
+                .unwrap_or_else(|| panic!("`{name}` is declared"));
+            let declared = spec.default.expect("declares a default");
+            assert_eq!(
+                conv.get_property(name),
+                Some(spec.parse_value(declared).expect("the default parses")),
+                "`{name}` reports the default it declares"
+            );
+        }
+        conv.set_property("dithering", PropValue::Str("tpdf-hf".into()))
+            .unwrap();
+        assert_eq!(
+            conv.get_property("dithering"),
+            Some(PropValue::Str("tpdf-hf".into()))
+        );
+        conv.set_property("noise-shaping", PropValue::Str("medium".into()))
+            .unwrap();
+        assert_eq!(
+            conv.get_property("noise-shaping"),
+            Some(PropValue::Str("medium".into()))
+        );
+        conv.set_property("dithering-threshold", PropValue::Uint(16))
+            .unwrap();
+        assert_eq!(
+            conv.get_property("dithering-threshold"),
+            Some(PropValue::Uint(16))
+        );
+        assert_eq!(
+            conv.set_property("dithering", PropValue::Str("gaussian".into())),
+            Err(PropError::Value)
+        );
+        assert_eq!(
+            conv.set_property(
+                "dithering-threshold",
+                PropValue::Uint(MAX_DITHERING_THRESHOLD + 1)
+            ),
+            Err(PropError::Value)
+        );
     }
 
     #[test]
@@ -810,9 +1493,8 @@ mod tests {
             .iter()
             .flat_map(|v| v.to_le_bytes())
             .collect();
-        let s16 =
-            convert_pcm(&src_f32, AudioFormat::PcmF32Le, 1, AudioFormat::PcmS16Le, 1).unwrap();
-        let back = convert_pcm(&s16, AudioFormat::PcmS16Le, 1, AudioFormat::PcmF32Le, 1).unwrap();
+        let s16 = convert(&src_f32, AudioFormat::PcmF32Le, 1, AudioFormat::PcmS16Le, 1).unwrap();
+        let back = convert(&s16, AudioFormat::PcmS16Le, 1, AudioFormat::PcmF32Le, 1).unwrap();
         for (i, chunk) in back.as_chunks::<4>().0.iter().enumerate() {
             let got = f32::from_le_bytes(*chunk);
             let want = [0.0f32, 0.5, -0.5, 1.0, -1.0][i];
@@ -827,7 +1509,7 @@ mod tests {
     fn s16_peak_maps_near_full_scale_float() {
         // i16 max -> ~1.0 f32.
         let s16: Vec<u8> = i16::MAX.to_le_bytes().to_vec();
-        let f32b = convert_pcm(&s16, AudioFormat::PcmS16Le, 1, AudioFormat::PcmF32Le, 1).unwrap();
+        let f32b = convert(&s16, AudioFormat::PcmS16Le, 1, AudioFormat::PcmF32Le, 1).unwrap();
         let v = f32::from_le_bytes(f32b[..4].try_into().unwrap());
         assert!((v - 1.0).abs() < 1e-3, "got {v}");
     }
@@ -836,13 +1518,13 @@ mod tests {
     fn s24_packs_three_bytes_little_endian() {
         // one f32 sample -> 3 bytes, not a 32-bit container.
         let src: Vec<u8> = 0.5f32.to_le_bytes().to_vec();
-        let s24 = convert_pcm(&src, AudioFormat::PcmF32Le, 1, AudioFormat::PcmS24Le, 1).unwrap();
+        let s24 = convert(&src, AudioFormat::PcmF32Le, 1, AudioFormat::PcmS24Le, 1).unwrap();
         assert_eq!(s24.len(), 3);
         let v = s24[0] as i32 | (s24[1] as i32) << 8 | (s24[2] as i8 as i32) << 16;
         assert!((v - 4_194_303).abs() <= 1, "got {v}");
         // negative values sign-extend out of the top byte.
         let src: Vec<u8> = (-0.5f32).to_le_bytes().to_vec();
-        let s24 = convert_pcm(&src, AudioFormat::PcmF32Le, 1, AudioFormat::PcmS24Le, 1).unwrap();
+        let s24 = convert(&src, AudioFormat::PcmF32Le, 1, AudioFormat::PcmS24Le, 1).unwrap();
         let v = s24[0] as i32 | (s24[1] as i32) << 8 | (s24[2] as i8 as i32) << 16;
         assert!((v + 4_194_303).abs() <= 1, "got {v}");
     }
@@ -857,13 +1539,13 @@ mod tests {
             (AudioFormat::PcmS24Le, 1e-6),
             (AudioFormat::PcmS32Le, 1e-6),
         ] {
-            let packed = convert_pcm(&src, AudioFormat::PcmF32Le, 1, format, 1).unwrap();
+            let packed = convert(&src, AudioFormat::PcmF32Le, 1, format, 1).unwrap();
             assert_eq!(
                 packed.len(),
                 values.len() * sample_bytes(format),
                 "{format:?}"
             );
-            let back = convert_pcm(&packed, format, 1, AudioFormat::PcmF32Le, 1).unwrap();
+            let back = convert(&packed, format, 1, AudioFormat::PcmF32Le, 1).unwrap();
             for (i, chunk) in back.as_chunks::<4>().0.iter().enumerate() {
                 let got = f32::from_le_bytes(*chunk);
                 assert!(
@@ -878,10 +1560,10 @@ mod tests {
     #[test]
     fn u8_silence_sits_at_the_offset_binary_midpoint() {
         let src: Vec<u8> = 0.0f32.to_le_bytes().to_vec();
-        let u8s = convert_pcm(&src, AudioFormat::PcmF32Le, 1, AudioFormat::PcmU8, 1).unwrap();
+        let u8s = convert(&src, AudioFormat::PcmF32Le, 1, AudioFormat::PcmU8, 1).unwrap();
         assert_eq!(&u8s[..], [128]);
         // and it reads back as silence.
-        let back = convert_pcm(&[128], AudioFormat::PcmU8, 1, AudioFormat::PcmF32Le, 1).unwrap();
+        let back = convert(&[128], AudioFormat::PcmU8, 1, AudioFormat::PcmF32Le, 1).unwrap();
         assert_eq!(f32::from_le_bytes(back[..4].try_into().unwrap()), 0.0);
     }
 
@@ -889,8 +1571,7 @@ mod tests {
     fn mono_fans_out_to_stereo() {
         // one s16 sample (value 1000) -> two identical channels.
         let mono: Vec<u8> = 1000i16.to_le_bytes().to_vec();
-        let stereo =
-            convert_pcm(&mono, AudioFormat::PcmS16Le, 1, AudioFormat::PcmS16Le, 2).unwrap();
+        let stereo = convert(&mono, AudioFormat::PcmS16Le, 1, AudioFormat::PcmS16Le, 2).unwrap();
         assert_eq!(stereo.len(), 4);
         assert_eq!(i16::from_le_bytes([stereo[0], stereo[1]]), 1000);
         assert_eq!(i16::from_le_bytes([stereo[2], stereo[3]]), 1000);
@@ -902,8 +1583,7 @@ mod tests {
         let mut stereo = Vec::new();
         stereo.extend_from_slice(&1000i16.to_le_bytes());
         stereo.extend_from_slice(&2000i16.to_le_bytes());
-        let mono =
-            convert_pcm(&stereo, AudioFormat::PcmS16Le, 2, AudioFormat::PcmS16Le, 1).unwrap();
+        let mono = convert(&stereo, AudioFormat::PcmS16Le, 2, AudioFormat::PcmS16Le, 1).unwrap();
         assert_eq!(mono.len(), 2);
         let v = i16::from_le_bytes([mono[0], mono[1]]);
         assert!((v - 1500).abs() <= 1, "got {v}");
@@ -913,7 +1593,7 @@ mod tests {
     fn ragged_input_fails_loud() {
         // 3 bytes is not a whole s16 stereo frame (4 bytes).
         assert_eq!(
-            convert_pcm(
+            convert(
                 &[0, 0, 0],
                 AudioFormat::PcmS16Le,
                 2,
@@ -951,7 +1631,7 @@ mod tests {
         for v in input {
             bytes.extend_from_slice(&v.to_le_bytes());
         }
-        let out = convert_pcm(
+        let out = convert(
             &bytes,
             AudioFormat::PcmF32Le,
             input.len() as u8,
@@ -964,6 +1644,84 @@ mod tests {
             .iter()
             .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .collect()
+    }
+
+    /// Mix `input` (one interleaved frame) down to `out_ch`, taking the input
+    /// speakers from `in_layout` rather than the count convention.
+    fn mix_f32_with_layout(input: &[f32], in_layout: ChannelLayout, out_ch: u8) -> Vec<f32> {
+        let mut bytes = Vec::new();
+        for v in input {
+            bytes.extend_from_slice(&v.to_le_bytes());
+        }
+        let out = convert_pcm(
+            &bytes,
+            PcmStream {
+                format: AudioFormat::PcmF32Le,
+                channels: input.len() as u8,
+                layout: in_layout,
+            },
+            mono_stream(AudioFormat::PcmF32Le, out_ch),
+            &mut plain_quantizer(),
+        )
+        .unwrap();
+        out.as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect()
+    }
+
+    #[test]
+    fn a_declared_layout_picks_different_downmix_coefficients() {
+        // Quad (FL FR BL BR) against the 4-channel default (FL FR FC BC): the
+        // back pair folds to its own side at 1/sqrt(2), while a center + back
+        // center spreads across both fronts, so the two rows differ.
+        let quad = ChannelLayout::of(&[
+            ChannelPosition::Fl,
+            ChannelPosition::Fr,
+            ChannelPosition::Bl,
+            ChannelPosition::Br,
+        ]);
+        let default_four = ChannelLayout::default_for(4).unwrap();
+        assert_ne!(quad, default_four);
+
+        let quad_matrix = mix_matrix(quad, ChannelLayout::STEREO);
+        let default_matrix = mix_matrix(default_four, ChannelLayout::STEREO);
+        assert_ne!(quad_matrix, default_matrix);
+        // FL keeps 1.0 and BL folds in at 1/sqrt(2), normalized by the row sum.
+        let quad_norm = 1.0 + SURROUND_MIX;
+        assert_close(
+            &quad_matrix,
+            &[
+                1.0 / quad_norm,
+                0.0,
+                SURROUND_MIX / quad_norm,
+                0.0,
+                0.0,
+                1.0 / quad_norm,
+                0.0,
+                SURROUND_MIX / quad_norm,
+            ],
+        );
+
+        // The same samples, converted: an unspecified layout keeps today's
+        // count-convention result, a declared quad does not.
+        let frame = [1.0f32, 0.0, 1.0, 0.0];
+        let as_declared = mix_f32_with_layout(&frame, quad, 2);
+        let as_unspecified = mix_f32_with_layout(&frame, ChannelLayout::UNSPECIFIED, 2);
+        assert_close(&as_unspecified, &mix_f32(&frame, 2));
+        assert_ne!(as_declared, as_unspecified);
+        assert_close(&as_declared, &[(1.0 + SURROUND_MIX) / quad_norm, 0.0]);
+    }
+
+    /// A stream of `channels` channels with no declared speaker layout, the
+    /// shape every caps carried before a layout could be declared.
+    fn mono_stream(format: AudioFormat, channels: u8) -> PcmStream {
+        PcmStream {
+            format,
+            channels,
+            layout: ChannelLayout::UNSPECIFIED,
+        }
     }
 
     fn assert_close(got: &[f32], want: &[f32]) {

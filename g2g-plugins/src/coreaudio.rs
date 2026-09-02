@@ -85,6 +85,7 @@ fn pcm_params(caps: &Caps) -> Result<(AudioFormat, u8, u32), G2gError> {
             format,
             channels,
             sample_rate,
+            ..
         } if bytes_per_sample(*format).is_some() && *channels > 0 && *sample_rate > 0 => {
             Ok((*format, *channels, *sample_rate))
         }
@@ -536,6 +537,7 @@ impl PadTemplates for CoreAudioSink {
             format,
             channels: 2,
             sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         Vec::from([PadTemplate::sink(CapsSet::from_alternatives(Vec::from([
             pcm(AudioFormat::PcmS16Le),
@@ -661,6 +663,7 @@ impl CoreAudioSrc {
             format: AudioFormat::PcmS16Le,
             channels: self.channels,
             sample_rate: self.sample_rate,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         }
     }
 

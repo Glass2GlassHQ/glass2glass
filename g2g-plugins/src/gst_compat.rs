@@ -3,7 +3,7 @@
 //!
 //! These back `g2g-inspect --gst <name>` and `g2g-launch`'s explain-on-error,
 //! and are the programmatic surface a porting tool builds on. They complement
-//! [`parse_launch`](g2g_core::runtime::parse_launch) (the authoritative parse):
+//! [`parse_launch`] (the authoritative parse):
 //! the linter runs it and enriches the first error with a gst->g2g suggestion,
 //! so porting is fix-and-rerun rather than decode-the-error.
 
@@ -436,7 +436,7 @@ fn family_equivalent(gst_name: &str) -> Option<GstEquivalent> {
 /// Map a GStreamer element name to its g2g equivalent, consulting the live
 /// `registry` first (so aliases resolve and feature-gated elements that ARE
 /// compiled in show as `Available`), then the launch keywords, then the static
-/// guidance table, then the family rules ([`GST_FAMILY_MAP`], for the plugins
+/// guidance table, then the family rules (`GST_FAMILY_MAP`, for the plugins
 /// whose names come by the dozen), then the feature catalog (the name is a g2g
 /// element this build left out), and finally the nearest known name (a spelling
 /// mistake).

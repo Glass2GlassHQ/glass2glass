@@ -1,8 +1,9 @@
 //! M386 - stream discovery for MPEG-TS and MP4, the M376 pattern applied beyond
 //! Matroska. `TsDemux` announces every elementary stream the PMT declares, and
-//! `Mp4Src` announces its (single) video track, both as a
-//! `BusMessage::StreamCollection` once the container's stream list is parsed, so
-//! an app can discover the streams of a `.ts` / `.mp4` the same way it does an MKV.
+//! `Mp4Src` announces every `moov` track (M1150; it still forwards only the
+//! primary video stream), both as a `BusMessage::StreamCollection` once the
+//! container's stream list is parsed, so an app can discover the streams of a
+//! `.ts` / `.mp4` the same way it does an MKV.
 
 #![cfg(feature = "std")]
 
@@ -284,10 +285,10 @@ async fn mp4src_announces_its_single_video_track() {
         .collect();
     assert_eq!(collections.len(), 1, "one StreamCollection for the MP4");
     let c = &collections[0];
-    assert_eq!(c.len(), 1, "Mp4Src is single-track: one stream");
+    assert_eq!(c.len(), 1, "the fixture has one track, so one stream");
     let video: Vec<_> = c.streams_of_type(StreamType::Video).collect();
     assert_eq!(video.len(), 1);
-    assert_eq!(video[0].id, "mp4-track-0");
+    assert_eq!(video[0].id, "mp4-track-1", "the muxer's 1-based track_ID");
     assert!(matches!(
         video[0].caps,
         Caps::CompressedVideo {

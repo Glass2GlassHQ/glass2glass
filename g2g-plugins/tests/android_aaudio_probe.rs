@@ -98,6 +98,7 @@ async fn aaudio_sink_renders_pcm() {
         format: AudioFormat::PcmS16Le,
         channels,
         sample_rate: rate,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     };
     let narrowed = sink.intercept_caps(&caps).expect("intercept caps");
     assert!(matches!(

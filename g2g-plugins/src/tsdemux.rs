@@ -484,6 +484,7 @@ impl TsDemux {
                     format,
                     channels: 0,
                     sample_rate: 0,
+                    channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
                 },
             )
         };
@@ -593,6 +594,7 @@ impl TsDemux {
             format,
             channels: 0,
             sample_rate: 0,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         }
     }
 
@@ -845,6 +847,7 @@ impl TsDemux {
                 format: AudioFormat::Opus,
                 channels,
                 sample_rate: 0,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
             }))
             .await?;
             self.opus_caps_emitted = true;
@@ -1264,7 +1267,7 @@ impl TsDemuxN {
     /// re-emits that port's `CapsChanged` for the new stream and confirms the active
     /// ids on the bus ([`BusMessage::StreamsSelected`]). Because TS ports route by
     /// PMT `stream_type`, a re-map to a different *codec* takes effect at routing;
-    /// two streams of the same codec share a port (as in [`MkvDemuxN`]). The
+    /// two streams of the same codec share a port (as in `MkvDemuxN`). The
     /// MPEG-TS sibling of [`MkvDemuxN::with_stream_select`](crate::mkvdemux::MkvDemuxN::with_stream_select).
     pub fn with_stream_select(mut self, select: StreamSelectController) -> Self {
         self.stream_select = Some(select);

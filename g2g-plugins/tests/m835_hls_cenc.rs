@@ -1244,6 +1244,7 @@ async fn run_hls(url: String, prebuffer_ms: u64, keys: CencKeyHandle) -> Vec<Vec
             format: g2g_core::AudioFormat::Aac,
             channels: 0,
             sample_rate: 0,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         },
     }];
     let mut demux = Mp4DemuxN::new(ports).with_cenc_key_handle(keys);

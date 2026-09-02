@@ -12,6 +12,7 @@
 //! the H.264 / H.265 / AV1 clips again, on the system readback path and on the
 //! GPU-resident texture path. It asserts both halves: the DPB images really grew
 //! (`dpb_image_extent`), and every decoded frame matches the unforced decode.
+//! All four cases run in one test function, sequentially: see the note there.
 //! Skips with no adapter / no decode support.
 #![cfg(all(
     any(target_os = "linux", target_os = "windows"),
@@ -167,24 +168,6 @@ fn check(codec: &str, decode: fn(Option<(u32, u32)>) -> Option<Decoded>) {
     }
 }
 
-#[test]
-fn h264_decode_survives_a_larger_picture_access_granularity() {
-    // Guard the fixture choice: at 64x64 the 480-row picture must actually pad,
-    // or the forced runs would prove nothing.
-    assert_ne!(aligned_extent(PICTURE, (64, 64)), PICTURE);
-    check("H.264", decode_h264);
-}
-
-#[test]
-fn h265_decode_survives_a_larger_picture_access_granularity() {
-    check("H.265", decode_h265);
-}
-
-#[test]
-fn av1_decode_survives_a_larger_picture_access_granularity() {
-    check("AV1", decode_av1);
-}
-
 /// The GPU-resident path samples the DPB slot through a `VkSamplerYcbcrConversion`,
 /// whose normalized coordinates are relative to the whole slot image, so the
 /// converter is told the padded extent. Returns each frame's RGBA readback plus
@@ -226,8 +209,7 @@ fn decode_h264_textures(granularity: Option<(u32, u32)>) -> Option<TextureDecode
     Some((decoder.dpb_image_extent(), frames))
 }
 
-#[test]
-fn h264_texture_decode_survives_a_larger_picture_access_granularity() {
+fn check_textures() {
     let Some((baseline_extent, baseline)) = decode_h264_textures(None) else {
         eprintln!("skip m1060: no Vulkan H.264 GPU decode path");
         return;
@@ -273,4 +255,19 @@ fn h264_texture_decode_survives_a_larger_picture_access_granularity() {
             );
         }
     }
+}
+
+// One test for all four cases: libtest runs test functions on parallel threads,
+// and two threads building a `wgpu::Instance` at once fault inside the Vulkan
+// loader's `loader_icd_scan`, which is why this file keeps one device-creating
+// test.
+#[test]
+fn decode_survives_a_larger_picture_access_granularity() {
+    // Guard the fixture choice: at 64x64 the 480-row picture must actually pad,
+    // or the forced runs would prove nothing.
+    assert_ne!(aligned_extent(PICTURE, (64, 64)), PICTURE);
+    check("H.264", decode_h264);
+    check("H.265", decode_h265);
+    check("AV1", decode_av1);
+    check_textures();
 }

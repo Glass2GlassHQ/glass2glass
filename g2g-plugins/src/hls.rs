@@ -1,7 +1,7 @@
 //! HLS playlist parser (RFC 8216), pure `no_std + alloc`. Parses the two
 //! `.m3u8` forms: a *master* playlist (a set of `#EXT-X-STREAM-INF` variant
 //! streams for ABR selection) and a *media* playlist (an ordered list of
-//! `#EXTINF` segments). [`HlsSrc`](crate::hlssrc) drives this; the parser does no
+//! `#EXTINF` segments). `HlsSrc` drives this; the parser does no
 //! I/O so it is fully unit-testable.
 //!
 //! A playlist is one form or the other: presence of any `#EXT-X-STREAM-INF`
@@ -79,7 +79,7 @@ pub struct Rendition {
 }
 
 /// `#EXT-X-KEY` encryption method. `SampleAes` is recognized but unsupported by
-/// [`HlsSrc`](crate::hlssrc) (per-sample, not whole-segment encryption); a
+/// `HlsSrc` (per-sample, not whole-segment encryption); a
 /// `METHOD=NONE` tag clears the key rather than producing one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyMethod {

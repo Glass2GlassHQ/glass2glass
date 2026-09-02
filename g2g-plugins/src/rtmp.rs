@@ -1,11 +1,11 @@
 //! Sans-IO RTMP protocol, both directions. Pure `no_std + alloc`, no sockets.
 //!
 //! - [`RtmpSession`] is the ingest (server) side, the transport half of
-//!   [`RtmpSrc`](crate::rtmpsrc): feed received bytes with [`RtmpSession::push`],
+//!   `RtmpSrc`: feed received bytes with [`RtmpSession::push`],
 //!   drain the peer responses ([`take_outbound`](RtmpSession::take_outbound)) and
 //!   the demuxed FLV byte stream ([`take_flv`](RtmpSession::take_flv)).
 //! - [`RtmpPublisher`] is the egress (client) side, the transport half of
-//!   [`RtmpSink`](crate::rtmpsink): it connects out and *publishes*. Drain
+//!   `RtmpSink`: it connects out and *publishes*. Drain
 //!   [`take_outbound`](RtmpPublisher::take_outbound) to the socket, feed the
 //!   socket's bytes to [`push`](RtmpPublisher::push), and once
 //!   [`is_publishing`](RtmpPublisher::is_publishing) feed an FLV byte stream to
@@ -15,7 +15,7 @@
 //! An RTMP audio/video message payload is exactly an FLV tag *body*, so the two
 //! halves are inverses: the session demuxes RTMP messages into an FLV stream,
 //! the publisher reframes an FLV stream back into RTMP messages. Both share the
-//! [`ChunkReader`] reassembly, the AMF0 codec, and the simple (non-digest)
+//! `ChunkReader` reassembly, the AMF0 codec, and the simple (non-digest)
 //! handshake ffmpeg/OBS use. Scope: one stream, H.264 + AAC, AMF0 only. Verified
 //! against the Adobe RTMP 1.0 spec.
 
@@ -635,7 +635,7 @@ enum PubPhase {
     Publishing,
 }
 
-/// Sans-IO RTMP publish client, the transport half of [`RtmpSink`](crate::rtmpsink).
+/// Sans-IO RTMP publish client, the transport half of `RtmpSink`.
 /// Construct with the target `app` / `tcUrl` / stream key; the C0/C1 handshake is
 /// queued immediately. Drain [`take_outbound`](Self::take_outbound) to the socket
 /// and feed the socket's bytes to [`push`](Self::push); once

@@ -14,6 +14,7 @@ pub(crate) fn pcm_params(caps: &Caps) -> Result<(u16, u16, u16, u32), G2gError> 
         format,
         channels,
         sample_rate,
+        ..
     } = caps
     else {
         return Err(G2gError::CapsMismatch);

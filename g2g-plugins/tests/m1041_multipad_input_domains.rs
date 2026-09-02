@@ -36,6 +36,7 @@ fn interleave_mux_stays_domain_transparent() {
             format: g2g_core::AudioFormat::PcmS16Le,
             channels: 2,
             sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         },
     );
     assert_eq!(mux.input_domains(), DomainSet::ALL);

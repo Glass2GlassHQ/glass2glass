@@ -132,11 +132,13 @@ pub(crate) fn couple_passthrough(
                 format: fi,
                 channels: ci,
                 sample_rate: si,
+                ..
             },
             Caps::Audio {
                 format: fp,
                 channels: cp,
                 sample_rate: sp,
+                ..
             },
         ) => {
             let format = if mask.format {
@@ -163,6 +165,7 @@ pub(crate) fn couple_passthrough(
                 format,
                 channels,
                 sample_rate,
+                channel_layout: crate::ChannelLayout::UNSPECIFIED,
             })
         }
         _ => None,
@@ -306,6 +309,7 @@ pub(crate) fn project_passthrough(out: &Caps, mask: PassthroughFields) -> Option
             format,
             channels,
             sample_rate,
+            ..
         } => {
             if !mask.format || !mask.channels {
                 return None; // no format / channel wildcard
@@ -318,6 +322,7 @@ pub(crate) fn project_passthrough(out: &Caps, mask: PassthroughFields) -> Option
                 } else {
                     ANY_SAMPLE_RATE
                 },
+                channel_layout: crate::ChannelLayout::UNSPECIFIED,
             })
         }
         _ => None,
@@ -460,6 +465,7 @@ fn concrete_probe_base(sample: &Caps) -> Caps {
             format: *format,
             channels: 2,
             sample_rate: 48_000,
+            channel_layout: crate::ChannelLayout::UNSPECIFIED,
         },
         other => other.clone(),
     }

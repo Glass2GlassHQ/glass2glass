@@ -54,6 +54,7 @@ fn audio_caps() -> Caps {
         format: AudioFormat::Aac,
         channels: 0,
         sample_rate: 0,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     }
 }
 

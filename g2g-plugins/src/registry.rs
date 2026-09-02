@@ -11,7 +11,7 @@
 //! opus / av1 / vpx / mjpeg codecs, `fmp4demux`, the rtsp / udp / http / hls /
 //! dash / rtmp network sources and sinks, and the Linux v4l2 / ffmpeg / vaapi /
 //! wayland / kms / alsa / pulse elements) are registered by
-//! [`register_feature_gated`], each block `#[cfg]`-gated like its module, so they
+//! `register_feature_gated`, each block `#[cfg]`-gated like its module, so they
 //! appear in `gst-inspect` / `parse_launch` when their feature is enabled.
 //! `filesrc` is registered (M112): its `bytestream-format` property supplies the
 //! container type a raw byte stream lacks, so `filesrc location=x.ts
@@ -42,6 +42,7 @@ use crate::audioresample::AudioResample;
 use crate::audiotestsrc::AudioTestSrc;
 use crate::av1parse::Av1Parse;
 use crate::capsfilter::CapsFilter;
+use crate::colorspace::Colorspace;
 use crate::compositor::{Compositor, CompositorPad};
 use crate::debugspy::DebugSpy;
 use crate::downloadbuffer::DownloadBuffer;
@@ -413,6 +414,7 @@ pub fn default_registry() -> Registry {
             format: AudioFormat::PcmS16Le,
             channels: 2,
             sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         },
         // num-buffers defaults to forever (the property's documented `-1`),
         // matching gst audiotestsrc; a launch line bounds it with `num-buffers=N`.
@@ -425,6 +427,7 @@ pub fn default_registry() -> Registry {
             format: AudioFormat::PcmS16Le,
             channels: 2,
             sample_rate: 44_100,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         },
         || Box::new(ToneGenerateSrc::new()),
     ));
@@ -435,6 +438,7 @@ pub fn default_registry() -> Registry {
             format: AudioFormat::PcmS16Le,
             channels: 1,
             sample_rate: 8_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         },
         || Box::new(DtmfSrc::new()),
     ));
@@ -448,6 +452,7 @@ pub fn default_registry() -> Registry {
                 format: AudioFormat::PcmS16Le,
                 channels: 2,
                 sample_rate: 48_000,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
             },
             || Box::new(AAudioSrc::new(48_000, 2, u64::MAX)),
         )
@@ -592,6 +597,11 @@ pub fn default_registry() -> Registry {
         // Caps-driven by default (M186): a bare `videoconvert` takes its output
         // format from a downstream capsfilter, or passes through.
         Box::new(VideoConvert::auto())
+    }));
+    // Colorimetry converter (M1127): a bare `colorspace` takes its target from a
+    // downstream capsfilter, or passes through.
+    reg.register_launch(LaunchFactory::of::<Colorspace>("colorspace", || {
+        Box::new(Colorspace::new())
     }));
     // Tensor dtype converter (M441): quantize/dequantize, the tensor sibling of
     // videoconvert. A bare instance quantizes to uint8 (scale 1, zp 0); the real
@@ -961,6 +971,12 @@ pub fn default_registry() -> Registry {
     reg.register_launch(LaunchFactory::of::<crate::speed::Speed>("speed", || {
         Box::new(crate::speed::Speed::new())
     }));
+    // Audio half of reverse playback (M1130): reverses the samples inside each
+    // `chunk-duration` batch, the way `gopreverse` reverses a decoded GOP.
+    reg.register_launch(LaunchFactory::of::<crate::audioreverse::AudioReverse>(
+        "audioreverse",
+        || Box::new(crate::audioreverse::AudioReverse::new()),
+    ));
     // Level meter + silence detector (passthrough analyzers): measurements are
     // read via getters, the g2g analog of gst posting them on the bus.
     reg.register_launch(LaunchFactory::of::<crate::level::Level>("level", || {
@@ -976,6 +992,11 @@ pub fn default_registry() -> Registry {
     reg.register_launch(LaunchFactory::of::<crate::spectrum::Spectrum>(
         "spectrum",
         || Box::new(crate::spectrum::Spectrum::new()),
+    ));
+    // EBU R128 loudness (M1131): momentary / short-term / gated integrated LUFS.
+    reg.register_launch(LaunchFactory::of::<crate::ebur128::Ebur128>(
+        "ebur128",
+        || Box::new(crate::ebur128::Ebur128::new()),
     ));
 
     // Demuxers + parsers + passthrough.
@@ -1319,6 +1340,7 @@ pub fn default_registry() -> Registry {
                 format: AudioFormat::PcmS16Le,
                 channels: 2,
                 sample_rate: 48_000,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
             },
         ))
     }));
@@ -1915,6 +1937,7 @@ fn register_autoplug_candidates(reg: &mut Registry) {
                 format: AudioFormat::PcmS16Le,
                 channels: 2,
                 sample_rate: 48_000,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
             },
             || Box::new(crate::coreaudio::CoreAudioSrc::new(48_000, 2, u64::MAX)),
         )
@@ -1947,6 +1970,7 @@ fn register_autoplug_candidates(reg: &mut Registry) {
                 format: AudioFormat::PcmS16Le,
                 channels: 2,
                 sample_rate: 48_000,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
             },
             || Box::new(crate::avf::AvfAudioSrc::new(48_000, 2, u64::MAX)),
         )
@@ -1998,6 +2022,7 @@ fn register_autoplug_candidates(reg: &mut Registry) {
                 format: AudioFormat::PcmF32Le,
                 channels: 2,
                 sample_rate: 48_000,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
             },
             || Box::new(crate::wasapisrc::WasapiSrc::new(u64::MAX)),
         )
@@ -2198,7 +2223,7 @@ fn register_aliases(reg: &mut Registry) {
 /// One feature-gated launch element: the name a pipeline writes, the cargo
 /// feature that compiles it, and whether this build has it.
 ///
-/// `compiled_in` mirrors the element's `#[cfg]` in [`register_feature_gated`];
+/// `compiled_in` mirrors the element's `#[cfg]` in `register_feature_gated`;
 /// the catalog itself is un-cfg'd, so a build that lacks an element can still
 /// name the feature that would provide it.
 #[derive(Debug, Clone, Copy)]
@@ -3063,6 +3088,7 @@ fn register_feature_gated(reg: &mut Registry) {
                 format: AudioFormat::PcmS16Le,
                 channels: 2,
                 sample_rate: 48_000,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
             },
             || Box::new(AlsaSrc::new()),
         )
@@ -3076,6 +3102,7 @@ fn register_feature_gated(reg: &mut Registry) {
                 format: AudioFormat::PcmS16Le,
                 channels: 2,
                 sample_rate: 48_000,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
             },
             || Box::new(PulseSrc::new()),
         )
@@ -3096,6 +3123,7 @@ fn register_feature_gated(reg: &mut Registry) {
                 format: AudioFormat::PcmS16Le,
                 channels: 2,
                 sample_rate: 48_000,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
             },
             || Box::new(PipeWireSrc::new()),
         )

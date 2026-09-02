@@ -55,6 +55,7 @@ use g2g_core::G2gError;
 
 mod caps;
 mod convert;
+mod layout;
 mod validate;
 
 pub use caps::{

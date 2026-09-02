@@ -265,6 +265,7 @@ impl AudioBufferSplit {
             format,
             channels,
             sample_rate,
+            ..
         } = caps
         else {
             return Err(G2gError::CapsMismatch);
@@ -377,6 +378,7 @@ impl AudioBufferSplit {
             format,
             channels,
             sample_rate: rate,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         let (_, denominator) = self.effective_duration();
 
@@ -717,6 +719,7 @@ impl PadTemplates for AudioBufferSplit {
             format,
             channels: ANY_CHANNELS,
             sample_rate: ANY_SAMPLE_RATE,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         let set = CapsSet::from_alternatives(pcm_formats().iter().copied().map(pcm).collect());
         vec![PadTemplate::sink(set.clone()), PadTemplate::source(set)]
@@ -734,6 +737,7 @@ mod tests {
             format: AudioFormat::PcmF32Le,
             channels: 1,
             sample_rate: rate,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         }
     }
 

@@ -241,6 +241,7 @@ impl AsyncElement for FfmpegAudioDec {
                     format: AudioFormat::PcmS16Le,
                     channels: ANY_CHANNELS,
                     sample_rate,
+                    channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
                 };
                 CapsSet::from_alternatives(alloc::vec![pcm(48_000), pcm(ANY_SAMPLE_RATE)])
             }
@@ -381,6 +382,7 @@ impl AsyncElement for FfmpegAudioDec {
                     format: AudioFormat::PcmS16Le,
                     channels: d.channels,
                     sample_rate: d.rate,
+                    channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
                 };
                 if self.last_out.as_ref() != Some(&new_caps) {
                     out.push(PipelinePacket::CapsChanged(new_caps.clone()))
@@ -407,11 +409,13 @@ impl PadTemplates for FfmpegAudioDec {
             format,
             channels: ANY_CHANNELS,
             sample_rate: 0,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         let pcm = Caps::Audio {
             format: AudioFormat::PcmS16Le,
             channels: ANY_CHANNELS,
             sample_rate: ANY_SAMPLE_RATE,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         Vec::from([
             PadTemplate::sink(CapsSet::from_alternatives(Vec::from([

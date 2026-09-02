@@ -48,7 +48,8 @@ async fn audioresample_retargets_rate_through_run_graph() {
             Caps::Audio {
                 format: AudioFormat::PcmS16Le,
                 channels: 2,
-                sample_rate: 48_000
+                sample_rate: 48_000,
+                ..
             }
         )
     });

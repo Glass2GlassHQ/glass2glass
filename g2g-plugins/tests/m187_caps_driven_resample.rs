@@ -15,6 +15,13 @@ use g2g_core::runtime::{parse_launch, run_graph};
 use g2g_core::PipelineClock;
 use g2g_plugins::registry::default_registry;
 
+/// Buffers the source emits.
+const SOURCE_BUFFERS: u64 = 3;
+
+/// A resampling pass adds one frame at end of stream: the sinc kernel window
+/// defers the last input samples and the flush delivers them.
+const RESAMPLED_FRAMES: u64 = SOURCE_BUFFERS + 1;
+
 struct ZeroClock;
 impl PipelineClock for ZeroClock {
     fn now_ns(&self) -> u64 {
@@ -37,7 +44,7 @@ async fn capsfilter_drives_audioresample_rate() {
     // the output, configure_output hands it over, audioresample 48k -> 16k.
     let line = "audiotestsrc num-buffers=3 freq=440 \
                 ! audioresample ! audio/x-raw,format=S16LE,rate=16000 ! fakesink";
-    assert_eq!(run_line(line).await, 3, "{line}");
+    assert_eq!(run_line(line).await, RESAMPLED_FRAMES, "{line}");
 }
 
 #[tokio::test]
@@ -45,7 +52,7 @@ async fn rate_only_capsfilter_drives_resample() {
     // Combine with M184: a format-less, rate-only capsfilter still drives the
     // rate (format stays the source's S16LE).
     let line = "audiotestsrc num-buffers=3 ! audioresample ! audio/x-raw,rate=16000 ! fakesink";
-    assert_eq!(run_line(line).await, 3, "{line}");
+    assert_eq!(run_line(line).await, RESAMPLED_FRAMES, "{line}");
 }
 
 #[tokio::test]
@@ -54,7 +61,7 @@ async fn bare_audioresample_is_passthrough() {
     // instead of failing to negotiate.
     assert_eq!(
         run_line("audiotestsrc num-buffers=3 ! audioresample ! fakesink").await,
-        3
+        SOURCE_BUFFERS
     );
 }
 
@@ -62,6 +69,6 @@ async fn bare_audioresample_is_passthrough() {
 async fn audioresample_samplerate_property_still_works() {
     assert_eq!(
         run_line("audiotestsrc num-buffers=3 ! audioresample samplerate=16000 ! fakesink").await,
-        3
+        RESAMPLED_FRAMES
     );
 }

@@ -25,7 +25,7 @@
 //! Every packet-XOR FEC scheme (RFC 2733 and its descendants ULPFEC, FlexFEC,
 //! SMPTE 2022-1) shares the same algebra and the same receiver bookkeeping, and
 //! differs only in how the recovery fields are packed on the wire. Both live
-//! here as [`XorFields`] and [`XorFecBuffer`], and [`crate::flexfec`] /
+//! here as `XorFields` and `XorFecBuffer`, and [`crate::flexfec`] /
 //! [`crate::st2022fec`] build their own wire formats on top.
 
 use alloc::collections::{BTreeMap, VecDeque};

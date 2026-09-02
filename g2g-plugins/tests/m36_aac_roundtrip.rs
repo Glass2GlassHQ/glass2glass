@@ -69,6 +69,7 @@ async fn pcm_aac_pcm_round_trip_recovers_the_stream() {
         format: AudioFormat::PcmS16Le,
         channels: CHANNELS,
         sample_rate: RATE,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     };
 
     // --- encode ---
@@ -121,6 +122,7 @@ async fn pcm_aac_pcm_round_trip_recovers_the_stream() {
                 format: AudioFormat::PcmS16Le,
                 channels: CHANNELS,
                 sample_rate: RATE,
+                ..
             })
         ),
         "decoded PCM caps, got {:?}",

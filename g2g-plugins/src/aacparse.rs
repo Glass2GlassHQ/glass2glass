@@ -398,6 +398,7 @@ impl PadTemplates for AacParse {
             format: AudioFormat::Aac,
             channels: 2,
             sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         Vec::from([
             PadTemplate::sink(CapsSet::one(aac.clone())),
@@ -419,6 +420,7 @@ impl AacInfo {
             format: AudioFormat::Aac,
             channels: self.channels,
             sample_rate: self.sample_rate,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         }
     }
 }
@@ -845,6 +847,7 @@ mod tests {
             format: AudioFormat::Aac,
             channels: 0,
             sample_rate: 0,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         }
     }
 
@@ -901,6 +904,7 @@ mod tests {
                 format: AudioFormat::Aac,
                 channels,
                 sample_rate,
+                ..
             }) => {
                 assert_eq!(*channels, 2);
                 assert_eq!(*sample_rate, 44_100);
@@ -1042,6 +1046,7 @@ mod tests {
             format: AudioFormat::PcmS16Le,
             channels: 2,
             sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         assert_eq!(parse.intercept_caps(&pcm), Err(G2gError::CapsMismatch));
     }

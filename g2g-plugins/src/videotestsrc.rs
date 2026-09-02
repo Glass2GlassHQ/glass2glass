@@ -47,7 +47,7 @@ pub enum Pattern {
     Ball,
     /// Concentric rings whose spacing tightens with radius: a sinusoidal zone
     /// plate `128 + 127*sin(2*pi*(x^2 + y^2)/period)`, phase-animated, for
-    /// resampling / aliasing tests. Uses the `libm`-free [`crate::mathf`] sine.
+    /// resampling / aliasing tests. Uses the `libm`-free `mathf` sine.
     ZonePlate,
 }
 
@@ -141,7 +141,7 @@ impl VideoTestSrc {
 
     /// M180: emit frames in the shared-CPU [`MemoryDomain::SystemView`] domain
     /// so a downstream stride transform can flip / crop them zero-copy. See the
-    /// [`shared`](Self::shared) field. Has no effect when a pool is configured.
+    /// `shared` field. Has no effect when a pool is configured.
     pub fn with_shared_memory(mut self) -> Self {
         self.shared = true;
         self

@@ -145,7 +145,7 @@ impl MkvMux {
         self
     }
 
-    /// Live mode: suppress the EOS `Cues` index (see [`streamable`](Self::streamable)).
+    /// Live mode: suppress the EOS `Cues` index (see `streamable`).
     pub fn with_streamable(mut self, streamable: bool) -> Self {
         self.streamable = streamable;
         self
@@ -209,6 +209,7 @@ impl MkvMux {
                 format,
                 channels,
                 sample_rate,
+                ..
             } => Some(MkvTrackSpec {
                 codec: audio_to_mkv(*format)?,
                 width: 0,
@@ -294,6 +295,7 @@ impl MkvMux {
             format,
             channels: 0,
             sample_rate: 0,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         Vec::from([
             video(VideoCodec::H264),

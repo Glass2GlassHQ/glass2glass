@@ -339,7 +339,7 @@ impl OggDemuxer {
     /// Restart parsing at a mid-file byte-seek landing (M862), keeping the
     /// current chain's bitstreams (codec, headers) while dropping all position
     /// state. Without them the packets after the landing would be typed by
-    /// [`detect`] from a random audio packet, and the decoder would never get
+    /// `detect` from a random audio packet, and the decoder would never get
     /// the codec headers the landing skipped past.
     pub fn resume_mid_stream(&mut self) {
         self.buf.clear();
@@ -584,7 +584,7 @@ impl OggLogicalStream {
 /// and setup headers without a codebook parse: the two block sizes (ident
 /// byte 28) and each mode's blockflag, located by a validated backward scan
 /// of the setup header's mode section (the ffmpeg `vorbis_parser` technique).
-/// Drives demux-side packet durations; see [`Self::packet_samples`].
+/// Drives demux-side packet durations; see [`Self::packet_blocksize`].
 #[derive(Debug, Clone)]
 pub struct VorbisTiming {
     bs0: u32,

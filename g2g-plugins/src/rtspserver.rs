@@ -8,8 +8,8 @@
 //! RTP/AVP. Both transports are negotiated: unicast UDP (the `client_port` range,
 //! `RtspEvent::Setup`) and TCP-interleaved (RFC 2326 §10.12, the `interleaved=`
 //! channels, `RtspEvent::SetupInterleaved`); the ingest I/O layer
-//! ([`RtspServerSrc`](crate::rtspserversrc)) serves both, while the serving sink
-//! ([`RtspServerSink`](crate::rtspserversink)) is UDP-only for now.
+//! (`RtspServerSrc`) serves both, while the serving sink
+//! (`RtspServerSink`) is UDP-only for now.
 
 use alloc::format;
 use alloc::string::{String, ToString};

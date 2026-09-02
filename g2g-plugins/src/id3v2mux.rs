@@ -4,7 +4,7 @@
 //! leaves one tag.
 //!
 //! The tags come from the `tags` property ([`crate::tagproperty`]), not from
-//! upstream: a [`TagList`](g2g_core::TagList) travels out of band on the bus and
+//! upstream: a [`TagList`] travels out of band on the bus and
 //! an element cannot read the bus, so there is no in-band tag event to pick up.
 //!
 //! `write-v1` adds the 128-byte ID3v1 block behind the stream, the lossy

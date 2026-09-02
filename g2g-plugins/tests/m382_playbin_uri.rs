@@ -38,6 +38,7 @@ fn aac_any() -> Caps {
         format: AudioFormat::Aac,
         channels: 0,
         sample_rate: 0,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     }
 }
 fn raw_video() -> Caps {
@@ -55,6 +56,7 @@ fn raw_audio() -> Caps {
         format: AudioFormat::PcmS16Le,
         channels: 0,
         sample_rate: 0,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     }
 }
 
@@ -211,6 +213,7 @@ async fn mux_av() -> Vec<u8> {
             format: AudioFormat::Aac,
             channels: 2,
             sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         },
     )
     .unwrap();

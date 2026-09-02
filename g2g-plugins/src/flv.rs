@@ -6,7 +6,7 @@
 //! millisecond timestamp, stream id) followed by its body. The body's first byte
 //! identifies the codec, and each codec puts a different number of bytes between
 //! it and the access unit; [`FlvCodec`] names the ones this parser carries and
-//! [`payload_offset`] holds the widths.
+//! `payload_offset` holds the widths.
 //!
 //! Video: H.264 (id 7, AVCC length-prefixed NALUs), Sorenson Spark (id 2),
 //! VP6 (id 4) and VP6 with alpha (id 5). Audio: AAC (sound format 10, raw

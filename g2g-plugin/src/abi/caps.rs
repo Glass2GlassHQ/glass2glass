@@ -330,6 +330,7 @@ pub fn caps_into_ffi(caps: &Caps) -> Result<FfiCaps, CapsCodeError> {
             format,
             channels,
             sample_rate,
+            ..
         } => (
             CAPS_AUDIO,
             FfiCapsBody {
@@ -407,6 +408,7 @@ pub fn caps_from_ffi(caps: &FfiCaps) -> Result<Caps, CapsCodeError> {
                 format: decode(AUDIO_FORMAT_CODES, "audio format", v.format)?,
                 channels,
                 sample_rate: v.sample_rate,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
             })
         }
         CAPS_BYTE_STREAM => {
@@ -538,6 +540,7 @@ mod tests {
                 format: *format,
                 channels: 2,
                 sample_rate: 48_000,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
             };
             let ffi = caps_into_ffi(&caps).expect("coded audio crosses");
             assert_eq!(caps_from_ffi(&ffi).expect("and comes back"), caps);

@@ -174,28 +174,23 @@ Highest leverage first:
 
 ## Audio depth
 
-- Windowed-sinc / polyphase resampler in `audioresample` (currently linear
-  interpolation, which rolls off high frequencies).
-- Dither (and optionally noise shaping) in `audioconvert` on bit-depth
-  reduction.
-- Audio reverse playback (the audio analog of `GopReverse`).
-- Loudness / analysis metering: `spectrum` and EBU R128 (`ebur128`) analogs
-  beside `level`.
-- Capture-side drift clock on `alsasrc` / `pipewiresrc`, so a duplex
-  capture-plus-playback graph can slave one direction to the other.
+- Ratio-scaled tap count in the `audioresample` sinc kernel: the fixed window
+  loses stop-band depth under heavy downsampling.
+- Hand sources the elected clock (a `SourceLoop::set_clock_sync` plus its
+  runner call site), so capture PTS can be translated onto a foreign master
+  in a duplex graph.
 - Carry an explicit channel mask/positions in `Caps::Audio` rather than only a
   count with the per-count `ChannelLayout` convention.
 
 ## Colorimetry
 
-- Write the caps colorimetry into the colour description the remaining encoders
-  emit (`nvenc`, `av1enc`, `mjpegenc`, the platform encoders), so a tagged
-  stream survives a re-encode there too.
-- Tag the raw output of the decoders that still leave colorimetry unknown: AV1
-  (`dav1d`, `Rav1dDec`), MJPEG (full-range BT.601 by JFIF), and the platform
-  decoders (Media Foundation, VideoToolbox, MediaCodec, VAAPI).
-- A colorspace conversion element that converts transfer and primaries (tone
-  and gamut mapping), the fields `VideoConvert` passes through untouched.
+- Write the caps colorimetry into the colour description the platform encoders
+  emit (Media Foundation, VideoToolbox, MediaCodec), so a tagged stream
+  survives a re-encode there too.
+- Tag the raw output of the platform decoders that still leave colorimetry
+  unknown (Media Foundation, VideoToolbox, MediaCodec, VAAPI).
+- Tone mapping in `colorspace`: PQ / HLG conversions are refused at negotiation,
+  only the SDR transfers convert.
 
 ## Transforms and effects
 

@@ -1,5 +1,5 @@
 //! Shared wgpu device context for the GPU elements (M103): the Vello overlay
-//! producer ([`crate::vellooverlay`]) and the [`WgpuSink`](crate::wgpusink)
+//! producer (`vellooverlay`) and the [`WgpuSink`](crate::wgpusink)
 //! consumer.
 //!
 //! A `wgpu::Texture` is bound to the device that created it, so a producer and a
@@ -206,7 +206,7 @@ impl WgpuKeepAlive for WgpuTextureKeepAlive {
 /// Three in-tree producers wrap their texture differently: the overlay / blit
 /// path uses [`WgpuTextureKeepAlive`], the CUDA and GPU-decode NV12 bridges use
 /// [`WgpuNv12Texture`], and the Android MediaCodec GPU decode (M304/M305) uses
-/// [`mediacodec_wgpu::WgpuRgbaTexture`](crate::mediacodec_wgpu::WgpuRgbaTexture).
+/// `mediacodec_wgpu::WgpuRgbaTexture`.
 /// Recognising all three lets the one [`WgpuSink`](crate::wgpusink) present any
 /// of them; [`texture_layout`] says how the pixels are stored.
 pub fn texture_of(owned: &OwnedWgpuTexture) -> Option<&wgpu::Texture> {

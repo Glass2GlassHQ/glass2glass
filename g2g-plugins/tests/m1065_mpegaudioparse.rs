@@ -60,6 +60,7 @@ fn mp3_sentinel_caps() -> Caps {
         format: AudioFormat::Mp3,
         channels: 0,
         sample_rate: 0,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     }
 }
 
@@ -285,6 +286,7 @@ fn stub_pcm_caps() -> Caps {
         format: AudioFormat::PcmS16Le,
         channels: ANY_CHANNELS,
         sample_rate: ANY_SAMPLE_RATE,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     }
 }
 
@@ -297,6 +299,7 @@ impl PadTemplates for StubAudioDec {
                 format: AudioFormat::Mp3,
                 channels: ANY_CHANNELS,
                 sample_rate: 0,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
             })),
             PadTemplate::source(CapsSet::one(stub_pcm_caps())),
         ])

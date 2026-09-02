@@ -46,7 +46,7 @@ pub const fn mix_q15(a: i16, b: i16, gain_a: i16, gain_b: i16) -> i16 {
 
 /// A heap-free two-input audio mixer [`StaticFanIn2`]: interleaved S16LE PCM
 /// on both inputs (same sample rate, channel layout, and per-frame byte
-/// count; a rate mismatch belongs to an upstream [`Resampler`]
+/// count; a rate mismatch belongs to an upstream [`Resampler`](crate::Resampler)
 /// (crate::Resampler)), interleaved S16LE out, lent from a
 /// [`StaticLendRing`]. Payloads that are not whole 16-bit samples or whose
 /// lengths differ are rejected as [`G2gError::CapsMismatch`]. Negative gains

@@ -22,6 +22,7 @@ fn out_caps() -> Caps {
         format: AudioFormat::PcmS16Le,
         channels: 1,
         sample_rate: 1000,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     }
 }
 

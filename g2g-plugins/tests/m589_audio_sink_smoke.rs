@@ -118,6 +118,7 @@ fn drive_tone<E: AsyncElement>(
         format,
         channels,
         sample_rate: RATE,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     };
     match sink.configure_pipeline(&caps) {
         Ok(_) => {}

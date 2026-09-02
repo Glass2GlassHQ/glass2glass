@@ -86,6 +86,7 @@ fn raw_audio_caps() -> CapsSet {
                 format,
                 channels: ANY_CHANNELS,
                 sample_rate: ANY_SAMPLE_RATE,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
             })
             .collect(),
     )

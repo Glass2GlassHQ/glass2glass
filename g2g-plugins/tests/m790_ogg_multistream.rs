@@ -341,6 +341,7 @@ async fn assert_pair_round_trips(
             format: got,
             sample_rate,
             channels,
+            ..
         } = &caps[port]
         else {
             panic!("port {port} announced audio caps, got {:?}", caps[port]);

@@ -255,6 +255,7 @@ impl PadTemplates for AudioAmplify {
             format: AudioFormat::PcmS16Le,
             channels: 2,
             sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         Vec::from([
             PadTemplate::sink(CapsSet::one(pcm.clone())),
@@ -368,6 +369,7 @@ mod tests {
             format: AudioFormat::PcmF32Le,
             channels: 2,
             sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         assert_eq!(
             a.configure_pipeline(&f32_caps).unwrap_err(),
@@ -377,6 +379,7 @@ mod tests {
             format: AudioFormat::PcmS16Le,
             channels: 1,
             sample_rate: 16_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         assert!(a.configure_pipeline(&ok).is_ok());
     }

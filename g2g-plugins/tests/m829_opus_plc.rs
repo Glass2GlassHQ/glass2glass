@@ -91,6 +91,7 @@ fn opus_caps() -> Caps {
         format: AudioFormat::Opus,
         channels: CHANNELS,
         sample_rate: OPUS_RATE_HZ,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     }
 }
 
@@ -123,6 +124,7 @@ async fn encode(frame_size: OpusFrameSize, count: usize) -> Vec<Vec<u8>> {
         format: AudioFormat::PcmS16Le,
         channels: CHANNELS,
         sample_rate: OPUS_RATE_HZ,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     })
     .unwrap();
     let pcm = tone_pcm(frame_size.samples() * count);

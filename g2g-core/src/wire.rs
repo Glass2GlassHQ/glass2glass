@@ -46,6 +46,7 @@ use crate::caps::{
     Colorimetry, Dim, Interlace, MatrixCoefficients, Rate, RawVideoFormat, SubPictureFormat,
     TensorDType, TensorLayout, TensorShape, TextFormat, TransferCharacteristics, VideoCodec,
 };
+use crate::channels::ChannelLayout;
 use crate::frame::{Frame, FrameTiming, PipelinePacket};
 use crate::memory::{MemoryDomain, SystemSlice};
 use crate::meta::FrameMetaSet;
@@ -55,8 +56,9 @@ use crate::tensor::MAX_TENSOR_RANK;
 /// Wire format version, the first byte of every encoded packet. Bumped on any
 /// incompatible layout change so a decoder rejects a mismatched peer up front
 /// rather than mis-parsing. Version 2 added the four colorimetry bytes to both
-/// video caps (M1111).
-pub const WIRE_VERSION: u8 = 2;
+/// video caps (M1111); version 3 added the u16 channel-layout mask to audio
+/// caps (M1147).
+pub const WIRE_VERSION: u8 = 3;
 
 /// Failure decoding (or encoding) a [`PipelinePacket`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,6 +108,9 @@ impl Writer {
     fn u8(&mut self, v: u8) {
         self.buf.push(v);
     }
+    fn u16(&mut self, v: u16) {
+        self.buf.extend_from_slice(&v.to_le_bytes());
+    }
     fn u32(&mut self, v: u32) {
         self.buf.extend_from_slice(&v.to_le_bytes());
     }
@@ -154,6 +159,10 @@ impl<'a> Reader<'a> {
     }
     fn u8(&mut self) -> Result<u8, WireError> {
         Ok(self.take(1)?[0])
+    }
+    fn u16(&mut self) -> Result<u16, WireError> {
+        let b = self.take(2)?;
+        Ok(u16::from_le_bytes([b[0], b[1]]))
     }
     fn u32(&mut self) -> Result<u32, WireError> {
         let b = self.take(4)?;
@@ -641,11 +650,13 @@ fn put_caps(w: &mut Writer, c: &Caps) {
             format,
             channels,
             sample_rate,
+            channel_layout,
         } => {
             w.u8(2);
             w.u8(audio_format_to_u8(*format));
             w.u8(*channels);
             w.u32(*sample_rate);
+            w.u16(channel_layout.mask());
         }
         Caps::Tensor {
             dtype,
@@ -701,6 +712,7 @@ fn get_caps(r: &mut Reader) -> Result<Caps, WireError> {
             format: audio_format_from_u8(r.u8()?)?,
             channels: r.u8()?,
             sample_rate: r.u32()?,
+            channel_layout: ChannelLayout::from_mask(r.u16()?),
         },
         3 => {
             let dtype = dtype_from_u8(r.u8()?)?;
@@ -1373,6 +1385,13 @@ mod tests {
                 format: AudioFormat::Opus,
                 channels: 2,
                 sample_rate: 48_000,
+                channel_layout: crate::ChannelLayout::UNSPECIFIED,
+            },
+            Caps::Audio {
+                format: AudioFormat::PcmS16Le,
+                channels: 6,
+                sample_rate: 48_000,
+                channel_layout: crate::ChannelLayout::SURROUND_5_1,
             },
             Caps::Tensor {
                 dtype: TensorDType::F32,
@@ -1503,6 +1522,24 @@ mod tests {
             encode_packet(&PipelinePacket::DataFrame(frame)),
             Err(WireError::UnsupportedDomain)
         );
+    }
+
+    #[test]
+    fn a_version_2_audio_caps_is_rejected_not_misparsed() {
+        // v3 appended the u16 channel mask to audio caps. A v2 peer's bytes are
+        // the same up to that point, so the version byte is the only thing that
+        // keeps them from decoding as a truncated v3 packet.
+        let caps = Caps::Audio {
+            format: AudioFormat::PcmS16Le,
+            channels: 6,
+            sample_rate: 48_000,
+            channel_layout: crate::ChannelLayout::SURROUND_5_1,
+        };
+        let mut v2 = encode_packet(&PipelinePacket::CapsChanged(caps)).expect("encode");
+        // Drop the mask and stamp the old version: exactly a v2 encoding.
+        v2.truncate(v2.len() - 2);
+        v2[0] = 2;
+        assert!(matches!(decode_packet(&v2), Err(WireError::BadTag)));
     }
 
     #[test]

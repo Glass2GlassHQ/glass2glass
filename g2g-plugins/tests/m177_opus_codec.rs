@@ -81,6 +81,7 @@ fn pcm_caps(channels: u8) -> Caps {
         format: AudioFormat::PcmS16Le,
         channels,
         sample_rate: OPUS_RATE_HZ,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     }
 }
 
@@ -109,6 +110,7 @@ async fn decode(channels: u8, packets: &[Vec<u8>]) -> CaptureSink {
         format: AudioFormat::Opus,
         channels,
         sample_rate: OPUS_RATE_HZ,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     })
     .unwrap();
     let mut sink = CaptureSink::default();
@@ -140,7 +142,8 @@ async fn stereo_roundtrip_preserves_signal_energy() {
         vec![Caps::Audio {
             format: AudioFormat::Opus,
             channels,
-            sample_rate: OPUS_RATE_HZ
+            sample_rate: OPUS_RATE_HZ,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED
         }],
         "encoder announces Opus caps once",
     );
@@ -153,6 +156,7 @@ async fn stereo_roundtrip_preserves_signal_energy() {
             format: AudioFormat::Opus,
             channels: 0,
             sample_rate: 0,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         })
         .unwrap();
     let mut psink = CaptureSink::default();
@@ -188,7 +192,8 @@ async fn stereo_roundtrip_preserves_signal_energy() {
         vec![Caps::Audio {
             format: AudioFormat::PcmS16Le,
             channels,
-            sample_rate: OPUS_RATE_HZ
+            sample_rate: OPUS_RATE_HZ,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED
         }],
         "decoder announces PCM caps once",
     );

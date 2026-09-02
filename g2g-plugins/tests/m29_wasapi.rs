@@ -58,6 +58,7 @@ async fn rejects_compressed_audio() {
         format: AudioFormat::Aac,
         channels: 2,
         sample_rate: 48_000,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     };
     let err = sink.configure_pipeline(&aac).expect_err("aac rejected");
     assert_eq!(err, G2gError::CapsMismatch);

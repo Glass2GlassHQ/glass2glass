@@ -318,7 +318,8 @@ async fn mp3_flv_round_trips_against_ffmpeg() {
         vec![Caps::Audio {
             format: AudioFormat::Mp3,
             channels: 2,
-            sample_rate: 44_100
+            sample_rate: 44_100,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED
         }],
         "the layout the audio tag flags declare is announced"
     );
@@ -336,6 +337,7 @@ async fn mp3_flv_round_trips_against_ffmpeg() {
         format: AudioFormat::Mp3,
         channels: 2,
         sample_rate: 44_100,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     };
     std::fs::write(&out, mux(&caps, &audio.frames, 1).await).unwrap();
     assert!(
@@ -410,6 +412,7 @@ async fn sorenson_plus_mp3_mux_into_one_flv() {
             format: AudioFormat::Mp3,
             channels: 2,
             sample_rate: 44_100,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         },
     )
     .unwrap();
@@ -507,6 +510,7 @@ async fn speex_carriage_probes_as_speex() {
         format: AudioFormat::Speex,
         channels: 1,
         sample_rate: 16_000,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     };
     let flv = mux(&caps, &aus, 1).await;
     let out = tmp("g2g_m831_speex.flv");
@@ -619,7 +623,8 @@ async fn h264_and_aac_still_demux() {
         vec![Caps::Audio {
             format: AudioFormat::Aac,
             channels: 2,
-            sample_rate: 44_100
+            sample_rate: 44_100,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED
         }]
     );
 
@@ -723,6 +728,7 @@ mod decode {
             format: AudioFormat::Mp3,
             channels: 2,
             sample_rate: 44_100,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         })
         .unwrap();
         let mut sink = CaptureSink::default();
@@ -741,7 +747,8 @@ mod decode {
             Some(&Caps::Audio {
                 format: AudioFormat::PcmS16Le,
                 channels: 2,
-                sample_rate: 44_100
+                sample_rate: 44_100,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED
             }),
             "the decoder announces the real layout"
         );

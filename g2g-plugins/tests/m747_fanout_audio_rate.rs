@@ -80,6 +80,7 @@ fn audioresample_derives_output_for_any_channels_placeholder() {
         format: AudioFormat::PcmS16Le,
         channels: ANY_CHANNELS,
         sample_rate: 44_100,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     };
     let out = transform.derive(&placeholder);
     assert!(

@@ -243,11 +243,23 @@ impl LogSource for Target<'_> {
 #[derive(Debug, Default)]
 pub struct InstanceNamer {
     counts: Vec<(&'static str, u32)>,
+    reserved: Vec<String>,
 }
 
 impl InstanceNamer {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A namer that counts past `reserved`, the names the graph already carries
+    /// from its launch line's `name=`. Without this an auto-named instance can
+    /// land on a name a user chose for another one, and two instances answering
+    /// to the same name make either unaddressable.
+    pub fn with_reserved(reserved: impl IntoIterator<Item = String>) -> Self {
+        Self {
+            counts: Vec::new(),
+            reserved: reserved.into_iter().collect(),
+        }
     }
 
     /// Name an element instance and log its addition, returning the name.
@@ -257,7 +269,7 @@ impl InstanceNamer {
     pub fn add(&mut self, category: &'static str, explicit: Option<&str>) -> String {
         let name = match explicit {
             Some(n) => String::from(n),
-            None => {
+            None => loop {
                 let n = match self.counts.iter_mut().find(|(c, _)| *c == category) {
                     Some(e) => {
                         let v = e.1;
@@ -269,8 +281,11 @@ impl InstanceNamer {
                         0
                     }
                 };
-                alloc::format!("{category}{n}")
-            }
+                let candidate = alloc::format!("{category}{n}");
+                if !self.reserved.contains(&candidate) {
+                    break candidate;
+                }
+            },
         };
         crate::g2g_info!(Target::named(category, &name), "added to pipeline");
         name

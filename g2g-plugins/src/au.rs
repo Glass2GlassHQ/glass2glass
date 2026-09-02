@@ -188,6 +188,7 @@ impl AuParse {
                 format: parsed.wire.format,
                 channels: parsed.wire.channels,
                 sample_rate: parsed.wire.sample_rate,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
             }))
             .await?;
             self.format = Some(parsed);
@@ -384,6 +385,7 @@ mod tests {
             format,
             channels,
             sample_rate: rate,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         }
     }
 

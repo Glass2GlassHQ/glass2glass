@@ -15,7 +15,7 @@
 //! change mid-stream.
 //!
 //! The header is attacker-controlled: the dimensions are bounded by
-//! [`MAX_DIMENSION`] and the frame size they imply by [`MAX_FRAME_BYTES`], both
+//! `MAX_DIMENSION` and the frame size they imply by `MAX_FRAME_BYTES`, both
 //! checked before anything is sized from them, so a bogus `W99999999` fails the
 //! parse instead of asking for terabytes.
 //!

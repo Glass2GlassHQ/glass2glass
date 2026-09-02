@@ -365,6 +365,7 @@ mod ffmpeg_codecs {
                 format: AudioFormat::Aac,
                 channels: 2,
                 sample_rate: 44_100,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
             })
             .expect("libavcodec opens the AAC decoder");
         let mut sink = CaptureSink::default();

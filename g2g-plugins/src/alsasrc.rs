@@ -45,9 +45,10 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
-    AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, FrameTiming,
-    G2gError, HardwareError, LatencyReport, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
-    PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
+    AudioFormat, Caps, CapsConstraint, CapsSet, ClockCandidate, ClockPriority, ConfigureOutcome,
+    DriftClock, DriftObservation, ElementMetadata, FrameTiming, G2gError, HardwareError,
+    LatencyReport, MemoryDomain, MonotonicClock, OutputSink, PadTemplate, PadTemplates,
+    PipelineClock, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
 
 use crate::alsapcm::{alsa_params, device_permutation, invert, permute, PcmConfig, FORMATS};
@@ -63,6 +64,10 @@ const DEFAULT_LATENCY_US: u32 = 10_000;
 /// allocation: cap it rather than trusting whatever the driver reports. 1 M
 /// frames is ~21 s at 48 kHz, far past any real period.
 const MAX_PERIOD_FRAMES: usize = 1 << 20;
+
+/// How often the clock-discipline trace prints, out of the once-per-period
+/// stream of observations (100 per second at the default 10 ms period).
+const CLOCK_LOG_INTERVAL_NS: u64 = 1_000_000_000;
 
 /// # Example
 ///
@@ -84,6 +89,13 @@ pub struct AlsaSrc {
     /// N periods and emit EOS (the bounded / test path).
     num_buffers: u64,
     configured: bool,
+    /// ADC-disciplined capture clock. The worker feeds it
+    /// `(monotonic_now, frames_captured)` observations so its `now_ns()` tracks
+    /// the card's real capture rate rather than wall time.
+    clock: Arc<DriftClock>,
+    /// Whether to offer [`clock`](Self::clock) to the pipeline's clock election
+    /// (the `provide-clock` property, default on).
+    provide_clock: bool,
 }
 
 impl Default for AlsaSrc {
@@ -105,7 +117,16 @@ impl AlsaSrc {
             latency_us: DEFAULT_LATENCY_US,
             num_buffers: u64::MAX,
             configured: false,
+            clock: Arc::new(DriftClock::new(Arc::new(MonotonicClock))),
+            provide_clock: true,
         }
+    }
+
+    /// The ADC-disciplined clock this source offers to election. Exposed for
+    /// tests / introspection; its `now_ns()` tracks the real capture rate once
+    /// the worker has observed the device.
+    pub fn clock(&self) -> Arc<DriftClock> {
+        Arc::clone(&self.clock)
     }
 
     /// Capture from a named ALSA PCM device (e.g. `hw:0,0`, `plughw:1`).
@@ -155,6 +176,7 @@ impl AlsaSrc {
             format: self.format,
             channels: self.channels,
             sample_rate: self.rate,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         // Reject a format no ALSA device opens (compressed, mulaw, ...) up front.
         alsa_params(&caps)?;
@@ -200,6 +222,21 @@ impl SourceLoop for AlsaSrc {
         LatencyReport::live(u64::from(self.latency_us) * 1_000, None)
     }
 
+    /// Offer the ADC-disciplined [`clock`](Self::clock) as a plain
+    /// [`Provider`](ClockPriority::Provider), one rank below the audio sinks'
+    /// [`AudioProvider`](ClockPriority::AudioProvider): in a duplex pipeline the
+    /// playout rate is the one nobody can adjust, so the sink stays master and
+    /// capture slaves to it. In a capture-only pipeline nothing else offers a
+    /// clock, so this one wins and the pipeline runs on the card's real rate
+    /// instead of the monotonic fallback.
+    fn provide_clock(&self) -> Option<ClockCandidate> {
+        if !self.provide_clock {
+            return None;
+        }
+        let clock: Arc<dyn PipelineClock + Send + Sync> = self.clock.clone();
+        Some(ClockCandidate::new(ClockPriority::Provider, clock))
+    }
+
     fn metadata(&self) -> ElementMetadata {
         ElementMetadata::new(
             "ALSA audio source",
@@ -225,6 +262,7 @@ impl SourceLoop for AlsaSrc {
             "buffer-time" => self.buffer_us = value.as_uint().ok_or(PropError::Type)? as u32,
             "latency-time" => self.latency_us = value.as_uint().ok_or(PropError::Type)? as u32,
             "num-buffers" => crate::numbuffers::set_num_buffers(&mut self.num_buffers, &value)?,
+            "provide-clock" => self.provide_clock = value.as_bool().ok_or(PropError::Type)?,
             _ => return Err(PropError::Unknown),
         }
         Ok(())
@@ -239,6 +277,7 @@ impl SourceLoop for AlsaSrc {
             "buffer-time" => Some(PropValue::Uint(u64::from(self.buffer_us))),
             "latency-time" => Some(PropValue::Uint(u64::from(self.latency_us))),
             "num-buffers" => Some(crate::numbuffers::get_num_buffers(self.num_buffers)),
+            "provide-clock" => Some(PropValue::Bool(self.provide_clock)),
             _ => None,
         }
     }
@@ -263,10 +302,13 @@ impl SourceLoop for AlsaSrc {
             let device = self.device.clone();
             let timing = (self.buffer_us, self.latency_us);
             let worker_stop = Arc::clone(&stop);
+            // Only discipline the clock when we actually offer it; otherwise the
+            // per-period `delay()` probe is wasted work no one reads.
+            let clock = self.provide_clock.then(|| Arc::clone(&self.clock));
             let worker = thread::Builder::new()
                 .name(String::from("g2g-alsasrc"))
                 .spawn(move || {
-                    worker_main(&device, cfg, timing, audio_tx, worker_stop, ready_tx);
+                    worker_main(&device, cfg, timing, audio_tx, worker_stop, clock, ready_tx);
                 })
                 .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
 
@@ -339,6 +381,7 @@ impl PadTemplates for AlsaSrc {
             format,
             channels: 2,
             sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         Vec::from([PadTemplate::source(CapsSet::from_alternatives(
             FORMATS.map(pcm).to_vec(),
@@ -382,6 +425,12 @@ static ALSASRC_PROPS: &[PropertySpec] = &[
         "periods to capture then EOS (-1 = forever)",
     )
     .with_default("-1"),
+    PropertySpec::new(
+        "provide-clock",
+        PropKind::Bool,
+        "Provide an ADC-disciplined clock for the pipeline's clock election",
+    )
+    .with_default("true"),
 ];
 
 // =================================================================
@@ -394,6 +443,7 @@ fn worker_main(
     timing: (u32, u32),
     audio_tx: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
     stop: Arc<AtomicBool>,
+    clock: Option<Arc<DriftClock>>,
     ready: std_mpsc::SyncSender<Result<(), i32>>,
 ) {
     let (pcm, period_frames) = match open_pcm(device, cfg, timing) {
@@ -412,6 +462,8 @@ fn worker_main(
 
     let io = pcm.io_bytes();
     let mut buf = vec![0u8; period_frames * cfg.frame_bytes()];
+    let mut frames_read = 0u64;
+    let mut last_clock_log_ns = 0u64;
     while !stop.load(Ordering::Relaxed) {
         let frames = match io.readi(&mut buf) {
             // A driver could report more frames than the buffer holds; clamp
@@ -428,6 +480,12 @@ fn worker_main(
         if frames == 0 {
             continue;
         }
+        frames_read = frames_read.saturating_add(frames as u64);
+        // Sampled right after the read returns (at ~the device rate), the same
+        // place the sink observes its playout position.
+        if let Some(clock) = clock.as_deref() {
+            discipline_clock(&pcm, cfg.rate, frames_read, clock, &mut last_clock_log_ns);
+        }
         let captured = &buf[..frames * cfg.frame_bytes()];
         let chunk = match perm.as_deref() {
             Some(p) => permute(captured, p, sample),
@@ -438,6 +496,64 @@ fn worker_main(
         }
     }
     let _ = pcm.drop();
+}
+
+/// Feed the drift clock one `(monotonic_now, captured_ns)` observation. Frames
+/// the hardware has actually captured = frames we have read out plus the
+/// `snd_pcm_delay` still sitting unread in the ring; that is the true ADC
+/// capture position, which drifts from wall time at the card's real rate. The
+/// local time is sampled next to the `delay()` probe so the pair lines up.
+///
+/// The read loop runs once per period (100 Hz at the default 10 ms), so the
+/// trace is throttled to [`CLOCK_LOG_INTERVAL_NS`]; `last_log_ns` carries the
+/// caller's stamp of the last line.
+fn discipline_clock(
+    pcm: &PCM,
+    rate: u32,
+    frames_read: u64,
+    clock: &DriftClock,
+    last_log_ns: &mut u64,
+) {
+    let local_ns = clock.reference_now();
+    // A failed / negative delay probe (device not running yet) yields no usable
+    // capture position; skip rather than feed a bogus sample.
+    let Ok(delay) = pcm.delay() else { return };
+    let unread = delay.max(0) as u64;
+    let Some(outcome) = observe_capture(clock, local_ns, frames_read.saturating_add(unread), rate)
+    else {
+        return;
+    };
+    if local_ns.saturating_sub(*last_log_ns) < CLOCK_LOG_INTERVAL_NS {
+        return;
+    }
+    *last_log_ns = local_ns;
+    g2g_core::g2g_log!(
+        g2g_core::log::Target::category("AlsaSrc"),
+        "clock local={}ms captured={}frames unread={} slope={:.6} observations={} {:?}",
+        local_ns / 1_000_000,
+        frames_read,
+        unread,
+        clock.slope(),
+        clock.observations(),
+        outcome
+    );
+}
+
+/// Fold one capture position into the drift fit: `frames_captured` at the card's
+/// nominal `rate` is the master timeline, `local_ns` the reference instant it
+/// was read at. `None` when there is no usable position yet (nothing captured,
+/// or a zero rate), so the caller skips instead of feeding a bogus sample.
+fn observe_capture(
+    clock: &DriftClock,
+    local_ns: u64,
+    frames_captured: u64,
+    rate: u32,
+) -> Option<DriftObservation> {
+    if frames_captured == 0 || rate == 0 {
+        return None;
+    }
+    let master_ns = (u128::from(frames_captured) * 1_000_000_000 / u128::from(rate)) as u64;
+    Some(clock.observe(local_ns, master_ns))
 }
 
 /// Open and configure the device for blocking interleaved capture. Returns the
@@ -511,6 +627,7 @@ mod tests {
                 format: AudioFormat::PcmS16Le,
                 channels: 1,
                 sample_rate: 16_000,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
             })
         );
         let bad = AlsaSrc::new().with_format(AudioFormat::Opus);
@@ -527,6 +644,7 @@ mod tests {
                 PropValue::Str(s) => s,
                 PropValue::Uint(u) => alloc::format!("{u}"),
                 PropValue::Int(i) => alloc::format!("{i}"),
+                PropValue::Bool(b) => alloc::format!("{b}"),
                 other => panic!("unexpected kind for {}: {other:?}", spec.name),
             };
             assert_eq!(live, declared, "{} default", spec.name);
@@ -543,6 +661,81 @@ mod tests {
     }
 
     #[test]
+    fn provides_a_capture_clock_below_the_sinks() {
+        let src = AlsaSrc::new();
+        let cand = src.provide_clock().expect("alsasrc offers a clock");
+        // Below AudioProvider so a duplex pipeline keeps the sink's playout
+        // clock as master, above SystemFallback so capture-only elects this.
+        assert_eq!(cand.priority, ClockPriority::Provider);
+        assert!(ClockPriority::Provider < ClockPriority::AudioProvider);
+        assert!(ClockPriority::Provider > ClockPriority::SystemFallback);
+    }
+
+    #[test]
+    fn provide_clock_property_toggles_the_candidate() {
+        let mut src = AlsaSrc::new();
+        assert_eq!(
+            src.get_property("provide-clock"),
+            Some(PropValue::Bool(true))
+        );
+        src.set_property("provide-clock", PropValue::Bool(false))
+            .unwrap();
+        assert!(
+            src.provide_clock().is_none(),
+            "disabled src offers no clock"
+        );
+        assert_eq!(
+            src.set_property("provide-clock", PropValue::Str("yes".into())),
+            Err(PropError::Type)
+        );
+    }
+
+    /// The discipline fold, driven with synthetic capture positions: a card
+    /// running 100 ppm fast should show up as a slope of ~1.0001, which is the
+    /// whole point of the clock (the pipeline paces to the ADC, not wall time).
+    #[test]
+    fn capture_positions_fit_the_real_capture_rate() {
+        const RATE: u32 = 48_000;
+        const PERIOD_FRAMES: f64 = 480.0; // 10 ms
+        const CARD_PPM_FAST: f64 = 1.0001;
+
+        let clock = DriftClock::new(Arc::new(MonotonicClock));
+        let base_local_ns = 5_000_000_000u64;
+        for period in 1..=DriftClock::DEFAULT_WINDOW as u64 {
+            let local_ns = base_local_ns + period * 10_000_000;
+            let captured = (period as f64 * PERIOD_FRAMES * CARD_PPM_FAST).round() as u64;
+            assert_eq!(
+                observe_capture(&clock, local_ns, captured, RATE),
+                Some(DriftObservation::Folded),
+                "clean ramp sample {period} should fold"
+            );
+        }
+        let slope = clock.slope();
+        assert!(
+            (1.00005..1.00015).contains(&slope),
+            "capture-rate estimate {slope} did not converge on 1.0001"
+        );
+
+        // Projecting the reference forward tracks the card, not wall time: a
+        // second of reference time is a second plus the drift of capture time.
+        let last_local_ns = base_local_ns + DriftClock::DEFAULT_WINDOW as u64 * 10_000_000;
+        let advance =
+            clock.project_ns(last_local_ns + 1_000_000_000) - clock.project_ns(last_local_ns);
+        assert!(
+            (1_000_050_000..1_000_150_000).contains(&advance),
+            "a reference second projected to {advance} ns of capture time"
+        );
+    }
+
+    #[test]
+    fn a_position_with_nothing_captured_feeds_no_sample() {
+        let clock = DriftClock::new(Arc::new(MonotonicClock));
+        assert_eq!(observe_capture(&clock, 1_000, 0, 48_000), None);
+        assert_eq!(observe_capture(&clock, 1_000, 480, 0), None);
+        assert_eq!(clock.observations(), 0);
+    }
+
+    #[test]
     fn pad_template_is_pcm_source_only() {
         use g2g_core::PadDirection;
         let source = AlsaSrc::pad_template(PadDirection::Source).expect("has source pad");
@@ -550,6 +743,7 @@ mod tests {
             format: AudioFormat::PcmS16Le,
             channels: 2,
             sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         assert!(matches!(source.caps, g2g_core::PadCaps::Fixed(ref s) if s.accepts(&pcm)));
         assert!(AlsaSrc::pad_template(PadDirection::Sink).is_none());

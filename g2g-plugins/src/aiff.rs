@@ -308,6 +308,7 @@ impl AiffParse {
                     format: wire.format,
                     channels: wire.channels,
                     sample_rate: wire.sample_rate,
+                    channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
                 }))
                 .await?;
                 self.in_data = true;
@@ -541,6 +542,7 @@ mod tests {
             format,
             channels,
             sample_rate: rate,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         }
     }
 

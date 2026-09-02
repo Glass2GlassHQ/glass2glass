@@ -59,6 +59,7 @@ fn audio_caps(format: AudioFormat) -> Caps {
         format,
         channels: 2,
         sample_rate: OPUS_RATE_HZ,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     }
 }
 
@@ -129,6 +130,7 @@ async fn f32_tone_round_trips_through_float_apis() {
                 format: AudioFormat::PcmF32Le,
                 channels: 2,
                 sample_rate: OPUS_RATE_HZ,
+                ..
             }
         )),
         "F32 output caps announced, got {caps:?}"

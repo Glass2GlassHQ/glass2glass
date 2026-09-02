@@ -143,7 +143,7 @@ pub enum Control {
     },
     Shutdown,
     /// Mid-stream Keying Material update (rekey): the opaque KM blob (the new
-    /// wrapped key + salt for the even or odd slot, [`crate::srtcrypto`] builds /
+    /// wrapped key + salt for the even or odd slot, `srtcrypto` builds /
     /// reads it). `rsp` distinguishes a request (KMREQ) from a response (KMRSP).
     KeyMaterial {
         rsp: bool,
@@ -171,7 +171,7 @@ pub struct Handshake {
     pub stream_id: Option<String>,
     /// KMREQ/KMRSP extension: the Keying Material message bytes (the wrapped
     /// stream key + salt), present when the stream is encrypted. Opaque here;
-    /// [`crate::srtcrypto`] builds and interprets it.
+    /// `srtcrypto` builds and interprets it.
     pub km: Option<Vec<u8>>,
     /// Whether this is a *response* handshake (a listener answering a caller's
     /// conclusion). The HSREQ/KMREQ extensions are then emitted as HSRSP/KMRSP:
@@ -492,7 +492,7 @@ pub struct SrtHandshake {
 
 impl SrtHandshake {
     /// `km` is the caller's Keying Material blob (from
-    /// [`crate::srtcrypto`]) for an encrypted stream, or `None` for cleartext.
+    /// `srtcrypto`) for an encrypted stream, or `None` for cleartext.
     pub fn new_caller(
         socket_id: u32,
         init_seq: u32,

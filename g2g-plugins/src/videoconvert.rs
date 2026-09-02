@@ -411,22 +411,43 @@ impl AsyncElement for VideoConvert {
                     if src.len() < needed {
                         return Err(G2gError::CapsMismatch);
                     }
-                    // M760: offload the pixel convert onto tokio's blocking pool so
-                    // the cooperative runner keeps servicing sibling arms while it
-                    // runs. Own the input bytes (Frame is not Send: it can hold a
-                    // GPU domain) so the closure is Send; the extra copy is cheap
-                    // next to the per-pixel color math.
-                    #[cfg(feature = "offload")]
-                    let converted = {
-                        let owned: Vec<u8> = src[..needed].to_vec();
-                        crate::offload::run_blocking(move || {
-                            convert_strided(&owned, format, out_fmt, wu, hu, src_stride, &matrix)
-                        })
-                        .await
+                    // `src` is a repack of the frame's rows, not the frame's own
+                    // bytes, so the input cannot be forwarded as-is.
+                    #[cfg(feature = "metadata")]
+                    let repacked = packed.is_some();
+                    #[cfg(not(feature = "metadata"))]
+                    let repacked = false;
+                    // Same format at a tight pitch: `convert_strided` would copy
+                    // the frame through unchanged (that arm applies no matrix), so
+                    // hand the incoming payload downstream instead.
+                    let forward_input = format == out_fmt
+                        && src_stride == tight
+                        && src.len() == needed
+                        && !repacked
+                        && matches!(frame.domain, MemoryDomain::System(_));
+                    let out_domain = if forward_input {
+                        frame.domain
+                    } else {
+                        // M760: offload the pixel convert onto tokio's blocking pool
+                        // so the cooperative runner keeps servicing sibling arms
+                        // while it runs. Own the input bytes (Frame is not Send: it
+                        // can hold a GPU domain) so the closure is Send; the extra
+                        // copy is cheap next to the per-pixel color math.
+                        #[cfg(feature = "offload")]
+                        let converted = {
+                            let owned: Vec<u8> = src[..needed].to_vec();
+                            crate::offload::run_blocking(move || {
+                                convert_strided(
+                                    &owned, format, out_fmt, wu, hu, src_stride, &matrix,
+                                )
+                            })
+                            .await
+                        };
+                        #[cfg(not(feature = "offload"))]
+                        let converted =
+                            convert_strided(src, format, out_fmt, wu, hu, src_stride, &matrix);
+                        MemoryDomain::System(SystemSlice::from_boxed(converted))
                     };
-                    #[cfg(not(feature = "offload"))]
-                    let converted =
-                        convert_strided(src, format, out_fmt, wu, hu, src_stride, &matrix);
 
                     // A convert changes format/geometry but not rate: carry the
                     // input framerate so a fixating downstream peer (e.g. a
@@ -445,7 +466,7 @@ impl AsyncElement for VideoConvert {
                         self.last_caps = Some(new_caps);
                     }
                     let out_frame = Frame {
-                        domain: MemoryDomain::System(SystemSlice::from_boxed(converted)),
+                        domain: out_domain,
                         timing: frame.timing,
                         sequence: self.emitted,
                         meta: Default::default(),

@@ -121,6 +121,7 @@ impl VorbisDec {
             format: AudioFormat::PcmS16Le,
             channels: self.channels,
             sample_rate: self.sample_rate,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         }
     }
 
@@ -175,6 +176,7 @@ impl AsyncElement for VorbisDec {
                     format: AudioFormat::PcmS16Le,
                     channels: ANY_CHANNELS,
                     sample_rate,
+                    channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
                 };
                 CapsSet::from_alternatives(alloc::vec![pcm(48_000), pcm(ANY_SAMPLE_RATE)])
             }
@@ -331,11 +333,13 @@ impl PadTemplates for VorbisDec {
                 format: AudioFormat::Vorbis,
                 channels: ANY_CHANNELS,
                 sample_rate: ANY_SAMPLE_RATE,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
             })),
             PadTemplate::source(CapsSet::one(Caps::Audio {
                 format: AudioFormat::PcmS16Le,
                 channels: 2,
                 sample_rate: 48_000,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
             })),
         ])
     }

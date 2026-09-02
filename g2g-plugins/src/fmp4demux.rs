@@ -1,7 +1,7 @@
 //! Fragmented-MP4 / CMAF byte-stream demuxer (Fmp4Demux): `ByteStream{IsoBmff}`
 //! in, `CompressedVideo{H264|H265}` Annex-B access units out. The streaming
 //! counterpart of the file-based [`Mp4Src`](crate::mp4src); both share the
-//! [`fmp4`](crate::fmp4) parser. This is what an HLS/DASH fMP4 segment stream
+//! `fmp4` parser. This is what an HLS/DASH fMP4 segment stream
 //! (init segment + media fragments) feeds into, the analog of `tsdemux` for the
 //! TS path.
 //!

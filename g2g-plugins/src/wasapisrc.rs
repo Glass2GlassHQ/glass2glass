@@ -118,6 +118,7 @@ impl WasapiSrc {
             format: c.format,
             channels: c.channels,
             sample_rate: c.sample_rate,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         })
     }
 }
@@ -282,6 +283,7 @@ impl PadTemplates for WasapiSrc {
             format,
             channels: 2,
             sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         Vec::from([PadTemplate::source(CapsSet::from_alternatives(Vec::from(
             [pcm(AudioFormat::PcmF32Le), pcm(AudioFormat::PcmS16Le)],
@@ -496,6 +498,7 @@ mod tests {
             format: AudioFormat::PcmF32Le,
             channels: 2,
             sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         assert!(matches!(source.caps, g2g_core::PadCaps::Fixed(ref s) if s.accepts(&pcm)));
         assert!(WasapiSrc::pad_template(PadDirection::Sink).is_none());

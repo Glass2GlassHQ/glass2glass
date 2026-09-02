@@ -181,6 +181,7 @@ impl PulseSrc {
             format: self.format,
             channels: self.channels,
             sample_rate: self.rate,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         // Reject a format no pulse stream carries (compressed, mulaw, ...).
         pulse_spec(&caps)?;
@@ -398,6 +399,7 @@ impl PadTemplates for PulseSrc {
             format,
             channels: 2,
             sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         Vec::from([PadTemplate::source(CapsSet::from_alternatives(
             FORMATS.map(pcm).to_vec(),
@@ -536,6 +538,7 @@ mod tests {
                 format: AudioFormat::PcmS16Le,
                 channels: 1,
                 sample_rate: 16_000,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
             })
         );
         let bad = PulseSrc::new().with_format(AudioFormat::Opus);
@@ -601,6 +604,7 @@ mod tests {
             format: AudioFormat::PcmS16Le,
             channels: 2,
             sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         assert!(matches!(source.caps, g2g_core::PadCaps::Fixed(ref s) if s.accepts(&pcm)));
         assert!(PulseSrc::pad_template(PadDirection::Sink).is_none());

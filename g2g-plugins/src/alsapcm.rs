@@ -61,6 +61,7 @@ pub(crate) fn alsa_params(caps: &Caps) -> Result<PcmConfig, G2gError> {
         format,
         channels,
         sample_rate,
+        ..
     } = caps
     else {
         return Err(G2gError::CapsMismatch);
@@ -153,6 +154,7 @@ mod tests {
             format,
             channels,
             sample_rate: rate,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         }
     }
 

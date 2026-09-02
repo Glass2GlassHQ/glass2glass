@@ -91,9 +91,9 @@ async fn decodes_mjpeg_to_rgba8_with_recovered_geometry() {
             height: Dim::Fixed(16),
             framerate: Rate::Fixed(30 << 16),
             interlace: g2g_core::Interlace::Any,
-            colorimetry: g2g_core::Colorimetry::UNKNOWN
+            colorimetry: g2g_core::Colorimetry::SRGB
         }],
-        "one CapsChanged with the decoded 16x16 RGBA geometry"
+        "one CapsChanged with the decoded 16x16 RGBA geometry, tagged sRGB per JFIF"
     );
 
     assert_eq!(sink.frames.len(), 2, "one RGBA frame per JPEG access unit");
@@ -131,7 +131,11 @@ async fn decodes_mjpeg_to_i420() {
             height: Dim::Fixed(16),
             framerate: Rate::Fixed(30 << 16),
             interlace: g2g_core::Interlace::Any,
-            colorimetry: g2g_core::Colorimetry::UNKNOWN
+            // JFIF colour over the limited range the planar route scales to.
+            colorimetry: g2g_core::Colorimetry {
+                range: g2g_core::ColorRange::Limited,
+                ..g2g_core::Colorimetry::JPEG
+            }
         }],
         "CapsChanged announces the I420 output format"
     );

@@ -4,7 +4,7 @@
 //! `ByteStream{IsoBmff}`): a progressive `.mp4` / `.mov` keeps its `moov` sample
 //! tables (`stbl`) and an `mdat`, and the `moov` may sit at the *end* of the file
 //! with absolute `stco` chunk offsets, so the whole file is buffered before the
-//! [`fmp4::parse_progressive`](crate::fmp4::parse_progressive) pass runs at `Eos`.
+//! `fmp4::parse_progressive` pass runs at `Eos`.
 //!
 //! This is what a bare `filesrc location=movie.mp4 ! decodebin` auto-plugs: a file
 //! source types itself `ByteStream{Mp4}` (M478), the auto-plugger picks this
@@ -140,6 +140,7 @@ impl Mp4Demux {
             format: AudioFormat::Aac,
             channels: 0,
             sample_rate: 0,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         }
     }
 
@@ -203,6 +204,7 @@ impl Mp4Demux {
                 format: *format,
                 channels: *channels,
                 sample_rate: *sample_rate,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
             }))
             .await?;
             self.caps_sent = true;

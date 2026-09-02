@@ -3,10 +3,13 @@
 //! their caps, duration, and metadata.
 //!
 //! Usage:
-//!   g2g-discover <path-or-uri>          # human-readable report
-//!   g2g-discover <path-or-uri> --json   # the same as JSON
-//!   g2g-discover --plugin <path> ...    # load a plugin first
-//!   g2g-discover --trusted-key <path>   # only load plugins signed by this key
+//!
+//! ```text
+//! g2g-discover <path-or-uri>          # human-readable report
+//! g2g-discover <path-or-uri> --json   # the same as JSON
+//! g2g-discover --plugin <path> ...    # load a plugin first
+//! g2g-discover --trusted-key <path>   # only load plugins signed by this key
+//! ```
 //!
 //! Backed by [`g2g_plugins::discover::discover`], which sniffs the container,
 //! runs a headless probe graph to the first frame, and reads the demuxer's

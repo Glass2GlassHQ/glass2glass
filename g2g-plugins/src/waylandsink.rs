@@ -143,7 +143,11 @@ struct QueuedFrame {
 ///
 /// - `Block` (default): `process()` waits for the matching `frame`
 ///   callback before returning. Producer is throttled to refresh.
-///   No drops, but backpressure propagates upstream.
+///   No drops, but backpressure propagates upstream. A compositor stops
+///   sending `frame` callbacks for a surface it is not painting (fully
+///   occluded, minimized, or on no output), so the wait only applies
+///   while callbacks are recent: a silent surface stops throttling
+///   rather than freezing the branch until the window is exposed again.
 /// - `DropOldest`: `process()` returns as soon as the worker accepts
 ///   the frame. If a previous frame is still awaiting its `frame`
 ///   callback, the worker overwrites it — the older frame never paints.
@@ -155,6 +159,12 @@ pub enum PacingPolicy {
     Block,
     DropOldest,
 }
+
+/// `frame` callbacks older than this mean the compositor is not painting the
+/// surface, and `Block` stops waiting on them. Also the bound on one ack wait,
+/// so the first frames after the compositor goes silent pay at most this before
+/// the sink notices. Well above any real refresh interval.
+const FRAME_CALLBACK_SILENCE_NS: u64 = 250_000_000;
 
 /// What the sink-side struct holds between `process()` calls. We keep
 /// only `Send + Sync` handles here so the multi-thread runner can move
@@ -266,6 +276,10 @@ pub struct WaylandSink {
     frames_presented: Arc<AtomicU64>,
     latency: Arc<LatencyRecorder>,
     frames_dropped: Arc<AtomicU64>,
+    /// Monotonic time of the compositor's most recent `frame` callback,
+    /// written by the worker; how `Block` tells a painting surface from a
+    /// silent one.
+    last_frame_callback_ns: Arc<AtomicU64>,
     pacing: PacingPolicy,
     /// PTS pacing + QoS late-drop (M173 / M176), shared with the other
     /// synchronizing sinks: the elected clock, the segment mapping, the
@@ -326,6 +340,7 @@ impl WaylandSink {
             frames_presented: Arc::new(AtomicU64::new(0)),
             latency: Arc::new(LatencyRecorder::new()),
             frames_dropped: Arc::new(AtomicU64::new(0)),
+            last_frame_callback_ns: Arc::new(AtomicU64::new(0)),
             pacing: PacingPolicy::default(),
             pacer: PresentationPacer::new(),
             last_present_done_ns: 0,
@@ -579,6 +594,11 @@ impl AsyncElement for WaylandSink {
         let presented = Arc::clone(&self.frames_presented);
         let dropped = Arc::clone(&self.frames_dropped);
         let latency = Arc::clone(&self.latency);
+        // Seeded with now so the just-mapped surface gets one silence window of
+        // ordinary blocking before its first callback has to arrive.
+        self.last_frame_callback_ns
+            .store(monotonic_ns(), Ordering::Relaxed);
+        let last_frame_callback_ns = Arc::clone(&self.last_frame_callback_ns);
         let title = self.title.clone();
         let app_id = self.app_id.clone();
 
@@ -600,6 +620,7 @@ impl AsyncElement for WaylandSink {
                     presented,
                     dropped,
                     latency,
+                    last_frame_callback_ns,
                     ready_for_worker,
                 ) {
                     std::eprintln!("g2g-waylandsink worker error: {e:?}");
@@ -728,13 +749,29 @@ impl AsyncElement for WaylandSink {
                     .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
                     match self.pacing {
                         PacingPolicy::Block => {
-                            // Wait for the compositor's `frame` callback
-                            // for this commit. RecvError means the
-                            // worker dropped the ack (shutdown / crash)
-                            // — treat as a hardware fault.
-                            ack_rx
-                                .await
-                                .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
+                            // Wait for the compositor's `frame` callback for
+                            // this commit, but only while callbacks are
+                            // arriving at all: a surface the compositor is not
+                            // painting gets none, and gating on one would
+                            // freeze the branch until the window is exposed.
+                            // RecvError means the worker dropped the ack
+                            // (shutdown / crash) — treat as a hardware fault.
+                            let silence =
+                                core::time::Duration::from_nanos(FRAME_CALLBACK_SILENCE_NS);
+                            let last_callback_ns =
+                                self.last_frame_callback_ns.load(Ordering::Relaxed);
+                            if monotonic_ns().saturating_sub(last_callback_ns)
+                                < FRAME_CALLBACK_SILENCE_NS
+                            {
+                                match tokio::time::timeout(silence, ack_rx).await {
+                                    Ok(acked) => acked
+                                        .map_err(|_| G2gError::Hardware(HardwareError::Other))?,
+                                    Err(_) => g2g_core::g2g_log!(
+                                        self,
+                                        "frame callback overdue, presenting unthrottled"
+                                    ),
+                                }
+                            }
                         }
                         PacingPolicy::DropOldest => {
                             // Fire-and-forget: producer keeps moving.
@@ -837,6 +874,9 @@ struct WorkerState {
     presented: Arc<AtomicU64>,
     dropped: Arc<AtomicU64>,
     latency: Arc<LatencyRecorder>,
+    /// Shared with the producer, stamped on every `frame` callback: how
+    /// `Block` pacing knows the compositor is still painting this surface.
+    last_frame_callback_ns: Arc<AtomicU64>,
     /// Frame queued before the surface is mappable. Once `configure`
     /// lands we drain this into the first draw. With blocking pacing the
     /// producer is throttled to one in-flight frame, so under steady
@@ -864,6 +904,7 @@ fn worker_main(
     presented: Arc<AtomicU64>,
     dropped: Arc<AtomicU64>,
     latency: Arc<LatencyRecorder>,
+    last_frame_callback_ns: Arc<AtomicU64>,
     ready: Arc<Handshake>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let conn = Connection::connect_to_env()?;
@@ -905,6 +946,7 @@ fn worker_main(
         presented,
         dropped,
         latency,
+        last_frame_callback_ns,
         pending: None,
         orientation: Orientation::Identity,
         pending_ack: None,
@@ -1036,6 +1078,8 @@ impl CompositorHandler for WorkerState {
         // The compositor is ready for the next frame. Record the
         // glass-to-glass delta (source ingest -> on-screen), then
         // release the producer blocked on this commit's ack.
+        self.last_frame_callback_ns
+            .store(monotonic_ns(), Ordering::Relaxed);
         if let Some((arrival_ns, ack)) = self.pending_ack.take() {
             if arrival_ns != 0 {
                 let now = monotonic_ns();

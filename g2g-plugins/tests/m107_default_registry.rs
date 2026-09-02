@@ -57,7 +57,10 @@ async fn audio_chain_parses_and_runs() {
     let stats = run_graph(graph, &ZeroClock, 4)
         .await
         .expect("audio pipeline runs");
-    assert_eq!(stats.frames_consumed, 3);
+    // 3 source buffers plus the resampler's end-of-stream tail: its sinc kernel
+    // window defers the last input samples, and the flush delivers them as one
+    // more frame.
+    assert_eq!(stats.frames_consumed, 4);
 }
 
 #[tokio::test]

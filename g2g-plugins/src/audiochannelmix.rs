@@ -272,6 +272,7 @@ mod tests {
             format: AudioFormat::PcmF32Le,
             channels: CHANNEL_MIX_CHANNELS,
             sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         }
     }
 
@@ -313,6 +314,7 @@ mod tests {
             format: AudioFormat::PcmF32Le,
             channels: 1,
             sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         assert_eq!(
             element.configure(&mono).unwrap_err(),

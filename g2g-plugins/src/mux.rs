@@ -27,11 +27,16 @@ use g2g_core::{
 /// # Example
 ///
 /// ```no_run
-/// use g2g_core::{AudioFormat, Caps};
+/// use g2g_core::{AudioFormat, Caps, ChannelLayout};
 /// use g2g_plugins::mux::InterleaveMux;
 ///
 /// let format = AudioFormat::PcmS16Le;
-/// let output = Caps::Audio { format, channels: 2, sample_rate: 48_000 };
+/// let output = Caps::Audio {
+///     format,
+///     channels: 2,
+///     sample_rate: 48_000,
+///     channel_layout: ChannelLayout::UNSPECIFIED,
+/// };
 /// let element = InterleaveMux::new(2, output);
 /// ```
 #[derive(Debug)]

@@ -49,6 +49,7 @@ fn pcm_caps() -> Caps {
         format: AudioFormat::PcmS16Le,
         channels: CHANNELS,
         sample_rate: RATE,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     }
 }
 

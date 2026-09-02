@@ -6,8 +6,8 @@
 //!
 //! A [`MultiOutputElement`] driven by
 //! [`run_source_fanout`](g2g_core::runtime::run_source_fanout): it parses every
-//! `moov/trak` ([`parse_all_tracks`]) and routes each `moof`+`mdat` fragment to
-//! the port matching its `track_ID` ([`parse_fragments_multi`]), so one demuxer
+//! `moov/trak` (`parse_all_tracks`) and routes each `moof`+`mdat` fragment to
+//! the port matching its `track_ID` (`parse_fragments_multi`), so one demuxer
 //! feeds several decode branches (audio + video together). Port `i` emits its
 //! elementary [`Caps`] ([`PipelinePacket::CapsChanged`]) before its first frame.
 //! With a bus, announces the file's tracks as a `StreamCollection` (M386).
@@ -46,7 +46,7 @@ use crate::fmp4::{
 use crate::mp4box::{find_box, parse_ilst_tags};
 
 /// The id a track carries in the `StreamCollection` and on its `StreamTag`s.
-fn stream_id(track_id: u32) -> alloc::string::String {
+pub(crate) fn stream_id(track_id: u32) -> alloc::string::String {
     alloc::format!("mp4-track-{track_id}")
 }
 
@@ -107,6 +107,7 @@ fn nego_caps(kind: &TrackKind) -> (Caps, bool) {
                 format: *format,
                 channels: 0,
                 sample_rate: 0,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
             },
             false,
         ),
@@ -122,7 +123,7 @@ fn nego_caps(kind: &TrackKind) -> (Caps, bool) {
 /// The track's **real** caps: the concrete channel layout / sample rate (audio)
 /// for the runtime `CapsChanged` refinement and the discovery `StreamCollection`.
 /// For video this equals [`nego_caps`] (geometry is already concrete).
-fn real_caps(kind: &TrackKind) -> Caps {
+pub(crate) fn real_caps(kind: &TrackKind) -> Caps {
     match kind {
         TrackKind::Video { .. } | TrackKind::Text { .. } | TrackKind::ClosedCaption { .. } => {
             nego_caps(kind).0
@@ -136,6 +137,7 @@ fn real_caps(kind: &TrackKind) -> Caps {
             format: *format,
             channels: *channels,
             sample_rate: *sample_rate,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         },
     }
 }
@@ -993,6 +995,7 @@ mod tests {
                     format: AudioFormat::Aac,
                     channels: 2,
                     sample_rate: 48000,
+                    channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
                 },
             )
             .unwrap();
@@ -1075,6 +1078,7 @@ mod tests {
                     format: AudioFormat::Aac,
                     channels: 2,
                     sample_rate: 48000,
+                    channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
                 },
             )
             .unwrap();
@@ -1259,6 +1263,7 @@ mod tests {
                     format: AudioFormat::Aac,
                     channels: 0,
                     sample_rate: 0,
+                    channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
                 })
                 .unwrap();
             let mut sink = CapsCapture::default();
@@ -1275,7 +1280,8 @@ mod tests {
             Some(Caps::Audio {
                 format: AudioFormat::Aac,
                 channels: 2,
-                sample_rate: 48_000
+                sample_rate: 48_000,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED
             }),
             "AacParse recovers the real channel layout / sample rate from the wired-in ASC"
         );

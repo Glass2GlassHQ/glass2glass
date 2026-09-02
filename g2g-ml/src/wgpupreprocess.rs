@@ -3,8 +3,10 @@
 //! `WgpuPreprocess` is the hardware-first preprocessing pillar: an
 //! `AsyncElement` that takes an NV12 or packed-YUYV video frame and emits a
 //! normalized f32 NCHW RGB tensor (`Caps::RawVideo -> Caps::Tensor{F32,
-//! [1,3,H,W],Nchw}`), doing the BT.601 colour conversion and the `value / 255`
-//! normalization in a wgpu compute shader rather than on the CPU. It produces the
+//! [1,3,H,W],Nchw}`), doing the YUV -> RGB conversion and the `value / 255`
+//! normalization in a wgpu compute shader rather than on the CPU. The matrix and
+//! range come from the input caps' colorimetry, reaching the shader as uniforms,
+//! and an untagged stream resolves to BT.601 limited. It produces the
 //! same tensor contract `OrtInference` builds on the CPU, so it composes with the
 //! existing tensor graph (`-> TensorBatcher -> inference -> TensorPostprocess`).
 //! YUYV is what a UVC webcam captures, so a camera reaches the tensor with no
@@ -26,7 +28,7 @@
 //!   into the compute pass. The frame's row stride and plane offset reach the
 //!   shader in the dims uniform, so a padded capture buffer needs no repack. A
 //!   webcam's capture buffer is CPU-backed, which only an integrated GPU can bind,
-//!   so [`with_import_adapter`](WgpuPreprocess::with_import_adapter) picks the GPU
+//!   so `with_import_adapter` picks the GPU
 //!   the import opens on (M993). Windows D3D11 surface import is the remaining
 //!   input path.
 //!
@@ -42,22 +44,72 @@ use core::pin::Pin;
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, G2gError, HardwareError,
-    MemoryDomain, OutputSink, OwnedWgpuBuffer, OwnedWgpuTexture, PipelinePacket, PropError,
-    PropKind, PropValue, PropertySpec, Rate, RawVideoFormat, TensorDType, TensorLayout,
+    AsyncElement, Caps, CapsConstraint, CapsSet, Colorimetry, ConfigureOutcome, Dim, G2gError,
+    HardwareError, MemoryDomain, OutputSink, OwnedWgpuBuffer, OwnedWgpuTexture, PipelinePacket,
+    PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat, TensorDType, TensorLayout,
     TensorShape, WgpuBufferKeepAlive,
 };
 // The GPU-resident NV12 frame owner lives with the interop code that produces it
 // (the CUDA and dma-buf bridges); re-exported so this module's consumers keep
 // naming it here.
 pub use g2g_plugins::gpu::WgpuNv12Texture;
+// The one place the YUV <-> RGB coefficients are derived, shared with the CPU
+// converters and shaders in g2g-plugins so no two stages disagree.
+use g2g_plugins::yuvmatrix::{YuvToRgbWeights, SAMPLE_SPAN};
 
 /// 8x8 invocations per workgroup; the dispatch covers ceil(W/8) x ceil(H/8).
 const WORKGROUP: u32 = 8;
 
-/// YUV bytes -> normalized planar RGB (BT.601 limited range), in a compute pass.
-/// The frame bytes arrive as a packed `array<u32>`; `out` is the f32 NCHW tensor
-/// (R plane, then G, then B), each value in `[0, 1]`.
+/// The chroma code carrying no colour, in the f32 units these mirrors work in.
+const CHROMA_NEUTRAL: f32 = g2g_plugins::yuvmatrix::CHROMA_NEUTRAL as f32;
+
+/// The uniform every pipeline binds: the frame geometry, where the input pixels
+/// sit in their buffer (`stride` = input row stride, `base` = byte offset of the
+/// first luma byte), and the six YUV -> RGB weights the stream's caps
+/// colorimetry resolves to. The texture pipelines read only the geometry and
+/// the weights.
+macro_rules! dims_struct {
+    () => {
+        r#"
+struct Dims {
+    width: u32,
+    height: u32,
+    stride: u32,
+    base: u32,
+    luma_gain: f32,
+    luma_floor: f32,
+    red_from_cr: f32,
+    green_from_cb: f32,
+    green_from_cr: f32,
+    blue_from_cb: f32,
+};
+
+@group(0) @binding(0) var<uniform> dims: Dims;
+"#
+    };
+}
+
+/// The colour step every YUV shader shares, in normalized (0..1) sample units:
+/// `yv` is the raw luma byte and `cb` / `cr` the raw chroma bytes already
+/// centred on zero. Only the weights differ per stream, and they arrive in the
+/// uniform, so one text serves every colorimetry.
+macro_rules! yuv_to_rgb {
+    () => {
+        r#"
+    let luma = dims.luma_gain * (yv / 255.0 - dims.luma_floor);
+    let cbn = cb / 255.0;
+    let crn = cr / 255.0;
+    let r = luma + dims.red_from_cr * crn;
+    let g = luma + dims.green_from_cb * cbn + dims.green_from_cr * crn;
+    let b = luma + dims.blue_from_cb * cbn;
+"#
+    };
+}
+
+/// YUV bytes -> normalized planar RGB, in a compute pass, with the matrix and
+/// range from the stream's caps colorimetry (an untagged stream gets BT.601
+/// limited). The frame bytes arrive as a packed `array<u32>`; `out` is the f32
+/// NCHW tensor (R plane, then G, then B), each value in `[0, 1]`.
 ///
 /// `$sample` is the only part that differs per pixel format: it reads `yv`, `cb`,
 /// `cr` for pixel `(x, y)`, whose row starts at byte `row`. Everything else, the
@@ -71,10 +123,8 @@ const WORKGROUP: u32 = 8;
 macro_rules! yuv_shader {
     ($sample:expr) => {
         concat!(
+            dims_struct!(),
             r#"
-struct Dims { width: u32, height: u32, stride: u32, base: u32 };
-
-@group(0) @binding(0) var<uniform> dims: Dims;
 @group(0) @binding(1) var<storage, read> pixels: array<u32>;
 @group(0) @binding(2) var<storage, read_write> out: array<f32>;
 
@@ -95,17 +145,13 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let row = dims.base + y * stride;
 "#,
             $sample,
+            yuv_to_rgb!(),
             r#"
-    let yy = (yv - 16.0) * 1.164383;
-    let r = yy + 1.596027 * cr;
-    let g = yy - 0.391762 * cb - 0.812968 * cr;
-    let b = yy + 2.017232 * cb;
-
     let area = w * h;
     let li = y * w + x;
-    out[li] = clamp(r, 0.0, 255.0) / 255.0;
-    out[area + li] = clamp(g, 0.0, 255.0) / 255.0;
-    out[2u * area + li] = clamp(b, 0.0, 255.0) / 255.0;
+    out[li] = clamp(r, 0.0, 1.0);
+    out[area + li] = clamp(g, 0.0, 1.0);
+    out[2u * area + li] = clamp(b, 0.0, 1.0);
 }
 "#
         )
@@ -142,10 +188,9 @@ const YUYV_SHADER: &str = yuv_shader!(
 /// `textureLoad` reads the exact integer byte (no sampler, no filtering), so the
 /// math and the output are identical to the storage-buffer path. `out` is the
 /// same f32 NCHW tensor.
-const TEX_SHADER: &str = r#"
-struct Dims { width: u32, height: u32, _pad0: u32, _pad1: u32 };
-
-@group(0) @binding(0) var<uniform> dims: Dims;
+const TEX_SHADER: &str = concat!(
+    dims_struct!(),
+    r#"
 @group(0) @binding(1) var nv12: texture_2d<u32>;
 @group(0) @binding(2) var<storage, read_write> out: array<f32>;
 
@@ -164,19 +209,17 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let cy = i32(h + y / 2u);
     let cb = f32(textureLoad(nv12, vec2<i32>(cx, cy), 0).r) - 128.0;
     let cr = f32(textureLoad(nv12, vec2<i32>(cx + 1, cy), 0).r) - 128.0;
-
-    let yy = (yv - 16.0) * 1.164383;
-    let r = yy + 1.596027 * cr;
-    let g = yy - 0.391762 * cb - 0.812968 * cr;
-    let b = yy + 2.017232 * cb;
-
+"#,
+    yuv_to_rgb!(),
+    r#"
     let area = w * h;
     let li = y * w + x;
-    out[li] = clamp(r, 0.0, 255.0) / 255.0;
-    out[area + li] = clamp(g, 0.0, 255.0) / 255.0;
-    out[2u * area + li] = clamp(b, 0.0, 255.0) / 255.0;
+    out[li] = clamp(r, 0.0, 1.0);
+    out[area + li] = clamp(g, 0.0, 1.0);
+    out[2u * area + li] = clamp(b, 0.0, 1.0);
 }
-"#;
+"#
+);
 
 /// Surface-import variant for an already-RGB frame (M304): the input is an
 /// `Rgba8Unorm` texture whose YCbCr->RGB conversion already happened upstream
@@ -184,10 +227,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 /// through an immutable ycbcr sampler). `textureLoad` returns normalized f32
 /// already, so this just writes R,G,B into the NCHW tensor, no colour math.
 #[cfg(all(target_os = "android", feature = "mediacodec-wgpu"))]
-const TEX_SHADER_RGBA: &str = r#"
-struct Dims { width: u32, height: u32, _pad0: u32, _pad1: u32 };
-
-@group(0) @binding(0) var<uniform> dims: Dims;
+const TEX_SHADER_RGBA: &str = concat!(
+    dims_struct!(),
+    r#"
 @group(0) @binding(1) var img: texture_2d<f32>;
 @group(0) @binding(2) var<storage, read_write> out: array<f32>;
 
@@ -206,16 +248,19 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     out[area + li] = c.g;
     out[2u * area + li] = c.b;
 }
-"#;
+"#
+);
 
-/// One pixel's BT.601 limited-range conversion, the host mirror of the shaders'
-/// colour math (`cb` / `cr` already centred on 0). Returns normalized R, G, B.
-fn bt601_rgb(yv: f32, cb: f32, cr: f32) -> [f32; 3] {
-    let yy = (yv - 16.0) * 1.164383;
+/// One pixel's YUV -> RGB, the host mirror of the shaders' colour math (`cb` /
+/// `cr` already centred on 0, all three still in 8-bit sample units). Returns
+/// normalized R, G, B.
+fn yuv_rgb(weights: &YuvToRgbWeights, yv: f32, cb: f32, cr: f32) -> [f32; 3] {
+    let luma = weights.luma_gain * (yv / SAMPLE_SPAN - weights.luma_floor);
+    let (cb, cr) = (cb / SAMPLE_SPAN, cr / SAMPLE_SPAN);
     [
-        (yy + 1.596027 * cr).clamp(0.0, 255.0) / 255.0,
-        (yy - 0.391762 * cb - 0.812968 * cr).clamp(0.0, 255.0) / 255.0,
-        (yy + 2.017232 * cb).clamp(0.0, 255.0) / 255.0,
+        (luma + weights.red_from_cr * cr).clamp(0.0, 1.0),
+        (luma + weights.green_from_cb * cb + weights.green_from_cr * cr).clamp(0.0, 1.0),
+        (luma + weights.blue_from_cb * cb).clamp(0.0, 1.0),
     ]
 }
 
@@ -226,10 +271,17 @@ fn write_pixel(out: &mut [f32], area: usize, index: usize, rgb: [f32; 3]) {
     out[2 * area + index] = rgb[2];
 }
 
-/// The host BT.601 reference matching `SHADER`, kept public so the test (and a
-/// CPU-fallback caller) can compare against the GPU output. Returns the f32
-/// NCHW RGB tensor for one tightly-packed NV12 frame.
-pub fn nv12_to_rgb_tensor(nv12: &[u8], width: usize, height: usize) -> Vec<f32> {
+/// The host reference matching `SHADER` for a stream whose caps name a
+/// colorimetry: the same matrix and range the shader gets in its uniform, so
+/// the two cannot disagree. Returns the f32 NCHW RGB tensor for one
+/// tightly-packed NV12 frame.
+pub fn nv12_to_rgb_tensor_tagged(
+    nv12: &[u8],
+    width: usize,
+    height: usize,
+    colorimetry: Colorimetry,
+) -> Vec<f32> {
+    let weights = YuvToRgbWeights::new(colorimetry);
     let area = width * height;
     let uv_base = area;
     let byte = |i: usize| nv12[i] as f32;
@@ -238,17 +290,35 @@ pub fn nv12_to_rgb_tensor(nv12: &[u8], width: usize, height: usize) -> Vec<f32> 
         for x in 0..width {
             let li = y * width + x;
             let uvi = uv_base + (y / 2) * width + (x / 2) * 2;
-            let rgb = bt601_rgb(byte(li), byte(uvi) - 128.0, byte(uvi + 1) - 128.0);
+            let rgb = yuv_rgb(
+                &weights,
+                byte(li),
+                byte(uvi) - CHROMA_NEUTRAL,
+                byte(uvi + 1) - CHROMA_NEUTRAL,
+            );
             write_pixel(&mut out, area, li, rgb);
         }
     }
     out
 }
 
+/// [`nv12_to_rgb_tensor_tagged`] for an untagged stream, which resolves to
+/// BT.601 limited range. Kept public so the tests and a CPU-fallback caller can
+/// compare against the GPU output.
+pub fn nv12_to_rgb_tensor(nv12: &[u8], width: usize, height: usize) -> Vec<f32> {
+    nv12_to_rgb_tensor_tagged(nv12, width, height, Colorimetry::UNKNOWN)
+}
+
 /// The host reference matching `YUYV_SHADER`, the packed-4:2:2 counterpart of
-/// [`nv12_to_rgb_tensor`]: one tightly-packed YUYV frame (`Y0 Cb Y1 Cr` per pixel
-/// pair, `2 * width` bytes per row) to the same f32 NCHW RGB tensor.
-pub fn yuyv_to_rgb_tensor(yuyv: &[u8], width: usize, height: usize) -> Vec<f32> {
+/// [`nv12_to_rgb_tensor_tagged`]: one tightly-packed YUYV frame (`Y0 Cb Y1 Cr`
+/// per pixel pair, `2 * width` bytes per row) to the same f32 NCHW RGB tensor.
+pub fn yuyv_to_rgb_tensor_tagged(
+    yuyv: &[u8],
+    width: usize,
+    height: usize,
+    colorimetry: Colorimetry,
+) -> Vec<f32> {
+    let weights = YuvToRgbWeights::new(colorimetry);
     let area = width * height;
     let byte = |i: usize| yuyv[i] as f32;
     let mut out = vec![0f32; 3 * area];
@@ -256,15 +326,21 @@ pub fn yuyv_to_rgb_tensor(yuyv: &[u8], width: usize, height: usize) -> Vec<f32> 
         for x in 0..width {
             let li = y * width + x;
             let pair = y * width * 2 + (x / 2) * 4;
-            let rgb = bt601_rgb(
+            let rgb = yuv_rgb(
+                &weights,
                 byte(pair + (x % 2) * 2),
-                byte(pair + 1) - 128.0,
-                byte(pair + 3) - 128.0,
+                byte(pair + 1) - CHROMA_NEUTRAL,
+                byte(pair + 3) - CHROMA_NEUTRAL,
             );
             write_pixel(&mut out, area, li, rgb);
         }
     }
     out
+}
+
+/// [`yuyv_to_rgb_tensor_tagged`] for an untagged stream (BT.601 limited).
+pub fn yuyv_to_rgb_tensor(yuyv: &[u8], width: usize, height: usize) -> Vec<f32> {
+    yuyv_to_rgb_tensor_tagged(yuyv, width, height, Colorimetry::UNKNOWN)
 }
 
 /// The raw formats the element reads, in preference order: NV12 and packed YUYV
@@ -324,9 +400,12 @@ struct Gpu {
     queue: wgpu::Queue,
     pipeline: wgpu::ComputePipeline,
     bind_group: wgpu::BindGroup,
+    dims_buf: wgpu::Buffer,
     input_buf: wgpu::Buffer,
     out_buf: wgpu::Buffer,
     staging: wgpu::Buffer,
+    /// Input row stride, one half of what the dims uniform says.
+    stride: u32,
     input_len: usize,
     input_padded: usize,
     out_bytes: usize,
@@ -364,6 +443,9 @@ pub struct WgpuPreprocess {
     /// Input pixel format from the negotiated caps: which compute shader runs and
     /// how many bytes a frame is.
     format: RawVideoFormat,
+    /// Colorimetry from the negotiated caps: the matrix and range the shader
+    /// converts with. An untagged stream resolves to BT.601 limited.
+    colorimetry: Colorimetry,
     configured: bool,
     gpu: Option<Gpu>,
     /// Surface-import resources, built on the first GPU-texture frame from that
@@ -408,6 +490,7 @@ impl WgpuPreprocess {
             width: 0,
             height: 0,
             format: RawVideoFormat::Nv12,
+            colorimetry: Colorimetry::UNKNOWN,
             configured: false,
             gpu: None,
             tex_gpu: None,
@@ -463,7 +546,7 @@ impl WgpuPreprocess {
         if self.gpu.is_some() {
             return Ok(());
         }
-        self.gpu = Some(build_gpu(self.width, self.height, self.format).await?);
+        self.gpu = Some(build_gpu(self.width, self.height, self.format, self.colorimetry).await?);
         Ok(())
     }
 
@@ -479,6 +562,14 @@ impl WgpuPreprocess {
         let mut padded = vec![0u8; gpu.input_padded];
         padded[..gpu.input_len].copy_from_slice(&pixels[..gpu.input_len]);
         gpu.queue.write_buffer(&gpu.input_buf, 0, &padded);
+        // A mid-stream caps change can move the colorimetry after the pipeline
+        // was built, and rewriting 48 bytes costs less than tracking whether it
+        // did.
+        gpu.queue.write_buffer(
+            &gpu.dims_buf,
+            0,
+            &dims_bytes(self.width, self.height, gpu.stride, 0, self.colorimetry),
+        );
 
         let mut encoder = gpu
             .device
@@ -532,6 +623,14 @@ impl WgpuPreprocess {
         let mut padded = vec![0u8; gpu.input_padded];
         padded[..gpu.input_len].copy_from_slice(&pixels[..gpu.input_len]);
         gpu.queue.write_buffer(&gpu.input_buf, 0, &padded);
+        // A mid-stream caps change can move the colorimetry after the pipeline
+        // was built, and rewriting 48 bytes costs less than tracking whether it
+        // did.
+        gpu.queue.write_buffer(
+            &gpu.dims_buf,
+            0,
+            &dims_bytes(self.width, self.height, gpu.stride, 0, self.colorimetry),
+        );
 
         let frame_buf = gpu.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("preprocess-tensor"),
@@ -584,6 +683,7 @@ impl WgpuPreprocess {
             queue,
             self.width,
             self.height,
+            self.colorimetry,
             TEX_SHADER,
             "nv12-tex-rgb-normalize",
         ));
@@ -602,6 +702,13 @@ impl WgpuPreprocess {
         if texture.width() != self.width || texture.height() != self.height + self.height / 2 {
             return Err(G2gError::CapsMismatch);
         }
+        // The texture is tightly packed from byte 0; only the colorimetry can
+        // move under this pipeline, so rewrite the uniform per frame.
+        tg.queue.write_buffer(
+            &tg.dims_buf,
+            0,
+            &dims_bytes(self.width, self.height, self.width, 0, self.colorimetry),
+        );
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         let layout = tg.pipeline.get_bind_group_layout(0);
         let bind_group = tg.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -676,6 +783,7 @@ impl WgpuPreprocess {
             queue,
             self.width,
             self.height,
+            self.colorimetry,
             TEX_SHADER_RGBA,
             "rgba-tex-tensor",
         ));
@@ -770,6 +878,7 @@ impl WgpuPreprocess {
                 &queue,
                 self.width,
                 self.height,
+                self.colorimetry,
                 shader,
                 "dmabuf-rgb-normalize",
             ));
@@ -799,7 +908,7 @@ impl WgpuPreprocess {
         ig.queue.write_buffer(
             &ig.dims_buf,
             0,
-            &dims_bytes(self.width, self.height, stride, base),
+            &dims_bytes(self.width, self.height, stride, base, self.colorimetry),
         );
         let layout = ig.pipeline.get_bind_group_layout(0);
         let bind_group = ig.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1020,6 +1129,7 @@ impl AsyncElement for WgpuPreprocess {
             format,
             width: Dim::Fixed(w),
             height: Dim::Fixed(h),
+            colorimetry,
             ..
         } = absolute_caps
         else {
@@ -1031,6 +1141,7 @@ impl AsyncElement for WgpuPreprocess {
         self.width = *w;
         self.height = *h;
         self.format = *format;
+        self.colorimetry = *colorimetry;
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
     }
@@ -1196,7 +1307,12 @@ fn gpu_err<E>(_e: E) -> G2gError {
     G2gError::Hardware(HardwareError::Other)
 }
 
-async fn build_gpu(width: u32, height: u32, format: RawVideoFormat) -> Result<Gpu, G2gError> {
+async fn build_gpu(
+    width: u32,
+    height: u32,
+    format: RawVideoFormat,
+    colorimetry: Colorimetry,
+) -> Result<Gpu, G2gError> {
     let source = shader_for(format).ok_or(G2gError::CapsMismatch)?;
     let stride = format.row_stride(width).ok_or(G2gError::CapsMismatch)?;
     let input_len = format
@@ -1239,12 +1355,16 @@ async fn build_gpu(width: u32, height: u32, format: RawVideoFormat) -> Result<Gp
     });
     let dims_buf = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("dims"),
-        size: 16,
+        size: DIMS_BYTES as u64,
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
     // System memory is tightly packed from byte 0.
-    queue.write_buffer(&dims_buf, 0, &dims_bytes(width, height, stride, 0));
+    queue.write_buffer(
+        &dims_buf,
+        0,
+        &dims_bytes(width, height, stride, 0, colorimetry),
+    );
 
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("yuv-rgb-normalize"),
@@ -1283,25 +1403,54 @@ async fn build_gpu(width: u32, height: u32, format: RawVideoFormat) -> Result<Gp
         queue,
         pipeline,
         bind_group,
+        dims_buf,
         input_buf,
         out_buf,
         staging,
+        stride,
         input_len,
         input_padded,
         out_bytes,
     })
 }
 
-/// The 16-byte `Dims` uniform every pipeline binds: the frame geometry, plus
-/// where the input pixels sit in their buffer (`stride` = input row stride,
-/// `base` = byte offset of the first luma byte). The texture pipelines read only
-/// the geometry.
-fn dims_bytes(width: u32, height: u32, stride: u32, base: u32) -> [u8; 16] {
-    let mut dims = [0u8; 16];
-    dims[0..4].copy_from_slice(&width.to_le_bytes());
-    dims[4..8].copy_from_slice(&height.to_le_bytes());
-    dims[8..12].copy_from_slice(&stride.to_le_bytes());
-    dims[12..16].copy_from_slice(&base.to_le_bytes());
+/// Size of the `Dims` uniform: four `u32` plus the six `f32` weights, rounded
+/// up to the 16-byte multiple WGSL gives a uniform struct.
+const DIMS_BYTES: usize = 48;
+
+/// The `Dims` uniform every pipeline binds, laid out as the WGSL struct
+/// `dims_struct!` declares: the frame geometry, where the input pixels sit in
+/// their buffer (`stride` = input row stride, `base` = byte offset of the first
+/// luma byte), then the YUV -> RGB weights `colorimetry` resolves to. The
+/// texture pipelines read only the geometry and the weights.
+fn dims_bytes(
+    width: u32,
+    height: u32,
+    stride: u32,
+    base: u32,
+    colorimetry: Colorimetry,
+) -> [u8; DIMS_BYTES] {
+    let weights = YuvToRgbWeights::new(colorimetry);
+    let mut dims = [0u8; DIMS_BYTES];
+    for (slot, value) in dims
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .zip([width, height, stride, base])
+    {
+        slot.copy_from_slice(&value.to_le_bytes());
+    }
+    let floats = [
+        weights.luma_gain,
+        weights.luma_floor,
+        weights.red_from_cr,
+        weights.green_from_cb,
+        weights.green_from_cr,
+        weights.blue_from_cb,
+    ];
+    for (slot, value) in dims[16..].as_chunks_mut::<4>().0.iter_mut().zip(floats) {
+        slot.copy_from_slice(&value.to_le_bytes());
+    }
     dims
 }
 
@@ -1312,11 +1461,13 @@ fn dims_bytes(width: u32, height: u32, stride: u32, base: u32) -> [u8; 16] {
 /// that input is: `TEX_SHADER` for an NV12 texture (M217), the imported dma-buf
 /// buffer's format shader (M990, see [`shader_for`]), `TEX_SHADER_RGBA` for an
 /// already-RGB texture (M304).
+#[allow(clippy::too_many_arguments)]
 fn build_import_gpu(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     width: u32,
     height: u32,
+    colorimetry: Colorimetry,
     shader: &str,
     label: &str,
 ) -> ImportGpu {
@@ -1337,12 +1488,16 @@ fn build_import_gpu(
     });
     let dims_buf = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("dims"),
-        size: 16,
+        size: DIMS_BYTES as u64,
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
     // A dma-buf frame rewrites this per dispatch with its own stride / offset.
-    queue.write_buffer(&dims_buf, 0, &dims_bytes(width, height, width, 0));
+    queue.write_buffer(
+        &dims_buf,
+        0,
+        &dims_bytes(width, height, width, 0, colorimetry),
+    );
 
     let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some(label),
@@ -1559,6 +1714,81 @@ mod tests {
             e.set_property("import-adapter", PropValue::Str("magic".into())),
             Err(PropError::Value)
         );
+    }
+
+    /// M1127: the matrix comes from the caps, not a constant. A BT.709 stream
+    /// and a BT.601 one decode the same bytes to different colours, and the
+    /// BT.709 result is the one BT.709's own weights predict.
+    #[test]
+    fn the_matrix_follows_the_caps_colorimetry() {
+        // A strongly red pixel pair: neutral chroma would convert identically
+        // under every matrix, so the chroma has to be off-centre to see this.
+        let nv12 = [180u8, 180, 180, 180, 90, 200];
+        let untagged = nv12_to_rgb_tensor(&nv12, 2, 2);
+        let bt709 = nv12_to_rgb_tensor_tagged(&nv12, 2, 2, Colorimetry::BT709);
+        assert_ne!(
+            untagged, bt709,
+            "BT.601 and BT.709 weight chroma differently"
+        );
+
+        let weights = YuvToRgbWeights::new(Colorimetry::BT709);
+        let expected = yuv_rgb(
+            &weights,
+            f32::from(nv12[0]),
+            f32::from(nv12[4]) - CHROMA_NEUTRAL,
+            f32::from(nv12[5]) - CHROMA_NEUTRAL,
+        );
+        let area = 4;
+        assert_eq!([bt709[0], bt709[area], bt709[2 * area]], expected);
+    }
+
+    /// An untagged stream converts exactly as an explicitly BT.601 one, which
+    /// is what keeps every existing GPU-vs-host comparison valid.
+    #[test]
+    fn an_untagged_stream_reads_as_bt601() {
+        let nv12 = [16u8, 235, 126, 100, 90, 200];
+        assert_eq!(
+            nv12_to_rgb_tensor(&nv12, 2, 2),
+            nv12_to_rgb_tensor_tagged(&nv12, 2, 2, Colorimetry::BT601)
+        );
+    }
+
+    /// The uniform the shaders read has to lay the weights out where the WGSL
+    /// struct declares them: four `u32` of geometry, then the six floats.
+    #[test]
+    fn the_dims_uniform_carries_the_caps_weights() {
+        let bytes = dims_bytes(640, 480, 640, 0, Colorimetry::BT709);
+        let float_at = |offset: usize| {
+            f32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("four bytes"))
+        };
+        let weights = YuvToRgbWeights::new(Colorimetry::BT709);
+        assert_eq!(
+            u32::from_le_bytes(bytes[0..4].try_into().unwrap()),
+            640,
+            "width first"
+        );
+        assert_eq!(float_at(16), weights.luma_gain);
+        assert_eq!(float_at(20), weights.luma_floor);
+        assert_eq!(float_at(24), weights.red_from_cr);
+        assert_eq!(float_at(36), weights.blue_from_cb);
+        // BT.601's uniform differs, so the shader really sees the caps.
+        assert_ne!(bytes, dims_bytes(640, 480, 640, 0, Colorimetry::BT601));
+    }
+
+    /// The colorimetry reaches the element from the negotiated caps.
+    #[test]
+    fn configure_takes_the_colorimetry_from_the_caps() {
+        let mut e = WgpuPreprocess::new();
+        e.configure_pipeline(&Caps::RawVideo {
+            format: RawVideoFormat::Nv12,
+            width: Dim::Fixed(64),
+            height: Dim::Fixed(48),
+            framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
+            colorimetry: Colorimetry::BT709,
+        })
+        .expect("a tagged NV12 stream configures");
+        assert_eq!(e.colorimetry, Colorimetry::BT709);
     }
 
     #[test]

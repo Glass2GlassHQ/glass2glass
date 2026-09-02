@@ -25,6 +25,7 @@ fn opus_caps() -> Caps {
         format: AudioFormat::Opus,
         channels: 2,
         sample_rate: 48000,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     }
 }
 
@@ -177,6 +178,7 @@ async fn opus_round_trips_through_mp4() {
                 format: AudioFormat::Opus,
                 channels: 2,
                 sample_rate: 48000,
+                ..
             }
         )),
         "concrete Opus caps announced, got {caps:?}"

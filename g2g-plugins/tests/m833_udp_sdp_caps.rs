@@ -153,6 +153,7 @@ fn opus_section_maps_to_audio_caps_and_is_refused_by_the_h264_source() {
             format: AudioFormat::Opus,
             channels: 2,
             sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         }
     );
     assert_eq!(media.payload_type, 111);

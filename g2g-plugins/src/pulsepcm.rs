@@ -26,6 +26,7 @@ pub(crate) fn pulse_spec(caps: &Caps) -> Result<Spec, G2gError> {
         format,
         channels,
         sample_rate,
+        ..
     } = caps
     else {
         return Err(G2gError::CapsMismatch);
@@ -99,6 +100,7 @@ mod tests {
             format: AudioFormat::PcmS16Le,
             channels: 2,
             sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         })
         .expect("s16 spec");
         assert_eq!(s16.format, PaFormat::S16le);
@@ -108,6 +110,7 @@ mod tests {
             format: AudioFormat::PcmF32Le,
             channels: 1,
             sample_rate: 44_100,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         })
         .expect("f32 spec");
         assert_eq!(f32.format, PaFormat::F32le);
@@ -116,6 +119,7 @@ mod tests {
             format: AudioFormat::Aac,
             channels: 2,
             sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         assert_eq!(pulse_spec(&aac), Err(G2gError::CapsMismatch));
     }
@@ -127,6 +131,7 @@ mod tests {
                 format,
                 channels,
                 sample_rate: 48_000,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
             })
         };
         // 24-bit maps to the packed pulse format, not the 32-bit-padded one.

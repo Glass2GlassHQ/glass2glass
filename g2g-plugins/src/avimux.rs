@@ -85,6 +85,7 @@ fn write_stream_of(caps: &Caps) -> Option<AviWriteStream> {
             format,
             channels,
             sample_rate,
+            ..
         } => Some(AviWriteStream::Audio {
             format: *format,
             channels: *channels,
@@ -525,6 +526,7 @@ mod tests {
             format: AudioFormat::Mp3,
             channels: 2,
             sample_rate: 44_100,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         let mut mux = AviMuxN::new(2);
         mux.configure_pipeline(0, &video).expect("video pad");

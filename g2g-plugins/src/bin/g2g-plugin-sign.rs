@@ -2,9 +2,12 @@
 //! (M1061).
 //!
 //! Usage:
-//!   g2g-plugin-sign keygen <out-private> <out-public>
-//!   g2g-plugin-sign sign <private-key> <plugin>     # writes <plugin>.sig
-//!   g2g-plugin-sign verify <public-key> <plugin>
+//!
+//! ```text
+//! g2g-plugin-sign keygen <out-private> <out-public>
+//! g2g-plugin-sign sign <private-key> <plugin>     # writes <plugin>.sig
+//! g2g-plugin-sign verify <public-key> <plugin>
+//! ```
 //!
 //! The private key is a PKCS#8 v2 Ed25519 document written 0600, the public key
 //! is 64 hex characters, and the `.sig` format is documented in

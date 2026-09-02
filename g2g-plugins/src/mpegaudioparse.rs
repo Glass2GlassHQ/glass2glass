@@ -4,9 +4,9 @@
 //!
 //! The audio sibling of [`crate::flacparse`]: an `.mp3` / `.mp2` file is a bare
 //! sequence of self-syncing frames with a tag block glued to each end, and
-//! [`crate::ffmpegaudiodec`] takes one frame per packet, so something has to
+//! `ffmpegaudiodec` takes one frame per packet, so something has to
 //! split the byte stream. Frame lengths come from
-//! [`mpa_header`](crate::audioframe::mpa_header), shared with the program-stream
+//! `mpa_header`, shared with the program-stream
 //! demuxer.
 //!
 //! Audio bytes alias the 11-bit frame sync often, so a candidate header is
@@ -222,6 +222,7 @@ impl MpegAudioParse {
             format: audio_format(header.layer),
             channels: header.channels,
             sample_rate: header.sample_rate,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         if self.last_caps.as_ref() != Some(&caps) {
             out.push(PipelinePacket::CapsChanged(caps.clone())).await?;
@@ -389,6 +390,7 @@ impl PadTemplates for MpegAudioParse {
             format: AudioFormat::Mp3,
             channels: 2,
             sample_rate: 44_100,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         Vec::from([
             PadTemplate::sink(CapsSet::one(mp3.clone())),
@@ -454,6 +456,7 @@ mod tests {
             format: AudioFormat::Mp3,
             channels: 0,
             sample_rate: 0,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         }
     }
 
@@ -550,6 +553,7 @@ mod tests {
                 format: AudioFormat::Mp3,
                 channels: FRAME_CHANNELS,
                 sample_rate: FRAME_RATE_HZ as u32,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
             }]
         );
     }

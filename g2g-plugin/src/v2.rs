@@ -1,5 +1,6 @@
-//! Plugin side of the v2 ABI: everything [`declare_plugin_v2!`] needs to turn a
-//! plain [`AsyncElement`] into a `repr(C)` vtable.
+//! Plugin side of the v2 ABI: everything
+//! [`declare_plugin_v2!`](crate::declare_plugin_v2) needs to turn a plain
+//! [`AsyncElement`] into a `repr(C)` vtable.
 //!
 //! A plugin author writes a normal element and one macro invocation. The shims
 //! below are what the macro instantiates: they convert at the boundary, keep

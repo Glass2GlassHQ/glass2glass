@@ -385,6 +385,7 @@ async fn audio_buffers_match_the_wav_data_chunk() {
             format: AudioFormat::PcmS16Le,
             channels,
             sample_rate,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         }]
     );
     // S16LE: two bytes a sample, one channel per sample frame.
@@ -430,6 +431,7 @@ async fn mulaw_buffers_match_the_wav_data_chunk() {
             format: AudioFormat::Mulaw,
             channels,
             sample_rate,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         }],
         "the caps `mulawdec` accepts"
     );

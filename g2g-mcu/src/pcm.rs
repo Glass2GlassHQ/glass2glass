@@ -31,7 +31,7 @@ pub trait PcmWriter {
 }
 
 /// A heap-free [`StaticSink`] rendering S16LE interleaved audio frames
-/// through a [`PcmWriter`], decoding via a fixed [`CHUNK_SAMPLES`] stack
+/// through a [`PcmWriter`], decoding via a fixed `CHUNK_SAMPLES` stack
 /// buffer. A frame whose payload is not a whole number of interleaved sample
 /// frames (`2 bytes x channels`) is rejected as [`G2gError::CapsMismatch`]
 /// before anything reaches the peripheral.

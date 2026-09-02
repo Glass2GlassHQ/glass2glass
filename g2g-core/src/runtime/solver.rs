@@ -3554,6 +3554,7 @@ mod tests {
             format: crate::caps::AudioFormat::Aac,
             channels: 2,
             sample_rate: 48_000,
+            channel_layout: crate::ChannelLayout::UNSPECIFIED,
         };
         let merged = compressed(
             VideoCodec::H264,

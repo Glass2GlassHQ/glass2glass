@@ -375,6 +375,7 @@ impl OpusEnc {
             format,
             channels: 2,
             sample_rate: OPUS_RATE_HZ,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         Vec::from([pcm(AudioFormat::PcmS16Le), pcm(AudioFormat::PcmF32Le)])
     }
@@ -386,6 +387,7 @@ impl OpusEnc {
                 format: format @ (AudioFormat::PcmS16Le | AudioFormat::PcmF32Le),
                 channels,
                 sample_rate,
+                ..
             } if (*channels == 1 || *channels == 2) && *sample_rate == OPUS_RATE_HZ => {
                 Some((*format == AudioFormat::PcmF32Le, *channels))
             }
@@ -398,6 +400,7 @@ impl OpusEnc {
             format: AudioFormat::Opus,
             channels: self.channels,
             sample_rate: OPUS_RATE_HZ,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         }
     }
 
@@ -547,6 +550,7 @@ impl AsyncElement for OpusEnc {
                 format: AudioFormat::Opus,
                 channels,
                 sample_rate: OPUS_RATE_HZ,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
             }),
             None => CapsSet::from_alternatives(Vec::new()),
         }))
@@ -785,6 +789,7 @@ impl PadTemplates for OpusEnc {
             format: AudioFormat::Opus,
             channels: 2,
             sample_rate: OPUS_RATE_HZ,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         Vec::from([
             PadTemplate::sink(CapsSet::from_alternatives(Self::input_templates())),

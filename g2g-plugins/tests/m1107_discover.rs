@@ -90,6 +90,24 @@ fn write_mp4(dir: &Path) -> PathBuf {
     path
 }
 
+/// H.264 video plus AAC audio in MP4, the multi-track `moov` case (M1150).
+fn write_mp4_av(dir: &Path) -> PathBuf {
+    let path = dir.join("clip-av.mp4");
+    let mut args = vec!["-f".to_string(), "lavfi".to_string()];
+    args.extend(video_input());
+    args.extend(["-f".to_string(), "lavfi".to_string()]);
+    args.extend(audio_input());
+    args.extend(
+        [
+            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-ac",
+        ]
+        .map(String::from),
+    );
+    args.push(AUDIO_CHANNELS.to_string());
+    run_ffmpeg(&args, &path);
+    path
+}
+
 /// H.264 video plus AAC audio in Matroska, the multi-stream case.
 fn write_mkv(dir: &Path) -> PathBuf {
     let path = dir.join("clip.mkv");
@@ -253,6 +271,35 @@ fn mp4_reports_container_video_geometry_and_duration() {
     assert_eq!(video["width"], WIDTH, "the geometry ffmpeg encoded at");
     assert_eq!(video["height"], HEIGHT);
     assert!(video["caps"].as_str().unwrap().starts_with("video/x-h264"));
+    cross_check_against_ffprobe(&info, &path);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn mp4_reports_both_streams_with_their_shapes() {
+    if !tool_present("ffmpeg") || !tool_present("ffprobe") {
+        eprintln!("skipping: ffmpeg / ffprobe not on PATH");
+        return;
+    }
+    let dir = fixture_dir();
+    let path = write_mp4_av(&dir);
+    let info = discover(&path);
+
+    assert_eq!(info["container"], "video/quicktime");
+    assert_fixture_duration(&info);
+    assert_eq!(
+        info["streams"].as_array().unwrap().len(),
+        2,
+        "the container's whole track list, not just the forwarded stream"
+    );
+    let video = video_stream(&info);
+    assert_eq!(video["width"], WIDTH);
+    assert_eq!(video["height"], HEIGHT);
+    let audio = audio_stream(&info);
+    assert_eq!(
+        audio["sample_rate"], AUDIO_SAMPLE_RATE,
+        "the rate ffmpeg encoded at"
+    );
     cross_check_against_ffprobe(&info, &path);
     let _ = std::fs::remove_file(&path);
 }

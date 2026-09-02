@@ -1,5 +1,5 @@
 //! GPU presentation sink (M103): presents [`MemoryDomain::WgpuTexture`] frames
-//! (eg from [`VelloAnalyticsOverlay`](crate::vellooverlay)) by blitting them onto
+//! (eg from `VelloAnalyticsOverlay`) by blitting them onto
 //! a target on the **same** wgpu device, with no GPU->CPU readback. The consuming
 //! end of the keep-on-GPU overlay path.
 //!

@@ -15,11 +15,15 @@ const FIXED_POINT_ONE: f32 = 256.0;
 const FIXED_POINT_SHIFT: u32 = 8;
 const FIXED_POINT_HALF: i32 = 1 << (FIXED_POINT_SHIFT - 1);
 
-/// 8-bit sample bounds: chroma is centred on 128, limited-range luma starts at
-/// 16 and spans 219 while chroma spans 224, and full range spans all 255.
-const CHROMA_NEUTRAL: i32 = 128;
-const SAMPLE_MAX: i32 = 255;
-const SAMPLE_SPAN: f32 = 255.0;
+/// The 8-bit code a chroma sample carrying no colour takes, what a converter
+/// subtracts before applying [`YuvToRgbWeights`].
+pub const CHROMA_NEUTRAL: i32 = 128;
+/// What an 8-bit sample spans, the units [`YuvToRgbWeights::luma_floor`]
+/// divides by.
+pub const SAMPLE_SPAN: f32 = 255.0;
+/// Limited-range 8-bit bounds: luma starts at 16 and spans 219, chroma spans
+/// 224; full range spans all 255.
+pub(crate) const SAMPLE_MAX: i32 = 255;
 const LIMITED_LUMA_FLOOR: i32 = 16;
 const LIMITED_LUMA_SPAN: f32 = 219.0;
 const LIMITED_CHROMA_SPAN: f32 = 224.0;
@@ -60,18 +64,18 @@ fn sample_swing(conversion: YuvConversion) -> SampleSwing {
 /// YUV -> RGB weights in normalized (0..1 sample) units, what a fragment shader
 /// multiplies its sampled luma and chroma by.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct YuvToRgbWeights {
+pub struct YuvToRgbWeights {
     /// Luma is `luma_gain * (y - luma_floor)`.
-    pub(crate) luma_gain: f32,
-    pub(crate) luma_floor: f32,
-    pub(crate) red_from_cr: f32,
-    pub(crate) green_from_cb: f32,
-    pub(crate) green_from_cr: f32,
-    pub(crate) blue_from_cb: f32,
+    pub luma_gain: f32,
+    pub luma_floor: f32,
+    pub red_from_cr: f32,
+    pub green_from_cb: f32,
+    pub green_from_cr: f32,
+    pub blue_from_cb: f32,
 }
 
 impl YuvToRgbWeights {
-    pub(crate) fn new(colorimetry: Colorimetry) -> Self {
+    pub fn new(colorimetry: Colorimetry) -> Self {
         let conversion = colorimetry.yuv_conversion();
         let swing = sample_swing(conversion);
         let (kr, kb) = (conversion.luma.kr, conversion.luma.kb);

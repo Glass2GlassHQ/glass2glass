@@ -132,6 +132,12 @@ fn chain_names(line: &str) -> Vec<String> {
         .collect()
 }
 
+/// Whether `name` is a video decoder category: `FfmpegVideoDec` under this
+/// file's features, or a hardware `*H264Dec` when those features unify in.
+fn is_video_decoder(name: &str) -> bool {
+    name.contains("VideoDec") || name.contains("H264Dec")
+}
+
 fn bare_decodebin_line(path: &std::path::Path) -> String {
     format!(
         "filesrc location={} ! decodebin ! audioconvert ! \
@@ -155,7 +161,7 @@ fn mp2_only_ts_bare_decodebin_plugs_audio_decoder() {
         "audio decoder plugged: {names:?}"
     );
     assert!(
-        !names.iter().any(|n| n.contains("H264Dec")),
+        !names.iter().any(|n| is_video_decoder(n)),
         "no video decoder: {names:?}"
     );
 }
@@ -210,7 +216,7 @@ fn private_pes_without_opus_registration_is_not_selected() {
         "no audio decoder off unidentified private data: {names:?}"
     );
     assert!(
-        names.iter().any(|n| n.contains("H264Dec")),
+        names.iter().any(|n| is_video_decoder(n)),
         "hook declined to the default video path: {names:?}"
     );
 }
@@ -232,7 +238,7 @@ fn av_ts_with_mp2_still_plugs_video_decoder() {
     ));
     std::fs::remove_file(&path).ok();
     assert!(
-        names.iter().any(|n| n.contains("H264Dec")),
+        names.iter().any(|n| is_video_decoder(n)),
         "video decoder plugged: {names:?}"
     );
     assert!(

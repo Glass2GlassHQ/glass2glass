@@ -3,7 +3,7 @@
 //!
 //! `set` replaces alpha with a constant (`alpha` 0..1); `green` / `blue` are a
 //! simple chroma key that makes a pixel transparent when the key channel
-//! dominates the other two by [`KEY_MARGIN`], opaque otherwise. The key is a
+//! dominates the other two by `KEY_MARGIN`, opaque otherwise. The key is a
 //! dominance test, not the full YUV-distance keyer GStreamer's `alpha` ships, so
 //! it stays integer-only and libm-free.
 

@@ -283,21 +283,25 @@ impl MkvDemux {
                 format: AudioFormat::Aac,
                 channels: 0,
                 sample_rate: 0,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
             },
             MkvStream::Ac3 => Caps::Audio {
                 format: AudioFormat::Ac3,
                 channels: 0,
                 sample_rate: 0,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
             },
             MkvStream::Flac => Caps::Audio {
                 format: AudioFormat::Flac,
                 channels: 0,
                 sample_rate: 0,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
             },
             MkvStream::Opus => Caps::Audio {
                 format: AudioFormat::Opus,
                 channels: 0,
                 sample_rate: 0,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
             },
             // Every subtitle stream is de-framed to plain UTF-8 cue text at emit
             // (the source syntax, `S_TEXT/UTF8` / `ASS` / `WEBVTT`, only selects the
@@ -382,6 +386,7 @@ impl MkvDemux {
                 format,
                 channels: track.channels.max(1),
                 sample_rate: track.sample_rate,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
             }),
             // A text / subpicture track carries no geometry or rate to refine
             // here (a subpicture's display size rides its `CodecPrivate`), so
@@ -475,6 +480,7 @@ impl MkvDemux {
             format,
             channels: track.channels.max(1),
             sample_rate: track.sample_rate,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         let (stream_type, caps) = match track.codec {
             MkvCodec::H264 => (StreamType::Video, video(VideoCodec::H264)),
@@ -985,6 +991,7 @@ pub fn forwardable_streams(demux: &MatroskaDemuxer) -> Vec<MkvStreamInfo> {
                     format,
                     channels: t.channels.max(1),
                     sample_rate,
+                    channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
                 },
                 other => other,
             };
@@ -1744,7 +1751,8 @@ mod tests {
             Caps::Audio {
                 format: AudioFormat::Opus,
                 channels: 2,
-                sample_rate: 0
+                sample_rate: 0,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED
             },
             "Opus forwardable caps carry the track's concrete channel count (rate stays the \
              unknown-until-parsed placeholder, since compressed rate intersects strictly)"
@@ -1808,7 +1816,8 @@ mod tests {
             alloc::vec![Caps::Audio {
                 format: AudioFormat::Opus,
                 channels: 2,
-                sample_rate: 48_000
+                sample_rate: 48_000,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED
             }]
         );
         assert_eq!(sink.frames, alloc::vec![alloc::vec![0x33, 0x44]]);

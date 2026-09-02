@@ -174,22 +174,18 @@ fn device_available(open: Result<impl Sized, VulkanVideoError>, codec: &str) -> 
     }
 }
 
+// One test for all three codecs: libtest runs test functions on parallel
+// threads, and two threads building a `wgpu::Instance` at once fault inside the
+// Vulkan loader's `loader_icd_scan`, which is why this file keeps one
+// device-creating test.
 #[test]
-fn h264_decode_to_texture_present_zero_copy() {
+fn decode_to_texture_present_zero_copy() {
     if device_available(block_on(open_h264_decode_device()), "H.264") {
         drive_wedge(VideoCodec::H264, H264_CLIP);
     }
-}
-
-#[test]
-fn h265_decode_to_texture_present_zero_copy() {
     if device_available(block_on(open_h265_decode_device()), "H.265") {
         drive_wedge(VideoCodec::H265, H265_CLIP);
     }
-}
-
-#[test]
-fn av1_decode_to_texture_present_zero_copy() {
     if device_available(block_on(open_av1_decode_device()), "AV1") {
         drive_wedge(VideoCodec::Av1, AV1_CLIP);
     }

@@ -76,6 +76,7 @@ fn coded_caps(sample_rate: u32) -> Caps {
         format: AudioFormat::ImaAdpcm,
         channels: ADPCM_CHANNELS,
         sample_rate,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     }
 }
 
@@ -143,6 +144,7 @@ impl AdpcmEnc {
                 format: AudioFormat::PcmS16Le,
                 channels: ADPCM_CHANNELS,
                 sample_rate,
+                ..
             } => Some(*sample_rate),
             _ => None,
         }
@@ -323,6 +325,7 @@ impl PadTemplates for AdpcmEnc {
                 format: AudioFormat::PcmS16Le,
                 channels: ADPCM_CHANNELS,
                 sample_rate: ANY_SAMPLE_RATE,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
             })),
             PadTemplate::source(CapsSet::one(coded_caps(ANY_SAMPLE_RATE))),
         ])
@@ -390,6 +393,7 @@ impl AdpcmDec {
                 format: AudioFormat::ImaAdpcm,
                 channels,
                 sample_rate,
+                ..
             } if *channels == ADPCM_CHANNELS || *channels == ANY_CHANNELS => Some(*sample_rate),
             _ => None,
         }
@@ -400,6 +404,7 @@ impl AdpcmDec {
             format: AudioFormat::PcmS16Le,
             channels: ADPCM_CHANNELS,
             sample_rate: self.sample_rate,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         }
     }
 
@@ -475,6 +480,7 @@ impl AsyncElement for AdpcmDec {
                     format: AudioFormat::PcmS16Le,
                     channels: ADPCM_CHANNELS,
                     sample_rate,
+                    channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
                 };
                 let fixatable = if sample_rate == ANY_SAMPLE_RATE {
                     FIXATE_SAMPLE_RATE_HZ
@@ -583,6 +589,7 @@ impl PadTemplates for AdpcmDec {
                 format: AudioFormat::PcmS16Le,
                 channels: ADPCM_CHANNELS,
                 sample_rate: ANY_SAMPLE_RATE,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
             })),
         ])
     }

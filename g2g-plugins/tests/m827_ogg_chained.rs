@@ -413,12 +413,14 @@ async fn a_chained_parameter_change_re_announces_caps() {
             Caps::Audio {
                 format: AudioFormat::Opus,
                 channels: 1,
-                sample_rate: 48_000
+                sample_rate: 48_000,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED
             },
             Caps::Audio {
                 format: AudioFormat::Opus,
                 channels: 2,
-                sample_rate: 48_000
+                sample_rate: 48_000,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED
             }
         ],
         "each chain announces its own channel count"
@@ -583,6 +585,7 @@ async fn only_a_segment_makes_a_repeated_opus_head_rebuild_the_decoder() {
             format: AudioFormat::Opus,
             channels: 1,
             sample_rate: 0,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         })
         .expect("configure");
         let mut sink = CaptureSink::default();

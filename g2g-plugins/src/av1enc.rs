@@ -15,6 +15,11 @@
 //! `encode_frame` drives both. The speed preset is builder-configurable
 //! (`with_speed`, 0..=10).
 //!
+//! The negotiated caps' colorimetry goes into the sequence header's
+//! `color_config` (`color_range` plus the CICP primaries / transfer / matrix), and
+//! rides onto the compressed output caps. An untagged input writes no colour
+//! description at all, which is AV1's "unspecified".
+//!
 //! Rate control is one of two mutually exclusive modes, since rav1e turns its
 //! rate controller off exactly when `bitrate <= 0` and reads `quantizer` only
 //! then: a target bitrate (`bitrate`, from a property or downstream congestion
@@ -40,8 +45,10 @@ use g2g_core::{
 };
 
 use rav1e::prelude::{
-    ChromaSampling, Config, Context, EncoderConfig, EncoderStatus, FrameParameters,
-    FrameTypeOverride, Pixel, SpeedSettings,
+    ChromaSampling, ColorDescription, ColorPrimaries as RavPrimaries, Config, Context,
+    EncoderConfig, EncoderStatus, FrameParameters, FrameTypeOverride,
+    MatrixCoefficients as RavMatrix, Pixel, PixelRange, SpeedSettings,
+    TransferCharacteristics as RavTransfer,
 };
 
 /// A live rav1e context, monomorphized to the sample type the input format needs:
@@ -77,6 +84,9 @@ pub struct Av1Enc {
     /// fixes the rav1e chroma sampling, bit depth, and the per-frame plane geometry.
     format: RawVideoFormat,
     framerate: Rate,
+    /// The negotiated input colorimetry, written into the sequence header's
+    /// `color_config` and carried on the compressed output caps.
+    colorimetry: g2g_core::Colorimetry,
     ctx: Option<RavCtx>,
     /// Source PTS keyed by `Packet::input_frameno`. Entries are removed as their
     /// packet is emitted, so this stays bounded to the encoder's lookahead window
@@ -132,6 +142,7 @@ impl Av1Enc {
             height: 0,
             format: RawVideoFormat::I420,
             framerate: Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
             ctx: None,
             pts_by_frameno: BTreeMap::new(),
             next_frameno: 0,
@@ -170,7 +181,7 @@ impl Av1Enc {
             width: Dim::Fixed(self.width),
             height: Dim::Fixed(self.height),
             framerate: self.framerate.clone(),
-            colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            colorimetry: self.colorimetry,
         }
     }
 
@@ -195,6 +206,12 @@ impl Av1Enc {
             // rav1e's `bitrate` is bits/second.
             bitrate,
             quantizer,
+            pixel_range: match self.colorimetry.range {
+                g2g_core::ColorRange::Full => PixelRange::Full,
+                // AV1 always codes the range bit, so an unknown one is limited.
+                _ => PixelRange::Limited,
+            },
+            color_description: color_description(self.colorimetry),
             ..Default::default()
         };
         let cfg = Config::new().with_encoder_config(enc);
@@ -371,6 +388,64 @@ fn chroma_for(format: RawVideoFormat) -> Option<ChromaSampling> {
     })
 }
 
+/// The sequence header's `color_description`, or `None` for a fully untagged
+/// stream (rav1e then clears `color_description_present_flag`, the AV1 spelling
+/// of "unspecified"). rav1e's colour enums are named for the CICP codepoints they
+/// carry, so each field maps to the variant its
+/// [`Colorimetry`](g2g_core::Colorimetry) field names.
+fn color_description(colorimetry: g2g_core::Colorimetry) -> Option<ColorDescription> {
+    use g2g_core::{ColorPrimaries as P, MatrixCoefficients as M, TransferCharacteristics as T};
+    if colorimetry.matrix == M::Unknown
+        && colorimetry.transfer == T::Unknown
+        && colorimetry.primaries == P::Unknown
+    {
+        return None;
+    }
+    Some(ColorDescription {
+        color_primaries: match colorimetry.primaries {
+            P::Bt709 => RavPrimaries::BT709,
+            P::Bt470bg => RavPrimaries::BT470BG,
+            P::Smpte170m => RavPrimaries::BT601,
+            P::Bt2020 => RavPrimaries::BT2020,
+            _ => RavPrimaries::Unspecified,
+        },
+        transfer_characteristics: match colorimetry.transfer {
+            T::Bt709 => RavTransfer::BT709,
+            T::Bt601 => RavTransfer::BT601,
+            T::Srgb => RavTransfer::SRGB,
+            T::Bt2020 => RavTransfer::BT2020_10Bit,
+            T::Pq => RavTransfer::SMPTE2084,
+            T::Hlg => RavTransfer::HLG,
+            _ => RavTransfer::Unspecified,
+        },
+        matrix_coefficients: match colorimetry.matrix {
+            M::Identity => RavMatrix::Identity,
+            M::Bt709 => RavMatrix::BT709,
+            M::Bt601 => RavMatrix::BT601,
+            M::Bt2020Ncl => RavMatrix::BT2020NCL,
+            _ => RavMatrix::Unspecified,
+        },
+    })
+}
+
+/// Whether rav1e can code `colorimetry` for `format`. The sRGB triple (BT.709
+/// primaries, sRGB transfer, identity matrix) is the one combination AV1
+/// constrains: it means GBR planes, so it is only legal full-range at 4:4:4, and
+/// rav1e panics rather than coding anything else.
+fn codable(colorimetry: g2g_core::Colorimetry, format: RawVideoFormat) -> bool {
+    let Some(description) = color_description(colorimetry) else {
+        return true;
+    };
+    let srgb_triple = description.color_primaries == RavPrimaries::BT709
+        && description.transfer_characteristics == RavTransfer::SRGB
+        && description.matrix_coefficients == RavMatrix::Identity;
+    if !srgb_triple {
+        return true;
+    }
+    colorimetry.range == g2g_core::ColorRange::Full
+        && chroma_for(format) == Some(ChromaSampling::Cs444)
+}
+
 /// Fill a fresh frame from the tightly-packed planar `src` (Y, U, V planes of
 /// `plane_dims` samples, `bps` bytes each), send it, and return the ready packets.
 /// Generic over the rav1e sample type so the 8-bit (`u8`) and 10/12-bit (`u16`)
@@ -462,8 +537,13 @@ impl AsyncElement for Av1Enc {
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
         // Accept any supported planar-YUV input, narrowing only geometry; the format
         // itself is kept (the encoder configures its chroma sampling to match).
-        if let Caps::RawVideo { format, .. } = upstream_caps {
-            if chroma_for(*format).is_some() {
+        if let Caps::RawVideo {
+            format,
+            colorimetry,
+            ..
+        } = upstream_caps
+        {
+            if chroma_for(*format).is_some() && codable(*colorimetry, *format) {
                 return upstream_caps.intersect(&Caps::RawVideo {
                     format: *format,
                     width: Dim::Any,
@@ -484,15 +564,17 @@ impl AsyncElement for Av1Enc {
                 width,
                 height,
                 framerate,
+                colorimetry,
                 interlace: _,
-                ..
-            } if chroma_for(*format).is_some() => CapsSet::one(Caps::CompressedVideo {
-                codec: VideoCodec::Av1,
-                width: width.clone(),
-                height: height.clone(),
-                framerate: framerate.clone(),
-                colorimetry: g2g_core::Colorimetry::UNKNOWN,
-            }),
+            } if chroma_for(*format).is_some() && codable(*colorimetry, *format) => {
+                CapsSet::one(Caps::CompressedVideo {
+                    codec: VideoCodec::Av1,
+                    width: width.clone(),
+                    height: height.clone(),
+                    framerate: framerate.clone(),
+                    colorimetry: *colorimetry,
+                })
+            }
             _ => CapsSet::from_alternatives(Vec::new()),
         }))
     }
@@ -503,13 +585,13 @@ impl AsyncElement for Av1Enc {
             width,
             height,
             framerate,
+            colorimetry,
             interlace: _,
-            ..
         } = absolute_caps
         else {
             return Err(G2gError::CapsMismatch);
         };
-        if chroma_for(*format).is_none() {
+        if chroma_for(*format).is_none() || !codable(*colorimetry, *format) {
             return Err(G2gError::CapsMismatch);
         }
         let (Dim::Fixed(w), Dim::Fixed(h)) = (width, height) else {
@@ -519,6 +601,7 @@ impl AsyncElement for Av1Enc {
         self.height = *h;
         self.format = *format;
         self.framerate = framerate.clone();
+        self.colorimetry = *colorimetry;
         self.build_context()?;
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)

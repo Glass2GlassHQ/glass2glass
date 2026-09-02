@@ -70,6 +70,8 @@ pub mod audiomixmatrix;
 pub mod audiopanorama;
 pub mod audiorate;
 pub mod audioresample;
+// `audioreverse`: the audio half of reverse playback, the analog of `areverse`.
+pub mod audioreverse;
 pub mod audiotestsrc;
 // `tonegeneratesrc`: a sine at `freq` / `volume`.
 pub mod audiowsincband;
@@ -98,6 +100,8 @@ pub mod cutter;
 // Source reading the payload carried inside a `data:` URI.
 pub mod dataurisrc;
 pub mod deinterleave;
+// `ebur128`: EBU R128 / ITU-R BS.1770 loudness meter.
+pub mod ebur128;
 pub mod equalizer;
 // Pass-through that turns a failure from downstream into a dropped buffer.
 pub mod errorignore;
@@ -217,6 +221,9 @@ pub mod chromahold;
 #[cfg(feature = "std")]
 pub mod clockoverlay;
 pub mod coloreffects;
+// `colorspace`: converts the colorimetry (matrix / range / transfer /
+// primaries) of raw video, keeping the pixel format.
+pub mod colorspace;
 pub mod deinterlace;
 pub mod gamma;
 pub mod gaussianblur;
@@ -334,8 +341,8 @@ pub mod misptime;
 // planar plane / frame sizing the format-agnostic filters need (deinterlace).
 mod pixel;
 // YUV <-> RGB coefficients for a stream's caps colorimetry, shared by every CPU
-// converter and shader here.
-mod yuvmatrix;
+// converter and shader here, and by g2g-ml's GPU preprocessor.
+pub mod yuvmatrix;
 // Where a capture driver's / decoder's padded rows sit, shared by the producers
 // that either declare them (`PlaneLayout`) or pack them tight.
 #[cfg(any(feature = "metadata", feature = "v4l2", feature = "pipewire"))]

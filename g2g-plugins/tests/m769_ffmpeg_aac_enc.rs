@@ -54,6 +54,7 @@ async fn encodes_a_tone_ffmpeg_can_decode() {
         format: AudioFormat::PcmS16Le,
         channels: 2,
         sample_rate: 48_000,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     })
     .expect("open the aac encoder");
 

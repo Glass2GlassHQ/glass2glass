@@ -31,7 +31,7 @@
 //!
 //! One logical bitstream (a single input pad), mirroring the single-stream
 //! `OggDemux`. The grouped multi-stream case is the fan-in sibling
-//! [`crate::oggmuxn::OggMuxN`], which reuses this module's [`OggStreamMux`] once
+//! [`crate::oggmuxn::OggMuxN`], which reuses this module's `OggStreamMux` once
 //! per input pad.
 //!
 //! **Chained streams (M858).** A `Segment` arriving after audio has flowed ends
@@ -81,6 +81,7 @@ pub(crate) fn input_alternatives() -> Vec<Caps> {
             format,
             channels: 0,
             sample_rate: 0,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         }),
     )
 }
@@ -763,6 +764,7 @@ mod tests {
             format: AudioFormat::Opus,
             channels: 2,
             sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         }
     }
 
@@ -787,6 +789,7 @@ mod tests {
             format: AudioFormat::Aac,
             channels: 2,
             sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         assert!(m.intercept_caps(&aac).is_err(), "AAC has no Ogg mapping");
 
@@ -1010,6 +1013,7 @@ mod tests {
             format: AudioFormat::Flac,
             channels: 2,
             sample_rate: rate,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         })
         .unwrap();
         let mut sink = CaptureSink::default();

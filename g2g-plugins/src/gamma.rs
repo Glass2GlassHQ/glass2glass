@@ -4,7 +4,7 @@
 //! `gamma < 1` darkens them, `gamma == 1` is the identity. CPU-only `no_std`.
 //!
 //! The `pow` comes from the crate's `libm`-free approximation
-//! ([`crate::mathf::powf`]), evaluated 256 times per gamma change (the LUT is
+//! (`mathf::powf`), evaluated 256 times per gamma change (the LUT is
 //! rebuilt only when `gamma` changes), not per pixel.
 
 use core::future::Future;

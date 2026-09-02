@@ -1044,11 +1044,13 @@ impl PsDemux {
                 format: AudioFormat::Mp2,
                 channels: 0,
                 sample_rate: 0,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
             },
             PsStream::Ac3 => Caps::Audio {
                 format: AudioFormat::Ac3,
                 channels: 0,
                 sample_rate: 0,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
             },
             PsStream::SubPicture => Caps::SubPicture {
                 format: SubPictureFormat::VobSub,

@@ -129,6 +129,7 @@ fn describe(uid: &str, name: &str, direction: Direction, channels: u8, rate: u32
             format: AudioFormat::PcmS16Le,
             channels,
             sample_rate: rate,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         }),
         element,
         props: Vec::from([("device".to_string(), uid.to_string())]),
@@ -327,6 +328,7 @@ mod tests {
                 format: AudioFormat::PcmS16Le,
                 channels: 1,
                 sample_rate: 44_100,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
             }]
         );
 

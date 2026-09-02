@@ -107,6 +107,7 @@ fn output_caps_declares_a_different_media_type_than_the_input() {
         format: AudioFormat::PcmS16Le,
         channels: 1,
         sample_rate: 16_000,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     };
     // The input pad now accepts audio, which the RGBA-only default refused.
     assert_eq!(el.intercept_caps(0, &audio).unwrap(), audio);

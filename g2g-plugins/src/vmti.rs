@@ -13,7 +13,7 @@
 //! fixed-width integer, so the encodings are the current (ST 0903.4 and later)
 //! ones; the pre-.4 scaled-integer forms are not read.
 //!
-//! With the `analytics` feature, [`vmti_from_analytics`] turns a frame's
+//! With the `analytics` feature, `vmti_from_analytics` turns a frame's
 //! `AnalyticsMeta` detections into a local set, so an in-pipeline detector emits
 //! standards-compliant VMTI.
 //!

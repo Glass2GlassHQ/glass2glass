@@ -215,6 +215,20 @@ as programmatic graph nodes, or via the Python host (`pysrc`/`pyelement`). The
 table lives in [g2g-plugins/src/gst_compat.rs](g2g-plugins/src/gst_compat.rs)
 and is easy to extend.
 
+**One gst element splits in two:** `videoconvert` changes the pixel format and
+carries the colorimetry through unchanged, and `colorspace` changes what the
+samples *mean* (matrix, range, transfer, primaries) at a fixed pixel format. A
+line that needs both chains them. PQ and HLG are refused rather than tone mapped.
+
+Three elements are named after the **ffmpeg filter** rather than a gst element,
+having no gst counterpart of their own:
+
+| ffmpeg filter | g2g |
+| :--- | :--- |
+| `areverse` | `audioreverse` (`chunk-duration=0` buffers the whole stream and reverses it at EOS, the `areverse` behavior) |
+| `ebur128` | `ebur128` (momentary / short-term / gated integrated LUFS, read via getters like `level`) |
+| `colorspace` | `colorspace`, the colorimetry half of gst's `videoconvert` described above |
+
 Whole plugins answer by family rather than name:
 
 | gst names | g2g |
@@ -388,14 +402,16 @@ which handle you want depends on what is changing:
 | What you are doing | GStreamer | glass2glass |
 | :--- | :--- | :--- |
 | Swap one element for another in place | block, unlink, add, link, unblock | `ElementSlot::swap` (an atomic store, no block) |
-| Add or drop an element on an edge | block, unlink, add, two links, unblock | `GraphMutator::insert_after` / `remove` |
+| Add or drop an element on an edge | block, unlink, add, two links, unblock | `GraphMutator::insert_after` / `insert_before` / `remove` |
+| Swap the source or the sink of a running pipeline | block the pad, unlink, set the old element to `NULL`, add, link, unblock | `GraphMutator::replace_source` / `replace_sink` |
 | Add or drop a whole branch | block the tee pad, request / release a pad | `DynamicFanoutHandle::add_branch`, `DynamicFaninHandle::add_input` |
 | Watch or drop buffers in passing | `GST_PAD_PROBE_TYPE_BUFFER` | a `LinkInterceptor` on the edge's probe slot |
 
 [`GraphMutator`](g2g-core/src/runtime/mutate.rs) is the direct analog of the
 block-and-relink dance, from `run_graph_mutable` / `run_graph_threaded_mutable`
 alongside the run future: `insert_after("dec", element)` splices onto the edge
-below `dec`, `remove("videoflip0")` lifts the element back out and hands it to
+below `dec`, `insert_before("sink", element)` onto the edge above `sink`, and
+`remove("videoflip0")` lifts the element back out and hands it to
 you. The ordering is the runner's problem rather than yours. An insert needs no
 drain, because the new element is given the very link its producer was pushing
 to, so whatever is queued stays ahead of anything the new element emits; a remove
@@ -406,17 +422,41 @@ into a stall or a crash. The protocol is DESIGN.md §4.8.6; a working demo that
 splices a `videoflip` in and out of a live RTSP window is
 [examples/g2g-mutate-demo](examples/g2g-mutate-demo).
 
-Know the scope before you port to it: a transform position on a 1:1 edge, between
-a source or transform and a transform or sink. Tee, demux and muxer positions are
-refused (`MutationError::NotMutable`), as are the two ends of the chain, so reach
-for the fan-out / fan-in handles for a branch and `ElementSlot` for an end. A
-removed element is not flushed, so one holding frames internally loses them. Each
-operation lands at the producer's next packet boundary, which means a source that
-has gone quiet defers it rather than failing it.
+Know the scope before you port to it: a transform position on a 1:1 edge carrying
+one stream. The producing end is a source, a transform, or one output of a tee or
+demux. The consuming end is a transform, a sink, or one input pad of a muxer or
+terminal fan-in. The structural nodes themselves are not splice points
+(`MutationError::NotMutable`), so reach for the fan-out / fan-in handles to add a
+whole branch.
+
+The two ends of the graph are not splice points either, but the element on one is
+swappable: `replace_source("src", element)` and `replace_sink("sink", element)`
+hand the old one back and return the name the replacement got. The old sink is
+given the frames still queued for it and an end of stream, so it finalizes before
+it comes back and the replacement starts only after that; a replacement source
+opens with a segment that continues the running time its predecessor reached, so
+it can stamp from its own zero. Neither joins the clock election or the latency
+fold the run settled at startup.
+
+An operation names whichever end of the edge is unique: `insert_after` takes the
+one edge below a node, which is how a producer feeding a muxer pad is addressed,
+and `insert_before` takes the one edge above a node, which is how a tee or demux
+branch is addressed by its consumer. A node with several edges on the side you
+asked for is `NotMutable` there and is addressed from the other side.
+
+A removed element is drained *and* flushed, so the frames it was holding
+internally reach the consumer too and a reordering position is as removable as a
+stateless one. Each operation lands at the producer's next packet boundary, which
+means a source that has gone quiet defers it rather than failing it.
 
 ---
 
 ## 6. Porting a custom element
+
+This section maps GStreamer's base classes and vmethods onto g2g's traits.
+[AUTHORING.md](AUTHORING.md) covers the same traits for a reader with no
+GStreamer background, and goes further into the lifecycle, properties,
+`no_std` and registration.
 
 A GStreamer base-class subclass becomes a Rust trait impl:
 
@@ -525,9 +565,10 @@ verified, which is the default.
 same `g2g-core` version, the same `rustc`, and the same layout-affecting features
 (`metadata`, `multi-thread`). The plugin embeds an ABI tag
 (`g2g_core::ABI_VERSION`) that folds all three together; the loader compares it
-and refuses a mismatch with a clear error rather than risk UB. (A future
-`abi_stable` facade would relax the same-toolchain requirement; a C-ABI shim was
-rejected as it loses the ergonomic Rust trait.) Regime (a) — including the
+and refuses a mismatch with a clear error rather than risk UB. To cross
+toolchains, declare the plugin with `g2g_plugin::declare_plugin_v2!` instead: it
+emits a frozen `repr(C)` descriptor, so the host may have been built by a
+different `rustc`, and the plugin may be written in C. Regime (a) — including the
 **package-rebuild** path, where a vendor compiles extra element crates into the
 g2g binary it ships — remains available and needs no ABI match.
 
@@ -563,45 +604,51 @@ g2g-launch 'videotestsrc ! gstwrap element="videoflip method=horizontal-flip" ! 
 
 ---
 
-## 8. Known gaps (as of M459)
+## 8. Known gaps
+
+The full outstanding list is DESIGN_TODO.md; this is what a port is most likely
+to hit.
 
 - **Platform coverage.** Linux and Windows are the primary targets. Android
   (MediaCodec decode/encode, Camera2, AAudio, Surface present, plus ML inference)
-  is device-validated. macOS VideoToolbox decode/encode is validated on the CI
-  Mac; AVFoundation / Core Audio / Metal present are still open. The
-  cross-platform software path (parsers, container mux/demux, SW transforms,
-  ffmpeg, `gst-launch` DSL) works everywhere. See DESIGN_TODO.md "Gap analysis".
-- Transport: SRT (TSBPD/AES/key-rotation), RTP with RTCP and FEC (ULPFEC,
-  FlexFEC), and WebRTC (WHIP/WHEP) are in; still open are RTMP egress, an RTSP
-  *server*, and RTP RTX. Catalogued in DESIGN_TODO.md.
-- Other structural gaps (e.g. allocation re-cascade) are catalogued in
-  DESIGN_TODO.md.
-- No auto-plug through fan-out demuxers (chunked HLS/DASH manifests); demux/select explicitly.
-- Native dynamic-plugin loading (§7c, M201) is version+toolchain-locked: a plugin
-  and host must share the same `g2g-core` version, `rustc`, and layout features.
-  Cross-toolchain binary plugins (an `abi_stable` facade) are future work.
+  is device-validated. macOS has VideoToolbox decode/encode, AVFoundation camera
+  and mic capture, ScreenCaptureKit, Core Audio, and a Metal present sink, but
+  the capture elements are only probe-validated: the CI Mac grants neither the
+  camera nor the screen-recording permission. The cross-platform software path
+  (parsers, container mux/demux, SW transforms, ffmpeg, `gst-launch` DSL) works
+  everywhere.
+- **Transport.** SRT (TSBPD/AES/key-rotation), RTP with RTCP, FEC (ULPFEC,
+  FlexFEC) and RTX, RTMP ingest and egress, an RTSP server, and WebRTC
+  (WHIP/WHEP) are in. Open: RTP over QUIC (waiting on the RFC and an assigned
+  ALPN), several NetStreams over one RTMP connection (declined, it needs a
+  runtime-arity fan-out the fixed-arity model has no room for), WebRTC FEC
+  (str0m carries no FEC payload, so loss recovery is NACK/RTX only), and a run
+  against LiveKit Cloud over a real TURN relay.
+- `playbin uri=hls://...` probes a master playlist and fans the variant out to its
+  elementary streams, but there is no DASH URI handler: point `dashsrc` at the
+  MPD and wire the demuxer and decoders explicitly.
+- Native dynamic-plugin loading (§7c) has two ABIs. The `declare_plugin!` path
+  needs plugin and host to share a `g2g-core` version, a `rustc`, and the
+  layout-affecting features; the frozen C ABI v2 loads across toolchains and from
+  plain C. Still open: how a distribution supplies `g2g-core` to an offline
+  plugin build.
 - `g2g-bridge` (embed a g2g sub-graph inside a GStreamer pipeline for incremental
-  migration, DESIGN.md §7): both layers exist. The impedance core (`BridgeGraph`)
-  runs `appsrc ! <fragment> ! appsink` on its own thread behind a synchronous
-  push/pull API; the GObject shell (`libgstglass2glass.so`, the `gstreamer`
-  feature) registers a real `glass2glass` GStreamer element, so a stock
-  `gst-launch` line can embed a g2g sub-graph by name:
+  migration, DESIGN.md §7) is in: the GObject shell (`libgstglass2glass.so`, the
+  `gstreamer` feature) registers a real `glass2glass` GStreamer element, so a
+  stock `gst-launch` line embeds a g2g sub-graph by name:
   `... ! glass2glass fragment="videoflip method=horizontal-flip" ! ...`. A
   caps/size-preserving fragment runs in place; a rescaling / reformatting one
   declares its result with `output-caps`, e.g.
   `glass2glass fragment=videoscale output-caps="video/x-raw,format=RGBA,width=640,height=360,framerate=30/1"`.
   Build and validate with `tools/gst-bridge-smoke.sh` (needs host GStreamer dev
-  libs). A dma-buf-backed `GstBuffer` is imported and handed back zero-copy (the
-  shell detects `GstDmaBufMemory` on input and re-wraps a dma-buf output;
-  `tools/gst-bridge-dmabuf-smoke.sh`); system-memory buffers are mapped and
-  copied. A GPU-*compute* fragment (`dmabuftowgpu ! <compute>`) still needs a
-  download/export element at its tail to return the GPU result to the shell.
-- `gstwrap` (§7d) is the reverse bridge: it hosts an un-ported GStreamer element
-  *inside* a g2g graph (`appsrc ! <element> ! appsink` on GStreamer's own
-  threads), so g2g can be the top-level framework during a migration. Behind the
-  `gstreamer` feature; v1 is system-memory (a copy each way), dma-buf zero-copy
-  through it is future work. Usable from `g2g-launch` (the tokenizer is
-  quote-aware, so `gstwrap element="x264enc bitrate=4000"` parses).
+  libs). A dma-buf-backed `GstBuffer` passes through zero-copy
+  (`tools/gst-bridge-dmabuf-smoke.sh`); system memory is mapped and copied. The
+  gap: a GPU-*compute* fragment (`dmabuftowgpu ! <compute>`) still needs a
+  download or dma-buf-export element at its tail to return the GPU result to the
+  shell.
+- `gstwrap` (§7d), the reverse bridge that hosts an un-ported GStreamer element
+  *inside* a g2g graph, is system memory only, a copy each way. dma-buf zero-copy
+  through it is future work.
 
 ---
 

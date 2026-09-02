@@ -9,7 +9,7 @@
 //! Rec.601 luma axis (so luma is preserved, grey stays grey, and hue=0 is exactly
 //! the pre-hue behaviour). The
 //! `sin`/`cos` of the hue angle come from the crate's `libm`-free approximation
-//! ([`crate::mathf`]), computed once per frame, not per pixel.
+//! (`mathf`), computed once per frame, not per pixel.
 
 use core::future::Future;
 use core::pin::Pin;

@@ -70,7 +70,10 @@ async fn audio_rate_pin_couples_through_passthrough() {
     // single-hop coupling baseline staying correct).
     let line = "audiotestsrc num-buffers=3 freq=440 \
                 ! audioresample ! audio/x-raw,format=S16LE,rate=16000 ! fakesink";
-    assert_eq!(run_line(line).await, 3, "{line}");
+    // 3 source buffers plus the resampler's end-of-stream tail: its sinc kernel
+    // window defers the last input samples, and the flush delivers them as one
+    // more frame.
+    assert_eq!(run_line(line).await, 4, "{line}");
 }
 
 #[tokio::test]

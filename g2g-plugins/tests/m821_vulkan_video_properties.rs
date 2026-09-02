@@ -243,7 +243,6 @@ fn parse_launch_sets_vulkanvideodec_properties() {
 /// `device-index` picks the GPU the decode device is opened on: index 0 is the
 /// first decode-capable adapter, and an index past the last one fails rather
 /// than silently opening a different GPU.
-#[test]
 fn device_index_selects_the_decode_gpu() {
     if h264_device_or_skip("device-index").is_none() {
         return;
@@ -267,7 +266,6 @@ fn device_index_selects_the_decode_gpu() {
 
 /// `num-dpb-slots` grows the decoder's DPB image pool, and the enlarged pool
 /// still decodes the clip bit-identically.
-#[test]
 fn num_dpb_slots_grows_the_dpb() {
     let Some(mut device) = h264_device_or_skip("num-dpb-slots") else {
         return;
@@ -323,7 +321,6 @@ fn num_dpb_slots_grows_the_dpb() {
 /// `low-latency` turns off display-order reordering: a B-frame clip comes out in
 /// coding order, one frame per access unit, instead of being held until its
 /// display position is settled.
-#[test]
 fn low_latency_emits_in_coding_order_one_frame_per_au() {
     let Some(device) = h264_device_or_skip("low-latency") else {
         return;
@@ -402,7 +399,6 @@ fn low_latency_emits_in_coding_order_one_frame_per_au() {
 
 /// Both construction-time properties are refused once the state they size is
 /// built, instead of being accepted and ignored.
-#[test]
 fn construction_properties_are_refused_once_built() {
     if h264_device_or_skip("late property set").is_none() {
         return;
@@ -434,4 +430,17 @@ fn construction_properties_are_refused_once_built() {
     // low-latency stays settable mid-stream: it only changes how much is held.
     dec.set_property("low-latency", PropValue::Bool(true))
         .expect("low-latency applies at any time");
+}
+
+// One test for every case that opens a decode device: libtest runs test
+// functions on parallel threads, and two threads building a `wgpu::Instance` at
+// once fault inside the Vulkan loader's `loader_icd_scan`, which is why this
+// file keeps one device-creating test. The property checks above touch no
+// device, so they stay separate.
+#[test]
+fn the_properties_apply_on_a_real_decode_device() {
+    device_index_selects_the_decode_gpu();
+    num_dpb_slots_grows_the_dpb();
+    low_latency_emits_in_coding_order_one_frame_per_au();
+    construction_properties_are_refused_once_built();
 }

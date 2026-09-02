@@ -88,6 +88,7 @@ async fn pipewiresrc_num_buffers_zero_emits_only_eos() {
         format: AudioFormat::PcmS16Le,
         channels: 2,
         sample_rate: 48_000,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     })
     .expect("pipewiresrc caps");
 

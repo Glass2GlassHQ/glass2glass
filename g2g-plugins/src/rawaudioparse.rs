@@ -157,6 +157,7 @@ impl RawAudioParse {
             format: self.format,
             channels: self.channels,
             sample_rate: self.sample_rate,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         }
     }
 
@@ -388,6 +389,7 @@ impl PadTemplates for RawAudioParse {
             format: DEFAULT_FORMAT,
             channels: DEFAULT_CHANNELS,
             sample_rate: DEFAULT_SAMPLE_RATE,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         Vec::from([
             PadTemplate::sink(CapsSet::one(Self::input_caps())),
@@ -514,6 +516,7 @@ mod tests {
                 format: AudioFormat::PcmS16Le,
                 channels: 2,
                 sample_rate: 48_000,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
             }]
         );
     }
@@ -538,6 +541,7 @@ mod tests {
                 format: AudioFormat::Mulaw,
                 channels: 1,
                 sample_rate: 8_000,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
             }]
         );
         // One byte per sample, so nothing is held back.

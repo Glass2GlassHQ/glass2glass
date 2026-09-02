@@ -206,7 +206,7 @@ impl<F: FnMut() -> u32> PacketSender for TimedSumSender<F> {
 /// panic-free proofs (the video pipeline does the same for `Caps::Tensor`).
 fn negotiate_mix_link() -> Option<Caps> {
     let mixed =
-        || Caps::Audio { format: AudioFormat::PcmS16Le, channels: 1, sample_rate: 8000 };
+        || Caps::Audio { format: AudioFormat::PcmS16Le, channels: 1, sample_rate: 8000, channel_layout: g2g_core::ChannelLayout::UNSPECIFIED };
     let produced = black_box(mixed());
     let accepted = black_box(mixed());
     produced.intersect(&accepted).ok()

@@ -631,6 +631,7 @@ fn opus_mono() -> Caps {
         format: AudioFormat::Opus,
         channels: 1,
         sample_rate: 48_000,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     }
 }
 
@@ -639,6 +640,7 @@ fn opus_stereo() -> Caps {
         format: AudioFormat::Opus,
         channels: 2,
         sample_rate: 48_000,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     }
 }
 

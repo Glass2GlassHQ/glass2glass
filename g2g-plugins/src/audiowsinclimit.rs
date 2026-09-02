@@ -276,6 +276,7 @@ mod tests {
             format: AudioFormat::PcmF32Le,
             channels: 1,
             sample_rate: rate,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         }
     }
 

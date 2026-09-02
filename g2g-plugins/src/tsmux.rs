@@ -325,6 +325,7 @@ impl TsMux {
                 format: AudioFormat::Aac,
                 channels: 0,
                 sample_rate: 0,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
             },
             Caps::Klv,
             Caps::SubPicture {

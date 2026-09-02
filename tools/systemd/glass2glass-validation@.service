@@ -1,0 +1,15 @@
+# One host-validation run of the suite named by the instance (desktop-gpu, bench).
+# A checkout somewhere other than %h/src/glass2glass overrides ExecStart with
+# `systemctl --user edit glass2glass-validation@<suite>.service`.
+
+[Unit]
+Description=glass2glass host validation (%i suite)
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/src/glass2glass
+ExecStart=%h/src/glass2glass/tools/host-validation.sh %i
+# The user manager's PATH has no rustup shims.
+Environment=PATH=%h/.cargo/bin:/usr/local/bin:/usr/bin:/bin
+Nice=10
+TimeoutStartSec=4h

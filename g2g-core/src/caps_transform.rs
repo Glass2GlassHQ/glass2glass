@@ -191,6 +191,7 @@ impl CapsTransform {
                     format,
                     channels,
                     sample_rate,
+                    ..
                 },
             ) => {
                 if !accept.is_empty() && !accept.contains(format) {
@@ -207,6 +208,7 @@ impl CapsTransform {
                             format: f,
                             channels: s.channels.apply(channels),
                             sample_rate: s.sample_rate.apply(sample_rate),
+                            channel_layout: crate::ChannelLayout::UNSPECIFIED,
                         },
                     );
                 }
@@ -271,6 +273,7 @@ mod tests {
             format,
             channels,
             sample_rate,
+            channel_layout: crate::ChannelLayout::UNSPECIFIED,
         }
     }
 

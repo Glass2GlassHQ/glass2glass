@@ -114,6 +114,7 @@ impl AudioRate {
             format,
             channels,
             sample_rate,
+            ..
         } = caps
         else {
             return Err(G2gError::CapsMismatch);
@@ -260,6 +261,7 @@ impl AsyncElement for AudioRate {
                         format,
                         channels,
                         sample_rate: rate,
+                        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
                     };
                     if self.last_caps.as_ref() != Some(&caps) {
                         out.push(PipelinePacket::CapsChanged(caps.clone())).await?;
@@ -388,6 +390,7 @@ impl PadTemplates for AudioRate {
             format,
             channels: ANY_CHANNELS,
             sample_rate: ANY_SAMPLE_RATE,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         let set = CapsSet::from_alternatives(pcm_formats().map(pcm).to_vec());
         Vec::from([PadTemplate::sink(set.clone()), PadTemplate::source(set)])
@@ -439,6 +442,7 @@ mod tests {
             format: AudioFormat::Opus,
             channels: 2,
             sample_rate: RATE,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         assert_eq!(
             e.configure_pipeline(&opus).unwrap_err(),
@@ -448,6 +452,7 @@ mod tests {
             format: AudioFormat::PcmS16Le,
             channels: ANY_CHANNELS,
             sample_rate: RATE,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         assert_eq!(
             e.configure_pipeline(&no_channels).unwrap_err(),
@@ -457,6 +462,7 @@ mod tests {
             format: AudioFormat::PcmS16Le,
             channels: 2,
             sample_rate: ANY_SAMPLE_RATE,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         assert_eq!(
             e.configure_pipeline(&no_rate).unwrap_err(),
@@ -466,6 +472,7 @@ mod tests {
             format: AudioFormat::PcmS16Le,
             channels: 2,
             sample_rate: RATE,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         assert!(e.configure_pipeline(&ok).is_ok());
     }

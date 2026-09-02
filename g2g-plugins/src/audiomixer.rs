@@ -31,13 +31,14 @@ use crate::audioconvert::{ns_to_samples, samples_to_ns};
 /// # Example
 ///
 /// ```no_run
-/// use g2g_core::{AudioFormat, Caps};
+/// use g2g_core::{AudioFormat, Caps, ChannelLayout};
 /// use g2g_plugins::audiomixer::AudioMixer;
 ///
 /// let output = Caps::Audio {
 ///     format: AudioFormat::PcmS16Le,
 ///     channels: 2,
 ///     sample_rate: 48_000,
+///     channel_layout: ChannelLayout::UNSPECIFIED,
 /// };
 /// let mixer = AudioMixer::new(2, output);
 /// ```

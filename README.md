@@ -138,7 +138,8 @@ parse error: unknown element: theoraenc
 - Migrate incrementally in either direction: `g2g-bridge` embeds a g2g sub-graph inside a GStreamer pipeline; `gstwrap` hosts an un-ported GStreamer element inside a g2g graph.
 
 Full guide, including the equivalence cookbook and application/element porting:
-**[PORTING.md](PORTING.md)**.
+**[PORTING.md](PORTING.md)**. Writing an element from scratch, with no GStreamer
+background assumed: **[AUTHORING.md](AUTHORING.md)**.
 
 ## Scripting: config files and Rhai
 
@@ -455,16 +456,18 @@ properties),
 the G.711 / IMA ADPCM codecs (`mulawenc` / `mulawdec`, `alawenc` / `alawdec`,
 `adpcmenc` / `adpcmdec`), the software video/audio
 transforms (`videoscale` / `videorate` / `imagefreeze` / `videocrop` / `videoflip` /
-`videobalance` / `videobox` / `alpha` / `gamma` / `deinterlace` / `timeoverlay` /
+`videobalance` / `videobox` / `colorspace` / `alpha` / `gamma` / `deinterlace` / `timeoverlay` /
 `aspectratiocrop` / `gaussianblur` / `videomedian` / `smooth` / `coloreffects` /
 `chromahold` / `zebrastripe` / `videodiff` / `solarize` / `chromium` / `dilate` / `dodge` /
 `exclusion` / `burn`,
-`audioconvert` / `audioresample` / `audiorate` / `audiomixer` / `interleave` /
+`audioconvert` (with `dithering` and `noise-shaping` on a bit-depth reduction) /
+`audioresample` (windowed sinc, `quality` 0 - 10) /
+`audiorate` / `audiomixer` / `interleave` /
 `deinterleave` / `scaletempo` / `volume` / `audiopanorama` /
 `audioamplify` / `audioecho` / `audiodynamic` / `audiowsinclimit` / `audiocheblimit` /
 `audiochannelmix` / `audiomixmatrix` / `stereo` / `audiofirfilter` / `audioiirfilter` /
-`removesilence` / `audiobuffersplit` / `speed` /
-`level` / `cutter` / `equalizer-3bands` / `spectrum`), the KLV telemetry codec (`klvdecode`, MISB ST 0601 / STANAG 4609),
+`removesilence` / `audiobuffersplit` / `speed` / `audioreverse` /
+`level` / `ebur128` / `cutter` / `equalizer-3bands` / `spectrum`), the KLV telemetry codec (`klvdecode`, MISB ST 0601 / STANAG 4609),
 the bitmap-subtitle decoders (`vobsubdec`, alias `dvdsubdec`, `dvbsubdec` and
 `pgsdec`) with the `subpictureoverlay` that blends their cues onto video,
 and the EBU teletext subtitle decoder (`teletextdec`),
@@ -849,10 +852,18 @@ cd examples/g2g-mutate-demo && cargo run --release
 The same RTSP feed in a window, with a `videoflip` spliced onto the decoded-video
 edge every few seconds, held, and lifted back off, while the stream keeps
 running: the picture turns over and back with no gap and no restart, and each
-operation prints as it happens. This is `GraphMutator` (M1115) on a live graph,
-the structural counterpart to a GStreamer pad block plus relink; see
-[PORTING.md](PORTING.md) §5.2. Standalone crate (workspace-excluded, its own
-lockfile) because it needs the `rtsp` + `ffmpeg` + `wayland-sink` feature set.
+operation prints as it happens. Lifting the flip back off drains the frames it
+was still holding internally through to the window first, so none is lost or
+reordered. `cargo run --release -- tee` runs the structural variant: the decoder
+feeds a `tee` with a window on each branch, and the splice lands on one branch's
+edge, named by the sink at its far end (`insert_before`), while the sibling
+window plays on untouched. This is `GraphMutator` on a live graph, the structural
+counterpart to a GStreamer pad block plus relink; see [PORTING.md](PORTING.md)
+§5.2. A splice point is a transform position on a 1:1 edge, tee / demux branches
+and muxer inputs included; the source and sink ends take a whole element in
+exchange for the one there instead (`replace_source` / `replace_sink`).
+Standalone crate (workspace-excluded, its own lockfile) because it needs the
+`rtsp` + `ffmpeg` + `wayland-sink` feature set.
 `G2G_RTSP_URL` picks the feed, `G2G_DEMO_SECONDS` bounds the run, ctrl-c ends it.
 
 ### NVIDIA NVDEC (system memory) + Wayland
@@ -1006,6 +1017,73 @@ and report the denial rather than failing; full capture and a true on-screen
 `SurfaceView` present need an APK harness. If `adb` reports "insufficient
 permissions", run `adb kill-server && adb start-server` and re-accept the prompt
 on the phone.
+
+## Host validation
+
+The GPU and bench suites need hardware CI cannot reach, on hosts that are
+powered off most of the day. There is no self-hosted runner: a systemd user
+timer runs `tools/host-validation.sh`, which fast-forwards the host's own
+checkout to `master`, runs one suite, and posts a commit status on the SHA it
+tested. Nothing on GitHub can start a process on the host, and an offline host
+queues nothing.
+
+Two suites, one per host:
+
+| Suite | Host | Steps |
+| :--- | :--- | :--- |
+| `desktop-gpu` | RTX 3060 desktop | the `vulkan-video` test files, the CUDA / NVDEC / `cuda-wgpu` tests, `g2g-ml`'s `cuda_wgpu_e2e`, and the A/V lip-sync soak |
+| `bench` | headless bench box | `tools/throughput-bench.sh`, with the g2g and GStreamer fps in the status description |
+
+A step whose hardware or feed is absent reports SKIP (no Vulkan ICD, no NVIDIA
+driver, no Wayland session, no HLS feed). A `cargo test` that passes while
+reporting zero tests is a FAIL, not a pass: that is what a feature-gated test
+file does when its feature is missing.
+
+**Create the token.** GitHub → Settings → Developer settings → Personal access
+tokens → Fine-grained tokens → Generate new token. Resource owner: the account
+that owns the repository. Repository access: Only select repositories →
+`Glass2GlassHQ/glass2glass`. Repository permissions: **Commit statuses → Read
+and write**, nothing else. Generate, copy, then on the host:
+
+```sh
+install -d -m 700 ~/.config/glass2glass-validation
+touch ~/.config/glass2glass-validation/token
+chmod 600 ~/.config/glass2glass-validation/token
+cat > ~/.config/glass2glass-validation/token   # paste the token, then Ctrl-D
+```
+
+The script refuses to run unless that file is mode 0600 and owned by the
+caller. `$G2G_VALIDATION_TOKEN_FILE` overrides the path.
+
+**Install the timer.** With the checkout at `~/src/glass2glass` (anywhere else,
+override `ExecStart` with `systemctl --user edit`):
+
+```sh
+install -d -m 755 ~/.config/systemd/user
+install -m 644 tools/systemd/glass2glass-validation@.service \
+               tools/systemd/glass2glass-validation@.timer ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now glass2glass-validation@desktop-gpu.timer  # 3060 desktop
+systemctl --user enable --now glass2glass-validation@bench.timer        # bench box
+loginctl enable-linger "$USER"   # headless host: start the user manager at boot
+```
+
+The timer fires 10 minutes after the user manager starts and once a day after
+that, so a boot-and-work session gets one run.
+
+**Read the results.** The statuses appear on the commit in the GitHub UI, or:
+
+```sh
+gh api repos/Glass2GlassHQ/glass2glass/commits/master/status \
+  --jq '.statuses[] | "\(.context)\t\(.state)\t\(.description)"'
+journalctl --user -u glass2glass-validation@desktop-gpu.service -n 200
+```
+
+`tools/host-validation.sh <suite> --dry-run` prints the status payload instead
+of posting it, and needs no token.
+
+The timer runs whatever is on `master`, so this is exactly as safe as push
+access to `master`.
 
 ## System dependencies
 

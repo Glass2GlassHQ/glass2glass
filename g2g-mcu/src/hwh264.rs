@@ -16,7 +16,7 @@
 //! ESP32-P4 the encoder is reached over the M650 C-seam (`CH264Encoder`): the
 //! ESP-IDF encoder driver *is* the peripheral. On-device validation (a
 //! `Hardware` conformance row on real silicon) needs a board and stays open,
-//! like [`HwJpegDec`]'s and `VtDecode`'s runtime tiers.
+//! like [`HwJpegDec`](crate::HwJpegDec)'s and `VtDecode`'s runtime tiers.
 
 use g2g_core::error::G2gError;
 use g2g_core::frame::Frame;

@@ -235,6 +235,7 @@ impl OpusParse {
             format: AudioFormat::Opus,
             channels,
             sample_rate: OPUS_RATE_HZ,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         if self.last_emitted_caps.as_ref() == Some(&new_caps) {
             return None;
@@ -355,6 +356,7 @@ impl PadTemplates for OpusParse {
             format: AudioFormat::Opus,
             channels: 2,
             sample_rate: OPUS_RATE_HZ,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         Vec::from([
             PadTemplate::sink(CapsSet::one(opus.clone())),
@@ -545,6 +547,7 @@ mod tests {
             format: AudioFormat::Opus,
             channels: 0,
             sample_rate: 0,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         }
     }
 
@@ -566,6 +569,7 @@ mod tests {
                 format: AudioFormat::Opus,
                 channels,
                 sample_rate,
+                ..
             }) => {
                 assert_eq!(*channels, 2);
                 assert_eq!(*sample_rate, OPUS_RATE_HZ);
@@ -795,6 +799,7 @@ mod tests {
             format: AudioFormat::Aac,
             channels: 2,
             sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         assert_eq!(parse.intercept_caps(&aac), Err(G2gError::CapsMismatch));
     }

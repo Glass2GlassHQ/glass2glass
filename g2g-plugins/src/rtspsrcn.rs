@@ -246,6 +246,7 @@ fn audio_caps(format: AudioFormat, channels: u8, sample_rate: u32) -> Caps {
         format,
         channels,
         sample_rate,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     }
 }
 
@@ -909,6 +910,7 @@ mod tests {
                 format: AudioFormat::Aac,
                 channels: 0,
                 sample_rate: 0,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
             })
         );
     }
@@ -949,6 +951,7 @@ mod tests {
                 format: AudioFormat::Aac,
                 channels: 1,
                 sample_rate: 48_000,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
             }),
         };
         let src = RtspSrcN::new("rtsp://example/stream").with_tracks(&tracks);
@@ -962,6 +965,7 @@ mod tests {
                 format: AudioFormat::Aac,
                 channels: 0,
                 sample_rate: 0,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
             })
         );
     }
@@ -972,6 +976,7 @@ mod tests {
             format: AudioFormat::Alaw,
             channels: G711_DEFAULT_CHANNELS,
             sample_rate: G711_CLOCK_RATE_HZ,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         };
         assert_eq!(negotiation_audio_caps(&declared), declared);
     }
@@ -991,6 +996,7 @@ mod tests {
                 format: AudioFormat::Alaw,
                 channels: G711_DEFAULT_CHANNELS,
                 sample_rate: G711_CLOCK_RATE_HZ,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
             })
         );
         assert_eq!(

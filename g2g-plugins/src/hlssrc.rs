@@ -57,11 +57,12 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use g2g_core::log::LogSource;
 use g2g_core::runtime::{SeekController, SourceLoop};
 use g2g_core::{
-    AudioFormat, BusHandle, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
-    Dim, ElementMetadata, G2gError, OutputSink, PipelinePacket, PropError, PropKind, PropValue,
-    PropertySpec, Rate, Seek, Segment, StreamType, TextFormat, VideoCodec,
+    g2g_debug, AudioFormat, BusHandle, ByteStreamEncoding, Caps, CapsConstraint, CapsSet,
+    ConfigureOutcome, Dim, ElementMetadata, G2gError, OutputSink, PipelinePacket, PropError,
+    PropKind, PropValue, PropertySpec, Rate, Seek, Segment, StreamType, TextFormat, VideoCodec,
 };
 
 use crate::abr::BandwidthEstimator;
@@ -115,6 +116,7 @@ fn codec_to_stream(codec: &str) -> Option<(StreamType, Caps, bool)> {
                 format: f,
                 channels: 0,
                 sample_rate: 0,
+                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
             },
             false,
         )
@@ -185,6 +187,7 @@ pub fn variant_streams(master: &MasterPlaylist, variant: &Variant) -> Vec<HlsStr
                     format: AudioFormat::Aac,
                     channels: 0,
                     sample_rate: 0,
+                    channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
                 },
                 video: false,
                 uri: Some(uri.clone()),
@@ -688,6 +691,12 @@ fn has_media_from(media: &MediaPlaylist, seq: u64, part: usize) -> bool {
     })
 }
 
+impl LogSource for HlsSrc {
+    fn log_category(&self) -> &'static str {
+        "hlssrc"
+    }
+}
+
 impl SourceLoop for HlsSrc {
     type RunFuture<'a>
         = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
@@ -900,17 +909,23 @@ impl SourceLoop for HlsSrc {
                         // behind its URI, so step over it instead of fetching a 404.
                         // A live packager pads a freshly started playlist with them.
                         if segment.gap {
-                            next_seq = next_seq.max(seg_seq + 1);
-                            next_part = 0;
+                            // Only a gap past the delivery cursor moves it; the
+                            // padding before it must not clobber next_part, or
+                            // every reload replays the live segment from part 0.
+                            if seg_seq + 1 > next_seq {
+                                next_seq = seg_seq + 1;
+                                next_part = 0;
+                            }
                         } else if seg_seq < next_seq {
                             // already delivered
                         } else if use_parts {
                             let first = if seg_seq == next_seq { next_part } else { 0 };
-                            for part in segment.parts.iter().skip(first) {
+                            for (part_index, part) in segment.parts.iter().enumerate().skip(first) {
                                 if part.gap {
                                     continue;
                                 }
                                 let part_url = resolve_url(&media_url, &part.uri);
+                                let t0 = g2g_core::metrics::monotonic_ns();
                                 let bytes = match part.byte_range {
                                     Some(r) => {
                                         get_range_bytes(
@@ -926,6 +941,15 @@ impl SourceLoop for HlsSrc {
                                         get_bytes(&client, &part_url, MAX_SEGMENT_BYTES).await?
                                     }
                                 };
+                                g2g_debug!(
+                                    self,
+                                    "t={t} {stream} part ({seg_seq},{part_index}) fetched: {len} bytes in {ms} ms",
+                                    t = g2g_core::metrics::monotonic_ns() / 1_000_000,
+                                    stream = media_url.rsplit('/').next().unwrap_or("?"),
+                                    len = bytes.len(),
+                                    ms = g2g_core::metrics::monotonic_ns().saturating_sub(t0)
+                                        / 1_000_000,
+                                );
                                 if !bytes.is_empty() {
                                     pending_keys.push_back(None);
                                     window.admit(
@@ -971,6 +995,15 @@ impl SourceLoop for HlsSrc {
                                 bytes.len(),
                                 g2g_core::metrics::monotonic_ns().saturating_sub(t0),
                             ));
+                            g2g_debug!(
+                                self,
+                                "t={t} {stream} segment {seg_seq} fetched: {len} bytes in {ms} ms",
+                                t = g2g_core::metrics::monotonic_ns() / 1_000_000,
+                                stream = media_url.rsplit('/').next().unwrap_or("?"),
+                                len = bytes.len(),
+                                ms = g2g_core::metrics::monotonic_ns().saturating_sub(t0)
+                                    / 1_000_000,
+                            );
                             // The sample-encryption key travels with its segment
                             // through the window, so it is published when those
                             // bytes are emitted, not now: fetching runs ahead.
@@ -1088,7 +1121,8 @@ impl SourceLoop for HlsSrc {
                 // playlist waits a reload interval and refetches.
                 let target_ms = u64::from(media.target_duration_secs.max(1)) * 1000;
                 let held = if ll {
-                    get_text_query(
+                    let t0 = g2g_core::metrics::monotonic_ns();
+                    let answer = get_text_query(
                         &client,
                         &media_url,
                         &[
@@ -1101,7 +1135,16 @@ impl SourceLoop for HlsSrc {
                         MAX_MANIFEST_BYTES,
                     )
                     .await
-                    .ok()
+                    .ok();
+                    g2g_debug!(
+                        self,
+                        "t={t} {stream} blocking reload for ({next_seq},{next_part}): held {ms} ms, {outcome}",
+                        t = g2g_core::metrics::monotonic_ns() / 1_000_000,
+                        stream = media_url.rsplit('/').next().unwrap_or("?"),
+                        ms = g2g_core::metrics::monotonic_ns().saturating_sub(t0) / 1_000_000,
+                        outcome = if answer.is_some() { "answered" } else { "miss" },
+                    );
+                    answer
                 } else {
                     None
                 };
@@ -1129,6 +1172,7 @@ impl SourceLoop for HlsSrc {
                         let scheduled = due + interval;
                         // A full interval behind: reload now, do not burst.
                         next_reload = Some(scheduled.max(now + interval / 2));
+                        g2g_debug!(self, "timed reload after {} ms", interval_ms);
                         get_text(&client, &media_url, MAX_MANIFEST_BYTES).await?
                     }
                 };

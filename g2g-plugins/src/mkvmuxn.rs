@@ -226,7 +226,7 @@ impl MkvMuxN {
         self
     }
 
-    /// Live mode: suppress the EOS `Cues` index (see [`streamable`](Self::streamable)).
+    /// Live mode: suppress the EOS `Cues` index (see `streamable`).
     pub fn with_streamable(mut self, streamable: bool) -> Self {
         self.streamable = streamable;
         self
@@ -284,6 +284,7 @@ impl MkvMuxN {
                 format: format @ (AudioFormat::Aac | AudioFormat::Opus),
                 channels,
                 sample_rate,
+                ..
             } => Some(PadKind::Audio {
                 format: *format,
                 channels: *channels,
@@ -913,6 +914,7 @@ mod tests {
             format: AudioFormat::Aac,
             channels: 2,
             sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         }
     }
 
@@ -1118,6 +1120,7 @@ mod tests {
             format: AudioFormat::Opus,
             channels: 2,
             sample_rate: 48_000,
+            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
         }
     }
 
