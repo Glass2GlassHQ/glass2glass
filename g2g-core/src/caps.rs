@@ -114,12 +114,6 @@ pub enum Caps {
     /// elementary metadata stream a transport demuxer splits out alongside video,
     /// timed by the frame's PTS (GStreamer `meta/x-klv`).
     Klv,
-    /// An ONVIF analytics metadata stream: each frame one complete
-    /// `tt:MetadataStream` XML document as the camera sent it over its
-    /// `application/vnd.onvif.metadata` RTSP track, already decompressed, timed by
-    /// the frame's PTS on the session's play timeline (GStreamer
-    /// `application/x-onvif-metadata`).
-    OnvifMetadata,
     /// A raw closed-caption stream: a container track carrying caption data as its
     /// own elementary stream rather than inside a video bitstream's SEI (the MP4
     /// `c608` / `c708` raw-caption tracks). Each frame is one sample's `cc_data`
@@ -137,6 +131,12 @@ pub enum Caps {
     /// transparent [`Caps::RawVideo`] RGBA canvases a compositor can paint over
     /// video, so nothing downstream needs a bitmap-cue concept.
     SubPicture { format: SubPictureFormat },
+    /// An ONVIF analytics metadata stream: each frame one complete
+    /// `tt:MetadataStream` XML document as the camera sent it over its
+    /// `application/vnd.onvif.metadata` RTSP track, already decompressed, timed by
+    /// the frame's PTS on the session's play timeline (GStreamer
+    /// `application/x-onvif-metadata`).
+    OnvifMetadata,
 }
 
 impl Caps {
