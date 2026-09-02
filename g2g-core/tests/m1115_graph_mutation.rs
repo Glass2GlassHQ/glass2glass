@@ -1886,24 +1886,35 @@ mod threaded {
     fn a_transform_splices_into_a_threaded_run() {
         let record = Arc::new(Mutex::new(Record::default()));
         let pushed = Arc::new(AtomicUsize::new(0));
-        let graph = source_transform_sink(&record, &pushed, None, vec![i420()]);
+        // Driver-stopped stream: a bounded one can finish before the driver's
+        // splice lands on a slow thread schedule, turning the op into a
+        // legitimate GraphEnded and the test into a coin flip.
+        let stop = Arc::new(AtomicBool::new(false));
+        let graph = graph_with_source(
+            &record,
+            &pushed,
+            None,
+            StreamShape::new(vec![i420()]).until_stopped(&stop),
+        );
 
         let spawner = ThreadSpawner;
         let (mutator, run) = run_graph_threaded_mutable(graph, &ZeroClock, LINK_CAPACITY, &spawner);
         let observed = Arc::clone(&record);
-        let driver = async {
+        let halt = Arc::clone(&stop);
+        let driver = async move {
             until(|| frames_seen(&observed) >= 3).await;
             mutator
                 .insert_after("src", Box::new(Marker::default()))
                 .await
-                .expect("the splice works the same on its own thread")
+                .expect("the splice works the same on its own thread");
+            until(|| marked_seen(&observed, 1) >= 1).await;
+            halt.store(true, Ordering::SeqCst);
         };
-        let (stats, _name) = block_on(Join2::new(run, driver));
+        let (stats, ()) = block_on(Join2::new(run, driver));
         let stats = stats.expect("the threaded run survives the splice");
-        assert_eq!(stats.frames_consumed, FRAME_COUNT);
 
         let record = record.lock().unwrap();
-        assert_complete_in_order(&record);
+        assert_no_gap(&record, stats.frames_emitted);
         assert_single_transition(&record.marks(), 0, 1);
     }
 
