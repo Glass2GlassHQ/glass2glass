@@ -94,6 +94,8 @@ const META_CAPTION: u8 = 2;
 const META_HDR_STATIC: u8 = 3;
 #[cfg_attr(not(feature = "metadata"), allow(dead_code))]
 const META_TIMECODE: u8 = 4;
+#[cfg_attr(not(feature = "metadata"), allow(dead_code))]
+const META_WALL_CLOCK: u8 = 5;
 
 // ---- primitive writer ----
 
@@ -688,6 +690,7 @@ fn put_caps(w: &mut Writer, c: &Caps) {
             w.u8(8);
             w.u8(subpicture_format_to_u8(*format));
         }
+        Caps::OnvifMetadata => w.u8(9),
     }
 }
 
@@ -746,6 +749,7 @@ fn get_caps(r: &mut Reader) -> Result<Caps, WireError> {
         8 => Caps::SubPicture {
             format: subpicture_format_from_u8(r.u8()?)?,
         },
+        9 => Caps::OnvifMetadata,
         _ => return Err(WireError::BadTag),
     })
 }
@@ -850,6 +854,7 @@ fn get_domain(r: &mut Reader) -> Result<MemoryDomain, WireError> {
 fn put_meta(w: &mut Writer, meta: &FrameMetaSet) {
     use crate::meta::{
         AnalyticsMeta, AnalyticsNode, BlobMeta, CaptionMeta, HdrStaticMeta, TimecodeMeta,
+        WallClockMeta,
     };
 
     let analytics = meta.get::<AnalyticsMeta>();
@@ -857,11 +862,13 @@ fn put_meta(w: &mut Writer, meta: &FrameMetaSet) {
     let caption = meta.get::<CaptionMeta>();
     let hdr = meta.get::<HdrStaticMeta>();
     let timecode = meta.get::<TimecodeMeta>();
+    let wall_clock = meta.get::<WallClockMeta>();
     let count = analytics.is_some() as u8
         + blob.is_some() as u8
         + caption.is_some() as u8
         + hdr.is_some() as u8
-        + timecode.is_some() as u8;
+        + timecode.is_some() as u8
+        + wall_clock.is_some() as u8;
     w.u8(count);
 
     if let Some(a) = analytics {
@@ -968,6 +975,12 @@ fn put_meta(w: &mut Writer, meta: &FrameMetaSet) {
         w.bool(t.framerate_q16.is_some());
         w.u32(t.framerate_q16.unwrap_or(0));
     }
+
+    if let Some(c) = wall_clock {
+        w.u8(META_WALL_CLOCK);
+        // two's complement, so a pre-1970 instant round-trips through the u64.
+        w.u64(c.unix_nanos as u64);
+    }
 }
 
 /// An optional `u16` as a presence flag then the value (only the HDR meta needs
@@ -1017,7 +1030,7 @@ fn get_meta(r: &mut Reader) -> Result<FrameMetaSet, WireError> {
     use crate::meta::{
         AnalyticsMeta, AnalyticsNode, BBox, Blob, BlobMeta, CaptionMeta, CaptionTriple,
         Chromaticity, Classification, HdrStaticMeta, Mask, MasteringDisplay, ObjectDetection,
-        Relation, Roi, Segmentation, TimecodeMeta, Tracking,
+        Relation, Roi, Segmentation, TimecodeMeta, Tracking, WallClockMeta,
     };
 
     let count = r.u8()?;
@@ -1155,6 +1168,11 @@ fn get_meta(r: &mut Reader) -> Result<FrameMetaSet, WireError> {
                     },
                 };
                 set.attach(tc);
+            }
+            META_WALL_CLOCK => {
+                set.attach(WallClockMeta {
+                    unix_nanos: r.u64()? as i64,
+                });
             }
             _ => return Err(WireError::BadTag),
         }
@@ -1407,6 +1425,7 @@ mod tests {
             Caps::ClosedCaption {
                 format: ClosedCaptionFormat::Cea708,
             },
+            Caps::OnvifMetadata,
         ];
         for caps in cases {
             let p = PipelinePacket::CapsChanged(caps.clone());
@@ -1818,6 +1837,31 @@ mod tests {
                 assert_eq!(got.meta.get::<TimecodeMeta>(), Some(&tc));
             }
             other => panic!("expected DataFrame, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "metadata")]
+    #[test]
+    fn wall_clock_metadata_round_trips() {
+        use crate::meta::WallClockMeta;
+        // 2008-10-10T12:24:57.321Z, the ONVIF analytics spec's example instant,
+        // and a pre-1970 instant so the signed value is exercised too.
+        for unix_nanos in [1_223_641_497_321_000_000_i64, -1_000_000_001] {
+            let wc = WallClockMeta { unix_nanos };
+            let mut meta = FrameMetaSet::new();
+            meta.attach(wc);
+            let frame = Frame {
+                domain: MemoryDomain::System(SystemSlice::from_boxed(Box::new([0u8; 4]))),
+                timing: FrameTiming::default(),
+                sequence: 0,
+                meta,
+            };
+            match roundtrip(&PipelinePacket::DataFrame(frame)) {
+                PipelinePacket::DataFrame(got) => {
+                    assert_eq!(got.meta.get::<WallClockMeta>(), Some(&wc));
+                }
+                other => panic!("expected DataFrame, got {other:?}"),
+            }
         }
     }
 }

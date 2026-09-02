@@ -43,7 +43,7 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AudioFormat, Caps, Dim, FrameTiming, G2gError, HardwareError, MemoryDomain, MultiOutputSink,
     MultiOutputSource, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate,
-    VideoCodec,
+    VideoCodec, NTP_TO_UNIX_EPOCH_SECS,
 };
 
 use crate::g711::{G711_CLOCK_RATE_HZ, G711_DEFAULT_CHANNELS};
@@ -60,6 +60,26 @@ pub const DEFAULT_USER_AGENT: &str = "glass2glass/0.1";
 pub const VIDEO_PORT: usize = 0;
 /// The audio track's output pad, present only when the SDP offered audio.
 pub const AUDIO_PORT: usize = 1;
+
+/// SDP `a=rtpmap` encoding name of an uncompressed ONVIF metadata track
+/// (Streaming spec 5.2.2.4).
+const ONVIF_METADATA_ENCODING: &str = "vnd.onvif.metadata";
+/// The GZIP variant's encoding name as retina spells it. The Streaming spec
+/// writes it [`ONVIF_METADATA_SPEC_GZIP_ENCODING`] instead.
+const ONVIF_METADATA_GZIP_ENCODING: &str = "vnd.onvif.metadata.gzip";
+/// The GZIP variant's encoding name as the Streaming spec writes it. retina
+/// 0.4.19 builds no depacketizer for this spelling, and a set-up stream it
+/// cannot depacketize fails the whole session at `demuxed()`, so a track
+/// advertised this way is skipped rather than played.
+const ONVIF_METADATA_SPEC_GZIP_ENCODING: &str = "vnd.onvif.metadata+gzip";
+/// EXI-coded metadata tracks. g2g has no EXI decoder, so they are skipped.
+const ONVIF_METADATA_EXI_ENCODINGS: &[&str] =
+    &["vnd.onvif.metadata.exi.onvif", "vnd.onvif.metadata.exi.ext"];
+
+/// Largest document one gzip-compressed metadata packet may inflate to. A
+/// camera's scene description is kilobytes; the bound stops a crafted few-KiB
+/// payload from inflating to gigabytes.
+const MAX_INFLATED_METADATA_LEN: usize = 4 * 1024 * 1024;
 
 /// Widest geometry the placeholder video caps accept, so `fixate` has a value
 /// to pick and the real dimensions can arrive later as a `CapsChanged`.
@@ -85,6 +105,10 @@ pub struct RtspTracks {
     /// and sample rate), or `None` when the SDP offers none. The pad negotiates
     /// with the decoder-facing form of this, see [`RtspSrcN::with_tracks`].
     pub audio: Option<Caps>,
+    /// Whether the SDP offers an ONVIF analytics metadata track this element
+    /// can play. Reported, not subscribed: the metadata pad is opt-in through
+    /// [`RtspSrcN::with_onvif_metadata`] / the `onvif-metadata` property.
+    pub onvif_metadata: bool,
 }
 
 /// # Example
@@ -113,6 +137,12 @@ pub struct RtspSrcN {
     /// Negotiation caps of the audio pad, or `None` for a video-only element
     /// (one output).
     audio: Option<Caps>,
+    /// Whether the ONVIF analytics metadata track gets its own output pad.
+    onvif_metadata: bool,
+    /// Output pads a launch line asked for by linking them, so setting
+    /// `onvif-metadata` after construction can trade the audio pad for the
+    /// metadata one instead of growing the element past the linked count.
+    requested_outputs: Option<usize>,
 }
 
 impl RtspSrcN {
@@ -127,6 +157,8 @@ impl RtspSrcN {
             expected_dims: None,
             probed_video: None,
             audio: None,
+            onvif_metadata: false,
+            requested_outputs: None,
         }
     }
 
@@ -134,8 +166,36 @@ impl RtspSrcN {
     /// the audio pad (AAC unless `audio-format` says otherwise), 1 leaves the
     /// element video-only.
     pub fn with_outputs(mut self, outputs: usize) -> Self {
-        self.audio = (outputs >= 2).then(|| audio_caps(AudioFormat::Aac, 0, 0));
+        self.requested_outputs = Some(outputs);
+        self.fill_audio_pad();
         self
+    }
+
+    /// Subscribe the SDP's ONVIF analytics metadata track on a pad of its own,
+    /// after video and audio. Off by default, so a graph that only wants
+    /// pictures negotiates exactly as before. Each frame on it is one complete
+    /// `tt:MetadataStream` document, ready for `onvifmetadataparse`.
+    pub fn with_onvif_metadata(mut self, on: bool) -> Self {
+        self.onvif_metadata = on;
+        self.fill_audio_pad();
+        self
+    }
+
+    /// Give the audio pad whatever room the linked-pad count leaves once video
+    /// and the optional metadata pad have taken theirs. Only a launch line fixes
+    /// that count; a builder caller names the pads it wants directly.
+    fn fill_audio_pad(&mut self) {
+        let Some(outputs) = self.requested_outputs else {
+            return;
+        };
+        let without_audio = 1 + usize::from(self.onvif_metadata);
+        self.audio = (outputs > without_audio).then(|| audio_caps(AudioFormat::Aac, 0, 0));
+    }
+
+    /// The metadata track's output pad, after video and audio.
+    fn metadata_port(&self) -> Option<usize> {
+        self.onvif_metadata
+            .then(|| 1 + usize::from(self.audio.is_some()))
     }
 
     /// Build from a DESCRIBE's [`RtspTracks`]: the real video geometry and, when
@@ -319,6 +379,112 @@ fn audio_stream_index(
     })
 }
 
+/// The first ONVIF analytics metadata track g2g can play, and whether its
+/// payload is gzip-compressed. Tracks advertised with the Streaming spec's
+/// `+gzip` spelling or with an EXI coding are logged and skipped: retina builds
+/// no depacketizer for the first, and g2g has no EXI decoder for the second.
+fn onvif_metadata_stream_index(streams: &[retina::client::Stream]) -> Option<(usize, bool)> {
+    streams.iter().enumerate().find_map(|(i, s)| {
+        if s.media() != "application" {
+            return None;
+        }
+        Some((i, onvif_metadata_gzip(s.encoding_name())?))
+    })
+}
+
+/// Whether an SDP encoding name is an ONVIF metadata track g2g plays, and
+/// whether its payload is gzip-compressed. `None` for a coding it has to leave
+/// alone, with a line saying which.
+fn onvif_metadata_gzip(encoding_name: &str) -> Option<bool> {
+    match encoding_name {
+        ONVIF_METADATA_ENCODING => Some(false),
+        ONVIF_METADATA_GZIP_ENCODING => Some(true),
+        ONVIF_METADATA_SPEC_GZIP_ENCODING => {
+            std::eprintln!(
+                "rtspsrcn: skipping the {ONVIF_METADATA_SPEC_GZIP_ENCODING} track: retina has no \
+                 depacketizer for that spelling and setting it up would fail the whole session",
+            );
+            None
+        }
+        name if ONVIF_METADATA_EXI_ENCODINGS.contains(&name) => {
+            std::eprintln!("rtspsrcn: skipping the {name} track: no EXI decoder");
+            None
+        }
+        _ => None,
+    }
+}
+
+/// Inflate one RFC 1952 gzip member: the header (and its optional extra field,
+/// name, comment and header CRC) is skipped, then the deflate stream is
+/// inflated. `None` for anything that is not a gzip member or does not inflate
+/// within [`MAX_INFLATED_METADATA_LEN`], so a truncated or crafted payload is
+/// dropped rather than trusted.
+fn inflate_gzip(data: &[u8]) -> Option<Vec<u8>> {
+    /// Fixed part of the header: magic, compression method, flags, mtime, extra
+    /// flags, OS.
+    const FIXED_HEADER_LEN: usize = 10;
+    const MAGIC: [u8; 2] = [0x1f, 0x8b];
+    const DEFLATE_METHOD: u8 = 8;
+    const FLAG_HEADER_CRC: u8 = 0x02;
+    const FLAG_EXTRA: u8 = 0x04;
+    const FLAG_NAME: u8 = 0x08;
+    const FLAG_COMMENT: u8 = 0x10;
+
+    if data.get(..2)? != MAGIC || *data.get(2)? != DEFLATE_METHOD {
+        return None;
+    }
+    let flags = *data.get(3)?;
+    let mut pos = FIXED_HEADER_LEN;
+    if flags & FLAG_EXTRA != 0 {
+        let len = u16::from_le_bytes([*data.get(pos)?, *data.get(pos + 1)?]) as usize;
+        pos = pos.checked_add(2)?.checked_add(len)?;
+    }
+    for flag in [FLAG_NAME, FLAG_COMMENT] {
+        if flags & flag != 0 {
+            let end = data.get(pos..)?.iter().position(|&b| b == 0)?;
+            pos = pos.checked_add(end)?.checked_add(1)?;
+        }
+    }
+    if flags & FLAG_HEADER_CRC != 0 {
+        pos = pos.checked_add(2)?;
+    }
+    let deflate = data.get(pos..)?;
+    miniz_oxide::inflate::decompress_to_vec_with_limit(deflate, MAX_INFLATED_METADATA_LEN).ok()
+}
+
+/// An RTCP sender report's 64-bit NTP timestamp as nanoseconds since the Unix
+/// epoch: seconds in the high word, a binary fraction of a second in the low.
+fn ntp_to_unix_nanos(ntp: u64) -> i64 {
+    const NANOS_PER_SEC: i64 = 1_000_000_000;
+    let secs = (ntp >> 32) as i64 - NTP_TO_UNIX_EPOCH_SECS as i64;
+    let frac_nanos = (((ntp & 0xFFFF_FFFF) * NANOS_PER_SEC as u64) >> 32) as i64;
+    secs.saturating_mul(NANOS_PER_SEC)
+        .saturating_add(frac_nanos)
+}
+
+/// The wall clock a stream's latest sender report pins its RTP clock to: an
+/// instant on the sender's clock and the media timestamp it names.
+#[derive(Debug, Clone, Copy)]
+struct SenderClock {
+    unix_nanos: i64,
+    rtp_timestamp: u32,
+    clock_rate_hz: u32,
+}
+
+impl SenderClock {
+    /// The sender's wall-clock time for the frame stamped `rtp_timestamp`,
+    /// nanoseconds since the Unix epoch. The RTP timestamp wraps at 2^32, so
+    /// the distance from the report is taken as a signed 32-bit difference and
+    /// a frame just before the report reads as earlier rather than as most of a
+    /// wrap ahead.
+    fn wall_clock_ns(&self, rtp_timestamp: u32) -> i64 {
+        const NANOS_PER_SEC: i64 = 1_000_000_000;
+        let delta = rtp_timestamp.wrapping_sub(self.rtp_timestamp) as i32;
+        let rate = i64::from(self.clock_rate_hz.max(1));
+        self.unix_nanos + i64::from(delta) * NANOS_PER_SEC / rate
+    }
+}
+
 fn audio_params_for(streams: &[retina::client::Stream], idx: usize) -> Option<&AudioParameters> {
     match streams[idx].parameters() {
         Some(ParametersRef::Audio(a)) => Some(a),
@@ -367,7 +533,12 @@ pub async fn probe_tracks(url: &str, user_agent: &str) -> Option<RtspTracks> {
     let video = caps_from_video_params(video_params_for(streams, video_idx))?;
     let audio = audio_stream_index(streams, None)
         .map(|(idx, format)| declared_audio_caps(format, audio_params_for(streams, idx)));
-    Some(RtspTracks { video, audio })
+    let onvif_metadata = onvif_metadata_stream_index(streams).is_some();
+    Some(RtspTracks {
+        video,
+        audio,
+        onvif_metadata,
+    })
 }
 
 static RTSPSRCN_PROPS: &[PropertySpec] = &[
@@ -411,6 +582,12 @@ static RTSPSRCN_PROPS: &[PropertySpec] = &[
     .with_default(NICK_AAC)
     .with_enum_values(AUDIO_FORMAT_NICKS),
     PropertySpec::new(
+        "onvif-metadata",
+        PropKind::Bool,
+        "subscribe the SDP's ONVIF analytics metadata track on a pad of its own",
+    )
+    .with_default("false"),
+    PropertySpec::new(
         "reconnect",
         PropKind::Uint,
         "max reconnect attempts after a session failure (0 = no reconnect)",
@@ -444,10 +621,13 @@ impl MultiOutputSource for RtspSrcN {
         Self: 'a;
 
     fn output_count(&self) -> usize {
-        1 + usize::from(self.audio.is_some())
+        1 + usize::from(self.audio.is_some()) + usize::from(self.onvif_metadata)
     }
 
     fn output_caps(&self, output: usize) -> Result<Caps, G2gError> {
+        if Some(output) == self.metadata_port() {
+            return Ok(Caps::OnvifMetadata);
+        }
         match output {
             VIDEO_PORT => Ok(self.video_caps()),
             AUDIO_PORT => self.audio.clone().ok_or(G2gError::CapsMismatch),
@@ -512,6 +692,11 @@ impl MultiOutputSource for RtspSrcN {
                 self.audio = Some(default_audio_caps(format));
                 Ok(())
             }
+            "onvif-metadata" => {
+                self.onvif_metadata = value.as_bool().ok_or(PropError::Type)?;
+                self.fill_audio_pad();
+                Ok(())
+            }
             "reconnect" => {
                 let n = value.as_uint().ok_or(PropError::Type)?;
                 self.reconnect.max_attempts = n.min(u32::MAX as u64) as u32;
@@ -570,6 +755,7 @@ impl MultiOutputSource for RtspSrcN {
             "audio-format" => Some(PropValue::Str(
                 audio_format_nick(self.audio_format()?).to_string(),
             )),
+            "onvif-metadata" => Some(PropValue::Bool(self.onvif_metadata)),
             "reconnect" => Some(PropValue::Uint(self.reconnect.max_attempts as u64)),
             "reconnect-backoff" => Some(PropValue::Uint(self.reconnect.initial_backoff_ms)),
             "reconnect-backoff-max" => Some(PropValue::Uint(self.reconnect.max_backoff_ms)),
@@ -688,23 +874,31 @@ async fn run_session(
     session_max_pts: &mut u64,
 ) -> SessionOutcome {
     let want_audio = src.audio_format();
-    let (session, video_idx, audio_idx) = match connect_describe_setup(
+    let metadata_port = src.metadata_port();
+    let (session, video_idx, audio_idx, metadata) = match connect_describe_setup(
         &src.url,
         &src.user_agent,
         src.creds.as_ref(),
         &src.transports,
         want_audio,
+        metadata_port.is_some(),
     )
     .await
     {
         Ok(v) => v,
         Err(e) => return SessionOutcome::NetworkError(e),
     };
+    let (metadata_idx, metadata_gzip) = match metadata {
+        Some((idx, gzip)) => (Some(idx), gzip),
+        None => (None, false),
+    };
 
-    let video_clock_rate = u64::from(session.streams()[video_idx].clock_rate_hz());
     let audio_clock_rate = audio_idx
         .map(|i| u64::from(session.streams()[i].clock_rate_hz()))
         .unwrap_or(1);
+    // The sender report each stream was last pinned to, indexed by retina's
+    // stream index, so a frame can carry the sender's wall clock.
+    let mut sender_clocks: Vec<Option<SenderClock>> = alloc::vec![None; session.streams().len()];
     let mut video_caps = caps_from_video_params(video_params_for(session.streams(), video_idx));
 
     // Both streams are set up, so the server's `RTP-Info` origin is what puts
@@ -731,6 +925,14 @@ async fn run_session(
     if let Some(caps) = &src.audio {
         if let Err(e) = out
             .push_to(AUDIO_PORT, PipelinePacket::CapsChanged(caps.clone()))
+            .await
+        {
+            return SessionOutcome::DownstreamError(e);
+        }
+    }
+    if let Some(port) = metadata_port {
+        if let Err(e) = out
+            .push_to(port, PipelinePacket::CapsChanged(Caps::OnvifMetadata))
             .await
         {
             return SessionOutcome::DownstreamError(e);
@@ -783,6 +985,48 @@ async fn run_session(
                 let keyframe = crate::h264util::h264_au_is_keyframe(&bytes);
                 (VIDEO_PORT, timestamp, 0, bytes, keyframe)
             }
+            // The compound packet's sender report pins this stream's RTP clock
+            // to the sender's wall clock, which is the only thing that lines the
+            // metadata track up with the video (the metadata RTP timestamps
+            // carry no meaning of their own).
+            CodecItem::Rtcp(compound) => {
+                let stream_id = compound.stream_id();
+                let sr = compound
+                    .pkts()
+                    .next()
+                    .and_then(|p| p.as_sender_report().ok().flatten());
+                // RFC 3550 lets a sender without a wall clock report NTP zero.
+                let sr = sr.filter(|sr| sr.ntp_timestamp().0 != 0);
+                if let (Some(sr), Some(slot)) = (sr, sender_clocks.get_mut(stream_id)) {
+                    *slot = Some(SenderClock {
+                        unix_nanos: ntp_to_unix_nanos(sr.ntp_timestamp().0),
+                        rtp_timestamp: sr.rtp_timestamp(),
+                        clock_rate_hz: demuxed.streams()[stream_id].clock_rate_hz(),
+                    });
+                }
+                continue;
+            }
+            CodecItem::MessageFrame(mf) if Some(mf.stream_id()) == metadata_idx => {
+                let port = match metadata_port {
+                    Some(port) => port,
+                    None => continue,
+                };
+                let document = if metadata_gzip {
+                    match inflate_gzip(mf.data()) {
+                        Some(bytes) => bytes.into_boxed_slice(),
+                        None => {
+                            std::eprintln!(
+                                "rtspsrcn: dropping a {}-byte ONVIF metadata document that does not inflate",
+                                mf.data().len(),
+                            );
+                            continue;
+                        }
+                    }
+                } else {
+                    Box::from(mf.data())
+                };
+                (port, mf.timestamp(), 0, document, true)
+            }
             CodecItem::AudioFrame(af) if Some(af.stream_id()) == audio_idx => {
                 let duration_ns = u64::from(af.frame_length().get()).saturating_mul(1_000_000_000)
                     / audio_clock_rate.max(1);
@@ -802,17 +1046,18 @@ async fn run_session(
             continue;
         }
 
-        let clock_rate = match port {
-            VIDEO_PORT => video_clock_rate,
-            _ => audio_clock_rate,
+        let stream_idx = match port {
+            VIDEO_PORT => video_idx,
+            _ if Some(port) == metadata_port => metadata_idx.unwrap_or(video_idx),
+            _ => audio_idx.unwrap_or(video_idx),
         };
-        let raw_ns =
-            (timestamp.elapsed().max(0) as u64).saturating_mul(1_000_000_000) / clock_rate.max(1);
+        let clock_rate = u64::from(demuxed.streams()[stream_idx].clock_rate_hz()).max(1);
+        let raw_ns = (timestamp.elapsed().max(0) as u64).saturating_mul(1_000_000_000) / clock_rate;
         let origin = *origin_ns.get_or_insert(raw_ns);
         let pts_ns = pts_base_ns.saturating_add(raw_ns.saturating_sub(origin));
         *session_max_pts = (*session_max_pts).max(pts_ns);
 
-        let frame = Frame {
+        let mut frame = Frame {
             domain: MemoryDomain::System(SystemSlice::from_boxed(bytes)),
             timing: FrameTiming {
                 pts_ns,
@@ -825,6 +1070,14 @@ async fn run_session(
             sequence: state[port].emitted,
             meta: Default::default(),
         };
+        // Before the stream's first sender report there is no wall clock to
+        // name, so the frame carries none.
+        if let Some(clock) = sender_clocks[stream_idx] {
+            attach_wall_clock(
+                &mut frame,
+                clock.wall_clock_ns(timestamp.timestamp() as u32),
+            );
+        }
         if let Err(e) = out.push_to(port, PipelinePacket::DataFrame(frame)).await {
             return SessionOutcome::DownstreamError(e);
         }
@@ -843,16 +1096,36 @@ async fn run_session(
     SessionOutcome::LimitReached
 }
 
-/// DESCRIBE and SETUP the video stream plus, when asked for, the audio one.
-/// Both tracks take the same lower transport, so a server that refuses UDP
-/// moves the whole session to interleaved TCP rather than splitting it.
+/// Attach the sender's wall clock to a frame. A no-op without the `metadata`
+/// feature, where a frame has nowhere to carry it.
+#[cfg(feature = "metadata")]
+fn attach_wall_clock(frame: &mut Frame, unix_nanos: i64) {
+    frame.meta.attach(g2g_core::WallClockMeta { unix_nanos });
+}
+
+#[cfg(not(feature = "metadata"))]
+fn attach_wall_clock(_frame: &mut Frame, _unix_nanos: i64) {}
+
+/// DESCRIBE and SETUP the video stream plus, when asked for, the audio one and
+/// the ONVIF metadata one. Every track takes the same lower transport, so a
+/// server that refuses UDP moves the whole session to interleaved TCP rather
+/// than splitting it. The metadata result is `(stream index, gzip)`.
 async fn connect_describe_setup(
     url: &str,
     user_agent: &str,
     creds: Option<&retina::client::Credentials>,
     transports: &[LowerTransport],
     want_audio: Option<AudioFormat>,
-) -> Result<(Session<Described>, usize, Option<usize>), G2gError> {
+    want_metadata: bool,
+) -> Result<
+    (
+        Session<Described>,
+        usize,
+        Option<usize>,
+        Option<(usize, bool)>,
+    ),
+    G2gError,
+> {
     let mut session = connect_describe(url, user_agent, creds).await?;
     let video_idx = video_stream_index(session.streams()).ok_or(G2gError::CapsMismatch)?;
     let audio_idx = match want_audio {
@@ -863,6 +1136,12 @@ async fn connect_describe_setup(
         ),
         None => None,
     };
+    // A missing metadata track leaves the pad silent through to EOS rather than
+    // failing the session: a camera can be configured to stream analytics on
+    // one profile and not another.
+    let metadata = want_metadata
+        .then(|| onvif_metadata_stream_index(session.streams()))
+        .flatten();
 
     let mut setup_err = None;
     for transport in transports {
@@ -871,6 +1150,7 @@ async fn connect_describe_setup(
                 .frame_format(FrameFormat::SIMPLE)
                 .transport(transport.retina())
         };
+        let extra = audio_idx.into_iter().chain(metadata.map(|(idx, _)| idx));
         match session.setup(video_idx, options()).await {
             Ok(()) => {}
             Err(e) => {
@@ -878,12 +1158,16 @@ async fn connect_describe_setup(
                 continue;
             }
         }
-        match audio_idx {
-            None => return Ok((session, video_idx, None)),
-            Some(idx) => match session.setup(idx, options()).await {
-                Ok(()) => return Ok((session, video_idx, Some(idx))),
-                Err(e) => setup_err = Some(e),
-            },
+        let mut failed = None;
+        for idx in extra {
+            if let Err(e) = session.setup(idx, options()).await {
+                failed = Some(e);
+                break;
+            }
+        }
+        match failed {
+            None => return Ok((session, video_idx, audio_idx, metadata)),
+            Some(e) => setup_err = Some(e),
         }
     }
     Err(match setup_err {
@@ -953,6 +1237,7 @@ mod tests {
                 sample_rate: 48_000,
                 channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
             }),
+            onvif_metadata: false,
         };
         let src = RtspSrcN::new("rtsp://example/stream").with_tracks(&tracks);
         assert_eq!(src.output_count(), 2);
@@ -1013,6 +1298,148 @@ mod tests {
         // g2g has no RTP depayload/decode path for these, so the pad is not offered.
         assert_eq!(audio_format_for("g722"), None);
         assert_eq!(audio_format_for("opus"), None);
+    }
+
+    #[test]
+    fn onvif_metadata_pad_is_opt_in_and_takes_the_last_slot() {
+        // Off by default: an existing consumer sees exactly what it saw before.
+        let src = RtspSrcN::new("rtsp://example/stream").with_outputs(2);
+        assert_eq!(src.output_count(), 2);
+        assert!(matches!(
+            src.output_caps(AUDIO_PORT),
+            Ok(Caps::Audio { .. })
+        ));
+
+        // Two linked pads plus the metadata track means video and metadata: the
+        // audio pad gives up its slot rather than the element growing past what
+        // the launch line linked.
+        let mut src = RtspSrcN::new("rtsp://example/stream").with_outputs(2);
+        src.set_property("onvif-metadata", PropValue::Bool(true))
+            .expect("onvif-metadata is a declared property");
+        assert_eq!(src.output_count(), 2);
+        assert_eq!(src.output_caps(1), Ok(Caps::OnvifMetadata));
+        assert_eq!(
+            src.get_property("onvif-metadata"),
+            Some(PropValue::Bool(true))
+        );
+
+        // Three linked pads keep the audio one, with metadata after it.
+        let src = RtspSrcN::new("rtsp://example/stream")
+            .with_outputs(3)
+            .with_onvif_metadata(true);
+        assert_eq!(src.output_count(), 3);
+        assert!(matches!(
+            src.output_caps(AUDIO_PORT),
+            Ok(Caps::Audio { .. })
+        ));
+        assert_eq!(src.output_caps(2), Ok(Caps::OnvifMetadata));
+    }
+
+    #[test]
+    fn sdp_encoding_names_select_the_metadata_track_and_its_compression() {
+        assert_eq!(onvif_metadata_gzip(ONVIF_METADATA_ENCODING), Some(false));
+        assert_eq!(
+            onvif_metadata_gzip(ONVIF_METADATA_GZIP_ENCODING),
+            Some(true)
+        );
+        // retina has no depacketizer for the specification's `+gzip` spelling,
+        // and none for EXI, so those tracks are left alone.
+        assert_eq!(onvif_metadata_gzip(ONVIF_METADATA_SPEC_GZIP_ENCODING), None);
+        for exi in ONVIF_METADATA_EXI_ENCODINGS {
+            assert_eq!(onvif_metadata_gzip(exi), None);
+        }
+        assert_eq!(onvif_metadata_gzip("vnd.onvif.metadata.other"), None);
+    }
+
+    /// 2008-10-10T12:24:57.321Z, the instant the ONVIF Analytics Specification's
+    /// first example frame names (section 5.1.3.1, page 13).
+    const SPEC_EXAMPLE_NANOS: i64 = 1_223_641_497_321_000_000;
+    const VIDEO_CLOCK_HZ: u32 = 90_000;
+
+    #[test]
+    fn a_sender_report_puts_frames_on_the_senders_wall_clock() {
+        // The same instant as an NTP timestamp: seconds since 1900 in the high
+        // word, the .321 as a binary fraction in the low.
+        let secs = (SPEC_EXAMPLE_NANOS / 1_000_000_000) as u64 + NTP_TO_UNIX_EPOCH_SECS;
+        let frac = (321_000_000u64 << 32) / 1_000_000_000;
+        let ntp = (secs << 32) | frac;
+        // The 32-bit fraction names about a quarter of a nanosecond, so the
+        // round trip is exact to one.
+        assert!((ntp_to_unix_nanos(ntp) - SPEC_EXAMPLE_NANOS).abs() <= 1);
+
+        let clock = SenderClock {
+            unix_nanos: SPEC_EXAMPLE_NANOS,
+            rtp_timestamp: 1_000_000,
+            clock_rate_hz: VIDEO_CLOCK_HZ,
+        };
+        // The report's own timestamp is the report's own instant.
+        assert_eq!(clock.wall_clock_ns(1_000_000), SPEC_EXAMPLE_NANOS);
+        // One second of 90 kHz ticks after it, and one second before.
+        assert_eq!(
+            clock.wall_clock_ns(1_000_000 + VIDEO_CLOCK_HZ),
+            SPEC_EXAMPLE_NANOS + 1_000_000_000
+        );
+        assert_eq!(
+            clock.wall_clock_ns(1_000_000 - VIDEO_CLOCK_HZ),
+            SPEC_EXAMPLE_NANOS - 1_000_000_000
+        );
+    }
+
+    #[test]
+    fn the_wall_clock_survives_an_rtp_timestamp_wrap() {
+        // A report taken one second of ticks before the 32-bit RTP clock wraps.
+        let clock = SenderClock {
+            unix_nanos: SPEC_EXAMPLE_NANOS,
+            rtp_timestamp: u32::MAX - VIDEO_CLOCK_HZ + 1,
+            clock_rate_hz: VIDEO_CLOCK_HZ,
+        };
+        // A frame a second after it, on the far side of the wrap. Read as an
+        // unsigned difference this would have come out most of a wrap ahead
+        // (about 13 hours) instead of a second.
+        assert_eq!(clock.wall_clock_ns(0), SPEC_EXAMPLE_NANOS + 1_000_000_000);
+        // And one from a second before the report, on the near side.
+        assert_eq!(
+            clock.wall_clock_ns(u32::MAX - 2 * VIDEO_CLOCK_HZ + 1),
+            SPEC_EXAMPLE_NANOS - 1_000_000_000,
+        );
+    }
+
+    #[test]
+    fn gzip_inflate_reads_a_member_and_refuses_anything_else() {
+        const PAYLOAD: &[u8] = br#"<?xml version="1.0"?><tt:MetadataStream/>"#;
+        let member = gzip_member(PAYLOAD);
+        assert_eq!(inflate_gzip(&member).as_deref(), Some(PAYLOAD));
+
+        // Not a gzip member, a header cut short, and a deflate stream cut
+        // short: all refused rather than panicking.
+        assert_eq!(inflate_gzip(PAYLOAD), None);
+        assert_eq!(inflate_gzip(&member[..5]), None);
+        assert_eq!(inflate_gzip(&member[..12]), None);
+        assert_eq!(inflate_gzip(&[]), None);
+    }
+
+    /// An RFC 1952 member around `payload`: the fixed header, the raw deflate
+    /// stream, then the CRC32 and length trailer.
+    fn gzip_member(payload: &[u8]) -> Vec<u8> {
+        let mut member = Vec::from([0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 0xff]);
+        member.extend_from_slice(&miniz_oxide::deflate::compress_to_vec(payload, 6));
+        member.extend_from_slice(&crc32(payload).to_le_bytes());
+        member.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        member
+    }
+
+    /// CRC-32, so the member the test builds carries a real trailer.
+    fn crc32(data: &[u8]) -> u32 {
+        const POLYNOMIAL: u32 = 0xEDB8_8320;
+        let mut crc = u32::MAX;
+        for &byte in data {
+            crc ^= u32::from(byte);
+            for _ in 0..8 {
+                let mask = (crc & 1).wrapping_neg();
+                crc = (crc >> 1) ^ (POLYNOMIAL & mask);
+            }
+        }
+        !crc
     }
 
     #[test]

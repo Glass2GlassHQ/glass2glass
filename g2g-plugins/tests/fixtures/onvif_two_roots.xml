@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- ONVIF Streaming Specification 26.06, section 5.1.2.1.1 "RTP for Metadata
+     stream", page 12: one metadata payload holding two concatenated
+     tt:MetadataStream roots, each with its own XML declaration. The
+     specification prints an ellipsis for the frame bodies and the event body;
+     one object is filled in per frame here so there is something to read back,
+     and the wsnt prefix is bound so the second root parses. -->
+<tt:MetadataStream xmlns:tt="http://www.onvif.org/ver10/schema">
+  <tt:VideoAnalytics>
+    <tt:Frame UtcTime="2008-10-10T12:24:57.321">
+      <tt:Object ObjectId="3">
+        <tt:Appearance>
+          <tt:Shape>
+            <tt:BoundingBox left="-0.5" top="0.5" right="0.0" bottom="0.0"/>
+            <tt:CenterOfGravity x="-0.25" y="0.25"/>
+          </tt:Shape>
+        </tt:Appearance>
+      </tt:Object>
+    </tt:Frame>
+    <tt:Frame UtcTime="2008-10-10T12:24:57.621">
+      <tt:Object ObjectId="3">
+        <tt:Appearance>
+          <tt:Shape>
+            <tt:BoundingBox left="-0.4" top="0.5" right="0.1" bottom="0.0"/>
+            <tt:CenterOfGravity x="-0.15" y="0.25"/>
+          </tt:Shape>
+        </tt:Appearance>
+      </tt:Object>
+    </tt:Frame>
+  </tt:VideoAnalytics>
+</tt:MetadataStream>
+<?xml version="1.0" encoding="UTF-8"?>
+<tt:MetadataStream xmlns:tt="http://www.onvif.org/ver10/schema"
+                   xmlns:wsnt="http://docs.oasis-open.org/wsn/b-2">
+  <tt:Event>
+    <wsnt:NotificationMessage>
+      <wsnt:Message>
+        <tt:Message UtcTime="2008-10-10T12:24:57.628">
+          <tt:Data>
+            <tt:SimpleItem Name="IsMotion" Value="true"/>
+          </tt:Data>
+        </tt:Message>
+      </wsnt:Message>
+    </wsnt:NotificationMessage>
+  </tt:Event>
+</tt:MetadataStream>

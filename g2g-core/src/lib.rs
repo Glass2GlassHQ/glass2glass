@@ -212,7 +212,8 @@ pub use meta::{
     blob_decoder, decode_blob, AnalyticsMeta, AnalyticsNode, BBox, Blob, BlobDecoder, BlobMeta,
     CaptionMeta, CaptionTriple, Chromaticity, Classification, DecodedBlob, FrameMeta,
     HdrStaticMeta, Mask, MasteringDisplay, NamedTensor, ObjectDetection, Propagation, Relation,
-    RelationKind, Roi, Segmentation, TensorMeta, TimecodeMeta, Tracking, Transform, BLOB_DECODERS,
+    RelationKind, Roi, Segmentation, TensorMeta, TimecodeMeta, Tracking, Transform, WallClockMeta,
+    BLOB_DECODERS,
 };
 #[cfg(feature = "alloc")]
 pub use property::{
@@ -258,7 +259,7 @@ pub use supervise::{
 #[cfg(feature = "alloc")]
 pub use tag::{resolve_tags, split_tags, Tag, TagList};
 pub use tensor::{TensorView, MAX_TENSOR_RANK};
-pub use time::{RefNs, RtpTs, TaiNs};
+pub use time::{RefNs, RtpTs, TaiNs, NTP_TO_UNIX_EPOCH_SECS};
 #[cfg(feature = "alloc")]
 pub use wire::{
     decode_packet, encode_packet, raw_format_from_u8, raw_format_to_u8, WireError, WIRE_VERSION,

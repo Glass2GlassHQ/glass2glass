@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- ONVIF Analytics Specification 21.12, section 5.1.3.1 "Objects", pages 13-14.
+     The specification prints the tt:Frame elements as a fragment; they are wrapped
+     here in the tt:MetadataStream / tt:VideoAnalytics root the Streaming
+     Specification 26.06 section 5.1.2.1.1 (page 12) shows, so the document parses.
+     The frame coordinate system is a 640x480 picture with the origin at its
+     lower-left corner. -->
+<tt:MetadataStream xmlns:tt="http://www.onvif.org/ver10/schema">
+  <tt:VideoAnalytics>
+    <tt:Frame UtcTime="2008-10-10T12:24:57.321">
+      <tt:Transformation>
+        <tt:Translate x="-1.0" y="-1.0"/>
+        <tt:Scale x="0.003125" y="0.00416667"/>
+      </tt:Transformation>
+      <tt:Object ObjectId="12">
+        <tt:Appearance>
+          <tt:Shape>
+            <tt:BoundingBox left="20.0" top="80.0" right="100.0" bottom="30.0"/>
+            <tt:CenterOfGravity x="60.0" y="50.0"/>
+          </tt:Shape>
+        </tt:Appearance>
+      </tt:Object>
+    </tt:Frame>
+    <tt:Frame UtcTime="2008-10-10T12:24:57.421">
+      <tt:Transformation>
+        <tt:Translate x="-1.0" y="-1.0"/>
+        <tt:Scale x="0.003125" y="0.00416667"/>
+      </tt:Transformation>
+      <tt:Object ObjectId="12">
+        <tt:Appearance>
+          <tt:Shape>
+            <tt:BoundingBox left="20.0" top="80.0" right="100.0" bottom="30.0"/>
+            <tt:CenterOfGravity x="60.0" y="50.0"/>
+          </tt:Shape>
+        </tt:Appearance>
+        <tt:Behaviour>
+          <tt:Idle/>
+        </tt:Behaviour>
+      </tt:Object>
+    </tt:Frame>
+    <tt:Frame UtcTime="2008-10-10T12:24:57.521">
+      <tt:Transformation>
+        <tt:Translate x="-1.0" y="-1.0"/>
+        <tt:Scale x="0.003125" y="0.00416667"/>
+      </tt:Transformation>
+    </tt:Frame>
+    <tt:Frame UtcTime="2008-10-10T12:24:57.621">
+      <tt:Transformation>
+        <tt:Translate x="-1.0" y="-1.0"/>
+        <tt:Scale x="0.003125" y="0.00416667"/>
+      </tt:Transformation>
+      <tt:Object ObjectId="12">
+        <tt:Appearance>
+          <tt:Shape>
+            <tt:BoundingBox left="25.0" top="80.0" right="105.0" bottom="30.0"/>
+            <tt:CenterOfGravity x="65.0" y="50.0"/>
+          </tt:Shape>
+        </tt:Appearance>
+      </tt:Object>
+    </tt:Frame>
+    <tt:Frame UtcTime="2008-10-10T12:24:57.721">
+      <tt:Transformation>
+        <tt:Translate x="-1.0" y="-1.0"/>
+        <tt:Scale x="0.003125" y="0.00416667"/>
+      </tt:Transformation>
+      <tt:Object ObjectId="19">
+        <tt:Appearance>
+          <tt:Shape>
+            <tt:BoundingBox left="20.0" top="80.0" right="100.0" bottom="30.0"/>
+            <tt:CenterOfGravity x="60.0" y="50.0"/>
+          </tt:Shape>
+        </tt:Appearance>
+        <tt:Behaviour>
+          <tt:Removed/>
+        </tt:Behaviour>
+      </tt:Object>
+    </tt:Frame>
+  </tt:VideoAnalytics>
+</tt:MetadataStream>

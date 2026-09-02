@@ -1096,6 +1096,38 @@ mod on {
         }
     }
 
+    /// The sender's wall-clock time for this frame: nanoseconds since the Unix
+    /// epoch, UTC. Where [`TimecodeMeta`] is a position on the source's own
+    /// count, this is absolute civil time, so two streams from the same device
+    /// (or from devices sharing an NTP server) line up on it.
+    ///
+    /// `RtspSrcN` computes it from the RTCP sender reports, and
+    /// `onvifmetadataparse` reads it out of an ONVIF `tt:Frame`'s `UtcTime`.
+    /// That pair is what lets an analytics document find the video frame it
+    /// describes, since the ONVIF metadata track's RTP timestamps carry no
+    /// meaning of their own.
+    #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+    pub struct WallClockMeta {
+        pub unix_nanos: i64,
+    }
+
+    impl FrameMeta for WallClockMeta {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+        fn as_any_mut(&mut self) -> &mut dyn Any {
+            self
+        }
+        fn clone_box(&self) -> Box<dyn FrameMeta> {
+            Box::new(*self)
+        }
+        /// When the picture was captured: unchanged by any pixel work, and a
+        /// re-encode of the same picture still describes the same instant.
+        fn propagate(&self, _transform: Transform) -> Propagation {
+            Propagation::Keep
+        }
+    }
+
     /// How the picture in this frame's buffer has to be turned to be shown the
     /// right way up. The orientation is relative to the buffer **as stored**:
     /// the rows and columns are exactly what the producer wrote, and a consumer

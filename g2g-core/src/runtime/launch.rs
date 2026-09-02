@@ -1865,14 +1865,16 @@ fn build_graph(
         } else if in_deg[ei] == 0 && registry.is_fanout_src(&spec.name) {
             // Terminal fan-out source (M727): 0 inputs, one output per named
             // pad reference (`s. ! ...`). The element's intrinsic port count
-            // must match the linked outputs.
+            // must match the linked outputs. Properties are applied first: one
+            // of them may pick the pad set (`rtspsrcn onvif-metadata=true`
+            // swaps the audio pad for the metadata one).
             let mut src = registry
                 .make_fanout_src(&spec.name, out_deg[ei])
                 .ok_or_else(|| ParseError::UnknownElement(spec.name.clone()))?;
+            apply_props(&mut src, &spec.name, &spec.props)?;
             if src.output_count() != out_deg[ei] {
                 return Err(ParseError::UnknownInputPad(spec.name.clone()));
             }
-            apply_props(&mut src, &spec.name, &spec.props)?;
             graph
                 .add_fanout_src(GraphNodeRef::FanoutSource(src), out_deg[ei] as u8)
                 .node()

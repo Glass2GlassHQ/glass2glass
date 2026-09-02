@@ -4,6 +4,10 @@ Pre-release. Work is tracked by milestone (Mn) following the roadmap in `DESIGN.
 Versioning and the stability tiers are defined in `STABILITY.md`; `g2g-core` is the
 semver-covered surface, the plugin/binding crates are provisional or experimental.
 
+## Unreleased
+
+- M1151: `rtspsrcn onvif-metadata=true` gives the camera's ONVIF analytics track its own pad, `onvifmetadataparse` reads the scene description into `AnalyticsMeta`, and `onvifmetadatacombiner` attaches it to the video frames it describes by wall clock.
+
 ## 0.7.0
 
 - M1150: `Mp4Src` announces every `moov` track in its `StreamCollection`, so `g2g-discover` lists an MP4's audio and text tracks too.

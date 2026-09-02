@@ -181,8 +181,9 @@ webrtc-livekit = ["webrtc", "dep:tokio-tungstenite", "tokio-tungstenite/native-t
 # (GetProfiles / GetStreamUri) with a WS-Security UsernameToken digest header.
 # Reuses reqwest for the SOAP HTTP POST, roxmltree to read the responses, sha1
 # for the password digest, getrandom for the nonce, and base64. Resolves a URI
-# then delegates to RtspSrc (so it implies the `rtsp` feature). Implies std.
-onvif = ["std", "rtsp", "tokio/net", "dep:reqwest", "dep:roxmltree", "dep:getrandom", "dep:base64"]
+# then delegates to RtspSrc (so it implies the `rtsp` feature). Implies std, and
+# `metadata` for the analytics graph `onvifmetadataparse` writes onto frames.
+onvif = ["std", "rtsp", "metadata", "tokio/net", "dep:reqwest", "dep:roxmltree", "dep:getrandom", "dep:base64"]
 # Windows hardware/software H.264 decode via the Media Foundation H.264 Decoder
 # MFT (IMFTransform). Pulls the windows crate; Windows-only, implies std.
 mf-decode = ["std", "dep:windows"]

@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- ONVIF Analytics Specification 21.12, section 5.1.3.5 "Object Class
+     descriptor", page 18: one object with three class candidates. The
+     specification's PDF renders the attribute quotes as typographic quotes; they
+     are plain quotes here, and the fragment is wrapped in the
+     tt:MetadataStream / tt:VideoAnalytics root so it parses. -->
+<tt:MetadataStream xmlns:tt="http://www.onvif.org/ver10/schema">
+  <tt:VideoAnalytics>
+    <tt:Frame UtcTime="2010-11-10T12:24:57.721">
+      <tt:Transformation>
+        <tt:Translate x="-1.0" y="-1.0"/>
+        <tt:Scale x="0.003125" y="0.00416667"/>
+      </tt:Transformation>
+      <tt:Object ObjectId="22">
+        <tt:Appearance>
+          <tt:Shape>
+            <tt:BoundingBox left="20.0" top="80.0" right="100.0" bottom="30.0"/>
+            <tt:CenterOfGravity x="60.0" y="50.0"/>
+          </tt:Shape>
+          <tt:Class>
+            <tt:Type Likelihood="0.8">Vehicle</tt:Type>
+            <tt:Type Likelihood="0.75">Car</tt:Type>
+            <tt:Type Likelihood="0.3">Truck</tt:Type>
+          </tt:Class>
+        </tt:Appearance>
+      </tt:Object>
+    </tt:Frame>
+  </tt:VideoAnalytics>
+</tt:MetadataStream>

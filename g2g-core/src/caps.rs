@@ -114,6 +114,12 @@ pub enum Caps {
     /// elementary metadata stream a transport demuxer splits out alongside video,
     /// timed by the frame's PTS (GStreamer `meta/x-klv`).
     Klv,
+    /// An ONVIF analytics metadata stream: each frame one complete
+    /// `tt:MetadataStream` XML document as the camera sent it over its
+    /// `application/vnd.onvif.metadata` RTSP track, already decompressed, timed by
+    /// the frame's PTS on the session's play timeline (GStreamer
+    /// `application/x-onvif-metadata`).
+    OnvifMetadata,
     /// A raw closed-caption stream: a container track carrying caption data as its
     /// own elementary stream rather than inside a video bitstream's SEI (the MP4
     /// `c608` / `c708` raw-caption tracks). Each frame is one sample's `cc_data`
@@ -150,6 +156,7 @@ impl Caps {
             | Caps::ByteStream { .. }
             | Caps::Text { .. }
             | Caps::Klv
+            | Caps::OnvifMetadata
             | Caps::ClosedCaption { .. }
             | Caps::SubPicture { .. } => false,
         }
@@ -272,6 +279,7 @@ impl Caps {
             }
             (Caps::Text { format: fa }, Caps::Text { format: fb }) if fa == fb => Ok(self.clone()),
             (Caps::Klv, Caps::Klv) => Ok(Caps::Klv),
+            (Caps::OnvifMetadata, Caps::OnvifMetadata) => Ok(Caps::OnvifMetadata),
             (Caps::ClosedCaption { format: a }, Caps::ClosedCaption { format: b }) if a == b => {
                 Ok(Caps::ClosedCaption { format: *a })
             }
@@ -377,6 +385,7 @@ impl Caps {
             | Caps::ByteStream { .. }
             | Caps::Text { .. }
             | Caps::Klv
+            | Caps::OnvifMetadata
             | Caps::ClosedCaption { .. }
             | Caps::SubPicture { .. } => Ok(self.clone()),
             Caps::Tensor { .. } => Ok(self.clone()),
@@ -405,6 +414,7 @@ impl Caps {
             | Caps::ByteStream { .. }
             | Caps::Text { .. }
             | Caps::Klv
+            | Caps::OnvifMetadata
             | Caps::ClosedCaption { .. }
             | Caps::SubPicture { .. } => None,
             Caps::Tensor { .. } => None,
@@ -484,6 +494,7 @@ impl Caps {
             Caps::ByteStream { encoding } => String::from(bytestream_gst_media_type(*encoding)),
             Caps::Text { format } => String::from(text_format_gst_media_type(*format)),
             Caps::Klv => String::from("meta/x-klv"),
+            Caps::OnvifMetadata => String::from("application/x-onvif-metadata"),
             Caps::ClosedCaption { format } => String::from(cc_format_gst_media_type(*format)),
             Caps::SubPicture { format } => String::from(subpicture_gst_media_type(*format)),
         }

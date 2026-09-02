@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- The pre-21.12 spelling of the class descriptor from the ONVIF schema
+     (tt:ClassDescriptor): tt:ClassCandidate pairs of tt:Type and tt:Likelihood,
+     rather than the tt:Type Likelihood="..." attribute form the ONVIF Analytics
+     Specification 21.12 section 5.1.3.5 (page 18) prints. Cameras in the field
+     still emit it, so both are read. Geometry is that section's example. -->
+<tt:MetadataStream xmlns:tt="http://www.onvif.org/ver10/schema">
+  <tt:VideoAnalytics>
+    <tt:Frame UtcTime="2010-11-10T12:24:57.721">
+      <tt:Transformation>
+        <tt:Translate x="-1.0" y="-1.0"/>
+        <tt:Scale x="0.003125" y="0.00416667"/>
+      </tt:Transformation>
+      <tt:Object ObjectId="22">
+        <tt:Appearance>
+          <tt:Shape>
+            <tt:BoundingBox left="20.0" top="80.0" right="100.0" bottom="30.0"/>
+            <tt:CenterOfGravity x="60.0" y="50.0"/>
+          </tt:Shape>
+          <tt:Class>
+            <tt:ClassCandidate>
+              <tt:Type>Human</tt:Type>
+              <tt:Likelihood>0.42</tt:Likelihood>
+            </tt:ClassCandidate>
+            <tt:ClassCandidate>
+              <tt:Type>Vehicle</tt:Type>
+              <tt:Likelihood>0.91</tt:Likelihood>
+            </tt:ClassCandidate>
+          </tt:Class>
+        </tt:Appearance>
+      </tt:Object>
+    </tt:Frame>
+  </tt:VideoAnalytics>
+</tt:MetadataStream>

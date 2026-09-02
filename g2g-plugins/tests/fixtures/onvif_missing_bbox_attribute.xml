@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- A malformed scene description: the first object's tt:BoundingBox is missing
+     its "bottom" attribute, which the ONVIF Analytics Specification 21.12
+     section 5.1.3.3 (page 16) requires. Geometry otherwise as that section's
+     example. The second object is well formed, so only the first is lost. -->
+<tt:MetadataStream xmlns:tt="http://www.onvif.org/ver10/schema">
+  <tt:VideoAnalytics>
+    <tt:Frame UtcTime="2008-10-10T12:24:57.321">
+      <tt:Transformation>
+        <tt:Translate x="-1.0" y="-1.0"/>
+        <tt:Scale x="0.003125" y="0.00416667"/>
+      </tt:Transformation>
+      <tt:Object ObjectId="12">
+        <tt:Appearance>
+          <tt:Shape>
+            <tt:BoundingBox left="20.0" top="80.0" right="100.0"/>
+            <tt:CenterOfGravity x="60.0" y="50.0"/>
+          </tt:Shape>
+        </tt:Appearance>
+      </tt:Object>
+      <tt:Object ObjectId="13">
+        <tt:Appearance>
+          <tt:Shape>
+            <tt:BoundingBox left="20.0" top="80.0" right="100.0" bottom="30.0"/>
+            <tt:CenterOfGravity x="60.0" y="50.0"/>
+          </tt:Shape>
+        </tt:Appearance>
+      </tt:Object>
+    </tt:Frame>
+  </tt:VideoAnalytics>
+</tt:MetadataStream>

@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- ONVIF Analytics Specification 21.12, section 5.1.3.1 "Objects", pages 14-15,
+     with both objects moved into one tt:Frame: the specification prints the
+     Vehicle and the LicensePlate that names it as Parent in consecutive frames,
+     and a camera that sees both at once puts them in the same one. This is the
+     case where the Parent attribute becomes a relation. -->
+<tt:MetadataStream xmlns:tt="http://www.onvif.org/ver10/schema">
+  <tt:VideoAnalytics>
+    <tt:Frame UtcTime="2019-06-10T12:24:57.721">
+      <tt:Transformation>
+        <tt:Translate x="-1.0" y="-1.0"/>
+        <tt:Scale x="0.003125" y="0.00416667"/>
+      </tt:Transformation>
+      <tt:Object ObjectId="14" Parent="12">
+        <tt:Appearance>
+          <tt:Shape>
+            <tt:BoundingBox left="40.0" top="150.0" right="70.0" bottom="100.0"/>
+            <tt:CenterOfGravity x="57.0" y="130.0"/>
+          </tt:Shape>
+          <tt:Class>
+            <tt:Type Likelihood="0.6">LicensePlate</tt:Type>
+          </tt:Class>
+        </tt:Appearance>
+      </tt:Object>
+      <tt:Object ObjectId="12">
+        <tt:Appearance>
+          <tt:Shape>
+            <tt:BoundingBox left="20.0" top="180.0" right="100.0" bottom="30.0"/>
+            <tt:CenterOfGravity x="60.0" y="80.0"/>
+          </tt:Shape>
+          <tt:Class>
+            <tt:Type Likelihood="0.9">Vehicle</tt:Type>
+          </tt:Class>
+        </tt:Appearance>
+      </tt:Object>
+    </tt:Frame>
+  </tt:VideoAnalytics>
+</tt:MetadataStream>

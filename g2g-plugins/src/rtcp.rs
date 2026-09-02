@@ -157,12 +157,10 @@ pub fn build_sender_report(
 #[cfg(feature = "std")]
 pub fn ntp_now() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
-    // NTP epoch (1900) precedes the Unix epoch (1970) by this many seconds.
-    const NTP_UNIX_OFFSET: u64 = 2_208_988_800;
     let d = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();
-    let secs = d.as_secs().wrapping_add(NTP_UNIX_OFFSET);
+    let secs = d.as_secs().wrapping_add(g2g_core::NTP_TO_UNIX_EPOCH_SECS);
     let frac = ((d.subsec_nanos() as u64) << 32) / 1_000_000_000;
     (secs << 32) | frac
 }

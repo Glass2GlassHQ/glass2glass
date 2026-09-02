@@ -61,6 +61,11 @@ impl From<u64> for RefNs {
     }
 }
 
+/// Seconds from the NTP epoch (1900-01-01) to the Unix epoch (1970-01-01). An
+/// RTCP sender report's 64-bit NTP timestamp counts from the earlier one, so a
+/// reader subtracts this to reach Unix time and a writer adds it.
+pub const NTP_TO_UNIX_EPOCH_SECS: u64 = 2_208_988_800;
+
 /// A 32-bit RTP media-clock timestamp as it appears on the wire (wraps at `2^32`).
 /// Distinct from a nanosecond time: it counts media-clock ticks, not ns.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]

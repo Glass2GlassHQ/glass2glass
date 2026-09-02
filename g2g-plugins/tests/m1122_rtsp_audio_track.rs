@@ -72,6 +72,7 @@ mod fanout {
                 colorimetry: g2g_core::Colorimetry::UNKNOWN,
             },
             audio,
+            onvif_metadata: false,
         }
     }
 

@@ -687,6 +687,10 @@ pub mod rtspsrcn;
 // camera's RTSP URL over SOAP, then delegates to RtspSrc; implies `rtsp`.
 #[cfg(feature = "onvif")]
 pub mod onvif;
+// ONVIF analytics metadata: onvifmetadataparse (documents to per-frame
+// analytics) and onvifmetadatacombiner (analytics onto the video it describes).
+#[cfg(feature = "onvif")]
+pub mod onvifmetadata;
 
 // Sans-IO RTSP 1.0 server responder (always compiled) and the tokio TCP serving
 // sink (egress: hosts a pipeline's H.264 as an RTSP endpoint).

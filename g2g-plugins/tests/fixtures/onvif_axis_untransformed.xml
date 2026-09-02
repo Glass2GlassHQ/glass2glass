@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- An Axis-style scene description: no tt:Transformation at all, so the
+     bounding box is already in the ONVIF normalized frame system the Analytics
+     Specification 21.12 section 5.1.2.2 (page 11) defines, x and y in [-1, 1]
+     with the origin at the picture centre and y pointing up. The UtcTime carries
+     an explicit zone offset. -->
+<tt:MetadataStream xmlns:tt="http://www.onvif.org/ver10/schema">
+  <tt:VideoAnalytics>
+    <tt:Frame UtcTime="2024-03-01T08:15:30.500+02:00">
+      <tt:Object ObjectId="7">
+        <tt:Appearance>
+          <tt:Shape>
+            <tt:BoundingBox left="-0.6" top="0.6" right="-0.2" bottom="0.2"/>
+            <tt:CenterOfGravity x="-0.4" y="0.4"/>
+          </tt:Shape>
+          <tt:Class>
+            <tt:Type Likelihood="0.55">Human</tt:Type>
+          </tt:Class>
+        </tt:Appearance>
+      </tt:Object>
+    </tt:Frame>
+  </tt:VideoAnalytics>
+</tt:MetadataStream>

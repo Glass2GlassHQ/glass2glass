@@ -128,7 +128,12 @@ Highest leverage first:
   providers.
 - Camera controls (exposure, focus, white balance) as element properties on
   AVCaptureDevice and Camera2.
-- ONVIF PTZ and event subscriptions.
+- ONVIF PTZ and event subscriptions, and the `tt:Event` part of a metadata
+  document (`onvifmetadataparse` reads only `tt:VideoAnalytics` frames).
+- ONVIF metadata tracks advertised with the Streaming Specification's
+  `vnd.onvif.metadata+gzip` encoding name, or with an EXI coding: retina builds
+  no depacketizer for either and fails the whole session on a set-up stream it
+  cannot depacketize, so those tracks are skipped today.
 - Run the Windows (`mfdevice` / `wasapidevice`) and macOS (`avfdevice` /
   `coreaudiodevice`) device providers on a real host: enumeration against
   attached hardware, endpoint selection by id through each element's `device`

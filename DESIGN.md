@@ -911,6 +911,58 @@ RtspSrc ──► H264Parse ──► [decoder] ──► [ML / display / encode
 
 `OnvifSrc` (`onvif` feature) is the ONVIF *control plane* in front of `RtspSrc`. An ONVIF camera does not stream over ONVIF; its SOAP services tell you the RTSP URL. `discover` sends one WS-Discovery `Probe` to the `239.255.255.250:3702` multicast group and collects each camera's device-service URL from the `ProbeMatch` `XAddrs`; `resolve_stream_uri` then runs `GetCapabilities` → `GetProfiles` → `GetStreamUri`, authenticated with a WS-Security `UsernameToken` digest (`Base64(SHA1(nonce ++ created ++ password))`). The element resolves the RTSP URI lazily during negotiation (`intercept_caps`), builds an inner `RtspSrc` once (forwarding the same credentials, since cameras gate the media stream behind the device account), and delegates the rest of the `SourceLoop` to it. The SOAP layer is hand-rolled (fixed request templates + `roxmltree` response reads) to avoid the git-only `onvif`/`schema` crate tree; the footprint is reqwest + roxmltree + sha1 + base64 + getrandom. Its scope is discovery and stream-URI resolution.
 
+**ONVIF analytics metadata (M1151).** The camera's scene description is a
+separate RTSP track, `m=application` with an `a=rtpmap` encoding name of
+`vnd.onvif.metadata` (uncompressed) or `vnd.onvif.metadata.gzip` (Streaming
+Specification 5.2.2.4). `RtspSrcN` subscribes it on a pad of its own when
+`onvif-metadata` is set, after video and audio; the property is off by default,
+so an existing consumer and the `playbin` hook negotiate exactly what they did
+before, and when a launch line links only two pads the metadata pad takes the
+audio one's slot rather than growing the element past what was linked. retina
+concatenates the RTP payloads to the marker bit, which closes one XML document;
+the element inflates a gzip member itself (`miniz_oxide`, bounded output) and
+emits the whole `tt:MetadataStream` document as one `Caps::OnvifMetadata` frame.
+The Streaming Specification writes the compressed encoding name
+`vnd.onvif.metadata+gzip` while retina matches `vnd.onvif.metadata.gzip`, and a
+set-up stream retina cannot depacketize fails the whole session, so a track
+advertised with the specification's spelling (or with an EXI coding, which g2g
+has no decoder for) is logged and left alone.
+
+`onvifmetadataparse` (`onvifmetadata.rs`, `onvif` feature) splits a document into
+one frame per `tt:Frame`, sharing the input buffer rather than copying it, and
+attaches that frame's objects as an `AnalyticsMeta`: one `ObjectDetection` per
+`tt:Object` with a usable `tt:BoundingBox`, a `Tracking` node holding its
+`ObjectId` related to it by `Tracks`, and a `Contains` relation for a `Parent`
+attribute naming an object in the same frame. Class names come from either
+encoding of `tt:Class` (the current `tt:Type Likelihood="..."` list and the
+legacy `tt:ClassCandidate` pairs), the likeliest one naming the detection.
+Coordinates pass through the `tt:Transformation` stack (`t' = v·s + t`,
+`s' = u·s`) into the ONVIF normalized frame system, then are remapped from
+`[-1, 1]` about the picture centre with `y` up to the `BBox` convention of
+`[0, 1]` from the top-left with `y` down. Elements are matched by namespace and
+local name, never by prefix; a payload holding several concatenated
+`<?xml ...?>` roots is cut at each declaration and parsed separately; frame and
+object counts and element depth are bounded and a malformed document yields no
+output.
+
+Sync is by wall clock, not by RTP time: the Streaming Specification gives the
+metadata track's RTP timestamps no meaning and makes a `tt:Frame`'s `UtcTime`
+the name of the picture it describes. `WallClockMeta` (`g2g-core`,
+nanoseconds since the Unix epoch) carries that instant on both sides.
+`RtspSrcN` keeps the latest RTCP sender report per stream and computes each
+frame's wall clock as the report's NTP instant plus the signed 32-bit RTP
+difference converted at the stream's clock rate, so a timestamp wrap reads as a
+frame just before the report rather than most of a wrap after it; before a
+stream's first report its frames carry no wall clock.
+`onvifmetadatacombiner` merges the two pads by that clock, falling back to PTS
+on the play timeline when either side lacks it. It holds each video frame for
+`latency` (default 200 ms) of stream time, attaches the metadata whose instant
+falls in the frame's window (its own duration, else the next frame's start),
+appends to whatever `AnalyticsMeta` a detector upstream already wrote rather
+than replacing it, and drops metadata that arrives more than `max-lateness`
+(default 200 ms) behind the video. An EOS on either pad flushes what is held, so
+a silent metadata pad never stalls the video.
+
 #### 4.11.5 Zero-copy NVDEC → CUDA → GPU display
 
 `Backend::NvdecCuvid` decodes on the GPU but copies NV12 back to system memory;

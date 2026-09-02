@@ -460,6 +460,14 @@ jobs:
       # live discovery / resolve tests are #[ignore] (need a camera on the LAN).
       - name: test g2g-plugins (onvif, offline)
         run: cargo test -p g2g-plugins --locked --features onvif --lib onvif --test onvif_smoke
+      # ONVIF analytics metadata (M1151): the scene-description parser against
+      # fixtures transcribed from the specifications, the combiner's wall-clock
+      # matching, and the rtspsrcn metadata pad against an in-process RTSP
+      # server on loopback (plain and gzip tracks). No camera needed.
+      - name: test g2g-plugins (onvif metadata)
+        run: |
+          cargo test -p g2g-plugins --locked --features onvif,rtsp --test m1151_onvif_metadata
+          cargo test -p g2g-plugins --locked --features onvif,rtsp --lib -- onvifmetadata rtspsrcn
       # Scripting surface (declarative JSON/YAML graphs + Rhai builder +
       # scriptelement + scriptrouter): the m578 suite builds text / scripts into
       # real graphs and runs them (including the scriptrouter -> appsink egress

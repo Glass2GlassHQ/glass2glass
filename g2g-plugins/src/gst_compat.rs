@@ -202,6 +202,20 @@ static GST_MAP: &[(&str, GstEquivalent)] = &[
         "no line-21 VBI waveform slicer; take the captions from the bitstream with `ccextract`, \
          or from a container caption track",
     )),
+    // The ONVIF metadata track arrives already depayloaded (retina concatenates
+    // the RTP packets to the marker bit), and g2g draws detections with one
+    // overlay whatever produced them.
+    ("onvifmetadatadepay", GstEquivalent::Unsupported(
+        "no standalone depayloader; `rtspsrcn onvif-metadata=true` gives the whole \
+         `tt:MetadataStream` document on a pad of its own, gzip already inflated",
+    )),
+    ("onvifmetadatapay", GstEquivalent::Unsupported(
+        "no ONVIF metadata payloader: g2g reads an analytics stream, it does not serve one",
+    )),
+    ("onvifmetadataoverlay", GstEquivalent::Unsupported(
+        "attach the analytics with `onvifmetadatacombiner`, then draw them with \
+         `analyticsoverlay`",
+    )),
     // WebRTC is one element per role rather than one bin with request pads, and
     // the SRTP / DTLS elements have no standalone counterpart at all.
     ("webrtcbin", GstEquivalent::Unsupported(

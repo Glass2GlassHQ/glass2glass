@@ -392,7 +392,8 @@ OS-coupled elements live behind cargo features:
 
 | Element | Feature | Platform / system dep |
 | :--- | :--- | :--- |
-| `RtspSrc` (video) / `RtspSrcN` (video + audio) | `rtsp` | retina |
+| `RtspSrc` (video) / `RtspSrcN` (video + audio, plus the camera's ONVIF analytics metadata track under `onvif-metadata=true`) | `rtsp` | retina |
+| `OnvifSrc` (camera discovery + stream-URI resolution) / `OnvifMetadataParse` / `OnvifMetadataCombiner` | `onvif` | reqwest + roxmltree |
 | `H264Parse` | (default) | — |
 | `FfmpegH264Dec` (sw / `NvdecCuvid` / `NvdecCuda` / `Vaapi`) | `ffmpeg` | Linux + libavcodec |
 | `VaapiH264Dec` | `vaapi` | Linux + libva + GBM |

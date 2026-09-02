@@ -881,7 +881,7 @@
                 <p class="f-lead">The streaming, adaptive, and capture ingests, each a real element.</p>
                 <div class="chip-group">
                     <span class="chip-label">Streaming</span>
-                    <div class="chip-row"><span class="chip">RtspSrc</span><span class="chip">UdpSrc</span><span class="chip">TcpClientSrc</span><span class="chip">ShmSrc</span><span class="chip">RtmpSrc</span><span class="chip">WebRtcWhepSrc</span></div>
+                    <div class="chip-row"><span class="chip">RtspSrc</span><span class="chip">RtspSrcN</span><span class="chip">OnvifSrc</span><span class="chip">UdpSrc</span><span class="chip">TcpClientSrc</span><span class="chip">ShmSrc</span><span class="chip">RtmpSrc</span><span class="chip">WebRtcWhepSrc</span></div>
                 </div>
                 <div class="chip-group">
                     <span class="chip-label">Adaptive</span>
@@ -1066,9 +1066,14 @@ g2g-launch <span class="flag">--script</span> build.rhai</div>
                     <div class="chip-row"><span class="chip">DetectionPostprocess</span><span class="chip">OrtSegmentation</span></div>
                 </div>
                 <div class="chip-group">
+                    <span class="chip-label">From the camera</span>
+                    <div class="chip-row"><span class="chip">OnvifMetadataParse</span><span class="chip">OnvifMetadataCombiner</span></div>
+                </div>
+                <div class="chip-group">
                     <span class="chip-label">Draw</span>
                     <div class="chip-row"><span class="chip">AnalyticsOverlay</span><span class="chip">VelloAnalyticsOverlay</span></div>
                 </div>
+                <p class="f-lead" style="margin-top:8px">An ONVIF camera's own analytics arrive the same way: <code>rtspsrcn onvif-metadata=true</code> gives the <code>tt:MetadataStream</code> track its own pad, and the combiner matches each scene description to the picture it describes on the sender's wall clock from RTCP.</p>
                 <span class="feature-tag tag-ml">ML</span>
             </div>
             <div class="feature-card">

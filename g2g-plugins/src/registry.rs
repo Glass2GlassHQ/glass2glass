@@ -813,6 +813,16 @@ pub fn default_registry() -> Registry {
         "klvdecode",
         || Box::new(crate::klv::KlvDecode::new()),
     ));
+    // ONVIF analytics metadata parser (M1151): one `tt:MetadataStream` document
+    // in, one frame per `tt:Frame` out carrying that frame's objects as
+    // analytics meta, e.g. `rtspsrcn onvif-metadata=true name=s  s. !
+    // onvifmetadataparse ! c.` .
+    #[cfg(feature = "onvif")]
+    reg.register_launch(
+        LaunchFactory::of::<crate::onvifmetadata::OnvifMetadataParse>("onvifmetadataparse", || {
+            Box::new(crate::onvifmetadata::OnvifMetadataParse::new())
+        }),
+    );
     // VobSub (DVD subpicture) decoder (M899): bitmap cues become full-frame
     // transparent RGBA canvases a compositor paints over the video,
     // e.g. `mkvdemux stream=vobsub ! vobsubdec ! c.` .
@@ -1305,6 +1315,15 @@ pub fn default_registry() -> Registry {
     #[cfg(feature = "metadata")]
     reg.register_muxer(MuxerFactory::new("cccombiner", |_inputs| {
         Box::new(crate::cccombiner::CcCombiner::new())
+    }));
+    // ONVIF analytics fan-in (M1151): a video branch on `c.video` (input 0, whose
+    // caps the output follows) and a parsed metadata branch on `c.text`
+    // (input 1), matched on the sender's wall clock so each picture leaves
+    // carrying the objects the camera found in it. Always 2-input, so link
+    // exactly the video and metadata branches.
+    #[cfg(feature = "onvif")]
+    reg.register_muxer(MuxerFactory::new("onvifmetadatacombiner", |_inputs| {
+        Box::new(crate::onvifmetadata::OnvifMetadataCombiner::new())
     }));
     // Picture-in-picture / grid video fan-in (M876): the gst `compositor` analog,
     // built by link degree like the muxers above (one pad per branch linked in,
@@ -2269,6 +2288,8 @@ pub static FEATURE_GATED_ELEMENTS: &[FeatureGatedElement] = &{
         "rtspsrc" => "rtsp";
         "rtspsrcn" => "rtsp";
         "onvifsrc" => "onvif";
+        "onvifmetadataparse" => "onvif";
+        "onvifmetadatacombiner" => "onvif";
         "udpsrc" => "udp-ingress";
         "udpsink" => "udp-egress";
         // The alias needs its own row: without `udp-egress` there is no
