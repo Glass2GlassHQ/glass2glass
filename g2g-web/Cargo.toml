@@ -8,7 +8,7 @@
 #     cargo build -p g2g-web --target wasm32-unknown-unknown --release
 [package]
 name = "g2g-web"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 license = "MPL-2.0"
 publish = false
