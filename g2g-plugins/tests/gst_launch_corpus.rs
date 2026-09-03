@@ -224,6 +224,11 @@ fn new_elements_are_available_under_their_gst_names() {
         "hsvdetector",
         "roundedcorners",
         "rsaudioecho",
+        "fallbackswitch",
+        // A launch keyword rather than a registry element (it expands into a
+        // source, a decode chain and the switch), so it resolves via the keyword
+        // list.
+        "fallbacksrc",
     ] {
         assert_eq!(
             gst_equivalent(&reg, name),

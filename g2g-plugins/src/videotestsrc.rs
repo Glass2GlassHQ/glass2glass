@@ -49,6 +49,9 @@ pub enum Pattern {
     /// plate `128 + 127*sin(2*pi*(x^2 + y^2)/period)`, phase-animated, for
     /// resampling / aliasing tests. Uses the `libm`-free `mathf` sine.
     ZonePlate,
+    /// Opaque black. Static, and the frame a `fallbacksrc` shows while its main
+    /// URI is not delivering.
+    Black,
 }
 
 /// # Example
@@ -364,7 +367,7 @@ impl SourceLoop for VideoTestSrc {
 static VIDEOTESTSRC_PROPS: &[PropertySpec] = &[
     PropertySpec::new("pattern", PropKind::Str, "drawn pattern")
         .with_enum_values(
-            "gradient | snow | bar | moving-bar | smpte | checkers-8 | checker | ball | zone-plate",
+            "gradient | snow | bar | moving-bar | smpte | checkers-8 | checker | ball | zone-plate | black",
         )
         .with_default("smpte"),
     PropertySpec::new(
@@ -397,6 +400,7 @@ fn pattern_from_str(s: &str) -> Option<Pattern> {
         "checkers-8" | "checker" => Some(Pattern::Checkerboard),
         "ball" => Some(Pattern::Ball),
         "zone-plate" => Some(Pattern::ZonePlate),
+        "black" => Some(Pattern::Black),
         _ => None,
     }
 }
@@ -411,6 +415,7 @@ fn pattern_to_str(p: Pattern) -> &'static str {
         Pattern::Checkerboard => "checkers-8",
         Pattern::Ball => "ball",
         Pattern::ZonePlate => "zone-plate",
+        Pattern::Black => "black",
     }
 }
 
@@ -536,6 +541,12 @@ fn fill_pattern(pattern: Pattern, buf: &mut [u8], width: u32, seq: u64) {
                 px[1] = v;
                 px[2] = v;
                 px[3] = 255;
+            }
+        }
+        // Opaque black: zero RGB, full alpha.
+        Pattern::Black => {
+            for px in buf.as_chunks_mut::<4>().0 {
+                *px = [0, 0, 0, 255];
             }
         }
     }
@@ -681,6 +692,16 @@ mod tests {
     }
 
     #[test]
+    fn black_is_opaque_zero_rgb() {
+        let mut f = [7u8; BYTES];
+        fill_pattern(Pattern::Black, &mut f, W, 3);
+        assert!(
+            f.as_chunks::<4>().0.iter().all(|px| *px == [0, 0, 0, 255]),
+            "every pixel is opaque black"
+        );
+    }
+
+    #[test]
     fn every_pattern_string_round_trips() {
         for pattern in [
             Pattern::Gradient,
@@ -690,6 +711,7 @@ mod tests {
             Pattern::Checkerboard,
             Pattern::Ball,
             Pattern::ZonePlate,
+            Pattern::Black,
         ] {
             assert_eq!(pattern_from_str(pattern_to_str(pattern)), Some(pattern));
         }

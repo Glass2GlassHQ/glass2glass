@@ -43,6 +43,7 @@ static LAUNCH_KEYWORDS: &[&str] = &[
     "transcodebin",
     "uridecodebin",
     "playbin",
+    "fallbacksrc",
     "queue",
     "queue2",
     "tee",

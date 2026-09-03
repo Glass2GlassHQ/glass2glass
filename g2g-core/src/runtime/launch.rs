@@ -1452,12 +1452,14 @@ fn resolve_upstream_caps(
         .ok_or(ParseError::DecodebinNoUpstream)
 }
 
-/// `uridecodebin` / `playbin`: a source-providing macro. `uridecodebin uri=X`
-/// builds the source from the URI scheme handler and auto-plugs the decode chain
-/// to raw; `playbin uri=X` is that plus an auto sink (`autovideosink`, or the
-/// `video-sink=` override), i.e. a complete pipeline.
+/// `uridecodebin` / `playbin` / `fallbacksrc`: a source-providing macro.
+/// `uridecodebin uri=X` builds the source from the URI scheme handler and
+/// auto-plugs the decode chain to raw; `playbin uri=X` is that plus an auto sink
+/// (`autovideosink`, or the `video-sink=` override), i.e. a complete pipeline;
+/// `fallbacksrc uri=X` is `uridecodebin` plus a second branch, both feeding a
+/// `fallbackswitch`.
 fn is_uri_source(name: &str) -> bool {
-    matches!(name, "uridecodebin" | "playbin")
+    matches!(name, "uridecodebin" | "playbin" | "fallbacksrc")
 }
 
 /// The value of a spec property by key, if present.
@@ -1468,19 +1470,190 @@ fn prop<'a>(spec: &'a ElementSpec, key: &str) -> Option<&'a str> {
         .map(|(_, v)| v.as_str())
 }
 
-/// Expand every `uridecodebin` / `playbin` (a source position element) into the
-/// `uri=` scheme handler's source plus the auto-plugged decode chain, as
-/// pre-built nodes spliced straight into the chain. `playbin` additionally
-/// appends an auto sink so the line is a complete pipeline. The element must head
-/// its chain (it provides the source).
+/// The properties the `fallbacksrc` keyword takes. It is a macro, not an element,
+/// so the expansion reads these itself and an unknown one is rejected here
+/// instead of by `apply_props`.
+const FALLBACKSRC_PROPS: &[&str] = &[
+    "uri",
+    "fallback-uri",
+    "timeout",
+    "immediate-fallback",
+    "enable-audio",
+    "enable-video",
+];
+
+/// The switch a `fallbacksrc` expands around, and the input its fallback branch
+/// links to (input 0 is the main URI, so the fallback is input 1).
+const FALLBACK_SWITCH: &str = "fallbackswitch";
+const FALLBACK_SWITCH_PAD: &str = "sink_1";
+
+/// The instance name given to the generated switch when the `fallbacksrc` had no
+/// `name=` of its own, so the fallback branch has something to reference. A
+/// launch line using this name for one of its own elements collides
+/// ([`ParseError::DuplicateName`]).
+const FALLBACK_SWITCH_NAME: &str = "g2g-fallbacksrc-switch";
+
+/// Neither test source is live, so the dummy fallback would run as fast as the
+/// CPU allows; `clocksync` holds each buffer until its PTS comes due, which is
+/// what makes the dummy play at the main stream's rate.
+const FALLBACK_PACER: &str = "clocksync";
+
+/// The dummy fallback source per stream kind: black frames, or silence.
+const FALLBACK_VIDEO_DUMMY: (&str, &str, &str) = ("videotestsrc", "pattern", "black");
+const FALLBACK_AUDIO_DUMMY: (&str, &str, &str) = ("audiotestsrc", "wave", "silence");
+
+/// A `fallbacksrc` keyword's boolean property, defaulting to `default` when the
+/// line did not write it. Spelled as gst writes booleans in a launch line.
+fn keyword_bool(spec: &ElementSpec, key: &str, default: bool) -> Result<bool, ParseError> {
+    let Some(text) = prop(spec, key) else {
+        return Ok(default);
+    };
+    match text {
+        "true" | "1" => Ok(true),
+        "false" | "0" => Ok(false),
+        _ => Err(ParseError::BadValue {
+            element: spec.name.clone(),
+            key: key.to_string(),
+            value: text.to_string(),
+        }),
+    }
+}
+
+/// Expand one `fallbacksrc` into its main branch (the `uri=` source auto-plugged
+/// to raw), the `fallbackswitch` those branches meet at, and the fallback branch
+/// as a chain of its own that references the switch's second input.
+///
+/// The expansion is single-stream, like `uridecodebin`: `enable-video` /
+/// `enable-audio` say which kind the decode chain may reach, video first.
+/// `consumer` is the element the switch output feeds, whose declared input memory
+/// picks the decoder (M1018).
+fn expand_fallbacksrc(
+    registry: &Registry,
+    spec: &ElementSpec,
+    consumer: Option<&str>,
+    switch_name: &str,
+    avoided: &[&str],
+) -> Result<(Vec<Item>, Chain), ParseError> {
+    if let Some((key, _)) = spec
+        .props
+        .iter()
+        .find(|(k, _)| !FALLBACKSRC_PROPS.contains(&k.as_str()))
+    {
+        return Err(ParseError::UnknownProperty {
+            element: spec.name.clone(),
+            key: key.clone(),
+        });
+    }
+    let uri = prop(spec, "uri").ok_or_else(|| ParseError::MissingUri(spec.name.clone()))?;
+    let enable_video = keyword_bool(spec, "enable-video", true)?;
+    let enable_audio = keyword_bool(spec, "enable-audio", true)?;
+    if !enable_video && !enable_audio {
+        return Err(ParseError::BadValue {
+            element: spec.name.clone(),
+            key: "enable-video".to_string(),
+            value: "false".to_string(),
+        });
+    }
+    let preferred = consumer.map_or(MemoryDomainKind::System, |name| {
+        registry.declared_memory_preference(name)
+    });
+    let (source, source_caps) = registry
+        .build_uri_source(uri)
+        .map_err(|e: UriError| ParseError::Uri(alloc::format!("{uri}: {e:?}")))?;
+    // The kind is decided by which target the search reaches, so the dummy
+    // fallback is the right generator and a `fallback-uri` decodes to the same
+    // shape. Video first: a container carrying both is a video stream here.
+    let video_target: &dyn Fn(&Caps) -> bool = &is_raw_video;
+    let audio_target: &dyn Fn(&Caps) -> bool = &is_raw_audio;
+    let plug = |caps: &Caps, target: &dyn Fn(&Caps) -> bool| {
+        registry.autoplug_avoiding(caps, target, DECODEBIN_MAX_DEPTH, preferred, avoided)
+    };
+    let video = enable_video
+        .then(|| plug(&source_caps, video_target))
+        .flatten();
+    let (decoders, target, dummy) = match video {
+        Some(decoders) => (decoders, video_target, FALLBACK_VIDEO_DUMMY),
+        None => {
+            let decoders = enable_audio
+                .then(|| plug(&source_caps, audio_target))
+                .flatten()
+                .ok_or_else(|| ParseError::NoDecodeChain(alloc::format!("{source_caps:?}")))?;
+            (decoders, audio_target, FALLBACK_AUDIO_DUMMY)
+        }
+    };
+
+    let mut main = Vec::with_capacity(decoders.len() + 2);
+    main.push(Item::Prebuilt(PrebuiltNode::Source(source)));
+    for decoder in decoders {
+        main.push(Item::Prebuilt(PrebuiltNode::Element(decoder)));
+    }
+    let mut switch_props = Vec::new();
+    for key in ["timeout", "immediate-fallback"] {
+        if let Some(value) = prop(spec, key) {
+            switch_props.push((key.to_string(), value.to_string()));
+        }
+    }
+    main.push(Item::Element(ElementSpec {
+        name: FALLBACK_SWITCH.to_string(),
+        props: switch_props,
+        instance: Some(switch_name.to_string()),
+        log_category: spec.log_category.clone(),
+    }));
+
+    let mut fallback: Chain = Vec::new();
+    match prop(spec, "fallback-uri") {
+        Some(fallback_uri) => {
+            let (source, caps) = registry
+                .build_uri_source(fallback_uri)
+                .map_err(|e: UriError| ParseError::Uri(alloc::format!("{fallback_uri}: {e:?}")))?;
+            let decoders = plug(&caps, target)
+                .ok_or_else(|| ParseError::NoDecodeChain(alloc::format!("{caps:?}")))?;
+            fallback.push(Item::Prebuilt(PrebuiltNode::Source(source)));
+            for decoder in decoders {
+                fallback.push(Item::Prebuilt(PrebuiltNode::Element(decoder)));
+            }
+        }
+        None => {
+            let (name, key, value) = dummy;
+            fallback.push(Item::Element(ElementSpec {
+                name: name.to_string(),
+                props: Vec::from([(key.to_string(), value.to_string())]),
+                instance: None,
+                log_category: None,
+            }));
+            fallback.push(Item::Element(ElementSpec {
+                name: FALLBACK_PACER.to_string(),
+                props: Vec::new(),
+                instance: None,
+                log_category: None,
+            }));
+        }
+    }
+    fallback.push(Item::Ref {
+        name: switch_name.to_string(),
+        pad: FALLBACK_SWITCH_PAD.to_string(),
+    });
+    Ok((main, fallback))
+}
+
+/// Expand every `uridecodebin` / `playbin` / `fallbacksrc` (a source position
+/// element) into the `uri=` scheme handler's source plus the auto-plugged decode
+/// chain, as pre-built nodes spliced straight into the chain. `playbin`
+/// additionally appends an auto sink so the line is a complete pipeline;
+/// `fallbacksrc` appends its switch and contributes the fallback branch as
+/// another chain. The element must head its chain (it provides the source).
 fn expand_uri_sources(
     registry: &Registry,
     chains: Vec<Chain>,
     avoided: &[&str],
 ) -> Result<Vec<Chain>, ParseError> {
     let mut out = Vec::with_capacity(chains.len());
+    // Numbers the generated switch names apart, so two `fallbacksrc` in one line
+    // do not collide on the default name.
+    let mut fallbacksrc_count = 0usize;
     for chain in chains {
         let mut new_chain: Chain = Vec::with_capacity(chain.len());
+        let mut fallback_chains: Vec<Chain> = Vec::new();
         let mut items = chain.into_iter().enumerate().peekable();
         while let Some((i, item)) = items.next() {
             let spec = match item {
@@ -1492,6 +1665,23 @@ fn expand_uri_sources(
             };
             if i != 0 {
                 return Err(ParseError::UriSourceNotAtHead(spec.name));
+            }
+            if spec.name == "fallbacksrc" {
+                let consumer = match items.peek() {
+                    Some((_, Item::Element(consumer))) => Some(consumer.name.as_str()),
+                    _ => None,
+                };
+                // A `fallbacksrc name=f` names its switch, so `f.` resolves to
+                // the node the branches meet at.
+                let switch_name = spec.instance.clone().unwrap_or_else(|| {
+                    alloc::format!("{FALLBACK_SWITCH_NAME}-{fallbacksrc_count}")
+                });
+                fallbacksrc_count += 1;
+                let (main, fallback) =
+                    expand_fallbacksrc(registry, &spec, consumer, &switch_name, avoided)?;
+                new_chain.extend(main);
+                fallback_chains.push(fallback);
+                continue;
             }
             let is_playbin = spec.name.starts_with("playbin");
             let uri =
@@ -1533,6 +1723,7 @@ fn expand_uri_sources(
             }
         }
         out.push(new_chain);
+        out.extend(fallback_chains);
     }
     Ok(out)
 }
