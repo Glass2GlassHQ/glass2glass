@@ -2527,6 +2527,37 @@ asked of the encoder itself: a profile is written against codecs, so the pixel
 format or sample rate a source happens to produce is the macro's problem, not
 the caller's.
 
+**Fallback switching.** `fallbackswitch` is `input-selector` with the choice
+made for it: input 0 is the primary and each higher index the next fallback, so
+the input index is the priority. gst defaults a request pad's `priority` to its
+pad serial, and g2g's launch DSL has no per-pad property syntax to override it
+with, so the index is the whole rule. An input is healthy while it delivered a
+`DataFrame` within `timeout` nanoseconds; the lowest-index healthy input is
+forwarded, frames on the rest are dropped, and when none is healthy the current
+input keeps the output rather than blanking it. Health is re-checked on every
+arriving packet and on the tick the element declares (`tick_interval_ns` is the
+timeout), so a primary going silent is noticed while the other inputs are quiet
+too. `immediate-fallback=false` holds a lower-priority frame until the primary
+has had one timeout from the first frame the element saw; `auto-switch=false`
+hands the choice back to `active-pad`; `stop-on-eos` ends forwarding when any
+input ends. A switch re-announces the new input's caps downstream when they
+differ from the last ones emitted, since the branches negotiate independently.
+The element is `std`-only: the health rule measures against the process
+monotonic clock.
+
+`fallbacksrc uri=X` is the launch macro over it, flattened at parse time like
+`uridecodebin`: the URI's source auto-plugged to raw on input 0, and on input 1
+either `fallback-uri`'s own decode chain or a dummy generator, `videotestsrc
+pattern=black` or `audiotestsrc wave=silence` behind a `clocksync` (neither test
+source is live, so without the pacer the dummy would run as fast as the CPU
+allows). `timeout` and `immediate-fallback` pass through to the switch, and a
+`name=` names the switch, so a line can hang a further branch off it by pad
+reference. The expansion is single-stream, as `uridecodebin`'s is:
+`enable-video` / `enable-audio` say which kind the decode chain may reach, video
+first. The dummy carries its own geometry rather than the main stream's, which
+is not known until the main branch negotiates, and the switch's caps
+re-announcement is what carries that difference downstream.
+
 Two sources have no single file behind them and so derive their own type:
 `splitfilesrc` joins the parts a pattern matches into one byte stream, typing it
 from the first part's extension or header (a name like `clip.ts.part003` has no

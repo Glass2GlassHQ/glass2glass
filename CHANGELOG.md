@@ -11,6 +11,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M1152: `audioresample`'s sinc kernel scales its tap count with the downsampling ratio, so the stop-band rejection at a given `quality` holds at any ratio.
 - M1153: `colorspace` converts PQ and HLG to and from the SDR transfers, tone mapping an HDR source down to SDR white with the BT.2390 EETF from `hdr-peak-nits`.
 - M1156: `tsdemux` times a reordering H.264 / H.265 stream from its first PES timestamp when the SPS declares the frame period, instead of waiting for a second one.
+- M1154: `fallbackswitch` forwards the highest-priority input still delivering, and the `fallbacksrc uri=X` launch keyword backs a URI with a `fallback-uri` or a black / silent dummy.
 - M1151: `rtspsrcn onvif-metadata=true` gives the camera's ONVIF analytics track its own pad, `onvifmetadataparse` reads the scene description into `AnalyticsMeta`, and `onvifmetadatacombiner` attaches it to the video frames it describes by wall clock.
 
 ## 0.7.0

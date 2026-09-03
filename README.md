@@ -119,7 +119,7 @@ cargo run -p g2g-plugins --bin g2g-launch --features std -- \
 
 Element names mostly match (with aliases: `avdec_h264`→`ffmpegdec`,
 `qtmux`→`mp4mux`, `autovideosink`→`waylandsink`/`kmssink`, `autovideosrc`→`v4l2src`/`libcamerasrc`, ...). Inline caps
-filters, `tee name=t` fan-out, muxer fan-in, `decodebin`/`uridecodebin`/`playbin`
+filters, `tee name=t` fan-out, muxer fan-in, `decodebin`/`uridecodebin`/`playbin`/`fallbacksrc`
 and the encode-side `encodebin`/`transcodebin`
 (`encodebin profile="video/x-matroska:video/x-vp8,width=1280,height=720,bitrate=2000000:audio/x-opus"`,
 which expands into those encoders plus `matroskamux`, splicing the scaler a
@@ -487,9 +487,10 @@ byte stream), `dataurisrc` (a `data:` URI's payload), `vobsubsrc` (a DVD
 subtitle `.idx` / `.sub` sidecar pair), `splitmuxsink`
 (segmented recording, `muxer=mp4|matroska|mpegts`), `togglerecord` (start and
 stop several streams together on the main stream's keyframes: one element per
-stream, joined by `group=`, and `main=true` on the one that decides), and
-`hlssink` (HLS packaging: segment files plus an `.m3u8` playlist, fed by `tsmux`
-or `mp4mux`).
+stream, joined by `group=`, and `main=true` on the one that decides), `hlssink`
+(HLS packaging: segment files plus an `.m3u8` playlist, fed by `tsmux` or
+`mp4mux`), and `fallbackswitch` (forwards the highest-priority input that is
+still delivering, input 0 being the primary).
 
 ## Sample pipelines
 

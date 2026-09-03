@@ -46,7 +46,8 @@ and runs it against the standard registry. Supported syntax: linear chains,
 (`src ! m.  src ! m.  funnel name=m ! sink`), demuxer fan-out with named pads
 (`filesrc location=movie.mkv ! matroskademux name=d  d.video_0 ! ...  d.audio_0 ! ...`),
 inline caps filters (`! video/x-raw,format=NV12,width=640 !`), `queue`/`queue2`
-(mapped to a per-edge backpressure policy), `decodebin` / `uridecodebin` / `playbin`.
+(mapped to a per-edge backpressure policy), `decodebin` / `uridecodebin` /
+`playbin` / `fallbacksrc`.
 
 A **demuxer fan-out** (`matroskademux` / `tsdemux` / `qtdemux` fed by a file
 source) probes the file at parse time and splits it into its elementary streams,

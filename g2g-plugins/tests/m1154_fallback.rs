@@ -245,3 +245,81 @@ fn fallbacksrc_must_head_its_chain() {
         ParseError::UriSourceNotAtHead("fallbacksrc".to_string())
     );
 }
+
+/// A `fallback-uri` replaces the dummy with that URI's own decode chain. Both
+/// branches are files here, so unlike the dummy case the run reaches EOS: the
+/// main stream's frame is forwarded and the fallback's is dropped, since the main
+/// never stalls.
+#[tokio::test]
+async fn fallback_uri_branch_runs_to_eos_with_the_main_stream_forwarded() {
+    let main = pnm_fixture("main.pnm").await;
+    let spare = pnm_fixture("spare.pnm").await;
+    let line = format!(
+        "fallbacksrc uri=file://{} fallback-uri=file://{} ! fakesink",
+        main.display(),
+        spare.display()
+    );
+    let kinds = kinds(&line);
+    assert_eq!(
+        kinds.iter().filter(|k| **k == NodeKind::Source).count(),
+        2,
+        "both URIs became sources: {kinds:?}"
+    );
+
+    let reg = default_registry();
+    let graph = parse_launch(&reg, &line).unwrap_or_else(|e| panic!("{line}: {e}"));
+    let stats = run_graph(graph, &ZeroClock, 4)
+        .await
+        .unwrap_or_else(|e| panic!("{line}: {e:?}"));
+    std::fs::remove_file(&main).ok();
+    std::fs::remove_file(&spare).ok();
+    assert_eq!(
+        stats.frames_consumed, 1,
+        "the main stream's one frame, the fallback's dropped"
+    );
+}
+
+#[tokio::test]
+async fn fallback_uri_with_no_handler_is_an_error() {
+    let main = pnm_fixture("nohandler.pnm").await;
+    let reg = default_registry();
+    let error = parse_launch(
+        &reg,
+        &format!(
+            "fallbacksrc uri=file://{} fallback-uri=nosuchscheme:///y ! fakesink",
+            main.display()
+        ),
+    )
+    .unwrap_err();
+    std::fs::remove_file(&main).ok();
+    assert!(
+        matches!(&error, ParseError::Uri(message) if message.contains("nosuchscheme")),
+        "the fallback URI is reported, got {error:?}"
+    );
+}
+
+/// `timeout` and `immediate-fallback` are handed to the generated switch, not
+/// swallowed by the macro: a value the switch's property rejects fails the parse
+/// under the switch's name.
+#[tokio::test]
+async fn timeout_reaches_the_switch() {
+    let main = pnm_fixture("timeout.pnm").await;
+    let reg = default_registry();
+    let error = parse_launch(
+        &reg,
+        &format!(
+            "fallbacksrc uri=file://{} timeout=-1 ! fakesink",
+            main.display()
+        ),
+    )
+    .unwrap_err();
+    std::fs::remove_file(&main).ok();
+    assert_eq!(
+        error,
+        ParseError::BadValue {
+            element: "fallbackswitch".to_string(),
+            key: "timeout".to_string(),
+            value: "-1".to_string(),
+        }
+    );
+}
