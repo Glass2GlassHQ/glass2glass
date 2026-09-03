@@ -80,7 +80,9 @@ Highest leverage first:
 ## Receive / decode
 
 - **`VulkanVideoDec` residuals.** Run the `vulkanvideo` GPU tests on AMD RADV
-  and Intel ANV. Add multiplanar NV12 and `VulkanTexture` output domains.
+  and Intel ANV. Two-plane texture output for 10-bit streams (a `P010` wgpu
+  texture; today an `NV12` pin on a 10-bit stream fails the decode) and for
+  AV1 film-grain streams (the grain path uploads RGBA only).
 
 ## CUDA / display
 

@@ -1090,8 +1090,20 @@ keep-alive follow the `NvDec` multi-domain pattern (§4.11.3).
 `Std*` SPS/PPS mapping, IDR then full-DPB P-frame decode bit-exact vs the ffmpeg
 software decoder, the zero-copy `VkSamplerYcbcrConversion` NV12->RGBA import into
 a `wgpu::Texture`, the `VulkanVideoDec` streaming element and its `WgpuSink`
-present, and `produces(WgpuTexture)` auto-plug. Two consumption models sit on the
-same `H264DpbDecoder`: the **streaming** `VulkanVideoDec` (push, `AsyncElement`)
+present, and `produces(WgpuTexture)` auto-plug. The `WgpuTexture` output offers
+`Rgba8` first and `Nv12` second (M1157): when the solved caps pin `NV12`, the
+converter copies the decoded slot's two planes into a fresh image
+(`YcbcrConverter::copy_nv12`, a plane-wise `vkCmdCopyImage` on the compute queue
+in place of the ycbcr dispatch) and imports it as a `TextureFormat::NV12` wgpu
+texture behind `WgpuNv12Texture`, so a consumer samples the planes through
+`Plane0` / `Plane1` views with no colour conversion; the decode device requests
+`TEXTURE_FORMAT_NV12` when the adapter offers it. The same copy backs the
+`VulkanTexture` output domain: the frame carries the raw `VkImage` handle,
+`VkFormat` and geometry in `OwnedVulkanTexture`, and its keep-alive downcasts to
+`VulkanImageOwner` for the `ash` device and the wgpu texture that owns the image,
+so a Vulkan-native consumer (an encoder, a presenter) reads the picture where the
+decoder left it, idle in `SHADER_READ_ONLY_OPTIMAL`. Two consumption models sit
+on the same `H264DpbDecoder`: the **streaming** `VulkanVideoDec` (push, `AsyncElement`)
 for pipelines, and `VulkanVideoPlayer`, a **random-access "pull"** frame server
 (`frame_at(pts)` / `frame_at_index`) that indexes GOPs / POC (`index_pictures`),
 `reset`s and decodes forward from the enclosing random-access point on a seek
