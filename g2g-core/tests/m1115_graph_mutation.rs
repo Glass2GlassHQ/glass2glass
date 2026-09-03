@@ -1789,10 +1789,6 @@ fn a_refused_remove_leaves_no_drain_behind() {
     );
 }
 
-/// The thread-per-arm runner performs both operations the same way: the splice
-/// happens between packets on whichever OS thread the producer is running on,
-/// and a spliced element gets a worker thread of its own.
-#[cfg(feature = "multi-thread")]
 /// Forwards every packet, the `Eos` included, to both ports: the shape of a
 /// demux whose catch-all arm passes control packets through itself.
 struct EosForwardingDemux;
@@ -1878,6 +1874,10 @@ fn a_demux_forwarding_eos_ends_each_branch_once() {
     );
 }
 
+/// The thread-per-arm runner performs both operations the same way: the splice
+/// happens between packets on whichever OS thread the producer is running on,
+/// and a spliced element gets a worker thread of its own.
+#[cfg(feature = "multi-thread")]
 mod threaded {
     use super::*;
     use g2g_core::runtime::{run_graph_threaded_mutable, ThreadSpawner};
