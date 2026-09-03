@@ -485,8 +485,11 @@ the flow-control and debug elements (`concat` / `input-selector` /
 stamps a framerate), `splitfilesrc` (the parts of a cut recording read as one
 byte stream), `dataurisrc` (a `data:` URI's payload), `vobsubsrc` (a DVD
 subtitle `.idx` / `.sub` sidecar pair), `splitmuxsink`
-(segmented recording, `muxer=mp4|matroska|mpegts`), and `hlssink` (HLS
-packaging: segment files plus an `.m3u8` playlist, fed by `tsmux` or `mp4mux`).
+(segmented recording, `muxer=mp4|matroska|mpegts`), `togglerecord` (start and
+stop several streams together on the main stream's keyframes: one element per
+stream, joined by `group=`, and `main=true` on the one that decides), and
+`hlssink` (HLS packaging: segment files plus an `.m3u8` playlist, fed by `tsmux`
+or `mp4mux`).
 
 ## Sample pipelines
 

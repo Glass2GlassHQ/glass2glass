@@ -315,10 +315,21 @@ unless it says otherwise.
   `clockselect`, `compare`, `cpureport`, `navseek`, `pushfilesrc`,
   `flitetestsrc` / `festival`, `ssdobjectdetector`.
 - **gst-plugins-rs:** `gifenc` / `gifdec`, `gopbuffer`,
-  `togglerecord`, `livesync`, `fallbackswitch` / `fallbacksrc`, `textwrap`,
+  `livesync`, `fallbackswitch` / `fallbacksrc`, `textwrap`,
   `jsongstenc` / `jsongstparse`, `gstregex`, `zlibcompress` / `zlibdecompress`,
   `colordetect`, `videocompare`, `uriplaylistbin`, `ndisrc` / `ndisink`,
   `intersink` / `intersrc`, `originalbuffersave` / `originalbufferrestore`.
+  `livesync` needs a self-driven output cadence: the only element shape the
+  runner ticks is a fan-in (`MultiInputElement::tick_interval_ns`), and
+  `parse_launch` builds a registered muxer name only where the link degree
+  exceeds one (`is_muxer` in `g2g-core/src/runtime/launch.rs`), so a one-input
+  ticking element in a plain chain reports `UnknownElement`. Either let a
+  registered muxer name with a single inbound link build as a one-input fan-in,
+  the way a registered demux name with one outbound link falls back, or give
+  `AsyncElement` a tick hook of its own.
+- Give `togglerecord` a native N-in N-out node kind, so the streams that start
+  and stop together are one element with request pads instead of several joined
+  by a group name.
 ## Python-element host
 
 - Add an explicit plain-text format override for files with no `.txt` extension.
