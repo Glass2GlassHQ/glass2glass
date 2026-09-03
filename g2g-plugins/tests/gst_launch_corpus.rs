@@ -68,6 +68,8 @@ const PORTABLE: &[&str] = &[
     "videotestsrc ! hsvdetector hue-ref=0 hue-var=20 ! fakesink",
     "videotestsrc ! roundedcorners border-radius-px=8 ! fakesink",
     "audiotestsrc ! rsaudioecho delay=50000000 ! fakesink",
+    // M1154: a primary and a fallback feeding the priority switch.
+    "videotestsrc ! fallbackswitch name=s timeout=200000000 ! fakesink  videotestsrc ! s.sink_1",
     // A file source feeding a sink (parses without the file present).
     "filesrc location=/tmp/input.ts ! fakesink",
     // M1155: aligned recording. gst's request pads are one element per stream
@@ -104,6 +106,9 @@ const RUNNABLE: &[(&str, u64)] = &[
     ("videotestsrc num-buffers=3 ! hsvfilter hue-shift=90 ! fakesink", 3),
     ("videotestsrc num-buffers=3 ! hsvdetector saturation-ref=1 saturation-var=1 value-ref=1 value-var=1 ! fakesink", 3),
     ("videotestsrc num-buffers=3 ! roundedcorners border-radius-px=4 ! fakesink", 3),
+    // The primary keeps delivering well inside the timeout, so the fallback's
+    // three frames are dropped and only the primary's reach the sink.
+    ("videotestsrc num-buffers=3 ! fallbackswitch name=s ! fakesink  videotestsrc num-buffers=3 ! s.sink_1", 3),
 ];
 
 #[test]

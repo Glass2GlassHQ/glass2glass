@@ -608,18 +608,19 @@ pub struct LintReport {
 
 /// Every element name a `gst-launch` line references, best-effort: the first
 /// token of each `!`-separated segment, skipping inline caps filters
-/// (`video/x-raw,...`, which contain `/`), tee branch references (`t.`), and
-/// stray `key=value` tokens. Good enough for a portability scan; the
-/// authoritative element set is whatever [`parse_launch`] builds.
+/// (`video/x-raw,...`, which contain `/`), pad references (`t.`, `d.video_0`,
+/// `mux.sink_1`), and stray `key=value` tokens. Good enough for a portability
+/// scan; the authoritative element set is whatever [`parse_launch`] builds.
 fn element_names(line: &str) -> Vec<&str> {
     let mut names = Vec::new();
     for segment in line.split('!') {
         let Some(first) = segment.split_whitespace().next() else {
             continue;
         };
-        // Inline caps filter (media/type,fields) or a branch reference (`t.`) or
-        // a bare property token, none of which is an element to look up.
-        if first.contains('/') || first.ends_with('.') || first.contains('=') {
+        // Inline caps filter (media/type,fields) or a pad reference (no element
+        // name has a dot in it) or a bare property token, none of which is an
+        // element to look up.
+        if first.contains('/') || first.contains('.') || first.contains('=') {
             continue;
         }
         names.push(first);

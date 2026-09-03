@@ -1277,6 +1277,12 @@ pub fn default_registry() -> Registry {
     reg.register_muxer(MuxerFactory::new("input-selector", |inputs| {
         Box::new(crate::inputselector::InputSelector::new(inputs))
     }));
+    // Same shape as `input-selector`, but the input is picked by which one is
+    // still delivering rather than by hand: input 0 is the primary, each higher
+    // index the next fallback (M1154).
+    reg.register_muxer(MuxerFactory::new("fallbackswitch", |inputs| {
+        Box::new(crate::fallbackswitch::FallbackSwitch::new(inputs))
+    }));
     // Live output switch: 1-in / N-out, built by the demux link degree.
     reg.register_demux(g2g_core::runtime::DemuxFactory::new(
         "output-selector",

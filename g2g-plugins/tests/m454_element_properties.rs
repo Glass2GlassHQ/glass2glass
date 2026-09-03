@@ -4292,3 +4292,52 @@ fn togglerecord_record_group_and_main() {
         Err(g2g_core::PropError::ReadOnly)
     );
 }
+
+/// M1154: `fallbackswitch`'s health-rule knobs, all five settable from a launch
+/// line and all reporting the default `gst-inspect` prints.
+#[cfg(feature = "std")]
+#[test]
+fn fallbackswitch_switching_rule() {
+    use g2g_core::{MultiInputElement, PropError};
+    use g2g_plugins::fallbackswitch::FallbackSwitch;
+    let mut e = FallbackSwitch::new(2);
+    for name in [
+        "active-pad",
+        "auto-switch",
+        "immediate-fallback",
+        "timeout",
+        "stop-on-eos",
+    ] {
+        assert!(declares(e.properties(), name), "{name} is declared");
+        assert_eq!(
+            e.get_property(name),
+            Some(declared_default(e.properties(), name)),
+            "{name} reports its declared default"
+        );
+    }
+    e.set_property("timeout", PropValue::Uint(250_000_000))
+        .unwrap();
+    assert_eq!(
+        e.get_property("timeout"),
+        Some(PropValue::Uint(250_000_000))
+    );
+    e.set_property("auto-switch", PropValue::Bool(false))
+        .unwrap();
+    e.set_property("active-pad", PropValue::Uint(1)).unwrap();
+    assert_eq!(e.get_property("active-pad"), Some(PropValue::Uint(1)));
+    e.set_property("immediate-fallback", PropValue::Bool(true))
+        .unwrap();
+    assert_eq!(
+        e.get_property("immediate-fallback"),
+        Some(PropValue::Bool(true))
+    );
+    e.set_property("stop-on-eos", PropValue::Bool(true))
+        .unwrap();
+    assert_eq!(e.get_property("stop-on-eos"), Some(PropValue::Bool(true)));
+    // Only the pads that exist can be selected.
+    assert_eq!(
+        e.set_property("active-pad", PropValue::Uint(2))
+            .unwrap_err(),
+        PropError::Value
+    );
+}

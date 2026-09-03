@@ -109,6 +109,10 @@ pub mod errorignore;
 pub mod fakemediasink;
 pub mod fakesink;
 pub mod fakesrc;
+// Priority input switch with a stall timeout (M1154). std: its health rule
+// measures against the process monotonic clock.
+#[cfg(feature = "std")]
+pub mod fallbackswitch;
 // Decoded-GOP reverser (M897): the presentation half of reverse playback.
 pub mod gopreverse;
 pub mod h264parse;
