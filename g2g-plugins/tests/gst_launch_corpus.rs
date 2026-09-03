@@ -70,6 +70,10 @@ const PORTABLE: &[&str] = &[
     "audiotestsrc ! rsaudioecho delay=50000000 ! fakesink",
     // A file source feeding a sink (parses without the file present).
     "filesrc location=/tmp/input.ts ! fakesink",
+    // M1155: aligned recording. gst's request pads are one element per stream
+    // here, joined by `group=`, so the two-branch line is the N-stream form.
+    "videotestsrc ! togglerecord record=true ! fakesink",
+    "videotestsrc ! tee name=t ! queue ! togglerecord group=corpus is-live=true ! fakesink t. ! queue ! togglerecord group=corpus main=false ! fakesink",
 ];
 
 /// The subset of PORTABLE that also runs end to end on the baseline registry (a

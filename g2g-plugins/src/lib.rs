@@ -614,6 +614,10 @@ pub mod clock;
 // an as-fast-as-possible upstream into a live-paced stream.
 #[cfg(feature = "std")]
 pub mod clocksync;
+// Keyframe-aligned start/stop recording shared across streams. std: the record
+// group is a process-wide named table and secondaries park on a notify.
+#[cfg(feature = "std")]
+pub mod togglerecord;
 // Stall detector: fails the run when no data crosses it within `timeout`. std
 // because the deadline is wall time and the timer is a tokio task.
 #[cfg(feature = "std")]

@@ -1186,6 +1186,11 @@ pub fn default_registry() -> Registry {
     reg.register_launch(LaunchFactory::new("clocksync", Vec::new(), || {
         Box::new(crate::clocksync::ClockSyncTransform::new())
     }));
+    // Aligned start/stop recording (M1155): gst's one element with request pads
+    // is one of these per stream, joined by `group=`, one of them `main=true`.
+    reg.register_launch(LaunchFactory::new("togglerecord", Vec::new(), || {
+        Box::new(crate::togglerecord::ToggleRecord::new())
+    }));
     // Reverse playback (M897): re-emits each decoded GOP in descending PTS, so a
     // `rate < 0` seek plays backwards through a forward-only decoder.
     reg.register_launch(LaunchFactory::new("gopreverse", Vec::new(), || {

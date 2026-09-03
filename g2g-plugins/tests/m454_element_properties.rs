@@ -4239,3 +4239,56 @@ fn colorspace_hdr_peak_nits() {
         );
     }
 }
+
+/// M1155: `togglerecord`'s three gst properties plus the two that stand in for
+/// gst's request pads. `record` and `recording` live on the shared group, so
+/// they read back through it rather than off the element.
+#[cfg(feature = "std")]
+#[test]
+fn togglerecord_record_group_and_main() {
+    use g2g_plugins::togglerecord::{RecordGroup, ToggleRecord};
+    let mut e = ToggleRecord::new();
+    for name in ["record", "recording", "is-live", "group", "main"] {
+        assert!(declares(e.properties(), name), "{name} must be declared");
+    }
+    assert_eq!(
+        e.get_property("record"),
+        Some(declared_default(e.properties(), "record"))
+    );
+    assert_eq!(
+        e.get_property("recording"),
+        Some(declared_default(e.properties(), "recording"))
+    );
+    assert_eq!(
+        e.get_property("is-live"),
+        Some(declared_default(e.properties(), "is-live"))
+    );
+    assert_eq!(
+        e.get_property("group"),
+        Some(declared_default(e.properties(), "group"))
+    );
+    assert_eq!(
+        e.get_property("main"),
+        Some(declared_default(e.properties(), "main"))
+    );
+
+    e.set_property("is-live", PropValue::Bool(true)).unwrap();
+    assert_eq!(e.get_property("is-live"), Some(PropValue::Bool(true)));
+    e.set_property("main", PropValue::Bool(false)).unwrap();
+    assert_eq!(e.get_property("main"), Some(PropValue::Bool(false)));
+    e.set_property("group", PropValue::Str("m454-take".into()))
+        .unwrap();
+    assert_eq!(
+        e.get_property("group"),
+        Some(PropValue::Str("m454-take".into()))
+    );
+    e.set_property("record", PropValue::Bool(true)).unwrap();
+    assert!(
+        RecordGroup::named("m454-take").record(),
+        "`record` is the group's flag, not the element's"
+    );
+    assert_eq!(
+        e.set_property("recording", PropValue::Bool(true)),
+        Err(g2g_core::PropError::ReadOnly)
+    );
+}

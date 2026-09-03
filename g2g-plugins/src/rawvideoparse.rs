@@ -14,7 +14,7 @@
 //! `plane-strides` and `plane-offsets` read a dump whose rows or planes are
 //! padded (M1093), the layout a capture device or a GPU readback writes. Padding
 //! is undone by packing the rows tight, unless a consumer asked for a
-//! [`PlaneLayout`](g2g_core::meta::PlaneLayout), in which case the frame is
+//! `PlaneLayout` (the `metadata` feature), in which case the frame is
 //! passed through as it lies with that layout declared and nothing is copied.
 
 use core::future::Future;
