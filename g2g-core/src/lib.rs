@@ -233,7 +233,7 @@ pub use memory::{
     CudaKeepAlive, CvPixelBufferKeepAlive, D3D11KeepAlive, OwnedCudaBuffer, OwnedCvPixelBuffer,
     OwnedD3D11Texture, OwnedDmaBuf, OwnedVulkanTexture, OwnedWebGPUBuffer,
     OwnedWebGPUExternalTexture, OwnedWgpuBuffer, OwnedWgpuTexture, SyncFd, SystemView,
-    WebGPUKeepAlive, WgpuBufferKeepAlive, WgpuKeepAlive,
+    VulkanKeepAlive, WebGPUKeepAlive, WgpuBufferKeepAlive, WgpuKeepAlive,
 };
 pub use metrics::{LatencyHistogram, LatencySnapshot};
 pub use query::{AllocationParams, LatencyReport};

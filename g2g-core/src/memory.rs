@@ -749,13 +749,63 @@ impl OwnedDmaBuf {
     }
 }
 
-/// `Clone` shares the handle (it is an opaque id the producer owns); a tee
-/// branch references the same texture (M213).
+/// A GPU-resident picture as a raw `VkImage` (the payload of
+/// [`MemoryDomain::VulkanTexture`]), for a consumer that drives Vulkan directly
+/// rather than through wgpu. Carries the image handle, its `VkFormat` and visible
+/// dimensions; the objects that keep the image alive (its memory, the device)
+/// live inside the [`VulkanKeepAlive`] owner because `g2g-core` links no Vulkan
+/// loader. The image is idle and in `SHADER_READ_ONLY_OPTIMAL` layout when the
+/// frame is handed over; the producer waited its own work before emitting.
+/// `Clone` is a zero-copy refcount bump, so the frame fans out through a tee
+/// (M213); see [`MemoryDomain::share`].
 #[cfg(feature = "alloc")]
 #[derive(Debug, Clone)]
 pub struct OwnedVulkanTexture {
+    /// The `VkImage` handle as its raw `u64`.
     pub handle: u64,
-    pub allocation_id: u64,
+    /// The image's `VkFormat` as its raw `i32`, so the consumer reads the planes
+    /// correctly (`G8_B8R8_2PLANE_420_UNORM` for an 8-bit NV12 decode output).
+    pub format: i32,
+    /// Visible picture dimensions in pixels.
+    pub width: u32,
+    pub height: u32,
+    keep_alive: Arc<dyn VulkanKeepAlive>,
+}
+
+#[cfg(feature = "alloc")]
+impl OwnedVulkanTexture {
+    /// Wrap a `VkImage` with the owner that keeps it and its memory alive.
+    pub fn new(
+        handle: u64,
+        format: i32,
+        width: u32,
+        height: u32,
+        keep_alive: Arc<dyn VulkanKeepAlive>,
+    ) -> Self {
+        Self {
+            handle,
+            format,
+            width,
+            height,
+            keep_alive,
+        }
+    }
+
+    /// The keep-alive owner, for a consumer to downcast via
+    /// [`VulkanKeepAlive::as_any`] and recover the device the image lives on.
+    pub fn keep_alive(&self) -> &dyn VulkanKeepAlive {
+        self.keep_alive.as_ref()
+    }
+}
+
+/// Owner token kept alongside an [`OwnedVulkanTexture`]. The producing element
+/// boxes whatever pins the image (its memory, the `VkDevice`, a wgpu texture
+/// wrapping it) as this trait object; a consumer that links Vulkan downcasts via
+/// [`as_any`](Self::as_any) to reach the device. Dropping the last clone
+/// releases the image.
+#[cfg(feature = "alloc")]
+pub trait VulkanKeepAlive: core::fmt::Debug + Send + Sync {
+    fn as_any(&self) -> &dyn core::any::Any;
 }
 
 /// `Clone` shares the buffer id (M213).
