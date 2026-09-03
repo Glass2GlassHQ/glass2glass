@@ -169,10 +169,6 @@ Highest leverage first:
 - **Matroska `ContentEncoding`:** chained encodings, bzip2 / lzo, and
   `ContentEncryption` stay refused (blocks forward as stored, flagged
   `unsupported_encoding`); zlib and header stripping are undone at demux.
-- **Reordering-stream PTS from a single stamp:** an H.264 / H.265 transport
-  stream that reorders stays unstamped until its second PES timestamp, since
-  the picture-order-count step per frame is not declared anywhere and has to be
-  measured across two stamps.
 
 ## Codecs
 

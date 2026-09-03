@@ -528,14 +528,24 @@ impl VideoPtsSynth {
     /// measures how many ticks a count unit spans); an unstamped unit lands at
     /// its own distance from that anchor, which is behind it for a picture the
     /// stream coded ahead of its display slot.
+    ///
+    /// The first stamp alone carries the timeline when the SPS declares the
+    /// frame period (M1156): the count step per frame follows from the codec,
+    /// so the slope is known before a second stamp measures it.
     fn stamp_by_poc(&mut self, codec: VideoCodec, au: &[u8], pts_90khz: &mut Option<u64>) {
         let Some(poc) = self.poc.push_access_unit(codec, au).map(i64::from) else {
             return;
         };
         let declared_period = self.period_90.filter(|_| self.period_from_sps);
-        match *pts_90khz {
-            Some(real) => self.reorder.anchor(poc, real, declared_period),
-            None => *pts_90khz = self.reorder.synthesize(poc),
+        if let Some(real) = *pts_90khz {
+            self.reorder.anchor(poc, real, declared_period, codec);
+        }
+        let frame_coded_h264 = codec != VideoCodec::H265 && self.poc.frame_mbs_only() == Some(true);
+        if frame_coded_h264 {
+            self.reorder.refine_h264_step_from_parity(poc);
+        }
+        if pts_90khz.is_none() {
+            *pts_90khz = self.reorder.synthesize(poc);
         }
     }
 
@@ -561,32 +571,79 @@ impl VideoPtsSynth {
 /// stands instead.
 const MAX_POC_STEP_PER_FRAME: u64 = 4;
 
+/// Picture order counts one coded frame advances in H.265, which counts pictures.
+const H265_POC_STEP_PER_FRAME: u64 = 1;
+/// The same for H.264, which counts fields: a frame-coded picture advances both,
+/// and a field-coded stream codes one access unit per field, half a period apart.
+const H264_POC_STEP_PER_FRAME: u64 = 2;
+/// The H.264 step when the encoder counts pictures instead of fields, which an
+/// odd count in a frame-coded stream proves.
+const H264_PICTURE_COUNTING_POC_STEP: u64 = 1;
+
 /// Where a reordering stream's picture order counts sit on the presentation
 /// timeline (M952). Presentation time is linear in the count, so two real PES
 /// stamps fix the line exactly, whatever reorder depth the stream codes at: the
 /// later of the two anchors it and the pair measures its slope.
+///
+/// One stamp is enough when the SPS declares the frame period (M1156): the
+/// codec's count step per frame turns that period into a provisional slope, and
+/// the second stamp replaces it with the measured one.
 #[derive(Debug, Default)]
 struct ReorderPts {
     /// The last real stamp and the count it named.
     anchor: Option<(i64, u64)>,
     /// Ticks per count, as the exact ratio `(ticks, counts)`.
     scale: Option<(u64, u64)>,
+    /// Whether `scale` is the declared period over an assumed count step rather
+    /// than a span measured between two stamps.
+    scale_is_provisional: bool,
 }
 
 impl ReorderPts {
     /// Take a real stamp: re-anchor on it, and measure the slope against the
     /// previous anchor. A declared frame period replaces the measured slope
     /// when it divides into it a whole number of counts per frame, so the grid
-    /// follows the rate the stream declares rather than a rounded span.
-    fn anchor(&mut self, poc: i64, pts_90khz: u64, declared_period_90: Option<u64>) {
-        if let Some((previous_poc, previous_pts)) = self.anchor {
-            let counts = poc.abs_diff(previous_poc);
-            let ticks = pts_90khz.abs_diff(previous_pts);
-            if counts > 0 && ticks > 0 {
-                self.scale = Some(snap_to_declared_period(ticks, counts, declared_period_90));
+    /// follows the rate the stream declares rather than a rounded span. The
+    /// first stamp has nothing to measure against, so a declared period stands
+    /// in over the codec's count step until the second one arrives.
+    fn anchor(
+        &mut self,
+        poc: i64,
+        pts_90khz: u64,
+        declared_period_90: Option<u64>,
+        codec: VideoCodec,
+    ) {
+        match self.anchor {
+            Some((previous_poc, previous_pts)) => {
+                let counts = poc.abs_diff(previous_poc);
+                let ticks = pts_90khz.abs_diff(previous_pts);
+                if counts > 0 && ticks > 0 {
+                    self.scale = Some(snap_to_declared_period(ticks, counts, declared_period_90));
+                    self.scale_is_provisional = false;
+                }
+            }
+            None => {
+                if let Some(period) = declared_period_90 {
+                    self.scale = Some((period, poc_step_per_frame(codec)));
+                    self.scale_is_provisional = true;
+                }
             }
         }
         self.anchor = Some((poc, pts_90khz));
+    }
+
+    /// An H.264 encoder may step the order count once per frame rather than once
+    /// per field. Every count of a frame-coded stream is then even under the
+    /// field step, so the first odd count proves the step is one. A measured
+    /// slope already spans whatever the stream does, so only a provisional one
+    /// is rewritten.
+    fn refine_h264_step_from_parity(&mut self, poc: i64) {
+        if !self.scale_is_provisional || poc % 2 == 0 {
+            return;
+        }
+        if let Some((ticks, _)) = self.scale {
+            self.scale = Some((ticks, H264_PICTURE_COUNTING_POC_STEP));
+        }
     }
 
     /// The presentation time of an unstamped unit whose count is `poc`, once an
@@ -601,6 +658,14 @@ impl ReorderPts {
         } else {
             anchor_pts.saturating_sub(offset)
         })
+    }
+}
+
+/// How many picture order counts one coded frame of `codec` advances.
+fn poc_step_per_frame(codec: VideoCodec) -> u64 {
+    match codec {
+        VideoCodec::H265 => H265_POC_STEP_PER_FRAME,
+        _ => H264_POC_STEP_PER_FRAME,
     }
 }
 

@@ -2564,8 +2564,23 @@ geometry is unknown until the bitstream parser reads the SPS, so the demuxer
 advertises a fixatable placeholder `Range` refined downstream via `CapsChanged`
 (the `RtspSrc` pattern, §4.13); AAC advertises the sentinel channels/rate that
 `aacparse` refines from the ADTS header. The decode-side container precedent is
-`Mp4Src` / `Mp4Sink`. The TS muxer (`g2g-plugins::mpegts::TsMuxer`) is the
-inverse path, wrapping access units back into PES + 188-byte packets with
+`Mp4Src` / `Mp4Sink`.
+
+A conforming mux need only carry a PES timestamp every 700 ms, so most access
+units arrive unstamped and forwarding them that way lands them all at 0. The
+demuxer times each one itself: a stream whose SPS proves coded order is display
+order advances one frame period per unit, an MPEG-2 stream takes its display slot
+from the picture header's `temporal_reference`, and one that may reorder takes it
+from the picture order count, anchored on the real stamps. A single stamp carries
+a reordering stream when the SPS declares the frame period, since the count step
+per frame follows from the codec (H.265 counts pictures, H.264 counts fields), and
+the second real stamp then measures the slope exactly. An H.264 encoder may step
+the count once per frame instead, which the first odd count of a frame-coded
+stream proves, so that provisional step switches to one. A field-coded stream is
+left alone, its bottom fields counting odd legitimately.
+
+The TS muxer (`g2g-plugins::mpegts::TsMuxer`) is the inverse path, wrapping
+access units back into PES + 188-byte packets with
 a real PSI CRC. It is multi-stream: `with_streams` builds one program
 carrying N elementary streams, each on its own PID and named in one PMT, and
 multi-program: `with_programs` takes a `(program_number, stream_type)` per

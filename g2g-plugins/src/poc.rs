@@ -902,6 +902,13 @@ impl AccessUnitPoc {
         self.sps = Some(sps);
     }
 
+    /// `frame_mbs_only_flag` of the sequence parameter set in effect, `None`
+    /// before one arrives. A caller reading the parity of an H.264 count needs
+    /// it: a field-coded stream codes odd counts for its bottom fields.
+    pub fn frame_mbs_only(&self) -> Option<bool> {
+        self.sps.as_ref().map(|sps| sps.frame_mbs_only_flag)
+    }
+
     /// Feed one access unit: cache the parameter sets it carries and return the
     /// picture order count of the coded picture it opens, or `None` when it
     /// carries no first slice this parse can read.
