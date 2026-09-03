@@ -779,7 +779,7 @@ ring = { version = "0.17", optional = true }
 # The frozen v2 plugin ABI types + validation (M1010), shared with the SDK a
 # plugin author builds against, and the FFI-safe `Future` its poll boundary
 # uses. Both are plugin-loader-only, so the no_std baseline never sees them.
-g2g-plugin = { version = "0.7.0", path = "../g2g-plugin", optional = true }
+g2g-plugin = { version = "0.8.0", path = "../g2g-plugin", optional = true }
 async-ffi = { version = "0.5", optional = true }
 # Declarative graph format (declarative / declarative-yaml features, M578). serde
 # derive for the spec model; serde_json / serde_yaml are the two front-ends. All
