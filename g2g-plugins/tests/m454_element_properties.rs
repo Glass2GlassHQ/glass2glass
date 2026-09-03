@@ -28,7 +28,6 @@ fn declared_default(specs: &[PropertySpec], name: &str) -> PropValue {
 
 /// The `(min, max)` a spec declares for an unsigned property, as numbers, so a
 /// test can hold the declared text and the value the element enforces together.
-#[cfg(any(feature = "srtp", feature = "ffmpeg"))]
 fn declared_range(specs: &[PropertySpec], name: &str) -> (usize, usize) {
     let spec = specs
         .iter()
@@ -4198,4 +4197,45 @@ fn ebur128_interval_and_post_messages() {
         e.get_property("post-messages"),
         Some(PropValue::Bool(false))
     );
+}
+
+/// M1153: `colorspace`'s tone map takes the PQ source peak from a property, and
+/// only inside the range it declares.
+#[test]
+fn colorspace_hdr_peak_nits() {
+    use g2g_plugins::colorspace::{
+        Colorspace, DEFAULT_HDR_PEAK_NITS, MAXIMUM_HDR_PEAK_NITS, MINIMUM_HDR_PEAK_NITS,
+    };
+
+    let mut e = Colorspace::new();
+    let nits = |value: u32| PropValue::Uint(u64::from(value));
+
+    assert!(declares(e.properties(), "hdr-peak-nits"));
+    assert_eq!(
+        e.get_property("hdr-peak-nits"),
+        Some(nits(DEFAULT_HDR_PEAK_NITS))
+    );
+    assert_eq!(
+        declared_default(e.properties(), "hdr-peak-nits"),
+        nits(DEFAULT_HDR_PEAK_NITS),
+        "the declared default is the one a fresh element reports"
+    );
+    assert_eq!(
+        declared_range(e.properties(), "hdr-peak-nits"),
+        (
+            MINIMUM_HDR_PEAK_NITS as usize,
+            MAXIMUM_HDR_PEAK_NITS as usize
+        ),
+        "the declared range is the one the element enforces"
+    );
+    for peak in [MINIMUM_HDR_PEAK_NITS, MAXIMUM_HDR_PEAK_NITS] {
+        e.set_property("hdr-peak-nits", nits(peak)).unwrap();
+        assert_eq!(e.get_property("hdr-peak-nits"), Some(nits(peak)));
+    }
+    for peak in [MINIMUM_HDR_PEAK_NITS - 1, MAXIMUM_HDR_PEAK_NITS + 1] {
+        assert!(
+            e.set_property("hdr-peak-nits", nits(peak)).is_err(),
+            "{peak} is outside the declared range"
+        );
+    }
 }

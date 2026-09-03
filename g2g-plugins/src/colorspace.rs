@@ -12,18 +12,24 @@
 //!   transfer, apply the source-primaries-to-target-primaries matrix (both
 //!   D65, so no chromatic adaptation), re-encode with the output transfer.
 //!
-//! PQ and HLG are refused: converting either to or from an SDR curve is tone
-//! mapping, which this does not do, so such a target fails negotiation instead
-//! of producing a wrongly-labelled frame. The transfer and primaries also
-//! cannot be converted away from an *untagged* input, since there is no curve
-//! to linearize with; the output then stays untagged on those two fields rather
-//! than claiming a conversion that did not happen. The matrix and range do
-//! convert from an untagged input, because
+//! PQ and HLG (M1153) go through the same linear step: light relative to the
+//! 203 cd/m2 HDR reference white of BT.2408, which is what the SDR curves
+//! already produce at code 255. An HDR source headed for an SDR transfer is
+//! tone mapped on the way, with the BT.2390 EETF from `hdr-peak-nits` down to
+//! that white; the other direction encodes the light it has and expands no
+//! highlights.
+//!
+//! The transfer and primaries cannot be converted away from an *untagged*
+//! input, since there is no curve to linearize with; the output then stays
+//! untagged on those two fields rather than claiming a conversion that did not
+//! happen. The matrix and range do convert from an untagged input, because
 //! [`Colorimetry::yuv_conversion`](g2g_core::Colorimetry::yuv_conversion)
 //! resolves an unknown one to BT.601 limited.
 //!
-//! CPU-only and `no_std`: the transfer curves run on `mathf`, and each
-//! is folded into a 256-entry table at negotiation so no pixel pays a `powf`.
+//! CPU-only and `no_std`: the curves run on `mathf`, and each is folded into a
+//! 256-entry table at negotiation, so a pixel pays a `powf` only for the two
+//! steps whose value is per pixel rather than per code, the HLG OOTF and the
+//! tone map.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -32,16 +38,17 @@ use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::mathf::powf;
+use crate::mathf::{exp, powf};
 use crate::pixel::{carries_yuv, even_dims_required, frame_byte_size, rgba_rb_offsets};
 use crate::yuvmatrix::{YuvRgbMatrix, SAMPLE_MAX};
 use g2g_core::frame::Frame;
 use g2g_core::memory::{DomainSet, MemoryDomainKind, SystemSlice};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, CapsTransform, ColorPrimaries, ColorRange,
-    Colorimetry, ConfigureOutcome, Dim, ElementMetadata, G2gError, MatrixCoefficients,
-    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
-    PropValue, PropertySpec, Rate, RawVideoFormat, RawVideoShape, TransferCharacteristics,
+    Colorimetry, ConfigureOutcome, Dim, ElementMetadata, G2gError, LumaCoefficients,
+    MatrixCoefficients, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat, RawVideoShape,
+    TransferCharacteristics,
 };
 
 /// Formats whose colorimetry this element converts. The 4:2:0 pair carry a YUV
@@ -58,6 +65,19 @@ const FORMATS: [RawVideoFormat; 5] = [
 
 /// How many 8-bit codes a transfer table has an entry for.
 const CODE_COUNT: usize = SAMPLE_MAX as usize + 1;
+
+/// The light linear 1.0 stands for: HDR reference white, 203 cd/m2 (ITU-R
+/// BT.2408). An SDR curve puts code 255 here, so the SDR and HDR halves of a
+/// conversion meet on one scale.
+const REFERENCE_WHITE_NITS: f64 = 203.0;
+
+/// The `hdr-peak-nits` default, the mastering peak of a common HDR10 grade.
+pub const DEFAULT_HDR_PEAK_NITS: u32 = 1000;
+/// Reference white is the lowest peak worth naming: at it there is nothing
+/// above the SDR range and the tone map is the identity.
+pub const MINIMUM_HDR_PEAK_NITS: u32 = REFERENCE_WHITE_NITS as u32;
+/// PQ's own peak, the brightest a signal can name.
+pub const MAXIMUM_HDR_PEAK_NITS: u32 = PQ_PEAK_NITS as u32;
 
 /// # Example
 ///
@@ -80,6 +100,9 @@ pub struct Colorspace {
     /// What the emitted frames carry, and how to produce them. Rebuilt whenever
     /// either side's caps arrive.
     target: Colorimetry,
+    /// The `hdr-peak-nits` property: the peak a PQ source is graded to, which
+    /// is what the tone map compresses down to reference white.
+    hdr_peak_nits: u32,
     plan: Option<Plan>,
     configured: bool,
     last_caps: Option<Caps>,
@@ -107,6 +130,7 @@ impl Colorspace {
             input: None,
             negotiated: Colorimetry::UNKNOWN,
             target: Colorimetry::UNKNOWN,
+            hdr_peak_nits: DEFAULT_HDR_PEAK_NITS,
             plan: None,
             configured: false,
             last_caps: None,
@@ -138,7 +162,7 @@ impl Colorspace {
         let requested = self.forced.unwrap_or(self.negotiated);
         let target = carried(input.format, achievable(input.colorimetry, requested));
         let source = carried(input.format, input.colorimetry);
-        self.plan = Some(Plan::build(source, target)?);
+        self.plan = Some(Plan::build(source, target, f64::from(self.hdr_peak_nits))?);
         self.target = target;
         Ok(())
     }
@@ -239,14 +263,18 @@ enum Plan {
 }
 
 impl Plan {
-    fn build(source: Colorimetry, target: Colorimetry) -> Result<Self, G2gError> {
+    fn build(
+        source: Colorimetry,
+        target: Colorimetry,
+        pq_peak_nits: f64,
+    ) -> Result<Self, G2gError> {
         if source == target {
             return Ok(Plan::Passthrough);
         }
         Ok(Plan::Convert(ColorTransform {
             decode: YuvRgbMatrix::new(source),
             encode: YuvRgbMatrix::new(target),
-            light: LightTransform::build(source, target)?,
+            light: LightTransform::build(source, target, pq_peak_nits)?,
         }))
     }
 }
@@ -287,21 +315,31 @@ struct LightTransform {
     source_linear: [f32; CODE_COUNT],
     target_linear: [f32; CODE_COUNT],
     gamut: [[f32; 3]; 3],
+    /// The HLG tables hold scene light, so the OOTF has to run on top of them
+    /// to reach the display light everything else is in.
+    source_is_scene_light: bool,
+    target_is_scene_light: bool,
+    tone_map: Option<ToneMap>,
 }
 
 impl core::fmt::Debug for LightTransform {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("LightTransform")
             .field("gamut", &self.gamut)
+            .field("tone_map", &self.tone_map)
             .finish_non_exhaustive()
     }
 }
 
 impl LightTransform {
     /// `None` when the transfer and primaries both stay put. `Err` when the
-    /// conversion needs linear light but one end's curve is PQ or HLG, which is
-    /// tone mapping.
-    fn build(source: Colorimetry, target: Colorimetry) -> Result<Option<Box<Self>>, G2gError> {
+    /// conversion needs linear light but one end is untagged, which has no
+    /// curve to linearize with.
+    fn build(
+        source: Colorimetry,
+        target: Colorimetry,
+        pq_peak_nits: f64,
+    ) -> Result<Option<Box<Self>>, G2gError> {
         if source.transfer == target.transfer && source.primaries == target.primaries {
             return Ok(None);
         }
@@ -311,22 +349,51 @@ impl LightTransform {
         ) else {
             return Err(G2gError::CapsMismatch);
         };
+        // HDR down to an SDR transfer is the one direction that compresses: the
+        // other way encodes the light it has, expanding no highlights.
+        let tone_map = match (
+            source_curve.peak_nits(pq_peak_nits),
+            target_curve.peak_nits(pq_peak_nits),
+        ) {
+            (Some(source_peak), None) => ToneMap::new(source_peak),
+            _ => None,
+        };
         Ok(Some(Box::new(Self {
             source_linear: linear_table(&source_curve),
             target_linear: linear_table(&target_curve),
             gamut: gamut_matrix(source.primaries, target.primaries)?,
+            source_is_scene_light: source_curve.is_scene_light(),
+            target_is_scene_light: target_curve.is_scene_light(),
+            tone_map,
         })))
     }
 
     /// Source 8-bit RGB to target 8-bit RGB through linear light.
     fn apply(&self, r: i32, g: i32, b: i32) -> (i32, i32, i32) {
         let code = |v: i32| self.source_linear[v.clamp(0, SAMPLE_MAX) as usize];
-        let linear = [code(r), code(g), code(b)];
+        let mut linear = [code(r), code(g), code(b)];
+        if self.source_is_scene_light {
+            let gain = hlg_ootf_gain(linear);
+            scale(&mut linear, gain);
+        }
+        if let Some(tone_map) = &self.tone_map {
+            let gain = tone_map.gain(linear);
+            scale(&mut linear, gain);
+        }
         let mixed = |row: [f32; 3]| row[0] * linear[0] + row[1] * linear[1] + row[2] * linear[2];
+        let mut out = [
+            mixed(self.gamut[0]),
+            mixed(self.gamut[1]),
+            mixed(self.gamut[2]),
+        ];
+        if self.target_is_scene_light {
+            let gain = hlg_inverse_ootf_gain(out);
+            scale(&mut out, gain);
+        }
         (
-            self.encode(mixed(self.gamut[0])),
-            self.encode(mixed(self.gamut[1])),
-            self.encode(mixed(self.gamut[2])),
+            self.encode(out[0]),
+            self.encode(out[1]),
+            self.encode(out[2]),
         )
     }
 
@@ -387,20 +454,190 @@ impl TransferCurve {
     }
 }
 
-/// The curve a transfer names, or `None` for one this cannot linearize: PQ and
-/// HLG (tone mapping) and an untagged stream.
-fn transfer_curve(transfer: TransferCharacteristics) -> Option<TransferCurve> {
+/// PQ's peak (SMPTE ST 2084), the light its signal 1.0 names.
+const PQ_PEAK_NITS: f64 = 10_000.0;
+const PQ_M1: f64 = 2610.0 / 16384.0;
+const PQ_M2: f64 = 2523.0 / 4096.0 * 128.0;
+const PQ_C1: f64 = 3424.0 / 4096.0;
+const PQ_C2: f64 = 2413.0 / 4096.0 * 32.0;
+const PQ_C3: f64 = 2392.0 / 4096.0 * 32.0;
+
+/// PQ's EOTF: signal in 0..1 to display light in cd/m2.
+fn pq_to_nits(signal: f64) -> f64 {
+    let encoded = powf(signal.clamp(0.0, 1.0), 1.0 / PQ_M2);
+    let numerator = (encoded - PQ_C1).max(0.0);
+    // The denominator only vanishes past signal 1, which the clamp above cuts.
+    powf(numerator / (PQ_C2 - PQ_C3 * encoded), 1.0 / PQ_M1) * PQ_PEAK_NITS
+}
+
+/// PQ's inverse EOTF: display light in cd/m2 to signal in 0..1.
+fn nits_to_pq(nits: f64) -> f64 {
+    let light = powf((nits / PQ_PEAK_NITS).clamp(0.0, 1.0), PQ_M1);
+    powf((PQ_C1 + PQ_C2 * light) / (1.0 + PQ_C3 * light), PQ_M2)
+}
+
+/// HLG's OETF constants (ARIB STD-B67 / BT.2100).
+const HLG_A: f64 = 0.178_832_77;
+const HLG_B: f64 = 0.284_668_92;
+const HLG_C: f64 = 0.559_910_73;
+/// Where HLG's OETF changes from the square-root part to the logarithmic one.
+const HLG_OETF_BREAK: f64 = 0.5;
+/// The display HLG's OOTF is defined against, and so the peak an HLG source
+/// carries.
+const HLG_DISPLAY_PEAK_NITS: f64 = 1000.0;
+/// BT.2100's system gamma for that display.
+const HLG_SYSTEM_GAMMA: f64 = 1.2;
+
+/// HLG's inverse OETF: signal in 0..1 to scene light in 0..1, before the OOTF.
+fn hlg_to_scene(signal: f64) -> f64 {
+    let signal = signal.clamp(0.0, 1.0);
+    match signal <= HLG_OETF_BREAK {
+        true => signal * signal / 3.0,
+        false => (exp((signal - HLG_C) / HLG_A) + HLG_B) / 12.0,
+    }
+}
+
+/// The BT.2020 luma weights HLG's OOTF measures scene luminance with, which is
+/// why the OOTF is one gain for the pixel and not a per-channel curve.
+fn scene_luminance(channels: [f32; 3]) -> f64 {
+    let weights = LumaCoefficients::BT2020_NCL;
+    f64::from(weights.kr * channels[0] + weights.kg() * channels[1] + weights.kb * channels[2])
+}
+
+/// The gain HLG's OOTF puts on all three channels to take the pixel from scene
+/// light to display light relative to reference white.
+fn hlg_ootf_gain(scene: [f32; 3]) -> f32 {
+    let luminance = powf(scene_luminance(scene), HLG_SYSTEM_GAMMA - 1.0);
+    (luminance * HLG_DISPLAY_PEAK_NITS / REFERENCE_WHITE_NITS) as f32
+}
+
+/// The inverse of [`hlg_ootf_gain`]. The display luminance fixes the scene
+/// luminance, since the OOTF raises the latter to `HLG_SYSTEM_GAMMA`.
+fn hlg_inverse_ootf_gain(display: [f32; 3]) -> f32 {
+    let display_nits = scene_luminance(display) * REFERENCE_WHITE_NITS;
+    if display_nits <= 0.0 {
+        return 0.0;
+    }
+    let luminance = powf(display_nits / HLG_DISPLAY_PEAK_NITS, 1.0 / HLG_SYSTEM_GAMMA);
+    (REFERENCE_WHITE_NITS / (HLG_DISPLAY_PEAK_NITS * powf(luminance, HLG_SYSTEM_GAMMA - 1.0)))
+        as f32
+}
+
+/// The BT.2390 EETF that brings an HDR source's light into the SDR range, as
+/// its fixed part: the source peak as a PQ signal, the reference white the top
+/// of the source range lands on, and where the roll-off starts. Source black is
+/// 0, so BT.2390's black-lift term is zero and left out.
+#[derive(Debug)]
+struct ToneMap {
+    peak_signal: f64,
+    maximum_luminance: f64,
+    knee_start: f64,
+}
+
+impl ToneMap {
+    /// `None` when the source peaks at reference white or below: the knee then
+    /// sits at the top of the range, there is nothing to compress, and the
+    /// spline's `1 - knee_start` would divide by zero.
+    fn new(peak_nits: f64) -> Option<Self> {
+        let peak_signal = nits_to_pq(peak_nits);
+        let maximum_luminance = nits_to_pq(REFERENCE_WHITE_NITS) / peak_signal;
+        let knee_start = 1.5 * maximum_luminance - 0.5;
+        match knee_start >= 1.0 {
+            true => None,
+            false => Some(Self {
+                peak_signal,
+                maximum_luminance,
+                knee_start,
+            }),
+        }
+    }
+
+    /// The gain that puts the pixel's brightest channel on its tone-mapped
+    /// light, for all three channels, so the hue stays where it was.
+    fn gain(&self, linear: [f32; 3]) -> f32 {
+        let brightest = linear[0].max(linear[1]).max(linear[2]);
+        if brightest <= 0.0 {
+            return 1.0;
+        }
+        (self.map(f64::from(brightest)) / f64::from(brightest)) as f32
+    }
+
+    /// One reference-white-relative light through the EETF.
+    fn map(&self, linear: f64) -> f64 {
+        let signal = nits_to_pq(linear * REFERENCE_WHITE_NITS) / self.peak_signal;
+        if signal < self.knee_start {
+            return linear;
+        }
+        // Hermite across the roll-off: slope 1 where it leaves the straight
+        // part, flat where it reaches the target white. Light past the declared
+        // peak lands on that white rather than extrapolating above it.
+        let t = ((signal - self.knee_start) / (1.0 - self.knee_start)).min(1.0);
+        let (square, cube) = (t * t, t * t * t);
+        let rolled = (2.0 * cube - 3.0 * square + 1.0) * self.knee_start
+            + (cube - 2.0 * square + t) * (1.0 - self.knee_start)
+            + (-2.0 * cube + 3.0 * square) * self.maximum_luminance;
+        pq_to_nits(rolled * self.peak_signal) / REFERENCE_WHITE_NITS
+    }
+}
+
+fn scale(channels: &mut [f32; 3], gain: f32) {
+    for channel in channels.iter_mut() {
+        *channel *= gain;
+    }
+}
+
+/// The transfers this converts between: the SDR shape BT.709 and sRGB share,
+/// PQ, and HLG.
+enum Transfer {
+    Sdr(TransferCurve),
+    Pq,
+    Hlg,
+}
+
+impl Transfer {
+    /// Nonlinear code value in 0..1 to the light a table holds: display light
+    /// relative to reference white, except for HLG, whose table stops at the
+    /// scene light the signal carries.
+    fn to_linear(&self, value: f64) -> f64 {
+        match self {
+            Transfer::Sdr(curve) => curve.to_linear(value),
+            Transfer::Pq => pq_to_nits(value.clamp(0.0, 1.0)) / REFERENCE_WHITE_NITS,
+            Transfer::Hlg => hlg_to_scene(value),
+        }
+    }
+
+    fn is_scene_light(&self) -> bool {
+        matches!(self, Transfer::Hlg)
+    }
+
+    /// The peak light this carries, `None` for an SDR curve. PQ's comes from
+    /// the property, since the signal reaches 10000 cd/m2 but a grade does not;
+    /// HLG's is the display its OOTF is defined against.
+    fn peak_nits(&self, pq_peak: f64) -> Option<f64> {
+        match self {
+            Transfer::Sdr(_) => None,
+            Transfer::Pq => Some(pq_peak),
+            Transfer::Hlg => Some(HLG_DISPLAY_PEAK_NITS),
+        }
+    }
+}
+
+/// The curve a transfer names, or `None` for an untagged stream, which has none
+/// to linearize with.
+fn transfer_curve(transfer: TransferCharacteristics) -> Option<Transfer> {
     match transfer {
-        TransferCharacteristics::Srgb => Some(SRGB_CURVE),
+        TransferCharacteristics::Srgb => Some(Transfer::Sdr(SRGB_CURVE)),
         TransferCharacteristics::Bt601
         | TransferCharacteristics::Bt709
-        | TransferCharacteristics::Bt2020 => Some(BT709_CURVE),
+        | TransferCharacteristics::Bt2020 => Some(Transfer::Sdr(BT709_CURVE)),
+        TransferCharacteristics::Pq => Some(Transfer::Pq),
+        TransferCharacteristics::Hlg => Some(Transfer::Hlg),
         _ => None,
     }
 }
 
 /// The linear light of every 8-bit code under `curve`.
-fn linear_table(curve: &TransferCurve) -> [f32; CODE_COUNT] {
+fn linear_table(curve: &Transfer) -> [f32; CODE_COUNT] {
     let mut table = [0f32; CODE_COUNT];
     for (code, slot) in table.iter_mut().enumerate() {
         *slot = curve.to_linear(code as f64 / SAMPLE_MAX as f64) as f32;
@@ -674,8 +911,8 @@ impl AsyncElement for Colorspace {
     }
 
     /// Take the target from the negotiated output caps, and refuse a target the
-    /// element cannot deliver: a PQ / HLG conversion, or one that contradicts
-    /// the `colorimetry` property.
+    /// element cannot deliver: one that contradicts the `colorimetry` property,
+    /// or a transfer change away from an untagged input.
     fn configure_output(&mut self, output_caps: &Caps) -> Result<(), G2gError> {
         let Caps::RawVideo {
             format,
@@ -803,12 +1040,23 @@ impl AsyncElement for Colorspace {
                 self.rebuild_plan().map_err(|_| PropError::Value)?;
                 Ok(())
             }
+            "hdr-peak-nits" => {
+                let nits = value.as_uint().ok_or(PropError::Type)?;
+                let range = u64::from(MINIMUM_HDR_PEAK_NITS)..=u64::from(MAXIMUM_HDR_PEAK_NITS);
+                if !range.contains(&nits) {
+                    return Err(PropError::Value);
+                }
+                self.hdr_peak_nits = nits as u32;
+                self.rebuild_plan().map_err(|_| PropError::Value)?;
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
+            "hdr-peak-nits" => Some(PropValue::Uint(u64::from(self.hdr_peak_nits))),
             // The effective output colorimetry: the property when set, else
             // what negotiation resolved. `None` before either says anything.
             "colorimetry" => self
@@ -821,12 +1069,22 @@ impl AsyncElement for Colorspace {
     }
 }
 
-/// `Colorspace`'s settable properties: the output colorimetry.
-static COLORSPACE_PROPS: &[PropertySpec] = &[PropertySpec::new(
-    "colorimetry",
-    PropKind::Str,
-    "output colorimetry: bt709 | bt601 | bt2020 | sRGB | range:matrix:transfer:primaries; unset takes it from the negotiated caps",
-)];
+/// `Colorspace`'s settable properties: the output colorimetry, and the source
+/// peak the tone map works from.
+static COLORSPACE_PROPS: &[PropertySpec] = &[
+    PropertySpec::new(
+        "colorimetry",
+        PropKind::Str,
+        "output colorimetry: bt709 | bt601 | bt2020 | sRGB | range:matrix:transfer:primaries; unset takes it from the negotiated caps",
+    ),
+    PropertySpec::new(
+        "hdr-peak-nits",
+        PropKind::Uint,
+        "peak light in cd/m2 the PQ source is graded to, which the tone map compresses down to SDR white; applies to a PQ source only, an HLG one peaks at its 1000 cd/m2 display",
+    )
+    .with_range("203", "10000")
+    .with_default("1000"),
+];
 
 impl PadTemplates for Colorspace {
     /// Static superset: any convertible format at any geometry, the same set on
@@ -855,6 +1113,13 @@ mod tests {
             range,
             ..Colorimetry::UNKNOWN
         }
+    }
+
+    /// The light transform of a pair that moves, at the default source peak.
+    fn light(source: Colorimetry, target: Colorimetry) -> Box<LightTransform> {
+        LightTransform::build(source, target, f64::from(DEFAULT_HDR_PEAK_NITS))
+            .expect("the pair converts")
+            .expect("the transfer or primaries move")
     }
 
     /// The primaries construction has to reproduce the published BT.709 ->
@@ -902,11 +1167,7 @@ mod tests {
         let transform = ColorTransform {
             decode: YuvRgbMatrix::new(Colorimetry::BT709),
             encode: YuvRgbMatrix::new(Colorimetry::BT2020),
-            light: Some(
-                LightTransform::build(Colorimetry::BT709, Colorimetry::BT2020)
-                    .unwrap()
-                    .expect("709 and 2020 differ in primaries"),
-            ),
+            light: Some(light(Colorimetry::BT709, Colorimetry::BT2020)),
         };
         let (r, g, b) = transform.rgb_to_target_rgb(255, 0, 0);
         assert!(r < 255 && r > 200, "red stays dominant but drops: {r}");
@@ -922,11 +1183,9 @@ mod tests {
             transfer: TransferCharacteristics::Srgb,
             ..Colorimetry::BT709
         };
-        let light = LightTransform::build(bt709, srgb)
-            .unwrap()
-            .expect("the curves differ");
+        let converter = light(bt709, srgb);
         for code in [1i32, 20, 60, 128, 200, 254] {
-            let (converted, _, _) = light.apply(code, code, code);
+            let (converted, _, _) = converter.apply(code, code, code);
             let before = BT709_CURVE.to_linear(f64::from(code) / f64::from(SAMPLE_MAX));
             let after = SRGB_CURVE.to_linear(f64::from(converted) / f64::from(SAMPLE_MAX));
             assert!(
@@ -936,28 +1195,70 @@ mod tests {
         }
     }
 
-    /// Tone mapping is out of scope, so a PQ end fails to build rather than
-    /// producing an SDR-looking frame labelled HDR.
+    /// Both HDR curves convert, and only the direction that has light above the
+    /// SDR range tone maps.
     #[test]
-    fn a_pq_conversion_is_refused() {
-        assert_eq!(
-            LightTransform::build(Colorimetry::BT709, Colorimetry::BT2100_PQ).err(),
-            Some(G2gError::CapsMismatch)
-        );
-        assert_eq!(
-            LightTransform::build(Colorimetry::BT2100_HLG, Colorimetry::BT709).err(),
-            Some(G2gError::CapsMismatch)
-        );
+    fn an_hdr_source_tone_maps_and_an_hdr_target_does_not() {
+        assert!(light(Colorimetry::BT2100_PQ, Colorimetry::BT709)
+            .tone_map
+            .is_some());
+        assert!(light(Colorimetry::BT2100_HLG, Colorimetry::BT709)
+            .tone_map
+            .is_some());
+        assert!(light(Colorimetry::BT709, Colorimetry::BT2100_PQ)
+            .tone_map
+            .is_none());
         // A matrix-only change under an unchanged PQ transfer needs no linear
-        // light, so it is allowed.
+        // light at all.
         let pq_full = Colorimetry {
             range: ColorRange::Full,
             ..Colorimetry::BT2100_PQ
         };
         assert!(matches!(
-            LightTransform::build(Colorimetry::BT2100_PQ, pq_full),
+            LightTransform::build(
+                Colorimetry::BT2100_PQ,
+                pq_full,
+                f64::from(DEFAULT_HDR_PEAK_NITS)
+            ),
             Ok(None)
         ));
+    }
+
+    /// PQ's EOTF and its inverse are each other's, which is what both the code
+    /// tables and the tone map's PQ domain rest on.
+    #[test]
+    fn the_pq_curve_inverts_itself() {
+        for nits in [0.1f64, 1.0, REFERENCE_WHITE_NITS, 600.0, PQ_PEAK_NITS] {
+            let recovered = pq_to_nits(nits_to_pq(nits));
+            assert!(
+                (recovered - nits).abs() < 1e-3 * nits,
+                "{nits} cd/m2 came back as {recovered}"
+            );
+        }
+    }
+
+    /// A source that peaks at reference white has nothing above the SDR range,
+    /// so there is no tone map to build. One that peaks higher is the identity
+    /// below its knee and lands exactly on white at its peak.
+    #[test]
+    fn the_tone_map_spans_the_source_peak_to_reference_white() {
+        assert!(ToneMap::new(f64::from(MINIMUM_HDR_PEAK_NITS)).is_none());
+        let tone_map =
+            ToneMap::new(f64::from(DEFAULT_HDR_PEAK_NITS)).expect("1000 cd/m2 compresses");
+        assert_eq!(tone_map.map(0.0), 0.0);
+        let peak = f64::from(DEFAULT_HDR_PEAK_NITS) / REFERENCE_WHITE_NITS;
+        assert!(
+            (tone_map.map(peak) - 1.0).abs() < 1e-3,
+            "{}",
+            tone_map.map(peak)
+        );
+        // Monotone, or a brighter source pixel would come out darker.
+        let mut previous = 0.0;
+        for step in 0..64 {
+            let mapped = tone_map.map(peak * f64::from(step) / 63.0);
+            assert!(mapped >= previous, "step {step}: {mapped} after {previous}");
+            previous = mapped;
+        }
     }
 
     /// An untagged transfer cannot be linearized, so it is not relabelled: the
@@ -982,7 +1283,7 @@ mod tests {
         assert_eq!(dropped.transfer, Colorimetry::BT709.transfer);
         let source = carried(RawVideoFormat::Rgba8, Colorimetry::BT601);
         assert!(matches!(
-            Plan::build(source, dropped).unwrap(),
+            Plan::build(source, dropped, f64::from(DEFAULT_HDR_PEAK_NITS)).unwrap(),
             Plan::Convert(_)
         ));
     }
@@ -990,7 +1291,12 @@ mod tests {
     #[test]
     fn equal_colorimetry_is_a_passthrough() {
         assert!(matches!(
-            Plan::build(Colorimetry::BT709, Colorimetry::BT709).unwrap(),
+            Plan::build(
+                Colorimetry::BT709,
+                Colorimetry::BT709,
+                f64::from(DEFAULT_HDR_PEAK_NITS)
+            )
+            .unwrap(),
             Plan::Passthrough
         ));
     }

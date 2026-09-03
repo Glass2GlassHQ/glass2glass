@@ -235,29 +235,27 @@ fn an_unconstrained_output_passes_bytes_through() {
     assert_eq!(pushed_bytes(&packets), src);
 }
 
-/// Tone mapping is out of scope, so a PQ target fails negotiation rather than
-/// emitting an SDR frame tagged HDR.
+/// M1153: both HDR directions negotiate, and the emitted caps carry the
+/// transfer that was asked for. The pixels are m1153's business.
 #[test]
-fn a_pq_target_is_refused_at_negotiation() {
+fn both_pq_directions_negotiate() {
     let mut element = Colorspace::new();
     element
         .configure_pipeline(&raw(RawVideoFormat::I420, Colorimetry::BT709))
         .expect("a BT.709 input is fine");
-    assert_eq!(
-        element.configure_output(&raw(RawVideoFormat::I420, Colorimetry::BT2100_PQ)),
-        Err(G2gError::CapsMismatch),
-        "SDR -> PQ is tone mapping"
-    );
+    element
+        .configure_output(&raw(RawVideoFormat::I420, Colorimetry::BT2100_PQ))
+        .expect("SDR -> PQ encodes absolute light");
+    assert_eq!(element.output_colorimetry(), Colorimetry::BT2100_PQ);
 
-    // And the other way: a PQ input asked for SDR.
     let mut from_pq = Colorspace::new();
     from_pq
         .configure_pipeline(&raw(RawVideoFormat::I420, Colorimetry::BT2100_PQ))
         .expect("a PQ input is fine to carry");
-    assert_eq!(
-        from_pq.configure_output(&raw(RawVideoFormat::I420, Colorimetry::BT709)),
-        Err(G2gError::CapsMismatch)
-    );
+    from_pq
+        .configure_output(&raw(RawVideoFormat::I420, Colorimetry::BT709))
+        .expect("PQ -> SDR tone maps");
+    assert_eq!(from_pq.output_colorimetry(), Colorimetry::BT709);
 }
 
 /// The property forces the target whatever downstream negotiated, and reads

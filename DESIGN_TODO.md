@@ -192,8 +192,6 @@ Highest leverage first:
   survives a re-encode there too.
 - Tag the raw output of the platform decoders that still leave colorimetry
   unknown (Media Foundation, VideoToolbox, MediaCodec, VAAPI).
-- Tone mapping in `colorspace`: PQ / HLG conversions are refused at negotiation,
-  only the SDR transfers convert.
 
 ## Transforms and effects
 
