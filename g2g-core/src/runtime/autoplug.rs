@@ -1647,6 +1647,26 @@ mod factory {
             self.demuxes.iter().any(|d| d.name == name)
         }
 
+        /// Whether `name` is registered as a fan-in muxer. The transpose of
+        /// [`is_demux`](Self::is_demux): the parser uses it to build a fan-in node
+        /// from a name whose link degree is one, which is how an element whose
+        /// output cadence is its own (`livesync`) reaches a plain chain, since the
+        /// deadline tick only reaches a fan-in arm.
+        pub fn is_muxer(&self, name: &str) -> bool {
+            let name = self.resolve_alias(name);
+            self.muxers.iter().any(|m| m.name == name)
+        }
+
+        /// Whether `name` is registered as a transform / sink, the thing
+        /// [`make_element`](Self::make_element) builds. A name registered both
+        /// ways (`mp4mux`, `textoverlay`) is its single-input element at link
+        /// degree one and its muxer above that, so the parser has to tell the two
+        /// registrations apart without constructing either.
+        pub fn is_launch_element(&self, name: &str) -> bool {
+            let name = self.resolve_alias(name);
+            self.launch.iter().any(|f| f.name == name)
+        }
+
         /// The names of every element registerable by the parser: sources first,
         /// then transforms / sinks, each in registration order. The `gst-inspect`
         /// element list.

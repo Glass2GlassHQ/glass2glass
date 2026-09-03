@@ -1933,12 +1933,27 @@ fn build_graph(
 
     let is_tee = |ei: usize| specs[ei].name == "tee";
     // A non-tee node with several inbound links is a muxer (built from the
-    // registry with that input count); a tee has a single input pad.
-    let is_muxer = |ei: usize| !is_tee(ei) && in_deg[ei] > 1;
+    // registry with that input count); a tee has a single input pad. A single
+    // inbound link builds a fan-in too when the name is only registered as a
+    // muxer (M1155: `livesync` needs the fan-in arm's deadline tick and has one
+    // input); a name registered both ways (`mp4mux`, `textoverlay`) keeps
+    // falling back to its single-input element.
+    let is_muxer = |ei: usize| {
+        !is_tee(ei)
+            && match in_deg[ei] {
+                0 => false,
+                1 => {
+                    registry.is_muxer(&specs[ei].name)
+                        && !registry.is_launch_element(&specs[ei].name)
+                }
+                _ => true,
+            }
+    };
     // A node registered as a demuxer with several outbound links is a fan-out
     // demux (M210): the transpose of a muxer. A registered name with one output
     // falls back to its single-output launch element (e.g. `tsdemux`), the way a
-    // one-input muxer name falls back to its single-input element.
+    // one-input muxer name registered both ways falls back to its single-input
+    // element.
     let is_demux = |ei: usize| !is_tee(ei) && out_deg[ei] > 1 && registry.is_demux(&specs[ei].name);
     // Explicit-demux fan-out (M476): a non-tee, non-registered-demux element that
     // fans out to several pads and is fed by a file source is built by a registered
@@ -2773,4 +2788,226 @@ mod tests {
     // Auto-tee (M473): fan-out without an explicit `tee` no longer errors; the
     // parser splices one in. Covered end to end (build + run + topology) in
     // g2g-plugins/tests/m118_launch_branching.rs, where real elements exist.
+
+    /// M1155: an element whose output cadence is its own only gets the deadline
+    /// tick on a fan-in arm, and it has one input, so a name registered only as a
+    /// muxer builds a fan-in node at link degree one. A name registered both ways
+    /// still builds its single-input element there.
+    mod degree_one_fanin {
+        use super::super::DynAsyncElement;
+        use crate::memory::{MemoryDomain, SystemSlice};
+        use crate::runtime::{
+            block_on, parse_launch, run_graph, DynMultiInputElement, DynSourceLoop, LaunchFactory,
+            MuxerFactory, Registry, SourceFactory, SourceLoop,
+        };
+        use crate::{
+            AsyncElement, Caps, ConfigureOutcome, Dim, Frame, FrameTiming, G2gError,
+            MultiInputElement, OutputSink, PipelineClock, PipelinePacket, Rate, RawVideoFormat,
+        };
+        use alloc::boxed::Box;
+        use core::future::Future;
+        use core::pin::Pin;
+
+        const FRAMES: u64 = 3;
+
+        struct ZeroClock;
+        impl PipelineClock for ZeroClock {
+            fn now_ns(&self) -> u64 {
+                0
+            }
+        }
+
+        fn caps() -> Caps {
+            Caps::RawVideo {
+                format: RawVideoFormat::Rgba8,
+                width: Dim::Fixed(2),
+                height: Dim::Fixed(2),
+                framerate: Rate::Fixed(30 << 16),
+                interlace: crate::Interlace::Any,
+                colorimetry: crate::Colorimetry::UNKNOWN,
+            }
+        }
+
+        struct CountSrc;
+
+        impl SourceLoop for CountSrc {
+            type RunFuture<'a>
+                = Pin<Box<dyn Future<Output = Result<u64, G2gError>> + 'a>>
+            where
+                Self: 'a;
+            type CapsFuture<'a>
+                = core::future::Ready<Result<Caps, G2gError>>
+            where
+                Self: 'a;
+
+            fn intercept_caps(&mut self) -> Self::CapsFuture<'_> {
+                core::future::ready(Ok(caps()))
+            }
+
+            fn configure_pipeline(&mut self, _caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+                Ok(ConfigureOutcome::Accepted)
+            }
+
+            fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a> {
+                Box::pin(async move {
+                    for i in 0..FRAMES {
+                        out.push(PipelinePacket::DataFrame(Frame::new(
+                            MemoryDomain::System(SystemSlice::from_boxed(Box::new([0u8; 16]))),
+                            FrameTiming::default(),
+                            i,
+                        )))
+                        .await?;
+                    }
+                    out.push(PipelinePacket::Eos).await?;
+                    Ok(FRAMES)
+                })
+            }
+        }
+
+        /// One input, one output, forwards what it gets: the shape an element
+        /// needing the tick has.
+        struct PassMux;
+
+        impl MultiInputElement for PassMux {
+            type ProcessFuture<'a>
+                = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+            where
+                Self: 'a;
+
+            fn input_count(&self) -> usize {
+                1
+            }
+
+            fn intercept_caps(&self, _input: usize, upstream: &Caps) -> Result<Caps, G2gError> {
+                Ok(upstream.clone())
+            }
+
+            fn configure_pipeline(
+                &mut self,
+                _input: usize,
+                _caps: &Caps,
+            ) -> Result<ConfigureOutcome, G2gError> {
+                Ok(ConfigureOutcome::Accepted)
+            }
+
+            fn output_caps(&self) -> Result<Caps, G2gError> {
+                Ok(caps())
+            }
+
+            fn process<'a>(
+                &'a mut self,
+                _input: usize,
+                packet: PipelinePacket,
+                out: &'a mut dyn OutputSink,
+            ) -> Self::ProcessFuture<'a> {
+                Box::pin(async move {
+                    if matches!(packet, PipelinePacket::DataFrame(_)) {
+                        out.push(packet).await?;
+                    }
+                    Ok(())
+                })
+            }
+        }
+
+        /// The transform registration of the both-ways name. It drops every frame,
+        /// so the sink count alone says which of the two registrations the parser
+        /// picked.
+        struct DropAll;
+
+        impl AsyncElement for DropAll {
+            type ProcessFuture<'a>
+                = core::future::Ready<Result<(), G2gError>>
+            where
+                Self: 'a;
+
+            fn intercept_caps(&self, upstream: &Caps) -> Result<Caps, G2gError> {
+                Ok(upstream.clone())
+            }
+
+            fn configure_pipeline(&mut self, _caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+                Ok(ConfigureOutcome::Accepted)
+            }
+
+            fn process<'a>(
+                &'a mut self,
+                _packet: PipelinePacket,
+                _out: &'a mut dyn OutputSink,
+            ) -> Self::ProcessFuture<'a> {
+                core::future::ready(Ok(()))
+            }
+        }
+
+        struct Swallow;
+
+        impl AsyncElement for Swallow {
+            type ProcessFuture<'a>
+                = core::future::Ready<Result<(), G2gError>>
+            where
+                Self: 'a;
+
+            fn intercept_caps(&self, upstream: &Caps) -> Result<Caps, G2gError> {
+                Ok(upstream.clone())
+            }
+
+            fn configure_pipeline(&mut self, _caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+                Ok(ConfigureOutcome::Accepted)
+            }
+
+            fn process<'a>(
+                &'a mut self,
+                _packet: PipelinePacket,
+                _out: &'a mut dyn OutputSink,
+            ) -> Self::ProcessFuture<'a> {
+                core::future::ready(Ok(()))
+            }
+        }
+
+        fn registry() -> Registry {
+            let mut reg = Registry::new();
+            reg.register_source(SourceFactory::new("countsrc", caps(), || {
+                Box::new(CountSrc) as Box<dyn DynSourceLoop>
+            }));
+            reg.register_launch(LaunchFactory::new(
+                "countsink",
+                alloc::vec::Vec::new(),
+                || Box::new(Swallow) as Box<dyn DynAsyncElement>,
+            ));
+            reg.register_muxer(MuxerFactory::new("passmux", |_inputs| {
+                Box::new(PassMux) as Box<dyn DynMultiInputElement>
+            }));
+            // Registered both ways, like `mp4mux` / `textoverlay`.
+            reg.register_muxer(MuxerFactory::new("bothways", |_inputs| {
+                Box::new(PassMux) as Box<dyn DynMultiInputElement>
+            }));
+            reg.register_launch(LaunchFactory::new(
+                "bothways",
+                alloc::vec::Vec::new(),
+                || Box::new(DropAll) as Box<dyn DynAsyncElement>,
+            ));
+            reg
+        }
+
+        #[test]
+        fn a_muxer_only_name_builds_a_fan_in_on_one_inbound_link() {
+            let reg = registry();
+            let graph = parse_launch(&reg, "countsrc ! passmux ! countsink")
+                .expect("a one-input muxer in a plain chain parses");
+            let stats = block_on(run_graph(graph, &ZeroClock, 4)).expect("and runs");
+            assert_eq!(
+                stats.frames_consumed, FRAMES,
+                "the fan-in forwarded every frame to the sink"
+            );
+        }
+
+        #[test]
+        fn a_name_registered_both_ways_stays_its_element_on_one_inbound_link() {
+            let reg = registry();
+            let graph = parse_launch(&reg, "countsrc ! bothways ! countsink").expect("parses");
+            let stats = block_on(run_graph(graph, &ZeroClock, 4)).expect("runs");
+            assert_eq!(
+                stats.frames_consumed, 0,
+                "the transform registration ran, and it drops every frame"
+            );
+        }
+    }
 }
