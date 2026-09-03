@@ -10,9 +10,10 @@
 //! fractional read position (`phase`) across `process` calls. The `quality`
 //! property picks the kernel: 0 is two-point linear, cheap and table-free but
 //! with the usual high-frequency rolloff; 1..=10 is a windowed sinc whose tap
-//! count grows with quality, read from an oversampled phase table. Rate 1:1 is
-//! a byte-exact pass-through either way. CPU-only and `no_std`: this element
-//! lives in the crate baseline alongside `AudioConvert`.
+//! count grows with quality and, when downsampling, with the rate ratio, read
+//! from an oversampled phase table. Rate 1:1 is a byte-exact pass-through
+//! either way. CPU-only and `no_std`: this element lives in the crate baseline
+//! alongside `AudioConvert`.
 //!
 //! An output sample can only be emitted once its whole kernel window has
 //! arrived, so the per-buffer loop defers the last `taps / 2` input samples
@@ -59,12 +60,32 @@ const MIN_QUALITY_TEXT: &str = "0";
 const MAX_QUALITY_TEXT: &str = "10";
 const DEFAULT_QUALITY_TEXT: &str = "4";
 
-/// Kernel width per `quality` level, indexed by quality. Level 0 is the
-/// two-point linear path; the sinc levels grow to 64 taps, which at 48 kHz puts
-/// the kernel's transition band inside the top octave. gst also maps quality to
-/// filter length, but its table is Kaiser-parameterised and is not reproduced
-/// here.
+/// Kernel width per `quality` level at a 1:1 or upsampling ratio, indexed by
+/// quality. Level 0 is the two-point linear path; the sinc levels grow to 64
+/// taps, which at 48 kHz puts the kernel's transition band inside the top
+/// octave. gst also maps quality to filter length, but its table is
+/// Kaiser-parameterised and is not reproduced here.
 const QUALITY_TAPS: [usize; 11] = [2, 8, 12, 16, 32, 36, 40, 44, 48, 56, 64];
+
+/// Ceiling on the ratio-scaled tap count, bounding the phase table's memory and
+/// the multiply-adds per output sample. 1536 is quality 10's 64 taps times the
+/// 24:1 ratio of 192 kHz down to 8 kHz, so no supported rate pair is clamped.
+const MAX_SINC_TAPS: usize = 1536;
+
+/// Taps for `quality` at this rate pair, always even. Downsampling band-limits
+/// to the output Nyquist, so the sinc widens by the rate ratio; widening the
+/// window by the same ratio keeps as many sinc lobes inside it as at 1:1, which
+/// is what holds the stop-band rejection. Upsampling and 1:1 keep the quality's
+/// own width.
+fn scaled_taps(quality: u8, in_rate: u32, out_rate: u32) -> usize {
+    let base = QUALITY_TAPS[quality as usize];
+    if in_rate <= out_rate {
+        return base;
+    }
+    let ratio = in_rate.div_ceil(out_rate) as usize;
+    let scaled = base.saturating_mul(ratio).min(MAX_SINC_TAPS);
+    scaled + scaled % 2
+}
 
 /// Fractional read positions the sinc table holds, over `[0, 1]`. A runtime
 /// position lands between two of them and interpolates linearly, gst's
@@ -111,7 +132,7 @@ struct SincTable {
 
 impl SincTable {
     fn build(quality: u8, in_rate: u32, out_rate: u32) -> Self {
-        let taps = QUALITY_TAPS[quality as usize];
+        let taps = scaled_taps(quality, in_rate, out_rate);
         let half = taps / 2;
         // Downsampling has to band-limit to the *output* Nyquist, so the sinc
         // widens by the rate ratio; upsampling keeps the input Nyquist.
@@ -984,6 +1005,23 @@ mod tests {
         for v in got {
             assert!((v - LEVEL).abs() < 1e-6, "got {v} want {LEVEL}");
         }
+    }
+
+    #[test]
+    fn downsampling_scales_the_tap_count_by_the_ratio() {
+        let base = QUALITY_TAPS[DEFAULT_QUALITY as usize];
+        assert_eq!(scaled_taps(DEFAULT_QUALITY, 96_000, 8_000), base * 12);
+        assert_eq!(scaled_taps(DEFAULT_QUALITY, 44_100, 48_000), base);
+        assert_eq!(scaled_taps(DEFAULT_QUALITY, 48_000, 48_000), base);
+        // the widest rate pair the cap is sized for reaches it exactly.
+        assert_eq!(
+            scaled_taps(MAX_QUALITY as u8, 192_000, 8_000),
+            MAX_SINC_TAPS
+        );
+        // past it the count clamps, and stays even.
+        let clamped = scaled_taps(MAX_QUALITY as u8, 192_000, 1_000);
+        assert_eq!(clamped, MAX_SINC_TAPS);
+        assert!(clamped.is_multiple_of(2));
     }
 
     #[test]

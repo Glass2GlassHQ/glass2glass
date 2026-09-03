@@ -179,8 +179,6 @@ Highest leverage first:
 
 ## Audio depth
 
-- Ratio-scaled tap count in the `audioresample` sinc kernel: the fixed window
-  loses stop-band depth under heavy downsampling.
 - Hand sources the elected clock (a `SourceLoop::set_clock_sync` plus its
   runner call site), so capture PTS can be translated onto a foreign master
   in a duplex graph.

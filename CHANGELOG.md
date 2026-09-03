@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1152: `audioresample`'s sinc kernel scales its tap count with the downsampling ratio, so the stop-band rejection at a given `quality` holds at any ratio.
 - M1151: `rtspsrcn onvif-metadata=true` gives the camera's ONVIF analytics track its own pad, `onvifmetadataparse` reads the scene description into `AnalyticsMeta`, and `onvifmetadatacombiner` attaches it to the video frames it describes by wall clock.
 
 ## 0.7.0
