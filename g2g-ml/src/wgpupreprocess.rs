@@ -17,11 +17,13 @@
 //!   f32 tensor is left in a `wgpu::Buffer` (`MemoryDomain::WgpuBuffer`) instead
 //!   of read back to `MemoryDomain::System`, so `WgpuInference` binds it on-device.
 //! - **Input (M217, surface-import):** when the NV12 frame arrives already on the
-//!   GPU as a `MemoryDomain::WgpuTexture` (an R8Uint texture in standard NV12
-//!   byte layout, see [`WgpuNv12Texture`]), the element samples it straight into
-//!   the compute pass on the producer's own device, with no CPU upload. The
-//!   default `MemoryDomain::System` path (upload NV12 bytes to a storage buffer)
-//!   is unchanged.
+//!   GPU as a `MemoryDomain::WgpuTexture` (see [`WgpuNv12Texture`]), the element
+//!   samples it straight into the compute pass on the producer's own device, with
+//!   no CPU upload. Either NV12 texture layout works: the R8Uint plane holding
+//!   the standard NV12 byte layout that the bridges allocate, or the two-plane
+//!   `TextureFormat::NV12` a Vulkan Video decoder hands out (M1157), sampled
+//!   through its luma and chroma views. The default `MemoryDomain::System` path
+//!   (upload NV12 bytes to a storage buffer) is unchanged.
 //! - **Input (M990, dma-buf import, `dmabuf-wgpu` feature, Linux):** a
 //!   `MemoryDomain::DmaBuf` frame from a capture / decode path is imported
 //!   with Vulkan external memory into a buffer aliasing the same pixels and bound
@@ -53,6 +55,7 @@ use g2g_core::{
 // (the CUDA and dma-buf bridges); re-exported so this module's consumers keep
 // naming it here.
 pub use g2g_plugins::gpu::WgpuNv12Texture;
+use g2g_plugins::gpu::{nv12_plane_views, texture_layout, WgpuTextureLayout};
 // The one place the YUV <-> RGB coefficients are derived, shared with the CPU
 // converters and shaders in g2g-plugins so no two stages disagree.
 use g2g_plugins::yuvmatrix::{YuvToRgbWeights, SAMPLE_SPAN};
@@ -62,6 +65,38 @@ const WORKGROUP: u32 = 8;
 
 /// The chroma code carrying no colour, in the f32 units these mirrors work in.
 const CHROMA_NEUTRAL: f32 = g2g_plugins::yuvmatrix::CHROMA_NEUTRAL as f32;
+
+/// The entry point every surface-import shader shares: this invocation's pixel
+/// `(x, y)` plus the frame's `w` / `h` from the uniform, with the out-of-frame
+/// invocations of an edge workgroup returning before they read anything.
+macro_rules! tex_main_entry {
+    () => {
+        r#"
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let x = gid.x;
+    let y = gid.y;
+    let w = dims.width;
+    let h = dims.height;
+    if (x >= w || y >= h) { return; }
+"#
+    };
+}
+
+/// The tail every shader shares: `r`, `g`, `b` written into pixel `(x, y)` of
+/// the tightly-packed NCHW tensor's three planes.
+macro_rules! write_rgb_tensor {
+    () => {
+        r#"
+    let area = w * h;
+    let li = y * w + x;
+    out[li] = clamp(r, 0.0, 1.0);
+    out[area + li] = clamp(g, 0.0, 1.0);
+    out[2u * area + li] = clamp(b, 0.0, 1.0);
+}
+"#
+    };
+}
 
 /// The uniform every pipeline binds: the frame geometry, where the input pixels
 /// sit in their buffer (`stride` = input row stride, `base` = byte offset of the
@@ -146,14 +181,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 "#,
             $sample,
             yuv_to_rgb!(),
-            r#"
-    let area = w * h;
-    let li = y * w + x;
-    out[li] = clamp(r, 0.0, 1.0);
-    out[area + li] = clamp(g, 0.0, 1.0);
-    out[2u * area + li] = clamp(b, 0.0, 1.0);
-}
-"#
+            write_rgb_tensor!()
         )
     };
 }
@@ -193,15 +221,9 @@ const TEX_SHADER: &str = concat!(
     r#"
 @group(0) @binding(1) var nv12: texture_2d<u32>;
 @group(0) @binding(2) var<storage, read_write> out: array<f32>;
-
-@compute @workgroup_size(8, 8)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let x = gid.x;
-    let y = gid.y;
-    let w = dims.width;
-    let h = dims.height;
-    if (x >= w || y >= h) { return; }
-
+"#,
+    tex_main_entry!(),
+    r#"
     let yv = f32(textureLoad(nv12, vec2<i32>(i32(x), i32(y)), 0).r);
     // UV is half-resolution, packed in the rows after the Y plane: the Cb,Cr
     // pair for this pixel sits at column (x/2)*2 of row h + y/2.
@@ -211,14 +233,32 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let cr = f32(textureLoad(nv12, vec2<i32>(cx + 1, cy), 0).r) - 128.0;
 "#,
     yuv_to_rgb!(),
+    write_rgb_tensor!()
+);
+
+/// Surface-import variant of `TEX_SHADER` for the two-plane
+/// `TextureFormat::NV12` texture a Vulkan Video decoder hands out (M1157): the
+/// luma and chroma planes arrive as the two views `gpu::nv12_plane_views` builds,
+/// the chroma one at half size with Cb in `r` and Cr in `g`, so this pixel's
+/// chroma is its texel `(x/2, y/2)`. `textureLoad` fetches that exact texel with
+/// no filtering, and the plane views are normalized, so scaling back by 255
+/// feeds the shared colour step the same sample values the packed stage reads.
+const TEX_SHADER_NV12_PLANES: &str = concat!(
+    dims_struct!(),
     r#"
-    let area = w * h;
-    let li = y * w + x;
-    out[li] = clamp(r, 0.0, 1.0);
-    out[area + li] = clamp(g, 0.0, 1.0);
-    out[2u * area + li] = clamp(b, 0.0, 1.0);
-}
-"#
+@group(0) @binding(1) var luma_plane: texture_2d<f32>;
+@group(0) @binding(2) var<storage, read_write> out: array<f32>;
+@group(0) @binding(3) var chroma_plane: texture_2d<f32>;
+"#,
+    tex_main_entry!(),
+    r#"
+    let yv = textureLoad(luma_plane, vec2<i32>(i32(x), i32(y)), 0).r * 255.0;
+    let chroma = textureLoad(chroma_plane, vec2<i32>(i32(x / 2u), i32(y / 2u)), 0);
+    let cb = chroma.r * 255.0 - 128.0;
+    let cr = chroma.g * 255.0 - 128.0;
+"#,
+    yuv_to_rgb!(),
+    write_rgb_tensor!()
 );
 
 /// Surface-import variant for an already-RGB frame (M304): the input is an
@@ -232,23 +272,15 @@ const TEX_SHADER_RGBA: &str = concat!(
     r#"
 @group(0) @binding(1) var img: texture_2d<f32>;
 @group(0) @binding(2) var<storage, read_write> out: array<f32>;
-
-@compute @workgroup_size(8, 8)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let x = gid.x;
-    let y = gid.y;
-    let w = dims.width;
-    let h = dims.height;
-    if (x >= w || y >= h) { return; }
-
+"#,
+    tex_main_entry!(),
+    r#"
     let c = textureLoad(img, vec2<i32>(i32(x), i32(y)), 0);
-    let area = w * h;
-    let li = y * w + x;
-    out[li] = c.r;
-    out[area + li] = c.g;
-    out[2u * area + li] = c.b;
-}
-"#
+    let r = c.r;
+    let g = c.g;
+    let b = c.b;
+"#,
+    write_rgb_tensor!()
 );
 
 /// One pixel's YUV -> RGB, the host mirror of the shaders' colour math (`cb` /
@@ -452,6 +484,10 @@ pub struct WgpuPreprocess {
     /// frame's device (M217). Separate from `gpu` because the texture path binds
     /// a sampled texture, not a storage buffer, and adopts the producer's device.
     tex_gpu: Option<ImportGpu>,
+    /// Two-plane NV12 surface-import resources (M1157), built on the first such
+    /// GPU-texture frame. Separate pipeline from `tex_gpu` because the planes are
+    /// two normalized `texture_2d<f32>` bindings, not one packed uint plane.
+    tex_planes_gpu: Option<ImportGpu>,
     /// RGBA surface-import resources (M304), built on the first RGBA GPU-texture
     /// frame. Separate pipeline from `tex_gpu` (samples `texture_2d<f32>`, no
     /// YCbCr math); the input is already-converted RGBA from `MediaCodecDec`.
@@ -494,6 +530,7 @@ impl WgpuPreprocess {
             configured: false,
             gpu: None,
             tex_gpu: None,
+            tex_planes_gpu: None,
             #[cfg(all(target_os = "android", feature = "mediacodec-wgpu"))]
             tex_rgba_gpu: None,
             #[cfg(all(target_os = "linux", feature = "dmabuf-wgpu"))]
@@ -689,6 +726,42 @@ impl WgpuPreprocess {
         ));
     }
 
+    /// [`ensure_tex_gpu`](Self::ensure_tex_gpu) for the two-plane NV12 pipeline
+    /// (M1157).
+    fn ensure_tex_planes_gpu(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
+        if self.tex_planes_gpu.is_some() {
+            return;
+        }
+        self.tex_planes_gpu = Some(build_import_gpu(
+            device,
+            queue,
+            self.width,
+            self.height,
+            self.colorimetry,
+            TEX_SHADER_NV12_PLANES,
+            "nv12-planes-tex-rgb-normalize",
+        ));
+    }
+
+    /// Route a GPU-resident NV12 frame to the pipeline for the layout its
+    /// texture is in (M1157): one packed R8Uint plane from the NV12 bridges, or
+    /// the decoder's two-plane `TextureFormat::NV12`. Both produce the same
+    /// tensor. Any other format under a `WgpuNv12Texture` is a producer bug, not
+    /// something to guess at.
+    fn dispatch_nv12_texture(&mut self, owner: &WgpuNv12Texture) -> Result<MemoryDomain, G2gError> {
+        match texture_layout(owner.texture()) {
+            Some(WgpuTextureLayout::PackedNv12) => {
+                self.ensure_tex_gpu(owner.device(), owner.queue());
+                self.dispatch_tex(owner)
+            }
+            Some(WgpuTextureLayout::MultiplanarNv12) => {
+                self.ensure_tex_planes_gpu(owner.device(), owner.queue());
+                self.dispatch_tex_planes(owner)
+            }
+            Some(WgpuTextureLayout::Rgba) | None => Err(G2gError::UnsupportedDomain),
+        }
+    }
+
     /// Surface-import dispatch (M217): sample the incoming NV12 texture straight
     /// into the compute pass on its own device, no CPU upload. Returns the tensor
     /// domain, GPU-resident (`WgpuBuffer`) when `gpu_output` is set or read back
@@ -736,6 +809,72 @@ impl WgpuPreprocess {
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("nv12-tex->rgb"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&tg.pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            let gx = self.width.div_ceil(WORKGROUP);
+            let gy = self.height.div_ceil(WORKGROUP);
+            pass.dispatch_workgroups(gx, gy, 1);
+        }
+
+        finish_import(tg, encoder, self.gpu_output)
+    }
+
+    /// Two-plane surface-import dispatch (M1157): bind the decoder's
+    /// `TextureFormat::NV12` picture through its luma and chroma views and run
+    /// the same colour math [`dispatch_tex`](Self::dispatch_tex) does, so the
+    /// tensor matches the packed path byte for byte up to the plane views'
+    /// normalization.
+    fn dispatch_tex_planes(&self, owner: &WgpuNv12Texture) -> Result<MemoryDomain, G2gError> {
+        let tg = self
+            .tex_planes_gpu
+            .as_ref()
+            .ok_or(G2gError::NotConfigured)?;
+        let texture = owner.texture();
+        // A two-plane texture carries the picture at its own size, chroma
+        // subsampling included, so the extents are the negotiated ones.
+        if texture.width() != self.width || texture.height() != self.height {
+            return Err(G2gError::CapsMismatch);
+        }
+        // The planes are addressed by texel, so only the colorimetry can move
+        // under this pipeline: rewrite the uniform per frame.
+        tg.queue.write_buffer(
+            &tg.dims_buf,
+            0,
+            &dims_bytes(self.width, self.height, self.width, 0, self.colorimetry),
+        );
+        let [luma, chroma] = nv12_plane_views(texture);
+        let layout = tg.pipeline.get_bind_group_layout(0);
+        let bind_group = tg.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("nv12-planes-tex-binding"),
+            layout: &layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: tg.dims_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&luma),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: tg.out_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&chroma),
+                },
+            ],
+        });
+
+        let mut encoder = tg
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("nv12-planes-tex->rgb"),
                 timestamp_writes: None,
             });
             pass.set_pipeline(&tg.pipeline);
@@ -1208,8 +1347,7 @@ impl AsyncElement for WgpuPreprocess {
                         MemoryDomain::WgpuTexture(owned) => {
                             let any = owned.keep_alive().as_any();
                             if let Some(owner) = any.downcast_ref::<WgpuNv12Texture>() {
-                                self.ensure_tex_gpu(owner.device(), owner.queue());
-                                self.dispatch_tex(owner)?
+                                self.dispatch_nv12_texture(owner)?
                             } else if let Some(domain) = self.try_dispatch_rgba(any)? {
                                 // M304: already-RGB texture from the Android decode path.
                                 domain

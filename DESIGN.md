@@ -1104,7 +1104,27 @@ texture behind `WgpuNv12Texture`, so a consumer samples the planes through
 `VkFormat` and geometry in `OwnedVulkanTexture`, and its keep-alive downcasts to
 `VulkanImageOwner` for the `ash` device and the wgpu texture that owns the image,
 so a Vulkan-native consumer (an encoder, a presenter) reads the picture where the
-decoder left it, idle in `SHADER_READ_ONLY_OPTIMAL`. Two consumption models sit
+decoder left it, idle in `SHADER_READ_ONLY_OPTIMAL`.
+
+The caps say a `WgpuTexture` frame is NV12 but not which of the two NV12 texture
+layouts it is, so a consumer reads that off the texture per frame:
+`gpu::texture_layout` maps `R8Uint` to the packed plane the CUDA and dma-buf
+bridges allocate, `TextureFormat::NV12` to the decoder's two planes, and an
+uncompressed colour format to a finished picture. wgpu refuses to bind a
+multi-planar texture whole, so the planes come from `gpu::nv12_plane_views`:
+`Plane0` as full-size `R8Unorm` and `Plane1` as half-size `Rg8Unorm`, each a
+`texture_2d<f32>`. `WgpuSink` holds a blit pipeline per layout and picks one per
+frame, so one sink negotiated for NV12 renders the same picture from a decoder's
+texture and from a system-memory upload of the same clip: its two NV12 fragment
+stages share one `ycbcr_to_rgb` step and both fetch the nearest chroma texel,
+since a filtered chroma sample sits a quarter texel off the chroma grid and
+shifts colour across edges. `g2g-ml`'s `WgpuPreprocess` does the same on the
+compute side, with a second import pipeline binding the two plane views. The
+consumers that only read a finished picture (`WgpuCompositor`, `VulkanHdrSink`,
+the Bevy plugin) reject either NV12 layout rather than sampling a luma plane as
+colour.
+
+Two consumption models sit
 on the same `H264DpbDecoder`: the **streaming** `VulkanVideoDec` (push, `AsyncElement`)
 for pipelines, and `VulkanVideoPlayer`, a **random-access "pull"** frame server
 (`frame_at(pts)` / `frame_at_index`) that indexes GOPs / POC (`index_pictures`),

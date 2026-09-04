@@ -234,14 +234,20 @@ pub enum WgpuTextureLayout {
     /// The packed-NV12 plane [`WgpuNv12Texture`] describes: `width x height*3/2`
     /// R8Uint, Y rows then interleaved CbCr, needing a YCbCr -> RGB convert.
     PackedNv12,
+    /// The two-plane `wgpu::TextureFormat::NV12` a GPU decoder hands out:
+    /// `width x height`, sampled through the [`nv12_plane_views`] pair, needing
+    /// the same YCbCr -> RGB convert.
+    MultiplanarNv12,
 }
 
 /// The layout of `texture` from its format: the R8Uint single-channel plane the
-/// NV12 bridges allocate is packed NV12, an uncompressed colour format is a
-/// finished picture. `None` for a format no g2g consumer samples.
+/// NV12 bridges allocate is packed NV12, the two-plane NV12 format is the
+/// decoder's, an uncompressed colour format is a finished picture. `None` for a
+/// format no g2g consumer samples.
 pub fn texture_layout(texture: &wgpu::Texture) -> Option<WgpuTextureLayout> {
     match texture.format() {
         wgpu::TextureFormat::R8Uint => Some(WgpuTextureLayout::PackedNv12),
+        wgpu::TextureFormat::NV12 => Some(WgpuTextureLayout::MultiplanarNv12),
         wgpu::TextureFormat::Rgba8Unorm
         | wgpu::TextureFormat::Rgba8UnormSrgb
         | wgpu::TextureFormat::Bgra8Unorm
@@ -249,6 +255,34 @@ pub fn texture_layout(texture: &wgpu::Texture) -> Option<WgpuTextureLayout> {
         | wgpu::TextureFormat::Rgba16Float => Some(WgpuTextureLayout::Rgba),
         _ => None,
     }
+}
+
+/// The luma and chroma views of a [`WgpuTextureLayout::MultiplanarNv12`]
+/// texture: `Plane0` as full-size `R8Unorm`, `Plane1` as half-size `Rg8Unorm`,
+/// each a `texture_2d<f32>` in WGSL returning normalized `[0, 1]` samples. wgpu
+/// rejects a binding of the whole NV12 texture (aspect `All`), so every consumer
+/// samples it through this pair.
+pub fn nv12_plane_views(texture: &wgpu::Texture) -> [wgpu::TextureView; 2] {
+    [
+        (
+            "nv12-luma-plane",
+            wgpu::TextureAspect::Plane0,
+            wgpu::TextureFormat::R8Unorm,
+        ),
+        (
+            "nv12-chroma-plane",
+            wgpu::TextureAspect::Plane1,
+            wgpu::TextureFormat::Rg8Unorm,
+        ),
+    ]
+    .map(|(label, aspect, format)| {
+        texture.create_view(&wgpu::TextureViewDescriptor {
+            label: Some(label),
+            format: Some(format),
+            aspect,
+            ..Default::default()
+        })
+    })
 }
 
 /// Read an RGBA8 `wgpu::Texture` back to a packed `Vec<u8>` (`width * height * 4`)
@@ -415,9 +449,12 @@ pub(crate) unsafe fn import_vk_image_as_wgpu_texture(
 }
 
 /// Owns a GPU-resident NV12 frame for surface-import into `WgpuPreprocess`
-/// (M217): an R8Uint `wgpu::Texture` of size `width x (height * 3/2)` holding the
-/// bytes in the standard NV12 layout (Y plane, then interleaved Cb,Cr), plus the
-/// device / queue it lives on. Boxed as the [`WgpuKeepAlive`] of a
+/// (M217), in either NV12 texture layout: an R8Uint `wgpu::Texture` of size
+/// `width x (height * 3/2)` holding the bytes in the standard NV12 layout (Y
+/// plane, then interleaved Cb,Cr), or a two-plane `TextureFormat::NV12` texture
+/// of `width x height`. [`texture_layout`] of [`texture`](Self::texture) tells a
+/// consumer which. Carries the device / queue it lives on. Boxed as the
+/// [`WgpuKeepAlive`] of a
 /// [`MemoryDomain::WgpuTexture`](g2g_core::MemoryDomain); a consumer downcasts to
 /// recover the texture and adopt its device (a texture is bindable only on its
 /// own device), so the NV12 pixels are sampled straight into a compute or render
@@ -444,7 +481,8 @@ impl core::fmt::Debug for WgpuNv12Texture {
 }
 
 impl WgpuNv12Texture {
-    /// Wrap an NV12 R8Uint texture with the device / queue it lives on.
+    /// Wrap a packed-R8Uint or two-plane NV12 texture with the device / queue it
+    /// lives on.
     pub fn new(device: wgpu::Device, queue: wgpu::Queue, texture: wgpu::Texture) -> Self {
         Self {
             device,

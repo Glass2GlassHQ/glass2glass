@@ -32,7 +32,7 @@ use g2g_core::{Caps, Dim, PipelineClock, Rate, RawVideoFormat, VideoCodec};
 use g2g_plugins::appsink::{register_appsink_pull, AppSink, AppSinkPull, Pull};
 use g2g_plugins::ffmpegdec::FfmpegH264Dec;
 use g2g_plugins::filesrc::FileSrc;
-use g2g_plugins::gpu::{texture_of, GpuContext};
+use g2g_plugins::gpu::{texture_layout, texture_of, GpuContext, WgpuTextureLayout};
 use g2g_plugins::h264parse::H264Parse;
 use g2g_plugins::vellooverlay::VelloAnalyticsOverlay;
 use g2g_plugins::videoconvert::VideoConvert;
@@ -213,6 +213,12 @@ fn ingest_frames(
                     warn!("foreign keep-alive on a WgpuTexture frame; dropping");
                     continue;
                 };
+                // Bevy samples the texture as a colour image, so a YCbCr layout
+                // (an NV12 picture, packed or two-plane) has no sRGB view to make.
+                if texture_layout(texture) != Some(WgpuTextureLayout::Rgba) {
+                    warn!("non-RGBA texture on a WgpuTexture frame; dropping");
+                    continue;
+                }
                 // Clones share the refcounted wgpu texture; it outlives the
                 // g2g frame we drop at the end of this iteration.
                 let texture = texture.clone();

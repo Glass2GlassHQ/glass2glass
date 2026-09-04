@@ -15,7 +15,7 @@ use g2g_core::{
 };
 use g2g_ml::wgpupreprocess::{
     gpu_available, nv12_to_gpu_texture, nv12_to_rgb_tensor, nv12_to_rgb_tensor_tagged,
-    WgpuBufferOwner, WgpuPreprocess,
+    WgpuBufferOwner, WgpuNv12Texture, WgpuPreprocess,
 };
 
 fn nv12_caps(w: u32, h: u32) -> Caps {
@@ -450,4 +450,174 @@ async fn gpu_matrix_follows_the_caps_colorimetry() {
         .map(|(g, e)| (g - e).abs())
         .fold(0f32, f32::max);
     assert!(apart > 1e-2, "BT.601 and BT.709 differ by only {apart}");
+}
+
+/// Bytes per texel of an NV12 chroma plane, Cb and Cr interleaved.
+const CHROMA_BYTES_PER_TEXEL: u32 = 2;
+
+/// The two-plane counterpart of `nv12_to_gpu_texture`: the same NV12 bytes in a
+/// `TextureFormat::NV12` texture of `width x height`, the layout a GPU decoder
+/// hands out. `None` when the adapter cannot make one.
+async fn nv12_to_two_plane_texture(nv12: &[u8], width: u32, height: u32) -> Option<MemoryDomain> {
+    let instance = wgpu::Instance::default();
+    let adapter = instance
+        .request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            ..Default::default()
+        })
+        .await
+        .ok()?;
+    if !adapter
+        .features()
+        .contains(wgpu::Features::TEXTURE_FORMAT_NV12)
+    {
+        return None;
+    }
+    let (device, queue) = adapter
+        .request_device(&wgpu::DeviceDescriptor {
+            label: Some("two-plane-nv12"),
+            required_features: wgpu::Features::TEXTURE_FORMAT_NV12,
+            required_limits: adapter.limits(),
+            ..Default::default()
+        })
+        .await
+        .ok()?;
+
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("two-plane-nv12"),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::NV12,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    // Each plane is written on its own aspect: a whole-texture write has no
+    // single texel size to describe.
+    let luma_bytes = (width * height) as usize;
+    for (aspect, bytes, plane_width, plane_height, bytes_per_row) in [
+        (
+            wgpu::TextureAspect::Plane0,
+            &nv12[..luma_bytes],
+            width,
+            height,
+            width,
+        ),
+        (
+            wgpu::TextureAspect::Plane1,
+            &nv12[luma_bytes..],
+            width / 2,
+            height / 2,
+            (width / 2) * CHROMA_BYTES_PER_TEXEL,
+        ),
+    ] {
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect,
+            },
+            bytes,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(bytes_per_row),
+                rows_per_image: Some(plane_height),
+            },
+            wgpu::Extent3d {
+                width: plane_width,
+                height: plane_height,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
+
+    let owner = WgpuNv12Texture::new(device, queue, texture);
+    Some(MemoryDomain::WgpuTexture(g2g_core::OwnedWgpuTexture::new(
+        width,
+        height,
+        std::sync::Arc::new(owner),
+    )))
+}
+
+/// The tensor `element` produces for one GPU-texture frame.
+async fn preprocess_texture(element: &mut WgpuPreprocess, domain: MemoryDomain) -> Vec<f32> {
+    let mut out = Collect::default();
+    element
+        .process(
+            PipelinePacket::DataFrame(Frame {
+                domain,
+                timing: FrameTiming::default(),
+                sequence: 0,
+                meta: Default::default(),
+            }),
+            &mut out,
+        )
+        .await
+        .expect("surface-import");
+    let tensor = out
+        .packets
+        .iter()
+        .find_map(|p| match p {
+            PipelinePacket::DataFrame(f) => Some(f),
+            _ => None,
+        })
+        .expect("a tensor frame");
+    frame_f32(tensor)
+}
+
+/// M1157: the surface import also reads the two-plane `TextureFormat::NV12` a
+/// GPU decoder hands out, through its luma and chroma views. One configured
+/// element takes both NV12 texture layouts and must build the same tensor from
+/// the same bytes.
+#[tokio::test]
+async fn two_plane_nv12_texture_matches_the_packed_plane() {
+    let _gpu = GPU_LOCK.lock().await;
+    if !gpu_available().await {
+        eprintln!("skipping: no wgpu adapter on this host");
+        return;
+    }
+    let (w, h) = (4usize, 2usize);
+    let y_plane = [16u8, 81, 145, 235, 41, 100, 200, 128];
+    let uv_plane = [90u8, 200, 170, 60];
+    let nv12: Vec<u8> = y_plane.iter().chain(&uv_plane).copied().collect();
+
+    let Some(two_plane) = nv12_to_two_plane_texture(&nv12, w as u32, h as u32).await else {
+        eprintln!("skipping: no adapter with TEXTURE_FORMAT_NV12 on this host");
+        return;
+    };
+    let packed = nv12_to_gpu_texture(&nv12, w as u32, h as u32)
+        .await
+        .expect("upload the packed nv12 plane");
+
+    let mut element = WgpuPreprocess::new();
+    element
+        .configure_pipeline(&nv12_caps(w as u32, h as u32))
+        .expect("configure NV12");
+    let from_planes = preprocess_texture(&mut element, two_plane).await;
+    let from_packed = preprocess_texture(&mut element, packed).await;
+
+    assert_eq!(from_planes.len(), 3 * w * h, "NCHW RGB tensor length");
+    // The plane views hand the shader `byte / 255` where the packed R8Uint plane
+    // hands it the integer, so the two agree to the float roundtrip, not bitwise.
+    for (i, (planes, packed)) in from_planes.iter().zip(&from_packed).enumerate() {
+        assert!(
+            (planes - packed).abs() < 1e-5,
+            "element {i}: two-plane {planes} vs packed {packed}"
+        );
+    }
+    // And that tensor is the host reference, so neither GPU path is wrong in the
+    // same way.
+    let expected = nv12_to_rgb_tensor(&nv12, w, h);
+    for (i, (got, want)) in from_planes.iter().zip(&expected).enumerate() {
+        assert!(
+            (got - want).abs() < 1e-3,
+            "element {i}: two-plane {got} vs cpu reference {want}"
+        );
+    }
 }

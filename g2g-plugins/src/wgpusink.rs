@@ -38,7 +38,9 @@ use g2g_core::{
 };
 
 use crate::clock::wait_to_present;
-use crate::gpu::{gpu_err, texture_layout, texture_of, GpuContext, WgpuTextureLayout};
+use crate::gpu::{
+    gpu_err, nv12_plane_views, texture_layout, texture_of, GpuContext, WgpuTextureLayout,
+};
 use crate::yuvmatrix::YuvToRgbWeights;
 
 /// Fullscreen-triangle vertex stage, shared by both fragment stages below. The
@@ -76,34 +78,70 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
 }
 "#;
 
-/// Blit a packed-NV12 R8Uint plane (`width x height*3/2`: Y rows, then
-/// interleaved CbCr), converting YCbCr -> RGB with `colorimetry`'s matrix and
-/// range (the same weights the GL sink's shader gets). A uint texture is not
-/// filterable, so this fetches texels instead of sampling; the picture height
-/// comes from the texture (the packed plane is exactly 3/2 of it).
-fn fragment_nv12(colorimetry: Colorimetry) -> alloc::string::String {
-    let w = YuvToRgbWeights::new(colorimetry);
-    alloc::format!(
-        r#"
+/// Fetch a pixel from a packed-NV12 R8Uint plane (`width x height*3/2`: Y rows,
+/// then interleaved CbCr). A uint texture is not filterable, so this fetches
+/// texels instead of sampling. The picture height comes from the texture (the
+/// packed plane is exactly 3/2 of it).
+const FRAGMENT_PACKED_NV12: &str = r#"
 @group(0) @binding(0) var nv12_tex: texture_2d<u32>;
 
-fn plane_value(x: u32, y: u32) -> f32 {{
+fn plane_value(x: u32, y: u32) -> f32 {
     return f32(textureLoad(nv12_tex, vec2<u32>(x, y), 0).r) / 255.0;
-}}
+}
 
 @fragment
-fn fs(in: VsOut) -> @location(0) vec4<f32> {{
+fn fs(in: VsOut) -> @location(0) vec4<f32> {
     let packed = textureDimensions(nv12_tex);
     let luma_height = packed.y * 2u / 3u;
     let x = min(u32(in.uv.x * f32(packed.x)), packed.x - 1u);
     let y = min(u32(in.uv.y * f32(luma_height)), luma_height - 1u);
-
-    let luma = {luma_gain:?} * (plane_value(x, y) - {luma_floor:?});
     let chroma_x = (x / 2u) * 2u;
     let chroma_y = luma_height + y / 2u;
-    let cb = plane_value(chroma_x, chroma_y) - 0.5;
-    let cr = plane_value(chroma_x + 1u, chroma_y) - 0.5;
+    return ycbcr_to_rgb(
+        plane_value(x, y),
+        plane_value(chroma_x, chroma_y),
+        plane_value(chroma_x + 1u, chroma_y),
+    );
+}
+"#;
 
+/// Fetch a pixel from a two-plane `TextureFormat::NV12` texture through its luma
+/// and chroma views (`gpu::nv12_plane_views`): full-size luma, half-size chroma
+/// with Cb in `r` and Cr in `g`. Fetching the nearest chroma texel rather than
+/// filtering between pairs is what keeps one sink's picture the same whichever
+/// NV12 layout the producer hands it: a filtered sample lands a quarter of a
+/// chroma texel off the left-sited 4:2:0 grid and shifts colour across edges.
+/// The picture size comes from the luma plane.
+const FRAGMENT_MULTIPLANAR_NV12: &str = r#"
+@group(0) @binding(0) var luma_plane: texture_2d<f32>;
+@group(0) @binding(1) var chroma_plane: texture_2d<f32>;
+
+@fragment
+fn fs(in: VsOut) -> @location(0) vec4<f32> {
+    let luma_size = textureDimensions(luma_plane);
+    let x = min(u32(in.uv.x * f32(luma_size.x)), luma_size.x - 1u);
+    let y = min(u32(in.uv.y * f32(luma_size.y)), luma_size.y - 1u);
+    let chroma = textureLoad(chroma_plane, vec2<u32>(x / 2u, y / 2u), 0);
+    return ycbcr_to_rgb(
+        textureLoad(luma_plane, vec2<u32>(x, y), 0).r,
+        chroma.r,
+        chroma.g,
+    );
+}
+"#;
+
+/// One NV12 fragment stage: the YCbCr -> RGB step for `colorimetry` (the same
+/// weights the GL sink's shader gets) followed by `plane_fetch`, the per-layout
+/// stage above that reads the planes. All three sample values are normalized,
+/// with chroma still centred on the neutral 0.5.
+fn fragment_nv12(colorimetry: Colorimetry, plane_fetch: &str) -> alloc::string::String {
+    let w = YuvToRgbWeights::new(colorimetry);
+    alloc::format!(
+        r#"
+fn ycbcr_to_rgb(luma_value: f32, cb_value: f32, cr_value: f32) -> vec4<f32> {{
+    let luma = {luma_gain:?} * (luma_value - {luma_floor:?});
+    let cb = cb_value - 0.5;
+    let cr = cr_value - 0.5;
     return vec4<f32>(
         luma + ({red_from_cr:?}) * cr,
         luma + ({green_from_cb:?}) * cb + ({green_from_cr:?}) * cr,
@@ -111,6 +149,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {{
         1.0,
     );
 }}
+{plane_fetch}
 "#,
         luma_gain = w.luma_gain,
         luma_floor = w.luma_floor,
@@ -142,6 +181,39 @@ fn offscreen_texture(ctx: &GpuContext, width: u32, height: u32) -> wgpu::Texture
     })
 }
 
+/// What a layout's fragment stage binds, in binding order: one texture per plane
+/// it reads, then a sampler when it filters instead of fetching texels. The
+/// pipeline's bind group layout and the per-frame bind group are both built from
+/// this, so the two cannot fall out of step.
+#[derive(Debug)]
+struct BlitBindings {
+    planes: u32,
+    sample_type: wgpu::TextureSampleType,
+    sampler: bool,
+}
+
+fn blit_bindings(layout: WgpuTextureLayout) -> BlitBindings {
+    match layout {
+        WgpuTextureLayout::Rgba => BlitBindings {
+            planes: 1,
+            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+            sampler: true,
+        },
+        WgpuTextureLayout::PackedNv12 => BlitBindings {
+            planes: 1,
+            sample_type: wgpu::TextureSampleType::Uint,
+            sampler: false,
+        },
+        // The plane views are float textures, but both NV12 stages fetch texels,
+        // so neither binds a sampler.
+        WgpuTextureLayout::MultiplanarNv12 => BlitBindings {
+            planes: 2,
+            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+            sampler: false,
+        },
+    }
+}
+
 /// A blit pipeline plus the bind group layout its fragment stage expects.
 #[derive(Debug)]
 struct BlitPipeline {
@@ -152,8 +224,7 @@ struct BlitPipeline {
 impl BlitPipeline {
     /// Build the pipeline for one source layout: `fragment_stage` is appended to
     /// the shared vertex stage, and the bind group layout matches the bindings
-    /// that stage declares (a filtered colour texture + sampler for RGBA, a
-    /// non-filterable uint texture alone for packed NV12).
+    /// that stage declares (see [`blit_bindings`]).
     fn build(
         device: &wgpu::Device,
         target_format: wgpu::TextureFormat,
@@ -165,32 +236,31 @@ impl BlitPipeline {
             label: Some("wgpu-sink-blit"),
             source: wgpu::ShaderSource::Wgsl(source.into()),
         });
-        let texture_entry = wgpu::BindGroupLayoutEntry {
-            binding: 0,
-            visibility: wgpu::ShaderStages::FRAGMENT,
-            ty: wgpu::BindingType::Texture {
-                sample_type: match layout {
-                    WgpuTextureLayout::Rgba => wgpu::TextureSampleType::Float { filterable: true },
-                    WgpuTextureLayout::PackedNv12 => wgpu::TextureSampleType::Uint,
+        let bindings = blit_bindings(layout);
+        let mut entries = Vec::new();
+        for binding in 0..bindings.planes {
+            entries.push(wgpu::BindGroupLayoutEntry {
+                binding,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: bindings.sample_type,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
                 },
-                view_dimension: wgpu::TextureViewDimension::D2,
-                multisampled: false,
-            },
-            count: None,
-        };
-        let sampler_entry = wgpu::BindGroupLayoutEntry {
-            binding: 1,
-            visibility: wgpu::ShaderStages::FRAGMENT,
-            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-            count: None,
-        };
-        let entries: &[wgpu::BindGroupLayoutEntry] = match layout {
-            WgpuTextureLayout::Rgba => &[texture_entry, sampler_entry],
-            WgpuTextureLayout::PackedNv12 => &[texture_entry],
-        };
+                count: None,
+            });
+        }
+        if bindings.sampler {
+            entries.push(wgpu::BindGroupLayoutEntry {
+                binding: bindings.planes,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            });
+        }
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("wgpu-sink-bgl"),
-            entries,
+            entries: &entries,
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("wgpu-sink-layout"),
@@ -240,8 +310,8 @@ struct SourceLayout {
 impl SourceLayout {
     /// Texture format + size a system-memory frame of this layout uploads into,
     /// and its packed row stride in bytes.
-    fn upload_geometry(&self) -> (wgpu::TextureFormat, u32, u32, u32) {
-        match self.layout {
+    fn upload_geometry(&self) -> Result<(wgpu::TextureFormat, u32, u32, u32), G2gError> {
+        Ok(match self.layout {
             WgpuTextureLayout::Rgba => (
                 wgpu::TextureFormat::Rgba8Unorm,
                 self.width,
@@ -254,7 +324,10 @@ impl SourceLayout {
                 packed_nv12_height(self.height),
                 self.width,
             ),
-        }
+            // NV12 caps negotiate the packed layout, so a two-plane frame only
+            // ever arrives as a GPU texture, never as bytes to upload.
+            WgpuTextureLayout::MultiplanarNv12 => return Err(G2gError::UnsupportedDomain),
+        })
     }
 }
 
@@ -359,8 +432,12 @@ pub struct WgpuSink {
     /// from the texture, so a sink fed RGBA and NV12 in turn needs no rebuild.
     rgba_blit: BlitPipeline,
     nv12_blit: BlitPipeline,
-    /// Colorimetry the NV12 pipeline's shader was built with, so a mid-stream
-    /// refinement rebuilds it.
+    /// The two-plane NV12 blit, for a decoder-emitted `TextureFormat::NV12`
+    /// frame. Same caps as `nv12_blit`, different bindings, so which one runs is
+    /// decided per frame from the texture.
+    nv12_planes_blit: BlitPipeline,
+    /// Colorimetry both NV12 pipelines' shaders were built with, so a mid-stream
+    /// refinement rebuilds them.
     nv12_colorimetry: Colorimetry,
     /// Format of whatever the blits render into, needed to rebuild a pipeline.
     target_format: wgpu::TextureFormat,
@@ -446,7 +523,13 @@ impl WgpuSink {
                 device,
                 target_format,
                 WgpuTextureLayout::PackedNv12,
-                &fragment_nv12(Colorimetry::UNKNOWN),
+                &fragment_nv12(Colorimetry::UNKNOWN, FRAGMENT_PACKED_NV12),
+            ),
+            nv12_planes_blit: BlitPipeline::build(
+                device,
+                target_format,
+                WgpuTextureLayout::MultiplanarNv12,
+                &fragment_nv12(Colorimetry::UNKNOWN, FRAGMENT_MULTIPLANAR_NV12),
             ),
             nv12_colorimetry: Colorimetry::UNKNOWN,
             target_format,
@@ -461,8 +544,8 @@ impl WgpuSink {
         }
     }
 
-    /// Rebuild the NV12 blit for a new colorimetry. The weights are compiled
-    /// into the shader, so a mid-stream refinement means a new pipeline.
+    /// Rebuild both NV12 blits for a new colorimetry. The weights are compiled
+    /// into the shader, so a mid-stream refinement means new pipelines.
     fn set_nv12_colorimetry(&mut self, colorimetry: Colorimetry) {
         if colorimetry == self.nv12_colorimetry {
             return;
@@ -471,7 +554,13 @@ impl WgpuSink {
             &self.ctx.device,
             self.target_format,
             WgpuTextureLayout::PackedNv12,
-            &fragment_nv12(colorimetry),
+            &fragment_nv12(colorimetry, FRAGMENT_PACKED_NV12),
+        );
+        self.nv12_planes_blit = BlitPipeline::build(
+            &self.ctx.device,
+            self.target_format,
+            WgpuTextureLayout::MultiplanarNv12,
+            &fragment_nv12(colorimetry, FRAGMENT_MULTIPLANAR_NV12),
         );
         self.nv12_colorimetry = colorimetry;
     }
@@ -560,6 +649,15 @@ impl WgpuSink {
                 // or a format no blit here samples) is not presentable.
                 let texture = texture_of(owned).ok_or(G2gError::UnsupportedDomain)?;
                 let layout = texture_layout(texture).ok_or(G2gError::UnsupportedDomain)?;
+                // A two-plane texture carries the picture at its own size, so a
+                // mismatch with the negotiated geometry would sample the wrong
+                // plane extents.
+                if layout == WgpuTextureLayout::MultiplanarNv12 {
+                    let source = self.source.ok_or(G2gError::NotConfigured)?;
+                    if (texture.width(), texture.height()) != (source.width, source.height) {
+                        return Err(G2gError::CapsMismatch);
+                    }
+                }
                 // The texture belongs to the frame; the blit only reads it, but
                 // `present` needs `&mut self`, so clone the handle (cheap: wgpu
                 // handles are reference-counted).
@@ -579,7 +677,7 @@ impl WgpuSink {
     /// negotiated layout, then blit it.
     fn upload_system(&mut self, bytes: &[u8]) -> Result<(), G2gError> {
         let source = self.source.ok_or(G2gError::NotConfigured)?;
-        let (format, width, rows, bytes_per_row) = source.upload_geometry();
+        let (format, width, rows, bytes_per_row) = source.upload_geometry()?;
         if bytes.len() < (bytes_per_row as usize) * (rows as usize) {
             return Err(G2gError::CapsMismatch);
         }
@@ -630,27 +728,38 @@ impl WgpuSink {
         let blit = match layout {
             WgpuTextureLayout::Rgba => &self.rgba_blit,
             WgpuTextureLayout::PackedNv12 => &self.nv12_blit,
+            WgpuTextureLayout::MultiplanarNv12 => &self.nv12_planes_blit,
         };
-        let src_view = src.create_view(&wgpu::TextureViewDescriptor::default());
-        let texture_binding = wgpu::BindGroupEntry {
-            binding: 0,
-            resource: wgpu::BindingResource::TextureView(&src_view),
+        let bindings = blit_bindings(layout);
+        // A two-plane NV12 texture cannot be bound whole, only through its two
+        // plane views.
+        let views: Vec<wgpu::TextureView> = match layout {
+            WgpuTextureLayout::MultiplanarNv12 => Vec::from(nv12_plane_views(src)),
+            WgpuTextureLayout::Rgba | WgpuTextureLayout::PackedNv12 => {
+                Vec::from([src.create_view(&wgpu::TextureViewDescriptor::default())])
+            }
         };
-        let sampler_binding = wgpu::BindGroupEntry {
-            binding: 1,
-            resource: wgpu::BindingResource::Sampler(&self.sampler),
-        };
-        let entries: &[wgpu::BindGroupEntry] = match layout {
-            WgpuTextureLayout::Rgba => &[texture_binding, sampler_binding],
-            WgpuTextureLayout::PackedNv12 => &[texture_binding],
-        };
+        let mut entries: Vec<wgpu::BindGroupEntry> = views
+            .iter()
+            .enumerate()
+            .map(|(plane, view)| wgpu::BindGroupEntry {
+                binding: plane as u32,
+                resource: wgpu::BindingResource::TextureView(view),
+            })
+            .collect();
+        if bindings.sampler {
+            entries.push(wgpu::BindGroupEntry {
+                binding: bindings.planes,
+                resource: wgpu::BindingResource::Sampler(&self.sampler),
+            });
+        }
         let bind_group = self
             .ctx
             .device
             .create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("wgpu-sink-bg"),
                 layout: &blit.bind_group_layout,
-                entries,
+                entries: &entries,
             });
 
         // Acquire the destination view. For a surface, hold the SurfaceTexture

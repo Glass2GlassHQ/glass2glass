@@ -48,7 +48,7 @@ use g2g_core::{
 };
 
 use crate::clock::wait_to_present;
-use crate::gpu::texture_of;
+use crate::gpu::{texture_layout, texture_of, WgpuTextureLayout};
 use crate::vulkanvideo::{PresentContext, VulkanVideoDevice, VulkanVideoError};
 
 /// The colour space negotiated for the swapchain, in preference order.
@@ -1006,6 +1006,12 @@ impl AsyncElement for VulkanHdrPresentSink {
                     // A frame from a different GPU producer (foreign keep-alive
                     // type) is not presentable by this sink.
                     let texture = texture_of(owned).ok_or(G2gError::UnsupportedDomain)?;
+                    // The blit copies texels into the swapchain image with no
+                    // colour convert, so a YCbCr layout (an NV12 picture, packed
+                    // or two-plane) would land as garbage.
+                    if texture_layout(texture) != Some(WgpuTextureLayout::Rgba) {
+                        return Err(G2gError::UnsupportedDomain);
+                    }
                     // SAFETY: the `new` contract: the texture is live on this
                     // sink's device in SHADER_READ_ONLY_OPTIMAL and its decode
                     // completed before the frame was pushed.
