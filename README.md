@@ -489,8 +489,10 @@ subtitle `.idx` / `.sub` sidecar pair), `splitmuxsink`
 stop several streams together on the main stream's keyframes: one element per
 stream, joined by `group=`, and `main=true` on the one that decides), `hlssink`
 (HLS packaging: segment files plus an `.m3u8` playlist, fed by `tsmux` or
-`mp4mux`), and `fallbackswitch` (forwards the highest-priority input that is
-still delivering, input 0 being the primary).
+`mp4mux`), `fallbackswitch` (forwards the highest-priority input that is
+still delivering, input 0 being the primary), and `livesync` (keeps a stalling
+live input's output going, repeating the last video frame or filling with audio
+silence).
 
 ## Sample pipelines
 

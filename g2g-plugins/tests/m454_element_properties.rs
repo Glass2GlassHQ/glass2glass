@@ -4341,3 +4341,48 @@ fn fallbackswitch_switching_rule() {
         PropError::Value
     );
 }
+
+/// M1155: `livesync`'s two settable knobs report gst's defaults, and its four
+/// statistics counters are read-only.
+#[cfg(feature = "std")]
+#[test]
+fn livesync_latency_late_threshold_and_counters() {
+    use g2g_core::{MultiInputElement, PropError};
+    use g2g_plugins::livesync::LiveSync;
+    let mut e = LiveSync::new();
+    for name in [
+        "latency",
+        "late-threshold",
+        "in",
+        "drop",
+        "out",
+        "duplicate",
+    ] {
+        assert!(declares(e.properties(), name), "{name} is declared");
+        assert_eq!(
+            e.get_property(name),
+            Some(declared_default(e.properties(), name)),
+            "{name} reports its declared default"
+        );
+    }
+    e.set_property("latency", PropValue::Uint(100_000_000))
+        .unwrap();
+    assert_eq!(
+        e.get_property("latency"),
+        Some(PropValue::Uint(100_000_000))
+    );
+    e.set_property("late-threshold", PropValue::Uint(u64::MAX))
+        .unwrap();
+    assert_eq!(
+        e.get_property("late-threshold"),
+        Some(PropValue::Uint(u64::MAX)),
+        "the value gst spells -1: never resynchronise"
+    );
+    // The counters are what the element did, not something to set.
+    for name in ["in", "drop", "out", "duplicate"] {
+        assert_eq!(
+            e.set_property(name, PropValue::Uint(1)).unwrap_err(),
+            PropError::ReadOnly
+        );
+    }
+}

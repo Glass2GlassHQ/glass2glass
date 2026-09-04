@@ -6,7 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
-- M1155: `togglerecord` starts and stops several streams together on the main stream's keyframes, one element per stream joined by `group=`.
+- M1155: `togglerecord` starts and stops several streams together on the main stream's keyframes, and `livesync` keeps a stalling live input's output going with repeated frames or silence.
 - M1157: `vulkanvideodec` hands a decoded picture out as a two-plane NV12 wgpu texture when the caps pin `NV12`, or as the raw `VkImage` on the `VulkanTexture` domain, and `wgpusink` and `WgpuPreprocess` read either NV12 texture layout.
 - M1152: `audioresample`'s sinc kernel scales its tap count with the downsampling ratio, so the stop-band rejection at a given `quality` holds at any ratio.
 - M1153: `colorspace` converts PQ and HLG to and from the SDR transfers, tone mapping an HDR source down to SDR white with the BT.2390 EETF from `hdr-peak-nits`.

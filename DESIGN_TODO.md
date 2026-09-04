@@ -310,19 +310,13 @@ unless it says otherwise.
 - **Debug:** `fakevideodec`, `testsink` / `testsrcbin` / `videocodectestsink`,
   `clockselect`, `compare`, `cpureport`, `navseek`, `pushfilesrc`,
   `flitetestsrc` / `festival`, `ssdobjectdetector`.
-- **gst-plugins-rs:** `gifenc` / `gifdec`, `gopbuffer`,
-  `livesync`, `textwrap`,
+- **gst-plugins-rs:** `gifenc` / `gifdec`, `gopbuffer`, `textwrap`,
   `jsongstenc` / `jsongstparse`, `gstregex`, `zlibcompress` / `zlibdecompress`,
   `colordetect`, `videocompare`, `uriplaylistbin`, `ndisrc` / `ndisink`,
   `intersink` / `intersrc`, `originalbuffersave` / `originalbufferrestore`.
-  `livesync` needs a self-driven output cadence: the only element shape the
-  runner ticks is a fan-in (`MultiInputElement::tick_interval_ns`), and
-  `parse_launch` builds a registered muxer name only where the link degree
-  exceeds one (`is_muxer` in `g2g-core/src/runtime/launch.rs`), so a one-input
-  ticking element in a plain chain reports `UnknownElement`. Either let a
-  registered muxer name with a single inbound link build as a one-input fan-in,
-  the way a registered demux name with one outbound link falls back, or give
-  `AsyncElement` a tick hook of its own.
+- Give `livesync` its `single-segment` (restamp the output onto one running
+  timeline) and `sync` (emit an arriving buffer at once instead of waiting for
+  its due time) properties.
 - Give `togglerecord` a native N-in N-out node kind, so the streams that start
   and stop together are one element with request pads instead of several joined
   by a group name.

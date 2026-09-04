@@ -270,3 +270,16 @@ fn describe_returns_structured_element_docs() {
     assert_eq!(reg.describe_all().len(), reg.element_names().len());
     assert!(reg.describe("no-such-element").is_none());
 }
+
+/// M1155: `livesync` is registered only as a muxer, which is what makes its
+/// single inbound link build a fan-in (and so earn the deadline tick) instead of
+/// reporting an unknown element.
+#[test]
+fn livesync_is_registered_as_a_one_input_fan_in() {
+    let reg = default_registry();
+    assert!(reg.is_muxer("livesync"), "registered as a fan-in");
+    assert!(
+        !reg.is_launch_element("livesync"),
+        "and not also as a single-input element, which would win at link degree one"
+    );
+}

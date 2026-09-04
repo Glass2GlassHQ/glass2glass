@@ -76,6 +76,8 @@ const PORTABLE: &[&str] = &[
     // here, joined by `group=`, so the two-branch line is the N-stream form.
     "videotestsrc ! togglerecord record=true ! fakesink",
     "videotestsrc ! tee name=t ! queue ! togglerecord group=corpus is-live=true ! fakesink t. ! queue ! togglerecord group=corpus main=false ! fakesink",
+    // M1155: the gap filler, a one-input fan-in in an otherwise plain chain.
+    "videotestsrc ! livesync latency=100000000 ! fakesink",
 ];
 
 /// The subset of PORTABLE that also runs end to end on the baseline registry (a
@@ -109,6 +111,9 @@ const RUNNABLE: &[(&str, u64)] = &[
     // The primary keeps delivering well inside the timeout, so the fallback's
     // three frames are dropped and only the primary's reach the sink.
     ("videotestsrc num-buffers=3 ! fallbackswitch name=s ! fakesink  videotestsrc num-buffers=3 ! s.sink_1", 3),
+    // A clock that only tells time gives no ticks, so livesync fills nothing and
+    // the three source frames pass straight through.
+    ("videotestsrc num-buffers=3 ! livesync ! fakesink", 3),
 ];
 
 #[test]
@@ -225,6 +230,7 @@ fn new_elements_are_available_under_their_gst_names() {
         "roundedcorners",
         "rsaudioecho",
         "fallbackswitch",
+        "livesync",
         // A launch keyword rather than a registry element (it expands into a
         // source, a decode chain and the switch), so it resolves via the keyword
         // list.

@@ -1,11 +1,19 @@
-//! M1155: `togglerecord` starts and stops several streams on one decision.
+//! M1155: the two live-stream elements, `togglerecord` and `livesync`.
 //!
-//! Two halves. A hand-driven pair (an H.264 main whose keyframes decide, a PCM
-//! secondary at its own buffer rate) checks that the secondary forwards exactly
-//! the span the main recorded and lands on the same eaten-gap timeline. Then a
-//! `parse_launch` line checks the same element reached through text: the `record`
-//! property gates a single stream, and `group=` joins two tee branches so the
-//! secondary only passes what the main decided.
+//! `togglerecord` starts and stops several streams on one decision. A
+//! hand-driven pair (an H.264 main whose keyframes decide, a PCM secondary at its
+//! own buffer rate) checks that the secondary forwards exactly the span the main
+//! recorded and lands on the same eaten-gap timeline. Then a `parse_launch` line
+//! checks the same element reached through text: the `record` property gates a
+//! single stream, and `group=` joins two tee branches so the secondary only
+//! passes what the main decided.
+//!
+//! `livesync` keeps a stalling live input's output going. Hand-driven against a
+//! caller-supplied clock, it fills a video gap with the last frame repeated on
+//! cadence and an audio gap with silence the size of the last buffer, drops a
+//! frame behind the timeline it already emitted, and follows one that is further
+//! behind than `late-threshold`. A `parse_launch` line checks that a single
+//! inbound link builds it as a fan-in and that the frames reach the sink.
 //!
 //! `default_registry` is `std`-gated, so this file is too: run with
 //! `cargo test -p g2g-plugins --features std`.
@@ -15,9 +23,11 @@ use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::{parse_launch, run_graph};
 use g2g_core::{
     AsyncElement, AudioFormat, Caps, ChannelLayout, Colorimetry, Dim, Frame, FrameTiming, G2gError,
-    Interlace, OutputSink, PipelineClock, PipelinePacket, PropValue, PushOutcome, Rate,
-    RawVideoFormat, VideoCodec,
+    Interlace, MultiInputElement, OutputSink, PipelineClock, PipelinePacket, PropValue,
+    PushOutcome, Rate, RawVideoFormat, VideoCodec,
 };
+use g2g_plugins::clock::WallClock;
+use g2g_plugins::livesync::LiveSync;
 use g2g_plugins::registry::default_registry;
 use g2g_plugins::togglerecord::{RecordGroup, ToggleRecord};
 
@@ -86,10 +96,12 @@ fn frame(pts_ns: u64, duration_ns: u64, keyframe: bool) -> PipelinePacket {
     ))
 }
 
-/// Records the timestamp of every frame that got through.
+/// Records the timestamp, span and bytes of every frame that got through.
 #[derive(Default)]
 struct Collect {
     pts: Vec<u64>,
+    durations: Vec<u64>,
+    payloads: Vec<Vec<u8>>,
 }
 
 impl OutputSink for Collect {
@@ -101,6 +113,14 @@ impl OutputSink for Collect {
         let packet = packet_slot.take().expect("poll_push without a packet");
         if let PipelinePacket::DataFrame(frame) = packet {
             self.pts.push(frame.timing.pts_ns);
+            self.durations.push(frame.timing.duration_ns);
+            self.payloads.push(
+                frame
+                    .domain
+                    .as_system_slice()
+                    .expect("the tests push system memory")
+                    .to_vec(),
+            );
         }
         core::task::Poll::Ready(Ok(PushOutcome::Accepted))
     }
@@ -303,5 +323,260 @@ async fn a_parked_secondary_wakes_when_the_main_stream_advances() {
         secondary_out.pts,
         vec![0],
         "the secondary forwarded once the decision existed"
+    );
+}
+
+/// Nanoseconds in a second, for turning a sample rate into a buffer size.
+const NS_PER_SECOND: u64 = 1_000_000_000;
+/// Bytes in one hand-driven `livesync` video buffer. Each frame is filled with
+/// its own index, so a repeat is visible in the bytes.
+const LIVESYNC_VIDEO_BYTES: usize = 32;
+/// Frames fed on cadence before the stall.
+const LIVESYNC_LEAD_FRAMES: u64 = 2;
+/// Output slots the stall covers, and so filler frames expected.
+const LIVESYNC_GAP_FRAMES: u64 = 3;
+/// Two frame periods behind the output timeline before `livesync` follows the
+/// input instead of dropping it.
+const LIVESYNC_LATE_THRESHOLD_NS: u64 = 2 * VIDEO_FRAME_NS;
+/// Frames the late-arrival test feeds on cadence first: enough that a frame a
+/// threshold and more behind still lands on a non-negative timestamp.
+const LIVESYNC_ONCADENCE_FRAMES: u64 = 4;
+/// Fill byte of the frames that arrive behind the timeline, distinct from every
+/// on-cadence frame's index.
+const LIVESYNC_LATE_FILL: u8 = 0xAA;
+/// Buffers the `parse_launch` line asks `videotestsrc` for.
+const LIVESYNC_LAUNCH_BUFFERS: u64 = 4;
+/// Bytes one `PcmS16Le` sample takes, the format `pcm()` names.
+const PCM_S16LE_SAMPLE_BYTES: usize = 2;
+
+fn livesync_video_frame(pts_ns: u64, fill: u8) -> PipelinePacket {
+    PipelinePacket::DataFrame(Frame::new(
+        MemoryDomain::System(SystemSlice::from_boxed(
+            vec![fill; LIVESYNC_VIDEO_BYTES].into_boxed_slice(),
+        )),
+        FrameTiming {
+            pts_ns,
+            dts_ns: pts_ns,
+            duration_ns: VIDEO_FRAME_NS,
+            ..FrameTiming::default()
+        },
+        pts_ns / VIDEO_FRAME_NS,
+    ))
+}
+
+/// Bytes one `AUDIO_FRAME_NS` buffer of `pcm()` occupies.
+fn audio_buffer_bytes() -> usize {
+    let Caps::Audio {
+        format,
+        channels,
+        sample_rate,
+        ..
+    } = pcm()
+    else {
+        panic!("pcm() is audio caps");
+    };
+    let sample_bytes = match format {
+        AudioFormat::PcmS16Le => PCM_S16LE_SAMPLE_BYTES,
+        other => panic!("pcm() is 16-bit, got {other:?}"),
+    };
+    (sample_rate as u64 * AUDIO_FRAME_NS / NS_PER_SECOND) as usize
+        * channels as usize
+        * sample_bytes
+}
+
+fn livesync_audio_buffer(pts_ns: u64, bytes: &[u8]) -> PipelinePacket {
+    PipelinePacket::DataFrame(Frame::new(
+        MemoryDomain::System(SystemSlice::from_boxed(bytes.to_vec().into_boxed_slice())),
+        FrameTiming {
+            pts_ns,
+            dts_ns: pts_ns,
+            duration_ns: AUDIO_FRAME_NS,
+            ..FrameTiming::default()
+        },
+        pts_ns / AUDIO_FRAME_NS,
+    ))
+}
+
+#[tokio::test]
+async fn livesync_fills_a_video_stall_with_the_last_frame() {
+    let mut sync = LiveSync::new();
+    sync.configure_pipeline(0, &rgba())
+        .expect("raw video passes");
+    assert_eq!(
+        MultiInputElement::tick_interval_ns(&sync),
+        Some(VIDEO_FRAME_NS),
+        "the tick period is one frame period of the negotiated caps"
+    );
+
+    // Wall time tracks the timeline: every frame arrives exactly when it is due.
+    let mut out = Collect::default();
+    for index in 0..LIVESYNC_LEAD_FRAMES {
+        let pts_ns = index * VIDEO_FRAME_NS;
+        sync.handle(
+            0,
+            livesync_video_frame(pts_ns, index as u8),
+            pts_ns,
+            &mut out,
+        )
+        .await
+        .expect("the lead frames pass");
+    }
+
+    // Nothing arrives for the whole gap. One tick at the last missed slot fills
+    // every one of them.
+    let resume_pts_ns = (LIVESYNC_LEAD_FRAMES + LIVESYNC_GAP_FRAMES) * VIDEO_FRAME_NS;
+    sync.handle(
+        0,
+        PipelinePacket::Tick,
+        resume_pts_ns - VIDEO_FRAME_NS,
+        &mut out,
+    )
+    .await
+    .expect("the tick fills the gap");
+    sync.handle(
+        0,
+        livesync_video_frame(resume_pts_ns, LIVESYNC_LEAD_FRAMES as u8),
+        resume_pts_ns,
+        &mut out,
+    )
+    .await
+    .expect("the input resumes");
+
+    let emitted = LIVESYNC_LEAD_FRAMES + LIVESYNC_GAP_FRAMES + 1;
+    let expected_pts: Vec<u64> = (0..emitted).map(|slot| slot * VIDEO_FRAME_NS).collect();
+    assert_eq!(out.pts, expected_pts, "the output timeline has no hole");
+    assert_eq!(out.durations, vec![VIDEO_FRAME_NS; emitted as usize]);
+
+    let last_real = out.payloads[LIVESYNC_LEAD_FRAMES as usize - 1].clone();
+    for filler in 0..LIVESYNC_GAP_FRAMES as usize {
+        assert_eq!(
+            out.payloads[LIVESYNC_LEAD_FRAMES as usize + filler],
+            last_real,
+            "the filler is the last real frame's bytes"
+        );
+    }
+    assert_ne!(
+        out.payloads.last(),
+        Some(&last_real),
+        "and the resumed frame is not"
+    );
+
+    assert_eq!(
+        sync.get_property("in"),
+        Some(PropValue::Uint(LIVESYNC_LEAD_FRAMES + 1))
+    );
+    assert_eq!(sync.get_property("out"), Some(PropValue::Uint(emitted)));
+    assert_eq!(
+        sync.get_property("duplicate"),
+        Some(PropValue::Uint(LIVESYNC_GAP_FRAMES))
+    );
+    assert_eq!(sync.get_property("drop"), Some(PropValue::Uint(0)));
+}
+
+#[tokio::test]
+async fn livesync_fills_an_audio_stall_with_silence() {
+    let mut sync = LiveSync::new();
+    sync.configure_pipeline(0, &pcm()).expect("PCM passes");
+
+    let mut out = Collect::default();
+    let tone = vec![LIVESYNC_LATE_FILL; audio_buffer_bytes()];
+    sync.handle(0, livesync_audio_buffer(0, &tone), 0, &mut out)
+        .await
+        .expect("the first buffer passes");
+    sync.handle(0, PipelinePacket::Tick, AUDIO_FRAME_NS, &mut out)
+        .await
+        .expect("the tick fills the next slot");
+
+    assert_eq!(out.pts, vec![0, AUDIO_FRAME_NS]);
+    assert_eq!(out.durations, vec![AUDIO_FRAME_NS; 2]);
+    assert_eq!(out.payloads[0], tone);
+    assert_eq!(
+        out.payloads[1],
+        vec![0u8; audio_buffer_bytes()],
+        "S16LE silence is all-zero, the size and span of the last buffer"
+    );
+    assert_eq!(sync.get_property("duplicate"), Some(PropValue::Uint(1)));
+}
+
+#[tokio::test]
+async fn livesync_drops_a_late_frame_and_follows_a_much_later_one() {
+    let mut sync = LiveSync::new().with_late_threshold_ns(LIVESYNC_LATE_THRESHOLD_NS);
+    sync.configure_pipeline(0, &rgba())
+        .expect("raw video passes");
+
+    let mut out = Collect::default();
+    for index in 0..LIVESYNC_ONCADENCE_FRAMES {
+        let pts_ns = index * VIDEO_FRAME_NS;
+        sync.handle(
+            0,
+            livesync_video_frame(pts_ns, index as u8),
+            pts_ns,
+            &mut out,
+        )
+        .await
+        .expect("the lead frames pass");
+    }
+
+    // The next output is due at LIVESYNC_ONCADENCE_FRAMES periods. This one is exactly
+    // the threshold behind it, so it is dropped rather than followed.
+    let next_pts_ns = LIVESYNC_ONCADENCE_FRAMES * VIDEO_FRAME_NS;
+    let late_pts_ns = next_pts_ns - LIVESYNC_LATE_THRESHOLD_NS;
+    sync.handle(
+        0,
+        livesync_video_frame(late_pts_ns, LIVESYNC_LATE_FILL),
+        next_pts_ns,
+        &mut out,
+    )
+    .await
+    .expect("the late frame is handled");
+    let on_cadence: Vec<u64> = (0..LIVESYNC_ONCADENCE_FRAMES)
+        .map(|slot| slot * VIDEO_FRAME_NS)
+        .collect();
+    assert_eq!(
+        out.pts, on_cadence,
+        "the late frame did not reach the output"
+    );
+    assert_eq!(sync.get_property("drop"), Some(PropValue::Uint(1)));
+
+    // One period further behind clears the threshold, so the timeline follows it.
+    let resync_pts_ns = late_pts_ns - VIDEO_FRAME_NS;
+    sync.handle(
+        0,
+        livesync_video_frame(resync_pts_ns, LIVESYNC_LATE_FILL),
+        next_pts_ns + VIDEO_FRAME_NS,
+        &mut out,
+    )
+    .await
+    .expect("the far-behind frame is handled");
+    assert_eq!(
+        out.pts.last(),
+        Some(&resync_pts_ns),
+        "the output timeline restarted on the far-behind frame"
+    );
+    assert_eq!(
+        sync.get_property("drop"),
+        Some(PropValue::Uint(1)),
+        "following the input is not a drop"
+    );
+    assert_eq!(
+        sync.get_property("in"),
+        Some(PropValue::Uint(LIVESYNC_ONCADENCE_FRAMES + 2))
+    );
+}
+
+#[tokio::test]
+async fn a_launch_line_builds_livesync_as_a_one_input_fan_in() {
+    let reg = default_registry();
+    let line = format!("videotestsrc num-buffers={LIVESYNC_LAUNCH_BUFFERS} ! livesync ! fakesink");
+    let graph = parse_launch(&reg, &line).expect("the one-input livesync line parses");
+    // A real clock, so the fan-in arm gets the deadline tick the element asked
+    // for; the source outruns it, so no filler is due.
+    let stats = run_graph(graph, &WallClock::new(), 4)
+        .await
+        .expect("runs to EOS");
+    assert!(
+        stats.frames_consumed >= LIVESYNC_LAUNCH_BUFFERS,
+        "the sink saw every source frame, got {}",
+        stats.frames_consumed
     );
 }

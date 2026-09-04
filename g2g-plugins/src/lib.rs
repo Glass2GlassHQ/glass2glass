@@ -622,6 +622,10 @@ pub mod clocksync;
 // group is a process-wide named table and secondaries park on a notify.
 #[cfg(feature = "std")]
 pub mod togglerecord;
+// Gap filler for a stalling live input (M1155). std: the fill deadline measures
+// against the process monotonic clock.
+#[cfg(feature = "std")]
+pub mod livesync;
 // Stall detector: fails the run when no data crosses it within `timeout`. std
 // because the deadline is wall time and the timer is a tokio task.
 #[cfg(feature = "std")]

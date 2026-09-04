@@ -1283,6 +1283,13 @@ pub fn default_registry() -> Registry {
     reg.register_muxer(MuxerFactory::new("fallbackswitch", |inputs| {
         Box::new(crate::fallbackswitch::FallbackSwitch::new(inputs))
     }));
+    // One-input fan-in (M1155): gst's `livesync` has a single sink pad, and the
+    // fan-in shape is what earns it the deadline tick it needs to keep emitting
+    // while that input is stalled. Registered as a muxer only, so a launch line
+    // builds it as a fan-in at link degree one.
+    reg.register_muxer(MuxerFactory::new("livesync", |_inputs| {
+        Box::new(crate::livesync::LiveSync::new())
+    }));
     // Live output switch: 1-in / N-out, built by the demux link degree.
     reg.register_demux(g2g_core::runtime::DemuxFactory::new(
         "output-selector",
