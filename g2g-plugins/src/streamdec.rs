@@ -34,7 +34,8 @@
 //! ## Tier B (zero-copy): GPU-texture output
 //!
 //! [`VulkanStreamDecoder::new_gpu`] builds the same decoder in GPU-texture mode:
-//! [`Self::submit_chunk_texture`] returns the decoded frame as a GPU-resident RGBA
+//! [`VulkanStreamDecoder::submit_chunk_texture`] returns the decoded frame as a
+//! GPU-resident RGBA
 //! [`wgpu::Texture`] (YUV->RGB already applied on the GPU by g2g's
 //! `VkSamplerYcbcrConversion` compute pass, M494), so the frame never leaves the
 //! decode device. A consumer hands the texture
@@ -45,7 +46,8 @@
 //! decode device, which g2g creates itself (it must enable Vulkan video-decode
 //! queue families the render device would not). So zero-copy requires
 //! the renderer to run on the decode device, not the reverse: a consumer takes
-//! [`Self::gpu_context`] (instance / adapter / device / queue) and builds its
+//! [`VulkanStreamDecoder::gpu_context`] (instance / adapter / device / queue) and
+//! builds its
 //! renderer on it. On a single-GPU host that is the display GPU too; on a split
 //! decode/display host (decode dGPU, present iGPU) a cross-device copy is
 //! unavoidable and Tier A is the honest path.

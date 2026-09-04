@@ -6813,7 +6813,7 @@ impl VulkanVideoDevice {
 
     /// Request a DPB image count for decoders built from this device afterwards,
     /// or `None` to size the DPB from the stream. Applied by
-    /// [`dpb_slot_count`](Self::dpb_slot_count), so a decoder already built keeps
+    /// `dpb_slot_count`, so a decoder already built keeps
     /// the pool it was created with.
     pub fn set_dpb_slots(&mut self, slots: Option<u32>) {
         self.dpb_slots_request = slots;
@@ -8476,7 +8476,7 @@ impl VulkanVideoDevice {
     /// entirely on the GPU: the decoded NV12 image is converted to RGBA by a
     /// Vulkan compute pass through a `VkSamplerYcbcrConversion` and the result
     /// image is imported straight into wgpu, so the frame never round-trips
-    /// through system memory (unlike [`decode_idr_to_rgba_texture`]). Requires a
+    /// through system memory (unlike [`decode_idr_to_rgba_texture`](Self::decode_idr_to_rgba_texture)). Requires a
     /// distinct compute queue; returns [`VulkanVideoError::NoComputeQueue`]
     /// otherwise (caller falls back to the CPU path).
     pub fn decode_idr_to_rgba_texture_gpu(
@@ -8697,7 +8697,7 @@ impl VulkanVideoDevice {
     /// in place by a `VkSamplerYcbcrConversion` compute pass and imported into
     /// wgpu, so the frame never leaves the GPU. Requires a distinct compute queue
     /// on the decode device; returns [`VulkanVideoError::NoComputeQueue`] if none
-    /// (the caller falls back to [`create_h264_dpb_decoder`] + system NV12).
+    /// (the caller falls back to [`create_h264_dpb_decoder`](Self::create_h264_dpb_decoder) + system NV12).
     pub fn create_h264_dpb_decoder_gpu(
         &self,
         session: &H264DecodeSession,
@@ -10317,7 +10317,7 @@ impl H264DpbDecoder {
     /// decode itself). The frames still retire in coding order and lag submission
     /// by the ring depth, so a caller pairs each retired frame with the oldest
     /// unconsumed meta (decode order == ring retirement order) and reorders by
-    /// (coded-video-sequence, POC), the same key [`reorder_to_display_order`] uses.
+    /// (coded-video-sequence, POC), the same key `reorder_to_display_order` uses.
     pub fn decode_push_meta(
         &mut self,
         stream: &[u8],
@@ -10352,7 +10352,7 @@ impl H264DpbDecoder {
     /// wrapper over [`decode_push`](Self::decode_push) + [`decode_flush`](Self::decode_flush)
     /// for callers that have the whole stream in hand (tests, whole-clip decode).
     /// The frames are reordered from coding to display order (see
-    /// [`reorder_to_display_order`]), so a stream with B-frames comes out correctly;
+    /// `reorder_to_display_order`), so a stream with B-frames comes out correctly;
     /// for an I/P stream this is a no-op. The streaming
     /// [`decode_push`](Self::decode_push) stays in coding order (a low-latency
     /// consumer reorders by PTS itself).
@@ -10374,7 +10374,8 @@ impl H264DpbDecoder {
 
     /// Decode an entire elementary stream to GPU-resident RGBA `wgpu::Texture`s
     /// (one per coded picture, DISPLAY order), the zero-copy output. Requires
-    /// the decoder to have been built with [`create_h264_dpb_decoder_gpu`];
+    /// the decoder to have been built with
+    /// [`create_h264_dpb_decoder_gpu`](VulkanVideoDevice::create_h264_dpb_decoder_gpu);
     /// returns [`VulkanVideoError::NoComputeQueue`] otherwise. Like [`decode_all`],
     /// the textures are reordered to display order (B-frame streams come out right).
     ///
@@ -11849,7 +11850,7 @@ impl Av1DpbDecoder {
 
     /// Decode an entire AV1 bitstream to GPU-resident RGBA `wgpu::Texture`s.
     /// Requires the GPU-texture decoder (`create_av1_dpb_decoder_gpu`). Handles the
-    /// reorder-aware path (alt-ref + `show_existing_frame`) as [`decode_all`] does.
+    /// reorder-aware path (alt-ref + `show_existing_frame`) as [`decode_all`](Self::decode_all) does.
     pub fn decode_all_to_textures(
         &mut self,
         stream: &[u8],
@@ -12894,11 +12895,11 @@ pub enum TransferFunction {
 /// The colour space a decoded YUV frame is converted from: the [`ColorMatrix`],
 /// the quantization range (`full_range` = full 0..255, else studio 16..235), and
 /// the [`TransferFunction`]. Resolved from the stream (H.264 / H.265 VUI colour
-/// description or AV1 `color_config`) and applied by BOTH the CPU [`nv12_to_rgba`]
-/// and the GPU [`YcbcrConverter`], so decoded video is converted with its actual
+/// description or AV1 `color_config`) and applied by BOTH the CPU `nv12_to_rgba`
+/// and the GPU `YcbcrConverter`, so decoded video is converted with its actual
 /// colour space rather than a fixed BT.601. The matrix + range are always
 /// applied; the transfer only matters when the converter is asked to tone-map HDR
-/// to SDR ([`HdrOutput::TonemapSdr`]). Primaries are not carried separately: the
+/// to SDR (`HdrOutput::TonemapSdr`). Primaries are not carried separately: the
 /// gamut step keys off `matrix == Bt2020Ncl` (BT.2020 matrix implies BT.2020
 /// primaries for real content).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
