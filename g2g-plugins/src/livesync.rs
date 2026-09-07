@@ -10,6 +10,13 @@
 //! A frame behind the timeline already emitted is dropped, unless it is more than
 //! `late-threshold` behind, in which case the timeline follows it instead: an
 //! upstream that restarts its clock recovers rather than being dropped forever.
+//! Under `single-segment` that frame is stamped at the slot the output timeline
+//! expects next and the ones after it are shifted by the same offset, so the
+//! output PTS never goes backwards.
+//!
+//! Under `sync` a buffer that arrives before its due time waits for it, going out
+//! on the first tick at or past that time. It is off by default, unlike gst:
+//! the arm's tick period is fixed, so a held buffer leaves up to one period late.
 //!
 //! `std` only: the fill deadline measures against
 //! [`g2g_core::metrics::monotonic_ns`].
@@ -18,12 +25,14 @@ use core::future::Future;
 use core::pin::Pin;
 
 use alloc::boxed::Box;
+use alloc::collections::VecDeque;
 use alloc::vec;
 
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{
-    Caps, CapsConstraint, ConfigureOutcome, ElementMetadata, Frame, G2gError, MultiInputElement,
-    OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate,
+    Caps, CapsConstraint, ConfigureOutcome, ElementMetadata, Frame, FrameTiming, G2gError,
+    MultiInputElement, OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
+    Rate,
 };
 
 use crate::audioconvert::silence_byte;
@@ -50,6 +59,12 @@ const UNKNOWN_CADENCE_TICK_NS: u64 = 10_000_000;
 /// The counters read back through `in` / `drop` / `out` / `duplicate`.
 const COUNTER_DEFAULT_TEXT: &str = "0";
 
+/// The `sync` and `single-segment` default: neither is on.
+const DEFAULT_BOOL_TEXT: &str = "false";
+
+/// `sync` holds a buffer that arrives early until its due time, and
+/// `single-segment` keeps the output on one timeline when the input's restarts.
+///
 /// # Example
 ///
 /// ```no_run
@@ -62,6 +77,8 @@ const COUNTER_DEFAULT_TEXT: &str = "0";
 pub struct LiveSync {
     latency_ns: u64,
     late_threshold_ns: u64,
+    sync: bool,
+    single_segment: bool,
     /// The negotiated input caps, which are the output caps too.
     configured: Option<Caps>,
     /// Byte a silent sample of the configured PCM format is made of, `None` on
@@ -77,6 +94,12 @@ pub struct LiveSync {
     next_pts_ns: Option<u64>,
     /// Wall-clock time the buffer at `next_pts_ns` is due at.
     next_due_ns: u64,
+    /// Buffers accepted under `sync` whose due time has not arrived, each with
+    /// the wall-clock time it goes out at, oldest first.
+    held: VecDeque<(u64, Frame)>,
+    /// Nanoseconds added to an input timestamp to land it on the single output
+    /// timeline, `0` unless `single-segment` has followed a restarted input.
+    segment_offset_ns: i64,
     /// The caps last pushed downstream, so an unchanged re-announcement is
     /// suppressed.
     emitted_caps: Option<Caps>,
@@ -97,6 +120,8 @@ impl LiveSync {
         Self {
             latency_ns: DEFAULT_LATENCY_NS,
             late_threshold_ns: DEFAULT_LATE_THRESHOLD_NS,
+            sync: false,
+            single_segment: false,
             configured: None,
             silence: None,
             last_frame: None,
@@ -104,6 +129,8 @@ impl LiveSync {
             last_duration_ns: 0,
             next_pts_ns: None,
             next_due_ns: 0,
+            held: VecDeque::new(),
+            segment_offset_ns: 0,
             emitted_caps: None,
             frames_in: 0,
             frames_dropped: 0,
@@ -124,6 +151,23 @@ impl LiveSync {
     /// property). [`LATE_THRESHOLD_NEVER`] never follows.
     pub fn with_late_threshold_ns(mut self, late_threshold_ns: u64) -> Self {
         self.late_threshold_ns = late_threshold_ns;
+        self
+    }
+
+    /// Whether a buffer that arrives before its due time waits for it instead of
+    /// going out at once (the `sync` property). It leaves on the first tick at or
+    /// past that time, so at this element's tick period's resolution.
+    pub fn with_sync(mut self, sync: bool) -> Self {
+        self.sync = sync;
+        self
+    }
+
+    /// Whether the output stays on one timeline, input timestamps translated onto
+    /// it when the input's restarts (the `single-segment` property). Without it a
+    /// resync stamps the output with the input's own time and the output PTS
+    /// jumps back.
+    pub fn with_single_segment(mut self, single_segment: bool) -> Self {
+        self.single_segment = single_segment;
         self
     }
 
@@ -214,10 +258,43 @@ impl LiveSync {
         }
     }
 
+    /// An input timestamp on the output timeline: itself, unless
+    /// `single-segment` has moved the timeline off the input's.
+    fn translate(&self, stamp_ns: u64) -> u64 {
+        if self.single_segment {
+            stamp_ns.saturating_add_signed(self.segment_offset_ns)
+        } else {
+            stamp_ns
+        }
+    }
+
+    /// Emit the buffers `sync` held whose due time `now_ns` has reached.
+    async fn release_due(&mut self, now_ns: u64, out: &mut dyn OutputSink) -> Result<(), G2gError> {
+        while self
+            .held
+            .front()
+            .is_some_and(|(due_ns, _)| *due_ns <= now_ns)
+        {
+            let (_, frame) = self.held.pop_front().expect("the front was just read");
+            self.emit(frame, out).await?;
+        }
+        Ok(())
+    }
+
+    /// Emit everything `sync` is holding, whatever the time: no buffer is lost to
+    /// a stream end or a restart.
+    async fn flush_held(&mut self, out: &mut dyn OutputSink) -> Result<(), G2gError> {
+        while let Some((_, frame)) = self.held.pop_front() {
+            self.emit(frame, out).await?;
+        }
+        Ok(())
+    }
+
     /// Emit the buffers whose due time has passed while the input delivered
     /// nothing, so the output timeline stays contiguous over a stall.
     async fn fill_due(&mut self, now_ns: u64, out: &mut dyn OutputSink) -> Result<(), G2gError> {
-        if self.last_duration_ns == 0 {
+        // a held buffer is the next output, so nothing is missing yet
+        if self.last_duration_ns == 0 || !self.held.is_empty() {
             return Ok(());
         }
         while let Some(pts_ns) = self.next_pts_ns {
@@ -254,30 +331,51 @@ impl LiveSync {
 
     async fn accept(
         &mut self,
-        frame: Frame,
+        mut frame: Frame,
         now_ns: u64,
         out: &mut dyn OutputSink,
     ) -> Result<(), G2gError> {
         self.frames_in += 1;
+        let stamped_pts_ns = frame.timing.pts();
         // An unstamped buffer takes the slot the timeline expects next, which is
         // what a source with no clock of its own leaves for this element to say.
-        let pts_ns = frame
-            .timing
-            .pts()
-            .unwrap_or_else(|| self.next_pts_ns.unwrap_or_default());
+        let mut pts_ns = match stamped_pts_ns {
+            Some(stamped_ns) => self.translate(stamped_ns),
+            None => self.next_pts_ns.unwrap_or_default(),
+        };
         if let Some(next_pts_ns) = self.next_pts_ns {
-            let behind_ns = next_pts_ns.saturating_sub(pts_ns);
-            let resync = self.late_threshold_ns != LATE_THRESHOLD_NEVER
-                && behind_ns > self.late_threshold_ns;
-            if pts_ns < next_pts_ns && !resync {
-                self.frames_dropped += 1;
-                return Ok(());
+            if pts_ns < next_pts_ns {
+                let behind_ns = next_pts_ns - pts_ns;
+                let resync = self.late_threshold_ns != LATE_THRESHOLD_NEVER
+                    && behind_ns > self.late_threshold_ns;
+                if !resync {
+                    self.frames_dropped += 1;
+                    return Ok(());
+                }
+                self.flush_held(out).await?;
+                if let Some(stamped_ns) = stamped_pts_ns.filter(|_| self.single_segment) {
+                    self.segment_offset_ns = offset_onto(next_pts_ns, stamped_ns);
+                    pts_ns = next_pts_ns;
+                }
             }
+        }
+        if self.single_segment && stamped_pts_ns.is_some() {
+            if frame.timing.dts_ns != FrameTiming::PTS_NONE {
+                frame.timing.dts_ns = self.translate(frame.timing.dts_ns);
+            }
+            frame.timing.pts_ns = pts_ns;
         }
         let duration_ns = match frame.timing.duration_ns {
             0 => self.video_period_ns().unwrap_or(self.last_duration_ns),
-            stamped => stamped,
+            stamped_ns => stamped_ns,
         };
+        // next_due_ns is 0 until the first buffer, so that one is never held
+        if self.sync && self.next_due_ns > now_ns {
+            let due_ns = self.next_due_ns;
+            self.advance(pts_ns, duration_ns, due_ns);
+            self.held.push_back((due_ns, frame));
+            return Ok(());
+        }
         self.advance(pts_ns, duration_ns, now_ns);
         self.emit(frame, out).await
     }
@@ -294,10 +392,14 @@ impl LiveSync {
     ) -> Result<(), G2gError> {
         match packet {
             // The runner aggregates input ends and emits the merged Eos itself.
-            PipelinePacket::Eos => Ok(()),
-            PipelinePacket::Tick => self.fill_due(now_ns, out).await,
+            PipelinePacket::Eos => self.flush_held(out).await,
+            PipelinePacket::Tick => {
+                self.release_due(now_ns, out).await?;
+                self.fill_due(now_ns, out).await
+            }
             PipelinePacket::DataFrame(frame) => self.accept(frame, now_ns, out).await,
             PipelinePacket::CapsChanged(caps) => {
+                self.flush_held(out).await?;
                 Self::check_fillable(&caps)?;
                 self.adopt(&caps);
                 if self.emitted_caps.as_ref() == Some(&caps) {
@@ -308,6 +410,7 @@ impl LiveSync {
                 Ok(())
             }
             other => {
+                self.flush_held(out).await?;
                 out.push(other).await?;
                 Ok(())
             }
@@ -380,6 +483,8 @@ impl MultiInputElement for LiveSync {
         match name {
             "latency" => self.latency_ns = value.as_uint().ok_or(PropError::Type)?,
             "late-threshold" => self.late_threshold_ns = value.as_uint().ok_or(PropError::Type)?,
+            "sync" => self.sync = value.as_bool().ok_or(PropError::Type)?,
+            "single-segment" => self.single_segment = value.as_bool().ok_or(PropError::Type)?,
             "in" | "drop" | "out" | "duplicate" => return Err(PropError::ReadOnly),
             _ => return Err(PropError::Unknown),
         }
@@ -390,6 +495,8 @@ impl MultiInputElement for LiveSync {
         match name {
             "latency" => Some(PropValue::Uint(self.latency_ns)),
             "late-threshold" => Some(PropValue::Uint(self.late_threshold_ns)),
+            "sync" => Some(PropValue::Bool(self.sync)),
+            "single-segment" => Some(PropValue::Bool(self.single_segment)),
             "in" => Some(PropValue::Uint(self.frames_in)),
             "drop" => Some(PropValue::Uint(self.frames_dropped)),
             "out" => Some(PropValue::Uint(self.frames_out)),
@@ -411,6 +518,17 @@ impl MultiInputElement for LiveSync {
     }
 }
 
+/// The offset that lands `input_ns` on `target_ns`, saturating rather than
+/// wrapping on a timestamp outside the range `i64` nanoseconds cover.
+fn offset_onto(target_ns: u64, input_ns: u64) -> i64 {
+    let delta = i128::from(target_ns) - i128::from(input_ns);
+    i64::try_from(delta).unwrap_or(if delta.is_negative() {
+        i64::MIN
+    } else {
+        i64::MAX
+    })
+}
+
 /// `LiveSync`'s properties, named and defaulted as gst's `livesync`.
 static LIVESYNC_PROPS: &[PropertySpec] = &[
     PropertySpec::new(
@@ -425,6 +543,18 @@ static LIVESYNC_PROPS: &[PropertySpec] = &[
         "nanoseconds behind the output timeline before it follows the input instead of dropping it",
     )
     .with_default(DEFAULT_LATE_THRESHOLD_TEXT),
+    PropertySpec::new(
+        "sync",
+        PropKind::Bool,
+        "hold a buffer that arrives early until its due time instead of emitting it at once",
+    )
+    .with_default(DEFAULT_BOOL_TEXT),
+    PropertySpec::new(
+        "single-segment",
+        PropKind::Bool,
+        "keep the output on one timeline, translating the input's timestamps onto it",
+    )
+    .with_default(DEFAULT_BOOL_TEXT),
     PropertySpec::new("in", PropKind::Uint, "buffers accepted from the input")
         .with_default(COUNTER_DEFAULT_TEXT)
         .read_only(),

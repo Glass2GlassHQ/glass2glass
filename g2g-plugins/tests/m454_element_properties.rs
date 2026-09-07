@@ -4342,7 +4342,7 @@ fn fallbackswitch_switching_rule() {
     );
 }
 
-/// M1155: `livesync`'s two settable knobs report gst's defaults, and its four
+/// M1155: `livesync`'s settable knobs report gst's defaults, and its four
 /// statistics counters are read-only.
 #[cfg(feature = "std")]
 #[test]
@@ -4357,6 +4357,8 @@ fn livesync_latency_late_threshold_and_counters() {
         "drop",
         "out",
         "duplicate",
+        "sync",
+        "single-segment",
     ] {
         assert!(declares(e.properties(), name), "{name} is declared");
         assert_eq!(
@@ -4382,6 +4384,14 @@ fn livesync_latency_late_threshold_and_counters() {
     for name in ["in", "drop", "out", "duplicate"] {
         assert_eq!(
             e.set_property(name, PropValue::Uint(1)).unwrap_err(),
+    for name in ["sync", "single-segment"] {
+        e.set_property(name, PropValue::Bool(true)).unwrap();
+        assert_eq!(
+            e.get_property(name),
+            Some(PropValue::Bool(true)),
+            "{name} round-trips"
+        );
+    }
             PropError::ReadOnly
         );
     }

@@ -314,9 +314,6 @@ unless it says otherwise.
   `jsongstenc` / `jsongstparse`, `gstregex`, `zlibcompress` / `zlibdecompress`,
   `colordetect`, `videocompare`, `uriplaylistbin`, `ndisrc` / `ndisink`,
   `intersink` / `intersrc`, `originalbuffersave` / `originalbufferrestore`.
-- Give `livesync` its `single-segment` (restamp the output onto one running
-  timeline) and `sync` (emit an arriving buffer at once instead of waiting for
-  its due time) properties.
 - Give `togglerecord` a native N-in N-out node kind, so the streams that start
   and stop together are one element with request pads instead of several joined
   by a group name.

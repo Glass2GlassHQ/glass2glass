@@ -344,6 +344,12 @@ const LIVESYNC_ONCADENCE_FRAMES: u64 = 4;
 /// Fill byte of the frames that arrive behind the timeline, distinct from every
 /// on-cadence frame's index.
 const LIVESYNC_LATE_FILL: u8 = 0xAA;
+/// How far ahead of its due time the `sync` tests' early frames arrive.
+const LIVESYNC_EARLY_NS: u64 = VIDEO_FRAME_NS / 4;
+/// A tick after the early frame arrived but still before it is due.
+const LIVESYNC_EARLY_TICK_NS: u64 = VIDEO_FRAME_NS / 2;
+/// The timestamp an input that restarted its clock comes back on.
+const LIVESYNC_RESTART_PTS_NS: u64 = 0;
 /// Buffers the `parse_launch` line asks `videotestsrc` for.
 const LIVESYNC_LAUNCH_BUFFERS: u64 = 4;
 /// Bytes one `PcmS16Le` sample takes, the format `pcm()` names.
@@ -561,6 +567,187 @@ async fn livesync_drops_a_late_frame_and_follows_a_much_later_one() {
     assert_eq!(
         sync.get_property("in"),
         Some(PropValue::Uint(LIVESYNC_ONCADENCE_FRAMES + 2))
+    );
+}
+
+/// Feeds `LIVESYNC_LEAD_FRAMES` frames to a `sync=true` element: the first when
+/// it is due, the rest all at `LIVESYNC_EARLY_NS`, well before theirs.
+async fn livesync_hold_a_burst(out: &mut Collect) -> LiveSync {
+    let mut sync = LiveSync::new().with_sync(true);
+    sync.configure_pipeline(0, &rgba())
+        .expect("raw video passes");
+    sync.handle(0, livesync_video_frame(0, 0), 0, out)
+        .await
+        .expect("the first frame passes");
+    for index in 1..=LIVESYNC_LEAD_FRAMES {
+        sync.handle(
+            0,
+            livesync_video_frame(index * VIDEO_FRAME_NS, index as u8),
+            LIVESYNC_EARLY_NS,
+            out,
+        )
+        .await
+        .expect("the early frames are taken");
+    }
+    sync
+}
+
+#[tokio::test]
+async fn livesync_sync_holds_an_early_frame_until_its_due_time() {
+    let mut out = Collect::default();
+    let mut sync = LiveSync::new().with_sync(true);
+    sync.configure_pipeline(0, &rgba())
+        .expect("raw video passes");
+    sync.handle(0, livesync_video_frame(0, 0), 0, &mut out)
+        .await
+        .expect("the first frame passes");
+    assert_eq!(out.pts, vec![0], "the first frame is due on arrival");
+
+    sync.handle(
+        0,
+        livesync_video_frame(VIDEO_FRAME_NS, 1),
+        LIVESYNC_EARLY_NS,
+        &mut out,
+    )
+    .await
+    .expect("the early frame is taken");
+    assert_eq!(out.pts, vec![0], "the early frame is held, not emitted");
+
+    sync.handle(0, PipelinePacket::Tick, LIVESYNC_EARLY_TICK_NS, &mut out)
+        .await
+        .expect("a tick before the due time passes");
+    assert_eq!(
+        out.pts,
+        vec![0],
+        "a tick before the due time releases nothing"
+    );
+
+    sync.handle(0, PipelinePacket::Tick, VIDEO_FRAME_NS, &mut out)
+        .await
+        .expect("the tick at the due time passes");
+    assert_eq!(
+        out.pts,
+        vec![0, VIDEO_FRAME_NS],
+        "the tick at the due time releases the held frame"
+    );
+    assert_eq!(
+        sync.get_property("duplicate"),
+        Some(PropValue::Uint(0)),
+        "a held frame fills its own slot, so no filler is made for it"
+    );
+}
+
+#[tokio::test]
+async fn livesync_sync_releases_a_burst_one_slot_at_a_time() {
+    let mut out = Collect::default();
+    let mut sync = livesync_hold_a_burst(&mut out).await;
+    assert_eq!(out.pts, vec![0], "the whole burst is held");
+
+    for index in 1..=LIVESYNC_LEAD_FRAMES {
+        sync.handle(0, PipelinePacket::Tick, index * VIDEO_FRAME_NS, &mut out)
+            .await
+            .expect("the tick at each due time passes");
+        let released: Vec<u64> = (0..=index).map(|slot| slot * VIDEO_FRAME_NS).collect();
+        assert_eq!(
+            out.pts, released,
+            "each tick releases one held frame, in order"
+        );
+    }
+    assert_eq!(sync.get_property("duplicate"), Some(PropValue::Uint(0)));
+}
+
+#[tokio::test]
+async fn livesync_sync_flushes_what_it_holds_at_the_stream_end() {
+    let mut out = Collect::default();
+    let mut sync = livesync_hold_a_burst(&mut out).await;
+    sync.handle(0, PipelinePacket::Eos, LIVESYNC_EARLY_NS, &mut out)
+        .await
+        .expect("the stream end passes");
+    let every_frame: Vec<u64> = (0..=LIVESYNC_LEAD_FRAMES)
+        .map(|slot| slot * VIDEO_FRAME_NS)
+        .collect();
+    assert_eq!(
+        out.pts, every_frame,
+        "nothing held is lost at the stream end"
+    );
+}
+
+#[tokio::test]
+async fn livesync_without_sync_emits_an_early_frame_at_once() {
+    let mut sync = LiveSync::new();
+    sync.configure_pipeline(0, &rgba())
+        .expect("raw video passes");
+    let mut out = Collect::default();
+    sync.handle(0, livesync_video_frame(0, 0), 0, &mut out)
+        .await
+        .expect("the first frame passes");
+    sync.handle(
+        0,
+        livesync_video_frame(VIDEO_FRAME_NS, 1),
+        LIVESYNC_EARLY_NS,
+        &mut out,
+    )
+    .await
+    .expect("the early frame passes");
+    assert_eq!(
+        out.pts,
+        vec![0, VIDEO_FRAME_NS],
+        "off by default, so an early frame goes out on arrival"
+    );
+}
+
+#[tokio::test]
+async fn livesync_single_segment_keeps_a_restarted_input_on_one_timeline() {
+    let mut sync = LiveSync::new()
+        .with_late_threshold_ns(LIVESYNC_LATE_THRESHOLD_NS)
+        .with_single_segment(true);
+    sync.configure_pipeline(0, &rgba())
+        .expect("raw video passes");
+
+    let mut out = Collect::default();
+    for index in 0..LIVESYNC_ONCADENCE_FRAMES {
+        let pts_ns = index * VIDEO_FRAME_NS;
+        sync.handle(
+            0,
+            livesync_video_frame(pts_ns, index as u8),
+            pts_ns,
+            &mut out,
+        )
+        .await
+        .expect("the lead frames pass");
+    }
+
+    // Upstream restarts its clock: further behind than the threshold, so the
+    // element follows it, and single-segment stamps it at the slot due now.
+    let next_pts_ns = LIVESYNC_ONCADENCE_FRAMES * VIDEO_FRAME_NS;
+    sync.handle(
+        0,
+        livesync_video_frame(LIVESYNC_RESTART_PTS_NS, LIVESYNC_LATE_FILL),
+        next_pts_ns,
+        &mut out,
+    )
+    .await
+    .expect("the restarted frame is handled");
+    sync.handle(
+        0,
+        livesync_video_frame(LIVESYNC_RESTART_PTS_NS + VIDEO_FRAME_NS, LIVESYNC_LATE_FILL),
+        next_pts_ns + VIDEO_FRAME_NS,
+        &mut out,
+    )
+    .await
+    .expect("the frame after the restart is handled");
+
+    let unbroken: Vec<u64> = (0..LIVESYNC_ONCADENCE_FRAMES + 2)
+        .map(|slot| slot * VIDEO_FRAME_NS)
+        .collect();
+    assert_eq!(
+        out.pts, unbroken,
+        "the restarted input continues the output timeline instead of jumping back"
+    );
+    assert_eq!(
+        sync.get_property("drop"),
+        Some(PropValue::Uint(0)),
+        "neither restarted frame is behind the translated timeline"
     );
 }
 

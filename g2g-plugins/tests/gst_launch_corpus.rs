@@ -78,6 +78,8 @@ const PORTABLE: &[&str] = &[
     "videotestsrc ! tee name=t ! queue ! togglerecord group=corpus is-live=true ! fakesink t. ! queue ! togglerecord group=corpus main=false ! fakesink",
     // M1155: the gap filler, a one-input fan-in in an otherwise plain chain.
     "videotestsrc ! livesync latency=100000000 ! fakesink",
+    // M1158: holding buffers to their due time, on one output timeline.
+    "videotestsrc ! livesync sync=true single-segment=true ! fakesink",
 ];
 
 /// The subset of PORTABLE that also runs end to end on the baseline registry (a
@@ -114,6 +116,12 @@ const RUNNABLE: &[(&str, u64)] = &[
     // A clock that only tells time gives no ticks, so livesync fills nothing and
     // the three source frames pass straight through.
     ("videotestsrc num-buffers=3 ! livesync ! fakesink", 3),
+    // With no tick to release them, the frames livesync holds to their due time
+    // leave at the stream end instead, so the sink still sees all three.
+    (
+        "videotestsrc num-buffers=3 ! livesync sync=true ! fakesink",
+        3,
+    ),
 ];
 
 #[test]
