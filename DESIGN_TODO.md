@@ -156,6 +156,9 @@ Highest leverage first:
   re-solve through an `audioconvert` pinned to mono). Needs either a
   channel-count-agnostic ADPCM path or a converter that renegotiates on the
   refinement.
+- **Text-only MP4:** `mp4mux` with a lone text input fails the solve: at link
+  degree one the launch parser builds the one-input `Mp4Mux`, which takes
+  H.264 / H.265 only, while the fan-in `Mp4MuxN` writes a `tx3g` track.
 - **FLV:** Speex decode (no Speex encoder exists anywhere to build a validated
   decode vector, and gst's header-in-tag layout is rejected by libavcodec, so
   wiring a decoder would be an unvalidated claim).
@@ -227,7 +230,6 @@ Highest leverage first:
 ## Properties / introspection / DSL
 
 - A GUI / tooling introspection surface beyond the text dump.
-- Text muxer fan-in in `parse_launch`.
 
 ## GStreamer element coverage
 
