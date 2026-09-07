@@ -622,6 +622,14 @@ pub trait MultiInputElement: ElementBound {
         None
     }
 
+    /// This fan-in's contribution to the pipeline latency query (M12).
+    /// Default: zero, non-live. A fan-in that holds inputs back (a switch
+    /// waiting out a stall, a time-aligning mixer) overrides it; the DAG runner
+    /// folds it into `RunStats::latency` alongside the linear elements.
+    fn latency(&self) -> crate::query::LatencyReport {
+        crate::query::LatencyReport::ZERO
+    }
+
     /// Phase 1 for one input pad: narrow that input's proposed caps.
     fn intercept_caps(&self, input: usize, upstream_caps: &Caps) -> Result<Caps, G2gError>;
 

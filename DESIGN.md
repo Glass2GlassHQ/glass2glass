@@ -565,6 +565,8 @@ So when a `StateController` drives the run, the runner arms a `PlayAnchor` (a sh
 
 **Live paths never first-frame-anchor.** Each runner folds the path's `LatencyReport` into the sink's `ClockSync` (`with_path_latency`). When the aggregate says live, the pacer anchors on `base_time()` unconditionally, stamped or eager, and every deadline adds the aggregated minimum latency: GStreamer's `base_time + running_time + latency` model. A startup stall (a hardware decoder's first-frame initialization) then makes the opening frames late, they present immediately and the backlog drains, instead of the stall being latched into a first-frame anchor as the run's standing latency. First-frame anchoring remains the non-live behavior, where frames arrive at read speed and an absolute anchor would defeat pacing entirely.
 
+**What the fold covers.** The DAG runner folds every node that carries an element: sources, transforms, sinks, and fan-ins, which contribute `MultiInputElement::latency()` the way a transform contributes its own (a `fallbackswitch` declares its stall slack there). A tee is structural and contributes nothing. The fold is flat over the topology, one sum across every node, so a fan-in is not handed the aggregate of the branches feeding it and cannot report a per-branch figure.
+
 **Liveness comes back down.** The aggregate's `live` flag does not only fold into the sink's `ClockSync`, it also reaches every element: each runner calls `AsyncElement::configure_liveness` after the fold and before any arm starts, unconditionally, so a path with no live source is told `false` rather than left to assume one. A `GraphMutator` splice hands the run's flag to the spliced element beside its caps. `ffmpegdec` is what reads it today: `thread-type=auto` resolves to slice threading off a live source and to frame threading otherwise, gst-libav's rule, which trades the `thread_count - 1` pictures libavcodec then holds back for throughput when nothing is pacing the stream. The fold reads `latency()` first, so the pictures a decoder starts holding because of the answer are not in that run's reported aggregate.
 
 **The anchor is signed.** A first-frame anchor is `clock.now_ns() - running_time`, and a stream whose PTS epoch runs ahead of the elected clock's puts that below zero: an audio `DriftClock` reads the playout position (seconds since the device opened) while an HLS feed's PTS is the publisher's uptime (hours). `PresentationPacer` keeps `anchor_ns` as an `i64` for exactly that case, clamping only the finished deadline at zero, so a video sink slaved to an audio master presents its first frame on arrival rather than holding it for the difference between the two epochs.
@@ -2554,13 +2556,15 @@ made for it: input 0 is the primary and each higher index the next fallback, so
 the input index is the priority. gst defaults a request pad's `priority` to its
 pad serial, and g2g's launch DSL has no per-pad property syntax to override it
 with, so the index is the whole rule. An input is healthy while it delivered a
-`DataFrame` within `timeout` nanoseconds; the lowest-index healthy input is
-forwarded, frames on the rest are dropped, and when none is healthy the current
-input keeps the output rather than blanking it. Health is re-checked on every
+`DataFrame` within `timeout` plus `latency` nanoseconds, `latency` being the
+slack an upstream running late is allowed and what the element reports to the
+pipeline latency query, live, so downstream buffers it; the lowest-index healthy
+input is forwarded, frames on the rest are dropped, and when none is healthy the
+current input keeps the output rather than blanking it. Health is re-checked on every
 arriving packet and on the tick the element declares (`tick_interval_ns` is the
 timeout), so a primary going silent is noticed while the other inputs are quiet
 too. `immediate-fallback=false` holds a lower-priority frame until the primary
-has had one timeout from the first frame the element saw; `auto-switch=false`
+has had one stall window from the first frame the element saw; `auto-switch=false`
 hands the choice back to `active-pad`; `stop-on-eos` ends forwarding when any
 input ends. A switch re-announces the new input's caps downstream when they
 differ from the last ones emitted, since the branches negotiate independently.

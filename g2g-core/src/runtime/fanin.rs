@@ -382,6 +382,11 @@ pub trait DynMultiInputElement: ElementBound {
     fn tick_interval_ns(&self) -> Option<u64> {
         None
     }
+    /// Dyn-safe mirror of [`MultiInputElement::latency`], so the DAG runner
+    /// folds a fan-in's latency contribution like it folds a transform's.
+    fn latency(&self) -> LatencyReport {
+        LatencyReport::ZERO
+    }
     /// Dyn-safe mirror of [`MultiInputElement::input_pad_index`] (M481): map a
     /// named request pad to the concrete input index, for the launch parser.
     fn input_pad_index(&self, req: &PadRequest, ordinal: usize) -> Option<usize>;
@@ -496,6 +501,10 @@ impl<T: MultiInputElement> DynMultiInputElement for T {
 
     fn tick_interval_ns(&self) -> Option<u64> {
         MultiInputElement::tick_interval_ns(self)
+    }
+
+    fn latency(&self) -> LatencyReport {
+        MultiInputElement::latency(self)
     }
 
     fn input_pad_index(&self, req: &PadRequest, ordinal: usize) -> Option<usize> {
@@ -645,6 +654,10 @@ impl MultiInputElement for MuxRef<'_> {
         self.0.tick_interval_ns()
     }
 
+    fn latency(&self) -> LatencyReport {
+        self.0.latency()
+    }
+
     /// Only reachable by a direct call: the arms drive `process`, and
     /// `caps_constraint_as_input` below forwards the erased element's own
     /// constraint rather than routing through here.
@@ -767,6 +780,10 @@ impl<'b> DynMultiInputElement for &'b mut (dyn DynMultiInputElement + 'b) {
 
     fn tick_interval_ns(&self) -> Option<u64> {
         (**self).tick_interval_ns()
+    }
+
+    fn latency(&self) -> LatencyReport {
+        (**self).latency()
     }
 
     fn input_pad_index(&self, req: &PadRequest, ordinal: usize) -> Option<usize> {

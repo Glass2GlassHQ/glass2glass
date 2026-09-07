@@ -3,11 +3,11 @@
 //! index IS the priority: input 0 is the primary, 1 the first fallback, and so
 //! on, matching gst's default where a request pad's `priority` is its serial.
 //!
-//! An input is healthy while it delivered a `DataFrame` within `timeout`
-//! nanoseconds of now, so a pad that stops producing loses the output to the next
-//! index down. Health is re-evaluated on every incoming packet and on every
-//! `Tick`, which is why the element declares a tick interval: a stalled primary
-//! has to be noticed even while every other input is silent.
+//! An input is healthy while it delivered a `DataFrame` within `timeout` plus
+//! `latency` nanoseconds of now, so a pad that stops producing loses the output
+//! to the next index down. Health is re-evaluated on every incoming packet and
+//! on every `Tick`, which is why the element declares a tick interval: a stalled
+//! primary has to be noticed even while every other input is silent.
 //!
 //! `std` only: the health rule measures against
 //! [`g2g_core::metrics::monotonic_ns`].
@@ -19,6 +19,7 @@ use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
 
+use g2g_core::query::LatencyReport;
 use g2g_core::{
     Caps, CapsConstraint, ConfigureOutcome, ElementMetadata, G2gError, MultiInputElement,
     OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
@@ -43,6 +44,7 @@ pub struct FallbackSwitch {
     auto_switch: bool,
     immediate_fallback: bool,
     timeout_ns: u64,
+    latency_ns: u64,
     stop_on_eos: bool,
     configured: Vec<Option<Caps>>,
     /// When each input last delivered a `DataFrame`, `None` until its first one.
@@ -64,6 +66,7 @@ impl FallbackSwitch {
             auto_switch: true,
             immediate_fallback: false,
             timeout_ns: DEFAULT_TIMEOUT_NS,
+            latency_ns: 0,
             stop_on_eos: false,
             configured: vec![None; inputs],
             last_frame_ns: vec![None; inputs],
@@ -77,6 +80,14 @@ impl FallbackSwitch {
     /// stalled (the `timeout` property).
     pub fn with_timeout_ns(mut self, timeout_ns: u64) -> Self {
         self.timeout_ns = timeout_ns;
+        self
+    }
+
+    /// Nanoseconds of slack added to the stall window on top of `timeout`, for an
+    /// upstream that runs late (the `latency` property). It is also what the
+    /// element reports to the pipeline latency query.
+    pub fn with_latency_ns(mut self, latency_ns: u64) -> Self {
+        self.latency_ns = latency_ns;
         self
     }
 
@@ -106,22 +117,28 @@ impl FallbackSwitch {
         self.active
     }
 
+    /// How long an input may stay silent before it counts as stalled: `timeout`
+    /// plus the `latency` slack an upstream is allowed to run late by.
+    fn stall_window_ns(&self) -> u64 {
+        self.timeout_ns.saturating_add(self.latency_ns)
+    }
+
     fn healthy(&self, input: usize, now_ns: u64) -> bool {
         match self.last_frame_ns[input] {
-            Some(last) => now_ns.saturating_sub(last) <= self.timeout_ns,
+            Some(last) => now_ns.saturating_sub(last) <= self.stall_window_ns(),
             None => false,
         }
     }
 
     /// Whether a lower-priority frame is still being held back at startup: the
-    /// primary has delivered nothing and it has had less than `timeout` since the
-    /// element saw its first frame on any input.
+    /// primary has delivered nothing and it has had less than the stall window
+    /// since the element saw its first frame on any input.
     fn startup_hold(&self, now_ns: u64) -> bool {
         if self.immediate_fallback || self.last_frame_ns[0].is_some() {
             return false;
         }
         match self.first_frame_ns {
-            Some(first) => now_ns.saturating_sub(first) < self.timeout_ns,
+            Some(first) => now_ns.saturating_sub(first) < self.stall_window_ns(),
             None => true,
         }
     }
@@ -224,6 +241,14 @@ impl MultiInputElement for FallbackSwitch {
         (self.timeout_ns > 0).then_some(self.timeout_ns)
     }
 
+    /// The `latency` slack, reported live: the stall rule is clock-driven, so a
+    /// downstream sink has to hold frames that long for the switch to have
+    /// anything left to switch to. Counted into the max as well as the min, so a
+    /// path with a finite ceiling stays satisfiable.
+    fn latency(&self) -> LatencyReport {
+        LatencyReport::live(self.latency_ns, Some(self.latency_ns))
+    }
+
     fn configure_pipeline(
         &mut self,
         input: usize,
@@ -264,6 +289,7 @@ impl MultiInputElement for FallbackSwitch {
                 self.immediate_fallback = value.as_bool().ok_or(PropError::Type)?
             }
             "timeout" => self.timeout_ns = value.as_uint().ok_or(PropError::Type)?,
+            "latency" => self.latency_ns = value.as_uint().ok_or(PropError::Type)?,
             "stop-on-eos" => self.stop_on_eos = value.as_bool().ok_or(PropError::Type)?,
             _ => return Err(PropError::Unknown),
         }
@@ -276,6 +302,7 @@ impl MultiInputElement for FallbackSwitch {
             "auto-switch" => Some(PropValue::Bool(self.auto_switch)),
             "immediate-fallback" => Some(PropValue::Bool(self.immediate_fallback)),
             "timeout" => Some(PropValue::Uint(self.timeout_ns)),
+            "latency" => Some(PropValue::Uint(self.latency_ns)),
             "stop-on-eos" => Some(PropValue::Bool(self.stop_on_eos)),
             _ => None,
         }
@@ -320,6 +347,12 @@ static FALLBACKSWITCH_PROPS: &[PropertySpec] = &[
         "nanoseconds without a buffer before an input counts as stalled",
     )
     .with_default("1000000000"),
+    PropertySpec::new(
+        "latency",
+        PropKind::Uint,
+        "nanoseconds of extra stall slack for an upstream that runs late",
+    )
+    .with_default("0"),
     PropertySpec::new(
         "stop-on-eos",
         PropKind::Bool,
@@ -586,6 +619,52 @@ mod tests {
         assert_eq!(
             s.set_property("priority", PropValue::Uint(0)).unwrap_err(),
             PropError::Unknown
+        );
+    }
+
+    /// M1159: `latency` buys the upstream extra time before its pad counts as
+    /// stalled, so a gap between `timeout` and `timeout + latency` keeps the
+    /// primary and only a longer one switches.
+    #[tokio::test]
+    async fn latency_widens_the_stall_window() {
+        const LATENCY_NS: u64 = 50 * MS;
+        let mut s = switch(2)
+            .with_immediate_fallback(true)
+            .with_latency_ns(LATENCY_NS);
+        let mut out = CollectSink::default();
+        s.handle(0, frame(1), 0, &mut out).await.unwrap();
+        s.handle(1, frame(101), 10 * MS, &mut out).await.unwrap();
+
+        // 130 ms since the primary's frame: past `timeout`, inside the slack.
+        s.handle(0, PipelinePacket::Tick, 130 * MS, &mut out)
+            .await
+            .unwrap();
+        assert_eq!(s.active(), 0, "the primary still has its latency slack");
+        s.handle(1, frame(102), 135 * MS, &mut out).await.unwrap();
+        assert_eq!(out.seq, vec![1], "the fallback is still dropped");
+
+        // 160 ms: past `timeout + latency`, so the fallback takes over.
+        s.handle(0, PipelinePacket::Tick, 160 * MS, &mut out)
+            .await
+            .unwrap();
+        assert_eq!(s.active(), 1);
+        s.handle(1, frame(103), 165 * MS, &mut out).await.unwrap();
+        assert_eq!(out.seq, vec![1, 103]);
+    }
+
+    #[test]
+    fn latency_is_reported_to_the_pipeline_query() {
+        const LATENCY_NS: u64 = 40 * MS;
+        let reported = MultiInputElement::latency(&switch(2).with_latency_ns(LATENCY_NS));
+        assert_eq!(
+            reported,
+            LatencyReport::live(LATENCY_NS, Some(LATENCY_NS)),
+            "the slack downstream has to absorb, live like gst's query answer"
+        );
+        assert_eq!(
+            MultiInputElement::latency(&switch(2)),
+            LatencyReport::live(0, Some(0)),
+            "no slack by default"
         );
     }
 

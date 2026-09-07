@@ -4293,8 +4293,8 @@ fn togglerecord_record_group_and_main() {
     );
 }
 
-/// M1154: `fallbackswitch`'s health-rule knobs, all five settable from a launch
-/// line and all reporting the default `gst-inspect` prints.
+/// M1154 / M1159: `fallbackswitch`'s health-rule knobs, all six settable from a
+/// launch line and all reporting the default `gst-inspect` prints.
 #[cfg(feature = "std")]
 #[test]
 fn fallbackswitch_switching_rule() {
@@ -4306,6 +4306,7 @@ fn fallbackswitch_switching_rule() {
         "auto-switch",
         "immediate-fallback",
         "timeout",
+        "latency",
         "stop-on-eos",
     ] {
         assert!(declares(e.properties(), name), "{name} is declared");
@@ -4334,6 +4335,9 @@ fn fallbackswitch_switching_rule() {
     e.set_property("stop-on-eos", PropValue::Bool(true))
         .unwrap();
     assert_eq!(e.get_property("stop-on-eos"), Some(PropValue::Bool(true)));
+    e.set_property("latency", PropValue::Uint(40_000_000))
+        .unwrap();
+    assert_eq!(e.get_property("latency"), Some(PropValue::Uint(40_000_000)));
     // Only the pads that exist can be selected.
     assert_eq!(
         e.set_property("active-pad", PropValue::Uint(2))
@@ -4353,12 +4357,12 @@ fn livesync_latency_late_threshold_and_counters() {
     for name in [
         "latency",
         "late-threshold",
+        "sync",
+        "single-segment",
         "in",
         "drop",
         "out",
         "duplicate",
-        "sync",
-        "single-segment",
     ] {
         assert!(declares(e.properties(), name), "{name} is declared");
         assert_eq!(
@@ -4380,10 +4384,6 @@ fn livesync_latency_late_threshold_and_counters() {
         Some(PropValue::Uint(u64::MAX)),
         "the value gst spells -1: never resynchronise"
     );
-    // The counters are what the element did, not something to set.
-    for name in ["in", "drop", "out", "duplicate"] {
-        assert_eq!(
-            e.set_property(name, PropValue::Uint(1)).unwrap_err(),
     for name in ["sync", "single-segment"] {
         e.set_property(name, PropValue::Bool(true)).unwrap();
         assert_eq!(
@@ -4392,6 +4392,10 @@ fn livesync_latency_late_threshold_and_counters() {
             "{name} round-trips"
         );
     }
+    // The counters are what the element did, not something to set.
+    for name in ["in", "drop", "out", "duplicate"] {
+        assert_eq!(
+            e.set_property(name, PropValue::Uint(1)).unwrap_err(),
             PropError::ReadOnly
         );
     }

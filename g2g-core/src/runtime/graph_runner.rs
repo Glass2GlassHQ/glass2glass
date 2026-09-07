@@ -1512,8 +1512,9 @@ async fn prepare_graph<'a>(
     // linear runner's sink->source fold.
     let allocation = cascade_allocation(vg, topo, &solution)?;
 
-    // Latency fold + clock election over every element node (tee is structural;
-    // a muxer contributes neither, like the fan-in runner).
+    // Latency fold + clock election over every element node (tee is structural
+    // and contributes neither). A fan-in contributes its declared `latency()`,
+    // summed flat with the rest rather than per input branch.
     let mut latencies: Vec<LatencyReport> = Vec::with_capacity(n);
     let mut clocks: Vec<Option<ClockCandidate>> = Vec::with_capacity(n);
     for &node in topo {
@@ -3641,11 +3642,12 @@ fn element_configure_alloc(
     }
 }
 
-/// A node's latency contribution. `None` for structural (tee) and muxer nodes.
+/// A node's latency contribution. `None` for structural (tee) nodes.
 fn element_latency(vg: &ValidatedGraph<GraphNodeRef<'_>>, node: NodeId) -> Option<LatencyReport> {
     match vg.element(node) {
         Some(GraphNodeRef::Source(src)) => Some(src.latency()),
         Some(GraphNodeRef::Element(elem)) => Some(elem.latency()),
+        Some(GraphNodeRef::Muxer(mux)) => Some(mux.latency()),
         _ => None,
     }
 }

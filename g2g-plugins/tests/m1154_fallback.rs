@@ -33,6 +33,10 @@ const BLACK_PIXEL: [u8; 4] = [0, 0, 0, 255];
 /// default while the main stream's EOS ages into a stall.
 const SHORT_TIMEOUT_NS: u64 = 50_000_000;
 
+/// The `latency` slack the switch declares to the pipeline latency query, chosen
+/// well clear of zero so a fold that dropped it is visible.
+const SWITCH_LATENCY_NS: u64 = 30_000_000;
+
 /// How long a timed run gets before the dummy's frames are declared missing. The
 /// dummy is unbounded (a real fallback never ends), so the run is cancelled
 /// rather than waited out.
@@ -189,6 +193,25 @@ async fn dummy_black_frames_reach_the_sink_after_the_main_stream_stalls() {
         "the fallback's black frames reached the sink, got {black} black pixels in {} bytes",
         bytes.len()
     );
+}
+
+/// M1159: the switch's `latency` reaches the runner's latency fold, which used
+/// to skip fan-in nodes entirely.
+#[tokio::test]
+async fn switch_latency_reaches_the_run_stats() {
+    let reg = default_registry();
+    let line = format!(
+        "videotestsrc num-buffers=2 ! fallbackswitch latency={SWITCH_LATENCY_NS} ! fakesink"
+    );
+    let graph = parse_launch(&reg, &line).unwrap_or_else(|e| panic!("{line}: {e}"));
+    let stats = run_graph(graph, &ZeroClock, 4)
+        .await
+        .unwrap_or_else(|e| panic!("{line}: {e:?}"));
+    assert_eq!(
+        stats.latency.min_ns, SWITCH_LATENCY_NS,
+        "the switch is the only element declaring latency on this path"
+    );
+    assert!(stats.latency.live, "the switch answers the query live");
 }
 
 #[test]
