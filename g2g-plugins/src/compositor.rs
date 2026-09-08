@@ -48,6 +48,7 @@ use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
 
+use crate::padprop::split_pad_name;
 use crate::paint::blend_px;
 use crate::pixel::{frame_byte_size, planar_planes};
 use crate::yuvmatrix::YuvRgbMatrix;
@@ -276,12 +277,6 @@ static COMPOSITOR_PROPS: &[PropertySpec] = compositor_props!([0 1 2 3 4 5 6 7], 
 /// The same table without the CPU-only `format` (this element is RGBA8).
 #[cfg(feature = "wgpu-sink")]
 pub(crate) static WGPU_COMPOSITOR_PROPS: &[PropertySpec] = compositor_props!([0 1 2 3 4 5 6 7]);
-
-/// Split a `sinkN-<knob>` property name into the pad index and the knob.
-fn split_pad_name(name: &str) -> Option<(usize, &str)> {
-    let (index, knob) = name.strip_prefix("sink")?.split_once('-')?;
-    Some((index.parse().ok()?, knob))
-}
 
 /// Apply a flattened per-pad property. `None` when `name` is not one; `Err` when
 /// it names a pad this element does not have (silently ignoring it would leave a

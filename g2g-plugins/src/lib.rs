@@ -182,6 +182,8 @@ mod cudadeviceid;
 
 // Software RGBA8 compositor (fan-in pixel mixer): PiP / grids / overlays.
 pub mod compositor;
+// The `sinkN-<knob>` naming fan-ins flatten their per-pad properties into.
+mod padprop;
 // Conformance batteries (M614): exercise real elements to derive their maturity
 // records, so `g2g-inspect --maturity` reports validation observed, not claimed.
 pub mod conformance;

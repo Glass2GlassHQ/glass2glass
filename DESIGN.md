@@ -2555,9 +2555,16 @@ the caller's.
 
 **Fallback switching.** `fallbackswitch` is `input-selector` with the choice
 made for it: input 0 is the primary and each higher index the next fallback, so
-the input index is the priority. gst defaults a request pad's `priority` to its
-pad serial, and g2g's launch DSL has no per-pad property syntax to override it
-with, so the index is the whole rule. An input is healthy while it delivered a
+the input index is the priority until `sinkN-priority` says otherwise. gst
+defaults a request pad's `priority` to its pad serial and g2g defaults input N's
+to N, the same order; a lower number is preferred and ties go to the lower index.
+gst spells it on the request pad (`sink_1::priority`), which a `&'static`
+property table has no room for, so g2g flattens it into the element's own table
+for inputs 0..=7, the convention `compositor`'s `sinkN-xpos` already uses;
+a switch with more inputs sets the rest at construction. The best-priority input
+is also the one the startup hold waits for, where gst tests literally for
+priority 0 and so holds the output for a whole timeout when every pad was given
+a nonzero priority. An input is healthy while it delivered a
 `DataFrame` within `timeout` plus `latency` nanoseconds, `latency` being the
 slack an upstream running late is allowed and what the element reports to the
 pipeline latency query, live, so downstream buffers it; the lowest-index healthy

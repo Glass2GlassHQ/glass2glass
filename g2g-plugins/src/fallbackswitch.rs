@@ -1,11 +1,14 @@
 //! Fallback switch (`fallbackswitch`). Forwards the highest-priority input that
 //! is still delivering and falls back to the next one when it stalls. The input
-//! index IS the priority: input 0 is the primary, 1 the first fallback, and so
-//! on, matching gst's default where a request pad's `priority` is its serial.
+//! index is the priority unless `sinkN-priority` says otherwise: input 0 is the
+//! primary, 1 the first fallback, and so on, matching gst's default where a
+//! request pad's `priority` is its pad serial.
 //!
 //! An input is healthy while it delivered a `DataFrame` within `timeout` plus
 //! `latency` nanoseconds of now, so a pad that stops producing loses the output
-//! to the next index down. Health is re-evaluated on every incoming packet and
+//! to the next input down. `sinkN-priority` overrides the index for input N,
+//! lower being preferred, which is gst's per-pad `priority` flattened into the
+//! element's property table. Health is re-evaluated on every incoming packet and
 //! on every `Tick`, which is why the element declares a tick interval: a stalled
 //! primary has to be noticed even while every other input is silent.
 //!
@@ -19,6 +22,7 @@ use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
 
+use crate::padprop::split_pad_name;
 use g2g_core::query::LatencyReport;
 use g2g_core::{
     Caps, CapsConstraint, ConfigureOutcome, ElementMetadata, G2gError, MultiInputElement,
@@ -28,6 +32,9 @@ use g2g_core::{
 /// gst's `fallbackswitch` timeout default: one second without a buffer and the
 /// pad is stalled.
 const DEFAULT_TIMEOUT_NS: u64 = 1_000_000_000;
+
+/// The per-pad knob spelled into the property table as `sinkN-priority`.
+const PAD_PRIORITY_KNOB: &str = "priority";
 
 /// # Example
 ///
@@ -47,6 +54,8 @@ pub struct FallbackSwitch {
     latency_ns: u64,
     min_upstream_latency_ns: u64,
     stop_on_eos: bool,
+    /// Selection priority per input, lower preferred. Defaults to the index.
+    priorities: Vec<u32>,
     configured: Vec<Option<Caps>>,
     /// When each input last delivered a `DataFrame`, `None` until its first one.
     last_frame_ns: Vec<Option<u64>>,
@@ -70,6 +79,7 @@ impl FallbackSwitch {
             latency_ns: 0,
             min_upstream_latency_ns: 0,
             stop_on_eos: false,
+            priorities: (0..inputs as u32).collect(),
             configured: vec![None; inputs],
             last_frame_ns: vec![None; inputs],
             first_frame_ns: None,
@@ -101,6 +111,14 @@ impl FallbackSwitch {
         self
     }
 
+    /// Selection priority for one input, lower preferred (the `sinkN-priority`
+    /// property). Panics on an input this switch does not have.
+    pub fn with_priority(mut self, input: usize, priority: u32) -> Self {
+        assert!(input < self.inputs, "FallbackSwitch has no input {input}");
+        self.priorities[input] = priority;
+        self
+    }
+
     /// Pick the forwarded input by hand instead of by health (`auto-switch=false`
     /// plus `active-pad`).
     pub fn with_auto_switch(mut self, auto_switch: bool) -> Self {
@@ -127,6 +145,34 @@ impl FallbackSwitch {
         self.active
     }
 
+    /// Apply a flattened per-pad property. `None` when `name` is not one; `Err`
+    /// when it names an input this switch does not have, since ignoring it would
+    /// leave a launch line thinking its priority applied.
+    fn set_pad_property(&mut self, name: &str, value: &PropValue) -> Option<Result<(), PropError>> {
+        let (index, knob) = split_pad_name(name)?;
+        if knob != PAD_PRIORITY_KNOB {
+            return Some(Err(PropError::Unknown));
+        }
+        Some(self.set_priority(index, value))
+    }
+
+    fn set_priority(&mut self, input: usize, value: &PropValue) -> Result<(), PropError> {
+        let slot = self.priorities.get_mut(input).ok_or(PropError::Value)?;
+        *slot =
+            u32::try_from(value.as_uint().ok_or(PropError::Type)?).map_err(|_| PropError::Value)?;
+        Ok(())
+    }
+
+    /// Read back a flattened per-pad property, `None` if `name` is not one (or
+    /// names an input this switch does not have).
+    fn pad_property(&self, name: &str) -> Option<PropValue> {
+        let (index, knob) = split_pad_name(name)?;
+        (knob == PAD_PRIORITY_KNOB)
+            .then(|| self.priorities.get(index))
+            .flatten()
+            .map(|&priority| PropValue::Uint(priority as u64))
+    }
+
     /// How long an input may stay silent before it counts as stalled: `timeout`
     /// plus the `latency` slack an upstream is allowed to run late by.
     fn stall_window_ns(&self) -> u64 {
@@ -140,11 +186,19 @@ impl FallbackSwitch {
         }
     }
 
+    /// The input to prefer over every other: the lowest priority number, ties
+    /// going to the lowest index.
+    fn primary(&self) -> usize {
+        (0..self.inputs)
+            .min_by_key(|&i| self.priorities[i])
+            .unwrap_or(0)
+    }
+
     /// Whether a lower-priority frame is still being held back at startup: the
     /// primary has delivered nothing and it has had less than the stall window
     /// since the element saw its first frame on any input.
     fn startup_hold(&self, now_ns: u64) -> bool {
-        if self.immediate_fallback || self.last_frame_ns[0].is_some() {
+        if self.immediate_fallback || self.last_frame_ns[self.primary()].is_some() {
             return false;
         }
         match self.first_frame_ns {
@@ -153,17 +207,21 @@ impl FallbackSwitch {
         }
     }
 
-    /// Re-pick the forwarded input. The lowest-index healthy one wins; when none
-    /// is healthy the current one stays, so a stall does not blank the output.
+    /// Re-pick the forwarded input. The healthy one with the lowest priority
+    /// number wins, ties going to the lowest index; when none is healthy the
+    /// current one stays, so a stall does not blank the output.
     fn select(&mut self, now_ns: u64) {
         if !self.auto_switch {
             return;
         }
         if self.startup_hold(now_ns) {
-            self.active = 0;
+            self.active = self.primary();
             return;
         }
-        if let Some(input) = (0..self.inputs).find(|&i| self.healthy(i, now_ns)) {
+        if let Some(input) = (0..self.inputs)
+            .filter(|&i| self.healthy(i, now_ns))
+            .min_by_key(|&i| self.priorities[i])
+        {
             self.active = input;
         }
     }
@@ -290,6 +348,9 @@ impl MultiInputElement for FallbackSwitch {
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        if let Some(applied) = self.set_pad_property(name, &value) {
+            return applied;
+        }
         match name {
             "active-pad" => {
                 let index = value.as_uint().ok_or(PropError::Type)? as usize;
@@ -314,6 +375,9 @@ impl MultiInputElement for FallbackSwitch {
     }
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
+        if let Some(priority) = self.pad_property(name) {
+            return Some(priority);
+        }
         match name {
             "active-pad" => Some(PropValue::Uint(self.active as u64)),
             "auto-switch" => Some(PropValue::Bool(self.auto_switch)),
@@ -339,51 +403,68 @@ impl MultiInputElement for FallbackSwitch {
     }
 }
 
-/// `FallbackSwitch`'s settable properties, named as gst's `fallbackswitch`.
-static FALLBACKSWITCH_PROPS: &[PropertySpec] = &[
-    PropertySpec::new(
-        "active-pad",
-        PropKind::Uint,
-        "index of the input being forwarded",
-    )
-    .with_default("0"),
-    PropertySpec::new(
-        "auto-switch",
-        PropKind::Bool,
-        "pick the input by health instead of by active-pad",
-    )
-    .with_default("true"),
-    PropertySpec::new(
-        "immediate-fallback",
-        PropKind::Bool,
-        "forward a fallback at once instead of waiting timeout for the primary",
-    )
-    .with_default("false"),
-    PropertySpec::new(
-        "timeout",
-        PropKind::Uint,
-        "nanoseconds without a buffer before an input counts as stalled",
-    )
-    .with_default("1000000000"),
-    PropertySpec::new(
-        "latency",
-        PropKind::Uint,
-        "nanoseconds of extra stall slack for an upstream that runs late",
-    )
-    .with_default("0"),
-    PropertySpec::new(
-        "min-upstream-latency",
-        PropKind::Uint,
-        "nanoseconds the inputs feeding the switch are reported to take at minimum",
-    )
-    .with_default("0"),
-    PropertySpec::new(
-        "stop-on-eos",
-        PropKind::Bool,
-        "stop forwarding once any input ends",
-    )
-    .with_default("false"),
-];
+/// `FallbackSwitch`'s settable properties, named as gst's `fallbackswitch`, with
+/// its per-pad `priority` flattened to `sinkN-priority` for the pad indices
+/// given (see [`crate::padprop`]). A switch with more inputs than that sets the
+/// rest through [`FallbackSwitch::with_priority`] at construction.
+macro_rules! fallbackswitch_props {
+    ([$($i:literal)*]) => {
+        &[
+            PropertySpec::new(
+                "active-pad",
+                PropKind::Uint,
+                "index of the input being forwarded",
+            )
+            .with_default("0"),
+            PropertySpec::new(
+                "auto-switch",
+                PropKind::Bool,
+                "pick the input by health instead of by active-pad",
+            )
+            .with_default("true"),
+            PropertySpec::new(
+                "immediate-fallback",
+                PropKind::Bool,
+                "forward a fallback at once instead of waiting timeout for the primary",
+            )
+            .with_default("false"),
+            PropertySpec::new(
+                "timeout",
+                PropKind::Uint,
+                "nanoseconds without a buffer before an input counts as stalled",
+            )
+            .with_default("1000000000"),
+            PropertySpec::new(
+                "latency",
+                PropKind::Uint,
+                "nanoseconds of extra stall slack for an upstream that runs late",
+            )
+            .with_default("0"),
+            PropertySpec::new(
+                "min-upstream-latency",
+                PropKind::Uint,
+                "nanoseconds the inputs feeding the switch are reported to take at minimum",
+            )
+            .with_default("0"),
+            PropertySpec::new(
+                "stop-on-eos",
+                PropKind::Bool,
+                "stop forwarding once any input ends",
+            )
+            .with_default("false"),
+            $(
+                PropertySpec::new(
+                    concat!("sink", $i, "-priority"),
+                    PropKind::Uint,
+                    concat!("input ", $i, ": selection priority, lower is preferred"),
+                )
+                .with_default(stringify!($i)),
+            )*
+        ]
+    };
+}
+
+static FALLBACKSWITCH_PROPS: &[PropertySpec] = fallbackswitch_props!([0 1 2 3 4 5 6 7]);
 
 #[cfg(test)]
 mod tests {
@@ -472,6 +553,61 @@ mod tests {
         assert_eq!(s.active(), 1, "the tick made the switch");
         s.handle(1, frame(103), 135 * MS, &mut out).await.unwrap();
         assert_eq!(out.seq, vec![1, 2, 103], "the fallback took over");
+    }
+
+    #[tokio::test]
+    async fn a_priority_outranks_the_input_index() {
+        // Input 1 is the preferred one, so it wins over a healthy input 0.
+        let mut s = switch(2)
+            .with_immediate_fallback(true)
+            .with_priority(0, 1)
+            .with_priority(1, 0);
+        let mut out = CollectSink::default();
+        s.handle(0, frame(1), 0, &mut out).await.unwrap();
+        assert_eq!(s.active(), 0, "only input 0 is delivering");
+        s.handle(1, frame(101), 10 * MS, &mut out).await.unwrap();
+        assert_eq!(s.active(), 1, "the better priority takes the output");
+        s.handle(0, frame(2), 20 * MS, &mut out).await.unwrap();
+        assert_eq!(out.seq, vec![1, 101], "input 0 is dropped from then on");
+
+        // And the demoted input takes it back once the preferred one goes stale.
+        s.handle(0, frame(3), 200 * MS, &mut out).await.unwrap();
+        assert_eq!(s.active(), 0, "input 1 stopped delivering");
+        assert_eq!(out.seq, vec![1, 101, 3]);
+    }
+
+    #[tokio::test]
+    async fn the_startup_hold_waits_for_the_best_priority_input() {
+        // Input 1 is preferred, so input 0 is the one held back at startup.
+        let mut s = switch(2).with_priority(0, 1).with_priority(1, 0);
+        let mut out = CollectSink::default();
+        s.handle(0, frame(1), 0, &mut out).await.unwrap();
+        assert!(out.seq.is_empty(), "held until the preferred input speaks");
+        s.handle(1, frame(101), 10 * MS, &mut out).await.unwrap();
+        assert_eq!(out.seq, vec![101]);
+    }
+
+    #[test]
+    fn a_pad_priority_round_trips_through_the_property() {
+        let mut s = switch(2);
+        assert_eq!(
+            s.get_property("sink1-priority"),
+            Some(PropValue::Uint(1)),
+            "the default priority is the input index"
+        );
+        s.set_property("sink1-priority", PropValue::Uint(0))
+            .unwrap();
+        assert_eq!(s.get_property("sink1-priority"), Some(PropValue::Uint(0)));
+        assert_eq!(
+            s.set_property("sink5-priority", PropValue::Uint(0)),
+            Err(PropError::Value),
+            "this switch has no input 5"
+        );
+        assert_eq!(
+            s.set_property("sink0-xpos", PropValue::Uint(0)),
+            Err(PropError::Unknown),
+            "a pad knob the switch does not have"
+        );
     }
 
     #[tokio::test]

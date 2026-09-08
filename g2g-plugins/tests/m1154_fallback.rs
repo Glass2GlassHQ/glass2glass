@@ -218,6 +218,36 @@ async fn switch_latency_reaches_the_run_stats() {
     assert!(stats.latency.live, "the switch answers the query live");
 }
 
+/// M1162: `sinkN-priority` overrides the input index, so a later input can be
+/// the primary. Input 1 draws black and input 0 the SMPTE bars, so the pixels
+/// say which input owned the output.
+#[tokio::test]
+async fn a_pad_priority_makes_a_later_input_the_primary() {
+    let out = temp_path("priority.raw");
+    let reg = default_registry();
+    let line = format!(
+        "videotestsrc num-buffers=2 pattern=smpte ! s.            videotestsrc num-buffers=2 pattern=black ! s.            fallbackswitch name=s sink0-priority=1 sink1-priority=0 ! filesink location={}",
+        out.display()
+    );
+    let graph = parse_launch(&reg, &line).unwrap_or_else(|e| panic!("{line}: {e}"));
+    run_graph(graph, &ZeroClock, 4)
+        .await
+        .unwrap_or_else(|e| panic!("{line}: {e:?}"));
+
+    let bytes = std::fs::read(&out).expect("the sink wrote what the switch forwarded");
+    std::fs::remove_file(&out).ok();
+    let pixels = bytes.as_chunks::<4>().0;
+    assert!(
+        pixels.len() >= dummy_frame_pixels(),
+        "at least one whole frame came out, got {} pixels",
+        pixels.len()
+    );
+    assert!(
+        pixels.iter().all(|px| *px == BLACK_PIXEL),
+        "every forwarded pixel is input 1's black, not input 0's bars"
+    );
+}
+
 /// M1161: `min-upstream-latency` floors what the fold reports for the branches
 /// feeding the switch, on top of which the switch's own `latency` still counts.
 #[tokio::test]
