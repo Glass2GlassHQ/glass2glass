@@ -59,6 +59,23 @@ jobs:
         with:
           package: g2g-core
 
+  # The job above derives its release type from the version, so from the moment
+  # the workspace carries the pre-1.0 breaking bump until the next publish it
+  # skips every lint and passes having checked nothing. This one forces the patch
+  # release type, which makes the lints run and name what broke, and holds the
+  # result against the checked-in list.
+  api-breaks:
+    name: recorded api breaks (g2g-core)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-semver-checks
+      - run: tools/api-breaks.sh check
+
   # Lints, default features, Linux. Not run with `-D warnings`: the workspace
   # carries some intentional warnings, so CI fails only on clippy errors, not
   # warnings.

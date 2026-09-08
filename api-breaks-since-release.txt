@@ -1,0 +1,16 @@
+# Every API break g2g-core carries against the last release on crates.io, one
+# per line as `<lint>: <item>`. Regenerate with `tools/api-breaks.sh record`.
+#
+# cargo-semver-checks derives its release type from the version, so once the
+# workspace carries the pre-1.0 breaking bump every lint skips and the `semver`
+# CI job verifies nothing until the next publish. This list is what still holds
+# a break to a deliberate act during that window, and it is the raw material for
+# the release notes when the bump ships.
+auto_trait_impl_removed: type OwnedVulkanTexture is no longer RefUnwindSafe
+auto_trait_impl_removed: type OwnedVulkanTexture is no longer UnwindSafe
+constructible_struct_adds_field: field OwnedVulkanTexture.format
+constructible_struct_adds_field: field OwnedVulkanTexture.height
+constructible_struct_adds_field: field OwnedVulkanTexture.width
+constructible_struct_adds_private_field: field OwnedVulkanTexture.keep_alive
+enum_variant_added: variant BusMessage:SourceRestart
+struct_pub_field_missing: field allocation_id of struct OwnedVulkanTexture

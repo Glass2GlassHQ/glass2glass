@@ -129,6 +129,11 @@ The type tiers above translate to per-crate promises:
   (`ConfigureOutcome`, `PadDir`/`PadDirection`, `ClockPriority`, `LinkPolicy`,
   `SeekType`). Adding a variant to a `#[non_exhaustive]` vocabulary enum is
   **not** breaking, by design.
+- **Breaks in flight.** Between a breaking bump and the publish that ships it,
+  `cargo semver-checks` reads the bump as already covering everything and stops
+  reporting, so `api-breaks-since-release.txt` records each break against the last
+  released version instead, checked in CI and regenerated with
+  `tools/api-breaks.sh record`.
 - **Feature flags** are additive and not part of the semver contract; enabling one
   may pull in `std` / OS deps. Default (`no_std + alloc`) is the stable baseline.
 - **MSRV.** Split, because the two audiences are not the same. The embedded-facing
