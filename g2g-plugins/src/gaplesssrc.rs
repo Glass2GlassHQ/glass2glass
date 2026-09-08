@@ -148,13 +148,7 @@ impl SourceLoop for GaplessSrc {
                 // `end` are copied out (the inner's own count is lost when a
                 // preemption drops its run future mid-stream).
                 let (preempted, frames, end) = {
-                    let mut adapter = ShiftSink {
-                        out: &mut *out,
-                        offset,
-                        max_end: offset,
-                        frames: 0,
-                        shifted: false,
-                    };
+                    let mut adapter = ShiftSink::new(&mut *out, offset);
                     let preempted =
                         match select2(src.run(&mut adapter), self.ctl.wait_instant()).await {
                             Either::Left(res) => {
@@ -212,23 +206,38 @@ impl SourceLoop for GaplessSrc {
     }
 }
 
-/// An [`OutputSink`] adapter wrapping the real downstream output for one playlist
-/// item: it shifts each `DataFrame`'s PTS/DTS by `offset` (so items concatenate
-/// onto one timeline), tracks the highest end time reached (`max_end`, the next
-/// item's offset), and swallows the item's `Eos` (the gapless stream ends only at
-/// playlist end). Caps / flush / segment packets pass through unchanged.
-struct ShiftSink<'o> {
+/// An [`OutputSink`] adapter wrapping the real downstream output for one run of
+/// an inner source (a playlist item here, one life of a restarted source in
+/// `fallbacksrc`): it shifts each `DataFrame`'s PTS/DTS by `offset` (so
+/// successive runs concatenate onto one timeline), tracks the highest end time
+/// reached (`max_end`, the next run's offset), and swallows the inner `Eos` (the
+/// outer stream ends only when its owner says so). Caps / flush / segment packets
+/// pass through unchanged.
+pub(crate) struct ShiftSink<'o> {
     out: &'o mut dyn OutputSink,
     offset: u64,
     /// Highest `pts + duration` forwarded so far (seeded with `offset`, so an
     /// empty item leaves the offset unchanged).
-    max_end: u64,
-    /// `DataFrame`s forwarded for this item, so `GaplessSrc` counts frames even
+    pub(crate) max_end: u64,
+    /// `DataFrame`s forwarded for this item, so the owner counts frames even
     /// when a preemption drops the inner source's run future (losing its count).
-    frames: u64,
+    pub(crate) frames: u64,
     /// Whether the packet in the caller's slot has already been shifted and
     /// counted, so a re-poll under inner backpressure never shifts twice.
     shifted: bool,
+}
+
+impl<'o> ShiftSink<'o> {
+    /// Forward to `out` with every timestamp moved up by `offset`.
+    pub(crate) fn new(out: &'o mut dyn OutputSink, offset: u64) -> Self {
+        Self {
+            out,
+            offset,
+            max_end: offset,
+            frames: 0,
+            shifted: false,
+        }
+    }
 }
 
 impl OutputSink for ShiftSink<'_> {

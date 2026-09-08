@@ -73,7 +73,7 @@ use crate::link::LinkPolicy;
 use crate::memory::MemoryDomainKind;
 use crate::property::{PropError, PropValue, PropertySpec, ValueError};
 use crate::runtime::autoplug::{
-    is_raw_audio, is_raw_video, PadKind, PadRequest, Registry, UriError,
+    is_raw_audio, is_raw_video, PadKind, PadRequest, Registry, RestartPolicy, UriError,
 };
 use crate::runtime::{DynSourceLoop, GraphNode, GraphNodeRef};
 
@@ -1480,7 +1480,16 @@ const FALLBACKSRC_PROPS: &[&str] = &[
     "immediate-fallback",
     "enable-audio",
     "enable-video",
+    "restart-on-eos",
+    "restart-timeout",
+    "retry-timeout",
 ];
+
+/// gst `fallbacksrc`'s defaults for its restart timeouts (M1163): a source that
+/// delivers nothing for `restart-timeout` is rebuilt, and rebuilding is given up
+/// after `retry-timeout` of failures.
+const FALLBACK_RESTART_TIMEOUT_NS: u64 = 5_000_000_000;
+const FALLBACK_RETRY_TIMEOUT_NS: u64 = 60_000_000_000;
 
 /// The switch a `fallbacksrc` expands around, and the input its fallback branch
 /// links to (input 0 is the main URI, so the fallback is input 1).
@@ -1519,6 +1528,36 @@ fn keyword_bool(spec: &ElementSpec, key: &str, default: bool) -> Result<bool, Pa
     }
 }
 
+/// A `fallbacksrc` keyword's unsigned property (a nanosecond timeout), defaulting
+/// to `default` when the line did not write it.
+fn keyword_uint(spec: &ElementSpec, key: &str, default: u64) -> Result<u64, ParseError> {
+    let Some(text) = prop(spec, key) else {
+        return Ok(default);
+    };
+    text.parse().map_err(|_| ParseError::BadValue {
+        element: spec.name.clone(),
+        key: key.to_string(),
+        value: text.to_string(),
+    })
+}
+
+/// Wrap a `fallbacksrc` URI source so it is rebuilt when it dies (M1163), when
+/// the registry has a restart hook; else the source runs as it is.
+fn restartable_uri_source(
+    registry: &Registry,
+    source: Box<dyn DynSourceLoop>,
+    uri: &str,
+    policy: RestartPolicy,
+) -> Result<Box<dyn DynSourceLoop>, ParseError> {
+    let Some(hook) = registry.restart_source_hook() else {
+        return Ok(source);
+    };
+    let rebuild = registry
+        .uri_source_rebuilder(uri)
+        .map_err(|e: UriError| ParseError::Uri(alloc::format!("{uri}: {e:?}")))?;
+    Ok(hook(source, rebuild, policy))
+}
+
 /// Expand one `fallbacksrc` into its main branch (the `uri=` source auto-plugged
 /// to raw), the `fallbackswitch` those branches meet at, and the fallback branch
 /// as a chain of its own that references the switch's second input.
@@ -1554,12 +1593,18 @@ fn expand_fallbacksrc(
             value: "false".to_string(),
         });
     }
+    let restart = RestartPolicy {
+        restart_on_eos: keyword_bool(spec, "restart-on-eos", false)?,
+        restart_timeout_ns: keyword_uint(spec, "restart-timeout", FALLBACK_RESTART_TIMEOUT_NS)?,
+        retry_timeout_ns: keyword_uint(spec, "retry-timeout", FALLBACK_RETRY_TIMEOUT_NS)?,
+    };
     let preferred = consumer.map_or(MemoryDomainKind::System, |name| {
         registry.declared_memory_preference(name)
     });
     let (source, source_caps) = registry
         .build_uri_source(uri)
         .map_err(|e: UriError| ParseError::Uri(alloc::format!("{uri}: {e:?}")))?;
+    let source = restartable_uri_source(registry, source, uri, restart)?;
     // The kind is decided by which target the search reaches, so the dummy
     // fallback is the right generator and a `fallback-uri` decodes to the same
     // shape. Video first: a container carrying both is a video stream here.
@@ -1606,6 +1651,7 @@ fn expand_fallbacksrc(
             let (source, caps) = registry
                 .build_uri_source(fallback_uri)
                 .map_err(|e: UriError| ParseError::Uri(alloc::format!("{fallback_uri}: {e:?}")))?;
+            let source = restartable_uri_source(registry, source, fallback_uri, restart)?;
             let decoders = plug(&caps, target)
                 .ok_or_else(|| ParseError::NoDecodeChain(alloc::format!("{caps:?}")))?;
             fallback.push(Item::Prebuilt(PrebuiltNode::Source(source)));

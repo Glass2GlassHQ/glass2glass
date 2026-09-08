@@ -1117,6 +1117,39 @@ mod factory {
     /// in core, the Matroska parsing in `g2g-plugins`.
     pub type PlaybinHook = fn(&Registry, &str) -> Result<Option<Graph<GraphNode>>, ParseError>;
 
+    /// When a `fallbacksrc` rebuilds the source behind a URI (M1163). The
+    /// timeouts are nanoseconds, as gst's `fallbacksrc` takes them.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct RestartPolicy {
+        /// Rebuild the source when it ends cleanly, not only when it fails or
+        /// stalls.
+        pub restart_on_eos: bool,
+        /// How long the source may deliver nothing before it is rebuilt. Zero
+        /// disables the stall check.
+        pub restart_timeout_ns: u64,
+        /// How long after the first failure (counted from the last delivered
+        /// frame) a rebuild may still start. Once spent, the source stops
+        /// retrying and ends its stream. Zero means no rebuild at all.
+        pub retry_timeout_ns: u64,
+    }
+
+    /// Builds a fresh source (and its declared caps) for one URI each time it is
+    /// called, the rebuild half of [`RestartSourceHook`]. Handed out by
+    /// [`Registry::uri_source_rebuilder`]; owns its URI so it stays `'static`.
+    pub type UriRebuild = Box<dyn Fn() -> Result<(Box<dyn DynSourceLoop>, Caps), UriError> + Send>;
+
+    /// Wraps a URI source in one that rebuilds it with `rebuild` under `policy`
+    /// when it fails, stalls, or (under `restart_on_eos`) ends (M1163). Registered
+    /// via [`Registry::register_restart_source`]; when none is registered a
+    /// `fallbacksrc` runs its sources unwrapped, as before. A plain `fn` pointer
+    /// for the same reason as [`PlaybinHook`]; cross-crate because the restart
+    /// delay needs a timer core does not have.
+    pub type RestartSourceHook = fn(
+        source: Box<dyn DynSourceLoop>,
+        rebuild: UriRebuild,
+        policy: RestartPolicy,
+    ) -> Box<dyn DynSourceLoop>;
+
     /// An explicit-demux fan-out hook (M476), the sibling of [`PlaybinHook`] for a
     /// named demux element inside a user-authored line
     /// (`filesrc location=x.mkv ! matroskademux name=d  d.video_0 ! ...  d.audio_0 ! ...`).
@@ -1236,6 +1269,10 @@ mod factory {
         /// upstream tries each until one parses the container, returning the
         /// demuxer + per-port caps so the parser splices a decoder onto each port.
         decodebin_select: Vec<DecodebinSelectHook>,
+        /// The `fallbacksrc` source-restart hook (M1163). `None` (the default)
+        /// leaves a `fallbacksrc`'s sources unwrapped: a dead main source stays
+        /// dead and the switch holds the fallback.
+        restart_source: Option<RestartSourceHook>,
         /// Bare-`decodebin` primary-stream hooks (M746): a `filesrc location=X !
         /// decodebin` on a container tries each until one sniffs the file and names
         /// the single-stream demux + stream selection for its primary decodable
@@ -1379,6 +1416,19 @@ mod factory {
         /// a decoder onto each port. One per container type. Returns `&mut self`.
         pub fn register_decodebin_select(&mut self, hook: DecodebinSelectHook) -> &mut Self {
             self.decodebin_select.push(hook);
+            self
+        }
+
+        /// The `fallbacksrc` source-restart hook (M1163), if one is registered.
+        pub fn restart_source_hook(&self) -> Option<RestartSourceHook> {
+            self.restart_source
+        }
+
+        /// Register the `fallbacksrc` source-restart hook (M1163): the wrapper
+        /// that rebuilds a URI source when it fails, stalls, or ends. One per
+        /// registry; a second call replaces the first. Returns `&mut self`.
+        pub fn register_restart_source(&mut self, hook: RestartSourceHook) -> &mut Self {
+            self.restart_source = Some(hook);
             self
         }
 
@@ -2349,6 +2399,26 @@ mod factory {
             (handler.build)(&parsed)
         }
 
+        /// A closure that builds a fresh source for `uri` on every call, the way
+        /// [`build_uri_source`](Self::build_uri_source) does once, so a restart
+        /// wrapper can replace a dead source without holding the registry. Fails
+        /// now for a malformed URI or an unregistered scheme; a handler's own
+        /// per-build failure surfaces from each call.
+        pub fn uri_source_rebuilder(&self, uri: &str) -> Result<UriRebuild, UriError> {
+            let parsed = Uri::parse(uri).ok_or(UriError::Malformed)?;
+            let build = self
+                .uris
+                .iter()
+                .find(|h| h.scheme == parsed.scheme)
+                .map(|h| h.build)
+                .ok_or(UriError::UnknownScheme)?;
+            let uri = String::from(uri);
+            Ok(Box::new(move || {
+                let parsed = Uri::parse(&uri).ok_or(UriError::Malformed)?;
+                build(&parsed)
+            }))
+        }
+
         pub fn build_uridecodebin<Sk: AsyncElement + 'static>(
             &self,
             uri: &str,
@@ -2493,7 +2563,8 @@ pub use factory::{
     declared_source_caps, AutoplugError, AutoplugParams, DecodebinError, DecodebinSelectHook,
     DemuxFactory, DemuxSelectHook, ElementDoc, ElementFactory, FanoutSrcFactory, LaunchFactory,
     MuxerFactory, PlaybinError, PlaybinGraphError, PlaybinHook, PlaybinPort, PrimaryStream,
-    PrimaryStreamHook, PropertyDoc, Registry, SourceFactory, Uri, UriError, UriSourceFactory,
+    PrimaryStreamHook, PropertyDoc, Registry, RestartPolicy, RestartSourceHook, SourceFactory, Uri,
+    UriError, UriRebuild, UriSourceFactory,
 };
 
 #[cfg(test)]

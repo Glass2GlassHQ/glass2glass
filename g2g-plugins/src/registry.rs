@@ -1568,6 +1568,9 @@ fn register_uri_handlers(reg: &mut Registry) {
     reg.register_primary_stream(crate::uridecodebin::ts_primary_stream);
     reg.register_primary_stream(crate::uridecodebin::mp4_primary_stream);
     reg.register_primary_stream(crate::uridecodebin::mkv_primary_stream);
+    // `fallbacksrc` restarts (M1163): the wrapper that rebuilds a URI source when
+    // it fails, stalls for `restart-timeout`, or ends under `restart-on-eos`.
+    reg.register_restart_source(crate::fallbacksrc::restart_source);
     reg.register_primary_stream(crate::uridecodebin::ogg_primary_stream);
     reg.register_primary_stream(crate::uridecodebin::ps_primary_stream);
     reg.register_primary_stream(crate::uridecodebin::avi_primary_stream);

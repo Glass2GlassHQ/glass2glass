@@ -324,10 +324,9 @@ unless it says otherwise.
   by a group name.
 - **Fallback switching:** `fallbacksrc` carrying audio and video at once (a
   switch per kind off request pads, with `enable-audio` / `enable-video`
-  selecting pads rather than the decode target), and its `restart-on-eos`, `restart-timeout`, `retry-timeout`,
-  `status`, `statistics`, `source` / `fallback-source` and `manual-unblock`
-  properties, which need a supervisor holding a `GraphMutator` beside the
-  running graph.
+  selecting pads rather than the decode target), and its `status`,
+  `statistics`, `source` / `fallback-source` and `manual-unblock` properties,
+  which need a way to read a property off a node the launch keyword built.
 ## Python-element host
 
 - Add an explicit plain-text format override for files with no `.txt` extension.

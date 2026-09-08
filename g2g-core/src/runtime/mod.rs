@@ -155,7 +155,8 @@ pub use autoplug::{
     declared_source_caps, AutoplugError, AutoplugParams, DecodebinError, DecodebinSelectHook,
     DemuxFactory, DemuxSelectHook, ElementDoc, ElementFactory, FanoutSrcFactory, LaunchFactory,
     MuxerFactory, PlaybinError, PlaybinGraphError, PlaybinHook, PlaybinPort, PrimaryStream,
-    PrimaryStreamHook, PropertyDoc, Registry, SourceFactory, Uri, UriError, UriSourceFactory,
+    PrimaryStreamHook, PropertyDoc, Registry, RestartPolicy, RestartSourceHook, SourceFactory, Uri,
+    UriError, UriRebuild, UriSourceFactory,
 };
 
 #[cfg(feature = "std")]

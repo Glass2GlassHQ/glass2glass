@@ -2596,6 +2596,31 @@ first. The dummy carries its own geometry rather than the main stream's, which
 is not known until the main branch negotiates, and the switch's caps
 re-announcement is what carries that difference downstream.
 
+The keyword also keeps its sources alive (M1163). Both the `uri=` and the
+`fallback-uri=` source are wrapped in `RestartSrc` (`g2g-plugins/src/fallbacksrc.rs`),
+a source that runs the inner one and rebuilds it from the URI when it fails,
+delivers nothing for `restart-timeout` (5 s by default, 0 disables the check), or
+ends under `restart-on-eos`. Both sources take the same policy, where gst loops
+its fallback source on EOS unconditionally: a line over two files still runs to
+EOS unless it asks for the loop. Each life is stitched onto one timeline through the
+`ShiftSink` adapter shared with `gaplesssrc`, so a rebuilt file source that
+starts again at PTS 0 continues where the last life stopped, and the inner `Eos`
+packets are swallowed. A fixed one-second pause separates a death from its
+rebuild, gst's hardcoded sleep. `retry-timeout` (60 s) is the budget for repeated
+failure, counted from the first failure after the last delivered frame: a rebuild
+starts only while it would begin inside it, and once it is spent the wrapper ends
+its stream, handing the switch to the fallback for good. gst stores
+`retry-timeout` but never arms its timer, so this is the property's plain reading
+rather than its upstream behaviour. The wrapper is installed through the
+registry's `RestartSourceHook`, with `Registry::uri_source_rebuilder` handing it
+a closure that builds a fresh source for the URI; core owns the policy and the
+hook type, the plugin crate the timer-driven wrapper, the same split as the
+`playbin` hooks. Without a registered hook the keyword runs its sources unwrapped.
+The rebuilt source is negotiated by the wrapper and configured with the caps the
+runner gave the wrapper at startup, since a source arm cannot renegotiate the
+decode chain below it mid-run; a source that refuses them counts as a failed
+attempt.
+
 Two sources have no single file behind them and so derive their own type:
 `splitfilesrc` joins the parts a pattern matches into one byte stream, typing it
 from the first part's extension or header (a name like `clip.ts.part003` has no

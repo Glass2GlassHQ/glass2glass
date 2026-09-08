@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1163: `fallbacksrc` rebuilds a dead main or fallback source, with gst's `restart-on-eos`, `restart-timeout` and `retry-timeout`.
 - M1162: `fallbackswitch` takes gst's per-pad `priority` as `sinkN-priority`, so an input other than 0 can be the primary.
 - M1161: `fallbackswitch` takes gst's `min-upstream-latency`, a floor any fan-in can put under the latency the fold reports for the branches feeding it.
 - M1160: the DAG runner's latency fold follows paths, so a fan-in reports its slowest input branch and a run its slowest sink instead of the sum of every node.

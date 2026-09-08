@@ -113,6 +113,10 @@ pub mod fakesrc;
 // measures against the process monotonic clock.
 #[cfg(feature = "std")]
 pub mod fallbackswitch;
+// The `fallbacksrc` source wrapper that rebuilds a dead URI source (M1163). std:
+// the retry delay and stall check sleep on the tokio timer.
+#[cfg(feature = "std")]
+pub mod fallbacksrc;
 // Decoded-GOP reverser (M897): the presentation half of reverse playback.
 pub mod gopreverse;
 pub mod h264parse;
