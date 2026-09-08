@@ -3087,7 +3087,8 @@ mod tests {
         // A hardware P010 frame: verbatim into P010, shifted back down into I420p10.
         let hw = p010_frame(w as u32, h as u32, |p, x, y| val(p, x, y) << 6);
         let verbatim = copy_yuv(&hw, P010, &mut PackPool::default()).expect("P010 source -> P010");
-        assert_eq!(verbatim.as_ref(), out.as_ref(), "same pixels, same layout");
+        let (verbatim_bytes, out_bytes): (&[u8], &[u8]) = (verbatim.as_ref(), out.as_ref());
+        assert_eq!(verbatim_bytes, out_bytes, "same pixels, same layout");
         let planar_out =
             copy_yuv(&hw, I420p10, &mut PackPool::default()).expect("P010 source -> I420p10");
         assert_eq!(planar_out.len(), ysz + 2 * cw * ch * 2);
