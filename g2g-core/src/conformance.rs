@@ -32,6 +32,7 @@ use alloc::vec::Vec;
 
 /// A kind of check a conformance case can verify about an element.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ConformanceDimension {
     /// The element constructs and advertises its metadata / pad caps.
     Instantiate,
@@ -157,6 +158,7 @@ impl Evidence {
 /// The conservative headline maturity of an element, derived from its evidence.
 /// Ordered: a higher level strictly implies more validation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[non_exhaustive]
 pub enum MaturityLevel {
     /// No conformance evidence.
     Unverified,

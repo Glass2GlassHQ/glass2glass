@@ -55,8 +55,8 @@ pub(crate) fn frame_bytes(format: AudioFormat, channels: u32) -> usize {
 }
 
 /// The SPA channel id for one of our speaker positions.
-fn spa_position(p: ChannelPosition) -> u32 {
-    match p {
+fn spa_position(p: ChannelPosition) -> Option<u32> {
+    Some(match p {
         ChannelPosition::Fl => spa::sys::SPA_AUDIO_CHANNEL_FL,
         ChannelPosition::Fr => spa::sys::SPA_AUDIO_CHANNEL_FR,
         ChannelPosition::Fc => spa::sys::SPA_AUDIO_CHANNEL_FC,
@@ -68,12 +68,14 @@ fn spa_position(p: ChannelPosition) -> u32 {
         ChannelPosition::Bc => spa::sys::SPA_AUDIO_CHANNEL_RC,
         ChannelPosition::Sl => spa::sys::SPA_AUDIO_CHANNEL_SL,
         ChannelPosition::Sr => spa::sys::SPA_AUDIO_CHANNEL_SR,
-    }
+        _ => return None,
+    })
 }
 
 /// The SPA position array for our interleave order (the default layout for
 /// `channels`), so PipeWire routes a > 2-channel stream by speaker instead of
-/// treating it as unpositioned. `None` past the layout table (> 8 channels).
+/// treating it as unpositioned. `None` past the layout table (> 8 channels), or
+/// when a position has no SPA channel id.
 fn spa_positions(channels: u32) -> Option<[u32; MAX_CHANNELS]> {
     let mut position = [0u32; MAX_CHANNELS];
     // pipewire spells a lone channel `mono`, not front-center.
@@ -83,7 +85,7 @@ fn spa_positions(channels: u32) -> Option<[u32; MAX_CHANNELS]> {
     }
     let layout = ChannelLayout::default_for(u8::try_from(channels).ok()?)?;
     for (slot, p) in position.iter_mut().zip(layout.positions()) {
-        *slot = spa_position(p);
+        *slot = spa_position(p)?;
     }
     Some(position)
 }

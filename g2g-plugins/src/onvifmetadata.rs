@@ -912,7 +912,7 @@ fn highest_label(meta: &AnalyticsMeta) -> Option<u32> {
             AnalyticsNode::Classification(c) => Some(c.label),
             AnalyticsNode::Segmentation(s) => Some(s.label),
             AnalyticsNode::Roi(r) => Some(r.label),
-            AnalyticsNode::Tracking(_) => None,
+            _ => None,
         })
         // An unclassified object's id names nothing and must not stretch the table.
         .filter(|label| *label != UNCLASSIFIED_LABEL)
@@ -925,7 +925,7 @@ fn shift_label(node: &mut AnalyticsNode, offset: u32) {
         AnalyticsNode::Classification(c) => &mut c.label,
         AnalyticsNode::Segmentation(s) => &mut s.label,
         AnalyticsNode::Roi(r) => &mut r.label,
-        AnalyticsNode::Tracking(_) => return,
+        _ => return,
     };
     if *label != UNCLASSIFIED_LABEL {
         *label = label.saturating_add(offset);

@@ -128,7 +128,13 @@ The type tiers above translate to per-crate promises:
   signature, or adding a variant to a *deliberately-closed* (exhaustive) enum
   (`ConfigureOutcome`, `PadDir`/`PadDirection`, `ClockPriority`, `LinkPolicy`,
   `SeekType`). Adding a variant to a `#[non_exhaustive]` vocabulary enum is
-  **not** breaking, by design.
+  **not** breaking, by design. M1165 extended the M561 pass to the message,
+  error and remaining vocabulary enums, on the rule that an enum naming an
+  open-ended world (bus messages, error causes, tags, channel positions, stream
+  and analytics kinds) is annotated, while one naming a closed contract stays
+  exhaustive: a state machine, a two-way choice, a spec-fixed wire type, a
+  caps lattice with an `Any` identity (`Dim`, `Rate`, `Interlace`), or a fixed
+  geometric set (`Orientation`).
 - **Breaks in flight.** Between a breaking bump and the publish that ships it,
   `cargo semver-checks` reads the bump as already covering everything and stops
   reporting, so `api-breaks-since-release.txt` records each break against the last

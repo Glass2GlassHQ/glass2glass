@@ -606,9 +606,7 @@ fn itunes_atom(tag: &Tag) -> Option<(&'static [u8; 4], &str)> {
         Tag::Album(v) => (b"\xA9alb", v),
         Tag::Encoder(v) => (b"\xA9too", v),
         Tag::Comment(v) => (b"\xA9cmt", v),
-        Tag::Language(_) | Tag::Other { .. } | Tag::Number { .. } | Tag::Freeform { .. } => {
-            return None
-        }
+        _ => return None,
     };
     Some(pair)
 }

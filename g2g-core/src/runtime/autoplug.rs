@@ -41,6 +41,7 @@ use crate::runtime::solver::NegotiationFailure;
 /// decoder is software and `System`. Auto-plug can prefer / avoid hardware per
 /// request (throughput vs power) separately from the memory domain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum Acceleration {
     /// CPU / pure-software path (the default).
     #[default]
@@ -790,6 +791,7 @@ mod factory {
 
     /// Why [`Registry::decodebin`] could not splice a chain.
     #[derive(Debug)]
+    #[non_exhaustive]
     pub enum DecodebinError {
         /// No chain of registered elements converts the input caps to the target
         /// within the depth bound.
@@ -894,6 +896,7 @@ mod factory {
 
     /// Why [`Registry::build_uridecodebin`] could not assemble a graph.
     #[derive(Debug)]
+    #[non_exhaustive]
     pub enum UriError {
         /// The URI did not parse as `scheme://rest`, or a handler could not
         /// interpret its scheme-specific remainder (e.g. a bad `host:port`).
@@ -944,6 +947,7 @@ mod factory {
 
     /// Why [`Registry::build_playbin`] could not assemble a graph.
     #[derive(Debug)]
+    #[non_exhaustive]
     pub enum PlaybinError {
         /// No source is registered under the requested name.
         UnknownSource,
@@ -985,6 +989,7 @@ mod factory {
 
     /// Why [`Registry::build_playbin_graph`] could not assemble a graph.
     #[derive(Debug)]
+    #[non_exhaustive]
     pub enum PlaybinGraphError {
         /// No output ports were given (a `playbin` needs at least one stream).
         NoPorts,
@@ -1074,6 +1079,7 @@ mod factory {
     /// [`Registry::build_playbin_graph_with_params`]) failed. One type across the
     /// three, since they share every failure but the entry-specific first step.
     #[derive(Debug)]
+    #[non_exhaustive]
     pub enum AutoplugError {
         /// No source is registered under the requested name.
         UnknownSource,

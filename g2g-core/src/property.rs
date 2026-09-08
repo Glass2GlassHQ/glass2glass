@@ -379,6 +379,7 @@ impl PropertySpec {
 
 /// Why [`PropertySpec::parse_value`] rejected a textual property value.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ValueError {
     /// The text did not parse for the property's [`PropKind`].
     Kind(PropError),
@@ -443,6 +444,7 @@ impl ElementMetadata {
 /// Why a [`set_property`](crate::AsyncElement::set_property) (or a value parse)
 /// failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PropError {
     /// No property of that name on this element.
     Unknown,

@@ -2457,7 +2457,7 @@ fn tag_name_value(tag: &Tag) -> (Cow<'_, str>, Cow<'_, str>) {
         Tag::Encoder(_) => Cow::Borrowed("ENCODER"),
         Tag::Language(_) => Cow::Borrowed("LANGUAGE"),
         Tag::Comment(_) => Cow::Borrowed("COMMENT"),
-        Tag::Number { .. } | Tag::Freeform { .. } | Tag::Other { .. } => tag.key(),
+        _ => tag.key(),
     };
     (name, tag.value_string())
 }

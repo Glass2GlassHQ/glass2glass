@@ -710,6 +710,7 @@ fn map_decode_err(input: &Caps, e: DecodebinError) -> ParseError {
     match e {
         DecodebinError::NoChain => ParseError::NoDecodeChain(alloc::format!("{input:?}")),
         DecodebinError::Graph(e) => ParseError::Graph(e),
+        _ => ParseError::NoDecodeChain(alloc::format!("{input:?}")),
     }
 }
 

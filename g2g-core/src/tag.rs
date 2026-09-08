@@ -40,6 +40,7 @@ use alloc::vec::Vec;
 /// reverse-DNS owner (an MP4 `----` atom), and [`Tag::Other`] any other key
 /// verbatim.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Tag {
     Title(String),
     Artist(String),

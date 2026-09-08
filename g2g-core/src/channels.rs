@@ -12,6 +12,7 @@
 /// One speaker position. The discriminant is the WAV / ffmpeg mask bit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
+#[non_exhaustive]
 pub enum ChannelPosition {
     /// Front left.
     Fl = 0,

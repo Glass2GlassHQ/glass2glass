@@ -442,7 +442,7 @@ fn stream_type_label(stream_type: StreamType) -> &'static str {
         StreamType::Video => "video",
         StreamType::Audio => "audio",
         StreamType::Text => "text",
-        StreamType::Unknown => "unknown",
+        _ => "unknown",
     }
 }
 

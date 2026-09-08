@@ -116,6 +116,7 @@ pub async fn validate_json(reg: &Registry, line: &str) -> Value {
         Err(NegotiateError::Solve(nf)) => {
             json!({ "ok": false, "stage": "negotiate", "failure": failure_json(&nf) })
         }
+        Err(e) => json!({ "ok": false, "stage": "negotiate", "error": format!("{e:?}") }),
     }
 }
 
@@ -206,6 +207,7 @@ fn failure_json(nf: &NegotiationFailure) -> Value {
         NegotiationFailure::Cyclic => json!({ "kind": "cyclic" }),
         NegotiationFailure::NoConsistentFixation => json!({ "kind": "no-consistent-fixation" }),
         NegotiationFailure::MixedLegacyAndNative => json!({ "kind": "mixed-legacy-and-native" }),
+        _ => json!({ "kind": "other", "text": format!("{nf:?}") }),
     }
 }
 
@@ -584,7 +586,7 @@ fn stream_type_str(stream_type: StreamType) -> &'static str {
         StreamType::Video => "video",
         StreamType::Audio => "audio",
         StreamType::Text => "text",
-        StreamType::Unknown => "unknown",
+        _ => "unknown",
     }
 }
 

@@ -241,6 +241,7 @@ impl FanoutSrc {
 
 /// Validation failures from [`Graph::link`] and [`Graph::finish`].
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum GraphError {
     /// A linked pad referenced a node id that doesn't exist.
     UnknownNode(NodeId),

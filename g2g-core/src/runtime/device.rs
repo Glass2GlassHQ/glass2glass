@@ -167,6 +167,7 @@ fn apply_props(
 
 /// A hotplug change observed by a started [`DeviceMonitor`].
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum DeviceEvent {
     /// A device appeared (also emitted once per device present at start, so a
     /// consumer needs no separate initial probe).

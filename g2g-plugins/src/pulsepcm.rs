@@ -46,8 +46,8 @@ pub(crate) fn pulse_spec(caps: &Caps) -> Result<Spec, G2gError> {
     Ok(spec)
 }
 
-fn pulse_position(p: ChannelPosition) -> Position {
-    match p {
+fn pulse_position(p: ChannelPosition) -> Option<Position> {
+    Some(match p {
         ChannelPosition::Fl => Position::FrontLeft,
         ChannelPosition::Fr => Position::FrontRight,
         ChannelPosition::Fc => Position::FrontCenter,
@@ -59,12 +59,13 @@ fn pulse_position(p: ChannelPosition) -> Position {
         ChannelPosition::Bc => Position::RearCenter,
         ChannelPosition::Sl => Position::SideLeft,
         ChannelPosition::Sr => Position::SideRight,
-    }
+        _ => return None,
+    })
 }
 
 /// The channel map for our interleave order, so the server routes by speaker.
-/// `None` past the layout table (> 8 channels), where the stream falls back to
-/// the server's default map.
+/// `None` past the layout table (> 8 channels), or when a position has no pulse
+/// slot, where the stream falls back to the server's default map.
 pub(crate) fn pulse_map(channels: u8) -> Option<Map> {
     let mut map = Map::default();
     // pulse spells a lone channel `mono`, not front-center.
@@ -76,7 +77,7 @@ pub(crate) fn pulse_map(channels: u8) -> Option<Map> {
     map.init();
     map.set_len(channels);
     for (slot, pos) in map.get_mut().iter_mut().zip(layout.positions()) {
-        *slot = pulse_position(pos);
+        *slot = pulse_position(pos)?;
     }
     map.is_valid().then_some(map)
 }

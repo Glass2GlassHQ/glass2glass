@@ -3308,6 +3308,7 @@ pub async fn negotiate_graph<'a>(
 /// [`NegotiationFailure`] naming the conflicting link, which the opaque
 /// [`negotiate_graph`] flattens to `CapsMismatch`.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum NegotiateError {
     Setup(G2gError),
     Solve(NegotiationFailure),

@@ -46,6 +46,7 @@ pub struct CapsConflict {
 
 /// Structured solver failure (DESIGN.md §4.13.2).
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum NegotiationFailure {
     /// Adjacent elements have no overlap on the link between them, or a
     /// constraint update emptied that link.

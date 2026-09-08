@@ -20,6 +20,7 @@ use crate::caps::Caps;
 
 /// The kind of media an elementary stream carries (the `GstStreamType` analog).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum StreamType {
     Video,
     Audio,

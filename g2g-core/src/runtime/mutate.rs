@@ -45,6 +45,7 @@ use crate::segment::Segment;
 /// Why a structural mutation was refused. Every one of these leaves the graph
 /// running exactly as it was.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum MutationError {
     /// No element of the running graph carries this instance name.
     UnknownNode(String),

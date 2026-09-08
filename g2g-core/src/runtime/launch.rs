@@ -80,6 +80,7 @@ use crate::runtime::{DynSourceLoop, GraphNode, GraphNodeRef};
 
 /// Why [`parse_launch`] could not build a graph.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ParseError {
     /// The pipeline string was empty or all whitespace.
     Empty,

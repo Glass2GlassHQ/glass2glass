@@ -14,7 +14,7 @@ use g2g_core::{G2gError, HardwareError};
 pub(crate) fn map_wire(e: WireError) -> G2gError {
     match e {
         WireError::UnsupportedDomain => G2gError::UnsupportedDomain,
-        WireError::Truncated | WireError::BadTag => G2gError::Hardware(HardwareError::Other),
+        _ => G2gError::Hardware(HardwareError::Other),
     }
 }
 

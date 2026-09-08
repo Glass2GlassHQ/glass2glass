@@ -198,6 +198,7 @@ fn follow(classes: Option<&str>) {
             } => {
                 println!("REMOVED: {provider}/{persistent_id}");
             }
+            other => println!("{other:?}"),
         }
     }
 }

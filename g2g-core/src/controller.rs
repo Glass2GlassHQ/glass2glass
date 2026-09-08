@@ -28,6 +28,7 @@ pub const CONTROL_CATEGORY: &str = "controller";
 // Closed set: two interpolations cover the animation cases that exist. A cubic /
 // LFO source is a real addition when something needs one, not a placeholder.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum ControlSource {
     /// Hold each keyframe's value until the next keyframe's time (a discrete
     /// knob: a mode switch, a boolean).

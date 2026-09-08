@@ -177,6 +177,7 @@ mod on {
     /// How a piece of metadata survives a transform, the GstMeta
     /// `transform_func` analog. Reported by [`FrameMeta::propagate`].
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[non_exhaustive]
     pub enum Transform {
         /// A deep copy (e.g. a tee branch clone): meta is duplicated.
         Copy,
@@ -582,6 +583,7 @@ mod on {
 
     /// A node in the [`AnalyticsMeta`] relation graph.
     #[derive(Debug, Clone, PartialEq)]
+    #[non_exhaustive]
     pub enum AnalyticsNode {
         Detection(ObjectDetection),
         Classification(Classification),
@@ -592,6 +594,7 @@ mod on {
 
     /// The kind of a directed edge between two analytics nodes.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[non_exhaustive]
     pub enum RelationKind {
         /// A detection has-a classification (detection -> classification).
         Classifies,
@@ -849,6 +852,7 @@ mod on {
 
     /// A [`Blob`] payload decoded by the [`BLOB_DECODERS`] registry.
     #[derive(Debug, Clone, PartialEq)]
+    #[non_exhaustive]
     pub enum DecodedBlob {
         /// A little-endian `f32` vector (an ML embedding / feature vector).
         Embedding(Vec<f32>),

@@ -62,6 +62,7 @@ pub const WIRE_VERSION: u8 = 3;
 
 /// Failure decoding (or encoding) a [`PipelinePacket`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum WireError {
     /// The buffer ended mid-field (a truncated or corrupt message).
     Truncated,

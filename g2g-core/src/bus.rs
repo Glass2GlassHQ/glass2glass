@@ -21,6 +21,7 @@ use crate::tag::TagList;
 // geometry / rate placeholders are not totally ordered). `PartialEq` is enough
 // for the bus (assert_eq! in tests, direct comparison); nothing keys on it.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum BusMessage {
     /// A new stream has started: posted by the runner's source arm before the
     /// source produces any data, one per source (the GStreamer
@@ -237,6 +238,7 @@ pub enum BusMessage {
 /// What a restarting source is doing, gst `fallbacksrc`'s `status` (M1164).
 /// g2g has no buffering stage on this path, so gst's `buffering` has no analog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SourceRestartStatus {
     /// A life is running: the first one, or a rebuild that came up.
     Running,
@@ -249,6 +251,7 @@ pub enum SourceRestartStatus {
 /// Why a restarting source's last life ended, gst `fallbacksrc`'s `RetryReason`
 /// (M1164). gst folds `Rebuild` and `Negotiate` into one `StateChangeFailure`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SourceRestartReason {
     /// The source failed while running.
     Error,

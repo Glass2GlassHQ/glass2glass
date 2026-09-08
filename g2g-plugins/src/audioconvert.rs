@@ -978,13 +978,16 @@ fn mix_matrix(in_layout: ChannelLayout, out_layout: ChannelLayout) -> Vec<f32> {
                 }
             }
             Bc => {
-                if !(add(&mut m, Bl, ii, SURROUND_MIX) | add(&mut m, Br, ii, SURROUND_MIX))
-                    && !(add(&mut m, Sl, ii, SURROUND_MIX) | add(&mut m, Sr, ii, SURROUND_MIX))
-                    && !(add(&mut m, Fl, ii, 0.5) | add(&mut m, Fr, ii, 0.5))
-                {
+                let placed = (add(&mut m, Bl, ii, SURROUND_MIX)
+                    | add(&mut m, Br, ii, SURROUND_MIX))
+                    || (add(&mut m, Sl, ii, SURROUND_MIX) | add(&mut m, Sr, ii, SURROUND_MIX))
+                    || (add(&mut m, Fl, ii, 0.5) | add(&mut m, Fr, ii, 0.5));
+                if !placed {
                     let _ = add(&mut m, Fc, ii, SURROUND_MIX);
                 }
             }
+            // a position with no down-mix rule is dropped, as Lfe is
+            _ => {}
         }
     }
 
