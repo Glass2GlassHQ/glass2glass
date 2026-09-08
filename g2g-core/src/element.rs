@@ -45,7 +45,7 @@ pub enum Reconfigure {
     /// analog.
     ForceKeyframe,
     /// The sink downstream applies an
-    /// [`OrientationMeta`](crate::meta::OrientationMeta) itself, so a rotation
+    /// `OrientationMeta` itself, so a rotation
     /// upstream should attach the descriptor rather than remap the pixels. Sent
     /// once by a display sink that can turn a buffer for free (a Wayland
     /// `set_buffer_transform`, a KMS plane rotation) before the first frame is
@@ -367,7 +367,7 @@ pub trait AsyncElement: ElementBound {
     }
 
     /// Whether this sink applies an
-    /// [`OrientationMeta`](crate::meta::OrientationMeta) itself, i.e. it can
+    /// `OrientationMeta` itself, i.e. it can
     /// turn the picture for free at present time. The runner sends
     /// [`Reconfigure::AbsorbOrientation`] up this sink's input link before the
     /// first frame is pulled, so a `videoflip` upstream attaches the descriptor
@@ -460,7 +460,7 @@ pub trait AsyncElement: ElementBound {
     /// receives (M976), the pull half of `meta_transform`'s push half. The
     /// runner unions the declaration into the allocation cascade travelling
     /// upstream, so a producer any number of hops away can ask
-    /// [`MetaRequests::wants`](crate::meta::MetaRequests::wants) in
+    /// `MetaRequests::wants` in
     /// [`configure_allocation`](Self::configure_allocation) and skip work nobody
     /// downstream reads. Default: nothing requested, and a graph where every
     /// element defaults cascades exactly as it did before the hook existed.
