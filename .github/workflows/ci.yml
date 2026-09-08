@@ -246,6 +246,10 @@ jobs:
           cargo run -p g2g-plugins --locked --features linux-full --bin g2g-docgen
           git diff --exit-code docs/elements.html \
             || { echo "::error::docs/elements.html is stale. Regenerate with: cargo run -p g2g-plugins --features linux-full --bin g2g-docgen"; exit 1; }
+      # The docgen step above builds `linux-full` as a binary only, so a break
+      # that lives in a test target under that feature union goes unseen.
+      - name: check g2g-plugins (linux-full, test targets)
+        run: cargo check -p g2g-plugins --locked --all-targets --features linux-full
       - name: check g2g-plugins (linux feature set)
         run: >
           cargo check -p g2g-plugins --locked --all-targets --features
