@@ -1513,17 +1513,10 @@ async fn prepare_graph<'a>(
     let allocation = cascade_allocation(vg, topo, &solution)?;
 
     // Latency fold + clock election over every element node (tee is structural
-    // and contributes neither). A fan-in contributes its declared `latency()`,
-    // summed flat with the rest rather than per input branch.
-    let mut latencies: Vec<LatencyReport> = Vec::with_capacity(n);
-    let mut clocks: Vec<Option<ClockCandidate>> = Vec::with_capacity(n);
-    for &node in topo {
-        if let Some(l) = element_latency(vg, node) {
-            latencies.push(l);
-            clocks.push(element_clock(vg, node));
-        }
-    }
-    let latency = LatencyReport::aggregate(latencies);
+    // and contributes neither).
+    let latency = fold_latency(vg, topo);
+    let clocks: Vec<Option<ClockCandidate>> =
+        topo.iter().map(|&node| element_clock(vg, node)).collect();
 
     // M1123: hand the fold's liveness back down to every element, before any
     // arm starts. Unconditional, unlike the clock below: a path with no live
@@ -3695,6 +3688,28 @@ async fn clock_health_monitor(
             was_healthy = elected.healthy();
         }
     }
+}
+
+/// Fold the graph's declared latency the way a latency query travels: along a
+/// path each element's contribution sums, a fan-in waits for its slowest input
+/// branch, and the run reports the slowest of its sinks.
+fn fold_latency(vg: &ValidatedGraph<GraphNodeRef<'_>>, topo: &[NodeId]) -> LatencyReport {
+    let mut upstream = alloc::vec![LatencyReport::ZERO; vg.node_count()];
+    for &node in topo {
+        let incoming = vg
+            .in_edges(node)
+            .iter()
+            .map(|&edge| upstream[vg.edge(edge).src.node.0 as usize])
+            .reduce(LatencyReport::join_branches)
+            .unwrap_or(LatencyReport::ZERO);
+        let own = element_latency(vg, node).unwrap_or(LatencyReport::ZERO);
+        upstream[node.0 as usize] = incoming.combine(own);
+    }
+    topo.iter()
+        .filter(|&&node| vg.out_edges(node).is_empty())
+        .map(|&node| upstream[node.0 as usize])
+        .reduce(LatencyReport::join_branches)
+        .unwrap_or(LatencyReport::ZERO)
 }
 
 /// A node's offered clock for the pipeline clock election.

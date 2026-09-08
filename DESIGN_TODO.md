@@ -216,6 +216,9 @@ Highest leverage first:
 
 ## Clock-synchronised presentation
 
+- Let a demux declare a latency contribution: `MultiOutputElement` has no
+  `latency()`, so a fan-out that holds frames back reports nothing to the
+  pipeline latency query.
 - **KMS vblank reconciliation** + Wayland frame-callback co-scheduling. Needs a
   DRM/KMS presentation sink (current `WaylandSink` is SHM software). Validate on
   a real display.
@@ -319,9 +322,9 @@ unless it says otherwise.
 - Give `togglerecord` a native N-in N-out node kind, so the streams that start
   and stop together are one element with request pads instead of several joined
   by a group name.
-- **Fallback switching:** `fallbackswitch`'s `min-upstream-latency`, which needs
-  the runner's latency fold to hand a fan-in the aggregate of the branches
-  feeding it (it sums every node flat today), and a per-pad `priority`, which
+- **Fallback switching:** `fallbackswitch`'s `min-upstream-latency`, a floor on
+  the upstream aggregate the fold hands the switch, which every fan-in wants
+  (gst carries it on the aggregator base class); and a per-pad `priority`, which
   needs per-pad property syntax in the launch DSL.
   `fallbacksrc` carrying audio and video at once (a switch per kind off request
   pads, with `enable-audio` / `enable-video` selecting pads rather than the

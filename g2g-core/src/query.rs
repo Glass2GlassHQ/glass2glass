@@ -301,6 +301,22 @@ impl LatencyReport {
         }
     }
 
+    /// Merge two branches meeting at a fan-in (or two sinks ending the run).
+    /// The fan-in cannot produce until its slowest branch delivers, so the
+    /// minimums take the larger; the slack is whatever the tightest branch can
+    /// absorb, so an unbounded branch never lifts a finite ceiling.
+    pub fn join_branches(self, other: Self) -> Self {
+        Self {
+            live: self.live || other.live,
+            min_ns: self.min_ns.max(other.min_ns),
+            max_ns: match (self.max_ns, other.max_ns) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (Some(a), None) | (None, Some(a)) => Some(a),
+                (None, None) => None,
+            },
+        }
+    }
+
     /// Aggregate a whole path, source first through sink last.
     pub fn aggregate<I>(reports: I) -> Self
     where
