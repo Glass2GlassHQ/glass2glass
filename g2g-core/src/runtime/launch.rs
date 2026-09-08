@@ -73,7 +73,8 @@ use crate::link::LinkPolicy;
 use crate::memory::MemoryDomainKind;
 use crate::property::{PropError, PropValue, PropertySpec, ValueError};
 use crate::runtime::autoplug::{
-    is_raw_audio, is_raw_video, PadKind, PadRequest, Registry, RestartPolicy, UriError,
+    is_raw_audio, is_raw_video, FallbackSourceRole, PadKind, PadRequest, Registry, RestartPolicy,
+    UriError,
 };
 use crate::runtime::{DynSourceLoop, GraphNode, GraphNodeRef};
 
@@ -292,7 +293,12 @@ enum Item {
         name: String,
         pad: String,
     },
-    Prebuilt(PrebuiltNode),
+    /// `name` is the instance name the expansion chose for it (M1164), `None`
+    /// for a node no one addresses.
+    Prebuilt {
+        node: PrebuiltNode,
+        name: Option<String>,
+    },
 }
 
 /// A node a macro expansion built ahead of the structural pass: a source
@@ -846,7 +852,10 @@ fn expand_decodebin(
                     // name, so `upstream` clears as it does after a
                     // `uridecodebin`.
                     for element in decoders {
-                        new_chain.push(Item::Prebuilt(PrebuiltNode::Element(element)));
+                        new_chain.push(Item::Prebuilt {
+                            node: PrebuiltNode::Element(element),
+                            name: None,
+                        });
                     }
                     upstream = None;
                 }
@@ -862,7 +871,7 @@ fn expand_decodebin(
                 // name to take declared caps from, so a `decodebin` cannot follow
                 // it. Clear the upstream; if a decodebin does follow, it reports
                 // the missing-upstream error.
-                prebuilt @ Item::Prebuilt(_) => {
+                prebuilt @ Item::Prebuilt { .. } => {
                     upstream = None;
                     new_chain.push(prebuilt);
                 }
@@ -1350,7 +1359,7 @@ fn expand_encodebin(registry: &Registry, chains: Vec<Chain>) -> Result<Vec<Chain
                     upstream = Some((spec.name.clone(), spec.props.clone()));
                     new_chain.push(Item::Element(spec));
                 }
-                prebuilt @ Item::Prebuilt(_) => {
+                prebuilt @ Item::Prebuilt { .. } => {
                     upstream = None;
                     new_chain.push(prebuilt);
                 }
@@ -1500,12 +1509,18 @@ const FALLBACK_SWITCH_PAD: &str = "sink_1";
 /// `name=` of its own, so the fallback branch has something to reference. A
 /// launch line using this name for one of its own elements collides
 /// ([`ParseError::DuplicateName`]).
-const FALLBACK_SWITCH_NAME: &str = "g2g-fallbacksrc-switch";
+pub const FALLBACK_SWITCH_NAME: &str = "g2g-fallbacksrc-switch";
 
 /// Neither test source is live, so the dummy fallback would run as fast as the
 /// CPU allows; `clocksync` holds each buffer until its PTS comes due, which is
 /// what makes the dummy play at the main stream's rate.
 const FALLBACK_PACER: &str = "clocksync";
+
+/// Instance-name suffixes for the two URI sources the expansion builds (M1164),
+/// on the `fallbacksrc`'s own name: `fallbacksrc name=fb` gives `fb-source` and
+/// `fb-fallback-source`, so a launch line can address either.
+pub const FALLBACK_MAIN_SOURCE_SUFFIX: &str = "-source";
+pub const FALLBACK_FALLBACK_SOURCE_SUFFIX: &str = "-fallback-source";
 
 /// The dummy fallback source per stream kind: black frames, or silence.
 const FALLBACK_VIDEO_DUMMY: (&str, &str, &str) = ("videotestsrc", "pattern", "black");
@@ -1548,6 +1563,7 @@ fn restartable_uri_source(
     source: Box<dyn DynSourceLoop>,
     uri: &str,
     policy: RestartPolicy,
+    role: FallbackSourceRole,
 ) -> Result<Box<dyn DynSourceLoop>, ParseError> {
     let Some(hook) = registry.restart_source_hook() else {
         return Ok(source);
@@ -1555,7 +1571,7 @@ fn restartable_uri_source(
     let rebuild = registry
         .uri_source_rebuilder(uri)
         .map_err(|e: UriError| ParseError::Uri(alloc::format!("{uri}: {e:?}")))?;
-    Ok(hook(source, rebuild, policy))
+    Ok(hook(source, rebuild, policy, role))
 }
 
 /// Expand one `fallbacksrc` into its main branch (the `uri=` source auto-plugged
@@ -1604,7 +1620,7 @@ fn expand_fallbacksrc(
     let (source, source_caps) = registry
         .build_uri_source(uri)
         .map_err(|e: UriError| ParseError::Uri(alloc::format!("{uri}: {e:?}")))?;
-    let source = restartable_uri_source(registry, source, uri, restart)?;
+    let source = restartable_uri_source(registry, source, uri, restart, FallbackSourceRole::Main)?;
     // The kind is decided by which target the search reaches, so the dummy
     // fallback is the right generator and a `fallback-uri` decodes to the same
     // shape. Video first: a container carrying both is a video stream here.
@@ -1628,9 +1644,15 @@ fn expand_fallbacksrc(
     };
 
     let mut main = Vec::with_capacity(decoders.len() + 2);
-    main.push(Item::Prebuilt(PrebuiltNode::Source(source)));
+    main.push(Item::Prebuilt {
+        node: PrebuiltNode::Source(source),
+        name: Some(alloc::format!("{switch_name}{FALLBACK_MAIN_SOURCE_SUFFIX}")),
+    });
     for decoder in decoders {
-        main.push(Item::Prebuilt(PrebuiltNode::Element(decoder)));
+        main.push(Item::Prebuilt {
+            node: PrebuiltNode::Element(decoder),
+            name: None,
+        });
     }
     let mut switch_props = Vec::new();
     for key in ["timeout", "immediate-fallback"] {
@@ -1651,12 +1673,26 @@ fn expand_fallbacksrc(
             let (source, caps) = registry
                 .build_uri_source(fallback_uri)
                 .map_err(|e: UriError| ParseError::Uri(alloc::format!("{fallback_uri}: {e:?}")))?;
-            let source = restartable_uri_source(registry, source, fallback_uri, restart)?;
+            let source = restartable_uri_source(
+                registry,
+                source,
+                fallback_uri,
+                restart,
+                FallbackSourceRole::Fallback,
+            )?;
             let decoders = plug(&caps, target)
                 .ok_or_else(|| ParseError::NoDecodeChain(alloc::format!("{caps:?}")))?;
-            fallback.push(Item::Prebuilt(PrebuiltNode::Source(source)));
+            fallback.push(Item::Prebuilt {
+                node: PrebuiltNode::Source(source),
+                name: Some(alloc::format!(
+                    "{switch_name}{FALLBACK_FALLBACK_SOURCE_SUFFIX}"
+                )),
+            });
             for decoder in decoders {
-                fallback.push(Item::Prebuilt(PrebuiltNode::Element(decoder)));
+                fallback.push(Item::Prebuilt {
+                    node: PrebuiltNode::Element(decoder),
+                    name: None,
+                });
             }
         }
         None => {
@@ -1755,9 +1791,15 @@ fn expand_uri_sources(
             let decoders = registry
                 .autoplug_avoiding(&caps, &target, DECODEBIN_MAX_DEPTH, preferred, avoided)
                 .ok_or_else(|| ParseError::NoDecodeChain(alloc::format!("{caps:?}")))?;
-            new_chain.push(Item::Prebuilt(PrebuiltNode::Source(source)));
+            new_chain.push(Item::Prebuilt {
+                node: PrebuiltNode::Source(source),
+                name: None,
+            });
             for dec in decoders {
-                new_chain.push(Item::Prebuilt(PrebuiltNode::Element(dec)));
+                new_chain.push(Item::Prebuilt {
+                    node: PrebuiltNode::Element(dec),
+                    name: None,
+                });
             }
             if let Some(sink) = sink {
                 new_chain.push(Item::Element(ElementSpec {
@@ -1800,7 +1842,7 @@ fn build_graph(
     // The placeholder spec for a pre-built node carries a benign name so the
     // structural closures (`is_queue` / `is_tee`) never match it, and node
     // construction uses the pre-built node instead of looking the name up.
-    let mut prebuilt: Vec<Option<PrebuiltNode>> = Vec::new();
+    let mut prebuilt: Vec<Option<(PrebuiltNode, Option<String>)>> = Vec::new();
     let mut names: Vec<(String, usize)> = Vec::new();
     let mut chain_eps: Vec<Vec<Endpoint>> = Vec::with_capacity(chains.len());
 
@@ -1820,19 +1862,27 @@ fn build_graph(
                     prebuilt.push(None);
                     eps.push(Endpoint::Element(ei));
                 }
-                Item::Prebuilt(node) => {
+                Item::Prebuilt { node, name } => {
                     let ei = specs.len();
-                    let name = match node {
+                    // A generated name collides with a line's own `name=` the
+                    // same way the generated switch name does.
+                    if let Some(inst) = &name {
+                        if names.iter().any(|(n, _)| n == inst) {
+                            return Err(ParseError::DuplicateName(inst.clone()));
+                        }
+                        names.push((inst.clone(), ei));
+                    }
+                    let placeholder = match node {
                         PrebuiltNode::Source(_) => "uridecodebin",
                         PrebuiltNode::Element(_) => "(decoder)",
                     };
                     specs.push(ElementSpec {
-                        name: name.to_string(),
+                        name: placeholder.to_string(),
                         props: Vec::new(),
                         instance: None,
                         log_category: None,
                     });
-                    prebuilt.push(Some(node));
+                    prebuilt.push(Some((node, name)));
                     eps.push(Endpoint::Element(ei));
                 }
                 Item::Ref { name, pad } => eps.push(Endpoint::Ref { name, pad }),
@@ -2100,7 +2150,7 @@ fn build_graph(
         // A pre-built node (uridecodebin / playbin source or decoder) is spliced
         // in directly; its role still follows link degree (a source has no input,
         // a terminal decoder no output).
-        if let Some(node) = prebuilt[ei].take() {
+        if let Some((node, name)) = prebuilt[ei].take() {
             let nid = match node {
                 PrebuiltNode::Source(src) => graph.add_source(GraphNodeRef::Source(src)),
                 PrebuiltNode::Element(el) if out_deg[ei] == 0 => {
@@ -2108,6 +2158,9 @@ fn build_graph(
                 }
                 PrebuiltNode::Element(el) => graph.add_transform(GraphNodeRef::Element(el)),
             };
+            if let Some(name) = name {
+                graph.set_node_name(nid, name);
+            }
             node_of.push(Some(nid));
             continue;
         }
@@ -2492,7 +2545,7 @@ mod tests {
             .map(|i| match i {
                 Item::Element(s) => s.name.as_str(),
                 Item::Ref { name, .. } => name.as_str(),
-                Item::Prebuilt(_) => "(prebuilt)",
+                Item::Prebuilt { .. } => "(prebuilt)",
             })
             .collect()
     }

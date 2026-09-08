@@ -18,6 +18,11 @@
 //! begin inside the budget. gst stores `retry-timeout` but never arms its timer;
 //! here it is enforced, and once it runs out the wrapper stops retrying and ends
 //! its stream, which is what hands the switch to the fallback for good.
+//!
+//! Each life start, retry decision and stream end is posted as
+//! [`BusMessage::SourceRestart`](g2g_core::BusMessage), gst's
+//! read-only `status` and `statistics`: a source arm owns its element for the
+//! whole run, so nothing can read a property off it mid-run.
 
 use core::cell::Cell;
 use core::fmt;
@@ -27,15 +32,18 @@ use core::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use alloc::boxed::Box;
+use alloc::string::{String, ToString};
 
-use g2g_core::log::{short_type_name, LogSource};
+use g2g_core::log::{short_type_name, LogName, LogSource};
 use g2g_core::memory::{DomainSet, MemoryDomainKind};
 use g2g_core::query::LatencyReport;
 use g2g_core::runtime::{
-    select2, DynSourceLoop, Either, RestartPolicy, SourceLoop, UriError, UriRebuild,
+    select2, DynSourceLoop, Either, FallbackSourceRole, RestartPolicy, SourceLoop, UriError,
+    UriRebuild,
 };
 use g2g_core::{
-    g2g_info, g2g_warn, Caps, ConfigureOutcome, G2gError, OutputSink, PipelinePacket, PushOutcome,
+    g2g_info, g2g_warn, BusHandle, BusMessage, Caps, ConfigureOutcome, G2gError, OutputSink,
+    PipelinePacket, PushOutcome, SourceRestartReason, SourceRestartStatus,
 };
 
 use crate::gaplesssrc::ShiftSink;
@@ -49,8 +57,9 @@ pub fn restart_source(
     source: Box<dyn DynSourceLoop>,
     rebuild: UriRebuild,
     policy: RestartPolicy,
+    role: FallbackSourceRole,
 ) -> Box<dyn DynSourceLoop> {
-    Box::new(RestartSrc::new(source, rebuild, policy))
+    Box::new(RestartSrc::new(source, rebuild, policy, Some(role)))
 }
 
 /// A source that rebuilds the URI source it wraps when that source dies. See the
@@ -64,6 +73,11 @@ pub struct RestartSrc {
     policy: RestartPolicy,
     /// The caps the runner configured the wrapper with, reused for every rebuild.
     caps: Option<Caps>,
+    /// Which `fallbacksrc` source this is, for the bus report. `None` when it was
+    /// built directly rather than by the launch keyword.
+    role: Option<FallbackSourceRole>,
+    bus: Option<BusHandle>,
+    log_name: LogName,
 }
 
 impl fmt::Debug for RestartSrc {
@@ -72,18 +86,51 @@ impl fmt::Debug for RestartSrc {
             .field("has_current", &self.current.is_some())
             .field("policy", &self.policy)
             .field("caps", &self.caps)
+            .field("role", &self.role)
             .finish_non_exhaustive()
     }
 }
 
 impl RestartSrc {
-    pub fn new(source: Box<dyn DynSourceLoop>, rebuild: UriRebuild, policy: RestartPolicy) -> Self {
+    pub fn new(
+        source: Box<dyn DynSourceLoop>,
+        rebuild: UriRebuild,
+        policy: RestartPolicy,
+        role: Option<FallbackSourceRole>,
+    ) -> Self {
         Self {
             current: Some(source),
             rebuild,
             policy,
             caps: None,
+            role,
+            bus: None,
+            log_name: LogName::new(),
         }
+    }
+
+    /// Report this source's state to the application, dropping the message when
+    /// the bus is full rather than holding up the stream.
+    fn report(
+        &self,
+        status: SourceRestartStatus,
+        retries: u64,
+        reason: Option<SourceRestartReason>,
+    ) {
+        let Some(bus) = &self.bus else {
+            return;
+        };
+        bus.try_post(BusMessage::SourceRestart {
+            element: self
+                .log_name
+                .instance()
+                .unwrap_or(short_type_name::<Self>())
+                .to_string(),
+            role: self.role,
+            status,
+            retries,
+            reason,
+        });
     }
 }
 
@@ -100,6 +147,18 @@ enum Death {
     Rebuild(UriError),
     /// The rebuilt source refused to negotiate or to take the configured caps.
     Negotiate(G2gError),
+}
+
+impl Death {
+    fn reason(&self) -> SourceRestartReason {
+        match self {
+            Death::Error(_) => SourceRestartReason::Error,
+            Death::Eos => SourceRestartReason::Eos,
+            Death::Stall => SourceRestartReason::Timeout,
+            Death::Rebuild(_) => SourceRestartReason::Rebuild,
+            Death::Negotiate(_) => SourceRestartReason::Negotiate,
+        }
+    }
 }
 
 impl fmt::Display for Death {
@@ -207,6 +266,18 @@ impl SourceLoop for RestartSrc {
         Ok(outcome)
     }
 
+    fn set_instance_name(&mut self, name: String) {
+        self.log_name.set_instance(name);
+    }
+
+    fn set_log_category(&mut self, category: String) {
+        self.log_name.set_category(category);
+    }
+
+    fn set_bus(&mut self, bus: BusHandle) {
+        self.bus = Some(bus);
+    }
+
     fn latency(&self) -> LatencyReport {
         self.current
             .as_ref()
@@ -241,6 +312,8 @@ impl SourceLoop for RestartSrc {
             let mut current = self.current.take();
             // When the current run of failures began, cleared by a delivered frame.
             let mut first_failure: Option<Instant> = None;
+            // Rebuilds attempted so far, gst's `num-retry`.
+            let mut retries = 0u64;
             loop {
                 let source = match current.take() {
                     Some(source) => Ok(source),
@@ -249,6 +322,7 @@ impl SourceLoop for RestartSrc {
                 let death = match source {
                     Err(death) => death,
                     Ok(mut source) => {
+                        self.report(SourceRestartStatus::Running, retries, None);
                         let activity = Cell::new(Activity {
                             last: Instant::now(),
                             pushing: false,
@@ -276,6 +350,7 @@ impl SourceLoop for RestartSrc {
                         }
                         match outcome {
                             Either::Left(Ok(_)) if !self.policy.restart_on_eos => {
+                                self.report(SourceRestartStatus::Stopped, retries, None);
                                 out.push(PipelinePacket::Eos).await?;
                                 return Ok(total);
                             }
@@ -295,10 +370,13 @@ impl SourceLoop for RestartSrc {
                         self,
                         "source {death}; retry budget of {retry_timeout:?} spent, ending the stream"
                     );
+                    self.report(SourceRestartStatus::Stopped, retries, Some(death.reason()));
                     out.push(PipelinePacket::Eos).await?;
                     return Ok(total);
                 }
+                retries += 1;
                 g2g_info!(self, "source {death}; rebuilding in {RETRY_DELAY:?}");
+                self.report(SourceRestartStatus::Retrying, retries, Some(death.reason()));
                 tokio::time::sleep(RETRY_DELAY).await;
             }
         })
@@ -308,5 +386,11 @@ impl SourceLoop for RestartSrc {
 impl LogSource for RestartSrc {
     fn log_category(&self) -> &'static str {
         short_type_name::<Self>()
+    }
+    fn log_instance(&self) -> Option<&str> {
+        self.log_name.instance()
+    }
+    fn log_category_override(&self) -> Option<&str> {
+        self.log_name.category()
     }
 }

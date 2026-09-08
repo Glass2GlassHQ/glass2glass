@@ -324,9 +324,9 @@ unless it says otherwise.
   by a group name.
 - **Fallback switching:** `fallbacksrc` carrying audio and video at once (a
   switch per kind off request pads, with `enable-audio` / `enable-video`
-  selecting pads rather than the decode target), and its `status`,
-  `statistics`, `source` / `fallback-source` and `manual-unblock` properties,
-  which need a way to read a property off a node the launch keyword built.
+  selecting pads rather than the decode target); `manual-unblock`, holding the
+  output after a restart until the application releases it; and a way to hand
+  `fallbacksrc` an application-built source element in place of its `uri=`.
 ## Python-element host
 
 - Add an explicit plain-text format override for files with no `.txt` extension.

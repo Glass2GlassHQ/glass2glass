@@ -147,8 +147,9 @@ pub use graph_runner::{
 };
 
 // `PadKind` / `PadRequest` are not std-gated: the `no_std` fan-in trait
-// (`MultiInputElement::input_pad_index`) references them (M481).
-pub use autoplug::{PadKind, PadRequest};
+// (`MultiInputElement::input_pad_index`) references them (M481). Nor is
+// `FallbackSourceRole`: the bus carries it (M1164).
+pub use autoplug::{FallbackSourceRole, PadKind, PadRequest};
 
 #[cfg(feature = "std")]
 pub use autoplug::{
@@ -162,4 +163,5 @@ pub use autoplug::{
 #[cfg(feature = "std")]
 pub use launch::{
     fallback_factory, has_live_source, parse_launch, parse_launch_avoiding, ParseError,
+    FALLBACK_FALLBACK_SOURCE_SUFFIX, FALLBACK_MAIN_SOURCE_SUFFIX, FALLBACK_SWITCH_NAME,
 };

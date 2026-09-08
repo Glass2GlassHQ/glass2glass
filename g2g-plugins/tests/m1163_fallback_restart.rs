@@ -271,7 +271,7 @@ async fn timeline_never_goes_backwards_across_restarts() {
         restart_timeout_ns: NO_STALL_CHECK,
         retry_timeout_ns: GENEROUS_RETRY_NS,
     };
-    let mut wrapper = configured(RestartSrc::new(generated_source(), rebuild, policy)).await;
+    let mut wrapper = configured(RestartSrc::new(generated_source(), rebuild, policy, None)).await;
     let mut sink = Collect::default();
     let _ = tokio::time::timeout(
         RETRY_DELAY * 2 + SETTLE,
@@ -314,7 +314,13 @@ async fn retry_budget_ends_the_stream_after_repeated_failure() {
         restart_timeout_ns: NO_STALL_CHECK,
         retry_timeout_ns: retry_budget.as_nanos() as u64,
     };
-    let mut wrapper = configured(RestartSrc::new(missing_file_source(caps), rebuild, policy)).await;
+    let mut wrapper = configured(RestartSrc::new(
+        missing_file_source(caps),
+        rebuild,
+        policy,
+        None,
+    ))
+    .await;
     let mut sink = Collect::default();
     let started = Instant::now();
     let frames = SourceLoop::run(&mut wrapper, &mut sink)
@@ -380,7 +386,7 @@ async fn stalled_source_is_rebuilt_after_restart_timeout() {
         restart_timeout_ns: SHORT_STALL.as_nanos() as u64,
         retry_timeout_ns: GENEROUS_RETRY_NS,
     };
-    let mut wrapper = configured(RestartSrc::new(Box::new(StallSrc), rebuild, policy)).await;
+    let mut wrapper = configured(RestartSrc::new(Box::new(StallSrc), rebuild, policy, None)).await;
     let mut sink = Collect::default();
     // The first life stalls, waits out one retry delay, and its replacement
     // delivers before the run is cut.
@@ -411,7 +417,7 @@ async fn zero_restart_timeout_disables_the_stall_check() {
         restart_timeout_ns: NO_STALL_CHECK,
         retry_timeout_ns: GENEROUS_RETRY_NS,
     };
-    let mut wrapper = configured(RestartSrc::new(Box::new(StallSrc), rebuild, policy)).await;
+    let mut wrapper = configured(RestartSrc::new(Box::new(StallSrc), rebuild, policy, None)).await;
     let mut sink = Collect::default();
     let _ = tokio::time::timeout(
         SHORT_STALL + RETRY_DELAY + SETTLE,

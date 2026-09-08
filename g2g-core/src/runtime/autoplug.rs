@@ -400,6 +400,18 @@ impl EncoderChoice {
     }
 }
 
+/// Which of a `fallbacksrc`'s two sources a [`RestartSourceHook`] is wrapping:
+/// the `uri=` one or the `fallback-uri=` one. Carried on
+/// [`BusMessage::SourceRestart`](crate::BusMessage::SourceRestart) so an
+/// application tells the two apart without reading the instance name, which a
+/// launch line's `name=` chooses. Defined outside the std-gated `factory` module
+/// because the bus (`runtime`, not `std`) names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FallbackSourceRole {
+    Main,
+    Fallback,
+}
+
 #[cfg(feature = "std")]
 mod factory {
     use super::*;
@@ -1148,6 +1160,7 @@ mod factory {
         source: Box<dyn DynSourceLoop>,
         rebuild: UriRebuild,
         policy: RestartPolicy,
+        role: FallbackSourceRole,
     ) -> Box<dyn DynSourceLoop>;
 
     /// An explicit-demux fan-out hook (M476), the sibling of [`PlaybinHook`] for a

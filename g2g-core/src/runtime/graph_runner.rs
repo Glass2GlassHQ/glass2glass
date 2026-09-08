@@ -1360,6 +1360,10 @@ async fn prepare_graph<'a>(
                 Some(GraphNodeRef::Demux(demux)) => demux.set_instance_name(name.clone()),
                 None => {}
             }
+            // M1164: only a source reports out of band about itself so far.
+            if let (Some(bus), Some(GraphNodeRef::Source(src))) = (bus, vg.element_mut(node)) {
+                src.set_bus(bus.clone());
+            }
             // Mint a measured-latency probe for every node with a `process()`:
             // transforms, sinks, muxers, and demuxers (a demux is a `Tee`-kind
             // node whose payload is a `Demux` element).

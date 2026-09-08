@@ -269,7 +269,7 @@ pub use wire::{
 pub use pool::{BufferPool, PooledBuffer};
 
 #[cfg(feature = "runtime")]
-pub use bus::{Bus, BusHandle, BusMessage};
+pub use bus::{Bus, BusHandle, BusMessage, SourceRestartReason, SourceRestartStatus};
 
 #[cfg(feature = "runtime")]
 pub use qos::QosTracker;
@@ -280,7 +280,9 @@ pub use pacing::{
 };
 
 #[cfg(feature = "runtime")]
-pub use runtime::{CapsConflict, LinkInterceptor, NegotiationFailure, ProbeAction, ProbeSlot};
+pub use runtime::{
+    CapsConflict, FallbackSourceRole, LinkInterceptor, NegotiationFailure, ProbeAction, ProbeSlot,
+};
 
 #[cfg(feature = "runtime")]
 pub use pad_template::{

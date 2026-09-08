@@ -141,6 +141,9 @@ pub trait DynSourceLoop: ElementBound {
     /// Dyn-safe mirror of [`SourceLoop::set_instance_name`].
     fn set_instance_name(&mut self, _name: alloc::string::String) {}
 
+    /// Dyn-safe mirror of [`SourceLoop::set_bus`].
+    fn set_bus(&mut self, _bus: crate::bus::BusHandle) {}
+
     /// Dyn-safe mirror of [`SourceLoop::set_log_category`].
     fn set_log_category(&mut self, _category: alloc::string::String) {}
 
@@ -244,6 +247,10 @@ impl<T: SourceLoop> DynSourceLoop for T {
         SourceLoop::set_instance_name(self, name)
     }
 
+    fn set_bus(&mut self, bus: crate::bus::BusHandle) {
+        SourceLoop::set_bus(self, bus)
+    }
+
     fn set_log_category(&mut self, category: alloc::string::String) {
         SourceLoop::set_log_category(self, category)
     }
@@ -328,6 +335,10 @@ impl<'b> DynSourceLoop for &'b mut (dyn DynSourceLoop + 'b) {
 
     fn set_instance_name(&mut self, name: alloc::string::String) {
         (**self).set_instance_name(name)
+    }
+
+    fn set_bus(&mut self, bus: crate::bus::BusHandle) {
+        (**self).set_bus(bus)
     }
 
     fn set_log_category(&mut self, category: alloc::string::String) {

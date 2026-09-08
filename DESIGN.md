@@ -2621,6 +2621,29 @@ runner gave the wrapper at startup, since a source arm cannot renegotiate the
 decode chain below it mid-run; a source that refuses them counts as a failed
 attempt.
 
+What gst exposes as `fallbacksrc`'s read-only `status` and `statistics`
+properties, g2g posts on the bus as `BusMessage::SourceRestart`: a source arm
+owns its element for the whole run, so nothing can read a property off it
+mid-run. The message carries the status (`Running` as each life starts,
+`Retrying` once a rebuild is decided and before the one-second pause, `Stopped`
+at a clean end or a spent retry budget), the rebuild tally gst calls `num-retry`,
+and the reason the last life ended: `Error`, `Eos`, `Timeout` (the stall), and
+g2g's `Rebuild` / `Negotiate` where gst folds both into `StateChangeFailure`.
+gst's fourth status, `buffering`, has no analog: there is no buffering stage on
+this path. The main and the fallback source, which gst separates by carrying `num-retry` and
+`num-fallback-retry` side by side, are told apart by the message's
+`FallbackSourceRole`; the source's instance name rides along as a label for logs,
+not as the discriminator, since a launch line's `name=` chooses it. A `RestartSrc`
+built directly from Rust has no role. The runner hands the bus to a source through
+`SourceLoop::set_bus`, which only the graph runner calls.
+
+The expansion also names the sources it builds, off the `fallbacksrc`'s own name:
+`fallbacksrc name=fb` yields `fb-source` and, with a `fallback-uri=`, `fb-fallback-source`,
+so a name is what `GraphMutator::replace_source` addresses to swap either one
+during a run. The generated names collide with a line's own `name=` the way the
+generated switch name does, reported as `ParseError::DuplicateName`. The other
+source macros (`uridecodebin`, `playbin`) leave their nodes unnamed.
+
 Two sources have no single file behind them and so derive their own type:
 `splitfilesrc` joins the parts a pattern matches into one byte stream, typing it
 from the first part's extension or header (a name like `clip.ts.part003` has no

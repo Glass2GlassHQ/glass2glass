@@ -208,6 +208,58 @@ pub enum BusMessage {
     ClockLost,
     /// Application-defined signal carrying an opaque code.
     Custom(u64),
+    /// A restarting source reported its state (M1164), gst `fallbacksrc`'s
+    /// read-only `status` property and its `application/x-fallbacksrc-stats`
+    /// structure. Posted on the bus rather than read back off the element,
+    /// because a source arm owns its element for the whole run and so cannot
+    /// answer a property read mid-run.
+    SourceRestart {
+        /// The reporting source's instance name, a human label for logs and
+        /// telemetry. Not the discriminator: a launch line's `name=` chooses it.
+        element: alloc::string::String,
+        /// Which of a `fallbacksrc`'s two sources this is, the field to key on.
+        /// `None` for a restarting source built directly from Rust rather than
+        /// by the launch keyword. Replaces gst's separate `num-retry` /
+        /// `num-fallback-retry` field pairs.
+        role: Option<crate::runtime::FallbackSourceRole>,
+        /// What the source is doing now.
+        status: SourceRestartStatus,
+        /// Rebuilds this source has attempted so far, gst's `num-retry`. The
+        /// first `Running` carries 0.
+        retries: u64,
+        /// Why the previous life ended, gst's `last-retry-reason`. `Some` on
+        /// `Retrying` and on a `Stopped` a spent retry budget caused; `None` on
+        /// `Running` and on a `Stopped` a clean end of stream caused.
+        reason: Option<SourceRestartReason>,
+    },
+}
+
+/// What a restarting source is doing, gst `fallbacksrc`'s `status` (M1164).
+/// g2g has no buffering stage on this path, so gst's `buffering` has no analog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceRestartStatus {
+    /// A life is running: the first one, or a rebuild that came up.
+    Running,
+    /// The last life died and a rebuild is due.
+    Retrying,
+    /// The source ended, cleanly or with its retry budget spent.
+    Stopped,
+}
+
+/// Why a restarting source's last life ended, gst `fallbacksrc`'s `RetryReason`
+/// (M1164). gst folds `Rebuild` and `Negotiate` into one `StateChangeFailure`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceRestartReason {
+    /// The source failed while running.
+    Error,
+    /// The source ended and the policy asked for another life.
+    Eos,
+    /// The source delivered nothing for `restart-timeout`.
+    Timeout,
+    /// Building the replacement source failed.
+    Rebuild,
+    /// The replacement source refused the caps the run is configured with.
+    Negotiate,
 }
 
 /// Producer end of the [`Bus`], held by elements. Cloneable so every element

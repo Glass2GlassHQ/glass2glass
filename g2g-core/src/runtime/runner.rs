@@ -242,6 +242,14 @@ pub trait SourceLoop: ElementBound {
     /// Default: ignore.
     fn set_instance_name(&mut self, _name: alloc::string::String) {}
 
+    /// Receive the run's message bus (M1164), so a source can report out of band
+    /// what a property read cannot answer for it (its restart status, say): a
+    /// source arm owns its element for the whole run. Only the graph runner
+    /// (`run_graph` and its `_with_bus` / threaded siblings) hands it out; the
+    /// linear convenience runners (`run_simple_pipeline_with_bus` and friends)
+    /// do not. Default: ignore.
+    fn set_bus(&mut self, _bus: BusHandle) {}
+
     /// Override this instance's log category (M845), mirroring
     /// [`AsyncElement::set_log_category`](crate::AsyncElement::set_log_category).
     /// Default: ignore. A source that logs about itself stores it in a
