@@ -68,10 +68,17 @@ fn temp_path(tag: &str) -> PathBuf {
     std::env::temp_dir().join(format!("g2g_m1163_{}_{tag}", std::process::id()))
 }
 
+/// Tests in one binary share a process, so two of them writing and deleting the
+/// same fixture path race; each write takes a path of its own.
+fn unique_tag(tag: &str) -> String {
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    format!("{}_{tag}", NEXT.fetch_add(1, Ordering::SeqCst))
+}
+
 /// Write a fixture by running `line` (which must end in a `filesink`) and return
 /// its path, so the bytes come from the real encoder.
 async fn fixture(tag: &str, line: &str) -> PathBuf {
-    let path = temp_path(tag);
+    let path = temp_path(&unique_tag(tag));
     let reg = default_registry();
     let line = format!("{line} ! filesink location={}", path.display());
     let graph = parse_launch(&reg, &line).unwrap_or_else(|e| panic!("{line}: {e}"));
@@ -119,7 +126,7 @@ async fn lit_pixels_after(restart_props: &str, duration: Duration) -> usize {
         "videotestsrc num-buffers=1 pattern=black ! pnmenc",
     )
     .await;
-    let out = temp_path(&format!("out_{}.raw", restart_props.len()));
+    let out = temp_path(&unique_tag("out.raw"));
     let line = format!(
         "fallbacksrc uri=file://{} fallback-uri=file://{} {restart_props} ! filesink location={}",
         main.display(),
