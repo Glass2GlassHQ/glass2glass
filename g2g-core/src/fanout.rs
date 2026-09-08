@@ -630,6 +630,15 @@ pub trait MultiInputElement: ElementBound {
         crate::query::LatencyReport::ZERO
     }
 
+    /// A floor, in nanoseconds, on the minimum latency the fold reports for the
+    /// branches feeding this fan-in (gst's aggregator `min-upstream-latency`).
+    /// Default zero, so the branches speak for themselves. A fan-in raises it
+    /// when a slower input is expected to be plugged in later than the ones
+    /// negotiated at startup, whose latency is all the fold can see.
+    fn min_upstream_latency_ns(&self) -> u64 {
+        0
+    }
+
     /// Phase 1 for one input pad: narrow that input's proposed caps.
     fn intercept_caps(&self, input: usize, upstream_caps: &Caps) -> Result<Caps, G2gError>;
 

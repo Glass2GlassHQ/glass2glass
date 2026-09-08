@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1161: `fallbackswitch` takes gst's `min-upstream-latency`, a floor any fan-in can put under the latency the fold reports for the branches feeding it.
 - M1160: the DAG runner's latency fold follows paths, so a fan-in reports its slowest input branch and a run its slowest sink instead of the sum of every node.
 - M1159: `fallbackswitch` takes gst's `latency`, widening its stall window and reporting that slack to the runner's latency fold, which now includes fan-in elements.
 - M1158: `livesync` holds an early buffer until its due time under `sync`, and keeps the output on one timeline across a restarted input under `single-segment`.

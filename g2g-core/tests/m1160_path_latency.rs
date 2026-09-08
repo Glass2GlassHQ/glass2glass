@@ -1,6 +1,9 @@
 //! M1160: the DAG runner's latency fold follows paths. A fan-in waits for its
 //! slowest input branch and a run reports its slowest sink, where the fold used
 //! to sum every node in the graph flat.
+//!
+//! M1161: a fan-in floors what the fold reports for the branches feeding it
+//! (`min_upstream_latency_ns`), for an input slower than the ones it started with.
 #![cfg(all(feature = "std", feature = "runtime"))]
 
 use core::future::Future;
@@ -24,6 +27,8 @@ const FAST_BRANCH_MIN_NS: u64 = 5_000_000;
 /// Branch ceilings, likewise distinguishable from their sum.
 const WIDE_CEILING_NS: u64 = 200_000_000;
 const TIGHT_CEILING_NS: u64 = 40_000_000;
+/// A floor above both branch minimums, so it is what the fold has to report.
+const UPSTREAM_FLOOR_NS: u64 = 50_000_000;
 /// What the shared source ahead of a tee contributes to both branches.
 const SOURCE_MIN_NS: u64 = 3_000_000;
 const SOURCE_CEILING_NS: u64 = 100_000_000;
@@ -95,6 +100,7 @@ impl SourceLoop for LatentSrc {
 /// Forwards every input's frames, contributing no latency of its own.
 struct ForwardingMux {
     inputs: usize,
+    upstream_floor_ns: u64,
 }
 
 impl MultiInputElement for ForwardingMux {
@@ -105,6 +111,10 @@ impl MultiInputElement for ForwardingMux {
 
     fn input_count(&self) -> usize {
         self.inputs
+    }
+
+    fn min_upstream_latency_ns(&self) -> u64 {
+        self.upstream_floor_ns
     }
 
     fn intercept_caps(&self, _input: usize, upstream_caps: &Caps) -> Result<Caps, G2gError> {
@@ -182,8 +192,23 @@ impl AsyncElement for LatentSink {
 
 /// `LatentSrc(a) -> ForwardingMux <- LatentSrc(b)`, then a zero-latency sink.
 fn two_branches_into_a_fan_in(a: LatencyReport, b: LatencyReport) -> LatencyReport {
+    branches_under_floor(a, b, 0)
+}
+
+/// The same graph, with the fan-in flooring what its branches report.
+fn branches_under_floor(
+    a: LatencyReport,
+    b: LatencyReport,
+    upstream_floor_ns: u64,
+) -> LatencyReport {
     let mut g: Graph<GraphNode> = Graph::new();
-    let mux = g.add_muxer(GraphNode::muxer(ForwardingMux { inputs: 2 }), 2);
+    let mux = g.add_muxer(
+        GraphNode::muxer(ForwardingMux {
+            inputs: 2,
+            upstream_floor_ns,
+        }),
+        2,
+    );
     let src_a = g.add_source(GraphNode::source(LatentSrc { latency: a }));
     let src_b = g.add_source(GraphNode::source(LatentSrc { latency: b }));
     let sink = g.add_sink(GraphNode::element(LatentSink::new(LatencyReport::ZERO)));
@@ -265,5 +290,37 @@ fn a_run_reports_its_slowest_sink() {
         folded.max_ns,
         Some(SOURCE_CEILING_NS + TIGHT_CEILING_NS),
         "the tighter branch sets the ceiling the source's slack adds to"
+    );
+}
+
+#[test]
+fn a_fan_ins_floor_lifts_what_its_branches_report() {
+    let branches = (
+        LatencyReport::buffered(SLOW_BRANCH_MIN_NS, Some(WIDE_CEILING_NS)),
+        LatencyReport::buffered(FAST_BRANCH_MIN_NS, Some(WIDE_CEILING_NS)),
+    );
+    let floored = branches_under_floor(branches.0, branches.1, UPSTREAM_FLOOR_NS);
+    assert_eq!(
+        floored.min_ns, UPSTREAM_FLOOR_NS,
+        "the floor stands in for a branch slower than either negotiated one"
+    );
+    assert_eq!(
+        floored.max_ns,
+        Some(WIDE_CEILING_NS),
+        "the floor moves the minimum only"
+    );
+}
+
+#[test]
+fn a_floor_under_the_branches_changes_nothing() {
+    let branches = (
+        LatencyReport::buffered(SLOW_BRANCH_MIN_NS, Some(WIDE_CEILING_NS)),
+        LatencyReport::buffered(FAST_BRANCH_MIN_NS, Some(TIGHT_CEILING_NS)),
+    );
+    let floored = branches_under_floor(branches.0, branches.1, FAST_BRANCH_MIN_NS);
+    assert_eq!(
+        floored,
+        two_branches_into_a_fan_in(branches.0, branches.1),
+        "the branches already exceed it"
     );
 }

@@ -45,6 +45,7 @@ pub struct FallbackSwitch {
     immediate_fallback: bool,
     timeout_ns: u64,
     latency_ns: u64,
+    min_upstream_latency_ns: u64,
     stop_on_eos: bool,
     configured: Vec<Option<Caps>>,
     /// When each input last delivered a `DataFrame`, `None` until its first one.
@@ -67,6 +68,7 @@ impl FallbackSwitch {
             immediate_fallback: false,
             timeout_ns: DEFAULT_TIMEOUT_NS,
             latency_ns: 0,
+            min_upstream_latency_ns: 0,
             stop_on_eos: false,
             configured: vec![None; inputs],
             last_frame_ns: vec![None; inputs],
@@ -88,6 +90,14 @@ impl FallbackSwitch {
     /// element reports to the pipeline latency query.
     pub fn with_latency_ns(mut self, latency_ns: u64) -> Self {
         self.latency_ns = latency_ns;
+        self
+    }
+
+    /// Nanoseconds the branches feeding the switch are reported to take at
+    /// minimum, whatever they declare (the `min-upstream-latency` property), for
+    /// a slower input plugged in after the run started.
+    pub fn with_min_upstream_latency_ns(mut self, min_upstream_latency_ns: u64) -> Self {
+        self.min_upstream_latency_ns = min_upstream_latency_ns;
         self
     }
 
@@ -249,6 +259,10 @@ impl MultiInputElement for FallbackSwitch {
         LatencyReport::live(self.latency_ns, Some(self.latency_ns))
     }
 
+    fn min_upstream_latency_ns(&self) -> u64 {
+        self.min_upstream_latency_ns
+    }
+
     fn configure_pipeline(
         &mut self,
         input: usize,
@@ -290,6 +304,9 @@ impl MultiInputElement for FallbackSwitch {
             }
             "timeout" => self.timeout_ns = value.as_uint().ok_or(PropError::Type)?,
             "latency" => self.latency_ns = value.as_uint().ok_or(PropError::Type)?,
+            "min-upstream-latency" => {
+                self.min_upstream_latency_ns = value.as_uint().ok_or(PropError::Type)?
+            }
             "stop-on-eos" => self.stop_on_eos = value.as_bool().ok_or(PropError::Type)?,
             _ => return Err(PropError::Unknown),
         }
@@ -303,6 +320,7 @@ impl MultiInputElement for FallbackSwitch {
             "immediate-fallback" => Some(PropValue::Bool(self.immediate_fallback)),
             "timeout" => Some(PropValue::Uint(self.timeout_ns)),
             "latency" => Some(PropValue::Uint(self.latency_ns)),
+            "min-upstream-latency" => Some(PropValue::Uint(self.min_upstream_latency_ns)),
             "stop-on-eos" => Some(PropValue::Bool(self.stop_on_eos)),
             _ => None,
         }
@@ -351,6 +369,12 @@ static FALLBACKSWITCH_PROPS: &[PropertySpec] = &[
         "latency",
         PropKind::Uint,
         "nanoseconds of extra stall slack for an upstream that runs late",
+    )
+    .with_default("0"),
+    PropertySpec::new(
+        "min-upstream-latency",
+        PropKind::Uint,
+        "nanoseconds the inputs feeding the switch are reported to take at minimum",
     )
     .with_default("0"),
     PropertySpec::new(

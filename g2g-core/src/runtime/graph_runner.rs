@@ -3696,12 +3696,13 @@ async fn clock_health_monitor(
 fn fold_latency(vg: &ValidatedGraph<GraphNodeRef<'_>>, topo: &[NodeId]) -> LatencyReport {
     let mut upstream = alloc::vec![LatencyReport::ZERO; vg.node_count()];
     for &node in topo {
-        let incoming = vg
+        let mut incoming = vg
             .in_edges(node)
             .iter()
             .map(|&edge| upstream[vg.edge(edge).src.node.0 as usize])
             .reduce(LatencyReport::join_branches)
             .unwrap_or(LatencyReport::ZERO);
+        incoming.min_ns = incoming.min_ns.max(min_upstream_latency(vg, node));
         let own = element_latency(vg, node).unwrap_or(LatencyReport::ZERO);
         upstream[node.0 as usize] = incoming.combine(own);
     }
@@ -3710,6 +3711,15 @@ fn fold_latency(vg: &ValidatedGraph<GraphNodeRef<'_>>, topo: &[NodeId]) -> Laten
         .map(|&node| upstream[node.0 as usize])
         .reduce(LatencyReport::join_branches)
         .unwrap_or(LatencyReport::ZERO)
+}
+
+/// The floor a fan-in puts under its branches' folded minimum. Zero everywhere
+/// else: only a fan-in can be handed a branch aggregate to raise.
+fn min_upstream_latency(vg: &ValidatedGraph<GraphNodeRef<'_>>, node: NodeId) -> u64 {
+    match vg.element(node) {
+        Some(GraphNodeRef::Muxer(mux)) => mux.min_upstream_latency_ns(),
+        _ => 0,
+    }
 }
 
 /// A node's offered clock for the pipeline clock election.

@@ -2568,7 +2568,10 @@ timeout), so a primary going silent is noticed while the other inputs are quiet
 too. `immediate-fallback=false` holds a lower-priority frame until the primary
 has had one stall window from the first frame the element saw; `auto-switch=false`
 hands the choice back to `active-pad`; `stop-on-eos` ends forwarding when any
-input ends. A switch re-announces the new input's caps downstream when they
+input ends; `min-upstream-latency` floors what the fold reports for the branches
+feeding the switch (gst carries it on the aggregator base class, and g2g on
+`MultiInputElement`, so any fan-in can raise it), which is how a run makes room
+for an input slower than the ones it negotiated at startup. A switch re-announces the new input's caps downstream when they
 differ from the last ones emitted, since the branches negotiate independently.
 The element is `std`-only: the health rule measures against the process
 monotonic clock.

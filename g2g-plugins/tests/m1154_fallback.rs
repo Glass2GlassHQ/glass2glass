@@ -37,6 +37,10 @@ const SHORT_TIMEOUT_NS: u64 = 50_000_000;
 /// well clear of zero so a fold that dropped it is visible.
 const SWITCH_LATENCY_NS: u64 = 30_000_000;
 
+/// The floor the switch puts under its inputs' folded latency, distinct from
+/// `SWITCH_LATENCY_NS` so the two cannot be confused in the reported sum.
+const MIN_UPSTREAM_LATENCY_NS: u64 = 70_000_000;
+
 /// How long a timed run gets before the dummy's frames are declared missing. The
 /// dummy is unbounded (a real fallback never ends), so the run is cancelled
 /// rather than waited out.
@@ -212,6 +216,25 @@ async fn switch_latency_reaches_the_run_stats() {
         "the switch is the only element declaring latency on this path"
     );
     assert!(stats.latency.live, "the switch answers the query live");
+}
+
+/// M1161: `min-upstream-latency` floors what the fold reports for the branches
+/// feeding the switch, on top of which the switch's own `latency` still counts.
+#[tokio::test]
+async fn min_upstream_latency_floors_what_the_inputs_report() {
+    let reg = default_registry();
+    let line = format!(
+        "videotestsrc num-buffers=2 ! fallbackswitch latency={SWITCH_LATENCY_NS}          min-upstream-latency={MIN_UPSTREAM_LATENCY_NS} ! fakesink"
+    );
+    let graph = parse_launch(&reg, &line).unwrap_or_else(|e| panic!("{line}: {e}"));
+    let stats = run_graph(graph, &ZeroClock, 4)
+        .await
+        .unwrap_or_else(|e| panic!("{line}: {e:?}"));
+    assert_eq!(
+        stats.latency.min_ns,
+        MIN_UPSTREAM_LATENCY_NS + SWITCH_LATENCY_NS,
+        "videotestsrc declares nothing, so the floor is what its branch reports"
+    );
 }
 
 #[test]

@@ -387,6 +387,12 @@ pub trait DynMultiInputElement: ElementBound {
     fn latency(&self) -> LatencyReport {
         LatencyReport::ZERO
     }
+
+    /// Dyn-safe mirror of [`MultiInputElement::min_upstream_latency_ns`]: the
+    /// floor this fan-in puts under its branches' folded minimum.
+    fn min_upstream_latency_ns(&self) -> u64 {
+        0
+    }
     /// Dyn-safe mirror of [`MultiInputElement::input_pad_index`] (M481): map a
     /// named request pad to the concrete input index, for the launch parser.
     fn input_pad_index(&self, req: &PadRequest, ordinal: usize) -> Option<usize>;
@@ -505,6 +511,10 @@ impl<T: MultiInputElement> DynMultiInputElement for T {
 
     fn latency(&self) -> LatencyReport {
         MultiInputElement::latency(self)
+    }
+
+    fn min_upstream_latency_ns(&self) -> u64 {
+        MultiInputElement::min_upstream_latency_ns(self)
     }
 
     fn input_pad_index(&self, req: &PadRequest, ordinal: usize) -> Option<usize> {
@@ -658,6 +668,10 @@ impl MultiInputElement for MuxRef<'_> {
         self.0.latency()
     }
 
+    fn min_upstream_latency_ns(&self) -> u64 {
+        self.0.min_upstream_latency_ns()
+    }
+
     /// Only reachable by a direct call: the arms drive `process`, and
     /// `caps_constraint_as_input` below forwards the erased element's own
     /// constraint rather than routing through here.
@@ -784,6 +798,10 @@ impl<'b> DynMultiInputElement for &'b mut (dyn DynMultiInputElement + 'b) {
 
     fn latency(&self) -> LatencyReport {
         (**self).latency()
+    }
+
+    fn min_upstream_latency_ns(&self) -> u64 {
+        (**self).min_upstream_latency_ns()
     }
 
     fn input_pad_index(&self, req: &PadRequest, ordinal: usize) -> Option<usize> {

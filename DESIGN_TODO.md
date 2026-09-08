@@ -322,10 +322,8 @@ unless it says otherwise.
 - Give `togglerecord` a native N-in N-out node kind, so the streams that start
   and stop together are one element with request pads instead of several joined
   by a group name.
-- **Fallback switching:** `fallbackswitch`'s `min-upstream-latency`, a floor on
-  the upstream aggregate the fold hands the switch, which every fan-in wants
-  (gst carries it on the aggregator base class); and a per-pad `priority`, which
-  needs per-pad property syntax in the launch DSL.
+- **Fallback switching:** `fallbackswitch`'s per-pad `priority`, which needs
+  per-pad property syntax in the launch DSL.
   `fallbacksrc` carrying audio and video at once (a switch per kind off request
   pads, with `enable-audio` / `enable-video` selecting pads rather than the
   decode target), and its `restart-on-eos`, `restart-timeout`, `retry-timeout`,
