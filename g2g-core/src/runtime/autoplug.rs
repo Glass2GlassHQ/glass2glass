@@ -1136,6 +1136,42 @@ mod factory {
     /// in core, the Matroska parsing in `g2g-plugins`.
     pub type PlaybinHook = fn(&Registry, &str) -> Result<Option<Graph<GraphNode>>, ParseError>;
 
+    /// One output port of a [`UriFanout`]: the elementary [`Caps`] the demuxer
+    /// emits on it, and the kind of media it carries.
+    #[derive(Clone, Debug)]
+    pub struct UriFanoutPort {
+        pub caps: Caps,
+        pub stream_type: crate::stream::StreamType,
+    }
+
+    /// A URI probed into an open-ported fan-out (M1168): the byte source, the
+    /// multi-output demuxer it feeds, and one entry per demux port. The
+    /// open-ported sibling of [`PlaybinHook`], whose graph is already closed on
+    /// its own sinks: a lone `fallbacksrc` needs the ports themselves, because a
+    /// `fallbackswitch` sits between each port and its sink. `rebuild` builds
+    /// another `source` for the same URI, the input [`RestartSourceHook`] needs.
+    pub struct UriFanout {
+        pub source: Box<dyn DynSourceLoop>,
+        pub rebuild: UriRebuild,
+        pub demux: Box<dyn DynMultiOutputElement>,
+        pub ports: Vec<UriFanoutPort>,
+    }
+
+    impl core::fmt::Debug for UriFanout {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            f.debug_struct("UriFanout")
+                .field("ports", &self.ports)
+                .finish_non_exhaustive()
+        }
+    }
+
+    /// A URI fan-out hook (M1168): probe the URI's container and return the byte
+    /// source, the demuxer, and its ports, or `Ok(None)` to decline a container
+    /// the hook does not parse. `Err` aborts the parse. A plain `fn` pointer for
+    /// the same reason as [`PlaybinHook`]; registered via
+    /// [`Registry::register_uri_fanout`].
+    pub type UriFanoutHook = fn(&Registry, &str) -> Result<Option<UriFanout>, ParseError>;
+
     /// When a `fallbacksrc` rebuilds the source behind a URI (M1163). The
     /// timeouts are nanoseconds, as gst's `fallbacksrc` takes them.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1280,6 +1316,11 @@ mod factory {
         /// does not parse, so one hook per container type coexists (MKV, TS, ...).
         /// Empty (the default) leaves `playbin` as the M196 single-stream pipeline.
         playbin: Vec<PlaybinHook>,
+        /// URI fan-out hooks (M1168), the open-ported siblings of `playbin`. A
+        /// lone `fallbacksrc uri=X` tries each in registration order until one
+        /// claims the container, then puts a `fallbackswitch` between every port
+        /// and its sink. Empty (the default) leaves `fallbacksrc` single-stream.
+        uri_fanout: Vec<UriFanoutHook>,
         /// Explicit-demux fan-out hooks (M476): a named demux element with several
         /// output-pad references and a file source upstream tries each in order
         /// until one builds the multi-output demuxer (`Some`); each declines
@@ -1410,6 +1451,23 @@ mod factory {
         /// parse. Returns `&mut self` to chain calls.
         pub fn register_playbin(&mut self, hook: PlaybinHook) -> &mut Self {
             self.playbin.push(hook);
+            self
+        }
+
+        /// The registered URI fan-out hooks (M1168), tried in order by a lone
+        /// `fallbacksrc uri=X` in a [`parse_launch`](crate::runtime::parse_launch)
+        /// pipeline.
+        pub fn uri_fanout_hooks(&self) -> &[UriFanoutHook] {
+            &self.uri_fanout
+        }
+
+        /// Register a URI fan-out hook (M1168): a lone `fallbacksrc uri=X` tries
+        /// the registered hooks in order until one claims the container, then
+        /// carries every port it reports at once. Register one per container
+        /// type; each declines a container it does not parse. Returns `&mut self`
+        /// to chain calls.
+        pub fn register_uri_fanout(&mut self, hook: UriFanoutHook) -> &mut Self {
+            self.uri_fanout.push(hook);
             self
         }
 
@@ -2605,7 +2663,7 @@ pub use factory::{
     DemuxFactory, DemuxSelectHook, ElementDoc, ElementFactory, FanoutSrcFactory, LaunchFactory,
     MuxerFactory, PlaybinError, PlaybinGraphError, PlaybinHook, PlaybinPort, PrimaryStream,
     PrimaryStreamHook, PropertyDoc, Registry, RestartPolicy, RestartSourceHook, SourceFactory, Uri,
-    UriError, UriRebuild, UriSourceFactory,
+    UriError, UriFanout, UriFanoutHook, UriFanoutPort, UriRebuild, UriSourceFactory,
 };
 
 #[cfg(test)]

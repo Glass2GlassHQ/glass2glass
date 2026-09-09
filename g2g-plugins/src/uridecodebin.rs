@@ -206,8 +206,10 @@ use alloc::vec::Vec;
 #[cfg(feature = "std")]
 use g2g_core::runtime::{
     is_raw_audio, is_raw_video, DecodebinError, GraphNode, GraphNodeRef, ParseError, PrimaryStream,
-    Registry,
+    Registry, UriFanout, UriFanoutPort,
 };
+#[cfg(feature = "std")]
+use g2g_core::stream::StreamType;
 #[cfg(feature = "hls")]
 use g2g_core::AudioFormat;
 #[cfg(feature = "std")]
@@ -278,6 +280,97 @@ fn parse_cc_source(v: &str) -> Option<crate::ccextract::CcSource> {
     crate::ccextract::CcSource::parse(v)
 }
 
+/// The byte source a probed container's multi-output demuxer reads. Built from
+/// the path and the container, not from the `file://` URI handler (which
+/// self-demuxes MP4 and would emit elementary video, not bytes).
+#[cfg(feature = "std")]
+fn byte_source(path: &str, encoding: ByteStreamEncoding) -> Box<dyn DynSourceLoop> {
+    Box::new(crate::filesrc::FileSrc::new(
+        path,
+        Caps::ByteStream { encoding },
+    ))
+}
+
+/// The open-ported fan-out of a probed file container (M1168): the byte source,
+/// a rebuild of it (what `RestartSrc` calls when the source dies), the demuxer,
+/// and one port entry per forwardable stream in port order.
+#[cfg(feature = "std")]
+fn file_fanout(
+    path: &str,
+    encoding: ByteStreamEncoding,
+    demux: Box<dyn DynMultiOutputElement>,
+    av: &[(Caps, bool)],
+) -> UriFanout {
+    let owned = path.to_string();
+    UriFanout {
+        source: byte_source(path, encoding),
+        rebuild: Box::new(move || {
+            Ok((byte_source(&owned, encoding), Caps::ByteStream { encoding }))
+        }),
+        demux,
+        ports: av
+            .iter()
+            .map(|(caps, video)| UriFanoutPort {
+                caps: caps.clone(),
+                stream_type: match video {
+                    true => StreamType::Video,
+                    false => StreamType::Audio,
+                },
+            })
+            .collect(),
+    }
+}
+
+/// A `file://` Matroska container probed into what every consumer of it needs:
+/// the path its byte source reads, the parsed header (which also holds the
+/// subtitle tracks), and the forwardable streams in port order.
+#[cfg(feature = "std")]
+struct MkvProbe {
+    path: alloc::string::String,
+    header: crate::matroska::MatroskaDemuxer,
+    infos: Vec<crate::mkvdemux::MkvStreamInfo>,
+}
+
+/// Probe a `file://` URI as Matroska. `None` for a non-`file://` URI, an
+/// unreadable file, or a container with no forwardable Matroska track.
+#[cfg(feature = "std")]
+fn mkv_probe(uri: &str) -> Option<MkvProbe> {
+    let (path, prefix) = open_file_prefix(uri)?;
+    let mut header = crate::matroska::MatroskaDemuxer::new();
+    header.push_data(&prefix);
+    let infos = crate::mkvdemux::forwardable_streams(&header);
+    if infos.is_empty() {
+        return None;
+    }
+    Some(MkvProbe {
+        path,
+        header,
+        infos,
+    })
+}
+
+#[cfg(feature = "std")]
+impl MkvProbe {
+    const ENCODING: ByteStreamEncoding = ByteStreamEncoding::Matroska;
+
+    fn av(&self) -> Vec<(Caps, bool)> {
+        self.infos
+            .iter()
+            .map(|i| (i.caps.clone(), i.video))
+            .collect()
+    }
+
+    fn demux(&self) -> Box<dyn DynMultiOutputElement> {
+        Box::new(crate::mkvdemux::MkvDemuxN::new(
+            self.infos.iter().map(|i| i.stream).collect(),
+        ))
+    }
+
+    fn fanout(&self) -> UriFanout {
+        file_fanout(&self.path, Self::ENCODING, self.demux(), &self.av())
+    }
+}
+
 /// The `playbin uri=X` auto-fan-out hook for Matroska / WebM (M382): probe a
 /// `file://` MKV container, then assemble `FileSrc -> MkvDemuxN -> {decode -> auto
 /// sink}` with one branch per forwardable stream, the multi-stream form of
@@ -293,58 +386,102 @@ fn parse_cc_source(v: &str) -> Option<crate::ccextract::CcSource> {
 #[cfg(feature = "std")]
 pub fn mkv_playbin(reg: &Registry, uri: &str) -> Result<Option<Graph<GraphNode>>, ParseError> {
     let (uri, cc) = cc_request(uri);
-    let Some((path, prefix)) = open_file_prefix(&uri) else {
+    let Some(probe) = mkv_probe(&uri) else {
         return Ok(None);
     };
-    let mut demux = crate::matroska::MatroskaDemuxer::new();
-    demux.push_data(&prefix);
-    let infos = crate::mkvdemux::forwardable_streams(&demux);
-    if infos.is_empty() {
-        return Ok(None); // not Matroska (or no forwardable track): decline
-    }
-    let streams: Vec<_> = infos.iter().map(|i| i.stream).collect();
-    let av: Vec<(Caps, bool)> = infos.iter().map(|i| (i.caps.clone(), i.video)).collect();
-    if let Some(video_idx) = infos.iter().position(|i| i.video) {
+    let av = probe.av();
+    if let Some(video_idx) = probe.infos.iter().position(|i| i.video) {
         // An explicit `#closed-captions=` request overlays the in-SEI captions
         // (M430); else a subtitle track overlays its cues (the MP4 M412 sibling,
         // M415). Only one text pad, so the explicit caption request wins.
         if let Some(cc) = cc {
-            let source = crate::filesrc::FileSrc::new(
-                &path,
-                Caps::ByteStream {
-                    encoding: ByteStreamEncoding::Matroska,
-                },
-            );
             return build_cc_overlay(
                 reg,
-                Box::new(source),
-                crate::mkvdemux::MkvDemuxN::new(streams),
+                byte_source(&probe.path, MkvProbe::ENCODING),
+                probe.demux(),
                 &av,
                 video_idx,
                 cc,
             )
             .map(Some);
         }
-        if let Some(text) = crate::mkvdemux::subtitle_streams(&demux).first() {
-            return build_mkv_subtitle_overlay(reg, &path, &infos, text).map(Some);
+        if let Some(text) = crate::mkvdemux::subtitle_streams(&probe.header).first() {
+            return build_mkv_subtitle_overlay(reg, &probe.path, &probe.infos, text).map(Some);
         }
     }
-    // The file:// URI handler self-demuxes MP4, so build the matching Matroska
-    // byte source directly and feed it to the multi-output demuxer. Audio tracks
-    // go through the convert/resample branch (not decoder -> sink direct).
-    let source = crate::filesrc::FileSrc::new(
-        &path,
-        Caps::ByteStream {
-            encoding: ByteStreamEncoding::Matroska,
-        },
-    );
+    // Audio tracks go through the convert/resample branch (not decoder -> sink
+    // direct).
     build_av_fanout(
         reg,
-        Box::new(source),
-        crate::mkvdemux::MkvDemuxN::new(streams),
+        byte_source(&probe.path, MkvProbe::ENCODING),
+        probe.demux(),
         &av,
     )
     .map(Some)
+}
+
+/// The lone-`fallbacksrc` URI fan-out hook for Matroska (M1168), the open-ported
+/// sibling of [`mkv_playbin`]: the caller puts a `fallbackswitch` between each
+/// port and its sink, so the hook stops at the demuxer. Declines the same URIs
+/// [`mkv_playbin`] declines. A `#closed-captions=` fragment is stripped and
+/// ignored: there is no overlay on this path.
+#[cfg(feature = "std")]
+pub fn mkv_uri_fanout(_reg: &Registry, uri: &str) -> Result<Option<UriFanout>, ParseError> {
+    let (uri, _cc) = cc_request(uri);
+    Ok(mkv_probe(&uri).map(|probe| probe.fanout()))
+}
+
+/// A `file://` MPEG-TS container probed into its forwardable streams: the path
+/// its byte source reads, and one stream per PMT entry in port order.
+#[cfg(feature = "std")]
+struct TsProbe {
+    path: alloc::string::String,
+    infos: Vec<crate::tsdemux::TsStreamInfo>,
+}
+
+/// Probe a `file://` URI as MPEG-TS. `None` for a non-`file://` URI, an
+/// unreadable file, or a container with no PMT in the probed prefix.
+#[cfg(feature = "std")]
+fn ts_probe(uri: &str) -> Option<TsProbe> {
+    let (path, prefix) = open_file_prefix(uri)?;
+    // Resync to the TS sync byte and feed whole 188-byte packets to parse the PMT.
+    let mut header = crate::mpegts::TsDemuxer::new();
+    let mut off = 0;
+    while off + crate::mpegts::TS_PACKET_LEN <= prefix.len() {
+        if prefix[off] != crate::mpegts::SYNC_BYTE {
+            off += 1;
+            continue;
+        }
+        header.push_packet(&prefix[off..off + crate::mpegts::TS_PACKET_LEN]);
+        off += crate::mpegts::TS_PACKET_LEN;
+    }
+    let infos = crate::tsdemux::forwardable_streams(&header);
+    if infos.is_empty() {
+        return None;
+    }
+    Some(TsProbe { path, infos })
+}
+
+#[cfg(feature = "std")]
+impl TsProbe {
+    const ENCODING: ByteStreamEncoding = ByteStreamEncoding::MpegTs;
+
+    fn av(&self) -> Vec<(Caps, bool)> {
+        self.infos
+            .iter()
+            .map(|i| (i.caps.clone(), i.video))
+            .collect()
+    }
+
+    fn demux(&self) -> Box<dyn DynMultiOutputElement> {
+        Box::new(crate::tsdemux::TsDemuxN::new(
+            self.infos.iter().map(|i| i.stream).collect(),
+        ))
+    }
+
+    fn fanout(&self) -> UriFanout {
+        file_fanout(&self.path, Self::ENCODING, self.demux(), &self.av())
+    }
 }
 
 /// The `playbin uri=X` auto-fan-out hook for MPEG-TS (M389): probe a `file://`
@@ -355,39 +492,17 @@ pub fn mkv_playbin(reg: &Registry, uri: &str) -> Result<Option<Graph<GraphNode>>
 #[cfg(feature = "std")]
 pub fn ts_playbin(reg: &Registry, uri: &str) -> Result<Option<Graph<GraphNode>>, ParseError> {
     let (uri, cc) = cc_request(uri);
-    let Some((path, prefix)) = open_file_prefix(&uri) else {
+    let Some(probe) = ts_probe(&uri) else {
         return Ok(None);
     };
-    // Resync to the TS sync byte and feed whole 188-byte packets to parse the PMT.
-    let mut demux = crate::mpegts::TsDemuxer::new();
-    let mut off = 0;
-    while off + 188 <= prefix.len() {
-        if prefix[off] != 0x47 {
-            off += 1;
-            continue;
-        }
-        demux.push_packet(&prefix[off..off + 188]);
-        off += 188;
-    }
-    let infos = crate::tsdemux::forwardable_streams(&demux);
-    if infos.is_empty() {
-        return Ok(None); // not MPEG-TS (or no PMT yet): decline
-    }
-    let streams: Vec<_> = infos.iter().map(|i| i.stream).collect();
-    let av: Vec<(Caps, bool)> = infos.iter().map(|i| (i.caps.clone(), i.video)).collect();
-    let source = crate::filesrc::FileSrc::new(
-        &path,
-        Caps::ByteStream {
-            encoding: ByteStreamEncoding::MpegTs,
-        },
-    );
+    let av = probe.av();
     // An explicit `#closed-captions=` request overlays the in-SEI captions (M430);
     // MPEG-TS broadcast is the most common CEA-608 / 708 carrier.
-    if let (Some(cc), Some(video_idx)) = (cc, infos.iter().position(|i| i.video)) {
+    if let (Some(cc), Some(video_idx)) = (cc, probe.infos.iter().position(|i| i.video)) {
         return build_cc_overlay(
             reg,
-            Box::new(source),
-            crate::tsdemux::TsDemuxN::new(streams),
+            byte_source(&probe.path, TsProbe::ENCODING),
+            probe.demux(),
             &av,
             video_idx,
             cc,
@@ -396,11 +511,19 @@ pub fn ts_playbin(reg: &Registry, uri: &str) -> Result<Option<Graph<GraphNode>>,
     }
     build_av_fanout(
         reg,
-        Box::new(source),
-        crate::tsdemux::TsDemuxN::new(streams),
+        byte_source(&probe.path, TsProbe::ENCODING),
+        probe.demux(),
         &av,
     )
     .map(Some)
+}
+
+/// The lone-`fallbacksrc` URI fan-out hook for MPEG-TS (M1168), the open-ported
+/// sibling of [`ts_playbin`]. See [`mkv_uri_fanout`].
+#[cfg(feature = "std")]
+pub fn ts_uri_fanout(_reg: &Registry, uri: &str) -> Result<Option<UriFanout>, ParseError> {
+    let (uri, _cc) = cc_request(uri);
+    Ok(ts_probe(&uri).map(|probe| probe.fanout()))
 }
 
 /// Probe an MPEG program stream prefix into a parsed [`PsDemuxer`]. A program
@@ -443,7 +566,7 @@ pub fn ps_playbin(reg: &Registry, uri: &str) -> Result<Option<Graph<GraphNode>>,
         return build_cc_overlay(
             reg,
             Box::new(source),
-            crate::psdemux::PsDemuxN::new(streams),
+            Box::new(crate::psdemux::PsDemuxN::new(streams)),
             &av,
             video_idx,
             cc,
@@ -465,7 +588,7 @@ pub fn ps_playbin(reg: &Registry, uri: &str) -> Result<Option<Graph<GraphNode>>,
     build_av_fanout(
         reg,
         Box::new(source),
-        crate::psdemux::PsDemuxN::new(streams),
+        Box::new(crate::psdemux::PsDemuxN::new(streams)),
         &av,
     )
     .map(Some)
@@ -846,18 +969,15 @@ fn wire_audio_branch(
 /// audio sink (no converter chain), since the plugin-side `audioconvert` /
 /// `audioresample` are outside its element pool.
 #[cfg(feature = "std")]
-fn build_av_fanout<D>(
+fn build_av_fanout(
     reg: &Registry,
     source: Box<dyn DynSourceLoop>,
-    demux: D,
+    demux: Box<dyn DynMultiOutputElement>,
     av: &[(Caps, bool)],
-) -> Result<Graph<GraphNode>, ParseError>
-where
-    D: g2g_core::MultiOutputElement + 'static,
-{
+) -> Result<Graph<GraphNode>, ParseError> {
     let mut graph: Graph<GraphNode> = Graph::new();
     let src = graph.add_source(GraphNodeRef::Source(source));
-    let demux = graph.add_demux(GraphNodeRef::demux(demux), av.len() as u8);
+    let demux = graph.add_demux(GraphNodeRef::Demux(demux), av.len() as u8);
     graph.link(src, demux.input()).map_err(ParseError::Graph)?;
     wire_av_fanout(reg, &mut graph, demux, av)?;
     Ok(graph)
@@ -983,20 +1103,17 @@ fn wire_overlay_av(
 /// `av` lists each demux port's `(elementary caps, is_video)`; the video track is
 /// at `video_idx`. Generic over the demux element, like [`build_av_fanout`].
 #[cfg(feature = "std")]
-fn build_cc_overlay<D>(
+fn build_cc_overlay(
     reg: &Registry,
     source: Box<dyn DynSourceLoop>,
-    demux: D,
+    demux: Box<dyn DynMultiOutputElement>,
     av: &[(Caps, bool)],
     video_idx: usize,
     cc: crate::ccextract::CcSource,
-) -> Result<Graph<GraphNode>, ParseError>
-where
-    D: g2g_core::MultiOutputElement + 'static,
-{
+) -> Result<Graph<GraphNode>, ParseError> {
     let mut graph: Graph<GraphNode> = Graph::new();
     let src = graph.add_source(GraphNodeRef::Source(source));
-    let demux = graph.add_demux(GraphNodeRef::demux(demux), av.len() as u8);
+    let demux = graph.add_demux(GraphNodeRef::Demux(demux), av.len() as u8);
     graph.link(src, demux.input()).map_err(ParseError::Graph)?;
     wire_cc_overlay(reg, &mut graph, demux, av, video_idx, cc)?;
     Ok(graph)
@@ -1226,6 +1343,60 @@ fn build_mkv_subtitle_overlay(
     Ok(graph)
 }
 
+/// A `file://` ISO-BMFF container probed into its forwardable tracks: the path
+/// its byte source reads, the probed prefix (which also holds the subtitle
+/// tracks), and one track per `moov` entry in port order.
+#[cfg(feature = "std")]
+struct Mp4Probe {
+    path: alloc::string::String,
+    prefix: Vec<u8>,
+    infos: Vec<crate::mp4demuxn::Mp4StreamInfo>,
+}
+
+/// Probe a `file://` URI as ISO-BMFF. `None` for a non-`file://` URI, an
+/// unreadable file, or a container whose `moov` is not in the probed prefix.
+#[cfg(feature = "std")]
+fn mp4_probe(uri: &str) -> Option<Mp4Probe> {
+    let (path, prefix) = open_file_prefix(uri)?;
+    let infos = crate::mp4demuxn::forwardable_streams(&prefix);
+    if infos.is_empty() {
+        return None;
+    }
+    Some(Mp4Probe {
+        path,
+        prefix,
+        infos,
+    })
+}
+
+#[cfg(feature = "std")]
+impl Mp4Probe {
+    const ENCODING: ByteStreamEncoding = ByteStreamEncoding::IsoBmff;
+
+    fn av(&self) -> Vec<(Caps, bool)> {
+        self.infos
+            .iter()
+            .map(|i| (i.caps.clone(), i.video))
+            .collect()
+    }
+
+    fn demux(&self) -> Box<dyn DynMultiOutputElement> {
+        Box::new(crate::mp4demuxn::Mp4DemuxN::new(
+            self.infos
+                .iter()
+                .map(|i| crate::mp4demuxn::Mp4Port {
+                    track_id: i.track_id,
+                    caps: i.caps.clone(),
+                })
+                .collect(),
+        ))
+    }
+
+    fn fanout(&self) -> UriFanout {
+        file_fanout(&self.path, Self::ENCODING, self.demux(), &self.av())
+    }
+}
+
 /// The `playbin uri=X` auto-fan-out hook for fragmented MP4 / CMAF (M392): probe
 /// a `file://` ISO-BMFF container's `moov`, then assemble `FileSrc -> Mp4DemuxN ->
 /// {decode -> auto sink}` with one branch per forwardable track, the MP4 sibling
@@ -1239,53 +1410,44 @@ fn build_mkv_subtitle_overlay(
 #[cfg(feature = "std")]
 pub fn mp4_playbin(reg: &Registry, uri: &str) -> Result<Option<Graph<GraphNode>>, ParseError> {
     let (uri, cc) = cc_request(uri);
-    let Some((path, prefix)) = open_file_prefix(&uri) else {
+    let Some(probe) = mp4_probe(&uri) else {
         return Ok(None);
     };
-    let infos = crate::mp4demuxn::forwardable_streams(&prefix);
-    if infos.is_empty() {
-        return Ok(None); // not MP4 (or moov not in the prefix): decline
-    }
-    let av: Vec<(Caps, bool)> = infos.iter().map(|i| (i.caps.clone(), i.video)).collect();
-    let demux_ports: Vec<_> = infos
-        .iter()
-        .map(|i| crate::mp4demuxn::Mp4Port {
-            track_id: i.track_id,
-            caps: i.caps.clone(),
-        })
-        .collect();
-    let source = crate::filesrc::FileSrc::new(
-        &path,
-        Caps::ByteStream {
-            encoding: ByteStreamEncoding::IsoBmff,
-        },
-    );
-    if let Some(video_idx) = infos.iter().position(|i| i.video) {
+    let av = probe.av();
+    if let Some(video_idx) = probe.infos.iter().position(|i| i.video) {
         // An explicit `#closed-captions=` request overlays the in-SEI captions
         // (M430); else a subtitle track overlays its cues (M412). One text pad, so
         // the explicit caption request wins.
         if let Some(cc) = cc {
             return build_cc_overlay(
                 reg,
-                Box::new(source),
-                crate::mp4demuxn::Mp4DemuxN::new(demux_ports),
+                byte_source(&probe.path, Mp4Probe::ENCODING),
+                probe.demux(),
                 &av,
                 video_idx,
                 cc,
             )
             .map(Some);
         }
-        if let Some(text) = crate::mp4demuxn::subtitle_streams(&prefix).first() {
-            return build_mp4_subtitle_overlay(reg, &path, &infos, text).map(Some);
+        if let Some(text) = crate::mp4demuxn::subtitle_streams(&probe.prefix).first() {
+            return build_mp4_subtitle_overlay(reg, &probe.path, &probe.infos, text).map(Some);
         }
     }
     build_av_fanout(
         reg,
-        Box::new(source),
-        crate::mp4demuxn::Mp4DemuxN::new(demux_ports),
+        byte_source(&probe.path, Mp4Probe::ENCODING),
+        probe.demux(),
         &av,
     )
     .map(Some)
+}
+
+/// The lone-`fallbacksrc` URI fan-out hook for ISO-BMFF (M1168), the open-ported
+/// sibling of [`mp4_playbin`]. See [`mkv_uri_fanout`].
+#[cfg(feature = "std")]
+pub fn mp4_uri_fanout(_reg: &Registry, uri: &str) -> Result<Option<UriFanout>, ParseError> {
+    let (uri, _cc) = cc_request(uri);
+    Ok(mp4_probe(&uri).map(|probe| probe.fanout()))
 }
 
 // ---- Explicit-demux fan-out hooks (M476) --------------------------------
@@ -1960,7 +2122,7 @@ pub fn build_hls_ts_fanout(
     build_av_fanout(
         reg,
         Box::new(source),
-        crate::tsdemux::TsDemuxN::new(ts_streams),
+        Box::new(crate::tsdemux::TsDemuxN::new(ts_streams)),
         &port_infos,
     )
     .map(Some)
@@ -1997,7 +2159,7 @@ pub fn build_hls_fmp4_fanout(
     build_av_fanout(
         reg,
         Box::new(source),
-        crate::mp4demuxn::Mp4DemuxN::new(demux_ports),
+        Box::new(crate::mp4demuxn::Mp4DemuxN::new(demux_ports)),
         &av,
     )
     .map(Some)
@@ -2029,7 +2191,7 @@ pub fn build_hls_separate_fanout(
     let mut graph = build_av_fanout(
         reg,
         Box::new(crate::hlssrc::HlsSrc::new(master_url)),
-        TsDemuxN::new(Vec::from([vts])),
+        Box::new(TsDemuxN::new(Vec::from([vts]))),
         &[(video.caps.clone(), true)],
     )?;
     // The separate audio rendition playlist, its own source -> demux -> audio
@@ -2043,7 +2205,7 @@ pub fn build_hls_separate_fanout(
     let audio_graph = build_av_fanout(
         reg,
         Box::new(crate::hlssrc::HlsSrc::new(audio_url)),
-        TsDemuxN::new(Vec::from([TsStream::Aac])),
+        Box::new(TsDemuxN::new(Vec::from([TsStream::Aac]))),
         &[(audio_caps, false)],
     )?;
     graph.merge(audio_graph);
@@ -2246,7 +2408,7 @@ pub fn build_hls_ts_cc_overlay(
     build_cc_overlay(
         reg,
         Box::new(source),
-        crate::tsdemux::TsDemuxN::new(ts_streams),
+        Box::new(crate::tsdemux::TsDemuxN::new(ts_streams)),
         &av,
         video_idx,
         cc,
@@ -2282,7 +2444,7 @@ pub fn build_hls_fmp4_cc_overlay(
     build_cc_overlay(
         reg,
         Box::new(source),
-        crate::mp4demuxn::Mp4DemuxN::new(demux_ports),
+        Box::new(crate::mp4demuxn::Mp4DemuxN::new(demux_ports)),
         &av,
         video_idx,
         cc,
@@ -2332,7 +2494,7 @@ pub fn build_hls_separate_cc_overlay(
     let audio_graph = build_av_fanout(
         reg,
         Box::new(crate::hlssrc::HlsSrc::new(audio_url)),
-        TsDemuxN::new(Vec::from([TsStream::Aac])),
+        Box::new(TsDemuxN::new(Vec::from([TsStream::Aac]))),
         &[(audio_caps, false)],
     )?;
     graph.merge(audio_graph);

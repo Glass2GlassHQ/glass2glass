@@ -166,13 +166,14 @@ pub use autoplug::{
     DemuxFactory, DemuxSelectHook, ElementDoc, ElementFactory, FanoutSrcFactory, LaunchFactory,
     MuxerFactory, PlaybinError, PlaybinGraphError, PlaybinHook, PlaybinPort, PrimaryStream,
     PrimaryStreamHook, PropertyDoc, Registry, RestartPolicy, RestartSourceHook, SourceFactory, Uri,
-    UriError, UriRebuild, UriSourceFactory,
+    UriError, UriFanout, UriFanoutHook, UriFanoutPort, UriRebuild, UriSourceFactory,
 };
 
 #[cfg(feature = "std")]
 pub use launch::{
     fallback_factory, has_live_source, parse_launch, parse_launch_avoiding, ParseError,
-    FALLBACK_FALLBACK_SOURCE_SUFFIX, FALLBACK_MAIN_SOURCE_SUFFIX, FALLBACK_SWITCH_NAME,
+    FALLBACK_AUDIO_SUFFIX, FALLBACK_FALLBACK_SOURCE_SUFFIX, FALLBACK_MAIN_SOURCE_SUFFIX,
+    FALLBACK_SWITCH_NAME, FALLBACK_VIDEO_SUFFIX,
 };
 
 #[cfg(feature = "std")]

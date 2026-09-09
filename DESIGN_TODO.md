@@ -322,10 +322,12 @@ unless it says otherwise.
 - Give `togglerecord` a native N-in N-out node kind, so the streams that start
   and stop together are one element with request pads instead of several joined
   by a group name.
-- **Fallback switching:** `fallbacksrc` carrying audio and video at once (a
-  switch per kind off request pads, with `enable-audio` / `enable-video`
-  selecting pads rather than the decode target), and a way to hand
-  `fallbacksrc` an application-built source element in place of its `uri=`.
+- **Fallback switching:** a way to hand `fallbacksrc` an application-built source
+  element in place of its `uri=`. Carry a container holding several streams of
+  one kind (two audio tracks, say) through a fanned-out `fallbacksrc`, which
+  today falls back to the single-stream form. Register a URI fan-out hook for the
+  remaining containers (`ps`, `ogg`, HLS, RTSP), whose `playbin` hooks build a
+  graph the fan-out cannot reuse.
 ## Python-element host
 
 - Add an explicit plain-text format override for files with no `.txt` extension.

@@ -74,10 +74,11 @@ use crate::memory::MemoryDomainKind;
 use crate::property::{PropError, PropValue, PropertySpec, ValueError};
 use crate::runtime::autoplug::{
     is_raw_audio, is_raw_video, FallbackSourceRole, PadKind, PadRequest, Registry, RestartPolicy,
-    UriError,
+    UriError, UriFanout, UriRebuild,
 };
 use crate::runtime::parse_scope::ParseScope;
 use crate::runtime::{DynSourceLoop, GraphNode, GraphNodeRef, UnblockHandle};
+use crate::stream::StreamType;
 
 /// Why [`parse_launch`] could not build a graph.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1515,6 +1516,7 @@ const FALLBACK_RETRY_TIMEOUT_NS: u64 = 60_000_000_000;
 /// links to (input 0 is the main URI, so the fallback is input 1).
 const FALLBACK_SWITCH: &str = "fallbackswitch";
 const FALLBACK_SWITCH_PAD: &str = "sink_1";
+const FALLBACK_SWITCH_INPUTS: usize = 2;
 
 /// The instance name given to the generated switch when the `fallbacksrc` had no
 /// `name=` of its own, so the fallback branch has something to reference. A
@@ -1533,9 +1535,59 @@ const FALLBACK_PACER: &str = "clocksync";
 pub const FALLBACK_MAIN_SOURCE_SUFFIX: &str = "-source";
 pub const FALLBACK_FALLBACK_SOURCE_SUFFIX: &str = "-fallback-source";
 
+/// Instance-name suffixes telling the per-kind switches of a fanned-out
+/// `fallbacksrc` apart (M1168): `fallbacksrc name=fb` over a file carrying both
+/// kinds gives the switches `fb-video` and `fb-audio`.
+pub const FALLBACK_VIDEO_SUFFIX: &str = "-video";
+pub const FALLBACK_AUDIO_SUFFIX: &str = "-audio";
+
 /// The dummy fallback source per stream kind: black frames, or silence.
 const FALLBACK_VIDEO_DUMMY: (&str, &str, &str) = ("videotestsrc", "pattern", "black");
 const FALLBACK_AUDIO_DUMMY: (&str, &str, &str) = ("audiotestsrc", "wave", "silence");
+
+/// The sink a `fallbacksrc` that is the whole pipeline ends each kind on, so a
+/// lone keyword is a runnable line rather than a switch with nothing downstream.
+const FALLBACK_VIDEO_SINK: &str = "autovideosink";
+const FALLBACK_AUDIO_SINK: &str = "autoaudiosink";
+
+/// Between a raw-audio switch output and its sink: the sink fixes one PCM format
+/// at configure, and these absorb the stream's real channels and rate.
+const FALLBACK_AUDIO_TAIL: &[&str] = &["audioconvert", "audioresample"];
+
+/// What one stream kind's branch of a fanned-out `fallbacksrc` is made of: the
+/// suffix its switch is named with, the generator its dummy fallback uses, the
+/// elements between the switch and the sink, the sink itself, and the raw caps
+/// the decode chain plugs to.
+#[derive(Clone, Copy)]
+struct FallbackKind {
+    suffix: &'static str,
+    dummy: (&'static str, &'static str, &'static str),
+    tail: &'static [&'static str],
+    sink: &'static str,
+    raw: fn(&Caps) -> bool,
+}
+
+/// The branch shape for a demux port's media kind, or `None` for a kind a
+/// `fallbacksrc` has no generator and no sink for (text, unclassified).
+fn fallback_kind(stream_type: StreamType) -> Option<FallbackKind> {
+    match stream_type {
+        StreamType::Video => Some(FallbackKind {
+            suffix: FALLBACK_VIDEO_SUFFIX,
+            dummy: FALLBACK_VIDEO_DUMMY,
+            tail: &[],
+            sink: FALLBACK_VIDEO_SINK,
+            raw: is_raw_video,
+        }),
+        StreamType::Audio => Some(FallbackKind {
+            suffix: FALLBACK_AUDIO_SUFFIX,
+            dummy: FALLBACK_AUDIO_DUMMY,
+            tail: FALLBACK_AUDIO_TAIL,
+            sink: FALLBACK_AUDIO_SINK,
+            raw: is_raw_audio,
+        }),
+        _ => None,
+    }
+}
 
 /// A `fallbacksrc` keyword's boolean property, defaulting to `default` when the
 /// line did not write it. Spelled as gst writes booleans in a launch line.
@@ -1578,30 +1630,53 @@ fn restartable_uri_source(
     role: FallbackSourceRole,
     unblock: Option<UnblockHandle>,
 ) -> Result<Box<dyn DynSourceLoop>, ParseError> {
-    let Some(hook) = registry.restart_source_hook() else {
+    if registry.restart_source_hook().is_none() {
         return Ok(source);
-    };
+    }
     let rebuild = registry
         .uri_source_rebuilder(uri)
         .map_err(|e: UriError| ParseError::Uri(alloc::format!("{uri}: {e:?}")))?;
-    Ok(hook(source, rebuild, policy, role, unblock))
+    Ok(restartable_source(
+        registry, source, rebuild, policy, role, unblock,
+    ))
 }
 
-/// Expand one `fallbacksrc` into its main branch (the `uri=` source auto-plugged
-/// to raw), the `fallbackswitch` those branches meet at, and the fallback branch
-/// as a chain of its own that references the switch's second input.
-///
-/// The expansion is single-stream, like `uridecodebin`: `enable-video` /
-/// `enable-audio` say which kind the decode chain may reach, video first.
-/// `consumer` is the element the switch output feeds, whose declared input memory
-/// picks the decoder (M1018).
-fn expand_fallbacksrc(
+/// [`restartable_uri_source`] with the rebuild already in hand: the fan-out path
+/// rebuilds the container's byte source, not the URI scheme handler's (which for
+/// `file://` may self-demux a different container).
+fn restartable_source(
     registry: &Registry,
-    spec: &ElementSpec,
-    consumer: Option<&str>,
-    switch_name: &str,
-    avoided: &[&str],
-) -> Result<(Vec<Item>, Chain), ParseError> {
+    source: Box<dyn DynSourceLoop>,
+    rebuild: UriRebuild,
+    policy: RestartPolicy,
+    role: FallbackSourceRole,
+    unblock: Option<UnblockHandle>,
+) -> Box<dyn DynSourceLoop> {
+    match registry.restart_source_hook() {
+        Some(hook) => hook(source, rebuild, policy, role, unblock),
+        None => source,
+    }
+}
+
+/// Everything a `fallbacksrc` keyword's properties say, read once so the
+/// single-stream expansion and the lone-keyword fan-out agree on them.
+struct FallbackSettings<'a> {
+    uri: &'a str,
+    fallback_uri: Option<&'a str>,
+    enable_video: bool,
+    enable_audio: bool,
+    restart: RestartPolicy,
+    unblock: Option<UnblockHandle>,
+    /// The properties forwarded to each `fallbackswitch` the expansion builds.
+    switch_props: Vec<(String, String)>,
+}
+
+/// Read a `fallbacksrc` keyword's properties. It is a macro, not an element, so
+/// an unknown property is rejected here instead of by `apply_props`.
+fn fallbacksrc_settings<'a>(
+    registry: &Registry,
+    spec: &'a ElementSpec,
+) -> Result<FallbackSettings<'a>, ParseError> {
     if let Some((key, _)) = spec
         .props
         .iter()
@@ -1622,11 +1697,6 @@ fn expand_fallbacksrc(
             value: "false".to_string(),
         });
     }
-    let restart = RestartPolicy {
-        restart_on_eos: keyword_bool(spec, "restart-on-eos", false)?,
-        restart_timeout_ns: keyword_uint(spec, "restart-timeout", FALLBACK_RESTART_TIMEOUT_NS)?,
-        retry_timeout_ns: keyword_uint(spec, "retry-timeout", FALLBACK_RETRY_TIMEOUT_NS)?,
-    };
     // Without a registered handle a held source could never be released, so the
     // line is rejected here rather than hanging with nothing to poke.
     let unblock = match keyword_bool(spec, "manual-unblock", false)? {
@@ -1637,6 +1707,54 @@ fn expand_fallbacksrc(
                 .ok_or_else(|| ParseError::MissingUnblockHandle(spec.name.clone()))?,
         ),
     };
+    let mut switch_props = Vec::new();
+    for key in ["timeout", "immediate-fallback"] {
+        if let Some(value) = prop(spec, key) {
+            switch_props.push((key.to_string(), value.to_string()));
+        }
+    }
+    Ok(FallbackSettings {
+        uri,
+        fallback_uri: prop(spec, "fallback-uri"),
+        enable_video,
+        enable_audio,
+        restart: RestartPolicy {
+            restart_on_eos: keyword_bool(spec, "restart-on-eos", false)?,
+            restart_timeout_ns: keyword_uint(spec, "restart-timeout", FALLBACK_RESTART_TIMEOUT_NS)?,
+            retry_timeout_ns: keyword_uint(spec, "retry-timeout", FALLBACK_RETRY_TIMEOUT_NS)?,
+        },
+        unblock,
+        switch_props,
+    })
+}
+
+/// Expand one `fallbacksrc` into its main branch (the `uri=` source auto-plugged
+/// to raw), the `fallbackswitch` those branches meet at, and the fallback branch
+/// as a chain of its own that references the switch's second input.
+///
+/// The expansion is single-stream, like `uridecodebin`: `enable-video` /
+/// `enable-audio` say which kind the decode chain may reach, video first.
+/// `consumer` is the element the switch output feeds, whose declared input memory
+/// picks the decoder (M1018). `auto_sink` appends the kind's automatic sink, so a
+/// `fallbacksrc` that is the whole line is still a runnable pipeline.
+fn expand_fallbacksrc(
+    registry: &Registry,
+    spec: &ElementSpec,
+    consumer: Option<&str>,
+    switch_name: &str,
+    avoided: &[&str],
+    auto_sink: bool,
+) -> Result<(Vec<Item>, Chain), ParseError> {
+    let settings = fallbacksrc_settings(registry, spec)?;
+    let FallbackSettings {
+        uri,
+        fallback_uri,
+        enable_video,
+        enable_audio,
+        restart,
+        unblock,
+        switch_props,
+    } = settings;
     let preferred = consumer.map_or(MemoryDomainKind::System, |name| {
         registry.declared_memory_preference(name)
     });
@@ -1662,14 +1780,22 @@ fn expand_fallbacksrc(
     let video = enable_video
         .then(|| plug(&source_caps, video_target))
         .flatten();
-    let (decoders, target, dummy) = match video {
-        Some(decoders) => (decoders, video_target, FALLBACK_VIDEO_DUMMY),
+    let (decoders, target, kind) = match video {
+        Some(decoders) => (
+            decoders,
+            video_target,
+            fallback_kind(StreamType::Video).expect("video is a fallbacksrc kind"),
+        ),
         None => {
             let decoders = enable_audio
                 .then(|| plug(&source_caps, audio_target))
                 .flatten()
                 .ok_or_else(|| ParseError::NoDecodeChain(alloc::format!("{source_caps:?}")))?;
-            (decoders, audio_target, FALLBACK_AUDIO_DUMMY)
+            (
+                decoders,
+                audio_target,
+                fallback_kind(StreamType::Audio).expect("audio is a fallbacksrc kind"),
+            )
         }
     };
 
@@ -1684,21 +1810,23 @@ fn expand_fallbacksrc(
             name: None,
         });
     }
-    let mut switch_props = Vec::new();
-    for key in ["timeout", "immediate-fallback"] {
-        if let Some(value) = prop(spec, key) {
-            switch_props.push((key.to_string(), value.to_string()));
-        }
-    }
     main.push(Item::Element(ElementSpec {
         name: FALLBACK_SWITCH.to_string(),
         props: switch_props,
         instance: Some(switch_name.to_string()),
         log_category: spec.log_category.clone(),
     }));
+    if auto_sink {
+        main.push(Item::Element(ElementSpec {
+            name: kind.sink.to_string(),
+            props: Vec::new(),
+            instance: None,
+            log_category: None,
+        }));
+    }
 
     let mut fallback: Chain = Vec::new();
-    match prop(spec, "fallback-uri") {
+    match fallback_uri {
         Some(fallback_uri) => {
             let (source, caps) = registry
                 .build_uri_source(fallback_uri)
@@ -1727,7 +1855,7 @@ fn expand_fallbacksrc(
             }
         }
         None => {
-            let (name, key, value) = dummy;
+            let (name, key, value) = kind.dummy;
             fallback.push(Item::Element(ElementSpec {
                 name: name.to_string(),
                 props: Vec::from([(key.to_string(), value.to_string())]),
@@ -1764,6 +1892,9 @@ fn expand_uri_sources(
     // Numbers the generated switch names apart, so two `fallbacksrc` in one line
     // do not collide on the default name.
     let mut fallbacksrc_count = 0usize;
+    // A `fallbacksrc` that is the whole line has nothing downstream of its
+    // switch, so the expansion appends the sink for the kind it reached.
+    let lone_fallbacksrc = lone_fallbacksrc_spec(&chains).is_some();
     for chain in chains {
         let mut new_chain: Chain = Vec::with_capacity(chain.len());
         let mut fallback_chains: Vec<Chain> = Vec::new();
@@ -1790,8 +1921,14 @@ fn expand_uri_sources(
                     alloc::format!("{FALLBACK_SWITCH_NAME}-{fallbacksrc_count}")
                 });
                 fallbacksrc_count += 1;
-                let (main, fallback) =
-                    expand_fallbacksrc(registry, &spec, consumer, &switch_name, avoided)?;
+                let (main, fallback) = expand_fallbacksrc(
+                    registry,
+                    &spec,
+                    consumer,
+                    &switch_name,
+                    avoided,
+                    lone_fallbacksrc,
+                )?;
                 new_chain.extend(main);
                 fallback_chains.push(fallback);
                 continue;
@@ -2494,6 +2631,15 @@ pub fn parse_launch_avoiding(
             }
         }
     }
+    // fallbacksrc uri=X per-kind fan-out (M1168): a lone `fallbacksrc` probes the
+    // container the same way and gives every kind its own switch and sink. It
+    // declines a single-kind container, which build_graph then expands to the
+    // single-stream form plus one automatic sink.
+    if let Some(spec) = lone_fallbacksrc_spec(&chains) {
+        if let Some(graph) = build_fallbacksrc_fanout(registry, spec)? {
+            return Ok(splice_domain_converters(registry, graph));
+        }
+    }
     Ok(splice_domain_converters(
         registry,
         build_graph(registry, chains, avoided)?,
@@ -2567,6 +2713,246 @@ fn lone_playbin_uri(chains: &[Chain]) -> Option<&str> {
         return None;
     }
     prop(spec, "uri")
+}
+
+/// The spec of a pipeline that is a single bare `fallbacksrc uri=X` (and nothing
+/// else), the M1168 per-kind fan-out trigger. `None` for any other shape: an
+/// inline `fallbacksrc` feeds user-written elements, and a launch line has no way
+/// to name a second output, so it stays single-stream.
+fn lone_fallbacksrc_spec(chains: &[Chain]) -> Option<&ElementSpec> {
+    let [chain] = chains else { return None };
+    let [Item::Element(spec)] = chain.as_slice() else {
+        return None;
+    };
+    (spec.name == "fallbacksrc" && prop(spec, "uri").is_some()).then_some(spec)
+}
+
+/// Set a generated node name, rejecting a collision with one already generated
+/// the way the parser rejects two elements sharing a `name=`.
+fn name_node(
+    graph: &mut Graph<GraphNode>,
+    taken: &mut Vec<String>,
+    node: NodeId,
+    name: String,
+) -> Result<(), ParseError> {
+    if taken.contains(&name) {
+        return Err(ParseError::DuplicateName(name));
+    }
+    graph.set_node_name(node, name.clone());
+    taken.push(name);
+    Ok(())
+}
+
+/// The first registered fan-out hook that claims `uri`, or `None` when every hook
+/// declines (an unprobed scheme, or a container none of them parses).
+fn uri_fanout(registry: &Registry, uri: &str) -> Result<Option<UriFanout>, ParseError> {
+    for hook in registry.uri_fanout_hooks() {
+        if let Some(fanout) = hook(registry, uri)? {
+            return Ok(Some(fanout));
+        }
+    }
+    Ok(None)
+}
+
+/// The branch shape per port of a fan-out, or `None` when the ports are not one
+/// per kind: a port whose kind a `fallbacksrc` has no generator for, or two ports
+/// of the same kind (which would need two switches named alike). Either way the
+/// caller falls back to the single-stream expansion.
+fn fallback_kinds(fanout: &UriFanout) -> Option<Vec<FallbackKind>> {
+    let mut seen: Vec<StreamType> = Vec::with_capacity(fanout.ports.len());
+    let mut kinds = Vec::with_capacity(fanout.ports.len());
+    for port in &fanout.ports {
+        if seen.contains(&port.stream_type) {
+            return None;
+        }
+        seen.push(port.stream_type);
+        kinds.push(fallback_kind(port.stream_type)?);
+    }
+    Some(kinds)
+}
+
+/// Build the per-kind graph of a lone `fallbacksrc uri=X` (M1168): one restartable
+/// byte source into one demuxer, then per demux port a decode chain into input 0
+/// of that kind's `fallbackswitch`, the fallback branch into input 1, and the
+/// switch output to that kind's automatic sink.
+///
+/// `Ok(None)` declines, leaving the single-stream expansion to build the line: no
+/// hook claims the URI, the container carries one kind, a kind repeats, or either
+/// `enable-video` / `enable-audio` is off.
+fn build_fallbacksrc_fanout(
+    registry: &Registry,
+    spec: &ElementSpec,
+) -> Result<Option<Graph<GraphNode>>, ParseError> {
+    let settings = fallbacksrc_settings(registry, spec)?;
+    if !settings.enable_video || !settings.enable_audio {
+        return Ok(None);
+    }
+    let Some(main) = uri_fanout(registry, settings.uri)? else {
+        return Ok(None);
+    };
+    let Some(kinds) = fallback_kinds(&main) else {
+        return Ok(None);
+    };
+    if kinds.len() < 2 {
+        return Ok(None);
+    }
+    // A `fallbacksrc name=f` names its switches, so `f-video.` resolves to the
+    // node the video branches meet at; unnamed it takes the generated stem the
+    // single-stream expansion uses for its one switch.
+    let base = spec
+        .instance
+        .clone()
+        .unwrap_or_else(|| alloc::format!("{FALLBACK_SWITCH_NAME}-0"));
+    // The fallback fan-out is used only when every port it reports is a kind the
+    // main stream also carries; otherwise a port would have nothing to drain it,
+    // and each kind takes its dummy generator instead.
+    let fallback = match settings.fallback_uri {
+        Some(uri) => uri_fanout(registry, uri)?.filter(|f| {
+            fallback_kinds(f).is_some()
+                && f.ports
+                    .iter()
+                    .all(|p| main.ports.iter().any(|m| m.stream_type == p.stream_type))
+        }),
+        None => None,
+    };
+
+    let mut graph: Graph<GraphNode> = Graph::new();
+    let mut names: Vec<String> = Vec::new();
+    let ports = main.ports;
+    let source = restartable_source(
+        registry,
+        main.source,
+        main.rebuild,
+        settings.restart,
+        FallbackSourceRole::Main,
+        settings.unblock.clone(),
+    );
+    let src = graph.add_source(GraphNodeRef::Source(source));
+    name_node(
+        &mut graph,
+        &mut names,
+        src,
+        alloc::format!("{base}{FALLBACK_MAIN_SOURCE_SUFFIX}"),
+    )?;
+    let demux = graph.add_demux(GraphNodeRef::Demux(main.demux), ports.len() as u8);
+    graph.link(src, demux.input())?;
+
+    let fallback = match fallback {
+        Some(fanout) => {
+            let source = restartable_source(
+                registry,
+                fanout.source,
+                fanout.rebuild,
+                settings.restart,
+                FallbackSourceRole::Fallback,
+                settings.unblock.clone(),
+            );
+            let node = graph.add_source(GraphNodeRef::Source(source));
+            name_node(
+                &mut graph,
+                &mut names,
+                node,
+                alloc::format!("{base}{FALLBACK_FALLBACK_SOURCE_SUFFIX}"),
+            )?;
+            let ports = fanout.ports;
+            let demux = graph.add_demux(GraphNodeRef::Demux(fanout.demux), ports.len() as u8);
+            graph.link(node, demux.input())?;
+            Some((demux, ports))
+        }
+        None => None,
+    };
+
+    for (i, (port, kind)) in ports.iter().zip(&kinds).enumerate() {
+        let mut switch = registry
+            .make_muxer(FALLBACK_SWITCH, FALLBACK_SWITCH_INPUTS)
+            .ok_or_else(|| ParseError::NotAMuxer(FALLBACK_SWITCH.to_string()))?;
+        apply_props(&mut switch, FALLBACK_SWITCH, &settings.switch_props)?;
+        let switch = graph.add_muxer(GraphNodeRef::Muxer(switch), FALLBACK_SWITCH_INPUTS as u8);
+        name_node(
+            &mut graph,
+            &mut names,
+            switch.node(),
+            alloc::format!("{base}{}", kind.suffix),
+        )?;
+        if let Some(category) = &spec.log_category {
+            graph.set_node_log_category(switch.node(), category.clone());
+        }
+        plug_decode(
+            registry,
+            &mut graph,
+            demux.out(i as u8),
+            switch.input(0),
+            &port.caps,
+            kind,
+        )?;
+        let matching = fallback.as_ref().and_then(|(demux, ports)| {
+            ports
+                .iter()
+                .position(|p| p.stream_type == port.stream_type)
+                .map(|j| (demux.out(j as u8), &ports[j].caps))
+        });
+        match matching {
+            Some((pad, caps)) => {
+                plug_decode(registry, &mut graph, pad, switch.input(1), caps, kind)?
+            }
+            None => plug_dummy(registry, &mut graph, switch.input(1), kind)?,
+        }
+        let mut head = {
+            let sink = registry
+                .make_element(kind.sink)
+                .ok_or_else(|| ParseError::UnknownElement(kind.sink.to_string()))?;
+            graph.add_sink(GraphNodeRef::Element(sink))
+        };
+        for name in kind.tail.iter().rev() {
+            let element = registry
+                .make_element(name)
+                .ok_or_else(|| ParseError::UnknownElement((*name).to_string()))?;
+            let node = graph.add_transform(GraphNodeRef::Element(element));
+            graph.link(node, head)?;
+            head = node;
+        }
+        graph.link(switch.output(), head)?;
+    }
+    Ok(Some(graph))
+}
+
+/// Auto-plug the decode chain from one demux port to one switch input.
+fn plug_decode(
+    registry: &Registry,
+    graph: &mut Graph<GraphNode>,
+    from: PadId,
+    to: PadId,
+    caps: &Caps,
+    kind: &FallbackKind,
+) -> Result<(), ParseError> {
+    registry
+        .decodebin(graph, from, to, caps, &kind.raw, DECODEBIN_MAX_DEPTH)
+        .map_err(|_| ParseError::NoDecodeChain(alloc::format!("{caps:?}")))?;
+    Ok(())
+}
+
+/// Build the dummy fallback branch for one kind (black frames or silence behind
+/// the pacer) into one switch input, the same generator the single-stream
+/// expansion uses when no `fallback-uri` was given.
+fn plug_dummy(
+    registry: &Registry,
+    graph: &mut Graph<GraphNode>,
+    to: PadId,
+    kind: &FallbackKind,
+) -> Result<(), ParseError> {
+    let (name, key, value) = kind.dummy;
+    let mut source = registry
+        .make_source(name)
+        .ok_or_else(|| ParseError::UnknownSource(name.to_string()))?;
+    apply_props(&mut source, name, &[(key.to_string(), value.to_string())])?;
+    let source = graph.add_source(GraphNodeRef::Source(source));
+    let pacer = registry
+        .make_element(FALLBACK_PACER)
+        .ok_or_else(|| ParseError::UnknownElement(FALLBACK_PACER.to_string()))?;
+    let pacer = graph.add_transform(GraphNodeRef::Element(pacer));
+    graph.link(source, pacer)?;
+    graph.link(pacer, to)?;
+    Ok(())
 }
 
 #[cfg(test)]

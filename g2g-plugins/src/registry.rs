@@ -1542,6 +1542,11 @@ fn register_uri_handlers(reg: &mut Registry) {
     reg.register_playbin(crate::uridecodebin::ts_playbin);
     reg.register_playbin(crate::uridecodebin::mp4_playbin);
     reg.register_playbin(crate::uridecodebin::ps_playbin);
+    // The open-ported siblings (M1168): a lone `fallbacksrc uri=file://x` carries
+    // every port the same probe finds, each through its own `fallbackswitch`.
+    reg.register_uri_fanout(crate::uridecodebin::mkv_uri_fanout);
+    reg.register_uri_fanout(crate::uridecodebin::ts_uri_fanout);
+    reg.register_uri_fanout(crate::uridecodebin::mp4_uri_fanout);
     // Lone-audio-stream files the container hooks decline: Ogg (Opus / FLAC)
     // and elementary audio (`.flac`), M775.
     reg.register_playbin(crate::uridecodebin::audio_playbin);

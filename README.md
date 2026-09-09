@@ -492,7 +492,8 @@ stream, joined by `group=`, and `main=true` on the one that decides), `hlssink`
 `mp4mux`), `fallbackswitch` (forwards the highest-priority input that is
 still delivering, input 0 being the primary; the `fallbacksrc uri=X` keyword
 wraps it around a URI's decode chain, rebuilds that source when it dies, and
-reports each restart on the bus),
+reports each restart on the bus, and on its own carries every stream kind the
+container holds through a switch and a sink of its own),
 and `livesync` (keeps a stalling
 live input's output going, repeating the last video frame or filling with audio
 silence).

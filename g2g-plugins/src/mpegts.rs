@@ -27,7 +27,8 @@ use crate::poc::AccessUnitPoc;
 /// timestamp prefix is not handled).
 pub const TS_PACKET_LEN: usize = 188;
 
-const SYNC_BYTE: u8 = 0x47;
+/// The byte every TS packet starts with, what a probe resyncs to.
+pub const SYNC_BYTE: u8 = 0x47;
 const PID_PAT: u16 = 0x0000;
 /// The DVB SI PID the SDT rides (ETSI EN 300 468); shared with the BAT and the
 /// other-TS SDT, which the `table_id` filter drops.

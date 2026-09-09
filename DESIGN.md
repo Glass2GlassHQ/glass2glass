@@ -2590,11 +2590,39 @@ pattern=black` or `audiotestsrc wave=silence` behind a `clocksync` (neither test
 source is live, so without the pacer the dummy would run as fast as the CPU
 allows). `timeout` and `immediate-fallback` pass through to the switch, and a
 `name=` names the switch, so a line can hang a further branch off it by pad
-reference. The expansion is single-stream, as `uridecodebin`'s is:
+reference. Inline, the expansion is single-stream, as `uridecodebin`'s is:
 `enable-video` / `enable-audio` say which kind the decode chain may reach, video
 first. The dummy carries its own geometry rather than the main stream's, which
 is not known until the main branch negotiates, and the switch's caps
 re-announcement is what carries that difference downstream.
+
+A `fallbacksrc uri=X` that is the *whole* pipeline instead carries every kind the
+container holds (M1168), the way a lone `playbin` fans out. The split is the same
+one `playbin` draws and for the same reason: the multi-stream form has an output
+per kind and a launch line has no way to name a second one, so only the form with
+nothing downstream of it can take it. The URI is probed by a
+`Registry::register_uri_fanout` hook, the open-ported sibling of the `playbin`
+hook: where that returns a graph already closed on its own sinks, this returns
+the byte source, its rebuild, the multi-output demuxer, and each port's caps and
+`StreamType`, because a `fallbackswitch` has to sit between every port and its
+sink. One restartable byte source feeds one demuxer, and each port gets its own
+decode chain into input 0 of its own switch, its own fallback on input 1, and its
+own automatic sink (`autovideosink`, or `audioconvert ! audioresample !
+autoaudiosink`, the tail that fixes one PCM format for the sink while the
+converters absorb the stream's real channels and rate). A `fallback-uri` is
+probed by the same hooks and its matching port feeds each switch; a kind the
+fallback does not carry falls back to the dummy generator. The switches are named
+after the keyword with the kind appended (`fallbacksrc name=fb` gives `fb-video`
+and `fb-audio`), the sources with the M1164 suffixes on the keyword's own name.
+Hooks are registered for Matroska, MPEG-TS and ISO-BMFF, sharing each container's
+probe with its `playbin` hook. A hook declines a container it does not parse, and
+the fan-out declines a container that does not hold exactly one port per kind, so
+either way the line falls back to the single-stream expansion plus one automatic
+sink. Restart needs nothing new: the demuxer downstream of a rebuilt byte source
+copes with the rebuilt stream, so the main branch is the existing `RestartSrc`
+wrap with a demuxer after it. The rebuild comes from the hook rather than from
+`Registry::uri_source_rebuilder`, because the container's byte source is not what
+the URI's scheme handler builds (for `file://` that handler self-demuxes MP4).
 
 The keyword also keeps its sources alive (M1163). Both the `uri=` and the
 `fallback-uri=` source are wrapped in `RestartSrc` (`g2g-plugins/src/fallbacksrc.rs`),
