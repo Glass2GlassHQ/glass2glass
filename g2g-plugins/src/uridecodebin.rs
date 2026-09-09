@@ -291,22 +291,20 @@ fn byte_source(path: &str, encoding: ByteStreamEncoding) -> Box<dyn DynSourceLoo
     ))
 }
 
-/// The open-ported fan-out of a probed file container (M1168): the byte source,
-/// a rebuild of it (what `RestartSrc` calls when the source dies), the demuxer,
-/// and one port entry per forwardable stream in port order.
+/// The open-ported fan-out of a probed container (M1168): a source of its bytes,
+/// a rebuild of that source (what `RestartSrc` calls when it dies), the demuxer,
+/// and one port entry per forwardable stream in port order. `make` is called once
+/// for the running source and again for every rebuild, so it carries its own URI.
 #[cfg(feature = "std")]
-fn file_fanout(
-    path: &str,
+fn byte_fanout(
+    make: impl Fn() -> Box<dyn DynSourceLoop> + Send + 'static,
     encoding: ByteStreamEncoding,
     demux: Box<dyn DynMultiOutputElement>,
     av: &[(Caps, bool)],
 ) -> UriFanout {
-    let owned = path.to_string();
     UriFanout {
-        source: byte_source(path, encoding),
-        rebuild: Box::new(move || {
-            Ok((byte_source(&owned, encoding), Caps::ByteStream { encoding }))
-        }),
+        source: make(),
+        rebuild: Box::new(move || Ok((make(), Caps::ByteStream { encoding }))),
         demux,
         ports: av
             .iter()
@@ -319,6 +317,18 @@ fn file_fanout(
             })
             .collect(),
     }
+}
+
+/// [`byte_fanout`] over a `file://` container: the path its byte source reads.
+#[cfg(feature = "std")]
+fn file_fanout(
+    path: &str,
+    encoding: ByteStreamEncoding,
+    demux: Box<dyn DynMultiOutputElement>,
+    av: &[(Caps, bool)],
+) -> UriFanout {
+    let owned = path.to_string();
+    byte_fanout(move || byte_source(&owned, encoding), encoding, demux, av)
 }
 
 /// A `file://` Matroska container probed into what every consumer of it needs:
@@ -536,6 +546,57 @@ fn probe_ps(prefix: &[u8]) -> crate::psdemux::PsDemuxer {
     demux
 }
 
+/// A `file://` MPEG program stream probed into what every consumer of it needs:
+/// the path its byte source reads, the parsed demuxer (which also holds the
+/// subpicture substreams and the sequence geometry), and the forwardable streams
+/// in port order.
+#[cfg(feature = "std")]
+struct PsProbe {
+    path: alloc::string::String,
+    header: crate::psdemux::PsDemuxer,
+    infos: Vec<crate::psdemux::PsStreamInfo>,
+}
+
+/// Probe a `file://` URI as an MPEG program stream. `None` for a non-`file://`
+/// URI, an unreadable file, or one whose probe window showed no program stream
+/// packet.
+#[cfg(feature = "std")]
+fn ps_probe(uri: &str) -> Option<PsProbe> {
+    let (path, prefix) = open_file_prefix(uri)?;
+    let header = probe_ps(&prefix);
+    let infos = crate::psdemux::forwardable_streams(&header);
+    if infos.is_empty() {
+        return None;
+    }
+    Some(PsProbe {
+        path,
+        header,
+        infos,
+    })
+}
+
+#[cfg(feature = "std")]
+impl PsProbe {
+    const ENCODING: ByteStreamEncoding = ByteStreamEncoding::MpegPs;
+
+    fn av(&self) -> Vec<(Caps, bool)> {
+        self.infos
+            .iter()
+            .map(|i| (i.caps.clone(), i.video))
+            .collect()
+    }
+
+    fn demux(&self) -> Box<dyn DynMultiOutputElement> {
+        Box::new(crate::psdemux::PsDemuxN::new(
+            self.infos.iter().map(|i| i.stream).collect(),
+        ))
+    }
+
+    fn fanout(&self) -> UriFanout {
+        file_fanout(&self.path, Self::ENCODING, self.demux(), &self.av())
+    }
+}
+
 /// The `playbin uri=X` auto-fan-out hook for MPEG program streams (M929): probe a
 /// `file://` `.mpg` / `.vob`, then assemble `FileSrc -> PsDemuxN -> {decode -> auto
 /// sink}` with one branch per forwardable stream, the program stream sibling of
@@ -546,27 +607,15 @@ fn probe_ps(prefix: &[u8]) -> crate::psdemux::PsDemuxer {
 #[cfg(feature = "std")]
 pub fn ps_playbin(reg: &Registry, uri: &str) -> Result<Option<Graph<GraphNode>>, ParseError> {
     let (uri, cc) = cc_request(uri);
-    let Some((path, prefix)) = open_file_prefix(&uri) else {
+    let Some(probe) = ps_probe(&uri) else {
         return Ok(None);
     };
-    let demux = probe_ps(&prefix);
-    let infos = crate::psdemux::forwardable_streams(&demux);
-    if infos.is_empty() {
-        return Ok(None); // not a program stream (or nothing seen yet): decline
-    }
-    let streams: Vec<_> = infos.iter().map(|i| i.stream).collect();
-    let av: Vec<(Caps, bool)> = infos.iter().map(|i| (i.caps.clone(), i.video)).collect();
-    let source = crate::filesrc::FileSrc::new(
-        &path,
-        Caps::ByteStream {
-            encoding: ByteStreamEncoding::MpegPs,
-        },
-    );
-    if let (Some(cc), Some(video_idx)) = (cc, infos.iter().position(|i| i.video)) {
+    let av = probe.av();
+    if let (Some(cc), Some(video_idx)) = (cc, probe.infos.iter().position(|i| i.video)) {
         return build_cc_overlay(
             reg,
-            Box::new(source),
-            Box::new(crate::psdemux::PsDemuxN::new(streams)),
+            byte_source(&probe.path, PsProbe::ENCODING),
+            probe.demux(),
             &av,
             video_idx,
             cc,
@@ -577,9 +626,11 @@ pub fn ps_playbin(reg: &Registry, uri: &str) -> Result<Option<Graph<GraphNode>>,
     // The canvas needs the video's geometry, which the sequence header gives once
     // a video access unit has parsed; without it (or without a video track) the
     // plain A/V fan-out below plays the disc unsubtitled.
-    if !crate::psdemux::subpicture_streams(&demux).is_empty() && infos.iter().any(|i| i.video) {
-        if let Some(geometry) = demux.sequence() {
-            return build_ps_subpicture_overlay(reg, &path, &infos, geometry).map(Some);
+    if !crate::psdemux::subpicture_streams(&probe.header).is_empty()
+        && probe.infos.iter().any(|i| i.video)
+    {
+        if let Some(geometry) = probe.header.sequence() {
+            return build_ps_subpicture_overlay(reg, &probe.path, &probe.infos, geometry).map(Some);
         }
     }
     // Every video branch carries a `deinterlace mode=auto` (M935), so an
@@ -587,11 +638,20 @@ pub fn ps_playbin(reg: &Registry, uri: &str) -> Result<Option<Graph<GraphNode>>,
     // than the container probe deciding up front (the M932 mechanism).
     build_av_fanout(
         reg,
-        Box::new(source),
-        Box::new(crate::psdemux::PsDemuxN::new(streams)),
+        byte_source(&probe.path, PsProbe::ENCODING),
+        probe.demux(),
         &av,
     )
     .map(Some)
+}
+
+/// The lone-`fallbacksrc` URI fan-out hook for MPEG program streams (M1169), the
+/// open-ported sibling of [`ps_playbin`]. See [`mkv_uri_fanout`]. Subpicture
+/// tracks are left out: there is no overlay on this path.
+#[cfg(feature = "std")]
+pub fn ps_uri_fanout(_reg: &Registry, uri: &str) -> Result<Option<UriFanout>, ParseError> {
+    let (uri, _cc) = cc_request(uri);
+    Ok(ps_probe(&uri).map(|probe| probe.fanout()))
 }
 
 /// Build the DVD subpicture overlay graph (M931): `FileSrc -> PsDemuxN ->
@@ -2130,7 +2190,7 @@ pub fn build_hls_ts_fanout(
 
 /// Assemble the `HlsSrc -> Mp4DemuxN -> {decode -> auto sink}` fan-out for an
 /// fMP4 / CMAF HLS variant (M396), discovering its tracks from the `#EXT-X-MAP`
-/// init segment's `moov` ([`mp4demuxn::forwardable_streams`]). The network-free
+/// init segment's `moov` ([`crate::mp4demuxn::forwardable_streams`]). The network-free
 /// core of the fMP4 branch of [`hls_playbin`], unit-testable on an init segment.
 /// `Ok(None)` (decline) when the init carries no forwardable track.
 ///
@@ -2552,6 +2612,131 @@ fn hls_lang_hints(rest: &str) -> (&str, HlsHints) {
     (url, (audio, subtitle, cc))
 }
 
+/// An `hls://` URI's playlists, fetched and parsed: the origin URL every branch
+/// reads, the master, the variant chosen from it, and that variant's media
+/// playlist (whose `#EXT-X-MAP` says the packaging). Shared by [`hls_playbin`]
+/// and [`hls_uri_fanout`], which differ only in what they build over it.
+#[cfg(feature = "hls")]
+struct HlsPlaylists {
+    source_url: alloc::string::String,
+    media_url: alloc::string::String,
+    master: crate::hls::MasterPlaylist,
+    variant: crate::hls::Variant,
+    media: crate::hls::MediaPlaylist,
+}
+
+/// Fetch and parse the master behind `url_rest` plus its chosen variant's media
+/// playlist. `None` (so the caller declines to the single-stream handler) on a
+/// failed fetch or parse, a URI naming a media playlist rather than a master, or
+/// a master offering no variant. Three blocking fetches: network-coupled,
+/// validated against a live server rather than in CI.
+#[cfg(feature = "hls")]
+fn hls_playlists(url_rest: &str) -> Option<HlsPlaylists> {
+    let source_url = alloc::format!("https://{url_rest}");
+    let master_text = blocking_get_text(&source_url)?;
+    let Ok(crate::hls::Playlist::Master(master)) = crate::hls::parse(&master_text) else {
+        return None;
+    };
+    let variant = master.select(None)?.clone();
+    // The variant's media playlist tells the container: an `#EXT-X-MAP` init
+    // segment means fMP4 / CMAF (fan out via Mp4DemuxN, tracks from the init's
+    // moov), otherwise muxed MPEG-TS (fan out via TsDemuxN, ports from CODECS).
+    let media_url = crate::fetch::resolve_url(&source_url, &variant.uri);
+    let media_text = blocking_get_text(&media_url)?;
+    let Ok(crate::hls::Playlist::Media(media)) = crate::hls::parse(&media_text) else {
+        return None; // a master pointing at a master, or a parse error
+    };
+    Some(HlsPlaylists {
+        source_url,
+        media_url,
+        master,
+        variant,
+        media,
+    })
+}
+
+#[cfg(feature = "hls")]
+impl HlsPlaylists {
+    /// The `#EXT-X-MAP` init segment of an fMP4 / CMAF variant, or `None` for a
+    /// muxed MPEG-TS variant (no map) or a failed fetch.
+    fn init_segment(&self) -> Option<Vec<u8>> {
+        let map = self.media.map_uri.as_ref()?;
+        blocking_get_bytes(&crate::fetch::resolve_url(&self.media_url, map))
+    }
+
+    /// One `HlsSrc` on the master, the demuxer for the chosen variant's
+    /// packaging, and a port per routable stream (M1169). `None` when the
+    /// variant carries no routable stream, or when its fMP4 init segment does
+    /// not fetch. The two packagings are the network-free
+    /// [`hls_fmp4_uri_fanout`] / [`hls_ts_uri_fanout`]; the fetch is here.
+    fn fanout(&self) -> Option<UriFanout> {
+        if self.media.map_uri.is_some() {
+            return hls_fmp4_uri_fanout(&self.source_url, &self.init_segment()?);
+        }
+        let streams = crate::hlssrc::variant_streams(&self.master, &self.variant);
+        hls_ts_uri_fanout(&self.source_url, &streams)
+    }
+}
+
+/// The open-ported fan-out of a muxed MPEG-TS HLS variant (M1169), the
+/// `fallbacksrc` sibling of [`build_hls_ts_fanout`]: one `HlsSrc` on the master
+/// into one `TsDemuxN`, a port per routable muxed stream. Only the variant's own
+/// segments (`uri == None`) are carried; a rendition with its own playlist needs
+/// a second source, which one fan-out cannot hold, so a separate-audio variant
+/// yields the video port alone and the caller falls back to single-stream.
+/// `None` when no muxed stream is routable. Network-free assembly.
+#[cfg(feature = "hls")]
+pub fn hls_ts_uri_fanout(
+    source_url: &str,
+    streams: &[crate::hlssrc::HlsStreamInfo],
+) -> Option<UriFanout> {
+    let mut ts_streams = Vec::new();
+    let mut av = Vec::new();
+    for stream in streams.iter().filter(|s| s.uri.is_none()) {
+        if let Some(ts) = hls_ts_stream(stream) {
+            ts_streams.push(ts);
+            av.push((stream.caps.clone(), stream.video));
+        }
+    }
+    if ts_streams.is_empty() {
+        return None;
+    }
+    let url = source_url.to_string();
+    Some(byte_fanout(
+        move || Box::new(crate::hlssrc::HlsSrc::new(&url)),
+        ByteStreamEncoding::MpegTs,
+        Box::new(crate::tsdemux::TsDemuxN::new(ts_streams)),
+        &av,
+    ))
+}
+
+/// The open-ported fan-out of an fMP4 / CMAF HLS variant (M1169), the
+/// `fallbacksrc` sibling of [`build_hls_fmp4_fanout`]: the tracks come from the
+/// `#EXT-X-MAP` init segment's `moov`. `None` when the init carries no
+/// forwardable track. Network-free assembly, unit-testable on an init segment.
+#[cfg(feature = "hls")]
+pub fn hls_fmp4_uri_fanout(source_url: &str, init: &[u8]) -> Option<UriFanout> {
+    let infos = crate::mp4demuxn::forwardable_streams(init);
+    if infos.is_empty() {
+        return None;
+    }
+    let av: Vec<(Caps, bool)> = infos.iter().map(|i| (i.caps.clone(), i.video)).collect();
+    let ports: Vec<_> = infos
+        .iter()
+        .map(|i| crate::mp4demuxn::Mp4Port {
+            track_id: i.track_id,
+            caps: i.caps.clone(),
+        })
+        .collect();
+    let url = source_url.to_string();
+    Some(byte_fanout(
+        move || Box::new(crate::hlssrc::HlsSrc::new(&url)),
+        ByteStreamEncoding::IsoBmff,
+        Box::new(crate::mp4demuxn::Mp4DemuxN::new(ports)),
+        &av,
+    ))
+}
+
 #[cfg(feature = "hls")]
 pub fn hls_playbin(reg: &Registry, uri: &str) -> Result<Option<Graph<GraphNode>>, ParseError> {
     let Some(parsed) = Uri::parse(uri) else {
@@ -2564,57 +2749,44 @@ pub fn hls_playbin(reg: &Registry, uri: &str) -> Result<Option<Graph<GraphNode>>
     // language preference (HLS URIs have no other place for it); strip it off the
     // playlist URL (M418).
     let (url_rest, (audio_lang, subtitle_lang, cc)) = hls_lang_hints(parsed.rest);
-    let source_url = alloc::format!("https://{url_rest}");
-    // Fetch + parse the master; decline (single-stream fallback) on any failure.
-    let Some(master_text) = blocking_get_text(&source_url) else {
+    let Some(playlists) = hls_playlists(url_rest) else {
         return Ok(None);
     };
-    let Ok(crate::hls::Playlist::Master(master)) = crate::hls::parse(&master_text) else {
-        return Ok(None); // a media playlist or parse error: single-stream handles it
-    };
-    let Some(variant) = master.select(None) else {
-        return Ok(None);
-    };
-    // The variant's media playlist tells the container: an `#EXT-X-MAP` init
-    // segment means fMP4 / CMAF (fan out via Mp4DemuxN, tracks from the init's
-    // moov), otherwise muxed MPEG-TS (fan out via TsDemuxN, ports from CODECS).
-    let media_url = crate::fetch::resolve_url(&source_url, &variant.uri);
-    let Some(media_text) = blocking_get_text(&media_url) else {
-        return Ok(None);
-    };
-    let media = match crate::hls::parse(&media_text) {
-        Ok(crate::hls::Playlist::Media(m)) => m,
-        _ => return Ok(None), // a master pointing at a master, or a parse error
-    };
-    if let Some(map) = &media.map_uri {
-        let init_url = crate::fetch::resolve_url(&media_url, map);
-        let Some(init) = blocking_get_bytes(&init_url) else {
+    let HlsPlaylists {
+        source_url,
+        master,
+        variant,
+        media,
+        ..
+    } = &playlists;
+    if media.map_uri.is_some() {
+        let Some(init) = playlists.init_segment() else {
             return Ok(None);
         };
         // An explicit `#closed-captions=` overlays the in-SEI captions onto the
         // fMP4 video (M436), the HLS analog of the file hooks' caption auto-plug.
         if let Some(cc) = cc {
-            if let Some(g) = build_hls_fmp4_cc_overlay(reg, &source_url, &init, cc)? {
+            if let Some(g) = build_hls_fmp4_cc_overlay(reg, source_url, &init, cc)? {
                 return Ok(Some(g));
             }
         }
-        return build_hls_fmp4_fanout(reg, &source_url, &init);
+        return build_hls_fmp4_fanout(reg, source_url, &init);
     }
-    let streams = crate::hlssrc::variant_streams(&master, variant);
+    let streams = crate::hlssrc::variant_streams(master, variant);
     // Resolve the chosen renditions (M418 language pick): a SUBTITLES WebVTT
     // rendition and/or a separate audio rendition, each absolute and `None` when the
     // variant binds no such group (or the rendition is muxed-in, no own `URI`). The
     // pair decides the graph shape below.
     let subtitle_url = resolve_rendition(
-        &master,
-        &source_url,
+        master,
+        source_url,
         variant.subtitles_group.as_deref(),
         crate::hls::MediaType::Subtitles,
         subtitle_lang.as_deref(),
     );
     let audio_url = resolve_rendition(
-        &master,
-        &source_url,
+        master,
+        source_url,
         variant.audio_group.as_deref(),
         crate::hls::MediaType::Audio,
         audio_lang.as_deref(),
@@ -2628,17 +2800,17 @@ pub fn hls_playbin(reg: &Registry, uri: &str) -> Result<Option<Graph<GraphNode>>
     // rendition.
     if let Some(cc) = cc {
         if let Some(a) = &audio_url {
-            if let Some(g) = build_hls_separate_cc_overlay(reg, &source_url, &streams, a, cc)? {
+            if let Some(g) = build_hls_separate_cc_overlay(reg, source_url, &streams, a, cc)? {
                 return Ok(Some(g));
             }
-        } else if let Some(g) = build_hls_ts_cc_overlay(reg, &source_url, &streams, cc)? {
+        } else if let Some(g) = build_hls_ts_cc_overlay(reg, source_url, &streams, cc)? {
             return Ok(Some(g));
         }
     }
     // Separate audio + SUBTITLES renditions: the three-source overlay, video from
     // the variant's TS, audio + subtitle each its own rendition source (M420).
     if let (Some(a), Some(s)) = (&audio_url, &subtitle_url) {
-        if let Some(g) = build_hls_separate_subtitle_overlay(reg, &source_url, &streams, a, s)? {
+        if let Some(g) = build_hls_separate_subtitle_overlay(reg, source_url, &streams, a, s)? {
             return Ok(Some(g));
         }
     }
@@ -2646,7 +2818,7 @@ pub fn hls_playbin(reg: &Registry, uri: &str) -> Result<Option<Graph<GraphNode>>
     // rendition onto the video (M419, the cross-source join).
     if audio_url.is_none() {
         if let Some(s) = &subtitle_url {
-            if let Some(g) = build_hls_subtitle_overlay(reg, &source_url, &streams, s)? {
+            if let Some(g) = build_hls_subtitle_overlay(reg, source_url, &streams, s)? {
                 return Ok(Some(g));
             }
         }
@@ -2654,9 +2826,30 @@ pub fn hls_playbin(reg: &Registry, uri: &str) -> Result<Option<Graph<GraphNode>>
     // A separate audio rendition (no subtitle): the two-source A/V fan-out, the
     // variant carries video, the audio is a distinct rendition (M397).
     if let Some(a) = &audio_url {
-        return build_hls_separate_fanout(reg, &source_url, &streams, a);
+        return build_hls_separate_fanout(reg, source_url, &streams, a);
     }
-    build_hls_ts_fanout(reg, &source_url, &streams)
+    build_hls_ts_fanout(reg, source_url, &streams)
+}
+
+/// The lone-`fallbacksrc` URI fan-out hook for HLS (M1169), the open-ported
+/// sibling of [`hls_playbin`]: probe the master and carry the chosen variant's
+/// muxed MPEG-TS or fMP4 streams as demux ports, so each gets its own
+/// `fallbackswitch` and sink. Declines (`Ok(None)`) a non-`hls` URI, a failed
+/// probe, and a variant with no routable muxed stream. A separate audio
+/// rendition is left to the single-stream expansion: its audio is a second
+/// playlist, and one fan-out has one source. Rendition-language and
+/// `#closed-captions=` fragments are stripped and ignored, there is no overlay
+/// on this path. Network-coupled, like [`hls_playbin`].
+#[cfg(feature = "hls")]
+pub fn hls_uri_fanout(_reg: &Registry, uri: &str) -> Result<Option<UriFanout>, ParseError> {
+    let Some(parsed) = Uri::parse(uri) else {
+        return Ok(None);
+    };
+    if parsed.scheme != "hls" || parsed.rest.is_empty() {
+        return Ok(None);
+    }
+    let (url_rest, _hints) = hls_lang_hints(parsed.rest);
+    Ok(hls_playlists(url_rest).and_then(|playlists| playlists.fanout()))
 }
 
 #[cfg(all(test, feature = "hls"))]

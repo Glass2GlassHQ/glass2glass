@@ -1547,6 +1547,7 @@ fn register_uri_handlers(reg: &mut Registry) {
     reg.register_uri_fanout(crate::uridecodebin::mkv_uri_fanout);
     reg.register_uri_fanout(crate::uridecodebin::ts_uri_fanout);
     reg.register_uri_fanout(crate::uridecodebin::mp4_uri_fanout);
+    reg.register_uri_fanout(crate::uridecodebin::ps_uri_fanout);
     // Lone-audio-stream files the container hooks decline: Ogg (Opus / FLAC)
     // and elementary audio (`.flac`), M775.
     reg.register_playbin(crate::uridecodebin::audio_playbin);
@@ -1585,6 +1586,7 @@ fn register_uri_handlers(reg: &mut Registry) {
     {
         reg.register_uri(crate::uridecodebin::hls_handler());
         reg.register_playbin(crate::uridecodebin::hls_playbin);
+        reg.register_uri_fanout(crate::uridecodebin::hls_uri_fanout);
     }
     #[cfg(feature = "udp-ingress")]
     reg.register_uri(crate::uridecodebin::udp_handler());

@@ -2614,8 +2614,13 @@ probed by the same hooks and its matching port feeds each switch; a kind the
 fallback does not carry falls back to the dummy generator. The switches are named
 after the keyword with the kind appended (`fallbacksrc name=fb` gives `fb-video`
 and `fb-audio`), the sources with the M1164 suffixes on the keyword's own name.
-Hooks are registered for Matroska, MPEG-TS and ISO-BMFF, sharing each container's
-probe with its `playbin` hook. A hook declines a container it does not parse, and
+Hooks are registered for Matroska, MPEG-TS, ISO-BMFF, MPEG program streams, and
+HLS (M1169), sharing each container's probe with its `playbin` hook. An HLS
+variant fans out through the demuxer its packaging needs, `TsDemuxN` for muxed
+MPEG-TS segments and `Mp4DemuxN` for fMP4 / CMAF, with the tracks read from the
+`#EXT-X-MAP` init segment; a rendition with its own playlist gets no port,
+because one fan-out has one source, so a separate-audio variant reports its video
+alone and the line falls back to single-stream. A hook declines a container it does not parse, and
 the fan-out declines a container that does not hold exactly one port per kind, so
 either way the line falls back to the single-stream expansion plus one automatic
 sink. Restart needs nothing new: the demuxer downstream of a rebuilt byte source

@@ -2,7 +2,9 @@
 //! network probe (`hls_playbin`) is validated live, not in CI; this exercises the
 //! network-free assembly (`build_hls_ts_fanout`) that turns a master variant's
 //! discovered streams into `HlsSrc -> TsDemuxN -> {decode -> auto sink}`, plus the
-//! `variant_streams` rendition discovery that feeds it.
+//! `variant_streams` rendition discovery that feeds it. The M1169 checks at the
+//! bottom cover the open-ported siblings a lone `fallbacksrc uri=hls://...`
+//! builds from the same probe.
 #![cfg(feature = "hls")]
 
 use core::future::Future;
@@ -18,7 +20,8 @@ use g2g_core::{
 use g2g_plugins::hls::{parse, Playlist};
 use g2g_plugins::hlssrc::{variant_streams, HlsStreamInfo};
 use g2g_plugins::uridecodebin::{
-    build_hls_fmp4_fanout, build_hls_separate_fanout, build_hls_ts_fanout,
+    build_hls_fmp4_fanout, build_hls_separate_fanout, build_hls_ts_fanout, hls_fmp4_uri_fanout,
+    hls_ts_uri_fanout,
 };
 
 fn h264_any() -> Caps {
@@ -230,12 +233,10 @@ fn separate_audio_rendition_builds_two_source_chains() {
     assert_eq!(graph.edges().len(), 9);
 }
 
-/// An fMP4 / CMAF HLS variant fans out via `Mp4DemuxN`, its tracks discovered from
-/// the `#EXT-X-MAP` init segment (here a two-track A/V file's ftyp+moov, built by
-/// `Mp4MuxN`). The network-free assembly (`build_hls_fmp4_fanout`) is what the
-/// hook calls after fetching the init.
-#[test]
-fn fmp4_variant_fans_out_via_mp4demuxn() {
+/// The `#EXT-X-MAP` init segment of a two-track (H.264 + AAC) fragmented MP4:
+/// the `ftyp` + `moov` `Mp4MuxN` writes ahead of the first fragment, which is
+/// what an fMP4 HLS variant's tracks are discovered from.
+fn fmp4_init() -> Vec<u8> {
     use g2g_core::frame::{Frame, FrameTiming};
     use g2g_core::memory::{MemoryDomain, SystemSlice};
     use g2g_core::runtime::block_on;
@@ -297,8 +298,7 @@ fn fmp4_variant_fans_out_via_mp4demuxn() {
         au
     }
 
-    // Mux a two-track (H.264 + AAC) fragmented MP4; its ftyp+moov is the init.
-    let init = block_on(async {
+    block_on(async {
         let mut mux = Mp4MuxN::new(2);
         mux.configure_pipeline(0, &h264_any()).unwrap();
         mux.configure_pipeline(
@@ -328,10 +328,16 @@ fn fmp4_variant_fans_out_via_mp4demuxn() {
             .await
             .unwrap();
         sink.bytes
-    });
+    })
+}
 
+/// An fMP4 / CMAF HLS variant fans out via `Mp4DemuxN`, its tracks discovered
+/// from the `#EXT-X-MAP` init segment. The network-free assembly
+/// (`build_hls_fmp4_fanout`) is what the hook calls after fetching the init.
+#[test]
+fn fmp4_variant_fans_out_via_mp4demuxn() {
     let reg = registry();
-    let graph = build_hls_fmp4_fanout(&reg, "https://example.com/master.m3u8", &init)
+    let graph = build_hls_fmp4_fanout(&reg, "https://example.com/master.m3u8", &fmp4_init())
         .expect("fmp4 fan-out builds")
         .expect("two tracks fan out");
     // Audio track goes through the M422+ branch (decoder+convert+resample+sink),
@@ -343,4 +349,88 @@ fn fmp4_variant_fans_out_via_mp4demuxn() {
         "source, demux, video decode+deinterlace+sink, audio decode+convert+resample+sink"
     );
     assert_eq!(graph.edges().len(), 8);
+}
+
+// --- M1169: the open-ported siblings a lone `fallbacksrc uri=hls://...` uses ---
+//
+// These stop at the demuxer instead of closing on sinks, because the caller puts
+// a `fallbackswitch` between each port and its sink. Same probe, same packaging
+// split, so the checks below assert the ports rather than a whole graph.
+
+/// A muxed MPEG-TS variant's streams become one fan-out port each, tagged with
+/// the kind the caller picks that port's switch and sink by.
+#[test]
+fn a_muxed_ts_variant_reports_a_port_per_stream() {
+    let master_text = "#EXTM3U\n\
+        #EXT-X-STREAM-INF:BANDWIDTH=2400000,RESOLUTION=1280x720,CODECS=\"avc1.4d401e,mp4a.40.2\"\n\
+        720p.m3u8\n";
+    let Playlist::Master(master) = parse(master_text).unwrap() else {
+        panic!("expected master");
+    };
+    let streams = variant_streams(&master, &master.variants[0]);
+    let fanout = hls_ts_uri_fanout("https://example.com/master.m3u8", &streams)
+        .expect("a muxed A/V variant fans out");
+    assert_eq!(
+        fanout
+            .ports
+            .iter()
+            .map(|p| p.stream_type)
+            .collect::<Vec<_>>(),
+        vec![StreamType::Video, StreamType::Audio],
+        "one port per muxed stream, in demux port order"
+    );
+    assert_eq!(fanout.ports[0].caps, h264_any());
+    assert_eq!(fanout.ports[1].caps, aac_any());
+}
+
+/// A rendition with its own playlist needs a second source, which one fan-out
+/// cannot hold, so only the variant's own muxed streams get ports: a
+/// separate-audio variant reports video alone and the caller falls back to the
+/// single-stream expansion.
+#[test]
+fn a_separate_audio_rendition_gets_no_port() {
+    let streams = vec![
+        muxed(StreamType::Video, h264_any(), true),
+        HlsStreamInfo {
+            stream_type: StreamType::Audio,
+            caps: aac_any(),
+            video: false,
+            uri: Some("audio/en.m3u8".into()),
+            name: "en".into(),
+            language: Some("en".into()),
+        },
+    ];
+    let fanout = hls_ts_uri_fanout("https://example.com/v.m3u8", &streams)
+        .expect("the muxed video still fans out");
+    assert_eq!(
+        fanout
+            .ports
+            .iter()
+            .map(|p| p.stream_type)
+            .collect::<Vec<_>>(),
+        vec![StreamType::Video],
+        "the rendition's audio is not on the variant's own demuxer"
+    );
+
+    // Nothing muxed at all: no port, so the hook declines outright.
+    assert!(hls_ts_uri_fanout("https://example.com/v.m3u8", &[]).is_none());
+}
+
+/// The fMP4 sibling: the ports come from the `#EXT-X-MAP` init segment's `moov`,
+/// the same tracks `build_hls_fmp4_fanout` decodes.
+#[test]
+fn an_fmp4_variant_reports_a_port_per_track() {
+    let fanout = hls_fmp4_uri_fanout("https://example.com/master.m3u8", &fmp4_init())
+        .expect("a two-track init fans out");
+    assert_eq!(
+        fanout
+            .ports
+            .iter()
+            .map(|p| p.stream_type)
+            .collect::<Vec<_>>(),
+        vec![StreamType::Video, StreamType::Audio]
+    );
+
+    // An init segment with no forwardable track: decline.
+    assert!(hls_fmp4_uri_fanout("https://example.com/master.m3u8", &[]).is_none());
 }
