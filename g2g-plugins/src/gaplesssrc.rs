@@ -240,6 +240,35 @@ impl<'o> ShiftSink<'o> {
     }
 }
 
+/// What the shift rule did to one packet leaving an inner source's run.
+pub(crate) enum Shifted {
+    /// A `DataFrame`, moved onto the outer timeline, whose end time is this.
+    Frame(u64),
+    /// The inner run's `Eos`, swallowed: only its owner ends the outer stream.
+    Swallowed,
+    /// A caps refinement, segment or flush, forwarded unchanged.
+    Passed,
+}
+
+/// Move one packet onto the outer timeline in place, the rule
+/// [`ShiftSink`] and `fallbacksrc`'s multi-output sibling (M1170) share.
+pub(crate) fn shift_packet(packet: &mut Option<PipelinePacket>, offset: u64) -> Shifted {
+    match packet.take().expect("poll_push without a packet") {
+        PipelinePacket::DataFrame(mut f) => {
+            f.timing.pts_ns = f.timing.pts_ns.saturating_add(offset);
+            f.timing.dts_ns = f.timing.dts_ns.saturating_add(offset);
+            let end = f.timing.pts_ns.saturating_add(f.timing.duration_ns);
+            *packet = Some(PipelinePacket::DataFrame(f));
+            Shifted::Frame(end)
+        }
+        PipelinePacket::Eos => Shifted::Swallowed,
+        other => {
+            *packet = Some(other);
+            Shifted::Passed
+        }
+    }
+}
+
 impl OutputSink for ShiftSink<'_> {
     fn begin_push(&mut self) {
         self.shifted = false;
@@ -252,23 +281,15 @@ impl OutputSink for ShiftSink<'_> {
         packet: &mut Option<PipelinePacket>,
     ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
         if !self.shifted {
-            match packet.take().expect("poll_push without a packet") {
-                PipelinePacket::DataFrame(mut f) => {
-                    f.timing.pts_ns = f.timing.pts_ns.saturating_add(self.offset);
-                    f.timing.dts_ns = f.timing.dts_ns.saturating_add(self.offset);
-                    let end = f.timing.pts_ns.saturating_add(f.timing.duration_ns);
+            match shift_packet(packet, self.offset) {
+                Shifted::Frame(end) => {
                     if end > self.max_end {
                         self.max_end = end;
                     }
                     self.frames = self.frames.saturating_add(1);
-                    *packet = Some(PipelinePacket::DataFrame(f));
                 }
-                // Swallow the inner item's EOS: only playlist-end emits a terminal
-                // Eos (from `GaplessSrc::run`).
-                PipelinePacket::Eos => return core::task::Poll::Ready(Ok(PushOutcome::Accepted)),
-                // A per-item caps refinement / segment / flush still reaches the
-                // chain unchanged.
-                other => *packet = Some(other),
+                Shifted::Swallowed => return core::task::Poll::Ready(Ok(PushOutcome::Accepted)),
+                Shifted::Passed => {}
             }
             self.shifted = true;
         }

@@ -1577,6 +1577,9 @@ fn register_uri_handlers(reg: &mut Registry) {
     // `fallbacksrc` restarts (M1163): the wrapper that rebuilds a URI source when
     // it fails, stalls for `restart-timeout`, or ends under `restart-on-eos`.
     reg.register_restart_source(crate::fallbacksrc::restart_source);
+    // The same restart for a fanned-out session (M1170): a dead RTSP stream is
+    // rebuilt with every track back on one timeline.
+    reg.register_restart_fanout_source(crate::fallbacksrc::restart_fanout_source);
     reg.register_primary_stream(crate::uridecodebin::ogg_primary_stream);
     reg.register_primary_stream(crate::uridecodebin::ps_primary_stream);
     reg.register_primary_stream(crate::uridecodebin::avi_primary_stream);
@@ -1597,6 +1600,7 @@ fn register_uri_handlers(reg: &mut Registry) {
     {
         reg.register_uri(crate::uridecodebin::rtsp_handler());
         reg.register_playbin(crate::uridecodebin::rtsp_playbin);
+        reg.register_uri_fanout(crate::uridecodebin::rtsp_uri_fanout);
     }
     #[cfg(all(target_os = "linux", feature = "v4l2"))]
     reg.register_uri(crate::uridecodebin::v4l2_handler());

@@ -68,13 +68,14 @@ use alloc::vec::Vec;
 
 use crate::caps::{Caps, CapsSet};
 use crate::element::DynAsyncElement;
+use crate::fanout::DynMultiOutputSource;
 use crate::graph::{Graph, GraphError, NodeId, PadId};
 use crate::link::LinkPolicy;
 use crate::memory::MemoryDomainKind;
 use crate::property::{PropError, PropValue, PropertySpec, ValueError};
 use crate::runtime::autoplug::{
-    is_raw_audio, is_raw_video, FallbackSourceRole, PadKind, PadRequest, Registry, RestartPolicy,
-    UriError, UriFanout, UriRebuild,
+    is_raw_audio, is_raw_video, FallbackSourceRole, FanoutRebuild, PadKind, PadRequest, Registry,
+    RestartPolicy, UriError, UriFanout, UriFanoutHead, UriRebuild,
 };
 use crate::runtime::parse_scope::ParseScope;
 use crate::runtime::{DynSourceLoop, GraphNode, GraphNodeRef, UnblockHandle};
@@ -1658,6 +1659,21 @@ fn restartable_source(
     }
 }
 
+/// [`restartable_source`] for a session that produces every port itself (M1170).
+fn restartable_fanout_source(
+    registry: &Registry,
+    source: Box<dyn DynMultiOutputSource>,
+    rebuild: FanoutRebuild,
+    policy: RestartPolicy,
+    role: FallbackSourceRole,
+    unblock: Option<UnblockHandle>,
+) -> Box<dyn DynMultiOutputSource> {
+    match registry.restart_fanout_source_hook() {
+        Some(hook) => hook(source, rebuild, policy, role, unblock),
+        None => source,
+    }
+}
+
 /// Everything a `fallbacksrc` keyword's properties say, read once so the
 /// single-stream expansion and the lone-keyword fan-out agree on them.
 struct FallbackSettings<'a> {
@@ -2771,6 +2787,58 @@ fn fallback_kinds(fanout: &UriFanout) -> Option<Vec<FallbackKind>> {
     Some(kinds)
 }
 
+/// Add one fan-out's head to `graph`, restart-wrapped and named `name`, and
+/// answer the pad each port is read off (M1170). A file container's head is a
+/// byte source into a demuxer, so the name goes on the source and the pads come
+/// off the demuxer; a session's head is one multi-output source, so both are the
+/// same node.
+#[allow(clippy::too_many_arguments)]
+fn add_fanout_head(
+    registry: &Registry,
+    graph: &mut Graph<GraphNode>,
+    names: &mut Vec<String>,
+    head: UriFanoutHead,
+    ports: usize,
+    settings: &FallbackSettings<'_>,
+    role: FallbackSourceRole,
+    name: String,
+) -> Result<Vec<PadId>, ParseError> {
+    match head {
+        UriFanoutHead::Demux {
+            source,
+            rebuild,
+            demux,
+        } => {
+            let source = restartable_source(
+                registry,
+                source,
+                rebuild,
+                settings.restart,
+                role,
+                settings.unblock.clone(),
+            );
+            let src = graph.add_source(GraphNodeRef::Source(source));
+            name_node(graph, names, src, name)?;
+            let demux = graph.add_demux(GraphNodeRef::Demux(demux), ports as u8);
+            graph.link(src, demux.input())?;
+            Ok((0..ports).map(|i| demux.out(i as u8)).collect())
+        }
+        UriFanoutHead::FanoutSource { source, rebuild } => {
+            let source = restartable_fanout_source(
+                registry,
+                source,
+                rebuild,
+                settings.restart,
+                role,
+                settings.unblock.clone(),
+            );
+            let src = graph.add_fanout_src(GraphNodeRef::FanoutSource(source), ports as u8);
+            name_node(graph, names, src.node(), name)?;
+            Ok((0..ports).map(|i| src.output(i as u8)).collect())
+        }
+    }
+}
+
 /// Build the per-kind graph of a lone `fallbacksrc uri=X` (M1168): one restartable
 /// byte source into one demuxer, then per demux port a decode chain into input 0
 /// of that kind's `fallbackswitch`, the fallback branch into input 1, and the
@@ -2819,45 +2887,30 @@ fn build_fallbacksrc_fanout(
     let mut graph: Graph<GraphNode> = Graph::new();
     let mut names: Vec<String> = Vec::new();
     let ports = main.ports;
-    let source = restartable_source(
+    let main_pads = add_fanout_head(
         registry,
-        main.source,
-        main.rebuild,
-        settings.restart,
-        FallbackSourceRole::Main,
-        settings.unblock.clone(),
-    );
-    let src = graph.add_source(GraphNodeRef::Source(source));
-    name_node(
         &mut graph,
         &mut names,
-        src,
+        main.head,
+        ports.len(),
+        &settings,
+        FallbackSourceRole::Main,
         alloc::format!("{base}{FALLBACK_MAIN_SOURCE_SUFFIX}"),
     )?;
-    let demux = graph.add_demux(GraphNodeRef::Demux(main.demux), ports.len() as u8);
-    graph.link(src, demux.input())?;
 
     let fallback = match fallback {
         Some(fanout) => {
-            let source = restartable_source(
+            let pads = add_fanout_head(
                 registry,
-                fanout.source,
-                fanout.rebuild,
-                settings.restart,
-                FallbackSourceRole::Fallback,
-                settings.unblock.clone(),
-            );
-            let node = graph.add_source(GraphNodeRef::Source(source));
-            name_node(
                 &mut graph,
                 &mut names,
-                node,
+                fanout.head,
+                fanout.ports.len(),
+                &settings,
+                FallbackSourceRole::Fallback,
                 alloc::format!("{base}{FALLBACK_FALLBACK_SOURCE_SUFFIX}"),
             )?;
-            let ports = fanout.ports;
-            let demux = graph.add_demux(GraphNodeRef::Demux(fanout.demux), ports.len() as u8);
-            graph.link(node, demux.input())?;
-            Some((demux, ports))
+            Some((pads, fanout.ports))
         }
         None => None,
     };
@@ -2880,16 +2933,16 @@ fn build_fallbacksrc_fanout(
         plug_decode(
             registry,
             &mut graph,
-            demux.out(i as u8),
+            main_pads[i],
             switch.input(0),
             &port.caps,
             kind,
         )?;
-        let matching = fallback.as_ref().and_then(|(demux, ports)| {
+        let matching = fallback.as_ref().and_then(|(pads, ports)| {
             ports
                 .iter()
                 .position(|p| p.stream_type == port.stream_type)
-                .map(|j| (demux.out(j as u8), &ports[j].caps))
+                .map(|j| (pads[j], &ports[j].caps))
         });
         match matching {
             Some((pad, caps)) => {

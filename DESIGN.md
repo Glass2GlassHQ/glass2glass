@@ -2605,7 +2605,10 @@ nothing downstream of it can take it. The URI is probed by a
 hook: where that returns a graph already closed on its own sinks, this returns
 the byte source, its rebuild, the multi-output demuxer, and each port's caps and
 `StreamType`, because a `fallbackswitch` has to sit between every port and its
-sink. One restartable byte source feeds one demuxer, and each port gets its own
+sink. What produces the ports is either a restartable byte source feeding one demuxer
+or, for a session protocol, one restartable multi-output source with nothing
+after it (M1170): an RTSP stream's video and audio tracks come off one
+`DESCRIBE`, so there is no byte stream to demux. Each port gets its own
 decode chain into input 0 of its own switch, its own fallback on input 1, and its
 own automatic sink (`autovideosink`, or `audioconvert ! audioresample !
 autoaudiosink`, the tail that fixes one PCM format for the sink while the
@@ -2614,8 +2617,8 @@ probed by the same hooks and its matching port feeds each switch; a kind the
 fallback does not carry falls back to the dummy generator. The switches are named
 after the keyword with the kind appended (`fallbacksrc name=fb` gives `fb-video`
 and `fb-audio`), the sources with the M1164 suffixes on the keyword's own name.
-Hooks are registered for Matroska, MPEG-TS, ISO-BMFF, MPEG program streams, and
-HLS (M1169), sharing each container's probe with its `playbin` hook. An HLS
+Hooks are registered for Matroska, MPEG-TS, ISO-BMFF, MPEG program streams, HLS
+(M1169) and RTSP (M1170), sharing each container's probe with its `playbin` hook. An HLS
 variant fans out through the demuxer its packaging needs, `TsDemuxN` for muxed
 MPEG-TS segments and `Mp4DemuxN` for fMP4 / CMAF, with the tracks read from the
 `#EXT-X-MAP` init segment; a rendition with its own playlist gets no port,
@@ -2623,11 +2626,21 @@ because one fan-out has one source, so a separate-audio variant reports its vide
 alone and the line falls back to single-stream. A hook declines a container it does not parse, and
 the fan-out declines a container that does not hold exactly one port per kind, so
 either way the line falls back to the single-stream expansion plus one automatic
-sink. Restart needs nothing new: the demuxer downstream of a rebuilt byte source
-copes with the rebuilt stream, so the main branch is the existing `RestartSrc`
-wrap with a demuxer after it. The rebuild comes from the hook rather than from
-`Registry::uri_source_rebuilder`, because the container's byte source is not what
-the URI's scheme handler builds (for `file://` that handler self-demuxes MP4).
+sink. A demuxed head needs nothing new for restart: the demuxer downstream of a
+rebuilt byte source copes with the rebuilt stream, so it is the existing
+`RestartSrc` wrap with a demuxer after it. The rebuild comes from the hook rather
+than from `Registry::uri_source_rebuilder`, because the container's byte source
+is not what the URI's scheme handler builds (for `file://` that handler
+self-demuxes MP4). A session head takes `RestartFanoutSrc` instead, the
+multi-output sibling of `RestartSrc`: the same policy over a life that pushes to
+several ports, with one shared timeline offset for all of them, so a rebuilt
+session keeps the alignment its tracks had. The two wrappers share the policy
+state (the timeline offset, the retry tally, the budget arithmetic) and the
+timestamp-shift rule; what differs is that there is no per-port configure to
+repeat, since a multi-output source answers `output_caps` itself, and the
+terminal EOS goes to every port. The port count and each port's caps are read
+once from the first session and answered from there, because between a death and
+the next life there is no inner session to ask.
 
 The keyword also keeps its sources alive (M1163). Both the `uri=` and the
 `fallback-uri=` source are wrapped in `RestartSrc` (`g2g-plugins/src/fallbacksrc.rs`),

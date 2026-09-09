@@ -110,6 +110,66 @@ pub fn rtsp_playbin(reg: &Registry, uri: &str) -> Result<Option<Graph<GraphNode>
     build_rtsp_av_fanout(reg, parsed.raw, &tracks)
 }
 
+/// The lone-`fallbacksrc` URI fan-out hook for RTSP (M1170), the open-ported
+/// sibling of [`rtsp_playbin`]: `DESCRIBE` the stream and, when it carries audio
+/// as well as video, carry both tracks off one session as fan-out ports, so each
+/// gets its own `fallbackswitch` and sink.
+///
+/// The head is the session itself, with no demuxer after it: `RtspSrcN` produces
+/// both tracks, so a restart rebuilds the whole session rather than a byte source
+/// under a demuxer. Declines (`Ok(None)`) a non-`rtsp` URI, an unreachable
+/// server, and a video-only stream (one kind does not fan out), leaving the
+/// single-stream expansion to build the line. Network-coupled: validated against
+/// a live server, not in CI.
+#[cfg(all(feature = "rtsp", feature = "std"))]
+pub fn rtsp_uri_fanout(_reg: &Registry, uri: &str) -> Result<Option<UriFanout>, ParseError> {
+    let Some(parsed) = Uri::parse(uri) else {
+        return Ok(None);
+    };
+    if parsed.scheme != "rtsp" || parsed.rest.is_empty() {
+        return Ok(None);
+    }
+    let Some(tracks) =
+        crate::rtspsrcn::blocking_probe_tracks(parsed.raw, crate::rtspsrcn::DEFAULT_USER_AGENT)
+    else {
+        return Ok(None);
+    };
+    Ok(rtsp_track_fanout(parsed.raw, &tracks))
+}
+
+/// The fan-out of an RTSP stream that carries both tracks (M1170), the
+/// network-free half of [`rtsp_uri_fanout`]: `tracks` comes from a `DESCRIBE`
+/// the caller already did. `None` when the SDP offered no audio, so the port
+/// order matches [`VIDEO_PORT`](crate::rtspsrcn::VIDEO_PORT) /
+/// [`AUDIO_PORT`](crate::rtspsrcn::AUDIO_PORT).
+#[cfg(all(feature = "rtsp", feature = "std"))]
+pub fn rtsp_track_fanout(url: &str, tracks: &crate::rtspsrcn::RtspTracks) -> Option<UriFanout> {
+    use crate::rtspsrcn::{negotiation_audio_caps, RtspSrcN};
+    use g2g_core::fanout::DynMultiOutputSource;
+
+    let audio = tracks.audio.as_ref().map(negotiation_audio_caps)?;
+    let session = {
+        let (url, tracks) = (url.to_string(), tracks.clone());
+        move || Box::new(RtspSrcN::new(&url).with_tracks(&tracks)) as Box<dyn DynMultiOutputSource>
+    };
+    Some(UriFanout {
+        head: UriFanoutHead::FanoutSource {
+            source: session(),
+            rebuild: Box::new(move || Ok(session())),
+        },
+        ports: Vec::from([
+            UriFanoutPort {
+                caps: tracks.video.clone(),
+                stream_type: StreamType::Video,
+            },
+            UriFanoutPort {
+                caps: audio,
+                stream_type: StreamType::Audio,
+            },
+        ]),
+    })
+}
+
 /// `file:///path` -> the source matching what the file's header says it is: an
 /// ISO-BMFF file gets [`Mp4Src`](crate::mp4src::Mp4Src) (which demuxes its H.264
 /// track), anything else a [`FileSrc`](crate::filesrc::FileSrc) declaring the
@@ -206,7 +266,7 @@ use alloc::vec::Vec;
 #[cfg(feature = "std")]
 use g2g_core::runtime::{
     is_raw_audio, is_raw_video, DecodebinError, GraphNode, GraphNodeRef, ParseError, PrimaryStream,
-    Registry, UriFanout, UriFanoutPort,
+    Registry, UriFanout, UriFanoutHead, UriFanoutPort,
 };
 #[cfg(feature = "std")]
 use g2g_core::stream::StreamType;
@@ -303,9 +363,11 @@ fn byte_fanout(
     av: &[(Caps, bool)],
 ) -> UriFanout {
     UriFanout {
-        source: make(),
-        rebuild: Box::new(move || Ok((make(), Caps::ByteStream { encoding }))),
-        demux,
+        head: UriFanoutHead::Demux {
+            source: make(),
+            rebuild: Box::new(move || Ok((make(), Caps::ByteStream { encoding }))),
+            demux,
+        },
         ports: av
             .iter()
             .map(|(caps, video)| UriFanoutPort {

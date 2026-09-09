@@ -422,7 +422,7 @@ mod factory {
     use alloc::string::{String, ToString};
 
     use crate::element::{AsyncElement, DynAsyncElement};
-    use crate::fanout::MultiOutputElement;
+    use crate::fanout::{DynMultiOutputSource, MultiOutputElement};
     use crate::graph::{Graph, GraphError, NodeId, PadId};
     use crate::memory::DomainSet;
     use crate::pad_template::{PadCaps, PadDirection, PadTemplate, PadTemplates};
@@ -1144,24 +1144,52 @@ mod factory {
         pub stream_type: crate::stream::StreamType,
     }
 
-    /// A URI probed into an open-ported fan-out (M1168): the byte source, the
-    /// multi-output demuxer it feeds, and one entry per demux port. The
-    /// open-ported sibling of [`PlaybinHook`], whose graph is already closed on
-    /// its own sinks: a lone `fallbacksrc` needs the ports themselves, because a
-    /// `fallbackswitch` sits between each port and its sink. `rebuild` builds
-    /// another `source` for the same URI, the input [`RestartSourceHook`] needs.
+    /// What produces a [`UriFanout`]'s ports. A file container splits one byte
+    /// stream with a demuxer; a session protocol delivers every track itself
+    /// (M1170). Each carries the rebuild its restart wrapper calls.
+    pub enum UriFanoutHead {
+        /// A byte source feeding a multi-output demuxer, one port per demux
+        /// output. `rebuild` builds another byte source for the same URI, the
+        /// input [`RestartSourceHook`] needs.
+        Demux {
+            source: Box<dyn DynSourceLoop>,
+            rebuild: UriRebuild,
+            demux: Box<dyn DynMultiOutputElement>,
+        },
+        /// A source that produces every port itself, with nothing between it and
+        /// the switches: an RTSP session's video and audio tracks off one
+        /// `DESCRIBE`. `rebuild` is the input [`RestartFanoutSourceHook`] needs.
+        FanoutSource {
+            source: Box<dyn DynMultiOutputSource>,
+            rebuild: FanoutRebuild,
+        },
+    }
+
+    impl core::fmt::Debug for UriFanoutHead {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            match self {
+                Self::Demux { .. } => f.write_str("Demux"),
+                Self::FanoutSource { .. } => f.write_str("FanoutSource"),
+            }
+        }
+    }
+
+    /// A URI probed into an open-ported fan-out (M1168): what produces the ports,
+    /// and one entry per port. The open-ported sibling of [`PlaybinHook`], whose
+    /// graph is already closed on its own sinks: a lone `fallbacksrc` needs the
+    /// ports themselves, because a `fallbackswitch` sits between each port and
+    /// its sink.
     pub struct UriFanout {
-        pub source: Box<dyn DynSourceLoop>,
-        pub rebuild: UriRebuild,
-        pub demux: Box<dyn DynMultiOutputElement>,
+        pub head: UriFanoutHead,
         pub ports: Vec<UriFanoutPort>,
     }
 
     impl core::fmt::Debug for UriFanout {
         fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
             f.debug_struct("UriFanout")
+                .field("head", &self.head)
                 .field("ports", &self.ports)
-                .finish_non_exhaustive()
+                .finish()
         }
     }
 
@@ -1207,6 +1235,28 @@ mod factory {
         role: FallbackSourceRole,
         unblock: Option<UnblockHandle>,
     ) -> Box<dyn DynSourceLoop>;
+
+    /// Builds a fresh multi-output source for one URI each time it is called, the
+    /// rebuild half of [`RestartFanoutSourceHook`] (M1170). Owns its URI so it
+    /// stays `'static`. There are no declared caps alongside it, unlike
+    /// [`UriRebuild`]: a multi-output source answers `output_caps` per port
+    /// itself.
+    pub type FanoutRebuild =
+        Box<dyn Fn() -> Result<Box<dyn DynMultiOutputSource>, UriError> + Send>;
+
+    /// [`RestartSourceHook`] for a multi-output source (M1170): the same policy
+    /// over a session that delivers several tracks, so a dead RTSP session is
+    /// rebuilt with every track back on one timeline. Registered via
+    /// [`Registry::register_restart_fanout_source`]; when none is registered a
+    /// fanned-out session runs unwrapped and a death hands its switches to their
+    /// fallbacks for good.
+    pub type RestartFanoutSourceHook = fn(
+        source: Box<dyn DynMultiOutputSource>,
+        rebuild: FanoutRebuild,
+        policy: RestartPolicy,
+        role: FallbackSourceRole,
+        unblock: Option<UnblockHandle>,
+    ) -> Box<dyn DynMultiOutputSource>;
 
     /// An explicit-demux fan-out hook (M476), the sibling of [`PlaybinHook`] for a
     /// named demux element inside a user-authored line
@@ -1336,6 +1386,10 @@ mod factory {
         /// leaves a `fallbacksrc`'s sources unwrapped: a dead main source stays
         /// dead and the switch holds the fallback.
         restart_source: Option<RestartSourceHook>,
+        /// The `fallbacksrc` restart hook for a fanned-out session (M1170), the
+        /// multi-output sibling of `restart_source`. `None` (the default) leaves a
+        /// fanned-out session unwrapped.
+        restart_fanout_source: Option<RestartFanoutSourceHook>,
         /// The `fallbacksrc` manual-unblock handle (M1166), the release control
         /// each life of a `manual-unblock=true` source waits on. `None` (the
         /// default) makes `manual-unblock=true` a parse error, since nothing
@@ -1514,6 +1568,24 @@ mod factory {
         /// registry; a second call replaces the first. Returns `&mut self`.
         pub fn register_restart_source(&mut self, hook: RestartSourceHook) -> &mut Self {
             self.restart_source = Some(hook);
+            self
+        }
+
+        /// The `fallbacksrc` restart hook for a fanned-out session (M1170), if one
+        /// is registered.
+        pub fn restart_fanout_source_hook(&self) -> Option<RestartFanoutSourceHook> {
+            self.restart_fanout_source
+        }
+
+        /// Register the `fallbacksrc` restart hook for a fanned-out session
+        /// (M1170), the multi-output sibling of
+        /// [`register_restart_source`](Self::register_restart_source). One per
+        /// registry; a second call replaces the first. Returns `&mut self`.
+        pub fn register_restart_fanout_source(
+            &mut self,
+            hook: RestartFanoutSourceHook,
+        ) -> &mut Self {
+            self.restart_fanout_source = Some(hook);
             self
         }
 
@@ -2660,10 +2732,11 @@ mod factory {
 #[cfg(feature = "std")]
 pub use factory::{
     declared_source_caps, AutoplugError, AutoplugParams, DecodebinError, DecodebinSelectHook,
-    DemuxFactory, DemuxSelectHook, ElementDoc, ElementFactory, FanoutSrcFactory, LaunchFactory,
-    MuxerFactory, PlaybinError, PlaybinGraphError, PlaybinHook, PlaybinPort, PrimaryStream,
-    PrimaryStreamHook, PropertyDoc, Registry, RestartPolicy, RestartSourceHook, SourceFactory, Uri,
-    UriError, UriFanout, UriFanoutHook, UriFanoutPort, UriRebuild, UriSourceFactory,
+    DemuxFactory, DemuxSelectHook, ElementDoc, ElementFactory, FanoutRebuild, FanoutSrcFactory,
+    LaunchFactory, MuxerFactory, PlaybinError, PlaybinGraphError, PlaybinHook, PlaybinPort,
+    PrimaryStream, PrimaryStreamHook, PropertyDoc, Registry, RestartFanoutSourceHook,
+    RestartPolicy, RestartSourceHook, SourceFactory, Uri, UriError, UriFanout, UriFanoutHead,
+    UriFanoutHook, UriFanoutPort, UriRebuild, UriSourceFactory,
 };
 
 #[cfg(test)]

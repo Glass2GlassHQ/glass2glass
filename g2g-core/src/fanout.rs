@@ -311,6 +311,12 @@ pub trait MultiOutputSource: ElementBound {
 
     /// See [`set_instance_name`](Self::set_instance_name).
     fn set_log_category(&mut self, _category: alloc::string::String) {}
+
+    /// Receive the run's bus, so a session that restarts itself can report that
+    /// out of band (M1170), mirroring
+    /// [`SourceLoop::set_bus`](crate::runtime::SourceLoop::set_bus). Default:
+    /// ignore.
+    fn set_bus(&mut self, _bus: crate::bus::BusHandle) {}
 }
 
 /// Dyn-safe mirror of [`MultiOutputSource`] (boxed-future `run`), so a terminal
@@ -336,6 +342,8 @@ pub trait DynMultiOutputSource: ElementBound {
     fn set_instance_name(&mut self, _name: alloc::string::String) {}
     /// Dyn-safe mirror of [`MultiOutputSource::set_log_category`].
     fn set_log_category(&mut self, _category: alloc::string::String) {}
+    /// Dyn-safe mirror of [`MultiOutputSource::set_bus`].
+    fn set_bus(&mut self, _bus: crate::bus::BusHandle) {}
 }
 
 impl<T: MultiOutputSource> DynMultiOutputSource for T {
@@ -366,6 +374,9 @@ impl<T: MultiOutputSource> DynMultiOutputSource for T {
     fn set_log_category(&mut self, category: alloc::string::String) {
         MultiOutputSource::set_log_category(self, category)
     }
+    fn set_bus(&mut self, bus: crate::bus::BusHandle) {
+        MultiOutputSource::set_bus(self, bus)
+    }
 }
 
 /// Forwarding impl so a borrowed `&mut dyn DynMultiOutputSource` can be boxed
@@ -388,6 +399,9 @@ impl<'b> DynMultiOutputSource for &'b mut (dyn DynMultiOutputSource + 'b) {
     }
     fn set_log_category(&mut self, category: alloc::string::String) {
         (**self).set_log_category(category)
+    }
+    fn set_bus(&mut self, bus: crate::bus::BusHandle) {
+        (**self).set_bus(bus)
     }
 }
 

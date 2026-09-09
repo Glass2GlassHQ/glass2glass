@@ -325,9 +325,8 @@ unless it says otherwise.
 - **Fallback switching:** a way to hand `fallbacksrc` an application-built source
   element in place of its `uri=`. Carry a container holding several streams of
   one kind (two audio tracks, say) through a fanned-out `fallbacksrc`, which
-  today falls back to the single-stream form. Register a URI fan-out hook for
-  Ogg and RTSP: Ogg needs the several-streams-of-one-kind support above, RTSP a
-  fan-out shape holding one multi-output source with no demuxer after it.
+  today falls back to the single-stream form, which an Ogg fan-out hook needs
+  before it can carry anything.
 ## Python-element host
 
 - Add an explicit plain-text format override for files with no `.txt` extension.
