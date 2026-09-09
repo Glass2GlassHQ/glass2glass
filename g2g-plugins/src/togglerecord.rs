@@ -4,7 +4,10 @@
 //! `sink_%u`/`src_%u` request pads, N in and N out. g2g's graph has no N-in N-out
 //! node kind, so the port is one [`ToggleRecord`] per stream, all sharing a
 //! [`RecordGroup`]: the `group` property (or `RecordGroup::new()` from Rust) is
-//! what a gst request pad is here.
+//! what a gst request pad is here. A `group=` name joins only the elements of
+//! the same `parse_launch` call, so two pipelines picking one name stay apart,
+//! and [`RecordGroup::named`] from outside a parse reaches the group a line
+//! built, which is how an application toggles a text pipeline while it plays.
 //!
 //! The main stream decides. `record=true` moves the group to `Starting`, and the
 //! main forwards nothing until its next keyframe, which opens a recorded span at
@@ -90,9 +93,13 @@ pub struct RecordGroup {
 }
 
 impl RecordGroup {
-    /// The group a `togglerecord group=<name>` launch line joined, created on
-    /// first ask. The only way an application that built its pipeline from text
-    /// can reach the `record` flag.
+    /// The group of that name in the parse running on this thread, or, called
+    /// from outside every parse as an application is, the one the earliest
+    /// parse still holding that name built. Created on first ask.
+    ///
+    /// A running arm owns its element, so this is how an application starts and
+    /// stops a recording its launch line set up. Ask after parsing the line:
+    /// before that nothing holds the name and this makes a group of its own.
     pub fn named(name: &str) -> Arc<Self> {
         named_group(name)
     }
@@ -248,22 +255,44 @@ fn recorded_before(spans: &[(u64, u64)], pts_ns: u64) -> Option<u64> {
     None
 }
 
+/// The parse a `group=` name was read in, and the name.
+type GroupKey = (u64, String);
+
+/// Weak, so a group disappears with its last member.
+type GroupTable = Mutex<HashMap<GroupKey, Weak<RecordGroup>>>;
+
 /// The `group=` name table. A launch factory builds its element from a plain
 /// `fn`, so a name is the only way two elements in a text pipeline can find the
-/// same group. Weak, so a group disappears with its last member.
-fn group_table() -> &'static Mutex<HashMap<String, Weak<RecordGroup>>> {
-    static TABLE: OnceLock<Mutex<HashMap<String, Weak<RecordGroup>>>> = OnceLock::new();
+/// same group. Keyed by the parse as well, so two pipelines that pick the same
+/// name do not join up.
+fn group_table() -> &'static GroupTable {
+    static TABLE: OnceLock<GroupTable> = OnceLock::new();
     TABLE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 fn named_group(name: &str) -> Arc<RecordGroup> {
+    let parse = g2g_core::runtime::current_parse_id();
     let mut table = group_table().lock().unwrap();
     table.retain(|_, weak| weak.strong_count() > 0);
-    if let Some(group) = table.get(name).and_then(Weak::upgrade) {
+    // An application asks from outside every parse and has only the name, so it
+    // reaches whichever parse took that name first. Inside a parse the lookup
+    // never leaves it.
+    let existing = if parse == 0 {
+        table
+            .iter()
+            .filter(|(key, _)| key.1 == name)
+            .min_by_key(|(key, _)| key.0)
+            .and_then(|(_, weak)| weak.upgrade())
+    } else {
+        table
+            .get(&(parse, name.to_string()))
+            .and_then(Weak::upgrade)
+    };
+    if let Some(group) = existing {
         return group;
     }
     let group = RecordGroup::new();
-    table.insert(name.to_string(), Arc::downgrade(&group));
+    table.insert((parse, name.to_string()), Arc::downgrade(&group));
     group
 }
 

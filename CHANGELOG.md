@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1167: a `togglerecord` `group=` name joins only the elements of the same `parse_launch` call, so two pipelines in one process cannot record each other's streams.
 - M1166: `fallbacksrc` takes gst's `manual-unblock`, holding every life of a restarted source until the application releases it through a shared handle.
 - M1165: the message, error and vocabulary enums are `#[non_exhaustive]`, so adding a variant to one stops being a breaking change.
 - M1164: a `fallbacksrc` source posts its status, role and retry tally on the bus, and the keyword names the two sources it builds after itself.

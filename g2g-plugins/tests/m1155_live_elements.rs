@@ -232,16 +232,18 @@ async fn a_launch_line_gates_a_single_stream_on_record() {
 
 #[tokio::test]
 async fn a_named_group_joins_two_branches_of_a_launch_line() {
-    // Held for the whole test: the group is what a `togglerecord group=` element
-    // looks up, and dropping it would let the second run build a fresh one.
-    let group = RecordGroup::named("m1155-branches");
-    group.set_record(true);
-
     let reg = default_registry();
     let line = "videotestsrc num-buffers=4 ! tee name=t \
                 ! queue ! togglerecord group=m1155-branches ! fakesink \
                 t. ! queue ! togglerecord group=m1155-branches main=false ! fakesink";
     let graph = parse_launch(&reg, line).expect("the two-branch group line parses");
+
+    // Held for the whole test: the group is what a `togglerecord group=` element
+    // looks up, and dropping it would let the second run build a fresh one. The
+    // name only reaches the line's group once the line has been parsed.
+    let group = RecordGroup::named("m1155-branches");
+    group.set_record(true);
+
     let stats = run_graph(graph, &ZeroClock, 4).await.expect("runs");
     assert_eq!(
         stats.frames_consumed, 8,

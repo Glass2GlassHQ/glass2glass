@@ -625,7 +625,7 @@ pub mod clock;
 #[cfg(feature = "std")]
 pub mod clocksync;
 // Keyframe-aligned start/stop recording shared across streams. std: the record
-// group is a process-wide named table and secondaries park on a notify.
+// group is a per-parse named table and secondaries park on a notify.
 #[cfg(feature = "std")]
 pub mod togglerecord;
 // Gap filler for a stalling live input (M1155). std: the fill deadline measures

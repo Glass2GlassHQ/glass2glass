@@ -48,6 +48,9 @@ mod launch;
 mod mutate;
 
 #[cfg(feature = "std")]
+mod parse_scope;
+
+#[cfg(feature = "std")]
 mod observe;
 
 #[cfg(feature = "std")]
@@ -171,3 +174,6 @@ pub use launch::{
     fallback_factory, has_live_source, parse_launch, parse_launch_avoiding, ParseError,
     FALLBACK_FALLBACK_SOURCE_SUFFIX, FALLBACK_MAIN_SOURCE_SUFFIX, FALLBACK_SWITCH_NAME,
 };
+
+#[cfg(feature = "std")]
+pub use parse_scope::current_parse_id;

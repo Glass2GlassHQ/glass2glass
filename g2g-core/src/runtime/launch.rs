@@ -76,6 +76,7 @@ use crate::runtime::autoplug::{
     is_raw_audio, is_raw_video, FallbackSourceRole, PadKind, PadRequest, Registry, RestartPolicy,
     UriError,
 };
+use crate::runtime::parse_scope::ParseScope;
 use crate::runtime::{DynSourceLoop, GraphNode, GraphNodeRef, UnblockHandle};
 
 /// Why [`parse_launch`] could not build a graph.
@@ -2459,6 +2460,9 @@ pub fn parse_launch_avoiding(
     pipeline: &str,
     avoided: &[&str],
 ) -> Result<Graph<GraphNode>, ParseError> {
+    // Every element built below, including the ones a playbin hook builds, sees
+    // this one id, and no other parse sees it.
+    let _scope = ParseScope::enter();
     // The parser's own built-ins are not registry factories, but they are
     // element names all the same, so a chain may start on one.
     let knows = |name: &str| {
