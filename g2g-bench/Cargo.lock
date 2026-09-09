@@ -322,7 +322,7 @@ dependencies = [
 
 [[package]]
 name = "g2g-core"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "arc-swap",
  "loom",
@@ -333,7 +333,7 @@ dependencies = [
 
 [[package]]
 name = "g2g-mcu"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "embedded-hal",
  "g2g-core",
@@ -341,7 +341,7 @@ dependencies = [
 
 [[package]]
 name = "g2g-plugins"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "cc",
  "g2g-core",
