@@ -75,7 +75,7 @@ use crate::memory::MemoryDomainKind;
 use crate::property::{PropError, PropValue, PropertySpec, ValueError};
 use crate::runtime::autoplug::{
     is_raw_audio, is_raw_video, FallbackSourceRole, FanoutRebuild, PadKind, PadRequest, Registry,
-    RestartPolicy, UriError, UriFanout, UriFanoutHead, UriRebuild,
+    RestartPolicy, UriError, UriFanout, UriFanoutHead, UriFanoutPort, UriRebuild,
 };
 use crate::runtime::parse_scope::ParseScope;
 use crate::runtime::{DynSourceLoop, GraphNode, GraphNodeRef, UnblockHandle};
@@ -2770,21 +2770,74 @@ fn uri_fanout(registry: &Registry, uri: &str) -> Result<Option<UriFanout>, Parse
     Ok(None)
 }
 
-/// The branch shape per port of a fan-out, or `None` when the ports are not one
-/// per kind: a port whose kind a `fallbacksrc` has no generator for, or two ports
-/// of the same kind (which would need two switches named alike). Either way the
-/// caller falls back to the single-stream expansion.
-fn fallback_kinds(fanout: &UriFanout) -> Option<Vec<FallbackKind>> {
+/// The branch shape per port of a fan-out, or `None` when any port's kind is one
+/// a `fallbacksrc` has no generator and no sink for (text, unclassified), which
+/// leaves the caller the single-stream expansion.
+///
+/// A kind may repeat (M1171): a container carrying two audio tracks gets two
+/// audio branches. `ordinal` is how many earlier ports carried the same kind, so
+/// each switch takes a distinct name and each main port pairs with the matching
+/// fallback port rather than all of them with the first of their kind.
+fn fallback_kinds(fanout: &UriFanout) -> Option<Vec<FanoutBranch>> {
     let mut seen: Vec<StreamType> = Vec::with_capacity(fanout.ports.len());
-    let mut kinds = Vec::with_capacity(fanout.ports.len());
+    let mut branches = Vec::with_capacity(fanout.ports.len());
     for port in &fanout.ports {
-        if seen.contains(&port.stream_type) {
-            return None;
-        }
+        let ordinal = seen.iter().filter(|t| **t == port.stream_type).count();
         seen.push(port.stream_type);
-        kinds.push(fallback_kind(port.stream_type)?);
+        branches.push(FanoutBranch {
+            kind: fallback_kind(port.stream_type)?,
+            ordinal,
+        });
     }
-    Some(kinds)
+    Some(branches)
+}
+
+/// The index of the `ordinal`-th port of `stream_type` in `ports`, or `None`
+/// when there is no such port (M1171).
+fn nth_port_of_kind(
+    ports: &[UriFanoutPort],
+    stream_type: StreamType,
+    ordinal: usize,
+) -> Option<usize> {
+    ports
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| p.stream_type == stream_type)
+        .map(|(i, _)| i)
+        .nth(ordinal)
+}
+
+/// Whether every port in `fallback` has a `main` port of the same kind to feed,
+/// counted per kind so two fallback audio tracks need two main audio tracks.
+fn covers_every_port(main: &[UriFanoutPort], fallback: &[UriFanoutPort]) -> bool {
+    let count = |ports: &[UriFanoutPort], t: StreamType| {
+        ports.iter().filter(|p| p.stream_type == t).count()
+    };
+    fallback
+        .iter()
+        .all(|p| count(fallback, p.stream_type) <= count(main, p.stream_type))
+}
+
+/// One port's branch of a fanned-out `fallbacksrc`: its kind's shape, and which
+/// port of that kind it is (M1171).
+#[derive(Clone, Copy)]
+struct FanoutBranch {
+    kind: FallbackKind,
+    ordinal: usize,
+}
+
+impl FanoutBranch {
+    /// The name of this branch's switch: the keyword's stem plus the kind's
+    /// suffix, and for the second and later port of a kind the ordinal too, so a
+    /// two-audio-track container's switches never collide. The first port of a
+    /// kind keeps the bare suffix, so a single-track container's names are the
+    /// ones M1168 already generated.
+    fn switch_name(&self, base: &str) -> String {
+        match self.ordinal {
+            0 => alloc::format!("{base}{}", self.kind.suffix),
+            n => alloc::format!("{base}{}-{n}", self.kind.suffix),
+        }
+    }
 }
 
 /// Add one fan-out's head to `graph`, restart-wrapped and named `name`, and
@@ -2858,10 +2911,10 @@ fn build_fallbacksrc_fanout(
     let Some(main) = uri_fanout(registry, settings.uri)? else {
         return Ok(None);
     };
-    let Some(kinds) = fallback_kinds(&main) else {
+    let Some(branches) = fallback_kinds(&main) else {
         return Ok(None);
     };
-    if kinds.len() < 2 {
+    if branches.len() < 2 {
         return Ok(None);
     }
     // A `fallbacksrc name=f` names its switches, so `f-video.` resolves to the
@@ -2871,16 +2924,13 @@ fn build_fallbacksrc_fanout(
         .instance
         .clone()
         .unwrap_or_else(|| alloc::format!("{FALLBACK_SWITCH_NAME}-0"));
-    // The fallback fan-out is used only when every port it reports is a kind the
-    // main stream also carries; otherwise a port would have nothing to drain it,
-    // and each kind takes its dummy generator instead.
+    // The fallback fan-out is used only when every port it reports has a main
+    // port to feed; otherwise a port would have nothing to drain it, and the
+    // unmatched branches take their dummy generators instead. Counted per kind,
+    // so a two-audio-track fallback behind a one-audio-track main is refused.
     let fallback = match settings.fallback_uri {
-        Some(uri) => uri_fanout(registry, uri)?.filter(|f| {
-            fallback_kinds(f).is_some()
-                && f.ports
-                    .iter()
-                    .all(|p| main.ports.iter().any(|m| m.stream_type == p.stream_type))
-        }),
+        Some(uri) => uri_fanout(registry, uri)?
+            .filter(|f| fallback_kinds(f).is_some() && covers_every_port(&main.ports, &f.ports)),
         None => None,
     };
 
@@ -2915,7 +2965,8 @@ fn build_fallbacksrc_fanout(
         None => None,
     };
 
-    for (i, (port, kind)) in ports.iter().zip(&kinds).enumerate() {
+    for (i, (port, branch)) in ports.iter().zip(&branches).enumerate() {
+        let kind = &branch.kind;
         let mut switch = registry
             .make_muxer(FALLBACK_SWITCH, FALLBACK_SWITCH_INPUTS)
             .ok_or_else(|| ParseError::NotAMuxer(FALLBACK_SWITCH.to_string()))?;
@@ -2925,7 +2976,7 @@ fn build_fallbacksrc_fanout(
             &mut graph,
             &mut names,
             switch.node(),
-            alloc::format!("{base}{}", kind.suffix),
+            branch.switch_name(&base),
         )?;
         if let Some(category) = &spec.log_category {
             graph.set_node_log_category(switch.node(), category.clone());
@@ -2938,10 +2989,11 @@ fn build_fallbacksrc_fanout(
             &port.caps,
             kind,
         )?;
+        // The k-th main port of a kind pairs with the k-th fallback port of that
+        // kind, so a two-track container's second audio stream backs the second
+        // audio switch rather than every audio switch backing onto the first.
         let matching = fallback.as_ref().and_then(|(pads, ports)| {
-            ports
-                .iter()
-                .position(|p| p.stream_type == port.stream_type)
+            nth_port_of_kind(ports, port.stream_type, branch.ordinal)
                 .map(|j| (pads[j], &ports[j].caps))
         });
         match matching {

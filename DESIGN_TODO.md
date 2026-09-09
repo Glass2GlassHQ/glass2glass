@@ -323,10 +323,7 @@ unless it says otherwise.
   and stop together are one element with request pads instead of several joined
   by a group name.
 - **Fallback switching:** a way to hand `fallbacksrc` an application-built source
-  element in place of its `uri=`. Carry a container holding several streams of
-  one kind (two audio tracks, say) through a fanned-out `fallbacksrc`, which
-  today falls back to the single-stream form, which an Ogg fan-out hook needs
-  before it can carry anything.
+  element in place of its `uri=`.
 ## Python-element host
 
 - Add an explicit plain-text format override for files with no `.txt` extension.

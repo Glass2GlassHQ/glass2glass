@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1171: a fanned-out `fallbacksrc` carries several streams of one kind, so a grouped Ogg file's audio bitstreams each get their own switch and sink.
 - M1170: a lone `fallbacksrc` fans out an RTSP stream's tracks off one session, and restarts a dead session with every track back on one timeline.
 - M1169: a lone `fallbacksrc` fans out an MPEG program stream and an HLS variant, muxed MPEG-TS or fMP4.
 - M1168: a `fallbacksrc` that is the whole pipeline carries every stream kind its container holds, each through its own switch and sink.

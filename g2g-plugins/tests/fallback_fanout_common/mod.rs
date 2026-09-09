@@ -113,6 +113,19 @@ pub(crate) fn compressed_audio(format: AudioFormat) -> Caps {
     }
 }
 
+/// Whether `candidate` is the same media type as `declared`, ignoring the shape
+/// fields a decoder does not constrain: an audio stream's channels and rate, a
+/// compressed video stream's geometry. A real decoder takes those from the
+/// stream, which is what lets it survive a demuxer refining its port's caps
+/// mid-stream; a stub that pinned them would refuse the refinement.
+fn same_media_type(declared: &Caps, candidate: &Caps) -> bool {
+    match (declared, candidate) {
+        (Caps::Audio { format: a, .. }, Caps::Audio { format: b, .. }) => a == b,
+        (Caps::CompressedVideo { codec: a, .. }, Caps::CompressedVideo { codec: b, .. }) => a == b,
+        _ => declared == candidate,
+    }
+}
+
 /// A stand-in for a decoder: it re-types its input to the raw caps the branch has
 /// to reach and answers each access unit with one blank raw buffer of that shape,
 /// so the fan-out runs, and its converters work, without a decoder feature
@@ -144,10 +157,13 @@ impl AsyncElement for StubDecode {
         Ok(self.output.clone())
     }
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
-        CapsConstraint::Mapping(Vec::from([(
-            CapsSet::one(self.input.clone()),
-            CapsSet::one(self.output.clone()),
-        )]))
+        let (input, output) = (self.input.clone(), self.output.clone());
+        CapsConstraint::DerivedOutput(Box::new(move |candidate: &Caps| {
+            match same_media_type(&input, candidate) {
+                true => CapsSet::one(output.clone()),
+                false => CapsSet::from_alternatives(Vec::new()),
+            }
+        }))
     }
     fn configure_pipeline(&mut self, _caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         self.configured = true;

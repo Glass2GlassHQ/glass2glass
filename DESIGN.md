@@ -2617,16 +2617,23 @@ probed by the same hooks and its matching port feeds each switch; a kind the
 fallback does not carry falls back to the dummy generator. The switches are named
 after the keyword with the kind appended (`fallbacksrc name=fb` gives `fb-video`
 and `fb-audio`), the sources with the M1164 suffixes on the keyword's own name.
+A kind may repeat (M1171): a container carrying two audio tracks gets two audio
+branches, and the second and later port of a kind takes its ordinal too
+(`fb-audio-1`), so a one-track container's names are unchanged. Each main port
+pairs with the fallback port of the same ordinal, so the second audio track backs
+the second audio switch rather than every audio switch backing onto the first.
 Hooks are registered for Matroska, MPEG-TS, ISO-BMFF, MPEG program streams, HLS
-(M1169) and RTSP (M1170), sharing each container's probe with its `playbin` hook. An HLS
+(M1169), RTSP (M1170) and Ogg (M1171), sharing each container's probe with its
+`playbin` hook. Ogg is what needs the repeated kind: every Ogg mapping g2g reads
+is audio, so a grouped file's ports are all audio ports. An HLS
 variant fans out through the demuxer its packaging needs, `TsDemuxN` for muxed
 MPEG-TS segments and `Mp4DemuxN` for fMP4 / CMAF, with the tracks read from the
 `#EXT-X-MAP` init segment; a rendition with its own playlist gets no port,
 because one fan-out has one source, so a separate-audio variant reports its video
 alone and the line falls back to single-stream. A hook declines a container it does not parse, and
-the fan-out declines a container that does not hold exactly one port per kind, so
-either way the line falls back to the single-stream expansion plus one automatic
-sink. A demuxed head needs nothing new for restart: the demuxer downstream of a
+the fan-out declines one whose ports are fewer than two or include a kind it has
+no generator and no sink for, so either way the line falls back to the
+single-stream expansion plus one automatic sink. A demuxed head needs nothing new for restart: the demuxer downstream of a
 rebuilt byte source copes with the rebuilt stream, so it is the existing
 `RestartSrc` wrap with a demuxer after it. The rebuild comes from the hook rather
 than from `Registry::uri_source_rebuilder`, because the container's byte source

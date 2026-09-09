@@ -1548,6 +1548,9 @@ fn register_uri_handlers(reg: &mut Registry) {
     reg.register_uri_fanout(crate::uridecodebin::ts_uri_fanout);
     reg.register_uri_fanout(crate::uridecodebin::mp4_uri_fanout);
     reg.register_uri_fanout(crate::uridecodebin::ps_uri_fanout);
+    // Ogg last: it is the only all-audio container here, so it claims a URI the
+    // A/V hooks above declined (M1171).
+    reg.register_uri_fanout(crate::uridecodebin::ogg_uri_fanout);
     // Lone-audio-stream files the container hooks decline: Ogg (Opus / FLAC)
     // and elementary audio (`.flac`), M775.
     reg.register_playbin(crate::uridecodebin::audio_playbin);
