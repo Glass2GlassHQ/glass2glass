@@ -139,7 +139,9 @@ The type tiers above translate to per-crate promises:
   `cargo semver-checks` reads the bump as already covering everything and stops
   reporting, so `api-breaks-since-release.txt` records each break against the last
   released version instead, checked in CI and regenerated with
-  `tools/api-breaks.sh record`.
+  `tools/api-breaks.sh record`. Publishing empties it, since the breaks it lists
+  are now in the released version, so regenerating it is the last step of a
+  release: skip it and the next push fails the gate.
 - **Feature flags** are additive and not part of the semver contract; enabling one
   may pull in `std` / OS deps. Default (`no_std + alloc`) is the stable baseline.
 - **MSRV.** Split, because the two audiences are not the same. The embedded-facing
