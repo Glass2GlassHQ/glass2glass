@@ -167,6 +167,13 @@ pub enum ParseError {
     /// no [`UnblockHandle`](crate::runtime::UnblockHandle): nothing could ever
     /// release the source, so the pipeline would deliver nothing.
     MissingUnblockHandle(String),
+    /// A `togglerecord` request-pad reference has no partner: a stream through it
+    /// needs both its `sink_N` and its `src_N`.
+    UnpairedRequestPad { element: String, pad: String },
+    /// A `togglerecord` reference named no request pad, or named stream 0. The
+    /// pads are paired, so the stream index has to be explicit, and stream 0 is
+    /// the inline keyword's own chain.
+    BadRequestPad { element: String, pad: String },
 }
 
 impl From<GraphError> for ParseError {
@@ -225,6 +232,18 @@ impl core::fmt::Display for ParseError {
                     write!(f, " (a flag set joins nicks with '+', e.g. video+audio)")?;
                 }
                 Ok(())
+            }
+            ParseError::UnpairedRequestPad { element, pad } => {
+                write!(
+                    f,
+                    "{element}.{pad}: a stream needs both its sink_N and its src_N"
+                )
+            }
+            ParseError::BadRequestPad { element, pad } => {
+                write!(
+                    f,
+                    "{element}.{pad}: name a request pad as sink_N / src_N with N above 0 (stream 0 is the inline {TOGGLERECORD} itself)"
+                )
             }
             ParseError::UnknownReference(n) => {
                 write!(f, "reference to undeclared element name: {n}")
@@ -1260,6 +1279,186 @@ fn pin_on_converter(specs: &mut Vec<ElementSpec>, element: &str, key: &str, valu
     }
 }
 
+/// The stream index a `togglerecord` request pad names, and which side it is.
+/// `None` for a pad that is not a request pad at all.
+fn request_pad(pad: &str) -> Option<(bool, usize)> {
+    for (prefix, is_sink) in [(TOGGLERECORD_SINK_PAD, true), (TOGGLERECORD_SRC_PAD, false)] {
+        if let Some(index) = pad.strip_prefix(prefix) {
+            return index.parse().ok().map(|i| (is_sink, i));
+        }
+    }
+    None
+}
+
+/// The instance names of the `togglerecord` keywords a line declared, in
+/// appearance order. An unnamed one cannot be referenced, so it stays the
+/// single-stream element it already is.
+fn named_togglerecords(chains: &[Chain]) -> Vec<String> {
+    let mut names = Vec::new();
+    for chain in chains {
+        for item in chain {
+            if let Item::Element(spec) = item {
+                if spec.name == TOGGLERECORD {
+                    if let Some(instance) = &spec.instance {
+                        names.push(instance.clone());
+                    }
+                }
+            }
+        }
+    }
+    names
+}
+
+/// The name the expansion gives the element carrying stream `index` of the
+/// `togglerecord` named `base`. Stream 0 is the inline keyword itself, which
+/// keeps the name the line gave it.
+fn togglerecord_stream_name(base: &str, index: usize) -> String {
+    alloc::format!("{base}-{index}")
+}
+
+/// One secondary stream's element: the same keyword in the same group, not the
+/// main stream.
+fn togglerecord_secondary(
+    base: &str,
+    group: &str,
+    index: usize,
+    log_category: Option<&str>,
+) -> ElementSpec {
+    ElementSpec {
+        name: TOGGLERECORD.to_string(),
+        props: alloc::vec![
+            (TOGGLERECORD_GROUP_PROP.to_string(), group.to_string()),
+            (TOGGLERECORD_MAIN_PROP.to_string(), "false".to_string()),
+        ],
+        instance: Some(togglerecord_stream_name(base, index)),
+        log_category: log_category.map(|c| c.to_string()),
+    }
+}
+
+/// `togglerecord name=t` with request pads (M1172): gst spells several streams
+/// that start and stop together as one element with `sink_%u` / `src_%u` pad
+/// pairs. Here that is one `ToggleRecord` per stream sharing one group, built by
+/// rewriting the references, so the graph holds plain 1-in 1-out transforms the
+/// way every other g2g bin flattens.
+///
+/// The inline keyword is stream 0, the main stream whose keyframes decide. Each
+/// `t.sink_K` tail reference becomes a secondary element in that chain, and the
+/// matching `t.src_K` head reference becomes a reference to it. The group is the
+/// keyword's own `name=` unless the line set `group=` itself.
+///
+/// A reference with no partner, or one naming no request pad, is a parse error:
+/// the pads are paired, so an unpaired one would leave a stream with one end
+/// dangling.
+fn expand_togglerecord(chains: Vec<Chain>) -> Result<Vec<Chain>, ParseError> {
+    let bases = named_togglerecords(&chains);
+    if bases.is_empty() {
+        return Ok(chains);
+    }
+    let mut chains = chains;
+    for base in bases {
+        // What the group is called, and the spec the secondaries copy their log
+        // category from.
+        let mut group = base.clone();
+        // The keyword's own log category, which its secondaries inherit.
+        let mut log_category: Option<String> = None;
+        let mut declared = false;
+        for chain in &chains {
+            for item in chain {
+                if let Item::Element(spec) = item {
+                    if spec.name == TOGGLERECORD && spec.instance.as_deref() == Some(&base) {
+                        if let Some((_, value)) = spec
+                            .props
+                            .iter()
+                            .find(|(k, _)| k == TOGGLERECORD_GROUP_PROP)
+                        {
+                            group = value.clone();
+                        }
+                        log_category = spec.log_category.clone();
+                        declared = true;
+                    }
+                }
+            }
+        }
+        if !declared {
+            continue;
+        }
+
+        // Every request pad the line references, checked in pairs before
+        // anything is rewritten.
+        let (mut sinks, mut srcs): (Vec<usize>, Vec<usize>) = (Vec::new(), Vec::new());
+        for chain in &chains {
+            for item in chain {
+                let Item::Ref { name, pad } = item else {
+                    continue;
+                };
+                if name != &base {
+                    continue;
+                }
+                match request_pad(pad) {
+                    Some((true, index)) if index > 0 => sinks.push(index),
+                    Some((false, index)) if index > 0 => srcs.push(index),
+                    _ => {
+                        return Err(ParseError::BadRequestPad {
+                            element: base.clone(),
+                            pad: pad.clone(),
+                        })
+                    }
+                }
+            }
+        }
+        for (side, other) in [(&sinks, &srcs), (&srcs, &sinks)] {
+            if let Some(index) = side.iter().find(|i| !other.contains(i)) {
+                let pad = match core::ptr::eq(side, &sinks) {
+                    true => alloc::format!("{TOGGLERECORD_SINK_PAD}{index}"),
+                    false => alloc::format!("{TOGGLERECORD_SRC_PAD}{index}"),
+                };
+                return Err(ParseError::UnpairedRequestPad {
+                    element: base.clone(),
+                    pad,
+                });
+            }
+        }
+        if sinks.is_empty() {
+            continue; // a named `togglerecord` nobody referenced: one stream
+        }
+
+        // Rewrite: the inline keyword joins the group, each `sink_K` becomes the
+        // secondary element itself, and each `src_K` becomes a reference to it.
+        for chain in &mut chains {
+            for item in chain.iter_mut() {
+                match item {
+                    Item::Element(spec)
+                        if spec.name == TOGGLERECORD && spec.instance.as_deref() == Some(&base) =>
+                    {
+                        if !spec.props.iter().any(|(k, _)| k == TOGGLERECORD_GROUP_PROP) {
+                            spec.props
+                                .push((TOGGLERECORD_GROUP_PROP.to_string(), group.clone()));
+                        }
+                    }
+                    Item::Ref { name, pad } if name == &base => {
+                        // Checked above, so the pad is a request pad above zero.
+                        let (is_sink, index) = request_pad(pad).expect("checked request pad");
+                        *item = match is_sink {
+                            true => Item::Element(togglerecord_secondary(
+                                &base,
+                                &group,
+                                index,
+                                log_category.as_deref(),
+                            )),
+                            false => Item::Ref {
+                                name: togglerecord_stream_name(&base, index),
+                                pad: String::new(),
+                            },
+                        };
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    Ok(chains)
+}
+
 /// `transcodebin`: decode whatever arrives and re-encode it to a profile, which
 /// is exactly `decodebin ! encodebin profile=...`. Rewritten into those two
 /// macros before either expands, so it inherits both behaviours (and both error
@@ -1512,6 +1711,20 @@ const FALLBACKSRC_PROPS: &[&str] = &[
 /// after `retry-timeout` of failures.
 const FALLBACK_RESTART_TIMEOUT_NS: u64 = 5_000_000_000;
 const FALLBACK_RETRY_TIMEOUT_NS: u64 = 60_000_000_000;
+
+/// The launch keyword whose `sink_%u` / `src_%u` request pads expand into one
+/// element per stream, all joined by a shared group (M1172).
+const TOGGLERECORD: &str = "togglerecord";
+
+/// The properties the expansion writes on the elements it builds: the group that
+/// joins them, and which of them is the stream whose keyframes decide.
+const TOGGLERECORD_GROUP_PROP: &str = "group";
+const TOGGLERECORD_MAIN_PROP: &str = "main";
+
+/// Request-pad prefixes on a `togglerecord` reference: the input a stream enters
+/// by and the output it leaves by.
+const TOGGLERECORD_SINK_PAD: &str = "sink_";
+const TOGGLERECORD_SRC_PAD: &str = "src_";
 
 /// The switch a `fallbacksrc` expands around, and the input its fallback branch
 /// links to (input 0 is the main URI, so the fallback is input 1).
@@ -2008,6 +2221,7 @@ fn build_graph(
     // Expand the source-providing (uridecodebin / playbin) and mid-chain
     // (decodebin) macros into concrete nodes before the structural build, so the
     // rest of the builder sees only real elements and pre-built nodes.
+    let chains = expand_togglerecord(chains)?;
     let chains = expand_transcodebin(chains);
     let chains = expand_uri_sources(registry, chains, avoided)?;
     let chains = expand_decodebin(registry, chains, avoided)?;
