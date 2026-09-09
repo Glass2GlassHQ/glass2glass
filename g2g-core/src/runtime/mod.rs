@@ -50,6 +50,9 @@ mod mutate;
 #[cfg(feature = "std")]
 mod observe;
 
+#[cfg(feature = "std")]
+mod unblock;
+
 pub use autoplug::{
     find_chain, find_chain_preferring, find_chain_with, is_raw_audio, is_raw_video, Acceleration,
     CapabilityDescriptor, ChainLink, ElementDesc, EncoderChoice, EncoderProvider, MuxerProvider,
@@ -105,6 +108,9 @@ pub use fanin::{
 
 #[cfg(feature = "std")]
 pub use gapless::{GaplessController, GaplessInstantWait, GaplessWait};
+
+#[cfg(feature = "std")]
+pub use unblock::{UnblockHandle, UnblockWait};
 
 #[cfg(feature = "std")]
 pub use graph_runner::{

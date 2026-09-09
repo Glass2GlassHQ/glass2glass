@@ -430,6 +430,7 @@ mod factory {
     use crate::runtime::launch::ParseError;
     use crate::runtime::{
         DynMultiInputElement, DynMultiOutputElement, DynSourceLoop, GraphNode, GraphNodeRef,
+        UnblockHandle,
     };
 
     /// Structured, owned introspection of one registered element: the same facts
@@ -1159,14 +1160,16 @@ mod factory {
     /// Wraps a URI source in one that rebuilds it with `rebuild` under `policy`
     /// when it fails, stalls, or (under `restart_on_eos`) ends (M1163). Registered
     /// via [`Registry::register_restart_source`]; when none is registered a
-    /// `fallbacksrc` runs its sources unwrapped, as before. A plain `fn` pointer
-    /// for the same reason as [`PlaybinHook`]; cross-crate because the restart
-    /// delay needs a timer core does not have.
+    /// `fallbacksrc` runs its sources unwrapped, as before. `unblock`, when set,
+    /// is the handle each life waits on before it delivers (M1166). A plain `fn`
+    /// pointer for the same reason as [`PlaybinHook`]; cross-crate because the
+    /// restart delay needs a timer core does not have.
     pub type RestartSourceHook = fn(
         source: Box<dyn DynSourceLoop>,
         rebuild: UriRebuild,
         policy: RestartPolicy,
         role: FallbackSourceRole,
+        unblock: Option<UnblockHandle>,
     ) -> Box<dyn DynSourceLoop>;
 
     /// An explicit-demux fan-out hook (M476), the sibling of [`PlaybinHook`] for a
@@ -1292,6 +1295,11 @@ mod factory {
         /// leaves a `fallbacksrc`'s sources unwrapped: a dead main source stays
         /// dead and the switch holds the fallback.
         restart_source: Option<RestartSourceHook>,
+        /// The `fallbacksrc` manual-unblock handle (M1166), the release control
+        /// each life of a `manual-unblock=true` source waits on. `None` (the
+        /// default) makes `manual-unblock=true` a parse error, since nothing
+        /// could release the source.
+        unblock: Option<UnblockHandle>,
         /// Bare-`decodebin` primary-stream hooks (M746): a `filesrc location=X !
         /// decodebin` on a container tries each until one sniffs the file and names
         /// the single-stream demux + stream selection for its primary decodable
@@ -1448,6 +1456,20 @@ mod factory {
         /// registry; a second call replaces the first. Returns `&mut self`.
         pub fn register_restart_source(&mut self, hook: RestartSourceHook) -> &mut Self {
             self.restart_source = Some(hook);
+            self
+        }
+
+        /// The `fallbacksrc` manual-unblock handle (M1166), if one is registered.
+        pub fn unblock_handle(&self) -> Option<UnblockHandle> {
+            self.unblock.clone()
+        }
+
+        /// Register the `fallbacksrc` manual-unblock handle (M1166): the release
+        /// control every life of a `manual-unblock=true` source waits on, stored
+        /// as a clone so the application keeps its own. One per registry; a
+        /// second call replaces the first. Returns `&mut self`.
+        pub fn register_unblock_handle(&mut self, handle: &UnblockHandle) -> &mut Self {
+            self.unblock = Some(handle.clone());
             self
         }
 

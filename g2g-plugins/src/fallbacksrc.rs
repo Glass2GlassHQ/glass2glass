@@ -11,6 +11,10 @@
 //! `fallbacksrc uri=X` launch keyword wraps both its main and its `fallback-uri`
 //! source with it.
 //!
+//! With an [`UnblockHandle`] set (M1166, gst's
+//! `manual-unblock`), each life waits for the application to release it before
+//! it delivers anything, and the wait re-arms on every restart.
+//!
 //! Semantics follow gst's `fallbacksrc`: a fixed one-second pause before a
 //! rebuild, `restart-timeout` as a stall timer on the running source, and
 //! `retry-timeout` as the budget for repeated failure, measured from the first
@@ -38,8 +42,8 @@ use g2g_core::log::{short_type_name, LogName, LogSource};
 use g2g_core::memory::{DomainSet, MemoryDomainKind};
 use g2g_core::query::LatencyReport;
 use g2g_core::runtime::{
-    select2, DynSourceLoop, Either, FallbackSourceRole, RestartPolicy, SourceLoop, UriError,
-    UriRebuild,
+    select2, DynSourceLoop, Either, FallbackSourceRole, RestartPolicy, SourceLoop, UnblockHandle,
+    UriError, UriRebuild,
 };
 use g2g_core::{
     g2g_info, g2g_warn, BusHandle, BusMessage, Caps, ConfigureOutcome, G2gError, OutputSink,
@@ -58,8 +62,13 @@ pub fn restart_source(
     rebuild: UriRebuild,
     policy: RestartPolicy,
     role: FallbackSourceRole,
+    unblock: Option<UnblockHandle>,
 ) -> Box<dyn DynSourceLoop> {
-    Box::new(RestartSrc::new(source, rebuild, policy, Some(role)))
+    let wrapper = RestartSrc::new(source, rebuild, policy, Some(role));
+    Box::new(match unblock {
+        Some(handle) => wrapper.with_unblock_handle(handle),
+        None => wrapper,
+    })
 }
 
 /// A source that rebuilds the URI source it wraps when that source dies. See the
@@ -76,6 +85,9 @@ pub struct RestartSrc {
     /// Which `fallbacksrc` source this is, for the bus report. `None` when it was
     /// built directly rather than by the launch keyword.
     role: Option<FallbackSourceRole>,
+    /// The application's release control (M1166): with one set, every life waits
+    /// for an `unblock` before it delivers.
+    unblock: Option<UnblockHandle>,
     bus: Option<BusHandle>,
     log_name: LogName,
 }
@@ -87,6 +99,7 @@ impl fmt::Debug for RestartSrc {
             .field("policy", &self.policy)
             .field("caps", &self.caps)
             .field("role", &self.role)
+            .field("manual_unblock", &self.unblock.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -104,9 +117,18 @@ impl RestartSrc {
             policy,
             caps: None,
             role,
+            unblock: None,
             bus: None,
             log_name: LogName::new(),
         }
+    }
+
+    /// Hold every life until the application releases it through `handle`
+    /// (M1166, gst's `manual-unblock`). The handle re-arms, so a restarted
+    /// source waits again.
+    pub fn with_unblock_handle(mut self, handle: UnblockHandle) -> Self {
+        self.unblock = Some(handle);
+        self
     }
 
     /// Report this source's state to the application, dropping the message when
@@ -322,6 +344,9 @@ impl SourceLoop for RestartSrc {
                 let death = match source {
                     Err(death) => death,
                     Ok(mut source) => {
+                        if let Some(unblock) = &self.unblock {
+                            unblock.wait_release().await;
+                        }
                         self.report(SourceRestartStatus::Running, retries, None);
                         let activity = Cell::new(Activity {
                             last: Instant::now(),

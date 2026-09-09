@@ -2621,6 +2621,18 @@ runner gave the wrapper at startup, since a source arm cannot renegotiate the
 decode chain below it mid-run; a source that refuses them counts as a failed
 attempt.
 
+`manual-unblock=true` (M1166) holds every life, the first included, until the
+application releases it, where gst blocks the restarted source's pads. gst
+releases through an `unblock` action signal; g2g has no signals, so the release
+is an `UnblockHandle` (`g2g-core/src/runtime/unblock.rs`), the app-holds /
+source-holds-a-clone shape `GaplessController` already uses, registered on the
+`Registry` and passed to the wrapper by the expansion. One `unblock` frees one
+life and the handle re-arms, so an application releases again after every
+restart; a held life delivers nothing and does not report itself `Running`. Both
+the `uri=` and the `fallback-uri=` source take the handle, since either can be
+the one that restarted. `manual-unblock=true` without a registered handle is a
+parse error rather than a pipeline nothing could ever release.
+
 What gst exposes as `fallbacksrc`'s read-only `status` and `statistics`
 properties, g2g posts on the bus as `BusMessage::SourceRestart`: a source arm
 owns its element for the whole run, so nothing can read a property off it

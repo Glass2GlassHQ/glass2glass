@@ -282,12 +282,12 @@ fn fallbacksrc_rejects_a_property_it_does_not_have() {
     assert_eq!(
         parse_launch(
             &reg,
-            "fallbacksrc uri=file:///x.pnm manual-unblock=true ! fakesink"
+            "fallbacksrc uri=file:///x.pnm no-such-property=true ! fakesink"
         )
         .unwrap_err(),
         ParseError::UnknownProperty {
             element: "fallbacksrc".to_string(),
-            key: "manual-unblock".to_string(),
+            key: "no-such-property".to_string(),
         }
     );
 }

@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1166: `fallbacksrc` takes gst's `manual-unblock`, holding every life of a restarted source until the application releases it through a shared handle.
 - M1165: the message, error and vocabulary enums are `#[non_exhaustive]`, so adding a variant to one stops being a breaking change.
 - M1164: a `fallbacksrc` source posts its status, role and retry tally on the bus, and the keyword names the two sources it builds after itself.
 - M1163: `fallbacksrc` rebuilds a dead main or fallback source, with gst's `restart-on-eos`, `restart-timeout` and `retry-timeout`.

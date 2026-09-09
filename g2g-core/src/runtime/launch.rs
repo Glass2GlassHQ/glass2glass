@@ -76,7 +76,7 @@ use crate::runtime::autoplug::{
     is_raw_audio, is_raw_video, FallbackSourceRole, PadKind, PadRequest, Registry, RestartPolicy,
     UriError,
 };
-use crate::runtime::{DynSourceLoop, GraphNode, GraphNodeRef};
+use crate::runtime::{DynSourceLoop, GraphNode, GraphNodeRef, UnblockHandle};
 
 /// Why [`parse_launch`] could not build a graph.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -160,6 +160,10 @@ pub enum ParseError {
     Uri(String),
     /// Linking two nodes into the graph failed.
     Graph(GraphError),
+    /// A `fallbacksrc` asked for `manual-unblock=true`, but the registry carries
+    /// no [`UnblockHandle`](crate::runtime::UnblockHandle): nothing could ever
+    /// release the source, so the pipeline would deliver nothing.
+    MissingUnblockHandle(String),
 }
 
 impl From<GraphError> for ParseError {
@@ -265,6 +269,10 @@ impl core::fmt::Display for ParseError {
             ParseError::MissingUri(n) => write!(f, "{n}: missing required 'uri=' property"),
             ParseError::Uri(msg) => write!(f, "uri error: {msg}"),
             ParseError::Graph(e) => write!(f, "graph link error: {e:?}"),
+            ParseError::MissingUnblockHandle(n) => write!(
+                f,
+                "{n}: manual-unblock=true needs an UnblockHandle on the registry (Registry::register_unblock_handle), or nothing can release the source"
+            ),
         }
     }
 }
@@ -1493,6 +1501,7 @@ const FALLBACKSRC_PROPS: &[&str] = &[
     "restart-on-eos",
     "restart-timeout",
     "retry-timeout",
+    "manual-unblock",
 ];
 
 /// gst `fallbacksrc`'s defaults for its restart timeouts (M1163): a source that
@@ -1558,13 +1567,15 @@ fn keyword_uint(spec: &ElementSpec, key: &str, default: u64) -> Result<u64, Pars
 }
 
 /// Wrap a `fallbacksrc` URI source so it is rebuilt when it dies (M1163), when
-/// the registry has a restart hook; else the source runs as it is.
+/// the registry has a restart hook; else the source runs as it is. `unblock` is
+/// the handle each life waits on under `manual-unblock=true` (M1166).
 fn restartable_uri_source(
     registry: &Registry,
     source: Box<dyn DynSourceLoop>,
     uri: &str,
     policy: RestartPolicy,
     role: FallbackSourceRole,
+    unblock: Option<UnblockHandle>,
 ) -> Result<Box<dyn DynSourceLoop>, ParseError> {
     let Some(hook) = registry.restart_source_hook() else {
         return Ok(source);
@@ -1572,7 +1583,7 @@ fn restartable_uri_source(
     let rebuild = registry
         .uri_source_rebuilder(uri)
         .map_err(|e: UriError| ParseError::Uri(alloc::format!("{uri}: {e:?}")))?;
-    Ok(hook(source, rebuild, policy, role))
+    Ok(hook(source, rebuild, policy, role, unblock))
 }
 
 /// Expand one `fallbacksrc` into its main branch (the `uri=` source auto-plugged
@@ -1615,13 +1626,30 @@ fn expand_fallbacksrc(
         restart_timeout_ns: keyword_uint(spec, "restart-timeout", FALLBACK_RESTART_TIMEOUT_NS)?,
         retry_timeout_ns: keyword_uint(spec, "retry-timeout", FALLBACK_RETRY_TIMEOUT_NS)?,
     };
+    // Without a registered handle a held source could never be released, so the
+    // line is rejected here rather than hanging with nothing to poke.
+    let unblock = match keyword_bool(spec, "manual-unblock", false)? {
+        false => None,
+        true => Some(
+            registry
+                .unblock_handle()
+                .ok_or_else(|| ParseError::MissingUnblockHandle(spec.name.clone()))?,
+        ),
+    };
     let preferred = consumer.map_or(MemoryDomainKind::System, |name| {
         registry.declared_memory_preference(name)
     });
     let (source, source_caps) = registry
         .build_uri_source(uri)
         .map_err(|e: UriError| ParseError::Uri(alloc::format!("{uri}: {e:?}")))?;
-    let source = restartable_uri_source(registry, source, uri, restart, FallbackSourceRole::Main)?;
+    let source = restartable_uri_source(
+        registry,
+        source,
+        uri,
+        restart,
+        FallbackSourceRole::Main,
+        unblock.clone(),
+    )?;
     // The kind is decided by which target the search reaches, so the dummy
     // fallback is the right generator and a `fallback-uri` decodes to the same
     // shape. Video first: a container carrying both is a video stream here.
@@ -1680,6 +1708,7 @@ fn expand_fallbacksrc(
                 fallback_uri,
                 restart,
                 FallbackSourceRole::Fallback,
+                unblock,
             )?;
             let decoders = plug(&caps, target)
                 .ok_or_else(|| ParseError::NoDecodeChain(alloc::format!("{caps:?}")))?;
