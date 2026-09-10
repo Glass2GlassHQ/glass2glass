@@ -1,6 +1,6 @@
 //! M492: Vulkan Video H.264 full-DPB decode on real hardware.
 //!
-//! Fourth increment of `VulkanVideoDec` (DESIGN-decode.md). The M489-M491
+//! Fourth increment of `VulkanVideoDec` (design/decode.md). The M489-M491
 //! entry points decode only the leading IDR (hardcoded lone-IDR `Std*`
 //! constants, no references). This decodes the *whole* elementary stream:
 //! per-picture slice-header parse, picture-order-count, and H.264 sliding-window

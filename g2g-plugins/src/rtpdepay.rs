@@ -6,7 +6,7 @@
 //! datagrams a socket receives.
 //!
 //! This is the basic in-order depayloader. A jitter buffer (packet reorder,
-//! loss concealment, RTCP) is the larger receive-side follow-up (DESIGN_TODO);
+//! loss concealment, RTCP) is the larger receive-side follow-up (design/TODO.md);
 //! out-of-order or lost packets are detected via the sequence number and reset
 //! the in-flight reassembly so a gap never welds two access units together.
 

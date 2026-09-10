@@ -1,5 +1,5 @@
 //! C ABI for glass2glass: the language-neutral waist over the `gst-launch`-style
-//! DSL + element registry (PORTING.md §5, DESIGN-launch.md).
+//! DSL + element registry (PORTING.md §5, design/launch.md).
 //!
 //! Experimental (Tier 3 in `STABILITY.md`): tracks `g2g-core`, no stability
 //! promise of its own.
@@ -41,7 +41,7 @@ use g2g_plugins::clock::WallClock;
 use g2g_plugins::registry::default_registry;
 
 /// Steady-state link depth, matching `g2g-launch` (keeps latency low without
-/// starving the source; see DESIGN notes on `link_capacity`).
+/// starving the source; see design/README.md on `link_capacity`).
 const LINK_CAPACITY: usize = 4;
 /// Bus backlog. Control messages are dropped (not blocked) when full, so a slow
 /// poller never stalls the data path; this only bounds how many unread messages

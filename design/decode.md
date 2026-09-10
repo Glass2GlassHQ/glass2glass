@@ -4,7 +4,7 @@ Decoder and encoder elements: VAAPI, Windows Media Foundation, libavcodec,
 NVDEC / NVENC and Vulkan Video, plus the RTSP receive pipeline that feeds them
 and the GPU-resident output paths.
 
-Part of the design in [DESIGN.md](DESIGN.md).
+Part of the design in [README.md](README.md).
 
 ## Decoder element contract
 
@@ -168,7 +168,7 @@ ffmpeg `Nvenc` backend takes system-memory I420 and copies it into libavcodec.
 drives the NVIDIA Video Codec SDK (`nvEncodeAPI`) directly, so pixels never leave
 the GPU. It closes the native `FfmpegH264Dec(NvdecCuda) -> NvEnc` loop with no
 PCIe download, the encode-side mirror of the `CudaToWgpu` import bridge
-([DESIGN-ml.md](DESIGN-ml.md)), and is the egress half of the server-side
+([ml.md](ml.md)), and is the egress half of the server-side
 render-and-stream path fed by the wgpu-to-CUDA hand-off.
 
 - Caps: `Caps::RawVideo { format: Nv12 | Rgba8 | Bgra8, .. }` in,
@@ -212,7 +212,7 @@ render-and-stream path fed by the wgpu-to-CUDA hand-off.
   re-applied live through `nvEncReconfigureEncoder`. The output-bitstream-buffer
   pool and runtime bitrate retarget are in place.
 - `input_domains = {Cuda}`, so a CPU-side NV12 source gets a `CudaUpload` spliced
-  in by the converter auto-plug ([DESIGN-caps.md](DESIGN-caps.md), the allocation
+  in by the converter auto-plug ([caps.md](caps.md), the allocation
   cascade). The encoder itself
   stays Cuda-only.
 - An on-hardware round-trip on the RTX 3060 synthesizes a CUDA-resident NV12
@@ -240,7 +240,7 @@ loop stays on the GPU and out of libavcodec.
 - Multi-domain output: `output_domains = {Cuda, System}`, reconciled in
   `configure_allocation` against the negotiated proposal
   (`resolve_for_producer`, the allocation cascade in
-  [DESIGN-caps.md](DESIGN-caps.md)). A CUDA-capable consumer
+  [caps.md](caps.md)). A CUDA-capable consumer
   keeps each surface device-resident, the default `MemoryDomain::Cuda`. A
   System-only consumer makes the decoder download through `cuda::download_nv12`
   before emitting. Downstream demand alone decides.
@@ -329,7 +329,7 @@ offset intact. `InitialTimestampPolicy::Permissive` keeps a server that omits
 
 The audio pad negotiates at the decoder-facing caps, not the SDP's. A compressed
 `sample_rate` is matched for equality (the negotiation lifecycle in
-[DESIGN.md](DESIGN.md)), so AAC advertises the
+[README.md](README.md)), so AAC advertises the
 `0/0` sentinel the demuxers use and G.711 the 8 kHz rate its decoder declares.
 
 Pad count is fixed before the run, so the `playbin uri=rtsp://...` hook DESCRIBEs
@@ -429,7 +429,7 @@ luma Y and interleaved chroma UV, row pitches, dims, the `CUcontext`, and a boxe
 `CudaKeepAlive` owner. Core never links CUDA: the producing element supplies the
 owner as a trait object, and dropping the buffer releases the backing allocation.
 `AllocationParams::cuda(...)` makes `MemoryDomainKind::Cuda` a cross-element pool
-domain in the allocation negotiation ([DESIGN-caps.md](DESIGN-caps.md)).
+domain in the allocation negotiation ([caps.md](caps.md)).
 
 `Backend::NvdecCuda` opens the generic `h264` codec with an
 `AV_HWDEVICE_TYPE_CUDA` device and a `get_format` hook selecting
@@ -511,12 +511,12 @@ is chained alongside `VkVideoDecodeCapabilitiesKHR`, with a
 
 The element is mostly reuse. The `VkImage` to `wgpu::Texture` import
 (`cudawgpu.rs` / `dmabufwgpu.rs` `texture_from_raw` plus
-`TextureMemory::External`, [DESIGN-ml.md](DESIGN-ml.md)), custom Vulkan device
+`TextureMemory::External`, [ml.md](ml.md)), custom Vulkan device
 creation with extra extensions from the `cuda-wgpu` device path, the multiplanar
 NV12-to-RGBA `VkSamplerYcbcrConversion` compute pass shared with the Android
 `mediacodec-wgpu` decoder, the Annex-B plus SPS/PPS front-end (`h264parse` and
 h265parse), and the allocation-domain auto-plug (the allocation cascade in
-[DESIGN-caps.md](DESIGN-caps.md)) all
+[caps.md](caps.md)) all
 already exist.
 
 New is the decode session itself: a `VkDevice` with a

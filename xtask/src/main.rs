@@ -1,5 +1,5 @@
 //! `cargo xtask <command>`: the project's dev commands, consolidating the
-//! invocations that were shell-history tribal knowledge (DESIGN_TODO developer
+//! invocations that were shell-history tribal knowledge (design/TODO.md developer
 //! tooling). It only orchestrates `cargo` and toolchain tools, so it has no
 //! dependencies.
 //!

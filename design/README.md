@@ -45,7 +45,7 @@ A source produces packets, transforms rewrite them, and sinks consume them:
 ```
 
 Before any frame flows, the runner runs one caps-negotiation pass over the whole
-graph ([DESIGN-caps.md](DESIGN-caps.md)): every link is assigned a concrete
+graph ([caps.md](caps.md)): every link is assigned a concrete
 `Caps`, every element allocates its buffers, and the memory domain each link
 carries (System / DMABUF / CUDA / Vulkan / WebGPU texture) is settled, so a
 zero-copy link stays zero-copy. Each element then runs as its own cooperative
@@ -70,21 +70,21 @@ document.
 
 | Where | What |
 | :--- | :--- |
-| [DESIGN-caps.md](DESIGN-caps.md) | the caps CSP solver, allocation cascade, auto-plug, `decodebin` / `playbin`, bins. |
-| [DESIGN-runtime.md](DESIGN-runtime.md) | dynamic graph reconfiguration, the state machine, preroll and seek, the bus, logging. |
-| [DESIGN-timing.md](DESIGN-timing.md) | clock election, the audio master, PTP, presentation anchoring, latency, QoS. |
-| [DESIGN-decode.md](DESIGN-decode.md) | hardware decoders and encoders, and the end-to-end RTSP pipeline. |
-| [DESIGN-live.md](DESIGN-live.md) | capture, device discovery, RTP / RTMP / RTSP / SRT in both directions, fallback switching. |
-| [DESIGN-containers.md](DESIGN-containers.md) | containers and byte streams, mux and demux, HLS and DASH, still images. |
-| [DESIGN-text.md](DESIGN-text.md) | subtitles, closed captions, bitmap subtitles, teletext, the overlay elements. |
-| [DESIGN-transports.md](DESIGN-transports.md) | WebRTC, distributed graphs, MoQ, ST 2110, local zero-copy IPC. |
-| [DESIGN-launch.md](DESIGN-launch.md) | properties, introspection, the `gst-launch` DSL, plugins, hosted Python and Rhai. |
-| [DESIGN-ml.md](DESIGN-ml.md) | GPU tensor preprocess, inference backends, batching, detection metadata. |
-| [DESIGN-tooling.md](DESIGN-tooling.md) | DOT dumps, the negotiation explainer, `xtask`, telemetry, conformance. |
-| [DESIGN-embedded.md](DESIGN-embedded.md) | the heap-free core, MCU elements, RTOS executors, footprint proofs. |
+| [caps.md](caps.md) | the caps CSP solver, allocation cascade, auto-plug, `decodebin` / `playbin`, bins. |
+| [runtime.md](runtime.md) | dynamic graph reconfiguration, the state machine, preroll and seek, the bus, logging. |
+| [timing.md](timing.md) | clock election, the audio master, PTP, presentation anchoring, latency, QoS. |
+| [decode.md](decode.md) | hardware decoders and encoders, and the end-to-end RTSP pipeline. |
+| [live.md](live.md) | capture, device discovery, RTP / RTMP / RTSP / SRT in both directions, fallback switching. |
+| [containers.md](containers.md) | containers and byte streams, mux and demux, HLS and DASH, still images. |
+| [text.md](text.md) | subtitles, closed captions, bitmap subtitles, teletext, the overlay elements. |
+| [transports.md](transports.md) | WebRTC, distributed graphs, MoQ, ST 2110, local zero-copy IPC. |
+| [launch.md](launch.md) | properties, introspection, the `gst-launch` DSL, plugins, hosted Python and Rhai. |
+| [ml.md](ml.md) | GPU tensor preprocess, inference backends, batching, detection metadata. |
+| [tooling.md](tooling.md) | DOT dumps, the negotiation explainer, `xtask`, telemetry, conformance. |
+| [embedded.md](embedded.md) | the heap-free core, MCU elements, RTOS executors, footprint proofs. |
 
-Open work is in [DESIGN_TODO.md](DESIGN_TODO.md). Shipped milestones are logged
-in [CHANGELOG.md](CHANGELOG.md).
+Open work is in [TODO.md](TODO.md). Shipped milestones are logged
+in [CHANGELOG.md](../CHANGELOG.md).
 
 ---
 
@@ -96,9 +96,9 @@ standard elements, ML backends, and platform bindings.
 | Crate | Purpose | Target profile | Licensing |
 | :--- | :--- | :--- | :--- |
 | `g2g-core` | Core traits, `Frame` definitions, buffer pool allocators, clock model. | `no_std + alloc` | MPL-2.0 |
-| `g2g-mcu` | Heap-free MCU peripheral, codec and transport elements over `embedded-hal` seams ([DESIGN-embedded.md](DESIGN-embedded.md)). | `no_std`, no `alloc` | MPL-2.0 |
+| `g2g-mcu` | Heap-free MCU peripheral, codec and transport elements over `embedded-hal` seams ([embedded.md](embedded.md)). | `no_std`, no `alloc` | MPL-2.0 |
 | `g2g-mcugen` | Host compiler turning a declarative graph document into a monomorphized static MCU pipeline. | `std` | MPL-2.0 |
-| `g2g-plugin` | SDK for dynamically loadable plugins (the `declare_plugin!` macro + ABI tag, [DESIGN-launch.md](DESIGN-launch.md)). | `no_std + alloc` | MPL-2.0 |
+| `g2g-plugin` | SDK for dynamically loadable plugins (the `declare_plugin!` macro + ABI tag, [launch.md](launch.md)). | `no_std + alloc` | MPL-2.0 |
 | `g2g-plugins` | Standard collection of source/sink/transform elements (`rtsp`, `wgpu`, `v4l2`). | `no_std + alloc` / `std` mixed | MPL-2.0 |
 | `g2g-ml` | ML inference elements built on `burn` (Wasm/embedded) and `ort` (server), plus the multi-stream tensor batcher. | `std` | MPL-2.0 |
 | `g2g-bridge` | C-FFI dynamic library to embed `g2g` sub-graphs inside GStreamer pipelines. | `std` (`cdylib`) | MPL-2.0 |
@@ -115,7 +115,7 @@ element wrappers.
 
 
 Pointers to the heap-free build of `g2g-core`, the static element model, and the
-MCU element crates are in [DESIGN-embedded.md](DESIGN-embedded.md).
+MCU element crates are in [embedded.md](embedded.md).
 
 ---
 
@@ -164,7 +164,7 @@ buffer: ML detection, classification and tracking results, regions of interest,
 reference timestamps. It is gated behind the `metadata` cargo feature, off by
 default: when off it is a zero-sized unit, so the `no_std` and RTOS baseline pays
 nothing per frame, and when on it is a list of `Arc<dyn FrameMeta>`. The full
-attach, propagate and demand contract is in [DESIGN-ml.md](DESIGN-ml.md).
+attach, propagate and demand contract is in [ml.md](ml.md).
 Construct frames via `Frame::new(domain, timing, sequence)` so future field
 additions do not break call sites.
 
@@ -174,7 +174,7 @@ arrive, and every subsequent `DataFrame` on that link is implicitly under those
 caps until the next `CapsChanged` arrives. The runner guarantees `CapsChanged` is
 ordered in the stream, sitting between the last old-caps `DataFrame` and the
 first new-caps `DataFrame`, which is the load-bearing correctness property for
-mid-stream format changes ([DESIGN-caps.md](DESIGN-caps.md)).
+mid-stream format changes ([caps.md](caps.md)).
 
 ### Memory domains
 
@@ -263,7 +263,7 @@ On `no_std + alloc` and `std`, `BufferPool<T>` wraps `Arc<Mutex<Vec<T>>>` plus a
 `VecDeque<Waker>` of acquire waiters, `acquire().await` resolves the moment a
 `PooledBuffer` elsewhere is dropped, and `try_acquire()` is the sync fast path for
 non-blocking contexts. The strict no-heap pools and the `StaticLendRing` zero-copy
-lend are in [DESIGN-embedded.md](DESIGN-embedded.md).
+lend are in [embedded.md](embedded.md).
 
 The `SystemSlice` carrier supports three ownership models transparently:
 `SystemSlice::from_boxed(Box<[u8]>)` for one-off frames,
@@ -455,7 +455,7 @@ backtrack avoids the GStreamer pattern of failing the entire pipeline on
 allocation pressure.
 
 The solver that runs this over a whole DAG, rather than one link at a time, is in
-[DESIGN-caps.md](DESIGN-caps.md).
+[caps.md](caps.md).
 
 ### The element traits
 
@@ -556,7 +556,7 @@ composes graphs from string-keyed plugin factories loaded at runtime, while g2g
 composes typed graphs at compile time, so pad metadata lives in the trait
 signatures. The cost is that fan-out (tee), fan-in (muxer) and demuxer-style
 dynamic pads require additional trait variants rather than runtime pad-list
-mutation, which [DESIGN-runtime.md](DESIGN-runtime.md) covers.
+mutation, which [runtime.md](runtime.md) covers.
 
 ### Backpressure and scheduling
 
@@ -674,7 +674,7 @@ throttles the channel, which throttles the source. No explicit source-side pacin
 is required for sync playback.
 
 Clock election, the audio master clock, PTP, presentation anchoring, the latency
-fold and the QoS report are in [DESIGN-timing.md](DESIGN-timing.md).
+fold and the QoS report are in [timing.md](timing.md).
 
 ---
 
@@ -730,7 +730,7 @@ and `ElementBound` is empty without `multi-thread`. The embedded surface is:
 (Cortex-M) and `riscv32`, which lack 64-bit atomics, compile, and
 `critical-section` makes the lock-based fallback interrupt-safe. The heap-free
 build and the MCU element crates are in
-[DESIGN-embedded.md](DESIGN-embedded.md).
+[embedded.md](embedded.md).
 
 ### Browser sandbox
 

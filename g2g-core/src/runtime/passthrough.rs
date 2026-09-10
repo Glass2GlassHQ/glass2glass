@@ -1,5 +1,5 @@
 //! Passthrough-field negotiation helpers for the solver's mid-stream re-solve
-//! (DESIGN-caps.md). A transform declares which caps fields it forwards
+//! (design/caps.md). A transform declares which caps fields it forwards
 //! unchanged (`PassthroughFields`); these functions couple those fields across a
 //! link (`couple_*`), project a feasible input from an output (`project_*`), and
 //! discover a mask by probing an element's caps closure (`discover_*`) where the

@@ -4,7 +4,7 @@
 //! and `MfDecode` (Windows Media Foundation): it consumes Annex-B H.264
 //! `DataFrame`s (`MemoryDomain::System`, what `RtspSrc` / `H264Parse` emit) and
 //! produces decoded NV12 frames, also `MemoryDomain::System`. It is the first
-//! element of the Android platform track (DESIGN_TODO.md "Platform: Android"); a
+//! element of the Android platform track (design/TODO.md "Platform: Android"); a
 //! zero-copy `AHardwareBuffer` / `SurfaceTexture` path is the follow-up.
 //!
 //! Unlike VideoToolbox (which wants AVCC + out-of-band parameter sets),

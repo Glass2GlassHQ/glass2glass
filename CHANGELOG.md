@@ -1,6 +1,6 @@
 # Changelog
 
-Pre-release. Work is tracked by milestone (Mn) following the roadmap in `DESIGN_TODO.md`.
+Pre-release. Work is tracked by milestone (Mn) following the roadmap in `design/TODO.md`.
 Versioning and the stability tiers are defined in `STABILITY.md`; `g2g-core` is the
 semver-covered surface, the plugin/binding crates are provisional or experimental.
 

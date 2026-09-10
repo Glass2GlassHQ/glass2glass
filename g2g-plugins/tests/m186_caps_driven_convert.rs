@@ -47,7 +47,7 @@ async fn caps_driven_convert_and_scale_each_pinned() {
     // 160x120. NOTE: stacking two auto transforms before a single far caps
     // (`videoconvert ! videoscale ! caps`) does NOT propagate the format back
     // through the passthrough-format scaler, that needs the forward-resolve walk
-    // tracked in DESIGN_TODO. A capsfilter after each transform is the supported
+    // tracked in design/TODO.md. A capsfilter after each transform is the supported
     // (and conventional) form.
     let line = "videotestsrc num-buffers=2 width=320 height=240 \
                 ! videoconvert ! video/x-raw,format=NV12 \

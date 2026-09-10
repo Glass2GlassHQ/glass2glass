@@ -2,11 +2,11 @@
 
 The capability-negotiation subsystem: the constraint model, the CSP solver, the
 DAG runner it feeds, mid-stream re-solve, the allocation cascade, fan-out and
-fan-in, bins, and auto-plug. Part of the design in [DESIGN.md](DESIGN.md).
+fan-in, bins, and auto-plug. Part of the design in [README.md](README.md).
 
 ## The constraint model
 
-The handshake sketched in [DESIGN.md](DESIGN.md) is the interface contract. The underlying
+The handshake sketched in [README.md](README.md) is the interface contract. The underlying
 mechanism is a **distributed constraint-satisfaction problem (CSP)**: each
 element declares a constraint over `(input, output)` caps; a solver finds an
 assignment over every link in the graph that satisfies all constraints,
@@ -182,7 +182,7 @@ arm's own result, so swallowing the closed channel at the tee is safe.
 Negotiation phase 1 asks each source for its **produce set**
 (`DynSourceLoop::produced_caps`, the erased view of `SourceLoop::caps_constraint`),
 not its preferred caps alone, so a source that offers alternatives (`v4l2src`'s
-pixel formats, [DESIGN-live.md](DESIGN-live.md)) has the choice settled by the
+pixel formats, [live.md](live.md)) has the choice settled by the
 solve like any other element:
 arc consistency drops the alternatives downstream cannot take, the fixation picks
 the highest-preference survivor, and the source reads the outcome in
@@ -233,7 +233,7 @@ lower-latency default, and it is the only path for the `no_std` / wasm / embassy
 executors, which the `run_graph_threaded` gate (`std + multi-thread`) excludes.
 `run_graph_threaded` requires an owning `Graph<GraphNode>` (`'static`) so each arm
 can move its element onto a worker thread. The same rule shapes the fan-in
-deadline tick ([DESIGN.md](DESIGN.md)): the cooperative arms borrow their clock,
+deadline tick ([README.md](README.md)): the cooperative arms borrow their clock,
 but a builder
 closure owns everything it carries, so `run_graph_threaded_ticked` takes the clock
 as an `Arc<dyn DynAsyncClock + Send + Sync>` and each muxer arm is wrapped in a
@@ -252,7 +252,7 @@ runner keeps a separate entry, because its arms need an owned clock handle rathe
 than the borrow `as_ticker` yields.
 
 **Animated properties ride the arms.** A node can carry a `ControlProgram`
-(the animated properties in [DESIGN-launch.md](DESIGN-launch.md)): keyframed
+(the animated properties in [launch.md](launch.md)): keyframed
 curves bound to its property names, which the arm
 that owns the element samples at each `DataFrame`'s PTS and applies before handing
 that frame over, so a frame is processed under the values its own timestamp calls
@@ -608,7 +608,7 @@ child elements, manages their state, and exposes interior pads as *ghost pads*.
 g2g implements the same user-facing capability (reusable named subgraphs +
 ghost pads) but as **construction-time flattening**, not a runtime container.
 The reason is the same one behind the dark-slot trade-off in
-[DESIGN-runtime.md](DESIGN-runtime.md): g2g composes typed graphs ahead of the
+[runtime.md](runtime.md): g2g composes typed graphs ahead of the
 run, so grouping for reuse and pad exposure can happen before validation, and
 the runtime never needs a hierarchy to manage.
 

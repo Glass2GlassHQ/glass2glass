@@ -2,7 +2,7 @@
 
 Camera and audio capture, device discovery, the RTP, RTMP, RTSP and SRT paths
 in both directions, and the fallback switching that keeps a live source
-running. Part of the design in [DESIGN.md](DESIGN.md).
+running. Part of the design in [README.md](README.md).
 
 ## Live capture
 
@@ -12,7 +12,7 @@ running. Part of the design in [DESIGN.md](DESIGN.md).
 `/dev/videoN` device through V4L2 mmap streaming I/O, wrapping the pure-Rust
 `v4l` crate with no libv4l C dependency. Packed YUYV, 4:2:2, the near-universal
 UVC output, is the preferred format, and `VideoConvert` unpacks it to a planar
-or RGB target (the raw formats in [DESIGN.md](DESIGN.md)), so the canonical
+or RGB target (the raw formats in [README.md](README.md)), so the canonical
 chain is
 `V4l2Src -> VideoConvert(Yuyv -> Nv12) -> sink`.
 
@@ -284,7 +284,7 @@ device does carry.
 
 ## Live egress
 
-The receive path in [DESIGN-decode.md](DESIGN-decode.md) has an inverse:
+The receive path in [decode.md](decode.md) has an inverse:
 encoded video out over RTP. The protocol logic is sans-IO. A pure packetizer
 produces the RTP packets and a thin sink does the UDP I/O.
 
@@ -360,7 +360,7 @@ key. The local certificate is a self-signed ECDSA P-256 one unless `pem`
 supplies it, `peer-pem` reads the peer's, and `peer-fingerprint`, in the SDP
 `a=fingerprint` value form, aborts a handshake whose peer certificate does not
 match. Any DTLS failure stops the run: nothing falls back to clear media.
-[PORTING.md](PORTING.md#srtp-gaps) compares the host integration surface with
+[PORTING.md](../PORTING.md#srtp-gaps) compares the host integration surface with
 GStreamer's SRTP elements.
 
 ## Live ingress over UDP and RTP
@@ -409,7 +409,7 @@ This is raw RTP with no RTSP or SDP, so there is no out-of-band stream
 description. The output geometry is a declared hint (`with_video_size`,
 `with_framerate`), and since H.264 carries its real dimensions in the SPS a
 downstream decoder re-derives and corrects them. `RtspSrc` covers the RTSP case
-with its own jitter buffer ([DESIGN-decode.md](DESIGN-decode.md)).
+with its own jitter buffer ([decode.md](decode.md)).
 
 ## RTMP
 
@@ -423,7 +423,7 @@ per-chunk-stream header inheritance and `Set Chunk Size`, and the AMF0
 Window-Ack, Set-Peer-Bandwidth, `_result` and `onStatus` replies. An RTMP audio
 or video message payload is exactly an FLV tag body, so the session reframes the
 messages into an FLV byte stream that the existing `flvdemux`
-([DESIGN-containers.md](DESIGN-containers.md)) recovers the H.264 and AAC access
+([containers.md](containers.md)) recovers the H.264 and AAC access
 units from. Scope is one publisher, one stream, H.264 plus AAC, AMF0.
 
 `RtmpSink` (`rtmpsink.rs`, `rtmp` feature) is the inverse. It connects out to an

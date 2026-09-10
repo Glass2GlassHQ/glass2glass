@@ -28,7 +28,7 @@
 //! the whole file. With neither, it falls back to the M364 re-scan from offset 0.
 //!
 //! Scope (v1): the first track of the selected codec; multi-track-of-one-codec
-//! selection and lacing are follow-ups (DESIGN-containers.md).
+//! selection and lacing are follow-ups (design/containers.md).
 
 use core::future::Future;
 use core::pin::Pin;
@@ -1272,7 +1272,7 @@ impl PadTemplates for MkvDemux {
 ///
 /// A [`MultiOutputElement`] driven by
 /// [`run_source_fanout`](g2g_core::runtime::run_source_fanout): each port carries
-/// one selected [`MkvStream`] (the "dark slots", DESIGN-runtime.md), so one demuxer feeds
+/// one selected [`MkvStream`] (the "dark slots", design/runtime.md), so one demuxer feeds
 /// several decode branches in one pipeline rather than instantiating a
 /// single-output demuxer per stream. The demuxer parses the container once and
 /// routes each track's access units to its port by codec; a parsed track with no

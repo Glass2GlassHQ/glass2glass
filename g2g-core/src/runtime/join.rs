@@ -291,7 +291,7 @@ pub enum Either<A, B> {
 /// Do not use it where dropping the un-ready arm would discard progress.
 ///
 /// This is the β interruptibility primitive
-/// (DESIGN-caps.md): a runner arm awaits its
+/// (design/caps.md): a runner arm awaits its
 /// data `recv()` and an out-of-band control `recv()` together, so a
 /// coordinator directive reaches the arm at the same await point that
 /// otherwise blocks on data. Without it the no_std runtime can only `join`

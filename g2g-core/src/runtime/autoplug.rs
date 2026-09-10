@@ -1,5 +1,5 @@
 //! Auto-plug: a runtime element registry plus a decode-chain search over the
-//! static pad-template metadata (DESIGN-caps.md, DESIGN_TODO "Auto-plug /
+//! static pad-template metadata (design/caps.md, design/TODO.md "Auto-plug /
 //! element registry / `decodebin`-equivalent"). M83.
 //!
 //! GStreamer's `decodebin` takes the caps coming off a source and walks the

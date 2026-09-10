@@ -6,8 +6,8 @@ Guidance for AI agents working in this repository. Read this before making chang
 
 `glass2glass` (`g2g`) is a Rust multimedia pipeline framework, GStreamer-like but
 with a statically typed, `no_std + alloc` core. Graphs are composed from typed
-elements rather than runtime string-keyed factories. Full design: `DESIGN.md`
-plus the per-track `DESIGN-*.md` files it indexes.
+elements rather than runtime string-keyed factories. Full design: `design/README.md`
+plus the per-track files it indexes.
 
 ## Workspace
 
@@ -69,7 +69,7 @@ Adding a dependency to one of the 1.86 crates means checking its MSRV, and a
   AI assistant as a co-author.
 - **`CHANGELOG.md`: one terse line per milestone.** State what changed, not how
   it works, why it was found, or what it now enables. One sentence, no
-  sub-clauses piling on internals. If the detail matters it goes in `DESIGN.md`,
+  sub-clauses piling on internals. If the detail matters it goes in `design/README.md`,
   not here. Match the length of the surrounding entries, never exceed it.
 
 ## Build & test (PowerShell)
@@ -103,21 +103,21 @@ under test. Every test needs an assertion that fails if the feature breaks.
 ## Milestones
 
 Work is tracked by milestone `Mn`. The high-level roadmap is the top of
-`DESIGN_TODO.md`; the reading guide at the top of `DESIGN.md` maps each track to
-its own `DESIGN-*.md` file. Record each milestone in `CHANGELOG.md` under
+`design/TODO.md`; the reading guide at the top of `design/README.md` maps each track to
+its own file. Record each milestone in `CHANGELOG.md` under
 `## Unreleased`, one terse line (see the Conventions note above).
 Pre-release `0.7.0` (tagged, published to crates.io). Stability tiers and the
 versioning policy live in `STABILITY.md`.
 
-`DESIGN_TODO.md` is a terse catalogue of outstanding tasks only: no comparison
+`design/TODO.md` is a terse catalogue of outstanding tasks only: no comparison
 to GStreamer, no list of historical accomplishments. It must never mention a done
 item, not even to note it as done or partially done: when a task (or part of one)
-is finished, delete that text from `DESIGN_TODO.md` and leave only what is still
+is finished, delete that text from `design/TODO.md` and leave only what is still
 outstanding, phrased as a plain future task with no reference to what already
-landed. Done work appears only in `DESIGN.md` and its `DESIGN-*.md` track files
+landed. Done work appears only in `design/README.md` and its track files
 (the current design) and `CHANGELOG.md` (the milestone line), never in
-`DESIGN_TODO.md`. If finishing a task established architecture worth keeping,
-document that in the `DESIGN-*.md` file for its track. Those files describe only
+`design/TODO.md`. If finishing a task established architecture worth keeping,
+document that in the design file for its track. Those files describe only
 the current design.
 
 ## Platform notes

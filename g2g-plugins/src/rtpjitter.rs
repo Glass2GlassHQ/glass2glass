@@ -16,7 +16,7 @@
 //!
 //! Scope: reordering, loss/duplicate/late detection, and bounded-latency
 //! release. RTCP receiver reports, NACK/RTX retransmission, and FEC are the
-//! larger receive-side follow-ups (DESIGN_TODO).
+//! larger receive-side follow-ups (design/TODO.md).
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;

@@ -1,4 +1,4 @@
-//! ONNX Runtime instance-segmentation element (M992, DESIGN-ml.md): the in-tree
+//! ONNX Runtime instance-segmentation element (M992, design/ml.md): the in-tree
 //! producer of the `Segmentation` / `Roi` analytics nodes.
 //!
 //! `OrtSegmentation` runs a YOLO `-seg` model (Ultralytics YOLOv8-seg /

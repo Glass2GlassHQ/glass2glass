@@ -1,5 +1,5 @@
 //! M837: declarative forward derivation for caps transforms
-//! (DESIGN-caps.md).
+//! (design/caps.md).
 //!
 //! A caps-driven transform (videoscale / videoconvert / videorate /
 //! audioconvert / audioresample) derives its output caps field by field from

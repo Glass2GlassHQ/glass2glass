@@ -57,6 +57,6 @@ full-frame ring) is a Tier-1.5 follow-up.
 
 Real MIPI-CSI capture + hardware H.264 + WiFi/RTP egress, bridging the ESP-IDF C
 drivers through the M650 C-seams (`CFrameGrabber` / `CPacketSender`). See the
-`DESIGN_TODO.md` "ESP32-P4X board bring-up" entry for the full plan and the
+`design/TODO.md` "ESP32-P4X board bring-up" entry for the full plan and the
 unknowns to verify first (esp-hal's pure-Rust CSI/H.264 coverage; whether bare
 `no_std` can reach the ESP32-C6 network stack without `esp-idf`).

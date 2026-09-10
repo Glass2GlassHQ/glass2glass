@@ -1,4 +1,4 @@
-//! DAG pipeline runner (DESIGN_TODO "DAG runner" D3).
+//! DAG pipeline runner (design/TODO.md "DAG runner" D3).
 //!
 //! [`run_graph`] drives an arbitrary multimedia DAG built with [`Graph`]:
 //! whole-graph CSP negotiation via [`solve_graph`] (D2), then one spawned arm

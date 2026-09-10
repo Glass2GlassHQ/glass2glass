@@ -2,7 +2,7 @@
 
 Clock election and health, mid-graph pacing, the audio master clock, PTP, how a
 sink anchors presentation, the latency fold, and the QoS report that travels back
-upstream. Part of the design in [DESIGN.md](DESIGN.md), which defines
+upstream. Part of the design in [README.md](README.md), which defines
 `FrameTiming` and the clock traits.
 
 ## Clock election and distribution
@@ -144,7 +144,7 @@ servo's own seam is typed the same way: `sync_exchange` takes
 `(TaiNs, RefNs, RefNs, TaiNs)` and `observe_master` takes `(RefNs, TaiNs)`, so
 master and reference cannot be swapped. Durations stay a plain `u64`. The
 ST 2110 media transport built over `MediaClock` is in
-[DESIGN-transports.md](DESIGN-transports.md).
+[transports.md](transports.md).
 
 ## Anchoring and the latency fold
 

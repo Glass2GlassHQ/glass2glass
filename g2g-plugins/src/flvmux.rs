@@ -20,7 +20,7 @@
 //!
 //! Scope: one track (a single input pad), mirroring the single-stream
 //! `FlvDemux`. An `onMetaData` script tag is written when metadata is attached
-//! via [`FlvMux::with_tags`]; A/V muxing is `FlvMuxN` (DESIGN-containers.md).
+//! via [`FlvMux::with_tags`]; A/V muxing is `FlvMuxN` (design/containers.md).
 
 use core::future::Future;
 use core::pin::Pin;

@@ -2,7 +2,7 @@
 
 This file covers the container demuxers and muxers, the byte-stream caps that
 feed them, adaptive streaming over HTTP, and the still-image formats that take
-the same shape. Part of the design in [DESIGN.md](DESIGN.md).
+the same shape. Part of the design in [README.md](README.md).
 
 ## Byte stream caps
 
@@ -90,7 +90,7 @@ output pad's media type is fixed at negotiation before any packet is parsed.
 H.264 and H.265 are distinct downstream decoders, not a refinement. Video
 geometry is unknown until the bitstream parser reads the SPS, so the demuxer
 advertises a fixatable placeholder `Range` refined downstream via `CapsChanged`,
-the `RtspSrc` pattern in [DESIGN-caps.md](DESIGN-caps.md). AAC advertises the
+the `RtspSrc` pattern in [caps.md](caps.md). AAC advertises the
 sentinel
 channels and rate that `aacparse` refines from the ADTS header.
 
@@ -351,7 +351,7 @@ cue's display window carried on the frame and the `BlockGroup`'s
 `BlockDuration` scaled onto `MkvFrame.duration_ns`. A `SimpleBlock` leaves that
 `0`. `S_TEXT/ASS` and `S_TEXT/WEBVTT` are likewise de-framed to plain
 `Text{Utf8}` cue text via the `CodecPrivate` header, and `mkv_playbin`
-auto-plugs the subtitle overlay of [DESIGN-text.md](DESIGN-text.md).
+auto-plugs the subtitle overlay of [text.md](text.md).
 `S_VOBSUB` is the bitmap case: `MkvCodec::VobSub` maps to
 `Caps::SubPicture { VobSub }`, `MkvStream::VobSub`, whose blocks are forwarded
 verbatim as subpicture units after the track's `.idx` `CodecPrivate` goes out in
@@ -714,7 +714,7 @@ maximum that size field can state, and stamped with the opening packet's PTS and
 the unit's own hide time as duration. A program stream carries no palette, so
 the pad opens on a synthesized `.idx` holding only the video's `size:` line and
 `VobSubDec`'s default palette renders the cues, see
-[DESIGN-text.md](DESIGN-text.md).
+[text.md](text.md).
 
 Out of scope: LPCM and DTS substreams, the program stream map, a PS muxer, and
 seeking.

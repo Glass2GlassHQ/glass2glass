@@ -3,7 +3,7 @@
 Graph visualization, the negotiation explainer, `cargo xtask`, benchmarks, the
 run telemetry and live dashboard, the JSON introspection surface, and the
 conformance batteries that derive an element's maturity. Part of the design in
-[DESIGN.md](DESIGN.md).
+[README.md](README.md).
 
 ## DOT visualization
 
@@ -36,7 +36,7 @@ caps and each edge's memory domain, the producing node's `output_memory`, that
 the dump renders on the edges, marking GPU and zero-copy links bold. A
 negotiation failure falls back to a topology-only dump.
 
-It also runs the allocation cascade ([DESIGN-caps.md](DESIGN-caps.md)) before
+It also runs the allocation cascade ([caps.md](caps.md)) before
 reading those domains, since that is what settles a multi-domain producer on the
 one its consumer asked for. Without it a decoder feeding a CPU sink still
 reported its `Cuda` default and the dump called a downloading link a GPU link.
@@ -418,7 +418,7 @@ best-effort transport interop against a real ffmpeg, aggregating into one
 they append rather than truncate, and publishing `--maturity` to the job summary.
 The GPU `Hardware` rows come from a self-hosted GPU runner.
 
-Together with the copy plan in [DESIGN.md](DESIGN.md), this is the
+Together with the copy plan in [README.md](README.md), this is the
 validation-first posture: the framework states hard, checkable properties, that
 this graph is zero-copy or that this element is unit-tested but not
 interop-validated, rather than leaving them to prose and trust.

@@ -1,4 +1,4 @@
-//! GPU-resident tensor inference via wgpu compute (DESIGN-ml.md, M216).
+//! GPU-resident tensor inference via wgpu compute (design/ml.md, M216).
 //!
 //! `WgpuInference` is the consumer half of the keep-on-GPU inference branch
 //! `WgpuPreprocess::with_gpu_output` (M215) opened: it takes the f32 NCHW tensor

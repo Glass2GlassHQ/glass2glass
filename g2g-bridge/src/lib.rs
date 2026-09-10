@@ -3,7 +3,7 @@
 //! Experimental (Tier 3 in `STABILITY.md`): no stability promise.
 //!
 //! Embeds an isolated `g2g` processing sub-graph inside a legacy GStreamer
-//! pipeline (DESIGN.md), so an existing GStreamer application can adopt one
+//! pipeline (design/README.md), so an existing GStreamer application can adopt one
 //! g2g element (a wgpu filter, an ML inference stage) at a time instead of
 //! rewriting the whole pipeline. This is the incremental-migration path for a
 //! GStreamer *application* (the hardest port: dynamic pipelines built against
@@ -28,7 +28,7 @@
 //! The reuse of the already-tested [`appsrc`](g2g_plugins::appsrc) /
 //! [`appsink`](g2g_plugins::appsink) elements is deliberate: they are exactly the
 //! "synchronous external code feeds/drains a running async graph" boundary the
-//! bridge needs, including the bounded-channel backpressure DESIGN.md calls
+//! bridge needs, including the bounded-channel backpressure design/README.md calls
 //! for.
 
 #![forbid(unsafe_op_in_unsafe_fn)]

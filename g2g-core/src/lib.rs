@@ -12,7 +12,7 @@
 //! `parse_launch`, the `dyn` element traits, and the tooling (conformance, dot,
 //! copy plan, wire codec) all live behind the `alloc` feature.
 //!
-//! See `DESIGN.md` for the full specification.
+//! See `design/README.md` for the full specification.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]

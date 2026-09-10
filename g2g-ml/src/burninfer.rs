@@ -1,4 +1,4 @@
-//! Pure-Rust Burn inference element (`burn` backend, DESIGN-ml.md).
+//! Pure-Rust Burn inference element (`burn` backend, design/ml.md).
 //!
 //! `BurnInference` is the no-C++ counterpart of `OrtInference`: it negotiates
 //! `Caps::RawVideo` (RGBA) on its input pad and `Caps::Tensor` on its output

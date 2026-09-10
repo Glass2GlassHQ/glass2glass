@@ -1,4 +1,4 @@
-//! DAG pipeline graph + validation (DESIGN_TODO "DAG runner" D1).
+//! DAG pipeline graph + validation (design/TODO.md "DAG runner" D1).
 //!
 //! `Graph<E>` is the builder for an arbitrary multimedia DAG: linear, fan-out
 //! (tee), fan-in (muxer), and nested branches in one topology. It carries an
@@ -670,7 +670,7 @@ impl<E> core::fmt::Debug for Graph<E> {
 /// unlinked inside the bin and get their peer only when the host graph links the
 /// returned [`BinInstance`], so the host's `finish()` is what validates. This is
 /// pure construction-time encapsulation, no new [`NodeKind`]: the bin's nodes
-/// become first-class host nodes on flattening (DESIGN.md the bins section).
+/// become first-class host nodes on flattening (design/README.md the bins section).
 pub struct Bin<E> {
     graph: Graph<E>,
     ghost_in: Vec<PadId>,

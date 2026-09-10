@@ -132,7 +132,7 @@ the stream is over. It **must** push the final `Eos` itself before returning
 after `process(Eos)` returns, so forwarding it ends the consumer twice. Match it
 and do nothing, or use it as the flush signal for whatever the element is holding
 internally (which is also what a `GraphMutator::remove` uses to drain an element
-on its way out, DESIGN-runtime.md):
+on its way out, design/runtime.md):
 
 ```rust
 PipelinePacket::Eos => {}

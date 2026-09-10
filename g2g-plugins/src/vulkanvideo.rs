@@ -4,8 +4,8 @@
 //! and `VK_KHR_video_decode_*`, decoding into a texture on the same Vulkan device
 //! wgpu already runs, the cross-vendor analog of the CUDA-locked
 //! `NvDec -> CudaToWgpu` path (AMD/RADV, NVIDIA, Intel/ANV all expose the
-//! extensions). See DESIGN-decode.md and the `VulkanVideoDec` entry in
-//! DESIGN_TODO.md.
+//! extensions). See design/decode.md and the `VulkanVideoDec` entry in
+//! design/TODO.md.
 //!
 //! This first increment is the **capability probe**: the load-bearing question
 //! the whole element negotiates against, and the one the design says to settle

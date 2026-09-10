@@ -9,7 +9,7 @@ with no gap and no restart. Each operation prints as it happens, and a removed
 element is handed back to the caller alive.
 
 That is [`GraphMutator`](../../g2g-core/src/runtime/mutate.rs) (M1115), from
-`run_graph_mutable` beside the run future. The protocol is DESIGN-runtime.md, and
+`run_graph_mutable` beside the run future. The protocol is design/runtime.md, and
 PORTING.md §5.2 maps it to the GStreamer pad-block-and-relink idiom it replaces.
 
 ## Running it

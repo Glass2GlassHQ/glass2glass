@@ -191,7 +191,7 @@ mf-decode = ["std", "dep:windows"]
 # objc2 VideoToolbox / Core Media / Core Video / Core Foundation bindings;
 # macOS-only (the deps live under [target.'cfg(target_os = "macos")']), implies
 # std. The macOS counterpart of mf-decode; first element of the macOS platform
-# track. See DESIGN_TODO.md "Platform: macOS".
+# track. See design/TODO.md "Platform: macOS".
 vtdecode = [
     "std",
     "dep:objc2",
@@ -267,7 +267,7 @@ metal-sink = [
 # Android hardware H.264 decode via the NDK MediaCodec (AMediaCodec) through the
 # `ndk` crate. Android-only (the dep lives under [target.'cfg(target_os =
 # "android")']), implies std. The Android counterpart of vtdecode / mf-decode;
-# first element of the Android platform track. See DESIGN_TODO.md "Platform:
+# first element of the Android platform track. See design/TODO.md "Platform:
 # Android".
 mediacodec = ["std", "dep:ndk"]
 # Android AAudio PCM render (AAudioSink) + capture (AAudioSrc) (M307), via the
@@ -416,7 +416,7 @@ dmabuf-wgpu = ["std", "dep:wgpu", "dep:wgpu-hal", "dep:ash"]
 # Vendor-neutral GPU-resident hardware video decode via Vulkan Video
 # (`VK_KHR_video_queue` + `VK_KHR_video_decode_*`), decoding into a wgpu texture
 # on the same Vulkan device wgpu runs, the cross-vendor analog of the CUDA-locked
-# NvDec -> CudaToWgpu path (AMD/RADV, NVIDIA, Intel/ANV). See DESIGN.md 4.11.6.
+# NvDec -> CudaToWgpu path (AMD/RADV, NVIDIA, Intel/ANV). See design/README.md 4.11.6.
 vulkan-video = ["std", "dep:wgpu", "dep:wgpu-hal", "dep:ash"]
 # HDR swapchain present (M575): `VulkanHdrSink` presents a decoded HDR texture to
 # an on-screen swapchain with an HDR colour space (`COLOR_SPACE_HDR10_ST2084_EXT`
@@ -453,7 +453,7 @@ wayland-sink = ["std", "dep:smithay-client-toolkit"]
 # proprietary EGL driver. Same GL/EGL deps as cuda-gl minus the CUDA stack:
 # khronos-egl, glow, wayland-egl, SCTK. Linux-only, implies std.
 gl-sink = ["std", "dep:khronos-egl", "dep:glow", "dep:wayland-egl", "dep:smithay-client-toolkit"]
-# Browser / WebAssembly target (DESIGN.md §6.3). Wasm-gated elements: WasmClock
+# Browser / WebAssembly target (design/README.md §6.3). Wasm-gated elements: WasmClock
 # (performance.now + setTimeout sleep), WebSocketSrc ingest, and a spawn_local
 # browser entry. Pulls wasm-bindgen/js-sys/web-sys/wasm-bindgen-futures
 # (target-gated to wasm32); implies std. Build:

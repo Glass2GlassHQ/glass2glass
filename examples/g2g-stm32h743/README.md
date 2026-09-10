@@ -15,7 +15,7 @@ in the network path.
   (smoltcp). That makes RTP egress **pure Rust end to end** — a stronger
   portability story than the ESP32-P4 (whose WiFi means bridging ESP-IDF C).
 - It's also the home of the M640 hardware-JPEG codec and the M655 functional
-  safety narrative (see the repo's `DESIGN_TODO.md` on-device rows).
+  safety narrative (see the repo's `design/TODO.md` on-device rows).
 
 ## The one piece that matters
 

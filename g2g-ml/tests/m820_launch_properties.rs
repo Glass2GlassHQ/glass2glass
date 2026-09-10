@@ -307,7 +307,7 @@ fn register_adds_the_ml_elements_by_name() {
     assert!(reg.inspect("wgpuinference").is_none());
 }
 
-/// The DESIGN_TODO target line, end to end: parse it against a registry the ML
+/// The design/TODO.md target line, end to end: parse it against a registry the ML
 /// elements were registered on, and read the properties back off the built graph.
 #[cfg(all(feature = "ort", feature = "analytics"))]
 #[test]

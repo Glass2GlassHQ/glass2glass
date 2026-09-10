@@ -1,6 +1,6 @@
 //! M491: Vulkan Video decode -> wgpu RGBA texture, GPU-resident (no CPU copy).
 //!
-//! Fifth increment of `VulkanVideoDec` (DESIGN-decode.md): the frame never
+//! Fifth increment of `VulkanVideoDec` (design/decode.md): the frame never
 //! leaves the GPU. The decoded NV12 image is converted to RGBA by a Vulkan
 //! compute pass through a `VkSamplerYcbcrConversion` on a dedicated compute
 //! queue, and the RGBA image is imported straight into wgpu (`texture_from_raw`)

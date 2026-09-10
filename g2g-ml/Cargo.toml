@@ -23,11 +23,11 @@ launch = ["std", "g2g-core/runtime"]
 # model output tensor into AnalyticsMeta detections (no inference engine needed);
 # enables g2g-core's `metadata` feature so frames carry the typed graph.
 analytics = ["g2g-core/metadata"]
-# Pure-Rust Burn backend with wgpu (DESIGN.md §5.2): BurnInference runs a
+# Pure-Rust Burn backend with wgpu (design/README.md §5.2): BurnInference runs a
 # deterministic linear-layer inference on the GPU through burn's wgpu backend,
 # no C++ engine. Targets embedded / Wasm / RTOS / server alike.
 burn = ["std", "dep:burn"]
-# Inline GPU tensor preprocessing (DESIGN.md §5.1): WgpuPreprocess converts an
+# Inline GPU tensor preprocessing (design/README.md §5.1): WgpuPreprocess converts an
 # NV12 frame to a normalized f32 NCHW RGB tensor in a wgpu compute shader.
 # Pulls wgpu (any D3D12/Vulkan/Metal GPU) plus g2g-plugins for the shared
 # GPU-frame owner types (WgpuNv12Texture); implies std.

@@ -4,7 +4,7 @@ The `g2g` developer workflow is consolidated behind a few tools: a `cargo xtask`
 command crate, a pipeline visualizer, a caps-negotiation explainer, criterion
 benchmarks with a CI regression guard, and an end-of-run telemetry report. This
 page is the reference; the architecture notes live in
-[DESIGN-tooling.md](DESIGN-tooling.md).
+[design/tooling.md](design/tooling.md).
 
 ## `cargo xtask`
 
@@ -257,7 +257,7 @@ one `event` per bus message. The JSON is built in `g2g_plugins::dashboard`
 Today's tap covers the cooperative graph runner and the two linear runners
 (per-element `process()` + input fill); the fan-in / fan-out / muxer runners,
 per-link transit time, source-side timing, and the threaded runner are
-follow-ups (see `DESIGN_TODO.md`).
+follow-ups (see `design/TODO.md`).
 
 ## Terminal UI (`--tui`)
 

@@ -106,4 +106,4 @@ pipeline once and move a stage between an MCU, an edge box, a GPU server, or the
 browser (even across a network boundary, see the remote-detection server) by
 swapping the source/sink or a single element, never the graph.
 
-See [DESIGN.md](DESIGN.md) and the [README](README.md#portability-one-pipeline-five-targets).
+See [design/README.md](design/README.md) and the [README](README.md#portability-one-pipeline-five-targets).

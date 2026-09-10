@@ -4,7 +4,7 @@ Network and cross-process carriers: the native WebRTC stack, the
 distributed-graph elements that cut a graph edge across a process or machine
 boundary, MoQ Transport, SMPTE ST 2110 media transport, and zero-copy local IPC
 for GPU memory.
-Part of the design in [DESIGN.md](DESIGN.md).
+Part of the design in [README.md](README.md).
 
 ## WebRTC
 
@@ -16,14 +16,14 @@ str0m's pure-Rust `rust-crypto` backend is selected, so there is no OpenSSL or
 libnice dependency. Everything is behind the opt-in `webrtc` feature, off by
 default, so the no_std baseline is unaffected. This is the native, server-grade
 counterpart of the browser-only data-channel `WebRtcSrc` (the browser sandbox in
-[DESIGN.md](DESIGN.md)).
+[README.md](README.md)).
 
 ### Element family
 
 One PeerConnection carries one track per element or N tracks in a session
 element. The trait an element implements selects the shape, and each maps to a
 terminal runner from the fan-in / fan-out family
-([DESIGN-caps.md](DESIGN-caps.md), fan-out and fan-in).
+([caps.md](caps.md), fan-out and fan-in).
 
 | Element | Tracks | Direction | Trait | Runner |
 | :--- | :--- | :--- | :--- | :--- |
@@ -226,8 +226,8 @@ with no trickle channel.
 
 ### RTCP feedback
 
-RTCP feedback rides the reverse channel of [DESIGN-caps.md](DESIGN-caps.md)
-[DESIGN-caps.md](DESIGN-caps.md). A remote PLI (`Event::KeyframeRequest`) becomes a
+RTCP feedback rides the reverse channel of [caps.md](caps.md)
+[caps.md](caps.md). A remote PLI (`Event::KeyframeRequest`) becomes a
 `Reconfigure::ForceKeyframe` walked upstream via
 `AsyncElement::take_reconfigure` to the encoder, where `Av1Enc` forces a rav1e
 IDR. Ingress originates a PLI on a mid-GOP join. str0m's BWE
@@ -261,11 +261,11 @@ A `Track` enum unifies the per-track facts WebRTC must agree on: the codec
 `media_time` maps a nanosecond PTS onto the track's RTP timestamp.
 
 H.264 crosses the boundary as Annex-B, the pipeline convention of
-[DESIGN-decode.md](DESIGN-decode.md): str0m's packetizer splits NAL units and
+[decode.md](decode.md): str0m's packetizer splits NAL units and
 its depayloader emits start-code framing. A receive-side video element
 advertises a `Dim::Range` / `Rate::Range` placeholder rather than `Dim::Any`,
 because geometry is only known from the in-band SPS and `fixate()`
-([DESIGN-caps.md](DESIGN-caps.md)) rejects `Any` at negotiation. A
+([caps.md](caps.md)) rejects `Any` at negotiation. A
 downstream `H264Parse` recovers the real dimensions.
 
 ### Validation status
@@ -274,7 +274,7 @@ On-network validated against a local mediamtx, single-track WHIP/WHEP and
 multi-track A/V, and by in-process P2P loopbacks on localhost, video and full
 A/V sendrecv. Structurally the stack covers one connection with N tracks,
 BUNDLE, sendrecv, PLI and BWE, which is `webrtcbin` parity. What remains is
-maturity rather than architecture, and `DESIGN_TODO.md`'s "WebRTC" item carries
+maturity rather than architecture, and `TODO.md`'s "WebRTC" item carries
 the tiered list.
 
 ## Distributed graphs
@@ -813,7 +813,7 @@ bare primitive, `m562_dmabuf_semaphore_sync` for the element handoff, and
 ## SMPTE ST 2110
 
 ST 2110 media transport rides on the shared PTP clock
-([DESIGN-timing.md](DESIGN-timing.md)).
+([timing.md](timing.md)).
 `MediaClock` (`g2g-core`, ST 2110-10) maps a PTP/TAI time to a 32-bit wrapping RTP
 timestamp and back, a media clock counting at 90 kHz for video or the sample rate
 for audio from the PTP epoch, so two receivers on the same grandmaster compute the

@@ -1,7 +1,7 @@
 //! Content-based demultiplexer (M205): one input, N typed output ports.
 //!
-//! The `pad-added` / dynamic-pad analog for the bounded-N case (DESIGN.md
-//! the "dark slots" in DESIGN-runtime.md). A container or multiplexed stream carries several
+//! The `pad-added` / dynamic-pad analog for the bounded-N case (design/README.md
+//! the "dark slots" in design/runtime.md). A container or multiplexed stream carries several
 //! elementary streams; this element splits them onto distinct output ports, one
 //! per stream, each with its own caps. It is a [`MultiOutputElement`] driven by
 //! [`run_source_fanout`](g2g_core::runtime::run_source_fanout), so a single

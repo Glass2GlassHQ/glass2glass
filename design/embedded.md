@@ -2,7 +2,7 @@
 
 The `alloc`-optional core, the static element model, the MCU peripheral and
 codec elements, the RTOS executors, and the proofs that hold all of it to a
-measured footprint. Part of the design in [DESIGN.md](DESIGN.md).
+measured footprint. Part of the design in [README.md](README.md).
 
 ## The heap-free (`alloc`-optional) core
 

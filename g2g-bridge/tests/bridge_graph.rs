@@ -1,5 +1,5 @@
 //! `BridgeGraph`: an embedded g2g sub-graph driven from synchronous code, the
-//! cross-thread push/pull path a GStreamer `chain` function uses (DESIGN.md).
+//! cross-thread push/pull path a GStreamer `chain` function uses (design/README.md).
 //!
 //! `default_registry` (and the bridge) are `std`-gated, so this file is too.
 #![cfg(feature = "std")]

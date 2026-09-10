@@ -1,4 +1,4 @@
-//! M16 step 2 (DESIGN-caps.md): negotiation-time element
+//! M16 step 2 (design/caps.md): negotiation-time element
 //! surface.
 //!
 //! `FormatElement` is the trait the future solver (M16 step 3) consumes;
@@ -140,7 +140,7 @@ impl core::fmt::Debug for CapsConstraint<'_> {
 }
 
 impl CapsConstraint<'_> {
-    /// ACCEPT_CAPS query (DESIGN-caps.md): would this element accept a
+    /// ACCEPT_CAPS query (design/caps.md): would this element accept a
     /// link carrying `caps`? A pure check against the declared
     /// constraint, with no runtime negotiation or back-and-forth.
     ///
@@ -465,7 +465,7 @@ mod tests {
 
     #[test]
     fn accept_caps_query_checks_constraint_set() {
-        // ACCEPT_CAPS (DESIGN §7): pure check against the declared set.
+        // ACCEPT_CAPS (design/README.md §7): pure check against the declared set.
         let nv12_720 = video(
             RawVideoFormat::Nv12,
             Dim::Fixed(1280),

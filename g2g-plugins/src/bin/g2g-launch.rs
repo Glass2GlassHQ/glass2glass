@@ -92,7 +92,7 @@ use g2g_plugins::registry::default_registry;
 use g2g_plugins::TokioThreadSpawner;
 
 // Steady-state link depth. Matches the integration-test default; small enough to
-// keep latency low without starving the source (see DESIGN notes on
+// keep latency low without starving the source (see design/README.md on
 // link_capacity dominating glass-to-glass latency).
 const LINK_CAPACITY: usize = 4;
 

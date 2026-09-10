@@ -255,7 +255,7 @@ pub trait AsyncElement: ElementBound {
     /// Default [`System`](MemoryDomainKind::System); a GPU producer (a hardware
     /// decoder emitting into VRAM, a wgpu/CUDA bridge) overrides it. Surfaced
     /// per edge by the negotiate-only path so the DOT dump can mark the GPU /
-    /// zero-copy links (it is not part of `Caps`; see DESIGN-caps.md).
+    /// zero-copy links (it is not part of `Caps`; see design/caps.md).
     fn output_memory(&self) -> MemoryDomainKind {
         MemoryDomainKind::System
     }
@@ -450,7 +450,7 @@ pub trait AsyncElement: ElementBound {
     /// carries meta through itself (a pass-through forwarding the same frame) or
     /// produces none, so the runner does nothing. Association is exact for a
     /// 1-in-1-out transform; a pipelined element gets most-recent-input
-    /// association. See DESIGN-ml.md.
+    /// association. See design/ml.md.
     #[cfg(feature = "metadata")]
     fn meta_transform(&self) -> Option<crate::meta::Transform> {
         None
@@ -768,7 +768,7 @@ pub trait DynAsyncElement: ElementBound {
 }
 
 /// Blanket adapter: every [`AsyncElement`] is usable as a
-/// [`DynAsyncElement`] by boxing its `process` future (DESIGN.md).
+/// [`DynAsyncElement`] by boxing its `process` future (design/README.md).
 /// This is what lets real plugin elements drop into a `Box<dyn
 /// DynAsyncElement>` slot without a hand-written impl. Method calls are
 /// disambiguated to `AsyncElement::` because the two traits share names.

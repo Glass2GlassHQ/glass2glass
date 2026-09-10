@@ -15,7 +15,7 @@ executor and links the hardware.
 The name reflects the metric the project optimizes for: **glass-to-glass
 latency**, the time between physical photon capture and hardware presentation.
 
-See [DESIGN.md](DESIGN.md) for the architecture specification and
+See [design/README.md](design/README.md) for the architecture specification and
 [DEVTOOLS.md](DEVTOOLS.md) for the developer tooling (`cargo xtask`, the pipeline
 visualizer, the caps explainer, benchmarks).
 
@@ -531,7 +531,7 @@ run_source_transform_sink(src, dec, sink, &clock, LatencyProfile::Live).await?;
 ```
 
 Features: `rtsp ffmpeg cuda cuda-gl`. Linux + NVIDIA only. See
-[DESIGN-decode.md](DESIGN-decode.md).
+[design/decode.md](design/decode.md).
 
 ### Native NVDEC → NVENC transcode, GPU-resident, with domain auto-plug
 
@@ -1131,7 +1131,7 @@ g2g-capi/        # C ABI (cdylib/staticlib + include/g2g.h)
 g2g-pyapi/       # Python (pyo3) bindings
 xtask/           # dev-command crate (cargo xtask ci | test --here | size | wasm | bench | ffi-probe)
 g2g-bench/       # criterion benchmarks (excluded from the workspace)
-DESIGN.md        # architecture overview; DESIGN-*.md per track
+design/          # architecture overview, track documents and open work
 DEVTOOLS.md      # developer tooling reference
 docs/            # GitHub Pages site
 ```

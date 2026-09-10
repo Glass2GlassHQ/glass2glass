@@ -8,7 +8,7 @@
 //! one task, so `block_in_place` there would block every sibling arm too (it
 //! only yields to *other* tasks, and the arms are the same task). Only pushing
 //! the blocking work into a separate pool task lets the join keep making
-//! progress. See DESIGN-caps.md 4.13.3.
+//! progress. See design/caps.md 4.13.3.
 
 /// Run `f` on tokio's blocking pool and await its result. With no tokio runtime
 /// active (a non-tokio executor like g2g-core's park-based `block_on`, where

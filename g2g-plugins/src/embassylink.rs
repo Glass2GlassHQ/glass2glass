@@ -1,5 +1,5 @@
 //! Embassy zero-alloc inter-task link: a statically-sized channel carrying
-//! `PipelinePacket`s between embedded tasks (DESIGN.md "stack channels"),
+//! `PipelinePacket`s between embedded tasks (design/README.md "stack channels"),
 //! the embassy-sync counterpart of the spin-based runtime channel. The app owns
 //! the `PacketChannel` (e.g. in a `StaticCell` or `static`) and hands its `sink`
 //! to a producer and its `receiver` to a consumer.
@@ -7,7 +7,7 @@
 //! The channel storage is static (no allocation), and the `OutputSink`
 //! adapter pushes through the poll form, so a push costs no heap either. The
 //! fully static element model (concrete future types, no `dyn`) remains the
-//! static-graph layer (DESIGN-runtime.md).
+//! static-graph layer (design/runtime.md).
 
 use embassy_sync::blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex, RawMutex};
 use embassy_sync::channel::{Channel, Receiver, Sender};

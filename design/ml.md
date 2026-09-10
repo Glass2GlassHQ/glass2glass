@@ -2,7 +2,7 @@
 
 GPU tensor preprocessing, the inference backends, multi-stream batching, and the
 per-frame metadata that carries detections through the graph to an overlay. Part
-of the design in [DESIGN.md](DESIGN.md).
+of the design in [README.md](README.md).
 
 To prevent GPU-to-CPU synchronization stalls, tensor execution happens directly
 inside the VRAM domain. ML elements are `AsyncElement` implementations like any

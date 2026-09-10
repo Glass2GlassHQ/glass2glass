@@ -2,7 +2,7 @@
 
 Timed text and its renderers: subtitle parsing, the CPU and GPU overlay
 elements, closed captions in and out of a video bitstream, bitmap subtitle
-formats, and teletext. Part of the design in [DESIGN.md](DESIGN.md).
+formats, and teletext. Part of the design in [README.md](README.md).
 
 ## textoverlay
 
@@ -50,7 +50,7 @@ Cues are set programmatically through `from_srt` and `from_webvtt` or, on `std`,
 through the `location=` property loading a `.srt` or `.vtt` file, typed by
 extension and otherwise by content sniff. The element is registered as
 `textoverlay` for the `gst-launch` text parser. This mirrors the analytics
-overlay's CPU baseline in [DESIGN-ml.md](DESIGN-ml.md): the `no_std` bitmap
+overlay's CPU baseline in [ml.md](ml.md): the `no_std` bitmap
 renderer is the portable path.
 
 ### TrueType and shaping

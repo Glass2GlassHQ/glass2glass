@@ -6,7 +6,7 @@
 //! per-input re-solve, a future mid-stream clock change) has nowhere to
 //! live in that topology: each arm only sees its own two links. The
 //! coordinator is the single task that will own that coordination
-//! (DESIGN-caps.md; R2: single-task
+//! (design/caps.md; R2: single-task
 //! coordinator, not shared `Arc<Mutex>` on every element; R3:
 //! out-of-band coordinator-channel, not in-band `PipelinePacket`s).
 //!
@@ -455,7 +455,7 @@ where
 /// re-derives its own allocation params from the new caps
 /// (`propose_allocation`) and stores them for its next-frame allocation
 /// (`configure_allocation`). This is the cheap, element-local phase of
-/// the re-cascade (DESIGN-caps.md): a sink
+/// the re-cascade (design/caps.md): a sink
 /// resizes its own pool, a decoder re-derives its scratch buffer. There
 /// is deliberately **no** cross-element propagation here, that is β; the
 /// element both proposes and configures itself rather than answering a

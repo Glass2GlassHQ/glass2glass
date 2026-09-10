@@ -17,7 +17,7 @@ default = ["std"]
 # hosting an element in a graph wants it anyway.
 std = ["g2g-core/std", "g2g-core/runtime"]
 # Embed CPython and host gst-python-ml element shells in-process via pyo3
-# (DESIGN.md, the Python-element track). OS-coupled: needs libpython at build
+# (design/README.md, the Python-element track). OS-coupled: needs libpython at build
 # and run time, so it is off the no_std / RTOS baseline and implies std. The
 # default build negotiates caps but cannot run frames (the per-frame Python
 # call lives behind this feature).

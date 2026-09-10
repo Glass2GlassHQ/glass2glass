@@ -99,7 +99,7 @@ async fn videoscale_convenience_properties_scale() {
     );
 }
 
-// KNOWN GST-PORTING GAPS (tracked in DESIGN_TODO, not naming issues):
+// KNOWN GST-PORTING GAPS (tracked in design/TODO.md, not naming issues):
 //  - Format-less geometry caps `video/x-raw,width=160,height=120` don't parse:
 //    g2g's `Caps::RawVideo` format field is a concrete enum, not "any".
 //  - Caps-driven transform operation: `videoscale ! video/x-raw,...,width=160`

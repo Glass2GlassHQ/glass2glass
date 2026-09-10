@@ -364,7 +364,7 @@ A GStreamer *application* is rarely a static line: it adds and removes branches 
 runtime, blocks pads, relinks on `pad-added`, and pushes/pulls buffers from app
 code. g2g reaches the same outcomes with different primitives, because Rust
 ownership forbids GObject's reference-cycle + signal-callback shape. The full map
-is DESIGN-runtime.md; the patterns an app developer hits most:
+is design/runtime.md; the patterns an app developer hits most:
 
 | GStreamer idiom | glass2glass |
 | :--- | :--- |
@@ -419,7 +419,7 @@ to, so whatever is queued stays ahead of anything the new element emits; a remov
 closes the element's input and lets it drain through before the bypass takes
 effect. Caps consent is settled before anything moves, and a refusal leaves the
 graph running unchanged, which is the case a mis-ordered `unlink` / `link` turns
-into a stall or a crash. The protocol is DESIGN-runtime.md; a working demo that
+into a stall or a crash. The protocol is design/runtime.md; a working demo that
 splices a `videoflip` in and out of a live RTSP window is
 [examples/g2g-mutate-demo](examples/g2g-mutate-demo).
 
@@ -607,7 +607,7 @@ g2g-launch 'videotestsrc ! gstwrap element="videoflip method=horizontal-flip" ! 
 
 ## 8. Known gaps
 
-The full outstanding list is DESIGN_TODO.md; this is what a port is most likely
+The full outstanding list is design/TODO.md; this is what a port is most likely
 to hit.
 
 - **Platform coverage.** Linux and Windows are the primary targets. Android
@@ -634,7 +634,7 @@ to hit.
   plain C. Still open: how a distribution supplies `g2g-core` to an offline
   plugin build.
 - `g2g-bridge` (embed a g2g sub-graph inside a GStreamer pipeline for incremental
-  migration, DESIGN.md) is in: the GObject shell (`libgstglass2glass.so`, the
+  migration, design/README.md) is in: the GObject shell (`libgstglass2glass.so`, the
   `gstreamer` feature) registers a real `glass2glass` GStreamer element, so a
   stock `gst-launch` line embeds a g2g sub-graph by name:
   `... ! glass2glass fragment="videoflip method=horizontal-flip" ! ...`. A

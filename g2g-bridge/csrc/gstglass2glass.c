@@ -1,5 +1,5 @@
 /* GStreamer element `glass2glass`: embeds a g2g sub-graph inside a GStreamer
- * pipeline (DESIGN.md §7). This is the thin GObject shell over the Rust
+ * pipeline (design/README.md §7). This is the thin GObject shell over the Rust
  * `BridgeGraph` impedance core; it owns all GStreamer/GObject boilerplate and
  * delegates the actual work to the C-ABI functions in `src/ffi.rs`.
  *

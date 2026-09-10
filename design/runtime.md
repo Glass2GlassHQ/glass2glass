@@ -2,7 +2,7 @@
 
 Changing a graph while it runs, the state machine and seek model, and the bus and
 logging channels an application watches. Part of the design in
-[DESIGN.md](DESIGN.md).
+[README.md](README.md).
 
 ## Two graph APIs
 
@@ -543,7 +543,7 @@ events, so an element notifies the application without a back-reference.
 - `ClockLost`: the elected clock lost the reference it disciplines to
   (`GST_MESSAGE_CLOCK_LOST`).
 - `SourceRestart`: a `fallbacksrc` life started, is being retried, or stopped
-  ([DESIGN-live.md](DESIGN-live.md)).
+  ([live.md](live.md)).
 
 Posting is non-blocking through `try_post`: a control message never stalls the data
 path, and a full bus drops the report rather than applying backpressure.

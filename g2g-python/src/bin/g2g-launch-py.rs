@@ -29,7 +29,7 @@ use g2g_plugins::clock::WallClock;
 use g2g_plugins::registry::default_registry;
 
 // Same steady-state link depth as `g2g-launch` (low latency without starving the
-// source); see DESIGN notes on link_capacity dominating glass-to-glass latency.
+// source); see design/README.md on link_capacity dominating glass-to-glass latency.
 const LINK_CAPACITY: usize = 4;
 
 const USAGE: &str = "usage: g2g-launch-py [-q] <element> [key=value ...] ! <element> ! ...";

@@ -10,7 +10,7 @@
 //! the shared store [`HlsSrc`](crate::hlssrc) publishes the playlist's
 //! `#EXT-X-KEY` material into. This element reads the key in force; the fMP4
 //! path resolves a rotating key per fragment instead (see [`crate::cenc`]).
-//! AC-3 sample encryption is a follow-up (DESIGN_TODO).
+//! AC-3 sample encryption is a follow-up (design/TODO.md).
 //!
 //! H.264: for each slice NAL (type 1 / 5) longer than 48 bytes, the
 //! emulation-prevention bytes are stripped, the first 32 bytes stay clear, then a

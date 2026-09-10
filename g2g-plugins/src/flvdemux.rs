@@ -22,7 +22,7 @@
 //! parsed. Besides H.264 and AAC the legacy Flash codecs are carried too
 //! (`stream=sorenson | vp6 | vp6a | mp3 | speex`), their frames forwarded as the
 //! codec's own bitstream with the layout the tag flags declare announced via
-//! `CapsChanged` (DESIGN-containers.md).
+//! `CapsChanged` (design/containers.md).
 
 use core::future::Future;
 use core::pin::Pin;

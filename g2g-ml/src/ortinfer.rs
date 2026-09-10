@@ -1,4 +1,4 @@
-//! ONNX Runtime inference element (`ort` backend, DESIGN-ml.md).
+//! ONNX Runtime inference element (`ort` backend, design/ml.md).
 //!
 //! M21: `OrtInference` is an `AsyncElement` transform that negotiates
 //! `Caps::RawVideo` on its input pad and `Caps::Tensor` on its output pad,

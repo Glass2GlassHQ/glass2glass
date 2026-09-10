@@ -1,6 +1,6 @@
 /* `gstwrap` C helper: drives a real GStreamer pipeline
  * `appsrc ! <element> ! appsink` so a g2g graph can host an unported GStreamer
- * element (DESIGN.md §7, the reverse of g2g-bridge). The Rust element
+ * element (design/README.md §7, the reverse of g2g-bridge). The Rust element
  * (src/gstwrap.rs) owns all g2g plumbing (caps negotiation, Frame mapping) and
  * calls these C-ABI functions to feed/drain the embedded GStreamer pipeline.
  *

@@ -516,7 +516,7 @@ impl RunStats {
 /// Longer chains (4+ elements, future runner variants) will iterate
 /// the solver result to reconfigure every changed downstream link, not
 /// just the immediate next element — that's the structural unlock
-/// DESIGN-caps.md calls out.
+/// design/caps.md calls out.
 ///
 /// Forward × reverse race (§7): an `EmptyLink` here means the sink
 /// can't take the boundary's output. The caller drops the forward
@@ -954,7 +954,7 @@ where
 ///
 /// Heterogeneous branches arrive as `Box`-erased `&mut dyn DynAsyncElement`
 /// (std only). Negotiation fixates the source proposal once and configures
-/// every element with it (DESIGN.md); per-branch caps negotiation is
+/// every element with it (design/README.md); per-branch caps negotiation is
 /// M10, so a sink returning `ReFixate` here fails with `FixationFailed`.
 #[cfg(feature = "std")]
 pub async fn run_source_fanout<Src, Tx, Clk>(
@@ -1977,7 +1977,7 @@ where
 ///
 /// Owed: Caps-β, a forward coordinator re-solve walk for a downstream
 /// `DerivedOutput` element that must re-derive mid-stream (driver-gated,
-/// DESIGN-caps.md). ReFixate at startup fails loud
+/// design/caps.md). ReFixate at startup fails loud
 /// (`FixationFailed`), as in `run_source_fanout`.
 #[cfg(feature = "std")]
 pub async fn run_linear_chain<Src, Snk, Clk>(
@@ -2214,7 +2214,7 @@ where
     // M18 β: a single coordinator task owns the cross-element re-cascade.
     // The sink arm reports an applied mid-stream `CapsChanged` (with its
     // re-derived allocation proposal) out-of-band
-    // (DESIGN-caps.md); the coordinator
+    // (design/caps.md); the coordinator
     // forwards the proposal one hop upstream over `transform_ctrl_rx` to the
     // transform's `configure_allocation`. The transform arm selects on that
     // control receiver alongside its data link, so the directive reaches it

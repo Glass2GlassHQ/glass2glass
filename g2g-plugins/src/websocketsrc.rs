@@ -1,7 +1,7 @@
 //! WebSocket ingest source (browser/wasm). Opens a `WebSocket`, receives
 //! binary messages (`ArrayBuffer`), and emits each as a `DataFrame` chunk in
 //! the system-memory domain: the browser analog of `FileSrc`/`RtspSrc` for
-//! pull-from-network ingest (DESIGN.md).
+//! pull-from-network ingest (design/README.md).
 //!
 //! Like `FileSrc`, a raw byte stream carries no caps, so the caller declares
 //! them at construction; the source produces exactly that to the solver. Feed

@@ -3,7 +3,7 @@
 The runtime face of an element: string-keyed properties, `gst-inspect`-style
 introspection, the `gst-launch` text parser, declarative and scripted graphs,
 dynamically loaded native plugins, and the hosted Python and Rhai element
-shells. Part of the design in [DESIGN.md](DESIGN.md).
+shells. Part of the design in [README.md](README.md).
 
 The typed `with_*` builders are the zero-cost construction path and the only one
 the `no_std` and RTOS baseline needs. Tooling, meaning a text-pipeline parser, an

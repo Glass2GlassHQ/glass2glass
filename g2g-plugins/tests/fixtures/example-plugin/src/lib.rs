@@ -1,6 +1,6 @@
 //! An out-of-tree third-party g2g plugin, built as a dynamically loadable
 //! `cdylib`. This is the whole author workflow for extending a packaged
-//! `g2g-launch` without recompiling g2g (DESIGN_TODO "Dynamic plugin loading via
+//! `g2g-launch` without recompiling g2g (design/TODO.md "Dynamic plugin loading via
 //! cargo", M201):
 //!
 //! 1. `cargo new --lib`, set `crate-type = ["cdylib"]`.

@@ -1,5 +1,5 @@
 //! Caps filter: a pass-through transform that forces a negotiation-time
-//! narrowing (DESIGN-caps.md). Data flows through unchanged;
+//! narrowing (design/caps.md). Data flows through unchanged;
 //! the element's only job is to constrain the link to a specific
 //! `CapsSet` so the solver narrows the chain to it.
 //!

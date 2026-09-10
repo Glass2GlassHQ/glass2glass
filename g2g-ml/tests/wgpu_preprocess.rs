@@ -1,5 +1,5 @@
 #![cfg(feature = "wgpu")]
-//! DESIGN-ml.md: `WgpuPreprocess` converts an NV12 frame to a normalized f32 NCHW RGB
+//! design/ml.md: `WgpuPreprocess` converts an NV12 frame to a normalized f32 NCHW RGB
 //! tensor in a wgpu compute shader. The test runs a known NV12 frame (distinct
 //! luma, one neutral and one coloured chroma block) through the element on the
 //! real GPU and asserts the read-back tensor matches the host BT.601 reference

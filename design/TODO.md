@@ -1,9 +1,9 @@
-# DESIGN_TODO
+# Design TODO
 
-Outstanding work, tracked against the architecture in [DESIGN.md](DESIGN.md).
+Outstanding work, tracked against the architecture in [README.md](README.md).
 This file is a terse catalogue of open tasks only. Completed work and the
-rationale for shipped architecture live in [DESIGN.md](DESIGN.md) and
-[CHANGELOG.md](CHANGELOG.md), not here.
+rationale for shipped architecture live in [README.md](README.md) and
+[CHANGELOG.md](../CHANGELOG.md), not here.
 
 ## Roadmap (high level)
 

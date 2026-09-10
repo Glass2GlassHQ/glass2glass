@@ -1,6 +1,6 @@
 //! Standard source / sink / transform elements for `glass2glass`.
 //!
-//! Per the spec (DESIGN.md), this crate is `no_std + alloc` at baseline. Network
+//! Per the spec (design/README.md), this crate is `no_std + alloc` at baseline. Network
 //! and OS-coupled elements (RTSP source via `retina`, V4L2, wgpu sinks)
 //! live behind cargo features that imply `std`.
 //!
@@ -1308,7 +1308,7 @@ pub mod wgpudmabuf;
 
 // Vendor-neutral GPU-resident hardware video decode via Vulkan Video
 // (VK_KHR_video_queue). Linux + Windows (both expose the extensions on RADV /
-// ANV / the NVIDIA proprietary driver). See DESIGN-decode.md.
+// ANV / the NVIDIA proprietary driver). See design/decode.md.
 #[cfg(all(
     any(target_os = "linux", target_os = "windows"),
     feature = "vulkan-video"
@@ -1318,7 +1318,7 @@ pub mod vulkanvideo;
 // HDR swapchain present (M575): present a decoded HDR texture to an on-screen
 // swapchain with an HDR colour space + mastering metadata. A raw ash swapchain on
 // the decode device (wgpu 29 cannot express a swapchain colour space). See
-// DESIGN-decode.md.
+// design/decode.md.
 #[cfg(all(
     any(target_os = "linux", target_os = "windows"),
     feature = "hdr-present"
@@ -1508,7 +1508,7 @@ pub mod cudawgpu;
 #[cfg(all(target_os = "linux", feature = "cuda-wgpu"))]
 pub mod cudatowgpu;
 
-// Browser / WebAssembly target (DESIGN.md), behind the `web` feature:
+// Browser / WebAssembly target (design/README.md), behind the `web` feature:
 // WasmClock (performance.now + setTimeout) and WebSocketSrc ingest. The wasm
 // bindings are target-gated to wasm32, so enabling `web` elsewhere is a no-op,
 // like mf-decode on Linux. The deployable `#[wasm_bindgen]` browser entry points
