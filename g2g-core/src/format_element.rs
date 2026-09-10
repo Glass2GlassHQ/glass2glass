@@ -1,4 +1,4 @@
-//! M16 step 2 (DESIGN.md §4.13.1): negotiation-time element
+//! M16 step 2 (DESIGN-caps.md): negotiation-time element
 //! surface.
 //!
 //! `FormatElement` is the trait the future solver (M16 step 3) consumes;
@@ -140,7 +140,7 @@ impl core::fmt::Debug for CapsConstraint<'_> {
 }
 
 impl CapsConstraint<'_> {
-    /// ACCEPT_CAPS query (DESIGN.md §4.13.1): would this element accept a
+    /// ACCEPT_CAPS query (DESIGN-caps.md): would this element accept a
     /// link carrying `caps`? A pure check against the declared
     /// constraint, with no runtime negotiation or back-and-forth.
     ///

@@ -1,4 +1,4 @@
-//! Detection post-processing (DESIGN.md §5.3): the element that turns a
+//! Detection post-processing (DESIGN-ml.md): the element that turns a
 //! YOLO-style model output tensor into structured bounding-box detections, the
 //! first producer of the per-frame analytics metadata graph (`g2g-core::meta`).
 //! Composes after inference: `... -> OrtInference -> DetectionPostprocess`.

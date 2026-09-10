@@ -182,7 +182,7 @@ async fn slot_swap_mid_stream_through_runner() {
             .await
             .expect("transform A must signal on its first frame");
         // Configure B against the live caps before installing it: the slot
-        // does not re-run negotiation on swap (DESIGN.md §4.8.2).
+        // does not re-run negotiation on swap (DESIGN-runtime.md).
         let mut transform_b: Box<dyn DynAsyncElement + Send> = Box::new(Tap {
             counter: counter_b_driver,
             first_tx: None,

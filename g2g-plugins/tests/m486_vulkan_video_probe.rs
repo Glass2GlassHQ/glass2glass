@@ -1,6 +1,6 @@
 //! M486: Vulkan Video decode capability probe (`vulkan-video` feature).
 //!
-//! First increment of `VulkanVideoDec` (DESIGN.md 4.11.6): confirm the machine's
+//! First increment of `VulkanVideoDec` (DESIGN-decode.md): confirm the machine's
 //! Vulkan driver actually exposes a `VK_QUEUE_VIDEO_DECODE_BIT_KHR` queue for
 //! H.264 and report the decode limits `intercept_caps` and DPB sizing will use.
 //! Runs for real on a Vulkan GPU (the RTX 3060 dev host); skips cleanly with no

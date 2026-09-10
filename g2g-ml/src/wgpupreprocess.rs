@@ -1,4 +1,4 @@
-//! Inline GPU tensor preprocessing via wgpu compute (DESIGN.md §5.1).
+//! Inline GPU tensor preprocessing via wgpu compute (DESIGN-ml.md).
 //!
 //! `WgpuPreprocess` is the hardware-first preprocessing pillar: an
 //! `AsyncElement` that takes an NV12 or packed-YUYV video frame and emits a

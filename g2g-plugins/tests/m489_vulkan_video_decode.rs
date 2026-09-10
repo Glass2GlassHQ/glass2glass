@@ -1,6 +1,6 @@
 //! M489: Vulkan Video H.264 IDR frame decode on real hardware.
 //!
-//! Third increment of `VulkanVideoDec` (DESIGN.md 4.11.6): actually decode a
+//! Third increment of `VulkanVideoDec` (DESIGN-decode.md): actually decode a
 //! frame. Opens the decode device, creates the session from the fixture's
 //! SPS/PPS, submits the first IDR slice through `vkCmdDecodeVideoKHR`, and reads
 //! back the decoded NV12 luma plane. Asserts the luma is non-uniform, i.e. the

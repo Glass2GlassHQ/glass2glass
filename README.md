@@ -531,7 +531,7 @@ run_source_transform_sink(src, dec, sink, &clock, LatencyProfile::Live).await?;
 ```
 
 Features: `rtsp ffmpeg cuda cuda-gl`. Linux + NVIDIA only. See
-[DESIGN.md §4.11.5](DESIGN.md).
+[DESIGN-decode.md](DESIGN-decode.md).
 
 ### Native NVDEC → NVENC transcode, GPU-resident, with domain auto-plug
 
@@ -1131,7 +1131,7 @@ g2g-capi/        # C ABI (cdylib/staticlib + include/g2g.h)
 g2g-pyapi/       # Python (pyo3) bindings
 xtask/           # dev-command crate (cargo xtask ci | test --here | size | wasm | bench | ffi-probe)
 g2g-bench/       # criterion benchmarks (excluded from the workspace)
-DESIGN.md        # architecture specification
+DESIGN.md        # architecture overview; DESIGN-*.md per track
 DEVTOOLS.md      # developer tooling reference
 docs/            # GitHub Pages site
 ```

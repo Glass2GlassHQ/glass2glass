@@ -1,6 +1,6 @@
 //! M488: Vulkan Video H.264 decode session + parameters on real hardware.
 //!
-//! Second increment of `VulkanVideoDec` (DESIGN.md 4.11.6): open a wgpu device
+//! Second increment of `VulkanVideoDec` (DESIGN-decode.md): open a wgpu device
 //! with a Vulkan Video decode queue, then create a `VkVideoSessionKHR` +
 //! `VkVideoSessionParametersKHR` from the real fixture's SPS/PPS. Creating the
 //! session parameters makes the driver validate the `Std*` SPS/PPS mapping

@@ -6,7 +6,8 @@ Guidance for AI agents working in this repository. Read this before making chang
 
 `glass2glass` (`g2g`) is a Rust multimedia pipeline framework, GStreamer-like but
 with a statically typed, `no_std + alloc` core. Graphs are composed from typed
-elements rather than runtime string-keyed factories. Full design: `DESIGN.md`.
+elements rather than runtime string-keyed factories. Full design: `DESIGN.md`
+plus the per-track `DESIGN-*.md` files it indexes.
 
 ## Workspace
 
@@ -102,9 +103,9 @@ under test. Every test needs an assertion that fails if the feature breaks.
 ## Milestones
 
 Work is tracked by milestone `Mn`. The high-level roadmap is the top of
-`DESIGN_TODO.md`; `DESIGN.md` §4.10 maps the architectural tracks to their spec
-sections. Record each milestone in `CHANGELOG.md` under `## Unreleased`, one
-terse line (see the Conventions note above).
+`DESIGN_TODO.md`; the reading guide at the top of `DESIGN.md` maps each track to
+its own `DESIGN-*.md` file. Record each milestone in `CHANGELOG.md` under
+`## Unreleased`, one terse line (see the Conventions note above).
 Pre-release `0.7.0` (tagged, published to crates.io). Stability tiers and the
 versioning policy live in `STABILITY.md`.
 
@@ -113,10 +114,11 @@ to GStreamer, no list of historical accomplishments. It must never mention a don
 item, not even to note it as done or partially done: when a task (or part of one)
 is finished, delete that text from `DESIGN_TODO.md` and leave only what is still
 outstanding, phrased as a plain future task with no reference to what already
-landed. Done work appears only in `DESIGN.md` (the current design) and
-`CHANGELOG.md` (the milestone line), never in `DESIGN_TODO.md`. If finishing a
-task established architecture worth keeping, document that in `DESIGN.md`.
-`DESIGN.md` describes only the current design.
+landed. Done work appears only in `DESIGN.md` and its `DESIGN-*.md` track files
+(the current design) and `CHANGELOG.md` (the milestone line), never in
+`DESIGN_TODO.md`. If finishing a task established architecture worth keeping,
+document that in the `DESIGN-*.md` file for its track. Those files describe only
+the current design.
 
 ## Platform notes
 

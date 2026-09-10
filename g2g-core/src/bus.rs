@@ -2,7 +2,7 @@
 //!
 //! A pipeline-level channel for asynchronous out-of-band messages: elements
 //! notify the application of lifecycle events (EOS, errors, warnings) or
-//! custom signals without holding a back-reference to it (DESIGN.md §4.9.1).
+//! custom signals without holding a back-reference to it (DESIGN-runtime.md).
 //! Many elements produce, one application consumes — a thin **mp-sc** wrapper
 //! over the runtime channel ([`crate::runtime::bounded`]).
 //!

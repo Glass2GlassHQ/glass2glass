@@ -34,7 +34,7 @@ pub struct DotAnnotations<'a> {
     /// edge's primary label via [`Caps::to_gst_string`].
     pub edge_caps: Option<&'a [Caps]>,
     /// Memory domain per edge. Memory domains are not part of [`Caps`] (they
-    /// ride the auto-plug metadata, see DESIGN.md 4.13.9), so they are passed
+    /// ride the auto-plug metadata, see DESIGN-caps.md), so they are passed
     /// alongside. A non-`System` domain marks a zero-copy GPU link and is drawn
     /// bold.
     pub edge_memory: Option<&'a [MemoryDomainKind]>,

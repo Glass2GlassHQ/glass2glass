@@ -7,7 +7,7 @@
 //! rendered / decoded GPU frame can leave the process with no CPU copy: feed the
 //! emitted dma-buf to a [`DmaBufSink`](crate::localdmabuf::DmaBufSink) (M557) and
 //! the peer re-imports it with `DmaBufToWgpu`. This is the export mirror of the
-//! import side of DESIGN.md 7 and the GPU producer named as the M557 follow-up.
+//! import side of DESIGN.md and the GPU producer named as the M557 follow-up.
 //!
 //! # How the export works
 //!

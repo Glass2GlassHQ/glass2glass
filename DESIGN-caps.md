@@ -1,15 +1,12 @@
-# glass2glass: CSP Caps Negotiation
+# Caps negotiation
 
-The capability-negotiation subsystem of `glass2glass`, extracted from
-[DESIGN.md](DESIGN.md) for length (it is the largest single part of the
-design). Section numbers (§4.13.x) are preserved verbatim, so the many
-`§4.13.x` cross-references elsewhere in `DESIGN.md` resolve here.
+The capability-negotiation subsystem: the constraint model, the CSP solver, the
+DAG runner it feeds, mid-stream re-solve, the allocation cascade, fan-out and
+fan-in, bins, and auto-plug. Part of the design in [DESIGN.md](DESIGN.md).
 
----
+## The constraint model
 
-### 4.13 CSP Caps Negotiation
-
-The handshake sketched in §4.2 is the *interface* contract. The underlying
+The handshake sketched in [DESIGN.md](DESIGN.md) is the interface contract. The underlying
 mechanism is a **distributed constraint-satisfaction problem (CSP)**: each
 element declares a constraint over `(input, output)` caps; a solver finds an
 assignment over every link in the graph that satisfies all constraints,
@@ -21,7 +18,7 @@ the whole graph (or over an affected subgraph on a mid-stream change),
 returns structured failure when no assignment exists, and trades pad-query
 round-trips for direct function calls.
 
-#### 4.13.1 CapsSet and the constraint enum
+## CapsSet and the constraint enum
 
 ```rust
 /// A set of acceptable caps descriptions, ordered by preference.
@@ -63,7 +60,8 @@ retargets is unsound (the solver would narrow the input on a field the transform
 rewrites). A full *closure-free* forward-derivation descriptor would remove the
 duplication, but it is a deliberate non-goal: forward derivation is genuinely
 imperative (a scaler branches on format membership and enforces 4:2:0 even-dims,
-the cross-field validity §4.13.10 keeps out of the declarative constraint), so it
+the cross-field validity the declarative constraint leaves out),
+so it
 cannot be a `Copy` descriptor without re-importing exactly what was excluded.
 Instead the drift is caught directly: the solver's forward step runs a
 `debug_assert!` (`verify_passthrough_sound`) that every field the mask declares
@@ -118,7 +116,7 @@ pub enum Caps {
 so a raw-only sink simply cannot match compressed caps, and the impossibility
 becomes a type-level error rather than a runtime `not-negotiated`.
 
-#### 4.13.2 The solver
+## The solver
 
 `solver::solve_linear` runs arc consistency on a chain: forward sweep
 (`Produces ∩ Accepts ∩ Identity ∩ Mapping ∩ DerivedOutput`), backward sweep
@@ -148,9 +146,9 @@ posted to the pipeline `Bus` via `BusMessage::NegotiationFailed`.
 `solver::downstream_feasibility(constraints) -> Vec<Option<CapsSet>>` is a
 backward fold from the sink that computes, per link, the set the downstream
 tail can still fixate **ignoring the upstream**. It's source-independent and
-serves as a snapshot for the mid-stream re-solve (§4.13.4).
+serves as a snapshot for the mid-stream re-solve below.
 
-#### 4.13.3 The DAG runner
+## The DAG runner
 
 `run_graph(Graph<GraphNodeRef>, clock, link_capacity)` is the single runner.
 A `Graph` is built from `GraphNode { Source | Element | Muxer }` payloads and
@@ -184,7 +182,8 @@ arm's own result, so swallowing the closed channel at the tee is safe.
 Negotiation phase 1 asks each source for its **produce set**
 (`DynSourceLoop::produced_caps`, the erased view of `SourceLoop::caps_constraint`),
 not its preferred caps alone, so a source that offers alternatives (`v4l2src`'s
-pixel formats, §4.12a) has the choice settled by the solve like any other element:
+pixel formats, [DESIGN-live.md](DESIGN-live.md)) has the choice settled by the
+solve like any other element:
 arc consistency drops the alternatives downstream cannot take, the fixation picks
 the highest-preference survivor, and the source reads the outcome in
 `configure_pipeline`. A source still on the legacy bridge yields the single
@@ -193,7 +192,7 @@ the highest-preference survivor, and the source reads the outcome in
 The fan-in and duplex runners read the same produce set (M955). Their branches do
 not form a chain to solve, so each is narrowed on its own: `select_branch_caps`
 walks the set in preference order and takes the first alternative the pad that
-branch feeds accepts (`ACCEPT_CAPS`, §4.13.8) — the merged sink for
+branch feeds accepts (`ACCEPT_CAPS`, below), the merged sink for
 `run_fanin_sink`, the per-input pad for a fan-in session, a duplex send side, or a
 runtime-attached input. Per-pad accept sets therefore let one run carry a
 different format per branch out of identical sources. When a pad accepts none of
@@ -234,14 +233,15 @@ lower-latency default, and it is the only path for the `no_std` / wasm / embassy
 executors, which the `run_graph_threaded` gate (`std + multi-thread`) excludes.
 `run_graph_threaded` requires an owning `Graph<GraphNode>` (`'static`) so each arm
 can move its element onto a worker thread. The same rule shapes the fan-in
-deadline tick (§3.1): the cooperative arms borrow their clock, but a builder
+deadline tick ([DESIGN.md](DESIGN.md)): the cooperative arms borrow their clock,
+but a builder
 closure owns everything it carries, so `run_graph_threaded_ticked` takes the clock
 as an `Arc<dyn DynAsyncClock + Send + Sync>` and each muxer arm is wrapped in a
 future that owns its handle and lends it to the shared arm code.
 
 **The fan-in deadline tick comes from the pipeline clock.** A fan-in element that
 declares a `tick_interval_ns` receives `PipelinePacket::Tick` on that period even
-while its inputs are silent (§3.1), which is how a compositor holds its output rate
+while its inputs are silent, which is how a compositor holds its output rate
 over a stalled pad. The timer is not a separate runner input: `PipelineClock::as_ticker`
 returns the clock itself when it can sleep on a deadline (every `AsyncClock`
 overrides it; the default is `None`), and every cooperative entry point derives the
@@ -252,7 +252,8 @@ runner keeps a separate entry, because its arms need an owned clock handle rathe
 than the borrow `as_ticker` yields.
 
 **Animated properties ride the arms.** A node can carry a `ControlProgram`
-(§ properties, M882): keyframed curves bound to its property names, which the arm
+(the animated properties in [DESIGN-launch.md](DESIGN-launch.md)): keyframed
+curves bound to its property names, which the arm
 that owns the element samples at each `DataFrame`'s PTS and applies before handing
 that frame over, so a frame is processed under the values its own timestamp calls
 for. The program is resolved against the element's declared properties before
@@ -284,7 +285,7 @@ holding the element's one-thread-at-a-time contract. Off-tokio executors
 path is transparent there. This is the lower-effort complement to
 `run_graph_threaded`: no thread-per-arm, just the one CPU-bound stage overlapped.
 
-#### 4.13.4 Mid-stream re-solve
+## Mid-stream re-solve
 
 A mid-stream `PipelinePacket::CapsChanged` triggers a re-fixation that stays
 correctly downstream-aware:
@@ -347,7 +348,7 @@ property. `Caps` are not stamped on each frame; they live on the link as
 the most recently received `CapsChanged` packet. Correctness across a
 mid-stream change therefore depends on `CapsChanged` sitting **between**
 the last old-caps `DataFrame` and the first new-caps `DataFrame` in the
-forward stream — not before, not after. For a format-changing element
+forward stream, not before and not after. For a format-changing element
 that buffers (decoder B-frame reorder, encoder lookahead), this means
 the element emits its output `CapsChanged` at the **decode/encode
 boundary** in its `process` output, not at the moment it received the
@@ -355,7 +356,7 @@ input `CapsChanged`. The runner cascades that ordered event downstream;
 sinks reconfigure their pools when they see it, and the next data frame
 they process is unambiguously under the new caps.
 
-#### 4.13.5 Allocation cascade
+## Allocation cascade
 
 Allocation negotiation is part of the same orchestration. A coordinator task
 owns refs to source / transforms / sink and orchestrates events the spawned
@@ -474,7 +475,7 @@ Two fan structures have non-trivial joins:
   proposal is not absorbed there, since a container muxer's byte output has no
   memory-domain tie to its inputs.
 
-#### 4.13.6 Fan-out and fan-in
+## Fan-out and fan-in
 
 `run_source_fanout` per-branch re-solves a mid-stream `CapsChanged` via
 `re_solve_downstream_dyn_sink`. Branches run in independent arms, so the
@@ -551,11 +552,12 @@ Two flavours of fan-in element exist. `InterleaveMux` (`mux.rs`) is a
 carries its own caps), combining encoded tracks into one stream. `Compositor`
 (`compositor.rs`) is a *pixel mixer*: it overlays N raw RGBA8 inputs onto one
 output canvas at configurable position, z-order, and per-pad alpha (the
-`videomixer` / `compositor` analog — picture-in-picture, camera grids, sub-window
+`videomixer` and `compositor` analog: picture-in-picture, camera grids, sub-window
 UIs). It is CPU and `no_std`-baseline like the other raw-video transforms, with
-straight source-over alpha blending and left/top clipping. Because a mixer must combine *simultaneous* inputs rather than
-interleave, it caches the latest frame per input and uses **input 0 as the
-timing driver**: one composited output frame is emitted per input-0 frame,
+straight source-over alpha blending and left/top clipping. Because a mixer must
+combine simultaneous inputs rather than interleave, it caches the latest frame
+per input and uses input 0 as the timing driver: one composited output frame is
+emitted per input-0 frame,
 overlaying whatever the other inputs have most recently delivered. At startup it
 briefly buffers input-0 frames (bounded) until every overlay has produced once,
 so a late-starting overlay (camera warm-up) still appears; on buffer overflow the
@@ -599,13 +601,14 @@ when every input has ended the muxer arm closes the merged link with `Eos`, endi
 the sink arm. This is the `run_muxer_sink` shape extended to runtime-added inputs
 (attach a late audio track to a running `muxer ! filesink`).
 
-#### 4.13.6a Bins and ghost pads (flattening)
+## Bins and ghost pads
 
 GStreamer's `GstBin` is a runtime container: a node in the pipeline that holds
 child elements, manages their state, and exposes interior pads as *ghost pads*.
 g2g implements the same user-facing capability (reusable named subgraphs +
 ghost pads) but as **construction-time flattening**, not a runtime container.
-The reason is the same one in §4.9.3: g2g composes typed graphs ahead of the
+The reason is the same one behind the dark-slot trade-off in
+[DESIGN-runtime.md](DESIGN-runtime.md): g2g composes typed graphs ahead of the
 run, so grouping for reuse and pad exposure can happen before validation, and
 the runtime never needs a hierarchy to manage.
 
@@ -623,8 +626,8 @@ the bin and acquire their peer when the host links the `BinInstance`, so the
 host's `finish()` is the single validation point.
 
 Crucially this adds **no `NodeKind` variant**: a bin's interior nodes become
-first-class host nodes on flattening, so the solver (§4.13.2) and runner
-(§4.13.3) drive them with zero awareness bins ever existed, and none of the
+first-class host nodes on flattening, so the solver and runner drive them with
+zero awareness bins ever existed, and none of the
 exhaustive `NodeKind` match sites change. The decode-chain splices
 (`Registry::decodebin`, the `uridecodebin` / `decodebin` launch macros) already
 flatten subgraphs ad hoc at the element-vector / parse-item layer; they predate
@@ -635,7 +638,7 @@ recursive solve/run, per-bin state transitions, and bus-message bubbling, i.e.
 GStreamer's full hierarchical `GstBin`. None of that is required for reuse,
 ghost pads, or a nestable decodebin.
 
-#### 4.13.7 Pad templates
+## Pad templates
 
 Static metadata for tools that need to query pad compatibility without
 constructing the element. `PadTemplate` + the `PadTemplates` trait expose
@@ -644,7 +647,7 @@ run the solver against two element types' static templates for pre-
 instantiation compatibility checks. The runtime `caps_constraint_as_*`
 remains the instance-level (possibly narrower) view.
 
-#### 4.13.8 ACCEPT_CAPS and CapsFilter
+## ACCEPT_CAPS and CapsFilter
 
 Fall out of the constraint surface:
 
@@ -654,9 +657,9 @@ Fall out of the constraint surface:
 - **`CapsFilter`** is an `Identity(specific_set)` pass-through. Inserted
   anywhere in a pipeline to force a narrowing.
 
-#### 4.13.9 Auto-plug and the element registry
+## Auto-plug and the element registry
 
-`decodebin`-equivalent, built on the pad-template metadata (§4.13.7) and the
+`decodebin`-equivalent, built on the pad-template metadata and the
 solver. `g2g-core::runtime::autoplug` is two layers split by what they need:
 
 - **Search** (`runtime`, `no_std`). `ElementDesc` is a name plus an element
@@ -719,7 +722,7 @@ forwarded in-band ahead of the first frame as decoder extradata).
   sink, target, max_depth)` assembles a complete `source → chain → sink` graph
   from a *named* registered source. `build_uridecodebin(uri, sink, target,
   max_depth)` is the URI front door over it: it parses `uri` (a minimal
-  `scheme://rest` split — core pulls no URL crate), dispatches on the scheme to
+  `scheme://rest` split, since core pulls no URL crate), dispatches on the scheme to
   a registered `UriSourceFactory` that builds the source *from the URI*
   (`udp://host:port`, `file:///clip.mp4`, `rtsp://…`, `v4l2:///dev/videoN`), and
   auto-plugs the decode chain to `target`. The scheme handlers are the analog of
@@ -739,7 +742,8 @@ forwarded in-band ahead of the first frame as decoder extradata).
   a demuxer announces every track as a `BusMessage::StreamCollection` (for
   `MkvDemux`/`MkvDemuxN` and `TsDemux`/`Mp4Src`), the app selects among them
   via a `StreamSelectController`, and the multi-output `MkvDemuxN` (a
-  `MultiOutputElement`) routes N elementary streams to N ports in one parse. `Registry::build_playbin_graph` assembles
+  `MultiOutputElement`) routes N elementary streams to N ports in one parse.
+  `Registry::build_playbin_graph` assembles
   `source → demux → {decode chain → sink}` per `PlaybinPort`, with each port's
   branch statically negotiated against its codec via `port_output_caps` /
   `NodeConstraint::Demux` so a real decoder configures at startup, not
@@ -755,7 +759,7 @@ forwarded in-band ahead of the first frame as decoder extradata).
   `build_playbin_graph_with_source` rather than the `file://` handler's
   MP4-self-demuxing source. The hook slot is a *list*: `register_playbin`
   appends and `parse_launch` tries each in turn, so one hook per container type
-  coexists — `ts_playbin` is the MPEG-TS sibling (`TsDemuxN` multi-output
+  coexists: `ts_playbin` is the MPEG-TS sibling (`TsDemuxN` multi-output
   demuxer), and a TS file is handled by it while an MKV file is handled by
   `mkv_playbin`, each declining the other's container. `mp4_playbin` is the
   fragmented-MP4 sibling (`Mp4DemuxN` multi-output demuxer), the multi-track
@@ -824,7 +828,7 @@ forwarded in-band ahead of the first frame as decoder extradata).
   when nothing is queued behind it (so the app enqueues the next item *during*
   playback for a seamless swap), and on the item's EOS pulls the next, rebasing
   its PTS/DTS onto the running timeline via an interposing `ShiftSink` that also
-  swallows the inner item's `Eos` — so the only terminal `Eos` is the one
+  swallows the inner item's `Eos`, so the only terminal `Eos` is the one
   `GaplessSrc` emits when the `finish`ed playlist drains. This is the source-swap
   counterpart of the segment loop (which loops *one* item via a `SEGMENT`
   seek); both are poll-based with a wakeful idle. An *instant* (flushing) switch
@@ -878,7 +882,8 @@ forwarded in-band ahead of the first frame as decoder extradata).
   The preference is not the caller's to state: `Registry::decodebin` reads it off
   the graph it is splicing into (`Registry::derived_memory_preference`). The
   element behind the `to` pad already declares what memory it accepts
-  (`input_domains`, §4.13.5), so its most-preferred domain (GPU-resident before
+  (`input_domains`, the allocation cascade), so its most-preferred domain
+  (GPU-resident before
   `System`, `DomainSet`'s order) becomes `preferred_memory`: a Cuda-only consumer
   gets `NvDec`, a `WgpuTexture` one gets `vulkanvideodec`, and a consumer that
   declares nothing (`DomainSet::ALL`, the default) derives `System`, leaving an
@@ -936,7 +941,7 @@ forwarded in-band ahead of the first frame as decoder extradata).
   decoder's advertised formats, and a line that genuinely needs a converter fails
   as before rather than finding nothing.
 
-#### 4.13.10 Current limits
+## Current limits
 
 The solver is **arc consistency** (constraint propagation over per-link caps),
 not a complete CSP search. That bounds exactly where it is complete and where it
@@ -945,7 +950,7 @@ is not:
 - **Linear chains are complete.** A linear pipeline is a tree of binary
   (adjacent-link) constraints, and arc consistency is complete for
   tree-structured binary CSPs: if a satisfying assignment exists it is found.
-  With `DerivedCoupled`'s field-level coupling (§4.13.1), a downstream pin on a
+  With `DerivedCoupled`'s field-level coupling, a downstream pin on a
   passthrough field couples back through any number of passthrough transforms
   (`videoscale ! videoconvert ! caps`, and deeper). This family is closed.
 
@@ -989,7 +994,7 @@ is not:
   hard cases were judged not worth a declarative encoding.
 
 - **Allocation is a separate cascade.** Buffer-pool / stride / alignment
-  negotiation (§4.13.5, the allocation query) runs after caps fixation, not
+  negotiation (the allocation cascade) runs after caps fixation, not
   folded into the caps CSP. A downstream allocator whose layout requirement
   should feed back into the *caps* choice is not expressed; this is the most
   likely future pressure point as real GPU/hardware allocators land.

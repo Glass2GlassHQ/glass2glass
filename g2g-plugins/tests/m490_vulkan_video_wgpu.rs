@@ -1,6 +1,6 @@
 //! M490: Vulkan Video H.264 decode -> wgpu RGBA texture on real hardware.
 //!
-//! Fourth increment of `VulkanVideoDec` (DESIGN.md 4.11.6) and the wedge
+//! Fourth increment of `VulkanVideoDec` (DESIGN-decode.md) and the wedge
 //! payload: decode a frame and land it in a `wgpu::Texture` the way a wgpu
 //! consumer (game engine / visualization viewer) samples it. Decodes the
 //! fixture's IDR, converts NV12 -> RGBA, uploads to an `Rgba8Unorm` texture on

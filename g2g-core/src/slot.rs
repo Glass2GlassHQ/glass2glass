@@ -9,7 +9,7 @@
 //! against the old element naturally because [`ElementSlot::process`]
 //! takes a `load_full()` snapshot of the current contents at the start
 //! of each call. The next `process()` invocation sees the new element.
-//! See `DESIGN.md` §4.8.2.
+//! See DESIGN-runtime.md.
 //!
 //! Inside the slot, the element is wrapped in an `Arc<Mutex<_>>`: `Arc`
 //! to share between the snapshot-taking process futures and the swapper,
@@ -87,7 +87,7 @@ impl ElementSlot {
     /// A cloneable handle that can swap this slot's element from another
     /// task while the runner drives the slot. This is how a mid-stream
     /// `Reconfigure` or codec switch replaces an element without stalling
-    /// or rebuilding the pipeline (DESIGN.md §4.8.2).
+    /// or rebuilding the pipeline (DESIGN-runtime.md).
     pub fn handle(&self) -> SwapHandle {
         SwapHandle {
             inner: self.inner.clone(),

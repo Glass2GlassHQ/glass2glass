@@ -1,4 +1,4 @@
-//! Instance-segmentation decode (DESIGN.md §5.3): turns the two output tensors of
+//! Instance-segmentation decode (DESIGN-ml.md): turns the two output tensors of
 //! a YOLO `-seg` model into [`Segmentation`] and [`Roi`] analytics nodes, the
 //! mask-producing sibling of the box decoder in [`crate::detect`].
 //!

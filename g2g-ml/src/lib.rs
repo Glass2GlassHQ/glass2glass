@@ -23,7 +23,7 @@ pub mod registry;
 #[cfg(feature = "launch")]
 pub use registry::register;
 
-// Bounded multi-stream tensor batcher (DESIGN.md §5.3, M22; moved from the
+// Bounded multi-stream tensor batcher (DESIGN-ml.md, M22; moved from the
 // dissolved g2g-enterprise crate, M635): gathers one tensor frame per input
 // stream into a single batched frame for dynamic-batch inference.
 #[cfg(feature = "std")]
@@ -38,13 +38,13 @@ pub mod postprocess;
 // the safetensors crate. Architecture stays compiled; only weights load.
 pub mod safetensors;
 
-// Detection post-processing (DESIGN.md §5.3): decode a YOLO-style model output
+// Detection post-processing (DESIGN-ml.md): decode a YOLO-style model output
 // tensor into AnalyticsMeta bounding-box detections (confidence threshold + NMS),
 // attached to the frame. Gated behind `analytics` (pulls g2g-core's `metadata`).
 #[cfg(feature = "analytics")]
 pub mod detect;
 
-// Instance-segmentation decode (DESIGN.md §5.3): a YOLO -seg model's box and
+// Instance-segmentation decode (DESIGN-ml.md): a YOLO -seg model's box and
 // mask-prototype outputs -> AnalyticsMeta Segmentation + Roi nodes. Pure Rust,
 // no inference engine, so a browser ort-web caller can decode with it too.
 #[cfg(feature = "analytics")]
@@ -56,13 +56,13 @@ pub mod segmentation;
 #[cfg(all(feature = "ort", feature = "analytics"))]
 pub mod ortsegment;
 
-// Inline GPU tensor preprocessing (DESIGN.md §5.1): NV12 -> normalized f32
+// Inline GPU tensor preprocessing (DESIGN-ml.md): NV12 -> normalized f32
 // NCHW RGB tensor in a wgpu compute shader, the hardware-first preprocessing
 // counterpart of OrtInference's CPU path.
 #[cfg(feature = "wgpu")]
 pub mod wgpupreprocess;
 
-// GPU-resident tensor inference (DESIGN.md §5.2, M216): a wgpu matmul compute
+// GPU-resident tensor inference (DESIGN-ml.md, M216): a wgpu matmul compute
 // pass that binds WgpuPreprocess's GPU-resident output tensor directly, so the
 // tensor never leaves the GPU between preprocess and inference. The consumer
 // half of the keep-on-GPU branch with_gpu_output (M215) opened.
@@ -76,7 +76,7 @@ pub mod wgpuinfer;
 #[cfg(all(target_os = "linux", feature = "cuda-wgpu"))]
 pub use g2g_plugins::cudatowgpu;
 
-// Pure-Rust Burn inference element (DESIGN.md §5.2): a linear layer run on
+// Pure-Rust Burn inference element (DESIGN-ml.md): a linear layer run on
 // burn's wgpu backend, the no-C++ counterpart of OrtInference. The module is
 // `burninfer` (not `burn`) so in-crate paths can't collide with the dependency.
 #[cfg(feature = "burn")]

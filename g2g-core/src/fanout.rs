@@ -1,4 +1,4 @@
-//! Fan-out primitives for the dynamic graph layer (DESIGN.md §4.8.4).
+//! Fan-out primitives for the dynamic graph layer (DESIGN-runtime.md).
 //!
 //! M9 (1→N slice): a multi-output sink abstraction plus the two routing
 //! primitives that cover branch enable/disable and A/B switching:

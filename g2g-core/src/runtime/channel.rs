@@ -855,7 +855,7 @@ pub enum ProbeAction {
 
 /// A probe registered on a link. `on_packet` is called for every packet
 /// before it is sent, and returns whether to pass or drop it. The g2g
-/// equivalent of a GStreamer pad probe (DESIGN.md §4.9).
+/// equivalent of a GStreamer pad probe (DESIGN-runtime.md).
 pub trait LinkInterceptor {
     fn on_packet(&self, packet: &PipelinePacket) -> ProbeAction;
 }

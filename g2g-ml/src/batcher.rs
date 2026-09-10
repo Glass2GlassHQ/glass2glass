@@ -1,4 +1,4 @@
-//! Bounded multi-stream tensor batcher (DESIGN.md §5.3).
+//! Bounded multi-stream tensor batcher (DESIGN-ml.md).
 //!
 //! M22: `TensorBatcher` is a `MultiInputElement` that gathers one tensor
 //! frame from each input stream and emits the gathered round as a single
@@ -15,7 +15,7 @@
 //! an ended input still drain into batches first. This needs the per-input
 //! `Eos` delivery added to `MultiInputElement::process` in M22.
 //!
-//! Owed: a deadline-based partial-batch flush (the "Timeout" half of §5.3's
+//! Owed: a deadline-based partial-batch flush (the "Timeout" half of DESIGN-ml.md's
 //! select/timeout), gated on a runtime timer primitive; today a stalled
 //! (but not ended) input stalls its round, which backpressures the other
 //! inputs once links fill.

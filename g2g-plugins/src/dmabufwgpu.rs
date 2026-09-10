@@ -9,7 +9,7 @@
 //!
 //! This is the GPU-consuming counterpart to the bridge's dma-buf ingest side
 //! (`AppSrcFeed::push_dmabuf`): together they are the `GstDmaBufMemory` -> g2g
-//! GPU zero-copy path of DESIGN.md §7.
+//! GPU zero-copy path of DESIGN.md.
 //!
 //! Hardware note (measured, see also `libcamera_dmabuf`): a discrete GPU imports
 //! only *GPU-visible* dma-bufs (allocated by a GPU / CSI-ISP, or GPU-exported),

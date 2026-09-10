@@ -1,7 +1,7 @@
 #![cfg(feature = "embassy-link")]
 //! M45: a real source streams packets through an embassy-sync zero-alloc
 //! channel to a consumer, both driven by `embassy_futures::block_on`. Proves
-//! the §6.2 stack-channel link carries the pipeline's `PipelinePacket`s between
+//! the stack-channel link carries the pipeline's `PipelinePacket`s between
 //! two halves on an Embassy executor primitive, with the channel storage static
 //! (no allocation).
 

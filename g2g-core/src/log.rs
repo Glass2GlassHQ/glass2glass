@@ -835,7 +835,7 @@ impl LogSink for RingSink {
 }
 
 /// The reserved log category the caps-negotiation explainer emits under
-/// (DESIGN.md 4.20a). Not an element type: it names the solver's narration, so
+/// (DESIGN-tooling.md). Not an element type: it names the solver's narration, so
 /// `G2G_DEBUG=caps:debug` (or the `G2G_CAPS_TRACE` shortcut) turns it on
 /// independent of element logging.
 pub const CAPS_CATEGORY: &str = "caps";

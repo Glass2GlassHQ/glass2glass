@@ -4,7 +4,7 @@ The `g2g` developer workflow is consolidated behind a few tools: a `cargo xtask`
 command crate, a pipeline visualizer, a caps-negotiation explainer, criterion
 benchmarks with a CI regression guard, and an end-of-run telemetry report. This
 page is the reference; the architecture notes live in
-[DESIGN.md §4.20](DESIGN.md).
+[DESIGN-tooling.md](DESIGN-tooling.md).
 
 ## `cargo xtask`
 

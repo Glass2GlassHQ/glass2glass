@@ -1,6 +1,6 @@
 //! `gstwrap`: host an unported GStreamer element inside a g2g graph.
 //!
-//! The mirror of `g2g-bridge` (DESIGN.md §7). Where the bridge embeds a g2g
+//! The mirror of `g2g-bridge` (DESIGN.md). Where the bridge embeds a g2g
 //! sub-graph inside a GStreamer pipeline (adopt one g2g stage in a GStreamer
 //! app), `gstwrap` embeds a GStreamer element inside a g2g graph: adopt g2g as
 //! the top-level framework now and keep the stages you have not ported yet

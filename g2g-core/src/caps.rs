@@ -162,7 +162,7 @@ impl Caps {
         }
     }
 
-    /// Phase 1 intersection (DESIGN.md §4.2). Narrow `self` against `other`,
+    /// Phase 1 intersection (DESIGN.md). Narrow `self` against `other`,
     /// returning the overlap. Both must be the same variant; ranged fields
     /// (`Dim`/`Rate`) intersect field-wise, scalar fields (`codec` /
     /// `format`, `channels`, `sample_rate`, tensor dtype/shape/layout) must
@@ -314,7 +314,7 @@ impl Caps {
         }
     }
 
-    /// Phase 2 fixation (DESIGN.md §4.2): collapse every ranged field to a
+    /// Phase 2 fixation (DESIGN.md): collapse every ranged field to a
     /// single `Fixed` value. `Range` fixates to its **minimum**, reflecting
     /// the latency-first design (less data is lower latency); an element
     /// preferring a different value counter-proposes via
@@ -1485,7 +1485,7 @@ fn intersect_range((amin, amax): (u32, u32), (bmin, bmax): (u32, u32)) -> Option
 /// `Caps` itself remains the *fixed* description used at runtime
 /// (`DataFrame.caps`, `configure_*`). `CapsSet` is the negotiation-time
 /// vocabulary: it carries alternatives and preference, neither of which
-/// fits in a single `Caps`. See DESIGN.md §4.13.1.
+/// fits in a single `Caps`. See DESIGN-caps.md.
 ///
 /// The first alternative is highest preference; later ones are
 /// fallbacks the element will accept if no peer agrees on the first.
@@ -1565,7 +1565,7 @@ impl CapsSet {
     }
 
     /// True if any alternative is compatible with `caps` (a non-empty
-    /// intersection exists). The ACCEPT_CAPS predicate (DESIGN.md §4.13.1):
+    /// intersection exists). The ACCEPT_CAPS predicate (DESIGN-caps.md):
     /// "would a link carrying `caps` satisfy this set?" — a pure check,
     /// no negotiation.
     pub fn accepts(&self, caps: &Caps) -> bool {

@@ -1,5 +1,5 @@
 //! C ABI for glass2glass: the language-neutral waist over the `gst-launch`-style
-//! DSL + element registry (PORTING.md §5, DESIGN.md §4.16).
+//! DSL + element registry (PORTING.md §5, DESIGN-launch.md).
 //!
 //! Experimental (Tier 3 in `STABILITY.md`): tracks `g2g-core`, no stability
 //! promise of its own.

@@ -140,7 +140,7 @@ impl BridgeGraph {
             .spawn(move || {
                 // A dedicated current-thread runtime drives the async sub-graph
                 // on this OS thread, isolated from GStreamer's streaming threads
-                // (DESIGN.md §7). `enable_time` matches the runtime the rest of
+                // (DESIGN.md). `enable_time` matches the runtime the rest of
                 // the workspace runs graphs on (sinks may use tokio timers).
                 let rt = tokio::runtime::Builder::new_current_thread()
                     .enable_time()

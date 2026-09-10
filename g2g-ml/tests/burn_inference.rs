@@ -1,5 +1,5 @@
 #![cfg(feature = "burn")]
-//! §5.2: `BurnInference` runs a linear layer (`input . W + b`) on burn's wgpu
+//! DESIGN-ml.md: `BurnInference` runs a linear layer (`input . W + b`) on burn's wgpu
 //! backend. The test feeds a known RGBA frame through the element on the real
 //! GPU and asserts the `[1, N]` logits match a CPU matmul of the same
 //! deterministic weights within float tolerance, with the tensor caps emitted

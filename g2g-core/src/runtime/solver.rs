@@ -1,4 +1,4 @@
-//! M16 step 3 (DESIGN.md §4.13.2): linear-pipeline caps solver.
+//! M16 step 3 (DESIGN-caps.md): linear-pipeline caps solver.
 //!
 //! Takes the ordered constraint list for a source → transform* → sink
 //! chain and returns one fixated `Caps` per link, or a structured
@@ -44,7 +44,7 @@ pub struct CapsConflict {
     pub downstream: CapsSet,
 }
 
-/// Structured solver failure (DESIGN.md §4.13.2).
+/// Structured solver failure (DESIGN-caps.md).
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum NegotiationFailure {
@@ -502,7 +502,7 @@ fn derived_forward(
 }
 
 /// Caps-α mid-stream re-fixation outcome for one interior element
-/// (DESIGN.md §4.13.4). The runner derives the element's
+/// (DESIGN-caps.md). The runner derives the element's
 /// forwarded output from its declared constraint, steered by the downstream
 /// feasibility snapshot, instead of letting the element fixate greedily.
 #[derive(Debug, Clone, PartialEq)]
@@ -527,7 +527,7 @@ pub(crate) enum ForwardResolve {
 /// sink, or a non-invertible `DerivedOutput` / legacy element below it).
 /// Computed once at startup and snapshotted per interior arm so the
 /// mid-stream re-solve can steer an element's output without reaching the
-/// downstream elements at runtime (DESIGN.md §4.13.4).
+/// downstream elements at runtime (DESIGN-caps.md).
 ///
 /// Test-only since `run_linear_chain` became a thin builder over `run_graph`
 /// (which uses the edge-indexed [`graph_downstream_feasibility`]); the test
@@ -637,7 +637,7 @@ fn backward_feasible(
 }
 
 /// Caps-α: derive the forwarded output for an interior element on a
-/// mid-stream caps change (DESIGN.md §4.13.4). `input` is
+/// mid-stream caps change (DESIGN-caps.md). `input` is
 /// the new fixated caps the element receives; `downstream_feasible` is its
 /// output link's snapshot from [`downstream_feasibility`]; `prev_output` is
 /// the output caps the element last produced (startup-solved, then tracked by
@@ -1008,7 +1008,7 @@ pub fn solve_graph<E>(
 }
 
 /// [`solve_graph`] with caller-supplied node labels for the caps-negotiation
-/// explainer (DESIGN.md 4.20a). The runner passes each node's element category
+/// explainer (DESIGN-tooling.md). The runner passes each node's element category
 /// (e.g. `h264parse`) so the `G2G_CAPS_TRACE` narration reads in element names
 /// rather than node ids; direct callers use [`solve_graph`]'s `n{id}:{kind}`
 /// default. The solve itself is identical; `label` only affects the log text,
