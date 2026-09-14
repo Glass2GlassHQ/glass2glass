@@ -42,6 +42,7 @@ use retina::client::{Described, PlayOptions, Session, SessionGroup, SessionOptio
 use retina::codec::{CodecItem, FrameFormat, ParametersRef, VideoParameters};
 
 use g2g_core::frame::Frame;
+use g2g_core::log::Target;
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
@@ -83,6 +84,8 @@ impl ReconnectPolicy {
     }
 }
 
+// log category shared by RtspSrc and RtspSrcN
+const LOG_CATEGORY: &str = "rtspsrc";
 /// Wait before the first retry when only an attempt count was asked for.
 const DEFAULT_INITIAL_BACKOFF_MS: u64 = 250;
 /// Cap on the doubling retry backoff.
@@ -699,7 +702,14 @@ async fn run_session(
 
     let played = match session.play(PlayOptions::default()).await {
         Ok(p) => p,
-        Err(_) => return SessionOutcome::NetworkError(G2gError::Hardware(HardwareError::Other)),
+        Err(e) => {
+            g2g_core::g2g_error!(
+                Target::category(LOG_CATEGORY),
+                "PLAY {} failed: {e}",
+                src.url
+            );
+            return SessionOutcome::NetworkError(G2gError::Hardware(HardwareError::Other));
+        }
     };
 
     let mut demuxed = match played.demuxed() {
@@ -886,7 +896,10 @@ async fn connect_describe_setup(
         }
     }
     Err(match setup_err {
-        Some(_) => G2gError::Hardware(HardwareError::Other),
+        Some(e) => {
+            g2g_core::g2g_error!(Target::category(LOG_CATEGORY), "SETUP {url} failed: {e}");
+            G2gError::Hardware(HardwareError::Other)
+        }
         // An empty transport list cannot happen: `protocols` rejects an empty set.
         None => G2gError::CapsMismatch,
     })
@@ -906,9 +919,10 @@ pub(crate) async fn connect_describe(
         .session_group(session_group)
         .creds(creds.cloned())
         .user_agent(user_agent.to_string());
-    Session::describe(url, opts)
-        .await
-        .map_err(|_| G2gError::Hardware(HardwareError::Other))
+    Session::describe(url.clone(), opts).await.map_err(|e| {
+        g2g_core::g2g_error!(Target::category(LOG_CATEGORY), "DESCRIBE {url} failed: {e}");
+        G2gError::Hardware(HardwareError::Other)
+    })
 }
 
 /// The first stream g2g decodes as video: H.264 or H.265.

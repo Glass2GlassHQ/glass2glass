@@ -780,14 +780,26 @@ cargo test -p g2g-plugins \
 
 ### A standing RTSP feed
 
-A loopback setup uses `mediamtx` as the relay and `ffmpeg` as the publisher.
-In one terminal:
+A loopback setup uses [mediamtx](https://github.com/bluenviron/mediamtx) as
+the relay and `ffmpeg` as the publisher. The quickest relay is the docker
+image on the host network, which listens on 8554/tcp:
 
 ```sh
-mediamtx                  # listens on 8554/tcp by default
+docker run --rm -it --network=host bluenviron/mediamtx
 ```
 
-In a second terminal, push a synthetic H.264 feed into it:
+Where host networking is unavailable (Windows, macOS), map the port and pin
+RTSP to TCP, since UDP needs the real source address and docker's network
+stack rewrites it:
+
+```sh
+docker run --rm -it -e MTX_RTSPTRANSPORTS=tcp -p 8554:8554 bluenviron/mediamtx
+```
+
+A native `mediamtx` binary from the
+[releases page](https://github.com/bluenviron/mediamtx/releases) works the
+same with no arguments. In a second terminal, push a synthetic H.264 feed
+into it:
 
 ```sh
 ffmpeg -re -f lavfi -i testsrc=size=1280x720:rate=30 \
@@ -1080,8 +1092,8 @@ distribution ships, with `libnvcuvid.so` and `libcuda.so` on the linker path.
 `Backend::NvdecCuvid` / `Backend::NvdecCuda` need an `ffmpeg` build with cuvid
 support.
 
-`mediamtx` for the loopback RTSP server is a single binary from
-<https://github.com/bluenviron/mediamtx/releases>. Some distros package it.
+The loopback RTSP relay is `mediamtx`, run from docker or as a single binary
+(see [A standing RTSP feed](#a-standing-rtsp-feed)).
 
 ## Layout
 
