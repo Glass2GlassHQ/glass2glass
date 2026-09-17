@@ -29,7 +29,9 @@ pub enum BusMessage {
     /// matching [`Eos`](BusMessage::Eos) so an application can track stream
     /// lifetime (e.g. reset per-stream UI on each start).
     StreamStart,
-    /// End-of-stream observed by the posting element.
+    /// End of stream: posted once by the runner when every arm has ended
+    /// without error, so every sink has taken its EOS (the GStreamer
+    /// `GST_MESSAGE_EOS` analog), and by any element that observes one itself.
     Eos,
     /// An informational, non-error notification (the GStreamer
     /// `GST_MESSAGE_INFO` analog, M206), the third severity below

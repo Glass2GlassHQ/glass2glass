@@ -327,6 +327,10 @@ It can also keep one launch-line pipeline running on a background thread:
   the transforms inserted through MCP
 - `set_log_level(level, category?)` changes the process default or one category
   immediately and reports the previous threshold
+- `tail_events(limit?, clear?)` reads the bus messages posted since the pipeline
+  started, from the sources' stream-start to the run's EOS, from a 1024-entry buffer, each with a sequence number and the time it
+  was observed, in the dashboard's event JSON shape (the large tag, chapter and
+  stream-collection payloads are skipped, as on the dashboard)
 - `tail_logs(limit?, clear?)` reads structured records from a 1024-record
   `RingSink`, including its overwrite count
 - `sample_edge(edge, count?, timeout_ms?)` installs a temporary pass-through
@@ -338,6 +342,19 @@ It can also keep one launch-line pipeline running on a background thread:
   revision
 - `remove_transform(node, expected_revision)` removes an MCP-inserted transform
 - `stop_pipeline()` ends and releases the run
+
+The server is the `g2g_plugins::mcp::McpServer` type and the binary is a thin
+`serve_stdio` call over it. A host application that already runs a pipeline
+embeds the same server in-process: it hands `register_pipeline` its live
+`Observer`, `GraphMutator` and `Bus`, then feeds JSON-RPC methods to `dispatch`
+from whatever transport it has. The host keeps the run's lifecycle:
+`stop_pipeline` refuses a registered pipeline, the host reports the run's end
+through the returned `RegisteredPipelineHandle`, and `unregister_pipeline`
+releases the handles without touching the run. The bus becomes the server's,
+drained on its own thread into the event buffer, since a bus has one consumer.
+The server's log ring is subscribed beside the host's sink with
+`g2g_core::log::add_sink`, not installed in its place, and unsubscribed on drop.
+One pipeline at a time, started or registered.
 
 Every write names the revision it inspected. A stale write is refused with the
 current revision, so two agent decisions cannot silently apply to different graph

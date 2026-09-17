@@ -2346,6 +2346,10 @@ fn fold_run_stats(
     for r in results {
         counts.push(r?);
     }
+    // every arm ended without error, so every sink has taken its EOS
+    if let Some(bus) = bus {
+        bus.try_post(crate::bus::BusMessage::Eos);
+    }
     let coordinator_events = counts[coord_arm_index];
     let mut emitted = 0u64;
     let mut consumed = 0u64;

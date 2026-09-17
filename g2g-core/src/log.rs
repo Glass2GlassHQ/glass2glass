@@ -39,7 +39,7 @@
 #[cfg(feature = "std")]
 extern crate std;
 
-use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 
 use alloc::borrow::Cow;
 use alloc::boxed::Box;
@@ -626,6 +626,14 @@ static HAS_OVERRIDES: AtomicBool = AtomicBool::new(false);
 static CONFIG: Mutex<LogConfig> = Mutex::new(LogConfig::new());
 #[allow(clippy::type_complexity)]
 static SINK: Mutex<Option<Box<dyn LogSink>>> = Mutex::new(None);
+// `HAS_EXTRA_SINKS` mirrors `!EXTRA_SINKS.is_empty()` so the common case skips the lock.
+static EXTRA_SINKS: Mutex<Vec<(SinkId, Box<dyn LogSink>)>> = Mutex::new(Vec::new());
+static HAS_EXTRA_SINKS: AtomicBool = AtomicBool::new(false);
+static NEXT_SINK_ID: AtomicU64 = AtomicU64::new(1);
+
+/// The handle [`add_sink`] returns, for [`remove_sink`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SinkId(u64);
 
 fn sync_caches(cfg: &LogConfig) {
     DEFAULT_LEVEL.store(cfg.default as u8, Ordering::Relaxed);
@@ -665,15 +673,21 @@ pub fn emit_fields(
     fields: &[LogField<'_>],
     message: core::fmt::Arguments<'_>,
 ) {
+    let record = LogRecord {
+        level,
+        category,
+        instance,
+        timestamp_ns: timestamp_now(),
+        fields,
+        message,
+    };
     if let Some(sink) = SINK.lock().as_deref() {
-        sink.emit(&LogRecord {
-            level,
-            category,
-            instance,
-            timestamp_ns: timestamp_now(),
-            fields,
-            message,
-        });
+        sink.emit(&record);
+    }
+    if HAS_EXTRA_SINKS.load(Ordering::Relaxed) {
+        for (_, sink) in EXTRA_SINKS.lock().iter() {
+            sink.emit(&record);
+        }
     }
 }
 
@@ -711,8 +725,40 @@ pub fn unix_time_source() -> u64 {
 }
 
 /// Install (replace) the global log sink. Without one, records are dropped.
+/// Sinks added with [`add_sink`] are unaffected.
 pub fn set_sink(sink: Box<dyn LogSink>) {
     *SINK.lock() = Some(sink);
+}
+
+/// Subscribe a second sink beside the one [`set_sink`] installed: every record
+/// reaches the primary sink and each subscriber, so a tool that wants a copy of
+/// the log (a flight recorder, an MCP tail) does not take the host's sink away.
+/// [`remove_sink`] with the returned id unsubscribes it.
+pub fn add_sink(sink: Box<dyn LogSink>) -> SinkId {
+    let id = SinkId(NEXT_SINK_ID.fetch_add(1, Ordering::Relaxed));
+    let mut sinks = EXTRA_SINKS.lock();
+    sinks.push((id, sink));
+    HAS_EXTRA_SINKS.store(true, Ordering::Relaxed);
+    id
+}
+
+/// Unsubscribe a sink added with [`add_sink`]; `false` if it was not subscribed.
+pub fn remove_sink(id: SinkId) -> bool {
+    let mut sinks = EXTRA_SINKS.lock();
+    let before = sinks.len();
+    sinks.retain(|(sink_id, _)| *sink_id != id);
+    HAS_EXTRA_SINKS.store(!sinks.is_empty(), Ordering::Relaxed);
+    sinks.len() != before
+}
+
+/// The global default threshold.
+pub fn default_level() -> LogLevel {
+    LogLevel::from_u8(DEFAULT_LEVEL.load(Ordering::Relaxed)).unwrap_or(LogLevel::Off)
+}
+
+/// The global effective threshold for `category` (see [`LogConfig::level_for`]).
+pub fn level_for(category: &str) -> LogLevel {
+    CONFIG.lock().level_for(category)
 }
 
 /// Set the global default threshold (applies to categories with no override).
@@ -737,13 +783,15 @@ pub fn configure(spec: &str) {
     sync_caches(&cfg);
 }
 
-/// Reset the global config to defaults and remove the sink and time source
+/// Reset the global config to defaults and remove the sinks and time source
 /// (for tests).
 pub fn reset() {
     let mut cfg = CONFIG.lock();
     *cfg = LogConfig::new();
     sync_caches(&cfg);
     *SINK.lock() = None;
+    EXTRA_SINKS.lock().clear();
+    HAS_EXTRA_SINKS.store(false, Ordering::Relaxed);
     *TIME_SOURCE.lock() = None;
     HAS_TIME_SOURCE.store(false, Ordering::Relaxed);
 }
@@ -1283,6 +1331,29 @@ mod tests {
         assert_eq!(recs[1].0, LogLevel::Warn);
         assert_eq!(recs[1].1, "videoscale");
         drop(recs);
+        reset();
+    }
+
+    /// A subscriber added beside the host's sink sees every record the host's
+    /// sink sees, and removing it leaves the host's sink in place.
+    #[test]
+    fn an_added_sink_receives_records_beside_the_primary_sink() {
+        let _g = GLOBAL_GUARD.lock();
+        reset();
+        let primary = RingSink::new(4);
+        let subscriber = RingSink::new(4);
+        set_sink(Box::new(primary.clone()));
+        let id = add_sink(Box::new(subscriber.clone()));
+
+        g2g_error!(Target::category("demo"), "seen by both");
+        assert_eq!(primary.len(), 1);
+        assert_eq!(subscriber.len(), 1);
+
+        assert!(remove_sink(id));
+        assert!(!remove_sink(id));
+        g2g_error!(Target::category("demo"), "seen by the primary only");
+        assert_eq!(primary.len(), 2);
+        assert_eq!(subscriber.len(), 1);
         reset();
     }
 

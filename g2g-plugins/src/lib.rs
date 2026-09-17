@@ -809,6 +809,9 @@ pub mod shmpipe;
 #[cfg(feature = "tooling-json")]
 pub mod toolingjson;
 
+#[cfg(all(feature = "observe", feature = "multi-thread"))]
+pub mod mcp;
+
 // Edge content preview (observe feature): sampled packet -> JSON thumbnail /
 // waveform / hexdump for the dashboard edge tap.
 #[cfg(feature = "observe")]

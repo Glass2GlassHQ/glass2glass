@@ -100,9 +100,9 @@ pub fn snapshot_json(snap: &TelemetrySnapshot) -> String {
     v.to_string()
 }
 
-/// Serialize a bus message to the wire JSON string, or `None` for messages the
-/// dashboard does not surface (the heavy `StreamCollection` / `Tag` payloads).
-pub fn event_json(msg: &BusMessage) -> Option<String> {
+/// Convert a bus message to the shared tooling JSON shape, or `None` for
+/// messages the tooling does not surface.
+pub fn event_value(msg: &BusMessage) -> Option<Value> {
     let v = match msg {
         BusMessage::StreamStart => json!({"kind": "stream-start"}),
         BusMessage::Eos => json!({"kind": "eos"}),
@@ -166,7 +166,13 @@ pub fn event_json(msg: &BusMessage) -> Option<String> {
     };
     let mut obj = v;
     obj["type"] = json!("event");
-    Some(obj.to_string())
+    Some(obj)
+}
+
+/// Serialize a bus message to the wire JSON string, or `None` for messages the
+/// dashboard does not surface (the heavy `StreamCollection` / `Tag` payloads).
+pub fn event_json(msg: &BusMessage) -> Option<String> {
+    event_value(msg).map(|value| value.to_string())
 }
 
 /// Serve the dashboard on `host:port` until the process ends (`host` is
