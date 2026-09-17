@@ -160,6 +160,12 @@ pub fn event_value(msg: &BusMessage) -> Option<Value> {
             "retries": retries,
             "reason": format!("{reason:?}"),
         }),
+        BusMessage::MetadataRecord { element, record } => json!({
+            "kind": "metadata-record",
+            "element": element,
+            // the line is JSON already, so it rides as a value, not a string
+            "record": serde_json::from_str::<Value>(record).unwrap_or_else(|_| json!(record)),
+        }),
         // Skip the large structured payloads the dashboard has no view for, and
         // anything added since.
         _ => return None,

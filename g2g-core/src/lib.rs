@@ -209,11 +209,11 @@ pub use mediaclock::MediaClock;
 pub use meta::FrameMetaSet;
 #[cfg(feature = "metadata")]
 pub use meta::{
-    blob_decoder, decode_blob, AnalyticsMeta, AnalyticsNode, BBox, Blob, BlobDecoder, BlobMeta,
-    CaptionMeta, CaptionTriple, Chromaticity, Classification, DecodedBlob, FrameMeta,
-    HdrStaticMeta, Mask, MasteringDisplay, NamedTensor, ObjectDetection, Propagation, Relation,
-    RelationKind, Roi, Segmentation, TensorMeta, TimecodeMeta, Tracking, Transform, WallClockMeta,
-    BLOB_DECODERS,
+    blob_decoder, canonical_blob_header, decode_blob, frame_carries, AnalyticsMeta, AnalyticsNode,
+    BBox, Blob, BlobDecoder, BlobMeta, CaptionMeta, CaptionTriple, Chromaticity, Classification,
+    DecodedBlob, FrameMeta, HdrStaticMeta, Mask, MasteringDisplay, NamedTensor, ObjectDetection,
+    Propagation, Relation, RelationKind, Roi, Segmentation, TensorMeta, TimecodeMeta, Tracking,
+    Transform, WallClockMeta, BLOB_DECODERS, CARRIES_DETECTIONS,
 };
 #[cfg(feature = "alloc")]
 pub use property::{

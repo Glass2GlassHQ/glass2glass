@@ -89,6 +89,7 @@ use crate::runtime::mutate::{
     LiveEdge, LiveNode, LiveTopology, MutationRequest, MutationService, MutationSpawn,
 };
 use crate::runtime::progress::PipelineProgress;
+use crate::runtime::property_mailbox::{drain_properties, PropertyMailbox};
 use crate::runtime::runner::{
     re_solve_downstream_dyn_sink, LinkCapacity, NullSink, RunStats, SourceLoop,
 };
@@ -1390,12 +1391,14 @@ async fn prepare_graph<'a>(
                 Some(GraphNodeRef::Demux(demux)) => demux.set_instance_name(name.clone()),
                 None => {}
             }
-            // M1164: only a source reports out of band about itself so far, a
-            // fanned-out session included (M1170).
+            // M1164: a source reports out of band about itself, a fanned-out
+            // session included (M1170); a transform or sink posts what it
+            // observes (a metasink's records).
             if let Some(bus) = bus {
                 match vg.element_mut(node) {
                     Some(GraphNodeRef::Source(src)) => src.set_bus(bus.clone()),
                     Some(GraphNodeRef::FanoutSource(src)) => src.set_bus(bus.clone()),
+                    Some(GraphNodeRef::Element(elem)) => elem.set_bus(bus.clone()),
                     _ => {}
                 }
             }
@@ -1693,6 +1696,13 @@ fn live_topology<'a>(
             total_in_edges: vg.in_edges(NodeId(i as u32)).len(),
             done: None,
             removable: matches!(vg.kind(NodeId(i as u32)), NodeKind::Transform),
+            // M1175: only an arm that hands packets to its element one at a time
+            // can act between them, the rule `resolve_controllers` follows.
+            properties: matches!(
+                vg.kind(NodeId(i as u32)),
+                NodeKind::Transform | NodeKind::Sink | NodeKind::Muxer(_)
+            )
+            .then(PropertyMailbox::new),
         })
         .collect();
     let mut edges: Vec<LiveEdge> = Vec::new();
@@ -2047,6 +2057,9 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
             // `input_pts_ordered` and monomorphizes it over the element.
             let mux_probe = probes[node.0 as usize].clone();
             let mux_control = controllers[node.0 as usize].take();
+            let mux_properties = live
+                .as_ref()
+                .and_then(|t| t.nodes[node.0 as usize].properties.clone());
             let arm: BoxFuture<'a, Result<u64, G2gError>> = mux.drive_muxer_arm(MuxerArmIo {
                 parts: MuxerArmParts {
                     pad_rxs,
@@ -2057,6 +2070,7 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
                     arm_rx: mux_ctrl,
                     probe: mux_probe,
                     control: mux_control,
+                    properties: mux_properties,
                 },
                 ticker,
             });
@@ -2113,6 +2127,9 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
                     bus: bus.cloned(),
                     probe: probes[node.0 as usize].clone(),
                     control: controllers[node.0 as usize].take(),
+                    properties: live
+                        .as_ref()
+                        .and_then(|t| t.nodes[node.0 as usize].properties.clone()),
                 };
                 match live.as_mut() {
                     // A mutable run keeps every transform's element reachable, so
@@ -2145,6 +2162,9 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
                     progress: progress.cloned(),
                     probe: probes[node.0 as usize].clone(),
                     control: controllers[node.0 as usize].take(),
+                    properties: live
+                        .as_ref()
+                        .and_then(|t| t.nodes[node.0 as usize].properties.clone()),
                 };
                 match live.as_mut() {
                     // M1149: as for a transform, at the same cost.
@@ -2608,6 +2628,9 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
             let mux_probe = probes[node.0 as usize].clone();
             let mux_ticker = ticker.clone();
             let mux_control = controllers[node.0 as usize].take();
+            let mux_properties = live
+                .as_ref()
+                .and_then(|t| t.nodes[node.0 as usize].properties.clone());
             let build: alloc::boxed::Box<dyn FnOnce() -> LocalArmFuture + Send> =
                 alloc::boxed::Box::new(move || -> LocalArmFuture {
                     mux.drive_muxer_arm_owned_tick(MuxerArmOwnedTickIo {
@@ -2620,6 +2643,7 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
                             arm_rx: mux_ctrl,
                             probe: mux_probe,
                             control: mux_control,
+                            properties: mux_properties,
                         },
                         ticker: mux_ticker,
                     })
@@ -2677,6 +2701,9 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
                 let probe = probes[node.0 as usize].clone();
                 let ch = coord_handle.clone();
                 let control = controllers[node.0 as usize].take();
+                let properties = live
+                    .as_ref()
+                    .and_then(|t| t.nodes[node.0 as usize].properties.clone());
                 let done = live.as_mut().map(|topology| {
                     let (done_tx, done_rx) = bounded(1);
                     topology.nodes[node.0 as usize].done = Some(Handback::Element(done_rx));
@@ -2695,6 +2722,7 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
                         bus: bus_c,
                         probe,
                         control,
+                        properties,
                     };
                     // See the cooperative path: a mutable run keeps the element
                     // reachable so a remove can hand it back.
@@ -2718,6 +2746,9 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
                 let ch = coord_handle.clone();
                 let arm_rx = arm_ctrl_rx[node.0 as usize].take().expect("sink ctrl rx");
                 let control = controllers[node.0 as usize].take();
+                let properties = live
+                    .as_ref()
+                    .and_then(|t| t.nodes[node.0 as usize].properties.clone());
                 let done = live.as_mut().map(|topology| {
                     let (done_tx, done_rx) = bounded(1);
                     topology.nodes[node.0 as usize].done = Some(Handback::Element(done_rx));
@@ -2735,6 +2766,7 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
                         progress: prog_c,
                         probe,
                         control,
+                        properties,
                     };
                     match done {
                         Some(done) => Box::pin(lent_sink_arm(elem, io, done)),
@@ -3915,6 +3947,9 @@ pub struct TransformArmIo {
     pub(crate) bus: Option<BusHandle>,
     pub(crate) probe: Probe,
     pub(crate) control: Option<ArmController>,
+    /// Where a live property set / get waits for this arm's next packet
+    /// boundary (M1175). `None` unless the run was asked for a mutator.
+    pub(crate) properties: Option<PropertyMailbox>,
 }
 
 /// As [`TransformArmIo`], for the sink arm.
@@ -3931,6 +3966,7 @@ pub struct SinkArmIo {
     pub(crate) progress: Option<PipelineProgress>,
     pub(crate) probe: Probe,
     pub(crate) control: Option<ArmController>,
+    pub(crate) properties: Option<PropertyMailbox>,
 }
 
 /// Monomorphized over the element type by the `drive_transform_arm` blanket
@@ -3953,6 +3989,7 @@ pub async fn transform_arm<E: AsyncElement>(
         bus,
         probe,
         control,
+        properties,
     } = io;
     let mut adapter = SenderSink::new(out_tx);
     // M947: charge time spent blocked on the downstream link to this element's
@@ -4158,6 +4195,9 @@ pub async fn transform_arm<E: AsyncElement>(
                 // M882: animated properties are sampled at this frame's PTS, so
                 // the element processes it under the values that frame's time
                 // calls for.
+                // M1175: a live property set / get lands here, between packets,
+                // so the element is only ever touched by its own arm.
+                drain_properties(properties.as_ref(), &mut elem as &mut dyn DynAsyncElement);
                 apply_control(
                     control.as_ref(),
                     &mut elem as &mut dyn DynAsyncElement,
@@ -4231,6 +4271,7 @@ async fn sink_arm_loop<E: AsyncElement>(elem: &mut E, io: SinkArmIo) -> Result<u
         progress,
         probe,
         control,
+        properties,
     } = io;
     let mut null = NullSink;
     let mut consumed = 0u64;
@@ -4395,6 +4436,8 @@ async fn sink_arm_loop<E: AsyncElement>(elem: &mut E, io: SinkArmIo) -> Result<u
                     }
                 }
                 // M882: sample the animated properties at this frame's PTS.
+                // M1175: as in the transform arm.
+                drain_properties(properties.as_ref(), &mut *elem as &mut dyn DynAsyncElement);
                 apply_control(
                     control.as_ref(),
                     &mut *elem as &mut dyn DynAsyncElement,
@@ -5135,6 +5178,7 @@ pub(crate) struct MuxerArmParts {
     pub(crate) arm_rx: Receiver<ArmDirective>,
     pub(crate) probe: Probe,
     pub(crate) control: Option<ArmController>,
+    pub(crate) properties: Option<PropertyMailbox>,
 }
 
 /// A muxer arm's input, as the cooperative runner builds it. Opaque on purpose,
@@ -5191,6 +5235,7 @@ pub(crate) async fn muxer_arm<E: MultiInputElement>(
                 arm_rx,
                 probe,
                 control,
+                properties,
             },
         ticker,
     } = io;
@@ -5330,6 +5375,11 @@ pub(crate) async fn muxer_arm<E: MultiInputElement>(
                     p.record_fill(pad_rxs[slot].1.fill_percent());
                 }
                 // M882: sample the animated properties at this frame's PTS.
+                // M1175: as in the transform arm.
+                drain_properties(
+                    properties.as_ref(),
+                    &mut mux as &mut dyn DynMultiInputElement,
+                );
                 apply_control(
                     control.as_ref(),
                     &mut mux as &mut dyn DynMultiInputElement,
@@ -5378,6 +5428,7 @@ pub(crate) async fn muxer_arm_pts<E: MultiInputElement>(
                 arm_rx,
                 probe,
                 control,
+                properties,
             },
         ticker,
     } = io;
@@ -5403,6 +5454,11 @@ pub(crate) async fn muxer_arm_pts<E: MultiInputElement>(
             }
             // M882: sampled in release (PTS) order, so the animation follows the
             // ordered stream rather than pad arrival.
+            // M1175: as in the transform arm.
+            drain_properties(
+                properties.as_ref(),
+                &mut mux as &mut dyn DynMultiInputElement,
+            );
             apply_control_at(
                 control.as_ref(),
                 &mut mux as &mut dyn DynMultiInputElement,

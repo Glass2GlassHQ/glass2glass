@@ -527,6 +527,12 @@ pub trait AsyncElement: ElementBound {
     /// lines carry the instance name.
     fn set_instance_name(&mut self, _name: alloc::string::String) {}
 
+    /// Receive the run's message bus, the [`SourceLoop::set_bus`](crate::runtime::SourceLoop::set_bus)
+    /// counterpart for a transform or sink, so an element can post out of band
+    /// (a `metasink` posting each record it writes). Only the graph runner hands
+    /// it out, and only when the run has a bus. Default: ignore.
+    fn set_bus(&mut self, _bus: crate::bus::BusHandle) {}
+
     /// Override this instance's log category (M845), which is otherwise the
     /// element type name. Default: ignore. An element that logs about itself
     /// stores it (in a [`LogName`](crate::log::LogName)) and returns it from
@@ -725,6 +731,9 @@ pub trait DynAsyncElement: ElementBound {
     /// name an erased element instance for logging.
     fn set_instance_name(&mut self, _name: alloc::string::String) {}
 
+    /// Dyn-safe mirror of [`AsyncElement::set_bus`].
+    fn set_bus(&mut self, _bus: crate::bus::BusHandle) {}
+
     /// Dyn-safe mirror of [`AsyncElement::set_log_category`].
     fn set_log_category(&mut self, _category: alloc::string::String) {}
 
@@ -901,6 +910,10 @@ impl<T: AsyncElement> DynAsyncElement for T {
 
     fn set_instance_name(&mut self, name: alloc::string::String) {
         AsyncElement::set_instance_name(self, name)
+    }
+
+    fn set_bus(&mut self, bus: crate::bus::BusHandle) {
+        AsyncElement::set_bus(self, bus)
     }
 
     fn set_log_category(&mut self, category: alloc::string::String) {
@@ -1082,6 +1095,10 @@ impl<'b> AsyncElement for DynRef<'b> {
         self.0.set_instance_name(name)
     }
 
+    fn set_bus(&mut self, bus: crate::bus::BusHandle) {
+        self.0.set_bus(bus)
+    }
+
     fn set_log_category(&mut self, category: alloc::string::String) {
         self.0.set_log_category(category)
     }
@@ -1229,6 +1246,10 @@ impl<'b> DynAsyncElement for &'b mut (dyn DynAsyncElement + 'b) {
 
     fn set_instance_name(&mut self, name: alloc::string::String) {
         (**self).set_instance_name(name)
+    }
+
+    fn set_bus(&mut self, bus: crate::bus::BusHandle) {
+        (**self).set_bus(bus)
     }
 
     fn set_log_category(&mut self, category: alloc::string::String) {

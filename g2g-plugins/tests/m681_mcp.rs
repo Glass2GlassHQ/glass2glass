@@ -4,8 +4,8 @@
 //! binary end to end (the tool logic is unit-tested in `toolingjson`; this checks
 //! the JSON-RPC framing).
 //!
-//! Needs `observe,multi-thread` (`declarative-yaml` for the `run_graph` test):
-//! `cargo test -p g2g-plugins --features observe,multi-thread,declarative-yaml
+//! Needs `mcp` (`declarative-yaml` for the `run_graph` test):
+//! `cargo test -p g2g-plugins --features mcp,declarative-yaml
 //! --test m681_mcp`.
 #![cfg(all(feature = "tooling-json", feature = "multi-thread"))]
 

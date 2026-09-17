@@ -823,10 +823,12 @@ mod on {
             Self::default()
         }
 
-        /// Append a tagged blob.
+        /// Append a tagged blob. The header is stored in its canonical form
+        /// ([`canonical_blob_header`]), so `GST-ALERT:` and `alert` name the
+        /// same blob.
         pub fn push(&mut self, header: impl Into<String>, payload: Vec<u8>) {
             self.blobs.push(Blob {
-                header: header.into(),
+                header: canonical_blob_header(&header.into()),
                 payload,
             });
         }
@@ -844,10 +846,43 @@ mod on {
             self.blobs.len()
         }
 
-        /// The first blob tagged `header`, if any.
+        /// The first blob tagged `header`, if any. `header` is matched in its
+        /// canonical form, like the stored one.
         pub fn get(&self, header: &str) -> Option<&Blob> {
+            let header = canonical_blob_header(header);
             self.blobs.iter().find(|b| b.header == header)
         }
+    }
+
+    /// The name a blob header goes by everywhere in g2g: lowercase, without the
+    /// `GST-` prefix and trailing `:` gst-python-ml puts on the wire, so
+    /// `GST-ALERT:` becomes `alert`. Every producer's spelling reaches the same
+    /// consumer key, and the JSON key a `metasink` writes is the name an
+    /// `only-on` names.
+    pub fn canonical_blob_header(header: &str) -> String {
+        let trimmed = header.trim().trim_end_matches(':');
+        let without_prefix = trimmed
+            .get(..4)
+            .filter(|prefix| prefix.eq_ignore_ascii_case("gst-"))
+            .map_or(trimmed, |_| &trimmed[4..]);
+        without_prefix.to_ascii_lowercase()
+    }
+
+    /// The `only-on` name for "the frame carries at least one detection".
+    pub const CARRIES_DETECTIONS: &str = "detections";
+
+    /// Whether `meta` carries what `name` asks for: [`CARRIES_DETECTIONS`] is an
+    /// [`AnalyticsMeta`] with at least one detection node, any other name is a
+    /// [`BlobMeta`] blob with that canonical header. The test behind an element's
+    /// `only-on` property: a frame without it passes the element untouched.
+    pub fn frame_carries(meta: &FrameMetaSet, name: &str) -> bool {
+        if name == CARRIES_DETECTIONS {
+            return meta
+                .get::<AnalyticsMeta>()
+                .is_some_and(|analytics| analytics.detections().next().is_some());
+        }
+        meta.get::<BlobMeta>()
+            .is_some_and(|blobs| blobs.get(name).is_some())
     }
 
     /// A [`Blob`] payload decoded by the [`BLOB_DECODERS`] registry.

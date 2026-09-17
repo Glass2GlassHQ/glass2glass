@@ -30,6 +30,7 @@ use crate::element::{BoxFuture, DynAsyncElement};
 use crate::error::G2gError;
 use crate::graph::NodeId;
 use crate::link::LinkPolicy;
+use crate::property::{PropError, PropValue};
 use crate::runtime::channel::{
     advertise_orientation, bounded, link, LinkSender, ProducerEndpoint, Receiver, Sender,
 };
@@ -39,6 +40,7 @@ use crate::runtime::graph_runner::{
     run_source, BranchMode, GraphCoordHandle, SinkArmIo, SourceArmIo, TransformArmIo,
 };
 use crate::runtime::progress::PipelineProgress;
+use crate::runtime::property_mailbox::{PropertyMailbox, PropertyRequest};
 use crate::runtime::runner::re_solve_downstream_dyn_sink;
 use crate::segment::Segment;
 
@@ -68,6 +70,10 @@ pub enum MutationError {
     /// The run has ended (or its producer's arm has), so there is no graph left
     /// to mutate.
     GraphEnded,
+    /// The element refused the property value (M1175): its own
+    /// [`PropError`], so an unknown name, a kind mismatch and an out-of-range
+    /// value are told apart the way a build-time `set_property` tells them apart.
+    PropertyRejected(PropError),
 }
 
 /// A handle on a *running* graph's topology (M1115): splice a transform onto a
@@ -292,6 +298,60 @@ impl<'a> GraphMutator<'a> {
             .map_err(|_| MutationError::GraphEnded)?;
         answer.recv().await.ok_or(MutationError::GraphEnded)?
     }
+
+    /// Set a property on the element named `node` while it runs (M1175), the
+    /// `gst-launch` knob applied mid-stream. The element's own
+    /// [`set_property`](crate::AsyncElement::set_property) runs inside the arm
+    /// that owns it, at that arm's next packet boundary, so the element is never
+    /// touched from another task and the value takes effect between packets
+    /// rather than inside one.
+    ///
+    /// A value the element refuses comes back as
+    /// [`MutationError::PropertyRejected`] carrying its own [`PropError`], which
+    /// is how an unknown property name is reported too. A node whose arm hands
+    /// packets to no element (a source, a tee, a demux) is
+    /// [`MutationError::NotMutable`]: only a transform, a sink or a fan-in
+    /// position can act between packets, the same rule animated properties
+    /// follow.
+    pub async fn set_property(
+        &self,
+        node: &str,
+        name: &str,
+        value: PropValue,
+    ) -> Result<(), MutationError> {
+        let (reply, answer) = bounded(1);
+        self.tx
+            .send(MutationRequest::SetProperty {
+                node: node.to_string(),
+                name: name.to_string(),
+                value,
+                reply,
+            })
+            .await
+            .map_err(|_| MutationError::GraphEnded)?;
+        answer.recv().await.ok_or(MutationError::GraphEnded)?
+    }
+
+    /// Read a property off the element named `node` while it runs, at the same
+    /// packet boundary [`set_property`](Self::set_property) writes at, so a read
+    /// after a write sees that write. `Ok(None)` is the element's own answer for
+    /// a name it does not carry.
+    pub async fn get_property(
+        &self,
+        node: &str,
+        name: &str,
+    ) -> Result<Option<PropValue>, MutationError> {
+        let (reply, answer) = bounded(1);
+        self.tx
+            .send(MutationRequest::GetProperty {
+                node: node.to_string(),
+                name: name.to_string(),
+                reply,
+            })
+            .await
+            .map_err(|_| MutationError::GraphEnded)?;
+        answer.recv().await.ok_or(MutationError::GraphEnded)?
+    }
 }
 
 /// Which edge of the named node a splice addresses: the one below it (the
@@ -332,6 +392,17 @@ pub(crate) enum MutationRequest<'a> {
         node: String,
         source: Box<dyn DynSourceLoop + 'a>,
         reply: Sender<ReplacedSource<'a>>,
+    },
+    SetProperty {
+        node: String,
+        name: String,
+        value: PropValue,
+        reply: Sender<Result<(), MutationError>>,
+    },
+    GetProperty {
+        node: String,
+        name: String,
+        reply: Sender<Result<Option<PropValue>, MutationError>>,
     },
 }
 
@@ -376,6 +447,9 @@ pub(crate) struct LiveNode<'a> {
     pub(crate) done: Option<Handback<'a>>,
     /// A transform: the only kind of node that can be lifted out.
     pub(crate) removable: bool,
+    /// Where a live property operation is queued for this node's arm (M1175).
+    /// `None` on a node whose arm hands packets to no element of its own.
+    pub(crate) properties: Option<PropertyMailbox>,
 }
 
 /// How a lent-out element comes back when its arm ends. The two shapes are
@@ -605,11 +679,71 @@ impl<'a, 's> MutationService<'a, 's> {
                     let result = self.replace_source(&node, source).await;
                     let _ = reply.try_send(result);
                 }
+                Some(MutationRequest::SetProperty {
+                    node,
+                    name,
+                    value,
+                    reply,
+                }) => {
+                    let result = self.set_property(&node, &name, value).await;
+                    let _ = reply.try_send(result);
+                }
+                Some(MutationRequest::GetProperty { node, name, reply }) => {
+                    let result = self.get_property(&node, &name).await;
+                    let _ = reply.try_send(result);
+                }
                 // Every handle is gone, so nothing more can arrive; the arms
                 // still have a run to finish.
                 None => core::future::pending::<()>().await,
             }
         }
+    }
+
+    /// M1175: queue the set for the arm that owns the element and wait for that
+    /// arm's answer. A reply channel that closes without an answer means the arm
+    /// ended (or the whole run did) before it reached a packet boundary.
+    async fn set_property(
+        &self,
+        node: &str,
+        name: &str,
+        value: PropValue,
+    ) -> Result<(), MutationError> {
+        let mailbox = self.mailbox(node)?;
+        let (reply, answer) = bounded(1);
+        mailbox.push(PropertyRequest::Set {
+            name: name.to_string(),
+            value,
+            reply,
+        });
+        answer
+            .recv()
+            .await
+            .ok_or(MutationError::GraphEnded)?
+            .map_err(MutationError::PropertyRejected)
+    }
+
+    /// [`set_property`](Self::set_property) for a read: the element's own answer,
+    /// `None` for a name it does not carry.
+    async fn get_property(
+        &self,
+        node: &str,
+        name: &str,
+    ) -> Result<Option<PropValue>, MutationError> {
+        let mailbox = self.mailbox(node)?;
+        let (reply, answer) = bounded(1);
+        mailbox.push(PropertyRequest::Get {
+            name: name.to_string(),
+            reply,
+        });
+        answer.recv().await.ok_or(MutationError::GraphEnded)
+    }
+
+    fn mailbox(&self, node: &str) -> Result<&PropertyMailbox, MutationError> {
+        let found = self.find(node)?;
+        self.nodes[found]
+            .properties
+            .as_ref()
+            .ok_or_else(|| MutationError::NotMutable(node.to_string()))
     }
 
     fn find(&self, name: &str) -> Result<usize, MutationError> {
@@ -732,6 +866,9 @@ impl<'a, 's> MutationService<'a, 's> {
 
         let spliced = self.nodes.len();
         let (done_tx, done_rx) = bounded(1);
+        // A spliced element takes live property operations the way a negotiated
+        // transform does.
+        let properties = PropertyMailbox::new();
         let io = TransformArmIo {
             in_rx: feed_rx,
             out_tx: original,
@@ -744,6 +881,7 @@ impl<'a, 's> MutationService<'a, 's> {
             bus: self.bus.clone(),
             probe: None,
             control: None,
+            properties: Some(properties.clone()),
         };
         let arm = (self.spawn.transform)(element, io, done_tx);
         if self.arms.send(arm).await.is_err() {
@@ -771,6 +909,7 @@ impl<'a, 's> MutationService<'a, 's> {
             total_in_edges: 1,
             done: Some(Handback::Element(done_rx)),
             removable: true,
+            properties: Some(properties),
         });
         self.edges[edge].consumer = spliced;
         // The one shape the edge above the spliced element is known to carry:
@@ -994,6 +1133,7 @@ impl<'a, 's> MutationService<'a, 's> {
         advertise_orientation(&feed_rx, element.absorbs_orientation());
         let replacement = self.nodes.len();
         let (done_tx, done_rx) = bounded(1);
+        let properties = PropertyMailbox::new();
         let io = SinkArmIo {
             in_rx: feed_rx,
             arm_rx: dead_directives(),
@@ -1007,6 +1147,7 @@ impl<'a, 's> MutationService<'a, 's> {
             progress: self.progress.clone(),
             probe: None,
             control: None,
+            properties: Some(properties.clone()),
         };
         let arm = (self.spawn.sink)(element, io, done_tx);
         if self.arms.send(arm).await.is_err() {
@@ -1023,6 +1164,7 @@ impl<'a, 's> MutationService<'a, 's> {
             total_in_edges: 1,
             done: Some(Handback::Element(done_rx)),
             removable: false,
+            properties: Some(properties),
         });
         self.edges[edge].consumer = replacement;
         self.edges[edge].feasible = Some(feasible);
@@ -1126,6 +1268,8 @@ impl<'a, 's> MutationService<'a, 's> {
             total_in_edges: 0,
             done: Some(Handback::Source(done_rx)),
             removable: false,
+            // A source drives itself, so it has no packet boundary to act at.
+            properties: None,
         });
         // As in `replace_sink`: the node the old source sat on keeps its name
         // and loses its edge.

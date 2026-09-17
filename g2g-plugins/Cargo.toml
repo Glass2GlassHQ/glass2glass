@@ -32,7 +32,8 @@ linux-full = [
     "opus", "vorbis", "vpx", "av1-encode", "mjpeg", "mjpeg-encode", "png", "webp",
     "alsa-sink", "alsa-src", "pulse-sink", "pulse-src", "pipewire", "portal",
     "wayland-sink", "kms-sink", "wgpu-sink", "wgpu-present", "vello-overlay", "analytics",
-    "declarative-yaml", "script-rhai", "observe", "tui", "latency-bench",
+    "analytics-json", "embedding-index",
+    "declarative-yaml", "script-rhai", "observe", "mcp", "tui", "latency-bench",
 ]
 std = ["g2g-core/std", "dep:tokio"]
 multi-thread = ["g2g-core/multi-thread"]
@@ -155,6 +156,10 @@ moqt = ["webtransport", "tokio/rt", "tokio/sync", "tokio/macros"]
 # of std; the transports below layer their own deps.
 tooling-json = ["std", "dep:serde_json"]
 observe = ["tooling-json", "tokio/net", "tokio/io-util", "tokio/rt", "tokio/time", "tokio/macros", "tokio/sync", "dep:tokio-tungstenite", "futures-util/sink"]
+# The `g2g-mcp` server: the live-pipeline tools (`observe`, `multi-thread`), the
+# metadata record tools (`analytics-json`), and a frame snapshot as a PNG image
+# block (`png` + base64).
+mcp = ["observe", "multi-thread", "analytics-json", "png", "dep:base64"]
 # In-terminal live telemetry: `g2g-launch --tui` reads the same `Observer` tap
 # the dashboard does and draws it with ratatui, no browser and no server. No
 # JSON: it renders the snapshot structs directly, so it is independent of
@@ -576,6 +581,17 @@ text-shaping = ["truetype-overlay", "dep:cosmic-text"]
 # `metadata` container so frames carry the typed graph. CPU, no_std baseline; the
 # Vello GPU backend is the separate `vello-overlay` feature (M102).
 analytics = ["metadata"]
+# Analytics records as JSON: `metasink` writes one JSON line per frame (pts,
+# detections, JSON blobs, text) and posts it on the bus, `metareplay` reattaches
+# such a file to frames by pts, `analyticsalert` fires rules on detections and
+# attaches the `alert` blob (webhook POST through reqwest), `alertrecorder`
+# writes a clip around each alert, `trim` keeps a pts range. std for the files
+# and serde_json for the lines.
+analytics-json = ["metadata", "std", "dep:serde_json", "dep:reqwest"]
+# `embeddingsink`: one sqlite row per embedded frame (source_id, pts, model_name,
+# vector), the same schema gst-python-ml's `pyml_embeddingsink` writes and its
+# `search_video` reads. rusqlite with sqlite bundled, so there is no system dep.
+embedding-index = ["metadata", "std", "dep:rusqlite"]
 # Vello GPU analytics overlay (M102): VelloAnalyticsOverlay renders the
 # AnalyticsMeta detection boxes with the Vello GPU 2D renderer (wgpu) into a
 # wgpu texture, output as MemoryDomain::WgpuTexture (kept on GPU, no readback).
@@ -788,6 +804,7 @@ async-ffi = { version = "0.5", optional = true }
 # the workspace -Werror.
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
+rusqlite = { version = "0.40", optional = true, features = ["bundled"] }
 serde_yaml = { version = "0.9", optional = true }
 # Embedded Rhai script engine (script-rhai feature, M579/M580). Pure Rust, no
 # system deps. default-features off keeps it lean; `std` for the std build,
@@ -1313,7 +1330,7 @@ required-features = ["std"]
 # MCP server for agent-driven dev; needs serde_json (registry dump / results).
 [[bin]]
 name = "g2g-mcp"
-required-features = ["observe", "multi-thread"]
+required-features = ["mcp"]
 
 # Keygen / sign / verify for detached plugin signatures (M1061).
 [[bin]]

@@ -51,6 +51,9 @@ mod mutate;
 mod parse_scope;
 
 #[cfg(feature = "std")]
+mod property_mailbox;
+
+#[cfg(feature = "std")]
 mod observe;
 
 #[cfg(feature = "std")]

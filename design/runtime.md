@@ -268,6 +268,25 @@ reaction to an unsolvable mid-stream caps change, where a branch under
 Every operation completes at the producer's next packet boundary, so a producer
 that has gone quiet defers it rather than failing.
 
+### Setting a property while it runs
+
+`set_property` and `get_property` name a node and a property, and the element's own
+`set_property` / `get_property` runs inside the arm that owns that element, at that
+arm's next packet boundary. The element is therefore only ever touched from the task
+driving it, and a value takes effect between two packets rather than inside one. The
+queue is one mailbox per node, an atomic flag over a small list, so an arm with
+nothing waiting pays one acquire load per packet and allocates nothing.
+
+Only a transform, a sink or a fan-in position carries a mailbox, the rule animated
+properties follow: those are the arms that hand an element one packet at a time. A
+source drives itself and a tee carries no element, so both are `NotMutable`. A
+spliced element and a replacement sink get one of their own, so they are as settable
+as a negotiated element. A value the element refuses comes back as
+`PropertyRejected` carrying the element's own `PropError`, which is also how an
+unknown property name is reported. A get of a name the element does not carry is
+`Ok(None)`, again the element's answer rather than the mutator's. An arm that ended
+before it reached a boundary is `GraphEnded`.
+
 ## GStreamer dynamic-feature mapping
 
 g2g's dynamic surface is intended to be a superset of GStreamer's dynamic

@@ -235,6 +235,16 @@ pub enum BusMessage {
         /// `Running` and on a `Stopped` a clean end of stream caused.
         reason: Option<SourceRestartReason>,
     },
+    /// One metadata record a `metasink` wrote, as the JSON line it went to the
+    /// file as: the frame's pts in seconds plus its detections, JSON blobs or
+    /// text. Posted per record so a tool reading the bus (`g2g-mcp`) sees the
+    /// pipeline's results as they happen, without reading the file back.
+    MetadataRecord {
+        /// The posting sink's instance name.
+        element: alloc::string::String,
+        /// The JSON line.
+        record: alloc::string::String,
+    },
 }
 
 /// What a restarting source is doing, gst `fallbacksrc`'s `status` (M1164).
