@@ -24,6 +24,22 @@
 //! `GraphMutator` and `Bus` to [`McpServer::register_pipeline`] instead and
 //! keeps the lifecycle: `stop_pipeline` refuses a registered pipeline.
 //!
+//! The managed run's results come back through the record tools, the live
+//! property tools, and a picture of one edge:
+//!
+//!   latest_metadata  {count}              -> the newest `metasink` records
+//!   wait_for_records {count, key, ...}    -> block until new ones arrive
+//!   load_metadata    {path}               -> read a finished run's file instead
+//!   get_property     {element, property}  -> read one live element's knob
+//!   set_property     {element, ..., value}-> write it between packets
+//!   snapshot_frame   {element|edge}       -> the newest frame as a PNG image block
+//!   clip_at          {source, pts, secs}  -> cut a clip out of a video file
+//!
+//! `prompts/list` / `prompts/get` serve one prompt per `###` section of the
+//! README's sample pipelines, read from disk at call time (`G2G_README` points
+//! elsewhere). `describe_frame` and `search_video` are not here: they need the
+//! Python models `pyml_mcp` hosts.
+//!
 //! No MCP framework dependency: the JSON-RPC envelope is hand-rolled over
 //! stdin/stdout with serde_json. Needs the `observe` and `multi-thread`
 //! features.
@@ -36,19 +52,24 @@ use std::cell::Cell;
 use std::collections::{BTreeMap, VecDeque};
 use std::io::{BufRead, Write};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{mpsc, Arc, Mutex, OnceLock};
+use std::sync::{mpsc, Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
+#[cfg(feature = "mcp")]
+use base64::Engine as _;
+
 use g2g_core::log::{LogLevel, LogValue, RingSink, SinkId};
-use g2g_core::property::{takes_undeclared_properties, PropValue};
+use g2g_core::property::{takes_undeclared_properties, PropKind, PropValue};
 use g2g_core::runtime::{
     parse_launch, run_graph_observed_mutable, select2, Either, GraphMutator, LinkInterceptor,
     Observer, ProbeAction, Registry, RunStats,
 };
-use g2g_core::{Bus, PipelinePacket};
+#[cfg(feature = "mcp")]
+use g2g_core::runtime::{NodeRole, TelemetrySnapshot};
+use g2g_core::{Bus, BusMessage, PipelinePacket};
 
 use crate::clock::WallClock;
 use crate::preview::packet_preview;
@@ -64,6 +85,35 @@ const DEFAULT_PACKET_SAMPLE_COUNT: usize = 1;
 const MAX_PACKET_SAMPLE_COUNT: usize = 32;
 const DEFAULT_PACKET_SAMPLE_TIMEOUT_MS: u64 = 1000;
 const MAX_PACKET_SAMPLE_TIMEOUT_MS: u64 = 30_000;
+const RECORD_CAPACITY: usize = 1000;
+const DEFAULT_RECORD_COUNT: usize = 10;
+const DEFAULT_RECORD_WAIT_MS: u64 = 30_000;
+const MAX_RECORD_WAIT_MS: u64 = 120_000;
+/// How long a `wait_for_records` sleep runs before it rechecks the run state,
+/// which wakes no one when the pipeline fails.
+const RECORD_WAIT_SLICE: Duration = Duration::from_millis(50);
+/// The key a record line that is not JSON comes back under.
+const RAW_RECORD_KEY: &str = "raw";
+#[cfg(feature = "mcp")]
+const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(feature = "mcp")]
+const SNAPSHOT_MIME_TYPE: &str = "image/png";
+const DEFAULT_CLIP_SECONDS: f64 = 4.0;
+const DEFAULT_CLIP_DECODER: &str = "decodebin";
+const DEFAULT_CLIP_ENCODER: &str = "mjpegenc ! avimux";
+/// The container [`DEFAULT_CLIP_ENCODER`] writes, for the default `location`.
+const DEFAULT_CLIP_EXTENSION: &str = ".avi";
+/// How long a clip run gets to decode, cut and mux before it is abandoned.
+const CLIP_DEADLINE_SECS: u64 = 60;
+/// The clip line's own converter, whose processed count is the clip's frames.
+const CLIP_FRAME_COUNTER: &str = "clip-frames";
+const NS_PER_SECOND: f64 = 1_000_000_000.0;
+/// Where the README the prompts are built from lives, and the variable that
+/// points somewhere else. Read at call time: the crate is published without it.
+const README_PATH_ENV: &str = "G2G_README";
+const README_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../README.md");
+/// The README heading whose `###` subsections become prompts.
+const PIPELINE_SECTION_HEADING: &str = "## Sample pipelines";
 static PIPELINE_CLOCK: OnceLock<WallClock> = OnceLock::new();
 
 /// The MCP server: the tool dispatcher plus at most one managed pipeline.
@@ -76,6 +126,7 @@ pub struct McpServer {
     registry: Registry,
     runtime: tokio::runtime::Runtime,
     pipeline: Option<ManagedPipeline>,
+    records: RecordStore,
     logs: RingSink,
     log_sink_id: SinkId,
 }
@@ -117,6 +168,7 @@ impl McpServer {
                 .build()
                 .expect("build tokio runtime"),
             pipeline: None,
+            records: RecordStore::new(),
             logs,
             log_sink_id,
         }
@@ -167,11 +219,13 @@ impl McpServer {
         match method {
             "initialize" => Ok(json!({
                 "protocolVersion": PROTOCOL_VERSION,
-                "capabilities": { "tools": {} },
+                "capabilities": { "tools": {}, "prompts": {} },
                 "serverInfo": { "name": "g2g-mcp", "version": env!("CARGO_PKG_VERSION") },
             })),
             "tools/list" => Ok(json!({ "tools": tool_specs() })),
             "tools/call" => self.call_tool(params),
+            "prompts/list" => Ok(json!({ "prompts": prompt_specs() })),
+            "prompts/get" => prompt_messages(params),
             "notifications/initialized" | "ping" => Ok(json!({})),
             other => Err((-32601, format!("method not found: {other}"))),
         }
@@ -197,7 +251,8 @@ impl McpServer {
             return Err(RegistrationError::PipelineAlreadyRegistered);
         }
         let events = EventBuffer::new(EVENT_CAPACITY);
-        let event_collector = EventCollector::spawn(bus, events.clone())
+        self.records.reset();
+        let event_collector = EventCollector::spawn(bus, events.clone(), self.records.clone())
             .map_err(RegistrationError::EventCollector)?;
         let run_state = Arc::new(Mutex::new(PipelineRunState::Running));
         let handle = RegisteredPipelineHandle {
@@ -363,6 +418,136 @@ impl EventBuffer {
     }
 }
 
+/// The metadata records a `metasink` posted on the bus, oldest first, with a
+/// count of everything ever posted (so a waiter can tell its own arrivals from
+/// the tail it already saw) and whether anything more can arrive. It belongs to
+/// the server rather than a pipeline: `load_metadata` fills it from a file with
+/// nothing running.
+#[derive(Debug, Clone)]
+struct RecordStore {
+    inner: Arc<(Mutex<RecordStoreState>, Condvar)>,
+}
+
+#[derive(Debug, Default)]
+struct RecordStoreState {
+    records: VecDeque<Value>,
+    posted: u64,
+    ended: bool,
+}
+
+impl RecordStore {
+    fn new() -> Self {
+        Self {
+            inner: Arc::new((Mutex::new(RecordStoreState::default()), Condvar::new())),
+        }
+    }
+
+    fn lock(&self) -> MutexGuard<'_, RecordStoreState> {
+        self.inner.0.lock().expect("metadata record store")
+    }
+
+    fn push(&self, record: Value) {
+        push_record(&mut self.lock(), record);
+        self.inner.1.notify_all();
+    }
+
+    /// Nothing more will arrive: the run reached EOS, or a file was loaded.
+    fn end(&self) {
+        self.lock().ended = true;
+        self.inner.1.notify_all();
+    }
+
+    /// Start over for a new run, releasing whoever waits on the old one.
+    fn reset(&self) {
+        *self.lock() = RecordStoreState::default();
+        self.inner.1.notify_all();
+    }
+
+    fn ended(&self) -> bool {
+        self.lock().ended
+    }
+
+    fn latest(&self, count: usize) -> Vec<Value> {
+        let state = self.lock();
+        let skipped = state.records.len().saturating_sub(count);
+        state.records.iter().skip(skipped).cloned().collect()
+    }
+
+    /// Replace the store with the JSON lines of a finished run.
+    fn load(&self, text: &str) -> u64 {
+        let mut state = self.lock();
+        *state = RecordStoreState::default();
+        for line in text.lines().filter(|line| !line.trim().is_empty()) {
+            push_record(&mut state, record_value(line));
+        }
+        state.ended = true;
+        self.inner.1.notify_all();
+        state.posted
+    }
+
+    /// Block until `count` records carrying `key` have been posted since this
+    /// call, or nothing more can arrive, or the timeout passes. `run_ended`
+    /// answers for the pipeline behind the store, which posts no wakeup of its
+    /// own when it fails.
+    fn wait(
+        &self,
+        count: usize,
+        key: &str,
+        timeout: Duration,
+        run_ended: &dyn Fn() -> bool,
+    ) -> Vec<Value> {
+        let deadline = Instant::now() + timeout;
+        let mut state = self.lock();
+        // an ended run posts nothing more, so its whole tail counts as fresh
+        let posted_before = if state.ended { 0 } else { state.posted };
+        loop {
+            let matched = records_since(&state, posted_before, key);
+            if matched.len() >= count || state.ended || run_ended() {
+                return matched;
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return matched;
+            }
+            state = self
+                .inner
+                .1
+                .wait_timeout(state, left.min(RECORD_WAIT_SLICE))
+                .expect("metadata record store")
+                .0;
+        }
+    }
+}
+
+fn push_record(state: &mut RecordStoreState, record: Value) {
+    if state.records.len() == RECORD_CAPACITY {
+        state.records.pop_front();
+    }
+    state.records.push_back(record);
+    state.posted = state.posted.saturating_add(1);
+}
+
+/// The records posted after `posted_before` that carry `key`, oldest first. An
+/// empty `key` matches every record.
+fn records_since(state: &RecordStoreState, posted_before: u64, key: &str) -> Vec<Value> {
+    let fresh = usize::try_from(state.posted.saturating_sub(posted_before))
+        .unwrap_or(RECORD_CAPACITY)
+        .min(state.records.len());
+    state
+        .records
+        .iter()
+        .skip(state.records.len() - fresh)
+        .filter(|record| key.is_empty() || record.get(key).is_some())
+        .cloned()
+        .collect()
+}
+
+/// One `metasink` line as a value. A line that is not JSON still reaches the
+/// agent, under its own key, rather than disappearing.
+fn record_value(line: &str) -> Value {
+    serde_json::from_str(line).unwrap_or_else(|_| json!({ RAW_RECORD_KEY: line }))
+}
+
 #[derive(Debug)]
 struct EventCollector {
     stop: Option<tokio::sync::oneshot::Sender<()>>,
@@ -370,7 +555,7 @@ struct EventCollector {
 }
 
 impl EventCollector {
-    fn spawn(bus: Bus, events: EventBuffer) -> std::io::Result<Self> {
+    fn spawn(bus: Bus, events: EventBuffer, records: RecordStore) -> std::io::Result<Self> {
         let (stop, stop_receiver) = tokio::sync::oneshot::channel();
         let thread = std::thread::Builder::new()
             .name("g2g-mcp-events".into())
@@ -382,6 +567,13 @@ impl EventCollector {
                 runtime.block_on(async move {
                     let drain = async move {
                         while let Some(message) = bus.recv().await {
+                            match &message {
+                                BusMessage::MetadataRecord { record, .. } => {
+                                    records.push(record_value(record));
+                                }
+                                BusMessage::Eos => records.end(),
+                                _ => {}
+                            }
                             if let Some(event) = crate::dashboard::event_value(&message) {
                                 events.push(event);
                             }
@@ -507,7 +699,9 @@ fn tool_specs() -> Value {
         },
         {
             "name": "start_pipeline",
-            "description": "Start one pipeline in the background for live inspection and mutation.",
+            "description": "Start one pipeline in the background for live inspection and mutation. \
+                            Give a metasink a location=: a line whose records would land in this \
+                            server's stdout, which carries the protocol, is refused.",
             "inputSchema": {
                 "type": "object",
                 "properties": { "pipeline": { "type": "string" } },
@@ -614,11 +808,111 @@ fn tool_specs() -> Value {
             }
         },
         {
+            "name": "latest_metadata",
+            "description": "The newest records a metasink posted, oldest first: each has a pts in \
+                            seconds plus detections, text, or a JSON blob such as alert.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "count": { "type": "integer", "minimum": 1, "maximum": 1000 } }
+            }
+        },
+        {
+            "name": "wait_for_records",
+            "description": "Wait for a metasink to post new records, oldest first, and return them \
+                            with the pipeline status. Give a key such as detections or alert to wait \
+                            only for records carrying it. Returns whatever arrived when the pipeline \
+                            ends, fails, or the timeout passes first.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "count": { "type": "integer", "minimum": 1, "maximum": 1000 },
+                    "key": { "type": "string" },
+                    "timeout_ms": { "type": "integer", "minimum": 1, "maximum": 120000 }
+                }
+            }
+        },
+        {
+            "name": "load_metadata",
+            "description": "Load the JSON lines a metasink wrote to a file as the current records, \
+                            so latest_metadata and wait_for_records read a finished run with no \
+                            pipeline running. Stops the managed pipeline.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "path": { "type": "string" } },
+                "required": ["path"]
+            }
+        },
+        {
+            "name": "get_property",
+            "description": "Read a property of a named element of the managed pipeline.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "element": { "type": "string" },
+                    "property": { "type": "string" }
+                },
+                "required": ["element", "property"]
+            }
+        },
+        {
+            "name": "set_property",
+            "description": "Set a property on a named element of the managed pipeline, applied \
+                            between packets, and report the value read back. A source or a tee \
+                            takes no live property.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "element": { "type": "string" },
+                    "property": { "type": "string" },
+                    "value": { "type": ["string", "number", "boolean"] }
+                },
+                "required": ["element", "property", "value"]
+            }
+        },
+        {
+            "name": "clip_at",
+            "description": "Cut the seconds of video around a pts out of a video file, through \
+                            `filesrc ! decoder ! trim ! videoconvert ! encoder ! filesink`. \
+                            Returns where it was written, the range it covers and how many frames \
+                            it holds. `location` must carry the extension the encoder's muxer \
+                            writes; the default is an AVI in the temporary directory.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "source": { "type": "string" },
+                    "pts": { "type": "number" },
+                    "seconds": { "type": "number" },
+                    "location": { "type": "string" },
+                    "decoder": { "type": "string" },
+                    "encoder": { "type": "string" }
+                },
+                "required": ["source", "pts"]
+            }
+        },
+        {
             "name": "stop_pipeline",
             "description": "Stop and release the managed pipeline.",
             "inputSchema": { "type": "object", "properties": {} }
         }
     ]);
+    // The image block needs the png and base64 dependencies the `mcp` feature pulls.
+    #[cfg(feature = "mcp")]
+    if let Some(list) = tools.as_array_mut() {
+        list.push(json!({
+            "name": "snapshot_frame",
+            "description": "The newest frame reaching an element of the managed pipeline, as a PNG \
+                            image. Names the element the frame is about to reach, or an edge index \
+                            from pipeline_status. Left empty it takes the metasink, or the pipeline's \
+                            only sink.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "element": { "type": "string" },
+                    "edge": { "type": "integer", "minimum": 0 }
+                }
+            }
+        }));
+    }
     #[cfg(feature = "declarative")]
     if let Some(list) = tools.as_array_mut() {
         list.push(json!({
@@ -723,11 +1017,27 @@ impl McpServer {
                 .pipeline
                 .as_ref()
                 .map(ManagedPipeline::status_json)
-                .unwrap_or_else(|| json!({ "ok": false, "error": "no managed pipeline" })),
+                .unwrap_or_else(no_pipeline),
             "tail_events" => self.tail_events(&args)?,
             "set_log_level" => self.set_log_level(&args)?,
             "tail_logs" => self.tail_logs(&args)?,
             "sample_edge" => self.sample_edge(&args)?,
+            "latest_metadata" => {
+                let count = bounded_usize(
+                    args.get("count"),
+                    DEFAULT_RECORD_COUNT,
+                    RECORD_CAPACITY,
+                    "count",
+                )?;
+                json!({ "ok": true, "records": self.records.latest(count) })
+            }
+            "wait_for_records" => self.wait_for_records(&args)?,
+            "load_metadata" => self.load_metadata(&args)?,
+            "get_property" => self.get_property(&args)?,
+            "set_property" => self.set_property(&args)?,
+            "clip_at" => self.clip_at(&args)?,
+            #[cfg(feature = "mcp")]
+            "snapshot_frame" => return self.snapshot_frame(&args),
             "validate_insertion" => self.validate_insertion(&args)?,
             "insert_transform" => self.insert_transform(&args)?,
             "remove_transform" => self.remove_transform(&args)?,
@@ -746,10 +1056,7 @@ impl McpServer {
             other => return Err((-32602, format!("unknown tool: {other}"))),
         };
 
-        // MCP tool results wrap output as content blocks; hand back the JSON as text.
-        Ok(json!({
-            "content": [ { "type": "text", "text": serde_json::to_string_pretty(&payload).unwrap_or_default() } ]
-        }))
+        Ok(text_result(&payload))
     }
 
     fn start_pipeline(&mut self, line: &str) -> Value {
@@ -762,12 +1069,23 @@ impl McpServer {
                 return json!({ "ok": false, "stage": "parse", "error": format!("{error}") });
             }
         };
+        if metasink_writes_to_stdout(&graph) {
+            return json!({
+                "ok": false,
+                "error": "give the metasink a location=: with none its records go to this server's stdout, which carries the protocol",
+            });
+        }
 
         let observer = Observer::new();
         let thread_observer = observer.clone();
         let (bus, bus_handle) = Bus::new(256);
         let events = EventBuffer::new(EVENT_CAPACITY);
-        let mut event_collector = match EventCollector::spawn(bus, events.clone()) {
+        self.records.reset();
+        let mut event_collector = match EventCollector::spawn(
+            bus,
+            events.clone(),
+            self.records.clone(),
+        ) {
             Ok(collector) => collector,
             Err(error) => {
                 return json!({ "ok": false, "error": format!("cannot start bus event collector: {error}") });
@@ -879,7 +1197,7 @@ impl McpServer {
         let limit = bounded_usize(args.get("limit"), 100, EVENT_CAPACITY, "limit")?;
         let clear = args.get("clear").and_then(Value::as_bool).unwrap_or(false);
         let Some(pipeline) = self.pipeline.as_ref() else {
-            return Ok(json!({ "ok": false, "error": "no managed pipeline" }));
+            return Ok(no_pipeline());
         };
         let (events, overwritten) = pipeline.events.read(limit, clear);
         Ok(json!({
@@ -940,7 +1258,7 @@ impl McpServer {
             "timeout_ms",
         )?;
         let Some(pipeline) = self.pipeline.as_ref() else {
-            return Ok(json!({ "ok": false, "error": "no managed pipeline" }));
+            return Ok(no_pipeline());
         };
         let observer = pipeline.observer.clone();
         let deadline = Instant::now() + Duration::from_millis(timeout_ms);
@@ -996,10 +1314,255 @@ impl McpServer {
         }))
     }
 
+    fn wait_for_records(&self, args: &Value) -> Result<Value, (i64, String)> {
+        let count = bounded_usize(args.get("count"), 1, RECORD_CAPACITY, "count")?;
+        let key = args.get("key").and_then(Value::as_str).unwrap_or("");
+        let timeout_ms = bounded_u64(
+            args.get("timeout_ms"),
+            DEFAULT_RECORD_WAIT_MS,
+            MAX_RECORD_WAIT_MS,
+            "timeout_ms",
+        )?;
+        if self.pipeline.is_none() && !self.records.ended() {
+            return Ok(json!({
+                "ok": false,
+                "error": "no pipeline is running, call start_pipeline first",
+            }));
+        }
+        let run_state = self
+            .pipeline
+            .as_ref()
+            .map(|pipeline| pipeline.run_state.clone());
+        let run_ended = move || {
+            run_state.as_ref().is_some_and(|state| {
+                !matches!(
+                    &*state.lock().expect("pipeline run state"),
+                    PipelineRunState::Running
+                )
+            })
+        };
+        let records = self
+            .records
+            .wait(count, key, Duration::from_millis(timeout_ms), &run_ended);
+        let status = self
+            .pipeline
+            .as_ref()
+            .map(ManagedPipeline::status_json)
+            .unwrap_or_else(|| json!({ "state": "none" }));
+        Ok(json!({ "ok": true, "records": records, "status": status }))
+    }
+
+    fn load_metadata(&mut self, args: &Value) -> Result<Value, (i64, String)> {
+        let path = required_string(args, "path", "load_metadata")?.to_string();
+        let text = std::fs::read_to_string(&path)
+            .map_err(|error| (-32602, format!("cannot read '{path}': {error}")))?;
+        self.stop_pipeline();
+        Ok(json!({ "ok": true, "records": self.records.load(&text) }))
+    }
+
+    fn get_property(&mut self, args: &Value) -> Result<Value, (i64, String)> {
+        let element = required_string(args, "element", "get_property")?;
+        let property = required_string(args, "property", "get_property")?;
+        let Some(pipeline) = self.pipeline.as_ref() else {
+            return Ok(no_pipeline());
+        };
+        let mutator = pipeline.mutator.clone();
+        let read = self
+            .runtime
+            .block_on(mutator.get_property(element, property));
+        Ok(property_result(property, read))
+    }
+
+    fn set_property(&mut self, args: &Value) -> Result<Value, (i64, String)> {
+        let element = required_string(args, "element", "set_property")?;
+        let property = required_string(args, "property", "set_property")?;
+        let requested = args
+            .get("value")
+            .ok_or((-32602, "set_property needs `value`".to_string()))?;
+        let Some(pipeline) = self.pipeline.as_ref() else {
+            return Ok(no_pipeline());
+        };
+        let mutator = pipeline.mutator.clone();
+        // The element's own current value names the kind to parse for, so a JSON
+        // 30 reaches an Int property as an Int and "30/1" reaches a Fraction.
+        let kind = match self
+            .runtime
+            .block_on(mutator.get_property(element, property))
+        {
+            Ok(current) => current.map(|current| current.kind()),
+            Err(error) => return Ok(mutation_error(&error)),
+        };
+        let value = property_value(requested, kind)?;
+        if let Err(error) = self
+            .runtime
+            .block_on(mutator.set_property(element, property, value))
+        {
+            return Ok(mutation_error(&error));
+        }
+        let read = self
+            .runtime
+            .block_on(mutator.get_property(element, property));
+        Ok(property_result(property, read))
+    }
+
+    /// Cut `seconds` of video centred on `pts` out of a file, decoding, trimming
+    /// and re-encoding it through a one-shot launch line.
+    fn clip_at(&mut self, args: &Value) -> Result<Value, (i64, String)> {
+        let source = required_string(args, "source", "clip_at")?;
+        let pts = args
+            .get("pts")
+            .and_then(Value::as_f64)
+            .ok_or((-32602, "clip_at needs `pts`".to_string()))?;
+        let seconds = args
+            .get("seconds")
+            .and_then(Value::as_f64)
+            .unwrap_or(DEFAULT_CLIP_SECONDS);
+        if seconds <= 0.0 || !seconds.is_finite() {
+            return Err((-32602, "`seconds` must be positive".into()));
+        }
+        let decoder = args
+            .get("decoder")
+            .and_then(Value::as_str)
+            .unwrap_or(DEFAULT_CLIP_DECODER);
+        let encoder = args
+            .get("encoder")
+            .and_then(Value::as_str)
+            .unwrap_or(DEFAULT_CLIP_ENCODER);
+        if !std::path::Path::new(source).is_file() {
+            return Ok(json!({ "ok": false, "error": format!("no video at '{source}'") }));
+        }
+        let start = (pts - seconds / 2.0).max(0.0);
+        let end = start + seconds;
+        let location = args.get("location").and_then(Value::as_str).unwrap_or("");
+        let path = if location.is_empty() {
+            default_clip_path(source, start)
+        } else {
+            location.to_string()
+        };
+        let line = format!(
+            "filesrc location={source} ! {decoder} ! trim start={start_ns} stop={end_ns} \
+             ! videoconvert name={CLIP_FRAME_COUNTER} ! {encoder} ! filesink location={path}",
+            source = launch_quote(source),
+            path = launch_quote(&path),
+            start_ns = seconds_to_ns(start),
+            end_ns = seconds_to_ns(end),
+        );
+        let outcome =
+            self.runtime
+                .block_on(launch_json(&self.registry, &line, CLIP_DEADLINE_SECS, None));
+        if outcome.get("ok").and_then(Value::as_bool) != Some(true) {
+            return Ok(outcome);
+        }
+        // The muxer hands the sink one byte stream, so the run's frame count is
+        // the converter's: the frames the trim kept.
+        let frames = outcome
+            .pointer("/stats/per_element")
+            .and_then(Value::as_array)
+            .and_then(|elements| {
+                elements
+                    .iter()
+                    .find(|element| element["name"] == CLIP_FRAME_COUNTER)
+            })
+            .and_then(|element| element["proc_count"].as_u64());
+        let Some(frames) = frames else {
+            return Ok(json!({
+                "ok": false,
+                "error": format!("the clip did not finish within {CLIP_DEADLINE_SECS}s"),
+                "pipeline": line,
+            }));
+        };
+        Ok(json!({
+            "ok": true,
+            "path": path,
+            "start": start,
+            "end": end,
+            "frames": frames,
+            "pipeline": line,
+        }))
+    }
+
+    /// The newest frame on the edge feeding an element, as an image content
+    /// block. Returns the whole tool result, not a payload: a picture is not
+    /// text.
+    #[cfg(feature = "mcp")]
+    fn snapshot_frame(&self, args: &Value) -> Result<Value, (i64, String)> {
+        let element = args.get("element").and_then(Value::as_str).unwrap_or("");
+        let requested_edge = args
+            .get("edge")
+            .map(|edge| {
+                edge.as_u64()
+                    .and_then(|edge| usize::try_from(edge).ok())
+                    .ok_or((-32602, "`edge` must be an edge index".to_string()))
+            })
+            .transpose()?;
+        let Some(pipeline) = self.pipeline.as_ref() else {
+            return Ok(text_result(&no_pipeline()));
+        };
+        // A run registers its topology after negotiation, so a snapshot taken
+        // right after start_pipeline waits for it.
+        let deadline = Instant::now() + SNAPSHOT_TIMEOUT;
+        let topology = loop {
+            let topology = pipeline.observer.snapshot();
+            if !topology.nodes.is_empty() || Instant::now() >= deadline {
+                break topology;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        let (edge, element) = match snapshot_edge(&topology, element, requested_edge) {
+            Ok(found) => found,
+            Err(error) => return Ok(text_result(&json!({ "ok": false, "error": error }))),
+        };
+        let (Some(slot), Some(caps)) = (
+            pipeline.observer.edge_probe(edge),
+            pipeline.observer.edge_caps(edge),
+        ) else {
+            return Ok(text_result(
+                &json!({ "ok": false, "error": "edge index is out of range" }),
+            ));
+        };
+
+        let (sender, receiver) = mpsc::sync_channel(1);
+        slot.install(Arc::new(FrameCapture {
+            caps: Mutex::new(caps),
+            sender,
+            remaining: AtomicUsize::new(1),
+        }));
+        let captured = receiver.recv_timeout(deadline.saturating_duration_since(Instant::now()));
+        slot.remove();
+        let Ok(captured) = captured else {
+            return Ok(text_result(&json!({
+                "ok": false,
+                "error": format!("no frame reached `{element}` within {SNAPSHOT_TIMEOUT:?}"),
+            })));
+        };
+        let image = match snapshot_png(&captured, &element) {
+            Ok(image) => image,
+            Err(error) => return Ok(text_result(&json!({ "ok": false, "error": error }))),
+        };
+        let description = json!({
+            "ok": true,
+            "element": element,
+            "edge": edge,
+            "width": image.width,
+            "height": image.height,
+            "pts_ns": captured.pts_ns,
+        });
+        Ok(json!({
+            "content": [
+                {
+                    "type": "image",
+                    "data": base64::engine::general_purpose::STANDARD.encode(&image.png),
+                    "mimeType": SNAPSHOT_MIME_TYPE,
+                },
+                text_block(&description),
+            ]
+        }))
+    }
+
     fn validate_insertion(&mut self, args: &Value) -> Result<Value, (i64, String)> {
         let request = insertion_request(args)?;
         let Some(pipeline) = self.pipeline.as_ref() else {
-            return Ok(json!({ "ok": false, "error": "no managed pipeline" }));
+            return Ok(no_pipeline());
         };
         if request.expected_revision != pipeline.revision {
             return Ok(revision_mismatch(pipeline.revision));
@@ -1024,7 +1587,7 @@ impl McpServer {
     fn insert_transform(&mut self, args: &Value) -> Result<Value, (i64, String)> {
         let request = insertion_request(args)?;
         let Some(pipeline) = self.pipeline.as_ref() else {
-            return Ok(json!({ "ok": false, "error": "no managed pipeline" }));
+            return Ok(no_pipeline());
         };
         if request.expected_revision != pipeline.revision {
             return Ok(revision_mismatch(pipeline.revision));
@@ -1066,7 +1629,7 @@ impl McpServer {
         let node = required_string(args, "node", "remove_transform")?;
         let expected_revision = required_u64(args, "expected_revision", "remove_transform")?;
         let Some(pipeline) = self.pipeline.as_ref() else {
-            return Ok(json!({ "ok": false, "error": "no managed pipeline" }));
+            return Ok(no_pipeline());
         };
         if expected_revision != pipeline.revision {
             return Ok(revision_mismatch(pipeline.revision));
@@ -1099,7 +1662,7 @@ impl McpServer {
             });
         }
         let Some(mut pipeline) = self.pipeline.take() else {
-            return json!({ "ok": false, "error": "no managed pipeline" });
+            return no_pipeline();
         };
         pipeline.stop();
         let final_status = pipeline.status_json();
@@ -1167,6 +1730,435 @@ fn packet_json(packet: &PipelinePacket, caps: &g2g_core::Caps) -> Value {
         PipelinePacket::Tick => json!({ "kind": "tick" }),
         _ => json!({ "kind": "unknown" }),
     }
+}
+
+/// An MCP tool result carrying one JSON payload: results are content blocks, and
+/// everything but a picture rides as text.
+fn text_result(payload: &Value) -> Value {
+    json!({ "content": [text_block(payload)] })
+}
+
+fn text_block(payload: &Value) -> Value {
+    json!({ "type": "text", "text": serde_json::to_string_pretty(payload).unwrap_or_default() })
+}
+
+fn no_pipeline() -> Value {
+    json!({ "ok": false, "error": "no managed pipeline" })
+}
+
+fn mutation_error(error: &impl core::fmt::Debug) -> Value {
+    json!({ "ok": false, "error": format!("{error:?}") })
+}
+
+/// A property read as the tool reports it: keyed by the property's own name, as
+/// `gst-launch` spells it, with `null` for a name the element does not carry.
+fn property_result<E: core::fmt::Debug>(
+    property: &str,
+    read: Result<Option<PropValue>, E>,
+) -> Value {
+    match read {
+        Ok(value) => json!({ "ok": true, property: value.as_ref().map(property_json) }),
+        Err(error) => mutation_error(&error),
+    }
+}
+
+fn property_json(value: &PropValue) -> Value {
+    match value {
+        PropValue::Bool(value) => json!(value),
+        PropValue::Int(value) => json!(value),
+        PropValue::Uint(value) => json!(value),
+        PropValue::Double(value) => json!(value),
+        PropValue::Fraction(numerator, denominator) => json!(format!("{numerator}/{denominator}")),
+        PropValue::Str(value) => json!(value),
+        PropValue::Flags(nicks) => json!(nicks.join("+")),
+        // a kind added since: the agent still sees the value
+        other => json!(format!("{other:?}")),
+    }
+}
+
+/// A JSON argument as a typed property value. With `kind` known (the element's
+/// current value) the text is parsed the way a launch line's would be; without
+/// it the JSON type decides and the element has the last word.
+fn property_value(value: &Value, kind: Option<PropKind>) -> Result<PropValue, (i64, String)> {
+    let text = property_text(value)?;
+    if let Some(kind) = kind {
+        return PropValue::parse(kind, &text).map_err(|error| {
+            (
+                -32602,
+                format!("bad `value` for a {kind:?} property: {error:?}"),
+            )
+        });
+    }
+    Ok(match value {
+        Value::Bool(flag) => PropValue::Bool(*flag),
+        Value::Number(number) => match (number.as_i64(), number.as_u64(), number.as_f64()) {
+            (Some(signed), None, _) => PropValue::Int(signed),
+            (_, Some(unsigned), _) => PropValue::Uint(unsigned),
+            (_, _, Some(double)) => PropValue::Double(double),
+            _ => return Err((-32602, "`value` is not a number".into())),
+        },
+        _ => PropValue::Str(text),
+    })
+}
+
+/// A path as a launch-line property value. The parser resolves `\` escapes and
+/// quoted regions, so a path with spaces survives.
+fn launch_quote(path: &str) -> String {
+    let mut quoted = String::with_capacity(path.len() + 2);
+    quoted.push('"');
+    for character in path.chars() {
+        if character == '"' || character == '\\' {
+            quoted.push('\\');
+        }
+        quoted.push(character);
+    }
+    quoted.push('"');
+    quoted
+}
+
+fn seconds_to_ns(seconds: f64) -> u64 {
+    (seconds.max(0.0) * NS_PER_SECOND) as u64
+}
+
+/// Where a clip goes when the call named no `location`: beside the temporary
+/// directory, under the source's stem and the second it starts at.
+fn default_clip_path(source: &str, start: f64) -> String {
+    let stem = std::path::Path::new(source)
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    std::env::temp_dir()
+        .join(format!("{stem}-{start:.2}{DEFAULT_CLIP_EXTENSION}"))
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Captures the first frame crossing an edge for `snapshot_frame`, under the
+/// caps it arrived with.
+#[cfg(feature = "mcp")]
+struct FrameCapture {
+    caps: Mutex<g2g_core::Caps>,
+    sender: mpsc::SyncSender<CapturedFrame>,
+    remaining: AtomicUsize,
+}
+
+#[cfg(feature = "mcp")]
+#[derive(Debug)]
+struct CapturedFrame {
+    caps: g2g_core::Caps,
+    pts_ns: Option<u64>,
+    memory: String,
+    /// `None` for a frame that is not in system memory.
+    pixels: Option<Vec<u8>>,
+}
+
+#[cfg(feature = "mcp")]
+impl LinkInterceptor for FrameCapture {
+    fn on_packet(&self, packet: &PipelinePacket) -> ProbeAction {
+        let mut caps = self.caps.lock().expect("frame capture caps");
+        if let PipelinePacket::CapsChanged(changed) = packet {
+            *caps = changed.clone();
+        }
+        let PipelinePacket::DataFrame(frame) = packet else {
+            return ProbeAction::Pass;
+        };
+        if self
+            .remaining
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
+                (remaining > 0).then_some(remaining - 1)
+            })
+            .is_err()
+        {
+            return ProbeAction::Pass;
+        }
+        let _ = self.sender.try_send(CapturedFrame {
+            caps: caps.clone(),
+            pts_ns: frame.timing.pts(),
+            memory: format!("{:?}", frame.domain.kind()).to_ascii_lowercase(),
+            pixels: frame.domain.as_system_slice().map(<[u8]>::to_vec),
+        });
+        ProbeAction::Pass
+    }
+}
+
+#[cfg(feature = "mcp")]
+struct SnapshotImage {
+    png: Vec<u8>,
+    width: u32,
+    height: u32,
+}
+
+/// One captured frame as a PNG. Anything that is not already packed RGB or RGBA
+/// is converted; the error text names the element to insert instead.
+#[cfg(feature = "mcp")]
+fn snapshot_png(captured: &CapturedFrame, element: &str) -> Result<SnapshotImage, String> {
+    use g2g_core::{Caps, Dim, RawVideoFormat};
+    use png::ColorType;
+
+    let Caps::RawVideo {
+        format,
+        width,
+        height,
+        colorimetry,
+        ..
+    } = &captured.caps
+    else {
+        return Err(format!(
+            "`{element}` takes {}, which is not raw video: insert a decoder and a videoconvert ahead of it",
+            captured.caps.to_gst_string()
+        ));
+    };
+    let (Dim::Fixed(width), Dim::Fixed(height)) = (width, height) else {
+        return Err(format!(
+            "the caps reaching `{element}` fix no frame size: {}",
+            captured.caps.to_gst_string()
+        ));
+    };
+    let Some(pixels) = captured.pixels.as_deref() else {
+        return Err(format!(
+            "the frame reaching `{element}` is in {} memory: insert that domain's download element (cudadownload, wgpudownload) ahead of it",
+            captured.memory
+        ));
+    };
+    let needed = crate::pixel::frame_byte_size(*format, *width, *height);
+    if pixels.len() < needed {
+        return Err(format!(
+            "the frame holds {} bytes, short of the {needed} its caps describe",
+            pixels.len()
+        ));
+    }
+    let (color, converted) = match format {
+        RawVideoFormat::Rgb8 => (ColorType::Rgb, None),
+        RawVideoFormat::Rgba8 => (ColorType::Rgba, None),
+        _ => (
+            ColorType::Rgba,
+            Some(crate::videoconvert::convert(
+                &pixels[..needed],
+                *format,
+                RawVideoFormat::Rgba8,
+                *width as usize,
+                *height as usize,
+                *colorimetry,
+            )),
+        ),
+    };
+    let image = converted.as_deref().unwrap_or(&pixels[..needed]);
+
+    let mut png = Vec::new();
+    let mut encoder = png::Encoder::new(&mut png, *width, *height);
+    encoder.set_color(color);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder
+        .write_header()
+        .map_err(|error| format!("cannot write the PNG header: {error}"))?;
+    writer
+        .write_image_data(image)
+        .map_err(|error| format!("cannot write the PNG pixels: {error}"))?;
+    writer
+        .finish()
+        .map_err(|error| format!("cannot finish the PNG: {error}"))?;
+    Ok(SnapshotImage {
+        png,
+        width: *width,
+        height: *height,
+    })
+}
+
+/// The edge whose frames reach the element to snapshot, with that element's
+/// name. An explicit `edge` index wins, then a named element, then the sink the
+/// results go to.
+#[cfg(feature = "mcp")]
+fn snapshot_edge(
+    snapshot: &TelemetrySnapshot,
+    element: &str,
+    edge: Option<usize>,
+) -> Result<(usize, String), String> {
+    if let Some(edge) = edge {
+        let info = snapshot
+            .edges
+            .get(edge)
+            .ok_or_else(|| format!("the pipeline has {} edges", snapshot.edges.len()))?;
+        let name = snapshot
+            .nodes
+            .get(info.to)
+            .map(|node| node.name.clone())
+            .unwrap_or_default();
+        return Ok((edge, name));
+    }
+    let name = if element.is_empty() {
+        default_snapshot_element(snapshot)?
+    } else {
+        element.to_string()
+    };
+    let node = snapshot
+        .nodes
+        .iter()
+        .find(|node| node.name == name)
+        .ok_or_else(|| format!("the pipeline has no element named `{name}`"))?;
+    let edge = snapshot
+        .edges
+        .iter()
+        .position(|edge| edge.to == node.id)
+        .ok_or_else(|| format!("nothing feeds `{name}`"))?;
+    Ok((edge, name))
+}
+
+#[cfg(feature = "mcp")]
+fn default_snapshot_element(snapshot: &TelemetrySnapshot) -> Result<String, String> {
+    let sinks: Vec<&str> = snapshot
+        .nodes
+        .iter()
+        .filter(|node| node.role == NodeRole::Sink)
+        .map(|node| node.name.as_str())
+        .collect();
+    if let Some(name) =
+        metasink_prefix().and_then(|prefix| sinks.iter().find(|name| name.starts_with(prefix)))
+    {
+        return Ok((*name).to_string());
+    }
+    match sinks.as_slice() {
+        [only] => Ok((*only).to_string()),
+        [] => Err("the pipeline has no sink: name an `element`".to_string()),
+        several => Err(format!(
+            "the pipeline has several sinks ({}): name an `element`",
+            several.join(", ")
+        )),
+    }
+}
+
+/// Whether the graph holds a `metasink` with no `location`, which would write
+/// its records to the stdout this server's protocol rides on.
+#[cfg(feature = "analytics-json")]
+fn metasink_writes_to_stdout(graph: &g2g_core::Graph<g2g_core::runtime::GraphNode>) -> bool {
+    (0..graph.node_count()).any(|node| {
+        let Some(g2g_core::runtime::GraphNodeRef::Element(element)) =
+            graph.element(g2g_core::NodeId(node as u32))
+        else {
+            return false;
+        };
+        element.log_category() == g2g_core::log::short_type_name::<crate::metasink::MetaSink>()
+            && element
+                .get_property("location")
+                .is_some_and(|location| location.as_str() == Some(""))
+    })
+}
+
+#[cfg(not(feature = "analytics-json"))]
+fn metasink_writes_to_stdout(_graph: &g2g_core::Graph<g2g_core::runtime::GraphNode>) -> bool {
+    false
+}
+
+/// The name an unnamed `metasink` node takes, so a snapshot finds the element
+/// the results come from among several sinks.
+#[cfg(all(feature = "mcp", feature = "analytics-json"))]
+fn metasink_prefix() -> Option<&'static str> {
+    Some(g2g_core::log::short_type_name::<crate::metasink::MetaSink>())
+}
+
+#[cfg(all(feature = "mcp", not(feature = "analytics-json")))]
+fn metasink_prefix() -> Option<&'static str> {
+    None
+}
+
+/// One `###` section of the README's sample pipelines: the slug it is addressed
+/// by, its heading, and the text `prompts/get` returns.
+#[derive(Debug)]
+struct ReadmePrompt {
+    name: String,
+    heading: String,
+    text: String,
+}
+
+impl ReadmePrompt {
+    fn description(&self) -> String {
+        format!("The README pipelines under {}", self.heading)
+    }
+}
+
+fn prompt_specs() -> Vec<Value> {
+    readme_prompts()
+        .iter()
+        .map(|prompt| json!({ "name": prompt.name, "description": prompt.description() }))
+        .collect()
+}
+
+fn prompt_messages(params: Option<&Value>) -> Result<Value, (i64, String)> {
+    let name = params
+        .and_then(|params| params.get("name"))
+        .and_then(Value::as_str)
+        .ok_or((-32602, "prompts/get needs `name`".to_string()))?;
+    let prompt = readme_prompts()
+        .into_iter()
+        .find(|prompt| prompt.name == name)
+        .ok_or((-32602, format!("unknown prompt: {name}")))?;
+    Ok(json!({
+        "description": prompt.description(),
+        "messages": [
+            { "role": "user", "content": { "type": "text", "text": prompt.text } }
+        ],
+    }))
+}
+
+/// A prompt per `###` heading under the README's sample pipelines, carrying that
+/// section's code blocks. An unreadable README leaves an agent without prompts,
+/// not without a server.
+fn readme_prompts() -> Vec<ReadmePrompt> {
+    let path = std::env::var(README_PATH_ENV).unwrap_or_else(|_| README_PATH.to_string());
+    let Ok(readme) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let mut prompts: Vec<ReadmePrompt> = Vec::new();
+    let mut in_section = false;
+    let mut fenced = false;
+    for line in readme.lines() {
+        if !fenced && line.starts_with("## ") {
+            in_section = line.trim_end() == PIPELINE_SECTION_HEADING;
+            continue;
+        }
+        if !in_section {
+            continue;
+        }
+        if !fenced && line.starts_with("### ") {
+            let heading = line[4..].trim().to_string();
+            prompts.push(ReadmePrompt {
+                name: prompt_name(&heading),
+                text: prompt_opening(&heading),
+                heading,
+            });
+            continue;
+        }
+        if line.trim_start().starts_with("```") {
+            fenced = !fenced;
+        } else if !fenced {
+            continue;
+        }
+        if let Some(prompt) = prompts.last_mut() {
+            prompt.text.push('\n');
+            prompt.text.push_str(line);
+        }
+    }
+    prompts
+}
+
+fn prompt_opening(heading: &str) -> String {
+    format!(
+        "These are the {heading} pipelines from the g2g README. start_pipeline or launch take each \
+         line below, and a display sink can be swapped for metasink to read the results back."
+    )
+}
+
+/// A heading as a prompt name: ASCII lowercase and `_`, since a heading carries
+/// arrows and other punctuation a client cannot address.
+fn prompt_name(heading: &str) -> String {
+    let mut name = String::with_capacity(heading.len());
+    for character in heading.chars() {
+        if character.is_ascii_alphanumeric() {
+            name.push(character.to_ascii_lowercase());
+        } else if !name.ends_with('_') {
+            name.push('_');
+        }
+    }
+    name.trim_matches('_').to_string()
 }
 
 fn parse_log_level(value: &Value) -> Result<LogLevel, (i64, String)> {

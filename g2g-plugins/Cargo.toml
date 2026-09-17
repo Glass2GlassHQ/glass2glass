@@ -159,7 +159,7 @@ observe = ["tooling-json", "tokio/net", "tokio/io-util", "tokio/rt", "tokio/time
 # The `g2g-mcp` server: the live-pipeline tools (`observe`, `multi-thread`), the
 # metadata record tools (`analytics-json`), and a frame snapshot as a PNG image
 # block (`png` + base64).
-mcp = ["observe", "multi-thread", "analytics-json", "png", "dep:base64"]
+mcp = ["observe", "multi-thread", "analytics-json", "png", "mjpeg-encode", "dep:base64"]
 # In-terminal live telemetry: `g2g-launch --tui` reads the same `Observer` tap
 # the dashboard does and draws it with ratatui, no browser and no server. No
 # JSON: it renders the snapshot structs directly, so it is independent of
@@ -585,8 +585,8 @@ analytics = ["metadata"]
 # detections, JSON blobs, text) and posts it on the bus, `metareplay` reattaches
 # such a file to frames by pts, `analyticsalert` fires rules on detections and
 # attaches the `alert` blob (webhook POST through reqwest), `alertrecorder`
-# writes a clip around each alert, `trim` keeps a pts range. std for the files
-# and serde_json for the lines.
+# writes a clip around each alert. std for the files and serde_json for the
+# lines.
 analytics-json = ["metadata", "std", "dep:serde_json", "dep:reqwest"]
 # `embeddingsink`: one sqlite row per embedded frame (source_id, pts, model_name,
 # vector), the same schema gst-python-ml's `pyml_embeddingsink` writes and its

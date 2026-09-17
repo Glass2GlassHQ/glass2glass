@@ -4,8 +4,13 @@
 //! binary end to end (the tool logic is unit-tested in `toolingjson`; this checks
 //! the JSON-RPC framing).
 //!
-//! Needs `mcp` (`declarative-yaml` for the `run_graph` test):
-//! `cargo test -p g2g-plugins --features mcp,declarative-yaml
+//! M1177 adds the record tools (`latest_metadata` / `wait_for_records` /
+//! `load_metadata`), the live property tools, `snapshot_frame`, `clip_at` and
+//! the README prompts, all driven through the same binary.
+//!
+//! Needs `mcp` (`declarative-yaml` for the `run_graph` test, `mjpeg` for the
+//! clip test, which decodes the AVI it just wrote):
+//! `cargo test -p g2g-plugins --features mcp,declarative-yaml,mjpeg
 //! --test m681_mcp`.
 #![cfg(all(feature = "tooling-json", feature = "multi-thread"))]
 
@@ -20,7 +25,19 @@ const LIVE_DEADLINE: Duration = Duration::from_secs(10);
 /// Feed the JSON-RPC request lines to `g2g-mcp` and split its stdout into
 /// (responses, notifications): a notification carries no `id`.
 fn session(requests: &[&str]) -> (Vec<serde_json::Value>, Vec<serde_json::Value>) {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_g2g-mcp"))
+    session_with_env(requests, &[])
+}
+
+/// [`session`] with `environment` set on the server process.
+fn session_with_env(
+    requests: &[&str],
+    environment: &[(&str, &str)],
+) -> (Vec<serde_json::Value>, Vec<serde_json::Value>) {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_g2g-mcp"));
+    for (name, value) in environment {
+        command.env(name, value);
+    }
+    let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -76,6 +93,16 @@ impl LiveSession {
 
     /// Call one tool and return its payload.
     fn call(&mut self, tool: &str, arguments: serde_json::Value) -> serde_json::Value {
+        payload(&self.request(tool, arguments))
+    }
+
+    /// Call one tool and return its whole result, for a tool whose content is
+    /// not one text block.
+    fn result(&mut self, tool: &str, arguments: serde_json::Value) -> serde_json::Value {
+        self.request(tool, arguments)["result"].clone()
+    }
+
+    fn request(&mut self, tool: &str, arguments: serde_json::Value) -> serde_json::Value {
         let id = self.next_id;
         self.next_id += 1;
         let request = serde_json::json!({
@@ -89,7 +116,7 @@ impl LiveSession {
         self.stdout.read_line(&mut line).unwrap();
         let response: serde_json::Value = serde_json::from_str(&line).expect("message is JSON");
         assert_eq!(response["id"], id, "{response}");
-        payload(&response)
+        response
     }
 
     /// Repeat `call` until `done` accepts the payload or the deadline passes.
@@ -147,6 +174,10 @@ fn initialize_lists_tools_and_calls_them() {
     assert!(tools.contains(&"insert_transform") && tools.contains(&"remove_transform"));
     assert!(tools.contains(&"set_log_level") && tools.contains(&"tail_logs"));
     assert!(tools.contains(&"sample_edge") && tools.contains(&"tail_events"));
+    assert!(tools.contains(&"latest_metadata") && tools.contains(&"wait_for_records"));
+    assert!(tools.contains(&"load_metadata") && tools.contains(&"clip_at"));
+    assert!(tools.contains(&"get_property") && tools.contains(&"set_property"));
+    assert!(tools.contains(&"snapshot_frame"));
 
     // validate -> ok
     assert_eq!(payload(&resp[2])["ok"], true);
@@ -542,7 +573,12 @@ fn a_host_registers_its_own_pipeline_in_process() {
             .copied()
             .unwrap()
     };
-    assert_eq!(events[0]["kind"], "stream-start", "{tail}");
+    // the host's own posts race the runner's stream-start, so only its presence
+    // is decided
+    assert!(
+        events.iter().any(|event| event["kind"] == "stream-start"),
+        "{tail}"
+    );
     assert_eq!(
         find("error")["text"],
         format!("{:?}", G2gError::CapsMismatch)
@@ -603,4 +639,475 @@ fn a_host_registers_its_own_pipeline_in_process() {
     assert!(!server.unregister_pipeline());
     let gone = call(&mut server, "pipeline_status", serde_json::json!({}));
     assert_eq!(gone["ok"], false, "{gone}");
+}
+
+/// A path under the temporary directory, unique to this process so parallel
+/// tests never share a file.
+fn temp_path(name: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("g2g_mcp_{}_{name}", std::process::id()))
+}
+
+/// A `videotestsrc` property default, read off the element rather than restated
+/// here, so a test expectation follows the element.
+fn videotestsrc_default(session: &mut LiveSession, property: &str) -> String {
+    let inspected = session.call("inspect", serde_json::json!({ "element": "videotestsrc" }));
+    inspected["elements"][0]["properties"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|spec| spec["name"] == property)
+        .unwrap_or_else(|| panic!("videotestsrc has a {property} property: {inspected}"))["default"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+/// Packets the pipeline's sink has taken, from a `pipeline_status` payload. 0
+/// while the run is still starting.
+fn sink_packets(status: &serde_json::Value) -> u64 {
+    let Some(sink) = status["telemetry"]["nodes"]
+        .as_array()
+        .and_then(|nodes| nodes.iter().find(|node| node["role"] == "sink"))
+    else {
+        return 0;
+    };
+    status["telemetry"]["edges"]
+        .as_array()
+        .and_then(|edges| edges.iter().find(|edge| edge["to"] == sink["id"]))
+        .and_then(|edge| edge["packets"].as_u64())
+        .unwrap_or(0)
+}
+
+/// The records the replay tests feed in. Each box is an exact binary fraction of
+/// the frame, so the pixels survive the normalize / denormalize round trip
+/// through `metareplay` unchanged, and only the second record carries an alert.
+#[cfg(feature = "analytics-json")]
+fn fixture_records() -> Vec<serde_json::Value> {
+    Vec::from([
+        serde_json::json!({
+            "pts": 0.0,
+            "detections": [
+                { "label": "person", "x": 80, "y": 120, "w": 40, "h": 60, "score": 0.875 }
+            ],
+        }),
+        // the second frame of a 30 fps videotestsrc, inside metareplay's window
+        serde_json::json!({
+            "pts": 1.0 / 30.0,
+            "detections": [
+                { "label": "car", "x": 160, "y": 60, "w": 80, "h": 120, "score": 0.5 }
+            ],
+            "alert": { "rule": "person-in-zone" },
+        }),
+    ])
+}
+
+#[cfg(feature = "analytics-json")]
+fn write_fixture(path: &std::path::Path) {
+    let lines: Vec<String> = fixture_records()
+        .iter()
+        .map(serde_json::Value::to_string)
+        .collect();
+    std::fs::write(path, lines.join("\n") + "\n").expect("write the record fixture");
+}
+
+/// A detector's output replayed onto bare frames reaches the record tools: the
+/// sink posts each line on the bus, `wait_for_records` hands back the ones
+/// posted since the call, and `key` narrows them to the records carrying it.
+#[cfg(feature = "analytics-json")]
+#[test]
+fn reads_the_records_a_metasink_posts() {
+    let fixture = temp_path("records.jsonl");
+    let written = temp_path("records-written.jsonl");
+    write_fixture(&fixture);
+    let _ = std::fs::remove_file(&written);
+    let expected = fixture_records();
+
+    let mut session = LiveSession::spawn();
+    let started = session.call(
+        "start_pipeline",
+        serde_json::json!({
+            "pipeline": format!(
+                "videotestsrc num-buffers=5 ! metareplay location=\"{}\" ! metasink location=\"{}\"",
+                fixture.display(),
+                written.display(),
+            ),
+        }),
+    );
+    assert_eq!(started["ok"], true, "{started}");
+
+    let waited = session.call(
+        "wait_for_records",
+        serde_json::json!({ "count": expected.len(), "timeout_ms": 10000 }),
+    );
+    assert_eq!(waited["ok"], true, "{waited}");
+    let records = waited["records"].as_array().unwrap();
+    assert_eq!(records.len(), expected.len(), "{waited}");
+    assert_eq!(
+        records[0]["detections"], expected[0]["detections"],
+        "the boxes come back in the pixels the fixture named: {waited}"
+    );
+    assert_eq!(
+        records[1]["detections"], expected[1]["detections"],
+        "{waited}"
+    );
+    assert_eq!(records[1]["alert"], expected[1]["alert"], "{waited}");
+    assert_eq!(records[0]["pts"], 0.0, "{waited}");
+
+    // the run is over, so its whole tail is fresh again and the key filter is
+    // what decides which records come back
+    session.poll("pipeline_status", serde_json::json!({}), |status| {
+        status["state"] == "finished"
+    });
+    let alerts = session.call(
+        "wait_for_records",
+        serde_json::json!({ "key": "alert", "timeout_ms": 2000 }),
+    );
+    let alerts = alerts["records"].as_array().unwrap();
+    assert_eq!(
+        alerts.len(),
+        1,
+        "only one record carries an alert: {alerts:?}"
+    );
+    assert_eq!(alerts[0]["alert"], expected[1]["alert"]);
+
+    let latest = session.call("latest_metadata", serde_json::json!({}));
+    let latest = latest["records"].as_array().unwrap();
+    assert_eq!(latest.len(), expected.len());
+    assert_eq!(latest[0]["pts"], 0.0, "oldest first");
+    assert!(latest[1]["pts"].as_f64().unwrap() > 0.0);
+
+    let lines = std::fs::read_to_string(&written).expect("the sink wrote its file");
+    assert_eq!(
+        lines.lines().count(),
+        expected.len(),
+        "the bus carried what the file holds"
+    );
+    let _ = std::fs::remove_file(&fixture);
+    let _ = std::fs::remove_file(&written);
+}
+
+/// A finished run's file stands in for a pipeline: `load_metadata` fills the
+/// store, and a wait over it returns at once instead of blocking on a run that
+/// is not there.
+#[cfg(feature = "analytics-json")]
+#[test]
+fn loads_records_from_a_file_with_no_pipeline() {
+    let fixture = temp_path("loaded.jsonl");
+    write_fixture(&fixture);
+    let expected = fixture_records();
+
+    let mut session = LiveSession::spawn();
+    let refused = session.call(
+        "wait_for_records",
+        serde_json::json!({ "timeout_ms": 1000 }),
+    );
+    assert_eq!(refused["ok"], false, "{refused}");
+    assert!(
+        refused["error"]
+            .as_str()
+            .unwrap()
+            .contains("start_pipeline"),
+        "{refused}"
+    );
+
+    let loaded = session.call(
+        "load_metadata",
+        serde_json::json!({ "path": fixture.display().to_string() }),
+    );
+    assert_eq!(loaded["records"], expected.len(), "{loaded}");
+
+    let waited = session.call(
+        "wait_for_records",
+        serde_json::json!({ "count": expected.len(), "timeout_ms": 1000 }),
+    );
+    assert_eq!(waited["status"]["state"], "none", "{waited}");
+    let records = waited["records"].as_array().unwrap();
+    assert_eq!(records.len(), expected.len(), "{waited}");
+    assert_eq!(records[1]["alert"], expected[1]["alert"]);
+    let _ = std::fs::remove_file(&fixture);
+}
+
+/// A property written mid-run takes effect between packets: the valve stops
+/// feeding the sink, the read back reports the new value, and the two refusals
+/// (an unknown name, a source) come back as the mutator's own errors.
+#[test]
+fn reads_and_writes_live_properties() {
+    let mut session = LiveSession::spawn();
+    let started = session.call(
+        "start_pipeline",
+        serde_json::json!({
+            "pipeline": "videotestsrc name=src ! valve name=v drop=false ! fakesink name=sink",
+        }),
+    );
+    assert_eq!(started["ok"], true, "{started}");
+
+    let read = session.call(
+        "get_property",
+        serde_json::json!({ "element": "v", "property": "drop" }),
+    );
+    assert_eq!(read["ok"], true, "{read}");
+    assert_eq!(read["drop"], false, "{read}");
+
+    // frames must be flowing before closing the valve can be seen to stop them
+    session.poll("pipeline_status", serde_json::json!({}), |status| {
+        sink_packets(status) > 0
+    });
+
+    let set = session.call(
+        "set_property",
+        serde_json::json!({ "element": "v", "property": "drop", "value": true }),
+    );
+    assert_eq!(set["ok"], true, "{set}");
+    assert_eq!(set["drop"], true, "the value is read back off the element");
+
+    // the frames already in flight land first, then the count stops moving
+    std::thread::sleep(Duration::from_millis(300));
+    let before = sink_packets(&session.call("pipeline_status", serde_json::json!({})));
+    std::thread::sleep(Duration::from_millis(300));
+    let after = sink_packets(&session.call("pipeline_status", serde_json::json!({})));
+    assert!(before > 0, "the sink took frames before the valve closed");
+    assert_eq!(before, after, "a dropping valve feeds the sink nothing");
+
+    let unknown = session.call(
+        "set_property",
+        serde_json::json!({ "element": "v", "property": "nope", "value": 1 }),
+    );
+    assert_eq!(unknown["ok"], false, "{unknown}");
+    assert!(
+        unknown["error"]
+            .as_str()
+            .unwrap()
+            .contains("PropertyRejected"),
+        "{unknown}"
+    );
+
+    let source = session.call(
+        "set_property",
+        serde_json::json!({ "element": "src", "property": "pattern", "value": "ball" }),
+    );
+    assert_eq!(source["ok"], false, "{source}");
+    assert!(
+        source["error"].as_str().unwrap().contains("NotMutable"),
+        "{source}"
+    );
+
+    assert_eq!(
+        session.call("stop_pipeline", serde_json::json!({}))["ok"],
+        true
+    );
+}
+
+/// The PNG magic every encoded snapshot starts with.
+const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+
+/// The newest frame reaching the pipeline's sink comes back as an image content
+/// block beside the text one, at the geometry the source negotiated.
+#[test]
+fn snapshots_the_newest_frame_as_a_png() {
+    use base64::Engine as _;
+
+    let mut session = LiveSession::spawn();
+    let started = session.call(
+        "start_pipeline",
+        serde_json::json!({ "pipeline": "videotestsrc name=src ! fakesink name=shown" }),
+    );
+    assert_eq!(started["ok"], true, "{started}");
+    session.poll("pipeline_status", serde_json::json!({}), |status| {
+        sink_packets(status) > 0
+    });
+
+    let result = session.result("snapshot_frame", serde_json::json!({}));
+    let image = &result["content"][0];
+    assert_eq!(image["type"], "image", "{result}");
+    assert_eq!(image["mimeType"], "image/png");
+    let png = base64::engine::general_purpose::STANDARD
+        .decode(image["data"].as_str().unwrap())
+        .expect("the image block is base64");
+    assert_eq!(&png[..PNG_SIGNATURE.len()], &PNG_SIGNATURE, "a PNG file");
+
+    let described: serde_json::Value =
+        serde_json::from_str(result["content"][1]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(described["ok"], true, "{described}");
+    assert_eq!(
+        described["element"], "shown",
+        "the only sink is the default"
+    );
+    assert!(described["pts_ns"].is_u64(), "{described}");
+
+    let decoder = png::Decoder::new(std::io::Cursor::new(&png));
+    let reader = decoder.read_info().expect("the snapshot decodes");
+    let info = reader.info();
+    let width: u32 = videotestsrc_default(&mut session, "width").parse().unwrap();
+    let height: u32 = videotestsrc_default(&mut session, "height")
+        .parse()
+        .unwrap();
+    assert_eq!((info.width, info.height), (width, height));
+    assert_eq!(described["width"], width);
+    assert_eq!(described["height"], height);
+
+    assert_eq!(
+        session.call("stop_pipeline", serde_json::json!({}))["ok"],
+        true
+    );
+}
+
+/// With several sinks the snapshot goes to the one the results come from, the
+/// `metasink`, rather than the display.
+#[cfg(feature = "analytics-json")]
+#[test]
+fn snapshots_the_metasink_among_several_sinks() {
+    let written = temp_path("snapshot-records.jsonl");
+    let mut session = LiveSession::spawn();
+    let started = session.call(
+        "start_pipeline",
+        serde_json::json!({
+            "pipeline": format!(
+                "videotestsrc ! tee name=t ! fakesink name=shown t. ! metasink location=\"{}\"",
+                written.display(),
+            ),
+        }),
+    );
+    assert_eq!(started["ok"], true, "{started}");
+    session.poll("pipeline_status", serde_json::json!({}), |status| {
+        sink_packets(status) > 0
+    });
+
+    let result = session.result("snapshot_frame", serde_json::json!({}));
+    let described: serde_json::Value =
+        serde_json::from_str(result["content"][1]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(described["ok"], true, "{described}");
+    assert_ne!(described["element"], "shown", "{described}");
+    assert_eq!(result["content"][0]["type"], "image", "{result}");
+
+    assert_eq!(
+        session.call("stop_pipeline", serde_json::json!({}))["ok"],
+        true
+    );
+    let _ = std::fs::remove_file(&written);
+}
+
+/// Each `###` section of the README's sample pipelines is served as a prompt,
+/// addressable by an ASCII slug and carrying that section's code blocks.
+#[test]
+fn serves_the_readme_pipelines_as_prompts() {
+    let readme = concat!(env!("CARGO_MANIFEST_DIR"), "/../README.md");
+    let (responses, _) = session_with_env(
+        &[
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"prompts/list"}"#,
+        ],
+        &[("G2G_README", readme)],
+    );
+    assert!(
+        responses[0]["result"]["capabilities"]["prompts"].is_object(),
+        "{}",
+        responses[0]
+    );
+    let prompts = responses[1]["result"]["prompts"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert!(!prompts.is_empty(), "{}", responses[1]);
+    for prompt in &prompts {
+        let name = prompt["name"].as_str().unwrap();
+        assert!(
+            !name.is_empty()
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'),
+            "{name} is not addressable"
+        );
+        assert!(prompt["description"].as_str().unwrap().contains("README"));
+    }
+
+    let first = prompts[0]["name"].as_str().unwrap();
+    let get = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "prompts/get", "params": { "name": first },
+    });
+    let (responses, _) = session_with_env(&[&get.to_string()], &[("G2G_README", readme)]);
+    let message = &responses[0]["result"]["messages"][0];
+    assert_eq!(message["role"], "user");
+    let text = message["content"]["text"].as_str().unwrap();
+    assert!(text.starts_with("These are the"), "{text}");
+    assert!(
+        text.contains("```"),
+        "the section's code blocks ride along: {text}"
+    );
+}
+
+/// A clip is cut out of a file by decoding it, trimming to the range around the
+/// pts and muxing it back: the range is centred on the pts and the output is an
+/// AVI holding the frames that second covers.
+#[cfg(feature = "mjpeg")]
+#[test]
+fn cuts_a_clip_out_of_a_video_file() {
+    /// 3 s of video at the source's own framerate.
+    const SOURCE_FRAMES: u64 = 90;
+    const CLIP_PTS: f64 = 1.5;
+    const CLIP_SECONDS: f64 = 1.0;
+
+    let source = temp_path("clip-source.avi");
+    let _ = std::fs::remove_file(&source);
+    let mut session = LiveSession::spawn();
+    let built = session.call(
+        "launch",
+        serde_json::json!({
+            "pipeline": format!(
+                "videotestsrc num-buffers={SOURCE_FRAMES} ! videoconvert ! mjpegenc ! avimux \
+                 ! filesink location=\"{}\"",
+                source.display(),
+            ),
+            "duration_secs": 60,
+        }),
+    );
+    assert_eq!(built["ok"], true, "{built}");
+    assert!(source.is_file(), "the source clip was written");
+
+    let clip = session.call(
+        "clip_at",
+        serde_json::json!({
+            "source": source.display().to_string(),
+            "pts": CLIP_PTS,
+            "seconds": CLIP_SECONDS,
+            // bare `avidemux` advertises H.264 before it has read the header
+            "decoder": "avidemux stream=mjpeg ! mjpegdec",
+        }),
+    );
+    assert_eq!(clip["ok"], true, "{clip}");
+    assert_eq!(clip["start"], CLIP_PTS - CLIP_SECONDS / 2.0, "{clip}");
+    assert_eq!(clip["end"], CLIP_PTS + CLIP_SECONDS / 2.0, "{clip}");
+
+    let framerate = videotestsrc_default(&mut session, "framerate");
+    let (numerator, denominator) = framerate.split_once('/').expect("fps as n/d");
+    let fps = numerator.parse::<f64>().unwrap() / denominator.parse::<f64>().unwrap();
+    assert_eq!(
+        clip["frames"].as_u64().unwrap(),
+        (fps * CLIP_SECONDS) as u64,
+        "{clip}"
+    );
+
+    let path = std::path::PathBuf::from(clip["path"].as_str().unwrap());
+    let bytes = std::fs::read(&path).expect("the clip was written");
+    assert_eq!(&bytes[..4], b"RIFF", "an AVI header");
+    let _ = std::fs::remove_file(&source);
+    let _ = std::fs::remove_file(&path);
+}
+
+/// A `metasink` with no `location` writes its lines to the server's stdout,
+/// which carries the protocol, so the run is refused before it starts.
+#[cfg(feature = "analytics-json")]
+#[test]
+fn refuses_a_metasink_that_would_write_to_the_protocol_stream() {
+    let mut session = LiveSession::spawn();
+    let refused = session.call(
+        "start_pipeline",
+        serde_json::json!({ "pipeline": "videotestsrc num-buffers=2 ! metasink" }),
+    );
+    assert_eq!(refused["ok"], false, "{refused}");
+    assert!(
+        refused["error"].as_str().unwrap().contains("location="),
+        "{refused}"
+    );
+    let status = session.call("pipeline_status", serde_json::json!({}));
+    assert_eq!(status["ok"], false, "nothing was started: {status}");
 }

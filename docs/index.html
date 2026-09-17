@@ -1016,10 +1016,10 @@ g2g-launch <span class="flag">--script</span> build.rhai</div>
             <div class="feature-card">
                 <span class="f-icon">&#127919;</span>
                 <h3>Per-frame metadata</h3>
-                <p class="f-lead">Detections, classifications, and tracks ride along with the frame and survive branching. A camera's own ONVIF analytics arrive the same way, matched to the picture they describe. Overlay elements draw the result.</p>
+                <p class="f-lead">Detections, classifications, and tracks ride along with the frame and survive branching. A camera's own ONVIF analytics arrive the same way, matched to the picture they describe. Overlay elements draw the result, a metadata sink writes it as JSON lines you can replay onto the same video later, and an alert element fires rules on it and records a clip around each hit.</p>
                 <div class="chip-group">
                     <span class="chip-label">Elements</span>
-                    <div class="chip-row"><span class="chip">DetectionPostprocess</span><span class="chip">OrtSegmentation</span><span class="chip">OnvifMetadataParse</span><span class="chip">AnalyticsOverlay</span></div>
+                    <div class="chip-row"><span class="chip">DetectionPostprocess</span><span class="chip">OrtSegmentation</span><span class="chip">OnvifMetadataParse</span><span class="chip">AnalyticsOverlay</span><span class="chip">MetaSink</span><span class="chip">AnalyticsAlert</span><span class="chip">AlertRecorder</span></div>
                 </div>
                 <span class="feature-tag tag-ml">ML</span>
             </div>

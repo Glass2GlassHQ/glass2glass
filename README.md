@@ -153,6 +153,14 @@ parse error: unknown element: theoraenc
   the same hardware after a replug (`v4l2src device-id=`, since `/dev/videoN`
   is not stable). A V4L2 listing includes the controls and ranges
   `v4l2src extra-controls=` accepts.
+- **`g2g-mcp`** (feature `mcp`) is a Model Context Protocol server over stdio,
+  so an agent drives pipelines: inspect and validate a launch line, run one,
+  keep one running and read its telemetry, bus events, logs and packet samples,
+  set a property or splice a transform while it runs, read the records a
+  `metasink` posts, snapshot a frame as PNG, cut a clip out of a file, and load
+  the README's sample pipelines as prompts. Captioning a frame with a VLM and
+  searching an embedding index by text stay in gst-python-ml's `pyml-mcp`, which
+  reads the same files. `claude mcp add g2g -- target/release/g2g-mcp`.
 - **Incremental migration.** `g2g-bridge` embeds a g2g sub-graph in a
   GStreamer pipeline. `gstwrap` hosts an un-ported GStreamer element in a g2g
   graph.
@@ -434,6 +442,8 @@ cargo clippy --workspace --all-targets
 | `PngDec` / `PngEnc` (pure Rust) | `png` | none |
 | `WebPDec` (lossy + lossless, pure Rust) | `webp` | none |
 | `AnalyticsOverlay` (CPU) / `VelloAnalyticsOverlay` (GPU) (detection boxes, segmentation masks, ROIs) / `WgpuSink` | `analytics`, `vello-overlay`, `wgpu-sink` | wgpu (GPU variants) |
+| `MetaSink` / `MetaReplay` (one JSON line per frame: detections, blobs, text; replay onto frames) / `AnalyticsAlert` (rules, cooldown, `alert` blob, webhook) / `AlertRecorder` (a clip around each alert) | `analytics-json` | none |
+| `EmbeddingSink` (sqlite index of embedding vectors, searchable from `pyml-mcp`) | `embedding-index` | none (sqlite bundled) |
 | `VelloTextOverlay` (subtitle cues drawn on the GPU, `WgpuTexture` out) | `vello-text-overlay` | wgpu |
 | `OrtInference` (+ CUDA / DirectML EPs) | `ort`, `cuda`, `directml` (in `g2g-ml`) | onnxruntime |
 | `BurnInference` (linear layer, or an ONNX topology imported by `burn-onnx` codegen) | `burn` (in `g2g-ml`) | wgpu (Vulkan / Metal / DX12) |

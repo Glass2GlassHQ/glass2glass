@@ -174,7 +174,6 @@ impl AsyncElement for PngEnc {
                 width,
                 height,
                 framerate,
-                interlace: _,
                 ..
             } => CapsSet::one(Caps::CompressedVideo {
                 codec: VideoCodec::Png,
@@ -193,7 +192,6 @@ impl AsyncElement for PngEnc {
             width,
             height,
             framerate,
-            interlace: _,
             ..
         } = absolute_caps
         else {

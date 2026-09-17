@@ -319,10 +319,18 @@ envelope hand-rolled with serde_json, and exposes these one-shot tools:
 - `launch(pipeline, duration_secs)`, run with a deadline and report `RunStats`
 - `run_graph`, a declarative JSON or YAML document by path or inline, advertised
   only in `declarative` builds, with the same run conventions
+- `clip_at(source, pts, seconds?, location?, decoder?, encoder?)` cuts the
+  seconds around a pts out of a video file through
+  `filesrc ! decoder ! trim ! videoconvert ! encoder ! filesink`, and reports the
+  path, the range and the frames the trim kept
+- `load_metadata(path)` loads the JSON lines a `metasink` wrote as the current
+  records, so a finished run reads back with nothing running
 
 It can also keep one launch-line pipeline running on a background thread:
 
-- `start_pipeline(pipeline)` starts the managed run
+- `start_pipeline(pipeline)` starts the managed run, refusing a line whose
+  `metasink` carries no `location`, since those lines would land in the stdout
+  the protocol rides on
 - `pipeline_status()` returns its state, revision, live `Observer` snapshot and
   the transforms inserted through MCP
 - `set_log_level(level, category?)` changes the process default or one category
@@ -341,6 +349,15 @@ It can also keep one launch-line pipeline running on a background thread:
 - `insert_transform(...)` applies the same checked insertion and increments the
   revision
 - `remove_transform(node, expected_revision)` removes an MCP-inserted transform
+- `get_property(element, property)` / `set_property(element, property, value)`
+  read and write one live element's knob through the mutator, the write applied
+  between packets and reported by reading it back
+- `latest_metadata(count?)` returns the newest `metasink` records, oldest first
+- `wait_for_records(count?, key?, timeout_ms?)` blocks until that many records
+  carrying `key` have been posted since the call, or the run ends or the timeout
+  passes, and returns them with the pipeline status
+- `snapshot_frame(element?, edge?)` returns the newest frame reaching an element
+  as a PNG image content block, advertised only in `mcp` builds
 - `stop_pipeline()` ends and releases the run
 
 The server is the `g2g_plugins::mcp::McpServer` type and the binary is a thin
@@ -362,6 +379,28 @@ shapes. Inserted elements are built from the registry and take the same typed
 property values as a launch line. The server refuses to remove a transform it did
 not insert. An edge sample never changes packet delivery. It removes its probe
 after collecting the requested packets or reaching the timeout.
+
+A run's results come back without reading its output file. A `metasink` posts
+every JSON line it writes as a `BusMessage::MetadataRecord`, and the event
+collector parses each one into a 1000-record store on the server, which
+`start_pipeline` resets and the run's EOS closes. That store is what
+`latest_metadata` and `wait_for_records` read, and `load_metadata` fills it from
+a file instead, so the record tools work with no pipeline at all. A waiter blocks
+on a condition variable and rechecks the run state on a timer, since a failed run
+wakes no one. `snapshot_frame` installs a one-shot interceptor on the edge into
+the element, converts the frame to RGBA when it is neither RGB nor RGBA, and
+PNG-encodes it. With no `element` it takes the `metasink`, or the pipeline's only
+sink. Caps that are not raw video, or a frame outside system memory, come back
+naming the element to insert. `clip_at` names the converter it puts after the
+`trim`, since the muxer hands the sink one byte stream and only that element's
+processed count is the clip's frame count. `describe_frame` and `search_video`
+are not ported: they need the models `pyml_mcp` hosts in Python.
+
+`prompts/list` and `prompts/get` serve one prompt per `###` heading under the
+README's sample pipelines, each carrying that section's code blocks. The README
+is read at call time (`G2G_README` overrides the path), never compiled in: the
+published crate does not ship it. A missing README leaves an empty prompt list,
+not an error.
 
 Both run tools stream live telemetry while running when the client supplies a
 `progressToken`, with periodic `notifications/progress` carrying the dashboard's
