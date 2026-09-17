@@ -1681,7 +1681,7 @@ impl LinkInterceptor for PacketSampler {
         if self
             .remaining
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
-                (remaining > 0).then_some(remaining - 1)
+                remaining.checked_sub(1)
             })
             .is_err()
         {
@@ -1865,7 +1865,7 @@ impl LinkInterceptor for FrameCapture {
         if self
             .remaining
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
-                (remaining > 0).then_some(remaining - 1)
+                remaining.checked_sub(1)
             })
             .is_err()
         {
