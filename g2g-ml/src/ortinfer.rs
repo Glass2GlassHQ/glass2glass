@@ -127,6 +127,9 @@ pub struct OrtInference {
     /// several models' outputs keeps them apart. Empty for a single model.
     #[cfg(feature = "analytics")]
     tensor_name: String,
+    /// Name of the metadata a frame must carry to be inferred on: a blob header,
+    /// or `detections` for any detection. Empty runs the model on every frame.
+    only_on: String,
     configured: bool,
     last_caps: Option<Caps>,
     emitted: u64,
@@ -153,6 +156,7 @@ impl OrtInference {
             attach_tensor: false,
             #[cfg(feature = "analytics")]
             tensor_name: String::new(),
+            only_on: String::new(),
             configured: false,
             last_caps: None,
             emitted: 0,
@@ -341,6 +345,20 @@ impl OrtInference {
     /// Count of tensor `DataFrame`s pushed downstream. Useful in tests.
     pub fn inferred_count(&self) -> u64 {
         self.emitted
+    }
+
+    /// Whether `only-on` names something this frame does not carry, so it goes
+    /// downstream with no session run at all.
+    #[cfg(feature = "analytics")]
+    fn forwards_untouched(&self, frame: &Frame) -> bool {
+        !self.only_on.is_empty() && !g2g_core::frame_carries(&frame.meta, &self.only_on)
+    }
+
+    /// Without the `analytics` feature a frame carries no metadata to test, and
+    /// `set_property` refuses a non-empty `only-on`, so every frame is inferred.
+    #[cfg(not(feature = "analytics"))]
+    fn forwards_untouched(&self, _frame: &Frame) -> bool {
+        false
     }
 
     /// Accept an already-normalized f32 NCHW `[1, 3, H, W]` tensor input
@@ -544,6 +562,13 @@ impl AsyncElement for OrtInference {
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        // A gated frame goes downstream exactly as it arrived, which matches the
+        // negotiated output caps only while this element keeps the picture on the
+        // wire. Emitting the tensor as the frame makes the two disagree.
+        #[cfg(feature = "analytics")]
+        if !self.only_on.is_empty() && !self.attach_tensor {
+            return Err(G2gError::CapsMismatch);
+        }
         let model = self.model.as_ref().ok_or(G2gError::NotConfigured)?;
         // RGBA mode normalizes to f32, so it only feeds an f32 model; a quantized
         // (u8 / i8) model must take a pre-quantized tensor via `with_tensor_input`.
@@ -592,6 +617,17 @@ impl AsyncElement for OrtInference {
                 self.tensor_name = String::from(value.as_str().ok_or(PropError::Type)?);
                 Ok(())
             }
+            "only-on" => {
+                let name = value.as_str().ok_or(PropError::Type)?;
+                // Nothing to gate on when frames carry no metadata, and silently
+                // inferring on every frame is not what the line asked for.
+                #[cfg(not(feature = "analytics"))]
+                if !name.is_empty() {
+                    return Err(PropError::Value);
+                }
+                self.only_on = String::from(name);
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
         }
     }
@@ -605,6 +641,7 @@ impl AsyncElement for OrtInference {
             "attach-tensor" => Some(PropValue::Bool(self.attach_tensor)),
             #[cfg(feature = "analytics")]
             "tensor-name" => Some(PropValue::Str(self.tensor_name.clone())),
+            "only-on" => Some(PropValue::Str(self.only_on.clone())),
             _ => None,
         }
     }
@@ -620,6 +657,10 @@ impl AsyncElement for OrtInference {
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
+                    if self.forwards_untouched(&frame) {
+                        out.push(PipelinePacket::DataFrame(frame)).await?;
+                        return Ok(());
+                    }
                     let Some(slice) = frame.domain.as_system_slice() else {
                         return Err(G2gError::UnsupportedDomain);
                     };
@@ -745,6 +786,12 @@ const TENSOR_NAME_PROP: PropertySpec = PropertySpec::new(
     "name the attached output is stored under, to keep several models on one frame apart",
 );
 
+const ONLY_ON_PROP: PropertySpec = PropertySpec::new(
+    "only-on",
+    PropKind::Str,
+    "Run only on frames carrying this blob, or any detection when set to detections. Other frames pass through untouched, so this needs attach-tensor=true.",
+);
+
 #[cfg(feature = "analytics")]
 static ORT_INFER_PROPS: &[PropertySpec] = &[
     MODEL_PROP,
@@ -752,9 +799,11 @@ static ORT_INFER_PROPS: &[PropertySpec] = &[
     PROVIDER_PROP,
     ATTACH_TENSOR_PROP,
     TENSOR_NAME_PROP,
+    ONLY_ON_PROP,
 ];
 #[cfg(not(feature = "analytics"))]
-static ORT_INFER_PROPS: &[PropertySpec] = &[MODEL_PROP, TENSOR_INPUT_PROP, PROVIDER_PROP];
+static ORT_INFER_PROPS: &[PropertySpec] =
+    &[MODEL_PROP, TENSOR_INPUT_PROP, PROVIDER_PROP, ONLY_ON_PROP];
 
 /// The RGBA input pad is the static superset (the model's geometry narrows it at
 /// instance time). No source template: the output tensor's shape is the loaded
@@ -897,5 +946,111 @@ mod tests {
             "dynamic non-batch dims are rejected"
         );
         assert_eq!(static_output_dims(&[1, 0]), Err(G2gError::CapsMismatch));
+    }
+
+    /// M1178: `only-on` forwards a frame that does not carry the named blob, with
+    /// no session run, which is also why this needs no model file: without the
+    /// gate the same frame fails with `NotConfigured` (the last case below). It
+    /// is refused outright unless `attach-tensor` keeps the picture on the wire,
+    /// since a forwarded frame has to match the negotiated output caps.
+    #[cfg(feature = "analytics")]
+    #[test]
+    fn only_on_forwards_a_frame_without_the_blob() {
+        use g2g_core::{BlobMeta, Dim, FrameTiming, PropError, PushOutcome, Rate};
+
+        const GATE: &str = "alert";
+        const OTHER: &str = "embedding";
+
+        #[derive(Default)]
+        struct CollectSink {
+            packets: Vec<PipelinePacket>,
+        }
+
+        impl OutputSink for CollectSink {
+            fn poll_push(
+                &mut self,
+                _cx: &mut core::task::Context<'_>,
+                packet_slot: &mut Option<PipelinePacket>,
+            ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+                let packet = packet_slot.take().expect("poll_push without a packet");
+                self.packets.push(packet);
+                core::task::Poll::Ready(Ok(PushOutcome::Accepted))
+            }
+        }
+
+        fn frame_carrying(header: &str) -> Frame {
+            let mut frame = Frame {
+                domain: MemoryDomain::System(SystemSlice::from_boxed(
+                    vec![0u8; 4].into_boxed_slice(),
+                )),
+                timing: FrameTiming::default(),
+                sequence: 7,
+                meta: Default::default(),
+            };
+            let mut blobs = BlobMeta::new();
+            blobs.push(header, Vec::from(b"x".as_slice()));
+            frame.meta.attach(blobs);
+            frame
+        }
+
+        let mut element = OrtInference::new();
+        assert!(element.properties().iter().any(|p| p.name == "only-on"));
+        element
+            .set_property("only-on", PropValue::Str(String::from(GATE)))
+            .unwrap();
+        assert_eq!(
+            element.get_property("only-on"),
+            Some(PropValue::Str(String::from(GATE)))
+        );
+        assert_eq!(
+            element.set_property("only-on", PropValue::Bool(true)),
+            Err(PropError::Type)
+        );
+
+        // Emitting the tensor as the frame would put a forwarded picture on a
+        // pad negotiated for the model's output, so the pair is refused.
+        let rgba = Caps::RawVideo {
+            format: RawVideoFormat::Rgba8,
+            width: Dim::Fixed(1),
+            height: Dim::Fixed(1),
+            framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        };
+        assert_eq!(
+            element.configure_pipeline(&rgba).err(),
+            Some(G2gError::CapsMismatch),
+            "only-on needs attach-tensor=true"
+        );
+        element
+            .set_property("attach-tensor", PropValue::Bool(true))
+            .unwrap();
+
+        // A session needs a model file, which this test has none of. The gate
+        // sits ahead of the session, so set the flag `process` checks.
+        element.configured = true;
+
+        assert!(element.forwards_untouched(&frame_carrying(OTHER)));
+        assert!(!element.forwards_untouched(&frame_carrying(GATE)));
+
+        let mut sink = CollectSink::default();
+        g2g_core::runtime::block_on(
+            element.process(PipelinePacket::DataFrame(frame_carrying(OTHER)), &mut sink),
+        )
+        .unwrap();
+        let [PipelinePacket::DataFrame(forwarded)] = &sink.packets[..] else {
+            panic!("the gated frame should go downstream on its own");
+        };
+        assert_eq!(forwarded.sequence, 7, "forwarded untouched, not renumbered");
+        assert!(forwarded.meta.get::<BlobMeta>().is_some(), "metadata kept");
+        assert_eq!(element.inferred_count(), 0, "no session ran");
+
+        // The frame the gate admits reaches the session, which there is none of.
+        assert_eq!(
+            g2g_core::runtime::block_on(
+                element.process(PipelinePacket::DataFrame(frame_carrying(GATE)), &mut sink)
+            ),
+            Err(G2gError::NotConfigured)
+        );
     }
 }

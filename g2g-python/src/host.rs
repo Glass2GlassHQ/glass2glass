@@ -19,6 +19,27 @@
 //! metadata blobs. This is the `backend/gst` `GstFrameIO` shape on a g2g
 //! [`Frame`]. Step 3 routes the blob list into [`g2g_core::FrameMetaSet`].
 //!
+//! `meta` reads as well as writes. Before each call the host fills it from the
+//! incoming frame's own metadata, so a hosted tracker or alert element sees what
+//! a native detector upstream attached:
+//!
+//! ```text
+//! meta.objects()      -> [{"label": str, "x": int, "y": int, "w": int, "h": int, "score": float}, ...]
+//! meta.class_names()  -> [str, ...]
+//! meta.blobs()        -> {name: bytes, ...}
+//! meta.tracking_ids() -> [int | None, ...]
+//! ```
+//!
+//! Boxes come back in pixels of the frame being processed, the shape
+//! gst-python-ml's `read_objects` returns, so a stream with no picture (audio,
+//! text) reports none. `label` is the class name when the producer published a
+//! table and the label id in decimal when it did not. `tracking_ids` is aligned
+//! with `objects`, each entry the identity related to that detection or `None`.
+//! Blob names are canonical (`g2g_core::canonical_blob_header`), so
+//! `GST-ALERT:` on the wire reads back as `alert`. What the element stages is
+//! appended to this, never substituted for it: a frame keeps upstream's
+//! detections and blobs alongside the hosted element's own.
+//!
 //! A stream that is not raw video has no picture shape, so it reaches Python
 //! through the payload hook instead:
 //!
@@ -98,6 +119,7 @@ use std::thread::{self, JoinHandle};
 use pyo3::exceptions::{PyBufferError, PyRuntimeError, PyValueError};
 use pyo3::ffi;
 use pyo3::prelude::*;
+use pyo3::types::{PyBytes, PyDict};
 
 use g2g_core::log::Target;
 use g2g_core::runtime::{bounded, Receiver};
@@ -296,11 +318,40 @@ enum Staged {
 #[pyclass]
 #[derive(Debug, Default)]
 struct MetaSink {
+    /// What the incoming frame already carried, filled before the call and read
+    /// only by the `objects` / `class_names` / `blobs` / `tracking_ids` methods,
+    /// so no lock is needed.
+    upstream: UpstreamMeta,
     staged: Mutex<Vec<Staged>>,
     /// The buffers the element produced, when it emits its own rather than
     /// overwriting the frame it was handed. Locked for the same reason `staged`
     /// is.
     emitted: Mutex<Vec<Emitted>>,
+}
+
+/// What upstream attached to the frame this call is about, converted once into
+/// the shapes the gst-python-ml side reads. Built before the call, immutable for
+/// its duration.
+#[derive(Debug, Default)]
+struct UpstreamMeta {
+    objects: Vec<UpstreamObject>,
+    class_names: Vec<String>,
+    blobs: Vec<(String, Vec<u8>)>,
+}
+
+/// One upstream detection in the shape `read_objects` returns: the class name
+/// (the label id in decimal when the producer published no table), the box in
+/// pixels of the frame being processed, and the confidence, plus the tracking
+/// identity related to it.
+#[derive(Debug)]
+struct UpstreamObject {
+    label: String,
+    x: i64,
+    y: i64,
+    w: i64,
+    h: i64,
+    score: f32,
+    tracking_id: Option<u64>,
 }
 
 /// A buffer a hosted element produced in place of the one it was handed.
@@ -330,6 +381,53 @@ impl MetaSink {
 
 #[pymethods]
 impl MetaSink {
+    /// The detections already on the incoming frame, one dict each with keys
+    /// `label` (str), `x` / `y` / `w` / `h` (int pixels of the processed frame)
+    /// and `score` (float). Empty for a stream with no picture, whose normalized
+    /// boxes have no dims to scale by.
+    fn objects<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDict>>> {
+        self.upstream
+            .objects
+            .iter()
+            .map(|object| {
+                let dict = PyDict::new(py);
+                dict.set_item("label", &object.label)?;
+                dict.set_item("x", object.x)?;
+                dict.set_item("y", object.y)?;
+                dict.set_item("w", object.w)?;
+                dict.set_item("h", object.h)?;
+                dict.set_item("score", object.score)?;
+                Ok(dict)
+            })
+            .collect()
+    }
+
+    /// The class-name table the upstream producer published, which the label ids
+    /// on its detections index into. Empty when it published none.
+    fn class_names(&self) -> Vec<String> {
+        self.upstream.class_names.clone()
+    }
+
+    /// The opaque blobs already on the incoming frame, keyed by canonical header
+    /// (lowercase, without gst-python-ml's `GST-` prefix and trailing `:`).
+    fn blobs<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let dict = PyDict::new(py);
+        for (header, payload) in &self.upstream.blobs {
+            dict.set_item(header, PyBytes::new(py, payload))?;
+        }
+        Ok(dict)
+    }
+
+    /// The tracking identity related to each entry of [`objects`](Self::objects),
+    /// aligned with it, `None` where the producer wired none.
+    fn tracking_ids(&self) -> Vec<Option<u64>> {
+        self.upstream
+            .objects
+            .iter()
+            .map(|object| object.tracking_id)
+            .collect()
+    }
+
     /// Add an object-detection box: class `label` id, pixel `(x, y, w, h)`,
     /// confidence `score` in `[0, 1]`. Returns the record's handle, for
     /// [`relate`](Self::relate).
@@ -798,7 +896,24 @@ fn process_job(
 ) -> Reply {
     let handoff = handoff(py, instance, &mut job)?;
 
-    let sink = match Py::new(py, MetaSink::default()) {
+    // `None` for a payload job: it has no pixels for a detection box to be
+    // measured in.
+    let frame_dims = job
+        .caps
+        .video()
+        .map(|(w, h, _)| (w, h))
+        .filter(|(w, h)| *w > 0 && *h > 0);
+    // A batch reports the anchor's metadata: the hook takes one `meta`, and the
+    // anchor is the frame that carries metadata downstream.
+    let upstream = upstream_meta(job.frames.first(), frame_dims);
+
+    let sink = match Py::new(
+        py,
+        MetaSink {
+            upstream,
+            ..Default::default()
+        },
+    ) {
         Ok(s) => s,
         Err(e) => return Err(py_fail(py, e)),
     };
@@ -831,13 +946,6 @@ fn process_job(
 
     match produced {
         Ok(true) => {
-            // `None` for a payload job: it has no pixels for a detection box to
-            // be normalized against.
-            let frame_dims = job
-                .caps
-                .video()
-                .map(|(w, h, _)| (w, h))
-                .filter(|(w, h)| *w > 0 && *h > 0);
             let Some(anchor) = job.frames.first() else {
                 return Ok(Vec::new());
             };
@@ -1100,12 +1208,79 @@ fn planes_released(py: Python<'_>, planes: &[Py<CudaPlane>]) -> PyResult<bool> {
     Ok(true)
 }
 
+/// Read what upstream attached to `frame` into the shapes the hosted element
+/// reads off `meta`. Boxes are denormalized by `frame_dims`, the inverse of what
+/// [`attach_metadata`] does on the way out.
+#[cfg(feature = "analytics")]
+fn upstream_meta(frame: Option<&Frame>, frame_dims: Option<(u32, u32)>) -> UpstreamMeta {
+    use g2g_core::{AnalyticsMeta, AnalyticsNode, BlobMeta, RelationKind};
+
+    /// The tracking identity wired to the detection at `node`, if any.
+    fn tracked_id(analytics: &AnalyticsMeta, node: usize) -> Option<u64> {
+        analytics.relations.iter().find_map(|relation| {
+            if relation.from != node || relation.kind != RelationKind::Tracks {
+                return None;
+            }
+            match analytics.nodes.get(relation.to) {
+                Some(AnalyticsNode::Tracking(tracking)) => Some(tracking.object_id),
+                _ => None,
+            }
+        })
+    }
+
+    let Some(frame) = frame else {
+        return UpstreamMeta::default();
+    };
+    let mut upstream = UpstreamMeta::default();
+    if let Some(analytics) = frame.meta.get::<AnalyticsMeta>() {
+        if let Some(names) = analytics.class_names.as_ref() {
+            upstream.class_names = names.iter().map(|name| name.to_string()).collect();
+        }
+        // A box is a fraction of a picture, and a text or audio buffer has none
+        // to multiply by, so it has no pixels to report.
+        if let Some((width, height)) = frame_dims {
+            let (sx, sy) = (width as f32, height as f32);
+            for (index, node) in analytics.nodes.iter().enumerate() {
+                let AnalyticsNode::Detection(detection) = node else {
+                    continue;
+                };
+                upstream.objects.push(UpstreamObject {
+                    label: analytics
+                        .class_name(detection.label)
+                        .map_or_else(|| detection.label.to_string(), String::from),
+                    x: (detection.bbox.x * sx).round() as i64,
+                    y: (detection.bbox.y * sy).round() as i64,
+                    w: (detection.bbox.w * sx).round() as i64,
+                    h: (detection.bbox.h * sy).round() as i64,
+                    score: detection.confidence,
+                    tracking_id: tracked_id(analytics, index),
+                });
+            }
+        }
+    }
+    if let Some(blobs) = frame.meta.get::<BlobMeta>() {
+        upstream.blobs = blobs
+            .iter()
+            .map(|blob| (blob.header.clone(), blob.payload.clone()))
+            .collect();
+    }
+    upstream
+}
+
+/// Without the `analytics` feature `FrameMetaSet` is the ZST, so there is
+/// nothing on a frame to read back.
+#[cfg(not(feature = "analytics"))]
+fn upstream_meta(_frame: Option<&Frame>, _frame_dims: Option<(u32, u32)>) -> UpstreamMeta {
+    UpstreamMeta::default()
+}
+
 /// Materialize staged results onto the frame: detections / classifications into
 /// an [`g2g_core::AnalyticsMeta`], opaque blobs into a [`g2g_core::BlobMeta`].
+/// Both are appended to what upstream attached rather than replacing it.
 #[cfg(feature = "analytics")]
 fn attach_metadata(frame: &mut Frame, staged: Vec<Staged>, frame_dims: Option<(u32, u32)>) {
     use g2g_core::{
-        AnalyticsMeta, AnalyticsNode, BBox, BlobMeta, Classification, ObjectDetection,
+        AnalyticsMeta, AnalyticsNode, BBox, BlobMeta, Classification, ObjectDetection, Relation,
         RelationKind, Tracking,
     };
 
@@ -1189,10 +1364,32 @@ fn attach_metadata(frame: &mut Frame, staged: Vec<Staged>, frame_dims: Option<(u
         analytics.relate(from, to, RelationKind::Tracks);
     }
     if !analytics.nodes.is_empty() {
-        frame.meta.attach(analytics);
+        match frame.meta.get_mut::<AnalyticsMeta>() {
+            // Upstream's detections stay: a hosted tracker or alert element adds
+            // to what a native detector found rather than erasing it. Relations
+            // are by node index, so they shift by what is already there.
+            Some(carried) => {
+                let offset = carried.nodes.len();
+                carried.nodes.extend(analytics.nodes);
+                carried
+                    .relations
+                    .extend(analytics.relations.into_iter().map(|relation| Relation {
+                        from: relation.from + offset,
+                        to: relation.to + offset,
+                        kind: relation.kind,
+                    }));
+                if analytics.class_names.is_some() {
+                    carried.class_names = analytics.class_names;
+                }
+            }
+            None => frame.meta.attach(analytics),
+        }
     }
     if !blobs.is_empty() {
-        frame.meta.attach(blobs);
+        match frame.meta.get_mut::<BlobMeta>() {
+            Some(carried) => carried.blobs.extend(blobs.blobs),
+            None => frame.meta.attach(blobs),
+        }
     }
 }
 

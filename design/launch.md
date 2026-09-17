@@ -352,6 +352,30 @@ it unset and share the anchor's. `g2g.PTS_NONE`, which is
 `FrameTiming::PTS_NONE`, emits a buffer with no presentation time, which a sink
 presents on arrival.
 
+**What upstream attached.** `meta` reads as well as writes. The host fills it
+from the incoming frame before each call, so a hosted tracker or alert element
+sees what a native detector already found. `meta.objects()` returns one dict per
+detection with `label`, `x`, `y`, `w`, `h` and `score`, the box in pixels of the
+frame being processed rather than the normalized `BBox` it travels as.
+`meta.class_names()` is the table those labels index into, and `label` carries
+the id in decimal when the producer published no table.
+`meta.tracking_ids()` is the identity related to each detection, aligned with
+`objects()`. `meta.blobs()` is the opaque side-data keyed by canonical header, so
+the `GST-ALERT:` gst-python-ml puts on the wire reads back as `alert`. A stream
+with no picture reports no objects, because a normalized box has no dims to
+scale by. What the element stages is appended to all this on the way out, so the
+frame carries the detector's results and the hosted element's both, and the
+upstream class table survives an element that publishes none. A batch reads the
+anchor's metadata, since `g2g_process_batch` takes one sink and the anchor is the
+frame that carries metadata downstream.
+
+**Running on some frames only.** `only-on=` names something a frame has to carry
+for the hosted class to be called: a blob header, or `detections` for any
+detection at all. A frame without it goes downstream untouched, with no Python
+call, which is how an alert or overlay element rides a detector that fires on a
+few frames in a hundred. `OrtInference` with `attach-tensor=true` takes the same
+property.
+
 ### CUDA device memory
 
 A `MemoryDomain::Cuda` frame has no CPU bytes, so its two semi-planar planes are

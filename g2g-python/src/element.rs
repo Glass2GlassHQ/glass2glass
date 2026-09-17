@@ -58,6 +58,9 @@ pub struct PyTransform {
     /// both halves of this element's memory-domain declaration: the frame arrives
     /// and leaves in the one domain, so the two cannot disagree.
     cuda_frames: bool,
+    /// Name of the metadata a frame must carry for the hosted element to see it:
+    /// a blob header, or `detections` for any detection. Empty runs every frame.
+    only_on: String,
     /// Element properties forwarded verbatim to the hosted Python instance at
     /// construction (e.g. `model-name`, `engine-name`, `device`): the gst-python
     /// GObject-property analog. The Python class declares these (via the g2g
@@ -94,6 +97,7 @@ impl PyTransform {
             produce: None,
             draw_label: false,
             cuda_frames: false,
+            only_on: String::new(),
             params: Vec::new(),
             configured: false,
             fixed: None,
@@ -152,6 +156,20 @@ impl PyTransform {
     /// Count of frames pushed downstream. Useful in tests.
     pub fn emitted_count(&self) -> u64 {
         self.emitted
+    }
+
+    /// Whether `only-on` names something this frame does not carry, so it goes
+    /// downstream with no Python call at all.
+    #[cfg(feature = "analytics")]
+    fn forwards_untouched(&self, frame: &Frame) -> bool {
+        !self.only_on.is_empty() && !g2g_core::frame_carries(&frame.meta, &self.only_on)
+    }
+
+    /// Without the `analytics` feature a frame carries no metadata to test, and
+    /// `set_property` refuses a non-empty `only-on`, so every frame runs.
+    #[cfg(not(feature = "analytics"))]
+    fn forwards_untouched(&self, _frame: &Frame) -> bool {
+        false
     }
 
     #[cfg(feature = "python")]
@@ -295,6 +313,11 @@ impl AsyncElement for PyTransform {
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
+                    if self.forwards_untouched(&frame) {
+                        self.emitted += 1;
+                        out.push(PipelinePacket::DataFrame(frame)).await?;
+                        return Ok(());
+                    }
                     for output in self.run(frame).await? {
                         self.emitted += 1;
                         out.push(PipelinePacket::DataFrame(output)).await?;
@@ -355,6 +378,17 @@ impl AsyncElement for PyTransform {
                 self.cuda_frames = value.as_bool().ok_or(PropError::Type)?;
                 Ok(())
             }
+            "only-on" => {
+                let name = value.as_str().ok_or(PropError::Type)?;
+                // Nothing to gate on when frames carry no metadata, and silently
+                // running every frame is not what the line asked for.
+                #[cfg(not(feature = "analytics"))]
+                if !name.is_empty() {
+                    return Err(PropError::Value);
+                }
+                self.only_on = name.to_string();
+                Ok(())
+            }
             "format" => {
                 let parsed = format_from_py(value.as_str().ok_or(PropError::Type)?)
                     .ok_or(PropError::Value)?;
@@ -387,6 +421,7 @@ impl AsyncElement for PyTransform {
             "class" => Some(PropValue::Str(self.class.clone())),
             "draw-label" => Some(PropValue::Bool(self.draw_label)),
             "cuda-frames" => Some(PropValue::Bool(self.cuda_frames)),
+            "only-on" => Some(PropValue::Str(self.only_on.clone())),
             "format" => match &self.accept {
                 Caps::RawVideo { format, .. } => {
                     Some(PropValue::Str(format_to_py(*format).to_string()))
@@ -456,6 +491,12 @@ static PYTRANSFORM_PROPS: &[PropertySpec] = hosted_element_props![
         "host an element that reads GPU-resident CUDA frames (needs g2g_process_cuda, NV12 / P010)",
     )
     .with_default("false"),
+    PropertySpec::new(
+        "only-on",
+        PropKind::Str,
+        "Run only on frames carrying this blob, or any detection when set to detections. Other frames pass through untouched.",
+    )
+    .with_default(""),
     PropertySpec::new(
         "input-caps",
         PropKind::Str,

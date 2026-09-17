@@ -126,6 +126,14 @@ selects, and owns the exportable render-target texture.
 g2g avoids bundling heavy, unsafe proprietary C++ engines. The `g2g-ml` crate
 provides wrapper elements targeting two execution paradigms.
 
+`OrtInference` takes `only-on=`, which names a blob header, or `detections` for
+any detection, that a frame has to carry to be inferred on. A frame without it is
+forwarded with no session run, so a second stage can ride the first one's results
+instead of paying for every frame. It needs `attach-tensor=true`: a forwarded
+frame has to match the negotiated output caps, and only the attach-tensor shape
+keeps the picture on the wire. `BurnInference` and `WgpuInference` emit the tensor
+as the frame in every mode, so neither takes the property.
+
 ### Burn
 
 `g2g-ml::burn`, for embedded, wasm and RTOS, leverages the pure-Rust Burn

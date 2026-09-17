@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1178: hosted Python elements read the detections, class names, tracking ids and blobs upstream attached, and `pyelement` / `ortinfer attach-tensor=true` take `only-on` to skip frames without a named blob or any detection.
 - M1175: `GraphMutator` sets and reads an element's properties while the graph runs, transforms and sinks receive the bus, and blob headers are canonical.
 - M1174: `g2g-mcp` tails bus events, and a host application registers its own running pipeline with the in-process `McpServer` while keeping its lifecycle.
 - M1173: `g2g-mcp` diagnoses one managed live pipeline through telemetry, logs and packet samples, and applies revision-checked transform changes.
