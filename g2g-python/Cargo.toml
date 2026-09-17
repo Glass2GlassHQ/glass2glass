@@ -42,6 +42,12 @@ launch = [
     "g2g-plugins/v4l2",
     "g2g-plugins/wayland-sink",
     "g2g-plugins/analytics",
+    # The native record / alert / replay / index elements pyml-launch maps the
+    # gst-python-ml sinks and alert onto, and the clip encoder alertrecorder
+    # defaults to.
+    "g2g-plugins/analytics-json",
+    "g2g-plugins/embedding-index",
+    "g2g-plugins/mjpeg-encode",
     # Audio capture and playback: a gst-python-ml transcribe / separate / TTS
     # line starts at a microphone or ends at a speaker.
     "g2g-plugins/pulse-src",
