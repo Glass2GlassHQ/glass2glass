@@ -321,6 +321,14 @@ jobs:
       # Headerless raw framers (M1086), still-image framers (M1087) and the
       # file-less sources (M1088): all need the std registry, and the
       # still-image legs cross-check the framed geometry against the decoders.
+      # Analytics records (M1176): metasink / metareplay / analyticsalert /
+      # alertrecorder (mjpeg + avi write the test clip) and the sqlite embedding
+      # index, plus the text digest and trim elements.
+      - name: test g2g-plugins (analytics records)
+        run: >
+          cargo test -p g2g-plugins --locked --features analytics-json,embedding-index,mjpeg,mjpeg-encode
+          --test m1176_metadata_records --test m1176_trim_and_digest --test m1176_embedding_index
+          --test m454_element_properties
       - name: test g2g-plugins (raw + still framers, file-less sources)
         run: cargo test -p g2g-plugins --locked --features std,png,mjpeg --test m1086_raw_parse --test m1087_still_parse --test m1088_split_and_data
       # Encoding profiles (M1089): each profile line must write byte for byte

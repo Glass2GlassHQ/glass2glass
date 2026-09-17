@@ -4400,3 +4400,175 @@ fn livesync_latency_late_threshold_and_counters() {
         );
     }
 }
+
+/// M1176: the record file each metadata element reads or writes.
+#[cfg(feature = "analytics-json")]
+#[test]
+fn metasink_and_metareplay_location() {
+    use g2g_plugins::metareplay::MetaReplay;
+    use g2g_plugins::metasink::MetaSink;
+    let path = "records.jsonl";
+    let mut sink = MetaSink::new();
+    assert!(declares(sink.properties(), "location"));
+    assert_eq!(
+        sink.get_property("location"),
+        Some(declared_default(sink.properties(), "location")),
+        "an unset location is stdout"
+    );
+    sink.set_property("location", PropValue::Str(path.into()))
+        .unwrap();
+    assert_eq!(
+        sink.get_property("location"),
+        Some(PropValue::Str(path.into()))
+    );
+    let mut replay = MetaReplay::new();
+    assert!(declares(replay.properties(), "location"));
+    assert_eq!(
+        replay.get_property("location"),
+        Some(declared_default(replay.properties(), "location"))
+    );
+    replay
+        .set_property("location", PropValue::Str(path.into()))
+        .unwrap();
+    assert_eq!(
+        replay.get_property("location"),
+        Some(PropValue::Str(path.into()))
+    );
+}
+
+/// M1176: every alert knob, and the rules text that has to parse as JSON.
+#[cfg(feature = "analytics-json")]
+#[test]
+fn analyticsalert_rules_cooldown_border_and_webhook() {
+    use g2g_core::PropError;
+    use g2g_plugins::analyticsalert::AnalyticsAlert;
+    let mut e = AnalyticsAlert::new();
+    for name in ["rules", "cooldown", "draw-alert", "webhook-url"] {
+        assert!(declares(e.properties(), name), "{name} is declared");
+        assert_eq!(
+            e.get_property(name),
+            Some(declared_default(e.properties(), name)),
+            "{name} reports its declared default"
+        );
+    }
+    let rules = "[{\"class\":\"person\",\"min_score\":0.8}]";
+    e.set_property("rules", PropValue::Str(rules.into()))
+        .unwrap();
+    assert_eq!(e.get_property("rules"), Some(PropValue::Str(rules.into())));
+    assert_eq!(
+        e.set_property("rules", PropValue::Str("{not json".into()))
+            .unwrap_err(),
+        PropError::Value,
+        "rules that do not parse are refused, not silently ignored"
+    );
+    e.set_property("cooldown", PropValue::Uint(30)).unwrap();
+    assert_eq!(e.get_property("cooldown"), Some(PropValue::Uint(30)));
+    e.set_property("draw-alert", PropValue::Bool(false))
+        .unwrap();
+    assert_eq!(e.get_property("draw-alert"), Some(PropValue::Bool(false)));
+    e.set_property("webhook-url", PropValue::Str("http://h/alert".into()))
+        .unwrap();
+    assert_eq!(
+        e.get_property("webhook-url"),
+        Some(PropValue::Str("http://h/alert".into()))
+    );
+}
+
+/// M1176: the clip a recorder writes, and the window it covers.
+#[cfg(feature = "analytics-json")]
+#[test]
+fn alertrecorder_clip_location_encoder_and_window() {
+    use g2g_plugins::alertrecorder::AlertRecorder;
+    let mut e = AlertRecorder::new();
+    for name in ["location", "encoder", "seconds-before", "seconds-after"] {
+        assert!(declares(e.properties(), name), "{name} is declared");
+        assert_eq!(
+            e.get_property(name),
+            Some(declared_default(e.properties(), name)),
+            "{name} reports its declared default"
+        );
+    }
+    e.set_property("location", PropValue::Str("/tmp/clip-%s.avi".into()))
+        .unwrap();
+    assert_eq!(
+        e.get_property("location"),
+        Some(PropValue::Str("/tmp/clip-%s.avi".into()))
+    );
+    e.set_property("encoder", PropValue::Str("mjpegenc ! avimux".into()))
+        .unwrap();
+    assert_eq!(
+        e.get_property("encoder"),
+        Some(PropValue::Str("mjpegenc ! avimux".into()))
+    );
+    for name in ["seconds-before", "seconds-after"] {
+        e.set_property(name, PropValue::Double(1.5)).unwrap();
+        assert_eq!(e.get_property(name), Some(PropValue::Double(1.5)));
+    }
+}
+
+/// M1176: the index a sink writes and what a search reports for it.
+#[cfg(feature = "embedding-index")]
+#[test]
+fn embeddingsink_location_source_and_model() {
+    use g2g_plugins::embeddingsink::EmbeddingSink;
+    let mut e = EmbeddingSink::new();
+    for (name, value) in [
+        ("location", "index.db"),
+        ("source-id", "north-gate"),
+        ("model-name", "clip-vit-b32"),
+    ] {
+        assert!(declares(e.properties(), name), "{name} is declared");
+        assert_eq!(
+            e.get_property(name),
+            Some(declared_default(e.properties(), name)),
+            "{name} reports its declared default"
+        );
+        e.set_property(name, PropValue::Str(value.into())).unwrap();
+        assert_eq!(e.get_property(name), Some(PropValue::Str(value.into())));
+    }
+}
+
+/// M1176: the window one digest covers.
+#[test]
+fn textdigest_window_seconds() {
+    use g2g_plugins::textdigest::TextDigest;
+    let mut e = TextDigest::new();
+    assert!(declares(e.properties(), "window-seconds"));
+    assert_eq!(
+        e.get_property("window-seconds"),
+        Some(declared_default(e.properties(), "window-seconds"))
+    );
+    e.set_property("window-seconds", PropValue::Double(5.0))
+        .unwrap();
+    assert_eq!(
+        e.get_property("window-seconds"),
+        Some(PropValue::Double(5.0))
+    );
+}
+
+/// M1176: the range a trim keeps, in nanoseconds.
+#[test]
+fn trim_start_and_stop() {
+    use g2g_plugins::trim::Trim;
+    let mut e = Trim::new();
+    assert!(declares(e.properties(), "start"));
+    assert!(declares(e.properties(), "stop"));
+    assert_eq!(
+        e.get_property("start"),
+        Some(declared_default(e.properties(), "start"))
+    );
+    // No declared default for `stop`: a fresh element keeps everything, which is
+    // the whole u64 range.
+    assert_eq!(e.get_property("stop"), Some(PropValue::Uint(u64::MAX)));
+    e.set_property("start", PropValue::Uint(1_000_000_000))
+        .unwrap();
+    e.set_property("stop", PropValue::Uint(3_000_000_000))
+        .unwrap();
+    assert_eq!(
+        (e.get_property("start"), e.get_property("stop")),
+        (
+            Some(PropValue::Uint(1_000_000_000)),
+            Some(PropValue::Uint(3_000_000_000))
+        )
+    );
+}

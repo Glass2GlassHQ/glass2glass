@@ -334,6 +334,17 @@ signature, written even for a stream that carries no cue, and a cue whose text i
 blank writes nothing, since an empty block would end the preceding cue early when
 the document is read back.
 
+### Text digest
+
+`TextDigest` (`textdigest`) joins the `Text{Utf8}` frames of a `window-seconds`
+window into one frame per window, each input becoming the line `At <seconds>s:
+<text>`. The first frame at or past the end of the open window closes it: the
+collected lines go out as one frame stamped with the window's start and its
+length, and the new window starts at that frame; the window still open at EOS is
+flushed. Inputs are consumed, so nothing but digests leaves the element. It is
+what turns a caption or detection-summary stream into the paragraph a language
+model or a log reader is handed, and it is `no_std` like the other text elements.
+
 ## Bitmap subtitles
 
 Bitmap subtitles are the one subtitle family that is not text, so they get their

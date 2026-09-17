@@ -195,6 +195,25 @@ pub mod conformance;
 // Needs the per-frame metadata graph, so it is gated on `analytics`.
 #[cfg(feature = "analytics")]
 pub mod analyticsoverlay;
+// Metadata records as JSON lines (M1176): one line per frame out of `metasink`,
+// back onto the frames through `metareplay`. Both need std and serde_json.
+#[cfg(feature = "analytics-json")]
+pub mod metareplay;
+#[cfg(feature = "analytics-json")]
+pub mod metasink;
+// Rule-driven alerts on the detections a frame carries, and the clip recorder
+// that catches the seconds around each one.
+#[cfg(feature = "analytics-json")]
+pub mod alertrecorder;
+#[cfg(feature = "analytics-json")]
+pub mod analyticsalert;
+// Embedding index: one sqlite row per embedded frame.
+#[cfg(feature = "embedding-index")]
+pub mod embeddingsink;
+// Text window digest (no_std): the text frames of a window as one frame.
+pub mod textdigest;
+// Presentation-time range cut (no_std).
+pub mod trim;
 // Shared wgpu device context for the GPU elements (M103): a producer and a sink
 // must share one device for a copy-free WgpuTexture handoff.
 #[cfg(any(

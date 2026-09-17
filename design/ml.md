@@ -346,6 +346,55 @@ tracker should treat specially, related to its `Segmentation` by `Contains`. The
 decode is pure Rust (`g2g-ml::segmentation`), so an `ort-web` caller in the
 browser that already holds both outputs reuses it without an element.
 
+### Records
+
+`g2g-plugins::metasink` (`analytics-json` feature) writes one JSON line per frame:
+`pts` in seconds, `detections` as the class name and the box in whole pixels of the
+negotiated geometry, and one key per `BlobMeta` blob whose payload is JSON, under
+the blob's canonical header. A `Caps::Text` frame writes its text instead, and a
+record holding nothing but a `pts` is not written at all. Each line also goes on
+the bus as `BusMessage::MetadataRecord`, so a tool watching the run (`g2g-mcp`)
+reports results as they happen rather than tailing the file. The record is
+gst-python-ml's `pyml_metasink` format, key for key, so either side reads the
+other's files.
+
+`metareplay` puts such a file back: each frame takes the record whose time is
+nearest its own, within half a frame duration (20 ms where the duration is
+unknown), and gets an `AnalyticsMeta` whose boxes are normalized back against the
+negotiated geometry, with a class-name table interned in the order the file first
+mentions each name. Every key that is not `pts`, `text` or `detections` comes back
+as a blob. A detector therefore runs once and its results replay onto the video as
+often as wanted.
+
+`analyticsalert` turns detections into events. A rule is `{class, min_score,
+zone}`, all optional, matching on a substring of the class name, a confidence
+threshold and the box centre; a matching frame fires at most one alert per rule,
+attaches them as the `alert` blob, outlines the frame in red and POSTs the alert
+JSON to `webhook-url`. The cooldown between repeats is measured in stream time,
+the frame's pts, where the Python element uses wall time, so a replayed file fires
+the same alerts at the same frames every run.
+
+`alertrecorder` catches the seconds around each alert. It holds a ring of recent
+frames by pts and, on the first frame carrying the `alert` blob, opens a clip: a
+child graph `appsrc ! <encoder> ! filesink`, parsed from the launch registry and
+run on its own thread, fed the ring and then each following frame with the pts
+rebased to the clip's first. A further alerted frame pushes the end out by
+`seconds-after`. The ring holds a reference-counted handle on each frame's bytes,
+so frames crossing the element are not copied, and the child graph is built on the
+thread that runs it, since a graph's elements are not `Send` in a
+single-threaded build. `trim` is the other half of getting a clip out of a
+recording: it keeps a pts range of any stream, rebases it onto the range's start,
+and pushes `Eos` at `stop`, so a sink closes its file there rather than at the
+source's end.
+
+`embeddingsink` (`embedding-index` feature) stores one sqlite row per embedded
+frame, `(source_id, pts, model_name, vector)`, the schema gst-python-ml's
+`embedding_index.py` creates and its `search_video` queries. The `embedding` blob
+is read in both shapes that exist: a length-prefixed JSON header then the
+little-endian `f32` vector, or the bare vector. One index holds one model, so a
+second model name is refused rather than mixed into a table a search compares
+across.
+
 ### Metadata through fan-out and transforms
 
 `FrameMetaSet` holds each `FrameMeta` as an `Arc<dyn FrameMeta>` and is `Clone`,

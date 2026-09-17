@@ -859,6 +859,45 @@ pub fn default_registry() -> Registry {
     reg.register_launch(LaunchFactory::new("analyticsoverlay", Vec::new(), || {
         Box::new(crate::analyticsoverlay::AnalyticsOverlay::new())
     }));
+    // Metadata record tools (M1176): `metasink` writes one JSON line per frame
+    // and posts it on the bus, `metareplay` puts such a file back onto the frames
+    // it was recorded from. The replay is caps-driven (no pad templates): it
+    // takes whatever raw video geometry the run negotiated.
+    #[cfg(feature = "analytics-json")]
+    reg.register_launch(LaunchFactory::of::<crate::metasink::MetaSink>(
+        "metasink",
+        || Box::new(crate::metasink::MetaSink::new()),
+    ));
+    #[cfg(feature = "analytics-json")]
+    reg.register_launch(LaunchFactory::new("metareplay", Vec::new(), || {
+        Box::new(crate::metareplay::MetaReplay::new())
+    }));
+    // Rule-driven alerts (M1176) and the clip recorder that catches the seconds
+    // around each one. Both caps-driven.
+    #[cfg(feature = "analytics-json")]
+    reg.register_launch(LaunchFactory::new("analyticsalert", Vec::new(), || {
+        Box::new(crate::analyticsalert::AnalyticsAlert::new())
+    }));
+    #[cfg(feature = "analytics-json")]
+    reg.register_launch(LaunchFactory::new("alertrecorder", Vec::new(), || {
+        Box::new(crate::alertrecorder::AlertRecorder::new())
+    }));
+    // Embedding index sink (M1176): one sqlite row per embedded frame.
+    #[cfg(feature = "embedding-index")]
+    reg.register_launch(LaunchFactory::of::<crate::embeddingsink::EmbeddingSink>(
+        "embeddingsink",
+        || Box::new(crate::embeddingsink::EmbeddingSink::new()),
+    ));
+    // Text window digest (M1176): the text frames of a window as one frame.
+    reg.register_launch(LaunchFactory::of::<crate::textdigest::TextDigest>(
+        "textdigest",
+        || Box::new(crate::textdigest::TextDigest::new()),
+    ));
+    // Presentation-time range cut (M1176), caps-driven: it passes whatever it is
+    // given, minus the frames outside the range.
+    reg.register_launch(LaunchFactory::new("trim", Vec::new(), || {
+        Box::new(crate::trim::Trim::new())
+    }));
     // Still-frame stream generator (M1067): `imagefreeze num-buffers=N` bounds
     // the run, a bare `imagefreeze` repeats the first frame indefinitely. No pad
     // templates declared (caps-driven via intercept_caps).
@@ -2369,6 +2408,11 @@ pub static FEATURE_GATED_ELEMENTS: &[FeatureGatedElement] = &{
         "rtmpsrc" => "rtmp";
         "rtmpsink" => "rtmp";
         "analyticsoverlay" => "analytics";
+        "metasink" => "analytics-json";
+        "metareplay" => "analytics-json";
+        "analyticsalert" => "analytics-json";
+        "alertrecorder" => "analytics-json";
+        "embeddingsink" => "embedding-index";
         "wgpucompositor" => "wgpu-sink";
         "gstwrap" => "gstreamer";
         "mp4mux" => "std";
