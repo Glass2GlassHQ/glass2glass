@@ -308,10 +308,10 @@ dropped on replay rather than failing.
 
 ## g2g-mcp
 
-`g2g-mcp` (the `tooling-json` feature) is a Model Context Protocol server so an
-agent can drive g2g development. It speaks newline-delimited JSON-RPC 2.0 over
-stdio with no MCP framework dependency, the envelope hand-rolled with serde_json,
-and exposes five tools:
+`g2g-mcp` (the `observe` and `multi-thread` features) is a Model Context
+Protocol server so an agent can drive g2g development. It speaks
+newline-delimited JSON-RPC 2.0 over stdio with no MCP framework dependency, the
+envelope hand-rolled with serde_json, and exposes these one-shot tools:
 
 - `list_elements`
 - `inspect(element)`
@@ -319,6 +319,32 @@ and exposes five tools:
 - `launch(pipeline, duration_secs)`, run with a deadline and report `RunStats`
 - `run_graph`, a declarative JSON or YAML document by path or inline, advertised
   only in `declarative` builds, with the same run conventions
+
+It can also keep one launch-line pipeline running on a background thread:
+
+- `start_pipeline(pipeline)` starts the managed run
+- `pipeline_status()` returns its state, revision, live `Observer` snapshot and
+  the transforms inserted through MCP
+- `set_log_level(level, category?)` changes the process default or one category
+  immediately and reports the previous threshold
+- `tail_logs(limit?, clear?)` reads structured records from a 1024-record
+  `RingSink`, including its overwrite count
+- `sample_edge(edge, count?, timeout_ms?)` installs a temporary pass-through
+  probe and returns packet type, timing, memory domain and a bounded content
+  preview
+- `validate_insertion(target, position, element, properties, expected_revision)`
+  runs the mutator's current-caps and downstream checks without changing the graph
+- `insert_transform(...)` applies the same checked insertion and increments the
+  revision
+- `remove_transform(node, expected_revision)` removes an MCP-inserted transform
+- `stop_pipeline()` ends and releases the run
+
+Every write names the revision it inspected. A stale write is refused with the
+current revision, so two agent decisions cannot silently apply to different graph
+shapes. Inserted elements are built from the registry and take the same typed
+property values as a launch line. The server refuses to remove a transform it did
+not insert. An edge sample never changes packet delivery. It removes its probe
+after collecting the requested packets or reaching the timeout.
 
 Both run tools stream live telemetry while running when the client supplies a
 `progressToken`, with periodic `notifications/progress` carrying the dashboard's

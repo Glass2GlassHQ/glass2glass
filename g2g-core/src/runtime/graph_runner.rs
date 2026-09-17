@@ -1086,6 +1086,36 @@ pub async fn run_graph_observed<'a, Clk: PipelineClock>(
     .await
 }
 
+/// As [`run_graph_observed`], with a [`GraphMutator`] for changing the running
+/// graph. The observer and mutator share the same prepared graph and caps.
+pub fn run_graph_observed_mutable<'a, 'o, Clk: PipelineClock>(
+    graph: Graph<GraphNodeRef<'a>>,
+    clock: &'a Clk,
+    link_capacity: impl Into<LinkCapacity>,
+    observer: &'o Observer,
+    bus: Option<&'o BusHandle>,
+) -> (GraphMutator<'a>, BoxFuture<'o, Result<RunStats, G2gError>>)
+where
+    'a: 'o,
+{
+    let capacity: LinkCapacity = link_capacity.into();
+    let (mutator, requests) = mutation_channel(MUTATION_QUEUE_DEPTH);
+    let run = run_graph_inner(
+        graph,
+        clock,
+        capacity,
+        bus,
+        None,
+        None,
+        None,
+        Some(observer),
+        None,
+        None,
+        Some(requests),
+    );
+    (mutator, Box::pin(run))
+}
+
 /// As [`run_graph`], but publishes playback progress into `progress` (M203): the
 /// sink arm publishes the stream-time [`position`](PipelineProgress::position) of
 /// every buffer it consumes, and the source arm publishes the

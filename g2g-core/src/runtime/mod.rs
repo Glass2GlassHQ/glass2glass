@@ -118,9 +118,10 @@ pub use unblock::{UnblockHandle, UnblockWait};
 #[cfg(feature = "std")]
 pub use graph_runner::{
     auto_plug_domain_converters, copy_plan, negotiate_graph, negotiate_graph_explained, run_graph,
-    run_graph_mutable, run_graph_observed, run_graph_observed_recorded, run_graph_recorded,
-    run_graph_stateful, run_graph_with_bus, run_graph_with_copy_policy, run_graph_with_progress,
-    DynMultiOutputElement, GraphNode, GraphNodeRef, GraphTemplate, NegotiateError,
+    run_graph_mutable, run_graph_observed, run_graph_observed_mutable, run_graph_observed_recorded,
+    run_graph_recorded, run_graph_stateful, run_graph_with_bus, run_graph_with_copy_policy,
+    run_graph_with_progress, DynMultiOutputElement, GraphNode, GraphNodeRef, GraphTemplate,
+    NegotiateError,
 };
 
 #[cfg(feature = "std")]

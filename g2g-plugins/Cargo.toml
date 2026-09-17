@@ -1313,7 +1313,7 @@ required-features = ["std"]
 # MCP server for agent-driven dev; needs serde_json (registry dump / results).
 [[bin]]
 name = "g2g-mcp"
-required-features = ["tooling-json"]
+required-features = ["observe", "multi-thread"]
 
 # Keygen / sign / verify for detached plugin signatures (M1061).
 [[bin]]

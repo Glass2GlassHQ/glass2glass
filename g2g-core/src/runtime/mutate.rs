@@ -103,6 +103,45 @@ impl core::fmt::Debug for GraphMutator<'_> {
 }
 
 impl<'a> GraphMutator<'a> {
+    /// Check whether an element can be inserted below `after`, using the same
+    /// current caps and downstream checks as [`insert_after`](Self::insert_after).
+    pub async fn validate_insert_after(
+        &self,
+        after: &str,
+        element: Box<dyn DynAsyncElement + 'a>,
+    ) -> Result<(), MutationError> {
+        self.validate_insert(after, Side::Below, element).await
+    }
+
+    /// Check whether an element can be inserted above `before`, using the same
+    /// current caps and downstream checks as [`insert_before`](Self::insert_before).
+    pub async fn validate_insert_before(
+        &self,
+        before: &str,
+        element: Box<dyn DynAsyncElement + 'a>,
+    ) -> Result<(), MutationError> {
+        self.validate_insert(before, Side::Above, element).await
+    }
+
+    async fn validate_insert(
+        &self,
+        node: &str,
+        side: Side,
+        element: Box<dyn DynAsyncElement + 'a>,
+    ) -> Result<(), MutationError> {
+        let (reply, answer) = bounded(1);
+        self.tx
+            .send(MutationRequest::ValidateInsert {
+                node: node.to_string(),
+                side,
+                element,
+                reply,
+            })
+            .await
+            .map_err(|_| MutationError::GraphEnded)?;
+        answer.recv().await.ok_or(MutationError::GraphEnded)?
+    }
+
     /// Splice `element` onto the edge leaving the element named `after`, so the
     /// stream runs `after -> element -> (whatever `after` fed)`. Returns the
     /// instance name the new element was given.
@@ -268,6 +307,12 @@ pub(crate) enum Side {
 /// future, which is where the arms and links live.
 #[allow(missing_debug_implementations)]
 pub(crate) enum MutationRequest<'a> {
+    ValidateInsert {
+        node: String,
+        side: Side,
+        element: Box<dyn DynAsyncElement + 'a>,
+        reply: Sender<Result<(), MutationError>>,
+    },
     Insert {
         node: String,
         side: Side,
@@ -522,6 +567,15 @@ impl<'a, 's> MutationService<'a, 's> {
     pub(crate) async fn run(mut self) -> core::convert::Infallible {
         loop {
             match self.rx.recv().await {
+                Some(MutationRequest::ValidateInsert {
+                    node,
+                    side,
+                    mut element,
+                    reply,
+                }) => {
+                    let result = self.prepare_insert(&node, side, &mut *element).map(|_| ());
+                    let _ = reply.try_send(result);
+                }
                 Some(MutationRequest::Insert {
                     node,
                     side,
@@ -636,30 +690,9 @@ impl<'a, 's> MutationService<'a, 's> {
         side: Side,
         mut element: Box<dyn DynAsyncElement + 'a>,
     ) -> Result<String, MutationError> {
-        let edge = self.edge_at(name, side)?;
+        let (edge, edge_caps, out_caps) = self.prepare_insert(name, side, &mut *element)?;
         let endpoint = self.edges[edge].endpoint.clone();
         let consumer = self.edges[edge].consumer;
-        let edge_caps = endpoint.caps().ok_or(MutationError::NoCaps)?;
-
-        // Negotiate before anything is disturbed: the element against the caps
-        // on the wire, then its output against what the chain below accepts.
-        let out_caps = element
-            .intercept_caps(&edge_caps)
-            .map_err(MutationError::Refused)?;
-        if out_caps != edge_caps && !accepts_downstream(&self.edges[edge].feasible, &out_caps) {
-            return Err(MutationError::DownstreamRefused);
-        }
-        // A counter-proposal has nowhere to go: the upstream element is already
-        // running under the caps it fixated at startup, which is what
-        // `reject_refixate` says at startup too.
-        element
-            .configure_pipeline(&edge_caps)
-            .map_err(MutationError::Refused)?
-            .reject_refixate()
-            .map_err(MutationError::Refused)?;
-        element
-            .configure_output(&out_caps)
-            .map_err(MutationError::Refused)?;
         element.configure_liveness(self.path_is_live);
         let name = self.unique_name(element.log_category());
         element.set_instance_name(name.clone());
@@ -748,6 +781,34 @@ impl<'a, 's> MutationService<'a, 's> {
         self.edges[edge].feasible = Some(CapsSet::one(edge_caps));
         retarget(&mut self.nodes[consumer].in_edges, edge, below);
         Ok(name)
+    }
+
+    fn prepare_insert(
+        &self,
+        name: &str,
+        side: Side,
+        element: &mut dyn DynAsyncElement,
+    ) -> Result<(usize, Caps, Caps), MutationError> {
+        let edge = self.edge_at(name, side)?;
+        let edge_caps = self.edges[edge]
+            .endpoint
+            .caps()
+            .ok_or(MutationError::NoCaps)?;
+        let out_caps = element
+            .intercept_caps(&edge_caps)
+            .map_err(MutationError::Refused)?;
+        if out_caps != edge_caps && !accepts_downstream(&self.edges[edge].feasible, &out_caps) {
+            return Err(MutationError::DownstreamRefused);
+        }
+        element
+            .configure_pipeline(&edge_caps)
+            .map_err(MutationError::Refused)?
+            .reject_refixate()
+            .map_err(MutationError::Refused)?;
+        element
+            .configure_output(&out_caps)
+            .map_err(MutationError::Refused)?;
+        Ok((edge, edge_caps, out_caps))
     }
 
     async fn remove(&mut self, node: &str) -> Result<Box<dyn DynAsyncElement + 'a>, MutationError> {

@@ -4,10 +4,10 @@
 //! binary end to end (the tool logic is unit-tested in `toolingjson`; this checks
 //! the JSON-RPC framing).
 //!
-//! Needs `tooling-json` (`declarative-yaml` for the `run_graph` test):
-//! `cargo test -p g2g-plugins --features tooling-json,declarative-yaml
+//! Needs `observe,multi-thread` (`declarative-yaml` for the `run_graph` test):
+//! `cargo test -p g2g-plugins --features observe,multi-thread,declarative-yaml
 //! --test m681_mcp`.
-#![cfg(feature = "tooling-json")]
+#![cfg(all(feature = "tooling-json", feature = "multi-thread"))]
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
@@ -67,6 +67,10 @@ fn initialize_lists_tools_and_calls_them() {
         .map(|t| t["name"].as_str().unwrap())
         .collect();
     assert!(tools.contains(&"inspect") && tools.contains(&"validate") && tools.contains(&"launch"));
+    assert!(tools.contains(&"start_pipeline") && tools.contains(&"pipeline_status"));
+    assert!(tools.contains(&"insert_transform") && tools.contains(&"remove_transform"));
+    assert!(tools.contains(&"set_log_level") && tools.contains(&"tail_logs"));
+    assert!(tools.contains(&"sample_edge"));
 
     // validate -> ok
     assert_eq!(payload(&resp[2])["ok"], true);
@@ -196,4 +200,106 @@ fn launch_without_progress_token_emits_no_notifications() {
     ]);
     assert_eq!(payload(&resp[0])["timed_out"], true);
     assert!(notes.is_empty(), "no token, no notifications: {notes:?}");
+}
+
+#[test]
+fn manages_and_mutates_a_running_pipeline() {
+    let (responses, notifications) = session(&[
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"start_pipeline","arguments":{"pipeline":"videotestsrc name=src ! identity name=base ! fakesink name=sink"}}}"#,
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"pipeline_status","arguments":{}}}"#,
+        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"validate_insertion","arguments":{"target":"base","position":"after","element":"valve","properties":{"drop":false},"expected_revision":0}}}"#,
+        r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"insert_transform","arguments":{"target":"base","position":"after","element":"valve","properties":{"drop":false},"expected_revision":0}}}"#,
+        r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"insert_transform","arguments":{"target":"base","position":"after","element":"valve","properties":{"drop":false},"expected_revision":0}}}"#,
+        r#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"pipeline_status","arguments":{}}}"#,
+        r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"remove_transform","arguments":{"node":"Valve0","expected_revision":1}}}"#,
+        r#"{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"stop_pipeline","arguments":{}}}"#,
+    ]);
+
+    assert!(notifications.is_empty());
+    assert_eq!(responses.len(), 8);
+    assert_eq!(payload(&responses[0])["ok"], true);
+
+    let initial = payload(&responses[1]);
+    assert!(matches!(
+        initial["state"].as_str(),
+        Some("starting" | "running")
+    ));
+    assert_eq!(initial["revision"], 0);
+
+    assert_eq!(payload(&responses[2])["ok"], true);
+    let inserted = payload(&responses[3]);
+    assert_eq!(inserted["ok"], true, "{inserted}");
+    assert_eq!(inserted["node"], "Valve0");
+    assert_eq!(inserted["revision"], 1);
+
+    let stale = payload(&responses[4]);
+    assert_eq!(stale["ok"], false);
+    assert_eq!(stale["current_revision"], 1);
+
+    let changed = payload(&responses[5]);
+    assert_eq!(changed["inserted"]["Valve0"]["target"], "base");
+    assert_eq!(changed["inserted"]["Valve0"]["properties"]["drop"], false);
+    assert_eq!(changed["revision"], 1);
+    assert_eq!(changed["telemetry"]["nodes"].as_array().unwrap().len(), 3);
+
+    let removed = payload(&responses[6]);
+    assert_eq!(removed["ok"], true, "{removed}");
+    assert_eq!(removed["revision"], 2);
+    assert_eq!(payload(&responses[7])["ok"], true);
+}
+
+#[test]
+fn changes_log_levels_and_samples_live_packets() {
+    let (responses, notifications) = session(&[
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"set_log_level","arguments":{"level":"info"}}}"#,
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"start_pipeline","arguments":{"pipeline":"videotestsrc name=src ! identity name=base ! fakesink name=sink"}}}"#,
+        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"sample_edge","arguments":{"edge":0,"count":2,"timeout_ms":2000}}}"#,
+        r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"tail_logs","arguments":{"limit":20,"clear":true}}}"#,
+        r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"tail_logs","arguments":{}}}"#,
+        r#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"set_log_level","arguments":{"level":"error"}}}"#,
+        r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"stop_pipeline","arguments":{}}}"#,
+    ]);
+
+    assert!(notifications.is_empty());
+    assert_eq!(responses.len(), 7);
+
+    let enabled = payload(&responses[0]);
+    assert_eq!(enabled["ok"], true);
+    assert_eq!(enabled["previous_level"], "error");
+    assert_eq!(enabled["level"], "info");
+
+    assert_eq!(payload(&responses[1])["ok"], true);
+    let sampled = payload(&responses[2]);
+    assert_eq!(sampled["ok"], true, "{sampled}");
+    assert_eq!(sampled["timed_out"], false, "{sampled}");
+    let samples = sampled["samples"].as_array().unwrap();
+    assert_eq!(samples.len(), 2);
+    for sample in samples {
+        assert_eq!(sample["kind"], "frame");
+        assert!(sample["sequence"].is_u64());
+        assert!(sample["memory"].is_string());
+        assert!(sample["preview"].is_object());
+    }
+
+    let logs = payload(&responses[3]);
+    assert_eq!(logs["ok"], true);
+    assert!(
+        logs["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|record| record["message"] == "added to pipeline"),
+        "{logs}"
+    );
+    assert!(logs["records"].as_array().unwrap()[0]["timestamp_ns"].is_u64());
+    assert!(logs["records"].as_array().unwrap()[0]["fields"].is_object());
+    assert!(payload(&responses[4])["records"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+
+    let restored = payload(&responses[5]);
+    assert_eq!(restored["previous_level"], "info");
+    assert_eq!(restored["level"], "error");
+    assert_eq!(payload(&responses[6])["ok"], true);
 }

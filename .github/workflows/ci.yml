@@ -521,7 +521,7 @@ jobs:
         run: |
           cargo test -p g2g-plugins --locked --features observe,declarative-yaml --lib -- dashboard:: preview:: toolingjson::
           cargo test -p g2g-plugins --locked --features observe,declarative-yaml --test m677_observe --test m846_live_edge_counters --test m849_fanin_edge_preview
-          cargo test -p g2g-plugins --locked --features observe,declarative-yaml --test m681_mcp
+          cargo test -p g2g-plugins --locked --features observe,multi-thread,declarative-yaml --test m681_mcp
       # Native WebRTC (str0m sans-IO stack): an opt-in feature, so it stays out
       # of the default suite. Compile the feature, then run the
       # deterministic + localhost-only tests: the webrtc element/util/turn lib
