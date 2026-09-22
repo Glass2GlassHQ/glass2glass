@@ -167,8 +167,8 @@ pub use chapter::Chapter;
 pub use clock::MonotonicClock;
 #[cfg(feature = "alloc")]
 pub use clock::{
-    elect_clock, AsyncClock, ClockCandidate, ClockPriority, ClockSync, DynAsyncClock, ElectedClock,
-    PipelineClock,
+    elect_clock, AsyncClock, CaptureAnchor, ClockCandidate, ClockPriority, ClockSync,
+    DynAsyncClock, ElectedClock, PipelineClock,
 };
 #[cfg(feature = "runtime")]
 pub use clock::{DriftClock, DriftObservation};

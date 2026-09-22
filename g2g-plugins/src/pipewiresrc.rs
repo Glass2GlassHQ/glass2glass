@@ -24,10 +24,10 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
-    AudioFormat, Caps, CapsConstraint, CapsSet, ClockCandidate, ClockPriority, ConfigureOutcome,
-    DriftClock, DriftObservation, ElementMetadata, FrameTiming, G2gError, HardwareError,
-    LatencyReport, MemoryDomain, MonotonicClock, OutputSink, PadTemplate, PadTemplates,
-    PipelineClock, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
+    AudioFormat, Caps, CapsConstraint, CapsSet, CaptureAnchor, ClockCandidate, ClockPriority,
+    ClockSync, ConfigureOutcome, DriftClock, DriftObservation, ElementMetadata, FrameTiming,
+    G2gError, HardwareError, LatencyReport, MemoryDomain, MonotonicClock, OutputSink, PadTemplate,
+    PadTemplates, PipelineClock, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
 
 use pipewire as pw;
@@ -88,6 +88,9 @@ pub struct PipeWireSrc {
     /// Whether to offer [`clock`](Self::clock) to the pipeline's clock election
     /// (the `provide-clock` property, default on).
     provide_clock: bool,
+    /// The elected clock, when one was handed over: capture stamps land on its
+    /// running time instead of this source's own zero.
+    clock_sync: Option<ClockSync>,
 }
 
 /// What the loop thread needs to open the capture stream.
@@ -120,6 +123,7 @@ impl PipeWireSrc {
             configured: false,
             clock: Arc::new(DriftClock::new(Arc::new(MonotonicClock))),
             provide_clock: true,
+            clock_sync: None,
         }
     }
 
@@ -209,6 +213,10 @@ impl SourceLoop for PipeWireSrc {
 
     /// Live source: one buffer period is device-driven, so report a small live
     /// latency hint rather than zero.
+    fn set_clock_sync(&mut self, sync: ClockSync) {
+        self.clock_sync = Some(sync);
+    }
+
     fn latency(&self) -> LatencyReport {
         LatencyReport::live(0, None)
     }
@@ -327,6 +335,8 @@ impl SourceLoop for PipeWireSrc {
             };
             let mut seq = 0u64;
             let mut frames_total = 0u64; // sample frames, for PTS
+            let clock_sync = self.clock_sync.clone();
+            let mut anchor = CaptureAnchor::new();
             let mut downstream_open = true;
             let mut failure = None;
 
@@ -346,10 +356,16 @@ impl SourceLoop for PipeWireSrc {
                 }
                 let n_frames = (bytes.len() / stride) as u64;
                 let arrival_ns = g2g_core::metrics::monotonic_ns();
-                let pts = if rate > 0 {
+                let elapsed = if rate > 0 {
                     frames_total * 1_000_000_000 / rate as u64
                 } else {
                     0
+                };
+                // This buffer finished capturing when it arrived, so its own
+                // span is the lead the anchor has to walk back.
+                let pts = match &clock_sync {
+                    Some(sync) => anchor.stamp(sync, elapsed, n_frames * frame_dur),
+                    None => elapsed,
                 };
                 let frame = Frame {
                     domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),

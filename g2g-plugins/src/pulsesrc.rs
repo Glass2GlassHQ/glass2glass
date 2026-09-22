@@ -40,9 +40,9 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
-    AudioFormat, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, FrameTiming,
-    G2gError, HardwareError, LatencyReport, MemoryDomain, OutputSink, PadTemplate, PadTemplates,
-    PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
+    AudioFormat, Caps, CapsConstraint, CapsSet, CaptureAnchor, ClockSync, ConfigureOutcome,
+    ElementMetadata, FrameTiming, G2gError, HardwareError, LatencyReport, MemoryDomain, OutputSink,
+    PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
 
 use crate::audioconvert::{audio_format_from_str, audio_format_to_str, sample_bytes};
@@ -96,6 +96,9 @@ pub struct PulseSrc {
     /// N fragments and emit EOS (the bounded / test path).
     num_buffers: u64,
     configured: bool,
+    /// The elected clock, when one was handed over: capture stamps land on its
+    /// running time instead of this source's own zero.
+    clock_sync: Option<ClockSync>,
 }
 
 impl Default for PulseSrc {
@@ -119,6 +122,7 @@ impl PulseSrc {
             latency_us: DEFAULT_LATENCY_US,
             num_buffers: u64::MAX,
             configured: false,
+            clock_sync: None,
         }
     }
 
@@ -262,6 +266,10 @@ impl SourceLoop for PulseSrc {
         LatencyReport::live(u64::from(self.latency_us) * 1_000, None)
     }
 
+    fn set_clock_sync(&mut self, sync: ClockSync) {
+        self.clock_sync = Some(sync);
+    }
+
     fn metadata(&self) -> ElementMetadata {
         ElementMetadata::new(
             "PulseAudio audio source",
@@ -346,6 +354,8 @@ impl SourceLoop for PulseSrc {
             let mut seq = 0u64;
             let mut frames_total = 0u64;
             let mut downstream_open = true;
+            let clock_sync = self.clock_sync.clone();
+            let mut anchor = CaptureAnchor::new();
             while seq < limit {
                 let Some(bytes) = audio_rx.recv().await else {
                     break; // worker ended
@@ -354,14 +364,20 @@ impl SourceLoop for PulseSrc {
                 if n_frames == 0 {
                     continue;
                 }
-                let pts_ns = frames_total * 1_000_000_000 / rate;
+                let elapsed_ns = frames_total * 1_000_000_000 / rate;
                 let end_ns = (frames_total + n_frames) * 1_000_000_000 / rate;
+                // This fragment finished capturing when the read returned, so
+                // its own span is the lead the anchor has to walk back.
+                let pts_ns = match &clock_sync {
+                    Some(sync) => anchor.stamp(sync, elapsed_ns, end_ns - elapsed_ns),
+                    None => elapsed_ns,
+                };
                 let frame = Frame {
                     domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
                     timing: FrameTiming {
                         pts_ns,
                         dts_ns: pts_ns,
-                        duration_ns: end_ns - pts_ns,
+                        duration_ns: end_ns - elapsed_ns,
                         capture_ns: pts_ns,
                         arrival_ns: g2g_core::metrics::monotonic_ns(),
                         keyframe: false, // audio: every buffer is independent

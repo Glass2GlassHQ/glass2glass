@@ -167,9 +167,6 @@ Highest leverage first:
 
 ## Audio depth
 
-- Hand sources the elected clock (a `SourceLoop::set_clock_sync` plus its
-  runner call site), so capture PTS can be translated onto a foreign master
-  in a duplex graph.
 - Carry an explicit channel mask/positions in `Caps::Audio` rather than only a
   count with the per-count `ChannelLayout` convention.
 

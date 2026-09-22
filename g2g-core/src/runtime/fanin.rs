@@ -100,6 +100,10 @@ pub trait DynSourceLoop: ElementBound {
         None
     }
 
+    /// Dyn-safe mirror of [`SourceLoop::set_clock_sync`], so an erased live
+    /// source can stamp running time.
+    fn set_clock_sync(&mut self, sync: crate::clock::ClockSync);
+
     /// Dyn-safe mirror of [`SourceLoop::provide_clock`], for the runner's clock
     /// election.
     fn provide_clock(&self) -> Option<ClockCandidate>;
@@ -215,6 +219,10 @@ impl<T: SourceLoop> DynSourceLoop for T {
         SourceLoop::query_duration(self)
     }
 
+    fn set_clock_sync(&mut self, sync: crate::clock::ClockSync) {
+        SourceLoop::set_clock_sync(self, sync)
+    }
+
     fn provide_clock(&self) -> Option<ClockCandidate> {
         SourceLoop::provide_clock(self)
     }
@@ -307,6 +315,10 @@ impl<'b> DynSourceLoop for &'b mut (dyn DynSourceLoop + 'b) {
 
     fn query_duration(&self) -> Option<u64> {
         (**self).query_duration()
+    }
+
+    fn set_clock_sync(&mut self, sync: crate::clock::ClockSync) {
+        (**self).set_clock_sync(sync)
     }
 
     fn provide_clock(&self) -> Option<ClockCandidate> {

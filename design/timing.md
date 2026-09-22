@@ -23,6 +23,15 @@ synchronises presents a frame when the elected clock reaches
 through the active `Segment`, and a sink that ignores the hook presents as fast as
 backpressure allows.
 
+Sources receive the same `ClockSync`. A capture source stamps its own zero-based
+timeline (a sample count, the driver's first buffer timestamp), which says nothing
+about when the pipeline started or what a foreign master reads, so `CaptureAnchor`
+samples the running time at the first captured buffer and every stamp after it is
+that anchor plus the source's own elapsed time. The anchor walks back the lead
+between capture and delivery (one period for an audio read, one interval for a
+camera frame). `AlsaSrc`, `PulseSrc`, `PipeWireSrc`, `PipeWireVideoSrc` and
+`V4l2Src` take that path; a source the runner hands no clock keeps its own zero.
+
 An elected clock can lose the reference it is disciplined to, a PTP servo going
 free-running when its grandmaster disappears, which `PipelineClock::healthy`
 reports: true by default, since a clock reading a monotonic counter or a DAC has

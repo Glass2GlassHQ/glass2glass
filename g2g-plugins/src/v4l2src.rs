@@ -35,9 +35,10 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::{OwnedDmaBuf, SystemSlice};
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
-    Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, FrameTiming, G2gError,
-    HardwareError, LatencyReport, MemoryDomain, MemoryDomainKind, OutputSink, PadTemplate,
-    PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate,
+    Caps, CapsConstraint, CapsSet, CaptureAnchor, ClockSync, ConfigureOutcome, Dim,
+    ElementMetadata, FrameTiming, G2gError, HardwareError, LatencyReport, MemoryDomain,
+    MemoryDomainKind, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
+    PropValue, PropertySpec, Rate,
 };
 
 use crate::capturepixelformat::CapturePixelFormat;
@@ -1030,6 +1031,9 @@ fn capture_dmabuf(
 /// ```
 #[derive(Debug)]
 pub struct V4l2Src {
+    /// The elected clock, when one was handed over: capture stamps land on its
+    /// running time instead of this source's own zero.
+    clock_sync: Option<ClockSync>,
     device: String,
     /// Persistent id from the device monitor; when set it decides `device` at
     /// negotiation instead of the node path, so a saved pipeline survives a
@@ -1064,6 +1068,7 @@ impl V4l2Src {
     /// Capture from `device` (e.g. `/dev/video0`) at the default 640x480 / 30.
     pub fn new(device: impl Into<String>) -> Self {
         Self {
+            clock_sync: None,
             device: device.into(),
             device_id: String::new(),
             device_resolved: false,
@@ -1390,6 +1395,10 @@ impl SourceLoop for V4l2Src {
 
     /// Live source: contributes one frame period of latency so the sink keeps a
     /// frame in hand and never runs dry waiting on capture.
+    fn set_clock_sync(&mut self, sync: ClockSync) {
+        self.clock_sync = Some(sync);
+    }
+
     fn latency(&self) -> LatencyReport {
         let fps = self
             .chosen
@@ -1490,6 +1499,8 @@ impl SourceLoop for V4l2Src {
             let mut epoch_ns: Option<u64> = None;
             let mut prev_pts = 0u64;
             let mut seq = 0u64;
+            let clock_sync = self.clock_sync.clone();
+            let mut anchor = CaptureAnchor::new();
             while let Some(captured) = rx.recv().await {
                 // Skip a short frame rather than push a malformed buffer
                 // downstream. The dmabuf path checks the driver's byte count on
@@ -1503,9 +1514,15 @@ impl SourceLoop for V4l2Src {
                 // Source-side wall-clock stamp for glass-to-glass latency, same
                 // convention as VideoTestSrc / RtspSrc.
                 let arrival_ns = g2g_core::metrics::monotonic_ns();
-                let pts = match captured.timestamp_ns {
+                let elapsed = match captured.timestamp_ns {
                     Some(ts) => ts.saturating_sub(*epoch_ns.get_or_insert(ts)),
                     None => seq * pts_step_ns,
+                };
+                // The first frame finished exposing one interval before it
+                // arrived, which is the lead the anchor has to walk back.
+                let pts = match &clock_sync {
+                    Some(sync) => anchor.stamp(sync, elapsed, pts_step_ns),
+                    None => elapsed,
                 };
                 // The gap the previous frame occupied. The nominal period
                 // covers the first frame and any repeated timestamp.

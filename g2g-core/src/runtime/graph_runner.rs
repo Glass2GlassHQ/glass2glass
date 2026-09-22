@@ -1614,10 +1614,12 @@ async fn prepare_graph<'a>(
         };
         let sync = sync.with_path_latency(latency);
         for &node in topo {
-            if matches!(vg.kind(node), NodeKind::Sink) {
-                if let Some(GraphNodeRef::Element(elem)) = vg.element_mut(node) {
-                    elem.set_clock_sync(sync.clone());
-                }
+            let is_sink = matches!(vg.kind(node), NodeKind::Sink);
+            match vg.element_mut(node) {
+                // A live capture source stamps running time off the same sync.
+                Some(GraphNodeRef::Source(src)) => src.set_clock_sync(sync.clone()),
+                Some(GraphNodeRef::Element(elem)) if is_sink => elem.set_clock_sync(sync.clone()),
+                _ => {}
             }
         }
         sink_clock_sync = Some(sync);

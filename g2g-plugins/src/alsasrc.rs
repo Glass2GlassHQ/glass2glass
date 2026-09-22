@@ -45,10 +45,10 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
-    AudioFormat, Caps, CapsConstraint, CapsSet, ClockCandidate, ClockPriority, ConfigureOutcome,
-    DriftClock, DriftObservation, ElementMetadata, FrameTiming, G2gError, HardwareError,
-    LatencyReport, MemoryDomain, MonotonicClock, OutputSink, PadTemplate, PadTemplates,
-    PipelineClock, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
+    AudioFormat, Caps, CapsConstraint, CapsSet, CaptureAnchor, ClockCandidate, ClockPriority,
+    ClockSync, ConfigureOutcome, DriftClock, DriftObservation, ElementMetadata, FrameTiming,
+    G2gError, HardwareError, LatencyReport, MemoryDomain, MonotonicClock, OutputSink, PadTemplate,
+    PadTemplates, PipelineClock, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
 
 use crate::alsapcm::{alsa_params, device_permutation, invert, permute, PcmConfig, FORMATS};
@@ -96,6 +96,9 @@ pub struct AlsaSrc {
     /// Whether to offer [`clock`](Self::clock) to the pipeline's clock election
     /// (the `provide-clock` property, default on).
     provide_clock: bool,
+    /// The elected clock, when one was handed over: capture stamps land on its
+    /// running time instead of this source's own zero.
+    clock_sync: Option<ClockSync>,
 }
 
 impl Default for AlsaSrc {
@@ -119,6 +122,7 @@ impl AlsaSrc {
             configured: false,
             clock: Arc::new(DriftClock::new(Arc::new(MonotonicClock))),
             provide_clock: true,
+            clock_sync: None,
         }
     }
 
@@ -229,6 +233,10 @@ impl SourceLoop for AlsaSrc {
     /// capture slaves to it. In a capture-only pipeline nothing else offers a
     /// clock, so this one wins and the pipeline runs on the card's real rate
     /// instead of the monotonic fallback.
+    fn set_clock_sync(&mut self, sync: ClockSync) {
+        self.clock_sync = Some(sync);
+    }
+
     fn provide_clock(&self) -> Option<ClockCandidate> {
         if !self.provide_clock {
             return None;
@@ -328,6 +336,8 @@ impl SourceLoop for AlsaSrc {
             let mut seq = 0u64;
             let mut frames_total = 0u64;
             let mut downstream_open = true;
+            let clock_sync = self.clock_sync.clone();
+            let mut anchor = CaptureAnchor::new();
             while seq < limit {
                 let Some(bytes) = audio_rx.recv().await else {
                     break; // worker ended
@@ -336,14 +346,20 @@ impl SourceLoop for AlsaSrc {
                 if n_frames == 0 {
                     continue;
                 }
-                let pts_ns = frames_total * 1_000_000_000 / u64::from(cfg.rate);
+                let elapsed_ns = frames_total * 1_000_000_000 / u64::from(cfg.rate);
                 let end_ns = (frames_total + n_frames) * 1_000_000_000 / u64::from(cfg.rate);
+                // This period finished capturing when the read returned, so its
+                // own span is the lead the anchor has to walk back.
+                let pts_ns = match &clock_sync {
+                    Some(sync) => anchor.stamp(sync, elapsed_ns, end_ns - elapsed_ns),
+                    None => elapsed_ns,
+                };
                 let frame = Frame {
                     domain: MemoryDomain::System(SystemSlice::from_boxed(bytes.into_boxed_slice())),
                     timing: FrameTiming {
                         pts_ns,
                         dts_ns: pts_ns,
-                        duration_ns: end_ns - pts_ns,
+                        duration_ns: end_ns - elapsed_ns,
                         capture_ns: pts_ns,
                         arrival_ns: g2g_core::metrics::monotonic_ns(),
                         keyframe: false, // audio: every buffer is independent

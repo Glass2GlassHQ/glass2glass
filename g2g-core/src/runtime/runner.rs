@@ -177,6 +177,13 @@ pub trait SourceLoop: ElementBound {
         None
     }
 
+    /// Receive the pipeline's elected clock + base time, so a live capture
+    /// source can stamp running time rather than its own zero-based timeline
+    /// (see [`CaptureAnchor`](crate::clock::CaptureAnchor)). Called once before
+    /// [`run`](Self::run), only when a clock was elected. Default: ignore, which
+    /// stamps from the source's own zero.
+    fn set_clock_sync(&mut self, _sync: ClockSync) {}
+
     /// M16 step 5f: declare this source's negotiation-time constraint.
     /// Default: eagerly await `intercept_caps()` and wrap as a
     /// `LegacySource(Caps)` for the solver. Migrated sources override
@@ -746,7 +753,11 @@ where
             ),
             None => ClockSync::new(c.clock.clone(), base_time_ns),
         };
-        AsyncElement::set_clock_sync(sink, sync.with_path_latency(latency));
+        let sync = sync.with_path_latency(latency);
+        // The source gets it too, so a live capture stamps running time rather
+        // than its own zero.
+        SourceLoop::set_clock_sync(source, sync.clone());
+        AsyncElement::set_clock_sync(sink, sync);
     }
 
     let (link_tx, link_rx) = link(link_capacity);
@@ -2201,10 +2212,9 @@ where
     // frame at its running-time deadline (PTS pacing). Only when a clock was
     // elected; without one the sink presents as fast as backpressure allows.
     if let Some(c) = &elected {
-        AsyncElement::set_clock_sync(
-            sink,
-            ClockSync::new(c.clock.clone(), base_time_ns).with_path_latency(latency),
-        );
+        let sync = ClockSync::new(c.clock.clone(), base_time_ns).with_path_latency(latency);
+        SourceLoop::set_clock_sync(source, sync.clone());
+        AsyncElement::set_clock_sync(sink, sync);
     }
 
     let (link1_tx, link1_rx) = link(link_capacity);

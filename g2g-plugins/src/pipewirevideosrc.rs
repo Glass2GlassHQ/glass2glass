@@ -59,10 +59,10 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::{OwnedDmaBuf, SystemSlice};
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
-    Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, FrameTiming, G2gError,
-    HardwareError, LatencyReport, MemoryDomain, MemoryDomainKind, OutputSink, PadTemplate,
-    PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate,
-    RawVideoFormat,
+    Caps, CapsConstraint, CapsSet, CaptureAnchor, ClockSync, ConfigureOutcome, Dim,
+    ElementMetadata, FrameTiming, G2gError, HardwareError, LatencyReport, MemoryDomain,
+    MemoryDomainKind, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
+    PropValue, PropertySpec, Rate, RawVideoFormat,
 };
 
 use pipewire as pw;
@@ -181,6 +181,9 @@ enum FromWorker {
 /// ```
 #[derive(Debug)]
 pub struct PipeWireVideoSrc {
+    /// The elected clock, when one was handed over: capture stamps land on its
+    /// running time instead of this source's own zero.
+    clock_sync: Option<ClockSync>,
     /// Node to capture from (`node.name` or object serial); empty = the default
     /// video source the session manager picks.
     target: String,
@@ -223,6 +226,7 @@ impl PipeWireVideoSrc {
     /// Capture from the default video node at 640x480 / 30.
     pub fn new() -> Self {
         Self {
+            clock_sync: None,
             target: String::new(),
             req_width: DEFAULT_WIDTH,
             req_height: DEFAULT_HEIGHT,
@@ -624,6 +628,10 @@ impl SourceLoop for PipeWireVideoSrc {
 
     /// Live source: contributes one frame period so the sink keeps a frame in
     /// hand and never runs dry waiting on capture (same as `V4l2Src`).
+    fn set_clock_sync(&mut self, sync: ClockSync) {
+        self.clock_sync = Some(sync);
+    }
+
     fn latency(&self) -> LatencyReport {
         let period_ns = if self.req_fps > 0 {
             1_000_000_000 / u64::from(self.req_fps)
@@ -708,8 +716,10 @@ impl SourceLoop for PipeWireVideoSrc {
                 0
             };
             let mut seq = 0u64;
-            let mut pts = 0u64;
+            let mut elapsed = 0u64;
             let mut downstream_open = true;
+            let clock_sync = self.clock_sync.clone();
+            let mut anchor = CaptureAnchor::new();
             let mut failure = None;
             // The format the frames arriving now are in, so a padded frame can
             // say where its rows are.
@@ -761,6 +771,12 @@ impl SourceLoop for PipeWireVideoSrc {
                     }
                 };
                 let arrival_ns = g2g_core::metrics::monotonic_ns();
+                // The first frame finished exposing one period before it
+                // arrived, which is the lead the anchor has to walk back.
+                let pts = match &clock_sync {
+                    Some(sync) => anchor.stamp(sync, elapsed, period_ns),
+                    None => elapsed,
+                };
                 let mut frame = Frame {
                     domain,
                     timing: FrameTiming {
@@ -789,7 +805,7 @@ impl SourceLoop for PipeWireVideoSrc {
                     downstream_open = false;
                     break;
                 }
-                pts += period_ns;
+                elapsed += period_ns;
                 seq += 1;
             }
 

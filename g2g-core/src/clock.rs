@@ -340,6 +340,42 @@ impl ClockSync {
     }
 }
 
+/// Where a live source's own timeline sits on the elected clock. A capture
+/// source stamps from its own zero (a sample count, the driver's first
+/// timestamp), which says nothing about when the pipeline started or what a
+/// foreign master reads. The first captured buffer samples the running time and
+/// every stamp after it is that anchor plus the source's own elapsed time, so
+/// the frames land on the timeline the sinks present against.
+#[derive(Debug, Default)]
+pub struct CaptureAnchor {
+    running_zero_ns: Option<u64>,
+}
+
+impl CaptureAnchor {
+    pub const fn new() -> Self {
+        Self {
+            running_zero_ns: None,
+        }
+    }
+
+    /// Running-time stamp for a source-relative `elapsed_ns`. `lead_ns` is how
+    /// long before this call the first sample was captured (one period for an
+    /// audio read), so the read that delivered it does not push the anchor late.
+    pub fn stamp(&mut self, sync: &ClockSync, elapsed_ns: u64, lead_ns: u64) -> u64 {
+        let zero = *self.running_zero_ns.get_or_insert_with(|| {
+            sync.now_ns()
+                .saturating_sub(sync.base_time())
+                .saturating_sub(lead_ns)
+        });
+        zero.saturating_add(elapsed_ns)
+    }
+
+    /// The running time the source's zero maps to, once anchored.
+    pub fn running_zero_ns(&self) -> Option<u64> {
+        self.running_zero_ns
+    }
+}
+
 impl core::fmt::Debug for ClockSync {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("ClockSync")
@@ -768,6 +804,39 @@ mod tests {
 
     fn cand(priority: ClockPriority, now: u64) -> Option<ClockCandidate> {
         Some(ClockCandidate::new(priority, Arc::new(Fixed(now))))
+    }
+
+    /// A source that starts capturing a second into the run stamps its first
+    /// buffer at that second, not at zero, and keeps its own cadence after.
+    #[test]
+    fn capture_anchor_puts_a_source_timeline_on_running_time() {
+        const BASE_NS: u64 = 5_000_000_000;
+        const CAPTURE_START_NS: u64 = BASE_NS + 1_000_000_000;
+        const PERIOD_NS: u64 = 10_000_000;
+        let sync = ClockSync::new(Arc::new(Fixed(CAPTURE_START_NS + PERIOD_NS)), BASE_NS);
+        let mut anchor = CaptureAnchor::new();
+        // The first period was captured `PERIOD_NS` before the read returned.
+        assert_eq!(
+            anchor.stamp(&sync, 0, PERIOD_NS),
+            CAPTURE_START_NS - BASE_NS
+        );
+        assert_eq!(
+            anchor.stamp(&sync, PERIOD_NS, PERIOD_NS),
+            CAPTURE_START_NS - BASE_NS + PERIOD_NS,
+            "later stamps keep the source's own spacing"
+        );
+        assert_eq!(anchor.running_zero_ns(), Some(CAPTURE_START_NS - BASE_NS));
+    }
+
+    /// Without a clock the source keeps its own zero: `stamp` is only reached
+    /// through a `ClockSync`, so an unanchored source is the untouched path.
+    #[test]
+    fn capture_anchor_at_the_base_time_is_the_source_timeline() {
+        const BASE_NS: u64 = 7_000_000_000;
+        let sync = ClockSync::new(Arc::new(Fixed(BASE_NS)), BASE_NS);
+        let mut anchor = CaptureAnchor::new();
+        assert_eq!(anchor.stamp(&sync, 0, 0), 0);
+        assert_eq!(anchor.stamp(&sync, 40_000_000, 0), 40_000_000);
     }
 
     #[test]
