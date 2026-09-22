@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1190: `RemoteWsSink listen=true` serves its stream to a client that dials in, and the browser `WsWireSrc` reads it, so a native graph can hand its tail to a browser.
 - M1189: a remote transform can take the peer's metadata alone and keep each frame locally, so a stage that only attaches detections stops paying for the return pixels.
 - M1188: `alsasink`, `pulsesink` and `pipewiresink` take a dma-buf frame and map it for reading, so a dma-buf producer feeding them no longer downloads to system memory.
 - M1187: the runner hands every source the elected clock, and the capture sources stamp their frames on its running time instead of their own zero.

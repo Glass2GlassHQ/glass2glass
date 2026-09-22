@@ -34,13 +34,14 @@ use alloc::boxed::Box;
 use alloc::string::{String, ToString};
 
 use tokio::net::TcpStream;
-use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::{accept_async, connect_async, MaybeTlsStream, WebSocketStream};
 
 use g2g_core::{G2gError, PipelinePacket, PropError, PropKind, PropValue, PropertySpec};
 
+use crate::filesink::io_err;
 use crate::remoteclient::{PacketClient, RemoteClient};
 use crate::remotesource::TransportFuture;
-use crate::remotewsio::{send_wire, ws_err};
+use crate::remotewsio::{bind_addr_of, send_wire, ws_err};
 
 /// WebSocket `RemoteWsSink`: a [`g2g_core::wire`] stream carried one packet per
 /// binary WebSocket message, received by [`RemoteWsSrc`](crate::remotewssrc).
@@ -58,8 +59,13 @@ impl RemoteWsSink {
 /// [`RemoteWsTransform`](crate::remotewstransform) round trip).
 #[derive(Debug)]
 pub struct WsClient {
-    /// WebSocket URL of the `RemoteWsSrc` server (e.g. `ws://127.0.0.1:9601`).
+    /// WebSocket URL of the `RemoteWsSrc` server (e.g. `ws://127.0.0.1:9601`),
+    /// or the address to bind when `listen` is set.
     url: String,
+    /// Wait for a client to dial in rather than dialing out (the `listen`
+    /// property): the receiving peer is then whoever connects, which is the only
+    /// direction a browser can take.
+    listen: bool,
     /// Opened lazily on the first send (the handshake is async).
     socket: Option<WebSocketStream<MaybeTlsStream<TcpStream>>>,
 }
@@ -69,6 +75,7 @@ impl WsClient {
     pub(crate) fn new(url: impl Into<String>) -> Self {
         Self {
             url: url.into(),
+            listen: false,
             socket: None,
         }
     }
@@ -96,6 +103,12 @@ impl PacketClient for WsClient {
             "retry a failed connect / send up to N times (0 = off)",
         )
         .with_default("0"),
+        PropertySpec::new(
+            "listen",
+            PropKind::Bool,
+            "serve the stream to a client that dials in, instead of dialing out",
+        )
+        .with_default("false"),
     ];
 
     fn is_connected(&self) -> bool {
@@ -104,6 +117,18 @@ impl PacketClient for WsClient {
 
     fn connect(&mut self) -> TransportFuture<'_, ()> {
         Box::pin(async move {
+            if self.listen {
+                let bind = bind_addr_of(&self.url)?;
+                let listener = tokio::net::TcpListener::bind(bind).await.map_err(io_err)?;
+                let (tcp, _peer) = listener.accept().await.map_err(io_err)?;
+                // The accepted stream wears the client side's type, so one field
+                // holds either role's socket.
+                let socket = accept_async(MaybeTlsStream::Plain(tcp))
+                    .await
+                    .map_err(ws_err)?;
+                self.socket = Some(socket);
+                return Ok(());
+            }
             let (socket, _resp) = connect_async(&self.url).await.map_err(ws_err)?;
             self.socket = Some(socket);
             Ok(())
@@ -149,6 +174,13 @@ impl PacketClient for WsClient {
                 }
                 None => Err(PropError::Type),
             }),
+            "listen" => Some(match value.as_bool() {
+                Some(b) => {
+                    self.listen = b;
+                    Ok(())
+                }
+                None => Err(PropError::Type),
+            }),
             _ => None,
         }
     }
@@ -156,6 +188,7 @@ impl PacketClient for WsClient {
     fn get_transport_prop(&self, name: &str) -> Option<PropValue> {
         match name {
             "location" => Some(PropValue::Str(self.url.clone())),
+            "listen" => Some(PropValue::Bool(self.listen)),
             _ => None,
         }
     }

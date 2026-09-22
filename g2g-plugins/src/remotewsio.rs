@@ -25,6 +25,20 @@ pub(crate) fn ws_err(_: WsError) -> G2gError {
     G2gError::Hardware(HardwareError::Other)
 }
 
+/// The address inside a `ws://host:port` URL, for the sink that listens instead
+/// of dialing. Anything that is not an address (a hostname, a path) is a
+/// property the element cannot bind.
+pub(crate) fn bind_addr_of(url: &str) -> Result<core::net::SocketAddr, G2gError> {
+    let authority = url
+        .strip_prefix("ws://")
+        .or_else(|| url.strip_prefix("wss://"))
+        .unwrap_or(url);
+    let authority = authority.split('/').next().unwrap_or(authority);
+    authority
+        .parse()
+        .map_err(|_| G2gError::Hardware(HardwareError::Other))
+}
+
 /// Serialize `packet` with the wire codec and send it as one binary message.
 pub(crate) async fn send_wire<S>(
     ws: &mut WebSocketStream<S>,

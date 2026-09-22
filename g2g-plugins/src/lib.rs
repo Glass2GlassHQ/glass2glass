@@ -1580,6 +1580,12 @@ pub mod websocketsink;
 #[cfg(all(target_arch = "wasm32", feature = "web"))]
 pub mod wswiresink;
 
+// Browser WebSocket source for the distributed-graph primitive: reads the wire
+// stream a native `RemoteWsSink listen=true` serves, discovering the caps from
+// its leading message.
+#[cfg(all(target_arch = "wasm32", feature = "web"))]
+pub mod wswiresrc;
+
 // WsWireTransform (M555): the browser remote-transform. Offloads a middle stage
 // to a native peer over one WebSocket (send frame, receive processed frame back),
 // the generic replacement for the bespoke WebRemoteDetect detection shim.

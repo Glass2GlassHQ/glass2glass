@@ -281,6 +281,27 @@ pub fn run_websocket_decode_offload_to_wire(url: String, wire_url: String) {
     });
 }
 
+/// **Wire-codec ingest** from a native peer -> canvas (the receive direction of
+/// the distributed-graph primitive). A browser can only dial out, so the native
+/// side serves (`RemoteWsSink listen=true`) and `WsWireSrc` reads the stream it
+/// pushes: the caps come off the wire, then the frames with their timing and
+/// metadata, decoded already. `wire_url` is the serving peer's WebSocket (e.g.
+/// `ws://127.0.0.1:9601`) and `canvas_id` an existing `<canvas>`.
+#[wasm_bindgen]
+pub fn run_wire_ingest_to_canvas(wire_url: String, canvas_id: String) {
+    use g2g_plugins::wswiresrc::WsWireSrc;
+
+    spawn_local(async move {
+        let mut src = WsWireSrc::new(wire_url);
+        let mut sink = CanvasSink::new(canvas_id);
+        let clock = WasmClock::new();
+        report(
+            "wire-ingest->canvas",
+            run_simple_pipeline(&mut src, &mut sink, &clock, 8).await,
+        );
+    });
+}
+
 /// WebSocket ingest -> WebCodecs decode -> **WebGPU** canvas: the zero-copy path.
 /// The decoder keeps each frame GPU-resident (`with_gpu_output`) and the sink imports
 /// it as a `GPUExternalTexture` and renders it, with no CPU readback (the browser

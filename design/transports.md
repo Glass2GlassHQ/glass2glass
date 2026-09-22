@@ -333,13 +333,22 @@ the TCP roles. The one behavioural difference is that the WebSocket handshake is
 async, so the sink connects on its first `process` rather than in
 `configure_pipeline`.
 
+`listen=true` flips the sink's role: instead of dialing a `RemoteWsSrc` it binds
+its `location` address, accepts one client, and pushes the same stream down the
+accepted socket. That is the only direction that reaches a browser, which can
+dial out but not listen.
+
 This carrier exists for reach: a browser peer can speak only WebSocket, so it is
 the transport that lets a `g2g-web` graph join the primitive. `WsWireSink`
 (`g2g-plugins`, the `web` feature) is the wasm send half, wrapping the browser
 `WebSocket` API around the same `encode_packet`, so a browser graph
 `... -> WsWireSink` ships an edge to a native `RemoteWsSrc -> ...`. Because the
 wire codec compiles unchanged on `wasm32`, the browser and the native server
-share the serializer.
+share the serializer. `WsWireSrc` is the receive half of the same pair: it dials
+a serving `RemoteWsSink`, discovers the caps from the leading wire message, and
+emits the frames the peer pushes, so a native graph can cut an edge and run its
+tail in a browser (`run_wire_ingest_to_canvas` in `g2g-web`). It is
+compile-checked, not yet run in a browser.
 
 ### Remote transform
 
