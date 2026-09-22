@@ -32,7 +32,7 @@ linux-full = [
     "opus", "vorbis", "vpx", "av1-encode", "mjpeg", "mjpeg-encode", "png", "webp",
     "alsa-sink", "alsa-src", "pulse-sink", "pulse-src", "pipewire", "portal",
     "wayland-sink", "kms-sink", "wgpu-sink", "wgpu-present", "vello-overlay", "analytics",
-    "analytics-json", "embedding-index",
+    "analytics-json", "mqtt", "embedding-index",
     "declarative-yaml", "script-rhai", "observe", "mcp", "tui", "latency-bench",
 ]
 std = ["g2g-core/std", "dep:tokio"]
@@ -588,6 +588,10 @@ analytics = ["metadata"]
 # writes a clip around each alert. std for the files and serde_json for the
 # lines.
 analytics-json = ["metadata", "std", "dep:serde_json", "dep:reqwest"]
+# `mqttsink`: publishes the record `metasink` writes as one MQTT message per
+# frame, through the pure-Rust rumqttc client on the caller's tokio runtime.
+# TLS goes through native-tls, the stack reqwest already links.
+mqtt = ["analytics-json", "dep:rumqttc"]
 # `embeddingsink`: one sqlite row per embedded frame (source_id, pts, model_name,
 # vector), the same schema gst-python-ml's `pyml_embeddingsink` writes and its
 # `search_video` reads. rusqlite with sqlite bundled, so there is no system dep.
@@ -859,6 +863,9 @@ symphonia-codec-vorbis = { version = "0.6", optional = true }
 # default-tls (platform-native TLS) and http1/http2; only `chunk()` streaming is
 # used. Runs on the caller's tokio runtime.
 reqwest = { version = "0.12", optional = true }
+# MQTT client for `mqttsink` (the `mqtt` feature). Default features would pull
+# rustls; native-tls shares the TLS stack reqwest links.
+rumqttc = { version = "0.25", optional = true, default-features = false, features = ["use-native-tls"] }
 # str0m: sans-IO WebRTC stack (ICE / DTLS / SRTP / SCTP / RTP). `rust-crypto` is
 # the pure-Rust crypto backend (RustCrypto ecosystem), so no OpenSSL system dep.
 # Drives the native WebRtcSink (the `webrtc` feature). 0.22 is the first release

@@ -4572,3 +4572,113 @@ fn trim_start_and_stop() {
         )
     );
 }
+
+/// M1179: every broker knob on `mqttsink`, and the two that are bounded.
+#[cfg(feature = "mqtt")]
+#[test]
+fn mqttsink_broker_properties() {
+    use g2g_plugins::mqttsink::MqttSink;
+    let mut sink = MqttSink::new();
+    for spec in sink.properties() {
+        assert_eq!(
+            sink.get_property(spec.name),
+            Some(declared_default(sink.properties(), spec.name)),
+            "a fresh mqttsink reports the declared default of `{}`",
+            spec.name
+        );
+    }
+    for (name, value) in [
+        ("host", PropValue::Str(String::from("broker.local"))),
+        ("port", PropValue::Uint(8883)),
+        ("topic", PropValue::Str(String::from("cameras/north"))),
+        ("client-id", PropValue::Str(String::from("north-cam"))),
+        ("qos", PropValue::Uint(2)),
+        ("retain", PropValue::Bool(true)),
+        ("username", PropValue::Str(String::from("user"))),
+        ("password", PropValue::Str(String::from("secret"))),
+        ("tls", PropValue::Bool(true)),
+        ("keep-alive", PropValue::Uint(5)),
+    ] {
+        assert!(declares(sink.properties(), name));
+        sink.set_property(name, value.clone()).unwrap();
+        assert_eq!(sink.get_property(name), Some(value), "`{name}` round-trips");
+    }
+    assert_eq!(
+        sink.set_property("qos", PropValue::Uint(3)),
+        Err(g2g_core::PropError::Value),
+        "qos stops at 2"
+    );
+    assert_eq!(
+        sink.set_property("port", PropValue::Uint(65_536)),
+        Err(g2g_core::PropError::Value),
+        "a port fits in 16 bits"
+    );
+    let reg = g2g_plugins::registry::default_registry();
+    assert!(
+        g2g_core::runtime::parse_launch(
+            &reg,
+            "videotestsrc num-buffers=2 ! mqttsink host=broker.local port=8883 topic=cameras/north qos=2 retain=true tls=true"
+        )
+        .is_ok(),
+        "a launch line setting every broker knob parses"
+    );
+    assert!(
+        g2g_core::runtime::parse_launch(
+            &reg,
+            "videotestsrc num-buffers=2 ! mqttsink topic=x qos=3"
+        )
+        .is_err(),
+        "an out-of-range qos is rejected at parse time"
+    );
+}
+
+/// M1179: the broker knobs again on `mqttsrc`, plus its topic filter and limit.
+#[cfg(feature = "mqtt")]
+#[test]
+fn mqttsrc_broker_properties() {
+    use g2g_core::runtime::SourceLoop;
+    use g2g_plugins::mqttsrc::MqttSrc;
+    let mut source = MqttSrc::new();
+    for spec in source.properties() {
+        assert_eq!(
+            source.get_property(spec.name),
+            Some(declared_default(source.properties(), spec.name)),
+            "a fresh mqttsrc reports the declared default of `{}`",
+            spec.name
+        );
+    }
+    for (name, value) in [
+        ("host", PropValue::Str(String::from("broker.local"))),
+        ("port", PropValue::Uint(8883)),
+        ("topic", PropValue::Str(String::from("cameras/+/control"))),
+        ("client-id", PropValue::Str(String::from("north-cam"))),
+        ("qos", PropValue::Uint(0)),
+        ("username", PropValue::Str(String::from("user"))),
+        ("password", PropValue::Str(String::from("secret"))),
+        ("tls", PropValue::Bool(true)),
+        ("keep-alive", PropValue::Uint(5)),
+        ("num-buffers", PropValue::Int(3)),
+    ] {
+        assert!(declares(source.properties(), name));
+        source.set_property(name, value.clone()).unwrap();
+        assert_eq!(
+            source.get_property(name),
+            Some(value),
+            "`{name}` round-trips"
+        );
+    }
+    assert_eq!(
+        source.set_property("qos", PropValue::Uint(3)),
+        Err(g2g_core::PropError::Value),
+        "qos stops at 2"
+    );
+    let reg = g2g_plugins::registry::default_registry();
+    assert!(
+        g2g_core::runtime::parse_launch(
+            &reg,
+            "mqttsrc host=broker.local topic=cameras/+/control num-buffers=3 ! textdigest ! fakesink"
+        )
+        .is_ok(),
+        "a launch line starting at mqttsrc parses"
+    );
+}

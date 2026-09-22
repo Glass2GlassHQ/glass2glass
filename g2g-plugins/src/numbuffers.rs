@@ -31,6 +31,7 @@ pub(crate) fn get_num_buffers(limit: u64) -> PropValue {
     feature = "tcp",
     feature = "shm",
     feature = "udp-ingress",
+    feature = "mqtt",
     feature = "v4l2",
     feature = "mf-video-src",
     feature = "moqt",

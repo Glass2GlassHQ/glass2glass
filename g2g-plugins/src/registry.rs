@@ -872,6 +872,12 @@ pub fn default_registry() -> Registry {
     reg.register_launch(LaunchFactory::new("metareplay", Vec::new(), || {
         Box::new(crate::metareplay::MetaReplay::new())
     }));
+    // The same record published to an MQTT topic, one message per frame.
+    #[cfg(feature = "mqtt")]
+    reg.register_launch(LaunchFactory::of::<crate::mqttsink::MqttSink>(
+        "mqttsink",
+        || Box::new(crate::mqttsink::MqttSink::new()),
+    ));
     // Rule-driven alerts (M1176) and the clip recorder that catches the seconds
     // around each one. Both caps-driven.
     #[cfg(feature = "analytics-json")]
@@ -2410,6 +2416,8 @@ pub static FEATURE_GATED_ELEMENTS: &[FeatureGatedElement] = &{
         "analyticsoverlay" => "analytics";
         "metasink" => "analytics-json";
         "metareplay" => "analytics-json";
+        "mqttsink" => "mqtt";
+        "mqttsrc" => "mqtt";
         "analyticsalert" => "analytics-json";
         "alertrecorder" => "analytics-json";
         "embeddingsink" => "embedding-index";
@@ -2645,6 +2653,16 @@ fn register_feature_gated(reg: &mut Registry) {
             encoding: ByteStreamEncoding::MpegTs,
         },
         || Box::new(ShmSrc::default()),
+    ));
+    // MQTT control messages (M1179): each message on the topic filter as a
+    // text frame.
+    #[cfg(feature = "mqtt")]
+    reg.register_source(SourceFactory::new(
+        "mqttsrc",
+        Caps::Text {
+            format: g2g_core::TextFormat::Utf8,
+        },
+        || Box::new(crate::mqttsrc::MqttSrc::new()),
     ));
     #[cfg(feature = "udp-ingress")]
     reg.register_source(SourceFactory::new(

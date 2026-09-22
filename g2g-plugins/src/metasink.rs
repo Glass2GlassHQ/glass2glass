@@ -110,6 +110,56 @@ pub(crate) fn detection_json(
     Value::Object(object)
 }
 
+/// The record for one frame: its time, then its text (a `Caps::Text` input) or
+/// its detections in pixels of a `width` x `height` frame and its JSON blobs.
+/// `None` when it holds nothing but a time. `mqttsink` publishes the same record.
+pub(crate) fn frame_record(
+    frame: &Frame,
+    text_input: bool,
+    width: u32,
+    height: u32,
+) -> Option<Map<String, Value>> {
+    let mut record = Map::new();
+    if let Some(pts_ns) = frame.timing.pts() {
+        record.insert(
+            PTS_KEY.to_string(),
+            Value::from(pts_ns as f64 / NS_PER_SECOND),
+        );
+    }
+    if text_input {
+        let bytes = frame.domain.as_system_slice()?;
+        record.insert(
+            TEXT_KEY.to_string(),
+            Value::String(String::from_utf8_lossy(bytes).into_owned()),
+        );
+        return Some(record);
+    }
+    if let Some(analytics) = frame.meta.get::<AnalyticsMeta>() {
+        let detections: Vec<Value> = analytics
+            .detections()
+            .map(|detection| {
+                detection_json(
+                    detection,
+                    analytics.class_name(detection.label),
+                    width,
+                    height,
+                )
+            })
+            .collect();
+        if !detections.is_empty() {
+            record.insert(DETECTIONS_KEY.to_string(), Value::Array(detections));
+        }
+    }
+    if let Some(blobs) = frame.meta.get::<BlobMeta>() {
+        for blob in blobs.iter() {
+            if let Ok(value) = serde_json::from_slice::<Value>(&blob.payload) {
+                record.insert(blob.header.clone(), value);
+            }
+        }
+    }
+    (record.len() > 1).then_some(record)
+}
+
 /// Writes the analytics metadata, blobs and text of each frame as one JSON line.
 ///
 /// # Example
@@ -172,45 +222,7 @@ impl MetaSink {
 
     /// The record for one frame, or `None` when it holds nothing but a time.
     fn record_for(&self, frame: &Frame) -> Option<Map<String, Value>> {
-        let mut record = Map::new();
-        if let Some(pts_ns) = frame.timing.pts() {
-            record.insert(
-                PTS_KEY.to_string(),
-                Value::from(pts_ns as f64 / NS_PER_SECOND),
-            );
-        }
-        if self.text_input {
-            let bytes = frame.domain.as_system_slice()?;
-            record.insert(
-                TEXT_KEY.to_string(),
-                Value::String(String::from_utf8_lossy(bytes).into_owned()),
-            );
-            return Some(record);
-        }
-        if let Some(analytics) = frame.meta.get::<AnalyticsMeta>() {
-            let detections: Vec<Value> = analytics
-                .detections()
-                .map(|detection| {
-                    detection_json(
-                        detection,
-                        analytics.class_name(detection.label),
-                        self.width,
-                        self.height,
-                    )
-                })
-                .collect();
-            if !detections.is_empty() {
-                record.insert(DETECTIONS_KEY.to_string(), Value::Array(detections));
-            }
-        }
-        if let Some(blobs) = frame.meta.get::<BlobMeta>() {
-            for blob in blobs.iter() {
-                if let Ok(value) = serde_json::from_slice::<Value>(&blob.payload) {
-                    record.insert(blob.header.clone(), value);
-                }
-            }
-        }
-        (record.len() > 1).then_some(record)
+        frame_record(frame, self.text_input, self.width, self.height)
     }
 
     fn write_line(&mut self, line: &str) -> Result<(), G2gError> {

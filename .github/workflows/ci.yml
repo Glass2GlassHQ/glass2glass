@@ -235,7 +235,8 @@ jobs:
             pkg-config libssl-dev libasound2-dev libpulse-dev \
             libopus-dev libwayland-dev libxkbcommon-dev libdav1d-dev nasm \
             clang libavcodec-dev libavformat-dev libavutil-dev libswscale-dev \
-            libva-dev libdrm-dev libgbm-dev libvpx-dev libpipewire-0.3-dev
+            libva-dev libdrm-dev libgbm-dev libvpx-dev libpipewire-0.3-dev \
+            mosquitto mosquitto-clients
       # docs/elements.html is generated from the registry, so it silently goes
       # stale every time an element is added. The element list is exactly the
       # elements compiled in, so this has to use the same feature set the
@@ -253,7 +254,7 @@ jobs:
       - name: check g2g-plugins (linux feature set)
         run: >
           cargo check -p g2g-plugins --locked --all-targets --features
-          rtsp,onvif,srt,udp-egress,udp-ingress,rtmp,http-src,hls,dash,av1-encode,dav1d,rav1d,mjpeg,mjpeg-encode,png,webp,opus,vorbis,alsa-sink,pulse-sink,alsa-src,pulse-src,wayland-sink,kms-sink,v4l2,analytics,vello-overlay,wgpu-sink,plugin-loader,plugin-signing,declarative-yaml,script-rhai,webtransport,moqt
+          rtsp,onvif,srt,udp-egress,udp-ingress,rtmp,http-src,hls,dash,av1-encode,dav1d,rav1d,mjpeg,mjpeg-encode,png,webp,opus,vorbis,alsa-sink,pulse-sink,alsa-src,pulse-src,wayland-sink,kms-sink,v4l2,analytics,vello-overlay,wgpu-sink,plugin-loader,plugin-signing,declarative-yaml,script-rhai,webtransport,moqt,mqtt
       # Plugin loading v1 (same-toolchain dlopen) + v2 (frozen C ABI, M1010):
       # each test builds its fixture cdylib (v2 also compiles the plain-C
       # plugin with cc), so the dynamic boundary is exercised, not just checked.
@@ -329,6 +330,14 @@ jobs:
           cargo test -p g2g-plugins --locked --features analytics-json,embedding-index,mjpeg,mjpeg-encode
           --test m1176_metadata_records --test m1176_trim_and_digest --test m1176_embedding_index
           --test m454_element_properties
+      # mqttsink / mqttsrc (M1179) run against a real mosquitto, with
+      # mosquitto_sub and mosquitto_pub as the peers. The test self-skips
+      # without the binaries, so a green run here is only evidence if they are
+      # present.
+      - name: the mqtt reference peer must exist (a missing one self-skips the test)
+        run: mosquitto -h 2>&1 | grep -q "mosquitto version"
+      - name: test g2g-plugins (mqtt sink + source vs mosquitto)
+        run: cargo test -p g2g-plugins --locked --features mqtt --test m1179_mqtt --test m454_element_properties
       - name: test g2g-plugins (raw + still framers, file-less sources)
         run: cargo test -p g2g-plugins --locked --features std,png,mjpeg --test m1086_raw_parse --test m1087_still_parse --test m1088_split_and_data
       # Encoding profiles (M1089): each profile line must write byte for byte

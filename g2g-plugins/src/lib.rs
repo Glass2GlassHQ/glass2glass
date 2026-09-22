@@ -201,6 +201,14 @@ pub mod analyticsoverlay;
 pub mod metareplay;
 #[cfg(feature = "analytics-json")]
 pub mod metasink;
+// MQTT: the record as one message per frame out of `mqttsink`, and each
+// message on a topic as a text frame out of `mqttsrc`.
+#[cfg(feature = "mqtt")]
+pub(crate) mod mqtt;
+#[cfg(feature = "mqtt")]
+pub mod mqttsink;
+#[cfg(feature = "mqtt")]
+pub mod mqttsrc;
 // Rule-driven alerts on the detections a frame carries, and the clip recorder
 // that catches the seconds around each one.
 #[cfg(feature = "analytics-json")]

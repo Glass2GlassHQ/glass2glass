@@ -358,6 +358,21 @@ reports results as they happen rather than tailing the file. The record is
 gst-python-ml's `pyml_metasink` format, key for key, so either side reads the
 other's files.
 
+`mqttsink` (`mqtt` feature) publishes that same record, one message per frame, to
+a topic on an MQTT broker, so a fleet dashboard or a rules engine subscribes to
+detections and alerts without a file in between. The rumqttc event loop runs on a
+task of the pipeline's tokio runtime and reconnects on its own. A record is queued
+to it and never awaited: a dead broker costs dropped records (counted), never a
+stalled pipeline. `Eos` drains the queue before the connection closes. The client
+id defaults to the element's instance name, so two sinks in one graph do not evict
+each other from the broker. `mqttsrc` is the other direction: it subscribes to a
+topic filter and emits each message as a `Caps::Text` frame stamped with its
+arrival time, so a control channel (`mqttsrc ! textdigest ! ...`) or a remote
+detector's records (`mqttsrc ! metasink`) enter a graph the same way. The source
+polls the connection in its own loop, subscribing again after every reconnect,
+and only `num-buffers` ends it. Both share the broker settings and their
+properties (`g2g-plugins::mqtt`).
+
 `metareplay` puts such a file back: each frame takes the record whose time is
 nearest its own, within half a frame duration (20 ms where the duration is
 unknown), and gets an `AnalyticsMeta` whose boxes are normalized back against the

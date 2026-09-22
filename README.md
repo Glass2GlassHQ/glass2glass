@@ -443,6 +443,7 @@ cargo clippy --workspace --all-targets
 | `WebPDec` (lossy + lossless, pure Rust) | `webp` | none |
 | `AnalyticsOverlay` (CPU) / `VelloAnalyticsOverlay` (GPU) (detection boxes, segmentation masks, ROIs) / `WgpuSink` | `analytics`, `vello-overlay`, `wgpu-sink` | wgpu (GPU variants) |
 | `MetaSink` / `MetaReplay` (one JSON line per frame: detections, blobs, text; replay onto frames) / `AnalyticsAlert` (rules, cooldown, `alert` blob, webhook) / `AlertRecorder` (a clip around each alert) | `analytics-json` | none |
+| `MqttSink` (the same record per frame, published to an MQTT topic) / `MqttSrc` (each message on a topic filter as a text frame) | `mqtt` | none |
 | `EmbeddingSink` (sqlite index of embedding vectors, searchable from `pyml-mcp`) | `embedding-index` | none (sqlite bundled) |
 | `VelloTextOverlay` (subtitle cues drawn on the GPU, `WgpuTexture` out) | `vello-text-overlay` | wgpu |
 | `OrtInference` (+ CUDA / DirectML EPs) | `ort`, `cuda`, `directml` (in `g2g-ml`) | onnxruntime |
