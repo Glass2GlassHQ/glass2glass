@@ -21,8 +21,16 @@ use vulkan_nv12_common::{
     H, W,
 };
 
+// libtest runs these in parallel and concurrent instance creation SIGSEGVs the NVIDIA loader
+static GPU_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn gpu_lock() -> std::sync::MutexGuard<'static, ()> {
+    GPU_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 #[test]
 fn nv12_caps_on_wgpu_texture_hand_out_two_plane_textures() {
+    let _gpu = gpu_lock();
     if let Some(reason) = skip_reason() {
         eprintln!("skipping: {reason}");
         return;
@@ -45,6 +53,7 @@ fn nv12_caps_on_wgpu_texture_hand_out_two_plane_textures() {
 
 #[test]
 fn vulkan_texture_domain_hands_out_the_raw_image() {
+    let _gpu = gpu_lock();
     if let Some(reason) = skip_reason() {
         eprintln!("skipping: {reason}");
         return;
@@ -84,6 +93,7 @@ fn vulkan_texture_domain_hands_out_the_raw_image() {
 
 #[test]
 fn unpinned_wgpu_texture_still_converts_to_rgba() {
+    let _gpu = gpu_lock();
     if let Some(reason) = skip_reason() {
         eprintln!("skipping: {reason}");
         return;
