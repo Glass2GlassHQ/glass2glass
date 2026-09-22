@@ -17,7 +17,10 @@ use std::process::Command;
 use g2g_core::error::G2gError;
 use g2g_core::staticpool::StaticLendRing;
 use g2g_core::StaticTransform;
-use g2g_mcu::adpcm::{decode_block, encode_block, samples_per_block, BLOCK_HEADER};
+use g2g_mcu::adpcm::{
+    decode_block, decode_block_channels, encode_block, encode_block_channels, samples_per_block,
+    samples_per_block_channels, BLOCK_HEADER,
+};
 use g2g_mcu::{AdpcmDec, AdpcmEnc, ImaState};
 use util::{block_on, frame_of, le_bytes, payload};
 
@@ -200,6 +203,119 @@ fn block_round_trip_and_state_carry() {
         decode_block(&enc[..12], &mut [0u8; 12]).is_none(),
         "wrong dst size"
     );
+}
+
+/// Interleave two channels of S16LE.
+fn interleave(left: &[i16], right: &[i16]) -> Vec<i16> {
+    left.iter().zip(right).flat_map(|(l, r)| [*l, *r]).collect()
+}
+
+fn encode_stream_stereo(interleaved: &[i16], block_bytes: usize) -> Vec<u8> {
+    let per_channel = samples_per_block_channels(block_bytes, 2);
+    let frame_bytes = per_channel * 2 * 2;
+    let mut out = vec![0u8; le_bytes(interleaved).len() / frame_bytes * block_bytes];
+    let mut states = [ImaState::default(); 2];
+    for (s, d) in le_bytes(interleaved)
+        .chunks_exact(frame_bytes)
+        .zip(out.chunks_exact_mut(block_bytes))
+    {
+        encode_block_channels(&mut states, s, d).expect("sized exactly");
+    }
+    out
+}
+
+fn decode_stream_stereo(bytes: &[u8], block_bytes: usize) -> Vec<u8> {
+    let per_channel = samples_per_block_channels(block_bytes, 2);
+    let frame_bytes = per_channel * 2 * 2;
+    let mut out = vec![0u8; bytes.len() / block_bytes * frame_bytes];
+    for (s, d) in bytes
+        .chunks_exact(block_bytes)
+        .zip(out.chunks_exact_mut(frame_bytes))
+    {
+        decode_block_channels(2, s, d).expect("sized exactly");
+    }
+    out
+}
+
+/// Stereo blocks interleave one 4-byte group per channel after the two
+/// headers, so both channels must survive a round trip independently: a
+/// layout that crossed the channels would reconstruct each as the other's
+/// step adaptation.
+#[test]
+fn stereo_block_round_trips_both_channels() {
+    let per_channel = samples_per_block_channels(BLOCK, 2);
+    let left = signal(per_channel);
+    let right: Vec<i16> = signal(per_channel).iter().map(|s| -(s / 2)).collect();
+    let sig = interleave(&left, &right);
+    let coded = encode_stream_stereo(&sig, BLOCK);
+    assert_eq!(coded.len(), BLOCK);
+    let decoded = decode_stream_stereo(&coded, BLOCK);
+    let back: Vec<i16> = decoded
+        .chunks_exact(2)
+        .map(|b| i16::from_le_bytes([b[0], b[1]]))
+        .collect();
+    assert_eq!(back.len(), sig.len());
+    // Each channel's first sample is its block header predictor, verbatim.
+    assert_eq!(back[0], left[0]);
+    assert_eq!(back[1], right[0]);
+    let error = |channel: usize| -> i64 {
+        back.iter()
+            .skip(channel)
+            .step_by(2)
+            .zip(if channel == 0 { &left } else { &right })
+            .map(|(got, want)| (*got as i64 - *want as i64).abs())
+            .sum::<i64>()
+            / per_channel as i64
+    };
+    // 4-bit ADPCM is lossy, so the bar is tracking, not equality; a crossed
+    // layout lands far above this.
+    assert!(error(0) < 600, "left channel error {}", error(0));
+    assert!(error(1) < 600, "right channel error {}", error(1));
+}
+
+/// The stereo block layout is ffmpeg's `adpcm_ima_wav`, byte for byte.
+#[test]
+fn ffmpeg_oracle_stereo_bit_exact() {
+    if Command::new("ffmpeg").arg("-version").output().is_err() {
+        eprintln!("skipping: ffmpeg not available");
+        return;
+    }
+    let dir = std::env::temp_dir();
+    let stamp = std::process::id();
+    let f = |name: &str| dir.join(format!("g2g-m639-stereo-{stamp}-{name}"));
+
+    let per_channel = samples_per_block_channels(BLOCK, 2);
+    let left = signal(per_channel * 8);
+    let right: Vec<i16> = signal(per_channel * 8).iter().map(|s| -(s / 2)).collect();
+    let sig = interleave(&left, &right);
+    let ours = encode_stream_stereo(&sig, BLOCK);
+
+    std::fs::write(f("sig.s16"), le_bytes(&sig)).unwrap();
+    let status = Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-loglevel",
+            "error",
+            "-f",
+            "s16le",
+            "-ar",
+            "8000",
+            "-ac",
+            "2",
+            "-i",
+        ])
+        .arg(f("sig.s16"))
+        .args(["-c:a", "adpcm_ima_wav", "-block_size", &BLOCK.to_string()])
+        .arg(f("theirs.wav"))
+        .status()
+        .expect("run ffmpeg");
+    assert!(status.success(), "ffmpeg encode");
+    let theirs = wav_data(&std::fs::read(f("theirs.wav")).unwrap());
+    assert_eq!(ours, theirs, "stereo stream differs from ffmpeg");
+
+    for name in ["sig.s16", "theirs.wav"] {
+        let _ = std::fs::remove_file(f(name));
+    }
 }
 
 #[test]

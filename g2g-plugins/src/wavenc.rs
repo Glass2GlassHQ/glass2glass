@@ -33,7 +33,7 @@ use g2g_core::{
     PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
 
-use g2g_mcu::adpcm::{samples_per_block, BLOCK_HEADER};
+use g2g_mcu::adpcm::{samples_per_block_channels, BLOCK_HEADER};
 
 /// Size fields of a stream whose length is not known when the header is written.
 /// A reader takes the `data` chunk as running to the end of the file.
@@ -96,7 +96,10 @@ fn header(
 ) -> Option<Vec<u8>> {
     let (tag, bits) = wave_format(format)?;
     let samples_per_block = match format {
-        AudioFormat::ImaAdpcm => Some(samples_per_block(block_align_property)),
+        AudioFormat::ImaAdpcm => Some(samples_per_block_channels(
+            block_align_property,
+            channels.max(1) as usize,
+        )),
         _ => None,
     };
     let block_align = match format {
@@ -109,10 +112,10 @@ fn header(
         // Folded in one expression, since a block holds thousands of samples and
         // dividing first would round the rate away. (ffmpeg writes the decoded
         // PCM rate in this field instead, which readers ignore either way.)
-        Some(samples) => u32::try_from(
-            u64::from(sample_rate) * u64::from(channels) * u64::from(block_align) / samples as u64,
-        )
-        .ok()?,
+        // `samples` counts one channel, so the block already spans them all.
+        Some(samples) => {
+            u32::try_from(u64::from(sample_rate) * u64::from(block_align) / samples as u64).ok()?
+        }
         None => sample_rate * block_align as u32,
     };
     // The `fmt ` extension: absent for PCM, empty for G.711, one field for ADPCM.

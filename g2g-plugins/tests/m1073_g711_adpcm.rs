@@ -26,6 +26,8 @@ use g2g_core::{
     AsyncElement, AudioFormat, Caps, Frame, FrameTiming, G2gError, MemoryDomain, OutputSink,
     PipelineClock, PipelinePacket, PushOutcome, ANY_CHANNELS, ANY_SAMPLE_RATE,
 };
+use g2g_mcu::adpcm::samples_per_block_channels;
+use g2g_plugins::adpcm::DEFAULT_BLOCK_ALIGN;
 use g2g_plugins::g711::{MulawDec, G711_CLOCK_RATE_HZ, G711_DEFAULT_CHANNELS};
 use g2g_plugins::registry::default_registry;
 
@@ -35,6 +37,10 @@ impl PipelineClock for ZeroClock {
         0
     }
 }
+
+/// Channels and sample width the stereo fixture carries.
+const STEREO_CHANNELS: usize = 2;
+const PCM_SAMPLE_BYTES: usize = 2;
 
 /// `RIFF` + size + `WAVE`, then 4-byte id + 4-byte size per chunk.
 const RIFF_HEADER_LEN: usize = 12;
@@ -70,7 +76,8 @@ fn wav_data_chunk(file: &[u8]) -> &[u8] {
 /// Run `filesrc location=<input> ! wavparse ! <element> ! filesink` and return
 /// what the sink wrote.
 async fn transcode(input: &str, element: &str) -> Vec<u8> {
-    let tag: String = element
+    // The input belongs in the name too: two cases can share an element.
+    let tag: String = format!("{input}_{element}")
         .chars()
         .filter(char::is_ascii_alphanumeric)
         .collect();
@@ -123,9 +130,10 @@ async fn alaw_encode_matches_ffmpeg() {
 }
 
 /// The tail block is padded with silence, exactly as ffmpeg's encoder flushes
-/// its own, so the whole coded stream matches byte for byte. The
-/// `audioconvert` pins mono: a WAV's channel count is not known until the
-/// `fmt ` chunk is read, so negotiation would otherwise fixate to stereo.
+/// its own, so the whole coded stream matches byte for byte. The `audioconvert`
+/// is the downmix path: a WAV's channel count is not known until the `fmt `
+/// chunk is read, so negotiation fixates to stereo and the real mono layout
+/// arrives mid-stream.
 #[tokio::test]
 async fn adpcm_encode_matches_ffmpeg() {
     let coded = transcode(
@@ -135,6 +143,43 @@ async fn adpcm_encode_matches_ffmpeg() {
     .await;
     let reference = read_fixture("sine_8k_mono_imaadpcm.wav");
     assert_eq!(coded, wav_data_chunk(&reference));
+}
+
+/// A stereo block interleaves both channels, so the whole coded stream matches
+/// ffmpeg's byte for byte without any `audioconvert`: the encoder takes the
+/// file's own layout.
+#[tokio::test]
+async fn stereo_adpcm_encode_matches_ffmpeg() {
+    let coded = transcode("sine_8k_stereo_s16le.wav", "adpcmenc").await;
+    let reference = read_fixture("sine_8k_stereo_imaadpcm.wav");
+    assert_eq!(coded, wav_data_chunk(&reference));
+}
+
+/// The decode direction of the same layout, against ffmpeg's own reconstruction
+/// of the reference file.
+#[tokio::test]
+async fn stereo_adpcm_fixture_decodes_bit_exact() {
+    let decoded = transcode("sine_8k_stereo_imaadpcm.wav", "adpcmdec").await;
+    assert_eq!(
+        decoded,
+        read_fixture("sine_8k_stereo_imaadpcm_decoded.s16le")
+    );
+}
+
+/// A stereo source through a mono-pinned converter: the layout the `fmt ` chunk
+/// announces arrives after negotiation settled on the placeholder, and the
+/// converter has to keep downmixing across that refinement.
+#[tokio::test]
+async fn a_mono_pinned_convert_downmixes_a_stereo_source() {
+    let coded = transcode(
+        "sine_8k_stereo_s16le.wav",
+        "audioconvert channels=1 ! adpcmenc",
+    )
+    .await;
+    let stereo = read_fixture("sine_8k_stereo_s16le.wav");
+    let frames = wav_data_chunk(&stereo).len() / (STEREO_CHANNELS * PCM_SAMPLE_BYTES);
+    let blocks = frames.div_ceil(samples_per_block_channels(DEFAULT_BLOCK_ALIGN, 1));
+    assert_eq!(coded.len(), blocks * DEFAULT_BLOCK_ALIGN);
 }
 
 async fn round_trip(line: &str) -> u64 {

@@ -146,12 +146,6 @@ Highest leverage first:
 
 ## Containers
 
-- **ADPCM from a placeholder-stereo source:** `adpcmenc` takes mono only, and a
-  source whose real layout arrives at runtime negotiates at the stereo
-  placeholder, so `wavparse ! adpcmenc` fails the solve (and again on the runtime
-  re-solve through an `audioconvert` pinned to mono). Needs either a
-  channel-count-agnostic ADPCM path or a converter that renegotiates on the
-  refinement.
 - **Text-only MP4:** `mp4mux` with a lone text input fails the solve: at link
   degree one the launch parser builds the one-input `Mp4Mux`, which takes
   H.264 / H.265 only, while the fan-in `Mp4MuxN` writes a `tx3g` track.

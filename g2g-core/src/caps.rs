@@ -1446,6 +1446,17 @@ impl PassthroughFields {
         sample_rate: false,
     };
 
+    /// Every field coupled: what a constraint that declares no mask is treated
+    /// as, so nothing is assumed retargeted.
+    pub const ALL: Self = Self {
+        format: true,
+        width: true,
+        height: true,
+        framerate: true,
+        channels: true,
+        sample_rate: true,
+    };
+
     pub const fn with_format(mut self) -> Self {
         self.format = true;
         self

@@ -123,70 +123,167 @@ pub const fn samples_per_block(block_bytes: usize) -> usize {
         .saturating_add(1)
 }
 
+/// Bytes one channel's interleave group carries, and the samples in it: a
+/// multi-channel block alternates 4-byte groups, 8 samples each, per channel.
+const GROUP_BYTES: usize = 4;
+const GROUP_SAMPLES: usize = 8;
+
+/// Samples one channel carries in a `block_bytes` block holding `channels`
+/// interleaved channels. Mono packs every data byte; a multi-channel block
+/// alternates whole 4-byte groups, so it carries whole groups only.
+pub const fn samples_per_block_channels(block_bytes: usize, channels: usize) -> usize {
+    if channels <= 1 {
+        return samples_per_block(block_bytes);
+    }
+    let data = block_bytes.saturating_sub(BLOCK_HEADER.saturating_mul(channels));
+    (data / (GROUP_BYTES.saturating_mul(channels)))
+        .saturating_mul(GROUP_SAMPLES)
+        .saturating_add(1)
+}
+
+/// Which channel a data byte belongs to, and its index within that channel's
+/// own bytes. Mono is the identity.
+const fn byte_owner(index: usize, channels: usize) -> (usize, usize) {
+    let group = index / GROUP_BYTES;
+    (
+        group % channels,
+        (group / channels) * GROUP_BYTES + index % GROUP_BYTES,
+    )
+}
+
+/// Data bytes a block of `channels` channels actually fills: mono packs the
+/// block out, a multi-channel one stops at the last whole interleave group.
+const fn data_bytes_used(data_len: usize, channels: usize) -> usize {
+    if channels <= 1 {
+        return data_len;
+    }
+    (data_len / (GROUP_BYTES * channels)) * (GROUP_BYTES * channels)
+}
+
+/// Encode one block of `states.len()` interleaved channels: `src` is exactly
+/// `samples_per_block_channels * channels * 2` bytes of interleaved S16LE,
+/// `dst` exactly `block_bytes`. Each channel's step index carries across
+/// blocks (the caller keeps `states`); its predictor restarts from that
+/// channel's first sample, as the reference encoder does. Wrong slice sizes
+/// yield `None`.
+pub fn encode_block_channels(states: &mut [ImaState], src: &[u8], dst: &mut [u8]) -> Option<()> {
+    let channels = states.len();
+    if channels == 0 || dst.len() < BLOCK_HEADER * channels {
+        return None;
+    }
+    let per_channel = samples_per_block_channels(dst.len(), channels);
+    if src.len() != per_channel * channels * SAMPLE_BYTES {
+        return None;
+    }
+    let (headers, data) = dst.split_at_mut(BLOCK_HEADER * channels);
+    for (channel, state) in states.iter_mut().enumerate() {
+        state.predictor = sample_at(src, channels, channel, 0)?;
+        state.step_index = state.step_index.min(88);
+        let header = headers
+            .get_mut(channel * BLOCK_HEADER..)?
+            .get_mut(..BLOCK_HEADER)?;
+        let [h0, h1, h2, h3] = header else {
+            return None;
+        };
+        [*h0, *h1] = state.predictor.to_le_bytes();
+        *h2 = state.step_index;
+        *h3 = 0;
+    }
+    let used = data_bytes_used(data.len(), channels);
+    for (index, byte) in data.iter_mut().enumerate().take(used) {
+        let (channel, within) = byte_owner(index, channels);
+        let state = states.get_mut(channel)?;
+        let first = 1 + within * 2;
+        let low = state.encode_sample(sample_at(src, channels, channel, first)?);
+        let high = state.encode_sample(sample_at(src, channels, channel, first + 1)?);
+        *byte = low | (high << 4);
+    }
+    Some(())
+}
+
+/// Decode one block of `channels` interleaved channels: `src` is exactly
+/// `block_bytes`, `dst` exactly `samples_per_block_channels * channels * 2`
+/// bytes of interleaved S16LE. Wrong slice sizes yield `None`.
+pub fn decode_block_channels(channels: usize, src: &[u8], dst: &mut [u8]) -> Option<()> {
+    if channels == 0 || channels > MAX_BLOCK_CHANNELS || src.len() < BLOCK_HEADER * channels {
+        return None;
+    }
+    let per_channel = samples_per_block_channels(src.len(), channels);
+    if dst.len() != per_channel * channels * SAMPLE_BYTES {
+        return None;
+    }
+    let (headers, data) = src.split_at(BLOCK_HEADER * channels);
+    let mut states = [ImaState::default(); MAX_BLOCK_CHANNELS];
+    for (channel, state) in states.iter_mut().enumerate().take(channels) {
+        let header = headers.get(channel * BLOCK_HEADER..)?.get(..BLOCK_HEADER)?;
+        let &[p0, p1, index, _reserved] = header else {
+            return None;
+        };
+        state.predictor = i16::from_le_bytes([p0, p1]);
+        state.step_index = index.min(88);
+        put_sample(dst, channels, channel, 0, state.predictor)?;
+    }
+    let used = data_bytes_used(data.len(), channels);
+    for (index, &byte) in data.iter().enumerate().take(used) {
+        let (channel, within) = byte_owner(index, channels);
+        let state = states.get_mut(channel)?;
+        let first = 1 + within * 2;
+        let low = state.decode_sample(byte & 0x0F);
+        put_sample(dst, channels, channel, first, low)?;
+        let high = state.decode_sample(byte >> 4);
+        put_sample(dst, channels, channel, first + 1, high)?;
+    }
+    Some(())
+}
+
+/// Bytes per S16LE sample.
+const SAMPLE_BYTES: usize = 2;
+
+/// Channels one block can interleave: the WAV layout is mono or stereo.
+pub const MAX_BLOCK_CHANNELS: usize = 2;
+
+/// Read interleaved sample `index` of `channel` out of S16LE `src`.
+fn sample_at(src: &[u8], channels: usize, channel: usize, index: usize) -> Option<i16> {
+    let at = (index * channels + channel) * SAMPLE_BYTES;
+    let &[lo, hi] = src.get(at..)?.get(..SAMPLE_BYTES)? else {
+        return None;
+    };
+    Some(i16::from_le_bytes([lo, hi]))
+}
+
+/// Write interleaved sample `index` of `channel` into S16LE `dst`.
+fn put_sample(
+    dst: &mut [u8],
+    channels: usize,
+    channel: usize,
+    index: usize,
+    sample: i16,
+) -> Option<()> {
+    let at = (index * channels + channel) * SAMPLE_BYTES;
+    let slot = dst.get_mut(at..)?.get_mut(..SAMPLE_BYTES)?;
+    let [lo, hi] = slot else { return None };
+    [*lo, *hi] = sample.to_le_bytes();
+    Some(())
+}
+
 /// Encode one mono block: `src` is exactly `samples_per_block * 2` bytes of
 /// S16LE, `dst` exactly `block_bytes`; `step_index` carries across blocks
 /// (pass the previous block's return). Wrong slice sizes yield `None` (the
 /// element maps it to [`G2gError::CapsMismatch`]); the conversion itself
 /// cannot fail.
 pub fn encode_block(step_index: u8, src: &[u8], dst: &mut [u8]) -> Option<u8> {
-    // Explicit length checks before `split_at`, so the split cannot panic
-    // (`split_at_*_checked` needs a newer MSRV).
-    if dst.len() < BLOCK_HEADER || src.len() < 2 {
-        return None;
-    }
-    let (header, data) = dst.split_at_mut(BLOCK_HEADER);
-    if src.len() != samples_per_block(BLOCK_HEADER + data.len()) * 2 {
-        return None;
-    }
-    let (first, rest) = src.split_at(2);
-    let &[lo, hi] = first else { return None };
-    let mut st = ImaState {
-        predictor: i16::from_le_bytes([lo, hi]),
-        step_index: step_index.min(88),
-    };
-    let [h0, h1, h2, h3] = header else {
-        return None;
-    };
-    [*h0, *h1] = st.predictor.to_le_bytes();
-    *h2 = st.step_index;
-    *h3 = 0;
-    for (byte, quad) in data.iter_mut().zip(rest.chunks_exact(4)) {
-        let &[a0, a1, b0, b1] = quad else { continue };
-        let low = st.encode_sample(i16::from_le_bytes([a0, a1]));
-        let high = st.encode_sample(i16::from_le_bytes([b0, b1]));
-        *byte = low | (high << 4);
-    }
-    Some(st.step_index)
+    let mut states = [ImaState {
+        predictor: 0,
+        step_index,
+    }];
+    encode_block_channels(&mut states, src, dst)?;
+    Some(states[0].step_index)
 }
 
 /// Decode one mono block: `src` is exactly `block_bytes`, `dst` exactly
 /// `samples_per_block * 2` bytes of S16LE. Wrong slice sizes yield `None`.
 pub fn decode_block(src: &[u8], dst: &mut [u8]) -> Option<()> {
-    // Explicit length checks before `split_at`, so the split cannot panic
-    // (`split_at_*_checked` needs a newer MSRV).
-    if src.len() < BLOCK_HEADER || dst.len() < 2 {
-        return None;
-    }
-    if dst.len() != samples_per_block(src.len()) * 2 {
-        return None;
-    }
-    let (header, data) = src.split_at(BLOCK_HEADER);
-    let &[p0, p1, idx, _reserved] = header else {
-        return None;
-    };
-    let mut st = ImaState {
-        predictor: i16::from_le_bytes([p0, p1]),
-        step_index: idx.min(88),
-    };
-    let (first, rest) = dst.split_at_mut(2);
-    let [f0, f1] = first else { return None };
-    [*f0, *f1] = st.predictor.to_le_bytes();
-    for (&byte, quad) in data.iter().zip(rest.chunks_exact_mut(4)) {
-        let [a0, a1, b0, b1] = quad else { continue };
-        [*a0, *a1] = st.decode_sample(byte & 0x0F).to_le_bytes();
-        [*b0, *b1] = st.decode_sample(byte >> 4).to_le_bytes();
-    }
-    Some(())
+    decode_block_channels(1, src, dst)
 }
 
 /// A heap-free IMA ADPCM encoder [`StaticTransform`]: mono S16LE in, IMA-WAV

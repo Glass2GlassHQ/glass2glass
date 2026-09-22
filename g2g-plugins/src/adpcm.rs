@@ -1,11 +1,12 @@
-//! IMA ADPCM elements (M1073): `adpcmenc` packs mono `Audio{PcmS16Le}` into
-//! the WAV / DVI block layout at 4 bits per sample, `adpcmdec` unpacks it.
+//! IMA ADPCM elements (M1073): `adpcmenc` packs mono or stereo
+//! `Audio{PcmS16Le}` into the WAV / DVI block layout at 4 bits per sample,
+//! `adpcmdec` unpacks it.
 //! The block math is [`g2g_mcu::adpcm`], the heap-free MCU codec validated
 //! bit-exact against ffmpeg's `adpcm_ima_wav`; these elements are the `alloc`
 //! host wrappers around it.
 //!
 //! `layout=dvi` is the only layout g2g models, so it is not a property the way
-//! GStreamer's `adpcmenc` has one. Blocks are self-contained and mono, so a
+//! GStreamer's `adpcmenc` has one. Blocks are self-contained, so a
 //! stream is a run of `blockalign`-sized blocks: the encoder buffers samples
 //! until a whole block is available (padding the last one with silence at EOS,
 //! as ffmpeg does) and the decoder buffers bytes until a whole block is, so a
@@ -15,9 +16,9 @@
 //! `fmt ` chunk's block align off its input caps: a file written with a
 //! non-default block size needs `adpcmdec blockalign=N` on the launch line.
 //!
-//! The encoder takes mono only. An unknown channel count fixates to stereo, so
-//! a source that announces its layout mid-stream (`wavparse`) needs an explicit
-//! `audioconvert channels=1` ahead of `adpcmenc`.
+//! A stereo block carries both channels: two headers, then one 4-byte group per
+//! channel in turn. More channels than that have no WAV layout, so they are
+//! refused.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -33,7 +34,10 @@ use g2g_core::{
     PropError, PropKind, PropValue, PropertySpec, ANY_CHANNELS, ANY_SAMPLE_RATE,
 };
 
-use g2g_mcu::adpcm::{decode_block, encode_block, samples_per_block};
+use g2g_mcu::adpcm::{
+    decode_block_channels, encode_block_channels, samples_per_block_channels, ImaState,
+    MAX_BLOCK_CHANNELS,
+};
 
 /// Bytes per block, the `blockalign` default: what WAV writers (ffmpeg's
 /// `adpcm_ima_wav`, GStreamer's `adpcmenc`) use.
@@ -42,8 +46,9 @@ pub const DEFAULT_BLOCK_ALIGN: usize = 1024;
 const MIN_BLOCK_ALIGN: usize = 64;
 /// Largest accepted `blockalign`, GStreamer's upper bound.
 const MAX_BLOCK_ALIGN: usize = 8192;
-/// The only channel layout the block math covers.
-const ADPCM_CHANNELS: u8 = 1;
+/// Channels one block can interleave: mono or stereo, what the WAV layout
+/// covers.
+const MAX_ADPCM_CHANNELS: u8 = MAX_BLOCK_CHANNELS as u8;
 /// The rate the decoded caps fixate on while nothing has announced the real one
 /// (the placeholder `wavparse` negotiates with): the stream's rate arrives in a
 /// `CapsChanged` before the first block is decoded.
@@ -70,17 +75,43 @@ fn parse_block_align(value: PropValue) -> Result<usize, PropError> {
     Ok(bytes as usize)
 }
 
-/// Mono ADPCM caps at the given layout.
-fn coded_caps(sample_rate: u32) -> Caps {
+/// ADPCM caps at the given layout.
+fn coded_caps(channels: u8, sample_rate: u32) -> Caps {
     Caps::Audio {
         format: AudioFormat::ImaAdpcm,
-        channels: ADPCM_CHANNELS,
+        channels,
         sample_rate,
         channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
     }
 }
 
-/// Encodes mono interleaved S16LE PCM into IMA ADPCM blocks.
+/// Raw PCM caps at the given layout, what both elements convert against.
+fn pcm_caps(channels: u8, sample_rate: u32) -> Caps {
+    Caps::Audio {
+        format: AudioFormat::PcmS16Le,
+        channels,
+        sample_rate,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
+    }
+}
+
+/// A channel count the block layout covers, `ANY_CHANNELS` included (it is the
+/// still-unknown count a parser refines mid-stream).
+fn block_channels(channels: u8) -> bool {
+    channels == ANY_CHANNELS || (1..=MAX_ADPCM_CHANNELS).contains(&channels)
+}
+
+/// Per-channel samples one block carries, and the interleaved S16LE bytes they
+/// occupy.
+fn block_frames(block_align: usize, channels: u8) -> usize {
+    samples_per_block_channels(block_align, channels.max(1) as usize)
+}
+
+fn block_pcm_bytes(block_align: usize, channels: u8) -> usize {
+    block_frames(block_align, channels) * channels.max(1) as usize * PCM_SAMPLE_BYTES
+}
+
+/// Encodes mono or stereo interleaved S16LE PCM into IMA ADPCM blocks.
 ///
 /// # Example
 ///
@@ -93,10 +124,12 @@ fn coded_caps(sample_rate: u32) -> Caps {
 pub struct AdpcmEnc {
     block_align: usize,
     sample_rate: u32,
+    channels: u8,
     /// S16LE bytes not yet packed into a whole block.
     pending: Vec<u8>,
-    /// The step index carried across blocks, as the reference encoder does.
-    step_index: u8,
+    /// Per-channel coder state carried across blocks, as the reference encoder
+    /// does.
+    states: [ImaState; MAX_BLOCK_CHANNELS],
     /// PTS of the next block, anchored to the first input frame's PTS.
     next_pts_ns: Option<u64>,
     last_out: Option<Caps>,
@@ -115,8 +148,9 @@ impl AdpcmEnc {
         Self {
             block_align: DEFAULT_BLOCK_ALIGN,
             sample_rate: 0,
+            channels: 1,
             pending: Vec::new(),
-            step_index: 0,
+            states: [ImaState::default(); MAX_BLOCK_CHANNELS],
             next_pts_ns: None,
             last_out: None,
             sequence: 0,
@@ -138,26 +172,38 @@ impl AdpcmEnc {
 
     /// The PCM shape this encoder takes: mono interleaved S16LE. An unknown
     /// channel count is refused rather than assumed, since it fixates to stereo.
-    fn pcm_shape(caps: &Caps) -> Option<u32> {
+    fn pcm_shape(caps: &Caps) -> Option<(u8, u32)> {
         match caps {
             Caps::Audio {
                 format: AudioFormat::PcmS16Le,
-                channels: ADPCM_CHANNELS,
+                channels,
                 sample_rate,
                 ..
-            } => Some(*sample_rate),
+            } if block_channels(*channels) => Some((*channels, *sample_rate)),
             _ => None,
         }
     }
 
+    /// Adopt a refined channel count. The block layout is built around it, so
+    /// the buffered tail and the carried coder state do not survive a change.
+    fn set_channels(&mut self, channels: u8) {
+        if channels == ANY_CHANNELS || channels == self.channels {
+            return;
+        }
+        self.channels = channels.min(MAX_ADPCM_CHANNELS);
+        self.pending.clear();
+        self.states = [ImaState::default(); MAX_BLOCK_CHANNELS];
+    }
+
     /// Bytes of S16LE input one block consumes.
     fn source_block_bytes(&self) -> usize {
-        samples_per_block(self.block_align) * PCM_SAMPLE_BYTES
+        block_pcm_bytes(self.block_align, self.channels)
     }
 
     /// Nanoseconds of audio one block carries.
     fn block_duration_ns(&self) -> u64 {
-        samples_per_block(self.block_align) as u64 * 1_000_000_000 / self.sample_rate.max(1) as u64
+        block_frames(self.block_align, self.channels) as u64 * 1_000_000_000
+            / self.sample_rate.max(1) as u64
     }
 
     /// Encode every whole block the pending samples hold, and emit each as a
@@ -172,9 +218,12 @@ impl AdpcmEnc {
         while self.pending.len() >= source_block {
             let mut block = alloc::vec![0u8; self.block_align];
             let samples: Vec<u8> = self.pending.drain(..source_block).collect();
-            self.step_index = encode_block(self.step_index, &samples, &mut block)
+            let states = self
+                .states
+                .get_mut(..self.channels.max(1) as usize)
                 .ok_or(G2gError::CapsMismatch)?;
-            let new_caps = coded_caps(self.sample_rate);
+            encode_block_channels(states, &samples, &mut block).ok_or(G2gError::CapsMismatch)?;
+            let new_caps = coded_caps(self.channels, self.sample_rate);
             if self.last_out.as_ref() != Some(&new_caps) {
                 out.push(PipelinePacket::CapsChanged(new_caps.clone()))
                     .await?;
@@ -212,7 +261,8 @@ impl AsyncElement for AdpcmEnc {
         g2g_core::memory::DomainSet::only(g2g_core::memory::MemoryDomainKind::System)
     }
 
-    /// Mono S16LE only, so an `audioconvert` is placed ahead of anything else.
+    /// Mono or stereo S16LE only, so an `audioconvert` is placed ahead of
+    /// anything wider.
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
         Self::pcm_shape(upstream_caps)
             .map(|_| upstream_caps.clone())
@@ -221,13 +271,16 @@ impl AsyncElement for AdpcmEnc {
 
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match Self::pcm_shape(input) {
-            Some(sample_rate) => CapsSet::one(coded_caps(sample_rate)),
+            Some((channels, sample_rate)) => CapsSet::one(coded_caps(channels, sample_rate)),
             None => CapsSet::from_alternatives(Vec::new()),
         }))
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        self.sample_rate = Self::pcm_shape(absolute_caps).ok_or(G2gError::CapsMismatch)?;
+        let (channels, sample_rate) =
+            Self::pcm_shape(absolute_caps).ok_or(G2gError::CapsMismatch)?;
+        self.sample_rate = sample_rate;
+        self.set_channels(channels);
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
     }
@@ -236,7 +289,7 @@ impl AsyncElement for AdpcmEnc {
         ElementMetadata::new(
             "ADPCM encoder",
             "Codec/Encoder/Audio",
-            "Encodes mono S16LE PCM to IMA ADPCM (dvi layout)",
+            "Encodes mono or stereo S16LE PCM to IMA ADPCM (dvi layout)",
             "g2g",
         )
     }
@@ -287,7 +340,7 @@ impl AsyncElement for AdpcmEnc {
                 }
                 PipelinePacket::Flush => {
                     self.pending.clear();
-                    self.step_index = 0;
+                    self.states = [ImaState::default(); MAX_BLOCK_CHANNELS];
                     self.next_pts_ns = None;
                     out.push(PipelinePacket::Flush).await?;
                 }
@@ -296,9 +349,13 @@ impl AsyncElement for AdpcmEnc {
                     // against it, and it is the coded rate too.
                     Caps::Audio {
                         format: AudioFormat::PcmS16Le,
+                        channels,
                         sample_rate,
                         ..
-                    } => self.sample_rate = *sample_rate,
+                    } if block_channels(*channels) => {
+                        self.sample_rate = *sample_rate;
+                        self.set_channels(*channels);
+                    }
                     // The runner's pre-fixed output caps: forward them on.
                     Caps::Audio {
                         format: AudioFormat::ImaAdpcm,
@@ -321,18 +378,13 @@ impl AsyncElement for AdpcmEnc {
 impl PadTemplates for AdpcmEnc {
     fn pad_templates() -> Vec<PadTemplate> {
         Vec::from([
-            PadTemplate::sink(CapsSet::one(Caps::Audio {
-                format: AudioFormat::PcmS16Le,
-                channels: ADPCM_CHANNELS,
-                sample_rate: ANY_SAMPLE_RATE,
-                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
-            })),
-            PadTemplate::source(CapsSet::one(coded_caps(ANY_SAMPLE_RATE))),
+            PadTemplate::sink(CapsSet::one(pcm_caps(ANY_CHANNELS, ANY_SAMPLE_RATE))),
+            PadTemplate::source(CapsSet::one(coded_caps(ANY_CHANNELS, ANY_SAMPLE_RATE))),
         ])
     }
 }
 
-/// Decodes IMA ADPCM blocks back to mono interleaved S16LE PCM.
+/// Decodes IMA ADPCM blocks back to interleaved S16LE PCM.
 ///
 /// # Example
 ///
@@ -345,6 +397,7 @@ impl PadTemplates for AdpcmEnc {
 pub struct AdpcmDec {
     block_align: usize,
     sample_rate: u32,
+    channels: u8,
     /// Coded bytes not yet forming a whole block.
     pending: Vec<u8>,
     /// PTS of the next block's PCM, anchored to the first input frame's PTS.
@@ -365,6 +418,7 @@ impl AdpcmDec {
         Self {
             block_align: DEFAULT_BLOCK_ALIGN,
             sample_rate: 0,
+            channels: 1,
             pending: Vec::new(),
             next_pts_ns: None,
             last_out: None,
@@ -387,36 +441,42 @@ impl AdpcmDec {
     }
 
     /// The coded layout `caps` carries, sentinels included.
-    fn coded_shape(caps: &Caps) -> Option<u32> {
+    fn coded_shape(caps: &Caps) -> Option<(u8, u32)> {
         match caps {
             Caps::Audio {
                 format: AudioFormat::ImaAdpcm,
                 channels,
                 sample_rate,
                 ..
-            } if *channels == ADPCM_CHANNELS || *channels == ANY_CHANNELS => Some(*sample_rate),
+            } if block_channels(*channels) => Some((*channels, *sample_rate)),
             _ => None,
         }
     }
 
-    fn output_caps(&self) -> Caps {
-        Caps::Audio {
-            format: AudioFormat::PcmS16Le,
-            channels: ADPCM_CHANNELS,
-            sample_rate: self.sample_rate,
-            channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
+    /// Adopt a refined channel count. The block layout is built around it, so
+    /// a partial block buffered under the old one does not survive a change.
+    fn set_channels(&mut self, channels: u8) {
+        if channels == ANY_CHANNELS || channels == self.channels {
+            return;
         }
+        self.channels = channels.min(MAX_ADPCM_CHANNELS);
+        self.pending.clear();
+    }
+
+    fn output_caps(&self) -> Caps {
+        pcm_caps(self.channels, self.sample_rate)
     }
 
     /// Nanoseconds of audio one block carries.
     fn block_duration_ns(&self) -> u64 {
-        samples_per_block(self.block_align) as u64 * 1_000_000_000 / self.sample_rate.max(1) as u64
+        block_frames(self.block_align, self.channels) as u64 * 1_000_000_000
+            / self.sample_rate.max(1) as u64
     }
 
     /// Decode every whole block the pending bytes hold; a partial one stays
     /// buffered for the next input frame.
     async fn drain(&mut self, out: &mut dyn OutputSink) -> Result<(), G2gError> {
-        let pcm_block = samples_per_block(self.block_align) * PCM_SAMPLE_BYTES;
+        let pcm_block = block_pcm_bytes(self.block_align, self.channels);
         while self.pending.len() >= self.block_align {
             // IMA ADPCM has no default rate the way G.711 has 8 kHz: without
             // one announced there is nothing to stamp the PCM with.
@@ -425,7 +485,8 @@ impl AdpcmDec {
             }
             let block: Vec<u8> = self.pending.drain(..self.block_align).collect();
             let mut pcm = alloc::vec![0u8; pcm_block];
-            decode_block(&block, &mut pcm).ok_or(G2gError::CapsMismatch)?;
+            decode_block_channels(self.channels.max(1) as usize, &block, &mut pcm)
+                .ok_or(G2gError::CapsMismatch)?;
             let new_caps = self.output_caps();
             if self.last_out.as_ref() != Some(&new_caps) {
                 out.push(PipelinePacket::CapsChanged(new_caps.clone()))
@@ -470,31 +531,31 @@ impl AsyncElement for AdpcmDec {
             .ok_or(G2gError::CapsMismatch)
     }
 
-    /// Mono S16LE at the coded rate. The wildcard alternative keeps a
+    /// S16LE at the coded layout. The wildcard alternative keeps a
     /// still-unknown rate negotiable; the real one arrives in the `CapsChanged`
     /// the parser emits ahead of the first block.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match Self::coded_shape(input) {
-            Some(sample_rate) => {
-                let pcm = |sample_rate| Caps::Audio {
-                    format: AudioFormat::PcmS16Le,
-                    channels: ADPCM_CHANNELS,
-                    sample_rate,
-                    channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
-                };
+            Some((channels, sample_rate)) => {
                 let fixatable = if sample_rate == ANY_SAMPLE_RATE {
                     FIXATE_SAMPLE_RATE_HZ
                 } else {
                     sample_rate
                 };
-                CapsSet::from_alternatives(alloc::vec![pcm(fixatable), pcm(ANY_SAMPLE_RATE)])
+                CapsSet::from_alternatives(alloc::vec![
+                    pcm_caps(channels, fixatable),
+                    pcm_caps(channels, ANY_SAMPLE_RATE)
+                ])
             }
             None => CapsSet::from_alternatives(Vec::new()),
         }))
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        self.sample_rate = Self::coded_shape(absolute_caps).ok_or(G2gError::CapsMismatch)?;
+        let (channels, sample_rate) =
+            Self::coded_shape(absolute_caps).ok_or(G2gError::CapsMismatch)?;
+        self.sample_rate = sample_rate;
+        self.set_channels(channels);
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
     }
@@ -503,7 +564,7 @@ impl AsyncElement for AdpcmDec {
         ElementMetadata::new(
             "ADPCM decoder",
             "Codec/Decoder/Audio",
-            "Decodes IMA ADPCM (dvi layout) to mono S16LE PCM",
+            "Decodes IMA ADPCM (dvi layout) to S16LE PCM",
             "g2g",
         )
     }
@@ -559,9 +620,13 @@ impl AsyncElement for AdpcmDec {
                     // landing): decoded PCM inherits it.
                     Caps::Audio {
                         format: AudioFormat::ImaAdpcm,
+                        channels,
                         sample_rate,
                         ..
-                    } => self.sample_rate = *sample_rate,
+                    } if block_channels(*channels) => {
+                        self.sample_rate = *sample_rate;
+                        self.set_channels(*channels);
+                    }
                     // The runner's pre-fixed output caps: forward them on.
                     Caps::Audio {
                         format: AudioFormat::PcmS16Le,
@@ -584,13 +649,8 @@ impl AsyncElement for AdpcmDec {
 impl PadTemplates for AdpcmDec {
     fn pad_templates() -> Vec<PadTemplate> {
         Vec::from([
-            PadTemplate::sink(CapsSet::one(coded_caps(ANY_SAMPLE_RATE))),
-            PadTemplate::source(CapsSet::one(Caps::Audio {
-                format: AudioFormat::PcmS16Le,
-                channels: ADPCM_CHANNELS,
-                sample_rate: ANY_SAMPLE_RATE,
-                channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
-            })),
+            PadTemplate::sink(CapsSet::one(coded_caps(ANY_CHANNELS, ANY_SAMPLE_RATE))),
+            PadTemplate::source(CapsSet::one(pcm_caps(ANY_CHANNELS, ANY_SAMPLE_RATE))),
         ])
     }
 }

@@ -685,6 +685,14 @@ pub(crate) fn resolve_forward_output(
     let keep_shape = prev_output.and_then(|p| {
         project_passthrough(p, PassthroughFields::NONE.with_format().with_channels())
     });
+    // Fields the element copies from its input. A `DerivedFields` transform
+    // states which it retargets instead, so a survivor differing from the input
+    // there is what the element produces (`audioconvert channels=1` fed stereo).
+    // Every other constraint declares nothing, so all fields are compared.
+    let copied_fields = match constraint {
+        CapsConstraint::DerivedFields(t) => t.passthrough(),
+        _ => PassthroughFields::ALL,
+    };
     // A kept-shape survivor is forwardable only when its re-derived fields
     // EQUAL the new input's (a converter's copied geometry / rate, unfixed
     // values included: a decoder emitting no framerate stays that way through
@@ -692,9 +700,13 @@ pub(crate) fn resolve_forward_output(
     // produce set (vorbisdec's 48 kHz against a 44.1 kHz input) is not
     // input-derived, and forwarding it would announce a value the element
     // never produces.
-    fn tracks_input(survivor: &Caps, input: &Caps) -> bool {
+    fn tracks_input(survivor: &Caps, input: &Caps, copied: PassthroughFields) -> bool {
         match (survivor.dims(), input.dims()) {
-            (Some(s), Some(i)) => s == i,
+            (Some((s_w, s_h, s_rate)), Some((i_w, i_h, i_rate))) => {
+                (!copied.width || s_w == i_w)
+                    && (!copied.height || s_h == i_h)
+                    && (!copied.framerate || s_rate == i_rate)
+            }
             _ => match (survivor, input) {
                 (
                     Caps::Audio {
@@ -707,7 +719,9 @@ pub(crate) fn resolve_forward_output(
                         sample_rate: i_rate,
                         ..
                     },
-                ) => s_rate == i_rate && s_ch == i_ch,
+                ) => {
+                    (!copied.sample_rate || s_rate == i_rate) && (!copied.channels || s_ch == i_ch)
+                }
                 _ => false,
             },
         }
@@ -717,7 +731,7 @@ pub(crate) fn resolve_forward_output(
         set.intersect(&CapsSet::one(shape.clone()))
             .alternatives()
             .iter()
-            .find(|c| tracks_input(c, input))
+            .find(|c| tracks_input(c, input, copied_fields))
             .cloned()
     };
     // a Derived closure computed the candidate from this input, so the element
@@ -733,7 +747,7 @@ pub(crate) fn resolve_forward_output(
             // input-derived or otherwise tracks the input.
             [one] => match candidates.fixate() {
                 Some(c) => ForwardResolve::Fixed(c),
-                None if derives_from_input || tracks_input(one, input) => {
+                None if derives_from_input || tracks_input(one, input, copied_fields) => {
                     ForwardResolve::Fixed(one.clone())
                 }
                 None => ForwardResolve::Defer,
@@ -2210,8 +2224,8 @@ fn apply_muxer_node<E>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::caps::{Dim, Rate, RawVideoFormat, VideoCodec};
-    use crate::caps_transform::{CapsTransform, FieldTransform, RawVideoShape};
+    use crate::caps::{AudioFormat, Dim, Rate, RawVideoFormat, VideoCodec};
+    use crate::caps_transform::{AudioShape, CapsTransform, FieldTransform, RawVideoShape};
     use crate::runtime::passthrough::couple_passthrough;
     use alloc::boxed::Box;
     use alloc::vec;
@@ -3041,6 +3055,34 @@ mod tests {
             resolve_forward_output(&conv, &i420, Some(&bgra_set), None),
             ForwardResolve::Infeasible(NegotiationFailure::EmptyLink { .. })
         ));
+    }
+
+    /// A converter that retargets the channel count keeps producing its target
+    /// when the real layout arrives mid-stream. The `wavparse ! audioconvert
+    /// channels=1 ! adpcmenc` regression: the WAV's stereo `fmt ` chunk lands
+    /// after negotiation fixated on the mono placeholder, and deferring there
+    /// forwards the converter's stereo INPUT to a mono-only encoder.
+    #[test]
+    fn resolve_forward_output_keeps_a_retargeted_channel_count() {
+        let audio = |channels: u8, sample_rate: u32| Caps::Audio {
+            format: AudioFormat::PcmS16Le,
+            channels,
+            sample_rate,
+            channel_layout: crate::ChannelLayout::UNSPECIFIED,
+        };
+        let to_mono = CapsConstraint::DerivedFields(CapsTransform::Audio {
+            accept: vec![AudioFormat::PcmS16Le],
+            produce: Vec::new(),
+            shapes: vec![AudioShape::PASSTHROUGH
+                .with_format(FieldTransform::Fixed(AudioFormat::PcmS16Le))
+                .with_channels(FieldTransform::Fixed(1))],
+        });
+        // Solved output, then the source's real (stereo) layout mid-stream.
+        let previous = audio(1, 48_000);
+        match resolve_forward_output(&to_mono, &audio(2, 8_000), None, Some(&previous)) {
+            ForwardResolve::Fixed(c) => assert_eq!(c, audio(1, 8_000)),
+            other => panic!("expected Fixed(mono), got {other:?}"),
+        }
     }
 
     /// A rescaler's single output is forwarded even when an input field it never
