@@ -79,6 +79,9 @@ Highest leverage first:
 ## Receive / decode
 
 - **`VulkanVideoDec` residuals.** Run the `vulkanvideo` GPU tests on Intel ANV.
+  On a driver that decodes into the reference slot but whose decode queue
+  cannot transfer, order each decode after the cross-queue readback copy of
+  every slot it references, not only the slot it writes.
 
 ## CUDA / display
 

@@ -45,6 +45,11 @@ VULKAN_VIDEO_FEATURES="vulkan-video,wgpu-sink,hdr-present"
 # (distinct output image, no transfer on the decode queue).
 RADEON_ICD="/usr/share/vulkan/icd.d/radeon_icd.x86_64.json"
 NVIDIA_ICD="/usr/share/vulkan/icd.d/nvidia_icd.x86_64.json"
+# The validation steps rerun the vulkan targets under the Khronos layer with
+# synchronization validation on, and fail on any error or sync hazard it logs.
+VALIDATION_LAYER_MANIFEST="/usr/share/vulkan/explicit_layer.d/VkLayer_khronos_validation.json"
+VALIDATION_LAYER_SELECTOR="*validation*"
+VALIDATION_FAILURE_PATTERN="Validation Error|SYNC-HAZARD"
 CUDA_FEATURES="nvdec,nvenc,cuda-wgpu,ffmpeg"
 CUDA_WGPU_END_TO_END_FEATURES="cuda-wgpu-e2e"
 SOAK_FEATURES="hls ffmpeg wayland-sink pipewire"
@@ -279,6 +284,81 @@ run_cargo_test_step() {
   record_step "$step_name" "PASS" "$total_test_count tests over $target_count targets"
 }
 
+# The layer truncates its log per process, so every target gets its own.
+write_validation_layer_settings() {
+  local settings_file="$1" layer_log="$2"
+  cat >"$settings_file" <<EOF
+khronos_validation.validate_sync = true
+khronos_validation.debug_action = VK_DBG_LAYER_ACTION_LOG_MSG
+khronos_validation.log_filename = $layer_log
+khronos_validation.report_flags = warn,error
+EOF
+}
+
+# The id of the first error or sync hazard in a layer log, empty when it is clean.
+first_validation_failure() {
+  local layer_log="$1" line
+  [ -f "$layer_log" ] || return 0
+  line="$(grep -m 1 -E "$VALIDATION_FAILURE_PATTERN" "$layer_log")" || return 0
+  # The header line reads "Validation Error: [ <id> ] | MessageID = ...".
+  if [[ "$line" =~ \[\ ([^][:space:]]+)\ \] ]]; then
+    printf '%s' "${BASH_REMATCH[1]}"
+  else
+    printf '%s' "$line"
+  fi
+}
+
+# run_vulkan_validation_step <name> <precondition> <test targets>
+# Runs each target like run_cargo_test_step, under the validation layer. A target
+# fails when the layer logged an error or sync hazard, its tests failed, or it
+# ran none.
+run_vulkan_validation_step() {
+  local step_name="$1" precondition="$2" targets="$3"
+  step_precondition_met "$step_name" "$precondition" || return 0
+  echo "== $step_name =="
+  local step_log="$WORK_DIRECTORY/step-${#STEP_NAMES[@]}.log"
+  local layer_directory="$WORK_DIRECTORY/validation-${#STEP_NAMES[@]}"
+  local target_log="$WORK_DIRECTORY/target.log"
+  LAST_STEP_LOG="$step_log"
+  : >"$step_log"
+  mkdir -p "$layer_directory"
+
+  local target target_count=0 failed_target_count=0 first_failure=""
+  local settings_file layer_log tests_passed failure
+  for target in $targets; do
+    target_count=$((target_count + 1))
+    settings_file="$layer_directory/$target.txt"
+    layer_log="$layer_directory/$target.log"
+    write_validation_layer_settings "$settings_file" "$layer_log"
+    tests_passed=0
+    if VK_LOADER_LAYERS_ENABLE="$VALIDATION_LAYER_SELECTOR" \
+      VK_LAYER_SETTINGS_PATH="$settings_file" \
+      cargo test -p g2g-plugins --features "$VULKAN_VIDEO_FEATURES" --test "$target" \
+      >"$target_log" 2>&1; then
+      tests_passed=1
+    fi
+    cat "$target_log" >>"$step_log"
+
+    failure="$(first_validation_failure "$layer_log")"
+    if [ -z "$failure" ] && [ "$tests_passed" -eq 0 ]; then
+      failure="tests failed"
+    elif [ -z "$failure" ] && [ "$(reported_test_count "$target_log")" -eq 0 ]; then
+      failure="ran 0 tests"
+    fi
+    [ -n "$failure" ] || continue
+    echo "$target: $failure" | tee -a "$step_log"
+    failed_target_count=$((failed_target_count + 1))
+    [ -n "$first_failure" ] || first_failure="$target $failure"
+  done
+
+  if [ "$failed_target_count" -ne 0 ]; then
+    record_step "$step_name" "FAIL" \
+      "$failed_target_count of $target_count targets failed, first $first_failure"
+    return
+  fi
+  record_step "$step_name" "PASS" "$target_count targets clean"
+}
+
 # ---------------------------------------------------------------- preconditions
 
 have_vulkan_device() {
@@ -301,6 +381,19 @@ have_both_vulkan_drivers() {
     return 1
   fi
   have_vulkan_device
+}
+
+have_validation_layer() {
+  if [ ! -e "$VALIDATION_LAYER_MANIFEST" ]; then
+    SKIP_REASON="no Khronos validation layer"
+    return 1
+  fi
+  have_vulkan_device
+}
+
+have_validation_layer_and_both_vulkan_drivers() {
+  have_validation_layer || return 1
+  have_both_vulkan_drivers
 }
 
 have_cuda_device() {
@@ -389,6 +482,13 @@ run_desktop_gpu_suite() {
     VK_DRIVER_FILES="$RADEON_ICD" \
       run_cargo_test_step "vulkan video decode (RADV)" have_both_vulkan_drivers \
       g2g-plugins "$VULKAN_VIDEO_FEATURES" "$vulkan_targets"
+    unset VK_DRIVER_FILES
+
+    run_vulkan_validation_step "vulkan validation (default)" have_validation_layer \
+      "$vulkan_targets"
+    VK_DRIVER_FILES="$RADEON_ICD" \
+      run_vulkan_validation_step "vulkan validation (RADV)" \
+      have_validation_layer_and_both_vulkan_drivers "$vulkan_targets"
     unset VK_DRIVER_FILES
     unset G2G_VULKAN_REF_DIR
   fi

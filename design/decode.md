@@ -564,6 +564,16 @@ per slot rather than per decode is what makes AV1 `show_existing_frame` and
 reorder re-display need no copy: a slot's picture stays readable until that slot
 is decoded into again, which cannot happen while it is still referenced.
 
+A driver that does not report `SEPARATE_REFERENCE_IMAGES`, the NVIDIA driver for
+all three codecs, requires every reference slot of a
+session to be a layer of one image. There the DPB is one image with an array
+layer per slot and a single-layer view per slot. The picture resource binds that
+view, so its `baseArrayLayer` is 0, and every barrier, readback copy, plane copy
+and sampling view names the slot's layer: a barrier over the whole image would
+take the other slots' references to `UNDEFINED` with it. A driver that reports the
+capability, RADV, gets one image per slot. Distinct-model output images are never
+references and stay one image per slot on both.
+
 A video-decode-only queue family, which is what RADV exposes, supports no
 transfer commands, so the readback copy cannot ride in the decode's own command
 buffer. There the copy is recorded on the compute family's queue instead and
@@ -596,7 +606,9 @@ two planes into a fresh image of the decoder's own format
 in place of the ycbcr dispatch) and imports it as a `TextureFormat::NV12` (8-bit
 `G8_B8R8`) or `TextureFormat::P010` (10-bit `G10X6`) wgpu texture behind
 `WgpuNv12Texture`, so a consumer samples the planes through `Plane0` / `Plane1`
-views with no colour conversion. The decode device requests whichever of
+views with no colour conversion. Those views are in each plane's own format, so
+the copy image is created `MUTABLE_FORMAT | EXTENDED_USAGE`, as wgpu creates its
+own two-plane textures. The decode device requests whichever of
 `TEXTURE_FORMAT_NV12` / `TEXTURE_FORMAT_P010` the adapter offers.
 
 A stream's bit depth is only known once its parameter sets parse, long after the
@@ -942,13 +954,28 @@ persistent command buffer and fence per slot, and one readback buffer sized
 `DECODE_RING_DEPTH` frames so each slot copies to its own region. Each picture is
 recorded and submitted without waiting. The oldest slot is retired, fence waited,
 its NV12 read back and its bitstream freed, only when the ring wraps onto it, and
-a final drain collects the tail. In-order execution on the single decode queue
-preserves DPB reference correctness because references are CPU-side bookkeeping,
-so only the readback buffer needs per-slot isolation. `reset` (seek) and `Drop`
-drain the ring first. This keeps CPU record and fence-wait latency behind GPU
-decode work instead of stalling after every picture, about 16% higher batch
-decode throughput on the 3060 measured on H.264, and the bit-exact-vs-ffmpeg
-guards go through this path unchanged.
+a final drain collects the tail. `reset` (seek) and `Drop` drain the ring first.
+This keeps CPU record and fence-wait latency behind GPU decode work instead of
+stalling after every picture, about 16% higher batch decode throughput on the
+3060 measured on H.264, and the bit-exact-vs-ffmpeg guards go through this path
+unchanged.
+
+Submission order on one queue does not by itself order one decode's reads after
+another's writes, so `record_decode` opens every decode after the session's first
+with a barrier whose source is the decode stage with decode read and write
+access. It transitions the target slot's layer, and on the distinct model the
+output image, after the earlier decodes that read or wrote them, and a global
+memory barrier from decode writes to decode reads makes the references those
+decodes wrote visible to this one. The first decode after a `RESET` takes the top
+of the pipe as its source, since the reset drained every earlier decode.
+Where the readback copy runs on another queue nothing orders a decode after the
+copy of the same slot's previous picture, so a decode into a slot first retires
+the ring entries through the newest one that decoded into it.
+
+The ycbcr pass and the two-plane copy wait the decode's semaphore at the compute
+and transfer stage respectively, and their opening layout transitions take that
+same stage as their source, which puts the transitions after the wait instead of
+ahead of it at the top of the queue.
 
 The streaming `VulkanVideoDec` element decodes one access unit per `process`
 call, so it drains per AU by design. The ring win is on the batch `decode_all`

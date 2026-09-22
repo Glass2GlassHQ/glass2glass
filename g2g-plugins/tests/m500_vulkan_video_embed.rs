@@ -38,12 +38,12 @@ struct VsOut {
 
 @vertex
 fn vs(@builtin(vertex_index) i: u32) -> VsOut {
-    // Fullscreen triangle.
-    var xy = array<vec2<f32>, 3>(vec2(-1.0, -1.0), vec2(3.0, -1.0), vec2(-1.0, 3.0));
-    var out: VsOut;
-    out.pos = vec4<f32>(xy[i], 0.0, 1.0);
-    out.uv = vec2<f32>((xy[i].x + 1.0) * 0.5, (xy[i].y + 1.0) * 0.5);
-    return out;
+    // fullscreen triangle with no local array or struct var: naga gives those a layout spirv-val rejects
+    let xy = vec2<f32>(select(-1.0, 3.0, i == 1u), select(-1.0, 3.0, i == 2u));
+    return VsOut(
+        vec4<f32>(xy, 0.0, 1.0),
+        vec2<f32>((xy.x + 1.0) * 0.5, (xy.y + 1.0) * 0.5),
+    );
 }
 
 @group(0) @binding(0) var tex: texture_2d<f32>;

@@ -54,16 +54,15 @@ struct VsOut {
 
 @vertex
 fn vs(@builtin(vertex_index) vid: u32) -> VsOut {
-    var corners = array<vec2<f32>, 3>(
-        vec2<f32>(-1.0, -1.0),
-        vec2<f32>( 3.0, -1.0),
-        vec2<f32>(-1.0,  3.0),
+    // no local array or struct var: naga gives those a layout spirv-val rejects
+    let xy = vec2<f32>(
+        select(-1.0, 3.0, vid == 1u),
+        select(-1.0, 3.0, vid == 2u),
     );
-    let xy = corners[vid];
-    var out: VsOut;
-    out.pos = vec4<f32>(xy, 0.0, 1.0);
-    out.uv = vec2<f32>((xy.x + 1.0) * 0.5, 1.0 - (xy.y + 1.0) * 0.5);
-    return out;
+    return VsOut(
+        vec4<f32>(xy, 0.0, 1.0),
+        vec2<f32>((xy.x + 1.0) * 0.5, 1.0 - (xy.y + 1.0) * 0.5),
+    );
 }
 "#;
 
