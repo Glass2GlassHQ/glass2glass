@@ -902,6 +902,11 @@ pub mod remoteclient;
 ))]
 pub mod metaonly;
 
+// The peer side of a remote transform: accept one client and run a chain of
+// transforms as the stage it offloads, replying one frame per frame.
+#[cfg(feature = "remote-ws")]
+pub mod remotewsstage;
+
 // Shared core for the distributed-graph remote-transform elements (WebSocket
 // RemoteWsTransform + WebTransport RemoteWtTransform): the FIFO frame-out /
 // processed-frame-back round trip, parameterized over the transport.

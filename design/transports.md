@@ -374,6 +374,15 @@ ends have to agree, so a payload arriving in that mode fails the run rather than
 being discarded. `metaonly.rs` holds the property and the merge, shared by the
 native transforms and the wasm `WsWireTransform` (`with_meta_only`).
 
+`serve_ws_stage` is the peer half. It accepts one client, splits the connection,
+and runs `run_linear_chain` over it: the read half backs a source that discovers
+the caps from the leading message, the write half a sink that returns one frame
+per frame (control stays local, since a reply pairs with the frame that caused
+it). So the offloaded stage can be a whole subgraph, a `Bin`'s interior
+flattened into its stages, rather than something hand-written per peer. Its
+`meta_only` flag is the serving end of the mode above. A branching subgraph is
+not covered: the host runs a linear chain.
+
 One generic, detection-agnostic element covers what a hand-rolled RGBA-up /
 boxes-down protocol would. The browser graph
 `WebSocketSrc -> WebCodecsDecode -> WsWireTransform -> AnalyticsOverlay ->
