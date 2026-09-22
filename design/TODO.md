@@ -103,9 +103,9 @@ Highest leverage first:
   - Data-channel loose ends: str0m surfaces no remote-close event, so EOS rides
     an explicit marker message; a WHIP/SFU-signalled data channel vs the P2P
     `SdpChannel` seam.
-- **Remote graph carriers.** Add a wrapper that remotes a whole `Bin`, and a
-  WebTransport datagram carrier. `WsWireSrc` is compile-checked only: run it in
-  a browser against a serving `RemoteWsSink`.
+- **Remote graph carriers.** Add a wrapper that remotes a whole `Bin`.
+  `WsWireSrc` is compile-checked only: run it in a browser against a serving
+  `RemoteWsSink`.
 
 ## Adaptive streaming (HLS / DASH)
 
