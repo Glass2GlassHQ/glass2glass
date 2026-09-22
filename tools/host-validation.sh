@@ -49,6 +49,8 @@ NVIDIA_ICD="/usr/share/vulkan/icd.d/nvidia_icd.x86_64.json"
 # synchronization validation on, and fail on any error or sync hazard it logs.
 VALIDATION_LAYER_MANIFEST="/usr/share/vulkan/explicit_layer.d/VkLayer_khronos_validation.json"
 VALIDATION_LAYER_SELECTOR="*validation*"
+VALIDATION_ACTIVE_HEADER="Khronos Validation Layer Active"
+VALIDATION_LOG_NOTICE="Logging validation error to"
 VALIDATION_FAILURE_PATTERN="Validation Error|SYNC-HAZARD"
 CUDA_FEATURES="nvdec,nvenc,cuda-wgpu,ffmpeg"
 CUDA_WGPU_END_TO_END_FEATURES="cuda-wgpu-e2e"
@@ -291,7 +293,7 @@ write_validation_layer_settings() {
 khronos_validation.validate_sync = true
 khronos_validation.debug_action = VK_DBG_LAYER_ACTION_LOG_MSG
 khronos_validation.log_filename = $layer_log
-khronos_validation.report_flags = warn,error
+khronos_validation.report_flags = info,warn,error
 EOF
 }
 
@@ -299,6 +301,11 @@ EOF
 first_validation_failure() {
   local layer_log="$1" line
   [ -f "$layer_log" ] || return 0
+  # info level makes the layer write this header, so an empty log is not a clean one
+  if ! grep -q "$VALIDATION_ACTIVE_HEADER" "$layer_log"; then
+    printf 'validation layer wrote no log'
+    return 0
+  fi
   line="$(grep -m 1 -E "$VALIDATION_FAILURE_PATTERN" "$layer_log")" || return 0
   # The header line reads "Validation Error: [ <id> ] | MessageID = ...".
   if [[ "$line" =~ \[\ ([^][:space:]]+)\ \] ]]; then
@@ -323,7 +330,7 @@ run_vulkan_validation_step() {
   : >"$step_log"
   mkdir -p "$layer_directory"
 
-  local target target_count=0 failed_target_count=0 first_failure=""
+  local target target_count=0 failed_target_count=0 first_failure="" no_instance_count=0
   local settings_file layer_log tests_passed failure
   for target in $targets; do
     target_count=$((target_count + 1))
@@ -339,6 +346,11 @@ run_vulkan_validation_step() {
     fi
     cat "$target_log" >>"$step_log"
 
+    # a target that opens no vulkan instance never loads the layer
+    if ! grep -q "$VALIDATION_LOG_NOTICE" "$target_log"; then
+      no_instance_count=$((no_instance_count + 1))
+      rm -f "$layer_log"
+    fi
     failure="$(first_validation_failure "$layer_log")"
     if [ -z "$failure" ] && [ "$tests_passed" -eq 0 ]; then
       failure="tests failed"
@@ -356,7 +368,12 @@ run_vulkan_validation_step() {
       "$failed_target_count of $target_count targets failed, first $first_failure"
     return
   fi
-  record_step "$step_name" "PASS" "$target_count targets clean"
+  if [ "$no_instance_count" -eq "$target_count" ]; then
+    record_step "$step_name" "FAIL" "the validation layer loaded in no target"
+    return
+  fi
+  record_step "$step_name" "PASS" \
+    "$((target_count - no_instance_count)) targets clean, $no_instance_count opened no vulkan instance"
 }
 
 # ---------------------------------------------------------------- preconditions

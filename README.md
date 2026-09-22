@@ -1046,6 +1046,12 @@ fixture with ffmpeg and points `G2G_VULKAN_REF_DIR` at the dumps, so the decode
 tests compare their hardware output bit for bit instead of checking geometry
 alone; without ffmpeg that step reports SKIP and the decode steps still run.
 
+It then runs the same Vulkan test files again under the Khronos validation layer
+with synchronization validation on, once per driver, and fails on any validation
+error or sync hazard. A test file that opens no Vulkan instance is counted
+separately, and a log without the layer's startup line fails, so a layer that
+never loaded cannot pass as clean.
+
 **Create the token.** GitHub → Settings → Developer settings → Personal
 access tokens → Fine-grained tokens → Generate new token. Resource owner: the
 account that owns the repository. Repository access: Only select repositories
