@@ -459,11 +459,8 @@ async fn alertrecorder_writes_a_clip_that_decodes_back() {
         .await
         .expect("the clip decodes");
     let mut decoded = 0;
-    loop {
-        match pull.try_pull() {
-            Pull::Frame(_) => decoded += 1,
-            Pull::Empty | Pull::Ended => break,
-        }
+    while let Pull::Frame(_) = pull.try_pull() {
+        decoded += 1;
     }
     assert_eq!(decoded, expected, "the clip covers the alert's window");
     let _ = std::fs::remove_dir_all(&directory);
