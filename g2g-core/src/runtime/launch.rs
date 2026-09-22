@@ -2426,19 +2426,39 @@ fn build_graph(
     }
 
     let is_tee = |ei: usize| specs[ei].name == "tee";
+    // The name feeding `ei` over its one inbound link, when it has exactly one.
+    let sole_producer = |ei: usize| {
+        let mut found = None;
+        for &(s, d, _, _) in &links {
+            if d != ei {
+                continue;
+            }
+            if found.is_some() {
+                return None;
+            }
+            found = Some(specs[s].name.as_str());
+        }
+        found
+    };
     // A non-tee node with several inbound links is a muxer (built from the
     // registry with that input count); a tee has a single input pad. A single
     // inbound link builds a fan-in too when the name is only registered as a
     // muxer (M1155: `livesync` needs the fan-in arm's deadline tick and has one
-    // input); a name registered both ways (`mp4mux`, `textoverlay`) keeps
-    // falling back to its single-input element.
+    // input). A name registered both ways (`mp4mux`, `textoverlay`) falls back
+    // to its single-input element, unless that element does not take what the
+    // one producer puts out and the fan-in does: a lone subtitle track into
+    // `mp4mux` is the video-only `Mp4Mux` against `Mp4MuxN`'s `tx3g`.
     let is_muxer = |ei: usize| {
         !is_tee(ei)
             && match in_deg[ei] {
                 0 => false,
                 1 => {
                     registry.is_muxer(&specs[ei].name)
-                        && !registry.is_launch_element(&specs[ei].name)
+                        && (!registry.is_launch_element(&specs[ei].name)
+                            || sole_producer(ei).is_some_and(|upstream| {
+                                registry.launch_element_accepts(&specs[ei].name, upstream)
+                                    == Some(false)
+                            }))
                 }
                 _ => true,
             }

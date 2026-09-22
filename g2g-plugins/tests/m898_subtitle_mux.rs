@@ -28,6 +28,13 @@ use g2g_plugins::mp4demuxn::{Mp4DemuxN, Mp4Port};
 use g2g_plugins::mp4muxn::Mp4MuxN;
 use g2g_plugins::subparse::SubParse;
 
+struct ZeroClock;
+impl g2g_core::PipelineClock for ZeroClock {
+    fn now_ns(&self) -> u64 {
+        0
+    }
+}
+
 /// The cue source for every leg: two cues with a gap between them and a start
 /// past zero, so the gap handling each container needs is exercised.
 const SRT: &str = "1\n\
@@ -861,6 +868,67 @@ async fn ffmpeg_reads_the_cues_back_from_a_g2g_muxed_file() {
         }
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(dir.join(format!("{name}.srt")));
+    }
+}
+
+/// A lone subtitle track through a launch line: `mp4mux` at one inbound link is
+/// the video-only single-input element, so the parser has to reach the fan-in
+/// muxer that writes `tx3g` instead.
+#[tokio::test]
+async fn a_text_only_launch_line_writes_a_tx3g_track() {
+    let dir = std::env::temp_dir();
+    let stamp = std::process::id();
+    let srt_path = dir.join(format!("g2g-m898-{stamp}-textonly.srt"));
+    std::fs::write(&srt_path, SRT).expect("write the srt");
+    let out_path = dir.join(format!("g2g-m898-{stamp}-textonly.mp4"));
+    let line = format!(
+        "subtitlesrc location={} ! subparse ! mp4mux ! filesink location={}",
+        srt_path.display(),
+        out_path.display()
+    );
+    let registry = g2g_plugins::registry::default_registry();
+    let graph = g2g_core::runtime::parse_launch(&registry, &line).expect("the line parses");
+    g2g_core::runtime::run_graph(graph, &ZeroClock, 4)
+        .await
+        .expect("the line runs");
+
+    if !have("ffmpeg") || !have("ffprobe") {
+        eprintln!("ffmpeg/ffprobe not present; skipping the reference-peer read");
+        assert!(
+            std::fs::metadata(&out_path)
+                .expect("the sink wrote a file")
+                .len()
+                > 0,
+            "the muxer wrote bytes"
+        );
+        return;
+    }
+    let streams = probe_streams(&out_path);
+    assert_eq!(streams.len(), 1, "the lone text track: {streams:?}");
+    assert!(
+        streams[0].contains("codec_type=subtitle") && streams[0].contains("codec_name=mov_text"),
+        "the track is timed text: {streams:?}"
+    );
+    let srt = extract_srt(
+        &out_path,
+        &dir.join(format!("g2g-m898-{stamp}-textonly-back.srt")),
+    );
+    for (text, start, end) in [
+        ("Hello world", "00:00:01,000", "00:00:03,500"),
+        ("Second cue", "00:00:05,000", "00:00:06,000"),
+    ] {
+        assert!(srt.contains(text), "the cue text survives: {srt}");
+        assert!(
+            srt.contains(&format!("{start} --> {end}")),
+            "the cue window survives: {srt}"
+        );
+    }
+    for path in [
+        srt_path,
+        out_path,
+        dir.join(format!("g2g-m898-{stamp}-textonly-back.srt")),
+    ] {
+        let _ = std::fs::remove_file(path);
     }
 }
 

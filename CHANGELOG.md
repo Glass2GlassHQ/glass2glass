@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1186: the launch parser builds the fan-in muxer at one inbound link when the single-input element does not take what the producer puts out, so a lone subtitle track reaches `mp4mux`.
 - M1185: `adpcmenc` / `adpcmdec` carry stereo IMA ADPCM blocks, and a converter pinned to a channel count keeps converting when the source announces its real layout mid-stream.
 - M1184: `VulkanVideoDec` orders a decode after the cross-queue readback of every slot it references, on a driver that decodes into the reference slot but cannot copy on its decode queue.
 - M1183: `VulkanVideoDec` runs clean under the Khronos validation layer with sync validation on NVIDIA and RADV, and the nightly GPU suite fails on any layer error.

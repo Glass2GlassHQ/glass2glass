@@ -589,6 +589,18 @@ mod factory {
         }
     }
 
+    /// The fixed caps of the first template facing `direction`, if it has any
+    /// (a wildcard pad constrains nothing, so it answers `None`).
+    fn pad_caps(templates: &[PadTemplate], direction: PadDirection) -> Option<&CapsSet> {
+        templates
+            .iter()
+            .find(|t| t.direction == direction)
+            .and_then(|t| match &t.caps {
+                PadCaps::Fixed(s) => Some(s),
+                PadCaps::Any => None,
+            })
+    }
+
     /// A named element factory for the `gst-launch` text parser and the
     /// `gst-inspect` dump (M105): a *parameterless* constructor plus the element's
     /// pad templates. Unlike [`ElementFactory`] (the autoplug factory, built from
@@ -1886,6 +1898,37 @@ mod factory {
         pub fn is_launch_element(&self, name: &str) -> bool {
             let name = self.resolve_alias(name);
             self.launch.iter().any(|f| f.name == name)
+        }
+
+        /// Whether the single-input element registered as `name` accepts what
+        /// the element registered as `upstream` puts out. `None` when either
+        /// side is unregistered or its pad is a wildcard: the parser cannot
+        /// tell, and treats that as acceptance.
+        pub fn launch_element_accepts(&self, name: &str, upstream: &str) -> Option<bool> {
+            let name = self.resolve_alias(name);
+            let upstream = self.resolve_alias(upstream);
+            let produced = match self.sources.iter().find(|s| s.name == upstream) {
+                Some(source) => CapsSet::one(source.output.clone()),
+                None => {
+                    let factory = self.launch.iter().find(|f| f.name == upstream)?;
+                    pad_caps(&factory.templates, PadDirection::Source)?.clone()
+                }
+            };
+            let factory = self.launch.iter().find(|f| f.name == name)?;
+            let sink = factory
+                .templates
+                .iter()
+                .find(|t| t.direction == PadDirection::Sink)?;
+            if matches!(sink.caps, PadCaps::Any) {
+                return None;
+            }
+            Some(produced.alternatives().iter().any(|caps| {
+                let as_source = PadTemplate::source(CapsSet::one(caps.clone()));
+                matches!(
+                    pad_link(&as_source, sink),
+                    Ok(_) | Err(NegotiationFailure::Unfixable { .. })
+                )
+            }))
         }
 
         /// The names of every element registerable by the parser: sources first,
