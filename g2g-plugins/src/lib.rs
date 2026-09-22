@@ -893,6 +893,15 @@ pub mod remotesource;
 #[cfg(any(feature = "remote", feature = "remote-ws", feature = "webtransport"))]
 pub mod remoteclient;
 
+// The meta-only reply mode the remote-transform elements share: the peer returns
+// each frame's metadata alone and the client emits the frame it kept.
+#[cfg(any(
+    feature = "remote-ws",
+    feature = "webtransport",
+    all(target_arch = "wasm32", feature = "web")
+))]
+pub mod metaonly;
+
 // Shared core for the distributed-graph remote-transform elements (WebSocket
 // RemoteWsTransform + WebTransport RemoteWtTransform): the FIFO frame-out /
 // processed-frame-back round trip, parameterized over the transport.

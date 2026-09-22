@@ -358,6 +358,13 @@ through locally. The native `RemoteWsTransform` is a tokio-tungstenite client
 that offloads a middle stage to another machine, and the browser
 `WsWireTransform` is its wasm twin.
 
+`meta-only` drops the return pixels for a stage that leaves them alone: the
+client keeps the frame it sent, the peer replies with an empty payload carrying
+the metadata, and the client emits its own frame with that meta attached. Both
+ends have to agree, so a payload arriving in that mode fails the run rather than
+being discarded. `metaonly.rs` holds the property and the merge, shared by the
+native transforms and the wasm `WsWireTransform` (`with_meta_only`).
+
 One generic, detection-agnostic element covers what a hand-rolled RGBA-up /
 boxes-down protocol would. The browser graph
 `WebSocketSrc -> WebCodecsDecode -> WsWireTransform -> AnalyticsOverlay ->

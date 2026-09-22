@@ -21,10 +21,13 @@
 //! peer), so the reply stream stays one-packet-per-frame. Per-frame timing still
 //! crosses (the wire codec carries each frame's `FrameTiming`).
 //!
-//! Bandwidth note: this round-trips the whole frame both ways, the honest cost of
-//! a generic packet-in / packet-out transform. Fine on a LAN / localhost; a
-//! `metadata`-only return (retain the frame locally, receive only the attached
-//! meta) is a future optimization for the pixels-unchanged case.
+//! Bandwidth note: a full round trip carries the whole frame both ways, the
+//! honest cost of a generic packet-in / packet-out transform. `meta-only` halves
+//! it for a stage that only attaches metadata (inference, analytics): the client
+//! keeps its own frame, the peer replies with an empty payload carrying the meta
+//! alone, and the client emits its retained frame with that meta on it. Both ends
+//! have to agree, so a payload arriving in that mode is a protocol error rather
+//! than something to discard.
 //!
 //! `RemoteTransform<T>` holds the shared machinery; a [`PacketDuplex`] transport
 //! supplies the connection. [`RemoteWsTransform`](crate::remotewstransform) and
@@ -42,6 +45,7 @@ use g2g_core::{
     PropertySpec,
 };
 
+use crate::metaonly::{merge_meta, META_ONLY_PROPERTY};
 use crate::remoteclient::PacketClient;
 use crate::remotesource::TransportFuture;
 
@@ -65,6 +69,8 @@ pub trait PacketDuplex: PacketClient {
 /// docs.
 pub struct RemoteTransform<T: PacketDuplex> {
     transport: T,
+    /// Whether the peer returns metadata alone (see [`META_ONLY_PROPERTY`]).
+    meta_only: bool,
     /// Caps recorded in `configure_pipeline`, sent to the peer (deduped against
     /// `last_sent`) as the leading `CapsChanged` so its subgraph configures.
     configured_caps: Option<Caps>,
@@ -88,6 +94,7 @@ impl<T: PacketDuplex> RemoteTransform<T> {
     pub(crate) fn from_transport(transport: T) -> Self {
         Self {
             transport,
+            meta_only: false,
             configured_caps: None,
             last_sent: None,
             configured: false,
@@ -98,6 +105,19 @@ impl<T: PacketDuplex> RemoteTransform<T> {
     /// Count of processed frames emitted downstream. Useful in tests.
     pub fn emitted(&self) -> u64 {
         self.emitted
+    }
+
+    /// Take the peer's metadata alone and keep each frame locally, for a stage
+    /// that leaves the pixels alone. The peer has to agree: a reply carrying a
+    /// payload fails the run.
+    pub fn with_meta_only(mut self, meta_only: bool) -> Self {
+        self.meta_only = meta_only;
+        self
+    }
+
+    /// Whether metadata-only replies are expected.
+    pub fn meta_only(&self) -> bool {
+        self.meta_only
     }
 
     /// Send `caps` to the peer unless it already has them, so its subgraph
@@ -157,9 +177,10 @@ impl<T: PacketDuplex> AsyncElement for RemoteTransform<T> {
 
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    self.transport
-                        .send(&PipelinePacket::DataFrame(frame))
-                        .await?;
+                    // Sent by reference, so the frame is still here to emit when
+                    // the peer returns metadata alone.
+                    let sent = PipelinePacket::DataFrame(frame);
+                    self.transport.send(&sent).await?;
                     // Exactly one processed packet comes back per frame (the peer
                     // never echoes control), so this read pairs with our frame.
                     let processed = self
@@ -168,7 +189,12 @@ impl<T: PacketDuplex> AsyncElement for RemoteTransform<T> {
                         .await?
                         .ok_or(G2gError::Hardware(HardwareError::Other))?;
                     self.emitted += 1;
-                    out.push(processed).await?;
+                    let emit = if self.meta_only {
+                        merge_meta(sent, processed)?
+                    } else {
+                        processed
+                    };
+                    out.push(emit).await?;
                 }
                 PipelinePacket::CapsChanged(caps) => {
                     // Forward mid-stream refinement to the peer (deduped) and
@@ -206,12 +232,19 @@ impl<T: PacketDuplex> AsyncElement for RemoteTransform<T> {
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        if name == META_ONLY_PROPERTY.name {
+            self.meta_only = value.as_bool().ok_or(PropError::Type)?;
+            return Ok(());
+        }
         self.transport
             .set_transport_prop(name, &value)
             .unwrap_or(Err(PropError::Unknown))
     }
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
+        if name == META_ONLY_PROPERTY.name {
+            return Some(PropValue::Bool(self.meta_only));
+        }
         self.transport.get_transport_prop(name)
     }
 }

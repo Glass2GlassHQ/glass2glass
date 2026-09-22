@@ -21,8 +21,8 @@
 //! frame in flight; the linear browser chain processes one frame at a time).
 //!
 //! Bandwidth note: this round-trips the whole frame both ways, the honest cost of
-//! a generic packet-in / packet-out transform (a `metadata`-only return is a
-//! future optimization for the pixels-unchanged case).
+//! a generic packet-in / packet-out transform. `with_meta_only` drops the return
+//! pixels for a stage that only attaches metadata, see [`crate::metaonly`].
 
 use core::future::Future;
 use core::pin::Pin;
@@ -67,6 +67,8 @@ pub struct WsWireTransform {
     /// leading `CapsChanged` so its subgraph configures before the first frame.
     configured_caps: Option<Caps>,
     last_sent: Option<Caps>,
+    /// Whether the peer returns metadata alone (see [`crate::metaonly`]).
+    meta_only: bool,
     emitted: u64,
 }
 
@@ -98,8 +100,17 @@ impl WsWireTransform {
             configured: false,
             configured_caps: None,
             last_sent: None,
+            meta_only: false,
             emitted: 0,
         }
+    }
+
+    /// Take the peer's metadata alone and keep each frame locally, for a stage
+    /// that leaves the pixels alone. The peer has to agree: a reply carrying a
+    /// payload fails the run.
+    pub fn with_meta_only(mut self, meta_only: bool) -> Self {
+        self.meta_only = meta_only;
+        self
     }
 
     /// Count of processed frames emitted downstream. Useful in tests.
@@ -218,7 +229,10 @@ impl AsyncElement for WsWireTransform {
 
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    self.send(&PipelinePacket::DataFrame(frame)).await?;
+                    // Sent by reference, so the frame is still here to emit when
+                    // the peer returns metadata alone.
+                    let sent = PipelinePacket::DataFrame(frame);
+                    self.send(&sent).await?;
                     // Exactly one processed packet per frame (the peer never
                     // echoes control), so this read pairs with our frame.
                     let bytes = {
@@ -228,7 +242,12 @@ impl AsyncElement for WsWireTransform {
                     let bytes = bytes.ok_or(G2gError::Hardware(HardwareError::Other))?;
                     let processed = decode_packet(&bytes).map_err(map_wire)?;
                     self.emitted += 1;
-                    out.push(processed).await?;
+                    let emit = if self.meta_only {
+                        crate::metaonly::merge_meta(sent, processed)?
+                    } else {
+                        processed
+                    };
+                    out.push(emit).await?;
                 }
                 PipelinePacket::CapsChanged(caps) => {
                     if self.last_sent.as_ref() != Some(&caps) {

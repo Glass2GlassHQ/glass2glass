@@ -63,6 +63,7 @@ impl PacketDuplex for WtClient {
         .with_default("https://127.0.0.1:9604"),
         CERT_HASHES_PROP,
         crate::remotewtio::CONGESTION_PROP,
+        crate::metaonly::META_ONLY_PROPERTY,
     ];
 
     fn recv(&mut self) -> TransportFuture<'_, Option<PipelinePacket>> {

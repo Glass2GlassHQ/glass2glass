@@ -104,9 +104,8 @@ Highest leverage first:
     an explicit marker message; a WHIP/SFU-signalled data channel vs the P2P
     `SdpChannel` seam.
 - **Remote graph carriers.** Add a native WebSocket server that pushes an
-  unsolicited stream to `WsWireSrc`, a wrapper that remotes a whole `Bin`, a
-  WebTransport datagram carrier, and a metadata-only response for remote
-  transforms whose pixels are unchanged.
+  unsolicited stream to `WsWireSrc`, a wrapper that remotes a whole `Bin`, and a
+  WebTransport datagram carrier.
 
 ## Adaptive streaming (HLS / DASH)
 

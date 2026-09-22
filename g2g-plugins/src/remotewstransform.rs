@@ -35,12 +35,15 @@ impl RemoteWsTransform {
 impl PacketDuplex for WsClient {
     const NAME: &'static str = "Remote WebSocket transform";
     const DESCRIPTION: &'static str = "Offloads a middle stage: ships each frame to a remote peer over a WebSocket and emits the processed frame it returns";
-    const PROPERTIES: &'static [PropertySpec] = &[PropertySpec::new(
-        "location",
-        PropKind::Str,
-        "WebSocket URL of the remote stage server (e.g. ws://host:port)",
-    )
-    .with_default("ws://127.0.0.1:9602")];
+    const PROPERTIES: &'static [PropertySpec] = &[
+        PropertySpec::new(
+            "location",
+            PropKind::Str,
+            "WebSocket URL of the remote stage server (e.g. ws://host:port)",
+        )
+        .with_default("ws://127.0.0.1:9602"),
+        crate::metaonly::META_ONLY_PROPERTY,
+    ];
 
     fn recv(&mut self) -> TransportFuture<'_, Option<PipelinePacket>> {
         Box::pin(async move {
