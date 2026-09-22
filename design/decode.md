@@ -498,9 +498,10 @@ available.
 `as_hal::<Vulkan>()`, finds a decode-capable queue family, and queries
 `vkGetPhysicalDeviceVideoCapabilitiesKHR` for H.264, H.265 and AV1. It returns
 the coded-extent range, DPB slot and active-reference budget, and the
-`DPB_AND_OUTPUT_COINCIDE` flag that `intercept_caps` and DPB sizing negotiate
-against. On the RTX 3060: H.264 to 4096 square, H.265 and AV1 to 8192 square,
-output coincides with the DPB.
+`DPB_AND_OUTPUT_COINCIDE` flag that `intercept_caps`, DPB sizing and the decode
+model negotiate against. On the RTX 3060: H.264 to 4096 square, H.265 and AV1 to
+8192 square, output coincides with the DPB. On the Radeon 680M under Mesa RADV:
+H.264 to 4096 square, H.265 and AV1 to 8192x4352, output distinct from the DPB.
 
 The query returns a generic `ERROR_INITIALIZATION_FAILED` unless the
 codec-specific output caps struct (`VkVideoDecodeH264/H265/AV1CapabilitiesKHR`)
@@ -537,10 +538,39 @@ geometries with `ERROR_INVALID_VIDEO_STD_PARAMETERS_KHR`.
 
 Every image the session writes, DPB slot and decode output, is created at the
 picture extent rounded up to the device's `pictureAccessGranularity`, the unit in
-which a decode accesses a picture resource. The readback copy takes the picture's
-own extent back out of that image, and the YCbCr compute pass is given the padded
-extent so its normalized coordinates still land on the picture's texels. The
-padding never reaches an output frame.
+which a decode accesses a picture resource, and never below the device's minimum
+coded extent. The readback copy takes the picture's own extent back out of that
+image, and the YCbCr compute pass is given the padded extent so its normalized
+coordinates still land on the picture's texels. The padding never reaches an
+output frame: `output_extent` is the picture size the caller gets, `coded_extent`
+the size every picture resource is bound at, which the spec requires to stay
+inside the device's coded-extent range.
+
+A driver reporting `DPB_AND_OUTPUT_COINCIDE` decodes into its reference slot, and
+one image per slot serves as both. A driver that does not, Mesa RADV for all
+three codecs, writes the picture into a second image in the same decode
+operation. There the format query runs twice, once for `VIDEO_DECODE_DST_KHR` and
+once for `VIDEO_DECODE_DPB_KHR` alone (the combined query returns no format at
+all, which is what used to fail every session create), and each DPB slot is
+created in the reference format with the DPB usage bit alone, paired one to one
+with an output image in the decode format carrying the output bit plus
+`TRANSFER_SRC` and, on the GPU path, `SAMPLED`. The decode binds the slot as its
+setup reference and the paired image as `dstPictureResource`; reference lists
+keep naming slot images. Every reader, the readback copy, the YCbCr pass, the
+two-plane copy and the film-grain read-back, takes the paired output image in
+`VIDEO_DECODE_DST_KHR` layout instead of the slot in `VIDEO_DECODE_DPB_KHR`, and
+skips the transition back that keeps a coincide slot a valid reference. Pairing
+per slot rather than per decode is what makes AV1 `show_existing_frame` and
+reorder re-display need no copy: a slot's picture stays readable until that slot
+is decoded into again, which cannot happen while it is still referenced.
+
+A video-decode-only queue family, which is what RADV exposes, supports no
+transfer commands, so the readback copy cannot ride in the decode's own command
+buffer. There the copy is recorded on the compute family's queue instead and
+submitted after a per-ring-slot semaphore the decode signals, and every readable
+picture image is `CONCURRENT` across the families that touch it. The decode queue
+copies in its own command buffer when its family allows it, which is one
+submission per picture instead of two.
 
 Session and DPB rebuild mid-stream on any in-band parameter-set change, keyed by
 a byte fingerprint of the AU's parameter sets. That covers geometry and
@@ -862,14 +892,13 @@ decode order differs from display order takes a synchronous reorder-aware path:
 without emitting, and each `show_existing_frame` emits the referenced stored slot
 at its display position.
 
-Film grain is synthesized on the decoded NV12. The 3060 exposes only
-`DPB_AND_OUTPUT_COINCIDE` for AV1, so the driver cannot apply grain, which needs
-a distinct output image, and `apply_film_grain_nv12` runs the full AV1 grain
+Film grain is synthesized on the decoded NV12. The session never asks the driver
+to apply it, on either decode model, and `apply_film_grain_nv12` runs the full AV1 grain
 synthesis (spec 7.18.3, ported from the re_rav1d scalar reference) on the
 grain-free hardware reconstruction, bit-exact against dav1d for luma and chroma.
 The GPU-texture path applies the same grain: since the ycbcr compute pass
-produces the grain-free reconstruction, `grained_slot_to_texture` reads the
-displayed slot back to NV12, the GPU DPB images carrying `TRANSFER_SRC`, runs
+produces the grain-free reconstruction, `grained_picture_to_texture` reads the
+displayed picture back to NV12, the GPU picture images carrying `TRANSFER_SRC`, runs
 `apply_film_grain_nv12`, and uploads the result into a texture in whichever layout
 the caps settled on: RGBA through the CPU convert, or a `TextureFormat::NV12`
 texture written one `write_texture` per plane aspect when the caps pinned the

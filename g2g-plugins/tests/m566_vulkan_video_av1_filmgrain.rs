@@ -1,10 +1,8 @@
 //! M566: Vulkan Video AV1 film grain synthesis on real hardware.
 //!
 //! AV1 film grain is applied at output time on the grain-free reconstruction. The
-//! Vulkan hardware decoder does not apply it (the RTX 3060 exposes only
-//! `DPB_AND_OUTPUT_COINCIDE`; driver grain needs a distinct output image,
-//! `DPB_AND_OUTPUT_DISTINCT`), so `Av1DpbDecoder` synthesizes grain on the decoded
-//! NV12 (`apply_film_grain_nv12`, ported from the re_rav1d scalar reference, the
+//! session never asks the driver to apply it, so `Av1DpbDecoder` synthesizes
+//! grain on the decoded NV12 (`apply_film_grain_nv12`, ported from the re_rav1d scalar reference, the
 //! same crate g2g uses for `Rav1dDec`), matching the ffmpeg / dav1d software
 //! decoder bit-for-bit. A film-grain stream routes through the synchronous
 //! reorder-aware path so grain is applied per displayed frame.

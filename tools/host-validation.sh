@@ -39,6 +39,12 @@ FAILURE_LOG_TAIL_LINES=25
 # wgpu-sink and hdr-present are what the three vulkan test files that need more
 # than vulkan-video gate on. Without them those files compile to empty binaries.
 VULKAN_VIDEO_FEATURES="vulkan-video,wgpu-sink,hdr-present"
+# The default adapter pick prefers the discrete GPU, so on a host with both an
+# NVIDIA card and a Mesa RADV one the vulkan tests only ever exercise NVIDIA. The
+# second step pins the loader to the radeon ICD to cover the other decode model
+# (distinct output image, no transfer on the decode queue).
+RADEON_ICD="/usr/share/vulkan/icd.d/radeon_icd.x86_64.json"
+NVIDIA_ICD="/usr/share/vulkan/icd.d/nvidia_icd.x86_64.json"
 CUDA_FEATURES="nvdec,nvenc,cuda-wgpu,ffmpeg"
 CUDA_WGPU_END_TO_END_FEATURES="cuda-wgpu-e2e"
 SOAK_FEATURES="hls ffmpeg wayland-sink pipewire"
@@ -288,6 +294,15 @@ have_vulkan_device() {
   fi
 }
 
+have_both_vulkan_drivers() {
+  # On an AMD-only host the default vulkan step already runs on RADV.
+  if [ ! -e "$RADEON_ICD" ] || [ ! -e "$NVIDIA_ICD" ]; then
+    SKIP_REASON="no second Vulkan driver"
+    return 1
+  fi
+  have_vulkan_device
+}
+
 have_cuda_device() {
   # The driver's control node exists exactly when the NVIDIA driver is loaded.
   if [ ! -c /dev/nvidiactl ]; then
@@ -354,6 +369,10 @@ run_desktop_gpu_suite() {
   else
     run_cargo_test_step "vulkan video decode" have_vulkan_device \
       g2g-plugins "$VULKAN_VIDEO_FEATURES" "$vulkan_targets"
+    VK_DRIVER_FILES="$RADEON_ICD" \
+      run_cargo_test_step "vulkan video decode (RADV)" have_both_vulkan_drivers \
+      g2g-plugins "$VULKAN_VIDEO_FEATURES" "$vulkan_targets"
+    unset VK_DRIVER_FILES
   fi
 
   run_cargo_test_step "cuda decode + wgpu bridge" have_cuda_device \

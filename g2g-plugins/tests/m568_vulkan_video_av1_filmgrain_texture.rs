@@ -1,11 +1,10 @@
 //! M568: AV1 film grain on the GPU-texture decode path, on real hardware.
 //!
 //! The zero-copy `decode_all_to_textures` path (M494's AV1 sibling) produces the
-//! grain-free hardware reconstruction: the RTX 3060 exposes only
-//! `DPB_AND_OUTPUT_COINCIDE`, so the driver cannot apply grain, and the GPU ycbcr
-//! compute pass has no grain stage. For a grain stream the reorder-aware texture
-//! path now reads each displayed slot back to NV12 (`TRANSFER_SRC`), synthesizes
-//! grain on the CPU bit-for-bit with dav1d (`apply_film_grain_nv12`, the same path
+//! grain-free hardware reconstruction: the session never asks the driver to apply
+//! grain, and the GPU ycbcr compute pass has no grain stage. For a grain stream
+//! the reorder-aware texture path reads each displayed slot back to NV12
+//! (`TRANSFER_SRC`), synthesizes grain on the CPU bit-for-bit with dav1d (`apply_film_grain_nv12`, the same path
 //! M566 proved on the system output), and uploads the result to the texture. Grain
 //! is output-only, so the read-back leaves the DPB reference untouched.
 //!
