@@ -498,8 +498,12 @@ impl RecordStore {
     ) -> Vec<Value> {
         let deadline = Instant::now() + timeout;
         let mut state = self.lock();
-        // an ended run posts nothing more, so its whole tail counts as fresh
-        let posted_before = if state.ended { 0 } else { state.posted };
+        // a finished run posts nothing more, so its whole tail is fresh (bus eos may lag the run state)
+        let posted_before = if state.ended || run_ended() {
+            0
+        } else {
+            state.posted
+        };
         loop {
             let matched = records_since(&state, posted_before, key);
             if matched.len() >= count || state.ended || run_ended() {
@@ -2404,4 +2408,21 @@ fn emit_progress(token: &Value, progress: u64, telemetry: Value) {
     let mut out = std::io::stdout();
     let _ = writeln!(out, "{note}");
     let _ = out.flush();
+}
+
+#[cfg(all(test, feature = "mcp"))]
+mod tests {
+    use super::*;
+
+    // the runner's finished state can arrive before the bus eos ends the store
+    #[test]
+    fn wait_treats_a_finished_run_as_ended() {
+        let store = RecordStore::new();
+        store.push(json!({ "pts": 0.0 }));
+        store.push(json!({ "pts": 1.0, "alert": "car" }));
+        let run_ended = || true;
+        let matched = store.wait(1, "alert", Duration::from_millis(10), &run_ended);
+        assert_eq!(matched.len(), 1, "{matched:?}");
+        assert_eq!(matched[0]["alert"], "car");
+    }
 }
