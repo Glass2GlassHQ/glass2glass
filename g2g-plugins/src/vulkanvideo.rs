@@ -5371,6 +5371,17 @@ fn planar_420_format(bit_depth: u8) -> vk::Format {
     }
 }
 
+/// The g2g pixel format the two-plane decode output carries at a bit depth: 8-bit
+/// `Nv12`, or `P010` for the 10-bit `G10X6` layout (16-bit little-endian samples,
+/// value in the top 10 bits) the readback and the wgpu `P010` texture both hold.
+fn two_plane_raw_format(bit_depth: u8) -> RawVideoFormat {
+    if bit_depth >= 10 {
+        RawVideoFormat::P010
+    } else {
+        RawVideoFormat::Nv12
+    }
+}
+
 /// Bytes per luma / chroma sample for a decode output format (1 for 8-bit NV12,
 /// 2 for the 10-bit `G10X6` format whose samples are 16-bit containers).
 fn format_bytes_per_sample(fmt: vk::Format) -> u64 {
@@ -6507,11 +6518,11 @@ impl YcbcrConverter {
         }
     }
 
-    /// Copy the decoded two-plane picture out of the DPB slot into a fresh NV12
-    /// image and import that as a `TextureFormat::NV12` wgpu texture, so a
+    /// Copy the decoded two-plane picture out of the DPB slot into a fresh image
+    /// of the decoder's own format and import that as a `TextureFormat::NV12`
+    /// (8-bit) or `TextureFormat::P010` (10-bit `G10X6`) wgpu texture, so a
     /// consumer samples the planes with no colour conversion. Same queue, fence
-    /// and semaphore choreography as [`convert`](Self::convert). 8-bit only:
-    /// wgpu has no format for the 10-bit `G10X6` planes the decoder writes.
+    /// and semaphore choreography as [`convert`](Self::convert).
     ///
     /// # Safety
     /// As [`convert`](Self::convert).
@@ -6523,7 +6534,20 @@ impl YcbcrConverter {
         restore_to_dpb: bool,
         wait_sem: vk::Semaphore,
     ) -> Result<wgpu::Texture, VulkanVideoError> {
-        if self.nv12_format != vk::Format::G8_B8R8_2PLANE_420_UNORM {
+        let (wgpu_format, label) = match self.nv12_format {
+            vk::Format::G8_B8R8_2PLANE_420_UNORM => {
+                (wgpu::TextureFormat::NV12, "vulkan-video-nv12")
+            }
+            vk::Format::G10X6_B10X6R10X6_2PLANE_420_UNORM_3PACK16 => {
+                (wgpu::TextureFormat::P010, "vulkan-video-p010")
+            }
+            _ => return Err(VulkanVideoError::UnsupportedStream),
+        };
+        if !self
+            .wgpu_device
+            .features()
+            .contains(wgpu_format.required_features())
+        {
             return Err(VulkanVideoError::UnsupportedStream);
         }
         let dev = &self.raw_device;
@@ -6582,10 +6606,10 @@ impl YcbcrConverter {
                 copy,
                 copy_mem,
                 size,
-                wgpu::TextureFormat::NV12,
+                wgpu_format,
                 wgpu::TextureUses::RESOURCE | wgpu::TextureUses::COPY_SRC,
                 wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
-                "vulkan-video-nv12",
+                label,
             )
             .ok_or(VulkanVideoError::NoVulkanAdapter)
         }
@@ -6715,10 +6739,11 @@ struct Transients {
     set: vk::DescriptorSet,
 }
 
-/// `TEXTURE_FORMAT_NV12` when the adapter offers it, so a decoded picture can be
-/// imported as a two-plane NV12 wgpu texture; empty otherwise.
-fn nv12_texture_feature(adapter: &wgpu::Adapter) -> wgpu::Features {
-    adapter.features() & wgpu::Features::TEXTURE_FORMAT_NV12
+/// Whichever of `TEXTURE_FORMAT_NV12` / `TEXTURE_FORMAT_P010` the adapter offers,
+/// so a decoded 8-bit or 10-bit picture can be imported as a two-plane wgpu
+/// texture; empty when it offers neither.
+fn two_plane_texture_features(adapter: &wgpu::Adapter) -> wgpu::Features {
+    adapter.features() & (wgpu::Features::TEXTURE_FORMAT_NV12 | wgpu::Features::TEXTURE_FORMAT_P010)
 }
 
 /// What the GPU-texture path hands downstream per picture.
@@ -6727,7 +6752,7 @@ pub enum TextureOutput {
     /// The ycbcr compute pass's RGBA (RGBA16F at 10-bit) picture.
     Rgba,
     /// A copy of the decoded two-plane picture, imported as a
-    /// `TextureFormat::NV12` texture. 8-bit streams only.
+    /// `TextureFormat::NV12` (8-bit) or `TextureFormat::P010` (10-bit) texture.
     Nv12,
 }
 
@@ -7008,7 +7033,7 @@ pub async fn open_decode_device_at(
     // Priorities array lives in this scope so the queue-create pointer the
     // callback records stays valid through `open_with_callback`.
     let priorities = [1.0f32];
-    let features = nv12_texture_feature(&adapter);
+    let features = two_plane_texture_features(&adapter);
     // The extension alone does not turn `vkCmdPipelineBarrier2` on: without the
     // feature its behaviour is undefined, and every decode barrier goes through
     // it. wgpu does not enable it, so chain it here. Same scope rule as
@@ -10195,13 +10220,14 @@ impl DpbCore {
         }
     }
 
-    /// Emit an already-decoded, idle DPB slot as an RGBA `wgpu::Texture` with AV1
-    /// film grain applied. The GPU ycbcr compute pass cannot apply grain (the
-    /// hardware reconstruction is grain-free, and the driver only offers it on the
-    /// `DPB_AND_OUTPUT_DISTINCT` path this decoder does not use), so the slot is
-    /// read back to NV12 (`TRANSFER_SRC`, grain must not touch the DPB reference),
-    /// grain is synthesized on the CPU bit-for-bit with dav1d (`apply_film_grain_nv12`,
-    /// the same path the system `decode_all` uses), and the result is uploaded to a
+    /// Emit an already-decoded, idle DPB slot as a `wgpu::Texture` with AV1 film
+    /// grain applied, in whichever layout [`TextureOutput`] asks for. The GPU ycbcr
+    /// compute pass cannot apply grain (the hardware reconstruction is grain-free,
+    /// and the driver only offers it on the `DPB_AND_OUTPUT_DISTINCT` path this
+    /// decoder does not use), so the slot is read back to NV12 (`TRANSFER_SRC`,
+    /// grain must not touch the DPB reference), grain is synthesized on the CPU
+    /// bit-for-bit with dav1d (`apply_film_grain_nv12`, the same path the system
+    /// `decode_all` uses), and the result is uploaded to an RGBA or two-plane NV12
     /// texture. Grain streams take the reorder path, so this is only ever an idle
     /// slot (no decode into `image` in flight).
     fn grained_slot_to_texture(
@@ -10214,12 +10240,12 @@ impl DpbCore {
         apply_film_grain_nv12(&mut frame, fg, is_id);
         let color = self.color;
         let gpu = self.gpu.as_ref().ok_or(VulkanVideoError::NoComputeQueue)?;
-        Ok(nv12_to_rgba_texture(
-            &gpu.converter.wgpu_device,
-            &gpu.wgpu_queue,
-            &frame,
-            color,
-        ))
+        let device = &gpu.converter.wgpu_device;
+        let queue = &gpu.wgpu_queue;
+        Ok(match gpu.output {
+            TextureOutput::Nv12 => nv12_to_two_plane_texture(device, queue, &frame),
+            TextureOutput::Rgba => nv12_to_rgba_texture(device, queue, &frame, color),
+        })
     }
 
     /// Wait on and free every in-flight ring decode WITHOUT reading it back, then
@@ -13023,6 +13049,77 @@ fn nv12_to_rgba(frame: &Nv12Frame, color: VideoColorSpace) -> alloc::vec::Vec<u8
     rgba
 }
 
+/// Upload an 8-bit [`Nv12Frame`] into a fresh two-plane `TextureFormat::NV12`
+/// `wgpu::Texture`, one `write_texture` per plane aspect, so a consumer samples
+/// the planes through [`nv12_plane_views`](crate::gpu::nv12_plane_views) exactly
+/// as it would a zero-copy decode texture. The AV1 film-grain path's upload when
+/// the caps pinned the two-plane output (grain is synthesized on the CPU NV12, so
+/// the hardware copy cannot carry it).
+fn nv12_to_two_plane_texture(
+    wgpu_device: &wgpu::Device,
+    wgpu_queue: &wgpu::Queue,
+    frame: &Nv12Frame,
+) -> wgpu::Texture {
+    debug_assert_eq!(frame.bit_depth, 8, "the grain upload is 8-bit NV12 only");
+    let size = wgpu::Extent3d {
+        width: frame.width,
+        height: frame.height,
+        depth_or_array_layers: 1,
+    };
+    let texture = wgpu_device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("vulkan-video-grained-nv12"),
+        size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::NV12,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC
+            | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let planes = [
+        (
+            wgpu::TextureAspect::Plane0,
+            &frame.luma,
+            frame.width,
+            frame.height,
+        ),
+        (
+            wgpu::TextureAspect::Plane1,
+            &frame.chroma,
+            frame.width / 2,
+            frame.height / 2,
+        ),
+    ];
+    for (aspect, bytes, width, height) in planes {
+        let bytes_per_texel = wgpu::TextureFormat::NV12
+            .block_copy_size(Some(aspect))
+            .expect("NV12 plane aspect has a texel size");
+        wgpu_queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect,
+            },
+            bytes,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(width * bytes_per_texel),
+                rows_per_image: Some(height),
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
+    wgpu_queue.submit([]);
+    texture
+}
+
 /// Upload an [`Nv12Frame`] to a fresh `Rgba8Unorm` `wgpu::Texture` via the CPU
 /// `nv12_to_rgba` conversion and `write_texture`. Used by the one-shot IDR path
 /// and by the AV1 film-grain texture path (grain is synthesized on the CPU NV12,
@@ -13214,6 +13311,16 @@ impl core::fmt::Debug for DpbDecoderKind {
 }
 
 impl DpbDecoderKind {
+    /// The stream's sample bit depth (8 or 10), from the parameter sets the
+    /// decoder was built with.
+    fn bit_depth(&self) -> u8 {
+        match self {
+            DpbDecoderKind::H264(d) => d.core.bit_depth,
+            DpbDecoderKind::H265(d) => d.core.bit_depth,
+            DpbDecoderKind::Av1(d) => d.core.bit_depth,
+        }
+    }
+
     /// Pick what the GPU-texture path emits per picture.
     fn set_texture_output(&mut self, output: TextureOutput) {
         match self {
@@ -13649,22 +13756,30 @@ impl VulkanVideoDec {
 
     /// The pixel formats the decoder can emit on the resolved output domain, in
     /// preference order: the `WgpuTexture` path offers the ycbcr pass's `Rgba8`
-    /// first and the two-plane `Nv12` copy for a consumer that pins it; the raw
-    /// `VulkanTexture` image and the system path are `Nv12` only.
+    /// first and the two-plane copy for a consumer that pins it; the raw
+    /// `VulkanTexture` image and the system path are two-plane only. Which of
+    /// `Nv12` / `P010` a stream actually produces is its bit depth, unknown until
+    /// the parameter sets parse, so both are offered and a pin the samples cannot
+    /// carry is refused in [`ensure_decoder`](Self::ensure_decoder).
     fn output_formats(&self) -> &'static [RawVideoFormat] {
         if self.out_domain == MemoryDomainKind::WgpuTexture {
-            &[RawVideoFormat::Rgba8, RawVideoFormat::Nv12]
+            &[
+                RawVideoFormat::Rgba8,
+                RawVideoFormat::Nv12,
+                RawVideoFormat::P010,
+            ]
         } else {
-            &[RawVideoFormat::Nv12]
+            &[RawVideoFormat::Nv12, RawVideoFormat::P010]
         }
     }
 
-    /// Whether the GPU-texture path copies the NV12 planes out instead of
+    /// Whether the GPU-texture path copies the two planes out instead of
     /// converting to RGBA: always for a raw `VulkanTexture`, on `WgpuTexture` when
-    /// the caps settled on `Nv12` (unsolved caps take the preferred `Rgba8`).
+    /// the caps settled on `Nv12` or `P010` (unsolved caps take the preferred
+    /// `Rgba8`).
     fn texture_output(&self) -> TextureOutput {
         let format = self.out_format.unwrap_or(self.output_formats()[0]);
-        if format == RawVideoFormat::Nv12 {
+        if matches!(format, RawVideoFormat::Nv12 | RawVideoFormat::P010) {
             TextureOutput::Nv12
         } else {
             TextureOutput::Rgba
@@ -13837,6 +13952,15 @@ impl VulkanVideoDec {
                 _ => return Err(G2gError::CapsMismatch),
             };
 
+        // The pin was solved before any bit depth was known, so refuse one these
+        // samples cannot carry rather than mislabel or truncate them.
+        if let Some(pinned) = self.out_format {
+            let carried = two_plane_raw_format(decoder.bit_depth());
+            if matches!(pinned, RawVideoFormat::Nv12 | RawVideoFormat::P010) && pinned != carried {
+                return Err(G2gError::CapsMismatch);
+            }
+        }
+
         // Flush the outgoing decoder's pipelined tail before it drops, so a
         // mid-stream reconfig does not lose the frames still in its ring (`process`
         // emits `reconfig_tail` against the old geometry before the reconfig
@@ -13901,13 +14025,13 @@ impl VulkanVideoDec {
         out: &mut dyn OutputSink,
     ) -> Result<(), G2gError> {
         let caps = Caps::RawVideo {
-            format: RawVideoFormat::Nv12,
+            format: two_plane_raw_format(f.bit_depth),
             width: Dim::Fixed(f.width),
             height: Dim::Fixed(f.height),
             framerate: self.framerate.clone(),
             interlace: g2g_core::Interlace::Any,
-            // NV12 leaves the decoder unconverted, so the stream's own colour
-            // description applies to these samples.
+            // The two planes leave the decoder unconverted, so the stream's own
+            // colour description applies to these samples.
             colorimetry: self.stream_colorimetry,
         };
         if self.last_caps.as_ref() != Some(&caps) {
@@ -14000,8 +14124,13 @@ impl VulkanVideoDec {
     ) -> Result<(), G2gError> {
         for (timing, tex) in textures {
             let (w, h) = (tex.width(), tex.height());
-            let nv12 = tex.format() == wgpu::TextureFormat::NV12;
-            let colorimetry = if nv12 {
+            let two_plane_format = match tex.format() {
+                wgpu::TextureFormat::NV12 => Some(RawVideoFormat::Nv12),
+                wgpu::TextureFormat::P010 => Some(RawVideoFormat::P010),
+                _ => None,
+            };
+            let two_plane = two_plane_format.is_some();
+            let colorimetry = if two_plane {
                 // The planes are the decoder's own output, so the stream's colour
                 // description applies to them unchanged.
                 self.stream_colorimetry
@@ -14016,11 +14145,7 @@ impl VulkanVideoDec {
                     primaries: self.stream_colorimetry.primaries,
                 }
             };
-            let format = if nv12 {
-                RawVideoFormat::Nv12
-            } else {
-                RawVideoFormat::Rgba8
-            };
+            let format = two_plane_format.unwrap_or(RawVideoFormat::Rgba8);
             let caps = Caps::RawVideo {
                 format,
                 width: Dim::Fixed(w),
@@ -14046,7 +14171,7 @@ impl VulkanVideoDec {
                     h,
                     alloc::sync::Arc::new(owner),
                 ))
-            } else if nv12 {
+            } else if two_plane {
                 let keep = alloc::sync::Arc::new(crate::gpu::WgpuNv12Texture::new(
                     device.wgpu_device.clone(),
                     device.wgpu_queue.clone(),
@@ -14101,11 +14226,12 @@ impl VulkanImageOwner {
         }
     }
 
-    /// The image's `VkFormat`: the two-plane NV12 the decoder writes, or the
-    /// ycbcr pass's RGBA target.
+    /// The image's `VkFormat`: the two-plane NV12 / `G10X6` the decoder writes, or
+    /// the ycbcr pass's RGBA target.
     pub fn format(&self) -> vk::Format {
         match self.texture.format() {
             wgpu::TextureFormat::NV12 => vk::Format::G8_B8R8_2PLANE_420_UNORM,
+            wgpu::TextureFormat::P010 => vk::Format::G10X6_B10X6R10X6_2PLANE_420_UNORM_3PACK16,
             wgpu::TextureFormat::Rgba8Unorm => vk::Format::R8G8B8A8_UNORM,
             wgpu::TextureFormat::Rgba16Float => vk::Format::R16G16B16A16_SFLOAT,
             _ => vk::Format::UNDEFINED,
@@ -14153,11 +14279,13 @@ impl PadTemplates for VulkanVideoDec {
                     })
                     .collect(),
             )),
-            // Both outputs the element can produce: system NV12 or, on the
-            // zero-copy `WgpuTexture` path, RGBA (the `.produces(WgpuTexture)`
+            // Every output the element can produce: the unconverted two planes
+            // (`Nv12` 8-bit / `P010` 10-bit) in system memory or as a texture, or,
+            // on the zero-copy `WgpuTexture` path, RGBA (the `.produces(WgpuTexture)`
             // auto-plug tag steers a GPU consumer to the latter).
             PadTemplate::source(CapsSet::from_alternatives(alloc::vec::Vec::from([
                 raw(RawVideoFormat::Nv12),
+                raw(RawVideoFormat::P010),
                 raw(RawVideoFormat::Rgba8),
             ]))),
         ])

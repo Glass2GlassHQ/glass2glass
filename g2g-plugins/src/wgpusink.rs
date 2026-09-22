@@ -105,10 +105,12 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
 }
 "#;
 
-/// Fetch a pixel from a two-plane `TextureFormat::NV12` texture through its luma
-/// and chroma views (`gpu::nv12_plane_views`): full-size luma, half-size chroma
-/// with Cb in `r` and Cr in `g`. Fetching the nearest chroma texel rather than
-/// filtering between pairs is what keeps one sink's picture the same whichever
+/// Fetch a pixel from a two-plane `TextureFormat::NV12` / `TextureFormat::P010`
+/// texture through its luma and chroma views (`gpu::nv12_plane_views`): the
+/// normalized plane samples make one shader fit either depth. Full-size luma,
+/// half-size chroma with Cb in `r` and Cr in `g`. Fetching the nearest chroma
+/// texel rather than filtering between pairs is what keeps one sink's picture the
+/// same whichever
 /// NV12 layout the producer hands it: a filtered sample lands a quarter of a
 /// chroma texel off the left-sited 4:2:0 grid and shifts colour across edges.
 /// The picture size comes from the luma plane.

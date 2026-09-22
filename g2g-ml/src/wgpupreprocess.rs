@@ -237,9 +237,10 @@ const TEX_SHADER: &str = concat!(
 );
 
 /// Surface-import variant of `TEX_SHADER` for the two-plane
-/// `TextureFormat::NV12` texture a Vulkan Video decoder hands out (M1157): the
-/// luma and chroma planes arrive as the two views `gpu::nv12_plane_views` builds,
-/// the chroma one at half size with Cb in `r` and Cr in `g`, so this pixel's
+/// `TextureFormat::NV12` / `TextureFormat::P010` texture a Vulkan Video decoder
+/// hands out (M1157): the luma and chroma planes arrive as the two views
+/// `gpu::nv12_plane_views` builds, the chroma one at half size with Cb in `r`
+/// and Cr in `g`, so this pixel's
 /// chroma is its texel `(x/2, y/2)`. `textureLoad` fetches that exact texel with
 /// no filtering, and the plane views are normalized, so scaling back by 255
 /// feeds the shared colour step the same sample values the packed stage reads.

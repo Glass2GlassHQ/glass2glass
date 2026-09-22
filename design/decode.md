@@ -559,13 +559,22 @@ against the ffmpeg software decoder, the zero-copy `VkSamplerYcbcrConversion`
 NV12-to-RGBA import into a `wgpu::Texture`, the `VulkanVideoDec` streaming
 element and its `WgpuSink` present, and `produces(WgpuTexture)` auto-plug.
 
-The `WgpuTexture` output offers `Rgba8` first and `Nv12` second. When the solved
-caps pin `NV12`, the converter copies the decoded slot's two planes into a fresh
-image (`YcbcrConverter::copy_nv12`, a plane-wise `vkCmdCopyImage` on the compute
-queue in place of the ycbcr dispatch) and imports it as a `TextureFormat::NV12`
-wgpu texture behind `WgpuNv12Texture`, so a consumer samples the planes through
-`Plane0` / `Plane1` views with no colour conversion. The decode device requests
-`TEXTURE_FORMAT_NV12` when the adapter offers it.
+The `WgpuTexture` output offers `Rgba8` first, then `Nv12` and `P010`. When the
+solved caps pin either two-plane format, the converter copies the decoded slot's
+two planes into a fresh image of the decoder's own format
+(`YcbcrConverter::copy_nv12`, a plane-wise `vkCmdCopyImage` on the compute queue
+in place of the ycbcr dispatch) and imports it as a `TextureFormat::NV12` (8-bit
+`G8_B8R8`) or `TextureFormat::P010` (10-bit `G10X6`) wgpu texture behind
+`WgpuNv12Texture`, so a consumer samples the planes through `Plane0` / `Plane1`
+views with no colour conversion. The decode device requests whichever of
+`TEXTURE_FORMAT_NV12` / `TEXTURE_FORMAT_P010` the adapter offers.
+
+A stream's bit depth is only known once its parameter sets parse, long after the
+caps solve, so the source pad offers both formats and the mismatch is caught at
+decode: an `Nv12` pin on a 10-bit stream, or a `P010` pin on an 8-bit one, fails
+`ensure_decoder` with `CapsMismatch` rather than mislabelling or truncating
+samples. The unpinned system path announces the format its frames carry,
+`Nv12` or `P010`, from `Nv12Frame::bit_depth`.
 
 The same copy backs the `VulkanTexture` output domain: the frame carries the raw
 `VkImage` handle, `VkFormat` and geometry in `OwnedVulkanTexture`, and its
@@ -579,15 +588,17 @@ presenter reads the picture where the decoder left it, idle in
 The caps say a `WgpuTexture` frame is NV12 but not which of the two NV12 texture
 layouts it is, so a consumer reads that off the texture per frame.
 `gpu::texture_layout` maps `R8Uint` to the packed plane the CUDA and dma-buf
-bridges allocate, `TextureFormat::NV12` to the decoder's two planes, and an
-uncompressed colour format to a finished picture.
+bridges allocate, `TextureFormat::NV12` and `TextureFormat::P010` to the
+decoder's two planes, and an uncompressed colour format to a finished picture.
 
 wgpu refuses to bind a multi-planar texture whole, so the planes come from
-`gpu::nv12_plane_views`: `Plane0` as full-size `R8Unorm` and `Plane1` as
-half-size `Rg8Unorm`, each a `texture_2d<f32>`. `WgpuSink` holds a blit pipeline
-per layout and picks one per frame, so one sink negotiated for NV12 renders the
-same picture from a decoder's texture and from a system-memory upload of the same
-clip. Its two NV12 fragment stages share one `ycbcr_to_rgb` step and both fetch
+`gpu::nv12_plane_views`: full-size `Plane0` and half-size `Plane1`, each viewed
+in the plane format the texture's own format dictates (`R8Unorm` / `Rg8Unorm` for
+NV12, `R16Unorm` / `Rg16Unorm` for P010) and each a `texture_2d<f32>`. Plane
+samples are normalized, so one shader reads either depth. `WgpuSink` holds a blit
+pipeline per layout and picks one per frame, so one sink negotiated for NV12
+renders the same picture from a decoder's texture and from a system-memory upload
+of the same clip. Its two NV12 fragment stages share one `ycbcr_to_rgb` step and both fetch
 the nearest chroma texel, since a filtered chroma sample sits a quarter texel off
 the chroma grid and shifts colour across edges. `g2g-ml`'s `WgpuPreprocess` does
 the same on the compute side, with a second import pipeline binding the two plane
@@ -770,6 +781,11 @@ from the decode bit depth, so a `G10X6` frame samples through a 10-bit
 the CPU reference under the stream's matrix. The float target preserves the full
 10-bit precision and is where the transfer stage operates.
 
+A consumer that wants the unconverted 10-bit planes pins `P010` instead: the
+`G10X6` copy imports as a `TextureFormat::P010` texture, and the raw
+`VulkanTexture` domain hands out the `G10X6` image itself. Both are bit-exact
+with the system `P010` readback of the same clip.
+
 ### HDR transfer and tone mapping
 
 The fixed-function ycbcr hardware does the matrix and range but not the transfer
@@ -854,9 +870,12 @@ grain-free hardware reconstruction, bit-exact against dav1d for luma and chroma.
 The GPU-texture path applies the same grain: since the ycbcr compute pass
 produces the grain-free reconstruction, `grained_slot_to_texture` reads the
 displayed slot back to NV12, the GPU DPB images carrying `TRANSFER_SRC`, runs
-`apply_film_grain_nv12`, and uploads the result to the RGBA texture. Grain is
-output-only, so the read-back leaves the DPB reference untouched and a grain-free
-displayed frame stays on the zero-copy GPU convert.
+`apply_film_grain_nv12`, and uploads the result into a texture in whichever layout
+the caps settled on: RGBA through the CPU convert, or a `TextureFormat::NV12`
+texture written one `write_texture` per plane aspect when the caps pinned the
+two-plane output. Grain is output-only, so the read-back leaves the DPB reference
+untouched and a grain-free displayed frame stays on the zero-copy GPU convert.
+Grain synthesis is 8-bit, so a 10-bit grain stream stays on the grain-free path.
 
 `StdVideoAV1LoopRestoration::LoopRestorationSize` is the `1 + lr_unit_shift`
 encoding, not the pixel unit size, matching ffmpeg's Vulkan hwaccel. Getting it
