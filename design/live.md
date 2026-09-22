@@ -157,6 +157,14 @@ clock. All accept interleaved `PcmS16Le` and `PcmF32Le` and reject compressed
 audio structurally. Errors surface as
 `HardwareError::{Alsa,PulseAudio,PipeWire}`.
 
+All three take a `MemoryDomain::DmaBuf` frame as well as a system one. The
+device takes a host pointer either way, so `dmabufmap` maps the exporter's
+buffer for reading (whole, from the frame's offset on: the kernel refuses a
+partial dma-buf mapping) inside the `DMA_BUF_IOCTL_SYNC` CPU-access bracket,
+and a dma-buf producer feeding an audio sink no longer downloads through the
+allocation cascade first. A dma-buf carries no payload length, so the payload
+is the buffer from its offset to the end.
+
 ## Device discovery
 
 The `GstDeviceProvider` and `GstDeviceMonitor` analog is in

@@ -159,10 +159,11 @@ impl AsyncElement for AlsaSink {
     where
         Self: 'a;
 
-    /// Reads host memory, so it takes system frames only. The allocation
-    /// cascade turns that into a download demand on a GPU producer.
+    /// Feeds the device a host pointer, so it reads a system buffer or maps a
+    /// dma-buf in place. A producer in any other domain downloads through the
+    /// allocation cascade.
     fn input_domains(&self) -> g2g_core::memory::DomainSet {
-        g2g_core::memory::DomainSet::only(g2g_core::memory::MemoryDomainKind::System)
+        crate::dmabufmap::audio_input_domains()
     }
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
@@ -282,10 +283,11 @@ impl AsyncElement for AlsaSink {
         Box::pin(async move {
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    let slice = frame
-                        .domain
-                        .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
-                    let samples = slice.to_vec();
+                    let bytes = crate::dmabufmap::frame_bytes(
+                        &frame,
+                        g2g_core::log::short_type_name::<Self>(),
+                    )?;
+                    let samples = bytes.as_slice().to_vec();
                     let link = self.link.as_ref().ok_or(G2gError::NotConfigured)?;
                     // Awaited, not blocking: a full queue is the device's
                     // back-pressure and yields to the executor.

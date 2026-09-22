@@ -818,6 +818,14 @@ pub mod udpsrc;
 #[cfg(feature = "tcp")]
 pub mod tcp;
 
+// Read-only CPU mapping of a dma-buf, so a sink that feeds a host pointer to a
+// device takes the exporter's buffer instead of a system copy.
+#[cfg(all(
+    target_os = "linux",
+    any(feature = "alsa-sink", feature = "pulse-sink", feature = "pipewire")
+))]
+pub mod dmabufmap;
+
 // Shared-memory IPC pair (M1081): ShmSink serves frames through a POSIX shm
 // area announced over a unix control socket, ShmSrc maps that area and copies
 // each announced block out. The wire is GStreamer's shmpipe protocol, so either

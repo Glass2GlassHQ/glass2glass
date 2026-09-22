@@ -141,7 +141,6 @@ Highest leverage first:
 
 ## Sinks
 
-- Add DMABUF zero-copy to `alsasink`, `pulsesink`, and `pipewiresink`.
 - Validate `wasapisink` U8, S24, and S32 acceptance on a Windows host.
 
 ## Containers
