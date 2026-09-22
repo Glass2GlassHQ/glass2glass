@@ -2,6 +2,7 @@
 pkg/
 ws-fixture-server/target/
 ws-recv-server/target/
+wire-serve-server/target/
 detect-server/target/
 received.h264
 

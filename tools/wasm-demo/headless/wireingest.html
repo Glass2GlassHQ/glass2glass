@@ -1,0 +1,18 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>g2g wire-ingest headless test</title>
+<!--
+  Headless test page for the receive direction of the distributed-graph
+  primitive. Loads the g2g wasm module and runs WsWireSrc -> CanvasSink against
+  the serving peer named in the query string, so the browser reads a stream a
+  native graph pushes. Driven by run-wireingest.mjs; not part of the interactive
+  demo (index.html).
+-->
+<canvas id="view" width="320" height="240"></canvas>
+<script type="module">
+  import init, { run_wire_ingest_to_canvas } from "../pkg/g2g_web.js";
+  const ws = new URLSearchParams(location.search).get("ws");
+  await init();
+  console.log("g2g[test]: module init ok, ws=" + ws);
+  run_wire_ingest_to_canvas(ws, "view");
+</script>

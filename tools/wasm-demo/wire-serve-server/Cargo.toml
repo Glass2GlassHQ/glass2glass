@@ -1,0 +1,18 @@
+# Native wire-codec server for the browser demo's receive direction: serves a
+# `videotestsrc` pattern to whoever dials in, so a browser `WsWireSrc` has a peer
+# to read. Standalone (own Cargo.lock, excluded from the g2g workspace) so its
+# tokio deps never enter the normal build. Run:
+#   cargo run --release -- [bind_addr] [frames]
+[package]
+name = "wire-serve-server"
+version = "0.1.0"
+edition = "2021"
+license = "MPL-2.0"
+publish = false
+
+[dependencies]
+g2g-core = { path = "../../../g2g-core", features = ["std", "runtime"] }
+g2g-plugins = { path = "../../../g2g-plugins", default-features = false, features = ["std", "remote-ws"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time"] }
+
+[workspace]

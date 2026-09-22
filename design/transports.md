@@ -347,8 +347,10 @@ wire codec compiles unchanged on `wasm32`, the browser and the native server
 share the serializer. `WsWireSrc` is the receive half of the same pair: it dials
 a serving `RemoteWsSink`, discovers the caps from the leading wire message, and
 emits the frames the peer pushes, so a native graph can cut an edge and run its
-tail in a browser (`run_wire_ingest_to_canvas` in `g2g-web`). It is
-compile-checked, not yet run in a browser.
+tail in a browser (`run_wire_ingest_to_canvas` in `g2g-web`).
+`tools/wasm-demo/headless/run-wireingest.mjs` runs that in a real Chromium
+against `wire-serve-server`, asserting the browser consumed every frame the
+native side served and painted them.
 
 ### Remote transform
 

@@ -163,7 +163,11 @@ buffer for reading (whole, from the frame's offset on: the kernel refuses a
 partial dma-buf mapping) inside the `DMA_BUF_IOCTL_SYNC` CPU-access bracket,
 and a dma-buf producer feeding an audio sink no longer downloads through the
 allocation cascade first. A dma-buf carries no payload length, so the payload
-is the buffer from its offset to the end.
+is the buffer from its offset to the end. The mapping is tested against the
+kernel's own exporter (a sealed memfd through `/dev/udmabuf`) and played through
+`alsasink` on ALSA's `null` device, so the whole path runs against a real card
+without making a sound; the other two sinks read their payload through the same
+`dmabufmap` reader.
 
 ## Device discovery
 

@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1192: the browser `WsWireSrc` is validated in a real Chromium against a native serving peer, and a dma-buf frame is played through `alsasink` on a real device.
 - M1191: `serve_ws_stage` hosts a chain of transforms as the stage a `RemoteWsTransform` offloads, so a whole subgraph runs on the peer without a hand-written server.
 - M1190: `RemoteWsSink listen=true` serves its stream to a client that dials in, and the browser `WsWireSrc` reads it, so a native graph can hand its tail to a browser.
 - M1189: a remote transform can take the peer's metadata alone and keep each frame locally, so a stage that only attaches detections stops paying for the return pixels.

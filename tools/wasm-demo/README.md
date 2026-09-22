@@ -16,6 +16,8 @@ deploy. The wasm artifact is ~200 KB (it ships no codec: WebCodecs uses the brow
 - `cargo install wasm-pack`
 - `python3` (for the static file server) and a WebCodecs-capable browser (Chrome/Edge;
   Firefox with `dom.media.webcodecs.enabled`).
+- For the headless tests: `npm i` here (playwright-core) plus a full Chromium,
+  named by `G2G_CHROME`.
 
 ## Run (three steps)
 
@@ -128,6 +130,21 @@ where the browser hands back no adapter).
 node headless/run-worker.mjs      # -> PASS ...
 ```
 
+### Headless test (wire ingest from a native peer)
+
+`headless/run-wireingest.mjs` drives the receive direction of the
+distributed-graph primitive: `wire-serve-server` runs
+`VideoTestSrc -> RemoteWsSink listen=true` and serves the packet stream, the page
+(`headless/wireingest.html`) runs `WsWireSrc -> CanvasSink`, and the test asserts
+the browser consumed every frame the server sent, finished clean, and painted the
+pattern. A browser can only dial out, so this is the direction that needs the
+native side listening. Prereqs as above (`playwright-core` suffices), env
+overrides `G2G_CHROME`, `G2G_WIRE_SERVER_BIN`.
+
+```sh
+node headless/run-wireingest.mjs  # -> PASS ...
+```
+
 ## Pieces
 
 | File | Role |
@@ -140,7 +157,8 @@ node headless/run-worker.mjs      # -> PASS ...
 | `ws-recv-server/` | native receiver for the send demo; appends the browser's encoded access units to `received.h264` |
 | `serve.sh` | `python3 -m http.server` (no special headers) |
 | `fixtures/` | committed tiny deterministic ONNX detector (`tiny-detect.onnx`) + `gen-tiny-detect.py` |
-| `headless/` | `run-ortdetect.mjs` + `ortdetect.html` (ort-web chain), `run-worker.mjs` + `worker.html` (worker executor) |
+| `wire-serve-server/` | native `VideoTestSrc -> RemoteWsSink listen=true`: serves the wire stream to a browser `WsWireSrc` |
+| `headless/` | `run-ortdetect.mjs` + `ortdetect.html` (ort-web chain), `run-worker.mjs` + `worker.html` (worker executor), `run-wireingest.mjs` + `wireingest.html` (wire ingest) |
 
 ## Notes
 

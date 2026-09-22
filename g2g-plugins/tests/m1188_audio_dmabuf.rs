@@ -13,7 +13,9 @@
 #![cfg(all(target_os = "linux", feature = "alsa-sink"))]
 
 use g2g_core::memory::{MemoryDomain, OwnedDmaBuf};
-use g2g_core::{AsyncElement, Frame, FrameTiming};
+use g2g_core::{
+    AsyncElement, Caps, Frame, FrameTiming, G2gError, OutputSink, PipelinePacket, PushOutcome,
+};
 use g2g_plugins::alsasink::AlsaSink;
 use g2g_plugins::dmabufmap::{frame_bytes, DmaBufReadMap};
 
@@ -155,6 +157,76 @@ fn an_offset_dmabuf_reads_from_its_offset() {
     let owned = unsafe { OwnedDmaBuf::from_raw(raw, 0, OFFSET) };
     let map = DmaBufReadMap::read(&owned).expect("the dma-buf maps at its offset");
     assert_eq!(map.as_slice(), &bytes[OFFSET as usize..]);
+}
+
+/// The whole path, against a real device: a dma-buf frame goes to `alsasink`
+/// and reaches the card through libasound, mapped rather than copied in. Plays
+/// to ALSA's `null` PCM, a real device that makes no sound, so the test runs
+/// anywhere libasound does; self-skips when the device or `/dev/udmabuf` is
+/// missing.
+#[tokio::test]
+async fn a_dmabuf_frame_plays_through_alsasink() {
+    /// One period of S16LE stereo at 48 kHz, the shape the sink is configured
+    /// for.
+    const SAMPLE_RATE: u32 = 48_000;
+    const CHANNELS: u8 = 2;
+    const FRAMES: usize = 480;
+    const BYTES: usize = FRAMES * CHANNELS as usize * 2;
+
+    // A quiet ramp: real samples, so a mis-mapped buffer is not silence either
+    // way.
+    let mut samples = Vec::with_capacity(BUFFER_BYTES);
+    for i in 0..BYTES / 2 {
+        samples.extend_from_slice(&((i as i16 % 2048) - 1024).to_le_bytes());
+    }
+    samples.resize(BUFFER_BYTES, 0);
+
+    let Some(dmabuf) = udmabuf_of(&samples) else {
+        eprintln!("SKIP: /dev/udmabuf is not available, so no dma-buf to play");
+        return;
+    };
+
+    let mut sink = AlsaSink::with_device("null");
+    let caps = Caps::Audio {
+        format: g2g_core::AudioFormat::PcmS16Le,
+        channels: CHANNELS,
+        sample_rate: SAMPLE_RATE,
+        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
+    };
+    if AsyncElement::configure_pipeline(&mut sink, &caps).is_err() {
+        eprintln!("SKIP: no ALSA null device on this host");
+        return;
+    }
+
+    let mut discard = DiscardOut;
+    AsyncElement::process(
+        &mut sink,
+        PipelinePacket::DataFrame(dmabuf_frame(dmabuf)),
+        &mut discard,
+    )
+    .await
+    .expect("the dma-buf frame reached the device");
+    AsyncElement::process(&mut sink, PipelinePacket::Eos, &mut discard)
+        .await
+        .expect("eos drains the device");
+    assert!(
+        sink.frames_rendered() > 0,
+        "the card was handed the mapped buffer"
+    );
+}
+
+/// A sink pushes nothing on, so its output goes nowhere.
+struct DiscardOut;
+
+impl OutputSink for DiscardOut {
+    fn poll_push(
+        &mut self,
+        _cx: &mut core::task::Context<'_>,
+        packet_slot: &mut Option<PipelinePacket>,
+    ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+        packet_slot.take();
+        core::task::Poll::Ready(Ok(PushOutcome::Accepted))
+    }
 }
 
 /// The sink advertises both domains, which is what keeps the allocation cascade
