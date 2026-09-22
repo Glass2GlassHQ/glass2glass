@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1182: `tools/vulkan-refs.sh` generates the ffmpeg reference dumps the Vulkan decode tests compare against, `G2G_VULKAN_REF_DIR` points them at one directory, and the nightly GPU suite runs with them.
 - M1181: `VulkanVideoDec` decodes on a driver that writes the picture into an image distinct from its DPB reference, so the Mesa RADV path runs bit-exact.
 - M1180: `VulkanVideoDec` hands out a `P010` texture for a 10-bit stream, announces `P010` on the system path, and uploads an AV1 film-grain frame as a two-plane texture.
 - M1179: `mqttsink` publishes the `metasink` record of each frame to an MQTT topic, and `mqttsrc` emits each message on a topic as a text frame.

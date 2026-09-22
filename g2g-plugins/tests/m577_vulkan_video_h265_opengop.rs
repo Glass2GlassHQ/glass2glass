@@ -23,9 +23,9 @@
 //! ```
 //! Structural + content assertions run always (the stream must actually carry a
 //! CRA with RASL followers, else the fix is untested). Bit-exactness against the
-//! software decoder's DISPLAY-order output is checked when `G2G_H265_OPENGOP_REF`
-//! points at a raw `yuv420p` dump (`ffmpeg -i clip -f rawvideo -pix_fmt yuv420p
-//! ref.yuv`): every frame at its display index is SAD/px 0, which only holds if
+//! software decoder's DISPLAY-order output is checked when
+//! `G2G_VULKAN_REF_DIR` names a directory of `tools/vulkan-refs.sh` dumps: every frame at its display index
+//! is SAD/px 0, which only holds if
 //! the CRA kept the references its RASL followers reference.
 //!
 //! Runs on the RTX 3060; skips with no adapter / no decode support.
@@ -40,7 +40,11 @@ use g2g_plugins::vulkanvideo::{
     VulkanVideoError,
 };
 
+mod vulkan_ref;
+use vulkan_ref::reference_yuv;
+
 const CLIP: &[u8] = include_bytes!("fixtures/h265_640x480_opengop.hevc");
+const CLIP_FIXTURE: &str = "h265_640x480_opengop.hevc";
 const W: usize = 640;
 const H: usize = 480;
 
@@ -73,8 +77,7 @@ fn count_nal_types(stream: &[u8]) -> (usize, usize, usize) {
 
 /// Per-frame luma + chroma SAD/px between decoded frames (display order) and a
 /// planar `yuv420p` display-order reference; panics on length mismatch.
-fn assert_bit_exact(frames: &[Nv12Frame], ref_path: &str) {
-    let ref_yuv = std::fs::read(ref_path).expect("read reference");
+fn assert_bit_exact(frames: &[Nv12Frame], ref_yuv: &[u8]) {
     let cw = W / 2;
     let ch = H / 2;
     let fb = W * H + 2 * cw * ch;
@@ -168,8 +171,8 @@ fn h265_opengop_cra_rasl_decodes_correctly() {
         );
     }
 
-    if let Ok(p) = std::env::var("G2G_H265_OPENGOP_REF") {
-        assert_bit_exact(&frames, &p);
+    if let Some(ref_yuv) = reference_yuv(CLIP_FIXTURE) {
+        assert_bit_exact(&frames, &ref_yuv);
         eprintln!(
             "m577: {} open-GOP frames bit-exact in display order",
             frames.len()

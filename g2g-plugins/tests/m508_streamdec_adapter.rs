@@ -6,8 +6,8 @@
 //! satisfies that contract on real hardware, so a consumer can wrap it in one
 //! async-decoder impl (the wgpu-texture wedge, Tier A readback).
 //!
-//! Runs on the RTX 3060; skips with no AV1 decode adapter. Optional bit-exact
-//! check vs an ffmpeg `yuv420p` (== I420) dump via `G2G_AV1_REF`.
+//! Runs on the RTX 3060; skips with no AV1 decode adapter. The bit-exact check vs
+//! the ffmpeg `yuv420p` (== I420) dump runs when `G2G_VULKAN_REF_DIR` names a directory of `tools/vulkan-refs.sh` dumps.
 #![cfg(all(
     any(target_os = "linux", target_os = "windows"),
     feature = "vulkan-video"
@@ -19,7 +19,11 @@ use g2g_plugins::streamdec::{
 };
 use g2g_plugins::vulkanvideo::{open_av1_decode_device, VulkanVideoError};
 
+mod vulkan_ref;
+use vulkan_ref::reference_yuv;
+
 const CLIP: &[u8] = include_bytes!("fixtures/av1_640x480.obu");
+const CLIP_FIXTURE: &str = "av1_640x480.obu";
 const W: usize = 640;
 const H: usize = 480;
 
@@ -166,8 +170,7 @@ fn streamdec_adapter_streams_i420_frames() {
 
     // Bit-exactness of every frame vs an ffmpeg yuv420p (I420) reference: full
     // I420 (Y + U + V), so this also checks the NV12 -> I420 chroma deinterleave.
-    if let Ok(path) = std::env::var("G2G_AV1_REF") {
-        let ref_yuv = std::fs::read(&path).expect("read G2G_AV1_REF");
+    if let Some(ref_yuv) = reference_yuv(CLIP_FIXTURE) {
         assert!(
             ref_yuv.len() >= i420_len * frames.len(),
             "reference too short"

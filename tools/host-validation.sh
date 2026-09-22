@@ -344,6 +344,13 @@ have_soak_preconditions() {
   fi
 }
 
+have_ffmpeg() {
+  if ! command -v ffmpeg >/dev/null 2>&1; then
+    SKIP_REASON="no ffmpeg, vulkan steps check geometry only"
+    return 1
+  fi
+}
+
 have_gstreamer_launch() {
   if ! command -v "${GSTREAMER_LAUNCH%% *}" >/dev/null 2>&1; then
     SKIP_REASON="no $GSTREAMER_LAUNCH"
@@ -367,12 +374,23 @@ run_desktop_gpu_suite() {
   if [ -z "${vulkan_targets// /}" ]; then
     record_step "vulkan video decode" "FAIL" "no vulkan test files found"
   else
+    # Without the dumps the decode tests check geometry only, so generate them
+    # first and hand both driver steps the directory.
+    local reference_directory="$WORK_DIRECTORY/vulkan-refs"
+    run_step "vulkan references" have_ffmpeg \
+      bash "$REPOSITORY_ROOT/tools/vulkan-refs.sh" "$reference_directory"
+    if [ "$LAST_STEP_RESULT" = "PASS" ]; then
+      set_last_step_detail "$(wc -l <"$LAST_STEP_LOG") dumps"
+      export G2G_VULKAN_REF_DIR="$reference_directory"
+    fi
+
     run_cargo_test_step "vulkan video decode" have_vulkan_device \
       g2g-plugins "$VULKAN_VIDEO_FEATURES" "$vulkan_targets"
     VK_DRIVER_FILES="$RADEON_ICD" \
       run_cargo_test_step "vulkan video decode (RADV)" have_both_vulkan_drivers \
       g2g-plugins "$VULKAN_VIDEO_FEATURES" "$vulkan_targets"
     unset VK_DRIVER_FILES
+    unset G2G_VULKAN_REF_DIR
   fi
 
   run_cargo_test_step "cuda decode + wgpu bridge" have_cuda_device \

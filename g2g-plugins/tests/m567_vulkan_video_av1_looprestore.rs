@@ -12,8 +12,7 @@
 //! The fixture is a 640x480 libaom clip that uses loop restoration on its first
 //! frame. The structural assertion (the stream genuinely exercises loop
 //! restoration) runs always; bit-exactness vs the ffmpeg / dav1d software decoder
-//! (luma AND chroma) is checked when `G2G_AV1_REF` points at a raw `yuv420p` dump
-//! of the same clip, verified out of band: every plane SAD/px 0.
+//! (luma AND chroma) is checked when `G2G_VULKAN_REF_DIR` names a directory of `tools/vulkan-refs.sh` dumps: every plane SAD/px 0.
 //!
 //! Runs on the RTX 3060; skips with no adapter / no AV1 decode / no compute queue.
 #![cfg(all(
@@ -27,7 +26,11 @@ use g2g_plugins::vulkanvideo::{
     to_std_av1_seq_header, VulkanVideoError,
 };
 
+mod vulkan_ref;
+use vulkan_ref::reference_yuv;
+
 const CLIP: &[u8] = include_bytes!("fixtures/av1_640x480_looprestore.obu");
+const CLIP_FIXTURE: &str = "av1_640x480_looprestore.obu";
 const W: usize = 640;
 const H: usize = 480;
 
@@ -75,8 +78,7 @@ fn decodes_looprestore_av1_stream() {
         );
     }
 
-    if let Ok(path) = std::env::var("G2G_AV1_REF") {
-        let ref_yuv = std::fs::read(&path).expect("read G2G_AV1_REF");
+    if let Some(ref_yuv) = reference_yuv(CLIP_FIXTURE) {
         let cw = W / 2;
         let ch = H / 2;
         let frame_bytes = W * H + 2 * cw * ch;

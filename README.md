@@ -1041,6 +1041,11 @@ driver, no Wayland session, no HLS feed). A `cargo test` that passes with zero
 tests is a FAIL, since that is what a feature-gated test file does when its
 feature is missing.
 
+The `desktop-gpu` suite first runs `tools/vulkan-refs.sh` to decode each Vulkan
+fixture with ffmpeg and points `G2G_VULKAN_REF_DIR` at the dumps, so the decode
+tests compare their hardware output bit for bit instead of checking geometry
+alone; without ffmpeg that step reports SKIP and the decode steps still run.
+
 **Create the token.** GitHub → Settings → Developer settings → Personal
 access tokens → Fine-grained tokens → Generate new token. Resource owner: the
 account that owns the repository. Repository access: Only select repositories

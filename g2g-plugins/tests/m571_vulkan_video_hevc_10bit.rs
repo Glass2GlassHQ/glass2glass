@@ -10,8 +10,7 @@
 //! The fixture is a 640x480 x265 Main 10 clip (BT.2020 / PQ tagged, 5 frames).
 //! Structural assertions run always (bit depth 10, 2-byte samples, real content);
 //! bit-exactness vs the ffmpeg / libde265 software decoder is checked when
-//! `G2G_H265_10BIT_REF` points at a raw `yuv420p10le` dump (`ffmpeg -i clip
-//! -f rawvideo -pix_fmt yuv420p10le ref.yuv`): every luma and chroma sample SAD 0.
+//! `G2G_VULKAN_REF_DIR` names a directory of `tools/vulkan-refs.sh` dumps: every luma and chroma sample SAD 0.
 //! (This is the first HDR-precision decode layer; PQ/HLG tone mapping and the
 //! 10-bit GPU-texture path are later increments - the GPU-texture path rejects
 //! 10-bit today with `UnsupportedStream`.)
@@ -27,7 +26,11 @@ use g2g_plugins::vulkanvideo::{
     extract_h265_parameter_sets, open_h265_decode_device, to_std_h265_params, VulkanVideoError,
 };
 
+mod vulkan_ref;
+use vulkan_ref::reference_yuv;
+
 const CLIP: &[u8] = include_bytes!("fixtures/h265_640x480_main10.hevc");
+const CLIP_FIXTURE: &str = "h265_640x480_main10.hevc";
 const W: usize = 640;
 const H: usize = 480;
 
@@ -94,8 +97,7 @@ fn decodes_hevc_main10_10bit() {
     }
 
     // Optional bit-exact check vs an ffmpeg yuv420p10le reference (display order).
-    if let Ok(path) = std::env::var("G2G_H265_10BIT_REF") {
-        let ref_yuv = std::fs::read(&path).expect("read G2G_H265_10BIT_REF");
+    if let Some(ref_yuv) = reference_yuv(CLIP_FIXTURE) {
         let cw = W / 2;
         let ch = H / 2;
         let fb = (W * H + 2 * cw * ch) * 2; // planar 10-bit: Y, U, V, 2 bytes each

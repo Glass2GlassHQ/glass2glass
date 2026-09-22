@@ -8,9 +8,9 @@
 //! M566 proved on the system output), and uploads the result to the texture. Grain
 //! is output-only, so the read-back leaves the DPB reference untouched.
 //!
-//! Structural assertions run always. Bit-exactness is checked when `G2G_AV1_REF`
-//! points at a raw `yuv420p` dump of the same clip (`ffmpeg -i clip -f rawvideo
-//! -pix_fmt yuv420p ref.yuv`, grain applied): each RGBA texture is compared against
+//! Structural assertions run always. Bit-exactness is checked when
+//! `G2G_VULKAN_REF_DIR` names a directory of `tools/vulkan-refs.sh` dumps (grain applied by ffmpeg's
+//! dav1d): each RGBA texture is compared against
 //! the BT.601-limited conversion of the reference frame, which equals the texture
 //! path's own `nv12_to_rgba` of the (bit-exact) grained NV12, so the SAD is 0.
 //!
@@ -25,7 +25,11 @@ use g2g_plugins::vulkanvideo::{
     extract_av1_sequence_header, open_av1_decode_device, to_std_av1_seq_header, VulkanVideoError,
 };
 
+mod vulkan_ref;
+use vulkan_ref::reference_yuv;
+
 const CLIP: &[u8] = include_bytes!("fixtures/av1_640x480_filmgrain.obu");
+const CLIP_FIXTURE: &str = "av1_640x480_filmgrain.obu";
 const W: usize = 640;
 const H: usize = 480;
 
@@ -117,8 +121,7 @@ fn decodes_filmgrain_av1_to_textures() {
     }
 
     // Optional bit-exact check vs an ffmpeg/dav1d yuv420p reference (grain applied).
-    if let Ok(path) = std::env::var("G2G_AV1_REF") {
-        let ref_yuv = std::fs::read(&path).expect("read G2G_AV1_REF");
+    if let Some(ref_yuv) = reference_yuv(CLIP_FIXTURE) {
         let cw = W / 2;
         let ch = H / 2;
         let frame_bytes = W * H + 2 * cw * ch;

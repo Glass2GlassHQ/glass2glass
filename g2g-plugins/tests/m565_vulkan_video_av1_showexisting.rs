@@ -13,8 +13,7 @@
 //! `show_existing_frame` (17 coded frame OBUs -> 15 displayed frames), no film
 //! grain. Structural assertions (including that the fixture genuinely uses alt-ref
 //! and show_existing) run always; bit-exactness vs the ffmpeg (dav1d) software
-//! decoder is checked when `G2G_AV1_REF` points at a raw `yuv420p` dump of the same
-//! clip, verified out of band as for M506: all 15 display frames SAD/px 0.
+//! decoder is checked when `G2G_VULKAN_REF_DIR` names a directory of `tools/vulkan-refs.sh` dumps: all 15 display frames SAD/px 0.
 //!
 //! Runs on the RTX 3060; skips with no adapter / no AV1 decode / no compute queue.
 #![cfg(all(
@@ -28,7 +27,11 @@ use g2g_plugins::vulkanvideo::{
     VulkanVideoError,
 };
 
+mod vulkan_ref;
+use vulkan_ref::reference_yuv;
+
 const CLIP: &[u8] = include_bytes!("fixtures/av1_640x480_showexisting.obu");
+const CLIP_FIXTURE: &str = "av1_640x480_showexisting.obu";
 const W: usize = 640;
 const H: usize = 480;
 
@@ -91,8 +94,7 @@ fn decodes_showexisting_av1_stream() {
     }
 
     // Optional bit-exact check vs an ffmpeg yuv420p reference dump (display order).
-    if let Ok(path) = std::env::var("G2G_AV1_REF") {
-        let ref_yuv = std::fs::read(&path).expect("read G2G_AV1_REF");
+    if let Some(ref_yuv) = reference_yuv(CLIP_FIXTURE) {
         let frame_bytes = W * H * 3 / 2;
         assert!(
             ref_yuv.len() >= frame_bytes * frames.len(),

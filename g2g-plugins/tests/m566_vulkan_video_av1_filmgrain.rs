@@ -10,8 +10,7 @@
 //! The fixture is a 640x480 SVT-AV1 clip encoded with film grain (9 frames). The
 //! structural assertion (the stream actually carries film grain) runs always;
 //! bit-exactness vs the software decoder (luma AND chroma) is checked when
-//! `G2G_AV1_REF` points at a raw `yuv420p` dump of the same clip (`ffmpeg -i clip
-//! -f rawvideo -pix_fmt yuv420p ref.yuv`), verified out of band: every plane SAD/px 0.
+//! `G2G_VULKAN_REF_DIR` names a directory of `tools/vulkan-refs.sh` dumps: every plane SAD/px 0.
 //!
 //! Runs on the RTX 3060; skips with no adapter / no AV1 decode / no compute queue.
 #![cfg(all(
@@ -24,7 +23,11 @@ use g2g_plugins::vulkanvideo::{
     extract_av1_sequence_header, open_av1_decode_device, to_std_av1_seq_header, VulkanVideoError,
 };
 
+mod vulkan_ref;
+use vulkan_ref::reference_yuv;
+
 const CLIP: &[u8] = include_bytes!("fixtures/av1_640x480_filmgrain.obu");
+const CLIP_FIXTURE: &str = "av1_640x480_filmgrain.obu";
 const W: usize = 640;
 const H: usize = 480;
 
@@ -73,8 +76,7 @@ fn decodes_filmgrain_av1_stream() {
     // Optional bit-exact check vs an ffmpeg/dav1d yuv420p reference (grain applied).
     // NV12 chroma is interleaved CbCr; the reference is planar I420, so de-interleave
     // to compare the Cb (U) and Cr (V) planes.
-    if let Ok(path) = std::env::var("G2G_AV1_REF") {
-        let ref_yuv = std::fs::read(&path).expect("read G2G_AV1_REF");
+    if let Some(ref_yuv) = reference_yuv(CLIP_FIXTURE) {
         let cw = W / 2;
         let ch = H / 2;
         let frame_bytes = W * H + 2 * cw * ch;
