@@ -14339,7 +14339,7 @@ impl VulkanVideoDec {
                 Err(VulkanVideoError::NoComputeQueue) => {
                     Ok((sys().map_err(decode_refused)?, false))
                 }
-                Err(_) => Err(G2gError::CapsMismatch),
+                Err(err) => Err(decode_refused(err)),
             }
         } else {
             Ok((sys().map_err(decode_refused)?, false))
