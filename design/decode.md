@@ -970,7 +970,9 @@ decodes wrote visible to this one. The first decode after a `RESET` takes the to
 of the pipe as its source, since the reset drained every earlier decode.
 Where the readback copy runs on another queue nothing orders a decode after the
 copy of the same slot's previous picture, so a decode into a slot first retires
-the ring entries through the newest one that decoded into it.
+the ring entries through the newest one that decoded into it. On the coincide
+model that copy also moves the slot image out of the decode layout and back, so
+the decode retires through the newest entry for any slot it references as well.
 
 The ycbcr pass and the two-plane copy wait the decode's semaphore at the compute
 and transfer stage respectively, and their opening layout transitions take that

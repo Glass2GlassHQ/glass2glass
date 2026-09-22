@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1184: `VulkanVideoDec` orders a decode after the cross-queue readback of every slot it references, on a driver that decodes into the reference slot but cannot copy on its decode queue.
 - M1183: `VulkanVideoDec` runs clean under the Khronos validation layer with sync validation on NVIDIA and RADV, and the nightly GPU suite fails on any layer error.
 - M1182: `tools/vulkan-refs.sh` generates the ffmpeg reference dumps the Vulkan decode tests compare against, `G2G_VULKAN_REF_DIR` points them at one directory, and the nightly GPU suite runs with them.
 - M1181: `VulkanVideoDec` decodes on a driver that writes the picture into an image distinct from its DPB reference, so the Mesa RADV path runs bit-exact.

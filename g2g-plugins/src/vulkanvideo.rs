@@ -10367,7 +10367,12 @@ impl DpbCore {
     ) -> Result<(), VulkanVideoError> {
         // a copy on another queue may still be reading the picture this decode overwrites
         if self.copy_pool.is_some() {
-            self.retire_through_target(target)?;
+            let mut waited_slots = alloc::vec![target];
+            // on a coincide driver that copy also moves each reference out of the decode layout
+            if !self.distinct() {
+                waited_slots.extend(reference_slot_indices(begin_info));
+            }
+            self.retire_through_slots(&waited_slots)?;
         }
         let idx = self.ring_next;
         if self.ring[idx].in_flight.is_some() {
@@ -10605,13 +10610,13 @@ impl DpbCore {
         }
     }
 
-    fn retire_through_target(&mut self, target: usize) -> Result<(), VulkanVideoError> {
+    fn retire_through_slots(&mut self, slots: &[usize]) -> Result<(), VulkanVideoError> {
         let newest = (0..DECODE_RING_DEPTH).rev().find(|i| {
             let idx = (self.ring_next + i) % DECODE_RING_DEPTH;
             self.ring[idx]
                 .in_flight
                 .as_ref()
-                .is_some_and(|decode| decode.dpb_slot == target)
+                .is_some_and(|decode| slots.contains(&decode.dpb_slot))
         });
         let Some(newest) = newest else {
             return Ok(());
@@ -13736,6 +13741,25 @@ unsafe fn destroy_pictures(dev: &ash::Device, pictures: &[DpbImage]) {
 }
 
 // a barrier on a layered DPB must name one slot's layer or it discards the others
+// the begin-coding slot indices, without the -1 entry for the slot being set up
+fn reference_slot_indices(begin_info: &vk::VideoBeginCodingInfoKHR) -> alloc::vec::Vec<usize> {
+    if begin_info.reference_slot_count == 0 {
+        return alloc::vec::Vec::new();
+    }
+    // SAFETY: `begin_info` borrows its caller's reference-slot array for this call,
+    // `reference_slot_count` entries long and non-null since the count is nonzero.
+    let slots = unsafe {
+        core::slice::from_raw_parts(
+            begin_info.p_reference_slots,
+            begin_info.reference_slot_count as usize,
+        )
+    };
+    slots
+        .iter()
+        .filter_map(|slot| usize::try_from(slot.slot_index).ok())
+        .collect()
+}
+
 fn layer_range(layer: u32) -> vk::ImageSubresourceRange {
     vk::ImageSubresourceRange {
         aspect_mask: vk::ImageAspectFlags::COLOR,
