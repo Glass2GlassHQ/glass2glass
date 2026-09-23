@@ -11,15 +11,10 @@
 mod cue_render_common;
 
 use cue_render_common::{
-    bounds, gpu_context, gpu_frame, gpu_overlay, gpu_render, is_blue, is_ink, is_red, latin_font,
-    read_first, render, GPU_LOCK, H, NO_BOX, W,
+    bounds, gpu_context, gpu_frame, gpu_overlay, gpu_render, ink_overlap, is_blue, is_red,
+    latin_font, read_first, render, GPU_LOCK, H, MIN_CPU_OVERLAP, NO_BOX, W,
 };
 use g2g_core::{AsyncElement, PropValue};
-
-/// Least intersection-over-union between the GPU and CPU ink masks. Not 1,
-/// because Vello and `ab_glyph` antialias the same outline differently, so edge
-/// pixels differ by design.
-const MIN_CPU_OVERLAP: f32 = 0.75;
 
 /// A two-line cue with the first line red and the second blue, so each column's
 /// pixels are told apart by colour. `settings` follows the timing, empty for a
@@ -40,31 +35,6 @@ fn replacement_font() -> Option<(&'static str, Vec<u8>)> {
     ]
     .into_iter()
     .find_map(|path| Some((path, read_first(&[path])?)))
-}
-
-/// Intersection-over-union of the painted pixels of two frames.
-fn ink_overlap(first: &[u8], second: &[u8]) -> f32 {
-    let ink = |pixels: &[u8]| -> Vec<bool> {
-        pixels
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .map(|px| is_ink(px))
-            .collect()
-    };
-    let (first, second) = (ink(first), ink(second));
-    let both = first
-        .iter()
-        .zip(&second)
-        .filter(|(a, b)| **a && **b)
-        .count();
-    let either = first
-        .iter()
-        .zip(&second)
-        .filter(|(a, b)| **a || **b)
-        .count();
-    assert!(either > 0, "one of the frames has ink");
-    both as f32 / either as f32
 }
 
 /// `(left, top, right, bottom)` of one line's ink, inclusive.

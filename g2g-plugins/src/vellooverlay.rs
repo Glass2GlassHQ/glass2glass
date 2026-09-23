@@ -52,13 +52,14 @@ use g2g_core::ElementMetadata;
 #[cfg(feature = "vello-text-overlay")]
 use vello::peniko::{Fill, FontData};
 #[cfg(feature = "vello-text-overlay")]
-use vello::Glyph;
+use vello::{Glyph, NormalizedCoord};
 
 #[cfg(feature = "vello-text-overlay")]
 use crate::subparse::{Cue, TextShadow};
 #[cfg(feature = "vello-text-overlay")]
 use crate::textoverlay::{
-    stroke_offsets, BlurredShadowMask, ChainGlyph, GlyphPaint, PlacedCue, PlacedGlyph, TextOverlay,
+    stroke_offsets, BlurredShadowMask, ChainGlyph, FontAxis, GlyphPaint, PlacedCue, PlacedGlyph,
+    TextOverlay,
 };
 #[cfg(feature = "vello-text-overlay")]
 use crate::textshape::FontId;
@@ -544,8 +545,9 @@ const FONT_PROPERTY: &str = "font";
 /// Cues, fonts, colours, cue selection and placement are the CPU overlay's
 /// (`location=` / `font=` / `color=` / `font-size=` behave the same, and
 /// cosmic-text shapes and picks fallback faces the same way, so a Latin cue with
-/// CJK in it uses the same faces here). `font-variations=` is not applied here:
-/// a variable font draws at its default instance. Only the drawing differs:
+/// CJK in it uses the same faces here). `font-variations=` moves a variable face
+/// the way each CPU raster does: a shaped glyph takes its weight on the `wght`
+/// axis, a vertical cue's glyph every axis in the spec. Only the drawing differs:
 /// the glyph outlines of the face the shaper chose go to Vello as glyph runs,
 /// and the backing box is a filled rect, both composited over the frame image on
 /// the GPU.
@@ -702,12 +704,12 @@ impl VelloTextOverlay {
     }
 
     /// Draw one cue's backing box, span fills, shadows, underlines and glyphs,
-    /// batching the glyphs into runs of one face, colour and size (a
-    /// `::cue(.class)` span or a fallback face starts a new run). Every shadow
-    /// is drawn before any glyph, so a neighbour's shadow never lands on top of
-    /// a glyph. A span's weight, slant and width reach the shaper's face
-    /// selection, so they arrive here in the glyph ids and the face the run
-    /// names, with nothing extra to do.
+    /// batching the glyphs into runs of one face, colour, size and variable-face
+    /// position (a `::cue(.class)` span or a fallback face starts a new run).
+    /// Every shadow is drawn before any glyph, so a neighbour's shadow never
+    /// lands on top of a glyph. A span's weight, slant and width reach the
+    /// shaper's face selection, so they arrive here in the glyph ids, the face
+    /// the run names and the weight the run is drawn at.
     fn draw_cue<Placed: OutlineGlyph>(&mut self, scene: &mut Scene, cue: &PlacedCue<Placed>) {
         let (x, y, box_w, box_h) = cue.background;
         if box_w > 0 && box_h > 0 {
@@ -727,10 +729,16 @@ impl VelloTextOverlay {
             let mut start = 0;
             while start < cue.glyphs.len() {
                 let head = &cue.glyphs[start];
-                let (face, size, paint) = (head.face(), head.em_size(), head.paint());
+                let (face, size, paint, instance) =
+                    (head.face(), head.em_size(), head.paint(), head.instance());
                 let end = cue.glyphs[start..]
                     .iter()
-                    .position(|g| g.face() != face || g.em_size() != size || g.paint() != paint)
+                    .position(|g| {
+                        g.face() != face
+                            || g.em_size() != size
+                            || g.paint() != paint
+                            || g.instance() != instance
+                    })
                     .map_or(cue.glyphs.len(), |n| start + n);
                 let batch = &cue.glyphs[start..end];
                 start = end;
@@ -768,6 +776,7 @@ impl VelloTextOverlay {
                 let Some(font) = font_handle(&mut self.fonts, &mut self.text, face) else {
                     continue;
                 };
+                let coords = normalized_coords(font, instance, self.text.font_axes());
                 for (offset, brush) in copies {
                     let run = batch.iter().map(|g| {
                         let glyph = g.glyph();
@@ -780,6 +789,7 @@ impl VelloTextOverlay {
                     scene
                         .draw_glyphs(font)
                         .font_size(size)
+                        .normalized_coords(&coords)
                         .brush(brush_color(brush))
                         .draw(Fill::NonZero, run);
                 }
@@ -807,6 +817,19 @@ enum FaceKey {
     Chain(usize),
 }
 
+#[cfg(feature = "vello-text-overlay")]
+const WEIGHT_AXIS_TAG: &[u8; 4] = b"wght";
+
+// Where on its variable axes a glyph's face is drawn, matching the CPU raster.
+#[cfg(feature = "vello-text-overlay")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GlyphInstance {
+    // swash moves a shaped glyph's face to the glyph's weight on the `wght` axis.
+    Weight(u16),
+    // The `ab_glyph` chain face carries every `font-variations=` axis.
+    ElementAxes,
+}
+
 /// A placed glyph Vello draws from its outline, from either layout.
 #[cfg(feature = "vello-text-overlay")]
 trait OutlineGlyph {
@@ -815,6 +838,7 @@ trait OutlineGlyph {
     fn glyph(&self) -> Glyph;
     fn em_size(&self) -> f32;
     fn paint(&self) -> GlyphPaint;
+    fn instance(&self) -> GlyphInstance;
     /// The blurred shadow mask, with its corner as an offset from the pen origin.
     fn blurred_shadow_mask(&self, text: &mut TextOverlay, blur: u32) -> Option<BlurredShadowMask>;
 }
@@ -845,6 +869,10 @@ impl OutlineGlyph for PlacedGlyph {
         }
     }
 
+    fn instance(&self) -> GlyphInstance {
+        GlyphInstance::Weight(self.key.font_weight.0)
+    }
+
     fn blurred_shadow_mask(&self, text: &mut TextOverlay, blur: u32) -> Option<BlurredShadowMask> {
         text.blurred_shadow_mask(self.key, blur)
     }
@@ -870,6 +898,10 @@ impl OutlineGlyph for ChainGlyph {
 
     fn paint(&self) -> GlyphPaint {
         self.paint
+    }
+
+    fn instance(&self) -> GlyphInstance {
+        GlyphInstance::ElementAxes
     }
 
     fn blurred_shadow_mask(&self, text: &mut TextOverlay, blur: u32) -> Option<BlurredShadowMask> {
@@ -939,6 +971,34 @@ fn font_handle<'a>(
     };
     cache.push((key, FontData::new(Blob::from(bytes), index)));
     cache.last().map(|(_, font)| font)
+}
+
+#[cfg(feature = "vello-text-overlay")]
+fn normalized_coords(
+    font: &FontData,
+    instance: GlyphInstance,
+    element_axes: &[FontAxis],
+) -> Vec<NormalizedCoord> {
+    use skrifa::{FontRef, MetadataProvider, Tag};
+    let Ok(face) = FontRef::from_index(font.data.data(), font.index) else {
+        return Vec::new();
+    };
+    let axes = face.axes();
+    let location = match instance {
+        GlyphInstance::Weight(weight) => {
+            axes.location([(Tag::new(WEIGHT_AXIS_TAG), f32::from(weight))])
+        }
+        GlyphInstance::ElementAxes => axes.location(
+            element_axes
+                .iter()
+                .map(|(tag, value)| (Tag::new(tag), *value)),
+        ),
+    };
+    location
+        .coords()
+        .iter()
+        .map(|coord| coord.to_bits())
+        .collect()
 }
 
 #[cfg(feature = "vello-text-overlay")]

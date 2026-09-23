@@ -99,7 +99,7 @@ struct LineMetrics {
 /// One variable-font axis coordinate: a 4-byte OpenType axis tag (`wght`,
 /// `wdth`, ...) and the position on it.
 #[cfg(feature = "truetype-overlay")]
-type FontAxis = ([u8; 4], f32);
+pub(crate) type FontAxis = ([u8; 4], f32);
 
 /// A fill behind one span's glyphs on one line: `(x, y, width, height)` in frame
 /// pixels, and its RGBA.
@@ -1586,6 +1586,11 @@ impl TextOverlay {
     pub(crate) fn face_data(&mut self, id: crate::textshape::FontId) -> Option<(Vec<u8>, u32)> {
         self.ensure_shaper();
         self.shaper.as_ref()?.face_data(id)
+    }
+
+    #[cfg(feature = "vello-text-overlay")]
+    pub(crate) fn font_axes(&self) -> &[FontAxis] {
+        &self.axes
     }
 
     /// The `wght` variable-font axis position, if `font-variations=` set one: the

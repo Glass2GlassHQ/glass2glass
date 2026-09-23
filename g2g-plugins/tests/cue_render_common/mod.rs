@@ -1,7 +1,7 @@
 //! Helpers shared by the cue-rendering tests (`m1055_cue_text_style`,
-//! `m1057_cue_css`, `m1196_vello_vertical_cues`): the one-cue WebVTT document
-//! builder, the black frame and sink the CPU and GPU overlays render into, the
-//! system fonts to render with, and the pixel
+//! `m1057_cue_css`, `m1196_vello_vertical_cues`, `m1202_vello_font_variations`):
+//! the one-cue WebVTT document builder, the black frame and sink the CPU and GPU
+//! overlays render into, the system fonts to render with, and the pixel
 //! predicates and scanners the assertions read the result through. One
 //! definition, included per test binary via `mod cue_render_common;`.
 #![allow(dead_code)] // no one test file uses every helper here
@@ -107,6 +107,10 @@ impl OutputSink for FrameSink {
 /// Render the document's cue over a black frame, as RGBA8 bytes. With no `font`
 /// the shaper picks the system sans-serif itself.
 pub(crate) async fn render(font: Option<&[u8]>, vtt: &str) -> Vec<u8> {
+    cpu_frame(&mut cpu_overlay(font, vtt)).await
+}
+
+pub(crate) fn cpu_overlay(font: Option<&[u8]>, vtt: &str) -> TextOverlay {
     let mut overlay = TextOverlay::new()
         .with_cues(parse_webvtt(vtt))
         .with_font_size(FONT_PX);
@@ -114,6 +118,10 @@ pub(crate) async fn render(font: Option<&[u8]>, vtt: &str) -> Vec<u8> {
         overlay = overlay.with_font_bytes(font, 0).expect("font parses");
     }
     overlay.configure_pipeline(&caps()).expect("caps accepted");
+    overlay
+}
+
+pub(crate) async fn cpu_frame(overlay: &mut TextOverlay) -> Vec<u8> {
     let mut sink = FrameSink::default();
     overlay
         .process(PipelinePacket::DataFrame(black_frame()), &mut sink)
@@ -157,6 +165,36 @@ pub(crate) fn ink(pixels: &[u8]) -> usize {
         .iter()
         .filter(|px| is_ink(*px))
         .count()
+}
+
+/// Least intersection-over-union between the GPU and CPU ink masks. Not 1,
+/// because Vello and the CPU rasterizers antialias the same outline differently,
+/// so edge pixels differ by design.
+pub(crate) const MIN_CPU_OVERLAP: f32 = 0.75;
+
+/// Intersection-over-union of the painted pixels of two frames.
+pub(crate) fn ink_overlap(first: &[u8], second: &[u8]) -> f32 {
+    let ink = |pixels: &[u8]| -> Vec<bool> {
+        pixels
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|px| is_ink(px))
+            .collect()
+    };
+    let (first, second) = (ink(first), ink(second));
+    let both = first
+        .iter()
+        .zip(&second)
+        .filter(|(a, b)| **a && **b)
+        .count();
+    let either = first
+        .iter()
+        .zip(&second)
+        .filter(|(a, b)| **a || **b)
+        .count();
+    assert!(either > 0, "one of the frames has ink");
+    both as f32 / either as f32
 }
 
 /// Bounding box `(left, top, right, bottom)` of the pixels `pick` accepts,

@@ -608,7 +608,7 @@ vello-overlay = ["std", "analytics", "dep:vello", "dep:wgpu"]
 # keep-on-GPU pipeline overlays text with no CPU round trip. Cue selection,
 # placement and font fallback are the CPU TextOverlay's, shaped by cosmic-text;
 # only the glyph outlines are drawn on the GPU, hence both features.
-vello-text-overlay = ["vello-overlay", "text-shaping"]
+vello-text-overlay = ["vello-overlay", "text-shaping", "dep:skrifa"]
 # GPU presentation sink (M103): WgpuSink presents MemoryDomain::WgpuTexture
 # frames (eg from VelloAnalyticsOverlay) by blitting onto a target on the *same*
 # shared wgpu device (a wgpu texture is device-bound, so producer and sink must
@@ -954,6 +954,9 @@ vello = { version = "0.9", optional = true }
 # wgpu for the GpuContext + WgpuSink (and shared with vello, which re-exports the
 # same crate). Optional; pulled by vello-overlay / wgpu-sink.
 wgpu = { version = "29", optional = true }
+# Maps `font-variations=` user values to the normalized coords Vello draws a
+# variable face at (vello-text-overlay feature). The version vello 0.9 uses.
+skrifa = { version = "0.42.1", optional = true }
 # Raw Vulkan escape hatch for CUDA<->wgpu interop (cuda-wgpu feature, M220). The
 # Vulkan backend of wgpu, used to create a device with VK_KHR_external_memory_fd
 # and to wrap a self-allocated, externally-shared VkImage as a wgpu texture

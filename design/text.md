@@ -106,9 +106,9 @@ Weight, slant and width are carried as per-span cosmic-text `Attrs`, so they pic
 a face out of the font database, a real bold or italic face where the family has
 one, else the `wght` variation axis for weight. There is no synthetic oblique, so
 an italic run with no italic face installed renders upright. They reach the Vello
-backend in the glyph ids and the face each run names. That face selection is the
-shaped path only: a `vertical:rl` or `lr` cue on the `ab_glyph` column renderer
-keeps the element's own `font-variations=` weight.
+backend in the glyph ids, the face each run names and the run's weight. That face
+selection is the shaped path only: a `vertical:rl` or `lr` cue on the `ab_glyph`
+column renderer keeps the element's own `font-variations=` weight.
 
 An underline is a filled bar in the run's text colour, drawn in the glyph layer so
 a neighbour's shadow stays under it, below the baseline horizontally and down the
@@ -158,8 +158,10 @@ backends.
 `ab_glyph` sizes a face by its ascent-to-descent height, not its em square, so a
 vertical glyph reaches Vello at the em size that draws it as tall. Its pen origin
 is a whole pixel on both backends, so the two put the same column in the same
-pixels. Vello draws the default instance of a variable face, so
-`font-variations=` reaches only the CPU rasters.
+pixels. A variable face is drawn where its CPU raster puts it: a shaped glyph at
+its own weight on the `wght` axis, as swash does, and a vertical glyph at every
+`font-variations=` axis, as the `ab_glyph` chain face does. skrifa turns those
+axis values into the normalized coords each Vello glyph run carries.
 
 ### Streamed cues
 

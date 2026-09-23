@@ -174,8 +174,6 @@ Highest leverage first:
   shaping if cosmic-text ever grows writing modes.
 - Add a carrier for non-default channel orders when a source needs an
   interleave order outside the per-count `ChannelLayout` convention.
-- Apply `font-variations=` on the `VelloTextOverlay` path (a variable font
-  draws at its default instance there).
 - Apply an `OrientationMeta` in `kmssink` (a DRM plane rotation), on the VAAPI
   VPP path and on the D3D11 VideoProcessor path, so those sinks advertise
   `Reconfigure::AbsorbOrientation` too.
