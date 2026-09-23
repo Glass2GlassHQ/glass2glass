@@ -517,6 +517,11 @@ pub mod devicemon;
 // (uses the Registry + parse_launch).
 #[cfg(feature = "std")]
 pub mod gst_compat;
+// the g2g-inspect and g2g-docgen bodies over a caller's registry, for launchers with extra elements
+#[cfg(feature = "std")]
+pub mod docgen;
+#[cfg(feature = "std")]
+pub mod inspect_cli;
 // Declarative graph format (M578): build a `Graph` from a JSON / YAML document,
 // the structured sibling of the `gst-launch` text parser. Behind `declarative`
 // (pulls serde + serde_json); `declarative-yaml` adds the YAML front-end.

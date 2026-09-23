@@ -52,6 +52,9 @@ launch = [
     # line starts at a microphone or ends at a speaker.
     "g2g-plugins/pulse-src",
     "g2g-plugins/pulse-sink",
+    # `--inspect --json` and `--mcp` serve the g2g-inspect JSON dump and the
+    # g2g-mcp server over this registry.
+    "g2g-plugins/mcp",
 ]
 # Also register the native Rust inference elements (`ortinfer` /
 # `detectionpostprocess` / ...) in `g2g-launch-py`, so one launch line can run a
@@ -91,6 +94,8 @@ tokio = { version = "1", features = ["rt", "macros"] }
 # `pyelement` launch-registry test parses a pipeline around. g2g-plugins does not
 # depend on g2g-python, so this dev-only edge is acyclic (same pattern as g2g-ml).
 g2g-plugins = { workspace = true, features = ["std"] }
+# Reads the `g2g-launch-py --inspect --json` and `--mcp` replies.
+serde_json = "1"
 
 [lints]
 workspace = true

@@ -16,12 +16,17 @@
 //!   ! analyticsoverlay ! videoconvert ! autovideosink
 //! ```
 //!
-//! `--inspect` prints the `g2g-inspect` dump of a hosted element with the
-//! properties its class declares, which a plain dump cannot know:
+//! `--inspect`, `--docgen` and `--mcp` run `g2g-inspect`, `g2g-docgen` and
+//! `g2g-mcp` over this registry, so the hosted elements appear in each.
+//! `--inspect` takes any `g2g-inspect` argument, and naming a hosted element
+//! with a class prints the properties that class declares, which a plain dump
+//! cannot know:
 //!
 //! ```text
+//! g2g-launch-py --inspect --json pyelement
 //! g2g-launch-py --inspect pyelement module=objectdetector class=ObjectDetector
 //! g2g-launch-py --inspect pyaggregator module=batch class=BatchInfer
+//! g2g-launch-py --docgen elements.html
 //! ```
 //!
 //! The interpreter must see the gst-python-ml package + its deps: set
@@ -40,24 +45,38 @@ use g2g_plugins::registry::default_registry;
 // source); see design/README.md on link_capacity dominating glass-to-glass latency.
 const LINK_CAPACITY: usize = 4;
 
-const USAGE: &str =
-    "usage: g2g-launch-py [-q] <element> [key=value ...] ! <element> ! ...\n       \
-                     g2g-launch-py --inspect pyelement|pyaggregator module=<module> class=<class>";
+const USAGE: &str = "usage: g2g-launch-py [-q] <element> [key=value ...] ! <element> ! ...
+       g2g-launch-py --inspect [g2g-inspect arguments]
+       g2g-launch-py --inspect pyelement|pyaggregator module=<module> class=<class>
+       g2g-launch-py --docgen [out.html]
+       g2g-launch-py --mcp";
 
 fn main() {
     g2g_core::log::init_from_env();
 
-    // Join the args into one pipeline string; accept a leading `-q`/`--quiet`
-    // or `--inspect`, and skip the common no-op gst-launch flags so a pasted line still runs.
+    // Join the args into one pipeline string. Accept a leading `-q`/`--quiet`,
+    // hand everything after a tool flag to that tool, and skip the common no-op
+    // gst-launch flags so a pasted line still runs.
     let mut quiet = false;
-    let mut inspect = false;
     let mut tokens: Vec<String> = Vec::new();
     let mut in_pipeline = false;
-    for arg in std::env::args().skip(1) {
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
         if !in_pipeline && arg.starts_with('-') && arg != "-" {
             match arg.as_str() {
                 "-q" | "--quiet" => quiet = true,
-                "--inspect" => inspect = true,
+                "--inspect" => {
+                    inspect(args.collect());
+                    return;
+                }
+                "--docgen" => {
+                    g2g_plugins::docgen::run(&registry(), args.next());
+                    return;
+                }
+                "--mcp" => {
+                    g2g_plugins::mcp::McpServer::with_registry(registry()).serve_stdio();
+                    return;
+                }
                 "-e" | "--eos-on-shutdown" | "-m" | "--messages" | "-f" | "--no-fault" | "-t"
                 | "--tags" | "-v" | "--verbose" => {}
                 "-h" | "--help" => {
@@ -70,10 +89,6 @@ fn main() {
         }
         in_pipeline = true;
         tokens.push(arg);
-    }
-    if inspect {
-        inspect_hosted_class(&tokens);
-        return;
     }
     let pipeline = tokens.join(" ");
     if pipeline.trim().is_empty() {
@@ -176,13 +191,20 @@ fn registry() -> Registry {
     reg
 }
 
+/// `--inspect <element> key=value ...` names a hosted class, anything else is a
+/// `g2g-inspect` command line.
+fn inspect(tokens: Vec<String>) {
+    match tokens.split_first() {
+        Some((element, properties)) if !element.starts_with('-') && !properties.is_empty() => {
+            inspect_hosted_class(element, properties)
+        }
+        _ => g2g_plugins::inspect_cli::run(registry(), tokens),
+    }
+}
+
 /// Print the dump `--inspect <element> module=... class=...` asks for, or the
-/// usage and exit 2 when the arguments do not name a hosted element and class.
-fn inspect_hosted_class(tokens: &[String]) {
-    let Some((element, properties)) = tokens.split_first() else {
-        eprintln!("{USAGE}");
-        process::exit(2);
-    };
+/// usage and exit 2 when the arguments do not name a module and class.
+fn inspect_hosted_class(element: &str, properties: &[String]) {
     let mut module = None;
     let mut class = None;
     for property in properties {

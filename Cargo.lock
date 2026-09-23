@@ -4182,6 +4182,7 @@ dependencies = [
  "g2g-ml",
  "g2g-plugins",
  "pyo3",
+ "serde_json",
  "tokio",
 ]
 

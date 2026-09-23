@@ -273,6 +273,13 @@ default and read/write flags, from the same `ElementDoc` and `PropertyDoc`
 introspection the text path uses. Like the dashboard it is serialized in
 `g2g-plugins` with serde_json, not in `g2g-core`.
 
+The `g2g-inspect` and `g2g-docgen` bodies are `g2g-plugins` functions that take
+the registry (`inspect_cli::run`, `docgen::run`), as `McpServer::with_registry`
+does for the server. g2g-plugins cannot depend on g2g-python, so `g2g-launch-py`
+passes its own registry, the standard one plus `g2g_python::register`, to all
+three behind `--inspect`, `--docgen` and `--mcp`. The committed
+`docs/elements.html` is generated through that path.
+
 It feeds two consumers. The visual pipeline builder (`tools/builder/`) is a React
 Flow app (Vite plus pnpm) that loads a `registry.json` snapshot, offers a typed
 drag-drop canvas with pan and zoom and either-direction linking, and imports and

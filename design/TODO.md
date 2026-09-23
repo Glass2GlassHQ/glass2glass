@@ -296,12 +296,6 @@ unless it says otherwise.
   `intersink` / `intersrc`, `originalbuffersave` / `originalbufferrestore`.
 - **Fallback switching:** gst's `fallback-source`, an application-built source
   for `fallbacksrc`'s fallback side.
-## Python-element host
-
-- List `pyelement` / `pyaggregator` in `g2g-inspect`, `g2g-docgen` and `g2g-mcp`
-  (g2g-plugins cannot depend on g2g-python, so only `g2g-launch-py --inspect`
-  shows a hosted class's properties).
-
 ## Embedded
 
 - Connect `EmbassyClock` to a HAL tick on real hardware.

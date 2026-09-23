@@ -161,6 +161,10 @@ parse error: unknown element: theoraenc
   the README's sample pipelines as prompts. Captioning a frame with a VLM and
   searching an embedding index by text stay in gst-python-ml's `pyml-mcp`, which
   reads the same files. `claude mcp add g2g -- target/release/g2g-mcp`.
+- **`g2g-launch-py`** (crate `g2g-python`) is `g2g-launch` plus the hosted
+  gst-python-ml elements. `--inspect`, `--docgen` and `--mcp` run the three
+  tools above with `pyelement` / `pysrc` / `pyaggregator` included, and
+  `--inspect pyelement module=m class=C` lists that class's own properties.
 - **Incremental migration.** `g2g-bridge` embeds a g2g sub-graph in a
   GStreamer pipeline. `gstwrap` hosts an un-ported GStreamer element in a g2g
   graph.

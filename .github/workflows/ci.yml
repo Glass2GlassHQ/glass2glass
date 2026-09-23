@@ -237,16 +237,21 @@ jobs:
             clang libavcodec-dev libavformat-dev libavutil-dev libswscale-dev \
             libva-dev libdrm-dev libgbm-dev libvpx-dev libpipewire-0.3-dev \
             mosquitto mosquitto-clients
+      # g2g-launch-py links libpython (pyo3), for the docs step below.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
       # docs/elements.html is generated from the registry, so it silently goes
       # stale every time an element is added. The element list is exactly the
       # elements compiled in, so this has to use the same feature set the
       # committed file was generated with (`linux-full`), which is what the
       # extra libav* / libva / libvpx / libpipewire packages above are for.
+      # g2g-launch-py adds the hosted Python elements to that registry.
       - name: docs/elements.html is up to date
         run: |
-          cargo run -p g2g-plugins --locked --features linux-full --bin g2g-docgen
+          cargo run -p g2g-python --locked --features launch,g2g-plugins/linux-full --bin g2g-launch-py -- --docgen docs/elements.html
           git diff --exit-code docs/elements.html \
-            || { echo "::error::docs/elements.html is stale. Regenerate with: cargo run -p g2g-plugins --features linux-full --bin g2g-docgen"; exit 1; }
+            || { echo "::error::docs/elements.html is stale. Regenerate with: cargo run -p g2g-python --features launch,g2g-plugins/linux-full --bin g2g-launch-py -- --docgen docs/elements.html"; exit 1; }
       # The docgen step above builds `linux-full` as a binary only, so a break
       # that lives in a test target under that feature union goes unseen.
       - name: check g2g-plugins (linux-full, test targets)

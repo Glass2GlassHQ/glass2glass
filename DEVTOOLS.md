@@ -389,11 +389,11 @@ frames do not serialize, so they cannot be replayed).
 ## MCP server (`g2g-mcp`)
 
 `g2g-mcp` is a Model Context Protocol server (JSON-RPC over stdio) for
-agent-driven dev. Build with `tooling-json` and point an MCP client at the
+agent-driven dev. Build with `mcp` and point an MCP client at the
 binary:
 
 ```sh
-cargo build -p g2g-plugins --features tooling-json --bin g2g-mcp
+cargo build -p g2g-plugins --features mcp --bin g2g-mcp
 # register target/debug/g2g-mcp as an MCP stdio server in your client
 ```
 
@@ -432,3 +432,14 @@ cargo run -p g2g-plugins --features linux-full --bin g2g-docgen
 The listing reflects the elements compiled into the build (a feature-gated or
 platform-only element absent from the build is absent from the page), exactly
 like `g2g-inspect`. The page is linked from the project landing page.
+
+`g2g-launch-py` (crate `g2g-python`, feature `launch`) runs `g2g-inspect`,
+`g2g-docgen` and `g2g-mcp` over a registry that also holds the hosted Python
+elements `pyelement`, `pysrc` and `pyaggregator`: `--inspect [g2g-inspect
+arguments]`, `--docgen [out.html]` and `--mcp`. Listing the hosted elements
+does not start the interpreter, but the binary links libpython. The checked-in
+page comes from this path, and CI regenerates it the same way:
+
+```
+cargo run -p g2g-python --features launch,g2g-plugins/linux-full --bin g2g-launch-py -- --docgen docs/elements.html
+```
