@@ -74,8 +74,9 @@ use crate::link::LinkPolicy;
 use crate::memory::MemoryDomainKind;
 use crate::property::{PropError, PropValue, PropertySpec, ValueError};
 use crate::runtime::autoplug::{
-    is_raw_audio, is_raw_video, FallbackSourceRole, FanoutRebuild, PadKind, PadRequest, Registry,
-    RestartPolicy, UriError, UriFanout, UriFanoutHead, UriFanoutPort, UriRebuild,
+    is_raw_audio, is_raw_video, FallbackSourceRole, FanoutRebuild, MainSourceFactory, PadKind,
+    PadRequest, Registry, RestartPolicy, UriError, UriFanout, UriFanoutHead, UriFanoutPort,
+    UriRebuild,
 };
 use crate::runtime::parse_scope::ParseScope;
 use crate::runtime::{DynSourceLoop, GraphNode, GraphNodeRef, UnblockHandle};
@@ -156,7 +157,8 @@ pub enum ParseError {
     /// A `uridecodebin` / `playbin` was not at the head of its chain. It provides
     /// the source, so it must start the pipeline.
     UriSourceNotAtHead(String),
-    /// A `uridecodebin` / `playbin` had no `uri=` property.
+    /// A `uridecodebin` / `playbin` had no `uri=` property, or a `fallbacksrc`
+    /// had neither a `uri=` nor a registered main source.
     MissingUri(String),
     /// The `uri=` could not be turned into a source (bad URI, or no handler
     /// registered for its scheme). The message quotes the URI and reason.
@@ -1887,10 +1889,17 @@ fn restartable_fanout_source(
     }
 }
 
+/// Where a `fallbacksrc`'s main source comes from: its `uri=`, or failing that
+/// the application's registered factory (M1198).
+enum MainSource<'a> {
+    Uri(&'a str),
+    Factory(MainSourceFactory),
+}
+
 /// Everything a `fallbacksrc` keyword's properties say, read once so the
 /// single-stream expansion and the lone-keyword fan-out agree on them.
 struct FallbackSettings<'a> {
-    uri: &'a str,
+    main: MainSource<'a>,
     fallback_uri: Option<&'a str>,
     enable_video: bool,
     enable_audio: bool,
@@ -1916,7 +1925,11 @@ fn fallbacksrc_settings<'a>(
             key: key.clone(),
         });
     }
-    let uri = prop(spec, "uri").ok_or_else(|| ParseError::MissingUri(spec.name.clone()))?;
+    let main = match (prop(spec, "uri"), registry.fallbacksrc_main_source()) {
+        (Some(uri), _) => MainSource::Uri(uri),
+        (None, Some(factory)) => MainSource::Factory(factory),
+        (None, None) => return Err(ParseError::MissingUri(spec.name.clone())),
+    };
     let enable_video = keyword_bool(spec, "enable-video", true)?;
     let enable_audio = keyword_bool(spec, "enable-audio", true)?;
     if !enable_video && !enable_audio {
@@ -1943,7 +1956,7 @@ fn fallbacksrc_settings<'a>(
         }
     }
     Ok(FallbackSettings {
-        uri,
+        main,
         fallback_uri: prop(spec, "fallback-uri"),
         enable_video,
         enable_audio,
@@ -1976,7 +1989,7 @@ fn expand_fallbacksrc(
 ) -> Result<(Vec<Item>, Chain), ParseError> {
     let settings = fallbacksrc_settings(registry, spec)?;
     let FallbackSettings {
-        uri,
+        main,
         fallback_uri,
         enable_video,
         enable_audio,
@@ -1987,17 +2000,34 @@ fn expand_fallbacksrc(
     let preferred = consumer.map_or(MemoryDomainKind::System, |name| {
         registry.declared_memory_preference(name)
     });
-    let (source, source_caps) = registry
-        .build_uri_source(uri)
-        .map_err(|e: UriError| ParseError::Uri(alloc::format!("{uri}: {e:?}")))?;
-    let source = restartable_uri_source(
-        registry,
-        source,
-        uri,
-        restart,
-        FallbackSourceRole::Main,
-        unblock.clone(),
-    )?;
+    let (source, source_caps) = match main {
+        MainSource::Uri(uri) => {
+            let (source, caps) = registry
+                .build_uri_source(uri)
+                .map_err(|e: UriError| ParseError::Uri(alloc::format!("{uri}: {e:?}")))?;
+            let source = restartable_uri_source(
+                registry,
+                source,
+                uri,
+                restart,
+                FallbackSourceRole::Main,
+                unblock.clone(),
+            )?;
+            (source, caps)
+        }
+        MainSource::Factory(factory) => {
+            let (source, caps) = factory.build();
+            let source = restartable_source(
+                registry,
+                source,
+                factory.rebuilder(),
+                restart,
+                FallbackSourceRole::Main,
+                unblock.clone(),
+            );
+            (source, caps)
+        }
+    };
     // The kind is decided by which target the search reaches, so the dummy
     // fallback is the right generator and a `fallback-uri` decodes to the same
     // shape. Video first: a container carrying both is a video stream here.
@@ -2965,8 +2995,8 @@ fn lone_playbin_uri(chains: &[Chain]) -> Option<&str> {
     prop(spec, "uri")
 }
 
-/// The spec of a pipeline that is a single bare `fallbacksrc uri=X` (and nothing
-/// else), the M1168 per-kind fan-out trigger. `None` for any other shape: an
+/// The spec of a pipeline that is a single bare `fallbacksrc` (and nothing else),
+/// the M1168 per-kind fan-out trigger. `None` for any other shape: an
 /// inline `fallbacksrc` feeds user-written elements, and a launch line has no way
 /// to name a second output, so it stays single-stream.
 fn lone_fallbacksrc_spec(chains: &[Chain]) -> Option<&ElementSpec> {
@@ -2974,7 +3004,7 @@ fn lone_fallbacksrc_spec(chains: &[Chain]) -> Option<&ElementSpec> {
     let [Item::Element(spec)] = chain.as_slice() else {
         return None;
     };
-    (spec.name == "fallbacksrc" && prop(spec, "uri").is_some()).then_some(spec)
+    (spec.name == "fallbacksrc").then_some(spec)
 }
 
 /// Set a generated node name, rejecting a collision with one already generated
@@ -3142,7 +3172,11 @@ fn build_fallbacksrc_fanout(
     if !settings.enable_video || !settings.enable_audio {
         return Ok(None);
     }
-    let Some(main) = uri_fanout(registry, settings.uri)? else {
+    // An application-built source is one output with no container to probe.
+    let MainSource::Uri(uri) = &settings.main else {
+        return Ok(None);
+    };
+    let Some(main) = uri_fanout(registry, uri)? else {
         return Ok(None);
     };
     let Some(branches) = fallback_kinds(&main) else {

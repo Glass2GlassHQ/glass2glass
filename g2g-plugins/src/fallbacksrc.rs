@@ -1,4 +1,4 @@
-//! The source half of `fallbacksrc` (M1163): a wrapper that rebuilds the URI
+//! The source half of `fallbacksrc` (M1163): a wrapper that rebuilds the
 //! source behind it when that source fails, delivers nothing for
 //! `restart-timeout`, or (under `restart-on-eos`) ends. Each life of the inner
 //! source is stitched onto one timeline through the
@@ -73,7 +73,7 @@ pub fn restart_source(
     })
 }
 
-/// A source that rebuilds the URI source it wraps when that source dies. See the
+/// A source that rebuilds the source it wraps when that source dies. See the
 /// module docs. Negotiation and the first configure go through the source given
 /// at construction; every rebuilt source is negotiated by the wrapper itself and
 /// configured with the caps the wrapper was configured with.

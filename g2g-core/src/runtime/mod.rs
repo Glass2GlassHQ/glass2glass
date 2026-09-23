@@ -168,8 +168,8 @@ pub use autoplug::{FallbackSourceRole, PadKind, PadRequest};
 pub use autoplug::{
     declared_source_caps, AutoplugError, AutoplugParams, DecodebinError, DecodebinSelectHook,
     DemuxFactory, DemuxSelectHook, ElementDoc, ElementFactory, FanoutRebuild, FanoutSrcFactory,
-    LaunchFactory, MuxerFactory, PlaybinError, PlaybinGraphError, PlaybinHook, PlaybinPort,
-    PrimaryStream, PrimaryStreamHook, PropertyDoc, Registry, RestartFanoutSourceHook,
+    LaunchFactory, MainSourceFactory, MuxerFactory, PlaybinError, PlaybinGraphError, PlaybinHook,
+    PlaybinPort, PrimaryStream, PrimaryStreamHook, PropertyDoc, Registry, RestartFanoutSourceHook,
     RestartPolicy, RestartSourceHook, SourceFactory, Uri, UriError, UriFanout, UriFanoutHead,
     UriFanoutHook, UriFanoutPort, UriRebuild, UriSourceFactory,
 };

@@ -294,8 +294,8 @@ unless it says otherwise.
   `jsongstenc` / `jsongstparse`, `gstregex`, `zlibcompress` / `zlibdecompress`,
   `colordetect`, `videocompare`, `uriplaylistbin`, `ndisrc` / `ndisink`,
   `intersink` / `intersrc`, `originalbuffersave` / `originalbufferrestore`.
-- **Fallback switching:** a way to hand `fallbacksrc` an application-built source
-  element in place of its `uri=`.
+- **Fallback switching:** gst's `fallback-source`, an application-built source
+  for `fallbacksrc`'s fallback side.
 ## Python-element host
 
 - Add an explicit plain-text format override for files with no `.txt` extension.

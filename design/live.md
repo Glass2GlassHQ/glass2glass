@@ -672,6 +672,28 @@ sources take the handle, since either can be the one that restarted.
 `manual-unblock=true` without a registered handle is a parse error rather than a
 pipeline nothing could ever release.
 
+### An application-built source
+
+gst's `source` property hands `fallbacksrc` an element to use in place of the
+URI. g2g takes a `MainSourceFactory` registered with
+`Registry::register_fallbacksrc_main_source`, and a `fallbacksrc` line with no
+`uri=` builds its main branch from it. A `uri=` on the line still wins, as in
+gst, and a line with neither is `ParseError::MissingUri`.
+
+It is a factory rather than an instance because a g2g source runs once. gst
+restarts a custom source by cycling the same element through `NULL` and back to
+`PLAYING`, but `SourceLoop` has no reset, so there is nothing to run a dead
+instance again. The factory returns a fresh source and the caps it produces. It
+is called once when the line is parsed, the caps choosing the decode chain, and
+again for every rebuild, where it stands in for `Registry::uri_source_rebuilder`
+under the same `RestartSrc` policy.
+
+The factory is one per registry, like the unblock handle, so every URI-less
+`fallbacksrc` in a line builds from it. A lone `fallbacksrc` over it takes the
+single-stream expansion plus its automatic sink, since a `DynSourceLoop` has one
+output and there is no container to fan out. The fallback side keeps
+`fallback-uri` or the dummy: gst's `fallback-source` has no analog yet.
+
 ### Restart status on the bus
 
 What gst exposes as `fallbacksrc`'s read-only `status` and `statistics`

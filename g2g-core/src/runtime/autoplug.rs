@@ -420,6 +420,7 @@ mod factory {
 
     use alloc::format;
     use alloc::string::{String, ToString};
+    use alloc::sync::Arc;
 
     use crate::element::{AsyncElement, DynAsyncElement};
     use crate::fanout::{DynMultiOutputSource, MultiOutputElement};
@@ -1233,6 +1234,40 @@ mod factory {
     /// [`Registry::uri_source_rebuilder`]; owns its URI so it stays `'static`.
     pub type UriRebuild = Box<dyn Fn() -> Result<(Box<dyn DynSourceLoop>, Caps), UriError> + Send>;
 
+    /// The application's own source for a `fallbacksrc` with no `uri=` (M1198),
+    /// gst's `source` property. A factory because a source runs once: it is
+    /// called at parse and again for every restart, each call returning a fresh
+    /// source and the caps it produces.
+    #[derive(Clone)]
+    pub struct MainSourceFactory {
+        build: Arc<dyn Fn() -> (Box<dyn DynSourceLoop>, Caps) + Send + Sync>,
+    }
+
+    impl MainSourceFactory {
+        pub fn new(
+            build: impl Fn() -> (Box<dyn DynSourceLoop>, Caps) + Send + Sync + 'static,
+        ) -> Self {
+            Self {
+                build: Arc::new(build),
+            }
+        }
+
+        pub(crate) fn build(&self) -> (Box<dyn DynSourceLoop>, Caps) {
+            (self.build)()
+        }
+
+        pub(crate) fn rebuilder(&self) -> UriRebuild {
+            let factory = self.clone();
+            Box::new(move || Ok(factory.build()))
+        }
+    }
+
+    impl core::fmt::Debug for MainSourceFactory {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            f.debug_struct("MainSourceFactory").finish_non_exhaustive()
+        }
+    }
+
     /// Wraps a URI source in one that rebuilds it with `rebuild` under `policy`
     /// when it fails, stalls, or (under `restart_on_eos`) ends (M1163). Registered
     /// via [`Registry::register_restart_source`]; when none is registered a
@@ -1407,6 +1442,9 @@ mod factory {
         /// default) makes `manual-unblock=true` a parse error, since nothing
         /// could release the source.
         unblock: Option<UnblockHandle>,
+        /// The application's source for a `fallbacksrc` with no `uri=` (M1198).
+        /// `None` (the default) makes such a line a parse error.
+        fallbacksrc_main_source: Option<MainSourceFactory>,
         /// Bare-`decodebin` primary-stream hooks (M746): a `filesrc location=X !
         /// decodebin` on a container tries each until one sniffs the file and names
         /// the single-stream demux + stream selection for its primary decodable
@@ -1612,6 +1650,23 @@ mod factory {
         /// second call replaces the first. Returns `&mut self`.
         pub fn register_unblock_handle(&mut self, handle: &UnblockHandle) -> &mut Self {
             self.unblock = Some(handle.clone());
+            self
+        }
+
+        /// The application's source for a `fallbacksrc` with no `uri=` (M1198), if
+        /// one is registered.
+        pub fn fallbacksrc_main_source(&self) -> Option<MainSourceFactory> {
+            self.fallbacksrc_main_source.clone()
+        }
+
+        /// Register the source a `fallbacksrc` with no `uri=` runs as its main
+        /// source (M1198). A `uri=` on the line still wins, as in gst. One per
+        /// registry, a second call replaces the first. Returns `&mut self`.
+        pub fn register_fallbacksrc_main_source(
+            &mut self,
+            factory: MainSourceFactory,
+        ) -> &mut Self {
+            self.fallbacksrc_main_source = Some(factory);
             self
         }
 
@@ -2776,8 +2831,8 @@ mod factory {
 pub use factory::{
     declared_source_caps, AutoplugError, AutoplugParams, DecodebinError, DecodebinSelectHook,
     DemuxFactory, DemuxSelectHook, ElementDoc, ElementFactory, FanoutRebuild, FanoutSrcFactory,
-    LaunchFactory, MuxerFactory, PlaybinError, PlaybinGraphError, PlaybinHook, PlaybinPort,
-    PrimaryStream, PrimaryStreamHook, PropertyDoc, Registry, RestartFanoutSourceHook,
+    LaunchFactory, MainSourceFactory, MuxerFactory, PlaybinError, PlaybinGraphError, PlaybinHook,
+    PlaybinPort, PrimaryStream, PrimaryStreamHook, PropertyDoc, Registry, RestartFanoutSourceHook,
     RestartPolicy, RestartSourceHook, SourceFactory, Uri, UriError, UriFanout, UriFanoutHead,
     UriFanoutHook, UriFanoutPort, UriRebuild, UriSourceFactory,
 };
