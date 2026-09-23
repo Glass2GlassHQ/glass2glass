@@ -62,11 +62,11 @@ pub fn register(registry: &mut g2g_core::runtime::Registry) {
     use g2g_core::runtime::{LaunchFactory, MuxerFactory, SourceFactory};
     use g2g_core::{Caps, Dim, Rate, RawVideoFormat};
 
-    registry.register_launch(LaunchFactory::of::<PyTransform>("pyelement", || {
+    registry.register_launch(LaunchFactory::of::<PyTransform>(PYELEMENT, || {
         Box::new(PyTransform::new("", ""))
     }));
 
-    registry.register_muxer(MuxerFactory::new("pyaggregator", |inputs| {
+    registry.register_muxer(MuxerFactory::new(PYAGGREGATOR, |inputs| {
         Box::new(PyAggregator::new("", "", inputs))
     }));
 
@@ -83,6 +83,43 @@ pub fn register(registry: &mut g2g_core::runtime::Registry) {
     registry.register_source(SourceFactory::new("pysrc", default_caps, || {
         Box::new(PySource::new("", ""))
     }));
+}
+
+/// Registry name of the hosted transform, [`PyTransform`].
+pub const PYELEMENT: &str = "pyelement";
+/// Registry name of the hosted batching aggregator, [`PyAggregator`].
+pub const PYAGGREGATOR: &str = "pyaggregator";
+
+/// The [`Registry::inspect`](g2g_core::runtime::Registry::inspect) dump of
+/// `element` hosting `class` from `module`, its property list extended with the
+/// ones the class declares. `None` unless `element` is a registered
+/// [`PYELEMENT`] or [`PYAGGREGATOR`].
+#[cfg(feature = "std")]
+pub fn inspect_hosted_class(
+    registry: &g2g_core::runtime::Registry,
+    element: &str,
+    module: &str,
+    class: &str,
+) -> Option<String> {
+    use g2g_core::property::format_specs;
+    use g2g_core::AsyncElement as _;
+    use g2g_core::MultiInputElement as _;
+
+    let (unhosted, hosted) = match element {
+        PYELEMENT => (
+            PyTransform::new("", "").properties(),
+            PyTransform::new(module, class).properties(),
+        ),
+        PYAGGREGATOR => (
+            PyAggregator::new("", "", 1).properties(),
+            PyAggregator::new(module, class, 1).properties(),
+        ),
+        _ => return None,
+    };
+    let dump = registry.inspect(element)?;
+    // The property list closes the dump, so swapping it keeps the rest intact.
+    let head = dump.strip_suffix(&format_specs(unhosted))?;
+    Some(format!("{head}{}", format_specs(hosted)))
 }
 
 #[cfg(feature = "python")]

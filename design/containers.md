@@ -65,6 +65,16 @@ never answers `Raw`, since every byte sequence matches it, so `filesrc` reaches
 it only by extension or an explicit `bytestream-format=raw`, and no auto-plug
 candidate claims it.
 
+## Plain-text files
+
+`filesrc` types a `.txt` or `.text` file as `Caps::Text { Utf8 }`, and
+`bytestream-format=text` does the same for any other name, such as a prompt kept
+as `.md`. Content sniffing never answers plain text, since almost any small file
+of ASCII bytes is valid UTF-8, so the extension and the property are the only two
+ways in. GStreamer spells this as a `text/x-raw,format=utf8` caps filter after
+`filesrc`, whose source pad takes any caps. A g2g source declares its caps before
+negotiation, so in g2g that caps filter checks the type rather than setting it.
+
 ## AIFF and AU
 
 Uncompressed audio files sit next to WAVE. `ByteStreamEncoding::Aiff` is EA IFF

@@ -313,6 +313,10 @@ impl SourceLoop for FileSrc {
                 self.format_explicit = true;
                 match value.as_str().ok_or(PropError::Type)? {
                     "auto" => self.auto_detect = true,
+                    PLAIN_TEXT_FORMAT => {
+                        self.caps = PLAIN_TEXT_CAPS;
+                        self.auto_detect = false;
+                    }
                     s => {
                         let encoding = encoding_from_str(s).ok_or(PropError::Value)?;
                         self.caps = Caps::ByteStream { encoding };
@@ -341,17 +345,30 @@ impl SourceLoop for FileSrc {
             "num-buffers" => Some(crate::numbuffers::get_num_buffers(self.target_chunks)),
             "bytestream-format" => {
                 if self.auto_detect {
-                    Some(PropValue::Str("auto".into()))
-                } else if let Caps::ByteStream { encoding } = &self.caps {
-                    Some(PropValue::Str(encoding_to_str(*encoding).into()))
-                } else {
-                    None
+                    return Some(PropValue::Str("auto".into()));
+                }
+                match &self.caps {
+                    Caps::ByteStream { encoding } => {
+                        Some(PropValue::Str(encoding_to_str(*encoding).into()))
+                    }
+                    caps if *caps == PLAIN_TEXT_CAPS => {
+                        Some(PropValue::Str(PLAIN_TEXT_FORMAT.into()))
+                    }
+                    _ => None,
                 }
             }
             _ => None,
         }
     }
 }
+
+/// The `bytestream-format` value that types the file as plain UTF-8 text, for
+/// prose whose extension is not `.txt` (content sniffing never claims prose).
+const PLAIN_TEXT_FORMAT: &str = "text";
+
+const PLAIN_TEXT_CAPS: Caps = Caps::Text {
+    format: g2g_core::TextFormat::Utf8,
+};
 
 /// `FileSrc`'s settable properties (M107, M112): the input file path, and the
 /// container of a raw byte stream (so a text pipeline can feed a demuxer).
@@ -360,7 +377,7 @@ static FILESRC_PROPS: &[PropertySpec] = &[
     PropertySpec::new(
         "bytestream-format",
         PropKind::Str,
-        "container of a raw byte stream: mpegts | matroska | ogg | flv | raw | auto (sniff the header)",
+        "container of a raw byte stream: mpegts | matroska | ogg | flv | raw | auto (sniff the header), or text for plain UTF-8 text",
     ),
     PropertySpec::new(
         "blocksize",
@@ -458,12 +475,8 @@ pub(crate) fn caps_from_extension(path: &std::path::Path) -> Option<Caps> {
             return Some(crate::typefind::elementary_video_caps(VideoCodec::H265))
         }
         // Plain prose matches no subtitle syntax, so content sniffing can never
-        // reach it: the extension is the only safe declaration.
-        "txt" | "text" => {
-            return Some(Caps::Text {
-                format: g2g_core::TextFormat::Utf8,
-            })
-        }
+        // reach it: only the extension or `bytestream-format=text` declares it.
+        "txt" | "text" => return Some(PLAIN_TEXT_CAPS),
         "vtt" => {
             return Some(Caps::Text {
                 format: g2g_core::TextFormat::WebVtt,

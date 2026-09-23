@@ -27,7 +27,7 @@ use g2g_core::{
     PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat,
 };
 
-use crate::props::{fixed_caps, hosted_element_props};
+use crate::props::{fixed_caps, hosted_element_props, HostedClassProperties};
 
 /// A gst-python-ml batched element hosted as a first-class g2g aggregator.
 #[derive(Debug)]
@@ -262,7 +262,7 @@ impl MultiInputElement for PyAggregator {
     }
 
     fn properties(&self) -> &'static [PropertySpec] {
-        PYAGGREGATOR_PROPS
+        PYAGGREGATOR_CLASS_PROPS.for_class(&self.module, &self.class)
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
@@ -319,6 +319,9 @@ impl MultiInputElement for PyAggregator {
         }
     }
 }
+
+static PYAGGREGATOR_CLASS_PROPS: HostedClassProperties =
+    HostedClassProperties::new(PYAGGREGATOR_PROPS);
 
 /// `PyAggregator`'s settable properties (the runtime / `gst-launch` face). The
 /// input count comes from link degree (the muxer factory), not a property.

@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1197: `filesrc bytestream-format=text` reads any file as plain text, and `g2g-launch-py --inspect` lists the properties a hosted Python class declares.
 - M1200: the dashboard is validated live against an RTSP feed, and a finished run now hands each client its `eos` event and a close frame instead of dropping the socket.
 - M1198: a `fallbacksrc` with no `uri=` runs an application-built main source from a registered factory and rebuilds it on restart.
 - M1199: `tools/plugin-sdk-bundle.sh` stages the vendored SDK crates, the C header and a pkg-config file, so a plugin builds with no network.

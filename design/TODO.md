@@ -298,9 +298,9 @@ unless it says otherwise.
   for `fallbacksrc`'s fallback side.
 ## Python-element host
 
-- Add an explicit plain-text format override for files with no `.txt` extension.
-- Include hosted Python class properties in inspection output without requiring
-  `properties()` to return a `&'static` slice.
+- List `pyelement` / `pyaggregator` in `g2g-inspect`, `g2g-docgen` and `g2g-mcp`
+  (g2g-plugins cannot depend on g2g-python, so only `g2g-launch-py --inspect`
+  shows a hosted class's properties).
 
 ## Embedded
 

@@ -417,6 +417,17 @@ call, which is how an alert or overlay element rides a detector that fires on a
 few frames in a hundred. `OrtInference` with `attach-tensor=true` takes the same
 property.
 
+**Properties the class declares.** A `pyelement` or `pyaggregator` passes any
+name it does not read itself to the hosted class. Once `module=` and `class=` are
+both set, `properties()` imports the class, creates an instance, and asks its
+`g2g_properties()` for the names it declares. The host's list then carries those
+names, typed as text, in place of the entry that lets any name through, so an
+inspection dump shows them and a launch line naming one the class lacks fails at
+parse. `properties()` returns a `&'static` slice, so each class's list is leaked
+once and reused, which bounds the leak by the number of classes loaded. A class
+that declares nothing, or does not import, keeps the open entry, and its names
+are checked when the pipeline starts.
+
 ### CUDA device memory
 
 A `MemoryDomain::Cuda` frame has no CPU bytes, so its two semi-planar planes are

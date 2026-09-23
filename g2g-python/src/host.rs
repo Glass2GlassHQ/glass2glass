@@ -767,6 +767,20 @@ fn declared_properties(obj: &Bound<'_, PyAny>) -> PyResult<Option<Vec<String>>> 
     Ok(Some(obj.call_method0(DECLARED_PROPERTIES_HOOK)?.extract()?))
 }
 
+/// The property names a fresh instance of `class` from `module` declares, for
+/// inspection and the parse-time check. `None` when the class declares none or
+/// does not load, and a class that does not load fails again, with its
+/// traceback, when the pipeline starts.
+pub(crate) fn class_declared_properties(module: &str, class: &str) -> Option<Vec<String>> {
+    init_host();
+    Python::attach(|py| {
+        let instance = PyModule::import(py, module)?.getattr(class)?.call0()?;
+        declared_properties(&instance)
+    })
+    .ok()
+    .flatten()
+}
+
 /// Convert a g2g [`PropValue`] to the Python scalar an element property expects.
 fn propvalue_to_py(py: Python<'_>, value: &PropValue) -> PyResult<Py<PyAny>> {
     use pyo3::IntoPyObjectExt;

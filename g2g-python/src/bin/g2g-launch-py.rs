@@ -16,6 +16,14 @@
 //!   ! analyticsoverlay ! videoconvert ! autovideosink
 //! ```
 //!
+//! `--inspect` prints the `g2g-inspect` dump of a hosted element with the
+//! properties its class declares, which a plain dump cannot know:
+//!
+//! ```text
+//! g2g-launch-py --inspect pyelement module=objectdetector class=ObjectDetector
+//! g2g-launch-py --inspect pyaggregator module=batch class=BatchInfer
+//! ```
+//!
 //! The interpreter must see the gst-python-ml package + its deps: set
 //! `PYTHONPATH` (plugin dir + venv site dirs) before launching, exactly as the
 //! M322 host test does. Build with `--features launch` (pulls g2g-plugins'
@@ -24,7 +32,7 @@
 use std::process;
 use std::time::{Duration, Instant};
 
-use g2g_core::runtime::{parse_launch, run_graph_with_progress, PipelineProgress};
+use g2g_core::runtime::{parse_launch, run_graph_with_progress, PipelineProgress, Registry};
 use g2g_plugins::clock::WallClock;
 use g2g_plugins::registry::default_registry;
 
@@ -32,20 +40,24 @@ use g2g_plugins::registry::default_registry;
 // source); see design/README.md on link_capacity dominating glass-to-glass latency.
 const LINK_CAPACITY: usize = 4;
 
-const USAGE: &str = "usage: g2g-launch-py [-q] <element> [key=value ...] ! <element> ! ...";
+const USAGE: &str =
+    "usage: g2g-launch-py [-q] <element> [key=value ...] ! <element> ! ...\n       \
+                     g2g-launch-py --inspect pyelement|pyaggregator module=<module> class=<class>";
 
 fn main() {
     g2g_core::log::init_from_env();
 
     // Join the args into one pipeline string; accept a leading `-q`/`--quiet`
-    // and skip the common no-op gst-launch flags so a pasted line still runs.
+    // or `--inspect`, and skip the common no-op gst-launch flags so a pasted line still runs.
     let mut quiet = false;
+    let mut inspect = false;
     let mut tokens: Vec<String> = Vec::new();
     let mut in_pipeline = false;
     for arg in std::env::args().skip(1) {
         if !in_pipeline && arg.starts_with('-') && arg != "-" {
             match arg.as_str() {
                 "-q" | "--quiet" => quiet = true,
+                "--inspect" => inspect = true,
                 "-e" | "--eos-on-shutdown" | "-m" | "--messages" | "-f" | "--no-fault" | "-t"
                 | "--tags" | "-v" | "--verbose" => {}
                 "-h" | "--help" => {
@@ -58,6 +70,10 @@ fn main() {
         }
         in_pipeline = true;
         tokens.push(arg);
+    }
+    if inspect {
+        inspect_hosted_class(&tokens);
+        return;
     }
     let pipeline = tokens.join(" ");
     if pipeline.trim().is_empty() {
@@ -74,13 +90,7 @@ fn main() {
         }
     }
 
-    // The one difference from `g2g-launch`: register the hosted Python elements
-    // (`pyelement` / `pysrc` / `pyaggregator`) on top of the standard registry,
-    // plus the native inference elements under `ml`.
-    let mut reg = default_registry();
-    g2g_python::register(&mut reg);
-    #[cfg(feature = "ml")]
-    g2g_ml::register(&mut reg);
+    let reg = registry();
 
     let graph = match parse_launch(&reg, &pipeline) {
         Ok(graph) => graph,
@@ -150,6 +160,51 @@ fn main() {
         }
         Err(err) => {
             eprintln!("pipeline error: {err:?}");
+            process::exit(1);
+        }
+    }
+}
+
+/// The one difference from `g2g-launch`: the hosted Python elements (`pyelement`
+/// / `pysrc` / `pyaggregator`) on top of the standard registry, plus the native
+/// inference elements under `ml`.
+fn registry() -> Registry {
+    let mut reg = default_registry();
+    g2g_python::register(&mut reg);
+    #[cfg(feature = "ml")]
+    g2g_ml::register(&mut reg);
+    reg
+}
+
+/// Print the dump `--inspect <element> module=... class=...` asks for, or the
+/// usage and exit 2 when the arguments do not name a hosted element and class.
+fn inspect_hosted_class(tokens: &[String]) {
+    let Some((element, properties)) = tokens.split_first() else {
+        eprintln!("{USAGE}");
+        process::exit(2);
+    };
+    let mut module = None;
+    let mut class = None;
+    for property in properties {
+        match property.split_once('=') {
+            Some(("module", value)) => module = Some(value),
+            Some(("class", value)) => class = Some(value),
+            _ => {
+                eprintln!(
+                    "g2g-launch-py: --inspect takes only module= and class=, not '{property}'"
+                );
+                process::exit(2);
+            }
+        }
+    }
+    let (Some(module), Some(class)) = (module, class) else {
+        eprintln!("{USAGE}");
+        process::exit(2);
+    };
+    match g2g_python::inspect_hosted_class(&registry(), element, module, class) {
+        Some(dump) => print!("{dump}"),
+        None => {
+            eprintln!("g2g-launch-py: no hosted Python element named '{element}'");
             process::exit(1);
         }
     }

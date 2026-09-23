@@ -31,7 +31,7 @@ use g2g_core::{
 };
 
 use crate::format::{format_from_py, format_to_py, frame_bytes};
-use crate::props::{fixed_caps, hosted_element_props};
+use crate::props::{fixed_caps, hosted_element_props, HostedClassProperties};
 
 /// A gst-python-ml element hosted as a first-class g2g transform.
 #[derive(Debug)]
@@ -357,7 +357,7 @@ impl AsyncElement for PyTransform {
     }
 
     fn properties(&self) -> &'static [PropertySpec] {
-        PYTRANSFORM_PROPS
+        PYTRANSFORM_CLASS_PROPS.for_class(&self.module, &self.class)
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
@@ -460,6 +460,9 @@ impl PadTemplates for PyTransform {
         Vec::from([PadTemplate::sink(set.clone()), PadTemplate::source(set)])
     }
 }
+
+static PYTRANSFORM_CLASS_PROPS: HostedClassProperties =
+    HostedClassProperties::new(PYTRANSFORM_PROPS);
 
 /// `PyTransform`'s settable properties (the runtime / `gst-launch` face).
 static PYTRANSFORM_PROPS: &[PropertySpec] = hosted_element_props![
