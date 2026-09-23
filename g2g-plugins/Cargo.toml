@@ -1474,6 +1474,11 @@ required-features = ["plugin-loader"]
 name = "m1061_plugin_signing"
 required-features = ["plugin-signing"]
 
+# M1199: stages the plugin SDK bundle, builds a plugin from it with no network, and dlopens it.
+[[test]]
+name = "m1199_offline_plugin_sdk"
+required-features = ["plugin-loader"]
+
 # M214: zero-copy GPU fan-out (overlay -> tee -> {sink, sink}) on a real wgpu
 # device. Needs the overlay producer and the wgpu present sink.
 [[test]]

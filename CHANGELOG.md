@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1199: `tools/plugin-sdk-bundle.sh` stages the vendored SDK crates, the C header and a pkg-config file, so a plugin builds with no network.
 - M1196: `VelloTextOverlay` draws `vertical:rl` / `vertical:lr` cues with the CPU `textoverlay`'s column layout.
 - M1194: `MultiOutputElement::latency()` lets a demux add what it holds back to the pipeline latency query.
 - M1195: `onvifmetadataparse` reads the `tt:Event` notifications of a metadata document and `onvifmetadatacombiner` puts them on the video frame.

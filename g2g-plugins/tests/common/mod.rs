@@ -1,7 +1,9 @@
-//! Building the v2 example plugin, shared by the loader tests that need a real
-//! `cdylib` on disk (`plugin_loader_v2`, `m1061_plugin_signing`).
+//! Building the v2 example plugin and the C plugin, shared by the loader tests
+//! that need a real shared library on disk.
+#![allow(dead_code)] // no one test file uses every helper here
 
-use std::path::PathBuf;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// The v2 example-plugin fixture crate directory.
@@ -70,4 +72,33 @@ pub(crate) fn build_fixture_with(extra: &[&str], target_subdir: &str) -> PathBuf
 /// The fixture as a well-behaved plugin.
 pub(crate) fn build_fixture() -> PathBuf {
     build_fixture_with(&[], "target")
+}
+
+pub(crate) fn compile_c_plugin(include_flags: &[OsString], out_dir: &Path) -> PathBuf {
+    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/c-plugin/plugin.c");
+    std::fs::create_dir_all(out_dir).expect("create the C plugin build dir");
+    let so = out_dir.join(format!(
+        "{}g2gcplugin{}",
+        std::env::consts::DLL_PREFIX,
+        std::env::consts::DLL_SUFFIX
+    ));
+
+    let shared_flag = if cfg!(target_os = "macos") {
+        "-dynamiclib"
+    } else {
+        "-shared"
+    };
+    let compiler = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
+    let status = Command::new(compiler)
+        .args(["-std=c11", "-Wall", "-Wextra", "-Werror", "-fPIC", "-O1"])
+        .arg(shared_flag)
+        .args(include_flags)
+        .arg("-o")
+        .arg(&so)
+        .arg(&source)
+        .status()
+        .expect("spawn the C compiler");
+    assert!(status.success(), "the C plugin failed to compile");
+    assert!(so.is_file(), "no library at {}", so.display());
+    so
 }

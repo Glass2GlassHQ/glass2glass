@@ -302,10 +302,6 @@ unless it says otherwise.
 - Include hosted Python class properties in inspection output without requiring
   `properties()` to return a `&'static` slice.
 
-## Dynamic plugin loading
-
-- Define how a distribution supplies `g2g-core` for offline plugin builds.
-
 ## Embedded
 
 - Connect `EmbassyClock` to a HAL tick on real hardware.

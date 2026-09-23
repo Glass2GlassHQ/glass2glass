@@ -259,12 +259,13 @@ jobs:
       # each test builds its fixture cdylib (v2 also compiles the plain-C
       # plugin with cc), so the dynamic boundary is exercised, not just checked.
       # `plugin-signing` implies `plugin-loader`, and adds the M1061 signature
-      # gate over the same fixture.
+      # gate over the same fixture. M1199 builds a Rust and a C plugin from the
+      # tools/plugin-sdk-bundle.sh output with an empty CARGO_HOME and --offline.
       - name: test g2g-plugins (plugin loading v1 + v2)
         run: >
           cargo test -p g2g-plugins --locked --features plugin-signing
           --test plugin_loader_dlopen --test plugin_loader_v2 --test plugin_c_abi
-          --test m1061_plugin_signing
+          --test m1061_plugin_signing --test m1199_offline_plugin_sdk
       # MoQ Transport draft-16 (M902 / M903 / M905): control-message and datagram
       # layouts against the reference implementation, malformed peer input,
       # subgroup reassembly, and the property surface. The legs that need the

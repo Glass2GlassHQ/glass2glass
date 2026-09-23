@@ -255,6 +255,47 @@ therefore keeps a fixed table of 64 const-generic trampolines
 (`MAX_V2_ELEMENT_SLOTS`), and past that a load is refused rather than silently
 dropping an element. Slots are never freed, matching the loaded-forever library.
 
+### Offline plugin builds
+
+What a plugin build needs from g2g depends on the ABI it targets.
+
+A `declare_plugin!` plugin needs the `g2g-core` and `g2g-plugin` sources the
+host binary was built from, the host's `rustc`, and the host's `metadata` and
+`multi-thread` choices. The ABI tag carries the version number, not a hash of
+the source, so a crates.io `g2g-core` with the same version number as a patched
+or unreleased host tree passes the tag check and can still differ in layout. The
+sources therefore have to come from the host's own tree.
+
+A `declare_plugin_v2!` plugin needs `g2g-core` and `g2g-plugin` at any version
+whose `V2_ABI_VERSION` equals the host's, built by any `rustc` from 1.86 on.
+`g2g-core` is still a build dependency, because the SDK adapts an ordinary
+`AsyncElement` to the vtables. A plain-C plugin needs only `g2g_plugin_v2.h`.
+
+`tools/plugin-sdk-bundle.sh <prefix>` stages all three from the tree that
+builds the host. `cargo package` turns `g2g-core` and `g2g-plugin` into
+standalone crates, with workspace-inherited fields and path dependencies
+rewritten. `cargo vendor` then runs over a throwaway crate depending on the two,
+seeded with the workspace `Cargo.lock`, so each third-party crate is the version
+the host linked. The two packaged crates join the vendored ones in a cargo
+directory source, each with a `.cargo-checksum.json` holding the `.crate` file's
+SHA-256 and an empty file list. A `config.toml` beside the directory replaces
+crates.io with it, and a plugin author passes that file to
+`cargo build --offline --config`. Cargo resolves a relative `directory` in a
+config file against the parent of the file's own directory, so the prefix still
+works after it moves. The header goes to `include/g2g/`, with a
+`share/pkgconfig/g2g-plugin.pc` that finds it through `${pcfiledir}`.
+
+`cargo vendor` copies every package in the lockfile for every target, so the
+directory also carries `loom` (the `cfg(loom)` dependency of `g2g-core`),
+`windows-sys` and `wasm-bindgen`, about 57 MB in all. It runs with
+`--respect-source-config`, so a distribution build that already replaces
+crates.io with its own vendored tree stages the bundle from that tree.
+
+`m1199_offline_plugin_sdk` stages the bundle, builds the v1 example plugin's
+source against it with an empty `CARGO_HOME` and `--offline`, and loads the
+result through the ABI tag check. It also compiles the C fixture with the flags
+`pkg-config` reads from the bundle and loads that.
+
 ### Detached signatures
 
 A host built with the `plugin-signing` feature can be handed a set of trusted

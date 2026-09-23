@@ -24,21 +24,14 @@
 #![cfg(unix)]
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use g2g_core::runtime::{parse_launch, run_graph};
 use g2g_plugins::clock::WallClock;
 use g2g_plugins::plugin_loader;
 use g2g_plugins::registry::default_registry;
 
-/// The C compiler to build the fixture with: `$CC`, else `cc`.
-fn compiler() -> String {
-    std::env::var("CC").unwrap_or_else(|_| "cc".to_string())
-}
-
-fn manifest_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-}
+mod common;
+use common::compile_c_plugin;
 
 /// Compile the C fixture into a shared library and return its path.
 fn build_c_plugin() -> PathBuf {
@@ -50,34 +43,10 @@ fn build_c_plugin() -> PathBuf {
 }
 
 fn build_c_plugin_uncached() -> PathBuf {
-    let source = manifest_dir().join("tests/fixtures/c-plugin/plugin.c");
-    let include = manifest_dir().join("../g2g-plugin/include");
-    let out_dir = manifest_dir().join("tests/fixtures/c-plugin/build");
-    std::fs::create_dir_all(&out_dir).expect("create the C plugin build dir");
-    let so = out_dir.join(format!(
-        "{}g2gcplugin{}",
-        std::env::consts::DLL_PREFIX,
-        std::env::consts::DLL_SUFFIX
-    ));
-
-    let shared_flag = if cfg!(target_os = "macos") {
-        "-dynamiclib"
-    } else {
-        "-shared"
-    };
-    let status = Command::new(compiler())
-        .args(["-std=c11", "-Wall", "-Wextra", "-Werror", "-fPIC", "-O1"])
-        .arg(shared_flag)
-        .arg("-I")
-        .arg(&include)
-        .arg("-o")
-        .arg(&so)
-        .arg(&source)
-        .status()
-        .expect("spawn the C compiler");
-    assert!(status.success(), "the C plugin failed to compile");
-    assert!(so.is_file(), "no library at {}", so.display());
-    so
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let include = manifest_dir.join("../g2g-plugin/include");
+    let out_dir = manifest_dir.join("tests/fixtures/c-plugin/build");
+    compile_c_plugin(&["-I".into(), include.into()], &out_dir)
 }
 
 /// `sizeof` for every ABI struct, in the order `g2g_c_plugin_layout` reports.

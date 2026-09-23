@@ -555,6 +555,27 @@ name: `g2g-launch --plugin libmy_plugin.so ... ! myfilter ! ...`. `g2g-inspect`
 loads plugins the same way so their elements list. A complete, buildable example
 is `g2g-plugins/tests/fixtures/example-plugin`.
 
+**Offline builds.** A distribution ships the SDK so a plugin builds with no
+network. From the source tree it built `g2g-launch` from, it runs
+`tools/plugin-sdk-bundle.sh <prefix>` and installs what that stages:
+`share/g2g/plugin-sdk/`, `include/g2g/g2g_plugin_v2.h` and
+`share/pkgconfig/g2g-plugin.pc`. With a `/usr` prefix, a plugin author builds a
+Rust plugin with
+
+```sh
+cargo build --release --offline --config /usr/share/g2g/plugin-sdk/config.toml
+```
+
+and a C plugin with
+
+```sh
+cc -shared -fPIC $(pkg-config --cflags g2g-plugin) -o libmy_plugin.so plugin.c
+```
+
+A `declare_plugin!` plugin must also build with the host's `rustc` and enable
+the host's `metadata` / `multi-thread` features on `g2g-core`. A
+`declare_plugin_v2!` or C plugin has neither constraint.
+
 **Signatures.** A host built with `plugin-signing` and given Ed25519 public keys,
 through `$G2G_PLUGIN_TRUSTED_KEYS` (`:`-separated key files) or
 `g2g-inspect --trusted-key <path>`, loads only plugins carrying a matching
@@ -631,8 +652,7 @@ to hit.
 - Native dynamic-plugin loading (§7c) has two ABIs. The `declare_plugin!` path
   needs plugin and host to share a `g2g-core` version, a `rustc`, and the
   layout-affecting features; the frozen C ABI v2 loads across toolchains and from
-  plain C. Still open: how a distribution supplies `g2g-core` to an offline
-  plugin build.
+  plain C.
 - `g2g-bridge` (embed a g2g sub-graph inside a GStreamer pipeline for incremental
   migration, design/README.md) is in: the GObject shell (`libgstglass2glass.so`, the
   `gstreamer` feature) registers a real `glass2glass` GStreamer element, so a
