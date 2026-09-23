@@ -394,6 +394,23 @@ local name, never by prefix. A payload holding several concatenated
 object counts and element depth are bounded, and a malformed document yields no
 output.
 
+The `tt:Event` part becomes one more output frame, after the analytics ones,
+carrying an `OnvifEventMeta` (defined in `onvifmetadata.rs`, not `g2g-core`)
+with one `OnvifEventMessage` per `wsnt:NotificationMessage` directly under a
+`tt:Event`: the `wsnt:Topic` text as written, the `tt:Message` `UtcTime`, its
+`PropertyOperation` (`Initialized`, `Changed`, `Deleted`) and the `tt:SimpleItem`
+name-value pairs of its `Source`, `Key` and `Data` groups. Field names follow
+`onvif.xsd` (`tt:Message`, `tt:ItemList`), `metadatastream.xsd`
+(`tt:EventStream`) and WS-BaseNotification `b-2.xsd`. `tt:ElementItem`s are
+skipped. The frame takes the input document's `WallClockMeta` rather than a
+message's `UtcTime`, as GStreamer's `onvifmetadataparse` times non-frame
+elements by the buffer that carried them. A message that breaks the schema (no
+readable `UtcTime`, an unknown `PropertyOperation`, an item without its `Name`
+or `Value`) is dropped alone. Messages per document
+(`MAX_EVENT_MESSAGES_PER_DOCUMENT`), items per message (`MAX_ITEMS_PER_MESSAGE`)
+and topic, name and value length (`MAX_EVENT_TEXT_BYTES`) are bounded: past the
+first bound the rest are dropped, past the other two the message is.
+
 ### onvifmetadatacombiner
 
 Sync is by wall clock, not RTP time: the Streaming Specification gives the
@@ -411,7 +428,8 @@ the play timeline when either side lacks it. It holds each video frame for
 `latency` (default 200 ms) of stream time, attaches the metadata whose instant
 falls in the frame's window, its own duration else the next frame's start,
 appends to whatever `AnalyticsMeta` a detector upstream already wrote rather than
-replacing it, and drops metadata more than `max-lateness` (default 200 ms) behind
+replacing it, appends event messages to the frame's `OnvifEventMeta` the same
+way, and drops metadata more than `max-lateness` (default 200 ms) behind
 the video. An EOS on either pad flushes what is held, so a silent metadata pad
 never stalls the video.
 

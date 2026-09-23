@@ -98,7 +98,7 @@ fn tracked_ids(meta: &AnalyticsMeta) -> Vec<u64> {
 
 #[test]
 fn the_spec_example_frames_become_normalized_boxes() {
-    let frames = parse_metadata_documents(&fixture("onvif_transformed_frames.xml"));
+    let frames = parse_metadata_documents(&fixture("onvif_transformed_frames.xml")).frames;
     assert_eq!(frames.len(), 5, "one output per tt:Frame");
     assert_eq!(
         frames.iter().map(|f| f.unix_nanos).collect::<Vec<_>>(),
@@ -131,7 +131,7 @@ fn the_spec_example_frames_become_normalized_boxes() {
 
 #[test]
 fn an_empty_frame_still_yields_a_frame() {
-    let frames = parse_metadata_documents(&fixture("onvif_transformed_frames.xml"));
+    let frames = parse_metadata_documents(&fixture("onvif_transformed_frames.xml")).frames;
     // The specification's third example frame carries a transformation and no
     // objects: the receiver has to see it, since it means the scene emptied.
     let empty = &frames[2];
@@ -142,7 +142,7 @@ fn an_empty_frame_still_yields_a_frame() {
 
 #[test]
 fn a_detection_is_related_to_the_tracking_node_holding_its_object_id() {
-    let frames = parse_metadata_documents(&fixture("onvif_transformed_frames.xml"));
+    let frames = parse_metadata_documents(&fixture("onvif_transformed_frames.xml")).frames;
     let meta = &frames[0].analytics;
     assert_eq!(meta.nodes.len(), 2, "one detection and one tracking node");
     assert_eq!(
@@ -162,7 +162,7 @@ fn a_detection_is_related_to_the_tracking_node_holding_its_object_id() {
 
 #[test]
 fn the_likeliest_class_type_names_the_detection() {
-    let frames = parse_metadata_documents(&fixture("onvif_multi_class.xml"));
+    let frames = parse_metadata_documents(&fixture("onvif_multi_class.xml")).frames;
     assert_eq!(frames.len(), 1);
     let meta = &frames[0].analytics;
     let detection = only_detection(meta);
@@ -174,7 +174,7 @@ fn the_likeliest_class_type_names_the_detection() {
 
 #[test]
 fn the_legacy_class_candidate_form_reads_the_same_way() {
-    let frames = parse_metadata_documents(&fixture("onvif_legacy_class_candidate.xml"));
+    let frames = parse_metadata_documents(&fixture("onvif_legacy_class_candidate.xml")).frames;
     let meta = &frames[0].analytics;
     let detection = only_detection(meta);
     assert_eq!(meta.class_name(detection.label), Some("Vehicle"));
@@ -183,7 +183,7 @@ fn the_legacy_class_candidate_form_reads_the_same_way() {
 
 #[test]
 fn an_object_with_no_class_carries_no_name() {
-    let frames = parse_metadata_documents(&fixture("onvif_transformed_frames.xml"));
+    let frames = parse_metadata_documents(&fixture("onvif_transformed_frames.xml")).frames;
     let detection = only_detection(&frames[0].analytics);
     assert_eq!(detection.label, UNCLASSIFIED_LABEL);
     assert_eq!(frames[0].analytics.class_name(detection.label), None);
@@ -191,7 +191,7 @@ fn an_object_with_no_class_carries_no_name() {
 
 #[test]
 fn a_parent_in_the_same_frame_becomes_a_contains_relation() {
-    let frames = parse_metadata_documents(&fixture("onvif_parent_same_frame.xml"));
+    let frames = parse_metadata_documents(&fixture("onvif_parent_same_frame.xml")).frames;
     assert_eq!(frames.len(), 1);
     let meta = &frames[0].analytics;
     // Objects 14 (the plate, listed first and naming 12 as its Parent) then 12.
@@ -215,7 +215,7 @@ fn a_parent_in_the_same_frame_becomes_a_contains_relation() {
 fn a_parent_in_another_frame_relates_nothing() {
     // The specification prints the vehicle and its plate in consecutive frames,
     // where nothing can be related: a relation is within one frame's graph.
-    let frames = parse_metadata_documents(&fixture("onvif_parent_object.xml"));
+    let frames = parse_metadata_documents(&fixture("onvif_parent_object.xml")).frames;
     assert_eq!(frames.len(), 2);
     for frame in &frames {
         assert!(
@@ -241,7 +241,7 @@ fn a_parent_in_another_frame_relates_nothing() {
 
 #[test]
 fn an_untransformed_box_is_already_in_the_normalized_system() {
-    let frames = parse_metadata_documents(&fixture("onvif_axis_untransformed.xml"));
+    let frames = parse_metadata_documents(&fixture("onvif_axis_untransformed.xml")).frames;
     assert_eq!(frames.len(), 1);
     let detection = only_detection(&frames[0].analytics);
     // left=-0.6 top=0.6 right=-0.2 bottom=0.2, y up about the picture centre.
@@ -260,7 +260,7 @@ fn an_untransformed_box_is_already_in_the_normalized_system() {
 
 #[test]
 fn two_concatenated_roots_both_parse() {
-    let frames = parse_metadata_documents(&fixture("onvif_two_roots.xml"));
+    let frames = parse_metadata_documents(&fixture("onvif_two_roots.xml")).frames;
     // Two frames in the first root; the second root carries only an event.
     assert_eq!(frames.len(), 2);
     assert_eq!(frames[0].unix_nanos, Some(FRAME_1_NANOS));
@@ -271,13 +271,16 @@ fn two_concatenated_roots_both_parse() {
 #[test]
 fn a_declaration_inside_cdata_is_content_not_a_boundary() {
     let plain = fixture("onvif_axis_untransformed.xml");
-    let want = parse_metadata_documents(&plain).len();
+    let want = parse_metadata_documents(&plain).frames.len();
     assert!(want > 0);
     let with_cdata = String::from_utf8(plain).unwrap().replace(
         "</tt:Frame>",
         "<tt:Extension><![CDATA[<?xml version=\"1.0\"?>]]></tt:Extension></tt:Frame>",
     );
-    assert_eq!(parse_metadata_documents(with_cdata.as_bytes()).len(), want);
+    assert_eq!(
+        parse_metadata_documents(with_cdata.as_bytes()).frames.len(),
+        want
+    );
 }
 
 #[test]
@@ -287,7 +290,7 @@ fn an_object_naming_itself_as_parent_relates_nothing() {
         .replace("Parent=\"12\"", "Parent=\"14\"")
         // Negative ids are legal xs:integer but name no trackable object.
         .replace("ObjectId=\"12\"", "ObjectId=\"-12\"");
-    let frames = parse_metadata_documents(document.as_bytes());
+    let frames = parse_metadata_documents(document.as_bytes()).frames;
     assert_eq!(frames.len(), 1);
     let meta = &frames[0].analytics;
     assert_eq!(tracked_ids(meta), [14]);
@@ -308,7 +311,9 @@ fn a_document_nested_past_the_depth_bound_yields_nothing() {
     let mut document = String::from("<?xml version=\"1.0\"?>");
     document.push_str(&"<x>".repeat(LEVELS));
     document.push_str(&"</x>".repeat(LEVELS));
-    assert!(parse_metadata_documents(document.as_bytes()).is_empty());
+    assert!(parse_metadata_documents(document.as_bytes())
+        .frames
+        .is_empty());
 
     // Siblings are not levels: a frame of self-closing and paired objects at
     // the bound's depth still parses.
@@ -316,14 +321,14 @@ fn a_document_nested_past_the_depth_bound_yields_nothing() {
     let padding = "<tt:Extension/>".repeat(MAX_ELEMENT_DEPTH * 2);
     let padded = plain.replace("</tt:Frame>", &format!("{padding}</tt:Frame>"));
     assert_eq!(
-        parse_metadata_documents(padded.as_bytes()).len(),
-        parse_metadata_documents(plain.as_bytes()).len(),
+        parse_metadata_documents(padded.as_bytes()).frames.len(),
+        parse_metadata_documents(plain.as_bytes()).frames.len(),
     );
 }
 
 #[test]
 fn a_stream_with_an_event_part_still_yields_its_frames() {
-    let frames = parse_metadata_documents(&fixture("onvif_cell_motion_stream.xml"));
+    let frames = parse_metadata_documents(&fixture("onvif_cell_motion_stream.xml")).frames;
     // The cell-motion example's two frames describe no objects, and the
     // tt:Event part beside them contributes none.
     assert_eq!(frames.len(), 2);
@@ -334,7 +339,7 @@ fn a_stream_with_an_event_part_still_yields_its_frames() {
 
 #[test]
 fn a_missing_bounding_box_attribute_skips_only_that_object() {
-    let frames = parse_metadata_documents(&fixture("onvif_missing_bbox_attribute.xml"));
+    let frames = parse_metadata_documents(&fixture("onvif_missing_bbox_attribute.xml")).frames;
     assert_eq!(frames.len(), 1);
     // Object 12's box has no `bottom`; object 13's is whole.
     assert_eq!(tracked_ids(&frames[0].analytics), [13]);
@@ -344,12 +349,18 @@ fn a_missing_bounding_box_attribute_skips_only_that_object() {
 #[test]
 fn a_truncated_or_non_xml_document_yields_nothing() {
     let whole = fixture("onvif_transformed_frames.xml");
-    assert!(!parse_metadata_documents(&whole).is_empty());
-    assert!(parse_metadata_documents(&whole[..whole.len() / 2]).is_empty());
-    assert!(parse_metadata_documents(b"not xml at all").is_empty());
-    assert!(parse_metadata_documents(&[]).is_empty());
+    assert!(!parse_metadata_documents(&whole).frames.is_empty());
+    assert!(parse_metadata_documents(&whole[..whole.len() / 2])
+        .frames
+        .is_empty());
+    assert!(parse_metadata_documents(b"not xml at all")
+        .frames
+        .is_empty());
+    assert!(parse_metadata_documents(&[]).frames.is_empty());
     // Invalid UTF-8 where the document should be.
-    assert!(parse_metadata_documents(&[0xff, 0xfe, 0x00]).is_empty());
+    assert!(parse_metadata_documents(&[0xff, 0xfe, 0x00])
+        .frames
+        .is_empty());
 }
 
 #[test]
@@ -369,7 +380,7 @@ fn the_object_count_bound_holds() {
     }
     document.push_str("</tt:Frame></tt:VideoAnalytics></tt:MetadataStream>");
 
-    let frames = parse_metadata_documents(document.as_bytes());
+    let frames = parse_metadata_documents(document.as_bytes()).frames;
     assert_eq!(frames.len(), 1);
     assert_eq!(
         frames[0].analytics.detections().count(),
@@ -1285,7 +1296,7 @@ async fn a_gzip_metadata_track_is_inflated() {
         "the pad emits the inflated document",
     );
     // And the inflated document is the one the parser reads.
-    let parsed = parse_metadata_documents(frames[0].domain.as_system_slice().unwrap());
+    let parsed = parse_metadata_documents(frames[0].domain.as_system_slice().unwrap()).frames;
     assert_eq!(parsed.len(), 5);
     assert_box(&only_detection(&parsed[0].analytics).bbox, &SPEC_BOX);
 }

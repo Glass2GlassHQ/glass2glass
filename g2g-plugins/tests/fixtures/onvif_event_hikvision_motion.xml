@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- A Hikvision-style motion alarm (the VideoSourceToken /
+     VideoAnalyticsToken / MyMotionDetectorRule tokens) captured from a
+     TRENDnet TV-IP311PI, as printed in the "ONVIF Notifications" post on
+     altaroca.wordpress.com (2014-09-13). The camera sent it in a wsnt:Notify
+     body; the wsnt:NotificationMessage is copied unchanged into the
+     tt:MetadataStream / tt:Event wrapper the metadata stream schema
+     (metadatastream.xsd, tt:EventStream) puts it in, with the namespaces
+     the SOAP envelope bound. -->
+<tt:MetadataStream xmlns:tt="http://www.onvif.org/ver10/schema"
+                   xmlns:wsnt="http://docs.oasis-open.org/wsn/b-2">
+<tt:Event>
+<wsnt:NotificationMessage>
+  <wsnt:Topic Dialect="http://www.onvif.org/ver10/tev/topicExpression/ConcreteSet">tns1:RuleEngine/CellMotionDetector/Motion</wsnt:Topic>
+  <wsnt:Message>
+  <tt:Message UtcTime="2014-09-09T12:43:39Z" PropertyOperation="Changed">
+  <tt:Source>
+    <tt:SimpleItem Name="VideoSourceConfigurationToken" Value="VideoSourceToken"/>
+    <tt:SimpleItem Name="VideoAnalyticsConfigurationToken" Value="VideoAnalyticsToken"/>
+    <tt:SimpleItem Name="Rule" Value="MyMotionDetectorRule"/>
+  </tt:Source>
+  <tt:Data><tt:SimpleItem Name="IsMotion" Value="true"/></tt:Data>
+  </tt:Message>
+  </wsnt:Message>
+</wsnt:NotificationMessage>
+</tt:Event>
+</tt:MetadataStream>

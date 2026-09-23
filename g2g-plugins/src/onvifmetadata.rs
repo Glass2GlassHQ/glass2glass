@@ -7,8 +7,10 @@
 //! (concatenated across the RTP marker bit and gzip-inflated already).
 //! [`OnvifMetadataParse`] splits it into one output frame per `tt:Frame`,
 //! carrying that frame's objects as detections plus the `UtcTime` it names as
-//! [`WallClockMeta`]. [`OnvifMetadataCombiner`] then merges those onto the
-//! video frames they describe:
+//! [`WallClockMeta`]. The document's `tt:Event` part becomes one more frame
+//! carrying its notification messages as [`OnvifEventMeta`].
+//! [`OnvifMetadataCombiner`] then merges those onto the video frames they
+//! describe:
 //!
 //! ```text
 //! rtspsrcn onvif-metadata=true name=s
@@ -30,9 +32,10 @@
 //! top-left with `y` pointing down, so both axes are remapped.
 //!
 //! Every count, length and coordinate here comes off the wire from a camera:
-//! the document is parsed with bounds on how many frames and objects it may
-//! describe, non-finite numbers are refused, and a malformed document yields no
-//! output rather than an error or a panic.
+//! the document is parsed with bounds on how many frames, objects, event
+//! messages and items it may describe and on how long an event text may be,
+//! non-finite numbers are refused, and a malformed document yields no output
+//! rather than an error or a panic.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -45,7 +48,8 @@ use alloc::vec::Vec;
 use g2g_core::frame::Frame;
 use g2g_core::log::{short_type_name, LogName, LogSource};
 use g2g_core::meta::{
-    AnalyticsMeta, AnalyticsNode, BBox, ObjectDetection, RelationKind, Tracking, WallClockMeta,
+    AnalyticsMeta, AnalyticsNode, BBox, FrameMeta, ObjectDetection, Propagation, RelationKind,
+    Tracking, Transform, WallClockMeta,
 };
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, G2gError,
@@ -59,6 +63,9 @@ use crate::xmlutil::days_from_civil;
 /// Elements are matched by namespace and local name, never by the `tt:` prefix
 /// a particular camera happens to bind to it.
 const ONVIF_SCHEMA_NS: &str = "http://www.onvif.org/ver10/schema";
+/// The WS-BaseNotification namespace of `wsnt:NotificationMessage` and its
+/// `Topic` and `Message` children.
+const WS_BASE_NOTIFICATION_NS: &str = "http://docs.oasis-open.org/wsn/b-2";
 
 /// `tt:Frame` elements one document may describe before the rest are dropped.
 pub const MAX_FRAMES_PER_DOCUMENT: usize = 256;
@@ -68,6 +75,15 @@ pub const MAX_OBJECTS_PER_DOCUMENT: usize = 1024;
 /// deep, and the XML parser recurses per level, so a deeper one is refused
 /// before it can exhaust the stack.
 pub const MAX_ELEMENT_DEPTH: usize = 64;
+/// `wsnt:NotificationMessage` elements one document may carry before the rest
+/// are dropped.
+pub const MAX_EVENT_MESSAGES_PER_DOCUMENT: usize = 256;
+/// `tt:SimpleItem` elements one event message may carry across its `Source`,
+/// `Key` and `Data` groups. A message with more is refused whole.
+pub const MAX_ITEMS_PER_MESSAGE: usize = 64;
+/// Longest event topic, item name or item value, in bytes. A message holding a
+/// longer one is refused whole.
+pub const MAX_EVENT_TEXT_BYTES: usize = 1024;
 
 /// Label id for an object the camera gave no class. Past the end of any
 /// `class_names` table, so `AnalyticsMeta::class_name` reports no name for it.
@@ -93,25 +109,110 @@ pub struct OnvifMetadataFrame {
     pub analytics: AnalyticsMeta,
 }
 
+/// A `tt:Message`'s `PropertyOperation`: what happened to the property the
+/// message reports on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PropertyOperation {
+    Initialized,
+    Deleted,
+    Changed,
+}
+
+impl PropertyOperation {
+    const ALL: [Self; 3] = [Self::Initialized, Self::Deleted, Self::Changed];
+
+    /// The spelling the ONVIF schema gives this operation.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Initialized => "Initialized",
+            Self::Deleted => "Deleted",
+            Self::Changed => "Changed",
+        }
+    }
+
+    fn parse(text: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|operation| operation.as_str() == text.trim())
+    }
+}
+
+/// A `tt:SimpleItem`: one name-value pair of an event message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SimpleItem {
+    pub name: String,
+    pub value: String,
+}
+
+/// One `wsnt:NotificationMessage` of a document's `tt:Event` part.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OnvifEventMessage {
+    /// The `wsnt:Topic` text as written, prefixes included, such as
+    /// `tns1:RuleEngine/CellMotionDetector/Motion`.
+    pub topic: Option<String>,
+    /// The `tt:Message` `UtcTime` as nanoseconds since the Unix epoch.
+    pub unix_nanos: i64,
+    pub property_operation: Option<PropertyOperation>,
+    pub source: Vec<SimpleItem>,
+    pub key: Vec<SimpleItem>,
+    pub data: Vec<SimpleItem>,
+}
+
+/// The event messages of one metadata payload.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OnvifEventMeta {
+    pub messages: Vec<OnvifEventMessage>,
+}
+
+impl FrameMeta for OnvifEventMeta {
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
+    fn as_any_mut(&mut self) -> &mut dyn core::any::Any {
+        self
+    }
+    fn clone_box(&self) -> Box<dyn FrameMeta> {
+        Box::new(self.clone())
+    }
+    /// What the camera reported at an instant: no pixel work changes it.
+    fn propagate(&self, _transform: Transform) -> Propagation {
+        Propagation::Keep
+    }
+}
+
+/// Everything one metadata payload describes.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ParsedMetadata {
+    pub frames: Vec<OnvifMetadataFrame>,
+    pub events: Vec<OnvifEventMessage>,
+}
+
+impl ParsedMetadata {
+    fn is_full(&self) -> bool {
+        self.frames.len() >= MAX_FRAMES_PER_DOCUMENT
+            && self.events.len() >= MAX_EVENT_MESSAGES_PER_DOCUMENT
+    }
+}
+
 // ---- document parsing ----
 
 /// Split a payload into the XML documents it holds and parse every `tt:Frame`
-/// in each. A metadata payload may carry several concatenated
-/// `<?xml ...?><tt:MetadataStream>` roots, which no XML parser accepts as one
-/// document, so the payload is cut at each declaration first. A chunk that does
-/// not parse contributes nothing.
-pub fn parse_metadata_documents(payload: &[u8]) -> Vec<OnvifMetadataFrame> {
+/// and event message in each. A metadata payload may carry several
+/// concatenated `<?xml ...?><tt:MetadataStream>` roots, which no XML parser
+/// accepts as one document, so the payload is cut at each declaration first. A
+/// chunk that does not parse contributes nothing.
+pub fn parse_metadata_documents(payload: &[u8]) -> ParsedMetadata {
+    let mut parsed = ParsedMetadata::default();
     let Ok(text) = core::str::from_utf8(payload) else {
-        return Vec::new();
+        return parsed;
     };
-    let mut frames = Vec::new();
     for chunk in split_xml_documents(text) {
-        parse_one_document(chunk, &mut frames);
-        if frames.len() >= MAX_FRAMES_PER_DOCUMENT {
+        parse_one_document(chunk, &mut parsed);
+        if parsed.is_full() {
             break;
         }
     }
-    frames
+    parsed
 }
 
 /// The XML declarations in `text` as the document boundaries they mark. A
@@ -141,7 +242,7 @@ fn split_xml_documents(text: &str) -> Vec<&str> {
     chunks
 }
 
-fn parse_one_document(text: &str, out: &mut Vec<OnvifMetadataFrame>) {
+fn parse_one_document(text: &str, out: &mut ParsedMetadata) {
     if nests_deeper_than(text, MAX_ELEMENT_DEPTH) {
         return;
     }
@@ -154,14 +255,85 @@ fn parse_one_document(text: &str, out: &mut Vec<OnvifMetadataFrame>) {
     // standing alone as well.
     let mut objects_left = MAX_OBJECTS_PER_DOCUMENT;
     for node in doc.descendants() {
-        if out.len() >= MAX_FRAMES_PER_DOCUMENT {
+        if out.is_full() {
             return;
         }
-        if !is_onvif(node, "Frame") {
-            continue;
+        if is_onvif(node, "Frame") && out.frames.len() < MAX_FRAMES_PER_DOCUMENT {
+            out.frames.push(parse_frame(node, &mut objects_left));
+        } else if is_event_notification(node) && out.events.len() < MAX_EVENT_MESSAGES_PER_DOCUMENT
+        {
+            out.events.extend(parse_notification(node));
         }
-        out.push(parse_frame(node, &mut objects_left));
     }
+}
+
+/// A `wsnt:NotificationMessage` directly under a `tt:Event`, the only place
+/// the metadata stream schema puts one.
+fn is_event_notification(node: roxmltree::Node) -> bool {
+    is_named(node, WS_BASE_NOTIFICATION_NS, "NotificationMessage")
+        && node
+            .parent()
+            .is_some_and(|parent| is_onvif(parent, "Event"))
+}
+
+/// One notification's topic and `tt:Message`. A message that breaks the
+/// schema (no readable `UtcTime`, an unknown `PropertyOperation`, an item
+/// missing its name or value) or a bound is refused whole, so a consumer
+/// never sees half of one. `tt:ElementItem`s are skipped.
+fn parse_notification(notification: roxmltree::Node) -> Option<OnvifEventMessage> {
+    let topic = notification
+        .children()
+        .find(|n| is_named(*n, WS_BASE_NOTIFICATION_NS, "Topic"))
+        .and_then(|n| n.text())
+        .map(str::trim)
+        .filter(|text| !text.is_empty());
+    let topic = match topic {
+        Some(text) => Some(bounded_text(text)?),
+        None => None,
+    };
+    let message = notification
+        .children()
+        .find(|n| is_named(*n, WS_BASE_NOTIFICATION_NS, "Message"))
+        .and_then(|wrapper| child(wrapper, "Message"))?;
+    let unix_nanos = parse_utc_time(message.attribute("UtcTime")?)?;
+    let property_operation = match message.attribute("PropertyOperation") {
+        Some(text) => Some(PropertyOperation::parse(text)?),
+        None => None,
+    };
+    let mut items_left = MAX_ITEMS_PER_MESSAGE;
+    Some(OnvifEventMessage {
+        topic,
+        unix_nanos,
+        property_operation,
+        source: item_list(message, "Source", &mut items_left)?,
+        key: item_list(message, "Key", &mut items_left)?,
+        data: item_list(message, "Data", &mut items_left)?,
+    })
+}
+
+/// The `tt:SimpleItem` pairs of a message's `Source`, `Key` or `Data` group,
+/// empty when the group is absent.
+fn item_list(
+    message: roxmltree::Node,
+    group: &str,
+    items_left: &mut usize,
+) -> Option<Vec<SimpleItem>> {
+    let Some(list) = child(message, group) else {
+        return Some(Vec::new());
+    };
+    let mut items = Vec::new();
+    for item in list.children().filter(|n| is_onvif(*n, "SimpleItem")) {
+        *items_left = items_left.checked_sub(1)?;
+        items.push(SimpleItem {
+            name: bounded_text(item.attribute("Name")?)?,
+            value: bounded_text(item.attribute("Value")?)?,
+        });
+    }
+    Some(items)
+}
+
+fn bounded_text(text: &str) -> Option<String> {
+    (text.len() <= MAX_EVENT_TEXT_BYTES).then(|| text.to_string())
 }
 
 /// A coordinate system: a point `p` in it maps to `p * scale + translate` in the
@@ -361,8 +533,12 @@ fn intern_class(names: &mut Vec<String>, name: &str) -> u32 {
 }
 
 fn is_onvif(node: roxmltree::Node, local: &str) -> bool {
+    is_named(node, ONVIF_SCHEMA_NS, local)
+}
+
+fn is_named(node: roxmltree::Node, namespace: &str, local: &str) -> bool {
     node.is_element()
-        && node.tag_name().namespace() == Some(ONVIF_SCHEMA_NS)
+        && node.tag_name().namespace() == Some(namespace)
         && node.tag_name().name() == local
 }
 
@@ -496,9 +672,10 @@ fn parse_zone_offset_secs(text: &str) -> Option<i64> {
 
 /// Split an ONVIF metadata document into one frame per `tt:Frame`, each
 /// carrying that frame's objects as [`AnalyticsMeta`] and its `UtcTime` as
-/// [`WallClockMeta`]. The payload is passed through unchanged (the same buffer,
-/// shared rather than copied), so a downstream branch can still record or
-/// forward the original XML.
+/// [`WallClockMeta`], then one frame carrying the `tt:Event` part as
+/// [`OnvifEventMeta`] and the input's own wall clock. The payload is passed
+/// through unchanged (the same buffer, shared rather than copied), so a
+/// downstream branch can still record or forward the original XML.
 ///
 /// # Example
 ///
@@ -518,6 +695,13 @@ impl OnvifMetadataParse {
     pub fn new() -> Self {
         Self::default()
     }
+
+    /// An output frame sharing `input`'s payload and timing, with no meta yet.
+    fn output_frame(&mut self, input: &Frame) -> Frame {
+        let frame = Frame::new(input.domain.share(), input.timing, self.emitted);
+        self.emitted += 1;
+        frame
+    }
 }
 
 impl AsyncElement for OnvifMetadataParse {
@@ -530,7 +714,7 @@ impl AsyncElement for OnvifMetadataParse {
         ElementMetadata::new(
             "ONVIF metadata parser",
             "Parser/Metadata",
-            "Splits an ONVIF tt:MetadataStream document into per-frame analytics metadata",
+            "Splits an ONVIF tt:MetadataStream document into per-frame analytics and event metadata",
             "g2g",
         )
     }
@@ -574,10 +758,10 @@ impl AsyncElement for OnvifMetadataParse {
                         return Ok(());
                     };
                     let parsed = parse_metadata_documents(payload);
-                    if parsed.is_empty() {
+                    if parsed.frames.is_empty() && parsed.events.is_empty() {
                         g2g_core::g2g_warn!(
                             self,
-                            "dropping a {}-byte document with no readable tt:Frame",
+                            "dropping a {}-byte document with no readable tt:Frame or event message",
                             payload.len(),
                         );
                         return Ok(());
@@ -585,13 +769,22 @@ impl AsyncElement for OnvifMetadataParse {
                     // One refcount bump per output instead of a copy of the
                     // document per frame it describes.
                     frame.domain.make_shareable();
-                    for parsed_frame in parsed {
-                        let mut out_frame =
-                            Frame::new(frame.domain.share(), frame.timing, self.emitted);
-                        self.emitted += 1;
+                    for parsed_frame in parsed.frames {
+                        let mut out_frame = self.output_frame(&frame);
                         out_frame.meta.attach(parsed_frame.analytics);
                         if let Some(unix_nanos) = parsed_frame.unix_nanos {
                             out_frame.meta.attach(WallClockMeta { unix_nanos });
+                        }
+                        out.push(PipelinePacket::DataFrame(out_frame)).await?;
+                    }
+                    if !parsed.events.is_empty() {
+                        let mut out_frame = self.output_frame(&frame);
+                        out_frame.meta.attach(OnvifEventMeta {
+                            messages: parsed.events,
+                        });
+                        // GStreamer's parser also times events by the document that carried them.
+                        if let Some(wall_clock) = frame.meta.get::<WallClockMeta>() {
+                            out_frame.meta.attach(*wall_clock);
                         }
                         out.push(PipelinePacket::DataFrame(out_frame)).await?;
                     }
@@ -702,10 +895,19 @@ struct HeldVideo {
     at: Instant,
 }
 
-/// Attach an ONVIF analytics stream to the video frames it describes, the
-/// `onvifmetadataoverlay` half that does the matching (the drawing is
-/// `analyticsoverlay` downstream). Input 0 is the video, whose caps and pixels
-/// pass through untouched; input 1 is `onvifmetadataparse` output.
+/// One parsed metadata frame waiting for the video frame it lands on.
+#[derive(Debug)]
+struct PendingMetadata {
+    at: Instant,
+    analytics: Option<AnalyticsMeta>,
+    events: Option<OnvifEventMeta>,
+}
+
+/// Attach an ONVIF metadata stream's analytics and event messages to the video
+/// frames they describe, the `onvifmetadataoverlay` half that does the matching
+/// (the drawing is `analyticsoverlay` downstream). Input 0 is the video, whose
+/// caps and pixels pass through untouched; input 1 is `onvifmetadataparse`
+/// output.
 ///
 /// # Example
 ///
@@ -720,7 +922,7 @@ pub struct OnvifMetadataCombiner {
     /// Video frames waiting for metadata, oldest first.
     held: VecDeque<HeldVideo>,
     /// Metadata not yet matched to a video frame, oldest first.
-    pending: VecDeque<(Instant, AnalyticsMeta)>,
+    pending: VecDeque<PendingMetadata>,
     /// The newest instant seen on either pad, the element's idea of now.
     newest: Option<Instant>,
     /// The newest instant seen on the video pad, which is what `max-lateness`
@@ -801,7 +1003,7 @@ impl OnvifMetadataCombiner {
         while self
             .pending
             .front()
-            .is_some_and(|(at, _)| at.on(axis) < cutoff)
+            .is_some_and(|pending| pending.at.on(axis) < cutoff)
         {
             self.pending.pop_front();
         }
@@ -848,13 +1050,18 @@ impl OnvifMetadataCombiner {
             while self
                 .pending
                 .front()
-                .is_some_and(|(at, _)| at.on(axis) < end)
+                .is_some_and(|pending| pending.at.on(axis) < end)
             {
-                let (at, analytics) = self.pending.pop_front().expect("front is present");
-                if at.on(axis) < start {
+                let pending = self.pending.pop_front().expect("front is present");
+                if pending.at.on(axis) < start {
                     continue;
                 }
-                append_analytics(&mut held.frame, &analytics);
+                if let Some(analytics) = &pending.analytics {
+                    append_analytics(&mut held.frame, analytics);
+                }
+                if let Some(events) = pending.events {
+                    append_events(&mut held.frame, events);
+                }
             }
             out.push(PipelinePacket::DataFrame(held.frame)).await?;
         }
@@ -900,6 +1107,15 @@ fn append_analytics(frame: &mut Frame, incoming: &AnalyticsMeta) {
             to: relation.to + node_offset,
             kind: relation.kind,
         });
+    }
+}
+
+/// Add one metadata frame's event messages to a video frame, after any it
+/// already carries.
+fn append_events(frame: &mut Frame, incoming: OnvifEventMeta) {
+    match frame.meta.get_mut::<OnvifEventMeta>() {
+        Some(existing) => existing.messages.extend(incoming.messages),
+        None => frame.meta.attach(incoming),
     }
 }
 
@@ -1005,7 +1221,7 @@ impl MultiInputElement for OnvifMetadataCombiner {
         ElementMetadata::new(
             "ONVIF metadata combiner",
             "Filter/Video/Metadata",
-            "Attaches an ONVIF analytics stream to the video frames it describes",
+            "Attaches an ONVIF analytics and event stream to the video frames it describes",
             "g2g",
         )
     }
@@ -1065,8 +1281,14 @@ impl MultiInputElement for OnvifMetadataCombiner {
                     let at = Instant::of(&frame);
                     self.metadata_has_wall_clock |= at.wall_nanos.is_some();
                     self.note(at, false);
-                    if let Some(analytics) = frame.meta.get::<AnalyticsMeta>() {
-                        self.pending.push_back((at, analytics.clone()));
+                    let analytics = frame.meta.get::<AnalyticsMeta>().cloned();
+                    let events = frame.meta.get::<OnvifEventMeta>().cloned();
+                    if analytics.is_some() || events.is_some() {
+                        self.pending.push_back(PendingMetadata {
+                            at,
+                            analytics,
+                            events,
+                        });
                     }
                     self.drop_late_metadata();
                     self.release(out, false).await
