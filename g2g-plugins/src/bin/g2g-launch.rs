@@ -906,6 +906,7 @@ fn run_dashboard(
     quiet: bool,
     record_dir: Option<&str>,
 ) {
+    use core::pin::pin;
     use tokio::sync::broadcast;
 
     // Non-loopback binds expose unauthenticated telemetry + frame previews.
@@ -928,7 +929,7 @@ fn run_dashboard(
 
         // Drain the bus and fan each event out to every connected client.
         let drain_tx = ev_tx.clone();
-        tokio::spawn(async move {
+        let drainer = tokio::spawn(async move {
             while let Some(msg) = bus.recv().await {
                 if let Some(json) = g2g_plugins::dashboard::event_json(&msg) {
                     let _ = drain_tx.send(json);
@@ -943,9 +944,7 @@ fn run_dashboard(
             println!("dashboard: http://{shown}:{port}  (bound {host}, pipeline running, Ctrl-C to stop)");
         }
 
-        // The run future finishes with the pipeline; the server runs forever.
-        // `select!` returns on whichever ends first: normally the run, dropping
-        // the server; a bind error ends the server first and we surface it.
+        // A bind error ends the server before the run, and we surface it.
         let run: RunFuture = match &recorder {
             Some(rec) => Box::pin(run_graph_observed_recorded(
                 graph,
@@ -963,15 +962,34 @@ fn run_dashboard(
                 Some(&bus_handle),
             )),
         };
-        tokio::select! {
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let shutdown = async {
+            let _ = shutdown_rx.await;
+        };
+        let mut server = pin!(g2g_plugins::dashboard::serve(
+            observer.clone(),
+            ev_tx,
+            host,
+            port,
+            shutdown
+        ));
+        let run_result = tokio::select! {
             r = run => r,
-            e = g2g_plugins::dashboard::serve(observer.clone(), ev_tx.clone(), host, port) => {
+            e = &mut server => {
                 if let Err(err) = e {
                     eprintln!("dashboard: server error: {err}");
                 }
-                Ok(Default::default())
+                return Ok(Default::default());
             }
+        };
+        // The clients get the run's last events, its Eos included, before the server stops.
+        drop(bus_handle);
+        let _ = drainer.await;
+        let _ = shutdown_tx.send(());
+        if let Err(err) = server.await {
+            eprintln!("dashboard: server error: {err}");
         }
+        run_result
     });
 
     match result {

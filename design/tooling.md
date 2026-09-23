@@ -231,6 +231,9 @@ The transport lives in `g2g-plugins::dashboard` under the `observe` feature.
 with a self-contained dashboard page (`tools/dashboard/`) and a WebSocket upgrade
 with a JSON `telemetry` snapshot every 250 ms plus one `event` per `BusMessage`,
 fanned out to all clients via a broadcast channel drained off the `Bus`.
+When the run ends the server stops accepting, and each client gets the
+events still queued (the run's `eos` among them), a last snapshot and a close
+frame before `g2g-launch` exits.
 
 Each telemetry edge carries its negotiated caps, from the `Observer`'s per-edge
 solution, and live counters, packets, CPU-payload bytes, drops, and `blocked_ns`,

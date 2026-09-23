@@ -27,6 +27,8 @@
 //!   compare it against.
 //! - `{"type":"event","kind":"eos"|"error"|...,...}` (see [`event_json`]).
 
+use core::future::Future;
+use core::pin::pin;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -41,6 +43,7 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
+use tokio::task::JoinSet;
 use tokio_tungstenite::tungstenite::Message;
 
 use g2g_core::runtime::{LinkInterceptor, Observer, ProbeAction, ProbeSlot, TelemetrySnapshot};
@@ -91,6 +94,9 @@ pub const INDEX_HTML: &str = include_str!("../../tools/dashboard/index.html");
 
 /// Telemetry push cadence.
 const TICK: Duration = Duration::from_millis(250);
+
+/// How long a stopping server waits for its clients to take their last events.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(1);
 
 /// Serialize a telemetry snapshot to the wire JSON string: the shared
 /// [`toolingjson::telemetry_json`] shape plus the dashboard's `type` tag.
@@ -187,16 +193,18 @@ pub fn event_json(msg: &BusMessage) -> Option<String> {
 /// event stream (WebSocket). `events` is the fan-out channel a bus-drain task
 /// publishes [`event_json`] strings into; every WS client subscribes to it.
 ///
-/// Runs forever (the accept loop); drive it with `tokio::select!` against the
-/// pipeline run future so it is dropped when the pipeline finishes.
+/// Accepts until `shutdown` resolves. Each client then gets the events still
+/// queued, a last snapshot and a close frame once every other `events` sender
+/// is gone, waiting at most [`SHUTDOWN_GRACE`].
 pub async fn serve(
     observer: Observer,
     events: broadcast::Sender<String>,
     host: &str,
     port: u16,
+    shutdown: impl Future<Output = ()>,
 ) -> std::io::Result<()> {
     let listener = TcpListener::bind((host, port)).await?;
-    serve_on(listener, observer, events).await
+    serve_on(listener, observer, events, shutdown).await
 }
 
 /// The accept loop, split from the bind so a test can supply an ephemeral-port
@@ -205,15 +213,27 @@ async fn serve_on(
     listener: TcpListener,
     observer: Observer,
     events: broadcast::Sender<String>,
+    shutdown: impl Future<Output = ()>,
 ) -> std::io::Result<()> {
+    let mut connections = JoinSet::new();
+    let mut shutdown = pin!(shutdown);
     loop {
-        let (stream, _) = listener.accept().await?;
-        let observer = observer.clone();
-        let ev_rx = events.subscribe();
-        tokio::spawn(async move {
-            let _ = handle_conn(stream, observer, ev_rx).await;
-        });
+        tokio::select! {
+            accepted = listener.accept() => {
+                let (stream, _) = accepted?;
+                while connections.try_join_next().is_some() {}
+                let observer = observer.clone();
+                let ev_rx = events.subscribe();
+                connections.spawn(async move {
+                    let _ = handle_conn(stream, observer, ev_rx).await;
+                });
+            }
+            () = &mut shutdown => break,
+        }
     }
+    drop(events);
+    let _ = tokio::time::timeout(SHUTDOWN_GRACE, connections.join_all()).await;
+    Ok(())
 }
 
 async fn handle_conn(
@@ -290,11 +310,15 @@ async fn stream_telemetry(
                         }
                     }
                     // Lagged: the client fell behind the event fan-out; skip the
-                    // gap and keep streaming. Closed: the bus drainer is gone
-                    // (pipeline ended), but keep pushing telemetry until the run
-                    // future drops us.
+                    // gap and keep streaming.
                     Err(broadcast::error::RecvError::Lagged(_)) => {}
-                    Err(broadcast::error::RecvError::Closed) => {}
+                    // The run has ended and every event it posted was sent.
+                    Err(broadcast::error::RecvError::Closed) => {
+                        let json = snapshot_json(&observer.snapshot());
+                        let _ = tx.send(Message::Text(json)).await;
+                        let _ = tx.send(Message::Close(None)).await;
+                        break;
+                    }
                 }
             }
             // Inbound frames: subscribe / unsubscribe control, plus close.
@@ -543,7 +567,12 @@ mod tests {
         let (ev_tx, _) = broadcast::channel::<String>(16);
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let addr = listener.local_addr().unwrap();
-        tokio::spawn(serve_on(listener, observer, ev_tx.clone()));
+        tokio::spawn(serve_on(
+            listener,
+            observer,
+            ev_tx.clone(),
+            core::future::pending(),
+        ));
 
         let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/"))
             .await
@@ -580,6 +609,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_stopping_server_delivers_the_last_event_then_closes() {
+        use futures_util::StreamExt;
+
+        let observer = Observer::new();
+        let (ev_tx, _) = broadcast::channel::<String>(16);
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let shutdown = async {
+            let _ = shutdown_rx.await;
+        };
+        let server = tokio::spawn(serve_on(listener, observer, ev_tx.clone(), shutdown));
+
+        let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/"))
+            .await
+            .unwrap();
+        // One telemetry tick proves the connection is subscribed before the event.
+        while !matches!(ws.next().await.unwrap().unwrap(), Message::Text(_)) {}
+
+        ev_tx.send(event_json(&BusMessage::Eos).unwrap()).unwrap();
+        drop(ev_tx);
+        shutdown_tx.send(()).unwrap();
+
+        let mut saw_eos = false;
+        let closed = loop {
+            match ws.next().await {
+                Some(Ok(Message::Text(t))) => {
+                    let v: Value = serde_json::from_str(&t).unwrap();
+                    saw_eos |= v["type"] == "event" && v["kind"] == "eos";
+                }
+                Some(Ok(Message::Close(_))) => break true,
+                Some(Ok(_)) => continue,
+                Some(Err(_)) | None => break false,
+            }
+        };
+        assert!(saw_eos, "the queued eos event reaches the client");
+        assert!(
+            closed,
+            "the client gets a close frame, not a dropped socket"
+        );
+        server.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
     async fn edge_subscribe_streams_a_video_preview() {
         use crate::registry::default_registry;
         use futures_util::StreamExt;
@@ -604,7 +677,12 @@ mod tests {
         let (ev_tx, _) = broadcast::channel::<String>(16);
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let addr = listener.local_addr().unwrap();
-        tokio::spawn(serve_on(listener, observer.clone(), ev_tx));
+        tokio::spawn(serve_on(
+            listener,
+            observer.clone(),
+            ev_tx,
+            core::future::pending(),
+        ));
 
         let clock = ZeroClock;
         let client = async {
@@ -676,7 +754,12 @@ mod tests {
         let (ev_tx, _) = broadcast::channel::<String>(16);
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let addr = listener.local_addr().unwrap();
-        tokio::spawn(serve_on(listener, observer.clone(), ev_tx));
+        tokio::spawn(serve_on(
+            listener,
+            observer.clone(),
+            ev_tx,
+            core::future::pending(),
+        ));
 
         let clock = ZeroClock;
         let client = async {

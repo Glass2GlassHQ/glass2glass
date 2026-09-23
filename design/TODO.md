@@ -333,8 +333,8 @@ unless it says otherwise.
 
 ## Developer tooling
 
-- **Per-element / per-link telemetry gaps.** Remaining `Observer` coverage:
-  validate the dashboard live against an RTSP source.
+- Dashboard edge labels are clipped between nodes at the default layout
+  spacing (caps and packet count cut off on a 1400 px wide page).
 
 ## Audio decode-to-PCM QA
 
