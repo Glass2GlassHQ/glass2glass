@@ -261,7 +261,8 @@ pub struct ClockSync {
     /// sink anchors on the base time, never the first frame.
     path_live: bool,
     /// Aggregated minimum path latency, added to every presentation deadline.
-    path_latency_min_ns: u64,
+    /// Shared by every clone, so a runner re-fold reaches sinks already running.
+    path_latency_min_ns: Arc<AtomicU64>,
 }
 
 impl ClockSync {
@@ -272,7 +273,7 @@ impl ClockSync {
             base_time_ns,
             play_anchor: None,
             path_live: false,
-            path_latency_min_ns: 0,
+            path_latency_min_ns: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -289,7 +290,7 @@ impl ClockSync {
             base_time_ns,
             play_anchor: Some(play_anchor),
             path_live: false,
-            path_latency_min_ns: 0,
+            path_latency_min_ns: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -300,7 +301,7 @@ impl ClockSync {
     /// latency for the whole run.
     pub fn with_path_latency(mut self, report: crate::query::LatencyReport) -> Self {
         self.path_live = report.live;
-        self.path_latency_min_ns = report.min_ns;
+        self.path_latency_min_ns = Arc::new(AtomicU64::new(report.min_ns));
         self
     }
 
@@ -313,7 +314,11 @@ impl ClockSync {
     /// The path's aggregated minimum latency, added to every presentation
     /// deadline so a live sink buffers just enough to never run dry.
     pub fn path_latency_min_ns(&self) -> u64 {
-        self.path_latency_min_ns
+        self.path_latency_min_ns.load(Ordering::Relaxed)
+    }
+
+    pub fn set_path_latency_min_ns(&self, min_ns: u64) {
+        self.path_latency_min_ns.store(min_ns, Ordering::Relaxed);
     }
 
     /// Current time on the elected clock.

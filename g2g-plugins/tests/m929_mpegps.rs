@@ -1228,6 +1228,33 @@ async fn the_fanout_subpicture_port_opens_on_the_idx_config() {
     );
 }
 
+// video_unit's frame_rate_code 3
+const VIDEO_UNIT_FRAME_PERIOD_NS: u64 = 1_000_000_000 / 25;
+
+#[tokio::test]
+async fn the_fanout_declares_the_picture_it_holds_once_a_sequence_header_parses() {
+    let mut el = PsDemuxN::new(Vec::from([PsStream::Mpeg2]));
+    el.configure_pipeline(&ps_caps()).expect("configure");
+    assert_eq!(el.latency(), g2g_core::LatencyReport::ZERO);
+
+    let mut file = Vec::new();
+    for i in 0..2 {
+        file.extend_from_slice(&PACK);
+        file.extend_from_slice(&pes(0xE0, Some(9_000 * (i + 1)), &video_unit(720, 480, 1)));
+    }
+    let mut tap = PortTap::new(1);
+    el.process(data_frame(file), &mut tap)
+        .await
+        .expect("demux the stream");
+    assert_eq!(
+        el.latency(),
+        g2g_core::LatencyReport::buffered(
+            VIDEO_UNIT_FRAME_PERIOD_NS,
+            Some(VIDEO_UNIT_FRAME_PERIOD_NS)
+        )
+    );
+}
+
 /// M931: `playbin uri=file.vob` on a disc with a subpicture track builds the
 /// compositing overlay graph, and a disc without one builds the plain A/V
 /// fan-out. Needs a decoder for the video, so it runs under the `ffmpeg` feature.

@@ -35,10 +35,10 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::StreamSelectController;
 use g2g_core::{
     AsyncElement, AudioFormat, BusHandle, BusMessage, ByteStreamEncoding, Caps, CapsConstraint,
-    CapsSet, ConfigureOutcome, Dim, ElementMetadata, FrameTiming, G2gError, MemoryDomain,
-    MultiOutputElement, MultiOutputSink, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
-    PropError, PropKind, PropValue, PropertySpec, Rate, Seek, Segment, Stream, StreamCollection,
-    StreamType, SubPictureFormat, VideoCodec,
+    CapsSet, ConfigureOutcome, Dim, ElementMetadata, FrameTiming, G2gError, LatencyReport,
+    MemoryDomain, MultiOutputElement, MultiOutputSink, OutputSink, PadTemplate, PadTemplates,
+    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, Seek, Segment, Stream,
+    StreamCollection, StreamType, SubPictureFormat, VideoCodec,
 };
 
 use crate::mpeg2video::Mpeg2TimestampSynth;
@@ -1502,6 +1502,8 @@ pub struct PsDemuxN {
     /// downstream configures its pads from the solved caps and cannot accept two
     /// inputs of different geometry, so a builder that knows the size states it.
     seed_geometry: Option<SequenceHeader>,
+    // the video reframer holds a picture until the next one starts
+    held_picture_ns: u64,
 }
 
 impl PsDemuxN {
@@ -1526,6 +1528,7 @@ impl PsDemuxN {
             segment_sent,
             config_sent,
             seed_geometry: None,
+            held_picture_ns: 0,
         }
     }
 
@@ -1666,6 +1669,7 @@ impl PsDemuxN {
             }
             if kind == PsStream::Mpeg2 {
                 if let Some(seq) = u.sequence {
+                    self.held_picture_ns = crate::compositor::frame_period_ns(seq.framerate_q16);
                     if self.refined[port] != Some(seq) {
                         self.refined[port] = Some(seq);
                         out.push_to(
@@ -1794,5 +1798,9 @@ impl MultiOutputElement for PsDemuxN {
 
     fn get_property(&self, _name: &str) -> Option<PropValue> {
         None
+    }
+
+    fn latency(&self) -> LatencyReport {
+        LatencyReport::buffered(self.held_picture_ns, Some(self.held_picture_ns))
     }
 }

@@ -317,6 +317,10 @@ pub trait MultiOutputSource: ElementBound {
     /// [`SourceLoop::set_bus`](crate::runtime::SourceLoop::set_bus). Default:
     /// ignore.
     fn set_bus(&mut self, _bus: crate::bus::BusHandle) {}
+
+    fn latency(&self) -> crate::query::LatencyReport {
+        crate::query::LatencyReport::ZERO
+    }
 }
 
 /// Dyn-safe mirror of [`MultiOutputSource`] (boxed-future `run`), so a terminal
@@ -344,6 +348,9 @@ pub trait DynMultiOutputSource: ElementBound {
     fn set_log_category(&mut self, _category: alloc::string::String) {}
     /// Dyn-safe mirror of [`MultiOutputSource::set_bus`].
     fn set_bus(&mut self, _bus: crate::bus::BusHandle) {}
+    fn latency(&self) -> crate::query::LatencyReport {
+        crate::query::LatencyReport::ZERO
+    }
 }
 
 impl<T: MultiOutputSource> DynMultiOutputSource for T {
@@ -377,6 +384,9 @@ impl<T: MultiOutputSource> DynMultiOutputSource for T {
     fn set_bus(&mut self, bus: crate::bus::BusHandle) {
         MultiOutputSource::set_bus(self, bus)
     }
+    fn latency(&self) -> crate::query::LatencyReport {
+        MultiOutputSource::latency(self)
+    }
 }
 
 /// Forwarding impl so a borrowed `&mut dyn DynMultiOutputSource` can be boxed
@@ -402,6 +412,9 @@ impl<'b> DynMultiOutputSource for &'b mut (dyn DynMultiOutputSource + 'b) {
     }
     fn set_bus(&mut self, bus: crate::bus::BusHandle) {
         (**self).set_bus(bus)
+    }
+    fn latency(&self) -> crate::query::LatencyReport {
+        (**self).latency()
     }
 }
 

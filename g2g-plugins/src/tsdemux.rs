@@ -32,10 +32,10 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{SeekController, StreamSelectController};
 use g2g_core::{
     AsyncElement, AudioFormat, BusHandle, BusMessage, ByteStreamEncoding, Caps, CapsConstraint,
-    CapsSet, ConfigureOutcome, Dim, ElementMetadata, FrameTiming, G2gError, MemoryDomain,
-    MultiOutputElement, MultiOutputSink, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
-    PropError, PropKind, PropValue, PropertySpec, Rate, Seek, Segment, Stream, StreamCollection,
-    StreamType, SubPictureFormat, Tag, TagList, VideoCodec,
+    CapsSet, ConfigureOutcome, Dim, ElementMetadata, FrameTiming, G2gError, LatencyReport,
+    MemoryDomain, MultiOutputElement, MultiOutputSink, OutputSink, PadTemplate, PadTemplates,
+    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, Seek, Segment, Stream,
+    StreamCollection, StreamType, SubPictureFormat, Tag, TagList, VideoCodec,
 };
 
 use crate::demuxseek::{Admit, DemuxSeek};
@@ -1218,6 +1218,19 @@ pub struct TsDemuxN {
     /// Whether port `i` has seen a sequence header (MPEG-2 ports only, see
     /// [`TsDemux`]'s `mpeg2_tuned_in`).
     mpeg2_tuned_in: Vec<bool>,
+    last_unit_dts_ns: Vec<Option<u64>>,
+    held_unit_ns: Vec<Option<u64>>,
+}
+
+// ISO/IEC 13818-1 caps the gap between coded PTS at 0.7 s, so a longer one is a discontinuity
+const MAX_PTS_INTERVAL_NS: u64 = 700_000_000;
+
+// a sparse stream (subtitles, KLV) holds a unit until the next one arrives, however long that is
+fn holds_timed_units(stream: TsStream) -> bool {
+    matches!(
+        TsDemux::output_caps(stream),
+        Caps::CompressedVideo { .. } | Caps::Audio { .. }
+    )
 }
 
 impl TsDemuxN {
@@ -1228,6 +1241,8 @@ impl TsDemuxN {
         let announced = alloc::vec![false; ports.len()];
         let segment_sent = alloc::vec![false; ports.len()];
         let mpeg2_tuned_in = alloc::vec![false; ports.len()];
+        let last_unit_dts_ns = alloc::vec![None; ports.len()];
+        let held_unit_ns = alloc::vec![None; ports.len()];
         Self {
             demux: TsDemuxer::new(),
             buf: Vec::new(),
@@ -1236,6 +1251,8 @@ impl TsDemuxN {
             segment_base: None,
             segment_sent,
             mpeg2_tuned_in,
+            last_unit_dts_ns,
+            held_unit_ns,
             bus: None,
             collection_posted: false,
             tags: TagPoster::default(),
@@ -1243,6 +1260,18 @@ impl TsDemuxN {
             program_number: None,
             emitted: 0,
         }
+    }
+
+    // a PES stays in the parser until the next one on its PID starts
+    fn learn_held_unit(&mut self, port: usize, dts_ns: Option<u64>) {
+        let previous = core::mem::replace(&mut self.last_unit_dts_ns[port], dts_ns);
+        if self.held_unit_ns[port].is_some() {
+            return;
+        }
+        self.held_unit_ns[port] = previous
+            .zip(dts_ns)
+            .and_then(|(previous, now)| now.checked_sub(previous))
+            .filter(|&interval| interval > 0 && interval <= MAX_PTS_INTERVAL_NS);
     }
 
     /// Attach the pipeline bus so the program's `StreamCollection` (M386) posts
@@ -1439,6 +1468,9 @@ impl TsDemuxN {
                 .dts_90khz
                 .map(|d| (d as u128 * 1_000_000_000 / 90_000) as u64)
                 .unwrap_or(pts_ns);
+            if holds_timed_units(self.ports[port]) {
+                self.learn_held_unit(port, u.pts_90khz.map(|_| dts_ns));
+            }
             let data = unwrap_sync_klv(u.stream_type, u.data);
             let frame = Frame::new(
                 MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
@@ -1582,6 +1614,7 @@ impl MultiOutputElement for TsDemuxN {
                     self.buf.clear();
                     self.demux = TsDemuxer::new();
                     self.demux.set_program_number(self.program_number);
+                    self.last_unit_dts_ns.fill(None);
                     for port in 0..self.ports.len() {
                         out.push_to(port, PipelinePacket::Flush).await?;
                     }
@@ -1628,6 +1661,17 @@ impl MultiOutputElement for TsDemuxN {
             "program-number" => Some(PropValue::Int(program_number_to_int(self.program_number))),
             _ => None,
         }
+    }
+
+    fn latency(&self) -> LatencyReport {
+        let held_ns = self
+            .held_unit_ns
+            .iter()
+            .flatten()
+            .copied()
+            .max()
+            .unwrap_or(0);
+        LatencyReport::buffered(held_ns, Some(held_ns))
     }
 }
 

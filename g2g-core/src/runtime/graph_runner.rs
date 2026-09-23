@@ -1300,6 +1300,7 @@ struct Prepared {
     solution: Vec<Caps>,
     feasibility: Vec<Option<CapsSet>>,
     latency: LatencyReport,
+    latency_fold: alloc::sync::Arc<LatencyFold>,
     allocation: Option<AllocationParams>,
     clock_priority: ClockPriority,
     base_time_ns: u64,
@@ -1574,7 +1575,8 @@ async fn prepare_graph<'a>(
 
     // Latency fold + clock election over every element node (tee is structural
     // and contributes neither).
-    let latency = fold_latency(vg, topo);
+    let mut latency_fold = LatencyFold::new(vg, topo);
+    let latency = latency_fold.aggregate();
     let clocks: Vec<Option<ClockCandidate>> =
         topo.iter().map(|&node| element_clock(vg, node)).collect();
 
@@ -1642,6 +1644,7 @@ async fn prepare_graph<'a>(
         }
         sink_clock_sync = Some(sync);
     }
+    latency_fold.sink_clock_sync = sink_clock_sync.clone();
 
     Ok((
         probes,
@@ -1649,6 +1652,7 @@ async fn prepare_graph<'a>(
             solution,
             feasibility,
             latency,
+            latency_fold: alloc::sync::Arc::new(latency_fold),
             allocation,
             clock_priority,
             base_time_ns,
@@ -1935,6 +1939,7 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
             solution,
             feasibility,
             latency,
+            latency_fold,
             allocation,
             clock_priority,
             base_time_ns,
@@ -2207,6 +2212,7 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
                         in_rx,
                         out_txs: demux_out_txs_by_port(&vg, node, out_txs),
                         probe: probes[node.0 as usize].clone(),
+                        latency: LatencyFold::publisher(&latency_fold, node),
                     }),
                     _ => Box::pin(tee_arm(in_rx, out_txs, branch_drop)),
                 }
@@ -2299,7 +2305,7 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
         coord_arm_index,
         &dropped,
         &probes,
-        latency,
+        latency_fold.aggregate(),
         allocation,
         clock_priority,
         base_time_ns,
@@ -2540,6 +2546,7 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
             solution,
             feasibility,
             latency,
+            latency_fold,
             allocation,
             clock_priority,
             base_time_ns,
@@ -2801,11 +2808,13 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
                     Some(GraphNodeRef::Demux(demux)) => {
                         let demux_probe = probes[node.0 as usize].clone();
                         let out_txs = demux_out_txs_by_port(&vg, node, out_txs);
+                        let latency = LatencyFold::publisher(&latency_fold, node);
                         alloc::boxed::Box::new(move || -> LocalArmFuture {
                             demux.drive_demux_arm(DemuxArmIo {
                                 in_rx,
                                 out_txs,
                                 probe: demux_probe,
+                                latency,
                             })
                         })
                     }
@@ -2936,7 +2945,7 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
         coord_arm_index,
         &dropped,
         &probes,
-        latency,
+        latency_fold.aggregate(),
         allocation,
         clock_priority,
         base_time_ns,
@@ -3731,10 +3740,11 @@ fn element_configure_alloc(
     }
 }
 
-/// A node's latency contribution. `None` for tee and fan-out source nodes.
+/// A node's latency contribution. `None` for tee nodes.
 fn element_latency(vg: &ValidatedGraph<GraphNodeRef<'_>>, node: NodeId) -> Option<LatencyReport> {
     match vg.element(node) {
         Some(GraphNodeRef::Source(src)) => Some(src.latency()),
+        Some(GraphNodeRef::FanoutSource(src)) => Some(src.latency()),
         Some(GraphNodeRef::Element(elem)) => Some(elem.latency()),
         Some(GraphNodeRef::Muxer(mux)) => Some(mux.latency()),
         Some(GraphNodeRef::Demux(demux)) => Some(demux.latency()),
@@ -3790,24 +3800,127 @@ async fn clock_health_monitor(
 /// Fold the graph's declared latency the way a latency query travels: along a
 /// path each element's contribution sums, a fan-in waits for its slowest input
 /// branch, and the run reports the slowest of its sinks.
-fn fold_latency(vg: &ValidatedGraph<GraphNodeRef<'_>>, topo: &[NodeId]) -> LatencyReport {
-    let mut upstream = alloc::vec![LatencyReport::ZERO; vg.node_count()];
-    for &node in topo {
-        let mut incoming = vg
-            .in_edges(node)
-            .iter()
-            .map(|&edge| upstream[vg.edge(edge).src.node.0 as usize])
-            .reduce(LatencyReport::join_branches)
-            .unwrap_or(LatencyReport::ZERO);
-        incoming.min_ns = incoming.min_ns.max(min_upstream_latency(vg, node));
-        let own = element_latency(vg, node).unwrap_or(LatencyReport::ZERO);
-        upstream[node.0 as usize] = incoming.combine(own);
+#[derive(Debug)]
+struct LatencyFold {
+    paths: LatencyPaths,
+    // a demux only knows what it holds once media flows, so its arm re-folds mid-run
+    state: spin::Mutex<LatencyFoldState>,
+    sink_clock_sync: Option<ClockSync>,
+}
+
+#[derive(Debug)]
+struct LatencyPaths {
+    topo: Vec<NodeId>,
+    upstream_nodes: Vec<Vec<NodeId>>,
+    upstream_floors: Vec<u64>,
+    terminals: Vec<NodeId>,
+}
+
+#[derive(Debug)]
+struct LatencyFoldState {
+    reports: Vec<LatencyReport>,
+    // scratch, so a re-fold from an arm does not allocate
+    upstream: Vec<LatencyReport>,
+    aggregate: LatencyReport,
+}
+
+impl LatencyFold {
+    fn new(vg: &ValidatedGraph<GraphNodeRef<'_>>, topo: &[NodeId]) -> Self {
+        let node_count = vg.node_count();
+        let mut upstream_nodes = alloc::vec![Vec::new(); node_count];
+        let mut upstream_floors = alloc::vec![0; node_count];
+        let mut reports = alloc::vec![LatencyReport::ZERO; node_count];
+        for &node in topo {
+            let index = node.0 as usize;
+            upstream_nodes[index] = vg
+                .in_edges(node)
+                .iter()
+                .map(|&edge| vg.edge(edge).src.node)
+                .collect();
+            upstream_floors[index] = min_upstream_latency(vg, node);
+            reports[index] = element_latency(vg, node).unwrap_or(LatencyReport::ZERO);
+        }
+        let paths = LatencyPaths {
+            topo: topo.to_vec(),
+            upstream_nodes,
+            upstream_floors,
+            terminals: topo
+                .iter()
+                .copied()
+                .filter(|&node| vg.out_edges(node).is_empty())
+                .collect(),
+        };
+        let mut upstream = alloc::vec![LatencyReport::ZERO; node_count];
+        let aggregate = paths.fold(&reports, &mut upstream);
+        Self {
+            paths,
+            state: spin::Mutex::new(LatencyFoldState {
+                reports,
+                upstream,
+                aggregate,
+            }),
+            sink_clock_sync: None,
+        }
     }
-    topo.iter()
-        .filter(|&&node| vg.out_edges(node).is_empty())
-        .map(|&node| upstream[node.0 as usize])
-        .reduce(LatencyReport::join_branches)
-        .unwrap_or(LatencyReport::ZERO)
+
+    fn aggregate(&self) -> LatencyReport {
+        self.state.lock().aggregate
+    }
+
+    fn publisher(fold: &alloc::sync::Arc<Self>, node: NodeId) -> LatencyPublisher {
+        LatencyPublisher {
+            node,
+            published: fold.state.lock().reports[node.0 as usize],
+            fold: fold.clone(),
+        }
+    }
+
+    fn publish(&self, node: NodeId, report: LatencyReport) {
+        let mut guard = self.state.lock();
+        let state = &mut *guard;
+        state.reports[node.0 as usize] = report;
+        state.aggregate = self.paths.fold(&state.reports, &mut state.upstream);
+        // under the lock, so two arms re-folding at once cannot store the older result last
+        if let Some(sync) = &self.sink_clock_sync {
+            sync.set_path_latency_min_ns(state.aggregate.min_ns);
+        }
+    }
+}
+
+impl LatencyPaths {
+    fn fold(&self, reports: &[LatencyReport], upstream: &mut [LatencyReport]) -> LatencyReport {
+        for &node in &self.topo {
+            let index = node.0 as usize;
+            let mut incoming = self.upstream_nodes[index]
+                .iter()
+                .map(|&src| upstream[src.0 as usize])
+                .reduce(LatencyReport::join_branches)
+                .unwrap_or(LatencyReport::ZERO);
+            incoming.min_ns = incoming.min_ns.max(self.upstream_floors[index]);
+            upstream[index] = incoming.combine(reports[index]);
+        }
+        self.terminals
+            .iter()
+            .map(|&node| upstream[node.0 as usize])
+            .reduce(LatencyReport::join_branches)
+            .unwrap_or(LatencyReport::ZERO)
+    }
+}
+
+pub(crate) struct LatencyPublisher {
+    node: NodeId,
+    published: LatencyReport,
+    fold: alloc::sync::Arc<LatencyFold>,
+}
+
+impl LatencyPublisher {
+    fn observe(&mut self, report: LatencyReport) {
+        if report == self.published {
+            return;
+        }
+        self.published = report;
+        self.fold.publish(self.node, report);
+    }
 }
 
 /// The floor a fan-in puts under its branches' folded minimum. Zero everywhere
@@ -4579,6 +4692,7 @@ pub struct DemuxArmIo {
     pub(crate) in_rx: LinkReceiver,
     pub(crate) out_txs: Vec<LinkSender>,
     pub(crate) probe: Probe,
+    pub(crate) latency: LatencyPublisher,
 }
 
 /// The demux arm: drain the single input edge and let the routing element
@@ -4599,6 +4713,7 @@ pub(crate) async fn demux_arm<E: MultiOutputElement>(
         in_rx,
         out_txs,
         probe,
+        mut latency,
     } = io;
     let branch_count = out_txs.len();
     let senders: Vec<SenderSink> = out_txs.into_iter().map(SenderSink::new).collect();
@@ -4635,6 +4750,7 @@ pub(crate) async fn demux_arm<E: MultiOutputElement>(
                 if let Some(p) = timed {
                     p.record_proc_since(t0);
                 }
+                latency.observe(demux.latency());
             }
             None => return Ok(0),
         }

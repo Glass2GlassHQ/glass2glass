@@ -188,10 +188,8 @@ Highest leverage first:
 
 ## Clock-synchronised presentation
 
-- Fold latency again once a demux has parsed its first unit, so `TsDemuxN`,
-  `PsDemuxN`, `OggDemuxN`, `Mp4DemuxN` and `AviDemuxN` can report the unit they
-  hold through `MultiOutputElement::latency()` (the fold runs once, before any
-  media flows). `MultiOutputSource` has no `latency()` at all.
+- Report the unit `OggDemuxN` (a page) and `Mp4DemuxN` (a fragment) hold
+  through `MultiOutputElement::latency()` once the first one parses.
 - **KMS vblank reconciliation** + Wayland frame-callback co-scheduling. Needs a
   DRM/KMS presentation sink (current `WaylandSink` is SHM software). Validate on
   a real display.

@@ -208,12 +208,27 @@ The DAG runner folds every node that carries an element: sources, transforms, si
 fan-ins and demuxes. A fan-in contributes `MultiInputElement::latency()` the way a
 transform contributes its own, so a `fallbackswitch` declares its stall slack there.
 A demux contributes `MultiOutputElement::latency()`, added once at the demux node,
-so every output branch carries it. A tee is structural and contributes nothing. A
-fan-out source contributes nothing either: `MultiOutputSource` has no `latency()`.
-The default demux `latency()` is zero, and no in-tree demux overrides it. The ones
-that hold media back (`tsdemux` keeps one PES per stream until the next one starts,
-`oggdemux` a page, `mp4demux` a fragment) hold one unit whose duration comes from
-the stream, and the fold runs once before any media has been parsed.
+so every output branch carries it, and a fan-out source contributes
+`MultiOutputSource::latency()`. A tee is structural and contributes nothing.
+
+A demux only learns what it holds once media flows, so the fold is kept for the
+run instead of computed once. Each demux arm reads its element's `latency()` after
+every `process` and compares it with the last report it published, so an
+unchanged value costs a comparison and no lock. On a change the arm stores the
+report in the run's per-node table, folds the startup topology again under that
+table's lock, and stores the new minimum into the `ClockSync` every sink holds.
+`ClockSync` keeps the minimum in an `Arc<AtomicU64>` shared by all its clones, the
+way `ElectedClock` reaches sinks already inside their arms, so the next deadline a
+sink computes includes it. `RunStats::latency` reports the last fold, and liveness
+stays what the startup fold decided.
+
+`tsdemux` keeps each PES until the next one on its PID starts, so its fan-out
+latches the decode-time step between the first two timestamped units on each audio
+or video port and reports the largest. A step longer than the 0.7 s MPEG-TS allows
+between timestamps is a discontinuity and is ignored, and subtitle and KLV ports
+are left out because a sparse stream's gap says nothing about the media.
+`mpegpsdemux` reframes video on picture start codes, so it holds one picture and
+reports the frame period of the last sequence header.
 
 The fold follows paths, not the node list. Each node's upstream aggregate is its
 inputs' merged, plus its own contribution (`LatencyReport::combine`, the sum a
