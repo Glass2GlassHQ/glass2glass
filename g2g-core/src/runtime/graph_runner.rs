@@ -308,6 +308,12 @@ pub trait DynMultiOutputElement: ElementBound {
     fn drive_demux_arm<'s>(self: Box<Self>, io: DemuxArmIo) -> BoxFuture<'s, Result<u64, G2gError>>
     where
         Self: 's;
+
+    /// Dyn-safe mirror of [`MultiOutputElement::latency`], so the DAG runner
+    /// folds a demux's latency contribution like it folds a transform's.
+    fn latency(&self) -> LatencyReport {
+        LatencyReport::ZERO
+    }
 }
 
 impl<T: MultiOutputElement> DynMultiOutputElement for T {
@@ -360,6 +366,10 @@ impl<T: MultiOutputElement> DynMultiOutputElement for T {
         Self: 's,
     {
         Box::pin(demux_arm(*self, io))
+    }
+
+    fn latency(&self) -> LatencyReport {
+        MultiOutputElement::latency(self)
     }
 }
 
@@ -431,6 +441,10 @@ impl MultiOutputElement for DemuxRef<'_> {
     fn set_log_category(&mut self, category: alloc::string::String) {
         self.0.set_log_category(category)
     }
+
+    fn latency(&self) -> LatencyReport {
+        self.0.latency()
+    }
 }
 
 /// Forwarding impl so a borrowed `&mut dyn DynMultiOutputElement` can be boxed
@@ -486,6 +500,10 @@ impl<'b> DynMultiOutputElement for &'b mut (dyn DynMultiOutputElement + 'b) {
         Self: 's,
     {
         Box::pin(demux_arm(DemuxRef(*self), io))
+    }
+
+    fn latency(&self) -> LatencyReport {
+        (**self).latency()
     }
 }
 
@@ -3713,12 +3731,13 @@ fn element_configure_alloc(
     }
 }
 
-/// A node's latency contribution. `None` for structural (tee) nodes.
+/// A node's latency contribution. `None` for tee and fan-out source nodes.
 fn element_latency(vg: &ValidatedGraph<GraphNodeRef<'_>>, node: NodeId) -> Option<LatencyReport> {
     match vg.element(node) {
         Some(GraphNodeRef::Source(src)) => Some(src.latency()),
         Some(GraphNodeRef::Element(elem)) => Some(elem.latency()),
         Some(GraphNodeRef::Muxer(mux)) => Some(mux.latency()),
+        Some(GraphNodeRef::Demux(demux)) => Some(demux.latency()),
         _ => None,
     }
 }

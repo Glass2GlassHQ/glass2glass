@@ -204,11 +204,16 @@ first-frame anchor as the run's standing latency. First-frame anchoring remains 
 non-live behaviour, where frames arrive at read speed and an absolute anchor would
 defeat pacing entirely.
 
-The DAG runner folds every node that carries an element: sources, transforms, sinks
-and fan-ins, which contribute `MultiInputElement::latency()` the way a transform
-contributes its own, so a `fallbackswitch` declares its stall slack there. A tee is
-structural and contributes nothing, and a demux contributes nothing either since
-`MultiOutputElement` has no `latency()` to declare one with.
+The DAG runner folds every node that carries an element: sources, transforms, sinks,
+fan-ins and demuxes. A fan-in contributes `MultiInputElement::latency()` the way a
+transform contributes its own, so a `fallbackswitch` declares its stall slack there.
+A demux contributes `MultiOutputElement::latency()`, added once at the demux node,
+so every output branch carries it. A tee is structural and contributes nothing. A
+fan-out source contributes nothing either: `MultiOutputSource` has no `latency()`.
+The default demux `latency()` is zero, and no in-tree demux overrides it. The ones
+that hold media back (`tsdemux` keeps one PES per stream until the next one starts,
+`oggdemux` a page, `mp4demux` a fragment) hold one unit whose duration comes from
+the stream, and the fold runs once before any media has been parsed.
 
 The fold follows paths, not the node list. Each node's upstream aggregate is its
 inputs' merged, plus its own contribution (`LatencyReport::combine`, the sum a

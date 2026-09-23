@@ -593,6 +593,13 @@ pub trait MultiOutputElement: ElementBound {
     fn get_property(&self, _name: &str) -> Option<PropValue> {
         None
     }
+
+    /// This fan-out's contribution to the pipeline latency query, mirroring
+    /// [`MultiInputElement::latency`]. Default: zero, non-live. A demux that
+    /// holds media back before routing it overrides it.
+    fn latency(&self) -> crate::query::LatencyReport {
+        crate::query::LatencyReport::ZERO
+    }
 }
 
 /// Multi-input element trait variant: an N-input, 1-output element (a

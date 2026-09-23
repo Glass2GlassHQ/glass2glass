@@ -189,9 +189,10 @@ Highest leverage first:
 
 ## Clock-synchronised presentation
 
-- Let a demux declare a latency contribution: `MultiOutputElement` has no
-  `latency()`, so a fan-out that holds frames back reports nothing to the
-  pipeline latency query.
+- Fold latency again once a demux has parsed its first unit, so `TsDemuxN`,
+  `PsDemuxN`, `OggDemuxN`, `Mp4DemuxN` and `AviDemuxN` can report the unit they
+  hold through `MultiOutputElement::latency()` (the fold runs once, before any
+  media flows). `MultiOutputSource` has no `latency()` at all.
 - **KMS vblank reconciliation** + Wayland frame-callback co-scheduling. Needs a
   DRM/KMS presentation sink (current `WaylandSink` is SHM software). Validate on
   a real display.
