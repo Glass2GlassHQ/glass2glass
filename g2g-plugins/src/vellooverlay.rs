@@ -57,7 +57,9 @@ use vello::Glyph;
 #[cfg(feature = "vello-text-overlay")]
 use crate::subparse::{Cue, TextShadow};
 #[cfg(feature = "vello-text-overlay")]
-use crate::textoverlay::{stroke_offsets, PlacedGlyph, TextOverlay};
+use crate::textoverlay::{
+    stroke_offsets, BlurredShadowMask, ChainGlyph, GlyphPaint, PlacedCue, PlacedGlyph, TextOverlay,
+};
 #[cfg(feature = "vello-text-overlay")]
 use crate::textshape::FontId;
 
@@ -529,6 +531,10 @@ impl AsyncElement for VelloAnalyticsOverlay {
     }
 }
 
+/// The `font=` property, which replaces the face chain.
+#[cfg(feature = "vello-text-overlay")]
+const FONT_PROPERTY: &str = "font";
+
 /// Renders the subtitle cues active at the frame's PTS with Vello, emitting a
 /// GPU-resident [`MemoryDomain::WgpuTexture`]: the GPU companion to the CPU
 /// [`TextOverlay`](crate::textoverlay), for a pipeline that keeps frames on the
@@ -536,19 +542,21 @@ impl AsyncElement for VelloAnalyticsOverlay {
 /// system memory.
 ///
 /// Cues, fonts, colours, cue selection and placement are the CPU overlay's
-/// (`location=` / `font=` / `color=` / `font-size=` / `font-variations=` behave
-/// the same, and cosmic-text shapes and picks fallback faces the same way, so a
-/// Latin cue with CJK in it uses the same faces here). Only the drawing differs:
+/// (`location=` / `font=` / `color=` / `font-size=` behave the same, and
+/// cosmic-text shapes and picks fallback faces the same way, so a Latin cue with
+/// CJK in it uses the same faces here). `font-variations=` is not applied here:
+/// a variable font draws at its default instance. Only the drawing differs:
 /// the glyph outlines of the face the shaper chose go to Vello as glyph runs,
 /// and the backing box is a filled rect, both composited over the frame image on
 /// the GPU.
 ///
-/// Two limits against the CPU element. `vertical:rl` / `lr` cues draw nothing
-/// here: vertical writing is a shaping limit (cosmic-text is horizontal-only)
-/// and the CPU element covers it with its own column renderer, which has no
-/// glyph runs to hand over. And there is no bitmap-font fallback, so a host
-/// where neither `font=` nor font discovery yields a usable face renders no
-/// text rather than the 8x8 ASCII baseline.
+/// `vertical:rl` / `lr` cues take the CPU element's column layout
+/// (cosmic-text is horizontal-only), and their glyphs go to Vello as outlines
+/// of the `ab_glyph` chain face each was placed from.
+///
+/// There is no bitmap-font fallback, so a host where neither `font=` nor font
+/// discovery yields a usable face renders no text rather than the 8x8 ASCII
+/// baseline.
 ///
 /// # Example
 ///
@@ -569,9 +577,9 @@ pub struct VelloTextOverlay {
     /// than a second copy of that state is what keeps the two backends drawing
     /// the same cue in the same place.
     text: TextOverlay,
-    /// Faces already handed to Vello, keyed by the shaper's face id. A face's
-    /// bytes are copied once here, never per frame.
-    fonts: Vec<(FontId, FontData)>,
+    /// Faces already handed to Vello. A face's bytes are copied once here,
+    /// never per frame.
+    fonts: Vec<(FaceKey, FontData)>,
     ctx: Option<GpuContext>,
     gpu: Option<Gpu>,
     drawn: u64,
@@ -682,95 +690,98 @@ impl VelloTextOverlay {
         gpu.render_scene(&scene, w, h)
     }
 
-    /// Draw each active cue's backing box, span fills, shadows, underlines and
-    /// glyphs, batching the glyphs into runs of one face, colour and size (a
+    /// Draw each active cue: the shaped horizontal cues, then the vertical cues
+    /// the CPU element lays out from its `ab_glyph` chain.
+    fn draw_cues(&mut self, scene: &mut Scene, t_ns: u64) {
+        for cue in self.text.place_shaped_cues(t_ns) {
+            self.draw_cue(scene, &cue);
+        }
+        for cue in self.text.place_vertical_cues(t_ns) {
+            self.draw_cue(scene, &cue);
+        }
+    }
+
+    /// Draw one cue's backing box, span fills, shadows, underlines and glyphs,
+    /// batching the glyphs into runs of one face, colour and size (a
     /// `::cue(.class)` span or a fallback face starts a new run). Every shadow
     /// is drawn before any glyph, so a neighbour's shadow never lands on top of
     /// a glyph. A span's weight, slant and width reach the shaper's face
     /// selection, so they arrive here in the glyph ids and the face the run
     /// names, with nothing extra to do.
-    fn draw_cues(&mut self, scene: &mut Scene, t_ns: u64) {
-        let placed = self.text.place_shaped_cues(t_ns);
-        for cue in placed {
-            let (x, y, box_w, box_h) = cue.background;
-            if box_w > 0 && box_h > 0 {
-                fill_rect(scene, (x, y, box_w, box_h), cue.background_color);
-            }
-            for (rect, color) in &cue.span_backgrounds {
-                fill_rect(scene, *rect, *color);
-            }
-            // Shadows first, then the outlines, then the underline bars and
-            // the glyph fills over them.
-            for layer in [GlyphLayer::Shadow, GlyphLayer::Stroke, GlyphLayer::Fill] {
-                if layer == GlyphLayer::Fill {
-                    for (rect, color) in &cue.underlines {
-                        fill_rect(scene, *rect, *color);
-                    }
+    fn draw_cue<Placed: OutlineGlyph>(&mut self, scene: &mut Scene, cue: &PlacedCue<Placed>) {
+        let (x, y, box_w, box_h) = cue.background;
+        if box_w > 0 && box_h > 0 {
+            fill_rect(scene, (x, y, box_w, box_h), cue.background_color);
+        }
+        for (rect, color) in &cue.span_backgrounds {
+            fill_rect(scene, *rect, *color);
+        }
+        // Shadows first, then the outlines, then the underline bars and the
+        // glyph fills over them.
+        for layer in [GlyphLayer::Shadow, GlyphLayer::Stroke, GlyphLayer::Fill] {
+            if layer == GlyphLayer::Fill {
+                for (rect, color) in &cue.underlines {
+                    fill_rect(scene, *rect, *color);
                 }
-                let mut start = 0;
-                while start < cue.glyphs.len() {
-                    let head = &cue.glyphs[start];
-                    let (font_id, size) = (head.key.font_id, head.font_size);
-                    let (shadow, stroke, color) = (head.shadow, head.stroke, head.color);
-                    let end = cue.glyphs[start..]
-                        .iter()
-                        .position(|g| {
-                            g.key.font_id != font_id
-                                || g.color != color
-                                || g.font_size != size
-                                || g.shadow != shadow
-                                || g.stroke != stroke
-                        })
-                        .map_or(cue.glyphs.len(), |n| start + n);
-                    let batch = &cue.glyphs[start..end];
-                    start = end;
-                    // Each copy of the run this layer puts down: where it goes
-                    // and what it is drawn in.
-                    let copies: Vec<((f32, f32), [u8; 4])> = match layer {
-                        GlyphLayer::Shadow => match shadow {
-                            // Vello has no filter that blurs a glyph run, so a
-                            // blurred shadow goes down as one tinted mask image
-                            // per glyph, blurred by the same code as the CPU
-                            // paths.
-                            Some(shadow) if shadow.blur > 0 => {
-                                for glyph in batch {
-                                    draw_blurred_shadow(scene, &mut self.text, glyph, shadow);
-                                }
-                                continue;
+            }
+            let mut start = 0;
+            while start < cue.glyphs.len() {
+                let head = &cue.glyphs[start];
+                let (face, size, paint) = (head.face(), head.em_size(), head.paint());
+                let end = cue.glyphs[start..]
+                    .iter()
+                    .position(|g| g.face() != face || g.em_size() != size || g.paint() != paint)
+                    .map_or(cue.glyphs.len(), |n| start + n);
+                let batch = &cue.glyphs[start..end];
+                start = end;
+                // Each copy of the run this layer puts down: where it goes and
+                // what it is drawn in.
+                let copies: Vec<((f32, f32), [u8; 4])> = match layer {
+                    GlyphLayer::Shadow => match paint.shadow {
+                        // Vello has no filter that blurs a glyph run, so a
+                        // blurred shadow goes down as one tinted mask image per
+                        // glyph, blurred by the same code as the CPU paths.
+                        Some(shadow) if shadow.blur > 0 => {
+                            for glyph in batch {
+                                draw_blurred_shadow(scene, &mut self.text, glyph, shadow);
                             }
-                            Some(shadow) => alloc::vec![(
-                                (shadow.offset_x as f32, shadow.offset_y as f32),
-                                shadow.color
-                            )],
-                            None => continue,
-                        },
-                        // The outline is the run drawn once per offset inside
-                        // the stroke radius, the same dilation the CPU paths do
-                        // on the coverage mask.
-                        GlyphLayer::Stroke => match stroke {
-                            Some(stroke) => stroke_offsets(stroke.width_px)
-                                .into_iter()
-                                .map(|(dx, dy)| ((dx as f32, dy as f32), stroke.color))
-                                .collect(),
-                            None => continue,
-                        },
-                        GlyphLayer::Fill => alloc::vec![((0.0, 0.0), color)],
-                    };
-                    let Some(font) = font_handle(&mut self.fonts, &mut self.text, font_id) else {
-                        continue;
-                    };
-                    for (offset, brush) in copies {
-                        let run = batch.iter().map(|g| Glyph {
-                            id: g.key.glyph_id as u32,
-                            x: g.x as f32 + offset.0,
-                            y: g.y as f32 + offset.1,
-                        });
-                        scene
-                            .draw_glyphs(font)
-                            .font_size(size)
-                            .brush(brush_color(brush))
-                            .draw(Fill::NonZero, run);
-                    }
+                            continue;
+                        }
+                        Some(shadow) => alloc::vec![(
+                            (shadow.offset_x as f32, shadow.offset_y as f32),
+                            shadow.color
+                        )],
+                        None => continue,
+                    },
+                    // The outline is the run drawn once per offset inside the
+                    // stroke radius, the same dilation the CPU paths do on the
+                    // coverage mask.
+                    GlyphLayer::Stroke => match paint.stroke {
+                        Some(stroke) => stroke_offsets(stroke.width_px)
+                            .into_iter()
+                            .map(|(dx, dy)| ((dx as f32, dy as f32), stroke.color))
+                            .collect(),
+                        None => continue,
+                    },
+                    GlyphLayer::Fill => alloc::vec![((0.0, 0.0), paint.color)],
+                };
+                let Some(font) = font_handle(&mut self.fonts, &mut self.text, face) else {
+                    continue;
+                };
+                for (offset, brush) in copies {
+                    let run = batch.iter().map(|g| {
+                        let glyph = g.glyph();
+                        Glyph {
+                            x: glyph.x + offset.0,
+                            y: glyph.y + offset.1,
+                            ..glyph
+                        }
+                    });
+                    scene
+                        .draw_glyphs(font)
+                        .font_size(size)
+                        .brush(brush_color(brush))
+                        .draw(Fill::NonZero, run);
                 }
             }
         }
@@ -787,16 +798,95 @@ enum GlyphLayer {
     Fill,
 }
 
+/// The face a glyph's outline is read from: one the shaper picked for a
+/// horizontal cue, or one in the `ab_glyph` chain a vertical cue draws from.
+#[cfg(feature = "vello-text-overlay")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FaceKey {
+    Shaped(FontId),
+    Chain(usize),
+}
+
+/// A placed glyph Vello draws from its outline, from either layout.
+#[cfg(feature = "vello-text-overlay")]
+trait OutlineGlyph {
+    fn face(&self) -> FaceKey;
+    /// Glyph index and pen origin on the baseline, in frame pixels.
+    fn glyph(&self) -> Glyph;
+    fn em_size(&self) -> f32;
+    fn paint(&self) -> GlyphPaint;
+    /// The blurred shadow mask, with its corner as an offset from the pen origin.
+    fn blurred_shadow_mask(&self, text: &mut TextOverlay, blur: u32) -> Option<BlurredShadowMask>;
+}
+
+#[cfg(feature = "vello-text-overlay")]
+impl OutlineGlyph for PlacedGlyph {
+    fn face(&self) -> FaceKey {
+        FaceKey::Shaped(self.key.font_id)
+    }
+
+    fn glyph(&self) -> Glyph {
+        Glyph {
+            id: self.key.glyph_id as u32,
+            x: self.x as f32,
+            y: self.y as f32,
+        }
+    }
+
+    fn em_size(&self) -> f32 {
+        self.font_size
+    }
+
+    fn paint(&self) -> GlyphPaint {
+        GlyphPaint {
+            color: self.color,
+            shadow: self.shadow,
+            stroke: self.stroke,
+        }
+    }
+
+    fn blurred_shadow_mask(&self, text: &mut TextOverlay, blur: u32) -> Option<BlurredShadowMask> {
+        text.blurred_shadow_mask(self.key, blur)
+    }
+}
+
+#[cfg(feature = "vello-text-overlay")]
+impl OutlineGlyph for ChainGlyph {
+    fn face(&self) -> FaceKey {
+        FaceKey::Chain(self.face)
+    }
+
+    fn glyph(&self) -> Glyph {
+        Glyph {
+            id: self.glyph_id as u32,
+            x: self.x as f32,
+            y: self.y as f32,
+        }
+    }
+
+    fn em_size(&self) -> f32 {
+        self.em_size
+    }
+
+    fn paint(&self) -> GlyphPaint {
+        self.paint
+    }
+
+    fn blurred_shadow_mask(&self, text: &mut TextOverlay, blur: u32) -> Option<BlurredShadowMask> {
+        text.blurred_chain_shadow_mask(self, blur)
+    }
+}
+
 /// Draw one glyph's blurred drop shadow as an image: the blurred coverage mask
 /// tinted with the shadow colour, placed at the glyph's shadow offset.
 #[cfg(feature = "vello-text-overlay")]
 fn draw_blurred_shadow(
     scene: &mut Scene,
     text: &mut TextOverlay,
-    glyph: &PlacedGlyph,
+    glyph: &impl OutlineGlyph,
     shadow: TextShadow,
 ) {
-    let Some(mask) = text.blurred_shadow_mask(glyph.key, shadow.blur) else {
+    let Some(mask) = glyph.blurred_shadow_mask(text, shadow.blur) else {
         return;
     };
     let [r, g, b, a] = shadow.color;
@@ -813,8 +903,9 @@ fn draw_blurred_shadow(
         width: mask.width as u32,
         height: mask.height as u32,
     };
-    let x = glyph.x + shadow.offset_x + mask.left;
-    let y = glyph.y + shadow.offset_y + mask.top;
+    let origin = glyph.glyph();
+    let x = origin.x + (shadow.offset_x + mask.left) as f32;
+    let y = origin.y + (shadow.offset_y + mask.top) as f32;
     scene.draw_image(&image, Affine::translate((x as f64, y as f64)));
 }
 
@@ -830,20 +921,23 @@ fn fill_rect(scene: &mut Scene, (x, y, w, h): (i32, i32, i32, i32), color: [u8; 
     );
 }
 
-/// The Vello handle for the shaper face `id`, copying the face bytes into the
-/// cache on first use. A free function so the cache and the shaper are borrowed
+/// The Vello handle for face `key`, copying the face bytes into the cache on
+/// first use. A free function so the cache and the text element are borrowed
 /// separately from the element.
 #[cfg(feature = "vello-text-overlay")]
 fn font_handle<'a>(
-    cache: &'a mut Vec<(FontId, FontData)>,
+    cache: &'a mut Vec<(FaceKey, FontData)>,
     text: &mut TextOverlay,
-    id: FontId,
+    key: FaceKey,
 ) -> Option<&'a FontData> {
-    if let Some(pos) = cache.iter().position(|(cached, _)| *cached == id) {
+    if let Some(pos) = cache.iter().position(|(cached, _)| *cached == key) {
         return Some(&cache[pos].1);
     }
-    let (bytes, index) = text.face_data(id)?;
-    cache.push((id, FontData::new(Blob::from(bytes), index)));
+    let (bytes, index) = match key {
+        FaceKey::Shaped(id) => text.face_data(id)?,
+        FaceKey::Chain(face) => text.chain_face_data(face)?,
+    };
+    cache.push((key, FontData::new(Blob::from(bytes), index)));
     cache.last().map(|(_, font)| font)
 }
 
@@ -955,7 +1049,12 @@ impl AsyncElement for VelloTextOverlay {
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
-        self.text.set_property(name, value)
+        self.text.set_property(name, value)?;
+        // A new `font=` reuses chain indices and shaper face ids for other faces.
+        if name == FONT_PROPERTY {
+            self.fonts.clear();
+        }
+        Ok(())
     }
 
     fn get_property(&self, name: &str) -> Option<PropValue> {

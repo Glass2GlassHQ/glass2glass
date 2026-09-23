@@ -1,6 +1,7 @@
 //! Helpers shared by the cue-rendering tests (`m1055_cue_text_style`,
-//! `m1057_cue_css`): the one-cue WebVTT document builder, the black frame and
-//! sink the overlay renders into, the system fonts to render with, and the pixel
+//! `m1057_cue_css`, `m1196_vello_vertical_cues`): the one-cue WebVTT document
+//! builder, the black frame and sink the CPU and GPU overlays render into, the
+//! system fonts to render with, and the pixel
 //! predicates and scanners the assertions read the result through. One
 //! definition, included per test binary via `mod cue_render_common;`.
 #![allow(dead_code)] // no one test file uses every helper here
@@ -222,4 +223,68 @@ pub(crate) fn longest_run(
         }
     }
     best
+}
+
+/// Taken for the whole body of every GPU test: parallel device creation
+/// intermittently segfaults in the NVIDIA driver.
+#[cfg(feature = "vello-text-overlay")]
+pub(crate) static GPU_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// A headless GPU context, or `None` to skip on a host with no wgpu adapter.
+#[cfg(feature = "vello-text-overlay")]
+pub(crate) async fn gpu_context() -> Option<g2g_plugins::gpu::GpuContext> {
+    match g2g_plugins::gpu::GpuContext::headless().await {
+        Ok(ctx) => Some(ctx),
+        Err(_) => {
+            std::eprintln!("no wgpu adapter, skipping the GPU test");
+            None
+        }
+    }
+}
+
+/// The Vello overlay's rendering of the document's cue over a black frame, read
+/// back from the texture it emits.
+#[cfg(feature = "vello-text-overlay")]
+pub(crate) async fn gpu_render(
+    ctx: &g2g_plugins::gpu::GpuContext,
+    font: &[u8],
+    vtt: &str,
+) -> Vec<u8> {
+    gpu_frame(ctx, &mut gpu_overlay(ctx, font, vtt)).await
+}
+
+/// A configured Vello overlay showing the document's cue in `font`.
+#[cfg(feature = "vello-text-overlay")]
+pub(crate) fn gpu_overlay(
+    ctx: &g2g_plugins::gpu::GpuContext,
+    font: &[u8],
+    vtt: &str,
+) -> g2g_plugins::vellooverlay::VelloTextOverlay {
+    let mut overlay = g2g_plugins::vellooverlay::VelloTextOverlay::new()
+        .with_context(ctx.clone())
+        .with_font_bytes(font, 0)
+        .expect("font parses")
+        .with_cues(parse_webvtt(vtt))
+        .with_font_size(FONT_PX);
+    overlay.configure_pipeline(&caps()).expect("caps accepted");
+    overlay
+}
+
+/// One black frame through `overlay`, read back from the texture it emits.
+#[cfg(feature = "vello-text-overlay")]
+pub(crate) async fn gpu_frame(
+    ctx: &g2g_plugins::gpu::GpuContext,
+    overlay: &mut g2g_plugins::vellooverlay::VelloTextOverlay,
+) -> Vec<u8> {
+    use g2g_plugins::gpu::{read_rgba_texture, texture_of};
+    let mut sink = FrameSink::default();
+    overlay
+        .process(PipelinePacket::DataFrame(black_frame()), &mut sink)
+        .await
+        .expect("frame rendered");
+    let frame = sink.last.expect("frame forwarded");
+    let MemoryDomain::WgpuTexture(owned) = &frame.domain else {
+        panic!("output is a GPU texture domain");
+    };
+    read_rgba_texture(ctx, texture_of(owned).expect("texture keep-alive"))
 }

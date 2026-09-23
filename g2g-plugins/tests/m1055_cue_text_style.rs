@@ -165,47 +165,7 @@ async fn italic_span_selects_an_italic_face_when_one_is_installed() {
 #[cfg(feature = "vello-text-overlay")]
 mod gpu {
     use super::*;
-    use cue_render_common::{black_frame, caps, FrameSink};
-    use g2g_core::{AsyncElement, MemoryDomain, PipelinePacket};
-    use g2g_plugins::gpu::{read_rgba_texture, texture_of, GpuContext};
-    use g2g_plugins::subparse::parse_webvtt;
-    use g2g_plugins::vellooverlay::VelloTextOverlay;
-
-    // Parallel per-test device creation intermittently segfaults in the NVIDIA
-    // driver (the recorded wgpu gotcha), so the GPU tests take one lock for
-    // their whole body.
-    static GPU_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-    async fn gpu_context() -> Option<GpuContext> {
-        match GpuContext::headless().await {
-            Ok(ctx) => Some(ctx),
-            Err(_) => {
-                std::eprintln!("no wgpu adapter; skipping the GPU underline test");
-                None
-            }
-        }
-    }
-
-    /// The GPU overlay's rendering of the document, read back from the texture.
-    async fn gpu_render(ctx: &GpuContext, font: &[u8], vtt: &str) -> Vec<u8> {
-        let mut overlay = VelloTextOverlay::new()
-            .with_context(ctx.clone())
-            .with_font_bytes(font, 0)
-            .expect("font parses")
-            .with_cues(parse_webvtt(vtt))
-            .with_font_size(cue_render_common::FONT_PX);
-        overlay.configure_pipeline(&caps()).expect("caps accepted");
-        let mut sink = FrameSink::default();
-        overlay
-            .process(PipelinePacket::DataFrame(black_frame()), &mut sink)
-            .await
-            .expect("frame rendered");
-        let frame = sink.last.expect("frame forwarded");
-        let MemoryDomain::WgpuTexture(owned) = &frame.domain else {
-            panic!("output is a GPU texture domain");
-        };
-        read_rgba_texture(ctx, texture_of(owned).expect("texture keep-alive"))
-    }
+    use cue_render_common::{gpu_context, gpu_render, GPU_LOCK};
 
     /// The GPU backend draws the underline bar too, in the pixels the CPU
     /// overlay puts it in.

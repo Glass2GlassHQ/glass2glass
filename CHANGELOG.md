@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1196: `VelloTextOverlay` draws `vertical:rl` / `vertical:lr` cues with the CPU `textoverlay`'s column layout.
 - M1194: `MultiOutputElement::latency()` lets a demux add what it holds back to the pipeline latency query.
 - M1195: `onvifmetadataparse` reads the `tt:Event` notifications of a metadata document and `onvifmetadatacombiner` puts them on the video frame.
 - M1193: `serve_ws_stage` hosts a branching subgraph as a `Bin` and fails the run when a reply does not pair with its frame.

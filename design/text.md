@@ -56,17 +56,20 @@ renderer is the portable path.
 ### TrueType and shaping
 
 The `truetype-overlay` feature replaces the bitmap font with a real one.
-`fontdue` parses a `.ttf` or `.ttc` and rasterizes each glyph to a coverage
-bitmap, alpha-blended onto the frame in the text colour, so CJK, accented Latin
-and mixed-case render, laid out horizontal or vertical from
-`CueSettings::vertical` with the same `position`, `line` and `align` placement.
+`ab_glyph` parses a `.ttf`, `.otf` or `.ttc` and rasterizes each glyph, glyf or
+CFF outlines, to a coverage bitmap, alpha-blended onto the frame in the text
+colour, so CJK, accented Latin and mixed-case render, laid out horizontal or
+vertical from `CueSettings::vertical` with the same `position`, `line` and
+`align` placement. A `vertical:rl` or `lr` cue is a set of top-to-bottom
+columns, one per line, the first line rightmost for `rl` and leftmost for `lr`,
+with the block against that edge unless `position` places it.
 
-`fontdue` does no font fallback, so `TextOverlay` holds a fallback chain that
-`add_font` appends to: each glyph is drawn from the first face whose
-`lookup_glyph_index` is non-zero, so a Latin primary plus a CJK fallback covers
-mixed text. `fontdue` rasterizes glyf TrueType outlines only, and CFF and CFF2
-faces use the `text-shaping` feature's cosmic-text backend for horizontal cues.
-The `no_std` baseline keeps the bitmap font.
+`ab_glyph` does no font fallback, so `TextOverlay` holds a fallback chain that
+`add_font` appends to: each glyph is drawn from the first face with a non-zero
+glyph id for it, so a Latin primary plus a CJK fallback covers mixed text. With
+`text-shaping` on, horizontal cues go through cosmic-text instead and vertical
+cues stay on this chain, which grows a discovered system face for any codepoint
+it lacks. The `no_std` baseline keeps the bitmap font.
 
 ### WebVTT styles
 
@@ -140,12 +143,23 @@ as the rest of the subtitle file and the size becomes a glyph raster.
 same cues, for a pipeline that keeps frames on the GPU: RGBA8 in,
 `MemoryDomain::WgpuTexture` out, like `VelloAnalyticsOverlay` beside it. It holds
 a `TextOverlay` rather than its own state, so cue selection, `CueSettings`
-placement, colours, font chain and shaping are one implementation. The shared step
-lays each active cue out into canvas-absolute glyph positions, which the CPU
-element blits as swash rasters and this one hands to Vello as glyph runs, drawn
-from the very face cosmic-text's per-codepoint fallback resolved, so a mixed Latin
-and CJK cue uses the same faces on both backends. Vertical cues use the CPU
-element's column renderer.
+placement, colours, font chain and shaping are one implementation.
+
+Both backends draw from the same layout step. `place_shaped_cues` lays the
+horizontal cues out through cosmic-text and `place_chain_cues` lays the vertical
+cues out in columns from the `ab_glyph` chain, each returning a `PlacedCue` of
+backing box, span fills, underline bars and glyph pen origins in frame pixels.
+The CPU element blits those glyphs as swash or `ab_glyph` rasters. This one
+hands them to Vello as glyph runs, drawn from the face each glyph was placed
+from: the face cosmic-text's per-codepoint fallback resolved, or the chain face
+for a vertical cue. So a mixed Latin and CJK cue uses the same faces on both
+backends.
+
+`ab_glyph` sizes a face by its ascent-to-descent height, not its em square, so a
+vertical glyph reaches Vello at the em size that draws it as tall. Its pen origin
+is a whole pixel on both backends, so the two put the same column in the same
+pixels. Vello draws the default instance of a variable face, so
+`font-variations=` reaches only the CPU rasters.
 
 ### Streamed cues
 

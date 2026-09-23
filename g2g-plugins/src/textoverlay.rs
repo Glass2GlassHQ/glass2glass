@@ -69,7 +69,12 @@ use crate::subparse::{RubyRun, TextShadow, TextStroke, WritingMode};
 /// so switching rasterizer left that math unchanged. Also keeps `TextOverlay`
 /// deriving `Debug` (`ab_glyph::FontVec` does not implement it).
 #[cfg(feature = "truetype-overlay")]
-struct FontFace(ab_glyph::FontVec);
+struct FontFace {
+    font: ab_glyph::FontVec,
+    /// Which face of a `.ttc` this is, which `ab_glyph` does not hand back.
+    #[cfg(feature = "vello-text-overlay")]
+    collection_index: u32,
+}
 
 /// One glyph's placement metrics, in the y-up convention fontdue used: `xmin` is
 /// the pen-to-left-edge offset, `ymin` the baseline-to-bottom-edge offset
@@ -111,9 +116,29 @@ struct TtfGlyph {
     y: i32,
     size: (usize, usize),
     coverage: Vec<u8>,
-    color: [u8; 4],
-    shadow: Option<TextShadow>,
-    stroke: Option<TextStroke>,
+    paint: GlyphPaint,
+}
+
+/// One glyph placed from the `ab_glyph` fallback chain: `(x, y)` is the pen
+/// origin on the baseline in whole frame pixels, before the rasterizer's own
+/// bitmap offsets. Produced by [`TextOverlay::place_chain_cues`] so the CPU
+/// blitter and the Vello GPU backend draw vertical cues in the same pixels.
+#[cfg(feature = "truetype-overlay")]
+#[derive(Debug)]
+pub(crate) struct ChainGlyph {
+    /// Index of the face in the fallback chain.
+    pub face: usize,
+    /// Glyph index in that face.
+    pub glyph_id: u16,
+    pub x: i32,
+    pub y: i32,
+    /// The `ab_glyph` scale: ascent to descent in pixels, not the em size.
+    pub font_size: f32,
+    /// The em size in pixels that draws the glyph as tall as `font_size` does,
+    /// the size an outline renderer takes.
+    #[cfg(feature = "vello-text-overlay")]
+    pub em_size: f32,
+    pub paint: GlyphPaint,
 }
 
 /// The font attributes the cue's `::cue` rules and its `<b>` / `<i>` / `<u>`
@@ -198,11 +223,11 @@ const VERTICAL_COLUMN_FRACTION: f32 = 1.3;
 /// The paint one run of glyphs takes: the fill colour plus the shadow and the
 /// outline drawn under it.
 #[cfg(feature = "truetype-overlay")]
-#[derive(Debug, Clone, Copy)]
-struct GlyphPaint {
-    color: [u8; 4],
-    shadow: Option<TextShadow>,
-    stroke: Option<TextStroke>,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct GlyphPaint {
+    pub color: [u8; 4],
+    pub shadow: Option<TextShadow>,
+    pub stroke: Option<TextStroke>,
 }
 
 /// Baseline-to-baseline advance of a shaped block, as a fraction of its text
@@ -394,11 +419,12 @@ pub(crate) struct PlacedGlyph {
 
 /// One cue laid out on the canvas: the backing box as `(x, y, width, height)`
 /// in frame pixels, and every glyph in it. Produced by
-/// [`TextOverlay::place_shaped_cues`] so the CPU blitter and the Vello GPU
-/// backend place the same cue in the same pixels.
-#[cfg(feature = "text-shaping")]
+/// [`TextOverlay::place_shaped_cues`] and [`TextOverlay::place_chain_cues`] so
+/// the CPU blitter and the Vello GPU backend place the same cue in the same
+/// pixels.
+#[cfg(feature = "truetype-overlay")]
 #[derive(Debug)]
-pub(crate) struct PlacedCue {
+pub(crate) struct PlacedCue<Glyph> {
     pub background: (i32, i32, i32, i32),
     pub background_color: [u8; 4],
     /// Fills behind the spans that asked for one, one per run of a span on a
@@ -407,28 +433,60 @@ pub(crate) struct PlacedCue {
     /// Underline bars, one per underlined run on a line, in the run's text
     /// colour. Drawn in the glyph layer, so a neighbour's shadow stays under it.
     pub underlines: Vec<SpanFill>,
-    pub glyphs: Vec<PlacedGlyph>,
+    pub glyphs: Vec<Glyph>,
 }
 
 #[cfg(feature = "truetype-overlay")]
 impl FontFace {
+    /// Parse face `collection_index` of `bytes`, moved to every axis position in
+    /// `axes`. `None` if the bytes are not a font.
+    fn new(bytes: Vec<u8>, collection_index: u32, axes: &[FontAxis]) -> Option<Self> {
+        let font = ab_glyph::FontVec::try_from_vec_and_index(bytes, collection_index).ok()?;
+        let mut face = Self {
+            font,
+            #[cfg(feature = "vello-text-overlay")]
+            collection_index,
+        };
+        for axis in axes {
+            face.set_axis(*axis);
+        }
+        Some(face)
+    }
+
     /// Move this face to `value` on the `tag` axis. `false` if the face has no
     /// such axis (not variable, or a different axis set).
     fn set_axis(&mut self, (tag, value): FontAxis) -> bool {
         use ab_glyph::VariableFont;
-        self.0.set_variation(&tag, value)
+        self.font.set_variation(&tag, value)
+    }
+
+    /// The em size in pixels that matches the `ab_glyph` scale `px`, which
+    /// measures ascent to descent instead.
+    #[cfg(feature = "vello-text-overlay")]
+    fn em_size(&self, px: f32) -> f32 {
+        use ab_glyph::{Font, ScaleFont};
+        let units_per_em = self
+            .font
+            .units_per_em()
+            .expect("a parsed face always has units per em");
+        self.font.as_scaled(px).h_scale_factor() * units_per_em
+    }
+
+    /// Glyph index of `c`, `.notdef` (0) when the face lacks it.
+    fn glyph_id(&self, c: char) -> ab_glyph::GlyphId {
+        use ab_glyph::Font;
+        self.font.glyph_id(c)
     }
 
     /// Whether this face has a real (non-`.notdef`) glyph for `c`.
     fn has_glyph(&self, c: char) -> bool {
-        use ab_glyph::Font;
-        self.0.glyph_id(c).0 != 0
+        self.glyph_id(c).0 != 0
     }
 
     /// Scaled ascent + line advance at `px`.
     fn line_metrics(&self, px: f32) -> LineMetrics {
         use ab_glyph::{Font, ScaleFont};
-        let sf = self.0.as_scaled(px);
+        let sf = self.font.as_scaled(px);
         LineMetrics {
             ascent: sf.ascent(),
             new_line_size: sf.height() + sf.line_gap(),
@@ -439,9 +497,9 @@ impl FontFace {
     /// are unused by the callers that ask only for the advance.
     fn metrics(&self, c: char, px: f32) -> Metrics {
         use ab_glyph::{Font, ScaleFont};
-        let id = self.0.glyph_id(c);
+        let id = self.font.glyph_id(c);
         Metrics {
-            advance_width: self.0.as_scaled(px).h_advance(id),
+            advance_width: self.font.as_scaled(px).h_advance(id),
             xmin: 0,
             ymin: 0,
             width: 0,
@@ -449,14 +507,14 @@ impl FontFace {
         }
     }
 
-    /// Rasterize `c` at `px` to a coverage bitmap (one byte per pixel) plus its
-    /// placement metrics. A glyph with no outline (space) yields an empty bitmap.
-    fn rasterize(&self, c: char, px: f32) -> (Metrics, Vec<u8>) {
+    /// Rasterize glyph `id` at `px` to a coverage bitmap (one byte per pixel)
+    /// plus its placement metrics. A glyph with no outline (space) yields an
+    /// empty bitmap.
+    fn rasterize(&self, id: ab_glyph::GlyphId, px: f32) -> (Metrics, Vec<u8>) {
         use ab_glyph::{Font, ScaleFont};
-        let id = self.0.glyph_id(c);
-        let advance_width = self.0.as_scaled(px).h_advance(id);
+        let advance_width = self.font.as_scaled(px).h_advance(id);
         let glyph = id.with_scale_and_position(px, ab_glyph::point(0.0, 0.0));
-        let Some(outlined) = self.0.outline_glyph(glyph) else {
+        let Some(outlined) = self.font.outline_glyph(glyph) else {
             return (
                 Metrics {
                     advance_width,
@@ -609,12 +667,8 @@ impl TextOverlay {
     /// Noto Sans CJK OTF) render, not only glyf `.ttf`s.
     #[cfg(feature = "truetype-overlay")]
     pub fn add_font_bytes(&mut self, bytes: &[u8], collection_index: u32) -> Result<(), G2gError> {
-        let font = ab_glyph::FontVec::try_from_vec_and_index(bytes.to_vec(), collection_index)
-            .map_err(|_| G2gError::CapsMismatch)?;
-        let mut face = FontFace(font);
-        for axis in &self.axes {
-            face.set_axis(*axis);
-        }
+        let face = FontFace::new(bytes.to_vec(), collection_index, &self.axes)
+            .ok_or(G2gError::CapsMismatch)?;
         self.fonts.push(face);
         #[cfg(feature = "text-shaping")]
         {
@@ -681,12 +735,39 @@ impl TextOverlay {
     /// TTF path only runs with at least one font).
     #[cfg(feature = "truetype-overlay")]
     fn glyph_font(&self, c: char) -> &FontFace {
-        for f in &self.fonts {
-            if f.has_glyph(c) {
-                return f;
-            }
-        }
-        &self.fonts[0]
+        &self.fonts[self.glyph_face(c)]
+    }
+
+    /// Chain index of the face [`glyph_font`](Self::glyph_font) picks for `c`.
+    #[cfg(feature = "truetype-overlay")]
+    fn glyph_face(&self, c: char) -> usize {
+        self.fonts.iter().position(|f| f.has_glyph(c)).unwrap_or(0)
+    }
+
+    /// `c` placed from the chain at `px`, with `pen` mapping its advance to its
+    /// pen origin. Returns the glyph and that advance.
+    #[cfg(feature = "truetype-overlay")]
+    fn chain_glyph(
+        &self,
+        c: char,
+        px: f32,
+        paint: GlyphPaint,
+        pen: impl FnOnce(f32) -> (f32, f32),
+    ) -> (ChainGlyph, f32) {
+        let face = self.glyph_face(c);
+        let advance = self.fonts[face].metrics(c, px).advance_width;
+        let (x, y) = pen(advance);
+        let glyph = ChainGlyph {
+            face,
+            glyph_id: self.fonts[face].glyph_id(c).0,
+            x: x as i32,
+            y: y as i32,
+            font_size: px,
+            #[cfg(feature = "vello-text-overlay")]
+            em_size: self.fonts[face].em_size(px),
+            paint,
+        };
+        (glyph, advance)
     }
 
     /// Use a preparsed cue list.
@@ -954,13 +1035,13 @@ impl TextOverlay {
             .sum()
     }
 
-    /// Rasterize `text` at `px` and push it as glyphs advancing right from pen
-    /// `x` on `baseline`. Used for a ruby annotation, which is placed against
-    /// its base run rather than laid out in the line.
+    /// Place `text` at `px` as glyphs advancing right from pen `x` on
+    /// `baseline`. Used for a ruby annotation, which is placed against its base
+    /// run rather than laid out in the line.
     #[cfg(feature = "truetype-overlay")]
     fn push_horizontal_run(
         &self,
-        glyphs: &mut Vec<TtfGlyph>,
+        glyphs: &mut Vec<ChainGlyph>,
         text: &str,
         px: f32,
         x: f32,
@@ -969,27 +1050,19 @@ impl TextOverlay {
     ) {
         let mut pen = x;
         for c in text.chars() {
-            let (m, coverage) = self.glyph_font(c).rasterize(c, px);
-            glyphs.push(TtfGlyph {
-                x: (pen + m.xmin as f32) as i32,
-                y: (baseline - m.ymin as f32 - m.height as f32) as i32,
-                size: (m.width, m.height),
-                coverage,
-                color: paint.color,
-                shadow: paint.shadow,
-                stroke: paint.stroke,
-            });
-            pen += m.advance_width;
+            let (glyph, advance) = self.chain_glyph(c, px, paint, |_| (pen, baseline));
+            glyphs.push(glyph);
+            pen += advance;
         }
     }
 
-    /// Rasterize `text` at `px` and push it as a column of glyphs centred on
-    /// `x`, the first cell starting at `top`. The vertical-writing-mode
-    /// companion to [`push_horizontal_run`](Self::push_horizontal_run).
+    /// Place `text` at `px` as a column of glyphs centred on `x`, the first
+    /// cell starting at `top`. The vertical-writing-mode companion to
+    /// [`push_horizontal_run`](Self::push_horizontal_run).
     #[cfg(feature = "truetype-overlay")]
     fn push_vertical_run(
         &self,
-        glyphs: &mut Vec<TtfGlyph>,
+        glyphs: &mut Vec<ChainGlyph>,
         text: &str,
         px: f32,
         x: f32,
@@ -999,17 +1072,10 @@ impl TextOverlay {
         let ascent = self.fonts[0].line_metrics(px).ascent;
         let cell_h = px * VERTICAL_CELL_FRACTION;
         for (i, c) in text.chars().enumerate() {
-            let (m, coverage) = self.glyph_font(c).rasterize(c, px);
             let baseline = top + ascent + i as f32 * cell_h;
-            glyphs.push(TtfGlyph {
-                x: (x - m.advance_width / 2.0 + m.xmin as f32) as i32,
-                y: (baseline - m.ymin as f32 - m.height as f32) as i32,
-                size: (m.width, m.height),
-                coverage,
-                color: paint.color,
-                shadow: paint.shadow,
-                stroke: paint.stroke,
-            });
+            let (glyph, _) =
+                self.chain_glyph(c, px, paint, |advance| (x - advance / 2.0, baseline));
+            glyphs.push(glyph);
         }
     }
 
@@ -1053,18 +1119,21 @@ impl TextOverlay {
         self.blit_coverage(buf, x0 - pad, y0 - pad, grown, &mask, shadow.color);
     }
 
-    /// TrueType render path (the `truetype-overlay` feature): rasterize each
-    /// active cue's glyphs from the loaded font. Horizontal cues lay out
-    /// left-to-right, top-to-bottom (auto-`line` cues stack from the bottom like
-    /// the bitmap path); `vertical:rl` / `lr` cues lay out as top-to-bottom
-    /// columns advancing right-to-left / left-to-right, with `align` justifying
-    /// each column vertically. Placement (`position` / `line`) mirrors the bitmap
+    /// Lay out the cues active at `t_ns` from the `ab_glyph` chain (the
+    /// `truetype-overlay` feature). Horizontal cues lay out left-to-right,
+    /// top-to-bottom, and auto-`line` cues stack from the bottom like the bitmap
+    /// path. `vertical:rl` / `lr` cues lay out as top-to-bottom columns
+    /// advancing right-to-left / left-to-right, with `align` justifying each
+    /// column vertically. Placement (`position` / `line`) mirrors the bitmap
     /// path; metrics and advances come from the font, at the per-character size
     /// a `::cue` `font-size` asked for.
+    ///
+    /// Returns canvas-absolute placements rather than drawing, so the CPU
+    /// blitter and the Vello GPU backend put the same cue in the same pixels.
     #[cfg(feature = "truetype-overlay")]
-    fn render_active_ttf(&self, buf: &mut [u8], t_ns: u64) {
-        // Line metrics come from the primary; each glyph is rasterized from the
-        // first font in the chain that has it (see `glyph_font`).
+    fn place_chain_cues(&self, t_ns: u64) -> Vec<PlacedCue<ChainGlyph>> {
+        // Line metrics come from the primary, each glyph from the first font in
+        // the chain that has it (see `glyph_font`).
         let primary = &self.fonts[0];
         let w = self.width as f32;
         let h = self.height as f32;
@@ -1072,6 +1141,7 @@ impl TextOverlay {
         let pad = (px * 0.25).max(2.0);
         let margin = px * 0.5;
         let mut auto_bottom = h - margin;
+        let mut placed = Vec::new();
 
         for cue in self.active(t_ns) {
             let lines: Vec<&str> = cue.text.lines().collect();
@@ -1079,8 +1149,7 @@ impl TextOverlay {
                 continue;
             }
             let s = &cue.settings;
-            // With shaping on this path renders vertical cues only; horizontal
-            // ones go through `render_active_shaped`.
+            // With shaping on, horizontal cues go through `place_shaped_cues`.
             #[cfg(feature = "text-shaping")]
             if !matches!(
                 s.vertical,
@@ -1092,6 +1161,11 @@ impl TextOverlay {
             // text colour is per character so a `::cue(.class)` run recolours
             // only its own span.
             let fg_at = |off: usize| s.color_at(off).unwrap_or(self.text_color);
+            let paint_at = |off: usize| GlyphPaint {
+                color: fg_at(off),
+                shadow: s.shadow_at(off),
+                stroke: s.stroke_at(off),
+            };
             let bg = s.background.unwrap_or(self.bg_color);
             let bases = line_offsets(&cue.text);
             // A `::cue` `font-size` sizes the whole cue; a `::cue(.class)` one
@@ -1109,7 +1183,7 @@ impl TextOverlay {
                 .fold(cue_px, f32::max);
             let lm = primary.line_metrics(tallest_px);
             let line_h = lm.new_line_size.max(tallest_px);
-            let mut glyphs: Vec<TtfGlyph> = Vec::new();
+            let mut glyphs: Vec<ChainGlyph> = Vec::new();
             let mut fills: Vec<SpanFill> = Vec::new();
             let mut underlines: Vec<SpanFill> = Vec::new();
             // The bar is sized by the run's own text size, so an underlined
@@ -1128,6 +1202,7 @@ impl TextOverlay {
                     .map_or(cue_px * RUBY_SIZE_FRACTION, |size| size.resolve(cue_px))
             };
 
+            let (block_left, block_top, block_w, block_h);
             if matches!(
                 s.vertical,
                 WritingMode::VerticalRl | WritingMode::VerticalLr
@@ -1137,30 +1212,22 @@ impl TextOverlay {
                 let cell_h = tallest_px * VERTICAL_CELL_FRACTION;
                 let n_cols = lines.len();
                 let max_len = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0) as f32;
-                let block_w = n_cols as f32 * col_w;
-                let block_h = max_len * cell_h;
+                block_w = n_cols as f32 * col_w;
+                block_h = max_len * cell_h;
                 // `position` anchors the block centre; default hugs the leading
                 // edge (right for rl, left for lr). `line` sets the top.
-                let block_left = match s.position {
+                block_left = match s.position {
                     Some(p) => p as f32 / 100.0 * w - block_w / 2.0,
                     None if rl => w - block_w - margin,
                     None => margin,
                 }
                 .clamp(0.0, (w - block_w).max(0.0));
-                let block_top = match s.line {
+                block_top = match s.line {
                     Some(p) => {
                         (p as f32 / 100.0 * h).clamp(margin, (h - margin - block_h).max(margin))
                     }
                     None => margin,
                 };
-                self.fill_rect(
-                    buf,
-                    (block_left - pad) as i32,
-                    (block_top - pad) as i32,
-                    (block_w + 2.0 * pad) as i32,
-                    (block_h + 2.0 * pad) as i32,
-                    bg,
-                );
                 for (ci, line) in lines.iter().enumerate() {
                     // First logical line is the rightmost column when rl.
                     let col = if rl { n_cols - 1 - ci } else { ci };
@@ -1178,10 +1245,13 @@ impl TextOverlay {
                     let mut underline_cells = Vec::new();
                     let mut ruby = RubyExtents::new(&s.ruby);
                     for (j, &(off, c)) in chars.iter().enumerate() {
-                        let (m, cov) = self.glyph_font(c).rasterize(c, px_at(base + off));
-                        let gx = col_x + (col_w - m.advance_width) / 2.0 + m.xmin as f32;
                         let baseline = start_y + lm.ascent + j as f32 * cell_h;
-                        let gy = baseline - m.ymin as f32 - m.height as f32;
+                        let (glyph, _) = self.chain_glyph(
+                            c,
+                            px_at(base + off),
+                            paint_at(base + off),
+                            |advance| (col_x + (col_w - advance) / 2.0, baseline),
+                        );
                         let cell_top = start_y + j as f32 * cell_h;
                         cells.push((
                             s.span_background_at(base + off),
@@ -1194,15 +1264,7 @@ impl TextOverlay {
                             (cell_top + cell_h) as i32,
                         ));
                         ruby.cover(&s.ruby, base + off, cell_top, cell_top + cell_h);
-                        glyphs.push(TtfGlyph {
-                            x: gx as i32,
-                            y: gy as i32,
-                            size: (m.width, m.height),
-                            coverage: cov,
-                            color: fg_at(base + off),
-                            shadow: s.shadow_at(base + off),
-                            stroke: s.stroke_at(base + off),
-                        });
+                        glyphs.push(glyph);
                     }
                     // A vertical cue puts the annotation beside its base column,
                     // on the side the columns advance away from.
@@ -1253,12 +1315,12 @@ impl TextOverlay {
                             .sum()
                     })
                     .collect();
-                let block_w = line_ws.iter().copied().fold(0.0_f32, f32::max);
-                let block_h = lines.len() as f32 * line_h;
+                block_w = line_ws.iter().copied().fold(0.0_f32, f32::max);
+                block_h = lines.len() as f32 * line_h;
                 let anchor_x = s.position.map(|p| p as f32 / 100.0 * w).unwrap_or(w / 2.0);
-                let block_left =
+                block_left =
                     ttf_align_left(s.align, anchor_x, block_w).clamp(0.0, (w - block_w).max(0.0));
-                let block_top = match s.line {
+                block_top = match s.line {
                     Some(p) => {
                         (p as f32 / 100.0 * h).clamp(margin, (h - margin - block_h).max(margin))
                     }
@@ -1268,14 +1330,6 @@ impl TextOverlay {
                         t
                     }
                 };
-                self.fill_rect(
-                    buf,
-                    (block_left - pad) as i32,
-                    (block_top - pad) as i32,
-                    (block_w + 2.0 * pad) as i32,
-                    (block_h + 2.0 * pad) as i32,
-                    bg,
-                );
                 for (row, line) in lines.iter().enumerate() {
                     let line_w = line_ws[row];
                     let x0 = match s.align {
@@ -1291,30 +1345,23 @@ impl TextOverlay {
                     let mut underline_cells = Vec::new();
                     let mut ruby = RubyExtents::new(&s.ruby);
                     for (off, c) in line.char_indices() {
-                        let (m, cov) = self.glyph_font(c).rasterize(c, px_at(base + off));
-                        let gx = pen + m.xmin as f32;
-                        let gy = baseline - m.ymin as f32 - m.height as f32;
+                        let (glyph, advance) =
+                            self.chain_glyph(c, px_at(base + off), paint_at(base + off), |_| {
+                                (pen, baseline)
+                            });
                         cells.push((
                             s.span_background_at(base + off),
                             pen as i32,
-                            (pen + m.advance_width) as i32,
+                            (pen + advance) as i32,
                         ));
                         underline_cells.push((
                             underline_at(base + off),
                             pen as i32,
-                            (pen + m.advance_width) as i32,
+                            (pen + advance) as i32,
                         ));
-                        ruby.cover(&s.ruby, base + off, pen, pen + m.advance_width);
-                        glyphs.push(TtfGlyph {
-                            x: gx as i32,
-                            y: gy as i32,
-                            size: (m.width, m.height),
-                            coverage: cov,
-                            color: fg_at(base + off),
-                            shadow: s.shadow_at(base + off),
-                            stroke: s.stroke_at(base + off),
-                        });
-                        pen += m.advance_width;
+                        ruby.cover(&s.ruby, base + off, pen, pen + advance);
+                        glyphs.push(glyph);
+                        pen += advance;
                     }
                     // The annotation is centred over its base run, sitting on
                     // the line box's top edge so the base keeps its baseline.
@@ -1343,14 +1390,72 @@ impl TextOverlay {
                     }
                 }
             }
+            placed.push(PlacedCue {
+                background: (
+                    (block_left - pad) as i32,
+                    (block_top - pad) as i32,
+                    (block_w + 2.0 * pad) as i32,
+                    (block_h + 2.0 * pad) as i32,
+                ),
+                background_color: bg,
+                span_backgrounds: fills,
+                underlines,
+                glyphs,
+            });
+        }
+        placed
+    }
 
-            for (rect, color) in fills {
+    /// The vertical cues active at `t_ns` laid out from the `ab_glyph` chain,
+    /// for the Vello backend: cosmic-text has no vertical writing mode, so
+    /// [`place_shaped_cues`](Self::place_shaped_cues) leaves these out. Grows
+    /// the chain for their codepoints first, as the CPU render does.
+    #[cfg(feature = "vello-text-overlay")]
+    pub(crate) fn place_vertical_cues(&mut self, t_ns: u64) -> Vec<PlacedCue<ChainGlyph>> {
+        self.ensure_shaper();
+        self.extend_chain_for_vertical(t_ns);
+        if self.fonts.is_empty() {
+            return Vec::new();
+        }
+        self.place_chain_cues(t_ns)
+    }
+
+    /// Rasterize a glyph [`place_chain_cues`](Self::place_chain_cues) placed.
+    #[cfg(feature = "truetype-overlay")]
+    fn rasterize_chain_glyph(&self, glyph: &ChainGlyph) -> TtfGlyph {
+        let (m, coverage) =
+            self.fonts[glyph.face].rasterize(ab_glyph::GlyphId(glyph.glyph_id), glyph.font_size);
+        TtfGlyph {
+            x: glyph.x + m.xmin,
+            y: glyph.y - m.ymin - m.height as i32,
+            size: (m.width, m.height),
+            coverage,
+            paint: glyph.paint,
+        }
+    }
+
+    /// Blit the cues [`place_chain_cues`](Self::place_chain_cues) laid out: the
+    /// backing box, the span fills over it, the shadows, the outlines, then the
+    /// underline bars and each glyph's rasterized coverage.
+    #[cfg(feature = "truetype-overlay")]
+    fn render_active_ttf(&self, buf: &mut [u8], t_ns: u64) {
+        for cue in self.place_chain_cues(t_ns) {
+            let (bx, by, bw, bh) = cue.background;
+            self.fill_rect(buf, bx, by, bw, bh, cue.background_color);
+            for (rect, color) in cue.span_backgrounds {
                 self.fill_rect(buf, rect.0, rect.1, rect.2, rect.3, color);
             }
+            let glyphs: Vec<TtfGlyph> = cue
+                .glyphs
+                .iter()
+                .map(|g| self.rasterize_chain_glyph(g))
+                .collect();
             // Every shadow goes under every glyph, so a neighbour's shadow never
             // lands on top of this glyph.
             for g in &glyphs {
-                let Some(shadow) = g.shadow else { continue };
+                let Some(shadow) = g.paint.shadow else {
+                    continue;
+                };
                 self.blit_shadow(
                     buf,
                     g.x + shadow.offset_x,
@@ -1363,16 +1468,50 @@ impl TextOverlay {
             // Outlines go over every shadow and under every fill, so a
             // neighbour's outline never covers this glyph.
             for g in &glyphs {
-                let Some(stroke) = g.stroke else { continue };
+                let Some(stroke) = g.paint.stroke else {
+                    continue;
+                };
                 self.blit_stroke(buf, g.x, g.y, g.size, &g.coverage, stroke);
             }
-            for (rect, color) in underlines {
+            for (rect, color) in cue.underlines {
                 self.fill_rect(buf, rect.0, rect.1, rect.2, rect.3, color);
             }
             for g in &glyphs {
-                self.blit_coverage(buf, g.x, g.y, g.size, &g.coverage, g.color);
+                self.blit_coverage(buf, g.x, g.y, g.size, &g.coverage, g.paint.color);
             }
         }
+    }
+
+    /// The blurred drop-shadow mask for one chain glyph, the
+    /// [`blurred_shadow_mask`](Self::blurred_shadow_mask) of a vertical cue.
+    #[cfg(feature = "vello-text-overlay")]
+    pub(crate) fn blurred_chain_shadow_mask(
+        &self,
+        glyph: &ChainGlyph,
+        blur: u32,
+    ) -> Option<BlurredShadowMask> {
+        let (m, raster) =
+            self.fonts[glyph.face].rasterize(ab_glyph::GlyphId(glyph.glyph_id), glyph.font_size);
+        if m.width == 0 || m.height == 0 {
+            return None;
+        }
+        let (coverage, (width, height), pad) = blur_coverage(&raster, (m.width, m.height), blur);
+        let pad = pad as i32;
+        Some(BlurredShadowMask {
+            coverage,
+            width,
+            height,
+            left: m.xmin - pad,
+            top: -m.ymin - m.height as i32 - pad,
+        })
+    }
+
+    /// Bytes + collection index of chain face `face`, so the Vello backend can
+    /// draw a [`ChainGlyph`]'s outline from the face it was placed from.
+    #[cfg(feature = "vello-text-overlay")]
+    pub(crate) fn chain_face_data(&self, face: usize) -> Option<(Vec<u8>, u32)> {
+        let face = self.fonts.get(face)?;
+        Some((face.font.as_slice().to_vec(), face.collection_index))
     }
 
     /// Build the shaper if it is not up (system-font discovery plus the
@@ -1388,11 +1527,7 @@ impl TextOverlay {
         let shaper = crate::textshape::TextShaper::new(&self.font_data);
         if self.fonts.is_empty() {
             if let Some((bytes, index)) = shaper.default_face() {
-                if let Ok(font) = ab_glyph::FontVec::try_from_vec_and_index(bytes, index) {
-                    let mut face = FontFace(font);
-                    for axis in &self.axes {
-                        face.set_axis(*axis);
-                    }
+                if let Some(face) = FontFace::new(bytes, index, &self.axes) {
                     self.fonts.push(face);
                 }
             }
@@ -1436,14 +1571,10 @@ impl TextOverlay {
                 self.uncovered_chars.push(c);
                 continue;
             };
-            let Ok(font) = ab_glyph::FontVec::try_from_vec_and_index(bytes, index) else {
+            let Some(face) = FontFace::new(bytes, index, &self.axes) else {
                 self.uncovered_chars.push(c);
                 continue;
             };
-            let mut face = FontFace(font);
-            for axis in &self.axes {
-                face.set_axis(*axis);
-            }
             self.fonts.push(face);
         }
     }
@@ -1474,13 +1605,13 @@ impl TextOverlay {
     /// the primary lacks a codepoint. Placement (`position` / `line` / `align`,
     /// auto-`line` stacking) and colours are the same as the `ab_glyph` path;
     /// only the glyphs and their advances come from the shaper. Vertical cues are
-    /// left to [`render_active_ttf`](Self::render_active_ttf) (cosmic-text has no
+    /// left to [`place_chain_cues`](Self::place_chain_cues) (cosmic-text has no
     /// vertical writing mode).
     ///
     /// Returns canvas-absolute placements rather than drawing, so the CPU
     /// blitter and the Vello GPU backend put the same cue in the same pixels.
     #[cfg(feature = "text-shaping")]
-    pub(crate) fn place_shaped_cues(&mut self, t_ns: u64) -> Vec<PlacedCue> {
+    pub(crate) fn place_shaped_cues(&mut self, t_ns: u64) -> Vec<PlacedCue<PlacedGlyph>> {
         self.ensure_shaper();
         // Out of the field for the layout: it needs `&mut` shaper while the cue
         // list is borrowed from `&self`.
@@ -3181,10 +3312,7 @@ mod tests {
         let shaped: Vec<u16> = block.lines[0].glyphs.iter().map(|g| g.glyph_id).collect();
 
         // What the isolated first-font-with-glyph lookup would have produced.
-        let isolated: Vec<u16> = {
-            use ab_glyph::Font;
-            word.chars().map(|c| ov.fonts[0].0.glyph_id(c).0).collect()
-        };
+        let isolated: Vec<u16> = word.chars().map(|c| ov.fonts[0].glyph_id(c).0).collect();
         std::eprintln!("shaped {shaped:?} vs isolated {isolated:?}");
         assert!(!shaped.is_empty(), "the Arabic word shaped to glyphs");
         assert!(
