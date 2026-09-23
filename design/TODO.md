@@ -331,11 +331,6 @@ unless it says otherwise.
 - Add `WgpuBuffer` download or dma-buf export at the GStreamer bridge output.
 - Add dma-buf zero-copy to `gstwrap`.
 
-## Developer tooling
-
-- Dashboard edge labels are clipped between nodes at the default layout
-  spacing (caps and packet count cut off on a 1400 px wide page).
-
 ## Audio decode-to-PCM QA
 
 - calliope: AAC decode is not bit-exact across decoders, so it wants a golden /

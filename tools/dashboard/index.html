@@ -125,7 +125,10 @@ let view = { x: 0, y: 0, k: 1 }; // pan/zoom of the graph viewport
 let fitted = false;            // frame the graph once on first paint
 let contentSize = { w: 0, h: 0 };
 
-const COL_W = 220, ROW_H = 96, NODE_W = 168, NODE_H = 64, PAD = 30;
+const ROW_H = 96, NODE_W = 168, NODE_H = 64, PAD = 30;
+const COL_GAP_MIN = 52, LABEL_MARGIN = 12;
+// column gap fits the widest edge label and only grows, so a counter ticking up never moves the nodes
+let colGap = COL_GAP_MIN;
 const roleColor = { source: "var(--source)", sink: "var(--sink)",
   transform: "var(--xform)", tee: "var(--tee)", muxer: "var(--tee)" };
 
@@ -160,6 +163,25 @@ function capsShort(s) {
 }
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
+function trafficLabel(e) {
+  const drops = e.drops ? `  ${e.drops} dropped` : "";
+  return `${e.packets} pkt  ${fmtBytes(e.bytes)}${drops}`;
+}
+// measured with a probe text node so the .edge-lbl font is what gets measured
+function fitColumnGap(edges) {
+  const probe = document.createElementNS(SVG_NS, "text");
+  probe.setAttribute("class", "edge-lbl");
+  svg.appendChild(probe);
+  const width = (text) => { probe.textContent = text; return probe.getComputedTextLength(); };
+  edges.forEach(e => {
+    const widths = [];
+    if (e.caps) widths.push(width(capsShort(e.caps)));
+    if (e.packets) widths.push(width(trafficLabel(e)));
+    widths.forEach(w => { colGap = Math.max(colGap, w + 2 * LABEL_MARGIN); });
+  });
+  probe.remove();
+}
+
 // Longest-path layering: a node's column is 1 + max(column of its predecessors).
 function layout(nodes, edges) {
   const preds = new Map(nodes.map(n => [n.id, []]));
@@ -182,7 +204,7 @@ function layout(nodes, edges) {
     const c = col.get(n.id);
     const r = perCol.get(c) || 0;
     perCol.set(c, r + 1);
-    pos.set(n.id, { x: PAD + c * COL_W, y: PAD + r * ROW_H });
+    pos.set(n.id, { x: PAD + c * (NODE_W + colGap), y: PAD + r * ROW_H });
   });
   return pos;
 }
@@ -190,6 +212,7 @@ function layout(nodes, edges) {
 function render(msg) {
   const { nodes, edges } = msg;
   svg.innerHTML = "";
+  fitColumnGap(edges);
   const pos = layout(nodes, edges);
   const maxX = Math.max(...[...pos.values()].map(p => p.x), 0) + NODE_W + PAD;
   const maxY = Math.max(...[...pos.values()].map(p => p.y), 0) + NODE_H + PAD;
@@ -235,8 +258,7 @@ function render(msg) {
       counts.setAttribute("x", mx);
       counts.setAttribute("y", (y1 + y2) / 2 + 9);
       counts.setAttribute("text-anchor", "middle");
-      const drops = e.drops ? `  ${e.drops} dropped` : "";
-      counts.textContent = `${e.packets} pkt  ${fmtBytes(e.bytes)}${drops}`;
+      counts.textContent = trafficLabel(e);
       const ctitle = document.createElementNS(SVG_NS, "title");
       ctitle.textContent = `producer blocked ${fmtNs(e.blocked_ns)} on this link`;
       counts.appendChild(ctitle);
