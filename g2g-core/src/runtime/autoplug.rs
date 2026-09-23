@@ -421,6 +421,7 @@ mod factory {
     use alloc::format;
     use alloc::string::{String, ToString};
     use alloc::sync::Arc;
+    use core::panic::RefUnwindSafe;
 
     use crate::element::{AsyncElement, DynAsyncElement};
     use crate::fanout::{DynMultiOutputSource, MultiOutputElement};
@@ -1240,12 +1241,13 @@ mod factory {
     /// source and the caps it produces.
     #[derive(Clone)]
     pub struct MainSourceFactory {
-        build: Arc<dyn Fn() -> (Box<dyn DynSourceLoop>, Caps) + Send + Sync>,
+        // RefUnwindSafe keeps Registry UnwindSafe
+        build: Arc<dyn Fn() -> (Box<dyn DynSourceLoop>, Caps) + Send + Sync + RefUnwindSafe>,
     }
 
     impl MainSourceFactory {
         pub fn new(
-            build: impl Fn() -> (Box<dyn DynSourceLoop>, Caps) + Send + Sync + 'static,
+            build: impl Fn() -> (Box<dyn DynSourceLoop>, Caps) + Send + Sync + RefUnwindSafe + 'static,
         ) -> Self {
             Self {
                 build: Arc::new(build),
