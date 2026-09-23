@@ -1,5 +1,5 @@
 //! M1198: `fallbacksrc` runs an application-built source in place of `uri=`.
-//! The application registers a `MainSourceFactory` on the registry, and a
+//! The application registers a `FallbacksrcSourceFactory` on the registry, and a
 //! `fallbacksrc` line with no `uri=` builds its main branch from it. The factory
 //! is called once at parse and again for every restart, so the existing restart
 //! policy rebuilds the application's source the way it rebuilds a URI source.
@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use g2g_core::error::HardwareError;
-use g2g_core::runtime::{parse_launch, run_graph, MainSourceFactory, Registry, SourceLoop};
+use g2g_core::runtime::{parse_launch, run_graph, FallbacksrcSourceFactory, Registry, SourceLoop};
 use g2g_core::{Caps, ConfigureOutcome, G2gError, NodeKind, OutputSink, PipelineClock};
 use g2g_plugins::appsink::register_appsink_pull;
 use g2g_plugins::fallbacksrc::RETRY_DELAY;
@@ -86,7 +86,7 @@ fn registry_with(build: fn() -> DynSource) -> (Registry, Arc<AtomicUsize>) {
     let seen = calls.clone();
     let caps = immediate_caps(build());
     let mut registry = default_registry();
-    registry.register_fallbacksrc_main_source(MainSourceFactory::new(move || {
+    registry.register_fallbacksrc_main_source(FallbacksrcSourceFactory::new(move || {
         seen.fetch_add(1, Ordering::SeqCst);
         (build(), caps.clone())
     }));

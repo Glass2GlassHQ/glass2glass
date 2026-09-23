@@ -74,9 +74,9 @@ use crate::link::LinkPolicy;
 use crate::memory::MemoryDomainKind;
 use crate::property::{PropError, PropValue, PropertySpec, ValueError};
 use crate::runtime::autoplug::{
-    is_raw_audio, is_raw_video, FallbackSourceRole, FanoutRebuild, MainSourceFactory, PadKind,
-    PadRequest, Registry, RestartPolicy, UriError, UriFanout, UriFanoutHead, UriFanoutPort,
-    UriRebuild,
+    is_raw_audio, is_raw_video, FallbackSourceRole, FallbacksrcSourceFactory, FanoutRebuild,
+    PadKind, PadRequest, Registry, RestartPolicy, UriError, UriFanout, UriFanoutHead,
+    UriFanoutPort, UriRebuild,
 };
 use crate::runtime::parse_scope::ParseScope;
 use crate::runtime::{DynSourceLoop, GraphNode, GraphNodeRef, UnblockHandle};
@@ -1889,18 +1889,54 @@ fn restartable_fanout_source(
     }
 }
 
-/// Where a `fallbacksrc`'s main source comes from: its `uri=`, or failing that
-/// the application's registered factory (M1198).
-enum MainSource<'a> {
+enum FallbacksrcSourceOrigin<'a> {
     Uri(&'a str),
-    Factory(MainSourceFactory),
+    Factory(FallbacksrcSourceFactory),
+}
+
+impl<'a> FallbacksrcSourceOrigin<'a> {
+    // the URI wins over the factory, as gst's `uri` wins over `source`
+    fn resolve(uri: Option<&'a str>, factory: Option<FallbacksrcSourceFactory>) -> Option<Self> {
+        uri.map(Self::Uri).or_else(|| factory.map(Self::Factory))
+    }
+
+    fn build(
+        &self,
+        registry: &Registry,
+        policy: RestartPolicy,
+        role: FallbackSourceRole,
+        unblock: Option<UnblockHandle>,
+    ) -> Result<(Box<dyn DynSourceLoop>, Caps), ParseError> {
+        match self {
+            Self::Uri(uri) => {
+                let (source, caps) = registry
+                    .build_uri_source(uri)
+                    .map_err(|e: UriError| ParseError::Uri(alloc::format!("{uri}: {e:?}")))?;
+                let source = restartable_uri_source(registry, source, uri, policy, role, unblock)?;
+                Ok((source, caps))
+            }
+            Self::Factory(factory) => {
+                let (source, caps) = factory.build();
+                let source = restartable_source(
+                    registry,
+                    source,
+                    factory.rebuilder(),
+                    policy,
+                    role,
+                    unblock,
+                );
+                Ok((source, caps))
+            }
+        }
+    }
 }
 
 /// Everything a `fallbacksrc` keyword's properties say, read once so the
 /// single-stream expansion and the lone-keyword fan-out agree on them.
 struct FallbackSettings<'a> {
-    main: MainSource<'a>,
-    fallback_uri: Option<&'a str>,
+    main: FallbacksrcSourceOrigin<'a>,
+    // None means the dummy generators
+    fallback: Option<FallbacksrcSourceOrigin<'a>>,
     enable_video: bool,
     enable_audio: bool,
     restart: RestartPolicy,
@@ -1925,11 +1961,9 @@ fn fallbacksrc_settings<'a>(
             key: key.clone(),
         });
     }
-    let main = match (prop(spec, "uri"), registry.fallbacksrc_main_source()) {
-        (Some(uri), _) => MainSource::Uri(uri),
-        (None, Some(factory)) => MainSource::Factory(factory),
-        (None, None) => return Err(ParseError::MissingUri(spec.name.clone())),
-    };
+    let main =
+        FallbacksrcSourceOrigin::resolve(prop(spec, "uri"), registry.fallbacksrc_main_source())
+            .ok_or_else(|| ParseError::MissingUri(spec.name.clone()))?;
     let enable_video = keyword_bool(spec, "enable-video", true)?;
     let enable_audio = keyword_bool(spec, "enable-audio", true)?;
     if !enable_video && !enable_audio {
@@ -1957,7 +1991,10 @@ fn fallbacksrc_settings<'a>(
     }
     Ok(FallbackSettings {
         main,
-        fallback_uri: prop(spec, "fallback-uri"),
+        fallback: FallbacksrcSourceOrigin::resolve(
+            prop(spec, "fallback-uri"),
+            registry.fallbacksrc_fallback_source(),
+        ),
         enable_video,
         enable_audio,
         restart: RestartPolicy {
@@ -1990,7 +2027,7 @@ fn expand_fallbacksrc(
     let settings = fallbacksrc_settings(registry, spec)?;
     let FallbackSettings {
         main,
-        fallback_uri,
+        fallback: fallback_source,
         enable_video,
         enable_audio,
         restart,
@@ -2000,36 +2037,10 @@ fn expand_fallbacksrc(
     let preferred = consumer.map_or(MemoryDomainKind::System, |name| {
         registry.declared_memory_preference(name)
     });
-    let (source, source_caps) = match main {
-        MainSource::Uri(uri) => {
-            let (source, caps) = registry
-                .build_uri_source(uri)
-                .map_err(|e: UriError| ParseError::Uri(alloc::format!("{uri}: {e:?}")))?;
-            let source = restartable_uri_source(
-                registry,
-                source,
-                uri,
-                restart,
-                FallbackSourceRole::Main,
-                unblock.clone(),
-            )?;
-            (source, caps)
-        }
-        MainSource::Factory(factory) => {
-            let (source, caps) = factory.build();
-            let source = restartable_source(
-                registry,
-                source,
-                factory.rebuilder(),
-                restart,
-                FallbackSourceRole::Main,
-                unblock.clone(),
-            );
-            (source, caps)
-        }
-    };
+    let (source, source_caps) =
+        main.build(registry, restart, FallbackSourceRole::Main, unblock.clone())?;
     // The kind is decided by which target the search reaches, so the dummy
-    // fallback is the right generator and a `fallback-uri` decodes to the same
+    // fallback is the right generator and a fallback source decodes to the same
     // shape. Video first: a container carrying both is a video stream here.
     let video_target: &dyn Fn(&Caps) -> bool = &is_raw_video;
     let audio_target: &dyn Fn(&Caps) -> bool = &is_raw_audio;
@@ -2085,19 +2096,10 @@ fn expand_fallbacksrc(
     }
 
     let mut fallback: Chain = Vec::new();
-    match fallback_uri {
-        Some(fallback_uri) => {
-            let (source, caps) = registry
-                .build_uri_source(fallback_uri)
-                .map_err(|e: UriError| ParseError::Uri(alloc::format!("{fallback_uri}: {e:?}")))?;
-            let source = restartable_uri_source(
-                registry,
-                source,
-                fallback_uri,
-                restart,
-                FallbackSourceRole::Fallback,
-                unblock,
-            )?;
+    match fallback_source {
+        Some(origin) => {
+            let (source, caps) =
+                origin.build(registry, restart, FallbackSourceRole::Fallback, unblock)?;
             let decoders = plug(&caps, target)
                 .ok_or_else(|| ParseError::NoDecodeChain(alloc::format!("{caps:?}")))?;
             fallback.push(Item::Prebuilt {
@@ -3082,6 +3084,36 @@ fn covers_every_port(main: &[UriFanoutPort], fallback: &[UriFanoutPort]) -> bool
         .all(|p| count(fallback, p.stream_type) <= count(main, p.stream_type))
 }
 
+enum FanoutFallback {
+    PerPort {
+        pads: Vec<PadId>,
+        ports: Vec<UriFanoutPort>,
+    },
+    // `port` is the one main port an application-built source backs
+    OnePort {
+        pad: PadId,
+        port: usize,
+        caps: Caps,
+    },
+}
+
+// video before audio, as in the single-stream expansion
+fn single_fallback_port(
+    registry: &Registry,
+    ports: &[UriFanoutPort],
+    caps: &Caps,
+) -> Option<usize> {
+    [StreamType::Video, StreamType::Audio]
+        .into_iter()
+        .find_map(|stream_type| {
+            let kind = fallback_kind(stream_type)?;
+            let index = nth_port_of_kind(ports, stream_type, 0)?;
+            registry
+                .autoplug_names(caps, &kind.raw, DECODEBIN_MAX_DEPTH)
+                .map(|_| index)
+        })
+}
+
 /// One port's branch of a fanned-out `fallbacksrc`: its kind's shape, and which
 /// port of that kind it is (M1171).
 #[derive(Clone, Copy)]
@@ -3159,7 +3191,8 @@ fn add_fanout_head(
 /// Build the per-kind graph of a lone `fallbacksrc uri=X` (M1168): one restartable
 /// byte source into one demuxer, then per demux port a decode chain into input 0
 /// of that kind's `fallbackswitch`, the fallback branch into input 1, and the
-/// switch output to that kind's automatic sink.
+/// switch output to that kind's automatic sink. An application-built fallback
+/// (M1203) is one stream, so it backs one switch and the rest take dummies.
 ///
 /// `Ok(None)` declines, leaving the single-stream expansion to build the line: no
 /// hook claims the URI, the container carries one kind, a kind repeats, or either
@@ -3173,7 +3206,7 @@ fn build_fallbacksrc_fanout(
         return Ok(None);
     }
     // An application-built source is one output with no container to probe.
-    let MainSource::Uri(uri) = &settings.main else {
+    let FallbacksrcSourceOrigin::Uri(uri) = &settings.main else {
         return Ok(None);
     };
     let Some(main) = uri_fanout(registry, uri)? else {
@@ -3196,10 +3229,10 @@ fn build_fallbacksrc_fanout(
     // port to feed; otherwise a port would have nothing to drain it, and the
     // unmatched branches take their dummy generators instead. Counted per kind,
     // so a two-audio-track fallback behind a one-audio-track main is refused.
-    let fallback = match settings.fallback_uri {
-        Some(uri) => uri_fanout(registry, uri)?
+    let fallback_fanout = match &settings.fallback {
+        Some(FallbacksrcSourceOrigin::Uri(uri)) => uri_fanout(registry, uri)?
             .filter(|f| fallback_kinds(f).is_some() && covers_every_port(&main.ports, &f.ports)),
-        None => None,
+        Some(FallbacksrcSourceOrigin::Factory(_)) | None => None,
     };
 
     let mut graph: Graph<GraphNode> = Graph::new();
@@ -3216,8 +3249,9 @@ fn build_fallbacksrc_fanout(
         alloc::format!("{base}{FALLBACK_MAIN_SOURCE_SUFFIX}"),
     )?;
 
-    let fallback = match fallback {
-        Some(fanout) => {
+    let fallback_name = alloc::format!("{base}{FALLBACK_FALLBACK_SOURCE_SUFFIX}");
+    let fallback = match (fallback_fanout, &settings.fallback) {
+        (Some(fanout), _) => {
             let pads = add_fanout_head(
                 registry,
                 &mut graph,
@@ -3226,11 +3260,31 @@ fn build_fallbacksrc_fanout(
                 fanout.ports.len(),
                 &settings,
                 FallbackSourceRole::Fallback,
-                alloc::format!("{base}{FALLBACK_FALLBACK_SOURCE_SUFFIX}"),
+                fallback_name,
             )?;
-            Some((pads, fanout.ports))
+            Some(FanoutFallback::PerPort {
+                pads,
+                ports: fanout.ports,
+            })
         }
-        None => None,
+        (None, Some(origin @ FallbacksrcSourceOrigin::Factory(_))) => {
+            let (source, caps) = origin.build(
+                registry,
+                settings.restart,
+                FallbackSourceRole::Fallback,
+                settings.unblock.clone(),
+            )?;
+            let port = single_fallback_port(registry, &ports, &caps)
+                .ok_or_else(|| ParseError::NoDecodeChain(alloc::format!("{caps:?}")))?;
+            let src = graph.add_source(GraphNodeRef::Source(source));
+            name_node(&mut graph, &mut names, src, fallback_name)?;
+            Some(FanoutFallback::OnePort {
+                pad: src.into(),
+                port,
+                caps,
+            })
+        }
+        (None, _) => None,
     };
 
     for (i, (port, branch)) in ports.iter().zip(&branches).enumerate() {
@@ -3260,10 +3314,19 @@ fn build_fallbacksrc_fanout(
         // The k-th main port of a kind pairs with the k-th fallback port of that
         // kind, so a two-track container's second audio stream backs the second
         // audio switch rather than every audio switch backing onto the first.
-        let matching = fallback.as_ref().and_then(|(pads, ports)| {
-            nth_port_of_kind(ports, port.stream_type, branch.ordinal)
-                .map(|j| (pads[j], &ports[j].caps))
-        });
+        let matching = match &fallback {
+            Some(FanoutFallback::PerPort {
+                pads,
+                ports: fallback_ports,
+            }) => nth_port_of_kind(fallback_ports, port.stream_type, branch.ordinal)
+                .map(|j| (pads[j], &fallback_ports[j].caps)),
+            Some(FanoutFallback::OnePort {
+                pad,
+                port: backed,
+                caps,
+            }) => (*backed == i).then_some((*pad, caps)),
+            None => None,
+        };
         match matching {
             Some((pad, caps)) => {
                 plug_decode(registry, &mut graph, pad, switch.input(1), caps, kind)?
@@ -3306,7 +3369,7 @@ fn plug_decode(
 
 /// Build the dummy fallback branch for one kind (black frames or silence behind
 /// the pacer) into one switch input, the same generator the single-stream
-/// expansion uses when no `fallback-uri` was given.
+/// expansion uses when there is no fallback source.
 fn plug_dummy(
     registry: &Registry,
     graph: &mut Graph<GraphNode>,

@@ -557,8 +557,8 @@ clock.
 
 `fallbacksrc uri=X` is the launch macro over the switch, flattened at parse time
 like `uridecodebin`: the URI's source auto-plugged to raw on input 0, and on
-input 1 either `fallback-uri`'s own decode chain or a dummy generator,
-`videotestsrc pattern=black` or `audiotestsrc wave=silence` behind a
+input 1 the decode chain of `fallback-uri` or of an application-built fallback
+source, or else a dummy generator, `videotestsrc pattern=black` or `audiotestsrc wave=silence` behind a
 `clocksync`. Neither test source is live, so without the pacer the dummy would
 run as fast as the CPU allows. `timeout` and `immediate-fallback` pass through to
 the switch, and a `name=` names the switch, so a line can hang a further branch
@@ -672,13 +672,17 @@ sources take the handle, since either can be the one that restarted.
 `manual-unblock=true` without a registered handle is a parse error rather than a
 pipeline nothing could ever release.
 
-### An application-built source
+### Application-built sources
 
-gst's `source` property hands `fallbacksrc` an element to use in place of the
-URI. g2g takes a `MainSourceFactory` registered with
-`Registry::register_fallbacksrc_main_source`, and a `fallbacksrc` line with no
-`uri=` builds its main branch from it. A `uri=` on the line still wins, as in
-gst, and a line with neither is `ParseError::MissingUri`.
+gst's `source` and `fallback-source` properties hand `fallbacksrc` an element to
+use in place of `uri` and `fallback-uri`. g2g takes a `FallbacksrcSourceFactory`
+for each side, registered with `Registry::register_fallbacksrc_main_source` and
+`Registry::register_fallbacksrc_fallback_source`. A line with no `uri=` builds its
+main branch from the main factory, and a line with no `fallback-uri=` builds its
+fallback branch from the fallback factory instead of the dummy generator. A URI
+on the line still wins on either side, as in gst. A line with neither `uri=` nor
+a main factory is `ParseError::MissingUri`, and one with neither `fallback-uri=`
+nor a fallback factory takes the dummy.
 
 It is a factory rather than an instance because a g2g source runs once. gst
 restarts a custom source by cycling the same element through `NULL` and back to
@@ -686,13 +690,20 @@ restarts a custom source by cycling the same element through `NULL` and back to
 instance again. The factory returns a fresh source and the caps it produces. It
 is called once when the line is parsed, the caps choosing the decode chain, and
 again for every rebuild, where it stands in for `Registry::uri_source_rebuilder`
-under the same `RestartSrc` policy.
+under the same `RestartSrc` policy. A factory-built source gets the treatment
+the URI source on its side would: the same `FallbackSourceRole`, the same
+`manual-unblock` handle, the same generated name, and its caps auto-plugged to
+the kind the branch reaches.
 
-The factory is one per registry, like the unblock handle, so every URI-less
-`fallbacksrc` in a line builds from it. A lone `fallbacksrc` over it takes the
-single-stream expansion plus its automatic sink, since a `DynSourceLoop` has one
-output and there is no container to fan out. The fallback side keeps
-`fallback-uri` or the dummy: gst's `fallback-source` has no analog yet.
+Each factory is one per registry, like the unblock handle, so every
+`fallbacksrc` in a line that needs one builds from it. A lone `fallbacksrc` over
+a main factory takes the single-stream expansion plus its automatic sink, since a
+`DynSourceLoop` has one output and there is no container to fan out. A lone
+`fallbacksrc uri=X` that fans out over a fallback factory puts the one fallback
+stream on one port: the first port of the first kind its caps decode to, video
+before audio as in the single-stream expansion. Every other port takes its dummy,
+and a fallback that decodes to no kind the main carries is
+`ParseError::NoDecodeChain`.
 
 ### Restart status on the bus
 
@@ -717,7 +728,7 @@ it. A `RestartSrc` built directly from Rust has no role. The runner hands the bu
 to a source through `SourceLoop::set_bus`, which only the graph runner calls.
 
 The expansion also names the sources it builds off the `fallbacksrc`'s own name:
-`fallbacksrc name=fb` yields `fb-source` and, with a `fallback-uri=`,
+`fallbacksrc name=fb` yields `fb-source` and, with a fallback source,
 `fb-fallback-source`, so a name is what `GraphMutator::replace_source` addresses
 to swap either one during a run. The generated names collide with a line's own
 `name=` the way the generated switch name does, reported as

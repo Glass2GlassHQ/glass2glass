@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1203: a `fallbacksrc` with no `fallback-uri=` runs an application-built fallback source from a registered factory and rebuilds it on restart.
 - M1202: `VelloTextOverlay` draws a variable font at the `font-variations=` axis positions, as the CPU `textoverlay` does.
 - M1204: `g2g-launch-py --inspect`, `--docgen` and `--mcp` run the inspect, reference-page and MCP tools with the hosted Python elements listed.
 - M1205: the dashboard spaces its node columns to the widest edge label, so caps and packet counts are no longer hidden behind the nodes.

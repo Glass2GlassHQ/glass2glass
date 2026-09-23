@@ -292,8 +292,7 @@ unless it says otherwise.
   `jsongstenc` / `jsongstparse`, `gstregex`, `zlibcompress` / `zlibdecompress`,
   `colordetect`, `videocompare`, `uriplaylistbin`, `ndisrc` / `ndisink`,
   `intersink` / `intersrc`, `originalbuffersave` / `originalbufferrestore`.
-- **Fallback switching:** gst's `fallback-source`, an application-built source
-  for `fallbacksrc`'s fallback side.
+
 ## Embedded
 
 - Connect `EmbassyClock` to a HAL tick on real hardware.

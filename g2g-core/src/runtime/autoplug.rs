@@ -1235,17 +1235,18 @@ mod factory {
     /// [`Registry::uri_source_rebuilder`]; owns its URI so it stays `'static`.
     pub type UriRebuild = Box<dyn Fn() -> Result<(Box<dyn DynSourceLoop>, Caps), UriError> + Send>;
 
-    /// The application's own source for a `fallbacksrc` with no `uri=` (M1198),
-    /// gst's `source` property. A factory because a source runs once: it is
-    /// called at parse and again for every restart, each call returning a fresh
-    /// source and the caps it produces.
+    /// The application's own source for one side of a `fallbacksrc`: the main
+    /// side when the line has no `uri=` (M1198, gst's `source`), the fallback
+    /// side when it has no `fallback-uri=` (M1203, gst's `fallback-source`). A
+    /// factory because a source runs once: it is called at parse and again for
+    /// every restart, each call returning a fresh source and the caps it produces.
     #[derive(Clone)]
-    pub struct MainSourceFactory {
+    pub struct FallbacksrcSourceFactory {
         // RefUnwindSafe keeps Registry UnwindSafe
         build: Arc<dyn Fn() -> (Box<dyn DynSourceLoop>, Caps) + Send + Sync + RefUnwindSafe>,
     }
 
-    impl MainSourceFactory {
+    impl FallbacksrcSourceFactory {
         pub fn new(
             build: impl Fn() -> (Box<dyn DynSourceLoop>, Caps) + Send + Sync + RefUnwindSafe + 'static,
         ) -> Self {
@@ -1264,9 +1265,10 @@ mod factory {
         }
     }
 
-    impl core::fmt::Debug for MainSourceFactory {
+    impl core::fmt::Debug for FallbacksrcSourceFactory {
         fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-            f.debug_struct("MainSourceFactory").finish_non_exhaustive()
+            f.debug_struct("FallbacksrcSourceFactory")
+                .finish_non_exhaustive()
         }
     }
 
@@ -1446,7 +1448,9 @@ mod factory {
         unblock: Option<UnblockHandle>,
         /// The application's source for a `fallbacksrc` with no `uri=` (M1198).
         /// `None` (the default) makes such a line a parse error.
-        fallbacksrc_main_source: Option<MainSourceFactory>,
+        fallbacksrc_main_source: Option<FallbacksrcSourceFactory>,
+        // None leaves a line with no `fallback-uri=` the dummy generators
+        fallbacksrc_fallback_source: Option<FallbacksrcSourceFactory>,
         /// Bare-`decodebin` primary-stream hooks (M746): a `filesrc location=X !
         /// decodebin` on a container tries each until one sniffs the file and names
         /// the single-stream demux + stream selection for its primary decodable
@@ -1657,7 +1661,7 @@ mod factory {
 
         /// The application's source for a `fallbacksrc` with no `uri=` (M1198), if
         /// one is registered.
-        pub fn fallbacksrc_main_source(&self) -> Option<MainSourceFactory> {
+        pub fn fallbacksrc_main_source(&self) -> Option<FallbacksrcSourceFactory> {
             self.fallbacksrc_main_source.clone()
         }
 
@@ -1666,9 +1670,23 @@ mod factory {
         /// registry, a second call replaces the first. Returns `&mut self`.
         pub fn register_fallbacksrc_main_source(
             &mut self,
-            factory: MainSourceFactory,
+            factory: FallbacksrcSourceFactory,
         ) -> &mut Self {
             self.fallbacksrc_main_source = Some(factory);
+            self
+        }
+
+        pub fn fallbacksrc_fallback_source(&self) -> Option<FallbacksrcSourceFactory> {
+            self.fallbacksrc_fallback_source.clone()
+        }
+
+        /// The fallback source of a `fallbacksrc` with no `fallback-uri=` (M1203),
+        /// in place of the dummy generators. A second call replaces the first.
+        pub fn register_fallbacksrc_fallback_source(
+            &mut self,
+            factory: FallbacksrcSourceFactory,
+        ) -> &mut Self {
+            self.fallbacksrc_fallback_source = Some(factory);
             self
         }
 
@@ -2832,11 +2850,11 @@ mod factory {
 #[cfg(feature = "std")]
 pub use factory::{
     declared_source_caps, AutoplugError, AutoplugParams, DecodebinError, DecodebinSelectHook,
-    DemuxFactory, DemuxSelectHook, ElementDoc, ElementFactory, FanoutRebuild, FanoutSrcFactory,
-    LaunchFactory, MainSourceFactory, MuxerFactory, PlaybinError, PlaybinGraphError, PlaybinHook,
-    PlaybinPort, PrimaryStream, PrimaryStreamHook, PropertyDoc, Registry, RestartFanoutSourceHook,
-    RestartPolicy, RestartSourceHook, SourceFactory, Uri, UriError, UriFanout, UriFanoutHead,
-    UriFanoutHook, UriFanoutPort, UriRebuild, UriSourceFactory,
+    DemuxFactory, DemuxSelectHook, ElementDoc, ElementFactory, FallbacksrcSourceFactory,
+    FanoutRebuild, FanoutSrcFactory, LaunchFactory, MuxerFactory, PlaybinError, PlaybinGraphError,
+    PlaybinHook, PlaybinPort, PrimaryStream, PrimaryStreamHook, PropertyDoc, Registry,
+    RestartFanoutSourceHook, RestartPolicy, RestartSourceHook, SourceFactory, Uri, UriError,
+    UriFanout, UriFanoutHead, UriFanoutHook, UriFanoutPort, UriRebuild, UriSourceFactory,
 };
 
 #[cfg(test)]
