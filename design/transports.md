@@ -376,14 +376,25 @@ ends have to agree, so a payload arriving in that mode fails the run rather than
 being discarded. `metaonly.rs` holds the property and the merge, shared by the
 native transforms and the wasm `WsWireTransform` (`with_meta_only`).
 
-`serve_ws_stage` is the peer half. It accepts one client, splits the connection,
-and runs `run_linear_chain` over it: the read half backs a source that discovers
-the caps from the leading message, the write half a sink that returns one frame
-per frame (control stays local, since a reply pairs with the frame that caused
-it). So the offloaded stage can be a whole subgraph, a `Bin`'s interior
-flattened into its stages, rather than something hand-written per peer. Its
-`meta_only` flag is the serving end of the mode above. A branching subgraph is
-not covered: the host runs a linear chain.
+`serve_ws_stage` is the peer half. It takes a `Bin` with exactly one ghost
+input and one ghost output, accepts one client and splits the connection. The
+read half backs a source that discovers the caps from the leading message and
+links to the ghost input. The write half backs a sink on the ghost output that
+returns frames only, since a reply pairs with the frame that caused it. The
+flattened graph runs on `run_graph`, so the offloaded stage can branch: tees,
+side branches that end in local sinks, muxers that rejoin. A linear chain is
+just a bin whose transforms are linked in a row. Its `meta_only` flag is the
+serving end of the mode above.
+
+The client sends one frame and waits for its reply before the next, so the bin
+has to deliver exactly one frame to its ghost output per frame on its ghost
+input, in order, keeping that frame's `sequence`, and without waiting on a
+later frame. The source records the sequence of each frame it reads, and the
+sink checks every reply against the oldest one still owed. A reply that is
+extra, reordered or renumbered fails the host run and drops the connection, so
+the client fails too rather than pairing a frame with another frame's reply.
+End of stream with replies still owed fails the same way. A bin that drops or
+holds back a frame is not detected: both ends wait on each other.
 
 One generic, detection-agnostic element covers what a hand-rolled RGBA-up /
 boxes-down protocol would. The browser graph

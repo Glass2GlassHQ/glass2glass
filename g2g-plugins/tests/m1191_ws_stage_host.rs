@@ -14,12 +14,11 @@
 use core::future::Future;
 use core::pin::Pin;
 
-use g2g_core::element::DynAsyncElement;
 use g2g_core::frame::Frame;
 use g2g_core::memory::{MemoryDomain, SystemSlice};
-use g2g_core::runtime::{run_source_transform_sink, LatencyProfile, SourceLoop};
+use g2g_core::runtime::{run_source_transform_sink, GraphNodeRef, LatencyProfile, SourceLoop};
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError,
+    AsyncElement, Bin, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, FrameTiming, G2gError,
     OutputSink, PipelineClock, PipelinePacket, Rate, RawVideoFormat,
 };
 
@@ -172,6 +171,20 @@ impl AsyncElement for CollectSink {
     }
 }
 
+/// The hosted subgraph: `stages` in a row, the first taking the client's frames
+/// and the last giving the replies.
+fn chain_bin(stages: Vec<GraphNodeRef<'static>>) -> Bin<GraphNodeRef<'static>> {
+    let mut bin = Bin::new();
+    let nodes: Vec<_> = stages.into_iter().map(|s| bin.add_transform(s)).collect();
+    for pair in nodes.windows(2) {
+        bin.link(pair[0], pair[1]).expect("link");
+    }
+    bin.ghost_input(nodes[0]).expect("ghost input");
+    bin.ghost_output(nodes[nodes.len() - 1])
+        .expect("ghost output");
+    bin
+}
+
 /// A listener the host adopts, plus the URL the client dials. Bound up front:
 /// the transform's connect does not retry, so the port has to be listening
 /// before the client's first frame.
@@ -187,16 +200,15 @@ async fn a_hosted_chain_processes_every_frame_the_client_offloads() {
 
     // The peer: two stages run as one offloaded subgraph. Driven on this task
     // (the runner's futures are not Send, so join! rather than spawn).
-    let mut first = AddStage {
-        step: FIRST_STAGE_ADDS,
-    };
-    let mut second = AddStage {
-        step: SECOND_STAGE_ADDS,
-    };
-    let host = async {
-        let stages: Vec<&mut dyn DynAsyncElement> = vec![&mut first, &mut second];
-        serve_ws_stage_on(listener, stages, &ZeroClock, 4, false).await
-    };
+    let stage = chain_bin(vec![
+        GraphNodeRef::element(AddStage {
+            step: FIRST_STAGE_ADDS,
+        }),
+        GraphNodeRef::element(AddStage {
+            step: SECOND_STAGE_ADDS,
+        }),
+    ]);
+    let host = serve_ws_stage_on(listener, stage, &ZeroClock, 4, false);
 
     // The client graph: offload the middle stage to that peer.
     let mut src = CountSrc;
@@ -336,11 +348,8 @@ async fn a_meta_only_host_returns_the_stage_s_metadata_alone() {
     }
 
     let (listener, url) = bound_listener();
-    let mut stage = DetectStage;
-    let host = async {
-        let stages: Vec<&mut dyn DynAsyncElement> = vec![&mut stage];
-        serve_ws_stage_on(listener, stages, &ZeroClock, 4, true).await
-    };
+    let stage = chain_bin(vec![GraphNodeRef::element(DetectStage)]);
+    let host = serve_ws_stage_on(listener, stage, &ZeroClock, 4, true);
 
     let mut src = CountSrc;
     let mut xform = RemoteWsTransform::new(url).with_meta_only(true);

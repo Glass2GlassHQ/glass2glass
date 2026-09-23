@@ -103,8 +103,6 @@ Highest leverage first:
   - Data-channel loose ends: str0m surfaces no remote-close event, so EOS rides
     an explicit marker message; a WHIP/SFU-signalled data channel vs the P2P
     `SdpChannel` seam.
-- **Remote graph carriers.** `serve_ws_stage` hosts a linear chain; a branching
-  subgraph needs the DAG runner behind the same seam.
 
 ## Adaptive streaming (HLS / DASH)
 
@@ -161,11 +159,6 @@ Highest leverage first:
 
 - **Pure-Rust / wasm decode** to drop the ffmpeg FFI: VP8 / VP9 decode and a
   pure-Rust Opus path (see the roadmap for why both are blocked).
-
-## Audio depth
-
-- Carry an explicit channel mask/positions in `Caps::Audio` rather than only a
-  count with the per-count `ChannelLayout` convention.
 
 ## Colorimetry
 
