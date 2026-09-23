@@ -65,6 +65,8 @@ fn registry_with_anysink() -> Registry {
     reg
 }
 
+// `name=` is the muxer's instance name, so the fan node reports as `m`
+const FANIN_MUX_NAME: &str = "m";
 const FANIN: &str =
     "videotestsrc num-buffers=4 ! m.   videotestsrc num-buffers=3 ! m.   funnel name=m ! anysink";
 
@@ -87,7 +89,7 @@ async fn observed_muxer_fanin_reports_the_fan_node() {
     let mux = stats
         .per_element
         .iter()
-        .find(|e| e.name == "mux0")
+        .find(|e| e.name == FANIN_MUX_NAME)
         .expect("muxer node present in per_element");
     assert!(
         mux.proc.count > 0,
@@ -104,7 +106,7 @@ async fn observed_muxer_fanin_reports_the_fan_node() {
         .find(|n| n.role == NodeRole::Muxer)
         .expect("muxer node in snapshot");
     let lat = mux_node.latency.as_ref().expect("muxer probed");
-    assert_eq!(lat.name, "mux0");
+    assert_eq!(lat.name, FANIN_MUX_NAME);
     assert!(lat.proc.count > 0, "snapshot sees the muxer's timed frames");
 }
 
@@ -124,7 +126,7 @@ async fn threaded_observed_muxer_fanin_reports_the_fan_node() {
     let mux = stats
         .per_element
         .iter()
-        .find(|e| e.name == "mux0")
+        .find(|e| e.name == FANIN_MUX_NAME)
         .expect("muxer node present in per_element under the threaded runner");
     assert!(
         mux.proc.count > 0,

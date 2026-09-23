@@ -551,7 +551,13 @@ pub fn gst_name_synonyms(registry: &Registry) -> Vec<(&'static str, &'static str
     }
     for (gst_name, equivalent) in GST_MAP {
         if let GstEquivalent::Renamed(g2g_name) = equivalent {
-            add(gst_name, g2g_name);
+            // an alias this build resolves outranks the table's target
+            let target = if registry_has(registry, gst_name) {
+                gst_name
+            } else {
+                g2g_name
+            };
+            add(gst_name, target);
         }
     }
     pairs.sort_unstable();
