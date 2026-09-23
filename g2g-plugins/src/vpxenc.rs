@@ -275,7 +275,7 @@ impl AsyncElement for VpxEnc {
                 width,
                 height,
                 framerate,
-                                ..
+                ..
             } => CapsSet::one(Caps::CompressedVideo {
                 codec,
                 width: width.clone(),
@@ -293,7 +293,7 @@ impl AsyncElement for VpxEnc {
             width,
             height,
             framerate,
-                        ..
+            ..
         } = absolute_caps
         else {
             return Err(G2gError::CapsMismatch);
