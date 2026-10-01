@@ -1680,15 +1680,20 @@ struct PacketSampler {
     remaining: AtomicUsize,
 }
 
+fn claim_one(remaining: &AtomicUsize) -> bool {
+    let mut current = remaining.load(Ordering::Relaxed);
+    while let Some(next) = current.checked_sub(1) {
+        match remaining.compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => return true,
+            Err(actual) => current = actual,
+        }
+    }
+    false
+}
+
 impl LinkInterceptor for PacketSampler {
     fn on_packet(&self, packet: &PipelinePacket) -> ProbeAction {
-        if self
-            .remaining
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
-                remaining.checked_sub(1)
-            })
-            .is_err()
-        {
+        if !claim_one(&self.remaining) {
             return ProbeAction::Pass;
         }
         let mut caps = self.caps.lock().expect("packet sampler caps");
@@ -1866,13 +1871,7 @@ impl LinkInterceptor for FrameCapture {
         let PipelinePacket::DataFrame(frame) = packet else {
             return ProbeAction::Pass;
         };
-        if self
-            .remaining
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
-                remaining.checked_sub(1)
-            })
-            .is_err()
-        {
+        if !claim_one(&self.remaining) {
             return ProbeAction::Pass;
         }
         let _ = self.sender.try_send(CapturedFrame {
