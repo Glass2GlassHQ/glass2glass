@@ -4682,3 +4682,67 @@ fn mqttsrc_broker_properties() {
         "a launch line starting at mqttsrc parses"
     );
 }
+
+#[cfg(feature = "std")]
+#[test]
+fn appsink_caps_and_input_domains() {
+    use g2g_core::memory::{DomainSet, MemoryDomainKind};
+    use g2g_core::PropError;
+    use g2g_plugins::appsink::AppSink;
+    let mut sink = AppSink::new();
+    assert!(declares(sink.properties(), "input-domains"));
+    assert!(declares(sink.properties(), "caps"));
+
+    sink.set_property(
+        "input-domains",
+        PropValue::Str(String::from("dmabuf, system")),
+    )
+    .unwrap();
+    assert_eq!(
+        sink.input_domains(),
+        DomainSet::only(MemoryDomainKind::DmaBuf).with(MemoryDomainKind::System)
+    );
+    assert_eq!(
+        sink.get_property("input-domains"),
+        Some(PropValue::Str(String::from("dmabuf,system")))
+    );
+    assert_eq!(
+        sink.set_property("input-domains", PropValue::Str(String::from("dmabuf,vram"))),
+        Err(PropError::Value),
+        "an unknown domain name is rejected"
+    );
+
+    let caps = "video/x-raw,format=RGBA,width=4,height=2,framerate=30/1";
+    sink.set_property("caps", PropValue::Str(String::from(caps)))
+        .unwrap();
+    assert_eq!(
+        sink.get_property("caps"),
+        Some(PropValue::Str(String::from(caps)))
+    );
+    assert!(matches!(
+        sink.caps_constraint_as_sink(),
+        g2g_core::CapsConstraint::Accepts(_)
+    ));
+}
+
+#[cfg(feature = "wgpu-sink")]
+#[test]
+fn wgpucompositor_gpu_output() {
+    use g2g_core::memory::{DomainSet, MemoryDomainKind};
+    use g2g_core::MultiInputElement;
+    use g2g_plugins::compositor::CompositorPad;
+    use g2g_plugins::wgpucompositor::WgpuCompositor;
+    let mut e = WgpuCompositor::new(320, 240, Vec::from([CompositorPad::at(0, 0)]));
+    assert!(declares(e.properties(), "gpu-output"));
+    assert_eq!(
+        e.get_property("gpu-output"),
+        Some(declared_default(e.properties(), "gpu-output"))
+    );
+    e.set_property("gpu-output", PropValue::Bool(true)).unwrap();
+    assert_eq!(e.get_property("gpu-output"), Some(PropValue::Bool(true)));
+    assert_eq!(
+        e.output_domains(),
+        DomainSet::only(MemoryDomainKind::WgpuTexture),
+        "the composite leaves as a texture"
+    );
+}

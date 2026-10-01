@@ -106,6 +106,7 @@ async fn export_dmabuf(bytes: &[u8], caps: &Caps) -> Option<Frame> {
             PipelinePacket::DataFrame(Frame {
                 domain: MemoryDomain::WgpuBuffer(WgpuToDmaBuf::wrap_buffer(
                     &device,
+                    &queue,
                     source,
                     bytes.len(),
                 )),

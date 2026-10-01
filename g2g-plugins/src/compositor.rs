@@ -274,9 +274,19 @@ macro_rules! compositor_props {
 
 static COMPOSITOR_PROPS: &[PropertySpec] = compositor_props!([0 1 2 3 4 5 6 7], FORMAT_PROP);
 
-/// The same table without the CPU-only `format` (this element is RGBA8).
 #[cfg(feature = "wgpu-sink")]
-pub(crate) static WGPU_COMPOSITOR_PROPS: &[PropertySpec] = compositor_props!([0 1 2 3 4 5 6 7]);
+const GPU_OUTPUT_PROP: PropertySpec = PropertySpec::new(
+    "gpu-output",
+    PropKind::Bool,
+    "hand the composite on as a wgpu texture instead of reading it back to system memory",
+)
+.with_default("false");
+
+/// The same table without the CPU-only `format` (this element is RGBA8), plus
+/// the GPU-only `gpu-output`.
+#[cfg(feature = "wgpu-sink")]
+pub(crate) static WGPU_COMPOSITOR_PROPS: &[PropertySpec] =
+    compositor_props!([0 1 2 3 4 5 6 7], GPU_OUTPUT_PROP);
 
 /// Apply a flattened per-pad property. `None` when `name` is not one; `Err` when
 /// it names a pad this element does not have (silently ignoring it would leave a

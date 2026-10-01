@@ -17,6 +17,8 @@ use g2g_plugins::registry::default_registry;
 /// pull channels carry their own bounds.
 const LINK_CAPACITY: usize = 4;
 
+const OUTPUT_DOMAINS: &str = "dmabuf,system";
+
 /// Monotonic counter for collision-free `appsrc` / `appsink` channel names. The
 /// named-feed registries those elements use are process-global (keyed by the
 /// channel string), so every `BridgeGraph` must claim a unique pair. An atomic
@@ -100,8 +102,8 @@ impl BridgeGraph {
     /// input (a rescaling / reformatting fragment, e.g.
     /// `"videoscale"` with `input_caps` 1280x720 and `output_caps` 640x360).
     ///
-    /// `output_caps` pins the sub-graph's final caps with a trailing inline
-    /// filter: it both gives a caps-driven transform a fixate target and declares
+    /// `output_caps` pins the sub-graph's final caps on the embedded `appsink`:
+    /// it both gives a caps-driven transform a fixate target and declares
     /// to the embedder (the GStreamer shell) the size/format of the frames the
     /// graph will produce, so it can allocate matching output buffers.
     pub fn with_output_caps(
@@ -118,14 +120,16 @@ impl BridgeGraph {
         let feed = register_appsrc(&in_ch);
         let pull = register_appsink_pull(&out_ch);
 
-        // Pin the sub-graph's output with a trailing inline caps filter. A
-        // caps-driven transform (videoconvert, videoscale, videoflip) cannot
-        // fixate its output when the downstream `appsink` imposes no concrete
-        // caps, so it errors and produces nothing; the filter gives it a target.
-        // When `output_caps == input_caps` (the default via `new`) this also
-        // enforces the caps/size-preserving contract.
+        // Pin the sub-graph's output caps on the `appsink`. A caps-driven
+        // transform (videoconvert, videoscale, videoflip) cannot fixate its
+        // output when the downstream `appsink` imposes no concrete caps, so it
+        // errors and produces nothing; the caps give it a target. When
+        // `output_caps == input_caps` (the default via `new`) this also enforces
+        // the caps/size-preserving contract. The caps sit on the sink rather
+        // than on a filter in front of it, because a filter would hide a GPU
+        // producer's domain from the converter auto-plug.
         let desc = format!(
-            "appsrc channel={in_ch} caps={input_caps} ! {fragment} ! {output_caps} ! appsink channel={out_ch}"
+            "appsrc channel={in_ch} caps={input_caps} ! {fragment} ! appsink caps={output_caps} input-domains={OUTPUT_DOMAINS} channel={out_ch}"
         );
 
         let reg = default_registry();
@@ -248,9 +252,10 @@ impl Drop for BridgeGraph {
 }
 
 /// Borrow a system-memory frame's bytes, the common case for the bridge (the
-/// embedder pushed `System` buffers and the graph kept them in system memory).
-/// Returns `None` for a GPU-resident frame, which the embedder must download
-/// before it can be handed back to GStreamer as a `GstBuffer`.
+/// embedder pushed `System` buffers, or the graph downloaded a GPU frame before
+/// the `appsink`). Returns `None` for a `DmaBuf` frame, which the embedder wraps
+/// as dma-buf memory instead, and for a frame in a domain g2g has no download
+/// converter for.
 pub fn frame_bytes(frame: &Frame) -> Option<&[u8]> {
     frame.domain.as_system_slice()
 }

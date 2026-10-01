@@ -145,7 +145,9 @@ pub struct G2gBridge(BridgeGraph);
 
 /// An output frame lent to C: a borrowed view plus the owning boxed [`Frame`].
 /// C copies `data[..len]` into its `GstBuffer`, then calls
-/// [`g2g_bridge_out_release`] to drop the frame.
+/// [`g2g_bridge_out_release`] to drop the frame. A dma-buf frame is released
+/// only once GStreamer frees the memory wrapping it, since its producer may
+/// recycle the buffer as soon as the frame drops.
 #[repr(C)]
 #[derive(Debug)]
 pub struct G2gOut {
@@ -303,8 +305,9 @@ pub unsafe extern "C" fn g2g_bridge_push_dmabuf(
 /// Block until the next processed frame and lend it to C via `*out`. Returns 1
 /// with `*out` filled (`kind` selects the system-bytes vs dma-buf payload), -1 at
 /// end-of-stream (or null handle), -2 for a memory domain the shell cannot hand
-/// back (a GPU-resident frame that is neither system nor dma-buf; download it in
-/// the sub-graph first).
+/// back. The embedded `appsink` takes dma-buf or system memory, so the auto-plug
+/// downloads a wgpu or CUDA frame first; -2 is left for a domain g2g has no
+/// download converter for.
 ///
 /// # Safety
 /// `bridge` must be a live handle; `out` must point to writable [`G2gOut`].

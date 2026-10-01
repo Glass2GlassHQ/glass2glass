@@ -86,7 +86,7 @@ async fn timeline_sync_roundtrip_multi_frame() {
         queue.write_buffer(&src, 0, &pattern);
 
         let frame_in = Frame {
-            domain: MemoryDomain::WgpuBuffer(WgpuToDmaBuf::wrap_buffer(&dev, src, SIZE)),
+            domain: MemoryDomain::WgpuBuffer(WgpuToDmaBuf::wrap_buffer(&dev, &queue, src, SIZE)),
             timing: FrameTiming::default(),
             sequence: n,
             meta: Default::default(),

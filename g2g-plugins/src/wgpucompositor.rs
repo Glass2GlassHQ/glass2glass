@@ -806,7 +806,7 @@ impl WgpuCompositor {
     /// Copy the composited canvas into a fresh per-frame texture handed
     /// downstream. Fresh (not the shared buffer) so the next frame's dispatch
     /// cannot clobber a canvas still in flight.
-    fn canvas_texture(&self) -> Result<wgpu::Texture, G2gError> {
+    fn canvas_texture(&self) -> Result<WgpuTextureKeepAlive, G2gError> {
         let gpu = self.gpu.as_ref().ok_or(G2gError::NotConfigured)?;
         let size = wgpu::Extent3d {
             width: self.out_w,
@@ -846,7 +846,11 @@ impl WgpuCompositor {
             size,
         );
         gpu.queue.submit([encoder.finish()]);
-        Ok(texture)
+        Ok(WgpuTextureKeepAlive::new(
+            gpu.device.clone(),
+            gpu.queue.clone(),
+            texture,
+        ))
     }
 
     /// The pixels to cache for a delivered frame. A GPU texture is kept by
@@ -886,7 +890,7 @@ impl WgpuCompositor {
             MemoryDomain::WgpuTexture(OwnedWgpuTexture::new(
                 self.out_w,
                 self.out_h,
-                Arc::new(WgpuTextureKeepAlive(self.canvas_texture()?)),
+                Arc::new(self.canvas_texture()?),
             ))
         } else {
             MemoryDomain::System(SystemSlice::from_boxed(self.read_canvas()?))
@@ -925,6 +929,14 @@ impl MultiInputElement for WgpuCompositor {
             .with(g2g_core::memory::MemoryDomainKind::System)
     }
 
+    fn output_domains(&self) -> g2g_core::memory::DomainSet {
+        let domain = match self.gpu_output {
+            true => g2g_core::memory::MemoryDomainKind::WgpuTexture,
+            false => g2g_core::memory::MemoryDomainKind::System,
+        };
+        g2g_core::memory::DomainSet::only(domain)
+    }
+
     fn input_count(&self) -> usize {
         self.pads.len()
     }
@@ -960,6 +972,7 @@ impl MultiInputElement for WgpuCompositor {
             "framerate" => self.framerate_q16 = framerate_property(&value)?,
             "background-color" => self.background = color_property(&value)?,
             "timed-output" => self.state.set_hold(value.as_bool().ok_or(PropError::Type)?),
+            "gpu-output" => self.gpu_output = value.as_bool().ok_or(PropError::Type)?,
             _ => return Err(PropError::Unknown),
         }
         Ok(())
@@ -975,6 +988,7 @@ impl MultiInputElement for WgpuCompositor {
             "framerate" => PropValue::Fraction((self.framerate_q16 >> 16) as i32, 1),
             "background-color" => color_value(self.background),
             "timed-output" => PropValue::Bool(self.state.hold_enabled()),
+            "gpu-output" => PropValue::Bool(self.gpu_output),
             _ => return None,
         })
     }
@@ -1303,7 +1317,11 @@ mod tests {
             MemoryDomain::WgpuTexture(OwnedWgpuTexture::new(
                 w,
                 h,
-                Arc::new(WgpuTextureKeepAlive(texture)),
+                Arc::new(WgpuTextureKeepAlive::new(
+                    ctx.device.clone(),
+                    ctx.queue.clone(),
+                    texture,
+                )),
             )),
             FrameTiming::default(),
             0,

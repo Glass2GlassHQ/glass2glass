@@ -866,6 +866,10 @@ pub trait MultiInputElement: ElementBound {
         DomainSet::ALL
     }
 
+    fn output_domains(&self) -> DomainSet {
+        DomainSet::only(crate::memory::MemoryDomainKind::System)
+    }
+
     /// Receive this instance's log name and a per-instance log category
     /// override, mirroring
     /// [`AsyncElement::set_instance_name`]

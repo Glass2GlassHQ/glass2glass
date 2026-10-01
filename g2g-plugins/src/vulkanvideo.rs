@@ -14709,7 +14709,11 @@ impl VulkanVideoDec {
                 ));
                 MemoryDomain::WgpuTexture(OwnedWgpuTexture::new(w, h, keep))
             } else {
-                let keep = alloc::sync::Arc::new(crate::gpu::WgpuTextureKeepAlive(tex));
+                let keep = alloc::sync::Arc::new(crate::gpu::WgpuTextureKeepAlive::new(
+                    device.wgpu_device.clone(),
+                    device.wgpu_queue.clone(),
+                    tex,
+                ));
                 MemoryDomain::WgpuTexture(OwnedWgpuTexture::new(w, h, keep))
             };
             let out_frame = Frame {

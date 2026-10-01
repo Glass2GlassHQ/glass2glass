@@ -426,6 +426,9 @@ pub trait DynMultiInputElement: ElementBound {
     fn input_domains(&self) -> DomainSet {
         DomainSet::ALL
     }
+    fn output_domains(&self) -> DomainSet {
+        DomainSet::only(crate::memory::MemoryDomainKind::System)
+    }
     /// Dyn-safe mirror of [`MultiInputElement::propose_allocation_for_input`].
     fn propose_allocation_for_input(&self, input: usize, caps: &Caps) -> Option<AllocationParams>;
     /// Dyn-safe mirror of [`MultiInputElement::propose_allocation_for_output`].
@@ -554,6 +557,10 @@ impl<T: MultiInputElement> DynMultiInputElement for T {
 
     fn input_domains(&self) -> DomainSet {
         MultiInputElement::input_domains(self)
+    }
+
+    fn output_domains(&self) -> DomainSet {
+        MultiInputElement::output_domains(self)
     }
 
     fn propose_allocation_for_input(&self, input: usize, caps: &Caps) -> Option<AllocationParams> {
@@ -752,6 +759,10 @@ impl MultiInputElement for MuxRef<'_> {
         self.0.input_domains()
     }
 
+    fn output_domains(&self) -> DomainSet {
+        self.0.output_domains()
+    }
+
     fn propose_allocation_for_input(&self, input: usize, caps: &Caps) -> Option<AllocationParams> {
         self.0.propose_allocation_for_input(input, caps)
     }
@@ -841,6 +852,10 @@ impl<'b> DynMultiInputElement for &'b mut (dyn DynMultiInputElement + 'b) {
 
     fn input_domains(&self) -> DomainSet {
         (**self).input_domains()
+    }
+
+    fn output_domains(&self) -> DomainSet {
+        (**self).output_domains()
     }
 
     fn propose_allocation_for_input(&self, input: usize, caps: &Caps) -> Option<AllocationParams> {

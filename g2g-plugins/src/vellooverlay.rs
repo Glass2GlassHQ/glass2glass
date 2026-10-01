@@ -100,6 +100,10 @@ struct Gpu {
 }
 
 impl Gpu {
+    fn keep_alive(&self, texture: wgpu::Texture) -> WgpuTextureKeepAlive {
+        WgpuTextureKeepAlive::new(self.device.clone(), self.queue.clone(), texture)
+    }
+
     /// Render `scene` into a fresh `w` x `h` RGBA8 texture, returned for an
     /// output frame to own.
     fn render_scene(&mut self, scene: &Scene, w: u32, h: u32) -> Result<wgpu::Texture, G2gError> {
@@ -459,11 +463,12 @@ impl AsyncElement for VelloAnalyticsOverlay {
 
                     ensure_gpu(&mut self.gpu, &self.ctx).await?;
                     let texture = self.render(rgba, &shapes)?;
+                    let gpu = self.gpu.as_ref().ok_or(G2gError::NotConfigured)?;
 
                     let domain = MemoryDomain::WgpuTexture(OwnedWgpuTexture::new(
                         self.width,
                         self.height,
-                        alloc::sync::Arc::new(WgpuTextureKeepAlive(texture)),
+                        alloc::sync::Arc::new(gpu.keep_alive(texture)),
                     ));
                     let mut out_frame = Frame::new(domain, frame.timing, frame.sequence);
                     // Carry the analytics forward so a downstream stage still sees
@@ -1066,11 +1071,12 @@ impl AsyncElement for VelloTextOverlay {
 
                     ensure_gpu(&mut self.gpu, &self.ctx).await?;
                     let texture = self.render(rgba, frame.timing.pts_ns)?;
+                    let gpu = self.gpu.as_ref().ok_or(G2gError::NotConfigured)?;
 
                     let domain = MemoryDomain::WgpuTexture(OwnedWgpuTexture::new(
                         self.width,
                         self.height,
-                        alloc::sync::Arc::new(WgpuTextureKeepAlive(texture)),
+                        alloc::sync::Arc::new(gpu.keep_alive(texture)),
                     ));
                     let mut out_frame = Frame::new(domain, frame.timing, frame.sequence);
                     out_frame.meta = frame.meta;

@@ -132,7 +132,11 @@ impl App {
             MemoryDomain::WgpuTexture(OwnedWgpuTexture::new(
                 W,
                 H,
-                Arc::new(WgpuTextureKeepAlive(self.textures[self.idx].clone())),
+                Arc::new(WgpuTextureKeepAlive::new(
+                    self.device.wgpu_device.clone(),
+                    self.device.wgpu_queue.clone(),
+                    self.textures[self.idx].clone(),
+                )),
             )),
             FrameTiming {
                 pts_ns: self.idx as u64 * FRAME_INTERVAL.as_nanos() as u64,

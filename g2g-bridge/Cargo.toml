@@ -32,6 +32,11 @@ g2g-core = { workspace = true }
 g2g-plugins = { workspace = true }
 tokio = { version = "1", features = ["rt", "time"], optional = true }
 
+# `wgpu-sink` brings in `wgpucompositor` and `wgpudownload`, so the tests can
+# run a fragment that ends in GPU memory.
+[dev-dependencies]
+g2g-plugins = { workspace = true, features = ["wgpu-sink"] }
+
 [build-dependencies]
 cc = "1"
 pkg-config = "0.3"

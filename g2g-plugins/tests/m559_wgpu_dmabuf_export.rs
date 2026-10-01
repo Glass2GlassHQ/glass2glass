@@ -71,7 +71,7 @@ async fn roundtrip(format: RawVideoFormat, w: u32, h: u32, size: usize) -> Optio
     queue.write_buffer(&src, 0, &pattern);
 
     let frame_in = Frame {
-        domain: MemoryDomain::WgpuBuffer(WgpuToDmaBuf::wrap_buffer(&dev, src, size)),
+        domain: MemoryDomain::WgpuBuffer(WgpuToDmaBuf::wrap_buffer(&dev, &queue, src, size)),
         timing: FrameTiming {
             pts_ns: 1234,
             ..FrameTiming::default()

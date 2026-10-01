@@ -1228,7 +1228,11 @@ mod tests {
             MemoryDomain::WgpuTexture(g2g_core::memory::OwnedWgpuTexture::new(
                 4,
                 4,
-                alloc::sync::Arc::new(crate::gpu::WgpuTextureKeepAlive(texture)),
+                alloc::sync::Arc::new(crate::gpu::WgpuTextureKeepAlive::new(
+                    ctx.device.clone(),
+                    ctx.queue.clone(),
+                    texture,
+                )),
             )),
             g2g_core::FrameTiming {
                 pts_ns,

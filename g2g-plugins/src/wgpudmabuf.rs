@@ -104,13 +104,22 @@ fn supported(format: RawVideoFormat) -> bool {
 #[derive(Debug)]
 pub struct PlainWgpuBuffer {
     buffer: wgpu::Buffer,
-    _device: wgpu::Device,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
 }
 
 impl PlainWgpuBuffer {
     /// The wrapped buffer.
     pub fn buffer(&self) -> &wgpu::Buffer {
         &self.buffer
+    }
+
+    pub fn device(&self) -> &wgpu::Device {
+        &self.device
+    }
+
+    pub fn queue(&self) -> &wgpu::Queue {
+        &self.queue
     }
 }
 
@@ -230,13 +239,19 @@ impl WgpuToDmaBuf {
 
     /// Wrap a `wgpu::Buffer` (allocated on this element's [`gpu`](Self::gpu)
     /// device, with `COPY_SRC` usage) as a `WgpuBuffer` frame domain this element
-    /// accepts.
-    pub fn wrap_buffer(device: &wgpu::Device, buffer: wgpu::Buffer, len: usize) -> OwnedWgpuBuffer {
+    /// accepts. `queue` is the device's, so a download can read the buffer back.
+    pub fn wrap_buffer(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        buffer: wgpu::Buffer,
+        len: usize,
+    ) -> OwnedWgpuBuffer {
         OwnedWgpuBuffer::new(
             len,
             Arc::new(PlainWgpuBuffer {
                 buffer,
-                _device: device.clone(),
+                device: device.clone(),
+                queue: queue.clone(),
             }),
         )
     }

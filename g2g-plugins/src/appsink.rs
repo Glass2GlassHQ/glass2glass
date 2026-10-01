@@ -26,12 +26,15 @@ use alloc::vec::Vec;
 
 use spin::Mutex;
 
+use crate::capsfilter::parse_caps_set;
+
 use g2g_core::frame::Frame;
+use g2g_core::memory::{DomainSet, MemoryDomainKind};
 use g2g_core::runtime::{bounded, Receiver, Sender};
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, ConfigureOutcome, ElementMetadata, G2gError, MemoryDomain,
-    OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue,
-    PropertySpec,
+    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, G2gError,
+    MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
+    PropValue, PropertySpec,
 };
 
 /// Bounded depth of the element -> application pull channel. A full channel
@@ -133,7 +136,9 @@ impl AppSinkPull {
     }
 }
 
-/// Application pull/callback sink. Accepts any caps.
+/// Application pull/callback sink. Accepts any caps unless narrowed by the `caps`
+/// property, and every memory domain unless narrowed with
+/// [`with_input_domains`](AppSink::with_input_domains).
 ///
 /// # Example
 ///
@@ -144,17 +149,37 @@ impl AppSinkPull {
 /// let sink = AppSink::new().with_channel("frames");
 /// let next = pull.try_pull();
 /// ```
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct AppSink {
     channel: String,
+    caps: Option<(String, CapsSet)>,
+    input_domains: DomainSet,
     configured: bool,
     mode: Option<SinkMode>,
     received: u64,
 }
 
+impl Default for AppSink {
+    fn default() -> Self {
+        Self {
+            channel: String::new(),
+            caps: None,
+            input_domains: DomainSet::ALL,
+            configured: false,
+            mode: None,
+            received: 0,
+        }
+    }
+}
+
 impl AppSink {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn with_input_domains(mut self, domains: DomainSet) -> Self {
+        self.input_domains = domains;
+        self
     }
 
     /// Set the delivery `channel` name programmatically (the builder path; the
@@ -186,11 +211,24 @@ impl AsyncElement for AppSink {
         Self: 'a;
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
-        Ok(upstream_caps.clone())
+        let Some((_, set)) = &self.caps else {
+            return Ok(upstream_caps.clone());
+        };
+        set.alternatives()
+            .iter()
+            .find_map(|alternative| upstream_caps.intersect(alternative).ok())
+            .ok_or(G2gError::CapsMismatch)
     }
 
     fn caps_constraint_as_sink(&self) -> CapsConstraint<'_> {
-        CapsConstraint::AcceptsAny
+        match &self.caps {
+            Some((_, set)) => CapsConstraint::Accepts(set.clone()),
+            None => CapsConstraint::AcceptsAny,
+        }
+    }
+
+    fn input_domains(&self) -> DomainSet {
+        self.input_domains
     }
 
     fn configure_pipeline(&mut self, _absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -282,16 +320,93 @@ impl AsyncElement for AppSink {
                 self.channel = value.as_str().ok_or(PropError::Type)?.to_string();
                 Ok(())
             }
+            "caps" => {
+                let text = value.as_str().ok_or(PropError::Type)?;
+                let set = parse_caps_set(text).ok_or(PropError::Value)?;
+                if set.alternatives().is_empty() {
+                    return Err(PropError::Value);
+                }
+                self.caps = Some((text.to_string(), set));
+                Ok(())
+            }
+            "input-domains" => {
+                self.input_domains = parse_domains(value.as_str().ok_or(PropError::Type)?)?;
+                Ok(())
+            }
             _ => Err(PropError::Unknown),
+        }
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "channel" => Some(PropValue::Str(self.channel_name().to_string())),
+            "caps" => self
+                .caps
+                .as_ref()
+                .map(|(text, _)| PropValue::Str(text.clone())),
+            "input-domains" => Some(PropValue::Str(domain_names(self.input_domains))),
+            _ => None,
         }
     }
 }
 
-static APPSINK_PROPS: &[PropertySpec] = &[PropertySpec::new(
-    "channel",
-    PropKind::Str,
-    "delivery name matching set_appsink_callback / register_appsink_pull (default \"default\")",
-)];
+const MEMORY_DOMAIN_NAMES: &[(&str, MemoryDomainKind)] = &[
+    ("system", MemoryDomainKind::System),
+    ("systemview", MemoryDomainKind::SystemView),
+    ("dmabuf", MemoryDomainKind::DmaBuf),
+    ("vulkantexture", MemoryDomainKind::VulkanTexture),
+    ("webgpubuffer", MemoryDomainKind::WebGPUBuffer),
+    ("cuda", MemoryDomainKind::Cuda),
+    ("d3d11texture", MemoryDomainKind::D3D11Texture),
+    ("cvpixelbuffer", MemoryDomainKind::CvPixelBuffer),
+    (
+        "webgpuexternaltexture",
+        MemoryDomainKind::WebGPUExternalTexture,
+    ),
+    ("wgputexture", MemoryDomainKind::WgpuTexture),
+    ("wgpubuffer", MemoryDomainKind::WgpuBuffer),
+];
+
+fn parse_domains(names: &str) -> Result<DomainSet, PropError> {
+    names.split(',').try_fold(DomainSet::EMPTY, |set, name| {
+        let (_, kind) = MEMORY_DOMAIN_NAMES
+            .iter()
+            .find(|(known, _)| *known == name.trim())
+            .ok_or(PropError::Value)?;
+        Ok(set.with(*kind))
+    })
+}
+
+fn domain_names(set: DomainSet) -> String {
+    let names: Vec<&str> = set
+        .iter()
+        .filter_map(|kind| {
+            MEMORY_DOMAIN_NAMES
+                .iter()
+                .find(|(_, known)| *known == kind)
+                .map(|(name, _)| *name)
+        })
+        .collect();
+    names.join(",")
+}
+
+static APPSINK_PROPS: &[PropertySpec] = &[
+    PropertySpec::new(
+        "channel",
+        PropKind::Str,
+        "delivery name matching set_appsink_callback / register_appsink_pull (default \"default\")",
+    ),
+    PropertySpec::new(
+        "caps",
+        PropKind::Str,
+        "caps to accept, gst-launch syntax (default any)",
+    ),
+    PropertySpec::new(
+        "input-domains",
+        PropKind::Str,
+        "comma-separated memory domains to accept, e.g. dmabuf,system (default every domain)",
+    ),
+];
 
 impl PadTemplates for AppSink {
     fn pad_templates() -> Vec<PadTemplate> {

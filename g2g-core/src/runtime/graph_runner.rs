@@ -199,14 +199,16 @@ impl<'a> GraphNodeRef<'a> {
 
     /// The memory domain of the frames this node emits on its output pad(s)
     /// (M285): the source's / element's `output_memory`, surfaced per edge for
-    /// the DOT dump so a GPU / zero-copy link is marked. Fan-in / fan-out
-    /// elements are reported as `System` (their domain is the upstream's; the
-    /// per-edge derivation does not propagate through them yet).
+    /// the DOT dump so a GPU / zero-copy link is marked. A fan-in reports the
+    /// preferred domain it declares; fan-out elements are reported as `System`
+    /// (their domain is the upstream's; the per-edge derivation does not
+    /// propagate through them yet).
     pub fn output_memory(&self) -> crate::memory::MemoryDomainKind {
         match self {
             GraphNodeRef::Source(s) => s.output_memory(),
             GraphNodeRef::Element(e) => e.output_memory(),
-            GraphNodeRef::Muxer(_) | GraphNodeRef::FanoutSource(_) | GraphNodeRef::Demux(_) => {
+            GraphNodeRef::Muxer(m) => m.output_domains().preferred().unwrap_or_default(),
+            GraphNodeRef::FanoutSource(_) | GraphNodeRef::Demux(_) => {
                 crate::memory::MemoryDomainKind::System
             }
         }
@@ -214,14 +216,15 @@ impl<'a> GraphNodeRef<'a> {
 
     /// The full set of memory domains this node can emit (M351), the
     /// producer-capability half of the two-sided allocation-domain negotiation.
-    /// A source's / element's `output_domains`; fan-in / fan-out nodes report a
+    /// A source's / element's / fan-in's `output_domains`; fan-out nodes report a
     /// System singleton (their domain follows the upstream, like
     /// [`output_memory`](Self::output_memory)).
     pub fn output_domains(&self) -> crate::memory::DomainSet {
         match self {
             GraphNodeRef::Source(s) => s.output_domains(),
             GraphNodeRef::Element(e) => e.output_domains(),
-            GraphNodeRef::Muxer(_) | GraphNodeRef::FanoutSource(_) | GraphNodeRef::Demux(_) => {
+            GraphNodeRef::Muxer(m) => m.output_domains(),
+            GraphNodeRef::FanoutSource(_) | GraphNodeRef::Demux(_) => {
                 crate::memory::DomainSet::only(crate::memory::MemoryDomainKind::System)
             }
         }
@@ -977,8 +980,9 @@ pub async fn run_graph_with_copy_policy<'a, Clk: PipelineClock>(
 /// producer domain is traced through structural tee/demux nodes back to the real
 /// producer ([`output_domains`](GraphNodeRef::output_domains)); if it shares no
 /// domain with `C`'s [`input_domains`](GraphNodeRef::input_domains), `factory` is
-/// asked for a converter from the producer's preferred domain to one `C` accepts,
-/// and it is spliced onto that edge ([`Graph::insert_on_edge`]).
+/// asked for a converter from the producer's preferred domain to each domain `C`
+/// accepts in preference order, and the first one it returns is spliced onto that
+/// edge ([`Graph::insert_on_edge`]).
 ///
 /// Converters are caps-transparent (`Identity`), so the subsequent caps solve is
 /// unaffected. `factory` returns `None` when it has no converter for a pair, in
@@ -1010,7 +1014,12 @@ pub fn auto_plug_domain_converters<'a>(
         if !producer.intersect(consumer).is_empty() && !bridges_two_gpus(from, to) {
             continue;
         }
-        if let Some(conv) = factory(from, to) {
+        // Skip domains the producer emits itself, bar the preferred one a GPU bridge targets.
+        let converter = consumer
+            .iter()
+            .filter(|&k| k == to || !producer.contains(k))
+            .find_map(|k| factory(from, k));
+        if let Some(conv) = converter {
             graph.insert_on_edge(e, conv);
         }
     }

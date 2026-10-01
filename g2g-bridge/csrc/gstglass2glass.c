@@ -50,7 +50,8 @@ struct _GstGlass2Glass {
   gchar *output_caps;  /* if set, the sub-graph rescales/reformats to these caps */
   G2gBridge *bridge;   /* live between set_caps and stop */
   guint in_stride;     /* input plane-0 stride, for a dma-buf input with no video meta */
-  guint out_height;    /* negotiated output height, for dma-buf output sizing */
+  GstVideoInfo out_info;   /* negotiated output format, for dma-buf output sizing */
+  gboolean have_out_info;  /* whether the output caps are raw video */
   GstAllocator *dmabuf_alloc; /* wraps a produced dma-buf fd into a GstBuffer */
 };
 
@@ -145,8 +146,8 @@ static gboolean gst_glass2glass_get_unit_size(GstBaseTransform *base, GstCaps *c
 /* ---- transform vmethods -------------------------------------------------- */
 /* Build the sub-graph once caps are fixed. `incaps` describes the buffers the
  * embedded appsrc receives; `outcaps` (== incaps for a preserving fragment) the
- * frames it produces. Records the input stride and output height for the
- * dma-buf import (which carries no byte length of its own). */
+ * frames it produces. Records the input stride and output format for the
+ * dma-buf import and output (which carry no byte length of their own). */
 static gboolean gst_glass2glass_set_caps(GstBaseTransform *base, GstCaps *incaps,
                                          GstCaps *outcaps) {
   GstGlass2Glass *self = GST_GLASS2GLASS(base);
@@ -155,12 +156,11 @@ static gboolean gst_glass2glass_set_caps(GstBaseTransform *base, GstCaps *incaps
     self->bridge = NULL;
   }
 
-  GstVideoInfo ininfo, outinfo;
+  GstVideoInfo ininfo;
   self->in_stride = gst_video_info_from_caps(&ininfo, incaps)
                         ? (guint)GST_VIDEO_INFO_PLANE_STRIDE(&ininfo, 0)
                         : 0;
-  self->out_height =
-      gst_video_info_from_caps(&outinfo, outcaps) ? GST_VIDEO_INFO_HEIGHT(&outinfo) : 0;
+  self->have_out_info = gst_video_info_from_caps(&self->out_info, outcaps);
 
   gchar *instr = self->input_caps ? g_strdup(self->input_caps) : gst_caps_to_string(incaps);
   gchar *outstr = gst_caps_to_string(outcaps);
@@ -198,20 +198,66 @@ static gboolean push_input(GstGlass2Glass *self, GstBuffer *in) {
   return ok;
 }
 
+/* The plane layout g2g gives a dma-buf frame at this luma stride, and its size. */
+static gsize dmabuf_layout(const GstVideoInfo *info, guint stride, guint offset,
+                           gsize offsets[GST_VIDEO_MAX_PLANES],
+                           gint strides[GST_VIDEO_MAX_PLANES]) {
+  const GstVideoFormatInfo *finfo = info->finfo;
+  gsize next = offset;
+  for (guint plane = 0; plane < GST_VIDEO_INFO_N_PLANES(info); plane++) {
+    guint comp = 0;
+    while (GST_VIDEO_FORMAT_INFO_PLANE(finfo, comp) != plane)
+      comp++;
+    guint plane_stride = stride * GST_VIDEO_FORMAT_INFO_PSTRIDE(finfo, comp) /
+                         GST_VIDEO_FORMAT_INFO_PSTRIDE(finfo, 0);
+    plane_stride >>= GST_VIDEO_FORMAT_INFO_W_SUB(finfo, comp);
+    gint rows = GST_VIDEO_FORMAT_INFO_SCALE_HEIGHT(finfo, comp, GST_VIDEO_INFO_HEIGHT(info));
+    offsets[plane] = next;
+    strides[plane] = (gint)plane_stride;
+    next += (gsize)plane_stride * rows;
+  }
+  return next;
+}
+
+static void release_held_frame(gpointer held) {
+  g2g_bridge_out_release(held);
+  g_free(held);
+}
+
 /* Build the downstream buffer from a pulled frame: a system frame becomes an
  * owned GstBuffer (bytes copied); a dma-buf frame is wrapped zero-copy into a
- * dma-buf GstBuffer (its fd dup'ed, so the g2g frame keeps its own). */
-static GstBuffer *wrap_output(GstGlass2Glass *self, const G2gOut *out) {
+ * dma-buf GstBuffer (its fd dup'ed, so the g2g frame keeps its own), and the
+ * frame moves onto that memory, clearing `out->owner`. */
+static GstBuffer *wrap_output(GstGlass2Glass *self, G2gOut *out) {
   if (out->kind == 1) {
+    if (!self->have_out_info)
+      return NULL;
     if (!self->dmabuf_alloc)
       self->dmabuf_alloc = gst_dmabuf_allocator_new();
-    gsize size = (gsize)out->offset + (gsize)out->stride * self->out_height;
+    const GstVideoInfo *info = &self->out_info;
+    gboolean default_layout =
+        out->offset == 0 && (gint)out->stride == GST_VIDEO_INFO_PLANE_STRIDE(info, 0);
+    gsize offsets[GST_VIDEO_MAX_PLANES];
+    gint strides[GST_VIDEO_MAX_PLANES];
+    gsize size = default_layout ? GST_VIDEO_INFO_SIZE(info)
+                                : dmabuf_layout(info, out->stride, out->offset, offsets, strides);
     /* dup: the g2g frame owns `out->fd`; GStreamer's dma-buf memory owns its own. */
     GstMemory *mem = gst_dmabuf_allocator_alloc(self->dmabuf_alloc, dup(out->fd), size);
     if (!mem)
       return NULL;
+    /* Hold the frame until GStreamer frees the memory: its producer recycles the buffer on release. */
+    G2gOut *held = g_new(G2gOut, 1);
+    *held = *out;
+    out->owner = NULL;
+    gst_mini_object_set_qdata(GST_MINI_OBJECT(mem), g_quark_from_static_string("g2g-bridge-frame"),
+                              held, release_held_frame);
+    GST_MINI_OBJECT_FLAG_SET(mem, GST_MEMORY_FLAG_READONLY);
     GstBuffer *buf = gst_buffer_new();
     gst_buffer_append_memory(buf, mem);
+    if (!default_layout)
+      gst_buffer_add_video_meta_full(buf, GST_VIDEO_FRAME_FLAG_NONE, GST_VIDEO_INFO_FORMAT(info),
+                                     GST_VIDEO_INFO_WIDTH(info), GST_VIDEO_INFO_HEIGHT(info),
+                                     GST_VIDEO_INFO_N_PLANES(info), offsets, strides);
     return buf;
   }
   GstBuffer *buf = gst_buffer_new_allocate(NULL, out->len, NULL);
@@ -253,8 +299,8 @@ static GstFlowReturn gst_glass2glass_generate_output(GstBaseTransform *base, Gst
   int r = g2g_bridge_pull_buf(self->bridge, &out);
   if (r < 0) {
     gst_buffer_unref(in);
-    /* -1 EOS, -2 a memory domain the shell cannot hand back (download it in the
-     * sub-graph, e.g. end the fragment with a wgpu/cuda download). */
+    /* -1 EOS, -2 a memory domain g2g has no download converter for (wgpu and
+     * CUDA frames are downloaded inside the sub-graph). */
     return (r == -1) ? GST_FLOW_EOS : GST_FLOW_ERROR;
   }
 
@@ -342,7 +388,7 @@ static void gst_glass2glass_init(GstGlass2Glass *self) {
   self->output_caps = NULL;
   self->bridge = NULL;
   self->in_stride = 0;
-  self->out_height = 0;
+  self->have_out_info = FALSE;
   self->dmabuf_alloc = NULL;
 }
 

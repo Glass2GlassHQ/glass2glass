@@ -310,6 +310,9 @@ pub mod multipart;
 pub mod wgpucompositor;
 #[cfg(feature = "wgpu-sink")]
 pub mod wgpusink;
+// Reads a wgpu texture or buffer frame back to system memory (`wgpudownload`).
+#[cfg(feature = "wgpu-sink")]
+pub mod wgpudownload;
 // Windowed wgpu display sink (`wgpusink` on a launch line): owns an
 // xdg_toplevel, builds the wgpu::Surface over it, and drives WgpuSink on it.
 #[cfg(all(target_os = "linux", feature = "wgpu-present"))]

@@ -377,6 +377,30 @@ fn container_muxer_provider(container: &Caps) -> Option<&'static [&'static str]>
     })
 }
 
+#[cfg(any(all(target_os = "linux", feature = "cuda"), feature = "wgpu-sink"))]
+fn domain_converter(
+    from: g2g_core::MemoryDomainKind,
+    to: g2g_core::MemoryDomainKind,
+) -> Option<g2g_core::runtime::GraphNode> {
+    #[cfg(all(target_os = "linux", feature = "cuda"))]
+    if let Some(converter) = crate::cuda::cuda_domain_converter(from, to) {
+        return Some(converter);
+    }
+    #[cfg(feature = "wgpu-sink")]
+    if matches!(
+        (from, to),
+        (
+            g2g_core::MemoryDomainKind::WgpuTexture | g2g_core::MemoryDomainKind::WgpuBuffer,
+            g2g_core::MemoryDomainKind::System
+        )
+    ) {
+        return Some(g2g_core::runtime::GraphNode::element(
+            crate::wgpudownload::WgpuDownload::new(),
+        ));
+    }
+    None
+}
+
 pub fn default_registry() -> Registry {
     let mut reg = Registry::new();
     // Auto-plugged decode chains splice a re-framing parser before the decoder
@@ -389,8 +413,8 @@ pub fn default_registry() -> Registry {
     // A parsed pipeline whose producer and consumer disagree on a memory domain
     // gets the bridge spliced in (M354): `nvdec ! wgpusink` keeps the frame on
     // the GPU, `nvdec ! waylandsink` downloads it.
-    #[cfg(all(target_os = "linux", feature = "cuda"))]
-    reg.set_domain_converter(crate::cuda::cuda_domain_converter);
+    #[cfg(any(all(target_os = "linux", feature = "cuda"), feature = "wgpu-sink"))]
+    reg.set_domain_converter(domain_converter);
 
     // Sources. The output caps are the autoplug `decodebin` input; the parser
     // only calls the constructor and applies properties.
@@ -2422,6 +2446,7 @@ pub static FEATURE_GATED_ELEMENTS: &[FeatureGatedElement] = &{
         "alertrecorder" => "analytics-json";
         "embeddingsink" => "embedding-index";
         "wgpucompositor" => "wgpu-sink";
+        "wgpudownload" => "wgpu-sink";
         "gstwrap" => "gstreamer";
         "mp4mux" => "std";
         "localcudasrc" => "local-ipc" on "linux";
@@ -3102,6 +3127,11 @@ fn register_feature_gated(reg: &mut Registry) {
         })
         .with_experimental(),
     );
+    // A GPU-resident wgpu texture or buffer back to system memory.
+    #[cfg(feature = "wgpu-sink")]
+    reg.register_launch(LaunchFactory::new("wgpudownload", Vec::new(), || {
+        Box::new(crate::wgpudownload::WgpuDownload::new())
+    }));
     // Export mirror (M559): a GPU-resident wgpu buffer out to a dma-buf fd.
     #[cfg(all(target_os = "linux", feature = "dmabuf-wgpu"))]
     reg.register_launch(

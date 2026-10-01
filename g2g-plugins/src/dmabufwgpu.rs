@@ -59,21 +59,30 @@ fn gpu_err() -> G2gError {
 
 /// Keep-alive owner for a [`MemoryDomain::WgpuBuffer`] backed by an imported
 /// dma-buf: holds the `wgpu::Buffer` (which, via `from_raw_managed`, owns the
-/// imported `VkDeviceMemory` and closes the dup'ed fd on drop) and the device
-/// needed to use it. A downstream wgpu consumer downcasts via [`Any`] to recover
-/// the buffer.
+/// imported `VkDeviceMemory` and closes the dup'ed fd on drop) and the device and
+/// queue needed to use it. A downstream wgpu consumer downcasts via [`Any`] to
+/// recover the buffer.
 #[derive(Debug)]
 pub struct DmaBufWgpuBuffer {
     // Field order is drop order: the buffer (and its backing imported memory) is
     // released before the device.
     buffer: wgpu::Buffer,
-    _device: wgpu::Device,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
 }
 
 impl DmaBufWgpuBuffer {
     /// The imported GPU buffer, for a downstream stage that links wgpu.
     pub fn buffer(&self) -> &wgpu::Buffer {
         &self.buffer
+    }
+
+    pub fn device(&self) -> &wgpu::Device {
+        &self.device
+    }
+
+    pub fn queue(&self) -> &wgpu::Queue {
+        &self.queue
     }
 }
 
@@ -368,6 +377,7 @@ impl AsyncElement for DmaBufToWgpu {
                         self.queue = Some(queue);
                     }
                     let device = self.device.clone().unwrap();
+                    let queue = self.queue.clone().unwrap();
 
                     let stride = u64::from(dmabuf.stride);
                     // Plane-aware size: RGBA is one plane, NV12 / I420 add the
@@ -384,7 +394,8 @@ impl AsyncElement for DmaBufToWgpu {
                     let buffer = self.importer.import(&device, dmabuf, size).await?;
                     let owner = DmaBufWgpuBuffer {
                         buffer,
-                        _device: device.clone(),
+                        device,
+                        queue,
                     };
                     let mut gpu_frame = frame;
                     gpu_frame.domain = MemoryDomain::WgpuBuffer(OwnedWgpuBuffer::new(

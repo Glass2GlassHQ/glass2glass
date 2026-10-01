@@ -188,10 +188,38 @@ pub fn present_on_producer_device<E>(
 
 /// Keep-alive owner for a rendered wgpu texture (the [`WgpuKeepAlive`] payload of
 /// [`MemoryDomain::WgpuTexture`](g2g_core::MemoryDomain)). Owns the
-/// `wgpu::Texture`; the consuming sink recovers it via [`texture_of`]. Shared so
-/// the overlay producer and the sink agree on the concrete type to downcast to.
+/// `wgpu::Texture` and the device / queue it lives on; the consuming sink recovers
+/// the texture via [`texture_of`], and a download reads it back on that device.
+/// Shared so the overlay producer and the sink agree on the concrete type to
+/// downcast to.
 #[derive(Debug)]
-pub struct WgpuTextureKeepAlive(pub wgpu::Texture);
+pub struct WgpuTextureKeepAlive {
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    texture: wgpu::Texture,
+}
+
+impl WgpuTextureKeepAlive {
+    pub fn new(device: wgpu::Device, queue: wgpu::Queue, texture: wgpu::Texture) -> Self {
+        Self {
+            device,
+            queue,
+            texture,
+        }
+    }
+
+    pub fn texture(&self) -> &wgpu::Texture {
+        &self.texture
+    }
+
+    pub fn device(&self) -> &wgpu::Device {
+        &self.device
+    }
+
+    pub fn queue(&self) -> &wgpu::Queue {
+        &self.queue
+    }
+}
 
 impl WgpuKeepAlive for WgpuTextureKeepAlive {
     fn as_any(&self) -> &dyn core::any::Any {
@@ -212,7 +240,7 @@ impl WgpuKeepAlive for WgpuTextureKeepAlive {
 pub fn texture_of(owned: &OwnedWgpuTexture) -> Option<&wgpu::Texture> {
     let any = owned.keep_alive().as_any();
     if let Some(k) = any.downcast_ref::<WgpuTextureKeepAlive>() {
-        return Some(&k.0);
+        return Some(k.texture());
     }
     if let Some(k) = any.downcast_ref::<WgpuNv12Texture>() {
         return Some(k.texture());
@@ -308,14 +336,32 @@ pub(crate) fn read_rgba_texture_dq(
     queue: &wgpu::Queue,
     texture: &wgpu::Texture,
 ) -> Result<alloc::vec::Vec<u8>, G2gError> {
-    let w = texture.width();
-    let h = texture.height();
-    let bpp = texture.format().block_copy_size(None).unwrap_or(4) as usize;
-    let tight = w as usize * bpp;
+    let bpp = texture.format().block_copy_size(None).unwrap_or(4);
+    read_texture_plane(
+        device,
+        queue,
+        texture,
+        wgpu::TextureAspect::All,
+        (texture.width(), texture.height()),
+        bpp,
+    )
+}
+
+pub(crate) fn read_texture_plane(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    aspect: wgpu::TextureAspect,
+    extent: (u32, u32),
+    bpp: u32,
+) -> Result<alloc::vec::Vec<u8>, G2gError> {
+    let (w, h) = extent;
+    let tight = w as usize * bpp as usize;
     // wgpu requires bytes_per_row be a multiple of 256 for texture->buffer copies.
-    let padded = tight.div_ceil(256) * 256;
+    let padded = tight.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT as usize)
+        * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT as usize;
     let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("read_rgba_texture"),
+        label: Some("read_texture_plane"),
         size: (padded * h as usize) as u64,
         usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
@@ -326,7 +372,7 @@ pub(crate) fn read_rgba_texture_dq(
             texture,
             mip_level: 0,
             origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
+            aspect,
         },
         wgpu::TexelCopyBufferInfo {
             buffer: &buffer,
@@ -343,6 +389,22 @@ pub(crate) fn read_rgba_texture_dq(
         },
     );
     queue.submit([enc.finish()]);
+    let mapped = map_for_read(device, &buffer)?;
+    // Drop the per-row padding back to a tight stride.
+    let mut out = alloc::vec::Vec::with_capacity(tight * h as usize);
+    for row in 0..h as usize {
+        let start = row * padded;
+        out.extend_from_slice(&mapped[start..start + tight]);
+    }
+    drop(mapped);
+    buffer.unmap();
+    Ok(out)
+}
+
+pub(crate) fn map_for_read(
+    device: &wgpu::Device,
+    buffer: &wgpu::Buffer,
+) -> Result<wgpu::BufferView, G2gError> {
     let slice = buffer.slice(..);
     let (tx, rx) = std::sync::mpsc::channel();
     slice.map_async(wgpu::MapMode::Read, move |r| {
@@ -355,16 +417,7 @@ pub(crate) fn read_rgba_texture_dq(
         })
         .map_err(gpu_err)?;
     rx.recv().map_err(gpu_err)?.map_err(gpu_err)?;
-    let mapped = slice.get_mapped_range();
-    // Drop the per-row padding back to a tight w*4 stride.
-    let mut out = alloc::vec::Vec::with_capacity(tight * h as usize);
-    for row in 0..h as usize {
-        let start = row * padded;
-        out.extend_from_slice(&mapped[start..start + tight]);
-    }
-    drop(mapped);
-    buffer.unmap();
-    Ok(out)
+    Ok(slice.get_mapped_range())
 }
 
 /// Map any wgpu / Vello failure to a structured hardware error.
@@ -721,7 +774,11 @@ mod tests {
             MemoryDomain::WgpuTexture(OwnedWgpuTexture::new(
                 W,
                 H,
-                Arc::new(WgpuTextureKeepAlive(texture)),
+                Arc::new(WgpuTextureKeepAlive::new(
+                    ctx.device.clone(),
+                    ctx.queue.clone(),
+                    texture,
+                )),
             )),
             FrameTiming::default(),
             0,

@@ -156,7 +156,20 @@ fn main() {
 /// bound to the sink's device, whichever GPU that turned out to be).
 struct Present {
     sink: WgpuSink,
-    textures: Vec<wgpu::Texture>,
+    textures: Vec<Arc<WgpuTextureKeepAlive>>,
+}
+
+fn keep_alives(ctx: &GpuContext, textures: Vec<wgpu::Texture>) -> Vec<Arc<WgpuTextureKeepAlive>> {
+    textures
+        .into_iter()
+        .map(|t| {
+            Arc::new(WgpuTextureKeepAlive::new(
+                ctx.device.clone(),
+                ctx.queue.clone(),
+                t,
+            ))
+        })
+        .collect()
 }
 
 struct App {
@@ -203,7 +216,7 @@ impl App {
                     decode_gpu.name
                 );
                 let sink = self.make_sink(self.decode_ctx.clone(), surface, config);
-                let textures = self.decode_textures.to_vec();
+                let textures = keep_alives(&self.decode_ctx, self.decode_textures.to_vec());
                 return Present { sink, textures };
             }
             // Unexpected (same GPU yet could not configure): reopen and cross-copy.
@@ -228,12 +241,13 @@ impl App {
         surface: wgpu::Surface<'static>,
         config: wgpu::SurfaceConfiguration,
     ) -> Present {
-        let textures = self
+        let uploaded = self
             .decode_textures
             .iter()
             .map(|t| readback_rgba(&self.decode_ctx, t, self.width, self.height))
             .map(|bytes| upload_rgba(&display_ctx, self.width, self.height, &bytes))
             .collect();
+        let textures = keep_alives(&display_ctx, uploaded);
         let sink = self.make_sink(display_ctx, surface, config);
         Present { sink, textures }
     }
@@ -278,12 +292,11 @@ impl App {
         let Some(present) = self.present.as_mut() else {
             return;
         };
-        let tex = &present.textures[self.idx];
         let frame = Frame::new(
             MemoryDomain::WgpuTexture(OwnedWgpuTexture::new(
                 self.width,
                 self.height,
-                Arc::new(WgpuTextureKeepAlive(tex.clone())),
+                present.textures[self.idx].clone(),
             )),
             FrameTiming::default(),
             self.idx as u64,

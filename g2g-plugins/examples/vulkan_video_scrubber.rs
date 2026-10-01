@@ -157,7 +157,7 @@ struct App {
     present: Option<Present>,
     /// The display-GPU texture for the currently shown frame, cached so repeated
     /// redraws of the same frame do not re-decode or re-transfer.
-    shown: Option<(usize, wgpu::Texture)>,
+    shown: Option<(usize, Arc<WgpuTextureKeepAlive>)>,
     cur: usize,
     playing: bool,
     dragging: bool,
@@ -211,11 +211,16 @@ impl App {
         let display_tex = match self.present.as_ref().map(|p| &p.mode) {
             Some(Mode::CrossGpu(display_ctx)) => {
                 let bytes = readback_rgba(&decode_ctx, &decode_tex, w, h);
-                upload_rgba(display_ctx, w, h, &bytes)
+                WgpuTextureKeepAlive::new(
+                    display_ctx.device.clone(),
+                    display_ctx.queue.clone(),
+                    upload_rgba(display_ctx, w, h, &bytes),
+                )
             }
             // Zero-copy (or not yet built): the decode texture is presented as is.
-            _ => decode_tex,
+            _ => WgpuTextureKeepAlive::new(decode_ctx.device, decode_ctx.queue, decode_tex),
         };
+        let display_tex = Arc::new(display_tex);
         self.shown = Some((cur, display_tex));
         self.update_title();
         true
@@ -231,11 +236,7 @@ impl App {
         let tex = self.shown.as_ref().expect("ensured").1.clone();
         let present = self.present.as_mut().expect("checked");
         let frame = Frame::new(
-            MemoryDomain::WgpuTexture(OwnedWgpuTexture::new(
-                w,
-                h,
-                Arc::new(WgpuTextureKeepAlive(tex)),
-            )),
+            MemoryDomain::WgpuTexture(OwnedWgpuTexture::new(w, h, tex)),
             FrameTiming::default(),
             cur as u64,
         );

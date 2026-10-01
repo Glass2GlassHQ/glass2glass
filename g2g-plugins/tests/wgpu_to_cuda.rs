@@ -334,7 +334,11 @@ async fn wgpu_to_cuda_element_bridges_and_recycles() {
             MemoryDomain::WgpuTexture(OwnedWgpuTexture::new(
                 W,
                 H,
-                Arc::new(WgpuTextureKeepAlive(src.clone())),
+                Arc::new(WgpuTextureKeepAlive::new(
+                    dev.device.clone(),
+                    dev.queue.clone(),
+                    src.clone(),
+                )),
             )),
             g2g_core::FrameTiming {
                 pts_ns: seq as u64 * 33_000_000,

@@ -161,7 +161,9 @@ fn run_parent() {
             });
             queue.write_buffer(&src, 0, &pattern(seq));
             let frame = Frame {
-                domain: MemoryDomain::WgpuBuffer(WgpuToDmaBuf::wrap_buffer(&dev, src, SIZE)),
+                domain: MemoryDomain::WgpuBuffer(WgpuToDmaBuf::wrap_buffer(
+                    &dev, &queue, src, SIZE,
+                )),
                 timing: FrameTiming {
                     pts_ns: seq * 1000,
                     ..FrameTiming::default()

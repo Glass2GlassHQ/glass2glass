@@ -1049,12 +1049,15 @@ mod tests {
 
     fn wgpu_frame(ctx: &GpuContext, w: u32, h: u32, texture: wgpu::Texture, pts_ns: u64) -> Frame {
         use crate::gpu::WgpuTextureKeepAlive;
-        let _ = ctx;
         Frame::new(
             MemoryDomain::WgpuTexture(OwnedWgpuTexture::new(
                 w,
                 h,
-                alloc::sync::Arc::new(WgpuTextureKeepAlive(texture)),
+                alloc::sync::Arc::new(WgpuTextureKeepAlive::new(
+                    ctx.device.clone(),
+                    ctx.queue.clone(),
+                    texture,
+                )),
             )),
             FrameTiming {
                 pts_ns,

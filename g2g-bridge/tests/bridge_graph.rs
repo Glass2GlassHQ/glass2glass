@@ -153,3 +153,45 @@ fn drop_without_draining_does_not_deadlock() {
     bridge.end_of_stream();
     drop(bridge); // joins the run thread in Drop; must return.
 }
+
+#[test]
+fn gpu_fragment_comes_back_as_system_bytes() {
+    use g2g_plugins::wgpu;
+
+    // 37 RGBA pixels are 148 bytes, short of the 256-byte row a texture copy pads to.
+    const WIDTH: usize = 37;
+    const HEIGHT: usize = 5;
+    const RGBA_BYTES_PER_PIXEL: usize = 4;
+    const OPAQUE: u8 = 255;
+
+    let has_adapter = g2g_core::runtime::block_on(
+        wgpu::Instance::default().request_adapter(&wgpu::RequestAdapterOptions::default()),
+    )
+    .is_ok();
+    if !has_adapter {
+        eprintln!("no wgpu adapter; skipping");
+        return;
+    }
+
+    let caps = format!("video/x-raw,format=RGBA,width={WIDTH},height={HEIGHT},framerate=30/1");
+    let fragment = format!("wgpucompositor width={WIDTH} height={HEIGHT} gpu-output=true");
+    let bridge = BridgeGraph::new(&fragment, &caps).expect("builds");
+
+    // Opaque pixels come through compositing unchanged.
+    let pixels: Vec<u8> = (0..WIDTH * HEIGHT * RGBA_BYTES_PER_PIXEL)
+        .map(
+            |i| match i % RGBA_BYTES_PER_PIXEL == RGBA_BYTES_PER_PIXEL - 1 {
+                true => OPAQUE,
+                false => (i.wrapping_mul(7).wrapping_add(3)) as u8,
+            },
+        )
+        .collect();
+    assert!(bridge.push(&pixels, 0));
+    bridge.end_of_stream();
+
+    let frame = bridge.pull_blocking().expect("a frame came back");
+    assert_eq!(
+        frame_bytes(&frame).expect("system-memory frame"),
+        pixels.as_slice()
+    );
+}
