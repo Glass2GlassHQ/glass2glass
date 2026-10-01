@@ -18,7 +18,7 @@ cargo build -p g2g-bridge --features gstreamer
 
 plugdir="target/gstplugins"
 mkdir -p "$plugdir"
-cp -f target/debug/libg2g_bridge.so "$plugdir/libgstglass2glass.so"
+cp -f "${CARGO_TARGET_DIR:-target}/debug/libg2g_bridge.so" "$plugdir/libgstglass2glass.so"
 export GST_PLUGIN_PATH="$PWD/$plugdir"
 
 work="$(mktemp -d)"

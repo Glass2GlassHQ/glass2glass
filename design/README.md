@@ -962,8 +962,9 @@ an `output-caps` property into the caps a reformatting element like an encoder o
 input to output.
 
 The pipeline handle is `Send` because the appsrc and appsink APIs are MT-safe, the
-element driving them from one runner task at a time. The data path uses system
-memory, with a copy in and a copy out, like the shell's non-dma-buf path.
+element driving them from one runner task at a time. A system frame is copied in
+and out, a dma-buf frame passes in without a copy, and `output-memory=dmabuf`
+hands the hosted element's dma-buf output on.
 
 It is validated locally by
 `cargo test -p g2g-plugins --features gstreamer --test gstwrap`, not in CI, hosting
