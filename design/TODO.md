@@ -184,8 +184,6 @@ Highest leverage first:
 
 ## Clock-synchronised presentation
 
-- Report the unit `OggDemuxN` (a page) and `Mp4DemuxN` (a fragment) hold
-  through `MultiOutputElement::latency()` once the first one parses.
 - **KMS vblank reconciliation** + Wayland frame-callback co-scheduling. Needs a
   DRM/KMS presentation sink (current `WaylandSink` is SHM software). Validate on
   a real display.

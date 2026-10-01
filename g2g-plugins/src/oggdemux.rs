@@ -61,9 +61,9 @@ use g2g_core::runtime::SeekController;
 use g2g_core::{
     g2g_debug, g2g_error, AsyncElement, AudioFormat, BusHandle, BusMessage, ByteStreamEncoding,
     Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, FrameTiming, G2gError,
-    MemoryDomain, MultiOutputElement, MultiOutputSink, OutputSink, PadTemplate, PadTemplates,
-    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Seek, Segment, Stream,
-    StreamCollection, StreamType, TagList,
+    LatencyReport, MemoryDomain, MultiOutputElement, MultiOutputSink, OutputSink, PadTemplate,
+    PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Seek, Segment,
+    Stream, StreamCollection, StreamType, TagList,
 };
 
 use crate::demuxseek::{Admit, DemuxSeek};
@@ -546,6 +546,8 @@ struct StreamReady {
     /// Stream time a mid-file landing anchored at, in the batch that anchored it
     /// (M862). The caller compares it against the seek target.
     resumed_at: Option<u64>,
+    // summed durations of the first audio page's packets, in the batch that carries them
+    first_page_ns: Option<u64>,
 }
 
 /// The per-logical-bitstream half of the demux elements: caps announcement,
@@ -599,6 +601,8 @@ struct StreamEmitter {
     /// timed from the file start any more, so nothing is emitted until the
     /// landing's first granule-bearing page says where it is.
     awaiting_anchor: bool,
+    // counted against the first audio page's packet count to find where that page ends
+    audio_packets_stepped: u64,
 }
 
 impl StreamEmitter {
@@ -644,6 +648,7 @@ impl StreamEmitter {
         self.head_forwarded = false;
         self.prev_blocksize = None;
         self.awaiting_anchor = true;
+        self.audio_packets_stepped = 0;
     }
 
     /// Rebase onto a chained physical stream (M827): the previous chain's
@@ -767,7 +772,15 @@ impl StreamEmitter {
                 };
             }
         }
-        for packet in packets {
+        let first_page_packets = stream
+            .first_data_granule()
+            .filter(|_| self.audio_packets_stepped == 0)
+            .map(|(_, count, _)| count as usize);
+        let mut first_page_ns = 0u64;
+        self.audio_packets_stepped = self
+            .audio_packets_stepped
+            .saturating_add(packets.len() as u64);
+        for (index, packet) in packets.into_iter().enumerate() {
             let pkt_samples = match codec {
                 // Each Ogg-FLAC audio packet is one whole frame; its header
                 // carries the block size.
@@ -854,6 +867,9 @@ impl StreamEmitter {
                 continue;
             }
             self.position_ns = pts_ns.saturating_add(duration_ns);
+            if first_page_packets.is_some_and(|count| index < count) {
+                first_page_ns = first_page_ns.saturating_add(duration_ns);
+            }
             ready.frames.push((
                 packet,
                 FrameTiming {
@@ -865,6 +881,7 @@ impl StreamEmitter {
                 false,
             ));
         }
+        ready.first_page_ns = first_page_packets.map(|_| first_page_ns);
         ready
     }
 }
@@ -1174,7 +1191,12 @@ pub struct OggDemuxN {
     /// posted.
     tags_posted: Vec<bool>,
     emitted: u64,
+    // a page's packets emit only once the whole page has parsed
+    held_page_ns: Vec<Option<u64>>,
 }
+
+// twice ffmpeg's default page duration
+const MAX_HELD_PAGE_NS: u64 = 2_000_000_000;
 
 impl OggDemuxN {
     /// A demuxer with one output port per entry of `ports`. Panics if `ports` is
@@ -1185,6 +1207,7 @@ impl OggDemuxN {
             "OggDemuxN needs at least one output port"
         );
         let emitters = (0..ports.len()).map(|_| StreamEmitter::default()).collect();
+        let held_page_ns = alloc::vec![None; ports.len()];
         Self {
             demux: OggDemuxer::new(),
             ports,
@@ -1194,6 +1217,7 @@ impl OggDemuxN {
             tags_chain: None,
             tags_posted: Vec::new(),
             emitted: 0,
+            held_page_ns,
         }
     }
 
@@ -1361,6 +1385,11 @@ impl MultiOutputElement for OggDemuxN {
                     continue;
                 }
                 let ready = self.emitters[port].step(&self.demux.streams()[index], packets);
+                if self.held_page_ns[port].is_none() {
+                    self.held_page_ns[port] = ready
+                        .first_page_ns
+                        .filter(|&page_ns| page_ns > 0 && page_ns <= MAX_HELD_PAGE_NS);
+                }
                 if let Some(caps) = ready.caps {
                     out.push_to(port, PipelinePacket::CapsChanged(caps)).await?;
                 }
@@ -1379,6 +1408,17 @@ impl MultiOutputElement for OggDemuxN {
             }
             Ok(())
         })
+    }
+
+    fn latency(&self) -> LatencyReport {
+        let held_ns = self
+            .held_page_ns
+            .iter()
+            .flatten()
+            .copied()
+            .max()
+            .unwrap_or(0);
+        LatencyReport::buffered(held_ns, Some(held_ns))
     }
 }
 

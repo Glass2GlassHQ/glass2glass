@@ -229,6 +229,17 @@ between timestamps is a discontinuity and is ignored, and subtitle and KLV ports
 are left out because a sparse stream's gap says nothing about the media.
 `mpegpsdemux` reframes video on picture start codes, so it holds one picture and
 reports the frame period of the last sequence header.
+`oggdemux` emits a page's packets once the whole page has parsed, so each port
+latches the summed packet durations of its first audio page and the fan-out
+reports the largest. Header pages do not count, a chained file keeps the first
+chain's value, and a page longer than 2 s, twice the page duration ffmpeg cuts
+by default, is ignored.
+`mp4demux` keeps a fragment's `moof` until its `mdat` lands and then emits the
+whole fragment, so each port latches the span of its track's samples in the
+first fragment that carries them, from the earliest presentation time to the
+latest end. A span over 30 s is ignored. A progressive file is parsed whole at
+`Eos` and reports zero, since adding the file's length to every deadline would
+pace nothing.
 
 The fold follows paths, not the node list. Each node's upstream aggregate is its
 inputs' merged, plus its own contribution (`LatencyReport::combine`, the sum a

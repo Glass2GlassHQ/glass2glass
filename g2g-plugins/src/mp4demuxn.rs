@@ -35,8 +35,8 @@ use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::StreamSelectController;
 use g2g_core::{
     AudioFormat, BusHandle, BusMessage, ByteStreamEncoding, Caps, ConfigureOutcome, Dim,
-    FrameTiming, G2gError, MemoryDomain, MultiOutputElement, MultiOutputSink, PipelinePacket, Rate,
-    Stream, StreamCollection, StreamType,
+    FrameTiming, G2gError, LatencyReport, MemoryDomain, MultiOutputElement, MultiOutputSink,
+    PipelinePacket, Rate, Stream, StreamCollection, StreamType,
 };
 
 use crate::fmp4::{
@@ -280,7 +280,12 @@ pub struct Mp4DemuxN {
     /// playlist rotates keys mid-stream).
     drained: u64,
     emitted: u64,
+    // a fragment's moof waits for its mdat, then the whole fragment emits at once
+    held_fragment_ns: Vec<Option<u64>>,
 }
+
+// no real fragment runs this long
+const MAX_HELD_FRAGMENT_NS: u64 = 30_000_000_000;
 
 impl Mp4DemuxN {
     /// A demuxer with one output port per entry of `ports`, in port order. Panics
@@ -292,6 +297,7 @@ impl Mp4DemuxN {
         );
         let announced = alloc::vec![false; ports.len()];
         let need_config = alloc::vec![true; ports.len()];
+        let held_fragment_ns = alloc::vec![None; ports.len()];
         Self {
             buf: Vec::new(),
             tracks: None,
@@ -307,6 +313,7 @@ impl Mp4DemuxN {
             cenc_keys: None,
             drained: 0,
             emitted: 0,
+            held_fragment_ns,
         }
     }
 
@@ -594,6 +601,7 @@ impl Mp4DemuxN {
                         &tracks,
                         self.drained.saturating_add(start as u64),
                     )?;
+                    self.learn_held_fragment(&samples);
                     self.emit_samples(&tracks, samples, out).await?;
                     off = end;
                     consumed = off;
@@ -611,6 +619,29 @@ impl Mp4DemuxN {
             self.drained = self.drained.saturating_add(consumed as u64);
         }
         Ok(())
+    }
+
+    // latched per port from the first fragment that carries its track
+    fn learn_held_fragment(&mut self, samples: &[(u32, Sample)]) {
+        for (port, held) in self.held_fragment_ns.iter_mut().enumerate() {
+            if held.is_some() {
+                continue;
+            }
+            let track_id = self.ports[port].track_id;
+            let span = samples
+                .iter()
+                .filter(|(id, _)| *id == track_id)
+                .map(|(_, sample)| {
+                    let end = sample.pts_ns.saturating_add(sample.duration_ns);
+                    (sample.pts_ns, end)
+                })
+                .reduce(|(start, end), (sample_start, sample_end)| {
+                    (start.min(sample_start), end.max(sample_end))
+                });
+            *held = span
+                .map(|(start, end)| end.saturating_sub(start))
+                .filter(|&span_ns| span_ns > 0 && span_ns <= MAX_HELD_FRAGMENT_NS);
+        }
     }
 
     /// Parse the whole buffered file at `Eos` and emit every sample, for a
@@ -852,6 +883,18 @@ impl MultiOutputElement for Mp4DemuxN {
             }
             Ok(())
         })
+    }
+
+    // progressive files never latch: they are held whole until Eos
+    fn latency(&self) -> LatencyReport {
+        let held_ns = self
+            .held_fragment_ns
+            .iter()
+            .flatten()
+            .copied()
+            .max()
+            .unwrap_or(0);
+        LatencyReport::buffered(held_ns, Some(held_ns))
     }
 }
 
