@@ -97,7 +97,7 @@ pub fn register_appsink_pull(channel: &str) -> AppSinkPull {
     AppSinkPull { rx }
 }
 
-// ends the pull handle of a channel whose appsink never configured
+/// Ends the pull handle of a channel whose appsink never configured.
 pub fn unregister_appsink(channel: &str) {
     SINKS.lock().remove(channel);
 }
