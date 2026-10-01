@@ -15,9 +15,10 @@ use g2g_core::memory::{DomainSet, SystemSlice};
 use g2g_core::runtime::{auto_plug_domain_converters, run_graph, GraphNode, SourceLoop};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, Frame, FrameTiming,
-    G2gError, Graph, MemoryDomain, MemoryDomainKind, OutputSink, PipelineClock, PipelinePacket,
-    Rate, RawVideoFormat,
+    G2gError, Graph, MemoryDomain, MemoryDomainKind, NodeId, OutputSink, PipelineClock,
+    PipelinePacket, Rate, RawVideoFormat,
 };
+use g2g_plugins::capsfilter::CapsFilter;
 
 struct NullClock;
 impl PipelineClock for NullClock {
@@ -177,8 +178,8 @@ impl AsyncElement for DomainSink {
     }
 }
 
-/// Fake factory: an upload into CUDA and a CUDA -> GPU-texture bridge, the two
-/// pairs the real CUDA factory covers besides the download.
+/// Fake factory: the three pairs the real CUDA factory covers, an upload into
+/// CUDA, a CUDA -> GPU-texture bridge, and a download.
 fn fake_factory(from: MemoryDomainKind, to: MemoryDomainKind) -> Option<GraphNode> {
     match (from, to) {
         (MemoryDomainKind::System, MemoryDomainKind::Cuda) => {
@@ -191,8 +192,80 @@ fn fake_factory(from: MemoryDomainKind, to: MemoryDomainKind) -> Option<GraphNod
                 emits: MemoryDomainKind::WgpuTexture,
             }))
         }
+        (MemoryDomainKind::Cuda, MemoryDomainKind::System) => {
+            Some(GraphNode::element(FakeConverter {
+                emits: MemoryDomainKind::System,
+            }))
+        }
         _ => None,
     }
+}
+
+fn element_name(graph: &Graph<GraphNode>, node: NodeId) -> &'static str {
+    graph.element(node).expect("an element").log_category()
+}
+
+fn feeder(graph: &Graph<GraphNode>, node: NodeId) -> NodeId {
+    graph
+        .edges()
+        .iter()
+        .find(|e| e.dst.node == node)
+        .expect("an edge into the node")
+        .src
+        .node
+}
+
+#[tokio::test]
+async fn download_goes_after_a_chain_of_capsfilters() {
+    let seen = Arc::new(Mutex::new(0u64));
+    let mut g: Graph<GraphNode> = Graph::new();
+    let src = g.add_source(GraphNode::source(FakeSource {
+        count: 3,
+        domains: DomainSet::only(MemoryDomainKind::Cuda),
+    }));
+    let first = g.add_transform(GraphNode::element(CapsFilter::new(nv12())));
+    let second = g.add_transform(GraphNode::element(CapsFilter::new(nv12())));
+    let snk = g.add_sink(GraphNode::element(DomainSink {
+        requires: DomainSet::only(MemoryDomainKind::System),
+        seen: Arc::clone(&seen),
+    }));
+    g.link(src, first).unwrap();
+    g.link(first, second).unwrap();
+    g.link(second, snk).unwrap();
+
+    let g = auto_plug_domain_converters(g, &fake_factory);
+    assert_eq!(g.node_count(), 5, "one converter was spliced");
+    let converter = feeder(&g, snk);
+    assert_eq!(element_name(&g, converter), "FakeConverter");
+    assert_eq!(feeder(&g, converter), second);
+
+    run_graph(g, &NullClock, 4).await.expect("runs");
+    assert_eq!(*seen.lock().unwrap(), 3);
+}
+
+#[tokio::test]
+async fn capsfilter_hands_the_sink_domain_to_a_multi_domain_producer() {
+    let seen = Arc::new(Mutex::new(0u64));
+    let mut g: Graph<GraphNode> = Graph::new();
+    let src = g.add_source(GraphNode::source(FakeSource {
+        count: 3,
+        domains: DomainSet::only(MemoryDomainKind::Cuda).with(MemoryDomainKind::System),
+    }));
+    let filter = g.add_transform(GraphNode::element(CapsFilter::new(nv12())));
+    let snk = g.add_sink(GraphNode::element(DomainSink {
+        requires: DomainSet::only(MemoryDomainKind::System),
+        seen: Arc::clone(&seen),
+    }));
+    g.link(src, filter).unwrap();
+    g.link(filter, snk).unwrap();
+
+    let g = auto_plug_domain_converters(g, &fake_factory);
+    assert_eq!(g.node_count(), 3, "the producer can emit System itself");
+
+    let stats = run_graph(g, &NullClock, 4).await.expect("runs");
+    let allocation = stats.allocation.expect("the source got a proposal");
+    assert_eq!(allocation.domain, MemoryDomainKind::System);
+    assert_eq!(*seen.lock().unwrap(), 3);
 }
 
 /// A System producer feeding a Cuda-only consumer gets a converter spliced, and

@@ -283,6 +283,11 @@ pub trait AsyncElement: ElementBound {
         DomainSet::ALL
     }
 
+    // true when every frame leaves in the memory it arrived in, like a caps filter
+    fn output_domain_follows_input(&self) -> bool {
+        false
+    }
+
     /// Answer the upstream peer's allocation query (M12): the buffer size,
     /// count, alignment, and memory domain this element needs allocated so a
     /// pool can be handed over without a copy. Default: no preference
@@ -636,6 +641,10 @@ pub trait DynAsyncElement: ElementBound {
         DomainSet::ALL
     }
 
+    fn output_domain_follows_input(&self) -> bool {
+        false
+    }
+
     /// Dyn-safe mirror of [`AsyncElement::meta_transform`]. Default `None`.
     #[cfg(feature = "metadata")]
     fn meta_transform(&self) -> Option<crate::meta::Transform> {
@@ -843,6 +852,10 @@ impl<T: AsyncElement> DynAsyncElement for T {
         AsyncElement::input_domains(self)
     }
 
+    fn output_domain_follows_input(&self) -> bool {
+        AsyncElement::output_domain_follows_input(self)
+    }
+
     #[cfg(feature = "metadata")]
     fn meta_transform(&self) -> Option<crate::meta::Transform> {
         AsyncElement::meta_transform(self)
@@ -1026,6 +1039,10 @@ impl<'b> AsyncElement for DynRef<'b> {
         self.0.input_domains()
     }
 
+    fn output_domain_follows_input(&self) -> bool {
+        self.0.output_domain_follows_input()
+    }
+
     #[cfg(feature = "metadata")]
     fn meta_transform(&self) -> Option<crate::meta::Transform> {
         self.0.meta_transform()
@@ -1177,6 +1194,10 @@ impl<'b> DynAsyncElement for &'b mut (dyn DynAsyncElement + 'b) {
 
     fn input_domains(&self) -> DomainSet {
         (**self).input_domains()
+    }
+
+    fn output_domain_follows_input(&self) -> bool {
+        (**self).output_domain_follows_input()
     }
 
     #[cfg(feature = "metadata")]

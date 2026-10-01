@@ -108,6 +108,10 @@ impl AsyncElement for CapsFilter {
         CapsConstraint::Identity(self.filter.clone())
     }
 
+    fn output_domain_follows_input(&self) -> bool {
+        true
+    }
+
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         // The solver should only ever hand us caps the filter accepts;
         // fail loud if it didn't (a negotiation bug, not a runtime state).

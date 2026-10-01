@@ -977,8 +977,9 @@ pub async fn run_graph_with_copy_policy<'a, Clk: PipelineClock>(
 /// a domain (M354), the structural complement to the M351/M352 in-band domain
 /// negotiation: negotiation settles a *shared* domain when one exists, and this
 /// inserts a converter when one does not. For each original edge `P -> C`, the
-/// producer domain is traced through structural tee/demux nodes back to the real
-/// producer ([`output_domains`](GraphNodeRef::output_domains)); if it shares no
+/// producer domain is traced through structural tee/demux nodes and elements whose
+/// output domain follows their input (a caps filter) back to the real producer
+/// ([`output_domains`](GraphNodeRef::output_domains)); if it shares no
 /// domain with `C`'s [`input_domains`](GraphNodeRef::input_domains), `factory` is
 /// asked for a converter from the producer's preferred domain to each domain `C`
 /// accepts in preference order, and the first one it returns is spliced onto that
@@ -1011,7 +1012,9 @@ pub fn auto_plug_domain_converters<'a>(
         // Nothing to do when the two ends already agree on a domain, unless the
         // only thing they agree on is system memory while both would rather stay
         // on the GPU.
-        if !producer.intersect(consumer).is_empty() && !bridges_two_gpus(from, to) {
+        let shared = producer.intersect(consumer);
+        let shares_a_device_domain = shared.preferred().is_some_and(|k| !k.is_system());
+        if shares_a_device_domain || (!shared.is_empty() && !bridges_two_gpus(from, to)) {
             continue;
         }
         // Skip domains the producer emits itself, bar the preferred one a GPU bridge targets.
@@ -1038,13 +1041,15 @@ fn bridges_two_gpus(from: MemoryDomainKind, to: MemoryDomainKind) -> bool {
     from != to && !from.is_system() && !to.is_system()
 }
 
-/// Domains the node emits, tracing through structural tee/demux nodes (which
-/// forward their single input's domain) to the real producer. Used by the
-/// converter auto-plug so a tee fed by a GPU decoder reports the GPU domain on
-/// every branch rather than the structural `System` default.
+/// Domains the node emits, tracing through structural tee/demux nodes and
+/// domain-forwarding elements (which forward their single input's domain) to the
+/// real producer. Used by the converter auto-plug so a tee or caps filter fed by
+/// a GPU decoder reports the GPU domain downstream rather than the `System`
+/// default.
 fn traced_output_domains<'a>(graph: &Graph<GraphNodeRef<'a>>, node: NodeId) -> DomainSet {
-    if let Some(NodeKind::Tee(_)) = graph.node_kind(node) {
-        // A tee/demux is domain-transparent: trace its single input's producer.
+    let is_tee = matches!(graph.node_kind(node), Some(NodeKind::Tee(_)));
+    if is_tee || forwards_input_domain(graph.element(node)) {
+        // Domain-transparent: trace its single input's producer.
         return match graph.edges().iter().find(|e| e.dst.node == node) {
             Some(in_edge) => traced_output_domains(graph, in_edge.src.node),
             None => DomainSet::only(MemoryDomainKind::System),
@@ -1054,6 +1059,10 @@ fn traced_output_domains<'a>(graph: &Graph<GraphNodeRef<'a>>, node: NodeId) -> D
         .element(node)
         .map(|n| n.output_domains())
         .unwrap_or(DomainSet::only(MemoryDomainKind::System))
+}
+
+fn forwards_input_domain(node: Option<&GraphNodeRef<'_>>) -> bool {
+    matches!(node, Some(GraphNodeRef::Element(e)) if e.output_domain_follows_input())
 }
 
 /// As [`run_graph`], but posts pipeline [`BusMessage`](crate::BusMessage)s to
@@ -3556,7 +3565,7 @@ fn cascade_allocation(
             NodeKind::Sink => {
                 let in_e = vg.in_edges(node)[0];
                 let caps = solution[in_e].clone();
-                edge_proposal[in_e] = element_propose(vg, node, &caps, MetaRequests::new());
+                edge_proposal[in_e] = element_propose(vg, node, &caps, MetaRequests::new(), None);
             }
             NodeKind::Transform => {
                 let in_e = vg.in_edges(node)[0];
@@ -3572,7 +3581,10 @@ fn cascade_allocation(
                 }
                 let caps = solution[out_e].clone();
                 let downstream = edge_meta_requests(edge_proposal[out_e]);
-                edge_proposal[in_e] = element_propose(vg, node, &caps, downstream);
+                // The downstream demand reaches past an element that forwards frames untouched.
+                let forwarded =
+                    edge_proposal[out_e].filter(|_| forwards_input_domain(vg.element(node)));
+                edge_proposal[in_e] = element_propose(vg, node, &caps, downstream, forwarded);
             }
             NodeKind::Tee(_) => {
                 let in_e = vg.in_edges(node)[0];
@@ -3668,10 +3680,14 @@ fn element_propose(
     node: NodeId,
     caps: &Caps,
     downstream: MetaRequests,
+    forwarded: Option<AllocationParams>,
 ) -> Option<AllocationParams> {
     match vg.element(node) {
         Some(GraphNodeRef::Element(elem)) => with_meta_demand(
-            narrow_to_input_domains(elem.propose_allocation(caps), elem.input_domains()),
+            narrow_to_input_domains(
+                elem.propose_allocation(caps).or(forwarded),
+                elem.input_domains(),
+            ),
             elem.meta_requests().carry_upstream(downstream),
         ),
         _ => None,
@@ -4173,8 +4189,9 @@ pub async fn transform_arm<E: AsyncElement>(
                     // our output caps, and report it so the cascade continues to
                     // our upstream neighbour.
                     elem.configure_allocation(&params);
+                    let forwarded = elem.output_domain_follows_input().then_some(params);
                     let proposal = with_meta_demand(
-                        elem.propose_allocation(&out_caps),
+                        elem.propose_allocation(&out_caps).or(forwarded),
                         elem.meta_requests().carry_upstream(params.meta_requests),
                     );
                     coord

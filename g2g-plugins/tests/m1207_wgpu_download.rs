@@ -117,6 +117,24 @@ async fn auto_plug_downloads_for_a_dmabuf_or_system_sink() {
     assert_eq!(system_bytes(&frame), pixels.as_slice());
 }
 
+#[tokio::test]
+async fn auto_plug_downloads_through_a_chain_of_capsfilters() {
+    let _gpu = GPU_LOCK.lock().await;
+    if !has_adapter().await {
+        eprintln!("no wgpu adapter; skipping");
+        return;
+    }
+    let pixels = opaque_pattern();
+    let rgba = format!("video/x-raw,format=RGBA,width={WIDTH},height={HEIGHT}");
+    let frame = through_gpu_compositor(
+        "download_through_capsfilters",
+        &format!("capsfilter caps={rgba} ! {rgba} ! appsink input-domains=system"),
+        &pixels,
+    )
+    .await;
+    assert_eq!(system_bytes(&frame), pixels.as_slice());
+}
+
 #[derive(Default)]
 struct Capture {
     frame: Option<Frame>,

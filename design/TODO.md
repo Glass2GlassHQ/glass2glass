@@ -316,5 +316,3 @@ unless it says otherwise.
   it at the bridge output for zero-copy `WgpuBuffer` egress.
 - Build the wgpu elements into the shipped GStreamer plugin (`g2g-bridge` has no
   feature that enables them).
-- Trace the converter auto-plug through a `capsfilter`, so
-  `<gpu producer> ! capsfilter ! <system sink>` gets a download spliced.

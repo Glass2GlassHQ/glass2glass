@@ -443,6 +443,20 @@ Two fan structures have non-trivial joins:
   `CudaUpload` with no hand-wiring. Negotiation settles a shared domain when one
   exists; the auto-plug bridges when one does not; an unconvertible pair still
   fails loud.
+- **Looking through a caps filter.** An element whose frames leave in the memory
+  they arrived in declares `output_domain_follows_input` (`CapsFilter` does), and
+  the producer-domain trace walks through it as it walks through a tee. So
+  `<gpu producer> ! capsfilter ! capsfilter ! <system sink>` gets its download on
+  the edge into the sink, after the last filter: the converter always sits on the
+  edge into the consumer that needs it, which is also the only placement that
+  works when a filter feeds a tee whose branches want different domains. The
+  converter is caps-`Identity`, so the filters' caps still pin the link. The
+  allocation cascade carries the downstream proposal past such an element when it
+  proposes nothing itself, so a producer that can download on its own (`NvDec`,
+  `{Cuda, System}`) settles on `System` behind a filter and no converter is
+  spliced. A consumer that shares a device-resident domain with its producer (any
+  `DomainSet::ALL` consumer does) never gets a converter. The GPU-to-GPU bridge
+  is reserved for ends whose best shared domain is system memory.
 - **Muxer boundary.** A muxer states its per-pad demand through
   `MultiInputElement::propose_allocation_for_input(pad, caps)` (default `None`,
   so a plain container muxer imposes nothing). The declaration half holds here

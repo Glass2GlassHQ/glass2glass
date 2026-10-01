@@ -73,9 +73,11 @@ impl AsyncElement for FakeConverter {
     }
 }
 
-struct DmaBufOrSystemSink;
+struct DomainSink {
+    accepts: DomainSet,
+}
 
-impl AsyncElement for DmaBufOrSystemSink {
+impl AsyncElement for DomainSink {
     type ProcessFuture<'a> = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>;
 
     fn intercept_caps(&self, upstream: &Caps) -> Result<Caps, G2gError> {
@@ -88,7 +90,7 @@ impl AsyncElement for DmaBufOrSystemSink {
         Ok(ConfigureOutcome::Accepted)
     }
     fn input_domains(&self) -> DomainSet {
-        DomainSet::only(MemoryDomainKind::DmaBuf).with(MemoryDomainKind::System)
+        self.accepts
     }
     fn process<'a>(
         &'a mut self,
@@ -99,12 +101,16 @@ impl AsyncElement for DmaBufOrSystemSink {
     }
 }
 
-fn texture_to_sink() -> Graph<GraphNode> {
+fn texture_to_sink(accepts: DomainSet) -> Graph<GraphNode> {
     let mut graph: Graph<GraphNode> = Graph::new();
     let source = graph.add_source(GraphNode::source(TextureSource));
-    let sink = graph.add_sink(GraphNode::element(DmaBufOrSystemSink));
+    let sink = graph.add_sink(GraphNode::element(DomainSink { accepts }));
     graph.link(source, sink).unwrap();
     graph
+}
+
+fn dmabuf_or_system() -> DomainSet {
+    DomainSet::only(MemoryDomainKind::DmaBuf).with(MemoryDomainKind::System)
 }
 
 fn emitted_by(graph: &Graph<GraphNode>, id: u32) -> Option<MemoryDomainKind> {
@@ -124,7 +130,7 @@ fn falls_back_to_the_consumers_second_domain() {
         }
     };
 
-    let graph = auto_plug_domain_converters(texture_to_sink(), &factory);
+    let graph = auto_plug_domain_converters(texture_to_sink(dmabuf_or_system()), &factory);
 
     assert_eq!(graph.node_count(), 3, "a converter was spliced");
     assert_eq!(emitted_by(&graph, 2), Some(MemoryDomainKind::System));
@@ -143,9 +149,24 @@ fn preferred_domain_converter_still_wins() {
         Some(GraphNode::element(FakeConverter { emits: to }))
     };
 
-    let graph = auto_plug_domain_converters(texture_to_sink(), &factory);
+    let graph = auto_plug_domain_converters(texture_to_sink(dmabuf_or_system()), &factory);
 
     assert_eq!(graph.node_count(), 3);
     assert_eq!(emitted_by(&graph, 2), Some(MemoryDomainKind::DmaBuf));
     assert_eq!(*asked.lock().unwrap(), [MemoryDomainKind::DmaBuf]);
+}
+
+#[test]
+fn consumer_sharing_the_texture_domain_gets_no_converter() {
+    let factory = |_from: MemoryDomainKind, to: MemoryDomainKind| {
+        Some(GraphNode::element(FakeConverter { emits: to }))
+    };
+    let cuda_texture_or_system = DomainSet::only(MemoryDomainKind::Cuda)
+        .with(MemoryDomainKind::WgpuTexture)
+        .with(MemoryDomainKind::System);
+
+    for accepts in [DomainSet::ALL, cuda_texture_or_system] {
+        let graph = auto_plug_domain_converters(texture_to_sink(accepts), &factory);
+        assert_eq!(graph.node_count(), 2, "{accepts:?} takes the texture as is");
+    }
 }
