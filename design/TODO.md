@@ -311,6 +311,8 @@ unless it says otherwise.
 
 ## GStreamer bridge
 
-- Let `wgputodmabuf` export a buffer made on another device (it opens its own
-  export device, so it fails on every in-tree `WgpuBuffer` producer), then splice
-  it at the bridge output for zero-copy `WgpuBuffer` egress.
+- Build `dmabuftowgpu` and `wgputodmabuf` into the GStreamer plugin (the bridge's
+  `wgpu` feature leaves out `dmabuf-wgpu`), and let the bridge's `appsrc` declare
+  dma-buf output when GStreamer hands it dma-buf memory, so a `dmabuftowgpu`
+  fragment negotiates and its `WgpuBuffer` output leaves through `wgputodmabuf`,
+  then validate that egress against real GStreamer.

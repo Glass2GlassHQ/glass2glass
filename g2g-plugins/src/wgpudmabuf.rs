@@ -15,11 +15,17 @@
 //! external-memory flags), so the element allocates its *own* Vulkan buffer backed
 //! by `VkExportMemoryAllocateInfo` with the dma-buf handle type, copies the input
 //! into it on the GPU (`copy_buffer_to_buffer`), and exports the backing memory as
-//! a dma-buf fd with `vkGetMemoryFdKHR`. Because the input and the exportable
-//! buffer must share one `wgpu::Device` for that GPU copy, a producer feeding this
-//! element must allocate on the element's device (see [`WgpuToDmaBuf::gpu`] and
-//! [`WgpuToDmaBuf::wrap_buffer`]); a cross-device hand-off is impossible without a
-//! copy anyway.
+//! a dma-buf fd with `vkGetMemoryFdKHR`. The input and the exportable buffer must
+//! share one `wgpu::Device` for that GPU copy, so the element exports on the
+//! producer's device, recovered from the frame's keep-alive. wgpu-hal enables
+//! `VK_KHR_external_memory_fd` and `VK_EXT_external_memory_dma_buf` on every
+//! Vulkan device whose driver offers them, so a plain wgpu device qualifies. The
+//! zero-stall mode below also needs `VK_KHR_external_semaphore_fd`, which only the
+//! dma-buf import and export devices ([`WgpuToDmaBuf::gpu`]) request.
+//!
+//! A buffer carrying a [`PlaneLayout`](g2g_core::meta::PlaneLayout) (a padded
+//! import from [`DmaBufToWgpu`](crate::dmabufwgpu::DmaBufToWgpu)) is exported in
+//! that layout, its plane-0 stride and offset stamped on the dma-buf.
 //!
 //! # Lifetime
 //!
@@ -66,36 +72,26 @@ use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
 
 use ash::vk;
 
+use g2g_core::log::{short_type_name, Target};
 use g2g_core::memory::{
     DomainSet, MemoryDomain, MemoryDomainKind, OwnedDmaBuf, OwnedWgpuBuffer, SyncFd,
     WgpuBufferKeepAlive,
 };
+use g2g_core::meta::PlaneLayout;
 use g2g_core::pad_template::{PadTemplate, PadTemplates};
 use g2g_core::{
-    AsyncElement, Caps, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError, HardwareError,
-    OutputSink, PipelinePacket, Rate, RawVideoFormat,
+    g2g_error, AsyncElement, Caps, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
+    HardwareError, OutputSink, PipelinePacket, Rate, RawVideoFormat,
 };
 
-use crate::dmabufwgpu::DmaBufWgpuBuffer;
-
-/// Formats this element exports: packed RGBA/BGRA/YUYV (one plane) and 8-bit NV12
-/// (a packed luma + interleaved-chroma buffer, luma stride). The frame byte size
-/// and row stride come from `RawVideoFormat`'s `frame_bytes` / `row_stride`, so
-/// the export and the [`DmaBufToWgpu`](crate::dmabufwgpu::DmaBufToWgpu) import
-/// agree.
-const FORMATS: [RawVideoFormat; 4] = [
-    RawVideoFormat::Rgba8,
-    RawVideoFormat::Bgra8,
-    RawVideoFormat::Nv12,
-    RawVideoFormat::Yuyv,
-];
+use crate::dmabufwgpu::{single_stride_layout, DmaBufWgpuBuffer, DMABUF_FRAME_FORMATS};
 
 fn gpu_err() -> G2gError {
     G2gError::Hardware(HardwareError::Other)
 }
 
 fn supported(format: RawVideoFormat) -> bool {
-    FORMATS.contains(&format)
+    DMABUF_FRAME_FORMATS.contains(&format)
 }
 
 /// Owner for a plain exportable-device `wgpu::Buffer`: what
@@ -129,19 +125,51 @@ impl WgpuBufferKeepAlive for PlainWgpuBuffer {
     }
 }
 
-/// Recover the input `wgpu::Buffer` from a `WgpuBuffer` frame's keep-alive. Known
-/// owners: this element's [`PlainWgpuBuffer`] and the importer's
-/// [`DmaBufWgpuBuffer`] (so an import -> GPU-work -> export chain on one device
-/// flows through).
-fn input_buffer(owned: &OwnedWgpuBuffer) -> Option<&wgpu::Buffer> {
+/// Recover the input `wgpu::Buffer` and the device and queue it lives on from a
+/// `WgpuBuffer` frame's keep-alive. Known owners: [`PlainWgpuBuffer`] and the
+/// importer's [`DmaBufWgpuBuffer`].
+fn producer_buffer(
+    owned: &OwnedWgpuBuffer,
+) -> Option<(&wgpu::Buffer, &wgpu::Device, &wgpu::Queue)> {
     let any = owned.keep_alive().as_any();
     if let Some(p) = any.downcast_ref::<PlainWgpuBuffer>() {
-        return Some(p.buffer());
+        return Some((p.buffer(), p.device(), p.queue()));
     }
     if let Some(d) = any.downcast_ref::<DmaBufWgpuBuffer>() {
-        return Some(d.buffer());
+        return Some((d.buffer(), d.device(), d.queue()));
     }
     None
+}
+
+fn raw_device(device: &wgpu::Device) -> Option<vk::Device> {
+    // SAFETY: reads the device handle only, nothing is created or submitted.
+    unsafe { device.as_hal::<wgpu_hal::api::Vulkan>() }.map(|hal| hal.raw_device().handle())
+}
+
+/// The first device extension an export on `device` needs that it lacks, or
+/// `None` when it has them all. A non-Vulkan device lacks the first one.
+fn missing_export_extension(
+    device: &wgpu::Device,
+    external_semaphore: bool,
+) -> Option<&'static core::ffi::CStr> {
+    let memory = [
+        ash::khr::external_memory_fd::NAME,
+        ash::ext::external_memory_dma_buf::NAME,
+    ];
+    let semaphore: &[&'static core::ffi::CStr] = match external_semaphore {
+        true => &[ash::khr::external_semaphore_fd::NAME],
+        false => &[],
+    };
+    // SAFETY: reads the enabled extension list only.
+    let Some(hal) = (unsafe { device.as_hal::<wgpu_hal::api::Vulkan>() }) else {
+        return Some(memory[0]);
+    };
+    let enabled = hal.enabled_device_extensions();
+    memory
+        .iter()
+        .chain(semaphore)
+        .copied()
+        .find(|name| !enabled.contains(name))
 }
 
 /// GPU -> DMABUF export element. See the module docs.
@@ -158,10 +186,10 @@ pub struct WgpuToDmaBuf {
     device: Option<wgpu::Device>,
     queue: Option<wgpu::Queue>,
     configured: bool,
-    /// Pixel format, luma/packed row stride, and height from the negotiated caps;
-    /// the exported buffer is `format.frame_bytes(stride, height)` bytes.
+    /// Pixel format and geometry from the negotiated caps: with the input's plane
+    /// layout they give the exported planes ([`single_stride_layout`]).
     format: RawVideoFormat,
-    stride: u32,
+    width: u32,
     height: u32,
     exported: u64,
     /// Zero-stall sync mode (see module docs "Synchronisation"): when set, signal a
@@ -197,7 +225,7 @@ impl WgpuToDmaBuf {
             queue: None,
             configured: false,
             format: RawVideoFormat::Rgba8,
-            stride: 0,
+            width: 0,
             height: 0,
             exported: 0,
             external_semaphore: false,
@@ -225,9 +253,11 @@ impl WgpuToDmaBuf {
         self.exported
     }
 
-    /// Ensure the export device exists and return clones of it and its queue, so a
-    /// producer (or a test) can allocate its input `wgpu::Buffer` on the *same*
-    /// device (required for the GPU copy into the exportable buffer).
+    /// Open a device carrying every export extension (the semaphore one too) if
+    /// none is adopted yet, and return clones of it and its queue, so a producer
+    /// (or a test) can allocate its input `wgpu::Buffer` on it. Frames from any
+    /// other export-capable device work as well, as long as one device feeds the
+    /// element.
     pub async fn gpu(&mut self) -> Result<(wgpu::Device, wgpu::Queue), G2gError> {
         if self.device.is_none() {
             let (device, queue) = create_export_device().await?;
@@ -237,9 +267,9 @@ impl WgpuToDmaBuf {
         Ok((self.device.clone().unwrap(), self.queue.clone().unwrap()))
     }
 
-    /// Wrap a `wgpu::Buffer` (allocated on this element's [`gpu`](Self::gpu)
-    /// device, with `COPY_SRC` usage) as a `WgpuBuffer` frame domain this element
-    /// accepts. `queue` is the device's, so a download can read the buffer back.
+    /// Wrap a `wgpu::Buffer` (with `COPY_SRC` usage) and the device and queue it
+    /// lives on as a `WgpuBuffer` frame domain this element accepts and a download
+    /// can read back.
     pub fn wrap_buffer(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -256,15 +286,75 @@ impl WgpuToDmaBuf {
         )
     }
 
+    /// Export on `device` from now on, or fail when it cannot export or another
+    /// device was adopted first: the timeline semaphore and the copies still in
+    /// flight belong to that one.
+    fn adopt_device(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) -> Result<(), G2gError> {
+        if let Some(current) = &self.device {
+            if raw_device(current) == raw_device(device) {
+                return Ok(());
+            }
+            g2g_error!(
+                Target::category(short_type_name::<Self>()),
+                "a frame arrived from a second wgpu device, this element exports on the first one only"
+            );
+            return Err(G2gError::UnsupportedDomain);
+        }
+        if let Some(extension) = missing_export_extension(device, self.external_semaphore) {
+            g2g_error!(
+                Target::category(short_type_name::<Self>()),
+                "the producer's wgpu device cannot export a dma-buf: {extension:?} is not enabled"
+            );
+            return Err(G2gError::UnsupportedDomain);
+        }
+        self.device = Some(device.clone());
+        self.queue = Some(queue.clone());
+        Ok(())
+    }
+
+    /// The plane-0 offset and stride to stamp on the dma-buf and the bytes the
+    /// planes span: the input's own layout when it carries one, else tightly packed
+    /// planes. A layout whose later planes do not follow plane 0's stride cannot be
+    /// described by one dma-buf stride and offset, so it fails.
+    fn export_layout(&self, owned: &OwnedWgpuBuffer) -> Result<(u32, u32, u64), G2gError> {
+        let input = owned.plane_layout();
+        let (offset, stride) = match input.and_then(|layout| layout.plane(0)) {
+            Some(plane) => (plane.offset, plane.stride),
+            None => (0, 0),
+        };
+        let to_u32 = |value: usize| u32::try_from(value).map_err(|_| G2gError::CapsMismatch);
+        let (layout, size) = single_stride_layout(
+            self.format,
+            self.width,
+            self.height,
+            to_u32(offset)?,
+            to_u32(stride)?,
+        )
+        .ok_or(G2gError::CapsMismatch)?;
+        let follows_plane_0 = |input: &PlaneLayout| {
+            input.count() == layout.count()
+                && (0..layout.count()).all(|plane| layout.plane(plane) == input.plane(plane))
+        };
+        if !input.is_none_or(follows_plane_0) {
+            return Err(G2gError::CapsMismatch);
+        }
+        let first_plane = layout.plane(0).ok_or(G2gError::CapsMismatch)?;
+        Ok((
+            to_u32(first_plane.offset)?,
+            to_u32(first_plane.stride)?,
+            size,
+        ))
+    }
+
     /// Create the persistent exportable timeline semaphore and export its fd, once.
-    /// Requires the export device (call [`gpu`](Self::gpu) first).
+    /// Requires the export device, from [`gpu`](Self::gpu) or the first frame.
     fn ensure_semaphore(&mut self) -> Result<(), G2gError> {
         if self.semaphore.is_some() {
             return Ok(());
         }
         let device = self.device.as_ref().ok_or_else(gpu_err)?;
-        // SAFETY: `device` is a Vulkan export device carrying
-        // VK_KHR_external_semaphore_fd (added in `create_export_device`).
+        // SAFETY: `device` is a Vulkan device carrying VK_KHR_external_semaphore_fd
+        // (added in `create_export_device`, checked in `adopt_device`).
         let (sem, fd) = unsafe { create_export_semaphore(device)? };
         self.semaphore = Some(sem);
         // SAFETY: `fd` is a fresh, owned OPAQUE_FD from the export above.
@@ -330,7 +420,7 @@ impl PadTemplates for WgpuToDmaBuf {
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
-        let set = CapsSet::from_alternatives(FORMATS.map(any).to_vec());
+        let set = CapsSet::from_alternatives(DMABUF_FRAME_FORMATS.map(any).to_vec());
         alloc::vec![PadTemplate::sink(set.clone()), PadTemplate::source(set)]
     }
 }
@@ -377,8 +467,9 @@ impl AsyncElement for WgpuToDmaBuf {
             } => (*format, *w, *h),
             _ => return Err(G2gError::CapsMismatch),
         };
-        self.stride = format.row_stride(w).ok_or(G2gError::CapsMismatch)?;
+        single_stride_layout(format, w, h, 0, 0).ok_or(G2gError::CapsMismatch)?;
         self.format = format;
+        self.width = w;
         self.height = h;
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
@@ -399,13 +490,11 @@ impl AsyncElement for WgpuToDmaBuf {
                         // Export path only; a non-wgpu frame is not ours.
                         return Err(G2gError::UnsupportedDomain);
                     };
-                    let src = input_buffer(owned).ok_or(G2gError::UnsupportedDomain)?;
-                    self.gpu().await?;
+                    let (src, device, queue) =
+                        producer_buffer(owned).ok_or(G2gError::UnsupportedDomain)?;
+                    self.adopt_device(device, queue)?;
 
-                    let size = self
-                        .format
-                        .frame_bytes(u64::from(self.stride), u64::from(self.height))
-                        .ok_or(G2gError::CapsMismatch)?;
+                    let (offset, stride, size) = self.export_layout(owned)?;
                     if size == 0 || (owned.len as u64) < size {
                         return Err(G2gError::CapsMismatch);
                     }
@@ -429,9 +518,8 @@ impl AsyncElement for WgpuToDmaBuf {
                     let (fd, dst) = unsafe { export_copy(device, queue, src, size, sync)? };
 
                     // SAFETY: `fd` is a fresh dma-buf fd owned by this process;
-                    // OwnedDmaBuf closes it once on drop. Stride = tight row bytes,
-                    // offset 0 (packed single plane).
-                    let mut dmabuf = unsafe { OwnedDmaBuf::from_raw(fd, self.stride, 0) };
+                    // OwnedDmaBuf closes it once on drop.
+                    let mut dmabuf = unsafe { OwnedDmaBuf::from_raw(fd, stride, offset) };
                     if let (Some(sf), Some((_, value))) = (&self.sync_fd, sync) {
                         dmabuf = dmabuf.with_sync(sf.clone(), value);
                     }

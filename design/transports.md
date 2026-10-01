@@ -790,8 +790,15 @@ fd with `vkGetMemoryFdKHR`. The exported fd is an independent reference to the
 underlying buffer under dma-buf refcounting, so the element frees its own Vulkan
 handles immediately and the fd keeps the memory alive, as does the receiver's
 `SCM_RIGHTS` dup once `DmaBufSink` sends it. The input and the exportable buffer
-must share one `wgpu::Device` for the copy, so a producer feeds this element on
-its device, exposed via `gpu()` / `wrap_buffer`. By default the element waits
+must share one `wgpu::Device` for the copy, so the element runs it on the
+producer's device, taken from the frame's keep-alive (`PlainWgpuBuffer` or
+`DmaBufWgpuBuffer`), and fails a frame from a second device. wgpu-hal enables
+`VK_KHR_external_memory_fd` and `VK_EXT_external_memory_dma_buf` on every Vulkan
+device whose driver offers them, so a device opened with a plain
+`request_device` exports too. The zero-stall mode below also needs
+`VK_KHR_external_semaphore_fd`, which only the import and export devices
+(`create_import_device`, `gpu()`) request, and the element checks the device's
+enabled extensions before the first copy. By default the element waits
 for the copy to finish with `device.poll(Wait)` before exporting, so a consumer
 sees complete pixels, and `with_external_semaphore(true)` replaces that stall
 with an exported timeline semaphore. Validated on the RTX 3060: a buffer
@@ -799,11 +806,15 @@ exported to a dma-buf and re-imported by `DmaBufToWgpu` on a separate wgpu
 device reads back byte-exact (`m559_wgpu_dmabuf_export`), which also confirms
 dma-buf export and import work on this NVIDIA driver.
 
-Packed RGBA/BGRA/YUYV and 8-bit NV12 are supported. The plane-aware frame size,
-where a packed format is one plane and NV12 / I420 add the half-height chroma
-region, and the row stride are `RawVideoFormat::frame_bytes` and `row_stride`,
-which both the export and the `DmaBufToWgpu` import use, so they always agree on
-the buffer size.
+Packed RGBA/BGRA/YUYV, NV12, P010 and I420 are supported, the same list on both
+sides. A dma-buf carries one stride and one offset, so both elements derive every
+plane from plane 0 with `single_stride_layout`: NV12's and P010's interleaved
+chroma at the luma stride, I420's chroma planes at half of it, each plane at full
+stride after the last. The import stamps that layout on the `OwnedWgpuBuffer` it
+emits, and the export copies a buffer that carries one verbatim and puts its
+plane-0 stride and offset on the dma-buf, so a padded frame round-trips with its
+padding. A layout whose later planes do not follow plane 0 fails the export, since
+one stride cannot describe it.
 
 The whole GPU-egress stack composes end to end across a process boundary:
 `WgpuToDmaBuf -> DmaBufSink -> [process] -> DmaBufSrc -> DmaBufToWgpu` moves a

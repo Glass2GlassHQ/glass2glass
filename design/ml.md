@@ -498,6 +498,12 @@ pitch for NV12's interleaved chroma and half of it for I420's, and the VAAPI
 decoder copies the surface out at its own `y_pitch` and `uv_pitch` in one pass per
 plane rather than row by row.
 
+A `WgpuBuffer` frame carries the layout on its `OwnedWgpuBuffer` rather than as
+meta, which is why `PlaneLayout` sits outside the `metadata` gate. `DmaBufToWgpu`
+stamps the imported dma-buf's plane layout there, `wgpudownload` reads the rows
+where they lie and packs them tight for a system-memory consumer, and
+`wgputodmabuf` exports them as they are.
+
 A frame in a dma-buf carries the layout whether or not anyone asked, since its
 rows sit at the producer's pitch either way and a consumer that maps the buffer
 has no other way to find them. `VideoConvert` is that consumer: it requests the

@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1211: `wgpudownload` packs a padded NV12 or P010 `WgpuBuffer` tight, and `wgputodmabuf` exports on the producer's device in the buffer's plane layout.
 - M1210: the domain-converter auto-plug looks through `capsfilter`s, so a GPU producer feeding a system-memory sink through one gets its download spliced.
 - M1209: the `g2g-bridge` `wgpu` feature puts `wgpucompositor` and `wgpudownload` in the GStreamer plugin, and `gstwrap` fails the stream when it cannot map a sample.
 - M1207: `wgpudownload` reads GPU frames back to system memory and the launch auto-plug splices it, so a `g2g-bridge` fragment that ends on the GPU hands its frames back to GStreamer.

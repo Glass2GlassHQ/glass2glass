@@ -890,7 +890,11 @@ caps, equal to the input when preserving, which both enforces the contract and
 gives a caps-driven transform a fixate target. The same `appsink` accepts only
 `dmabuf` and `system` memory, so the launch auto-plug splices `wgpudownload` or
 `cudadownload` after a fragment that ends on the GPU, and a dma-buf output passes
-through untouched.
+through untouched. With the `dmabuf-wgpu` feature a fragment that ends in a
+`WgpuBuffer` gets `wgputodmabuf` instead, exporting on the producer's device. The
+embedded `appsrc` declares system memory only, so a fragment that starts with
+`dmabuftowgpu`, the one in-tree `WgpuBuffer` producer for raw video, fails the
+domain negotiation.
 The wgpu elements, `wgpucompositor` and `wgpudownload`, are in the registry only
 with the crate's `wgpu` feature, so a plugin built with `--features gstreamer,wgpu`
 runs a GPU fragment inside `gst-launch-1.0` (`tools/gst-bridge-smoke.sh`).

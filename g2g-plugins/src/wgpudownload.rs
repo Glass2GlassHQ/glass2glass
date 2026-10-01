@@ -9,9 +9,10 @@ use g2g_core::log::{short_type_name, Target};
 use g2g_core::memory::{
     DomainSet, MemoryDomainKind, OwnedWgpuBuffer, OwnedWgpuTexture, SystemSlice,
 };
+use g2g_core::meta::PlaneLayout;
 use g2g_core::{
-    g2g_error, AsyncElement, Caps, CapsConstraint, ConfigureOutcome, ElementMetadata, G2gError,
-    MemoryDomain, OutputSink, PipelinePacket,
+    g2g_error, AsyncElement, Caps, CapsConstraint, ConfigureOutcome, Dim, ElementMetadata,
+    G2gError, MemoryDomain, OutputSink, PipelinePacket, RawVideoFormat,
 };
 
 use crate::gpu::{
@@ -22,6 +23,32 @@ use crate::gpu::{
 pub struct WgpuDownload {
     configured: bool,
     downloaded: u64,
+    raw_video: Option<RawVideoGeometry>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RawVideoGeometry {
+    format: RawVideoFormat,
+    width: usize,
+    height: usize,
+}
+
+impl RawVideoGeometry {
+    fn of(caps: &Caps) -> Option<Self> {
+        match caps {
+            Caps::RawVideo {
+                format,
+                width: Dim::Fixed(width),
+                height: Dim::Fixed(height),
+                ..
+            } => Some(Self {
+                format: *format,
+                width: *width as usize,
+                height: *height as usize,
+            }),
+            _ => None,
+        }
+    }
 }
 
 impl WgpuDownload {
@@ -77,7 +104,43 @@ fn read_texture_dq(
     Ok(out)
 }
 
-fn download_buffer(owned: &OwnedWgpuBuffer) -> Result<Vec<u8>, G2gError> {
+fn download_buffer(
+    owned: &OwnedWgpuBuffer,
+    raw_video: Option<RawVideoGeometry>,
+) -> Result<Vec<u8>, G2gError> {
+    let bytes = read_owned_buffer(owned)?;
+    let Some(layout) = owned.plane_layout() else {
+        return Ok(bytes);
+    };
+    let raw_video = raw_video.ok_or(G2gError::CapsMismatch)?;
+    pack_planes(&bytes, layout, raw_video).ok_or(G2gError::CapsMismatch)
+}
+
+// `None` when the layout and the caps disagree or a row falls outside the buffer.
+fn pack_planes(
+    padded: &[u8],
+    layout: &PlaneLayout,
+    raw_video: RawVideoGeometry,
+) -> Option<Vec<u8>> {
+    let RawVideoGeometry {
+        format,
+        width,
+        height,
+    } = raw_video;
+    let shapes = crate::paddedrows::plane_shapes_with_stride_shift(format, width, height);
+    if shapes.len() != layout.count() {
+        return None;
+    }
+    let mut packed = Vec::new();
+    for (plane, (row_bytes, rows, _)) in shapes.into_iter().enumerate() {
+        for row in 0..rows {
+            packed.extend_from_slice(padded.get(layout.row_range(plane, row, row_bytes)?)?);
+        }
+    }
+    Some(packed)
+}
+
+fn read_owned_buffer(owned: &OwnedWgpuBuffer) -> Result<Vec<u8>, G2gError> {
     let owner = owned.keep_alive();
     #[cfg(all(target_os = "linux", feature = "dmabuf-wgpu"))]
     {
@@ -156,7 +219,8 @@ impl AsyncElement for WgpuDownload {
         DomainSet::only(MemoryDomainKind::WgpuTexture).with(MemoryDomainKind::WgpuBuffer)
     }
 
-    fn configure_pipeline(&mut self, _absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+    fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        self.raw_video = RawVideoGeometry::of(absolute_caps);
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
     }
@@ -174,7 +238,9 @@ impl AsyncElement for WgpuDownload {
                 PipelinePacket::DataFrame(mut frame) => {
                     let bytes = match &frame.domain {
                         MemoryDomain::WgpuTexture(owned) => Some(download_texture(owned)?),
-                        MemoryDomain::WgpuBuffer(owned) => Some(download_buffer(owned)?),
+                        MemoryDomain::WgpuBuffer(owned) => {
+                            Some(download_buffer(owned, self.raw_video)?)
+                        }
                         _ => None,
                     };
                     if let Some(bytes) = bytes {
@@ -186,6 +252,10 @@ impl AsyncElement for WgpuDownload {
                 }
                 // The runner forwards end-of-stream after `process` returns.
                 PipelinePacket::Eos => {}
+                PipelinePacket::CapsChanged(caps) => {
+                    self.raw_video = RawVideoGeometry::of(&caps);
+                    out.push(PipelinePacket::CapsChanged(caps)).await?;
+                }
                 other => {
                     out.push(other).await?;
                 }

@@ -35,20 +35,22 @@ use ash::vk;
 use g2g_core::memory::{
     DomainSet, MemoryDomain, MemoryDomainKind, OwnedDmaBuf, OwnedWgpuBuffer, WgpuBufferKeepAlive,
 };
+use g2g_core::meta::{Plane, PlaneLayout};
 use g2g_core::pad_template::{PadTemplate, PadTemplates};
 use g2g_core::{
     AsyncElement, Caps, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError, HardwareError,
     OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat,
 };
 
-/// Raw formats the import accepts (the pixel caps pass through unchanged; only
-/// the memory domain changes from dma-buf to a GPU buffer). `RawVideoFormat`'s
-/// `frame_bytes` / `row_stride` give each one's single-stride byte layout, so the
-/// import and the export ([`crate::wgpudmabuf::WgpuToDmaBuf`]) agree on the size.
-const FORMATS: [RawVideoFormat; 5] = [
+/// Raw formats the import and the export ([`crate::wgpudmabuf::WgpuToDmaBuf`])
+/// accept (the pixel caps pass through unchanged; only the memory domain
+/// changes). Each one's planes follow plane 0's stride the way
+/// [`single_stride_layout`] lays them out.
+pub(crate) const DMABUF_FRAME_FORMATS: [RawVideoFormat; 6] = [
     RawVideoFormat::Rgba8,
     RawVideoFormat::Bgra8,
     RawVideoFormat::Nv12,
+    RawVideoFormat::P010,
     RawVideoFormat::I420,
     RawVideoFormat::Yuyv,
 ];
@@ -217,8 +219,9 @@ pub struct DmaBufToWgpu {
     /// built lazily on the first frame (device creation is async) and reused.
     device: Option<wgpu::Device>,
     queue: Option<wgpu::Queue>,
-    /// Frame height, from the negotiated caps: the imported buffer size is
-    /// `offset + format.frame_bytes(stride, height)`.
+    /// Frame geometry, from the negotiated caps: with the dma-buf's stride and
+    /// offset it gives the imported planes ([`single_stride_layout`]).
+    width: u32,
     height: u32,
     /// Pixel format, from the negotiated caps (drives the plane-aware size).
     format: RawVideoFormat,
@@ -242,6 +245,7 @@ impl DmaBufToWgpu {
             configured: false,
             device: None,
             queue: None,
+            width: 0,
             height: 0,
             format: RawVideoFormat::Rgba8,
             imported: 0,
@@ -285,7 +289,7 @@ impl PadTemplates for DmaBufToWgpu {
             interlace: g2g_core::Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
-        let set = CapsSet::from_alternatives(FORMATS.map(any).to_vec());
+        let set = CapsSet::from_alternatives(DMABUF_FRAME_FORMATS.map(any).to_vec());
         alloc::vec![PadTemplate::sink(set.clone()), PadTemplate::source(set)]
     }
 }
@@ -312,12 +316,13 @@ impl AsyncElement for DmaBufToWgpu {
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        (self.format, self.height) = match absolute_caps {
+        (self.format, self.width, self.height) = match absolute_caps {
             Caps::RawVideo {
                 format,
-                height: g2g_core::Dim::Fixed(h),
+                width: Dim::Fixed(w),
+                height: Dim::Fixed(h),
                 ..
-            } => (*format, *h),
+            } => (*format, *w, *h),
             _ => return Err(G2gError::CapsMismatch),
         };
         self.configured = true;
@@ -379,15 +384,14 @@ impl AsyncElement for DmaBufToWgpu {
                     let device = self.device.clone().unwrap();
                     let queue = self.queue.clone().unwrap();
 
-                    let stride = u64::from(dmabuf.stride);
-                    // Plane-aware size: RGBA is one plane, NV12 / I420 add the
-                    // half-height chroma region (a bare stride*height would import
-                    // only the luma plane of a planar frame).
-                    let plane_bytes = self
-                        .format
-                        .frame_bytes(stride, u64::from(self.height))
-                        .ok_or(G2gError::CapsMismatch)?;
-                    let size = u64::from(dmabuf.offset) + plane_bytes;
+                    let (layout, size) = single_stride_layout(
+                        self.format,
+                        self.width,
+                        self.height,
+                        dmabuf.offset,
+                        dmabuf.stride,
+                    )
+                    .ok_or(G2gError::CapsMismatch)?;
                     if size == 0 {
                         return Err(G2gError::CapsMismatch);
                     }
@@ -398,10 +402,10 @@ impl AsyncElement for DmaBufToWgpu {
                         queue,
                     };
                     let mut gpu_frame = frame;
-                    gpu_frame.domain = MemoryDomain::WgpuBuffer(OwnedWgpuBuffer::new(
-                        size as usize,
-                        Arc::new(owner),
-                    ));
+                    gpu_frame.domain = MemoryDomain::WgpuBuffer(
+                        OwnedWgpuBuffer::new(size as usize, Arc::new(owner))
+                            .with_plane_layout(layout),
+                    );
                     self.imported += 1;
                     out.push(PipelinePacket::DataFrame(gpu_frame)).await?;
                 }
@@ -412,6 +416,38 @@ impl AsyncElement for DmaBufToWgpu {
             Ok(())
         })
     }
+}
+
+/// Where each plane of a `format` frame sits in a dma-buf whose plane 0 starts at
+/// `offset` with rows `stride` bytes apart (0 means tight), and how many bytes the
+/// planes span with every row at full stride. `None` when the stride cannot hold
+/// a row or the arithmetic overflows: both numbers come from the producer.
+pub(crate) fn single_stride_layout(
+    format: RawVideoFormat,
+    width: u32,
+    height: u32,
+    offset: u32,
+    stride: u32,
+) -> Option<(PlaneLayout, u64)> {
+    let planes = crate::paddedrows::padded_planes(
+        format,
+        width as usize,
+        height as usize,
+        offset as usize,
+        stride as usize,
+    )?;
+    let last = planes.last()?;
+    let size = last
+        .offset
+        .checked_add(last.stride.checked_mul(last.rows)?)?;
+    let planes: alloc::vec::Vec<Plane> = planes
+        .iter()
+        .map(|p| Plane {
+            offset: p.offset,
+            stride: p.stride,
+        })
+        .collect();
+    Some((PlaneLayout::new(&planes)?, size as u64))
 }
 
 /// The [`ImportAdapter`] choice as a property, declared once and reused by every
@@ -772,10 +808,9 @@ mod tests {
     /// driver's stride: a short size would bind less than the picture.
     #[test]
     fn yuyv_import_size_is_the_packed_plane() {
-        assert!(FORMATS.contains(&RawVideoFormat::Yuyv));
-        assert_eq!(
-            RawVideoFormat::Yuyv.frame_bytes(1280, 480),
-            Some(1280 * 480)
-        );
+        assert!(DMABUF_FRAME_FORMATS.contains(&RawVideoFormat::Yuyv));
+        let (_, size) = single_stride_layout(RawVideoFormat::Yuyv, 640, 480, 0, 1280)
+            .expect("the stride holds a row");
+        assert_eq!(size, 1280 * 480);
     }
 }

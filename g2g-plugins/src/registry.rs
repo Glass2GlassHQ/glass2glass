@@ -377,7 +377,11 @@ fn container_muxer_provider(container: &Caps) -> Option<&'static [&'static str]>
     })
 }
 
-#[cfg(any(all(target_os = "linux", feature = "cuda"), feature = "wgpu-sink"))]
+#[cfg(any(
+    all(target_os = "linux", feature = "cuda"),
+    all(target_os = "linux", feature = "dmabuf-wgpu"),
+    feature = "wgpu-sink"
+))]
 fn domain_converter(
     from: g2g_core::MemoryDomainKind,
     to: g2g_core::MemoryDomainKind,
@@ -385,6 +389,17 @@ fn domain_converter(
     #[cfg(all(target_os = "linux", feature = "cuda"))]
     if let Some(converter) = crate::cuda::cuda_domain_converter(from, to) {
         return Some(converter);
+    }
+    #[cfg(all(target_os = "linux", feature = "dmabuf-wgpu"))]
+    if (from, to)
+        == (
+            g2g_core::MemoryDomainKind::WgpuBuffer,
+            g2g_core::MemoryDomainKind::DmaBuf,
+        )
+    {
+        return Some(g2g_core::runtime::GraphNode::element(
+            crate::wgpudmabuf::WgpuToDmaBuf::new(),
+        ));
     }
     #[cfg(feature = "wgpu-sink")]
     if matches!(
@@ -413,7 +428,11 @@ pub fn default_registry() -> Registry {
     // A parsed pipeline whose producer and consumer disagree on a memory domain
     // gets the bridge spliced in (M354): `nvdec ! wgpusink` keeps the frame on
     // the GPU, `nvdec ! waylandsink` downloads it.
-    #[cfg(any(all(target_os = "linux", feature = "cuda"), feature = "wgpu-sink"))]
+    #[cfg(any(
+        all(target_os = "linux", feature = "cuda"),
+        all(target_os = "linux", feature = "dmabuf-wgpu"),
+        feature = "wgpu-sink"
+    ))]
     reg.set_domain_converter(domain_converter);
 
     // Sources. The output caps are the autoplug `decodebin` input; the parser

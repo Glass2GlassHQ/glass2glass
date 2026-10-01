@@ -384,8 +384,15 @@ mod pixel;
 // converter and shader here, and by g2g-ml's GPU preprocessor.
 pub mod yuvmatrix;
 // Where a capture driver's / decoder's padded rows sit, shared by the producers
-// that either declare them (`PlaneLayout`) or pack them tight.
-#[cfg(any(feature = "metadata", feature = "v4l2", feature = "pipewire"))]
+// that either declare them (`PlaneLayout`) or pack them tight, and by the GPU
+// import / download that carry and strip them.
+#[cfg(any(
+    feature = "metadata",
+    feature = "v4l2",
+    feature = "pipewire",
+    feature = "wgpu-sink",
+    all(target_os = "linux", feature = "dmabuf-wgpu")
+))]
 mod paddedrows;
 // Sans-IO RFC 4566 SDP: the shared media-section scanner plus the RTP/AVP
 // mapping from a media description to Caps (payload type, codec, clock rate,

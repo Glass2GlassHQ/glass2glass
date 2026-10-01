@@ -4,6 +4,8 @@ use alloc::boxed::Box;
 use alloc::sync::Arc;
 use core::ffi::c_void;
 
+#[cfg(feature = "alloc")]
+use crate::meta::PlaneLayout;
 #[cfg(feature = "runtime")]
 use crate::pool::PooledBuffer;
 #[cfg(feature = "alloc")]
@@ -1192,7 +1194,8 @@ pub trait WgpuKeepAlive: core::fmt::Debug + Send + Sync {
 
 /// A GPU-resident linear buffer (the payload of [`MemoryDomain::WgpuBuffer`],
 /// M215): a `wgpu::Buffer` holding a tensor or other linear data a compute
-/// shader produced. Carries the valid payload length in bytes; the
+/// shader produced. Carries the valid payload length in bytes and, for a raw
+/// video frame with padded rows, a [`PlaneLayout`]; the
 /// `wgpu::Buffer` itself lives inside the [`WgpuBufferKeepAlive`] owner because
 /// `g2g-core` never links wgpu. The buffer analog of [`OwnedWgpuTexture`].
 /// `Clone` is a zero-copy refcount bump (M213).
@@ -1205,6 +1208,8 @@ pub struct OwnedWgpuBuffer {
     /// long as the frame is referenced; reference-counted so a tee branch shares
     /// it rather than copying.
     keep_alive: Arc<dyn WgpuBufferKeepAlive>,
+    // None means the planes are packed tight from byte 0.
+    plane_layout: Option<PlaneLayout>,
 }
 
 #[cfg(feature = "alloc")]
@@ -1212,7 +1217,20 @@ impl OwnedWgpuBuffer {
     /// Wrap a GPU buffer's payload length with the owner that keeps the backing
     /// `wgpu::Buffer` alive. `Arc`-held so the frame is shareable (M213).
     pub fn new(len: usize, keep_alive: Arc<dyn WgpuBufferKeepAlive>) -> Self {
-        Self { len, keep_alive }
+        Self {
+            len,
+            keep_alive,
+            plane_layout: None,
+        }
+    }
+
+    pub fn with_plane_layout(mut self, layout: PlaneLayout) -> Self {
+        self.plane_layout = Some(layout);
+        self
+    }
+
+    pub fn plane_layout(&self) -> Option<&PlaneLayout> {
+        self.plane_layout.as_ref()
     }
 
     /// The keep-alive owner, for a consumer that links wgpu to downcast via

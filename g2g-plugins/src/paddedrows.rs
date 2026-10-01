@@ -42,7 +42,11 @@ pub(crate) fn plane_shapes_with_stride_shift(
 
 /// One plane of a padded frame: where its rows start, how far apart they are,
 /// how wide each one is and how many there are.
-#[cfg(any(feature = "v4l2", feature = "pipewire"))]
+#[cfg(any(
+    feature = "v4l2",
+    feature = "pipewire",
+    all(target_os = "linux", feature = "dmabuf-wgpu")
+))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct PaddedPlane {
     pub offset: usize,
@@ -56,7 +60,11 @@ pub(crate) struct PaddedPlane {
 /// stride cannot hold its own row or the arithmetic overflows: the stride comes
 /// from a driver or a daemon, so it is checked once here and every caller
 /// slices with what it gets back.
-#[cfg(any(feature = "v4l2", feature = "pipewire"))]
+#[cfg(any(
+    feature = "v4l2",
+    feature = "pipewire",
+    all(target_os = "linux", feature = "dmabuf-wgpu")
+))]
 pub(crate) fn padded_planes(
     format: RawVideoFormat,
     w: usize,
