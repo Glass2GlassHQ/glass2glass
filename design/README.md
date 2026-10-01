@@ -409,9 +409,10 @@ whichever side carries YUV, the input, or the negotiated output caps for an RGB
 input, and declares on its output caps what it wrote: a YUV target carries the
 matrix and range of the YUV side, an RGB target neither, and the input's transfer
 and primaries ride through. The `Compositor` mixes in input 0's colorimetry, fills
-its background through that same conversion, limited-range black by default where
-it used to write full-range JFIF, and announces the refined output caps when they
-firm up after negotiation.
+its background through that same conversion, limited-range black by default,
+and announces the refined output caps when they firm up after negotiation.
+`WgpuCompositor` mixes `Rgba8` textures only, planar YUV mixes stay on the CPU
+`Compositor`.
 
 ### The negotiation lifecycle
 

@@ -29,7 +29,7 @@ Highest leverage first:
 ## Architecture guarantees (validation-first)
 
 - **Grow the conformance matrix.** Persist evidence from the resource-owning
-  tests still uncovered as they are validated (`vaapi` decode, the Android and
+  tests still uncovered as they are validated (`vaapi` decode on Intel, the Android and
   macOS device paths). Get the device-tagged `Hardware` rows into CI by wiring a
   runner that has the hardware: a `Hardware` row can only come from a run on the
   device, so a runner without a GPU or a camera will never produce one.
@@ -165,7 +165,7 @@ Highest leverage first:
   emit (Media Foundation, VideoToolbox, MediaCodec), so a tagged stream
   survives a re-encode there too.
 - Tag the raw output of the platform decoders that still leave colorimetry
-  unknown (Media Foundation, VideoToolbox, MediaCodec, VAAPI).
+  unknown (Media Foundation, VideoToolbox, MediaCodec, and `VaapiDec` on Intel).
 
 ## Transforms and effects
 
@@ -174,13 +174,9 @@ Highest leverage first:
   shaping if cosmic-text ever grows writing modes.
 - Add a carrier for non-default channel orders when a source needs an
   interleave order outside the per-count `ChannelLayout` convention.
-- Apply an `OrientationMeta` in `kmssink` (a DRM plane rotation), on the VAAPI
-  VPP path and on the D3D11 VideoProcessor path, so those sinks advertise
+- Apply an `OrientationMeta` in `kmssink` (a DRM plane rotation) and on the
+  D3D11 VideoProcessor path, so those sinks advertise
   `Reconfigure::AbsorbOrientation` too.
-
-## Compositor
-
-- `wgpucompositor`: planar YUV.
 
 ## Metadata (FrameMeta / AnalyticsMeta)
 

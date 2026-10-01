@@ -321,11 +321,11 @@ d3d11-sink = ["std", "dep:windows"]
 # Linux hardware H.264 decode via VAAPI through the `cros-codecs` crate.
 # Pulls cros-codecs (+ libva + GBM bindings); Linux-only, implies std.
 vaapi = ["std", "dep:cros-codecs"]
-# ffmpeg/libavcodec H.264 decode (software baseline; VAAPI hwaccel deferred).
+# ffmpeg/libavcodec decode (software, NVDEC, and VAAPI hwaccel backends).
 # Pulls ffmpeg-next + ffmpeg-sys; Linux-only, implies std. Needs system libav*
 # (Fedora: ffmpeg-free-devel; Debian/Ubuntu: libavcodec-dev libavformat-dev
-# libavutil-dev). This is the production-ready Linux decode path while the
-# `vaapi` feature is blocked on cros-codecs GBM/NV12 surface allocation.
+# libavutil-dev). Its VAAPI backend is the AMD hardware path, the `vaapi`
+# feature works on Intel only (cros-codecs has no radeonsi NV12 surfaces).
 ffmpeg = ["std", "dep:ffmpeg-next"]
 # V4L2 capture source (M90): V4l2Src streams YUYV (4:2:2) frames off a
 # /dev/videoN UVC device via mmap. Pulls the pure-Rust `v4l` crate (no libv4l C
