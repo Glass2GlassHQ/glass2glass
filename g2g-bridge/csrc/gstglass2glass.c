@@ -300,7 +300,10 @@ static GstFlowReturn gst_glass2glass_generate_output(GstBaseTransform *base, Gst
   if (r < 0) {
     gst_buffer_unref(in);
     /* -1 EOS, -2 a memory domain g2g has no download converter for (wgpu and
-     * CUDA frames are downloaded inside the sub-graph). */
+     * CUDA frames are downloaded inside the sub-graph), -3 the sub-graph failed. */
+    if (r == -3)
+      GST_ELEMENT_ERROR(self, STREAM, FAILED, ("g2g sub-graph failed (reason logged above)"),
+                        ("fragment=\"%s\"", self->fragment ? self->fragment : "identity"));
     return (r == -1) ? GST_FLOW_EOS : GST_FLOW_ERROR;
   }
 

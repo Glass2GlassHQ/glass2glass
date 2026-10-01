@@ -195,6 +195,8 @@ fn normalize_gst_caps(s: &str) -> String {
     out
 }
 
+static LOG_INIT: std::sync::Once = std::sync::Once::new();
+
 /// Build an embedded sub-graph for `appsrc ! <fragment> ! <out_caps> ! appsink`.
 /// `in_caps` describes the pushed buffers, `out_caps` the frames the graph
 /// produces (the negotiated src-pad caps). When the two are equal the sub-graph
@@ -217,6 +219,8 @@ pub unsafe extern "C" fn g2g_bridge_create(
     else {
         return ptr::null_mut();
     };
+    // the reason a sub-graph fails is only ever logged
+    LOG_INIT.call_once(g2g_core::log::init_from_env);
     let in_caps = normalize_gst_caps(in_caps);
     // A null / absent out_caps means "same as input" (the preserving case).
     // SAFETY: caller contract on `out_caps`.
@@ -302,23 +306,31 @@ pub unsafe extern "C" fn g2g_bridge_push_dmabuf(
     c_int::from(bridge.0.push_dmabuf(dmabuf, pts_ns))
 }
 
+const PULL_ENDED: c_int = -1;
+const PULL_UNSUPPORTED_DOMAIN: c_int = -2;
+const PULL_GRAPH_FAILED: c_int = -3;
+
 /// Block until the next processed frame and lend it to C via `*out`. Returns 1
 /// with `*out` filled (`kind` selects the system-bytes vs dma-buf payload), -1 at
 /// end-of-stream (or null handle), -2 for a memory domain the shell cannot hand
-/// back. The embedded `appsink` takes dma-buf or system memory, so the auto-plug
-/// downloads a wgpu or CUDA frame first; -2 is left for a domain g2g has no
-/// download converter for.
+/// back, -3 when the sub-graph stopped with an error (caps that did not
+/// negotiate, an element that failed). The embedded `appsink` takes dma-buf or
+/// system memory, so the auto-plug downloads a wgpu or CUDA frame first; -2 is
+/// left for a domain g2g has no download converter for.
 ///
 /// # Safety
 /// `bridge` must be a live handle; `out` must point to writable [`G2gOut`].
 #[no_mangle]
 pub unsafe extern "C" fn g2g_bridge_pull_buf(bridge: *mut G2gBridge, out: *mut G2gOut) -> c_int {
     // SAFETY: caller contract.
-    let Some(bridge) = (unsafe { bridge.as_ref() }) else {
-        return -1;
+    let Some(bridge) = (unsafe { bridge.as_mut() }) else {
+        return PULL_ENDED;
     };
     let Some(frame) = bridge.0.pull_blocking() else {
-        return -1;
+        return match bridge.0.shutdown() {
+            Ok(_) => PULL_ENDED,
+            Err(_) => PULL_GRAPH_FAILED,
+        };
     };
     let boxed = Box::new(frame);
     let pts_ns = boxed.timing.pts_ns;
@@ -343,7 +355,7 @@ pub unsafe extern "C" fn g2g_bridge_pull_buf(bridge: *mut G2gBridge, out: *mut G
             pts_ns,
             owner: ptr::null_mut(),
         },
-        _ => return -2,
+        _ => return PULL_UNSUPPORTED_DOMAIN,
     };
     // Only now transfer ownership (so an early `-2` return does not leak the box).
     let mut cout = cout;

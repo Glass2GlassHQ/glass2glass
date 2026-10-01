@@ -97,6 +97,11 @@ pub fn register_appsink_pull(channel: &str) -> AppSinkPull {
     AppSinkPull { rx }
 }
 
+// ends the pull handle of a channel whose appsink never configured
+pub fn unregister_appsink(channel: &str) {
+    SINKS.lock().remove(channel);
+}
+
 /// Outcome of a non-blocking [`AppSinkPull::try_pull`].
 #[derive(Debug)]
 pub enum Pull {

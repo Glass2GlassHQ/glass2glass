@@ -4,6 +4,9 @@
 //! `default_registry` (and the bridge) are `std`-gated, so this file is too.
 #![cfg(feature = "std")]
 
+use std::sync::{mpsc, Arc};
+use std::time::Duration;
+
 use g2g_bridge::{frame_bytes, BridgeError, BridgeGraph};
 
 const CAPS: &str = "video/x-raw,format=RGBA,width=2,height=2,framerate=30/1";
@@ -194,4 +197,27 @@ fn gpu_fragment_comes_back_as_system_bytes() {
         frame_bytes(&frame).expect("system-memory frame"),
         pixels.as_slice()
     );
+}
+
+// compositor labels its output 30/1, which the 1/1 caps pinned on the appsink reject
+#[test]
+fn failed_negotiation_ends_the_drain() {
+    const DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
+    let caps = "video/x-raw,format=RGBA,width=2,height=2,framerate=1/1";
+    let bridge = Arc::new(BridgeGraph::new("compositor width=2 height=2", caps).expect("builds"));
+    assert!(bridge.push(&[0u8; 16], 0));
+
+    let (ended_sender, ended_receiver) = mpsc::channel();
+    let drain = Arc::clone(&bridge);
+    let drain_thread = std::thread::spawn(move || {
+        let _ = ended_sender.send(drain.pull_blocking().is_none());
+    });
+    let ended = ended_receiver
+        .recv_timeout(DRAIN_TIMEOUT)
+        .expect("pull_blocking returned instead of waiting forever");
+    assert!(ended, "a graph that did not negotiate produces no frame");
+    drain_thread.join().expect("drain thread");
+
+    let bridge = Arc::into_inner(bridge).expect("the drain thread released its handle");
+    assert!(bridge.finish().is_err(), "the run reports the failure");
 }

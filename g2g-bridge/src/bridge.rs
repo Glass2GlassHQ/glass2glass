@@ -8,7 +8,7 @@ use g2g_core::memory::OwnedDmaBuf;
 use g2g_core::runtime::{parse_launch, run_graph, ParseError, RunStats};
 use g2g_core::{Frame, G2gError, PipelineClock};
 
-use g2g_plugins::appsink::{register_appsink_pull, AppSinkPull, Pull};
+use g2g_plugins::appsink::{register_appsink_pull, unregister_appsink, AppSinkPull, Pull};
 use g2g_plugins::appsrc::{register_appsrc, AppSrcFeed};
 use g2g_plugins::registry::default_registry;
 
@@ -151,7 +151,10 @@ impl BridgeGraph {
                     .build()
                     .expect("build bridge tokio runtime");
                 let clock = ZeroClock;
-                rt.block_on(run_graph(graph, &clock, LINK_CAPACITY))
+                let result = rt.block_on(run_graph(graph, &clock, LINK_CAPACITY));
+                // a graph that failed before the appsink configured leaves the pull channel open
+                unregister_appsink(&out_ch);
+                result
             })
             .map_err(BridgeError::Spawn)?;
 
@@ -230,7 +233,7 @@ impl BridgeGraph {
     /// Drop the drain (so a full output channel stops back-pressuring), signal
     /// EOS on the feed, then join. Joining cannot deadlock: with the pull handle
     /// gone the appsink discards undeliverable frames instead of blocking.
-    fn shutdown(&mut self) -> Result<RunStats, G2gError> {
+    pub(crate) fn shutdown(&mut self) -> Result<RunStats, G2gError> {
         self.pull = None;
         if let Some(feed) = self.feed.take() {
             feed.end_of_stream();

@@ -55,7 +55,7 @@ cmp -s "$work/ident.raw" "$work/flip.raw" && { echo "FAIL flip had no effect"; f
 cmp -s "$work/ident.raw" "$work/flip2.raw" && echo "  PASS flip!flip == identity (byte-exact reversible)" || { echo "FAIL double-flip != identity"; fail=1; }
 
 echo "== wgpu checks (the frame round-trips through GPU memory) =="
-# an output framerate other than the input's holds the one frame until EOS
+# the output caps default to the input caps, so the compositor matches the input framerate
 run "wgpucompositor width=64 height=64 framerate=1/1 gpu-output=true" gpu.raw
 run "wgpucompositor width=64 height=64 framerate=1/1 gpu-output=true ! wgpudownload" gpudl.raw
 # videotestsrc pixels are opaque, so compositing a single input leaves them unchanged.
@@ -78,5 +78,22 @@ gst-launch-1.0 videotestsrc num-buffers=1 ! "$caps" \
   ! filesink location="$work/i420.raw" >/dev/null 2>&1
 sz=$(stat -c%s "$work/i420.raw" 2>/dev/null || echo 0)
 [ "$sz" = "$((64 * 64 * 3 / 2))" ] && echo "  PASS videoconvert RGBA->I420 ($sz bytes)" || { echo "FAIL format change is $sz bytes (want 6144)"; fail=1; }
+
+# compositor labels its output 30/1 by default, so a 1/1 input needs output-caps at that rate.
+out_rate="video/x-raw,format=RGBA,width=64,height=64,framerate=30/1"
+gst-launch-1.0 videotestsrc num-buffers=1 ! "$caps" \
+  ! glass2glass fragment="compositor width=64 height=64" output-caps="$out_rate" \
+  ! filesink location="$work/rate.raw" >/dev/null 2>&1
+cmp -s "$work/ident.raw" "$work/rate.raw" && echo "  PASS compositor 1/1->30/1 == identity" || { echo "FAIL framerate change lost the frame"; fail=1; }
+
+# Without output-caps those rates cannot negotiate: the element must error out, not hang.
+rate_rc=0
+timeout 20 gst-launch-1.0 videotestsrc num-buffers=1 ! "$caps" \
+  ! glass2glass fragment="compositor width=64 height=64" ! fakesink >/dev/null 2>&1 || rate_rc=$?
+case "$rate_rc" in
+  0) echo "FAIL mismatched framerate ran without error"; fail=1 ;;
+  124) echo "FAIL mismatched framerate hung"; fail=1 ;;
+  *) echo "  PASS mismatched framerate fails fast (exit $rate_rc)" ;;
+esac
 
 [ "$fail" = 0 ] && echo "== all bridge smoke checks passed ==" || { echo "== bridge smoke FAILED =="; exit 1; }
