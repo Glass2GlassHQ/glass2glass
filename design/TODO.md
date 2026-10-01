@@ -318,8 +318,3 @@ unless it says otherwise.
   feature that enables them).
 - Trace the converter auto-plug through a `capsfilter`, so
   `<gpu producer> ! capsfilter ! <system sink>` gets a download spliced.
-
-## Audio decode-to-PCM QA
-
-- calliope: AAC decode is not bit-exact across decoders, so it wants a golden /
-  determinism check instead of the cross-engine differential Opus uses.
