@@ -1,7 +1,7 @@
 //! Builds the `gstwrap` C helper (`csrc/gstwrap_host.c`) into the crate when the
 //! `gstreamer` feature is on. The C file includes the real GStreamer headers (so
 //! struct layouts and macros are correct), and pkg-config supplies the include
-//! paths and link flags for gstreamer-1.0 + gstreamer-app-1.0.
+//! paths and link flags for gstreamer-1.0, -app, -allocators and -video.
 //!
 //! Mirrors `g2g-bridge`'s build.rs. Cargo does not expose package features as
 //! `cfg` to build scripts, so the gate is the `CARGO_FEATURE_GSTREAMER` env var
@@ -36,9 +36,26 @@ fn main() {
         "gstreamer-app-1.0 dev package (pkg-config) is required for the `gstreamer` feature",
     );
 
+    // gstreamer-allocators-1.0 for the dma-buf allocator / memory API.
+    let allocators = pkg_config::Config::new()
+        .probe("gstreamer-allocators-1.0")
+        .expect("gstreamer-allocators-1.0 dev package (pkg-config) is required");
+    // gstreamer-video-1.0 for the GstVideoMeta carrying a dma-buf's plane layout.
+    let video = pkg_config::Config::new()
+        .probe("gstreamer-video-1.0")
+        .expect(
+            "gstreamer-video-1.0 dev package (pkg-config) is required for the `gstreamer` feature",
+        );
+
     let mut build = cc::Build::new();
     build.file("csrc/gstwrap_host.c");
-    for path in gst.include_paths.iter().chain(app.include_paths.iter()) {
+    for path in gst
+        .include_paths
+        .iter()
+        .chain(app.include_paths.iter())
+        .chain(allocators.include_paths.iter())
+        .chain(video.include_paths.iter())
+    {
         build.include(path);
     }
     build.compile("g2g_gstwrap_host");

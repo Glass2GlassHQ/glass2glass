@@ -615,9 +615,11 @@ graph.add_transform({
 //   w.set_property("output-caps", PropValue::Str("video/x-h264,...".into()))?;
 ```
 
-It drives `appsrc ! <element> ! appsink` in a real GStreamer pipeline internally;
-system-memory frames flow in and out (a copy each way in v1). Built behind the
-`gstreamer` feature (needs the gstreamer-1.0 + gstreamer-app-1.0 dev packages).
+It drives `appsrc ! <element> ! appsink` in a real GStreamer pipeline internally.
+System-memory frames are copied in and out. A dma-buf frame goes in without a
+copy, and `output-memory=dmabuf` hands the hosted element's dma-buf output on
+the same way. Built behind the `gstreamer` feature (needs the gstreamer-1.0,
+-app, -allocators and -video dev packages).
 It works from `g2g-launch` too, since the launch tokenizer is quote-aware:
 
 ```sh

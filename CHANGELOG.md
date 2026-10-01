@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1208: `gstwrap` takes dma-buf frames in without a copy and, with `output-memory=dmabuf`, hands the hosted element's dma-buf output on.
 - M1206: `oggdemux` and `mp4demux` report the page or fragment they hold, so their sinks pace with it.
 - M1201: the DAG runners fold latency again when a demux reports a new value mid-run, so `tsdemux` and `mpegpsdemux` sinks pace with the unit the demux holds.
 - M1203: a `fallbacksrc` with no `fallback-uri=` runs an application-built fallback source from a registered factory and rebuilds it on restart.

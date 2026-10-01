@@ -43,11 +43,27 @@ pub(crate) fn bitrate_change_is_significant(current: u64, target: u64) -> bool {
     target.abs_diff(current) * 100 >= current * 20
 }
 
+pub(crate) trait PacketPayload {
+    fn into_domain(self) -> MemoryDomain;
+}
+
+impl PacketPayload for Vec<u8> {
+    fn into_domain(self) -> MemoryDomain {
+        MemoryDomain::System(SystemSlice::from_boxed(self.into_boxed_slice()))
+    }
+}
+
+impl PacketPayload for MemoryDomain {
+    fn into_domain(self) -> MemoryDomain {
+        self
+    }
+}
+
 /// Push a batch and return any downstream feedback (see [`EmitFeedback`]).
 pub(crate) async fn emit_packets(
     caps_sent: &mut bool,
     emitted: &mut u64,
-    packets: Vec<(Vec<u8>, u64)>,
+    packets: Vec<(impl PacketPayload, u64)>,
     caps: &Caps,
     out: &mut dyn OutputSink,
 ) -> Result<EmitFeedback, G2gError> {
@@ -56,9 +72,9 @@ pub(crate) async fn emit_packets(
         *caps_sent = true;
     }
     let mut feedback = EmitFeedback::default();
-    for (data, pts_ns) in packets {
+    for (payload, pts_ns) in packets {
         let frame = Frame::new(
-            MemoryDomain::System(SystemSlice::from_boxed(data.into_boxed_slice())),
+            payload.into_domain(),
             FrameTiming {
                 pts_ns,
                 dts_ns: pts_ns,
@@ -157,7 +173,8 @@ mod tests {
         let mut sent = false;
         let mut emitted = 0;
         let mut sink = OutcomeSink(PushOutcome::Accepted);
-        let fb = emit_packets(&mut sent, &mut emitted, Vec::new(), &caps(), &mut sink)
+        let no_packets: Vec<(Vec<u8>, u64)> = Vec::new();
+        let fb = emit_packets(&mut sent, &mut emitted, no_packets, &caps(), &mut sink)
             .await
             .unwrap();
         assert!(!fb.force_keyframe);

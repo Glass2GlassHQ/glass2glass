@@ -312,7 +312,6 @@ unless it says otherwise.
 ## GStreamer bridge
 
 - Add `WgpuBuffer` download or dma-buf export at the GStreamer bridge output.
-- Add dma-buf zero-copy to `gstwrap`.
 
 ## Audio decode-to-PCM QA
 
