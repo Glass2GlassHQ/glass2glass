@@ -1170,7 +1170,7 @@ macro_rules! g2g_trace {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use alloc::format;
     use alloc::sync::Arc;
@@ -1302,7 +1302,7 @@ mod tests {
     }
 
     // Serializes the few tests that touch the process-global config / sink.
-    static GLOBAL_GUARD: Mutex<()> = Mutex::new(());
+    pub(crate) static GLOBAL_GUARD: Mutex<()> = Mutex::new(());
 
     #[test]
     fn macros_respect_global_filtering_and_route_to_sink() {

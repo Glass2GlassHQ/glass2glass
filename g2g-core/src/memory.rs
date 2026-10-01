@@ -1270,6 +1270,7 @@ mod tests {
     /// error kind stays `UnsupportedDomain`; the detail rides the log.
     #[test]
     fn refusing_a_device_frame_names_the_domain_that_arrived() {
+        let _guard = crate::log::tests::GLOBAL_GUARD.lock();
         let logs = crate::log::RingSink::new(8);
         crate::log::set_sink(alloc::boxed::Box::new(logs.clone()));
 
