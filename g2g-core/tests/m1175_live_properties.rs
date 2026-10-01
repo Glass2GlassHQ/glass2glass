@@ -7,7 +7,7 @@
 //! value off the sink's own record rather than off the element: the value took
 //! effect on the stream, not just in a field. The refusal cases check the
 //! element's own verdict comes back and that the stream is unchanged by them.
-#![cfg(all(feature = "std", feature = "runtime"))]
+#![cfg(all(feature = "std", feature = "runtime", feature = "multi-thread"))]
 
 use core::future::Future;
 use core::pin::Pin;
