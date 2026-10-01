@@ -7,6 +7,7 @@
 # Prerequisites:
 #   - gstreamer-1.0 + gstreamer-base-1.0 dev packages (pkg-config finds them).
 #   - gst-launch-1.0 / gst-inspect-1.0 on PATH (gstreamer1-tools / -plugins-base).
+#   - a wgpu adapter (a GPU, or a software Vulkan driver such as lavapipe).
 #
 # Usage: tools/gst-bridge-smoke.sh
 set -euo pipefail
@@ -14,13 +15,13 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 echo "== building libgstglass2glass.so =="
-cargo build -p g2g-bridge --features gstreamer
+cargo build -p g2g-bridge --features gstreamer,wgpu
 
 # GStreamer derives the plugin name from the `libgst<name>.so` filename, so the
 # cargo cdylib (libg2g_bridge.so) is published under the expected name.
 plugdir="target/gstplugins"
 mkdir -p "$plugdir"
-cp -f target/debug/libg2g_bridge.so "$plugdir/libgstglass2glass.so"
+cp -f "${CARGO_TARGET_DIR:-target}/debug/libg2g_bridge.so" "$plugdir/libgstglass2glass.so"
 export GST_PLUGIN_PATH="$PWD/$plugdir"
 
 echo "== gst-inspect-1.0 glass2glass =="
@@ -52,6 +53,14 @@ done
 cmp -s "$work/ident.raw" "$work/cv.raw"   && echo "  PASS videoconvert == identity (RGBA passthrough)" || { echo "FAIL videoconvert changed bytes"; fail=1; }
 cmp -s "$work/ident.raw" "$work/flip.raw" && { echo "FAIL flip had no effect"; fail=1; } || echo "  PASS flip != identity (frame transformed)"
 cmp -s "$work/ident.raw" "$work/flip2.raw" && echo "  PASS flip!flip == identity (byte-exact reversible)" || { echo "FAIL double-flip != identity"; fail=1; }
+
+echo "== wgpu checks (the frame round-trips through GPU memory) =="
+# an output framerate other than the input's holds the one frame until EOS
+run "wgpucompositor width=64 height=64 framerate=1/1 gpu-output=true" gpu.raw
+run "wgpucompositor width=64 height=64 framerate=1/1 gpu-output=true ! wgpudownload" gpudl.raw
+# videotestsrc pixels are opaque, so compositing a single input leaves them unchanged.
+cmp -s "$work/ident.raw" "$work/gpu.raw"   && echo "  PASS wgpucompositor == identity (download auto-plugged)" || { echo "FAIL wgpucompositor changed bytes"; fail=1; }
+cmp -s "$work/ident.raw" "$work/gpudl.raw" && echo "  PASS wgpucompositor ! wgpudownload == identity" || { echo "FAIL wgpudownload changed bytes"; fail=1; }
 
 echo "== caps/size-changing checks (output-caps property) =="
 # Downscale 64x64 -> 32x16 RGBA (2048 bytes).

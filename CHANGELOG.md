@@ -7,6 +7,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 ## Unreleased
 
 - M1210: the domain-converter auto-plug looks through `capsfilter`s, so a GPU producer feeding a system-memory sink through one gets its download spliced.
+- M1209: the `g2g-bridge` `wgpu` feature puts `wgpucompositor` and `wgpudownload` in the GStreamer plugin, and `gstwrap` fails the stream when it cannot map a sample.
 - M1207: `wgpudownload` reads GPU frames back to system memory and the launch auto-plug splices it, so a `g2g-bridge` fragment that ends on the GPU hands its frames back to GStreamer.
 - M1208: `gstwrap` takes dma-buf frames in without a copy and, with `output-memory=dmabuf`, hands the hosted element's dma-buf output on.
 - M1206: `oggdemux` and `mp4demux` report the page or fragment they hold, so their sinks pace with it.

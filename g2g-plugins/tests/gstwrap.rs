@@ -13,17 +13,19 @@
 //! (`element="videoflip method=horizontal-flip"`). It asserts the pixels come
 //! back horizontally flipped, which only a real GStreamer `videoflip` produces.
 
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::Write;
-use std::os::fd::{BorrowedFd, FromRawFd, IntoRawFd};
+use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, IntoRawFd};
 use std::os::unix::fs::{FileExt, MetadataExt};
+use std::sync::{Arc, Mutex};
 
 use g2g_core::frame::{Frame, FrameTiming};
+use g2g_core::log::{LogLevel, LogRecord, LogSink};
 use g2g_core::memory::{MemoryDomain, MemoryDomainKind, OwnedDmaBuf, SystemSlice};
 use g2g_core::runtime::{parse_launch, run_graph};
 use g2g_core::{
-    AsyncElement, G2gError, OutputSink, PipelineClock, PipelinePacket, PropError, PropValue,
-    PushOutcome,
+    AsyncElement, G2gError, HardwareError, OutputSink, PipelineClock, PipelinePacket, PropError,
+    PropValue, PushOutcome,
 };
 
 use g2g_plugins::capsfilter::parse_caps;
@@ -62,6 +64,17 @@ impl OutputSink for Collect {
             }
             Ok(PushOutcome::Accepted)
         })
+    }
+}
+
+#[derive(Clone, Default)]
+struct ErrorCategories(Arc<Mutex<Vec<String>>>);
+
+impl LogSink for ErrorCategories {
+    fn emit(&self, record: &LogRecord<'_>) {
+        if record.level == LogLevel::Error {
+            self.0.lock().unwrap().push(record.category.to_owned());
+        }
     }
 }
 
@@ -222,6 +235,54 @@ async fn dmabuf_output_rejects_a_system_sample() {
         "a system sample failed loud: {result:?}"
     );
     assert!(sink.frames.is_empty() && sink.dmabufs.is_empty());
+}
+
+// A write-only fd cannot be mapped for reading, so the system copy-out fails.
+#[tokio::test]
+async fn an_unmappable_sample_fails_the_stream() {
+    let bytes = vec![0u8; (PLANE_OFFSET + PADDED_STRIDE * RGBA_HEIGHT) as usize];
+    let memfd = memfd_holding(&bytes);
+    let write_only = OpenOptions::new()
+        .write(true)
+        .open(format!("/proc/self/fd/{}", memfd.as_raw_fd()))
+        .expect("reopen the memfd write-only");
+    // SAFETY: the write-only fd moves into the OwnedDmaBuf, which closes it once.
+    let input =
+        unsafe { OwnedDmaBuf::from_raw(write_only.into_raw_fd(), PADDED_STRIDE, PLANE_OFFSET) };
+
+    let mut el = GstWrap::new();
+    el.set_property("element", PropValue::Str("identity".into()))
+        .expect("element property");
+    el.configure_pipeline(&parse_caps(RGBA_CAPS).expect("caps parse"))
+        .expect("gst pipeline builds (needs host GStreamer)");
+    let error_categories = ErrorCategories::default();
+    let log_sink_id = g2g_core::log::add_sink(Box::new(error_categories.clone()));
+    let mut sink = Collect::default();
+    let result = match el
+        .process(
+            PipelinePacket::DataFrame(first_frame(MemoryDomain::DmaBuf(input))),
+            &mut sink,
+        )
+        .await
+    {
+        Ok(()) => el.process(PipelinePacket::Eos, &mut sink).await,
+        error => error,
+    };
+    g2g_core::log::remove_sink(log_sink_id);
+    assert!(
+        matches!(result, Err(G2gError::Hardware(HardwareError::Other))),
+        "the unmappable sample failed loud: {result:?}"
+    );
+    assert!(sink.frames.is_empty() && sink.dmabufs.is_empty());
+    assert!(
+        error_categories
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|category| category == el.log_category()),
+        "the failure was logged under the element's category"
+    );
 }
 
 #[test]

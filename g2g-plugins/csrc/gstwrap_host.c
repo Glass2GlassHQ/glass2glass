@@ -298,7 +298,8 @@ size_t g2g_gstwrap_dmabuf_sample_size(void) {
 
 /* Non-blocking drain of one processed frame. Returns 1 and fills the out params
  * (caller frees `*out_data` with g2g_gstwrap_free_buf) when a sample is ready, 0
- * when none is ready yet (the element has internal latency), and -1 at EOS. */
+ * when none is ready yet (the element has internal latency), -1 at EOS, and -3
+ * when the sample could not be mapped or copied. */
 int g2g_gstwrap_try_pull(G2gGstWrap *w, uint8_t **out_data, size_t *out_len,
                          uint64_t *out_pts) {
   if (w == NULL) {
@@ -314,13 +315,13 @@ int g2g_gstwrap_try_pull(G2gGstWrap *w, uint8_t **out_data, size_t *out_len,
   GstMapInfo map;
   if (buf == NULL || !gst_buffer_map(buf, &map, GST_MAP_READ)) {
     gst_sample_unref(sample);
-    return G2G_GSTWRAP_NOT_READY;
+    return G2G_GSTWRAP_FAILED;
   }
   uint8_t *copy = malloc(map.size > 0 ? map.size : 1);
   if (copy == NULL) {
     gst_buffer_unmap(buf, &map);
     gst_sample_unref(sample);
-    return G2G_GSTWRAP_NOT_READY;
+    return G2G_GSTWRAP_FAILED;
   }
   memcpy(copy, map.data, map.size);
   *out_data = copy;

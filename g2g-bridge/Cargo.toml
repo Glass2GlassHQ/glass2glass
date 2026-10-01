@@ -26,6 +26,8 @@ std = ["g2g-core/std", "g2g-core/runtime", "g2g-core/multi-thread", "g2g-plugins
 # The GStreamer GObject shell (`csrc/gstglass2glass.c`, built by build.rs via
 # pkg-config + cc). Links the system gstreamer-1.0 / gstreamer-base-1.0.
 gstreamer = ["std"]
+# Registers `wgpucompositor` and `wgpudownload`, so a `fragment` can use them.
+wgpu = ["std", "g2g-plugins/wgpu-sink"]
 
 [dependencies]
 g2g-core = { workspace = true }

@@ -314,5 +314,3 @@ unless it says otherwise.
 - Let `wgputodmabuf` export a buffer made on another device (it opens its own
   export device, so it fails on every in-tree `WgpuBuffer` producer), then splice
   it at the bridge output for zero-copy `WgpuBuffer` egress.
-- Build the wgpu elements into the shipped GStreamer plugin (`g2g-bridge` has no
-  feature that enables them).

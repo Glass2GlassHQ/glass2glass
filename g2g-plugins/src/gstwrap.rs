@@ -44,11 +44,12 @@ use alloc::vec::Vec;
 
 use std::ffi::CString;
 
+use g2g_core::log::{short_type_name, Target};
 use g2g_core::memory::{DomainSet, MemoryDomain, MemoryDomainKind, OwnedDmaBuf, SystemSlice};
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, G2gError,
-    HardwareError, OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
-    RawVideoFormat,
+    g2g_error, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata,
+    G2gError, HardwareError, OutputSink, PipelinePacket, PropError, PropKind, PropValue,
+    PropertySpec, RawVideoFormat,
 };
 
 use crate::capsfilter::parse_caps;
@@ -403,8 +404,12 @@ enum Pulled {
     EndOfStream,
 }
 
+fn log_target() -> Target<'static> {
+    Target::category(short_type_name::<GstWrap>())
+}
+
 /// Try to drain one processed frame as system memory, copying its bytes out.
-fn pull_system(p: WrapPtr) -> Pulled {
+fn pull_system(p: WrapPtr) -> Result<Pulled, G2gError> {
     let mut data: *mut u8 = ptr::null_mut();
     let mut len: usize = 0;
     let mut pts: u64 = 0;
@@ -419,10 +424,17 @@ fn pull_system(p: WrapPtr) -> Pulled {
             // SAFETY: `data` came from `try_pull` and has not been freed.
             unsafe { g2g_gstwrap_free_buf(data) };
             let domain = MemoryDomain::System(SystemSlice::from_boxed(v.into_boxed_slice()));
-            Pulled::Frame(domain, pts)
+            Ok(Pulled::Frame(domain, pts))
         }
-        END_OF_STREAM => Pulled::EndOfStream,
-        _ => Pulled::NotReady,
+        NOT_READY => Ok(Pulled::NotReady),
+        END_OF_STREAM => Ok(Pulled::EndOfStream),
+        _ => {
+            g2g_error!(
+                log_target(),
+                "cannot map or copy out the hosted element's sample"
+            );
+            Err(G2gError::Hardware(HardwareError::Other))
+        }
     }
 }
 
@@ -464,7 +476,10 @@ impl GstWrap {
             NOT_READY => return Ok(Pulled::NotReady),
             END_OF_STREAM => return Ok(Pulled::EndOfStream),
             NOT_DMABUF => return Err(G2gError::UnsupportedDomain),
-            _ => return Err(G2gError::Hardware(HardwareError::Other)),
+            _ => {
+                g2g_error!(log_target(), "cannot dup the hosted element's dma-buf fd");
+                return Err(G2gError::Hardware(HardwareError::Other));
+            }
         }
         // SAFETY: on `PULLED` the helper hands over a fresh dup of the sample's
         // fd that nothing else owns.
@@ -483,7 +498,7 @@ impl GstWrap {
 
     fn pull_one(&mut self, p: WrapPtr) -> Result<Pulled, G2gError> {
         match self.output_memory {
-            OutputMemory::System => Ok(pull_system(p)),
+            OutputMemory::System => pull_system(p),
             OutputMemory::DmaBuf => self.pull_dmabuf(p),
         }
     }

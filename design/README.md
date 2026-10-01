@@ -891,6 +891,9 @@ gives a caps-driven transform a fixate target. The same `appsink` accepts only
 `dmabuf` and `system` memory, so the launch auto-plug splices `wgpudownload` or
 `cudadownload` after a fragment that ends on the GPU, and a dma-buf output passes
 through untouched.
+The wgpu elements, `wgpucompositor` and `wgpudownload`, are in the registry only
+with the crate's `wgpu` feature, so a plugin built with `--features gstreamer,wgpu`
+runs a GPU fragment inside `gst-launch-1.0` (`tools/gst-bridge-smoke.sh`).
 
 Zero-copy DMABUF import exists at the ingest side: `appsrc` accepts a
 `MemoryDomain::DmaBuf` frame through `AppSrcFeed::push_dmabuf`,
@@ -947,7 +950,8 @@ Internally it drives `appsrc ! <element> ! appsink` in a real GStreamer pipeline
 GStreamer's own streaming threads. `process` copies each `System` input frame into a
 `GstBuffer` with `gst_app_src_push_buffer`, drains ready output non-blockingly with
 `gst_app_sink_try_pull_sample` at 0 timeout, and on EOS flushes the element's
-buffered frames.
+buffered frames. A sample the helper cannot map or copy out fails `process` with
+`HardwareError::Other`, logged on the element's category.
 
 The C interop mirrors the shell's: a small helper (`csrc/gstwrap_host.c`, built by
 the crate's `build.rs` via pkg-config and `cc`) over the gstreamer-1.0 and
