@@ -360,7 +360,7 @@ fn changes_log_levels_and_samples_live_packets() {
     let (responses, notifications) = session(&[
         r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"set_log_level","arguments":{"level":"info"}}}"#,
         r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"start_pipeline","arguments":{"pipeline":"videotestsrc name=src ! identity name=base ! fakesink name=sink"}}}"#,
-        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"sample_edge","arguments":{"edge":0,"count":2,"timeout_ms":2000}}}"#,
+        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"sample_edge","arguments":{"edge":0,"count":4,"timeout_ms":2000}}}"#,
         r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"tail_logs","arguments":{"limit":20,"clear":true}}}"#,
         r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"tail_logs","arguments":{}}}"#,
         r#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"set_log_level","arguments":{"level":"error"}}}"#,
@@ -380,9 +380,14 @@ fn changes_log_levels_and_samples_live_packets() {
     assert_eq!(sampled["ok"], true, "{sampled}");
     assert_eq!(sampled["timed_out"], false, "{sampled}");
     let samples = sampled["samples"].as_array().unwrap();
-    assert_eq!(samples.len(), 2);
-    for sample in samples {
-        assert_eq!(sample["kind"], "frame");
+    assert_eq!(samples.len(), 4);
+    // a tap that attaches before the first frame also sees the caps and segment
+    let frames: Vec<_> = samples
+        .iter()
+        .filter(|sample| sample["kind"] == "frame")
+        .collect();
+    assert!(frames.len() >= 2, "{sampled}");
+    for sample in frames {
         assert!(sample["sequence"].is_u64());
         assert!(sample["memory"].is_string());
         assert!(sample["preview"].is_object());
@@ -551,7 +556,10 @@ fn a_host_registers_its_own_pipeline_in_process() {
     let deadline = Instant::now() + LIVE_DEADLINE;
     let tail = loop {
         let tail = call(&mut server, "tail_events", serde_json::json!({}));
-        if event_kinds(&tail).contains(&"negotiation-failed".to_string()) {
+        let kinds = event_kinds(&tail);
+        if kinds.contains(&"negotiation-failed".to_string())
+            && kinds.contains(&"stream-start".to_string())
+        {
             break tail;
         }
         assert!(
