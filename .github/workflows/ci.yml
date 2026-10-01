@@ -263,6 +263,11 @@ jobs:
       # just checking it. Tests that need a device skip on a runner without one.
       - name: test workspace (linux-full)
         run: cargo test --workspace --locked --features linux-full --no-fail-fast
+      # the linux-full test binaries leave no disk for the steps below
+      - name: drop the linux-full test binaries
+        run: |
+          find target/debug/deps -maxdepth 1 -type f -executable ! -name '*.so' -delete
+          df -h /
       - name: check g2g-plugins (linux feature set)
         run: >
           cargo check -p g2g-plugins --locked --all-targets --features
