@@ -169,7 +169,15 @@ impl DomainSet {
     /// Every domain. The default *input* acceptance of an element (it imposes no
     /// domain requirement on its upstream), so the converter auto-plug only acts
     /// on elements that declare a narrower `input_domains`.
-    pub const ALL: Self = Self(0x03ff); // 10 variants -> low 10 bits
+    pub const ALL: Self = {
+        let mut bits = 0;
+        let mut i = 0;
+        while i < DOMAIN_PREFERENCE.len() {
+            bits |= 1 << DOMAIN_PREFERENCE[i].bit_index();
+            i += 1;
+        }
+        Self(bits)
+    };
 
     /// Iterate the member domains in preference order (GPU-resident first).
     pub fn iter(self) -> impl Iterator<Item = MemoryDomainKind> {
@@ -1233,6 +1241,11 @@ mod tests {
     use super::*;
     use alloc::sync::Arc;
     use core::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn all_domains_accepts_a_cv_pixel_buffer() {
+        assert!(DomainSet::ALL.contains(MemoryDomainKind::CvPixelBuffer));
+    }
 
     /// Stands in for a producer's owning handle (eg an ffmpeg `AVFrame`):
     /// flips a shared flag on drop so the test can prove the keep-alive owner
