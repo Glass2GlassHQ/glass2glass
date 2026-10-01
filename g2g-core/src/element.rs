@@ -283,7 +283,7 @@ pub trait AsyncElement: ElementBound {
         DomainSet::ALL
     }
 
-    // true when every frame leaves in the memory it arrived in, like a caps filter
+    /// True when every frame leaves in the memory it arrived in, like a caps filter.
     fn output_domain_follows_input(&self) -> bool {
         false
     }
