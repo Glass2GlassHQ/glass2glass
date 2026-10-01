@@ -223,6 +223,11 @@ jobs:
     name: features (linux)
     runs-on: ubuntu-latest
     steps:
+      # the linux-full test build runs out of disk on a stock runner
+      - name: free runner disk
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
