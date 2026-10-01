@@ -130,7 +130,7 @@ pub struct Plane {
 /// repack them into that shape, row by row, before pushing the frame.
 ///
 /// A consumer that asks for this meta
-/// ([`MetaRequests`](crate::meta::MetaRequests)) says it will read rows where
+/// ([`MetaRequests`]) says it will read rows where
 /// they lie, so the producer can hand over the padded buffer as it is and the
 /// repack disappears.
 ///
