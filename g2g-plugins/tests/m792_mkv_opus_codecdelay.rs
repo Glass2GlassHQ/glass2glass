@@ -219,33 +219,57 @@ fn decode_raw(path: &PathBuf, decoder: &[&str], format: &str, codec: &str) -> Ve
 }
 
 // --- Matroska element oracle -------------------------------------------------
-//
-// A byte scan bounded to the header region (the Tracks element up to the first
-// Cluster), which is unambiguous enough for a test and needs no EBML walker.
 
-/// The body of the first `id` element between the `Tracks` element and the first
-/// `Cluster`. `id` is the element id's raw bytes (the length marker included).
-fn header_element(file: &[u8], id: &[u8]) -> Option<Vec<u8>> {
-    let tracks = file
-        .windows(4)
-        .position(|w| w == [0x16, 0x54, 0xAE, 0x6B])
-        .expect("the file has a Tracks element");
-    let end = file
-        .windows(4)
-        .position(|w| w == [0x1F, 0x43, 0xB6, 0x75])
-        .unwrap_or(file.len());
-    let at = tracks + file[tracks..end].windows(id.len()).position(|w| w == id)?;
-    let size_at = at + id.len();
-    // EBML size VINT: the leading bit position gives the byte count, and the
-    // marker bit is stripped from the value.
+const SEGMENT_ID: [u8; 4] = [0x18, 0x53, 0x80, 0x67];
+const TRACKS_ID: [u8; 4] = [0x16, 0x54, 0xAE, 0x6B];
+const TRACK_ENTRY_ID: [u8; 1] = [0xAE];
+
+/// The byte count of an EBML VINT, from the position of its leading bit.
+fn vint_len(first: u8) -> Option<usize> {
+    (0..8).find(|i| first & (0x80 >> i) != 0).map(|i| i + 1)
+}
+
+/// The element starting at `at`: its raw id bytes, body offset and end offset.
+fn element_at(file: &[u8], at: usize) -> Option<(&[u8], usize, usize)> {
+    let id_len = vint_len(*file.get(at)?)?;
+    let id = file.get(at..at + id_len)?;
+    let size_at = at + id_len;
     let first = *file.get(size_at)?;
-    let len = (0..8).find(|i| first & (0x80 >> i) != 0)? + 1;
-    let mut size = u64::from(first & (0xFF >> len));
-    for b in file.get(size_at + 1..size_at + len)? {
+    let size_len = vint_len(first)?;
+    let mut size = u64::from(first) & (0xFF >> size_len);
+    for b in file.get(size_at + 1..size_at + size_len)? {
         size = (size << 8) | u64::from(*b);
     }
-    let body = size_at + len;
-    file.get(body..body + size as usize).map(<[u8]>::to_vec)
+    let body = size_at + size_len;
+    let unknown_size = size == (1u64 << (7 * size_len)) - 1;
+    let end = if unknown_size {
+        file.len()
+    } else {
+        (body + size as usize).min(file.len())
+    };
+    Some((id, body, end))
+}
+
+/// The body range of the first `id` element among the siblings in `from..to`.
+fn child(file: &[u8], from: usize, to: usize, id: &[u8]) -> Option<(usize, usize)> {
+    let mut at = from;
+    while at < to {
+        let (element_id, body, end) = element_at(file, at)?;
+        if element_id == id {
+            return Some((body, end));
+        }
+        at = end;
+    }
+    None
+}
+
+/// The body of the first track's `id` child. `id` is the element id's raw bytes.
+fn header_element(file: &[u8], id: &[u8]) -> Option<Vec<u8>> {
+    let (segment, segment_end) = child(file, 0, file.len(), &SEGMENT_ID)?;
+    let (tracks, tracks_end) = child(file, segment, segment_end, &TRACKS_ID)?;
+    let (entry, entry_end) = child(file, tracks, tracks_end, &TRACK_ENTRY_ID)?;
+    let (body, end) = child(file, entry, entry_end, id)?;
+    Some(file[body..end].to_vec())
 }
 
 /// A big-endian unsigned EBML element body as a number.
