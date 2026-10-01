@@ -15,6 +15,12 @@ impl PipelineClock for ZeroClock {
     }
 }
 
+#[cfg(not(any(
+    feature = "wgpu-present",
+    feature = "wayland-sink",
+    feature = "kms-sink",
+    feature = "metal-sink"
+)))]
 #[tokio::test]
 async fn autovideosink_resolves_and_runs() {
     // No wayland/kms feature in the default test build, so autovideosink falls
@@ -29,6 +35,12 @@ async fn autovideosink_resolves_and_runs() {
     assert_eq!(consumed, 3, "{line}");
 }
 
+#[cfg(not(any(
+    feature = "alsa-sink",
+    feature = "pulse-sink",
+    feature = "coreaudio",
+    feature = "wasapi-sink"
+)))]
 #[tokio::test]
 async fn autoaudiosink_resolves_and_runs() {
     let reg = default_registry();
@@ -71,6 +83,7 @@ async fn aliases_do_not_shadow_canonical_names() {
     );
 }
 
+#[cfg(not(any(feature = "wayland-sink", feature = "kms-sink", feature = "gl-sink")))]
 #[tokio::test]
 async fn desktop_video_sink_names_alias_to_a_sink() {
     // xvimagesink / glimagesink / ximagesink all map onto the available display
