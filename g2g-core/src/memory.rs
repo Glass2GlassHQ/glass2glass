@@ -1208,7 +1208,7 @@ pub struct OwnedWgpuBuffer {
     /// long as the frame is referenced; reference-counted so a tee branch shares
     /// it rather than copying.
     keep_alive: Arc<dyn WgpuBufferKeepAlive>,
-    // None means the planes are packed tight from byte 0.
+    /// `None` when the planes are packed tight from byte 0.
     plane_layout: Option<PlaneLayout>,
 }
 
@@ -1224,11 +1224,13 @@ impl OwnedWgpuBuffer {
         }
     }
 
+    /// Record where each plane's rows sit when the producer padded them.
     pub fn with_plane_layout(mut self, layout: PlaneLayout) -> Self {
         self.plane_layout = Some(layout);
         self
     }
 
+    /// The plane layout, `None` when the planes are packed tight from byte 0.
     pub fn plane_layout(&self) -> Option<&PlaneLayout> {
         self.plane_layout.as_ref()
     }

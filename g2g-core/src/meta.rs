@@ -165,8 +165,13 @@ impl PlaneLayout {
     /// One plane at `offset` 0 with row pitch `stride`: the packed-format
     /// case (RGBA, YUYV), which is most of what pads rows in practice.
     pub fn single(stride: usize) -> Self {
+        let mut slots = [Plane {
+            offset: 0,
+            stride: 0,
+        }; MAX_PLANES];
+        slots[0] = Plane { offset: 0, stride };
         PlaneLayout {
-            planes: [Plane { offset: 0, stride }; MAX_PLANES],
+            planes: slots,
             count: 1,
         }
     }

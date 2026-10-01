@@ -536,6 +536,7 @@ pub trait AsyncElement: ElementBound {
     /// counterpart for a transform or sink, so an element can post out of band
     /// (a `metasink` posting each record it writes). Only the graph runner hands
     /// it out, and only when the run has a bus. Default: ignore.
+    #[cfg(feature = "runtime")]
     fn set_bus(&mut self, _bus: crate::bus::BusHandle) {}
 
     /// Override this instance's log category (M845), which is otherwise the
@@ -741,6 +742,7 @@ pub trait DynAsyncElement: ElementBound {
     fn set_instance_name(&mut self, _name: alloc::string::String) {}
 
     /// Dyn-safe mirror of [`AsyncElement::set_bus`].
+    #[cfg(feature = "runtime")]
     fn set_bus(&mut self, _bus: crate::bus::BusHandle) {}
 
     /// Dyn-safe mirror of [`AsyncElement::set_log_category`].
@@ -925,6 +927,7 @@ impl<T: AsyncElement> DynAsyncElement for T {
         AsyncElement::set_instance_name(self, name)
     }
 
+    #[cfg(feature = "runtime")]
     fn set_bus(&mut self, bus: crate::bus::BusHandle) {
         AsyncElement::set_bus(self, bus)
     }
@@ -1112,6 +1115,7 @@ impl<'b> AsyncElement for DynRef<'b> {
         self.0.set_instance_name(name)
     }
 
+    #[cfg(feature = "runtime")]
     fn set_bus(&mut self, bus: crate::bus::BusHandle) {
         self.0.set_bus(bus)
     }
@@ -1269,6 +1273,7 @@ impl<'b> DynAsyncElement for &'b mut (dyn DynAsyncElement + 'b) {
         (**self).set_instance_name(name)
     }
 
+    #[cfg(feature = "runtime")]
     fn set_bus(&mut self, bus: crate::bus::BusHandle) {
         (**self).set_bus(bus)
     }
