@@ -404,7 +404,7 @@ static APPSINK_PROPS: &[PropertySpec] = &[
     PropertySpec::new(
         "input-domains",
         PropKind::Str,
-        "comma-separated memory domains to accept, e.g. dmabuf,system (default every domain)",
+        "comma-separated set of memory domains to accept, e.g. dmabuf,system (default every domain)",
     ),
 ];
 

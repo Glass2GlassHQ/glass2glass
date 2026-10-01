@@ -2463,6 +2463,8 @@ pub static FEATURE_GATED_ELEMENTS: &[FeatureGatedElement] = &{
         "avenc_aac" => "ffmpeg" on "linux";
         "vaapidec" => "vaapi" on "linux";
         "vaapidech265" => "vaapi" on "linux";
+        "cudadownload" => "cuda" on "linux";
+        "cudaupload" => "cuda" on "linux";
         "nvdec" => "nvdec" on "linux";
         "nvenc" => "nvenc" on "linux";
         "jpegxsenc" => "jpegxs" on "linux";
@@ -3127,6 +3129,14 @@ fn register_feature_gated(reg: &mut Registry) {
         })
         .with_experimental(),
     );
+    #[cfg(all(target_os = "linux", feature = "cuda"))]
+    reg.register_launch(LaunchFactory::new("cudadownload", Vec::new(), || {
+        Box::new(crate::cuda::CudaDownload::new())
+    }));
+    #[cfg(all(target_os = "linux", feature = "cuda"))]
+    reg.register_launch(LaunchFactory::new("cudaupload", Vec::new(), || {
+        Box::new(crate::cuda::CudaUpload::new())
+    }));
     // A GPU-resident wgpu texture or buffer back to system memory.
     #[cfg(feature = "wgpu-sink")]
     reg.register_launch(LaunchFactory::new("wgpudownload", Vec::new(), || {

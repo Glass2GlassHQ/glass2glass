@@ -885,9 +885,12 @@ rescales or reformats declares its result through an `output-caps` property, and
 the shell then advertises it via `transform_caps`, sizes the output buffer via
 `get_unit_size` (`gst_video_info_from_caps`), and runs the out-of-place `transform`
 from `inbuf` to `outbuf`. GstBaseTransform dispatches between the two by whether the
-negotiated caps differ. `BridgeGraph` pins the sub-graph's trailing inline caps
-filter to the output caps, equal to the input when preserving, which both enforces
-the contract and gives a caps-driven transform a fixate target.
+negotiated caps differ. `BridgeGraph` pins the sub-graph's `appsink` to the output
+caps, equal to the input when preserving, which both enforces the contract and
+gives a caps-driven transform a fixate target. The same `appsink` accepts only
+`dmabuf` and `system` memory, so the launch auto-plug splices `wgpudownload` or
+`cudadownload` after a fragment that ends on the GPU, and a dma-buf output passes
+through untouched.
 
 Zero-copy DMABUF import exists at the ingest side: `appsrc` accepts a
 `MemoryDomain::DmaBuf` frame through `AppSrcFeed::push_dmabuf`,
@@ -911,8 +914,11 @@ buffer may differ from the input in size and memory kind. On input it checks
 `gst_is_dmabuf_memory` and imports the fd via `g2g_bridge_push_dmabuf`, else maps
 and copies bytes, and on output the pull returns either system bytes or a dma-buf,
 the FFI `G2gOut` carrying a `kind` discriminant, and the shell wraps a dma-buf frame
-back into a `GstBuffer` via `gst_dmabuf_allocator_alloc` with the fd dup'ed so the
-g2g frame keeps its own. A full
+back into a `GstBuffer` via `gst_dmabuf_allocator_alloc` with the fd dup'ed. The
+buffer is sized from the negotiated video info, with a `GstVideoMeta` for a padded
+stride or an offset, and the pulled g2g frame rides as qdata on the read-only
+`GstMemory` until GStreamer frees it, so a recycling producer upstream cannot reuse
+the buffer while downstream still reads it. A full
 `dma-buf in -> glass2glass(identity) -> dma-buf out` round-trip is validated with a
 memfd-backed dma-buf (`tools/gst-bridge-dmabuf-smoke.sh`), and the system-memory
 path is unchanged (`tools/gst-bridge-smoke.sh`).

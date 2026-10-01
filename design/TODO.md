@@ -311,7 +311,13 @@ unless it says otherwise.
 
 ## GStreamer bridge
 
-- Add `WgpuBuffer` download or dma-buf export at the GStreamer bridge output.
+- Let `wgputodmabuf` export a buffer made on another device (it opens its own
+  export device, so it fails on every in-tree `WgpuBuffer` producer), then splice
+  it at the bridge output for zero-copy `WgpuBuffer` egress.
+- Build the wgpu elements into the shipped GStreamer plugin (`g2g-bridge` has no
+  feature that enables them).
+- Trace the converter auto-plug through a `capsfilter`, so
+  `<gpu producer> ! capsfilter ! <system sink>` gets a download spliced.
 
 ## Audio decode-to-PCM QA
 
