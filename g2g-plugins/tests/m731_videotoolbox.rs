@@ -10,7 +10,7 @@ use g2g_core::conformance::{ConformanceDimension, Evidence};
 use g2g_core::frame::{Frame, FrameTiming, PipelinePacket};
 use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::{
-    AsyncElement, Caps, ConfigureOutcome, Dim, G2gError, Interlace, OutputSink, PushOutcome, Rate,
+    AsyncElement, Caps, ConfigureOutcome, Dim, G2gError, OutputSink, PushOutcome, Rate,
     RawVideoFormat, VideoCodec,
 };
 use g2g_plugins::vtdecode::VtDecode;
@@ -225,6 +225,7 @@ async fn vtdecode_h265_fixture() {
 #[cfg(feature = "vtencode")]
 mod encode {
     use super::*;
+    use g2g_core::Interlace;
     use g2g_plugins::vtencode::VtEncode;
 
     const WIDTH: u32 = 320;

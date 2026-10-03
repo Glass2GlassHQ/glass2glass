@@ -196,7 +196,7 @@ mf-decode = ["std", "dep:windows"]
 # objc2 VideoToolbox / Core Media / Core Video / Core Foundation bindings;
 # macOS-only (the deps live under [target.'cfg(target_os = "macos")']), implies
 # std. The macOS counterpart of mf-decode; first element of the macOS platform
-# track. See design/TODO.md "Platform: macOS".
+# track.
 vtdecode = [
     "std",
     "dep:objc2",
@@ -215,6 +215,7 @@ vtencode = [
     "dep:objc2-core-media",
     "dep:objc2-core-video",
     "dep:objc2-core-foundation",
+    "dep:objc2-io-surface",
 ]
 # AVFoundation camera (AvfVideoSrc) + mic (AvfAudioSrc) capture (M738).
 # macOS-only, implies std; both devices are permission-gated (TCC) in a real
@@ -1072,6 +1073,8 @@ objc2-core-foundation = { version = "0.3", optional = true, default-features = f
 # NSString / NSError, for compiling the metal-sink's MSL shader source.
 objc2-foundation = { version = "0.3", optional = true, default-features = false, features = [
     "std",
+    "NSArray",
+    "NSEnumerator",
     "NSString",
     "NSError",
     "NSObject",

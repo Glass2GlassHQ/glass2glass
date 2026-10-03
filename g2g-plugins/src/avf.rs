@@ -41,7 +41,9 @@ use objc2_avf_audio::{
 use objc2_core_audio_types::kAudioFormatLinearPCM;
 use objc2_core_foundation::{CFRetained, CFString};
 use objc2_core_media::{CMBlockBuffer, CMSampleBuffer};
-use objc2_core_video::kCVPixelBufferPixelFormatTypeKey;
+use objc2_core_video::{
+    kCVPixelBufferHeightKey, kCVPixelBufferPixelFormatTypeKey, kCVPixelBufferWidthKey,
+};
 use objc2_foundation::{NSDictionary, NSNumber, NSObject, NSObjectProtocol, NSString};
 
 use g2g_core::frame::Frame;
@@ -220,6 +222,11 @@ unsafe fn open_session(
 // Camera
 // ---------------------------------------------------------------------------
 
+/// Delivered camera geometry (VGA), pinned by the session preset and the
+/// data output's videoSettings.
+const CAMERA_WIDTH: u32 = 640;
+const CAMERA_HEIGHT: u32 = 480;
+
 /// Captures NV12 frames from the default camera (VGA preset).
 ///
 /// # Example
@@ -282,8 +289,8 @@ impl AvfVideoSrc {
         // camera paces itself, per-frame PTS carries the real timing).
         Caps::RawVideo {
             format: RawVideoFormat::Nv12,
-            width: Dim::Fixed(640),
-            height: Dim::Fixed(480),
+            width: Dim::Fixed(CAMERA_WIDTH),
+            height: Dim::Fixed(CAMERA_HEIGHT),
             framerate: Rate::Fixed(30 << 16),
             interlace: Interlace::Any,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
@@ -296,20 +303,30 @@ impl AvfVideoSrc {
         }
         // SAFETY: static access; open_session validates everything else.
         let session = unsafe { open_session(AVMediaTypeVideo, &self.device)? };
-        // SAFETY: fresh session; VGA is universally supported.
+        // SAFETY: fresh session. The preset is only a hint: some cameras (the
+        // M-series MacBook Air's) keep delivering their native 1080p, so the
+        // output's videoSettings below also pin the delivered geometry.
         unsafe { session.setSessionPreset(AVCaptureSessionPreset640x480) };
 
         // SAFETY: plain object creation.
         let output = unsafe { AVCaptureVideoDataOutput::new() };
         // Pin the delivered format to '420v' NV12 (every Apple camera pipeline
-        // supports the bi-planar 4:2:0 formats).
+        // supports the bi-planar 4:2:0 formats) at the geometry the caps
+        // advertise; on macOS the data output scales to the requested size.
         // SAFETY: the CF and NS string types are toll-free bridged; the key
-        // static is valid.
-        let key: &NSString =
-            unsafe { &*(kCVPixelBufferPixelFormatTypeKey as *const CFString as *const NSString) };
+        // statics are valid.
+        let (fmt_key, w_key, h_key): (&NSString, &NSString, &NSString) = unsafe {
+            (
+                &*(kCVPixelBufferPixelFormatTypeKey as *const CFString as *const NSString),
+                &*(kCVPixelBufferWidthKey as *const CFString as *const NSString),
+                &*(kCVPixelBufferHeightKey as *const CFString as *const NSString),
+            )
+        };
         let fourcc = NSNumber::numberWithUnsignedInt(crate::cvnv12::K_CV_PIXEL_FORMAT_420V);
-        let value: &AnyObject = &fourcc;
-        let settings = NSDictionary::from_slices(&[key], &[value]);
+        let width = NSNumber::numberWithUnsignedInt(CAMERA_WIDTH);
+        let height = NSNumber::numberWithUnsignedInt(CAMERA_HEIGHT);
+        let values: [&AnyObject; 3] = [&fourcc, &width, &height];
+        let settings = NSDictionary::from_slices(&[fmt_key, w_key, h_key], &values);
         // SAFETY: fresh output; the settings dictionary is well-formed.
         unsafe { output.setVideoSettings(Some(&settings)) };
 

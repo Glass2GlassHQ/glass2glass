@@ -3,6 +3,12 @@
 //! buffer, the retained-buffer keep-alive behind the zero-copy `CvPixelBuffer`
 //! domain, and the delegate-to-run-loop handoff for the capture sources.
 
+// The delegate handoff is unused in a VtDecode-only build.
+#![cfg_attr(
+    not(any(feature = "avfoundation", feature = "screencapture")),
+    allow(dead_code)
+)]
+
 use objc2_core_foundation::CFRetained;
 use objc2_core_media::CMSampleBuffer;
 use objc2_core_video::{
@@ -86,6 +92,7 @@ impl<T> core::fmt::Debug for Shared<T> {
 /// video-range `'420v'` and full-range `'420f'`. We accept either and pack to
 /// our NV12 byte layout; the BT.601 / range semantics ride in caps, not here.
 pub(crate) const K_CV_PIXEL_FORMAT_420V: u32 = 0x3432_3076; // '420v'
+#[cfg_attr(not(feature = "vtdecode"), allow(dead_code))]
 pub(crate) const K_CV_PIXEL_FORMAT_420F: u32 = 0x3432_3066; // '420f'
 
 /// Pins a `CVPixelBuffer` for a downstream frame's lifetime (the keep-alive

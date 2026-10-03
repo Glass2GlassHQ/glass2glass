@@ -70,12 +70,6 @@ Highest leverage first:
   (non-commercial SDP); commercial use is license-gated (confirm the
   open-source-interop clause).
 
-## Platform: macOS
-
-- `AvfVideoSrc` / `ScreenCaptureSrc`: real capture validation on a Mac with a
-  camera / screen-recording permission (the CI runner grants neither, so only
-  the probe paths are validated).
-
 ## Receive / decode
 
 - **`VulkanVideoDec` residuals.** Run the `vulkanvideo` GPU tests on Intel ANV.

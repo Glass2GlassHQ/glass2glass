@@ -208,7 +208,7 @@ pub(crate) fn h265_nal_type(nal: &[u8]) -> Option<u8> {
 /// VPS, SPS, and PPS NAL lists: the H.265 parameter sets.
 #[cfg(any(
     all(target_os = "android", feature = "mediacodec"),
-    all(target_os = "macos", any(feature = "vtdecode", feature = "vtencode")),
+    all(target_os = "macos", feature = "vtdecode"),
     test
 ))]
 pub(crate) type H265ParameterSets = (Vec<Vec<u8>>, Vec<Vec<u8>>, Vec<Vec<u8>>);
@@ -220,7 +220,7 @@ pub(crate) type H265ParameterSets = (Vec<Vec<u8>>, Vec<Vec<u8>>, Vec<Vec<u8>>);
 /// its HEVC format description.
 #[cfg(any(
     all(target_os = "android", feature = "mediacodec"),
-    all(target_os = "macos", any(feature = "vtdecode", feature = "vtencode")),
+    all(target_os = "macos", feature = "vtdecode"),
     test
 ))]
 pub(crate) fn h265_parameter_sets(au: &[u8]) -> H265ParameterSets {
