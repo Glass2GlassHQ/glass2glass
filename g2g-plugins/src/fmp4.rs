@@ -249,6 +249,11 @@ pub(crate) struct TrackHeader {
     pub(crate) kind: TrackKind,
     pub(crate) cenc: Option<CencTrack>,
     pub(crate) tags: TagList,
+    /// Where the presentation starts in the track's media timeline (timescale
+    /// ticks): the `edts/elst` first edit's `media_time`, e.g. an AAC encoder's
+    /// 1024-sample priming. `0` when there is no edit list or it does not start
+    /// with a media edit.
+    pub(crate) media_start: u64,
 }
 
 /// Parse every forwardable (`vide` / `soun` / timed-text) track out of a `moov`
@@ -338,7 +343,31 @@ fn parse_trak(trak: &[u8]) -> Result<Option<TrackHeader>, G2gError> {
         kind,
         cenc: cenc_track(cenc, stbl)?,
         tags: parse_ilst_tags(trak),
+        media_start: edit_media_start(trak),
     }))
+}
+
+/// The `media_time` of a `trak`'s first edit (`edts/elst`), in media timescale
+/// ticks: where its presentation starts, which is how MP4 records an encoder's
+/// priming. `0` for no edit list, an empty first edit (`media_time` -1, a
+/// presentation delay, not a trim), or a malformed box: the edit list is
+/// untrusted, so anything unreadable falls back to presenting from the start.
+fn edit_media_start(trak: &[u8]) -> u64 {
+    let Some(elst) = find_path(trak, &[b"edts", b"elst"]) else {
+        return 0;
+    };
+    let entry_count = be32(elst, 4).unwrap_or(0);
+    if entry_count == 0 {
+        return 0;
+    }
+    // v0: u32 segment_duration + i32 media_time; v1: u64 + i64. The entries
+    // start after version/flags (4) and entry_count (4).
+    let media_time = match elst.first() {
+        Some(0) => be32(elst, 12).map(|t| i64::from(t as i32)),
+        Some(1) => be64(elst, 16).map(|t| t as i64),
+        _ => return 0,
+    };
+    media_time.ok().filter(|&t| t > 0).map_or(0, |t| t as u64)
 }
 
 /// The out-of-band config from an `av01` sample entry's `av1C` record (M779):
@@ -1582,6 +1611,51 @@ impl CmafChunker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `trak` holding only an `edts/elst` built from raw entry bytes.
+    fn trak_with_elst(version: u8, entries: u32, entry: &[u8]) -> Vec<u8> {
+        use crate::mp4box::{full_box, mp4_box};
+        let mut p = entries.to_be_bytes().to_vec();
+        p.extend_from_slice(entry);
+        mp4_box(b"edts", &full_box(b"elst", version, 0, &p))
+    }
+
+    #[test]
+    fn edit_media_start_reads_the_first_edit() {
+        // v0: segment_duration u32, media_time i32, rate.
+        let v0 = [
+            48_000u32.to_be_bytes(),
+            1024u32.to_be_bytes(),
+            0x0001_0000u32.to_be_bytes(),
+        ]
+        .concat();
+        assert_eq!(edit_media_start(&trak_with_elst(0, 1, &v0)), 1024);
+        // v1: segment_duration u64, media_time i64, rate.
+        let v1 = [
+            48_000u64.to_be_bytes().as_slice(),
+            &2048u64.to_be_bytes(),
+            &0x0001_0000u32.to_be_bytes(),
+        ]
+        .concat();
+        assert_eq!(edit_media_start(&trak_with_elst(1, 1, &v1)), 2048);
+    }
+
+    #[test]
+    fn edit_media_start_ignores_delays_and_malformed_lists() {
+        assert_eq!(edit_media_start(&[]), 0, "no edit list");
+        // An empty edit (media_time -1) delays the presentation; it trims nothing.
+        let empty = [
+            1000u32.to_be_bytes(),
+            u32::MAX.to_be_bytes(),
+            0x0001_0000u32.to_be_bytes(),
+        ]
+        .concat();
+        assert_eq!(edit_media_start(&trak_with_elst(0, 1, &empty)), 0);
+        // No entries, a truncated entry, and an unknown version all fall back.
+        assert_eq!(edit_media_start(&trak_with_elst(0, 0, &[])), 0);
+        assert_eq!(edit_media_start(&trak_with_elst(0, 1, &[0, 0, 1])), 0);
+        assert_eq!(edit_media_start(&trak_with_elst(2, 1, &[0; 20])), 0);
+    }
     use alloc::vec;
 
     /// The chunk splitter cuts a CMAF segment after every `mdat` whatever the

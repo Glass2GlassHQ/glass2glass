@@ -13,7 +13,7 @@
 //!  --test m886_linux_audio_capture`. Validated on this Fedora / PipeWire host
 //! (pipewire-alsa + pipewire-pulse), where the default source exists even with
 //! no microphone attached.
-#![cfg(any(feature = "alsa-src", feature = "pulse-src"))]
+#![cfg(all(target_os = "linux", any(feature = "alsa-src", feature = "pulse-src")))]
 
 use g2g_core::runtime::{block_on, SourceLoop};
 use g2g_core::{AudioFormat, Caps, G2gError, OutputSink, PipelinePacket, PropValue, PushOutcome};

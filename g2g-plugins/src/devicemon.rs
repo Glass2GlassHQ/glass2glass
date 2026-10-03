@@ -42,7 +42,11 @@ pub fn default_device_monitor() -> DeviceMonitor {
     monitor.register(alloc::boxed::Box::new(
         crate::wasapidevice::WasapiDeviceProvider::new(),
     ));
-    #[cfg(any(feature = "wgpu-sink", feature = "cuda", feature = "vaapi"))]
+    #[cfg(any(
+        feature = "wgpu-sink",
+        all(target_os = "linux", feature = "cuda"),
+        all(target_os = "linux", feature = "vaapi")
+    ))]
     monitor.register(alloc::boxed::Box::new(
         crate::gpudevice::GpuDeviceProvider::new(),
     ));

@@ -16,7 +16,7 @@
 //! gracefully (no panic) when the decoder cannot initialise, so it is a no-op on
 //! a machine without the hardware.
 
-#![cfg(feature = "nvdec")]
+#![cfg(all(target_os = "linux", feature = "nvdec"))]
 
 use core::future::Future;
 use core::pin::Pin;

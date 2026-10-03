@@ -905,7 +905,7 @@ fn tcpclientsink_endpoint() {
 
 /// M1081: `shmsink` takes the gst `shm` sink property set, and reports the
 /// generated area name once the area exists.
-#[cfg(all(unix, feature = "shm"))]
+#[cfg(all(target_os = "linux", feature = "shm"))]
 #[test]
 fn shmsink_socket_area_and_backlog_properties() {
     use g2g_plugins::shm::ShmSink;
@@ -976,7 +976,7 @@ fn shmsink_socket_area_and_backlog_properties() {
 
 /// M1081: `shmsrc` takes the socket it reads and either way of declaring what
 /// the bytes are.
-#[cfg(all(unix, feature = "shm"))]
+#[cfg(all(target_os = "linux", feature = "shm"))]
 #[test]
 fn shmsrc_socket_and_declared_caps() {
     use g2g_core::runtime::SourceLoop;
@@ -4094,7 +4094,7 @@ fn roundedcorners_border_radius_px() {
 /// decoder and reads it back; this is the launch-line half, plus the bound that
 /// keeps a pasted line from asking for a thread count that is a resource
 /// exhaustion rather than a decode setting.
-#[cfg(feature = "ffmpeg")]
+#[cfg(all(target_os = "linux", feature = "ffmpeg"))]
 #[test]
 fn ffmpegdec_max_threads() {
     use g2g_plugins::ffmpegdec::FfmpegVideoDec;
@@ -4122,7 +4122,7 @@ fn ffmpegdec_max_threads() {
 /// M1119: which threading method the decoder may use, gst `avdec_*`'s
 /// `thread-type` with its three nicks. `frame` is the one that trades latency
 /// for throughput, so the launch line has to be able to ask for it by name.
-#[cfg(feature = "ffmpeg")]
+#[cfg(all(target_os = "linux", feature = "ffmpeg"))]
 #[test]
 fn ffmpegdec_thread_type() {
     use g2g_plugins::ffmpegdec::{FfmpegVideoDec, ThreadType};

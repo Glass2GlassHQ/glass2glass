@@ -50,8 +50,6 @@ use crate::rtspserver::{
     sdp_h264, RtspEvent, RtspRequest, RtspResponder, DEFAULT_SESSION_TIMEOUT_SECS,
 };
 
-/// H.264 RTP media clock (RFC 6184): 90 kHz.
-const RTP_CLOCK_HZ: u64 = 90_000;
 /// Default dynamic RTP payload type for H.264.
 const DEFAULT_PAYLOAD_TYPE: u8 = 96;
 /// Default max RTP payload bytes, leaving headroom under a 1500-byte MTU.
@@ -426,9 +424,10 @@ impl RtspServerSink {
         self.eos_seen
     }
 
-    /// 90 kHz RTP timestamp for a presentation time.
+    /// 90 kHz RTP timestamp for a presentation time (the H.264 media clock,
+    /// RFC 6184).
     fn rtp_timestamp(pts_ns: u64) -> u32 {
-        ((pts_ns as u128 * RTP_CLOCK_HZ as u128) / 1_000_000_000) as u32
+        crate::rtpklv::rtp_timestamp_from_pts(pts_ns)
     }
 
     /// Bind the shared RTP socket, promote the listener to tokio, then accept one

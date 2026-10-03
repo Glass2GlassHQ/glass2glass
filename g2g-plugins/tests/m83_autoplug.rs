@@ -215,7 +215,7 @@ fn build_playbin_rejects_unknown_source() {
 /// With the real `ffmpeg` decoder registered, the search routes H.264 to raw
 /// through it. Compile + run only under the `ffmpeg` feature (it reads the
 /// decoder's pad templates; no decode is performed, so no media is needed).
-#[cfg(feature = "ffmpeg")]
+#[cfg(all(target_os = "linux", feature = "ffmpeg"))]
 #[test]
 fn registry_finds_real_ffmpeg_decoder_for_h264() {
     use g2g_plugins::ffmpegdec::FfmpegH264Dec;
@@ -232,7 +232,7 @@ fn registry_finds_real_ffmpeg_decoder_for_h264() {
 /// The VAAPI H.264 decoder's templates route H.264 to raw NV12. Compile + run
 /// only under the `vaapi` feature; reads templates only, no decode (so no GPU /
 /// libva surface is touched, which the AMD path can't allocate anyway).
-#[cfg(feature = "vaapi")]
+#[cfg(all(target_os = "linux", feature = "vaapi"))]
 #[test]
 fn registry_finds_real_vaapi_decoder_for_h264() {
     use g2g_plugins::vaapidec::VaapiH264Dec;

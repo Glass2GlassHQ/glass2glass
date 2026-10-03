@@ -15,7 +15,7 @@
 //! not a failure. Run: `cargo test -p g2g-plugins --features pulse-sink --test
 //! m884_pulsesink_drift_clock`. Validated on this Fedora / PipeWire host
 //! (pipewire-pulse); plays a brief tone.
-#![cfg(feature = "pulse-sink")]
+#![cfg(all(target_os = "linux", feature = "pulse-sink"))]
 
 use std::thread::sleep;
 use std::time::Duration;

@@ -403,7 +403,7 @@ async fn mid_stream_reverse_seek_lands_on_the_gop_boundary() {
 
 /// The decode leg: the same frames decoded through the reverse GOP walk are
 /// bit-exact with a forward decode of the same file. Needs libavcodec.
-#[cfg(feature = "ffmpeg")]
+#[cfg(all(target_os = "linux", feature = "ffmpeg"))]
 mod decode {
     use super::*;
     use g2g_core::runtime::{run_graph, GraphNode};

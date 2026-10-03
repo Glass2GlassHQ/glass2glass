@@ -11,7 +11,10 @@
 
 use alloc::vec::Vec;
 
-#[cfg(any(feature = "v4l2", feature = "pipewire"))]
+#[cfg(any(
+    all(target_os = "linux", feature = "v4l2"),
+    all(target_os = "linux", feature = "pipewire")
+))]
 use g2g_core::frame::Frame;
 use g2g_core::RawVideoFormat;
 
@@ -43,8 +46,8 @@ pub(crate) fn plane_shapes_with_stride_shift(
 /// One plane of a padded frame: where its rows start, how far apart they are,
 /// how wide each one is and how many there are.
 #[cfg(any(
-    feature = "v4l2",
-    feature = "pipewire",
+    all(target_os = "linux", feature = "v4l2"),
+    all(target_os = "linux", feature = "pipewire"),
     all(target_os = "linux", feature = "dmabuf-wgpu")
 ))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,8 +64,8 @@ pub(crate) struct PaddedPlane {
 /// from a driver or a daemon, so it is checked once here and every caller
 /// slices with what it gets back.
 #[cfg(any(
-    feature = "v4l2",
-    feature = "pipewire",
+    all(target_os = "linux", feature = "v4l2"),
+    all(target_os = "linux", feature = "pipewire"),
     all(target_os = "linux", feature = "dmabuf-wgpu")
 ))]
 pub(crate) fn padded_planes(
@@ -95,7 +98,10 @@ pub(crate) fn padded_planes(
 
 /// How many bytes a padded frame occupies: the end of its last plane's last
 /// row, `plane0_offset` included.
-#[cfg(any(feature = "v4l2", feature = "pipewire"))]
+#[cfg(any(
+    all(target_os = "linux", feature = "v4l2"),
+    all(target_os = "linux", feature = "pipewire")
+))]
 pub(crate) fn padded_frame_bytes(
     format: RawVideoFormat,
     w: usize,
@@ -114,7 +120,10 @@ pub(crate) fn padded_frame_bytes(
 /// `first_stride` bytes apart (0 means already tight). `None` when `src` does
 /// not hold what the geometry claims, in which case `dst` may hold a partial
 /// frame and has to be discarded.
-#[cfg(any(feature = "v4l2", feature = "pipewire"))]
+#[cfg(any(
+    all(target_os = "linux", feature = "v4l2"),
+    all(target_os = "linux", feature = "pipewire")
+))]
 pub(crate) fn pack_tight(
     src: &[u8],
     format: RawVideoFormat,
@@ -138,7 +147,13 @@ pub(crate) fn pack_tight(
 
 /// The meta describing a padded frame's rows, `None` when the geometry and the
 /// stride do not fit together.
-#[cfg(all(feature = "metadata", any(feature = "v4l2", feature = "pipewire")))]
+#[cfg(all(
+    feature = "metadata",
+    any(
+        all(target_os = "linux", feature = "v4l2"),
+        all(target_os = "linux", feature = "pipewire")
+    )
+))]
 pub(crate) fn padded_plane_layout(
     format: RawVideoFormat,
     w: usize,
@@ -160,7 +175,10 @@ pub(crate) fn padded_plane_layout(
 /// Declare on `frame` where its padded rows sit. `first_stride` of 0 means the
 /// producer packed them tight, so nothing is declared. Compiles away without
 /// the `metadata` feature, where there is no meta to attach.
-#[cfg(any(feature = "v4l2", feature = "pipewire"))]
+#[cfg(any(
+    all(target_os = "linux", feature = "v4l2"),
+    all(target_os = "linux", feature = "pipewire")
+))]
 pub(crate) fn declare_padded_rows(
     frame: &mut Frame,
     format: RawVideoFormat,
@@ -179,7 +197,13 @@ pub(crate) fn declare_padded_rows(
     let _ = (frame, format, w, h, plane0_offset, first_stride);
 }
 
-#[cfg(all(test, any(feature = "v4l2", feature = "pipewire")))]
+#[cfg(all(
+    test,
+    any(
+        all(target_os = "linux", feature = "v4l2"),
+        all(target_os = "linux", feature = "pipewire")
+    )
+))]
 mod tests {
     use super::*;
 

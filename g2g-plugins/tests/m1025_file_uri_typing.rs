@@ -5,7 +5,7 @@
 //! stream and died with `CapsMismatch` at the first byte. Both source shapes have
 //! to keep working: an ISO-BMFF file still self-demuxes, anything else the sniff
 //! recognises becomes a `FileSrc` carrying those caps so the decode chain plugs.
-#![cfg(all(feature = "std", feature = "ffmpeg"))]
+#![cfg(all(feature = "std", target_os = "linux", feature = "ffmpeg"))]
 
 use g2g_core::runtime::{block_on, is_raw_video, run_graph, Registry};
 use g2g_core::PipelineClock;

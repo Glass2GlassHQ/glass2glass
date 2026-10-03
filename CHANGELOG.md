@@ -6,6 +6,9 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1212: `qtdemux` starts an audio track's segment past its edit-list priming and `mp4mux` writes it back as an edit list, so an AAC remux keeps its encoder delay.
+- RTP senders (`udpsink`, `rtspserversink`, KLV) round PTS to the nearest 90 kHz tick through one shared conversion.
+- Platform-only features (`ffmpeg`, `nvenc`, `vaapi`, `nvdec`, `shm`, ALSA / Pulse / PipeWire / V4L2) no longer break a build on another OS; `shm` is Linux-only.
 - `mp4mux` rounds sample times to the nearest tick, so 1024-sample AAC frames and 30 fps video no longer lose a tick each and drift.
 - `metalvideosink` no longer leaks the per-frame Metal objects on a pipeline thread, and `screencapturesrc` keeps running while the display is unchanged.
 - `avfvideosrc` delivers the VGA geometry it advertises on cameras that ignore the session preset, and each macOS platform feature builds on its own.

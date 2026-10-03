@@ -14,7 +14,7 @@
 //! fails loud with a hardware error, treated as "no device" not a failure. Run:
 //! `cargo test -p g2g-plugins --features alsa-sink --test m591_alsasink_drift_clock`.
 //! Validated on this Fedora / PipeWire host (pipewire-alsa); plays a brief tone.
-#![cfg(feature = "alsa-sink")]
+#![cfg(all(target_os = "linux", feature = "alsa-sink"))]
 
 use std::thread::sleep;
 use std::time::Duration;

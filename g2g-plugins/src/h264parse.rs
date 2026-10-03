@@ -380,8 +380,8 @@ fn parse_vui(br: &mut BitReader) -> Vui {
 /// one exception, returning 0: it pins output order to decode order by spec, a
 /// proof rather than a declaration. `None` if there is no parseable SPS.
 ///
-/// Consumed by the libavcodec decoder (`ffmpegdec`), so gated on that feature.
-#[cfg(feature = "ffmpeg")]
+/// Consumed by the libavcodec decoder (`ffmpegdec`), so gated like it.
+#[cfg(all(target_os = "linux", feature = "ffmpeg"))]
 pub(crate) fn sps_reorder_frames(au: &[u8]) -> Option<u8> {
     for nal in crate::annexb::nal_units_any(au) {
         if nal.first().map(|b| b & 0x1F) != Some(7) {
@@ -397,7 +397,7 @@ pub(crate) fn sps_reorder_frames(au: &[u8]) -> Option<u8> {
 
 /// Parse an SPS RBSP (post NAL-header byte) for its level-derived reorder depth.
 /// Mirrors the field walk of [`parse_sps`] up to the frame dimensions.
-#[cfg(feature = "ffmpeg")]
+#[cfg(all(target_os = "linux", feature = "ffmpeg"))]
 fn parse_sps_reorder(rbsp: &[u8]) -> Option<u8> {
     if rbsp.len() < 3 {
         return None;
@@ -462,7 +462,7 @@ fn parse_sps_reorder(rbsp: &[u8]) -> Option<u8> {
 
 /// `MaxDpbMbs` for an H.264 level (Table A-1), in macroblocks. The reorder /
 /// DPB frame bound is this divided by the frame size in macroblocks.
-#[cfg(feature = "ffmpeg")]
+#[cfg(all(target_os = "linux", feature = "ffmpeg"))]
 fn max_dpb_mbs(level_idc: u8) -> u32 {
     match level_idc {
         0..=10 => 396,
@@ -549,7 +549,7 @@ mod tests {
     /// Frame an SPS RBSP in Annex-B with an explicit profile / level (unlike
     /// [`build_test_annexb_sps`], which hardcodes baseline). `rbsp` is the
     /// post-NAL-header bytes.
-    #[cfg(feature = "ffmpeg")]
+    #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
     fn annexb_sps(profile_idc: u8, level_idc: u8, rbsp: &[u8]) -> Vec<u8> {
         let mut out = vec![0u8, 0, 0, 1, 0x67, profile_idc, 0, level_idc];
         out.extend_from_slice(rbsp);
@@ -557,7 +557,7 @@ mod tests {
     }
 
     /// Minimal SPS body (non-high-profile branch) at `width` x `height`.
-    #[cfg(feature = "ffmpeg")]
+    #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
     fn sps_body(width: u32, height: u32) -> Vec<u8> {
         let mut w = BitWriter::default();
         w.write_ue(0); // seq_parameter_set_id
@@ -577,7 +577,7 @@ mod tests {
         w.into_bytes()
     }
 
-    #[cfg(feature = "ffmpeg")]
+    #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
     #[test]
     fn sps_reorder_frames_uses_level_dpb_for_reordering_profile() {
         // Main profile, level 4.0, 1920x1088 (120x68 = 8160 MBs).
@@ -586,7 +586,7 @@ mod tests {
         assert_eq!(sps_reorder_frames(&au), Some(4));
     }
 
-    #[cfg(feature = "ffmpeg")]
+    #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
     #[test]
     fn sps_reorder_frames_uses_level_dpb_for_baseline_too() {
         // Baseline (66) is not special-cased to zero: some JVT conformance vectors
@@ -596,7 +596,7 @@ mod tests {
         assert_eq!(sps_reorder_frames(&au), Some(4));
     }
 
-    #[cfg(feature = "ffmpeg")]
+    #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
     #[test]
     fn sps_reorder_frames_zero_for_poc_type_2() {
         // POC type 2 pins output order to decode order, so the level DPB bound
@@ -611,7 +611,7 @@ mod tests {
         assert_eq!(sps_reorder_frames(&au), Some(0));
     }
 
-    #[cfg(feature = "ffmpeg")]
+    #[cfg(all(target_os = "linux", feature = "ffmpeg"))]
     #[test]
     fn sps_reorder_frames_none_without_sps() {
         // A stream carrying only a slice NAL (type 5 = IDR) has no SPS.

@@ -23,7 +23,7 @@ const HEIGHT: u32 = 720;
 /// default. Lets the live demo run small enough that a debug build outpaces the
 /// framerate, so PTS pacing is the throttle rather than CPU. Only the live
 /// (`wayland-sink`) path parses geometry; the still path uses the default size.
-#[cfg(feature = "wayland-sink")]
+#[cfg(all(target_os = "linux", feature = "wayland-sink"))]
 fn geometry(arg: Option<String>) -> (u32, u32) {
     arg.and_then(|s| {
         let (w, h) = s.split_once('x')?;
@@ -47,7 +47,7 @@ GLASS TO GLASS SUBTITLES
 SPEAKER ONE:
 NICE TO MEET YOU";
 
-#[cfg(feature = "wayland-sink")]
+#[cfg(all(target_os = "linux", feature = "wayland-sink"))]
 fn main() {
     use g2g_core::runtime::{run_graph, GraphNodeRef};
     use g2g_core::{graph::Graph, Bus, BusMessage, RawVideoFormat};
@@ -132,7 +132,10 @@ fn main() {
     }
 }
 
-#[cfg(all(feature = "std", not(feature = "wayland-sink")))]
+#[cfg(all(
+    feature = "std",
+    not(all(target_os = "linux", feature = "wayland-sink"))
+))]
 fn main() {
     still::run();
 }
@@ -144,7 +147,10 @@ fn main() {
 
 /// Still-image path: render one frame to a PPM, no display required. Used to
 /// preview the overlay headless.
-#[cfg(all(feature = "std", not(feature = "wayland-sink")))]
+#[cfg(all(
+    feature = "std",
+    not(all(target_os = "linux", feature = "wayland-sink"))
+))]
 mod still {
     use core::future::Future;
     use core::pin::Pin;

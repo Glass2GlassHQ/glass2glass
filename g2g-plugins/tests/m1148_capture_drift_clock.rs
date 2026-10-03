@@ -12,7 +12,7 @@
 //! loud with a hardware error, read here as "no device" rather than a failure.
 //! Run with the features built:
 //! `cargo test -p g2g-plugins --features alsa-src,pipewire --test m1148_capture_drift_clock`.
-#![cfg(any(feature = "alsa-src", feature = "pipewire"))]
+#![cfg(all(target_os = "linux", any(feature = "alsa-src", feature = "pipewire")))]
 
 use g2g_core::runtime::{block_on, SourceLoop};
 use g2g_core::{ClockPriority, G2gError, OutputSink, PipelinePacket, PushOutcome};

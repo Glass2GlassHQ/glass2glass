@@ -27,7 +27,7 @@ impl PipelineClock for ZeroClock {
 // dead code under another decoder feature (vaapi / nvdec / mediacodec /
 // vulkan-video).
 #[cfg(any(
-    feature = "ffmpeg",
+    all(target_os = "linux", feature = "ffmpeg"),
     not(any(
         feature = "ffmpeg",
         feature = "vaapi",

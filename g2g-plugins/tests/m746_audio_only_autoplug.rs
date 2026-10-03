@@ -9,7 +9,7 @@
 //! the end-to-end PCM output is live-validated with `g2g-launch`. Needs the audio
 //! decoder in the autoplug pool (ffmpeg).
 
-#![cfg(all(feature = "std", feature = "ffmpeg"))]
+#![cfg(all(feature = "std", target_os = "linux", feature = "ffmpeg"))]
 
 use g2g_core::runtime::parse_launch;
 use g2g_plugins::mpegts::{STREAM_TYPE_AAC, STREAM_TYPE_H264};

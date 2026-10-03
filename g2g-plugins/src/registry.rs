@@ -200,7 +200,7 @@ use crate::rtspserversrc::RtspServerSrc;
 #[cfg(feature = "rtsp")]
 use crate::rtspsrc::RtspSrc;
 use crate::scaletempo::ScaleTempo;
-#[cfg(all(unix, feature = "shm"))]
+#[cfg(all(target_os = "linux", feature = "shm"))]
 use crate::shm::{ShmSink, ShmSrc};
 #[cfg(feature = "srtp")]
 use crate::srtpdec::SrtpDec;
@@ -2692,7 +2692,7 @@ fn register_feature_gated(reg: &mut Registry) {
     // Shared memory (M1081). The declared caps are nominal for the same reason
     // as the TCP sources': the shmpipe protocol has no field for caps, so
     // `bytestream-format` or `caps` says what the bytes are.
-    #[cfg(all(unix, feature = "shm"))]
+    #[cfg(all(target_os = "linux", feature = "shm"))]
     reg.register_source(SourceFactory::new(
         "shmsrc",
         Caps::ByteStream {
@@ -2745,7 +2745,7 @@ fn register_feature_gated(reg: &mut Registry) {
     reg.register_launch(LaunchFactory::of::<TcpClientSink>("tcpclientsink", || {
         Box::new(TcpClientSink::default())
     }));
-    #[cfg(all(unix, feature = "shm"))]
+    #[cfg(all(target_os = "linux", feature = "shm"))]
     reg.register_launch(LaunchFactory::of::<ShmSink>("shmsink", || {
         Box::new(ShmSink::default())
     }));

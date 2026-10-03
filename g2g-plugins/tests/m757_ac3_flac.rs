@@ -7,7 +7,7 @@
 //! is live-validated with `g2g-launch` (FLAC and, since M937's swresample-matching
 //! s16 rounding, AC-3 both bit-exact vs ffmpeg). Needs the ffmpeg decoder pool.
 
-#![cfg(all(feature = "std", feature = "ffmpeg"))]
+#![cfg(all(feature = "std", target_os = "linux", feature = "ffmpeg"))]
 
 use g2g_core::runtime::{parse_launch, run_graph};
 use g2g_core::PipelineClock;

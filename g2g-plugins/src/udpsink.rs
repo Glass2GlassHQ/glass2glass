@@ -126,8 +126,6 @@ impl FecConfig {
     }
 }
 
-/// H.264 RTP media clock (RFC 6184): timestamps tick at 90 kHz.
-const RTP_CLOCK_HZ: u64 = 90_000;
 /// Default dynamic RTP payload type for H.264.
 const DEFAULT_PAYLOAD_TYPE: u8 = 96;
 /// Default max RTP payload bytes, leaving headroom under a 1500-byte MTU.
@@ -450,10 +448,10 @@ impl UdpSink {
         self.eos_seen
     }
 
-    /// 90 kHz RTP timestamp for a presentation time. Wraps the u32 RTP field
-    /// as the protocol expects.
+    /// 90 kHz RTP timestamp for a presentation time (the H.264 media clock,
+    /// RFC 6184). Wraps the u32 RTP field as the protocol expects.
     fn rtp_timestamp(pts_ns: u64) -> u32 {
-        ((pts_ns as u128 * RTP_CLOCK_HZ as u128) / 1_000_000_000) as u32
+        crate::rtpklv::rtp_timestamp_from_pts(pts_ns)
     }
 
     /// Where each datagram goes: the `clients` list when set, else `host`:`port`.
@@ -1056,7 +1054,7 @@ mod tests {
         assert_eq!(UdpSink::rtp_timestamp(0), 0);
         // 1 second of pts -> 90000 ticks.
         assert_eq!(UdpSink::rtp_timestamp(1_000_000_000), 90_000);
-        // 1/30 s -> 3000 ticks.
-        assert_eq!(UdpSink::rtp_timestamp(33_333_333), 2999);
+        // 1/30 s -> 3000 ticks, though the ns PTS is truncated just under it.
+        assert_eq!(UdpSink::rtp_timestamp(33_333_333), 3000);
     }
 }

@@ -10,7 +10,7 @@
 //! ```sh
 //! cargo test -p g2g-plugins --features shm --test m1081_shm -- --ignored --nocapture
 //! ```
-#![cfg(all(unix, feature = "shm"))]
+#![cfg(all(target_os = "linux", feature = "shm"))]
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};

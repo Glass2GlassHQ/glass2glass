@@ -5,10 +5,18 @@
 //! element acts on, then parses in a real launch line. No network / device is
 //! touched: construction and property state only.
 
-#[cfg(any(feature = "rtsp", feature = "v4l2", feature = "webrtc"))]
+#[cfg(any(
+    feature = "rtsp",
+    all(target_os = "linux", feature = "v4l2"),
+    feature = "webrtc"
+))]
 use g2g_core::PropValue;
 
-#[cfg(any(feature = "rtsp", feature = "v4l2", feature = "webrtc"))]
+#[cfg(any(
+    feature = "rtsp",
+    all(target_os = "linux", feature = "v4l2"),
+    feature = "webrtc"
+))]
 fn declares(specs: &[g2g_core::PropertySpec], name: &str) -> bool {
     specs.iter().any(|s| s.name == name)
 }
@@ -43,7 +51,7 @@ fn rtspsrc_location_round_trips_and_parses() {
     );
 }
 
-#[cfg(feature = "v4l2")]
+#[cfg(all(target_os = "linux", feature = "v4l2"))]
 #[test]
 fn v4l2src_device_round_trips_and_parses() {
     use g2g_core::runtime::{parse_launch, SourceLoop};

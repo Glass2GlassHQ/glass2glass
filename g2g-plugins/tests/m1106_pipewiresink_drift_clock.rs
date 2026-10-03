@@ -12,7 +12,7 @@
 //! `configure_pipeline` fails loud with a hardware error, treated as "no
 //! device" not a failure. Run:
 //! `cargo test -p g2g-plugins --features pipewire --test m1106_pipewiresink_drift_clock`.
-#![cfg(feature = "pipewire")]
+#![cfg(all(target_os = "linux", feature = "pipewire"))]
 
 use std::thread::sleep;
 use std::time::Duration;

@@ -110,8 +110,9 @@ udp-ingress = ["std", "tokio/net"]
 tcp = ["std", "tokio/net", "tokio/io-util"]
 # Shared-memory IPC pair (M1081): ShmSink / ShmSrc speak the `shmpipe` protocol
 # of GStreamer's `shm` plugin, a unix control socket plus a POSIX shm area, so
-# either end can be a gst `shmsink` / `shmsrc`. Unix only; libc supplies the
-# shm_open / mmap calls. Implies std + tokio net/io-util.
+# either end can be a gst `shmsink` / `shmsrc`. Linux only (macOS rejects the
+# area setup); libc supplies the shm_open / mmap calls. Implies std + tokio
+# net/io-util.
 shm = ["std", "dep:libc", "tokio/net", "tokio/io-util"]
 # Distributed-graph transport pair (M551): RemoteSink (TCP client, egress) +
 # RemoteSrc (TCP listener, ingress) serialize the whole PipelinePacket stream
@@ -1431,6 +1432,11 @@ required-features = ["vulkan-video"]
 # M740: on-screen macOS present (VideoToolbox zero-copy decode into an
 # app-owned window's CAMetalLayer via `MetalVideoSink::with_layer`). Non-macOS
 # builds get a stub main; the real path needs macOS.
+# Registers an out-of-tree source in the std registry and runs it.
+[[example]]
+name = "third_party_source"
+required-features = ["std"]
+
 [[example]]
 name = "metal_video_on_screen"
 required-features = ["vtdecode", "metal-sink"]

@@ -233,7 +233,11 @@ pub mod trim;
 ))]
 pub mod gpu;
 // GPU / compute device discovery (M939): wgpu adapters, CUDA devices, VAAPI nodes.
-#[cfg(any(feature = "wgpu-sink", feature = "cuda", feature = "vaapi"))]
+#[cfg(any(
+    feature = "wgpu-sink",
+    all(target_os = "linux", feature = "cuda"),
+    all(target_os = "linux", feature = "vaapi")
+))]
 pub mod gpudevice;
 // Re-export wgpu so a downstream consumer (a viewer wiring g2g's GPU-texture
 // decode into its renderer) can name `wgpu::Texture` / build on a shared device
@@ -388,8 +392,8 @@ pub mod yuvmatrix;
 // import / download that carry and strip them.
 #[cfg(any(
     feature = "metadata",
-    feature = "v4l2",
-    feature = "pipewire",
+    all(target_os = "linux", feature = "v4l2"),
+    all(target_os = "linux", feature = "pipewire"),
     feature = "wgpu-sink",
     all(target_os = "linux", feature = "dmabuf-wgpu")
 ))]
@@ -607,7 +611,10 @@ pub mod flactag;
 pub mod mpegaudioparse;
 // Non-blocking link to a blocking audio device worker thread, shared by the
 // ALSA and PulseAudio sinks.
-#[cfg(any(feature = "alsa-sink", feature = "pulse-sink"))]
+#[cfg(all(
+    target_os = "linux",
+    any(feature = "alsa-sink", feature = "pulse-sink")
+))]
 mod audioworker;
 // Matroska / WebM demuxer parsing core (no_std): EBML -> Tracks + Cluster frames.
 pub mod matroska;
@@ -845,9 +852,9 @@ pub mod dmabufmap;
 // area announced over a unix control socket, ShmSrc maps that area and copies
 // each announced block out. The wire is GStreamer's shmpipe protocol, so either
 // end can be a gst shmsink / shmsrc.
-#[cfg(all(unix, feature = "shm"))]
+#[cfg(all(target_os = "linux", feature = "shm"))]
 pub mod shm;
-#[cfg(all(unix, feature = "shm"))]
+#[cfg(all(target_os = "linux", feature = "shm"))]
 pub mod shmpipe;
 
 // Distributed-graph transport pair (M551): RemoteSink (TCP client) serializes
@@ -1100,8 +1107,8 @@ pub mod mfaacencode;
     feature = "av1-encode",
     feature = "vpx",
     feature = "opus",
-    feature = "ffmpeg",
-    feature = "nvenc",
+    all(target_os = "linux", feature = "ffmpeg"),
+    all(target_os = "linux", feature = "nvenc"),
     feature = "gstreamer"
 ))]
 mod encoder_base;

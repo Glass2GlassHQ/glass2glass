@@ -13,7 +13,10 @@
 //! `cargo test -p g2g-plugins --features alsa-sink,pulse-sink,pipewire
 //!  --test m589_audio_sink_smoke`. Validated on this Fedora / PipeWire host
 //! (PulseAudio-on-PipeWire + pipewire-alsa); it plays a brief quiet tone.
-#![cfg(any(feature = "alsa-sink", feature = "pulse-sink", feature = "pipewire"))]
+#![cfg(all(
+    target_os = "linux",
+    any(feature = "alsa-sink", feature = "pulse-sink", feature = "pipewire")
+))]
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;

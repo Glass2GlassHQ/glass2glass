@@ -365,7 +365,7 @@ async fn splices_only_the_conflicting_tee_branch() {
 /// A CPU-side NV12 stream feeds `NvEnc` (CUDA-only input) with no hand-wiring:
 /// `auto_plug_cuda_converters` splices a `CudaUpload`, so the System source
 /// reaches the encoder and produces H.264. Skips gracefully without a GPU.
-#[cfg(feature = "nvenc")]
+#[cfg(all(target_os = "linux", feature = "nvenc"))]
 #[tokio::test]
 async fn auto_plugs_cuda_upload_before_nvenc() {
     use g2g_plugins::cuda::auto_plug_cuda_converters;

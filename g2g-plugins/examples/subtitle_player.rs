@@ -24,7 +24,7 @@
 //!   cargo run -p g2g-plugins --features "ffmpeg wayland-sink truetype-overlay" \
 //!       --example subtitle_player -- clip.mp4 clip_jp.vtt 1280x720
 
-#[cfg(all(feature = "ffmpeg", feature = "wayland-sink"))]
+#[cfg(all(target_os = "linux", feature = "ffmpeg", feature = "wayland-sink"))]
 fn main() {
     use std::path::Path;
 
@@ -146,7 +146,7 @@ fn main() {
     }
 }
 
-#[cfg(not(all(feature = "ffmpeg", feature = "wayland-sink")))]
+#[cfg(not(all(target_os = "linux", feature = "ffmpeg", feature = "wayland-sink")))]
 fn main() {
-    eprintln!("build with --features \"ffmpeg wayland-sink\"");
+    eprintln!("build on Linux with --features \"ffmpeg wayland-sink\"");
 }

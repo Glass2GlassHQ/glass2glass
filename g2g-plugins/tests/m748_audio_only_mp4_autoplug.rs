@@ -11,7 +11,7 @@
 //! the end-to-end PCM output is live-validated with `g2g-launch`. Fixtures are tiny
 //! ffmpeg clips (a `moov` cannot be hand-synthesized like an MPEG-TS PMT).
 
-#![cfg(all(feature = "std", feature = "ffmpeg"))]
+#![cfg(all(feature = "std", target_os = "linux", feature = "ffmpeg"))]
 
 use std::path::PathBuf;
 

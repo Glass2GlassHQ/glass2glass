@@ -36,7 +36,7 @@ use g2g_core::runtime::StreamSelectController;
 use g2g_core::{
     AudioFormat, BusHandle, BusMessage, ByteStreamEncoding, Caps, ConfigureOutcome, Dim,
     FrameTiming, G2gError, LatencyReport, MemoryDomain, MultiOutputElement, MultiOutputSink,
-    PipelinePacket, Rate, Stream, StreamCollection, StreamType,
+    PipelinePacket, Rate, Segment, Stream, StreamCollection, StreamType,
 };
 
 use crate::fmp4::{
@@ -282,6 +282,12 @@ pub struct Mp4DemuxN {
     emitted: u64,
     // a fragment's moof waits for its mdat, then the whole fragment emits at once
     held_fragment_ns: Vec<Option<u64>>,
+    /// The last `Segment` from upstream, re-sent per port with that port's
+    /// [`port_start_ns`](Self::port_start_ns) applied.
+    upstream_segment: Segment,
+    /// Per port, where the track's presentation starts (ns): an audio edit
+    /// list's priming trim, `0` when none or not yet known.
+    port_start_ns: Vec<u64>,
 }
 
 // no real fragment runs this long
@@ -298,6 +304,7 @@ impl Mp4DemuxN {
         let announced = alloc::vec![false; ports.len()];
         let need_config = alloc::vec![true; ports.len()];
         let held_fragment_ns = alloc::vec![None; ports.len()];
+        let port_start_ns = alloc::vec![0; ports.len()];
         Self {
             buf: Vec::new(),
             tracks: None,
@@ -314,6 +321,8 @@ impl Mp4DemuxN {
             drained: 0,
             emitted: 0,
             held_fragment_ns,
+            upstream_segment: Segment::new(),
+            port_start_ns,
         }
     }
 
@@ -644,6 +653,14 @@ impl Mp4DemuxN {
         }
     }
 
+    /// The upstream segment as port `port` sees it: starting no earlier than
+    /// its track's presentation start, so the priming before it is clipped.
+    fn port_segment(&self, port: usize) -> Segment {
+        let mut seg = self.upstream_segment;
+        seg.start = seg.start.max(self.port_start_ns[port]);
+        seg
+    }
+
     /// Parse the whole buffered file at `Eos` and emit every sample, for a
     /// *progressive* (non-fragmented) `moov`+`mdat` layout whose samples reference
     /// one big `mdat` (nothing can emit incrementally). The fragmented path emits in
@@ -695,6 +712,27 @@ impl Mp4DemuxN {
                     .unwrap_or_else(|| self.ports[port].caps.clone());
                 out.push_to(port, PipelinePacket::CapsChanged(caps)).await?;
                 self.announced[port] = true;
+                // An audio edit list trims the encoder's priming off the
+                // presentation: the segment starts past it, so sinks clip it and
+                // a remux writes it back as an edit list. Opus is left out: its
+                // pre-skip rides in the `OpusHead`, which `OpusDec` already trims.
+                let track = tracks.iter().find(|t| t.track_id == track_id);
+                let start_ns = match track {
+                    Some(
+                        t @ TrackHeader {
+                            kind: TrackKind::Audio { format, .. },
+                            ..
+                        },
+                    ) if *format != AudioFormat::Opus && t.media_start > 0 => {
+                        t.media_start.saturating_mul(1_000_000_000) / u64::from(t.timescale)
+                    }
+                    _ => 0,
+                };
+                if start_ns != self.port_start_ns[port] {
+                    self.port_start_ns[port] = start_ns;
+                    out.push_to(port, PipelinePacket::Segment(self.port_segment(port)))
+                        .await?;
+                }
             }
 
             let mut data = sample.annexb;
@@ -871,8 +909,10 @@ impl MultiOutputElement for Mp4DemuxN {
                     }
                 }
                 PipelinePacket::Segment(seg) => {
+                    self.upstream_segment = seg;
                     for port in 0..self.ports.len() {
-                        out.push_to(port, PipelinePacket::Segment(seg)).await?;
+                        out.push_to(port, PipelinePacket::Segment(self.port_segment(port)))
+                            .await?;
                     }
                 }
                 // The input's (byte-stream) CapsChanged is consumed: each port

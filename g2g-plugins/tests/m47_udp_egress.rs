@@ -118,7 +118,7 @@ async fn sink_sends_rtp_matching_packetizer_with_pts_derived_timestamp() {
     let mut reference = RtpH264Packetizer::new(PAYLOAD_TYPE, SSRC).with_max_payload(MAX_PAYLOAD);
     let mut expected: Vec<Vec<u8>> = Vec::new();
     expected.extend(reference.packetize(&au1, 0));
-    expected.extend(reference.packetize(&au2, 2999)); // 33_333_333 ns at 90 kHz
+    expected.extend(reference.packetize(&au2, 3000)); // 33_333_333 ns at 90 kHz
     let expected_count = expected.len();
     assert_eq!(expected_count, 5, "2 single-NAL + 3 FU-A fragments");
 
@@ -160,7 +160,7 @@ async fn sink_sends_rtp_matching_packetizer_with_pts_derived_timestamp() {
 
     // RTP timestamp is the 90 kHz image of pts (independent of the reference).
     assert_eq!(timestamp(&received[0]), 0, "AU1 pts 0 -> ts 0");
-    assert_eq!(timestamp(&received[2]), 2999, "AU2 pts 1/30 s -> ts 2999");
+    assert_eq!(timestamp(&received[2]), 3000, "AU2 pts 1/30 s -> ts 3000");
     // One timestamp per access unit.
     assert_eq!(timestamp(&received[0]), timestamp(&received[1]));
     assert_eq!(timestamp(&received[2]), timestamp(&received[3]));

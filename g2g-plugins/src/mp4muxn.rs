@@ -146,6 +146,12 @@ pub struct Mp4MuxN {
     decode_time: Vec<u64>,
     /// Per-track previous PTS (ns), for the sample-duration delta.
     prev_pts_ns: Vec<Option<u64>>,
+    /// Per-track first PTS (ns): media time 0 of that track in the file.
+    first_pts_ns: Vec<Option<u64>>,
+    /// Per-track `Segment` start (ns). Past the first PTS, the samples before it
+    /// are priming the presentation skips (an AAC encoder delay, set by a
+    /// demuxer from its source's edit list), written back as an `elst`.
+    segment_start_ns: Vec<u64>,
     /// Per-track CDP sequence counter, for a `c708` track's caption packets.
     cdp_seq: Vec<u16>,
     /// Per-track end (ns) of the last text cue written, so the run before the next
@@ -260,6 +266,8 @@ impl Mp4MuxN {
             agg: InputAggregator::new(inputs),
             decode_time: alloc::vec![0; inputs],
             prev_pts_ns: alloc::vec![None; inputs],
+            first_pts_ns: alloc::vec![None; inputs],
+            segment_start_ns: alloc::vec![0; inputs],
             cdp_seq: alloc::vec![0; inputs],
             text_end_ns: alloc::vec![0; inputs],
             header_written: false,
@@ -480,6 +488,26 @@ impl Mp4MuxN {
 
     /// Whether the pad carries Opus, whose in-band headers are dropped rather
     /// than muxed as samples.
+    /// Per pad slot, where its presentation starts in its media timeline
+    /// (timescale ticks), for the `elst`: an Opus track's pre-skip from its
+    /// `OpusHead`, else how far the input's `Segment` starts past its first
+    /// sample (the priming a demuxer read from its source's edit list).
+    fn media_starts(&self) -> Vec<u64> {
+        (0..self.inputs)
+            .map(|input| {
+                let Some(init) = self.inits[input].as_ref() else {
+                    return 0;
+                };
+                if self.is_opus_pad(input) {
+                    return u64::from(track_pre_skip(init));
+                }
+                let first = self.first_pts_ns[input].unwrap_or(0);
+                let skip_ns = self.segment_start_ns[input].saturating_sub(first);
+                ns_to_ts(skip_ns, init.timescale())
+            })
+            .collect()
+    }
+
     fn is_opus_pad(&self, input: usize) -> bool {
         matches!(
             self.kinds[input],
@@ -859,7 +887,8 @@ impl Mp4MuxN {
         let mut bytes = Vec::new();
         if !self.header_written {
             bytes.extend_from_slice(&if self.cmaf { ftyp_cmaf() } else { ftyp() });
-            bytes.extend_from_slice(&av_moov(&self.inits, None, &self.moov_metadata()));
+            let starts = self.media_starts();
+            bytes.extend_from_slice(&av_moov(&self.inits, None, &self.moov_metadata(), &starts));
             self.header_written = true;
         }
         if opens_fragment {
@@ -941,14 +970,15 @@ impl Mp4MuxN {
                 .iter()
                 .map(|w| mdat_start.saturating_add(*w))
                 .collect();
+            let starts = self.media_starts();
             let tables: Vec<Option<TrackTables>> = (0..self.inputs)
                 .map(|input| {
-                    self.inits[input]
-                        .as_ref()
-                        .map(|init| track_tables(input, init, &samples, &offsets, force_co64))
+                    self.inits[input].as_ref().map(|init| {
+                        track_tables(input, init, &samples, &offsets, force_co64, starts[input])
+                    })
                 })
                 .collect();
-            av_moov(&self.inits, Some(&tables), &metadata)
+            av_moov(&self.inits, Some(&tables), &metadata, &starts)
         };
 
         let head_len = head.len() as u64;
@@ -1195,6 +1225,7 @@ impl MultiInputElement for Mp4MuxN {
                             return Ok(());
                         }
                     }
+                    self.first_pts_ns[input].get_or_insert(frame.timing.pts_ns);
                     self.agg.push(input, frame);
                 }
                 PipelinePacket::Eos => self.agg.mark_ended(input),
@@ -1209,8 +1240,12 @@ impl MultiInputElement for Mp4MuxN {
                 }
                 // A per-input `Segment` maps that stream to running time; a muxed
                 // container carries its own timestamps, so it is consumed rather
-                // than forwarded into the byte stream.
-                PipelinePacket::Segment(_) => return Ok(()),
+                // than forwarded into the byte stream. Its start is kept: one past
+                // the track's first sample becomes the track's edit list.
+                PipelinePacket::Segment(seg) => {
+                    self.segment_start_ns[input] = seg.start;
+                    return Ok(());
+                }
                 other => {
                     out.push(other).await?;
                     return Ok(());
@@ -1275,6 +1310,7 @@ fn av_moov(
     tracks: &[Option<TrackInit>],
     tables: Option<&[Option<TrackTables>]>,
     metadata: &MoovMetadata,
+    media_starts: &[u64],
 ) -> Vec<u8> {
     let table_of = |i: usize| tables.and_then(|t| t.get(i)).and_then(Option::as_ref);
     let next_track_id = (tracks.len() + 1) as u32;
@@ -1303,7 +1339,19 @@ fn av_moov(
     for (i, track) in tracks.iter().enumerate() {
         let Some(track) = track else { continue };
         let track_tags = metadata.per_track.get(i);
-        body.extend_from_slice(&trak(i as u32 + 1, track, table_of(i), track_tags));
+        // A track's presentation start: what the muxer learned per input, or
+        // the codec's own delay (Opus pre-skip) when it has nothing better.
+        let media_start = media_starts
+            .get(i)
+            .copied()
+            .unwrap_or_else(|| u64::from(track_pre_skip(track)));
+        body.extend_from_slice(&trak(
+            i as u32 + 1,
+            track,
+            table_of(i),
+            track_tags,
+            media_start,
+        ));
     }
     // A progressive file has no fragments, so no `mvex` to announce them.
     if tables.is_none() {
@@ -1360,6 +1408,7 @@ fn track_tables(
     samples: &[ProgSample],
     offsets: &[u64],
     force_co64: bool,
+    media_time: u64,
 ) -> TrackTables {
     let mut idx: Vec<usize> = (0..samples.len())
         .filter(|&i| samples[i].input == input)
@@ -1456,7 +1505,6 @@ fn track_tables(
     }
     let chunk_box = full_box(if needs_co64 { b"co64" } else { b"stco" }, 0, 0, &chunks);
 
-    let media_time = u64::from(track_pre_skip(init));
     let timescale = init.timescale();
     let presentation = media_duration.saturating_sub(media_time);
     TrackTables {
@@ -1781,15 +1829,15 @@ fn track_pre_skip(init: &TrackInit) -> u32 {
 /// pre-roll. `segment_duration` (movie timescale) is the presentation length,
 /// or `0` ("to the end of the media") in the fragmented layout, whose `moov` is
 /// written before the total is known. Empty for a track with no delay to trim.
-fn edts(init: &TrackInit, segment_duration: u64) -> Vec<u8> {
-    let media_time = track_pre_skip(init);
+fn edts(media_time: u64, segment_duration: u64) -> Vec<u8> {
     if media_time == 0 {
         return Vec::new();
     }
     let mut p = Vec::new();
     p.extend_from_slice(&1u32.to_be_bytes()); // entry count
     p.extend_from_slice(&(segment_duration as u32).to_be_bytes());
-    p.extend_from_slice(&media_time.to_be_bytes());
+    // elst v0 media_time is an i32.
+    p.extend_from_slice(&(media_time.min(i32::MAX as u64) as u32).to_be_bytes());
     p.extend_from_slice(&0x0001_0000u32.to_be_bytes()); // media rate 1.0
     mp4_box(b"edts", &full_box(b"elst", 0, 0, &p))
 }
@@ -1802,6 +1850,7 @@ fn trak(
     init: &TrackInit,
     tables: Option<&TrackTables>,
     tags: Option<&TagList>,
+    media_start: u64,
 ) -> Vec<u8> {
     let TrakMedia {
         handler,
@@ -1892,7 +1941,7 @@ fn trak(
         .unwrap_or_default();
     mp4_box(
         b"trak",
-        &[tkhd, edts(init, segment_duration), mdia, udta].concat(),
+        &[tkhd, edts(media_start, segment_duration), mdia, udta].concat(),
     )
 }
 
@@ -2105,7 +2154,7 @@ mod tests {
                 config: alloc::vec![0x11, 0x90],
             }),
         ];
-        let moov = av_moov(&tracks, None, &MoovMetadata::default());
+        let moov = av_moov(&tracks, None, &MoovMetadata::default(), &[]);
         let count = |needle: &[u8]| moov.windows(4).filter(|w| *w == needle).count();
         assert_eq!(count(b"trak"), 2, "one trak per track");
         assert_eq!(count(b"trex"), 2, "one trex per track");
@@ -2128,7 +2177,7 @@ mod tests {
                 config: alloc::vec![0x11, 0x90],
             }),
         ];
-        let moov = av_moov(&tracks, None, &MoovMetadata::default());
+        let moov = av_moov(&tracks, None, &MoovMetadata::default(), &[]);
         let count = |needle: &[u8]| moov.windows(4).filter(|w| *w == needle).count();
         assert_eq!(count(b"trak"), 1, "only the non-empty pad gets a trak");
         assert_eq!(count(b"trex"), 1);
@@ -2148,7 +2197,7 @@ mod tests {
             rate: 48000,
             config: Vec::new(),
         })];
-        let moov = av_moov(&tracks, None, &MoovMetadata::default());
+        let moov = av_moov(&tracks, None, &MoovMetadata::default(), &[]);
         let count = |needle: &[u8]| moov.windows(needle.len()).filter(|w| *w == needle).count();
         assert_eq!(count(b"Opus"), 1, "Opus sample entry");
         assert_eq!(count(b"dOps"), 1, "OpusSpecificBox");
@@ -2186,7 +2235,7 @@ mod tests {
             rate: 48000,
             config: head,
         })];
-        let moov = av_moov(&tracks, None, &MoovMetadata::default());
+        let moov = av_moov(&tracks, None, &MoovMetadata::default(), &[]);
         let dops = moov.windows(4).position(|w| w == b"dOps").unwrap();
         assert_eq!(
             u16::from_be_bytes([moov[dops + 6], moov[dops + 7]]),
@@ -2209,7 +2258,7 @@ mod tests {
             height: 240,
             param_sets: Vec::new(),
         })];
-        let moov = av_moov(&tracks, None, &MoovMetadata::default());
+        let moov = av_moov(&tracks, None, &MoovMetadata::default(), &[]);
         let count = |needle: &[u8]| moov.windows(needle.len()).filter(|w| *w == needle).count();
         assert_eq!(count(b"vp09"), 1, "VP9 sample entry");
         assert_eq!(count(b"vpcC"), 1, "VPCodecConfigurationBox");

@@ -12,7 +12,7 @@
 //!
 //! Reuses the M747/M749 AAC-in-TS fixture (mono 44.1 kHz). Needs the AAC decoder in
 //! the autoplug pool (ffmpeg) and `default_registry` (std).
-#![cfg(all(feature = "std", feature = "ffmpeg"))]
+#![cfg(all(feature = "std", target_os = "linux", feature = "ffmpeg"))]
 
 use std::path::PathBuf;
 
