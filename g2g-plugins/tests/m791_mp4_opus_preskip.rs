@@ -172,11 +172,13 @@ fn probed_f64(probed: &[(String, String)], key: &str) -> f64 {
         .unwrap_or_else(|_| panic!("ffprobe {key} is a number, got {:?}", field(probed, key)))
 }
 
-/// ffmpeg's decode of `path` as raw interleaved 16-bit PCM. Fails the test if
-/// ffmpeg reports any decode error, so a container the peer cannot read is
-/// caught here rather than silently comparing two empty buffers.
+/// ffmpeg's decode of `path` as raw interleaved 32-bit float PCM. Fails the
+/// test if ffmpeg reports any decode error, so a container the peer cannot
+/// read is caught here rather than silently comparing two empty buffers. Float,
+/// not S16: ffmpeg 9's S16 conversion of an Ogg's end-trimmed last frame can
+/// differ by one LSB from the same frame untrimmed.
 fn decode_pcm(path: &PathBuf) -> Vec<u8> {
-    decode_raw(path, &[], "s16le", "pcm_s16le")
+    decode_raw(path, &[], "f32le", "pcm_f32le")
 }
 
 /// The same decode as raw interleaved 32-bit float, through **libopus** rather
@@ -614,7 +616,7 @@ async fn opusenc_into_mp4_declares_the_encoders_own_lookahead() {
     );
     // ffmpeg reads it back without complaint, the point of a muxer nobody else wrote.
     assert!(
-        decode_pcm(&out).len() > (rate as usize * 4) / 2,
+        decode_pcm(&out).len() > (rate as usize * 8) / 2,
         "ffmpeg decoded a full second"
     );
 

@@ -117,6 +117,15 @@ fn temp_path(tag: &str, ext: &str) -> PathBuf {
     std::env::temp_dir().join(format!("g2g-m827-{tag}-{}.{ext}", std::process::id()))
 }
 
+/// ffmpeg's libvorbis encoder authors the Vorbis fixtures; not every ffmpeg
+/// build has it (Homebrew's dropped it), so those tests skip without it.
+fn have_libvorbis() -> bool {
+    Command::new("ffmpeg")
+        .args(["-hide_banner", "-h", "encoder=libvorbis"])
+        .output()
+        .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).starts_with("Encoder libvorbis"))
+}
+
 /// Encode one tone to `path` with ffmpeg. `codec` is `libopus` or `libvorbis`.
 fn encode(path: &Path, codec: &str, freq: u32, channels: u8, rate: u32) -> Option<()> {
     if Command::new("ffmpeg").arg("-version").output().is_err() {
@@ -432,8 +441,8 @@ async fn a_chained_parameter_change_re_announces_caps() {
 /// file.
 #[tokio::test]
 async fn a_chain_that_changes_codec_fails_loud() {
-    if Command::new("ffmpeg").arg("-version").output().is_err() {
-        eprintln!("skipping: no ffmpeg");
+    if Command::new("ffmpeg").arg("-version").output().is_err() || !have_libvorbis() {
+        eprintln!("skipping: no ffmpeg with libvorbis");
         return;
     }
     let opus = temp_path("cross-1", "opus");

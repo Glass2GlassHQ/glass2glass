@@ -846,11 +846,12 @@ async fn ffmpeg_decodes_a_chunked_cmaf_file_identically_to_the_unchunked_mux() {
     let aus = demux_mp4(&source).await.ports[0].clone();
     assert_eq!(aus.len(), 60, "2 s at 30 fps");
 
-    // 15-frame GOPs (500 ms) chunked at 100 ms. A 30 fps frame is 33.33 ms, so a
-    // chunk takes four of them to reach the target and each GOP splits 4/4/4/3.
+    // 15-frame GOPs (500 ms) chunked at 110 ms. A 30 fps frame is 33.33 ms, so a
+    // chunk takes four of them to pass the target and each GOP splits 4/4/4/3.
+    // (Not 100 ms: three frames reach exactly 100 ms, a boundary tie.)
     let chunked_mux = Mp4MuxN::new(1)
         .with_cmaf(true)
-        .with_chunk_duration_ms(100)
+        .with_chunk_duration_ms(110)
         .with_prft(true);
     let (chunked, frames) = mux_n_single(&aus, chunked_mux).await;
     let (whole, whole_frames) = mux_n_single(&aus, Mp4MuxN::new(1).with_cmaf(true)).await;

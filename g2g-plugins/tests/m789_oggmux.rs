@@ -84,6 +84,15 @@ fn have_ffmpeg() -> bool {
         && Command::new("ffprobe").arg("-version").output().is_ok()
 }
 
+/// ffmpeg's libvorbis encoder authors the Vorbis fixtures; not every ffmpeg
+/// build has it (Homebrew's dropped it), so those tests skip without it.
+fn have_libvorbis() -> bool {
+    Command::new("ffmpeg")
+        .args(["-hide_banner", "-h", "encoder=libvorbis"])
+        .output()
+        .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).starts_with("Encoder libvorbis"))
+}
+
 fn temp_path(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("g2g-m789-{}-{name}", std::process::id()))
 }
@@ -292,8 +301,8 @@ async fn opus_remux_is_packet_exact_and_ffmpeg_reads_it() {
 
 #[tokio::test]
 async fn vorbis_remux_is_packet_exact_and_ffmpeg_reads_it() {
-    if !have_ffmpeg() {
-        eprintln!("skipping: no ffmpeg");
+    if !have_ffmpeg() || !have_libvorbis() {
+        eprintln!("skipping: no ffmpeg with libvorbis");
         return;
     }
     assert_remux_matches("vorbis", "libvorbis", "vorbis", "vorbis", 44_100).await;

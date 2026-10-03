@@ -673,7 +673,11 @@ impl Mp4MuxN {
             _ => default_dur_ns,
         };
         self.prev_pts_ns[input] = Some(pts_ns);
-        let duration = ns_to_ts(dur_ns, timescale) as u32;
+        // The difference of the rounded end and start, not the rounded length:
+        // a 1024-sample AAC frame is 21333333.33 ns, and converting each length
+        // on its own loses a tick a frame that piles up as A/V drift.
+        let duration = (ns_to_ts(pts_ns.saturating_add(dur_ns), timescale)
+            - ns_to_ts(pts_ns, timescale)) as u32;
 
         // A text track has no per-sample timestamp on disk: a cue presents where
         // the durations before it end, so the run between two cues (and any before
@@ -1242,8 +1246,10 @@ impl MultiInputElement for Mp4MuxN {
 // module's users keep their import path.
 pub(crate) use crate::aacparse::{asc_from_adts, strip_adts};
 
+/// Nanoseconds to the nearest `timescale` tick. Round, not truncate: a PTS
+/// already truncated to whole nanoseconds sits just under its exact tick.
 fn ns_to_ts(ns: u64, timescale: u32) -> u64 {
-    (ns as u128 * timescale as u128 / 1_000_000_000) as u64
+    ((ns as u128 * timescale as u128 + 500_000_000) / 1_000_000_000) as u64
 }
 
 /// The metadata a `moov` carries: the file's own tags and one list per pad slot,
@@ -2299,10 +2305,10 @@ mod tests {
         assert_eq!(u32::from_be_bytes(stss[4..8].try_into().unwrap()), 2);
         assert_eq!(u32::from_be_bytes(stss[8..12].try_into().unwrap()), 1);
         assert_eq!(u32::from_be_bytes(stss[12..16].try_into().unwrap()), 6);
-        // The movie lasts six 33.3 ms frames: 2999 ticks each at 90 kHz, so
-        // 199 ms in the 1 kHz movie timescale.
+        // The movie lasts six 33.3 ms frames: 3000 ticks each at 90 kHz, so
+        // 200 ms in the 1 kHz movie timescale.
         let mvhd = box_payload(&file, b"mvhd").expect("mvhd");
-        assert_eq!(u32::from_be_bytes(mvhd[16..20].try_into().unwrap()), 199);
+        assert_eq!(u32::from_be_bytes(mvhd[16..20].try_into().unwrap()), 200);
 
         // Sample bytes really live where stco says they do: the first chunk
         // offset lands on the first sample's AVCC length prefix.

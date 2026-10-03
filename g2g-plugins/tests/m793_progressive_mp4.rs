@@ -486,9 +486,18 @@ async fn assert_av_layouts_agree(vcodec: &str, acodec: &str, probe_video: &str, 
         tap.ports[0].len(),
         "{vcodec}: every muxed picture comes back"
     );
+    // Over the declared media length only: ffmpeg (9.0) trims a progressive
+    // file's last frame to its stts duration but decodes a fragment's whole.
+    let declared: f64 = field(&audio, "duration").parse().expect("audio duration");
+    let media_bytes = (declared * 48_000.0).round() as usize * 2 * 2;
+    let (prog_audio, frag_audio) = (decode_audio(&prog_path), decode_audio(&frag_path));
+    assert!(
+        prog_audio.len() >= media_bytes && frag_audio.len() >= media_bytes,
+        "{acodec}: both layouts decode the declared {declared} s"
+    );
     assert_eq!(
-        decode_audio(&prog_path),
-        decode_audio(&frag_path),
+        prog_audio[..media_bytes],
+        frag_audio[..media_bytes],
         "{acodec}: the two layouts decode to the same samples"
     );
 
