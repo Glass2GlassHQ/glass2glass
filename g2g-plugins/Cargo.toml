@@ -1435,6 +1435,11 @@ required-features = ["vulkan-video"]
 name = "metal_video_on_screen"
 required-features = ["vtdecode", "metal-sink"]
 
+# Live camera / display capture presented zero-copy in a window (macOS).
+[[example]]
+name = "capture_on_screen"
+required-features = ["avfoundation", "screencapture", "metal-sink"]
+
 # M978: turnkey windowed runner for WgpuSink (videotestsrc -> synthetic detection
 # metadata -> Vello overlay -> on-screen sink). No media file or codec hardware.
 [[example]]
