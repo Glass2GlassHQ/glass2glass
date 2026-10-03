@@ -9,8 +9,8 @@ rationale for shipped architecture live in [README.md](README.md) and
 
 Highest leverage first:
 
-1. **Platforms.** macOS: camera / screen capture validation on a permitted
-   Mac.
+1. **Platforms.** Run the Windows and macOS device providers on a real host,
+   and persist conformance evidence for the macOS device paths.
 2. **Egress / transports.** Real-peer FlexFEC interop when a peer
    implementation is available (GStreamer here lacks `rtpflexfecenc`).
 3. **Depth.** Pure-Rust codec paths to cut the remaining ffmpeg FFI reliance.
