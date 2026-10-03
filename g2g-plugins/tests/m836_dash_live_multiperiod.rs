@@ -313,11 +313,11 @@ async fn dash_live_presentation_delay_property_overrides_the_manifest() {
 
 #[tokio::test]
 async fn dash_live_availability_time_offset_publishes_a_segment_before_it_completes() {
-    // 15.5s into a 2s-segment presentation: segment number 8 covers [14,16)s, so
+    // 15.1s into a 2s-segment presentation: segment number 8 covers [14,16)s, so
     // it is still being written, but a 1s availabilityTimeOffset publishes it
     // from 15s. It is the live edge, and a 2s presentation delay starts there.
     let (url, _) = serve_live(vec![
-        live_mpd(15.5, 6.0, Some(2.0), Some("1")),
+        live_mpd(15.1, 6.0, Some(2.0), Some("1")),
         ended_mpd(14.0),
     ]);
     let mut src = DashSrc::new(url).with_reload_interval_ms(20);
@@ -330,7 +330,7 @@ async fn dash_live_availability_time_offset_publishes_a_segment_before_it_comple
 
     // The same wall clock with no offset: only complete segments are available,
     // so the edge is the previous one.
-    let (url, _) = serve_live(vec![live_mpd(15.5, 6.0, Some(2.0), None), ended_mpd(14.0)]);
+    let (url, _) = serve_live(vec![live_mpd(15.1, 6.0, Some(2.0), None), ended_mpd(14.0)]);
     let mut src = DashSrc::new(url).with_reload_interval_ms(20);
     let sink = run_dash(&mut src).await;
     assert_eq!(
@@ -346,7 +346,7 @@ async fn dash_live_oversized_availability_time_offset_clamps_to_one_segment() {
     // media that does not exist: it clamps at the in-progress segment, number 8.
     for ato in ["999", "INF"] {
         let (url, requests) = serve_live(vec![
-            live_mpd(15.5, 6.0, Some(2.0), Some(ato)),
+            live_mpd(14.1, 6.0, Some(2.0), Some(ato)),
             ended_mpd(14.0),
         ]);
         let mut src = DashSrc::new(url).with_reload_interval_ms(20);
