@@ -557,11 +557,14 @@ impl AsyncElement for MetalVideoSink {
                     if !wait_to_present(paced).await {
                         return Ok(());
                     }
-                    match &frame.domain {
-                        MemoryDomain::System(slice) => self.present_system(slice.as_slice())?,
-                        MemoryDomain::CvPixelBuffer(buf) => self.present_cv(buf)?,
-                        _ => return Err(G2gError::UnsupportedDomain),
-                    }
+                    // Metal / QuartzCore autorelease the drawable, textures and
+                    // descriptors; a pipeline thread has no run loop draining a
+                    // pool, so drain one per frame or they pile up for good.
+                    objc2::rc::autoreleasepool(|_| match &frame.domain {
+                        MemoryDomain::System(slice) => self.present_system(slice.as_slice()),
+                        MemoryDomain::CvPixelBuffer(buf) => self.present_cv(buf),
+                        _ => Err(G2gError::UnsupportedDomain),
+                    })?;
                 }
                 PipelinePacket::CapsChanged(c) => {
                     // A geometry change rebuilds the layer + textures; anything

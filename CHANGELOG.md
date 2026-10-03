@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- `metalvideosink` no longer leaks the per-frame Metal objects on a pipeline thread, and `screencapturesrc` keeps running while the display is unchanged.
 - `avfvideosrc` delivers the VGA geometry it advertises on cameras that ignore the session preset, and each macOS platform feature builds on its own.
 - the `g2g-bridge` GStreamer element errors out when its sub-graph's caps do not negotiate, instead of hanging.
 - M1211: `wgpudownload` packs a padded NV12 or P010 `WgpuBuffer` tight, and `wgputodmabuf` exports on the producer's device in the buffer's plane layout.

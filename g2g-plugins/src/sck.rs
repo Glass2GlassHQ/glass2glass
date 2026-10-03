@@ -17,6 +17,7 @@ use core::future::Future;
 use core::pin::Pin;
 use core::ptr::NonNull;
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::Duration;
@@ -53,7 +54,8 @@ use alloc::boxed::Box;
 /// How long the run loop waits for the delegate before checking liveness, and
 /// how long the shareable-content lookup may take.
 const IO_TIMEOUT: Duration = Duration::from_secs(1);
-/// Consecutive empty waits before the source surfaces a dead capture.
+/// Consecutive empty waits, with no idle heartbeat either, before the source
+/// surfaces a dead capture.
 const MAX_IDLE_WAITS: u32 = 3;
 
 fn hw() -> G2gError {
@@ -68,6 +70,10 @@ unsafe impl Send for RetainedPtr {}
 
 struct OutputIvars {
     shared: Arc<Shared<CapturedVideo>>,
+    /// Set on every callback, image or not: ScreenCaptureKit keeps calling
+    /// back with imageless `SCFrameStatus.idle` buffers while the display is
+    /// unchanged, so this tells a static screen from a dead stream.
+    alive: Arc<AtomicBool>,
 }
 
 define_class!(
@@ -90,6 +96,7 @@ define_class!(
             if of_type != SCStreamOutputType::Screen {
                 return;
             }
+            self.ivars().alive.store(true, Ordering::Relaxed);
             let Some(captured) = captured_video_from_sample(sample_buffer) else {
                 return;
             };
@@ -101,8 +108,8 @@ define_class!(
 );
 
 impl StreamOutput {
-    fn new(shared: Arc<Shared<CapturedVideo>>) -> Retained<Self> {
-        let this = Self::alloc().set_ivars(OutputIvars { shared });
+    fn new(shared: Arc<Shared<CapturedVideo>>, alive: Arc<AtomicBool>) -> Retained<Self> {
+        let this = Self::alloc().set_ivars(OutputIvars { shared, alive });
         // SAFETY: plain NSObject init.
         unsafe { msg_send![super(this), init] }
     }
@@ -172,6 +179,7 @@ pub struct ScreenCaptureSrc {
     cv_output: bool,
     state: Option<StreamState>,
     shared: Arc<Shared<CapturedVideo>>,
+    alive: Arc<AtomicBool>,
     configured: bool,
 }
 
@@ -190,6 +198,7 @@ impl ScreenCaptureSrc {
             cv_output: false,
             state: None,
             shared: Arc::new(Shared::default()),
+            alive: Arc::new(AtomicBool::new(false)),
             configured: false,
         }
     }
@@ -241,7 +250,7 @@ impl ScreenCaptureSrc {
                 None,
             );
             let queue = DispatchQueue::new("g2g.screencapturesrc", None);
-            let output = StreamOutput::new(self.shared.clone());
+            let output = StreamOutput::new(self.shared.clone(), self.alive.clone());
             stream
                 .addStreamOutput_type_sampleHandlerQueue_error(
                     ProtocolObject::from_ref(&*output),
@@ -365,7 +374,13 @@ impl SourceLoop for ScreenCaptureSrc {
                             .map_err(|_| hw())?;
                         filled = guard;
                         if timeout.timed_out() && filled.is_empty() {
-                            idle += 1;
+                            // An unchanged display only sends idle callbacks:
+                            // the stream is live, keep waiting for content.
+                            if self.alive.swap(false, Ordering::Relaxed) {
+                                idle = 0;
+                            } else {
+                                idle += 1;
+                            }
                             break None;
                         }
                     }
