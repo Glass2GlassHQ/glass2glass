@@ -612,6 +612,15 @@ jobs:
         run: >
           cargo check -p g2g-plugins --locked --all-targets
           --features vtdecode,vtencode,metal-sink,coreaudio,avfoundation,screencapture,wgpu-sink
+      # Each feature alone: the combined build unifies their objc2 deps and
+      # cfg-gated helpers, hiding a feature that does not compile by itself.
+      - name: check g2g-plugins (each macos feature alone)
+        run: |
+          for f in vtdecode vtencode metal-sink coreaudio avfoundation screencapture; do
+            echo "::group::$f"
+            cargo check -p g2g-plugins --locked --all-targets --features "$f"
+            echo "::endgroup::"
+          done
       # M731+: run the VideoToolbox / Metal / Core Audio / AVFoundation /
       # ScreenCaptureKit elements for real (decode the reference fixtures,
       # encode round trip, CAMetalLayer present, AudioQueue render + capture;
