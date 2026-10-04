@@ -111,8 +111,44 @@ fn rgba_flat(w: usize, h: usize, pixel: [u8; 4]) -> Vec<u8> {
 /// `chroma`, so a filter that strays off the luma plane is caught.
 fn i420_flat(w: usize, h: usize, luma: u8, chroma: u8) -> Vec<u8> {
     let mut bytes = vec![luma; w * h];
-    bytes.resize(w * h + 2 * (w / 2) * (h / 2), chroma);
+    bytes.resize(i420_bytes(w, h), chroma);
     bytes
+}
+
+fn i420_bytes(w: usize, h: usize) -> usize {
+    RawVideoFormat::I420
+        .unpadded_frame_bytes(w as u32, h as u32)
+        .unwrap() as usize
+}
+
+// odd on both axes, so every chroma plane rounds up
+const ODD_SIZE: (usize, usize) = (37, 31);
+
+/// Every filter that takes I420 takes it at an odd size, chroma planes and all.
+#[test]
+fn the_i420_filters_take_an_odd_size_frame() {
+    const LUMA: u8 = 60;
+    const CHROMA: u8 = 90;
+    let (w, h) = ODD_SIZE;
+    let source = i420_flat(w, h, LUMA, CHROMA);
+    let caps = raw(RawVideoFormat::I420, w as u32, h as u32);
+    let outputs = [
+        run(
+            &mut VideoMedian::new().with_luma_only(false),
+            caps.clone(),
+            source.clone(),
+        ),
+        run(
+            &mut Smooth::new().with_luma_only(false),
+            caps.clone(),
+            source.clone(),
+        ),
+        run(&mut ZebraStripe::new(), caps.clone(), source.clone()),
+        run(&mut VideoDiff::new(), caps, source.clone()),
+    ];
+    for (index, out) in outputs.iter().enumerate() {
+        assert_eq!(out, &source, "filter {index} changed a flat frame");
+    }
 }
 
 fn i420_luma(bytes: &[u8], w: usize, h: usize) -> &[u8] {
@@ -592,7 +628,7 @@ fn i420_vertical_step(w: usize, h: usize, dark: u8, light: u8, chroma: u8) -> Ve
     let mut bytes: Vec<u8> = (0..w * h)
         .map(|i| if i % w < w / 2 { dark } else { light })
         .collect();
-    bytes.resize(w * h + 2 * (w / 2) * (h / 2), chroma);
+    bytes.resize(i420_bytes(w, h), chroma);
     bytes
 }
 
@@ -699,6 +735,70 @@ fn aspectratiocrop_trims_to_the_target_ratio_and_keeps_the_centre() {
             row_marker(row + dropped_per_edge),
             "output row {row} came from the wrong source row"
         );
+    }
+}
+
+/// An odd-size I420 frame crops by an even number of rows, and every plane keeps
+/// the rows that sat under the kept picture.
+#[test]
+fn aspectratiocrop_trims_an_odd_size_i420_frame() {
+    const ASPECT: (i32, i32) = (16, 9);
+    const U_MARKER: usize = 100;
+    const V_MARKER: usize = 200;
+    let (w, h) = ODD_SIZE;
+    let planes = |w: usize, h: usize| {
+        let (chroma_w, chroma_h) = (w.div_ceil(2), h.div_ceil(2));
+        [
+            (0, w, h),
+            (w * h, chroma_w, chroma_h),
+            (w * h + chroma_w * chroma_h, chroma_w, chroma_h),
+        ]
+    };
+    // each row of each plane carries its own index plus the plane's marker
+    let markers = [0, U_MARKER, V_MARKER];
+    let mut source = vec![0u8; i420_bytes(w, h)];
+    for ((offset, plane_w, plane_h), marker) in planes(w, h).into_iter().zip(markers) {
+        for row in 0..plane_h {
+            source[offset + row * plane_w..][..plane_w].fill((marker + row) as u8);
+        }
+    }
+
+    let mut element = AspectRatioCrop::new().with_aspect_ratio(ASPECT.0, ASPECT.1);
+    element
+        .configure_pipeline(&raw(RawVideoFormat::I420, w as u32, h as u32))
+        .unwrap();
+    let packets = push(&mut element, source);
+    let Caps::RawVideo {
+        width: Dim::Fixed(out_w),
+        height: Dim::Fixed(out_h),
+        ..
+    } = emitted_caps(&packets)
+    else {
+        panic!("raw caps out");
+    };
+    let (out_w, out_h) = (out_w as usize, out_h as usize);
+    assert_eq!(out_w, w, "a too-tall picture keeps its width");
+    let dropped_per_edge = (h - out_h) / 2;
+    assert!(dropped_per_edge > 0 && dropped_per_edge % 2 == 0);
+
+    let out = pixels(packets);
+    assert_eq!(out.len(), i420_bytes(out_w, out_h));
+    for (plane, ((offset, plane_w, plane_h), marker)) in
+        planes(out_w, out_h).into_iter().zip(markers).enumerate()
+    {
+        let shift = if plane == 0 {
+            dropped_per_edge
+        } else {
+            dropped_per_edge / 2
+        };
+        for row in 0..plane_h {
+            assert!(
+                out[offset + row * plane_w..][..plane_w]
+                    .iter()
+                    .all(|&b| b == (marker + row + shift) as u8),
+                "plane {plane} row {row} came from the wrong source row"
+            );
+        }
     }
 }
 

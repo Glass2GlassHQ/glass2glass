@@ -19,7 +19,7 @@ use g2g_core::{
     OutputSink, PadTemplate, PipelinePacket, PushOutcome, Rate, RawVideoFormat, Reconfigure,
 };
 
-use crate::pixel::{even_dims_required, frame_byte_size};
+use crate::pixel::frame_byte_size;
 
 /// The negotiated stream and the caps bookkeeping a transform needs between
 /// frames. Every [`PixelFilter`] owns one.
@@ -61,8 +61,7 @@ pub(crate) trait PixelFilter {
     fn reset(&mut self) {}
 }
 
-/// The input caps a filter accepts: one of its formats, fixed non-zero dims,
-/// even on each axis the format subsamples.
+/// The input caps a filter accepts: one of its formats at fixed non-zero dims.
 pub(crate) fn accept_input<F: PixelFilter>(
     caps: &Caps,
 ) -> Result<(RawVideoFormat, u32, u32, Rate), G2gError> {
@@ -77,10 +76,6 @@ pub(crate) fn accept_input<F: PixelFilter>(
         return Err(G2gError::CapsMismatch);
     };
     if !F::FORMATS.contains(format) || *w == 0 || *h == 0 {
-        return Err(G2gError::CapsMismatch);
-    }
-    let (even_w, even_h) = even_dims_required(*format);
-    if (even_w && !w.is_multiple_of(2)) || (even_h && !h.is_multiple_of(2)) {
         return Err(G2gError::CapsMismatch);
     }
     Ok((*format, *w, *h, framerate.clone()))

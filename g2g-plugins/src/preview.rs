@@ -13,6 +13,7 @@ use alloc::vec::Vec;
 
 use serde_json::{json, Value};
 
+use crate::pixel::frame_byte_size;
 use g2g_core::{AudioFormat, Caps, Dim, PipelinePacket, RawVideoFormat, VideoCodec};
 
 /// Longest thumbnail edge in pixels.
@@ -47,7 +48,7 @@ pub fn packet_preview(packet: &PipelinePacket, caps: &Caps) -> Option<Value> {
             height,
             ..
         } => match (dim(width), dim(height)) {
-            (Some(w), Some(h)) => raw_video_thumb(bytes, *format, w as usize, h as usize),
+            (Some(w), Some(h)) => raw_video_thumb(bytes, *format, w, h),
             _ => hexdump(bytes),
         },
         Caps::Audio {
@@ -67,19 +68,13 @@ pub fn packet_preview(packet: &PipelinePacket, caps: &Caps) -> Option<Value> {
 /// Thumbnail one raw-video frame. Packed RGBA/BGRA go straight to the downscaler;
 /// planar NV12/I420 are converted to RGBA first via the shared `VideoConvert`
 /// math. Unhandled formats or a short buffer fall back to a hexdump.
-fn raw_video_thumb(bytes: &[u8], format: RawVideoFormat, w: usize, h: usize) -> Value {
+fn raw_video_thumb(bytes: &[u8], format: RawVideoFormat, width: u32, height: u32) -> Value {
+    let (w, h) = (width as usize, height as usize);
     match format {
         RawVideoFormat::Rgba8 => video_thumb(bytes, w, h, false),
         RawVideoFormat::Bgra8 => video_thumb(bytes, w, h, true),
         RawVideoFormat::Nv12 | RawVideoFormat::I420 => {
-            // 4:2:0 needs even dims and a luma + half-size chroma plane.
-            let planar_len = w.saturating_mul(h).saturating_mul(3) / 2;
-            if w == 0
-                || h == 0
-                || !w.is_multiple_of(2)
-                || !h.is_multiple_of(2)
-                || bytes.len() < planar_len
-            {
+            if w == 0 || h == 0 || bytes.len() < frame_byte_size(format, width, height) {
                 return hexdump(bytes);
             }
             let rgba = crate::videoconvert::convert(
@@ -384,6 +379,23 @@ mod tests {
         assert_eq!(v["kind"], "video");
         assert_eq!(v["w"], w);
         assert_eq!(v["h"], h);
+    }
+
+    #[test]
+    fn odd_size_nv12_becomes_thumbnail() {
+        let (w, h) = crate::pixel::tests::GEOMETRIES[0];
+        let caps = Caps::RawVideo {
+            format: RawVideoFormat::Nv12,
+            width: Dim::Fixed(w),
+            height: Dim::Fixed(h),
+            framerate: Rate::Fixed(30 << 16),
+            interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        };
+        let buf = vec![128u8; frame_byte_size(RawVideoFormat::Nv12, w, h)];
+        let v = packet_preview(&frame(buf), &caps).unwrap();
+        assert_eq!(v["kind"], "video");
+        assert_eq!((v["w"].clone(), v["h"].clone()), (json!(w), json!(h)));
     }
 
     #[test]

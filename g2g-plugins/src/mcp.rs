@@ -2431,25 +2431,35 @@ mod tests {
         assert_eq!(matched[0]["alert"], "car");
     }
 
+    fn odd_size_frame(format: g2g_core::RawVideoFormat) -> CapturedFrame {
+        use g2g_core::{Caps, Dim};
+        let (width, height) = crate::pixel::tests::GEOMETRIES[0];
+        CapturedFrame {
+            caps: Caps::RawVideo {
+                format,
+                width: Dim::Fixed(width),
+                height: Dim::Fixed(height),
+                framerate: g2g_core::Rate::Any,
+                interlace: g2g_core::Interlace::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            },
+            pts_ns: None,
+            memory: "system".into(),
+            pixels: Some(alloc::vec![0; crate::pixel::frame_byte_size(format, width, height)]),
+        }
+    }
+
     #[test]
     fn a_snapshot_refuses_a_frame_it_cannot_convert() {
-        use g2g_core::{Caps, Dim, RawVideoFormat};
+        let captured = odd_size_frame(g2g_core::RawVideoFormat::P010);
+        assert!(snapshot_png(&captured, "sink").is_err());
+    }
+
+    #[test]
+    fn a_snapshot_converts_an_odd_size_nv12_frame() {
         let (width, height) = crate::pixel::tests::GEOMETRIES[0];
-        for format in [RawVideoFormat::Nv12, RawVideoFormat::P010] {
-            let captured = CapturedFrame {
-                caps: Caps::RawVideo {
-                    format,
-                    width: Dim::Fixed(width),
-                    height: Dim::Fixed(height),
-                    framerate: g2g_core::Rate::Any,
-                    interlace: g2g_core::Interlace::Any,
-                    colorimetry: g2g_core::Colorimetry::UNKNOWN,
-                },
-                pts_ns: None,
-                memory: "system".into(),
-                pixels: Some(alloc::vec![0; crate::pixel::frame_byte_size(format, width, height)]),
-            };
-            assert!(snapshot_png(&captured, "sink").is_err(), "{format:?}");
-        }
+        let image = snapshot_png(&odd_size_frame(g2g_core::RawVideoFormat::Nv12), "sink")
+            .expect("odd NV12 converts");
+        assert_eq!((image.width, image.height), (width, height));
     }
 }
