@@ -77,12 +77,12 @@ async fn audio_rate_pin_couples_through_passthrough() {
 }
 
 #[tokio::test]
-async fn odd_yuv420_geometry_pin_fails_loud() {
-    // 4:2:0 (NV12) requires even dims; an odd target behind the converter must
-    // fail negotiation, not fixate impossible caps.
+async fn odd_yuv420_geometry_pin_couples() {
+    // An odd 4:2:0 target behind the converter couples back to the scaler like
+    // an even one, its chroma rounded up.
     let line = "videotestsrc num-buffers=2 width=320 height=240 \
-                ! videoscale ! videoconvert ! video/x-raw,format=NV12,width=161,height=120 ! fakesink";
-    run_line_err(line).await;
+                ! videoscale ! videoconvert ! video/x-raw,format=NV12,width=161,height=121 ! fakesink";
+    assert_eq!(run_line(line).await, 2, "{line}");
 }
 
 #[tokio::test]

@@ -275,18 +275,6 @@ fn audio_rate_pin_solves_back_through_resample_and_convert() {
 
 #[test]
 fn an_impossible_target_declares_no_shape_and_fails_loud() {
-    // videoscale with an odd target for a 4:2:0 format derives nothing (the
-    // format is not accepted), so the solve fails rather than fixating caps the
-    // element cannot produce.
-    let scale = VideoScale::new(63, 32);
-    let t = transform_of(&scale);
-    assert!(t
-        .derive(&raw(RawVideoFormat::Nv12, 320, 240, FPS30))
-        .is_empty());
-    assert!(!t
-        .derive(&raw(RawVideoFormat::Rgba8, 320, 240, FPS30))
-        .is_empty());
-
     // videorate with a non-positive target declares no output shape at all.
     let rate = VideoRate::new(0.0);
     let t = transform_of(&rate);
