@@ -132,20 +132,33 @@ fn luma_diff(a: &[u8], b: &[u8], w: usize, h: usize) -> (u32, u32) {
 
 #[tokio::test]
 async fn yadif_matches_ffmpeg_bit_exactly() {
+    yadif_matches_ffmpeg("testsrc2", W, H).await;
+}
+
+// testsrc2 rounds its size down to even, testsrc does not
+#[tokio::test]
+async fn yadif_matches_ffmpeg_at_an_odd_size() {
+    yadif_matches_ffmpeg("testsrc", W - 1, H - 1).await;
+}
+
+async fn yadif_matches_ffmpeg(source: &str, w: usize, h: usize) {
     if !have_ffmpeg() {
         eprintln!("ffmpeg not present: skipping");
         return;
     }
-    let il = temp_path("interlaced.yuv");
-    let reference = temp_path("ffmpeg-yadif.yuv");
-    // testsrc2 at 50 fps interleaved pairwise into 25 interlaced frames: every
+    let frame_bytes = RawVideoFormat::I420
+        .unpadded_frame_bytes(w as u32, h as u32)
+        .unwrap() as usize;
+    let il = temp_path(&format!("interlaced-{w}x{h}.yuv"));
+    let reference = temp_path(&format!("ffmpeg-yadif-{w}x{h}.yuv"));
+    // the source at 50 fps interleaved pairwise into 25 interlaced frames: every
     // frame has real motion between its two fields, which is what yadif's
     // temporal branch keys on.
     ffmpeg(&[
         "-f",
         "lavfi",
         "-i",
-        &format!("testsrc2=size={W}x{H}:rate=50:duration=1"),
+        &format!("{source}=size={w}x{h}:rate=50:duration=1"),
         "-vf",
         "tinterlace=mode=interleave_top,format=yuv420p",
         "-f",
@@ -158,7 +171,7 @@ async fn yadif_matches_ffmpeg_bit_exactly() {
         "-pix_fmt",
         "yuv420p",
         "-s",
-        &format!("{W}x{H}"),
+        &format!("{w}x{h}"),
         "-r",
         "25",
         "-i",
@@ -172,8 +185,8 @@ async fn yadif_matches_ffmpeg_bit_exactly() {
         reference.to_str().unwrap(),
     ]);
 
-    let input = split_frames(&std::fs::read(&il).unwrap(), I420_BYTES);
-    let want = split_frames(&std::fs::read(&reference).unwrap(), I420_BYTES);
+    let input = split_frames(&std::fs::read(&il).unwrap(), frame_bytes);
+    let want = split_frames(&std::fs::read(&reference).unwrap(), frame_bytes);
     assert!(input.len() >= 10, "fixture is {} frames", input.len());
     assert_eq!(
         want.len(),
@@ -181,7 +194,7 @@ async fn yadif_matches_ffmpeg_bit_exactly() {
         "ffmpeg yadif mode 0 is single rate: N in, N out"
     );
 
-    let got = run(&input, RawVideoFormat::I420, W, H, DeinterlaceMethod::Yadif).await;
+    let got = run(&input, RawVideoFormat::I420, w, h, DeinterlaceMethod::Yadif).await;
     assert_eq!(
         got.frames.len(),
         input.len(),
@@ -189,7 +202,7 @@ async fn yadif_matches_ffmpeg_bit_exactly() {
     );
 
     for (i, (g, r)) in got.frames.iter().zip(&want).enumerate() {
-        let (interior, border) = luma_diff(g, r, W, H);
+        let (interior, border) = luma_diff(g, r, w, h);
         let differing = g.iter().zip(r.iter()).filter(|(a, b)| a != b).count();
         assert_eq!(
             (interior, border, differing),
@@ -365,14 +378,14 @@ async fn output_keeps_its_own_frames_timing() {
 }
 
 #[test]
-fn odd_geometry_on_a_subsampled_format_is_refused() {
-    let mut el = Deinterlace::new();
-    assert!(el
-        .configure_pipeline(&caps(RawVideoFormat::I420, 15, 8))
-        .is_err());
-    assert!(el
-        .configure_pipeline(&caps(RawVideoFormat::I420, 16, 8))
-        .is_ok());
+fn odd_geometry_on_a_subsampled_format_is_accepted() {
+    for format in [RawVideoFormat::I420, RawVideoFormat::Nv12] {
+        let mut el = Deinterlace::new();
+        assert!(
+            el.configure_pipeline(&caps(format, 15, 7)).is_ok(),
+            "{format:?}"
+        );
+    }
 }
 
 #[test]

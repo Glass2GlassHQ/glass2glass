@@ -55,7 +55,7 @@ use g2g_core::{
     PropValue, PropertySpec, Rate, RawVideoFormat,
 };
 
-use crate::pixel::{even_dims_required, frame_byte_size, planar_planes};
+use crate::pixel::{frame_byte_size, planar_planes};
 
 const FORMATS: [RawVideoFormat; 13] = [
     RawVideoFormat::Rgba8,
@@ -504,12 +504,6 @@ impl Deinterlace {
             return None;
         };
         if !FORMATS.contains(format) || *w == 0 || *h == 0 {
-            return None;
-        }
-        // A subsampled format at an odd dimension has no whole chroma grid, so
-        // the plane layout below would not describe the buffer it is given.
-        let (even_w, even_h) = even_dims_required(*format);
-        if (even_w && *w % 2 != 0) || (even_h && *h % 2 != 0) {
             return None;
         }
         Some((*format, *w, *h, framerate.clone()))
