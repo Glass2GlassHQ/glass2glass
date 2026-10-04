@@ -590,8 +590,8 @@ impl VulkanStreamDecoder {
 fn nv12_to_i420(nv12: &Nv12Frame) -> Vec<u8> {
     let w = nv12.width as usize;
     let h = nv12.height as usize;
-    let cw = w / 2;
-    let ch = h / 2;
+    let cw = w.div_ceil(2);
+    let ch = h.div_ceil(2);
     let mut out = Vec::with_capacity(w * h + 2 * cw * ch);
     out.extend_from_slice(&nv12.luma);
     // NV12 chroma is Cb,Cr interleaved (U then V per pair) -> split into planes.

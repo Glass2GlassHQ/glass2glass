@@ -141,8 +141,9 @@ pub enum VulkanVideoError {
     /// The access unit carried no decodable slice (no IDR slice NAL).
     NoDecodableSlice,
     /// The stream uses a coding tool this decoder does not implement (e.g.
-    /// H.264 `pic_order_cnt_type == 1`, interlaced field pictures, or an odd
-    /// picture size). Rejected up front rather than mis-decoded.
+    /// H.264 `pic_order_cnt_type == 1`, interlaced field pictures), or an odd
+    /// picture size was asked of the two-plane texture output. Rejected up
+    /// front rather than mis-decoded.
     UnsupportedStream,
     /// No distinct compute queue was available for the GPU-resident NV12 -> RGBA
     /// pass; the caller should use the CPU-convert path instead.
@@ -3659,7 +3660,9 @@ fn fg_apply_uv_band_420(
     // luma co-located to chroma (bx,by) for 4:2:0: 2x2 average.
     let noise_uv = |sv: u8, g: i32, lx: usize, ly: usize| -> u8 {
         let l0 = luma[(band_cy0 * 2 + ly * 2) * lstride + lx * 2] as i32;
-        let l1 = luma[(band_cy0 * 2 + ly * 2) * lstride + lx * 2 + 1] as i32;
+        // dav1d repeats the last luma column of an odd-width frame
+        let right = (lx * 2 + 1).min(lstride - 1);
+        let l1 = luma[(band_cy0 * 2 + ly * 2) * lstride + right] as i32;
         let avg = (l0 + l1 + 1) >> 1;
         let val = if fg.chroma_scaling_from_luma {
             avg
@@ -3740,8 +3743,8 @@ fn apply_film_grain_nv12(frame: &mut Nv12Frame, fg: &Av1FilmGrain, is_id: bool) 
     }
     let w = frame.width as usize;
     let h = frame.height as usize;
-    let cw = w / 2;
-    let ch = h / 2;
+    let cw = w.div_ceil(2);
+    let ch = h.div_ceil(2);
 
     // Grain templates.
     let mut grain_y: alloc::boxed::Box<FgGrainLut> =
@@ -5397,6 +5400,95 @@ fn format_bytes_per_sample(fmt: vk::Format) -> u64 {
     }
 }
 
+// wgpu and Vulkan both refuse a two-plane 4:2:0 texture with an odd side
+fn require_even_two_plane_texture(width: u32, height: u32) -> Result<(), VulkanVideoError> {
+    if width.is_multiple_of(2) && height.is_multiple_of(2) {
+        Ok(())
+    } else {
+        Err(VulkanVideoError::UnsupportedStream)
+    }
+}
+
+// a transfer-only queue needs each copy's bufferOffset on a 4-byte boundary, which also covers the P010 CbCr texel
+const READBACK_PLANE_ALIGNMENT: u64 = 4;
+
+// where the two planes of one `width` x `height` picture land in a host-visible readback buffer
+#[derive(Debug, Clone, Copy)]
+struct ReadbackLayout {
+    width: u32,
+    height: u32,
+    luma_len: u64,
+    chroma_offset: u64,
+    chroma_len: u64,
+}
+
+impl ReadbackLayout {
+    fn new(bit_depth: u8, width: u32, height: u32) -> Result<Self, VulkanVideoError> {
+        let format = two_plane_raw_format(bit_depth);
+        let luma_len = format
+            .plane_bytes(0, width, height)
+            .ok_or(VulkanVideoError::UnsupportedStream)?;
+        let chroma_len = format
+            .plane_bytes(1, width, height)
+            .ok_or(VulkanVideoError::UnsupportedStream)?;
+        Ok(Self {
+            width,
+            height,
+            luma_len,
+            chroma_offset: round_up(luma_len, READBACK_PLANE_ALIGNMENT),
+            chroma_len,
+        })
+    }
+
+    fn len(&self) -> u64 {
+        self.chroma_offset + self.chroma_len
+    }
+
+    // the chroma copy covers the odd last column and row, which the coded picture holds
+    fn copy_regions(
+        &self,
+        base_offset: u64,
+        layers: impl Fn(vk::ImageAspectFlags) -> vk::ImageSubresourceLayers,
+    ) -> [vk::BufferImageCopy; 2] {
+        let plane = |aspect: vk::ImageAspectFlags, offset: u64, width: u32, height: u32| {
+            vk::BufferImageCopy::default()
+                .buffer_offset(base_offset + offset)
+                .buffer_row_length(0)
+                .buffer_image_height(0)
+                .image_subresource(layers(aspect))
+                .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
+                .image_extent(vk::Extent3D {
+                    width,
+                    height,
+                    depth: 1,
+                })
+        };
+        [
+            plane(vk::ImageAspectFlags::PLANE_0, 0, self.width, self.height),
+            plane(
+                vk::ImageAspectFlags::PLANE_1,
+                self.chroma_offset,
+                self.width.div_ceil(2),
+                self.height.div_ceil(2),
+            ),
+        ]
+    }
+
+    // `mapped` must point at `self.len()` bytes a finished `copy_regions` copy wrote
+    unsafe fn read_planes(&self, mapped: *const u8) -> (alloc::vec::Vec<u8>, alloc::vec::Vec<u8>) {
+        // SAFETY: both ranges lie inside the `self.len()` bytes the contract guarantees.
+        unsafe {
+            let luma = core::slice::from_raw_parts(mapped, self.luma_len as usize).to_vec();
+            let chroma = core::slice::from_raw_parts(
+                mapped.add(self.chroma_offset as usize),
+                self.chroma_len as usize,
+            )
+            .to_vec();
+            (luma, chroma)
+        }
+    }
+}
+
 /// The RGBA output formats the [`YcbcrConverter`] targets at a bit depth: 8-bit
 /// -> `R8G8B8A8_UNORM` / `Rgba8Unorm`; 10-bit -> `R16G16B16A16_SFLOAT` /
 /// `Rgba16Float`. The float target preserves the full 10-bit precision and is
@@ -6552,6 +6644,7 @@ impl YcbcrConverter {
         {
             return Err(VulkanVideoError::UnsupportedStream);
         }
+        require_even_two_plane_texture(w, h)?;
         let dev = &self.raw_device;
         // SAFETY: contract above; the copy image is created here and moved into
         // wgpu on success (its drop callback frees it), freed here on failure.
@@ -7394,8 +7487,6 @@ impl Drop for Av1DecodeSession {
     }
 }
 
-type CodedAndOutputExtents = ((u32, u32), (u32, u32));
-
 impl VulkanVideoDevice {
     pub fn caps(&self) -> &VulkanVideoDecodeCaps {
         &self.caps
@@ -7542,16 +7633,8 @@ impl VulkanVideoDevice {
     /// `max_h`, and the picture size the caller gets back. They differ when the
     /// stream is smaller than the device's minimum coded extent: a picture
     /// resource must stay inside the device's coded-extent range, so the picture
-    /// is decoded at the minimum and cropped on the way out. An odd size is
-    /// refused: the readback and the NV12 textures carry `w/2 x h/2` chroma.
-    fn session_extents(
-        &self,
-        max_w: u32,
-        max_h: u32,
-    ) -> Result<CodedAndOutputExtents, VulkanVideoError> {
-        if !max_w.is_multiple_of(2) || !max_h.is_multiple_of(2) {
-            return Err(VulkanVideoError::UnsupportedStream);
-        }
+    /// is decoded at the minimum and cropped on the way out.
+    fn session_extents(&self, max_w: u32, max_h: u32) -> ((u32, u32), (u32, u32)) {
         let output = (
             max_w.min(self.caps.max_coded_extent.0),
             max_h.min(self.caps.max_coded_extent.1),
@@ -7560,7 +7643,7 @@ impl VulkanVideoDevice {
             output.0.max(self.caps.min_coded_extent.0),
             output.1.max(self.caps.min_coded_extent.1),
         );
-        Ok((coded, output))
+        (coded, output)
     }
 
     /// The extent every image a decode session writes must be created at for a
@@ -7616,7 +7699,7 @@ impl VulkanVideoDevice {
         // H.264 decode is 8-bit here (High profile, NV12); High 10 is out of scope.
         let (picture_format, reference_format) = self.session_picture_formats(&prof.profile, 8)?;
 
-        let ((w, h), (out_w, out_h)) = self.session_extents(max_w, max_h)?;
+        let ((w, h), (out_w, out_h)) = self.session_extents(max_w, max_h);
         let coded_extent = self.session_max_coded_extent();
 
         let session_ci = vk::VideoSessionCreateInfoKHR::default()
@@ -7733,7 +7816,7 @@ impl VulkanVideoDevice {
         let (picture_format, reference_format) =
             self.session_picture_formats(&prof.profile, bit_depth)?;
 
-        let ((w, h), (out_w, out_h)) = self.session_extents(max_w, max_h)?;
+        let ((w, h), (out_w, out_h)) = self.session_extents(max_w, max_h);
         let coded_extent = self.session_max_coded_extent();
 
         let session_ci = vk::VideoSessionCreateInfoKHR::default()
@@ -7852,7 +7935,7 @@ impl VulkanVideoDevice {
         let (picture_format, reference_format) =
             self.session_picture_formats(&prof.profile, bit_depth)?;
 
-        let ((w, h), (out_w, out_h)) = self.session_extents(max_w, max_h)?;
+        let ((w, h), (out_w, out_h)) = self.session_extents(max_w, max_h);
         let coded_extent = self.session_max_coded_extent();
 
         let session_ci = vk::VideoSessionCreateInfoKHR::default()
@@ -8102,12 +8185,11 @@ impl VulkanVideoDevice {
         h: u32,
     ) -> Result<Nv12Frame, VulkanVideoError> {
         let dev = &self.raw_device;
-        let bytes_per_sample = format_bytes_per_sample(planar_420_format(8));
-        let luma_len = (w as u64) * (h as u64) * bytes_per_sample;
-        let chroma_len = luma_len / 2;
-        let nv12_len = luma_len + chroma_len;
+        // The one-shot IDR path is the 8-bit H.264 format.
+        let bit_depth = 8;
+        let layout = ReadbackLayout::new(bit_depth, w, h)?;
         let rb_ci = vk::BufferCreateInfo::default()
-            .size(nv12_len)
+            .size(layout.len())
             .usage(vk::BufferUsageFlags::TRANSFER_DST)
             .sharing_mode(vk::SharingMode::EXCLUSIVE);
         // SAFETY: valid create info.
@@ -8172,28 +8254,12 @@ impl VulkanVideoDevice {
                 let dep = vk::DependencyInfo::default()
                     .image_memory_barriers(core::slice::from_ref(&to_src));
                 (self.sync2_fns.fp().cmd_pipeline_barrier2_khr)(cb, &dep);
-                let plane = |aspect: vk::ImageAspectFlags, offset: u64, pw: u32, ph: u32| {
-                    vk::BufferImageCopy::default()
-                        .buffer_offset(offset)
-                        .buffer_row_length(0)
-                        .buffer_image_height(0)
-                        .image_subresource(vk::ImageSubresourceLayers {
-                            aspect_mask: aspect,
-                            mip_level: 0,
-                            base_array_layer: 0,
-                            layer_count: 1,
-                        })
-                        .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
-                        .image_extent(vk::Extent3D {
-                            width: pw,
-                            height: ph,
-                            depth: 1,
-                        })
-                };
-                let regions = [
-                    plane(vk::ImageAspectFlags::PLANE_0, 0, w, h),
-                    plane(vk::ImageAspectFlags::PLANE_1, luma_len, w / 2, h / 2),
-                ];
+                let regions = layout.copy_regions(0, |aspect| vk::ImageSubresourceLayers {
+                    aspect_mask: aspect,
+                    mip_level: 0,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                });
                 dev.cmd_copy_image_to_buffer(
                     cb,
                     picture,
@@ -8215,23 +8281,16 @@ impl VulkanVideoDevice {
 
         let planes = match submitted {
             Ok(()) => {
-                // SAFETY: readback_mem is host-visible/coherent and holds `nv12_len`
+                // SAFETY: readback_mem is host-visible/coherent and holds `layout.len()`
                 // bytes written by the completed copy.
                 unsafe {
                     let ptr = dev
-                        .map_memory(readback_mem, 0, nv12_len, vk::MemoryMapFlags::empty())
+                        .map_memory(readback_mem, 0, layout.len(), vk::MemoryMapFlags::empty())
                         .map_err(VulkanVideoError::QueryFailed)?
                         as *const u8;
-                    let mut luma = alloc::vec![0u8; luma_len as usize];
-                    let mut chroma = alloc::vec![0u8; chroma_len as usize];
-                    core::ptr::copy_nonoverlapping(ptr, luma.as_mut_ptr(), luma_len as usize);
-                    core::ptr::copy_nonoverlapping(
-                        ptr.add(luma_len as usize),
-                        chroma.as_mut_ptr(),
-                        chroma_len as usize,
-                    );
+                    let planes = layout.read_planes(ptr);
                     dev.unmap_memory(readback_mem);
-                    Ok((luma, chroma))
+                    Ok(planes)
                 }
             }
             Err(e) => Err(VulkanVideoError::QueryFailed(e)),
@@ -8246,13 +8305,12 @@ impl VulkanVideoDevice {
         }
 
         let (luma, chroma) = planes?;
-        // The one-shot IDR path is the 8-bit H.264 format.
         Ok(Nv12Frame {
             width: w,
             height: h,
             luma,
             chroma,
-            bit_depth: 8,
+            bit_depth,
         })
     }
 
@@ -8919,6 +8977,7 @@ impl VulkanVideoDevice {
         // `R16G16B16A16_SFLOAT`); the system readback scales its buffer lengths.
         let bps = format_bytes_per_sample(picture_format);
         let bit_depth = if bps >= 2 { 10 } else { 8 };
+        let readback_layout = ReadbackLayout::new(bit_depth, w, h)?;
 
         // DPB image pool, plus (distinct model) one decode output image paired with
         // each slot. On any failure, free what was already created.
@@ -8969,11 +9028,8 @@ impl VulkanVideoDevice {
         // decoded frames back to back (the system path pipelines that many decodes
         // in flight). Each slot's region starts at a `readback_stride` multiple so
         // its copy `bufferOffset` stays aligned. Lengths are in BYTES: a 10-bit
-        // (G10X6) format stores 2 bytes per sample, so they scale by `bps`.
-        let luma_len = (w as u64) * (h as u64) * bps;
-        let chroma_len = luma_len / 2;
-        let nv12_len = luma_len + chroma_len;
-        let readback_stride = round_up(nv12_len, 256);
+        // (G10X6) format stores 2 bytes per sample, so they scale with `bit_depth`.
+        let readback_stride = round_up(readback_layout.len(), 256);
         let rb_ci = vk::BufferCreateInfo::default()
             .size(readback_stride * DECODE_RING_DEPTH as u64)
             .usage(vk::BufferUsageFlags::TRANSFER_DST)
@@ -9241,9 +9297,7 @@ impl VulkanVideoDevice {
             pool,
             readback,
             readback_mem,
-            luma_len,
-            chroma_len,
-            nv12_len,
+            readback_layout,
             readback_stride,
             ring_pool,
             copy_pool,
@@ -9784,10 +9838,8 @@ struct DpbCore {
     pool: vk::CommandPool,
     readback: vk::Buffer,
     readback_mem: vk::DeviceMemory,
-    luma_len: u64,
-    chroma_len: u64,
-    nv12_len: u64,
-    /// Per-slot byte stride within `readback` (`nv12_len` rounded up so each
+    readback_layout: ReadbackLayout,
+    /// Per-slot byte stride within `readback` (`readback_layout.len()` rounded up so each
     /// slot's `bufferOffset` satisfies the copy alignment). The readback buffer
     /// holds `DECODE_RING_DEPTH` of these back to back.
     readback_stride: u64,
@@ -10005,7 +10057,6 @@ impl DpbCore {
     /// picture image must be valid and outlive the submission.
     unsafe fn record_picture_copy(&self, cb: vk::CommandBuffer, copy: PictureCopy) {
         let dev = &self.raw_device;
-        let (w, h) = self.output_extent;
         let (src_stage, src_access) = copy.after;
         let picture = copy.picture;
         // SAFETY: contract above; the barriers move the picture image
@@ -10026,30 +10077,11 @@ impl DpbCore {
                 vk::DependencyInfo::default().image_memory_barriers(core::slice::from_ref(&to_src));
             (self.sync2_fns.fp().cmd_pipeline_barrier2_khr)(cb, &dep);
 
-            let plane = |aspect: vk::ImageAspectFlags, offset: u64, pw: u32, ph: u32| {
-                vk::BufferImageCopy::default()
-                    .buffer_offset(offset)
-                    .buffer_row_length(0)
-                    .buffer_image_height(0)
-                    .image_subresource(picture.layers(aspect))
-                    .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
-                    .image_extent(vk::Extent3D {
-                        width: pw,
-                        height: ph,
-                        depth: 1,
-                    })
-            };
-            // The chroma plane is interleaved CbCr at half resolution, packed right
-            // after luma in this region of the readback buffer.
-            let regions = [
-                plane(vk::ImageAspectFlags::PLANE_0, copy.offset, w, h),
-                plane(
-                    vk::ImageAspectFlags::PLANE_1,
-                    copy.offset + self.luma_len,
-                    w / 2,
-                    h / 2,
-                ),
-            ];
+            // The chroma plane is interleaved CbCr at half resolution, packed after
+            // luma in this region of the readback buffer.
+            let regions = self
+                .readback_layout
+                .copy_regions(copy.offset, |aspect| picture.layers(aspect));
             dev.cmd_copy_image_to_buffer(
                 cb,
                 picture.image,
@@ -10487,25 +10519,19 @@ impl DpbCore {
         h: u32,
     ) -> Result<Nv12Frame, VulkanVideoError> {
         let dev = &self.raw_device;
-        // SAFETY: readback_mem is host-visible/coherent and holds `nv12_len` bytes
-        // at `offset` written by the completed copy; mapped and unmapped here.
+        // SAFETY: readback_mem is host-visible/coherent and holds
+        // `readback_layout.len()` bytes at `offset` written by the completed copy;
+        // mapped and unmapped here.
         unsafe {
             let ptr = dev
                 .map_memory(
                     self.readback_mem,
                     offset,
-                    self.nv12_len,
+                    self.readback_layout.len(),
                     vk::MemoryMapFlags::empty(),
                 )
                 .map_err(VulkanVideoError::QueryFailed)? as *const u8;
-            let mut luma = alloc::vec![0u8; self.luma_len as usize];
-            let mut chroma = alloc::vec![0u8; self.chroma_len as usize];
-            core::ptr::copy_nonoverlapping(ptr, luma.as_mut_ptr(), self.luma_len as usize);
-            core::ptr::copy_nonoverlapping(
-                ptr.add(self.luma_len as usize),
-                chroma.as_mut_ptr(),
-                self.chroma_len as usize,
-            );
+            let (luma, chroma) = self.readback_layout.read_planes(ptr);
             dev.unmap_memory(self.readback_mem);
             Ok(Nv12Frame {
                 width: w,
@@ -10728,7 +10754,7 @@ impl DpbCore {
         let device = &gpu.converter.wgpu_device;
         let queue = &gpu.wgpu_queue;
         Ok(match gpu.output {
-            TextureOutput::Nv12 => nv12_to_two_plane_texture(device, queue, &frame),
+            TextureOutput::Nv12 => nv12_to_two_plane_texture(device, queue, &frame)?,
             TextureOutput::Rgba => nv12_to_rgba_texture(device, queue, &frame, color),
         })
     }
@@ -13385,8 +13411,8 @@ pub struct Nv12Frame {
     /// bytes for 8-bit, `2 * width * height` for 10-bit (little-endian 16-bit
     /// samples, value in the top 10 bits, the G10X6 layout).
     pub luma: alloc::vec::Vec<u8>,
-    /// Interleaved Cb,Cr plane, row-major, `(width/2) * (height/2)` pairs. Half the
-    /// luma byte length (same bytes-per-sample).
+    /// Interleaved Cb,Cr plane, row-major, `ceil(width/2) * ceil(height/2)` pairs
+    /// (same bytes-per-sample as luma).
     pub chroma: alloc::vec::Vec<u8>,
     /// Sample bit depth: 8 (one byte per sample) or 10 (two bytes per sample).
     pub bit_depth: u8,
@@ -13518,7 +13544,7 @@ fn nv12_to_rgba(frame: &Nv12Frame, color: VideoColorSpace) -> alloc::vec::Vec<u8
     // AV1 film-grain), so this only guards misuse.
     debug_assert_eq!(frame.bit_depth, 8, "nv12_to_rgba is 8-bit only");
     let (w, h) = (frame.width as usize, frame.height as usize);
-    let cw = w / 2;
+    let cw = w.div_ceil(2);
     let (kr, kb) = color.luma_weights();
     let kg = 1.0 - kr - kb;
     // Studio range rescales Y from 16..235 and C from 16..240 to full 0..255;
@@ -13562,8 +13588,9 @@ fn nv12_to_two_plane_texture(
     wgpu_device: &wgpu::Device,
     wgpu_queue: &wgpu::Queue,
     frame: &Nv12Frame,
-) -> wgpu::Texture {
+) -> Result<wgpu::Texture, VulkanVideoError> {
     debug_assert_eq!(frame.bit_depth, 8, "the grain upload is 8-bit NV12 only");
+    require_even_two_plane_texture(frame.width, frame.height)?;
     let size = wgpu::Extent3d {
         width: frame.width,
         height: frame.height,
@@ -13620,7 +13647,7 @@ fn nv12_to_two_plane_texture(
         );
     }
     wgpu_queue.submit([]);
-    texture
+    Ok(texture)
 }
 
 /// Upload an [`Nv12Frame`] to a fresh `Rgba8Unorm` `wgpu::Texture` via the CPU
