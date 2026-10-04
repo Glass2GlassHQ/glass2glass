@@ -22,25 +22,22 @@ use g2g_core::RawVideoFormat;
 /// `format`, in plane order. The shift derives a plane's row stride from plane
 /// 0's, the only stride these producers report: a horizontally-subsampled
 /// planar format's chroma rows sit at half the luma stride, NV12's interleaved
-/// chroma plane at the full one.
+/// chroma plane at the full one. `None` on overflow.
 pub(crate) fn plane_shapes_with_stride_shift(
     format: RawVideoFormat,
     w: usize,
     h: usize,
-) -> Vec<(usize, usize, u32)> {
-    let bps = format.bytes_per_sample();
-    if let Some((hs, vs)) = format.chroma_shift() {
-        let (cw, ch) = (w.div_ceil(1 << hs), h.div_ceil(1 << vs));
-        return alloc::vec![(w * bps, h, 0), (cw * bps, ch, hs), (cw * bps, ch, hs)];
-    }
-    match format {
-        // Semi-planar: luma, then one interleaved Cb,Cr plane at half height and
-        // the same byte width (half the samples, two of them per position).
-        RawVideoFormat::Nv12 => alloc::vec![(w, h, 0), (w, h.div_ceil(2), 0)],
-        RawVideoFormat::P010 => alloc::vec![(w * 2, h, 0), (w * 2, h.div_ceil(2), 0)],
-        // Everything else is one packed plane.
-        _ => alloc::vec![(crate::pixel::row_bytes(format, w), h, 0)],
-    }
+) -> Option<Vec<(usize, usize, u32)>> {
+    let chroma_stride_shift = format
+        .chroma_shift()
+        .map_or(0, |(horizontal, _)| horizontal);
+    (0..format.plane_count())
+        .map(|plane| {
+            let (_, row_bytes, rows) = crate::pixel::tight_plane(format, plane, w, h)?;
+            let shift = if plane == 0 { 0 } else { chroma_stride_shift };
+            Some((row_bytes, rows, shift))
+        })
+        .collect()
 }
 
 /// One plane of a padded frame: where its rows start, how far apart they are,
@@ -77,7 +74,7 @@ pub(crate) fn padded_planes(
 ) -> Option<Vec<PaddedPlane>> {
     let mut offset = plane0_offset;
     let mut planes = Vec::new();
-    for (row_bytes, rows, shift) in plane_shapes_with_stride_shift(format, w, h) {
+    for (row_bytes, rows, shift) in plane_shapes_with_stride_shift(format, w, h)? {
         let stride = match first_stride {
             0 => row_bytes,
             s => s >> shift,
@@ -256,6 +253,69 @@ mod tests {
             padded_frame_bytes(RawVideoFormat::Nv12, 4, 4, 0, 8),
             Some(44)
         );
+    }
+
+    #[test]
+    fn shapes_are_the_core_planes() {
+        use crate::pixel::tests::{EVERY_FORMAT, GEOMETRIES};
+        for format in EVERY_FORMAT {
+            for (w, h) in GEOMETRIES {
+                let shapes = plane_shapes_with_stride_shift(format, w as usize, h as usize)
+                    .expect("small frame");
+                let core: Vec<(usize, usize)> = (0..format.plane_count())
+                    .map(|plane| {
+                        (
+                            format.plane_stride(plane, w).unwrap() as usize,
+                            format.plane_rows(plane, h).unwrap() as usize,
+                        )
+                    })
+                    .collect();
+                let rows: Vec<(usize, usize)> = shapes
+                    .iter()
+                    .map(|&(row_bytes, rows, _)| (row_bytes, rows))
+                    .collect();
+                assert_eq!(rows, core, "{format:?} {w}x{h}");
+                let tight = padded_frame_bytes(format, w as usize, h as usize, 0, 0);
+                assert_eq!(
+                    tight,
+                    Some(format.unpadded_frame_bytes(w, h).unwrap() as usize),
+                    "{format:?} {w}x{h}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_odd_width_nv12_stride_has_to_hold_the_wider_chroma_row() {
+        let (w, h) = crate::pixel::tests::GEOMETRIES[0];
+        let (w, h) = (w as usize, h as usize);
+        let format = RawVideoFormat::Nv12;
+        let luma_row = format.plane_stride(0, w as u32).unwrap() as usize;
+        let chroma_row = format.plane_stride(1, w as u32).unwrap() as usize;
+        assert!(chroma_row > luma_row);
+        assert_eq!(padded_planes(format, w, h, 0, luma_row), None);
+        let planes = padded_planes(format, w, h, 0, chroma_row).expect("holds both rows");
+        assert_eq!(planes[1].row_bytes, chroma_row);
+        assert_eq!(planes[1].stride, chroma_row);
+    }
+
+    #[test]
+    fn packing_an_odd_width_nv12_frame_keeps_the_last_chroma_pair() {
+        let (w, h) = crate::pixel::tests::GEOMETRIES[0];
+        let (w, h) = (w as usize, h as usize);
+        let format = RawVideoFormat::Nv12;
+        let chroma_row = format.plane_stride(1, w as u32).unwrap() as usize;
+        let stride = chroma_row + 2;
+        let rows = h + h.div_ceil(2);
+        let src: Vec<u8> = (0..stride * rows).map(|i| i as u8).collect();
+        let mut dst = Vec::new();
+        pack_tight(&src, format, w, h, stride, &mut dst).expect("the buffer fits");
+        assert_eq!(
+            dst.len(),
+            format.unpadded_frame_bytes(w as u32, h as u32).unwrap() as usize
+        );
+        let last_chroma_row = &src[(rows - 1) * stride..][..chroma_row];
+        assert_eq!(&dst[dst.len() - chroma_row..], last_chroma_row);
     }
 
     #[test]

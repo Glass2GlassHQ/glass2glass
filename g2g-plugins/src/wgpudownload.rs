@@ -127,7 +127,7 @@ fn pack_planes(
         width,
         height,
     } = raw_video;
-    let shapes = crate::paddedrows::plane_shapes_with_stride_shift(format, width, height);
+    let shapes = crate::paddedrows::plane_shapes_with_stride_shift(format, width, height)?;
     if shapes.len() != layout.count() {
         return None;
     }

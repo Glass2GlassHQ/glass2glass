@@ -397,6 +397,7 @@ impl PlaneLayout {
     /// single mapped block).
     fn planes(&self) -> Vec<(usize, usize, u32)> {
         crate::paddedrows::plane_shapes_with_stride_shift(self.format, self.width, self.height)
+            .expect("new caps the geometry at MAX_DIM")
     }
 
     /// Bytes of a tightly packed frame in this layout.

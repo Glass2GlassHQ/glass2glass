@@ -16,7 +16,6 @@ use g2g_plugins::wgpudownload::WgpuDownload;
 // 37 RGBA pixels are 148 bytes, short of the 256-byte row a texture copy pads to.
 const WIDTH: u32 = 37;
 const HEIGHT: u32 = 5;
-const NV12_HEIGHT: u32 = 4;
 const RGBA_BYTES_PER_PIXEL: usize = 4;
 const OPAQUE: u8 = 255;
 
@@ -49,11 +48,11 @@ fn opaque_pattern() -> Vec<u8> {
         .collect()
 }
 
-fn video_caps(format: RawVideoFormat, height: u32) -> Caps {
+fn video_caps(format: RawVideoFormat) -> Caps {
     Caps::RawVideo {
         format,
         width: Dim::Fixed(WIDTH),
-        height: Dim::Fixed(height),
+        height: Dim::Fixed(HEIGHT),
         framerate: Rate::Fixed(30 << 16),
         interlace: g2g_core::Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
@@ -61,7 +60,7 @@ fn video_caps(format: RawVideoFormat, height: u32) -> Caps {
 }
 
 fn rgba_caps() -> Caps {
-    video_caps(RawVideoFormat::Rgba8, HEIGHT)
+    video_caps(RawVideoFormat::Rgba8)
 }
 
 async fn through_gpu_compositor(name: &str, tail: &str, pixels: &[u8]) -> Frame {
@@ -221,7 +220,7 @@ async fn plain_buffer_reads_back() {
 async fn odd_width_tight_nv12_buffer_reads_back() {
     let _gpu = GPU_LOCK.lock().await;
     let len = RawVideoFormat::Nv12
-        .frame_bytes(WIDTH.into(), NV12_HEIGHT.into())
+        .unpadded_frame_bytes(WIDTH, HEIGHT)
         .expect("nv12 frame size") as usize;
     assert_ne!(len as u64 % wgpu::COPY_BUFFER_ALIGNMENT, 0);
     let pixels: Vec<u8> = (0..len)
@@ -232,7 +231,7 @@ async fn odd_width_tight_nv12_buffer_reads_back() {
         return;
     };
     let frame = download_as(
-        &video_caps(RawVideoFormat::Nv12, NV12_HEIGHT),
+        &video_caps(RawVideoFormat::Nv12),
         MemoryDomain::WgpuBuffer(buffer),
     )
     .await

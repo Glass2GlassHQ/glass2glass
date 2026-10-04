@@ -421,7 +421,9 @@ impl AsyncElement for DmaBufToWgpu {
 /// Where each plane of a `format` frame sits in a dma-buf whose plane 0 starts at
 /// `offset` with rows `stride` bytes apart (0 means tight), and how many bytes the
 /// planes span with every row at full stride. `None` when the stride cannot hold
-/// a row or the arithmetic overflows: both numbers come from the producer.
+/// a row or the arithmetic overflows: both numbers come from the producer. A
+/// tight stride is plane 0's row, so an odd-width NV12 frame, whose chroma row
+/// is one byte wider, has no tight single-stride layout.
 pub(crate) fn single_stride_layout(
     format: RawVideoFormat,
     width: u32,
@@ -429,6 +431,10 @@ pub(crate) fn single_stride_layout(
     offset: u32,
     stride: u32,
 ) -> Option<(PlaneLayout, u64)> {
+    let stride = match stride {
+        0 => format.plane_stride(0, width)?,
+        stride => stride,
+    };
     let planes = crate::paddedrows::padded_planes(
         format,
         width as usize,
@@ -819,5 +825,33 @@ mod tests {
         let (_, size) = single_stride_layout(RawVideoFormat::Yuyv, 640, 480, 0, 1280)
             .expect("the stride holds a row");
         assert_eq!(size, 1280 * 480);
+    }
+
+    #[test]
+    fn an_odd_width_nv12_frame_needs_a_stride_its_chroma_row_fits() {
+        let (width, height) = crate::pixel::tests::GEOMETRIES[0];
+        let format = RawVideoFormat::Nv12;
+        let chroma_row = format.plane_stride(1, width).unwrap();
+        assert_eq!(single_stride_layout(format, width, height, 0, 0), None);
+        assert_eq!(single_stride_layout(format, width, height, 0, width), None);
+        let stride = format.row_stride(width).unwrap();
+        assert_eq!(stride, chroma_row);
+        let (layout, size) =
+            single_stride_layout(format, width, height, 0, stride).expect("both rows fit");
+        assert_eq!(layout.plane(1).unwrap().stride, chroma_row as usize);
+        assert_eq!(Some(size), format.frame_bytes(stride.into(), height.into()));
+    }
+
+    #[test]
+    fn a_tight_even_width_frame_lays_its_planes_at_plane_0s_stride() {
+        let (width, height) = crate::pixel::tests::GEOMETRIES[3];
+        for format in DMABUF_FRAME_FORMATS {
+            let stride = format.plane_stride(0, width).unwrap();
+            assert_eq!(
+                single_stride_layout(format, width, height, 0, 0),
+                single_stride_layout(format, width, height, 0, stride),
+                "{format:?}"
+            );
+        }
     }
 }

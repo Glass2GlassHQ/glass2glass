@@ -76,27 +76,46 @@ pub(crate) fn planar_planes(
     w: usize,
     h: usize,
 ) -> [(usize, usize, usize); 3] {
-    let (hs, vs) = format.chroma_shift().expect("fully-planar format");
-    let bps = format.bytes_per_sample();
-    let (cw, ch) = (w.div_ceil(1 << hs), h.div_ceil(1 << vs));
-    let luma = w * h * bps;
-    let chroma = cw * ch * bps;
-    [(0, w, h), (luma, cw, ch), (luma + chroma, cw, ch)]
+    assert!(format.is_planar_yuv(), "fully-planar format");
+    let bytes_per_sample = format.bytes_per_sample();
+    [0, 1, 2].map(|plane| {
+        let (offset, row_bytes, rows) = tight_plane(format, plane, w, h).expect("frame size fits");
+        (offset, row_bytes / bytes_per_sample, rows)
+    })
+}
+
+/// `(byte offset, row bytes, rows)` of `plane` in a tightly packed `w x h`
+/// frame of `format`, as [`RawVideoFormat::plane_offset`],
+/// [`RawVideoFormat::plane_stride`] and [`RawVideoFormat::plane_rows`] define
+/// it. `None` for a plane the format does not have, or on overflow.
+pub(crate) fn tight_plane(
+    format: RawVideoFormat,
+    plane: usize,
+    w: usize,
+    h: usize,
+) -> Option<(usize, usize, usize)> {
+    let (w, h) = (u32::try_from(w).ok()?, u32::try_from(h).ok()?);
+    let offset = usize::try_from(format.plane_offset(plane, w, h)?).ok()?;
+    let row_bytes = usize::try_from(format.plane_stride(plane, w)?).ok()?;
+    let rows = usize::try_from(format.plane_rows(plane, h)?).ok()?;
+    Some((offset, row_bytes, rows))
 }
 
 /// Per-plane `(row bytes, rows)` of one `w x h` frame in `format`, in plane
 /// order: the shape a [`PlaneLayout`](g2g_core::meta::PlaneLayout) puts offsets
 /// and strides on. A tightly-packed frame is exactly these rows back to back;
-/// a padded one differs only in where each row starts.
+/// a padded one differs only in where each row starts. `None` on overflow.
 #[cfg(feature = "metadata")]
 pub(crate) fn plane_shapes(
     format: RawVideoFormat,
     w: usize,
     h: usize,
-) -> alloc::vec::Vec<(usize, usize)> {
-    crate::paddedrows::plane_shapes_with_stride_shift(format, w, h)
-        .into_iter()
-        .map(|(row_bytes, rows, _)| (row_bytes, rows))
+) -> Option<alloc::vec::Vec<(usize, usize)>> {
+    (0..format.plane_count())
+        .map(|plane| {
+            let (_, row_bytes, rows) = tight_plane(format, plane, w, h)?;
+            Some((row_bytes, rows))
+        })
         .collect()
 }
 
@@ -111,39 +130,110 @@ pub(crate) fn row_bytes(format: RawVideoFormat, w: usize) -> usize {
     }
 }
 
-/// Tightly-packed byte size of one `w x h` frame in `format` (no row padding).
+/// Tightly-packed byte size of one `w x h` frame in `format` (no row padding),
+/// [`RawVideoFormat::unpadded_frame_bytes`] as a `usize`. Saturates at
+/// `usize::MAX` on overflow, so a length check against it fails.
 pub(crate) fn frame_byte_size(format: RawVideoFormat, w: u32, h: u32) -> usize {
-    // Fully-planar YUV (I420/I422/I444 at 8/10/12-bit): Y plus two chroma planes,
-    // each chroma plane shrunk per the format's subsampling, all at this depth's
-    // sample size. Derives from the format's own layout so a new variant needs no
-    // edit here.
-    if let Some((hs, vs)) = format.chroma_shift() {
-        let (w, h) = (w as usize, h as usize);
-        let (cw, ch) = (w.div_ceil(1 << hs), h.div_ceil(1 << vs));
-        return (w * h + 2 * cw * ch) * format.bytes_per_sample();
+    format
+        .unpadded_frame_bytes(w, h)
+        .and_then(|bytes| usize::try_from(bytes).ok())
+        .unwrap_or(usize::MAX)
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+
+    pub(crate) const EVERY_FORMAT: [RawVideoFormat; 15] = [
+        RawVideoFormat::Nv12,
+        RawVideoFormat::I420,
+        RawVideoFormat::Rgba8,
+        RawVideoFormat::Bgra8,
+        RawVideoFormat::Rgb8,
+        RawVideoFormat::Yuyv,
+        RawVideoFormat::I420p10,
+        RawVideoFormat::I420p12,
+        RawVideoFormat::I422,
+        RawVideoFormat::I422p10,
+        RawVideoFormat::I422p12,
+        RawVideoFormat::I444,
+        RawVideoFormat::I444p10,
+        RawVideoFormat::I444p12,
+        RawVideoFormat::P010,
+    ];
+
+    // odd and even on each axis, so a subsampled chroma plane has to round up
+    pub(crate) const GEOMETRIES: [(u32, u32); 5] = [(37, 5), (37, 4), (38, 5), (38, 4), (1, 1)];
+
+    #[test]
+    fn frame_size_is_the_core_definition() {
+        for format in EVERY_FORMAT {
+            for (w, h) in GEOMETRIES {
+                let core = format.unpadded_frame_bytes(w, h).unwrap() as usize;
+                assert_eq!(frame_byte_size(format, w, h), core, "{format:?} {w}x{h}");
+            }
+        }
     }
-    let (w, h) = (w as usize, h as usize);
-    match format {
-        RawVideoFormat::Rgba8 | RawVideoFormat::Bgra8 => w * h * 4,
-        // Packed RGB: three bytes per pixel, no alpha.
-        RawVideoFormat::Rgb8 => w * h * 3,
-        RawVideoFormat::Nv12 => w * h * 3 / 2,
-        // Semi-planar 10-bit: NV12's sample counts at 2 bytes each.
-        RawVideoFormat::P010 => w * h * 3,
-        // Packed 4:2:2: two bytes per pixel (Y0 U Y1 V over each pixel pair).
-        RawVideoFormat::Yuyv => w * h * 2,
-        // The fully-planar formats are handled above via `chroma_shift`.
-        RawVideoFormat::I420
-        | RawVideoFormat::I420p10
-        | RawVideoFormat::I420p12
-        | RawVideoFormat::I422
-        | RawVideoFormat::I422p10
-        | RawVideoFormat::I422p12
-        | RawVideoFormat::I444
-        | RawVideoFormat::I444p10
-        | RawVideoFormat::I444p12 => unreachable!("planar YUV handled by chroma_shift"),
-        // A packed format not modeled here (or one added since): fail loud
-        // rather than mis-size a buffer.
-        _ => unreachable!("unmodeled packed RawVideoFormat: {format:?}"),
+
+    #[test]
+    fn planes_are_the_core_definition() {
+        for format in EVERY_FORMAT {
+            for (w, h) in GEOMETRIES {
+                let (wu, hu) = (w as usize, h as usize);
+                let core_plane = |plane: usize| {
+                    (
+                        format.plane_offset(plane, w, h).unwrap() as usize,
+                        format.plane_stride(plane, w).unwrap() as usize,
+                        format.plane_rows(plane, h).unwrap() as usize,
+                    )
+                };
+                if format.is_planar_yuv() {
+                    let bytes_per_sample = format.bytes_per_sample();
+                    for (plane, (offset, samples, rows)) in
+                        planar_planes(format, wu, hu).into_iter().enumerate()
+                    {
+                        assert_eq!(
+                            (offset, samples * bytes_per_sample, rows),
+                            core_plane(plane),
+                            "{format:?} {w}x{h} plane {plane}"
+                        );
+                    }
+                }
+                #[cfg(feature = "metadata")]
+                assert_eq!(
+                    plane_shapes(format, wu, hu).unwrap(),
+                    (0..format.plane_count())
+                        .map(|plane| {
+                            let (_, row_bytes, rows) = core_plane(plane);
+                            (row_bytes, rows)
+                        })
+                        .collect::<alloc::vec::Vec<_>>(),
+                    "{format:?} {w}x{h}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_odd_width_semi_planar_chroma_row_holds_a_whole_last_pair() {
+        let (w, h) = (GEOMETRIES[0].0 as usize, GEOMETRIES[0].1 as usize);
+        for format in [RawVideoFormat::Nv12, RawVideoFormat::P010] {
+            let (_, luma_row, _) = tight_plane(format, 0, w, h).unwrap();
+            let (_, chroma_row, chroma_rows) = tight_plane(format, 1, w, h).unwrap();
+            assert_eq!(
+                chroma_row,
+                luma_row + format.bytes_per_sample(),
+                "{format:?}"
+            );
+            assert_eq!(chroma_rows, h.div_ceil(2), "{format:?}");
+        }
+    }
+
+    #[test]
+    fn an_overflowing_frame_size_saturates() {
+        assert_eq!(
+            frame_byte_size(RawVideoFormat::Rgba8, u32::MAX, u32::MAX),
+            usize::MAX
+        );
     }
 }

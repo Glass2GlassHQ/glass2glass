@@ -388,7 +388,7 @@ impl AsyncElement for VideoConvert {
                     };
                     #[cfg(feature = "metadata")]
                     let packed: Option<Box<[u8]>> = match layout {
-                        Some(l) if !reads_in_place(format, wu, hu, &l) => Some(
+                        Some(l) if !reads_in_place(format, wu, &l) => Some(
                             pack_planes(src, format, wu, hu, &l).ok_or(G2gError::CapsMismatch)?,
                         ),
                         _ => None,
@@ -712,14 +712,9 @@ fn convert_strided(
 /// format that has one plane, starting at the front of the buffer. Anything else
 /// (a padded planar frame) is packed out by [`pack_planes`] first.
 #[cfg(feature = "metadata")]
-fn reads_in_place(
-    format: RawVideoFormat,
-    w: usize,
-    h: usize,
-    layout: &g2g_core::meta::PlaneLayout,
-) -> bool {
+fn reads_in_place(format: RawVideoFormat, w: usize, layout: &g2g_core::meta::PlaneLayout) -> bool {
     layout.count() == 1
-        && plane_shapes(format, w, h).len() == 1
+        && format.plane_count() == 1
         && layout
             .plane(0)
             .is_some_and(|p| p.offset == 0 && p.stride >= row_bytes(format, w))
@@ -737,7 +732,7 @@ fn pack_planes(
     h: usize,
     layout: &g2g_core::meta::PlaneLayout,
 ) -> Option<Box<[u8]>> {
-    let shapes = plane_shapes(format, w, h);
+    let shapes = plane_shapes(format, w, h)?;
     if layout.count() != shapes.len() {
         return None;
     }

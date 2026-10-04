@@ -1935,16 +1935,19 @@ impl RawVideoFormat {
         self.chroma_shift().is_some()
     }
 
-    /// Row stride in bytes of the luma / packed plane at `width`: 4 bytes per
-    /// pixel for packed RGBA / BGRA, 3 for packed RGB, 2 for packed YUYV, 1 for
-    /// 8-bit NV12 / I420 luma. `None` for a format with no single-stride byte
-    /// layout.
+    /// Narrowest row stride in bytes at `width` that every plane of a
+    /// [`Self::frame_bytes`] layout fits: 4 bytes per pixel for packed RGBA /
+    /// BGRA, 3 for packed RGB, 2 for packed YUYV, and for 8-bit NV12 / I420 the
+    /// width rounded up to even, so NV12's chroma row and I420's half-stride
+    /// chroma row hold an odd width's last chroma sample. `None` for a format
+    /// with no single-stride byte layout.
     pub fn row_stride(self, width: u32) -> Option<u32> {
         match self {
-            RawVideoFormat::Rgba8 | RawVideoFormat::Bgra8 => width.checked_mul(4),
-            RawVideoFormat::Rgb8 => width.checked_mul(3),
-            RawVideoFormat::Yuyv => width.checked_mul(2),
-            RawVideoFormat::Nv12 | RawVideoFormat::I420 => Some(width),
+            RawVideoFormat::Rgba8
+            | RawVideoFormat::Bgra8
+            | RawVideoFormat::Rgb8
+            | RawVideoFormat::Yuyv => self.plane_stride(0, width),
+            RawVideoFormat::Nv12 | RawVideoFormat::I420 => width.div_ceil(2).checked_mul(2),
             _ => None,
         }
     }
@@ -2859,6 +2862,18 @@ mod tests {
         assert_eq!(Nv12.frame_bytes(704, 480), Some(704 * 480 * 3 / 2));
         // Odd height still rounds the chroma rows up.
         assert_eq!(Nv12.frame_bytes(4, 3), Some(4 * 3 + 4 * 2));
+        // An odd width's stride is wide enough for the chroma row it rounds up to.
+        for format in [Nv12, I420] {
+            let stride = format.row_stride(37).expect("single-stride format");
+            assert!(stride >= format.plane_stride(0, 37).unwrap(), "{format:?}");
+            let chroma_shift = format
+                .chroma_shift()
+                .map_or(0, |(horizontal, _)| horizontal);
+            assert!(
+                stride >> chroma_shift >= format.plane_stride(1, 37).unwrap(),
+                "{format:?}"
+            );
+        }
         // A bogus stride/height cannot overflow into a small allocation.
         assert_eq!(Nv12.frame_bytes(u64::MAX, 4), None);
         // Formats with no single-stride layout report nothing rather than a guess.
