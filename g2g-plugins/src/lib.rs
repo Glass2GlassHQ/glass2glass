@@ -126,6 +126,7 @@ pub mod h265parse;
 pub mod identity;
 pub mod imagefreeze;
 pub mod inputselector;
+pub mod inter;
 pub mod interleave;
 pub mod level;
 pub mod mux;

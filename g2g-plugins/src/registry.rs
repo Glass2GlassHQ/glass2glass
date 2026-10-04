@@ -634,6 +634,15 @@ pub fn default_registry() -> Registry {
         crate::appsrc::registered_output_caps(),
         || Box::new(crate::appsrc::AppSrc::new()),
     ));
+    // In-process link from another graph's `intersink` (M1214). The declared
+    // caps are a placeholder, the real ones are the producer's.
+    reg.register_source(SourceFactory::new(
+        "intersrc",
+        Caps::ByteStream {
+            encoding: g2g_core::ByteStreamEncoding::Raw,
+        },
+        || Box::new(crate::inter::InterSrc::new()),
+    ));
 
     // Video transforms.
     reg.register_launch(LaunchFactory::of::<VideoConvert>("videoconvert", || {
@@ -1563,6 +1572,11 @@ pub fn default_registry() -> Registry {
     reg.register_launch(LaunchFactory::of::<crate::appsink::AppSink>(
         "appsink",
         || Box::new(crate::appsink::AppSink::new()),
+    ));
+    // Publishes its stream to the `intersrc`s of other graphs (M1214).
+    reg.register_launch(LaunchFactory::of::<crate::inter::InterSink>(
+        "intersink",
+        || Box::new(crate::inter::InterSink::new()),
     ));
     reg.register_launch(LaunchFactory::of::<FileSink>("filesink", || {
         Box::new(FileSink::new(""))

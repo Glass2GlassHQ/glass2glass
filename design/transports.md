@@ -2,8 +2,8 @@
 
 Network and cross-process carriers: the native WebRTC stack, the
 distributed-graph elements that cut a graph edge across a process or machine
-boundary, MoQ Transport, SMPTE ST 2110 media transport, and zero-copy local IPC
-for GPU memory.
+boundary, MoQ Transport, SMPTE ST 2110 media transport, in-process links
+between graphs, and zero-copy local IPC for GPU memory.
 Part of the design in [README.md](README.md).
 
 ## WebRTC
@@ -691,6 +691,26 @@ most 14 days, and a certificate that signs itself cannot be the leaf
 catalog and init tracks each hold one object published before any subscriber
 exists, so they must be subscribed with an absolute start at group 0. A
 latest-object filter delivers nothing.
+
+## In-process graph links
+
+`intersink` and `intersrc` (the `inter` module, `no_std + alloc`) connect
+independent graphs in one process by `producer-name`. A process-global table
+maps each name to its producer's caps and a list of consumer queues. One
+`intersink` claims a name at `configure_pipeline`, and a second claim fails until
+the first sends `Eos` or is dropped. Releasing the name drops every consumer
+queue, so each `intersrc` drains what it holds, emits `Eos` and returns.
+
+An `intersrc` subscribes during negotiation. Its first queued packet is always a
+`CapsChanged` with the producer's caps, sent at subscription or when a producer
+claims the name, so a consumer that starts first waits in `intercept_caps`
+instead of failing. Each consumer gets its own bounded queue (`max-buffers`), and
+the producer never waits on one: a full queue evicts its oldest `DataFrame` and
+keeps control packets. Fan-out duplicates frames with `Frame::share`, outside the
+table lock. A consumer that joins compressed video after frames have flowed
+drops frames until the first keyframe. Both elements carry System memory only,
+because a sink is not told the memory domain its input negotiated and a source
+has to declare its domains at negotiation.
 
 ## Local zero-copy IPC
 

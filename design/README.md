@@ -77,7 +77,7 @@ document.
 | [live.md](live.md) | capture, device discovery, RTP / RTMP / RTSP / SRT in both directions, fallback switching. |
 | [containers.md](containers.md) | containers and byte streams, mux and demux, HLS and DASH, still images. |
 | [text.md](text.md) | subtitles, closed captions, bitmap subtitles, teletext, the overlay elements. |
-| [transports.md](transports.md) | WebRTC, distributed graphs, MoQ, ST 2110, local zero-copy IPC. |
+| [transports.md](transports.md) | WebRTC, distributed graphs, MoQ, ST 2110, in-process graph links, local zero-copy IPC. |
 | [launch.md](launch.md) | properties, introspection, the `gst-launch` DSL, plugins, hosted Python and Rhai. |
 | [ml.md](ml.md) | GPU tensor preprocess, inference backends, batching, detection metadata. |
 | [tooling.md](tooling.md) | DOT dumps, the negotiation explainer, `xtask`, telemetry, conformance. |

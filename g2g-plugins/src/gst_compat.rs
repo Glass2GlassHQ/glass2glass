@@ -86,6 +86,12 @@ static GST_MAP: &[(&str, GstEquivalent)] = &[
     // to Available before this table; no row is needed (and an Unsupported one
     // would contradict reality).
     ("rtph264depay", GstEquivalent::Unsupported("RTP depayloading is built into `udpsrc` / `rtspsrc`")),
+    ("intervideosink", GstEquivalent::Unsupported(INTER_HINT)),
+    ("intervideosrc", GstEquivalent::Unsupported(INTER_HINT)),
+    ("interaudiosink", GstEquivalent::Unsupported(INTER_HINT)),
+    ("interaudiosrc", GstEquivalent::Unsupported(INTER_HINT)),
+    ("intersubsink", GstEquivalent::Unsupported(INTER_HINT)),
+    ("intersubsrc", GstEquivalent::Unsupported(INTER_HINT)),
     // The auto-capture aliases only speak when a capture element is compiled in,
     // and they never fall back to a test source.
     ("autovideosrc", GstEquivalent::Unsupported(
@@ -285,6 +291,11 @@ const WEBRTC_SECURITY_HINT: &str =
 const SDP_HINT: &str =
     "`udpsrc sdp=<document text or .sdp path>` reads the description and takes its codec, \
      geometry, frame rate and receive port from it";
+
+/// The answer for the per-media C `inter*` elements.
+const INTER_HINT: &str = "`intersink producer-name=<name>` and `intersrc producer-name=<name>` \
+                          link graphs in one process for any media, and send nothing while the \
+                          producer is idle";
 
 /// The answer for gst's `bin` / `pipeline` grouping keywords.
 const BIN_HINT: &str = "g2g flattens bins, and the parser does not accept the `bin.( ... )` \
@@ -1013,6 +1024,17 @@ mod tests {
         let reg = default_registry();
         assert_eq!(gst_equivalent(&reg, "appsrc"), GstEquivalent::Available);
         assert_eq!(gst_equivalent(&reg, "appsink"), GstEquivalent::Available);
+    }
+
+    #[test]
+    fn inter_elements_are_available_and_the_c_family_points_at_them() {
+        let reg = default_registry();
+        assert_eq!(gst_equivalent(&reg, "intersink"), GstEquivalent::Available);
+        assert_eq!(gst_equivalent(&reg, "intersrc"), GstEquivalent::Available);
+        assert_eq!(
+            gst_equivalent(&reg, "intervideosrc"),
+            GstEquivalent::Unsupported(INTER_HINT)
+        );
     }
 
     #[test]

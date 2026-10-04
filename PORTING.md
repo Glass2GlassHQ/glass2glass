@@ -213,7 +213,10 @@ Common mappings: `jpegenc`/`jpegdec` â†’ `mjpegenc`/`mjpegdec`; `souphttpsrc` â†
 exist as named launch elements (`appsrc channel=<name>` / `appsink
 channel=<name>`, the application registers the matching feed/sink before launch,
 and `output-domains=dmabuf` / `input-domains=dmabuf` declare dma-buf frames),
-as programmatic graph nodes, or via the Python host (`pysrc`/`pyelement`). The
+as programmatic graph nodes, or via the Python host (`pysrc`/`pyelement`).
+`intersink producer-name=<name>` / `intersrc producer-name=<name>` link two
+graphs in one process like gst-plugins-rs's `intersink`/`intersrc`, and replace
+the C `intervideosink`/`interaudiosink`/`intersubsink` families. The
 table lives in [g2g-plugins/src/gst_compat.rs](g2g-plugins/src/gst_compat.rs)
 and is easy to extend.
 

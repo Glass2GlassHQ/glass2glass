@@ -161,7 +161,7 @@ impl<T> Sender<T> {
     /// oldest data frame and make room without disturbing queued control
     /// packets. No waker is signalled: a receiver only parks when the queue is
     /// empty, and eviction only runs on a full queue.
-    pub(crate) fn evict_front_matching(&self, pred: impl Fn(&T) -> bool) -> Option<T> {
+    pub fn evict_front_matching(&self, pred: impl Fn(&T) -> bool) -> Option<T> {
         let mut g = self.inner.lock();
         let idx = g.queue.iter().position(pred)?;
         g.queue.remove(idx)
