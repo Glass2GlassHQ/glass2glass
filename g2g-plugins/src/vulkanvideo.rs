@@ -5412,12 +5412,17 @@ fn require_even_two_plane_texture(width: u32, height: u32) -> Result<(), VulkanV
 // H.264 and H.265 count a 4:2:0 crop in chroma samples, two luma samples each
 const CHROMA_420_CROP_UNIT: u32 = 2;
 
-// the offset and extent left of `picture` once `[left, right, top, bottom]` crop units of `unit` samples are cut off
-fn crop_window(
+struct CropRectangle {
+    offset: (u32, u32),
+    extent: (u32, u32),
+}
+
+// what is left of `picture` once `[left, right, top, bottom]` crop units of `unit` samples are cut off
+fn crop_rectangle(
     picture: (u32, u32),
     unit: (u32, u32),
     [left, right, top, bottom]: [u32; 4],
-) -> Result<((u32, u32), (u32, u32)), VulkanVideoError> {
+) -> Result<CropRectangle, VulkanVideoError> {
     let axis = |size: u32, unit: u32, start: u32, end: u32| {
         let offset = start.checked_mul(unit)?;
         let kept = size
@@ -5429,7 +5434,10 @@ fn crop_window(
         axis(picture.0, unit.0, left, right).ok_or(VulkanVideoError::UnsupportedStream)?;
     let (y, height) =
         axis(picture.1, unit.1, top, bottom).ok_or(VulkanVideoError::UnsupportedStream)?;
-    Ok(((x, y), (width, height)))
+    Ok(CropRectangle {
+        offset: (x, y),
+        extent: (width, height),
+    })
 }
 
 // the luma and chroma plane offsets of a 4:2:0 picture that starts at `offset`
@@ -7779,7 +7787,10 @@ impl VulkanVideoDevice {
         let ((w, h), picture) = self.session_extents(max_w, max_h);
         // a field-coded stream counts crop rows in pairs of field rows
         let fields_per_frame = 2u32.saturating_sub(u32::from(ps.sps.frame_mbs_only_flag));
-        let (output_offset, (out_w, out_h)) = crop_window(
+        let CropRectangle {
+            offset: output_offset,
+            extent: (out_w, out_h),
+        } = crop_rectangle(
             picture,
             (
                 CHROMA_420_CROP_UNIT,
@@ -7911,7 +7922,10 @@ impl VulkanVideoDevice {
             self.session_picture_formats(&prof.profile, bit_depth)?;
 
         let ((w, h), picture) = self.session_extents(max_w, max_h);
-        let (output_offset, (out_w, out_h)) = crop_window(
+        let CropRectangle {
+            offset: output_offset,
+            extent: (out_w, out_h),
+        } = crop_rectangle(
             picture,
             (CHROMA_420_CROP_UNIT, CHROMA_420_CROP_UNIT),
             [
@@ -8710,21 +8724,11 @@ impl VulkanVideoDevice {
         // GPU-resident NV12 -> RGBA via a ycbcr-conversion compute pass. On
         // success the RGBA image + memory are moved into the wgpu texture's drop
         // callback; every other object is destroyed before returning.
-        let (out_w, out_h) = session.output_extent;
         // SAFETY: all handles are created from this device and destroyed exactly
         // once (here or in the wgpu drop callback); the compute submission is
         // waited on before teardown.
-        let result = unsafe {
-            self.ycbcr_to_wgpu(
-                nv12,
-                (image_w, image_h),
-                compute_queue,
-                session.output_offset,
-                out_w,
-                out_h,
-                source,
-            )
-        };
+        let result =
+            unsafe { self.ycbcr_to_wgpu(nv12, (image_w, image_h), compute_queue, session, source) };
 
         // The decode images are done with once the compute pass finished (inside
         // ycbcr_to_wgpu); free them regardless of outcome.
@@ -8743,11 +8747,10 @@ impl VulkanVideoDevice {
         nv12: vk::Image,
         nv12_extent: (u32, u32),
         compute_queue: vk::Queue,
-        offset: (u32, u32),
-        w: u32,
-        h: u32,
+        session: &H264DecodeSession,
         source: PictureSource,
     ) -> Result<wgpu::Texture, VulkanVideoError> {
+        let (w, h) = session.output_extent;
         // SAFETY: contract forwarded to the free helper.
         unsafe {
             nv12_to_wgpu_texture(
@@ -8758,7 +8761,7 @@ impl VulkanVideoDevice {
                 self.compute_queue_family,
                 nv12,
                 nv12_extent,
-                offset,
+                session.output_offset,
                 w,
                 h,
                 source,

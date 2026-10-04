@@ -44,8 +44,13 @@ pub(crate) fn ycbcr_push_constants(
         source_offset.1,
     ];
     let mut bytes = [0u8; YCBCR_PUSH_CONSTANT_SIZE as usize];
-    for (slot, word) in bytes.chunks_exact_mut(size_of::<u32>()).zip(words) {
-        slot.copy_from_slice(&word.to_ne_bytes());
+    for (slot, word) in bytes
+        .as_chunks_mut::<{ size_of::<u32>() }>()
+        .0
+        .iter_mut()
+        .zip(words)
+    {
+        *slot = word.to_ne_bytes();
     }
     bytes
 }
