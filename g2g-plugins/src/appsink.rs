@@ -4,7 +4,9 @@
 //! Two delivery modes, selected by what the application registers under the
 //! sink's `channel` name *before* launch (the parameterless `fn` factory means
 //! the element is handed neither directly, so both are parked in a named
-//! global and claimed at `configure_pipeline`):
+//! global). The element claims its registration when its channel is set, or at
+//! `configure_pipeline` if none was registered yet, and dropping the element
+//! ends the pull, so a graph that fails before it configures still ends it:
 //!
 //! - **Callback** ([`set_appsink_callback`], the GStreamer `new-sample` model):
 //!   the element invokes the callback per frame on the run thread with a
@@ -18,6 +20,7 @@
 use core::ffi::c_void;
 use core::future::Future;
 use core::pin::Pin;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
@@ -97,11 +100,6 @@ pub fn register_appsink_pull(channel: &str) -> AppSinkPull {
     AppSinkPull { rx }
 }
 
-/// Ends the pull handle of a channel whose appsink never configured.
-pub fn unregister_appsink(channel: &str) {
-    SINKS.lock().remove(channel);
-}
-
 /// Outcome of a non-blocking [`AppSinkPull::try_pull`].
 #[derive(Debug)]
 pub enum Pull {
@@ -123,9 +121,12 @@ pub struct AppSinkPull {
 impl AppSinkPull {
     /// Non-blocking: return the next frame if one is queued.
     pub fn try_pull(&self) -> Pull {
+        // read before try_recv, a last frame sent in between must not read as Ended
+        let closed = self.rx.is_closed();
         match self.rx.try_recv() {
             Some(Pulled::Frame(f)) => Pull::Frame(f),
             Some(Pulled::Eos) => Pull::Ended,
+            None if closed => Pull::Ended,
             None => Pull::Empty,
         }
     }
@@ -160,6 +161,7 @@ pub struct AppSink {
     caps: Option<(String, CapsSet)>,
     input_domains: DomainSet,
     configured: bool,
+    negotiated: AtomicBool,
     mode: Option<SinkMode>,
     received: u64,
 }
@@ -171,6 +173,7 @@ impl Default for AppSink {
             caps: None,
             input_domains: DomainSet::ALL,
             configured: false,
+            negotiated: AtomicBool::new(false),
             mode: None,
             received: 0,
         }
@@ -191,8 +194,13 @@ impl AppSink {
     /// launch / registry path uses the `channel=` property). Must match the name
     /// passed to [`register_appsink_pull`] / [`set_appsink_callback`].
     pub fn with_channel(mut self, channel: impl Into<String>) -> Self {
-        self.channel = channel.into();
+        self.set_channel(channel.into());
         self
+    }
+
+    fn set_channel(&mut self, channel: String) {
+        self.channel = channel;
+        self.mode = SINKS.lock().remove(self.channel_name());
     }
 
     fn channel_name(&self) -> &str {
@@ -206,6 +214,15 @@ impl AppSink {
     /// Frames delivered so far.
     pub fn received(&self) -> u64 {
         self.received
+    }
+}
+
+impl Drop for AppSink {
+    fn drop(&mut self) {
+        // registry probes build and drop a default appsink, those must not end a live registration
+        if self.mode.is_none() && self.negotiated.load(Ordering::Relaxed) {
+            SINKS.lock().remove(self.channel_name());
+        }
     }
 }
 
@@ -226,6 +243,7 @@ impl AsyncElement for AppSink {
     }
 
     fn caps_constraint_as_sink(&self) -> CapsConstraint<'_> {
+        self.negotiated.store(true, Ordering::Relaxed);
         match &self.caps {
             Some((_, set)) => CapsConstraint::Accepts(set.clone()),
             None => CapsConstraint::AcceptsAny,
@@ -237,12 +255,14 @@ impl AsyncElement for AppSink {
     }
 
     fn configure_pipeline(&mut self, _absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        // Claim the registered delivery mode once, and only once: a format- or
-        // size-changing upstream transform makes the runner cascade caps a
-        // second time, calling `configure_pipeline` again. The claim removes the
-        // entry from the global, so a re-configure must not run it again or it
-        // would clobber the already-claimed `tx`/callback with `None` and then
-        // silently drop every frame (and never forward EOS).
+        // Claim the registered delivery mode here only if setting the channel
+        // found none (a default channel name, or a registration made after the
+        // element was built). A format- or size-changing upstream transform
+        // makes the runner cascade caps a second time, calling
+        // `configure_pipeline` again. The claim removes the entry from the
+        // global, so a re-configure must not run it again or it would clobber
+        // the already-claimed `tx`/callback with `None` and then silently drop
+        // every frame (and never forward EOS).
         if self.mode.is_none() {
             self.mode = SINKS.lock().remove(self.channel_name());
         }
@@ -322,7 +342,7 @@ impl AsyncElement for AppSink {
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
         match name {
             "channel" => {
-                self.channel = value.as_str().ok_or(PropError::Type)?.to_string();
+                self.set_channel(value.as_str().ok_or(PropError::Type)?.to_string());
                 Ok(())
             }
             "caps" => {

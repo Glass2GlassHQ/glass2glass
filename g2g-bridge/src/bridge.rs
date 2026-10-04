@@ -8,7 +8,7 @@ use g2g_core::memory::OwnedDmaBuf;
 use g2g_core::runtime::{parse_launch, run_graph, ParseError, RunStats};
 use g2g_core::{Frame, G2gError, PipelineClock};
 
-use g2g_plugins::appsink::{register_appsink_pull, unregister_appsink, AppSinkPull, Pull};
+use g2g_plugins::appsink::{register_appsink_pull, AppSinkPull, Pull};
 use g2g_plugins::appsrc::{register_appsrc, AppSrcFeed};
 use g2g_plugins::registry::default_registry;
 
@@ -115,8 +115,8 @@ impl BridgeGraph {
         let in_ch = format!("__g2g_bridge_{id}_in");
         let out_ch = format!("__g2g_bridge_{id}_out");
 
-        // Register before launch: the elements claim these named endpoints when
-        // the run thread reaches `configure_pipeline`.
+        // Register before parsing: the appsink claims its endpoint when the parser
+        // sets its channel, the appsrc when the run thread configures it.
         let feed = register_appsrc(&in_ch);
         let pull = register_appsink_pull(&out_ch);
 
@@ -151,10 +151,7 @@ impl BridgeGraph {
                     .build()
                     .expect("build bridge tokio runtime");
                 let clock = ZeroClock;
-                let result = rt.block_on(run_graph(graph, &clock, LINK_CAPACITY));
-                // a graph that failed before the appsink configured leaves the pull channel open
-                unregister_appsink(&out_ch);
-                result
+                rt.block_on(run_graph(graph, &clock, LINK_CAPACITY))
             })
             .map_err(BridgeError::Spawn)?;
 
