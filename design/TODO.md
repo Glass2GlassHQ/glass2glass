@@ -244,9 +244,6 @@ unless it says otherwise.
   `ogmtextparse` / `oggaviparse`, `3gppmux` / `ismlmux` / `mj2mux` (mp4mux
   brands), `qtmoovrecover`, `avisubtitle`, `gdppay` / `gdpdepay`, `pcapparse` /
   `irtspparse`, `bz2enc` / `bz2dec`, `midiparse`.
-- **Multi-file sources:** `splitmuxsrc` (each part its own container, so the
-  parts have to be demuxed separately and their timestamps joined, unlike
-  `splitfilesrc`'s byte join).
 - **Subtitles / captions:** `ttmlparse` / `ttmlrender`, `assrender`,
   `textrender`, `dvbsubenc`, `dvdsubparse`, `cea608mux` / `cc708overlay`,
   `h264ccinserter` / `h265ccinserter` / `h264ccextractor` / `h265ccextractor`.
