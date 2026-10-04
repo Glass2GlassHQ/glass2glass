@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- `videoconvert`, `colorspace`, `deinterlace`, `videocrop`, `videoscale` and the I420 video filters take odd-size NV12 / I420 / YUYV frames; a YUYV row at an odd width is `4 * ceil(w/2)` bytes.
+- `VulkanVideoDec` decodes odd AV1 picture sizes to system memory and RGBA textures, and `CudaToWgpu` carries odd-size NV12 frames.
 - M1216: `unixfdsink` and `unixfdsrc` (feature `unixfd`, Linux) pass frames as file descriptors over a unix socket, wire-compatible with GStreamer's elements.
 - M1217: `ristsink` and `ristsrc` (feature `rist`): RIST TR-06-1 Simple Profile over MPEG-TS, with both NACK forms and retransmission, interoperable with GStreamer.
 - M1218: `webrtcdsp` and `webrtcechoprobe` (feature `webrtcdsp`): echo cancellation, noise suppression, gain control and a high-pass filter on the pure-Rust `sonora` processor.
