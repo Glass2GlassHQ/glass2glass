@@ -1,4 +1,4 @@
-//! What the raw byte-stream carriers (TCP, SRT, raw UDP) share: the frame shape
+//! What the raw byte-stream carriers (TCP, SRT, RIST, raw UDP) share: the frame shape
 //! a received chunk takes, the MPEG-TS packet geometry that decides how a
 //! datagram is cut, and the container list a wire sink can carry.
 
@@ -50,6 +50,13 @@ pub fn is_packet_encoding(encoding: ByteStreamEncoding) -> bool {
     )
 }
 
+/// The MPEG-TS byte stream the TS carriers (SRT, RIST) take and produce.
+pub fn mpegts_caps() -> Caps {
+    Caps::ByteStream {
+        encoding: ByteStreamEncoding::MpegTs,
+    }
+}
+
 /// [`CARRIED_ENCODINGS`] as caps, for a pad template or an `Accepts` set.
 pub fn carried_bytestream_caps() -> Vec<Caps> {
     CARRIED_ENCODINGS
@@ -71,7 +78,7 @@ pub fn datagram_chunk(encoding: ByteStreamEncoding, max_payload: usize) -> usize
 
 /// A frame carrying `bytes`, stamped and sequenced the way `FileSrc` stamps a
 /// file chunk, so every byte source looks identical downstream.
-#[cfg(any(feature = "tcp", feature = "udp-ingress"))]
+#[cfg(any(feature = "tcp", feature = "udp-ingress", feature = "rist"))]
 pub(crate) fn byte_frame(bytes: Vec<u8>, sequence: u64) -> g2g_core::frame::Frame {
     use g2g_core::frame::Frame;
     use g2g_core::memory::SystemSlice;

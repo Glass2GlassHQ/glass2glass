@@ -422,6 +422,7 @@ cargo clippy --workspace --all-targets
 | `UdpSrc` (RTP ingest + jitter buffer + RTCP / NACK, or raw MPEG-TS datagrams) | `udp-ingress` | none |
 | `SrtpEnc` / `SrtpDec` (RFC 3711 / RFC 7714 SRTP and SRTCP, per-SSRC receive contexts) | `srtp` | none |
 | `DtlsSrtpEnc` / `DtlsSrtpDec` (DTLS-SRTP handshake over the media socket keys SRTP) | `dtls-srtp` | none |
+| `RistSink` / `RistSrc` (RIST Simple Profile: MPEG-TS over RTP with NACK retransmission) | `rist` | none |
 | `TcpServerSrc` / `TcpClientSrc` / `TcpServerSink` / `TcpClientSink` | `tcp` | none |
 | `ShmSink` / `ShmSrc` (GStreamer's `shm` protocol: shared-memory frames + unix control socket) | `shm` | Linux |
 | `RtmpSrc` (RTMP publisher ingest) | `rtmp` | none |

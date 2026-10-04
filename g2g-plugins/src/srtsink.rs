@@ -20,12 +20,12 @@ use alloc::vec::Vec;
 use std::net::SocketAddr;
 
 use g2g_core::{
-    AsyncElement, ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
-    ElementMetadata, G2gError, HardwareError, OutputSink, PadTemplate, PadTemplates,
-    PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
+    AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, G2gError,
+    HardwareError, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind,
+    PropValue, PropertySpec,
 };
 
-use crate::bytestream::TS_DATAGRAM_PAYLOAD;
+use crate::bytestream::{mpegts_caps, TS_DATAGRAM_PAYLOAD};
 use crate::filesink::io_err;
 use crate::srt::{self, LiveCc, SrtHandshake, SrtSender, CC_DEFAULT_OVERHEAD};
 use crate::srtcrypto::{AesKeySize, SrtCrypto, KM_KK_EVEN};
@@ -56,12 +56,6 @@ struct PendingKm {
     /// Earliest monotonic microsecond time for the next retransmit.
     next_at_us: u64,
     retries: u32,
-}
-
-fn ts_bytestream() -> Caps {
-    Caps::ByteStream {
-        encoding: ByteStreamEncoding::MpegTs,
-    }
 }
 
 /// # Example
@@ -334,11 +328,11 @@ impl AsyncElement for SrtSink {
     }
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
-        upstream_caps.intersect(&ts_bytestream())
+        upstream_caps.intersect(&mpegts_caps())
     }
 
     fn caps_constraint_as_sink(&self) -> CapsConstraint<'_> {
-        CapsConstraint::Accepts(CapsSet::one(ts_bytestream()))
+        CapsConstraint::Accepts(CapsSet::one(mpegts_caps()))
     }
 
     fn configure_pipeline(&mut self, _absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -520,6 +514,6 @@ impl AsyncElement for SrtSink {
 
 impl PadTemplates for SrtSink {
     fn pad_templates() -> Vec<PadTemplate> {
-        Vec::from([PadTemplate::sink(CapsSet::one(ts_bytestream()))])
+        Vec::from([PadTemplate::sink(CapsSet::one(mpegts_caps()))])
     }
 }

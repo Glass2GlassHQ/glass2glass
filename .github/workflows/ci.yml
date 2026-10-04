@@ -316,6 +316,10 @@ jobs:
         run: cargo test -p g2g-plugins --locked --features tcp --test m1068_tcp
       - name: test g2g-plugins (raw udp)
         run: cargo test -p g2g-plugins --locked --features udp-ingress,udp-egress --test m1079_raw_udp
+      # RIST (M1217): the wire pieces, the properties, and g2g to g2g over a
+      # lossy loopback relay. The gst interop legs are ignored here.
+      - name: test g2g-plugins (rist)
+        run: cargo test -p g2g-plugins --locked --features rist --test m1217_rist
       # SRTP elements (M1098, M1099, M1101): the protected round trips under
       # every cipher and authentication pair, the drop paths, the session
       # controls and the properties. The gst interop legs are ignored here.

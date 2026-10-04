@@ -25,7 +25,7 @@ default = []
 # explicitly), and the no_std `embassy*` RTOS backends.
 linux-full = [
     "multi-thread", "plugin-loader", "plugin-signing",
-    "rtsp", "rtsp-server", "srt", "srtp", "dtls-srtp", "tcp", "shm", "udp-egress", "udp-ingress", "rtmp", "webrtc",
+    "rtsp", "rtsp-server", "srt", "rist", "srtp", "dtls-srtp", "tcp", "shm", "udp-egress", "udp-ingress", "rtmp", "webrtc",
     "remote", "remote-ws", "webtransport", "moqt",
     "http-src", "hls", "dash",
     "ffmpeg", "vaapi", "v4l2",
@@ -77,6 +77,11 @@ rtsp-server = ["std", "tokio/net", "tokio/io-util", "tokio/macros"]
 # `srt` wire/handshake/reliability layer is always compiled; only the tokio UDP
 # elements need this. Implies std + tokio net.
 srt = ["std", "tokio/net", "dep:aes", "dep:ctr", "dep:hmac", "dep:pbkdf2", "dep:aes-kw", "dep:getrandom"]
+# RIST transport (VSF TR-06-1 Simple Profile): RistSink + RistSrc carrying an
+# MPEG-TS byte stream as RTP MP2T with NACK retransmission, interoperable with
+# GStreamer's `ristsink` / `ristsrc`. The sans-IO `rist` module is always
+# compiled, getrandom picks the SSRC. Implies std + tokio net.
+rist = ["std", "tokio/net", "dep:getrandom"]
 # Sans-IO SRTP/SRTCP protection: the RFC 7714 AES-GCM profiles and the RFC 3711
 # / RFC 6188 AES counter-mode and HMAC-SHA1 ones. RustCrypto supplies AES-GCM,
 # HMAC-SHA1 and secret erasure; counter mode is driven from the AES block cipher

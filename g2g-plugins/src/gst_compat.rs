@@ -171,6 +171,33 @@ static GST_MAP: &[(&str, GstEquivalent)] = &[
         "`srtsink` is the only SRT sink and always calls out to a listener (`host` / `port`); \
          there is no listen-mode send",
     )),
+    // RIST: the retransmission and MP2T payloading gst splits into helper
+    // elements are inside `ristsink` / `ristsrc`.
+    ("ristrtxsend", GstEquivalent::Unsupported(
+        "retransmission is built into `ristsink`, and `sender-buffer` sizes its history",
+    )),
+    ("ristrtxreceive", GstEquivalent::Unsupported(
+        "retransmission recovery is built into `ristsrc`, tuned by `reorder-section` and \
+         `max-rtx-retries`",
+    )),
+    ("ristrtpext", GstEquivalent::Unsupported(
+        "the RIST header extension (sequence number extension, null packet deletion) is not \
+         implemented: `ristsink` speaks the Simple Profile without it",
+    )),
+    ("ristrtpdeext", GstEquivalent::Unsupported(
+        "the RIST header extension is not implemented: `ristsrc` speaks the Simple Profile \
+         without it",
+    )),
+    ("roundrobin", GstEquivalent::Unsupported(
+        "RIST bonding is not implemented: `ristsink` sends over one link",
+    )),
+    ("rtpmp2tpay", GstEquivalent::Unsupported(
+        "MPEG-TS RTP payloading is built into `ristsink`, so link `mpegtsmux` to it directly \
+         (`udpsink` sends TS as plain datagrams, without RTP)",
+    )),
+    ("rtpmp2tdepay", GstEquivalent::Unsupported(
+        "`ristsrc` outputs the MPEG-TS byte stream itself, so link it to `tsdemux` directly",
+    )),
     // Launch keywords, not elements: the parser accepts `queue` / `queue2` /
     // `decodebin` / `uridecodebin` / `playbin` and nothing else, so the gst
     // variants name the keyword they should be spelled as.

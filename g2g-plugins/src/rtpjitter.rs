@@ -84,6 +84,9 @@ pub struct RtpJitterBuffer {
     next: Option<u64>,
     /// Highest extended sequence seen, for wraparound unrolling.
     last_ext: Option<u64>,
+    /// Hold every packet `max_hold_ns` past its arrival, not only one behind a
+    /// gap, so the output runs a constant delay behind the network.
+    constant_delay: bool,
     stats: JitterStats,
 }
 
@@ -109,8 +112,18 @@ impl RtpJitterBuffer {
             packets: BTreeMap::new(),
             next: None,
             last_ext: None,
+            constant_delay: false,
             stats: JitterStats::default(),
         }
+    }
+
+    /// Release every packet `max_hold_ns` after it arrived, in order, instead of
+    /// as soon as its predecessors are in. A packet that fills a gap late (a
+    /// retransmission) keeps the slot of the packet after it, so recovery does
+    /// not push the whole output back.
+    pub fn with_constant_delay(mut self) -> Self {
+        self.constant_delay = true;
+        self
     }
 
     pub fn stats(&self) -> JitterStats {
@@ -179,11 +192,20 @@ impl RtpJitterBuffer {
             self.stats.reordered += 1;
         }
         self.stats.received += 1;
+        let following_arrival_ns = self
+            .packets
+            .range(ext + 1..)
+            .next()
+            .map(|(_, following)| following.arrival_ns);
+        let arrival_ns = match following_arrival_ns {
+            Some(following) if self.constant_delay => following.min(now_ns),
+            _ => now_ns,
+        };
         self.packets.insert(
             ext,
             Buffered {
                 data: packet.to_vec(),
-                arrival_ns: now_ns,
+                arrival_ns,
             },
         );
     }
@@ -192,26 +214,27 @@ impl RtpJitterBuffer {
     /// expected sequence is present, or its predecessors are overdue
     /// (`max_hold_ns` elapsed for the held head) or the buffer is at
     /// `max_depth`, in which case the gap is declared lost and skipped. Returns
-    /// `None` while still waiting. Call repeatedly to drain.
+    /// `None` while still waiting. Call repeatedly to drain. In
+    /// [`constant_delay`](Self::with_constant_delay) mode the next expected
+    /// sequence waits out `max_hold_ns` too.
     pub fn pop(&mut self, now_ns: u64) -> Option<Vec<u8>> {
         let next = self.next?;
         let (&head, head_buf) = self.packets.iter().next()?;
-        if head == next {
-            let buf = self.packets.remove(&head).expect("head present");
-            self.next = Some(next + 1);
-            return Some(buf.data);
-        }
-        // A gap precedes the head. Hold for late predecessors up to the bound;
-        // past it (by time or depth), declare [next, head) lost and skip ahead.
-        debug_assert!(head > next, "released sequences are never re-buffered");
+        let head_is_next = head == next;
+        // A gap precedes the head when it is not the next sequence. Hold for late
+        // predecessors up to the bound; past it (by time or depth), declare
+        // [next, head) lost and skip ahead.
+        debug_assert!(head >= next, "released sequences are never re-buffered");
         let overdue = now_ns.saturating_sub(head_buf.arrival_ns) >= self.config.max_hold_ns;
-        if overdue || self.packets.len() >= self.config.max_depth.max(1) {
-            self.stats.lost += head - next;
-            let buf = self.packets.remove(&head).expect("head present");
-            self.next = Some(head + 1);
-            return Some(buf.data);
+        let full = self.packets.len() >= self.config.max_depth.max(1);
+        let ready = overdue || (head_is_next && !self.constant_delay);
+        if !ready && !full {
+            return None;
         }
-        None
+        self.stats.lost += head - next;
+        let buf = self.packets.remove(&head).expect("head present");
+        self.next = Some(head + 1);
+        Some(buf.data)
     }
 
     /// The 16-bit sequence numbers currently missing: holes between the next
@@ -228,13 +251,12 @@ impl RtpJitterBuffer {
         // max_depth packets, so holes past that window are lost, not NACKed.
         let window = self.config.max_depth.max(1) as u64;
         let end = last.min(next.saturating_add(window));
-        let mut ext = next;
-        while ext < end {
-            if !self.packets.contains_key(&ext) {
-                out.push((ext & 0xFFFF) as u16);
-            }
-            ext += 1;
+        let mut expected = next;
+        for &present in self.packets.range(next..end).map(|(ext, _)| ext) {
+            out.extend((expected..present).map(|ext| (ext & 0xFFFF) as u16));
+            expected = present + 1;
         }
+        out.extend((expected..end).map(|ext| (ext & 0xFFFF) as u16));
         out
     }
 
@@ -246,7 +268,10 @@ impl RtpJitterBuffer {
     pub fn next_deadline_ns(&self, now_ns: u64) -> Option<u64> {
         let next = self.next?;
         let (&head, head_buf) = self.packets.iter().next()?;
-        if head == next || self.packets.len() >= self.config.max_depth.max(1) {
+        let head_is_next = head == next;
+        if (head_is_next && !self.constant_delay)
+            || self.packets.len() >= self.config.max_depth.max(1)
+        {
             return Some(0);
         }
         let due = head_buf.arrival_ns + self.config.max_hold_ns;

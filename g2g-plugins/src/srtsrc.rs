@@ -21,11 +21,12 @@ use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
 use g2g_core::{
-    ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata,
-    FrameTiming, G2gError, HardwareError, MemoryDomain, OutputSink, PipelinePacket, PropError,
-    PropKind, PropValue, PropertySpec,
+    Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, FrameTiming, G2gError,
+    HardwareError, MemoryDomain, OutputSink, PipelinePacket, PropError, PropKind, PropValue,
+    PropertySpec,
 };
 
+use crate::bytestream::mpegts_caps;
 use crate::filesink::io_err;
 use crate::srt::{self, Control, SrtHandshake, SrtReceiver};
 use crate::srtcrypto::SrtCrypto;
@@ -41,12 +42,6 @@ const NACK_MIN_INTERVAL_NS: u64 = 20_000_000;
 /// Receive timeout (ms) so the TSBPD buffer still flushes due packets when no new
 /// datagram arrives; bounds the extra delivery jitter a silent gap can add.
 const TSBPD_WAKE_MS: u64 = 5;
-
-fn ts_bytestream() -> Caps {
-    Caps::ByteStream {
-        encoding: ByteStreamEncoding::MpegTs,
-    }
-}
 
 /// # Example
 ///
@@ -139,13 +134,13 @@ impl SourceLoop for SrtSrc {
         Self: 'a;
 
     fn intercept_caps<'a>(&'a mut self) -> Self::CapsFuture<'a> {
-        core::future::ready(Ok(ts_bytestream()))
+        core::future::ready(Ok(mpegts_caps()))
     }
 
     fn caps_constraint<'a>(
         &'a mut self,
     ) -> impl Future<Output = Result<CapsConstraint<'a>, G2gError>> + 'a {
-        core::future::ready(Ok(CapsConstraint::Produces(CapsSet::one(ts_bytestream()))))
+        core::future::ready(Ok(CapsConstraint::Produces(CapsSet::one(mpegts_caps()))))
     }
 
     fn configure_pipeline(&mut self, _absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -264,8 +259,7 @@ impl SourceLoop for SrtSrc {
             let peer_socket_id = hs.peer_socket_id();
 
             // The MPEG-TS byte stream the depayloaded packets reconstruct.
-            out.push(PipelinePacket::CapsChanged(ts_bytestream()))
-                .await?;
+            out.push(PipelinePacket::CapsChanged(mpegts_caps())).await?;
 
             let mut receiver = SrtReceiver::new();
             // Hold packets back to the advertised latency (TSBPD): the negotiated

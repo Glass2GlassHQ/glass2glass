@@ -2,8 +2,8 @@
 //! (RFC 4585), the control-protocol half of the RTP receive-side stack. It
 //! builds and parses the compound packets that flow alongside the media:
 //! receiver reports (loss / jitter feedback), sender reports (for round-trip
-//! timing), BYE (clean termination), and Generic NACK (request retransmission
-//! of lost sequence numbers).
+//! timing), BYE (clean termination), Generic NACK (request retransmission
+//! of lost sequence numbers), a CNAME-only SDES, and APP packets.
 //!
 //! [`ReceptionStats`] tracks the RFC 3550 reception statistics for one source
 //! (extended highest sequence, cumulative + interval loss, interarrival jitter)
@@ -19,6 +19,7 @@ pub const PT_SR: u8 = 200;
 pub const PT_RR: u8 = 201;
 pub const PT_SDES: u8 = 202;
 pub const PT_BYE: u8 = 203;
+pub const PT_APP: u8 = 204;
 /// Transport-layer feedback (RFC 4585); Generic NACK is `FMT == 1`.
 pub const PT_RTPFB: u8 = 205;
 pub const FMT_GENERIC_NACK: u8 = 1;
@@ -82,7 +83,22 @@ pub enum RtcpPacket {
     Other {
         pt: u8,
     },
+    /// Application-defined packet (PT 204): the 5-bit subtype, the SSRC field,
+    /// the four-character name and the application data that follows it.
+    App {
+        subtype: u8,
+        ssrc: u32,
+        name: [u8; 4],
+        data: Vec<u8>,
+    },
 }
+
+/// SDES item type of the canonical end-point name.
+const SDES_ITEM_CNAME: u8 = 1;
+/// An SDES item length is one byte.
+const SDES_ITEM_MAX_LEN: usize = u8::MAX as usize;
+/// RTCP packets are a whole number of 32-bit words.
+const RTCP_WORD: usize = 4;
 
 fn push_u32(out: &mut Vec<u8>, v: u32) {
     out.extend_from_slice(&v.to_be_bytes());
@@ -170,6 +186,35 @@ pub fn build_bye(ssrc: u32) -> Vec<u8> {
     let mut out = Vec::new();
     header(&mut out, 1, PT_BYE);
     push_u32(&mut out, ssrc);
+    patch_length(&mut out, 0);
+    out
+}
+
+/// Build an SDES (PT 202) with one chunk carrying only the CNAME item. A name
+/// longer than an item can hold is cut at 255 bytes.
+pub fn build_sdes_cname(ssrc: u32, cname: &str) -> Vec<u8> {
+    let name = &cname.as_bytes()[..cname.len().min(SDES_ITEM_MAX_LEN)];
+    let mut out = Vec::new();
+    header(&mut out, 1, PT_SDES);
+    push_u32(&mut out, ssrc);
+    out.push(SDES_ITEM_CNAME);
+    out.push(name.len() as u8);
+    out.extend_from_slice(name);
+    // the null item that ends the chunk, then zeros to the word boundary
+    out.push(0);
+    out.resize(out.len().next_multiple_of(RTCP_WORD), 0);
+    patch_length(&mut out, 0);
+    out
+}
+
+/// Build an APP (PT 204) packet. `data` is zero-padded to a whole word.
+pub fn build_app(subtype: u8, ssrc: u32, name: [u8; 4], data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    header(&mut out, subtype, PT_APP);
+    push_u32(&mut out, ssrc);
+    out.extend_from_slice(&name);
+    out.extend_from_slice(data);
+    out.resize(out.len().next_multiple_of(RTCP_WORD), 0);
     patch_length(&mut out, 0);
     out
 }
@@ -277,6 +322,18 @@ pub fn parse_compound(buf: &[u8]) -> Vec<RtcpPacket> {
                     }
                 }
                 out.push(RtcpPacket::Bye { ssrc });
+            }
+            PT_APP => {
+                if let (Some(ssrc_bytes), Some(name), Some(data)) =
+                    (body.get(..4), body.get(4..8), body.get(8..))
+                {
+                    out.push(RtcpPacket::App {
+                        subtype: count as u8,
+                        ssrc: be32(ssrc_bytes, 0),
+                        name: [name[0], name[1], name[2], name[3]],
+                        data: data.to_vec(),
+                    });
+                }
             }
             _ => out.push(RtcpPacket::Other { pt }),
         }

@@ -189,6 +189,10 @@ use crate::remotewtsink::RemoteWtSink;
 use crate::remotewtsrc::RemoteWtSrc;
 #[cfg(feature = "webtransport")]
 use crate::remotewttransform::RemoteWtTransform;
+#[cfg(feature = "rist")]
+use crate::ristsink::RistSink;
+#[cfg(feature = "rist")]
+use crate::ristsrc::RistSrc;
 #[cfg(feature = "rtmp")]
 use crate::rtmpsink::RtmpSink;
 #[cfg(feature = "rtmp")]
@@ -2448,6 +2452,8 @@ pub static FEATURE_GATED_ELEMENTS: &[FeatureGatedElement] = &{
         "rtspserversrcn" => "rtsp-server";
         "srtsrc" => "srt";
         "srtsink" => "srt";
+        "ristsrc" => "rist";
+        "ristsink" => "rist";
         "srtpenc" => "srtp";
         "srtpdec" => "srtp";
         "dtlssrtpenc" => "dtls-srtp";
@@ -2866,6 +2872,18 @@ fn register_feature_gated(reg: &mut Registry) {
     #[cfg(feature = "srt")]
     reg.register_launch(LaunchFactory::of::<SrtSink>("srtsink", || {
         Box::new(SrtSink::new("127.0.0.1:9000".parse().unwrap()))
+    }));
+    #[cfg(feature = "rist")]
+    reg.register_source(SourceFactory::new(
+        "ristsrc",
+        Caps::ByteStream {
+            encoding: ByteStreamEncoding::MpegTs,
+        },
+        || Box::new(RistSrc::default()),
+    ));
+    #[cfg(feature = "rist")]
+    reg.register_launch(LaunchFactory::of::<RistSink>("ristsink", || {
+        Box::new(RistSink::default())
     }));
     // Distributed-graph transport pair (M551). `remotesrc` produces whatever the
     // sender negotiates: the declared caps are a nominal catalog default, since

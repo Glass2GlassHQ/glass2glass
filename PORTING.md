@@ -214,7 +214,11 @@ g2g-inspect videoconvert         # one element's properties + pad templates
 ```
 
 Common mappings: `jpegenc`/`jpegdec` → `mjpegenc`/`mjpegdec`; `souphttpsrc` →
-`httpsrc`; `rtph264depay` → built into `udpsrc`/`rtspsrc`. `appsrc`/`appsink`
+`httpsrc`; `rtph264depay` → built into `udpsrc`/`rtspsrc`. RIST keeps its gst
+names but drops the MPEG-TS payloader around it: `mpegtsmux ! rtpmp2tpay !
+ristsink` is `mpegtsmux ! ristsink`, and `ristsrc ! rtpmp2tdepay ! tsdemux` is
+`ristsrc ! tsdemux` (Simple Profile only: no bonding, no header extension, no
+encryption). `appsrc`/`appsink`
 exist as named launch elements (`appsrc channel=<name>` / `appsink
 channel=<name>`, the application registers the matching feed/sink before launch,
 and `output-domains=dmabuf` / `input-domains=dmabuf` declare dma-buf frames),

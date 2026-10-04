@@ -788,6 +788,14 @@ pub mod srtsink;
 #[cfg(feature = "srt")]
 pub mod srtsrc;
 
+// Sans-IO RIST (VSF TR-06-1 Simple Profile) NACK, RTT echo and retransmission
+// pieces, always compiled. The tokio sink / source need the `rist` feature.
+pub mod rist;
+#[cfg(feature = "rist")]
+pub mod ristsink;
+#[cfg(feature = "rist")]
+pub mod ristsrc;
+
 // UDP egress sink (M47): drives the M46 RtpH264Packetizer and sends RTP over a
 // tokio UdpSocket, the send-side inverse of RtspSrc's receive path.
 #[cfg(feature = "udp-egress")]
@@ -963,6 +971,7 @@ mod netprop;
 #[cfg(any(
     feature = "tcp",
     feature = "srt",
+    feature = "rist",
     feature = "udp-ingress",
     feature = "udp-egress",
 ))]

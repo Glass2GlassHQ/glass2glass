@@ -3,7 +3,7 @@
 Network and cross-process carriers: the native WebRTC stack, the
 distributed-graph elements that cut a graph edge across a process or machine
 boundary, MoQ Transport, SMPTE ST 2110 media transport, in-process links
-between graphs, and zero-copy local IPC for GPU memory.
+between graphs, zero-copy local IPC for GPU memory, and RIST.
 Part of the design in [README.md](README.md).
 
 ## WebRTC
@@ -989,3 +989,46 @@ arrived late and starved the receiver, and whether it stays within the profile's
 What is built spans -10, -20, -21, -22, -30, -40 and -7 plus SDP, written from the
 RFCs and loopback-tested, not yet interop-validated against reference gear.
 Multicast interop remains.
+
+## RIST
+
+`ristsink` and `ristsrc` (`rist` feature) speak the VSF TR-06-1 Simple Profile,
+one link, interoperable with GStreamer's elements of the same names. The sink
+takes an MPEG-TS byte stream and payloads it as RTP MP2T itself (payload type 33,
+90 kHz, seven TS packets per RTP packet as `rtpmp2tpay` does), and the source
+outputs the byte stream, so the gst `rtpmp2tpay ! ristsink` and `ristsrc !
+rtpmp2tdepay` pairs each collapse to one element. Bonding, the Main Profile
+header extension, null-packet deletion, tunnelling and encryption are not built.
+
+The wire pieces are sans-IO and always compiled. `rtcp.rs` builds and parses APP
+packets and the CNAME-only SDES every RIST compound carries. `rist.rs` holds the
+RIST-specific parts: the SSRC rule (low bit 0 on originals, 1 on
+retransmissions, which are otherwise the original packet), the range NACK (APP
+subtype 0, name `RIST`, at most 16 ranges per packet), the choice between it and
+the RFC 4585 generic NACK (whichever is shorter, generic on a tie, the rule
+GStreamer's `ristsrc` uses), the RTT echo response, the sender's retransmission
+history and the receiver's NACK schedule.
+
+The sink sends RTP to `port` and SR + SDES to `port + 1` from one socket, at
+most `min-rtcp-interval` apart, and answers both NACK forms and RTT echo
+requests on it. Its history keeps `sender-buffer` ms of packets, capped at half
+the 16-bit sequence space so a sequence number names one packet. It services
+RTCP after each buffer it sends, and at EOS keeps answering for
+`sender-buffer` ms before it sends BYE.
+
+The source binds `port` and `port + 1` and replies with RR + SDES to the source
+address of the sender's last RTCP packet, the TR-06-1 NAT rule. The RTP jitter
+buffer runs in a constant-delay mode: every packet is held `receiver-buffer` ms
+after arrival, and a packet that fills a gap late takes the release slot of the
+packet after it. A hole is first requested once it is `reorder-section` ms old,
+then again every `(receiver-buffer - reorder-section) / max-rtx-retries` ms up
+to `max-rtx-retries` requests. The source reports `receiver-buffer` as live
+latency and ends once the sender's BYE has drained through the buffer. RTT
+echo requests are answered on both ends and never originated.
+
+Validated through a relay that drops a burst and scattered media packets:
+g2g to g2g, GStreamer `ristsink` into `ristsrc`, and `ristsink` into GStreamer
+`ristsrc`, each byte-exact (the GStreamer interop tests are ignored without
+`gst-launch-1.0`). GStreamer's `rtpmp2tpay` never sends the last seven TS
+packets it holds at EOS, so its stream ends one RTP payload short of what
+`mpegtsmux` produced.
