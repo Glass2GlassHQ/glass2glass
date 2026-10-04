@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1216: `unixfdsink` and `unixfdsrc` (feature `unixfd`, Linux) pass frames as file descriptors over a unix socket, wire-compatible with GStreamer's elements.
 - M1217: `ristsink` and `ristsrc` (feature `rist`): RIST TR-06-1 Simple Profile over MPEG-TS, with both NACK forms and retransmission, interoperable with GStreamer.
 - M1218: `webrtcdsp` and `webrtcechoprobe` (feature `webrtcdsp`): echo cancellation, noise suppression, gain control and a high-pass filter on the pure-Rust `sonora` processor.
 - M1215: `splitmuxsrc` plays the parts a `splitmuxsink` wrote (mp4, matroska, mpegts) as one continuous stream; matroska reads GStreamer's NUL-padded codec ids.

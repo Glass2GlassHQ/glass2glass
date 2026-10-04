@@ -86,6 +86,8 @@ Highest leverage first:
 
 - **RTP over QUIC (RoQ):** implement after the draft becomes an RFC with an
   assigned ALPN. Candidate peers: mengelbart/roq (Go), meetecho/imquic.
+- **`unixfdsink`:** reuse memfds from a pool for system frames, and carry a
+  dma-buf frame's GPU sync fd.
 - **RIST:** link bonding (`bonding-addresses`, broadcast and round-robin),
   multicast, and the Main Profile sequence-number extension (`ristrtpext` /
   `ristrtpdeext`); interop against librist's `ristsender` / `ristreceiver`.
@@ -275,8 +277,7 @@ unless it says otherwise.
   `pipeline` as launch keywords, `msesrc`.
 - **IPC:** `proxysink` / `proxysrc`, `intervideosink` / `intervideosrc` /
   `interaudiosink` / `interaudiosrc` / `intersubsink` / `intersubsrc`,
-  `ipcpipelinesink` / `ipcpipelinesrc` / `ipcslavepipeline`, `unixfdsink` /
-  `unixfdsrc` (fd-passing over a unix socket, the DMABUF-capable one).
+  `ipcpipelinesink` / `ipcpipelinesrc` / `ipcslavepipeline`.
 - **Network:** `curlhttpsrc` and the `curl*sink` uploaders, `souphttpclientsink`, `giosrc` /
   `giosink` / `giostreamsrc` / `giostreamsink`, `shout2send`, `sctpenc` /
   `sctpdec` outside WebRTC, `multifdsink` / `multisocketsink` / `socketsrc`,
