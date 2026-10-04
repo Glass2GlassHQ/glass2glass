@@ -29,8 +29,20 @@ typedef struct {
   void *owner;
 } G2gOut;
 
+/* The Rust side mirrors the plane arrays below with a fixed length of 4. */
+G_STATIC_ASSERT(GST_VIDEO_MAX_PLANES == 4);
+
+/* where each plane of a tightly packed g2g frame sits (`GstVideoPlanes` in g2g-plugins) */
+typedef struct {
+  unsigned int n_planes;
+  size_t offsets[GST_VIDEO_MAX_PLANES];
+  int strides[GST_VIDEO_MAX_PLANES];
+  size_t size;
+} G2gBridgePlanes;
+
 extern G2gBridge *g2g_bridge_create(const char *fragment, const char *in_caps,
                                     const char *out_caps);
+extern int g2g_bridge_tight_planes(const char *caps, G2gBridgePlanes *out);
 extern int g2g_bridge_push_buf(G2gBridge *b, const unsigned char *data, size_t len,
                                unsigned long long pts_ns);
 extern int g2g_bridge_push_dmabuf(G2gBridge *b, int fd, unsigned int stride, unsigned int offset,
@@ -50,8 +62,13 @@ struct _GstGlass2Glass {
   gchar *output_caps;  /* if set, the sub-graph rescales/reformats to these caps */
   G2gBridge *bridge;   /* live between set_caps and stop */
   guint in_stride;     /* input plane-0 stride, for a dma-buf input with no video meta */
+  GstVideoInfo in_info;    /* negotiated input format, for repacking system input rows */
+  gboolean have_in_planes; /* whether `in_planes` holds the tight layout of the input caps */
+  G2gBridgePlanes in_planes;
   GstVideoInfo out_info;   /* negotiated output format, for dma-buf output sizing */
   gboolean have_out_info;  /* whether the output caps are raw video */
+  gboolean have_out_planes; /* whether `out_planes` holds the tight layout of the output caps */
+  G2gBridgePlanes out_planes;
   GstAllocator *dmabuf_alloc; /* wraps a produced dma-buf fd into a GstBuffer */
 };
 
@@ -152,6 +169,63 @@ static gboolean gst_glass2glass_get_unit_size(GstBaseTransform *base, GstCaps *c
   return TRUE;
 }
 
+/* ---- row layout ---------------------------------------------------------- */
+/* GStreamer pads rows to 4 bytes by default and g2g packs them tight, so a system
+ * frame is copied between the two layouts unless they already agree. */
+
+static gboolean tight_planes(const gchar *caps, const GstVideoInfo *info, G2gBridgePlanes *planes) {
+  return g2g_bridge_tight_planes(caps, planes) &&
+         planes->n_planes == GST_VIDEO_INFO_N_PLANES(info);
+}
+
+static gboolean layout_is_tight(const G2gBridgePlanes *planes, const gsize *offsets,
+                                const gint *strides) {
+  for (guint i = 0; i < planes->n_planes; i++) {
+    if (offsets[i] != planes->offsets[i] || strides[i] != planes->strides[i])
+      return FALSE;
+  }
+  return TRUE;
+}
+
+static gboolean buffer_is_tight(GstBuffer *buf, const GstVideoInfo *info,
+                                const G2gBridgePlanes *planes) {
+  GstVideoMeta *meta = gst_buffer_get_video_meta(buf);
+  if (meta)
+    return layout_is_tight(planes, meta->offset, meta->stride);
+  return layout_is_tight(planes, info->offset, info->stride);
+}
+
+static GstBuffer *wrap_frame(guint8 *data, GstMemoryFlags flags, const GstVideoInfo *info,
+                             const G2gBridgePlanes *planes) {
+  GstBuffer *buf = gst_buffer_new_wrapped_full(flags, data, planes->size, 0, planes->size, NULL, NULL);
+  gsize offsets[GST_VIDEO_MAX_PLANES] = {0};
+  gint strides[GST_VIDEO_MAX_PLANES] = {0};
+  for (guint i = 0; i < planes->n_planes; i++) {
+    offsets[i] = planes->offsets[i];
+    strides[i] = planes->strides[i];
+  }
+  gst_buffer_add_video_meta_full(buf, GST_VIDEO_FRAME_FLAG_NONE, GST_VIDEO_INFO_FORMAT(info),
+                                 GST_VIDEO_INFO_WIDTH(info), GST_VIDEO_INFO_HEIGHT(info),
+                                 planes->n_planes, offsets, strides);
+  return buf;
+}
+
+/* a buffer without a GstVideoMeta is read in the default layout of `info` */
+static gboolean copy_frame(GstBuffer *dst, GstBuffer *src, const GstVideoInfo *info) {
+  GstVideoFrame src_frame;
+  GstVideoFrame dst_frame;
+  if (!gst_video_frame_map(&src_frame, info, src, GST_MAP_READ))
+    return FALSE;
+  if (!gst_video_frame_map(&dst_frame, info, dst, GST_MAP_WRITE)) {
+    gst_video_frame_unmap(&src_frame);
+    return FALSE;
+  }
+  gboolean copied = gst_video_frame_copy(&dst_frame, &src_frame);
+  gst_video_frame_unmap(&dst_frame);
+  gst_video_frame_unmap(&src_frame);
+  return copied;
+}
+
 /* ---- transform vmethods -------------------------------------------------- */
 /* Build the sub-graph once caps are fixed. `incaps` describes the buffers the
  * embedded appsrc receives; `outcaps` (== incaps for a preserving fragment) the
@@ -165,27 +239,28 @@ static gboolean gst_glass2glass_set_caps(GstBaseTransform *base, GstCaps *incaps
     self->bridge = NULL;
   }
 
-  GstVideoInfo ininfo;
-  self->in_stride = video_info_from_caps(&ininfo, incaps)
-                        ? (guint)GST_VIDEO_INFO_PLANE_STRIDE(&ininfo, 0)
-                        : 0;
+  gboolean have_in_info = video_info_from_caps(&self->in_info, incaps);
+  self->in_stride = have_in_info ? (guint)GST_VIDEO_INFO_PLANE_STRIDE(&self->in_info, 0) : 0;
   self->have_out_info = video_info_from_caps(&self->out_info, outcaps);
 
-  gchar *instr = self->input_caps ? g_strdup(self->input_caps) : gst_caps_to_string(incaps);
+  gchar *negotiated_in = gst_caps_to_string(incaps);
   gchar *outstr = gst_caps_to_string(outcaps);
+  self->have_in_planes = have_in_info && tight_planes(negotiated_in, &self->in_info, &self->in_planes);
+  self->have_out_planes =
+      self->have_out_info && tight_planes(outstr, &self->out_info, &self->out_planes);  const gchar *instr = self->input_caps ? self->input_caps : negotiated_in;
   const char *frag = self->fragment ? self->fragment : "identity";
   self->bridge = g2g_bridge_create(frag, instr, outstr);
   if (!self->bridge)
     GST_ERROR_OBJECT(self, "failed to build g2g sub-graph: fragment=\"%s\" in=\"%s\" out=\"%s\"",
                      frag, instr, outstr);
-  g_free(instr);
+  g_free(negotiated_in);
   g_free(outstr);
   return self->bridge != NULL;
 }
 
 /* Push one input buffer into the sub-graph. A dma-buf-backed buffer is imported
  * zero-copy (the fd, not the mapped bytes); any other memory is mapped and its
- * bytes copied in. */
+ * bytes copied in, repacked into tight rows when GStreamer's rows are padded. */
 static gboolean push_input(GstGlass2Glass *self, GstBuffer *in) {
   guint64 pts = GST_BUFFER_PTS_IS_VALID(in) ? GST_BUFFER_PTS(in) : 0;
   GstMemory *mem = gst_buffer_peek_memory(in, 0);
@@ -199,10 +274,21 @@ static gboolean push_input(GstGlass2Glass *self, GstBuffer *in) {
     }
     return g2g_bridge_push_dmabuf(self->bridge, fd, stride, offset, pts);
   }
+  if (self->have_in_planes && !buffer_is_tight(in, &self->in_info, &self->in_planes)) {
+    guint8 *tight = g_malloc(self->in_planes.size);
+    GstBuffer *dst = wrap_frame(tight, 0, &self->in_info, &self->in_planes);
+    gboolean ok = copy_frame(dst, in, &self->in_info) &&
+                  g2g_bridge_push_buf(self->bridge, tight, self->in_planes.size, pts);
+    gst_buffer_unref(dst);
+    g_free(tight);
+    return ok;
+  }
   GstMapInfo map;
   if (!gst_buffer_map(in, &map, GST_MAP_READ))
     return FALSE;
-  gboolean ok = g2g_bridge_push_buf(self->bridge, map.data, map.size, pts);
+  /* GStreamer's buffer may run past the last tight row */
+  gsize len = self->have_in_planes ? MIN(map.size, self->in_planes.size) : map.size;
+  gboolean ok = g2g_bridge_push_buf(self->bridge, map.data, len, pts);
   gst_buffer_unmap(in, &map);
   return ok;
 }
@@ -234,7 +320,8 @@ static void release_held_frame(gpointer held) {
 }
 
 /* Build the downstream buffer from a pulled frame: a system frame becomes an
- * owned GstBuffer (bytes copied); a dma-buf frame is wrapped zero-copy into a
+ * owned GstBuffer (bytes copied, into GStreamer's padded rows when they differ
+ * from g2g's tight ones); a dma-buf frame is wrapped zero-copy into a
  * dma-buf GstBuffer (its fd dup'ed, so the g2g frame keeps its own), and the
  * frame moves onto that memory, clearing `out->owner`. */
 static GstBuffer *wrap_output(GstGlass2Glass *self, G2gOut *out) {
@@ -268,6 +355,25 @@ static GstBuffer *wrap_output(GstGlass2Glass *self, G2gOut *out) {
                                      GST_VIDEO_INFO_WIDTH(info), GST_VIDEO_INFO_HEIGHT(info),
                                      GST_VIDEO_INFO_N_PLANES(info), offsets, strides);
     return buf;
+  }
+  const G2gBridgePlanes *planes = &self->out_planes;
+  if (self->have_out_planes &&
+      !layout_is_tight(planes, self->out_info.offset, self->out_info.stride)) {
+    if (out->len < planes->size)
+      return NULL;
+    GstBuffer *src = wrap_frame((guint8 *)out->data, GST_MEMORY_FLAG_READONLY, &self->out_info,
+                                planes);
+    gsize size = GST_VIDEO_INFO_SIZE(&self->out_info);
+    GstBuffer *dst = gst_buffer_new_allocate(NULL, size, NULL);
+    /* the row padding would otherwise carry whatever the allocator left there */
+    gboolean copied = dst && gst_buffer_memset(dst, 0, 0, size) == size &&
+                      copy_frame(dst, src, &self->out_info);
+    gst_buffer_unref(src);
+    if (!copied && dst) {
+      gst_buffer_unref(dst);
+      dst = NULL;
+    }
+    return dst;
   }
   GstBuffer *buf = gst_buffer_new_allocate(NULL, out->len, NULL);
   if (!buf)
@@ -400,9 +506,14 @@ static void gst_glass2glass_init(GstGlass2Glass *self) {
   self->output_caps = NULL;
   self->bridge = NULL;
   self->in_stride = 0;
+  self->have_in_planes = FALSE;
   self->have_out_info = FALSE;
+  self->have_out_planes = FALSE;
   self->dmabuf_alloc = NULL;
 }
+
+size_t g2g_bridge_planes_size(void);
+size_t g2g_bridge_planes_size(void) { return sizeof(G2gBridgePlanes); }
 
 /* ---- plugin init --------------------------------------------------------- */
 /* The plugin entry points (`gst_plugin_glass2glass_get_desc` / `_register`) and

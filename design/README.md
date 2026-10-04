@@ -956,6 +956,18 @@ the bytes that come out with the ones that went in. A system frame makes the sam
 trip with a first fragment of `wgpuupload ! wgputodmabuf` and `memory:DMABuf`
 output caps. A tiled `gldownload` dma-buf must fail negotiation there.
 
+A raw video system frame is laid out differently on the two sides: GStreamer pads
+each row to 4 bytes by default, and a g2g frame is tightly packed. At `set_caps` the
+shell asks `g2g_bridge_tight_planes` for the tight plane offsets and strides of the
+input and output caps, computed in Rust by `g2g_plugins::gstplanes`, the same code
+`gstwrap` uses. An input buffer whose layout (its `GstVideoMeta`, else the caps'
+default) already matches is pushed as mapped. Otherwise `gst_video_frame_copy`
+repacks it into tight rows first. A pulled system frame is copied into a zeroed
+default-layout buffer the same way, unless the two layouts match. The C side of the
+copy is repeated in `gstwrap_host.c`, since the two crates build their C
+separately. `tools/gst-bridge-smoke.sh` compares the shell's output with GStreamer's
+own element at 37- and 38-pixel rows and at aligned sizes.
+
 The plugin entry points are subtle. rustc exports only its own `#[no_mangle]`
 symbols from a cdylib and localizes anything pulled from a statically-linked C
 archive, so a C `GST_PLUGIN_DEFINE` descriptor is invisible to GStreamer's loader.
@@ -999,7 +1011,7 @@ hands the hosted element's dma-buf output on.
 A raw video system frame crosses in GStreamer's default `GstVideoInfo` layout,
 whose rows are padded to 4 bytes, while a g2g frame is tightly packed. The Rust
 side computes each plane's offset and stride from the g2g-core plane functions
-(or the frame's `PlaneLayout`) and passes them through the C ABI. The helper
+(or the frame's `PlaneLayout`) in `gstplanes` and passes them through the C ABI. The helper
 wraps the bytes in a buffer carrying that `GstVideoMeta` and
 `gst_video_frame_copy`s it into a default-layout buffer. Output goes the other way
 into the tight layout of the announced caps, reading the sample's own

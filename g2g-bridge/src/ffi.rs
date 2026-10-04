@@ -14,7 +14,8 @@ use core::slice;
 
 use g2g_core::Frame;
 
-use g2g_plugins::capsfilter::normalize_gst_caps;
+use g2g_plugins::capsfilter::{normalize_gst_caps, parse_caps};
+use g2g_plugins::gstplanes::GstVideoPlanes;
 
 use crate::bridge::BridgeGraph;
 
@@ -209,6 +210,36 @@ pub unsafe extern "C" fn g2g_bridge_create(
     }
 }
 
+/// Fill `*out` with where each plane of a tightly packed frame of `caps` (a
+/// GStreamer caps string) sits, the layout g2g frames use. Returns 1 for fixed
+/// raw video caps, 0 for anything else (encoded, dma-buf, unparseable) or a null
+/// argument.
+///
+/// # Safety
+/// `caps` must be a valid NUL-terminated C string (or null); `out` must point to
+/// a writable [`GstVideoPlanes`] (or be null).
+#[no_mangle]
+pub unsafe extern "C" fn g2g_bridge_tight_planes(
+    caps: *const c_char,
+    out: *mut GstVideoPlanes,
+) -> c_int {
+    // SAFETY: caller contract on `caps`.
+    let Some(caps) = (unsafe { opt_str(caps) }) else {
+        return 0;
+    };
+    let planes = parse_caps(&normalize_gst_caps(caps))
+        .as_ref()
+        .and_then(GstVideoPlanes::tight_for_caps);
+    // SAFETY: caller contract: `out` is null or writable.
+    match (planes, unsafe { out.as_mut() }) {
+        (Some(planes), Some(out)) => {
+            *out = planes;
+            1
+        }
+        _ => 0,
+    }
+}
+
 /// Push one buffer (copied) into the sub-graph, retrying briefly if the feed is
 /// momentarily full. Returns 1 on success, 0 if it stayed full (the graph is
 /// wedged) or the handle is null.
@@ -389,4 +420,20 @@ unsafe fn opt_str<'a>(p: *const c_char) -> Option<&'a str> {
     }
     // SAFETY: caller contract on `p`.
     unsafe { core::ffi::CStr::from_ptr(p) }.to_str().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    extern "C" {
+        fn g2g_bridge_planes_size() -> usize;
+    }
+
+    #[test]
+    fn planes_match_the_c_struct() {
+        // SAFETY: returns a sizeof, no arguments.
+        let c_size = unsafe { g2g_bridge_planes_size() };
+        assert_eq!(c_size, core::mem::size_of::<GstVideoPlanes>());
+    }
 }

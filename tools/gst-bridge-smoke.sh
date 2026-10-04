@@ -96,4 +96,45 @@ case "$rate_rc" in
   *) echo "  PASS mismatched framerate fails fast (exit $rate_rc)" ;;
 esac
 
+echo "== row layout checks (glass2glass matches GStreamer's own element) =="
+# Both outputs are converted losslessly to 4-byte pixels, whose rows GStreamer never
+# pads, because GStreamer leaves its own row padding uninitialized.
+same_as_gst() { # label input-caps gst-element fragment output-caps(empty: preserving) unpadded-format
+  local label=$1 in_caps=$2 element=$3 fragment=$4 out_caps=$5 unpadded_format=$6
+  local reference_caps=${out_caps:-$in_caps}
+  local output_caps_property=()
+  [ -n "$out_caps" ] && output_caps_property=("output-caps=$out_caps")
+  rm -f "$work/reference.raw" "$work/bridged.raw"
+  gst-launch-1.0 videotestsrc num-buffers=1 ! "$in_caps" ! $element ! "$reference_caps" \
+    ! videoconvert ! "video/x-raw,format=$unpadded_format" \
+    ! filesink location="$work/reference.raw" >/dev/null 2>&1 || true
+  gst-launch-1.0 videotestsrc num-buffers=1 ! "$in_caps" \
+    ! glass2glass fragment="$fragment" "${output_caps_property[@]}" \
+    ! videoconvert ! "video/x-raw,format=$unpadded_format" \
+    ! filesink location="$work/bridged.raw" >/dev/null 2>&1 || true
+  local size
+  size=$(stat -c%s "$work/reference.raw" 2>/dev/null || echo 0)
+  if [ "$size" != 0 ] && cmp -s "$work/reference.raw" "$work/bridged.raw"; then
+    echo "  PASS $label ($size bytes)"
+  else
+    echo "FAIL $label: $(stat -c%s "$work/bridged.raw" 2>/dev/null || echo 0) bytes differ from GStreamer's $size"
+    fail=1
+  fi
+}
+raw() { echo "video/x-raw,format=$1,width=$2,height=$3,framerate=1/1"; }
+flip="videoflip method=vertical-flip"
+# 37 and 38-pixel rows are not a multiple of 4 bytes, so GStreamer pads them and g2g does not.
+for size in "37 3" "64 4"; do
+  same_as_gst "identity RGB $size" "$(raw RGB $size)" identity identity "" RGBA
+  same_as_gst "videoconvert RGB->RGBA $size" "$(raw RGB $size)" videoconvert videoconvert "$(raw RGBA $size)" RGBA
+  same_as_gst "videoconvert RGBA->RGB $size" "$(raw RGBA $size)" videoconvert videoconvert "$(raw RGB $size)" RGBA
+done
+for format in I420 NV12; do
+  same_as_gst "identity $format 37 5" "$(raw $format 37 5)" identity identity "" AYUV
+  # g2g's videoflip refuses odd 4:2:0 sizes
+  for size in "38 6" "64 4"; do
+    same_as_gst "vertical flip $format $size" "$(raw $format $size)" "$flip" "$flip" "" AYUV
+  done
+done
+
 [ "$fail" = 0 ] && echo "== all bridge smoke checks passed ==" || { echo "== bridge smoke FAILED =="; exit 1; }

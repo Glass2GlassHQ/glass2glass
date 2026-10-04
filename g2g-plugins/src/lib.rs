@@ -320,6 +320,8 @@ pub mod wgpusink;
 // Reads a wgpu texture or buffer frame back to system memory (`wgpudownload`).
 #[cfg(feature = "wgpu-sink")]
 pub mod wgpudownload;
+// The tight plane layout handed to the GStreamer C code of `gstwrap` and g2g-bridge.
+pub mod gstplanes;
 // Copies a system frame into a wgpu buffer (`wgpuupload`).
 #[cfg(feature = "wgpu-sink")]
 pub mod wgpuupload;
