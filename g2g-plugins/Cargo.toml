@@ -29,7 +29,7 @@ linux-full = [
     "remote", "remote-ws", "webtransport", "moqt",
     "http-src", "hls", "dash",
     "ffmpeg", "vaapi", "v4l2",
-    "opus", "vorbis", "vpx", "av1-encode", "mjpeg", "mjpeg-encode", "png", "webp",
+    "opus", "vorbis", "webrtcdsp", "vpx", "av1-encode", "mjpeg", "mjpeg-encode", "png", "webp",
     "alsa-sink", "alsa-src", "pulse-sink", "pulse-src", "pipewire", "portal",
     "wayland-sink", "kms-sink", "wgpu-sink", "wgpu-present", "vello-overlay", "analytics",
     "analytics-json", "mqtt", "embedding-index",
@@ -683,6 +683,10 @@ mozjpeg = ["mjpeg", "mjpeg-encode", "dep:mozjpeg"]
 # so it is gated and excluded from pure-Rust / no_std builds. Implies std. v1 is
 # 48 kHz mono/stereo S16LE <-> Opus, the rate Opus always decodes at.
 opus = ["std", "dep:audiopus"]
+# WebRTC audio processing (webrtcdsp + webrtcechoprobe): echo cancellation, noise
+# suppression, gain control and a high-pass filter via `sonora`, a pure-Rust port
+# of WebRTC's audio processing module. No system deps. Implies std.
+webrtcdsp = ["std", "dep:sonora"]
 # Vorbis audio decode (VorbisDec) via symphonia's pure-Rust decoder: the Ogg /
 # WebM audio codec preceding Opus. No system deps. Implies std.
 vorbis = ["std", "dep:symphonia-core", "dep:symphonia-codec-vorbis"]
@@ -856,6 +860,9 @@ image-webp = { version = "0.2", optional = true }
 # mis-locates the lib on multiarch lib64 layouts, so the dev package is the
 # supported path. Gated + std-only, excluded from no_std builds.
 audiopus = { version = "0.3.0-rc.0", optional = true }
+# Pure-Rust port of WebRTC's audio processing module (webrtcdsp feature): AEC3,
+# noise suppression, AGC2, high-pass filter. BSD-3-Clause, MSRV 1.91.
+sonora = { version = "0.2", optional = true }
 # Pure-Rust Vorbis decoder (vorbis feature) for VorbisDec. symphonia is the
 # maintained pure-Rust codec suite (lewton is dormant); only the vorbis codec
 # crate + core are pulled, not the demuxers.

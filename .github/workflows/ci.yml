@@ -375,6 +375,10 @@ jobs:
       # feature set above is only checked, so the opus-gated tests run here.
       - name: test g2g-plugins (opus codec + properties)
         run: cargo test -p g2g-plugins --locked --features std,opus --test m454_element_properties --test m177_opus_codec
+      # WebRTC echo cancellation, noise suppression and gain control (M1218)
+      # through the pure-Rust sonora port, no system library needed.
+      - name: test g2g-plugins (webrtcdsp)
+        run: cargo test -p g2g-plugins --locked --features webrtcdsp --test m1218_webrtcdsp
       # Codec quality harness (M1001): the decoder goldens over the committed
       # fixtures, and the encode / decode PSNR floors for the encoders that need
       # no special hardware. Both persist `Quality` conformance evidence.

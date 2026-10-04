@@ -230,6 +230,8 @@ use crate::vpxenc::VpxEnc;
 use crate::waylandsink::WaylandSink;
 #[cfg(feature = "webp")]
 use crate::webpdec::WebPDec;
+#[cfg(feature = "webrtcdsp")]
+use crate::webrtcdsp::{WebrtcDsp, WebrtcEchoProbe};
 #[cfg(feature = "webrtc")]
 use crate::webrtcsink::WebRtcSink;
 #[cfg(feature = "webrtc")]
@@ -2418,6 +2420,8 @@ pub static FEATURE_GATED_ELEMENTS: &[FeatureGatedElement] = &{
         "opusenc" => "opus";
         "opusdec" => "opus";
         "vorbisdec" => "vorbis";
+        "webrtcdsp" => "webrtcdsp";
+        "webrtcechoprobe" => "webrtcdsp";
         "av1enc" => "av1-encode";
         "vpxenc" => "vpx";
         "mjpegdec" => "mjpeg";
@@ -2616,6 +2620,16 @@ fn register_feature_gated(reg: &mut Registry) {
     reg.register_launch(LaunchFactory::of::<VorbisDec>("vorbisdec", || {
         Box::new(VorbisDec::new())
     }));
+    #[cfg(feature = "webrtcdsp")]
+    {
+        reg.register_launch(LaunchFactory::of::<WebrtcDsp>("webrtcdsp", || {
+            Box::new(WebrtcDsp::new())
+        }));
+        reg.register_launch(LaunchFactory::of::<WebrtcEchoProbe>(
+            "webrtcechoprobe",
+            || Box::new(WebrtcEchoProbe::new()),
+        ));
+    }
     #[cfg(feature = "av1-encode")]
     reg.register_launch(LaunchFactory::of::<Av1Enc>("av1enc", || {
         Box::new(Av1Enc::new())

@@ -169,6 +169,39 @@ kernel's own exporter (a sealed memfd through `/dev/udmabuf`) and played through
 without making a sound; the other two sinks read their payload through the same
 `dmabufmap` reader.
 
+## Echo cancellation
+
+`webrtcdsp` and `webrtcechoprobe` (`webrtcdsp` feature) are GStreamer's voice
+processing pair over `sonora`, a pure-Rust port of WebRTC's audio processing
+module: AEC3 echo cancellation, noise suppression, AGC2 gain control and a
+high-pass filter. Both take interleaved `PcmS16Le` or `PcmF32Le` at 8, 16, 32
+or 48 kHz.
+
+The probe sits on the playback path and forwards its input unchanged, keeping
+the last 2 s of it with the pts of each buffer. It registers in a process-wide
+list under its `probe-name` (default `webrtcechoprobe0`), since an element
+never learns its launch-line `name=`. On configure, `webrtcdsp` acquires the
+first unclaimed probe whose name equals its `probe` property, and fails with
+`NotConfigured` when echo cancellation is on and none matches, or with
+`CapsMismatch` when the probe runs at another rate. Channel counts may differ.
+
+The dsp owns the processor. It cuts the capture stream into 10 ms periods
+and, for each one, pulls the far-end period whose timestamps match, as
+`gst_webrtc_echo_probe_read` does: far-end samples older than the capture
+period are dropped and a far end that starts later is padded with leading
+silence. That far-end period goes to the render side, its lead over the
+capture period goes to `set_stream_delay_ms` (0 without timestamps), and the
+capture period is processed. GStreamer adds the probe's downstream sink latency
+to that delay. g2g has no latency query, so that term is zero, and AEC3
+estimates the echo path delay itself.
+
+Each input frame yields one output frame holding every whole period it
+completed, stamped from the input pts plus the samples consumed. At EOS the
+partial period left over is padded with silence, processed, and emitted at its
+real length, so samples out equal samples in. The added latency is one period,
+reported through `latency()`. A property set at runtime re-applies the
+processor config.
+
 ## Device discovery
 
 The `GstDeviceProvider` and `GstDeviceMonitor` analog is in

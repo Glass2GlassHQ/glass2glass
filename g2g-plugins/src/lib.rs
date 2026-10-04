@@ -1177,6 +1177,10 @@ pub mod opusenc;
 // Vorbis decode, pure Rust via symphonia. Gated behind the `vorbis` feature.
 #[cfg(feature = "vorbis")]
 pub mod vorbisdec;
+// WebRTC echo cancellation, noise suppression and gain control, pure Rust via
+// sonora. Gated behind the `webrtcdsp` feature.
+#[cfg(feature = "webrtcdsp")]
+pub mod webrtcdsp;
 
 // HTTP(S) byte-stream source via reqwest (the fetch layer under HLS/DASH).
 #[cfg(feature = "http-src")]

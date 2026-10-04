@@ -225,6 +225,18 @@ the C `intervideosink`/`interaudiosink`/`intersubsink` families. The
 table lives in [g2g-plugins/src/gst_compat.rs](g2g-plugins/src/gst_compat.rs)
 and is easy to extend.
 
+`webrtcdsp` / `webrtcechoprobe` (`webrtcdsp` feature) pair through the
+probe's `probe-name` property rather than its element name, since a g2g element
+never sees its `name=`: write `webrtcechoprobe probe-name=<name>` and
+`webrtcdsp probe=<name>`, or leave both at the default `webrtcechoprobe0`. Gain
+control is AGC2, so `gain-control-mode` takes `adaptive-digital` or
+`fixed-digital`, `target-level-dbfs` sets the adaptive target and
+`compression-gain-db` (at most 49) the fixed gain. `limiter`,
+`startup-min-volume`, `voice-detection` and its frame-size and likelihood
+companions, `echo-suppression-level`, `delay-agnostic`, `extended-filter` and
+`experimental-agc` are not provided: AGC2's limiter is always on, there is no
+voice-activity flag, and GStreamer's own build ignores the rest.
+
 **One gst element splits in two:** `videoconvert` changes the pixel format and
 carries the colorimetry through unchanged, and `colorspace` changes what the
 samples *mean* (matrix, range, transfer, primaries) at a fixed pixel format. A
