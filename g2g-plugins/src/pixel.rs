@@ -111,12 +111,13 @@ pub(crate) fn plane_shapes(
     w: usize,
     h: usize,
 ) -> Option<alloc::vec::Vec<(usize, usize)>> {
-    (0..format.plane_count())
-        .map(|plane| {
-            let (_, row_bytes, rows) = tight_plane(format, plane, w, h)?;
-            Some((row_bytes, rows))
-        })
-        .collect()
+    let shapes = crate::paddedrows::plane_shapes_with_stride_shift(format, w, h)?;
+    Some(
+        shapes
+            .into_iter()
+            .map(|(row_bytes, rows, _)| (row_bytes, rows))
+            .collect(),
+    )
 }
 
 /// Byte width of one row of `format`'s **first** plane at `w` pixels: the row
