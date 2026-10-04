@@ -5409,7 +5409,7 @@ fn require_even_two_plane_texture(width: u32, height: u32) -> Result<(), VulkanV
     }
 }
 
-// a transfer-only queue needs each copy's bufferOffset on a 4-byte boundary, which also covers the P010 CbCr texel
+// a copy on a transfer-only queue needs its bufferOffset on a 4-byte boundary
 const READBACK_PLANE_ALIGNMENT: u64 = 4;
 
 // where the two planes of one `width` x `height` picture land in a host-visible readback buffer
@@ -5444,7 +5444,7 @@ impl ReadbackLayout {
         self.chroma_offset + self.chroma_len
     }
 
-    // the chroma copy covers the odd last column and row, which the coded picture holds
+    // the coded image holds the chroma of an odd last column and row
     fn copy_regions(
         &self,
         base_offset: u64,
