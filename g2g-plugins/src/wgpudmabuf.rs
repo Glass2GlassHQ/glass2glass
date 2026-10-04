@@ -61,12 +61,10 @@
 //! `VK_EXT_external_memory_dma_buf` *export* support (validated on the RTX 3060 via
 //! `dmabuf_export_probe`). CI-excluded like the rest of the GPU stack.
 
-use core::any::Any;
 use core::future::Future;
 use core::pin::Pin;
 
 use alloc::boxed::Box;
-use alloc::sync::Arc;
 
 use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
 
@@ -75,7 +73,6 @@ use ash::vk;
 use g2g_core::log::{short_type_name, Target};
 use g2g_core::memory::{
     DomainSet, MemoryDomain, MemoryDomainKind, OwnedDmaBuf, OwnedWgpuBuffer, SyncFd,
-    WgpuBufferKeepAlive,
 };
 use g2g_core::meta::PlaneLayout;
 use g2g_core::pad_template::{PadTemplate, PadTemplates};
@@ -84,9 +81,8 @@ use g2g_core::{
     HardwareError, OutputSink, PipelinePacket, Rate, RawVideoFormat,
 };
 
-use crate::dmabufwgpu::{
-    single_stride_layout, whole_word_size, DmaBufWgpuBuffer, DMABUF_FRAME_FORMATS,
-};
+use crate::dmabufwgpu::{single_stride_layout, DmaBufWgpuBuffer, DMABUF_FRAME_FORMATS};
+use crate::wgpubuffer::{whole_word_size, PlainWgpuBuffer};
 
 fn gpu_err() -> G2gError {
     G2gError::Hardware(HardwareError::Other)
@@ -94,37 +90,6 @@ fn gpu_err() -> G2gError {
 
 fn supported(format: RawVideoFormat) -> bool {
     DMABUF_FRAME_FORMATS.contains(&format)
-}
-
-/// Owner for a plain exportable-device `wgpu::Buffer`: what
-/// [`WgpuToDmaBuf::wrap_buffer`] attaches so a producer on the element's device
-/// hands it a `WgpuBuffer` frame this element can recover and copy from.
-#[derive(Debug)]
-pub struct PlainWgpuBuffer {
-    buffer: wgpu::Buffer,
-    device: wgpu::Device,
-    queue: wgpu::Queue,
-}
-
-impl PlainWgpuBuffer {
-    /// The wrapped buffer.
-    pub fn buffer(&self) -> &wgpu::Buffer {
-        &self.buffer
-    }
-
-    pub fn device(&self) -> &wgpu::Device {
-        &self.device
-    }
-
-    pub fn queue(&self) -> &wgpu::Queue {
-        &self.queue
-    }
-}
-
-impl WgpuBufferKeepAlive for PlainWgpuBuffer {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
 }
 
 /// Recover the input `wgpu::Buffer` and the device and queue it lives on from a
@@ -278,14 +243,7 @@ impl WgpuToDmaBuf {
         buffer: wgpu::Buffer,
         len: usize,
     ) -> OwnedWgpuBuffer {
-        OwnedWgpuBuffer::new(
-            len,
-            Arc::new(PlainWgpuBuffer {
-                buffer,
-                device: device.clone(),
-                queue: queue.clone(),
-            }),
-        )
+        crate::wgpubuffer::wrap_buffer(device, queue, buffer, len)
     }
 
     /// Export on `device` from now on, or fail when it cannot export or another

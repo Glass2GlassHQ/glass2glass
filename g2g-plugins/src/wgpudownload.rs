@@ -124,15 +124,13 @@ fn download_buffer(
 
 fn read_owned_buffer(owned: &OwnedWgpuBuffer) -> Result<Vec<u8>, G2gError> {
     let owner = owned.keep_alive();
+    let any = owner.as_any();
+    if let Some(b) = any.downcast_ref::<crate::wgpubuffer::PlainWgpuBuffer>() {
+        return read_buffer(b.device(), b.queue(), b.buffer(), owned.len);
+    }
     #[cfg(all(target_os = "linux", feature = "dmabuf-wgpu"))]
-    {
-        let any = owner.as_any();
-        if let Some(b) = any.downcast_ref::<crate::wgpudmabuf::PlainWgpuBuffer>() {
-            return read_buffer(b.device(), b.queue(), b.buffer(), owned.len);
-        }
-        if let Some(b) = any.downcast_ref::<crate::dmabufwgpu::DmaBufWgpuBuffer>() {
-            return read_buffer(b.device(), b.queue(), b.buffer(), owned.len);
-        }
+    if let Some(b) = any.downcast_ref::<crate::dmabufwgpu::DmaBufWgpuBuffer>() {
+        return read_buffer(b.device(), b.queue(), b.buffer(), owned.len);
     }
     Err(unreadable(MemoryDomainKind::WgpuBuffer, owner))
 }
@@ -145,14 +143,13 @@ fn unreadable(domain: MemoryDomainKind, owner: &dyn Debug) -> G2gError {
     G2gError::UnsupportedDomain
 }
 
-#[cfg(all(target_os = "linux", feature = "dmabuf-wgpu"))]
 fn read_buffer(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     buffer: &wgpu::Buffer,
     len: usize,
 ) -> Result<Vec<u8>, G2gError> {
-    let copy_size = crate::dmabufwgpu::whole_word_size(len as u64).ok_or(G2gError::CapsMismatch)?;
+    let copy_size = crate::wgpubuffer::whole_word_size(len as u64).ok_or(G2gError::CapsMismatch)?;
     if copy_size > buffer.size() {
         return Err(G2gError::CapsMismatch);
     }

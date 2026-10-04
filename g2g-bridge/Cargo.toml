@@ -26,7 +26,7 @@ std = ["g2g-core/std", "g2g-core/runtime", "g2g-core/multi-thread", "g2g-plugins
 # The GStreamer GObject shell (`csrc/gstglass2glass.c`, built by build.rs via
 # pkg-config + cc). Links the system gstreamer-1.0 / gstreamer-base-1.0.
 gstreamer = ["std"]
-# Registers `wgpucompositor` and `wgpudownload`, so a `fragment` can use them,
+# Registers `wgpucompositor`, `wgpuupload` and `wgpudownload`, so a `fragment` can use them,
 # and on Linux `dmabuftowgpu` and `wgputodmabuf` for dma-buf input and output
 # (g2g-plugins compiles those two out elsewhere).
 wgpu = ["std", "g2g-plugins/wgpu-sink", "g2g-plugins/dmabuf-wgpu"]

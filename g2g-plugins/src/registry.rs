@@ -419,6 +419,17 @@ fn domain_converter(
             crate::wgpudownload::WgpuDownload::new(),
         ));
     }
+    #[cfg(feature = "wgpu-sink")]
+    if (from, to)
+        == (
+            g2g_core::MemoryDomainKind::System,
+            g2g_core::MemoryDomainKind::WgpuBuffer,
+        )
+    {
+        return Some(g2g_core::runtime::GraphNode::element(
+            crate::wgpuupload::WgpuUpload::new(),
+        ));
+    }
     None
 }
 
@@ -2496,6 +2507,7 @@ pub static FEATURE_GATED_ELEMENTS: &[FeatureGatedElement] = &{
         "embeddingsink" => "embedding-index";
         "wgpucompositor" => "wgpu-sink";
         "wgpudownload" => "wgpu-sink";
+        "wgpuupload" => "wgpu-sink";
         "gstwrap" => "gstreamer";
         "mp4mux" => "std";
         "localcudasrc" => "local-ipc" on "linux";
@@ -3229,6 +3241,11 @@ fn register_feature_gated(reg: &mut Registry) {
     #[cfg(feature = "wgpu-sink")]
     reg.register_launch(LaunchFactory::new("wgpudownload", Vec::new(), || {
         Box::new(crate::wgpudownload::WgpuDownload::new())
+    }));
+    // A system frame into a GPU-resident wgpu buffer.
+    #[cfg(feature = "wgpu-sink")]
+    reg.register_launch(LaunchFactory::new("wgpuupload", Vec::new(), || {
+        Box::new(crate::wgpuupload::WgpuUpload::new())
     }));
     // Export mirror (M559): a GPU-resident wgpu buffer out to a dma-buf fd.
     #[cfg(all(target_os = "linux", feature = "dmabuf-wgpu"))]

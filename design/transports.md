@@ -824,6 +824,15 @@ subtracts its own base time.
 same pixels, so a rendered or decoded GPU frame leaves the process with no CPU
 copy. Feed the output to `DmaBufSink`.
 
+`wgpuupload` (the `wgpu-sink` feature) is how a system frame gets there. It copies
+the tight bytes into a `wgpu::Buffer` with `COPY_SRC | COPY_DST` usage, created
+mapped and sized up to wgpu's 4-byte copy alignment, and the frame keeps the exact
+length. The buffer sits on the `GpuContext` given through `with_context`, else on a
+headless device the element opens, and is owned by a `PlainWgpuBuffer`, the keep-alive
+`wgputodmabuf` and `wgpudownload` already recover their device from. It is the
+domain converter registered for System to `WgpuBuffer`, so `appsrc ! wgputodmabuf`
+gets it spliced.
+
 A wgpu-allocated buffer is not itself exportable, so the element allocates its
 own Vulkan buffer backed by `VkExportMemoryAllocateInfo` with the dma-buf handle
 type, copies the input into it on the GPU, and exports the memory as a dma-buf

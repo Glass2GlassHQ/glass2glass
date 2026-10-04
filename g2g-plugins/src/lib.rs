@@ -320,6 +320,15 @@ pub mod wgpusink;
 // Reads a wgpu texture or buffer frame back to system memory (`wgpudownload`).
 #[cfg(feature = "wgpu-sink")]
 pub mod wgpudownload;
+// Copies a system frame into a wgpu buffer (`wgpuupload`).
+#[cfg(feature = "wgpu-sink")]
+pub mod wgpuupload;
+// The owner of a `WgpuBuffer` frame's buffer, shared by upload, download and dma-buf export.
+#[cfg(any(
+    feature = "wgpu-sink",
+    all(target_os = "linux", feature = "dmabuf-wgpu")
+))]
+pub mod wgpubuffer;
 // Windowed wgpu display sink (`wgpusink` on a launch line): owns an
 // xdg_toplevel, builds the wgpu::Surface over it, and drives WgpuSink on it.
 #[cfg(all(target_os = "linux", feature = "wgpu-present"))]

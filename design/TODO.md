@@ -211,11 +211,6 @@ Highest leverage first:
   validated against reference gear (built from the RFCs, not yet
   interop-tested).
 
-## GStreamer bridge
-
-- A system-memory to `WgpuBuffer` upload element, so a bridge fragment can turn
-  system frames into dma-bufs through `wgputodmabuf`.
-
 ## Properties / introspection / DSL
 
 - A GUI / tooling introspection surface beyond the text dump.

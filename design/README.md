@@ -915,9 +915,9 @@ caps name the pixels as `format=DMA_DRM, drm-format=<fourcc>`. `BridgeGraph` map
 fourcc of each format `dmabuftowgpu` imports back to the plain format, and fails
 construction on any other fourcc or on a modifier suffix, since the import reads
 linear rows only. The shell reads such caps through `gst_video_info_dma_drm_*`.
-The wgpu elements, `wgpucompositor` and `wgpudownload`, are in the registry only
-with the crate's `wgpu` feature, which also brings in `dmabuftowgpu` and
-`wgputodmabuf` on Linux, so a plugin built with `--features gstreamer,wgpu` runs a
+The wgpu elements, `wgpucompositor`, `wgpuupload` and `wgpudownload`, are in the
+registry only with the crate's `wgpu` feature, which also brings in `dmabuftowgpu`
+and `wgputodmabuf` on Linux, so a plugin built with `--features gstreamer,wgpu` runs a
 GPU fragment inside `gst-launch-1.0` (`tools/gst-bridge-smoke.sh`).
 
 Zero-copy DMABUF import exists at the ingest side: `appsrc` accepts a
@@ -952,8 +952,9 @@ memfd-backed dma-buf (`tools/gst-bridge-dmabuf-smoke.sh`), and the system-memory
 path is unchanged (`tools/gst-bridge-smoke.sh`). The same script chains two
 `glass2glass` elements on `memory:DMABuf` caps, a linear GBM buffer through
 `dmabuftowgpu ! wgputodmabuf` and then `dmabuftowgpu ! wgpudownload`, and compares
-the bytes that come out with the ones that went in. A tiled `gldownload` dma-buf
-must fail negotiation there.
+the bytes that come out with the ones that went in. A system frame makes the same
+trip with a first fragment of `wgpuupload ! wgputodmabuf` and `memory:DMABuf`
+output caps. A tiled `gldownload` dma-buf must fail negotiation there.
 
 The plugin entry points are subtle. rustc exports only its own `#[no_mangle]`
 symbols from a cdylib and localizes anything pulled from a statically-linked C

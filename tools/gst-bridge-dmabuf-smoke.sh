@@ -9,7 +9,9 @@
 # A GPU case then chains two glass2glass elements on `memory:DMABuf` caps: a
 # linear GBM buffer goes through `dmabuftowgpu ! wgputodmabuf`, crosses
 # GStreamer as dma-buf memory, and comes back through `dmabuftowgpu !
-# wgpudownload` byte-for-byte. A tiled dma-buf from `gldownload` must fail fast.
+# wgpudownload` byte-for-byte. A system frame takes the same trip, entering the
+# first element through `wgpuupload ! wgputodmabuf`. A tiled dma-buf from
+# `gldownload` must fail fast.
 # Host GStreamer and GPU only, so validated locally, not in CI.
 #
 # Prerequisites: gstreamer-1.0, gstreamer-app-1.0, gstreamer-allocators-1.0,
@@ -168,6 +170,54 @@ static GstPadProbeReturn note_dmabuf(GstPad *pad, GstPadProbeInfo *info, gpointe
   return GST_PAD_PROBE_OK;
 }
 
+/* Push `buf` through `launch`, whose second glass2glass is named `down`, and
+ * check the frame crossed between the two as dma-buf memory and came out as `expected`. */
+static int run_gpu_chain(const char *launch, GstBuffer *buf, const guint8 *expected, gsize size,
+                         const char *description) {
+  GstElement *pipe = gst_parse_launch(launch, NULL);
+  if (!pipe) { g_printerr("  FAIL GPU pipeline build failed\n"); gst_buffer_unref(buf); return 1; }
+  GstElement *src = gst_bin_get_by_name(GST_BIN(pipe), "src");
+  GstElement *down = gst_bin_get_by_name(GST_BIN(pipe), "down");
+  GstElement *sink = gst_bin_get_by_name(GST_BIN(pipe), "sink");
+  GstPad *between = gst_element_get_static_pad(down, "sink");
+  saw_dmabuf_between = FALSE;
+  gst_pad_add_probe(between, GST_PAD_PROBE_TYPE_BUFFER, note_dmabuf, NULL, NULL);
+
+  gst_element_set_state(pipe, GST_STATE_PLAYING);
+  int rc = 1;
+  if (gst_app_src_push_buffer(GST_APP_SRC(src), buf) == GST_FLOW_OK) {
+    gst_app_src_end_of_stream(GST_APP_SRC(src));
+    GstSample *sample = gst_app_sink_pull_sample(GST_APP_SINK(sink));
+    GstMapInfo map;
+    if (!sample) {
+      g_printerr("  FAIL GPU chain: no output sample\n");
+    } else if (!saw_dmabuf_between) {
+      g_printerr("  FAIL GPU chain: the frame between the two elements is not dma-buf memory\n");
+    } else if (!gst_buffer_map(gst_sample_get_buffer(sample), &map, GST_MAP_READ)) {
+      g_printerr("  FAIL GPU chain: output does not map\n");
+    } else {
+      if (map.size == size && memcmp(map.data, expected, size) == 0) {
+        rc = 0;
+        g_print("  PASS %s -> same %" G_GSIZE_FORMAT " bytes\n", description, map.size);
+      } else {
+        g_printerr("  FAIL GPU chain: %" G_GSIZE_FORMAT " output bytes differ from the input\n", map.size);
+      }
+      gst_buffer_unmap(gst_sample_get_buffer(sample), &map);
+    }
+    if (sample) gst_sample_unref(sample);
+  } else {
+    g_printerr("  FAIL GPU chain: push failed\n");
+  }
+
+  gst_element_set_state(pipe, GST_STATE_NULL);
+  gst_object_unref(between);
+  gst_object_unref(src);
+  gst_object_unref(down);
+  gst_object_unref(sink);
+  gst_object_unref(pipe);
+  return rc;
+}
+
 /* Two glass2glass elements pass a GPU frame to each other as dma-buf memory. */
 static int chained_gpu_roundtrip(const char *render_node) {
   const int row_bytes = GPU_WIDTH * RGBA_BYTES_PER_PIXEL;
@@ -194,14 +244,6 @@ static int chained_gpu_roundtrip(const char *render_node) {
       "glass2glass name=down fragment=\"dmabuftowgpu ! wgpudownload\" "
       "output-caps=\"video/x-raw,format=RGBA,width=%d,height=%d,framerate=1/1\" ! "
       "appsink name=sink", RGBA_DRM_FORMAT, GPU_WIDTH, GPU_HEIGHT, GPU_WIDTH, GPU_HEIGHT);
-  GstElement *pipe = gst_parse_launch(launch, NULL);
-  g_free(launch);
-  if (!pipe) { g_printerr("  FAIL GPU pipeline build failed\n"); return 1; }
-  GstElement *src = gst_bin_get_by_name(GST_BIN(pipe), "src");
-  GstElement *down = gst_bin_get_by_name(GST_BIN(pipe), "down");
-  GstElement *sink = gst_bin_get_by_name(GST_BIN(pipe), "sink");
-  GstPad *between = gst_element_get_static_pad(down, "sink");
-  gst_pad_add_probe(between, GST_PAD_PROBE_TYPE_BUFFER, note_dmabuf, NULL, NULL);
 
   GstAllocator *alloc = gst_dmabuf_allocator_new();
   GstBuffer *buf = gst_buffer_new();
@@ -215,51 +257,47 @@ static int chained_gpu_roundtrip(const char *render_node) {
                                    GPU_HEIGHT, 1, offsets, strides);
   }
 
-  gst_element_set_state(pipe, GST_STATE_PLAYING);
-  int rc = 1;
-  if (gst_app_src_push_buffer(GST_APP_SRC(src), buf) == GST_FLOW_OK) {
-    gst_app_src_end_of_stream(GST_APP_SRC(src));
-    GstSample *sample = gst_app_sink_pull_sample(GST_APP_SINK(sink));
-    GstMapInfo map;
-    if (!sample) {
-      g_printerr("  FAIL GPU chain: no output sample\n");
-    } else if (!saw_dmabuf_between) {
-      g_printerr("  FAIL GPU chain: the frame between the two elements is not dma-buf memory\n");
-    } else if (!gst_buffer_map(gst_sample_get_buffer(sample), &map, GST_MAP_READ)) {
-      g_printerr("  FAIL GPU chain: output does not map\n");
-    } else {
-      if (map.size == sizeof expected && memcmp(map.data, expected, sizeof expected) == 0) {
-        rc = 0;
-        g_print("  PASS linear dma-buf RGBA %dx%d stride %u -> glass2glass(dmabuftowgpu ! wgputodmabuf) "
-                "-> dma-buf -> glass2glass(dmabuftowgpu ! wgpudownload) -> same %" G_GSIZE_FORMAT " bytes\n",
-                GPU_WIDTH, GPU_HEIGHT, stride, map.size);
-      } else {
-        g_printerr("  FAIL GPU chain: %" G_GSIZE_FORMAT " output bytes differ from the input\n", map.size);
-      }
-      gst_buffer_unmap(gst_sample_get_buffer(sample), &map);
-    }
-    if (sample) gst_sample_unref(sample);
-  } else {
-    g_printerr("  FAIL GPU chain: push failed\n");
-  }
-
-  gst_element_set_state(pipe, GST_STATE_NULL);
-  gst_object_unref(between);
+  gchar *description = g_strdup_printf(
+      "linear dma-buf RGBA %dx%d stride %u -> glass2glass(dmabuftowgpu ! wgputodmabuf) "
+      "-> dma-buf -> glass2glass(dmabuftowgpu ! wgpudownload)", GPU_WIDTH, GPU_HEIGHT, stride);
+  int rc = run_gpu_chain(launch, buf, expected, sizeof expected, description);
+  g_free(description);
+  g_free(launch);
   gst_object_unref(alloc);
-  gst_object_unref(src);
-  gst_object_unref(down);
-  gst_object_unref(sink);
-  gst_object_unref(pipe);
   gbm_bo_destroy(bo);
   gbm_device_destroy(dev);
   close(drm);
   return rc;
 }
 
+/* A system frame becomes a dma-buf inside the first glass2glass and comes back out of the second. */
+static int system_upload_roundtrip(void) {
+  guint8 expected[GPU_WIDTH * GPU_HEIGHT * RGBA_BYTES_PER_PIXEL];
+  for (gsize i = 0; i < sizeof expected; i++) expected[i] = (guint8)(i * 5 + 1);
+  gchar *launch = g_strdup_printf(
+      "appsrc name=src is-live=false format=time "
+      "caps=video/x-raw,format=RGBA,width=%d,height=%d,framerate=1/1 ! "
+      "glass2glass fragment=\"wgpuupload ! wgputodmabuf\" "
+      "output-caps=\"video/x-raw(memory:DMABuf),format=DMA_DRM,drm-format=%s,width=%d,height=%d,framerate=1/1\" ! "
+      "glass2glass name=down fragment=\"dmabuftowgpu ! wgpudownload\" "
+      "output-caps=\"video/x-raw,format=RGBA,width=%d,height=%d,framerate=1/1\" ! "
+      "appsink name=sink", GPU_WIDTH, GPU_HEIGHT, RGBA_DRM_FORMAT, GPU_WIDTH, GPU_HEIGHT,
+      GPU_WIDTH, GPU_HEIGHT);
+  GstBuffer *buf = gst_buffer_new_memdup(expected, sizeof expected);
+  GST_BUFFER_PTS(buf) = 0;
+  gchar *description = g_strdup_printf(
+      "system RGBA %dx%d -> glass2glass(wgpuupload ! wgputodmabuf) -> dma-buf "
+      "-> glass2glass(dmabuftowgpu ! wgpudownload)", GPU_WIDTH, GPU_HEIGHT);
+  int rc = run_gpu_chain(launch, buf, expected, sizeof expected, description);
+  g_free(description);
+  g_free(launch);
+  return rc;
+}
+
 int main(int argc, char **argv) {
   gst_init(NULL, NULL);
   int rc = 0;
-  if (argc > 1) return chained_gpu_roundtrip(argv[1]);
+  if (argc > 1) return chained_gpu_roundtrip(argv[1]) | system_upload_roundtrip();
   rc |= roundtrip("RGBA", 64, 16, 256, 256 * 16, FALSE);
   /* NV12 is luma rows then half-height interleaved chroma rows. */
   rc |= roundtrip("NV12", 64, 16, 64, 64 * 16 * 3 / 2, FALSE);

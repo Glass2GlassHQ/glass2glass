@@ -42,6 +42,8 @@ use g2g_core::{
     OutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat,
 };
 
+use crate::wgpubuffer::whole_word_size;
+
 /// Raw formats the import and the export ([`crate::wgpudmabuf::WgpuToDmaBuf`])
 /// accept (the pixel caps pass through unchanged; only the memory domain
 /// changes). Each one's planes follow plane 0's stride the way
@@ -454,11 +456,6 @@ pub(crate) fn single_stride_layout(
         })
         .collect();
     Some((PlaneLayout::new(&planes)?, size as u64))
-}
-
-// buffer copies and storage bindings move whole 4-byte words
-pub(crate) fn whole_word_size(len: u64) -> Option<u64> {
-    len.checked_next_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT)
 }
 
 /// The [`ImportAdapter`] choice as a property, declared once and reused by every
