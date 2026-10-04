@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1214: `intersink` and `intersrc` connect independent graphs in one process by `producer-name` (system memory).
 - M1213: `appsrc` gains `output-domains`, so a `g2g-bridge` fragment on `memory:DMABuf` caps can start with `dmabuftowgpu` and end in `wgputodmabuf`.
 - An `appsink` pull handle ends when its graph is gone, including a graph that fails before the sink configures, and `try_pull` reports `Ended` on a closed channel.
 - Odd-width and odd-height NV12 / P010 frames have one tight size everywhere (the chroma row holds the rounded-up pair), and a consumer that cannot take an odd size refuses it.

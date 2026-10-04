@@ -294,7 +294,7 @@ unless it says otherwise.
 - **gst-plugins-rs:** `gifenc` / `gifdec`, `gopbuffer`, `textwrap`,
   `jsongstenc` / `jsongstparse`, `gstregex`, `zlibcompress` / `zlibdecompress`,
   `colordetect`, `videocompare`, `uriplaylistbin`, `ndisrc` / `ndisink`,
-  `intersink` / `intersrc`, `originalbuffersave` / `originalbufferrestore`.
+  `originalbuffersave` / `originalbufferrestore`.
 
 ## Embedded
 
