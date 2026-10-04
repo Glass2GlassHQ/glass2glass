@@ -16,6 +16,7 @@ use g2g_plugins::wgpudownload::WgpuDownload;
 // 37 RGBA pixels are 148 bytes, short of the 256-byte row a texture copy pads to.
 const WIDTH: u32 = 37;
 const HEIGHT: u32 = 5;
+const NV12_HEIGHT: u32 = 4;
 const RGBA_BYTES_PER_PIXEL: usize = 4;
 const OPAQUE: u8 = 255;
 
@@ -48,15 +49,19 @@ fn opaque_pattern() -> Vec<u8> {
         .collect()
 }
 
-fn rgba_caps() -> Caps {
+fn video_caps(format: RawVideoFormat, height: u32) -> Caps {
     Caps::RawVideo {
-        format: RawVideoFormat::Rgba8,
+        format,
         width: Dim::Fixed(WIDTH),
-        height: Dim::Fixed(HEIGHT),
+        height: Dim::Fixed(height),
         framerate: Rate::Fixed(30 << 16),
         interlace: g2g_core::Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
+}
+
+fn rgba_caps() -> Caps {
+    video_caps(RawVideoFormat::Rgba8, HEIGHT)
 }
 
 async fn through_gpu_compositor(name: &str, tail: &str, pixels: &[u8]) -> Frame {
@@ -154,8 +159,12 @@ impl OutputSink for Capture {
 }
 
 async fn download(domain: MemoryDomain) -> Result<Frame, G2gError> {
+    download_as(&rgba_caps(), domain).await
+}
+
+async fn download_as(caps: &Caps, domain: MemoryDomain) -> Result<Frame, G2gError> {
     let mut element = WgpuDownload::new();
-    element.configure_pipeline(&rgba_caps())?;
+    element.configure_pipeline(caps)?;
     let mut capture = Capture::default();
     element
         .process(
@@ -170,13 +179,20 @@ async fn download(domain: MemoryDomain) -> Result<Frame, G2gError> {
 async fn plain_buffer(pixels: &[u8]) -> Option<OwnedWgpuBuffer> {
     use g2g_plugins::wgpudmabuf::WgpuToDmaBuf;
     let (device, queue) = WgpuToDmaBuf::new().gpu().await.ok()?;
+    // A buffer cannot be created mapped at a size wgpu could not copy whole.
+    let size = (pixels.len() as u64).next_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT);
     let buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("download-source"),
-        size: pixels.len() as u64,
+        size,
         usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
+        mapped_at_creation: true,
     });
-    queue.write_buffer(&buffer, 0, pixels);
+    buffer
+        .slice(..)
+        .get_mapped_range_mut()
+        .slice(..pixels.len())
+        .copy_from_slice(pixels);
+    buffer.unmap();
     Some(WgpuToDmaBuf::wrap_buffer(
         &device,
         &queue,
@@ -197,6 +213,30 @@ async fn plain_buffer_reads_back() {
     let frame = download(MemoryDomain::WgpuBuffer(buffer))
         .await
         .expect("downloads");
+    assert_eq!(system_bytes(&frame), pixels.as_slice());
+}
+
+#[cfg(all(target_os = "linux", feature = "dmabuf-wgpu"))]
+#[tokio::test]
+async fn odd_width_tight_nv12_buffer_reads_back() {
+    let _gpu = GPU_LOCK.lock().await;
+    let len = RawVideoFormat::Nv12
+        .frame_bytes(WIDTH.into(), NV12_HEIGHT.into())
+        .expect("nv12 frame size") as usize;
+    assert_ne!(len as u64 % wgpu::COPY_BUFFER_ALIGNMENT, 0);
+    let pixels: Vec<u8> = (0..len)
+        .map(|i| i.wrapping_mul(7).wrapping_add(3) as u8)
+        .collect();
+    let Some(buffer) = plain_buffer(&pixels).await else {
+        eprintln!("no Vulkan export device; skipping");
+        return;
+    };
+    let frame = download_as(
+        &video_caps(RawVideoFormat::Nv12, NV12_HEIGHT),
+        MemoryDomain::WgpuBuffer(buffer),
+    )
+    .await
+    .expect("downloads");
     assert_eq!(system_bytes(&frame), pixels.as_slice());
 }
 

@@ -84,7 +84,9 @@ use g2g_core::{
     HardwareError, OutputSink, PipelinePacket, Rate, RawVideoFormat,
 };
 
-use crate::dmabufwgpu::{single_stride_layout, DmaBufWgpuBuffer, DMABUF_FRAME_FORMATS};
+use crate::dmabufwgpu::{
+    single_stride_layout, whole_word_size, DmaBufWgpuBuffer, DMABUF_FRAME_FORMATS,
+};
 
 fn gpu_err() -> G2gError {
     G2gError::Hardware(HardwareError::Other)
@@ -494,8 +496,9 @@ impl AsyncElement for WgpuToDmaBuf {
                         producer_buffer(owned).ok_or(G2gError::UnsupportedDomain)?;
                     self.adopt_device(device, queue)?;
 
-                    let (offset, stride, size) = self.export_layout(owned)?;
-                    if size == 0 || (owned.len as u64) < size {
+                    let (offset, stride, frame_size) = self.export_layout(owned)?;
+                    let size = whole_word_size(frame_size).ok_or(G2gError::CapsMismatch)?;
+                    if frame_size == 0 || (owned.len as u64) < frame_size || src.size() < size {
                         return Err(G2gError::CapsMismatch);
                     }
 

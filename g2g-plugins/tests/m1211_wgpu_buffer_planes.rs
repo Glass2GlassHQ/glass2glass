@@ -12,6 +12,8 @@ use g2g_plugins::wgpudownload::WgpuDownload;
 
 const WIDTH: u32 = 6;
 const HEIGHT: u32 = 4;
+const ODD_WIDTH: u32 = 37;
+const ODD_HEIGHT: u32 = 4;
 const NV12_STRIDE: usize = 16;
 const P010_STRIDE: usize = 32;
 const P010_BYTES_PER_SAMPLE: usize = 2;
@@ -55,12 +57,12 @@ struct SemiPlanar {
     row_bytes: usize,
     stride: usize,
     leading: usize,
+    height: usize,
 }
 
 impl SemiPlanar {
     fn rows(&self) -> [usize; 2] {
-        let height = HEIGHT as usize;
-        [height, height.div_ceil(2)]
+        [self.height, self.height.div_ceil(2)]
     }
 
     fn layout(&self) -> PlaneLayout {
@@ -99,12 +101,14 @@ const NV12: SemiPlanar = SemiPlanar {
     row_bytes: WIDTH as usize,
     stride: NV12_STRIDE,
     leading: 0,
+    height: HEIGHT as usize,
 };
 
 const P010: SemiPlanar = SemiPlanar {
     row_bytes: WIDTH as usize * P010_BYTES_PER_SAMPLE,
     stride: P010_STRIDE,
     leading: 0,
+    height: HEIGHT as usize,
 };
 
 async fn push_through(
@@ -131,14 +135,21 @@ fn system_bytes(frame: &Frame) -> Vec<u8> {
         .to_vec()
 }
 
-fn source_buffer(device: &wgpu::Device, queue: &wgpu::Queue, bytes: &[u8]) -> wgpu::Buffer {
+fn source_buffer(device: &wgpu::Device, bytes: &[u8]) -> wgpu::Buffer {
+    // A buffer cannot be created mapped at a size wgpu could not copy whole.
+    let size = (bytes.len() as u64).next_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT);
     let buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("padded-source"),
-        size: bytes.len() as u64,
+        size,
         usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
+        mapped_at_creation: true,
     });
-    queue.write_buffer(&buffer, 0, bytes);
+    buffer
+        .slice(..)
+        .get_mapped_range_mut()
+        .slice(..bytes.len())
+        .copy_from_slice(bytes);
+    buffer.unmap();
     buffer
 }
 
@@ -148,7 +159,7 @@ async fn download_laid_out(
 ) -> Option<(Vec<u8>, Vec<u8>)> {
     let (device, queue) = WgpuToDmaBuf::new().gpu().await.ok()?;
     let (padded, tight) = shape.padded_and_tight();
-    let buffer = source_buffer(&device, &queue, &padded);
+    let buffer = source_buffer(&device, &padded);
     let owned = WgpuToDmaBuf::wrap_buffer(&device, &queue, buffer, padded.len())
         .with_plane_layout(shape.layout());
     let frame = push_through(
@@ -195,7 +206,7 @@ async fn padded_dmabuf(padded: &[u8], stride: usize) -> Option<OwnedDmaBuf> {
     let (device, queue) = export.gpu().await.ok()?;
     let rows = padded.len() / stride;
     let luma_rows = rows * 2 / 3;
-    let buffer = source_buffer(&device, &queue, padded);
+    let buffer = source_buffer(&device, padded);
     let frame = push_through(
         &mut export,
         &caps(RawVideoFormat::Nv12, stride as u32, luma_rows as u32),
@@ -320,7 +331,7 @@ fn tight_nv12_frame(device: &wgpu::Device, queue: &wgpu::Queue) -> (OwnedWgpuBuf
         ..NV12
     }
     .padded_and_tight();
-    let buffer = source_buffer(device, queue, &tight);
+    let buffer = source_buffer(device, &tight);
     (
         WgpuToDmaBuf::wrap_buffer(device, queue, buffer, tight.len()),
         tight,
@@ -359,6 +370,45 @@ async fn a_plain_wgpu_device_exports_without_the_semaphore() {
     )
     .await;
     assert!(matches!(refused, Err(G2gError::UnsupportedDomain)));
+}
+
+#[tokio::test]
+async fn odd_width_tight_nv12_exports_unchanged() {
+    let _gpu = GPU_LOCK.lock().await;
+    let shape = SemiPlanar {
+        row_bytes: ODD_WIDTH as usize,
+        stride: ODD_WIDTH as usize,
+        leading: 0,
+        height: ODD_HEIGHT as usize,
+    };
+    let (_, tight) = shape.padded_and_tight();
+    assert_ne!(tight.len() as u64 % wgpu::COPY_BUFFER_ALIGNMENT, 0);
+    let mut export = WgpuToDmaBuf::new();
+    let Ok((device, queue)) = export.gpu().await else {
+        eprintln!("no Vulkan export device; skipping");
+        return;
+    };
+    let buffer = source_buffer(&device, &tight);
+    let frame_caps = caps(RawVideoFormat::Nv12, ODD_WIDTH, ODD_HEIGHT);
+    let exported = push_through(
+        &mut export,
+        &frame_caps,
+        MemoryDomain::WgpuBuffer(WgpuToDmaBuf::wrap_buffer(
+            &device,
+            &queue,
+            buffer,
+            tight.len(),
+        )),
+    )
+    .await
+    .expect("exports");
+    let reimported = push_through(&mut DmaBufToWgpu::new(), &frame_caps, exported.domain)
+        .await
+        .expect("re-imports");
+    let frame = push_through(&mut WgpuDownload::new(), &frame_caps, reimported.domain)
+        .await
+        .expect("downloads");
+    assert_eq!(system_bytes(&frame), tight);
 }
 
 struct ZeroClock;

@@ -450,6 +450,11 @@ pub(crate) fn single_stride_layout(
     Some((PlaneLayout::new(&planes)?, size as u64))
 }
 
+// buffer copies and storage bindings move whole 4-byte words
+pub(crate) fn whole_word_size(len: u64) -> Option<u64> {
+    len.checked_next_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT)
+}
+
 /// The [`ImportAdapter`] choice as a property, declared once and reused by every
 /// element with a dma-buf input path (this one and `wgpupreprocess`).
 pub const IMPORT_ADAPTER_PROP: PropertySpec = PropertySpec::new(
@@ -670,13 +675,15 @@ unsafe fn timeline_counter(device: &wgpu::Device, sem: vk::Semaphore) -> Result<
 ///
 /// # Safety
 /// `device` must carry `VK_EXT_external_memory_dma_buf`; `fd` must be a valid
-/// open dma-buf of at least `size` bytes, owned by the caller (it is duplicated
-/// before Vulkan takes ownership).
+/// open dma-buf of at least `size` bytes rounded up to a whole 4-byte word,
+/// owned by the caller (it is duplicated before Vulkan takes ownership).
 unsafe fn import_dmabuf(
     device: &wgpu::Device,
     fd: i32,
     size: u64,
 ) -> Result<wgpu::Buffer, G2gError> {
+    // a dma-buf spans whole pages, so the rounded size stays inside it
+    let size = whole_word_size(size).ok_or(G2gError::CapsMismatch)?;
     // SAFETY: raw device from the live wgpu device; the raw objects created here
     // are either handed to wgpu (on success) or freed (on failure).
     let (vk_buffer, vk_memory) = unsafe {

@@ -170,8 +170,7 @@ fn read_buffer(
     buffer: &wgpu::Buffer,
     len: usize,
 ) -> Result<Vec<u8>, G2gError> {
-    // Buffer copies move whole 4-byte words.
-    let copy_size = (len as u64).next_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT);
+    let copy_size = crate::dmabufwgpu::whole_word_size(len as u64).ok_or(G2gError::CapsMismatch)?;
     if copy_size > buffer.size() {
         return Err(G2gError::CapsMismatch);
     }
