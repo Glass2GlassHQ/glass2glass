@@ -27,6 +27,10 @@ FIXTURES=(
   "av1_321x181.obu yuv420p"
   "av1_321x181_10bit.obu yuv420p10le"
   "av1_321x181_filmgrain.obu yuv420p"
+  "h264_320x180.h264 yuv420p"
+  "h264_304x180_crop.h264 yuv420p"
+  "h265_320x180.hevc yuv420p"
+  "h265_304x180_main10_crop.hevc yuv420p10le"
 )
 
 if [ "$#" -ne 1 ]; then

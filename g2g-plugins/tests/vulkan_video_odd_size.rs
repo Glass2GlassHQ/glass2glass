@@ -9,12 +9,12 @@ use g2g_core::{Caps, Dim, RawVideoFormat, VideoCodec};
 use g2g_plugins::streamdec::{VideoCodec as StreamCodec, VulkanStreamDecoder};
 use g2g_plugins::vulkanvideo::{
     extract_av1_sequence_header, open_av1_decode_device, to_std_av1_seq_header, Av1DecodeSession,
-    Av1DpbDecoder, Nv12Frame, TextureOutput, VulkanVideoDevice, VulkanVideoError,
+    Av1DpbDecoder, TextureOutput, VulkanVideoDevice, VulkanVideoError,
 };
 
 mod vulkan_nv12_common;
 mod vulkan_ref;
-use vulkan_ref::reference_yuv;
+use vulkan_ref::{assert_frames_match_reference, planar_frames, two_plane_to_planar};
 
 // ffmpeg -f lavfi -i testsrc=size=321x181:rate=30 -frames:v 10 -pix_fmt yuv420p -c:v libaom-av1 -cpu-used 8 -b:v 200k -f obu av1_321x181.obu
 const CLIP: &[u8] = include_bytes!("fixtures/av1_321x181.obu");
@@ -99,81 +99,6 @@ fn gpu_decoder(
         }
         Err(error) => panic!("build GPU AV1 decoder: {error:?}"),
     }
-}
-
-// g2g's tight NV12 / P010 frame rewritten as ffmpeg's planar dump of the same picture
-fn two_plane_to_planar(frame: &[u8], bit_depth: u8, (width, height): (u32, u32)) -> Vec<u8> {
-    let two_plane = if bit_depth > 8 {
-        RawVideoFormat::P010
-    } else {
-        RawVideoFormat::Nv12
-    };
-    let luma_bytes = two_plane.plane_bytes(0, width, height).expect("plane fits") as usize;
-    let chroma_bytes = two_plane.plane_bytes(1, width, height).expect("plane fits") as usize;
-    assert_eq!(frame.len(), luma_bytes + chroma_bytes, "frame is not tight");
-    let sample_bytes = two_plane.bytes_per_sample();
-    let unused_low_bits = u16::BITS - u32::from(bit_depth);
-    let planar_sample = |sample: &[u8]| -> Vec<u8> {
-        match sample {
-            [byte] => vec![*byte],
-            [low, high] => (u16::from_le_bytes([*low, *high]) >> unused_low_bits)
-                .to_le_bytes()
-                .to_vec(),
-            _ => unreachable!("one or two bytes per sample"),
-        }
-    };
-    let (luma, chroma) = frame.split_at(luma_bytes);
-    let pairs = chroma.chunks_exact(2 * sample_bytes);
-    let cb = pairs.clone().map(|pair| &pair[..sample_bytes]);
-    let cr = pairs.map(|pair| &pair[sample_bytes..]);
-    luma.chunks_exact(sample_bytes)
-        .chain(cb)
-        .chain(cr)
-        .flat_map(planar_sample)
-        .collect()
-}
-
-fn planar_frames(frames: Vec<Nv12Frame>, size: (u32, u32)) -> Vec<Vec<u8>> {
-    frames
-        .into_iter()
-        .map(|frame| {
-            assert_eq!((frame.width, frame.height), size);
-            two_plane_to_planar(&[frame.luma, frame.chroma].concat(), frame.bit_depth, size)
-        })
-        .collect()
-}
-
-// sizes always, every sample against the ffmpeg dump when one is configured
-fn assert_frames_match_reference(
-    frames: &[Vec<u8>],
-    planar: RawVideoFormat,
-    (width, height): (u32, u32),
-    fixture: &str,
-) {
-    assert!(!frames.is_empty(), "no frames decoded");
-    let frame_bytes = planar
-        .unpadded_frame_bytes(width, height)
-        .expect("frame size fits") as usize;
-    for (index, frame) in frames.iter().enumerate() {
-        assert_eq!(frame.len(), frame_bytes, "frame {index} has the wrong size");
-    }
-    let Some(reference) = reference_yuv(fixture) else {
-        return;
-    };
-    assert_eq!(
-        reference.len(),
-        frame_bytes * frames.len(),
-        "the reference holds a different frame count"
-    );
-    for (index, (frame, expected)) in frames
-        .iter()
-        .zip(reference.chunks_exact(frame_bytes))
-        .enumerate()
-    {
-        let differing = frame.iter().zip(expected).filter(|(a, b)| a != b).count();
-        assert_eq!(differing, 0, "frame {index}: {differing} bytes differ");
-    }
-    eprintln!("{fixture}: {} frames bit-exact", frames.len());
 }
 
 #[test]
