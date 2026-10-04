@@ -39,7 +39,9 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::mathf::{exp, powf};
-use crate::pixel::{carries_yuv, even_dims_required, frame_byte_size, rgba_rb_offsets};
+use crate::pixel::{
+    carries_yuv, chroma_420_offsets, chroma_420_size, frame_byte_size, rgba_rb_offsets,
+};
 use crate::yuvmatrix::{YuvRgbMatrix, SAMPLE_MAX};
 use g2g_core::frame::Frame;
 use g2g_core::memory::{DomainSet, MemoryDomainKind, SystemSlice};
@@ -167,8 +169,7 @@ impl Colorspace {
         Ok(())
     }
 
-    /// Validate a raw-video caps as a convertible input. 4:2:0 needs even dims
-    /// so the chroma plane divides.
+    /// Validate a raw-video caps as a convertible input.
     fn accept_input(caps: &Caps) -> Result<InputStream, G2gError> {
         let Caps::RawVideo {
             format,
@@ -182,10 +183,6 @@ impl Colorspace {
             return Err(G2gError::CapsMismatch);
         };
         if !FORMATS.contains(format) || *w == 0 || *h == 0 {
-            return Err(G2gError::CapsMismatch);
-        }
-        let (even_width, even_height) = even_dims_required(*format);
-        if (even_width && *w % 2 != 0) || (even_height && *h % 2 != 0) {
             return Err(G2gError::CapsMismatch);
         }
         Ok(InputStream {
@@ -785,10 +782,11 @@ fn convert_frame(
     }
 }
 
-/// 4:2:0 YUV, one chroma cell at a time: each of the block's four luma samples
-/// is converted on its own, and the block's chroma comes from the mean of the
-/// four converted RGB values, the same 2x2 box filter `videoconvert` writes its
-/// 4:2:0 chroma with. `interleaved` picks NV12 over I420.
+/// 4:2:0 YUV, one chroma cell at a time: each of the block's luma samples is
+/// converted on its own, and the block's chroma comes from the mean of the
+/// converted RGB values, the same box filter `videoconvert` writes its 4:2:0
+/// chroma with (a block cut by an odd right or bottom edge averages the pixels
+/// it has). `interleaved` picks NV12 over I420.
 fn convert_yuv420(
     src: &[u8],
     width: usize,
@@ -797,19 +795,20 @@ fn convert_yuv420(
     transform: &ColorTransform,
 ) -> Box<[u8]> {
     let luma = width * height;
-    let mut dst = vec![0u8; luma + luma / 2];
-    let (chroma_width, chroma_height) = (width / 2, height / 2);
+    let (chroma_width, chroma_height) = chroma_420_size(width, height);
+    let chroma = chroma_width * chroma_height;
+    let mut dst = vec![0u8; luma + 2 * chroma];
     for cy in 0..chroma_height {
+        let rows = cy * 2..(cy * 2 + 2).min(height);
         for cx in 0..chroma_width {
-            let cell = cy * chroma_width + cx;
-            let (u, v) = match interleaved {
-                true => (src[luma + 2 * cell] as i32, src[luma + 2 * cell + 1] as i32),
-                false => (src[luma + cell] as i32, src[luma + luma / 4 + cell] as i32),
-            };
+            let columns = cx * 2..(cx * 2 + 2).min(width);
+            let (u_at, v_at) =
+                chroma_420_offsets(luma, chroma, cy * chroma_width + cx, interleaved);
+            let (u, v) = (src[u_at] as i32, src[v_at] as i32);
             let (mut sum_r, mut sum_g, mut sum_b) = (0i32, 0i32, 0i32);
-            for dy in 0..2 {
-                for dx in 0..2 {
-                    let index = (cy * 2 + dy) * width + cx * 2 + dx;
+            for row in rows.clone() {
+                for column in columns.clone() {
+                    let index = row * width + column;
                     let (r, g, b) = transform.yuv_to_target_rgb(src[index] as i32, u, v);
                     dst[index] = transform.encode.rgb_to_yuv(r, g, b).0 as u8;
                     sum_r += r;
@@ -817,17 +816,13 @@ fn convert_yuv420(
                     sum_b += b;
                 }
             }
-            let (_, u, v) = transform.encode.rgb_to_yuv(sum_r / 4, sum_g / 4, sum_b / 4);
-            match interleaved {
-                true => {
-                    dst[luma + 2 * cell] = u as u8;
-                    dst[luma + 2 * cell + 1] = v as u8;
-                }
-                false => {
-                    dst[luma + cell] = u as u8;
-                    dst[luma + luma / 4 + cell] = v as u8;
-                }
-            }
+            let count = (rows.len() * columns.len()) as i32;
+            let (_, u, v) =
+                transform
+                    .encode
+                    .rgb_to_yuv(sum_r / count, sum_g / count, sum_b / count);
+            dst[u_at] = u as u8;
+            dst[v_at] = v as u8;
         }
     }
     dst.into_boxed_slice()

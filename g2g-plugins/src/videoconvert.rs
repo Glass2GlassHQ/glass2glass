@@ -21,7 +21,9 @@ use alloc::vec::Vec;
 
 #[cfg(feature = "metadata")]
 use crate::pixel::pack_planes;
-use crate::pixel::{carries_yuv, frame_byte_size, planar_planes, row_bytes};
+use crate::pixel::{
+    carries_yuv, chroma_420_offsets, chroma_420_size, frame_byte_size, planar_planes, row_bytes,
+};
 use crate::yuvmatrix::YuvRgbMatrix;
 use g2g_core::frame::Frame;
 use g2g_core::memory::{DomainSet, MemoryDomainKind, SystemSlice};
@@ -964,13 +966,6 @@ fn avg_chroma(
     ((su + count / 2) / count, (sv + count / 2) / count)
 }
 
-/// Width and height of one 4:2:0 chroma plane of a `w x h` frame, rounded up
-/// the way g2g-core lays it out.
-fn chroma_420_size(w: usize, h: usize) -> (usize, usize) {
-    let [_, (_, width, height), _] = planar_planes(RawVideoFormat::I420, w, h);
-    (width, height)
-}
-
 /// Bytes in one YUYV Y0 U Y1 V group.
 const YUYV_GROUP_BYTES: usize = 4;
 
@@ -980,16 +975,6 @@ const YUYV_GROUP_BYTES: usize = 4;
 fn yuyv_sample(src: &[u8], stride: usize, row: usize, col: usize) -> (u8, u8, u8) {
     let group = row * stride + (col / 2) * YUYV_GROUP_BYTES;
     (src[group + 2 * (col % 2)], src[group + 1], src[group + 3])
-}
-
-/// Byte offsets of the U and V of chroma sample `ci` in a tight 4:2:0 frame with
-/// `luma` luma bytes and `chroma` samples per chroma plane: interleaved after the
-/// luma for NV12, one plane each for I420.
-fn chroma_420_offsets(luma: usize, chroma: usize, ci: usize, interleaved: bool) -> (usize, usize) {
-    match interleaved {
-        true => (luma + 2 * ci, luma + 2 * ci + 1),
-        false => (luma + ci, luma + chroma + ci),
-    }
 }
 
 /// Packed YUYV (4:2:2, byte order Y0 U Y1 V) -> 4:2:0 YUV. The luma plane is a

@@ -84,6 +84,28 @@ pub(crate) fn planar_planes(
     })
 }
 
+/// Width and height of one 4:2:0 chroma plane of a `w x h` frame, rounded up
+/// the way g2g-core lays it out.
+pub(crate) fn chroma_420_size(w: usize, h: usize) -> (usize, usize) {
+    let [_, (_, width, height), _] = planar_planes(RawVideoFormat::I420, w, h);
+    (width, height)
+}
+
+/// Byte offsets of the U and V of chroma sample `ci` in a tight 8-bit 4:2:0
+/// frame with `luma` luma bytes and `chroma` samples per chroma plane:
+/// interleaved after the luma for NV12, one plane each for I420.
+pub(crate) fn chroma_420_offsets(
+    luma: usize,
+    chroma: usize,
+    ci: usize,
+    interleaved: bool,
+) -> (usize, usize) {
+    match interleaved {
+        true => (luma + 2 * ci, luma + 2 * ci + 1),
+        false => (luma + ci, luma + chroma + ci),
+    }
+}
+
 // (byte offset, row bytes, rows) of one plane of a tight frame, as g2g-core defines it
 pub(crate) fn tight_plane(
     format: RawVideoFormat,

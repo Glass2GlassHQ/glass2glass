@@ -36,10 +36,19 @@ impl OutputSink for CollectSink {
 }
 
 fn raw(format: RawVideoFormat, colorimetry: Colorimetry) -> Caps {
+    raw_sized(format, colorimetry, WIDTH, HEIGHT)
+}
+
+fn raw_sized(
+    format: RawVideoFormat,
+    colorimetry: Colorimetry,
+    width: usize,
+    height: usize,
+) -> Caps {
     Caps::RawVideo {
         format,
-        width: Dim::Fixed(WIDTH as u32),
-        height: Dim::Fixed(HEIGHT as u32),
+        width: Dim::Fixed(width as u32),
+        height: Dim::Fixed(height as u32),
         framerate: Rate::Fixed(30),
         interlace: g2g_core::Interlace::Any,
         colorimetry,
@@ -96,9 +105,10 @@ fn expected_via_rgb(
     format: RawVideoFormat,
     source: Colorimetry,
     target: Colorimetry,
+    (width, height): (usize, usize),
 ) -> Vec<u8> {
-    let rgba = convert(src, format, RawVideoFormat::Rgba8, WIDTH, HEIGHT, source);
-    convert(&rgba, RawVideoFormat::Rgba8, format, WIDTH, HEIGHT, target).into_vec()
+    let rgba = convert(src, format, RawVideoFormat::Rgba8, width, height, source);
+    convert(&rgba, RawVideoFormat::Rgba8, format, width, height, target).into_vec()
 }
 
 /// Drive one frame through a configured element and return what it pushed.
@@ -165,7 +175,7 @@ fn bt709_to_bt601_matches_a_decode_then_reencode() {
         src.clone(),
     );
 
-    let expected = expected_via_rgb(&src, RawVideoFormat::I420, source, target);
+    let expected = expected_via_rgb(&src, RawVideoFormat::I420, source, target, (WIDTH, HEIGHT));
     assert_eq!(pushed_bytes(&packets), expected);
     // The two matrices really differ, so the test would pass on a passthrough
     // only if the oracle were also a passthrough.
@@ -199,7 +209,7 @@ fn nv12_converts_with_the_same_math_as_i420() {
     );
     assert_eq!(
         pushed_bytes(&packets),
-        expected_via_rgb(&nv12, RawVideoFormat::Nv12, source, target)
+        expected_via_rgb(&nv12, RawVideoFormat::Nv12, source, target, (WIDTH, HEIGHT))
     );
 }
 
@@ -404,6 +414,7 @@ fn an_untagged_input_keeps_its_untagged_transfer() {
             RawVideoFormat::I420,
             Colorimetry::UNKNOWN,
             matrix_only(MatrixCoefficients::Bt709, ColorRange::Limited),
+            (WIDTH, HEIGHT),
         )
     );
 }
@@ -421,20 +432,42 @@ fn an_unsupported_format_is_refused() {
     );
 }
 
-/// 4:2:0 needs even dims on both axes, or the chroma plane does not divide.
+/// An odd size keeps its rounded-up chroma and converts the way the RGB oracle
+/// does, edge chroma cells included.
 #[test]
-fn odd_dims_are_refused_for_420() {
-    let mut element = Colorspace::new();
-    let odd = Caps::RawVideo {
-        format: RawVideoFormat::I420,
-        width: Dim::Fixed(3),
-        height: Dim::Fixed(4),
-        framerate: Rate::Fixed(30),
-        interlace: g2g_core::Interlace::Any,
-        colorimetry: Colorimetry::BT709,
-    };
-    assert_eq!(
-        element.configure_pipeline(&odd).err(),
-        Some(G2gError::CapsMismatch)
-    );
+fn odd_dims_convert_like_a_decode_then_reencode() {
+    const ODD_SIZE: (usize, usize) = (37, 5);
+    let (width, height) = ODD_SIZE;
+    let source = matrix_only(MatrixCoefficients::Bt709, ColorRange::Limited);
+    let target = matrix_only(MatrixCoefficients::Bt601, ColorRange::Limited);
+    let rgba: Vec<u8> = (0..width * height)
+        .flat_map(|index| {
+            [
+                (40 + index) as u8,
+                (200 - index) as u8,
+                (70 + index / 2) as u8,
+                255,
+            ]
+        })
+        .collect();
+    for format in [RawVideoFormat::I420, RawVideoFormat::Nv12] {
+        let src = convert(&rgba, RawVideoFormat::Rgba8, format, width, height, source).into_vec();
+        let packets = run(
+            &mut Colorspace::new(),
+            raw_sized(format, source, width, height),
+            raw_sized(format, target, width, height),
+            src.clone(),
+        );
+        let out = pushed_bytes(&packets);
+        assert_eq!(
+            Some(out.len() as u64),
+            format.unpadded_frame_bytes(width as u32, height as u32),
+            "{format:?}"
+        );
+        assert_eq!(
+            out,
+            expected_via_rgb(&src, format, source, target, ODD_SIZE),
+            "{format:?}"
+        );
+    }
 }
