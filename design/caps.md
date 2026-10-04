@@ -1001,7 +1001,7 @@ is not:
   exists.)
 
 - **Cross-field validity within one element is not modelled.** Constraints
-  *among an element's own caps fields* (a 4:2:0 format requiring even dimensions,
+  *among an element's own caps fields* (a 4:2:0 path requiring even dimensions,
   chroma siting) are non-binary and are deliberately kept out of the declarative
   constraint: caps fields stay independent within an alternative, and an element
   enumerates valid combinations as separate `CapsSet` alternatives instead. The

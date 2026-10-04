@@ -414,6 +414,20 @@ and announces the refined output caps when they firm up after negotiation.
 `WgpuCompositor` mixes `Rgba8` textures only, planar YUV mixes stay on the CPU
 `Compositor`.
 
+Raw frames of any size share one tight layout, `RawVideoFormat::plane_stride` and
+`plane_rows`, which every byte-size helper derives from. Subsampled chroma rounds
+up, so a `w x h` 4:2:0 frame carries `ceil(w/2) x ceil(h/2)` chroma samples, and a
+YUYV row holds whole Y0 U Y1 V groups, `4 * ceil(w/2)` bytes, as ffmpeg's
+`yuyv422` and GStreamer's `YUY2` do. The CPU paths take odd sizes on that layout.
+`videoconvert` and `colorspace` average an edge chroma sample over the pixels
+inside the picture and give the last luma column or row the last chroma sample on
+the way back. `videoscale` and `videoconvertscale` map chroma positions through
+the luma scale rather than the chroma plane's own, so the rounded-up sample count
+does not shift the chroma grid. `videocrop` and `aspectratiocrop` keep their even
+insets and crop an odd frame plane by plane. `videoflip` still refuses an odd
+subsampled frame, since mirroring an odd extent needs a chroma resample its remap
+does not do.
+
 ### The negotiation lifecycle
 
 Because g2g enforces a sans-IO and asynchronous execution model, capability

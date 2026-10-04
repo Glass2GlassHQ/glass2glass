@@ -89,7 +89,7 @@ const CONVERT_FORMATS: [(RawVideoFormat, &str); 3] = [
     (RawVideoFormat::Yuyv, "yuyv422"),
 ];
 
-// the bound a lossy webp decode is held to against libwebp's, where only the chroma filter differs
+// the bound a lossy webp decode is held to against libwebp, whose chroma filter differs too
 const MEAN_ABS_DIFF_BOUND: f64 = 3.0;
 
 const GRADIENT_BASE: [usize; 3] = [40, 60, 200];

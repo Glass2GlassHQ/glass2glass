@@ -5,9 +5,10 @@
 //!
 //! The quarter rotations and the two diagonal mirrors swap width and height;
 //! `Rotate180` and the axis mirrors keep the geometry. 4:2:0 (`Nv12`, `I420`)
-//! needs even input dims since chroma is subsampled 2x2; odd dims fail
-//! negotiation/configure loud. Packed formats (`Rgba8`, `Bgra8`) take any dims.
-//! CPU-only `no_std` baseline.
+//! needs even input dims: mirroring an odd extent moves the unpaired chroma
+//! column or row to the other edge, which needs a chroma resample this remap
+//! does not do, so odd dims fail negotiation/configure loud. Packed formats
+//! (`Rgba8`, `Bgra8`) take any dims. CPU-only `no_std` baseline.
 //!
 //! When the sink downstream answers the first push with
 //! `Reconfigure::AbsorbOrientation` (M1058), the frame goes through untouched
@@ -106,6 +107,7 @@ impl VideoFlip {
         if !FORMATS.contains(format) || *w == 0 || *h == 0 {
             return Err(G2gError::CapsMismatch);
         }
+        // a remap cannot move the unpaired chroma column or row of an odd extent
         let (ew, eh) = even_dims_required(*format);
         if (ew && *w % 2 != 0) || (eh && *h % 2 != 0) {
             return Err(G2gError::CapsMismatch);

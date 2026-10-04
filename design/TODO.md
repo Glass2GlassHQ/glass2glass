@@ -171,10 +171,9 @@ Highest leverage first:
 
 ## Transforms and effects
 
-- **Odd-size 4:2:0 conversion.** `videoconvert` (and the scale / crop / flip
-  transforms on its paths) refuse an odd width or height for NV12 / I420 / YUYV;
-  convert them with the chroma rounded up. YUYV rows at an odd width are `2w`
-  bytes here and `4 * ceil(w/2)` in ffmpeg.
+- **Odd-size `videoflip`.** It refuses an odd width or height for the
+  subsampled formats; mirror and rotate them with the chroma resampled, since
+  the unpaired chroma column or row moves to the other edge.
 - **`CudaToWgpu` odd sizes.** The packed `w x h*3/2` texture cannot hold the
   wider chroma row of an odd-width NV12 frame, so it is refused.
 - **`textoverlay` font backend:** font-variation axes beyond `wght` on the
