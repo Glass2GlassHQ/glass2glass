@@ -26,6 +26,8 @@ const CLIP_10BIT_FIXTURE: &str = "av1_321x181_10bit.obu";
 const CLIP_GRAIN: &[u8] = include_bytes!("fixtures/av1_321x181_filmgrain.obu");
 const CLIP_GRAIN_FIXTURE: &str = "av1_321x181_filmgrain.obu";
 
+const RGBA_PIXEL_BYTES: usize = 4;
+
 // libtest runs these in parallel and concurrent instance creation SIGSEGVs the NVIDIA loader
 static GPU_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -311,8 +313,10 @@ fn an_odd_size_picture_converts_to_an_rgba_texture() {
         assert_eq!((texture.width(), texture.height()), (width, height));
         assert_eq!(texture.format(), wgpu::TextureFormat::Rgba8Unorm);
         let rgba = device.read_rgba_texture(texture);
-        let last_column: Vec<&[u8]> = rgba
-            .chunks_exact(4)
+        let last_column: Vec<&[u8; RGBA_PIXEL_BYTES]> = rgba
+            .as_chunks::<RGBA_PIXEL_BYTES>()
+            .0
+            .iter()
             .skip(width as usize - 1)
             .step_by(width as usize)
             .collect();

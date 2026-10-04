@@ -16029,14 +16029,15 @@ mod tests {
             bit_depth: 8,
         };
         let rgba = nv12_to_rgba(&frame, VideoColorSpace::BT601_STUDIO);
-        for (index, pixel) in rgba.chunks_exact(4).enumerate() {
+        const RGBA_PIXEL_BYTES: usize = 4;
+        for (index, pixel) in rgba.as_chunks::<RGBA_PIXEL_BYTES>().0.iter().enumerate() {
             let (x, y) = (index % width as usize, index / width as usize);
             let (cb, cr) = chroma_pairs[(y / 2) * chroma_columns + x / 2];
             let expected = nv12_to_rgba(
                 &solid_nv12(luma_value, cb, cr),
                 VideoColorSpace::BT601_STUDIO,
             );
-            assert_eq!(pixel, &expected[0..4], "pixel ({x}, {y})");
+            assert_eq!(pixel[..], expected[..RGBA_PIXEL_BYTES], "pixel ({x}, {y})");
         }
     }
 }
