@@ -129,29 +129,3 @@ fn decodes_whole_av1_stream_with_references() {
     )
     .expect("record hardware evidence");
 }
-
-// the readback carries w/2 x h/2 chroma, so an odd-size session would drop its last chroma pair
-#[test]
-fn an_odd_size_session_is_refused() {
-    let device = match block_on(open_av1_decode_device()) {
-        Ok(d) => d,
-        Err(VulkanVideoError::NoVulkanAdapter)
-        | Err(VulkanVideoError::ExtensionUnsupported)
-        | Err(VulkanVideoError::NoDecodeQueue) => {
-            eprintln!("skip m506: no Vulkan AV1 decode adapter");
-            return;
-        }
-        Err(e) => panic!("open AV1 decode device: {e:?}"),
-    };
-    let seq = extract_av1_sequence_header(CLIP).expect("parse sequence header");
-    let std = to_std_av1_seq_header(&seq);
-    for (width, height) in [(W - 1, H), (W, H - 1)] {
-        assert!(
-            matches!(
-                device.create_av1_session(&std, width as u32, height as u32),
-                Err(VulkanVideoError::UnsupportedStream)
-            ),
-            "{width}x{height}"
-        );
-    }
-}

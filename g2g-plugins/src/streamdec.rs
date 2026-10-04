@@ -119,7 +119,7 @@ pub enum VideoMatrixCoefficients {
 #[derive(Debug, Clone)]
 pub struct DecodedVideoFrame {
     /// Packed planar YUV: Y (`width*height`), then U, then V (each
-    /// `width/2 * height/2` for 4:2:0). No per-row stride padding.
+    /// `ceil(width/2) * ceil(height/2)` for 4:2:0). No per-row stride padding.
     pub data: Vec<u8>,
     pub width: u32,
     pub height: u32,

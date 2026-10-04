@@ -16014,4 +16014,29 @@ mod tests {
         assert_ne!(p601[0..3], p709[0..3], "601 vs 709 must differ on chroma");
         assert_ne!(p709[0..3], p2020[0..3], "709 vs 2020 must differ on chroma");
     }
+
+    #[test]
+    fn an_odd_size_frame_takes_each_pixel_from_its_own_chroma_pair() {
+        let (width, height) = (3u32, 3u32);
+        let luma_value = 120;
+        let chroma_pairs = [(90u8, 200u8), (100, 210), (60, 30), (220, 140)];
+        let chroma_columns = width.div_ceil(2) as usize;
+        let frame = Nv12Frame {
+            width,
+            height,
+            luma: alloc::vec![luma_value; (width * height) as usize],
+            chroma: chroma_pairs.iter().flat_map(|&(cb, cr)| [cb, cr]).collect(),
+            bit_depth: 8,
+        };
+        let rgba = nv12_to_rgba(&frame, VideoColorSpace::BT601_STUDIO);
+        for (index, pixel) in rgba.chunks_exact(4).enumerate() {
+            let (x, y) = (index % width as usize, index / width as usize);
+            let (cb, cr) = chroma_pairs[(y / 2) * chroma_columns + x / 2];
+            let expected = nv12_to_rgba(
+                &solid_nv12(luma_value, cb, cr),
+                VideoColorSpace::BT601_STUDIO,
+            );
+            assert_eq!(pixel, &expected[0..4], "pixel ({x}, {y})");
+        }
+    }
 }

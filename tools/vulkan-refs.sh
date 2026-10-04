@@ -24,6 +24,9 @@ FIXTURES=(
   "h265_640x480_bframes.h265 yuv420p"
   "h265_640x480_main10.hevc yuv420p10le"
   "h265_640x480_opengop.hevc yuv420p"
+  "av1_321x181.obu yuv420p"
+  "av1_321x181_10bit.obu yuv420p10le"
+  "av1_321x181_filmgrain.obu yuv420p"
 )
 
 if [ "$#" -ne 1 ]; then
