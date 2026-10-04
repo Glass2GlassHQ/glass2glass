@@ -1937,7 +1937,8 @@ impl RawVideoFormat {
 
     /// Narrowest row stride in bytes at `width` that every plane of a
     /// [`Self::frame_bytes`] layout fits: 4 bytes per pixel for packed RGBA /
-    /// BGRA, 3 for packed RGB, 2 for packed YUYV, and for 8-bit NV12 / I420 the
+    /// BGRA, 3 for packed RGB, 2 for packed YUYV (its width rounded up to even,
+    /// see [`Self::plane_stride`]), and for 8-bit NV12 / I420 the
     /// width rounded up to even, so NV12's chroma row and I420's half-stride
     /// chroma row hold an odd width's last chroma sample. `None` for a format
     /// with no single-stride byte layout.
@@ -1996,8 +1997,9 @@ impl RawVideoFormat {
     }
 
     /// Bytes one pixel occupies in a packed format's single plane: 4 for RGBA /
-    /// BGRA, 3 for RGB, 2 for YUYV. `None` for the multi-plane formats, where one
-    /// pixel's samples are spread across planes.
+    /// BGRA, 3 for RGB, 2 for YUYV (whose row still rounds up to a whole pixel
+    /// pair, see [`Self::plane_stride`]). `None` for the multi-plane formats,
+    /// where one pixel's samples are spread across planes.
     pub const fn pixel_stride(self) -> Option<usize> {
         match self {
             RawVideoFormat::Rgba8 | RawVideoFormat::Bgra8 => Some(4),
@@ -2007,11 +2009,16 @@ impl RawVideoFormat {
         }
     }
 
-    /// Row stride in bytes of `plane` at `width`, with no row padding. `None`
-    /// for a plane this format does not have, or on overflow.
+    /// Row stride in bytes of `plane` at `width`, with no row padding. A YUYV
+    /// row holds whole 4-byte Y0 U Y1 V groups, so an odd width rounds up to
+    /// the next even one (ffmpeg's `yuyv422`, GStreamer's `YUY2`). `None` for a
+    /// plane this format does not have, or on overflow.
     pub fn plane_stride(self, plane: usize, width: u32) -> Option<u32> {
         if plane >= self.plane_count() {
             return None;
+        }
+        if self == RawVideoFormat::Yuyv {
+            return width.div_ceil(2).checked_mul(4);
         }
         if let Some(pixel) = self.pixel_stride() {
             return width.checked_mul(pixel as u32);
@@ -2853,6 +2860,7 @@ mod tests {
         // Packed: one plane. YUYV is two bytes per pixel, RGBA four.
         assert_eq!(Yuyv.row_stride(640), Some(1280));
         assert_eq!(Yuyv.frame_bytes(1280, 480), Some(1280 * 480));
+        assert_eq!(Yuyv.row_stride(37), Yuyv.row_stride(38));
         assert_eq!(Rgba8.row_stride(640), Some(2560));
         assert_eq!(Rgba8.frame_bytes(2560, 480), Some(2560 * 480));
         // NV12 luma is one byte per pixel plus the half-height chroma region, and
@@ -2889,6 +2897,9 @@ mod tests {
         assert_eq!(Rgba8.plane_stride(0, 640), Some(2560));
         assert_eq!(Rgba8.unpadded_frame_bytes(640, 480), Some(640 * 480 * 4));
         assert_eq!(Yuyv.plane_stride(0, 640), Some(1280));
+        // An odd YUYV width still ends on a whole Y0 U Y1 V group.
+        assert_eq!(Yuyv.plane_stride(0, 37), Yuyv.plane_stride(0, 38));
+        assert_eq!(Yuyv.unpadded_frame_bytes(37, 5), Some(38 * 2 * 5));
         assert_eq!(Rgba8.plane_stride(1, 640), None, "no second plane");
 
         // Semi-planar: luma then one interleaved chroma plane at half height.

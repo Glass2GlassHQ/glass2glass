@@ -8,9 +8,9 @@
 //! caps colorimetry of whichever side carries YUV (BT.601 limited range when the
 //! stream says nothing). Same-family conversions skip it: RGBA<->BGRA is a
 //! channel swizzle and NV12<->I420 a chroma-plane repack, both lossless.
-//! 4:2:0 formats require even dims (chroma is subsampled 2x2); odd dims
-//! fail negotiation loud. CPU-only and `no_std`: this element lives in the
-//! crate baseline.
+//! Subsampled chroma rounds up at an odd width or height: the last chroma
+//! sample covers only the edge pixels that exist. CPU-only and `no_std`: this
+//! element lives in the crate baseline.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -21,7 +21,7 @@ use alloc::vec::Vec;
 
 #[cfg(feature = "metadata")]
 use crate::pixel::pack_planes;
-use crate::pixel::{carries_yuv, even_dims_required, frame_byte_size, planar_planes, row_bytes};
+use crate::pixel::{carries_yuv, frame_byte_size, planar_planes, row_bytes};
 use crate::yuvmatrix::YuvRgbMatrix;
 use g2g_core::frame::Frame;
 use g2g_core::memory::{DomainSet, MemoryDomainKind, SystemSlice};
@@ -194,7 +194,7 @@ impl VideoConvert {
     }
 
     /// Validate a raw-video caps as a convertible input and return the stream it
-    /// describes. 4:2:0 endpoints need even dims on either side.
+    /// describes.
     fn accept_input(&self, caps: &Caps) -> Result<InputStream, G2gError> {
         let Caps::RawVideo {
             format,
@@ -207,8 +207,6 @@ impl VideoConvert {
         else {
             return Err(G2gError::CapsMismatch);
         };
-        // The dims must be even on every axis either the input or the (known)
-        // target format subsamples, so chroma planes divide cleanly.
         let target = self.target.unwrap_or(*format);
         if !converts_from(*format, *w, *h) || !converts_from(target, *w, *h) {
             return Err(G2gError::CapsMismatch);
@@ -310,7 +308,7 @@ impl AsyncElement for VideoConvert {
 
     /// M186: take the output format from the negotiated output caps when the
     /// `format` property is unset (caps-driven). Validates the format is
-    /// producible and, if 4:2:0, that the input dims are even.
+    /// producible.
     fn configure_output(&mut self, output_caps: &Caps) -> Result<(), G2gError> {
         let Caps::RawVideo {
             format,
@@ -322,12 +320,6 @@ impl AsyncElement for VideoConvert {
         };
         if !FORMATS.contains(format) {
             return Err(G2gError::CapsMismatch);
-        }
-        let (ew, eh) = even_dims_required(*format);
-        if let Some(input) = &self.input {
-            if (ew && input.width % 2 != 0) || (eh && input.height % 2 != 0) {
-                return Err(G2gError::CapsMismatch);
-            }
         }
         self.resolved = Some(*format);
         self.output_colorimetry = *colorimetry;
@@ -600,12 +592,7 @@ impl PadTemplates for VideoConvert {
 }
 
 pub(crate) fn converts_from(format: RawVideoFormat, w: u32, h: u32) -> bool {
-    let (even_width, even_height) = even_dims_required(format);
-    INPUT_FORMATS.contains(&format)
-        && w != 0
-        && h != 0
-        && (!even_width || w.is_multiple_of(2))
-        && (!even_height || h.is_multiple_of(2))
+    INPUT_FORMATS.contains(&format) && w != 0 && h != 0
 }
 
 /// Dispatch one frame conversion. `src` is validated to hold at least the
@@ -791,24 +778,18 @@ fn to_hub(
         RawVideoFormat::Yuyv => {
             // Packed Y0 U Y1 V: each macropixel is two luma, one shared chroma pair,
             // replicated to both columns for 4:4:4.
+            let stride = row_bytes(from, w);
             for row in 0..h {
-                for col2 in 0..w / 2 {
-                    let s = (row * (w / 2) + col2) * 4;
-                    let (y0, cu, y1, cv) = (
-                        src[s] as i32,
-                        src[s + 1] as i32,
-                        src[s + 2] as i32,
-                        src[s + 3] as i32,
-                    );
-                    let i = row * w + col2 * 2;
-                    (y[i], u[i], v[i]) = (y0, cu, cv);
-                    (y[i + 1], u[i + 1], v[i + 1]) = (y1, cu, cv);
+                for col in 0..w {
+                    let (luma, cu, cv) = yuyv_sample(src, stride, row, col);
+                    let i = row * w + col;
+                    (y[i], u[i], v[i]) = (luma as i32, cu as i32, cv as i32);
                 }
             }
             (y, u, v, 8)
         }
         RawVideoFormat::Nv12 => {
-            let cw = w / 2;
+            let (cw, _) = chroma_420_size(w, h);
             for row in 0..h {
                 for col in 0..w {
                     let ci = (row / 2) * cw + col / 2;
@@ -884,17 +865,35 @@ fn from_hub(
             dst.into_boxed_slice()
         }
         RawVideoFormat::Nv12 => {
-            let (cw, ch) = (w / 2, h / 2);
+            let (cw, ch) = chroma_420_size(w, h);
             let mut dst = vec![0u8; n + 2 * cw * ch];
             for i in 0..n {
                 dst[i] = scale_depth(y[i], wd, 8) as u8;
             }
             for cy in 0..ch {
                 for cx in 0..cw {
-                    let (su, sv) = avg_chroma(u, v, w, cx, cy, 1, 1);
+                    let (su, sv) = avg_chroma(u, v, w, h, cx, cy, 1, 1);
                     let ci = cy * cw + cx;
                     dst[n + 2 * ci] = scale_depth(su, wd, 8) as u8;
                     dst[n + 2 * ci + 1] = scale_depth(sv, wd, 8) as u8;
+                }
+            }
+            dst.into_boxed_slice()
+        }
+        RawVideoFormat::Yuyv => {
+            let stride = row_bytes(to, w);
+            let mut dst = vec![0u8; stride * h];
+            for row in 0..h {
+                for cx in 0..stride / YUYV_GROUP_BYTES {
+                    let (su, sv) = avg_chroma(u, v, w, h, cx, row, 1, 0);
+                    let left = row * w + 2 * cx;
+                    // an odd width's last group repeats the edge luma
+                    let right = (left + 1).min(row * w + w - 1);
+                    let group = row * stride + cx * YUYV_GROUP_BYTES;
+                    dst[group] = scale_depth(y[left], wd, 8) as u8;
+                    dst[group + 1] = scale_depth(su, wd, 8) as u8;
+                    dst[group + 2] = scale_depth(y[right], wd, 8) as u8;
+                    dst[group + 3] = scale_depth(sv, wd, 8) as u8;
                 }
             }
             dst.into_boxed_slice()
@@ -924,7 +923,7 @@ fn from_hub(
             let (_, cw, chh) = planes[1];
             for cy in 0..chh {
                 for cx in 0..cw {
-                    let (su, sv) = avg_chroma(u, v, w, cx, cy, hs, vs);
+                    let (su, sv) = avg_chroma(u, v, w, h, cx, cy, hs, vs);
                     let ci = cy * cw + cx;
                     wr(planes[1].0, ci, su);
                     wr(planes[2].0, ci, sv);
@@ -935,62 +934,88 @@ fn from_hub(
     }
 }
 
-/// Average the `2^hs x 2^vs` block of full-resolution chroma at chroma cell
-/// `(cx, cy)` (the box filter for chroma downsampling). For 4:4:4 (`hs = vs = 0`)
-/// this is the single co-located sample.
+/// Average the `2^hs x 2^vs` block of full-resolution `w x h` chroma at chroma
+/// cell `(cx, cy)` (the box filter for chroma downsampling). A block hanging off
+/// an odd right or bottom edge averages only the pixels inside the picture. For
+/// 4:4:4 (`hs = vs = 0`) this is the single co-located sample.
+#[allow(clippy::too_many_arguments)]
 fn avg_chroma(
     u: &[i32],
     v: &[i32],
     w: usize,
+    h: usize,
     cx: usize,
     cy: usize,
     hs: u32,
     vs: u32,
 ) -> (i32, i32) {
     let (bw, bh) = (1usize << hs, 1usize << vs);
+    let rows = cy * bh..((cy + 1) * bh).min(h);
+    let columns = cx * bw..((cx + 1) * bw).min(w);
     let (mut su, mut sv) = (0i32, 0i32);
-    for dy in 0..bh {
-        for dx in 0..bw {
-            let i = (cy * bh + dy) * w + cx * bw + dx;
+    for row in rows.clone() {
+        for column in columns.clone() {
+            let i = row * w + column;
             su += u[i];
             sv += v[i];
         }
     }
-    let count = (bw * bh) as i32;
+    let count = (rows.len() * columns.len()) as i32;
     ((su + count / 2) / count, (sv + count / 2) / count)
+}
+
+/// Width and height of one 4:2:0 chroma plane of a `w x h` frame, rounded up
+/// the way g2g-core lays it out.
+fn chroma_420_size(w: usize, h: usize) -> (usize, usize) {
+    let [_, (_, width, height), _] = planar_planes(RawVideoFormat::I420, w, h);
+    (width, height)
+}
+
+/// Bytes in one YUYV Y0 U Y1 V group.
+const YUYV_GROUP_BYTES: usize = 4;
+
+/// `(luma, U, V)` of pixel `(row, col)` in a YUYV frame whose rows are `stride`
+/// bytes apart: the group's left or right luma and the chroma pair the group
+/// shares.
+fn yuyv_sample(src: &[u8], stride: usize, row: usize, col: usize) -> (u8, u8, u8) {
+    let group = row * stride + (col / 2) * YUYV_GROUP_BYTES;
+    (src[group + 2 * (col % 2)], src[group + 1], src[group + 3])
+}
+
+/// Byte offsets of the U and V of chroma sample `ci` in a tight 4:2:0 frame with
+/// `luma` luma bytes and `chroma` samples per chroma plane: interleaved after the
+/// luma for NV12, one plane each for I420.
+fn chroma_420_offsets(luma: usize, chroma: usize, ci: usize, interleaved: bool) -> (usize, usize) {
+    match interleaved {
+        true => (luma + 2 * ci, luma + 2 * ci + 1),
+        false => (luma + ci, luma + chroma + ci),
+    }
 }
 
 /// Packed YUYV (4:2:2, byte order Y0 U Y1 V) -> 4:2:0 YUV. The luma plane is a
 /// direct deinterleave; chroma drops to half vertical resolution by averaging
-/// the two source rows that share each output chroma sample. `interleaved`
-/// selects NV12 (true) vs I420 (false) chroma layout. Width is even (checked at
-/// negotiation); height is even whenever the 4:2:0 target is involved.
+/// the two source rows that share each output chroma sample (the one row left
+/// at an odd height stands alone). `interleaved` selects NV12 (true) vs I420
+/// (false) chroma layout.
 fn yuyv_to_yuv420(src: &[u8], w: usize, h: usize, interleaved: bool) -> Box<[u8]> {
+    let stride = row_bytes(RawVideoFormat::Yuyv, w);
     let luma = w * h;
-    let mut dst = vec![0u8; luma + luma / 2];
-    // Luma: every macropixel (4 src bytes) yields two Y samples.
+    let (cw, ch) = chroma_420_size(w, h);
+    let mut dst = vec![0u8; luma + 2 * cw * ch];
     for y in 0..h {
         for x in 0..w {
-            dst[y * w + x] = src[(y * w + x) * 2];
+            dst[y * w + x] = yuyv_sample(src, stride, y, x).0;
         }
     }
-    let (cw, ch) = (w / 2, h / 2);
     for cy in 0..ch {
+        let rows = [cy * 2, (cy * 2 + 1).min(h - 1)];
         for cx in 0..cw {
-            // The macropixel at column `cx` carries one U and one V per row;
-            // average the two rows (cy*2, cy*2+1) for the 4:2:0 sample.
-            let row0 = ((cy * 2) * w + cx * 2) * 2;
-            let row1 = ((cy * 2 + 1) * w + cx * 2) * 2;
-            let u = (src[row0 + 1] as u32 + src[row1 + 1] as u32).div_ceil(2);
-            let v = (src[row0 + 3] as u32 + src[row1 + 3] as u32).div_ceil(2);
-            let ci = cy * cw + cx;
-            if interleaved {
-                dst[luma + 2 * ci] = u as u8;
-                dst[luma + 2 * ci + 1] = v as u8;
-            } else {
-                dst[luma + ci] = u as u8;
-                dst[luma + luma / 4 + ci] = v as u8;
-            }
+            let [(_, u0, v0), (_, u1, v1)] = rows.map(|row| yuyv_sample(src, stride, row, cx * 2));
+            let u = (u0 as u32 + u1 as u32).div_ceil(2);
+            let v = (v0 as u32 + v1 as u32).div_ceil(2);
+            let (u_at, v_at) = chroma_420_offsets(luma, cw * ch, cy * cw + cx, interleaved);
+            dst[u_at] = u as u8;
+            dst[v_at] = v as u8;
         }
     }
     dst.into_boxed_slice()
@@ -1007,24 +1032,17 @@ fn yuyv_to_rgb(
     b_off: usize,
     matrix: &YuvRgbMatrix,
 ) -> Box<[u8]> {
+    let stride = row_bytes(RawVideoFormat::Yuyv, w);
     let mut dst = vec![0u8; w * h * 4];
     for y in 0..h {
-        for mx in 0..(w / 2) {
-            let s = (y * w + mx * 2) * 2;
-            let (y0, u, y1, v) = (
-                src[s] as i32,
-                src[s + 1] as i32,
-                src[s + 2] as i32,
-                src[s + 3] as i32,
-            );
-            for (yi, luma) in [y0, y1].into_iter().enumerate() {
-                let (r, g, b) = matrix.yuv_to_rgb(luma, u, v);
-                let p = (y * w + mx * 2 + yi) * 4;
-                dst[p + r_off] = r as u8;
-                dst[p + 1] = g as u8;
-                dst[p + b_off] = b as u8;
-                dst[p + 3] = 255;
-            }
+        for x in 0..w {
+            let (luma, u, v) = yuyv_sample(src, stride, y, x);
+            let (r, g, b) = matrix.yuv_to_rgb(luma as i32, u as i32, v as i32);
+            let p = (y * w + x) * 4;
+            dst[p + r_off] = r as u8;
+            dst[p + 1] = g as u8;
+            dst[p + b_off] = b as u8;
+            dst[p + 3] = 255;
         }
     }
     dst.into_boxed_slice()
@@ -1071,7 +1089,8 @@ fn narrow_rgba(src: &[u8], w: usize, h: usize, src_stride: usize) -> Box<[u8]> {
 /// NV12 -> I420: split the interleaved UV plane into separate U and V.
 fn nv12_to_i420(src: &[u8], w: usize, h: usize) -> Box<[u8]> {
     let luma = w * h;
-    let chroma = luma / 4;
+    let (cw, ch) = chroma_420_size(w, h);
+    let chroma = cw * ch;
     let mut dst = vec![0u8; luma + 2 * chroma];
     dst[..luma].copy_from_slice(&src[..luma]);
     for i in 0..chroma {
@@ -1084,7 +1103,8 @@ fn nv12_to_i420(src: &[u8], w: usize, h: usize) -> Box<[u8]> {
 /// I420 -> NV12: interleave the U and V planes.
 fn i420_to_nv12(src: &[u8], w: usize, h: usize) -> Box<[u8]> {
     let luma = w * h;
-    let chroma = luma / 4;
+    let (cw, ch) = chroma_420_size(w, h);
+    let chroma = cw * ch;
     let mut dst = vec![0u8; luma + 2 * chroma];
     dst[..luma].copy_from_slice(&src[..luma]);
     for i in 0..chroma {
@@ -1097,7 +1117,7 @@ fn i420_to_nv12(src: &[u8], w: usize, h: usize) -> Box<[u8]> {
 /// Packed 4-byte RGB(A) -> 4:2:0 YUV through `matrix`. `r_off`/`b_off` select
 /// the source channel order (RGBA: 0/2, BGRA: 2/0); `interleaved` picks NV12
 /// (true) vs I420 (false) chroma layout. Chroma is the average of each 2x2
-/// block.
+/// block, of the part of it inside the picture at an odd right or bottom edge.
 #[allow(clippy::too_many_arguments)]
 fn rgb_to_yuv420(
     src: &[u8],
@@ -1110,7 +1130,8 @@ fn rgb_to_yuv420(
     matrix: &YuvRgbMatrix,
 ) -> Box<[u8]> {
     let luma = w * h;
-    let mut dst = vec![0u8; luma + luma / 2];
+    let (cw, ch) = chroma_420_size(w, h);
+    let mut dst = vec![0u8; luma + 2 * cw * ch];
     for y in 0..h {
         for x in 0..w {
             let p = y * src_stride + x * 4;
@@ -1122,29 +1143,25 @@ fn rgb_to_yuv420(
             dst[y * w + x] = matrix.rgb_to_yuv(r, g, b).0 as u8;
         }
     }
-    let (cw, ch) = (w / 2, h / 2);
     for cy in 0..ch {
+        let rows = cy * 2..(cy * 2 + 2).min(h);
         for cx in 0..cw {
-            // average the 2x2 block's RGB before the chroma transform.
+            let columns = cx * 2..(cx * 2 + 2).min(w);
+            // average the block's RGB before the chroma transform.
             let (mut r, mut g, mut b) = (0i32, 0i32, 0i32);
-            for dy in 0..2 {
-                for dx in 0..2 {
-                    let p = (cy * 2 + dy) * src_stride + (cx * 2 + dx) * 4;
+            for row in rows.clone() {
+                for column in columns.clone() {
+                    let p = row * src_stride + column * 4;
                     r += src[p + r_off] as i32;
                     g += src[p + 1] as i32;
                     b += src[p + b_off] as i32;
                 }
             }
-            let (_, u, v) = matrix.rgb_to_yuv(r / 4, g / 4, b / 4);
-            let (u, v) = (u as u8, v as u8);
-            let ci = cy * cw + cx;
-            if interleaved {
-                dst[luma + 2 * ci] = u;
-                dst[luma + 2 * ci + 1] = v;
-            } else {
-                dst[luma + ci] = u;
-                dst[luma + luma / 4 + ci] = v;
-            }
+            let count = (rows.len() * columns.len()) as i32;
+            let (_, u, v) = matrix.rgb_to_yuv(r / count, g / count, b / count);
+            let (u_at, v_at) = chroma_420_offsets(luma, cw * ch, cy * cw + cx, interleaved);
+            dst[u_at] = u as u8;
+            dst[v_at] = v as u8;
         }
     }
     dst.into_boxed_slice()
@@ -1163,16 +1180,12 @@ fn yuv420_to_rgb(
     matrix: &YuvRgbMatrix,
 ) -> Box<[u8]> {
     let luma = w * h;
-    let cw = w / 2;
+    let (cw, ch) = chroma_420_size(w, h);
     let mut dst = vec![0u8; w * h * 4];
     for y in 0..h {
         for x in 0..w {
-            let ci = (y / 2) * cw + x / 2;
-            let (u, v) = if interleaved {
-                (src[luma + 2 * ci] as i32, src[luma + 2 * ci + 1] as i32)
-            } else {
-                (src[luma + ci] as i32, src[luma + luma / 4 + ci] as i32)
-            };
+            let (u_at, v_at) = chroma_420_offsets(luma, cw * ch, (y / 2) * cw + x / 2, interleaved);
+            let (u, v) = (src[u_at] as i32, src[v_at] as i32);
             let (r, g, b) = matrix.yuv_to_rgb(src[y * w + x] as i32, u, v);
             let p = (y * w + x) * 4;
             dst[p + r_off] = r as u8;
@@ -1187,11 +1200,16 @@ fn yuv420_to_rgb(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pixel::tests::GEOMETRIES;
     use g2g_core::PassthroughFields;
 
     fn rgba_caps(w: u32, h: u32) -> Caps {
+        raw_caps(RawVideoFormat::Rgba8, w, h)
+    }
+
+    fn raw_caps(format: RawVideoFormat, w: u32, h: u32) -> Caps {
         Caps::RawVideo {
-            format: RawVideoFormat::Rgba8,
+            format,
             width: Dim::Fixed(w),
             height: Dim::Fixed(h),
             framerate: Rate::Any,
@@ -1237,16 +1255,140 @@ mod tests {
         assert!(f(&h264).is_empty());
     }
 
+    // BT.601 integer rounding only
+    const ROUND_TRIP_TOLERANCE: i32 = 4;
+
     #[test]
-    fn yuv420_targets_reject_odd_dims() {
-        let mut conv = VideoConvert::new(RawVideoFormat::Nv12);
-        let err = conv
-            .configure_pipeline(&rgba_caps(3, 2))
-            .expect_err("odd dims into a 4:2:0 target must fail");
-        assert_eq!(err, G2gError::CapsMismatch);
-        // packed -> packed has no subsampling, odd dims are fine
-        let mut swz = VideoConvert::new(RawVideoFormat::Bgra8);
-        assert!(swz.configure_pipeline(&rgba_caps(3, 3)).is_ok());
+    fn subsampled_targets_accept_odd_dims() {
+        for target in [RawVideoFormat::Nv12, RawVideoFormat::I420] {
+            for (w, h) in GEOMETRIES {
+                let mut conv = VideoConvert::new(target);
+                assert!(
+                    conv.configure_pipeline(&rgba_caps(w, h)).is_ok(),
+                    "{target:?} {w}x{h}"
+                );
+                let mut auto = VideoConvert::auto();
+                auto.configure_pipeline(&rgba_caps(w, h)).unwrap();
+                assert!(
+                    auto.configure_output(&raw_caps(target, w, h)).is_ok(),
+                    "{target:?} {w}x{h}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_odd_edge_chroma_sample_averages_only_the_edge_pixels() {
+        const EDGE: [u8; 4] = [255, 0, 0, 255];
+        const INSIDE: [u8; 4] = [128, 128, 128, 255];
+        let (w, h) = (3, 3);
+        let src: Vec<u8> = (0..h)
+            .flat_map(|y| {
+                (0..w).flat_map(move |x| {
+                    if x == w - 1 || y == h - 1 {
+                        EDGE
+                    } else {
+                        INSIDE
+                    }
+                })
+            })
+            .collect();
+        let matrix = YuvRgbMatrix::new(Colorimetry::UNKNOWN);
+        let (_, edge_u, edge_v) = matrix.rgb_to_yuv(EDGE[0] as i32, EDGE[1] as i32, EDGE[2] as i32);
+        let nv12 = rgb_to_yuv420(&src, w, h, 0, 2, true, w * 4, &matrix);
+        let (cw, ch) = chroma_420_size(w, h);
+        assert_eq!(nv12.len(), w * h + 2 * cw * ch);
+        // every chroma cell but the top-left one covers only edge pixels
+        for (cx, cy) in [(1, 0), (0, 1), (1, 1)] {
+            let (u_at, v_at) = chroma_420_offsets(w * h, cw * ch, cy * cw + cx, true);
+            assert_eq!(
+                (nv12[u_at] as i32, nv12[v_at] as i32),
+                (edge_u, edge_v),
+                "chroma cell ({cx}, {cy})"
+            );
+        }
+    }
+
+    #[test]
+    fn odd_size_frames_round_trip_through_every_subsampled_format() {
+        // one colour per 2x2 block, so subsampling loses nothing
+        const RED_STEP: usize = 13;
+        const GREEN_STEP: usize = 90;
+        const BLUE: u8 = 200;
+        let block_colour = |x: usize, y: usize| {
+            [
+                (x / 2 * RED_STEP) as u8,
+                (y / 2 * GREEN_STEP) as u8,
+                BLUE,
+                u8::MAX,
+            ]
+        };
+        for (w, h) in GEOMETRIES {
+            let (w, h) = (w as usize, h as usize);
+            let rgba: Vec<u8> = (0..h)
+                .flat_map(|y| (0..w).flat_map(move |x| block_colour(x, y)))
+                .collect();
+            for format in [
+                RawVideoFormat::Nv12,
+                RawVideoFormat::I420,
+                RawVideoFormat::Yuyv,
+                RawVideoFormat::I420p10,
+                RawVideoFormat::I422,
+            ] {
+                let yuv = convert(
+                    &rgba,
+                    RawVideoFormat::Rgba8,
+                    format,
+                    w,
+                    h,
+                    Colorimetry::UNKNOWN,
+                );
+                assert_eq!(
+                    yuv.len(),
+                    frame_byte_size(format, w as u32, h as u32),
+                    "{format:?} {w}x{h}"
+                );
+                let back = convert(
+                    &yuv,
+                    format,
+                    RawVideoFormat::Rgba8,
+                    w,
+                    h,
+                    Colorimetry::UNKNOWN,
+                );
+                for (index, (got, want)) in back.iter().zip(&rgba).enumerate() {
+                    assert!(
+                        (*got as i32 - *want as i32).abs() <= ROUND_TRIP_TOLERANCE,
+                        "{format:?} {w}x{h} byte {index}: {got} vs {want}"
+                    );
+                }
+            }
+            let nv12 = convert(
+                &rgba,
+                RawVideoFormat::Rgba8,
+                RawVideoFormat::Nv12,
+                w,
+                h,
+                Colorimetry::UNKNOWN,
+            );
+            let i420 = convert(
+                &nv12,
+                RawVideoFormat::Nv12,
+                RawVideoFormat::I420,
+                w,
+                h,
+                Colorimetry::UNKNOWN,
+            );
+            let back = convert(
+                &i420,
+                RawVideoFormat::I420,
+                RawVideoFormat::Nv12,
+                w,
+                h,
+                Colorimetry::UNKNOWN,
+            );
+            assert_eq!(back, nv12, "NV12 -> I420 -> NV12 {w}x{h}");
+        }
     }
 
     #[test]
@@ -1288,9 +1430,9 @@ mod tests {
             let rgba = yuv420_to_rgb(&nv12, 2, 2, true, 0, 2, &matrix);
             for px in rgba.as_chunks::<4>().0 {
                 assert!(
-                    (px[0] as i32 - r as i32).abs() <= 4
-                        && (px[1] as i32 - g as i32).abs() <= 4
-                        && (px[2] as i32 - b as i32).abs() <= 4,
+                    (px[0] as i32 - r as i32).abs() <= ROUND_TRIP_TOLERANCE
+                        && (px[1] as i32 - g as i32).abs() <= ROUND_TRIP_TOLERANCE
+                        && (px[2] as i32 - b as i32).abs() <= ROUND_TRIP_TOLERANCE,
                     "({r},{g},{b}) round-tripped to ({},{},{})",
                     px[0],
                     px[1],

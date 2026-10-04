@@ -143,14 +143,14 @@ pub(crate) fn pack_planes(
 }
 
 /// Byte width of one row of `format`'s **first** plane at `w` pixels: the row
-/// pitch of a tightly-packed frame.
+/// pitch of a tightly-packed frame, [`RawVideoFormat::plane_stride`] as a
+/// `usize`. Saturates at `usize::MAX` on overflow.
 pub(crate) fn row_bytes(format: RawVideoFormat, w: usize) -> usize {
-    match format {
-        RawVideoFormat::Rgba8 | RawVideoFormat::Bgra8 => w * 4,
-        RawVideoFormat::Rgb8 => w * 3,
-        RawVideoFormat::Yuyv => w * 2,
-        _ => w * format.bytes_per_sample(),
-    }
+    u32::try_from(w)
+        .ok()
+        .and_then(|w| format.plane_stride(0, w))
+        .and_then(|stride| usize::try_from(stride).ok())
+        .unwrap_or(usize::MAX)
 }
 
 /// Tightly-packed byte size of one `w x h` frame in `format` (no row padding),

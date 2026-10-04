@@ -1,12 +1,14 @@
 #![cfg(feature = "std")]
 
-use std::process::Command;
+use std::io::Write;
+use std::process::{Command, Stdio};
 
 use g2g_core::runtime::{parse_launch, run_graph};
-use g2g_core::{PipelineClock, RawVideoFormat};
+use g2g_core::{Colorimetry, PipelineClock, RawVideoFormat};
 use g2g_plugins::appsink::{register_appsink_pull, Pull};
 use g2g_plugins::appsrc::register_appsrc;
 use g2g_plugins::registry::default_registry;
+use g2g_plugins::videoconvert::convert;
 
 // odd on both axes, then odd width alone
 const SIZES: [(u32, u32); 2] = [(37, 5), (37, 4)];
@@ -44,6 +46,186 @@ fn ffmpeg_frame(width: u32, height: u32, pixel_format: &str) -> Vec<u8> {
         .expect("ffmpeg runs");
     assert!(out.status.success(), "ffmpeg failed: {out:?}");
     out.stdout
+}
+
+// ffmpeg's conversion of one raw frame from `from` to `to`
+fn ffmpeg_convert(frame: &[u8], width: u32, height: u32, from: &str, to: &str) -> Vec<u8> {
+    let mut child = Command::new("ffmpeg")
+        .args(["-v", "error", "-f", "rawvideo", "-pix_fmt", from, "-s"])
+        .arg(format!("{width}x{height}"))
+        .args(["-i", "-", "-pix_fmt", to, "-f", "rawvideo", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("ffmpeg runs");
+    let mut stdin = child.stdin.take().expect("piped stdin");
+    let input = frame.to_vec();
+    let feeder = std::thread::spawn(move || stdin.write_all(&input).expect("feed ffmpeg"));
+    let out = child.wait_with_output().expect("ffmpeg finishes");
+    feeder.join().expect("feeder thread");
+    assert!(out.status.success(), "ffmpeg failed: {out:?}");
+    out.stdout
+}
+
+// odd and even on each axis, and the smallest frame
+const CONVERT_SIZES: [(u32, u32); 4] = [(37, 5), (37, 4), (38, 5), (1, 1)];
+const CONVERT_FORMATS: [(RawVideoFormat, &str); 3] = [
+    (RawVideoFormat::Nv12, "nv12"),
+    (RawVideoFormat::I420, "yuv420p"),
+    (RawVideoFormat::Yuyv, "yuyv422"),
+];
+
+// the bound a lossy webp decode is held to against libwebp's, where only the chroma filter differs
+const MEAN_ABS_DIFF_BOUND: f64 = 3.0;
+
+const GRADIENT_BASE: [usize; 3] = [40, 60, 200];
+const GRADIENT_STEP: usize = 4;
+
+// red rises along x, green along y, blue falls along both
+fn gradient_rgba(width: u32, height: u32) -> Vec<u8> {
+    let [red, green, blue] = GRADIENT_BASE;
+    (0..height as usize)
+        .flat_map(|y| {
+            (0..width as usize).flat_map(move |x| {
+                [
+                    (red + GRADIENT_STEP * x) as u8,
+                    (green + GRADIENT_STEP * y) as u8,
+                    (blue - GRADIENT_STEP * (x + y)) as u8,
+                    u8::MAX,
+                ]
+            })
+        })
+        .collect()
+}
+
+fn mean_abs_diff(a: &[u8], b: &[u8]) -> f64 {
+    assert_eq!(a.len(), b.len(), "same sample count");
+    let total: u64 = a
+        .iter()
+        .zip(b)
+        .map(|(x, y)| u64::from(x.abs_diff(*y)))
+        .sum();
+    total as f64 / a.len() as f64
+}
+
+#[test]
+fn rgba_converts_at_odd_sizes_like_ffmpeg() {
+    let ffmpeg = have_ffmpeg();
+    if !ffmpeg {
+        eprintln!("ffmpeg not present: checking sizes only");
+    }
+    for (width, height) in CONVERT_SIZES {
+        let (w, h) = (width as usize, height as usize);
+        let rgba = gradient_rgba(width, height);
+        for (format, pixel_format) in CONVERT_FORMATS {
+            let label = format!("{pixel_format} {width}x{height}");
+            let ours = convert(
+                &rgba,
+                RawVideoFormat::Rgba8,
+                format,
+                w,
+                h,
+                Colorimetry::UNKNOWN,
+            );
+            assert_eq!(
+                Some(ours.len() as u64),
+                format.unpadded_frame_bytes(width, height),
+                "{label}"
+            );
+            if !ffmpeg {
+                continue;
+            }
+            let reference = ffmpeg_convert(&rgba, width, height, "rgba", pixel_format);
+            assert_eq!(ours.len(), reference.len(), "{label}");
+            let drift = mean_abs_diff(&ours, &reference);
+            assert!(drift < MEAN_ABS_DIFF_BOUND, "rgba to {label}: {drift}");
+
+            let back = convert(
+                &reference,
+                format,
+                RawVideoFormat::Rgba8,
+                w,
+                h,
+                Colorimetry::UNKNOWN,
+            );
+            let back_reference = ffmpeg_convert(&reference, width, height, pixel_format, "rgba");
+            let drift = mean_abs_diff(&back, &back_reference);
+            assert!(drift < MEAN_ABS_DIFF_BOUND, "{label} to rgba: {drift}");
+        }
+    }
+}
+
+#[test]
+fn nv12_repacks_to_i420_at_odd_sizes_like_ffmpeg() {
+    if !have_ffmpeg() {
+        eprintln!("ffmpeg not present: skipping");
+        return;
+    }
+    for (width, height) in CONVERT_SIZES {
+        let (w, h) = (width as usize, height as usize);
+        let nv12 = ffmpeg_frame(width, height, "nv12");
+        let i420 = ffmpeg_convert(&nv12, width, height, "nv12", "yuv420p");
+        let repacked = convert(
+            &nv12,
+            RawVideoFormat::Nv12,
+            RawVideoFormat::I420,
+            w,
+            h,
+            Colorimetry::UNKNOWN,
+        );
+        assert_eq!(*repacked, *i420, "{width}x{height}");
+        let back = convert(
+            &i420,
+            RawVideoFormat::I420,
+            RawVideoFormat::Nv12,
+            w,
+            h,
+            Colorimetry::UNKNOWN,
+        );
+        assert_eq!(*back, *nv12, "{width}x{height}");
+    }
+}
+
+// the subsampled formats videoconvert produces, by their caps name
+const LAUNCH_TARGETS: [(RawVideoFormat, &str); 2] = [
+    (RawVideoFormat::Nv12, "NV12"),
+    (RawVideoFormat::I420, "I420"),
+];
+
+#[tokio::test]
+async fn videoconvert_launches_at_an_odd_size() {
+    let (width, height) = CONVERT_SIZES[0];
+    let rgba = gradient_rgba(width, height);
+    for (format, name) in LAUNCH_TARGETS {
+        let in_channel = format!("odd_convert_in_{name}");
+        let out_channel = format!("odd_convert_out_{name}");
+        let feed = register_appsrc(&in_channel);
+        assert!(feed.push(&rgba, 0));
+        feed.end_of_stream();
+        let pull = register_appsink_pull(&out_channel);
+        let line = format!(
+            "appsrc channel={in_channel} caps=video/x-raw,format=RGBA,width={width},height={height},framerate=30/1 \
+             ! videoconvert ! video/x-raw,format={name} ! appsink channel={out_channel}"
+        );
+        let graph = parse_launch(&default_registry(), &line).expect("parses");
+        run_graph(graph, &ZeroClock, 4).await.expect("runs");
+        let Pull::Frame(out) = pull.try_pull() else {
+            panic!("no {name} frame reached the appsink");
+        };
+        let expected = convert(
+            &rgba,
+            RawVideoFormat::Rgba8,
+            format,
+            width as usize,
+            height as usize,
+            Colorimetry::UNKNOWN,
+        );
+        assert_eq!(
+            out.domain.as_system_slice().expect("system memory"),
+            &*expected,
+            "{name}"
+        );
+    }
 }
 
 #[test]
