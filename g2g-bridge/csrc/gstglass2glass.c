@@ -132,12 +132,21 @@ static GstCaps *gst_glass2glass_transform_caps(GstBaseTransform *base, GstPadDir
   return others;
 }
 
+/* GStreamer 1.24+ dma-buf caps say format=DMA_DRM and name the pixels in drm-format. */
+static gboolean video_info_from_caps(GstVideoInfo *info, GstCaps *caps) {
+  if (!gst_video_is_dma_drm_caps(caps))
+    return gst_video_info_from_caps(info, caps);
+  GstVideoInfoDmaDrm drm_info;
+  return gst_video_info_dma_drm_from_caps(&drm_info, caps) &&
+         gst_video_info_dma_drm_to_video_info(&drm_info, info);
+}
+
 /* Output buffer size for a given (raw video) caps, needed when the element is
  * not operating in place. */
 static gboolean gst_glass2glass_get_unit_size(GstBaseTransform *base, GstCaps *caps, gsize *size) {
   (void)base;
   GstVideoInfo info;
-  if (!gst_video_info_from_caps(&info, caps))
+  if (!video_info_from_caps(&info, caps))
     return FALSE;
   *size = GST_VIDEO_INFO_SIZE(&info);
   return TRUE;
@@ -157,10 +166,10 @@ static gboolean gst_glass2glass_set_caps(GstBaseTransform *base, GstCaps *incaps
   }
 
   GstVideoInfo ininfo;
-  self->in_stride = gst_video_info_from_caps(&ininfo, incaps)
+  self->in_stride = video_info_from_caps(&ininfo, incaps)
                         ? (guint)GST_VIDEO_INFO_PLANE_STRIDE(&ininfo, 0)
                         : 0;
-  self->have_out_info = gst_video_info_from_caps(&self->out_info, outcaps);
+  self->have_out_info = video_info_from_caps(&self->out_info, outcaps);
 
   gchar *instr = self->input_caps ? g_strdup(self->input_caps) : gst_caps_to_string(incaps);
   gchar *outstr = gst_caps_to_string(outcaps);

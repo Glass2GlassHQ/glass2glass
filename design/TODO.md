@@ -302,11 +302,3 @@ unless it says otherwise.
 - D3D11 decoder surface import into `WgpuPreprocess` (bind the surface directly
   into the compute pass, the Windows counterpart of the dma-buf import).
 - Run the QNN and CoreML execution providers on Qualcomm and Apple hardware.
-
-## GStreamer bridge
-
-- Build `dmabuftowgpu` and `wgputodmabuf` into the GStreamer plugin (the bridge's
-  `wgpu` feature leaves out `dmabuf-wgpu`), and let the bridge's `appsrc` declare
-  dma-buf output when GStreamer hands it dma-buf memory, so a `dmabuftowgpu`
-  fragment negotiates and its `WgpuBuffer` output leaves through `wgputodmabuf`,
-  then validate that egress against real GStreamer.

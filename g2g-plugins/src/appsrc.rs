@@ -26,7 +26,7 @@ use alloc::string::{String, ToString};
 use spin::Mutex;
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::{OwnedDmaBuf, SystemSlice};
+use g2g_core::memory::{DomainSet, MemoryDomainKind, OwnedDmaBuf, SystemSlice};
 use g2g_core::runtime::{bounded, Receiver, Sender, SourceLoop};
 use g2g_core::{
     Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, FrameTiming, G2gError,
@@ -36,6 +36,7 @@ use g2g_core::{
 use g2g_core::{Dim, Rate};
 
 use crate::capsfilter::parse_caps_set;
+use crate::memory_domain_names::{domain_names, parse_domains};
 
 /// Bounded depth of the application -> element feed. A push past this returns
 /// "full" rather than blocking, so a fast producer never stalls; the pipeline
@@ -114,8 +115,9 @@ impl AppSrcFeed {
     /// Push an imported DMABUF frame: the descriptor stays on the GPU/producer,
     /// no bytes are copied. `dmabuf` owns its fd (dup it from the producer's, so
     /// the two lifetimes are independent). Returns `false` (dropping `dmabuf`,
-    /// which closes its fd) if the feed is full or closed. The downstream element
-    /// must accept the `DmaBuf` memory domain; a system-memory consumer needs an
+    /// which closes its fd) if the feed is full or closed. The element's
+    /// `output-domains` must include `dmabuf`, and the downstream element must
+    /// accept the `DmaBuf` memory domain; a system-memory consumer needs an
     /// import/download step first.
     pub fn push_dmabuf(&self, dmabuf: OwnedDmaBuf, pts_ns: u64) -> bool {
         self.tx
@@ -161,6 +163,8 @@ fn nominal_caps() -> Caps {
 
 /// Application push source. Set its `caps` (fully fixed, `gst-launch` syntax) and
 /// `channel` properties; buffers arrive from the matching [`register_appsrc`].
+/// `output-domains` declares the memory domains the pushed frames come in
+/// (default `system`); a frame in any other domain fails the run.
 ///
 /// # Example
 ///
@@ -173,13 +177,27 @@ fn nominal_caps() -> Caps {
 /// let rgba = vec![0u8; 320 * 240 * 4];
 /// feed.push(&rgba, 0);
 /// ```
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct AppSrc {
     channel: String,
-    caps: Option<Caps>,
+    caps: Option<(String, Caps)>,
+    output_domains: DomainSet,
     configured: bool,
     feed: Option<Receiver<AppItem>>,
     seq: u64,
+}
+
+impl Default for AppSrc {
+    fn default() -> Self {
+        Self {
+            channel: String::new(),
+            caps: None,
+            output_domains: DomainSet::only(MemoryDomainKind::System),
+            configured: false,
+            feed: None,
+            seq: 0,
+        }
+    }
 }
 
 impl AppSrc {
@@ -207,14 +225,19 @@ impl SourceLoop for AppSrc {
         Self: 'a;
 
     fn intercept_caps<'a>(&'a mut self) -> Self::CapsFuture<'a> {
-        core::future::ready(self.caps.clone().ok_or(G2gError::CapsMismatch))
+        core::future::ready(
+            self.caps
+                .as_ref()
+                .map(|(_, caps)| caps.clone())
+                .ok_or(G2gError::CapsMismatch),
+        )
     }
 
     fn caps_constraint<'a>(
         &'a mut self,
     ) -> impl Future<Output = Result<CapsConstraint<'a>, G2gError>> + 'a {
         let constraint = match &self.caps {
-            Some(c) => Ok(CapsConstraint::Produces(CapsSet::one(c.clone()))),
+            Some((_, caps)) => Ok(CapsConstraint::Produces(CapsSet::one(caps.clone()))),
             None => Err(G2gError::CapsMismatch),
         };
         core::future::ready(constraint)
@@ -244,6 +267,9 @@ impl SourceLoop for AppSrc {
             // The loop ends when the pattern stops matching: an explicit
             // `AppItem::Eos`, or `None` once every feed handle has dropped.
             while let Some(AppItem::Frame { domain, pts_ns }) = feed.recv().await {
+                if !self.output_domains.contains(domain.kind()) {
+                    return Err(G2gError::UnsupportedDomain);
+                }
                 let frame = Frame {
                     domain,
                     timing: FrameTiming {
@@ -261,6 +287,16 @@ impl SourceLoop for AppSrc {
             out.push(PipelinePacket::Eos).await?;
             Ok(pushed)
         })
+    }
+
+    fn output_memory(&self) -> MemoryDomainKind {
+        self.output_domains
+            .preferred()
+            .unwrap_or(MemoryDomainKind::System)
+    }
+
+    fn output_domains(&self) -> DomainSet {
+        self.output_domains
     }
 
     fn properties(&self) -> &'static [PropertySpec] {
@@ -283,10 +319,26 @@ impl SourceLoop for AppSrc {
                     .first()
                     .cloned()
                     .ok_or(PropError::Value)?;
-                self.caps = Some(caps);
+                self.caps = Some((s.to_string(), caps));
+                Ok(())
+            }
+            "output-domains" => {
+                self.output_domains = parse_domains(value.as_str().ok_or(PropError::Type)?)?;
                 Ok(())
             }
             _ => Err(PropError::Unknown),
+        }
+    }
+
+    fn get_property(&self, name: &str) -> Option<PropValue> {
+        match name {
+            "channel" => Some(PropValue::Str(self.channel_name().to_string())),
+            "caps" => self
+                .caps
+                .as_ref()
+                .map(|(text, _)| PropValue::Str(text.clone())),
+            "output-domains" => Some(PropValue::Str(domain_names(self.output_domains))),
+            _ => None,
         }
     }
 
@@ -303,6 +355,7 @@ impl SourceLoop for AppSrc {
 static APPSRC_PROPS: &[PropertySpec] = &[
     PropertySpec::new("channel", PropKind::Str, "feed name matching register_appsrc (default \"default\")"),
     PropertySpec::new("caps", PropKind::Str, "fixed output caps, gst-launch syntax (e.g. video/x-raw,format=RGBA,width=320,height=240,framerate=30/1)"),
+    PropertySpec::new("output-domains", PropKind::Str, "comma-separated set of memory domains the pushed frames come in, e.g. dmabuf (default system)"),
 ];
 
 /// The registry needs this source's declared output caps; see `nominal_caps`.

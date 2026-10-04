@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1213: `appsrc` gains `output-domains`, so a `g2g-bridge` fragment on `memory:DMABuf` caps can start with `dmabuftowgpu` and end in `wgputodmabuf`.
 - M1212: `qtdemux` starts an audio track's segment past its edit-list priming and `mp4mux` writes it back as an edit list, so an AAC remux keeps its encoder delay.
 - RTP senders (`udpsink`, `rtspserversink`, KLV) round PTS to the nearest 90 kHz tick through one shared conversion.
 - Platform-only features (`ffmpeg`, `nvenc`, `vaapi`, `nvdec`, `shm`, ALSA / Pulse / PipeWire / V4L2) no longer break a build on another OS; `shm` is Linux-only.

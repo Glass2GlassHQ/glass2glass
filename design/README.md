@@ -891,13 +891,20 @@ gives a caps-driven transform a fixate target. The same `appsink` accepts only
 `dmabuf` and `system` memory, so the launch auto-plug splices `wgpudownload` or
 `cudadownload` after a fragment that ends on the GPU, and a dma-buf output passes
 through untouched. With the `dmabuf-wgpu` feature a fragment that ends in a
-`WgpuBuffer` gets `wgputodmabuf` instead, exporting on the producer's device. The
-embedded `appsrc` declares system memory only, so a fragment that starts with
-`dmabuftowgpu`, the one in-tree `WgpuBuffer` producer for raw video, fails the
-domain negotiation.
+`WgpuBuffer` gets `wgputodmabuf` instead, exporting on the producer's device.
+The embedded `appsrc` declares its domains through `output-domains`: input caps
+carrying the `memory:DMABuf` feature make it `dmabuf` only, so a fragment that
+starts with `dmabuftowgpu` negotiates, and plain caps make it `system,dmabuf`,
+since GStreamer may still hand a plain-caps element dma-buf memory. `memory:DMABuf`
+output caps narrow the `appsink` to `dmabuf` the same way. GStreamer 1.24+ dma-buf
+caps name the pixels as `format=DMA_DRM, drm-format=<fourcc>`. `BridgeGraph` maps the
+fourcc of each format `dmabuftowgpu` imports back to the plain format, and fails
+construction on any other fourcc or on a modifier suffix, since the import reads
+linear rows only. The shell reads such caps through `gst_video_info_dma_drm_*`.
 The wgpu elements, `wgpucompositor` and `wgpudownload`, are in the registry only
-with the crate's `wgpu` feature, so a plugin built with `--features gstreamer,wgpu`
-runs a GPU fragment inside `gst-launch-1.0` (`tools/gst-bridge-smoke.sh`).
+with the crate's `wgpu` feature, which also brings in `dmabuftowgpu` and
+`wgputodmabuf` on Linux, so a plugin built with `--features gstreamer,wgpu` runs a
+GPU fragment inside `gst-launch-1.0` (`tools/gst-bridge-smoke.sh`).
 
 Zero-copy DMABUF import exists at the ingest side: `appsrc` accepts a
 `MemoryDomain::DmaBuf` frame through `AppSrcFeed::push_dmabuf`,
@@ -928,7 +935,11 @@ stride or an offset, and the pulled g2g frame rides as qdata on the read-only
 the buffer while downstream still reads it. A full
 `dma-buf in -> glass2glass(identity) -> dma-buf out` round-trip is validated with a
 memfd-backed dma-buf (`tools/gst-bridge-dmabuf-smoke.sh`), and the system-memory
-path is unchanged (`tools/gst-bridge-smoke.sh`).
+path is unchanged (`tools/gst-bridge-smoke.sh`). The same script chains two
+`glass2glass` elements on `memory:DMABuf` caps, a linear GBM buffer through
+`dmabuftowgpu ! wgputodmabuf` and then `dmabuftowgpu ! wgpudownload`, and compares
+the bytes that come out with the ones that went in. A tiled `gldownload` dma-buf
+must fail negotiation there.
 
 The plugin entry points are subtle. rustc exports only its own `#[no_mangle]`
 symbols from a cdylib and localizes anything pulled from a statically-linked C

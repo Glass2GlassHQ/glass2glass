@@ -4,12 +4,15 @@
 //! `default_registry` (and the bridge) are `std`-gated, so this file is too.
 #![cfg(feature = "std")]
 
-use std::sync::{mpsc, Arc};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 
 use g2g_bridge::{frame_bytes, BridgeError, BridgeGraph};
 
 const CAPS: &str = "video/x-raw,format=RGBA,width=2,height=2,framerate=30/1";
+
+// Opening wgpu devices concurrently crashes some drivers.
+static GPU_LOCK: Mutex<()> = Mutex::new(());
 
 /// The buffers an embedder pushes flow through the sub-graph and come back out,
 /// with timestamps preserved, across the thread boundary: the graph runs on its
@@ -167,6 +170,7 @@ fn gpu_fragment_comes_back_as_system_bytes() {
     const RGBA_BYTES_PER_PIXEL: usize = 4;
     const OPAQUE: u8 = 255;
 
+    let _gpu = GPU_LOCK.lock().unwrap();
     let has_adapter = g2g_core::runtime::block_on(
         wgpu::Instance::default().request_adapter(&wgpu::RequestAdapterOptions::default()),
     )
@@ -220,4 +224,139 @@ fn failed_negotiation_ends_the_drain() {
 
     let bridge = Arc::into_inner(bridge).expect("the drain thread released its handle");
     assert!(bridge.finish().is_err(), "the run reports the failure");
+}
+
+// GStreamer exported this from a GL texture here, the suffix is a tiled NVIDIA layout.
+const TILED_DRM_FORMAT: &str = "AB24:0x020000001056bb03";
+
+#[test]
+fn tiled_dmabuf_caps_fail_to_build() {
+    let caps = format!(
+        "video/x-raw(memory:DMABuf),format=DMA_DRM,drm-format={TILED_DRM_FORMAT},width=2,height=2,framerate=30/1"
+    );
+    let err = BridgeGraph::new("dmabuftowgpu", &caps).expect_err("a tiled dma-buf");
+    assert!(
+        matches!(err, BridgeError::UnsupportedDmaBufCaps(_)),
+        "surfaced as unsupported dma-buf caps: {err}"
+    );
+}
+
+#[cfg(target_os = "linux")]
+mod dmabuf {
+    use g2g_core::memory::{MemoryDomain, OwnedDmaBuf};
+    use g2g_core::{
+        AsyncElement, Caps, Dim, Frame, FrameTiming, G2gError, OutputSink, PipelinePacket,
+        PushOutcome, Rate, RawVideoFormat,
+    };
+    use g2g_plugins::wgpu;
+    use g2g_plugins::wgpudmabuf::WgpuToDmaBuf;
+
+    use super::*;
+
+    const WIDTH: u32 = 64;
+    const HEIGHT: u32 = 16;
+    const RGBA_BYTES_PER_PIXEL: usize = 4;
+    // GStreamer's drm-format for RGBA
+    const RGBA_DRM_FORMAT: &str = "AB24";
+
+    #[derive(Default)]
+    struct Capture {
+        frame: Option<Frame>,
+    }
+
+    impl OutputSink for Capture {
+        fn poll_push(
+            &mut self,
+            _cx: &mut core::task::Context<'_>,
+            packet_slot: &mut Option<PipelinePacket>,
+        ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+            if let Some(PipelinePacket::DataFrame(frame)) = packet_slot.take() {
+                self.frame = Some(frame);
+            }
+            core::task::Poll::Ready(Ok(PushOutcome::Accepted))
+        }
+    }
+
+    async fn export_dmabuf(pixels: &[u8]) -> Option<OwnedDmaBuf> {
+        let mut export = WgpuToDmaBuf::new();
+        let (device, queue) = export.gpu().await.ok()?;
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("bridge-dmabuf-source"),
+            size: pixels.len() as u64,
+            usage: wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: true,
+        });
+        buffer
+            .slice(..)
+            .get_mapped_range_mut()
+            .copy_from_slice(pixels);
+        buffer.unmap();
+        let caps = Caps::RawVideo {
+            format: RawVideoFormat::Rgba8,
+            width: Dim::Fixed(WIDTH),
+            height: Dim::Fixed(HEIGHT),
+            framerate: Rate::Fixed(30 << 16),
+            interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        };
+        export.configure_pipeline(&caps).expect("configures");
+        let domain = MemoryDomain::WgpuBuffer(WgpuToDmaBuf::wrap_buffer(
+            &device,
+            &queue,
+            buffer,
+            pixels.len(),
+        ));
+        let mut capture = Capture::default();
+        export
+            .process(
+                PipelinePacket::DataFrame(Frame::new(domain, FrameTiming::default(), 0)),
+                &mut capture,
+            )
+            .await
+            .expect("exports");
+        match capture.frame.expect("the export pushed a frame").domain {
+            MemoryDomain::DmaBuf(dmabuf) => Some(dmabuf),
+            other => panic!("the export emitted {:?}", other.kind()),
+        }
+    }
+
+    #[test]
+    fn dmabuf_caps_fragment_round_trips_a_gpu_frame() {
+        let _gpu = GPU_LOCK.lock().unwrap();
+        let dmabuf_caps = format!(
+            "video/x-raw(memory:DMABuf),format=DMA_DRM,drm-format={RGBA_DRM_FORMAT},width={WIDTH},height={HEIGHT},framerate=30/1"
+        );
+        let system_caps =
+            format!("video/x-raw,format=RGBA,width={WIDTH},height={HEIGHT},framerate=30/1");
+        let pixels: Vec<u8> = (0..WIDTH as usize * HEIGHT as usize * RGBA_BYTES_PER_PIXEL)
+            .map(|i| (i.wrapping_mul(7).wrapping_add(3)) as u8)
+            .collect();
+        let Some(dmabuf) = g2g_core::runtime::block_on(export_dmabuf(&pixels)) else {
+            eprintln!("no Vulkan export device; skipping");
+            return;
+        };
+
+        let bridge = BridgeGraph::new("dmabuftowgpu ! wgputodmabuf", &dmabuf_caps).expect("builds");
+        assert!(bridge.push_dmabuf(dmabuf, 0));
+        bridge.end_of_stream();
+        let frame = bridge.pull_blocking().expect("a frame came back");
+        let MemoryDomain::DmaBuf(exported) = frame.domain else {
+            panic!("expected a dma-buf, got {:?}", frame.domain.kind());
+        };
+        bridge.finish().expect("clean shutdown");
+
+        let readback = BridgeGraph::with_output_caps(
+            "dmabuftowgpu ! wgpudownload",
+            &dmabuf_caps,
+            &system_caps,
+        )
+        .expect("builds");
+        assert!(readback.push_dmabuf(exported, 0));
+        readback.end_of_stream();
+        let frame = readback.pull_blocking().expect("a frame came back");
+        assert_eq!(
+            frame_bytes(&frame).expect("system-memory frame"),
+            pixels.as_slice()
+        );
+    }
 }

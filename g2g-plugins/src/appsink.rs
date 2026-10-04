@@ -30,9 +30,10 @@ use alloc::vec::Vec;
 use spin::Mutex;
 
 use crate::capsfilter::parse_caps_set;
+use crate::memory_domain_names::{domain_names, parse_domains};
 
 use g2g_core::frame::Frame;
-use g2g_core::memory::{DomainSet, MemoryDomainKind};
+use g2g_core::memory::DomainSet;
 use g2g_core::runtime::{bounded, Receiver, Sender};
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, G2gError,
@@ -373,46 +374,6 @@ impl AsyncElement for AppSink {
             _ => None,
         }
     }
-}
-
-const MEMORY_DOMAIN_NAMES: &[(&str, MemoryDomainKind)] = &[
-    ("system", MemoryDomainKind::System),
-    ("systemview", MemoryDomainKind::SystemView),
-    ("dmabuf", MemoryDomainKind::DmaBuf),
-    ("vulkantexture", MemoryDomainKind::VulkanTexture),
-    ("webgpubuffer", MemoryDomainKind::WebGPUBuffer),
-    ("cuda", MemoryDomainKind::Cuda),
-    ("d3d11texture", MemoryDomainKind::D3D11Texture),
-    ("cvpixelbuffer", MemoryDomainKind::CvPixelBuffer),
-    (
-        "webgpuexternaltexture",
-        MemoryDomainKind::WebGPUExternalTexture,
-    ),
-    ("wgputexture", MemoryDomainKind::WgpuTexture),
-    ("wgpubuffer", MemoryDomainKind::WgpuBuffer),
-];
-
-fn parse_domains(names: &str) -> Result<DomainSet, PropError> {
-    names.split(',').try_fold(DomainSet::EMPTY, |set, name| {
-        let (_, kind) = MEMORY_DOMAIN_NAMES
-            .iter()
-            .find(|(known, _)| *known == name.trim())
-            .ok_or(PropError::Value)?;
-        Ok(set.with(*kind))
-    })
-}
-
-fn domain_names(set: DomainSet) -> String {
-    let names: Vec<&str> = set
-        .iter()
-        .filter_map(|kind| {
-            MEMORY_DOMAIN_NAMES
-                .iter()
-                .find(|(_, known)| *known == kind)
-                .map(|(name, _)| *name)
-        })
-        .collect();
-    names.join(",")
 }
 
 static APPSINK_PROPS: &[PropertySpec] = &[

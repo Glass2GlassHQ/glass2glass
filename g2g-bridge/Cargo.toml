@@ -26,8 +26,10 @@ std = ["g2g-core/std", "g2g-core/runtime", "g2g-core/multi-thread", "g2g-plugins
 # The GStreamer GObject shell (`csrc/gstglass2glass.c`, built by build.rs via
 # pkg-config + cc). Links the system gstreamer-1.0 / gstreamer-base-1.0.
 gstreamer = ["std"]
-# Registers `wgpucompositor` and `wgpudownload`, so a `fragment` can use them.
-wgpu = ["std", "g2g-plugins/wgpu-sink"]
+# Registers `wgpucompositor` and `wgpudownload`, so a `fragment` can use them,
+# and on Linux `dmabuftowgpu` and `wgputodmabuf` for dma-buf input and output
+# (g2g-plugins compiles those two out elsewhere).
+wgpu = ["std", "g2g-plugins/wgpu-sink", "g2g-plugins/dmabuf-wgpu"]
 
 [dependencies]
 g2g-core = { workspace = true }
@@ -38,6 +40,11 @@ tokio = { version = "1", features = ["rt", "time"], optional = true }
 # run a fragment that ends in GPU memory.
 [dev-dependencies]
 g2g-plugins = { workspace = true, features = ["wgpu-sink"] }
+
+# `dmabuf-wgpu` brings in `dmabuftowgpu` and `wgputodmabuf`, so the tests can
+# export a real dma-buf and run a fragment that imports it.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+g2g-plugins = { workspace = true, features = ["dmabuf-wgpu"] }
 
 [build-dependencies]
 cc = "1"

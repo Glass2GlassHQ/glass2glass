@@ -48,6 +48,8 @@ pub mod flacparse;
 // `g2g-mcu` companding math.
 pub mod g711;
 
+mod memory_domain_names;
+
 pub mod appsink;
 pub mod appsrc;
 pub mod audioamplify;

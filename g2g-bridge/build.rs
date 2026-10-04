@@ -20,8 +20,9 @@ fn main() {
     let base = pkg_config::Config::new()
         .probe("gstreamer-base-1.0")
         .expect("gstreamer-base-1.0 dev package (pkg-config) is required");
-    // gstreamer-video-1.0 for gst_video_info_from_caps (output buffer sizing).
+    // gstreamer-video-1.0 for gst_video_info_from_caps, 1.24 for the DMA_DRM caps helpers.
     let video = pkg_config::Config::new()
+        .atleast_version("1.24")
         .probe("gstreamer-video-1.0")
         .expect("gstreamer-video-1.0 dev package (pkg-config) is required");
     // gstreamer-allocators-1.0 for the dma-buf allocator / memory API.

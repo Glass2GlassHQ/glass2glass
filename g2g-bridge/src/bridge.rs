@@ -19,6 +19,29 @@ const LINK_CAPACITY: usize = 4;
 
 const OUTPUT_DOMAINS: &str = "dmabuf,system";
 
+// GStreamer can hand dma-buf memory under plain caps, so the appsrc admits it too
+const PLAIN_INPUT_DOMAINS: &str = "system,dmabuf";
+
+const DMABUF_DOMAINS: &str = "dmabuf";
+
+const DMABUF_CAPS_FEATURE: &str = "(memory:DMABuf)";
+
+const FORMAT_FIELD: &str = "format=";
+
+const DRM_FORMAT_FIELD: &str = "drm-format=";
+
+const DMA_DRM_FORMAT: &str = "DMA_DRM";
+
+// GStreamer's drm-format fourcc for each format dmabuftowgpu imports
+const DRM_FOURCC_FORMATS: &[(&str, &str)] = &[
+    ("AB24", "RGBA"),
+    ("AR24", "BGRA"),
+    ("NV12", "NV12"),
+    ("P010", "P010_10LE"),
+    ("YU12", "I420"),
+    ("YUYV", "YUY2"),
+];
+
 /// Monotonic counter for collision-free `appsrc` / `appsink` channel names. The
 /// named-feed registries those elements use are process-global (keyed by the
 /// channel string), so every `BridgeGraph` must claim a unique pair. An atomic
@@ -45,6 +68,9 @@ pub enum BridgeError {
     Parse(ParseError),
     /// The dedicated run thread could not be spawned.
     Spawn(std::io::Error),
+    /// `memory:DMABuf` caps whose `drm-format` names no pixel format
+    /// `dmabuftowgpu` imports, or a non-linear modifier.
+    UnsupportedDmaBufCaps(String),
 }
 
 impl fmt::Display for BridgeError {
@@ -52,6 +78,9 @@ impl fmt::Display for BridgeError {
         match self {
             BridgeError::Parse(e) => write!(f, "bridge sub-graph failed to parse: {e}"),
             BridgeError::Spawn(e) => write!(f, "bridge run thread failed to spawn: {e}"),
+            BridgeError::UnsupportedDmaBufCaps(caps) => {
+                write!(f, "dma-buf caps the sub-graph cannot import: {caps}")
+            }
         }
     }
 }
@@ -91,6 +120,11 @@ impl BridgeGraph {
     /// `"video/x-raw,format=RGBA,width=1280,height=720,framerate=30/1"`); the
     /// GStreamer shell derives it from the upstream pad's negotiated caps.
     ///
+    /// Caps carrying the `memory:DMABuf` feature declare dma-buf input: the
+    /// fragment's first element must take the `DmaBuf` domain (`dmabuftowgpu`),
+    /// and a GStreamer 1.24+ `format=DMA_DRM, drm-format=<fourcc>` is read as the
+    /// pixel format it names. Plain caps take system memory or dma-buf.
+    ///
     /// The sub-graph's output caps are pinned equal to its input (the
     /// caps/size-preserving case). For a fragment that rescales or reformats, use
     /// [`with_output_caps`](BridgeGraph::with_output_caps).
@@ -106,11 +140,24 @@ impl BridgeGraph {
     /// it both gives a caps-driven transform a fixate target and declares
     /// to the embedder (the GStreamer shell) the size/format of the frames the
     /// graph will produce, so it can allocate matching output buffers.
+    /// `memory:DMABuf` output caps make the graph hand back dma-buf frames only.
     pub fn with_output_caps(
         fragment: &str,
         input_caps: &str,
         output_caps: &str,
     ) -> Result<Self, BridgeError> {
+        let input = SubGraphCaps::from_gst(input_caps)?;
+        let output = SubGraphCaps::from_gst(output_caps)?;
+        let input_domains = match input.dmabuf {
+            true => DMABUF_DOMAINS,
+            false => PLAIN_INPUT_DOMAINS,
+        };
+        let output_domains = match output.dmabuf {
+            true => DMABUF_DOMAINS,
+            false => OUTPUT_DOMAINS,
+        };
+        let (input_caps, output_caps) = (input.caps, output.caps);
+
         let id = SEQ.fetch_add(1, Ordering::Relaxed);
         let in_ch = format!("__g2g_bridge_{id}_in");
         let out_ch = format!("__g2g_bridge_{id}_out");
@@ -129,7 +176,7 @@ impl BridgeGraph {
         // than on a filter in front of it, because a filter would hide a GPU
         // producer's domain from the converter auto-plug.
         let desc = format!(
-            "appsrc channel={in_ch} caps={input_caps} ! {fragment} ! appsink caps={output_caps} input-domains={OUTPUT_DOMAINS} channel={out_ch}"
+            "appsrc channel={in_ch} caps={input_caps} output-domains={input_domains} ! {fragment} ! appsink caps={output_caps} input-domains={output_domains} channel={out_ch}"
         );
 
         let reg = default_registry();
@@ -248,6 +295,49 @@ impl Drop for BridgeGraph {
         if self.join.is_some() {
             let _ = self.shutdown();
         }
+    }
+}
+
+#[derive(Debug)]
+struct SubGraphCaps {
+    caps: String,
+    dmabuf: bool,
+}
+
+impl SubGraphCaps {
+    fn from_gst(caps: &str) -> Result<Self, BridgeError> {
+        let (media_type, fields) = caps.split_once(',').unwrap_or((caps, ""));
+        let Some(media_type) = media_type.strip_suffix(DMABUF_CAPS_FEATURE) else {
+            return Ok(Self {
+                caps: caps.to_string(),
+                dmabuf: false,
+            });
+        };
+        let unsupported = || BridgeError::UnsupportedDmaBufCaps(caps.to_string());
+        let drm_format = fields
+            .split(',')
+            .find_map(|field| field.strip_prefix(DRM_FORMAT_FIELD));
+        let mut rewritten = vec![media_type.to_string()];
+        for field in fields.split(',').filter(|field| !field.is_empty()) {
+            if field.starts_with(DRM_FORMAT_FIELD) {
+                continue;
+            }
+            if field.strip_prefix(FORMAT_FIELD) != Some(DMA_DRM_FORMAT) {
+                rewritten.push(field.to_string());
+                continue;
+            }
+            let fourcc = drm_format.ok_or_else(unsupported)?;
+            // a modifier suffix (a tiled layout) matches no entry
+            let (_, format) = DRM_FOURCC_FORMATS
+                .iter()
+                .find(|(known, _)| *known == fourcc)
+                .ok_or_else(unsupported)?;
+            rewritten.push(format!("{FORMAT_FIELD}{format}"));
+        }
+        Ok(Self {
+            caps: rewritten.join(","),
+            dmabuf: true,
+        })
     }
 }
 

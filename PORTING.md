@@ -211,7 +211,8 @@ g2g-inspect videoconvert         # one element's properties + pad templates
 Common mappings: `jpegenc`/`jpegdec` → `mjpegenc`/`mjpegdec`; `souphttpsrc` →
 `httpsrc`; `rtph264depay` → built into `udpsrc`/`rtspsrc`. `appsrc`/`appsink`
 exist as named launch elements (`appsrc channel=<name>` / `appsink
-channel=<name>`, the application registers the matching feed/sink before launch),
+channel=<name>`, the application registers the matching feed/sink before launch,
+and `output-domains=dmabuf` / `input-domains=dmabuf` declare dma-buf frames),
 as programmatic graph nodes, or via the Python host (`pysrc`/`pyelement`). The
 table lives in [g2g-plugins/src/gst_compat.rs](g2g-plugins/src/gst_compat.rs)
 and is easy to extend.
@@ -665,10 +666,11 @@ to hit.
   `glass2glass fragment=videoscale output-caps="video/x-raw,format=RGBA,width=640,height=360,framerate=30/1"`.
   Build and validate with `tools/gst-bridge-smoke.sh` (needs host GStreamer dev
   libs). A dma-buf-backed `GstBuffer` passes through zero-copy
-  (`tools/gst-bridge-dmabuf-smoke.sh`); system memory is mapped and copied. The
-  gap: a GPU-*compute* fragment (`dmabuftowgpu ! <compute>`) still needs a
-  download or dma-buf-export element at its tail to return the GPU result to the
-  shell.
+  (`tools/gst-bridge-dmabuf-smoke.sh`); system memory is mapped and copied.
+  With the `wgpu` feature, input caps carrying `memory:DMABuf` feed a GPU
+  fragment directly: `glass2glass fragment="dmabuftowgpu ! <compute>"` imports
+  the dma-buf, and a `WgpuBuffer` result leaves through an auto-plugged
+  `wgputodmabuf`. Only linear `drm-format` values are imported.
 - `gstwrap` (§7d), the reverse bridge that hosts an un-ported GStreamer element
   *inside* a g2g graph, is system memory only, a copy each way. dma-buf zero-copy
   through it is future work.
