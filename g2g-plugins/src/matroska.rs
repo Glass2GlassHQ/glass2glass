@@ -172,6 +172,9 @@ impl MkvCodec {
     /// Map a Matroska `CodecID` string to a codec. AAC has profile suffixes
     /// (`A_AAC/MPEG4/LC`, ...), so it is matched by prefix; the rest are exact.
     fn from_codec_id(id: &[u8]) -> MkvCodec {
+        // EBML strings may be NUL-padded (GStreamer's matroskamux pads CodecID)
+        let padding = id.iter().rev().take_while(|&&byte| byte == 0).count();
+        let id = &id[..id.len() - padding];
         if id == b"V_MPEG4/ISO/AVC" {
             MkvCodec::H264
         } else if id == b"V_MPEGH/ISO/HEVC" {
@@ -2541,6 +2544,15 @@ fn uint_bytes(v: u64) -> Vec<u8> {
 mod tests {
     use super::*;
     use alloc::vec;
+
+    #[test]
+    fn a_nul_padded_codec_id_still_names_its_codec() {
+        assert_eq!(
+            MkvCodec::from_codec_id(b"V_MPEG4/ISO/AVC\0"),
+            MkvCodec::H264
+        );
+        assert_eq!(MkvCodec::from_codec_id(b"A_OPUS\0\0"), MkvCodec::Opus);
+    }
 
     /// Encode `value` as a minimal-length EBML VINT (used for element sizes and
     /// block track numbers in the synthetic builders).

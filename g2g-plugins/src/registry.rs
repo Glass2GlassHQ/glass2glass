@@ -618,6 +618,12 @@ pub fn default_registry() -> Registry {
         },
         || Box::new(crate::splitfilesrc::SplitFileSrc::new("")),
     ));
+    // Split-muxer source (M1215): the declared caps stand in for the first part's stream.
+    reg.register_source(SourceFactory::new(
+        "splitmuxsrc",
+        crate::typefind::elementary_video_caps(g2g_core::VideoCodec::H264),
+        || Box::new(crate::splitmuxsrc::SplitMuxSrc::new("")),
+    ));
     // `data:` URI source (M1088): the payload inside the URI, typed by sniffing
     // it. The declared caps are a placeholder, replaced once the URI is read.
     reg.register_source(SourceFactory::new(

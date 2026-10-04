@@ -39,7 +39,7 @@ use crate::filesrc::{encoding_from_str, encoding_to_str};
 
 /// Default read chunk size, matching `filesrc`: large enough to amortize
 /// syscalls, small enough that a demuxer downstream sees steady progress.
-const DEFAULT_BLOCKSIZE: usize = 64 * 1024;
+pub(crate) const DEFAULT_BLOCKSIZE: usize = 64 * 1024;
 
 /// The same value as declared text, for `gst-inspect`.
 const DEFAULT_BLOCKSIZE_TEXT: &str = "65536";
@@ -105,33 +105,9 @@ impl SplitFileSrc {
         self
     }
 
-    /// The parts the pattern matches, in name order. The pattern's directory
-    /// part selects the directory and its file-name part is the wildcard, the
-    /// way gst's `splitfilesrc` reads it.
+    /// The parts the pattern matches, in name order.
     pub fn parts(&self) -> Result<Vec<PathBuf>, G2gError> {
-        let pattern = Path::new(&self.location);
-        let directory = match pattern.parent() {
-            Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
-            _ => PathBuf::from("."),
-        };
-        let Some(name) = pattern.file_name().and_then(|name| name.to_str()) else {
-            return Err(G2gError::CapsMismatch);
-        };
-        let entries = std::fs::read_dir(&directory)
-            .map_err(|e| path_io_err(short_type_name::<Self>(), "read_dir", &directory, e))?;
-        let mut matched = Vec::new();
-        for entry in entries {
-            let entry = entry.map_err(io_err)?;
-            let file_name = entry.file_name();
-            let Some(candidate) = file_name.to_str() else {
-                continue;
-            };
-            if wildcard_matches(name, candidate) {
-                matched.push(entry.path());
-            }
-        }
-        matched.sort();
-        Ok(matched)
+        matching_parts(&self.location, short_type_name::<Self>())
     }
 
     /// The media type of the joined stream: the explicit one, else the first
@@ -149,6 +125,59 @@ impl SplitFileSrc {
         }
         crate::filesrc::sniff_file_caps(first, short_type_name::<Self>())
     }
+}
+
+/// The files a wildcard `location` matches, in name order. The pattern's
+/// directory part selects the directory and its file-name part is the wildcard,
+/// the way gst's `splitfilesrc` and `splitmuxsrc` read it. `element` names the
+/// reader in an I/O error.
+pub(crate) fn matching_parts(
+    location: &str,
+    element: &'static str,
+) -> Result<Vec<PathBuf>, G2gError> {
+    let pattern = Path::new(location);
+    let directory = match pattern.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
+    let Some(name) = pattern.file_name().and_then(|name| name.to_str()) else {
+        return Err(G2gError::CapsMismatch);
+    };
+    let entries = std::fs::read_dir(&directory)
+        .map_err(|e| path_io_err(element, "read_dir", &directory, e))?;
+    let mut matched = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(io_err)?;
+        let file_name = entry.file_name();
+        let Some(candidate) = file_name.to_str() else {
+            continue;
+        };
+        if wildcard_matches(name, candidate) {
+            matched.push(entry.path());
+        }
+    }
+    matched.sort();
+    Ok(matched)
+}
+
+/// The next `blocksize` bytes of `file` as one buffer, `None` at its end.
+pub(crate) fn read_block(
+    file: &mut File,
+    blocksize: usize,
+    sequence: u64,
+) -> Result<Option<Frame>, G2gError> {
+    let mut buf = alloc::vec![0u8; blocksize];
+    let read = file.read(&mut buf).map_err(io_err)?;
+    if read == 0 {
+        return Ok(None);
+    }
+    buf.truncate(read);
+    Ok(Some(Frame::new(
+        MemoryDomain::System(SystemSlice::from_boxed(buf.into_boxed_slice())),
+        // A byte stream carries no timing; a demuxer downstream recovers it.
+        FrameTiming::default(),
+        sequence,
+    )))
 }
 
 /// Whether `candidate` matches a `*` / `?` wildcard `pattern`, the shell
@@ -241,20 +270,7 @@ impl SourceLoop for SplitFileSrc {
             for path in self.parts()? {
                 let mut file = File::open(&path)
                     .map_err(|e| path_io_err(short_type_name::<Self>(), "open", &path, e))?;
-                loop {
-                    let mut buf = alloc::vec![0u8; self.blocksize];
-                    let read = file.read(&mut buf).map_err(io_err)?;
-                    if read == 0 {
-                        break;
-                    }
-                    buf.truncate(read);
-                    let frame = Frame::new(
-                        MemoryDomain::System(SystemSlice::from_boxed(buf.into_boxed_slice())),
-                        // A byte stream carries no timing; a demuxer downstream
-                        // recovers it.
-                        FrameTiming::default(),
-                        sequence,
-                    );
+                while let Some(frame) = read_block(&mut file, self.blocksize, sequence)? {
                     sequence += 1;
                     out.push(PipelinePacket::DataFrame(frame)).await?;
                 }

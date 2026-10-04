@@ -714,6 +714,9 @@ pub mod multifilesrc;
 pub mod record;
 #[cfg(feature = "std")]
 pub mod splitmuxsink;
+// Split-muxer source: the parts a splitmuxsink wrote played back as one stream.
+#[cfg(feature = "std")]
+pub mod splitmuxsrc;
 // HLS packager: cuts a muxed byte stream into segment files plus a rolling
 // m3u8 media playlist (M896).
 #[cfg(feature = "std")]

@@ -115,6 +115,11 @@ A still image needs no hint either: `filesrc location=X.png ! decodebin` and the
 RGBA. `pngenc` writes one lossless PNG per frame; the single-image JPEG encoder is
 `mjpegenc` (gst's `jpegenc`), and there is no WebP encoder.
 
+A `splitmuxsink` recording plays back with `splitmuxsrc location="clip*.mp4" !
+h264parse ! …`, where `location` is a glob as in GStreamer, not the sink's `%05d`
+pattern. It plays the parts' primary (video) stream as one timeline, and has no
+seeking or `num-open-fragments`.
+
 There is also a `typefind` element for a byte stream that is not a file
 (`srtsrc ! typefind ! …`): it sniffs the flowing bytes and re-declares the caps
 mid-stream, so the source's guess is corrected before the data passes on. A

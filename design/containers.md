@@ -55,6 +55,24 @@ it by sniffing the bytes, never by the URI's declared MIME type. Both expose the
 resolved type through `probe_output_caps`, so `decodebin` plans from what the
 source will actually produce.
 
+## splitmuxsrc
+
+`splitmuxsrc` plays the parts a `splitmuxsink` wrote, matched by a wildcard
+`location` and played in name order. Each part is its own container and is
+demuxed on its own: an MP4 part through `Mp4Src`, a Matroska or MPEG-TS part
+through that container's single-stream demuxer, set by the primary-stream hook to
+the part's video track (its audio track when it has none). Every part has to
+carry the first part's codec.
+
+The first part keeps its own timestamps. Each later part is shifted so its first
+frame lands where the previous part ended, which holds whether its muxer
+restarted at zero (MP4) or kept counting (Matroska, MPEG-TS). A part ends at its
+highest PTS plus that frame's duration, and a frame with no duration (MPEG-TS)
+counts as the smallest PTS gap seen between neighbouring frames. The shift is the
+`shift_packet` rule `gaplesssrc` and `fallbacksrc` use. A later part's
+stream-start `Segment` is dropped, a repeated `CapsChanged` is suppressed, and
+sequence numbers run on across parts.
+
 ## Raw byte streams
 
 `ByteStreamEncoding::Raw` is the one encoding with no container and no framing:

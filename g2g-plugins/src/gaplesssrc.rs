@@ -250,13 +250,29 @@ pub(crate) enum Shifted {
     Passed,
 }
 
-/// Move one packet onto the outer timeline in place, the rule
-/// [`ShiftSink`] and `fallbacksrc`'s multi-output sibling (M1170) share.
-pub(crate) fn shift_packet(packet: &mut Option<PipelinePacket>, offset: u64) -> Shifted {
+// a playlist item or a restarted source starts its own timeline at zero
+pub(crate) const INNER_TIMELINE_START: u64 = 0;
+
+/// Move one packet onto the outer timeline in place, inner time `origin`
+/// landing at `offset`: the rule [`ShiftSink`], `fallbacksrc`'s multi-output
+/// sibling (M1170) and `splitmuxsrc` share.
+pub(crate) fn shift_packet(
+    packet: &mut Option<PipelinePacket>,
+    origin: u64,
+    offset: u64,
+) -> Shifted {
     match packet.take().expect("poll_push without a packet") {
         PipelinePacket::DataFrame(mut f) => {
-            f.timing.pts_ns = f.timing.pts_ns.saturating_add(offset);
-            f.timing.dts_ns = f.timing.dts_ns.saturating_add(offset);
+            f.timing.pts_ns = f
+                .timing
+                .pts_ns
+                .saturating_add(offset)
+                .saturating_sub(origin);
+            f.timing.dts_ns = f
+                .timing
+                .dts_ns
+                .saturating_add(offset)
+                .saturating_sub(origin);
             let end = f.timing.pts_ns.saturating_add(f.timing.duration_ns);
             *packet = Some(PipelinePacket::DataFrame(f));
             Shifted::Frame(end)
@@ -281,7 +297,7 @@ impl OutputSink for ShiftSink<'_> {
         packet: &mut Option<PipelinePacket>,
     ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
         if !self.shifted {
-            match shift_packet(packet, self.offset) {
+            match shift_packet(packet, INNER_TIMELINE_START, self.offset) {
                 Shifted::Frame(end) => {
                     if end > self.max_end {
                         self.max_end = end;

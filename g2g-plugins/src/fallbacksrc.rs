@@ -52,7 +52,7 @@ use g2g_core::{
     PipelinePacket, PushOutcome, SourceRestartReason, SourceRestartStatus,
 };
 
-use crate::gaplesssrc::{shift_packet, ShiftSink, Shifted};
+use crate::gaplesssrc::{shift_packet, ShiftSink, Shifted, INNER_TIMELINE_START};
 
 /// The pause between a source's death and its rebuild, gst's hardcoded sleep.
 pub const RETRY_DELAY: Duration = Duration::from_secs(1);
@@ -593,7 +593,7 @@ impl MultiOutputSink for LifeSink<'_> {
         packet: &mut Option<PipelinePacket>,
     ) -> Poll<Result<PushOutcome, G2gError>> {
         if !self.shifted {
-            match shift_packet(packet, self.offset) {
+            match shift_packet(packet, INNER_TIMELINE_START, self.offset) {
                 Shifted::Frame(end) => {
                     if end > self.max_end {
                         self.max_end = end;
