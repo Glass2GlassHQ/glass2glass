@@ -20,23 +20,33 @@ use g2g_core::memory::OwnedWgpuTexture;
 use g2g_core::{G2gError, HardwareError, WgpuKeepAlive};
 
 /// Byte size of the push-constant block both YCbCr -> RGBA compute shaders
-/// declare (`shaders/mediacodec_ycbcr*.comp`): `uint xfer, srcWidth, srcHeight`.
+/// declare (`shaders/mediacodec_ycbcr*.comp`): `uint xfer, srcWidth, srcHeight,
+/// srcX, srcY`.
 #[cfg(any(feature = "vulkan-video", feature = "mediacodec-wgpu"))]
-pub(crate) const YCBCR_PUSH_CONSTANT_SIZE: u32 = 12;
+pub(crate) const YCBCR_PUSH_CONSTANT_SIZE: u32 = 20;
 
 /// Pack the YCbCr -> RGBA shaders' push constants: the HDR transfer selector (0
-/// passthrough, 1 PQ, 2 HLG) and the extent of the image being sampled, which
+/// passthrough, 1 PQ, 2 HLG), the extent of the image being sampled, which
 /// exceeds the output extent when the decoder rounded the picture up to the
-/// device's picture access granularity.
+/// device's picture access granularity, and the top-left of the output picture
+/// in that image.
 #[cfg(any(feature = "vulkan-video", feature = "mediacodec-wgpu"))]
 pub(crate) fn ycbcr_push_constants(
     transfer: u32,
     source_extent: (u32, u32),
+    source_offset: (u32, u32),
 ) -> [u8; YCBCR_PUSH_CONSTANT_SIZE as usize] {
+    let words = [
+        transfer,
+        source_extent.0,
+        source_extent.1,
+        source_offset.0,
+        source_offset.1,
+    ];
     let mut bytes = [0u8; YCBCR_PUSH_CONSTANT_SIZE as usize];
-    bytes[0..4].copy_from_slice(&transfer.to_ne_bytes());
-    bytes[4..8].copy_from_slice(&source_extent.0.to_ne_bytes());
-    bytes[8..12].copy_from_slice(&source_extent.1.to_ne_bytes());
+    for (slot, word) in bytes.chunks_exact_mut(size_of::<u32>()).zip(words) {
+        slot.copy_from_slice(&word.to_ne_bytes());
+    }
     bytes
 }
 

@@ -220,11 +220,12 @@ impl VulkanStreamDecoder {
             VideoCodec::H264 => {
                 let ps =
                     extract_h264_parameter_sets(init).ok_or(VulkanVideoError::UnsupportedStream)?;
-                let width = (ps.sps.pic_width_in_mbs_minus1 + 1) * 16;
-                let height = (ps.sps.pic_height_in_map_units_minus1 + 1) * 16;
+                let coded_width = (ps.sps.pic_width_in_mbs_minus1 + 1) * 16;
+                let coded_height = (ps.sps.pic_height_in_map_units_minus1 + 1) * 16;
                 let (range, coefficients) =
                     h26x_colorimetry(ps.sps.matrix_coefficients, ps.sps.video_full_range_flag);
-                let session = device.create_h264_session(&ps, width, height)?;
+                let session = device.create_h264_session(&ps, coded_width, coded_height)?;
+                let (width, height) = session.output_extent;
                 let decoder = device.create_h264_dpb_decoder(&session, &ps)?;
                 Ok(Self {
                     inner: Inner::H264 {
@@ -243,12 +244,15 @@ impl VulkanStreamDecoder {
             VideoCodec::H265 => {
                 let ps =
                     extract_h265_parameter_sets(init).ok_or(VulkanVideoError::UnsupportedStream)?;
-                let width = ps.sps.pic_width_in_luma_samples;
-                let height = ps.sps.pic_height_in_luma_samples;
                 let std = to_std_h265_params(&ps);
                 let (range, coefficients) =
                     h26x_colorimetry(ps.sps.matrix_coefficients, ps.sps.video_full_range_flag);
-                let session = device.create_h265_session(&std, width, height)?;
+                let session = device.create_h265_session(
+                    &std,
+                    ps.sps.pic_width_in_luma_samples,
+                    ps.sps.pic_height_in_luma_samples,
+                )?;
+                let (width, height) = session.output_extent;
                 let decoder = device.create_h265_dpb_decoder(&session, &ps)?;
                 Ok(Self {
                     inner: Inner::H265 {
@@ -305,11 +309,12 @@ impl VulkanStreamDecoder {
             VideoCodec::H264 => {
                 let ps =
                     extract_h264_parameter_sets(init).ok_or(VulkanVideoError::UnsupportedStream)?;
-                let width = (ps.sps.pic_width_in_mbs_minus1 + 1) * 16;
-                let height = (ps.sps.pic_height_in_map_units_minus1 + 1) * 16;
+                let coded_width = (ps.sps.pic_width_in_mbs_minus1 + 1) * 16;
+                let coded_height = (ps.sps.pic_height_in_map_units_minus1 + 1) * 16;
                 let (range, coefficients) =
                     h26x_colorimetry(ps.sps.matrix_coefficients, ps.sps.video_full_range_flag);
-                let session = device.create_h264_session(&ps, width, height)?;
+                let session = device.create_h264_session(&ps, coded_width, coded_height)?;
+                let (width, height) = session.output_extent;
                 let decoder = device.create_h264_dpb_decoder_gpu(&session, &ps)?;
                 Ok(Self {
                     inner: Inner::H264 {
@@ -328,12 +333,15 @@ impl VulkanStreamDecoder {
             VideoCodec::H265 => {
                 let ps =
                     extract_h265_parameter_sets(init).ok_or(VulkanVideoError::UnsupportedStream)?;
-                let width = ps.sps.pic_width_in_luma_samples;
-                let height = ps.sps.pic_height_in_luma_samples;
                 let std = to_std_h265_params(&ps);
                 let (range, coefficients) =
                     h26x_colorimetry(ps.sps.matrix_coefficients, ps.sps.video_full_range_flag);
-                let session = device.create_h265_session(&std, width, height)?;
+                let session = device.create_h265_session(
+                    &std,
+                    ps.sps.pic_width_in_luma_samples,
+                    ps.sps.pic_height_in_luma_samples,
+                )?;
+                let (width, height) = session.output_extent;
                 let decoder = device.create_h265_dpb_decoder_gpu(&session, &ps)?;
                 Ok(Self {
                     inner: Inner::H265 {
@@ -415,12 +423,12 @@ impl VulkanStreamDecoder {
         Ok(dec)
     }
 
-    /// Coded width in luma samples.
+    /// Width of the decoded frames in luma samples, after the stream's crop.
     pub fn width(&self) -> u32 {
         self.width
     }
 
-    /// Coded height in luma samples.
+    /// Height of the decoded frames in luma samples, after the stream's crop.
     pub fn height(&self) -> u32 {
         self.height
     }

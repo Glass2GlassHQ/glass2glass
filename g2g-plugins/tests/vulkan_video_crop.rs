@@ -6,7 +6,7 @@
 use g2g_core::memory::MemoryDomainKind;
 use g2g_core::runtime::{block_on, parse_launch, run_graph};
 use g2g_core::{Caps, Dim, PipelineClock, Rate, RawVideoFormat, VideoCodec};
-use g2g_plugins::appsink::{register_appsink_pull, Pull};
+use g2g_plugins::appsink::register_appsink_pull;
 use g2g_plugins::registry::default_registry;
 use g2g_plugins::streamdec::{VideoCodec as StreamCodec, VulkanStreamDecoder};
 use g2g_plugins::vulkanvideo::{
@@ -484,11 +484,11 @@ fn the_one_shot_idr_decodes_are_the_crop_rectangle() {
 }
 
 #[test]
-fn a_launch_line_negotiates_the_cropped_size() {
+fn a_launch_line_decodes_the_crop_rectangle() {
     let _gpu = gpu_lock();
     for (clip, parser) in [
         (H264_ALL_SIDES_CROP, "h264parse"),
-        (H265_10BIT_ALL_SIDES_CROP, "h265parse"),
+        (H265_CONFORMANCE_WINDOW, "h265parse"),
     ] {
         if open_device(clip.codec).is_none() {
             return;
@@ -496,18 +496,15 @@ fn a_launch_line_negotiates_the_cropped_size() {
         let channel = format!("crop_{}", clip.file);
         let pull = register_appsink_pull(&channel);
         let line = format!(
-            "filesrc location={}/tests/fixtures/{} ! {parser} ! vulkanvideodec \
-             ! video/x-raw,width={},height={} ! appsink channel={channel}",
+            "filesrc location={}/tests/fixtures/{} ! {parser} ! vulkanvideodec ! appsink channel={channel}",
             env!("CARGO_MANIFEST_DIR"),
             clip.file,
-            clip.size.0,
-            clip.size.1,
         );
         let graph = parse_launch(&default_registry(), &line).expect("parses");
-        block_on(run_graph(graph, &ZeroClock, LINK_CAPACITY))
-            .unwrap_or_else(|error| panic!("{line} runs, got {error:?}"));
+        // the appsink holds only a few frames, so they are pulled while the graph runs
+        let run = std::thread::spawn(move || block_on(run_graph(graph, &ZeroClock, LINK_CAPACITY)));
         let mut frames = Vec::new();
-        while let Pull::Frame(frame) = pull.try_pull() {
+        while let Some(frame) = block_on(pull.pull()) {
             frames.push(
                 frame
                     .domain
@@ -516,6 +513,9 @@ fn a_launch_line_negotiates_the_cropped_size() {
                     .to_vec(),
             );
         }
+        run.join()
+            .expect("the graph thread finishes")
+            .unwrap_or_else(|error| panic!("{line} runs, got {error:?}"));
         reference_check(clip, &frames);
     }
 }

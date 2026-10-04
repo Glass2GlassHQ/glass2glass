@@ -656,7 +656,7 @@ pub unsafe fn ahb_to_rgba_readback(
             pipeline_layout,
             vk::ShaderStageFlags::COMPUTE,
             0,
-            &crate::gpu::ycbcr_push_constants(0, (width, height)),
+            &crate::gpu::ycbcr_push_constants(0, (width, height), (0, 0)),
         );
         d.cmd_dispatch(cb, width.div_ceil(8), height.div_ceil(8), 1);
 
@@ -1344,7 +1344,7 @@ impl YcbcrToRgba {
                 self.pipeline_layout,
                 vk::ShaderStageFlags::COMPUTE,
                 0,
-                &crate::gpu::ycbcr_push_constants(0, (self.width, self.height)),
+                &crate::gpu::ycbcr_push_constants(0, (self.width, self.height), (0, 0)),
             );
             d.cmd_dispatch(cb, self.width.div_ceil(8), self.height.div_ceil(8), 1);
             // Leave the output in SHADER_READ_ONLY_OPTIMAL: a tidy layout for the

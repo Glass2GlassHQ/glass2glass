@@ -5409,12 +5409,49 @@ fn require_even_two_plane_texture(width: u32, height: u32) -> Result<(), VulkanV
     }
 }
 
+// H.264 and H.265 count a 4:2:0 crop in chroma samples, two luma samples each
+const CHROMA_420_CROP_UNIT: u32 = 2;
+
+// the offset and extent left of `picture` once `[left, right, top, bottom]` crop units of `unit` samples are cut off
+fn crop_window(
+    picture: (u32, u32),
+    unit: (u32, u32),
+    [left, right, top, bottom]: [u32; 4],
+) -> Result<((u32, u32), (u32, u32)), VulkanVideoError> {
+    let axis = |size: u32, unit: u32, start: u32, end: u32| {
+        let offset = start.checked_mul(unit)?;
+        let kept = size
+            .checked_sub(offset)?
+            .checked_sub(end.checked_mul(unit)?)?;
+        (kept > 0).then_some((offset, kept))
+    };
+    let (x, width) =
+        axis(picture.0, unit.0, left, right).ok_or(VulkanVideoError::UnsupportedStream)?;
+    let (y, height) =
+        axis(picture.1, unit.1, top, bottom).ok_or(VulkanVideoError::UnsupportedStream)?;
+    Ok(((x, y), (width, height)))
+}
+
+// the luma and chroma plane offsets of a 4:2:0 picture that starts at `offset`
+fn two_plane_image_offsets(offset: (u32, u32)) -> Result<[vk::Offset3D; 2], VulkanVideoError> {
+    let plane = |(x, y): (u32, u32)| -> Result<vk::Offset3D, VulkanVideoError> {
+        Ok(vk::Offset3D {
+            x: i32::try_from(x).map_err(|_| VulkanVideoError::UnsupportedStream)?,
+            y: i32::try_from(y).map_err(|_| VulkanVideoError::UnsupportedStream)?,
+            z: 0,
+        })
+    };
+    Ok([plane(offset)?, plane((offset.0 / 2, offset.1 / 2))?])
+}
+
 // a copy on a transfer-only queue needs its bufferOffset on a 4-byte boundary
 const READBACK_PLANE_ALIGNMENT: u64 = 4;
 
-// where the two planes of one `width` x `height` picture land in a host-visible readback buffer
+// where the two planes of the `width` x `height` picture at `image_offset` land in a host-visible readback buffer
 #[derive(Debug, Clone, Copy)]
 struct ReadbackLayout {
+    luma_image_offset: vk::Offset3D,
+    chroma_image_offset: vk::Offset3D,
     width: u32,
     height: u32,
     luma_len: u64,
@@ -5423,7 +5460,12 @@ struct ReadbackLayout {
 }
 
 impl ReadbackLayout {
-    fn new(bit_depth: u8, width: u32, height: u32) -> Result<Self, VulkanVideoError> {
+    fn new(
+        bit_depth: u8,
+        image_offset: (u32, u32),
+        width: u32,
+        height: u32,
+    ) -> Result<Self, VulkanVideoError> {
         let format = two_plane_raw_format(bit_depth);
         let luma_len = format
             .plane_bytes(0, width, height)
@@ -5431,7 +5473,10 @@ impl ReadbackLayout {
         let chroma_len = format
             .plane_bytes(1, width, height)
             .ok_or(VulkanVideoError::UnsupportedStream)?;
+        let [luma_image_offset, chroma_image_offset] = two_plane_image_offsets(image_offset)?;
         Ok(Self {
+            luma_image_offset,
+            chroma_image_offset,
             width,
             height,
             luma_len,
@@ -5450,13 +5495,17 @@ impl ReadbackLayout {
         base_offset: u64,
         layers: impl Fn(vk::ImageAspectFlags) -> vk::ImageSubresourceLayers,
     ) -> [vk::BufferImageCopy; 2] {
-        let plane = |aspect: vk::ImageAspectFlags, offset: u64, width: u32, height: u32| {
+        let plane = |aspect: vk::ImageAspectFlags,
+                     offset: u64,
+                     image_offset: vk::Offset3D,
+                     width: u32,
+                     height: u32| {
             vk::BufferImageCopy::default()
                 .buffer_offset(base_offset + offset)
                 .buffer_row_length(0)
                 .buffer_image_height(0)
                 .image_subresource(layers(aspect))
-                .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
+                .image_offset(image_offset)
                 .image_extent(vk::Extent3D {
                     width,
                     height,
@@ -5464,10 +5513,17 @@ impl ReadbackLayout {
                 })
         };
         [
-            plane(vk::ImageAspectFlags::PLANE_0, 0, self.width, self.height),
+            plane(
+                vk::ImageAspectFlags::PLANE_0,
+                0,
+                self.luma_image_offset,
+                self.width,
+                self.height,
+            ),
             plane(
                 vk::ImageAspectFlags::PLANE_1,
                 self.chroma_offset,
+                self.chroma_image_offset,
                 self.width.div_ceil(2),
                 self.height.div_ceil(2),
             ),
@@ -5676,7 +5732,8 @@ unsafe fn alloc_bind_image_raw(
 ///
 /// `nv12_extent` is the sampled image's own extent, which exceeds `w` x `h` when
 /// the picture was rounded up to the device's picture access granularity; the
-/// shader needs it to address texel (x, y) of a padded image.
+/// shader needs it to address texel (x, y) of a padded image. `offset` is where
+/// the `w` x `h` picture starts in that image.
 ///
 /// # Safety
 /// `nv12` must be a valid image on `raw_device`, decoded and idle (its decode
@@ -5692,6 +5749,7 @@ unsafe fn nv12_to_wgpu_texture(
     compute_family: u32,
     nv12: vk::Image,
     nv12_extent: (u32, u32),
+    offset: (u32, u32),
     w: u32,
     h: u32,
     source: PictureSource,
@@ -5906,7 +5964,7 @@ unsafe fn nv12_to_wgpu_texture(
             pipeline_layout,
             vk::ShaderStageFlags::COMPUTE,
             0,
-            &crate::gpu::ycbcr_push_constants(0, nv12_extent),
+            &crate::gpu::ycbcr_push_constants(0, nv12_extent, offset),
         );
         dev.cmd_dispatch(cb, w.div_ceil(8), h.div_ceil(8), 1);
         // RGBA general -> shader-read for wgpu sampling. When this NV12 image is a
@@ -6045,6 +6103,9 @@ struct YcbcrConverter {
     /// picture when the pictures were rounded up to the picture access
     /// granularity, so the shader cannot derive it from the output extent.
     slot_extent: (u32, u32),
+    // the top-left of the stream's crop rectangle in a slot image
+    picture_offset: (u32, u32),
+    picture_plane_offsets: [vk::Offset3D; 2],
 }
 
 impl core::fmt::Debug for YcbcrConverter {
@@ -6104,10 +6165,12 @@ impl YcbcrConverter {
         bit_depth: u8,
         hdr_output: HdrOutput,
         slot_extent: (u32, u32),
+        picture_offset: (u32, u32),
         sampler_descriptors: u32,
     ) -> Result<Self, VulkanVideoError> {
         let dev = raw_device;
         let err = VulkanVideoError::QueryFailed;
+        let picture_plane_offsets = two_plane_image_offsets(picture_offset)?;
         let (ycbcr_model, ycbcr_range) = color.vk_ycbcr();
         let nv12_format = planar_420_format(bit_depth);
         let (rgba_format, wgpu_format) = rgba_output_format(bit_depth);
@@ -6254,6 +6317,8 @@ impl YcbcrConverter {
                 wgpu_format,
                 xfer,
                 slot_extent,
+                picture_offset,
+                picture_plane_offsets,
             })
         }
     }
@@ -6414,13 +6479,14 @@ impl YcbcrConverter {
                 &[],
             );
             // HDR transfer selector (0 for the 8-bit / passthrough path) plus the
-            // sampled slot extent the shader normalizes its coordinates by.
+            // sampled slot extent the shader normalizes its coordinates by and the
+            // picture's offset in it.
             dev.cmd_push_constants(
                 cb,
                 self.pipeline_layout,
                 vk::ShaderStageFlags::COMPUTE,
                 0,
-                &crate::gpu::ycbcr_push_constants(self.xfer, self.slot_extent),
+                &crate::gpu::ycbcr_push_constants(self.xfer, self.slot_extent, self.picture_offset),
             );
             dev.cmd_dispatch(cb, w.div_ceil(8), h.div_ceil(8), 1);
             let mut after = alloc::vec::Vec::with_capacity(2);
@@ -6718,7 +6784,8 @@ impl YcbcrConverter {
     ///
     /// # Safety
     /// `cb` must be recordable; `src` and `dst` must be valid two-plane images
-    /// of at least `w` x `h` on `self.raw_device`.
+    /// on `self.raw_device`, `src` holding the `w` x `h` picture at
+    /// `picture_offset` and `dst` at least `w` x `h`.
     unsafe fn record_copy_nv12(
         &self,
         cb: vk::CommandBuffer,
@@ -6728,7 +6795,8 @@ impl YcbcrConverter {
         h: u32,
     ) -> Result<(), vk::Result> {
         let dev = &self.raw_device;
-        let plane = |aspect: vk::ImageAspectFlags, pw: u32, ph: u32| {
+        let [luma_offset, chroma_offset] = self.picture_plane_offsets;
+        let plane = |aspect: vk::ImageAspectFlags, src_offset: vk::Offset3D, pw: u32, ph: u32| {
             let dst_layers = vk::ImageSubresourceLayers {
                 aspect_mask: aspect,
                 mip_level: 0,
@@ -6737,6 +6805,7 @@ impl YcbcrConverter {
             };
             vk::ImageCopy::default()
                 .src_subresource(src.layers(aspect))
+                .src_offset(src_offset)
                 .dst_subresource(dst_layers)
                 .extent(vk::Extent3D {
                     width: pw,
@@ -6746,8 +6815,8 @@ impl YcbcrConverter {
         };
         // The chroma plane is half size in both directions.
         let regions = [
-            plane(vk::ImageAspectFlags::PLANE_0, w, h),
-            plane(vk::ImageAspectFlags::PLANE_1, w / 2, h / 2),
+            plane(vk::ImageAspectFlags::PLANE_0, luma_offset, w, h),
+            plane(vk::ImageAspectFlags::PLANE_1, chroma_offset, w / 2, h / 2),
         ];
         // SAFETY: contract above.
         unsafe {
@@ -7330,9 +7399,11 @@ pub struct H264DecodeSession {
     /// driver decodes into an image distinct from the reference it sets up.
     pub reference_format: vk::Format,
     pub coded_extent: (u32, u32),
-    /// The picture size the caller gets back. Smaller than `coded_extent` when the
-    /// stream's pictures are below the device's minimum coded extent.
+    /// The picture size the caller gets back: the stream's crop rectangle (H.264
+    /// frame crop, H.265 conformance window), and smaller than `coded_extent` also
+    /// when the stream's pictures are below the device's minimum coded extent.
     pub output_extent: (u32, u32),
+    pub output_offset: (u32, u32),
 }
 
 impl core::fmt::Debug for H264DecodeSession {
@@ -7384,9 +7455,11 @@ pub struct H265DecodeSession {
     /// driver decodes into an image distinct from the reference it sets up.
     pub reference_format: vk::Format,
     pub coded_extent: (u32, u32),
-    /// The picture size the caller gets back. Smaller than `coded_extent` when the
-    /// stream's pictures are below the device's minimum coded extent.
+    /// The picture size the caller gets back: the stream's crop rectangle (H.264
+    /// frame crop, H.265 conformance window), and smaller than `coded_extent` also
+    /// when the stream's pictures are below the device's minimum coded extent.
     pub output_extent: (u32, u32),
+    pub output_offset: (u32, u32),
 }
 
 impl core::fmt::Debug for H265DecodeSession {
@@ -7435,9 +7508,11 @@ pub struct Av1DecodeSession {
     /// driver decodes into an image distinct from the reference it sets up.
     pub reference_format: vk::Format,
     pub coded_extent: (u32, u32),
-    /// The picture size the caller gets back. Smaller than `coded_extent` when the
-    /// stream's pictures are below the device's minimum coded extent.
+    /// The picture size the caller gets back: the stream's crop rectangle (H.264
+    /// frame crop, H.265 conformance window), and smaller than `coded_extent` also
+    /// when the stream's pictures are below the device's minimum coded extent.
     pub output_extent: (u32, u32),
+    pub output_offset: (u32, u32),
     /// The Std sequence header handed to the driver at parameters creation.
     /// NVIDIA retains and dereferences the pointer per decode (it does NOT
     /// copy), so the session owns this stable-address block for its lifetime.
@@ -7630,7 +7705,7 @@ impl VulkanVideoDevice {
     }
 
     /// The extent every picture resource is bound at for a stream of `max_w` x
-    /// `max_h`, and the picture size the caller gets back. They differ when the
+    /// `max_h`, and the picture size the stream's own crop then applies to. They differ when the
     /// stream is smaller than the device's minimum coded extent: a picture
     /// resource must stay inside the device's coded-extent range, so the picture
     /// is decoded at the minimum and cropped on the way out.
@@ -7686,9 +7761,11 @@ impl VulkanVideoDevice {
         self
     }
 
-    /// Create an H.264 decode session + parameters for `ps`, whose pictures are
-    /// `max_w`x`max_h` (clamped to the device's coded-extent range). Session
-    /// parameter creation validates the `Std*` SPS/PPS mapping.
+    /// Create an H.264 decode session + parameters for `ps`, whose coded pictures
+    /// are `max_w`x`max_h` (clamped to the device's coded-extent range). The output
+    /// is the SPS frame crop of that picture, and a crop reaching outside it is
+    /// [`VulkanVideoError::UnsupportedStream`]. Session parameter creation
+    /// validates the `Std*` SPS/PPS mapping.
     pub fn create_h264_session(
         &self,
         ps: &H264ParameterSets,
@@ -7699,7 +7776,22 @@ impl VulkanVideoDevice {
         // H.264 decode is 8-bit here (High profile, NV12); High 10 is out of scope.
         let (picture_format, reference_format) = self.session_picture_formats(&prof.profile, 8)?;
 
-        let ((w, h), (out_w, out_h)) = self.session_extents(max_w, max_h);
+        let ((w, h), picture) = self.session_extents(max_w, max_h);
+        // a field-coded stream counts crop rows in pairs of field rows
+        let fields_per_frame = 2u32.saturating_sub(u32::from(ps.sps.frame_mbs_only_flag));
+        let (output_offset, (out_w, out_h)) = crop_window(
+            picture,
+            (
+                CHROMA_420_CROP_UNIT,
+                CHROMA_420_CROP_UNIT.saturating_mul(fields_per_frame),
+            ),
+            [
+                ps.sps.frame_crop_left_offset,
+                ps.sps.frame_crop_right_offset,
+                ps.sps.frame_crop_top_offset,
+                ps.sps.frame_crop_bottom_offset,
+            ],
+        )?;
         let coded_extent = self.session_max_coded_extent();
 
         let session_ci = vk::VideoSessionCreateInfoKHR::default()
@@ -7794,11 +7886,13 @@ impl VulkanVideoDevice {
             reference_format,
             coded_extent: (w, h),
             output_extent: (out_w, out_h),
+            output_offset,
         })
     }
 
     /// Create an H.265 decode session + parameters (carrying the VPS/SPS/PPS) for
-    /// a stream of up to `max_w` x `max_h`. The HEVC sibling of
+    /// a stream of up to `max_w` x `max_h`, output at the SPS conformance window.
+    /// The HEVC sibling of
     /// [`create_h264_session`](Self::create_h264_session): building the session
     /// parameters makes the driver validate the M501 `Std*` mapping (a wrong
     /// mapping fails here), the H.265 analog of M488's H.264 validation.
@@ -7816,7 +7910,17 @@ impl VulkanVideoDevice {
         let (picture_format, reference_format) =
             self.session_picture_formats(&prof.profile, bit_depth)?;
 
-        let ((w, h), (out_w, out_h)) = self.session_extents(max_w, max_h);
+        let ((w, h), picture) = self.session_extents(max_w, max_h);
+        let (output_offset, (out_w, out_h)) = crop_window(
+            picture,
+            (CHROMA_420_CROP_UNIT, CHROMA_420_CROP_UNIT),
+            [
+                std.sps.conf_win_left_offset,
+                std.sps.conf_win_right_offset,
+                std.sps.conf_win_top_offset,
+                std.sps.conf_win_bottom_offset,
+            ],
+        )?;
         let coded_extent = self.session_max_coded_extent();
 
         let session_ci = vk::VideoSessionCreateInfoKHR::default()
@@ -7914,6 +8018,7 @@ impl VulkanVideoDevice {
             reference_format,
             coded_extent: (w, h),
             output_extent: (out_w, out_h),
+            output_offset,
         })
     }
 
@@ -8026,6 +8131,7 @@ impl VulkanVideoDevice {
             reference_format,
             coded_extent: (w, h),
             output_extent: (out_w, out_h),
+            output_offset: (0, 0),
             _std: own_std,
         })
     }
@@ -8161,7 +8267,13 @@ impl VulkanVideoDevice {
             .submit_idr_decode_into(session, &slice, &dpb, output.as_ref(), w, h)
             .and_then(|()| {
                 let (out_w, out_h) = session.output_extent;
-                self.read_picture_to_nv12(picture.image, source, out_w, out_h)
+                self.read_picture_to_nv12(
+                    picture.image,
+                    source,
+                    session.output_offset,
+                    out_w,
+                    out_h,
+                )
             });
         // SAFETY: both images were created above, are destroyed once here, and the
         // decode and its copy were both fence-waited.
@@ -8181,13 +8293,14 @@ impl VulkanVideoDevice {
         &self,
         picture: vk::Image,
         source: PictureSource,
+        offset: (u32, u32),
         w: u32,
         h: u32,
     ) -> Result<Nv12Frame, VulkanVideoError> {
         let dev = &self.raw_device;
         // The one-shot IDR path is the 8-bit H.264 format.
         let bit_depth = 8;
-        let layout = ReadbackLayout::new(bit_depth, w, h)?;
+        let layout = ReadbackLayout::new(bit_depth, offset, w, h)?;
         let rb_ci = vk::BufferCreateInfo::default()
             .size(layout.len())
             .usage(vk::BufferUsageFlags::TRANSFER_DST)
@@ -8606,6 +8719,7 @@ impl VulkanVideoDevice {
                 nv12,
                 (image_w, image_h),
                 compute_queue,
+                session.output_offset,
                 out_w,
                 out_h,
                 source,
@@ -8629,6 +8743,7 @@ impl VulkanVideoDevice {
         nv12: vk::Image,
         nv12_extent: (u32, u32),
         compute_queue: vk::Queue,
+        offset: (u32, u32),
         w: u32,
         h: u32,
         source: PictureSource,
@@ -8643,6 +8758,7 @@ impl VulkanVideoDevice {
                 self.compute_queue_family,
                 nv12,
                 nv12_extent,
+                offset,
                 w,
                 h,
                 source,
@@ -8959,6 +9075,7 @@ impl VulkanVideoDevice {
         session: vk::VideoSessionKHR,
         parameters: vk::VideoSessionParametersKHR,
         coded_extent: (u32, u32),
+        output_offset: (u32, u32),
         output_extent: (u32, u32),
         picture_format: vk::Format,
         reference_format: vk::Format,
@@ -8970,14 +9087,15 @@ impl VulkanVideoDevice {
     ) -> Result<DpbCore, VulkanVideoError> {
         let (w, h) = output_extent;
         // Slot images are rounded up to the device's picture access granularity;
-        // the picture stays in the top-left corner and is copied out at `(w, h)`.
+        // the coded picture stays in the top-left corner and is copied out from
+        // `output_offset` at `(w, h)`.
         let image_extent = self.picture_image_extent(coded_extent);
         // 8-bit NV12 (`G8_B8R8`, 1 byte/sample) or 10-bit (`G10X6`, 2). The GPU
         // converter picks its ycbcr conversion + RGBA target from this (10-bit ->
         // `R16G16B16A16_SFLOAT`); the system readback scales its buffer lengths.
         let bps = format_bytes_per_sample(picture_format);
         let bit_depth = if bps >= 2 { 10 } else { 8 };
-        let readback_layout = ReadbackLayout::new(bit_depth, w, h)?;
+        let readback_layout = ReadbackLayout::new(bit_depth, output_offset, w, h)?;
 
         // DPB image pool, plus (distinct model) one decode output image paired with
         // each slot. On any failure, free what was already created.
@@ -9245,6 +9363,7 @@ impl VulkanVideoDevice {
                     bit_depth,
                     hdr_output,
                     image_extent,
+                    output_offset,
                     self.combined_sampler_descriptor_count(picture_format),
                 )
             } {
@@ -9344,6 +9463,7 @@ impl VulkanVideoDevice {
             session.session,
             session.parameters,
             (w, h),
+            session.output_offset,
             session.output_extent,
             session.picture_format,
             session.reference_format,
@@ -9437,6 +9557,7 @@ impl VulkanVideoDevice {
             session.session,
             session.parameters,
             (w, h),
+            session.output_offset,
             session.output_extent,
             session.picture_format,
             session.reference_format,
@@ -9528,6 +9649,7 @@ impl VulkanVideoDevice {
             session.session,
             session.parameters,
             (w, h),
+            session.output_offset,
             session.output_extent,
             session.picture_format,
             session.reference_format,
@@ -9820,8 +9942,9 @@ struct DpbCore {
     session: vk::VideoSessionKHR,
     parameters: vk::VideoSessionParametersKHR,
     coded_extent: (u32, u32),
-    /// The picture size handed back: `coded_extent` minus any padding the device's
-    /// minimum coded extent forced. Every copy out of a picture uses this.
+    /// The picture size handed back: the stream's crop of `coded_extent`, minus any
+    /// padding the device's minimum coded extent forced. Every copy out of a
+    /// picture uses this, from the crop offset the readback and converter hold.
     output_extent: (u32, u32),
     /// Extent the DPB slot images were created at: `coded_extent` rounded up to
     /// the device's picture access granularity. Every copy out of a slot still
@@ -13085,9 +13208,10 @@ impl VulkanVideoPlayer {
             Some(VideoCodec::H264) => {
                 let ps = extract_h264_parameter_sets(&stream)
                     .ok_or(VulkanVideoError::UnsupportedStream)?;
-                let width = (ps.sps.pic_width_in_mbs_minus1 + 1) * 16;
-                let height = (ps.sps.pic_height_in_map_units_minus1 + 1) * 16;
-                let session = device.create_h264_session(&ps, width, height)?;
+                let coded_width = (ps.sps.pic_width_in_mbs_minus1 + 1) * 16;
+                let coded_height = (ps.sps.pic_height_in_map_units_minus1 + 1) * 16;
+                let session = device.create_h264_session(&ps, coded_width, coded_height)?;
+                let (width, height) = session.output_extent;
                 let decoder = device.create_h264_dpb_decoder_gpu(&session, &ps)?;
                 (
                     PlayerDecoder::H264(decoder),
@@ -13099,10 +13223,13 @@ impl VulkanVideoPlayer {
             Some(VideoCodec::H265) => {
                 let ps = extract_h265_parameter_sets(&stream)
                     .ok_or(VulkanVideoError::UnsupportedStream)?;
-                let width = ps.sps.pic_width_in_luma_samples;
-                let height = ps.sps.pic_height_in_luma_samples;
                 let std = to_std_h265_params(&ps);
-                let session = device.create_h265_session(&std, width, height)?;
+                let session = device.create_h265_session(
+                    &std,
+                    ps.sps.pic_width_in_luma_samples,
+                    ps.sps.pic_height_in_luma_samples,
+                )?;
+                let (width, height) = session.output_extent;
                 let decoder = device.create_h265_dpb_decoder_gpu(&session, &ps)?;
                 (
                     PlayerDecoder::H265(decoder),
