@@ -564,6 +564,16 @@ output frame: `output_extent` is the picture size the caller gets, `coded_extent
 the size every picture resource is bound at, which the spec requires to stay
 inside the device's coded-extent range.
 
+Only AV1 produces an odd picture size, since its frame size is any value, while
+H.264 and H.265 crop a 4:2:0 picture in two-sample units. The images are always
+even, so the readback copies `ceil(w/2) x ceil(h/2)` CbCr pairs out of them, the
+tight NV12 / P010 layout of the core caps, with the chroma plane starting on a
+4-byte boundary of the readback buffer as a copy on a transfer-only queue needs.
+Film grain repeats the last luma column for the chroma average of an odd width,
+as dav1d does. The RGBA outputs carry any size. The two-plane `NV12` / `P010`
+texture output refuses an odd size with `UnsupportedStream`, because Vulkan and
+wgpu both reject a 4:2:0 multi-planar image with an odd side.
+
 A driver reporting `DPB_AND_OUTPUT_COINCIDE` decodes into its reference slot, and
 one image per slot serves as both. A driver that does not, Mesa RADV for all
 three codecs, writes the picture into a second image in the same decode

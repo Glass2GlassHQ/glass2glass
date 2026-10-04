@@ -73,9 +73,13 @@ Highest leverage first:
 ## Receive / decode
 
 - **`VulkanVideoDec` residuals.** Run the `vulkanvideo` GPU tests on Intel ANV.
-- **`VulkanVideoDec` odd picture sizes.** Decode a stream whose picture width
-  or height is odd (the readback and the NV12 textures carry `w/2 x h/2`
-  chroma, so such a session is refused).
+- **`VulkanVideoDec` odd-size two-plane texture.** Hand out an odd-size picture
+  on the `NV12` / `P010` texture output, which Vulkan and wgpu refuse to create
+  with an odd side, for example as an even-rounded texture with the picture size
+  carried beside it.
+- **`VulkanVideoDec` cropping.** Apply the H.264 frame crop and the H.265
+  conformance window: the output is the whole coded picture, so a 1080p H.264
+  stream comes out 1920x1088.
 
 ## CUDA / display
 
@@ -174,8 +178,10 @@ Highest leverage first:
 - **Odd-size `videoflip`.** It refuses an odd width or height for the
   subsampled formats; mirror and rotate them with the chroma resampled, since
   the unpaired chroma column or row moves to the other edge.
-- **`CudaToWgpu` odd sizes.** The packed `w x h*3/2` texture cannot hold the
-  wider chroma row of an odd-width NV12 frame, so it is refused.
+- **Odd-size NV12 on the wgpu consumers.** `WgpuSink` and `WgpuPreprocess`
+  refuse an odd NV12 width or height: the sink's packed-NV12 blit takes the
+  picture width from the texture, and the preprocess storage-buffer shader reads
+  the chroma rows at the luma row stride.
 - **`textoverlay` font backend:** font-variation axes beyond `wght` on the
   shaped horizontal path (cosmic-text exposes only weight); vertical-mode
   shaping if cosmic-text ever grows writing modes.

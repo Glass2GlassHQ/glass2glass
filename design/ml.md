@@ -35,8 +35,9 @@ keeps the tensor on the GPU.
 
 Surface-import input closes the other end. When the NV12 frame arrives already
 GPU-resident as a `MemoryDomain::WgpuTexture`, a `WgpuNv12Texture` keep-alive
-wrapping an R8Uint texture of `width x height*3/2` in standard NV12 byte layout,
-the element adopts that texture's device and samples it with `textureLoad`
+wrapping an R8Uint texture of `gpu::packed_nv12_extent` (the luma rows, then the
+interleaved CbCr rows, every row as wide as the `2 * ceil(width/2)` byte chroma
+row), the element adopts that texture's device and samples it with `textureLoad`
 straight into the compute pass, with no CPU upload, bit-identical to the
 storage-buffer path.
 
@@ -87,7 +88,9 @@ imports the same memory by FD with `cuImportExternalMemory` and copies the NVDEC
 NV12 planes into it device to device, and the wgpu device travels on the frame's
 keep-alive so `WgpuPreprocess` adopts it, the device-identity pattern. The whole
 `NVDEC -> CudaToWgpu -> WgpuPreprocess -> WgpuInference` chain is validated on an
-RTX 3060, matching a CPU reference with no PCIe download.
+RTX 3060, matching a CPU reference with no PCIe download. An odd-size frame
+crosses the bridge in that packed layout, while `WgpuPreprocess` and `WgpuSink`
+refuse odd NV12 geometry at negotiation.
 
 Shared images are recycled from a reuse pool. The Vulkan image, its CUDA import
 and the `wgpu::Texture` are allocated once and returned to a free list when the
