@@ -39,7 +39,8 @@ use g2g_core::{
 
 use crate::clock::wait_to_present;
 use crate::gpu::{
-    gpu_err, nv12_plane_views, texture_layout, texture_of, GpuContext, WgpuTextureLayout,
+    gpu_err, nv12_plane_views, packed_nv12_extent, texture_layout, texture_of, GpuContext,
+    WgpuTextureLayout,
 };
 use crate::yuvmatrix::YuvToRgbWeights;
 
@@ -319,23 +320,20 @@ impl SourceLayout {
                 self.height,
                 self.width * 4,
             ),
-            WgpuTextureLayout::PackedNv12 => (
-                wgpu::TextureFormat::R8Uint,
-                self.width,
-                packed_nv12_height(self.height),
-                self.width,
-            ),
+            WgpuTextureLayout::PackedNv12 => {
+                let (texture_width, texture_height) = packed_nv12_extent(self.width, self.height);
+                (
+                    wgpu::TextureFormat::R8Uint,
+                    texture_width,
+                    texture_height,
+                    self.width,
+                )
+            }
             // NV12 caps negotiate the packed layout, so a two-plane frame only
             // ever arrives as a GPU texture, never as bytes to upload.
             WgpuTextureLayout::MultiplanarNv12 => return Err(G2gError::UnsupportedDomain),
         })
     }
-}
-
-/// Rows an NV12 frame of `height` occupies once packed into a single plane: the
-/// luma rows plus the half-height interleaved chroma rows.
-fn packed_nv12_height(height: u32) -> u32 {
-    height + height / 2
 }
 
 /// The sink's accepted layouts: NV12 (what the decoders produce) and RGBA (what

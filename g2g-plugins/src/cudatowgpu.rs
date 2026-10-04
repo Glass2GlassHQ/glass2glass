@@ -218,10 +218,6 @@ impl AsyncElement for CudaToWgpu {
                         buf.width,
                         buf.height,
                     );
-                    // the packed texture has w-byte chroma rows, too narrow at an odd width
-                    if !w.is_multiple_of(2) || !h.is_multiple_of(2) {
-                        return Err(G2gError::CapsMismatch);
-                    }
 
                     if self.interop.is_none() {
                         self.interop = Some(shared_interop_device().await?);

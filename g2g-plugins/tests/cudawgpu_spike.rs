@@ -149,9 +149,8 @@ async fn wgpu_reads_what_cuda_wrote() {
     );
 }
 
-// the packed texture cannot hold an odd width's last chroma pair, so the frame is refused
 #[tokio::test]
-async fn an_odd_size_cuda_frame_is_refused() {
+async fn an_odd_size_cuda_frame_lands_in_the_packed_texture() {
     use g2g_core::memory::SystemSlice;
     use g2g_core::{
         AsyncElement, Caps, Dim, Frame, FrameTiming, G2gError, MemoryDomain, OutputSink,
@@ -159,6 +158,7 @@ async fn an_odd_size_cuda_frame_is_refused() {
     };
     use g2g_plugins::cuda::CudaUpload;
     use g2g_plugins::cudatowgpu::CudaToWgpu;
+    use g2g_plugins::gpu::{packed_nv12_extent, WgpuNv12Texture};
 
     #[derive(Default)]
     struct Collect(Vec<PipelinePacket>);
@@ -191,8 +191,9 @@ async fn an_odd_size_cuda_frame_is_refused() {
     let len = RawVideoFormat::Nv12
         .unpadded_frame_bytes(ODD_W, ODD_H)
         .unwrap() as usize;
+    let bytes: Vec<u8> = (0..len).map(|i| i as u8).collect();
     let frame = Frame::new(
-        MemoryDomain::System(SystemSlice::from_boxed(vec![0u8; len].into_boxed_slice())),
+        MemoryDomain::System(SystemSlice::from_boxed(bytes.clone().into_boxed_slice())),
         FrameTiming::default(),
         0,
     );
@@ -205,11 +206,83 @@ async fn an_odd_size_cuda_frame_is_refused() {
     };
     let mut to_wgpu = CudaToWgpu::new();
     to_wgpu.configure_pipeline(&caps).expect("configures");
-    let refused = to_wgpu
-        .process(PipelinePacket::DataFrame(on_gpu), &mut Collect::default())
-        .await;
-    assert!(
-        matches!(refused, Err(G2gError::CapsMismatch)),
-        "{refused:?}"
+    let mut bridged = Collect::default();
+    to_wgpu
+        .process(PipelinePacket::DataFrame(on_gpu), &mut bridged)
+        .await
+        .expect("an odd-size frame crosses the bridge");
+    let Some(PipelinePacket::DataFrame(on_wgpu)) = bridged.0.pop() else {
+        panic!("the bridge emitted no frame");
+    };
+    let MemoryDomain::WgpuTexture(owned) = &on_wgpu.domain else {
+        panic!("expected a WgpuTexture frame");
+    };
+    let owner = owned
+        .keep_alive()
+        .as_any()
+        .downcast_ref::<WgpuNv12Texture>()
+        .expect("the bridge hands out a WgpuNv12Texture");
+    let texture = owner.texture();
+    let (texture_width, texture_height) = packed_nv12_extent(ODD_W, ODD_H);
+    assert_eq!(
+        (texture.width(), texture.height()),
+        (texture_width, texture_height)
     );
+
+    let padded_row = texture_width.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
+        * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+    let buffer = owner.device().create_buffer(&wgpu::BufferDescriptor {
+        label: Some("odd-readback"),
+        size: (padded_row * texture_height) as u64,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut encoder = owner
+        .device()
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+    encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &buffer,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(padded_row),
+                rows_per_image: Some(texture_height),
+            },
+        },
+        texture.size(),
+    );
+    owner.queue().submit([encoder.finish()]);
+    let slice = buffer.slice(..);
+    slice.map_async(wgpu::MapMode::Read, |_| {});
+    owner
+        .device()
+        .poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        })
+        .expect("poll");
+    let rows = slice.get_mapped_range();
+
+    let padded_row = padded_row as usize;
+    let luma_row = RawVideoFormat::Nv12.plane_stride(0, ODD_W).unwrap() as usize;
+    let chroma_row = RawVideoFormat::Nv12.plane_stride(1, ODD_W).unwrap() as usize;
+    let chroma_rows = RawVideoFormat::Nv12.plane_rows(1, ODD_H).unwrap() as usize;
+    let luma_rows = ODD_H as usize;
+    let luma = (0..luma_rows).map(|y| &rows[y * padded_row..][..luma_row]);
+    let chroma =
+        (luma_rows..luma_rows + chroma_rows).map(|y| &rows[y * padded_row..][..chroma_row]);
+    let tight: Vec<u8> = luma.chain(chroma).flatten().copied().collect();
+    assert_eq!(tight, bytes, "the texture holds the frame's NV12 rows");
+    drop(rows);
+    drop(on_wgpu);
+    to_wgpu
+        .process(PipelinePacket::Eos, &mut Collect::default())
+        .await
+        .expect("eos releases the pool");
 }

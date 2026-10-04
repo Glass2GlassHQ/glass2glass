@@ -259,14 +259,20 @@ pub fn texture_of(owned: &OwnedWgpuTexture) -> Option<&wgpu::Texture> {
 pub enum WgpuTextureLayout {
     /// One colour texture holding the finished picture, sampled directly.
     Rgba,
-    /// The packed-NV12 plane [`WgpuNv12Texture`] describes: `width x height*3/2`
-    /// R8Uint, Y rows then interleaved CbCr, needing a YCbCr -> RGB convert.
+    /// The packed-NV12 plane [`WgpuNv12Texture`] describes: one R8Uint texture of
+    /// [`packed_nv12_extent`], Y rows then interleaved CbCr, needing a YCbCr ->
+    /// RGB convert.
     PackedNv12,
     /// The two-plane `wgpu::TextureFormat::NV12` (8-bit) or
     /// `wgpu::TextureFormat::P010` (10-bit) a GPU decoder hands out:
     /// `width x height`, sampled through the [`nv12_plane_views`] pair, needing
     /// the same YCbCr -> RGB convert.
     MultiplanarNv12,
+}
+
+// rows as wide as the chroma row, so an odd width leaves one unused byte after each luma row
+pub fn packed_nv12_extent(width: u32, height: u32) -> (u32, u32) {
+    (2 * width.div_ceil(2), height + height.div_ceil(2))
 }
 
 /// The layout of `texture` from its format: the R8Uint single-channel plane the
@@ -499,9 +505,9 @@ pub(crate) unsafe fn import_vk_image_as_wgpu_texture(
 }
 
 /// Owns a GPU-resident NV12 frame for surface-import into `WgpuPreprocess`
-/// (M217), in either NV12 texture layout: an R8Uint `wgpu::Texture` of size
-/// `width x (height * 3/2)` holding the bytes in the standard NV12 layout (Y
-/// plane, then interleaved Cb,Cr), or a two-plane `TextureFormat::NV12` /
+/// (M217), in either NV12 texture layout: an R8Uint `wgpu::Texture` of
+/// [`packed_nv12_extent`] holding the NV12 rows (Y plane, then interleaved
+/// Cb,Cr), or a two-plane `TextureFormat::NV12` /
 /// `TextureFormat::P010` texture of `width x height`. [`texture_layout`] of
 /// [`texture`](Self::texture) tells a consumer which. Carries the device / queue
 /// it lives on. Boxed as the

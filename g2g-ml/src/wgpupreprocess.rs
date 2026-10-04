@@ -55,7 +55,7 @@ use g2g_core::{
 // (the CUDA and dma-buf bridges); re-exported so this module's consumers keep
 // naming it here.
 pub use g2g_plugins::gpu::WgpuNv12Texture;
-use g2g_plugins::gpu::{nv12_plane_views, texture_layout, WgpuTextureLayout};
+use g2g_plugins::gpu::{nv12_plane_views, packed_nv12_extent, texture_layout, WgpuTextureLayout};
 // The one place the YUV <-> RGB coefficients are derived, shared with the CPU
 // converters and shaders in g2g-plugins so no two stages disagree.
 use g2g_plugins::yuvmatrix::{YuvToRgbWeights, SAMPLE_SPAN};
@@ -771,9 +771,8 @@ impl WgpuPreprocess {
     fn dispatch_tex(&self, owner: &WgpuNv12Texture) -> Result<MemoryDomain, G2gError> {
         let tg = self.tex_gpu.as_ref().ok_or(G2gError::NotConfigured)?;
         let texture = owner.texture();
-        // The texture must hold the NV12 frame in the standard byte layout:
-        // width x (height + height/2), one byte per texel (R8Uint).
-        if texture.width() != self.width || texture.height() != self.height + self.height / 2 {
+        // The texture must hold the NV12 frame in the packed R8Uint layout.
+        if (texture.width(), texture.height()) != packed_nv12_extent(self.width, self.height) {
             return Err(G2gError::CapsMismatch);
         }
         // The texture is tightly packed from byte 0; only the colorimetry can

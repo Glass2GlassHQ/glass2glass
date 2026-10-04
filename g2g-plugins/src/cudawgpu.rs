@@ -42,6 +42,8 @@ use core::pin::Pin;
 use alloc::boxed::Box;
 use ash::vk;
 
+use crate::gpu::packed_nv12_extent;
+
 use g2g_core::g2g_error;
 use g2g_core::log::{short_type_name, Target};
 use g2g_core::{
@@ -232,12 +234,6 @@ async fn open_interop_device(
     })
 }
 
-/// The packed-NV12 texture geometry M217 samples: one R8Uint plane holding the
-/// Y rows then the interleaved CbCr rows.
-fn nv12_texture_height(height: u32) -> u32 {
-    height + height / 2
-}
-
 /// Pick a memory type index satisfying `type_bits` with the requested property
 /// flags (here `DEVICE_LOCAL`).
 fn find_memory_type(
@@ -279,7 +275,7 @@ pub unsafe fn export_nv12_image(
     width: u32,
     height: u32,
 ) -> Result<SharedNv12Image, G2gError> {
-    let tex_h = nv12_texture_height(height);
+    let (tex_w, tex_h) = packed_nv12_extent(width, height);
 
     // SAFETY: caller guarantees a Vulkan device; we hold the hal guard for the
     // whole allocation and never retain raw handles past the ash device.
@@ -296,7 +292,11 @@ pub unsafe fn export_nv12_image(
         let image_info = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
             .format(vk::Format::R8_UINT)
-            .extent(vk::Extent3D { width, height: tex_h, depth: 1 })
+            .extent(vk::Extent3D {
+                width: tex_w,
+                height: tex_h,
+                depth: 1,
+            })
             .mip_levels(1)
             .array_layers(1)
             .samples(vk::SampleCountFlags::TYPE_1)
@@ -402,9 +402,10 @@ impl SharedNv12Image {
 /// `device` must be the Vulkan wgpu device `shared` was created on. Consumes
 /// `shared`: its image and memory must not be freed by any other path.
 pub unsafe fn wrap_as_texture(device: &wgpu::Device, shared: SharedNv12Image) -> wgpu::Texture {
+    let (tex_w, tex_h) = packed_nv12_extent(shared.width, shared.height);
     let size = wgpu::Extent3d {
-        width: shared.width,
-        height: nv12_texture_height(shared.height),
+        width: tex_w,
+        height: tex_h,
         depth_or_array_layers: 1,
     };
     // SAFETY: `device` is the interop Vulkan device; `image` / `memory` are valid
@@ -437,8 +438,8 @@ pub unsafe fn wrap_as_texture(device: &wgpu::Device, shared: SharedNv12Image) ->
 pub unsafe fn cuda_roundtrip_check(shared: &SharedNv12Image) -> Result<bool, G2gError> {
     use cuda_ffi as c;
 
-    let w = shared.width as usize;
-    let tex_h = nv12_texture_height(shared.height) as usize;
+    let (w, tex_h) = packed_nv12_extent(shared.width, shared.height);
+    let (w, tex_h) = (w as usize, tex_h as usize);
 
     // SAFETY: all calls follow the CUDA Driver API contract; handles are checked
     // before use and destroyed before return.
@@ -571,8 +572,8 @@ pub unsafe fn cuda_roundtrip_check(shared: &SharedNv12Image) -> Result<bool, G2g
 /// `shared` must come from [`export_nv12_image`] and not yet have been imported.
 pub unsafe fn cuda_fill_xor_pattern(shared: &SharedNv12Image) -> Result<(), G2gError> {
     use cuda_ffi as c;
-    let w = shared.width as usize;
-    let tex_h = nv12_texture_height(shared.height) as usize;
+    let (w, tex_h) = packed_nv12_extent(shared.width, shared.height);
+    let (w, tex_h) = (w as usize, tex_h as usize);
 
     // SAFETY: standard CUDA Driver API sequence; handles destroyed before return.
     unsafe {
@@ -729,8 +730,8 @@ pub unsafe fn import_image_into_cuda(
     context: u64,
 ) -> Result<CudaImageMapping, G2gError> {
     use cuda_ffi as c;
-    let w = shared.width as usize;
-    let tex_h = nv12_texture_height(shared.height) as usize;
+    let (w, tex_h) = packed_nv12_extent(shared.width, shared.height);
+    let (w, tex_h) = (w as usize, tex_h as usize);
 
     // SAFETY: CUDA Driver API import sequence in `context`. On error every CUDA
     // handle created so far is destroyed before the context is popped, and the
@@ -832,6 +833,8 @@ pub unsafe fn cuda_copy_planes_into(
     use cuda_ffi as c;
     let w = width as usize;
     let h = height as usize;
+    let (chroma_row_bytes, _) = packed_nv12_extent(width, height);
+    let chroma_row_bytes = chroma_row_bytes as usize;
     let array = mapping.array as c::CuArray;
 
     // SAFETY: `array` is the persistent mapped array from `import_image_into_cuda`
@@ -874,8 +877,8 @@ pub unsafe fn cuda_copy_planes_into(
                 dst_device: 0,
                 dst_array: array,
                 dst_pitch: 0,
-                width_in_bytes: w,
-                height: h / 2,
+                width_in_bytes: chroma_row_bytes,
+                height: h.div_ceil(2),
             };
             result = check(c::cu_memcpy_2d(&chroma));
         }
