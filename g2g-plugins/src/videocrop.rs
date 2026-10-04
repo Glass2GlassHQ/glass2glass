@@ -432,7 +432,7 @@ fn crop_plane(
 }
 
 /// Crop one frame to the `w x h` rect at `(x, y)`, preserving `format`. `src`
-/// is validated to hold the input frame; `x` and `y` are even on every axis the
+/// is validated to hold the input frame. `x` and `y` are even on every axis the
 /// format subsamples, and an odd `w` or `h` keeps the rounded-up chroma.
 pub(crate) fn crop(
     src: &[u8],

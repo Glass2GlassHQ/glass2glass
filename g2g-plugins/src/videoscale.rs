@@ -454,7 +454,7 @@ fn axis_samples(in_luma: usize, out_luma: usize, shift: u32) -> Vec<(usize, usiz
 /// Bilinear-resample one `channels`-interleaved plane whose rows are `src_w`
 /// samples wide, reading output column `x` through `cols[x]` and output row `y`
 /// through `rows[y]`. NV12's UV plane uses `channels = 2` so U and V resample
-/// together under one set of weights; every other plane is single-channel.
+/// together under one set of weights. Every other plane is single-channel.
 fn resample_plane(
     src: &[u8],
     src_w: usize,
