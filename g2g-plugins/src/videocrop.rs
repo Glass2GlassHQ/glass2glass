@@ -9,8 +9,10 @@
 //! supported; negative values are rejected.
 //!
 //! 4:2:0 (`Nv12`, `I420`) needs even insets on all four edges, since chroma is
-//! subsampled 2x2; odd values fail negotiation/configure loud. Packed formats
-//! (`Rgba8`, `Bgra8`) crop at any inset. CPU-only `no_std` baseline.
+//! subsampled 2x2; odd values fail negotiation/configure loud. The frame itself
+//! may be odd-sized: its last chroma column or row is cropped like any other.
+//! Packed formats (`Rgba8`, `Bgra8`) crop at any inset. CPU-only `no_std`
+//! baseline.
 
 use core::future::Future;
 use core::pin::Pin;
@@ -19,7 +21,7 @@ use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::pixel::{even_dims_required, frame_byte_size, planar_planes};
+use crate::pixel::{chroma_420_size, even_dims_required, frame_byte_size, planar_planes};
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
@@ -101,10 +103,6 @@ impl VideoCrop {
             return Err(G2gError::CapsMismatch);
         };
         if !FORMATS.contains(format) || *w == 0 || *h == 0 {
-            return Err(G2gError::CapsMismatch);
-        }
-        let (ew, eh) = even_dims_required(*format);
-        if (ew && *w % 2 != 0) || (eh && *h % 2 != 0) {
             return Err(G2gError::CapsMismatch);
         }
         Ok((*format, *w, *h, framerate.clone()))
@@ -434,8 +432,8 @@ fn crop_plane(
 }
 
 /// Crop one frame to the `w x h` rect at `(x, y)`, preserving `format`. `src`
-/// is validated to hold the input frame; all coords are even when the format
-/// is 4:2:0.
+/// is validated to hold the input frame; `x` and `y` are even on every axis the
+/// format subsamples, and an odd `w` or `h` keeps the rounded-up chroma.
 pub(crate) fn crop(
     src: &[u8],
     format: RawVideoFormat,
@@ -450,15 +448,15 @@ pub(crate) fn crop(
         }
         RawVideoFormat::Nv12 => {
             let luma_in = in_w * in_h;
-            let chroma_in = (in_w / 2) * (in_h / 2) * 2;
+            let (chroma_w, chroma_h) = chroma_420_size(in_w, in_h);
             let mut out = crop_plane(src, in_w, x, y, w, h, 1);
             let chroma = crop_plane(
-                &src[luma_in..luma_in + chroma_in],
-                in_w / 2,
+                &src[luma_in..luma_in + chroma_w * chroma_h * 2],
+                chroma_w,
                 x / 2,
                 y / 2,
-                w / 2,
-                h / 2,
+                w.div_ceil(2),
+                h.div_ceil(2),
                 2,
             );
             out.extend_from_slice(&chroma);
@@ -482,8 +480,8 @@ pub(crate) fn crop(
                     pw,
                     x >> hs,
                     y >> vs,
-                    w >> hs,
-                    h >> vs,
+                    w.div_ceil(1 << hs),
+                    h.div_ceil(1 << vs),
                     bps,
                 );
                 out.extend_from_slice(&plane);
@@ -563,6 +561,51 @@ mod tests {
         assert_eq!(out.len(), 2 * 2 + (1 * 1 * 2));
         // luma row 0 of the crop starts at src[(2*4)+2] = src[10].
         assert_eq!(&out[0..2], &[10, 11]);
+    }
+
+    #[test]
+    fn crops_an_odd_size_4_2_0_frame_plane_by_plane() {
+        let (in_w, in_h) = (37usize, 5usize);
+        let (top, bottom, left, right) = (2usize, 0usize, 2usize, 2usize);
+        let (out_w, out_h) = (in_w - left - right, in_h - top - bottom);
+        // every sample names its plane, row and column
+        let sample =
+            |plane: usize, row: usize, column: usize| (plane * 64 + row * 8 + column) as u8;
+        for format in [RawVideoFormat::Nv12, RawVideoFormat::I420] {
+            let plane_shape = |plane, w, h| crate::pixel::tight_plane(format, plane, w, h).unwrap();
+            let mut src = vec![0u8; frame_byte_size(format, in_w as u32, in_h as u32)];
+            for plane in 0..format.plane_count() {
+                let (offset, row_bytes, rows) = plane_shape(plane, in_w, in_h);
+                for row in 0..rows {
+                    for column in 0..row_bytes {
+                        src[offset + row * row_bytes + column] = sample(plane, row, column);
+                    }
+                }
+            }
+            let out = crop(&src, format, (in_w, in_h), (left, top, out_w, out_h));
+            assert_eq!(
+                out.len(),
+                frame_byte_size(format, out_w as u32, out_h as u32)
+            );
+            for plane in 0..format.plane_count() {
+                let (offset, row_bytes, rows) = plane_shape(plane, out_w, out_h);
+                // the crop origin in this plane's bytes: halved for chroma, NV12 pairs two bytes
+                let (_, in_row_bytes, _) = plane_shape(plane, in_w, in_h);
+                let (row_shift, column_shift) = match plane {
+                    0 => (top, left),
+                    _ => (top / 2, left / 2 * (in_row_bytes / in_w.div_ceil(2))),
+                };
+                for row in 0..rows {
+                    for column in 0..row_bytes {
+                        assert_eq!(
+                            out[offset + row * row_bytes + column],
+                            sample(plane, row + row_shift, column + column_shift),
+                            "{format:?} plane {plane} ({row}, {column})"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -662,9 +705,10 @@ mod tests {
                 .expect_err("odd left for 4:2:0"),
             G2gError::CapsMismatch
         );
-        // valid even insets are accepted.
+        // valid even insets are accepted, on an odd-size frame too.
         let mut c = VideoCrop::new(2, 2, 2, 2);
         assert!(c.configure_pipeline(&nv12_caps(8, 8)).is_ok());
+        assert!(c.configure_pipeline(&nv12_caps(37, 7)).is_ok());
         // packed format with odd insets inside the frame is fine.
         let mut c = VideoCrop::new(1, 1, 1, 1);
         assert!(c.configure_pipeline(&rgba_caps(8, 8)).is_ok());

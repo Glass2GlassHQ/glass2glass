@@ -219,6 +219,41 @@ fn a_flat_nv12_frame_fuses_to_the_expected_rgb() {
     );
 }
 
+/// An odd-size 4:2:0 frame fuses too, its rounded-up chroma plane read where it
+/// lies.
+#[test]
+fn an_odd_size_nv12_frame_fuses_to_the_expected_rgb() {
+    const MID_GREY_LUMA: u8 = 126;
+    const NEUTRAL_CHROMA: u8 = 128;
+    let (in_w, in_h, out_w, out_h) = (37u32, 5u32, 20u32, 3u32);
+    let luma = (in_w * in_h) as usize;
+    let frame_bytes = RawVideoFormat::Nv12
+        .unpadded_frame_bytes(in_w, in_h)
+        .unwrap() as usize;
+    let mut nv12 = vec![MID_GREY_LUMA; luma];
+    nv12.resize(frame_bytes, NEUTRAL_CHROMA);
+
+    let mut element = VideoConvertScale::auto();
+    let packets = run_negotiated(
+        &mut element,
+        raw(RawVideoFormat::Nv12, in_w, in_h),
+        Some(raw(RawVideoFormat::Rgb8, out_w, out_h)),
+        nv12,
+    );
+    let PipelinePacket::DataFrame(out) = packets.last().unwrap() else {
+        panic!("expected a DataFrame downstream");
+    };
+    let bytes = out.domain.require_system_slice("test").unwrap();
+    assert_eq!(
+        Some(bytes.len() as u64),
+        RawVideoFormat::Rgb8.unpadded_frame_bytes(out_w, out_h)
+    );
+    assert!(
+        bytes.iter().all(|&b| b == NEUTRAL_CHROMA),
+        "a flat grey frame stays flat grey through the fused pass"
+    );
+}
+
 /// The element has to work through `parse_launch` and the runner, not just when
 /// a test configures it by hand: a caps filter downstream is what pins its
 /// output, and the runner is what calls `configure_pipeline` / `configure_output`.

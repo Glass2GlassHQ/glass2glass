@@ -23,9 +23,9 @@ use core::task::{Context, Poll};
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use crate::pixel::frame_byte_size;
+use crate::pixel::{chroma_420_offsets, chroma_420_size, frame_byte_size};
 use crate::videoconvert::VideoConvert;
-use crate::videoscale::{bilerp, map_axis, VideoScale};
+use crate::videoscale::{bilerp, map_axis, map_axis_scaled, VideoScale};
 use crate::yuvmatrix::YuvRgbMatrix;
 use alloc::vec;
 use g2g_core::frame::Frame;
@@ -97,20 +97,19 @@ fn fused_resample_convert(
         _ => return None,
     };
     let luma = in_w * in_h;
-    let (cw, ch) = (in_w / 2, in_h / 2);
-    let chroma_columns: Vec<(usize, usize, u32)> =
-        (0..out_w).map(|x| map_axis(x, out_w, cw)).collect();
+    let (cw, ch) = chroma_420_size(in_w, in_h);
+    // a luma position maps to the half-size chroma plane through the luma scale
+    let chroma_columns: Vec<(usize, usize, u32)> = (0..out_w)
+        .map(|x| map_axis_scaled(x, in_w, 2 * out_w, cw))
+        .collect();
     let chroma_at = |index: usize| {
-        if interleaved {
-            (src[luma + 2 * index], src[luma + 2 * index + 1])
-        } else {
-            (src[luma + index], src[luma + cw * ch + index])
-        }
+        let (u_at, v_at) = chroma_420_offsets(luma, cw * ch, index, interleaved);
+        (src[u_at], src[v_at])
     };
     for y in 0..out_h {
         let (y0, y1, fy) = map_axis(y, out_h, in_h);
         let (row0, row1) = (y0 * in_w, y1 * in_w);
-        let (cy0, cy1, cfy) = map_axis(y, out_h, ch);
+        let (cy0, cy1, cfy) = map_axis_scaled(y, in_h, 2 * out_h, ch);
         let (crow0, crow1) = (cy0 * cw, cy1 * cw);
         for (x, &(x0, x1, fx)) in columns.iter().enumerate() {
             let luma_sample = bilerp(

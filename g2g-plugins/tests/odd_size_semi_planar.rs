@@ -50,10 +50,24 @@ fn ffmpeg_frame(width: u32, height: u32, pixel_format: &str) -> Vec<u8> {
 
 // ffmpeg's conversion of one raw frame from `from` to `to`
 fn ffmpeg_convert(frame: &[u8], width: u32, height: u32, from: &str, to: &str) -> Vec<u8> {
+    ffmpeg_filter(frame, width, height, from, "null", to)
+}
+
+// one raw frame through an ffmpeg video filter, converted from `from` to `to`
+fn ffmpeg_filter(
+    frame: &[u8],
+    width: u32,
+    height: u32,
+    from: &str,
+    filter: &str,
+    to: &str,
+) -> Vec<u8> {
     let mut child = Command::new("ffmpeg")
         .args(["-v", "error", "-f", "rawvideo", "-pix_fmt", from, "-s"])
         .arg(format!("{width}x{height}"))
-        .args(["-i", "-", "-pix_fmt", to, "-f", "rawvideo", "-"])
+        .args([
+            "-i", "-", "-vf", filter, "-pix_fmt", to, "-f", "rawvideo", "-",
+        ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -192,26 +206,49 @@ const LAUNCH_TARGETS: [(RawVideoFormat, &str); 2] = [
     (RawVideoFormat::I420, "I420"),
 ];
 
+// one frame through `appsrc ! {elements} ! appsink`, as the appsink received it
+async fn launch_one_frame(
+    frame: &[u8],
+    format: &str,
+    (width, height): (u32, u32),
+    elements: &str,
+    channel: &str,
+) -> Vec<u8> {
+    let in_channel = format!("odd_{channel}_in");
+    let out_channel = format!("odd_{channel}_out");
+    let feed = register_appsrc(&in_channel);
+    assert!(feed.push(frame, 0));
+    feed.end_of_stream();
+    let pull = register_appsink_pull(&out_channel);
+    let line = format!(
+        "appsrc channel={in_channel} caps=video/x-raw,format={format},width={width},height={height},framerate=30/1 \
+         ! {elements} ! appsink channel={out_channel}"
+    );
+    let graph = parse_launch(&default_registry(), &line).expect("parses");
+    run_graph(graph, &ZeroClock, 4).await.expect("runs");
+    let Pull::Frame(out) = pull.try_pull() else {
+        panic!("no frame reached the appsink of `{line}`");
+    };
+    out.domain
+        .as_system_slice()
+        .expect("system memory")
+        .to_vec()
+}
+
 #[tokio::test]
 async fn videoconvert_launches_at_an_odd_size() {
-    let (width, height) = CONVERT_SIZES[0];
+    let size = CONVERT_SIZES[0];
+    let (width, height) = size;
     let rgba = gradient_rgba(width, height);
     for (format, name) in LAUNCH_TARGETS {
-        let in_channel = format!("odd_convert_in_{name}");
-        let out_channel = format!("odd_convert_out_{name}");
-        let feed = register_appsrc(&in_channel);
-        assert!(feed.push(&rgba, 0));
-        feed.end_of_stream();
-        let pull = register_appsink_pull(&out_channel);
-        let line = format!(
-            "appsrc channel={in_channel} caps=video/x-raw,format=RGBA,width={width},height={height},framerate=30/1 \
-             ! videoconvert ! video/x-raw,format={name} ! appsink channel={out_channel}"
-        );
-        let graph = parse_launch(&default_registry(), &line).expect("parses");
-        run_graph(graph, &ZeroClock, 4).await.expect("runs");
-        let Pull::Frame(out) = pull.try_pull() else {
-            panic!("no {name} frame reached the appsink");
-        };
+        let out = launch_one_frame(
+            &rgba,
+            "RGBA",
+            size,
+            &format!("videoconvert ! video/x-raw,format={name}"),
+            &format!("convert_{name}"),
+        )
+        .await;
         let expected = convert(
             &rgba,
             RawVideoFormat::Rgba8,
@@ -220,11 +257,43 @@ async fn videoconvert_launches_at_an_odd_size() {
             height as usize,
             Colorimetry::UNKNOWN,
         );
-        assert_eq!(
-            out.domain.as_system_slice().expect("system memory"),
-            &*expected,
-            "{name}"
+        assert_eq!(out, *expected, "{name}");
+    }
+}
+
+#[tokio::test]
+async fn videocrop_crops_an_odd_frame_like_ffmpeg() {
+    if !have_ffmpeg() {
+        eprintln!("ffmpeg not present: skipping");
+        return;
+    }
+    // even insets on an odd frame leave an odd crop
+    const TOP: u32 = 2;
+    const LEFT: u32 = 2;
+    const RIGHT: u32 = 2;
+    let size = CONVERT_SIZES[0];
+    let (width, height) = size;
+    let (out_w, out_h) = (width - LEFT - RIGHT, height - TOP);
+    for (name, pixel_format) in [("NV12", "nv12"), ("I420", "yuv420p")] {
+        let frame = ffmpeg_frame(width, height, pixel_format);
+        let out = launch_one_frame(
+            &frame,
+            name,
+            size,
+            &format!("videocrop top={TOP} left={LEFT} right={RIGHT}"),
+            &format!("crop_{name}"),
+        )
+        .await;
+        // without exact=1 ffmpeg rounds a 4:2:0 crop size down to even
+        let reference = ffmpeg_filter(
+            &frame,
+            width,
+            height,
+            pixel_format,
+            &format!("crop={out_w}:{out_h}:{LEFT}:{TOP}:exact=1"),
+            pixel_format,
         );
+        assert_eq!(out, reference, "{name}");
     }
 }
 
@@ -253,25 +322,14 @@ async fn an_ffmpeg_nv12_frame_composites_unchanged() {
     }
     for (width, height) in SIZES {
         let frame = ffmpeg_frame(width, height, "nv12");
-        let in_channel = format!("odd_nv12_in_{width}x{height}");
-        let out_channel = format!("odd_nv12_out_{width}x{height}");
-        let feed = register_appsrc(&in_channel);
-        assert!(feed.push(&frame, 0));
-        feed.end_of_stream();
-        let pull = register_appsink_pull(&out_channel);
-        let line = format!(
-            "appsrc channel={in_channel} caps=video/x-raw,format=NV12,width={width},height={height},framerate=30/1 \
-             ! compositor width={width} height={height} format=nv12 ! appsink channel={out_channel}"
-        );
-        let graph = parse_launch(&default_registry(), &line).expect("parses");
-        run_graph(graph, &ZeroClock, 4).await.expect("runs");
-        let Pull::Frame(out) = pull.try_pull() else {
-            panic!("no frame reached the appsink");
-        };
-        assert_eq!(
-            out.domain.as_system_slice().expect("system memory"),
-            frame.as_slice(),
-            "{width}x{height}"
-        );
+        let out = launch_one_frame(
+            &frame,
+            "NV12",
+            (width, height),
+            &format!("compositor width={width} height={height} format=nv12"),
+            &format!("compositor_{width}x{height}"),
+        )
+        .await;
+        assert_eq!(out, frame, "{width}x{height}");
     }
 }

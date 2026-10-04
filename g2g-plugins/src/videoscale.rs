@@ -9,8 +9,8 @@
 //! in the `no_std` crate baseline. Packed formats (`Rgba8`, `Bgra8`, `Rgb8`)
 //! resample as one 4-channel plane; the 4:2:0 formats (`Nv12`, `I420`)
 //! resample luma and chroma independently at their own resolutions, so
-//! chroma keeps its half-resolution sampling. 4:2:0 needs even input and
-//! output dims (chroma is subsampled 2x2); odd dims fail negotiation loud.
+//! chroma keeps its half-resolution sampling. At an odd size the chroma plane
+//! rounds up and still maps through the luma scale.
 //!
 //! Bilinear is the baseline-correctness choice, not peak quality; a wgpu
 //! variant for GPU-resident input lands later. True separable bilinear is
@@ -24,7 +24,7 @@ use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::pixel::{even_dims_required, frame_byte_size, planar_planes};
+use crate::pixel::{chroma_420_size, frame_byte_size, planar_planes};
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
@@ -49,13 +49,6 @@ const FORMATS: [RawVideoFormat; 13] = [
     RawVideoFormat::I444p10,
     RawVideoFormat::I444p12,
 ];
-
-/// True when `(w, h)` violates the even-width / even-height a format's chroma
-/// subsampling requires (so a scale stays on chroma-sample boundaries).
-fn bad_even_dims(format: RawVideoFormat, w: u32, h: u32) -> bool {
-    let (ew, eh) = even_dims_required(format);
-    (ew && !w.is_multiple_of(2)) || (eh && !h.is_multiple_of(2))
-}
 
 /// Upper bound on the scalable output range advertised in caps-driven (auto)
 /// mode (M185). Covers up to 8K with headroom; a downstream capsfilter pins a
@@ -121,7 +114,7 @@ impl VideoScale {
     }
 
     /// Validate a raw-video caps as a scalable input and return its format,
-    /// dims, and framerate. 4:2:0 inputs need even dims.
+    /// dims, and framerate.
     fn accept_input(&self, caps: &Caps) -> Result<(RawVideoFormat, u32, u32, Rate), G2gError> {
         let Caps::RawVideo {
             format,
@@ -136,19 +129,12 @@ impl VideoScale {
         if !FORMATS.contains(format) || *w == 0 || *h == 0 {
             return Err(G2gError::CapsMismatch);
         }
-        if bad_even_dims(*format, *w, *h) {
-            return Err(G2gError::CapsMismatch);
-        }
         Ok((*format, *w, *h, framerate.clone()))
     }
 
-    /// The configured target geometry must be non-zero, and even when the
-    /// negotiated format is 4:2:0.
-    fn validate_target(&self, format: RawVideoFormat) -> Result<(), G2gError> {
+    /// The configured target geometry must be non-zero.
+    fn validate_target(&self) -> Result<(), G2gError> {
         if self.target_w == 0 || self.target_h == 0 {
-            return Err(G2gError::CapsMismatch);
-        }
-        if bad_even_dims(format, self.target_w, self.target_h) {
             return Err(G2gError::CapsMismatch);
         }
         Ok(())
@@ -195,19 +181,13 @@ impl AsyncElement for VideoScale {
 
     /// Native `DerivedFields`: any supported raw input maps to the same
     /// format at the configured target dims, framerate preserved (so format +
-    /// framerate are the coupled fields). A 4:2:0 format with an odd target is
-    /// not accepted, so the solve fails loud rather than fixating impossible
-    /// caps.
+    /// framerate are the coupled fields).
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         let (tw, th) = (self.target_w, self.target_h);
         let (accept, shapes) = if tw > 0 && th > 0 {
             // Property-driven: fixed target geometry.
             (
-                FORMATS
-                    .iter()
-                    .copied()
-                    .filter(|f| !bad_even_dims(*f, tw, th))
-                    .collect(),
+                FORMATS.to_vec(),
                 vec![RawVideoShape::PASSTHROUGH
                     .with_width(FieldTransform::Fixed(Dim::Fixed(tw)))
                     .with_height(FieldTransform::Fixed(Dim::Fixed(th)))],
@@ -244,7 +224,7 @@ impl AsyncElement for VideoScale {
         // In auto mode the output geometry comes from `configure_output`, not the
         // properties, so only validate a property-pinned target here.
         if !self.is_auto() {
-            self.validate_target(format)?;
+            self.validate_target()?;
         }
         self.input = Some((format, w, h, rate));
         self.configured = true;
@@ -254,10 +234,9 @@ impl AsyncElement for VideoScale {
     /// M185: take the output geometry from the negotiated output caps when the
     /// `width`/`height` properties are unset (caps-driven). When they are set,
     /// the solve already fixated the output to them, so this just records the
-    /// same dims. Validates the resolved geometry (non-zero, even for 4:2:0).
+    /// same dims. Validates the resolved geometry is non-zero.
     fn configure_output(&mut self, output_caps: &Caps) -> Result<(), G2gError> {
         let Caps::RawVideo {
-            format,
             width: Dim::Fixed(w),
             height: Dim::Fixed(h),
             ..
@@ -266,9 +245,6 @@ impl AsyncElement for VideoScale {
             return Err(G2gError::CapsMismatch);
         };
         if *w == 0 || *h == 0 {
-            return Err(G2gError::CapsMismatch);
-        }
-        if bad_even_dims(*format, *w, *h) {
             return Err(G2gError::CapsMismatch);
         }
         self.resolved = Some((*w, *h));
@@ -431,7 +407,19 @@ impl PadTemplates for VideoScale {
 /// at the edges. `dst_n` is non-zero (target dims validated) and a
 /// single-sample axis (`src_n == 1`) collapses to weight 0.
 pub(crate) fn map_axis(out: usize, dst_n: usize, src_n: usize) -> (usize, usize, u32) {
-    let pos = ((2 * out as i64 + 1) * src_n as i64 * 32768) / dst_n as i64 - 32768;
+    map_axis_scaled(out, src_n, dst_n, src_n)
+}
+
+/// [`map_axis`] with positions scaled by `numerator / denominator` instead of
+/// `src_n / dst_n`. A subsampled chroma axis passes its luma axis's scale, so the
+/// sample count rounding up at an odd luma extent cannot shift the chroma grid.
+pub(crate) fn map_axis_scaled(
+    out: usize,
+    numerator: usize,
+    denominator: usize,
+    src_n: usize,
+) -> (usize, usize, u32) {
+    let pos = ((2 * out as i64 + 1) * numerator as i64 * 32768) / denominator as i64 - 32768;
     let max = ((src_n - 1) as i64) << 16;
     let pos = pos.clamp(0, max);
     let i0 = (pos >> 16) as usize;
@@ -452,22 +440,31 @@ pub(crate) fn bilerp(p00: u8, p10: u8, p01: u8, p11: u8, fx: u32, fy: u32) -> u8
     ((val + (1i64 << 31)) >> 32) as u8
 }
 
-/// Bilinear-resample one `channels`-interleaved plane from `src_w x src_h`
-/// to `dst_w x dst_h`. NV12's UV plane uses `channels = 2` so U and V
-/// resample together under one set of weights; every other plane is
-/// single-channel.
+/// How each output sample along one axis of a plane reads the source: the
+/// plane's samples are the luma extent divided by `1 << shift`, rounded up, and
+/// positions map through the luma scale `in_luma / out_luma`.
+fn axis_samples(in_luma: usize, out_luma: usize, shift: u32) -> Vec<(usize, usize, u32)> {
+    let src_n = in_luma.div_ceil(1 << shift);
+    let dst_n = out_luma.div_ceil(1 << shift);
+    (0..dst_n)
+        .map(|out| map_axis_scaled(out, in_luma, out_luma, src_n))
+        .collect()
+}
+
+/// Bilinear-resample one `channels`-interleaved plane whose rows are `src_w`
+/// samples wide, reading output column `x` through `cols[x]` and output row `y`
+/// through `rows[y]`. NV12's UV plane uses `channels = 2` so U and V resample
+/// together under one set of weights; every other plane is single-channel.
 fn resample_plane(
     src: &[u8],
     src_w: usize,
-    src_h: usize,
-    dst_w: usize,
-    dst_h: usize,
+    cols: &[(usize, usize, u32)],
+    rows: &[(usize, usize, u32)],
     channels: usize,
 ) -> Vec<u8> {
-    let mut dst = vec![0u8; dst_w * dst_h * channels];
-    let cols: Vec<(usize, usize, u32)> = (0..dst_w).map(|ox| map_axis(ox, dst_w, src_w)).collect();
-    for oy in 0..dst_h {
-        let (y0, y1, fy) = map_axis(oy, dst_h, src_h);
+    let dst_w = cols.len();
+    let mut dst = vec![0u8; dst_w * rows.len() * channels];
+    for (oy, &(y0, y1, fy)) in rows.iter().enumerate() {
         let (row0, row1) = (y0 * src_w, y1 * src_w);
         for (ox, &(x0, x1, fx)) in cols.iter().enumerate() {
             let dbase = (oy * dst_w + ox) * channels;
@@ -484,9 +481,9 @@ fn resample_plane(
 }
 
 /// Resample one frame from `in_w x in_h` to `out_w x out_h`, preserving
-/// `format`. `src` is validated to hold the input frame; all dims are even
-/// when the format is 4:2:0. Equal in/out dims short-circuit to a copy so
-/// an identity scale is exact.
+/// `format`. `src` is validated to hold the input frame. Each plane resamples
+/// at its own rounded-up size, chroma through the luma scale. Equal in/out dims
+/// short-circuit to a copy so an identity scale is exact.
 pub fn scale(
     src: &[u8],
     format: RawVideoFormat,
@@ -498,21 +495,24 @@ pub fn scale(
     if in_w == out_w && in_h == out_h {
         return src[..frame_byte_size(format, in_w as u32, in_h as u32)].into();
     }
+    let luma_cols = axis_samples(in_w, out_w, 0);
+    let luma_rows = axis_samples(in_h, out_h, 0);
     match format {
         RawVideoFormat::Rgba8 | RawVideoFormat::Bgra8 => {
-            resample_plane(src, in_w, in_h, out_w, out_h, 4).into_boxed_slice()
+            resample_plane(src, in_w, &luma_cols, &luma_rows, 4).into_boxed_slice()
         }
-        RawVideoFormat::Rgb8 => resample_plane(src, in_w, in_h, out_w, out_h, 3).into_boxed_slice(),
+        RawVideoFormat::Rgb8 => {
+            resample_plane(src, in_w, &luma_cols, &luma_rows, 3).into_boxed_slice()
+        }
         RawVideoFormat::Nv12 => {
             let luma_in = in_w * in_h;
-            let chroma_in = (in_w / 2) * (in_h / 2) * 2;
-            let mut out = resample_plane(&src[..luma_in], in_w, in_h, out_w, out_h, 1);
+            let (chroma_w, chroma_h) = chroma_420_size(in_w, in_h);
+            let mut out = resample_plane(&src[..luma_in], in_w, &luma_cols, &luma_rows, 1);
             let chroma = resample_plane(
-                &src[luma_in..luma_in + chroma_in],
-                in_w / 2,
-                in_h / 2,
-                out_w / 2,
-                out_h / 2,
+                &src[luma_in..luma_in + chroma_w * chroma_h * 2],
+                chroma_w,
+                &axis_samples(in_w, out_w, 1),
+                &axis_samples(in_h, out_h, 1),
                 2,
             );
             out.extend_from_slice(&chroma);
@@ -528,17 +528,23 @@ pub fn scale(
             let (hs, vs) = f.chroma_shift().expect("planar format");
             let bps = f.bytes_per_sample();
             let planes = planar_planes(f, in_w, in_h);
-            let resample = |plane: &[u8], sw, sh, dw, dh| {
+            let resample = |plane: &[u8], src_w, cols: &[_], rows: &[_]| {
                 if bps == 2 {
-                    resample_plane16(plane, sw, sh, dw, dh)
+                    resample_plane16(plane, src_w, cols, rows)
                 } else {
-                    resample_plane(plane, sw, sh, dw, dh, 1)
+                    resample_plane(plane, src_w, cols, rows, 1)
                 }
             };
-            let (ocw, och) = (out_w.div_ceil(1 << hs), out_h.div_ceil(1 << vs));
-            let mut out = resample(&src[..planes[1].0], in_w, in_h, out_w, out_h);
+            let chroma_cols = axis_samples(in_w, out_w, hs);
+            let chroma_rows = axis_samples(in_h, out_h, vs);
+            let mut out = resample(&src[..planes[1].0], in_w, &luma_cols, &luma_rows);
             for (off, pw, ph) in [planes[1], planes[2]] {
-                let plane = resample(&src[off..off + pw * ph * bps], pw, ph, ocw, och);
+                let plane = resample(
+                    &src[off..off + pw * ph * bps],
+                    pw,
+                    &chroma_cols,
+                    &chroma_rows,
+                );
                 out.extend_from_slice(&plane);
             }
             out.into_boxed_slice()
@@ -558,14 +564,18 @@ fn bilerp16(p00: u32, p10: u32, p01: u32, p11: u32, fx: u32, fy: u32) -> u16 {
     ((val + (1i64 << 31)) >> 32) as u16
 }
 
-/// Bilinear-resample one single-channel plane of little-endian `u16` samples
-/// (a 10/12-bit luma or chroma plane) from `src_w x src_h` to `dst_w x dst_h`.
-fn resample_plane16(src: &[u8], src_w: usize, src_h: usize, dst_w: usize, dst_h: usize) -> Vec<u8> {
+/// [`resample_plane`] for one single-channel plane of little-endian `u16`
+/// samples (a 10/12-bit luma or chroma plane).
+fn resample_plane16(
+    src: &[u8],
+    src_w: usize,
+    cols: &[(usize, usize, u32)],
+    rows: &[(usize, usize, u32)],
+) -> Vec<u8> {
     let rd = |i: usize| u16::from_le_bytes([src[i * 2], src[i * 2 + 1]]) as u32;
-    let cols: Vec<(usize, usize, u32)> = (0..dst_w).map(|ox| map_axis(ox, dst_w, src_w)).collect();
-    let mut dst = vec![0u8; dst_w * dst_h * 2];
-    for oy in 0..dst_h {
-        let (y0, y1, fy) = map_axis(oy, dst_h, src_h);
+    let dst_w = cols.len();
+    let mut dst = vec![0u8; dst_w * rows.len() * 2];
+    for (oy, &(y0, y1, fy)) in rows.iter().enumerate() {
         let (row0, row1) = (y0 * src_w, y1 * src_w);
         for (ox, &(x0, x1, fx)) in cols.iter().enumerate() {
             let v = bilerp16(
@@ -604,7 +614,7 @@ mod tests {
         // one channel, 2px -> 4px: half-pixel mapping samples the two
         // endpoints and the 1/4, 3/4 interior points.
         let src = [0u8, 100];
-        let out = resample_plane(&src, 2, 1, 4, 1, 1);
+        let out = resample_plane(&src, 2, &axis_samples(2, 4, 0), &axis_samples(1, 1, 0), 1);
         assert_eq!(&out[..], &[0, 25, 75, 100]);
     }
 
@@ -614,7 +624,7 @@ mod tests {
         // the interior points land at 1/4 and 3/4 (250, 750), proving samples are
         // interpolated as whole u16 values, not byte-wise.
         let src: Vec<u8> = [0u16, 1000].iter().flat_map(|s| s.to_le_bytes()).collect();
-        let out = resample_plane16(&src, 2, 1, 4, 1);
+        let out = resample_plane16(&src, 2, &axis_samples(2, 4, 0), &axis_samples(1, 1, 0));
         let got: Vec<u16> = out
             .as_chunks::<2>()
             .0
@@ -709,9 +719,21 @@ mod tests {
         assert!(f(&h264).is_empty());
     }
 
+    fn nv12_caps(w: u32, h: u32) -> Caps {
+        Caps::RawVideo {
+            format: RawVideoFormat::Nv12,
+            width: Dim::Fixed(w),
+            height: Dim::Fixed(h),
+            framerate: Rate::Any,
+            interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        }
+    }
+
     #[test]
-    fn derived_output_rejects_odd_target_for_yuv420() {
-        let scaler = VideoScale::new(63, 32);
+    fn derived_output_takes_an_odd_target_for_yuv420() {
+        let (target_w, target_h) = (63, 32);
+        let scaler = VideoScale::new(target_w, target_h);
         let CapsConstraint::DerivedFields(t) = scaler.caps_constraint_as_transform() else {
             panic!("expected DerivedFields");
         };
@@ -719,53 +741,52 @@ mod tests {
             t.passthrough(),
             PassthroughFields::NONE.with_format().with_framerate()
         );
-        let f = |c: &Caps| t.derive(c);
-        let nv12_in = Caps::RawVideo {
-            format: RawVideoFormat::Nv12,
-            width: Dim::Fixed(320),
-            height: Dim::Fixed(240),
-            framerate: Rate::Any,
-            interlace: g2g_core::Interlace::Any,
-            colorimetry: g2g_core::Colorimetry::UNKNOWN,
-        };
-        assert!(
-            f(&nv12_in).is_empty(),
-            "odd target width is invalid for 4:2:0"
+        assert_eq!(
+            t.derive(&nv12_caps(320, 240)).alternatives(),
+            &[nv12_caps(target_w, target_h)]
         );
-        // a packed format with the same odd target is fine
-        assert!(!f(&rgba_caps(320, 240)).is_empty());
     }
 
     #[test]
-    fn configure_rejects_odd_dims_for_yuv420() {
-        let nv12 = |w, h| Caps::RawVideo {
-            format: RawVideoFormat::Nv12,
-            width: Dim::Fixed(w),
-            height: Dim::Fixed(h),
-            framerate: Rate::Any,
-            interlace: g2g_core::Interlace::Any,
-            colorimetry: g2g_core::Colorimetry::UNKNOWN,
-        };
-        // odd target into a 4:2:0 stream fails
-        let mut s = VideoScale::new(63, 32);
-        assert_eq!(
-            s.configure_pipeline(&nv12(320, 240))
-                .expect_err("odd target"),
-            G2gError::CapsMismatch
-        );
-        // odd input dims fail too
-        let mut s = VideoScale::new(64, 32);
-        assert_eq!(
-            s.configure_pipeline(&nv12(321, 240))
-                .expect_err("odd input"),
-            G2gError::CapsMismatch
-        );
-        // even in / even out is accepted
-        let mut s = VideoScale::new(64, 32);
-        assert!(s.configure_pipeline(&nv12(320, 240)).is_ok());
-        // packed formats accept odd dims
+    fn configure_takes_odd_dims_for_yuv420() {
         let mut s = VideoScale::new(63, 31);
-        assert!(s.configure_pipeline(&rgba_caps(321, 241)).is_ok());
+        assert!(s.configure_pipeline(&nv12_caps(320, 240)).is_ok());
+        let mut s = VideoScale::new(64, 32);
+        assert!(s.configure_pipeline(&nv12_caps(321, 241)).is_ok());
+        assert!(s.configure_output(&nv12_caps(63, 31)).is_ok());
+    }
+
+    #[test]
+    fn odd_width_chroma_maps_through_the_luma_scale() {
+        // U rises linearly with the luma position of each chroma sample's centre
+        const SLOPE: f64 = 3.0;
+        let (in_w, out_w, h) = (37usize, 74usize, 4usize);
+        let planes = planar_planes(RawVideoFormat::I420, in_w, h);
+        let (u_offset, chroma_w, chroma_h) = planes[1];
+        let mut src = vec![0u8; frame_byte_size(RawVideoFormat::I420, in_w as u32, h as u32)];
+        for row in 0..chroma_h {
+            for column in 0..chroma_w {
+                let centre = (2 * column + 1) as f64;
+                src[u_offset + row * chroma_w + column] = (SLOPE * centre) as u8;
+            }
+        }
+        let out = scale(&src, RawVideoFormat::I420, in_w, h, out_w, h);
+        let [_, (out_u_offset, out_chroma_w, _), _] = planar_planes(RawVideoFormat::I420, out_w, h);
+        let last_input_centre = (2 * chroma_w - 1) as f64;
+        for column in 0..out_w.div_ceil(2) {
+            let input_centre = (2 * column + 1) as f64 * in_w as f64 / out_w as f64;
+            // the first and last samples clamp to the edge chroma
+            if input_centre < 1.0 || input_centre > last_input_centre {
+                continue;
+            }
+            let got = out[out_u_offset + column] as f64;
+            assert!(
+                (got - SLOPE * input_centre).abs() <= 1.0,
+                "chroma column {column}: {got} vs {}",
+                SLOPE * input_centre
+            );
+        }
+        assert_eq!(out_chroma_w, out_w.div_ceil(2));
     }
 
     #[test]
