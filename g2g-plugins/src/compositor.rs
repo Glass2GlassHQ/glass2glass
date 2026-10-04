@@ -1809,6 +1809,19 @@ mod tests {
         );
     }
 
+    #[test]
+    fn an_opaque_odd_size_semi_planar_input_composites_unchanged() {
+        let (w, h) = crate::pixel::tests::GEOMETRIES[0];
+        let format = RawVideoFormat::Nv12;
+        let mut comp =
+            Compositor::new(w, h, Vec::from([CompositorPad::at(0, 0)])).with_format(format);
+        comp.state.set_geometry(0, w, h);
+        let input: Vec<u8> = (0..format.unpadded_frame_bytes(w, h).unwrap())
+            .map(|i| i as u8)
+            .collect();
+        assert_eq!(*comp.compose(&input), *input);
+    }
+
     /// The background fill is converted with the output's colorimetry, so an
     /// untagged mix gets limited-range black (Y16), the black the sinks decode
     /// as black, rather than the full-range Y0 that used to leak through as

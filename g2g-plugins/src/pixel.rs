@@ -84,10 +84,7 @@ pub(crate) fn planar_planes(
     })
 }
 
-/// `(byte offset, row bytes, rows)` of `plane` in a tightly packed `w x h`
-/// frame of `format`, as [`RawVideoFormat::plane_offset`],
-/// [`RawVideoFormat::plane_stride`] and [`RawVideoFormat::plane_rows`] define
-/// it. `None` for a plane the format does not have, or on overflow.
+// (byte offset, row bytes, rows) of one plane of a tight frame, as g2g-core defines it
 pub(crate) fn tight_plane(
     format: RawVideoFormat,
     plane: usize,

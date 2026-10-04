@@ -61,39 +61,12 @@ pub fn format_from_py(s: &str) -> Option<RawVideoFormat> {
 }
 
 /// Bytes one `width` x `height` frame of `fmt` occupies, for allocating a blank
-/// source buffer. Packed formats are exact; the fully-planar YUV family derives
-/// its size from the format's own subsampling and sample depth.
+/// source buffer: [`RawVideoFormat::unpadded_frame_bytes`] as a `usize`,
+/// saturating at `usize::MAX` on overflow so the allocation fails loud.
 pub fn frame_bytes(fmt: RawVideoFormat, width: u32, height: u32) -> usize {
-    // Fully-planar YUV (I420/I422/I444 at 8/10/12-bit): Y plus two subsampled
-    // chroma planes at this depth's sample size.
-    if let Some((hs, vs)) = fmt.chroma_shift() {
-        let (w, h) = (width as usize, height as usize);
-        let (cw, ch) = (w.div_ceil(1 << hs), h.div_ceil(1 << vs));
-        return (w * h + 2 * cw * ch) * fmt.bytes_per_sample();
-    }
-    let (w, h) = (width as usize, height as usize);
-    match fmt {
-        RawVideoFormat::Rgba8 | RawVideoFormat::Bgra8 => w * h * 4,
-        // Packed RGB: three bytes per pixel, no alpha.
-        RawVideoFormat::Rgb8 => w * h * 3,
-        RawVideoFormat::Yuyv => w * h * 2,
-        RawVideoFormat::Nv12 => w * h * 3 / 2,
-        // Semi-planar 10-bit: NV12's sample counts at 2 bytes each.
-        RawVideoFormat::P010 => w * h * 3,
-        // The fully-planar formats are handled above via `chroma_shift`.
-        RawVideoFormat::I420
-        | RawVideoFormat::I420p10
-        | RawVideoFormat::I420p12
-        | RawVideoFormat::I422
-        | RawVideoFormat::I422p10
-        | RawVideoFormat::I422p12
-        | RawVideoFormat::I444
-        | RawVideoFormat::I444p10
-        | RawVideoFormat::I444p12 => unreachable!("planar YUV handled by chroma_shift"),
-        // A packed format not modeled here (or one added since): fail loud
-        // rather than mis-size a buffer.
-        _ => unreachable!("unmodeled packed RawVideoFormat: {fmt:?}"),
-    }
+    fmt.unpadded_frame_bytes(width, height)
+        .and_then(|bytes| usize::try_from(bytes).ok())
+        .unwrap_or(usize::MAX)
 }
 
 #[cfg(test)]
@@ -150,5 +123,18 @@ mod tests {
         assert_eq!(frame_bytes(RawVideoFormat::Rgba8, 4, 2), 32);
         assert_eq!(frame_bytes(RawVideoFormat::Yuyv, 4, 2), 16);
         assert_eq!(frame_bytes(RawVideoFormat::Nv12, 4, 2), 12);
+    }
+
+    #[test]
+    fn an_odd_size_semi_planar_frame_holds_its_rounded_up_chroma() {
+        const ODD_WIDTH: u32 = 37;
+        const ODD_HEIGHT: u32 = 5;
+        for fmt in [RawVideoFormat::Nv12, RawVideoFormat::P010] {
+            assert_eq!(
+                Some(frame_bytes(fmt, ODD_WIDTH, ODD_HEIGHT) as u64),
+                fmt.unpadded_frame_bytes(ODD_WIDTH, ODD_HEIGHT),
+                "{fmt:?}"
+            );
+        }
     }
 }

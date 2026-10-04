@@ -14,6 +14,7 @@
 use std::io::Read;
 use std::process::ExitCode;
 
+use g2g_core::RawVideoFormat;
 use g2g_plugins::timestampburn::{decode, monotonic_ns};
 
 const NS_PER_MS: f64 = 1_000_000.0;
@@ -27,16 +28,16 @@ fn usage() -> ! {
 }
 
 struct Args {
-    width: usize,
-    height: usize,
+    width: u32,
+    height: u32,
     frames: usize,
     warmup: usize,
     label: String,
 }
 
 fn parse_args() -> Args {
-    let mut width = 0usize;
-    let mut height = 0usize;
+    let mut width = 0u32;
+    let mut height = 0u32;
     let mut frames = usize::MAX;
     let mut warmup = 0usize;
     let mut label = String::from("latency");
@@ -72,8 +73,11 @@ fn percentile(sorted: &[u64], pct: usize) -> f64 {
 
 fn main() -> ExitCode {
     let args = parse_args();
-    // I420: a full-size luma plane then two half-size chroma planes.
-    let frame_bytes = args.width * args.height * 3 / 2;
+    let frame_bytes = RawVideoFormat::I420
+        .unpadded_frame_bytes(args.width, args.height)
+        .and_then(|bytes| usize::try_from(bytes).ok())
+        .unwrap_or_else(|| usage());
+    let (width, height) = (args.width as usize, args.height as usize);
     let mut frame = vec![0u8; frame_bytes];
     let mut stdin = std::io::stdin().lock();
 
@@ -92,7 +96,7 @@ fn main() -> ExitCode {
         if read <= args.warmup {
             continue;
         }
-        match decode(&frame[..args.width * args.height], args.width) {
+        match decode(&frame[..width * height], width) {
             Some(burned) => samples.push(now.saturating_sub(burned)),
             None => undecodable += 1,
         }

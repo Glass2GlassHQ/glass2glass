@@ -27,7 +27,7 @@ pub(crate) fn pack_yuv420_to_nv12(img: &Image) -> Option<(Vec<u8>, u32, u32)> {
     let v_rs = img.plane_row_stride(2).ok()? as usize;
     let v_ps = img.plane_pixel_stride(2).ok()? as usize;
 
-    let (cw, ch) = (w / 2, h / 2);
+    let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
     let mut nv12 = Vec::with_capacity(w * h + 2 * cw * ch);
     // Luma: w bytes per row, row-stride apart.
     for row in 0..h {

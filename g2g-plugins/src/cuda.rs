@@ -480,8 +480,8 @@ unsafe fn upload_nv12(
         check(ffi::cu_ctx_push_current(ctx.0 as ffi::CuContext))?;
         let mut dptr: u64 = 0;
         let mut pitch: usize = 0;
-        // Widest row across the two planes (chroma_w == w here) sizes the pitch;
-        // element size 16 matches NVENC's preferred alignment.
+        // Widest row across the two planes (chroma_w, one more than w at an odd
+        // width) sizes the pitch; element size 16 matches NVENC's preferred alignment.
         let mut result = check(ffi::cu_mem_alloc_pitch(
             &mut dptr,
             &mut pitch,
@@ -496,7 +496,7 @@ unsafe fn upload_nv12(
                     src.as_ptr(),
                     w * h,
                     chroma_w,
-                    w,
+                    chroma_w,
                     chroma_h,
                     chroma_dst,
                     pitch,

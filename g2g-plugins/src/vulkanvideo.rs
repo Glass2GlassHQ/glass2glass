@@ -140,9 +140,9 @@ pub enum VulkanVideoError {
     NoSuchDevice,
     /// The access unit carried no decodable slice (no IDR slice NAL).
     NoDecodableSlice,
-    /// The stream uses an H.264 coding tool this decoder does not implement
-    /// (e.g. `pic_order_cnt_type == 1`, or interlaced field pictures). Rejected
-    /// up front rather than mis-decoded.
+    /// The stream uses a coding tool this decoder does not implement (e.g.
+    /// H.264 `pic_order_cnt_type == 1`, interlaced field pictures, or an odd
+    /// picture size). Rejected up front rather than mis-decoded.
     UnsupportedStream,
     /// No distinct compute queue was available for the GPU-resident NV12 -> RGBA
     /// pass; the caller should use the CPU-convert path instead.
@@ -7394,6 +7394,8 @@ impl Drop for Av1DecodeSession {
     }
 }
 
+type CodedAndOutputExtents = ((u32, u32), (u32, u32));
+
 impl VulkanVideoDevice {
     pub fn caps(&self) -> &VulkanVideoDecodeCaps {
         &self.caps
@@ -7540,8 +7542,16 @@ impl VulkanVideoDevice {
     /// `max_h`, and the picture size the caller gets back. They differ when the
     /// stream is smaller than the device's minimum coded extent: a picture
     /// resource must stay inside the device's coded-extent range, so the picture
-    /// is decoded at the minimum and cropped on the way out.
-    fn session_extents(&self, max_w: u32, max_h: u32) -> ((u32, u32), (u32, u32)) {
+    /// is decoded at the minimum and cropped on the way out. An odd size is
+    /// refused: the readback and the NV12 textures carry `w/2 x h/2` chroma.
+    fn session_extents(
+        &self,
+        max_w: u32,
+        max_h: u32,
+    ) -> Result<CodedAndOutputExtents, VulkanVideoError> {
+        if !max_w.is_multiple_of(2) || !max_h.is_multiple_of(2) {
+            return Err(VulkanVideoError::UnsupportedStream);
+        }
         let output = (
             max_w.min(self.caps.max_coded_extent.0),
             max_h.min(self.caps.max_coded_extent.1),
@@ -7550,7 +7560,7 @@ impl VulkanVideoDevice {
             output.0.max(self.caps.min_coded_extent.0),
             output.1.max(self.caps.min_coded_extent.1),
         );
-        (coded, output)
+        Ok((coded, output))
     }
 
     /// The extent every image a decode session writes must be created at for a
@@ -7606,7 +7616,7 @@ impl VulkanVideoDevice {
         // H.264 decode is 8-bit here (High profile, NV12); High 10 is out of scope.
         let (picture_format, reference_format) = self.session_picture_formats(&prof.profile, 8)?;
 
-        let ((w, h), (out_w, out_h)) = self.session_extents(max_w, max_h);
+        let ((w, h), (out_w, out_h)) = self.session_extents(max_w, max_h)?;
         let coded_extent = self.session_max_coded_extent();
 
         let session_ci = vk::VideoSessionCreateInfoKHR::default()
@@ -7723,7 +7733,7 @@ impl VulkanVideoDevice {
         let (picture_format, reference_format) =
             self.session_picture_formats(&prof.profile, bit_depth)?;
 
-        let ((w, h), (out_w, out_h)) = self.session_extents(max_w, max_h);
+        let ((w, h), (out_w, out_h)) = self.session_extents(max_w, max_h)?;
         let coded_extent = self.session_max_coded_extent();
 
         let session_ci = vk::VideoSessionCreateInfoKHR::default()
@@ -7842,7 +7852,7 @@ impl VulkanVideoDevice {
         let (picture_format, reference_format) =
             self.session_picture_formats(&prof.profile, bit_depth)?;
 
-        let ((w, h), (out_w, out_h)) = self.session_extents(max_w, max_h);
+        let ((w, h), (out_w, out_h)) = self.session_extents(max_w, max_h)?;
         let coded_extent = self.session_max_coded_extent();
 
         let session_ci = vk::VideoSessionCreateInfoKHR::default()

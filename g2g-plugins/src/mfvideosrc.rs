@@ -121,11 +121,7 @@ impl MfPixelFormat {
 
     /// Bytes per frame for `width`x`height`.
     fn frame_bytes(self, width: u32, height: u32) -> usize {
-        let px = (width as usize) * (height as usize);
-        match self {
-            MfPixelFormat::Nv12 => px * 3 / 2,
-            MfPixelFormat::Yuy2 => px * 2,
-        }
+        crate::pixel::frame_byte_size(self.raw_format(), width, height)
     }
 }
 
@@ -829,6 +825,11 @@ mod tests {
     fn pixel_format_byte_sizes() {
         assert_eq!(MfPixelFormat::Nv12.frame_bytes(640, 480), 640 * 480 * 3 / 2);
         assert_eq!(MfPixelFormat::Yuy2.frame_bytes(640, 480), 640 * 480 * 2);
+        let (width, height) = crate::pixel::tests::GEOMETRIES[0];
+        assert_eq!(
+            Some(MfPixelFormat::Nv12.frame_bytes(width, height) as u64),
+            RawVideoFormat::Nv12.unpadded_frame_bytes(width, height)
+        );
     }
 
     #[test]

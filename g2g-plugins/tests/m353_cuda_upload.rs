@@ -20,10 +20,14 @@ const W: u32 = 320;
 const H: u32 = 240;
 
 fn nv12_caps() -> Caps {
+    nv12_caps_at(W, H)
+}
+
+fn nv12_caps_at(width: u32, height: u32) -> Caps {
     Caps::RawVideo {
         format: RawVideoFormat::Nv12,
-        width: Dim::Fixed(W),
-        height: Dim::Fixed(H),
+        width: Dim::Fixed(width),
+        height: Dim::Fixed(height),
         framerate: Rate::Fixed(30 << 16),
         interlace: g2g_core::Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
@@ -110,6 +114,45 @@ async fn cuda_upload_promotes_system_nv12_to_cuda() {
     }
     assert_eq!(up.uploaded(), 1, "one host->device upload");
     assert_eq!(up.forwarded(), 0, "no pass-through (input was System)");
+}
+
+#[tokio::test]
+async fn an_odd_size_nv12_frame_round_trips_through_cuda() {
+    const ODD_W: u32 = 37;
+    const ODD_H: u32 = 5;
+    let caps = nv12_caps_at(ODD_W, ODD_H);
+    let mut up = CudaUpload::new();
+    match up.configure_pipeline(&caps) {
+        Ok(_) => {}
+        Err(e) if skip_if_no_gpu(&e) => return,
+        Err(e) => panic!("unexpected configure error: {e:?}"),
+    }
+    let len = RawVideoFormat::Nv12
+        .unpadded_frame_bytes(ODD_W, ODD_H)
+        .unwrap() as usize;
+    let bytes: Vec<u8> = (0..len).map(|i| i as u8).collect();
+    let frame = Frame::new(
+        MemoryDomain::System(SystemSlice::from_boxed(bytes.clone().into_boxed_slice())),
+        FrameTiming::default(),
+        0,
+    );
+    let mut uploaded = Collect::default();
+    up.process(PipelinePacket::DataFrame(frame), &mut uploaded)
+        .await
+        .expect("uploads");
+    let Some(PipelinePacket::DataFrame(on_gpu)) = uploaded.packets.pop() else {
+        panic!("upload emitted no frame");
+    };
+    let mut down = g2g_plugins::cuda::CudaDownload::new();
+    down.configure_pipeline(&caps).expect("configures");
+    let mut downloaded = Collect::default();
+    down.process(PipelinePacket::DataFrame(on_gpu), &mut downloaded)
+        .await
+        .expect("downloads");
+    let Some(PipelinePacket::DataFrame(back)) = downloaded.packets.pop() else {
+        panic!("download emitted no frame");
+    };
+    assert_eq!(back.domain.as_system_slice(), Some(bytes.as_slice()));
 }
 
 /// A frame already in CUDA memory passes through untouched (no redundant copy),

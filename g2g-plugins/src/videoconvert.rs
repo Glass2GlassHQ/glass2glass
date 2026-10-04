@@ -207,19 +207,10 @@ impl VideoConvert {
         else {
             return Err(G2gError::CapsMismatch);
         };
-        if !INPUT_FORMATS.contains(format) || *w == 0 || *h == 0 {
-            return Err(G2gError::CapsMismatch);
-        }
         // The dims must be even on every axis either the input or the (known)
-        // target format subsamples, so chroma planes divide cleanly. YUYV folds in
-        // as a horizontally-subsampled (even-width) format.
-        let (mut ew, mut eh) = even_dims_required(*format);
-        if let Some(target) = self.target {
-            let (tw, th) = even_dims_required(target);
-            ew |= tw;
-            eh |= th;
-        }
-        if (ew && *w % 2 != 0) || (eh && *h % 2 != 0) {
+        // target format subsamples, so chroma planes divide cleanly.
+        let target = self.target.unwrap_or(*format);
+        if !converts_from(*format, *w, *h) || !converts_from(target, *w, *h) {
             return Err(G2gError::CapsMismatch);
         }
         Ok(InputStream {
@@ -608,8 +599,17 @@ impl PadTemplates for VideoConvert {
     }
 }
 
+pub(crate) fn converts_from(format: RawVideoFormat, w: u32, h: u32) -> bool {
+    let (even_width, even_height) = even_dims_required(format);
+    INPUT_FORMATS.contains(&format)
+        && w != 0
+        && h != 0
+        && (!even_width || w.is_multiple_of(2))
+        && (!even_height || h.is_multiple_of(2))
+}
+
 /// Dispatch one frame conversion. `src` is validated to hold at least the
-/// input frame; dims are even whenever a 4:2:0 format is involved.
+/// input frame, and [`converts_from`] holds for both formats at `w x h`.
 /// `colorimetry` is the YUV side's, from its caps: it picks the matrix and range
 /// the color step uses, and an `UNKNOWN` one converts BT.601 limited. Public so
 /// the `convert` benchmark (M284) can exercise this hot path directly.

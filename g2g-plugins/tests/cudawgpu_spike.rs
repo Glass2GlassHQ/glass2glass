@@ -148,3 +148,68 @@ async fn wgpu_reads_what_cuda_wrote() {
         "wgpu must read exactly the (x^y) pattern CUDA wrote"
     );
 }
+
+// the packed texture cannot hold an odd width's last chroma pair, so the frame is refused
+#[tokio::test]
+async fn an_odd_size_cuda_frame_is_refused() {
+    use g2g_core::memory::SystemSlice;
+    use g2g_core::{
+        AsyncElement, Caps, Dim, Frame, FrameTiming, G2gError, MemoryDomain, OutputSink,
+        PipelinePacket, PushOutcome, Rate, RawVideoFormat,
+    };
+    use g2g_plugins::cuda::CudaUpload;
+    use g2g_plugins::cudatowgpu::CudaToWgpu;
+
+    #[derive(Default)]
+    struct Collect(Vec<PipelinePacket>);
+    impl OutputSink for Collect {
+        fn poll_push(
+            &mut self,
+            _cx: &mut core::task::Context<'_>,
+            packet_slot: &mut Option<PipelinePacket>,
+        ) -> core::task::Poll<Result<PushOutcome, G2gError>> {
+            self.0.extend(packet_slot.take());
+            core::task::Poll::Ready(Ok(PushOutcome::Accepted))
+        }
+    }
+
+    const ODD_W: u32 = 37;
+    const ODD_H: u32 = 5;
+    let caps = Caps::RawVideo {
+        format: RawVideoFormat::Nv12,
+        width: Dim::Fixed(ODD_W),
+        height: Dim::Fixed(ODD_H),
+        framerate: Rate::Fixed(30 << 16),
+        interlace: g2g_core::Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
+    };
+    let mut up = CudaUpload::new();
+    if let Err(e) = up.configure_pipeline(&caps) {
+        eprintln!("skipping: no CUDA ({e:?})");
+        return;
+    }
+    let len = RawVideoFormat::Nv12
+        .unpadded_frame_bytes(ODD_W, ODD_H)
+        .unwrap() as usize;
+    let frame = Frame::new(
+        MemoryDomain::System(SystemSlice::from_boxed(vec![0u8; len].into_boxed_slice())),
+        FrameTiming::default(),
+        0,
+    );
+    let mut uploaded = Collect::default();
+    up.process(PipelinePacket::DataFrame(frame), &mut uploaded)
+        .await
+        .expect("uploads");
+    let Some(PipelinePacket::DataFrame(on_gpu)) = uploaded.0.pop() else {
+        panic!("upload emitted no frame");
+    };
+    let mut to_wgpu = CudaToWgpu::new();
+    to_wgpu.configure_pipeline(&caps).expect("configures");
+    let refused = to_wgpu
+        .process(PipelinePacket::DataFrame(on_gpu), &mut Collect::default())
+        .await;
+    assert!(
+        matches!(refused, Err(G2gError::CapsMismatch)),
+        "{refused:?}"
+    );
+}

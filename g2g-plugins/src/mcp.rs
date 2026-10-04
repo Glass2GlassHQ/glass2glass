@@ -1923,6 +1923,12 @@ fn snapshot_png(captured: &CapturedFrame, element: &str) -> Result<SnapshotImage
             captured.memory
         ));
     };
+    if !crate::videoconvert::converts_from(*format, *width, *height) {
+        return Err(format!(
+            "the frame reaching `{element}` cannot be converted to RGBA for a snapshot: {}",
+            captured.caps.to_gst_string()
+        ));
+    }
     let needed = crate::pixel::frame_byte_size(*format, *width, *height);
     if pixels.len() < needed {
         return Err(format!(
@@ -2423,5 +2429,27 @@ mod tests {
         let matched = store.wait(1, "alert", Duration::from_millis(10), &run_ended);
         assert_eq!(matched.len(), 1, "{matched:?}");
         assert_eq!(matched[0]["alert"], "car");
+    }
+
+    #[test]
+    fn a_snapshot_refuses_a_frame_it_cannot_convert() {
+        use g2g_core::{Caps, Dim, RawVideoFormat};
+        let (width, height) = crate::pixel::tests::GEOMETRIES[0];
+        for format in [RawVideoFormat::Nv12, RawVideoFormat::P010] {
+            let captured = CapturedFrame {
+                caps: Caps::RawVideo {
+                    format,
+                    width: Dim::Fixed(width),
+                    height: Dim::Fixed(height),
+                    framerate: g2g_core::Rate::Any,
+                    interlace: g2g_core::Interlace::Any,
+                    colorimetry: g2g_core::Colorimetry::UNKNOWN,
+                },
+                pts_ns: None,
+                memory: "system".into(),
+                pixels: Some(alloc::vec![0; crate::pixel::frame_byte_size(format, width, height)]),
+            };
+            assert!(snapshot_png(&captured, "sink").is_err(), "{format:?}");
+        }
     }
 }
