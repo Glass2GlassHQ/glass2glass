@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1218: `webrtcdsp` and `webrtcechoprobe` (feature `webrtcdsp`): echo cancellation, noise suppression, gain control and a high-pass filter on the pure-Rust `sonora` processor.
 - M1215: `splitmuxsrc` plays the parts a `splitmuxsink` wrote (mp4, matroska, mpegts) as one continuous stream; matroska reads GStreamer's NUL-padded codec ids.
 - M1214: `intersink` and `intersrc` connect independent graphs in one process by `producer-name` (system memory).
 - M1213: `appsrc` gains `output-domains`, so a `g2g-bridge` fragment on `memory:DMABuf` caps can start with `dmabuftowgpu` and end in `wgputodmabuf`.

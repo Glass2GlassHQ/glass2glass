@@ -227,7 +227,7 @@ unless it says otherwise.
   `vorbisparse`, `theoraparse`, `icydemux` (SHOUTcast metadata in `httpsrc`).
 - **Audio filters:** `audiointerleave`, `audiolatency`, `rganalysis` /
   `rgvolume` / `rglimiter`, `bs2b`, `freeverb`, `pitch` / `bpmdetect`,
-  `webrtcdsp` / `webrtcechoprobe`, `spanplc`, `accurip`, `chromaprint`.
+  `spanplc`, `accurip`, `chromaprint`.
 - **Audio visualisers:** `wavescope`, `spacescope`, `spectrascope`, `synaescope`,
   `goom` / `goom2k1`.
 - **Video parsers:** `h263parse`, `h266parse`, `diracparse`, `jpeg2000parse`,
