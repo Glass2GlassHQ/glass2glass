@@ -207,6 +207,11 @@ impl<T> Receiver<T> {
         }
         v
     }
+
+    /// True once every sender has dropped. Values already queued still drain.
+    pub fn is_closed(&self) -> bool {
+        self.inner.lock().senders == 0
+    }
 }
 
 #[allow(missing_debug_implementations)]
@@ -1614,6 +1619,16 @@ mod link_tests {
         drop(tx);
         assert_eq!(rx.try_recv(), Some(1), "remaining value still drains");
         assert_eq!(rx.try_recv(), None, "empty and closed");
+    }
+
+    #[test]
+    fn is_closed_only_after_the_last_sender_drops() {
+        let (tx, rx) = bounded::<u32>(2);
+        let second = tx.clone();
+        drop(tx);
+        assert!(!rx.is_closed(), "one sender remains");
+        drop(second);
+        assert!(rx.is_closed());
     }
 
     /// The adapter of a transform that answers keyframe requests but not the
