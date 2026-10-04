@@ -201,10 +201,18 @@ fn nv12_repacks_to_i420_at_odd_sizes_like_ffmpeg() {
 }
 
 // the subsampled formats videoconvert produces, by their caps name
-const LAUNCH_TARGETS: [(RawVideoFormat, &str); 2] = [
+const LAUNCH_TARGETS: [(RawVideoFormat, &str); 3] = [
     (RawVideoFormat::Nv12, "NV12"),
     (RawVideoFormat::I420, "I420"),
+    (RawVideoFormat::Yuyv, "YUY2"),
 ];
+
+// even width, then odd on both axes
+const YUYV_SIZES: [(u32, u32); 2] = [(38, 4), (37, 5)];
+const YUYV_CAPS_NAME: &str = "YUY2";
+const YUYV_PIXEL_FORMAT: &str = "yuyv422";
+// the formats videoconvert packs to YUYV, by caps name and ffmpeg pixel format
+const YUYV_SOURCES: [(&str, &str); 3] = [("RGBA", "rgba"), ("NV12", "nv12"), ("I420", "yuv420p")];
 
 // one frame through `appsrc ! {elements} ! appsink`, as the appsink received it
 async fn launch_one_frame(
@@ -258,6 +266,87 @@ async fn videoconvert_launches_at_an_odd_size() {
             Colorimetry::UNKNOWN,
         );
         assert_eq!(out, *expected, "{name}");
+    }
+}
+
+#[tokio::test]
+async fn videoconvert_format_property_produces_yuyv() {
+    for size in YUYV_SIZES {
+        let (width, height) = size;
+        let rgba = gradient_rgba(width, height);
+        let out = launch_one_frame(
+            &rgba,
+            "RGBA",
+            size,
+            &format!("videoconvert format={YUYV_CAPS_NAME}"),
+            &format!("yuyv_property_{width}x{height}"),
+        )
+        .await;
+        assert_eq!(
+            Some(out.len() as u64),
+            RawVideoFormat::Yuyv.unpadded_frame_bytes(width, height),
+            "{width}x{height}"
+        );
+        let expected = convert(
+            &rgba,
+            RawVideoFormat::Rgba8,
+            RawVideoFormat::Yuyv,
+            width as usize,
+            height as usize,
+            Colorimetry::UNKNOWN,
+        );
+        assert_eq!(out, *expected, "{width}x{height}");
+    }
+}
+
+#[tokio::test]
+async fn videoconvert_packs_yuyv_like_ffmpeg() {
+    if !have_ffmpeg() {
+        eprintln!("ffmpeg not present: skipping");
+        return;
+    }
+    for size in YUYV_SIZES {
+        let (width, height) = size;
+        let rgba = gradient_rgba(width, height);
+        for (name, pixel_format) in YUYV_SOURCES {
+            let label = format!("{name} {width}x{height}");
+            let frame = ffmpeg_convert(&rgba, width, height, "rgba", pixel_format);
+            let out = launch_one_frame(
+                &frame,
+                name,
+                size,
+                &format!("videoconvert format={YUYV_CAPS_NAME}"),
+                &format!("yuyv_from_{name}_{width}x{height}"),
+            )
+            .await;
+            let reference = ffmpeg_convert(&frame, width, height, pixel_format, YUYV_PIXEL_FORMAT);
+            assert_eq!(out.len(), reference.len(), "{label}");
+            let drift = mean_abs_diff(&out, &reference);
+            assert!(drift < MEAN_ABS_DIFF_BOUND, "{label} to yuyv: {drift}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn yuyv_round_trips_through_rgba() {
+    if !have_ffmpeg() {
+        eprintln!("ffmpeg not present: skipping");
+        return;
+    }
+    for size in YUYV_SIZES {
+        let (width, height) = size;
+        let rgba = gradient_rgba(width, height);
+        let yuyv = ffmpeg_convert(&rgba, width, height, "rgba", YUYV_PIXEL_FORMAT);
+        let back = launch_one_frame(
+            &yuyv,
+            YUYV_CAPS_NAME,
+            size,
+            &format!("videoconvert format=RGBA ! videoconvert format={YUYV_CAPS_NAME}"),
+            &format!("yuyv_round_trip_{width}x{height}"),
+        )
+        .await;
+        let drift = mean_abs_diff(&back, &yuyv);
+        assert!(drift < MEAN_ABS_DIFF_BOUND, "{width}x{height}: {drift}");
     }
 }
 

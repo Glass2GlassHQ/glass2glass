@@ -36,26 +36,7 @@ use g2g_core::{
 
 /// Formats this element can both consume and produce. The convert `target`
 /// is always one of these.
-const FORMATS: [RawVideoFormat; 13] = [
-    RawVideoFormat::Rgba8,
-    RawVideoFormat::Bgra8,
-    RawVideoFormat::Rgb8,
-    RawVideoFormat::Nv12,
-    RawVideoFormat::I420,
-    RawVideoFormat::I420p10,
-    RawVideoFormat::I420p12,
-    RawVideoFormat::I422,
-    RawVideoFormat::I422p10,
-    RawVideoFormat::I422p12,
-    RawVideoFormat::I444,
-    RawVideoFormat::I444p10,
-    RawVideoFormat::I444p12,
-];
-
-/// Formats accepted as **input**. Superset of [`FORMATS`]: `Yuyv` (packed
-/// 4:2:2, the usual webcam output) is unpacked to a planar / RGB target but is
-/// never produced, so it is input-only.
-const INPUT_FORMATS: [RawVideoFormat; 14] = [
+const FORMATS: [RawVideoFormat; 14] = [
     RawVideoFormat::Rgba8,
     RawVideoFormat::Bgra8,
     RawVideoFormat::Rgb8,
@@ -239,7 +220,7 @@ impl AsyncElement for VideoConvert {
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
         // any supported raw format at any geometry; per-format alternatives
         // intersected in declaration order.
-        for format in INPUT_FORMATS {
+        for format in FORMATS {
             let candidate = Caps::RawVideo {
                 format,
                 width: Dim::Any,
@@ -283,10 +264,8 @@ impl AsyncElement for VideoConvert {
                 // Property-driven: the fixed target format.
                 Some(t) => vec![RawVideoShape::PASSTHROUGH.with_format(FieldTransform::Fixed(t))],
                 // Caps-driven (auto): any producible format at this geometry,
-                // preferring passthrough (the input format, no conversion) when it is
-                // itself producible. The `produce` gate drops the passthrough for an
-                // input-only format (Yuyv), so such an input lists the producible set;
-                // for a producible one it collapses into the preferred passthrough.
+                // preferring passthrough (the input format, no conversion). The
+                // retarget to the input's own format collapses into it.
                 None => {
                     let mut shapes = vec![RawVideoShape::PASSTHROUGH];
                     shapes.extend(FORMATS.iter().map(|f| {
@@ -296,7 +275,7 @@ impl AsyncElement for VideoConvert {
                 }
             };
         CapsConstraint::DerivedFields(CapsTransform::RawVideo {
-            accept: INPUT_FORMATS.to_vec(),
+            accept: FORMATS.to_vec(),
             produce: FORMATS.to_vec(),
             shapes,
         })
@@ -594,7 +573,7 @@ impl PadTemplates for VideoConvert {
 }
 
 pub(crate) fn converts_from(format: RawVideoFormat, w: u32, h: u32) -> bool {
-    INPUT_FORMATS.contains(&format) && w != 0 && h != 0
+    FORMATS.contains(&format) && w != 0 && h != 0
 }
 
 /// Dispatch one frame conversion. `src` is validated to hold at least the
@@ -685,7 +664,7 @@ fn convert_strided(
         (I420, Rgba8) => yuv420_to_rgb(src, w, h, false, 0, 2, matrix),
         (Nv12, Bgra8) => yuv420_to_rgb(src, w, h, true, 2, 0, matrix),
         (I420, Bgra8) => yuv420_to_rgb(src, w, h, false, 2, 0, matrix),
-        // YUYV (packed 4:2:2) is input-only: unpack to the planar / RGB target.
+        // YUYV (packed 4:2:2) unpacks directly to these targets.
         (Yuyv, I420) => yuyv_to_yuv420(src, w, h, false),
         (Yuyv, Nv12) => yuyv_to_yuv420(src, w, h, true),
         (Yuyv, Rgba8) => yuyv_to_rgb(src, w, h, 0, 2, matrix),

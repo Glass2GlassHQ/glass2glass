@@ -130,7 +130,7 @@ fn videoscale_derivation_honors_its_passthrough_mask() {
 
 #[test]
 fn videoconvert_derivation_honors_its_passthrough_mask() {
-    // Includes a Yuyv input (input-only): its outputs are the producible formats
+    // Includes a Yuyv input (packed 4:2:2): its outputs are the producible formats
     // at the *same* geometry, so width/height/framerate must stay passthrough.
     let inputs = [rgba(320, 240), raw(RawVideoFormat::Yuyv, 320, 240)];
     check(&VideoConvert::auto(), &inputs);

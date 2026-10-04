@@ -260,7 +260,8 @@ fn an_odd_size_nv12_frame_fuses_to_the_expected_rgb() {
 #[cfg(feature = "std")]
 mod launch {
     use g2g_core::runtime::{parse_launch, run_graph};
-    use g2g_core::PipelineClock;
+    use g2g_core::{PipelineClock, RawVideoFormat};
+    use g2g_plugins::appsrc::register_appsrc;
     use g2g_plugins::registry::default_registry;
 
     struct ZeroClock;
@@ -301,5 +302,25 @@ mod launch {
             runs("videotestsrc num-buffers=5 ! videoconvertscale ! video/x-raw,format=NV12,width=320,height=240 ! fakesink").await,
             5
         );
+    }
+
+    // a YUYV output here would reach a scaler that takes no YUYV
+    #[tokio::test]
+    async fn a_yuyv_input_scales_in_a_launch_line() {
+        const CHANNEL: &str = "m1029_yuyv_in";
+        const SIZE: (u32, u32) = (64, 48);
+        const SCALED: (u32, u32) = (32, 24);
+        let frame_bytes = RawVideoFormat::Yuyv
+            .unpadded_frame_bytes(SIZE.0, SIZE.1)
+            .expect("yuyv frame size");
+        let feed = register_appsrc(CHANNEL);
+        assert!(feed.push(&vec![u8::MAX / 2; frame_bytes as usize], 0));
+        feed.end_of_stream();
+        let line = format!(
+            "appsrc channel={CHANNEL} caps=video/x-raw,format=YUY2,width={},height={},framerate=30/1 \
+             ! videoconvertscale ! video/x-raw,width={},height={} ! fakesink",
+            SIZE.0, SIZE.1, SCALED.0, SCALED.1
+        );
+        assert_eq!(runs(&line).await, 1);
     }
 }

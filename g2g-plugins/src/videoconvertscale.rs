@@ -397,18 +397,19 @@ impl AsyncElement for VideoConvertScale {
     }
 
     /// The two elements' own declarations, merged: each format the converter can
-    /// produce, at each geometry the scaler can produce. Neither restates the
-    /// other's rules, so a change to either lands here.
+    /// produce and the scaler takes, at each geometry the scaler can produce.
+    /// Neither restates the other's rules, so a change to either lands here.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
         let convert_constraint = self.convert.caps_constraint_as_transform();
         let scale_constraint = self.scale.caps_constraint_as_transform();
         let (
             CapsConstraint::DerivedFields(CapsTransform::RawVideo {
                 accept,
-                produce,
+                mut produce,
                 shapes: format_shapes,
             }),
             CapsConstraint::DerivedFields(CapsTransform::RawVideo {
+                accept: scalable,
                 shapes: geometry_shapes,
                 ..
             }),
@@ -418,6 +419,8 @@ impl AsyncElement for VideoConvertScale {
             // means one changed shape and this merge no longer describes it.
             return self.convert.caps_constraint_as_transform();
         };
+        // the scaler runs last on an input it rejects
+        produce.retain(|format| scalable.contains(format));
         let mut shapes: Vec<RawVideoShape> = Vec::new();
         for format in &format_shapes {
             for geometry in &geometry_shapes {
