@@ -4,7 +4,7 @@
 //! `videoflip`); like the g2g-bridge smoke scripts, run it locally, not in CI:
 //!
 //! ```sh
-//! cargo test -p g2g-plugins --features gstreamer --test gstwrap
+//! cargo test -p g2g-plugins --features gstreamer,metadata --test gstwrap
 //! ```
 //!
 //! The test drives the element directly (a crafted input frame + a capturing
@@ -24,8 +24,8 @@ use g2g_core::log::{LogLevel, LogRecord, LogSink};
 use g2g_core::memory::{MemoryDomain, MemoryDomainKind, OwnedDmaBuf, SystemSlice};
 use g2g_core::runtime::{parse_launch, run_graph};
 use g2g_core::{
-    AsyncElement, G2gError, HardwareError, OutputSink, PipelineClock, PipelinePacket, PropError,
-    PropValue, PushOutcome,
+    AsyncElement, Caps, Colorimetry, Dim, G2gError, HardwareError, Interlace, OutputSink,
+    PipelineClock, PipelinePacket, PropError, PropValue, PushOutcome, Rate, RawVideoFormat,
 };
 
 use g2g_plugins::capsfilter::parse_caps;
@@ -359,6 +359,125 @@ async fn hosts_a_real_gstreamer_videoflip() {
         vec![0x10, 0x20, 0x30, 0x40, 0xFF, 0xFF, 0xFF, 0xFF],
         "pixels came back horizontally flipped by the real GStreamer videoflip"
     );
+}
+
+// Each plane's rows in order, sliced out of a tightly packed frame.
+fn tight_rows(format: RawVideoFormat, width: u32, height: u32, frame: &[u8]) -> Vec<Vec<&[u8]>> {
+    (0..format.plane_count())
+        .map(|plane| {
+            let offset = format.plane_offset(plane, width, height).unwrap() as usize;
+            let row_bytes = format.plane_stride(plane, width).unwrap() as usize;
+            let rows = format.plane_rows(plane, height).unwrap() as usize;
+            (0..rows)
+                .map(|row| &frame[offset + row * row_bytes..][..row_bytes])
+                .collect()
+        })
+        .collect()
+}
+
+// Q16.16 frames per second.
+const ONE_FRAME_PER_SECOND: u32 = 1 << 16;
+
+// Row widths that are not a multiple of 4: GStreamer's default strides would pad them.
+const UNALIGNED_FRAMES: [(RawVideoFormat, u32, u32); 3] = [
+    (RawVideoFormat::Rgb8, 37, 3),
+    (RawVideoFormat::I420, 37, 5),
+    (RawVideoFormat::Nv12, 37, 5),
+];
+
+#[tokio::test]
+async fn flips_frames_with_unaligned_rows() {
+    for (format, width, height) in UNALIGNED_FRAMES {
+        let caps = Caps::RawVideo {
+            format,
+            width: Dim::Fixed(width),
+            height: Dim::Fixed(height),
+            framerate: Rate::Fixed(ONE_FRAME_PER_SECOND),
+            interlace: Interlace::Any,
+            colorimetry: Colorimetry::UNKNOWN,
+        };
+        let frame_bytes = format.unpadded_frame_bytes(width, height).unwrap() as usize;
+        let input: Vec<u8> = (0..frame_bytes).map(|i| (i % 251) as u8).collect();
+        let expected: Vec<u8> = tight_rows(format, width, height, &input)
+            .into_iter()
+            .flat_map(|rows| rows.into_iter().rev().flatten().copied())
+            .collect();
+
+        let mut el = GstWrap::new();
+        el.set_property(
+            "element",
+            PropValue::Str("videoflip method=vertical-flip".into()),
+        )
+        .expect("element property");
+        el.configure_pipeline(&caps)
+            .expect("gst pipeline builds (needs host GStreamer + gst-plugins-good videoflip)");
+        let mut sink = Collect::default();
+        el.process(
+            PipelinePacket::DataFrame(first_frame(MemoryDomain::System(SystemSlice::from_boxed(
+                input.into_boxed_slice(),
+            )))),
+            &mut sink,
+        )
+        .await
+        .expect("process frame");
+        el.process(PipelinePacket::Eos, &mut sink)
+            .await
+            .expect("process eos");
+
+        assert_eq!(sink.frames.len(), 1, "{format:?} {width}x{height}");
+        assert_eq!(
+            sink.frames[0], expected,
+            "{format:?} {width}x{height} came back with every plane's rows reversed"
+        );
+    }
+}
+
+#[cfg(feature = "metadata")]
+#[tokio::test]
+async fn reads_a_padded_frame_where_its_plane_layout_says() {
+    const ROW_PADDING: usize = 5;
+    let (format, width, height) = UNALIGNED_FRAMES[0];
+    let row_bytes = format.plane_stride(0, width).unwrap() as usize;
+    let stride = row_bytes + ROW_PADDING;
+    let tight: Vec<u8> = (0..row_bytes * height as usize)
+        .map(|i| (i % 251) as u8)
+        .collect();
+    let mut padded = vec![0xEE_u8; stride * height as usize];
+    for (row, pixels) in tight.chunks(row_bytes).enumerate() {
+        padded[row * stride..][..row_bytes].copy_from_slice(pixels);
+    }
+    let expected: Vec<u8> = tight.chunks(row_bytes).rev().flatten().copied().collect();
+
+    let mut el = GstWrap::new();
+    el.set_property(
+        "element",
+        PropValue::Str("videoflip method=vertical-flip".into()),
+    )
+    .expect("element property");
+    el.configure_pipeline(&Caps::RawVideo {
+        format,
+        width: Dim::Fixed(width),
+        height: Dim::Fixed(height),
+        framerate: Rate::Fixed(ONE_FRAME_PER_SECOND),
+        interlace: Interlace::Any,
+        colorimetry: Colorimetry::UNKNOWN,
+    })
+    .expect("gst pipeline builds (needs host GStreamer + gst-plugins-good videoflip)");
+    let mut frame = first_frame(MemoryDomain::System(SystemSlice::from_boxed(
+        padded.into_boxed_slice(),
+    )));
+    frame
+        .meta
+        .attach(g2g_core::meta::PlaneLayout::single(stride));
+    let mut sink = Collect::default();
+    el.process(PipelinePacket::DataFrame(frame), &mut sink)
+        .await
+        .expect("process frame");
+    el.process(PipelinePacket::Eos, &mut sink)
+        .await
+        .expect("process eos");
+
+    assert_eq!(sink.frames, vec![expected], "rows read past the padding");
 }
 
 /// The quote-aware launch tokenizer carries a multi-word element description into

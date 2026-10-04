@@ -213,9 +213,6 @@ Highest leverage first:
 
 ## GStreamer bridge
 
-- `gstwrap`'s system-memory push attaches no `GstVideoMeta`, so GStreamer
-  assumes its default 4-byte-aligned strides: attach the meta with the tight
-  plane offsets and strides.
 - A system-memory to `WgpuBuffer` upload element, so a bridge fragment can turn
   system frames into dma-bufs through `wgputodmabuf`.
 

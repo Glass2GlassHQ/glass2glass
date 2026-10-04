@@ -13,11 +13,15 @@
 //! own streaming threads; `process` feeds frames into the appsrc and drains the
 //! appsink, never owning those threads.
 //!
-//! Input `System` frames are copied into a `GstBuffer`. A `DmaBuf` frame is
-//! pushed without a copy as a `GstDmaBufMemory` over a dup of its fd, with a
-//! `GstVideoMeta` carrying its stride and offset. The appsrc caps stay plain
-//! system caps, so an element without dma-buf support maps the memory, which
-//! works for a linear buffer.
+//! Input `System` frames are copied into a `GstBuffer`. A raw video frame is
+//! copied into the caps' default `GstVideoInfo` layout, read through its
+//! `PlaneLayout` when it carries one, and system output is copied back tightly
+//! packed, so a wrapped element never has to honour a `GstVideoMeta`.
+//!
+//! A `DmaBuf` frame is pushed without a copy as a `GstDmaBufMemory` over a dup
+//! of its fd, with a `GstVideoMeta` carrying its stride and offset. The appsrc
+//! caps stay plain system caps, so an element without dma-buf support maps the
+//! memory, which works for a linear buffer.
 //!
 //! `output-memory` picks the output side. `system` (the default) copies each
 //! sample out to a `System` frame. `dmabuf` hands each sample's dma-buf on as a
@@ -44,8 +48,10 @@ use alloc::vec::Vec;
 
 use std::ffi::CString;
 
+use g2g_core::frame::Frame;
 use g2g_core::log::{short_type_name, Target};
 use g2g_core::memory::{DomainSet, MemoryDomain, MemoryDomainKind, OwnedDmaBuf, SystemSlice};
+use g2g_core::meta;
 use g2g_core::{
     g2g_error, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata,
     G2gError, HardwareError, OutputSink, PipelinePacket, PropError, PropKind, PropValue,
@@ -79,6 +85,16 @@ struct DmaBufSample {
     plane_strides: [c_int; GST_VIDEO_MAX_PLANES],
 }
 
+// Mirrors `G2gGstWrapPlanes` in the C helper.
+#[repr(C)]
+#[derive(Debug, PartialEq, Eq)]
+struct VideoPlanes {
+    count: c_uint,
+    offsets: [usize; GST_VIDEO_MAX_PLANES],
+    strides: [c_int; GST_VIDEO_MAX_PLANES],
+    size: usize,
+}
+
 impl DmaBufSample {
     fn empty() -> Self {
         Self {
@@ -103,8 +119,15 @@ extern "C" {
         element_desc: *const c_char,
         in_caps: *const c_char,
         out_caps: *const c_char,
+        output_planes: *const VideoPlanes,
     ) -> *mut c_void;
-    fn g2g_gstwrap_push(w: *mut c_void, data: *const u8, len: usize, pts_ns: u64) -> c_int;
+    fn g2g_gstwrap_push(
+        w: *mut c_void,
+        data: *const u8,
+        len: usize,
+        planes: *const VideoPlanes,
+        pts_ns: u64,
+    ) -> c_int;
     fn g2g_gstwrap_push_dmabuf(
         w: *mut c_void,
         fd: c_int,
@@ -127,6 +150,8 @@ extern "C" {
     fn g2g_gstwrap_sample_unref(sample: *mut c_void);
     #[cfg(test)]
     fn g2g_gstwrap_dmabuf_sample_size() -> usize;
+    #[cfg(test)]
+    fn g2g_gstwrap_planes_size() -> usize;
     fn g2g_gstwrap_free_buf(p: *mut u8);
     fn g2g_gstwrap_eos(w: *mut c_void);
     fn g2g_gstwrap_free(w: *mut c_void);
@@ -214,7 +239,7 @@ pub struct GstWrap {
     /// Caps announced downstream (once) before the first output frame: the
     /// declared `output-caps` for a reformatting element, else the input caps.
     announce_caps: Option<Caps>,
-    input_raw_video: Option<(RawVideoFormat, u32)>,
+    input_raw_video: Option<RawVideoGeometry>,
     output_raw_format: Option<RawVideoFormat>,
     lent_samples: Vec<LentSample>,
     caps_sent: bool,
@@ -325,10 +350,7 @@ struct PushPlanes {
     required_end: usize,
 }
 
-fn push_planes(
-    raw_video: Option<(RawVideoFormat, u32)>,
-    dmabuf: &OwnedDmaBuf,
-) -> Option<PushPlanes> {
+fn push_planes(raw_video: Option<RawVideoGeometry>, dmabuf: &OwnedDmaBuf) -> Option<PushPlanes> {
     let offset = u64::from(dmabuf.offset);
     let data_offset = usize::try_from(offset).ok()?;
     let mut planes = PushPlanes {
@@ -338,10 +360,10 @@ fn push_planes(
         strides: [0; GST_VIDEO_MAX_PLANES],
         required_end: data_offset,
     };
-    let Some((format, height)) = raw_video else {
+    let Some(raw_video) = raw_video else {
         return Some(planes);
     };
-    let layout = plane_layout(format, dmabuf.stride, height)?;
+    let layout = plane_layout(raw_video.format, dmabuf.stride, raw_video.height)?;
     planes.count = c_uint::try_from(layout.count).ok()?;
     planes.required_end = usize::try_from(offset.checked_add(layout.span)?).ok()?;
     for plane in 0..layout.count {
@@ -381,15 +403,84 @@ fn sample_layout(raw_format: Option<RawVideoFormat>, sample: &DmaBufSample) -> O
     Some((stride, offset))
 }
 
-fn raw_video_of(caps: &Caps) -> Option<(RawVideoFormat, u32)> {
+#[derive(Debug, Clone, Copy)]
+struct RawVideoGeometry {
+    format: RawVideoFormat,
+    width: u32,
+    height: u32,
+}
+
+fn raw_video_of(caps: &Caps) -> Option<RawVideoGeometry> {
     match caps {
         Caps::RawVideo {
             format,
+            width: Dim::Fixed(width),
             height: Dim::Fixed(height),
             ..
-        } => Some((*format, *height)),
+        } => Some(RawVideoGeometry {
+            format: *format,
+            width: *width,
+            height: *height,
+        }),
         _ => None,
     }
+}
+
+fn tight_layout(raw_video: RawVideoGeometry) -> Option<meta::PlaneLayout> {
+    let RawVideoGeometry {
+        format,
+        width,
+        height,
+    } = raw_video;
+    let planes = (0..format.plane_count())
+        .map(|plane| {
+            Some(meta::Plane {
+                offset: usize::try_from(format.plane_offset(plane, width, height)?).ok()?,
+                stride: usize::try_from(format.plane_stride(plane, width)?).ok()?,
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    meta::PlaneLayout::new(&planes)
+}
+
+// `None` when `layout` does not describe the format's planes or a row overflows.
+fn video_planes(layout: &meta::PlaneLayout, raw_video: RawVideoGeometry) -> Option<VideoPlanes> {
+    let RawVideoGeometry {
+        format,
+        width,
+        height,
+    } = raw_video;
+    let count = format.plane_count();
+    if layout.count() != count || count > GST_VIDEO_MAX_PLANES {
+        return None;
+    }
+    let mut planes = VideoPlanes {
+        count: c_uint::try_from(count).ok()?,
+        offsets: [0; GST_VIDEO_MAX_PLANES],
+        strides: [0; GST_VIDEO_MAX_PLANES],
+        size: 0,
+    };
+    for index in 0..count {
+        let plane = layout.plane(index)?;
+        let row_bytes = usize::try_from(format.plane_stride(index, width)?).ok()?;
+        let last_row = usize::try_from(format.plane_rows(index, height)?.checked_sub(1)?).ok()?;
+        let end = layout.row_range(index, last_row, row_bytes)?.end;
+        planes.offsets[index] = plane.offset;
+        planes.strides[index] = c_int::try_from(plane.stride).ok()?;
+        planes.size = planes.size.max(end);
+    }
+    Some(planes)
+}
+
+// The frame's own `PlaneLayout`, else tightly packed.
+fn frame_planes(frame: &Frame, raw_video: RawVideoGeometry) -> Option<VideoPlanes> {
+    #[cfg(feature = "metadata")]
+    if let Some(layout) = frame.meta.get::<meta::PlaneLayout>() {
+        return video_planes(layout, raw_video);
+    }
+    #[cfg(not(feature = "metadata"))]
+    let _ = frame;
+    video_planes(&tight_layout(raw_video)?, raw_video)
 }
 
 unsafe extern "C" fn release_pushed_dmabuf(keep_alive: *mut c_void) {
@@ -588,10 +679,27 @@ impl AsyncElement for GstWrap {
             None => None,
         };
         let out_ptr = out_c.as_ref().map_or(ptr::null(), |c| c.as_ptr());
+        let output_planes = match raw_video_of(&announce) {
+            Some(raw_video) => Some(
+                tight_layout(raw_video)
+                    .and_then(|layout| video_planes(&layout, raw_video))
+                    .ok_or(G2gError::CapsMismatch)?,
+            ),
+            None => None,
+        };
+        let output_planes_ptr = output_planes.as_ref().map_or(ptr::null(), ptr::from_ref);
 
-        // SAFETY: all three are valid NUL-terminated C strings that outlive the
+        // SAFETY: the three strings are valid NUL-terminated C strings and
+        // `output_planes_ptr` is null or a live `VideoPlanes`, all outliving the
         // call; `create` copies what it needs and returns NULL on any failure.
-        let h = unsafe { g2g_gstwrap_create(element_c.as_ptr(), in_c.as_ptr(), out_ptr) };
+        let h = unsafe {
+            g2g_gstwrap_create(
+                element_c.as_ptr(),
+                in_c.as_ptr(),
+                out_ptr,
+                output_planes_ptr,
+            )
+        };
         if h.is_null() {
             return Err(G2gError::Hardware(HardwareError::Other));
         }
@@ -666,10 +774,21 @@ impl AsyncElement for GstWrap {
                         let bytes = frame
                             .domain
                             .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
+                        let planes = match self.input_raw_video {
+                            Some(raw_video) => Some(
+                                frame_planes(&frame, raw_video)
+                                    .filter(|planes| planes.size <= bytes.len())
+                                    .ok_or(G2gError::CapsMismatch)?,
+                            ),
+                            None => None,
+                        };
+                        let planes_ptr = planes.as_ref().map_or(ptr::null(), ptr::from_ref);
                         // SAFETY: `p` is valid; `bytes` is valid for `bytes.len()`;
-                        // `push` copies the bytes into a GstBuffer.
-                        let r =
-                            unsafe { g2g_gstwrap_push(p.0, bytes.as_ptr(), bytes.len(), pts_ns) };
+                        // `planes_ptr` is null or a live `VideoPlanes`; `push`
+                        // copies the bytes into a GstBuffer.
+                        let r = unsafe {
+                            g2g_gstwrap_push(p.0, bytes.as_ptr(), bytes.len(), planes_ptr, pts_ns)
+                        };
                         if r != 0 {
                             return Err(G2gError::Hardware(HardwareError::Other));
                         }
@@ -728,6 +847,13 @@ mod tests {
         // SAFETY: returns a sizeof, no arguments.
         let c_size = unsafe { g2g_gstwrap_dmabuf_sample_size() };
         assert_eq!(c_size, core::mem::size_of::<DmaBufSample>());
+    }
+
+    #[test]
+    fn video_planes_match_the_c_struct() {
+        // SAFETY: returns a sizeof, no arguments.
+        let c_size = unsafe { g2g_gstwrap_planes_size() };
+        assert_eq!(c_size, core::mem::size_of::<VideoPlanes>());
     }
 
     #[test]

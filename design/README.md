@@ -995,6 +995,18 @@ element driving them from one runner task at a time. A system frame is copied in
 and out, a dma-buf frame passes in without a copy, and `output-memory=dmabuf`
 hands the hosted element's dma-buf output on.
 
+A raw video system frame crosses in GStreamer's default `GstVideoInfo` layout,
+whose rows are padded to 4 bytes, while a g2g frame is tightly packed. The Rust
+side computes each plane's offset and stride from the g2g-core plane functions
+(or the frame's `PlaneLayout`) and passes them through the C ABI. The helper
+wraps the bytes in a buffer carrying that `GstVideoMeta` and
+`gst_video_frame_copy`s it into a default-layout buffer. Output goes the other way
+into the tight layout of the announced caps, reading the sample's own
+`GstVideoMeta` when it has one. The push already copied, so this adds no copy, and
+an element that ignores `GstVideoMeta` still reads its frames correctly, with no
+allocation query needed. Zero-copy push was not taken: a latent element such as
+`x264enc` holds dozens of input buffers, which would drain a pooled upstream.
+
 It is validated locally by
 `cargo test -p g2g-plugins --features gstreamer --test gstwrap`, not in CI, hosting
 a real `videoflip` and asserting the pixels come back flipped, and by running
