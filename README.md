@@ -425,6 +425,7 @@ cargo clippy --workspace --all-targets
 | `RistSink` / `RistSrc` (RIST Simple Profile: MPEG-TS over RTP with NACK retransmission) | `rist` | none |
 | `TcpServerSrc` / `TcpClientSrc` / `TcpServerSink` / `TcpClientSink` | `tcp` | none |
 | `ShmSink` / `ShmSrc` (GStreamer's `shm` protocol: shared-memory frames + unix control socket) | `shm` | Linux |
+| `UnixFdSink` / `UnixFdSrc` (GStreamer's `unixfd` protocol: memfd / dma-buf descriptors over a unix socket) | `unixfd` | Linux |
 | `RtmpSrc` (RTMP publisher ingest) | `rtmp` | none |
 | `WebRtcSink` (WHIP egress, H.264 + Opus) / `WebRtcWhepSrc` (WHEP ingest, H.264): ICE / DTLS / SRTP, trickle ICE + ICE restart, NACK / RTX | `webrtc` | str0m (rust-crypto) + reqwest |
 | `WebRtcDataSrc` / `WebRtcDataSink` (P2P data channels on SCTP) | `webrtc` | str0m |

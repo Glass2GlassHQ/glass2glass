@@ -858,7 +858,12 @@ pub mod tcp;
 // device takes the exporter's buffer instead of a system copy.
 #[cfg(all(
     target_os = "linux",
-    any(feature = "alsa-sink", feature = "pulse-sink", feature = "pipewire")
+    any(
+        feature = "alsa-sink",
+        feature = "pulse-sink",
+        feature = "pipewire",
+        feature = "unixfd"
+    )
 ))]
 pub mod dmabufmap;
 
@@ -1508,8 +1513,16 @@ pub mod localcuda;
 // SCM_RIGHTS fd passing over a Unix socket (M557): hand-rolled sendmsg/recvmsg
 // FFI used by the DMABUF local transport to move a dma-buf's file descriptor
 // (which, unlike a CUDA IPC handle, is not plain bytes) between processes.
-#[cfg(all(target_os = "linux", feature = "local-dmabuf"))]
+#[cfg(all(target_os = "linux", any(feature = "local-dmabuf", feature = "unixfd")))]
 pub mod scmfd;
+
+// GStreamer's fd-passing IPC pair (M1216): UnixFdSink / UnixFdSrc share frames
+// as memfd / dma-buf descriptors over a unix socket, wire-compatible with gst
+// `unixfdsink` / `unixfdsrc`.
+#[cfg(all(target_os = "linux", feature = "unixfd"))]
+pub mod unixfd;
+#[cfg(all(target_os = "linux", feature = "unixfd"))]
+pub mod unixfdwire;
 
 // DmaBufSink / DmaBufSrc (M557): the vendor-neutral analog of LocalCudaSink/Src,
 // carrying a MemoryDomain::DmaBuf frame to a same-machine peer over a Unix socket

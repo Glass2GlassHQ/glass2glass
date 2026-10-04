@@ -117,6 +117,31 @@ pub(crate) fn plane_shapes(
     )
 }
 
+/// Copy a frame whose planes sit where `layout` says into its tightly-packed
+/// form. `None` when the layout does not describe this format's planes, or the
+/// buffer does not hold what it claims: a layout can come from any producer, so
+/// a bad one fails the frame instead of reading out of bounds.
+#[cfg(feature = "metadata")]
+pub(crate) fn pack_planes(
+    src: &[u8],
+    format: RawVideoFormat,
+    w: usize,
+    h: usize,
+    layout: &g2g_core::meta::PlaneLayout,
+) -> Option<alloc::boxed::Box<[u8]>> {
+    let shapes = plane_shapes(format, w, h)?;
+    if layout.count() != shapes.len() {
+        return None;
+    }
+    let mut out = alloc::vec::Vec::with_capacity(frame_byte_size(format, w as u32, h as u32));
+    for (plane, &(row_bytes, rows)) in shapes.iter().enumerate() {
+        for row in 0..rows {
+            out.extend_from_slice(src.get(layout.row_range(plane, row, row_bytes)?)?);
+        }
+    }
+    Some(out.into_boxed_slice())
+}
+
 /// Byte width of one row of `format`'s **first** plane at `w` pixels: the row
 /// pitch of a tightly-packed frame.
 pub(crate) fn row_bytes(format: RawVideoFormat, w: usize) -> usize {

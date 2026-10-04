@@ -14,6 +14,8 @@ use core::slice;
 
 use g2g_core::Frame;
 
+use g2g_plugins::capsfilter::normalize_gst_caps;
+
 use crate::bridge::BridgeGraph;
 
 // ---- GStreamer plugin entry points ------------------------------------------
@@ -166,41 +168,6 @@ pub struct G2gOut {
     /// Type-erased `Box<Frame>` keeping the payload (`data` or `fd`) alive until
     /// release.
     owner: *mut c_void,
-}
-
-/// Turn a serialized `GstCaps` into the form g2g's caps reader and launch DSL
-/// accept: `video/x-raw, format=(string)RGBA, width=(int)1280, ...` ->
-/// `video/x-raw,format=RGBA,width=1280,...`. Two transforms:
-///
-/// - drop every `(type)` annotation in the fields (a media-caps value never
-///   legitimately contains parentheses), keeping a caps feature on the media
-///   type (`video/x-raw(memory:DMABuf)`) for [`BridgeGraph`] to read, and
-/// - drop all whitespace, because the launch DSL tokenizes on spaces, so a
-///   `caps=` value with the spaces GStreamer inserts after commas would split
-///   into separate launch tokens (PORTING.md: no quoted values with spaces).
-///
-/// Fields g2g does not model (`multiview-mode`, `pixel-aspect-ratio`, ...) are
-/// carried through harmlessly; the caps reader ignores unknown fields.
-fn normalize_gst_caps(s: &str) -> String {
-    let (media_type, fields) = s.split_once(',').unwrap_or((s, ""));
-    let mut out: String = media_type
-        .chars()
-        .filter(|ch| !ch.is_whitespace())
-        .collect();
-    if !fields.is_empty() {
-        out.push(',');
-    }
-    let mut depth = 0u32;
-    for ch in fields.chars() {
-        match ch {
-            '(' => depth += 1,
-            ')' if depth > 0 => depth -= 1,
-            _ if depth > 0 => {}
-            _ if ch.is_whitespace() => {}
-            _ => out.push(ch),
-        }
-    }
-    out
 }
 
 static LOG_INIT: std::sync::Once = std::sync::Once::new();
@@ -422,18 +389,4 @@ unsafe fn opt_str<'a>(p: *const c_char) -> Option<&'a str> {
     }
     // SAFETY: caller contract on `p`.
     unsafe { core::ffi::CStr::from_ptr(p) }.to_str().ok()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::normalize_gst_caps;
-
-    #[test]
-    fn keeps_the_caps_feature_and_drops_type_annotations() {
-        let serialized = "video/x-raw(memory:DMABuf), format=(string)DMA_DRM, width=(int)64, drm-format=(string)AB24";
-        assert_eq!(
-            normalize_gst_caps(serialized),
-            "video/x-raw(memory:DMABuf),format=DMA_DRM,width=64,drm-format=AB24"
-        );
-    }
 }

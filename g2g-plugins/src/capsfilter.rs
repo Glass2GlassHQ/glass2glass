@@ -212,6 +212,128 @@ pub fn parse_caps(desc: &str) -> Option<Caps> {
     }
 }
 
+const DMABUF_CAPS_FEATURE: &str = "(memory:DMABuf)";
+
+const FORMAT_FIELD: &str = "format=";
+
+const DRM_FORMAT_FIELD: &str = "drm-format=";
+
+const DMA_DRM_FORMAT: &str = "DMA_DRM";
+
+// GStreamer's drm-format fourcc for each format dmabuftowgpu imports
+const DRM_FOURCC_FORMATS: &[(&str, &str)] = &[
+    ("AB24", "RGBA"),
+    ("AR24", "BGRA"),
+    ("NV12", "NV12"),
+    ("P010", "P010_10LE"),
+    ("YU12", "I420"),
+    ("YUYV", "YUY2"),
+];
+
+/// Turn a serialized `GstCaps` into the form g2g's caps reader and launch DSL
+/// accept: `video/x-raw, format=(string)RGBA, width=(int)1280, ...` ->
+/// `video/x-raw,format=RGBA,width=1280,...`. Two transforms:
+///
+/// - drop every `(type)` annotation in the fields (a media-caps value never
+///   legitimately contains parentheses), keeping a caps feature on the media
+///   type (`video/x-raw(memory:DMABuf)`) for [`read_memory_feature`] to read, and
+/// - drop all whitespace, because the launch DSL tokenizes on spaces, so a
+///   `caps=` value with the spaces GStreamer inserts after commas would split
+///   into separate launch tokens (PORTING.md: no quoted values with spaces).
+///
+/// Fields g2g does not model (`multiview-mode`, `pixel-aspect-ratio`, ...) are
+/// carried through harmlessly; the caps reader ignores unknown fields.
+pub fn normalize_gst_caps(s: &str) -> String {
+    let (media_type, fields) = s.split_once(',').unwrap_or((s, ""));
+    let mut out: String = media_type
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect();
+    if !fields.is_empty() {
+        out.push(',');
+    }
+    let mut depth = 0u32;
+    for ch in fields.chars() {
+        match ch {
+            '(' => depth += 1,
+            ')' if depth > 0 => depth -= 1,
+            _ if depth > 0 => {}
+            _ if ch.is_whitespace() => {}
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+/// A normalized GStreamer caps string with its `memory:DMABuf` feature read off.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GstCapsMemory {
+    /// The caps without the feature, in the form [`parse_caps`] reads.
+    pub caps: String,
+    pub dmabuf: bool,
+}
+
+/// Read the `memory:DMABuf` feature off a [`normalize_gst_caps`] string. A
+/// GStreamer 1.24+ `format=DMA_DRM, drm-format=<fourcc>` is read as the pixel
+/// format it names. `None` for dma-buf caps whose `drm-format` names no format
+/// `dmabuftowgpu` imports, or carries a non-linear modifier.
+pub fn read_memory_feature(caps: &str) -> Option<GstCapsMemory> {
+    let (media_type, fields) = caps.split_once(',').unwrap_or((caps, ""));
+    let Some(media_type) = media_type.strip_suffix(DMABUF_CAPS_FEATURE) else {
+        return Some(GstCapsMemory {
+            caps: caps.into(),
+            dmabuf: false,
+        });
+    };
+    let drm_format = fields
+        .split(',')
+        .find_map(|field| field.strip_prefix(DRM_FORMAT_FIELD));
+    let mut rewritten = alloc::vec![String::from(media_type)];
+    for field in fields.split(',').filter(|field| !field.is_empty()) {
+        if field.starts_with(DRM_FORMAT_FIELD) {
+            continue;
+        }
+        if field.strip_prefix(FORMAT_FIELD) != Some(DMA_DRM_FORMAT) {
+            rewritten.push(field.into());
+            continue;
+        }
+        // a modifier suffix (a tiled layout) matches no entry
+        let (_, format) = DRM_FOURCC_FORMATS
+            .iter()
+            .find(|(known, _)| Some(*known) == drm_format)?;
+        rewritten.push(alloc::format!("{FORMAT_FIELD}{format}"));
+    }
+    Some(GstCapsMemory {
+        caps: rewritten.join(","),
+        dmabuf: true,
+    })
+}
+
+/// `caps` as GStreamer 1.24+ spells dma-buf video: the `memory:DMABuf`
+/// feature with `format=DMA_DRM, drm-format=<fourcc>`, the inverse of
+/// [`read_memory_feature`]. `None` for anything but raw video in a format
+/// with a linear drm fourcc.
+pub fn dmabuf_gst_caps(caps: &Caps) -> Option<String> {
+    let Caps::RawVideo { .. } = caps else {
+        return None;
+    };
+    let plain = caps.to_gst_string();
+    let (media_type, fields) = plain.split_once(',')?;
+    let mut rewritten = alloc::vec![alloc::format!("{media_type}{DMABUF_CAPS_FEATURE}")];
+    for field in fields.split(',') {
+        let Some(format) = field.strip_prefix(FORMAT_FIELD) else {
+            rewritten.push(field.into());
+            continue;
+        };
+        let (fourcc, _) = DRM_FOURCC_FORMATS
+            .iter()
+            .find(|(_, known)| *known == format)?;
+        rewritten.push(alloc::format!("{FORMAT_FIELD}{DMA_DRM_FORMAT}"));
+        rewritten.push(alloc::format!("{DRM_FORMAT_FIELD}{fourcc}"));
+    }
+    Some(rewritten.join(","))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -350,6 +472,43 @@ mod tests {
         assert_eq!(
             f.set_property("caps", PropValue::Str("nonsense".into())),
             Err(PropError::Value)
+        );
+    }
+
+    #[test]
+    fn keeps_the_caps_feature_and_drops_type_annotations() {
+        let serialized = "video/x-raw(memory:DMABuf), format=(string)DMA_DRM, width=(int)64, drm-format=(string)AB24";
+        assert_eq!(
+            normalize_gst_caps(serialized),
+            "video/x-raw(memory:DMABuf),format=DMA_DRM,width=64,drm-format=AB24"
+        );
+    }
+
+    #[test]
+    fn dmabuf_caps_read_back_as_what_was_written() {
+        let caps = Caps::RawVideo {
+            format: RawVideoFormat::Rgba8,
+            width: Dim::Fixed(64),
+            height: Dim::Fixed(48),
+            framerate: Rate::Fixed(30 << 16),
+            interlace: g2g_core::Interlace::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        };
+        let written = dmabuf_gst_caps(&caps).expect("RGBA has a drm fourcc");
+        let read = read_memory_feature(&written).expect("the fourcc is known");
+        assert!(read.dmabuf);
+        assert_eq!(parse_caps(&read.caps), Some(caps));
+    }
+
+    #[test]
+    fn plain_caps_carry_no_memory_feature() {
+        let plain = "video/x-raw,format=NV12,width=2,height=2";
+        assert_eq!(
+            read_memory_feature(plain),
+            Some(GstCapsMemory {
+                caps: plain.into(),
+                dmabuf: false
+            })
         );
     }
 }

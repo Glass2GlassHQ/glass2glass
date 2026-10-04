@@ -225,7 +225,11 @@ and `output-domains=dmabuf` / `input-domains=dmabuf` declare dma-buf frames),
 as programmatic graph nodes, or via the Python host (`pysrc`/`pyelement`).
 `intersink producer-name=<name>` / `intersrc producer-name=<name>` link two
 graphs in one process like gst-plugins-rs's `intersink`/`intersrc`, and replace
-the C `intervideosink`/`interaudiosink`/`intersubsink` families. The
+the C `intervideosink`/`interaudiosink`/`intersubsink` families.
+`unixfdsink` / `unixfdsrc` (the `unixfd` feature, Linux) speak gst's `unixfd`
+wire, so a g2g process and a gst process can share frames as memfd or dma-buf
+descriptors in either direction, with the same `socket-path`, `socket-type`,
+`wait-for-connection` and `min-memory-size` properties. The
 table lives in [g2g-plugins/src/gst_compat.rs](g2g-plugins/src/gst_compat.rs)
 and is easy to extend.
 

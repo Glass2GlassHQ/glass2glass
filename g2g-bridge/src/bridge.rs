@@ -10,6 +10,7 @@ use g2g_core::{Frame, G2gError, PipelineClock};
 
 use g2g_plugins::appsink::{register_appsink_pull, AppSinkPull, Pull};
 use g2g_plugins::appsrc::{register_appsrc, AppSrcFeed};
+use g2g_plugins::capsfilter::{read_memory_feature, GstCapsMemory};
 use g2g_plugins::registry::default_registry;
 
 /// Backpressure floor for the embedded graph's internal edges. Matches the
@@ -23,24 +24,6 @@ const OUTPUT_DOMAINS: &str = "dmabuf,system";
 const PLAIN_INPUT_DOMAINS: &str = "system,dmabuf";
 
 const DMABUF_DOMAINS: &str = "dmabuf";
-
-const DMABUF_CAPS_FEATURE: &str = "(memory:DMABuf)";
-
-const FORMAT_FIELD: &str = "format=";
-
-const DRM_FORMAT_FIELD: &str = "drm-format=";
-
-const DMA_DRM_FORMAT: &str = "DMA_DRM";
-
-// GStreamer's drm-format fourcc for each format dmabuftowgpu imports
-const DRM_FOURCC_FORMATS: &[(&str, &str)] = &[
-    ("AB24", "RGBA"),
-    ("AR24", "BGRA"),
-    ("NV12", "NV12"),
-    ("P010", "P010_10LE"),
-    ("YU12", "I420"),
-    ("YUYV", "YUY2"),
-];
 
 /// Monotonic counter for collision-free `appsrc` / `appsink` channel names. The
 /// named-feed registries those elements use are process-global (keyed by the
@@ -146,8 +129,8 @@ impl BridgeGraph {
         input_caps: &str,
         output_caps: &str,
     ) -> Result<Self, BridgeError> {
-        let input = SubGraphCaps::from_gst(input_caps)?;
-        let output = SubGraphCaps::from_gst(output_caps)?;
+        let input = read_gst_caps(input_caps)?;
+        let output = read_gst_caps(output_caps)?;
         let input_domains = match input.dmabuf {
             true => DMABUF_DOMAINS,
             false => PLAIN_INPUT_DOMAINS,
@@ -298,47 +281,8 @@ impl Drop for BridgeGraph {
     }
 }
 
-#[derive(Debug)]
-struct SubGraphCaps {
-    caps: String,
-    dmabuf: bool,
-}
-
-impl SubGraphCaps {
-    fn from_gst(caps: &str) -> Result<Self, BridgeError> {
-        let (media_type, fields) = caps.split_once(',').unwrap_or((caps, ""));
-        let Some(media_type) = media_type.strip_suffix(DMABUF_CAPS_FEATURE) else {
-            return Ok(Self {
-                caps: caps.to_string(),
-                dmabuf: false,
-            });
-        };
-        let unsupported = || BridgeError::UnsupportedDmaBufCaps(caps.to_string());
-        let drm_format = fields
-            .split(',')
-            .find_map(|field| field.strip_prefix(DRM_FORMAT_FIELD));
-        let mut rewritten = vec![media_type.to_string()];
-        for field in fields.split(',').filter(|field| !field.is_empty()) {
-            if field.starts_with(DRM_FORMAT_FIELD) {
-                continue;
-            }
-            if field.strip_prefix(FORMAT_FIELD) != Some(DMA_DRM_FORMAT) {
-                rewritten.push(field.to_string());
-                continue;
-            }
-            let fourcc = drm_format.ok_or_else(unsupported)?;
-            // a modifier suffix (a tiled layout) matches no entry
-            let (_, format) = DRM_FOURCC_FORMATS
-                .iter()
-                .find(|(known, _)| *known == fourcc)
-                .ok_or_else(unsupported)?;
-            rewritten.push(format!("{FORMAT_FIELD}{format}"));
-        }
-        Ok(Self {
-            caps: rewritten.join(","),
-            dmabuf: true,
-        })
-    }
+fn read_gst_caps(caps: &str) -> Result<GstCapsMemory, BridgeError> {
+    read_memory_feature(caps).ok_or_else(|| BridgeError::UnsupportedDmaBufCaps(caps.to_string()))
 }
 
 /// Borrow a system-memory frame's bytes, the common case for the bridge (the

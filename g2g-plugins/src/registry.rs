@@ -2502,6 +2502,8 @@ pub static FEATURE_GATED_ELEMENTS: &[FeatureGatedElement] = &{
         "localcudasink" => "local-ipc" on "linux";
         "dmabufsrc" => "local-dmabuf" on "linux";
         "dmabufsink" => "local-dmabuf" on "linux";
+        "unixfdsrc" => "unixfd" on "linux";
+        "unixfdsink" => "unixfd" on "linux";
         "v4l2src" => "v4l2" on "linux";
         "libcamerasrc" => "libcamera" on "linux";
         "ffmpegdec" => "ffmpeg" on "linux";
@@ -2740,6 +2742,16 @@ fn register_feature_gated(reg: &mut Registry) {
         },
         || Box::new(ShmSrc::default()),
     ));
+    // Fd-passing IPC (M1216). The declared caps are a placeholder, the real
+    // ones arrive from the sink.
+    #[cfg(all(target_os = "linux", feature = "unixfd"))]
+    reg.register_source(SourceFactory::new(
+        "unixfdsrc",
+        Caps::ByteStream {
+            encoding: ByteStreamEncoding::Raw,
+        },
+        || Box::new(crate::unixfd::UnixFdSrc::default()),
+    ));
     // MQTT control messages (M1179): each message on the topic filter as a
     // text frame.
     #[cfg(feature = "mqtt")]
@@ -2789,6 +2801,11 @@ fn register_feature_gated(reg: &mut Registry) {
     reg.register_launch(LaunchFactory::of::<ShmSink>("shmsink", || {
         Box::new(ShmSink::default())
     }));
+    #[cfg(all(target_os = "linux", feature = "unixfd"))]
+    reg.register_launch(LaunchFactory::of::<crate::unixfd::UnixFdSink>(
+        "unixfdsink",
+        || Box::new(crate::unixfd::UnixFdSink::default()),
+    ));
     #[cfg(feature = "udp-egress")]
     reg.register_launch(LaunchFactory::of::<UdpSink>("udpsink", || {
         Box::new(UdpSink::new("127.0.0.1:5004".parse().unwrap()))

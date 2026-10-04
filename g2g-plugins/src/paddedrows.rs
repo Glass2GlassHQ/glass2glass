@@ -45,7 +45,8 @@ pub(crate) fn plane_shapes_with_stride_shift(
 #[cfg(any(
     all(target_os = "linux", feature = "v4l2"),
     all(target_os = "linux", feature = "pipewire"),
-    all(target_os = "linux", feature = "dmabuf-wgpu")
+    all(target_os = "linux", feature = "dmabuf-wgpu"),
+    all(target_os = "linux", feature = "unixfd")
 ))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct PaddedPlane {
@@ -63,7 +64,8 @@ pub(crate) struct PaddedPlane {
 #[cfg(any(
     all(target_os = "linux", feature = "v4l2"),
     all(target_os = "linux", feature = "pipewire"),
-    all(target_os = "linux", feature = "dmabuf-wgpu")
+    all(target_os = "linux", feature = "dmabuf-wgpu"),
+    all(target_os = "linux", feature = "unixfd")
 ))]
 pub(crate) fn padded_planes(
     format: RawVideoFormat,

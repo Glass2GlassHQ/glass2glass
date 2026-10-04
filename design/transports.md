@@ -795,6 +795,27 @@ validates the whole path cross-process with a genuine `udmabuf`, a CPU-mappable
 dma-buf built from a sealed memfd, so it needs no GPU, and each frame's bytes
 are mmap-verified in the receiving process.
 
+### GStreamer's unixfd wire
+
+`UnixFdSink` / `UnixFdSrc` (the `unixfd` feature) speak the protocol of gst's
+`unixfdsink` / `unixfdsrc`, so either end can be a GStreamer process. Each
+message is an 8-byte `{type, payload_size}` header with the buffer's fds
+attached through `scmfd`, one per memory, then the payload: the caps string, a
+buffer with its memories and serialized metas, a release, or EOS. The sink sends
+a dma-buf frame as its own fd and copies a system frame into a fresh memfd, and
+writes a `GstVideoMeta` for raw video so a gst reader sees the real strides. It
+holds every buffer per client until that client releases it or disconnects.
+
+The source maps a memfd read-only into a foreign `SystemSlice` with no copy, and
+the slice's free callback queues the release, so the sink keeps the buffer until
+the frame is dropped downstream. Under `memory:DMABuf` caps it hands the dma-buf
+on as `OwnedDmaBuf`, which has no drop hook, so it keeps one share and releases
+once `share_count` falls to one. Padded rows from a `GstVideoMeta` travel as a
+`PlaneLayout` when downstream asked for one and are packed tight otherwise.
+Timestamps cross as absolute `CLOCK_MONOTONIC`: running time plus the sink's
+base time and path latency, mapped off the pipeline clock, and the source
+subtracts its own base time.
+
 ### Exporting a GPU frame to a dma-buf
 
 `WgpuToDmaBuf` (the `dmabuf-wgpu` feature) is the GPU producer that pairs with

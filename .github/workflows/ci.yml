@@ -336,6 +336,11 @@ jobs:
       # socket and the command codec. The gst interop legs are ignored here.
       - name: test g2g-plugins (shm)
         run: cargo test -p g2g-plugins --locked --features shm --test m1081_shm
+      # Fd-passing IPC pair (M1216): the loopbacks, the hold-until-release
+      # bookkeeping and the malformed-peer cases. The gst interop legs are
+      # ignored here.
+      - name: test g2g-plugins (unixfd)
+        run: cargo test -p g2g-plugins --locked --features unixfd --test m1216_unixfd
       # Debug and test elements (M1083): the byte corrupters, the digest sink and
       # the fps reporter. `std` builds the registry the fps sink takes its child
       # from, so the file is gated on it.

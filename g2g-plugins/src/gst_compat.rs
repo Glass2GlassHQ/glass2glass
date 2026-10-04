@@ -1054,6 +1054,17 @@ mod tests {
     }
 
     #[test]
+    fn unixfd_elements_are_available_or_name_their_feature() {
+        let reg = default_registry();
+        let expected = match cfg!(all(target_os = "linux", feature = "unixfd")) {
+            true => GstEquivalent::Available,
+            false => GstEquivalent::NotCompiled("unixfd"),
+        };
+        assert_eq!(gst_equivalent(&reg, "unixfdsink"), expected);
+        assert_eq!(gst_equivalent(&reg, "unixfdsrc"), expected);
+    }
+
+    #[test]
     fn inter_elements_are_available_and_the_c_family_points_at_them() {
         let reg = default_registry();
         assert_eq!(gst_equivalent(&reg, "intersink"), GstEquivalent::Available);

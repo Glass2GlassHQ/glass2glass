@@ -25,7 +25,7 @@ default = []
 # explicitly), and the no_std `embassy*` RTOS backends.
 linux-full = [
     "multi-thread", "plugin-loader", "plugin-signing",
-    "rtsp", "rtsp-server", "srt", "rist", "srtp", "dtls-srtp", "tcp", "shm", "udp-egress", "udp-ingress", "rtmp", "webrtc",
+    "rtsp", "rtsp-server", "srt", "rist", "srtp", "dtls-srtp", "tcp", "shm", "unixfd", "udp-egress", "udp-ingress", "rtmp", "webrtc",
     "remote", "remote-ws", "webtransport", "moqt",
     "http-src", "hls", "dash",
     "ffmpeg", "vaapi", "v4l2",
@@ -119,6 +119,10 @@ tcp = ["std", "tokio/net", "tokio/io-util"]
 # area setup); libc supplies the shm_open / mmap calls. Implies std + tokio
 # net/io-util.
 shm = ["std", "dep:libc", "tokio/net", "tokio/io-util"]
+# GStreamer's fd-passing IPC pair (M1216): UnixFdSink / UnixFdSrc send each
+# frame as memfd or dma-buf descriptors over a unix socket, the wire of gst
+# `unixfdsink` / `unixfdsrc`, so either end can be a gst process. Linux only.
+unixfd = ["std", "metadata", "dep:libc", "tokio/net"]
 # Distributed-graph transport pair (M551): RemoteSink (TCP client, egress) +
 # RemoteSrc (TCP listener, ingress) serialize the whole PipelinePacket stream
 # via g2g-core's wire codec and ship it over TCP, so any graph edge can be cut
