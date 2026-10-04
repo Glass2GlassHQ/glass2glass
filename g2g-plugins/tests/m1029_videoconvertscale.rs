@@ -7,7 +7,7 @@
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
     AsyncElement, Caps, Dim, Frame, FrameTiming, G2gError, MemoryDomain, OutputSink,
-    PipelinePacket, PropValue, PushOutcome, Rate, RawVideoFormat,
+    PipelinePacket, PropError, PropValue, PushOutcome, Rate, RawVideoFormat,
 };
 use g2g_plugins::videoconvertscale::VideoConvertScale;
 
@@ -258,6 +258,15 @@ fn an_odd_size_nv12_frame_fuses_to_the_expected_rgb() {
 /// a test configures it by hand: a caps filter downstream is what pins its
 /// output, and the runner is what calls `configure_pipeline` / `configure_output`.
 #[cfg(feature = "std")]
+#[test]
+fn a_format_the_scaler_cannot_take_is_refused() {
+    let mut element = VideoConvertScale::auto();
+    assert_eq!(
+        element.set_property("format", PropValue::Str("YUY2".into())),
+        Err(PropError::Value)
+    );
+}
+
 mod launch {
     use g2g_core::runtime::{parse_launch, run_graph};
     use g2g_core::{PipelineClock, RawVideoFormat};

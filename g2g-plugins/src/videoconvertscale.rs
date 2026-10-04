@@ -370,6 +370,17 @@ impl VideoConvertScale {
     }
 }
 
+impl VideoConvertScale {
+    fn scales(&self, format: RawVideoFormat) -> bool {
+        match self.scale.caps_constraint_as_transform() {
+            CapsConstraint::DerivedFields(CapsTransform::RawVideo { accept, .. }) => {
+                accept.contains(&format)
+            }
+            _ => false,
+        }
+    }
+}
+
 impl AsyncElement for VideoConvertScale {
     type ProcessFuture<'a>
         = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
@@ -547,7 +558,15 @@ impl AsyncElement for VideoConvertScale {
     /// validates it.
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
         match name {
-            "format" => self.convert.set_property(name, value),
+            "format" => {
+                let format = value
+                    .as_str()
+                    .and_then(crate::videoconvert::raw_format_from_str);
+                if format.is_some_and(|format| !self.scales(format)) {
+                    return Err(PropError::Value);
+                }
+                self.convert.set_property(name, value)
+            }
             "width" | "height" => self.scale.set_property(name, value),
             _ => Err(PropError::Unknown),
         }
