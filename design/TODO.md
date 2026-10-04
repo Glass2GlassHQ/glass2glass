@@ -86,6 +86,9 @@ Highest leverage first:
 
 - **RTP over QUIC (RoQ):** implement after the draft becomes an RFC with an
   assigned ALPN. Candidate peers: mengelbart/roq (Go), meetecho/imquic.
+- **RIST:** link bonding (`bonding-addresses`, broadcast and round-robin),
+  multicast, and the Main Profile sequence-number extension (`ristrtpext` /
+  `ristrtpdeext`); interop against librist's `ristsender` / `ristreceiver`.
 - **RTMP:** multiple NetStreams over one connection. Deferred by design: it needs
   a dynamic-arity multi-output `RtmpSrc` (the stream count is only known once the
   client `createStream`s at runtime), which collides with g2g's fixed-arity-from-caps
@@ -274,8 +277,7 @@ unless it says otherwise.
   `interaudiosink` / `interaudiosrc` / `intersubsink` / `intersubsrc`,
   `ipcpipelinesink` / `ipcpipelinesrc` / `ipcslavepipeline`, `unixfdsink` /
   `unixfdsrc` (fd-passing over a unix socket, the DMABUF-capable one).
-- **Network:** `ristsink` / `ristsrc` and the `ristrtp*` / `ristrtx*` helpers,
-  `curlhttpsrc` and the `curl*sink` uploaders, `souphttpclientsink`, `giosrc` /
+- **Network:** `curlhttpsrc` and the `curl*sink` uploaders, `souphttpclientsink`, `giosrc` /
   `giosink` / `giostreamsrc` / `giostreamsink`, `shout2send`, `sctpenc` /
   `sctpdec` outside WebRTC, `multifdsink` / `multisocketsink` / `socketsrc`,
   `netsim`, `avtp*` (IEEE 1722), `rtspwms`, `asteriskh263`, `aesenc` / `aesdec`.
