@@ -7,6 +7,9 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 ## Unreleased
 
 - M1213: `appsrc` gains `output-domains`, so a `g2g-bridge` fragment on `memory:DMABuf` caps can start with `dmabuftowgpu` and end in `wgputodmabuf`.
+- An `appsink` pull handle ends when its graph is gone, including a graph that fails before the sink configures, and `try_pull` reports `Ended` on a closed channel.
+- Odd-width and odd-height NV12 / P010 frames have one tight size everywhere (the chroma row holds the rounded-up pair), and a consumer that cannot take an odd size refuses it.
+- `wgputodmabuf` and `dmabuftowgpu` handle a frame whose byte size is not a multiple of 4.
 - M1212: `qtdemux` starts an audio track's segment past its edit-list priming and `mp4mux` writes it back as an edit list, so an AAC remux keeps its encoder delay.
 - RTP senders (`udpsink`, `rtspserversink`, KLV) round PTS to the nearest 90 kHz tick through one shared conversion.
 - Platform-only features (`ffmpeg`, `nvenc`, `vaapi`, `nvdec`, `shm`, ALSA / Pulse / PipeWire / V4L2) no longer break a build on another OS; `shm` is Linux-only.

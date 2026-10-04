@@ -73,6 +73,9 @@ Highest leverage first:
 ## Receive / decode
 
 - **`VulkanVideoDec` residuals.** Run the `vulkanvideo` GPU tests on Intel ANV.
+- **`VulkanVideoDec` odd picture sizes.** Decode a stream whose picture width
+  or height is odd (the readback and the NV12 textures carry `w/2 x h/2`
+  chroma, so such a session is refused).
 
 ## CUDA / display
 
@@ -163,6 +166,12 @@ Highest leverage first:
 
 ## Transforms and effects
 
+- **Odd-size 4:2:0 conversion.** `videoconvert` (and the scale / crop / flip
+  transforms on its paths) refuse an odd width or height for NV12 / I420 / YUYV;
+  convert them with the chroma rounded up. YUYV rows at an odd width are `2w`
+  bytes here and `4 * ceil(w/2)` in ffmpeg.
+- **`CudaToWgpu` odd sizes.** The packed `w x h*3/2` texture cannot hold the
+  wider chroma row of an odd-width NV12 frame, so it is refused.
 - **`textoverlay` font backend:** font-variation axes beyond `wght` on the
   shaped horizontal path (cosmic-text exposes only weight); vertical-mode
   shaping if cosmic-text ever grows writing modes.
@@ -188,6 +197,14 @@ Highest leverage first:
 - **ST 2110 media transport:** wire compliance of -20/-22/-30/-40 + multicast
   validated against reference gear (built from the RFCs, not yet
   interop-tested).
+
+## GStreamer bridge
+
+- `gstwrap`'s system-memory push attaches no `GstVideoMeta`, so GStreamer
+  assumes its default 4-byte-aligned strides: attach the meta with the tight
+  plane offsets and strides.
+- A system-memory to `WgpuBuffer` upload element, so a bridge fragment can turn
+  system frames into dma-bufs through `wgputodmabuf`.
 
 ## Properties / introspection / DSL
 

@@ -609,7 +609,7 @@ pub(crate) fn converts_from(format: RawVideoFormat, w: u32, h: u32) -> bool {
 }
 
 /// Dispatch one frame conversion. `src` is validated to hold at least the
-/// input frame, and [`converts_from`] holds for both formats at `w x h`.
+/// input frame, and `converts_from` holds for both formats at `w x h`.
 /// `colorimetry` is the YUV side's, from its caps: it picks the matrix and range
 /// the color step uses, and an `UNKNOWN` one converts BT.601 limited. Public so
 /// the `convert` benchmark (M284) can exercise this hot path directly.

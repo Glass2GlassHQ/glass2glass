@@ -467,7 +467,6 @@ impl g2g_core::PipelineClock for ZeroClock {
 
 static SOURCE_DMABUF: std::sync::Mutex<Option<OwnedDmaBuf>> = std::sync::Mutex::new(None);
 
-// appsrc declares system memory only, so it cannot feed `dmabuftowgpu` on a launch line.
 #[derive(Debug)]
 struct DmaBufSource;
 
