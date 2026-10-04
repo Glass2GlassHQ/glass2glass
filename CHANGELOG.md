@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- The `glass2glass` GStreamer element converts between GStreamer's padded rows and g2g's tight rows for system frames, so sizes whose rows are not a multiple of 4 bytes pass through intact.
 - `videoconvert` produces YUY2 (the `format` property value used to fail negotiation); `videoconvertscale` refuses it, since the scaler takes no YUYV.
 - M1219: `wgpuupload` moves system frames into a wgpu buffer, the system to `WgpuBuffer` converter the auto-plugger splices in (so `appsrc ! wgputodmabuf` works).
 - `gstwrap` converts between g2g's tight rows and GStreamer's padded layout, so a wrapped element reads frames whose rows are not a multiple of 4 bytes.
