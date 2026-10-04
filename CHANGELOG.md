@@ -6,6 +6,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1219: `wgpuupload` moves system frames into a wgpu buffer, the system to `WgpuBuffer` converter the auto-plugger splices in (so `appsrc ! wgputodmabuf` works).
+- `gstwrap` converts between g2g's tight rows and GStreamer's padded layout, so a wrapped element reads frames whose rows are not a multiple of 4 bytes.
 - `videoconvert`, `colorspace`, `deinterlace`, `videocrop`, `videoscale` and the I420 video filters take odd-size NV12 / I420 / YUYV frames; a YUYV row at an odd width is `4 * ceil(w/2)` bytes.
 - `VulkanVideoDec` decodes odd AV1 picture sizes to system memory and RGBA textures, and `CudaToWgpu` carries odd-size NV12 frames.
 - M1216: `unixfdsink` and `unixfdsrc` (feature `unixfd`, Linux) pass frames as file descriptors over a unix socket, wire-compatible with GStreamer's elements.
