@@ -124,7 +124,7 @@ pub(crate) fn tight_plane(
 /// order: the shape a [`PlaneLayout`](g2g_core::meta::PlaneLayout) puts offsets
 /// and strides on. A tightly-packed frame is exactly these rows back to back;
 /// a padded one differs only in where each row starts. `None` on overflow.
-#[cfg(feature = "metadata")]
+#[cfg(any(feature = "metadata", feature = "wgpu-sink"))]
 pub(crate) fn plane_shapes(
     format: RawVideoFormat,
     w: usize,
@@ -143,7 +143,7 @@ pub(crate) fn plane_shapes(
 /// form. `None` when the layout does not describe this format's planes, or the
 /// buffer does not hold what it claims: a layout can come from any producer, so
 /// a bad one fails the frame instead of reading out of bounds.
-#[cfg(feature = "metadata")]
+#[cfg(any(feature = "metadata", feature = "wgpu-sink"))]
 pub(crate) fn pack_planes(
     src: &[u8],
     format: RawVideoFormat,

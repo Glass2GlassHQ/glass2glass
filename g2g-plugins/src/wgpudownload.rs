@@ -9,7 +9,6 @@ use g2g_core::log::{short_type_name, Target};
 use g2g_core::memory::{
     DomainSet, MemoryDomainKind, OwnedWgpuBuffer, OwnedWgpuTexture, SystemSlice,
 };
-use g2g_core::meta::PlaneLayout;
 use g2g_core::{
     g2g_error, AsyncElement, Caps, CapsConstraint, ConfigureOutcome, Dim, ElementMetadata,
     G2gError, MemoryDomain, OutputSink, PipelinePacket, RawVideoFormat,
@@ -113,31 +112,14 @@ fn download_buffer(
         return Ok(bytes);
     };
     let raw_video = raw_video.ok_or(G2gError::CapsMismatch)?;
-    pack_planes(&bytes, layout, raw_video).ok_or(G2gError::CapsMismatch)
-}
-
-// `None` when the layout and the caps disagree or a row falls outside the buffer.
-fn pack_planes(
-    padded: &[u8],
-    layout: &PlaneLayout,
-    raw_video: RawVideoGeometry,
-) -> Option<Vec<u8>> {
     let RawVideoGeometry {
         format,
         width,
         height,
     } = raw_video;
-    let shapes = crate::paddedrows::plane_shapes_with_stride_shift(format, width, height)?;
-    if shapes.len() != layout.count() {
-        return None;
-    }
-    let mut packed = Vec::new();
-    for (plane, (row_bytes, rows, _)) in shapes.into_iter().enumerate() {
-        for row in 0..rows {
-            packed.extend_from_slice(padded.get(layout.row_range(plane, row, row_bytes)?)?);
-        }
-    }
-    Some(packed)
+    crate::pixel::pack_planes(&bytes, format, width, height, layout)
+        .map(Vec::from)
+        .ok_or(G2gError::CapsMismatch)
 }
 
 fn read_owned_buffer(owned: &OwnedWgpuBuffer) -> Result<Vec<u8>, G2gError> {
