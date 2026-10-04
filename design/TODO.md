@@ -80,9 +80,6 @@ Highest leverage first:
 - **AV1 film grain chroma.** Match dav1d's chroma grain on libaom's
   `-aom-params film-grain-test=1` parameters: a 320x180 clip encoded with them
   differs from dav1d in 41 to 66 chroma bytes per frame, its luma is exact.
-- **`VulkanVideoDec` cropping.** Apply the H.264 frame crop and the H.265
-  conformance window: the output is the whole coded picture, so a 1080p H.264
-  stream comes out 1920x1088.
 
 ## CUDA / display
 

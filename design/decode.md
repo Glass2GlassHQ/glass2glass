@@ -564,6 +564,15 @@ output frame: `output_extent` is the picture size the caller gets, `coded_extent
 the size every picture resource is bound at, which the spec requires to stay
 inside the device's coded-extent range.
 
+The output is the stream's crop rectangle of the coded picture: the H.264 SPS
+frame crop or the H.265 SPS conformance window, so a 1080p H.264 stream coded at
+1920x1088 comes out 1920x1080. The session computes it once from the SPS as
+`output_offset` plus `output_extent`, and every output path reads from that
+offset: the readback copy, the YCbCr compute pass (pushed as the sample origin),
+and the two-plane texture copy. The H.265 VUI default display window is not
+applied, matching ffmpeg's default. A crop that reaches outside the coded picture
+or leaves it empty fails session creation with `UnsupportedStream`.
+
 Only AV1 produces an odd picture size, since its frame size is any value, while
 H.264 and H.265 crop a 4:2:0 picture in two-sample units. The images are always
 even, so the readback copies `ceil(w/2) x ceil(h/2)` CbCr pairs out of them, the
