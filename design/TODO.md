@@ -77,6 +77,12 @@ Highest leverage first:
   on the `NV12` / `P010` texture output, which Vulkan and wgpu refuse to create
   with an odd side, for example as an even-rounded texture with the picture size
   carried beside it.
+- **`vulkanvideodec` behind a geometry capsfilter.** `vulkanvideodec !
+  video/x-raw,width=W,height=H` fails negotiation with `NoConsistentFixation`,
+  even when W x H is the stream's size.
+- **10-bit H.265 through a launch line.** `filesrc ! h265parse ! vulkanvideodec
+  ! fakesink` on a Main 10 stream fails with `CapsMismatch` (the decoder API
+  itself decodes it).
 - **AV1 film grain chroma.** Match dav1d's chroma grain on libaom's
   `-aom-params film-grain-test=1` parameters: a 320x180 clip encoded with them
   differs from dav1d in 41 to 66 chroma bytes per frame, its luma is exact.
