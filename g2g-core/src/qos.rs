@@ -28,6 +28,16 @@ fn jitter_ns(deadline_ns: u64, now_ns: u64) -> i64 {
     }
 }
 
+#[cfg(feature = "std")]
+fn taken_ns() -> u64 {
+    crate::metrics::monotonic_ns()
+}
+
+#[cfg(not(feature = "std"))]
+fn taken_ns() -> u64 {
+    0
+}
+
 /// QoS state shared by synchronizing sinks: the lateness bound, the drop count,
 /// and the bus reporting.
 #[derive(Debug)]
@@ -99,7 +109,8 @@ impl QosTracker {
         now_ns > deadline_ns.saturating_add(self.max_lateness_ns)
     }
 
-    /// Verdict for one frame, `processed` being the sink's presented count.
+    /// Verdict for one frame due at clock time `deadline_ns`, whose running
+    /// time is `running_time_ns`, `processed` being the sink's presented count.
     ///
     /// `Some` means the frame is too late and must be dropped: the drop is
     /// counted and reported on the bus, and the returned [`QosMessage`] is the
@@ -110,15 +121,17 @@ impl QosTracker {
         &mut self,
         deadline_ns: u64,
         now_ns: u64,
+        running_time_ns: u64,
         processed: u64,
     ) -> Option<QosMessage> {
         let jitter = jitter_ns(deadline_ns, now_ns);
         if self.is_too_late(deadline_ns, now_ns) {
             self.dropped += 1;
-            self.post(deadline_ns, jitter, processed, now_ns);
+            self.post(running_time_ns, jitter, processed, now_ns);
             return Some(QosMessage {
                 jitter_ns: jitter,
-                running_time_ns: deadline_ns,
+                running_time_ns,
+                taken_ns: taken_ns(),
             });
         }
         match self.last_report_ns {
@@ -128,7 +141,7 @@ impl QosTracker {
             Some(last)
                 if self.interval_ns > 0 && now_ns.saturating_sub(last) >= self.interval_ns =>
             {
-                self.post(deadline_ns, jitter, processed, now_ns);
+                self.post(running_time_ns, jitter, processed, now_ns);
             }
             Some(_) => {}
         }
@@ -160,7 +173,7 @@ mod tests {
     #[test]
     fn default_bound_never_drops() {
         let mut q = QosTracker::new();
-        assert!(q.judge_frame(0, u64::MAX, 0).is_none());
+        assert!(q.judge_frame(0, u64::MAX, 0, 0).is_none());
         assert_eq!(q.dropped(), 0);
     }
 
@@ -170,8 +183,11 @@ mod tests {
         let mut q = QosTracker::new();
         q.set_bus(handle);
         q.set_max_lateness_ns(10);
-        assert!(q.judge_frame(100, 105, 3).is_none(), "within the bound");
-        let upstream = q.judge_frame(200, 215, 3).expect("past the bound");
+        assert!(
+            q.judge_frame(100, 105, 100, 3).is_none(),
+            "within the bound"
+        );
+        let upstream = q.judge_frame(200, 215, 200, 3).expect("past the bound");
         assert_eq!(upstream.jitter_ns, 15);
         assert_eq!(upstream.running_time_ns, 200);
         assert_eq!(q.dropped(), 1);
@@ -193,10 +209,10 @@ mod tests {
         q.set_bus(handle);
         q.set_report_interval_ns(1_000);
         // t=0 arms the interval, t=500 is inside it, t=1000 reports.
-        assert!(q.judge_frame(0, 0, 0).is_none());
-        assert!(q.judge_frame(500, 500, 1).is_none());
+        assert!(q.judge_frame(0, 0, 0, 0).is_none());
+        assert!(q.judge_frame(500, 500, 500, 1).is_none());
         assert_eq!(bus.try_recv(), None, "nothing before the interval elapses");
-        assert!(q.judge_frame(1_000, 1_000, 2).is_none());
+        assert!(q.judge_frame(1_000, 1_000, 1_000, 2).is_none());
         match bus.try_recv() {
             Some(BusMessage::Qos {
                 processed, dropped, ..
@@ -205,7 +221,7 @@ mod tests {
             }
             other => panic!("expected a periodic Qos, got {other:?}"),
         }
-        assert!(q.judge_frame(1_500, 1_500, 3).is_none());
+        assert!(q.judge_frame(1_500, 1_500, 1_500, 3).is_none());
         assert_eq!(bus.try_recv(), None, "interval restarted from the report");
     }
 
@@ -215,7 +231,7 @@ mod tests {
         let mut q = QosTracker::new();
         q.set_bus(handle);
         for i in 0..10u64 {
-            assert!(q.judge_frame(i * 1_000, i * 1_000, i).is_none());
+            assert!(q.judge_frame(i * 1_000, i * 1_000, i * 1_000, i).is_none());
         }
         assert_eq!(bus.try_recv(), None);
     }
@@ -226,9 +242,9 @@ mod tests {
         let mut q = QosTracker::new();
         q.set_bus(handle);
         q.set_report_interval_ns(100);
-        q.judge_frame(0, 0, 0);
+        q.judge_frame(0, 0, 0, 0);
         // Presented 40ns before its deadline, 200ns after the last report.
-        q.judge_frame(240, 200, 1);
+        q.judge_frame(240, 200, 240, 1);
         match bus.try_recv() {
             Some(BusMessage::Qos { jitter_ns, .. }) => assert_eq!(jitter_ns, -40),
             other => panic!("expected a periodic Qos, got {other:?}"),

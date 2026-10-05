@@ -417,6 +417,13 @@ call, which is how an alert or overlay element rides a detector that fires on a
 few frames in a hundred. `OrtInference` with `attach-tensor=true` takes the same
 property.
 
+**Late frames.** With `qos=true`, the default, once a downstream display sink
+reports a late frame a `pyelement` drops every frame that would reach it late
+too, given the hosted class's last run time, without calling the class, so a
+slow detector keeps up with the stream by running on fewer frames. `qos=false`
+runs every frame and relays the report on toward the source. The rule is in
+[timing.md](timing.md), under upstream QoS.
+
 **Properties the class declares.** A `pyelement` or `pyaggregator` passes any
 name it does not read itself to the hosted class. Once `module=` and `class=` are
 both set, `properties()` imports the class, creates an instance, and asks its

@@ -107,9 +107,18 @@ pub struct PresentationPacer {
     last_deadline_ns: Option<u64>,
 }
 
+/// GStreamer's `GstVideoSink` default.
+pub const VIDEO_SINK_MAX_LATENESS_NS: u64 = 20_000_000;
+
 impl PresentationPacer {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn for_video_sink() -> Self {
+        let mut pacer = Self::default();
+        pacer.set_max_lateness_ns(VIDEO_SINK_MAX_LATENESS_NS);
+        pacer
     }
 
     /// Adopt the elected clock + base time, engaging PTS pacing. The runner
@@ -209,6 +218,9 @@ impl PresentationPacer {
         let Some(sync) = self.clock_sync.clone() else {
             return Pace::Now;
         };
+        let Some(running_time) = self.running_time(pts_ns) else {
+            return Pace::Drop;
+        };
         let Some(deadline) = self.deadline_ns(pts_ns) else {
             return Pace::Drop;
         };
@@ -218,7 +230,7 @@ impl PresentationPacer {
         // so the sink catches up instead of accumulating lag. The same call
         // posts the periodic running-stats report when the frame is on time and
         // the interval has elapsed.
-        if let Some(q) = self.qos.judge_frame(deadline, now, presented) {
+        if let Some(q) = self.qos.judge_frame(deadline, now, running_time, presented) {
             self.pending_qos = Some(q);
             return Pace::Drop;
         }
@@ -436,22 +448,29 @@ mod tests {
         p.set_clock_sync(sync);
         p.set_bus(handle);
         p.set_max_lateness_ns(0);
-        // Anchor on the first frame at clock 0.
+        // Anchor at clock 10 ms so a deadline and a running time differ.
+        clock.store(10_000_000, Ordering::Relaxed);
         assert_eq!(p.judge(0, 0), Pace::Now);
         assert!(p.take_qos().is_none(), "on-time frame reports nothing");
 
         // The clock jumps 1 ms past the next frame's deadline.
-        clock.store(1_000_000, Ordering::Relaxed);
+        clock.store(11_000_000, Ordering::Relaxed);
         assert_eq!(p.judge(0, 1), Pace::Drop);
         assert_eq!(p.late_dropped(), 1);
         let upstream = p.take_qos().expect("upstream QoS report for the relay");
         assert_eq!(upstream.jitter_ns, 1_000_000);
-        assert_eq!(upstream.running_time_ns, 0);
+        assert_eq!(
+            upstream.running_time_ns, 0,
+            "the running time, not the deadline"
+        );
         assert!(p.take_qos().is_none(), "consumed once");
         match bus.try_recv() {
             Some(BusMessage::Qos {
-                jitter_ns, dropped, ..
-            }) => assert_eq!((jitter_ns, dropped), (1_000_000, 1)),
+                running_time_ns,
+                jitter_ns,
+                dropped,
+                ..
+            }) => assert_eq!((running_time_ns, jitter_ns, dropped), (0, 1_000_000, 1)),
             other => panic!("expected a Qos message, got {other:?}"),
         }
     }

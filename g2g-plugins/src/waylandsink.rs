@@ -284,8 +284,7 @@ pub struct WaylandSink {
     /// PTS pacing + QoS late-drop (M173 / M176), shared with the other
     /// synchronizing sinks: the elected clock, the segment mapping, the
     /// presentation anchor, and the lateness bound. Idle until the runner hands
-    /// over a clock; the default bound never drops, presenting every frame
-    /// however late.
+    /// over a clock; the default bound drops a frame more than 20 ms late.
     pacer: PresentationPacer,
     /// Monotonic stamp when the previous frame's present completed, for the
     /// per-frame pacing log (the inter-present gap is what stutter looks like).
@@ -342,7 +341,7 @@ impl WaylandSink {
             frames_dropped: Arc::new(AtomicU64::new(0)),
             last_frame_callback_ns: Arc::new(AtomicU64::new(0)),
             pacing: PacingPolicy::default(),
-            pacer: PresentationPacer::new(),
+            pacer: PresentationPacer::for_video_sink(),
             last_present_done_ns: 0,
             deadline_errors: Vec::new(),
             schedule_drift: ScheduleDriftTrace::default(),
@@ -357,7 +356,7 @@ impl WaylandSink {
     /// Enable QoS late-drop (M173): once PTS pacing is engaged, a frame already
     /// past its deadline by more than `ns` is dropped instead of presented late,
     /// so the sink catches up rather than accumulating lag. `0` drops any frame
-    /// that arrives after its deadline; the default (`u64::MAX`) never drops.
+    /// that arrives after its deadline; the default is 20 ms, `u64::MAX` never drops.
     pub fn with_max_lateness_ns(mut self, ns: u64) -> Self {
         self.pacer.set_max_lateness_ns(ns);
         self
@@ -1268,7 +1267,7 @@ fn nv12_to_xrgb8888(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use g2g_core::{BusMessage, Rate, VideoCodec};
+    use g2g_core::{BusMessage, Rate, VideoCodec, VIDEO_SINK_MAX_LATENESS_NS};
 
     /// Pins all eight descriptors to the transform that makes the compositor
     /// show the picture the way the descriptor asked for. The turn is the
@@ -1409,11 +1408,15 @@ mod tests {
 
     #[test]
     fn qos_lateness_decision_respects_the_bound() {
-        // Default: never too late (u64::MAX bound).
+        // Default: the 20 ms video-sink bound.
         let sink = WaylandSink::new();
         assert!(
-            !sink.pacer.is_too_late(0, u64::MAX),
-            "default bound never drops"
+            !sink.pacer.is_too_late(0, VIDEO_SINK_MAX_LATENESS_NS),
+            "within the default bound"
+        );
+        assert!(
+            sink.pacer.is_too_late(0, VIDEO_SINK_MAX_LATENESS_NS + 1),
+            "past the default bound"
         );
 
         // Bound 0: any frame past its deadline is too late.
@@ -1514,7 +1517,7 @@ mod tests {
 
     #[tokio::test]
     async fn qos_default_does_not_drop() {
-        // Default bound (u64::MAX): an on-time frame is not dropped. The anchor is
+        // Default bound: an on-time frame is not dropped. The anchor is
         // set on this first frame so its deadline equals now; it then proceeds to
         // present (no window here, so we only assert it was not QoS-dropped).
         let clock = Arc::new(AtomicU64::new(5_000_000));

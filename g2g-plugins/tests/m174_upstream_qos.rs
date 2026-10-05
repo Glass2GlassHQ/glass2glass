@@ -79,6 +79,7 @@ impl AsyncElement for QosSink {
                     self.pending = Some(QosMessage {
                         jitter_ns: j,
                         running_time_ns: f.timing.pts_ns,
+                        taken_ns: 0,
                     });
                 }
             }

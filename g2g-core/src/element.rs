@@ -69,6 +69,8 @@ pub struct QosMessage {
     pub jitter_ns: i64,
     /// Running time (PTS) of the late frame, for reference.
     pub running_time_ns: u64,
+    /// `metrics::monotonic_ns` when the sink judged the frame, 0 without `std`.
+    pub taken_ns: u64,
 }
 
 /// Cumulative presentation counters a paced sink kept over a run, read via

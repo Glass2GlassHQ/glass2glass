@@ -451,7 +451,7 @@ pub struct WgpuSink {
     configured: bool,
     presented: u64,
     /// PTS pacing + QoS late-drop: idle until the runner hands over a clock, and
-    /// the default lateness bound never drops.
+    /// the default lateness bound is 20 ms.
     pacer: PresentationPacer,
 }
 
@@ -539,7 +539,7 @@ impl WgpuSink {
             upload: None,
             configured: false,
             presented: 0,
-            pacer: PresentationPacer::new(),
+            pacer: PresentationPacer::for_video_sink(),
         }
     }
 
@@ -612,7 +612,7 @@ impl WgpuSink {
 
     /// QoS late-drop bound: once PTS pacing is engaged, a frame past its
     /// deadline by more than `ns` is dropped instead of presented late, so the
-    /// sink catches up. The default (`u64::MAX`) never drops.
+    /// sink catches up. The default is 20 ms, `u64::MAX` never drops.
     pub fn with_max_lateness_ns(mut self, ns: u64) -> Self {
         self.pacer.set_max_lateness_ns(ns);
         self

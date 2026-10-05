@@ -1563,6 +1563,7 @@ mod link_tests {
         rx.request_qos(QosMessage {
             jitter_ns: 5_000_000,
             running_time_ns: 100,
+            taken_ns: 0,
         });
         let outcome = run_to_ready(sink.push(dummy_frame())).expect("push ok");
         match outcome {
@@ -1588,6 +1589,7 @@ mod link_tests {
         rx.request_qos(QosMessage {
             jitter_ns: 1_000,
             running_time_ns: 0,
+            taken_ns: 0,
         });
         rx.request_reconfigure(Reconfigure::Renegotiate);
         let first = run_to_ready(sink.push(dummy_frame())).unwrap();

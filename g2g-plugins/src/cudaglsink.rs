@@ -156,7 +156,7 @@ impl CudaGlSink {
             colorimetry: Colorimetry::UNKNOWN,
             frames_presented: Arc::new(AtomicU64::new(0)),
             latency: Arc::new(LatencyHistogram::new()),
-            pacer: PresentationPacer::new(),
+            pacer: PresentationPacer::for_video_sink(),
         }
     }
 
@@ -172,7 +172,7 @@ impl CudaGlSink {
 
     /// QoS late-drop bound: once PTS pacing is engaged, a frame past its
     /// deadline by more than `ns` is dropped instead of presented late, so the
-    /// sink catches up. The default (`u64::MAX`) never drops.
+    /// sink catches up. The default is 20 ms, `u64::MAX` never drops.
     pub fn with_max_lateness_ns(mut self, ns: u64) -> Self {
         self.pacer.set_max_lateness_ns(ns);
         self

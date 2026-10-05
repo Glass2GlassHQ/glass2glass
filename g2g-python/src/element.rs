@@ -22,16 +22,26 @@
 
 use core::future::Future;
 use core::pin::Pin;
+use std::time::Instant;
+
+use g2g_core::metrics::monotonic_ns;
 
 use g2g_core::memory::{DomainSet, MemoryDomainKind};
 use g2g_core::{
     AllocationParams, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
-    ElementMetadata, Frame, G2gError, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
-    PropError, PropKind, PropValue, PropertySpec, Rate, RawVideoFormat,
+    ElementMetadata, Frame, FrameTiming, G2gError, OutputSink, PadTemplate, PadTemplates,
+    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, PushOutcome, Rate,
+    RawVideoFormat, Segment,
 };
 
 use crate::format::{format_from_py, format_to_py, frame_bytes};
 use crate::props::{fixed_caps, hosted_element_props, HostedClassProperties};
+
+#[derive(Debug, Clone, Copy)]
+struct SinkClock {
+    running_time_ns: u64,
+    taken_ns: u64,
+}
 
 /// A gst-python-ml element hosted as a first-class g2g transform.
 #[derive(Debug)]
@@ -67,6 +77,11 @@ pub struct PyTransform {
     /// backend's `GObject` shim); the host `setattr`s them on the instance with
     /// `-` mapped to `_`. Kept in insertion order for deterministic application.
     params: Vec<(String, PropValue)>,
+    qos: bool,
+    segment: Option<Segment>,
+    sink_clock: Option<SinkClock>,
+    last_run_ns: u64,
+    late_dropped: u64,
     configured: bool,
     /// The negotiated, fully fixed input caps captured at configure time, so
     /// `process` knows the concrete geometry / format to hand Python.
@@ -99,6 +114,11 @@ impl PyTransform {
             cuda_frames: false,
             only_on: String::new(),
             params: Vec::new(),
+            qos: true,
+            segment: None,
+            sink_clock: None,
+            last_run_ns: 0,
+            late_dropped: 0,
             configured: false,
             fixed: None,
             emitted: 0,
@@ -156,6 +176,45 @@ impl PyTransform {
     /// Count of frames pushed downstream. Useful in tests.
     pub fn emitted_count(&self) -> u64 {
         self.emitted
+    }
+
+    pub fn late_dropped_count(&self) -> u64 {
+        self.late_dropped
+    }
+
+    fn is_late(&self, frame: &Frame) -> bool {
+        let Some(sink_clock) = self.sink_clock else {
+            return false;
+        };
+        let pts = frame.timing.pts_ns;
+        if pts == FrameTiming::PTS_NONE {
+            return false;
+        }
+        let running_time = match &self.segment {
+            Some(segment) => segment.to_running_time(pts),
+            None => Some(pts),
+        };
+        let elapsed_ns = monotonic_ns().saturating_sub(sink_clock.taken_ns);
+        let due_by = sink_clock
+            .running_time_ns
+            .saturating_add(elapsed_ns)
+            .saturating_add(self.last_run_ns);
+        running_time.is_some_and(|running_time| running_time < due_by)
+    }
+
+    fn note_push(&mut self, outcome: PushOutcome) {
+        let PushOutcome::Qos(report) = outcome else {
+            return;
+        };
+        if !self.qos || report.jitter_ns <= 0 {
+            return;
+        }
+        self.sink_clock = Some(SinkClock {
+            running_time_ns: report
+                .running_time_ns
+                .saturating_add(report.jitter_ns.unsigned_abs()),
+            taken_ns: report.taken_ns,
+        });
     }
 
     /// Whether `only-on` names something this frame does not carry, so it goes
@@ -313,14 +372,24 @@ impl AsyncElement for PyTransform {
             }
             match packet {
                 PipelinePacket::DataFrame(frame) => {
-                    if self.forwards_untouched(&frame) {
-                        self.emitted += 1;
-                        out.push(PipelinePacket::DataFrame(frame)).await?;
+                    if self.is_late(&frame) {
+                        self.late_dropped += 1;
                         return Ok(());
                     }
-                    for output in self.run(frame).await? {
+                    if self.forwards_untouched(&frame) {
                         self.emitted += 1;
-                        out.push(PipelinePacket::DataFrame(output)).await?;
+                        let outcome = out.push(PipelinePacket::DataFrame(frame)).await?;
+                        self.note_push(outcome);
+                        return Ok(());
+                    }
+                    let started = Instant::now();
+                    let outputs = self.run(frame).await?;
+                    self.last_run_ns =
+                        u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                    for output in outputs {
+                        self.emitted += 1;
+                        let outcome = out.push(PipelinePacket::DataFrame(output)).await?;
+                        self.note_push(outcome);
                     }
                 }
                 // A mid-stream change to anything outside the accepted set is a
@@ -332,9 +401,11 @@ impl AsyncElement for PyTransform {
                     out.push(PipelinePacket::CapsChanged(announce)).await?;
                 }
                 PipelinePacket::Flush => {
+                    self.sink_clock = None;
                     out.push(PipelinePacket::Flush).await?;
                 }
                 PipelinePacket::Segment(seg) => {
+                    self.segment = Some(seg);
                     out.push(PipelinePacket::Segment(seg)).await?;
                 }
                 // Stateless per-frame host: nothing buffered to drain.
@@ -345,6 +416,10 @@ impl AsyncElement for PyTransform {
             }
             Ok(())
         })
+    }
+
+    fn handles_qos(&self) -> bool {
+        self.qos
     }
 
     fn metadata(&self) -> ElementMetadata {
@@ -376,6 +451,10 @@ impl AsyncElement for PyTransform {
             }
             "cuda-frames" => {
                 self.cuda_frames = value.as_bool().ok_or(PropError::Type)?;
+                Ok(())
+            }
+            "qos" => {
+                self.qos = value.as_bool().ok_or(PropError::Type)?;
                 Ok(())
             }
             "only-on" => {
@@ -421,6 +500,7 @@ impl AsyncElement for PyTransform {
             "class" => Some(PropValue::Str(self.class.clone())),
             "draw-label" => Some(PropValue::Bool(self.draw_label)),
             "cuda-frames" => Some(PropValue::Bool(self.cuda_frames)),
+            "qos" => Some(PropValue::Bool(self.qos)),
             "only-on" => Some(PropValue::Str(self.only_on.clone())),
             "format" => match &self.accept {
                 Caps::RawVideo { format, .. } => {
@@ -494,6 +574,12 @@ static PYTRANSFORM_PROPS: &[PropertySpec] = hosted_element_props![
         "host an element that reads GPU-resident CUDA frames (needs g2g_process_cuda, NV12 / P010)",
     )
     .with_default("false"),
+    PropertySpec::new(
+        "qos",
+        PropKind::Bool,
+        "once a downstream sink reports a late frame, drop any frame that would reach it late too instead of running the hosted element on it",
+    )
+    .with_default("true"),
     PropertySpec::new(
         "only-on",
         PropKind::Str,

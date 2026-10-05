@@ -163,7 +163,9 @@ ST 2110 media transport built over `MediaClock` is in
 deadline by more than a configurable `max_lateness` bound is dropped instead of
 presented late, so the sink catches up instead of accumulating lag, posting a
 `BusMessage::Qos` with running time, jitter and cumulative processed and dropped
-counts per drop.
+counts per drop. Every video display sink starts from
+`PresentationPacer::for_video_sink`, whose bound is 20 ms, GStreamer's
+`GstVideoSink` default. `SyncSink` and `clocksync` keep the never-drop default.
 
 `SyncSink` is the same sink without a display, so clock slaving is CI-testable with
 no hardware. It paces through the shared `PresentationPacer` and adopts the elected
@@ -325,6 +327,18 @@ Acting on the report is the other half. An element that returns `true` from
 `AsyncElement::handles_qos` is not relayed past, so it observes the report as
 `PushOutcome::Qos` from its own `push` and sheds work itself, the same opt-out
 `handles_keyframe_requests` and `handles_bitrate_requests` give an encoder.
+
+`pyelement` does that under its `qos` property, on by default. `GstBaseTransform`
+drops every frame up to the late frame's running time plus its jitter, which for
+an element slower than the stream picks the frame due right now, and that frame
+is late again by one run when it reaches the sink, so the display freezes.
+`pyelement` instead reads the report as the sink's clock, the late frame's
+running time plus its jitter, at the moment the sink judged the frame, which the
+report carries as `taken_ns` since the relay delivers it one push per element
+later. It drops any frame whose running time is below that clock advanced to now
+plus the hosted element's last run time, before any Python call. A hosted detector slower than
+the stream then runs on the frames the display can still show, one every run
+time, instead of turning playback into slow motion. A flush forgets the clock.
 
 `FfmpegVideoDec` does that under its `qos` property: a report arms a skip budget of
 `jitter / frame_period` pictures, capped by `max-skip-frames`, during which the

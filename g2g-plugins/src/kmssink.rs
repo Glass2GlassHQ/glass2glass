@@ -196,7 +196,7 @@ pub struct KmsSink {
     latency: LatencyHistogram,
     /// PTS pacing + QoS late-drop, on top of the vblank pacing `present()`
     /// already does: idle until the runner hands over a clock, and the default
-    /// lateness bound never drops.
+    /// lateness bound is 20 ms.
     pacer: PresentationPacer,
 }
 
@@ -236,7 +236,7 @@ impl KmsSink {
             height: 0,
             frames_presented: 0,
             latency: LatencyHistogram::new(),
-            pacer: PresentationPacer::new(),
+            pacer: PresentationPacer::for_video_sink(),
         }
     }
 
@@ -255,7 +255,7 @@ impl KmsSink {
 
     /// QoS late-drop bound: once PTS pacing is engaged, a frame past its
     /// deadline by more than `ns` is dropped instead of presented late, so the
-    /// sink catches up. The default (`u64::MAX`) never drops.
+    /// sink catches up. The default is 20 ms, `u64::MAX` never drops.
     pub fn with_max_lateness_ns(mut self, ns: u64) -> Self {
         self.pacer.set_max_lateness_ns(ns);
         self

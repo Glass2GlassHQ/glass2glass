@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1220: once a downstream sink reports a late frame, `pyelement` drops every frame that would reach it late too, given the hosted element's last run time, instead of running the element on it (`qos=true`, the default), and the video display sinks drop a frame more than 20 ms past its deadline by default (`max-lateness`, was never). A QoS report's `running_time_ns` is now the frame's running time, not its clock deadline, and `taken_ns` says when the sink judged it.
 - `VulkanVideoDec` outputs the H.264 frame crop / H.265 conformance window instead of the whole coded picture.
 - The `glass2glass` GStreamer element converts between GStreamer's padded rows and g2g's tight rows for system frames, so sizes whose rows are not a multiple of 4 bytes pass through intact.
 - `videoconvert` produces YUY2 (the `format` property value used to fail negotiation); `videoconvertscale` refuses it, since the scaler takes no YUYV.
