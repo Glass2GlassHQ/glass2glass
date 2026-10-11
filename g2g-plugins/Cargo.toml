@@ -36,7 +36,7 @@ linux-full = [
     "declarative-yaml", "script-rhai", "observe", "mcp", "tui", "latency-bench",
 ]
 std = ["g2g-core/std", "dep:tokio"]
-multi-thread = ["g2g-core/multi-thread"]
+multi-thread = ["g2g-core/multi-thread", "dep:libc"]
 # Element-level cooperative offload (M760): a heavy synchronous element moves
 # its per-frame compute onto tokio's blocking pool (`offload::run_blocking`), so
 # the cooperative `run_graph` keeps servicing sibling arms while it runs, without

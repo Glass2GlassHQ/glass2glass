@@ -570,7 +570,7 @@ pub mod plugin_loader;
 #[cfg(all(feature = "std", feature = "multi-thread"))]
 mod graphthreads;
 #[cfg(all(feature = "std", feature = "multi-thread"))]
-pub use graphthreads::TokioThreadSpawner;
+pub use graphthreads::{PinnedThreadSpawner, TokioThreadSpawner};
 // Annex-B NAL splitting shared by rtppay (RTP) and h264util (WebCodecs).
 mod annexb;
 // RIFF chunk walking shared by the WAVE and AVI elements.

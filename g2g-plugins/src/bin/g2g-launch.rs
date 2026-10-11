@@ -76,6 +76,8 @@ use std::io::Write;
 use std::process;
 use std::time::{Duration, Instant};
 
+#[cfg(feature = "multi-thread")]
+use g2g_core::element::BoxFuture;
 use g2g_core::runtime::{
     fallback_factory, has_live_source, parse_launch, parse_launch_avoiding, run_graph_recorded,
     run_graph_with_progress, FlightRecorder, GraphNode, PipelineProgress, Registry,
@@ -84,12 +86,14 @@ use g2g_core::runtime::{
 use g2g_core::runtime::{run_graph_observed, run_graph_observed_recorded, Observer};
 #[cfg(feature = "multi-thread")]
 use g2g_core::runtime::{run_graph_threaded_recorded, run_graph_threaded_with_progress};
+#[cfg(feature = "multi-thread")]
+use g2g_core::runtime::{GraphSpawner, LocalArmFuture};
 use g2g_core::Graph;
 use g2g_core::{Bus, BusMessage};
 use g2g_plugins::clock::WallClock;
 use g2g_plugins::registry::default_registry;
 #[cfg(feature = "multi-thread")]
-use g2g_plugins::TokioThreadSpawner;
+use g2g_plugins::{PinnedThreadSpawner, TokioThreadSpawner};
 
 // Steady-state link depth. Matches the integration-test default; small enough to
 // keep latency low without starving the source (see design/README.md on
@@ -100,6 +104,32 @@ const LINK_CAPACITY: usize = 4;
 /// ended the run), and a slow reader must not stall an element posting one.
 const BUS_DEPTH: usize = 64;
 
+#[derive(Debug, Clone, Copy)]
+enum ArmThreads {
+    Free,
+    Pinned,
+}
+
+#[cfg(feature = "multi-thread")]
+#[derive(Debug)]
+enum LaunchSpawner {
+    Free(TokioThreadSpawner),
+    Pinned(PinnedThreadSpawner),
+}
+
+#[cfg(feature = "multi-thread")]
+impl GraphSpawner for LaunchSpawner {
+    fn spawn_arm(
+        &self,
+        build: Box<dyn FnOnce() -> LocalArmFuture + Send>,
+    ) -> BoxFuture<'static, Result<u64, g2g_core::G2gError>> {
+        match self {
+            Self::Free(spawner) => spawner.spawn_arm(build),
+            Self::Pinned(spawner) => spawner.spawn_arm(build),
+        }
+    }
+}
+
 /// A boxed pipeline run, so the runner entry a flag selects (recorded or not,
 /// cooperative or thread-per-arm) is one type the driving loop can hold.
 type RunFuture<'r> = core::pin::Pin<
@@ -109,7 +139,7 @@ type RunFuture<'r> = core::pin::Pin<
     >,
 >;
 
-const USAGE: &str = "usage: g2g-launch [-v] [-q] [--dot] [--copy-plan] [--validate-json] [--run-json] [--threads] [--observe <port>] [--observe-host <addr>] [--tui] [--record-on-error <dir>] [--plugin <path>] [-e] [-m] [-h] \
+const USAGE: &str = "usage: g2g-launch [-v] [-q] [--dot] [--copy-plan] [--validate-json] [--run-json] [--threads[=pinned]] [--observe <port>] [--observe-host <addr>] [--tui] [--record-on-error <dir>] [--plugin <path>] [-e] [-m] [-h] \
 <element> [key=value ...] ! <element> ! ...\n       \
 g2g-launch [OPTIONS] --graph <file.json|.yaml>   # declarative graph (M578)\n       \
 g2g-launch [OPTIONS] --script <file.rhai>         # Rhai graph-building script (M579)";
@@ -163,7 +193,8 @@ struct Opts {
     /// via `run_graph_threaded`. Off by default: cooperative single-thread has
     /// lower per-frame latency; this trades a per-stage thread handoff for
     /// CPU-bound stages overlapping across cores. Needs the `multi-thread` build.
-    threads: bool,
+    /// `--threads=pinned` also pins each arm's thread to a core of its own.
+    threads: Option<ArmThreads>,
     /// Run the pipeline while serving the live dashboard on this port
     /// (`--observe <port>`): telemetry + bus events stream over a WebSocket, and
     /// the dashboard page is served on the same port. Needs the `observe` build.
@@ -246,7 +277,8 @@ fn parse_opts(args: impl Iterator<Item = String>) -> (Opts, Vec<String>) {
             "--copy-plan" => opts.copy_plan = true,
             "--validate-json" => opts.validate_json = true,
             "--run-json" => opts.run_json = true,
-            "--threads" => opts.threads = true,
+            "--threads" | "--threads=auto" => opts.threads = Some(ArmThreads::Free),
+            "--threads=pinned" => opts.threads = Some(ArmThreads::Pinned),
             "--tui" => opts.tui = true,
             "--plugin" => match args.next() {
                 Some(path) => opts.plugins.push(path),
@@ -722,11 +754,23 @@ fn main() {
         // looking hung. `timeout` only needs tokio's `time` feature (no `select!`
         // macro). A short pipeline finishes inside the first tick, so it stays quiet.
         let mut printed_status = false;
+        // the run future borrows the spawner for the whole run
+        #[cfg(feature = "multi-thread")]
+        let spawner = match opts.threads {
+            Some(ArmThreads::Pinned) => match PinnedThreadSpawner::from_sysfs() {
+                Ok(pinned) => LaunchSpawner::Pinned(pinned),
+                Err(error) => {
+                    eprintln!("pipeline error: --threads=pinned: {error}");
+                    process::exit(1);
+                }
+            },
+            _ => LaunchSpawner::Free(TokioThreadSpawner),
+        };
         let result = rt.block_on(async {
             // `--threads` runs one OS thread per arm (opt-in multicore); the default
             // is the cooperative single-thread runner. Both return the same
             // `Result<RunStats, _>`, boxed to one type so the heartbeat loop is shared.
-            let mut run: RunFuture = if opts.threads {
+            let mut run: RunFuture = if opts.threads.is_some() {
                 #[cfg(feature = "multi-thread")]
                 {
                     match &recorder {
@@ -737,7 +781,7 @@ fn main() {
                             Some(&progress),
                             Some(&bus_handle),
                             rec,
-                            &TokioThreadSpawner,
+                            &spawner,
                         )),
                         None => Box::pin(run_graph_threaded_with_progress(
                             graph,
@@ -745,7 +789,7 @@ fn main() {
                             LINK_CAPACITY,
                             &progress,
                             Some(&bus_handle),
-                            &TokioThreadSpawner,
+                            &spawner,
                         )),
                     }
                 }
