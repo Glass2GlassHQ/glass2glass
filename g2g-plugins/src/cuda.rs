@@ -152,7 +152,7 @@ impl AsyncElement for CudaDownload {
                                 domain: MemoryDomain::System(SystemSlice::from_boxed(bytes)),
                                 timing: frame.timing,
                                 sequence: frame.sequence,
-                                meta: Default::default(),
+                                meta: frame.meta,
                             }
                         }
                         // Already in system memory (software / cuvid backend);
@@ -417,7 +417,7 @@ impl AsyncElement for CudaUpload {
                                 domain: MemoryDomain::Cuda(buf),
                                 timing: frame.timing,
                                 sequence: frame.sequence,
-                                meta: Default::default(),
+                                meta: frame.meta,
                             }
                         }
                         // Already on the GPU: forward untouched.
