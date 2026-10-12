@@ -4613,8 +4613,8 @@ async fn sink_arm_loop<E: AsyncElement>(elem: &mut E, io: SinkArmIo) -> Result<u
                     // nowhere, so the banked wait is always 0 here.
                     p.record_visit(seq, wait_ns, t0, push_wait_ns);
                 }
-                // M175 upstream QoS: a sink that dropped a late frame asks to
-                // shed load; store its report on this sink's input link, where
+                // M175 upstream QoS: a sink reports a late drop or its periodic
+                // lateness. Store the report on this sink's input link, where
                 // the upstream transform relays it one hop further (or the source
                 // observes it directly as `PushOutcome::Qos`).
                 if let Some(qos) = elem.take_qos() {

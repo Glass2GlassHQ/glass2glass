@@ -18,7 +18,7 @@ use crate::clock::ClockSync;
 use crate::element::QosMessage;
 use crate::frame::FrameTiming;
 use crate::property::{PropError, PropKind, PropValue, PropertySpec};
-use crate::qos::QosTracker;
+use crate::qos::{upstream_report, QosTracker};
 use crate::segment::Segment;
 
 /// What a sink does with the frame it just asked [`PresentationPacer::judge`]
@@ -97,9 +97,12 @@ pub struct PresentationPacer {
     /// target immediately) rather than reuse the stale play-edge base time.
     seek_reanchor: bool,
     qos: QosTracker,
-    /// The last late-drop report, for the sink's `take_qos` (the upstream
-    /// reverse channel); latest wins.
+    /// The last upstream report, a late drop or the periodic one, for the
+    /// sink's `take_qos` (the upstream reverse channel), latest wins.
     pending_qos: Option<QosMessage>,
+    /// Clock time of the last upstream report, `None` until the first judged
+    /// frame arms the interval.
+    last_upstream_report_ns: Option<u64>,
     /// Deadline the most recent [`judge`](Self::judge) measured against, so a
     /// sink can score its own presentation error without re-deriving it.
     /// Cleared by a `judge` that reaches no deadline (unpaced, unset PTS, or a
@@ -109,6 +112,10 @@ pub struct PresentationPacer {
 
 /// GStreamer's `GstVideoSink` default.
 pub const VIDEO_SINK_MAX_LATENESS_NS: u64 = 20_000_000;
+
+/// How often a sink that presents frames reports its lateness upstream, so a
+/// producer that shed load on a late report also learns when the sink caught up.
+pub const UPSTREAM_QOS_INTERVAL_NS: u64 = 100_000_000;
 
 impl PresentationPacer {
     pub fn new() -> Self {
@@ -129,6 +136,7 @@ impl PresentationPacer {
         self.clock_sync = Some(sync);
         self.anchor_ns = None;
         self.anchor_pre_play = false;
+        self.last_upstream_report_ns = None;
     }
 
     /// The clock + base time being paced against, `None` until one is adopted.
@@ -232,7 +240,16 @@ impl PresentationPacer {
         // the interval has elapsed.
         if let Some(q) = self.qos.judge_frame(deadline, now, running_time, presented) {
             self.pending_qos = Some(q);
+            self.last_upstream_report_ns = Some(now);
             return Pace::Drop;
+        }
+        match self.last_upstream_report_ns {
+            None => self.last_upstream_report_ns = Some(now),
+            Some(last) if now.saturating_sub(last) >= UPSTREAM_QOS_INTERVAL_NS => {
+                self.pending_qos = Some(upstream_report(deadline, now, running_time));
+                self.last_upstream_report_ns = Some(now);
+            }
+            Some(_) => {}
         }
         match deadline.checked_sub(now) {
             Some(0) | None => Pace::Now,
@@ -251,7 +268,8 @@ impl PresentationPacer {
 
     /// The QoS report a late drop left for the sink's
     /// [`take_qos`](crate::AsyncElement::take_qos), which the runner relays
-    /// upstream so a source / decoder can shed load.
+    /// upstream so a source / decoder can shed load, or the report a presented
+    /// frame leaves at most once per [`UPSTREAM_QOS_INTERVAL_NS`].
     pub fn take_qos(&mut self) -> Option<QosMessage> {
         self.pending_qos.take()
     }
@@ -473,6 +491,41 @@ mod tests {
             }) => assert_eq!((running_time_ns, jitter_ns, dropped), (0, 1_000_000, 1)),
             other => panic!("expected a Qos message, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_presented_frame_reports_upstream_once_per_interval() {
+        let (clock, sync) = manual();
+        let mut p = PresentationPacer::for_video_sink();
+        p.set_clock_sync(sync);
+        assert_eq!(p.judge(0, 0), Pace::Now);
+        assert!(p.take_qos().is_none(), "the first frame arms the interval");
+
+        let half_interval = UPSTREAM_QOS_INTERVAL_NS / 2;
+        clock.store(half_interval, Ordering::Relaxed);
+        assert_eq!(
+            p.judge(UPSTREAM_QOS_INTERVAL_NS, 1),
+            Pace::Wait(half_interval)
+        );
+        assert!(
+            p.take_qos().is_none(),
+            "nothing before the interval elapses"
+        );
+
+        let early_ns = 5_000_000;
+        let running_time = UPSTREAM_QOS_INTERVAL_NS + early_ns;
+        clock.store(UPSTREAM_QOS_INTERVAL_NS, Ordering::Relaxed);
+        assert_eq!(p.judge(running_time, 2), Pace::Wait(early_ns));
+        let report = p.take_qos().expect("a periodic upstream report");
+        assert_eq!(report.jitter_ns, -(early_ns as i64), "early is negative");
+        assert_eq!(report.running_time_ns, running_time);
+        assert_eq!(p.late_dropped(), 0);
+
+        assert_eq!(
+            p.judge(running_time + early_ns, 3),
+            Pace::Wait(2 * early_ns)
+        );
+        assert!(p.take_qos().is_none(), "the interval restarted");
     }
 
     #[test]

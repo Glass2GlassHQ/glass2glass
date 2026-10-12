@@ -511,7 +511,7 @@ impl AsyncElement for WaylandSink {
         self.pacer.set_clock_sync(sync);
     }
 
-    /// Relay a late drop upstream (M174): the runner forwards this onto the
+    /// Relay a QoS report upstream (M174): the runner forwards this onto the
     /// incoming link, where the producer observes it as `PushOutcome::Qos` and
     /// can shed load so the sink stops running behind.
     fn take_qos(&mut self) -> Option<QosMessage> {

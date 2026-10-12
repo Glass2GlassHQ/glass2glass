@@ -308,9 +308,12 @@ just the sink. It rides the same per-link reverse channel as `Reconfigure`: a si
 returns a `QosMessage` from `AsyncElement::take_qos`, the runner stores it into the
 incoming link's reverse `QosSlot`, and the producer observes it as
 `PushOutcome::Qos` on its next push. Reconfigure wins when both are pending, and
-QoS is advisory and never holds the packet back. `SyncSink` originates it on a
-late-drop and `VideoTestSrc` reacts by skipping about `jitter / frame_period`
-frames, advancing PTS without generating them.
+QoS is advisory and never holds the packet back. `PresentationPacer` originates it
+on a late-drop, and on a presented frame at most once per
+`UPSTREAM_QOS_INTERVAL_NS` (100 ms) with the frame's signed jitter, so a producer
+also learns when the sink is on time again. `VideoTestSrc` reacts to a positive
+jitter by skipping about `jitter / frame_period` frames, advancing PTS without
+generating them.
 
 Relaying through a transform carries the report the rest of the way to the source
 in a multi-element pipeline. A transform observes a downstream QoS as a
@@ -339,13 +342,19 @@ result.
 `GstBaseTransform` drops every frame up to the late frame's running time plus its
 jitter, which for an element slower than the stream picks the frame due right
 now, and that frame is late again by one run when it reaches the sink, so the display freezes.
-`pyelement` instead reads the report as the sink's clock, the late frame's
-running time plus its jitter, at the moment the sink judged the frame, which the
-report carries as `taken_ns` since the relay delivers it one push per element
-later. It drops any frame whose running time is below that clock advanced to now
-plus the hosted element's last run time, before any Python call. A hosted detector slower than
-the stream then runs on the frames the display can still show, one every run
-time, instead of turning playback into slow motion. A flush forgets the clock.
+`pyelement` instead reads every report, early or late, as the sink's clock, the
+frame's running time plus its signed jitter, at the moment the sink judged the
+frame, which the report carries as `taken_ns` since the relay delivers it one push
+per element later. It also remembers when it pushed each of its last 64 frames,
+so a report on one of them gives the downstream delay, the time from its push to
+the sink's verdict. It drops a frame, before any Python call, when the frame's
+running time plus the sink's 20 ms bound is below that clock advanced to now plus
+the hosted element's last run time and the downstream delay, that is when the
+frame would reach the sink later than the sink accepts. Every pyelement in a chain
+reaches the same verdict on a frame, since one further downstream judges it later
+but has that much less delay ahead of it. A hosted detector slower than the stream
+then runs on the frames the display can still show, one every run time, instead of
+turning playback into slow motion. A flush forgets the clock and the delay.
 
 `FfmpegVideoDec` does that under its `qos` property: a report arms a skip budget of
 `jitter / frame_period` pictures, capped by `max-skip-frames`, during which the

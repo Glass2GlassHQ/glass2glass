@@ -897,8 +897,8 @@ where
                     if let Some(p) = timed {
                         p.record_proc_since(t0);
                     }
-                    // M174 upstream QoS: a sink that dropped a late frame asks to
-                    // shed load; forward its report onto the incoming link, where
+                    // M174 upstream QoS: a sink reports a late drop or its periodic
+                    // lateness. Forward the report onto the incoming link, where
                     // the source observes it as `PushOutcome::Qos` and skips ahead.
                     if let Some(qos) = sink.take_qos() {
                         link_rx.request_qos(qos);

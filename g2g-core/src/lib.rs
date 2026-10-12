@@ -277,7 +277,7 @@ pub use qos::QosTracker;
 #[cfg(feature = "runtime")]
 pub use pacing::{
     Pace, PresentationPacer, MAX_LATENESS_PROPERTY, PACING_PROPERTIES, QOS_INTERVAL_PROPERTY,
-    VIDEO_SINK_MAX_LATENESS_NS,
+    UPSTREAM_QOS_INTERVAL_NS, VIDEO_SINK_MAX_LATENESS_NS,
 };
 
 #[cfg(feature = "runtime")]

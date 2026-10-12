@@ -11,7 +11,9 @@ use g2g_python::PyTransform;
 const WIDTH: u32 = 2;
 const HEIGHT: u32 = 1;
 const FRAME_PERIOD_NS: u64 = 33_000_000;
-const JITTER_NS: i64 = 50_000_000;
+const JITTER_NS: i64 = 70_000_000;
+const EARLY_NS: i64 = 20_000_000;
+const DOWNSTREAM_DELAY: std::time::Duration = std::time::Duration::from_millis(50);
 const CALLS_HEADER: &str = "calls";
 
 #[derive(Default)]
@@ -230,4 +232,85 @@ fn a_frame_that_would_be_late_after_the_run_time_is_dropped() {
     );
     assert_eq!(sink.packets.len(), 2);
     assert_eq!(calls(&sink.packets[1]), 2);
+}
+
+#[test]
+fn an_early_report_ends_the_drops_a_late_one_started() {
+    let mut element = counting_element();
+    let mut sink = LateSink::default();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    let process = |element: &mut PyTransform, sink: &mut LateSink, pts_ns, sequence| {
+        runtime
+            .block_on(element.process(PipelinePacket::DataFrame(frame(pts_ns, sequence)), sink))
+            .unwrap();
+    };
+    sink.report = Some(QosMessage {
+        jitter_ns: JITTER_NS,
+        running_time_ns: 0,
+        taken_ns: 0,
+    });
+    process(&mut element, &mut sink, 0, 0);
+    process(&mut element, &mut sink, FRAME_PERIOD_NS, 1);
+    assert_eq!(element.late_dropped_count(), 1);
+
+    // An untimed frame is never late, so it carries the sink's next report.
+    sink.report = Some(QosMessage {
+        jitter_ns: -EARLY_NS,
+        running_time_ns: 0,
+        taken_ns: 0,
+    });
+    process(&mut element, &mut sink, FrameTiming::PTS_NONE, 2);
+    process(&mut element, &mut sink, 2 * FRAME_PERIOD_NS, 3);
+    assert_eq!(
+        element.late_dropped_count(),
+        1,
+        "66 ms runs once the sink reports it is early"
+    );
+    assert_eq!(sink.packets.len(), 3);
+}
+
+// The sink reports its clock at frame 2's running time, when frame 0 reached it
+// `delay` after this element pushed it.
+fn frame_two_is_dropped_after(delay: std::time::Duration) -> bool {
+    let mut element = counting_element();
+    let mut sink = LateSink::default();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    runtime
+        .block_on(element.process(PipelinePacket::DataFrame(frame(0, 0)), &mut sink))
+        .unwrap();
+    std::thread::sleep(delay);
+    sink.report = Some(QosMessage {
+        jitter_ns: 2 * FRAME_PERIOD_NS as i64,
+        running_time_ns: 0,
+        taken_ns: 0,
+    });
+    runtime
+        .block_on(element.process(
+            PipelinePacket::DataFrame(frame(FRAME_PERIOD_NS, 1)),
+            &mut sink,
+        ))
+        .unwrap();
+    runtime
+        .block_on(element.process(
+            PipelinePacket::DataFrame(frame(2 * FRAME_PERIOD_NS, 2)),
+            &mut sink,
+        ))
+        .unwrap();
+    element.late_dropped_count() == 1
+}
+
+#[test]
+fn the_learned_downstream_delay_counts_toward_lateness() {
+    assert!(
+        !frame_two_is_dropped_after(std::time::Duration::ZERO),
+        "a frame due at the sink's clock is within the sink's bound"
+    );
+    assert!(
+        frame_two_is_dropped_after(DOWNSTREAM_DELAY),
+        "it reaches the sink a delay later, past the bound"
+    );
 }

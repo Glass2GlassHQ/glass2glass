@@ -54,20 +54,21 @@ pub enum Reconfigure {
     AbsorbOrientation,
 }
 
-/// Downstream-originated quality-of-service signal: a synchronising sink is
-/// running behind the pipeline clock and dropped a late frame. Travels upstream
-/// along a link's reverse channel and is surfaced to the producing element as a
-/// [`PushOutcome::Qos`], so a source / decoder can shed load (skip frames) to let
-/// the pipeline catch up. The GStreamer QoS event analog (the
+/// Downstream-originated quality-of-service signal: a synchronising sink dropped
+/// a late frame, or reports how early or late it presented one, at most once per
+/// `UPSTREAM_QOS_INTERVAL_NS`. Travels upstream along a link's reverse channel
+/// and is surfaced to the producing element as a [`PushOutcome::Qos`], so a
+/// source / decoder can shed load (skip frames) to let the pipeline catch up.
+/// The GStreamer QoS event analog (the
 /// [`BusMessage::Qos`](crate::BusMessage::Qos) report is the out-of-band sibling
 /// the application observes).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct QosMessage {
-    /// How far past its deadline the dropped frame was, ns. Positive is late
-    /// (behind the clock); the producer skips roughly this much stream time to
-    /// catch up.
+    /// How far past its deadline the frame was, ns. Positive is late (behind
+    /// the clock), negative early. On a late report the producer skips roughly
+    /// this much stream time to catch up.
     pub jitter_ns: i64,
-    /// Running time (PTS) of the late frame, for reference.
+    /// Running time (PTS) of the judged frame, for reference.
     pub running_time_ns: u64,
     /// `metrics::monotonic_ns` when the sink judged the frame, 0 without `std`.
     pub taken_ns: u64,
@@ -102,9 +103,10 @@ pub enum PushOutcome {
     /// the previous one. The producer should handle the request before
     /// pushing further `DataFrame`s.
     Reconfigure(Reconfigure),
-    /// Downstream is behind the clock (a sink dropped a late frame). Advisory:
-    /// the producer may skip ahead to shed load. Reconfigure takes priority when
-    /// both are pending (negotiation correctness over QoS).
+    /// Downstream reports its lateness (a sink dropped a late frame, or the
+    /// periodic report of a presented one). Advisory: the producer may skip
+    /// ahead to shed load. Reconfigure takes priority when both are pending
+    /// (negotiation correctness over QoS).
     Qos(QosMessage),
     /// Downstream reports a target send bitrate in bits/second (a WebRTC sink
     /// relaying its congestion-control / BWE estimate). Advisory: an encoder
@@ -321,10 +323,11 @@ pub trait AsyncElement: ElementBound {
     fn set_clock_sync(&mut self, _sync: ClockSync) {}
 
     /// Take any QoS signal this element wants to send upstream, consuming it. A
-    /// synchronising sink that dropped a late frame returns a [`QosMessage`]
-    /// here; the runner forwards it onto the element's incoming link, where the
-    /// producer observes it as [`PushOutcome::Qos`]. Called by the runner after
-    /// each `process`. Default: nothing to send.
+    /// synchronising sink that dropped a late frame, or presented one with its
+    /// periodic report due, returns a [`QosMessage`] here. The runner forwards
+    /// it onto the element's incoming link, where the producer observes it as
+    /// [`PushOutcome::Qos`]. Called by the runner after each `process`.
+    /// Default: nothing to send.
     fn take_qos(&mut self) -> Option<QosMessage> {
         None
     }

@@ -38,6 +38,16 @@ fn taken_ns() -> u64 {
     0
 }
 
+/// The upstream report for a frame due at `deadline_ns`, judged at clock time
+/// `now_ns`.
+pub(crate) fn upstream_report(deadline_ns: u64, now_ns: u64, running_time_ns: u64) -> QosMessage {
+    QosMessage {
+        jitter_ns: jitter_ns(deadline_ns, now_ns),
+        running_time_ns,
+        taken_ns: taken_ns(),
+    }
+}
+
 /// QoS state shared by synchronizing sinks: the lateness bound, the drop count,
 /// and the bus reporting.
 #[derive(Debug)]
@@ -128,11 +138,7 @@ impl QosTracker {
         if self.is_too_late(deadline_ns, now_ns) {
             self.dropped += 1;
             self.post(running_time_ns, jitter, processed, now_ns);
-            return Some(QosMessage {
-                jitter_ns: jitter,
-                running_time_ns,
-                taken_ns: taken_ns(),
-            });
+            return Some(upstream_report(deadline_ns, now_ns, running_time_ns));
         }
         match self.last_report_ns {
             // First frame only arms the interval, so an application sees the

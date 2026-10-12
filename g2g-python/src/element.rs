@@ -22,6 +22,7 @@
 
 use core::future::Future;
 use core::pin::Pin;
+use std::collections::VecDeque;
 use std::time::Instant;
 
 use g2g_core::metrics::monotonic_ns;
@@ -31,16 +32,24 @@ use g2g_core::{
     AllocationParams, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
     ElementMetadata, Frame, FrameTiming, G2gError, OutputSink, PadTemplate, PadTemplates,
     PipelinePacket, PropError, PropKind, PropValue, PropertySpec, PushOutcome, Rate,
-    RawVideoFormat, Segment,
+    RawVideoFormat, Segment, VIDEO_SINK_MAX_LATENESS_NS,
 };
 
 use crate::format::{format_from_py, format_to_py, frame_bytes};
 use crate::props::{fixed_caps, hosted_element_props, HostedClassProperties};
 
+const RECENT_PUSH_CAPACITY: usize = 64;
+
 #[derive(Debug, Clone, Copy)]
 struct SinkClock {
     running_time_ns: u64,
     taken_ns: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RecentPush {
+    running_time_ns: u64,
+    pushed_ns: u64,
 }
 
 /// A gst-python-ml element hosted as a first-class g2g transform.
@@ -80,6 +89,10 @@ pub struct PyTransform {
     qos: bool,
     segment: Option<Segment>,
     sink_clock: Option<SinkClock>,
+    /// Time from this element pushing a frame to the sink judging it, learned
+    /// from a QoS report on a frame in `recent_pushes`.
+    downstream_delay_ns: u64,
+    recent_pushes: VecDeque<RecentPush>,
     last_run_ns: u64,
     late_dropped: u64,
     configured: bool,
@@ -117,6 +130,8 @@ impl PyTransform {
             qos: true,
             segment: None,
             sink_clock: None,
+            downstream_delay_ns: 0,
+            recent_pushes: VecDeque::with_capacity(RECENT_PUSH_CAPACITY),
             last_run_ns: 0,
             late_dropped: 0,
             configured: false,
@@ -182,37 +197,68 @@ impl PyTransform {
         self.late_dropped
     }
 
+    fn running_time(&self, frame: &Frame) -> Option<u64> {
+        let pts = frame.timing.pts_ns;
+        if pts == FrameTiming::PTS_NONE {
+            return None;
+        }
+        match &self.segment {
+            Some(segment) => segment.to_running_time(pts),
+            None => Some(pts),
+        }
+    }
+
     fn is_late(&self, frame: &Frame) -> bool {
         let Some(sink_clock) = self.sink_clock else {
             return false;
         };
-        let pts = frame.timing.pts_ns;
-        if pts == FrameTiming::PTS_NONE {
+        let Some(running_time) = self.running_time(frame) else {
             return false;
-        }
-        let running_time = match &self.segment {
-            Some(segment) => segment.to_running_time(pts),
-            None => Some(pts),
         };
         let elapsed_ns = monotonic_ns().saturating_sub(sink_clock.taken_ns);
-        let due_by = sink_clock
+        let reaches_sink_at = sink_clock
             .running_time_ns
             .saturating_add(elapsed_ns)
-            .saturating_add(self.last_run_ns);
-        running_time.is_some_and(|running_time| running_time < due_by)
+            .saturating_add(self.last_run_ns)
+            .saturating_add(self.downstream_delay_ns);
+        running_time.saturating_add(VIDEO_SINK_MAX_LATENESS_NS) < reaches_sink_at
+    }
+
+    async fn push_frame(&mut self, frame: Frame, out: &mut dyn OutputSink) -> Result<(), G2gError> {
+        self.emitted += 1;
+        if let Some(running_time_ns) = self.running_time(&frame) {
+            if self.recent_pushes.len() == RECENT_PUSH_CAPACITY {
+                self.recent_pushes.pop_front();
+            }
+            self.recent_pushes.push_back(RecentPush {
+                running_time_ns,
+                pushed_ns: monotonic_ns(),
+            });
+        }
+        let outcome = out.push(PipelinePacket::DataFrame(frame)).await?;
+        self.note_push(outcome);
+        Ok(())
     }
 
     fn note_push(&mut self, outcome: PushOutcome) {
         let PushOutcome::Qos(report) = outcome else {
             return;
         };
-        if !self.qos || report.jitter_ns <= 0 {
+        if !self.qos {
             return;
+        }
+        let reported_push = self
+            .recent_pushes
+            .iter()
+            .rev()
+            .find(|push| push.running_time_ns == report.running_time_ns);
+        if let Some(push) = reported_push {
+            self.downstream_delay_ns = report.taken_ns.saturating_sub(push.pushed_ns);
         }
         self.sink_clock = Some(SinkClock {
             running_time_ns: report
                 .running_time_ns
-                .saturating_add(report.jitter_ns.unsigned_abs()),
+                .saturating_add_signed(report.jitter_ns),
             taken_ns: report.taken_ns,
         });
     }
@@ -377,19 +423,14 @@ impl AsyncElement for PyTransform {
                         return Ok(());
                     }
                     if self.forwards_untouched(&frame) {
-                        self.emitted += 1;
-                        let outcome = out.push(PipelinePacket::DataFrame(frame)).await?;
-                        self.note_push(outcome);
-                        return Ok(());
+                        return self.push_frame(frame, out).await;
                     }
                     let started = Instant::now();
                     let outputs = self.run(frame).await?;
                     self.last_run_ns =
                         u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
                     for output in outputs {
-                        self.emitted += 1;
-                        let outcome = out.push(PipelinePacket::DataFrame(output)).await?;
-                        self.note_push(outcome);
+                        self.push_frame(output, out).await?;
                     }
                 }
                 // A mid-stream change to anything outside the accepted set is a
@@ -403,6 +444,8 @@ impl AsyncElement for PyTransform {
                 }
                 PipelinePacket::Flush => {
                     self.sink_clock = None;
+                    self.downstream_delay_ns = 0;
+                    self.recent_pushes.clear();
                     out.push(PipelinePacket::Flush).await?;
                 }
                 PipelinePacket::Segment(seg) => {
@@ -583,7 +626,7 @@ static PYTRANSFORM_PROPS: &[PropertySpec] = hosted_element_props![
     PropertySpec::new(
         "qos",
         PropKind::Bool,
-        "once a downstream sink reports a late frame, drop any frame that would reach it late too instead of running the hosted element on it",
+        "drop any frame a downstream sink's QoS report says would reach it late instead of running the hosted element on it",
     )
     .with_default("true"),
     PropertySpec::new(
