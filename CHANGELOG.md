@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1227: `nvdec` keeps its open parser and CUDA context when a parser refines the caps mid-stream, instead of opening new ones and leaking the old parser.
 - M1226: a sink pacing through `PresentationPacer` reports its lateness upstream at most every 100 ms while it presents frames (`UPSTREAM_QOS_INTERVAL_NS`), not only when it drops one, and `pyelement` drops a frame only when it would reach the sink past the sink's 20 ms bound, counting the delay it measured from its push to the sink.
 - M1225: `nvdec` tags its raw output with the input stream's colorimetry, and a hosted `g2g_process_cuda` receives the frame's YUV conversion as `(kr, kb, full_range)`.
 - M1224: `cudaglsink` is registered in the launcher registry under its gst name, so `g2g-launch` pipelines can present nvdec output from CUDA memory.

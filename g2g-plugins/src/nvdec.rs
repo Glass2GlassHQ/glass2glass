@@ -409,6 +409,17 @@ impl NvDec {
         Ok(())
     }
 
+    fn destroy_parser(&mut self) {
+        if self.parser.is_null() {
+            return;
+        }
+        // SAFETY: `parser` was created in `open` and is nulled here, so it is destroyed once.
+        unsafe {
+            let _ = ffi::cuvid_destroy_video_parser(self.parser);
+        }
+        self.parser = core::ptr::null_mut();
+    }
+
     /// Feed one Annex-B access unit (or an EOS flush) to the parser, then drain
     /// whatever frames the display callback produced.
     fn parse(
@@ -509,13 +520,7 @@ impl Drop for NvDec {
         // Destroy the parser first so no further callback can fire, then let the
         // boxed state drop (releasing the decoder / context `Arc`s; each is torn
         // down once the last frame referencing it is gone).
-        if !self.parser.is_null() {
-            // SAFETY: `parser` was created in `open` and is destroyed once.
-            unsafe {
-                let _ = ffi::cuvid_destroy_video_parser(self.parser);
-            }
-            self.parser = core::ptr::null_mut();
-        }
+        self.destroy_parser();
     }
 }
 
@@ -936,7 +941,7 @@ impl AsyncElement for NvDec {
             return Err(G2gError::CapsMismatch);
         };
         // Pick the NVCUVID codec before opening the parser; reject unsupported ones.
-        self.state.codec_cuvid = Self::cuvid_codec(*codec).ok_or(G2gError::CapsMismatch)?;
+        let codec_cuvid = Self::cuvid_codec(*codec).ok_or(G2gError::CapsMismatch)?;
         if let Dim::Fixed(w) = width {
             self.width = *w;
         }
@@ -945,6 +950,12 @@ impl AsyncElement for NvDec {
         }
         self.framerate = framerate.clone();
         self.input_caps = Some(absolute_caps.clone());
+        // a parser refining the caps mid-stream keeps the codec, so the open parser still fits
+        if self.configured && codec_cuvid == self.state.codec_cuvid {
+            return Ok(ConfigureOutcome::Accepted);
+        }
+        self.destroy_parser();
+        self.state.codec_cuvid = codec_cuvid;
         self.open()?;
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
@@ -1746,6 +1757,25 @@ mod tests {
                 None
             }
         }
+    }
+
+    #[test]
+    fn refined_caps_keep_the_open_parser() {
+        let Some(mut dec) = open_dec(VideoCodec::H264, 640, 480, 1) else {
+            return;
+        };
+        let (parser, context) = (dec.parser, dec.context);
+        let refined = Caps::CompressedVideo {
+            codec: VideoCodec::H264,
+            width: Dim::Fixed(640),
+            height: Dim::Fixed(480),
+            framerate: Rate::Fixed(25 << 16),
+            colorimetry: g2g_core::Colorimetry::BT709,
+        };
+        dec.configure_pipeline(&refined).expect("reconfigure");
+        assert_eq!(dec.parser, parser);
+        assert_eq!(dec.context, context);
+        assert_eq!(dec.input_caps, Some(refined));
     }
 
     #[tokio::test]
