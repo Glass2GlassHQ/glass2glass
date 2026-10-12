@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1222: negotiation names a transform whose derived output is empty for its input (`NegotiationFailure::NoOutputForInput`) instead of reporting a mismatch with the element below it.
 - M1221: `pyelement` passes a downstream QoS report on to the elements upstream of it as well as acting on it (`AsyncElement::relays_qos`).
 - `g2g-launch --threads=pinned` pins each arm's thread to a core of its own, arms in graph order onto cores grouped by shared L3, then shared L2, then core id, with the second SMT thread of every core after all the first ones (`PinnedThreadSpawner`). Linux only.
 - M1220: once a downstream sink reports a late frame, `pyelement` drops every frame that would reach it late too, given the hosted element's last run time, instead of running the element on it (`qos=true`, the default), and the video display sinks drop a frame more than 20 ms past its deadline by default (`max-lateness`, was never). A QoS report's `running_time_ns` is now the frame's running time, not its clock deadline, and `taken_ns` says when the sink judged it.

@@ -56,8 +56,11 @@ emits under a reserved `caps` log category, which is not an element type so it
 filters independently: a setup dump of each node's constraint, then per edge the
 surviving `CapsSet` and its fixated `Caps`. On failure it narrates at ERROR,
 naming the two conflicting nodes and dumping the set on every edge incident to
-them, so the log answers which two cannot agree and what each wanted. An edge
-that survives narrowing but cannot reduce to one `Caps` logs `cannot fixate`.
+them, so the log answers which two cannot agree and what each wanted. A
+transform whose derived output is empty for its input (an encoder fed a format it
+does not take) is named alone with that input, `X produces no output for <caps>`,
+since the element below it is not part of the failure. An edge that survives
+narrowing but cannot reduce to one `Caps` logs `cannot fixate`.
 
 Node labels come from the caller via `solve_graph_labeled`. The runner passes
 each element's `log_category`, so the narration reads `h264parse -> nvdec`, while

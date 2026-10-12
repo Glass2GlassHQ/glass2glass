@@ -113,5 +113,36 @@ fn caps_trace_narrates_success_and_failure() {
         "upstream set missing:\n{blob}"
     );
 
+    // --- failure: a transform derives no output from the RGBA it is given. ---
+    captured.lock().unwrap().clear();
+    let cs = vec![
+        NodeConstraint::Element(CapsConstraint::Produces(CapsSet::one(rgba(320, 240)))),
+        NodeConstraint::Element(CapsConstraint::DerivedOutput(Box::new(|_: &Caps| {
+            CapsSet::from_alternatives(Vec::new())
+        }))),
+        NodeConstraint::Element(CapsConstraint::AcceptsAny),
+    ];
+    let mut g: Graph<&str> = Graph::new();
+    let src = g.add_source("vsrc");
+    let encoder = g.add_transform("venc");
+    let sink = g.add_sink("vsink");
+    g.link(src, encoder).unwrap();
+    g.link(encoder, sink).unwrap();
+    let v = g.finish().unwrap();
+    assert!(
+        solve_graph(&v, &cs).is_err(),
+        "an empty derived output fails"
+    );
+
+    let blob = captured.lock().unwrap().join("\n");
+    assert!(
+        blob.contains("ERROR: n1:xform produces no output for video/x-raw,format=RGBA"),
+        "the transform and its input must be named:\n{blob}"
+    );
+    assert!(
+        !blob.contains("no caps overlap"),
+        "not a two-sided mismatch:\n{blob}"
+    );
+
     log::reset();
 }

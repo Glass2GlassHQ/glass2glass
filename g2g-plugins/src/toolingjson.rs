@@ -194,6 +194,12 @@ fn failure_json(nf: &NegotiationFailure) -> Value {
             }
             v
         }
+        NegotiationFailure::NoOutputForInput {
+            upstream,
+            downstream,
+        } => {
+            json!({ "kind": "no-output-for-input", "upstream": upstream, "downstream": downstream })
+        }
         NegotiationFailure::Unfixable {
             upstream,
             downstream,

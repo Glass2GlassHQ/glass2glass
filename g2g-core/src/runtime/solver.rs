@@ -80,6 +80,11 @@ pub enum NegotiationFailure {
     /// `DerivedOutput` variants. Mixed handling is added once step 5
     /// starts migrating individual elements off the legacy bridge.
     MixedLegacyAndNative,
+    /// `upstream` is a transform whose derived output (`DerivedOutput` /
+    /// `DerivedFields`) is empty for the caps on its input link, so the link to
+    /// `downstream` has nothing to carry: an encoder fed a pixel format it does
+    /// not take. Reported by the DAG solver.
+    NoOutputForInput { upstream: usize, downstream: usize },
 }
 
 impl NegotiationFailure {
@@ -1073,14 +1078,32 @@ pub fn solve_graph_preferred<E>(
             upstream,
             downstream,
             ..
+        }
+        | NegotiationFailure::NoOutputForInput {
+            upstream,
+            downstream,
         } => {
             let (up, down) = (NodeId(*upstream as u32), NodeId(*downstream as u32));
-            crate::g2g_error!(
-                t,
-                "no caps overlap between {} and {}",
-                label(up),
-                label(down)
-            );
+            if matches!(f, NegotiationFailure::NoOutputForInput { .. }) {
+                let input: Vec<String> = graph
+                    .in_edges(up)
+                    .iter()
+                    .map(|&e| fmt_set_opt(&edges[e]))
+                    .collect();
+                crate::g2g_error!(
+                    t,
+                    "{} produces no output for {}",
+                    label(up),
+                    input.join(", ")
+                );
+            } else {
+                crate::g2g_error!(
+                    t,
+                    "no caps overlap between {} and {}",
+                    label(up),
+                    label(down)
+                );
+            }
             for (id, slot) in edges.iter().enumerate() {
                 let e = graph.edge(id);
                 if [e.src.node, e.dst.node]
@@ -1897,8 +1920,11 @@ fn apply_transform_node<E>(
             if let Some(in_set) = edges[in_e].clone() {
                 let derived = forward_derived_union(f.as_ref(), &in_set);
                 if derived.is_empty() {
-                    let (up, down) = edge_endpoints(graph, out_e);
-                    return Err(NegotiationFailure::empty_link(up, down));
+                    let (upstream, downstream) = edge_endpoints(graph, out_e);
+                    return Err(NegotiationFailure::NoOutputForInput {
+                        upstream,
+                        downstream,
+                    });
                 }
                 narrow_edge(graph, edges, out_e, &derived, node)?;
             }
@@ -1923,8 +1949,11 @@ fn apply_transform_node<E>(
             if let Some(in_set) = edges[in_e].clone() {
                 let derived = forward_derived_union(&derive, &in_set);
                 if derived.is_empty() {
-                    let (up, down) = edge_endpoints(graph, out_e);
-                    return Err(NegotiationFailure::empty_link(up, down));
+                    let (upstream, downstream) = edge_endpoints(graph, out_e);
+                    return Err(NegotiationFailure::NoOutputForInput {
+                        upstream,
+                        downstream,
+                    });
                 }
                 narrow_edge(graph, edges, out_e, &derived, node)?;
             }
@@ -3343,6 +3372,41 @@ mod tests {
         let c = err.conflict().expect("both candidate sets captured");
         assert_eq!(c.upstream, CapsSet::one(rgba));
         assert_eq!(c.downstream, CapsSet::one(nv12));
+    }
+
+    #[test]
+    fn solve_graph_names_the_transform_whose_derived_output_is_empty() {
+        // An encoder that takes NV12 only, fed RGBA: its output link has
+        // nothing to carry, and the wildcard sink below it is not to blame.
+        let rgba = fixed_video(RawVideoFormat::Rgba8, 64, 48, 30);
+        let nv12_only = CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
+            Caps::RawVideo {
+                format: RawVideoFormat::Nv12,
+                ..
+            } => CapsSet::one(input.clone()),
+            _ => CapsSet::from_alternatives(Vec::new()),
+        }));
+        let cs: Vec<NodeConstraint> = vec![
+            NodeConstraint::Element(CapsConstraint::Produces(CapsSet::one(rgba))),
+            NodeConstraint::Element(nv12_only),
+            NodeConstraint::Element(CapsConstraint::AcceptsAny),
+        ];
+        let mut g: Graph<()> = Graph::new();
+        let src = g.add_source(());
+        let encoder = g.add_transform(());
+        let sink = g.add_sink(());
+        g.link(src, encoder).unwrap();
+        g.link(encoder, sink).unwrap();
+        let v = g.finish().unwrap();
+
+        let err = solve_graph(&v, &cs).expect_err("RGBA into an NV12-only encoder");
+        assert_eq!(
+            err,
+            NegotiationFailure::NoOutputForInput {
+                upstream: 1,
+                downstream: 2,
+            }
+        );
     }
 
     #[test]
