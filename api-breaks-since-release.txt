@@ -7,5 +7,5 @@
 # a break to a deliberate act during that window, and it is the raw material for
 # the release notes when the bump ships.
 constructible_struct_adds_field: field QosMessage.taken_ns
-method_parameter_count_changed: g2g_core::qos::QosTracker::judge_frame takes 3 parameters
 method_parameter_count_changed: g2g_core::QosTracker::judge_frame takes 3 parameters
+method_parameter_count_changed: g2g_core::qos::QosTracker::judge_frame takes 3 parameters

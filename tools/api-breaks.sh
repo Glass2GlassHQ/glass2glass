@@ -35,7 +35,7 @@ found=$(printf '%s\n' "$raw" \
            /^---/{lint=""; next}
            lint!="" && /^  [^ ]/{sub(/^ */,""); print lint": "$0}' \
     | sed -E 's/,?[[:space:]]*(previously[[:space:]]+)?in[[:space:]]+(file[[:space:]]+)?\/.*$//' \
-    | sort -u)
+    | LC_ALL=C sort -u)
 
 case "$mode" in
 record)
