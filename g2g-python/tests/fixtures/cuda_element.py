@@ -1,6 +1,7 @@
 # Hosted-element fixtures for the GPU zero-copy paths: elements that take a
-# Cuda-domain frame through `g2g_process_cuda(luma, chroma, w, h, meta)` (M984),
-# its batch and produce siblings, and the DLPack export (M986).
+# Cuda-domain frame through
+# `g2g_process_cuda(luma, chroma, w, h, yuv_conversion, meta)` (M984), its batch
+# and produce siblings, and the DLPack export (M986).
 #
 # The probes that only read a plane's description never touch device memory, so
 # they run with no GPU present. The cupy and torch classes need a real device
@@ -29,7 +30,7 @@ class CudaProbe:
     """Records both planes' CAI descriptions and stages a classification, so the
     Rust side sees both the handoff shape and that metadata still flows."""
 
-    def g2g_process_cuda(self, luma, chroma, width, height, meta):
+    def g2g_process_cuda(self, luma, chroma, width, height, yuv_conversion, meta):
         OBSERVED["luma"] = luma.__cuda_array_interface__
         OBSERVED["chroma"] = chroma.__cuda_array_interface__
         OBSERVED["context"] = luma.cuda_context
@@ -49,7 +50,7 @@ class PlaneRetainer:
     """Misbehaves: keeps a plane past the call, whose device pointer dangles once
     the frame is released downstream. The host must reject this."""
 
-    def g2g_process_cuda(self, luma, chroma, width, height, meta):
+    def g2g_process_cuda(self, luma, chroma, width, height, yuv_conversion, meta):
         self.kept = luma
 
 
@@ -58,7 +59,7 @@ class DlpackShapeProbe:
     `max_version` yields, the device tuple, and that an impossible request (a copy,
     or another device) is refused rather than quietly ignored. Runs with no GPU."""
 
-    def g2g_process_cuda(self, luma, chroma, width, height, meta):
+    def g2g_process_cuda(self, luma, chroma, width, height, yuv_conversion, meta):
         import ctypes
 
         OBSERVED["dlpack_device"] = luma.__dlpack_device__()
@@ -94,7 +95,7 @@ class DlpackConsumer:
     they alias the producer's surface, then takes an unconsumed capsule and drops
     it, which is the path the capsule destructor has to free itself."""
 
-    def g2g_process_cuda(self, luma, chroma, width, height, meta):
+    def g2g_process_cuda(self, luma, chroma, width, height, yuv_conversion, meta):
         import cupy
 
         OBSERVED["dlpack_device"] = luma.__dlpack_device__()
@@ -225,7 +226,7 @@ class CupyConsumer:
     the marker write is a deliberate probe that no copy sits in between.
     """
 
-    def g2g_process_cuda(self, luma, chroma, width, height, meta):
+    def g2g_process_cuda(self, luma, chroma, width, height, yuv_conversion, meta):
         import cupy
 
         y = cupy.asarray(luma)
@@ -304,7 +305,7 @@ class TorchDlpackConsumer:
     carried. Then writes a marker byte through the luma tensor so the producer
     side can confirm one allocation, two views."""
 
-    def g2g_process_cuda(self, luma, chroma, width, height, meta):
+    def g2g_process_cuda(self, luma, chroma, width, height, yuv_conversion, meta):
         import torch
 
         OBSERVED["torch_dlpack_device"] = luma.__dlpack_device__()
@@ -332,7 +333,7 @@ class TorchCaiConsumer:
     check the rest of the dict (pointer, shape, pitched strides, device) is what
     torch consumes."""
 
-    def g2g_process_cuda(self, luma, chroma, width, height, meta):
+    def g2g_process_cuda(self, luma, chroma, width, height, yuv_conversion, meta):
         import torch
 
         try:
@@ -468,7 +469,7 @@ class TorchFrameReturner:
     value, stages a blob, and returns them so the host sends them on in place of
     the input frame. Keeps nothing itself: the frame is the planes' only owner."""
 
-    def g2g_process_cuda(self, luma, chroma, width, height, meta):
+    def g2g_process_cuda(self, luma, chroma, width, height, yuv_conversion, meta):
         import torch
 
         device = torch.device("cuda", torch.cuda.current_device())
@@ -492,10 +493,17 @@ class TorchFrameReturner:
         return new_luma, new_chroma
 
 
+class YuvConversionProbe:
+    """Records the `(kr, kb, full_range)` tuple the host passed for the frame."""
+
+    def g2g_process_cuda(self, luma, chroma, width, height, yuv_conversion, meta):
+        OBSERVED["yuv_conversion"] = yuv_conversion
+
+
 class NoneReturner:
     """Returns `None` explicitly, which keeps the input frame."""
 
-    def g2g_process_cuda(self, luma, chroma, width, height, meta):
+    def g2g_process_cuda(self, luma, chroma, width, height, yuv_conversion, meta):
         return None
 
 
@@ -503,7 +511,7 @@ class InputReturner:
     """Misbehaves: hands the input planes back, whose memory the host releases
     when it replaces the input frame. The host must reject this."""
 
-    def g2g_process_cuda(self, luma, chroma, width, height, meta):
+    def g2g_process_cuda(self, luma, chroma, width, height, yuv_conversion, meta):
         return luma, chroma
 
 

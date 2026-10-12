@@ -66,7 +66,7 @@
 //! planes are handed over as [`CudaPlane`]s instead, one hook per shape:
 //!
 //! ```text
-//! g2g_process_cuda(luma, chroma, width: int, height: int, meta) -> (luma, chroma) | None
+//! g2g_process_cuda(luma, chroma, width: int, height: int, yuv_conversion, meta) -> (luma, chroma) | None
 //! g2g_process_cuda_batch([(luma, chroma), ...], width: int, height: int, meta)
 //! g2g_produce_cuda(width: int, height: int, meta) -> (luma, chroma) | None
 //! ```
@@ -74,10 +74,13 @@
 //! Each plane exposes `__cuda_array_interface__` (CAI v3) and `__dlpack__`, so
 //! `cupy.asarray(luma)` / `torch.from_dlpack(luma)` alias the decoder's device
 //! memory with no PCIe round-trip. See [`crate::cuda_plane`] for the layout and
-//! the CUDA-context caveat. The produce hook runs the other way: this crate links
-//! no CUDA and cannot allocate device memory, so the Python source allocates the
-//! surface and hands back two CAI-exporting objects, which the frame holds as its
-//! keep-alive. `g2g_process_cuda` may return such a pair too, and the host then
+//! the CUDA-context caveat. `yuv_conversion` is `(kr: float, kb: float,
+//! full_range: bool)` for the frame's current caps, as
+//! [`g2g_core::Colorimetry::yuv_conversion`] resolves it, so an element that
+//! converts the planes to RGB uses the stream's matrix. The produce hook runs
+//! the other way: this crate links no CUDA and cannot allocate device memory, so
+//! the Python source allocates the surface and hands back two CAI-exporting
+//! objects, which the frame holds as its keep-alive. `g2g_process_cuda` may return such a pair too, and the host then
 //! sends a frame over those planes in place of the input, with the input's
 //! timing, sequence and metadata.
 //!
@@ -126,8 +129,8 @@ use pyo3::types::{PyBytes, PyDict};
 use g2g_core::log::Target;
 use g2g_core::runtime::{bounded, Receiver};
 use g2g_core::{
-    g2g_warn, Caps, Dim, Frame, FrameTiming, G2gError, HardwareError, MemoryDomain, PropValue,
-    RawVideoFormat, SystemSlice,
+    g2g_warn, Caps, Colorimetry, Dim, Frame, FrameTiming, G2gError, HardwareError, MemoryDomain,
+    PropValue, RawVideoFormat, SystemSlice,
 };
 
 use crate::cuda_plane::{nv12_planes, produced_cuda_buffer, CudaPlane};
@@ -176,6 +179,7 @@ enum JobCaps {
         width: u32,
         height: u32,
         fmt: RawVideoFormat,
+        colorimetry: Colorimetry,
     },
     /// The negotiated caps, handed to Python as its `gst-launch` string.
     Payload(Caps),
@@ -184,7 +188,9 @@ enum JobCaps {
 impl JobCaps {
     fn video(&self) -> Option<(u32, u32, RawVideoFormat)> {
         match self {
-            JobCaps::RawVideo { width, height, fmt } => Some((*width, *height, *fmt)),
+            JobCaps::RawVideo {
+                width, height, fmt, ..
+            } => Some((*width, *height, *fmt)),
             JobCaps::Payload(_) => None,
         }
     }
@@ -1055,7 +1061,9 @@ fn call_system(
             )?;
             true
         }
-        JobCaps::RawVideo { width, height, fmt } => {
+        JobCaps::RawVideo {
+            width, height, fmt, ..
+        } => {
             let (w, h, fmt) = (*width, *height, format_to_py(*fmt));
             match job.kind {
                 JobKind::Batch => {
@@ -1104,7 +1112,22 @@ fn call_system(
 fn cuda_geometry(job: &Job) -> PyResult<(u32, u32, RawVideoFormat)> {
     job.caps
         .video()
-        .ok_or_else(|| PyRuntimeError::new_err("a GPU job needs raw-video caps"))
+        .ok_or_else(|| PyRuntimeError::new_err(GPU_JOB_NEEDS_RAW_VIDEO))
+}
+
+const GPU_JOB_NEEDS_RAW_VIDEO: &str = "a GPU job needs raw-video caps";
+
+/// The `(kr, kb, full_range)` tuple `g2g_process_cuda` receives.
+fn cuda_yuv_conversion(job: &Job) -> PyResult<(f32, f32, bool)> {
+    let JobCaps::RawVideo { colorimetry, .. } = &job.caps else {
+        return Err(PyRuntimeError::new_err(GPU_JOB_NEEDS_RAW_VIDEO));
+    };
+    let conversion = colorimetry.yuv_conversion();
+    Ok((
+        conversion.luma.kr,
+        conversion.luma.kb,
+        conversion.full_range,
+    ))
 }
 
 /// Call the hosted element with the GPU frame's two planes described by CAI, so
@@ -1121,6 +1144,7 @@ fn call_cuda(
 ) -> PyResult<bool> {
     let planes = [Py::new(py, luma)?, Py::new(py, chroma)?];
     let (width, height, fmt) = cuda_geometry(job)?;
+    let yuv_conversion = cuda_yuv_conversion(job)?;
     let bound = instance.bind(py);
     let returned = bound.call_method1(
         CUDA_HOOK,
@@ -1129,6 +1153,7 @@ fn call_cuda(
             planes[1].clone_ref(py),
             width,
             height,
+            yuv_conversion,
             sink.clone_ref(py),
         ),
     )?;
@@ -1448,11 +1473,13 @@ fn raw_video_caps(caps: &Caps) -> Result<JobCaps, G2gError> {
             format,
             width,
             height,
+            colorimetry,
             ..
         } => Ok(JobCaps::RawVideo {
             width: dim_fixed(width)?,
             height: dim_fixed(height)?,
             fmt: *format,
+            colorimetry: *colorimetry,
         }),
         _ => Err(G2gError::CapsMismatch),
     }

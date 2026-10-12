@@ -117,6 +117,8 @@ use crate::alsasrc::AlsaSrc;
 use crate::av1enc::Av1Enc;
 #[cfg(all(target_os = "android", feature = "camera2"))]
 use crate::camera2src::Camera2Src;
+#[cfg(all(target_os = "linux", feature = "cuda-gl"))]
+use crate::cudaglsink::CudaGlSink;
 #[cfg(feature = "dash")]
 use crate::dashsrc::DashSrc;
 #[cfg(feature = "dav1d")]
@@ -232,8 +234,6 @@ use crate::vorbisdec::VorbisDec;
 use crate::vpxenc::VpxEnc;
 #[cfg(all(target_os = "linux", feature = "wayland-sink"))]
 use crate::waylandsink::WaylandSink;
-#[cfg(all(target_os = "linux", feature = "cuda-gl"))]
-use crate::cudaglsink::CudaGlSink;
 #[cfg(feature = "webp")]
 use crate::webpdec::WebPDec;
 #[cfg(feature = "webrtcdsp")]

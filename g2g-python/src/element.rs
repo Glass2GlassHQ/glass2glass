@@ -83,8 +83,8 @@ pub struct PyTransform {
     last_run_ns: u64,
     late_dropped: u64,
     configured: bool,
-    /// The negotiated, fully fixed input caps captured at configure time, so
-    /// `process` knows the concrete geometry / format to hand Python.
+    /// The negotiated, fully fixed input caps from configure or the latest
+    /// accepted `CapsChanged`, so `process` knows what to hand Python.
     fixed: Option<Caps>,
     emitted: u64,
     /// The hosted Python element on its own GIL-owning worker thread, spawned
@@ -398,6 +398,7 @@ impl AsyncElement for PyTransform {
                 PipelinePacket::CapsChanged(c) => {
                     c.intersect(&self.accept)?;
                     let announce = self.output_for(&c);
+                    self.fixed = Some(c);
                     out.push(PipelinePacket::CapsChanged(announce)).await?;
                 }
                 PipelinePacket::Flush => {

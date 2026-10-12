@@ -107,6 +107,8 @@ pub struct NvDec {
     /// Caps of the last frame emitted; a decoded frame whose format / geometry
     /// differs (a mid-stream resolution or bit-depth change) re-announces.
     last_caps: Option<Caps>,
+    /// Latest input caps, refined mid-stream with the parser's VUI colorimetry.
+    input_caps: Option<Caps>,
     /// Frames the parser holds back before displaying (`CUVIDPARSERPARAMS::
     /// ulMaxDisplayDelay`): 1 keeps glass-to-glass tight, higher values pipeline
     /// decode against display at the cost of latency. Applied when the parser
@@ -237,6 +239,7 @@ impl NvDec {
             }),
             emitted: 0,
             last_caps: None,
+            input_caps: None,
             max_display_delay: DEFAULT_MAX_DISPLAY_DELAY,
             num_output_surfaces: DEFAULT_NUM_OUTPUT_SURFACES,
             cuda_device_id: crate::cudadeviceid::DEFAULT_CUDA_DEVICE_ID,
@@ -323,13 +326,19 @@ impl NvDec {
 
     /// The output caps for one decoded frame's format and geometry.
     fn frame_caps(&self, format: RawVideoFormat, w: u32, h: u32) -> Caps {
+        // The bitstream's colour description rides through decode unchanged
+        // (Unknown when the input caps carry none, never a guess here).
+        let colorimetry = match &self.input_caps {
+            Some(Caps::CompressedVideo { colorimetry, .. }) => *colorimetry,
+            _ => g2g_core::Colorimetry::UNKNOWN,
+        };
         Caps::RawVideo {
             format,
             width: Dim::Fixed(w),
             height: Dim::Fixed(h),
             framerate: self.framerate.clone(),
             interlace: g2g_core::Interlace::Any,
-            colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            colorimetry,
         }
     }
 
@@ -446,6 +455,23 @@ impl NvDec {
             // resolution or bit-depth change re-announces before its first frame.
             let caps = self.frame_caps(f.format, f.buffer.width, f.buffer.height);
             if self.last_caps.as_ref() != Some(&caps) {
+                // M16: decode-time caps must overlap the derived output at matching geometry.
+                #[cfg(debug_assertions)]
+                if let Some(input) = self.input_caps.as_ref() {
+                    let geometry_matches = matches!(
+                        input,
+                        Caps::CompressedVideo { width, height, .. }
+                            if *width == Dim::Fixed(f.buffer.width)
+                                && *height == Dim::Fixed(f.buffer.height)
+                    );
+                    if geometry_matches {
+                        let expected = derive_output_caps(input);
+                        debug_assert!(
+                            !expected.intersect(&CapsSet::one(caps.clone())).is_empty(),
+                            "nvdec decode-time output {caps:?} inconsistent with derive_output_caps({input:?}) = {expected:?}"
+                        );
+                    }
+                }
                 out.push(PipelinePacket::CapsChanged(caps.clone())).await?;
                 self.last_caps = Some(caps);
             }
@@ -890,32 +916,12 @@ impl AsyncElement for NvDec {
     }
 
     /// Native `DerivedOutput`: a supported codec (any geometry) in, NV12 or (for a
-    /// 10-/12-bit stream) P010 at the same dims and framerate out. Any other input
-    /// yields an empty set, rejected at solve. The runtime `CapsChanged` carries
-    /// the actual decoded (cropped) dims and the depth the stream turned out to be.
+    /// 10-/12-bit stream) P010 at the same dims, framerate and colorimetry out.
+    /// Any other input yields an empty set, rejected at solve. The runtime
+    /// `CapsChanged` carries the actual decoded (cropped) dims and the depth the
+    /// stream turned out to be.
     fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
-        CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
-            Caps::CompressedVideo {
-                codec: VideoCodec::H264 | VideoCodec::H265 | VideoCodec::Av1,
-                width,
-                height,
-                framerate,
-                ..
-            } => CapsSet::from_alternatives(
-                [RawVideoFormat::Nv12, RawVideoFormat::P010]
-                    .into_iter()
-                    .map(|format| Caps::RawVideo {
-                        format,
-                        width: width.clone(),
-                        height: height.clone(),
-                        framerate: framerate.clone(),
-                        interlace: g2g_core::Interlace::Any,
-                        colorimetry: g2g_core::Colorimetry::UNKNOWN,
-                    })
-                    .collect(),
-            ),
-            _ => CapsSet::from_alternatives(Vec::new()),
-        }))
+        CapsConstraint::DerivedOutput(Box::new(derive_output_caps))
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -938,6 +944,7 @@ impl AsyncElement for NvDec {
             self.height = *h;
         }
         self.framerate = framerate.clone();
+        self.input_caps = Some(absolute_caps.clone());
         self.open()?;
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
@@ -1045,6 +1052,10 @@ impl AsyncElement for NvDec {
                     let frames = self.parse(&[], 0, true)?;
                     self.emit(frames, out).await?;
                 }
+                // The decoder announces its own raw caps from the decoded frames.
+                PipelinePacket::CapsChanged(caps @ Caps::CompressedVideo { .. }) => {
+                    self.input_caps = Some(caps);
+                }
                 PipelinePacket::CapsChanged(_) => {}
                 other => {
                     out.push(other).await?;
@@ -1052,6 +1063,31 @@ impl AsyncElement for NvDec {
             }
             Ok(())
         })
+    }
+}
+
+fn derive_output_caps(input: &Caps) -> CapsSet {
+    match input {
+        Caps::CompressedVideo {
+            codec: VideoCodec::H264 | VideoCodec::H265 | VideoCodec::Av1,
+            width,
+            height,
+            framerate,
+            colorimetry,
+        } => CapsSet::from_alternatives(
+            [RawVideoFormat::Nv12, RawVideoFormat::P010]
+                .into_iter()
+                .map(|format| Caps::RawVideo {
+                    format,
+                    width: width.clone(),
+                    height: height.clone(),
+                    framerate: framerate.clone(),
+                    interlace: g2g_core::Interlace::Any,
+                    colorimetry: *colorimetry,
+                })
+                .collect(),
+        ),
+        _ => CapsSet::from_alternatives(Vec::new()),
     }
 }
 
@@ -1413,6 +1449,46 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[tokio::test]
+    async fn raw_output_carries_the_input_colorimetry() {
+        let bt709_input = Caps::CompressedVideo {
+            codec: VideoCodec::H264,
+            width: Dim::Fixed(1920),
+            height: Dim::Fixed(1080),
+            framerate: Rate::Fixed(30 << 16),
+            colorimetry: g2g_core::Colorimetry::BT709,
+        };
+        let raw_colorimetry = |caps: &Caps| match caps {
+            Caps::RawVideo { colorimetry, .. } => *colorimetry,
+            other => panic!("expected raw video, got {other:?}"),
+        };
+        let mut d = NvDec::new();
+        {
+            let CapsConstraint::DerivedOutput(derive) = d.caps_constraint_as_transform() else {
+                panic!("expected DerivedOutput");
+            };
+            let derived = derive(&bt709_input);
+            assert!(!derived.alternatives().is_empty());
+            for alternative in derived.alternatives() {
+                assert_eq!(raw_colorimetry(alternative), g2g_core::Colorimetry::BT709);
+            }
+        }
+        // Skips opening the parser, which needs NVDEC: a CapsChanged never reaches it.
+        d.configured = true;
+        let mut sink = RecordSink::default();
+        d.process(PipelinePacket::CapsChanged(bt709_input), &mut sink)
+            .await
+            .expect("refined input caps are accepted");
+        assert!(
+            sink.caps.is_empty(),
+            "the compressed caps are not forwarded"
+        );
+        assert_eq!(
+            raw_colorimetry(&d.frame_caps(RawVideoFormat::Nv12, 1920, 1080)),
+            g2g_core::Colorimetry::BT709
+        );
     }
 
     #[test]

@@ -438,14 +438,17 @@ are checked when the pipeline starts.
 ### CUDA device memory
 
 A `MemoryDomain::Cuda` frame has no CPU bytes, so its two semi-planar planes are
-described to `g2g_process_cuda(luma, chroma, width, height, meta)` as
-`g2g.CudaPlane` objects exposing `__cuda_array_interface__` v3: luma
+described to `g2g_process_cuda(luma, chroma, width, height, yuv_conversion, meta)`
+as `g2g.CudaPlane` objects exposing `__cuda_array_interface__` v3: luma
 `(height, width)` and interleaved chroma `(height/2, width/2, 2)`, byte strides
 carrying the producer's row pitch so a pitch that is not the width is described
 rather than repacked, `|u1` for NV12 and `<u2` for P010, and `stream: None`,
 since the CUDA domain carries no stream and a producer hands the frame over once
 the decode into it completed. `cupy.asarray(luma)` then aliases the decoder's
-surface with no PCIe round-trip.
+surface with no PCIe round-trip. `yuv_conversion` is `(kr, kb, full_range)`
+from `Colorimetry::yuv_conversion` on the frame's current caps, so an element
+converting the planes to RGB applies the stream's matrix and range, with unknown
+colorimetry resolved there to BT.601 limited.
 
 The `data` flag is read-only: the device memory belongs to the producer and a
 teed frame shares it under a read-only guarantee, with no copy-on-write to fall

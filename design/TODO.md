@@ -178,10 +178,6 @@ Highest leverage first:
   survives a re-encode there too.
 - Tag the raw output of the platform decoders that still leave colorimetry
   unknown (Media Foundation, VideoToolbox, MediaCodec, and `VaapiDec` on Intel).
-- `NvDec` leaves colorimetry `UNKNOWN` too, and the `pyelement` CUDA hook
-  carries none, so gst-python-ml converts every NV12 frame as BT.601 limited
-  range, including BT.709 clips. Tag the decoder output from the stream's VUI
-  and pass it through the hook.
 
 ## Transforms and effects
 
