@@ -64,7 +64,7 @@ pub struct PyTransform {
     /// property; `ActionTask` reads `self.draw_label`).
     draw_label: bool,
     /// Whether the hosted element works on GPU-resident CUDA frames, which it
-    /// reads through `g2g_process_cuda` and passes through untouched. It decides
+    /// reads through `g2g_process_cuda` and passes through or replaces. It decides
     /// both halves of this element's memory-domain declaration: the frame arrives
     /// and leaves in the one domain, so the two cannot disagree.
     cuda_frames: bool,
@@ -156,7 +156,7 @@ impl PyTransform {
 
     /// Host an element that works on GPU-resident CUDA frames: they reach it as
     /// `__cuda_array_interface__` planes through `g2g_process_cuda` and flow on
-    /// still device-resident. Sets this element's whole memory-domain story (see
+    /// still device-resident, as the input or as the planes the hook returns. Sets this element's whole memory-domain story (see
     /// [`AsyncElement::input_domains`]); the hosted class must define
     /// `g2g_process_cuda` and the caps must be semi-planar (NV12 / P010).
     pub fn with_cuda_frames(mut self, on: bool) -> Self {

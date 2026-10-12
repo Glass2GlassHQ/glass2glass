@@ -463,7 +463,11 @@ plane, including one a cupy array holds as its base or a consumed DLPack tensor
 holds as its manager context, fails the frame. An element that defines no hook
 for its shape gets `UnsupportedDomain` for a GPU frame rather than a silent
 readback, because `g2g-python` links no CUDA, so a CPU-only element needs an
-explicit `cudadownload` upstream.
+explicit `cudadownload` upstream. `g2g_process_cuda` may return a new
+`(luma, chroma)` pair at the input's geometry, which is validated and kept alive
+like a produced surface below and sent on in place of the input frame with the
+input's timing, sequence and metadata, under the element's `cuda_context` and
+`cuda_device` attributes. Returning `None` passes the input frame on.
 
 A GPU batch reaches a hosted aggregator as
 `g2g_process_cuda_batch(planes, width, height, meta)`, one `(luma, chroma)` pair

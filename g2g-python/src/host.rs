@@ -66,7 +66,7 @@
 //! planes are handed over as [`CudaPlane`]s instead, one hook per shape:
 //!
 //! ```text
-//! g2g_process_cuda(luma, chroma, width: int, height: int, meta)
+//! g2g_process_cuda(luma, chroma, width: int, height: int, meta) -> (luma, chroma) | None
 //! g2g_process_cuda_batch([(luma, chroma), ...], width: int, height: int, meta)
 //! g2g_produce_cuda(width: int, height: int, meta) -> (luma, chroma) | None
 //! ```
@@ -77,7 +77,9 @@
 //! the CUDA-context caveat. The produce hook runs the other way: this crate links
 //! no CUDA and cannot allocate device memory, so the Python source allocates the
 //! surface and hands back two CAI-exporting objects, which the frame holds as its
-//! keep-alive.
+//! keep-alive. `g2g_process_cuda` may return such a pair too, and the host then
+//! sends a frame over those planes in place of the input, with the input's
+//! timing, sequence and metadata.
 //!
 //! An element that does not define the hook for its shape cannot take such a
 //! frame: the host fails it with [`G2gError::UnsupportedDomain`] (it links no
@@ -142,11 +144,11 @@ const PAYLOAD_HOOK: &str = "g2g_process_payload";
 /// a pipeline naming one it has not is refused instead of silently setting an
 /// attribute nothing reads.
 const DECLARED_PROPERTIES_HOOK: &str = "g2g_properties";
-/// Optional attribute a hosted GPU source sets to report the `CUcontext` its
-/// surfaces live in, for a downstream consumer that has to push it.
+/// Optional attribute a hosted GPU source or transform sets to report the
+/// `CUcontext` its surfaces live in, for a downstream consumer that has to push it.
 const CUDA_CONTEXT_ATTR: &str = "cuda_context";
-/// Optional attribute a hosted GPU source sets to report which CUDA device it
-/// allocated on. Absent means device 0.
+/// Optional attribute a hosted GPU source or transform sets to report which CUDA
+/// device it allocated on. Absent means device 0.
 const CUDA_DEVICE_ATTR: &str = "cuda_device";
 
 static INIT: Once = Once::new();
@@ -936,7 +938,7 @@ fn process_job(
     // `Produce` job returns the Python source's bool (false = EOS).
     let produced = match handoff {
         Handoff::System(spans) => call_system(py, instance, &spans, &job, &sink),
-        Handoff::Cuda(luma, chroma) => call_cuda(py, instance, luma, chroma, &job, &sink),
+        Handoff::Cuda(luma, chroma) => call_cuda(py, instance, luma, chroma, &mut job, &sink),
         Handoff::CudaBatch(planes) => call_cuda_batch(py, instance, planes, &job, &sink),
         Handoff::ProduceCuda => call_produce_cuda(py, instance, &mut job, &sink),
     };
@@ -1106,28 +1108,45 @@ fn cuda_geometry(job: &Job) -> PyResult<(u32, u32, RawVideoFormat)> {
 }
 
 /// Call the hosted element with the GPU frame's two planes described by CAI, so
-/// the Python side maps them into cupy / torch without a device->host copy.
+/// the Python side maps them into cupy / torch without a device->host copy. A
+/// truthy return is a new `(luma, chroma)` pair that replaces the frame's memory,
+/// kept alive and described like a produced surface.
 fn call_cuda(
     py: Python<'_>,
     instance: &Py<PyAny>,
     luma: CudaPlane,
     chroma: CudaPlane,
-    job: &Job,
+    job: &mut Job,
     sink: &Py<MetaSink>,
 ) -> PyResult<bool> {
     let planes = [Py::new(py, luma)?, Py::new(py, chroma)?];
-    let (w, h, _) = cuda_geometry(job)?;
-    instance.bind(py).call_method1(
+    let (width, height, fmt) = cuda_geometry(job)?;
+    let bound = instance.bind(py);
+    let returned = bound.call_method1(
         CUDA_HOOK,
         (
             planes[0].clone_ref(py),
             planes[1].clone_ref(py),
-            w,
-            h,
+            width,
+            height,
             sink.clone_ref(py),
         ),
     )?;
-    planes_released(py, &planes)
+    // `returned` is still alive here: an input plane handed back counts as retained.
+    planes_released(py, &planes)?;
+    if !returned.is_truthy()? {
+        return Ok(true);
+    }
+    let (luma, chroma): (Bound<'_, PyAny>, Bound<'_, PyAny>) = returned.extract()?;
+    let context = reported_cuda_context(bound)?;
+    let device_ordinal = reported_cuda_device(bound)?;
+    let buffer = produced_cuda_buffer(&luma, &chroma, fmt, width, height, context, device_ordinal)?;
+    let frame = job
+        .frames
+        .first_mut()
+        .expect("a GPU transform job has one frame");
+    frame.domain = MemoryDomain::Cuda(buffer);
+    Ok(true)
 }
 
 /// Call the hosted aggregator with one plane pair per contributing input, as a
@@ -1189,7 +1208,7 @@ fn call_produce_cuda(
     Ok(true)
 }
 
-/// The `CUcontext` a hosted GPU source reports through its optional
+/// The `CUcontext` a hosted GPU element reports through its optional
 /// `cuda_context` attribute, or zero when it reports none.
 fn reported_cuda_context(instance: &Bound<'_, PyAny>) -> PyResult<u64> {
     match instance.getattr(CUDA_CONTEXT_ATTR) {
@@ -1198,7 +1217,7 @@ fn reported_cuda_context(instance: &Bound<'_, PyAny>) -> PyResult<u64> {
     }
 }
 
-/// The CUDA device ordinal a hosted GPU source reports through its optional
+/// The CUDA device ordinal a hosted GPU element reports through its optional
 /// `cuda_device` attribute, or zero when it reports none.
 fn reported_cuda_device(instance: &Bound<'_, PyAny>) -> PyResult<i32> {
     match instance.getattr(CUDA_DEVICE_ATTR) {

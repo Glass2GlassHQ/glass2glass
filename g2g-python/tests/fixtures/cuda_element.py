@@ -446,3 +446,72 @@ class DescribedCudaSource:
             DESCRIBED_PTR + pitch * height,
         )
         return luma, chroma
+
+
+RETURNED_LUMA_VALUE = 0x3C
+RETURNED_CHROMA_VALUE = 0x5A
+
+
+def _current_cuda_context():
+    """The `CUcontext` current on this thread, read from the driver, since torch
+    does not expose it."""
+    import ctypes
+
+    context = ctypes.c_void_p()
+    status = ctypes.CDLL("libcuda.so.1").cuCtxGetCurrent(ctypes.byref(context))
+    assert status == 0, f"cuCtxGetCurrent failed with {status}"
+    return context.value or 0
+
+
+class TorchFrameReturner:
+    """Allocates two fresh packed torch planes, fills them with a recognisable
+    value, stages a blob, and returns them so the host sends them on in place of
+    the input frame. Keeps nothing itself: the frame is the planes' only owner."""
+
+    def g2g_process_cuda(self, luma, chroma, width, height, meta):
+        import torch
+
+        device = torch.device("cuda", torch.cuda.current_device())
+        new_luma = torch.full(
+            (height, width), RETURNED_LUMA_VALUE, dtype=torch.uint8, device=device
+        )
+        new_chroma = torch.full(
+            (height // 2, width // 2, 2),
+            RETURNED_CHROMA_VALUE,
+            dtype=torch.uint8,
+            device=device,
+        )
+        torch.cuda.synchronize()
+        self.cuda_context = _current_cuda_context()
+        self.cuda_device = device.index
+        OBSERVED["returned_luma_ptr"] = int(new_luma.data_ptr())
+        OBSERVED["returned_chroma_ptr"] = int(new_chroma.data_ptr())
+        OBSERVED["returned_context"] = self.cuda_context
+        OBSERVED["returned_device"] = self.cuda_device
+        meta.add_blob("returned", b"yes")
+        return new_luma, new_chroma
+
+
+class NoneReturner:
+    """Returns `None` explicitly, which keeps the input frame."""
+
+    def g2g_process_cuda(self, luma, chroma, width, height, meta):
+        return None
+
+
+class InputReturner:
+    """Misbehaves: hands the input planes back, whose memory the host releases
+    when it replaces the input frame. The host must reject this."""
+
+    def g2g_process_cuda(self, luma, chroma, width, height, meta):
+        return luma, chroma
+
+
+def read_device_byte(pointer):
+    """One byte of device memory at `pointer`, read through torch's CAI import."""
+    import torch
+
+    plane = _Writable(
+        {"shape": (1,), "typestr": "|u1", "data": (pointer, False), "version": 3}
+    )
+    return int(torch.as_tensor(plane)[0])
