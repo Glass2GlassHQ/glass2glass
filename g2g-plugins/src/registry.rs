@@ -232,6 +232,8 @@ use crate::vorbisdec::VorbisDec;
 use crate::vpxenc::VpxEnc;
 #[cfg(all(target_os = "linux", feature = "wayland-sink"))]
 use crate::waylandsink::WaylandSink;
+#[cfg(all(target_os = "linux", feature = "cuda-gl"))]
+use crate::cudaglsink::CudaGlSink;
 #[cfg(feature = "webp")]
 use crate::webpdec::WebPDec;
 #[cfg(feature = "webrtcdsp")]
@@ -2535,6 +2537,7 @@ pub static FEATURE_GATED_ELEMENTS: &[FeatureGatedElement] = &{
         "dmabuftowgpu" => "dmabuf-wgpu" on "linux";
         "wgputodmabuf" => "dmabuf-wgpu" on "linux";
         "waylandsink" => "wayland-sink" on "linux";
+        "cudaglsink" => "cuda-gl" on "linux";
         "wgpusink" => "wgpu-present" on "linux";
         "kmssink" => "kms-sink" on "linux";
         "alsasink" => "alsa-sink" on "linux";
@@ -3271,6 +3274,13 @@ fn register_feature_gated(reg: &mut Registry) {
     #[cfg(all(target_os = "linux", feature = "wayland-sink"))]
     reg.register_launch(
         LaunchFactory::new("waylandsink", Vec::new(), || Box::new(WaylandSink::new()))
+            .with_usable(crate::waylanddisplay::compositor_reachable)
+            .with_experimental(),
+    );
+    // Presents an nvdec NV12 surface from CUDA memory with no host copy.
+    #[cfg(all(target_os = "linux", feature = "cuda-gl"))]
+    reg.register_launch(
+        LaunchFactory::new("cudaglsink", Vec::new(), || Box::new(CudaGlSink::new()))
             .with_usable(crate::waylanddisplay::compositor_reachable)
             .with_experimental(),
     );

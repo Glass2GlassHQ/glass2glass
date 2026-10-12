@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1224: `cudaglsink` is registered in the launcher registry under its gst name, so `g2g-launch` pipelines can present nvdec output from CUDA memory.
 - M1223: a hosted `g2g_process_cuda` can return a new `(luma, chroma)` pair of CUDA planes, which `pyelement` sends on in place of the input frame with its timing and metadata.
 - M1222: negotiation names a transform whose derived output is empty for its input (`NegotiationFailure::NoOutputForInput`) instead of reporting a mismatch with the element below it.
 - M1221: `pyelement` passes a downstream QoS report on to the elements upstream of it as well as acting on it (`AsyncElement::relays_qos`).
