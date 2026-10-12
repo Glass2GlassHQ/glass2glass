@@ -350,7 +350,9 @@ so a report on one of them gives the downstream delay, the time from its push to
 the sink's verdict. It drops a frame, before any Python call, when the frame's
 running time plus the sink's 20 ms bound is below that clock advanced to now plus
 the hosted element's last run time and the downstream delay, that is when the
-frame would reach the sink later than the sink accepts. Every pyelement in a chain
+frame would reach the sink later than the sink accepts. The last run time counts
+only for 100 ms after that run (`RUN_TIME_STALE_AFTER_NS`): a dropped frame never
+runs, so one run that ran long would otherwise drop every frame after it. Every pyelement in a chain
 reaches the same verdict on a frame, since one further downstream judges it later
 but has that much less delay ahead of it. A hosted detector slower than the stream
 then runs on the frames the display can still show, one every run time, instead of

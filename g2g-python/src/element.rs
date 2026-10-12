@@ -39,6 +39,8 @@ use crate::format::{format_from_py, format_to_py, frame_bytes};
 use crate::props::{fixed_caps, hosted_element_props, HostedClassProperties};
 
 const RECENT_PUSH_CAPACITY: usize = 64;
+// a run that ran long once must not drop every later frame, a dropped frame never runs to correct it
+const RUN_TIME_STALE_AFTER_NS: u64 = 100_000_000;
 
 #[derive(Debug, Clone, Copy)]
 struct SinkClock {
@@ -94,6 +96,7 @@ pub struct PyTransform {
     downstream_delay_ns: u64,
     recent_pushes: VecDeque<RecentPush>,
     last_run_ns: u64,
+    last_run_measured_ns: u64,
     late_dropped: u64,
     configured: bool,
     /// The negotiated, fully fixed input caps from configure or the latest
@@ -133,6 +136,7 @@ impl PyTransform {
             downstream_delay_ns: 0,
             recent_pushes: VecDeque::with_capacity(RECENT_PUSH_CAPACITY),
             last_run_ns: 0,
+            last_run_measured_ns: 0,
             late_dropped: 0,
             configured: false,
             fixed: None,
@@ -215,11 +219,15 @@ impl PyTransform {
         let Some(running_time) = self.running_time(frame) else {
             return false;
         };
-        let elapsed_ns = monotonic_ns().saturating_sub(sink_clock.taken_ns);
+        let now_ns = monotonic_ns();
+        let elapsed_ns = now_ns.saturating_sub(sink_clock.taken_ns);
+        let run_is_fresh =
+            now_ns.saturating_sub(self.last_run_measured_ns) <= RUN_TIME_STALE_AFTER_NS;
+        let predicted_run_ns = if run_is_fresh { self.last_run_ns } else { 0 };
         let reaches_sink_at = sink_clock
             .running_time_ns
             .saturating_add(elapsed_ns)
-            .saturating_add(self.last_run_ns)
+            .saturating_add(predicted_run_ns)
             .saturating_add(self.downstream_delay_ns);
         running_time.saturating_add(VIDEO_SINK_MAX_LATENESS_NS) < reaches_sink_at
     }
@@ -429,6 +437,7 @@ impl AsyncElement for PyTransform {
                     let outputs = self.run(frame).await?;
                     self.last_run_ns =
                         u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                    self.last_run_measured_ns = monotonic_ns();
                     for output in outputs {
                         self.push_frame(output, out).await?;
                     }

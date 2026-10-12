@@ -235,6 +235,44 @@ fn a_frame_that_would_be_late_after_the_run_time_is_dropped() {
 }
 
 #[test]
+fn a_run_time_measured_long_ago_no_longer_predicts() {
+    let mut element = hosted("m1220_element", "SlowTransform");
+    let mut sink = LateSink::default();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    let process = |element: &mut PyTransform, sink: &mut LateSink, pts_ns, sequence| {
+        runtime
+            .block_on(element.process(PipelinePacket::DataFrame(frame(pts_ns, sequence)), sink))
+            .unwrap();
+    };
+    // the sink is on time at frame 0, the 30 ms run alone makes 5 ms late
+    sink.report = Some(QosMessage {
+        jitter_ns: 0,
+        running_time_ns: 0,
+        taken_ns: 0,
+    });
+    process(&mut element, &mut sink, 0, 0);
+    process(&mut element, &mut sink, 5_000_000, 1);
+    assert_eq!(
+        element.late_dropped_count(),
+        1,
+        "5 ms is late by the fresh run"
+    );
+
+    // 155 ms is within the bound at 150 ms but not with a 30 ms run added
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    process(&mut element, &mut sink, 155_000_000, 2);
+    assert_eq!(
+        element.late_dropped_count(),
+        1,
+        "a run measured 150 ms ago no longer predicts"
+    );
+    assert_eq!(sink.packets.len(), 2);
+    assert_eq!(calls(&sink.packets[1]), 2);
+}
+
+#[test]
 fn an_early_report_ends_the_drops_a_late_one_started() {
     let mut element = counting_element();
     let mut sink = LateSink::default();

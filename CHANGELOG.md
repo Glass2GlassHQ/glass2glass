@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1228: `pyelement` counts the hosted element's last run time toward a frame's lateness only for 100 ms after that run (`RUN_TIME_STALE_AFTER_NS`), so one slow run no longer drops every frame after it until the stream ends.
 - M1227: `nvdec` keeps its open parser and CUDA context when a parser refines the caps mid-stream, instead of opening new ones and leaking the old parser.
 - M1226: a sink pacing through `PresentationPacer` reports its lateness upstream at most every 100 ms while it presents frames (`UPSTREAM_QOS_INTERVAL_NS`), not only when it drops one, and `pyelement` drops a frame only when it would reach the sink past the sink's 20 ms bound, counting the delay it measured from its push to the sink.
 - M1225: `nvdec` tags its raw output with the input stream's colorimetry, and a hosted `g2g_process_cuda` receives the frame's YUV conversion as `(kr, kb, full_range)`.
