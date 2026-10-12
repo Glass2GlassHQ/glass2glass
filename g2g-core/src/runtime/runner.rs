@@ -2269,9 +2269,10 @@ where
         // transform (its `process` push outcome is discarded). M720 extends the
         // same hop to keyframe requests / bitrate targets the transform does
         // not consume itself; M997 does the same for QoS, so a decoder that
-        // sheds work itself observes the report instead of relaying it.
-        if !transform.handles_qos() {
-            adapter.relay_qos_to(link1_rx.qos_slot());
+        // sheds work itself observes the report instead of relaying it. A
+        // pyelement both observes and relays it (`relays_qos`).
+        if transform.relays_qos() {
+            adapter.relay_qos_to(link1_rx.qos_slot(), transform.handles_qos());
         }
         adapter.relay_reconfigure_to(
             link1_rx.reconfigure_slot(),

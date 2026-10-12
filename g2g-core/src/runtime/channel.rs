@@ -933,6 +933,11 @@ pub struct SenderSink {
     /// slot instead, forwarding it one hop toward the source. A generic
     /// transform thus relays QoS without having to observe it in `process`.
     upstream_qos: Option<QosSlot>,
+    /// Whether a QoS report surfaces as [`PushOutcome::Qos`] to this adapter's
+    /// producer. `true` on a source's adapter and for a transform that
+    /// [`handles_qos`](crate::element::AsyncElement::handles_qos), which with
+    /// `upstream_qos` set both observes the report and relays it.
+    qos_answered: bool,
     /// As `upstream_qos`, for downstream reverse-channel `Reconfigure`s the
     /// producer does not answer (M720): set on a transform's output adapter.
     upstream_reconfigure: Option<ReconfigureSlot>,
@@ -1048,6 +1053,7 @@ impl SenderSink {
             link,
             probe,
             upstream_qos: None,
+            qos_answered: true,
             upstream_reconfigure: None,
             reconfigure_answered: ReconfigureAnswered::default(),
             upstream_bitrate: None,
@@ -1122,11 +1128,14 @@ impl SenderSink {
         self.probe.clone()
     }
 
-    /// Make this adapter relay any downstream QoS report onto `upstream` (the
-    /// owning transform's input link) rather than surfacing it (M175). The
-    /// runner wires this so QoS propagates source-ward through a transform.
-    pub(crate) fn relay_qos_to(&mut self, upstream: QosSlot) {
+    /// Make this adapter relay any downstream QoS report onto `upstream`, the
+    /// owning transform's input link (M175), and also surface it to the
+    /// transform when `answered` (it
+    /// [`handles_qos`](crate::element::AsyncElement::handles_qos)). The runner
+    /// wires this so QoS propagates source-ward through a transform.
+    pub(crate) fn relay_qos_to(&mut self, upstream: QosSlot, answered: bool) {
         self.upstream_qos = Some(upstream);
+        self.qos_answered = answered;
     }
 
     /// Relay onto the upstream link (M720) every downstream `Reconfigure` the
@@ -1151,7 +1160,7 @@ impl SenderSink {
     /// signal (reconfigure first, then QoS), else `Accepted`. Reconfigure takes
     /// priority because it is negotiation-critical; QoS is advisory. When a
     /// relay target is set (a transform adapter), an observed QoS is forwarded
-    /// upstream and the outcome stays `Accepted` rather than surfacing `Qos`.
+    /// upstream, and surfaces as `Qos` only when the transform answers it.
     /// Drain a pending downstream reconfigure. A variant this adapter's
     /// producer answers ([`ReconfigureAnswered`]) is returned for it to observe;
     /// anything else goes onto the upstream link when a relay target is set
@@ -1188,9 +1197,11 @@ impl SenderSink {
             return PushOutcome::Reconfigure(r);
         }
         if let Some(q) = self.link.qos.take() {
-            match &self.upstream_qos {
-                Some(upstream) => upstream.store(q),
-                None => return PushOutcome::Qos(q),
+            if let Some(upstream) = &self.upstream_qos {
+                upstream.store(q);
+            }
+            if self.qos_answered {
+                return PushOutcome::Qos(q);
             }
         }
         if let Some(bps) = self.link.bitrate.take() {
@@ -1603,6 +1614,37 @@ mod link_tests {
             matches!(second, PushOutcome::Qos(_)),
             "QoS surfaces once reconfigure drained"
         );
+    }
+
+    #[test]
+    fn an_answered_qos_report_surfaces_and_still_travels_upstream() {
+        let report = QosMessage {
+            jitter_ns: 5_000_000,
+            running_time_ns: 100,
+            taken_ns: 0,
+        };
+        for answered in [true, false] {
+            let (up_tx, up_rx) = link(2);
+            let (down_tx, down_rx) = link(2);
+            // Only the upstream link's reverse slot is used.
+            drop(up_tx);
+            let mut adapter = SenderSink::new(down_tx);
+            adapter.relay_qos_to(up_rx.qos_slot(), answered);
+
+            down_rx.request_qos(report);
+            let outcome = run_to_ready(adapter.push(dummy_frame())).expect("push ok");
+            let expected = if answered {
+                PushOutcome::Qos(report)
+            } else {
+                PushOutcome::Accepted
+            };
+            assert_eq!(outcome, expected, "answered={answered}");
+            assert_eq!(
+                up_rx.qos.take(),
+                Some(report),
+                "the report reaches the upstream link either way (answered={answered})"
+            );
+        }
     }
 
     #[test]

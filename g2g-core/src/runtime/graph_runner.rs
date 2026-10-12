@@ -4162,9 +4162,10 @@ pub async fn transform_arm<E: AsyncElement>(
     // consume them itself, so a PLI / BWE estimate crosses a parser between
     // the encoder and a WebRTC sink. M997 does the same for QoS: an element
     // that sheds work on a report (a decoder skipping non-reference frames)
-    // observes it instead.
-    if !elem.handles_qos() {
-        adapter.relay_qos_to(in_rx.qos_slot());
+    // observes it instead. A pyelement both observes and relays it
+    // (`relays_qos`).
+    if elem.relays_qos() {
+        adapter.relay_qos_to(in_rx.qos_slot(), elem.handles_qos());
     }
     adapter.relay_reconfigure_to(
         in_rx.reconfigure_slot(),

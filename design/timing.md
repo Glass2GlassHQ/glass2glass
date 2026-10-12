@@ -324,14 +324,21 @@ transforms the report walks one hop at a time back to the source. The element's
 `process` is unaffected.
 
 Acting on the report is the other half. An element that returns `true` from
-`AsyncElement::handles_qos` is not relayed past, so it observes the report as
-`PushOutcome::Qos` from its own `push` and sheds work itself, the same opt-out
-`handles_keyframe_requests` and `handles_bitrate_requests` give an encoder.
+`AsyncElement::handles_qos` observes the report as `PushOutcome::Qos` from its own
+`push` and sheds work itself, the same opt-out `handles_keyframe_requests` and
+`handles_bitrate_requests` give an encoder. By default such an element is not
+relayed past. One that also returns `true` from `AsyncElement::relays_qos` gets
+both: the output adapter stores the report onto the input link and surfaces it.
 
-`pyelement` does that under its `qos` property, on by default. `GstBaseTransform`
-drops every frame up to the late frame's running time plus its jitter, which for
-an element slower than the stream picks the frame due right now, and that frame
-is late again by one run when it reaches the sink, so the display freezes.
+`pyelement` does that under its `qos` property, on by default, and relays the
+report, so every element above it sheds work too, as a GStreamer QoS event
+travels through every element. A detector upstream of an overlay pyelement
+then drops a late frame before inference instead of the overlay dropping its
+result.
+
+`GstBaseTransform` drops every frame up to the late frame's running time plus its
+jitter, which for an element slower than the stream picks the frame due right
+now, and that frame is late again by one run when it reaches the sink, so the display freezes.
 `pyelement` instead reads the report as the sink's clock, the late frame's
 running time plus its jitter, at the moment the sink judged the frame, which the
 report carries as `taken_ns` since the relay delivers it one push per element

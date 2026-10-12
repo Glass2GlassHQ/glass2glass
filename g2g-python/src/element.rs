@@ -422,6 +422,11 @@ impl AsyncElement for PyTransform {
         self.qos
     }
 
+    // Elements upstream still do their work on every frame this one drops.
+    fn relays_qos(&self) -> bool {
+        true
+    }
+
     fn metadata(&self) -> ElementMetadata {
         ElementMetadata::new(
             "Python ML element host",
