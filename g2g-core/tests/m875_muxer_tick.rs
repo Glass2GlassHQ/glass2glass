@@ -23,6 +23,7 @@ use core::pin::Pin;
 use core::task::{Context, Poll};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use g2g_core::fanout::MultiInputElement;
 use g2g_core::memory::{MemoryDomain, SystemSlice};
@@ -36,10 +37,11 @@ use g2g_core::{
 
 const TICK_NS: u64 = 33_000_000;
 
-/// Spin bound for the fixtures that wait on a tick count: a runner that never ticks
-/// ends the run and fails an assertion instead of hanging. Generous because the
-/// threaded run's waiting source races real thread startup, not just a sibling task.
-const MAX_SPINS: usize = 200_000;
+/// Wall-clock bound for the fixtures that wait on a tick count: a runner that never
+/// ticks ends the run and fails an assertion instead of hanging. Generous because the
+/// threaded run's waiting source races real thread startup on a loaded machine, not
+/// just a sibling task.
+const MAX_TICK_WAIT: Duration = Duration::from_secs(10);
 
 fn caps() -> Caps {
     Caps::RawVideo {
@@ -229,10 +231,11 @@ impl SourceLoop for StallSrc {
 
     fn run<'a>(&'a mut self, out: &'a mut dyn OutputSink) -> Self::RunFuture<'a> {
         Box::pin(async move {
-            let mut spins = 0;
-            while self.ticks.load(Ordering::Acquire) < self.stall_until_ticks && spins < MAX_SPINS {
+            let deadline = Instant::now() + MAX_TICK_WAIT;
+            while self.ticks.load(Ordering::Acquire) < self.stall_until_ticks
+                && Instant::now() < deadline
+            {
                 yield_once().await;
-                spins += 1;
             }
             out.push(frame(0)).await?;
             out.push(PipelinePacket::Eos).await?;
@@ -274,10 +277,11 @@ impl SourceLoop for HoldSrc {
             for &seq in self.seqs {
                 out.push(frame(seq)).await?;
             }
-            let mut spins = 0;
-            while self.ticks.load(Ordering::Acquire) < self.hold_until_ticks && spins < MAX_SPINS {
+            let deadline = Instant::now() + MAX_TICK_WAIT;
+            while self.ticks.load(Ordering::Acquire) < self.hold_until_ticks
+                && Instant::now() < deadline
+            {
                 yield_once().await;
-                spins += 1;
             }
             out.push(PipelinePacket::Eos).await?;
             Ok(self.seqs.len() as u64)
