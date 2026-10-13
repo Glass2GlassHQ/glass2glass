@@ -456,20 +456,23 @@ pub fn default_registry() -> Registry {
 
     // Sources. The output caps are the autoplug `decodebin` input; the parser
     // only calls the constructor and applies properties.
-    reg.register_source(SourceFactory::new(
-        "videotestsrc",
-        Caps::RawVideo {
-            format: RawVideoFormat::Rgba8,
-            width: Dim::Any,
-            height: Dim::Any,
-            framerate: Rate::Any,
-            interlace: g2g_core::Interlace::Any,
-            colorimetry: g2g_core::Colorimetry::UNKNOWN,
-        },
-        // num-buffers defaults to forever (the property's documented `-1`),
-        // matching gst videotestsrc; a launch line bounds it with `num-buffers=N`.
-        || Box::new(VideoTestSrc::new(320, 240, 30, u64::MAX)),
-    ));
+    reg.register_source(
+        SourceFactory::new(
+            "videotestsrc",
+            Caps::RawVideo {
+                format: RawVideoFormat::Rgba8,
+                width: Dim::Any,
+                height: Dim::Any,
+                framerate: Rate::Any,
+                interlace: g2g_core::Interlace::Any,
+                colorimetry: g2g_core::Colorimetry::UNKNOWN,
+            },
+            // num-buffers defaults to forever (the property's documented `-1`),
+            // matching gst videotestsrc; a launch line bounds it with `num-buffers=N`.
+            || Box::new(VideoTestSrc::new(320, 240, 30, u64::MAX)),
+        )
+        .with_template_outputs::<VideoTestSrc>(),
+    );
     reg.register_source(SourceFactory::new(
         "audiotestsrc",
         Caps::Audio {
@@ -3379,6 +3382,7 @@ fn register_feature_gated(reg: &mut Registry) {
             },
             || Box::new(PulseSrc::new()),
         )
+        .with_template_outputs::<PulseSrc>()
         .with_experimental(),
     );
     // PipeWire: audio render / capture plus video capture (M890). The audio

@@ -231,6 +231,22 @@ fn matroska_demuxer_registered() {
 }
 
 #[test]
+fn a_source_lists_every_format_it_can_produce() {
+    let reg = default_registry();
+    let caps = reg
+        .describe("videotestsrc")
+        .and_then(|doc| doc.caps)
+        .expect("videotestsrc advertises output caps");
+    let inspected = reg
+        .inspect("videotestsrc")
+        .expect("videotestsrc is registered");
+    for format in ["Rgba8", "I420", "Nv12", "Yuyv"] {
+        assert!(caps.contains(format), "describe lists {format}: {caps}");
+        assert!(inspected.contains(format), "inspect lists {format}");
+    }
+}
+
+#[test]
 fn describe_returns_structured_element_docs() {
     // M585: the structured sibling of `inspect`, the source of truth for the
     // generated web element reference (`g2g-docgen`). Assert it carries the same

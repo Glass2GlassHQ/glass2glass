@@ -840,7 +840,8 @@ mod factory {
     /// derive the caps from a [`PadTemplates`] type.
     pub struct SourceFactory {
         name: &'static str,
-        output: Caps,
+        // the first alternative is the declared output, the rest what negotiation may pick
+        outputs: CapsSet,
         build: fn() -> Box<dyn DynSourceLoop>,
         experimental: bool,
     }
@@ -854,9 +855,35 @@ mod factory {
         ) -> Self {
             Self {
                 name,
-                output,
+                outputs: CapsSet::one(output),
                 build,
                 experimental: false,
+            }
+        }
+
+        pub fn with_template_outputs<S: PadTemplates>(mut self) -> Self {
+            let Some(PadCaps::Fixed(set)) = S::pad_template(PadDirection::Source).map(|t| t.caps)
+            else {
+                return self;
+            };
+            let mut outputs = self.outputs.alternatives().to_vec();
+            for caps in set.alternatives() {
+                if !outputs.contains(caps) {
+                    outputs.push(caps.clone());
+                }
+            }
+            self.outputs = CapsSet::from_alternatives(outputs);
+            self
+        }
+
+        fn output(&self) -> &Caps {
+            &self.outputs.alternatives()[0]
+        }
+
+        fn outputs_text(&self) -> String {
+            match self.outputs.alternatives() {
+                [only] => format!("{only:?}"),
+                all => format!("{all:?}"),
             }
         }
 
@@ -877,7 +904,7 @@ mod factory {
         fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
             f.debug_struct("SourceFactory")
                 .field("name", &self.name)
-                .field("output", &self.output)
+                .field("outputs", &self.outputs)
                 .finish_non_exhaustive()
         }
     }
@@ -1904,7 +1931,7 @@ mod factory {
         pub fn declared_output_caps(&self, name: &str) -> Option<Caps> {
             let name = self.resolve_alias(name);
             if let Some(s) = self.sources.iter().find(|s| s.name == name) {
-                return Some(s.output.clone());
+                return Some(s.output().clone());
             }
             let f = self.launch.iter().find(|f| f.name == name)?;
             let t = f
@@ -1983,7 +2010,7 @@ mod factory {
             let name = self.resolve_alias(name);
             let upstream = self.resolve_alias(upstream);
             let produced = match self.sources.iter().find(|s| s.name == upstream) {
-                Some(source) => CapsSet::one(source.output.clone()),
+                Some(source) => source.outputs.clone(),
                 None => {
                     let factory = self.launch.iter().find(|f| f.name == upstream)?;
                     pad_caps(&factory.templates, PadDirection::Source)?.clone()
@@ -2104,7 +2131,7 @@ mod factory {
                 if s.experimental {
                     let _ = writeln!(out, "  Stability   experimental");
                 }
-                let _ = writeln!(out, "\nOutput caps:\n  {:?}", s.output);
+                let _ = writeln!(out, "\nOutput caps:\n  {}", s.outputs_text());
                 let _ = write!(
                     out,
                     "\nElement Properties:\n{}",
@@ -2166,7 +2193,7 @@ mod factory {
                     author: m.author.to_string(),
                     role: "source".to_string(),
                     experimental: s.experimental,
-                    caps: Some(format!("{:?}", s.output)),
+                    caps: Some(s.outputs_text()),
                     pads: Vec::new(),
                     properties: property_docs(src.properties()),
                 })
@@ -2624,7 +2651,7 @@ mod factory {
             let mut graph: Graph<GraphNode> = Graph::new();
             let src = graph.add_source(GraphNodeRef::Source((source.build)()));
             let snk = graph.add_sink(GraphNodeRef::element(sink));
-            self.decodebin(&mut graph, src, snk, &source.output, target, max_depth)?;
+            self.decodebin(&mut graph, src, snk, source.output(), target, max_depth)?;
             Ok(graph)
         }
 
@@ -2650,7 +2677,7 @@ mod factory {
                 &mut graph,
                 src,
                 snk,
-                &source.output,
+                source.output(),
                 target,
                 max_depth,
                 params,
