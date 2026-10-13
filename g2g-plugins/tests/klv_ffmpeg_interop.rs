@@ -49,9 +49,9 @@ fn muxed_ts() -> (Vec<u8>, Vec<Vec<u8>>) {
     for i in 0..30u64 {
         let pts = i * 3600; // 40 ms in 90 kHz ticks
         let au = [0u8, 0, 0, 1, if i == 0 { 0x65 } else { 0x41 }, i as u8];
-        ts.extend_from_slice(&mux.push_au_on(0, &au, Some(pts), None));
+        ts.extend_from_slice(&mux.push_au_on(0, &au, Some(pts), None, false));
         let klv = telemetry(i).encode();
-        ts.extend_from_slice(&mux.push_au_on(1, &klv, Some(pts), None));
+        ts.extend_from_slice(&mux.push_au_on(1, &klv, Some(pts), None, false));
         packets.push(klv);
     }
     (ts, packets)

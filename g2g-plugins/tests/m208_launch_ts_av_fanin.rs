@@ -241,7 +241,7 @@ async fn mpegtsmux_fan_in_accepts_pat_interval() {
     // pat-interval on the two-input muxer parses and runs (baseline registry).
     let graph = parse_launch(
         &reg,
-        "h264src ! m.   aacsrc ! m.   mpegtsmux name=m pat-interval=10 ! anysink",
+        "h264src ! m.   aacsrc ! m.   mpegtsmux name=m pat-interval=900 ! anysink",
     )
     .expect("fan-in mpegtsmux accepts pat-interval");
     let stats = run_graph(graph, &ZeroClock, 4).await.expect("runs");

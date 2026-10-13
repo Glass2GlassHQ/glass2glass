@@ -40,17 +40,15 @@ use g2g_core::{
 
 use crate::demuxseek::{Admit, DemuxSeek};
 use crate::mpegts::{
-    unwrap_metadata_au_cells, EitSlot, EsUnit, TsDemuxer, STREAM_TYPE_AAC, STREAM_TYPE_AC3,
-    STREAM_TYPE_H264, STREAM_TYPE_H265, STREAM_TYPE_METADATA_PES, STREAM_TYPE_MPEG1_AUDIO,
-    STREAM_TYPE_MPEG1_VIDEO, STREAM_TYPE_MPEG2_AUDIO, STREAM_TYPE_MPEG2_VIDEO, STREAM_TYPE_MPEG4P2,
-    STREAM_TYPE_PRIVATE_PES, TAG_KEY_EVENT_DURATION, TAG_KEY_EVENT_NAME, TAG_KEY_EVENT_START,
-    TAG_KEY_EVENT_TEXT, TAG_KEY_NEXT_EVENT_DURATION, TAG_KEY_NEXT_EVENT_NAME,
-    TAG_KEY_NEXT_EVENT_START, TAG_KEY_NEXT_EVENT_TEXT, TAG_KEY_SCHEDULE_EVENT_DURATION,
-    TAG_KEY_SCHEDULE_EVENT_ID, TAG_KEY_SCHEDULE_EVENT_NAME, TAG_KEY_SCHEDULE_EVENT_START,
-    TAG_KEY_SCHEDULE_EVENT_TEXT, TAG_KEY_SERVICE_PROVIDER, TS_PACKET_LEN,
+    unwrap_metadata_au_cells, EitSlot, EsUnit, TsDemuxer, TsPacketSplitter, STREAM_TYPE_AAC,
+    STREAM_TYPE_AC3, STREAM_TYPE_H264, STREAM_TYPE_H265, STREAM_TYPE_METADATA_PES,
+    STREAM_TYPE_MPEG1_AUDIO, STREAM_TYPE_MPEG1_VIDEO, STREAM_TYPE_MPEG2_AUDIO,
+    STREAM_TYPE_MPEG2_VIDEO, STREAM_TYPE_MPEG4P2, STREAM_TYPE_PRIVATE_PES, TAG_KEY_EVENT_DURATION,
+    TAG_KEY_EVENT_NAME, TAG_KEY_EVENT_START, TAG_KEY_EVENT_TEXT, TAG_KEY_NEXT_EVENT_DURATION,
+    TAG_KEY_NEXT_EVENT_NAME, TAG_KEY_NEXT_EVENT_START, TAG_KEY_NEXT_EVENT_TEXT,
+    TAG_KEY_SCHEDULE_EVENT_DURATION, TAG_KEY_SCHEDULE_EVENT_ID, TAG_KEY_SCHEDULE_EVENT_NAME,
+    TAG_KEY_SCHEDULE_EVENT_START, TAG_KEY_SCHEDULE_EVENT_TEXT, TAG_KEY_SERVICE_PROVIDER,
 };
-
-const TS_SYNC: u8 = 0x47;
 
 /// The published stream id of an elementary stream: the id it takes in the
 /// `StreamCollection` (M386), and the id its per-stream tags post on (M872).
@@ -349,9 +347,9 @@ pub struct TsDemux {
     /// The PAT program to demux (`None` = the first program in PAT order),
     /// preserved across a parser reset so a seek keeps the selection.
     program_number: Option<u16>,
-    /// Bytes not yet consumed as whole TS packets (packet realignment across
-    /// input frames).
-    buf: Vec<u8>,
+    /// Bytes not yet consumed as whole TS packets (packet realignment and
+    /// stride detection across input frames).
+    packets: TsPacketSplitter,
     configured: bool,
     emitted: u64,
     /// Pipeline bus, for announcing the program's `StreamCollection` (M386).
@@ -400,7 +398,7 @@ impl TsDemux {
             demux: TsDemuxer::new(),
             stream: TsStream::H264,
             program_number: None,
-            buf: Vec::new(),
+            packets: TsPacketSplitter::new(),
             configured: false,
             emitted: 0,
             bus: None,
@@ -535,7 +533,7 @@ impl TsDemux {
     /// bytes and the demuxer's PAT/PMT/PES state, which the re-read stream
     /// re-establishes from its start.
     fn reset_parser(&mut self) {
-        self.buf.clear();
+        self.packets.clear();
         self.demux = TsDemuxer::new();
         self.demux.set_program_number(self.program_number);
         self.opus_caps_emitted = false;
@@ -654,34 +652,6 @@ impl TsDemux {
                 stream_type == STREAM_TYPE_MPEG1_VIDEO || stream_type == STREAM_TYPE_MPEG2_VIDEO
             }
             other => Self::selected_stream_type(other) == stream_type,
-        }
-    }
-
-    /// Consume whole 188-byte TS packets from `buf`, resyncing to the sync byte,
-    /// feeding each to the demuxer. Leaves any trailing partial packet in `buf`.
-    fn drain_packets(&mut self) {
-        loop {
-            // Resync: drop bytes before the next sync byte.
-            if self.buf.first() != Some(&TS_SYNC) {
-                match self.buf.iter().position(|&b| b == TS_SYNC) {
-                    Some(pos) => {
-                        self.buf.drain(..pos);
-                    }
-                    None => {
-                        self.buf.clear();
-                        return;
-                    }
-                }
-            }
-            if self.buf.len() < TS_PACKET_LEN {
-                return;
-            }
-            // Feed one packet. (A copy keeps the borrow off `self.buf` so the
-            // drain below is clean.)
-            let mut pkt = [0u8; TS_PACKET_LEN];
-            pkt.copy_from_slice(&self.buf[..TS_PACKET_LEN]);
-            self.demux.push_packet(&pkt);
-            self.buf.drain(..TS_PACKET_LEN);
         }
     }
 
@@ -939,8 +909,7 @@ impl AsyncElement for TsDemux {
                     let slice = frame
                         .domain
                         .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
-                    self.buf.extend_from_slice(slice);
-                    self.drain_packets();
+                    self.packets.push(slice, &mut self.demux);
                     if self.bus.is_some() {
                         self.post_stream_collection();
                         self.tags.post(&mut self.demux, self.bus.as_ref());
@@ -958,6 +927,7 @@ impl AsyncElement for TsDemux {
                 PipelinePacket::Eos => {
                     // Flush the final in-flight PES and emit it; the runner's
                     // transform arm forwards the EOS itself.
+                    self.packets.finish(&mut self.demux);
                     self.demux.flush();
                     let units = self.demux.take_units();
                     self.emit_units(units, out).await?;
@@ -1188,8 +1158,9 @@ impl PadTemplates for TsDemux {
 #[derive(Debug)]
 pub struct TsDemuxN {
     demux: TsDemuxer,
-    /// Bytes not yet consumed as whole TS packets (realignment across frames).
-    buf: Vec<u8>,
+    /// Bytes not yet consumed as whole TS packets (realignment and stride
+    /// detection across frames).
+    packets: TsPacketSplitter,
     /// Port `i` emits this elementary stream (one selected stream per output pad).
     ports: Vec<TsStream>,
     /// Whether port `i` has emitted its opening `CapsChanged` yet.
@@ -1245,7 +1216,7 @@ impl TsDemuxN {
         let held_unit_ns = alloc::vec![None; ports.len()];
         Self {
             demux: TsDemuxer::new(),
-            buf: Vec::new(),
+            packets: TsPacketSplitter::new(),
             ports,
             announced,
             segment_base: None,
@@ -1349,32 +1320,6 @@ impl TsDemuxN {
         self.ports
             .iter()
             .position(|&s| TsDemux::accepts_stream_type(s, stream_type))
-    }
-
-    /// Consume whole 188-byte TS packets from `buf`, resyncing to the sync byte,
-    /// feeding each to the demuxer. Leaves any trailing partial packet in `buf`.
-    /// (The realignment is identical to [`TsDemux::drain_packets`].)
-    fn drain_packets(&mut self) {
-        loop {
-            if self.buf.first() != Some(&TS_SYNC) {
-                match self.buf.iter().position(|&b| b == TS_SYNC) {
-                    Some(pos) => {
-                        self.buf.drain(..pos);
-                    }
-                    None => {
-                        self.buf.clear();
-                        return;
-                    }
-                }
-            }
-            if self.buf.len() < TS_PACKET_LEN {
-                return;
-            }
-            let mut pkt = [0u8; TS_PACKET_LEN];
-            pkt.copy_from_slice(&self.buf[..TS_PACKET_LEN]);
-            self.demux.push_packet(&pkt);
-            self.buf.drain(..TS_PACKET_LEN);
-        }
     }
 
     /// Announce the active program's PMT elementary streams as a
@@ -1597,8 +1542,7 @@ impl MultiOutputElement for TsDemuxN {
                     let slice = frame
                         .domain
                         .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
-                    self.buf.extend_from_slice(slice);
-                    self.drain_packets();
+                    self.packets.push(slice, &mut self.demux);
                     if self.bus.is_some() {
                         self.post_stream_collection();
                         self.tags.post(&mut self.demux, self.bus.as_ref());
@@ -1611,7 +1555,7 @@ impl MultiOutputElement for TsDemuxN {
                 // A flush resets the parser; the re-read stream re-establishes
                 // PAT/PMT/PES. Broadcast it to every branch.
                 PipelinePacket::Flush => {
-                    self.buf.clear();
+                    self.packets.clear();
                     self.demux = TsDemuxer::new();
                     self.demux.set_program_number(self.program_number);
                     self.last_unit_dts_ns.fill(None);
@@ -1627,6 +1571,7 @@ impl MultiOutputElement for TsDemuxN {
                 PipelinePacket::Eos => {
                     // Flush the final in-flight PES, route it; the runner
                     // broadcasts the merged Eos to every port.
+                    self.packets.finish(&mut self.demux);
                     self.demux.flush();
                     self.route_units(out).await?;
                 }
@@ -1685,6 +1630,7 @@ static TSDEMUXN_PROPS: &[PropertySpec] = &[PropertySpec::new(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mpegts::{SYNC_BYTE, TS_PACKET_LEN};
     use g2g_core::{PushOutcome, RawVideoFormat};
 
     /// PMT stream_type 0x10 maps to an MPEG-4 Part 2 video stream, and the
@@ -1763,15 +1709,16 @@ mod tests {
     fn ts_packet(pid: u16, pusi: bool, payload: &[u8]) -> Vec<u8> {
         const ROOM: usize = TS_PACKET_LEN - 4;
         let mut p = alloc::vec![0u8; TS_PACKET_LEN];
-        p[0] = TS_SYNC;
+        p[0] = SYNC_BYTE;
         p[1] = if pusi { 0x40 } else { 0x00 } | ((pid >> 8) as u8 & 0x1F);
         p[2] = (pid & 0xFF) as u8;
+        let continuity_counter = crate::mpegts::tests::next_continuity_counter(pid);
         let l = payload.len();
         if l == ROOM {
-            p[3] = 0x10;
+            p[3] = 0x10 | continuity_counter;
             p[4..].copy_from_slice(payload);
         } else {
-            p[3] = 0x30;
+            p[3] = 0x30 | continuity_counter;
             let af_len = ROOM - 1 - l;
             p[4] = af_len as u8;
             if af_len >= 1 {
@@ -1992,8 +1939,8 @@ mod tests {
         let mut m = crate::mpegts::TsMuxer::with_streams(&[STREAM_TYPE_H264]);
         m.set_service("News One", "G2G Broadcasting");
         m.set_stream_language(0, "eng");
-        let mut stream = m.push_au(&[0, 0, 0, 1, 0x65, 0x11], Some(900_000), None);
-        stream.extend(m.push_au(&[0, 0, 0, 1, 0x41, 0x22], Some(903_000), None));
+        let mut stream = m.push_au(&[0, 0, 0, 1, 0x65, 0x11], Some(900_000), None, false);
+        stream.extend(m.push_au(&[0, 0, 0, 1, 0x41, 0x22], Some(903_000), None, false));
 
         let (bus, handle) = Bus::new(16);
         let mut d = TsDemux::new().with_bus(handle);

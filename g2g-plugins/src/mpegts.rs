@@ -9,23 +9,29 @@
 //!
 //! Scope: every program the PAT names (select one via
 //! [`TsDemuxer::set_program_number`], default the first in PAT order); first PAT
-//! and first PMT per program win (no version / update handling). PSI sections
-//! (PAT / PMT) are assumed to fit in one TS packet (true for the small tables in
-//! practice); PES payloads reassemble across packets. The carried elementary
+//! and first PMT per program win (no version / update handling). PSI sections and
+//! PES payloads both reassemble across packets. The carried elementary
 //! stream for H.264 / H.265 is already Annex-B, so a unit feeds `h264parse`
 //! directly.
 
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use g2g_core::VideoCodec;
+use g2g_core::{G2gError, VideoCodec};
 
 use crate::mpeg2video::Mpeg2TimestampSynth;
 use crate::poc::AccessUnitPoc;
 
-/// MPEG-TS packet size in bytes (the standard 188; M2TS 192 with a 4-byte
-/// timestamp prefix is not handled).
+/// MPEG-TS packet size in bytes (the standard 188). [`TsPacketSplitter`] also
+/// reads the 192-byte M2TS and 204-byte DVB-ASI strides around it.
 pub const TS_PACKET_LEN: usize = 188;
+// a 4-byte arrival timestamp precedes each packet
+const M2TS_PACKET_STRIDE: usize = 192;
+// 16 parity bytes follow each packet
+const DVB_ASI_PACKET_STRIDE: usize = 204;
+const PACKET_STRIDES: [usize; 3] = [TS_PACKET_LEN, M2TS_PACKET_STRIDE, DVB_ASI_PACKET_STRIDE];
+const STRIDE_LOCK_PACKETS: usize = 4;
+const M2TS_TIMESTAMP_PREFIX_LEN: usize = M2TS_PACKET_STRIDE - TS_PACKET_LEN;
 
 /// The byte every TS packet starts with, what a probe resyncs to.
 pub const SYNC_BYTE: u8 = 0x47;
@@ -377,20 +383,29 @@ fn bcd_byte(byte: u8) -> Option<u8> {
     (tens <= 9 && units <= 9).then_some(tens * 10 + units)
 }
 
-/// Cap on the EIT section being reassembled, the limit EN 300 468 sets on an EIT
+/// Cap on an EIT section being reassembled, the limit EN 300 468 sets on an EIT
 /// section. The declared `section_length` cannot be trusted before the section is
 /// whole, so the buffer is capped rather than sized from it.
-const MAX_PSI_SECTION_BYTES: usize = 4096;
+const MAX_EIT_SECTION_BYTES: usize = 4096;
+const MAX_PAT_PMT_SDT_SECTION_BYTES: usize = 1024;
+const PSI_SECTION_HEADER_LEN: usize = 3;
+const PSI_STUFFING_BYTE: u8 = 0xFF;
+
+const PES_TIMESTAMP_CYCLE_90KHZ: u64 = 1 << 33;
+// sparse streams such as subtitles can go minutes between stamps
+const PES_TIMESTAMP_WRAP_TOLERANCE_90KHZ: u64 = 60 * 60 * 90_000;
 
 /// A reassembled PES payload: one access unit of an elementary stream.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EsUnit {
     pub pid: u16,
     pub stream_type: u8,
-    /// Presentation timestamp in 90 kHz units, if the PES carried one.
+    /// Presentation timestamp in 90 kHz units, if the PES carried one, extended
+    /// past the 33-bit wrap so it keeps rising across it.
     pub pts_90khz: Option<u64>,
     /// Decode timestamp in 90 kHz units, if the PES carried a separate DTS
-    /// (`PTS_DTS_flags == '11'`); `None` when the PES was PTS-only.
+    /// (`PTS_DTS_flags == '11'`); `None` when the PES was PTS-only. Extended
+    /// past the 33-bit wrap like the PTS.
     pub dts_90khz: Option<u64>,
     /// The elementary stream bytes (for H.264/H.265, Annex-B).
     pub data: Vec<u8>,
@@ -706,6 +721,31 @@ struct PendingPes {
     data: Vec<u8>,
 }
 
+const CONTINUITY_COUNTER_MODULUS: u8 = 16;
+const DISCONTINUITY_INDICATOR: u8 = 0x80;
+
+#[derive(Debug, Clone, Copy)]
+struct PidContinuity {
+    pid: u16,
+    counter: u8,
+    duplicate_seen: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Continuity {
+    InSequence,
+    Duplicate,
+    Lost,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum PsiTable {
+    Pat,
+    Sdt,
+    Eit,
+    Pmt(usize),
+}
+
 /// One program declared by the PAT: its `program_number`, the PID its PMT rides
 /// on, and the elementary streams that PMT names (empty until the PMT parses).
 #[derive(Debug, Clone)]
@@ -743,13 +783,16 @@ pub struct TsDemuxer {
     /// Bumped whenever [`eit_events`](Self::eit_events) changes, so the element
     /// layer can re-post without diffing.
     eit_generation: u64,
-    /// The EIT section being reassembled across TS packets. Unlike the PAT / PMT /
-    /// SDT, an EIT section routinely outgrows one packet.
-    eit_section: Vec<u8>,
+    /// The PSI section being reassembled across TS packets on each table PID
+    /// (PAT, PMT, SDT, EIT). An EIT section routinely outgrows one packet, and a
+    /// PMT naming many streams does too.
+    pending_sections: Vec<(u16, Vec<u8>)>,
     pending: Vec<PendingPes>,
     completed: Vec<EsUnit>,
     /// Video PTS synthesis state, one entry per video PID (M948).
     video_pts: Vec<(u16, VideoPtsSynth)>,
+    last_extended_timestamps: Vec<(u16, u64)>,
+    continuity: Vec<PidContinuity>,
 }
 
 impl TsDemuxer {
@@ -891,7 +934,9 @@ impl TsDemuxer {
     }
 
     /// Feed one TS packet (must be [`TS_PACKET_LEN`] bytes starting at the sync
-    /// byte). Malformed or short packets are ignored. Completed access units
+    /// byte). Malformed or short packets are ignored, a packet repeating its
+    /// PID's continuity counter once is a duplicate and skipped, and a gap in the
+    /// counter drops that PID's partial PES or section. Completed access units
     /// accumulate; drain them with [`take_units`](Self::take_units).
     pub fn push_packet(&mut self, pkt: &[u8]) {
         if pkt.len() < TS_PACKET_LEN || pkt[0] != SYNC_BYTE {
@@ -900,30 +945,132 @@ impl TsDemuxer {
         let pusi = pkt[1] & 0x40 != 0;
         let pid = (((pkt[1] & 0x1F) as u16) << 8) | pkt[2] as u16;
         let afc = (pkt[3] >> 4) & 0x03;
+        let continuity_counter = pkt[3] & 0x0F;
+        let has_adaptation_field = afc & 0x02 != 0;
+        let discontinuity =
+            has_adaptation_field && pkt[4] > 0 && pkt[5] & DISCONTINUITY_INDICATOR != 0;
+        let table = self.psi_table_of(pid);
+        let stream_type = self.stream_type_of(pid);
+        if table.is_none() && stream_type.is_none() {
+            return;
+        }
+        if afc & 0x01 == 0 {
+            if discontinuity {
+                self.continuity.retain(|state| state.pid != pid);
+            }
+            return; // an adaptation-field-only packet does not advance the counter
+        }
+        match self.check_continuity(pid, continuity_counter, discontinuity) {
+            Continuity::Duplicate => return,
+            Continuity::Lost => self.discard_partial(pid),
+            Continuity::InSequence => {}
+        }
 
         // Locate the payload after any adaptation field.
         let mut off = 4;
-        if afc & 0x02 != 0 {
+        if has_adaptation_field {
             // adaptation field present: its length byte, then that many bytes.
             let af_len = pkt[4] as usize;
             off = 5 + af_len;
         }
-        if afc & 0x01 == 0 || off >= TS_PACKET_LEN {
+        if off >= TS_PACKET_LEN {
             return; // no payload
         }
         let payload = &pkt[off..TS_PACKET_LEN];
 
-        if pid == PID_PAT {
-            self.parse_pat(payload, pusi);
-        } else if pid == PID_SDT {
-            self.parse_sdt(payload, pusi);
-        } else if pid == PID_EIT {
-            self.parse_eit(payload, pusi);
-        } else if let Some(idx) = self.programs.iter().position(|p| p.pmt_pid == pid) {
-            self.parse_pmt(idx, payload, pusi);
-        } else if let Some(stream_type) = self.stream_type_of(pid) {
+        if let Some(table) = table {
+            for section in self.collect_sections(pid, table, payload, pusi) {
+                match table {
+                    PsiTable::Pat => self.parse_pat(&section),
+                    PsiTable::Sdt => self.parse_sdt(&section),
+                    PsiTable::Eit => self.parse_eit(&section),
+                    PsiTable::Pmt(program_index) => self.parse_pmt(program_index, &section),
+                }
+            }
+        } else if let Some(stream_type) = stream_type {
             self.accumulate_pes(pid, stream_type, payload, pusi);
         }
+    }
+
+    fn check_continuity(&mut self, pid: u16, counter: u8, discontinuity: bool) -> Continuity {
+        let Some(state) = self.continuity.iter_mut().find(|state| state.pid == pid) else {
+            self.continuity.push(PidContinuity {
+                pid,
+                counter,
+                duplicate_seen: false,
+            });
+            return Continuity::InSequence;
+        };
+        let previous = core::mem::replace(
+            state,
+            PidContinuity {
+                pid,
+                counter,
+                duplicate_seen: false,
+            },
+        );
+        if discontinuity || counter == (previous.counter + 1) % CONTINUITY_COUNTER_MODULUS {
+            return Continuity::InSequence;
+        }
+        if counter == previous.counter && !previous.duplicate_seen {
+            state.duplicate_seen = true;
+            return Continuity::Duplicate;
+        }
+        Continuity::Lost
+    }
+
+    fn discard_partial(&mut self, pid: u16) {
+        self.pending.retain(|pes| pes.pid != pid);
+        if let Some((_, section)) = self
+            .pending_sections
+            .iter_mut()
+            .find(|(known, _)| *known == pid)
+        {
+            section.clear();
+        }
+    }
+
+    fn psi_table_of(&self, pid: u16) -> Option<PsiTable> {
+        match pid {
+            PID_PAT => Some(PsiTable::Pat),
+            PID_SDT => Some(PsiTable::Sdt),
+            PID_EIT => Some(PsiTable::Eit),
+            _ => self
+                .programs
+                .iter()
+                .position(|p| p.pmt_pid == pid)
+                .map(PsiTable::Pmt),
+        }
+    }
+
+    fn collect_sections(
+        &mut self,
+        pid: u16,
+        table: PsiTable,
+        payload: &[u8],
+        pusi: bool,
+    ) -> Vec<Vec<u8>> {
+        let max_section_bytes = match table {
+            PsiTable::Eit => MAX_EIT_SECTION_BYTES,
+            PsiTable::Pat | PsiTable::Sdt | PsiTable::Pmt(_) => MAX_PAT_PMT_SDT_SECTION_BYTES,
+        };
+        let slot = match self
+            .pending_sections
+            .iter()
+            .position(|(known, _)| *known == pid)
+        {
+            Some(slot) => slot,
+            None => {
+                self.pending_sections.push((pid, Vec::new()));
+                self.pending_sections.len() - 1
+            }
+        };
+        collect_sections(
+            &mut self.pending_sections[slot].1,
+            payload,
+            pusi,
+            max_section_bytes,
+        )
     }
 
     /// Drain the access units completed so far, synthesizing a PTS for each
@@ -975,17 +1122,6 @@ impl TsDemuxer {
             .map(|s| s.stream_type)
     }
 
-    /// Skip the PSI `pointer_field` and return the section bytes, or `None` if
-    /// this packet does not start a section (a non-PUSI continuation, which v1
-    /// does not reassemble).
-    fn section(payload: &[u8], pusi: bool) -> Option<&[u8]> {
-        if !pusi || payload.is_empty() {
-            return None;
-        }
-        let pointer = payload[0] as usize;
-        payload.get(1 + pointer..)
-    }
-
     /// The PSI section payload bounds: bytes `[3 .. 3 + section_length - 4]`
     /// (after the table-id + length header, before the trailing 4-byte CRC).
     fn section_body(section: &[u8]) -> Option<&[u8]> {
@@ -1013,13 +1149,10 @@ impl TsDemuxer {
         (mpeg_crc32(whole) == 0).then_some(body)
     }
 
-    fn parse_pat(&mut self, payload: &[u8], pusi: bool) {
+    fn parse_pat(&mut self, section: &[u8]) {
         if !self.programs.is_empty() {
             return; // first PAT wins (no version / update handling)
         }
-        let Some(section) = Self::section(payload, pusi) else {
-            return;
-        };
         if section.first() != Some(&0x00) {
             return; // table_id 0x00 = PAT
         }
@@ -1052,13 +1185,10 @@ impl TsDemuxer {
     /// ([`checked_section_body`](Self::checked_section_body)) and every length is
     /// bounds-checked, so a malformed or unrelated section on this PID is ignored
     /// rather than yielding garbled text.
-    fn parse_sdt(&mut self, payload: &[u8], pusi: bool) {
+    fn parse_sdt(&mut self, section: &[u8]) {
         if !self.services.is_empty() {
             return;
         }
-        let Some(section) = Self::section(payload, pusi) else {
-            return;
-        };
         if section.first() != Some(&TABLE_ID_SDT) {
             return; // an other-TS SDT (0x46), a BAT or an EIT sharing the PID
         }
@@ -1081,54 +1211,6 @@ impl TsDemuxer {
         }
     }
 
-    /// Collect one EIT section across TS packets (M1049), returning it once whole.
-    /// The PAT / PMT / SDT are read from a single packet, which holds for those
-    /// small tables, but an EIT event carries free text and routinely spans
-    /// several. A section is only buffered once its `table_id` is the
-    /// present/following one or a schedule one of this transport stream, which
-    /// keeps the other-TS tables sharing this PID out of the buffer entirely.
-    ///
-    /// The declared `section_length` is attacker-controlled, so the buffer is
-    /// capped and a section that overruns is abandoned; the next
-    /// payload-unit-start resyncs.
-    fn collect_eit_section(&mut self, payload: &[u8], pusi: bool) -> Option<Vec<u8>> {
-        if pusi {
-            self.eit_section.clear();
-            let pointer = *payload.first()? as usize;
-            let start = payload.get(1 + pointer..)?;
-            let table_id = *start.first()?;
-            if table_id != TABLE_ID_EIT_PRESENT_FOLLOWING
-                && !TABLE_ID_EIT_SCHEDULE.contains(&table_id)
-            {
-                return None; // an other-TS EIT or stuffing
-            }
-            self.eit_section.extend_from_slice(start);
-        } else if self.eit_section.is_empty() {
-            return None; // no section open on this PID
-        } else {
-            self.eit_section.extend_from_slice(payload);
-        }
-        if self.eit_section.len() > MAX_PSI_SECTION_BYTES {
-            self.eit_section.clear();
-            return None;
-        }
-        if self.eit_section.len() < 3 {
-            return None;
-        }
-        let total =
-            3 + ((((self.eit_section[1] & 0x0F) as usize) << 8) | self.eit_section[2] as usize);
-        if total > MAX_PSI_SECTION_BYTES {
-            self.eit_section.clear();
-            return None;
-        }
-        if self.eit_section.len() < total {
-            return None; // more packets to come
-        }
-        let mut section = core::mem::take(&mut self.eit_section);
-        section.truncate(total); // drop the 0xFF stuffing after the section
-        Some(section)
-    }
-
     /// Parse a DVB EIT section (PID 0x12) into the per-service event text, start
     /// time and duration (M1049, M1056). The event loop follows the 14-byte
     /// header, and each entry's descriptor loop carries the
@@ -1143,11 +1225,15 @@ impl TsDemuxer {
     /// The CRC is verified ([`checked_section_body`](Self::checked_section_body))
     /// and every length is bounds-checked, so a malformed section is ignored
     /// rather than yielding garbled text.
-    fn parse_eit(&mut self, payload: &[u8], pusi: bool) {
-        let Some(section) = self.collect_eit_section(payload, pusi) else {
+    fn parse_eit(&mut self, section: &[u8]) {
+        let Some(&table_id) = section.first() else {
             return;
         };
-        let Some(body) = Self::checked_section_body(&section) else {
+        if table_id != TABLE_ID_EIT_PRESENT_FOLLOWING && !TABLE_ID_EIT_SCHEDULE.contains(&table_id)
+        {
+            return; // an other-TS EIT
+        }
+        let Some(body) = Self::checked_section_body(section) else {
             return;
         };
         // The 14-byte EIT header: the 8-byte PSI common header, then
@@ -1266,13 +1352,10 @@ impl TsDemuxer {
         self.eit_generation = self.eit_generation.saturating_add(1);
     }
 
-    fn parse_pmt(&mut self, prog_idx: usize, payload: &[u8], pusi: bool) {
+    fn parse_pmt(&mut self, prog_idx: usize, section: &[u8]) {
         if !self.programs[prog_idx].streams.is_empty() {
             return; // first PMT per program wins
         }
-        let Some(section) = Self::section(payload, pusi) else {
-            return;
-        };
         if section.first() != Some(&0x02) {
             return; // table_id 0x02 = PMT
         }
@@ -1324,6 +1407,7 @@ impl TsDemuxer {
                 Self::finish(&mut self.completed, prev);
             }
             let (pts, dts, es) = parse_pes_header(payload);
+            let (pts, dts) = self.extend_pes_timestamps(pid, pts, dts);
             self.pending.push(PendingPes {
                 pid,
                 stream_type,
@@ -1343,6 +1427,30 @@ impl TsDemuxer {
         }
     }
 
+    fn extend_pes_timestamps(
+        &mut self,
+        pid: u16,
+        pts: Option<u64>,
+        dts: Option<u64>,
+    ) -> (Option<u64>, Option<u64>) {
+        let slot = self
+            .last_extended_timestamps
+            .iter()
+            .position(|(known, _)| *known == pid);
+        let reference = slot.map(|index| self.last_extended_timestamps[index].1);
+        let extend = |raw: u64| reference.map_or(raw, |reference| extend_timestamp(raw, reference));
+        let pts = pts.map(extend);
+        let dts = dts.map(extend);
+        let Some(latest) = dts.or(pts) else {
+            return (pts, dts);
+        };
+        match slot {
+            Some(index) => self.last_extended_timestamps[index].1 = latest,
+            None => self.last_extended_timestamps.push((pid, latest)),
+        }
+        (pts, dts)
+    }
+
     fn finish(completed: &mut Vec<EsUnit>, p: PendingPes) {
         if p.data.is_empty() {
             return;
@@ -1355,6 +1463,178 @@ impl TsDemuxer {
             data: p.data,
         });
     }
+}
+
+fn collect_sections(
+    pending: &mut Vec<u8>,
+    payload: &[u8],
+    pusi: bool,
+    max_section_bytes: usize,
+) -> Vec<Vec<u8>> {
+    let mut sections = Vec::new();
+    if !pusi {
+        if pending.is_empty() {
+            return sections; // no section open on this PID
+        }
+        pending.extend_from_slice(payload);
+        drain_complete_sections(pending, max_section_bytes, &mut sections);
+        return sections;
+    }
+    let pointer_and_rest = payload
+        .split_first()
+        .and_then(|(&pointer, rest)| rest.split_at_checked(usize::from(pointer)));
+    let Some((previous_section_tail, new_sections)) = pointer_and_rest else {
+        pending.clear();
+        return sections;
+    };
+    if !pending.is_empty() {
+        pending.extend_from_slice(previous_section_tail);
+        drain_complete_sections(pending, max_section_bytes, &mut sections);
+    }
+    pending.clear();
+    pending.extend_from_slice(new_sections);
+    drain_complete_sections(pending, max_section_bytes, &mut sections);
+    sections
+}
+
+fn drain_complete_sections(
+    pending: &mut Vec<u8>,
+    max_section_bytes: usize,
+    sections: &mut Vec<Vec<u8>>,
+) {
+    loop {
+        if pending.first() == Some(&PSI_STUFFING_BYTE) {
+            pending.clear();
+            return;
+        }
+        let Some(&[length_high, length_low]) = pending.get(1..PSI_SECTION_HEADER_LEN) else {
+            return;
+        };
+        let section_length = (usize::from(length_high & 0x0F) << 8) | usize::from(length_low);
+        let total = PSI_SECTION_HEADER_LEN + section_length;
+        if total > max_section_bytes {
+            pending.clear();
+            return;
+        }
+        if pending.len() < total {
+            return;
+        }
+        sections.push(pending.drain(..total).collect());
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct TsPacketSplitter {
+    buffer: Vec<u8>,
+    locked_stride: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum StrideProbe {
+    Locked(usize),
+    Tentative(usize),
+    FalseSync,
+}
+
+impl TsPacketSplitter {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn push(&mut self, bytes: &[u8], demuxer: &mut TsDemuxer) {
+        self.buffer.extend_from_slice(bytes);
+        self.split(demuxer, false);
+    }
+
+    pub fn finish(&mut self, demuxer: &mut TsDemuxer) {
+        self.split(demuxer, true);
+        self.buffer.clear();
+    }
+
+    pub fn clear(&mut self) {
+        self.buffer.clear();
+        self.locked_stride = None;
+    }
+
+    fn split(&mut self, demuxer: &mut TsDemuxer, end_of_stream: bool) {
+        let mut start = 0;
+        loop {
+            let Some(skipped) = self.buffer[start..].iter().position(|&b| b == SYNC_BYTE) else {
+                start = self.buffer.len();
+                break;
+            };
+            if skipped > 0 {
+                self.locked_stride = None;
+            }
+            start += skipped;
+            let packet_start = &self.buffer[start..];
+            if packet_start.len() < TS_PACKET_LEN {
+                break;
+            }
+            let probe = self
+                .locked_stride
+                .map_or_else(|| probe_stride(packet_start), StrideProbe::Locked);
+            let stride = match probe {
+                StrideProbe::Locked(stride) => {
+                    self.locked_stride = Some(stride);
+                    stride
+                }
+                StrideProbe::Tentative(stride) => stride,
+                StrideProbe::FalseSync => {
+                    start += 1;
+                    continue;
+                }
+            };
+            if packet_start.len() < stride && !end_of_stream {
+                break;
+            }
+            demuxer.push_packet(&packet_start[..TS_PACKET_LEN]);
+            start += stride.min(packet_start.len());
+        }
+        self.buffer.drain(..start);
+    }
+}
+
+fn probe_stride(packet_start: &[u8]) -> StrideProbe {
+    for stride in PACKET_STRIDES {
+        let Some(confirmed) = confirmed_syncs(packet_start, stride) else {
+            continue;
+        };
+        return match confirmed {
+            STRIDE_LOCK_PACKETS => StrideProbe::Locked(stride),
+            // nothing past this packet is buffered yet, and its first 188 bytes are the packet at any stride
+            0 => StrideProbe::Tentative(TS_PACKET_LEN),
+            _ => StrideProbe::Tentative(stride),
+        };
+    }
+    StrideProbe::FalseSync
+}
+
+/// The packet stride whose sync bytes recur through every packet of `header`, or
+/// `None` when no stride shows the sync byte at least twice.
+pub(crate) fn sniff_packet_stride(header: &[u8]) -> Option<usize> {
+    PACKET_STRIDES.into_iter().find(|&stride| {
+        let first_sync = if stride == M2TS_PACKET_STRIDE {
+            M2TS_TIMESTAMP_PREFIX_LEN
+        } else {
+            0
+        };
+        let mut sync_positions = (first_sync..header.len()).step_by(stride);
+        let packets = sync_positions.clone().count();
+        packets >= 2 && sync_positions.all(|position| header[position] == SYNC_BYTE)
+    })
+}
+
+fn confirmed_syncs(packet_start: &[u8], stride: usize) -> Option<usize> {
+    let mut confirmed = 0;
+    for following in 1..=STRIDE_LOCK_PACKETS {
+        match packet_start.get(following * stride) {
+            None => break,
+            Some(&SYNC_BYTE) => confirmed += 1,
+            Some(_) => return None,
+        }
+    }
+    Some(confirmed)
 }
 
 /// Parse a PES packet header at the start of `payload`, returning the PTS and
@@ -1391,6 +1671,20 @@ pub(crate) fn parse_pes_header(payload: &[u8]) -> (Option<u64>, Option<u64>, &[u
         None
     };
     (pts, dts, &payload[es_start..])
+}
+
+fn extend_timestamp(raw: u64, reference: u64) -> u64 {
+    let cycle_start = reference - reference % PES_TIMESTAMP_CYCLE_90KHZ;
+    let Some(same_cycle) = cycle_start.checked_add(raw) else {
+        return raw;
+    };
+    let one_wrap_ahead = same_cycle.checked_add(PES_TIMESTAMP_CYCLE_90KHZ);
+    let one_wrap_behind = same_cycle.checked_sub(PES_TIMESTAMP_CYCLE_90KHZ);
+    [Some(same_cycle), one_wrap_ahead, one_wrap_behind]
+        .into_iter()
+        .flatten()
+        .find(|candidate| candidate.abs_diff(reference) <= PES_TIMESTAMP_WRAP_TOLERANCE_90KHZ)
+        .unwrap_or(raw)
 }
 
 /// Decode a 33-bit MPEG PTS/DTS from its 5-byte field (90 kHz units).
@@ -1756,18 +2050,43 @@ pub(crate) fn opus_ts_packets(buf: &[u8]) -> Vec<&[u8]> {
 /// Base PID layout for the mux: program `p`'s PMT rides `MUX_PMT_PID + p`, and
 /// elementary stream `i` (global index) rides `MUX_ES_PID + i`. (The demuxer
 /// discovers these from the tables, so any values pair.)
-const MUX_PMT_PID: u16 = 0x1000;
-const MUX_ES_PID: u16 = 0x0100;
+pub const MUX_PMT_PID: u16 = 0x1000;
+pub const MUX_ES_PID: u16 = 0x0100;
 
-/// How far (90 kHz ticks) the PCR is placed ahead of the PTS it rides with:
-/// 100 ms. PCR must precede the PTS so the decoder has buffer lead time, and the
-/// PTS-PCR distance must stay under the T-STD ~700 ms bound.
-const PCR_LEAD_90KHZ: u64 = 9_000;
+// below 0x0010 is the PAT, CAT and other PSI, 0x1FFF is the null packet
+pub const MUX_PID_RANGE: core::ops::RangeInclusive<u16> = 0x0010..=0x1FFE;
+const PID_NULL: u16 = 0x1FFF;
+const NULL_PAYLOAD_BYTE: u8 = 0xFF;
+const AF_STUFFING_BYTE: u8 = 0xFF;
 
-/// Adaptation-field bytes a PCR costs a packet: the AF length byte, the AF flags
-/// byte, and the 6-byte PCR field. The first packet of a PCR-carrying PES loses
-/// this much payload room.
-const PCR_AF_OVERHEAD: usize = 8;
+const VBR_DECODER_DELAY_90KHZ: u64 = 9_000;
+// ffmpeg's default mux delay
+const CBR_DECODER_DELAY_90KHZ: u64 = 63_000;
+
+pub const DEFAULT_TABLE_INTERVAL_90KHZ: u64 = 9_000;
+pub const DEFAULT_PCR_INTERVAL_90KHZ: u64 = 3_600;
+pub const DEFAULT_TRANSPORT_STREAM_ID: u16 = 1;
+pub const DEFAULT_ORIGINAL_NETWORK_ID: u16 = 1;
+pub const MAX_TABLES_VERSION: u8 = 31;
+
+const SYSTEM_CLOCK_TICKS_PER_90KHZ: u64 = 300;
+const SYSTEM_CLOCK_HZ: u128 = 27_000_000;
+const BITS_PER_BYTE: u128 = 8;
+// the PCR value refers to the byte holding the last bit of its base
+const PCR_BYTE_OFFSET: usize = 11;
+
+const TS_HEADER_LEN: usize = 4;
+const TS_PAYLOAD_MAX: usize = TS_PACKET_LEN - TS_HEADER_LEN;
+const PUSI_FLAG: u8 = 0x40;
+const AFC_PAYLOAD_ONLY: u8 = 0x10;
+const AFC_ADAPTATION_ONLY: u8 = 0x20;
+const AFC_ADAPTATION_AND_PAYLOAD: u8 = 0x30;
+const AF_FLAG_RANDOM_ACCESS: u8 = 0x40;
+const AF_FLAG_PCR: u8 = 0x10;
+const AF_LENGTH_AND_FLAGS_LEN: usize = 2;
+const PCR_FIELD_LEN: usize = 6;
+// version_number shifts in above current_next_indicator
+const PSI_CURRENT_NEXT_RESERVED: u8 = 0xC1;
 
 /// One elementary stream in a [`TsMuxer`]: its PMT stream type, the TS PID it is
 /// carried on, its PES `stream_id`, its running continuity counter, and the index
@@ -1794,11 +2113,14 @@ struct MuxStream {
     /// display set, so it goes out wrapped in the PES data field EN 300 743
     /// carries it in rather than bare.
     dvb_subtitle: bool,
+    // EN 300 472 forbids an adaptation field beside teletext payload
+    teletext: bool,
+    overrun_warned: bool,
 }
 
 /// One program in a [`TsMuxer`]: its `program_number`, the PID its PMT rides on
 /// with that PID's continuity counter, the stream its PCR rides (the PMT's
-/// PCR_PID), and the decode clock the last PCR went out at.
+/// PCR_PID), and the 27 MHz value the last PCR carried.
 #[derive(Debug)]
 struct MuxProgram {
     number: u16,
@@ -1806,25 +2128,31 @@ struct MuxProgram {
     pmt_cc: u8,
     /// Global stream index carrying this program's PCR (its first stream).
     pcr_stream: usize,
-    last_pcr_90khz: Option<u64>,
+    last_pcr_27mhz: Option<u64>,
     /// This program's own SDT service text (M878), overriding the muxer-wide
     /// default set by [`TsMuxer::set_service`].
     service: Option<ServiceInfo>,
 }
 
 /// MPEG-TS multiplexer (M114, multi-stream since M207, multi-program since M783):
-/// wraps access units in PES packets and 188-byte TS packets, emitting PAT + PMT
-/// once up front. The inverse of [`TsDemuxer`]; the [`crate::tsmux::TsMux`]
-/// element wraps it. Each elementary stream (e.g. H.264 video + AAC audio) rides
-/// its own PID, named by the PMT of the program it belongs to.
+/// wraps access units in PES packets and 188-byte TS packets, repeating the PAT
+/// and PMTs on one cadence and the SDT on another. The inverse of [`TsDemuxer`];
+/// the [`crate::tsmux::TsMux`] element wraps it. Each elementary stream (e.g.
+/// H.264 video + AAC audio) rides its own PID, named by the PMT of the program it
+/// belongs to.
 ///
 /// Scope: one or more programs ([`with_programs`](Self::with_programs); the other
 /// constructors put every stream in program 1). The PAT names every program, each
 /// with its own PMT, and a PCR rides each program's first stream's PID (that PMT's
-/// PCR_PID) in the adaptation field of a PES's first TS packet, on the
-/// [`pcr_interval_90khz`] cadence. The caller is expected to interleave access
-/// units in timestamp order, which [`crate::tsmux::TsMux`] does. The PSI carries a
-/// real MPEG-2 CRC-32, so the output is a valid TS.
+/// PCR_PID) on the [`pcr_interval_90khz`] cadence, in the PES's first packet when
+/// the access unit is on that stream and in a PCR-only packet ahead of it
+/// otherwise. Every written PTS / DTS is the input value plus
+/// [`decoder_delay_90khz`](Self::decoder_delay_90khz). In variable-bitrate mode
+/// (the default) the PCR is the input clock. With [`set_bitrate`](Self::set_bitrate)
+/// the multiplex is constant-bitrate: the PCR comes from the byte position, and
+/// null packets pad the gaps. The caller is expected to interleave access units in
+/// timestamp order, which [`crate::tsmux::TsMux`] does. The PSI carries a real
+/// MPEG-2 CRC-32, so the output is a valid TS.
 ///
 /// [`pcr_interval_90khz`]: Self::set_pcr_interval_90khz
 #[derive(Debug)]
@@ -1839,19 +2167,26 @@ pub struct TsMuxer {
     /// is written at all.
     default_service: Option<ServiceInfo>,
     tables_written: bool,
-    /// PAT/PMT re-emission cadence in 90 kHz ticks (`0` = emit once up front, the
-    /// default). When set, the table pair is re-emitted before the first access
-    /// unit whose PTS is at least this far past the last emission, so a decoder
-    /// that joins mid-stream (a tuned-in multicast, an HLS/DASH segment boundary)
-    /// finds the PSI without waiting for the start of the stream.
+    /// PAT/PMT re-emission cadence in 90 kHz ticks (`0` = emit once up front,
+    /// default 9000). The table pair is re-emitted before the first access unit
+    /// at least this far past the last emission, so a decoder that joins
+    /// mid-stream (a tuned-in multicast, an HLS/DASH segment boundary) finds the
+    /// PSI without waiting for the start of the stream.
     table_interval_90khz: u64,
-    /// PTS (90 kHz) the tables were last emitted at, for the cadence above.
-    last_tables_pts: Option<u64>,
+    si_interval_90khz: u64,
+    last_tables_27mhz: Option<u64>,
+    last_si_27mhz: Option<u64>,
     /// PCR insertion cadence in 90 kHz ticks (default 3600, matching GStreamer
-    /// mpegtsmux). A PCR is emitted on a program's PCR_PID when the decode clock
-    /// (DTS, else PTS) is at least this far past that program's last PCR (and
-    /// always on its first clocked AU).
+    /// mpegtsmux). A program's PCR is due when the mux clock is at least this far
+    /// past its last PCR (and always before its first access unit).
     pcr_interval_90khz: u64,
+    // 0 is variable bitrate
+    bitrate: u64,
+    byte_clock_start_27mhz: Option<u64>,
+    bytes_written: u64,
+    transport_stream_id: u16,
+    original_network_id: u16,
+    tables_version: u8,
 }
 
 impl TsMuxer {
@@ -1892,7 +2227,7 @@ impl TsMuxer {
                         pmt_pid: MUX_PMT_PID + programs.len() as u16,
                         pmt_cc: 0,
                         pcr_stream: i,
-                        last_pcr_90khz: None,
+                        last_pcr_27mhz: None,
                         service: None,
                     });
                     ids.push((0, 0));
@@ -1933,6 +2268,8 @@ impl TsMuxer {
                 es_info: es_info.to_vec(),
                 identity_len: es_info.len(),
                 dvb_subtitle: false,
+                teletext: false,
+                overrun_warned: false,
             });
         }
         Self {
@@ -1942,9 +2279,17 @@ impl TsMuxer {
             sdt_cc: 0,
             default_service: None,
             tables_written: false,
-            table_interval_90khz: 0,
-            last_tables_pts: None,
-            pcr_interval_90khz: 3600,
+            table_interval_90khz: DEFAULT_TABLE_INTERVAL_90KHZ,
+            si_interval_90khz: DEFAULT_TABLE_INTERVAL_90KHZ,
+            last_tables_27mhz: None,
+            last_si_27mhz: None,
+            pcr_interval_90khz: DEFAULT_PCR_INTERVAL_90KHZ,
+            bitrate: 0,
+            byte_clock_start_27mhz: None,
+            bytes_written: 0,
+            transport_stream_id: DEFAULT_TRANSPORT_STREAM_ID,
+            original_network_id: DEFAULT_ORIGINAL_NETWORK_ID,
+            tables_version: 0,
         }
     }
 
@@ -2017,6 +2362,13 @@ impl TsMuxer {
     /// stream that is not a private PES is ignored. Call before the first access
     /// unit (the PMT goes out then).
     pub fn set_stream_teletext(&mut self, index: usize, service: TeletextService) {
+        if let Some(s) = self
+            .streams
+            .get_mut(index)
+            .filter(|s| s.stream_type == STREAM_TYPE_PRIVATE_PES)
+        {
+            s.teletext = true;
+        }
         self.set_private_identity(
             index,
             &[
@@ -2117,9 +2469,79 @@ impl TsMuxer {
         self.table_interval_90khz = ticks;
     }
 
+    pub fn set_si_interval_90khz(&mut self, ticks: u64) {
+        self.si_interval_90khz = ticks;
+    }
+
     /// Set the PCR insertion cadence in 90 kHz ticks (default 3600).
     pub fn set_pcr_interval_90khz(&mut self, ticks: u64) {
         self.pcr_interval_90khz = ticks;
+    }
+
+    pub fn set_bitrate(&mut self, bits_per_second: u64) {
+        self.bitrate = bits_per_second;
+    }
+
+    pub fn decoder_delay_90khz(&self) -> u64 {
+        if self.constant_bitrate() {
+            CBR_DECODER_DELAY_90KHZ
+        } else {
+            VBR_DECODER_DELAY_90KHZ
+        }
+    }
+
+    pub fn set_transport_stream_id(&mut self, id: u16) {
+        self.transport_stream_id = id;
+    }
+
+    pub fn set_original_network_id(&mut self, id: u16) {
+        self.original_network_id = id;
+    }
+
+    pub fn set_tables_version(&mut self, version: u8) -> Result<(), G2gError> {
+        if version > MAX_TABLES_VERSION {
+            g2g_core::g2g_error!(
+                self,
+                "tables version {version} exceeds {MAX_TABLES_VERSION}"
+            );
+            return Err(G2gError::NotConfigured);
+        }
+        self.tables_version = version;
+        Ok(())
+    }
+
+    pub fn set_pid_bases(&mut self, es_start: u16, pmt_start: u16) -> Result<(), G2gError> {
+        let es_pids = pid_span(es_start, self.streams.len());
+        let pmt_pids = pid_span(pmt_start, self.programs.len());
+        let (Some(es_pids), Some(pmt_pids)) = (es_pids, pmt_pids) else {
+            g2g_core::g2g_error!(
+                self,
+                "elementary stream or PMT PIDs run past {:#x}",
+                MUX_PID_RANGE.end()
+            );
+            return Err(G2gError::NotConfigured);
+        };
+        let overlap = es_pids.clone().any(|pid| pmt_pids.contains(&pid));
+        // the SDT PID lies inside the allowed range
+        let covers_sdt = es_pids.contains(&PID_SDT) || pmt_pids.contains(&PID_SDT);
+        if overlap || covers_sdt {
+            g2g_core::g2g_error!(
+                self,
+                "elementary stream PIDs {es_pids:#x?} and PMT PIDs {pmt_pids:#x?} collide"
+            );
+            return Err(G2gError::NotConfigured);
+        }
+        for (s, pid) in self.streams.iter_mut().zip(es_pids) {
+            s.pid = pid;
+        }
+        for (p, pid) in self.programs.iter_mut().zip(pmt_pids) {
+            p.pmt_pid = pid;
+        }
+        Ok(())
+    }
+
+    fn constant_bitrate(&self) -> bool {
+        self.bitrate > 0
     }
 
     /// Mux one access unit of stream 0 (the single-stream convenience). See
@@ -2129,74 +2551,127 @@ impl TsMuxer {
         au: &[u8],
         pts_90khz: Option<u64>,
         dts_90khz: Option<u64>,
+        keyframe: bool,
     ) -> Vec<u8> {
-        self.push_au_on(0, au, pts_90khz, dts_90khz)
+        self.push_au_on(0, au, pts_90khz, dts_90khz, keyframe)
     }
 
     /// Mux one access unit of elementary stream `stream_index` into TS bytes,
     /// preceded by the PAT + every program's PMT (+ the SDT, with a service set)
-    /// on the very first call (any stream). `pts_90khz`,
-    /// when present, is written into the PES header; a `dts_90khz` that differs
-    /// from it adds a second (DTS) timestamp for reordered (B-frame) video.
+    /// whenever their cadence is due, and always on the very first call (any
+    /// stream). `pts_90khz`, when present, is written into the PES header plus
+    /// the decoder delay. A `dts_90khz` that differs from it adds a second (DTS)
+    /// timestamp for reordered (B-frame) video. A `keyframe` access unit sets the
+    /// random_access_indicator and, on a PCR_PID, carries a PCR.
     pub fn push_au_on(
         &mut self,
         stream_index: usize,
         au: &[u8],
         pts_90khz: Option<u64>,
         dts_90khz: Option<u64>,
+        keyframe: bool,
     ) -> Vec<u8> {
         let mut out = Vec::new();
-        // Emit the PAT and every PMT up front, then again on the configured cadence
-        // so a mid-stream joiner finds the tables. A `None` PTS can't be time-gated,
-        // so it only ever triggers the initial emission.
-        let due = if !self.tables_written {
-            true
-        } else if self.table_interval_90khz > 0 {
-            match (pts_90khz, self.last_tables_pts) {
-                (Some(now), Some(last)) => now.saturating_sub(last) >= self.table_interval_90khz,
-                (Some(_), None) => true,
-                _ => false,
-            }
+        // DTS is monotonic in decode order, so the cadences hold even for
+        // reordered (B-frame) streams whose PTS is non-monotonic.
+        let input_clock_27mhz = dts_90khz
+            .or(pts_90khz)
+            .map(|clock| clock.saturating_mul(SYSTEM_CLOCK_TICKS_PER_90KHZ));
+        if self.constant_bitrate() {
+            let start = *self
+                .byte_clock_start_27mhz
+                .get_or_insert(input_clock_27mhz.unwrap_or(0));
+            let target = input_clock_27mhz.unwrap_or(start);
+            self.pad_until(target, &mut out);
         } else {
-            false
-        };
-        if due {
-            self.pat_packet(&mut out);
-            for p in 0..self.programs.len() {
-                self.pmt_packet(p, &mut out);
-            }
-            // The SDT joins the pair on the same cadence, so a mid-stream joiner
-            // learns the service name as soon as it learns the program layout.
-            self.sdt_packet(&mut out);
-            self.tables_written = true;
-            if let Some(now) = pts_90khz {
-                self.last_tables_pts = Some(now);
+            self.write_tables_if_due(input_clock_27mhz, &mut out);
+        }
+
+        let program_index = self.streams[stream_index].program;
+        let on_pcr_stream = self.programs[program_index].pcr_stream == stream_index;
+        let random_access = keyframe && !self.streams[stream_index].teletext;
+        let force_pcr = random_access && on_pcr_stream;
+        let mut first_packet_pcr = None;
+        if let (false, Some(now)) = (self.constant_bitrate(), input_clock_27mhz) {
+            let forced = force_pcr
+                && self.programs[program_index]
+                    .last_pcr_27mhz
+                    .is_none_or(|last| now >= last);
+            if forced || self.pcr_due(program_index, now) {
+                self.programs[program_index].last_pcr_27mhz = Some(now);
+                if on_pcr_stream {
+                    first_packet_pcr = Some(now);
+                } else {
+                    self.pcr_only_packet(program_index, now, &mut out);
+                }
             }
         }
-        // PCR rides its program's first stream's PID (that PMT's PCR_PID) and is
-        // clocked on the decode timeline (DTS, falling back to PTS when no DTS):
-        // DTS is monotonic in decode order, so the cadence bound holds even for
-        // reordered (B-frame) streams whose PTS is non-monotonic. Emit one in the
-        // first TS packet of this PES when the program's cadence is due (or no PCR
-        // has gone out for it yet). Other streams and clock-less AUs never carry
-        // PCR.
-        let clock = dts_90khz.or(pts_90khz);
-        let interval = self.pcr_interval_90khz;
-        let program = &mut self.programs[self.streams[stream_index].program];
-        let pcr = if program.pcr_stream == stream_index {
-            clock.and_then(|now| {
-                let due = match program.last_pcr_90khz {
-                    None => true,
-                    Some(last) => now.saturating_sub(last) >= interval,
-                };
-                due.then(|| {
-                    program.last_pcr_90khz = Some(now);
-                    now.saturating_sub(PCR_LEAD_90KHZ)
-                })
-            })
-        } else {
-            None
-        };
+
+        let delay = self.decoder_delay_90khz();
+        let written_pts = pts_90khz.map(|pts| pts.saturating_add(delay));
+        let written_dts = dts_90khz.map(|dts| dts.saturating_add(delay));
+        let pes = self.pes_for(stream_index, au, written_pts, written_dts);
+        let mut off = 0;
+        let mut first = true;
+        while off < pes.len() {
+            let pcr = if self.constant_bitrate() {
+                self.write_due_pcr_only_packets(Some(stream_index), &mut out);
+                self.embedded_pcr(stream_index, first && force_pcr, &out)
+            } else if first {
+                first_packet_pcr
+            } else {
+                None
+            };
+            let adaptation = AdaptationField {
+                pcr_27mhz: pcr,
+                random_access: first && random_access,
+            };
+            let take = (pes.len() - off).min(TS_PAYLOAD_MAX - adaptation.len());
+            let s = &mut self.streams[stream_index];
+            ts_packet(
+                s.pid,
+                first,
+                s.es_cc,
+                adaptation,
+                &pes[off..off + take],
+                &mut out,
+            );
+            s.es_cc = advance_continuity_counter(s.es_cc);
+            first = false;
+            off += take;
+        }
+
+        if let Some(decode_time) = written_dts.or(written_pts) {
+            self.warn_if_late(stream_index, decode_time, out.len());
+        }
+        self.bytes_written = self.bytes_written.saturating_add(out.len() as u64);
+        out
+    }
+
+    fn warn_if_late(&mut self, stream_index: usize, decode_time_90khz: u64, pending: usize) {
+        if !self.constant_bitrate() || self.streams[stream_index].overrun_warned {
+            return;
+        }
+        let decode_time = decode_time_90khz.saturating_mul(SYSTEM_CLOCK_TICKS_PER_90KHZ);
+        if self.byte_clock_27mhz(pending) <= decode_time {
+            return;
+        }
+        self.streams[stream_index].overrun_warned = true;
+        let pid = self.streams[stream_index].pid;
+        g2g_core::g2g_warn!(
+            self,
+            "stream on PID {pid:#x} outruns bitrate {} b/s: data arrives after its decode time",
+            self.bitrate
+        );
+    }
+
+    fn pes_for(
+        &mut self,
+        stream_index: usize,
+        au: &[u8],
+        pts_90khz: Option<u64>,
+        dts_90khz: Option<u64>,
+    ) -> Vec<u8> {
         let s = &mut self.streams[stream_index];
         // Synchronous KLV rides one metadata AU cell per access unit. An AU too
         // big for the cell's 16-bit length goes out bare (no ST 0601 local set
@@ -2213,50 +2688,128 @@ impl TsMuxer {
             .dvb_subtitle
             .then(|| crate::dvbsub::pes_data_field(au))
             .or(cell);
-        let pes = build_pes(
+        build_pes(
             s.stream_id,
             field.as_deref().unwrap_or(au),
             pts_90khz,
             dts_90khz,
-        );
-        let mut off = 0;
-        let mut pusi = true;
-        let mut first = true;
-        while off < pes.len() {
-            // Only the first packet of the PES carries the PCR; it shrinks the
-            // payload room by the adaptation-field overhead.
-            let pkt_pcr = if first { pcr } else { None };
-            let room = TS_PACKET_LEN
-                - 4
-                - if pkt_pcr.is_some() {
-                    PCR_AF_OVERHEAD
-                } else {
-                    0
-                };
-            let take = (pes.len() - off).min(room);
-            ts_packet(
-                s.pid,
-                pusi,
-                s.es_cc,
-                pkt_pcr,
-                &pes[off..off + take],
-                &mut out,
-            );
-            s.es_cc = (s.es_cc + 1) & 0x0F;
-            pusi = false;
-            first = false;
-            off += take;
+        )
+    }
+
+    // pending is the byte count already in this call's output
+    fn byte_clock_27mhz(&self, pending: usize) -> u64 {
+        let start = self.byte_clock_start_27mhz.unwrap_or(0);
+        if !self.constant_bitrate() {
+            return start;
         }
-        out
+        let bytes = u128::from(self.bytes_written) + pending as u128;
+        let elapsed = bytes * BITS_PER_BYTE * SYSTEM_CLOCK_HZ / u128::from(self.bitrate);
+        start.saturating_add(u64::try_from(elapsed).unwrap_or(u64::MAX))
+    }
+
+    fn pcr_due(&self, program_index: usize, now_27mhz: u64) -> bool {
+        let interval = self
+            .pcr_interval_90khz
+            .saturating_mul(SYSTEM_CLOCK_TICKS_PER_90KHZ);
+        self.programs[program_index]
+            .last_pcr_27mhz
+            .is_none_or(|last| now_27mhz >= last.saturating_add(interval))
+    }
+
+    fn pad_until(&mut self, target_27mhz: u64, out: &mut Vec<u8>) {
+        loop {
+            self.write_tables_if_due(Some(self.byte_clock_27mhz(out.len())), out);
+            if self.byte_clock_27mhz(out.len()) >= target_27mhz {
+                return;
+            }
+            if !self.write_due_pcr_only_packets(None, out) {
+                ts_packet(
+                    PID_NULL,
+                    false,
+                    0,
+                    AdaptationField::NONE,
+                    &[NULL_PAYLOAD_BYTE; TS_PAYLOAD_MAX],
+                    out,
+                );
+            }
+        }
+    }
+
+    // a PCR due on embedding_stream rides that stream's next packet instead
+    fn write_due_pcr_only_packets(
+        &mut self,
+        embedding_stream: Option<usize>,
+        out: &mut Vec<u8>,
+    ) -> bool {
+        let mut wrote = false;
+        for program_index in 0..self.programs.len() {
+            if Some(self.programs[program_index].pcr_stream) == embedding_stream {
+                continue;
+            }
+            if !self.pcr_due(program_index, self.byte_clock_27mhz(out.len())) {
+                continue;
+            }
+            let pcr = self.byte_clock_27mhz(out.len() + PCR_BYTE_OFFSET);
+            self.programs[program_index].last_pcr_27mhz = Some(pcr);
+            self.pcr_only_packet(program_index, pcr, out);
+            wrote = true;
+        }
+        wrote
+    }
+
+    fn embedded_pcr(&mut self, stream_index: usize, forced: bool, out: &[u8]) -> Option<u64> {
+        let program_index = self.streams[stream_index].program;
+        if self.programs[program_index].pcr_stream != stream_index {
+            return None;
+        }
+        if !forced && !self.pcr_due(program_index, self.byte_clock_27mhz(out.len())) {
+            return None;
+        }
+        let pcr = self.byte_clock_27mhz(out.len() + PCR_BYTE_OFFSET);
+        self.programs[program_index].last_pcr_27mhz = Some(pcr);
+        Some(pcr)
+    }
+
+    fn pcr_only_packet(&mut self, program_index: usize, pcr_27mhz: u64, out: &mut Vec<u8>) {
+        let s = &self.streams[self.programs[program_index].pcr_stream];
+        // no payload, so the counter repeats (ISO/IEC 13818-1 2.4.3.3)
+        let last_cc =
+            s.es_cc.wrapping_add(CONTINUITY_COUNTER_MODULUS - 1) % CONTINUITY_COUNTER_MODULUS;
+        let adaptation = AdaptationField {
+            pcr_27mhz: Some(pcr_27mhz),
+            random_access: false,
+        };
+        ts_packet(s.pid, false, last_cc, adaptation, &[], out);
+    }
+
+    fn write_tables_if_due(&mut self, now_27mhz: Option<u64>, out: &mut Vec<u8>) {
+        let first = !self.tables_written;
+        let tables_due =
+            first || cadence_due(now_27mhz, self.last_tables_27mhz, self.table_interval_90khz);
+        let si_due = first || cadence_due(now_27mhz, self.last_si_27mhz, self.si_interval_90khz);
+        if tables_due {
+            self.pat_packet(out);
+            for p in 0..self.programs.len() {
+                self.pmt_packet(p, out);
+            }
+            self.last_tables_27mhz = now_27mhz.or(self.last_tables_27mhz);
+        }
+        if si_due {
+            self.sdt_packet(out);
+            self.last_si_27mhz = now_27mhz.or(self.last_si_27mhz);
+        }
+        self.tables_written = true;
+    }
+
+    fn version_byte(&self) -> u8 {
+        PSI_CURRENT_NEXT_RESERVED | (self.tables_version << 1)
     }
 
     fn pat_packet(&mut self, out: &mut Vec<u8>) {
         let mut body = Vec::with_capacity(5 + self.programs.len() * 4);
-        body.extend_from_slice(&[
-            0x00, 0x01, // transport_stream_id
-            0xC1, 0x00, 0x00, // version/current, section_number, last_section_number
-        ]);
-        // One entry per program: program_number then its PMT PID.
+        body.extend_from_slice(&self.transport_stream_id.to_be_bytes());
+        body.extend_from_slice(&[self.version_byte(), 0x00, 0x00]); // section_number, last_section_number
+                                                                    // One entry per program: program_number then its PMT PID.
         for p in &self.programs {
             body.extend_from_slice(&[
                 (p.number >> 8) as u8,
@@ -2278,9 +2831,9 @@ impl TsMuxer {
         body.extend_from_slice(&[
             (program_number >> 8) as u8,
             program_number as u8,
-            0xC1,
+            self.version_byte(),
             0x00,
-            0x00, // version, section/last
+            0x00, // section/last
             0xE0 | (pcr_pid >> 8) as u8 & 0x1F,
             pcr_pid as u8, // PCR_PID
             0xF0,
@@ -2325,12 +2878,10 @@ impl TsMuxer {
                 continue;
             };
             if body.is_empty() {
-                body.extend_from_slice(&[
-                    0x00, 0x01, // transport_stream_id (matches the PAT's)
-                    0xC1, 0x00, 0x00, // version/current, section_number, last_section_number
-                    0x00, 0x01, // original_network_id
-                    0xFF, // reserved_future_use
-                ]);
+                body.extend_from_slice(&self.transport_stream_id.to_be_bytes());
+                body.extend_from_slice(&[self.version_byte(), 0x00, 0x00]); // section_number, last_section_number
+                body.extend_from_slice(&self.original_network_id.to_be_bytes());
+                body.push(0xFF); // reserved_future_use
             }
             let name = dvb_field(&service.name);
             let provider = dvb_field(&service.provider);
@@ -2363,6 +2914,39 @@ impl TsMuxer {
         }
         body
     }
+}
+
+impl g2g_core::log::LogSource for TsMuxer {
+    fn log_category(&self) -> &'static str {
+        "mpegtsmux"
+    }
+}
+
+fn pid_span(start: u16, count: usize) -> Option<core::ops::RangeInclusive<u16>> {
+    if !MUX_PID_RANGE.contains(&start) {
+        return None;
+    }
+    let Some(last_offset) = count.checked_sub(1) else {
+        return Some(start..=start.saturating_sub(1));
+    };
+    let end = start.checked_add(u16::try_from(last_offset).ok()?)?;
+    MUX_PID_RANGE.contains(&end).then_some(start..=end)
+}
+
+// a 0 interval or a missing clock never repeats
+fn cadence_due(now_27mhz: Option<u64>, last_27mhz: Option<u64>, interval_90khz: u64) -> bool {
+    let Some(now) = now_27mhz else {
+        return false;
+    };
+    if interval_90khz == 0 {
+        return false;
+    }
+    let interval = interval_90khz.saturating_mul(SYSTEM_CLOCK_TICKS_PER_90KHZ);
+    last_27mhz.is_none_or(|last| now >= last.saturating_add(interval))
+}
+
+fn advance_continuity_counter(cc: u8) -> u8 {
+    cc.wrapping_add(1) % CONTINUITY_COUNTER_MODULUS
 }
 
 /// Whether a `stream_type` the mux writes is video, for the SDT `service_type`.
@@ -2452,49 +3036,98 @@ fn encode_timestamp(prefix: u8, ts: u64, out: &mut Vec<u8>) {
     out.push(((ts & 0x7F) as u8) << 1 | 0x01);
 }
 
+#[derive(Debug, Clone, Copy)]
+struct AdaptationField {
+    pcr_27mhz: Option<u64>,
+    random_access: bool,
+}
+
+impl AdaptationField {
+    const NONE: Self = Self {
+        pcr_27mhz: None,
+        random_access: false,
+    };
+
+    fn len(&self) -> usize {
+        match (self.pcr_27mhz, self.random_access) {
+            (Some(_), _) => AF_LENGTH_AND_FLAGS_LEN + PCR_FIELD_LEN,
+            (None, true) => AF_LENGTH_AND_FLAGS_LEN,
+            (None, false) => 0,
+        }
+    }
+
+    fn flags(&self) -> u8 {
+        let pcr = if self.pcr_27mhz.is_some() {
+            AF_FLAG_PCR
+        } else {
+            0
+        };
+        let random_access = if self.random_access {
+            AF_FLAG_RANDOM_ACCESS
+        } else {
+            0
+        };
+        pcr | random_access
+    }
+}
+
 /// Write one 188-byte TS packet to `out`: a payload of up to 184 bytes, padded
 /// with an adaptation-field stuffing run when shorter (the last packet of a PES).
-/// With `pcr` set (the 90 kHz base) the adaptation field always exists, carrying
-/// the PCR_flag and 6-byte PCR ahead of any stuffing, so the payload room drops
-/// by [`PCR_AF_OVERHEAD`].
-fn ts_packet(pid: u16, pusi: bool, cc: u8, pcr: Option<u64>, payload: &[u8], out: &mut Vec<u8>) {
-    const PAYLOAD_MAX: usize = TS_PACKET_LEN - 4;
-    let payload_max = PAYLOAD_MAX - if pcr.is_some() { PCR_AF_OVERHEAD } else { 0 };
-    debug_assert!(payload.len() <= payload_max);
+/// The `adaptation` flags (a PCR, the random_access_indicator) shrink the payload
+/// room by [`AdaptationField::len`]. An empty payload makes an adaptation-only
+/// packet.
+fn ts_packet(
+    pid: u16,
+    pusi: bool,
+    cc: u8,
+    adaptation: AdaptationField,
+    payload: &[u8],
+    out: &mut Vec<u8>,
+) {
+    debug_assert!(payload.len() <= TS_PAYLOAD_MAX - adaptation.len());
     out.push(SYNC_BYTE);
-    out.push((if pusi { 0x40 } else { 0 }) | ((pid >> 8) as u8 & 0x1F));
+    out.push((if pusi { PUSI_FLAG } else { 0 }) | ((pid >> 8) as u8 & 0x1F));
     out.push(pid as u8);
     let l = payload.len();
-    if pcr.is_none() && l == PAYLOAD_MAX {
-        out.push(0x10 | (cc & 0x0F)); // payload only
+    let cc = cc % CONTINUITY_COUNTER_MODULUS;
+    if adaptation.len() == 0 && l == TS_PAYLOAD_MAX {
+        out.push(AFC_PAYLOAD_ONLY | cc);
         out.extend_from_slice(payload);
         return;
     }
-    out.push(0x30 | (cc & 0x0F)); // adaptation field + payload
-    let af_len = PAYLOAD_MAX - 1 - l; // bytes after the AF length byte
+    let control = if l == 0 {
+        AFC_ADAPTATION_ONLY
+    } else {
+        AFC_ADAPTATION_AND_PAYLOAD
+    };
+    out.push(control | cc);
+    let af_len = TS_PAYLOAD_MAX - 1 - l; // bytes after the AF length byte
     out.push(af_len as u8);
-    if let Some(base) = pcr {
-        out.push(0x10); // AF flags: PCR_flag
-        write_pcr(base, out);
-        out.resize(out.len() + (af_len - 1 - 6), 0xFF); // stuffing after flags + PCR
-    } else if af_len >= 1 {
-        out.push(0x00); // AF flags (no PCR / no options)
-        out.resize(out.len() + (af_len - 1), 0xFF); // stuffing
+    if af_len == 0 {
+        out.extend_from_slice(payload);
+        return;
     }
+    let af_end = out.len() + af_len;
+    out.push(adaptation.flags());
+    if let Some(pcr) = adaptation.pcr_27mhz {
+        write_pcr(pcr, out);
+    }
+    out.resize(af_end, AF_STUFFING_BYTE);
     out.extend_from_slice(payload);
 }
 
-/// Encode the 48-bit PCR field: 33-bit `base` (90 kHz), 6 reserved bits set to 1,
-/// 9-bit extension = 0 (no 27 MHz phase to encode).
-fn write_pcr(base: u64, out: &mut Vec<u8>) {
-    let base = base & 0x1_FFFF_FFFF;
+/// Encode the 48-bit PCR field from a 27 MHz value: the 33-bit base (90 kHz),
+/// 6 reserved bits set to 1, and the 9-bit extension (the 27 MHz remainder).
+fn write_pcr(pcr_27mhz: u64, out: &mut Vec<u8>) {
+    let base = (pcr_27mhz / SYSTEM_CLOCK_TICKS_PER_90KHZ) & 0x1_FFFF_FFFF;
+    let extension = (pcr_27mhz % SYSTEM_CLOCK_TICKS_PER_90KHZ) as u16;
     out.push((base >> 25) as u8);
     out.push((base >> 17) as u8);
     out.push((base >> 9) as u8);
     out.push((base >> 1) as u8);
-    // low base bit, then the 6 reserved 1s and the top extension bit (0).
-    out.push(((base as u8 & 0x1) << 7) | 0x7E);
-    out.push(0x00); // extension low bits = 0
+    // low base bit, then the 6 reserved 1s and the top extension bit.
+    out.push(((base as u8 & 0x1) << 7) | 0x7E | (extension >> 8) as u8);
+    out.push(extension as u8);
 }
 
 /// Write a PSI section (pointer field + table + MPEG-2 CRC-32), spanning more
@@ -2519,7 +3152,7 @@ fn psi_packet(pid: u16, table_id: u8, body: &[u8], mut cc: u8, out: &mut Vec<u8>
     let mut pusi = true;
     loop {
         let n = rest.len().min(ROOM);
-        ts_packet(pid, pusi, cc, None, &rest[..n], out);
+        ts_packet(pid, pusi, cc, AdaptationField::NONE, &rest[..n], out);
         cc = (cc + 1) & 0x0F;
         rest = &rest[n..];
         pusi = false;
@@ -2548,8 +3181,29 @@ fn mpeg_crc32(data: &[u8]) -> u32 {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+    extern crate std;
+
+    std::thread_local! {
+        static NEXT_CONTINUITY_COUNTERS: core::cell::RefCell<Vec<(u16, u8)>> =
+            const { core::cell::RefCell::new(Vec::new()) };
+    }
+
+    pub(crate) fn next_continuity_counter(pid: u16) -> u8 {
+        NEXT_CONTINUITY_COUNTERS.with_borrow_mut(|counters| {
+            let slot = match counters.iter().position(|(known, _)| *known == pid) {
+                Some(slot) => slot,
+                None => {
+                    counters.push((pid, 0));
+                    counters.len() - 1
+                }
+            };
+            let counter = counters[slot].1;
+            counters[slot].1 = (counter + 1) % CONTINUITY_COUNTER_MODULUS;
+            counter
+        })
+    }
 
     /// Build a 188-byte TS packet with the given PID / PUSI / payload. A short
     /// payload is padded with adaptation-field stuffing (as real muxers do), so
@@ -2561,12 +3215,13 @@ mod tests {
         p[0] = SYNC_BYTE;
         p[1] = if pusi { 0x40 } else { 0x00 } | ((pid >> 8) as u8 & 0x1F);
         p[2] = (pid & 0xFF) as u8;
+        let continuity_counter = next_continuity_counter(pid);
         let l = payload.len();
         if l == ROOM {
-            p[3] = 0x10; // payload only
+            p[3] = 0x10 | continuity_counter; // payload only
             p[4..].copy_from_slice(payload);
         } else {
-            p[3] = 0x30; // adaptation field + payload
+            p[3] = 0x30 | continuity_counter; // adaptation field + payload
             let af_len = ROOM - 1 - l; // bytes after the length byte
             p[4] = af_len as u8;
             if af_len >= 1 {
@@ -2838,8 +3493,9 @@ mod tests {
         let au0 = [0u8, 0, 0, 1, 0x65, 0xAA, 0xBB];
         let au1 = [0u8, 0, 0, 1, 0x41, 0xCC];
         let mut mux = TsMuxer::new(STREAM_TYPE_H264);
-        let mut bytes = mux.push_au(&au0, Some(900_000), None);
-        bytes.extend(mux.push_au(&au1, Some(903_000), None));
+        let delay = mux.decoder_delay_90khz();
+        let mut bytes = mux.push_au(&au0, Some(900_000), None, false);
+        bytes.extend(mux.push_au(&au1, Some(903_000), None, false));
         assert_eq!(bytes.len() % TS_PACKET_LEN, 0, "output is whole TS packets");
 
         let mut d = TsDemuxer::new();
@@ -2851,9 +3507,9 @@ mod tests {
         assert_eq!(units.len(), 2, "both AUs survive the round trip");
         assert_eq!(units[0].stream_type, STREAM_TYPE_H264);
         assert_eq!(units[0].data, au0, "AU bytes intact");
-        assert_eq!(units[0].pts_90khz, Some(900_000));
+        assert_eq!(units[0].pts_90khz, Some(900_000 + delay));
         assert_eq!(units[1].data, au1);
-        assert_eq!(units[1].pts_90khz, Some(903_000));
+        assert_eq!(units[1].pts_90khz, Some(903_000 + delay));
     }
 
     /// A DVB `service_descriptor` over the given raw provider / name field bytes.
@@ -2922,8 +3578,8 @@ mod tests {
         m.set_stream_language(1, "deu");
         m.set_stream_language(0, "en"); // not three letters: no descriptor
         m.set_stream_language(9, "eng"); // out of range: ignored
-        let mut ts = m.push_au_on(0, &[0, 0, 0, 1, 0x65, 0x11], Some(900_000), None);
-        ts.extend(m.push_au_on(1, &[0xFF, 0xF1, 0x22], Some(901_000), None));
+        let mut ts = m.push_au_on(0, &[0, 0, 0, 1, 0x65, 0x11], Some(900_000), None, false);
+        ts.extend(m.push_au_on(1, &[0xFF, 0xF1, 0x22], Some(901_000), None, false));
 
         let mut d = TsDemuxer::new();
         for pkt in ts.chunks(TS_PACKET_LEN) {
@@ -2948,7 +3604,7 @@ mod tests {
         assert_eq!(sdt[15], SERVICE_TYPE_TV, "service_type at the descriptor");
         let mut audio_only = TsMuxer::new(STREAM_TYPE_AAC);
         audio_only.set_service("Radio Two", "");
-        let radio = audio_only.push_au(&[0xFF, 0xF1, 0x33], Some(0), None);
+        let radio = audio_only.push_au(&[0xFF, 0xF1, 0x33], Some(0), None, false);
         let sdt = psi_body_of(&radio, PID_SDT).expect("SDT emitted");
         assert_eq!(sdt[15], SERVICE_TYPE_RADIO);
     }
@@ -2965,8 +3621,8 @@ mod tests {
             !m.set_program_service(7, "Nobody", ""),
             "no program 7: the caller learns the service went nowhere"
         );
-        let mut ts = m.push_au_on(0, &[0, 0, 0, 1, 0x65, 0x11], Some(900_000), None);
-        ts.extend(m.push_au_on(1, &[0xFF, 0xF1, 0x22], Some(901_000), None));
+        let mut ts = m.push_au_on(0, &[0, 0, 0, 1, 0x65, 0x11], Some(900_000), None, false);
+        ts.extend(m.push_au_on(1, &[0xFF, 0xF1, 0x22], Some(901_000), None, false));
 
         let mut d = TsDemuxer::new();
         for pkt in ts.chunks(TS_PACKET_LEN) {
@@ -2995,7 +3651,7 @@ mod tests {
     #[test]
     fn no_service_writes_no_sdt() {
         let mut m = TsMuxer::new(STREAM_TYPE_H264);
-        let ts = m.push_au(&[0, 0, 0, 1, 0x65, 0x88], Some(0), None);
+        let ts = m.push_au(&[0, 0, 0, 1, 0x65, 0x88], Some(0), None, false);
         assert!(psi_body_of(&ts, PID_SDT).is_none());
     }
 
@@ -3118,27 +3774,28 @@ mod tests {
         m.set_table_interval_90khz(90 * 100); // 100 ms cadence
         let au = alloc::vec![0u8, 0, 0, 1, 0x65, 0x88]; // a minimal IDR-ish AU
 
-        let out0 = m.push_au(&au, Some(0), None);
+        let out0 = m.push_au(&au, Some(0), None, false);
         assert_eq!(pat_count(&out0), 1, "PAT emitted up front");
-        let out1 = m.push_au(&au, Some(90 * 50), None); // +50 ms: under the interval
+        let out1 = m.push_au(&au, Some(90 * 50), None, false); // +50 ms: under the interval
         assert_eq!(pat_count(&out1), 0, "no PAT before the interval elapses");
-        let out2 = m.push_au(&au, Some(90 * 150), None); // 150 ms since last emit: due
+        let out2 = m.push_au(&au, Some(90 * 150), None, false); // 150 ms since last emit: due
         assert_eq!(pat_count(&out2), 1, "PAT re-emitted after the interval");
     }
 
     #[test]
     fn table_interval_zero_emits_tables_once() {
         let mut m = TsMuxer::new(STREAM_TYPE_H264);
+        m.set_table_interval_90khz(0);
         let au = alloc::vec![0u8, 0, 0, 1, 0x65, 0x88];
-        let _ = m.push_au(&au, Some(0), None);
-        let later = m.push_au(&au, Some(90 * 10_000), None); // 10 s later
+        let _ = m.push_au(&au, Some(0), None, false);
+        let later = m.push_au(&au, Some(90 * 10_000), None, false); // 10 s later
         let pats = later
             .chunks(TS_PACKET_LEN)
             .filter(|p| {
                 p.len() == TS_PACKET_LEN && (((p[1] as u16 & 0x1F) << 8) | p[2] as u16) == PID_PAT
             })
             .count();
-        assert_eq!(pats, 0, "default cadence emits the tables only once");
+        assert_eq!(pats, 0, "a zero cadence emits the tables only once");
     }
 
     #[test]
@@ -3271,11 +3928,11 @@ mod tests {
             (1, STREAM_TYPE_AAC),
             (2, STREAM_TYPE_H264),
         ]);
-        let mut ts = m.push_au_on(0, &[0, 0, 0, 1, 0x65, 0x11], Some(900_000), None);
-        ts.extend(m.push_au_on(1, &[0xFF, 0xF1, 0x22], Some(901_000), None));
-        ts.extend(m.push_au_on(2, &[0, 0, 0, 1, 0x65, 0x33], Some(902_000), None));
-        ts.extend(m.push_au_on(0, &[0, 0, 0, 1, 0x41, 0x44], Some(903_000), None));
-        ts.extend(m.push_au_on(2, &[0, 0, 0, 1, 0x41, 0x55], Some(904_000), None));
+        let mut ts = m.push_au_on(0, &[0, 0, 0, 1, 0x65, 0x11], Some(900_000), None, false);
+        ts.extend(m.push_au_on(1, &[0xFF, 0xF1, 0x22], Some(901_000), None, false));
+        ts.extend(m.push_au_on(2, &[0, 0, 0, 1, 0x65, 0x33], Some(902_000), None, false));
+        ts.extend(m.push_au_on(0, &[0, 0, 0, 1, 0x41, 0x44], Some(903_000), None, false));
+        ts.extend(m.push_au_on(2, &[0, 0, 0, 1, 0x41, 0x55], Some(904_000), None, false));
         ts
     }
 
@@ -3379,11 +4036,24 @@ mod tests {
         );
     }
 
+    fn first_pts(ts: &[u8], pid: u16) -> Option<u64> {
+        let mut d = TsDemuxer::new();
+        for pkt in ts.chunks(TS_PACKET_LEN) {
+            d.push_packet(pkt);
+        }
+        d.flush();
+        d.take_units()
+            .into_iter()
+            .find(|u| u.pid == pid)
+            .and_then(|u| u.pts_90khz)
+    }
+
     #[test]
-    fn pcr_on_first_stream0_packet_carries_pts_minus_lead() {
+    fn written_pts_carries_the_decoder_delay_and_pcr_is_the_input_clock() {
         let au = alloc::vec![0u8, 0, 0, 1, 0x65, 0x88];
         let mut m = TsMuxer::new(STREAM_TYPE_H264);
-        let out = m.push_au(&au, Some(900_000), None);
+        let delay = m.decoder_delay_90khz();
+        let out = m.push_au(&au, Some(900_000), None, false);
         assert_eq!(
             out.len() % TS_PACKET_LEN,
             0,
@@ -3391,13 +4061,15 @@ mod tests {
         );
         assert_eq!(
             find_pcr(&out, MUX_ES_PID),
-            Some(900_000 - PCR_LEAD_90KHZ),
-            "PCR base is pts minus the 100 ms lead"
+            Some(900_000),
+            "PCR is the input clock"
         );
-        // A PTS under the lead saturates the base to 0 rather than wrapping.
+        assert_eq!(first_pts(&out, MUX_ES_PID), Some(900_000 + delay));
+        // A PTS under the delay no longer saturates the PCR at 0.
         let mut m2 = TsMuxer::new(STREAM_TYPE_H264);
-        let out2 = m2.push_au(&au, Some(100), None);
-        assert_eq!(find_pcr(&out2, MUX_ES_PID), Some(0));
+        let out2 = m2.push_au(&au, Some(100), None, false);
+        assert_eq!(find_pcr(&out2, MUX_ES_PID), Some(100));
+        assert_eq!(first_pts(&out2, MUX_ES_PID), Some(100 + delay));
     }
 
     #[test]
@@ -3405,14 +4077,14 @@ mod tests {
         let au = alloc::vec![0u8, 0, 0, 1, 0x65, 0x88];
         // Default interval (3600): AUs exactly 3600 ticks apart each carry a PCR.
         let mut m = TsMuxer::new(STREAM_TYPE_H264);
-        assert!(find_pcr(&m.push_au(&au, Some(3600), None), MUX_ES_PID).is_some());
-        assert!(find_pcr(&m.push_au(&au, Some(7200), None), MUX_ES_PID).is_some());
+        assert!(find_pcr(&m.push_au(&au, Some(3600), None, false), MUX_ES_PID).is_some());
+        assert!(find_pcr(&m.push_au(&au, Some(7200), None, false), MUX_ES_PID).is_some());
 
         // A huge interval: only the first PTS'd AU carries a PCR.
         let mut big = TsMuxer::new(STREAM_TYPE_H264);
         big.set_pcr_interval_90khz(u64::MAX);
-        assert!(find_pcr(&big.push_au(&au, Some(0), None), MUX_ES_PID).is_some());
-        assert!(find_pcr(&big.push_au(&au, Some(1_000_000), None), MUX_ES_PID).is_none());
+        assert!(find_pcr(&big.push_au(&au, Some(0), None, false), MUX_ES_PID).is_some());
+        assert!(find_pcr(&big.push_au(&au, Some(1_000_000), None, false), MUX_ES_PID).is_none());
     }
 
     #[test]
@@ -3420,8 +4092,312 @@ mod tests {
         // Stream 1 (audio) is not the PCR_PID, so its packets carry no PCR.
         let mut m = TsMuxer::with_streams(&[STREAM_TYPE_H264, STREAM_TYPE_AAC]);
         let adts = alloc::vec![0xFFu8, 0xF1, 0x00, 0x00];
-        let out = m.push_au_on(1, &adts, Some(900_000), None);
+        let out = m.push_au_on(1, &adts, Some(900_000), None, false);
         assert!(find_pcr(&out, MUX_ES_PID + 1).is_none());
+    }
+
+    fn packet_pid(p: &[u8]) -> u16 {
+        (((p[1] & 0x1F) as u16) << 8) | p[2] as u16
+    }
+
+    fn adaptation_flags(p: &[u8]) -> Option<u8> {
+        let has_adaptation = p[3] & AFC_ADAPTATION_ONLY != 0;
+        (has_adaptation && p[4] > 0).then_some(p[5])
+    }
+
+    fn packet_pcr_27mhz(p: &[u8]) -> Option<u64> {
+        adaptation_flags(p).filter(|f| f & AF_FLAG_PCR != 0)?;
+        let base = ((p[6] as u64) << 25)
+            | ((p[7] as u64) << 17)
+            | ((p[8] as u64) << 9)
+            | ((p[9] as u64) << 1)
+            | ((p[10] as u64) >> 7);
+        let extension = (((p[10] & 0x01) as u64) << 8) | p[11] as u64;
+        Some(base * SYSTEM_CLOCK_TICKS_PER_90KHZ + extension)
+    }
+
+    fn count_pid(ts: &[u8], pid: u16) -> usize {
+        ts.chunks(TS_PACKET_LEN)
+            .filter(|p| packet_pid(p) == pid)
+            .count()
+    }
+
+    const TINY_IDR: [u8; 6] = [0, 0, 0, 1, 0x65, 0x88];
+    const TINY_ADTS: [u8; 4] = [0xFF, 0xF1, 0x00, 0x00];
+    const FRAME_PERIOD_90KHZ: u64 = 3_600;
+
+    #[test]
+    fn tables_repeat_on_the_default_100_ms_cadence() {
+        let mut m = TsMuxer::new(STREAM_TYPE_H264);
+        let half_cadence = DEFAULT_TABLE_INTERVAL_90KHZ / 2;
+        let mut ts = Vec::new();
+        for i in 0..5 {
+            ts.extend(m.push_au(&TINY_IDR, Some(i * half_cadence), None, false));
+        }
+        assert_eq!(count_pid(&ts, PID_PAT), 3, "PAT at 0, 100 and 200 ms");
+        assert_eq!(count_pid(&ts, MUX_PMT_PID), 3, "the PMT rides with it");
+    }
+
+    #[test]
+    fn sdt_repeats_on_its_own_cadence() {
+        let mut m = TsMuxer::new(STREAM_TYPE_H264);
+        m.set_service("News One", "G2G");
+        let table_interval = 9_000;
+        m.set_table_interval_90khz(table_interval);
+        m.set_si_interval_90khz(2 * table_interval);
+        let mut ts = Vec::new();
+        for i in 0..9 {
+            ts.extend(m.push_au(&TINY_IDR, Some(i * table_interval / 2), None, false));
+        }
+        assert_eq!(count_pid(&ts, PID_PAT), 5, "PAT every table interval");
+        assert_eq!(count_pid(&ts, PID_SDT), 3, "SDT every second one");
+    }
+
+    #[test]
+    fn pcr_only_packet_leads_an_audio_pes_without_advancing_the_counter() {
+        let mut m = TsMuxer::with_streams(&[STREAM_TYPE_H264, STREAM_TYPE_AAC]);
+        let ts = m.push_au_on(1, &TINY_ADTS, Some(0), None, false);
+        let after_tables: Vec<&[u8]> = ts
+            .chunks(TS_PACKET_LEN)
+            .filter(|p| packet_pid(p) != PID_PAT && packet_pid(p) != MUX_PMT_PID)
+            .collect();
+        let pcr_only = after_tables[0];
+        assert_eq!(packet_pid(pcr_only), MUX_ES_PID, "on the PCR_PID");
+        assert_eq!(pcr_only[3] & 0x30, AFC_ADAPTATION_ONLY, "no payload");
+        assert_eq!(
+            pcr_only[4] as usize,
+            TS_PAYLOAD_MAX - 1,
+            "AF fills the packet"
+        );
+        assert_eq!(packet_pcr_27mhz(pcr_only), Some(0));
+        assert_eq!(
+            packet_pid(after_tables[1]),
+            MUX_ES_PID + 1,
+            "then the audio"
+        );
+
+        // Video first: the PCR-only packet repeats the video PID's counter, and
+        // the next video payload continues from it.
+        let mut m = TsMuxer::with_streams(&[STREAM_TYPE_H264, STREAM_TYPE_AAC]);
+        let mut ts = m.push_au_on(0, &TINY_IDR, Some(0), None, false);
+        ts.extend(m.push_au_on(1, &TINY_ADTS, Some(FRAME_PERIOD_90KHZ), None, false));
+        ts.extend(m.push_au_on(0, &TINY_IDR, Some(FRAME_PERIOD_90KHZ + 1), None, false));
+        let video: Vec<&[u8]> = ts
+            .chunks(TS_PACKET_LEN)
+            .filter(|p| packet_pid(p) == MUX_ES_PID)
+            .collect();
+        assert_eq!(video.len(), 3);
+        assert_eq!(video[1][3] & 0x30, AFC_ADAPTATION_ONLY);
+        let counters: Vec<u8> = video.iter().map(|p| p[3] & 0x0F).collect();
+        assert_eq!(counters, alloc::vec![0, 0, 1]);
+    }
+
+    #[test]
+    fn random_access_indicator_marks_keyframes_only() {
+        let mut m = TsMuxer::new(STREAM_TYPE_H264);
+        let big_idr = alloc::vec![0x65u8; 2 * TS_PACKET_LEN];
+        let key = m.push_au(&big_idr, Some(0), None, true);
+        let key_es: Vec<&[u8]> = key
+            .chunks(TS_PACKET_LEN)
+            .filter(|p| packet_pid(p) == MUX_ES_PID)
+            .collect();
+        assert!(key_es.len() > 1);
+        assert_eq!(
+            adaptation_flags(key_es[0]).map(|f| f & AF_FLAG_RANDOM_ACCESS),
+            Some(AF_FLAG_RANDOM_ACCESS)
+        );
+        assert!(key_es[1..]
+            .iter()
+            .all(|p| adaptation_flags(p).unwrap_or(0) & AF_FLAG_RANDOM_ACCESS == 0));
+
+        let delta = m.push_au(&TINY_IDR, Some(10), None, false);
+        assert!(delta
+            .chunks(TS_PACKET_LEN)
+            .all(|p| adaptation_flags(p).unwrap_or(0) & AF_FLAG_RANDOM_ACCESS == 0));
+        assert!(find_pcr(&delta, MUX_ES_PID).is_none(), "PCR not due yet");
+        // A keyframe on the PCR_PID carries a PCR whatever the cadence says.
+        let keyframe = m.push_au(&TINY_IDR, Some(20), None, true);
+        assert_eq!(find_pcr(&keyframe, MUX_ES_PID), Some(20));
+
+        // Teletext packets never carry an adaptation field beside payload.
+        let mut teletext = TsMuxer::with_streams(&[STREAM_TYPE_PRIVATE_PES]);
+        teletext.set_stream_teletext(
+            0,
+            TeletextService {
+                language: *b"eng",
+                teletext_type: 0x02,
+                magazine: 8,
+                page: 0x88,
+            },
+        );
+        let ts = teletext.push_au(&[0x10; TS_PAYLOAD_MAX], Some(0), None, true);
+        assert!(ts
+            .chunks(TS_PACKET_LEN)
+            .all(|p| adaptation_flags(p).unwrap_or(0) & AF_FLAG_RANDOM_ACCESS == 0));
+    }
+
+    const TEST_BITRATE: u64 = 1_000_000;
+
+    // also returns the byte offset of the last AU's first PES packet
+    fn cbr_run() -> (TsMuxer, Vec<u8>, usize) {
+        let mut m = TsMuxer::new(STREAM_TYPE_H264);
+        m.set_bitrate(TEST_BITRATE);
+        m.set_table_interval_90khz(0);
+        m.set_si_interval_90khz(0);
+        let mut ts = Vec::new();
+        let mut last_pes = 0;
+        for i in 0..=25 {
+            let out = m.push_au(&TINY_IDR, Some(i * FRAME_PERIOD_90KHZ), None, false);
+            let first_es = out
+                .chunks(TS_PACKET_LEN)
+                .position(|p| packet_pid(p) == MUX_ES_PID && p[1] & PUSI_FLAG != 0)
+                .expect("the AU's PES");
+            last_pes = ts.len() + first_es * TS_PACKET_LEN;
+            ts.extend(out);
+        }
+        (m, ts, last_pes)
+    }
+
+    #[test]
+    fn constant_bitrate_output_size_follows_the_bitrate() {
+        let (m, ts, last_pes) = cbr_run();
+        let duration_90khz = 25 * FRAME_PERIOD_90KHZ;
+        let expected = (TEST_BITRATE * duration_90khz / 90_000 / 8) as usize;
+        assert!(
+            (expected..expected + TS_PACKET_LEN).contains(&last_pes),
+            "{last_pes} bytes before the AU at {duration_90khz} ticks, expected {expected}"
+        );
+        assert!(count_pid(&ts, PID_NULL) > 0, "null packets pad the gaps");
+        for null in ts
+            .chunks(TS_PACKET_LEN)
+            .filter(|p| packet_pid(p) == PID_NULL)
+        {
+            assert_eq!(null[3], AFC_PAYLOAD_ONLY, "payload only, counter 0");
+            assert!(null[4..].iter().all(|&b| b == NULL_PAYLOAD_BYTE));
+        }
+        assert_eq!(m.decoder_delay_90khz(), CBR_DECODER_DELAY_90KHZ);
+        assert_eq!(first_pts(&ts, MUX_ES_PID), Some(CBR_DECODER_DELAY_90KHZ));
+    }
+
+    #[test]
+    fn constant_bitrate_pcr_follows_the_byte_clock() {
+        let (_, ts, _) = cbr_run();
+        let pcrs: Vec<(usize, u64)> = ts
+            .chunks(TS_PACKET_LEN)
+            .enumerate()
+            .filter_map(|(i, p)| packet_pcr_27mhz(p).map(|pcr| (i * TS_PACKET_LEN, pcr)))
+            .collect();
+        let ticks_per_byte = |bytes: usize| {
+            (bytes as u128 * BITS_PER_BYTE * SYSTEM_CLOCK_HZ / TEST_BITRATE as u128) as u64
+        };
+        let packet_ticks = ticks_per_byte(TS_PACKET_LEN);
+        let interval = DEFAULT_PCR_INTERVAL_90KHZ * SYSTEM_CLOCK_TICKS_PER_90KHZ;
+        assert!(pcrs.len() > 20, "{} PCRs", pcrs.len());
+        assert_eq!(pcrs[0].1, ticks_per_byte(pcrs[0].0 + PCR_BYTE_OFFSET));
+        for pair in pcrs.windows(2) {
+            let ((first_at, first), (next_at, next)) = (pair[0], pair[1]);
+            let by_bytes = ticks_per_byte(next_at - first_at);
+            assert!(
+                next.abs_diff(first + by_bytes) <= 1,
+                "PCR {next} off the byte clock"
+            );
+            assert!(
+                next - first <= interval + packet_ticks,
+                "PCR gap {}",
+                next - first
+            );
+        }
+    }
+
+    #[test]
+    fn a_stream_over_the_bitrate_still_muxes() {
+        const SLOW_BITRATE: u64 = 100_000;
+        let mut m = TsMuxer::new(STREAM_TYPE_H264);
+        m.set_bitrate(SLOW_BITRATE);
+        let big = alloc::vec![0x41u8; 10_000];
+        let mut ts = Vec::new();
+        for i in 0..10 {
+            ts.extend(m.push_au(&big, Some(i * FRAME_PERIOD_90KHZ), None, false));
+        }
+        assert_eq!(ts.len() % TS_PACKET_LEN, 0);
+        let mut d = TsDemuxer::new();
+        for pkt in ts.chunks(TS_PACKET_LEN) {
+            d.push_packet(pkt);
+        }
+        d.flush();
+        let units = d.take_units();
+        assert_eq!(units.len(), 10, "every AU muxed");
+        assert!(units.iter().all(|u| u.data == big));
+        assert_eq!(
+            units[9].pts_90khz,
+            Some(9 * FRAME_PERIOD_90KHZ + CBR_DECODER_DELAY_90KHZ)
+        );
+    }
+
+    #[test]
+    fn identity_knobs_reach_the_written_tables() {
+        const TRANSPORT_STREAM_ID: u16 = 0x1234;
+        const ORIGINAL_NETWORK_ID: u16 = 0x5678;
+        const VERSION: u8 = 7;
+        const ES_START: u16 = 0x0200;
+        const PMT_START: u16 = 0x0300;
+        let mut m = TsMuxer::with_streams(&[STREAM_TYPE_H264, STREAM_TYPE_AAC]);
+        m.set_service("News One", "G2G");
+        m.set_transport_stream_id(TRANSPORT_STREAM_ID);
+        m.set_original_network_id(ORIGINAL_NETWORK_ID);
+        m.set_tables_version(VERSION).unwrap();
+        m.set_pid_bases(ES_START, PMT_START).unwrap();
+        let ts = m.push_au(&TINY_IDR, Some(0), None, false);
+        let version_byte = PSI_CURRENT_NEXT_RESERVED | (VERSION << 1);
+
+        let pat = psi_body_of(&ts, PID_PAT).expect("PAT");
+        assert_eq!(&pat[..2], &TRANSPORT_STREAM_ID.to_be_bytes());
+        assert_eq!(pat[2], version_byte);
+        assert_eq!(pat_programs(&pat), alloc::vec![(1, PMT_START)]);
+
+        let pmt = psi_body_of(&ts, PMT_START).expect("PMT on the moved PID");
+        assert_eq!(pmt[2], version_byte);
+        assert_eq!(
+            pmt_entries(&pmt),
+            (
+                1,
+                ES_START,
+                alloc::vec![
+                    (STREAM_TYPE_H264, ES_START),
+                    (STREAM_TYPE_AAC, ES_START + 1)
+                ]
+            )
+        );
+
+        let sdt = psi_body_of(&ts, PID_SDT).expect("SDT");
+        assert_eq!(
+            &sdt[..2],
+            &TRANSPORT_STREAM_ID.to_be_bytes(),
+            "matches the PAT"
+        );
+        assert_eq!(sdt[2], version_byte);
+        assert_eq!(&sdt[5..7], &ORIGINAL_NETWORK_ID.to_be_bytes());
+        assert_eq!(count_pid(&ts, ES_START), 1, "the PES rides the moved PID");
+    }
+
+    #[test]
+    fn colliding_or_out_of_range_pids_are_rejected() {
+        let mut m = TsMuxer::with_streams(&[STREAM_TYPE_H264, STREAM_TYPE_AAC, STREAM_TYPE_AAC]);
+        assert!(
+            m.set_pid_bases(0x0100, 0x0102).is_err(),
+            "ES 0x100..0x102 hits the PMT"
+        );
+        assert!(m.set_pid_bases(0x0100, 0x00FF).is_ok());
+        assert!(m.set_pid_bases(0x1FFD, 0x1000).is_err(), "runs past 0x1FFE");
+        assert!(
+            m.set_pid_bases(0x000F, 0x1000).is_err(),
+            "below the PSI range"
+        );
+        assert!(
+            m.set_pid_bases(0x0010, 0x1000).is_err(),
+            "covers the SDT PID"
+        );
+        assert!(m.set_tables_version(MAX_TABLES_VERSION + 1).is_err());
     }
 
     #[test]
@@ -3448,7 +4424,8 @@ mod tests {
         // A reordered (B-frame) AU: PTS ahead of DTS. Both survive mux -> demux.
         let au = alloc::vec![0u8, 0, 0, 1, 0x65, 0x11];
         let mut mux = TsMuxer::new(STREAM_TYPE_H264);
-        let bytes = mux.push_au(&au, Some(6000), Some(3600));
+        let delay = mux.decoder_delay_90khz();
+        let bytes = mux.push_au(&au, Some(6000), Some(3600), false);
         let mut d = TsDemuxer::new();
         for pkt in bytes.chunks(TS_PACKET_LEN) {
             d.push_packet(pkt);
@@ -3456,19 +4433,19 @@ mod tests {
         d.flush();
         let units = d.take_units();
         assert_eq!(units.len(), 1);
-        assert_eq!(units[0].pts_90khz, Some(6000));
-        assert_eq!(units[0].dts_90khz, Some(3600), "DTS recovered");
+        assert_eq!(units[0].pts_90khz, Some(6000 + delay));
+        assert_eq!(units[0].dts_90khz, Some(3600 + delay), "DTS recovered");
 
         // A PTS-only PES demuxes with no DTS.
         let mut mux2 = TsMuxer::new(STREAM_TYPE_H264);
-        let bytes2 = mux2.push_au(&au, Some(9000), None);
+        let bytes2 = mux2.push_au(&au, Some(9000), None, false);
         let mut d2 = TsDemuxer::new();
         for pkt in bytes2.chunks(TS_PACKET_LEN) {
             d2.push_packet(pkt);
         }
         d2.flush();
         let units2 = d2.take_units();
-        assert_eq!(units2[0].pts_90khz, Some(9000));
+        assert_eq!(units2[0].pts_90khz, Some(9000 + delay));
         assert_eq!(units2[0].dts_90khz, None, "PTS-only stays PTS-only");
     }
 
@@ -3486,7 +4463,7 @@ mod tests {
         for (i, &p) in pts_order.iter().enumerate() {
             let dts = base + i as u64 * frame_period;
             let pts = base + p * frame_period;
-            let out = m.push_au(&au, Some(pts), Some(dts));
+            let out = m.push_au(&au, Some(pts), Some(dts), false);
             if let Some(pcr) = find_pcr(&out, MUX_ES_PID) {
                 pcrs.push(pcr);
             }
@@ -3565,8 +4542,9 @@ mod tests {
     #[test]
     fn sync_klv_stream_gets_the_metadata_stream_id_and_descriptor() {
         let mut m = TsMuxer::with_streams(&[STREAM_TYPE_METADATA_PES]);
+        let delay = m.decoder_delay_90khz();
         let klv = klv_packet(2, 0xCD);
-        let bytes = m.push_au(&klv, Some(9000), None);
+        let bytes = m.push_au(&klv, Some(9000), None, false);
         // PES start code + stream_id in the first payload byte run of the ES PID.
         assert!(
             bytes.windows(4).any(|w| w == [0x00, 0x00, 0x01, 0xFC]),
@@ -3594,7 +4572,7 @@ mod tests {
         assert_eq!(units[0].stream_type, STREAM_TYPE_METADATA_PES);
         assert_eq!(
             units[0].pts_90khz,
-            Some(9000),
+            Some(9000 + delay),
             "sync KLV always carries a PTS"
         );
         assert_eq!(
@@ -3645,5 +4623,162 @@ mod tests {
         assert_eq!(bcd_hms_secs([0x01, 0x30, 0x00]), Some(5400));
         assert_eq!(bcd_hms_secs([0x00, 0x00, 0x45]), Some(45));
         assert_eq!(bcd_hms_secs([0x0F, 0x00, 0x00]), None);
+    }
+
+    #[test]
+    fn timestamp_extension_places_raw_values_across_the_wrap() {
+        let cycle = PES_TIMESTAMP_CYCLE_90KHZ;
+        let frame = 3000;
+        assert_eq!(
+            extend_timestamp(frame, cycle - frame),
+            cycle + frame,
+            "just past the wrap moves one cycle ahead"
+        );
+        assert_eq!(
+            extend_timestamp(cycle - frame, cycle + frame),
+            cycle - frame,
+            "a reordered stamp just before the wrap stays one cycle behind"
+        );
+        assert_eq!(
+            extend_timestamp(5 * frame, cycle + frame),
+            cycle + 5 * frame,
+            "a wrapped reference keeps later stamps in its cycle"
+        );
+        assert_eq!(
+            extend_timestamp(cycle - frame, frame),
+            cycle - frame,
+            "an unwrapped reference has no earlier cycle to fall back to"
+        );
+        let jump = frame + 2 * PES_TIMESTAMP_WRAP_TOLERANCE_90KHZ;
+        assert_eq!(
+            extend_timestamp(jump, cycle + frame),
+            jump,
+            "a jump past the tolerance keeps the raw value"
+        );
+    }
+
+    #[test]
+    fn demuxer_extends_pes_timestamps_past_the_wrap() {
+        let pmt_pid = 0x1000;
+        let es_pid = 0x0100;
+        let frame = 3000;
+        let first = PES_TIMESTAMP_CYCLE_90KHZ - 2 * frame;
+        let mut d = TsDemuxer::new();
+        d.push_packet(&psi_packet(PID_PAT, 0x00, &pat_body(1, pmt_pid)));
+        d.push_packet(&psi_packet(
+            pmt_pid,
+            0x02,
+            &pmt_body(es_pid, STREAM_TYPE_H264),
+        ));
+        let au = [0x00, 0x00, 0x00, 0x01, 0x65, 0xAA];
+        for index in 0..5 {
+            let raw = (first + index * frame) % PES_TIMESTAMP_CYCLE_90KHZ;
+            d.push_packet(&ts_packet(es_pid, true, &pes(Some(raw), &au)));
+        }
+        d.flush();
+        let stamps: Vec<u64> = d
+            .take_units()
+            .iter()
+            .filter_map(|unit| unit.pts_90khz)
+            .collect();
+        let expected: Vec<u64> = (0..5).map(|index| first + index * frame).collect();
+        assert_eq!(stamps, expected);
+    }
+
+    fn section_of(table_id: u8, body_len: usize) -> Vec<u8> {
+        let mut section = alloc::vec![
+            table_id,
+            0xB0 | (body_len >> 8) as u8 & 0x0F,
+            body_len as u8
+        ];
+        section.extend((0..body_len).map(|index| index as u8 & 0x7F));
+        section
+    }
+
+    #[test]
+    fn psi_sections_complete_across_packets_and_stop_at_stuffing() {
+        const PAYLOAD_ROOM: usize = TS_PACKET_LEN - 4;
+        let spanning = section_of(0x02, 300);
+        let packed = section_of(0x02, 20);
+        let first_part = PAYLOAD_ROOM - 1;
+        let mut pending = Vec::new();
+
+        let mut first_payload = alloc::vec![0u8];
+        first_payload.extend_from_slice(&spanning[..first_part]);
+        let completed = collect_sections(
+            &mut pending,
+            &first_payload,
+            true,
+            MAX_PAT_PMT_SDT_SECTION_BYTES,
+        );
+        assert!(completed.is_empty(), "the section is still open");
+
+        let tail = &spanning[first_part..];
+        let mut second_payload = alloc::vec![tail.len() as u8];
+        second_payload.extend_from_slice(tail);
+        second_payload.extend_from_slice(&packed);
+        second_payload.resize(PAYLOAD_ROOM, PSI_STUFFING_BYTE);
+        let completed = collect_sections(
+            &mut pending,
+            &second_payload,
+            true,
+            MAX_PAT_PMT_SDT_SECTION_BYTES,
+        );
+        assert_eq!(completed, [spanning, packed]);
+        assert!(pending.is_empty(), "stuffing after the sections is dropped");
+
+        let completed = collect_sections(
+            &mut pending,
+            &[0u8; PAYLOAD_ROOM],
+            false,
+            MAX_PAT_PMT_SDT_SECTION_BYTES,
+        );
+        assert!(completed.is_empty(), "a continuation with no open section");
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn duplicate_and_adaptation_only_packets_leave_the_pes_intact() {
+        const ADAPTATION_FIELD_ONLY: u8 = 0x20;
+        let pmt_pid = 0x1000;
+        let es_pid = 0x0100;
+        let mut d = TsDemuxer::new();
+        d.push_packet(&psi_packet(PID_PAT, 0x00, &pat_body(1, pmt_pid)));
+        d.push_packet(&psi_packet(
+            pmt_pid,
+            0x02,
+            &pmt_body(es_pid, STREAM_TYPE_H264),
+        ));
+        let first = [0x00, 0x00, 0x00, 0x01, 0x65, 0xAA];
+        let continuation = [0xBB, 0xCC];
+        d.push_packet(&ts_packet(es_pid, true, &pes(Some(0), &first)));
+        let continuation_packet = ts_packet(es_pid, false, &continuation);
+        d.push_packet(&continuation_packet);
+        d.push_packet(&continuation_packet);
+        let mut adaptation_only = continuation_packet.clone();
+        adaptation_only[3] = ADAPTATION_FIELD_ONLY | (adaptation_only[3] & 0x0F);
+        d.push_packet(&adaptation_only);
+        d.push_packet(&ts_packet(es_pid, true, &pes(Some(3000), &first)));
+        d.flush();
+        let units = d.take_units();
+        let mut expected = first.to_vec();
+        expected.extend_from_slice(&continuation);
+        assert_eq!(units.len(), 2);
+        assert_eq!(units[0].data, expected, "the duplicate is not appended");
+    }
+
+    #[test]
+    fn psi_section_declared_past_the_cap_is_discarded() {
+        let oversized = section_of(0x02, MAX_PAT_PMT_SDT_SECTION_BYTES);
+        let mut payload = alloc::vec![0u8];
+        payload.extend_from_slice(&oversized[..TS_PACKET_LEN - 5]);
+        let mut pending = Vec::new();
+        let completed =
+            collect_sections(&mut pending, &payload, true, MAX_PAT_PMT_SDT_SECTION_BYTES);
+        assert!(completed.is_empty());
+        assert!(
+            pending.is_empty(),
+            "nothing buffered for an oversized section"
+        );
     }
 }

@@ -517,23 +517,19 @@ struct TsProbe {
     infos: Vec<crate::tsdemux::TsStreamInfo>,
 }
 
+#[cfg(feature = "std")]
+fn ts_tables_from_prefix(prefix: &[u8]) -> crate::mpegts::TsDemuxer {
+    let mut demuxer = crate::mpegts::TsDemuxer::new();
+    crate::mpegts::TsPacketSplitter::new().push(prefix, &mut demuxer);
+    demuxer
+}
+
 /// Probe a `file://` URI as MPEG-TS. `None` for a non-`file://` URI, an
 /// unreadable file, or a container with no PMT in the probed prefix.
 #[cfg(feature = "std")]
 fn ts_probe(uri: &str) -> Option<TsProbe> {
     let (path, prefix) = open_file_prefix(uri)?;
-    // Resync to the TS sync byte and feed whole 188-byte packets to parse the PMT.
-    let mut header = crate::mpegts::TsDemuxer::new();
-    let mut off = 0;
-    while off + crate::mpegts::TS_PACKET_LEN <= prefix.len() {
-        if prefix[off] != crate::mpegts::SYNC_BYTE {
-            off += 1;
-            continue;
-        }
-        header.push_packet(&prefix[off..off + crate::mpegts::TS_PACKET_LEN]);
-        off += crate::mpegts::TS_PACKET_LEN;
-    }
-    let infos = crate::tsdemux::forwardable_streams(&header);
+    let infos = crate::tsdemux::forwardable_streams(&ts_tables_from_prefix(&prefix));
     if infos.is_empty() {
         return None;
     }
@@ -1880,15 +1876,7 @@ fn ts_select(
     pads: &[PadRequest],
 ) -> Option<(Box<dyn DynMultiOutputElement>, Vec<Caps>)> {
     let prefix = read_prefix(location)?;
-    let mut demux = crate::mpegts::TsDemuxer::new();
-    let mut off = 0;
-    while off + 188 <= prefix.len() {
-        if prefix[off] == 0x47 {
-            demux.push_packet(&prefix[off..off + 188]);
-        }
-        off += 188;
-    }
-    let infos = crate::tsdemux::forwardable_streams(&demux);
+    let infos = crate::tsdemux::forwardable_streams(&ts_tables_from_prefix(&prefix));
     if infos.is_empty() {
         return None;
     }
@@ -1952,15 +1940,7 @@ pub fn ts_primary_stream(location: &str, caps: &Caps) -> Option<PrimaryStream> {
         return None;
     }
     let prefix = read_prefix(location)?;
-    let mut demux = crate::mpegts::TsDemuxer::new();
-    let mut off = 0;
-    while off + 188 <= prefix.len() {
-        if prefix[off] == 0x47 {
-            demux.push_packet(&prefix[off..off + 188]);
-        }
-        off += 188;
-    }
-    let infos = crate::tsdemux::forwardable_streams(&demux);
+    let infos = crate::tsdemux::forwardable_streams(&ts_tables_from_prefix(&prefix));
     // prefer the video stream (naming its codec, the port default is h264
     // regardless of the PMT), else the first audio stream
     let primary = infos.iter().find(|i| i.video).or_else(|| infos.first())?;

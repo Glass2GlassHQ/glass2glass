@@ -33,7 +33,7 @@ fn transport_stream_chunks() -> Vec<Vec<u8>> {
                 &P_ACCESS_UNIT
             };
             let pts = FIRST_PTS_90KHZ + i * FRAME_INTERVAL_90KHZ;
-            muxer.push_au(access_unit, Some(pts), None)
+            muxer.push_au(access_unit, Some(pts), None, false)
         })
         .collect()
 }

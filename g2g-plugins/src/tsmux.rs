@@ -4,7 +4,7 @@
 //!
 //! Wraps the pure [`crate::mpegts::TsMuxer`], the inverse of
 //! [`crate::tsdemux::TsDemux`]: each input access unit becomes a PES packet split
-//! across 188-byte TS packets, with PAT + PMT emitted once up front. The PMT
+//! across 188-byte TS packets, with PAT + PMT repeated on the `pat-interval`. The PMT
 //! stream type is read from the input caps at configure. CPU, `no_std` baseline.
 //!
 //! ```text
@@ -39,7 +39,9 @@ use g2g_core::{
 
 use crate::dvbsub::{parse_page_ids, PageIds, DEFAULT_PAGE_ID, DEFAULT_SUBTITLING_TYPE};
 use crate::mpegts::{
-    TsMuxer, STREAM_TYPE_AAC, STREAM_TYPE_H264, STREAM_TYPE_H265, STREAM_TYPE_METADATA_PES,
+    TsMuxer, DEFAULT_ORIGINAL_NETWORK_ID, DEFAULT_PCR_INTERVAL_90KHZ, DEFAULT_TABLE_INTERVAL_90KHZ,
+    DEFAULT_TRANSPORT_STREAM_ID, MAX_TABLES_VERSION, MUX_ES_PID, MUX_PID_RANGE, MUX_PMT_PID,
+    STREAM_TYPE_AAC, STREAM_TYPE_H264, STREAM_TYPE_H265, STREAM_TYPE_METADATA_PES,
     STREAM_TYPE_PRIVATE_PES, TAG_KEY_SERVICE_NAME, TAG_KEY_SERVICE_PROVIDER,
 };
 
@@ -92,6 +94,217 @@ impl DvbSubDecl {
         self.from_stream
             .map(|(_, t)| t)
             .unwrap_or(DEFAULT_SUBTITLING_TYPE)
+    }
+}
+
+// the fan-in muxer adds prog-map
+pub(crate) const MUX_PROPERTIES: [PropertySpec; 12] = [
+    PropertySpec::new(
+        "pat-interval",
+        PropKind::Uint,
+        "PAT/PMT re-emission interval, ticks of the 90kHz clock (0 = once)",
+    )
+    .with_default("9000"),
+    // The PAT and PMT are emitted as a pair, so this shares the cadence.
+    PropertySpec::new(
+        "pmt-interval",
+        PropKind::Uint,
+        "alias of pat-interval (the tables are emitted together)",
+    )
+    .with_default("9000"),
+    PropertySpec::new(
+        "si-interval",
+        PropKind::Uint,
+        "SDT re-emission interval, ticks of the 90kHz clock (0 = once)",
+    )
+    .with_default("9000"),
+    PropertySpec::new(
+        "pcr-interval",
+        PropKind::Uint,
+        "PCR insertion interval, ticks of the 90kHz clock",
+    )
+    .with_default("3600"),
+    PropertySpec::new(
+        "bitrate",
+        PropKind::Uint,
+        "constant output bitrate in bits per second, padded with null packets (0 = variable bitrate)",
+    )
+    .with_default("0"),
+    PropertySpec::new(
+        "transport-stream-id",
+        PropKind::Uint,
+        "transport_stream_id written in the PAT and SDT",
+    )
+    .with_default("1")
+    .with_range("0", "65535"),
+    PropertySpec::new(
+        "original-network-id",
+        PropKind::Uint,
+        "original_network_id written in the SDT",
+    )
+    .with_default("1")
+    .with_range("0", "65535"),
+    PropertySpec::new(
+        "start-pid",
+        PropKind::Uint,
+        "PID of the first elementary stream, the rest follow in order",
+    )
+    .with_default("256")
+    .with_range("16", "8190"),
+    PropertySpec::new(
+        "pmt-start-pid",
+        PropKind::Uint,
+        "PID of the first program's PMT, the rest follow in order",
+    )
+    .with_default("4096")
+    .with_range("16", "8190"),
+    PropertySpec::new(
+        "tables-version",
+        PropKind::Uint,
+        "version_number written in the PAT, PMT and SDT",
+    )
+    .with_default("0")
+    .with_range("0", "31"),
+    PropertySpec::new(
+        "klv-sync",
+        PropKind::Bool,
+        "carry KLV metadata as synchronous metadata-in-PES (stream_type 0x15) instead of asynchronous private PES",
+    )
+    .with_default("false"),
+    PropertySpec::new(
+        "dvbsub-page-id",
+        PropKind::Uint,
+        "composition and ancillary page a DVB subtitle input is declared on when the stream carries no page-id config",
+    )
+    .with_default("1"),
+];
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct TsMuxSettings {
+    pub(crate) table_interval_90khz: u64,
+    si_interval_90khz: u64,
+    pub(crate) pcr_interval_90khz: u64,
+    bitrate: u64,
+    transport_stream_id: u16,
+    original_network_id: u16,
+    start_pid: u16,
+    pmt_start_pid: u16,
+    tables_version: u8,
+}
+
+impl Default for TsMuxSettings {
+    fn default() -> Self {
+        Self {
+            table_interval_90khz: DEFAULT_TABLE_INTERVAL_90KHZ,
+            si_interval_90khz: DEFAULT_TABLE_INTERVAL_90KHZ,
+            pcr_interval_90khz: DEFAULT_PCR_INTERVAL_90KHZ,
+            bitrate: 0,
+            transport_stream_id: DEFAULT_TRANSPORT_STREAM_ID,
+            original_network_id: DEFAULT_ORIGINAL_NETWORK_ID,
+            start_pid: MUX_ES_PID,
+            pmt_start_pid: MUX_PMT_PID,
+            tables_version: 0,
+        }
+    }
+}
+
+impl TsMuxSettings {
+    // None when the name is not one of these
+    pub(crate) fn set_property(
+        &mut self,
+        name: &str,
+        value: &PropValue,
+        mux: Option<&mut TsMuxer>,
+    ) -> Option<Result<(), PropError>> {
+        let result = match name {
+            "pat-interval" | "pmt-interval" | "si-interval" | "pcr-interval" => {
+                self.set_cadence(name, value, mux)
+            }
+            "bitrate"
+            | "transport-stream-id"
+            | "original-network-id"
+            | "start-pid"
+            | "pmt-start-pid"
+            | "tables-version" => {
+                // baked into the stream when the muxer is built
+                if mux.is_some() {
+                    return Some(Err(PropError::ReadOnly));
+                }
+                self.set_identity(name, value)
+            }
+            _ => return None,
+        };
+        Some(result)
+    }
+
+    fn set_cadence(
+        &mut self,
+        name: &str,
+        value: &PropValue,
+        mux: Option<&mut TsMuxer>,
+    ) -> Result<(), PropError> {
+        let ticks = value.as_uint().ok_or(PropError::Type)?;
+        match name {
+            "si-interval" => self.si_interval_90khz = ticks,
+            "pcr-interval" => self.pcr_interval_90khz = ticks,
+            _ => self.table_interval_90khz = ticks,
+        }
+        if let Some(mux) = mux {
+            self.apply_cadences(mux);
+        }
+        Ok(())
+    }
+
+    fn set_identity(&mut self, name: &str, value: &PropValue) -> Result<(), PropError> {
+        let number = value.as_uint().ok_or(PropError::Type)?;
+        if name == "bitrate" {
+            self.bitrate = number;
+            return Ok(());
+        }
+        let field = u16::try_from(number).map_err(|_| PropError::Value)?;
+        let pid_ok = MUX_PID_RANGE.contains(&field);
+        match name {
+            "transport-stream-id" => self.transport_stream_id = field,
+            "original-network-id" => self.original_network_id = field,
+            "start-pid" if pid_ok => self.start_pid = field,
+            "pmt-start-pid" if pid_ok => self.pmt_start_pid = field,
+            "tables-version" if number <= u64::from(MAX_TABLES_VERSION) => {
+                self.tables_version = field as u8
+            }
+            _ => return Err(PropError::Value),
+        }
+        Ok(())
+    }
+
+    pub(crate) fn get_property(&self, name: &str) -> Option<PropValue> {
+        let value = match name {
+            "pat-interval" | "pmt-interval" => self.table_interval_90khz,
+            "si-interval" => self.si_interval_90khz,
+            "pcr-interval" => self.pcr_interval_90khz,
+            "bitrate" => self.bitrate,
+            "transport-stream-id" => u64::from(self.transport_stream_id),
+            "original-network-id" => u64::from(self.original_network_id),
+            "start-pid" => u64::from(self.start_pid),
+            "pmt-start-pid" => u64::from(self.pmt_start_pid),
+            "tables-version" => u64::from(self.tables_version),
+            _ => return None,
+        };
+        Some(PropValue::Uint(value))
+    }
+
+    fn apply_cadences(&self, mux: &mut TsMuxer) {
+        mux.set_table_interval_90khz(self.table_interval_90khz);
+        mux.set_si_interval_90khz(self.si_interval_90khz);
+        mux.set_pcr_interval_90khz(self.pcr_interval_90khz);
+    }
+
+    pub(crate) fn apply(&self, mux: &mut TsMuxer) -> Result<(), G2gError> {
+        self.apply_cadences(mux);
+        mux.set_bitrate(self.bitrate);
+        mux.set_transport_stream_id(self.transport_stream_id);
+        mux.set_original_network_id(self.original_network_id);
+        mux.set_tables_version(self.tables_version)?;
+        mux.set_pid_bases(self.start_pid, self.pmt_start_pid)
     }
 }
 
@@ -207,7 +420,7 @@ pub(crate) fn language_from_tags(tags: &TagList) -> Option<&str> {
 /// use g2g_plugins::tsmux::TsMux;
 ///
 /// let mux = TsMux::new()
-///     .with_table_interval_ms(100)
+///     .with_table_interval_90khz(9000)
 ///     .with_pcr_interval(3600);
 /// ```
 #[derive(Debug)]
@@ -217,13 +430,10 @@ pub struct TsMux {
     mux: Option<TsMuxer>,
     configured: bool,
     emitted: u64,
-    /// PAT/PMT re-emission cadence in milliseconds (`0` = once up front). Applied
-    /// to the inner `TsMuxer` when it is built at configure. The PAT and PMT are
-    /// emitted together, so `pat-interval` and `pmt-interval` share this cadence.
-    table_interval_ms: u64,
-    /// PCR insertion cadence in 90 kHz ticks (default 3600). Applied to the inner
-    /// `TsMuxer` when it is built at configure.
-    pcr_interval_90khz: u64,
+    /// The cadences, bitrate and identity knobs, applied to the inner `TsMuxer`
+    /// when it is built at configure. The PAT and PMT are emitted together, so
+    /// `pat-interval` and `pmt-interval` share one cadence.
+    settings: TsMuxSettings,
     /// Carry a `Caps::Klv` input as synchronous KLV (metadata-in-PES 0x15)
     /// instead of the default asynchronous private PES (0x06 + 'KLVA').
     klv_sync: bool,
@@ -248,8 +458,7 @@ impl TsMux {
             mux: None,
             configured: false,
             emitted: 0,
-            table_interval_ms: 0,
-            pcr_interval_90khz: 3600,
+            settings: TsMuxSettings::default(),
             klv_sync: false,
             tags: TagList::new(),
             dvbsub: None,
@@ -269,15 +478,16 @@ impl TsMux {
         self
     }
 
-    /// Set the PAT/PMT re-emission interval in milliseconds (`0` = once up front).
-    pub fn with_table_interval_ms(mut self, ms: u64) -> Self {
-        self.table_interval_ms = ms;
+    /// Set the PAT/PMT re-emission interval in 90 kHz ticks (`0` = once up
+    /// front, default 9000).
+    pub fn with_table_interval_90khz(mut self, ticks: u64) -> Self {
+        self.settings.table_interval_90khz = ticks;
         self
     }
 
     /// Set the PCR insertion interval in 90 kHz ticks (default 3600).
     pub fn with_pcr_interval(mut self, ticks: u64) -> Self {
-        self.pcr_interval_90khz = ticks;
+        self.settings.pcr_interval_90khz = ticks;
         self
     }
 
@@ -393,9 +603,7 @@ impl AsyncElement for TsMux {
         let stream_type =
             stream_type_for(absolute_caps, self.klv_sync).ok_or(G2gError::CapsMismatch)?;
         let mut mux = TsMuxer::new(stream_type);
-        // 90 kHz clock: 90 ticks per millisecond.
-        mux.set_table_interval_90khz(self.table_interval_ms.saturating_mul(90));
-        mux.set_pcr_interval_90khz(self.pcr_interval_90khz);
+        self.settings.apply(&mut mux)?;
         if let Some((name, provider)) = service_from_tags(&self.tags) {
             mux.set_service(&name, &provider);
         }
@@ -419,51 +627,14 @@ impl AsyncElement for TsMux {
     }
 
     fn properties(&self) -> &'static [PropertySpec] {
-        const PROPS: &[PropertySpec] = &[
-            PropertySpec::new(
-                "pat-interval",
-                PropKind::Uint,
-                "PAT/PMT re-emission interval, milliseconds (0 = once)",
-            )
-            .with_default("0"),
-            // The PAT and PMT are emitted as a pair, so this shares the cadence.
-            PropertySpec::new(
-                "pmt-interval",
-                PropKind::Uint,
-                "alias of pat-interval (the tables are emitted together)",
-            )
-            .with_default("0"),
-            PropertySpec::new(
-                "pcr-interval",
-                PropKind::Uint,
-                "PCR insertion interval, ticks of the 90kHz clock",
-            )
-            .with_default("3600"),
-            PropertySpec::new(
-                "klv-sync",
-                PropKind::Bool,
-                "carry KLV metadata as synchronous metadata-in-PES (stream_type 0x15) instead of asynchronous private PES",
-            )
-            .with_default("false"),
-            PropertySpec::new(
-                "dvbsub-page-id",
-                PropKind::Uint,
-                "composition and ancillary page a DVB subtitle input is declared on when the stream carries no page-id config",
-            )
-            .with_default("1"),
-        ];
-        PROPS
+        &MUX_PROPERTIES
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        if let Some(result) = self.settings.set_property(name, &value, self.mux.as_mut()) {
+            return result;
+        }
         match name {
-            "pat-interval" | "pmt-interval" => {
-                self.table_interval_ms = value.as_uint().ok_or(PropError::Type)?;
-                if let Some(mux) = self.mux.as_mut() {
-                    mux.set_table_interval_90khz(self.table_interval_ms.saturating_mul(90));
-                }
-                Ok(())
-            }
             "dvbsub-page-id" => {
                 let v = u16::try_from(value.as_uint().ok_or(PropError::Type)?)
                     .map_err(|_| PropError::Value)?;
@@ -472,13 +643,6 @@ impl AsyncElement for TsMux {
                     decl.page_id = v;
                 }
                 self.declare_subtitling();
-                Ok(())
-            }
-            "pcr-interval" => {
-                self.pcr_interval_90khz = value.as_uint().ok_or(PropError::Type)?;
-                if let Some(mux) = self.mux.as_mut() {
-                    mux.set_pcr_interval_90khz(self.pcr_interval_90khz);
-                }
                 Ok(())
             }
             "klv-sync" => {
@@ -495,9 +659,10 @@ impl AsyncElement for TsMux {
     }
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
+        if let Some(value) = self.settings.get_property(name) {
+            return Some(value);
+        }
         match name {
-            "pat-interval" | "pmt-interval" => Some(PropValue::Uint(self.table_interval_ms)),
-            "pcr-interval" => Some(PropValue::Uint(self.pcr_interval_90khz)),
             "klv-sync" => Some(PropValue::Bool(self.klv_sync)),
             "dvbsub-page-id" => Some(PropValue::Uint(self.dvbsub_page_id as u64)),
             _ => None,
@@ -532,7 +697,7 @@ impl AsyncElement for TsMux {
                     let dts_90khz = (frame.timing.dts_ns != 0
                         && frame.timing.dts_ns != frame.timing.pts_ns)
                         .then(|| (frame.timing.dts_ns as u128 * 90_000 / 1_000_000_000) as u64);
-                    let ts = mux.push_au(slice, Some(pts_90khz), dts_90khz);
+                    let ts = mux.push_au(slice, Some(pts_90khz), dts_90khz, frame.timing.keyframe);
                     let out_frame = Frame::new(
                         MemoryDomain::System(SystemSlice::from_boxed(ts.into_boxed_slice())),
                         FrameTiming {

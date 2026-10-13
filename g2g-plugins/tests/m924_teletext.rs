@@ -95,13 +95,19 @@ fn author_ts() -> Vec<u8> {
         for (i, row) in rows.iter().enumerate() {
             units.push(DataUnit::text_row(MAGAZINE, 20 + i as u8, row));
         }
-        out.extend_from_slice(&mux.push_au(&encode_payload(&units), Some(ns_to_90k(pts_ns)), None));
+        out.extend_from_slice(&mux.push_au(
+            &encode_payload(&units),
+            Some(ns_to_90k(pts_ns)),
+            None,
+            false,
+        ));
     }
     // A page header with no rows behind it erases the subtitle on screen.
     out.extend_from_slice(&mux.push_au(
         &encode_payload(&[DataUnit::page_header(PAGE, 0, true)]),
         Some(ns_to_90k(END_NS)),
         None,
+        false,
     ));
     out
 }
@@ -240,7 +246,13 @@ fn teletextdec_builds_from_a_launch_line() {
 #[tokio::test]
 async fn the_pmt_descriptor_selects_the_page_and_cues_carry_their_display_span() {
     let cues = demux_and_decode(&author_ts()).await;
-    let expected: Vec<(u64, u64, String)> = cues_expected();
+    let delay_ns = TsMuxer::with_streams(&[STREAM_TYPE_PRIVATE_PES]).decoder_delay_90khz()
+        * 1_000_000_000
+        / 90_000;
+    let expected: Vec<(u64, u64, String)> = cues_expected()
+        .into_iter()
+        .map(|(start, span, text)| (start + delay_ns, span, text))
+        .collect();
     assert_eq!(cues, expected);
 }
 

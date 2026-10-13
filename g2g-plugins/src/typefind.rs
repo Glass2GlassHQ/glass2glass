@@ -37,10 +37,9 @@ use crate::aacparse::adts_header;
 use crate::audioframe::{
     ac3_header, mpa_header, MpaHeader, MpaLayer, AC3_MAX_FRAME_LEN, MPA_HEADER_LEN,
 };
+use crate::mpegts::{sniff_packet_stride, SYNC_BYTE, TS_PACKET_LEN};
 
 /// MPEG-TS packet stride; the sync byte recurs at this interval.
-const TS_PACKET_LEN: usize = 188;
-const TS_SYNC: u8 = 0x47;
 /// EBML magic (Matroska / WebM): the leading bytes of the EBML header element.
 const EBML_MAGIC: [u8; 4] = [0x1A, 0x45, 0xDF, 0xA3];
 /// Ogg page capture pattern.
@@ -390,23 +389,13 @@ fn sniff_text(header: &[u8]) -> Option<TextFormat> {
     None
 }
 
-/// True when the sync byte recurs at the 188-byte packet stride. Requires at
-/// least one recurrence so a stray leading `0x47` is not a false positive,
-/// unless fewer than two packets are present (then the lead byte is all we have).
+/// True when the sync byte recurs at a 188, 192 (M2TS) or 204 (DVB-ASI) byte
+/// packet stride. Requires at least one recurrence so a stray leading `0x47` is
+/// not a false positive, unless fewer than two 188-byte packets are present (then
+/// the lead byte is all we have).
 fn looks_like_mpegts(header: &[u8]) -> bool {
-    if header.first() != Some(&TS_SYNC) {
-        return false;
-    }
-    let mut confirmed = 0;
-    let mut off = TS_PACKET_LEN;
-    while off < header.len() {
-        if header[off] != TS_SYNC {
-            return false;
-        }
-        confirmed += 1;
-        off += TS_PACKET_LEN;
-    }
-    confirmed >= 1 || header.len() <= TS_PACKET_LEN
+    let lone_short_packet = header.first() == Some(&SYNC_BYTE) && header.len() <= TS_PACKET_LEN;
+    lone_short_packet || sniff_packet_stride(header).is_some()
 }
 
 /// Guess H.264 vs H.265 from a raw Annex-B elementary stream, or `None` if the
@@ -1026,9 +1015,9 @@ mod tests {
     fn container_magic_wins_over_a_frame_sync() {
         // An MPEG-TS stream whose packet payload opens on a frame sync stays TS.
         let mut ts = vec![0u8; TS_PACKET_LEN * 2 + 1];
-        ts[0] = TS_SYNC;
-        ts[TS_PACKET_LEN] = TS_SYNC;
-        ts[TS_PACKET_LEN * 2] = TS_SYNC;
+        ts[0] = SYNC_BYTE;
+        ts[TS_PACKET_LEN] = SYNC_BYTE;
+        ts[TS_PACKET_LEN * 2] = SYNC_BYTE;
         ts[4..4 + 2].copy_from_slice(&[0xFF, 0xFB]);
         assert_eq!(
             sniff_caps(&ts),

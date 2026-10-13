@@ -6,7 +6,16 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1253: `mpegtsmux` gains `transport-stream-id`, `original-network-id`, `start-pid`, `pmt-start-pid` and `tables-version`.
+- M1252: `mpegtsmux` gains a `bitrate` property for constant-bitrate output padded with null packets.
+- M1251: `mpegtsmux` sets the random access indicator on keyframes, with a PCR on keyframes of the PCR stream.
+- M1250: `mpegtsmux` sends each program's PCR ahead of its PES, adds a decoder delay to PTS and DTS, and interleaves inputs in decode order.
+- M1249: `mpegtsmux` repeats PAT and PMT every 100 ms with intervals in 90 kHz ticks, and the SDT on its own `si-interval`.
 - M1248: `MetaSink.text_output` tells a hosted class whether its `text_src` pad is linked.
+- M1247: `tsdemux`, `typefind` and `decodebin` read 192-byte M2TS and 204-byte DVB-ASI packet strides as well as 188.
+- M1246: the MPEG-TS demuxer reassembles PAT, PMT, SDT and EIT sections that span several packets.
+- M1245: the MPEG-TS demuxer skips duplicate packets and drops an access unit or section that lost a packet.
+- M1244: the MPEG-TS demuxer keeps PTS and DTS rising across the 33-bit wrap.
 - M1243: `wgpusink` presents through Vulkan unless `WGPU_BACKEND` names another backend, so two windows opening at once no longer abort the process.
 - M1242: a sink's QoS report crosses a tee, a demux and a muxer on its way to the source.
 - M1241: `pyelement` with its `text_src` pad linked sends what the hosted class emits with `meta.emit(..., output="text_src")` out that pad as UTF-8 text, and `src` keeps carrying the frame.

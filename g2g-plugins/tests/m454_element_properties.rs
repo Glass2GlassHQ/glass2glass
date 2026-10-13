@@ -1220,13 +1220,13 @@ fn tsmux_pat_pmt_interval() {
     let mut e = TsMux::new();
     assert!(declares(e.properties(), "pat-interval"));
     assert!(declares(e.properties(), "pmt-interval"));
-    e.set_property("pat-interval", PropValue::Uint(100))
+    e.set_property("pat-interval", PropValue::Uint(9000))
         .unwrap();
-    assert_eq!(e.get_property("pat-interval"), Some(PropValue::Uint(100)));
+    assert_eq!(e.get_property("pat-interval"), Some(PropValue::Uint(9000)));
     // pat / pmt share one cadence (the tables are emitted together).
-    e.set_property("pmt-interval", PropValue::Uint(250))
+    e.set_property("pmt-interval", PropValue::Uint(22500))
         .unwrap();
-    assert_eq!(e.get_property("pat-interval"), Some(PropValue::Uint(250)));
+    assert_eq!(e.get_property("pat-interval"), Some(PropValue::Uint(22500)));
 }
 
 #[test]
@@ -1261,6 +1261,92 @@ fn tsmux_pcr_interval() {
         fanin.get_property("pcr-interval"),
         Some(PropValue::Uint(9000))
     );
+}
+
+// both mpegtsmux elements declare these, a fresh element reports the declared
+// default, and a value set reads back
+macro_rules! assert_ts_broadcast_knobs {
+    ($element:expr) => {{
+        let e = &mut $element;
+        for name in [
+            "pat-interval",
+            "si-interval",
+            "bitrate",
+            "transport-stream-id",
+            "original-network-id",
+            "start-pid",
+            "pmt-start-pid",
+            "tables-version",
+        ] {
+            assert_eq!(
+                e.get_property(name),
+                Some(declared_default(e.properties(), name)),
+                "{name} default"
+            );
+        }
+        for (name, value) in [
+            ("si-interval", 4_500),
+            ("bitrate", 5_000_000),
+            ("transport-stream-id", 0x1234),
+            ("original-network-id", 0x5678),
+            ("start-pid", 0x0200),
+            ("pmt-start-pid", 0x0300),
+            ("tables-version", 31),
+        ] {
+            e.set_property(name, PropValue::Uint(value)).unwrap();
+            assert_eq!(e.get_property(name), Some(PropValue::Uint(value)));
+        }
+        for (name, value) in [
+            ("start-pid", 0x000F),
+            ("pmt-start-pid", 0x1FFF),
+            ("tables-version", 32),
+            ("transport-stream-id", 0x1_0000),
+        ] {
+            assert_eq!(
+                e.set_property(name, PropValue::Uint(value)),
+                Err(g2g_core::PropError::Value),
+                "{name}={value} rejected"
+            );
+        }
+    }};
+}
+
+#[test]
+fn tsmux_broadcast_knobs() {
+    assert_ts_broadcast_knobs!(g2g_plugins::tsmux::TsMux::new());
+    {
+        use g2g_core::MultiInputElement;
+        assert_ts_broadcast_knobs!(g2g_plugins::tsmuxn::TsMux::new(2));
+    }
+
+    // Built at configure: the knobs baked into the stream are fixed from then on.
+    let mut built = g2g_plugins::tsmux::TsMux::new();
+    built
+        .configure_pipeline(&g2g_core::Caps::CompressedVideo {
+            codec: g2g_core::VideoCodec::H264,
+            width: g2g_core::Dim::Any,
+            height: g2g_core::Dim::Any,
+            framerate: g2g_core::Rate::Any,
+            colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        })
+        .unwrap();
+    for name in [
+        "bitrate",
+        "transport-stream-id",
+        "original-network-id",
+        "start-pid",
+        "pmt-start-pid",
+        "tables-version",
+    ] {
+        assert_eq!(
+            built.set_property(name, PropValue::Uint(1)),
+            Err(g2g_core::PropError::ReadOnly),
+            "{name} after build"
+        );
+    }
+    built
+        .set_property("si-interval", PropValue::Uint(1))
+        .expect("cadences stay live");
 }
 
 #[test]

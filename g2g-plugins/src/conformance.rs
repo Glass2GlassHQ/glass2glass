@@ -492,8 +492,9 @@ pub fn mpegts() -> [MaturityRecord; 2] {
 }
 
 /// Mux a video access unit and an AAC frame as two separate runs of TS packets
-/// (video first, tables included), with the two access units that went in.
-fn mpegts_stream() -> (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>) {
+/// (video first, tables included), with the two access units that went in and
+/// the decoder delay the muxer added to their timestamps.
+fn mpegts_stream() -> (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, u64) {
     use crate::mpegts::{TsMuxer, STREAM_TYPE_AAC, STREAM_TYPE_H264};
 
     const AAC_PAYLOAD_BYTES: usize = 200;
@@ -501,9 +502,9 @@ fn mpegts_stream() -> (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>) {
     let [video, _] = h264_access_units();
     let audio = aac_adts_frame(AAC_PAYLOAD_BYTES);
     let mut mux = TsMuxer::with_streams(&[STREAM_TYPE_H264, STREAM_TYPE_AAC]);
-    let video_ts = mux.push_au_on(0, &video, Some(TS_VIDEO_PTS_90KHZ), None);
-    let audio_ts = mux.push_au_on(1, &audio, Some(TS_AUDIO_PTS_90KHZ), None);
-    (video_ts, audio_ts, video, audio)
+    let video_ts = mux.push_au_on(0, &video, Some(TS_VIDEO_PTS_90KHZ), None, true);
+    let audio_ts = mux.push_au_on(1, &audio, Some(TS_AUDIO_PTS_90KHZ), None, true);
+    (video_ts, audio_ts, video, audio, mux.decoder_delay_90khz())
 }
 
 /// Demux whole TS packets into their access units.
@@ -521,15 +522,15 @@ fn mpegts_units(bytes: &[u8]) -> Vec<crate::mpegts::EsUnit> {
 /// Whether both elementary streams survive the mux / demux byte-exact, with their
 /// timestamps.
 fn mpegts_round_trips() -> bool {
-    let (video_ts, audio_ts, video, audio) = mpegts_stream();
+    let (video_ts, audio_ts, video, audio, delay) = mpegts_stream();
     let mut bytes = video_ts;
     bytes.extend(audio_ts);
     let units = mpegts_units(&bytes);
     units.len() == 2
         && units[0].data == video
-        && units[0].pts_90khz == Some(TS_VIDEO_PTS_90KHZ)
+        && units[0].pts_90khz == Some(TS_VIDEO_PTS_90KHZ + delay)
         && units[1].data == audio
-        && units[1].pts_90khz == Some(TS_AUDIO_PTS_90KHZ)
+        && units[1].pts_90khz == Some(TS_AUDIO_PTS_90KHZ + delay)
 }
 
 /// Drop the last TS packet of the video PES (a continuation packet: the tables and
@@ -539,7 +540,7 @@ fn mpegts_round_trips() -> bool {
 fn mpegts_contains_a_dropped_packet() -> bool {
     use crate::mpegts::TS_PACKET_LEN;
 
-    let (video_ts, audio_ts, video, audio) = mpegts_stream();
+    let (video_ts, audio_ts, video, audio, _) = mpegts_stream();
     if video_ts.len() < 4 * TS_PACKET_LEN {
         return false; // too short for the PES to have a continuation packet
     }

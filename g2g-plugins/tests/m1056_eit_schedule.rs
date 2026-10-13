@@ -22,6 +22,7 @@ use g2g_plugins::mpegts::{
 use g2g_plugins::tsdemux::{TsDemux, TsStream};
 
 mod eit_common;
+mod ts_continuity;
 use eit_common::{
     data_frame, eit_event, eit_section, feed_sections, parse_sections, psi_packets,
     short_event_descriptor, CaptureSink, ANNEX_C_START_TIME, ANNEX_C_START_UNIX_SECS,

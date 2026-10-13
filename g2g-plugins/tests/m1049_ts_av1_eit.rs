@@ -29,6 +29,7 @@ use g2g_plugins::mpegts::{
 use g2g_plugins::tsdemux::{TsDemux, TsStream};
 
 mod eit_common;
+mod ts_continuity;
 use eit_common::{
     crc32_mpeg, data_frame, eit_event, eit_section, parse_sections, psi_packets,
     short_event_descriptor, CaptureSink, ANNEX_C_START_TIME, EVENT_DURATION, PID_EIT,
@@ -228,7 +229,7 @@ async fn gstreamer_decodes_a_g2g_muxed_av1_ts() {
     mux.set_stream_av1(0);
     let mut ts = Vec::new();
     for (i, au) in aus.iter().enumerate() {
-        ts.extend_from_slice(&mux.push_au_on(0, au, Some(i as u64 * 3600), None));
+        ts.extend_from_slice(&mux.push_au_on(0, au, Some(i as u64 * 3600), None, false));
     }
     assert!(
         ts.windows(AV1G_DESCRIPTOR.len())
@@ -328,7 +329,7 @@ async fn av1_survives_a_g2g_mux_demux_round_trip() {
     mux.set_stream_av1(0);
     let mut ts = Vec::new();
     for (i, au) in aus.iter().enumerate() {
-        ts.extend_from_slice(&mux.push_au_on(0, au, Some(i as u64 * 3600), None));
+        ts.extend_from_slice(&mux.push_au_on(0, au, Some(i as u64 * 3600), None, false));
     }
 
     let mut parser = TsDemuxer::new();
@@ -418,7 +419,13 @@ async fn an_unmarked_private_stream_is_not_av1() {
     let mut mux = TsMuxer::new(STREAM_TYPE_PRIVATE_PES); // the KLVA default
     let mut ts = Vec::new();
     for i in 0..4u64 {
-        ts.extend_from_slice(&mux.push_au_on(0, &[0x12, 0x00, i as u8], Some(i * 3600), None));
+        ts.extend_from_slice(&mux.push_au_on(
+            0,
+            &[0x12, 0x00, i as u8],
+            Some(i * 3600),
+            None,
+            false,
+        ));
     }
     let sink = demux_av1(&ts).await;
     assert!(

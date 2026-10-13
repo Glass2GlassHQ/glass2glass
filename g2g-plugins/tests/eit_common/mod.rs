@@ -115,7 +115,6 @@ pub(crate) fn eit_section(
 pub(crate) fn psi_packets(pid: u16, section: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
     let mut rest = section;
-    let mut continuity = 0u8;
     let mut first = true;
     while first || !rest.is_empty() {
         let mut pkt = Vec::with_capacity(TS_PACKET_LEN);
@@ -123,7 +122,7 @@ pub(crate) fn psi_packets(pid: u16, section: &[u8]) -> Vec<u8> {
         pkt.push(0x47);
         pkt.push(pusi | ((pid >> 8) as u8 & 0x1F));
         pkt.push(pid as u8);
-        pkt.push(0x10 | (continuity & 0x0F));
+        pkt.push(0x10 | crate::ts_continuity::next_continuity_counter(pid));
         if first {
             pkt.push(0x00); // pointer_field
         }
@@ -133,7 +132,6 @@ pub(crate) fn psi_packets(pid: u16, section: &[u8]) -> Vec<u8> {
         rest = &rest[take..];
         pkt.resize(TS_PACKET_LEN, 0xFF);
         out.extend_from_slice(&pkt);
-        continuity = continuity.wrapping_add(1);
         first = false;
     }
     out

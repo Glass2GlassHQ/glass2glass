@@ -26,6 +26,7 @@ use g2g_plugins::dvbsub::{page_id_blob, parse_page_ids, segment_span, PageIds};
 use g2g_plugins::matroska::{MatroskaDemuxer, MkvCodec};
 use g2g_plugins::mkvdemux::{MkvDemux, MkvStream};
 use g2g_plugins::mkvmuxn::MkvMuxN;
+use g2g_plugins::mpegts::{TsMuxer, STREAM_TYPE_PRIVATE_PES};
 use g2g_plugins::registry::default_registry;
 use g2g_plugins::tsdemux::{TsDemux, TsStream};
 use g2g_plugins::tsmux::TsMux;
@@ -77,6 +78,11 @@ impl CaptureSink {
         }
         out
     }
+}
+
+// the PTS shift the muxer adds, in nanoseconds
+fn mux_delay_ns() -> u64 {
+    TsMuxer::new(STREAM_TYPE_PRIVATE_PES).decoder_delay_90khz() * 1_000_000_000 / 90_000
 }
 
 fn temp_path(name: &str) -> PathBuf {
@@ -398,7 +404,7 @@ async fn a_dvbsub_pad_writes_a_private_pes_with_a_subtitling_descriptor() {
     assert_eq!(&back[1].0[..2], &[0x20, 0x00]);
     assert_eq!(back[1].0.last(), Some(&0xFF));
     assert_eq!(segment_span(&back[1].0), set, "the segments are unchanged");
-    assert_eq!(back[1].1.pts_ns, 2_000_000_000);
+    assert_eq!(back[1].1.pts_ns, 2_000_000_000 + mux_delay_ns());
 }
 
 /// The fan-in muxer carries the same subtitle pad next to video, and the
@@ -724,7 +730,11 @@ async fn the_dvb_write_paths_match_ffmpegs_own_transport_stream() {
         "every data field is byte for byte what ffmpeg wrote"
     );
     for (i, ((_, ours), (_, theirs))) in ours_back.iter().zip(&theirs).enumerate() {
-        assert_eq!(ours.pts_ns, theirs.pts_ns, "display set {i} keeps its time");
+        assert_eq!(
+            ours.pts_ns,
+            theirs.pts_ns + mux_delay_ns(),
+            "display set {i} keeps its time"
+        );
     }
 
     // Decode: transcoding each transport stream to DVD subpictures is bitmap to

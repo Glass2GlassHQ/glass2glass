@@ -6,12 +6,13 @@
 //! A [`MultiInputElement`]: each input pad accepts one elementary stream
 //! (`Caps::CompressedVideo{H264|H265}`, `Caps::Audio{Aac}`, or the
 //! `Caps::SubPicture{DvbSub}` subtitle pad of M927), and the access
-//! units are interleaved into one multiplex by presentation timestamp before
-//! being written to their per-stream PIDs. Time-ordering reuses the M204
+//! units are interleaved into one multiplex by decode time (the DTS when the
+//! frame carries one, else the PTS) before being written to their per-stream
+//! PIDs. Time-ordering reuses the M204
 //! [`InputAggregator::take_earliest_by`](g2g_core::InputAggregator::take_earliest_by)
 //! merge (release the globally earliest AU once every contributing input has one
-//! queued), so the muxed TS is monotonic across streams the way a decoder
-//! expects. The PMT (built once all inputs are configured) names every stream of
+//! queued), so the muxed TS is in decode order across streams the way a decoder
+//! expects, and no stream's data trails a PCR taken from another. The PMT (built once all inputs are configured) names every stream of
 //! its program.
 //!
 //! Scope: one program by default, several via `prog-map` (M783), which assigns a
@@ -44,10 +45,10 @@ use crate::dvbsub::DEFAULT_PAGE_ID;
 use crate::mpegts::{TsMuxer, STREAM_TYPE_H264, STREAM_TYPE_H265};
 use crate::tsmux::{
     is_av1, is_dvbsub, language_from_tags, service_from_tags, stream_type_for, DvbSubDecl,
-    UNDETERMINED_LANGUAGE,
+    TsMuxSettings, MUX_PROPERTIES, UNDETERMINED_LANGUAGE,
 };
 
-/// Muxes N elementary streams into one MPEG-TS byte stream, PTS-ordered.
+/// Muxes N elementary streams into one MPEG-TS byte stream, in decode order.
 ///
 /// # Example
 ///
@@ -57,7 +58,7 @@ use crate::tsmux::{
 /// // two elementary streams in one program, PAT/PMT every 100 ms.
 /// let mux = TsMux::new(2)
 ///     .with_program_numbers(&[1, 1])
-///     .with_table_interval_ms(100);
+///     .with_table_interval_90khz(9000);
 /// assert_eq!(mux.emitted(), 0);
 /// ```
 #[derive(Debug)]
@@ -68,17 +69,12 @@ pub struct TsMux {
     stream_types: Vec<Option<u8>>,
     /// Built lazily once every input is configured (the PMT needs all streams).
     mux: Option<TsMuxer>,
-    /// Per-input AU buffer; releases the globally earliest-PTS AU (M204).
+    /// Per-input AU buffer; releases the globally earliest-decode-time AU (M204).
     agg: InputAggregator<Frame>,
     emitted: u64,
-    /// PAT/PMT re-emission cadence in milliseconds (`0` = once up front), applied
-    /// to the inner `TsMuxer` when it is built. The PAT and PMT are emitted
-    /// together, so `pat-interval` and `pmt-interval` share this cadence, matching
-    /// the single-input [`crate::tsmux::TsMux`].
-    table_interval_ms: u64,
-    /// PCR insertion cadence in 90 kHz ticks (default 3600), applied to the inner
-    /// `TsMuxer` when it is built.
-    pcr_interval_90khz: u64,
+    /// The cadences, bitrate and identity knobs, applied to the inner `TsMuxer`
+    /// when it is built, matching the single-input [`crate::tsmux::TsMux`].
+    settings: TsMuxSettings,
     /// Program number per input pad, in pad order (default: every input in
     /// program 1). Zipped with the learned stream types to build the muxer.
     program_numbers: Vec<u16>,
@@ -117,8 +113,7 @@ impl TsMux {
             mux: None,
             agg: InputAggregator::new(inputs),
             emitted: 0,
-            table_interval_ms: 0,
-            pcr_interval_90khz: 3600,
+            settings: TsMuxSettings::default(),
             program_numbers: alloc::vec![1; inputs],
             klv_sync: false,
             tags: TagList::new(),
@@ -195,15 +190,16 @@ impl TsMux {
         self
     }
 
-    /// Set the PAT/PMT re-emission interval in milliseconds (`0` = once up front).
-    pub fn with_table_interval_ms(mut self, ms: u64) -> Self {
-        self.table_interval_ms = ms;
+    /// Set the PAT/PMT re-emission interval in 90 kHz ticks (`0` = once up
+    /// front, default 9000).
+    pub fn with_table_interval_90khz(mut self, ticks: u64) -> Self {
+        self.settings.table_interval_90khz = ticks;
         self
     }
 
     /// Set the PCR insertion interval in 90 kHz ticks (default 3600).
     pub fn with_pcr_interval(mut self, ticks: u64) -> Self {
-        self.pcr_interval_90khz = ticks;
+        self.settings.pcr_interval_90khz = ticks;
         self
     }
 
@@ -280,6 +276,33 @@ impl TsMux {
         if let Some(mux) = self.mux.as_mut() {
             mux.set_stream_subtitling(input, &language, decl.subtitling_type(), decl.ids());
         }
+    }
+}
+
+const PROG_MAP_PROPERTY: PropertySpec = PropertySpec::new(
+    "prog-map",
+    PropKind::Str,
+    "program number per input, comma separated in pad order (e.g. 1,1,2; default all in program 1)",
+)
+.with_default("1");
+
+// GStreamer mpegtsmux takes a pad-name -> program structure for prog-map, g2g properties are scalar
+const FAN_IN_PROPERTIES: [PropertySpec; MUX_PROPERTIES.len() + 1] = {
+    let mut all = [PROG_MAP_PROPERTY; MUX_PROPERTIES.len() + 1];
+    let mut i = 0;
+    while i < MUX_PROPERTIES.len() {
+        all[i] = MUX_PROPERTIES[i];
+        i += 1;
+    }
+    all
+};
+
+// 0 is the unset DTS sentinel
+fn decode_time_ns(frame: &Frame) -> u64 {
+    if frame.timing.dts_ns != 0 {
+        frame.timing.dts_ns
+    } else {
+        frame.timing.pts_ns
     }
 }
 
@@ -360,51 +383,13 @@ impl MultiInputElement for TsMux {
     }
 
     fn properties(&self) -> &'static [PropertySpec] {
-        const PROPS: &[PropertySpec] = &[
-            PropertySpec::new(
-                "pat-interval",
-                PropKind::Uint,
-                "PAT/PMT re-emission interval, milliseconds (0 = once)",
-            )
-            .with_default("0"),
-            // The PAT and PMT are emitted as a pair, so this shares the cadence.
-            PropertySpec::new(
-                "pmt-interval",
-                PropKind::Uint,
-                "alias of pat-interval (the tables are emitted together)",
-            )
-            .with_default("0"),
-            PropertySpec::new(
-                "pcr-interval",
-                PropKind::Uint,
-                "PCR insertion interval, ticks of the 90kHz clock",
-            )
-            .with_default("3600"),
-            // GStreamer mpegtsmux takes a pad-name -> program structure here; g2g
-            // properties are scalar, so this is one number per input in pad order.
-            PropertySpec::new(
-                "prog-map",
-                PropKind::Str,
-                "program number per input, comma separated in pad order (e.g. 1,1,2; default all in program 1)",
-            )
-            .with_default("1"),
-            PropertySpec::new(
-                "klv-sync",
-                PropKind::Bool,
-                "carry KLV metadata as synchronous metadata-in-PES (stream_type 0x15) instead of asynchronous private PES",
-            )
-            .with_default("false"),
-            PropertySpec::new(
-                "dvbsub-page-id",
-                PropKind::Uint,
-                "composition and ancillary page a DVB subtitle input is declared on when the stream carries no page-id config",
-            )
-            .with_default("1"),
-        ];
-        PROPS
+        &FAN_IN_PROPERTIES
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+        if let Some(result) = self.settings.set_property(name, &value, self.mux.as_mut()) {
+            return result;
+        }
         match name {
             "prog-map" => {
                 // The program layout is baked into the PSI when the muxer is built,
@@ -418,22 +403,6 @@ impl MultiInputElement for TsMux {
                     // an SDT without that service; refuse it instead.
                     .filter(|n| self.program_tags.iter().all(|(p, _)| n.contains(p)))
                     .ok_or(PropError::Value)?;
-                Ok(())
-            }
-            "pat-interval" | "pmt-interval" => {
-                self.table_interval_ms = value.as_uint().ok_or(PropError::Type)?;
-                // If the muxer is already built, update it in place; otherwise the
-                // build path applies the stored cadence.
-                if let Some(mux) = self.mux.as_mut() {
-                    mux.set_table_interval_90khz(self.table_interval_ms.saturating_mul(90));
-                }
-                Ok(())
-            }
-            "pcr-interval" => {
-                self.pcr_interval_90khz = value.as_uint().ok_or(PropError::Type)?;
-                if let Some(mux) = self.mux.as_mut() {
-                    mux.set_pcr_interval_90khz(self.pcr_interval_90khz);
-                }
                 Ok(())
             }
             "klv-sync" => {
@@ -462,9 +431,10 @@ impl MultiInputElement for TsMux {
     }
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
+        if let Some(value) = self.settings.get_property(name) {
+            return Some(value);
+        }
         match name {
-            "pat-interval" | "pmt-interval" => Some(PropValue::Uint(self.table_interval_ms)),
-            "pcr-interval" => Some(PropValue::Uint(self.pcr_interval_90khz)),
             "prog-map" => Some(PropValue::Str(self.prog_map_string())),
             "klv-sync" => Some(PropValue::Bool(self.klv_sync)),
             "dvbsub-page-id" => Some(PropValue::Uint(self.dvbsub_page_id as u64)),
@@ -525,9 +495,7 @@ impl MultiInputElement for TsMux {
                     .map(|(&program, s)| (program, s.expect("all set")))
                     .collect();
                 let mut mux = TsMuxer::with_programs(&streams);
-                // 90 kHz clock: 90 ticks per millisecond (matches the single-input path).
-                mux.set_table_interval_90khz(self.table_interval_ms.saturating_mul(90));
-                mux.set_pcr_interval_90khz(self.pcr_interval_90khz);
+                self.settings.apply(&mut mux)?;
                 if let Some((name, provider)) = service_from_tags(&self.tags) {
                     mux.set_service(&name, &provider);
                 }
@@ -565,9 +533,9 @@ impl MultiInputElement for TsMux {
                 self.mux = Some(mux);
             }
 
-            // Drain every AU now safe to emit, in global PTS order, writing each
+            // Drain every AU now safe to emit, in global decode order, writing each
             // to its stream's PID.
-            while let Some((stream, frame)) = self.agg.take_earliest_by(|f| f.timing.pts_ns) {
+            while let Some((stream, frame)) = self.agg.take_earliest_by(decode_time_ns) {
                 let slice = frame
                     .domain
                     .require_system_slice(g2g_core::log::short_type_name::<Self>())?;
@@ -582,6 +550,7 @@ impl MultiInputElement for TsMux {
                     slice,
                     Some(pts_90khz),
                     dts_90khz,
+                    frame.timing.keyframe,
                 );
                 let out_frame = Frame::new(
                     MemoryDomain::System(SystemSlice::from_boxed(ts.into_boxed_slice())),
@@ -694,10 +663,14 @@ mod tests {
 
         // 10 ms cadence, AUs at 0/20/40/60 ms: each AU past the first re-emits the
         // tables, so the PAT appears more than once.
+        const TEN_MS_90KHZ: u64 = 900;
         let mut mux = TsMux::new(1);
-        mux.set_property("pat-interval", PropValue::Uint(10))
+        mux.set_property("pat-interval", PropValue::Uint(TEN_MS_90KHZ))
             .unwrap();
-        assert_eq!(mux.get_property("pmt-interval"), Some(PropValue::Uint(10)));
+        assert_eq!(
+            mux.get_property("pmt-interval"),
+            Some(PropValue::Uint(TEN_MS_90KHZ))
+        );
         mux.configure_pipeline(0, &h264_caps()).unwrap();
         let mut sink = CaptureSink::default();
         for i in 0..4u64 {
@@ -713,7 +686,7 @@ mod tests {
             "PAT re-emitted at the interval"
         );
 
-        // Default (0): the PAT is emitted once up front.
+        // Default (100 ms): AUs inside 60 ms see the PAT once.
         let mut once = TsMux::new(1);
         once.configure_pipeline(0, &h264_caps()).unwrap();
         let mut sink0 = CaptureSink::default();
@@ -728,8 +701,126 @@ mod tests {
         assert_eq!(
             pat_packet_count(&sink0.bytes),
             1,
-            "PAT emitted once by default"
+            "PAT emitted once inside the default cadence"
         );
+    }
+
+    // video DTS trails its PTS by more than the VBR decoder delay
+    #[tokio::test]
+    async fn written_decode_times_never_trail_the_pcr() {
+        const FRAME_NS: u64 = 40_000_000;
+        const AUDIO_NS: u64 = 20_000_000;
+        const REORDER_LAG_NS: u64 = 200_000_000;
+        const TICKS_PER_90KHZ: u64 = 300;
+        const ADAPTATION_FIELD_PRESENT: u8 = 0x20;
+        const PCR_FLAG: u8 = 0x10;
+        const PAYLOAD_UNIT_START: u8 = 0x40;
+        const FIRST_PMT_PID: u16 = 0x1000;
+        let idr = alloc::vec![0u8, 0, 0, 1, 0x65, 0xAA];
+        let inter = alloc::vec![0u8, 0, 0, 1, 0x41, 0xBB];
+        let adts = alloc::vec![0xFFu8, 0xF1, 0x4C, 0x80, 0x01, 0x00, 0xFC, 0x00];
+
+        let mut mux = TsMux::new(2);
+        mux.configure_pipeline(0, &h264_caps()).unwrap();
+        mux.configure_pipeline(1, &aac_caps()).unwrap();
+        let mut sink = CaptureSink::default();
+        for i in 0..20u64 {
+            let key = i % 6 == 0;
+            let video = PipelinePacket::DataFrame(Frame::new(
+                MemoryDomain::System(SystemSlice::from_boxed(
+                    if key { idr.clone() } else { inter.clone() }.into_boxed_slice(),
+                )),
+                FrameTiming {
+                    pts_ns: i * FRAME_NS + REORDER_LAG_NS,
+                    // +1 keeps frame 0's DTS off the unset sentinel
+                    dts_ns: i * FRAME_NS + 1,
+                    keyframe: key,
+                    ..FrameTiming::default()
+                },
+                0,
+            ));
+            mux.process(0, video, &mut sink).await.unwrap();
+            for half in 0..2 {
+                let pts = i * FRAME_NS + half * AUDIO_NS;
+                mux.process(1, au_frame(adts.clone(), pts, true), &mut sink)
+                    .await
+                    .unwrap();
+            }
+        }
+        mux.process(0, PipelinePacket::Eos, &mut sink)
+            .await
+            .unwrap();
+        mux.process(1, PipelinePacket::Eos, &mut sink)
+            .await
+            .unwrap();
+
+        let mut last_pcr: Option<u64> = None;
+        let mut checked = 0;
+        for p in sink.bytes.chunks(crate::mpegts::TS_PACKET_LEN) {
+            let pid = ((p[1] & 0x1F) as u16) << 8 | p[2] as u16;
+            let has_adaptation = p[3] & ADAPTATION_FIELD_PRESENT != 0;
+            let has_pcr = has_adaptation && p[4] > 0 && p[5] & PCR_FLAG != 0;
+            if has_pcr {
+                let base = (p[6] as u64) << 25
+                    | (p[7] as u64) << 17
+                    | (p[8] as u64) << 9
+                    | (p[9] as u64) << 1
+                    | (p[10] as u64) >> 7;
+                let pcr = base * TICKS_PER_90KHZ + ((((p[10] & 1) as u64) << 8) | p[11] as u64);
+                assert!(
+                    last_pcr.is_none_or(|last| pcr >= last),
+                    "PCR went backwards"
+                );
+                last_pcr = Some(pcr);
+            }
+            let starts_pes = p[1] & PAYLOAD_UNIT_START != 0 && pid != 0 && pid < FIRST_PMT_PID;
+            if !starts_pes {
+                continue;
+            }
+            let offset = if has_adaptation { 5 + p[4] as usize } else { 4 };
+            let (pts, dts, _) = crate::mpegts::parse_pes_header(&p[offset..]);
+            let decode_time = dts.or(pts).expect("every AU is stamped") * TICKS_PER_90KHZ;
+            let pcr = last_pcr.expect("a PCR leads every PES");
+            assert!(
+                decode_time >= pcr,
+                "PID {pid:#x} decode time {decode_time} < PCR {pcr}"
+            );
+            checked += 1;
+        }
+        assert_eq!(checked, 60, "every AU checked");
+    }
+
+    #[tokio::test]
+    async fn identity_knobs_fix_at_build_and_a_pid_collision_fails_it() {
+        let au = alloc::vec![0u8, 0, 0, 1, 0x65, 0xAA];
+        let mut mux = TsMux::new(1);
+        mux.configure_pipeline(0, &h264_caps()).unwrap();
+        let mut sink = CaptureSink::default();
+        mux.process(0, h264_frame(au.clone(), 0), &mut sink)
+            .await
+            .unwrap();
+        assert_eq!(
+            mux.set_property("start-pid", PropValue::Uint(0x0200)),
+            Err(PropError::ReadOnly)
+        );
+        assert_eq!(
+            mux.set_property("bitrate", PropValue::Uint(1_000_000)),
+            Err(PropError::ReadOnly)
+        );
+
+        const SHARED_PID: u64 = 0x0200;
+        let mut colliding = TsMux::new(1);
+        colliding
+            .set_property("start-pid", PropValue::Uint(SHARED_PID))
+            .unwrap();
+        colliding
+            .set_property("pmt-start-pid", PropValue::Uint(SHARED_PID))
+            .unwrap();
+        colliding.configure_pipeline(0, &h264_caps()).unwrap();
+        assert!(colliding
+            .process(0, h264_frame(au, 0), &mut sink)
+            .await
+            .is_err());
     }
 
     /// M908: an output frame carries the sync flag of the video AU it packetizes,

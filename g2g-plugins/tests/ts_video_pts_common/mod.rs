@@ -98,9 +98,10 @@ pub(crate) fn demux_timestamps(
     stamps: &[(Option<u64>, Option<u64>)],
 ) -> Vec<(Option<u64>, Option<u64>)> {
     let mut mux = TsMuxer::new(stream_type);
+    let delay = mux.decoder_delay_90khz();
     let mut ts = Vec::new();
     for (au, (pts, dts)) in units.iter().zip(stamps) {
-        ts.extend(mux.push_au(au, *pts, *dts));
+        ts.extend(mux.push_au(au, *pts, *dts, false));
     }
     let mut demux = TsDemuxer::new();
     for packet in ts.chunks(TS_PACKET_LEN) {
@@ -111,7 +112,12 @@ pub(crate) fn demux_timestamps(
         .take_units()
         .into_iter()
         .filter(|u| u.stream_type == stream_type)
-        .map(|u| (u.pts_90khz, u.dts_90khz))
+        .map(|u| {
+            (
+                u.pts_90khz.map(|t| t - delay),
+                u.dts_90khz.map(|t| t - delay),
+            )
+        })
         .collect()
 }
 

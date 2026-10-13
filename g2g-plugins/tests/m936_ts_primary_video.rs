@@ -6,6 +6,8 @@
 
 #![cfg(feature = "std")]
 
+mod ts_continuity;
+
 use g2g_core::{ByteStreamEncoding, Caps};
 use g2g_plugins::mpegts::{STREAM_TYPE_H264, STREAM_TYPE_MPEG1_AUDIO, STREAM_TYPE_MPEG2_VIDEO};
 use g2g_plugins::uridecodebin::ts_primary_stream;
@@ -20,12 +22,13 @@ fn ts_packet(pid: u16, pusi: bool, payload: &[u8]) -> Vec<u8> {
     p[0] = TS_SYNC;
     p[1] = if pusi { 0x40 } else { 0x00 } | ((pid >> 8) as u8 & 0x1F);
     p[2] = (pid & 0xFF) as u8;
+    let continuity_counter = ts_continuity::next_continuity_counter(pid);
     let l = payload.len();
     if l == ROOM {
-        p[3] = 0x10;
+        p[3] = 0x10 | continuity_counter;
         p[4..].copy_from_slice(payload);
     } else {
-        p[3] = 0x30;
+        p[3] = 0x30 | continuity_counter;
         let af_len = ROOM - 1 - l;
         p[4] = af_len as u8;
         if af_len >= 1 {

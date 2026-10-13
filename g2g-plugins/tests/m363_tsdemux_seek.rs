@@ -18,6 +18,7 @@ use g2g_core::memory::{MemoryDomain, SystemSlice};
 use g2g_core::runtime::{SeekController, SourceLoop};
 use g2g_core::{ByteStreamEncoding, Caps, Dim, G2gError, Rate, Seek, VideoCodec};
 use g2g_plugins::filesrc::FileSrc;
+use g2g_plugins::mpegts::{TsMuxer, STREAM_TYPE_H264};
 use g2g_plugins::tsdemux::TsDemux;
 use g2g_plugins::tsmux::TsMux;
 
@@ -162,7 +163,8 @@ async fn tsdemux_seeks_to_the_target_keyframe_over_filesrc() {
     let byte = SeekController::new();
     let time = SeekController::new();
     // Seek to 100 ms: resume from the next keyframe, AU 4 (133 ms).
-    time.seek(Seek::flush_to(100_000_000));
+    let delay_ns = TsMuxer::new(STREAM_TYPE_H264).decoder_delay_90khz() * 1_000_000_000 / 90_000;
+    time.seek(Seek::flush_to(100_000_000 + delay_ns));
 
     let mut src = FileSrc::new(&path, Caps::ByteStream { encoding: ByteStreamEncoding::MpegTs })
         .with_chunk_size(188) // one TS packet per chunk: byte-seek observed mid-read

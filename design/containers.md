@@ -105,7 +105,7 @@ back. `typefind` and `filesrc` type them by magic or extension: `aiff`, `aif`,
 
 ## MPEG-TS
 
-`g2g-plugins::mpegts::TsDemuxer` is a pure `no_std + alloc` parser: it syncs
+`g2g-plugins::mpegts::TsDemuxer` is a pure `no_std + alloc` parser: it takes
 188-byte packets, reads the PAT and then the PMT it names, and reassembles PES
 per PID into access units with PTS. The `TsDemux` element wraps it. The parser
 reassembles every elementary stream the PMT names. The element has one output
@@ -121,6 +121,32 @@ advertises a fixatable placeholder `Range` refined downstream via `CapsChanged`,
 the `RtspSrc` pattern in [caps.md](caps.md). AAC advertises the
 sentinel
 channels and rate that `aacparse` refines from the ADTS header.
+
+### Packet framing and damaged streams
+
+`TsPacketSplitter` cuts the elements' byte input into packets. It reads
+188-byte packets, 192-byte M2TS packets with a 4-byte arrival timestamp in
+front, and 204-byte DVB-ASI packets with 16 parity bytes behind. It locks a
+stride once the sync byte repeats at it for 4 packets, tries 188 first, and
+searches again when a packet does not start with the sync byte. At end of
+stream it hands over a last packet that is shorter than its stride.
+
+The demuxer checks each PID's continuity counter on packets that carry payload.
+A packet that repeats the counter once is a duplicate and is skipped. Any other
+gap is a lost packet: the PID's partial PES or table section is dropped, and
+nothing more is collected on it until the next unit start. A packet whose
+adaptation field sets `discontinuity_indicator` starts a new counter run and
+drops nothing.
+
+PAT, PMT, SDT and EIT sections reassemble across packets, capped at 1024 bytes
+for the first three and 4096 for the EIT.
+
+PTS and DTS are 33-bit counters that wrap about every 26.5 hours. The demuxer
+places each one against the last timestamp on its PID: the same cycle, one wrap
+ahead, or one wrap behind once the PID has wrapped, whichever lands within an
+hour of it. A larger jump keeps the raw value. The elements see timestamps that
+keep rising across the wrap, and a flush or seek resets this with the rest of
+the parser.
 
 ### Timestamping unstamped access units
 
@@ -158,12 +184,50 @@ input pad in pad order, `prog-map=1,1,2`. GStreamer's `mpegtsmux` takes a
 pad-name structure there and g2g takes a comma list because its properties are
 scalar. The single-input `tsmux::TsMux` element wraps a one-stream muxer,
 `! mpegtsmux !`. The multi-input `tsmuxn::TsMux` is a `MultiInputElement` that
-muxes A+V, interleaving access units across inputs by PTS via the
-`take_earliest_by` merge so the multiplex is decode-ordered. The `mpegtsmux`
-name is registered both as the single-input launch element and as a fan-in
-muxer, so the text parser picks `tsmux::TsMux` for one input and
+muxes A+V, interleaving access units across inputs by decode time (the DTS when
+a frame carries one, else the PTS) via the `take_earliest_by` merge, so the
+multiplex is in decode order and no PES trails a PCR taken from another stream.
+The `mpegtsmux` name is registered both as the single-input launch element and
+as a fan-in muxer, so the text parser picks `tsmux::TsMux` for one input and
 `tsmuxn::TsMux` for several by link degree, as in
 `v.! m.  a.! m.  mpegtsmux name=m`.
+
+Tables repeat. The PAT and every PMT go out together every `pat-interval`
+(`pmt-interval` is the same cadence), and the SDT every `si-interval`, both in
+90 kHz ticks with GStreamer's default of 9000 (100 ms). 0 writes a table once.
+
+The PCR cadence (`pcr-interval`, default 3600 ticks) is per program. On an
+access unit of any stream of a program whose PCR is due, the PCR rides the PES's
+first packet when the unit is on the PCR_PID, and otherwise goes out first in a
+PCR-only packet on the PCR_PID: adaptation field only, continuity counter
+repeated. So the first packet of a program after its tables is a PCR. A keyframe
+sets the random_access_indicator in its PES's first packet, and on the PCR_PID
+also carries a PCR, as ffmpeg does, so a receiver tuning in at a keyframe gets a
+clock. Teletext gets no indicator, since EN 300 472 forbids an adaptation field
+beside its payload.
+
+Every written PTS and DTS is the input value plus a decoder delay,
+`TsMuxer::decoder_delay_90khz`. In variable-bitrate mode (`bitrate=0`, the
+default) the delay is 100 ms and a PCR is the access unit's input clock (DTS,
+else PTS), so data reaches the decoder 100 ms before its decode time. A demuxer
+sees the shifted timestamps.
+
+With `bitrate` set the multiplex is constant-bitrate. One byte clock runs for
+the whole multiplex: a packet's time is the start plus the bytes before it times
+8 over the bitrate, in 27 MHz, and a PCR carries the byte clock at its own byte,
+extension included. The delay becomes 700 ms, ffmpeg's default mux delay, and
+the byte clock starts at the first input decode time. Before each access unit
+the muxer pads until the byte clock reaches the unit's input decode time, with
+a PCR-only packet when a PCR is due and a null packet otherwise, and tables and
+PCRs come due by the byte clock. Input that outruns the bitrate logs one warning
+per stream and keeps muxing. Nothing pads at EOS.
+
+The identity knobs are fixed once the muxer is built, like `prog-map`:
+`transport-stream-id` (PAT and SDT), `original-network-id` (SDT), `start-pid`
+and `pmt-start-pid` (the first elementary stream and PMT PID, the rest
+following in order, 0x0010 to 0x1FFE) and `tables-version` (the PSI
+version_number, 0 to 31). Building fails when the stream and PMT PIDs collide
+with each other or the SDT PID. `bitrate` is fixed at build too.
 
 ### Tags over TS
 

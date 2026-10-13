@@ -18,8 +18,14 @@ use g2g_core::{
 };
 
 use g2g_plugins::klv::{split_klv_packets, KlvDecode, UasDatalink};
+use g2g_plugins::mpegts::{TsMuxer, STREAM_TYPE_H264};
 use g2g_plugins::tsdemux::{TsDemux, TsStream};
 use g2g_plugins::tsmuxn::TsMux;
+
+// the PTS shift the muxer adds, in nanoseconds
+fn mux_delay_ns() -> u64 {
+    TsMuxer::new(STREAM_TYPE_H264).decoder_delay_90khz() * 1_000_000_000 / 90_000
+}
 
 struct ZeroClock;
 impl PipelineClock for ZeroClock {
@@ -219,13 +225,21 @@ async fn klv_and_video_round_trip_one_ts() {
 
     let got_video = demux_stream(&ts, TsStream::H264).await;
     assert_eq!(got_video.len(), 3, "three video AUs recovered");
-    assert_eq!(got_video[1].1, 40_000_000, "video PTS preserved");
+    assert_eq!(
+        got_video[1].1,
+        40_000_000 + mux_delay_ns(),
+        "video PTS preserved"
+    );
 
     let got_klv = demux_stream(&ts, TsStream::Klv).await;
     let want: Vec<&[u8]> = klv_packets.iter().map(|p| &p[..]).collect();
     let got: Vec<&[u8]> = got_klv.iter().map(|(p, _)| &p[..]).collect();
     assert_eq!(got, want, "KLV packets recovered bit-exact");
-    assert_eq!(got_klv[0].1, 20_000_000, "KLV PTS preserved");
+    assert_eq!(
+        got_klv[0].1,
+        20_000_000 + mux_delay_ns(),
+        "KLV PTS preserved"
+    );
 
     // The recovered packets parse back to the telemetry that was encoded.
     for (i, (pkt, _)) in got_klv.iter().enumerate() {
@@ -273,5 +287,9 @@ async fn klvdecode_emits_text_lines() {
         line.contains("heading=87.3"),
         "line carries heading: {line}"
     );
-    assert_eq!(sink.aus[0].1, 20_000_000, "text keeps the KLV PTS");
+    assert_eq!(
+        sink.aus[0].1,
+        20_000_000 + mux_delay_ns(),
+        "text keeps the KLV PTS"
+    );
 }

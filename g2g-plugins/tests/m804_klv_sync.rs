@@ -33,6 +33,11 @@ impl PipelineClock for ZeroClock {
     }
 }
 
+// the PTS shift the muxer adds, in nanoseconds
+fn mux_delay_ns() -> u64 {
+    TsMuxer::new(STREAM_TYPE_H264).decoder_delay_90khz() * 1_000_000_000 / 90_000
+}
+
 fn have(cmd: &str) -> bool {
     Command::new(cmd)
         .arg("-version")
@@ -207,7 +212,7 @@ fn pmt_stream_types(ts: &[u8]) -> Vec<u8> {
 /// the wire.
 fn raw_metadata_pes_ts(payload: &[u8]) -> Vec<u8> {
     let mut mux = TsMuxer::with_streams(&[STREAM_TYPE_METADATA_PES]);
-    let tables = mux.push_au(&[0xAA], Some(0), None);
+    let tables = mux.push_au(&[0xAA], Some(0), None, false);
     let mut ts = tables[..2 * TS_PACKET_LEN].to_vec();
     let mut probe = TsDemuxer::new();
     for pkt in ts.chunks(TS_PACKET_LEN) {
@@ -300,14 +305,22 @@ async fn klv_sync_mux_writes_metadata_pes_and_round_trips() {
 
     let got_video = demux_stream(&ts, TsStream::H264).await;
     assert_eq!(got_video.len(), 3, "three video AUs recovered");
-    assert_eq!(got_video[1].1, 40_000_000, "video PTS preserved");
+    assert_eq!(
+        got_video[1].1,
+        40_000_000 + mux_delay_ns(),
+        "video PTS preserved"
+    );
 
     let got_klv = demux_stream(&ts, TsStream::Klv).await;
     let want: Vec<&[u8]> = klv_packets.iter().map(|p| &p[..]).collect();
     let got: Vec<&[u8]> = got_klv.iter().map(|(p, _)| &p[..]).collect();
     assert_eq!(got, want, "KLV packets recovered bit-exact");
-    assert_eq!(got_klv[0].1, 20_000_000, "sync KLV keeps its PTS");
-    assert_eq!(got_klv[1].1, 60_000_000);
+    assert_eq!(
+        got_klv[0].1,
+        20_000_000 + mux_delay_ns(),
+        "sync KLV keeps its PTS"
+    );
+    assert_eq!(got_klv[1].1, 60_000_000 + mux_delay_ns());
     for (i, (pkt, _)) in got_klv.iter().enumerate() {
         let ls = UasDatalink::parse(pkt).expect("valid ST 0601 set");
         assert_eq!(ls.timestamp_us, telemetry(i as u64).timestamp_us);
@@ -336,9 +349,9 @@ async fn ffmpeg_reads_the_sync_klv_stream() {
     for i in 0..30u64 {
         let pts = i * 3600; // 40 ms in 90 kHz ticks
         let au = [0u8, 0, 0, 1, if i == 0 { 0x65 } else { 0x41 }, i as u8];
-        ts.extend_from_slice(&mux.push_au_on(0, &au, Some(pts), None));
+        ts.extend_from_slice(&mux.push_au_on(0, &au, Some(pts), None, false));
         let klv = telemetry(i).encode();
-        ts.extend_from_slice(&mux.push_au_on(1, &klv, Some(pts), None));
+        ts.extend_from_slice(&mux.push_au_on(1, &klv, Some(pts), None, false));
         packets.push(klv);
     }
 

@@ -191,10 +191,11 @@ fn access_unit(stream_type: u8, sps: &[u8], keyframe: bool) -> Vec<u8> {
 /// transport stream, then demux it and report each unit's PTS in order.
 fn demux_pts(stream_type: u8, sps: &[u8], stamps: &[Option<u64>]) -> Vec<Option<u64>> {
     let mut mux = TsMuxer::new(stream_type);
+    let delay = mux.decoder_delay_90khz();
     let mut ts = Vec::new();
     for (index, pts) in stamps.iter().enumerate() {
         let au = access_unit(stream_type, sps, index == 0);
-        ts.extend(mux.push_au(&au, *pts, None));
+        ts.extend(mux.push_au(&au, *pts, None, false));
     }
     let mut demux = TsDemuxer::new();
     for packet in ts.chunks(TS_PACKET_LEN) {
@@ -205,7 +206,7 @@ fn demux_pts(stream_type: u8, sps: &[u8], stamps: &[Option<u64>]) -> Vec<Option<
         .take_units()
         .into_iter()
         .filter(|u| u.stream_type == stream_type)
-        .map(|u| u.pts_90khz)
+        .map(|u| u.pts_90khz.map(|t| t - delay))
         .collect()
 }
 

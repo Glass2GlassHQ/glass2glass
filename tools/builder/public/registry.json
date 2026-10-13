@@ -1218,20 +1218,21 @@
       "role": "element"
     },
     {
-      "author": "",
+      "author": "g2g",
       "caps": null,
-      "description": "",
-      "klass": "",
-      "long_name": "",
+      "description": "Muxes one elementary stream into an MPEG transport stream",
+      "experimental": false,
+      "klass": "Codec/Muxer",
+      "long_name": "MPEG-TS muxer",
       "name": "mpegtsmux",
       "pads": [
-        "SINK: [CompressedVideo { codec: H264, width: Any, height: Any, framerate: Any }, CompressedVideo { codec: H265, width: Any, height: Any, framerate: Any }, Audio { format: Aac, channels: 0, sample_rate: 0 }]",
+        "SINK: [CompressedVideo { codec: H264, width: Any, height: Any, framerate: Any, colorimetry: Colorimetry { range: Unknown, matrix: Unknown, transfer: Unknown, primaries: Unknown } }, CompressedVideo { codec: H265, width: Any, height: Any, framerate: Any, colorimetry: Colorimetry { range: Unknown, matrix: Unknown, transfer: Unknown, primaries: Unknown } }, CompressedVideo { codec: Av1, width: Any, height: Any, framerate: Any, colorimetry: Colorimetry { range: Unknown, matrix: Unknown, transfer: Unknown, primaries: Unknown } }, Audio { format: Aac, channels: 0, sample_rate: 0, channel_layout: ChannelLayout(0) }, Klv, SubPicture { format: DvbSub }]",
         "SRC: [ByteStream { encoding: MpegTs }]"
       ],
       "properties": [
         {
-          "blurb": "PAT/PMT re-emission interval, milliseconds (0 = once)",
-          "default": "0",
+          "blurb": "PAT/PMT re-emission interval, ticks of the 90kHz clock (0 = once)",
+          "default": "9000",
           "enum_values": null,
           "name": "pat-interval",
           "range": null,
@@ -1241,9 +1242,124 @@
         },
         {
           "blurb": "alias of pat-interval (the tables are emitted together)",
-          "default": "0",
+          "default": "9000",
           "enum_values": null,
           "name": "pmt-interval",
+          "range": null,
+          "readable": true,
+          "type": "Unsigned Integer",
+          "writable": true
+        },
+        {
+          "blurb": "SDT re-emission interval, ticks of the 90kHz clock (0 = once)",
+          "default": "9000",
+          "enum_values": null,
+          "name": "si-interval",
+          "range": null,
+          "readable": true,
+          "type": "Unsigned Integer",
+          "writable": true
+        },
+        {
+          "blurb": "PCR insertion interval, ticks of the 90kHz clock",
+          "default": "3600",
+          "enum_values": null,
+          "name": "pcr-interval",
+          "range": null,
+          "readable": true,
+          "type": "Unsigned Integer",
+          "writable": true
+        },
+        {
+          "blurb": "constant output bitrate in bits per second, padded with null packets (0 = variable bitrate)",
+          "default": "0",
+          "enum_values": null,
+          "name": "bitrate",
+          "range": null,
+          "readable": true,
+          "type": "Unsigned Integer",
+          "writable": true
+        },
+        {
+          "blurb": "transport_stream_id written in the PAT and SDT",
+          "default": "1",
+          "enum_values": null,
+          "name": "transport-stream-id",
+          "range": [
+            "0",
+            "65535"
+          ],
+          "readable": true,
+          "type": "Unsigned Integer",
+          "writable": true
+        },
+        {
+          "blurb": "original_network_id written in the SDT",
+          "default": "1",
+          "enum_values": null,
+          "name": "original-network-id",
+          "range": [
+            "0",
+            "65535"
+          ],
+          "readable": true,
+          "type": "Unsigned Integer",
+          "writable": true
+        },
+        {
+          "blurb": "PID of the first elementary stream, the rest follow in order",
+          "default": "256",
+          "enum_values": null,
+          "name": "start-pid",
+          "range": [
+            "16",
+            "8190"
+          ],
+          "readable": true,
+          "type": "Unsigned Integer",
+          "writable": true
+        },
+        {
+          "blurb": "PID of the first program's PMT, the rest follow in order",
+          "default": "4096",
+          "enum_values": null,
+          "name": "pmt-start-pid",
+          "range": [
+            "16",
+            "8190"
+          ],
+          "readable": true,
+          "type": "Unsigned Integer",
+          "writable": true
+        },
+        {
+          "blurb": "version_number written in the PAT, PMT and SDT",
+          "default": "0",
+          "enum_values": null,
+          "name": "tables-version",
+          "range": [
+            "0",
+            "31"
+          ],
+          "readable": true,
+          "type": "Unsigned Integer",
+          "writable": true
+        },
+        {
+          "blurb": "carry KLV metadata as synchronous metadata-in-PES (stream_type 0x15) instead of asynchronous private PES",
+          "default": "false",
+          "enum_values": null,
+          "name": "klv-sync",
+          "range": null,
+          "readable": true,
+          "type": "Boolean",
+          "writable": true
+        },
+        {
+          "blurb": "composition and ancillary page a DVB subtitle input is declared on when the stream carries no page-id config",
+          "default": "1",
+          "enum_values": null,
+          "name": "dvbsub-page-id",
           "range": null,
           "readable": true,
           "type": "Unsigned Integer",
