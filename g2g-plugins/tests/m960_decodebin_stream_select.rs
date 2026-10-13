@@ -10,8 +10,11 @@
 
 use std::process::Command;
 
-use g2g_core::runtime::{parse_launch, run_graph};
+use g2g_core::property::PropValue;
+use g2g_core::runtime::{parse_launch, run_graph, GraphNodeRef};
 use g2g_plugins::registry::default_registry;
+
+const MKV_DEMUX_CATEGORY: &str = "MkvDemux";
 
 struct ZeroClock;
 impl g2g_core::PipelineClock for ZeroClock {
@@ -79,14 +82,16 @@ fn mkv_with_video(codec: &[u8]) -> Vec<u8> {
     [elem(&[0x1A, 0x45, 0xDF, 0xA3], &[]), segment].concat()
 }
 
-fn chain_names(line: &str) -> Vec<String> {
+fn demux_stream(line: &str) -> Option<PropValue> {
     let reg = default_registry();
     let graph = parse_launch(&reg, line).unwrap_or_else(|e| panic!("parses `{line}`: {e}"));
     let vg = graph.finish().expect("valid graph");
-    vg.topo()
-        .iter()
-        .filter_map(|&n| vg.element(n).map(|e| e.log_category().to_string()))
-        .collect()
+    vg.topo().iter().find_map(|&n| match vg.element(n) {
+        Some(GraphNodeRef::Element(e)) if e.log_category() == MKV_DEMUX_CATEGORY => {
+            e.get_property("stream")
+        }
+        _ => None,
+    })
 }
 
 #[test]
@@ -94,12 +99,11 @@ fn bare_decodebin_selects_the_av1_track() {
     let path = temp_path("av1-header", "mkv");
     std::fs::write(&path, mkv_with_video(b"V_AV1")).unwrap();
     let line = format!("filesrc location={} ! decodebin ! fakesink", path.display());
-    let names = chain_names(&line);
-    // either AV1 decoder proves the track was selected; dav1ddec outranks
-    // rav1ddec when both are built
-    assert!(
-        names.iter().any(|n| n == "Rav1dDec" || n == "Dav1dDec"),
-        "an AV1 decoder is plugged from the selected track, got {names:?}"
+    // ffmpegdec outranks rav1ddec for AV1
+    assert_eq!(
+        demux_stream(&line),
+        Some(PropValue::Str("av1".into())),
+        "the demuxer selects the AV1 track"
     );
     let _ = std::fs::remove_file(&path);
 }
