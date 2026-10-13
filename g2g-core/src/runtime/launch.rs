@@ -134,6 +134,10 @@ pub enum ParseError {
     /// Two input-pad references resolve to the same muxer input index (M481), e.g.
     /// `mux.video_0` named twice, or a named pad colliding with a positional one.
     DuplicateInputPad(String),
+    /// An output-pad reference (`cap.foo`) names a pad this fan-out element does
+    /// not have, or one another link already took (M1241). An inline link or a
+    /// bare `cap.` reports an empty `pad`.
+    UnknownOutputPad { element: String, pad: String },
     /// A `queue` / `queue2` sits anywhere but a 1-in/1-out position. It is not an
     /// element in g2g (it collapses into the edge's backpressure policy), so it
     /// cannot be a source, a sink, or a fan-out / fan-in node.
@@ -282,6 +286,12 @@ impl core::fmt::Display for ParseError {
             }
             ParseError::DuplicateInputPad(n) => {
                 write!(f, "{n}: two inputs resolve to the same request pad index")
+            }
+            ParseError::UnknownOutputPad { element, pad } => {
+                write!(
+                    f,
+                    "{element}: no free output pad named '{pad}' (the element has no such pad, or another link already took it)"
+                )
             }
             ParseError::QueueRole(n) => {
                 write!(f, "{n}: a queue must sit between two elements (1-in/1-out); it maps to an edge policy, not a source/sink/branch")
@@ -2352,6 +2362,8 @@ fn build_graph(
     // order, so a demux-select hook can map port i to the requested stream.
     let mut raw_links: Vec<(usize, usize)> = Vec::new();
     let mut demux_pads: Vec<Vec<PadRequest>> = alloc::vec![Vec::new(); specs.len()];
+    // The same requests as written, for a registered demux that routes by pad name.
+    let mut output_pad_names: Vec<Vec<&str>> = alloc::vec![Vec::new(); specs.len()];
     // The DESTINATION pad request per raw link (M481): a named input-pad ref
     // (`... ! mux.audio_0`) carries a request; a bare `mux.` or an inline consumer
     // carries `None` (positional). The transpose of `demux_pads` (output side).
@@ -2395,6 +2407,7 @@ fn build_graph(
                 },
             };
             demux_pads[s].push(req);
+            output_pad_names[s].push(pads[w].unwrap_or(""));
             // The destination's input-pad request: a named ref (`mux.audio_0`)
             // parses; a bare `mux.` (empty suffix) or an inline consumer is `None`
             // (positional, resolved by the sequential input counter below).
@@ -2726,6 +2739,16 @@ fn build_graph(
             let mut demux = registry
                 .make_demux(&spec.name, out_deg[ei])
                 .ok_or_else(|| ParseError::UnknownElement(spec.name.clone()))?;
+            demux
+                .name_output_ports(&output_pad_names[ei])
+                .map_err(|port| ParseError::UnknownOutputPad {
+                    element: spec.name.clone(),
+                    pad: output_pad_names[ei]
+                        .get(port)
+                        .copied()
+                        .unwrap_or_default()
+                        .to_string(),
+                })?;
             apply_props(&mut demux, &spec.name, &spec.props)?;
             graph
                 .add_demux(GraphNodeRef::Demux(demux), out_deg[ei] as u8)

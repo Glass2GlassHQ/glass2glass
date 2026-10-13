@@ -114,12 +114,21 @@ fn shared_stream_caps(streams: &[BatchStream]) -> Result<Caps, G2gError> {
     Ok(first.caps.clone())
 }
 
+// what one call of the hosted class sends on: frames for src, and what it emitted to text_src
+#[derive(Debug, Default)]
+pub(crate) struct HostedOutput {
+    pub(crate) frames: Vec<Frame>,
+    pub(crate) text: Vec<Frame>,
+}
+
 #[derive(Debug)]
 pub(crate) struct HostedInput {
     pub(crate) module: String,
     pub(crate) class: String,
     pub(crate) accept: Caps,
     pub(crate) cuda_frames: bool,
+    // whether `meta.emit(..., output="text_src")` has a pad to go to
+    pub(crate) text_output: bool,
     params: Vec<(String, PropValue)>,
     configured: bool,
     fixed: Option<Caps>,
@@ -134,6 +143,7 @@ impl HostedInput {
             class,
             accept: default_accept(),
             cuda_frames: false,
+            text_output: false,
             params: Vec::new(),
             configured: false,
             fixed: None,
@@ -237,13 +247,16 @@ impl HostedInput {
         &self,
         frame: Frame,
         produce: Option<&Caps>,
-    ) -> Result<Vec<Frame>, G2gError> {
+    ) -> Result<HostedOutput, G2gError> {
         let (worker, caps) = self.worker_and_caps()?;
         #[cfg(feature = "analytics")]
         if frame.meta.get::<BatchMeta>().is_some() {
-            return Ok(vec![run_stream_batch(worker, frame).await?]);
+            return Ok(HostedOutput {
+                frames: vec![run_stream_batch(worker, frame).await?],
+                text: Vec::new(),
+            });
         }
-        worker.run(frame, caps, produce).await
+        worker.run(frame, caps, produce, self.text_output).await
     }
 
     #[cfg(feature = "python")]
@@ -267,7 +280,7 @@ impl HostedInput {
         &self,
         _frame: Frame,
         _produce: Option<&Caps>,
-    ) -> Result<Vec<Frame>, G2gError> {
+    ) -> Result<HostedOutput, G2gError> {
         Err(G2gError::UnsupportedDomain)
     }
 

@@ -287,6 +287,15 @@ pub trait DynMultiOutputElement: ElementBound {
     fn ports_unbatch(&self) -> bool {
         false
     }
+    /// Dyn-safe mirror of [`MultiOutputElement::port_caps_constraint`].
+    fn port_caps_constraint(&self, port: usize) -> Option<CapsConstraint<'_>> {
+        self.port_output_caps(port)
+            .map(|caps| CapsConstraint::Produces(CapsSet::one(caps)))
+    }
+    /// Dyn-safe mirror of [`MultiOutputElement::name_output_ports`].
+    fn name_output_ports(&mut self, _pad_names: &[&str]) -> Result<(), usize> {
+        Ok(())
+    }
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError>;
     fn process<'a>(
         &'a mut self,
@@ -344,6 +353,14 @@ impl<T: MultiOutputElement> DynMultiOutputElement for T {
 
     fn ports_unbatch(&self) -> bool {
         MultiOutputElement::ports_unbatch(self)
+    }
+
+    fn port_caps_constraint(&self, port: usize) -> Option<CapsConstraint<'_>> {
+        MultiOutputElement::port_caps_constraint(self, port)
+    }
+
+    fn name_output_ports(&mut self, pad_names: &[&str]) -> Result<(), usize> {
+        MultiOutputElement::name_output_ports(self, pad_names)
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -447,6 +464,14 @@ impl MultiOutputElement for DemuxRef<'_> {
         self.0.ports_unbatch()
     }
 
+    fn port_caps_constraint(&self, port: usize) -> Option<CapsConstraint<'_>> {
+        self.0.port_caps_constraint(port)
+    }
+
+    fn name_output_ports(&mut self, pad_names: &[&str]) -> Result<(), usize> {
+        self.0.name_output_ports(pad_names)
+    }
+
     fn properties(&self) -> &'static [PropertySpec] {
         self.0.properties()
     }
@@ -494,6 +519,14 @@ impl<'b> DynMultiOutputElement for &'b mut (dyn DynMultiOutputElement + 'b) {
 
     fn ports_unbatch(&self) -> bool {
         (**self).ports_unbatch()
+    }
+
+    fn port_caps_constraint(&self, port: usize) -> Option<CapsConstraint<'_>> {
+        (**self).port_caps_constraint(port)
+    }
+
+    fn name_output_ports(&mut self, pad_names: &[&str]) -> Result<(), usize> {
+        (**self).name_output_ports(pad_names)
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -3422,10 +3455,10 @@ fn build_node_constraints<'g, 'a>(
                 }
             }
             NodeKind::Tee(n) => {
-                let ports: Vec<Option<Caps>> = match vg.element(node) {
-                    Some(GraphNodeRef::Demux(elem)) => {
-                        (0..n as usize).map(|p| elem.port_output_caps(p)).collect()
-                    }
+                let ports: Vec<Option<CapsConstraint<'g>>> = match vg.element(node) {
+                    Some(GraphNodeRef::Demux(elem)) => (0..n as usize)
+                        .map(|p| elem.port_caps_constraint(p))
+                        .collect(),
                     _ => Vec::new(),
                 };
                 if !ports.is_empty() && ports.iter().all(Option::is_some) {
@@ -3433,10 +3466,7 @@ fn build_node_constraints<'g, 'a>(
                         Some(GraphNodeRef::Demux(elem)) => elem.caps_constraint_as_input(),
                         _ => CapsConstraint::AcceptsAny,
                     };
-                    let ports = ports
-                        .into_iter()
-                        .map(|c| CapsConstraint::Produces(CapsSet::one(c.expect("all Some"))))
-                        .collect();
+                    let ports = ports.into_iter().map(|c| c.expect("all Some")).collect();
                     NodeConstraint::Demux { input, ports }
                 } else {
                     NodeConstraint::Element(CapsConstraint::IdentityAny)

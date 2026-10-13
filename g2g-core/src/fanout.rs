@@ -24,7 +24,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use crate::caps::Caps;
+use crate::caps::{Caps, CapsSet};
 use crate::element::{
     AsyncElement, BoxFuture, ConfigureOutcome, ElementBound, OutputSink, PushOutcome, Reconfigure,
 };
@@ -575,6 +575,25 @@ pub trait MultiOutputElement: ElementBound {
     /// [`port_output_caps`](Self::port_output_caps). Default `false`.
     fn ports_unbatch(&self) -> bool {
         false
+    }
+
+    /// The constraint the solver applies to output port `port`. `Produces` fixes
+    /// the port's caps; a transform constraint (`DerivedOutput`, `Mapping`, ...)
+    /// relates the port's edge to the input edge, the way a transform's output
+    /// follows its input. Default: [`port_output_caps`](Self::port_output_caps)
+    /// as `Produces`. Ports negotiate apart only when every port returns `Some`.
+    fn port_caps_constraint(&self, port: usize) -> Option<CapsConstraint<'_>> {
+        self.port_output_caps(port)
+            .map(|caps| CapsConstraint::Produces(CapsSet::one(caps)))
+    }
+
+    /// Take the launch line's pad name for each output port, in port order: the
+    /// suffix of a `name.pad` reference, empty for an inline link or a bare
+    /// `name.`. `Err(port)` names the first port whose pad this element does not
+    /// have or has already given to another port. Default: every name is
+    /// accepted and ports stay in link order.
+    fn name_output_ports(&mut self, _pad_names: &[&str]) -> Result<(), usize> {
+        Ok(())
     }
 
     /// The memory domains this fan-out accepts on its single input pad,

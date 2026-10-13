@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1241: `pyelement` with its `text_src` pad linked sends what the hosted class emits with `meta.emit(..., output="text_src")` out that pad as UTF-8 text, and `src` keeps carrying the frame.
 - M1240: the Python and C bindings and the MCP server splice elements and chains into a running pipeline, remove them, replace its source or sink, set properties, add and drop tee branches and add muxer inputs, with a 5 s timeout and converters on by default.
 - M1239: `GraphMutator::add_input` attaches a source to a free declared pad of a running muxer.
 - M1238: `GraphMutator::add_branch` attaches a branch under a running tee and `remove_branch` drops one after its sink finalizes.

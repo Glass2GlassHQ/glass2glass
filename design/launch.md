@@ -393,6 +393,23 @@ it unset and share the anchor's. `g2g.PTS_NONE`, which is
 `FrameTiming::PTS_NONE`, emits a buffer with no presentation time, which a sink
 presents on arrival.
 
+**A second, text output.** A `pyelement` whose launch line links both
+`name.src` and `name.text_src` has two outputs. `src` carries what a one-output
+`pyelement` sends, staged metadata included, and `text_src` carries
+`text/x-raw,format=utf8`. The class sends a text frame there with
+`meta.emit(payload, duration_ns=None, pts_ns=None, output="text_src")`, timed
+like any emitted buffer, and the frame on `src` stays what it would be without
+that call. Ports go by pad name, so the order of the two branches on the line
+does not matter. These two are the only pad names for now: any other, or one
+pad linked twice, fails the launch naming it, so a broadcast after a
+`pyelement` takes an explicit `tee`. An emit naming `text_src` on a `pyelement`
+without that link, or naming an output that does not exist, raises in the class
+and fails the frame. `text_src` announces its caps before its first frame and
+gets end of stream with the input, also when it carried nothing. This face is
+registered as a demux under the same name: `MultiOutputElement::name_output_ports`
+hands it the pad names, and its `port_caps_constraint` gives the `src` port the
+transform's own constraint, so the solver derives that port from the input.
+
 **What upstream attached.** `meta` reads as well as writes. The host fills it
 from the incoming frame before each call, so a hosted tracker or alert element
 sees what a native detector already found. `meta.objects()` returns one dict per

@@ -43,6 +43,7 @@ mod hosted_input;
 mod props;
 mod sink;
 mod source;
+mod text_output;
 pub use aggregator::PyAggregator;
 pub use element::PyTransform;
 pub use sink::PySink;
@@ -50,7 +51,8 @@ pub use source::PySource;
 
 /// Register the hosted Python elements as `gst-launch` / autoplug factories on
 /// `registry`, so they are instantiable by name like any built-in:
-/// - `pyelement module=... class=... draw-label=...` — a transform;
+/// - `pyelement module=... class=... draw-label=...` — a transform, or with both
+///   its `src` and `text_src` pads linked, a transform with a second, text output;
 /// - `pysink module=... class=...` — a sink;
 /// - `pysrc module=... class=... format=... width=... height=... framerate=...
 ///   num-buffers=...` — a source;
@@ -63,11 +65,15 @@ pub use source::PySource;
 /// per-frame path still needs the `python` feature.
 #[cfg(feature = "std")]
 pub fn register(registry: &mut g2g_core::runtime::Registry) {
-    use g2g_core::runtime::{LaunchFactory, MuxerFactory, SourceFactory};
+    use g2g_core::runtime::{DemuxFactory, LaunchFactory, MuxerFactory, SourceFactory};
     use g2g_core::{Caps, Dim, Rate, RawVideoFormat};
 
     registry.register_launch(LaunchFactory::of::<PyTransform>(PYELEMENT, || {
         Box::new(PyTransform::new("", ""))
+    }));
+    // two linked source pads build this face, one builds the transform above
+    registry.register_demux(DemuxFactory::new(PYELEMENT, |_outputs| {
+        Box::new(text_output::PyTransformWithText::new())
     }));
 
     registry.register_launch(LaunchFactory::of::<PySink>(PYSINK, || {

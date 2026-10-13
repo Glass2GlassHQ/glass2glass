@@ -999,11 +999,12 @@ pub enum NodeConstraint<'a> {
     },
     /// Fan-out demux (M380): `input` is the byte-stream input constraint (the
     /// container the demux consumes), and `ports[i]` is output port `i`'s
-    /// `Produces` constraint (its distinct elementary stream). Unlike a broadcast
+    /// `Produces` constraint (its distinct elementary stream), or a transform
+    /// constraint for a port whose caps follow the input. Unlike a broadcast
     /// tee (which couples in == every out), the ports are *decoupled*, so each
     /// branch negotiates against its own caps and a downstream decoder configures
     /// against its codec at startup. Built from a demux element that declares
-    /// per-port caps (`MultiOutputElement::port_output_caps`); a broadcast fan-out
+    /// per-port caps (`MultiOutputElement::port_caps_constraint`); a broadcast fan-out
     /// (declaring none) stays a plain tee.
     Demux {
         input: CapsConstraint<'a>,
@@ -1532,8 +1533,12 @@ fn node_consistent<E>(
         },
         NodeKind::Tee(_) => match &constraints[node.0 as usize] {
             // A demux decouples its ports (each its own produce set, ensured by arc
-            // consistency), so there is no cross-edge equality.
-            NodeConstraint::Demux { .. } => true,
+            // consistency), so only a port that follows the input relates to it.
+            NodeConstraint::Demux { ports, .. } => out_e.iter().all(|&o| {
+                ports
+                    .get(graph.edge(o).src.index as usize)
+                    .is_none_or(|port| transform_pair_consistent(port, get(in_e[0]), get(o)))
+            }),
             NodeConstraint::BatchDemux { .. } => match get(in_e[0]) {
                 Caps::Batch { streams } if streams.len() == out_e.len() => out_e
                     .iter()
@@ -2211,8 +2216,9 @@ fn apply_tee_node<E>(
 /// Apply a fan-out **demux** node (M380): its ports are decoupled, so the input
 /// edge narrows by the demux's `input` accept (the container it consumes) and each
 /// output edge narrows by its port's `Produces` caps (its elementary stream),
-/// independent of one another. The port for an output edge is its source pad
-/// index, so the order of `out_e` does not matter.
+/// independent of one another. A port with a transform constraint instead
+/// relates its edge to the input edge as a transform would. The port for an
+/// output edge is its source pad index, so the order of `out_e` does not matter.
 fn apply_demux_node<E>(
     graph: &ValidatedGraph<E>,
     node: NodeId,
@@ -2230,8 +2236,12 @@ fn apply_demux_node<E>(
     }
     for &oe in out_e {
         let port = graph.edge(oe).src.index as usize;
-        if let Some(CapsConstraint::Produces(s)) = ports.get(port) {
-            narrow_edge(graph, edges, oe, s, node)?;
+        match ports.get(port) {
+            Some(CapsConstraint::Produces(s)) => narrow_edge(graph, edges, oe, s, node)?,
+            Some(follows_input) => {
+                apply_transform_node(graph, follows_input, in_e, oe, edges, node)?
+            }
+            None => {}
         }
     }
     Ok(())

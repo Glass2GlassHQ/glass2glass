@@ -59,7 +59,8 @@
 //! after another; an element whose outputs run in parallel (the separation
 //! family's stems) leaves it unset so they all share the anchor's.
 //! `g2g.PTS_NONE` means the buffer has no presentation time and a sink presents
-//! it on arrival.
+//! it on arrival. `output="text_src"` sends the bytes as a text frame on the
+//! `text_src` pad instead, for a `pyelement` whose launch line links it.
 //!
 //! GPU-resident frames take their own entry points (M984, M986). A
 //! [`MemoryDomain::Cuda`] frame has no CPU bytes to wrap, so its two semi-planar
@@ -135,6 +136,8 @@ use g2g_core::{
 
 use crate::cuda_plane::{nv12_planes, produced_cuda_buffer, CudaPlane};
 use crate::format::format_to_py;
+use crate::hosted_input::HostedOutput;
+use crate::text_output::{SRC_PAD, TEXT_SRC_PAD};
 
 /// The Python entry points for GPU-resident frames (M984, M986). An element that
 /// works on device memory defines the one matching its shape.
@@ -215,13 +218,14 @@ struct Job {
     kind: JobKind,
     // the element's output is the frame it was handed, sent on when it emits nothing
     in_place: bool,
+    text_output: bool,
 }
 
 /// Worker -> element reply: the buffers to send downstream, or an error. Either
 /// the one frame Python was handed, mutated in place, or the ones it emitted in
-/// its stead. An empty vec from a `Produce` job means the Python source
-/// signalled EOS.
-type Reply = Result<Vec<Frame>, G2gError>;
+/// its stead, plus any it emitted to `text_src`. No frames from a `Produce` job
+/// means the Python source signalled EOS.
+type Reply = Result<HostedOutput, G2gError>;
 
 /// Zero-copy writable view over a frame's System-memory bytes, handed to the
 /// hosted element through the Python buffer protocol. Holds a raw pointer into
@@ -347,6 +351,7 @@ struct MetaSink {
     /// overwriting the frame it was handed. Locked for the same reason `staged`
     /// is.
     emitted: Mutex<Vec<Emitted>>,
+    text_output: bool,
 }
 
 /// What upstream attached to the frame this call is about, converted once into
@@ -387,6 +392,13 @@ struct Emitted {
     /// rather than all of them stacking at the instant the text arrived. `None`
     /// inherits the anchor's.
     pts_ns: Option<u64>,
+    output: EmitOutput,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EmitOutput {
+    Src,
+    TextSrc,
 }
 
 impl MetaSink {
@@ -514,8 +526,32 @@ impl MetaSink {
     /// the anchor's. `g2g.PTS_NONE` says the buffer has no presentation time, and
     /// a sink presents it on arrival. The frame number is the host's, counted
     /// over what this element emitted, not the number of the buffer it read.
-    #[pyo3(signature = (payload, duration_ns = None, pts_ns = None))]
-    fn emit(&self, payload: Vec<u8>, duration_ns: Option<u64>, pts_ns: Option<u64>) {
+    ///
+    /// `output="text_src"` sends the buffer as one text frame on the `text_src`
+    /// pad instead, leaving the frame on `src` as it would be without it. Only a
+    /// `pyelement` whose launch line links `text_src` has that output.
+    #[pyo3(signature = (payload, duration_ns = None, pts_ns = None, output = None))]
+    fn emit(
+        &self,
+        payload: Vec<u8>,
+        duration_ns: Option<u64>,
+        pts_ns: Option<u64>,
+        output: Option<&str>,
+    ) -> PyResult<()> {
+        let output = match output {
+            None | Some(SRC_PAD) => EmitOutput::Src,
+            Some(TEXT_SRC_PAD) if self.text_output => EmitOutput::TextSrc,
+            Some(TEXT_SRC_PAD) => {
+                return Err(PyValueError::new_err(format!(
+                    "meta.emit names output '{TEXT_SRC_PAD}', which this element has only when the launch line links its {TEXT_SRC_PAD} pad"
+                )))
+            }
+            Some(other) => {
+                return Err(PyValueError::new_err(format!(
+                    "meta.emit names output '{other}', the outputs are '{SRC_PAD}' and '{TEXT_SRC_PAD}'"
+                )))
+            }
+        };
         self.emitted
             .lock()
             .expect("MetaSink emitted lock poisoned")
@@ -523,7 +559,9 @@ impl MetaSink {
                 payload,
                 duration_ns,
                 pts_ns,
+                output,
             });
+        Ok(())
     }
 }
 
@@ -622,12 +660,14 @@ impl PyWorker {
         frame: Frame,
         caps: &Caps,
         produce: Option<&Caps>,
-    ) -> Result<Vec<Frame>, G2gError> {
+        text_output: bool,
+    ) -> Result<HostedOutput, G2gError> {
         self.dispatch(Request::Job(Job {
             frames: vec![frame],
             caps: job_caps(caps)?,
             kind: JobKind::Transform,
             in_place: writes_in_place(caps, produce),
+            text_output,
         }))
         .await
     }
@@ -638,6 +678,7 @@ impl PyWorker {
             caps: job_caps(caps)?,
             kind: JobKind::Consume,
             in_place: true,
+            text_output: false,
         }))
         .await?;
         Ok(())
@@ -664,8 +705,10 @@ impl PyWorker {
             caps: job_caps(caps)?,
             kind: JobKind::Batch,
             in_place: writes_in_place(caps, produce),
+            text_output: false,
         }))
         .await
+        .map(|output| output.frames)
     }
 
     #[cfg(feature = "analytics")]
@@ -679,8 +722,10 @@ impl PyWorker {
             caps: raw_video_caps(caps)?,
             kind: JobKind::StreamBatch,
             in_place: true,
+            text_output: false,
         }))
         .await
+        .map(|output| output.frames)
     }
 
     /// Ask a GPU source for its next surface: it allocates the device memory and
@@ -694,9 +739,10 @@ impl PyWorker {
                 caps: raw_video_caps(caps)?,
                 kind: JobKind::ProduceCuda,
                 in_place: true,
+                text_output: false,
             }))
             .await?;
-        Ok(out.pop())
+        Ok(out.frames.pop())
     }
 
     /// Hand a blank frame to the Python source to fill. Returns the produced
@@ -712,12 +758,13 @@ impl PyWorker {
                 caps: raw_video_caps(caps)?,
                 kind: JobKind::Produce,
                 in_place: true,
+                text_output: false,
             }))
             .await?;
-        Ok(out.pop())
+        Ok(out.frames.pop())
     }
 
-    async fn dispatch(&self, request: Request) -> Result<Vec<Frame>, G2gError> {
+    async fn dispatch(&self, request: Request) -> Reply {
         self.job_tx
             .as_ref()
             .ok_or(G2gError::Shutdown)?
@@ -766,7 +813,7 @@ fn worker_main(
 
     // Numbers the buffers the element emits: one input can produce several, and
     // a sink takes a repeated sequence as a stream fault.
-    let mut emitted_sequence = 0u64;
+    let mut sequences = EmitSequences::default();
 
     // Attach once: a thread state built and torn down every frame costs 5 ms on free-threaded 3.14t.
     Python::attach(|py| {
@@ -780,7 +827,7 @@ fn worker_main(
             jobs = returned;
             let Ok(request) = next else { break };
             let reply = match request {
-                Request::Job(job) => process_job(py, &instance, job, &mut emitted_sequence),
+                Request::Job(job) => process_job(py, &instance, job, &mut sequences),
                 Request::Eos => call_eos(py, &instance),
             };
             // Capacity-1, and the element awaits each reply before sending the next
@@ -973,6 +1020,12 @@ fn require_hook(
     Ok(())
 }
 
+#[derive(Debug, Default)]
+struct EmitSequences {
+    src: u64,
+    text_src: u64,
+}
+
 /// Run a job (one frame for a transform, a batch for an aggregator) through the
 /// hosted element. Python reads / overwrites each frame's System memory in place
 /// via the buffer protocol, or reads a GPU frame's planes through CAI; the frames
@@ -981,7 +1034,7 @@ fn process_job(
     py: Python<'_>,
     instance: &Py<PyAny>,
     mut job: Job,
-    emitted_sequence: &mut u64,
+    sequences: &mut EmitSequences,
 ) -> Reply {
     let handoff = handoff(py, instance, &mut job)?;
 
@@ -1000,6 +1053,7 @@ fn process_job(
         py,
         MetaSink {
             upstream,
+            text_output: job.text_output,
             ..Default::default()
         },
     ) {
@@ -1038,7 +1092,7 @@ fn process_job(
         if !emitted.is_empty() {
             return Err(py_fail(py, sink_produced(instance.bind(py), SINK_EMITTED)));
         }
-        return Ok(Vec::new());
+        return Ok(HostedOutput::default());
     }
 
     if matches!(job.kind, JobKind::StreamBatch) {
@@ -1050,17 +1104,32 @@ fn process_job(
         for (frame, staged) in job.frames.iter_mut().zip(split_by_stream(staged, streams)) {
             attach_metadata(frame, staged, frame_dims);
         }
-        return Ok(job.frames);
+        return Ok(HostedOutput {
+            frames: job.frames,
+            text: Vec::new(),
+        });
     }
+
+    let (emitted, emitted_text): (Vec<Emitted>, Vec<Emitted>) = emitted
+        .into_iter()
+        .partition(|emitted| emitted.output == EmitOutput::Src);
 
     match produced {
         Ok(true) => {
             let Some(anchor) = job.frames.first() else {
-                return Ok(Vec::new());
+                return Ok(HostedOutput::default());
             };
             let anchor_timing = anchor.timing;
             let anchor_sequence = anchor.sequence;
             let anchor_meta = anchor.meta.clone();
+            let text = emitted_text
+                .into_iter()
+                .map(|emitted| {
+                    let sequence = sequences.text_src;
+                    sequences.text_src += 1;
+                    emitted_frame(emitted, anchor_timing, sequence)
+                })
+                .collect();
             let mut out = if emitted.is_empty() && !job.in_place {
                 // Nothing emitted by an element whose output is not its input:
                 // a transcriber still gathering audio has no text yet.
@@ -1074,29 +1143,13 @@ fn process_job(
             } else {
                 // Emitted frames number on past the input's rather than from
                 // zero: a sink reads a repeated sequence as a stream fault.
-                *emitted_sequence = (*emitted_sequence).max(anchor_sequence);
+                sequences.src = sequences.src.max(anchor_sequence);
                 emitted
                     .into_iter()
                     .map(|emitted| {
-                        let mut timing = anchor_timing;
-                        if let Some(duration_ns) = emitted.duration_ns {
-                            timing.duration_ns = duration_ns;
-                        }
-                        // An emitted buffer is never reordered, so its decode
-                        // time is its presentation time.
-                        if let Some(pts_ns) = emitted.pts_ns {
-                            timing.pts_ns = pts_ns;
-                            timing.dts_ns = pts_ns;
-                        }
-                        let sequence = *emitted_sequence;
-                        *emitted_sequence += 1;
-                        let mut frame = Frame::new(
-                            MemoryDomain::System(SystemSlice::from_boxed(
-                                emitted.payload.into_boxed_slice(),
-                            )),
-                            timing,
-                            sequence,
-                        );
+                        let sequence = sequences.src;
+                        sequences.src += 1;
+                        let mut frame = emitted_frame(emitted, anchor_timing, sequence);
                         // What upstream attached describes the stream, not the
                         // one buffer replaced, so it travels with every one sent.
                         frame.meta = anchor_meta.clone();
@@ -1109,12 +1162,30 @@ fn process_job(
             if let Some(first) = out.first_mut() {
                 attach_metadata(first, staged, frame_dims);
             }
-            Ok(out)
+            Ok(HostedOutput { frames: out, text })
         }
         // Produce EOS: drop the blank frame, signal end with an empty reply.
-        Ok(false) => Ok(Vec::new()),
+        Ok(false) => Ok(HostedOutput::default()),
         Err(e) => Err(py_fail(py, e)),
     }
+}
+
+fn emitted_frame(emitted: Emitted, anchor_timing: FrameTiming, sequence: u64) -> Frame {
+    let mut timing = anchor_timing;
+    if let Some(duration_ns) = emitted.duration_ns {
+        timing.duration_ns = duration_ns;
+    }
+    // An emitted buffer is never reordered, so its decode time is its
+    // presentation time.
+    if let Some(pts_ns) = emitted.pts_ns {
+        timing.pts_ns = pts_ns;
+        timing.dts_ns = pts_ns;
+    }
+    Frame::new(
+        MemoryDomain::System(SystemSlice::from_boxed(emitted.payload.into_boxed_slice())),
+        timing,
+        sequence,
+    )
 }
 
 /// Call the hosted element with writable views over the frames' System bytes.
@@ -1310,7 +1381,7 @@ fn call_eos(py: Python<'_>, instance: &Py<PyAny>) -> Reply {
     if defined {
         bound.call_method0(EOS_HOOK).map_err(|e| py_fail(py, e))?;
     }
-    Ok(Vec::new())
+    Ok(HostedOutput::default())
 }
 
 /// The geometry the GPU hooks pass to Python. `handoff` refuses a GPU job whose

@@ -145,6 +145,11 @@ impl PyTransform {
         self
     }
 
+    pub(crate) fn with_text_output(mut self) -> Self {
+        self.input.text_output = true;
+        self
+    }
+
     /// Count of frames pushed downstream. Useful in tests.
     pub fn emitted_count(&self) -> u64 {
         self.emitted
@@ -222,6 +227,64 @@ impl PyTransform {
                 .saturating_add_signed(report.jitter_ns),
             taken_ns: report.taken_ns,
         });
+    }
+
+    // the returned frames are what the hosted class emitted to text_src
+    pub(crate) async fn process_packet(
+        &mut self,
+        packet: PipelinePacket,
+        out: &mut dyn OutputSink,
+    ) -> Result<Vec<Frame>, G2gError> {
+        if !self.input.is_configured() {
+            return Err(G2gError::NotConfigured);
+        }
+        match packet {
+            PipelinePacket::DataFrame(frame) => {
+                if self.is_late(&frame) {
+                    self.late_dropped += 1;
+                    return Ok(Vec::new());
+                }
+                if self.forwards_untouched(&frame) {
+                    self.push_frame(frame, out).await?;
+                    return Ok(Vec::new());
+                }
+                let started = Instant::now();
+                let outputs = self.input.run(frame, self.produce.as_ref()).await?;
+                self.last_run_ns = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                self.last_run_measured_ns = monotonic_ns();
+                for output in outputs.frames {
+                    self.push_frame(output, out).await?;
+                }
+                return Ok(outputs.text);
+            }
+            // A mid-stream change to anything outside the accepted set is a
+            // hard error; otherwise announce this element's own output side
+            // so downstream stays in step. Under `output-caps=` the runner's
+            // packet carries that output, `configure_pipeline` took the input.
+            PipelinePacket::CapsChanged(c) => {
+                let announce = self.output_for(&c);
+                if self.produce.is_none() {
+                    self.input.caps_changed(c)?;
+                }
+                out.push(PipelinePacket::CapsChanged(announce)).await?;
+            }
+            PipelinePacket::Flush => {
+                self.sink_clock = None;
+                self.downstream_delay_ns = 0;
+                self.recent_pushes.clear();
+                out.push(PipelinePacket::Flush).await?;
+            }
+            PipelinePacket::Segment(seg) => {
+                self.segment = Some(seg);
+                out.push(PipelinePacket::Segment(seg)).await?;
+            }
+            // Stateless per-frame host: nothing buffered to drain.
+            PipelinePacket::Eos => {}
+            other => {
+                out.push(other).await?;
+            }
+        }
+        Ok(Vec::new())
     }
 
     /// Whether `only-on` names something this frame does not carry, so it goes
@@ -322,57 +385,8 @@ impl AsyncElement for PyTransform {
         packet: PipelinePacket,
         out: &'a mut dyn OutputSink,
     ) -> Self::ProcessFuture<'a> {
-        Box::pin(async move {
-            if !self.input.is_configured() {
-                return Err(G2gError::NotConfigured);
-            }
-            match packet {
-                PipelinePacket::DataFrame(frame) => {
-                    if self.is_late(&frame) {
-                        self.late_dropped += 1;
-                        return Ok(());
-                    }
-                    if self.forwards_untouched(&frame) {
-                        return self.push_frame(frame, out).await;
-                    }
-                    let started = Instant::now();
-                    let outputs = self.input.run(frame, self.produce.as_ref()).await?;
-                    self.last_run_ns =
-                        u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
-                    self.last_run_measured_ns = monotonic_ns();
-                    for output in outputs {
-                        self.push_frame(output, out).await?;
-                    }
-                }
-                // A mid-stream change to anything outside the accepted set is a
-                // hard error; otherwise announce this element's own output side
-                // so downstream stays in step. Under `output-caps=` the runner's
-                // packet carries that output, `configure_pipeline` took the input.
-                PipelinePacket::CapsChanged(c) => {
-                    let announce = self.output_for(&c);
-                    if self.produce.is_none() {
-                        self.input.caps_changed(c)?;
-                    }
-                    out.push(PipelinePacket::CapsChanged(announce)).await?;
-                }
-                PipelinePacket::Flush => {
-                    self.sink_clock = None;
-                    self.downstream_delay_ns = 0;
-                    self.recent_pushes.clear();
-                    out.push(PipelinePacket::Flush).await?;
-                }
-                PipelinePacket::Segment(seg) => {
-                    self.segment = Some(seg);
-                    out.push(PipelinePacket::Segment(seg)).await?;
-                }
-                // Stateless per-frame host: nothing buffered to drain.
-                PipelinePacket::Eos => {}
-                other => {
-                    out.push(other).await?;
-                }
-            }
-            Ok(())
-        })
+        // meta.emit refuses text_src on this one-output face
+        Box::pin(async move { self.process_packet(packet, out).await.map(|_| ()) })
     }
 
     fn handles_qos(&self) -> bool {
