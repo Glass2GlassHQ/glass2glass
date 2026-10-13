@@ -166,6 +166,34 @@ fn an_unknown_source_pad_fails_at_launch_naming_it() {
     assert!(error.to_string().contains("'subtitle_src'"), "{error}");
 }
 
+fn text_output_seen() -> Vec<bool> {
+    Python::attach(|py| {
+        let seen = PyModule::import(py, FIXTURE_MODULE)?.getattr("TEXT_OUTPUT_SEEN")?;
+        let values: Vec<bool> = seen.extract()?;
+        seen.call_method0("clear")?;
+        Ok::<_, PyErr>(values)
+    })
+    .expect("the fixture records what text_output said")
+}
+
+#[test]
+fn the_sink_says_whether_text_src_is_linked() {
+    run(&format!(
+        "videotestsrc num-buffers={FRAME_COUNT} ! {VIDEO_CAPS} ! \
+         pyelement module={FIXTURE_MODULE} class=CaptionerWhenLinked ! fakesink"
+    ))
+    .expect("an element that skips the text emit runs without the pad");
+    assert_eq!(text_output_seen(), vec![false; FRAME_COUNT]);
+
+    run(&format!(
+        "videotestsrc num-buffers={FRAME_COUNT} ! {VIDEO_CAPS} ! \
+         pyelement module={FIXTURE_MODULE} class=CaptionerWhenLinked name=cap \
+         cap.src ! fakesink cap.text_src ! fakesink"
+    ))
+    .expect("the run with the pad completes");
+    assert_eq!(text_output_seen(), vec![true; FRAME_COUNT]);
+}
+
 #[test]
 fn emitting_to_text_src_without_the_pad_fails_naming_it() {
     let result = run(&format!(

@@ -440,6 +440,11 @@ impl MetaSink {
         self.upstream.class_names.clone()
     }
 
+    #[getter]
+    fn text_output(&self) -> bool {
+        self.text_output
+    }
+
     /// The opaque blobs already on the incoming frame, keyed by canonical header
     /// (lowercase, without gst-python-ml's `GST-` prefix and trailing `:`).
     fn blobs<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {

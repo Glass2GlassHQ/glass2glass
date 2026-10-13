@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1248: `MetaSink.text_output` tells a hosted class whether its `text_src` pad is linked.
 - M1243: `wgpusink` presents through Vulkan unless `WGPU_BACKEND` names another backend, so two windows opening at once no longer abort the process.
 - M1242: a sink's QoS report crosses a tee, a demux and a muxer on its way to the source.
 - M1241: `pyelement` with its `text_src` pad linked sends what the hosted class emits with `meta.emit(..., output="text_src")` out that pad as UTF-8 text, and `src` keeps carrying the frame.

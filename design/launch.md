@@ -404,7 +404,8 @@ does not matter. These two are the only pad names for now: any other, or one
 pad linked twice, fails the launch naming it, so a broadcast after a
 `pyelement` takes an explicit `tee`. An emit naming `text_src` on a `pyelement`
 without that link, or naming an output that does not exist, raises in the class
-and fails the frame. `text_src` announces its caps before its first frame and
+and fails the frame, so a class that only sometimes has the link reads
+`meta.text_output` first. `text_src` announces its caps before its first frame and
 gets end of stream with the input, also when it carried nothing. This face is
 registered as a demux under the same name: `MultiOutputElement::name_output_ports`
 hands it the pad names, and its `port_caps_constraint` gives the `src` port the

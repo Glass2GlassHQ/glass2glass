@@ -19,3 +19,13 @@ class RecordingCaptioner:
         except ValueError as error:
             EMIT_ERRORS.append(str(error))
             raise
+
+
+TEXT_OUTPUT_SEEN = []
+
+
+class CaptionerWhenLinked:
+    def g2g_process(self, buf, width, height, fmt, meta):
+        TEXT_OUTPUT_SEEN.append(meta.text_output)
+        if meta.text_output:
+            meta.emit(b"caption", output="text_src")
