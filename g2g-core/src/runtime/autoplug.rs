@@ -782,8 +782,6 @@ mod factory {
         }
     }
 
-    /// The output port count a demux is built with to read its metadata and
-    /// properties. The real count comes from link degree at parse.
     const DEMUX_INSPECT_PORTS: usize = 2;
 
     /// Format an element's pad templates the way `gst-inspect` lists them (one

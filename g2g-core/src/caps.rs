@@ -547,9 +547,6 @@ impl Caps {
 /// than enumerate them.
 pub const MAX_BATCH_ALTERNATIVES: usize = 256;
 
-/// Every [`Caps::Batch`] taking one alternative per stream, the first stream's
-/// choice varying slowest so the set keeps each stream's preference order.
-/// `None` past [`MAX_BATCH_ALTERNATIVES`].
 #[cfg(feature = "alloc")]
 pub(crate) fn batch_alternatives(streams: &[&[Caps]]) -> Option<Vec<Caps>> {
     let mut batches: Vec<Vec<Caps>> = alloc::vec![Vec::new()];

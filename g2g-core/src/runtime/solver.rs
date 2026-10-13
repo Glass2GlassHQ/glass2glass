@@ -2300,7 +2300,6 @@ fn apply_muxer_node<E>(
     }
 }
 
-/// A fan-in node's `(pad, edge)` pairs in pad order.
 fn pads_in_order<E>(graph: &ValidatedGraph<E>, node: NodeId) -> Vec<(usize, usize)> {
     let mut pads: Vec<(usize, usize)> = graph
         .in_edges(node)
@@ -2311,7 +2310,6 @@ fn pads_in_order<E>(graph: &ValidatedGraph<E>, node: NodeId) -> Vec<(usize, usiz
     pads
 }
 
-/// Stream `stream` of every batch in `set` that has `streams` streams, deduped.
 fn batch_stream_alternatives(set: &CapsSet, streams: usize, stream: usize) -> CapsSet {
     let mut out: Vec<Caps> = Vec::new();
     for alternative in set.alternatives() {
@@ -2324,9 +2322,6 @@ fn batch_stream_alternatives(set: &CapsSet, streams: usize, stream: usize) -> Ca
     CapsSet::from_alternatives(out)
 }
 
-/// A batching mux (M1233): each input edge narrows by its pad's accept set, the
-/// output edge narrows to the batches of the input edges' alternatives, and each
-/// input edge narrows back to its stream of the output's alternatives.
 fn apply_batch_muxer_node<E>(
     graph: &ValidatedGraph<E>,
     node: NodeId,
@@ -2363,9 +2358,6 @@ fn apply_batch_muxer_node<E>(
     Ok(())
 }
 
-/// An unbatching demux (M1233): the input edge narrows by the demux's accept
-/// set, each port edge narrows to its stream of the input's batches, and the
-/// input narrows back to the batches whose every stream some port accepts.
 fn apply_batch_demux_node<E>(
     graph: &ValidatedGraph<E>,
     node: NodeId,
@@ -4367,9 +4359,7 @@ mod tests {
     }
     #[test]
     fn solve_graph_batch_mux_and_demux_negotiate_each_stream() {
-        // Two sources into a batching mux, its batch into an unbatching demux,
-        // one sink per port. Branch 0 only takes NV12, so the choice flows back
-        // through the batch to source 0, which offers RGBA first.
+        // branch 0 only takes NV12, which source 0 offers second
         let rgba = fixed_video(RawVideoFormat::Rgba8, 320, 240, 30);
         let nv12 = fixed_video(RawVideoFormat::Nv12, 320, 240, 30);
         let i420 = fixed_video(RawVideoFormat::I420, 640, 480, 25);

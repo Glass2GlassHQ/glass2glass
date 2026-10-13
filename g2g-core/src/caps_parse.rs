@@ -421,9 +421,6 @@ impl CapsSet {
     }
 }
 
-/// The `streams=<"caps","caps",...>` array of a batch caps, as
-/// [`Caps::to_gst_string`] prints it, expanded to one batch per combination of
-/// the streams' alternatives.
 fn batch_set(streams: &str) -> Option<CapsSet> {
     let inner = streams.strip_prefix('<')?.strip_suffix('>')?;
     let sets = split_top_commas(inner)

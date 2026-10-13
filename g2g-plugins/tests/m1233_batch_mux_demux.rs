@@ -41,8 +41,6 @@ fn rgba(width: Dim, height: Dim, framerate: Rate) -> Caps {
     }
 }
 
-/// Takes raw RGBA only and records its configured caps, every frame's timing
-/// and sequence, and whether EOS arrived.
 struct RecordingSink(Arc<Mutex<Received>>);
 
 impl AsyncElement for RecordingSink {
@@ -81,7 +79,6 @@ impl AsyncElement for RecordingSink {
     }
 }
 
-/// Passes every packet through, recording the stream indices of each batch.
 struct BatchProbe(Arc<Mutex<Vec<Vec<usize>>>>);
 
 impl AsyncElement for BatchProbe {
@@ -122,7 +119,6 @@ impl AsyncElement for BatchProbe {
     }
 }
 
-/// The frames a videotestsrc at `fps` emits for `count` buffers.
 fn expected_frames(fps: u64, count: u64) -> Vec<(u64, u64)> {
     let step = 1_000_000_000 / fps;
     (0..count).map(|i| (i * step, i)).collect()
@@ -136,8 +132,6 @@ fn pts_and_sequence(received: &Received) -> Vec<(u64, u64)> {
         .collect()
 }
 
-/// Two sources of 30 and 25 fps through mux, a batch probe and demux into one
-/// recording sink per port. Returns what each sink got and the batches seen.
 async fn run_batch_graph(
     first_frames: u64,
     second_frames: u64,
@@ -210,7 +204,6 @@ async fn an_ended_input_drops_out_of_later_batches() {
 static FIRST_SINK_FRAMES: AtomicUsize = AtomicUsize::new(0);
 static SECOND_SINK_FRAMES: AtomicUsize = AtomicUsize::new(0);
 
-/// Counts its frames into a static, so a launch-line sink can be read after the run.
 struct CountingSink(&'static AtomicUsize);
 
 impl AsyncElement for CountingSink {

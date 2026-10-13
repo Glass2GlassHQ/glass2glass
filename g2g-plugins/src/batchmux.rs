@@ -59,7 +59,6 @@ impl BatchMux {
     }
 }
 
-/// Input 0's timing when it contributes, else the earliest contributing frame's.
 fn round_timing(round: &[(usize, Frame)]) -> FrameTiming {
     match round.iter().find(|(index, _)| *index == 0) {
         Some((_, frame)) => frame.timing,
