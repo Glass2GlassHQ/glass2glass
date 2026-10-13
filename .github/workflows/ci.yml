@@ -754,6 +754,16 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends ffmpeg
           ffmpeg -protocols 2>/dev/null | grep -q srt && echo "ffmpeg has SRT" || echo "ffmpeg lacks SRT (SRT oracle will skip)"
+      # fail here rather than let the mux oracle skip without tsp
+      - name: install TSDuck (the transport-stream analyzer)
+        env:
+          TSDUCK_VERSION: 3.45-4798
+        run: |
+          . /etc/os-release
+          deb="tsduck_${TSDUCK_VERSION}.ubuntu${VERSION_ID%%.*}_amd64.deb"
+          curl -fsSL -o "/tmp/$deb" "https://github.com/tsduck/tsduck/releases/download/v${TSDUCK_VERSION}/$deb"
+          sudo apt-get install -y --no-install-recommends "/tmp/$deb"
+          tsp --version
       - name: start from a fresh evidence log
         run: rm -f "$G2G_CONFORMANCE_LOG"
       # Deterministic reference-demuxer oracles (required): the native fMP4 and
@@ -778,6 +788,10 @@ jobs:
       # `cargo test` skips them.
       - name: MPEG-TS metadata oracles (mpegtsmux + tsdemux vs ffmpeg)
         run: cargo test -p g2g-plugins --locked --features std --test m783_ts_multiprogram --test m872_ts_tags --test m878_ts_program_tags -- --nocapture
+      # Broadcast mux (M1249-M1253): ffprobe reads both streams, TSDuck finds no
+      # continuity errors and measures the constant bitrate from the PCRs.
+      - name: MPEG-TS broadcast mux oracles (mpegtsmux vs ffprobe + TSDuck)
+        run: cargo test -p g2g-plugins --locked --features std --test m1249_ts_mux_broadcast -- --nocapture
       # FLV both ways (M662): flvdemux's extracted elementary streams decoded
       # standalone by ffmpeg; flvmux's native FLV probed + decoded by ffmpeg.
       - name: FLV oracles (flvmux + flvdemux vs ffmpeg)
