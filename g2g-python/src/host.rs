@@ -143,6 +143,7 @@ const CUDA_BATCH_HOOK: &str = "g2g_process_cuda_batch";
 const CUDA_PRODUCE_HOOK: &str = "g2g_produce_cuda";
 /// The Python entry point for a stream that is not raw video.
 const PAYLOAD_HOOK: &str = "g2g_process_payload";
+const EOS_HOOK: &str = "g2g_eos";
 /// Optional method a hosted class defines to list the properties it declares, so
 /// a pipeline naming one it has not is refused instead of silently setting an
 /// attribute nothing reads.
@@ -160,6 +161,7 @@ static INIT: Once = Once::new();
 enum JobKind {
     /// `g2g_process(buf, w, h, fmt, meta)` — one frame, mutated in place.
     Transform,
+    Consume,
     /// `g2g_process_batch([buf, ...], w, h, fmt, meta)` — N frames.
     Batch,
     /// `g2g_produce(buf, w, h, fmt, meta) -> bool` — fill a blank frame; a
@@ -194,6 +196,11 @@ impl JobCaps {
             JobCaps::Payload(_) => None,
         }
     }
+}
+
+enum Request {
+    Job(Job),
+    Eos,
 }
 
 /// Frames plus their negotiated caps, sent to the worker thread.
@@ -553,7 +560,7 @@ pub fn init_host() {
 #[derive(Debug)]
 pub(crate) struct PyWorker {
     /// `None` only after [`Drop`] takes it to signal the worker to exit.
-    job_tx: Option<mpsc::Sender<Job>>,
+    job_tx: Option<mpsc::Sender<Request>>,
     result_rx: Receiver<Reply>,
     handle: Option<JoinHandle<()>>,
 }
@@ -569,7 +576,7 @@ impl PyWorker {
         params: &[(String, PropValue)],
     ) -> Result<Self, G2gError> {
         init_host();
-        let (job_tx, jobs) = mpsc::channel::<Job>();
+        let (job_tx, jobs) = mpsc::channel::<Request>();
         let (results, result_rx) = bounded::<Reply>(1);
         let (ack_tx, ack_rx) = mpsc::channel::<Result<(), G2gError>>();
         let (m, c) = (module.to_owned(), class.to_owned());
@@ -606,12 +613,27 @@ impl PyWorker {
     /// The `send` is non-blocking (unbounded job channel); the `await` parks until
     /// the worker's `try_send`, freeing the executor thread meanwhile.
     pub(crate) async fn run(&self, frame: Frame, caps: &Caps) -> Result<Vec<Frame>, G2gError> {
-        self.dispatch(Job {
+        self.dispatch(Request::Job(Job {
             frames: vec![frame],
             caps: job_caps(caps)?,
             kind: JobKind::Transform,
-        })
+        }))
         .await
+    }
+
+    pub(crate) async fn consume(&self, frame: Frame, caps: &Caps) -> Result<(), G2gError> {
+        self.dispatch(Request::Job(Job {
+            frames: vec![frame],
+            caps: job_caps(caps)?,
+            kind: JobKind::Consume,
+        }))
+        .await?;
+        Ok(())
+    }
+
+    pub(crate) async fn eos(&self) -> Result<(), G2gError> {
+        self.dispatch(Request::Eos).await?;
+        Ok(())
     }
 
     /// Hand a batch (one frame per contributing input) to the worker and await
@@ -624,11 +646,11 @@ impl PyWorker {
         frames: Vec<Frame>,
         caps: &Caps,
     ) -> Result<Vec<Frame>, G2gError> {
-        self.dispatch(Job {
+        self.dispatch(Request::Job(Job {
             frames,
             caps: job_caps(caps)?,
             kind: JobKind::Batch,
-        })
+        }))
         .await
     }
 
@@ -638,11 +660,11 @@ impl PyWorker {
     /// stamps it. Used by `PySource` under `cuda-frames`.
     pub(crate) async fn run_produce_cuda(&self, caps: &Caps) -> Result<Option<Frame>, G2gError> {
         let mut out = self
-            .dispatch(Job {
+            .dispatch(Request::Job(Job {
                 frames: Vec::new(),
                 caps: raw_video_caps(caps)?,
                 kind: JobKind::ProduceCuda,
-            })
+            }))
             .await?;
         Ok(out.pop())
     }
@@ -655,20 +677,20 @@ impl PyWorker {
         caps: &Caps,
     ) -> Result<Option<Frame>, G2gError> {
         let mut out = self
-            .dispatch(Job {
+            .dispatch(Request::Job(Job {
                 frames: vec![frame],
                 caps: raw_video_caps(caps)?,
                 kind: JobKind::Produce,
-            })
+            }))
             .await?;
         Ok(out.pop())
     }
 
-    async fn dispatch(&self, job: Job) -> Result<Vec<Frame>, G2gError> {
+    async fn dispatch(&self, request: Request) -> Result<Vec<Frame>, G2gError> {
         self.job_tx
             .as_ref()
             .ok_or(G2gError::Shutdown)?
-            .send(job)
+            .send(request)
             .map_err(|_| G2gError::Shutdown)?;
         self.result_rx
             .recv()
@@ -696,7 +718,7 @@ fn worker_main(
     draw_label: bool,
     params: Vec<(String, PropValue)>,
     ack: mpsc::Sender<Result<(), G2gError>>,
-    jobs: mpsc::Receiver<Job>,
+    jobs: mpsc::Receiver<Request>,
     results: g2g_core::runtime::Sender<Reply>,
 ) {
     let instance = match Python::attach(|py| instantiate(py, &module, &class, draw_label, &params))
@@ -725,8 +747,11 @@ fn worker_main(
                 (jobs, next)
             });
             jobs = returned;
-            let Ok(job) = next else { break };
-            let reply = process_job(py, &instance, job, &mut emitted_sequence);
+            let Ok(request) = next else { break };
+            let reply = match request {
+                Request::Job(job) => process_job(py, &instance, job, &mut emitted_sequence),
+                Request::Eos => call_eos(py, &instance),
+            };
             // Capacity-1, and the element awaits each reply before sending the next
             // job, so this never blocks; an error means the element (receiver) is
             // gone, so stop.
@@ -857,7 +882,7 @@ fn handoff(py: Python<'_>, instance: &Py<PyAny>, job: &mut Job) -> Result<Handof
             planes.push(nv12_planes(fmt, buf).ok_or(G2gError::UnsupportedDomain)?);
         }
         return match job.kind {
-            JobKind::Transform => {
+            JobKind::Transform | JobKind::Consume => {
                 require_hook(py, instance, CUDA_HOOK, CUDA_REMEDY)?;
                 let (luma, chroma) = planes.pop().ok_or(G2gError::UnsupportedDomain)?;
                 Ok(Handoff::Cuda(luma, chroma))
@@ -975,6 +1000,14 @@ fn process_job(
             .expect("MetaSink emitted lock poisoned"),
     );
 
+    if matches!(job.kind, JobKind::Consume) {
+        produced.map_err(|e| py_fail(py, e))?;
+        if !emitted.is_empty() {
+            return Err(py_fail(py, sink_produced(instance.bind(py), SINK_EMITTED)));
+        }
+        return Ok(Vec::new());
+    }
+
     match produced {
         Ok(true) => {
             let Some(anchor) = job.frames.first() else {
@@ -1059,15 +1092,17 @@ fn call_system(
     let bound = instance.bind(py);
     // Pass cloned handles into the call and keep `buffers` so the export
     // counters can be inspected after it returns.
+    let mut sink_returned = false;
     let produced = match &job.caps {
         // A payload has no geometry to pass, so the element gets the caps
         // description instead and reads the buffers' own lengths.
         JobCaps::Payload(caps) => {
             let list = pyo3::types::PyList::new(py, buffers.iter().map(|b| b.clone_ref(py)))?;
-            bound.call_method1(
+            let returned = bound.call_method1(
                 PAYLOAD_HOOK,
                 (list, caps.to_gst_string(), sink.clone_ref(py)),
             )?;
+            sink_returned = returned_by_sink(&job.kind, &returned);
             true
         }
         JobCaps::RawVideo {
@@ -1082,12 +1117,14 @@ fn call_system(
                         .call_method1("g2g_process_batch", (list, w, h, fmt, sink.clone_ref(py)))?;
                     true
                 }
-                JobKind::Transform => {
+                JobKind::Transform | JobKind::Consume => {
                     let buffer = buffers
                         .first()
                         .expect("single job has one frame")
                         .clone_ref(py);
-                    bound.call_method1("g2g_process", (buffer, w, h, fmt, sink.clone_ref(py)))?;
+                    let returned = bound
+                        .call_method1("g2g_process", (buffer, w, h, fmt, sink.clone_ref(py)))?;
+                    sink_returned = returned_by_sink(&job.kind, &returned);
                     true
                 }
                 JobKind::Produce => {
@@ -1117,7 +1154,35 @@ fn call_system(
             "g2g_process retained a frame buffer view past return (use-after-free risk)",
         ));
     }
+    if sink_returned {
+        return Err(sink_produced(bound, SINK_RETURNED));
+    }
     Ok(produced)
+}
+
+const SINK_RETURNED: &str = "its hook returned a value instead of None";
+const SINK_EMITTED: &str = "it emitted a buffer through meta.emit";
+
+fn returned_by_sink(kind: &JobKind, returned: &Bound<'_, PyAny>) -> bool {
+    matches!(kind, JobKind::Consume) && !returned.is_none()
+}
+
+fn sink_produced(instance: &Bound<'_, PyAny>, output: &str) -> PyErr {
+    match instance.get_type().name() {
+        Ok(class) => PyRuntimeError::new_err(format!(
+            "{class} is a sink and cannot produce, but {output}"
+        )),
+        Err(e) => e,
+    }
+}
+
+fn call_eos(py: Python<'_>, instance: &Py<PyAny>) -> Reply {
+    let bound = instance.bind(py);
+    let defined = bound.hasattr(EOS_HOOK).map_err(|e| py_fail(py, e))?;
+    if defined {
+        bound.call_method0(EOS_HOOK).map_err(|e| py_fail(py, e))?;
+    }
+    Ok(Vec::new())
 }
 
 /// The geometry the GPU hooks pass to Python. `handoff` refuses a GPU job whose
@@ -1172,6 +1237,9 @@ fn call_cuda(
     )?;
     // `returned` is still alive here: an input plane handed back counts as retained.
     planes_released(py, &planes)?;
+    if returned_by_sink(&job.kind, &returned) {
+        return Err(sink_produced(bound, SINK_RETURNED));
+    }
     if !returned.is_truthy()? {
         return Ok(true);
     }

@@ -39,15 +39,19 @@ pub mod format;
 
 mod aggregator;
 mod element;
+mod hosted_input;
 mod props;
+mod sink;
 mod source;
 pub use aggregator::PyAggregator;
 pub use element::PyTransform;
+pub use sink::PySink;
 pub use source::PySource;
 
 /// Register the hosted Python elements as `gst-launch` / autoplug factories on
 /// `registry`, so they are instantiable by name like any built-in:
 /// - `pyelement module=... class=... draw-label=...` — a transform;
+/// - `pysink module=... class=...` — a sink;
 /// - `pysrc module=... class=... format=... width=... height=... framerate=...
 ///   num-buffers=...` — a source;
 /// - `pyaggregator module=... class=... draw-label=...` — an N-in/1-out batching
@@ -64,6 +68,10 @@ pub fn register(registry: &mut g2g_core::runtime::Registry) {
 
     registry.register_launch(LaunchFactory::of::<PyTransform>(PYELEMENT, || {
         Box::new(PyTransform::new("", ""))
+    }));
+
+    registry.register_launch(LaunchFactory::of::<PySink>(PYSINK, || {
+        Box::new(PySink::new("", ""))
     }));
 
     registry.register_muxer(MuxerFactory::new(PYAGGREGATOR, |inputs| {
@@ -89,11 +97,13 @@ pub fn register(registry: &mut g2g_core::runtime::Registry) {
 pub const PYELEMENT: &str = "pyelement";
 /// Registry name of the hosted batching aggregator, [`PyAggregator`].
 pub const PYAGGREGATOR: &str = "pyaggregator";
+/// Registry name of the hosted sink, [`PySink`].
+pub const PYSINK: &str = "pysink";
 
 /// The [`Registry::inspect`](g2g_core::runtime::Registry::inspect) dump of
 /// `element` hosting `class` from `module`, its property list extended with the
 /// ones the class declares. `None` unless `element` is a registered
-/// [`PYELEMENT`] or [`PYAGGREGATOR`].
+/// [`PYELEMENT`], [`PYAGGREGATOR`] or [`PYSINK`].
 #[cfg(feature = "std")]
 pub fn inspect_hosted_class(
     registry: &g2g_core::runtime::Registry,
@@ -113,6 +123,10 @@ pub fn inspect_hosted_class(
         PYAGGREGATOR => (
             PyAggregator::new("", "", 1).properties(),
             PyAggregator::new(module, class, 1).properties(),
+        ),
+        PYSINK => (
+            PySink::new("", "").properties(),
+            PySink::new(module, class).properties(),
         ),
         _ => return None,
     };

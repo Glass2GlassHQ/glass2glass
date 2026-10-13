@@ -424,6 +424,14 @@ slow detector keeps up with the stream by running on fewer frames. `qos=false`
 runs every frame and relays the report on toward the source. The rule is in
 [timing.md](timing.md), under upstream QoS.
 
+**Ending a line in Python.** `pysink` takes the same `module=`, `class=`,
+`input-caps=` and `cuda-frames=` as `pyelement` and calls the same hook for each
+frame: `g2g_process`, `g2g_process_cuda` or `g2g_process_payload`. It produces
+nothing. A hook that returns anything but `None`, or calls `meta.emit`, fails
+the frame, and what the class stages on `meta` is dropped. At end of stream the
+host calls the class's `g2g_eos()` when it defines one, then stops the worker
+thread.
+
 **Properties the class declares.** A `pyelement` or `pyaggregator` passes any
 name it does not read itself to the hosted class. Once `module=` and `class=` are
 both set, `properties()` imports the class, creates an instance, and asks its

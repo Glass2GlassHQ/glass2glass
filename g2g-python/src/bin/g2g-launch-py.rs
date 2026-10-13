@@ -3,7 +3,8 @@
 //! end in pure g2g.
 //!
 //! It is `g2g-launch` plus one line: after [`default_registry`] it calls
-//! [`g2g_python::register`], which adds `pyelement` / `pysrc` / `pyaggregator`.
+//! [`g2g_python::register`], which adds `pyelement` / `pysink` / `pysrc` /
+//! `pyaggregator`.
 //! The hosted element runs under `PYML_BACKEND=g2g` (set by the host on first
 //! GIL acquisition), so its detections come back as `AnalyticsMeta` and an
 //! `analyticsoverlay` can draw them before an `autovideosink`:
@@ -55,7 +56,7 @@ const LINK_CAPACITY: usize = 4;
 const USAGE: &str =
     "usage: g2g-launch-py [-q] [--threads] <element> [key=value ...] ! <element> ! ...
        g2g-launch-py --inspect [g2g-inspect arguments]
-       g2g-launch-py --inspect pyelement|pyaggregator module=<module> class=<class>
+       g2g-launch-py --inspect pyelement|pyaggregator|pysink module=<module> class=<class>
        g2g-launch-py --docgen [out.html]
        g2g-launch-py --mcp";
 
@@ -204,8 +205,8 @@ fn main() {
 }
 
 /// The one difference from `g2g-launch`: the hosted Python elements (`pyelement`
-/// / `pysrc` / `pyaggregator`) on top of the standard registry, plus the native
-/// inference elements under `ml`.
+/// / `pysink` / `pysrc` / `pyaggregator`) on top of the standard registry, plus
+/// the native inference elements under `ml`.
 fn registry() -> Registry {
     let mut reg = default_registry();
     g2g_python::register(&mut reg);

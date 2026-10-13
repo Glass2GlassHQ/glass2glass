@@ -29,13 +29,17 @@ use g2g_core::metrics::monotonic_ns;
 
 use g2g_core::memory::{DomainSet, MemoryDomainKind};
 use g2g_core::{
-    AllocationParams, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim,
+    AllocationParams, AsyncElement, Caps, CapsConstraint, CapsSet, ConfigureOutcome,
     ElementMetadata, Frame, FrameTiming, G2gError, OutputSink, PadTemplate, PadTemplates,
-    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, PushOutcome, Rate,
-    RawVideoFormat, Segment, VIDEO_SINK_MAX_LATENESS_NS,
+    PipelinePacket, PropError, PropKind, PropValue, PropertySpec, PushOutcome, Segment,
+    VIDEO_SINK_MAX_LATENESS_NS,
 };
 
-use crate::format::{format_from_py, format_to_py, frame_bytes};
+use crate::format::{format_from_py, format_to_py};
+use crate::hosted_input::{
+    default_accept, HostedInput, CLASS_PROPERTY, CUDA_FRAMES_PROPERTY, INPUT_CAPS_PROPERTY,
+    MODULE_PROPERTY,
+};
 use crate::props::{fixed_caps, hosted_element_props, HostedClassProperties};
 
 const RECENT_PUSH_CAPACITY: usize = 64;
@@ -57,15 +61,7 @@ struct RecentPush {
 /// A gst-python-ml element hosted as a first-class g2g transform.
 #[derive(Debug)]
 pub struct PyTransform {
-    /// Python module to import, e.g. `"action"` (a gst-python-ml element shell
-    /// running under `PYML_BACKEND=g2g`).
-    module: String,
-    /// Class within the module to instantiate, e.g. `"ActionTransform"`.
-    class: String,
-    /// Caps this element accepts on its sink pad. Default: RGBA at any
-    /// geometry / rate. A real element derives this from the Python class's
-    /// declared sink-pad template; `with_accept` overrides it meanwhile.
-    accept: Caps,
+    input: HostedInput,
     /// Caps produced downstream when the hosted element emits a different media
     /// type than it reads: audio in / text out for transcription, and the rest
     /// of the 1-in-1-out gst-python-ml families. Unset means it emits what it
@@ -74,20 +70,9 @@ pub struct PyTransform {
     /// Overlay flag bridged to the Python task (an example backend-declared
     /// property; `ActionTask` reads `self.draw_label`).
     draw_label: bool,
-    /// Whether the hosted element works on GPU-resident CUDA frames, which it
-    /// reads through `g2g_process_cuda` and passes through or replaces. It decides
-    /// both halves of this element's memory-domain declaration: the frame arrives
-    /// and leaves in the one domain, so the two cannot disagree.
-    cuda_frames: bool,
     /// Name of the metadata a frame must carry for the hosted element to see it:
     /// a blob header, or `detections` for any detection. Empty runs every frame.
     only_on: String,
-    /// Element properties forwarded verbatim to the hosted Python instance at
-    /// construction (e.g. `model-name`, `engine-name`, `device`): the gst-python
-    /// GObject-property analog. The Python class declares these (via the g2g
-    /// backend's `GObject` shim); the host `setattr`s them on the instance with
-    /// `-` mapped to `_`. Kept in insertion order for deterministic application.
-    params: Vec<(String, PropValue)>,
     qos: bool,
     segment: Option<Segment>,
     sink_clock: Option<SinkClock>,
@@ -98,15 +83,7 @@ pub struct PyTransform {
     last_run_ns: u64,
     last_run_measured_ns: u64,
     late_dropped: u64,
-    configured: bool,
-    /// The negotiated, fully fixed input caps from configure or the latest
-    /// accepted `CapsChanged`, so `process` knows what to hand Python.
-    fixed: Option<Caps>,
     emitted: u64,
-    /// The hosted Python element on its own GIL-owning worker thread, spawned
-    /// at configure time. Present only in the `python` build.
-    #[cfg(feature = "python")]
-    worker: Option<crate::host::PyWorker>,
 }
 
 impl PyTransform {
@@ -115,21 +92,10 @@ impl PyTransform {
     /// stays cheap and infallible like the other elements' `new`.
     pub fn new(module: impl Into<String>, class: impl Into<String>) -> Self {
         Self {
-            module: module.into(),
-            class: class.into(),
-            accept: Caps::RawVideo {
-                format: RawVideoFormat::Rgba8,
-                width: Dim::Any,
-                height: Dim::Any,
-                framerate: Rate::Any,
-                interlace: g2g_core::Interlace::Any,
-                colorimetry: g2g_core::Colorimetry::UNKNOWN,
-            },
+            input: HostedInput::new(module.into(), class.into()),
             produce: None,
             draw_label: false,
-            cuda_frames: false,
             only_on: String::new(),
-            params: Vec::new(),
             qos: true,
             segment: None,
             sink_clock: None,
@@ -138,11 +104,7 @@ impl PyTransform {
             last_run_ns: 0,
             last_run_measured_ns: 0,
             late_dropped: 0,
-            configured: false,
-            fixed: None,
             emitted: 0,
-            #[cfg(feature = "python")]
-            worker: None,
         }
     }
 
@@ -150,7 +112,7 @@ impl PyTransform {
     /// supported set may carry `Any` dims/rate: negotiation fixes them against
     /// concrete upstream caps, so `process` always sees a fixed format.
     pub fn with_accept(mut self, caps: Caps) -> Self {
-        self.accept = caps;
+        self.input.accept = caps;
         self
     }
 
@@ -179,17 +141,8 @@ impl PyTransform {
     /// [`AsyncElement::input_domains`]); the hosted class must define
     /// `g2g_process_cuda` and the caps must be semi-planar (NV12 / P010).
     pub fn with_cuda_frames(mut self, on: bool) -> Self {
-        self.cuda_frames = on;
+        self.input.cuda_frames = on;
         self
-    }
-
-    /// The one memory domain frames arrive and leave in.
-    fn domain(&self) -> MemoryDomainKind {
-        if self.cuda_frames {
-            MemoryDomainKind::Cuda
-        } else {
-            MemoryDomainKind::System
-        }
     }
 
     /// Count of frames pushed downstream. Useful in tests.
@@ -284,21 +237,6 @@ impl PyTransform {
     fn forwards_untouched(&self, _frame: &Frame) -> bool {
         false
     }
-
-    #[cfg(feature = "python")]
-    async fn run(&self, frame: Frame) -> Result<Vec<Frame>, G2gError> {
-        let worker = self.worker.as_ref().ok_or(G2gError::NotConfigured)?;
-        let caps = self.fixed.as_ref().ok_or(G2gError::NotConfigured)?;
-        worker.run(frame, caps).await
-    }
-
-    #[cfg(not(feature = "python"))]
-    async fn run(&self, _frame: Frame) -> Result<Vec<Frame>, G2gError> {
-        // The per-frame Python call embeds CPython via pyo3 and lives behind
-        // the `python` feature. The default build negotiates caps but cannot
-        // run frames; build with `--features python`.
-        Err(G2gError::UnsupportedDomain)
-    }
 }
 
 impl AsyncElement for PyTransform {
@@ -320,11 +258,11 @@ impl AsyncElement for PyTransform {
         // only pushes forward, so wavparse's any-rate any-channels fixates alone.
         if let Some(produce) = self.produce.clone() {
             return CapsConstraint::Mapping(vec![(
-                CapsSet::one(self.accept.clone()),
+                CapsSet::one(self.input.accept.clone()),
                 CapsSet::one(produce),
             )]);
         }
-        let accept = self.accept.clone();
+        let accept = self.input.accept.clone();
         CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| {
             match input.intersect(&accept) {
                 Ok(_) => CapsSet::one(input.clone()),
@@ -346,7 +284,7 @@ impl AsyncElement for PyTransform {
     }
 
     fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
-        upstream_caps.intersect(&self.accept)
+        self.input.intercept_caps(upstream_caps)
     }
 
     /// The hosted element reads the frame where it already is and forwards it
@@ -358,11 +296,11 @@ impl AsyncElement for PyTransform {
     /// deliver what the hosted code reads, and splices nothing after it (the
     /// frame really does leave in the declared domain).
     fn input_domains(&self) -> DomainSet {
-        DomainSet::only(self.domain())
+        self.input.input_domains()
     }
 
     fn output_memory(&self) -> MemoryDomainKind {
-        self.domain()
+        self.input.domain()
     }
 
     /// Ask upstream to allocate in the domain the hosted code can read, so a
@@ -371,47 +309,11 @@ impl AsyncElement for PyTransform {
     /// the domain is constrained: this element allocates nothing of its own, so
     /// it imposes no buffer count or alignment, and the size is one frame.
     fn propose_allocation(&self, caps: &Caps) -> Option<AllocationParams> {
-        let Caps::RawVideo {
-            format,
-            width: Dim::Fixed(width),
-            height: Dim::Fixed(height),
-            ..
-        } = caps
-        else {
-            return None;
-        };
-        let size = frame_bytes(*format, *width, *height);
-        Some(if self.cuda_frames {
-            AllocationParams::cuda(size, 1, 1)
-        } else {
-            AllocationParams::system(size, 1)
-        })
+        self.input.propose_allocation(caps)
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
-        absolute_caps.intersect(&self.accept)?;
-        self.fixed = Some(absolute_caps.clone());
-        #[cfg(feature = "python")]
-        {
-            // A registry-built `pyelement` starts with empty module/class until
-            // `module=`/`class=` properties are applied; fail clearly here
-            // rather than importing the empty module.
-            if self.module.is_empty() || self.class.is_empty() {
-                return Err(G2gError::NotConfigured);
-            }
-            // Spawn the worker once: a re-configure (re-negotiation) must not tear
-            // down and re-init the hosted instance, which would discard a loaded
-            // model. Matches `PySource` / `PyAggregator`.
-            if self.worker.is_none() {
-                self.worker = Some(crate::host::PyWorker::spawn(
-                    &self.module,
-                    &self.class,
-                    self.draw_label,
-                    &self.params,
-                )?);
-            }
-        }
-        self.configured = true;
+        self.input.configure(absolute_caps, self.draw_label)?;
         Ok(ConfigureOutcome::Accepted)
     }
 
@@ -421,7 +323,7 @@ impl AsyncElement for PyTransform {
         out: &'a mut dyn OutputSink,
     ) -> Self::ProcessFuture<'a> {
         Box::pin(async move {
-            if !self.configured {
+            if !self.input.is_configured() {
                 return Err(G2gError::NotConfigured);
             }
             match packet {
@@ -434,7 +336,7 @@ impl AsyncElement for PyTransform {
                         return self.push_frame(frame, out).await;
                     }
                     let started = Instant::now();
-                    let outputs = self.run(frame).await?;
+                    let outputs = self.input.run(frame).await?;
                     self.last_run_ns =
                         u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
                     self.last_run_measured_ns = monotonic_ns();
@@ -446,9 +348,8 @@ impl AsyncElement for PyTransform {
                 // hard error; otherwise announce this element's own output side
                 // so downstream stays in step.
                 PipelinePacket::CapsChanged(c) => {
-                    c.intersect(&self.accept)?;
                     let announce = self.output_for(&c);
-                    self.fixed = Some(c);
+                    self.input.caps_changed(c)?;
                     out.push(PipelinePacket::CapsChanged(announce)).await?;
                 }
                 PipelinePacket::Flush => {
@@ -490,25 +391,13 @@ impl AsyncElement for PyTransform {
     }
 
     fn properties(&self) -> &'static [PropertySpec] {
-        PYTRANSFORM_CLASS_PROPS.for_class(&self.module, &self.class)
+        PYTRANSFORM_CLASS_PROPS.for_class(&self.input.module, &self.input.class)
     }
 
     fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
         match name {
-            "module" => {
-                self.module = value.as_str().ok_or(PropError::Type)?.to_string();
-                Ok(())
-            }
-            "class" => {
-                self.class = value.as_str().ok_or(PropError::Type)?.to_string();
-                Ok(())
-            }
             "draw-label" => {
                 self.draw_label = value.as_bool().ok_or(PropError::Type)?;
-                Ok(())
-            }
-            "cuda-frames" => {
-                self.cuda_frames = value.as_bool().ok_or(PropError::Type)?;
                 Ok(())
             }
             "qos" => {
@@ -529,53 +418,36 @@ impl AsyncElement for PyTransform {
             "format" => {
                 let parsed = format_from_py(value.as_str().ok_or(PropError::Type)?)
                     .ok_or(PropError::Value)?;
-                let Caps::RawVideo { format, .. } = &mut self.accept else {
+                let Caps::RawVideo { format, .. } = &mut self.input.accept else {
                     return Err(PropError::Value);
                 };
                 *format = parsed;
-                Ok(())
-            }
-            "input-caps" => {
-                self.accept = fixed_caps(value.as_str().ok_or(PropError::Type)?)?;
                 Ok(())
             }
             "output-caps" => {
                 self.produce = Some(fixed_caps(value.as_str().ok_or(PropError::Type)?)?);
                 Ok(())
             }
-            // Any other property goes to the hosted Python instance. Which names
-            // are real is the class's to say, so a typo is caught when it loads.
-            other => {
-                crate::props::forward(&mut self.params, other, value);
-                Ok(())
-            }
+            other => self.input.set_property(other, value),
         }
     }
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
-            "module" => Some(PropValue::Str(self.module.clone())),
-            "class" => Some(PropValue::Str(self.class.clone())),
             "draw-label" => Some(PropValue::Bool(self.draw_label)),
-            "cuda-frames" => Some(PropValue::Bool(self.cuda_frames)),
             "qos" => Some(PropValue::Bool(self.qos)),
             "only-on" => Some(PropValue::Str(self.only_on.clone())),
-            "format" => match &self.accept {
+            "format" => match &self.input.accept {
                 Caps::RawVideo { format, .. } => {
                     Some(PropValue::Str(format_to_py(*format).to_string()))
                 }
                 _ => None,
             },
-            "input-caps" => Some(PropValue::Str(self.accept.to_gst_string())),
             "output-caps" => self
                 .produce
                 .as_ref()
                 .map(|c| PropValue::Str(c.to_gst_string())),
-            other => self
-                .params
-                .iter()
-                .find(|(k, _)| k == other)
-                .map(|(_, v)| v.clone()),
+            other => self.input.get_property(other),
         }
     }
 }
@@ -586,15 +458,7 @@ impl PadTemplates for PyTransform {
     /// so sink and source carry the same set. (`with_accept` can host another
     /// format programmatically; the launch template reflects the default.)
     fn pad_templates() -> Vec<PadTemplate> {
-        let rgba = Caps::RawVideo {
-            format: RawVideoFormat::Rgba8,
-            width: Dim::Any,
-            height: Dim::Any,
-            framerate: Rate::Any,
-            interlace: g2g_core::Interlace::Any,
-            colorimetry: g2g_core::Colorimetry::UNKNOWN,
-        };
-        let set = CapsSet::one(rgba);
+        let set = CapsSet::one(default_accept());
         Vec::from([PadTemplate::sink(set.clone()), PadTemplate::source(set)])
     }
 }
@@ -604,16 +468,8 @@ static PYTRANSFORM_CLASS_PROPS: HostedClassProperties =
 
 /// `PyTransform`'s settable properties (the runtime / `gst-launch` face).
 static PYTRANSFORM_PROPS: &[PropertySpec] = hosted_element_props![
-    PropertySpec::new(
-        "module",
-        PropKind::Str,
-        "Python module to import (the element shell)",
-    ),
-    PropertySpec::new(
-        "class",
-        PropKind::Str,
-        "class within the module to instantiate",
-    ),
+    MODULE_PROPERTY,
+    CLASS_PROPERTY,
     PropertySpec::new(
         "draw-label",
         PropKind::Bool,
@@ -626,12 +482,7 @@ static PYTRANSFORM_PROPS: &[PropertySpec] = hosted_element_props![
         "pixel format the hosted element accepts (RGBA | BGRA | NV12 | I420 | YUY2 | P010_10LE)",
     )
     .with_default("RGBA"),
-    PropertySpec::new(
-        "cuda-frames",
-        PropKind::Bool,
-        "host an element that reads GPU-resident CUDA frames (needs g2g_process_cuda, NV12 / P010)",
-    )
-    .with_default("false"),
+    CUDA_FRAMES_PROPERTY,
     PropertySpec::new(
         "qos",
         PropKind::Bool,
@@ -644,12 +495,7 @@ static PYTRANSFORM_PROPS: &[PropertySpec] = hosted_element_props![
         "Run only on frames carrying this blob, or any detection when set to detections. Other frames pass through untouched.",
     )
     .with_default(""),
-    PropertySpec::new(
-        "input-caps",
-        PropKind::Str,
-        "caps accepted on the sink pad, e.g. audio/x-raw,format=S16LE,rate=16000",
-    )
-    .with_default("video/x-raw,format=RGBA"),
+    INPUT_CAPS_PROPERTY,
     PropertySpec::new(
         "output-caps",
         PropKind::Str,

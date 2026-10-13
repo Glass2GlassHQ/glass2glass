@@ -43,14 +43,18 @@ fn registry() -> Registry {
 }
 
 /// What `g2g-launch-py --inspect <element> module=... class=...` prints, for
-/// both hosted elements that forward properties to their class.
+/// each hosted element that forwards properties to its class.
 #[test]
 fn launcher_inspection_lists_the_hosted_class_properties() {
     use_fixtures();
     let declared = fixture_property_names();
     assert!(!declared.is_empty(), "the fixture declares properties");
     let registry = registry();
-    for element in [g2g_python::PYELEMENT, g2g_python::PYAGGREGATOR] {
+    for element in [
+        g2g_python::PYELEMENT,
+        g2g_python::PYAGGREGATOR,
+        g2g_python::PYSINK,
+    ] {
         let dump =
             g2g_python::inspect_hosted_class(&registry, element, FIXTURE_MODULE, DECLARING_CLASS)
                 .unwrap_or_else(|| panic!("{element} is a hosted element"));

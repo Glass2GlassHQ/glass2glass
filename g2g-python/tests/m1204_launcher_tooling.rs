@@ -9,14 +9,15 @@ use std::process::{Command, Output, Stdio};
 
 use g2g_core::property::PropertySpec;
 use g2g_core::{AsyncElement as _, MultiInputElement as _};
-use g2g_python::{PyAggregator, PyTransform, PYAGGREGATOR, PYELEMENT};
+use g2g_python::{PyAggregator, PySink, PyTransform, PYAGGREGATOR, PYELEMENT, PYSINK};
 use serde_json::Value;
 
 /// Each hosted element with the properties it declares before a class loads.
-fn hosted_elements() -> [(&'static str, &'static [PropertySpec]); 2] {
+fn hosted_elements() -> [(&'static str, &'static [PropertySpec]); 3] {
     [
         (PYELEMENT, PyTransform::new("", "").properties()),
         (PYAGGREGATOR, PyAggregator::new("", "", 1).properties()),
+        (PYSINK, PySink::new("", "").properties()),
     ]
 }
 
