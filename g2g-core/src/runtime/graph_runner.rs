@@ -81,12 +81,12 @@ use crate::runtime::channel::{
 use crate::runtime::coordinator::{
     log_caps_forward, log_caps_rejected, realloc_local_dyn, report_nego_failure, ArmDirective,
 };
-use crate::runtime::fanin::{DynMultiInputElement, DynSourceLoop};
+use crate::runtime::fanin::{select_branch_caps, DynMultiInputElement, DynSourceLoop};
 use crate::runtime::instrument::{snapshot_all, ElementProbe, Probe};
 use crate::runtime::join::{dynamic_join_open, join_all, select2, Either};
 use crate::runtime::mutate::{
-    lent_sink_arm, lent_source_arm, mutation_channel, spliced_arm, GraphMutator, Handback,
-    LiveEdge, LiveNode, LiveTopology, MutationRequest, MutationService, MutationSpawn,
+    lent_sink_arm, lent_source_arm, mutation_channel, spliced_arm, GraphMutator, Growth, Handback,
+    LiveEdge, LiveNode, LiveTopology, MutationRequest, MutationService, MutationSpawn, PadAdd,
 };
 use crate::runtime::progress::PipelineProgress;
 use crate::runtime::property_mailbox::{drain_properties, PropertyMailbox};
@@ -1763,24 +1763,62 @@ fn live_topology<'a>(
     feasibility: &[Option<CapsSet>],
     link_capacity: usize,
 ) -> LiveTopology<'a> {
-    let mut nodes: Vec<LiveNode<'a>> = (0..vg.node_count())
-        .map(|i| LiveNode {
-            name: names[i].clone(),
+    let mut nodes: Vec<LiveNode<'a>> = Vec::with_capacity(vg.node_count());
+    let mut branch_adds = Vec::with_capacity(vg.node_count());
+    let mut pad_adds = Vec::with_capacity(vg.node_count());
+    for (i, name) in names.iter().enumerate() {
+        let node = NodeId(i as u32);
+        // A plain tee and a muxer take new edges while they run; the receiving
+        // end waits here for the arm that is built later.
+        let (growth, branch_rx, pad_rx) = match vg.kind(node) {
+            NodeKind::Tee(_) if !matches!(vg.element(node), Some(GraphNodeRef::Demux(_))) => {
+                let (tx, rx) = bounded(MUTATION_QUEUE_DEPTH);
+                let mode = match vg.fanout_policy(node) {
+                    FanOutPolicy::FailLoud => BranchMode::FailLoud,
+                    FanOutPolicy::AllowBranchDrop => BranchMode::Drop,
+                };
+                (Growth::Branches { adds: tx, mode }, Some(rx), None)
+            }
+            NodeKind::Muxer(_) => {
+                let declared = match vg.element(node) {
+                    Some(GraphNodeRef::Muxer(mux)) => mux.input_count(),
+                    _ => 0,
+                };
+                let pads_in_use = vg
+                    .in_edges(node)
+                    .iter()
+                    .map(|&eid| vg.edge(eid).dst.index as usize)
+                    .collect();
+                let (tx, rx) = bounded(MUTATION_QUEUE_DEPTH);
+                let growth = Growth::Inputs {
+                    adds: tx,
+                    pads_in_use,
+                    declared,
+                };
+                (growth, None, Some(rx))
+            }
+            _ => (Growth::Fixed, None, None),
+        };
+        branch_adds.push(branch_rx);
+        pad_adds.push(pad_rx);
+        nodes.push(LiveNode {
+            name: name.clone(),
             out_edges: Vec::new(),
             in_edges: Vec::new(),
-            total_out_edges: vg.out_edges(NodeId(i as u32)).len(),
-            total_in_edges: vg.in_edges(NodeId(i as u32)).len(),
+            total_out_edges: vg.out_edges(node).len(),
+            total_in_edges: vg.in_edges(node).len(),
             done: None,
-            removable: matches!(vg.kind(NodeId(i as u32)), NodeKind::Transform),
+            removable: matches!(vg.kind(node), NodeKind::Transform),
             // M1175: only an arm that hands packets to its element one at a time
             // can act between them, the rule `resolve_controllers` follows.
             properties: matches!(
-                vg.kind(NodeId(i as u32)),
+                vg.kind(node),
                 NodeKind::Transform | NodeKind::Sink | NodeKind::Muxer(_)
             )
             .then(PropertyMailbox::new),
-        })
-        .collect();
+            growth,
+        });
+    }
     let mut edges: Vec<LiveEdge> = Vec::new();
     for eid in 0..vg.edge_count() {
         let Some(endpoint) = endpoints[eid].clone() else {
@@ -1800,7 +1838,12 @@ fn live_topology<'a>(
             mode: branch_mode(vg, edge.dst.node),
         });
     }
-    LiveTopology { nodes, edges }
+    LiveTopology {
+        nodes,
+        edges,
+        branch_adds,
+        pad_adds,
+    }
 }
 
 fn build_channels<'a>(
@@ -1956,7 +1999,6 @@ fn register_edge_taps(
     obs.register_edges(probes, solution.to_vec(), counters);
 }
 
-#[allow(clippy::too_many_arguments)]
 /// The pre-flow copy-budget check both runners make (M617): negotiation has
 /// settled every edge's memory domain, so the copy plan is exact and a pipeline
 /// that must stay zero-copy refuses to start rather than paying a host
@@ -1978,6 +2020,7 @@ fn enforce_copy_policy(
     plan.check(policy).map_err(|_| G2gError::CopyBudget)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_graph_inner<'a: 'c, 'c, Clk: PipelineClock>(
     graph: Graph<GraphNodeRef<'a>>,
     clock: &'c Clk,
@@ -2127,8 +2170,7 @@ pub(crate) async fn run_graph_inner<'a: 'c, 'c, Clk: PipelineClock>(
             // arrive, hanging the all-inputs-EOS aggregation forever. Forwarders
             // are still indexed by pad so a muxer's `process(pad, ..)` keeps its
             // per-input geometry straight even if pads link out of order.
-            let mut pad_rxs: Vec<(usize, Receiver<PipelinePacket>)> =
-                Vec::with_capacity(input_count);
+            let mut pad_rxs: Vec<(usize, MuxerPad)> = Vec::with_capacity(input_count);
             for (in_rx, pad) in in_rxs.into_iter().zip(pads) {
                 let (pad_tx, pad_rx) = bounded::<PipelinePacket>(link_capacity);
                 let fwd: BoxFuture<'c, Result<u64, G2gError>> =
@@ -2136,7 +2178,7 @@ pub(crate) async fn run_graph_inner<'a: 'c, 'c, Clk: PipelineClock>(
                 arms.push(fwd);
                 arm_kinds.push(kind);
                 arm_names.push(names[node.0 as usize].clone());
-                pad_rxs.push((pad, pad_rx));
+                pad_rxs.push((pad, MuxerPad::Tagged(pad_rx)));
             }
             // A muxer can opt into runner-level PTS-ordered delivery (the runner
             // merges its inputs by DataFrame PTS); the default drains round-robin
@@ -2158,6 +2200,9 @@ pub(crate) async fn run_graph_inner<'a: 'c, 'c, Clk: PipelineClock>(
                     probe: mux_probe,
                     control: mux_control,
                     properties: mux_properties,
+                    pad_adds: live
+                        .as_mut()
+                        .and_then(|t| t.pad_adds[node.0 as usize].take()),
                 },
                 ticker,
             });
@@ -2276,7 +2321,12 @@ pub(crate) async fn run_graph_inner<'a: 'c, 'c, Clk: PipelineClock>(
                         probe: probes[node.0 as usize].clone(),
                         latency: LatencyFold::publisher(&latency_fold, node),
                     }),
-                    _ => Box::pin(tee_arm(in_rx, out_txs, branch_drop)),
+                    _ => {
+                        let adds = live
+                            .as_mut()
+                            .and_then(|t| t.branch_adds[node.0 as usize].take());
+                        Box::pin(tee_arm(in_rx, out_txs, branch_drop, adds))
+                    }
                 }
             }
             NodeKind::FaninSink(_) => {
@@ -2336,6 +2386,8 @@ pub(crate) async fn run_graph_inner<'a: 'c, 'c, Clk: PipelineClock>(
                 dropped.clone(),
                 latency.live,
                 sink_clock_sync.clone(),
+                link_capacity,
+                ticker,
             )
             .run(),
         ),
@@ -2706,8 +2758,7 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
             let beta = mux_beta(&vg, node, &in_e, out_e[0], &solution, coord_handle.clone());
             let mux_ctrl = arm_ctrl_rx[node.0 as usize].take().expect("muxer ctrl rx");
             let input_count = in_rxs.len();
-            let mut pad_rxs: Vec<(usize, Receiver<PipelinePacket>)> =
-                Vec::with_capacity(input_count);
+            let mut pad_rxs: Vec<(usize, MuxerPad)> = Vec::with_capacity(input_count);
             for (in_rx, pad) in in_rxs.into_iter().zip(pads) {
                 let (pad_tx, pad_rx) = bounded::<PipelinePacket>(link_capacity);
                 let build: alloc::boxed::Box<dyn FnOnce() -> LocalArmFuture + Send> =
@@ -2717,7 +2768,7 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
                 handles.push(spawner.spawn_arm(with_stream_status(bus.cloned(), build)));
                 arm_kinds.push(kind);
                 arm_names.push(names[node.0 as usize].clone());
-                pad_rxs.push((pad, pad_rx));
+                pad_rxs.push((pad, MuxerPad::Tagged(pad_rx)));
             }
             let mux_probe = probes[node.0 as usize].clone();
             let mux_ticker = ticker.clone();
@@ -2725,6 +2776,9 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
             let mux_properties = live
                 .as_ref()
                 .and_then(|t| t.nodes[node.0 as usize].properties.clone());
+            let mux_pad_adds = live
+                .as_mut()
+                .and_then(|t| t.pad_adds[node.0 as usize].take());
             let build: alloc::boxed::Box<dyn FnOnce() -> LocalArmFuture + Send> =
                 alloc::boxed::Box::new(move || -> LocalArmFuture {
                     mux.drive_muxer_arm_owned_tick(MuxerArmOwnedTickIo {
@@ -2738,6 +2792,7 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
                             probe: mux_probe,
                             control: mux_control,
                             properties: mux_properties,
+                            pad_adds: mux_pad_adds,
                         },
                         ticker: mux_ticker,
                     })
@@ -2885,9 +2940,14 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
                             })
                         })
                     }
-                    _ => alloc::boxed::Box::new(move || -> LocalArmFuture {
-                        Box::pin(tee_arm(in_rx, out_txs, branch_drop))
-                    }),
+                    _ => {
+                        let adds = live
+                            .as_mut()
+                            .and_then(|t| t.branch_adds[node.0 as usize].take());
+                        alloc::boxed::Box::new(move || -> LocalArmFuture {
+                            Box::pin(tee_arm(in_rx, out_txs, branch_drop, adds))
+                        })
+                    }
                 }
             }
             NodeKind::FaninSink(_) => {
@@ -2978,6 +3038,8 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
                     dropped.clone(),
                     latency.live,
                     sink_clock_sync.clone(),
+                    link_capacity,
+                    ticker.as_deref().map(|t| t as &dyn DynAsyncClock),
                 )
                 .run(),
             )
@@ -4715,33 +4777,44 @@ async fn sink_arm_loop<E: AsyncElement>(elem: &mut E, io: SinkArmIo) -> Result<u
     }
 }
 
+/// `adds` is where a [`GraphMutator::add_branch`] hands this tee a new port
+/// (`None` unless the run was asked for a mutator): a port joins before the
+/// next packet, and one the mutator retired leaves on its first failed push.
 async fn tee_arm(
     in_rx: LinkReceiver,
     out_txs: Vec<LinkSender>,
     branch_drop: bool,
+    adds: Option<Receiver<LinkSender>>,
 ) -> Result<u64, G2gError> {
     let mut senders: Vec<SenderSink> = out_txs.into_iter().map(SenderSink::new).collect();
+    let mutable = adds.is_some();
     loop {
+        if let Some(adds) = &adds {
+            while let Some(port) = adds.try_recv() {
+                senders.push(SenderSink::new(port));
+            }
+        }
         match in_rx.recv().await {
             Some(PipelinePacket::Eos) => {
                 for s in senders.iter_mut() {
                     match s.push(PipelinePacket::Eos).await {
                         Ok(_) => {}
-                        // A dropped branch (`AllowBranchDrop`) has closed its
-                        // channel; skip it. Under `FailLoud` a closed branch is a
-                        // genuine error and propagates.
-                        Err(G2gError::Shutdown) if branch_drop => {}
+                        // A dropped branch (`AllowBranchDrop`) or a retired port
+                        // has closed its channel; skip it. Under `FailLoud` a
+                        // closed branch is a genuine error and propagates.
+                        Err(G2gError::Shutdown) if branch_drop || s.retired() => {}
                         Err(e) => return Err(e),
                     }
                 }
                 return Ok(0);
             }
             Some(packet) => {
-                if branch_drop {
-                    broadcast_drop_closed(&mut senders, packet).await?;
+                if branch_drop || mutable {
+                    broadcast_drop_closed(&mut senders, packet, branch_drop).await?;
                     // Every branch has dropped: the fan-out has no consumers left,
-                    // so this tee is done.
-                    if senders.is_empty() {
+                    // so this tee is done. A mutable tee stays, since a branch
+                    // can still be attached; meanwhile it drops what it is fed.
+                    if senders.is_empty() && !mutable {
                         return Ok(0);
                     }
                 } else {
@@ -4753,13 +4826,15 @@ async fn tee_arm(
     }
 }
 
-/// Broadcast like [`broadcast`], but a branch whose receiver has closed
-/// (a dropped `AllowBranchDrop` branch) is removed from `senders` instead of
-/// failing the fan-out. A genuine downstream error still surfaces through that
+/// Broadcast like [`broadcast`], but a branch whose receiver has closed is
+/// removed from `senders` instead of failing the fan-out: any closed branch
+/// under `branch_drop` (a dropped `AllowBranchDrop` branch), else only a port
+/// the mutator retired. A genuine downstream error still surfaces through that
 /// branch arm's own result, so swallowing the closed channel here is safe.
 async fn broadcast_drop_closed(
     senders: &mut Vec<SenderSink>,
     mut packet: PipelinePacket,
+    branch_drop: bool,
 ) -> Result<(), G2gError> {
     if let PipelinePacket::DataFrame(frame) = &mut packet {
         frame.domain.make_shareable();
@@ -4768,7 +4843,7 @@ async fn broadcast_drop_closed(
     for (i, s) in senders.iter_mut().enumerate() {
         match s.push(try_clone_packet(&packet)?).await {
             Ok(_) => {}
-            Err(G2gError::Shutdown) => dead.push(i),
+            Err(G2gError::Shutdown) if branch_drop || s.retired() => dead.push(i),
             Err(e) => return Err(e),
         }
     }
@@ -4906,6 +4981,138 @@ impl PadReceiver for Receiver<PipelinePacket> {
     fn recv_packet(&self) -> RecvFuture<'_, PipelinePacket> {
         self.recv()
     }
+}
+
+/// One muxer input pad as the arm reads it: the per-pad channel a forwarder
+/// fills for a pad the graph was built with, or, for an input attached mid-run,
+/// the source's link itself.
+#[allow(missing_debug_implementations)]
+pub(crate) enum MuxerPad {
+    Tagged(Receiver<PipelinePacket>),
+    Link(LinkReceiver),
+}
+
+impl MuxerPad {
+    fn try_recv(&self) -> Option<PipelinePacket> {
+        match self {
+            MuxerPad::Tagged(rx) => rx.try_recv(),
+            MuxerPad::Link(rx) => rx.try_recv(),
+        }
+    }
+
+    fn fill_percent(&self) -> u8 {
+        match self {
+            MuxerPad::Tagged(rx) => rx.fill_percent(),
+            MuxerPad::Link(rx) => rx.fill_percent(),
+        }
+    }
+}
+
+impl PadReceiver for MuxerPad {
+    fn recv_packet(&self) -> RecvFuture<'_, PipelinePacket> {
+        match self {
+            MuxerPad::Tagged(rx) => rx.recv(),
+            MuxerPad::Link(rx) => rx.recv(),
+        }
+    }
+}
+
+/// What woke a parked muxer arm: a β directive, a packet on a pad, or an input
+/// to attach. A closed channel in any of the three reads as `None`.
+enum MuxerWake {
+    Directive(Option<ArmDirective>),
+    Pad(usize, Option<PipelinePacket>),
+    Add(Option<PadAdd>),
+}
+
+/// Park a muxer arm on everything that can wake it. Data and control keep the
+/// bias they had over each other; an input to attach ranks last.
+async fn muxer_park(
+    control: Option<&Receiver<ArmDirective>>,
+    pad_rxs: &[(usize, MuxerPad)],
+    open: &[bool],
+    next: usize,
+    adds: Option<&Receiver<PadAdd>>,
+) -> MuxerWake {
+    let control = async {
+        match control {
+            Some(rx) => rx.recv().await,
+            None => core::future::pending().await,
+        }
+    };
+    let adds = async {
+        match adds {
+            Some(rx) => rx.recv().await,
+            None => core::future::pending().await,
+        }
+    };
+    match select2(select2(control, muxer_recv_any(pad_rxs, open, next)), adds).await {
+        Either::Left(Either::Left(directive)) => MuxerWake::Directive(directive),
+        Either::Left(Either::Right((slot, packet))) => MuxerWake::Pad(slot, packet),
+        Either::Right(add) => MuxerWake::Add(add),
+    }
+}
+
+/// Negotiate a runtime input against the muxer's pad: the source's produce set
+/// against the pad constraint, then the element's own veto, then the pad is
+/// configured. Mirrors the dynamic aggregator's attach.
+fn negotiate_runtime_pad(
+    mux: &mut dyn DynMultiInputElement,
+    pad: usize,
+    produced: &CapsSet,
+) -> Result<Caps, G2gError> {
+    let fixated = {
+        let constraint = mux.caps_constraint_as_input(pad);
+        let fixated = select_branch_caps(produced, &constraint)?;
+        // select_branch_caps falls back to the source's own caps when the pad
+        // accepts none of its alternatives, so check the pad again.
+        if !constraint.accepts(&fixated) {
+            return Err(G2gError::CapsMismatch);
+        }
+        fixated
+    };
+    if !mux.accepts_runtime_input(pad, &fixated) {
+        return Err(G2gError::InputRefused);
+    }
+    mux.configure_pipeline(pad, &fixated)?.reject_refixate()?;
+    Ok(fixated)
+}
+
+/// Take a runtime input into a muxer arm: negotiate it, open its pad, and
+/// answer the mutator. A refusal is answered too and leaves the arm as it was,
+/// so it returns whether a pad was opened. The merged output may shift with
+/// the new pad, announced downstream as a mid-stream pad change is.
+async fn admit_runtime_pad<E: MultiInputElement>(
+    mux: &mut E,
+    add: PadAdd,
+    pad_rxs: &mut Vec<(usize, MuxerPad)>,
+    open: &mut Vec<bool>,
+    current_output: &mut Caps,
+    out: &mut SenderSink,
+) -> Result<bool, G2gError> {
+    let PadAdd {
+        pad,
+        produced,
+        pad_rx,
+        reply,
+    } = add;
+    let fixated = match negotiate_runtime_pad(mux as &mut dyn DynMultiInputElement, pad, &produced)
+    {
+        Ok(caps) => caps,
+        Err(e) => {
+            let _ = reply.try_send(Err(e));
+            return Ok(false);
+        }
+    };
+    pad_rxs.push((pad, MuxerPad::Link(pad_rx)));
+    open.push(true);
+    let new_output = solve_mux_output_dyn(mux as &dyn DynMultiInputElement)?;
+    if new_output != *current_output {
+        *current_output = new_output.clone();
+        out.push(PipelinePacket::CapsChanged(new_output)).await?;
+    }
+    let _ = reply.try_send(Ok(fixated));
+    Ok(true)
 }
 
 impl PadReceiver for LinkReceiver {
@@ -5228,7 +5435,12 @@ impl MuxBeta {
         caps: Caps,
         out_caps: &Caps,
     ) -> Result<(), G2gError> {
-        self.pads[slot].caps = caps;
+        // An input attached mid-run has no pad here: it takes no part in the
+        // allocation cascade, like a spliced element.
+        let Some(pad) = self.pads.get_mut(slot) else {
+            return Ok(());
+        };
+        pad.caps = caps;
         self.rounds = 0;
         self.refresh_pads(mux).await;
         self.settle_output(mux, out_caps).await
@@ -5403,7 +5615,7 @@ async fn park_or_tick<T, E: MultiInputElement>(
 /// same payload.
 #[allow(missing_debug_implementations)]
 pub(crate) struct MuxerArmParts {
-    pub(crate) pad_rxs: Vec<(usize, Receiver<PipelinePacket>)>,
+    pub(crate) pad_rxs: Vec<(usize, MuxerPad)>,
     pub(crate) out_tx: LinkSender,
     pub(crate) input_count: usize,
     pub(crate) current_output: Caps,
@@ -5412,6 +5624,9 @@ pub(crate) struct MuxerArmParts {
     pub(crate) probe: Probe,
     pub(crate) control: Option<ArmController>,
     pub(crate) properties: Option<PropertyMailbox>,
+    /// Where a [`GraphMutator::add_input`] reaches this arm. `None` unless the
+    /// run was asked for a mutator.
+    pub(crate) pad_adds: Option<Receiver<PadAdd>>,
 }
 
 /// A muxer arm's input, as the cooperative runner builds it. Opaque on purpose,
@@ -5460,15 +5675,16 @@ pub(crate) async fn muxer_arm<E: MultiInputElement>(
     let MuxerArmIo {
         parts:
             MuxerArmParts {
-                pad_rxs,
+                mut pad_rxs,
                 out_tx,
-                input_count,
+                mut input_count,
                 mut current_output,
                 mut beta,
                 arm_rx,
                 probe,
                 control,
                 properties,
+                mut pad_adds,
             },
         ticker,
     } = io;
@@ -5482,6 +5698,24 @@ pub(crate) async fn muxer_arm<E: MultiInputElement>(
     let mut tick = ArmTick::new(ticker, &mux as &dyn DynMultiInputElement);
     beta.seed(&mux as &dyn DynMultiInputElement, &current_output);
     loop {
+        // An input attached mid-run joins before the next packet is picked, so
+        // a busy muxer admits it as promptly as a parked one.
+        if let Some(adds) = &pad_adds {
+            while let Some(add) = adds.try_recv() {
+                if admit_runtime_pad(
+                    &mut mux,
+                    add,
+                    &mut pad_rxs,
+                    &mut open,
+                    &mut current_output,
+                    &mut adapter,
+                )
+                .await?
+                {
+                    input_count += 1;
+                }
+            }
+        }
         // M839: a consumer's demand on the merged output arrives here. Checked
         // before the data drain so a busy muxer still applies it promptly.
         while let Some(directive) = arm_rx.try_recv() {
@@ -5518,15 +5752,16 @@ pub(crate) async fn muxer_arm<E: MultiInputElement>(
                 if !open.iter().any(|&o| o) {
                     return Ok(0);
                 }
-                // Race the β control channel against the pads, so a directive
-                // reaches this arm while it is parked waiting for data.
-                let park = async {
-                    if control_open {
-                        select2(arm_rx.recv(), muxer_recv_any(&pad_rxs, &open, next)).await
-                    } else {
-                        Either::Right(muxer_recv_any(&pad_rxs, &open, next).await)
-                    }
-                };
+                // Race the β control channel and the input adds against the
+                // pads, so a directive or an attach reaches this arm while it
+                // is parked waiting for data.
+                let park = muxer_park(
+                    control_open.then_some(&arm_rx),
+                    &pad_rxs,
+                    &open,
+                    next,
+                    pad_adds.as_ref(),
+                );
                 // M875: the tick deadline joins the race; a fired tick loops.
                 let Some(parked) =
                     park_or_tick(park, tick.as_mut(), &mut mux, &mut adapter).await?
@@ -5534,7 +5769,7 @@ pub(crate) async fn muxer_arm<E: MultiInputElement>(
                     continue;
                 };
                 let (slot, maybe) = match parked {
-                    Either::Left(Some(directive)) => {
+                    MuxerWake::Directive(Some(directive)) => {
                         apply_mux_directive(
                             &mut mux as &mut dyn DynMultiInputElement,
                             &mut beta,
@@ -5544,11 +5779,30 @@ pub(crate) async fn muxer_arm<E: MultiInputElement>(
                         .await?;
                         continue;
                     }
-                    Either::Left(None) => {
+                    MuxerWake::Directive(None) => {
                         control_open = false;
                         continue;
                     }
-                    Either::Right(v) => v,
+                    MuxerWake::Add(Some(add)) => {
+                        if admit_runtime_pad(
+                            &mut mux,
+                            add,
+                            &mut pad_rxs,
+                            &mut open,
+                            &mut current_output,
+                            &mut adapter,
+                        )
+                        .await?
+                        {
+                            input_count += 1;
+                        }
+                        continue;
+                    }
+                    MuxerWake::Add(None) => {
+                        pad_adds = None;
+                        continue;
+                    }
+                    MuxerWake::Pad(slot, maybe) => (slot, maybe),
                 };
                 next = (slot + 1) % input_count;
                 // A closed channel with no `Eos` is an upstream end; fold it into
@@ -5653,15 +5907,16 @@ pub(crate) async fn muxer_arm_pts<E: MultiInputElement>(
     let MuxerArmIo {
         parts:
             MuxerArmParts {
-                pad_rxs,
+                mut pad_rxs,
                 out_tx,
-                input_count,
+                mut input_count,
                 mut current_output,
                 mut beta,
                 arm_rx,
                 probe,
                 control,
                 properties,
+                mut pad_adds,
             },
         ticker,
     } = io;
@@ -5675,6 +5930,25 @@ pub(crate) async fn muxer_arm_pts<E: MultiInputElement>(
     let mut tick = ArmTick::new(ticker, &mux as &dyn DynMultiInputElement);
     beta.seed(&mux as &dyn DynMultiInputElement, &current_output);
     loop {
+        // An input attached mid-run joins before the next release round, as in
+        // `muxer_arm`; the aggregator grows a queue for it.
+        if let Some(adds) = &pad_adds {
+            while let Some(add) = adds.try_recv() {
+                if admit_runtime_pad(
+                    &mut mux,
+                    add,
+                    &mut pad_rxs,
+                    &mut open,
+                    &mut current_output,
+                    &mut adapter,
+                )
+                .await?
+                {
+                    input_count += 1;
+                    agg.add_input();
+                }
+            }
+        }
         // Release every frame now safe to emit, in global PTS order: the
         // aggregator yields the earliest only once every still-contributing input
         // has a head, so no later input can still deliver something earlier.
@@ -5720,18 +5994,18 @@ pub(crate) async fn muxer_arm_pts<E: MultiInputElement>(
         // racing the β control channel (M839) so a consumer's demand on the
         // merged output reaches this arm while it waits, and the tick deadline so
         // a quiet fan-in still gets its tick.
-        let park = async {
-            if control_open {
-                select2(arm_rx.recv(), muxer_recv_any(&pad_rxs, &open, next)).await
-            } else {
-                Either::Right(muxer_recv_any(&pad_rxs, &open, next).await)
-            }
-        };
+        let park = muxer_park(
+            control_open.then_some(&arm_rx),
+            &pad_rxs,
+            &open,
+            next,
+            pad_adds.as_ref(),
+        );
         let Some(parked) = park_or_tick(park, tick.as_mut(), &mut mux, &mut adapter).await? else {
             continue;
         };
         let (slot, maybe) = match parked {
-            Either::Left(Some(directive)) => {
+            MuxerWake::Directive(Some(directive)) => {
                 apply_mux_directive(
                     &mut mux as &mut dyn DynMultiInputElement,
                     &mut beta,
@@ -5741,11 +6015,31 @@ pub(crate) async fn muxer_arm_pts<E: MultiInputElement>(
                 .await?;
                 continue;
             }
-            Either::Left(None) => {
+            MuxerWake::Directive(None) => {
                 control_open = false;
                 continue;
             }
-            Either::Right(v) => v,
+            MuxerWake::Add(Some(add)) => {
+                if admit_runtime_pad(
+                    &mut mux,
+                    add,
+                    &mut pad_rxs,
+                    &mut open,
+                    &mut current_output,
+                    &mut adapter,
+                )
+                .await?
+                {
+                    input_count += 1;
+                    agg.add_input();
+                }
+                continue;
+            }
+            MuxerWake::Add(None) => {
+                pad_adds = None;
+                continue;
+            }
+            MuxerWake::Pad(slot, maybe) => (slot, maybe),
         };
         next = (slot + 1) % input_count;
         let pad = pad_rxs[slot].0;

@@ -62,6 +62,12 @@ impl<T> InputAggregator<T> {
         self.queues.len()
     }
 
+    /// One more input pad, empty and open, at the next index.
+    pub fn add_input(&mut self) {
+        self.queues.push(VecDeque::new());
+        self.ended.push(false);
+    }
+
     /// Queue an item for `input`, dropping (and counting) the oldest if the
     /// per-input cap is exceeded.
     pub fn push(&mut self, input: usize, item: T) {

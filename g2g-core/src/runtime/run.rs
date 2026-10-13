@@ -116,7 +116,7 @@ impl<'a: 'c, 'c, Clk: PipelineClock> RunBuilder<'a, 'c, Clk> {
     }
 
     /// Start the run on the caller's executor.
-    pub fn run(self) -> impl Future<Output = Result<RunStats, G2gError>> + 'c {
+    pub fn run(self) -> impl Future<Output = Result<RunStats, G2gError>> + use<'a, 'c, Clk> {
         self.start(None)
     }
 
@@ -126,32 +126,30 @@ impl<'a: 'c, 'c, Clk: PipelineClock> RunBuilder<'a, 'c, Clk> {
         self,
     ) -> (
         GraphMutator<'a>,
-        impl Future<Output = Result<RunStats, G2gError>> + 'c,
+        impl Future<Output = Result<RunStats, G2gError>> + use<'a, 'c, Clk>,
     ) {
         let (mutator, requests) = mutation_channel(MUTATION_QUEUE_DEPTH);
         (mutator, self.start(Some(requests)))
     }
 
-    fn start(
+    async fn start(
         self,
         mutation: Option<Receiver<MutationRequest<'a>>>,
-    ) -> impl Future<Output = Result<RunStats, G2gError>> + 'c {
-        async move {
-            run_graph_inner(
-                self.graph,
-                self.clock,
-                self.link_capacity,
-                self.bus,
-                self.state,
-                self.progress,
-                self.copy_policy,
-                self.observer,
-                self.recorder,
-                self.ticker.as_deref().map(|t| t as &dyn DynAsyncClock),
-                mutation,
-            )
-            .await
-        }
+    ) -> Result<RunStats, G2gError> {
+        run_graph_inner(
+            self.graph,
+            self.clock,
+            self.link_capacity,
+            self.bus,
+            self.state,
+            self.progress,
+            self.copy_policy,
+            self.observer,
+            self.recorder,
+            self.ticker.as_deref().map(|t| t as &dyn DynAsyncClock),
+            mutation,
+        )
+        .await
     }
 }
 
@@ -162,7 +160,7 @@ impl<'c, Clk: PipelineClock> RunBuilder<'static, 'c, Clk> {
     pub fn run_threaded<S: GraphSpawner>(
         self,
         spawner: &'c S,
-    ) -> impl Future<Output = Result<RunStats, G2gError>> + 'c {
+    ) -> impl Future<Output = Result<RunStats, G2gError>> + use<'c, Clk, S> {
         self.start_threaded(spawner, None)
     }
 
@@ -172,33 +170,31 @@ impl<'c, Clk: PipelineClock> RunBuilder<'static, 'c, Clk> {
         spawner: &'c S,
     ) -> (
         GraphMutator<'static>,
-        impl Future<Output = Result<RunStats, G2gError>> + 'c,
+        impl Future<Output = Result<RunStats, G2gError>> + use<'c, Clk, S>,
     ) {
         let (mutator, requests) = mutation_channel(MUTATION_QUEUE_DEPTH);
         (mutator, self.start_threaded(spawner, Some(requests)))
     }
 
-    fn start_threaded<S: GraphSpawner>(
+    async fn start_threaded<S: GraphSpawner>(
         self,
         spawner: &'c S,
         mutation: Option<Receiver<MutationRequest<'static>>>,
-    ) -> impl Future<Output = Result<RunStats, G2gError>> + 'c {
-        async move {
-            run_graph_threaded_inner(
-                self.graph,
-                self.clock,
-                self.link_capacity,
-                self.bus,
-                self.state,
-                self.progress,
-                self.copy_policy,
-                self.observer,
-                self.recorder,
-                self.ticker,
-                spawner,
-                mutation,
-            )
-            .await
-        }
+    ) -> Result<RunStats, G2gError> {
+        run_graph_threaded_inner(
+            self.graph,
+            self.clock,
+            self.link_capacity,
+            self.bus,
+            self.state,
+            self.progress,
+            self.copy_policy,
+            self.observer,
+            self.recorder,
+            self.ticker,
+            spawner,
+            mutation,
+        )
+        .await
     }
 }

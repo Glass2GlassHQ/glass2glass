@@ -245,6 +245,19 @@ pub enum BusMessage {
         /// The JSON line.
         record: alloc::string::String,
     },
+    /// A [`GraphMutator`](crate::runtime::GraphMutator) operation landed or
+    /// was refused, for whoever watches the graph besides the caller that got
+    /// the same answer back: a dashboard following the topology, a tool
+    /// logging what changed. Posted once per operation, reads excluded.
+    GraphMutated {
+        operation: crate::runtime::MutationKind,
+        /// The instance name the operation addressed: the splice position, the
+        /// element replaced or removed, the tee or muxer grown.
+        node: alloc::string::String,
+        /// The instance names the operation created, in stream order (none
+        /// for a remove or a property set), or why it was refused.
+        outcome: Result<alloc::vec::Vec<alloc::string::String>, crate::runtime::MutationError>,
+    },
 }
 
 /// What a restarting source is doing, gst `fallbacksrc`'s `status` (M1164).

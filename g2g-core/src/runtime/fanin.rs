@@ -374,7 +374,10 @@ impl<'b> DynSourceLoop for &'b mut (dyn DynSourceLoop + 'b) {
 /// When the pad accepts none of them the preferred alternative is returned
 /// anyway, leaving the rejection to that pad's `configure_pipeline`, which is
 /// where it was raised before a source had a set to choose from.
-fn select_branch_caps(produced: &CapsSet, pad: &CapsConstraint<'_>) -> Result<Caps, G2gError> {
+pub(crate) fn select_branch_caps(
+    produced: &CapsSet,
+    pad: &CapsConstraint<'_>,
+) -> Result<Caps, G2gError> {
     let accepted = produced
         .alternatives()
         .iter()

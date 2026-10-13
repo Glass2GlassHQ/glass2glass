@@ -499,6 +499,26 @@ impl ProducerEndpoint {
         }
     }
 
+    /// Withdraw a park request the mutation gave up waiting on. A producer that
+    /// already stopped resumes on the link it parked with; one that has not
+    /// reached its boundary yet never stops. Done under the one lock, so a
+    /// producer parking between the two steps cannot leave its link behind.
+    pub(crate) fn cancel_park(&self) {
+        let waker = {
+            let mut g = self.state.lock();
+            g.park = false;
+            if let Some(own) = g.detached.take() {
+                g.staged = Some(own);
+            }
+            self.pending
+                .store(true, core::sync::atomic::Ordering::Release);
+            g.producer.take()
+        };
+        if let Some(w) = waker {
+            w.wake();
+        }
+    }
+
     /// End the producer parked here for good (M1149): it resumes on the dead
     /// link it parked with, so its next push fails and its element leaves by the
     /// same path it takes when its consumer goes away. The packet it was holding
@@ -1102,6 +1122,13 @@ impl SenderSink {
     #[cfg(feature = "std")]
     pub(crate) fn drain_requested(&self) -> bool {
         self.endpoint.as_ref().is_some_and(|e| e.draining())
+    }
+
+    /// Whether the mutator took this link away for good: a tee port whose
+    /// branch was dropped, so a failed push here is the port going, not an error.
+    #[cfg(feature = "std")]
+    pub(crate) fn retired(&self) -> bool {
+        self.endpoint.as_ref().is_some_and(|e| e.retired())
     }
 
     /// Swallow any `Eos` pushed from here on, for the length of a flush

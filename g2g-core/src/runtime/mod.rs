@@ -47,6 +47,8 @@ mod launch;
 #[cfg(feature = "std")]
 mod mutate;
 
+mod mutation_error;
+
 #[cfg(feature = "std")]
 mod parse_scope;
 
@@ -131,7 +133,9 @@ pub use graph_runner::{
 };
 
 #[cfg(feature = "std")]
-pub use mutate::{GraphMutator, MutationError};
+pub use mutate::{ConverterFactory, GraphMutator};
+
+pub use mutation_error::{MutationError, MutationKind};
 
 #[cfg(feature = "std")]
 pub use run::RunBuilder;

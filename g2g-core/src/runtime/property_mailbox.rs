@@ -9,7 +9,7 @@
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::property::{PropError, PropValue};
 use crate::runtime::channel::Sender;
@@ -68,7 +68,10 @@ pub(crate) struct PropertyMailbox {
 #[derive(Debug)]
 struct Queue {
     pending: AtomicBool,
-    requests: spin::Mutex<Vec<PropertyRequest>>,
+    /// Each request with the ticket its push handed out, so a request whose
+    /// caller gave up waiting can be withdrawn by it.
+    requests: spin::Mutex<Vec<(u64, PropertyRequest)>>,
+    next_ticket: AtomicU64,
 }
 
 impl PropertyMailbox {
@@ -77,17 +80,30 @@ impl PropertyMailbox {
             inner: Arc::new(Queue {
                 pending: AtomicBool::new(false),
                 requests: spin::Mutex::new(Vec::new()),
+                next_ticket: AtomicU64::new(0),
             }),
         }
     }
 
-    /// Queue `request` for the arm to perform at its next packet boundary.
-    pub(crate) fn push(&self, request: PropertyRequest) {
+    /// Queue `request` for the arm to perform at its next packet boundary, and
+    /// hand back the ticket [`withdraw`](Self::withdraw) takes.
+    pub(crate) fn push(&self, request: PropertyRequest) -> u64 {
+        let ticket = self.inner.next_ticket.fetch_add(1, Ordering::Relaxed);
         let mut queued = self.inner.requests.lock();
-        queued.push(request);
+        queued.push((ticket, request));
         // Raised under the lock, so a drain that has just taken the queue cannot
         // clear this flag after the push that set it.
         self.inner.pending.store(true, Ordering::Release);
+        ticket
+    }
+
+    /// Take a queued request back before the arm reaches it. `false` when the
+    /// arm already has it, in which case its answer is on its way.
+    pub(crate) fn withdraw(&self, ticket: u64) -> bool {
+        let mut queued = self.inner.requests.lock();
+        let before = queued.len();
+        queued.retain(|(t, _)| *t != ticket);
+        queued.len() < before
     }
 
     /// Perform everything queued against `elem` and answer each request. The
@@ -101,7 +117,7 @@ impl PropertyMailbox {
             self.inner.pending.store(false, Ordering::Release);
             core::mem::take(&mut *queued)
         };
-        for request in requests {
+        for (_, request) in requests {
             match request {
                 PropertyRequest::Set { name, value, reply } => {
                     let _ = reply.try_send(elem.set_property(&name, value));
