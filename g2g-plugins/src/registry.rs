@@ -18,12 +18,15 @@
 //! bytestream-format=mpegts ! tsdemux` works as text.
 
 use alloc::boxed::Box;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
+use g2g_core::element::DynAsyncElement;
 #[cfg(feature = "script-rhai")]
 use g2g_core::runtime::DemuxFactory;
 use g2g_core::runtime::{
-    ElementFactory, EncoderChoice, LaunchFactory, MuxerFactory, Registry, SourceFactory,
+    ConverterFactory, ElementFactory, EncoderChoice, LaunchFactory, MuxerFactory, Registry,
+    SourceFactory,
 };
 use g2g_core::{AudioFormat, ByteStreamEncoding, Caps, Dim, Rate, RawVideoFormat};
 
@@ -433,6 +436,36 @@ fn domain_converter(
         ));
     }
     None
+}
+
+pub fn converters() -> ConverterFactory<'static> {
+    let mut reg = Registry::new();
+    reg.register(ElementFactory::of::<VideoConvert>(
+        "videoconvert",
+        videoconvert_to,
+    ));
+    reg.register(ElementFactory::of::<AudioConvert>(
+        "audioconvert",
+        audioconvert_to,
+    ));
+    Arc::new(reg).converters()
+}
+
+fn videoconvert_to(output: &Caps) -> Box<dyn DynAsyncElement> {
+    let Caps::RawVideo { format, .. } = output else {
+        unreachable!("videoconvert's source template is raw video only");
+    };
+    Box::new(VideoConvert::new(*format))
+}
+
+fn audioconvert_to(output: &Caps) -> Box<dyn DynAsyncElement> {
+    let Caps::Audio {
+        format, channels, ..
+    } = output
+    else {
+        unreachable!("audioconvert's source template is PCM only");
+    };
+    Box::new(AudioConvert::new(*format, *channels))
 }
 
 pub fn default_registry() -> Registry {

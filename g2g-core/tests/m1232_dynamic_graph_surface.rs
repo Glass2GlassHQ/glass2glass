@@ -20,10 +20,11 @@ use g2g_core::caps::CapsSet;
 use g2g_core::element::DynAsyncElement;
 use g2g_core::format_element::CapsConstraint;
 use g2g_core::memory::{MemoryDomain, SystemSlice};
+use g2g_core::pad_template::PadTemplate;
 use g2g_core::property::{PropError, PropKind, PropValue, PropertySpec};
 use g2g_core::runtime::{
-    block_on, select2, Either, GraphNode, Join2, MutationError, MutationKind, RunBuilder,
-    SourceLoop, ThreadSpawner,
+    block_on, select2, Either, ElementFactory, GraphNode, Join2, MutationError, MutationKind,
+    Registry, RunBuilder, SourceLoop, ThreadSpawner,
 };
 use g2g_core::{
     AsyncClock, AsyncElement, Bus, BusMessage, Caps, ConfigureOutcome, Dim, DynAsyncClock, Frame,
@@ -315,6 +316,25 @@ impl AsyncElement for Reformat {
             Ok(())
         })
     }
+}
+
+/// A registry whose one factory converts NV12 to I420.
+fn nv12_converter_registry() -> Registry {
+    let mut registry = Registry::new();
+    registry.register(ElementFactory::new(
+        "nv12toi420",
+        vec![
+            PadTemplate::sink(CapsSet::one(nv12())),
+            PadTemplate::source(CapsSet::one(i420())),
+        ],
+        |_| {
+            Box::new(Reformat {
+                from: RawVideoFormat::Nv12,
+                to: RawVideoFormat::I420,
+            })
+        },
+    ));
+    registry
 }
 
 static STEPPER_PROPS: &[PropertySpec] = &[PropertySpec::new(
@@ -932,20 +952,7 @@ fn a_caps_changing_insert_takes_its_converter_from_the_handle() {
     let (mutator, run) = RunBuilder::new(graph, &ZeroClock, LINK_CAPACITY).run_mutable();
     let converting = mutator
         .clone()
-        .with_converters(Arc::new(|produced, accepted| {
-            let wants = video_caps(RawVideoFormat::I420);
-            match produced {
-                Caps::RawVideo {
-                    format: RawVideoFormat::Nv12,
-                    ..
-                } if accepted.accepts(&wants) => Some(vec![Box::new(Reformat {
-                    from: RawVideoFormat::Nv12,
-                    to: RawVideoFormat::I420,
-                })
-                    as Box<dyn DynAsyncElement>]),
-                _ => None,
-            }
-        }));
+        .with_converters(Arc::new(nv12_converter_registry()).converters());
     let recolor = || {
         Box::new(Reformat {
             from: RawVideoFormat::I420,

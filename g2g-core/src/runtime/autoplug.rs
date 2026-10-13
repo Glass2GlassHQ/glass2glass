@@ -431,9 +431,11 @@ mod factory {
     use crate::property::{format_specs, PropError, PropValue};
     use crate::runtime::launch::ParseError;
     use crate::runtime::{
-        DynMultiInputElement, DynMultiOutputElement, DynSourceLoop, GraphNode, GraphNodeRef,
-        UnblockHandle,
+        ConverterFactory, DynMultiInputElement, DynMultiOutputElement, DynSourceLoop, GraphNode,
+        GraphNodeRef, UnblockHandle,
     };
+
+    const CONVERTER_MAX_DEPTH: usize = 4;
 
     /// Structured, owned introspection of one registered element: the same facts
     /// [`Registry::inspect`] renders as a `gst-inspect` text dump, exposed as data
@@ -2402,6 +2404,16 @@ mod factory {
             let descs = self.descs();
             let chain = find_chain(&descs, input, target, max_depth)?;
             self.instantiate(chain, &AutoplugParams::new()).ok()
+        }
+
+        pub fn converters(self: Arc<Self>) -> ConverterFactory<'static> {
+            Arc::new(move |produced: &Caps, accepted: &CapsSet| {
+                self.autoplug(
+                    produced,
+                    &|caps| accepted.accepts(caps),
+                    CONVERTER_MAX_DEPTH,
+                )
+            })
         }
 
         /// Build every element of a found chain, each configured to produce the
