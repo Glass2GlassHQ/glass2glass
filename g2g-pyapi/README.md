@@ -68,6 +68,36 @@ python examples/appsink_numpy.py
 The C equivalent (same waist, via `g2g-capi`) is in
 [`../examples/g2g-c-example`](../examples/g2g-c-example).
 
+## Changing a running pipeline
+
+A `Pipeline` accepts edits while it runs. Elements are addressed by their
+instance name: the `name=` from the launch line, or the name an insert returned.
+A new element is written as one launch-line element, `"videoflip method=rotate-180"`,
+without `name=` or `log-category=`.
+
+```python
+p = g2g.Pipeline("videotestsrc name=src ! clocksync ! fakesink name=sink")
+gate = p.insert_after("src", "valve drop=false")
+p.set_property(gate, "drop", "true")
+print(p.get_property(gate, "drop"))   # "true"
+p.remove(gate)
+```
+
+| Method | Does |
+| :--- | :--- |
+| `insert_after(node, description)` | Splices the element onto the edge below `node`, returns its name. |
+| `insert_before(node, description)` | Splices the element onto the edge above `node`, returns its name. |
+| `remove(node)` | Lifts a transform out of the pipeline and drops it. |
+| `replace_sink(node, description)` | Swaps the sink `node` for a new one, returns the new name. |
+| `replace_source(node, description)` | Swaps the source `node` for a new one, returns the new name. |
+| `set_property(node, name, value)` | Sets a property from its launch-line text. |
+| `get_property(node, name)` | The property's launch-line text, `None` if the element has no such property. |
+
+A refused edit raises `ValueError` carrying the reason (`UnknownNode`,
+`NotMutable`, `PropertyRejected`, ...) and leaves the pipeline running as it
+was. Each call blocks, with the GIL released, until the element upstream of the
+edit pushes its next packet, so an edit on a stalled pipeline waits for it.
+
 ## Testing
 
 The in-crate tests drive the bindings through an embedded interpreter, so they

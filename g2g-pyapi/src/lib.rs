@@ -35,11 +35,15 @@ mod pymod {
     use pyo3::prelude::*;
 
     use std::os::raw::c_int;
+    use std::sync::mpsc;
     use std::thread::JoinHandle;
     use std::time::{Duration, Instant};
 
     use g2g_core::frame::Frame;
-    use g2g_core::runtime::{block_on, parse_launch, run_graph_with_bus, RunStats};
+    use g2g_core::runtime::{
+        block_on, parse_element, parse_launch, parse_source, set_property_text, GraphMutator,
+        MutationError, ParseError, RunBuilder, RunStats,
+    };
     use g2g_core::{Bus, BusMessage, G2gError, MemoryDomain};
     use g2g_plugins::appsink::{register_appsink_pull, AppSinkPull, Pull};
     use g2g_plugins::appsrc::{register_appsrc, AppSrcFeed};
@@ -54,6 +58,7 @@ mod pymod {
     #[pyclass]
     struct Pipeline {
         bus: Bus,
+        mutator: GraphMutator<'static>,
         join: Option<JoinHandle<Result<RunStats, G2gError>>>,
         // The joined outcome, cached so a second `wait()` is idempotent. The
         // error arm is a formatted message (not the raw `G2gError`) so it can
@@ -83,6 +88,14 @@ mod pymod {
         }
     }
 
+    fn parse_error(error: ParseError) -> PyErr {
+        PyValueError::new_err(format!("parse error: {error}"))
+    }
+
+    fn refused(error: MutationError) -> PyErr {
+        PyValueError::new_err(format!("{error:?}"))
+    }
+
     /// Best-effort extraction of a panic payload's message (the common
     /// `&str` / `String` cases a `panic!` / `expect` produces).
     fn panic_message(payload: &(dyn core::any::Any + Send)) -> String {
@@ -100,9 +113,9 @@ mod pymod {
         #[new]
         fn new(description: &str) -> PyResult<Self> {
             let reg = default_registry();
-            let graph = parse_launch(&reg, description)
-                .map_err(|e| PyValueError::new_err(format!("parse error: {e}")))?;
+            let graph = parse_launch(&reg, description).map_err(parse_error)?;
             let (bus, handle) = Bus::new(BUS_CAPACITY);
+            let (mutator_sender, mutator_receiver) = mpsc::sync_channel(1);
             let join = std::thread::Builder::new()
                 .name("g2g-pyapi-run".into())
                 .spawn(move || {
@@ -111,14 +124,78 @@ mod pymod {
                         .build()
                         .expect("build tokio runtime");
                     let clock = WallClock::new();
-                    rt.block_on(run_graph_with_bus(graph, &clock, LINK_CAPACITY, &handle))
+                    let (mutator, run) = RunBuilder::new(graph, &clock, LINK_CAPACITY)
+                        .with_bus(&handle)
+                        .run_mutable();
+                    if mutator_sender.send(mutator).is_err() {
+                        return Err(G2gError::Shutdown);
+                    }
+                    rt.block_on(run)
                 })
                 .map_err(|e| PyValueError::new_err(format!("spawn run thread: {e}")))?;
+            let mutator = mutator_receiver
+                .recv()
+                .map_err(|_| PyValueError::new_err("pipeline run thread did not start"))?;
             Ok(Pipeline {
                 bus,
+                mutator,
                 join: Some(join),
                 result: None,
             })
+        }
+
+        fn insert_after(&self, py: Python<'_>, node: &str, description: &str) -> PyResult<String> {
+            let element = parse_element(&default_registry(), description).map_err(parse_error)?;
+            py.detach(|| block_on(self.mutator.insert_after(node, element)))
+                .map_err(refused)
+        }
+
+        fn insert_before(&self, py: Python<'_>, node: &str, description: &str) -> PyResult<String> {
+            let element = parse_element(&default_registry(), description).map_err(parse_error)?;
+            py.detach(|| block_on(self.mutator.insert_before(node, element)))
+                .map_err(refused)
+        }
+
+        fn remove(&self, py: Python<'_>, node: &str) -> PyResult<()> {
+            py.detach(|| block_on(self.mutator.remove(node)))
+                .map(drop)
+                .map_err(refused)
+        }
+
+        fn replace_sink(&self, py: Python<'_>, node: &str, description: &str) -> PyResult<String> {
+            let element = parse_element(&default_registry(), description).map_err(parse_error)?;
+            py.detach(|| block_on(self.mutator.replace_sink(node, element)))
+                .map(|(name, _old)| name)
+                .map_err(refused)
+        }
+
+        fn replace_source(
+            &self,
+            py: Python<'_>,
+            node: &str,
+            description: &str,
+        ) -> PyResult<String> {
+            let source = parse_source(&default_registry(), description).map_err(parse_error)?;
+            py.detach(|| block_on(self.mutator.replace_source(node, source)))
+                .map(|(name, _old)| name)
+                .map_err(refused)
+        }
+
+        fn set_property(
+            &self,
+            py: Python<'_>,
+            node: &str,
+            name: &str,
+            value: &str,
+        ) -> PyResult<()> {
+            py.detach(|| block_on(set_property_text(&self.mutator, node, name, value)))
+                .map_err(refused)
+        }
+
+        fn get_property(&self, py: Python<'_>, node: &str, name: &str) -> PyResult<Option<String>> {
+            py.detach(|| block_on(self.mutator.get_property(node, name)))
+                .map(|value| value.map(|value| value.to_string()))
+                .map_err(refused)
         }
 
         /// Pop one bus message as `(kind, text_or_None, a, b)`, or `None` if the
@@ -526,6 +603,56 @@ assert consumed == 1, consumed
                 let globals = PyDict::new(py);
                 py.run(script.as_c_str(), Some(&globals), None)
                     .expect("try_pull script runs");
+            });
+        }
+
+        #[test]
+        fn python_mutates_a_running_pipeline() {
+            ensure_module();
+            Python::attach(|py| {
+                let script = CString::new(
+                    r#"
+import g2g
+FRAMES = 90
+p = g2g.Pipeline(
+    f"videotestsrc name=src num-buffers={FRAMES} ! clocksync name=pace ! fakesink name=sink"
+)
+
+inserted = p.insert_after("src", "valve drop=false")
+assert inserted not in ("src", "pace", "sink"), inserted
+assert p.get_property(inserted, "drop") == "false"
+p.set_property(inserted, "drop-mode", "forward-sticky-events")
+assert p.get_property(inserted, "drop-mode") == "forward-sticky-events"
+assert p.get_property(inserted, "no-such-property") is None
+
+try:
+    p.set_property(inserted, "drop", "maybe")
+    raise AssertionError("an unparseable value was accepted")
+except ValueError as error:
+    assert "PropertyRejected" in str(error), error
+
+try:
+    p.insert_after("src", "identity name=extra")
+    raise AssertionError("name= was accepted")
+except ValueError as error:
+    assert "parse error" in str(error), error
+
+p.remove(inserted)
+
+try:
+    p.insert_after("no-such-node", "identity")
+    raise AssertionError("an unknown node was accepted")
+except ValueError as error:
+    assert "UnknownNode" in str(error), error
+
+_, consumed, _ = p.wait()
+assert consumed == FRAMES, consumed
+"#,
+                )
+                .unwrap();
+                let globals = PyDict::new(py);
+                py.run(script.as_c_str(), Some(&globals), None)
+                    .expect("mutation script runs");
             });
         }
 
