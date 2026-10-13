@@ -181,6 +181,9 @@ pub enum ParseError {
     /// A one-element description held something other than one element: a `!`,
     /// a pad reference, a caps token, or a second element.
     NotOneElement(String),
+    /// A chain description held something other than elements joined by `!`:
+    /// a pad reference, a caps token, or a second chain.
+    NotElementChain(String),
     /// A one-element description carried `name=` or `log-category=`, which only
     /// a whole launch line can apply.
     LaunchKeyword { element: String, key: String },
@@ -307,6 +310,9 @@ impl core::fmt::Display for ParseError {
             ),
             ParseError::NotOneElement(description) => {
                 write!(f, "'{description}' is not a single element")
+            }
+            ParseError::NotElementChain(description) => {
+                write!(f, "'{description}' is not a chain of elements joined by '!'")
             }
             ParseError::LaunchKeyword { element, key } => write!(
                 f,
@@ -3017,32 +3023,65 @@ pub fn parse_source(
     build_source(registry, &spec.name, &spec.props)
 }
 
+pub fn parse_chain(
+    registry: &Registry,
+    description: &str,
+) -> Result<Vec<Box<dyn DynAsyncElement>>, ParseError> {
+    parse_element_chain(registry, description)?
+        .iter()
+        .map(|spec| build_element(registry, &spec.name, &spec.props))
+        .collect()
+}
+
 fn parse_one_element(registry: &Registry, description: &str) -> Result<ElementSpec, ParseError> {
+    let mut specs = parse_element_chain(registry, description).map_err(|error| match error {
+        ParseError::NotElementChain(description) => ParseError::NotOneElement(description),
+        other => other,
+    })?;
+    if specs.len() != 1 {
+        return Err(ParseError::NotOneElement(description.trim().to_string()));
+    }
+    Ok(specs.swap_remove(0))
+}
+
+fn parse_element_chain(
+    registry: &Registry,
+    description: &str,
+) -> Result<Vec<ElementSpec>, ParseError> {
     let description = description.trim();
-    let not_one_element = || ParseError::NotOneElement(description.to_string());
+    let not_a_chain = || ParseError::NotElementChain(description.to_string());
     let tokens = tokenize(description);
     let mut tokens = tokens.iter().map(String::as_str).peekable();
-    let name = tokens.next().ok_or(ParseError::Empty)?;
-    if name == "!" || is_caps_token(name) || as_ref_name(name).is_some() {
-        return Err(not_one_element());
+    let mut specs = Vec::new();
+    loop {
+        let name = match tokens.next() {
+            Some(name) => name,
+            None if specs.is_empty() => return Err(ParseError::Empty),
+            None => return Err(not_a_chain()),
+        };
+        if name == "!" || is_caps_token(name) || as_ref_name(name).is_some() {
+            return Err(not_a_chain());
+        }
+        let spec = consume_element(name, &mut tokens, &|token| registry.knows_element(token))?;
+        // the mutator names the instance itself
+        let keyword = match (&spec.instance, &spec.log_category) {
+            (Some(_), _) => Some("name"),
+            (None, Some(_)) => Some("log-category"),
+            (None, None) => None,
+        };
+        if let Some(keyword) = keyword {
+            return Err(ParseError::LaunchKeyword {
+                element: spec.name,
+                key: keyword.to_string(),
+            });
+        }
+        specs.push(spec);
+        match tokens.next() {
+            None => return Ok(specs),
+            Some("!") => {}
+            Some(_) => return Err(not_a_chain()),
+        }
     }
-    let spec = consume_element(name, &mut tokens, &|token| registry.knows_element(token))?;
-    if tokens.next().is_some() {
-        return Err(not_one_element());
-    }
-    // the mutator names the instance itself
-    let keyword = match (&spec.instance, &spec.log_category) {
-        (Some(_), _) => Some("name"),
-        (None, Some(_)) => Some("log-category"),
-        (None, None) => None,
-    };
-    if let Some(keyword) = keyword {
-        return Err(ParseError::LaunchKeyword {
-            element: spec.name,
-            key: keyword.to_string(),
-        });
-    }
-    Ok(spec)
 }
 
 pub async fn set_property_text(
@@ -4056,8 +4095,8 @@ mod tests {
         }
     }
 
-    mod single_element_description {
-        use super::super::{parse_element, DynAsyncElement, ParseError};
+    mod element_descriptions {
+        use super::super::{parse_chain, parse_element, DynAsyncElement, ParseError};
         use crate::property::{PropError, PropKind, PropValue, PropertySpec};
         use crate::runtime::{LaunchFactory, Registry};
         use crate::{AsyncElement, Caps, ConfigureOutcome, G2gError, OutputSink, PipelinePacket};
@@ -4146,6 +4185,25 @@ mod tests {
                 .map(|_| ())
                 .unwrap_err();
             assert!(matches!(error, ParseError::NotOneElement(_)), "{error:?}");
+        }
+
+        #[test]
+        fn builds_a_chain_in_stream_order() {
+            let chain =
+                parse_chain(&registry(), "leveler level=1 ! leveler level=2").expect("parses");
+            let levels: alloc::vec::Vec<_> = chain
+                .iter()
+                .map(|element| element.get_property(LEVEL))
+                .collect();
+            assert_eq!(levels, [Some(PropValue::Int(1)), Some(PropValue::Int(2))]);
+        }
+
+        #[test]
+        fn refuses_a_caps_filter_in_a_chain() {
+            let error = parse_chain(&registry(), "leveler ! video/x-raw ! leveler")
+                .map(|_| ())
+                .unwrap_err();
+            assert!(matches!(error, ParseError::NotElementChain(_)), "{error:?}");
         }
     }
 }

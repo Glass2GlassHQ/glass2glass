@@ -87,7 +87,12 @@ p.remove(gate)
 | :--- | :--- |
 | `insert_after(node, description)` | Splices the element onto the edge below `node`, returns its name. |
 | `insert_before(node, description)` | Splices the element onto the edge above `node`, returns its name. |
+| `insert_chain_after(node, description)` | Splices a chain such as `"identity ! valve"` below `node`, all of it or none, returns the names. |
+| `insert_chain_before(node, description)` | The same, above `node`. |
 | `remove(node)` | Lifts a transform out of the pipeline and drops it. |
+| `add_branch(tee, description)` | Attaches a chain under the tee, its last element the branch's sink, returns the names. |
+| `remove_branch(sink)` | Drops the branch ending at `sink` from under its tee. |
+| `add_input(muxer, description)` | Attaches a source to the muxer's next free pad, returns its name. |
 | `replace_sink(node, description)` | Swaps the sink `node` for a new one, returns the new name. |
 | `replace_source(node, description)` | Swaps the source `node` for a new one, returns the new name. |
 | `set_property(node, name, value)` | Sets a property from its launch-line text. |
@@ -96,7 +101,11 @@ p.remove(gate)
 A refused edit raises `ValueError` carrying the reason (`UnknownNode`,
 `NotMutable`, `PropertyRejected`, ...) and leaves the pipeline running as it
 was. Each call blocks, with the GIL released, until the element upstream of the
-edit pushes its next packet, so an edit on a stalled pipeline waits for it.
+edit pushes its next packet, and raises `TimedOut` after 5 s. An element whose
+output format the pipeline below refuses gets a `videoconvert` or `audioconvert`
+spliced in after it. A launch line gives a muxer one pad per linked input, so
+`add_input` only finds a free pad on a muxer with fixed pads, such as
+`cccombiner` fed only video.
 
 ## Testing
 

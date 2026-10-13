@@ -64,8 +64,9 @@ use base64::Engine as _;
 use g2g_core::log::{LogLevel, LogValue, RingSink, SinkId};
 use g2g_core::property::PropValue;
 use g2g_core::runtime::{
-    build_element, parse_launch, run_graph_observed_mutable, select2, set_property_text, Either,
-    GraphMutator, LinkInterceptor, Observer, ProbeAction, Registry, RunStats,
+    build_element, parse_chain, parse_launch, parse_source, run_graph_observed_mutable, select2,
+    set_property_text, Either, GraphMutator, LinkInterceptor, Observer, ProbeAction, Registry,
+    RunStats,
 };
 #[cfg(feature = "mcp")]
 use g2g_core::runtime::{NodeRole, TelemetrySnapshot};
@@ -73,7 +74,7 @@ use g2g_core::{Bus, BusMessage, PipelinePacket};
 
 use crate::clock::WallClock;
 use crate::preview::packet_preview;
-use crate::registry::default_registry;
+use crate::registry::{default_registry, mutator_with_defaults};
 use crate::toolingjson::{
     launch_json, registry_json, stats_json, telemetry_json, validate_json, TelemetryTap,
 };
@@ -267,6 +268,7 @@ impl McpServer {
             event_collector: Some(event_collector),
             revision: 0,
             inserted: BTreeMap::new(),
+            branches: BTreeMap::new(),
         });
         Ok(handle)
     }
@@ -611,6 +613,7 @@ struct ManagedPipeline {
     event_collector: Option<EventCollector>,
     revision: u64,
     inserted: BTreeMap<String, Value>,
+    branches: BTreeMap<String, Value>,
 }
 
 impl ManagedPipeline {
@@ -649,6 +652,7 @@ impl ManagedPipeline {
             "revision": self.revision,
             "telemetry": telemetry_json(&snapshot),
             "inserted": self.inserted,
+            "branches": self.branches,
             "events": {
                 "buffered": self.events.len(),
                 "capacity": EVENT_CAPACITY,
@@ -809,6 +813,63 @@ fn tool_specs() -> Value {
                     "expected_revision": { "type": "integer" }
                 },
                 "required": ["node", "expected_revision"]
+            }
+        },
+        {
+            "name": "insert_chain",
+            "description": "Insert a chain of transforms, written as a launch line such as \
+                            `identity ! valve drop=false`, before or after a node in one step: \
+                            every element goes in or none does.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "target": { "type": "string" },
+                    "position": { "type": "string", "enum": ["before", "after"] },
+                    "chain": { "type": "string" },
+                    "expected_revision": { "type": "integer" }
+                },
+                "required": ["target", "position", "chain", "expected_revision"]
+            }
+        },
+        {
+            "name": "add_branch",
+            "description": "Attach a branch under a tee of the managed pipeline, written as a \
+                            launch line whose last element is the branch's sink, such as \
+                            `videoflip ! fakesink`.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tee": { "type": "string" },
+                    "branch": { "type": "string" },
+                    "expected_revision": { "type": "integer" }
+                },
+                "required": ["tee", "branch", "expected_revision"]
+            }
+        },
+        {
+            "name": "remove_branch",
+            "description": "Remove a branch previously added through this MCP server, named by its sink.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "sink": { "type": "string" },
+                    "expected_revision": { "type": "integer" }
+                },
+                "required": ["sink", "expected_revision"]
+            }
+        },
+        {
+            "name": "add_input",
+            "description": "Attach a source, written as one launch-line element, to the next free \
+                            pad of a muxer in the managed pipeline.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "muxer": { "type": "string" },
+                    "source": { "type": "string" },
+                    "expected_revision": { "type": "integer" }
+                },
+                "required": ["muxer", "source", "expected_revision"]
             }
         },
         {
@@ -1045,6 +1106,10 @@ impl McpServer {
             "validate_insertion" => self.validate_insertion(&args)?,
             "insert_transform" => self.insert_transform(&args)?,
             "remove_transform" => self.remove_transform(&args)?,
+            "insert_chain" => self.insert_chain(&args)?,
+            "add_branch" => self.add_branch(&args)?,
+            "remove_branch" => self.remove_branch(&args)?,
+            "add_input" => self.add_input(&args)?,
             "stop_pipeline" => self.stop_pipeline(),
             #[cfg(feature = "declarative")]
             "run_graph" => {
@@ -1142,7 +1207,7 @@ impl McpServer {
             }
         };
         let mutator = match ready_receiver.recv() {
-            Ok(Ok(mutator)) => mutator,
+            Ok(Ok(mutator)) => mutator_with_defaults(mutator),
             Ok(Err(error)) => {
                 let _ = thread.join();
                 event_collector.stop();
@@ -1166,6 +1231,7 @@ impl McpServer {
             event_collector: Some(event_collector),
             revision: 0,
             inserted: BTreeMap::new(),
+            branches: BTreeMap::new(),
         });
         json!({ "ok": true, "state": "running", "revision": 0 })
     }
@@ -1556,13 +1622,10 @@ impl McpServer {
 
     fn validate_insertion(&mut self, args: &Value) -> Result<Value, (i64, String)> {
         let request = insertion_request(args)?;
-        let Some(pipeline) = self.pipeline.as_ref() else {
-            return Ok(no_pipeline());
+        let mutator = match self.mutator_at(request.expected_revision) {
+            Ok(mutator) => mutator,
+            Err(refusal) => return Ok(refusal),
         };
-        if request.expected_revision != pipeline.revision {
-            return Ok(revision_mismatch(pipeline.revision));
-        }
-        let mutator = pipeline.mutator.clone();
         let element = build_transform(&self.registry, request.element, request.properties)?;
         let result = match request.position {
             "before" => self
@@ -1574,20 +1637,17 @@ impl McpServer {
             _ => return Err((-32602, "position must be `before` or `after`".into())),
         };
         Ok(match result {
-            Ok(()) => json!({ "ok": true, "revision": pipeline.revision }),
+            Ok(()) => json!({ "ok": true, "revision": request.expected_revision }),
             Err(error) => json!({ "ok": false, "error": format!("{error:?}") }),
         })
     }
 
     fn insert_transform(&mut self, args: &Value) -> Result<Value, (i64, String)> {
         let request = insertion_request(args)?;
-        let Some(pipeline) = self.pipeline.as_ref() else {
-            return Ok(no_pipeline());
+        let mutator = match self.mutator_at(request.expected_revision) {
+            Ok(mutator) => mutator,
+            Err(refusal) => return Ok(refusal),
         };
-        if request.expected_revision != pipeline.revision {
-            return Ok(revision_mismatch(pipeline.revision));
-        }
-        let mutator = pipeline.mutator.clone();
         let element = build_transform(&self.registry, request.element, request.properties)?;
         let result = match request.position {
             "before" => self
@@ -1623,19 +1683,20 @@ impl McpServer {
     fn remove_transform(&mut self, args: &Value) -> Result<Value, (i64, String)> {
         let node = required_string(args, "node", "remove_transform")?;
         let expected_revision = required_u64(args, "expected_revision", "remove_transform")?;
-        let Some(pipeline) = self.pipeline.as_ref() else {
-            return Ok(no_pipeline());
+        let mutator = match self.mutator_at(expected_revision) {
+            Ok(mutator) => mutator,
+            Err(refusal) => return Ok(refusal),
         };
-        if expected_revision != pipeline.revision {
-            return Ok(revision_mismatch(pipeline.revision));
-        }
-        if !pipeline.inserted.contains_key(node) {
+        if !self
+            .pipeline
+            .as_ref()
+            .is_some_and(|pipeline| pipeline.inserted.contains_key(node))
+        {
             return Ok(json!({
                 "ok": false,
                 "error": "only transforms inserted through this MCP server can be removed",
             }));
         }
-        let mutator = pipeline.mutator.clone();
         if let Err(error) = self.runtime.block_on(mutator.remove(node)) {
             return Ok(json!({ "ok": false, "error": format!("{error:?}") }));
         }
@@ -1643,6 +1704,122 @@ impl McpServer {
         pipeline.inserted.remove(node);
         pipeline.revision = pipeline.revision.saturating_add(1);
         Ok(json!({ "ok": true, "revision": pipeline.revision }))
+    }
+
+    fn insert_chain(&mut self, args: &Value) -> Result<Value, (i64, String)> {
+        let target = required_string(args, "target", "insert_chain")?;
+        let position = required_string(args, "position", "insert_chain")?;
+        let text = required_string(args, "chain", "insert_chain")?;
+        let expected_revision = required_u64(args, "expected_revision", "insert_chain")?;
+        let mutator = match self.mutator_at(expected_revision) {
+            Ok(mutator) => mutator,
+            Err(refusal) => return Ok(refusal),
+        };
+        let chain =
+            parse_chain(&self.registry, text).map_err(|error| (-32602, format!("{error}")))?;
+        let result = match position {
+            "before" => self
+                .runtime
+                .block_on(mutator.insert_chain_before(target, chain)),
+            "after" => self
+                .runtime
+                .block_on(mutator.insert_chain_after(target, chain)),
+            _ => return Err((-32602, "position must be `before` or `after`".into())),
+        };
+        let names = match result {
+            Ok(names) => names,
+            Err(error) => return Ok(json!({ "ok": false, "error": format!("{error:?}") })),
+        };
+        let pipeline = self.pipeline.as_mut().expect("managed pipeline");
+        pipeline.revision = pipeline.revision.saturating_add(1);
+        for name in &names {
+            pipeline.inserted.insert(
+                name.clone(),
+                json!({ "chain": text, "position": position, "target": target }),
+            );
+        }
+        Ok(json!({ "ok": true, "nodes": names, "revision": pipeline.revision }))
+    }
+
+    fn add_branch(&mut self, args: &Value) -> Result<Value, (i64, String)> {
+        let tee = required_string(args, "tee", "add_branch")?;
+        let text = required_string(args, "branch", "add_branch")?;
+        let expected_revision = required_u64(args, "expected_revision", "add_branch")?;
+        let mutator = match self.mutator_at(expected_revision) {
+            Ok(mutator) => mutator,
+            Err(refusal) => return Ok(refusal),
+        };
+        let branch =
+            parse_chain(&self.registry, text).map_err(|error| (-32602, format!("{error}")))?;
+        let names = match self.runtime.block_on(mutator.add_branch(tee, branch)) {
+            Ok(names) => names,
+            Err(error) => return Ok(json!({ "ok": false, "error": format!("{error:?}") })),
+        };
+        let pipeline = self.pipeline.as_mut().expect("managed pipeline");
+        pipeline.revision = pipeline.revision.saturating_add(1);
+        if let Some(sink) = names.last() {
+            pipeline.branches.insert(
+                sink.clone(),
+                json!({ "branch": text, "tee": tee, "nodes": names }),
+            );
+        }
+        Ok(json!({ "ok": true, "nodes": names, "revision": pipeline.revision }))
+    }
+
+    fn remove_branch(&mut self, args: &Value) -> Result<Value, (i64, String)> {
+        let sink = required_string(args, "sink", "remove_branch")?;
+        let expected_revision = required_u64(args, "expected_revision", "remove_branch")?;
+        let mutator = match self.mutator_at(expected_revision) {
+            Ok(mutator) => mutator,
+            Err(refusal) => return Ok(refusal),
+        };
+        if !self
+            .pipeline
+            .as_ref()
+            .is_some_and(|pipeline| pipeline.branches.contains_key(sink))
+        {
+            return Ok(json!({
+                "ok": false,
+                "error": "only branches added through this MCP server can be removed",
+            }));
+        }
+        if let Err(error) = self.runtime.block_on(mutator.remove_branch(sink)) {
+            return Ok(json!({ "ok": false, "error": format!("{error:?}") }));
+        }
+        let pipeline = self.pipeline.as_mut().expect("managed pipeline");
+        pipeline.branches.remove(sink);
+        pipeline.revision = pipeline.revision.saturating_add(1);
+        Ok(json!({ "ok": true, "revision": pipeline.revision }))
+    }
+
+    fn add_input(&mut self, args: &Value) -> Result<Value, (i64, String)> {
+        let muxer = required_string(args, "muxer", "add_input")?;
+        let text = required_string(args, "source", "add_input")?;
+        let expected_revision = required_u64(args, "expected_revision", "add_input")?;
+        let mutator = match self.mutator_at(expected_revision) {
+            Ok(mutator) => mutator,
+            Err(refusal) => return Ok(refusal),
+        };
+        let source =
+            parse_source(&self.registry, text).map_err(|error| (-32602, format!("{error}")))?;
+        let name = match self.runtime.block_on(mutator.add_input(muxer, source)) {
+            Ok(name) => name,
+            Err(error) => return Ok(json!({ "ok": false, "error": format!("{error:?}") })),
+        };
+        let pipeline = self.pipeline.as_mut().expect("managed pipeline");
+        pipeline.revision = pipeline.revision.saturating_add(1);
+        Ok(json!({ "ok": true, "node": name, "revision": pipeline.revision }))
+    }
+
+    // the reply refusing the call when no pipeline runs or `expected_revision` is stale
+    fn mutator_at(&self, expected_revision: u64) -> Result<GraphMutator<'static>, Value> {
+        let Some(pipeline) = self.pipeline.as_ref() else {
+            return Err(no_pipeline());
+        };
+        if expected_revision != pipeline.revision {
+            return Err(revision_mismatch(pipeline.revision));
+        }
+        Ok(pipeline.mutator.clone())
     }
 
     fn stop_pipeline(&mut self) -> Value {

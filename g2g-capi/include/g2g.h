@@ -82,10 +82,13 @@ void g2g_string_free(char *s);
 /* ---- changing a running pipeline ---------------------------------------------
  *
  * `node` is an instance name: a launch line's `name=`, or a name returned
- * below. `description` is one launch-line element ("valve drop=true") without
- * name= or log-category=. A refused call leaves the pipeline running as it was
+ * below. `description` is launch-line text without name= or log-category=: one
+ * element ("valve drop=true"), or a chain where a function says so. A refused call leaves the pipeline running as it was
  * and writes the reason to `err_out` (free with g2g_string_free). Each call
- * blocks until the element upstream of the edit pushes its next packet.
+ * blocks until the element upstream of the edit pushes its next packet, and
+ * gives up with TimedOut after 5 s. An element whose output format the
+ * pipeline below refuses gets a videoconvert or audioconvert spliced in after
+ * it.
  * Returned names and values are owned: free with g2g_string_free.
  */
 
@@ -96,6 +99,36 @@ char *g2g_pipeline_insert_after(G2gPipeline *p, const char *after,
 /* Splice the element onto the edge above `before`. Its name, or NULL. */
 char *g2g_pipeline_insert_before(G2gPipeline *p, const char *before,
                                  const char *description, char **err_out);
+
+/* Splice a chain ("identity ! valve") onto the edge below `after`, as one
+ * edit. Its names in stream order, NULL-terminated, or NULL. Free with
+ * g2g_strv_free. */
+char **g2g_pipeline_insert_chain_after(G2gPipeline *p, const char *after,
+                                       const char *description, char **err_out);
+
+/* The same, onto the edge above `before`. */
+char **g2g_pipeline_insert_chain_before(G2gPipeline *p, const char *before,
+                                        const char *description,
+                                        char **err_out);
+
+/* Attach a branch ("videoflip ! fakesink", the last element its sink) under
+ * the tee `tee`. Its names in stream order, NULL-terminated, or NULL. Free with
+ * g2g_strv_free. */
+char **g2g_pipeline_add_branch(G2gPipeline *p, const char *tee,
+                               const char *description, char **err_out);
+
+/* Drop the branch ending at the sink `sink` from under its tee. 1 on success,
+ * 0 if refused. */
+int g2g_pipeline_remove_branch(G2gPipeline *p, const char *sink,
+                               char **err_out);
+
+/* Attach a source to the next free pad of the muxer `muxer`. Its name, or
+ * NULL. */
+char *g2g_pipeline_add_input(G2gPipeline *p, const char *muxer,
+                             const char *description, char **err_out);
+
+/* Free a name array returned above, and every name in it. NULL is a no-op. */
+void g2g_strv_free(char **names);
 
 /* Lift the transform `node` out and drop it. 1 on success, 0 if refused. */
 int g2g_pipeline_remove(G2gPipeline *p, const char *node, char **err_out);

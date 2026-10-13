@@ -33,8 +33,8 @@ use std::thread::JoinHandle;
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{
-    block_on, parse_element, parse_launch, parse_source, set_property_text, GraphMutator,
-    MutationError, RunBuilder, RunStats,
+    block_on, parse_chain, parse_element, parse_launch, parse_source, set_property_text,
+    GraphMutator, MutationError, RunBuilder, RunStats,
 };
 use g2g_core::{Bus, BusMessage, G2gError, MemoryDomain, PipelineState};
 use g2g_plugins::appsink::{
@@ -42,7 +42,7 @@ use g2g_plugins::appsink::{
 };
 use g2g_plugins::appsrc::{register_appsrc, AppSrcFeed};
 use g2g_plugins::clock::WallClock;
-use g2g_plugins::registry::default_registry;
+use g2g_plugins::registry::{default_registry, mutator_with_defaults};
 
 /// Steady-state link depth, matching `g2g-launch` (keeps latency low without
 /// starving the source; see design/README.md on `link_capacity`).
@@ -186,7 +186,7 @@ pub unsafe extern "C" fn g2g_pipeline_launch(
 
     let p = Box::new(Pipeline {
         bus,
-        mutator,
+        mutator: mutator_with_defaults(mutator),
         join: Some(join),
         result: None,
         last_text: None,
@@ -361,6 +361,160 @@ pub unsafe extern "C" fn g2g_pipeline_insert_before(
     name_or_refusal(block_on(p.mutator.insert_before(before, element)), err_out)
 }
 
+/// Splice the chain `description` names onto the edge below `after`, as one
+/// operation. Returns the elements' instance names in stream order as a
+/// null-terminated array, or null with `err_out` set.
+///
+/// # Safety
+/// `p` must be a live handle, `after` and `description` valid C strings, and
+/// `err_out` null or writable.
+#[no_mangle]
+pub unsafe extern "C" fn g2g_pipeline_insert_chain_after(
+    p: *mut Pipeline,
+    after: *const c_char,
+    description: *const c_char,
+    err_out: *mut *mut c_char,
+) -> *mut *mut c_char {
+    // SAFETY: caller contract on every argument.
+    let Some((p, [after, description])) =
+        (unsafe { mutation_args(p, [after, description], err_out) })
+    else {
+        return ptr::null_mut();
+    };
+    let chain = match parse_chain(&default_registry(), description) {
+        Ok(chain) => chain,
+        Err(e) => return null_list_with_error(err_out, &format!("parse error: {e}")),
+    };
+    names_or_refusal(
+        block_on(p.mutator.insert_chain_after(after, chain)),
+        err_out,
+    )
+}
+
+/// Splice the chain `description` names onto the edge above `before`, as one
+/// operation. Returns the elements' instance names in stream order as a
+/// null-terminated array, or null with `err_out` set.
+///
+/// # Safety
+/// `p` must be a live handle, `before` and `description` valid C strings, and
+/// `err_out` null or writable.
+#[no_mangle]
+pub unsafe extern "C" fn g2g_pipeline_insert_chain_before(
+    p: *mut Pipeline,
+    before: *const c_char,
+    description: *const c_char,
+    err_out: *mut *mut c_char,
+) -> *mut *mut c_char {
+    // SAFETY: caller contract on every argument.
+    let Some((p, [before, description])) =
+        (unsafe { mutation_args(p, [before, description], err_out) })
+    else {
+        return ptr::null_mut();
+    };
+    let chain = match parse_chain(&default_registry(), description) {
+        Ok(chain) => chain,
+        Err(e) => return null_list_with_error(err_out, &format!("parse error: {e}")),
+    };
+    names_or_refusal(
+        block_on(p.mutator.insert_chain_before(before, chain)),
+        err_out,
+    )
+}
+
+/// Attach the branch `description` names under the tee `tee`, its last element
+/// the branch's sink. Returns the instance names in stream order as a
+/// null-terminated array, or null with `err_out` set.
+///
+/// # Safety
+/// `p` must be a live handle, `tee` and `description` valid C strings, and
+/// `err_out` null or writable.
+#[no_mangle]
+pub unsafe extern "C" fn g2g_pipeline_add_branch(
+    p: *mut Pipeline,
+    tee: *const c_char,
+    description: *const c_char,
+    err_out: *mut *mut c_char,
+) -> *mut *mut c_char {
+    // SAFETY: caller contract on every argument.
+    let Some((p, [tee, description])) = (unsafe { mutation_args(p, [tee, description], err_out) })
+    else {
+        return ptr::null_mut();
+    };
+    let branch = match parse_chain(&default_registry(), description) {
+        Ok(branch) => branch,
+        Err(e) => return null_list_with_error(err_out, &format!("parse error: {e}")),
+    };
+    names_or_refusal(block_on(p.mutator.add_branch(tee, branch)), err_out)
+}
+
+/// Drop the branch ending at the sink `sink` from under its tee. Returns 1, or
+/// 0 with `err_out` set.
+///
+/// # Safety
+/// `p` must be a live handle, `sink` a valid C string, and `err_out` null or
+/// writable.
+#[no_mangle]
+pub unsafe extern "C" fn g2g_pipeline_remove_branch(
+    p: *mut Pipeline,
+    sink: *const c_char,
+    err_out: *mut *mut c_char,
+) -> c_int {
+    // SAFETY: caller contract on every argument.
+    let Some((p, [sink])) = (unsafe { mutation_args(p, [sink], err_out) }) else {
+        return 0;
+    };
+    done_or_refusal(block_on(p.mutator.remove_branch(sink)).map(drop), err_out)
+}
+
+/// Attach the source `description` names to the next free pad of the muxer
+/// `muxer`. Returns the source's instance name, or null with `err_out` set.
+///
+/// # Safety
+/// `p` must be a live handle, `muxer` and `description` valid C strings, and
+/// `err_out` null or writable.
+#[no_mangle]
+pub unsafe extern "C" fn g2g_pipeline_add_input(
+    p: *mut Pipeline,
+    muxer: *const c_char,
+    description: *const c_char,
+    err_out: *mut *mut c_char,
+) -> *mut c_char {
+    // SAFETY: caller contract on every argument.
+    let Some((p, [muxer, description])) =
+        (unsafe { mutation_args(p, [muxer, description], err_out) })
+    else {
+        return ptr::null_mut();
+    };
+    let source = match parse_source(&default_registry(), description) {
+        Ok(source) => source,
+        Err(e) => return null_with_error(err_out, &format!("parse error: {e}")),
+    };
+    name_or_refusal(block_on(p.mutator.add_input(muxer, source)), err_out)
+}
+
+/// Free a null-terminated name array this library returned, and every name in
+/// it. Null is a no-op.
+///
+/// # Safety
+/// `names` must be null or an array returned by this library, freed once.
+#[no_mangle]
+pub unsafe extern "C" fn g2g_strv_free(names: *mut *mut c_char) {
+    if names.is_null() {
+        return;
+    }
+    let mut count = 0;
+    // SAFETY: caller contract: a null-terminated array from `owned_strv`.
+    while !unsafe { *names.add(count) }.is_null() {
+        count += 1;
+    }
+    // SAFETY: `owned_strv` built it as a boxed slice of `count + 1` pointers.
+    let names = unsafe { Box::from_raw(ptr::slice_from_raw_parts_mut(names, count + 1)) };
+    for name in names.iter().take(count) {
+        // SAFETY: each entry came from `CString::into_raw` in `owned_strv`.
+        drop(unsafe { CString::from_raw(*name) });
+    }
+}
+
 /// Lift the transform `node` out of the running graph and drop it. Returns 1,
 /// or 0 with `err_out` set.
 ///
@@ -522,6 +676,16 @@ fn name_or_refusal(
     }
 }
 
+fn names_or_refusal(
+    result: Result<Vec<String>, MutationError>,
+    err_out: *mut *mut c_char,
+) -> *mut *mut c_char {
+    match result {
+        Ok(names) => owned_strv(&names),
+        Err(e) => null_list_with_error(err_out, &format!("{e:?}")),
+    }
+}
+
 fn done_or_refusal(result: Result<(), MutationError>, err_out: *mut *mut c_char) -> c_int {
     match result {
         Ok(()) => 1,
@@ -535,6 +699,20 @@ fn done_or_refusal(result: Result<(), MutationError>, err_out: *mut *mut c_char)
 fn null_with_error(err_out: *mut *mut c_char, message: &str) -> *mut c_char {
     set_err(err_out, message);
     ptr::null_mut()
+}
+
+fn null_list_with_error(err_out: *mut *mut c_char, message: &str) -> *mut *mut c_char {
+    set_err(err_out, message);
+    ptr::null_mut()
+}
+
+fn owned_strv(names: &[String]) -> *mut *mut c_char {
+    let pointers: Box<[*mut c_char]> = names
+        .iter()
+        .map(|name| owned_string(name))
+        .chain([ptr::null_mut()])
+        .collect();
+    Box::into_raw(pointers).cast()
 }
 
 fn owned_string(text: &str) -> *mut c_char {

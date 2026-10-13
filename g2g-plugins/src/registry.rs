@@ -20,13 +20,14 @@
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::time::Duration;
 
 use g2g_core::element::DynAsyncElement;
 #[cfg(feature = "script-rhai")]
 use g2g_core::runtime::DemuxFactory;
 use g2g_core::runtime::{
-    ConverterFactory, ElementFactory, EncoderChoice, LaunchFactory, MuxerFactory, Registry,
-    SourceFactory,
+    ConverterFactory, ElementFactory, EncoderChoice, GraphMutator, LaunchFactory, MuxerFactory,
+    Registry, SourceFactory,
 };
 use g2g_core::{AudioFormat, ByteStreamEncoding, Caps, Dim, Rate, RawVideoFormat};
 
@@ -449,6 +450,15 @@ pub fn converters() -> ConverterFactory<'static> {
         audioconvert_to,
     ));
     Arc::new(reg).converters()
+}
+
+const DEFAULT_MUTATION_TIMEOUT: Duration = Duration::from_secs(5);
+
+// the run's clock has to sleep on a deadline, or every operation answers NoTimer
+pub fn mutator_with_defaults(mutator: GraphMutator<'static>) -> GraphMutator<'static> {
+    mutator
+        .with_timeout(DEFAULT_MUTATION_TIMEOUT)
+        .with_converters(converters())
 }
 
 fn videoconvert_to(output: &Caps) -> Box<dyn DynAsyncElement> {

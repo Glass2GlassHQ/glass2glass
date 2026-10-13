@@ -24,14 +24,22 @@ g2g_string_free(gate);
 ```
 
 `g2g_pipeline_insert_after` and `g2g_pipeline_insert_before` splice the element
-onto the edge below or above a node. `g2g_pipeline_remove` lifts a transform out
-and drops it. `g2g_pipeline_replace_sink` and `g2g_pipeline_replace_source` swap
+onto the edge below or above a node. `g2g_pipeline_insert_chain_after` and
+`g2g_pipeline_insert_chain_before` take a chain such as `"identity ! valve"` and
+splice all of it or none. `g2g_pipeline_remove` lifts a transform out and drops it.
+`g2g_pipeline_add_branch` attaches a chain under a tee, its last element the
+branch's sink, and `g2g_pipeline_remove_branch` drops the branch ending at a sink.
+`g2g_pipeline_add_input` attaches a source to a muxer's free pad. A launch line
+gives a muxer one pad per linked input, so only a muxer with fixed pads, such as
+`cccombiner` fed only video, has one free. `g2g_pipeline_replace_sink` and `g2g_pipeline_replace_source` swap
 an end of the pipeline for a new element. `g2g_pipeline_set_property` takes the
 value as launch-line text and `g2g_pipeline_get_property` returns it the same
 way, or NULL with no error when the element has no such property.
 
 A refused edit returns NULL or 0, writes the reason (`UnknownNode`,
 `NotMutable`, `PropertyRejected`, ...) to `err_out`, and leaves the pipeline
-running as it was. Free every returned string and error with `g2g_string_free`.
-Each call blocks until the element upstream of the edit pushes its next packet,
-so an edit on a stalled pipeline waits for it.
+running as it was. Free every returned string and error with `g2g_string_free`,
+and every name array with `g2g_strv_free`. Each call blocks until the element
+upstream of the edit pushes its next packet, and gives up with `TimedOut` after
+5 s. An element whose output format the pipeline below refuses gets a
+`videoconvert` or `audioconvert` spliced in after it.

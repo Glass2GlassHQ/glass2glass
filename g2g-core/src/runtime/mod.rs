@@ -186,10 +186,10 @@ pub use autoplug::{
 
 #[cfg(feature = "std")]
 pub use launch::{
-    build_element, build_source, fallback_factory, has_live_source, parse_element, parse_launch,
-    parse_launch_avoiding, parse_source, set_property_text, ParseError, FALLBACK_AUDIO_SUFFIX,
-    FALLBACK_FALLBACK_SOURCE_SUFFIX, FALLBACK_MAIN_SOURCE_SUFFIX, FALLBACK_SWITCH_NAME,
-    FALLBACK_VIDEO_SUFFIX,
+    build_element, build_source, fallback_factory, has_live_source, parse_chain, parse_element,
+    parse_launch, parse_launch_avoiding, parse_source, set_property_text, ParseError,
+    FALLBACK_AUDIO_SUFFIX, FALLBACK_FALLBACK_SOURCE_SUFFIX, FALLBACK_MAIN_SOURCE_SUFFIX,
+    FALLBACK_SWITCH_NAME, FALLBACK_VIDEO_SUFFIX,
 };
 
 #[cfg(feature = "std")]

@@ -41,14 +41,14 @@ mod pymod {
 
     use g2g_core::frame::Frame;
     use g2g_core::runtime::{
-        block_on, parse_element, parse_launch, parse_source, set_property_text, GraphMutator,
-        MutationError, ParseError, RunBuilder, RunStats,
+        block_on, parse_chain, parse_element, parse_launch, parse_source, set_property_text,
+        GraphMutator, MutationError, ParseError, RunBuilder, RunStats,
     };
     use g2g_core::{Bus, BusMessage, G2gError, MemoryDomain};
     use g2g_plugins::appsink::{register_appsink_pull, AppSinkPull, Pull};
     use g2g_plugins::appsrc::{register_appsrc, AppSrcFeed};
     use g2g_plugins::clock::WallClock;
-    use g2g_plugins::registry::default_registry;
+    use g2g_plugins::registry::{default_registry, mutator_with_defaults};
 
     const LINK_CAPACITY: usize = 4;
     const BUS_CAPACITY: usize = 64;
@@ -138,7 +138,7 @@ mod pymod {
                 .map_err(|_| PyValueError::new_err("pipeline run thread did not start"))?;
             Ok(Pipeline {
                 bus,
-                mutator,
+                mutator: mutator_with_defaults(mutator),
                 join: Some(join),
                 result: None,
             })
@@ -153,6 +153,51 @@ mod pymod {
         fn insert_before(&self, py: Python<'_>, node: &str, description: &str) -> PyResult<String> {
             let element = parse_element(&default_registry(), description).map_err(parse_error)?;
             py.detach(|| block_on(self.mutator.insert_before(node, element)))
+                .map_err(refused)
+        }
+
+        fn insert_chain_after(
+            &self,
+            py: Python<'_>,
+            node: &str,
+            description: &str,
+        ) -> PyResult<Vec<String>> {
+            let chain = parse_chain(&default_registry(), description).map_err(parse_error)?;
+            py.detach(|| block_on(self.mutator.insert_chain_after(node, chain)))
+                .map_err(refused)
+        }
+
+        fn insert_chain_before(
+            &self,
+            py: Python<'_>,
+            node: &str,
+            description: &str,
+        ) -> PyResult<Vec<String>> {
+            let chain = parse_chain(&default_registry(), description).map_err(parse_error)?;
+            py.detach(|| block_on(self.mutator.insert_chain_before(node, chain)))
+                .map_err(refused)
+        }
+
+        fn add_branch(
+            &self,
+            py: Python<'_>,
+            tee: &str,
+            description: &str,
+        ) -> PyResult<Vec<String>> {
+            let branch = parse_chain(&default_registry(), description).map_err(parse_error)?;
+            py.detach(|| block_on(self.mutator.add_branch(tee, branch)))
+                .map_err(refused)
+        }
+
+        fn remove_branch(&self, py: Python<'_>, sink: &str) -> PyResult<()> {
+            py.detach(|| block_on(self.mutator.remove_branch(sink)))
+                .map(drop)
+                .map_err(refused)
+        }
+
+        fn add_input(&self, py: Python<'_>, muxer: &str, description: &str) -> PyResult<String> {
+            let source = parse_source(&default_registry(), description).map_err(parse_error)?;
+            py.detach(|| block_on(self.mutator.add_input(muxer, source)))
                 .map_err(refused)
         }
 
@@ -653,6 +698,121 @@ assert consumed == FRAMES, consumed
                 let globals = PyDict::new(py);
                 py.run(script.as_c_str(), Some(&globals), None)
                     .expect("mutation script runs");
+            });
+        }
+
+        #[test]
+        fn python_adds_chains_and_branches_to_a_running_pipeline() {
+            ensure_module();
+            Python::attach(|py| {
+                let script = CString::new(
+                    r#"
+import g2g
+FRAMES = 90
+p = g2g.Pipeline(
+    f"videotestsrc name=src num-buffers={FRAMES} ! clocksync ! tee name=t ! fakesink name=main"
+)
+
+chain = p.insert_chain_after("src", "identity ! valve drop=false")
+assert len(chain) == 2, chain
+assert p.get_property(chain[1], "drop") == "false"
+
+branch = p.add_branch("t", "identity ! fakesink")
+assert len(branch) == 2, branch
+p.remove_branch(branch[-1])
+
+try:
+    p.remove_branch("src")
+    raise AssertionError("a source was removed as a branch")
+except ValueError as error:
+    assert "NotMutable" in str(error), error
+
+try:
+    p.add_input("main", "videotestsrc")
+    raise AssertionError("a sink took an input")
+except ValueError as error:
+    assert "NotMutable" in str(error), error
+
+try:
+    p.add_branch("t", "identity ! video/x-raw ! fakesink")
+    raise AssertionError("a caps filter was accepted in a branch")
+except ValueError as error:
+    assert "parse error" in str(error), error
+
+_, consumed, _ = p.wait()
+assert consumed == FRAMES, consumed
+"#,
+                )
+                .unwrap();
+                let globals = PyDict::new(py);
+                py.run(script.as_c_str(), Some(&globals), None)
+                    .expect("branch script runs");
+            });
+        }
+
+        #[test]
+        fn an_insert_that_changes_the_format_gets_a_converter() {
+            ensure_module();
+            Python::attach(|py| {
+                let script = CString::new(
+                    r#"
+import g2g
+FRAMES = 90
+p = g2g.Pipeline(
+    f"videotestsrc name=src num-buffers={FRAMES} ! video/x-raw,format=RGBA ! clocksync ! fakesink"
+)
+p.insert_after("src", "videoconvert format=I420")
+_, consumed, _ = p.wait()
+assert consumed == FRAMES, consumed
+"#,
+                )
+                .unwrap();
+                let globals = PyDict::new(py);
+                py.run(script.as_c_str(), Some(&globals), None)
+                    .expect("converter script runs");
+            });
+        }
+
+        #[test]
+        fn an_edit_on_a_stalled_pipeline_times_out() {
+            ensure_module();
+            Python::attach(|py| {
+                let script = CString::new(
+                    r#"
+import threading
+import g2g
+src = g2g.AppSrc("stalled-in")
+sink = g2g.AppSink("stalled-out")
+p = g2g.Pipeline(
+    "appsrc name=src channel=stalled-in caps=video/x-raw,format=RGBA,width=2,height=2,framerate=30/1"
+    " ! appsink channel=stalled-out"
+)
+assert src.push(b"\x01" * 16, 0)
+assert sink.pull(timeout_ms=5000) is not None
+
+# longer than the handle's own timeout, so only a missing timeout reaches it
+EDIT_DEADLINE_S = 10
+outcome = []
+def edit():
+    try:
+        p.insert_after("src", "identity")
+        outcome.append("completed")
+    except ValueError as error:
+        outcome.append(str(error))
+editor = threading.Thread(target=edit)
+editor.start()
+editor.join(timeout=EDIT_DEADLINE_S)
+src.end_of_stream()
+editor.join()
+assert "TimedOut" in outcome[0], outcome
+_, consumed, _ = p.wait()
+assert consumed == 1, consumed
+"#,
+                )
+                .unwrap();
+                let globals = PyDict::new(py);
+                py.run(script.as_c_str(), Some(&globals), None)
+                    .expect("stall script runs");
             });
         }
 

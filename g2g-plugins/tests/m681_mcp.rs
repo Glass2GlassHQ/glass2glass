@@ -172,6 +172,9 @@ fn initialize_lists_tools_and_calls_them() {
     assert!(tools.contains(&"inspect") && tools.contains(&"validate") && tools.contains(&"launch"));
     assert!(tools.contains(&"start_pipeline") && tools.contains(&"pipeline_status"));
     assert!(tools.contains(&"insert_transform") && tools.contains(&"remove_transform"));
+    for tool in ["insert_chain", "add_branch", "remove_branch", "add_input"] {
+        assert!(tools.contains(&tool), "{tool} is listed");
+    }
     assert!(tools.contains(&"set_log_level") && tools.contains(&"tail_logs"));
     assert!(tools.contains(&"sample_edge") && tools.contains(&"tail_events"));
     assert!(tools.contains(&"latest_metadata") && tools.contains(&"wait_for_records"));
@@ -353,6 +356,90 @@ fn manages_and_mutates_a_running_pipeline() {
     assert_eq!(removed["ok"], true, "{removed}");
     assert_eq!(removed["revision"], 2);
     assert_eq!(payload(&responses[7])["ok"], true);
+}
+
+#[test]
+fn an_insert_that_changes_the_format_gets_a_converter() {
+    let mut session = LiveSession::spawn();
+    let started = session.call(
+        "start_pipeline",
+        serde_json::json!({ "pipeline": "videotestsrc name=src ! video/x-raw,format=RGBA ! fakesink" }),
+    );
+    assert_eq!(started["ok"], true, "{started}");
+    let inserted = session.call(
+        "insert_transform",
+        serde_json::json!({
+            "target": "src", "position": "after", "element": "videoconvert",
+            "properties": { "format": "I420" }, "expected_revision": 0,
+        }),
+    );
+    assert_eq!(
+        inserted["ok"], true,
+        "the handle spliced no converter: {inserted}"
+    );
+    assert_eq!(
+        session.call("stop_pipeline", serde_json::json!({}))["ok"],
+        true
+    );
+}
+
+#[test]
+fn adds_chains_branches_and_inputs_to_a_running_pipeline() {
+    let mut session = LiveSession::spawn();
+    let started = session.call(
+        "start_pipeline",
+        serde_json::json!({ "pipeline": "videotestsrc name=src ! tee name=t ! fakesink name=sink" }),
+    );
+    assert_eq!(started["ok"], true, "{started}");
+
+    let chain = session.call(
+        "insert_chain",
+        serde_json::json!({
+            "target": "src", "position": "after", "chain": "identity ! valve drop=false",
+            "expected_revision": 0,
+        }),
+    );
+    assert_eq!(chain["ok"], true, "{chain}");
+    assert_eq!(chain["nodes"].as_array().unwrap().len(), 2, "{chain}");
+    assert_eq!(chain["revision"], 1);
+
+    let branch = session.call(
+        "add_branch",
+        serde_json::json!({ "tee": "t", "branch": "identity ! fakesink", "expected_revision": 1 }),
+    );
+    assert_eq!(branch["ok"], true, "{branch}");
+    let branch_sink = branch["nodes"][1].as_str().unwrap().to_string();
+
+    let status = session.call("pipeline_status", serde_json::json!({}));
+    assert_eq!(status["branches"][&branch_sink]["tee"], "t", "{status}");
+
+    let not_ours = session.call(
+        "remove_branch",
+        serde_json::json!({ "sink": "sink", "expected_revision": 2 }),
+    );
+    assert_eq!(not_ours["ok"], false, "the launch line's own branch stays");
+
+    let removed = session.call(
+        "remove_branch",
+        serde_json::json!({ "sink": branch_sink, "expected_revision": 2 }),
+    );
+    assert_eq!(removed["ok"], true, "{removed}");
+    assert_eq!(removed["revision"], 3);
+
+    let input = session.call(
+        "add_input",
+        serde_json::json!({ "muxer": "t", "source": "videotestsrc", "expected_revision": 3 }),
+    );
+    assert_eq!(input["ok"], false);
+    assert!(
+        input["error"].as_str().unwrap().contains("NotMutable"),
+        "{input}"
+    );
+
+    assert_eq!(
+        session.call("stop_pipeline", serde_json::json!({}))["ok"],
+        true
+    );
 }
 
 #[test]
