@@ -42,16 +42,20 @@ enum FieldVal<'a> {
     List(Vec<&'a str>),
 }
 
-/// Split on top-level commas only, so the commas inside a `[..]` range or `{..}`
-/// list are not mistaken for field separators.
+/// Split on top-level commas only, so the commas inside a `[..]` range, a
+/// `{..}` list, a `<..>` array or a `".."` string are not mistaken for field
+/// separators.
 pub(crate) fn split_top_commas(s: &str) -> Vec<&str> {
     let mut out = Vec::new();
     let mut depth = 0i32;
+    let mut quoted = false;
     let mut start = 0;
     for (i, c) in s.char_indices() {
         match c {
-            '[' | '{' => depth += 1,
-            ']' | '}' => depth = depth.saturating_sub(1),
+            '"' => quoted = !quoted,
+            _ if quoted => {}
+            '[' | '{' | '<' => depth += 1,
+            ']' | '}' | '>' => depth = depth.saturating_sub(1),
             ',' if depth == 0 => {
                 out.push(&s[start..i]);
                 start = i + 1;
@@ -407,9 +411,45 @@ impl CapsSet {
             "subpicture/x-pgs" => Some(CapsSet::one(Caps::SubPicture {
                 format: SubPictureFormat::Pgs,
             })),
+            "multistream/x-analytics-batch" => match fv("streams") {
+                Some(FieldVal::One(streams)) => batch_set(streams),
+                _ => None,
+            },
             _ => None,
         }
     }
+}
+
+/// The `streams=<"caps","caps",...>` array of a batch caps, as
+/// [`Caps::to_gst_string`] prints it, expanded to one batch per combination of
+/// the streams' alternatives.
+fn batch_set(streams: &str) -> Option<CapsSet> {
+    let inner = streams.strip_prefix('<')?.strip_suffix('>')?;
+    let mut batches: Vec<Vec<Caps>> = alloc::vec![Vec::new()];
+    for stream in split_top_commas(inner)
+        .into_iter()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let stream = stream.strip_prefix('"')?.strip_suffix('"')?;
+        let alternatives = CapsSet::from_gst_string(stream)?;
+        batches = batches
+            .iter()
+            .flat_map(|prefix| {
+                alternatives.alternatives().iter().map(move |caps| {
+                    let mut batch = prefix.clone();
+                    batch.push(caps.clone());
+                    batch
+                })
+            })
+            .collect();
+    }
+    Some(CapsSet::from_alternatives(
+        batches
+            .into_iter()
+            .map(|streams| Caps::Batch { streams })
+            .collect(),
+    ))
 }
 
 fn compressed(
@@ -633,6 +673,56 @@ mod tests {
                 &[caps]
             );
         }
+    }
+
+    #[test]
+    fn batch_caps_round_trip_through_the_parser() {
+        let rgba = Caps::RawVideo {
+            format: RawVideoFormat::Rgba8,
+            width: Dim::Fixed(320),
+            height: Dim::Fixed(240),
+            framerate: Rate::Fixed(30 << 16),
+            interlace: Interlace::Any,
+            colorimetry: Colorimetry::UNKNOWN,
+        };
+        let nv12 = Caps::RawVideo {
+            format: RawVideoFormat::Nv12,
+            width: Dim::Fixed(1280),
+            height: Dim::Fixed(720),
+            framerate: Rate::Any,
+            interlace: Interlace::Any,
+            colorimetry: Colorimetry::BT709,
+        };
+        let batch = Caps::Batch {
+            streams: alloc::vec![rgba, nv12],
+        };
+        let text = batch.to_gst_string();
+        assert!(text.starts_with("multistream/x-analytics-batch,streams=<\"video/x-raw,"));
+        assert_eq!(
+            CapsSet::from_gst_string(&text).unwrap().alternatives(),
+            &[batch]
+        );
+    }
+
+    #[test]
+    fn batch_caps_expand_each_stream_alternatives() {
+        let set = CapsSet::from_gst_string(
+            "multistream/x-analytics-batch,streams=<\"video/x-raw,format={RGBA,NV12}\",\"meta/x-klv\">",
+        )
+        .unwrap();
+        assert_eq!(set.alternatives().len(), 2);
+        for caps in set.alternatives() {
+            let Caps::Batch { streams } = caps else {
+                panic!("expected a batch, got {caps:?}");
+            };
+            assert_eq!(streams.len(), 2);
+            assert_eq!(streams[1], Caps::Klv);
+        }
+        assert!(CapsSet::from_gst_string("multistream/x-analytics-batch").is_none());
+        assert!(CapsSet::from_gst_string(
+            "multistream/x-analytics-batch,streams=<\"video/x-nonesuch\">"
+        )
+        .is_none());
     }
 
     #[test]

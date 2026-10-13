@@ -692,6 +692,13 @@ fn put_caps(w: &mut Writer, c: &Caps) {
             w.u8(subpicture_format_to_u8(*format));
         }
         Caps::OnvifMetadata => w.u8(9),
+        Caps::Batch { streams } => {
+            w.u8(10);
+            w.u32(streams.len() as u32);
+            for stream in streams {
+                put_caps(w, stream);
+            }
+        }
     }
 }
 
@@ -751,6 +758,18 @@ fn get_caps(r: &mut Reader) -> Result<Caps, WireError> {
             format: subpicture_format_from_u8(r.u8()?)?,
         },
         9 => Caps::OnvifMetadata,
+        10 => {
+            let count = r.u32()?;
+            let mut streams = Vec::new();
+            for _ in 0..count {
+                // a crafted message nesting batches would recurse without bound
+                if r.buf.get(r.pos) == Some(&10) {
+                    return Err(WireError::BadTag);
+                }
+                streams.push(get_caps(r)?);
+            }
+            Caps::Batch { streams }
+        }
         _ => return Err(WireError::BadTag),
     })
 }
@@ -1427,6 +1446,17 @@ mod tests {
                 format: ClosedCaptionFormat::Cea708,
             },
             Caps::OnvifMetadata,
+            Caps::Batch {
+                streams: alloc::vec![
+                    Caps::OnvifMetadata,
+                    Caps::Text {
+                        format: TextFormat::WebVtt,
+                    },
+                ],
+            },
+            Caps::Batch {
+                streams: Vec::new(),
+            },
         ];
         for caps in cases {
             let p = PipelinePacket::CapsChanged(caps.clone());
@@ -1451,6 +1481,18 @@ mod tests {
             w.u32(1);
         }
         w.u8(layout_to_u8(TensorLayout::Nchw));
+        let mut r = Reader::new(&w.buf);
+        assert_eq!(get_caps(&mut r), Err(WireError::BadTag));
+    }
+
+    #[test]
+    fn nested_batch_caps_rejected() {
+        let mut w = Writer::new();
+        for _ in 0..3 {
+            w.u8(10);
+            w.u32(1);
+        }
+        w.u8(6);
         let mut r = Reader::new(&w.buf);
         assert_eq!(get_caps(&mut r), Err(WireError::BadTag));
     }

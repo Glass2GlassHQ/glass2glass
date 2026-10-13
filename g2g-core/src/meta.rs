@@ -1304,6 +1304,56 @@ mod on {
         }
     }
 
+    /// The frames a [`Caps::Batch`](crate::Caps::Batch) carrier holds, one
+    /// entry per stream that contributed to this batch, in mux input order. The
+    /// gst-plugins-rs `GstAnalyticsBatchMeta` analog.
+    #[derive(Debug)]
+    pub struct BatchMeta {
+        pub streams: Vec<BatchStream>,
+    }
+
+    /// One stream's entry in a [`BatchMeta`].
+    #[derive(Debug)]
+    pub struct BatchStream {
+        /// The mux input the frame came from.
+        pub index: usize,
+        pub caps: crate::caps::Caps,
+        /// `None` once a consumer has taken the frame out.
+        pub frame: Option<crate::frame::Frame>,
+    }
+
+    impl FrameMeta for BatchMeta {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+        fn as_any_mut(&mut self) -> &mut dyn Any {
+            self
+        }
+        /// Shares each frame's buffer the way a tee branch does, a refcount bump
+        /// once the frame's memory was made shareable.
+        fn clone_box(&self) -> Box<dyn FrameMeta> {
+            Box::new(BatchMeta {
+                streams: self
+                    .streams
+                    .iter()
+                    .map(|stream| BatchStream {
+                        index: stream.index,
+                        caps: stream.caps.clone(),
+                        frame: stream.frame.as_ref().map(crate::frame::Frame::share),
+                    })
+                    .collect(),
+            })
+        }
+        /// A copy of the carrier leaves the batched frames as they were. Any
+        /// pixel or geometry change means the carrier no longer holds them.
+        fn propagate(&self, transform: Transform) -> Propagation {
+            match transform {
+                Transform::Copy => Propagation::Keep,
+                Transform::Scale | Transform::Crop | Transform::Encode => Propagation::Drop,
+            }
+        }
+    }
+
     impl FrameMeta for super::PlaneLayout {
         fn as_any(&self) -> &dyn Any {
             self
@@ -1391,6 +1441,63 @@ mod tests {
         assert_eq!(set.len(), 1, "normalized analytics survive a scale");
         set.propagate(Transform::Encode);
         assert!(set.is_empty(), "a re-encode drops pixel-derived analytics");
+    }
+
+    fn batch_of_one(bytes: &[u8]) -> BatchMeta {
+        let mut domain = crate::memory::MemoryDomain::System(
+            crate::memory::SystemSlice::from_boxed(bytes.to_vec().into_boxed_slice()),
+        );
+        domain.make_shareable();
+        BatchMeta {
+            streams: alloc::vec![BatchStream {
+                index: 1,
+                caps: crate::caps::Caps::Klv,
+                frame: Some(crate::frame::Frame::new(
+                    domain,
+                    crate::frame::FrameTiming::default(),
+                    7,
+                )),
+            }],
+        }
+    }
+
+    #[test]
+    fn batch_meta_keeps_through_copy_drops_on_pixel_change() {
+        for (transform, kept) in [
+            (Transform::Copy, true),
+            (Transform::Scale, false),
+            (Transform::Crop, false),
+            (Transform::Encode, false),
+        ] {
+            let mut set = FrameMetaSet::new();
+            set.attach(batch_of_one(&[1, 2, 3]));
+            set.propagate(transform);
+            assert_eq!(set.get::<BatchMeta>().is_some(), kept, "{transform:?}");
+        }
+    }
+
+    #[test]
+    fn teed_batch_shares_its_frames_on_write() {
+        let mut set = FrameMetaSet::new();
+        set.attach(batch_of_one(&[4, 5, 6]));
+        let mut branch = set.clone();
+        let taken = branch
+            .get_mut::<BatchMeta>()
+            .expect("batch attached")
+            .streams[0]
+            .frame
+            .take()
+            .expect("frame inside");
+        let original = set.get::<BatchMeta>().expect("batch attached").streams[0]
+            .frame
+            .as_ref()
+            .expect("the other branch keeps its frame");
+        assert_eq!(taken.sequence, 7);
+        assert_eq!(
+            taken.domain.as_system_slice().unwrap().as_ptr(),
+            original.domain.as_system_slice().unwrap().as_ptr(),
+            "the copy-on-write shared the bytes"
+        );
     }
 
     #[test]

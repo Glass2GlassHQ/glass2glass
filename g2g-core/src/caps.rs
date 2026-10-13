@@ -137,6 +137,12 @@ pub enum Caps {
     /// the frame's PTS on the session's play timeline (GStreamer
     /// `application/x-onvif-metadata`).
     OnvifMetadata,
+    /// A batch of frames from several streams (GStreamer
+    /// `multistream/x-analytics-batch`), one entry per stream in mux input
+    /// order. The frames ride in the carrier frame's `BatchMeta`, so the
+    /// carrier's own buffer is empty.
+    #[cfg(feature = "alloc")]
+    Batch { streams: Vec<Caps> },
 }
 
 impl Caps {
@@ -159,6 +165,8 @@ impl Caps {
             | Caps::OnvifMetadata
             | Caps::ClosedCaption { .. }
             | Caps::SubPicture { .. } => false,
+            #[cfg(feature = "alloc")]
+            Caps::Batch { .. } => false,
         }
     }
 
@@ -286,6 +294,16 @@ impl Caps {
             (Caps::SubPicture { format: a }, Caps::SubPicture { format: b }) if a == b => {
                 Ok(Caps::SubPicture { format: *a })
             }
+            #[cfg(feature = "alloc")]
+            (Caps::Batch { streams: a }, Caps::Batch { streams: b }) if a.len() == b.len() => {
+                Ok(Caps::Batch {
+                    streams: a
+                        .iter()
+                        .zip(b)
+                        .map(|(a, b)| a.intersect(b))
+                        .collect::<Result<_, _>>()?,
+                })
+            }
             _ => Err(G2gError::CapsMismatch),
         }
     }
@@ -293,6 +311,10 @@ impl Caps {
     /// True when every ranged field is `Fixed`. Scalar-only variants are
     /// always fixed.
     pub fn is_fixed(&self) -> bool {
+        #[cfg(feature = "alloc")]
+        if let Caps::Batch { streams } = self {
+            return streams.iter().all(Caps::is_fixed);
+        }
         if let Caps::Audio {
             format,
             channels,
@@ -389,6 +411,10 @@ impl Caps {
             | Caps::ClosedCaption { .. }
             | Caps::SubPicture { .. } => Ok(self.clone()),
             Caps::Tensor { .. } => Ok(self.clone()),
+            #[cfg(feature = "alloc")]
+            Caps::Batch { streams } => Ok(Caps::Batch {
+                streams: streams.iter().map(Caps::fixate).collect::<Result<_, _>>()?,
+            }),
         }
     }
 
@@ -418,6 +444,8 @@ impl Caps {
             | Caps::ClosedCaption { .. }
             | Caps::SubPicture { .. } => None,
             Caps::Tensor { .. } => None,
+            #[cfg(feature = "alloc")]
+            Caps::Batch { .. } => None,
         }
     }
 
@@ -497,6 +525,19 @@ impl Caps {
             Caps::OnvifMetadata => String::from("application/x-onvif-metadata"),
             Caps::ClosedCaption { format } => String::from(cc_format_gst_media_type(*format)),
             Caps::SubPicture { format } => String::from(subpicture_gst_media_type(*format)),
+            Caps::Batch { streams } => {
+                let mut s = String::from("multistream/x-analytics-batch,streams=<");
+                for (i, stream) in streams.iter().enumerate() {
+                    if i > 0 {
+                        s.push(',');
+                    }
+                    s.push('"');
+                    s.push_str(&stream.to_gst_string());
+                    s.push('"');
+                }
+                s.push('>');
+                s
+            }
         }
     }
 }
@@ -2317,6 +2358,58 @@ mod tests {
             cea708.to_gst_string(),
             "closedcaption/x-cea-708,format=cc_data"
         );
+    }
+
+    #[test]
+    fn batch_caps_intersect_stream_by_stream() {
+        let ranged = video(Dim::Range { min: 1, max: 1920 }, Dim::Any, Rate::Any);
+        let hd = video(Dim::Fixed(1280), Dim::Fixed(720), Rate::Fixed(30 << 16));
+        let batch = |streams: Vec<Caps>| Caps::Batch { streams };
+        assert_eq!(
+            batch(alloc::vec![ranged.clone(), hd.clone()])
+                .intersect(&batch(alloc::vec![hd.clone(), hd.clone()])),
+            Ok(batch(alloc::vec![hd.clone(), hd.clone()]))
+        );
+        assert_eq!(
+            batch(alloc::vec![hd.clone(), hd.clone()]).intersect(&batch(alloc::vec![hd.clone()])),
+            Err(G2gError::CapsMismatch)
+        );
+        assert_eq!(
+            batch(alloc::vec![hd.clone()]).intersect(&batch(alloc::vec![Caps::Klv])),
+            Err(G2gError::CapsMismatch)
+        );
+        assert_eq!(
+            batch(alloc::vec![hd.clone()]).intersect(&hd),
+            Err(G2gError::CapsMismatch)
+        );
+    }
+
+    #[test]
+    fn batch_caps_fixate_every_stream() {
+        let ranged = video(
+            Dim::Range { min: 64, max: 1920 },
+            Dim::Fixed(480),
+            Rate::Fixed(30 << 16),
+        );
+        let fixed = video(Dim::Fixed(64), Dim::Fixed(480), Rate::Fixed(30 << 16));
+        let batch = Caps::Batch {
+            streams: alloc::vec![fixed.clone(), ranged],
+        };
+        assert!(!batch.is_fixed());
+        let fixated = batch.fixate().expect("every stream fixates");
+        assert!(fixated.is_fixed());
+        assert_eq!(
+            fixated,
+            Caps::Batch {
+                streams: alloc::vec![fixed.clone(), fixed]
+            }
+        );
+        let unfixable = Caps::Batch {
+            streams: alloc::vec![video(Dim::Any, Dim::Fixed(480), Rate::Any)],
+        };
+        assert_eq!(unfixable.fixate(), Err(G2gError::CapsMismatch));
+        assert!(batch.dims().is_none());
+        assert!(!batch.is_raw_media());
     }
 
     #[test]

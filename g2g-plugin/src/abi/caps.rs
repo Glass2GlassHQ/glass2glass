@@ -286,7 +286,7 @@ fn interlace_from_ffi(value: u32) -> Result<Interlace, CapsCodeError> {
 }
 
 /// Convert a host [`Caps`] into its ABI form. A caps kind v2 does not carry
-/// (tensor, KLV, closed caption, sub-picture) or a format with no frozen code
+/// (tensor, KLV, closed caption, sub-picture, batch) or a format with no frozen code
 /// fails rather than being approximated.
 pub fn caps_into_ffi(caps: &Caps) -> Result<FfiCaps, CapsCodeError> {
     let (tag, body) = match caps {
@@ -647,6 +647,15 @@ mod tests {
     #[test]
     fn a_caps_kind_outside_v2_is_refused_not_approximated() {
         let err = caps_into_ffi(&Caps::Klv).expect_err("KLV does not cross v2");
+        assert_eq!(err, CapsCodeError::UnsupportedCapsKind);
+    }
+
+    #[test]
+    fn a_batch_is_refused_not_approximated() {
+        let batch = Caps::Batch {
+            streams: vec![Caps::Klv],
+        };
+        let err = caps_into_ffi(&batch).expect_err("a batch does not cross v2");
         assert_eq!(err, CapsCodeError::UnsupportedCapsKind);
     }
 
