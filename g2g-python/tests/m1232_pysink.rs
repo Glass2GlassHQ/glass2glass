@@ -2,7 +2,7 @@
 //! can end in a Python class that reads every frame and sends nothing on.
 #![cfg(feature = "analytics")]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::{parse_launch, run_graph};
@@ -28,7 +28,7 @@ fn report_path(test: &str) -> PathBuf {
     std::env::temp_dir().join(format!("m1232-{test}-{}.txt", std::process::id()))
 }
 
-fn take_report(path: &PathBuf) -> String {
+fn take_report(path: &Path) -> String {
     let report = std::fs::read_to_string(path).expect("the hosted sink wrote its report");
     std::fs::remove_file(path).expect("remove the report");
     report
@@ -63,7 +63,7 @@ fn text_frame(text: &str) -> Frame {
     )
 }
 
-fn text_sink(class: &str, location: &PathBuf) -> PySink {
+fn text_sink(class: &str, location: &Path) -> PySink {
     fixtures_on_path();
     let mut sink = PySink::new(FIXTURE_MODULE, class);
     sink.set_property("input-caps", PropValue::Str(TEXT_CAPS.into()))
