@@ -3,6 +3,8 @@
 # frame as a writable buffer-protocol object and proves an in-place write
 # reaches the Rust Frame's memory, with no numpy / cv2 dependency.
 
+import sys
+
 
 class EchoTransform:
     """Bumps the first byte in place and echoes geometry/format as a blob."""
@@ -144,6 +146,12 @@ class RetainingTransform:
         # Retain a writable view past return: this is the contract violation the
         # host's export-counter guard catches.
         self.saved = memoryview(buf)
+
+
+class CycleHoldingTransform:
+    def g2g_process(self, buf, width, height, fmt, meta):
+        view = memoryview(buf)
+        frame = sys._getframe()
 
 
 class CounterSource:

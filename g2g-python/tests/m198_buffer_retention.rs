@@ -45,14 +45,13 @@ fn frame_2x1_rgba() -> Frame {
     }
 }
 
-#[test]
-fn retained_buffer_view_is_rejected_not_use_after_free() {
+fn run_one_frame(class: &str) -> (Result<(), G2gError>, CollectSink) {
     std::env::set_var(
         "PYTHONPATH",
         concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures"),
     );
 
-    let mut el = PyTransform::new("echo_element", "RetainingTransform");
+    let mut el = PyTransform::new("echo_element", class);
     let caps = Caps::RawVideo {
         format: RawVideoFormat::Rgba8,
         width: Dim::Fixed(2),
@@ -68,6 +67,12 @@ fn retained_buffer_view_is_rejected_not_use_after_free() {
         .build()
         .unwrap();
     let result = rt.block_on(el.process(PipelinePacket::DataFrame(frame_2x1_rgba()), &mut sink));
+    (result, sink)
+}
+
+#[test]
+fn retained_buffer_view_is_rejected_not_use_after_free() {
+    let (result, sink) = run_one_frame("RetainingTransform");
 
     // The element retained the buffer past the call; the host must fail the
     // frame rather than forward it (which would later dangle).
@@ -79,4 +84,15 @@ fn retained_buffer_view_is_rejected_not_use_after_free() {
         sink.packets.is_empty(),
         "no frame should be forwarded after a retention violation"
     );
+}
+
+#[test]
+fn a_view_held_only_by_a_garbage_cycle_is_not_retained() {
+    let (result, sink) = run_one_frame("CycleHoldingTransform");
+
+    assert!(
+        result.is_ok(),
+        "a view only a dead cycle holds must not fail the frame, got {result:?}"
+    );
+    assert_eq!(sink.packets.len(), 1);
 }

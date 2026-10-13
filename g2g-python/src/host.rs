@@ -1099,7 +1099,11 @@ fn call_system(
     // numpy view holds a pointer that dangles once the frame is freed
     // downstream. A nonzero export count means the element kept one, so fail
     // this frame loud rather than risk a use-after-free next frame.
-    if buffers.iter().any(|b| b.borrow(py).exports.get() != 0) {
+    let retained = || buffers.iter().any(|b| b.borrow(py).exports.get() != 0);
+    if retained() {
+        collect_cycles(py)?;
+    }
+    if retained() {
         return Err(PyBufferError::new_err(
             "g2g_process retained a frame buffer view past return (use-after-free risk)",
         ));
@@ -1258,12 +1262,22 @@ fn reported_cuda_device(instance: &Bound<'_, PyAny>) -> PyResult<i32> {
 /// only reference left if the element let go, so a higher count means it kept one:
 /// fail the frame loud rather than let a later kernel read freed device memory.
 fn planes_released(py: Python<'_>, planes: &[Py<CudaPlane>]) -> PyResult<bool> {
-    if planes.iter().any(|plane| plane.get_refcnt(py) > 1) {
+    let retained = || planes.iter().any(|plane| plane.get_refcnt(py) > 1);
+    if retained() {
+        collect_cycles(py)?;
+    }
+    if retained() {
         return Err(PyRuntimeError::new_err(
             "a hosted element retained a CudaPlane past return (use-after-free risk)",
         ));
     }
     Ok(true)
+}
+
+// a frame object that stores itself, as `torch.fx.wrap` does on import, keeps its callers' views alive until gc runs
+fn collect_cycles(py: Python<'_>) -> PyResult<()> {
+    py.import("gc")?.call_method0("collect")?;
+    Ok(())
 }
 
 /// Read what upstream attached to `frame` into the shapes the hosted element
