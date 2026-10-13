@@ -39,6 +39,7 @@ launch = [
     "dep:tokio",
     "dep:g2g-plugins",
     "g2g-plugins/ffmpeg",
+    "g2g-plugins/multi-thread",
     "g2g-plugins/v4l2",
     "g2g-plugins/wayland-sink",
     "g2g-plugins/analytics",

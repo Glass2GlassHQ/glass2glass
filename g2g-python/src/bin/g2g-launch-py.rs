@@ -34,18 +34,26 @@
 //! M322 host test does. Build with `--features launch` (pulls g2g-plugins'
 //! ffmpeg / wayland-sink / analytics).
 
+use std::future::Future;
+use std::pin::Pin;
 use std::process;
 use std::time::{Duration, Instant};
 
-use g2g_core::runtime::{parse_launch, run_graph_with_progress, PipelineProgress, Registry};
+use g2g_core::runtime::{
+    parse_launch, run_graph_threaded_with_progress, run_graph_with_progress, PipelineProgress,
+    Registry, RunStats,
+};
+use g2g_core::G2gError;
 use g2g_plugins::clock::WallClock;
 use g2g_plugins::registry::default_registry;
+use g2g_plugins::TokioThreadSpawner;
 
 // Same steady-state link depth as `g2g-launch` (low latency without starving the
 // source); see design/README.md on link_capacity dominating glass-to-glass latency.
 const LINK_CAPACITY: usize = 4;
 
-const USAGE: &str = "usage: g2g-launch-py [-q] <element> [key=value ...] ! <element> ! ...
+const USAGE: &str =
+    "usage: g2g-launch-py [-q] [--threads] <element> [key=value ...] ! <element> ! ...
        g2g-launch-py --inspect [g2g-inspect arguments]
        g2g-launch-py --inspect pyelement|pyaggregator module=<module> class=<class>
        g2g-launch-py --docgen [out.html]
@@ -58,6 +66,7 @@ fn main() {
     // hand everything after a tool flag to that tool, and skip the common no-op
     // gst-launch flags so a pasted line still runs.
     let mut quiet = false;
+    let mut threads = false;
     let mut tokens: Vec<String> = Vec::new();
     let mut in_pipeline = false;
     let mut args = std::env::args().skip(1);
@@ -65,6 +74,7 @@ fn main() {
         if !in_pipeline && arg.starts_with('-') && arg != "-" {
             match arg.as_str() {
                 "-q" | "--quiet" => quiet = true,
+                "--threads" => threads = true,
                 "--inspect" => {
                     inspect(args.collect());
                     return;
@@ -127,14 +137,27 @@ fn main() {
     let progress = PipelineProgress::new();
     let started = Instant::now();
     let mut printed_status = false;
+    let spawner = TokioThreadSpawner;
     let result = rt.block_on(async {
-        let mut run = Box::pin(run_graph_with_progress(
-            graph,
-            &clock,
-            LINK_CAPACITY,
-            &progress,
-            None,
-        ));
+        // one OS thread per element, so a CPU-bound convert does not hold up every other element's handoff
+        let mut run: Pin<Box<dyn Future<Output = Result<RunStats, G2gError>> + '_>> = if threads {
+            Box::pin(run_graph_threaded_with_progress(
+                graph,
+                &clock,
+                LINK_CAPACITY,
+                &progress,
+                None,
+                &spawner,
+            ))
+        } else {
+            Box::pin(run_graph_with_progress(
+                graph,
+                &clock,
+                LINK_CAPACITY,
+                &progress,
+                None,
+            ))
+        };
         loop {
             match tokio::time::timeout(Duration::from_secs(1), &mut run).await {
                 Ok(r) => break r,
