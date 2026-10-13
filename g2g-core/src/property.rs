@@ -209,6 +209,21 @@ impl PropValue {
     }
 }
 
+// the text `PropValue::parse` reads back
+impl core::fmt::Display for PropValue {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            PropValue::Bool(value) => write!(f, "{value}"),
+            PropValue::Int(value) => write!(f, "{value}"),
+            PropValue::Uint(value) => write!(f, "{value}"),
+            PropValue::Double(value) => write!(f, "{value}"),
+            PropValue::Fraction(numerator, denominator) => write!(f, "{numerator}/{denominator}"),
+            PropValue::Str(value) => f.write_str(value),
+            PropValue::Flags(nicks) => f.write_str(&nicks.join("+")),
+        }
+    }
+}
+
 /// Read/write access flags for a property, the GObject `G_PARAM_READABLE` /
 /// `G_PARAM_WRITABLE` analog shown in a `gst-inspect` dump. Default is
 /// read+write; a derived/computed property is read-only.
@@ -535,6 +550,23 @@ pub fn spec_names(specs: &[PropertySpec]) -> Vec<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn display_text_parses_back_to_the_same_value() {
+        let values = [
+            PropValue::Bool(true),
+            PropValue::Int(-7),
+            PropValue::Uint(42),
+            PropValue::Double(0.25),
+            PropValue::Fraction(30000, 1001),
+            PropValue::Str("rotate-180".into()),
+            PropValue::Flags(alloc::vec!["video".into(), "audio".into()]),
+        ];
+        for value in values {
+            let text = value.to_string();
+            assert_eq!(PropValue::parse(value.kind(), &text), Ok(value), "{text}");
+        }
+    }
 
     #[test]
     fn parse_matches_kind() {

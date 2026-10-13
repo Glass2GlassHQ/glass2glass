@@ -79,7 +79,9 @@ use crate::runtime::autoplug::{
     UriFanoutPort, UriRebuild,
 };
 use crate::runtime::parse_scope::ParseScope;
-use crate::runtime::{DynSourceLoop, GraphNode, GraphNodeRef, UnblockHandle};
+use crate::runtime::{
+    DynSourceLoop, GraphMutator, GraphNode, GraphNodeRef, MutationError, UnblockHandle,
+};
 use crate::stream::StreamType;
 
 /// Why [`parse_launch`] could not build a graph.
@@ -176,6 +178,12 @@ pub enum ParseError {
     /// pads are paired, so the stream index has to be explicit, and stream 0 is
     /// the inline keyword's own chain.
     BadRequestPad { element: String, pad: String },
+    /// A one-element description held something other than one element: a `!`,
+    /// a pad reference, a caps token, or a second element.
+    NotOneElement(String),
+    /// A one-element description carried `name=` or `log-category=`, which only
+    /// a whole launch line can apply.
+    LaunchKeyword { element: String, key: String },
 }
 
 impl From<GraphError> for ParseError {
@@ -296,6 +304,13 @@ impl core::fmt::Display for ParseError {
             ParseError::MissingUnblockHandle(n) => write!(
                 f,
                 "{n}: manual-unblock=true needs an UnblockHandle on the registry (Registry::register_unblock_handle), or nothing can release the source"
+            ),
+            ParseError::NotOneElement(description) => {
+                write!(f, "'{description}' is not a single element")
+            }
+            ParseError::LaunchKeyword { element, key } => write!(
+                f,
+                "{element}: '{key}=' is not accepted here, the running graph names the element"
             ),
         }
     }
@@ -2634,10 +2649,7 @@ fn build_graph(
                 .add_fanout_src(GraphNodeRef::FanoutSource(src), out_deg[ei] as u8)
                 .node()
         } else if in_deg[ei] == 0 {
-            let mut src = registry
-                .make_source(&spec.name)
-                .ok_or_else(|| ParseError::UnknownSource(spec.name.clone()))?;
-            apply_props(&mut src, &spec.name, &spec.props)?;
+            let src = build_source(registry, &spec.name, &spec.props)?;
             graph.add_source(GraphNodeRef::Source(src))
         } else if is_muxer(ei) {
             let mut mux = registry
@@ -2713,16 +2725,10 @@ fn build_graph(
                 .add_demux(GraphNodeRef::Demux(demux), out_deg[ei] as u8)
                 .node()
         } else if out_deg[ei] == 0 {
-            let mut el = registry
-                .make_element(&spec.name)
-                .ok_or_else(|| ParseError::UnknownElement(spec.name.clone()))?;
-            apply_props(&mut el, &spec.name, &spec.props)?;
+            let el = build_element(registry, &spec.name, &spec.props)?;
             graph.add_sink(GraphNodeRef::Element(el))
         } else {
-            let mut el = registry
-                .make_element(&spec.name)
-                .ok_or_else(|| ParseError::UnknownElement(spec.name.clone()))?;
-            apply_props(&mut el, &spec.name, &spec.props)?;
+            let el = build_element(registry, &spec.name, &spec.props)?;
             graph.add_transform(GraphNodeRef::Element(el))
         };
         // M842: a `name=` is the element's instance name at run time, not just
@@ -2969,6 +2975,90 @@ pub fn has_live_source(graph: &Graph<GraphNode>) -> bool {
             _ => None,
         })
         .any(|candidate| candidate.priority == crate::clock::ClockPriority::LiveSource)
+}
+
+pub fn build_element(
+    registry: &Registry,
+    name: &str,
+    properties: &[(String, String)],
+) -> Result<Box<dyn DynAsyncElement>, ParseError> {
+    let mut element = registry
+        .make_element(name)
+        .ok_or_else(|| ParseError::UnknownElement(name.to_string()))?;
+    apply_props(&mut element, name, properties)?;
+    Ok(element)
+}
+
+pub fn build_source(
+    registry: &Registry,
+    name: &str,
+    properties: &[(String, String)],
+) -> Result<Box<dyn DynSourceLoop>, ParseError> {
+    let mut source = registry
+        .make_source(name)
+        .ok_or_else(|| ParseError::UnknownSource(name.to_string()))?;
+    apply_props(&mut source, name, properties)?;
+    Ok(source)
+}
+
+pub fn parse_element(
+    registry: &Registry,
+    description: &str,
+) -> Result<Box<dyn DynAsyncElement>, ParseError> {
+    let spec = parse_one_element(registry, description)?;
+    build_element(registry, &spec.name, &spec.props)
+}
+
+pub fn parse_source(
+    registry: &Registry,
+    description: &str,
+) -> Result<Box<dyn DynSourceLoop>, ParseError> {
+    let spec = parse_one_element(registry, description)?;
+    build_source(registry, &spec.name, &spec.props)
+}
+
+fn parse_one_element(registry: &Registry, description: &str) -> Result<ElementSpec, ParseError> {
+    let description = description.trim();
+    let not_one_element = || ParseError::NotOneElement(description.to_string());
+    let tokens = tokenize(description);
+    let mut tokens = tokens.iter().map(String::as_str).peekable();
+    let name = tokens.next().ok_or(ParseError::Empty)?;
+    if name == "!" || is_caps_token(name) || as_ref_name(name).is_some() {
+        return Err(not_one_element());
+    }
+    let spec = consume_element(name, &mut tokens, &|token| registry.knows_element(token))?;
+    if tokens.next().is_some() {
+        return Err(not_one_element());
+    }
+    // the mutator names the instance itself
+    let keyword = match (&spec.instance, &spec.log_category) {
+        (Some(_), _) => Some("name"),
+        (None, Some(_)) => Some("log-category"),
+        (None, None) => None,
+    };
+    if let Some(keyword) = keyword {
+        return Err(ParseError::LaunchKeyword {
+            element: spec.name,
+            key: keyword.to_string(),
+        });
+    }
+    Ok(spec)
+}
+
+pub async fn set_property_text(
+    mutator: &GraphMutator<'_>,
+    node: &str,
+    name: &str,
+    text: &str,
+) -> Result<(), MutationError> {
+    let value = match mutator.get_property(node, name).await? {
+        Some(current) => {
+            PropValue::parse(current.kind(), text).map_err(MutationError::PropertyRejected)?
+        }
+        // no value to take the kind from, so the element judges the text itself
+        None => PropValue::Str(text.to_string()),
+    };
+    mutator.set_property(node, name, value).await
 }
 
 /// Splice memory-domain converters into a just-parsed graph (M1017), where the
@@ -3963,6 +4053,99 @@ mod tests {
                 stats.frames_consumed, 0,
                 "the transform registration ran, and it drops every frame"
             );
+        }
+    }
+
+    mod single_element_description {
+        use super::super::{parse_element, DynAsyncElement, ParseError};
+        use crate::property::{PropError, PropKind, PropValue, PropertySpec};
+        use crate::runtime::{LaunchFactory, Registry};
+        use crate::{AsyncElement, Caps, ConfigureOutcome, G2gError, OutputSink, PipelinePacket};
+        use alloc::boxed::Box;
+        use alloc::string::ToString;
+
+        const ELEMENT: &str = "leveler";
+        const LEVEL: &str = "level";
+        const LEVEL_SPECS: &[PropertySpec] = &[PropertySpec::new(LEVEL, PropKind::Int, "level")];
+
+        #[derive(Default)]
+        struct Leveler {
+            level: i64,
+        }
+
+        impl AsyncElement for Leveler {
+            type ProcessFuture<'a>
+                = core::future::Ready<Result<(), G2gError>>
+            where
+                Self: 'a;
+
+            fn intercept_caps(&self, upstream: &Caps) -> Result<Caps, G2gError> {
+                Ok(upstream.clone())
+            }
+
+            fn configure_pipeline(&mut self, _caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+                Ok(ConfigureOutcome::Accepted)
+            }
+
+            fn properties(&self) -> &'static [PropertySpec] {
+                LEVEL_SPECS
+            }
+
+            fn set_property(&mut self, name: &str, value: PropValue) -> Result<(), PropError> {
+                match name {
+                    LEVEL => self.level = value.as_int().ok_or(PropError::Type)?,
+                    _ => return Err(PropError::Unknown),
+                }
+                Ok(())
+            }
+
+            fn get_property(&self, name: &str) -> Option<PropValue> {
+                (name == LEVEL).then_some(PropValue::Int(self.level))
+            }
+
+            fn process<'a>(
+                &'a mut self,
+                _packet: PipelinePacket,
+                _out: &'a mut dyn OutputSink,
+            ) -> Self::ProcessFuture<'a> {
+                core::future::ready(Ok(()))
+            }
+        }
+
+        fn registry() -> Registry {
+            let mut reg = Registry::new();
+            reg.register_launch(LaunchFactory::new(ELEMENT, alloc::vec::Vec::new(), || {
+                Box::new(Leveler::default()) as Box<dyn DynAsyncElement>
+            }));
+            reg
+        }
+
+        #[test]
+        fn builds_the_element_with_its_property() {
+            let element = parse_element(&registry(), "leveler level=7").expect("parses");
+            assert_eq!(element.get_property(LEVEL), Some(PropValue::Int(7)));
+        }
+
+        #[test]
+        fn refuses_an_instance_name() {
+            let error = parse_element(&registry(), "leveler name=l")
+                .map(|_| ())
+                .unwrap_err();
+            assert_eq!(
+                error,
+                ParseError::LaunchKeyword {
+                    element: ELEMENT.to_string(),
+                    key: "name".to_string(),
+                }
+            );
+        }
+
+        #[test]
+        fn refuses_a_link() {
+            let error = parse_element(&registry(), "leveler ! leveler")
+                .map(|_| ())
+                .unwrap_err();
+            assert!(matches!(error, ParseError::NotOneElement(_)), "{error:?}");
         }
     }
 }
