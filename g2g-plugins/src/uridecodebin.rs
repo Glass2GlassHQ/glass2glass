@@ -283,12 +283,18 @@ use g2g_core::{ByteStreamEncoding, Graph};
 /// extension-guessed caps, whose downstream error would never mention the file.
 #[cfg(feature = "std")]
 fn open_file_prefix(uri: &str) -> Option<(alloc::string::String, Vec<u8>)> {
+    let path = file_uri_path(uri)?;
+    let prefix = read_file_prefix(path, PLAYBIN_PROBE_BYTES)?;
+    Some((path.to_string(), prefix))
+}
+
+#[cfg(feature = "std")]
+fn file_uri_path(uri: &str) -> Option<&str> {
     let parsed = Uri::parse(uri)?;
     if parsed.scheme != "file" || parsed.rest.is_empty() {
         return None;
     }
-    let prefix = read_file_prefix(parsed.rest, PLAYBIN_PROBE_BYTES)?;
-    Some((parsed.rest.to_string(), prefix))
+    Some(parsed.rest)
 }
 
 /// The first `bytes` of `path`, or `None` if it cannot be opened or read. An
@@ -1466,27 +1472,28 @@ fn build_mkv_subtitle_overlay(
 }
 
 /// A `file://` ISO-BMFF container probed into its forwardable tracks: the path
-/// its byte source reads, the probed prefix (which also holds the subtitle
+/// its byte source reads, the `moov` box (which also holds the subtitle
 /// tracks), and one track per `moov` entry in port order.
 #[cfg(feature = "std")]
 struct Mp4Probe {
     path: alloc::string::String,
-    prefix: Vec<u8>,
+    moov: Vec<u8>,
     infos: Vec<crate::mp4demuxn::Mp4StreamInfo>,
 }
 
 /// Probe a `file://` URI as ISO-BMFF. `None` for a non-`file://` URI, an
-/// unreadable file, or a container whose `moov` is not in the probed prefix.
+/// unreadable file, or a container with no readable `moov`.
 #[cfg(feature = "std")]
 fn mp4_probe(uri: &str) -> Option<Mp4Probe> {
-    let (path, prefix) = open_file_prefix(uri)?;
-    let infos = crate::mp4demuxn::forwardable_streams(&prefix);
+    let path = file_uri_path(uri)?;
+    let moov = read_mp4_moov(path)?;
+    let infos = crate::mp4demuxn::forwardable_streams(&moov);
     if infos.is_empty() {
         return None;
     }
     Some(Mp4Probe {
-        path,
-        prefix,
+        path: path.to_string(),
+        moov,
         infos,
     })
 }
@@ -1526,9 +1533,7 @@ impl Mp4Probe {
 /// track and a video track, the video branch routes through a `TextOverlayN` fed
 /// by the subtitle track (M412, `build_mp4_subtitle_overlay`) so the subtitles
 /// render on screen. Declines (`Ok(None)`) for a non-`file://` URI, an unreadable
-/// file, or a container whose `moov` is not in the probed prefix (a non-MP4, or a
-/// progressive file whose `moov` trails the data, which stays on the single-stream
-/// `file://` -> `Mp4Src` path).
+/// file, or a container with no readable `moov` (a non-MP4).
 #[cfg(feature = "std")]
 pub fn mp4_playbin(reg: &Registry, uri: &str) -> Result<Option<Graph<GraphNode>>, ParseError> {
     let (uri, cc) = cc_request(uri);
@@ -1551,7 +1556,7 @@ pub fn mp4_playbin(reg: &Registry, uri: &str) -> Result<Option<Graph<GraphNode>>
             )
             .map(Some);
         }
-        if let Some(text) = crate::mp4demuxn::subtitle_streams(&probe.prefix).first() {
+        if let Some(text) = crate::mp4demuxn::subtitle_streams(&probe.moov).first() {
             return build_mp4_subtitle_overlay(reg, &probe.path, &probe.infos, text).map(Some);
         }
     }
@@ -1589,6 +1594,58 @@ fn read_prefix(path: &str) -> Option<Vec<u8>> {
     let f = std::fs::File::open(path).ok()?;
     f.take(PLAYBIN_PROBE_BYTES).read_to_end(&mut prefix).ok()?;
     Some(prefix)
+}
+
+#[cfg(feature = "std")]
+const MP4_BOX_SIZE_BYTES: usize = 4;
+#[cfg(feature = "std")]
+const MP4_BOX_HEADER_BYTES: usize = 8;
+#[cfg(feature = "std")]
+const MP4_LARGE_SIZE_BYTES: usize = 8;
+#[cfg(feature = "std")]
+const MP4_LARGE_SIZE_MARKER: u32 = 1;
+#[cfg(feature = "std")]
+const MP4_SIZE_TO_END_MARKER: u32 = 0;
+#[cfg(feature = "std")]
+const MP4_MAX_TOP_LEVEL_BOXES: usize = 1024;
+
+// Seeks box to box so a `moov` after a large `mdat` is found without reading the `mdat`.
+#[cfg(feature = "std")]
+fn read_mp4_moov(path: &str) -> Option<Vec<u8>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path).ok()?;
+    let file_len = file.metadata().ok()?.len();
+    let mut offset = 0u64;
+    for _ in 0..MP4_MAX_TOP_LEVEL_BOXES {
+        let mut header = [0u8; MP4_BOX_HEADER_BYTES];
+        file.seek(SeekFrom::Start(offset)).ok()?;
+        file.read_exact(&mut header).ok()?;
+        let (size_field, kind) = header.split_at(MP4_BOX_SIZE_BYTES);
+        let size = match u32::from_be_bytes(size_field.try_into().ok()?) {
+            MP4_LARGE_SIZE_MARKER => {
+                let mut large_size = [0u8; MP4_LARGE_SIZE_BYTES];
+                file.read_exact(&mut large_size).ok()?;
+                u64::from_be_bytes(large_size)
+            }
+            MP4_SIZE_TO_END_MARKER => file_len.checked_sub(offset)?,
+            size => u64::from(size),
+        };
+        if size < MP4_BOX_HEADER_BYTES as u64 {
+            return None;
+        }
+        let end = offset.checked_add(size).filter(|&end| end <= file_len)?;
+        if kind == b"moov" {
+            if size > PLAYBIN_PROBE_BYTES {
+                return None;
+            }
+            file.seek(SeekFrom::Start(offset)).ok()?;
+            let mut moov = Vec::new();
+            file.take(size).read_to_end(&mut moov).ok()?;
+            return Some(moov);
+        }
+        offset = end;
+    }
+    None
 }
 
 /// Resolve each output-pad request to a selectable-stream index (M476, text M477),
@@ -1924,8 +1981,8 @@ pub fn ts_primary_stream(location: &str, caps: &Caps) -> Option<PrimaryStream> {
 /// codec-specific decoder like `rav1ddec` against an AV1 mp4 would otherwise
 /// fail startup negotiation), else the audio track (`stream=aac`, which an
 /// audio-only `.m4a` needs because the default video port would plug a video
-/// decoder and fail "no caps overlap"). Declines a non-MP4 file, a `moov` past
-/// the probe window, an empty track set, or a video codec the demux cannot name.
+/// decoder and fail "no caps overlap"). Declines a non-MP4 file, an empty track
+/// set, or a video codec the demux cannot name.
 #[cfg(feature = "std")]
 pub fn mp4_primary_stream(location: &str, caps: &Caps) -> Option<PrimaryStream> {
     if !matches!(
@@ -1936,8 +1993,8 @@ pub fn mp4_primary_stream(location: &str, caps: &Caps) -> Option<PrimaryStream> 
     ) {
         return None;
     }
-    let prefix = read_prefix(location)?;
-    let infos = crate::mp4demuxn::forwardable_streams(&prefix);
+    let moov = read_mp4_moov(location)?;
+    let infos = crate::mp4demuxn::forwardable_streams(&moov);
     let selected = infos.iter().find(|i| i.video).or_else(|| infos.first())?;
     let stream = if selected.video {
         let Caps::CompressedVideo { codec, .. } = selected.caps else {
@@ -2085,18 +2142,18 @@ pub fn ogg_primary_stream(location: &str, caps: &Caps) -> Option<PrimaryStream> 
 
 /// Probe an MP4 file and build an [`Mp4DemuxN`](crate::mp4demuxn::Mp4DemuxN) with
 /// the requested tracks + their caps (M482). Shared by `qtdemux` demux-select and
-/// `decodebin` fan-out. Declines a non-MP4 file (or a `moov` past the probe window).
+/// `decodebin` fan-out. Declines a non-MP4 file.
 #[cfg(feature = "std")]
 fn mp4_select(
     location: &str,
     pads: &[PadRequest],
 ) -> Option<(Box<dyn DynMultiOutputElement>, Vec<Caps>)> {
-    let prefix = read_prefix(location)?;
+    let moov = read_mp4_moov(location)?;
     // Selection order: A/V tracks first, then subtitle (`tx3g`/`wvtt`/`stpp`)
     // tracks (M477), so a `d.text_0` request maps to the container's text track.
     // `Mp4DemuxN` forwards a `tx3g`/`wvtt` cue as `Text{Utf8}` (a `stpp` track as
     // `Text{Ttml}`, which a following `subparse` reduces to `Text{Utf8}`).
-    let mut infos = crate::mp4demuxn::forwardable_streams(&prefix);
+    let mut infos = crate::mp4demuxn::forwardable_streams(&moov);
     let mut kinds: Vec<PadKind> = infos
         .iter()
         .map(|i| {
@@ -2107,7 +2164,7 @@ fn mp4_select(
             }
         })
         .collect();
-    for text in crate::mp4demuxn::subtitle_streams(&prefix) {
+    for text in crate::mp4demuxn::subtitle_streams(&moov) {
         kinds.push(PadKind::Text);
         infos.push(text);
     }

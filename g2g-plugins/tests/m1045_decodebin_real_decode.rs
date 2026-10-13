@@ -179,3 +179,69 @@ async fn decodebin_fanout_runs_both_branches() {
         audio.len() / S16_BYTES
     );
 }
+
+/// More than `uridecodebin`'s 4 MiB container probe window.
+const MDAT_PADDING_BYTES: usize = 8 * 1024 * 1024;
+const BOX_SIZE_BYTES: usize = 4;
+const BOX_HEADER_BYTES: usize = 8;
+
+/// The fixture (already `moov` after `mdat`) with zeros appended inside its
+/// `mdat`, so the `moov` starts past the probe window. Every sample keeps its
+/// offset, so the `moov`'s chunk offsets stay valid.
+fn moov_past_probe_window() -> Vec<u8> {
+    let original = std::fs::read(FIXTURE).expect("fixture reads");
+    let mut padded = Vec::with_capacity(original.len() + MDAT_PADDING_BYTES);
+    let mut offset = 0;
+    while offset < original.len() {
+        let size_field: [u8; BOX_SIZE_BYTES] = original[offset..offset + BOX_SIZE_BYTES]
+            .try_into()
+            .expect("box size field");
+        let size = u32::from_be_bytes(size_field) as usize;
+        let whole_box = &original[offset..offset + size];
+        if &whole_box[BOX_SIZE_BYTES..BOX_HEADER_BYTES] == b"mdat" {
+            let padded_size = u32::try_from(size + MDAT_PADDING_BYTES).expect("mdat fits u32");
+            padded.extend_from_slice(&padded_size.to_be_bytes());
+            padded.extend_from_slice(&whole_box[BOX_SIZE_BYTES..]);
+            padded.resize(padded.len() + MDAT_PADDING_BYTES, 0);
+        } else {
+            padded.extend_from_slice(whole_box);
+        }
+        offset += size;
+    }
+    padded
+}
+
+/// A named `decodebin` finds a `moov` past the probe window and decodes every
+/// video frame.
+#[tokio::test]
+async fn named_decodebin_reads_a_moov_past_the_probe_window() {
+    // filesrc declares its caps from the extension.
+    let input = temp_path("moov-at-end-input").with_extension("mp4");
+    let out = temp_path("moov-at-end-video");
+    let _ = std::fs::remove_file(&out);
+    std::fs::write(&input, moov_past_probe_window()).expect("padded fixture written");
+
+    let line = format!(
+        "filesrc location={} ! decodebin name=d  d. ! queue ! videoconvert \
+         ! video/x-raw,format=I420 ! filesink location={}",
+        input.display(),
+        out.display()
+    );
+    let (_, snapshot) = run_line(&line).await;
+    let decoded = std::fs::read(&out).expect("decoded frames written");
+    let _ = std::fs::remove_file(&input);
+    let _ = std::fs::remove_file(&out);
+
+    let raw = observed_caps(&snapshot);
+    assert!(
+        raw.iter().any(|c| c.contains("video/x-raw")
+            && c.contains(&format!("width={FIXTURE_WIDTH}"))
+            && c.contains(&format!("height={FIXTURE_HEIGHT}"))),
+        "a link carried decoded {FIXTURE_WIDTH}x{FIXTURE_HEIGHT} video: {raw:?}"
+    );
+    assert_eq!(
+        decoded.len(),
+        FIXTURE_VIDEO_FRAMES * I420_FRAME_BYTES,
+        "every coded frame came out decoded"
+    );
+}

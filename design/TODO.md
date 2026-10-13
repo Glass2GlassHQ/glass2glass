@@ -160,12 +160,6 @@ Highest leverage first:
 
 ## Containers
 
-- **A named `decodebin` misreads an mp4 whose `moov` follows `mdat`.**
-  `mp4_select` reads only `PLAYBIN_PROBE_BYTES` (4 MiB) of the file, so it finds
-  no tracks in a 12 MB clip with `moov` at the end and declines, and a later hook
-  claims the file as `video/mpeg`. `filesrc ! decodebin name=d d. ! queue !
-  videoconvert ! fakesink` fails with CapsMismatch, a plain `decodebin` or a
-  faststart remux of the same file runs.
 - **FLV:** Speex decode (no Speex encoder exists anywhere to build a validated
   decode vector, and gst's header-in-tag layout is rejected by libavcodec, so
   wiring a decoder would be an unvalidated claim).
