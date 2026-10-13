@@ -3,12 +3,12 @@
 //! [`AlsaSrc`](crate::alsasrc::AlsaSrc). Records interleaved PCM from a
 //! PulseAudio (or PipeWire-pulse) source and emits `DataFrame`s.
 //!
-//! The requested format / rate / channels are what the server converts to, so
-//! the produced caps are deterministic from the properties and negotiation needs
-//! no server round-trip: a launch line parses and solves with no server running,
-//! and only `run` fails loud. An empty `device` records the server's default
-//! source, which on a desktop exists even with no microphone (the output
-//! monitor).
+//! The server converts to whatever format / rate / channels negotiation fixes:
+//! a set property, else what a downstream caps filter asks for, else the
+//! default. So negotiation needs no server round-trip: a launch line parses and
+//! solves with no server running, and only `run` fails loud. An empty `device`
+//! records the server's default source, which on a desktop exists even with no
+//! microphone (the output monitor).
 //!
 //! ## Threading
 //!
@@ -43,6 +43,7 @@ use g2g_core::{
     AudioFormat, Caps, CapsConstraint, CapsSet, CaptureAnchor, ClockSync, ConfigureOutcome,
     ElementMetadata, FrameTiming, G2gError, HardwareError, LatencyReport, MemoryDomain, OutputSink,
     PadTemplate, PadTemplates, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
+    ANY_CHANNELS, ANY_SAMPLE_RATE,
 };
 
 use crate::audioconvert::{audio_format_from_str, audio_format_to_str, sample_bytes};
@@ -90,6 +91,9 @@ pub struct PulseSrc {
     format: AudioFormat,
     channels: u8,
     rate: u32,
+    format_pinned: bool,
+    channels_pinned: bool,
+    rate_pinned: bool,
     buffer_us: u32,
     latency_us: u32,
     /// `u64::MAX` = record until error or downstream shutdown; else stop after
@@ -118,6 +122,9 @@ impl PulseSrc {
             format: AudioFormat::PcmS16Le,
             channels: 2,
             rate: 48_000,
+            format_pinned: false,
+            channels_pinned: false,
+            rate_pinned: false,
             buffer_us: DEFAULT_BUFFER_US,
             latency_us: DEFAULT_LATENCY_US,
             num_buffers: u64::MAX,
@@ -147,18 +154,21 @@ impl PulseSrc {
     /// Request a PCM sample format (any of the five [`FORMATS`] map).
     pub fn with_format(mut self, format: AudioFormat) -> Self {
         self.format = format;
+        self.format_pinned = true;
         self
     }
 
     /// Request a sample rate in Hz.
     pub fn with_rate(mut self, rate: u32) -> Self {
         self.rate = rate;
+        self.rate_pinned = true;
         self
     }
 
     /// Request a channel count.
     pub fn with_channels(mut self, channels: u8) -> Self {
         self.channels = channels;
+        self.channels_pinned = true;
         self
     }
 
@@ -190,6 +200,46 @@ impl PulseSrc {
         // Reject a format no pulse stream carries (compressed, mulaw, ...).
         pulse_spec(&caps)?;
         Ok(caps)
+    }
+
+    fn produced_caps(&self) -> Result<CapsSet, G2gError> {
+        // rejects a configured format no pulse stream carries
+        self.caps()?;
+        let mut formats = vec![(0, self.format)];
+        if !self.format_pinned {
+            let other_formats = FORMATS
+                .iter()
+                .map(|(format, _)| *format)
+                .filter(|format| *format != self.format);
+            formats.extend(other_formats.map(|format| (1, format)));
+        }
+        let mut rates = vec![(0, self.rate)];
+        if !self.rate_pinned {
+            rates.push((1, ANY_SAMPLE_RATE));
+        }
+        let mut channel_counts = vec![(0, self.channels)];
+        if !self.channels_pinned {
+            channel_counts.push((1, ANY_CHANNELS));
+        }
+        let mut alternatives = Vec::new();
+        for &(format_open, format) in &formats {
+            for &(rate_open, sample_rate) in &rates {
+                for &(channels_open, channels) in &channel_counts {
+                    let caps = Caps::Audio {
+                        format,
+                        channels,
+                        sample_rate,
+                        channel_layout: g2g_core::ChannelLayout::UNSPECIFIED,
+                    };
+                    alternatives.push((format_open + rate_open + channels_open, caps));
+                }
+            }
+        }
+        // fewest open fields first: fixation keeps each property a filter leaves unset
+        alternatives.sort_by_key(|(open_fields, _)| *open_fields);
+        Ok(CapsSet::from_alternatives(
+            alternatives.into_iter().map(|(_, caps)| caps).collect(),
+        ))
     }
 
     /// The stream parameters, with the two time properties folded into a
@@ -243,18 +293,28 @@ impl SourceLoop for PulseSrc {
         core::future::ready(self.caps())
     }
 
-    /// Produces the fixed PCM caps the server converts to, so a chain built on
-    /// the mic takes the native arc-consistency path (mirrors `PipeWireSrc`).
+    /// Produces the PCM caps the server converts to, with every unset property
+    /// left open to a downstream filter, so a chain built on the mic takes the
+    /// native arc-consistency path.
     fn caps_constraint<'a>(
         &'a mut self,
     ) -> impl Future<Output = Result<CapsConstraint<'a>, G2gError>> + 'a {
-        core::future::ready(
-            self.caps()
-                .map(|c| CapsConstraint::Produces(CapsSet::one(c))),
-        )
+        core::future::ready(self.produced_caps().map(CapsConstraint::Produces))
     }
 
-    fn configure_pipeline(&mut self, _absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+    fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        let Caps::Audio {
+            format,
+            channels,
+            sample_rate,
+            ..
+        } = *absolute_caps
+        else {
+            return Err(G2gError::CapsMismatch);
+        };
+        self.format = format;
+        self.channels = channels;
+        self.rate = sample_rate;
         self.stream_config()?;
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
@@ -291,9 +351,16 @@ impl SourceLoop for PulseSrc {
             "format" => {
                 let s = value.as_str().ok_or(PropError::Type)?;
                 self.format = audio_format_from_str(s).ok_or(PropError::Value)?;
+                self.format_pinned = true;
             }
-            "samplerate" => self.rate = value.as_uint().ok_or(PropError::Type)? as u32,
-            "channels" => self.channels = value.as_uint().ok_or(PropError::Type)? as u8,
+            "samplerate" => {
+                self.rate = value.as_uint().ok_or(PropError::Type)? as u32;
+                self.rate_pinned = true;
+            }
+            "channels" => {
+                self.channels = value.as_uint().ok_or(PropError::Type)? as u8;
+                self.channels_pinned = true;
+            }
             "buffer-time" => self.buffer_us = value.as_uint().ok_or(PropError::Type)? as u32,
             "latency-time" => self.latency_us = value.as_uint().ok_or(PropError::Type)? as u32,
             "num-buffers" => crate::numbuffers::set_num_buffers(&mut self.num_buffers, &value)?,
@@ -407,7 +474,7 @@ impl SourceLoop for PulseSrc {
 }
 
 impl PadTemplates for PulseSrc {
-    /// Produces PCM; a constructed instance fixes the format / rate / channels.
+    /// Produces PCM; a constructed instance narrows to its format / rate / channels.
     /// `Caps::Audio` has no open dims, so the template pins the common stereo /
     /// 48 kHz shape per format, as in `PulseSink`.
     fn pad_templates() -> Vec<PadTemplate> {

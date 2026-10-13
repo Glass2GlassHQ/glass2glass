@@ -127,9 +127,6 @@ Highest leverage first:
 
 ## Capture sources
 
-- **`pulsesrc` ignores a downstream caps filter.** It emits 48000 Hz stereo
-  when the launch line asks for 16000 Hz mono after `audioconvert !
-  audioresample`.
 - `mfvideosrc`: first Windows build + camera smoke test; D3D11 zero-copy;
   size/rate request beyond device default.
 - Screen capture: Windows DXGI Desktop Duplication.
