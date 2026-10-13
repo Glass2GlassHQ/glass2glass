@@ -62,10 +62,10 @@ use serde_json::{json, Value};
 use base64::Engine as _;
 
 use g2g_core::log::{LogLevel, LogValue, RingSink, SinkId};
-use g2g_core::property::{takes_undeclared_properties, PropKind, PropValue};
+use g2g_core::property::PropValue;
 use g2g_core::runtime::{
-    parse_launch, run_graph_observed_mutable, select2, Either, GraphMutator, LinkInterceptor,
-    Observer, ProbeAction, Registry, RunStats,
+    build_element, parse_launch, run_graph_observed_mutable, select2, set_property_text, Either,
+    GraphMutator, LinkInterceptor, Observer, ProbeAction, Registry, RunStats,
 };
 #[cfg(feature = "mcp")]
 use g2g_core::runtime::{NodeRole, TelemetrySnapshot};
@@ -1383,23 +1383,14 @@ impl McpServer {
         let requested = args
             .get("value")
             .ok_or((-32602, "set_property needs `value`".to_string()))?;
+        let text = property_text(requested)?;
         let Some(pipeline) = self.pipeline.as_ref() else {
             return Ok(no_pipeline());
         };
         let mutator = pipeline.mutator.clone();
-        // The element's own current value names the kind to parse for, so a JSON
-        // 30 reaches an Int property as an Int and "30/1" reaches a Fraction.
-        let kind = match self
-            .runtime
-            .block_on(mutator.get_property(element, property))
-        {
-            Ok(current) => current.map(|current| current.kind()),
-            Err(error) => return Ok(mutation_error(&error)),
-        };
-        let value = property_value(requested, kind)?;
         if let Err(error) = self
             .runtime
-            .block_on(mutator.set_property(element, property, value))
+            .block_on(set_property_text(&mutator, element, property, &text))
         {
             return Ok(mutation_error(&error));
         }
@@ -1777,37 +1768,10 @@ fn property_json(value: &PropValue) -> Value {
         PropValue::Int(value) => json!(value),
         PropValue::Uint(value) => json!(value),
         PropValue::Double(value) => json!(value),
-        PropValue::Fraction(numerator, denominator) => json!(format!("{numerator}/{denominator}")),
         PropValue::Str(value) => json!(value),
-        PropValue::Flags(nicks) => json!(nicks.join("+")),
-        // a kind added since: the agent still sees the value
-        other => json!(format!("{other:?}")),
+        // a fraction, a flag set, or a kind added since: its launch-line text
+        other => json!(other.to_string()),
     }
-}
-
-/// A JSON argument as a typed property value. With `kind` known (the element's
-/// current value) the text is parsed the way a launch line's would be; without
-/// it the JSON type decides and the element has the last word.
-fn property_value(value: &Value, kind: Option<PropKind>) -> Result<PropValue, (i64, String)> {
-    let text = property_text(value)?;
-    if let Some(kind) = kind {
-        return PropValue::parse(kind, &text).map_err(|error| {
-            (
-                -32602,
-                format!("bad `value` for a {kind:?} property: {error:?}"),
-            )
-        });
-    }
-    Ok(match value {
-        Value::Bool(flag) => PropValue::Bool(*flag),
-        Value::Number(number) => match (number.as_i64(), number.as_u64(), number.as_f64()) {
-            (Some(signed), None, _) => PropValue::Int(signed),
-            (_, Some(unsigned), _) => PropValue::Uint(unsigned),
-            (_, _, Some(double)) => PropValue::Double(double),
-            _ => return Err((-32602, "`value` is not a number".into())),
-        },
-        _ => PropValue::Str(text),
-    })
 }
 
 /// A path as a launch-line property value. The parser resolves `\` escapes and
@@ -2287,48 +2251,16 @@ fn build_transform(
     name: &str,
     properties: Option<&Value>,
 ) -> Result<Box<dyn g2g_core::element::DynAsyncElement>, (i64, String)> {
-    let mut element = registry
-        .make_element(name)
-        .ok_or((-32602, format!("no transform or sink named `{name}`")))?;
-    let Some(properties) = properties else {
-        return Ok(element);
+    let properties = match properties {
+        None => Vec::new(),
+        Some(properties) => properties
+            .as_object()
+            .ok_or((-32602, "`properties` must be an object".into()))?
+            .iter()
+            .map(|(key, value)| Ok((key.clone(), property_text(value)?)))
+            .collect::<Result<Vec<_>, (i64, String)>>()?,
     };
-    let properties = properties
-        .as_object()
-        .ok_or((-32602, "`properties` must be an object".into()))?;
-    for (property_name, property_value) in properties {
-        let specs = element.properties();
-        let spec = specs.iter().find(|spec| spec.name == property_name);
-        let value = match spec {
-            Some(spec) => {
-                if !spec.flags.writable {
-                    return Err((-32602, format!("`{property_name}` is read-only")));
-                }
-                let raw = property_text(property_value)?;
-                spec.parse_value(&raw).map_err(|_| {
-                    (
-                        -32602,
-                        format!("bad value for `{name}.{property_name}`: {raw}"),
-                    )
-                })?
-            }
-            None if takes_undeclared_properties(specs) => {
-                PropValue::Str(property_text(property_value)?)
-            }
-            None => {
-                return Err((-32602, format!("no property `{property_name}` on `{name}`")));
-            }
-        };
-        element
-            .set_property(property_name, value)
-            .map_err(|error| {
-                (
-                    -32602,
-                    format!("cannot set `{name}.{property_name}`: {error:?}"),
-                )
-            })?;
-    }
-    Ok(element)
+    build_element(registry, name, &properties).map_err(|error| (-32602, format!("{error}")))
 }
 
 fn property_text(value: &Value) -> Result<String, (i64, String)> {
