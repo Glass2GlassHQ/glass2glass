@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- `videotestsrc` produces every `videoconvert` raw format a downstream caps filter asks for, RGBA when none does.
 - `pulsesrc` records the format, rate and channels a caps filter directly after it asks for when the property is unset.
 - `videotestsrc` takes the width, height and framerate a downstream caps filter asks for when the property is unset.
 - A `wgpusink` that reaches end of stream no longer crashes another `wgpusink` still presenting.

@@ -14,10 +14,12 @@ use g2g_core::memory::{SystemSlice, SystemView};
 use g2g_core::runtime::SourceLoop;
 use g2g_core::tensor::TensorView;
 use g2g_core::{
-    BufferPool, Caps, CapsConstraint, CapsSet, ConfigureOutcome, Dim, ElementMetadata, FrameTiming,
-    G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket, PropError,
-    PropKind, PropValue, PropertySpec, PushOutcome, Rate, RawVideoFormat, TensorDType,
+    BufferPool, Caps, CapsConstraint, CapsSet, Colorimetry, ConfigureOutcome, Dim, ElementMetadata,
+    FrameTiming, G2gError, MemoryDomain, OutputSink, PadTemplate, PadTemplates, PipelinePacket,
+    PropError, PropKind, PropValue, PropertySpec, PushOutcome, Rate, RawVideoFormat, TensorDType,
 };
+
+use crate::videoconvert::{convert, FORMATS};
 
 /// Synthetic content drawn into each frame. Some animate with the frame index
 /// (gradient, snow, moving-bar, ball, zone-plate); the calibration patterns
@@ -72,6 +74,8 @@ pub struct VideoTestSrc {
     framerate_pinned: bool,
     target_frames: u64,
     pattern: Pattern,
+    format: RawVideoFormat,
+    colorimetry: Colorimetry,
     configured: bool,
     pool: Option<BufferPool<Box<[u8]>>>,
     /// Frames skipped in response to upstream QoS (M174). Cumulative across the
@@ -105,6 +109,8 @@ impl VideoTestSrc {
             framerate_pinned: false,
             target_frames,
             pattern: Pattern::default(),
+            format: DRAWN_FORMAT,
+            colorimetry: Colorimetry::UNKNOWN,
             configured: false,
             pool: None,
             skipped: 0,
@@ -142,6 +148,8 @@ impl VideoTestSrc {
             framerate_pinned: false,
             target_frames,
             pattern: Pattern::default(),
+            format: DRAWN_FORMAT,
+            colorimetry: Colorimetry::UNKNOWN,
             configured: false,
             pool: Some(pool),
             skipped: 0,
@@ -178,11 +186,21 @@ impl VideoTestSrc {
     }
 
     fn caps(&self) -> Caps {
-        rgba_caps(
+        raw_caps(
+            DRAWN_FORMAT,
             Dim::Fixed(self.width),
             Dim::Fixed(self.height),
             Rate::Fixed(self.framerate_q16),
         )
+    }
+
+    // pool buffers and the shared [H, W, 4] view are sized for the drawn RGBA frame
+    fn produced_formats(&self) -> &'static [RawVideoFormat] {
+        if self.pool.is_some() || self.shared {
+            &[DRAWN_FORMAT]
+        } else {
+            &FORMATS
+        }
     }
 
     fn produced_caps(&self) -> CapsSet {
@@ -199,12 +217,15 @@ impl VideoTestSrc {
             framerates.push((1, REQUESTED_FRAMERATE));
         }
         let mut alternatives = Vec::new();
-        for (width_open, width) in &widths {
-            for (height_open, height) in &heights {
-                for (framerate_open, framerate) in &framerates {
-                    let open_fields = width_open + height_open + framerate_open;
-                    let caps = rgba_caps(width.clone(), height.clone(), framerate.clone());
-                    alternatives.push((open_fields, caps));
+        for format in self.produced_formats() {
+            for (width_open, width) in &widths {
+                for (height_open, height) in &heights {
+                    for (framerate_open, framerate) in &framerates {
+                        let open_fields = width_open + height_open + framerate_open;
+                        let caps =
+                            raw_caps(*format, width.clone(), height.clone(), framerate.clone());
+                        alternatives.push((open_fields, caps));
+                    }
                 }
             }
         }
@@ -225,14 +246,17 @@ const REQUESTED_FRAMERATE: Rate = Rate::Range {
     max_q16: MAX_REQUESTED_FPS << 16,
 };
 
-fn rgba_caps(width: Dim, height: Dim, framerate: Rate) -> Caps {
+const DRAWN_FORMAT: RawVideoFormat = RawVideoFormat::Rgba8;
+const DRAWN_BYTES_PER_PIXEL: usize = 4;
+
+fn raw_caps(format: RawVideoFormat, width: Dim, height: Dim, framerate: Rate) -> Caps {
     Caps::RawVideo {
-        format: RawVideoFormat::Rgba8,
+        format,
         width,
         height,
         framerate,
         interlace: g2g_core::Interlace::Any,
-        colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        colorimetry: Colorimetry::UNKNOWN,
     }
 }
 
@@ -265,14 +289,21 @@ impl SourceLoop for VideoTestSrc {
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         let Caps::RawVideo {
+            format,
             width: Dim::Fixed(width),
             height: Dim::Fixed(height),
             framerate: Rate::Fixed(framerate_q16),
+            colorimetry,
             ..
         } = *absolute_caps
         else {
             return Err(G2gError::CapsMismatch);
         };
+        if !self.produced_formats().contains(&format) {
+            return Err(G2gError::CapsMismatch);
+        }
+        self.format = format;
+        self.colorimetry = colorimetry;
         self.width = width;
         self.height = height;
         self.framerate_q16 = framerate_q16;
@@ -291,8 +322,13 @@ impl SourceLoop for VideoTestSrc {
 
             let bytes_per_frame = (self.width as usize)
                 .checked_mul(self.height as usize)
-                .and_then(|n| n.checked_mul(4))
+                .and_then(|n| n.checked_mul(DRAWN_BYTES_PER_PIXEL))
                 .ok_or(G2gError::CapsMismatch)?;
+            let mut drawn = if self.format == DRAWN_FORMAT {
+                Vec::new()
+            } else {
+                vec![0u8; bytes_per_frame]
+            };
 
             let mut seq = 0u64;
             let mut pushed = 0u64;
@@ -319,13 +355,26 @@ impl SourceLoop for VideoTestSrc {
                     self.emitted_frames.push(buf.to_vec());
                     let backing: Arc<[u8]> = Arc::from(buf);
                     self.emitted_ptrs.push(backing.as_ptr() as usize);
-                    let view =
-                        TensorView::contiguous(TensorDType::U8, &[self.height, self.width, 4]);
+                    let view = TensorView::contiguous(
+                        TensorDType::U8,
+                        &[self.height, self.width, DRAWN_BYTES_PER_PIXEL as u32],
+                    );
                     MemoryDomain::SystemView(SystemView::new(backing, view))
-                } else {
+                } else if self.format == DRAWN_FORMAT {
                     let mut buf = vec![0u8; bytes_per_frame].into_boxed_slice();
                     fill_pattern(self.pattern, &mut buf, self.width, seq);
                     MemoryDomain::System(SystemSlice::from_boxed(buf))
+                } else {
+                    fill_pattern(self.pattern, &mut drawn, self.width, seq);
+                    let converted = convert(
+                        &drawn,
+                        DRAWN_FORMAT,
+                        self.format,
+                        self.width as usize,
+                        self.height as usize,
+                        self.colorimetry,
+                    );
+                    MemoryDomain::System(SystemSlice::from_boxed(converted))
                 };
 
                 let pts = seq * pts_step_ns;
@@ -635,18 +684,14 @@ fn bounce(seq: u64, span: usize, speed: u64) -> usize {
 }
 
 impl PadTemplates for VideoTestSrc {
-    /// Static superset: the type always produces RGBA at any geometry /
-    /// framerate. A constructed instance narrows to its set properties via
-    /// `SourceLoop::caps_constraint`.
+    /// Static superset: the type produces every `videoconvert` format at any
+    /// geometry / framerate. A constructed instance narrows to its set
+    /// properties via `SourceLoop::caps_constraint`.
     fn pad_templates() -> Vec<PadTemplate> {
-        Vec::from([PadTemplate::source(CapsSet::one(Caps::RawVideo {
-            format: RawVideoFormat::Rgba8,
-            width: Dim::Any,
-            height: Dim::Any,
-            framerate: Rate::Any,
-            interlace: g2g_core::Interlace::Any,
-            colorimetry: g2g_core::Colorimetry::UNKNOWN,
-        }))])
+        let any_geometry = |format| raw_caps(format, Dim::Any, Dim::Any, Rate::Any);
+        Vec::from([PadTemplate::source(CapsSet::from_alternatives(
+            FORMATS.map(any_geometry).to_vec(),
+        ))])
     }
 }
 

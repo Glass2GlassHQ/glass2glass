@@ -314,7 +314,7 @@ async fn capsfilter_rejects_incompatible_format() {
 
     let mut src = VideoTestSrc::new(32, 32, 30, 12);
     let mut filter = CapsFilter::new(Caps::RawVideo {
-        format: RawVideoFormat::Nv12,
+        format: RawVideoFormat::P010,
         width: Dim::Any,
         height: Dim::Any,
         framerate: Rate::Any,

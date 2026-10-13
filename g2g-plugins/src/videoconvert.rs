@@ -36,7 +36,7 @@ use g2g_core::{
 
 /// Formats this element can both consume and produce. The convert `target`
 /// is always one of these.
-const FORMATS: [RawVideoFormat; 14] = [
+pub(crate) const FORMATS: [RawVideoFormat; 14] = [
     RawVideoFormat::Rgba8,
     RawVideoFormat::Bgra8,
     RawVideoFormat::Rgb8,

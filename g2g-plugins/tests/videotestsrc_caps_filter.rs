@@ -2,9 +2,10 @@
 
 use g2g_core::frame::Frame;
 use g2g_core::runtime::{parse_launch, run_graph};
-use g2g_core::PipelineClock;
+use g2g_core::{Colorimetry, PipelineClock, RawVideoFormat};
 use g2g_plugins::appsink::{register_appsink_pull, Pull};
 use g2g_plugins::registry::default_registry;
+use g2g_plugins::videoconvert::convert;
 
 const RGBA_BYTES_PER_PIXEL: usize = 4;
 const NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
@@ -70,5 +71,77 @@ async fn fields_the_filter_leaves_unset_keep_the_source_properties() {
             frame.timing.duration_ns,
             NANOSECONDS_PER_SECOND / FILTER_FPS
         );
+    }
+}
+
+#[tokio::test]
+async fn frames_take_the_format_a_caps_filter_asks_for() {
+    const CASES: [(&str, RawVideoFormat, u32, u32); 6] = [
+        ("I420", RawVideoFormat::I420, 64, 48),
+        ("NV12", RawVideoFormat::Nv12, 64, 48),
+        ("BGRA", RawVideoFormat::Bgra8, 64, 48),
+        ("I420_10LE", RawVideoFormat::I420p10, 64, 48),
+        ("YUY2", RawVideoFormat::Yuyv, 64, 48),
+        ("NV12", RawVideoFormat::Nv12, 33, 17),
+    ];
+    for (name, format, width, height) in CASES {
+        let frames = run_into_appsink(
+            &format!("videotestsrc_caps_filter_format_{name}_{width}x{height}"),
+            &format!(
+                "videotestsrc num-buffers={FRAMES} \
+                 ! video/x-raw,format={name},width={width},height={height}"
+            ),
+        )
+        .await;
+        let expected = format.unpadded_frame_bytes(width, height).expect("fits") as usize;
+        for frame in &frames {
+            assert_eq!(frame_bytes(frame), expected, "{name} {width}x{height}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn converted_frames_carry_the_drawn_pattern() {
+    const WIDTH: usize = 70;
+    const HEIGHT: usize = 40;
+    const SMPTE_BARS: usize = 7;
+    const ROUND_TRIP_TOLERANCE: u8 = 4;
+    let source = format!("videotestsrc num-buffers={FRAMES} pattern=smpte");
+    let geometry = format!("width={WIDTH},height={HEIGHT}");
+    let drawn = run_into_appsink(
+        "videotestsrc_caps_filter_pattern_rgba",
+        &format!("{source} ! video/x-raw,format=RGBA,{geometry}"),
+    )
+    .await;
+    let converted = run_into_appsink(
+        "videotestsrc_caps_filter_pattern_i420",
+        &format!("{source} ! video/x-raw,format=I420,{geometry}"),
+    )
+    .await;
+    let drawn = drawn[0].domain.as_system_slice().expect("system memory");
+    let converted = converted[0]
+        .domain
+        .as_system_slice()
+        .expect("system memory");
+    let back = convert(
+        converted,
+        RawVideoFormat::I420,
+        RawVideoFormat::Rgba8,
+        WIDTH,
+        HEIGHT,
+        Colorimetry::UNKNOWN,
+    );
+    let row = HEIGHT / 2;
+    for bar in 0..SMPTE_BARS {
+        let column = (2 * bar + 1) * WIDTH / (2 * SMPTE_BARS);
+        let pixel = (row * WIDTH + column) * RGBA_BYTES_PER_PIXEL;
+        for channel in pixel..pixel + RGBA_BYTES_PER_PIXEL {
+            assert!(
+                drawn[channel].abs_diff(back[channel]) <= ROUND_TRIP_TOLERANCE,
+                "bar {bar} byte {channel}: drawn {} came back {}",
+                drawn[channel],
+                back[channel]
+            );
+        }
     }
 }

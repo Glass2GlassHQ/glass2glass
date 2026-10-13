@@ -83,19 +83,19 @@ async fn tee_branches_run_independent_transforms() {
 
 #[tokio::test]
 async fn incompatible_branch_fails_negotiation() {
-    // An RGBA source into an NV12-pinned filter has no overlap, so the
+    // The source never produces P010, so a P010-pinned filter has no overlap and the
     // whole-graph solve fails loud before any data flows.
     let mut g: Graph<GraphNode> = Graph::new();
     let src = g.add_source(GraphNode::source(VideoTestSrc::new(8, 8, 30, 4)));
-    let nv12_only = CapsFilter::new(Caps::RawVideo {
-        format: RawVideoFormat::Nv12,
+    let p010_only = CapsFilter::new(Caps::RawVideo {
+        format: RawVideoFormat::P010,
         width: Dim::Any,
         height: Dim::Any,
         framerate: Rate::Any,
         interlace: g2g_core::Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
     });
-    let filter = g.add_transform(GraphNode::element(nv12_only));
+    let filter = g.add_transform(GraphNode::element(p010_only));
     let sink = g.add_sink(GraphNode::element(FakeSink::new()));
     g.link(src, filter).unwrap();
     g.link(filter, sink).unwrap();
@@ -104,6 +104,6 @@ async fn incompatible_branch_fails_negotiation() {
     assert_eq!(
         result.err(),
         Some(G2gError::CapsMismatch),
-        "RGBA into NV12 filter must fail"
+        "source into a P010 filter must fail"
     );
 }

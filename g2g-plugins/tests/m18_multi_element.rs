@@ -102,7 +102,7 @@ async fn zero_transforms_is_source_to_sink() {
 async fn incompatible_capsfilter_fails_negotiation() {
     let mut src = VideoTestSrc::new(64, 64, 30, 4);
     let mut filter = CapsFilter::new(Caps::RawVideo {
-        format: RawVideoFormat::Nv12,
+        format: RawVideoFormat::P010,
         width: Dim::Any,
         height: Dim::Any,
         framerate: Rate::Any,
@@ -118,18 +118,18 @@ async fn incompatible_capsfilter_fails_negotiation() {
     assert_eq!(
         result.err(),
         Some(G2gError::CapsMismatch),
-        "an RGBA source cannot negotiate through an NV12-only filter"
+        "the source cannot negotiate through a P010-only filter"
     );
 }
 
 /// `run_linear_chain_with_bus` routes the whole-chain solve failure to the
-/// bus (M18 item 7): the same incompatible NV12 filter posts a structured
+/// bus (M18 item 7): the same incompatible P010 filter posts a structured
 /// `EmptyLink` while the run still errors `CapsMismatch`.
 #[tokio::test]
 async fn incompatible_chain_posts_negotiation_failure_to_bus() {
     let mut src = VideoTestSrc::new(64, 64, 30, 4);
     let mut filter = CapsFilter::new(Caps::RawVideo {
-        format: RawVideoFormat::Nv12,
+        format: RawVideoFormat::P010,
         width: Dim::Any,
         height: Dim::Any,
         framerate: Rate::Any,
