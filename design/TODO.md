@@ -86,6 +86,10 @@ Highest leverage first:
 - **AV1 film grain chroma.** Match dav1d's chroma grain on libaom's
   `-aom-params film-grain-test=1` parameters: a 320x180 clip encoded with them
   differs from dav1d in 41 to 66 chroma bytes per frame, its luma is exact.
+- **Cost-based decoder auto-plug (possibility).** Choose the auto-plug chain
+  with the lowest total cost, summing a per-element cost and a per-frame
+  memory-domain conversion cost scaled by resolution. Today the shortest chain
+  always wins, so a `System` sink gets a software decoder even for 4K HEVC.
 
 ## CUDA / display
 
