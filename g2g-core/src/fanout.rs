@@ -569,6 +569,14 @@ pub trait MultiOutputElement: ElementBound {
         None
     }
 
+    /// Whether output port `i` carries stream `i` of a [`Caps::Batch`] input
+    /// (M1233). The solver then derives each port's edge from the input edge,
+    /// and the input edge back from what every port accepts, in place of
+    /// [`port_output_caps`](Self::port_output_caps). Default `false`.
+    fn ports_unbatch(&self) -> bool {
+        false
+    }
+
     /// The memory domains this fan-out accepts on its single input pad,
     /// mirroring [`AsyncElement::input_domains`].
     /// Default [`DomainSet::ALL`] (no requirement). A demux that parses host
@@ -612,6 +620,13 @@ pub trait MultiOutputElement: ElementBound {
     /// holds media back before routing it overrides it.
     fn latency(&self) -> crate::query::LatencyReport {
         crate::query::LatencyReport::ZERO
+    }
+
+    /// Static introspection metadata for this demux, the `gst-inspect`
+    /// "Factory Details", mirroring [`MultiInputElement::metadata`].
+    /// Default: empty.
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::default()
     }
 }
 
@@ -714,6 +729,15 @@ pub trait MultiInputElement: ElementBound {
     /// by `caps_constraint_for_output`.
     fn output_follows_input(&self) -> Option<usize> {
         None
+    }
+
+    /// Whether the merged output is a [`Caps::Batch`] of the inputs' caps in
+    /// pad order (M1233). The solver then derives the output edge from every
+    /// input edge, and each input edge back from its stream of the output, so
+    /// [`caps_constraint_for_output`](Self::caps_constraint_for_output) is never
+    /// asked. Default `false`.
+    fn output_batches_inputs(&self) -> bool {
+        false
     }
 
     /// Map a named input-pad request to this element's concrete input index

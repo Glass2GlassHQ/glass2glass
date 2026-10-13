@@ -400,6 +400,10 @@ pub trait DynMultiInputElement: ElementBound {
     /// Dyn-safe mirror of [`MultiInputElement::output_follows_input`]: the input
     /// pad whose caps the merged output follows (identity-passthrough mux), if any.
     fn output_follows_input(&self) -> Option<usize>;
+    /// Dyn-safe mirror of [`MultiInputElement::output_batches_inputs`].
+    fn output_batches_inputs(&self) -> bool {
+        false
+    }
     /// Dyn-safe mirror of [`MultiInputElement::tick_interval_ns`]: the deadline
     /// tick period this element wants, if any.
     fn tick_interval_ns(&self) -> Option<u64> {
@@ -529,6 +533,10 @@ impl<T: MultiInputElement> DynMultiInputElement for T {
 
     fn output_follows_input(&self) -> Option<usize> {
         MultiInputElement::output_follows_input(self)
+    }
+
+    fn output_batches_inputs(&self) -> bool {
+        MultiInputElement::output_batches_inputs(self)
     }
 
     fn tick_interval_ns(&self) -> Option<u64> {
@@ -739,6 +747,10 @@ impl MultiInputElement for MuxRef<'_> {
         self.0.output_follows_input()
     }
 
+    fn output_batches_inputs(&self) -> bool {
+        self.0.output_batches_inputs()
+    }
+
     fn input_pad_index(&self, req: &PadRequest, ordinal: usize) -> Option<usize> {
         self.0.input_pad_index(req, ordinal)
     }
@@ -824,6 +836,10 @@ impl<'b> DynMultiInputElement for &'b mut (dyn DynMultiInputElement + 'b) {
 
     fn output_follows_input(&self) -> Option<usize> {
         (**self).output_follows_input()
+    }
+
+    fn output_batches_inputs(&self) -> bool {
+        (**self).output_batches_inputs()
     }
 
     fn tick_interval_ns(&self) -> Option<u64> {

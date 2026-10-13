@@ -16,7 +16,7 @@ use alloc::boxed::Box;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use crate::caps::{Caps, CapsSet, PassthroughFields};
+use crate::caps::{batch_alternatives, Caps, CapsSet, PassthroughFields};
 use crate::format_element::{CapsConstraint, CapsPreferences};
 use crate::graph::{NodeId, NodeKind, ValidatedGraph};
 use crate::log::{self, LogLevel, Target, CAPS_CATEGORY};
@@ -85,6 +85,11 @@ pub enum NegotiationFailure {
     /// `downstream` has nothing to carry: an encoder fed a pixel format it does
     /// not take. Reported by the DAG solver.
     NoOutputForInput { upstream: usize, downstream: usize },
+    /// The batching node `index` would carry more than
+    /// [`MAX_BATCH_ALTERNATIVES`](crate::caps::MAX_BATCH_ALTERNATIVES)
+    /// combinations of its streams' caps. A capsfilter on each stream narrows
+    /// them.
+    TooManyBatchAlternatives { index: usize },
 }
 
 impl NegotiationFailure {
@@ -1004,6 +1009,14 @@ pub enum NodeConstraint<'a> {
         input: CapsConstraint<'a>,
         ports: Vec<CapsConstraint<'a>>,
     },
+    /// Batching mux (M1233): `inputs[i]` is input pad `i`'s constraint as in
+    /// [`Muxer`](Self::Muxer), and the output edge carries a [`Caps::Batch`]
+    /// whose streams are the input edges' caps in pad order.
+    BatchMuxer { inputs: Vec<CapsConstraint<'a>> },
+    /// Unbatching demux (M1233): `input` is the input edge's constraint as in
+    /// [`Demux`](Self::Demux), and output port `i` carries stream `i` of the
+    /// input's [`Caps::Batch`].
+    BatchDemux { input: CapsConstraint<'a> },
 }
 
 /// Solve caps for an arbitrary DAG (design/TODO.md "DAG runner" D2). Generalizes
@@ -1506,22 +1519,33 @@ fn node_consistent<E>(
     let get = |e: usize| assign[e].as_ref().expect("checked all assigned");
     match graph.kind(node) {
         // Membership is already ensured by arc consistency; nothing cross-edge.
-        NodeKind::Source
-        | NodeKind::Sink
-        | NodeKind::Muxer(_)
-        | NodeKind::FaninSink(_)
-        | NodeKind::FanoutSrc(_) => true,
-        NodeKind::Tee(_) => {
+        NodeKind::Source | NodeKind::Sink | NodeKind::FaninSink(_) | NodeKind::FanoutSrc(_) => true,
+        NodeKind::Muxer(_) => match &constraints[node.0 as usize] {
+            NodeConstraint::BatchMuxer { .. } => {
+                let streams = pads_in_order(graph, node)
+                    .into_iter()
+                    .map(|(_, e)| get(e).clone())
+                    .collect();
+                *get(out_e[0]) == Caps::Batch { streams }
+            }
+            _ => true,
+        },
+        NodeKind::Tee(_) => match &constraints[node.0 as usize] {
             // A demux decouples its ports (each its own produce set, ensured by arc
-            // consistency), so there is no cross-edge equality; a broadcast tee
-            // requires every branch to carry its input.
-            if matches!(&constraints[node.0 as usize], NodeConstraint::Demux { .. }) {
-                true
-            } else {
+            // consistency), so there is no cross-edge equality.
+            NodeConstraint::Demux { .. } => true,
+            NodeConstraint::BatchDemux { .. } => match get(in_e[0]) {
+                Caps::Batch { streams } if streams.len() == out_e.len() => out_e
+                    .iter()
+                    .all(|&o| streams.get(graph.edge(o).src.index as usize) == Some(get(o))),
+                _ => false,
+            },
+            // A broadcast tee requires every branch to carry its input.
+            _ => {
                 let inp = get(in_e[0]);
                 out_e.iter().all(|&o| get(o) == inp)
             }
-        }
+        },
         NodeKind::Transform => match &constraints[node.0 as usize] {
             NodeConstraint::Element(c) => transform_pair_consistent(c, get(in_e[0]), get(out_e[0])),
             _ => true,
@@ -1609,6 +1633,10 @@ fn fmt_constraint(nc: &NodeConstraint<'_>) -> String {
             ),
         },
         NodeConstraint::Demux { ports, .. } => alloc::format!("demux -> {} ports", ports.len()),
+        NodeConstraint::BatchMuxer { inputs } => {
+            alloc::format!("batch mux {} inputs -> batch of their caps", inputs.len())
+        }
+        NodeConstraint::BatchDemux { .. } => "batch demux -> one port per stream".to_string(),
     }
 }
 
@@ -1676,7 +1704,9 @@ pub(crate) fn graph_downstream_feasibility<E>(
                 // A demux decouples its ports, so its input feasibility is its own
                 // `input` accept (not the branches'); a broadcast tee's input must
                 // satisfy every branch, so it is their intersection.
-                if let NodeConstraint::Demux { input, .. } = &constraints[idx] {
+                if let NodeConstraint::Demux { input, .. } | NodeConstraint::BatchDemux { input } =
+                    &constraints[idx]
+                {
                     feas[graph.in_edges(node)[0]] = match input {
                         CapsConstraint::Accepts(s) => Some(s.clone()),
                         _ => None,
@@ -1698,7 +1728,9 @@ pub(crate) fn graph_downstream_feasibility<E>(
             // sets independently (a muxer's output does not feed back to its
             // inputs; a terminal fan-in has no output at all).
             NodeKind::Muxer(_) | NodeKind::FaninSink(_) => {
-                if let NodeConstraint::Muxer { inputs, .. } = &constraints[idx] {
+                if let NodeConstraint::Muxer { inputs, .. }
+                | NodeConstraint::BatchMuxer { inputs } = &constraints[idx]
+                {
                     for &ie in graph.in_edges(node) {
                         let pad = graph.edge(ie).dst.index as usize;
                         feas[ie] = match inputs.get(pad) {
@@ -1767,6 +1799,9 @@ fn apply_node<E>(
             NodeConstraint::Demux { input, ports } => {
                 apply_demux_node(graph, node, in_e[0], out_e, input, ports, edges)
             }
+            NodeConstraint::BatchDemux { input } => {
+                apply_batch_demux_node(graph, node, in_e[0], out_e, input, edges)
+            }
             _ => apply_tee_node(graph, in_e[0], out_e, edges),
         },
         NodeKind::Muxer(_) => match nc {
@@ -1775,6 +1810,9 @@ fn apply_node<E>(
                 output,
                 follows,
             } => apply_muxer_node(graph, node, inputs, output, *follows, edges),
+            NodeConstraint::BatchMuxer { inputs } => {
+                apply_batch_muxer_node(graph, node, inputs, edges)
+            }
             _ => Err(shape_err),
         },
         // A terminal fan-in narrows only its input pads (no output edge to
@@ -2260,6 +2298,142 @@ fn apply_muxer_node<E>(
         }
         _ => Err(shape_err),
     }
+}
+
+/// A fan-in node's `(pad, edge)` pairs in pad order.
+fn pads_in_order<E>(graph: &ValidatedGraph<E>, node: NodeId) -> Vec<(usize, usize)> {
+    let mut pads: Vec<(usize, usize)> = graph
+        .in_edges(node)
+        .iter()
+        .map(|&e| (graph.edge(e).dst.index as usize, e))
+        .collect();
+    pads.sort_unstable();
+    pads
+}
+
+/// Stream `stream` of every batch in `set` that has `streams` streams, deduped.
+fn batch_stream_alternatives(set: &CapsSet, streams: usize, stream: usize) -> CapsSet {
+    let mut out: Vec<Caps> = Vec::new();
+    for alternative in set.alternatives() {
+        if let Caps::Batch { streams: batch } = alternative {
+            if batch.len() == streams && !out.contains(&batch[stream]) {
+                out.push(batch[stream].clone());
+            }
+        }
+    }
+    CapsSet::from_alternatives(out)
+}
+
+/// A batching mux (M1233): each input edge narrows by its pad's accept set, the
+/// output edge narrows to the batches of the input edges' alternatives, and each
+/// input edge narrows back to its stream of the output's alternatives.
+fn apply_batch_muxer_node<E>(
+    graph: &ValidatedGraph<E>,
+    node: NodeId,
+    inputs: &[CapsConstraint<'_>],
+    edges: &mut [Option<CapsSet>],
+) -> Result<(), NegotiationFailure> {
+    narrow_muxer_inputs(graph, node, inputs, edges)?;
+    let out_edge = graph.out_edges(node)[0];
+    let pads = pads_in_order(graph, node);
+    let input_sets: Option<Vec<&[Caps]>> = pads
+        .iter()
+        .map(|&(_, e)| edges[e].as_ref().map(CapsSet::alternatives))
+        .collect();
+    if let Some(input_sets) = input_sets {
+        let batches = batch_alternatives(&input_sets).ok_or(
+            NegotiationFailure::TooManyBatchAlternatives {
+                index: node.0 as usize,
+            },
+        )?;
+        narrow_edge(
+            graph,
+            edges,
+            out_edge,
+            &CapsSet::from_alternatives(batches),
+            node,
+        )?;
+    }
+    if let Some(output) = edges[out_edge].clone() {
+        for (stream, &(_, e)) in pads.iter().enumerate() {
+            let projected = batch_stream_alternatives(&output, pads.len(), stream);
+            narrow_edge(graph, edges, e, &projected, node)?;
+        }
+    }
+    Ok(())
+}
+
+/// An unbatching demux (M1233): the input edge narrows by the demux's accept
+/// set, each port edge narrows to its stream of the input's batches, and the
+/// input narrows back to the batches whose every stream some port accepts.
+fn apply_batch_demux_node<E>(
+    graph: &ValidatedGraph<E>,
+    node: NodeId,
+    in_e: usize,
+    out_e: &[usize],
+    input: &CapsConstraint<'_>,
+    edges: &mut [Option<CapsSet>],
+) -> Result<(), NegotiationFailure> {
+    if let CapsConstraint::Accepts(s) = input {
+        narrow_edge(graph, edges, in_e, s, node)?;
+    }
+    let ports = out_e.len();
+    let Some(batches) = edges[in_e].clone() else {
+        return Ok(());
+    };
+    for &oe in out_e {
+        let port = graph.edge(oe).src.index as usize;
+        let projected = batch_stream_alternatives(&batches, ports, port);
+        narrow_edge(graph, edges, oe, &projected, node)?;
+    }
+    let mut port_sets: Vec<Option<CapsSet>> = alloc::vec![None; ports];
+    for &oe in out_e {
+        let port = graph.edge(oe).src.index as usize;
+        if let Some(slot) = port_sets.get_mut(port) {
+            slot.clone_from(&edges[oe]);
+        }
+    }
+    let Some(port_sets) = port_sets.into_iter().collect::<Option<Vec<CapsSet>>>() else {
+        return Ok(());
+    };
+    let too_many = NegotiationFailure::TooManyBatchAlternatives {
+        index: node.0 as usize,
+    };
+    let mut narrowed: Vec<Caps> = Vec::new();
+    for alternative in batches.alternatives() {
+        let Caps::Batch { streams } = alternative else {
+            continue;
+        };
+        if streams.len() != ports {
+            continue;
+        }
+        let per_stream: Vec<Vec<Caps>> = streams
+            .iter()
+            .zip(&port_sets)
+            .map(|(stream, port)| {
+                port.alternatives()
+                    .iter()
+                    .filter_map(|caps| stream.intersect(caps).ok())
+                    .collect()
+            })
+            .collect();
+        let per_stream: Vec<&[Caps]> = per_stream.iter().map(Vec::as_slice).collect();
+        for batch in batch_alternatives(&per_stream).ok_or(too_many.clone())? {
+            if !narrowed.contains(&batch) {
+                narrowed.push(batch);
+            }
+        }
+        if narrowed.len() > crate::caps::MAX_BATCH_ALTERNATIVES {
+            return Err(too_many);
+        }
+    }
+    narrow_edge(
+        graph,
+        edges,
+        in_e,
+        &CapsSet::from_alternatives(narrowed),
+        node,
+    )
 }
 
 #[cfg(test)]
@@ -4190,5 +4364,120 @@ mod tests {
             .expect("solves with custom labels");
         assert_eq!(default, labeled);
         assert_eq!(labeled, vec![rgba]);
+    }
+    #[test]
+    fn solve_graph_batch_mux_and_demux_negotiate_each_stream() {
+        // Two sources into a batching mux, its batch into an unbatching demux,
+        // one sink per port. Branch 0 only takes NV12, so the choice flows back
+        // through the batch to source 0, which offers RGBA first.
+        let rgba = fixed_video(RawVideoFormat::Rgba8, 320, 240, 30);
+        let nv12 = fixed_video(RawVideoFormat::Nv12, 320, 240, 30);
+        let i420 = fixed_video(RawVideoFormat::I420, 640, 480, 25);
+        let nv12_any = video(RawVideoFormat::Nv12, Dim::Any, Dim::Any, Rate::Any);
+        let cs: Vec<NodeConstraint> = vec![
+            NodeConstraint::Element(CapsConstraint::Produces(CapsSet::from_alternatives(vec![
+                rgba,
+                nv12.clone(),
+            ]))),
+            NodeConstraint::Element(CapsConstraint::Produces(CapsSet::one(i420.clone()))),
+            NodeConstraint::BatchMuxer {
+                inputs: vec![CapsConstraint::AcceptsAny, CapsConstraint::AcceptsAny],
+            },
+            NodeConstraint::BatchDemux {
+                input: CapsConstraint::AcceptsAny,
+            },
+            NodeConstraint::Element(CapsConstraint::Accepts(CapsSet::one(nv12_any))),
+            NodeConstraint::Element(CapsConstraint::AcceptsAny),
+        ];
+        let mut g: Graph<()> = Graph::new();
+        let first = g.add_source(());
+        let second = g.add_source(());
+        let mux = g.add_muxer((), 2);
+        let demux = g.add_tee(2);
+        let branch0 = g.add_sink(());
+        let branch1 = g.add_sink(());
+        g.link(first, mux.input(0)).unwrap();
+        g.link(second, mux.input(1)).unwrap();
+        g.link(mux.output(), demux.input()).unwrap();
+        g.link(demux.out(0), branch0).unwrap();
+        g.link(demux.out(1), branch1).unwrap();
+        let v = g.finish().unwrap();
+
+        let sol = solve_graph(&v, &cs).expect("batch mux and demux solve");
+        assert_eq!(sol[0], nv12, "branch 0's NV12 reached source 0");
+        assert_eq!(sol[1], i420);
+        assert_eq!(
+            sol[2],
+            Caps::Batch {
+                streams: vec![nv12.clone(), i420.clone()]
+            }
+        );
+        assert_eq!(sol[3], nv12, "port 0 carries stream 0");
+        assert_eq!(sol[4], i420, "port 1 carries stream 1");
+    }
+
+    #[test]
+    fn solve_graph_batch_demux_needs_one_port_per_stream() {
+        let rgba = fixed_video(RawVideoFormat::Rgba8, 320, 240, 30);
+        let cs: Vec<NodeConstraint> = vec![
+            NodeConstraint::Element(CapsConstraint::Produces(CapsSet::one(Caps::Batch {
+                streams: vec![rgba.clone(), rgba],
+            }))),
+            NodeConstraint::BatchDemux {
+                input: CapsConstraint::AcceptsAny,
+            },
+            NodeConstraint::Element(CapsConstraint::AcceptsAny),
+            NodeConstraint::Element(CapsConstraint::AcceptsAny),
+            NodeConstraint::Element(CapsConstraint::AcceptsAny),
+        ];
+        let mut g: Graph<()> = Graph::new();
+        let src = g.add_source(());
+        let demux = g.add_tee(3);
+        g.link(src, demux.input()).unwrap();
+        for port in 0..3 {
+            let sink = g.add_sink(());
+            g.link(demux.out(port), sink).unwrap();
+        }
+        let v = g.finish().unwrap();
+        assert!(matches!(
+            solve_graph(&v, &cs),
+            Err(NegotiationFailure::EmptyLink { .. })
+        ));
+    }
+
+    #[test]
+    fn solve_graph_batch_mux_refuses_too_many_combinations() {
+        // Three inputs of seven alternatives each is 343 batches, past the cap.
+        let alternatives = |format| {
+            CapsSet::from_alternatives(
+                (1..=7)
+                    .map(|i| fixed_video(format, 16 * i, 16, 30))
+                    .collect(),
+            )
+        };
+        let cs: Vec<NodeConstraint> = vec![
+            NodeConstraint::Element(CapsConstraint::Produces(alternatives(RawVideoFormat::Nv12))),
+            NodeConstraint::Element(CapsConstraint::Produces(alternatives(RawVideoFormat::I420))),
+            NodeConstraint::Element(CapsConstraint::Produces(alternatives(
+                RawVideoFormat::Rgba8,
+            ))),
+            NodeConstraint::BatchMuxer {
+                inputs: (0..3).map(|_| CapsConstraint::AcceptsAny).collect(),
+            },
+            NodeConstraint::Element(CapsConstraint::AcceptsAny),
+        ];
+        let mut g: Graph<()> = Graph::new();
+        let sources: Vec<_> = (0..3).map(|_| g.add_source(())).collect();
+        let mux = g.add_muxer((), 3);
+        let sink = g.add_sink(());
+        for (pad, src) in sources.into_iter().enumerate() {
+            g.link(src, mux.input(pad as u8)).unwrap();
+        }
+        g.link(mux.output(), sink).unwrap();
+        let v = g.finish().unwrap();
+        assert_eq!(
+            solve_graph(&v, &cs),
+            Err(NegotiationFailure::TooManyBatchAlternatives { index: 3 })
+        );
     }
 }

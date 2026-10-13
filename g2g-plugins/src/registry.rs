@@ -1459,6 +1459,16 @@ pub fn default_registry() -> Registry {
     reg.register_muxer(MuxerFactory::new("cccombiner", |_inputs| {
         Box::new(crate::cccombiner::CcCombiner::new())
     }));
+    // Batch fan-in and fan-out (M1233): the demux's `d.src_N` branches are wired in link order.
+    #[cfg(feature = "metadata")]
+    reg.register_muxer(MuxerFactory::new("streammux", |inputs| {
+        Box::new(crate::batchmux::BatchMux::new(inputs))
+    }));
+    #[cfg(feature = "metadata")]
+    reg.register_demux(g2g_core::runtime::DemuxFactory::new(
+        "streamdemux",
+        |outputs| Box::new(crate::batchdemux::BatchDemux::new(outputs)),
+    ));
     // ONVIF analytics fan-in (M1151): a video branch on `c.video` (input 0, whose
     // caps the output follows) and a parsed metadata branch on `c.text`
     // (input 1), matched on the sender's wall clock so each picture leaves

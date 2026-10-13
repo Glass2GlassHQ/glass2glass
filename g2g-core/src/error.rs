@@ -43,6 +43,12 @@ pub enum G2gError {
     /// No data reached an element within the time it was given: the `watchdog`
     /// transform's `timeout` elapsed with the stream stalled.
     Timeout,
+    /// A demux built with `ports` output ports was handed a batch of `streams`
+    /// streams (M1233): each stream needs its own port.
+    PortCountMismatch { ports: usize, streams: usize },
+    /// The frame of mux input `index` was already taken out of its batch by an
+    /// earlier consumer (M1233).
+    BatchFrameTaken { index: usize },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

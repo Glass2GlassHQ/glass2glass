@@ -452,7 +452,7 @@ mod factory {
         pub description: String,
         /// Author / origin.
         pub author: String,
-        /// `"source"`, `"element"`, or `"muxer (fan-in)"`.
+        /// `"source"`, `"element"`, `"muxer (fan-in)"`, or `"demuxer (fan-out)"`.
         pub role: String,
         /// Host- or device-only runtime path: compiled, not promised in CI.
         /// See `STABILITY.md` (Tier 3).
@@ -781,6 +781,10 @@ mod factory {
                 .finish_non_exhaustive()
         }
     }
+
+    /// The output port count a demux is built with to read its metadata and
+    /// properties. The real count comes from link degree at parse.
+    const DEMUX_INSPECT_PORTS: usize = 2;
 
     /// Format an element's pad templates the way `gst-inspect` lists them (one
     /// line per pad: direction + the caps it accepts/produces).
@@ -2063,13 +2067,17 @@ mod factory {
                         .map(|m| m.name)
                         .filter(|name| !self.launch.iter().any(|f| f.name == *name)),
                 )
+                .chain(self.demuxes.iter().map(|d| d.name).filter(|name| {
+                    !self.launch.iter().any(|f| f.name == *name)
+                        && !self.muxers.iter().any(|m| m.name == *name)
+                }))
                 .collect()
         }
 
         /// One line per registerable element, `name: Long-name` (the long name
         /// from the element's [`metadata`](crate::AsyncElement::metadata), or just
         /// the name when it declares none), for the `gst-inspect` element index.
-        /// Sources, then transforms / sinks, then muxers. Each non-muxer element is
+        /// Sources, then transforms / sinks, then muxers, then demuxers. Each element is
         /// default-built to read its metadata (side-effect-free, like
         /// [`inspect`](Self::inspect)).
         pub fn element_listing(&self) -> Vec<String> {
@@ -2109,6 +2117,17 @@ mod factory {
                 // reads a muxer's.
                 if !self.launch.iter().any(|f| f.name == m.name) {
                     lines.push(line(m.name, (m.build)(1).metadata().long_name, false));
+                }
+            }
+            for d in &self.demuxes {
+                let listed = self.launch.iter().any(|f| f.name == d.name)
+                    || self.muxers.iter().any(|m| m.name == d.name);
+                if !listed {
+                    lines.push(line(
+                        d.name,
+                        (d.build)(DEMUX_INSPECT_PORTS).metadata().long_name,
+                        false,
+                    ));
                 }
             }
             lines
@@ -2170,6 +2189,17 @@ mod factory {
                     format_specs(mux.properties())
                 );
                 Some(out)
+            } else if let Some(d) = self.demuxes.iter().find(|d| d.name == name) {
+                let demux = (d.build)(DEMUX_INSPECT_PORTS);
+                out.push_str(&format_metadata(name, &demux.metadata()));
+                let _ = writeln!(out, "  Role        demuxer (fan-out)");
+                let _ = writeln!(out, "\nOutputs: derived from link degree");
+                let _ = write!(
+                    out,
+                    "\nElement Properties:\n{}",
+                    format_specs(demux.properties())
+                );
+                Some(out)
             } else {
                 None
             }
@@ -2227,6 +2257,21 @@ mod factory {
                     pads: Vec::new(),
                     properties: property_docs(mux.properties()),
                 })
+            } else if let Some(d) = self.demuxes.iter().find(|d| d.name == name) {
+                let demux = (d.build)(DEMUX_INSPECT_PORTS);
+                let m = demux.metadata();
+                Some(ElementDoc {
+                    name: name.to_string(),
+                    long_name: m.long_name.to_string(),
+                    klass: m.klass.to_string(),
+                    description: m.description.to_string(),
+                    author: m.author.to_string(),
+                    role: "demuxer (fan-out)".to_string(),
+                    experimental: false,
+                    caps: None,
+                    pads: Vec::new(),
+                    properties: property_docs(demux.properties()),
+                })
             } else {
                 None
             }
@@ -2234,7 +2279,8 @@ mod factory {
 
         /// Every registered element as an [`ElementDoc`], in the same order as
         /// [`element_names`](Self::element_names) (sources, transforms / sinks,
-        /// then muxer-only names). The structured catalog behind `g2g-docgen`.
+        /// then muxer-only and demux-only names). The structured catalog behind
+        /// `g2g-docgen`.
         pub fn describe_all(&self) -> Vec<ElementDoc> {
             self.element_names()
                 .into_iter()

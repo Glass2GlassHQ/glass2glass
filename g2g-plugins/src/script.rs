@@ -996,6 +996,15 @@ impl MultiOutputElement for ScriptRouter {
         Ok(ConfigureOutcome::Accepted)
     }
 
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "Rhai script router",
+            "Generic",
+            "Sends each buffer to the output a Rhai route(frame) function picks",
+            "g2g",
+        )
+    }
+
     fn process<'a>(
         &'a mut self,
         packet: PipelinePacket,

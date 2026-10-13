@@ -14,8 +14,8 @@ use core::pin::Pin;
 use alloc::boxed::Box;
 
 use g2g_core::{
-    Caps, CapsConstraint, ConfigureOutcome, G2gError, MultiOutputElement, MultiOutputSink,
-    PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
+    Caps, CapsConstraint, ConfigureOutcome, ElementMetadata, G2gError, MultiOutputElement,
+    MultiOutputSink, PipelinePacket, PropError, PropKind, PropValue, PropertySpec,
 };
 
 #[derive(Debug)]
@@ -52,6 +52,15 @@ impl MultiOutputElement for OutputSelector {
 
     fn configure_pipeline(&mut self, _absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
         Ok(ConfigureOutcome::Accepted)
+    }
+
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "Output selector",
+            "Generic",
+            "Sends the input to the one output the active-pad property picks",
+            "g2g",
+        )
     }
 
     fn properties(&self) -> &'static [PropertySpec] {

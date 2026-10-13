@@ -22,9 +22,9 @@ use g2g_core::frame::Frame;
 use g2g_core::log::LogSource;
 use g2g_core::memory::{DomainSet, MemoryDomainKind, SystemSlice};
 use g2g_core::{
-    ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, G2gError, MemoryDomain,
-    MultiOutputElement, MultiOutputSink, PipelinePacket, PropError, PropKind, PropValue,
-    PropertySpec,
+    ByteStreamEncoding, Caps, CapsConstraint, CapsSet, ConfigureOutcome, ElementMetadata, G2gError,
+    MemoryDomain, MultiOutputElement, MultiOutputSink, PipelinePacket, PropError, PropKind,
+    PropValue, PropertySpec,
 };
 
 use crate::dtlssrtp::{
@@ -389,6 +389,15 @@ impl MultiOutputElement for DtlsSrtpDec {
         absolute_caps.intersect(&input_caps())?;
         self.open_connection()?;
         Ok(ConfigureOutcome::Accepted)
+    }
+
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::new(
+            "DTLS-SRTP decoder",
+            "Filter/Network/SRTP",
+            "Runs a DTLS-SRTP handshake and unprotects the RTP and RTCP it keys",
+            "g2g",
+        )
     }
 
     fn properties(&self) -> &'static [PropertySpec] {

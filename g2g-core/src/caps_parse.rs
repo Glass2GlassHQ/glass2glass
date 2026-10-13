@@ -7,8 +7,9 @@
 use alloc::vec::Vec;
 
 use crate::caps::{
-    pcm_from_gst_format, AudioFormat, ByteStreamEncoding, Caps, CapsSet, Colorimetry, Dim,
-    Interlace, Rate, RawVideoFormat, SubPictureFormat, TextFormat, VideoCodec, PCM_FORMATS,
+    batch_alternatives, pcm_from_gst_format, AudioFormat, ByteStreamEncoding, Caps, CapsSet,
+    Colorimetry, Dim, Interlace, Rate, RawVideoFormat, SubPictureFormat, TextFormat, VideoCodec,
+    PCM_FORMATS,
 };
 use crate::channels::ChannelLayout;
 
@@ -425,31 +426,16 @@ impl CapsSet {
 /// the streams' alternatives.
 fn batch_set(streams: &str) -> Option<CapsSet> {
     let inner = streams.strip_prefix('<')?.strip_suffix('>')?;
-    let mut batches: Vec<Vec<Caps>> = alloc::vec![Vec::new()];
-    for stream in split_top_commas(inner)
+    let sets = split_top_commas(inner)
         .into_iter()
         .map(str::trim)
         .filter(|s| !s.is_empty())
-    {
-        let stream = stream.strip_prefix('"')?.strip_suffix('"')?;
-        let alternatives = CapsSet::from_gst_string(stream)?;
-        batches = batches
-            .iter()
-            .flat_map(|prefix| {
-                alternatives.alternatives().iter().map(move |caps| {
-                    let mut batch = prefix.clone();
-                    batch.push(caps.clone());
-                    batch
-                })
-            })
-            .collect();
-    }
-    Some(CapsSet::from_alternatives(
-        batches
-            .into_iter()
-            .map(|streams| Caps::Batch { streams })
-            .collect(),
-    ))
+        .map(|stream| CapsSet::from_gst_string(stream.strip_prefix('"')?.strip_suffix('"')?))
+        .collect::<Option<Vec<CapsSet>>>()?;
+    let alternatives: Vec<&[Caps]> = sets.iter().map(CapsSet::alternatives).collect();
+    Some(CapsSet::from_alternatives(batch_alternatives(
+        &alternatives,
+    )?))
 }
 
 fn compressed(

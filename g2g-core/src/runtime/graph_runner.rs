@@ -72,7 +72,7 @@ use crate::frame::{Frame, PipelinePacket};
 use crate::graph::{FanOutPolicy, Graph, NodeId, NodeKind, ValidatedGraph};
 use crate::memory::{DomainSet, MemoryDomainKind};
 use crate::meta::MetaRequests;
-use crate::property::{PropError, PropValue, PropertySpec};
+use crate::property::{ElementMetadata, PropError, PropValue, PropertySpec};
 use crate::query::{with_meta_demand, AllocationParams, LatencyReport};
 use crate::runtime::channel::{
     advertise_orientation, bounded, link, link_with_transit, LinkReceiver, LinkSender,
@@ -283,6 +283,10 @@ pub trait DynMultiOutputElement: ElementBound {
         DomainSet::ALL
     }
     fn port_output_caps(&self, port: usize) -> Option<Caps>;
+    /// Dyn-safe mirror of [`MultiOutputElement::ports_unbatch`].
+    fn ports_unbatch(&self) -> bool {
+        false
+    }
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError>;
     fn process<'a>(
         &'a mut self,
@@ -317,6 +321,12 @@ pub trait DynMultiOutputElement: ElementBound {
     fn latency(&self) -> LatencyReport {
         LatencyReport::ZERO
     }
+
+    /// Dyn-safe mirror of [`MultiOutputElement::metadata`], for the
+    /// `gst-inspect` "Factory Details" of an erased demux.
+    fn metadata(&self) -> ElementMetadata {
+        ElementMetadata::default()
+    }
 }
 
 impl<T: MultiOutputElement> DynMultiOutputElement for T {
@@ -330,6 +340,10 @@ impl<T: MultiOutputElement> DynMultiOutputElement for T {
 
     fn port_output_caps(&self, port: usize) -> Option<Caps> {
         MultiOutputElement::port_output_caps(self, port)
+    }
+
+    fn ports_unbatch(&self) -> bool {
+        MultiOutputElement::ports_unbatch(self)
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -373,6 +387,10 @@ impl<T: MultiOutputElement> DynMultiOutputElement for T {
 
     fn latency(&self) -> LatencyReport {
         MultiOutputElement::latency(self)
+    }
+
+    fn metadata(&self) -> ElementMetadata {
+        MultiOutputElement::metadata(self)
     }
 }
 
@@ -425,6 +443,10 @@ impl MultiOutputElement for DemuxRef<'_> {
         self.0.port_output_caps(port)
     }
 
+    fn ports_unbatch(&self) -> bool {
+        self.0.ports_unbatch()
+    }
+
     fn properties(&self) -> &'static [PropertySpec] {
         self.0.properties()
     }
@@ -448,6 +470,10 @@ impl MultiOutputElement for DemuxRef<'_> {
     fn latency(&self) -> LatencyReport {
         self.0.latency()
     }
+
+    fn metadata(&self) -> ElementMetadata {
+        self.0.metadata()
+    }
 }
 
 /// Forwarding impl so a borrowed `&mut dyn DynMultiOutputElement` can be boxed
@@ -464,6 +490,10 @@ impl<'b> DynMultiOutputElement for &'b mut (dyn DynMultiOutputElement + 'b) {
 
     fn port_output_caps(&self, port: usize) -> Option<Caps> {
         (**self).port_output_caps(port)
+    }
+
+    fn ports_unbatch(&self) -> bool {
+        (**self).ports_unbatch()
     }
 
     fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
@@ -507,6 +537,10 @@ impl<'b> DynMultiOutputElement for &'b mut (dyn DynMultiOutputElement + 'b) {
 
     fn latency(&self) -> LatencyReport {
         (**self).latency()
+    }
+
+    fn metadata(&self) -> ElementMetadata {
+        (**self).metadata()
     }
 }
 
@@ -3294,6 +3328,15 @@ fn build_node_constraints<'g, 'a>(
             // branches via `IdentityAny`. A demux that declares per-port caps
             // (M380) instead negotiates each branch against its port: build a
             // `Demux` constraint so a downstream decoder configures at startup.
+            NodeKind::Tee(_) if matches!(vg.element(node), Some(GraphNodeRef::Demux(elem)) if elem.ports_unbatch()) =>
+            {
+                let Some(GraphNodeRef::Demux(elem)) = vg.element(node) else {
+                    return Err(G2gError::CapsMismatch);
+                };
+                NodeConstraint::BatchDemux {
+                    input: elem.caps_constraint_as_input(),
+                }
+            }
             NodeKind::Tee(n) => {
                 let ports: Vec<Option<Caps>> = match vg.element(node) {
                     Some(GraphNodeRef::Demux(elem)) => {
@@ -3323,6 +3366,10 @@ fn build_node_constraints<'g, 'a>(
                 let inputs: Vec<CapsConstraint<'g>> = (0..elem.input_count())
                     .map(|pad| elem.caps_constraint_as_input(pad))
                     .collect();
+                if elem.output_batches_inputs() {
+                    constraints.push(NodeConstraint::BatchMuxer { inputs });
+                    continue;
+                }
                 let follows = elem.output_follows_input();
                 // An identity-passthrough mux derives its output from a pad, so it
                 // need not (and may be unable to) declare output caps up front;

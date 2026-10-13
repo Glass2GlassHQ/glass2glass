@@ -392,6 +392,11 @@ pub mod ccconverter;
 // Closed-caption combiner: video + captions in, video carrying caption meta out.
 #[cfg(feature = "metadata")]
 pub mod cccombiner;
+// Batch mux and demux (M1233): N raw video streams as one batch frame and back.
+#[cfg(feature = "metadata")]
+pub mod batchdemux;
+#[cfg(feature = "metadata")]
+pub mod batchmux;
 // MISB ST 0604 MISP time stamps in H.264 / H.265 SEI (STANAG 4609): codec +
 // misptimeinsert / misptimeextract elements (no_std).
 pub mod misptime;

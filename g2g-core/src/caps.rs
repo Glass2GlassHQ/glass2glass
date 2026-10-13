@@ -542,6 +542,40 @@ impl Caps {
     }
 }
 
+/// How many combinations of its streams' alternatives a set of
+/// [`Caps::Batch`] may hold, past which parsing or negotiating it fails rather
+/// than enumerate them.
+pub const MAX_BATCH_ALTERNATIVES: usize = 256;
+
+/// Every [`Caps::Batch`] taking one alternative per stream, the first stream's
+/// choice varying slowest so the set keeps each stream's preference order.
+/// `None` past [`MAX_BATCH_ALTERNATIVES`].
+#[cfg(feature = "alloc")]
+pub(crate) fn batch_alternatives(streams: &[&[Caps]]) -> Option<Vec<Caps>> {
+    let mut batches: Vec<Vec<Caps>> = alloc::vec![Vec::new()];
+    for alternatives in streams {
+        if batches.len().saturating_mul(alternatives.len()) > MAX_BATCH_ALTERNATIVES {
+            return None;
+        }
+        batches = batches
+            .iter()
+            .flat_map(|prefix| {
+                alternatives.iter().map(move |caps| {
+                    let mut batch = prefix.clone();
+                    batch.push(caps.clone());
+                    batch
+                })
+            })
+            .collect();
+    }
+    Some(
+        batches
+            .into_iter()
+            .map(|streams| Caps::Batch { streams })
+            .collect(),
+    )
+}
+
 /// GStreamer media-type string for a [`TextFormat`]. Plain / markup text is
 /// `text/x-raw` (with a `format=`); the structured subtitle formats carry their
 /// own `application/x-subtitle-*` media types, mirroring GStreamer.
