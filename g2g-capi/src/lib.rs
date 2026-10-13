@@ -27,11 +27,15 @@ use std::ffi::{c_char, c_void, CStr, CString};
 use std::fmt::Write as _;
 use std::os::raw::c_int;
 use std::ptr;
+use std::sync::mpsc;
 use std::thread::JoinHandle;
 
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
-use g2g_core::runtime::{block_on, parse_launch, run_graph_with_bus, RunStats};
+use g2g_core::runtime::{
+    block_on, parse_element, parse_launch, parse_source, set_property_text, GraphMutator,
+    MutationError, RunBuilder, RunStats,
+};
 use g2g_core::{Bus, BusMessage, G2gError, MemoryDomain, PipelineState};
 use g2g_plugins::appsink::{
     register_appsink_pull, set_appsink_callback, AppSinkPull, Pull, SampleCallback,
@@ -54,6 +58,7 @@ const BUS_CAPACITY: usize = 64;
 pub struct Pipeline {
     /// Consumer end of the pipeline bus; the producer went to the run thread.
     bus: Bus,
+    mutator: GraphMutator<'static>,
     /// The background run thread, taken once [`g2g_pipeline_wait`] joins it.
     join: Option<JoinHandle<Result<RunStats, G2gError>>>,
     /// Captured run result after the thread is joined.
@@ -147,6 +152,7 @@ pub unsafe extern "C" fn g2g_pipeline_launch(
     drop(reg);
 
     let (bus, bus_handle) = Bus::new(BUS_CAPACITY);
+    let (mutator_sender, mutator_receiver) = mpsc::sync_channel(1);
     let spawned = std::thread::Builder::new()
         .name("g2g-capi-run".into())
         .spawn(move || {
@@ -155,12 +161,13 @@ pub unsafe extern "C" fn g2g_pipeline_launch(
                 .build()
                 .expect("build tokio runtime");
             let clock = WallClock::new();
-            rt.block_on(run_graph_with_bus(
-                graph,
-                &clock,
-                LINK_CAPACITY,
-                &bus_handle,
-            ))
+            let (mutator, run) = RunBuilder::new(graph, &clock, LINK_CAPACITY)
+                .with_bus(&bus_handle)
+                .run_mutable();
+            if mutator_sender.send(mutator).is_err() {
+                return Err(G2gError::Shutdown);
+            }
+            rt.block_on(run)
         });
     // Returning null (not panicking across the FFI boundary) is the documented
     // failure contract.
@@ -171,9 +178,15 @@ pub unsafe extern "C" fn g2g_pipeline_launch(
             return ptr::null_mut();
         }
     };
+    let Ok(mutator) = mutator_receiver.recv() else {
+        let _ = join.join();
+        set_err(err_out, "pipeline run thread did not start");
+        return ptr::null_mut();
+    };
 
     let p = Box::new(Pipeline {
         bus,
+        mutator,
         join: Some(join),
         result: None,
         last_text: None,
@@ -292,6 +305,240 @@ pub unsafe extern "C" fn g2g_string_free(s: *mut c_char) {
     }
     // SAFETY: caller contract: `s` came from `CString::into_raw` in this crate.
     drop(unsafe { CString::from_raw(s) });
+}
+
+// ---- changing a running pipeline ---------------------------------------------
+
+/// Splice the element `description` names onto the edge below `after`.
+/// Returns its instance name, or null with `err_out` set.
+///
+/// # Safety
+/// `p` must be a live handle, `after` and `description` valid C strings, and
+/// `err_out` null or writable.
+#[no_mangle]
+pub unsafe extern "C" fn g2g_pipeline_insert_after(
+    p: *mut Pipeline,
+    after: *const c_char,
+    description: *const c_char,
+    err_out: *mut *mut c_char,
+) -> *mut c_char {
+    // SAFETY: caller contract on every argument.
+    let Some((p, [after, description])) =
+        (unsafe { mutation_args(p, [after, description], err_out) })
+    else {
+        return ptr::null_mut();
+    };
+    let element = match parse_element(&default_registry(), description) {
+        Ok(element) => element,
+        Err(e) => return null_with_error(err_out, &format!("parse error: {e}")),
+    };
+    name_or_refusal(block_on(p.mutator.insert_after(after, element)), err_out)
+}
+
+/// Splice the element `description` names onto the edge above `before`.
+/// Returns its instance name, or null with `err_out` set.
+///
+/// # Safety
+/// `p` must be a live handle, `before` and `description` valid C strings, and
+/// `err_out` null or writable.
+#[no_mangle]
+pub unsafe extern "C" fn g2g_pipeline_insert_before(
+    p: *mut Pipeline,
+    before: *const c_char,
+    description: *const c_char,
+    err_out: *mut *mut c_char,
+) -> *mut c_char {
+    // SAFETY: caller contract on every argument.
+    let Some((p, [before, description])) =
+        (unsafe { mutation_args(p, [before, description], err_out) })
+    else {
+        return ptr::null_mut();
+    };
+    let element = match parse_element(&default_registry(), description) {
+        Ok(element) => element,
+        Err(e) => return null_with_error(err_out, &format!("parse error: {e}")),
+    };
+    name_or_refusal(block_on(p.mutator.insert_before(before, element)), err_out)
+}
+
+/// Lift the transform `node` out of the running graph and drop it. Returns 1,
+/// or 0 with `err_out` set.
+///
+/// # Safety
+/// `p` must be a live handle, `node` a valid C string, and `err_out` null or
+/// writable.
+#[no_mangle]
+pub unsafe extern "C" fn g2g_pipeline_remove(
+    p: *mut Pipeline,
+    node: *const c_char,
+    err_out: *mut *mut c_char,
+) -> c_int {
+    // SAFETY: caller contract on every argument.
+    let Some((p, [node])) = (unsafe { mutation_args(p, [node], err_out) }) else {
+        return 0;
+    };
+    done_or_refusal(block_on(p.mutator.remove(node)).map(drop), err_out)
+}
+
+/// Take over the sink `node` with the element `description` names. Returns the
+/// replacement's instance name, or null with `err_out` set.
+///
+/// # Safety
+/// `p` must be a live handle, `node` and `description` valid C strings, and
+/// `err_out` null or writable.
+#[no_mangle]
+pub unsafe extern "C" fn g2g_pipeline_replace_sink(
+    p: *mut Pipeline,
+    node: *const c_char,
+    description: *const c_char,
+    err_out: *mut *mut c_char,
+) -> *mut c_char {
+    // SAFETY: caller contract on every argument.
+    let Some((p, [node, description])) =
+        (unsafe { mutation_args(p, [node, description], err_out) })
+    else {
+        return ptr::null_mut();
+    };
+    let element = match parse_element(&default_registry(), description) {
+        Ok(element) => element,
+        Err(e) => return null_with_error(err_out, &format!("parse error: {e}")),
+    };
+    let replaced = block_on(p.mutator.replace_sink(node, element)).map(|(name, _old)| name);
+    name_or_refusal(replaced, err_out)
+}
+
+/// Take over the source `node` with the source `description` names. Returns
+/// the replacement's instance name, or null with `err_out` set.
+///
+/// # Safety
+/// `p` must be a live handle, `node` and `description` valid C strings, and
+/// `err_out` null or writable.
+#[no_mangle]
+pub unsafe extern "C" fn g2g_pipeline_replace_source(
+    p: *mut Pipeline,
+    node: *const c_char,
+    description: *const c_char,
+    err_out: *mut *mut c_char,
+) -> *mut c_char {
+    // SAFETY: caller contract on every argument.
+    let Some((p, [node, description])) =
+        (unsafe { mutation_args(p, [node, description], err_out) })
+    else {
+        return ptr::null_mut();
+    };
+    let source = match parse_source(&default_registry(), description) {
+        Ok(source) => source,
+        Err(e) => return null_with_error(err_out, &format!("parse error: {e}")),
+    };
+    let replaced = block_on(p.mutator.replace_source(node, source)).map(|(name, _old)| name);
+    name_or_refusal(replaced, err_out)
+}
+
+/// Set property `name` on the running element `node` from its launch-line
+/// text. Returns 1, or 0 with `err_out` set.
+///
+/// # Safety
+/// `p` must be a live handle, `node`, `name` and `value` valid C strings, and
+/// `err_out` null or writable.
+#[no_mangle]
+pub unsafe extern "C" fn g2g_pipeline_set_property(
+    p: *mut Pipeline,
+    node: *const c_char,
+    name: *const c_char,
+    value: *const c_char,
+    err_out: *mut *mut c_char,
+) -> c_int {
+    // SAFETY: caller contract on every argument.
+    let Some((p, [node, name, value])) =
+        (unsafe { mutation_args(p, [node, name, value], err_out) })
+    else {
+        return 0;
+    };
+    done_or_refusal(
+        block_on(set_property_text(&p.mutator, node, name, value)),
+        err_out,
+    )
+}
+
+/// The launch-line text of property `name` on the running element `node`.
+/// Null without an error when the element has no such property, null with
+/// `err_out` set on a refusal.
+///
+/// # Safety
+/// `p` must be a live handle, `node` and `name` valid C strings, and `err_out`
+/// null or writable.
+#[no_mangle]
+pub unsafe extern "C" fn g2g_pipeline_get_property(
+    p: *mut Pipeline,
+    node: *const c_char,
+    name: *const c_char,
+    err_out: *mut *mut c_char,
+) -> *mut c_char {
+    // SAFETY: caller contract on every argument.
+    let Some((p, [node, name])) = (unsafe { mutation_args(p, [node, name], err_out) }) else {
+        return ptr::null_mut();
+    };
+    match block_on(p.mutator.get_property(node, name)) {
+        Ok(Some(value)) => owned_string(&value.to_string()),
+        Ok(None) => ptr::null_mut(),
+        Err(e) => null_with_error(err_out, &format!("{e:?}")),
+    }
+}
+
+// caller guarantees `p` is null or live, each string null or a valid C string, `err_out` null or writable
+unsafe fn mutation_args<'a, const N: usize>(
+    p: *const Pipeline,
+    strings: [*const c_char; N],
+    err_out: *mut *mut c_char,
+) -> Option<(&'a Pipeline, [&'a str; N])> {
+    if !err_out.is_null() {
+        // SAFETY: caller contract: `err_out` points to writable `*mut c_char`.
+        unsafe { *err_out = ptr::null_mut() };
+    }
+    // SAFETY: caller contract: `p` is null or a live handle.
+    let Some(p) = (unsafe { p.as_ref() }) else {
+        set_err(err_out, "null pipeline handle");
+        return None;
+    };
+    let mut borrowed = [""; N];
+    for (slot, string) in borrowed.iter_mut().zip(strings) {
+        // SAFETY: caller contract: `string` is null or a valid C string.
+        let Some(text) = (unsafe { opt_cstr(string) }) else {
+            set_err(err_out, "null or non-UTF-8 string argument");
+            return None;
+        };
+        *slot = text;
+    }
+    Some((p, borrowed))
+}
+
+fn name_or_refusal(
+    result: Result<String, MutationError>,
+    err_out: *mut *mut c_char,
+) -> *mut c_char {
+    match result {
+        Ok(name) => owned_string(&name),
+        Err(e) => null_with_error(err_out, &format!("{e:?}")),
+    }
+}
+
+fn done_or_refusal(result: Result<(), MutationError>, err_out: *mut *mut c_char) -> c_int {
+    match result {
+        Ok(()) => 1,
+        Err(e) => {
+            set_err(err_out, &format!("{e:?}"));
+            0
+        }
+    }
+}
+
+fn null_with_error(err_out: *mut *mut c_char, message: &str) -> *mut c_char {
+    set_err(err_out, message);
+    ptr::null_mut()
+}
+
+fn owned_string(text: &str) -> *mut c_char {
+    CString::new(text).unwrap_or_default().into_raw()
 }
 
 // ---- appsrc / appsink (M233) -------------------------------------------------
@@ -675,8 +922,7 @@ fn set_err(err_out: *mut *mut c_char, msg: &str) {
     if err_out.is_null() {
         return;
     }
-    let c = CString::new(msg).unwrap_or_default();
     // SAFETY: `err_out` non-null per the check; the caller owns the result and
     // frees it with `g2g_string_free`.
-    unsafe { *err_out = c.into_raw() };
+    unsafe { *err_out = owned_string(msg) };
 }

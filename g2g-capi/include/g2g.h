@@ -79,6 +79,45 @@ void g2g_pipeline_free(G2gPipeline *p);
 /* Free a string returned by this library (e.g. g2g_pipeline_launch err_out). */
 void g2g_string_free(char *s);
 
+/* ---- changing a running pipeline ---------------------------------------------
+ *
+ * `node` is an instance name: a launch line's `name=`, or a name returned
+ * below. `description` is one launch-line element ("valve drop=true") without
+ * name= or log-category=. A refused call leaves the pipeline running as it was
+ * and writes the reason to `err_out` (free with g2g_string_free). Each call
+ * blocks until the element upstream of the edit pushes its next packet.
+ * Returned names and values are owned: free with g2g_string_free.
+ */
+
+/* Splice the element onto the edge below `after`. Its name, or NULL. */
+char *g2g_pipeline_insert_after(G2gPipeline *p, const char *after,
+                                const char *description, char **err_out);
+
+/* Splice the element onto the edge above `before`. Its name, or NULL. */
+char *g2g_pipeline_insert_before(G2gPipeline *p, const char *before,
+                                 const char *description, char **err_out);
+
+/* Lift the transform `node` out and drop it. 1 on success, 0 if refused. */
+int g2g_pipeline_remove(G2gPipeline *p, const char *node, char **err_out);
+
+/* Swap the sink `node` for a new one. The new name, or NULL. */
+char *g2g_pipeline_replace_sink(G2gPipeline *p, const char *node,
+                                const char *description, char **err_out);
+
+/* Swap the source `node` for a new one. The new name, or NULL. */
+char *g2g_pipeline_replace_source(G2gPipeline *p, const char *node,
+                                  const char *description, char **err_out);
+
+/* Set a property from its launch-line text. 1 on success, 0 if refused. */
+int g2g_pipeline_set_property(G2gPipeline *p, const char *node,
+                              const char *name, const char *value,
+                              char **err_out);
+
+/* A property's launch-line text. NULL with no error when the element has no
+ * such property, NULL with `err_out` set if refused. */
+char *g2g_pipeline_get_property(G2gPipeline *p, const char *node,
+                                const char *name, char **err_out);
+
 /* ---- appsrc / appsink (M233) -------------------------------------------------
  *
  * The application feeds buffers into an `appsrc channel=<name>` and/or receives
