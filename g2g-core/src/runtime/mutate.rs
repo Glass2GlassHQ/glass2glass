@@ -47,6 +47,7 @@ use crate::runtime::mutation_error::{MutationError, MutationKind};
 use crate::runtime::progress::PipelineProgress;
 use crate::runtime::property_mailbox::{PropertyMailbox, PropertyRequest};
 use crate::runtime::runner::re_solve_downstream_dyn_sink;
+use crate::runtime::solver::{resolve_forward_output, ForwardResolve};
 use crate::segment::Segment;
 
 /// Builds the converter chain a caps-changing operation needs when the shape it
@@ -1247,9 +1248,15 @@ impl<'a, 'f, 's> MutationService<'a, 'f, 's> {
         let mut out_caps = Vec::with_capacity(elements.len());
         let mut current = input.clone();
         for element in elements.iter_mut() {
-            let out = element
+            let intercepted = element
                 .intercept_caps(&current)
                 .map_err(MutationError::Refused)?;
+            // a converter's intercept_caps only checks its input, its constraint names the output
+            let constraint = element.caps_constraint_as_transform();
+            let out = match resolve_forward_output(&constraint, &current, None, None) {
+                ForwardResolve::Fixed(caps) => caps,
+                _ => intercepted,
+            };
             out_caps.push(out.clone());
             current = out;
         }
