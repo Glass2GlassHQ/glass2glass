@@ -4,6 +4,9 @@ use g2g_core::{
     Rate, RawVideoFormat,
 };
 
+#[cfg(feature = "analytics")]
+use g2g_core::{BatchMeta, BatchStream};
+
 use crate::format::frame_bytes;
 use crate::props::fixed_caps;
 
@@ -39,6 +42,76 @@ pub(crate) fn default_accept() -> Caps {
         interlace: g2g_core::Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
+}
+
+// a batch is accepted when each of its streams would be on its own
+pub(crate) fn intersect_accepted(caps: &Caps, accept: &Caps) -> Result<Caps, G2gError> {
+    #[cfg(feature = "analytics")]
+    if let Caps::Batch { streams } = caps {
+        let streams = streams
+            .iter()
+            .map(|stream| stream.intersect(accept))
+            .collect::<Result<_, _>>()?;
+        return Ok(Caps::Batch { streams });
+    }
+    caps.intersect(accept)
+}
+
+#[cfg(feature = "analytics")]
+async fn run_stream_batch(
+    worker: &crate::host::PyWorker,
+    mut carrier: Frame,
+) -> Result<Frame, G2gError> {
+    let batch = carrier
+        .meta
+        .get_mut::<BatchMeta>()
+        .ok_or(G2gError::CapsMismatch)?;
+    let caps = shared_stream_caps(&batch.streams)?;
+    let frames = batch
+        .streams
+        .iter_mut()
+        .map(|stream| {
+            stream.frame.take().ok_or(G2gError::BatchFrameTaken {
+                index: stream.index,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let frames = worker.run_stream_batch(frames, &caps).await?;
+    for (stream, frame) in batch.streams.iter_mut().zip(frames) {
+        stream.frame = Some(frame);
+    }
+    Ok(carrier)
+}
+
+// `g2g_process_batch` takes one width, height and format for every buffer
+#[cfg(feature = "analytics")]
+fn shared_stream_caps(streams: &[BatchStream]) -> Result<Caps, G2gError> {
+    let picture = |caps: &Caps| match caps {
+        Caps::RawVideo {
+            format,
+            width,
+            height,
+            ..
+        } => Some((*format, width.clone(), height.clone())),
+        _ => None,
+    };
+    let first = streams.first().ok_or(G2gError::CapsMismatch)?;
+    let first_picture = picture(&first.caps);
+    if let Some(differing) = streams
+        .iter()
+        .find(|stream| picture(&stream.caps) != first_picture)
+    {
+        g2g_core::g2g_error!(
+            g2g_core::log::Target::category("pyelement"),
+            "batch stream {} is {} but stream {} is {}, pyelement needs one format and geometry across a batch",
+            differing.index,
+            differing.caps.to_gst_string(),
+            first.index,
+            first.caps.to_gst_string()
+        );
+        return Err(G2gError::CapsMismatch);
+    }
+    Ok(first.caps.clone())
 }
 
 #[derive(Debug)]
@@ -86,7 +159,7 @@ impl HostedInput {
     }
 
     pub(crate) fn intercept_caps(&self, upstream_caps: &Caps) -> Result<Caps, G2gError> {
-        upstream_caps.intersect(&self.accept)
+        intersect_accepted(upstream_caps, &self.accept)
     }
 
     pub(crate) fn propose_allocation(&self, caps: &Caps) -> Option<AllocationParams> {
@@ -112,7 +185,15 @@ impl HostedInput {
         absolute_caps: &Caps,
         #[cfg_attr(not(feature = "python"), allow(unused_variables))] draw_label: bool,
     ) -> Result<(), G2gError> {
-        absolute_caps.intersect(&self.accept)?;
+        self.intercept_caps(absolute_caps)?;
+        #[cfg(feature = "analytics")]
+        if self.cuda_frames && matches!(absolute_caps, Caps::Batch { .. }) {
+            g2g_core::g2g_error!(
+                g2g_core::log::Target::category("pyelement"),
+                "batch frames reach pyelement in system memory only, set cuda-frames=false"
+            );
+            return Err(G2gError::UnsupportedDomain);
+        }
         self.fixed = Some(absolute_caps.clone());
         #[cfg(feature = "python")]
         {
@@ -139,7 +220,7 @@ impl HostedInput {
     }
 
     pub(crate) fn caps_changed(&mut self, caps: Caps) -> Result<(), G2gError> {
-        caps.intersect(&self.accept)?;
+        self.intercept_caps(&caps)?;
         self.fixed = Some(caps);
         Ok(())
     }
@@ -158,6 +239,10 @@ impl HostedInput {
         produce: Option<&Caps>,
     ) -> Result<Vec<Frame>, G2gError> {
         let (worker, caps) = self.worker_and_caps()?;
+        #[cfg(feature = "analytics")]
+        if frame.meta.get::<BatchMeta>().is_some() {
+            return Ok(vec![run_stream_batch(worker, frame).await?]);
+        }
         worker.run(frame, caps, produce).await
     }
 

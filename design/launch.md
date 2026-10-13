@@ -410,6 +410,19 @@ upstream class table survives an element that publishes none. A batch reads the
 anchor's metadata, since `g2g_process_batch` takes one sink and the anchor is the
 frame that carries metadata downstream.
 
+**Batch frames.** A `pyelement` after `streammux` takes the `Caps::Batch` frame
+when every stream's caps is one it would take alone. It hands the frames inside
+to `g2g_process_batch(buffers, width, height, fmt, meta)` in one call, in batch
+order, then puts them back in the batch and sends it on, so `streamdemux` splits
+it as usual. Results follow gst-python-ml's batch labels: a detection or
+classification whose class name starts with `stream_<i>_` goes on frame `i`, a
+tracking identity goes with the detection related to it, and everything else,
+blobs included, goes on frame 0. Labels keep their prefix. `meta` reads frame
+0's upstream metadata. Two limits hold for now. Batch frames reach the class in
+system memory only, so `cuda-frames=true` refuses a batch at configure. Every
+stream in a batch must share one format and geometry, and a batch that mixes them
+fails, naming the first stream that differs.
+
 **Running on some frames only.** `only-on=` names something a frame has to carry
 for the hosted class to be called: a blob header, or `detections` for any
 detection at all. A frame without it goes downstream untouched, with no Python

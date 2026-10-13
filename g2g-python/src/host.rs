@@ -164,6 +164,9 @@ enum JobKind {
     Consume,
     /// `g2g_process_batch([buf, ...], w, h, fmt, meta)` — N frames.
     Batch,
+    // the same hook over a streammux batch: every frame goes back, each with its own stream's results
+    #[cfg_attr(not(feature = "analytics"), allow(dead_code))]
+    StreamBatch,
     /// `g2g_produce(buf, w, h, fmt, meta) -> bool` — fill a blank frame; a
     /// `False` return signals end of stream.
     Produce,
@@ -665,6 +668,21 @@ impl PyWorker {
         .await
     }
 
+    #[cfg(feature = "analytics")]
+    pub(crate) async fn run_stream_batch(
+        &self,
+        frames: Vec<Frame>,
+        caps: &Caps,
+    ) -> Result<Vec<Frame>, G2gError> {
+        self.dispatch(Request::Job(Job {
+            frames,
+            caps: raw_video_caps(caps)?,
+            kind: JobKind::StreamBatch,
+            in_place: true,
+        }))
+        .await
+    }
+
     /// Ask a GPU source for its next surface: it allocates the device memory and
     /// hands back the planes, so there is no blank frame to fill. `None` when the
     /// source signalled EOS. The returned frame carries no timing; the source
@@ -904,9 +922,11 @@ fn handoff(py: Python<'_>, instance: &Py<PyAny>, job: &mut Job) -> Result<Handof
                 require_hook(py, instance, CUDA_BATCH_HOOK, CUDA_REMEDY)?;
                 Ok(Handoff::CudaBatch(planes))
             }
-            // A GPU frame handed to the System produce path (or a kind that
-            // cannot arise) has nowhere to go.
-            JobKind::Produce | JobKind::ProduceCuda => Err(G2gError::UnsupportedDomain),
+            // A GPU frame handed to the System produce path, a streammux batch
+            // (System memory only), or a kind that cannot arise has nowhere to go.
+            JobKind::Produce | JobKind::ProduceCuda | JobKind::StreamBatch => {
+                Err(G2gError::UnsupportedDomain)
+            }
         };
     }
 
@@ -1021,6 +1041,18 @@ fn process_job(
         return Ok(Vec::new());
     }
 
+    if matches!(job.kind, JobKind::StreamBatch) {
+        produced.map_err(|e| py_fail(py, e))?;
+        if !emitted.is_empty() {
+            return Err(py_fail(py, PyRuntimeError::new_err(STREAM_BATCH_EMITTED)));
+        }
+        let streams = job.frames.len();
+        for (frame, staged) in job.frames.iter_mut().zip(split_by_stream(staged, streams)) {
+            attach_metadata(frame, staged, frame_dims);
+        }
+        return Ok(job.frames);
+    }
+
     match produced {
         Ok(true) => {
             let Some(anchor) = job.frames.first() else {
@@ -1127,7 +1159,7 @@ fn call_system(
         } => {
             let (w, h, fmt) = (*width, *height, format_to_py(*fmt));
             match job.kind {
-                JobKind::Batch => {
+                JobKind::Batch | JobKind::StreamBatch => {
                     let list =
                         pyo3::types::PyList::new(py, buffers.iter().map(|b| b.clone_ref(py)))?;
                     bound
@@ -1175,6 +1207,85 @@ fn call_system(
         return Err(sink_produced(bound, SINK_RETURNED));
     }
     Ok(produced)
+}
+
+const STREAM_BATCH_EMITTED: &str =
+    "a batch goes on as the frames it holds, so meta.emit cannot replace it";
+const STREAM_LABEL_PREFIX: &str = "stream_";
+
+// gst-python-ml labels a batch result `stream_<i>_<class>`, `i` the buffer's place in the batch
+fn stream_of_label_name(name: &str) -> Option<usize> {
+    let (index, _) = name.strip_prefix(STREAM_LABEL_PREFIX)?.split_once('_')?;
+    index.parse().ok()
+}
+
+fn split_by_stream(staged: Vec<Staged>, streams: usize) -> Vec<Vec<Staged>> {
+    let class_names = staged.iter().rev().find_map(|record| match record {
+        Staged::ClassNames { names } => Some(names.clone()),
+        _ => None,
+    });
+    let stream_of_label = |label: u32| {
+        class_names
+            .as_ref()
+            .and_then(|names| names.get(label as usize))
+            .and_then(|name| stream_of_label_name(name))
+            .filter(|stream| *stream < streams)
+            .unwrap_or(0)
+    };
+    let mut stream_of: Vec<usize> = staged
+        .iter()
+        .map(|record| match record {
+            Staged::Object { label, .. } | Staged::Classification { label, .. } => {
+                stream_of_label(*label)
+            }
+            _ => 0,
+        })
+        .collect();
+    for record in &staged {
+        let Staged::Relation { from, to } = record else {
+            continue;
+        };
+        let stream = stream_of.get(*from).copied();
+        if let (Some(Staged::Tracking { .. }), Some(stream)) = (staged.get(*to), stream) {
+            stream_of[*to] = stream;
+        }
+    }
+
+    let mut split: Vec<Vec<Staged>> = (0..streams).map(|_| Vec::new()).collect();
+    // a relation naming a relation or class-name record finds nothing at usize::MAX and drops
+    let mut position = vec![usize::MAX; staged.len()];
+    let mut relations = Vec::new();
+    for (index, record) in staged.into_iter().enumerate() {
+        match record {
+            Staged::ClassNames { .. } => {}
+            Staged::Relation { from, to } => relations.push((from, to)),
+            record => {
+                let list = &mut split[stream_of[index]];
+                position[index] = list.len();
+                list.push(record);
+            }
+        }
+    }
+    for (from, to) in relations {
+        let (Some(&from_stream), Some(&to_stream)) = (stream_of.get(from), stream_of.get(to))
+        else {
+            continue;
+        };
+        if from_stream == to_stream {
+            split[from_stream].push(Staged::Relation {
+                from: position[from],
+                to: position[to],
+            });
+        }
+    }
+    if let Some(names) = class_names {
+        for list in &mut split {
+            list.push(Staged::ClassNames {
+                names: names.clone(),
+            });
+        }
+    }
+    split
 }
 
 const SINK_RETURNED: &str = "its hook returned a value instead of None";

@@ -37,8 +37,8 @@ use g2g_core::{
 
 use crate::format::{format_from_py, format_to_py};
 use crate::hosted_input::{
-    default_accept, HostedInput, CLASS_PROPERTY, CUDA_FRAMES_PROPERTY, INPUT_CAPS_PROPERTY,
-    MODULE_PROPERTY,
+    default_accept, intersect_accepted, HostedInput, CLASS_PROPERTY, CUDA_FRAMES_PROPERTY,
+    INPUT_CAPS_PROPERTY, MODULE_PROPERTY,
 };
 use crate::props::{fixed_caps, hosted_element_props, HostedClassProperties};
 
@@ -264,7 +264,7 @@ impl AsyncElement for PyTransform {
         }
         let accept = self.input.accept.clone();
         CapsConstraint::DerivedOutput(Box::new(move |input: &Caps| {
-            match input.intersect(&accept) {
+            match intersect_accepted(input, &accept) {
                 Ok(_) => CapsSet::one(input.clone()),
                 Err(_) => CapsSet::from_alternatives(Vec::new()),
             }

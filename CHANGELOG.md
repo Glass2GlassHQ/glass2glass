@@ -14,6 +14,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 - M1235: `RunBuilder` starts a run with any combination of bus, state, progress, observer, recorder, ticker and mutator, and a run with a bus posts `BusMessage::GraphMutated` for each mutation.
 - A spliced element's output caps come from its transform constraint, so a spliced `videoconvert format=I420` no longer claims to pass its input through.
 - Frame sequence numbers keep rising at the consumer across a splice, remove or source replacement.
+- M1234: `pyelement` takes a `streammux` batch, runs `g2g_process_batch` over its frames in one call and puts each `stream_<i>_` result on its own stream's frame.
 - M1233: `streammux` batches one raw video frame from each input into a `Caps::Batch` frame carrying them in its `BatchMeta`, and `streamdemux` splits the batch back out, one port per stream. The solver negotiates each stream through the batch, and registered demuxes now show in `--inspect` and `--docgen`.
 - A `pyelement` or `pyaggregator` whose `output-caps=` differ from its input sends nothing on for a frame it emits nothing for, rather than the input frame.
 - `g2g-inspect` and the element reference list every format `videotestsrc` and `pulsesrc` can produce (`SourceFactory::with_template_outputs`).
