@@ -13,7 +13,7 @@ Only graph construction and slot mutation differ.
 The static typed graph is a compile-time topology via tuple types, with no `dyn`
 and zero cost, right for embedded, RTOS and static cloud pipelines. The
 type-erased dynamic graph holds boxed elements (`Box<dyn DynAsyncElement>`) in
-`ElementSlot`s and `BranchSlot`s, swappable at runtime, right for cloud
+`ElementSlot`s, swappable at runtime, right for cloud
 ingestion, desktop applications, and anything that needs runtime topology
 evolution.
 
@@ -39,44 +39,13 @@ as a transform in `source -> slot -> sink` driven by `run_graph` and a
 `SwapHandle::swap` mid-stream rerouting the remaining frames to the replacement
 while every frame still reaches the sink.
 
-### BranchSlot
-
-A branch with one logical input and one logical output is structurally an
-element. `BranchSlot` is the multi-element analog of `ElementSlot`, with the swap
-trade-off made explicit at the type level:
-
-```rust
-pub enum SwapPolicy {
-    /// Flip input routing; in-flight frames inside the old branch's
-    /// internal channels are discarded. Zero latency; bounded frame loss.
-    /// Right for stateless filters (color grade, debug overlay).
-    Immediate,
-
-    /// Flip input routing; wait for old branch to drain its in-flight
-    /// frames before exposing the new branch's output to the consumer.
-    /// Zero loss; pays the old branch's pipeline depth in latency.
-    DrainOld,
-
-    /// Both branches consume in parallel for a brief overlap window;
-    /// the merger cuts over at the named signal (next IDR, next segment
-    /// boundary, etc.). Zero loss, zero per-frame stall; brief duplicated
-    /// compute during the overlap.
-    ShadowWarm { cutover: CutoverSignal },
-}
-```
-
-Static-graph users at the embedded layer never instantiate `BranchSlot` and do
-not pay for any of this machinery.
-
 ### Router, Gate and Merger
 
 A `Router` is a 1-to-N transform that reads an atomic discriminator per frame and
 pushes the frame to exactly one of its outputs. A `Gate` is a 1-to-1 transform
 that reads an atomic boolean and either forwards or discards each frame. A
 `Merger` is an N-to-1 transform that reads from one of its inputs, switching on a
-discriminator. Together they cover branch enable and disable, A/B switching, and
-the routing and cutover halves of `ShadowWarm`. These primitives are the
-foundation of the dynamic-graph layer.
+discriminator. Together they cover branch enable and disable and A/B switching.
 
 ### Runtime request pads
 
@@ -99,9 +68,15 @@ the verdict, and a refused input fails alone (`InputRefused`, logged under the
 `ElementSlot` swaps what sits in a position. `GraphMutator` changes the positions
 themselves: it splices a transform onto a live edge of a running `run_graph` or
 `run_graph_threaded` graph, lifts one back off, and swaps the source or the sink
-on either end of it, while frames keep flowing. `run_graph_mutable` and
-`run_graph_threaded_mutable` hand the caller the handle beside the run future, the
-way `run_source_router_dynamic` does.
+on either end of it, while frames keep flowing. It also grows a tee by a branch and
+a muxer by an input. `RunBuilder::run_mutable` and `run_threaded_mutable` hand the
+caller the handle beside the run future, the way `run_source_router_dynamic` does.
+
+`RunBuilder` is the one entry point for a run, whatever it carries: a bus, a state
+controller, progress, a copy budget, an observer, a flight recorder, a tick timer
+and the mutator, in any combination. `RunBuilder::new(graph, &clock, capacity)`
+takes the required parts and each `with_*` adds one. The `run_graph_*` functions
+remain as shorthands for the single-feature cases.
 
 The mechanism is a retargetable producing endpoint per edge. The arm pushing into
 an edge does so through a `SenderSink` whose `LinkSender` the mutator can take
@@ -266,7 +241,80 @@ reaction to an unsolvable mid-stream caps change, where a branch under
 `AllowBranchDrop` drops rather than failing the run.
 
 Every operation completes at the producer's next packet boundary, so a producer
-that has gone quiet defers it rather than failing.
+that has gone quiet defers it, unless the handle carries a timeout.
+
+### Chains, branches and inputs
+
+`insert_chain_after` and `insert_chain_before` splice several elements in stream
+order as one operation. The producer parks once, each element is negotiated against
+what the one before it emits, and only the last one's output has to be accepted
+below. Either every element goes in or none does, and the call returns the names in
+order. `insert_after` and `insert_before` are the one-element case.
+
+`add_branch` is the request-pad analog on a named tee. The branch is a list of
+elements whose last one is the sink. It is negotiated against the caps the tee
+broadcasts before the tee is touched, and the tee starts sending to it between two
+packets. `remove_branch` names the branch by its sink. The tee stops feeding it at
+its next packet boundary, what was queued drains through every element, and the
+sink takes an end of stream so it finalizes before the elements come back. A new
+branch sink starts playing and receives the elected clock, and like a replacement
+sink it takes no part in the clock election, the latency fold or the allocation
+cascade.
+
+`add_input` attaches a source to the next free declared pad of a named muxer. The
+muxer's arm negotiates the pad between two packets: the source's produce set against
+the pad's constraint, then `accepts_runtime_input`, whose refusal comes back as
+`Refused`. A muxer with every declared pad in use is `NoFreePad`. A launch line
+builds a muxer with one pad per linked input, so only a muxer that declares a fixed
+pad count, such as `cccombiner` fed only video, has a free pad there.
+
+### Converters
+
+A handle built `with_converters` splices converters behind an element whose output
+the chain below would refuse, instead of refusing the operation. The handle holds a
+`ConverterFactory`: given the caps the element produces and the set the edge
+accepts, it returns the chain between them, or `None`. The element and its
+converters go in as one splice. `Registry::converters` builds a factory from a
+registry's autoplug search, at most `CONVERTER_MAX_DEPTH` (4) elements deep.
+`g2g_plugins::registry::converters()` is that factory over `videoconvert` and
+`audioconvert` alone, since the default registry's autoplug factories are parsers,
+demuxers and decoders. `videoscale` is left out because it cannot be built from
+search caps whose geometry is open.
+
+A spliced element's output is worked out from its `caps_constraint_as_transform`
+through `resolve_forward_output`, the same resolve a mid-stream re-solve uses, and
+from `intercept_caps` only when the constraint gives no answer. A converter's
+`intercept_caps` checks only its input, so without the constraint a spliced
+`videoconvert format=I420` would claim to pass its input through.
+
+### Timeouts
+
+A handle built `with_timeout` gives up after that long waiting for a producer to
+reach a packet boundary and answers `TimedOut` with the graph untouched. The bounded
+wait is the one before anything moves. Once an old element is being ended the
+operation completes regardless, since that step cannot be undone. A timed property
+set whose arm has not taken it yet is withdrawn from the mailbox, so it is never
+applied after the caller was told it failed. The deadline sleeps on the run's tick
+timer, `with_ticker` or the clock's own `as_ticker`, and a run with neither answers
+`NoTimer`.
+
+The language bindings and the MCP server hand out `mutator_with_defaults` from
+`g2g_plugins::registry`: a 5 s timeout and `converters()`. Their runs are on
+`WallClock`, which is its own ticker. A pipeline a host registers with the MCP
+server keeps the host's handle unchanged, since its run may have no timer.
+
+### Reporting and sequence numbers
+
+A run with a bus posts `BusMessage::GraphMutated` once per operation, property reads
+excluded: the kind, the node it addressed, and the names it created or why it was
+refused. The caller gets the same answer back, so the message is for whoever else
+watches the topology.
+
+A frame's sequence number keeps rising at the consumer across a splice. Each
+endpoint records the last sequence it passed on. After a takeover, the endpoint
+shifts the new producer's numbers only when they would otherwise repeat or go back,
+so a replacement source that numbers from its own large base passes through as it
+is.
 
 ### Setting a property while it runs
 
@@ -295,13 +343,13 @@ capabilities, achieved through a different set of primitives.
 | GStreamer feature | g2g mechanism |
 | :--- | :--- |
 | Element hot-swap | `ElementSlot::swap` (ArcSwap) |
-| Branch insertion / removal | `BranchSlot::swap` with `SwapPolicy::Immediate` |
+| Element or chain insertion / removal | `GraphMutator::insert_chain_after` / `remove` |
+| Tee request pad | `GraphMutator::add_branch` / `remove_branch` |
+| Muxer request pad | `GraphMutator::add_input` |
 | Branch enable / disable, A/B switching | `Router` + `Gate` |
-| Bin nesting | `BranchSlot` is structurally a bin |
+| Bin nesting | `Graph::merge` with ghost pads, flattened when built |
 | Mid-stream caps change | `PipelinePacket::CapsChanged` + runner cascade |
 | Allocation pressure backtrack | Phase 3 `ConfigureOutcome::ReFixate` |
-| Bitrate switching | `BranchSlot` + `ShadowWarm { cutover: NextSegment }` |
-| Codec change at keyframe | `BranchSlot` + `ShadowWarm { cutover: NextKeyframe }` |
 | Demuxer dynamic-pad (bounded N) | Pre-allocated dark slots, populated on discovery |
 | Live source push from app code | Direct `LinkSender::send` from external task |
 | Multi-pipeline isolation | One pipeline per task tree; no shared mutable state |

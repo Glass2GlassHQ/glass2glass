@@ -10,7 +10,7 @@ use g2g_plugins::clock::WallClock;
 use g2g_plugins::registry::{converters, default_registry};
 use g2g_plugins::videoconvert::VideoConvert;
 
-const CHANNEL: &str = "m1234-converters";
+const CHANNEL: &str = "m1237-converters";
 const LINK_CAPACITY: usize = 2;
 const PULL_TIMEOUT: Duration = Duration::from_secs(5);
 

@@ -873,7 +873,11 @@ This is `GraphMutator` on a live graph, the counterpart to a GStreamer pad
 block plus relink (see [PORTING.md](PORTING.md) §5.2). A splice point is a
 transform position on a 1:1 edge, including tee / demux branches and muxer
 inputs. The source and sink ends take a whole replacement element instead
-(`replace_source` / `replace_sink`). The demo is a standalone crate outside
+(`replace_source` / `replace_sink`). The same handle splices a whole chain
+(`insert_chain_after`), grows a tee by a branch (`add_branch` / `remove_branch`)
+and a muxer by an input (`add_input`). The Python and C bindings and the MCP
+server expose all of it, with a 5 s timeout and `videoconvert` / `audioconvert`
+spliced in when an edit changes the format. The demo is a standalone crate outside
 the workspace because it needs the `rtsp` + `ffmpeg` + `wayland-sink`
 feature set. `G2G_RTSP_URL` picks the feed, `G2G_DEMO_SECONDS` bounds the run,
 ctrl-c ends it.

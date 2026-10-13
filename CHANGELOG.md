@@ -6,6 +6,14 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1240: the Python and C bindings and the MCP server splice elements and chains into a running pipeline, remove them, replace its source or sink, set properties, add and drop tee branches and add muxer inputs, with a 5 s timeout and converters on by default.
+- M1239: `GraphMutator::add_input` attaches a source to a free declared pad of a running muxer.
+- M1238: `GraphMutator::add_branch` attaches a branch under a running tee and `remove_branch` drops one after its sink finalizes.
+- M1237: `GraphMutator::insert_chain_after` / `insert_chain_before` splice several elements as one operation, and a handle `with_converters` splices `videoconvert` / `audioconvert` behind an element whose output the edge below refuses.
+- M1236: a `GraphMutator` built `with_timeout` answers `TimedOut` with the graph untouched when the producer reaches no packet boundary in time.
+- M1235: `RunBuilder` starts a run with any combination of bus, state, progress, observer, recorder, ticker and mutator, and a run with a bus posts `BusMessage::GraphMutated` for each mutation.
+- A spliced element's output caps come from its transform constraint, so a spliced `videoconvert format=I420` no longer claims to pass its input through.
+- Frame sequence numbers keep rising at the consumer across a splice, remove or source replacement.
 - M1233: `streammux` batches one raw video frame from each input into a `Caps::Batch` frame carrying them in its `BatchMeta`, and `streamdemux` splits the batch back out, one port per stream. The solver negotiates each stream through the batch, and registered demuxes now show in `--inspect` and `--docgen`.
 - A `pyelement` or `pyaggregator` whose `output-caps=` differ from its input sends nothing on for a frame it emits nothing for, rather than the input frame.
 - `g2g-inspect` and the element reference list every format `videotestsrc` and `pulsesrc` can produce (`SourceFactory::with_template_outputs`).

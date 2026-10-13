@@ -402,7 +402,7 @@ is design/runtime.md; the patterns an app developer hits most:
 | `pad-added` relink (decodebin) | bounded dynamic pads: `decodebin`/`uridecodebin` auto-plug, or `StreamDemux` / `register_demux` with N typed output ports ("dark slots" populated on discovery) |
 | `gst_pad_add_probe(BUFFER)` | a `LinkInterceptor` registered on a slot (the probe analog) |
 | `gst_pad_add_probe(BLOCK)` / `pad_idle`, then relink | no block to install: name the position instead (§5.2) |
-| add / remove a branch at runtime | runtime fan-out via `DynamicFanoutHandle::add_branch`, fan-in via `DynamicFaninHandle`; a swappable sub-graph is a `BranchSlot` |
+| add / remove a branch at runtime | `GraphMutator::add_branch` / `remove_branch` on a named tee, `add_input` on a named muxer (§5.2) |
 | enable/disable a branch, A/B switch | `Router` + `Gate` (and their `RouterHandle` / `GateHandle`) |
 | element hot-swap | `ElementSlot::swap` (ArcSwap; no use-after-free with a frame in flight) |
 | flushing seek | `PipelinePacket::Flush` (the runner drains and resets) |
@@ -433,12 +433,14 @@ which handle you want depends on what is changing:
 | :--- | :--- | :--- |
 | Swap one element for another in place | block, unlink, add, link, unblock | `ElementSlot::swap` (an atomic store, no block) |
 | Add or drop an element on an edge | block, unlink, add, two links, unblock | `GraphMutator::insert_after` / `insert_before` / `remove` |
+| Add a chain of elements on an edge | block, unlink, add each, link each, unblock | `GraphMutator::insert_chain_after` / `insert_chain_before` |
 | Swap the source or the sink of a running pipeline | block the pad, unlink, set the old element to `NULL`, add, link, unblock | `GraphMutator::replace_source` / `replace_sink` |
-| Add or drop a whole branch | block the tee pad, request / release a pad | `DynamicFanoutHandle::add_branch`, `DynamicFaninHandle::add_input` |
+| Add or drop a whole branch | block the tee pad, request / release a pad | `GraphMutator::add_branch` / `remove_branch` |
+| Add an input to a running muxer | request a sink pad, link | `GraphMutator::add_input` |
 | Watch or drop buffers in passing | `GST_PAD_PROBE_TYPE_BUFFER` | a `LinkInterceptor` on the edge's probe slot |
 
 [`GraphMutator`](g2g-core/src/runtime/mutate.rs) is the direct analog of the
-block-and-relink dance, from `run_graph_mutable` / `run_graph_threaded_mutable`
+block-and-relink dance, from `RunBuilder::run_mutable` / `run_threaded_mutable`
 alongside the run future: `insert_after("dec", element)` splices onto the edge
 below `dec`, `insert_before("sink", element)` onto the edge above `sink`, and
 `remove("videoflip0")` lifts the element back out and hands it to
@@ -456,8 +458,16 @@ Know the scope before you port to it: a transform position on a 1:1 edge carryin
 one stream. The producing end is a source, a transform, or one output of a tee or
 demux. The consuming end is a transform, a sink, or one input pad of a muxer or
 terminal fan-in. The structural nodes themselves are not splice points
-(`MutationError::NotMutable`), so reach for the fan-out / fan-in handles to add a
-whole branch.
+(`MutationError::NotMutable`). A tee takes a whole branch with `add_branch`, and a
+muxer takes a new input on a free declared pad with `add_input`.
+
+Two handle options cover what a pad block leaves to the application.
+`with_timeout` bounds the wait for the producer's next packet, so an edit on a
+stalled pipeline fails with `TimedOut` instead of waiting. `with_converters`
+splices a `videoconvert` or `audioconvert` behind an element whose output the
+pipeline below refuses, where GStreamer would need the application to add it.
+Pass it `g2g_plugins::registry::converters()`. The Python and C bindings and the
+MCP server turn both on, with a 5 s timeout.
 
 The two ends of the graph are not splice points either, but the element on one is
 swappable: `replace_source("src", element)` and `replace_sink("sink", element)`

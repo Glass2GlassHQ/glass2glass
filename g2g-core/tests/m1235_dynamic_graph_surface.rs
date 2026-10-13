@@ -1,4 +1,4 @@
-//! M1232-M1236: the client surface over a running graph. `RunBuilder` composes
+//! M1235-M1239: the client surface over a running graph. `RunBuilder` composes
 //! a mutator with the other run options; a handle's timeout bounds the wait for
 //! a packet boundary and withdraws what it asked for; the bus reports every
 //! operation; a chain splices as one, with converters where the chain below
@@ -720,7 +720,7 @@ fn mutations_on(bus: &Bus) -> Vec<(MutationKind, String, Result<Vec<String>, Mut
     reports
 }
 
-/// M1232: a mutator and a bus on one run, which only an observer could pair
+/// M1235: a mutator and a bus on one run, which only an observer could pair
 /// before; M1233: the bus hears every operation, landed or refused.
 #[test]
 fn the_builder_pairs_a_mutator_with_a_bus_and_the_bus_reports_each_operation() {
@@ -772,7 +772,7 @@ fn the_builder_pairs_a_mutator_with_a_bus_and_the_bus_reports_each_operation() {
     );
 }
 
-/// M1233: a producer that never reaches a packet boundary does not hold a timed
+/// M1236: a producer that never reaches a packet boundary does not hold a timed
 /// handle; the park request is withdrawn, so the stream runs on untouched once
 /// the producer does move, and an untimed operation then lands.
 #[test]
@@ -861,7 +861,7 @@ fn a_renumbering_splice_keeps_the_sink_sequence_rising() {
     );
 }
 
-/// M1233: a timed property set that finds no packet boundary is withdrawn, so
+/// M1236: a timed property set that finds no packet boundary is withdrawn, so
 /// it never lands late; the next untimed one does.
 #[test]
 fn a_timed_property_set_is_withdrawn_rather_than_applied_late() {
@@ -928,7 +928,7 @@ fn a_timed_property_set_is_withdrawn_rather_than_applied_late() {
     );
 }
 
-/// M1233: a timeout needs a clock that sleeps; a run without one says so
+/// M1236: a timeout needs a clock that sleeps; a run without one says so
 /// instead of waiting unbounded under a handle that promised not to.
 #[test]
 fn a_timed_handle_on_a_run_without_a_timer_is_refused() {
@@ -955,7 +955,7 @@ fn a_timed_handle_on_a_run_without_a_timer_is_refused() {
     assert_eq!(refused, MutationError::NoTimer);
 }
 
-/// M1234: a chain goes in as one operation, in stream order, and each element
+/// M1237: a chain goes in as one operation, in stream order, and each element
 /// comes back out on its own.
 #[test]
 fn a_chain_splices_as_one_operation() {
@@ -1020,7 +1020,7 @@ fn a_chain_splices_as_one_operation() {
     assert_eq!(sequences, expected, "no frame was lost or reordered");
 }
 
-/// M1234: an element whose output the sink refuses is refused on a plain
+/// M1237: an element whose output the sink refuses is refused on a plain
 /// handle, and goes in behind a converter on a handle that has one.
 #[test]
 fn a_caps_changing_insert_takes_its_converter_from_the_handle() {
@@ -1080,7 +1080,7 @@ fn a_caps_changing_insert_takes_its_converter_from_the_handle() {
     );
 }
 
-/// M1235: a branch of a transform and a sink joins a running tee, sees every
+/// M1238: a branch of a transform and a sink joins a running tee, sees every
 /// frame from then on, and comes back out finalized; the sibling branches
 /// never notice. The tee's own branches drop the same way.
 #[test]
@@ -1166,7 +1166,7 @@ fn a_branch_is_added_under_a_tee_and_dropped_again() {
     );
 }
 
-/// M1235: the positions a branch operation refuses.
+/// M1238: the positions a branch operation refuses.
 #[test]
 fn branch_operations_refuse_nodes_that_are_not_under_a_tee() {
     let record = Arc::new(Mutex::new(Record::default()));
@@ -1203,7 +1203,7 @@ fn branch_operations_refuse_nodes_that_are_not_under_a_tee() {
     assert_eq!(not_a_muxer, MutationError::NotMutable("sink".into()));
 }
 
-/// M1236: a source joins a running muxer on its free pad and its frames reach
+/// M1239: a source joins a running muxer on its free pad and its frames reach
 /// the merged output; a second one finds no pad.
 #[test]
 fn an_input_is_added_to_a_running_muxer() {
@@ -1253,7 +1253,7 @@ fn an_input_is_added_to_a_running_muxer() {
     );
 }
 
-/// M1236: the element's veto on a runtime input comes back to the caller and
+/// M1239: the element's veto on a runtime input comes back to the caller and
 /// the run goes on.
 #[test]
 fn a_muxer_vetoes_a_runtime_input() {
@@ -1287,7 +1287,7 @@ fn a_muxer_vetoes_a_runtime_input() {
     assert_eq!(frames_marked(&record, LATE_SOURCE_MARK), 0);
 }
 
-/// M1235 on the thread-per-arm runner: the tee takes the port on its own
+/// M1238 on the thread-per-arm runner: the tee takes the port on its own
 /// thread, and the branch's arms get threads of their own.
 #[test]
 fn a_branch_is_added_under_a_threaded_tee() {
