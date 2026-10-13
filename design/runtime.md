@@ -374,6 +374,52 @@ content-agnostic default demux in the registry, because routing is inherently
 stream-specific as the muxer side ships specific muxers, so `register_demux` is the
 surface.
 
+### Batch frames: `streammux` and `streamdemux`
+
+A batch carries N video frames as one packet, so one inference element can see
+several streams at once. The model is gst-plugins-rs's `analyticscombiner` and
+`analyticssplitter`. The link caps are `Caps::Batch { streams }`, one entry per
+mux input in input order, printed as
+`multistream/x-analytics-batch,streams=<"video/x-raw,...","video/x-raw,...">`. The
+printed stream caps carry only fixed fields, as every printed caps does, so a ranged
+stream does not survive the round trip through text. The carrier frame's own buffer
+is empty. Its `BatchMeta` lists each contributing stream as a `BatchStream` with the
+mux input `index`, the stream `caps` and the `frame`. No pixels are copied.
+
+`streammux` is `BatchMux` in Rust, a `MultiInputElement` built with the input count
+from link degree. It takes raw video in system memory, any format and geometry per
+input. Frames queue in an `InputAggregator`, and every complete round, one frame from
+each input still running, becomes one batch. An ended input drops out once its queue
+drains. There is no timeout, so a late input holds the batch back. The batch takes
+input 0's timing when input 0 contributes, else the earliest contributing frame's.
+Segment and flush pass through from input 0 only.
+
+`streamdemux` is `BatchDemux` in Rust, a `MultiOutputElement`. The launch names
+differ from the Rust names because `StreamDemux` is already the content-routing demux.
+It takes each frame out of the meta and pushes it to the port of its mux input. A
+stream missing from a batch pushes nothing, and a frame some earlier consumer already
+took fails with `G2gError::BatchFrameTaken`. Its port count must equal the stream
+count, else configure fails with `G2gError::PortCountMismatch`. A registered demux's
+branches are wired in link order and a `d.src_N` suffix does not pick the port, so
+`d.src_0`, `d.src_1` have to be written in that order.
+
+The startup solve runs before any element is configured, so neither element could
+state its caps there. `MultiInputElement::output_batches_inputs` and
+`MultiOutputElement::ports_unbatch` give the solver two node shapes instead,
+`NodeConstraint::BatchMuxer` and `NodeConstraint::BatchDemux`. The mux output edge is
+every batch of its input edges' alternatives, and each input edge narrows back to its
+stream of the output. Each demux port edge is its stream of the input edge, and the
+input narrows back to the batches whose streams the ports accept. So every branch
+negotiates against its own stream, and a branch's demand reaches the source feeding
+that stream. More than `MAX_BATCH_ALTERNATIVES` combinations fails the solve with
+`NegotiationFailure::TooManyBatchAlternatives`, and a capsfilter on each input narrows
+them.
+
+A batch can be teed. `BatchMeta`'s copy-on-write clone shares each frame with
+`Frame::share`, the duplication the tee uses. `streammux` makes each frame shareable
+as it enters the batch, which moves owned and pooled bytes behind an `Arc` and copies
+bytes lent through the C ABI once.
+
 ## Lifecycle: state machine, preroll and seek
 
 The lifecycle spine sits on top of the DAG runner. It turns build, run to EOS and

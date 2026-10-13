@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1233: `streammux` batches one raw video frame from each input into a `Caps::Batch` frame carrying them in its `BatchMeta`, and `streamdemux` splits the batch back out, one port per stream. The solver negotiates each stream through the batch, and registered demuxes now show in `--inspect` and `--docgen`.
 - A `pyelement` or `pyaggregator` whose `output-caps=` differ from its input sends nothing on for a frame it emits nothing for, rather than the input frame.
 - `g2g-inspect` and the element reference list every format `videotestsrc` and `pulsesrc` can produce (`SourceFactory::with_template_outputs`).
 - `videotestsrc` produces every `videoconvert` raw format a downstream caps filter asks for, RGBA when none does.
