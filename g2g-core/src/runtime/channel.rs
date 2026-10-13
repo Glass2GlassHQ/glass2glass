@@ -387,6 +387,11 @@ struct EndpointState {
     /// the running time its predecessor reached.
     segment: Option<Segment>,
     last_frame: Option<(u64, u64)>,
+    // the last DataFrame sequence the consumer below saw on this edge
+    last_sequence: Option<u64>,
+    // a producer that just took over the edge must number its first frame above this
+    continue_after: Option<u64>,
+    sequence_shift: u64,
 }
 
 #[cfg(feature = "std")]
@@ -412,16 +417,25 @@ impl ProducerEndpoint {
     }
 
     /// Follow what crosses this edge: the shape it carries and the timeline it
-    /// carries it on. Called once per push while a run is mutable, and never
+    /// carries it on, renumbering frames after a takeover so the sequence the
+    /// consumer sees keeps rising. Called once per push while a run is mutable, and never
     /// otherwise (the endpoint is `None`), so an ordinary run keeps its single
     /// branch and the zero-alloc proofs are untouched.
-    pub(crate) fn observe(&self, packet: &PipelinePacket) {
+    pub(crate) fn observe(&self, packet: &mut PipelinePacket) {
         match packet {
             PipelinePacket::CapsChanged(caps) => self.state.lock().caps = Some(caps.clone()),
             PipelinePacket::Segment(segment) => self.state.lock().segment = Some(*segment),
             PipelinePacket::DataFrame(frame) => {
-                self.state.lock().last_frame =
-                    Some((frame.timing.pts_ns, frame.timing.duration_ns));
+                let mut g = self.state.lock();
+                g.last_frame = Some((frame.timing.pts_ns, frame.timing.duration_ns));
+                if let Some(last) = g.continue_after.take() {
+                    g.sequence_shift = match frame.sequence <= last {
+                        true => last + 1 - frame.sequence,
+                        false => 0,
+                    };
+                }
+                frame.sequence = frame.sequence.saturating_add(g.sequence_shift);
+                g.last_sequence = Some(frame.sequence);
             }
             _ => {}
         }
@@ -433,6 +447,17 @@ impl ProducerEndpoint {
     pub(crate) fn timeline(&self) -> (Option<Segment>, Option<(u64, u64)>) {
         let g = self.state.lock();
         (g.segment, g.last_frame)
+    }
+
+    pub(crate) fn last_sequence(&self) -> Option<u64> {
+        self.state.lock().last_sequence
+    }
+
+    // a consumer that already saw `last` must not see the numbering go backwards
+    pub(crate) fn continue_sequence_after(&self, last: Option<u64>) {
+        let mut g = self.state.lock();
+        g.continue_after = last;
+        g.sequence_shift = 0;
     }
 
     /// Ask for this producer's link when its arm ends, rather than letting the
@@ -553,6 +578,8 @@ impl ProducerEndpoint {
         g.staged = None;
         g.segment = None;
         g.last_frame = None;
+        g.continue_after = g.last_sequence;
+        g.sequence_shift = 0;
     }
 
     /// The producer's own side of the gate: parks, resumes, or retargets. `link`

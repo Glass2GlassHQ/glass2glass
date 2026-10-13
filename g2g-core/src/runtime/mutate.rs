@@ -1375,6 +1375,7 @@ impl<'a, 'f, 's> MutationService<'a, 'f, 's> {
         let mut original = self.detach(&endpoint, deadline).await?;
         let last_endpoint = ProducerEndpoint::new();
         last_endpoint.set_caps(&final_caps);
+        last_endpoint.continue_sequence_after(endpoint.last_sequence());
         original.set_mutation(Some(last_endpoint.clone()));
 
         // A caps-changing splice announces itself here, while the producer is
@@ -1577,6 +1578,7 @@ impl<'a, 'f, 's> MutationService<'a, 'f, 's> {
                 return Err(MutationError::Refused(e));
             }
         }
+        up_endpoint.continue_sequence_after(own_endpoint.last_sequence());
         up_endpoint.unpark(Some(output));
 
         // The producer's edge now ends at the consumer, and carries what the

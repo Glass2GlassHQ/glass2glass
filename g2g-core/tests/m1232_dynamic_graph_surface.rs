@@ -267,6 +267,47 @@ impl AsyncElement for Marker {
     }
 }
 
+/// Marks like [`Marker`] and numbers its output from 0, as most transforms do.
+#[derive(Default)]
+struct Renumber {
+    emitted: u64,
+}
+
+impl AsyncElement for Renumber {
+    type ProcessFuture<'a>
+        = Pin<Box<dyn Future<Output = Result<(), G2gError>> + 'a>>
+    where
+        Self: 'a;
+
+    fn intercept_caps(&self, upstream: &Caps) -> Result<Caps, G2gError> {
+        Ok(upstream.clone())
+    }
+    fn configure_pipeline(&mut self, _caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        Ok(ConfigureOutcome::Accepted)
+    }
+    fn process<'a>(
+        &'a mut self,
+        packet: PipelinePacket,
+        out: &'a mut dyn OutputSink,
+    ) -> Self::ProcessFuture<'a> {
+        Box::pin(async move {
+            let PipelinePacket::DataFrame(mut data) = packet else {
+                if !matches!(packet, PipelinePacket::Eos) {
+                    out.push(packet).await?;
+                }
+                return Ok(());
+            };
+            if let MemoryDomain::System(bytes) = &mut data.domain {
+                bytes.as_mut_slice()[0] += 1;
+            }
+            data.sequence = self.emitted;
+            self.emitted += 1;
+            out.push(PipelinePacket::DataFrame(data)).await?;
+            Ok(())
+        })
+    }
+}
+
 /// Marks like [`Marker`] and changes the raw format from `from` to `to`.
 struct Reformat {
     from: RawVideoFormat,
@@ -779,6 +820,45 @@ fn a_timed_operation_gives_up_on_a_stalled_producer_and_leaves_it_running() {
     let sequences: Vec<u64> = record.frames.iter().map(|&(s, _)| s).collect();
     let expected: Vec<u64> = (0..sequences.len() as u64).collect();
     assert_eq!(sequences, expected, "no frame was lost across the timeout");
+}
+
+/// A spliced transform that numbers its own output from 0 does not send the
+/// sequence the sink sees backwards, going in or coming back out.
+#[test]
+fn a_renumbering_splice_keeps_the_sink_sequence_rising() {
+    let record = Arc::new(Mutex::new(Record::default()));
+    let pushed = Arc::new(AtomicUsize::new(0));
+    let stop = Arc::new(AtomicBool::new(false));
+    let graph = source_sink_graph(&record, &pushed, &stop);
+
+    let (mutator, run) = RunBuilder::new(graph, &ZeroClock, LINK_CAPACITY).run_mutable();
+    let observed = Arc::clone(&record);
+    let halt = Arc::clone(&stop);
+    let driver = async move {
+        until(|| frames_seen(&observed) >= 3).await;
+        let name = within_deadline(
+            "the insert",
+            mutator.insert_after("src", Box::new(Renumber::default())),
+        )
+        .await
+        .expect("the renumbering transform goes in");
+        until(|| frames_marked(&observed, 1) >= 3).await;
+        within_deadline("the remove", mutator.remove(&name))
+            .await
+            .expect("the renumbering transform comes back out");
+        let seen = frames_seen(&observed);
+        until(|| frames_seen(&observed) >= seen + 3).await;
+        halt.store(true, Ordering::SeqCst);
+    };
+    let (stats, ()) = block_on(Join2::new(run, driver));
+    stats.expect("the run survives both splices");
+
+    let record = record.lock().unwrap();
+    let sequences: Vec<u64> = record.frames.iter().map(|&(s, _)| s).collect();
+    assert!(
+        sequences.windows(2).all(|pair| pair[0] < pair[1]),
+        "the sink's sequence only rises: {sequences:?}"
+    );
 }
 
 /// M1233: a timed property set that finds no packet boundary is withdrawn, so
