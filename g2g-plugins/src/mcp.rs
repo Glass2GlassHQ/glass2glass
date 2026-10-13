@@ -488,7 +488,7 @@ impl RecordStore {
     }
 
     /// Block until `count` records carrying `key` have been posted since this
-    /// call, or nothing more can arrive, or the timeout passes. `run_ended`
+    /// call, or nothing more can arrive, or the timeout passes. `run_phase`
     /// answers for the pipeline behind the store, which posts no wakeup of its
     /// own when it fails.
     fn wait(
@@ -496,19 +496,20 @@ impl RecordStore {
         count: usize,
         key: &str,
         timeout: Duration,
-        run_ended: &dyn Fn() -> bool,
+        run_phase: &dyn Fn() -> RecordRunPhase,
     ) -> Vec<Value> {
         let deadline = Instant::now() + timeout;
         let mut state = self.lock();
         // a finished run posts nothing more, so its whole tail is fresh (bus eos may lag the run state)
-        let posted_before = if state.ended || run_ended() {
+        let posted_before = if state.ended || run_phase() != RecordRunPhase::Running {
             0
         } else {
             state.posted
         };
         loop {
             let matched = records_since(&state, posted_before, key);
-            if matched.len() >= count || state.ended || run_ended() {
+            // a finished run's last records can still be on the bus, so only its eos ends the wait
+            if matched.len() >= count || state.ended || run_phase() == RecordRunPhase::Aborted {
                 return matched;
             }
             let left = deadline.saturating_duration_since(Instant::now());
@@ -523,6 +524,13 @@ impl RecordStore {
                 .0;
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecordRunPhase {
+    Running,
+    Finished,
+    Aborted,
 }
 
 fn push_record(state: &mut RecordStoreState, record: Value) {
@@ -1403,17 +1411,19 @@ impl McpServer {
             .pipeline
             .as_ref()
             .map(|pipeline| pipeline.run_state.clone());
-        let run_ended = move || {
-            run_state.as_ref().is_some_and(|state| {
-                !matches!(
-                    &*state.lock().expect("pipeline run state"),
-                    PipelineRunState::Running
-                )
-            })
+        let run_phase = move || {
+            let Some(state) = run_state.as_ref() else {
+                return RecordRunPhase::Running;
+            };
+            match &*state.lock().expect("pipeline run state") {
+                PipelineRunState::Running => RecordRunPhase::Running,
+                PipelineRunState::Finished(_) => RecordRunPhase::Finished,
+                PipelineRunState::Failed(_) | PipelineRunState::Stopped => RecordRunPhase::Aborted,
+            }
         };
         let records = self
             .records
-            .wait(count, key, Duration::from_millis(timeout_ms), &run_ended);
+            .wait(count, key, Duration::from_millis(timeout_ms), &run_phase);
         let status = self
             .pipeline
             .as_ref()
@@ -2534,10 +2544,43 @@ mod tests {
         let store = RecordStore::new();
         store.push(json!({ "pts": 0.0 }));
         store.push(json!({ "pts": 1.0, "alert": "car" }));
-        let run_ended = || true;
-        let matched = store.wait(1, "alert", Duration::from_millis(10), &run_ended);
+        let run_phase = || RecordRunPhase::Finished;
+        let matched = store.wait(1, "alert", Duration::from_millis(10), &run_phase);
         assert_eq!(matched.len(), 1, "{matched:?}");
         assert_eq!(matched[0]["alert"], "car");
+    }
+
+    #[test]
+    fn a_finished_run_waits_for_records_still_on_the_bus() {
+        const BUS_LAG: Duration = Duration::from_millis(50);
+        const WAIT_TIMEOUT: Duration = Duration::from_secs(10);
+        let store = RecordStore::new();
+        store.push(json!({ "pts": 0.0 }));
+        let bus = store.clone();
+        let late_bus = std::thread::spawn(move || {
+            std::thread::sleep(BUS_LAG);
+            bus.push(json!({ "pts": 1.0 }));
+            bus.end();
+        });
+        let run_phase = || RecordRunPhase::Finished;
+        let matched = store.wait(2, "", WAIT_TIMEOUT, &run_phase);
+        late_bus.join().expect("late bus thread");
+        assert_eq!(matched.len(), 2, "{matched:?}");
+    }
+
+    #[test]
+    fn a_failed_run_ends_the_wait_without_its_eos() {
+        const WAIT_TIMEOUT: Duration = Duration::from_secs(10);
+        let store = RecordStore::new();
+        store.push(json!({ "pts": 0.0 }));
+        let run_phase = || RecordRunPhase::Aborted;
+        let started = Instant::now();
+        let matched = store.wait(2, "", WAIT_TIMEOUT, &run_phase);
+        assert_eq!(matched.len(), 1, "{matched:?}");
+        assert!(
+            started.elapsed() < WAIT_TIMEOUT,
+            "a failed run must not hold the caller"
+        );
     }
 
     fn odd_size_frame(format: g2g_core::RawVideoFormat) -> CapturedFrame {
