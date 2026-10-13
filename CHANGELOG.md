@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1231: a hosted Python element's worker thread attaches to the interpreter once for its life and detaches only while it waits for the next frame. Attaching per frame built and tore down a Python thread state each time, 5 ms a frame on free-threaded 3.14t.
 - M1230: a hosted Python element whose buffer view is held only by a reference cycle no longer fails the frame. The host runs one `gc.collect()` before calling a view or `CudaPlane` retained. `torch.fx.wrap` leaves such a cycle when torchvision is first imported inside `g2g_process`.
 - M1229: `g2g-launch-py --threads` runs each element on its own OS thread through `run_graph_threaded`, as `g2g-launch --threads` does.
 - M1228: `pyelement` counts the hosted element's last run time toward a frame's lateness only for 100 ms after that run (`RUN_TIME_STALE_AFTER_NS`), so one slow run no longer drops every frame after it until the stream ends.

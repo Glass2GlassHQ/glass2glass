@@ -715,18 +715,27 @@ fn worker_main(
     // a sink takes a repeated sequence as a stream fault.
     let mut emitted_sequence = 0u64;
 
-    while let Ok(job) = jobs.recv() {
-        let reply = Python::attach(|py| process_job(py, &instance, job, &mut emitted_sequence));
-        // Capacity-1, and the element awaits each reply before sending the next
-        // job, so this never blocks; an error means the element (receiver) is
-        // gone, so stop.
-        if results.try_send(reply).is_err() {
-            break;
+    // Attach once: a thread state built and torn down every frame costs 5 ms on free-threaded 3.14t.
+    Python::attach(|py| {
+        let mut jobs = jobs;
+        loop {
+            // mpsc::Receiver is not Sync, so it moves into detach and back
+            let (returned, next) = py.detach(move || {
+                let next = jobs.recv();
+                (jobs, next)
+            });
+            jobs = returned;
+            let Ok(job) = next else { break };
+            let reply = process_job(py, &instance, job, &mut emitted_sequence);
+            // Capacity-1, and the element awaits each reply before sending the next
+            // job, so this never blocks; an error means the element (receiver) is
+            // gone, so stop.
+            if results.try_send(reply).is_err() {
+                break;
+            }
         }
-    }
-
-    // Release the instance under the GIL before the thread ends.
-    Python::attach(|_py| drop(instance));
+        drop(instance);
+    });
 }
 
 /// Import `module`, instantiate `class`, set `draw_label`, and forward the
