@@ -465,7 +465,7 @@ cargo clippy --workspace --all-targets
 
 | Group | Elements |
 | :--- | :--- |
-| Container demuxers and muxers | `qtdemux` / `mp4mux`, `tsdemux` / `mpegtsmux`, `matroskademux` / `matroskamux`, `flvdemux` / `flvmux`, `oggdemux` / `oggmux`, `avidemux` / `avimux`, `fmp4demux`, `mpegpsdemux`, `multipartdemux` / `multipartmux`, `y4mdec` / `y4menc`, `aiffparse` / `aiffmux`, `auparse` / `avmux_au` |
+| Container demuxers and muxers | `qtdemux` / `mp4mux`, `tsdemux` / `mpegtsmux` (188, 192 and 204-byte packets in, constant bitrate out), `matroskademux` / `matroskamux`, `flvdemux` / `flvmux`, `oggdemux` / `oggmux`, `avidemux` / `avimux`, `fmp4demux`, `mpegpsdemux`, `multipartdemux` / `multipartmux`, `y4mdec` / `y4menc`, `aiffparse` / `aiffmux`, `auparse` / `avmux_au` |
 | Bitstream parsers | `h264parse`, `h265parse`, `aacparse`, `mpegaudioparse` + `id3demux` / `apedemux`, `ac3parse`, `opusparse`, `vp8parse`, `vp9parse`, `av1parse`, `jpegparse`, `pngparse` |
 | Headerless framers | `rawvideoparse` / `rawaudioparse`: a `.yuv` / `.pcm` dump cut into buffers from declared properties |
 | Audio codecs | G.711 `mulawenc` / `mulawdec`, `alawenc` / `alawdec`, IMA ADPCM `adpcmenc` / `adpcmdec` |
