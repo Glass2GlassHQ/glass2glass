@@ -85,7 +85,7 @@ pub enum NegotiationFailure {
     /// `downstream` has nothing to carry: an encoder fed a pixel format it does
     /// not take. Reported by the DAG solver.
     NoOutputForInput { upstream: usize, downstream: usize },
-    /// The batching node `index` would carry more than
+    /// The batch demux `index` would accept more than
     /// [`MAX_BATCH_ALTERNATIVES`](crate::caps::MAX_BATCH_ALTERNATIVES)
     /// combinations of its streams' caps. A capsfilter on each stream narrows
     /// them.
@@ -2336,11 +2336,8 @@ fn apply_batch_muxer_node<E>(
         .map(|&(_, e)| edges[e].as_ref().map(CapsSet::alternatives))
         .collect();
     if let Some(input_sets) = input_sets {
-        let batches = batch_alternatives(&input_sets).ok_or(
-            NegotiationFailure::TooManyBatchAlternatives {
-                index: node.0 as usize,
-            },
-        )?;
+        let batches =
+            batch_alternatives(&input_sets).unwrap_or_else(|| preferred_batch(&input_sets));
         narrow_edge(
             graph,
             edges,
@@ -2356,6 +2353,17 @@ fn apply_batch_muxer_node<E>(
         }
     }
     Ok(())
+}
+
+// too many combinations to list, so each stream takes the alternative its producer prefers
+fn preferred_batch(streams: &[&[Caps]]) -> Vec<Caps> {
+    streams
+        .iter()
+        .map(|alternatives| alternatives.first().cloned())
+        .collect::<Option<Vec<Caps>>>()
+        .map(|streams| Caps::Batch { streams })
+        .into_iter()
+        .collect()
 }
 
 fn apply_batch_demux_node<E>(
@@ -4436,7 +4444,7 @@ mod tests {
     }
 
     #[test]
-    fn solve_graph_batch_mux_refuses_too_many_combinations() {
+    fn solve_graph_batch_mux_settles_each_stream_past_the_combination_cap() {
         // Three inputs of seven alternatives each is 343 batches, past the cap.
         let alternatives = |format| {
             CapsSet::from_alternatives(
@@ -4465,9 +4473,23 @@ mod tests {
         }
         g.link(mux.output(), sink).unwrap();
         let v = g.finish().unwrap();
+        let preferred = [
+            RawVideoFormat::Nv12,
+            RawVideoFormat::I420,
+            RawVideoFormat::Rgba8,
+        ]
+        .map(|format| fixed_video(format, 16, 16, 30));
+        let sol = solve_graph(&v, &cs).expect("the batch settles past the cap");
         assert_eq!(
-            solve_graph(&v, &cs),
-            Err(NegotiationFailure::TooManyBatchAlternatives { index: 3 })
+            &sol[..3],
+            &preferred,
+            "each source keeps its first alternative"
+        );
+        assert_eq!(
+            sol[3],
+            Caps::Batch {
+                streams: preferred.to_vec()
+            }
         );
     }
 }

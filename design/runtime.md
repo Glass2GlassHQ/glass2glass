@@ -411,9 +411,11 @@ every batch of its input edges' alternatives, and each input edge narrows back t
 stream of the output. Each demux port edge is its stream of the input edge, and the
 input narrows back to the batches whose streams the ports accept. So every branch
 negotiates against its own stream, and a branch's demand reaches the source feeding
-that stream. More than `MAX_BATCH_ALTERNATIVES` combinations fails the solve with
-`NegotiationFailure::TooManyBatchAlternatives`, and a capsfilter on each input narrows
-them.
+that stream. Past `MAX_BATCH_ALTERNATIVES` combinations the mux lists one batch
+instead, each input's first alternative, which is the format and size its producer
+prefers. A `videotestsrc` offers over a hundred, so two of them settle that way, and a
+capsfilter on an input keeps the branch's choice. A demux whose input would exceed the
+cap fails the solve with `NegotiationFailure::TooManyBatchAlternatives`.
 
 A batch can be teed. `BatchMeta`'s copy-on-write clone shares each frame with
 `Frame::share`, the duplication the tee uses. `streammux` makes each frame shareable
