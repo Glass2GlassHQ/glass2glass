@@ -210,6 +210,8 @@ struct Job {
     frames: Vec<Frame>,
     caps: JobCaps,
     kind: JobKind,
+    // the element's output is the frame it was handed, sent on when it emits nothing
+    in_place: bool,
 }
 
 /// Worker -> element reply: the buffers to send downstream, or an error. Either
@@ -612,11 +614,17 @@ impl PyWorker {
     /// media type but raw video reaches the element through the payload hook.
     /// The `send` is non-blocking (unbounded job channel); the `await` parks until
     /// the worker's `try_send`, freeing the executor thread meanwhile.
-    pub(crate) async fn run(&self, frame: Frame, caps: &Caps) -> Result<Vec<Frame>, G2gError> {
+    pub(crate) async fn run(
+        &self,
+        frame: Frame,
+        caps: &Caps,
+        produce: Option<&Caps>,
+    ) -> Result<Vec<Frame>, G2gError> {
         self.dispatch(Request::Job(Job {
             frames: vec![frame],
             caps: job_caps(caps)?,
             kind: JobKind::Transform,
+            in_place: writes_in_place(caps, produce),
         }))
         .await
     }
@@ -626,6 +634,7 @@ impl PyWorker {
             frames: vec![frame],
             caps: job_caps(caps)?,
             kind: JobKind::Consume,
+            in_place: true,
         }))
         .await?;
         Ok(())
@@ -645,11 +654,13 @@ impl PyWorker {
         &self,
         frames: Vec<Frame>,
         caps: &Caps,
+        produce: Option<&Caps>,
     ) -> Result<Vec<Frame>, G2gError> {
         self.dispatch(Request::Job(Job {
             frames,
             caps: job_caps(caps)?,
             kind: JobKind::Batch,
+            in_place: writes_in_place(caps, produce),
         }))
         .await
     }
@@ -664,6 +675,7 @@ impl PyWorker {
                 frames: Vec::new(),
                 caps: raw_video_caps(caps)?,
                 kind: JobKind::ProduceCuda,
+                in_place: true,
             }))
             .await?;
         Ok(out.pop())
@@ -681,6 +693,7 @@ impl PyWorker {
                 frames: vec![frame],
                 caps: raw_video_caps(caps)?,
                 kind: JobKind::Produce,
+                in_place: true,
             }))
             .await?;
         Ok(out.pop())
@@ -1016,7 +1029,11 @@ fn process_job(
             let anchor_timing = anchor.timing;
             let anchor_sequence = anchor.sequence;
             let anchor_meta = anchor.meta.clone();
-            let mut out = if emitted.is_empty() {
+            let mut out = if emitted.is_empty() && !job.in_place {
+                // Nothing emitted by an element whose output is not its input:
+                // a transcriber still gathering audio has no text yet.
+                Vec::new()
+            } else if emitted.is_empty() {
                 // Nothing emitted: the frame Python was handed, mutated in
                 // place. A batch's other inputs have done their work in the
                 // call, so only the anchor travels on.
@@ -1549,6 +1566,10 @@ fn attach_metadata(_frame: &mut Frame, _staged: Vec<Staged>, _frame_dims: Option
 
 /// Describe the negotiated caps for a job: raw video keeps its fixed geometry,
 /// anything else travels as an opaque payload.
+fn writes_in_place(input: &Caps, produce: Option<&Caps>) -> bool {
+    produce.is_none_or(|produce| produce == input)
+}
+
 fn job_caps(caps: &Caps) -> Result<JobCaps, G2gError> {
     match caps {
         Caps::RawVideo { .. } => raw_video_caps(caps),

@@ -47,6 +47,13 @@ class AudioTranscriber:
         meta.emit(("heard %d bytes" % samples.nbytes).encode("utf-8"))
 
 
+class GatheringTranscriber:
+    """A transcriber still gathering audio: it reads the buffer and emits nothing."""
+
+    def g2g_process_payload(self, buffers, caps, meta):
+        memoryview(buffers[0])
+
+
 class SpeechSynthesizer:
     """The other direction: a short text payload in, a long audio one out.
 

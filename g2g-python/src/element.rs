@@ -336,7 +336,7 @@ impl AsyncElement for PyTransform {
                         return self.push_frame(frame, out).await;
                     }
                     let started = Instant::now();
-                    let outputs = self.input.run(frame).await?;
+                    let outputs = self.input.run(frame, self.produce.as_ref()).await?;
                     self.last_run_ns =
                         u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
                     self.last_run_measured_ns = monotonic_ns();

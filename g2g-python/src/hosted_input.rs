@@ -152,9 +152,13 @@ impl HostedInput {
     }
 
     #[cfg(feature = "python")]
-    pub(crate) async fn run(&self, frame: Frame) -> Result<Vec<Frame>, G2gError> {
+    pub(crate) async fn run(
+        &self,
+        frame: Frame,
+        produce: Option<&Caps>,
+    ) -> Result<Vec<Frame>, G2gError> {
         let (worker, caps) = self.worker_and_caps()?;
-        worker.run(frame, caps).await
+        worker.run(frame, caps, produce).await
     }
 
     #[cfg(feature = "python")]
@@ -174,7 +178,11 @@ impl HostedInput {
     // The per-frame Python call embeds CPython via pyo3 and lives behind the
     // `python` feature, so the default build negotiates caps but cannot run frames.
     #[cfg(not(feature = "python"))]
-    pub(crate) async fn run(&self, _frame: Frame) -> Result<Vec<Frame>, G2gError> {
+    pub(crate) async fn run(
+        &self,
+        _frame: Frame,
+        _produce: Option<&Caps>,
+    ) -> Result<Vec<Frame>, G2gError> {
         Err(G2gError::UnsupportedDomain)
     }
 

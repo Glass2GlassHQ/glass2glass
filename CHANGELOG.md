@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- A `pyelement` or `pyaggregator` whose `output-caps=` differ from its input sends nothing on for a frame it emits nothing for, rather than the input frame.
 - `g2g-inspect` and the element reference list every format `videotestsrc` and `pulsesrc` can produce (`SourceFactory::with_template_outputs`).
 - `videotestsrc` produces every `videoconvert` raw format a downstream caps filter asks for, RGBA when none does.
 - `pulsesrc` records the format, rate and channels a caps filter directly after it asks for when the property is unset.

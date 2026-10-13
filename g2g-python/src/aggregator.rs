@@ -131,7 +131,7 @@ impl PyAggregator {
         self.worker
             .as_ref()
             .ok_or(G2gError::NotConfigured)?
-            .run_batch(frames, caps)
+            .run_batch(frames, caps, self.produce.as_ref())
             .await
     }
 

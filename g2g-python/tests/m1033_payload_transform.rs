@@ -102,8 +102,12 @@ fn fixtures_on_path() {
 
 /// The transcription shape: audio on the sink pad, text on the source pad.
 fn transcriber() -> PyTransform {
+    transcriber_hosting("AudioTranscriber")
+}
+
+fn transcriber_hosting(class: &str) -> PyTransform {
     fixtures_on_path();
-    let mut el = PyTransform::new("echo_element", "AudioTranscriber");
+    let mut el = PyTransform::new("echo_element", class);
     el.set_property(
         "input-caps",
         PropValue::Str("audio/x-raw,format=S16LE,rate=16000,channels=1".into()),
@@ -240,6 +244,17 @@ fn a_payload_transform_pushes_the_emitted_text_downstream() {
         "an emitted buffer keeps the place of the one it replaced"
     );
     assert_eq!(el.emitted_count(), 1);
+}
+
+/// A transcriber that has no text yet sends nothing on, not the audio it read
+/// under the text caps it declared.
+#[test]
+fn a_payload_transform_that_emits_nothing_sends_nothing() {
+    let mut el = transcriber_hosting("GatheringTranscriber");
+    el.configure_pipeline(&audio_caps()).unwrap();
+    let sink = push(&mut el, PipelinePacket::DataFrame(audio_frame()));
+
+    assert!(sink.packets.is_empty(), "{:?}", sink.packets);
 }
 
 /// Streaming speech is chunked and the separation family emits one buffer per
