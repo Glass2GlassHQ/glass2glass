@@ -127,6 +127,11 @@ Highest leverage first:
 
 ## Capture sources
 
+- **`videotestsrc` ignores a downstream caps filter.** It stays at 320x240
+  when the launch line asks for `video/x-raw,width=1280,height=720`.
+- **`pulsesrc` ignores a downstream caps filter.** It emits 48000 Hz stereo
+  when the launch line asks for 16000 Hz mono after `audioconvert !
+  audioresample`.
 - `mfvideosrc`: first Windows build + camera smoke test; D3D11 zero-copy;
   size/rate request beyond device default.
 - Screen capture: Windows DXGI Desktop Duplication.
@@ -148,10 +153,19 @@ Highest leverage first:
 
 ## Sinks
 
+- **`wgpusink` segfaults behind a tee with two sinks and a hosted depth
+  element on one branch.** Address 0 in thread `g2g-wgpusink`, exit 245. The same
+  tee with two sinks and no depth runs, and depth alone runs.
 - Validate `wasapisink` U8, S24, and S32 acceptance on a Windows host.
 
 ## Containers
 
+- **A named `decodebin` misreads an mp4 whose `moov` follows `mdat`.**
+  `mp4_select` reads only `PLAYBIN_PROBE_BYTES` (4 MiB) of the file, so it finds
+  no tracks in a 12 MB clip with `moov` at the end and declines, and a later hook
+  claims the file as `video/mpeg`. `filesrc ! decodebin name=d d. ! queue !
+  videoconvert ! fakesink` fails with CapsMismatch, a plain `decodebin` or a
+  faststart remux of the same file runs.
 - **FLV:** Speex decode (no Speex encoder exists anywhere to build a validated
   decode vector, and gst's header-in-tag layout is rejected by libavcodec, so
   wiring a decoder would be an unvalidated claim).
@@ -312,6 +326,13 @@ unless it says otherwise.
 
 ## ML
 
+- **`PyTransform` with `output-caps=` of another media type fails on the first
+  mid-stream `CapsChanged`.** The runner passes the element's output caps in that
+  packet, and `PyTransform::process` hands them to `HostedInput::caps_changed`,
+  which checks them against the input accept set. Whisper (`audio/x-raw` in,
+  `text/x-raw` out) fails with CapsMismatch, sepformer passes because its output
+  is audio too. `configure_pipeline` has already checked the input, as the
+  `CapsChanged` arm of `audioresample` notes.
 - Detector on the Edge TPU is blocked device-side: this Pixel's older Android ORT
   NNAPI EP rejects YOLO's op set (int8-weight initializers, SiLU `Mul` QDQ
   "unsupported quantized type", and an `AddNnapiSplit` divide bug on the C3k2
