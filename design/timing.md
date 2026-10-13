@@ -324,7 +324,10 @@ a relay handle to its input link's `QosSlot` (`relay_qos_to`). When the output
 adapter then sees a downstream QoS it stores it onto the input link instead of
 surfacing it, so the upstream neighbour observes it on its next push, and across N
 transforms the report walks one hop at a time back to the source. The element's
-`process` is unaffected.
+`process` is unaffected. A tee and a demux relay the same way onto their one input
+link, and a muxer onto every input link, so a report from a sink behind a
+`streamdemux` reaches the element between the muxer and the demux, and the
+decoders above the muxer.
 
 Acting on the report is the other half. An element that returns `true` from
 `AsyncElement::handles_qos` observes the report as `PushOutcome::Qos` from its own

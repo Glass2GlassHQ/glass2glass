@@ -1,5 +1,6 @@
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 use core::future::Future;
 use core::pin::Pin;
 use core::task::{Context, Poll, Waker};
@@ -973,13 +974,14 @@ impl ProbeSlot {
 pub struct SenderSink {
     link: LinkSender,
     probe: ProbeSlot,
-    /// Relay target for a downstream QoS report (M175). `None` on a source's
+    /// Relay targets for a downstream QoS report (M175). Empty on a source's
     /// output adapter: a QoS seen on the link surfaces as [`PushOutcome::Qos`]
-    /// so the source element acts on it. `Some` on a transform's output adapter:
-    /// the report is stored into this (the transform's *input* link) reverse
-    /// slot instead, forwarding it one hop toward the source. A generic
-    /// transform thus relays QoS without having to observe it in `process`.
-    upstream_qos: Option<QosSlot>,
+    /// so the source element acts on it. A transform's or fan-out's output
+    /// adapter holds its *input* link's reverse slot, a muxer's holds one per
+    /// input link (M1242): the report is stored into each instead, forwarding
+    /// it one hop toward the source. A generic transform thus relays QoS
+    /// without having to observe it in `process`.
+    upstream_qos: Vec<QosSlot>,
     /// Whether a QoS report surfaces as [`PushOutcome::Qos`] to this adapter's
     /// producer. `true` on a source's adapter and for a transform that
     /// [`handles_qos`](crate::element::AsyncElement::handles_qos), which with
@@ -1099,7 +1101,7 @@ impl SenderSink {
         Self {
             link,
             probe,
-            upstream_qos: None,
+            upstream_qos: Vec::new(),
             qos_answered: true,
             upstream_reconfigure: None,
             reconfigure_answered: ReconfigureAnswered::default(),
@@ -1182,13 +1184,14 @@ impl SenderSink {
         self.probe.clone()
     }
 
-    /// Make this adapter relay any downstream QoS report onto `upstream`, the
-    /// owning transform's input link (M175), and also surface it to the
-    /// transform when `answered` (it
+    /// Make this adapter relay any downstream QoS report onto `upstream`, an
+    /// input link of the owning element (M175), and also surface it to the
+    /// element when `answered` (it
     /// [`handles_qos`](crate::element::AsyncElement::handles_qos)). The runner
-    /// wires this so QoS propagates source-ward through a transform.
+    /// wires this so QoS propagates source-ward through a transform, a tee or a
+    /// demux, and calls it once per input link for a muxer (M1242).
     pub(crate) fn relay_qos_to(&mut self, upstream: QosSlot, answered: bool) {
-        self.upstream_qos = Some(upstream);
+        self.upstream_qos.push(upstream);
         self.qos_answered = answered;
     }
 
@@ -1251,7 +1254,7 @@ impl SenderSink {
             return PushOutcome::Reconfigure(r);
         }
         if let Some(q) = self.link.qos.take() {
-            if let Some(upstream) = &self.upstream_qos {
+            for upstream in &self.upstream_qos {
                 upstream.store(q);
             }
             if self.qos_answered {

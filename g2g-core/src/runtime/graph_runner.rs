@@ -76,7 +76,7 @@ use crate::property::{ElementMetadata, PropError, PropValue, PropertySpec};
 use crate::query::{with_meta_demand, AllocationParams, LatencyReport};
 use crate::runtime::channel::{
     advertise_orientation, bounded, link, link_with_transit, LinkReceiver, LinkSender,
-    ProducerEndpoint, Receiver, ReconfigureAnswered, RecvFuture, Sender, SenderSink,
+    ProducerEndpoint, QosSlot, Receiver, ReconfigureAnswered, RecvFuture, Sender, SenderSink,
 };
 use crate::runtime::coordinator::{
     log_caps_forward, log_caps_rejected, realloc_local_dyn, report_nego_failure, ArmDirective,
@@ -2204,8 +2204,10 @@ pub(crate) async fn run_graph_inner<'a: 'c, 'c, Clk: PipelineClock>(
             // are still indexed by pad so a muxer's `process(pad, ..)` keeps its
             // per-input geometry straight even if pads link out of order.
             let mut pad_rxs: Vec<(usize, MuxerPad)> = Vec::with_capacity(input_count);
+            let mut input_qos: Vec<QosSlot> = Vec::with_capacity(input_count);
             for (in_rx, pad) in in_rxs.into_iter().zip(pads) {
                 let (pad_tx, pad_rx) = bounded::<PipelinePacket>(link_capacity);
+                input_qos.push(in_rx.qos_slot());
                 let fwd: BoxFuture<'c, Result<u64, G2gError>> =
                     Box::pin(muxer_forwarder(in_rx, pad_tx));
                 arms.push(fwd);
@@ -2225,6 +2227,7 @@ pub(crate) async fn run_graph_inner<'a: 'c, 'c, Clk: PipelineClock>(
             let arm: BoxFuture<'c, Result<u64, G2gError>> = mux.drive_muxer_arm(MuxerArmIo {
                 parts: MuxerArmParts {
                     pad_rxs,
+                    input_qos,
                     out_tx,
                     input_count,
                     current_output: mux_out_caps,
@@ -2792,8 +2795,10 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
             let mux_ctrl = arm_ctrl_rx[node.0 as usize].take().expect("muxer ctrl rx");
             let input_count = in_rxs.len();
             let mut pad_rxs: Vec<(usize, MuxerPad)> = Vec::with_capacity(input_count);
+            let mut input_qos: Vec<QosSlot> = Vec::with_capacity(input_count);
             for (in_rx, pad) in in_rxs.into_iter().zip(pads) {
                 let (pad_tx, pad_rx) = bounded::<PipelinePacket>(link_capacity);
+                input_qos.push(in_rx.qos_slot());
                 let build: alloc::boxed::Box<dyn FnOnce() -> LocalArmFuture + Send> =
                     alloc::boxed::Box::new(move || -> LocalArmFuture {
                         Box::pin(muxer_forwarder(in_rx, pad_tx))
@@ -2817,6 +2822,7 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
                     mux.drive_muxer_arm_owned_tick(MuxerArmOwnedTickIo {
                         parts: MuxerArmParts {
                             pad_rxs,
+                            input_qos,
                             out_tx,
                             input_count,
                             current_output: mux_out_caps,
@@ -4817,11 +4823,18 @@ async fn tee_arm(
     adds: Option<Receiver<LinkSender>>,
 ) -> Result<u64, G2gError> {
     let mut senders: Vec<SenderSink> = out_txs.into_iter().map(SenderSink::new).collect();
+    // A branch sink's QoS report walks on past the tee onto its input link
+    // (M1242), as `transform_arm` relays it past a transform.
+    for sender in senders.iter_mut() {
+        sender.relay_qos_to(in_rx.qos_slot(), false);
+    }
     let mutable = adds.is_some();
     loop {
         if let Some(adds) = &adds {
             while let Some(port) = adds.try_recv() {
-                senders.push(SenderSink::new(port));
+                let mut sender = SenderSink::new(port);
+                sender.relay_qos_to(in_rx.qos_slot(), false);
+                senders.push(sender);
             }
         }
         match in_rx.recv().await {
@@ -4917,7 +4930,12 @@ pub(crate) async fn demux_arm<E: MultiOutputElement>(
         mut latency,
     } = io;
     let branch_count = out_txs.len();
-    let senders: Vec<SenderSink> = out_txs.into_iter().map(SenderSink::new).collect();
+    let mut senders: Vec<SenderSink> = out_txs.into_iter().map(SenderSink::new).collect();
+    // A branch sink's QoS report walks on past the demux onto its input link
+    // (M1242), as `transform_arm` relays it past a transform.
+    for sender in senders.iter_mut() {
+        sender.relay_qos_to(in_rx.qos_slot(), false);
+    }
     let mut multi = MultiSenderSink::new(senders);
     multi.set_push_wait_probe(probe.clone());
     loop {
@@ -5134,6 +5152,7 @@ async fn admit_runtime_pad<E: MultiInputElement>(
             return Ok(false);
         }
     };
+    out.relay_qos_to(pad_rx.qos_slot(), false);
     pad_rxs.push((pad, MuxerPad::Link(pad_rx)));
     open.push(true);
     let new_output = solve_mux_output_dyn(mux as &dyn DynMultiInputElement)?;
@@ -5646,6 +5665,9 @@ async fn park_or_tick<T, E: MultiInputElement>(
 #[allow(missing_debug_implementations)]
 pub(crate) struct MuxerArmParts {
     pub(crate) pad_rxs: Vec<(usize, MuxerPad)>,
+    /// The reverse QoS slot of every input link, so a downstream report is
+    /// relayed onto each of them (M1242).
+    pub(crate) input_qos: Vec<QosSlot>,
     pub(crate) out_tx: LinkSender,
     pub(crate) input_count: usize,
     pub(crate) current_output: Caps,
@@ -5706,6 +5728,7 @@ pub(crate) async fn muxer_arm<E: MultiInputElement>(
         parts:
             MuxerArmParts {
                 mut pad_rxs,
+                input_qos,
                 out_tx,
                 mut input_count,
                 mut current_output,
@@ -5720,6 +5743,11 @@ pub(crate) async fn muxer_arm<E: MultiInputElement>(
     } = io;
     let mut adapter = SenderSink::new(out_tx);
     adapter.set_push_wait_probe(probe.clone());
+    // A downstream QoS report walks on past the muxer onto every input link
+    // (M1242), so each producer sheds load.
+    for slot in input_qos {
+        adapter.relay_qos_to(slot, false);
+    }
     let mut open = alloc::vec![true; input_count];
     let mut ended = 0usize;
     // Cursor for round-robin fairness across both the try-drain and block paths.
@@ -5938,6 +5966,7 @@ pub(crate) async fn muxer_arm_pts<E: MultiInputElement>(
         parts:
             MuxerArmParts {
                 mut pad_rxs,
+                input_qos,
                 out_tx,
                 mut input_count,
                 mut current_output,
@@ -5952,6 +5981,11 @@ pub(crate) async fn muxer_arm_pts<E: MultiInputElement>(
     } = io;
     let mut adapter = SenderSink::new(out_tx);
     adapter.set_push_wait_probe(probe.clone());
+    // A downstream QoS report walks on past the muxer onto every input link
+    // (M1242), so each producer sheds load.
+    for slot in input_qos {
+        adapter.relay_qos_to(slot, false);
+    }
     let mut open = alloc::vec![true; input_count];
     let mut agg: InputAggregator<Frame> = InputAggregator::new(input_count);
     // Round-robin wake cursor, so a fast input does not bias the block path.
