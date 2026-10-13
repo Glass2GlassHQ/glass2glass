@@ -18,6 +18,7 @@ Architecture: [design/README.md](design/README.md). Developer tooling
 - [Quick start](#quick-start)
 - [Portability: one pipeline, five targets](#portability-one-pipeline-five-targets)
 - [Migrating an existing pipeline?](#migrating-an-existing-pipeline)
+- [Changing a running pipeline](#changing-a-running-pipeline)
 - [Scripting: config files and Rhai](#scripting-config-files-and-rhai)
 - [Embedded: heap-free pipelines on a bare-metal MCU](#embedded-heap-free-pipelines-on-a-bare-metal-mcu)
 - [The four pillars](#the-four-pillars)
@@ -172,6 +173,110 @@ parse error: unknown element: theoraenc
 Full guide, with the equivalence cookbook and application / element porting:
 [PORTING.md](PORTING.md). Writing an element from scratch:
 [AUTHORING.md](AUTHORING.md).
+
+## Changing a running pipeline
+
+You can add, remove and replace elements while a pipeline plays. Start the run
+with `run_mutable` and you get a `GraphMutator` back along with the run future.
+Keep polling the run, and make your edits from another task or from the other
+side of a `join!`:
+
+```rust
+use std::time::Duration;
+
+use g2g_core::property::PropValue;
+use g2g_core::runtime::{parse_element, parse_launch, LatencyProfile, RunBuilder};
+use g2g_plugins::clock::WallClock;
+use g2g_plugins::registry::{default_registry, mutator_with_defaults};
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() {
+    let registry = default_registry();
+    let graph = parse_launch(
+        &registry,
+        "videotestsrc name=src num-buffers=300 ! clocksync ! autovideosink",
+    )
+    .expect("parse");
+    let clock = WallClock::new();
+    let (mutator, run) = RunBuilder::new(graph, &clock, LatencyProfile::Live).run_mutable();
+    let mutator = mutator_with_defaults(mutator);
+
+    let edits = async {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let flip = parse_element(&registry, "videoflip method=rotate-180").expect("parse");
+        let flip_name = mutator.insert_after("src", flip).await.expect("insert");
+
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let mirror = PropValue::Str("horizontal-flip".into());
+        mutator.set_property(&flip_name, "method", mirror).await.expect("set");
+
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        mutator.remove(&flip_name).await.expect("remove");
+    };
+    let (result, ()) = tokio::join!(run, edits);
+    result.expect("run");
+}
+```
+
+After two seconds the picture turns upside down. Two seconds later it switches
+to a mirror image, and after two more it goes back to normal. The stream never
+stops and no frame is dropped. `clocksync` plays the test pattern at its frame
+rate. Without it all 300 frames would be done before the first edit.
+
+You refer to elements by name. Give them one with `name=` in the launch line.
+Anything unnamed gets the element type plus a number, like `VideoFlip0`. Every
+insert returns the name of the element it added, and that's what you pass to
+`remove` or `set_property` later.
+
+An edit happens between two frames, the next time the element just upstream of
+it sends something. If that element is stuck, say a network source that lost
+its feed, the edit waits for it. `mutator_with_defaults` caps that wait at 5 s
+and then fails with `TimedOut`. It also adds a `videoconvert` or
+`audioconvert` after an inserted element whose output format the rest of the
+pipeline can't take. A bare `GraphMutator` waits as long as it takes and
+refuses the format change instead.
+
+Every edit is checked against the format flowing on that link before anything
+moves. If the check fails you get a `MutationError`, and the pipeline keeps
+running exactly as before. A remove lets the element finish the frames it is
+already holding before its neighbours are joined up. If the element was
+changing the format and the next one can't take the original, the remove is
+refused and the element stays in.
+
+| Method | What it does |
+| :--- | :--- |
+| `insert_after(node, element)` | Adds `element` on the link leaving `node` and returns its name. |
+| `insert_before(node, element)` | Adds `element` on the link coming into `node`. A tee or demux branch is reached this way, by naming the element at the far end of the branch. |
+| `insert_chain_after` / `insert_chain_before` | The same for several elements, all or none. `parse_chain(&registry, "identity ! valve")` builds the list. |
+| `validate_insert_after` / `validate_insert_before` | Runs an insert's checks without changing anything. |
+| `remove(node)` | Takes a transform out and hands it back to you. |
+| `replace_source(node, source)` / `replace_sink(node, sink)` | Swaps out the element at either end and hands the old one back. The old sink gets its queued frames and an end of stream first, so a file sink finishes its file. |
+| `add_branch(tee, chain)` / `remove_branch(sink)` | Adds a branch under a tee, ending in its own sink, or drops one. |
+| `add_input(muxer, source)` | Connects a new source to a free input of a muxer. |
+| `set_property(node, name, value)` / `get_property(node, name)` | Reads or writes a property on a running transform or sink. |
+
+The errors you'll see most are `UnknownNode` (no element has that name),
+`NotMutable` (that spot can't be edited) and `DownstreamRefused` (the elements
+below won't accept the new format). `GraphEnded` means the run is already over.
+A tee, demux or muxer has several links on one side, so naming it there
+doesn't say which link you mean, and you get `NotMutable`. Name the element at
+the other end of the link instead.
+
+To replace a transform with a different one, `remove` it and `insert_after`
+its upstream neighbour. If you know when you build the graph that one element
+will be swapped often, wrap it in an `ElementSlot` and call `swap` through its
+`SwapHandle`. That switch is immediate and doesn't wait for a frame, but
+nothing checks the format for you: call `configure_pipeline` on the new element
+with the link's current caps before you swap it in.
+
+The thread-per-arm runner works the same way through `run_threaded_mutable`.
+The Python and C bindings have the same operations minus the validate calls,
+and take launch-line text for the elements ([g2g-pyapi](g2g-pyapi/README.md),
+[g2g-capi](g2g-capi/README.md)). The `g2g-mcp` server can edit a running
+pipeline too.
+[examples/g2g-mutate-demo](examples/g2g-mutate-demo) does this to a live RTSP
+feed in a window. If you're coming from GStreamer pad probes, PORTING.md §5.2
+maps each recipe to its call here.
 
 ## Scripting: config files and Rhai
 
@@ -869,18 +974,11 @@ the frames it still holds, so none is lost or reordered. `cargo run --release
 on each branch, and the splice lands on one branch, named by the sink at its
 far end (`insert_before`), while the sibling window plays on untouched.
 
-This is `GraphMutator` on a live graph, the counterpart to a GStreamer pad
-block plus relink (see [PORTING.md](PORTING.md) §5.2). A splice point is a
-transform position on a 1:1 edge, including tee / demux branches and muxer
-inputs. The source and sink ends take a whole replacement element instead
-(`replace_source` / `replace_sink`). The same handle splices a whole chain
-(`insert_chain_after`), grows a tee by a branch (`add_branch` / `remove_branch`)
-and a muxer by an input (`add_input`). The Python and C bindings and the MCP
-server expose all of it, with a 5 s timeout and `videoconvert` / `audioconvert`
-spliced in when an edit changes the format. The demo is a standalone crate outside
-the workspace because it needs the `rtsp` + `ffmpeg` + `wayland-sink`
-feature set. `G2G_RTSP_URL` picks the feed, `G2G_DEMO_SECONDS` bounds the run,
-ctrl-c ends it.
+The calls it makes are covered in
+[Changing a running pipeline](#changing-a-running-pipeline). The demo is a
+standalone crate outside the workspace because it needs the `rtsp` + `ffmpeg` +
+`wayland-sink` feature set. `G2G_RTSP_URL` picks the feed, `G2G_DEMO_SECONDS`
+bounds the run, ctrl-c ends it.
 
 ### NVIDIA NVDEC (system memory) + Wayland
 

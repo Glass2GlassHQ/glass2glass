@@ -404,7 +404,7 @@ is design/runtime.md; the patterns an app developer hits most:
 | `gst_pad_add_probe(BLOCK)` / `pad_idle`, then relink | no block to install: name the position instead (§5.2) |
 | add / remove a branch at runtime | `GraphMutator::add_branch` / `remove_branch` on a named tee, `add_input` on a named muxer (§5.2) |
 | enable/disable a branch, A/B switch | `Router` + `Gate` (and their `RouterHandle` / `GateHandle`) |
-| element hot-swap | `ElementSlot::swap` (ArcSwap; no use-after-free with a frame in flight) |
+| element hot-swap | `GraphMutator::remove` then `insert_after`, or `ElementSlot::swap` on an element wrapped in a slot at build time (§5.2) |
 | flushing seek | `PipelinePacket::Flush` (the runner drains and resets) |
 | child→parent signal/notify | post a `BusMessage`; the parent reads it (no back-reference) |
 
@@ -431,7 +431,7 @@ which handle you want depends on what is changing:
 
 | What you are doing | GStreamer | glass2glass |
 | :--- | :--- | :--- |
-| Swap one element for another in place | block, unlink, add, link, unblock | `ElementSlot::swap` (an atomic store, no block) |
+| Swap one element for another in place | block, unlink, add, link, unblock | `GraphMutator::remove` then `insert_after`, or `ElementSlot::swap` if you wrapped it in a slot when building (you configure the new element yourself) |
 | Add or drop an element on an edge | block, unlink, add, two links, unblock | `GraphMutator::insert_after` / `insert_before` / `remove` |
 | Add a chain of elements on an edge | block, unlink, add each, link each, unblock | `GraphMutator::insert_chain_after` / `insert_chain_before` |
 | Swap the source or the sink of a running pipeline | block the pad, unlink, set the old element to `NULL`, add, link, unblock | `GraphMutator::replace_source` / `replace_sink` |
@@ -452,7 +452,9 @@ effect. Caps consent is settled before anything moves, and a refusal leaves the
 graph running unchanged, which is the case a mis-ordered `unlink` / `link` turns
 into a stall or a crash. The protocol is design/runtime.md; a working demo that
 splices a `videoflip` in and out of a live RTSP window is
-[examples/g2g-mutate-demo](examples/g2g-mutate-demo).
+[examples/g2g-mutate-demo](examples/g2g-mutate-demo). A complete Rust example,
+the full list of operations and the errors they return are in the README under
+[Changing a running pipeline](README.md#changing-a-running-pipeline).
 
 Know the scope before you port to it: a transform position on a 1:1 edge carrying
 one stream. The producing end is a source, a transform, or one output of a tee or
