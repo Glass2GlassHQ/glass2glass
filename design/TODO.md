@@ -326,13 +326,6 @@ unless it says otherwise.
 
 ## ML
 
-- **`PyTransform` with `output-caps=` of another media type fails on the first
-  mid-stream `CapsChanged`.** The runner passes the element's output caps in that
-  packet, and `PyTransform::process` hands them to `HostedInput::caps_changed`,
-  which checks them against the input accept set. Whisper (`audio/x-raw` in,
-  `text/x-raw` out) fails with CapsMismatch, sepformer passes because its output
-  is audio too. `configure_pipeline` has already checked the input, as the
-  `CapsChanged` arm of `audioresample` notes.
 - Detector on the Edge TPU is blocked device-side: this Pixel's older Android ORT
   NNAPI EP rejects YOLO's op set (int8-weight initializers, SiLU `Mul` QDQ
   "unsupported quantized type", and an `AddNnapiSplit` divide bug on the C3k2

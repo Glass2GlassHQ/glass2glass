@@ -346,10 +346,13 @@ impl AsyncElement for PyTransform {
                 }
                 // A mid-stream change to anything outside the accepted set is a
                 // hard error; otherwise announce this element's own output side
-                // so downstream stays in step.
+                // so downstream stays in step. Under `output-caps=` the runner's
+                // packet carries that output, `configure_pipeline` took the input.
                 PipelinePacket::CapsChanged(c) => {
                     let announce = self.output_for(&c);
-                    self.input.caps_changed(c)?;
+                    if self.produce.is_none() {
+                        self.input.caps_changed(c)?;
+                    }
                     out.push(PipelinePacket::CapsChanged(announce)).await?;
                 }
                 PipelinePacket::Flush => {

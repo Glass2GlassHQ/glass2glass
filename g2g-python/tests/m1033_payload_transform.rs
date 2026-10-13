@@ -9,14 +9,21 @@
 #![cfg(feature = "analytics")]
 
 use g2g_core::memory::SystemSlice;
+use g2g_core::runtime::{parse_launch, run_graph};
 use g2g_core::{
     AsyncElement, AudioFormat, BlobMeta, Caps, CapsConstraint, Dim, Frame, FrameTiming, G2gError,
     Interlace, MemoryDomain, OutputSink, PipelinePacket, PropValue, PushOutcome, Rate,
     RawVideoFormat, TextFormat,
 };
+use g2g_plugins::clock::WallClock;
 use g2g_python::PyTransform;
 
 const AUDIO_BYTES: usize = 64;
+const LAUNCHED_BUFFERS: u32 = 5;
+const LAUNCHED_SAMPLE_RATE: u32 = 16_000;
+const LAUNCHED_CHANNELS: u32 = 1;
+const TEXT_CAPS: &str = "text/x-raw,format=utf8";
+const LINK_CAPACITY: usize = 4;
 
 #[derive(Default)]
 struct CollectSink {
@@ -465,5 +472,49 @@ fn the_caps_properties_round_trip() {
         el.set_property("output-caps", PropValue::Str("video/x-raw".into())),
         Err(g2g_core::PropError::Value),
         "format-less video/x-raw names every raw format at any geometry"
+    );
+}
+
+// audioresample's first-frame CapsChanged reaches the transcriber as its own text output caps.
+#[test]
+fn a_launched_transcriber_sends_text_to_the_sink() {
+    fixtures_on_path();
+    let location = std::env::temp_dir().join(format!("m1033-launch-{}.txt", std::process::id()));
+    let mut registry = g2g_plugins::registry::default_registry();
+    g2g_python::register(&mut registry);
+    let audio_caps = format!(
+        "audio/x-raw,format=S16LE,rate={LAUNCHED_SAMPLE_RATE},channels={LAUNCHED_CHANNELS}"
+    );
+    let line = format!(
+        "audiotestsrc num-buffers={LAUNCHED_BUFFERS} channels={LAUNCHED_CHANNELS} ! \
+         audioresample ! \
+         pyelement module=echo_element class=AudioTranscriber \
+         input-caps=\"{audio_caps}\" output-caps=\"{TEXT_CAPS}\" ! \
+         pysink module=sink_element class=CountingSink input-caps=\"{TEXT_CAPS}\" \
+         location={}",
+        location.display()
+    );
+    let graph = parse_launch(&registry, &line).expect("the launch line parses");
+    let clock = WallClock::new();
+    tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap()
+        .block_on(run_graph(graph, &clock, LINK_CAPACITY))
+        .expect("the run completes");
+
+    let report = std::fs::read_to_string(&location).expect("the hosted sink wrote its report");
+    std::fs::remove_file(&location).expect("remove the report");
+    let payloads: Vec<&str> = report
+        .lines()
+        .filter_map(|line| line.strip_prefix("payload="))
+        .collect();
+    // audioresample may flush one more buffer at end of stream.
+    assert!(payloads.len() >= LAUNCHED_BUFFERS as usize, "{report}");
+    assert!(
+        payloads
+            .iter()
+            .all(|payload| payload.starts_with(TEXT_CAPS) && payload.contains("heard ")),
+        "{report}"
     );
 }
