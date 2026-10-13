@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- `videotestsrc` takes the width, height and framerate a downstream caps filter asks for when the property is unset.
 - A `wgpusink` that reaches end of stream no longer crashes another `wgpusink` still presenting.
 - A named `decodebin`, `qtdemux` and `playbin` find an mp4's `moov` after an `mdat` larger than the 4 MiB probe window.
 - `pyelement` with `output-caps=` of another media type no longer fails with CapsMismatch on a mid-stream `CapsChanged`.

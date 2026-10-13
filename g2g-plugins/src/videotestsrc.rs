@@ -67,6 +67,9 @@ pub struct VideoTestSrc {
     width: u32,
     height: u32,
     framerate_q16: u32,
+    width_pinned: bool,
+    height_pinned: bool,
+    framerate_pinned: bool,
     target_frames: u64,
     pattern: Pattern,
     configured: bool,
@@ -97,6 +100,9 @@ impl VideoTestSrc {
             width,
             height,
             framerate_q16: framerate << 16,
+            width_pinned: false,
+            height_pinned: false,
+            framerate_pinned: false,
             target_frames,
             pattern: Pattern::default(),
             configured: false,
@@ -131,6 +137,9 @@ impl VideoTestSrc {
             width,
             height,
             framerate_q16: framerate << 16,
+            width_pinned: false,
+            height_pinned: false,
+            framerate_pinned: false,
             target_frames,
             pattern: Pattern::default(),
             configured: false,
@@ -169,14 +178,61 @@ impl VideoTestSrc {
     }
 
     fn caps(&self) -> Caps {
-        Caps::RawVideo {
-            format: RawVideoFormat::Rgba8,
-            width: Dim::Fixed(self.width),
-            height: Dim::Fixed(self.height),
-            framerate: Rate::Fixed(self.framerate_q16),
-            interlace: g2g_core::Interlace::Any,
-            colorimetry: g2g_core::Colorimetry::UNKNOWN,
+        rgba_caps(
+            Dim::Fixed(self.width),
+            Dim::Fixed(self.height),
+            Rate::Fixed(self.framerate_q16),
+        )
+    }
+
+    fn produced_caps(&self) -> CapsSet {
+        let mut widths = vec![(0, Dim::Fixed(self.width))];
+        if !self.width_pinned {
+            widths.push((1, REQUESTED_DIMENSION));
         }
+        let mut heights = vec![(0, Dim::Fixed(self.height))];
+        if !self.height_pinned {
+            heights.push((1, REQUESTED_DIMENSION));
+        }
+        let mut framerates = vec![(0, Rate::Fixed(self.framerate_q16))];
+        if !self.framerate_pinned {
+            framerates.push((1, REQUESTED_FRAMERATE));
+        }
+        let mut alternatives = Vec::new();
+        for (width_open, width) in &widths {
+            for (height_open, height) in &heights {
+                for (framerate_open, framerate) in &framerates {
+                    let open_fields = width_open + height_open + framerate_open;
+                    let caps = rgba_caps(width.clone(), height.clone(), framerate.clone());
+                    alternatives.push((open_fields, caps));
+                }
+            }
+        }
+        // fewest open fields first: fixation keeps each property a filter leaves unset
+        alternatives.sort_by_key(|(open_fields, _)| *open_fields);
+        CapsSet::from_alternatives(alternatives.into_iter().map(|(_, caps)| caps).collect())
+    }
+}
+
+const MAX_REQUESTED_DIMENSION: u32 = 16_384;
+const MAX_REQUESTED_FPS: u32 = 1_000;
+const REQUESTED_DIMENSION: Dim = Dim::Range {
+    min: 1,
+    max: MAX_REQUESTED_DIMENSION,
+};
+const REQUESTED_FRAMERATE: Rate = Rate::Range {
+    min_q16: 1,
+    max_q16: MAX_REQUESTED_FPS << 16,
+};
+
+fn rgba_caps(width: Dim, height: Dim, framerate: Rate) -> Caps {
+    Caps::RawVideo {
+        format: RawVideoFormat::Rgba8,
+        width,
+        height,
+        framerate,
+        interlace: g2g_core::Interlace::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
     }
 }
 
@@ -204,10 +260,22 @@ impl SourceLoop for VideoTestSrc {
     fn caps_constraint<'a>(
         &'a mut self,
     ) -> impl Future<Output = Result<CapsConstraint<'a>, G2gError>> + 'a {
-        core::future::ready(Ok(CapsConstraint::Produces(CapsSet::one(self.caps()))))
+        core::future::ready(Ok(CapsConstraint::Produces(self.produced_caps())))
     }
 
-    fn configure_pipeline(&mut self, _absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+    fn configure_pipeline(&mut self, absolute_caps: &Caps) -> Result<ConfigureOutcome, G2gError> {
+        let Caps::RawVideo {
+            width: Dim::Fixed(width),
+            height: Dim::Fixed(height),
+            framerate: Rate::Fixed(framerate_q16),
+            ..
+        } = *absolute_caps
+        else {
+            return Err(G2gError::CapsMismatch);
+        };
+        self.width = width;
+        self.height = height;
+        self.framerate_q16 = framerate_q16;
         self.configured = true;
         Ok(ConfigureOutcome::Accepted)
     }
@@ -331,10 +399,12 @@ impl SourceLoop for VideoTestSrc {
             "num-buffers" => crate::numbuffers::set_num_buffers(&mut self.target_frames, &value),
             "width" => {
                 self.width = value.as_uint().ok_or(PropError::Type)? as u32;
+                self.width_pinned = true;
                 Ok(())
             }
             "height" => {
                 self.height = value.as_uint().ok_or(PropError::Type)? as u32;
+                self.height_pinned = true;
                 Ok(())
             }
             "framerate" => {
@@ -344,6 +414,7 @@ impl SourceLoop for VideoTestSrc {
                 }
                 // Store fps as Q16: (n/d) << 16.
                 self.framerate_q16 = (((n as u64) << 16) / d as u64) as u32;
+                self.framerate_pinned = true;
                 Ok(())
             }
             _ => Err(PropError::Unknown),
@@ -565,7 +636,7 @@ fn bounce(seq: u64, span: usize, speed: u64) -> usize {
 
 impl PadTemplates for VideoTestSrc {
     /// Static superset: the type always produces RGBA at any geometry /
-    /// framerate. A constructed instance narrows to its configured dims via
+    /// framerate. A constructed instance narrows to its set properties via
     /// `SourceLoop::caps_constraint`.
     fn pad_templates() -> Vec<PadTemplate> {
         Vec::from([PadTemplate::source(CapsSet::one(Caps::RawVideo {

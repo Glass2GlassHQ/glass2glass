@@ -127,8 +127,6 @@ Highest leverage first:
 
 ## Capture sources
 
-- **`videotestsrc` ignores a downstream caps filter.** It stays at 320x240
-  when the launch line asks for `video/x-raw,width=1280,height=720`.
 - **`pulsesrc` ignores a downstream caps filter.** It emits 48000 Hz stereo
   when the launch line asks for 16000 Hz mono after `audioconvert !
   audioresample`.
