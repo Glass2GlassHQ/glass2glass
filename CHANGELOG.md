@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- A `wgpusink` that reaches end of stream no longer crashes another `wgpusink` still presenting.
 - A named `decodebin`, `qtdemux` and `playbin` find an mp4's `moov` after an `mdat` larger than the 4 MiB probe window.
 - `pyelement` with `output-caps=` of another media type no longer fails with CapsMismatch on a mid-stream `CapsChanged`.
 - M1232: `pysink` hosts a gst-python-ml element as a sink, so a launch line can end in a Python class. It calls the same per-frame hooks as `pyelement`, calls `g2g_eos()` at end of stream when the class defines it, and fails a frame whose hook returns a value or emits a buffer.

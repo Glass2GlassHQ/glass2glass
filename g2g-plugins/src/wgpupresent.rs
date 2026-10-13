@@ -662,6 +662,10 @@ async fn open_device(
     GpuContext::for_surface(instance, surface).await
 }
 
+// destroying one VkInstance makes the NVIDIA driver segfault in another window's swapchain present
+#[cfg(not(feature = "cuda-wgpu"))]
+static PRESENT_INSTANCE: std::sync::OnceLock<wgpu::Instance> = std::sync::OnceLock::new();
+
 /// A `wgpu::Surface` over the worker's `wl_surface`, plus the instance it belongs
 /// to (an adapter is only usable with the surface's own instance).
 fn create_surface(
@@ -671,7 +675,9 @@ fn create_surface(
     #[cfg(feature = "cuda-wgpu")]
     let instance = crate::cudawgpu::vulkan_instance();
     #[cfg(not(feature = "cuda-wgpu"))]
-    let instance = wgpu::Instance::default();
+    let instance = PRESENT_INSTANCE
+        .get_or_init(wgpu::Instance::default)
+        .clone();
 
     let wgpu_surface = create_surface_on(&instance, conn, surface)?;
     Ok((instance, wgpu_surface))

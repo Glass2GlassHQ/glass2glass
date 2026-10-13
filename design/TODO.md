@@ -153,9 +153,6 @@ Highest leverage first:
 
 ## Sinks
 
-- **`wgpusink` segfaults behind a tee with two sinks and a hosted depth
-  element on one branch.** Address 0 in thread `g2g-wgpusink`, exit 245. The same
-  tee with two sinks and no depth runs, and depth alone runs.
 - Validate `wasapisink` U8, S24, and S32 acceptance on a Windows host.
 
 ## Containers
