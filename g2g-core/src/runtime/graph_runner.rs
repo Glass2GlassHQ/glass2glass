@@ -1957,9 +1957,30 @@ fn register_edge_taps(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
+/// The pre-flow copy-budget check both runners make (M617): negotiation has
+/// settled every edge's memory domain, so the copy plan is exact and a pipeline
+/// that must stay zero-copy refuses to start rather than paying a host
+/// round-trip at runtime.
+fn enforce_copy_policy(
+    vg: &ValidatedGraph<GraphNodeRef<'_>>,
+    solution: &[Caps],
+    policy: crate::copyplan::CopyPolicy,
+) -> Result<(), G2gError> {
+    let edge_memory: Vec<crate::memory::MemoryDomainKind> = (0..vg.edge_count())
+        .map(|id| {
+            let src = vg.edge(id).src.node;
+            vg.element(src)
+                .map(|e| e.output_memory())
+                .unwrap_or(crate::memory::MemoryDomainKind::System)
+        })
+        .collect();
+    let plan = copy_plan(vg, solution, &edge_memory);
+    plan.check(policy).map_err(|_| G2gError::CopyBudget)
+}
+
+pub(crate) async fn run_graph_inner<'a: 'c, 'c, Clk: PipelineClock>(
     graph: Graph<GraphNodeRef<'a>>,
-    clock: &'a Clk,
+    clock: &'c Clk,
     link_capacity: impl Into<LinkCapacity>,
     bus: Option<&BusHandle>,
     state: Option<StateController>,
@@ -1967,7 +1988,7 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
     copy_policy: Option<crate::copyplan::CopyPolicy>,
     observer: Option<&Observer>,
     recorder: Option<&crate::runtime::FlightRecorder>,
-    ticker: Option<&'a dyn DynAsyncClock>,
+    ticker: Option<&'c dyn DynAsyncClock>,
     mutation: Option<Receiver<MutationRequest<'a>>>,
 ) -> Result<RunStats, G2gError> {
     // A pipeline clock that can sleep on a deadline is the fan-in tick timer
@@ -2017,18 +2038,7 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
     // paying a host round-trip at runtime. Configure side effects already ran (bound
     // sockets etc.) and are released when the doomed graph drops.
     if let Some(policy) = copy_policy {
-        let edge_memory: Vec<crate::memory::MemoryDomainKind> = (0..vg.edge_count())
-            .map(|id| {
-                let src = vg.edge(id).src.node;
-                vg.element(src)
-                    .map(|e| e.output_memory())
-                    .unwrap_or(crate::memory::MemoryDomainKind::System)
-            })
-            .collect();
-        let plan = copy_plan(&vg, &solution, &edge_memory);
-        if plan.check(policy).is_err() {
-            return Err(G2gError::CopyBudget);
-        }
+        enforce_copy_policy(&vg, &solution, policy)?;
     }
 
     let GraphChannels {
@@ -2074,7 +2084,7 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
         install_flight_recorder(rec, &vg, &txs, &solution, &names);
     }
 
-    let mut arms: Vec<BoxFuture<'a, Result<u64, G2gError>>> = Vec::with_capacity(n + 1);
+    let mut arms: Vec<BoxFuture<'c, Result<u64, G2gError>>> = Vec::with_capacity(n + 1);
     let mut arm_kinds: Vec<NodeKind> = Vec::with_capacity(n);
     // Arm order, not node order: a muxer contributes one forwarder arm per
     // input pad plus its own, so an arm index cannot index `names` directly.
@@ -2121,7 +2131,7 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
                 Vec::with_capacity(input_count);
             for (in_rx, pad) in in_rxs.into_iter().zip(pads) {
                 let (pad_tx, pad_rx) = bounded::<PipelinePacket>(link_capacity);
-                let fwd: BoxFuture<'a, Result<u64, G2gError>> =
+                let fwd: BoxFuture<'c, Result<u64, G2gError>> =
                     Box::pin(muxer_forwarder(in_rx, pad_tx));
                 arms.push(fwd);
                 arm_kinds.push(kind);
@@ -2137,7 +2147,7 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
             let mux_properties = live
                 .as_ref()
                 .and_then(|t| t.nodes[node.0 as usize].properties.clone());
-            let arm: BoxFuture<'a, Result<u64, G2gError>> = mux.drive_muxer_arm(MuxerArmIo {
+            let arm: BoxFuture<'c, Result<u64, G2gError>> = mux.drive_muxer_arm(MuxerArmIo {
                 parts: MuxerArmParts {
                     pad_rxs,
                     out_tx,
@@ -2157,7 +2167,7 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
             continue;
         }
 
-        let arm: BoxFuture<'a, Result<u64, G2gError>> = match kind {
+        let arm: BoxFuture<'c, Result<u64, G2gError>> = match kind {
             NodeKind::Source => {
                 let Some(GraphNodeRef::Source(src)) = element else {
                     return Err(G2gError::CapsMismatch);
@@ -2367,7 +2377,7 @@ pub(crate) async fn run_graph_inner<'a, Clk: PipelineClock>(
 
 /// Depth of the mutator's request and new-arm channels: how many structural
 /// operations can be in flight at once before a caller waits its turn.
-const MUTATION_QUEUE_DEPTH: usize = 4;
+pub(crate) const MUTATION_QUEUE_DEPTH: usize = 4;
 
 /// Join the arms, growably when the run can be mutated (M1115): a spliced
 /// element's arm arrives on `new_arms` and is folded in mid-run. Results keep
@@ -2569,6 +2579,7 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
     bus: Option<&BusHandle>,
     state: Option<StateController>,
     progress: Option<&PipelineProgress>,
+    copy_policy: Option<crate::copyplan::CopyPolicy>,
     observer: Option<&Observer>,
     recorder: Option<&FlightRecorder>,
     ticker: Option<alloc::sync::Arc<dyn DynAsyncClock + Send + Sync>>,
@@ -2617,6 +2628,10 @@ pub(crate) async fn run_graph_threaded_inner<S: GraphSpawner>(
         bus.is_some() && ticker.is_some(),
     )
     .await?;
+
+    if let Some(policy) = copy_policy {
+        enforce_copy_policy(&vg, &solution, policy)?;
+    }
 
     let GraphChannels {
         mut txs,
@@ -3032,6 +3047,7 @@ pub async fn run_graph_threaded<Clk: PipelineClock, S: GraphSpawner>(
         None,
         None,
         None,
+        None,
         spawner,
         None,
     )
@@ -3057,6 +3073,7 @@ pub fn run_graph_threaded_mutable<'s, Clk: PipelineClock, S: GraphSpawner>(
         graph,
         clock,
         capacity,
+        None,
         None,
         None,
         None,
@@ -3097,6 +3114,7 @@ pub async fn run_graph_threaded_ticked<S: GraphSpawner>(
         None,
         None,
         None,
+        None,
         Some(clock.clone()),
         spawner,
         None,
@@ -3121,6 +3139,7 @@ pub async fn run_graph_threaded_with_bus<Clk: PipelineClock, S: GraphSpawner>(
         clock,
         link_capacity,
         Some(bus),
+        None,
         None,
         None,
         None,
@@ -3153,6 +3172,7 @@ pub async fn run_graph_threaded_with_progress<Clk: PipelineClock, S: GraphSpawne
         None,
         None,
         None,
+        None,
         spawner,
         None,
     )
@@ -3176,6 +3196,7 @@ pub async fn run_graph_threaded_observed<Clk: PipelineClock, S: GraphSpawner>(
         graph,
         clock,
         link_capacity,
+        None,
         None,
         None,
         None,
@@ -3212,6 +3233,7 @@ pub async fn run_graph_threaded_recorded<Clk: PipelineClock, S: GraphSpawner>(
         bus,
         None,
         progress,
+        None,
         None,
         Some(recorder),
         None,

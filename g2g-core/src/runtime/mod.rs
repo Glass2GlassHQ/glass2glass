@@ -54,6 +54,9 @@ mod parse_scope;
 mod property_mailbox;
 
 #[cfg(feature = "std")]
+mod run;
+
+#[cfg(feature = "std")]
 mod observe;
 
 #[cfg(feature = "std")]
@@ -129,6 +132,9 @@ pub use graph_runner::{
 
 #[cfg(feature = "std")]
 pub use mutate::{GraphMutator, MutationError};
+
+#[cfg(feature = "std")]
+pub use run::RunBuilder;
 
 // The monomorphized-arm seam (M1000, extended to the fan-in / fan-out arms in
 // M1009): the drive hooks on `DynAsyncElement` / `DynMultiInputElement` /

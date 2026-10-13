@@ -492,43 +492,45 @@ pub(crate) struct LiveTopology<'a> {
 /// Builds the arm future for an element the mutator spliced in. The cooperative
 /// runner drives it on the caller's executor; the thread-per-arm runner hands it
 /// to its spawner. `done` takes the element back when the arm ends.
-pub(crate) type SpliceSpawn<'a, 's> = Box<
+pub(crate) type SpliceSpawn<'a, 'f, 's> = Box<
     dyn Fn(
             Box<dyn DynAsyncElement + 'a>,
             TransformArmIo,
             Sender<Box<dyn DynAsyncElement + 'a>>,
-        ) -> BoxFuture<'a, Result<u64, G2gError>>
+        ) -> BoxFuture<'f, Result<u64, G2gError>>
         + 's,
 >;
 
 /// [`SpliceSpawn`] for a replacement sink's arm (M1149).
-pub(crate) type SinkSpawn<'a, 's> = Box<
+pub(crate) type SinkSpawn<'a, 'f, 's> = Box<
     dyn Fn(
             Box<dyn DynAsyncElement + 'a>,
             SinkArmIo,
             Sender<Box<dyn DynAsyncElement + 'a>>,
-        ) -> BoxFuture<'a, Result<u64, G2gError>>
+        ) -> BoxFuture<'f, Result<u64, G2gError>>
         + 's,
 >;
 
 /// [`SpliceSpawn`] for a replacement source's arm (M1149).
-pub(crate) type SourceSpawn<'a, 's> = Box<
+pub(crate) type SourceSpawn<'a, 'f, 's> = Box<
     dyn Fn(
             Box<dyn DynSourceLoop + 'a>,
             SourceArmIo,
             Sender<Box<dyn DynSourceLoop + 'a>>,
-        ) -> BoxFuture<'a, Result<u64, G2gError>>
+        ) -> BoxFuture<'f, Result<u64, G2gError>>
         + 's,
 >;
 
 /// How the run driving this mutator starts an arm, one per position the mutator
 /// can put an element in. The two runners differ only in where the arm ends up:
-/// the caller's executor, or a worker thread of its own.
+/// the caller's executor, or a worker thread of its own. `'f` is the arm
+/// future's lifetime, the run's rather than the elements', since the run also
+/// borrows its clock.
 #[allow(missing_debug_implementations)]
-pub(crate) struct MutationSpawn<'a, 's> {
-    pub(crate) transform: SpliceSpawn<'a, 's>,
-    pub(crate) sink: SinkSpawn<'a, 's>,
-    pub(crate) source: SourceSpawn<'a, 's>,
+pub(crate) struct MutationSpawn<'a, 'f, 's> {
+    pub(crate) transform: SpliceSpawn<'a, 'f, 's>,
+    pub(crate) sink: SinkSpawn<'a, 'f, 's>,
+    pub(crate) source: SourceSpawn<'a, 'f, 's>,
 }
 
 /// Drive an element the mutator spliced in, handing it back through `done` when
@@ -586,13 +588,13 @@ pub(crate) async fn lent_source_arm<'a>(
 /// The mutator's other half, running inside the run future: it owns the live
 /// topology and performs each operation against the arms and links themselves.
 #[allow(missing_debug_implementations)]
-pub(crate) struct MutationService<'a, 's> {
+pub(crate) struct MutationService<'a, 'f, 's> {
     rx: Receiver<MutationRequest<'a>>,
     nodes: Vec<LiveNode<'a>>,
     edges: Vec<LiveEdge>,
     /// Sends a spliced element's arm into the run's growable join set.
-    arms: Sender<BoxFuture<'a, Result<u64, G2gError>>>,
-    spawn: MutationSpawn<'a, 's>,
+    arms: Sender<BoxFuture<'f, Result<u64, G2gError>>>,
+    spawn: MutationSpawn<'a, 'f, 's>,
     bus: Option<BusHandle>,
     /// The run's position / duration handle, so a replacement source or sink
     /// keeps answering the queries the one it took over from did (M1149).
@@ -609,13 +611,13 @@ pub(crate) struct MutationService<'a, 's> {
     sink_clock_sync: Option<ClockSync>,
 }
 
-impl<'a, 's> MutationService<'a, 's> {
+impl<'a, 'f, 's> MutationService<'a, 'f, 's> {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         rx: Receiver<MutationRequest<'a>>,
         topology: LiveTopology<'a>,
-        arms: Sender<BoxFuture<'a, Result<u64, G2gError>>>,
-        spawn: MutationSpawn<'a, 's>,
+        arms: Sender<BoxFuture<'f, Result<u64, G2gError>>>,
+        spawn: MutationSpawn<'a, 'f, 's>,
         bus: Option<BusHandle>,
         progress: Option<PipelineProgress>,
         dropped: Arc<spin::Mutex<u64>>,
