@@ -1539,9 +1539,11 @@ fn transform_pair_consistent(c: &CapsConstraint<'_>, inp: &Caps, outp: &Caps) ->
         }
         CapsConstraint::DerivedOutput(f) => f(inp).accepts(outp),
         CapsConstraint::DerivedFields(t) => t.derive(inp).accepts(outp),
-        // Produce / accept shapes on a transform slot, or legacy bridges: not a
-        // cross-edge relation re-checked here (arc consistency handled the forward
-        // cascade; the legacy bridge stays permissive through the migration).
+        CapsConstraint::LegacyTransform { intercept, .. } => {
+            intercept(inp).is_ok_and(|derived| derived.intersect(outp).is_ok())
+        }
+        // Produce / accept shapes on a transform slot: not a cross-edge relation
+        // re-checked here (arc consistency handled the forward cascade).
         _ => true,
     }
 }
@@ -1969,18 +1971,28 @@ fn apply_transform_node<E>(
             }
             Ok(())
         }
-        // Legacy bridge: forward `intercept(input)` to the output once the input
-        // fixates, the same single-caps forward cascade `solve_legacy_cascade`
-        // runs (no backward coupling, like the mixed-cascade path).
+        // Legacy bridge: forward `intercept(input)` to the output, the same
+        // single-caps forward cascade `solve_legacy_cascade` runs (no backward
+        // coupling, like the mixed-cascade path). A still ambiguous input
+        // forwards the union over the alternatives `intercept` accepts.
         CapsConstraint::LegacyTransform { intercept, .. } => {
-            if let Some(fixed_input) = edges[in_e].as_ref().and_then(fixed_single) {
-                let out = intercept(&fixed_input).map_err(|_| {
-                    let (up, down) = edge_endpoints(graph, out_e);
-                    NegotiationFailure::empty_link(up, down)
-                })?;
+            let Some(in_set) = edges[in_e].clone() else {
+                return Ok(());
+            };
+            let empty_output = || {
+                let (up, down) = edge_endpoints(graph, out_e);
+                NegotiationFailure::empty_link(up, down)
+            };
+            if let Some(fixed_input) = fixed_single(&in_set) {
+                let out = intercept(&fixed_input).map_err(|_| empty_output())?;
                 return narrow_edge(graph, edges, out_e, &CapsSet::one(out), node);
             }
-            Ok(())
+            let forward = |c: &Caps| intercept(c).map_or_else(|_| empty_set(), CapsSet::one);
+            let forwarded = forward_derived_union(&forward, &in_set);
+            if forwarded.is_empty() {
+                return Err(empty_output());
+            }
+            narrow_edge(graph, edges, out_e, &forwarded, node)
         }
         _ => Err(NegotiationFailure::EndpointShapeMismatch {
             index: node.0 as usize,
@@ -3754,6 +3766,49 @@ mod tests {
 
         let sol = solve_graph(&v, &cs).expect("legacy transform forwards");
         assert_eq!(sol, vec![rgba, nv12]);
+    }
+
+    fn legacy_passthrough_chain(
+        sink: CapsConstraint<'static>,
+    ) -> Result<Vec<Caps>, NegotiationFailure> {
+        let alternatives = vec![
+            fixed_video(RawVideoFormat::Rgba8, 64, 48, 30),
+            fixed_video(RawVideoFormat::Rgba8, 32, 24, 30),
+        ];
+        let cs: Vec<NodeConstraint> = vec![
+            NodeConstraint::Element(CapsConstraint::Produces(CapsSet::from_alternatives(
+                alternatives,
+            ))),
+            NodeConstraint::Element(CapsConstraint::LegacyTransform {
+                intercept: Box::new(|c: &Caps| Ok(c.clone())),
+                propose_output: Box::new(|c: &Caps| c.clone()),
+            }),
+            NodeConstraint::Element(sink),
+        ];
+        let mut g: Graph<()> = Graph::new();
+        let src = g.add_source(());
+        let tx = g.add_transform(());
+        let sink = g.add_sink(());
+        g.link(src, tx).unwrap();
+        g.link(tx, sink).unwrap();
+        let v = g.finish().unwrap();
+        solve_graph(&v, &cs)
+    }
+
+    #[test]
+    fn legacy_transform_behind_source_alternatives_takes_the_preferred_one() {
+        let preferred = fixed_video(RawVideoFormat::Rgba8, 64, 48, 30);
+        let sol = legacy_passthrough_chain(CapsConstraint::AcceptsAny)
+            .expect("legacy transform forwards an ambiguous input");
+        assert_eq!(sol, vec![preferred.clone(), preferred]);
+    }
+
+    #[test]
+    fn legacy_transform_output_stays_paired_with_its_input() {
+        let fallback = fixed_video(RawVideoFormat::Rgba8, 32, 24, 30);
+        let sol = legacy_passthrough_chain(CapsConstraint::Accepts(CapsSet::one(fallback.clone())))
+            .expect("the sink pin reaches the source through the legacy pair check");
+        assert_eq!(sol, vec![fallback.clone(), fallback]);
     }
 
     #[cfg(feature = "std")]
