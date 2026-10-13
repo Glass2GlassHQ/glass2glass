@@ -676,7 +676,16 @@ fn create_surface(
     let instance = crate::cudawgpu::vulkan_instance();
     #[cfg(not(feature = "cuda-wgpu"))]
     let instance = PRESENT_INSTANCE
-        .get_or_init(wgpu::Instance::default)
+        // two windows opening at once abort in GL's EGL probe
+        .get_or_init(|| {
+            wgpu::Instance::new(
+                wgpu::InstanceDescriptor {
+                    backends: wgpu::Backends::PRIMARY,
+                    ..wgpu::InstanceDescriptor::new_without_display_handle()
+                }
+                .with_env(),
+            )
+        })
         .clone();
 
     let wgpu_surface = create_surface_on(&instance, conn, surface)?;
