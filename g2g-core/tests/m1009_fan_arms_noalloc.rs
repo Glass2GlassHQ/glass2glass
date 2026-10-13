@@ -9,6 +9,7 @@
 //! warmup frame and at the last frame, and the difference must be zero.
 #![cfg(all(feature = "std", feature = "runtime"))]
 
+use core::cell::Cell;
 use core::future::Future;
 use core::pin::Pin;
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -25,12 +26,23 @@ use g2g_core::{
 
 static ALLOCS: AtomicUsize = AtomicUsize::new(0);
 
+thread_local! {
+    // libtest's main thread allocates while it waits for the result.
+    static MEASURING: Cell<bool> = const { Cell::new(false) };
+}
+
+fn measuring() -> bool {
+    MEASURING.with(Cell::get)
+}
+
 struct Counting;
 
 // SAFETY: forwards to `System` unchanged, only counting alloc / realloc first.
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        ALLOCS.fetch_add(1, Ordering::Relaxed);
+        if measuring() {
+            ALLOCS.fetch_add(1, Ordering::Relaxed);
+        }
         // SAFETY: `layout` is the valid layout forwarded from our caller.
         unsafe { System.alloc(layout) }
     }
@@ -39,7 +51,9 @@ unsafe impl GlobalAlloc for Counting {
         unsafe { System.dealloc(ptr, layout) }
     }
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        ALLOCS.fetch_add(1, Ordering::Relaxed);
+        if measuring() {
+            ALLOCS.fetch_add(1, Ordering::Relaxed);
+        }
         // SAFETY: `ptr` / `layout` come from a prior `alloc`; `new_size` is the
         // caller's valid request, forwarded unchanged.
         unsafe { System.realloc(ptr, layout, new_size) }
@@ -306,15 +320,16 @@ fn demux_graph_allocations() -> usize {
     let mut graph: Graph<GraphNode> = Graph::new();
     let src = graph.add_source(GraphNode::source(RingSource { ring: &RING }));
     let demux = graph.add_demux(GraphNode::demux(AlternatingDemux), 2);
-    // Only the even branch marks; the counter is process-wide, so it still sees
-    // whatever the odd branch allocated between the two marks.
+    // Only the even branch marks, run_graph polls the odd branch on this thread too.
     let even = graph.add_sink(GraphNode::element(MarkingSink::new(FRAMES / 2)));
     let odd = graph.add_sink(GraphNode::element(MarkingSink::new(0)));
     graph.link(src, demux.input()).unwrap();
     graph.link(demux.out(0), even).unwrap();
     graph.link(demux.out(1), odd).unwrap();
 
+    MEASURING.set(true);
     let stats = block_on(run_graph(graph, &ZeroClock, 2)).expect("run to EOS");
+    MEASURING.set(false);
     assert_eq!(stats.frames_consumed, FRAMES);
     steady_state_allocations()
 }
@@ -332,13 +347,13 @@ fn muxer_graph_allocations() -> usize {
     graph.link(b, mux.input(1)).unwrap();
     graph.link(mux.output(), sink).unwrap();
 
+    MEASURING.set(true);
     let stats = block_on(run_graph(graph, &ZeroClock, 2)).expect("run to EOS");
+    MEASURING.set(false);
     assert_eq!(stats.frames_consumed, 2 * FRAMES);
     steady_state_allocations()
 }
 
-/// One test for both graphs: a second `#[test]` in this binary would have the
-/// harness reporting its result (on another thread) inside the counted window.
 #[test]
 fn fan_arms_steady_state_make_zero_heap_allocations() {
     let demux = demux_graph_allocations();

@@ -14,6 +14,7 @@
 //! allocation; that cost is pinned separately in `m616_dyn_push_allocates`. The
 //! zero-alloc contract is the data path plus a concrete (non-dyn) link.
 
+use core::cell::Cell;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use std::alloc::{GlobalAlloc, Layout, System};
 
@@ -21,6 +22,15 @@ use g2g_core::memory::MemoryDomain;
 use g2g_core::{Frame, FrameTiming, StaticLendRing};
 
 static ALLOCS: AtomicUsize = AtomicUsize::new(0);
+
+thread_local! {
+    // libtest's main thread allocates while it waits for the result.
+    static MEASURING: Cell<bool> = const { Cell::new(false) };
+}
+
+fn measuring() -> bool {
+    MEASURING.with(Cell::get)
+}
 
 /// Wraps the system allocator, counting every allocating call (alloc + realloc).
 struct Counting;
@@ -30,7 +40,9 @@ struct Counting;
 // exactly the system allocator's, so all `GlobalAlloc` contracts are upheld.
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        ALLOCS.fetch_add(1, Ordering::Relaxed);
+        if measuring() {
+            ALLOCS.fetch_add(1, Ordering::Relaxed);
+        }
         // SAFETY: `layout` is the valid layout forwarded from our caller; System's
         // alloc contract is identical to ours, so forwarding upholds it.
         unsafe { System.alloc(layout) }
@@ -41,7 +53,9 @@ unsafe impl GlobalAlloc for Counting {
         unsafe { System.dealloc(ptr, layout) }
     }
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        ALLOCS.fetch_add(1, Ordering::Relaxed);
+        if measuring() {
+            ALLOCS.fetch_add(1, Ordering::Relaxed);
+        }
         // SAFETY: `ptr` / `layout` come from a prior `alloc`; `new_size` is the
         // caller's valid request, forwarded unchanged to System.
         unsafe { System.realloc(ptr, layout, new_size) }
@@ -87,7 +101,9 @@ fn fixed_pool_frame_path_makes_zero_heap_allocations() {
     let _ = run_data_path(&ring, 1_000);
 
     let before = ALLOCS.load(Ordering::Relaxed);
+    MEASURING.set(true);
     let acc = run_data_path(&ring, 100_000);
+    MEASURING.set(false);
     let allocs = ALLOCS.load(Ordering::Relaxed) - before;
 
     assert_eq!(

@@ -11,6 +11,7 @@
 //! at a warmup frame and at the last frame, and the difference must be zero.
 #![cfg(all(feature = "std", feature = "runtime"))]
 
+use core::cell::Cell;
 use core::future::Future;
 use core::pin::Pin;
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -26,12 +27,23 @@ use g2g_core::{
 
 static ALLOCS: AtomicUsize = AtomicUsize::new(0);
 
+thread_local! {
+    // libtest's main thread allocates while it waits for the result.
+    static MEASURING: Cell<bool> = const { Cell::new(false) };
+}
+
+fn measuring() -> bool {
+    MEASURING.with(Cell::get)
+}
+
 struct Counting;
 
 // SAFETY: forwards to `System` unchanged, only counting alloc / realloc first.
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        ALLOCS.fetch_add(1, Ordering::Relaxed);
+        if measuring() {
+            ALLOCS.fetch_add(1, Ordering::Relaxed);
+        }
         // SAFETY: `layout` is the valid layout forwarded from our caller.
         unsafe { System.alloc(layout) }
     }
@@ -40,7 +52,9 @@ unsafe impl GlobalAlloc for Counting {
         unsafe { System.dealloc(ptr, layout) }
     }
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        ALLOCS.fetch_add(1, Ordering::Relaxed);
+        if measuring() {
+            ALLOCS.fetch_add(1, Ordering::Relaxed);
+        }
         // SAFETY: `ptr` / `layout` come from a prior `alloc`; `new_size` is the
         // caller's valid request, forwarded unchanged.
         unsafe { System.realloc(ptr, layout, new_size) }
@@ -210,7 +224,9 @@ fn dyn_graph_steady_state_makes_zero_heap_allocations() {
     graph.link(src, mid).unwrap();
     graph.link(mid, snk).unwrap();
 
+    MEASURING.set(true);
     let stats = block_on(run_graph(graph, &ZeroClock, 2)).expect("run to EOS");
+    MEASURING.set(false);
     assert_eq!(stats.frames_consumed, FRAMES);
 
     let at_warmup = AT_WARMUP.load(Ordering::Relaxed);

@@ -13,6 +13,7 @@
 //! unboxed `process` futures, is a larger effort deferred; the load-bearing MCU
 //! claim, a heap-free data plane, is proven here and in M616.)
 
+use core::cell::Cell;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use std::alloc::{GlobalAlloc, Layout, System};
 
@@ -21,12 +22,23 @@ use g2g_core::{Frame, FrameTiming, StaticLendRing};
 
 static ALLOCS: AtomicUsize = AtomicUsize::new(0);
 
+thread_local! {
+    // libtest's main thread allocates while it waits for the result.
+    static MEASURING: Cell<bool> = const { Cell::new(false) };
+}
+
+fn measuring() -> bool {
+    MEASURING.with(Cell::get)
+}
+
 struct Counting;
 
 // SAFETY: forwards to `System` unchanged, only counting alloc / realloc first.
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        ALLOCS.fetch_add(1, Ordering::Relaxed);
+        if measuring() {
+            ALLOCS.fetch_add(1, Ordering::Relaxed);
+        }
         // SAFETY: `layout` is the caller's valid layout, forwarded unchanged.
         unsafe { System.alloc(layout) }
     }
@@ -35,7 +47,9 @@ unsafe impl GlobalAlloc for Counting {
         unsafe { System.dealloc(ptr, layout) }
     }
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        ALLOCS.fetch_add(1, Ordering::Relaxed);
+        if measuring() {
+            ALLOCS.fetch_add(1, Ordering::Relaxed);
+        }
         // SAFETY: `ptr` / `layout` from a prior `alloc`; `new_size` the caller's.
         unsafe { System.realloc(ptr, layout, new_size) }
     }
@@ -126,7 +140,9 @@ fn concrete_multistage_pipeline_makes_zero_heap_allocations() {
     let _ = run_chain(&ring, 1_000);
 
     let before = ALLOCS.load(Ordering::Relaxed);
+    MEASURING.set(true);
     let (fold, sum) = run_chain(&ring, 100_000);
+    MEASURING.set(false);
     let allocs = ALLOCS.load(Ordering::Relaxed) - before;
 
     assert_eq!(
