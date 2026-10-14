@@ -472,40 +472,18 @@ impl Future for PrerollGate {
 mod tests {
     use super::*;
     use crate::bus::Bus;
-    use core::task::{RawWaker, RawWakerVTable, Waker};
+    struct FlagWaker(Arc<AtomicBool>);
+
+    impl alloc::task::Wake for FlagWaker {
+        fn wake(self: Arc<Self>) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
 
     /// A waker that flips a shared flag when woken, so a test can prove the
     /// gate's parked waker is actually fired by `set_state`.
-    fn flag_waker(flag: Arc<core::sync::atomic::AtomicBool>) -> Waker {
-        // Leak an Arc clone as the waker data; freed in `drop_fn`.
-        fn clone_fn(data: *const ()) -> RawWaker {
-            // SAFETY: `data` is an `Arc<AtomicBool>` pointer we created below;
-            // reconstruct without dropping, bump the count, leak again.
-            let arc = unsafe { Arc::from_raw(data as *const core::sync::atomic::AtomicBool) };
-            let cloned = arc.clone();
-            core::mem::forget(arc);
-            RawWaker::new(Arc::into_raw(cloned) as *const (), &VT)
-        }
-        fn wake_fn(data: *const ()) {
-            // SAFETY: takes ownership of one ref (consumes it, as `wake` does).
-            let arc = unsafe { Arc::from_raw(data as *const core::sync::atomic::AtomicBool) };
-            arc.store(true, Ordering::SeqCst);
-        }
-        fn wake_by_ref_fn(data: *const ()) {
-            // SAFETY: borrows without consuming.
-            let arc = unsafe { Arc::from_raw(data as *const core::sync::atomic::AtomicBool) };
-            arc.store(true, Ordering::SeqCst);
-            core::mem::forget(arc);
-        }
-        fn drop_fn(data: *const ()) {
-            // SAFETY: drops the one ref this waker owned.
-            unsafe { drop(Arc::from_raw(data as *const core::sync::atomic::AtomicBool)) };
-        }
-        static VT: RawWakerVTable = RawWakerVTable::new(clone_fn, wake_fn, wake_by_ref_fn, drop_fn);
-        let raw = RawWaker::new(Arc::into_raw(flag) as *const (), &VT);
-        // SAFETY: `raw` is built from the VT above whose hooks treat the data
-        // pointer as the `Arc<AtomicBool>` it is.
-        unsafe { Waker::from_raw(raw) }
+    fn flag_waker(flag: Arc<AtomicBool>) -> Waker {
+        Waker::from(Arc::new(FlagWaker(flag)))
     }
 
     #[test]

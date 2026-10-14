@@ -337,8 +337,7 @@ mod tests {
 
     #[test]
     fn wait_instant_resolves_only_on_switch_now() {
-        let waker = noop_waker();
-        let mut cx = Context::from_waker(&waker);
+        let mut cx = Context::from_waker(Waker::noop());
         let c = GaplessController::new();
         let mut fut = core::pin::pin!(c.wait_instant());
         assert!(fut.as_mut().poll(&mut cx).is_pending(), "no instant yet");
@@ -366,8 +365,7 @@ mod tests {
 
         // A parked wait resolves when the playlist is finished.
         let c2 = GaplessController::new();
-        let waker = noop_waker();
-        let mut cx = Context::from_waker(&waker);
+        let mut cx = Context::from_waker(Waker::noop());
         let mut fut = core::pin::pin!(c2.wait_event());
         assert!(fut.as_mut().poll(&mut cx).is_pending(), "no event yet");
         c2.finish();
@@ -375,18 +373,5 @@ mod tests {
             fut.as_mut().poll(&mut cx).is_ready(),
             "finish resolves the wait"
         );
-    }
-
-    fn noop_waker() -> Waker {
-        use core::task::{RawWaker, RawWakerVTable};
-        const VT: RawWakerVTable = RawWakerVTable::new(
-            |_| RawWaker::new(core::ptr::null(), &VT),
-            |_| {},
-            |_| {},
-            |_| {},
-        );
-        // SAFETY: the vtable's clone returns a valid RawWaker over the same
-        // vtable, and wake/wake_by_ref/drop are no-ops on a null data pointer.
-        unsafe { Waker::from_raw(RawWaker::new(core::ptr::null(), &VT)) }
     }
 }

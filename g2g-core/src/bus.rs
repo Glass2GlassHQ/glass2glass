@@ -349,16 +349,8 @@ mod tests {
 
     /// Single-poll block_on; the bus futures here resolve immediately.
     fn block_on<F: Future>(mut fut: F) -> F::Output {
-        use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
-        static VT: RawWakerVTable = RawWakerVTable::new(
-            |_| RawWaker::new(core::ptr::null(), &VT),
-            |_| {},
-            |_| {},
-            |_| {},
-        );
-        // SAFETY: VT's hooks never dereference the data pointer.
-        let waker = unsafe { Waker::from_raw(RawWaker::new(core::ptr::null(), &VT)) };
-        let mut cx = Context::from_waker(&waker);
+        use core::task::{Context, Poll, Waker};
+        let mut cx = Context::from_waker(Waker::noop());
         // SAFETY: `fut` is pinned to the stack for the duration of this call.
         let mut pinned = unsafe { Pin::new_unchecked(&mut fut) };
         match pinned.as_mut().poll(&mut cx) {

@@ -342,28 +342,12 @@ mod tests {
     #[cfg(feature = "std")]
     use alloc::boxed::Box;
     use core::future::ready;
-    use core::task::{RawWaker, RawWakerVTable, Waker};
-
-    // Hand-rolled noop waker: the futures under test resolve (or stay
-    // pending) within a single poll, so no real wake is ever needed.
-    static NOOP_VTABLE: RawWakerVTable = RawWakerVTable::new(
-        |_| RawWaker::new(core::ptr::null(), &NOOP_VTABLE),
-        |_| {},
-        |_| {},
-        |_| {},
-    );
-
-    fn noop_waker() -> Waker {
-        // SAFETY: every NOOP_VTABLE fn is a no-op that never dereferences the
-        // data pointer, so a null data pointer is sound.
-        unsafe { Waker::from_raw(RawWaker::new(core::ptr::null(), &NOOP_VTABLE)) }
-    }
+    use core::task::Waker;
 
     /// Poll a future exactly once. The drop of `fut` at return is the point
     /// of the drop-safety test below.
     fn poll_once<F: Future>(fut: F) -> Poll<F::Output> {
-        let waker = noop_waker();
-        let mut cx = Context::from_waker(&waker);
+        let mut cx = Context::from_waker(Waker::noop());
         let mut fut = fut;
         // SAFETY: `fut` lives on this stack frame and is not moved after
         // pinning; it is dropped when the frame returns.
@@ -427,8 +411,7 @@ mod tests {
     /// wake.
     #[cfg(feature = "std")]
     fn spin<F: Future>(mut fut: F) -> F::Output {
-        let waker = noop_waker();
-        let mut cx = Context::from_waker(&waker);
+        let mut cx = Context::from_waker(Waker::noop());
         loop {
             // SAFETY: `fut` stays on this frame and is not moved after pinning.
             let p = unsafe { Pin::new_unchecked(&mut fut) };

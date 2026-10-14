@@ -496,27 +496,13 @@ mod tests {
     use crate::caps::{Caps, Dim, Rate, RawVideoFormat};
     use core::future::Future;
     use core::pin::Pin;
-    use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
-
-    static NOOP_VTABLE: RawWakerVTable = RawWakerVTable::new(
-        |_| RawWaker::new(core::ptr::null(), &NOOP_VTABLE),
-        |_| {},
-        |_| {},
-        |_| {},
-    );
-
-    fn noop_waker() -> Waker {
-        // SAFETY: every NOOP_VTABLE fn is a no-op that never dereferences the
-        // data pointer, so a null data pointer is sound.
-        unsafe { Waker::from_raw(RawWaker::new(core::ptr::null(), &NOOP_VTABLE)) }
-    }
+    use core::task::{Context, Poll, Waker};
 
     /// Busy-poll a future to completion. Every channel op in these tests
     /// resolves without truly parking (capacity is always available and the
     /// senders close deterministically), so this never spins.
     fn block_on<F: Future>(fut: F) -> F::Output {
-        let waker = noop_waker();
-        let mut cx = Context::from_waker(&waker);
+        let mut cx = Context::from_waker(Waker::noop());
         let mut fut = fut;
         // SAFETY: `fut` lives on this stack frame and is not moved after
         // pinning.

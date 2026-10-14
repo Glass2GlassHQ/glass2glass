@@ -277,16 +277,8 @@ mod tests {
     /// Block on a future using a noop waker; sufficient because all the
     /// futures in these tests resolve in a single poll.
     fn block_on<F: Future>(mut fut: F) -> F::Output {
-        use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
-        static VT: RawWakerVTable = RawWakerVTable::new(
-            |_| RawWaker::new(core::ptr::null(), &VT),
-            |_| {},
-            |_| {},
-            |_| {},
-        );
-        // SAFETY: VT's hooks never deref the pointer.
-        let waker = unsafe { Waker::from_raw(RawWaker::new(core::ptr::null(), &VT)) };
-        let mut cx = Context::from_waker(&waker);
+        use core::task::{Context, Poll, Waker};
+        let mut cx = Context::from_waker(Waker::noop());
         // SAFETY: pin to stack for duration of fn.
         let mut pinned = unsafe { Pin::new_unchecked(&mut fut) };
         match pinned.as_mut().poll(&mut cx) {

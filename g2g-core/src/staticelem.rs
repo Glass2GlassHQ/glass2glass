@@ -15,7 +15,7 @@
 
 use core::future::Future;
 use core::pin::pin;
-use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+use core::task::{Context, Poll, Waker};
 
 use crate::error::G2gError;
 use crate::frame::Frame;
@@ -291,16 +291,7 @@ impl<F: StaticFanIn2> StaticFanIn2 for &mut F {
 /// pipeline state machine is KBs; the footprint budgets count on the elision).
 #[inline]
 pub fn drive_ready<F: Future>(fut: F) -> Option<F::Output> {
-    const VTABLE: RawWakerVTable = RawWakerVTable::new(
-        |_| RawWaker::new(core::ptr::null(), &VTABLE),
-        |_| {},
-        |_| {},
-        |_| {},
-    );
-    // SAFETY: the vtable's clone returns an equivalent no-op waker and wake /
-    // drop are no-ops, satisfying the Waker contract.
-    let waker = unsafe { Waker::from_raw(RawWaker::new(core::ptr::null(), &VTABLE)) };
-    let mut cx = Context::from_waker(&waker);
+    let mut cx = Context::from_waker(Waker::noop());
     let fut = pin!(fut);
     match fut.poll(&mut cx) {
         Poll::Ready(v) => Some(v),
@@ -314,26 +305,10 @@ mod tests {
     use crate::frame::FrameTiming;
     use crate::memory::{MemoryDomain, SystemSlice};
     use core::future::Future;
-    use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
-
-    // A no-op waker so the tests drive a future to completion without an executor
-    // or any allocation (the static-chain futures never yield Pending here). Keeps
-    // the test itself heap-free, matching the model under test.
-    fn noop_waker() -> Waker {
-        const VTABLE: RawWakerVTable = RawWakerVTable::new(
-            |_| RawWaker::new(core::ptr::null(), &VTABLE),
-            |_| {},
-            |_| {},
-            |_| {},
-        );
-        // SAFETY: the vtable's clone returns an equivalent no-op RawWaker and the
-        // wake/drop arms are no-ops, so the waker upholds the Waker contract.
-        unsafe { Waker::from_raw(RawWaker::new(core::ptr::null(), &VTABLE)) }
-    }
+    use core::task::{Context, Poll, Waker};
 
     fn drive<F: Future>(fut: F) -> F::Output {
-        let waker = noop_waker();
-        let mut cx = Context::from_waker(&waker);
+        let mut cx = Context::from_waker(Waker::noop());
         let mut fut = core::pin::pin!(fut);
         loop {
             if let Poll::Ready(v) = fut.as_mut().poll(&mut cx) {

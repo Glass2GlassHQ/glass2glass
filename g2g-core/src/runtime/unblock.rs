@@ -128,24 +128,11 @@ impl Future for UnblockWait<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn noop_waker() -> Waker {
-        use core::task::{RawWaker, RawWakerVTable};
-        const VT: RawWakerVTable = RawWakerVTable::new(
-            |_| RawWaker::new(core::ptr::null(), &VT),
-            |_| {},
-            |_| {},
-            |_| {},
-        );
-        // SAFETY: the vtable's clone returns a valid RawWaker over the same
-        // vtable, and wake/wake_by_ref/drop are no-ops on a null data pointer.
-        unsafe { Waker::from_raw(RawWaker::new(core::ptr::null(), &VT)) }
-    }
+    use core::task::Waker;
 
     #[test]
     fn a_release_frees_one_wait_and_re_arms() {
-        let waker = noop_waker();
-        let mut cx = Context::from_waker(&waker);
+        let mut cx = Context::from_waker(Waker::noop());
         let app = UnblockHandle::new();
         let source = app.clone();
 
@@ -168,8 +155,7 @@ mod tests {
 
     #[test]
     fn a_release_set_before_the_wait_resolves_it_immediately() {
-        let waker = noop_waker();
-        let mut cx = Context::from_waker(&waker);
+        let mut cx = Context::from_waker(Waker::noop());
         let app = UnblockHandle::new();
         app.unblock();
         app.unblock(); // still one release: a second call before a take is a no-op

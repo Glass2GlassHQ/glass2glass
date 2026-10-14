@@ -4316,16 +4316,8 @@ mod tests {
     /// Minimal block-on for the single-poll futures these element calls produce
     /// (RecordingSink resolves immediately), avoiding a runtime dep in this test.
     fn futures_lite_block<F: Future>(fut: F) -> F::Output {
-        use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
-        static VT: RawWakerVTable = RawWakerVTable::new(
-            |_| RawWaker::new(core::ptr::null(), &VT),
-            |_| {},
-            |_| {},
-            |_| {},
-        );
-        // SAFETY: the vtable functions are no-ops that never deref the data pointer.
-        let waker = unsafe { Waker::from_raw(RawWaker::new(core::ptr::null(), &VT)) };
-        let mut cx = Context::from_waker(&waker);
+        use core::task::{Context, Poll, Waker};
+        let mut cx = Context::from_waker(Waker::noop());
         let mut fut = Box::pin(fut);
         match fut.as_mut().poll(&mut cx) {
             Poll::Ready(v) => v,

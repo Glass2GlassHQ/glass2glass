@@ -353,22 +353,9 @@ unsafe extern "C" fn release_slot(user: *mut c_void) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use core::task::{RawWaker, RawWakerVTable};
-
-    fn noop_waker() -> Waker {
-        fn clone(_: *const ()) -> RawWaker {
-            RawWaker::new(core::ptr::null(), &VTABLE)
-        }
-        fn no_op(_: *const ()) {}
-        static VTABLE: RawWakerVTable = RawWakerVTable::new(clone, no_op, no_op, no_op);
-        // SAFETY: every vtable fn is a no-op over a null data pointer and never
-        // dereferences it, so the RawWaker contract holds trivially.
-        unsafe { Waker::from_raw(RawWaker::new(core::ptr::null(), &VTABLE)) }
-    }
 
     fn poll_once<F: Future + Unpin>(fut: &mut F) -> Poll<F::Output> {
-        let waker = noop_waker();
-        let mut cx = Context::from_waker(&waker);
+        let mut cx = Context::from_waker(Waker::noop());
         Pin::new(fut).poll(&mut cx)
     }
 

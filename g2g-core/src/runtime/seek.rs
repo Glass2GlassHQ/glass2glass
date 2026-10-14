@@ -360,8 +360,7 @@ mod tests {
         // `shutdown` resolves the idle case. Drive a parked wait by polling it
         // once (Pending), then satisfying it and polling again (Ready).
         let c2 = SeekController::new();
-        let waker = noop_waker();
-        let mut cx = Context::from_waker(&waker);
+        let mut cx = Context::from_waker(Waker::noop());
         let mut fut = core::pin::pin!(c2.wait_event());
         assert!(fut.as_mut().poll(&mut cx).is_pending(), "no event yet");
         c2.shutdown();
@@ -369,20 +368,5 @@ mod tests {
             fut.as_mut().poll(&mut cx).is_ready(),
             "shutdown resolves the wait"
         );
-    }
-
-    /// A no-op waker so a `wait_event` future can be polled directly in a test.
-    #[cfg(feature = "std")]
-    fn noop_waker() -> Waker {
-        use core::task::{RawWaker, RawWakerVTable};
-        const VT: RawWakerVTable = RawWakerVTable::new(
-            |_| RawWaker::new(core::ptr::null(), &VT),
-            |_| {},
-            |_| {},
-            |_| {},
-        );
-        // SAFETY: the vtable's clone returns a valid RawWaker over the same
-        // vtable, and wake/wake_by_ref/drop are no-ops on a null data pointer.
-        unsafe { Waker::from_raw(RawWaker::new(core::ptr::null(), &VT)) }
     }
 }

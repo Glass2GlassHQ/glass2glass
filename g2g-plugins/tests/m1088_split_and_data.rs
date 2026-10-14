@@ -272,22 +272,12 @@ fn base64(bytes: &[u8]) -> String {
 /// caps futures are `Ready`, so one poll is enough.
 fn futures_lite_block<F: core::future::Future>(future: F) -> F::Output {
     let mut future = Box::pin(future);
-    let waker = noop_waker();
-    let mut cx = core::task::Context::from_waker(&waker);
+    let mut cx = core::task::Context::from_waker(core::task::Waker::noop());
     loop {
         if let core::task::Poll::Ready(value) = future.as_mut().poll(&mut cx) {
             return value;
         }
     }
-}
-
-fn noop_waker() -> core::task::Waker {
-    use core::task::{RawWaker, RawWakerVTable, Waker};
-    const VTABLE: RawWakerVTable =
-        RawWakerVTable::new(|_| RawWaker::new(&(), &VTABLE), |_| {}, |_| {}, |_| {});
-    // SAFETY: the vtable's clone returns the same no-op waker and every other
-    // entry does nothing, so there is no state to keep valid.
-    unsafe { Waker::from_raw(RawWaker::new(&(), &VTABLE)) }
 }
 
 #[derive(Default)]

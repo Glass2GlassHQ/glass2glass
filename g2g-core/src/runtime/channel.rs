@@ -1524,27 +1524,10 @@ mod link_tests {
     use alloc::boxed::Box;
     use alloc::vec::Vec;
     use core::pin::Pin;
-    use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
-
-    // Hand-rolled noop waker so this test module has no extra dev-dep.
-    // The link's send/recv futures resolve in a single poll whenever
-    // capacity is non-zero, so we never need to actually re-wake.
-    static NOOP_VTABLE: RawWakerVTable = RawWakerVTable::new(
-        |_| RawWaker::new(core::ptr::null(), &NOOP_VTABLE),
-        |_| {},
-        |_| {},
-        |_| {},
-    );
-
-    fn noop_waker() -> Waker {
-        // SAFETY: NOOP_VTABLE's functions are all no-ops and never
-        // dereference the data pointer; passing null is safe.
-        unsafe { Waker::from_raw(RawWaker::new(core::ptr::null(), &NOOP_VTABLE)) }
-    }
+    use core::task::{Context, Poll, Waker};
 
     fn run_to_ready<F: core::future::Future>(mut fut: F) -> F::Output {
-        let waker = noop_waker();
-        let mut cx = Context::from_waker(&waker);
+        let mut cx = Context::from_waker(Waker::noop());
         // SAFETY: `fut` lives on the stack for the duration of this fn
         // and we never move it after pinning.
         let mut pinned = unsafe { Pin::new_unchecked(&mut fut) };
@@ -2022,8 +2005,7 @@ mod link_tests {
         let mut sink = SenderSink::new(tx);
         run_to_ready(sink.push(frame_seq(0))).unwrap();
 
-        let waker = noop_waker();
-        let mut cx = Context::from_waker(&waker);
+        let mut cx = Context::from_waker(Waker::noop());
         let mut fut = core::pin::pin!(sink.push(PipelinePacket::CapsChanged(proposed_caps())));
         assert!(
             matches!(fut.as_mut().poll(&mut cx), Poll::Pending),
