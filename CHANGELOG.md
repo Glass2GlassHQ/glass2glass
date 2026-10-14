@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1412: NvEnc calls the CUDA driver through the shared FFI module.
 - M1411: tsmux, tsmuxn, rtcp, dashsrc, mpd, avf and st2110audiortp tick conversions use the core time helpers, and avf audio PTS no longer drifts.
 - M1410: Q16 framerate math in rtspsrc, avi, ivfdemux, the H.264/H.265 VUI, sdp, ffmpegdec, ffmpegenc, nvenc and the ST 2110 RTP elements uses the core helpers, so encoders get the exact fractional rate.
 - M1352: one heap-free YUYV to 4:2:0 converter serves g2g-mcu and `videoconvert`.
