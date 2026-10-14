@@ -30,10 +30,12 @@ impl PipelineClock for ZeroClock {
 }
 
 async fn has_adapter() -> bool {
-    wgpu::Instance::default()
-        .request_adapter(&wgpu::RequestAdapterOptions::default())
-        .await
-        .is_ok()
+    g2g_plugins::gpu::compliant_adapter(
+        &g2g_plugins::gpu::primary_instance(),
+        &wgpu::RequestAdapterOptions::default(),
+    )
+    .await
+    .is_some()
 }
 
 fn opaque_pattern() -> Vec<u8> {

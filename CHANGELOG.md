@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1263: g2g opens wgpu devices only on a fully WebGPU-compliant adapter and never starts the GL backend, so a software GL renderer gets a clean error instead of a vello panic.
 - M1261: the `glass2glass` GStreamer element carries `GstAnalyticsRelationMeta` in and out as `AnalyticsMeta`, behind `g2g-bridge`'s `gst-analytics` feature.
 - M1260: `videoconvert` converts to and from P010.
 - M1259: `dav1ddec` and `rav1ddec` advertise every planar format they decode to, so `decodebin` reaches a 10-bit, 4:2:2 or 4:4:4 capsfilter.

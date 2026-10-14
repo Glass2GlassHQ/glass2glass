@@ -171,10 +171,11 @@ fn gpu_fragment_comes_back_as_system_bytes() {
     const OPAQUE: u8 = 255;
 
     let _gpu = GPU_LOCK.lock().unwrap();
-    let has_adapter = g2g_core::runtime::block_on(
-        wgpu::Instance::default().request_adapter(&wgpu::RequestAdapterOptions::default()),
-    )
-    .is_ok();
+    let has_adapter = g2g_core::runtime::block_on(g2g_plugins::gpu::compliant_adapter(
+        &g2g_plugins::gpu::primary_instance(),
+        &wgpu::RequestAdapterOptions::default(),
+    ))
+    .is_some();
     if !has_adapter {
         eprintln!("no wgpu adapter; skipping");
         return;

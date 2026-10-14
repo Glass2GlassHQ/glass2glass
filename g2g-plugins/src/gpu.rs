@@ -55,6 +55,25 @@ pub(crate) fn ycbcr_push_constants(
     bytes
 }
 
+// GL adapters never pass `compliant_adapter`, and starting the GL backend for nothing can crash at teardown
+pub fn primary_instance() -> wgpu::Instance {
+    let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
+    descriptor.backends = wgpu::Backends::PRIMARY;
+    wgpu::Instance::new(descriptor)
+}
+
+// None for an adapter missing WebGPU features the GPU elements use, such as a software GL renderer
+pub async fn compliant_adapter(
+    instance: &wgpu::Instance,
+    options: &wgpu::RequestAdapterOptions<'_, '_>,
+) -> Option<wgpu::Adapter> {
+    let adapter = instance.request_adapter(options).await.ok()?;
+    adapter
+        .get_downlevel_capabilities()
+        .is_webgpu_compliant()
+        .then_some(adapter)
+}
+
 /// A shared wgpu device context. Clone it into each GPU element so they render
 /// and present on the same device (the prerequisite for a copy-free
 /// `WgpuTexture` handoff between a producer and a sink).
@@ -72,14 +91,16 @@ impl GpuContext {
     /// Build a headless context (no surface): for the overlay, the offscreen
     /// sink, and tests. Picks a high-performance adapter.
     pub async fn headless() -> Result<Self, G2gError> {
-        let instance = wgpu::Instance::default();
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
+        let instance = primary_instance();
+        let adapter = compliant_adapter(
+            &instance,
+            &wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
                 ..Default::default()
-            })
-            .await
-            .map_err(gpu_err)?;
+            },
+        )
+        .await
+        .ok_or_else(|| gpu_err(()))?;
         Self::from_adapter(instance, adapter).await
     }
 
@@ -90,14 +111,16 @@ impl GpuContext {
         instance: wgpu::Instance,
         surface: &wgpu::Surface<'_>,
     ) -> Result<Self, G2gError> {
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
+        let adapter = compliant_adapter(
+            &instance,
+            &wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
                 compatible_surface: Some(surface),
                 ..Default::default()
-            })
-            .await
-            .map_err(gpu_err)?;
+            },
+        )
+        .await
+        .ok_or_else(|| gpu_err(()))?;
         Self::from_adapter(instance, adapter).await
     }
 
@@ -638,14 +661,15 @@ mod tests {
     /// has no adapter (CI), so the test skips.
     async fn embedder_device() -> Option<(wgpu::Instance, wgpu::Adapter, wgpu::Device, wgpu::Queue)>
     {
-        let instance = wgpu::Instance::default();
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
+        let instance = primary_instance();
+        let adapter = compliant_adapter(
+            &instance,
+            &wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
                 ..Default::default()
-            })
-            .await
-            .ok()?;
+            },
+        )
+        .await?;
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("embedder"),

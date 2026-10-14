@@ -242,6 +242,10 @@ pub mod gpu;
     all(target_os = "linux", feature = "vaapi")
 ))]
 pub mod gpudevice;
+
+// EGL displays are process-wide: a test terminating one breaks another test's GL context mid-use
+#[cfg(all(test, feature = "std"))]
+pub(crate) static EGL_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 // Re-export wgpu so a downstream consumer (a viewer wiring g2g's GPU-texture
 // decode into its renderer) can name `wgpu::Texture` / build on a shared device
 // with the EXACT wgpu version g2g's textures are bound to. A version mismatch

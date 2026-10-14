@@ -555,7 +555,13 @@ mod tests {
     #[test]
     fn registry_resolves_glimagesink_and_glsink() {
         let reg = crate::registry::default_registry();
-        for name in ["glimagesink", "glsink"] {
+        // the alias skips glimagesink when no compositor is reachable, as on a headless runner
+        let names: &[&str] = if crate::waylanddisplay::compositor_reachable() {
+            &["glimagesink", "glsink"]
+        } else {
+            &["glimagesink"]
+        };
+        for &name in names {
             let mut el = reg
                 .make_element(name)
                 .unwrap_or_else(|| panic!("{name} is registered"));
@@ -912,6 +918,9 @@ mod tests {
     /// per-colorimetry comparison by converting both the same way.
     #[test]
     fn nv12_gpu_convert_matches_cpu_reference() {
+        let _egl = crate::EGL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let (headless, gl) = match headless_context() {
             Ok(pair) => pair,
             Err(why) => {
@@ -959,6 +968,9 @@ mod tests {
     /// (where the shader's bilinear chroma upsample blends the two).
     #[test]
     fn nv12_chroma_regions_reach_the_shader() {
+        let _egl = crate::EGL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let (headless, gl) = match headless_context() {
             Ok(pair) => pair,
             Err(why) => {
@@ -1016,6 +1028,9 @@ mod tests {
     /// uploaded frame byte for byte.
     #[test]
     fn rgba_path_is_bit_exact() {
+        let _egl = crate::EGL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let (headless, gl) = match headless_context() {
             Ok(pair) => pair,
             Err(why) => {

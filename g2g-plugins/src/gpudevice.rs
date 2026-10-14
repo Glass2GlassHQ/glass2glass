@@ -330,6 +330,9 @@ mod tests {
 
     #[test]
     fn probe_lists_only_compute_gpu_devices() {
+        let _egl = crate::EGL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let devices = GpuDeviceProvider::new().probe().expect("probe");
         for device in &devices {
             assert_eq!(device.provider, "gpu");
