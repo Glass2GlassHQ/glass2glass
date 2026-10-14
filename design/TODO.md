@@ -44,7 +44,8 @@ Bugs:
 - RTP timestamp rebasing in `rtprecv` and four ST 2110 receivers does not unwrap.
 - `srt.rs` trims the send buffer with a plain `>=` instead of `seq_ge`, and
   `srtsrc` ACKs every datagram.
-- `(pic_width_in_mbs_minus1 + 1) * 16` overflows in `streamdec` and `vulkanvideo`.
+- `streamdec` and `vulkanvideo` compute the H.264 coded height without
+  `frame_mbs_only_flag`, so field-coded streams get half the height.
 - `sink_arm_loop` drops flushed frames without `pop_transit_ns`.
 - Three audio capture sources stamp `frames * (1e9 / rate)` (drifts at 44.1 kHz)
   and use unbounded queues.

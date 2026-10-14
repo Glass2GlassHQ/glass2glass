@@ -577,6 +577,8 @@ fn parse_h264_vui_reorder(br: &mut BitReader) -> Option<u8> {
     Some(reorder as u8)
 }
 
+const H264_MACROBLOCK_SIZE: u32 = 16;
+
 /// Parse an SPS RBSP (the bytes after the NAL header, emulation-prevention
 /// already stripped). `None` on truncation or an unsupported feature.
 pub fn parse_h264_sps(rbsp: &[u8]) -> Option<H264Sps> {
@@ -627,6 +629,12 @@ pub fn parse_h264_sps(rbsp: &[u8]) -> Option<H264Sps> {
 
     let pic_width_in_mbs_minus1 = br.read_ue()?;
     let pic_height_in_map_units_minus1 = br.read_ue()?;
+    // callers compute the luma extent (minus1 + 1) * 16 unchecked
+    for size_in_macroblocks_minus1 in [pic_width_in_mbs_minus1, pic_height_in_map_units_minus1] {
+        size_in_macroblocks_minus1
+            .checked_add(1)?
+            .checked_mul(H264_MACROBLOCK_SIZE)?;
+    }
     let frame_mbs_only_flag = br.read_bit()?;
     let mut mb_adaptive_frame_field_flag = 0u32;
     if frame_mbs_only_flag == 0 {
@@ -15717,6 +15725,34 @@ mod tests {
             std.sps.chroma_format_idc,
             vk::native::StdVideoH265ChromaFormatIdc_STD_VIDEO_H265_CHROMA_FORMAT_IDC_420
         );
+    }
+
+    #[test]
+    fn h264_sps_rejects_extent_overflowing_u32() {
+        let sps_rbsp = |pic_width_in_mbs_minus1: u32| {
+            let mut w = BitWriter::default();
+            w.write_ue(0); // seq_parameter_set_id
+            w.write_ue(0); // log2_max_frame_num_minus4
+            w.write_ue(0); // pic_order_cnt_type
+            w.write_ue(0); // log2_max_pic_order_cnt_lsb_minus4
+            w.write_ue(1); // max_num_ref_frames
+            w.write_bit(0); // gaps_in_frame_num_value_allowed_flag
+            w.write_ue(pic_width_in_mbs_minus1);
+            w.write_ue(480 / H264_MACROBLOCK_SIZE - 1); // pic_height_in_map_units_minus1
+            w.write_bit(1); // frame_mbs_only_flag
+            w.write_bit(0); // direct_8x8_inference_flag
+            w.write_bit(0); // frame_cropping_flag
+            w.write_bit(0); // vui_parameters_present_flag
+            w.write_bit(1); // rbsp_trailing_bits
+            w.align_to_byte();
+            // baseline profile, level 3.0
+            let mut rbsp = alloc::vec![66u8, 0, 30];
+            rbsp.extend_from_slice(&w.into_bytes());
+            rbsp
+        };
+        let largest_fitting = u32::MAX / H264_MACROBLOCK_SIZE - 1;
+        assert!(parse_h264_sps(&sps_rbsp(largest_fitting)).is_some());
+        assert!(parse_h264_sps(&sps_rbsp(largest_fitting + 1)).is_none());
     }
 
     #[test]
