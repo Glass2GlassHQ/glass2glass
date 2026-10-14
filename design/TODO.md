@@ -26,6 +26,164 @@ Highest leverage first:
    device on wasm); it would need raw `web_sys` WebGPU + hand-rolled
    onnxruntime-web bindings.
 
+## Code audit: bugs, hot paths, duplication
+
+Bugs:
+
+- `XorFecBuffer` evicts the smallest raw `u16` seq, so ULPFEC, FlexFEC and
+  ST 2022-1 stop recovering after the sequence wraps. Key by extended seq.
+- `audioconvert` decodes S16/S24 by 2^(n-1) and encodes by 2^(n-1)-1, so every
+  decode and encode pass shifts samples above half scale one LSB toward zero.
+- `videoconvert::raw_format_to_str` panics on `Rgb8` and `raw_format_from_str`
+  accepts 5 of 15 formats. Use one GStreamer format-name table from core.
+- `SrtpReceiverSet::receiver_for` keeps a receiver for an SSRC before the
+  packet authenticates. Insert only after unprotect succeeds, and cap the count.
+- `parse_sps_reorder` returns `None` on SPS scaling lists.
+- `gamma`, `videobalance` and `alpha` swallow incoming `CapsChanged`. Move them
+  onto `PixelFilter`.
+- The `fmp4` fragment parsers ignore the `trun` composition offset.
+- `mp4audiosrc` adds `trun` durations unchecked.
+- ST 2110 depacketizers read the payload at offset 12 without `RtpHeader::parse`.
+- RTP timestamp rebasing in `rtprecv` and four ST 2110 receivers does not unwrap.
+- `srt.rs` trims the send buffer with a plain `>=` instead of `seq_ge`, and
+  `srtsrc` ACKs every datagram.
+- `(pic_width_in_mbs_minus1 + 1) * 16` overflows in `streamdec` and `vulkanvideo`.
+- `sink_arm_loop` drops flushed frames without `pop_transit_ns`.
+- Three audio capture sources stamp `frames * (1e9 / rate)` (drifts at 44.1 kHz)
+  and use unbounded queues.
+- `fmp4::contains_keyframe` ignores CRA and 3-byte start codes, and `H264Parse`
+  never sets `keyframe` on AVCC input.
+- `ffmpegaudiodec::adts_frames` checks sync with `& 0xF0`, `ffmpegaacenc::adts_wrap`
+  has no 13-bit length guard.
+- `VideoTestSrc::with_shared_memory` keeps every emitted frame.
+
+Core runtime:
+
+- `JoinAll` and `DynamicJoin` re-poll every arm on any wake. Poll only woken arms.
+- Remove the muxer forwarder arm, link `MuxerPad::Link(in_rx)` directly.
+- `FlowGate` takes the shared lock per frame in Playing. Check the state
+  atomically first.
+- Each push takes about six spin locks. Lock only when a signal flag is set.
+- `park_or_tick` builds a new boxed sleep per park.
+- Mutator runs drive every element through `DynRef` (a boxed future per packet).
+- `FrameMetaSet` clone allocates a Vec. `broadcast_drop_closed` shares for the last
+  sender too and duplicates `broadcast`.
+- `Gate::process` and `Router::process` box a future per packet.
+- The transform arm samples fill twice and reads the clock about five times per frame.
+- Route the sink, transform and router loops in `runner.rs` and `fanin.rs` through
+  the `graph_runner` arms.
+- One arm-IO builder for `run_graph_inner` and `run_graph_threaded_inner`.
+- Shared helpers for `muxer_arm` and `muxer_arm_pts`, one port-ordering
+  function, `inspect` formatting `describe`'s `ElementDoc`, and `launch` calling
+  `maybe_prepend_parser`.
+
+Core, bindings, ML:
+
+- `TensorView::materialize` copies one element at a time.
+- Log `enabled()` locks per call site once a category override exists, and sinks
+  emit under spinlocks.
+- `wire::encode_packet` starts at zero capacity and copies the payload twice.
+- `ElectedClock::now_ns` locks per read, `pacing::judge` clones `ClockSync` twice.
+- `BlobMeta::get` allocates a `String` per lookup.
+- `g2g_bridge_push_buf` re-copies the frame on every retry.
+- `g2g-python` `handoff` makes System frames writable for `Consume` jobs.
+- Frames crossing the plugin ABI always arrive read-only.
+- `g2g-pyapi` `pull_timeout` polls with 1 ms sleeps.
+- `wgpupreprocess` copies each frame into a padded Vec before upload, and four
+  wgpu readbacks are written by hand with per-frame staging buffers.
+- Dedup in `g2g-ml`: RGBA to NCHW preprocessing, f32 byte conversion, dtype size,
+  the `only-on` gate shared with `g2g-python`.
+- Dedup the `BusMessage` projection and host-bytes frame view in capi and pyapi.
+- One YUYV to I420 converter for `g2g-mcu` and the plugins.
+
+Containers:
+
+- `avi.rs` `apply_idx1` and `fmp4.rs` `stsc` lookups are quadratic.
+- The AVI writer copies the file 4 to 5 times, `mp4muxn` progressive 2 times.
+- Progressive MP4 and AVI demuxers de-frame every track to emit one.
+- PS, Ogg, IVF, Matroska and fMP4 demuxers drain the buffer front per unit.
+- Muxers copy each payload 3 to 5 times (mp4muxn, fmp4mux, matroska, flv, mpegts).
+- One `moov`/`moof` writer for fmp4mux, mp4muxn and mp4audiosink.
+- One `moof` parser for `fmp4` and `mp4audiosrc`.
+- One WAV `fmt ` writer and `wFormatTag` table for wavsink, wavenc, wavparse, avi.
+- Shared `MkvMuxSettings` for mkvmux and mkvmuxn.
+- One table-driven MPEG CRC-32 for ogg and mpegts.
+- `rtmp` reuses the FLV tag codec from `flv.rs`.
+
+Codecs and parsers:
+
+- Vulkan decode creates a bitstream buffer per picture and copies each AU 2 to 3
+  extra times, and `ensure_decoder` parses SPS/PPS before the fingerprint check.
+- Slice-header parsers de-emulate the whole slice.
+- `NalParse` and `StartCodeParse` rescan the accumulator from byte 0 and scan
+  each AU four or five times. Share one accumulator.
+- NVENC registers its input surface every frame.
+- `ffmpegenc` allocates an AVFrame per frame, `ffmpegdec` offload copies the AU twice.
+- One SPS head, VUI, HRD and PTL parser for h264parse, h265parse and vulkanvideo.
+- `vulkanvideo` uses av1parse's OBU walker, LEB128 and uvlc.
+- One length-prefixed to Annex-B converter and one avcC/hvcC parser.
+- One H.26x keyframe check for all callers.
+- ffmpegaacenc and ffmpegaudiodec use the aacparse ADTS helpers.
+
+Raw video and GPU:
+
+- `PixelFilter` effects allocate and copy the frame. Apply in place.
+- `videorate` deep-copies each frame up to three times.
+- `textoverlay` reshapes and re-rasterizes every cue on every frame.
+- `gaussianblur` allocates f64 scratch per frame.
+- `tensorconvert` builds a permutation per frame.
+- `videoconvert` hub path allocates i32 planes per frame, has no direct
+  P010/NV12 arm, and computes U and V for every luma sample.
+- `dmabufwgpu` and `wgpudmabuf` create Vulkan buffers per frame.
+- `deinterlace` yadif copies each frame twice.
+- `colorspace` calls `powf` per pixel on HDR paths.
+- Compositor scaled blends divide per pixel. Share videoscale's axis tables.
+- `waylandsink` has its own NV12 to XRGB converter and three frame passes.
+- NV12 plane geometry is derived by hand in kmssink, waylandsink, videoflip,
+  compositor, cuda, glnv12, cvnv12, and seven `w*h*3/2` sites.
+- `timeoverlay` and `analyticsoverlay` copy `paint::Canvas` blending.
+- `wgpusink` and `wgpucompositor` hand-write readback.
+
+Audio:
+
+- `audioconvert` has no passthrough, and noise shaping removes from the history front.
+- `pipewiresink` moves bytes one at a time under the realtime mutex and sleeps on EOS.
+- wasapisink, coreaudio and aaudio sinks block in `process`. Use `WorkerLink`.
+- One capture loop for alsasrc and pulsesrc.
+- audiobuffersplit, audioreverse, adpcm and audiomixer drain from the front.
+- The f32 transform wrapper is copied 9 times with two allocations per buffer.
+- `FirState` is direct-only, add overlap-save for long kernels.
+- One IIR implementation for equalizer and audioiirfilter.
+- `spectrum` recomputes the window and twiddles per FFT.
+- One tone phase helper, one sample-width table, one `saturate_i16`.
+- Sinks `to_vec` every buffer before the worker.
+
+Network:
+
+- `XorFecBuffer::try_recover` walks every repair and allocates per media packet.
+- ST 2110 pacing sleeps on 1 ms tokio timers, receivers block in async `run`.
+- SRTP re-keys HMAC per packet, SRT rebuilds the AES schedule per packet.
+- `udpsink` uses `RetransmissionHistory` from rist.
+- Remote TCP sets `TCP_NODELAY` and writes length and body once.
+- `rtppay`, `rtspserversink` and `rtpdepay` copy each payload two or three times.
+- ST 2110-20 allocates and copies per packet.
+- Dedup the LiveKit signalling helpers, `access_token`, `MediaTime` conversion,
+  and send `Transmit`s through `send_transmit`.
+- One caps de-dup type for the remote and wswire elements.
+- `rtcp::ntp_now` calls the core NTP converter, `rtx` uses `RtpHeader`.
+
+Shared helpers:
+
+- Core helpers for ns to clock-rate ticks and Q16 framerate, replacing about 30 sites.
+- `Waker::noop()` in place of 17 hand-rolled no-op wakers.
+- `AudioFormat::bytes_per_sample`, `Dim::fixed`.
+- `testutil::CollectSink` in src tests, a shared sink for integration tests.
+- An `mfcommon` module for the Media Foundation helpers, one CUDA driver FFI module.
+- One Android binder threadpool test helper.
+- One hex codec and base64 encoder, one BE byte reader.
+- `vtdecode`/`vtencode` `cm_time` helpers, `alertrecorder` uses `xmlutil::civil`,
+  and aacparse, dvbsub, st2110anc use `annexb::BitReader`.
+
 ## Architecture guarantees (validation-first)
 
 - **Grow the conformance matrix.** Persist evidence from the resource-owning
