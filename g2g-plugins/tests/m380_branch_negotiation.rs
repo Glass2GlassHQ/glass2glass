@@ -217,20 +217,8 @@ fn annexb(nals: &[&[u8]]) -> Vec<u8> {
     }
     v
 }
-fn adts_au(payload: &[u8]) -> Vec<u8> {
-    let frame_len = payload.len() + 7;
-    let mut au = vec![
-        0xFF,
-        0xF1,
-        (1 << 6) | (3 << 2),
-        ((2 & 3) << 6) | ((frame_len >> 11) & 3) as u8,
-        ((frame_len >> 3) & 0xFF) as u8,
-        (((frame_len & 7) << 5) as u8) | 0x1F,
-        0xFC,
-    ];
-    au.extend_from_slice(payload);
-    au
-}
+mod adts_common;
+use adts_common::adts_au;
 async fn mux_av() -> Vec<u8> {
     let sps = [0x67u8, 0x42, 0x00, 0x1e, 0x88];
     let pps = [0x68u8, 0xce, 0x3c, 0x80];

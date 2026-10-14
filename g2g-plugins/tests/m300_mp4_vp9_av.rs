@@ -74,21 +74,8 @@ fn vp9_key() -> Vec<u8> {
     vec![0x80, 0x49, 0x83, 0x42, 0x00, 0x11, 0x22]
 }
 
-/// A minimal ADTS AAC access unit (7-byte header + payload) at 48 kHz stereo.
-fn adts_au(payload: &[u8]) -> Vec<u8> {
-    let frame_len = payload.len() + 7;
-    let mut au = vec![
-        0xFF,
-        0xF1,
-        (1 << 6) | (3 << 2),
-        ((2 & 3) << 6) | ((frame_len >> 11) & 3) as u8,
-        ((frame_len >> 3) & 0xFF) as u8,
-        (((frame_len & 7) << 5) as u8) | 0x1F,
-        0xFC,
-    ];
-    au.extend_from_slice(payload);
-    au
-}
+mod adts_common;
+use adts_common::adts_au;
 
 fn count(haystack: &[u8], needle: &[u8]) -> usize {
     haystack

@@ -275,21 +275,14 @@ fn decrypt_avc_pattern(buf: &mut [u8], key: &[u8; 16], iv: &[u8; 16]) {
 fn decrypt_aac(buf: &[u8], key: &[u8; 16], iv: &[u8; 16]) -> Vec<u8> {
     let mut out = Vec::with_capacity(buf.len());
     let mut pos = 0;
-    while pos + 7 <= buf.len() {
-        // ADTS syncword is 12 set bits.
-        if buf[pos] != 0xFF || buf[pos + 1] & 0xF0 != 0xF0 {
-            break;
-        }
-        let header_len = if buf[pos + 1] & 0x01 == 1 { 7 } else { 9 };
-        let frame_len = ((buf[pos + 3] as usize & 0x03) << 11)
-            | ((buf[pos + 4] as usize) << 3)
-            | ((buf[pos + 5] as usize & 0xE0) >> 5);
-        if frame_len < header_len || pos + frame_len > buf.len() {
+    while let Some(header) = crate::aacparse::adts_header(&buf[pos..]) {
+        let frame_len = header.frame_len;
+        if pos + frame_len > buf.len() {
             break;
         }
         out.extend_from_slice(&decrypt_aac_frame(
             &buf[pos..pos + frame_len],
-            header_len,
+            header.header_len,
             key,
             iv,
         ));
@@ -459,20 +452,7 @@ mod tests {
         );
     }
 
-    fn adts_frame(payload: &[u8]) -> Vec<u8> {
-        let total = 7 + payload.len();
-        let mut frame = vec![
-            0xFF,
-            0xF1, // syncword + MPEG-4 + protection_absent=1 (7-byte header)
-            0x50,
-            (((total >> 11) & 0x03) as u8),
-            (((total >> 3) & 0xFF) as u8),
-            ((((total & 0x07) << 5) as u8) | 0x1F),
-            0xFC,
-        ];
-        frame.extend_from_slice(payload);
-        frame
-    }
+    use crate::aacparse::test_frames::adts_au as adts_frame;
 
     fn encrypt_aac_frame(
         frame: &[u8],

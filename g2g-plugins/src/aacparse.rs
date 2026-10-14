@@ -40,6 +40,8 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use crate::annexb::BitReader;
+
 use g2g_core::frame::Frame;
 use g2g_core::log::{short_type_name, LogName, LogSource};
 use g2g_core::memory::SystemSlice;
@@ -113,6 +115,21 @@ pub(crate) fn adts_from_asc(asc: &[u8], au: &[u8]) -> Option<Vec<u8>> {
         return None; // reserved/explicit rate or "config in stream": not ADTS-able
     }
     let profile = aot.saturating_sub(1) & 0x03; // ADTS profile = AOT - 1
+    adts_frame(profile, sr_index, channel_config, au)
+}
+
+/// ADTS `profile` for AAC-LC: the audio object type (2) minus one.
+pub(crate) const ADTS_PROFILE_AAC_LC: u8 = 1;
+
+/// Frame `au` behind a 7-byte ADTS header (no CRC) for `profile` (audio object
+/// type minus one), sampling-frequency index `sr_index` and `channel_config`.
+/// `None` when the frame exceeds the 13-bit ADTS frame length.
+pub(crate) fn adts_frame(
+    profile: u8,
+    sr_index: u8,
+    channel_config: u8,
+    au: &[u8],
+) -> Option<Vec<u8>> {
     let frame_len = au.len() + ADTS_HEADER_LEN;
     if frame_len > 0x1FFF {
         return None; // ADTS frame_length is 13 bits
@@ -432,6 +449,8 @@ pub(crate) struct AdtsHeader {
     channels: u8,
     /// Bytes this access unit occupies, header and any CRC included.
     pub(crate) frame_len: usize,
+    /// Bytes of header ahead of the payload: 7, or 9 with a CRC.
+    pub(crate) header_len: usize,
     profile: u8,
     freq_index: u8,
     channel_config: u8,
@@ -509,10 +528,12 @@ pub(crate) fn adts_header(buf: &[u8]) -> Option<AdtsHeader> {
     };
     let frame_len =
         (((head[3] & 0x03) as usize) << 11) | ((head[4] as usize) << 3) | ((head[5] >> 5) as usize);
-    (frame_len >= adts_header_len(head[1])).then_some(AdtsHeader {
+    let header_len = adts_header_len(head[1]);
+    (frame_len >= header_len).then_some(AdtsHeader {
         sample_rate,
         channels,
         frame_len,
+        header_len,
         profile,
         freq_index,
         channel_config,
@@ -530,31 +551,6 @@ fn parse_aac(au: &[u8]) -> Option<AacInfo> {
 fn parse_adts(au: &[u8]) -> Option<AacInfo> {
     let last = au.len().checked_sub(ADTS_HEADER_LEN)?;
     (0..=last).find_map(|i| adts_header(&au[i..]).map(|h| h.info()))
-}
-
-/// A minimal MSB-first bit reader over a byte slice, for the LATM fields (no
-/// exp-Golomb / emulation prevention, so the `annexb` reader is not needed).
-struct BitReader<'a> {
-    data: &'a [u8],
-    bit: usize,
-}
-
-impl<'a> BitReader<'a> {
-    fn new(data: &'a [u8]) -> Self {
-        Self { data, bit: 0 }
-    }
-
-    /// Read `n` bits (0..=24) as an unsigned value, MSB first. `None` past the end.
-    fn read(&mut self, n: u32) -> Option<u32> {
-        let mut v = 0u32;
-        for _ in 0..n {
-            let byte = *self.data.get(self.bit >> 3)?;
-            let b = (byte >> (7 - (self.bit & 7))) & 1;
-            v = (v << 1) | b as u32;
-            self.bit += 1;
-        }
-        Some(v)
-    }
 }
 
 /// Scan `au` for the first LOAS `AudioSyncStream` frame (syncword 0x2B7, 11 bits)
@@ -585,18 +581,18 @@ fn parse_loas(au: &[u8]) -> Option<AacInfo> {
 /// and stream-mux-config reuse yield `None` (caps stay unrefined, never wrong).
 fn parse_audio_mux_element(data: &[u8]) -> Option<AacInfo> {
     let mut r = BitReader::new(data);
-    if r.read(1)? == 1 {
+    if r.read_bits(1)? == 1 {
         return None; // useSameStreamMux: reuses a prior config we did not retain
     }
     // StreamMuxConfig
-    if r.read(1)? != 0 {
+    if r.read_bits(1)? != 0 {
         return None; // audioMuxVersion 1 (LatmGetValue lengths) not handled
     }
-    r.read(1)?; // allStreamsSameTimeFraming
-    r.read(6)?; // numSubFrames
-    r.read(4)?; // numProgram (only program 0 is parsed)
-    r.read(3)?; // numLayer of program 0 (only layer 0 is parsed)
-                // program 0, layer 0: useSameConfig is implied 0, so AudioSpecificConfig follows.
+    r.read_bits(1)?; // allStreamsSameTimeFraming
+    r.read_bits(6)?; // numSubFrames
+    r.read_bits(4)?; // numProgram (only program 0 is parsed)
+    r.read_bits(3)?; // numLayer of program 0 (only layer 0 is parsed)
+                     // program 0, layer 0: useSameConfig is implied 0, so AudioSpecificConfig follows.
     parse_audio_specific_config(&mut r)
 }
 
@@ -604,18 +600,18 @@ fn parse_audio_mux_element(data: &[u8]) -> Option<AacInfo> {
 /// audio object type, sampling frequency (index or explicit), and channel
 /// configuration, enough to pin the channel count and sample rate.
 fn parse_audio_specific_config(r: &mut BitReader) -> Option<AacInfo> {
-    let mut aot = r.read(5)?;
+    let mut aot = r.read_bits(5)?;
     if aot == 31 {
-        aot = 32 + r.read(6)?; // escape value
+        aot = 32 + r.read_bits(6)?; // escape value
     }
     let _ = aot; // the object type does not affect the channel count / rate
-    let sr_index = r.read(4)? as usize;
+    let sr_index = r.read_bits(4)? as usize;
     let sample_rate = if sr_index == 0x0F {
-        r.read(24)? // explicit 24-bit sampling frequency
+        r.read_bits(24)? // explicit 24-bit sampling frequency
     } else {
         *SAMPLE_RATES.get(sr_index)?
     };
-    let channel_config = r.read(4)?;
+    let channel_config = r.read_bits(4)?;
     let channels = match channel_config {
         1..=6 => channel_config as u8,
         7 => 8,
@@ -663,6 +659,15 @@ pub(crate) mod test_frames {
         f[5] = (((frame_len & 0x07) << 5) as u8) | 0x1F;
         f[6] = 0xFC; // buffer fullness low + num_raw_blocks (0)
         f
+    }
+
+    /// One 48 kHz stereo AAC-LC access unit carrying `payload`.
+    pub(crate) fn adts_au(payload: &[u8]) -> Vec<u8> {
+        const STEREO: u8 = 2;
+        const FREQ_INDEX_48000: u8 = 3;
+        let mut au = adts_frame(STEREO, FREQ_INDEX_48000, payload.len(), 0);
+        au[super::ADTS_HEADER_LEN..].copy_from_slice(payload);
+        au
     }
 }
 

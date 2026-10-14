@@ -1027,20 +1027,7 @@ mod tests {
         v
     }
 
-    fn adts_au(payload: &[u8]) -> Vec<u8> {
-        let frame_len = payload.len() + 7;
-        let mut au = alloc::vec![
-            0xFF,
-            0xF1,
-            (1 << 6) | (3 << 2), // 48 kHz
-            ((2 & 3) << 6) | ((frame_len >> 11) & 3) as u8,
-            ((frame_len >> 3) & 0xFF) as u8,
-            (((frame_len & 7) << 5) as u8) | 0x1F,
-            0xFC,
-        ];
-        au.extend_from_slice(payload);
-        au
-    }
+    use crate::aacparse::test_frames::adts_au;
 
     fn vframe(data: Vec<u8>, pts_ns: u64) -> PipelinePacket {
         PipelinePacket::DataFrame(Frame::new(

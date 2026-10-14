@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1307: ADTS framing goes through the aacparse helpers everywhere.
 - M1306: one length-prefixed to Annex-B converter refuses malformed input, and one avcC/hvcC parser keeps every parameter set.
 - M1305: Vulkan AV1 uses the av1parse OBU walker and sequence-header parser.
 - M1304: one H.265 SPS head and profile_tier_level reader.

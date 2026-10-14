@@ -18,6 +18,7 @@
 //! Threading: like `FfmpegH264Enc`, the raw `AVCodecContext` is single-owner and
 //! the element asserts `Send` under that contract.
 
+use crate::aacparse::{adts_frame, ADTS_PROFILE_AAC_LC};
 use core::future::Future;
 use core::pin::Pin;
 
@@ -44,14 +45,10 @@ use g2g_core::{
 /// Default constant bitrate: 128 kbps, the usual stereo-AAC streaming target.
 const DEFAULT_BITRATE_BPS: usize = 128_000;
 
-/// ADTS / ASC sampling-frequency-index table (ISO/IEC 14496-3). The encoder only
-/// opens at a rate in this table (libavcodec rejects others).
-const SAMPLE_RATES: [u32; 13] = [
-    96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350,
-];
-
+/// The encoder only opens at a rate in the ADTS sampling-frequency-index table
+/// (libavcodec rejects others).
 fn sample_rate_index(rate: u32) -> Option<u8> {
-    SAMPLE_RATES
+    crate::aacparse::SAMPLE_RATES
         .iter()
         .position(|&r| r == rate)
         .map(|i| i as u8)
@@ -272,7 +269,9 @@ impl FfmpegAacEnc {
                     let pts_ns =
                         (pts_units * 1_000_000_000 / self.sample_rate.max(1) as u128) as u64;
                     if let Some(data) = packet.data() {
-                        out.push((adts_wrap(data, sr_index, self.channels), pts_ns));
+                        let au = adts_frame(ADTS_PROFILE_AAC_LC, sr_index, self.channels, data)
+                            .ok_or(G2gError::Hardware(HardwareError::Other))?;
+                        out.push((au, pts_ns));
                     }
                 }
                 Err(FfError::Other { errno }) if errno == ffmpeg::error::EAGAIN => break,
@@ -308,24 +307,6 @@ impl FfmpegAacEnc {
         }
         Ok(())
     }
-}
-
-/// Prepend a 7-byte ADTS header (no CRC) to a raw AAC-LC access unit.
-fn adts_wrap(aac: &[u8], sr_index: u8, channels: u8) -> Vec<u8> {
-    let frame_len = aac.len() + 7;
-    // profile = AudioObjectType - 1; AAC-LC is AOT 2 -> profile 1.
-    let mut h = [0u8; 7];
-    h[0] = 0xFF;
-    h[1] = 0xF1; // syncword | MPEG-4 | layer 0 | protection_absent
-    h[2] = (1 << 6) | (sr_index << 2) | ((channels >> 2) & 1);
-    h[3] = ((channels & 3) << 6) | ((frame_len >> 11) & 3) as u8;
-    h[4] = ((frame_len >> 3) & 0xFF) as u8;
-    h[5] = (((frame_len & 7) << 5) as u8) | 0x1F; // buffer fullness 0x7FF (top bits)
-    h[6] = 0xFC; // buffer fullness (low) | num_raw_data_blocks = 0
-    let mut out = Vec::with_capacity(frame_len);
-    out.extend_from_slice(&h);
-    out.extend_from_slice(aac);
-    out
 }
 
 impl AsyncElement for FfmpegAacEnc {
@@ -513,7 +494,7 @@ mod tests {
     #[test]
     fn adts_header_encodes_length_and_params() {
         // 48 kHz (index 3), stereo (2), a 9-byte AAC payload -> 16-byte AU.
-        let au = adts_wrap(&[0u8; 9], 3, 2);
+        let au = adts_frame(ADTS_PROFILE_AAC_LC, 3, 2, &[0u8; 9]).expect("fits the frame length");
         assert_eq!(au.len(), 16);
         assert_eq!(au[0], 0xFF);
         assert_eq!(au[1], 0xF1);

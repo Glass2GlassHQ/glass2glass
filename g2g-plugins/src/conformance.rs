@@ -1081,7 +1081,8 @@ pub fn aac_parse() -> MaturityRecord {
         };
         asc_from_adts(&frame) == Some(config)
             && strip_adts(&frame) == raw.as_slice()
-            && adts_frame_length(&frame) == Some(frame.len())
+            && crate::aacparse::adts_header(&frame).map(|header| header.frame_len)
+                == Some(frame.len())
     });
     if framed {
         rec.add(
@@ -1091,20 +1092,6 @@ pub fn aac_parse() -> MaturityRecord {
         );
     }
     rec
-}
-
-/// The `aac_frame_length` an ADTS header declares (13 bits across bytes 3..6), or
-/// `None` if the buffer is not an ADTS frame. This is the field a frame splitter
-/// advances by, so it must equal the frame's own length.
-fn adts_frame_length(frame: &[u8]) -> Option<usize> {
-    if frame.len() < 7 || frame[0] != 0xFF || (frame[1] & 0xF0) != 0xF0 {
-        return None;
-    }
-    Some(
-        (usize::from(frame[3] & 0x03) << 11)
-            | (usize::from(frame[4]) << 3)
-            | (usize::from(frame[5]) >> 5),
-    )
 }
 
 /// Conformance of the Opus parser (`opusparse`): the `OpusHead` identification

@@ -36,8 +36,6 @@ Bugs:
   onto `PixelFilter`.
 - Run `cargo semver-checks` on g2g-core for M1284 (`Gate`/`Router` `ProcessFuture`
   types) and M1285 (new `DynAsyncElement` provided methods).
-- `ffmpegaudiodec::adts_frames` checks sync with `& 0xF0`, `ffmpegaacenc::adts_wrap`
-  has no 13-bit length guard.
 - `VideoTestSrc::with_shared_memory` keeps every emitted frame.
 
 Core runtime:
@@ -86,7 +84,6 @@ Codecs and parsers:
 - h265parse and vulkanvideo walk the H.265 SPS middle (sub-layer ordering to
   long-term refs) separately.
 - The reframing path copies AVCC input twice (convert, then append to the framer).
-- ffmpegaacenc and ffmpegaudiodec use the aacparse ADTS helpers.
 
 Raw video and GPU:
 

@@ -440,15 +440,9 @@ impl PadTemplates for FfmpegAudioDec {
 fn adts_frames(buf: &[u8]) -> Vec<&[u8]> {
     let mut frames = Vec::new();
     let mut pos = 0;
-    while pos + 7 <= buf.len() {
-        // Syncword: byte0 == 0xFF and the top 4 bits of byte1 == 0xF.
-        if buf[pos] != 0xFF || (buf[pos + 1] & 0xF0) != 0xF0 {
-            break;
-        }
-        let len = (((buf[pos + 3] & 0x03) as usize) << 11)
-            | ((buf[pos + 4] as usize) << 3)
-            | ((buf[pos + 5] >> 5) as usize);
-        if len < 7 || pos + len > buf.len() {
+    while let Some(header) = crate::aacparse::adts_header(&buf[pos..]) {
+        let len = header.frame_len;
+        if pos + len > buf.len() {
             break;
         }
         frames.push(&buf[pos..pos + len]);
@@ -596,16 +590,10 @@ mod tests {
     use alloc::vec;
     use alloc::vec::Vec;
 
-    /// A minimal `len`-byte ADTS frame: a 7-byte header (sync + `aac_frame_length`
-    /// = `len`) zero-padded to `len`.
+    /// A minimal `len`-byte ADTS frame: a 7-byte header zero-padded to `len`.
     fn adts(len: usize) -> Vec<u8> {
-        let mut f = vec![0u8; len];
-        f[0] = 0xFF;
-        f[1] = 0xF1; // syncword low nibble + MPEG-4, layer 0, no CRC
-        f[3] = ((len >> 11) & 0x03) as u8;
-        f[4] = ((len >> 3) & 0xFF) as u8;
-        f[5] = (((len & 0x07) << 5) as u8) | 0x1F;
-        f
+        const ADTS_HEADER_LEN: usize = 7;
+        crate::aacparse::test_frames::adts_au(&vec![0u8; len - ADTS_HEADER_LEN])
     }
 
     #[test]

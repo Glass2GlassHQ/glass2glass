@@ -80,23 +80,8 @@ fn annexb(nals: &[&[u8]]) -> Vec<u8> {
     v
 }
 
-/// A minimal ADTS AAC access unit (7-byte header + payload) at 48 kHz stereo.
-fn adts_au(payload: &[u8]) -> Vec<u8> {
-    let frame_len = payload.len() + 7;
-    let sr_index = 3u8; // 48000
-    let channels = 2u8;
-    let mut au = vec![
-        0xFF,
-        0xF1,
-        (1 << 6) | (sr_index << 2) | ((channels >> 2) & 1),
-        ((channels & 3) << 6) | ((frame_len >> 11) & 3) as u8,
-        ((frame_len >> 3) & 0xFF) as u8,
-        (((frame_len & 7) << 5) as u8) | 0x1F,
-        0xFC,
-    ];
-    au.extend_from_slice(payload);
-    au
-}
+mod adts_common;
+use adts_common::adts_au;
 
 fn count(haystack: &[u8], needle: &[u8]) -> usize {
     haystack
