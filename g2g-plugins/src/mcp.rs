@@ -2603,7 +2603,11 @@ mod tests {
 
     #[test]
     fn a_snapshot_refuses_a_frame_it_cannot_convert() {
-        let captured = odd_size_frame(g2g_core::RawVideoFormat::P010);
+        let mut captured = odd_size_frame(g2g_core::RawVideoFormat::Nv12);
+        // every raw format converts, a frame with no pixels does not
+        if let g2g_core::Caps::RawVideo { width, .. } = &mut captured.caps {
+            *width = g2g_core::Dim::Fixed(0);
+        }
         assert!(snapshot_png(&captured, "sink").is_err());
     }
 

@@ -94,10 +94,9 @@ async fn yuyv_format_pin_couples() {
 
 #[tokio::test]
 async fn unproducible_format_pin_fails_loud() {
-    // P010 is a decoder output videoconvert never produces. A P010 output pin
-    // behind the scaler must fail loud.
+    // videoconvert never produces compressed video
     let line = "videotestsrc num-buffers=2 width=320 height=240 \
-                ! videoscale ! videoconvert ! video/x-raw,format=P010_10LE,width=160,height=120 ! fakesink";
+                ! videoscale ! videoconvert ! video/x-h264,width=160,height=120 ! fakesink";
     run_line_err(line).await;
 }
 

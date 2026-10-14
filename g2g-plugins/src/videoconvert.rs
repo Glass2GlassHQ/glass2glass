@@ -36,7 +36,7 @@ use g2g_core::{
 
 /// Formats this element can both consume and produce. The convert `target`
 /// is always one of these.
-pub(crate) const FORMATS: [RawVideoFormat; 14] = [
+pub(crate) const FORMATS: [RawVideoFormat; 15] = [
     RawVideoFormat::Rgba8,
     RawVideoFormat::Bgra8,
     RawVideoFormat::Rgb8,
@@ -51,6 +51,7 @@ pub(crate) const FORMATS: [RawVideoFormat; 14] = [
     RawVideoFormat::I444p10,
     RawVideoFormat::I444p12,
     RawVideoFormat::Yuyv,
+    RawVideoFormat::P010,
 ];
 
 /// # Example
@@ -550,6 +551,7 @@ pub(crate) fn raw_format_to_str(f: RawVideoFormat) -> &'static str {
         RawVideoFormat::I444 => "Y444",
         RawVideoFormat::I444p10 => "Y444_10LE",
         RawVideoFormat::I444p12 => "Y444_12LE",
+        RawVideoFormat::P010 => "P010_10LE",
         // A format added since: no canonical string here, fail loud.
         _ => unreachable!("unnamed RawVideoFormat: {f:?}"),
     }
@@ -769,18 +771,19 @@ fn to_hub(
             }
             (y, u, v, 8)
         }
-        RawVideoFormat::Nv12 => {
+        RawVideoFormat::Nv12 | RawVideoFormat::P010 => {
             let (cw, _) = chroma_420_size(w, h);
+            let semi_planar = SemiPlanar::of(from);
             for row in 0..h {
                 for col in 0..w {
                     let ci = (row / 2) * cw + col / 2;
                     let i = row * w + col;
-                    y[i] = src[i] as i32;
-                    u[i] = src[n + 2 * ci] as i32;
-                    v[i] = src[n + 2 * ci + 1] as i32;
+                    y[i] = semi_planar.read(src, i);
+                    u[i] = semi_planar.read(src, n + 2 * ci);
+                    v[i] = semi_planar.read(src, n + 2 * ci + 1);
                 }
             }
-            (y, u, v, 8)
+            (y, u, v, from.bit_depth())
         }
         // The fully-planar family: read each plane at the format's depth, replicate
         // chroma up to 4:4:4 per the subsampling.
@@ -845,18 +848,20 @@ fn from_hub(
             }
             dst.into_boxed_slice()
         }
-        RawVideoFormat::Nv12 => {
+        RawVideoFormat::Nv12 | RawVideoFormat::P010 => {
             let (cw, ch) = chroma_420_size(w, h);
-            let mut dst = vec![0u8; n + 2 * cw * ch];
-            for i in 0..n {
-                dst[i] = scale_depth(y[i], wd, 8) as u8;
+            let semi_planar = SemiPlanar::of(to);
+            let depth = to.bit_depth();
+            let mut dst = vec![0u8; (n + 2 * cw * ch) * semi_planar.bytes_per_sample];
+            for (i, &luma) in y.iter().enumerate() {
+                semi_planar.write(&mut dst, i, scale_depth(luma, wd, depth));
             }
             for cy in 0..ch {
                 for cx in 0..cw {
                     let (su, sv) = avg_chroma(u, v, w, h, cx, cy, 1, 1);
                     let ci = cy * cw + cx;
-                    dst[n + 2 * ci] = scale_depth(su, wd, 8) as u8;
-                    dst[n + 2 * ci + 1] = scale_depth(sv, wd, 8) as u8;
+                    semi_planar.write(&mut dst, n + 2 * ci, scale_depth(su, wd, depth));
+                    semi_planar.write(&mut dst, n + 2 * ci + 1, scale_depth(sv, wd, depth));
                 }
             }
             dst.into_boxed_slice()
@@ -912,6 +917,40 @@ fn from_hub(
             }
             dst.into_boxed_slice()
         }
+    }
+}
+
+// NV12 or P010: P010 keeps each 10-bit sample in the top bits of a 16-bit word
+#[derive(Clone, Copy)]
+struct SemiPlanar {
+    bytes_per_sample: usize,
+    padding_bits: u32,
+}
+
+impl SemiPlanar {
+    fn of(format: RawVideoFormat) -> Self {
+        let bytes_per_sample = format.bytes_per_sample();
+        Self {
+            bytes_per_sample,
+            padding_bits: (bytes_per_sample * 8) as u32 - u32::from(format.bit_depth()),
+        }
+    }
+
+    fn read(self, src: &[u8], index: usize) -> i32 {
+        if self.bytes_per_sample == 1 {
+            return src[index] as i32;
+        }
+        let at = index * 2;
+        (u16::from_le_bytes([src[at], src[at + 1]]) >> self.padding_bits) as i32
+    }
+
+    fn write(self, dst: &mut [u8], index: usize, value: i32) {
+        if self.bytes_per_sample == 1 {
+            dst[index] = value as u8;
+            return;
+        }
+        let at = index * 2;
+        dst[at..at + 2].copy_from_slice(&((value as u16) << self.padding_bits).to_le_bytes());
     }
 }
 
@@ -1374,6 +1413,36 @@ mod tests {
         let nv12b = [0u8, 0, 0, 0, 7, 9];
         let i420b = nv12_to_i420(&nv12b, 2, 2);
         assert_eq!(&i420b[4..], &[7, 9], "U plane then V plane");
+    }
+
+    #[test]
+    fn p010_i420p10_repack_round_trips_losslessly() {
+        let words = |samples: &[u16]| -> Vec<u8> {
+            samples
+                .iter()
+                .flat_map(|sample| sample.to_le_bytes())
+                .collect()
+        };
+        // 2x2: 10-bit luma 1, 2, 1022, 1023, then the interleaved U 5, V 900 pair
+        let p010 = words(&[1 << 6, 2 << 6, 1022 << 6, 1023 << 6, 5 << 6, 900 << 6]);
+        let i420p10 = convert(
+            &p010,
+            RawVideoFormat::P010,
+            RawVideoFormat::I420p10,
+            2,
+            2,
+            Colorimetry::UNKNOWN,
+        );
+        assert_eq!(&i420p10[..], &words(&[1, 2, 1022, 1023, 5, 900])[..]);
+        let back = convert(
+            &i420p10,
+            RawVideoFormat::I420p10,
+            RawVideoFormat::P010,
+            2,
+            2,
+            Colorimetry::UNKNOWN,
+        );
+        assert_eq!(&back[..], &p010[..]);
     }
 
     #[test]

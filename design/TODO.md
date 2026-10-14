@@ -33,10 +33,6 @@ Highest leverage first:
   macOS device paths). Get the device-tagged `Hardware` rows into CI by wiring a
   runner that has the hardware: a `Hardware` row can only come from a run on the
   device, so a runner without a GPU or a camera will never produce one.
-- **Conformance per decoder backend.** Run calliope's Fluster conformance once
-  per decoder (`vulkanvideodec`, `nvdec`, `dav1ddec`, `rav1ddec`), each pinned
-  with `G2G_PLUGIN_FEATURE_RANK`, and record the pass counts as conformance
-  evidence.
 
 ## Alloc-optional (heap-free) MCU core
 
@@ -91,19 +87,18 @@ Highest leverage first:
   and the Chromium AV1 suites the keyframe decodes exactly and the first inter
   frame differs from dav1d, on both NVIDIA and RADV. 10-bit vectors fail to
   reach `I420_10LE`.
-- **`VulkanVideoDec` H.264 conformance.** The progressive JVT vectors
-  BAMQ1_JVC_C, BAMQ2_JVC_C, CABA3_TOSHIBA_E and CACQP3_Sony_D differ from the
-  reference. Interlaced vectors fail with an error rather than being refused.
+- **`VulkanVideoDec` H.264 and H.265 conformance.** 58 of 135 JVT and 104 of
+  188 HEVC vectors pass, against 129 and 141 for `nvdec`. Interlaced H.264
+  vectors fail with an error rather than being refused.
 - **`VulkanVideoDec` with two GPUs.** On a host with an NVIDIA and an AMD GPU
   and no `VK_DRIVER_FILES`, an AV1 stream decodes to uniform gray.
-- **AV1 resolution change and spatial layers.** `av1-1-b8-03-sizeup`,
-  `sizedown`, `av1-1-b8-22-svc-L2T1` and `L2T2` differ from the reference
-  through `dav1ddec` and `rav1ddec`.
-- **10-bit AV1 through `decodebin`.** `dav1ddec` and `rav1ddec` declare only
-  I420 at negotiation, so `decodebin ! video/x-raw,format=I420_10LE` fails
-  before the first frame. Advertise the 10-bit formats in their templates.
-- **`videoconvert` P010 input.** A pinned `nvdec` 10-bit AV1 decode into
-  `videoconvert` fails with `CapsMismatch` on P010.
+- **AV1 spatial layers.** `av1-1-b8-22-svc-L2T1` and `L2T2` differ from the
+  reference through `dav1ddec` and `rav1ddec`.
+- **HEVC through `ffmpegdec`.** 53 of 188 HEVC vectors fail through
+  `decodebin`, most of them Main 10 or RExt (4:2:2, 4:4:4, 12-bit and up).
+- **`nvdec` AV1 below the hardware minimum size.** The `av1-1-b8-01-size-*`
+  vectors smaller than NVDEC accepts fail the decode. Refuse them at
+  negotiation so auto-plug takes a software decoder.
 - **`ffmpegdec` AV1.** Every AV1 stream fails with `Hardware(Other)`, although
   the linked ffmpeg has libdav1d.
 - **AV1 film grain chroma.** Match dav1d's chroma grain on libaom's

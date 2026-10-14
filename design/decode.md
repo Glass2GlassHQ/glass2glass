@@ -1019,3 +1019,21 @@ ahead of it at the top of the queue.
 The streaming `VulkanVideoDec` element decodes one access unit per `process`
 call, so it drains per AU by design. The ring win is on the batch `decode_all`
 used by the player and tests.
+
+## Conformance per backend
+
+calliope's Fluster conformance run with each decoder pinned through
+`G2G_PLUGIN_FEATURE_RANK` (see the calliope README), on an RTX 3060 with the
+NVIDIA Vulkan driver, 2026-10-14. A pass is an output MD5 equal to the vector's
+official one.
+
+| Decoder | H.264 JVT-AVC_V1 | H.265 HEVC_V1 + RExt | AV1-TEST-VECTORS |
+| :--- | ---: | ---: | ---: |
+| `ffmpegdec` | 130 / 135 | 135 / 188 | 0 / 240 |
+| `nvdec` | 129 / 135 | 141 / 188 | 202 / 240 |
+| `vulkanvideodec` | 58 / 135 | 104 / 188 | 2 / 240 |
+| `dav1ddec` | | | 238 / 240 |
+| `rav1ddec` | | | 238 / 240 |
+
+The H.264 failures every backend shares are the Extended-profile FMO and SP
+slice vectors, which ffmpeg does not decode either.

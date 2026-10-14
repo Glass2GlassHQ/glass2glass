@@ -5,7 +5,7 @@
 
 use g2g_core::meta::Orientation;
 use g2g_core::runtime::{run_graph, GraphNode};
-use g2g_core::{Caps, Dim, G2gError, Graph, PipelineClock, Rate, RawVideoFormat};
+use g2g_core::{Caps, Dim, G2gError, Graph, PipelineClock, Rate, VideoCodec};
 use g2g_plugins::capsfilter::CapsFilter;
 use g2g_plugins::fakesink::FakeSink;
 use g2g_plugins::videocrop::VideoCrop;
@@ -83,19 +83,17 @@ async fn tee_branches_run_independent_transforms() {
 
 #[tokio::test]
 async fn incompatible_branch_fails_negotiation() {
-    // The source never produces P010, so a P010-pinned filter has no overlap and the
-    // whole-graph solve fails loud before any data flows.
+    // a raw source has no overlap with a compressed-only filter
     let mut g: Graph<GraphNode> = Graph::new();
     let src = g.add_source(GraphNode::source(VideoTestSrc::new(8, 8, 30, 4)));
-    let p010_only = CapsFilter::new(Caps::RawVideo {
-        format: RawVideoFormat::P010,
+    let compressed_only = CapsFilter::new(Caps::CompressedVideo {
+        codec: VideoCodec::H264,
         width: Dim::Any,
         height: Dim::Any,
         framerate: Rate::Any,
-        interlace: g2g_core::Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
     });
-    let filter = g.add_transform(GraphNode::element(p010_only));
+    let filter = g.add_transform(GraphNode::element(compressed_only));
     let sink = g.add_sink(GraphNode::element(FakeSink::new()));
     g.link(src, filter).unwrap();
     g.link(filter, sink).unwrap();
@@ -104,6 +102,6 @@ async fn incompatible_branch_fails_negotiation() {
     assert_eq!(
         result.err(),
         Some(G2gError::CapsMismatch),
-        "source into a P010 filter must fail"
+        "a raw source into a compressed-only filter must fail"
     );
 }

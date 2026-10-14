@@ -313,12 +313,11 @@ async fn capsfilter_rejects_incompatible_format() {
     use g2g_core::{Caps, Dim, Rate};
 
     let mut src = VideoTestSrc::new(32, 32, 30, 12);
-    let mut filter = CapsFilter::new(Caps::RawVideo {
-        format: RawVideoFormat::P010,
+    let mut filter = CapsFilter::new(Caps::CompressedVideo {
+        codec: VideoCodec::H264,
         width: Dim::Any,
         height: Dim::Any,
         framerate: Rate::Any,
-        interlace: g2g_core::Interlace::Any,
         colorimetry: g2g_core::Colorimetry::UNKNOWN,
     });
     let mut snk = FakeSink::new();

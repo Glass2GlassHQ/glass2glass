@@ -7,6 +7,8 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 ## Unreleased
 
 - M1261: the `glass2glass` GStreamer element carries `GstAnalyticsRelationMeta` in and out as `AnalyticsMeta`, behind `g2g-bridge`'s `gst-analytics` feature.
+- M1260: `videoconvert` converts to and from P010.
+- M1259: `dav1ddec` and `rav1ddec` advertise every planar format they decode to, so `decodebin` reaches a 10-bit, 4:2:2 or 4:4:4 capsfilter.
 - M1258: `wgpusink` presents to a non-sRGB surface format when the adapter offers one, so video no longer looks washed out from a second gamma encode.
 - M1257: `linux-full` builds the EGL `glimagesink`, so a launch line's `glimagesink` takes RGBA instead of falling back to the NV12-only `waylandsink`.
 - M1256: `decodebin` in a launch line decodes to a format the next element accepts, so `decodebin ! video/x-raw,format=I420` no longer gets an NV12 decoder.

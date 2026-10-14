@@ -43,6 +43,40 @@ macro_rules! av1_decoder {
         /// Decoded pictures from one fed unit: each shape with its packed pixels.
         type DecodedFrames = Vec<(OutputShape, Vec<u8>)>;
 
+        // every format `pic_format` yields, I420 first so an unconstrained link fixes to it
+        const OUTPUT_FORMATS: [RawVideoFormat; 9] = [
+            RawVideoFormat::I420,
+            RawVideoFormat::I420p10,
+            RawVideoFormat::I420p12,
+            RawVideoFormat::I422,
+            RawVideoFormat::I422p10,
+            RawVideoFormat::I422p12,
+            RawVideoFormat::I444,
+            RawVideoFormat::I444p10,
+            RawVideoFormat::I444p12,
+        ];
+
+        fn output_alternatives(
+            width: &Dim,
+            height: &Dim,
+            framerate: &Rate,
+            colorimetry: g2g_core::Colorimetry,
+        ) -> CapsSet {
+            CapsSet::from_alternatives(
+                OUTPUT_FORMATS
+                    .iter()
+                    .map(|format| Caps::RawVideo {
+                        format: *format,
+                        width: width.clone(),
+                        height: height.clone(),
+                        framerate: framerate.clone(),
+                        interlace: g2g_core::Interlace::Any,
+                        colorimetry,
+                    })
+                    .collect(),
+            )
+        }
+
         #[doc = concat!("Decodes an AV1 stream into a fully-planar YUV format via `", stringify!($backend), "`.")]
         pub struct $ty {
             decoder: Option<Decoder>,
@@ -274,17 +308,10 @@ macro_rules! av1_decoder {
 
             fn caps_constraint_as_transform(&self) -> CapsConstraint<'_> {
                 CapsConstraint::DerivedOutput(Box::new(|input: &Caps| match input {
+                    // Decode does not change how the samples map to colour, so
+                    // the bitstream's tag rides through.
                     Caps::CompressedVideo { codec: VideoCodec::Av1, width, height, framerate, colorimetry } => {
-                        CapsSet::one(Caps::RawVideo {
-                            format: RawVideoFormat::I420,
-                            width: width.clone(),
-                            height: height.clone(),
-                            framerate: framerate.clone(),
-                            interlace: g2g_core::Interlace::Any,
-                            // Decode does not change how the samples map to
-                            // colour, so the bitstream's tag rides through.
-                            colorimetry: *colorimetry,
-                        })
+                        output_alternatives(width, height, framerate, *colorimetry)
                     }
                     _ => CapsSet::from_alternatives(Vec::new()),
                 }))
@@ -358,17 +385,14 @@ macro_rules! av1_decoder {
         impl PadTemplates for $ty {
             fn pad_templates() -> Vec<PadTemplate> {
                 let av1 = Self::input_template();
-                let raw = Caps::RawVideo {
-                    format: RawVideoFormat::I420,
-                    width: Dim::Any,
-                    height: Dim::Any,
-                    framerate: Rate::Any,
-                    interlace: g2g_core::Interlace::Any,
-                    colorimetry: g2g_core::Colorimetry::UNKNOWN,
-                };
                 Vec::from([
                     PadTemplate::sink(CapsSet::one(av1)),
-                    PadTemplate::source(CapsSet::one(raw)),
+                    PadTemplate::source(output_alternatives(
+                        &Dim::Any,
+                        &Dim::Any,
+                        &Rate::Any,
+                        g2g_core::Colorimetry::UNKNOWN,
+                    )),
                 ])
             }
         }

@@ -10,6 +10,7 @@ use g2g_core::element::DynAsyncElement;
 use g2g_core::runtime::{run_linear_chain, run_linear_chain_with_bus};
 use g2g_core::{
     Bus, BusMessage, Caps, Dim, G2gError, NegotiationFailure, PipelineClock, Rate, RawVideoFormat,
+    VideoCodec,
 };
 
 use g2g_plugins::capsfilter::CapsFilter;
@@ -96,19 +97,22 @@ async fn zero_transforms_is_source_to_sink() {
     assert_eq!(sink.received(), target);
 }
 
-/// A `CapsFilter` pinning a format the source never produces fails the
+fn compressed_h264() -> Caps {
+    Caps::CompressedVideo {
+        codec: VideoCodec::H264,
+        width: Dim::Any,
+        height: Dim::Any,
+        framerate: Rate::Any,
+        colorimetry: g2g_core::Colorimetry::UNKNOWN,
+    }
+}
+
+/// A `CapsFilter` pinning caps the source never produces fails the
 /// whole-chain solve loud, proving negotiation runs over every element.
 #[tokio::test]
 async fn incompatible_capsfilter_fails_negotiation() {
     let mut src = VideoTestSrc::new(64, 64, 30, 4);
-    let mut filter = CapsFilter::new(Caps::RawVideo {
-        format: RawVideoFormat::P010,
-        width: Dim::Any,
-        height: Dim::Any,
-        framerate: Rate::Any,
-        interlace: g2g_core::Interlace::Any,
-        colorimetry: g2g_core::Colorimetry::UNKNOWN,
-    });
+    let mut filter = CapsFilter::new(compressed_h264());
     let mut sink = FakeSink::new();
     let clock = ZeroClock;
 
@@ -118,24 +122,17 @@ async fn incompatible_capsfilter_fails_negotiation() {
     assert_eq!(
         result.err(),
         Some(G2gError::CapsMismatch),
-        "the source cannot negotiate through a P010-only filter"
+        "a raw source cannot negotiate through a compressed-only filter"
     );
 }
 
 /// `run_linear_chain_with_bus` routes the whole-chain solve failure to the
-/// bus (M18 item 7): the same incompatible P010 filter posts a structured
+/// bus (M18 item 7): the same compressed-only filter posts a structured
 /// `EmptyLink` while the run still errors `CapsMismatch`.
 #[tokio::test]
 async fn incompatible_chain_posts_negotiation_failure_to_bus() {
     let mut src = VideoTestSrc::new(64, 64, 30, 4);
-    let mut filter = CapsFilter::new(Caps::RawVideo {
-        format: RawVideoFormat::P010,
-        width: Dim::Any,
-        height: Dim::Any,
-        framerate: Rate::Any,
-        interlace: g2g_core::Interlace::Any,
-        colorimetry: g2g_core::Colorimetry::UNKNOWN,
-    });
+    let mut filter = CapsFilter::new(compressed_h264());
     let mut sink = FakeSink::new();
     let clock = ZeroClock;
     let (bus, handle) = Bus::new(4);

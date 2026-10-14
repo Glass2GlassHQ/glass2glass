@@ -149,9 +149,11 @@ fn strip_tds(unit: &[u8]) -> Vec<u8> {
     out
 }
 
+const EIGHT_BIT: &str = "yuv420p";
+
 /// Encode a short AV1 clip (two GOPs) to IVF with ffmpeg's libaom, or `None`
 /// when the host cannot.
-fn encode_ivf(tag: &str) -> Option<(std::path::PathBuf, Vec<Vec<u8>>)> {
+fn encode_ivf(tag: &str, pixel_format: &str) -> Option<(std::path::PathBuf, Vec<Vec<u8>>)> {
     if Command::new("ffmpeg").arg("-version").output().is_err() {
         return None;
     }
@@ -167,6 +169,8 @@ fn encode_ivf(tag: &str) -> Option<(std::path::PathBuf, Vec<Vec<u8>>)> {
             "testsrc2=size=192x108:rate=30",
             "-frames:v",
             "16",
+            "-pix_fmt",
+            pixel_format,
             "-c:v",
             "libaom-av1",
             "-cpu-used",
@@ -234,7 +238,7 @@ fn assert_av1_track(sink: &FrameSink, expected: &[Vec<u8>]) {
 /// units through `Fmp4Demux` (the same `av01` parse the progressive path uses).
 #[tokio::test]
 async fn av1_mp4_round_trips() {
-    let Some((ivf, frames)) = encode_ivf("roundtrip") else {
+    let Some((ivf, frames)) = encode_ivf("roundtrip", EIGHT_BIT) else {
         eprintln!("skipping: no ffmpeg / libaom");
         return;
     };
@@ -273,7 +277,7 @@ async fn av1_mp4_round_trips() {
 /// (the reference-peer direction).
 #[tokio::test]
 async fn av1_ffmpeg_mp4_demuxes() {
-    let Some((ivf, frames)) = encode_ivf("ffmpeg") else {
+    let Some((ivf, frames)) = encode_ivf("ffmpeg", EIGHT_BIT) else {
         eprintln!("skipping: no ffmpeg / libaom");
         return;
     };
@@ -299,7 +303,7 @@ async fn av1_ffmpeg_mp4_demuxes() {
 /// the element level (caps + byte-identical units).
 #[tokio::test]
 async fn av1_mkv_element_round_trips() {
-    let Some((ivf, frames)) = encode_ivf("mkv") else {
+    let Some((ivf, frames)) = encode_ivf("mkv", EIGHT_BIT) else {
         eprintln!("skipping: no ffmpeg / libaom");
         return;
     };
@@ -341,7 +345,7 @@ async fn av1_mkv_element_round_trips() {
 
 #[tokio::test]
 async fn av1_ivf_negotiates_into_an_av1_only_parser() {
-    let Some((ivf, frames)) = encode_ivf("launch") else {
+    let Some((ivf, frames)) = encode_ivf("launch", EIGHT_BIT) else {
         eprintln!("skipping: no ffmpeg / libaom");
         return;
     };
@@ -361,4 +365,25 @@ async fn av1_ivf_negotiates_into_an_av1_only_parser() {
         frames.len() as u64,
         "every frame reaches the sink"
     );
+}
+
+#[cfg(feature = "dav1d")]
+#[tokio::test]
+async fn ten_bit_av1_decodes_through_decodebin_into_a_ten_bit_capsfilter() {
+    let Some((ivf, frames)) = encode_ivf("ten-bit", "yuv420p10le") else {
+        eprintln!("skipping: no ffmpeg / libaom");
+        return;
+    };
+    let graph = parse_launch(
+        &default_registry(),
+        &format!(
+            "filesrc location={} ! decodebin ! video/x-raw,format=I420_10LE ! fakesink",
+            ivf.display()
+        ),
+    )
+    .expect("parse");
+    let stats = run_graph(graph, &WallClock::new(), LatencyProfile::Live).await;
+    let _ = std::fs::remove_file(&ivf);
+    let stats = stats.expect("the av1 decoder offers I420_10LE");
+    assert_eq!(stats.frames_consumed, frames.len() as u64);
 }
