@@ -35,7 +35,7 @@ use std::collections::VecDeque;
 use std::sync::mpsc::sync_channel;
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -62,8 +62,42 @@ enum Ctrl {
     Terminate,
 }
 
-/// Shared PCM queue between the element and the realtime `process` callback.
-type SharedQueue = Arc<Mutex<VecDeque<u8>>>;
+// bounds the EOS wait so a stalled endpoint can't hang the pipeline
+const EOS_DRAIN_LIMIT: Duration = Duration::from_secs(2);
+
+// PCM bytes from the element to the realtime callback, oldest dropped past capacity
+#[derive(Debug, Default)]
+struct LeakyPcmQueue {
+    bytes: VecDeque<u8>,
+    capacity_bytes: usize,
+}
+
+impl LeakyPcmQueue {
+    fn reset(&mut self, capacity_bytes: usize) {
+        self.bytes.clear();
+        self.bytes.reserve(capacity_bytes);
+        self.capacity_bytes = capacity_bytes;
+    }
+
+    fn push(&mut self, payload: &[u8]) {
+        let kept = &payload[payload.len().saturating_sub(self.capacity_bytes)..];
+        let excess = (self.bytes.len() + kept.len()).saturating_sub(self.capacity_bytes);
+        self.bytes.drain(..excess);
+        self.bytes.extend(kept);
+    }
+
+    fn pop_into(&mut self, out: &mut [u8]) -> usize {
+        let count = self.bytes.len().min(out.len());
+        let (front, back) = self.bytes.as_slices();
+        let from_front = front.len().min(count);
+        out[..from_front].copy_from_slice(&front[..from_front]);
+        out[from_front..count].copy_from_slice(&back[..count - from_front]);
+        self.bytes.drain(..count);
+        count
+    }
+}
+
+type SharedQueue = Arc<Mutex<LeakyPcmQueue>>;
 
 /// # Example
 ///
@@ -79,7 +113,6 @@ pub struct PipeWireSink {
     ctrl_tx: Option<pw::channel::Sender<Ctrl>>,
     worker: Option<JoinHandle<()>>,
     queue: SharedQueue,
-    high_water: usize,
     caps: Option<Caps>,
     bytes_queued: Arc<AtomicU64>,
     /// Playout-disciplined master clock (the ALSA sink's M590 analog). The
@@ -109,7 +142,6 @@ impl core::fmt::Debug for PipeWireSink {
         f.debug_struct("PipeWireSink")
             .field("target", &self.target)
             .field("caps", &self.caps)
-            .field("high_water", &self.high_water)
             .field("bytes_queued", &self.bytes_queued.load(Ordering::Relaxed))
             .finish()
     }
@@ -127,8 +159,7 @@ impl PipeWireSink {
             target: String::new(),
             ctrl_tx: None,
             worker: None,
-            queue: Arc::new(Mutex::new(VecDeque::new())),
-            high_water: 0,
+            queue: Arc::new(Mutex::new(LeakyPcmQueue::default())),
             caps: None,
             bytes_queued: Arc::new(AtomicU64::new(0)),
             clock: Arc::new(DriftClock::new(Arc::new(MonotonicClock))),
@@ -162,21 +193,25 @@ impl PipeWireSink {
             let _ = join.join();
         }
         if let Ok(mut q) = self.queue.lock() {
-            q.clear();
+            q.bytes.clear();
         }
     }
 
     /// Wait for the worker to play out the queued PCM before teardown, so EOS
-    /// does not drop up to `high_water` bytes of buffered tail. The queue holds
-    /// at most ~1 s of audio and drains in real time; cap the wait at 2 s so a
-    /// stalled endpoint can't hang the pipeline.
-    fn drain_queue(&self) {
-        for _ in 0..200 {
-            let drained = self.queue.lock().map(|q| q.is_empty()).unwrap_or(true);
+    /// does not drop up to a second of buffered tail. Yields to the executor
+    /// between checks so the other arms keep running while it drains.
+    async fn drain_queue(&self) {
+        let deadline = Instant::now() + EOS_DRAIN_LIMIT;
+        while Instant::now() < deadline {
+            let drained = self
+                .queue
+                .lock()
+                .map(|q| q.bytes.is_empty())
+                .unwrap_or(true);
             if drained {
                 break;
             }
-            std::thread::sleep(Duration::from_millis(10));
+            tokio::task::yield_now().await;
         }
     }
 }
@@ -225,14 +260,13 @@ impl AsyncElement for PipeWireSink {
         }
 
         let stride = frame_bytes(format, channels);
-        // ~1 s of audio: bound the leaky queue.
-        self.high_water = stride * rate as usize;
 
         let (ctrl_tx, ctrl_rx) = pw::channel::channel::<Ctrl>();
         let (ready_tx, ready_rx) = sync_channel::<Result<(), i32>>(1);
         let queue = Arc::clone(&self.queue);
         if let Ok(mut q) = queue.lock() {
-            q.clear();
+            // ~1 s of audio
+            q.reset(stride * rate as usize);
         }
 
         let cfg = StreamCfg {
@@ -346,16 +380,10 @@ impl AsyncElement for PipeWireSink {
                         return Err(G2gError::NotConfigured);
                     }
                     let bytes = payload.as_slice();
-                    let mut q = self
-                        .queue
+                    self.queue
                         .lock()
-                        .map_err(|_| G2gError::Hardware(HardwareError::PipeWire(-1)))?;
-                    q.extend(bytes.iter().copied());
-                    // Leaky bound: drop the oldest bytes past the high-water mark.
-                    while q.len() > self.high_water {
-                        q.pop_front();
-                    }
-                    drop(q);
+                        .map_err(|_| G2gError::Hardware(HardwareError::PipeWire(-1)))?
+                        .push(bytes);
                     self.bytes_queued
                         .fetch_add(bytes.len() as u64, Ordering::Relaxed);
                     Ok(())
@@ -368,7 +396,7 @@ impl AsyncElement for PipeWireSink {
                 }
                 PipelinePacket::Flush | PipelinePacket::Segment(_) => Ok(()),
                 PipelinePacket::Eos => {
-                    self.drain_queue();
+                    self.drain_queue().await;
                     self.shutdown();
                     Ok(())
                 }
@@ -463,17 +491,11 @@ fn build_and_run(
                 // Fill whole-frame-aligned capacity from the queue; pad the
                 // remainder with silence so an underrun is quiet, not garbage.
                 let cap = (slice.len() / stride) * stride;
-                let mut filled = 0usize;
-                if let Ok(mut q) = q.lock() {
-                    let avail = q.len().min(cap);
-                    for slot in slice.iter_mut().take(avail) {
-                        *slot = q.pop_front().unwrap_or(0);
-                    }
-                    filled = avail;
-                }
-                for slot in slice.iter_mut().take(cap).skip(filled) {
-                    *slot = 0;
-                }
+                let filled = q
+                    .lock()
+                    .map(|mut q| q.pop_into(&mut slice[..cap]))
+                    .unwrap_or(0);
+                slice[filled..cap].fill(0);
                 cap
             } else {
                 0
@@ -608,6 +630,27 @@ mod tests {
                 spec.name
             );
         }
+    }
+
+    #[test]
+    fn leaky_queue_keeps_the_newest_bytes_in_order() {
+        let capacity = 6;
+        let mut queue = LeakyPcmQueue::default();
+        queue.reset(capacity);
+        queue.push(&[1, 2, 3, 4]);
+        queue.push(&[5, 6, 7, 8]);
+        let mut out = [0u8; 3];
+        assert_eq!(queue.pop_into(&mut out), out.len());
+        assert_eq!(out, [3, 4, 5]);
+        // wraps the ring, so the next read spans both halves
+        queue.push(&[9, 10, 11]);
+        let mut out = [0u8; 8];
+        assert_eq!(queue.pop_into(&mut out), capacity);
+        assert_eq!(out[..capacity], [6, 7, 8, 9, 10, 11]);
+        queue.push(&[20, 21, 22, 23, 24, 25, 26, 27]);
+        let mut out = [0u8; 8];
+        assert_eq!(queue.pop_into(&mut out), capacity);
+        assert_eq!(out[..capacity], [22, 23, 24, 25, 26, 27]);
     }
 
     #[test]

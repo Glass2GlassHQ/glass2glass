@@ -119,7 +119,6 @@ Raw video and GPU:
 
 Audio:
 
-- `pipewiresink` moves bytes one at a time under the realtime mutex and sleeps on EOS.
 - wasapisink, coreaudio and aaudio sinks block in `process`. Use `WorkerLink`.
 - audiobuffersplit, audioreverse, adpcm and audiomixer drain from the front.
 - The f32 transform wrapper is copied 9 times with two allocations per buffer.
