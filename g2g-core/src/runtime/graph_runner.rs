@@ -4911,20 +4911,10 @@ async fn tee_arm(
 /// branch arm's own result, so swallowing the closed channel here is safe.
 async fn broadcast_drop_closed(
     senders: &mut Vec<SenderSink>,
-    mut packet: PipelinePacket,
+    packet: PipelinePacket,
     branch_drop: bool,
 ) -> Result<(), G2gError> {
-    if let PipelinePacket::DataFrame(frame) = &mut packet {
-        frame.domain.make_shareable();
-    }
-    let mut dead: Vec<usize> = Vec::new();
-    for (i, s) in senders.iter_mut().enumerate() {
-        match s.push(try_clone_packet(&packet)?).await {
-            Ok(_) => {}
-            Err(G2gError::Shutdown) if branch_drop || s.retired() => dead.push(i),
-            Err(e) => return Err(e),
-        }
-    }
+    let dead = broadcast_tolerating(senders, packet, |s| branch_drop || s.retired()).await?;
     // Remove dead senders high-index-first so earlier indices stay valid.
     for &i in dead.iter().rev() {
         senders.remove(i);
@@ -5017,17 +5007,48 @@ pub(crate) async fn demux_arm<E: MultiOutputElement>(
 /// branch. A fan-out of `n` makes zero byte copies of a `System` / GPU frame.
 pub(crate) async fn broadcast(
     senders: &mut [SenderSink],
-    mut packet: PipelinePacket,
+    packet: PipelinePacket,
 ) -> Result<(), G2gError> {
+    broadcast_tolerating(senders, packet, |_| false)
+        .await
+        .map(|_| ())
+}
+
+// Returns the branches that had closed and that `tolerate_closed` let off.
+async fn broadcast_tolerating(
+    senders: &mut [SenderSink],
+    mut packet: PipelinePacket,
+    tolerate_closed: impl Fn(&SenderSink) -> bool,
+) -> Result<Vec<usize>, G2gError> {
     if let PipelinePacket::DataFrame(frame) = &mut packet {
         frame.domain.make_shareable();
     }
-    let last = senders.len() - 1;
-    for s in senders[..last].iter_mut() {
-        s.push(try_clone_packet(&packet)?).await?;
+    let mut closed = Vec::new();
+    let Some((last, others)) = senders.split_last_mut() else {
+        return Ok(closed);
+    };
+    for (index, sender) in others.iter_mut().enumerate() {
+        if !push_to_branch(sender, try_clone_packet(&packet)?, &tolerate_closed).await? {
+            closed.push(index);
+        }
     }
-    senders[last].push(packet).await?;
-    Ok(())
+    if !push_to_branch(last, packet, &tolerate_closed).await? {
+        closed.push(others.len());
+    }
+    Ok(closed)
+}
+
+// `false` when the branch had closed and `tolerate_closed` let it off.
+async fn push_to_branch(
+    sender: &mut SenderSink,
+    packet: PipelinePacket,
+    tolerate_closed: &impl Fn(&SenderSink) -> bool,
+) -> Result<bool, G2gError> {
+    match sender.push(packet).await {
+        Ok(_) => Ok(true),
+        Err(G2gError::Shutdown) if tolerate_closed(sender) => Ok(false),
+        Err(e) => Err(e),
+    }
 }
 
 /// What woke a parked muxer arm: a β directive, a packet on a pad, or an input

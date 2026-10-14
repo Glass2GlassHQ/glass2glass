@@ -49,8 +49,6 @@ Bugs:
 Core runtime:
 
 - Mutator runs drive every element through `DynRef` (a boxed future per packet).
-- `FrameMetaSet` clone allocates a Vec. `broadcast_drop_closed` shares for the last
-  sender too and duplicates `broadcast`.
 - `Gate::process` and `Router::process` box a future per packet.
 - Route the sink, transform and router loops in `runner.rs` and `fanin.rs` through
   the `graph_runner` arms.

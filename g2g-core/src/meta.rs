@@ -322,19 +322,32 @@ mod on {
     /// A list of typed [`FrameMeta`] attached to a frame. Empty (no allocation)
     /// on a freshly constructed frame.
     ///
-    /// Each entry is an [`Arc`] so a fan-out (tee) clone shares the metadata by
-    /// refcount instead of deep-copying it (cheap, and the analytics graph is
-    /// identical on both branches). A branch that mutates one entry pays a
-    /// copy-on-write deep copy only then (see [`get_mut`](Self::get_mut)), so the
-    /// other branch never observes the change.
+    /// The list and each entry are [`Arc`]s, so a fan-out (tee) clone is one
+    /// refcount bump instead of a copy (cheap, and the analytics graph is
+    /// identical on both branches). A branch that changes the list copies it
+    /// then, and one that mutates an entry deep-copies that entry then (see
+    /// [`get_mut`](Self::get_mut)), so the other branch never observes the change.
     #[derive(Debug, Default, Clone)]
-    pub struct FrameMetaSet(Vec<Arc<dyn FrameMeta>>);
+    pub struct FrameMetaSet(Option<Arc<Vec<Arc<dyn FrameMeta>>>>);
 
     impl FrameMetaSet {
         /// An empty metadata set with no backing allocation.
         #[inline]
         pub fn new() -> Self {
-            FrameMetaSet(Vec::new())
+            FrameMetaSet(None)
+        }
+
+        fn entries(&self) -> &[Arc<dyn FrameMeta>] {
+            self.0.as_deref().map_or(&[], Vec::as_slice)
+        }
+
+        // Copies the list first when another frame shares it.
+        fn entries_mut(&mut self) -> &mut Vec<Arc<dyn FrameMeta>> {
+            Arc::make_mut(self.0.get_or_insert_with(Default::default))
+        }
+
+        fn position<T: FrameMeta + 'static>(&self) -> Option<usize> {
+            self.entries().iter().position(|m| m.as_any().is::<T>())
         }
 
         /// Attach one piece of metadata, replacing any entry of the same type
@@ -345,16 +358,20 @@ mod on {
         /// would be unreachable, and an empty one already on the frame would
         /// hide what an element attaches later.
         pub fn attach<T: FrameMeta + 'static>(&mut self, meta: T) {
-            match self.0.iter().position(|m| m.as_any().is::<T>()) {
-                Some(idx) => self.0[idx] = Arc::new(meta),
-                None => self.0.push(Arc::new(meta)),
+            let existing = self.position::<T>();
+            let entries = self.entries_mut();
+            match existing {
+                Some(idx) => entries[idx] = Arc::new(meta),
+                None => entries.push(Arc::new(meta)),
             }
         }
 
         /// The attached meta of type `T`, if any. At most one is ever attached
         /// (see [`attach`](Self::attach)).
         pub fn get<T: FrameMeta + 'static>(&self) -> Option<&T> {
-            self.0.iter().find_map(|m| m.as_any().downcast_ref::<T>())
+            self.entries()
+                .iter()
+                .find_map(|m| m.as_any().downcast_ref::<T>())
         }
 
         /// Mutable access to the attached meta of type `T`, if any (at most one
@@ -365,12 +382,13 @@ mod on {
         /// [`FrameMeta::clone_box`] so this mutation stays private to this frame.
         /// When the entry is uniquely owned no copy is made.
         pub fn get_mut<T: FrameMeta + 'static>(&mut self) -> Option<&mut T> {
-            let idx = self.0.iter().position(|m| m.as_any().is::<T>())?;
+            let idx = self.position::<T>()?;
+            let entries = self.entries_mut();
             // Ensure unique ownership before handing out a mutable reference.
-            if Arc::get_mut(&mut self.0[idx]).is_none() {
-                self.0[idx] = Arc::from(self.0[idx].clone_box());
+            if Arc::get_mut(&mut entries[idx]).is_none() {
+                entries[idx] = Arc::from(entries[idx].clone_box());
             }
-            Arc::get_mut(&mut self.0[idx])
+            Arc::get_mut(&mut entries[idx])
                 .expect("entry is unique after the COW above")
                 .as_any_mut()
                 .downcast_mut::<T>()
@@ -378,23 +396,26 @@ mod on {
 
         /// Iterate every attached meta as a trait object.
         pub fn iter(&self) -> impl Iterator<Item = &dyn FrameMeta> {
-            self.0.iter().map(|m| m.as_ref())
+            self.entries().iter().map(|m| m.as_ref())
         }
 
         pub fn len(&self) -> usize {
-            self.0.len()
+            self.entries().len()
         }
 
         pub fn is_empty(&self) -> bool {
-            self.0.is_empty()
+            self.entries().is_empty()
         }
 
         /// Apply a [`Transform`]: retain only metas whose `propagate` returns
         /// [`Propagation::Keep`]. An element that resamples / re-encodes calls
         /// this so stale meta never rides a frame it no longer describes.
         pub fn propagate(&mut self, transform: Transform) {
-            self.0
-                .retain(|m| m.propagate(transform) == Propagation::Keep);
+            let keep = |m: &Arc<dyn FrameMeta>| m.propagate(transform) == Propagation::Keep;
+            if self.entries().iter().all(keep) {
+                return;
+            }
+            self.entries_mut().retain(keep);
         }
     }
 
@@ -1436,6 +1457,19 @@ mod tests {
             .unwrap()
             .add_detection(det(0.0, 0.0, 0.5, 0.5, 1, 0.5));
         assert_eq!(set.get::<AnalyticsMeta>().unwrap().nodes.len(), 1);
+    }
+
+    #[test]
+    fn a_clone_shares_the_set_until_one_side_changes_it() {
+        let mut original = FrameMetaSet::new();
+        original.attach(AnalyticsMeta::new());
+        let mut branch = original.clone();
+        branch.attach(BlobMeta::new());
+        branch.propagate(Transform::Encode);
+        assert_eq!(original.len(), 1, "the branch's changes stay on the branch");
+        assert!(original.get::<AnalyticsMeta>().is_some());
+        assert_eq!(branch.len(), 1);
+        assert!(branch.get::<BlobMeta>().is_some());
     }
 
     #[test]
