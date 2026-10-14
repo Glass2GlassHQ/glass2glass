@@ -45,11 +45,13 @@ use g2g_core::{
     PropertySpec, TagList, TextFormat, VideoCodec,
 };
 
+use g2g_core::time::ns_to_ticks;
+
 use crate::annexb::au_is_keyframe;
 use crate::cea::{build_cdp, parse_cc_data, CcTriple};
 use crate::fmp4mux::{
-    av1c_record, avcc_sample, parameter_sets, split_annexb, tfhd, visual_sample_entry,
-    vp8_keyframe, vp9_keyframe,
+    av1c_record, avcc_sample, parameter_sets, split_annexb, visual_sample_entry, vp8_keyframe,
+    vp9_keyframe,
 };
 use crate::mp4audiosink::esds;
 use crate::mp4box::{
@@ -62,7 +64,7 @@ use crate::opusparse::{
 use crate::rtcp;
 
 /// Video tracks use a 90 kHz media timescale; audio tracks use the sample rate.
-const VIDEO_TIMESCALE: u32 = 90_000;
+pub(crate) const VIDEO_TIMESCALE: u32 = 90_000;
 /// Timed-text tracks use a 1 kHz media timescale (ffmpeg's for `mov_text`), so a
 /// cue's millisecond timing lands on a tick exactly.
 const TEXT_TIMESCALE: u32 = 1_000;
@@ -90,7 +92,7 @@ enum PadKind {
 
 /// A track's `moov` init data, captured from its first access unit.
 #[derive(Debug, Clone)]
-enum TrackInit {
+pub(crate) enum TrackInit {
     Video {
         codec: VideoCodec,
         width: u32,
@@ -218,11 +220,30 @@ struct ProgSample {
 
 /// One buffered sample of an in-progress fragment (batched mode).
 #[derive(Debug, Clone)]
-struct PendingSample {
-    bytes: Vec<u8>,
+pub(crate) struct PendingSample {
+    pub(crate) bytes: Vec<u8>,
     /// Sample duration in the track's timescale.
-    duration: u32,
-    is_sync: bool,
+    pub(crate) duration: u32,
+    pub(crate) is_sync: bool,
+}
+
+impl PendingSample {
+    pub(crate) fn as_fragment_sample(&self) -> FragmentSample<'_> {
+        FragmentSample {
+            bytes: &self.bytes,
+            duration: self.duration,
+            is_sync: self.is_sync,
+        }
+    }
+}
+
+/// One sample as a `moof`+`mdat` fragment writes it.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct FragmentSample<'a> {
+    pub(crate) bytes: &'a [u8],
+    /// Sample duration in the track's timescale.
+    pub(crate) duration: u32,
+    pub(crate) is_sync: bool,
 }
 
 /// One finished sample on its way into the file: its bytes and the timing the
@@ -507,7 +528,7 @@ impl Mp4MuxN {
                 }
                 let first = self.first_pts_ns[input].unwrap_or(0);
                 let skip_ns = self.segment_start_ns[input].saturating_sub(first);
-                ns_to_ts(skip_ns, init.timescale())
+                ns_to_ticks(skip_ns, init.timescale())
             })
             .collect()
     }
@@ -708,8 +729,8 @@ impl Mp4MuxN {
         // The difference of the rounded end and start, not the rounded length:
         // a 1024-sample AAC frame is 21333333.33 ns, and converting each length
         // on its own loses a tick a frame that piles up as A/V drift.
-        let duration = (ns_to_ts(pts_ns.saturating_add(dur_ns), timescale)
-            - ns_to_ts(pts_ns, timescale)) as u32;
+        let duration = (ns_to_ticks(pts_ns.saturating_add(dur_ns), timescale)
+            - ns_to_ticks(pts_ns, timescale)) as u32;
 
         // A text track has no per-sample timestamp on disk: a cue presents where
         // the durations before it end, so the run between two cues (and any before
@@ -718,7 +739,7 @@ impl Mp4MuxN {
         // what ffmpeg writes.
         if matches!(self.kinds[input], Some(PadKind::Text)) {
             let end_ns = self.text_end_ns[input];
-            let gap = ns_to_ts(pts_ns.saturating_sub(end_ns), timescale) as u32;
+            let gap = ns_to_ticks(pts_ns.saturating_sub(end_ns), timescale) as u32;
             if gap > 0 {
                 let filler = TimedSample {
                     bytes: tx3g_sample(&[]),
@@ -778,8 +799,8 @@ impl Mp4MuxN {
                 bytes: sample,
                 duration,
                 is_sync,
-                dts: ns_to_ts(dts_ns, timescale),
-                composition_offset: ns_to_ts(pts_ns - dts_ns, timescale) as u32,
+                dts: ns_to_ticks(dts_ns, timescale),
+                composition_offset: ns_to_ticks(pts_ns - dts_ns, timescale) as u32,
             });
             return Ok(());
         }
@@ -840,7 +861,7 @@ impl Mp4MuxN {
         if self.fragment_duration_ms == 0 {
             return 0;
         }
-        ns_to_ts(
+        ns_to_ticks(
             self.fragment_duration_ms.saturating_mul(1_000_000),
             timescale,
         )
@@ -851,7 +872,7 @@ impl Mp4MuxN {
         if self.chunk_duration_ms == 0 {
             return 0;
         }
-        ns_to_ts(self.chunk_duration_ms.saturating_mul(1_000_000), timescale)
+        ns_to_ticks(self.chunk_duration_ms.saturating_mul(1_000_000), timescale)
     }
 
     /// End the open fragment on a track: the next chunk written there opens a new
@@ -906,13 +927,17 @@ impl Mp4MuxN {
         }
 
         self.sequence += 1;
+        let fragment_samples: Vec<FragmentSample<'_>> = samples
+            .iter()
+            .map(PendingSample::as_fragment_sample)
+            .collect();
         av_fragment(
             &mut bytes,
             track_id,
             self.sequence,
             base_decode_time,
             self.cmaf,
-            &samples,
+            &fragment_samples,
         );
 
         let out_frame = Frame::new(
@@ -1296,20 +1321,14 @@ impl MultiInputElement for Mp4MuxN {
 // module's users keep their import path.
 pub(crate) use crate::aacparse::{asc_from_adts, strip_adts};
 
-/// Nanoseconds to the nearest `timescale` tick. Round, not truncate: a PTS
-/// already truncated to whole nanoseconds sits just under its exact tick.
-fn ns_to_ts(ns: u64, timescale: u32) -> u64 {
-    ((ns as u128 * timescale as u128 + 500_000_000) / 1_000_000_000) as u64
-}
-
 /// The metadata a `moov` carries: the file's own tags and one list per pad slot,
 /// already split by the global / per-stream merge policy (M838), plus the
 /// file's table of contents (M1046, which has no per-track scope).
 #[derive(Debug, Default)]
-struct MoovMetadata {
-    global: TagList,
-    per_track: Vec<TagList>,
-    chapters: Vec<Chapter>,
+pub(crate) struct MoovMetadata {
+    pub(crate) global: TagList,
+    pub(crate) per_track: Vec<TagList>,
+    pub(crate) chapters: Vec<Chapter>,
 }
 
 /// Build a multi-track `moov`: `mvhd` + one `trak` per track + `mvex` (one
@@ -1321,7 +1340,7 @@ struct MoovMetadata {
 /// durations, `mvex` declares the movie extends into fragments) and `Some` for
 /// the progressive one (real tables and durations, no `mvex`), one entry per
 /// pad slot in the same order as `tracks`.
-fn av_moov(
+pub(crate) fn av_moov(
     tracks: &[Option<TrackInit>],
     tables: Option<&[Option<TrackTables>]>,
     metadata: &MoovMetadata,
@@ -1392,7 +1411,7 @@ fn av_moov(
 /// One progressive track's finished sample tables and the durations its headers
 /// declare. Built by [`track_tables`] once every sample is buffered.
 #[derive(Debug)]
-struct TrackTables {
+pub(crate) struct TrackTables {
     /// `stts` + optional `ctts` + optional `stss` + `stsc` + `stsz` +
     /// `stco`/`co64`, in the order they go into the `stbl` after the `stsd`.
     tables: Vec<u8>,
@@ -1960,16 +1979,29 @@ fn trak(
     )
 }
 
+/// A fragment's `tfhd`. Sample data always follows the `moof`
+/// (`default-base-is-moof`, base_data_offset absent), which is what CMAF requires
+/// of every track fragment. In CMAF mode the sample description index is stated
+/// rather than inherited from the `trex`, so a fragment describes itself.
+fn tfhd(track_id: u32, cmaf: bool) -> Vec<u8> {
+    let mut p = track_id.to_be_bytes().to_vec();
+    if !cmaf {
+        return full_box(b"tfhd", 0, 0x020000, &p);
+    }
+    p.extend_from_slice(&1u32.to_be_bytes()); // sample_description_index
+    full_box(b"tfhd", 0, 0x020002, &p)
+}
+
 /// Append one `moof`+`mdat` fragment holding `samples` for `track_id`, with a
 /// multi-sample `trun` (a single sample in the default per-AU mode). `tfdt` is the
 /// track's decode time at the first sample.
-fn av_fragment(
+pub(crate) fn av_fragment(
     out: &mut Vec<u8>,
     track_id: u32,
     sequence: u64,
     base_decode_time: u64,
     cmaf: bool,
-    samples: &[PendingSample],
+    samples: &[FragmentSample<'_>],
 ) {
     let build_moof = |data_offset: u32| -> Vec<u8> {
         let mfhd = full_box(b"mfhd", 0, 0, &(sequence as u32).to_be_bytes());
@@ -1996,7 +2028,7 @@ fn av_fragment(
     out.extend_from_slice(&build_moof((moof_len + BOX_HEADER_LEN) as u32));
     put_box_header(out, b"mdat", payload_len);
     for s in samples {
-        out.extend_from_slice(&s.bytes);
+        out.extend_from_slice(s.bytes);
     }
 }
 
@@ -2130,6 +2162,26 @@ mod tests {
         let (moofs0, samples0) = moof_and_sample_count(&sink0.bytes);
         assert_eq!(moofs0, 6, "per-AU mode emits one fragment per access unit");
         assert_eq!(samples0, 6);
+    }
+
+    #[test]
+    fn trun_data_offset_points_at_the_mdat_payload() {
+        let payload = [9u8, 9, 9, 9];
+        let sample = FragmentSample {
+            bytes: &payload,
+            duration: 3000,
+            is_sync: true,
+        };
+        let mut fragment = Vec::new();
+        av_fragment(&mut fragment, 1, 1, 0, false, &[sample]);
+        let moof_len = u32::from_be_bytes(fragment[..4].try_into().unwrap()) as usize;
+        let payload_at = moof_len + BOX_HEADER_LEN;
+        assert_eq!(&fragment[payload_at..], &payload);
+        // trun: [size][type][version+flags][sample_count][data_offset]
+        let trun = fragment.windows(4).position(|w| w == b"trun").unwrap();
+        let data_offset =
+            u32::from_be_bytes(fragment[trun + 12..trun + 16].try_into().unwrap()) as usize;
+        assert_eq!(data_offset, payload_at);
     }
 
     #[test]
@@ -2493,7 +2545,7 @@ mod tests {
         assert_eq!(u32::from_be_bytes(ctts[8..12].try_into().unwrap()), 3);
         assert_eq!(
             u32::from_be_bytes(ctts[12..16].try_into().unwrap()),
-            ns_to_ts(66_666_666, VIDEO_TIMESCALE) as u32,
+            ns_to_ticks(66_666_666, VIDEO_TIMESCALE) as u32,
             "pts - dts in the video timescale"
         );
     }

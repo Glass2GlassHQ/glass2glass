@@ -28,6 +28,7 @@ use g2g_core::{
 
 use crate::filesink::{io_err, path_io_err};
 use g2g_core::log::short_type_name;
+use g2g_core::time::ns_to_ticks;
 
 /// Samples per AAC-LC access unit (the fragment sample duration in media-time).
 const AAC_FRAME_SAMPLES: u32 = 1024;
@@ -50,10 +51,8 @@ pub struct Mp4AudioSink {
     header_written: bool,
     fragments: u64,
     decode_time: u64,
-    // carries the sub-tick remainder of ns->sample conversion so decode_time
-    // (tfdt) tracks real time exactly across a long recording instead of
-    // truncating one sample per fragment.
-    tick_remainder: u128,
+    // durations are cut from the running total so rounding never accumulates
+    elapsed_ns: u64,
     eos_seen: bool,
 }
 
@@ -68,7 +67,7 @@ impl Mp4AudioSink {
             header_written: false,
             fragments: 0,
             decode_time: 0,
-            tick_remainder: 0,
+            elapsed_ns: 0,
             eos_seen: false,
         }
     }
@@ -169,8 +168,14 @@ impl AsyncElement for Mp4AudioSink {
                     }
 
                     if !self.header_written {
-                        let header =
-                            [ftyp(), moov(self.channels, self.sample_rate, &self.asc)].concat();
+                        let track = TrackInit::Audio {
+                            format: AudioFormat::Aac,
+                            channels: self.channels,
+                            rate: self.sample_rate,
+                            config: self.asc.clone(),
+                        };
+                        let moov = av_moov(&[Some(track)], None, &MoovMetadata::default(), &[]);
+                        let header = [ftyp(), moov].concat();
                         let w = self.writer.as_mut().expect("checked above");
                         w.write_all(&header).map_err(io_err)?;
                         self.header_written = true;
@@ -179,14 +184,28 @@ impl AsyncElement for Mp4AudioSink {
                     // duration in media-time ticks: AAC-LC frame, or derived
                     // from the frame's explicit duration if present.
                     let duration = if frame.timing.duration_ns != 0 {
-                        let numer = frame.timing.duration_ns as u128 * self.sample_rate as u128
-                            + self.tick_remainder;
-                        self.tick_remainder = numer % 1_000_000_000;
-                        (numer / 1_000_000_000) as u32
+                        let end_ns = self.elapsed_ns.saturating_add(frame.timing.duration_ns);
+                        let ticks = ns_to_ticks(end_ns, self.sample_rate)
+                            - ns_to_ticks(self.elapsed_ns, self.sample_rate);
+                        self.elapsed_ns = end_ns;
+                        ticks as u32
                     } else {
                         AAC_FRAME_SAMPLES
                     };
-                    let frag = fragment(self.fragments + 1, self.decode_time, duration, au);
+                    let sample = FragmentSample {
+                        bytes: au,
+                        duration,
+                        is_sync: true,
+                    };
+                    let mut frag = Vec::new();
+                    av_fragment(
+                        &mut frag,
+                        TRACK_ID,
+                        self.fragments + 1,
+                        self.decode_time,
+                        false,
+                        &[sample],
+                    );
                     let w = self.writer.as_mut().expect("checked above");
                     w.write_all(&frag).map_err(io_err)?;
                     self.fragments += 1;
@@ -222,8 +241,11 @@ impl PadTemplates for Mp4AudioSink {
     }
 }
 
-// box primitives (mp4_box/full_box/ftyp/MATRIX) shared across the MP4 elements.
-use crate::mp4box::{ftyp, full_box, mp4_box, MATRIX};
+use crate::mp4box::{ftyp, full_box};
+use crate::mp4muxn::{av_fragment, av_moov, FragmentSample, MoovMetadata, TrackInit};
+
+/// The one track's `track_ID`.
+const TRACK_ID: u32 = 1;
 
 // --- box writers -----------------------------------------------------------
 
@@ -265,147 +287,6 @@ pub(crate) fn esds(asc: &[u8]) -> Vec<u8> {
     full_box(b"esds", 0, 0, &es_descriptor)
 }
 
-fn moov(channels: u8, rate: u32, asc: &[u8]) -> Vec<u8> {
-    let mvhd = {
-        let mut p = Vec::new();
-        p.extend_from_slice(&[0u8; 8]);
-        p.extend_from_slice(&1000u32.to_be_bytes()); // timescale
-        p.extend_from_slice(&0u32.to_be_bytes()); // duration (fragmented)
-        p.extend_from_slice(&0x00010000u32.to_be_bytes()); // rate 1.0
-        p.extend_from_slice(&0x0100u16.to_be_bytes()); // volume 1.0
-        p.extend_from_slice(&[0u8; 10]);
-        for m in MATRIX {
-            p.extend_from_slice(&m.to_be_bytes());
-        }
-        p.extend_from_slice(&[0u8; 24]);
-        p.extend_from_slice(&2u32.to_be_bytes()); // next track id
-        full_box(b"mvhd", 0, 0, &p)
-    };
-
-    let tkhd = {
-        let mut p = Vec::new();
-        p.extend_from_slice(&[0u8; 8]);
-        p.extend_from_slice(&1u32.to_be_bytes()); // track id
-        p.extend_from_slice(&[0u8; 4]);
-        p.extend_from_slice(&0u32.to_be_bytes()); // duration
-        p.extend_from_slice(&[0u8; 8]); // reserved
-        p.extend_from_slice(&0u16.to_be_bytes()); // layer
-        p.extend_from_slice(&0u16.to_be_bytes()); // alternate group
-        p.extend_from_slice(&0x0100u16.to_be_bytes()); // volume 1.0 (audio track)
-        p.extend_from_slice(&0u16.to_be_bytes()); // reserved
-        for m in MATRIX {
-            p.extend_from_slice(&m.to_be_bytes());
-        }
-        p.extend_from_slice(&0u32.to_be_bytes()); // width
-        p.extend_from_slice(&0u32.to_be_bytes()); // height
-        full_box(b"tkhd", 0, 3, &p) // enabled | in_movie
-    };
-
-    let mdhd = {
-        let mut p = Vec::new();
-        p.extend_from_slice(&[0u8; 8]);
-        p.extend_from_slice(&rate.to_be_bytes()); // timescale = sample rate
-        p.extend_from_slice(&0u32.to_be_bytes()); // duration
-        p.extend_from_slice(&0x55C4u16.to_be_bytes()); // language "und"
-        p.extend_from_slice(&[0u8; 2]);
-        full_box(b"mdhd", 0, 0, &p)
-    };
-
-    let hdlr = {
-        let mut p = Vec::new();
-        p.extend_from_slice(&[0u8; 4]);
-        p.extend_from_slice(b"soun");
-        p.extend_from_slice(&[0u8; 12]);
-        p.extend_from_slice(b"g2g\0");
-        full_box(b"hdlr", 0, 0, &p)
-    };
-
-    let mp4a = {
-        let mut p = Vec::new();
-        p.extend_from_slice(&[0u8; 6]); // reserved
-        p.extend_from_slice(&1u16.to_be_bytes()); // data reference index
-        p.extend_from_slice(&[0u8; 8]); // reserved (version/revision/vendor)
-        p.extend_from_slice(&(channels as u16).to_be_bytes());
-        p.extend_from_slice(&16u16.to_be_bytes()); // sample size
-        p.extend_from_slice(&0u16.to_be_bytes()); // pre_defined
-        p.extend_from_slice(&0u16.to_be_bytes()); // reserved
-        p.extend_from_slice(&(rate << 16).to_be_bytes()); // 16.16 sample rate
-        p.extend_from_slice(&esds(asc));
-        mp4_box(b"mp4a", &p)
-    };
-
-    let stbl = {
-        let stsd = {
-            let mut p = Vec::new();
-            p.extend_from_slice(&1u32.to_be_bytes());
-            p.extend_from_slice(&mp4a);
-            full_box(b"stsd", 0, 0, &p)
-        };
-        let empty4 = 0u32.to_be_bytes();
-        let stts = full_box(b"stts", 0, 0, &empty4);
-        let stsc = full_box(b"stsc", 0, 0, &empty4);
-        let stsz = full_box(b"stsz", 0, 0, &[0u8; 8]);
-        let stco = full_box(b"stco", 0, 0, &empty4);
-        mp4_box(b"stbl", &[stsd, stts, stsc, stsz, stco].concat())
-    };
-
-    let minf = {
-        // smhd: sound media header (balance 0).
-        let smhd = full_box(b"smhd", 0, 0, &[0u8; 4]);
-        let dref = {
-            let url = full_box(b"url ", 0, 1, &[]);
-            let mut p = Vec::new();
-            p.extend_from_slice(&1u32.to_be_bytes());
-            p.extend_from_slice(&url);
-            full_box(b"dref", 0, 0, &p)
-        };
-        let dinf = mp4_box(b"dinf", &dref);
-        mp4_box(b"minf", &[smhd, dinf, stbl].concat())
-    };
-
-    let mdia = mp4_box(b"mdia", &[mdhd, hdlr, minf].concat());
-    let trak = mp4_box(b"trak", &[tkhd, mdia].concat());
-
-    let mvex = {
-        let mut p = Vec::new();
-        p.extend_from_slice(&1u32.to_be_bytes());
-        p.extend_from_slice(&1u32.to_be_bytes());
-        p.extend_from_slice(&[0u8; 12]);
-        let trex = full_box(b"trex", 0, 0, &p);
-        mp4_box(b"mvex", &trex)
-    };
-
-    mp4_box(b"moov", &[mvhd, trak, mvex].concat())
-}
-
-/// One `moof`+`mdat` fragment holding a single audio access unit (always a
-/// sync sample).
-fn fragment(sequence: u64, decode_time: u64, duration: u32, sample: &[u8]) -> Vec<u8> {
-    let sample_flags: u32 = 0x0200_0000; // sync sample
-
-    let build_moof = |data_offset: u32| -> Vec<u8> {
-        let mfhd = full_box(b"mfhd", 0, 0, &(sequence as u32).to_be_bytes());
-        let tfhd = full_box(b"tfhd", 0, 0x020000, &1u32.to_be_bytes()); // default-base-is-moof
-        let tfdt = full_box(b"tfdt", 1, 0, &decode_time.to_be_bytes());
-        let trun = {
-            let mut p = Vec::new();
-            p.extend_from_slice(&1u32.to_be_bytes()); // sample count
-            p.extend_from_slice(&data_offset.to_be_bytes());
-            p.extend_from_slice(&duration.to_be_bytes());
-            p.extend_from_slice(&(sample.len() as u32).to_be_bytes());
-            p.extend_from_slice(&sample_flags.to_be_bytes());
-            full_box(b"trun", 0, 0x000701, &p)
-        };
-        let traf = mp4_box(b"traf", &[tfhd, tfdt, trun].concat());
-        mp4_box(b"moof", &[mfhd, traf].concat())
-    };
-
-    let moof_len = build_moof(0).len() as u32;
-    let moof = build_moof(moof_len + 8);
-    let mdat = mp4_box(b"mdat", sample);
-    [moof, mdat].concat()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -421,17 +302,6 @@ mod tests {
         let pos = b.windows(2).position(|w| w == asc).expect("asc present");
         assert_eq!(b[pos - 2], 0x05, "ASC tagged as DecoderSpecificInfo");
         assert_eq!(b[pos - 1], asc.len() as u8, "ASC length byte");
-    }
-
-    #[test]
-    fn fragment_data_offset_points_at_the_au() {
-        let frag = fragment(1, 0, 1024, &[7, 8, 9]);
-        let moof_len = u32::from_be_bytes(frag[..4].try_into().unwrap()) as usize;
-        let payload_at = moof_len + 8;
-        assert_eq!(&frag[payload_at..payload_at + 3], &[7, 8, 9]);
-        let pos = frag.windows(4).position(|w| w == b"trun").unwrap();
-        let data_offset = u32::from_be_bytes(frag[pos + 12..pos + 16].try_into().unwrap()) as usize;
-        assert_eq!(data_offset, payload_at);
     }
 
     #[test]

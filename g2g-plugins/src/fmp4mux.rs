@@ -20,10 +20,12 @@ use alloc::vec::Vec;
 
 use g2g_core::{Chapter, G2gError, TagList, VideoCodec};
 
-use crate::annexb::au_is_keyframe;
+use g2g_core::time::ns_to_ticks;
 
-/// 90 kHz media timescale, the conventional choice for video tracks.
-const TIMESCALE: u64 = 90_000;
+use crate::annexb::au_is_keyframe;
+use crate::mp4muxn::{
+    av_fragment, av_moov, FragmentSample, MoovMetadata, PendingSample, TrackInit, VIDEO_TIMESCALE,
+};
 /// Fallback per-frame duration when the stream carries no timing: 1/30 s.
 const DEFAULT_DURATION_NS: u64 = 33_333_333;
 
@@ -83,14 +85,6 @@ pub(crate) struct Fmp4Muxer {
     /// Producer wall clock sampled when the open fragment took its first sample,
     /// written in that fragment's `prft`.
     fragment_ntp: u64,
-}
-
-/// One buffered sample of an open multi-sample fragment (batched mode).
-#[derive(Debug)]
-struct PendingSample {
-    data: Vec<u8>,
-    duration: u32,
-    is_sync: bool,
 }
 
 impl Fmp4Muxer {
@@ -202,14 +196,18 @@ impl Fmp4Muxer {
         if !self.header_written {
             let param_sets = parameter_sets(self.codec, &nalus)?;
             out.extend_from_slice(&if self.cmaf { ftyp_cmaf() } else { ftyp() });
-            out.extend_from_slice(&moov(
-                self.codec,
-                self.width,
-                self.height,
-                &param_sets,
-                &self.tags,
-                &self.chapters,
-            ));
+            let track = TrackInit::Video {
+                codec: self.codec,
+                width: self.width,
+                height: self.height,
+                param_sets: param_sets.iter().map(|set| set.to_vec()).collect(),
+            };
+            let metadata = MoovMetadata {
+                global: self.tags.clone(),
+                per_track: Vec::new(),
+                chapters: self.chapters.clone(),
+            };
+            out.extend_from_slice(&av_moov(&[Some(track)], None, &metadata, &[]));
             self.header_written = true;
         }
         // duration: explicit, else pts delta, else the default.
@@ -222,7 +220,7 @@ impl Fmp4Muxer {
             }
         };
         self.prev_pts_ns = Some(pts_ns);
-        let duration = ns_to_timescale(duration_ns) as u32;
+        let duration = ns_to_ticks(duration_ns, VIDEO_TIMESCALE) as u32;
         let sample = avcc_sample(&nalus);
         let is_sync = au_is_keyframe(self.codec, annexb);
 
@@ -230,15 +228,21 @@ impl Fmp4Muxer {
         // because a fragment there may only start at a sync sample.
         if self.fragment_duration_ns == 0 && !self.cmaf {
             if let Some(now) = self.producer_clock {
-                out.extend_from_slice(&prft(1, now(), self.decode_time));
+                out.extend_from_slice(&prft(TRACK_ID, now(), self.decode_time));
             }
-            let frag = fragment(
+            let fragment_sample = FragmentSample {
+                bytes: &sample,
+                duration,
+                is_sync,
+            };
+            av_fragment(
+                &mut out,
+                TRACK_ID,
                 self.sequence + 1,
                 self.decode_time,
                 false,
-                &[(duration, &sample, is_sync)],
+                &[fragment_sample],
             );
-            out.extend_from_slice(&frag);
             self.sequence += 1;
             self.decode_time += duration as u64;
             return Ok(out);
@@ -263,7 +267,7 @@ impl Fmp4Muxer {
             self.fragment_ntp = self.producer_clock.map_or(0, |now| now());
         }
         self.pending.push(PendingSample {
-            data: sample,
+            bytes: sample,
             duration,
             is_sync,
         });
@@ -285,10 +289,10 @@ impl Fmp4Muxer {
         if self.pending.is_empty() {
             return Vec::new();
         }
-        let samples: Vec<(u32, &[u8], bool)> = self
+        let samples: Vec<FragmentSample<'_>> = self
             .pending
             .iter()
-            .map(|s| (s.duration, s.data.as_slice(), s.is_sync))
+            .map(PendingSample::as_fragment_sample)
             .collect();
         let mut frag = Vec::new();
         if !self.fragment_started {
@@ -297,15 +301,21 @@ impl Fmp4Muxer {
                 frag.extend_from_slice(&styp_cmaf(self.chunk_duration_ns > 0));
             }
             if self.producer_clock.is_some() {
-                frag.extend_from_slice(&prft(1, self.fragment_ntp, self.pending_decode_time));
+                frag.extend_from_slice(&prft(
+                    TRACK_ID,
+                    self.fragment_ntp,
+                    self.pending_decode_time,
+                ));
             }
         }
-        frag.extend_from_slice(&fragment(
+        av_fragment(
+            &mut frag,
+            TRACK_ID,
             self.sequence + 1,
             self.pending_decode_time,
             self.cmaf,
             &samples,
-        ));
+        );
         let total: u64 = self.pending.iter().map(|s| s.duration as u64).sum();
         self.sequence += 1;
         self.decode_time += total;
@@ -325,125 +335,18 @@ impl Fmp4Muxer {
     }
 }
 
-fn ns_to_timescale(ns: u64) -> u64 {
-    // 90 kHz: ns * 90000 / 1e9, reduced to avoid overflow.
-    ns.saturating_mul(TIMESCALE / 1000) / 1_000_000
-}
-
 // The Annex-B split / NAL-type / parameter-set / AVCC helpers moved to the
 // ungated `annexb` module (M662, the no_std FLV muxer shares them);
 // re-exported so this module's users keep their import path.
 pub(crate) use crate::annexb::{avcc_record, avcc_sample, parameter_sets, split_annexb};
 
-// box primitives (mp4_box/full_box/ftyp/MATRIX) shared across the MP4 elements.
-use crate::mp4box::{ftyp, ftyp_cmaf, full_box, mp4_box, prft, styp_cmaf, udta_with_tags, MATRIX};
+// box primitives (mp4_box/full_box/ftyp) shared across the MP4 elements.
+use crate::mp4box::{ftyp, ftyp_cmaf, mp4_box, prft, styp_cmaf};
+
+/// The one track's `track_ID`.
+const TRACK_ID: u32 = 1;
 
 // --- box writers ----------------------------------------------------------
-
-fn moov(
-    codec: VideoCodec,
-    width: u32,
-    height: u32,
-    param_sets: &[&[u8]],
-    tags: &TagList,
-    chapters: &[Chapter],
-) -> Vec<u8> {
-    let mvhd = {
-        let mut p = Vec::new();
-        p.extend_from_slice(&[0u8; 8]); // creation/modification time
-        p.extend_from_slice(&1000u32.to_be_bytes()); // timescale
-        p.extend_from_slice(&0u32.to_be_bytes()); // duration (fragmented)
-        p.extend_from_slice(&0x00010000u32.to_be_bytes()); // rate 1.0
-        p.extend_from_slice(&0x0100u16.to_be_bytes()); // volume 1.0
-        p.extend_from_slice(&[0u8; 10]); // reserved
-        for m in MATRIX {
-            p.extend_from_slice(&m.to_be_bytes());
-        }
-        p.extend_from_slice(&[0u8; 24]); // pre_defined
-        p.extend_from_slice(&2u32.to_be_bytes()); // next track id
-        full_box(b"mvhd", 0, 0, &p)
-    };
-
-    let tkhd = {
-        let mut p = Vec::new();
-        p.extend_from_slice(&[0u8; 8]); // times
-        p.extend_from_slice(&1u32.to_be_bytes()); // track id
-        p.extend_from_slice(&[0u8; 4]); // reserved
-        p.extend_from_slice(&0u32.to_be_bytes()); // duration
-        p.extend_from_slice(&[0u8; 16]); // reserved/layer/group/volume
-        for m in MATRIX {
-            p.extend_from_slice(&m.to_be_bytes());
-        }
-        p.extend_from_slice(&(width << 16).to_be_bytes()); // 16.16 width
-        p.extend_from_slice(&(height << 16).to_be_bytes()); // 16.16 height
-        full_box(b"tkhd", 0, 3, &p) // enabled | in_movie
-    };
-
-    let mdhd = {
-        let mut p = Vec::new();
-        p.extend_from_slice(&[0u8; 8]);
-        p.extend_from_slice(&(TIMESCALE as u32).to_be_bytes());
-        p.extend_from_slice(&0u32.to_be_bytes());
-        p.extend_from_slice(&0x55C4u16.to_be_bytes()); // language "und"
-        p.extend_from_slice(&[0u8; 2]);
-        full_box(b"mdhd", 0, 0, &p)
-    };
-
-    let hdlr = {
-        let mut p = Vec::new();
-        p.extend_from_slice(&[0u8; 4]); // pre_defined
-        p.extend_from_slice(b"vide");
-        p.extend_from_slice(&[0u8; 12]); // reserved
-        p.extend_from_slice(b"g2g\0");
-        full_box(b"hdlr", 0, 0, &p)
-    };
-
-    let sample_entry = visual_sample_entry(codec, width, height, param_sets);
-
-    let stbl = {
-        let stsd = {
-            let mut p = Vec::new();
-            p.extend_from_slice(&1u32.to_be_bytes()); // entry count
-            p.extend_from_slice(&sample_entry);
-            full_box(b"stsd", 0, 0, &p)
-        };
-        let empty4 = 0u32.to_be_bytes();
-        let stts = full_box(b"stts", 0, 0, &empty4);
-        let stsc = full_box(b"stsc", 0, 0, &empty4);
-        let stsz = full_box(b"stsz", 0, 0, &[0u8; 8]); // sample size + count
-        let stco = full_box(b"stco", 0, 0, &empty4);
-        mp4_box(b"stbl", &[stsd, stts, stsc, stsz, stco].concat())
-    };
-
-    let minf = {
-        let vmhd = full_box(b"vmhd", 0, 1, &[0u8; 8]);
-        let dref = {
-            let url = full_box(b"url ", 0, 1, &[]); // self-contained
-            let mut p = Vec::new();
-            p.extend_from_slice(&1u32.to_be_bytes());
-            p.extend_from_slice(&url);
-            full_box(b"dref", 0, 0, &p)
-        };
-        let dinf = mp4_box(b"dinf", &dref);
-        mp4_box(b"minf", &[vmhd, dinf, stbl].concat())
-    };
-
-    let mdia = mp4_box(b"mdia", &[mdhd, hdlr, minf].concat());
-    let trak = mp4_box(b"trak", &[tkhd, mdia].concat());
-
-    let mvex = {
-        let mut p = Vec::new();
-        p.extend_from_slice(&1u32.to_be_bytes()); // track id
-        p.extend_from_slice(&1u32.to_be_bytes()); // default sample description
-        p.extend_from_slice(&[0u8; 12]); // default duration/size/flags
-        let trex = full_box(b"trex", 0, 0, &p);
-        mp4_box(b"mvex", &trex)
-    };
-
-    // Optional iTunes-style metadata after the track boxes.
-    let udta = udta_with_tags(tags, chapters).unwrap_or_default();
-    mp4_box(b"moov", &[mvhd, trak, mvex, udta].concat())
-}
 
 /// The visual sample entry for the track: `avc1`+`avcC` for H.264,
 /// `hvc1`+`hvcC` for H.265. `param_sets` is the ordered set the moov needs
@@ -580,62 +483,6 @@ pub(crate) fn av1c_record(seq: &crate::av1parse::Av1SeqHeader, seq_obu: &[u8]) -
     p
 }
 
-/// A fragment's `tfhd`. Sample data always follows the `moof`
-/// (`default-base-is-moof`, base_data_offset absent), which is what CMAF requires
-/// of every track fragment. In CMAF mode the sample description index is stated
-/// rather than inherited from the `trex`, so a fragment describes itself.
-pub(crate) fn tfhd(track_id: u32, cmaf: bool) -> Vec<u8> {
-    let mut p = track_id.to_be_bytes().to_vec();
-    if !cmaf {
-        return full_box(b"tfhd", 0, 0x020000, &p);
-    }
-    p.extend_from_slice(&1u32.to_be_bytes()); // sample_description_index
-    full_box(b"tfhd", 0, 0x020002, &p)
-}
-
-/// One `moof`+`mdat` fragment holding `samples` (one or many): a `trun` with a
-/// per-sample (duration, size, flags) entry and a single `mdat` of the samples
-/// concatenated in order. A one-element slice is the per-AU fragment.
-fn fragment(
-    sequence: u64,
-    decode_time: u64,
-    cmaf: bool,
-    samples: &[(u32, &[u8], bool)],
-) -> Vec<u8> {
-    let build_moof = |data_offset: u32| -> Vec<u8> {
-        let mfhd = full_box(b"mfhd", 0, 0, &(sequence as u32).to_be_bytes());
-        let tfhd = tfhd(1, cmaf);
-        let tfdt = full_box(b"tfdt", 1, 0, &decode_time.to_be_bytes());
-        let trun = {
-            let mut p = Vec::new();
-            p.extend_from_slice(&(samples.len() as u32).to_be_bytes()); // sample count
-            p.extend_from_slice(&data_offset.to_be_bytes());
-            for (duration, data, is_sync) in samples {
-                // I-frame: depends on nothing; otherwise depends-on + non-sync.
-                let sample_flags: u32 = if *is_sync { 0x0200_0000 } else { 0x0101_0000 };
-                p.extend_from_slice(&duration.to_be_bytes());
-                p.extend_from_slice(&(data.len() as u32).to_be_bytes());
-                p.extend_from_slice(&sample_flags.to_be_bytes());
-            }
-            // data-offset | duration | size | flags present
-            full_box(b"trun", 0, 0x000701, &p)
-        };
-        let traf = mp4_box(b"traf", &[tfhd, tfdt, trun].concat());
-        mp4_box(b"moof", &[mfhd, traf].concat())
-    };
-
-    // the trun data offset points past the moof and the mdat header, both
-    // size-stable, so one rebuild with the measured size is exact.
-    let moof_len = build_moof(0).len() as u32;
-    let moof = build_moof(moof_len + 8);
-    let mdat_payload: Vec<u8> = samples
-        .iter()
-        .flat_map(|(_, data, _)| data.iter().copied())
-        .collect();
-    let mdat = mp4_box(b"mdat", &mdat_payload);
-    [moof, mdat].concat()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -708,12 +555,6 @@ mod tests {
             avcc_sample(&nalus),
             vec![0, 0, 0, 2, 0x67, 1, 0, 0, 0, 2, 0x65, 3]
         );
-    }
-
-    #[test]
-    fn ns_to_timescale_is_90khz() {
-        assert_eq!(ns_to_timescale(1_000_000_000), 90_000);
-        assert_eq!(ns_to_timescale(33_333_333), 2999);
     }
 
     #[test]
@@ -807,20 +648,5 @@ mod tests {
         assert_eq!(count(b"prft"), 3, "a prft ahead of every fragment");
         let p = out.windows(4).position(|w| w == b"prft").unwrap() + 4;
         assert_eq!(&out[p + 8..p + 16], &NTP.to_be_bytes());
-    }
-
-    #[test]
-    fn trun_data_offset_points_at_the_mdat_payload() {
-        let frag = fragment(1, 0, false, &[(3000, &[9, 9, 9, 9], true)]);
-        // moof size from its own header
-        let moof_len = u32::from_be_bytes(frag[..4].try_into().unwrap()) as usize;
-        // mdat payload begins after the mdat 8-byte header
-        let payload_at = moof_len + 8;
-        assert_eq!(&frag[payload_at..payload_at + 4], &[9, 9, 9, 9]);
-        // the trun's data_offset (relative to moof start) must equal that.
-        // locate trun: search for the fourcc and read its data_offset field.
-        let pos = frag.windows(4).position(|w| w == b"trun").unwrap();
-        let data_offset = u32::from_be_bytes(frag[pos + 12..pos + 16].try_into().unwrap()) as usize;
-        assert_eq!(data_offset, payload_at);
     }
 }
