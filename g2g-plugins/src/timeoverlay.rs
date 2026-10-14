@@ -45,7 +45,7 @@ use g2g_core::{
 };
 
 use crate::bitmapfont::{glyph, GLYPH_ADVANCE, GLYPH_HEIGHT};
-use crate::paint::blend_px;
+use crate::paint::Canvas;
 use crate::xmlutil::{civil_signed, days_from_civil};
 
 const FORMATS: [RawVideoFormat; 2] = [RawVideoFormat::Rgba8, RawVideoFormat::Bgra8];
@@ -927,65 +927,17 @@ pub(crate) fn draw_text(buf: &mut [u8], w: usize, h: usize, text: &str, style: &
         VAlign::Bottom => hi - box_h - ypad,
     };
 
-    let dims = (w, h);
+    let mut canvas = Canvas {
+        pixels: buf,
+        width: wi,
+        height: hi,
+    };
     if style.shaded {
-        fill_rect(buf, dims, box_x, box_y, box_w, box_h, [0, 0, 0, 160]);
+        canvas.fill_rect(box_x, box_y, box_w, box_h, [0, 0, 0, 160]);
     }
     for (i, c) in text.chars().enumerate() {
         let gx = box_x + inner + i as i32 * cell_w;
-        blit_glyph(buf, dims, gx, box_y + inner, scale, glyph(c), style.color);
-    }
-}
-
-fn fill_rect(
-    buf: &mut [u8],
-    dims: (usize, usize),
-    x: i32,
-    y: i32,
-    rw: i32,
-    rh: i32,
-    color: [u8; 4],
-) {
-    let (wi, hi) = (dims.0 as i32, dims.1 as i32);
-    for py in y..y + rh {
-        if py < 0 || py >= hi {
-            continue;
-        }
-        for px in x..x + rw {
-            if px < 0 || px >= wi {
-                continue;
-            }
-            blend_px(buf, ((py * wi + px) * 4) as usize, color, 255);
-        }
-    }
-}
-
-fn blit_glyph(
-    buf: &mut [u8],
-    dims: (usize, usize),
-    gx: i32,
-    gy: i32,
-    scale: i32,
-    rows: [u8; 8],
-    color: [u8; 4],
-) {
-    for (ry, bits) in rows.iter().enumerate() {
-        if *bits == 0 {
-            continue;
-        }
-        for col in 0..8i32 {
-            if bits & (0x80 >> col) != 0 {
-                fill_rect(
-                    buf,
-                    dims,
-                    gx + col * scale,
-                    gy + ry as i32 * scale,
-                    scale,
-                    scale,
-                    color,
-                );
-            }
-        }
+        canvas.blit_glyph(gx, box_y + inner, scale, glyph(c), style.color);
     }
 }
 

@@ -49,19 +49,28 @@ pub(crate) struct Canvas<'a> {
 impl Canvas<'_> {
     /// Source-over blend a filled rectangle, clipped to the canvas.
     pub(crate) fn fill_rect(&mut self, x: i32, y: i32, rw: i32, rh: i32, color: [u8; 4]) {
-        for py in y..y + rh {
-            if py < 0 || py >= self.height {
-                continue;
-            }
-            for px in x..x + rw {
-                if px < 0 || px >= self.width {
-                    continue;
-                }
+        self.fill_rect_alpha(x, y, rw, rh, color, u8::MAX);
+    }
+
+    /// [`fill_rect`](Self::fill_rect) with the colour's alpha scaled by
+    /// `galpha` (0..=255).
+    pub(crate) fn fill_rect_alpha(
+        &mut self,
+        x: i32,
+        y: i32,
+        rw: i32,
+        rh: i32,
+        color: [u8; 4],
+        galpha: u8,
+    ) {
+        let columns = x.max(0)..(x + rw).min(self.width);
+        for py in y.max(0)..(y + rh).min(self.height) {
+            for px in columns.clone() {
                 blend_px(
                     self.pixels,
                     ((py * self.width + px) * 4) as usize,
                     color,
-                    255,
+                    galpha,
                 );
             }
         }
@@ -136,6 +145,21 @@ pub(crate) fn ycbcr_to_rgb(y: u8, cr: u8, cb: u8, matrix: YcbcrMatrix) -> (u8, u
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_rect_hanging_off_the_corner_paints_only_inside() {
+        const SIDE: i32 = 3;
+        const INK: [u8; 4] = [9, 9, 9, 255];
+        let mut pixels = [0u8; (SIDE * SIDE * 4) as usize];
+        let mut canvas = Canvas {
+            pixels: &mut pixels,
+            width: SIDE,
+            height: SIDE,
+        };
+        canvas.fill_rect(-1, -1, 2, 2, INK);
+        assert_eq!(pixels[..4], INK);
+        assert!(pixels[4..].iter().all(|&byte| byte == 0));
+    }
 
     #[test]
     fn opaque_source_overwrites() {

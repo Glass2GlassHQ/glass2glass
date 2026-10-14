@@ -45,7 +45,6 @@ Codecs and parsers:
 
 Raw video and GPU:
 
-- `timeoverlay` and `analyticsoverlay` copy `paint::Canvas` blending.
 - `wgpusink` and `wgpucompositor` hand-write readback.
 
 Audio:

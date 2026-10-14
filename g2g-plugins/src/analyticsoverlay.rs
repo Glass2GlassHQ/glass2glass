@@ -419,20 +419,14 @@ impl AnalyticsOverlay {
 
     /// Blend one square of the stroke, `thickness` wide, clipped to the canvas.
     fn trail_dot(&self, buf: &mut [u8], x: i32, y: i32, color: [u8; 4], alpha: u8) {
-        let w = self.width as i32;
-        let h = self.height as i32;
         let half = self.thickness as i32 / 2;
-        for py in y - half..=y + half {
-            if py < 0 || py >= h {
-                continue;
-            }
-            for px in x - half..=x + half {
-                if px < 0 || px >= w {
-                    continue;
-                }
-                blend_px(buf, ((py * w + px) * 4) as usize, color, alpha);
-            }
-        }
+        let side = 2 * half + 1;
+        let mut canvas = Canvas {
+            pixels: buf,
+            width: self.width as i32,
+            height: self.height as i32,
+        };
+        canvas.fill_rect_alpha(x - half, y - half, side, side, color, alpha);
     }
 
     /// The caption for one detection, or `None` when neither part is enabled (or
