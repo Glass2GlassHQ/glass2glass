@@ -38,12 +38,6 @@ Bugs:
   types) and M1285 (new `DynAsyncElement` provided methods).
 - `VideoTestSrc::with_shared_memory` keeps every emitted frame.
 
-Core runtime:
-
-- Shared helpers for `muxer_arm` and `muxer_arm_pts`, one port-ordering
-  function, `inspect` formatting `describe`'s `ElementDoc`, and `launch` calling
-  `maybe_prepend_parser`.
-
 Core, bindings, ML:
 
 - `TensorView::materialize` copies one element at a time.

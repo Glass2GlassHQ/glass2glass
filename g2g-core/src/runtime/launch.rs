@@ -817,18 +817,9 @@ fn autoplug_for_consumer(
     };
     let mut chain =
         registry.autoplug_avoiding(input, target, DECODEBIN_MAX_DEPTH, preferred, avoided)?;
-    // M421/M676: prepend the re-framing parser ahead of a real decode of an
-    // elementary stream, like the boxed `decodebin` splice (the caps-identity
-    // parser is invisible to the shortest-chain search, so it never appears in
-    // the chain).
-    if !chain.is_empty() {
-        if let Some(parser) = registry
-            .parser_name(input)
-            .and_then(|p| registry.make_element(p))
-        {
-            chain.insert(0, parser);
-        }
-    }
+    // M421/M676: the caps-identity parser is invisible to the shortest-chain
+    // search, so it never appears in the chain.
+    registry.maybe_prepend_parser(input, &mut chain);
     Some(chain)
 }
 

@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1326: registry `inspect` and `describe` share one lookup, and launch reuses `maybe_prepend_parser`.
 - M1325: fan-out senders are ordered by port in one function.
 - M1324: the two muxer arms share pad-admit, wake and caps-change helpers.
 - M1323: one arm planner feeds the cooperative and threaded graph runners.

@@ -488,8 +488,7 @@ mod factory {
         pub writable: bool,
     }
 
-    /// Owned [`PropertyDoc`]s from a static spec table (shared by `describe`'s
-    /// three element-kind branches).
+    /// Owned [`PropertyDoc`]s from a static spec table.
     fn property_docs(specs: &[crate::property::PropertySpec]) -> Vec<PropertyDoc> {
         specs
             .iter()
@@ -785,6 +784,21 @@ mod factory {
     }
 
     const DEMUX_INSPECT_PORTS: usize = 2;
+
+    /// One registered element's facts, as `Registry::inspect` prints them and
+    /// `Registry::describe` returns them.
+    struct ElementFacts<'r> {
+        role: &'static str,
+        experimental: bool,
+        metadata: crate::property::ElementMetadata,
+        /// Output caps text, for a source or a muxer.
+        output_caps: Option<String>,
+        /// Pad templates, for a transform or sink.
+        templates: Option<&'r [PadTemplate]>,
+        /// How a fan-in or fan-out element gets its pad count.
+        link_degree: Option<&'static str>,
+        properties: &'static [crate::property::PropertySpec],
+    }
 
     /// Format an element's pad templates the way `gst-inspect` lists them (one
     /// line per pad: direction + the caps it accepts/produces).
@@ -1859,7 +1873,7 @@ mod factory {
         /// real decode (non-empty: an already-satisfied input needs no parser).
         /// Returns the launch name of the parser it prepended, so a caller with
         /// [`AutoplugParams`] can address it like any other auto-plugged element.
-        fn maybe_prepend_parser(
+        pub(crate) fn maybe_prepend_parser(
             &self,
             input: &Caps,
             elements: &mut Vec<Box<dyn DynAsyncElement>>,
@@ -2154,148 +2168,111 @@ mod factory {
             lines
         }
 
+        /// What [`inspect`](Self::inspect) and [`describe`](Self::describe)
+        /// report about the named element, `None` if it is not registered. The
+        /// element is default-built to read its property table (the specs are
+        /// `&'static`, behind an instance method), so building must be
+        /// side-effect-free, as the in-tree constructors are.
+        fn element_facts(&self, name: &str) -> Option<ElementFacts<'_>> {
+            if let Some(s) = self.sources.iter().find(|s| s.name == name) {
+                let src = (s.build)();
+                return Some(ElementFacts {
+                    role: "source",
+                    experimental: s.experimental,
+                    metadata: src.metadata(),
+                    output_caps: Some(s.outputs_text()),
+                    templates: None,
+                    link_degree: None,
+                    properties: src.properties(),
+                });
+            }
+            if let Some(f) = self.launch.iter().find(|f| f.name == name) {
+                let el = (f.build)();
+                return Some(ElementFacts {
+                    role: "element",
+                    experimental: f.experimental,
+                    metadata: el.metadata(),
+                    output_caps: None,
+                    templates: Some(f.templates.as_slice()),
+                    link_degree: None,
+                    properties: el.properties(),
+                });
+            }
+            if let Some(m) = self.muxers.iter().find(|m| m.name == name) {
+                // A one-input instance: the real input count is derived from link
+                // degree at parse, not needed here.
+                let mux = (m.build)(1);
+                return Some(ElementFacts {
+                    role: "muxer (fan-in)",
+                    experimental: false,
+                    metadata: mux.metadata(),
+                    output_caps: mux.output_caps().ok().map(|caps| format!("{caps:?}")),
+                    templates: None,
+                    link_degree: Some("Inputs: derived from link degree"),
+                    properties: mux.properties(),
+                });
+            }
+            let d = self.demuxes.iter().find(|d| d.name == name)?;
+            let demux = (d.build)(DEMUX_INSPECT_PORTS);
+            Some(ElementFacts {
+                role: "demuxer (fan-out)",
+                experimental: false,
+                metadata: demux.metadata(),
+                output_caps: None,
+                templates: None,
+                link_degree: Some("Outputs: derived from link degree"),
+                properties: demux.properties(),
+            })
+        }
+
         /// A `gst-inspect`-style dump for the named element: its role, its
         /// settable properties, and (for a transform / sink) its pad templates.
-        /// `None` if the name is not registered. The element is default-built to
-        /// read its property table (the specs are `&'static`, behind an instance
-        /// method), so building must be side-effect-free, as the in-tree
-        /// constructors are.
+        /// `None` if the name is not registered.
         pub fn inspect(&self, name: &str) -> Option<String> {
             use crate::property::format_metadata;
             use core::fmt::Write;
-            let mut out = String::new();
-            if let Some(s) = self.sources.iter().find(|s| s.name == name) {
-                let src = (s.build)();
-                out.push_str(&format_metadata(name, &src.metadata()));
-                let _ = writeln!(out, "  Role        source");
-                if s.experimental {
-                    let _ = writeln!(out, "  Stability   experimental");
-                }
-                let _ = writeln!(out, "\nOutput caps:\n  {}", s.outputs_text());
-                let _ = write!(
-                    out,
-                    "\nElement Properties:\n{}",
-                    format_specs(src.properties())
-                );
-                Some(out)
-            } else if let Some(f) = self.launch.iter().find(|f| f.name == name) {
-                let el = (f.build)();
-                out.push_str(&format_metadata(name, &el.metadata()));
-                let _ = writeln!(out, "  Role        element");
-                if f.experimental {
-                    let _ = writeln!(out, "  Stability   experimental");
-                }
-                let _ = write!(out, "\nPad Templates:\n{}", format_templates(&f.templates));
-                let _ = write!(
-                    out,
-                    "\nElement Properties:\n{}",
-                    format_specs(el.properties())
-                );
-                Some(out)
-            } else if let Some(m) = self.muxers.iter().find(|m| m.name == name) {
-                // Build a one-input instance to read its metadata / properties (the
-                // specs are `&'static`, behind instance methods); the fan-in
-                // constructors are side-effect-free, so this is safe. The real input
-                // count is derived from link degree at parse, not needed here.
-                let mux = (m.build)(1);
-                out.push_str(&format_metadata(name, &mux.metadata()));
-                let _ = writeln!(out, "  Role        muxer (fan-in)");
-                if let Ok(caps) = mux.output_caps() {
-                    let _ = writeln!(out, "\nOutput caps:\n  {caps:?}");
-                }
-                let _ = writeln!(out, "\nInputs: derived from link degree");
-                let _ = write!(
-                    out,
-                    "\nElement Properties:\n{}",
-                    format_specs(mux.properties())
-                );
-                Some(out)
-            } else if let Some(d) = self.demuxes.iter().find(|d| d.name == name) {
-                let demux = (d.build)(DEMUX_INSPECT_PORTS);
-                out.push_str(&format_metadata(name, &demux.metadata()));
-                let _ = writeln!(out, "  Role        demuxer (fan-out)");
-                let _ = writeln!(out, "\nOutputs: derived from link degree");
-                let _ = write!(
-                    out,
-                    "\nElement Properties:\n{}",
-                    format_specs(demux.properties())
-                );
-                Some(out)
-            } else {
-                None
+            let facts = self.element_facts(name)?;
+            let mut out = format_metadata(name, &facts.metadata);
+            let _ = writeln!(out, "  Role        {}", facts.role);
+            if facts.experimental {
+                let _ = writeln!(out, "  Stability   experimental");
             }
+            if let Some(caps) = &facts.output_caps {
+                let _ = writeln!(out, "\nOutput caps:\n  {caps}");
+            }
+            if let Some(templates) = facts.templates {
+                let _ = write!(out, "\nPad Templates:\n{}", format_templates(templates));
+            }
+            if let Some(line) = facts.link_degree {
+                let _ = writeln!(out, "\n{line}");
+            }
+            let _ = write!(
+                out,
+                "\nElement Properties:\n{}",
+                format_specs(facts.properties)
+            );
+            Some(out)
         }
 
         /// Structured introspection: the same facts [`inspect`](Self::inspect)
         /// dumps as text, returned as an [`ElementDoc`] for tooling to render
         /// (e.g. the searchable element reference the docs site is generated from).
-        /// `None` if the name is not registered. Like `inspect`, it default-builds
-        /// the element to read its `&'static` metadata / property table, so the
-        /// in-tree constructors must be side-effect-free.
+        /// `None` if the name is not registered.
         pub fn describe(&self, name: &str) -> Option<ElementDoc> {
-            if let Some(s) = self.sources.iter().find(|s| s.name == name) {
-                let src = (s.build)();
-                let m = src.metadata();
-                Some(ElementDoc {
-                    name: name.to_string(),
-                    long_name: m.long_name.to_string(),
-                    klass: m.klass.to_string(),
-                    description: m.description.to_string(),
-                    author: m.author.to_string(),
-                    role: "source".to_string(),
-                    experimental: s.experimental,
-                    caps: Some(s.outputs_text()),
-                    pads: Vec::new(),
-                    properties: property_docs(src.properties()),
-                })
-            } else if let Some(f) = self.launch.iter().find(|f| f.name == name) {
-                let el = (f.build)();
-                let m = el.metadata();
-                Some(ElementDoc {
-                    name: name.to_string(),
-                    long_name: m.long_name.to_string(),
-                    klass: m.klass.to_string(),
-                    description: m.description.to_string(),
-                    author: m.author.to_string(),
-                    role: "element".to_string(),
-                    experimental: f.experimental,
-                    caps: None,
-                    pads: pad_docs(&f.templates),
-                    properties: property_docs(el.properties()),
-                })
-            } else if let Some(mx) = self.muxers.iter().find(|m| m.name == name) {
-                let mux = (mx.build)(1);
-                let m = mux.metadata();
-                Some(ElementDoc {
-                    name: name.to_string(),
-                    long_name: m.long_name.to_string(),
-                    klass: m.klass.to_string(),
-                    description: m.description.to_string(),
-                    author: m.author.to_string(),
-                    role: "muxer (fan-in)".to_string(),
-                    experimental: false,
-                    caps: mux.output_caps().ok().map(|c| format!("{c:?}")),
-                    pads: Vec::new(),
-                    properties: property_docs(mux.properties()),
-                })
-            } else if let Some(d) = self.demuxes.iter().find(|d| d.name == name) {
-                let demux = (d.build)(DEMUX_INSPECT_PORTS);
-                let m = demux.metadata();
-                Some(ElementDoc {
-                    name: name.to_string(),
-                    long_name: m.long_name.to_string(),
-                    klass: m.klass.to_string(),
-                    description: m.description.to_string(),
-                    author: m.author.to_string(),
-                    role: "demuxer (fan-out)".to_string(),
-                    experimental: false,
-                    caps: None,
-                    pads: Vec::new(),
-                    properties: property_docs(demux.properties()),
-                })
-            } else {
-                None
-            }
+            let facts = self.element_facts(name)?;
+            let m = facts.metadata;
+            Some(ElementDoc {
+                name: name.to_string(),
+                long_name: m.long_name.to_string(),
+                klass: m.klass.to_string(),
+                description: m.description.to_string(),
+                author: m.author.to_string(),
+                role: facts.role.to_string(),
+                experimental: facts.experimental,
+                caps: facts.output_caps,
+                pads: facts.templates.map(pad_docs).unwrap_or_default(),
+                properties: property_docs(facts.properties),
+            })
         }
 
         /// Every registered element as an [`ElementDoc`], in the same order as
