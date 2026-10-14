@@ -31,6 +31,7 @@ use alloc::boxed::Box;
 use alloc::format;
 use alloc::vec::Vec;
 
+use g2g_core::caps::{framerate_q16_from_fraction, framerate_q16_to_fraction};
 use g2g_core::frame::Frame;
 use g2g_core::log::{short_type_name, LogSource};
 use g2g_core::memory::SystemSlice;
@@ -39,8 +40,6 @@ use g2g_core::{
     Dim, ElementMetadata, FrameTiming, G2gError, Interlace, MemoryDomain, OutputSink, PadTemplate,
     PadTemplates, PipelinePacket, Rate, RawVideoFormat,
 };
-
-use crate::videorate::rate_fraction;
 
 /// Signature every y4m stream opens with, the separating space included so a
 /// file that merely starts with the word does not match.
@@ -137,10 +136,15 @@ impl StreamHeader {
             format: self.format,
             width: Dim::Fixed(self.width),
             height: Dim::Fixed(self.height),
-            framerate: Rate::Fixed(rate_q16(self.framerate_num, self.framerate_den)),
+            framerate: Rate::Fixed(self.framerate_q16()),
             interlace: self.interlace,
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
         }
+    }
+
+    fn framerate_q16(&self) -> u32 {
+        framerate_q16_from_fraction(self.framerate_num, self.framerate_den)
+            .expect("every StreamHeader is built with a rate that fits Q16")
     }
 
     /// One frame's presentation span, taken from the header's own fraction
@@ -148,12 +152,6 @@ impl StreamHeader {
     fn frame_period_ns(&self) -> u64 {
         1_000_000_000u64 * self.framerate_den as u64 / self.framerate_num as u64
     }
-}
-
-/// A `num/den` framerate as the Q16 fixed-point fps [`Rate`] carries. The caller
-/// has already bounded both, so the quotient fits.
-fn rate_q16(num: u32, den: u32) -> u32 {
-    (((num as u64) << 16) / den as u64) as u32
 }
 
 /// Read a `YUV4MPEG2 ...` header line (no trailing newline).
@@ -194,7 +192,7 @@ fn parse_stream_header(line: &[u8]) -> Result<StreamHeader, G2gError> {
     if width == 0 || height == 0 || width > MAX_DIMENSION || height > MAX_DIMENSION {
         return Err(G2gError::CapsMismatch);
     }
-    if ((framerate_num as u64) << 16) / framerate_den as u64 > u32::MAX as u64 {
+    if framerate_q16_from_fraction(framerate_num, framerate_den).is_none() {
         return Err(G2gError::CapsMismatch);
     }
     let frame_bytes = format
@@ -484,7 +482,7 @@ fn stream_header(
     interlace: Interlace,
 ) -> Option<Vec<u8>> {
     let colourspace = format_colourspace(format)?;
-    let (num, den) = rate_fraction(framerate_q16);
+    let (num, den) = framerate_q16_to_fraction(framerate_q16);
     let scan = match interlace {
         Interlace::Interleaved => 't',
         Interlace::Any | Interlace::Progressive => 'p',
@@ -604,7 +602,7 @@ impl AsyncElement for Y4mEnc {
             .unpadded_frame_bytes(*width, *height)
             .filter(|bytes| *bytes > 0 && *bytes <= MAX_FRAME_BYTES as u64)
             .ok_or(G2gError::CapsMismatch)? as usize;
-        let (framerate_num, framerate_den) = rate_fraction(*framerate_q16);
+        let (framerate_num, framerate_den) = framerate_q16_to_fraction(*framerate_q16);
         self.input = Some(StreamHeader {
             format: *format,
             width: *width,
@@ -645,7 +643,7 @@ impl AsyncElement for Y4mEnc {
                             header.format,
                             header.width,
                             header.height,
-                            rate_q16(header.framerate_num, header.framerate_den),
+                            header.framerate_q16(),
                             header.interlace,
                         )
                         .ok_or(G2gError::CapsMismatch)?;
@@ -905,9 +903,6 @@ mod tests {
         );
         let parsed = parse_stream_header(&header[..header.len() - 1]).expect("its own header");
         assert_eq!(parsed.interlace, Interlace::Interleaved);
-        assert_eq!(
-            rate_q16(parsed.framerate_num, parsed.framerate_den),
-            ntsc_q16
-        );
+        assert_eq!(parsed.framerate_q16(), ntsc_q16);
     }
 }

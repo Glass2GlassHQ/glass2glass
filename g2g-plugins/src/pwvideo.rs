@@ -17,6 +17,7 @@ use spa::pod::serialize::PodSerializer;
 use spa::pod::{object, property, ChoiceValue, Property, Value};
 use spa::utils::{Choice, ChoiceEnum, ChoiceFlags, Fraction, Id, Rectangle, SpaTypes};
 
+use g2g_core::caps::framerate_q16_from_fraction;
 use g2g_core::{Dim, G2gError, Rate, RawVideoFormat};
 
 /// The raw formats the capture element handles, in preference order. The
@@ -131,7 +132,7 @@ pub(crate) fn rate_q16(num: u32, denom: u32) -> u32 {
     if denom == 0 {
         return 0;
     }
-    u32::try_from((u64::from(num) << 16) / u64::from(denom)).unwrap_or(u32::MAX)
+    framerate_q16_from_fraction(num, denom).unwrap_or(u32::MAX)
 }
 
 /// Which formats a connect pod offers behind its preferred one.

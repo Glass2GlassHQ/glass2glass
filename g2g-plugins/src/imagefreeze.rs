@@ -21,6 +21,7 @@ use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
 
+use g2g_core::caps::framerate_q16_from_fraction;
 use g2g_core::frame::Frame;
 use g2g_core::{
     AsyncElement, Caps, CapsConstraint, CapsTransform, ConfigureOutcome, Dim, ElementMetadata,
@@ -99,7 +100,7 @@ impl ImageFreeze {
         if denominator == 0 {
             return 0;
         }
-        u32::try_from((u64::from(numerator) << 16) / u64::from(denominator)).unwrap_or(u32::MAX)
+        framerate_q16_from_fraction(numerator, denominator).unwrap_or(u32::MAX)
     }
 
     fn accept_input(&self, caps: &Caps) -> Result<(RawVideoFormat, u32, u32), G2gError> {

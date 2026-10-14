@@ -9,6 +9,7 @@ use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 
+use g2g_core::caps::framerate_q16_from_fraction;
 use g2g_core::frame::Frame;
 use g2g_core::memory::{SystemSlice, SystemView};
 use g2g_core::runtime::SourceLoop;
@@ -461,8 +462,8 @@ impl SourceLoop for VideoTestSrc {
                 if n < 0 || d <= 0 {
                     return Err(PropError::Value);
                 }
-                // Store fps as Q16: (n/d) << 16.
-                self.framerate_q16 = (((n as u64) << 16) / d as u64) as u32;
+                self.framerate_q16 =
+                    framerate_q16_from_fraction(n as u32, d as u32).ok_or(PropError::Value)?;
                 self.framerate_pinned = true;
                 Ok(())
             }

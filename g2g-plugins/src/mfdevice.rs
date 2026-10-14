@@ -26,6 +26,7 @@ use std::sync::mpsc as std_mpsc;
 use std::thread;
 use std::time::Duration;
 
+use g2g_core::caps::framerate_q16_from_fraction;
 use g2g_core::runtime::{Device, DeviceProvider};
 use g2g_core::{Caps, CapsSet, Dim, G2gError, HardwareError, Interlace, Rate};
 
@@ -142,10 +143,10 @@ fn mode_caps(modes: &[VideoConfig]) -> CapsSet {
 
 /// An MF `num/den` frame rate as Q16 fps, the repo's rate encoding.
 fn rate_q16(num: u32, den: u32) -> Option<u32> {
-    if num == 0 || den == 0 {
+    if num == 0 {
         return None;
     }
-    u32::try_from(((num as u64) << 16) / den as u64).ok()
+    framerate_q16_from_fraction(num, den)
 }
 
 #[cfg(test)]

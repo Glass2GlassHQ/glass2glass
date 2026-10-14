@@ -23,6 +23,7 @@ use alloc::string::String;
 use std::fs::File;
 use std::io::Read;
 
+use g2g_core::caps::framerate_q16_from_fraction;
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::runtime::SourceLoop;
@@ -109,10 +110,7 @@ impl MultiFileSrc {
     /// the files are unstamped.
     fn rate_q16(&self) -> Option<u32> {
         let (numerator, denominator) = self.framerate?;
-        if denominator == 0 {
-            return None;
-        }
-        u32::try_from((u64::from(numerator) << 16) / u64::from(denominator)).ok()
+        framerate_q16_from_fraction(numerator, denominator)
     }
 
     /// The declared output caps: the sequence's media type, at the stated rate

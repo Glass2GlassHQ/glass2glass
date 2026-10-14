@@ -28,6 +28,7 @@ use alloc::vec::Vec;
 /// against (the same bound `PlaneLayout` carries).
 const MAX_PLANES: usize = 4;
 
+use g2g_core::caps::framerate_q16_from_fraction;
 use g2g_core::frame::Frame;
 use g2g_core::log::{short_type_name, LogName, LogSource};
 use g2g_core::memory::SystemSlice;
@@ -209,7 +210,7 @@ impl RawVideoParse {
         if denominator == 0 {
             return 0;
         }
-        u32::try_from((u64::from(numerator) << 16) / u64::from(denominator)).unwrap_or(u32::MAX)
+        framerate_q16_from_fraction(numerator, denominator).unwrap_or(u32::MAX)
     }
 
     /// Bytes of pixels in one frame, `None` for a format / geometry pair with no

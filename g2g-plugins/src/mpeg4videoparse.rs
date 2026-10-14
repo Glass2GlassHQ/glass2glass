@@ -15,6 +15,7 @@
 
 use alloc::vec::Vec;
 
+use g2g_core::caps::framerate_q16_from_fraction;
 use g2g_core::{PropertySpec, VideoCodec};
 
 use crate::access_unit::StartCodeRole;
@@ -160,7 +161,7 @@ fn parse_video_object_layer(payload: &[u8]) -> Option<VideoGeometry> {
             return None;
         }
         let increment = bits.read_bits(time_increment_bits(vop_time_increment_resolution))?;
-        fixed_vop_rate_q16(vop_time_increment_resolution, increment)
+        framerate_q16_from_fraction(vop_time_increment_resolution, increment)
     } else {
         None
     };
@@ -191,15 +192,6 @@ fn time_increment_bits(resolution: u32) -> u32 {
         0 | 1 => 1,
         r => 32 - (r - 1).leading_zeros(),
     }
-}
-
-/// Q16 frames per second from `vop_time_increment_resolution` ticks per second
-/// and the `fixed_vop_time_increment` ticks each VOP lasts.
-fn fixed_vop_rate_q16(resolution: u32, increment: u32) -> Option<u32> {
-    if increment == 0 {
-        return None;
-    }
-    u32::try_from(((resolution as u64) << 16) / increment as u64).ok()
 }
 
 /// Fuzzing entry: parse an MPEG-4 Part 2 VOL header out of an access unit.

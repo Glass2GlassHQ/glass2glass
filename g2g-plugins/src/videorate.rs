@@ -24,6 +24,9 @@ use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
 
+use g2g_core::caps::{
+    framerate_q16_from_fraction, framerate_q16_period_ns, framerate_q16_to_fraction,
+};
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
@@ -79,11 +82,7 @@ impl VideoRate {
         } else {
             0
         };
-        let dt_ns = if rate_q16 > 0 {
-            (1_000_000_000u64 << 16) / rate_q16 as u64
-        } else {
-            0
-        };
+        let dt_ns = framerate_q16_period_ns(rate_q16).unwrap_or(0);
         Self {
             rate_q16,
             dt_ns,
@@ -117,11 +116,7 @@ impl VideoRate {
     /// Set the effective target framerate (Q16 fps) and matching frame interval.
     fn set_rate_q16(&mut self, rate_q16: u32) {
         self.rate_q16 = rate_q16;
-        self.dt_ns = if rate_q16 > 0 {
-            (1_000_000_000u64 << 16) / rate_q16 as u64
-        } else {
-            0
-        };
+        self.dt_ns = framerate_q16_period_ns(rate_q16).unwrap_or(0);
     }
 
     fn accept_input(&self, caps: &Caps) -> Result<(RawVideoFormat, u32, u32), G2gError> {
@@ -414,7 +409,9 @@ impl AsyncElement for VideoRate {
                 }
                 // An explicit framerate property overrides caps-driven mode.
                 self.auto = false;
-                self.set_rate_q16((((n as u64) << 16) / d as u64) as u32);
+                let rate_q16 =
+                    framerate_q16_from_fraction(n as u32, d as u32).ok_or(PropError::Value)?;
+                self.set_rate_q16(rate_q16);
                 Ok(())
             }
             _ => Err(PropError::Unknown),
@@ -426,30 +423,12 @@ impl AsyncElement for VideoRate {
             // Report the stored Q16 rate as a reduced fraction, not the floored
             // integer, so a fractional target (e.g. 30000/1001) round-trips.
             "framerate" => {
-                let (num, den) = rate_fraction(self.rate_q16);
+                let (num, den) = framerate_q16_to_fraction(self.rate_q16);
                 Some(PropValue::Fraction(num as i32, den as i32))
             }
             _ => None,
         }
     }
-}
-
-/// A Q16 fixed-point framerate as the `num/den` fraction it stands for, reduced
-/// by the gcd: the raw ratio is `q16 / 65536`. A whole-number fps comes back as
-/// `fps/1`; a rate that was not exactly representable in Q16 (30000/1001) comes
-/// back as the Q16 value over 65536, not as the fraction it was built from.
-pub(crate) fn rate_fraction(rate_q16: u32) -> (u32, u32) {
-    let divisor = gcd(rate_q16, 1 << 16).max(1);
-    (rate_q16 / divisor, (1u32 << 16) / divisor)
-}
-
-fn gcd(mut a: u32, mut b: u32) -> u32 {
-    while b != 0 {
-        let t = a % b;
-        a = b;
-        b = t;
-    }
-    a
 }
 
 /// `VideoRate`'s settable properties (M104).

@@ -23,6 +23,7 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
+use g2g_core::caps::framerate_q16_from_fraction;
 use g2g_core::runtime::{Device, DeviceProvider};
 use g2g_core::{Caps, CapsSet, Dim, G2gError, Rate};
 
@@ -389,11 +390,10 @@ fn interval_rates(intervals: &[FrameIntervalEnum]) -> Vec<Rate> {
 /// A frame interval (seconds per frame) as Q16 fps, the repo's rate encoding.
 /// `None` for a zero term or a rate too large to encode.
 fn rate_q16(interval: &Fraction) -> Option<u32> {
-    if interval.numerator == 0 || interval.denominator == 0 {
+    if interval.denominator == 0 {
         return None;
     }
-    let q16 = ((interval.denominator as u64) << 16) / interval.numerator as u64;
-    u32::try_from(q16).ok()
+    framerate_q16_from_fraction(interval.denominator, interval.numerator)
 }
 
 #[cfg(test)]

@@ -63,6 +63,7 @@ use crate::mfcommon::{
     feed_sample, make_input_sample, mf_err, mf_ticks_to_ns, output_provides_samples, pack_u32_pair,
     process_output, read_sample_bytes, sample_time_ns, send_drain_command, OutputPull,
 };
+use g2g_core::caps::framerate_q16_to_fraction;
 use g2g_core::frame::Frame;
 use g2g_core::memory::SystemSlice;
 use g2g_core::{
@@ -1010,25 +1011,12 @@ fn derive_output_caps(codec: VideoCodec, input: &Caps) -> CapsSet {
 }
 
 /// Convert a Q16 fixed-point framerate to the (numerator, denominator) ratio
-/// MF media types carry, defaulting to 30/1 when the rate is open. Q16 means
-/// the raw ratio is `q16 / 65536`, reduced here by the gcd.
+/// MF media types carry, defaulting to 30/1 when the rate is open.
 fn rate_to_ratio(rate: &Rate) -> (u32, u32) {
     match rate {
-        Rate::Fixed(q16) if *q16 > 0 => {
-            let g = gcd(*q16, 1 << 16);
-            (*q16 / g, (1u32 << 16) / g)
-        }
+        Rate::Fixed(q16) if *q16 > 0 => framerate_q16_to_fraction(*q16),
         _ => (30, 1),
     }
-}
-
-fn gcd(mut a: u32, mut b: u32) -> u32 {
-    while b != 0 {
-        let t = a % b;
-        a = b;
-        b = t;
-    }
-    a
 }
 
 /// Per-frame duration in 100-ns units for an `fps = num/den` stream.

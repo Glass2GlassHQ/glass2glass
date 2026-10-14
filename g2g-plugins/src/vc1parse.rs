@@ -22,6 +22,7 @@
 //! header instead would need the sequence header's `INTERLACE` flag, which is
 //! not in the access unit being classified.
 
+use g2g_core::caps::framerate_q16_from_fraction;
 use g2g_core::{PropertySpec, VideoCodec};
 
 use crate::access_unit::StartCodeRole;
@@ -185,14 +186,16 @@ fn table_frame_rate_q16(numerator_code: u32, denominator_code: u32) -> Option<u3
     if numerator == 0 || denominator == 0 {
         return None;
     }
-    let q16 = (((numerator as u64) * (FRAME_RATE_SCALE as u64)) << 16) / denominator as u64;
-    u32::try_from(q16).ok()
+    framerate_q16_from_fraction(numerator.checked_mul(FRAME_RATE_SCALE)?, denominator)
 }
 
 /// Q16 frames per second for an explicit `FRAMERATEEXP`.
 fn explicit_frame_rate_q16(framerate_exponent: u32) -> Option<u32> {
-    let q16 = ((framerate_exponent as u64 + 1) << 16) / FRAME_RATE_EXPLICIT_DIVISOR as u64;
-    (q16 != 0).then_some(q16 as u32)
+    framerate_q16_from_fraction(
+        framerate_exponent.checked_add(1)?,
+        FRAME_RATE_EXPLICIT_DIVISOR,
+    )
+    .filter(|q16| *q16 != 0)
 }
 
 /// Fuzzing entry: parse a VC-1 advanced-profile sequence header out of an
