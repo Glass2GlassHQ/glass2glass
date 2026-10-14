@@ -196,6 +196,9 @@ pub struct FfmpegH264Enc {
     /// The opened video encoder. Derefs to the base `Encoder` for
     /// `send_frame` / `receive_packet`.
     encoder: Option<VideoEncoder>,
+    /// The AVFrame each input is copied into, reused across frames of one
+    /// encoder session.
+    input_frame: Option<FfVideo>,
     /// Source PTS per input frame number, indexed by the frame counter we stamp
     /// as the encoder PTS. With `max_b_frames = 0` output is in order, but the
     /// map survives any reorder and recovers the original nanosecond PTS. Keyed
@@ -257,6 +260,7 @@ impl FfmpegH264Enc {
             colorimetry: Colorimetry::UNKNOWN,
             bitrate_bps: DEFAULT_BITRATE_BPS,
             encoder: None,
+            input_frame: None,
             pts_by_frameno: alloc::collections::BTreeMap::new(),
             frame_no: 0,
             emitted: 0,
@@ -396,14 +400,15 @@ impl FfmpegH264Enc {
             .open_as_with(codec, self.open_options())
             .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
         self.encoder = Some(opened);
+        self.input_frame = None;
         self.pts_by_frameno.clear();
         self.frame_no = 0;
         Ok(())
     }
 
-    /// Copy a raw access unit into a fresh AVFrame of the negotiated pixel format
-    /// (honouring the frame's plane strides), forcing an IDR if a keyframe was
-    /// requested, and drain whatever packets the encoder releases.
+    /// Copy a raw access unit into the session's AVFrame of the negotiated pixel
+    /// format (honouring the frame's plane strides), forcing an IDR if a keyframe
+    /// was requested, and drain whatever packets the encoder releases.
     fn encode(&mut self, raw: &[u8], pts_ns: u64) -> Result<Vec<(Vec<u8>, u64)>, G2gError> {
         let (w, h) = (self.width as usize, self.height as usize);
         let planes = plane_layout(self.format, w, h).ok_or(G2gError::CapsMismatch)?;
@@ -413,7 +418,14 @@ impl FfmpegH264Enc {
         }
 
         let pixel = pixel_for(self.format).ok_or(G2gError::CapsMismatch)?;
-        let mut frame = FfVideo::new(pixel, self.width, self.height);
+        let frame = self
+            .input_frame
+            .get_or_insert_with(|| FfVideo::new(pixel, self.width, self.height));
+        // SAFETY: `frame` is an allocated AVFrame we own; buffers the encoder still
+        // references from the previous frame are swapped for fresh ones first.
+        if unsafe { ffmpeg::ffi::av_frame_make_writable(frame.as_mut_ptr()) } < 0 {
+            return Err(G2gError::Hardware(HardwareError::Other));
+        }
         let mut off = 0;
         for (i, (row_bytes, rows)) in planes.iter().enumerate() {
             // Read the stride before borrowing the plane data mutably (the borrow
@@ -426,21 +438,22 @@ impl FfmpegH264Enc {
 
         let frameno = self.frame_no;
         frame.set_pts(Some(frameno));
-        if core::mem::take(&mut self.force_keyframe) {
-            // SAFETY: `frame` is a freshly allocated, writable AVFrame we own;
-            // setting the picture type to I requests an IDR on this frame. NVENC
-            // and libx264 both honour `pict_type` for forced key frames.
-            unsafe {
-                (*frame.as_mut_ptr()).pict_type = ffmpeg::ffi::AVPictureType::AV_PICTURE_TYPE_I;
-            }
-        }
+        // Picture type I requests an IDR on this frame. NVENC and libx264 both
+        // honour `pict_type` for forced key frames.
+        let pict_type = if core::mem::take(&mut self.force_keyframe) {
+            ffmpeg::ffi::AVPictureType::AV_PICTURE_TYPE_I
+        } else {
+            ffmpeg::ffi::AVPictureType::AV_PICTURE_TYPE_NONE
+        };
+        // SAFETY: `frame` is a writable AVFrame we own.
+        unsafe { (*frame.as_mut_ptr()).pict_type = pict_type };
         // pts_by_frameno is keyed by the frame counter we stamped as the PTS.
         self.pts_by_frameno.insert(frameno as u64, pts_ns);
         self.frame_no += 1;
 
         let encoder = self.encoder.as_mut().ok_or(G2gError::NotConfigured)?;
         encoder
-            .send_frame(&frame)
+            .send_frame(frame)
             .map_err(|_| G2gError::Hardware(HardwareError::Other))?;
         self.drain()
     }

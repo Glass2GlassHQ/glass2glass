@@ -878,7 +878,7 @@ impl FfmpegVideoDec {
     #[cfg(not(feature = "offload"))]
     fn feed_access_unit(
         &mut self,
-        bitstream: &[u8],
+        packet: Packet,
         pts_ns: u64,
         input: InputStamp,
         decoded: &mut Vec<DecodedPicture>,
@@ -889,7 +889,7 @@ impl FfmpegVideoDec {
             pts_to_input: &mut self.pts_to_input,
             pack_pool: &mut self.pack_pool,
         };
-        feed_access_unit_into(&mut state, &cfg, bitstream, pts_ns, input, decoded)
+        feed_access_unit_into(&mut state, &cfg, packet, pts_ns, input, decoded)
     }
 
     fn drain_frames(&mut self, decoded: &mut Vec<DecodedPicture>) -> Result<(), G2gError> {
@@ -959,12 +959,11 @@ unsafe impl Send for OffloadDecode {}
 fn feed_access_unit_into(
     state: &mut DecodeState<'_>,
     cfg: &DecodeConfig,
-    bitstream: &[u8],
+    mut packet: Packet,
     pts_ns: u64,
     input: InputStamp,
     decoded: &mut Vec<DecodedPicture>,
 ) -> Result<(), G2gError> {
-    let mut packet = Packet::copy(bitstream);
     // libavcodec uses the packet's PTS verbatim; the unit is opaque to
     // the codec layer and is echoed back on the decoded frame. We feed
     // nanoseconds straight through.
@@ -1677,7 +1676,7 @@ impl AsyncElement for FfmpegVideoDec {
                     #[cfg(feature = "offload")]
                     {
                         let cfg = self.decode_config();
-                        let bitstream: Vec<u8> = slice.to_vec();
+                        let packet = Packet::copy(slice);
                         let pts_ns = frame.timing.pts_ns;
                         let input = InputStamp {
                             arrival_ns: frame.timing.arrival_ns,
@@ -1702,7 +1701,7 @@ impl AsyncElement for FfmpegVideoDec {
                                     feed_access_unit_into(
                                         &mut state,
                                         &cfg,
-                                        &bitstream,
+                                        packet,
                                         pts_ns,
                                         input,
                                         &mut b.decoded,
@@ -1721,7 +1720,7 @@ impl AsyncElement for FfmpegVideoDec {
                     }
                     #[cfg(not(feature = "offload"))]
                     self.feed_access_unit(
-                        slice,
+                        Packet::copy(slice),
                         frame.timing.pts_ns,
                         InputStamp {
                             arrival_ns: frame.timing.arrival_ns,
