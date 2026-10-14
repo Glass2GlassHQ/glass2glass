@@ -28,12 +28,6 @@ Highest leverage first:
 
 ## Code audit: bugs, hot paths, duplication
 
-Bugs:
-
-
-Core, bindings, ML:
-
-
 Codecs and parsers:
 
 - `vulkanvideo` `submit_idr_decode_into` creates a bitstream buffer per call.
