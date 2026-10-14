@@ -40,8 +40,6 @@ Bugs:
 
 Core runtime:
 
-- Route the sink, transform and router loops in `runner.rs` and `fanin.rs` through
-  the `graph_runner` arms.
 - One arm-IO builder for `run_graph_inner` and `run_graph_threaded_inner`.
 - Shared helpers for `muxer_arm` and `muxer_arm_pts`, one port-ordering
   function, `inspect` formatting `describe`'s `ElementDoc`, and `launch` calling

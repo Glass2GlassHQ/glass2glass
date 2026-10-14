@@ -9,10 +9,10 @@ use core::future::Future;
 use core::pin::Pin;
 
 use g2g_core::element::DynAsyncElement;
-use g2g_core::runtime::{run_graph, run_source_fanout, GraphNode};
+use g2g_core::runtime::{run_fanin_sink, run_graph, run_source_fanout, DynSourceLoop, GraphNode};
 use g2g_core::{
-    AsyncElement, Caps, CapsConstraint, ConfigureOutcome, Dim, Frame, G2gError, Graph, OutputSink,
-    PipelineClock, PipelinePacket, QosMessage, Rate, RawVideoFormat, Router,
+    AsyncElement, Caps, CapsConstraint, ConfigureOutcome, Dim, Frame, G2gError, Graph, Merger,
+    OutputSink, PipelineClock, PipelinePacket, QosMessage, Rate, RawVideoFormat, Router,
 };
 use g2g_plugins::batchmux::BatchMux;
 use g2g_plugins::streamdemux::StreamDemux;
@@ -176,5 +176,25 @@ async fn the_source_skips_on_a_report_through_the_fanout_runner() {
         stats.frames_emitted < TARGET,
         "the source skipped on the report relayed past the router ({} < {TARGET})",
         stats.frames_emitted
+    );
+}
+
+#[tokio::test]
+async fn the_selected_source_skips_on_a_report_through_the_fanin_runner() {
+    let mut selected = source();
+    let mut idle = source();
+    let mut merger = Merger::new(2);
+    let mut sink = late_sink();
+    let sources: Vec<&mut dyn DynSourceLoop> = vec![&mut selected, &mut idle];
+
+    let stats = run_fanin_sink(sources, &mut merger, &mut sink, &ZeroClock, 4)
+        .await
+        .expect("fan-in runs");
+    assert!(stats.frames_consumed > 0, "frames reached the sink");
+    assert!(
+        stats.frames_emitted < 2 * TARGET,
+        "the selected source skipped on the report relayed past the merger ({} < {})",
+        stats.frames_emitted,
+        2 * TARGET
     );
 }

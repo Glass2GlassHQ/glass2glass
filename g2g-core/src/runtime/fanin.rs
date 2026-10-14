@@ -41,7 +41,7 @@ use crate::runtime::channel::{
     bounded, packet_bytes, ProbeAction, ProbeSlot, Receiver, SendError, Sender, SenderSink,
 };
 use crate::runtime::coordinator::log_caps_rejected;
-use crate::runtime::graph_runner::{run_graph_inner, GraphNodeRef};
+use crate::runtime::graph_runner::{run_graph_inner, sink_arm_on, GraphNodeRef, SinkArmIo};
 use crate::runtime::instrument::{EdgeCounters, ElementProbe, Probe};
 use crate::runtime::join::{dynamic_join, join_all, select2, Either};
 use crate::runtime::observe::{link_tapped, register_runner_tap, EdgeTap, TapEdge, TapNode};
@@ -1146,6 +1146,8 @@ where
         let live = live_inputs.clone();
         forwarder_arms.push(Box::pin(async move {
             let mut out = SenderSink::new(out_tx_i);
+            // The sink's QoS report walks on to the input that fed it.
+            out.relay_qos_to(in_rx.qos_slot(), false);
             loop {
                 match in_rx.recv().await {
                     Some(PipelinePacket::Eos) | None => {
@@ -1170,47 +1172,10 @@ where
     // output link open.
     drop(out_tx);
 
-    let probe_for_sink = sink_probe.clone();
-    let sink_arm: BoxFuture<'_, Result<u64, G2gError>> = Box::pin(async move {
-        let mut null = NullSink;
-        let mut consumed: u64 = 0;
-        loop {
-            match out_rx.recv().await {
-                Some(PipelinePacket::Eos) => {
-                    sink.process(PipelinePacket::Eos, &mut null).await?;
-                    return Ok::<u64, G2gError>(consumed);
-                }
-                Some(PipelinePacket::CapsChanged(new_caps)) => {
-                    match log_caps_rejected(
-                        Some(probe_for_sink.name()),
-                        &new_caps,
-                        sink.configure_pipeline(&new_caps),
-                    )? {
-                        ConfigureOutcome::Accepted => {
-                            sink.process(PipelinePacket::CapsChanged(new_caps), &mut null)
-                                .await?;
-                        }
-                        ConfigureOutcome::ReFixate(counter) => {
-                            out_rx.request_reconfigure(Reconfigure::Propose(counter));
-                        }
-                    }
-                }
-                Some(packet) => {
-                    let is_data = matches!(packet, PipelinePacket::DataFrame(_));
-                    if is_data {
-                        consumed += 1;
-                        probe_for_sink.record_fill(out_rx.fill_percent());
-                    }
-                    let t0 = is_data.then(ElementProbe::mark).flatten();
-                    sink.process(packet, &mut null).await?;
-                    if is_data {
-                        probe_for_sink.record_proc_since(t0);
-                    }
-                }
-                None => return Ok(consumed),
-            }
-        }
-    });
+    let sink_arm: BoxFuture<'_, Result<u64, G2gError>> = Box::pin(sink_arm_on(
+        sink,
+        SinkArmIo::standalone(out_rx, Some(sink_probe.clone())),
+    ));
 
     // Arm order: [source0..N, forwarder0..N, sink].
     let mut arms = Vec::with_capacity(2 * input_count + 1);
@@ -1613,54 +1578,6 @@ impl DuplexInbound for InboundReceiver {
     }
 }
 
-/// One recv-side sink arm of a duplex run: configure on each `CapsChanged`, then
-/// process until `Eos` or the branch link closes. Shared with the dynamic runner,
-/// so a port grown mid-run drains exactly like a declared one.
-async fn duplex_sink_arm(
-    sink: &mut dyn DynAsyncElement,
-    rx: crate::runtime::channel::LinkReceiver,
-    probe: &ElementProbe,
-) -> Result<u64, G2gError> {
-    let mut null = NullSink;
-    let mut consumed: u64 = 0;
-    loop {
-        match rx.recv().await {
-            Some(PipelinePacket::Eos) => {
-                sink.process(PipelinePacket::Eos, &mut null).await?;
-                return Ok(consumed);
-            }
-            Some(PipelinePacket::CapsChanged(new_caps)) => {
-                match log_caps_rejected(
-                    Some(probe.name()),
-                    &new_caps,
-                    sink.configure_pipeline(&new_caps),
-                )? {
-                    ConfigureOutcome::Accepted => {
-                        sink.process(PipelinePacket::CapsChanged(new_caps), &mut null)
-                            .await?;
-                    }
-                    ConfigureOutcome::ReFixate(counter) => {
-                        rx.request_reconfigure(Reconfigure::Propose(counter));
-                    }
-                }
-            }
-            Some(packet) => {
-                let is_data = matches!(packet, PipelinePacket::DataFrame(_));
-                if is_data {
-                    consumed += 1;
-                    probe.record_fill(rx.fill_percent());
-                }
-                let t0 = is_data.then(ElementProbe::mark).flatten();
-                sink.process(packet, &mut null).await?;
-                if is_data {
-                    probe.record_proc_since(t0);
-                }
-            }
-            None => return Ok(consumed),
-        }
-    }
-}
-
 /// Drives a terminal **duplex** session ([`MultiDuplexSession`]): N send-side
 /// sources **and** M recv-side sinks over one connection, the union of
 /// [`run_fanin_session`] (send) and
@@ -1904,9 +1821,7 @@ where
         .zip(branch_receivers)
         .zip(sink_probes.iter().cloned())
     {
-        sink_arms.push(Box::pin(
-            async move { duplex_sink_arm(sink, rx, &probe).await },
-        ));
+        sink_arms.push(sink.drive_sink_arm_borrowed(SinkArmIo::standalone(rx, Some(probe))));
     }
 
     // Arm order: [source0..N, session, sink0..M].
@@ -3236,7 +3151,7 @@ where
             .zip(sink_probes.iter().cloned())
         {
             sink_arms.push(Box::pin(async move {
-                duplex_sink_arm(sink, rx, &probe)
+                sink.drive_sink_arm_borrowed(SinkArmIo::standalone(rx, Some(probe)))
                     .await
                     .map(DuplexArmOut::Sink)
             }));
@@ -3501,7 +3416,7 @@ where
     };
     let arm: BoxFuture<'a, Result<DuplexArmOut, G2gError>> = match prepared {
         Some((mut sink, probe)) => Box::pin(async move {
-            duplex_sink_arm(sink.as_mut(), rx, &probe)
+            sink.drive_sink_arm_borrowed(SinkArmIo::standalone(rx, Some(probe)))
                 .await
                 .map(DuplexArmOut::Sink)
         }),

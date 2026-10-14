@@ -362,16 +362,16 @@ pub struct RunStats {
     /// that don't expose per-edge policy (only `run_graph` does today).
     pub frames_dropped: u64,
     /// Aggregated source-to-sink latency (M12), computed once after
-    /// negotiation. Linear runners fold every element's `latency()`; fan-in /
-    /// fan-out runners leave this at `ZERO` (topology aggregation deferred).
+    /// negotiation from every element's `latency()`. The hand-built fan-in and
+    /// dynamic runners leave this at `ZERO`.
     pub latency: LatencyReport,
     /// The allocation proposal (M12) handed to the head producer (the source),
     /// negotiated from downstream. `None` when no downstream element proposed
-    /// one; always `None` for fan-in / fan-out runners (deferred).
+    /// one; always `None` for the hand-built fan-in and dynamic runners.
     pub allocation: Option<AllocationParams>,
     /// Priority of the clock the pipeline elected (M12). `SystemFallback` when
     /// no element provided one (the supplied clock stands); always
-    /// `SystemFallback` for fan-in / fan-out runners (deferred).
+    /// `SystemFallback` for the hand-built fan-in and dynamic runners.
     pub clock_priority: ClockPriority,
     /// `now_ns()` of the elected clock, read once after election — the
     /// pipeline's base-time origin.
@@ -380,8 +380,7 @@ pub struct RunStats {
     /// task observed over this run's control channel. Today the only
     /// event is a boundary forwarding a mid-stream `CapsChanged` the next
     /// element accepted; β will turn each into a `Recascade`. `0` for
-    /// runners that don't yet spawn a coordinator (simple / fan-out /
-    /// fan-in / muxer).
+    /// runners that don't spawn a coordinator (simple / fan-in / dynamic).
     pub coordinator_events: u64,
     /// Measured per-element telemetry (M399): each interior element's `process()`
     /// latency distribution (p50/p99) and input-link fill, in topological order.
