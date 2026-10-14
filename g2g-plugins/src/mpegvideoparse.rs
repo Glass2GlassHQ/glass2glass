@@ -15,9 +15,8 @@
 
 use g2g_core::{PropertySpec, VideoCodec};
 
-use crate::startcodeparse::{
-    StartCodeCodec, StartCodeParse, StartCodeRole, VideoGeometry, PIXEL_ASPECT_PROPERTY,
-};
+use crate::access_unit::StartCodeRole;
+use crate::startcodeparse::{StartCodeCodec, StartCodeParse, VideoGeometry, PIXEL_ASPECT_PROPERTY};
 
 /// `sequence_header_code`: the sequence header that carries the geometry.
 const SEQUENCE_HEADER_CODE: u8 = 0xB3;
@@ -264,7 +263,11 @@ mod tests {
         stream.extend_from_slice(&[0, 0, 1, GROUP_START_CODE, 0x00, 0x00, 0x00, 0x00]);
         stream.extend_from_slice(&picture_header(1, 2));
         stream.extend_from_slice(&slice(0xBB));
-        let starts = crate::startcodeparse::au_starts_by(&stream, MpegVideoCodec::start_code_role);
+        let starts = crate::access_unit::access_unit_starts(
+            &stream,
+            false,
+            crate::startcodeparse::unit_role::<MpegVideoCodec>,
+        );
         assert_eq!(starts, vec![0, second]);
     }
 

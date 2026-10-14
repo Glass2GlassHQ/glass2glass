@@ -28,7 +28,8 @@ use alloc::string::String;
 
 use g2g_core::{Colorimetry, PropKind, PropertySpec, VideoCodec};
 
-use crate::annexb::{h265_nal_type, next_start_code, strip_emulation_prevention, BitReader};
+use crate::access_unit::StartCodeRole;
+use crate::annexb::{h265_nal_type, strip_emulation_prevention, BitReader};
 use crate::nalparse::{NalCodec, NalParse, SpsGeometry};
 
 /// H.265 (HEVC) access-unit parser: `CompressedVideo{H265}` in and out, refining
@@ -61,16 +62,31 @@ impl NalCodec for H265Codec {
         h265_nal_type(nal)
     }
 
-    fn au_starts(data: &[u8]) -> Vec<usize> {
-        h265_au_starts(data)
+    /// A new picture's first slice has `first_slice_segment_in_pic_flag == 1`,
+    /// the MSB of the slice RBSP after the 2-byte NAL header. Slices 2..N carry
+    /// it as 0 and stay in the picture's access unit. Ahead of a picture, an
+    /// access-unit delimiter (35) and the parameter-set / prefix-SEI NALs that
+    /// lead a picture (VPS 32, SPS 33, PPS 34, prefix SEI 39) open the next
+    /// access unit (ISO/IEC 23008-2 7.4.2.4.4).
+    fn unit_role(unit: &[u8]) -> Option<StartCodeRole> {
+        let nal_type = h265_nal_type(unit)?;
+        if nal_type <= 31 {
+            let first_slice_of_picture = unit.get(2)? & 0x80 != 0;
+            return Some(if first_slice_of_picture {
+                StartCodeRole::Picture
+            } else {
+                StartCodeRole::PictureContinuation
+            });
+        }
+        Some(if matches!(nal_type, 32 | 33 | 34 | 35 | 39) {
+            StartCodeRole::Leads
+        } else {
+            StartCodeRole::Continues
+        })
     }
 
-    fn au_is_keyframe(au: &[u8]) -> bool {
-        crate::annexb::au_is_keyframe(Self::CODEC, au)
-    }
-
-    fn extract_sps_info(au: &[u8]) -> Option<SpsGeometry> {
-        extract_sps_info(au)
+    fn sps_info(nals: &[&[u8]]) -> Option<SpsGeometry> {
+        with_sps_rbsp(nals.iter().copied(), parse_sps)
     }
 }
 
@@ -83,8 +99,11 @@ const PPS_NUT: u8 = 34;
 /// Walk the NALs of `au` (Annex-B or AVCC, auto-detected), running `parse` over
 /// the de-emulated RBSP of each SPS NAL and returning the first result it
 /// yields. H.265 NAL type is bits `[1..7]` of the first header byte.
-fn with_sps_rbsp<T>(au: &[u8], parse: impl Fn(&[u8]) -> Option<T>) -> Option<T> {
-    for nal in crate::annexb::nal_units_any(au) {
+fn with_sps_rbsp<'a, T>(
+    nals: impl IntoIterator<Item = &'a [u8]>,
+    parse: impl Fn(&[u8]) -> Option<T>,
+) -> Option<T> {
+    for nal in nals {
         if nal.len() < 2 {
             continue;
         }
@@ -101,49 +120,6 @@ fn with_sps_rbsp<T>(au: &[u8], parse: impl Fn(&[u8]) -> Option<T>) -> Option<T> 
     None
 }
 
-fn extract_sps_info(au: &[u8]) -> Option<SpsGeometry> {
-    with_sps_rbsp(au, parse_sps)
-}
-
-/// Start-code offsets in an Annex-B buffer at which a new H.265 access unit
-/// begins, per the ISO/IEC 23008-2 access-unit boundary rules. The first NAL
-/// opens the first AU. Once a VCL NAL (`nal_unit_type` 0..=31) has been seen in
-/// the current AU, the next AU begins at: a VCL NAL whose
-/// `first_slice_segment_in_pic_flag` is 1 (the first coded picture slice, the MSB
-/// of the slice RBSP after the 2-byte NAL header), an access-unit delimiter (35),
-/// or the parameter-set / prefix-SEI NALs that lead a picture (VPS 32, SPS 33,
-/// PPS 34, prefix SEI 39). Slices 2..N of a picture carry the flag as 0 and stay
-/// in the same AU. The HEVC sibling of `h264parse`'s `h264_au_starts`.
-fn h265_au_starts(data: &[u8]) -> Vec<usize> {
-    let mut starts = Vec::new();
-    let mut seen_vcl = false;
-    let mut i = 0;
-    while let Some((sc, begin)) = next_start_code(data, i) {
-        let nal_type = data.get(begin).map(|b| (b >> 1) & 0x3F).unwrap_or(0);
-        let is_vcl = nal_type <= 31;
-        let starts_au = if !seen_vcl {
-            // Leading NALs of the first AU: only the very first opens it.
-            starts.is_empty()
-        } else if is_vcl {
-            // A new picture's first slice has first_slice_segment_in_pic_flag == 1,
-            // the MSB of the slice RBSP (the byte after the 2-byte NAL header).
-            data.get(begin + 2).map(|b| b & 0x80 != 0).unwrap_or(false)
-        } else {
-            // A non-VCL that can only lead the next access unit.
-            matches!(nal_type, 32 | 33 | 34 | 35 | 39)
-        };
-        if starts_au {
-            starts.push(sc);
-            seen_vcl = false;
-        }
-        if is_vcl {
-            seen_vcl = true;
-        }
-        i = begin;
-    }
-    starts
-}
-
 /// Build the WebCodecs `codec` string for an H.265 stream from its SPS
 /// (ISO/IEC 14496-15 Annex E.3, registered for WebCodecs by the W3C HEVC
 /// registration): `"hev1."`, the profile space letter and profile_idc, the
@@ -155,7 +131,10 @@ fn h265_au_starts(data: &[u8]) -> Vec<usize> {
 // geometry. Gated so the always-compiled module stays warning-clean elsewhere.
 #[cfg(any(test, all(target_arch = "wasm32", feature = "web-codecs")))]
 pub(crate) fn h265_codec_string(au: &[u8]) -> Option<String> {
-    let ptl = with_sps_rbsp(au, parse_general_profile_tier_level)?;
+    let ptl = with_sps_rbsp(
+        crate::annexb::nal_units_any(au),
+        parse_general_profile_tier_level,
+    )?;
     let space = match ptl.profile_space {
         0 => "",
         1 => "A",
@@ -654,12 +633,13 @@ pub(crate) fn parse_h265_short_term_rps(
 /// under `--cfg fuzzing` (cargo-fuzz) so the normal public API is unchanged.
 #[cfg(fuzzing)]
 pub fn fuzz_parse(data: &[u8]) {
-    let _ = extract_sps_info(data);
+    let _ = H265Codec::extract_sps_info(data);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::access_unit::access_unit_starts;
     use crate::annexb::{nal_units, BitWriter};
 
     // A malformed HEVC SPS whose short-term RPS carries huge Exp-Golomb POC
@@ -673,7 +653,7 @@ mod tests {
             0xff, 0xf8, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0x07, 0x03, 0x07, 0x07,
             0x07, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfb, 0x00, 0x07, 0x07,
         ];
-        let _ = extract_sps_info(&sps);
+        let _ = H265Codec::extract_sps_info(&sps);
     }
     use alloc::vec;
 
@@ -868,7 +848,7 @@ mod tests {
             Some("hev1.1.6.L93.B0")
         );
         // The geometry parse still crosses the block it now reads.
-        let info = extract_sps_info(&stream).expect("SPS must parse");
+        let info = H265Codec::extract_sps_info(&stream).expect("SPS must parse");
         assert_eq!((info.width, info.height), (640, 480));
     }
 
@@ -915,7 +895,7 @@ mod tests {
     #[test]
     fn recovers_dimensions_from_sps() {
         let stream = build_annexb_sps(1920, 1080, 1, None);
-        let info = extract_sps_info(&stream).expect("SPS must parse");
+        let info = H265Codec::extract_sps_info(&stream).expect("SPS must parse");
         assert_eq!((info.width, info.height), (1920, 1080));
         // The RBSP ends at the conformance window, so the VUI walk truncates:
         // geometry still resolves, the rate stays unrefined (best-effort M663).
@@ -926,14 +906,14 @@ mod tests {
     fn recovers_bt709_colorimetry_from_vui() {
         // CICP 1/1/1 + limited range is exactly the bt709 preset.
         let stream = build_annexb_sps_with_vui(1920, 1080, 1, 25, Some((1, 1, 1, false)));
-        let info = extract_sps_info(&stream).expect("SPS with colour must parse");
+        let info = H265Codec::extract_sps_info(&stream).expect("SPS with colour must parse");
         assert_eq!(info.colorimetry, Colorimetry::BT709);
     }
 
     #[test]
     fn absent_signal_type_colorimetry_stays_unknown() {
         let stream = build_annexb_sps_with_vui(1920, 1080, 1, 25, None);
-        let info = extract_sps_info(&stream).expect("SPS must parse");
+        let info = H265Codec::extract_sps_info(&stream).expect("SPS must parse");
         assert_eq!(info.colorimetry, Colorimetry::UNKNOWN);
     }
 
@@ -942,7 +922,7 @@ mod tests {
         // Unmodeled CICP codepoints fall back to Unknown per field; only the
         // coded full-range flag stays concrete.
         let stream = build_annexb_sps_with_vui(1920, 1080, 1, 25, Some((222, 199, 33, true)));
-        let info = extract_sps_info(&stream).expect("SPS must parse");
+        let info = H265Codec::extract_sps_info(&stream).expect("SPS must parse");
         assert_eq!(
             info.colorimetry,
             Colorimetry {
@@ -959,13 +939,13 @@ mod tests {
         // 25 fps: one tick per picture at a 25 Hz time scale (no H.264-style
         // field doubling in HEVC).
         let stream = build_annexb_sps_with_vui(1920, 1080, 1, 25, None);
-        let info = extract_sps_info(&stream).expect("SPS with VUI must parse");
+        let info = H265Codec::extract_sps_info(&stream).expect("SPS with VUI must parse");
         assert_eq!((info.width, info.height), (1920, 1080));
         assert_eq!(info.framerate, Some(25 << 16), "Q16 fps from timing_info");
 
         // 29.97 fps (30000/1001): the Q16 value is the truncated division.
         let ntsc = build_annexb_sps_with_vui(720, 480, 1001, 30_000, None);
-        let info = extract_sps_info(&ntsc).expect("NTSC SPS must parse");
+        let info = H265Codec::extract_sps_info(&ntsc).expect("NTSC SPS must parse");
         assert_eq!(info.framerate, Some(((30_000u64 << 16) / 1001) as u32));
     }
 
@@ -974,7 +954,7 @@ mod tests {
         // 1920x1088 coded, 4:2:0 (SubHeightC = 2), crop 4 chroma rows off the
         // bottom -> 1088 - 2*4 = 1080.
         let stream = build_annexb_sps(1920, 1088, 1, Some((0, 0, 0, 4)));
-        let info = extract_sps_info(&stream).expect("SPS with conf window must parse");
+        let info = H265Codec::extract_sps_info(&stream).expect("SPS with conf window must parse");
         assert_eq!((info.width, info.height), (1920, 1080));
     }
 
@@ -983,7 +963,7 @@ mod tests {
         // Huge conformance offsets must saturate, not overflow-panic on the sum.
         let huge = 3_000_000_000u32;
         let stream = build_annexb_sps(1920, 1080, 1, Some((huge, huge, huge, huge)));
-        let info = extract_sps_info(&stream).expect("parses without overflow");
+        let info = H265Codec::extract_sps_info(&stream).expect("parses without overflow");
         assert_eq!(
             (info.width, info.height),
             (0, 0),
@@ -999,7 +979,7 @@ mod tests {
         let nal = &annexb[4..]; // drop the 00 00 00 01 start code
         let mut hvcc = (nal.len() as u32).to_be_bytes().to_vec();
         hvcc.extend_from_slice(nal);
-        let info = extract_sps_info(&hvcc).expect("length-prefixed SPS must parse");
+        let info = H265Codec::extract_sps_info(&hvcc).expect("length-prefixed SPS must parse");
         assert_eq!((info.width, info.height), (1280, 720));
     }
 
@@ -1007,12 +987,12 @@ mod tests {
     fn ignores_non_sps_nals() {
         // A TRAIL_R slice NAL (type 1 -> first byte 0x02) carries no SPS.
         let stream = [0u8, 0, 0, 1, 0x02, 0x01, 0xAA, 0xBB];
-        assert!(extract_sps_info(&stream).is_none());
+        assert!(H265Codec::extract_sps_info(&stream).is_none());
     }
 
     #[test]
     fn returns_none_on_empty_input() {
-        assert!(extract_sps_info(&[]).is_none());
+        assert!(H265Codec::extract_sps_info(&[]).is_none());
     }
 
     #[test]
@@ -1234,7 +1214,7 @@ mod tests {
         stream.extend_from_slice(&annexb_vcl_h265(false, 2)); // same picture
         let b_off = stream.len();
         stream.extend_from_slice(&annexb_vcl_h265(true, 3)); // new picture
-        let starts = h265_au_starts(&stream);
+        let starts = access_unit_starts(&stream, true, H265Codec::unit_role);
         assert_eq!(
             starts,
             vec![0, b_off],

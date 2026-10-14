@@ -131,6 +131,8 @@ pub mod inter;
 pub mod interleave;
 pub mod level;
 pub mod mux;
+// Access-unit framing shared by the NAL and start-code elementary-stream parsers.
+pub mod access_unit;
 pub mod nalparse;
 // Shared access-unit framing for the start-code elementary streams that are not
 // NAL streams (MPEG-1/2 video, MPEG-4 Part 2, VC-1).

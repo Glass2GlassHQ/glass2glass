@@ -30,14 +30,10 @@ use g2g_core::{
     Rate, VideoCodec,
 };
 
-/// Upper bound on bytes buffered while waiting for an access-unit boundary. A
-/// real stream emits start codes frequently, so this only guards against an
-/// unbounded accumulator on non-conforming input: past it, the pending bytes go
-/// out as one access unit rather than growing without limit.
-const MAX_ACCUM_BYTES: usize = 16 * 1024 * 1024;
-
-/// Widest `config-interval` accepted, in seconds.
-const MAX_CONFIG_INTERVAL_SECONDS: i64 = 3600;
+use crate::access_unit::{
+    AccessUnitFramer, CapsRefinement, ConfigInterval, StartCodeRole, MAX_CONFIG_INTERVAL_SECONDS,
+};
+use crate::annexb::{find_start_code_prefix, START_CODE_PREFIX};
 
 /// Name of [`CONFIG_INTERVAL_PROPERTY`], matched in `set_property`.
 const CONFIG_INTERVAL_NAME: &str = "config-interval";
@@ -63,18 +59,6 @@ pub(crate) const PIXEL_ASPECT_PROPERTY: PropertySpec = PropertySpec::new(
     "sample aspect ratio read from the sequence header (0/1 = not signalled yet)",
 )
 .read_only();
-
-/// What one start-code unit does to the access unit being assembled.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum StartCodeRole {
-    /// A header that leads a picture (sequence header, GOP / entry point). It
-    /// opens a new access unit once the current one already holds a picture.
-    Leads,
-    /// The coded picture itself.
-    Picture,
-    /// Part of the picture in progress (a slice, an extension, user data).
-    Continues,
-}
 
 /// Coded geometry recovered from a sequence header.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -124,42 +108,14 @@ pub trait StartCodeCodec: Send + Sync + 'static {
 /// match a four-byte `00 00 00 01`: a sequence extension that ends in a zero
 /// byte would lose it, and the extension is read to its last bit.
 fn next_start_code(data: &[u8], from: usize) -> Option<(usize, usize)> {
-    let mut i = from;
-    while i + 3 <= data.len() {
-        if data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1 {
-            return Some((i, i + 3));
-        }
-        i += 1;
-    }
-    None
+    let prefix = find_start_code_prefix(data, from)?;
+    Some((prefix, prefix + START_CODE_PREFIX.len()))
 }
 
-/// Offsets in `data` at which a new access unit begins, per `classify`. The
-/// first start code always opens the first access unit; after that a unit that
-/// is not a continuation opens one as soon as the access unit in progress holds
-/// a picture.
-pub(crate) fn au_starts_by(data: &[u8], classify: impl Fn(u8) -> StartCodeRole) -> Vec<usize> {
-    let mut starts = Vec::new();
-    let mut seen_picture = false;
-    let mut search_from = 0;
-    while let Some((start_code, payload)) = next_start_code(data, search_from) {
-        // Resume past the code byte: a picture start code is 0x00, so a search
-        // resuming on it could re-match the prefix it belongs to.
-        search_from = payload + 1;
-        let Some(&code) = data.get(payload) else {
-            break;
-        };
-        let role = classify(code);
-        let opens_au = starts.is_empty() || (seen_picture && role != StartCodeRole::Continues);
-        if opens_au {
-            starts.push(start_code);
-            seen_picture = false;
-        }
-        if role == StartCodeRole::Picture {
-            seen_picture = true;
-        }
-    }
-    starts
+/// The role of the unit whose start code value leads `unit`, `None` until that
+/// byte has arrived.
+pub(crate) fn unit_role<C: StartCodeCodec>(unit: &[u8]) -> Option<StartCodeRole> {
+    unit.first().map(|&code| C::start_code_role(code))
 }
 
 /// Iterate the start-code units of `data` as `(code, payload)` pairs, the start
@@ -243,25 +199,15 @@ pub(crate) fn sample_aspect(code: u32, highest_defined: u32) -> Option<(u32, u32
 /// Access-unit parser for a start-code elementary stream. See the module docs.
 pub struct StartCodeParse<C: StartCodeCodec> {
     configured: bool,
-    last_emitted_caps: Option<Caps>,
-    caps_changes: u64,
-    /// Bytes received but not yet emitted as a complete access unit: the
-    /// trailing, possibly-incomplete access unit is held until the next one's
-    /// start code arrives.
-    accum: Vec<u8>,
-    /// Timing to stamp the access unit at the head of `accum`, captured when its
-    /// first byte arrived.
-    au_timing: FrameTiming,
+    caps: CapsRefinement,
+    framer: AccessUnitFramer,
     seq: u64,
-    /// Configuration-header re-insertion interval in seconds: `0` off, `-1`
-    /// every keyframe, `N` once `N` seconds have elapsed. Only meaningful for a
-    /// codec whose [`StartCodeCodec::config_headers`] returns headers.
-    config_interval: i32,
+    /// Configuration-header re-insertion cadence. Only meaningful for a codec
+    /// whose [`StartCodeCodec::config_headers`] returns headers.
+    config_interval: ConfigInterval,
     /// Last configuration headers seen, re-inserted before a keyframe that
     /// lacks them.
     cached_config: Vec<u8>,
-    /// PTS (ns) of the last access unit the headers were inserted before.
-    last_config_pts_ns: Option<u64>,
     /// Sample aspect ratio from the last sequence header, for the read-only
     /// `pixel-aspect-ratio` property (caps carry no field for it).
     pixel_aspect: Option<(u32, u32)>,
@@ -272,14 +218,11 @@ impl<C: StartCodeCodec> Default for StartCodeParse<C> {
     fn default() -> Self {
         Self {
             configured: false,
-            last_emitted_caps: None,
-            caps_changes: 0,
-            accum: Vec::new(),
-            au_timing: FrameTiming::default(),
+            caps: CapsRefinement::default(),
+            framer: AccessUnitFramer::new(false),
             seq: 0,
-            config_interval: 0,
+            config_interval: ConfigInterval::default(),
             cached_config: Vec::new(),
-            last_config_pts_ns: None,
             pixel_aspect: None,
             _codec: PhantomData,
         }
@@ -291,7 +234,7 @@ impl<C: StartCodeCodec> core::fmt::Debug for StartCodeParse<C> {
         f.debug_struct("StartCodeParse")
             .field("codec", &C::CODEC)
             .field("configured", &self.configured)
-            .field("config_interval", &self.config_interval)
+            .field("config_interval", &self.config_interval.seconds)
             .finish_non_exhaustive()
     }
 }
@@ -304,7 +247,7 @@ impl<C: StartCodeCodec> StartCodeParse<C> {
     /// Count of `CapsChanged` packets pushed downstream, for tests asserting
     /// re-emission is suppressed when the geometry is unchanged.
     pub fn caps_changes_emitted(&self) -> u64 {
-        self.caps_changes
+        self.caps.changes_emitted
     }
 
     /// The sample aspect ratio the last sequence header signalled.
@@ -315,7 +258,7 @@ impl<C: StartCodeCodec> StartCodeParse<C> {
     /// Set the configuration-header re-insertion interval in seconds (`0` off,
     /// `-1` every keyframe, `N` every N seconds).
     pub fn with_config_interval(mut self, seconds: i32) -> Self {
-        self.config_interval = seconds;
+        self.config_interval.seconds = seconds;
         self
     }
 
@@ -333,6 +276,9 @@ impl<C: StartCodeCodec> StartCodeParse<C> {
         pts_ns: u64,
         keyframe: bool,
     ) -> Vec<u8> {
+        if self.config_interval.is_off() {
+            return au;
+        }
         let carries_config = match C::config_headers(&au) {
             Some(headers) => {
                 self.cached_config = headers;
@@ -340,30 +286,16 @@ impl<C: StartCodeCodec> StartCodeParse<C> {
             }
             None => false,
         };
-        if self.config_interval == 0 || !keyframe {
-            return au;
-        }
-        // Already configured: nothing to add, but it resets the clock.
-        if carries_config {
-            self.last_config_pts_ns = Some(pts_ns);
-            return au;
-        }
-        let due = if self.config_interval < 0 {
-            true
-        } else {
-            let interval_ns = (self.config_interval as u64).saturating_mul(1_000_000_000);
-            match self.last_config_pts_ns {
-                None => true,
-                Some(last) => pts_ns.saturating_sub(last) >= interval_ns,
-            }
-        };
-        if !due || self.cached_config.is_empty() {
+        let have_cached_config = !self.cached_config.is_empty();
+        if !self
+            .config_interval
+            .insertion_due(pts_ns, keyframe, carries_config, have_cached_config)
+        {
             return au;
         }
         let mut out = Vec::with_capacity(self.cached_config.len() + au.len());
         out.extend_from_slice(&self.cached_config);
         out.extend_from_slice(&au);
-        self.last_config_pts_ns = Some(pts_ns);
         out
     }
 
@@ -385,55 +317,19 @@ impl<C: StartCodeCodec> StartCodeParse<C> {
             framerate: info.framerate.map_or(Rate::Any, Rate::Fixed),
             colorimetry: g2g_core::Colorimetry::UNKNOWN,
         };
-        if self.last_emitted_caps.as_ref() != Some(&new_caps) {
-            out.push(PipelinePacket::CapsChanged(new_caps.clone()))
-                .await?;
-            self.last_emitted_caps = Some(new_caps);
-            self.caps_changes += 1;
-        }
-        Ok(())
+        self.caps.refine(new_caps, out).await
     }
 
     /// Accumulate one input buffer and emit every access unit whose end is now
-    /// known. The trailing access unit stays buffered until the next call or
-    /// `Eos`. A non-`System` domain passes through unchanged.
+    /// known. A non-`System` domain passes through unchanged.
     async fn accumulate(&mut self, frame: Frame, out: &mut dyn OutputSink) -> Result<(), G2gError> {
         let Some(bytes) = frame.domain.as_system_slice() else {
             out.push(PipelinePacket::DataFrame(frame)).await?;
             return Ok(());
         };
-        if self.accum.is_empty() {
-            self.au_timing = frame.timing;
+        for (au, timing) in self.framer.push(bytes, frame.timing, unit_role::<C>) {
+            self.emit_au(au, timing, out).await?;
         }
-        self.accum.extend_from_slice(bytes);
-
-        if self.accum.len() > MAX_ACCUM_BYTES {
-            let au = core::mem::take(&mut self.accum);
-            let timing = self.au_timing;
-            return self.emit_au(au, timing, out).await;
-        }
-
-        let starts = au_starts_by(&self.accum, C::start_code_role);
-        if starts.len() < 2 {
-            return Ok(()); // at most one still-open access unit buffered
-        }
-        let frame_timing = frame.timing;
-        let tail = starts[starts.len() - 1];
-        let done = self.accum[..tail].to_vec();
-        self.accum.drain(..tail);
-        for pair in starts.windows(2) {
-            let (lo, hi) = (pair[0], pair[1]);
-            // The head access unit carries the timing captured when it began;
-            // one that both begins and ends inside this buffer takes this
-            // buffer's timing.
-            let timing = if lo == 0 {
-                self.au_timing
-            } else {
-                frame_timing
-            };
-            self.emit_au(done[lo..hi].to_vec(), timing, out).await?;
-        }
-        self.au_timing = frame_timing;
         Ok(())
     }
 
@@ -515,7 +411,7 @@ impl<C: StartCodeCodec> AsyncElement for StartCodeParse<C> {
                 if !(-1..=MAX_CONFIG_INTERVAL_SECONDS).contains(&seconds) {
                     return Err(PropError::Value);
                 }
-                self.config_interval = seconds as i32;
+                self.config_interval.seconds = seconds as i32;
                 Ok(())
             }
             PIXEL_ASPECT_NAME => Err(PropError::ReadOnly),
@@ -526,7 +422,7 @@ impl<C: StartCodeCodec> AsyncElement for StartCodeParse<C> {
     fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
             CONFIG_INTERVAL_NAME if Self::declares_config_interval() => {
-                Some(PropValue::Int(self.config_interval as i64))
+                Some(PropValue::Int(self.config_interval.seconds as i64))
             }
             PIXEL_ASPECT_NAME => {
                 let (w, h) = self.pixel_aspect.unwrap_or((0, 1));
@@ -553,17 +449,15 @@ impl<C: StartCodeCodec> AsyncElement for StartCodeParse<C> {
                 PipelinePacket::Flush => {
                     // A seek discontinuity: drop the partial access unit rather
                     // than splice pre-seek bytes onto the post-seek stream.
-                    self.accum.clear();
-                    self.last_emitted_caps = None;
+                    self.framer.clear();
+                    self.caps.forget();
                     out.push(PipelinePacket::Flush).await?;
                 }
                 PipelinePacket::Segment(seg) => {
                     out.push(PipelinePacket::Segment(seg)).await?;
                 }
                 PipelinePacket::Eos => {
-                    if !self.accum.is_empty() {
-                        let au = core::mem::take(&mut self.accum);
-                        let timing = self.au_timing;
+                    if let Some((au, timing)) = self.framer.finish() {
                         self.emit_au(au, timing, out).await?;
                     }
                 }
@@ -622,16 +516,21 @@ mod tests {
     #[test]
     fn au_starts_groups_leading_headers_with_their_picture() {
         // header, picture, slice | header, picture -> two access units.
-        let classify = |code: u8| match code {
-            0xB3 => StartCodeRole::Leads,
-            0x00 => StartCodeRole::Picture,
-            _ => StartCodeRole::Continues,
+        let classify = |unit: &[u8]| {
+            Some(match *unit.first()? {
+                0xB3 => StartCodeRole::Leads,
+                0x00 => StartCodeRole::Picture,
+                _ => StartCodeRole::Continues,
+            })
         };
         let mut data = vec![
             0u8, 0, 1, 0xB3, 0x11, 0, 0, 1, 0x00, 0x22, 0, 0, 1, 0x01, 0x33,
         ];
         let second = data.len();
         data.extend_from_slice(&[0, 0, 1, 0xB3, 0x44, 0, 0, 1, 0x00, 0x55]);
-        assert_eq!(au_starts_by(&data, classify), vec![0, second]);
+        assert_eq!(
+            crate::access_unit::access_unit_starts(&data, false, classify),
+            vec![0, second]
+        );
     }
 }

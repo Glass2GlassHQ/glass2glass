@@ -35,8 +35,16 @@ pub const PAYLOAD_CONTENT_LIGHT_LEVEL: usize = 144;
 /// Call `f(payload_type, payload)` for every SEI message in one access unit
 /// (`au`, Annex-B or AVCC framed) of `codec`, in bitstream order. Messages after
 /// a malformed one in the same NAL are skipped; the remaining NALs still parse.
-pub fn for_each_message(au: &[u8], codec: VideoCodec, mut f: impl FnMut(usize, &[u8])) {
-    for nal in nal_units_any(au) {
+pub fn for_each_message(au: &[u8], codec: VideoCodec, f: impl FnMut(usize, &[u8])) {
+    for_each_message_in_nals(nal_units_any(au), codec, f);
+}
+
+fn for_each_message_in_nals<'a>(
+    nals: impl Iterator<Item = &'a [u8]>,
+    codec: VideoCodec,
+    mut f: impl FnMut(usize, &[u8]),
+) {
+    for nal in nals {
         // SEI NAL header + RBSP offset differs by codec: H.264 SEI is NAL type 6
         // with a 1-byte header; H.265 prefix-SEI (39) / suffix-SEI (40) carry a
         // 2-byte header.
@@ -264,12 +272,21 @@ pub struct SeiInfo {
 /// message needs (default for H.265, or when the caller has no SPS yet: the
 /// timecode is then simply not recovered).
 pub fn parse_au(au: &[u8], codec: VideoCodec, pic_timing: PicTimingContext) -> SeiInfo {
+    parse_nals(nal_units_any(au), codec, pic_timing)
+}
+
+/// [`parse_au`] over an access unit already split into its NAL units.
+pub(crate) fn parse_nals<'a>(
+    nals: impl Iterator<Item = &'a [u8]>,
+    codec: VideoCodec,
+    pic_timing: PicTimingContext,
+) -> SeiInfo {
     let mut info = SeiInfo::default();
     #[cfg(feature = "metadata")]
     let mut hdr = g2g_core::meta::HdrStaticMeta::default();
     #[cfg(not(feature = "metadata"))]
     let _ = pic_timing;
-    for_each_message(au, codec, |ty, payload| match ty {
+    for_each_message_in_nals(nals, codec, |ty, payload| match ty {
         PAYLOAD_USER_DATA_REGISTERED => {
             crate::cea::parse_caption_payload(payload, &mut info.captions)
         }

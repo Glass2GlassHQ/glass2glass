@@ -797,6 +797,8 @@ spin = { version = "0.9", default-features = false, features = ["mutex", "spin_m
 # `forbid(unsafe_code)`, and no_std with `with-alloc` alone, so it fits the
 # baseline; default-features off keeps its `std` off.
 miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }
+# start-code search in the elementary-stream parsers, no_std with default features off
+memchr = { version = "2.8", default-features = false }
 # CLOCK_TAI via clock_gettime for the `ptp` feature (PtpSystemClock). Top-level
 # optional (builds on all platforms); the module using it is Linux + `ptp` gated.
 libc = { version = "0.2", optional = true }

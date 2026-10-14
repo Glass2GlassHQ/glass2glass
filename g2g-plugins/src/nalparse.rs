@@ -28,20 +28,10 @@ use g2g_core::{
     PropValue, PropertySpec, Rate, VideoCodec,
 };
 
-use crate::annexb::nal_units;
-
-/// Upper bound on bytes buffered while waiting for an access-unit boundary in
-/// re-framing mode. A real stream emits start codes frequently, so this is only a
-/// guard against an unbounded accumulator on pathological / non-conforming input:
-/// past it, the pending bytes are flushed as one access unit rather than grown
-/// without limit. A single intra access unit at 4K stays well under it.
-const MAX_REFRAME_BYTES: usize = 16 * 1024 * 1024;
-
-/// Consecutive buffers that must arrive on an access-unit boundary before
-/// re-framing stops holding the trailing access unit back (see
-/// [`NalParse::au_aligned_runs`]). Two, so a byte-stream chunk boundary that
-/// lands on an access-unit start by chance does not switch the mode on its own.
-const AU_ALIGNED_CONFIRMATIONS: u8 = 2;
+use crate::access_unit::{
+    AccessUnitFramer, CapsRefinement, ConfigInterval, StartCodeRole, MAX_CONFIG_INTERVAL_SECONDS,
+};
+use crate::annexb::{nal_units, nal_units_any, ANNEX_B_START_CODE};
 
 /// Coded-picture geometry recovered from an SPS (post conformance-window
 /// cropping), plus the framerate when the codec recovers one.
@@ -91,19 +81,22 @@ pub trait NalCodec: Send + Sync + 'static {
 
     /// NAL unit type of a NAL body (its header parsed), or `None` if too short.
     fn nal_type(nal: &[u8]) -> Option<u8>;
-    /// Start-code offsets in an Annex-B buffer at which a new access unit begins.
-    fn au_starts(data: &[u8]) -> Vec<usize>;
-    /// Whether an access unit opens a keyframe (IDR / IRAP).
-    fn au_is_keyframe(au: &[u8]) -> bool;
-    /// Recover SPS geometry (and optional framerate) from an access unit.
-    fn extract_sps_info(au: &[u8]) -> Option<SpsGeometry>;
+    /// What the NAL starting at `unit` (its header first) does to the access
+    /// unit being assembled, `None` when more of its bytes are needed to tell.
+    fn unit_role(unit: &[u8]) -> Option<StartCodeRole>;
+    /// Recover SPS geometry (and optional framerate) from an access unit's NALs.
+    fn sps_info(nals: &[&[u8]]) -> Option<SpsGeometry>;
+
+    /// [`Self::sps_info`] over an access unit in either framing.
+    fn extract_sps_info(au: &[u8]) -> Option<SpsGeometry> {
+        Self::sps_info(&nal_units_any(au).collect::<Vec<_>>())
+    }
 }
 
 /// Access-unit parser generic over a [`NalCodec`]. See the module docs.
 pub struct NalParse<C: NalCodec> {
     configured: bool,
-    last_emitted_caps: Option<Caps>,
-    sps_emitted: u64,
+    caps: CapsRefinement,
     /// Re-framing mode: re-chunk the input into access-unit-aligned Annex-B
     /// buffers (one coded picture per `DataFrame`) rather than passing buffers
     /// through unchanged. A decoder fed un-aligned units (e.g. one MPEG-TS PES
@@ -112,13 +105,8 @@ pub struct NalParse<C: NalCodec> {
     /// packet, matching GStreamer's `h264parse` / `h265parse`. Off in the default
     /// (caps-refinement-only) construction.
     reframe: bool,
-    /// Re-framing accumulator: Annex-B bytes received but not yet emitted as a
-    /// complete access unit (the trailing, possibly-incomplete AU is held until
-    /// the next AU's start code arrives). Empty outside re-framing mode.
-    accum: Vec<u8>,
-    /// Timing to stamp the access unit currently at the head of `accum` (captured
-    /// when that AU's first byte arrived). Re-framing only.
-    au_timing: FrameTiming,
+    /// Re-framing accumulator. Empty outside re-framing mode.
+    framer: AccessUnitFramer,
     /// Monotonic sequence number for emitted re-framed access units.
     seq: u64,
     /// Input framing, latched from the first frame (`Some(true)` = Annex-B start
@@ -126,28 +114,13 @@ pub struct NalParse<C: NalCodec> {
     /// once: a per-frame guess misclassifies a mid-AU Annex-B continuation buffer
     /// (no leading start code) as length-prefixed and mangles it. Re-framing only.
     input_is_annexb: Option<bool>,
-    /// Consecutive input buffers that began exactly where an access unit begins,
-    /// judged with the preceding bytes as context. At
-    /// [`AU_ALIGNED_CONFIRMATIONS`] the re-framer stops holding the trailing
-    /// access unit for the next buffer's start code and emits it with the buffer
-    /// it arrived in, which is the difference between a frame period of latency
-    /// and none on a live stream. Every access-unit-per-buffer upstream
-    /// (`RtspSrc`, the RTP depayloader, the mp4 / fMP4 / TS demuxers) earns it
-    /// within two buffers; a raw byte stream never does, because a chunk
-    /// boundary landing on an access-unit start twice running does not happen.
-    au_aligned_runs: u8,
-    /// Parameter-set re-insertion interval (the gst `config-interval`), in
-    /// seconds: `0` = never (default), `-1` = prepend the cached parameter sets to
-    /// every keyframe AU, `N > 0` = prepend at the first keyframe once `N` seconds
-    /// elapsed. Applied on the re-framing (access-unit-aligned Annex-B) output.
-    config_interval: i32,
+    /// Parameter-set re-insertion cadence, applied on the re-framing
+    /// (access-unit-aligned Annex-B) output.
+    config_interval: ConfigInterval,
     /// Cached parameter-set NAL bodies (start codes stripped), one bucket per
     /// [`NalCodec::PARAM_SET_TYPES`] entry in the same order, refreshed as they
     /// flow so a keyframe lacking inline parameter sets can be prefixed.
     cached: Vec<Vec<Vec<u8>>>,
-    /// PTS (ns) of the last AU the parameter sets were (re-)inserted before, for
-    /// the `config_interval > 0` time-based cadence.
-    last_config_pts_ns: Option<u64>,
     /// Last HDR10 static metadata seen in the stream's SEI. It describes the
     /// whole coded video sequence but is coded per IRAP, so it is latched and
     /// re-attached to every frame.
@@ -168,17 +141,13 @@ impl<C: NalCodec> Default for NalParse<C> {
     fn default() -> Self {
         Self {
             configured: false,
-            last_emitted_caps: None,
-            sps_emitted: 0,
+            caps: CapsRefinement::default(),
             reframe: false,
-            accum: Vec::new(),
-            au_timing: FrameTiming::default(),
+            framer: AccessUnitFramer::new(true),
             seq: 0,
             input_is_annexb: None,
-            au_aligned_runs: 0,
-            config_interval: 0,
+            config_interval: ConfigInterval::default(),
             cached: C::PARAM_SET_TYPES.iter().map(|_| Vec::new()).collect(),
-            last_config_pts_ns: None,
             #[cfg(feature = "metadata")]
             hdr: None,
             #[cfg(feature = "metadata")]
@@ -196,7 +165,7 @@ impl<C: NalCodec> core::fmt::Debug for NalParse<C> {
             .field("codec", &C::CODEC)
             .field("configured", &self.configured)
             .field("reframe", &self.reframe)
-            .field("config_interval", &self.config_interval)
+            .field("config_interval", &self.config_interval.seconds)
             .finish_non_exhaustive()
     }
 }
@@ -220,13 +189,13 @@ impl<C: NalCodec> NalParse<C> {
     /// for tests asserting re-emission is suppressed when the SPS geometry is
     /// unchanged.
     pub fn caps_changes_emitted(&self) -> u64 {
-        self.sps_emitted
+        self.caps.changes_emitted
     }
 
     /// Set the parameter-set re-insertion interval in seconds (`0` off, `-1` every
     /// keyframe, `N` every N seconds); see `config_interval`.
     pub fn with_config_interval(mut self, seconds: i32) -> Self {
-        self.config_interval = seconds;
+        self.config_interval.seconds = seconds;
         self
     }
 
@@ -239,99 +208,74 @@ impl<C: NalCodec> NalParse<C> {
         pts_ns: u64,
         keyframe: bool,
     ) -> Vec<u8> {
-        // Collect this AU's parameter sets, bucketed like `PARAM_SET_TYPES`, and
-        // note whether it already carries config (leads with / contains an SPS).
-        let mut collected: Vec<Vec<Vec<u8>>> =
-            C::PARAM_SET_TYPES.iter().map(|_| Vec::new()).collect();
+        if self.config_interval.is_off() {
+            return au;
+        }
+        let mut refreshed_buckets = 0u32;
         for nal in nal_units(&au) {
-            if let Some(t) = C::nal_type(nal) {
-                if let Some(idx) = C::PARAM_SET_TYPES.iter().position(|&x| x == t) {
-                    collected[idx].push(nal.to_vec());
-                }
+            let bucket = C::nal_type(nal)
+                .and_then(|nal_type| C::PARAM_SET_TYPES.iter().position(|&t| t == nal_type));
+            let Some(bucket) = bucket else {
+                continue;
+            };
+            if refreshed_buckets & (1 << bucket) == 0 {
+                self.cached[bucket].clear();
+                refreshed_buckets |= 1 << bucket;
             }
+            self.cached[bucket].push(nal.to_vec());
         }
-        let sps_idx = C::PARAM_SET_TYPES
+        let sps_bucket = C::PARAM_SET_TYPES
             .iter()
-            .position(|&x| x == C::SPS_TYPE)
+            .position(|&t| t == C::SPS_TYPE)
             .expect("SPS_TYPE must appear in PARAM_SET_TYPES");
-        let has_config = !collected[sps_idx].is_empty();
-        for (i, bucket) in collected.into_iter().enumerate() {
-            if !bucket.is_empty() {
-                self.cached[i] = bucket;
-            }
-        }
-
-        if self.config_interval == 0 || !keyframe {
+        let carries_config = refreshed_buckets & (1 << sps_bucket) != 0;
+        let have_cached_config = !self.cached[sps_bucket].is_empty();
+        if !self
+            .config_interval
+            .insertion_due(pts_ns, keyframe, carries_config, have_cached_config)
+        {
             return au;
         }
-        // The AU already carries config: nothing to add, but it resets the clock.
-        if has_config {
-            self.last_config_pts_ns = Some(pts_ns);
-            return au;
+        let mut prefixed = Vec::new();
+        for parameter_set in self.cached.iter().flatten() {
+            prefixed.extend_from_slice(&ANNEX_B_START_CODE);
+            prefixed.extend_from_slice(parameter_set);
         }
-        let due = if self.config_interval < 0 {
-            true // -1: every keyframe
-        } else {
-            let interval_ns = (self.config_interval as u64).saturating_mul(1_000_000_000);
-            match self.last_config_pts_ns {
-                None => true,
-                Some(last) => pts_ns.saturating_sub(last) >= interval_ns,
-            }
-        };
-        if !due || self.cached[sps_idx].is_empty() {
-            return au;
-        }
-        let mut out = Vec::with_capacity(au.len() + 96);
-        for ps in self.cached.iter().flatten() {
-            out.extend_from_slice(&[0, 0, 0, 1]);
-            out.extend_from_slice(ps);
-        }
-        out.extend_from_slice(&au);
-        self.last_config_pts_ns = Some(pts_ns);
-        out
+        prefixed.extend_from_slice(&au);
+        prefixed
     }
 
-    /// Refine caps from any SPS in `bytes` (suppressing an unchanged re-emit).
+    /// Refine caps from any SPS in `nals` (suppressing an unchanged re-emit).
     async fn refine_caps(
         &mut self,
-        bytes: &[u8],
+        nals: &[&[u8]],
         out: &mut dyn OutputSink,
     ) -> Result<(), G2gError> {
-        if let Some(info) = C::extract_sps_info(bytes) {
-            #[cfg(feature = "metadata")]
-            {
-                // The SEI timecode parse and its frame-rate field both come from
-                // the SPS, which may sit in an earlier access unit than the SEI.
-                if let Some(ctx) = info.pic_timing {
-                    self.pic_timing = ctx;
-                }
-                self.sps_framerate = info.framerate;
+        let Some(info) = C::sps_info(nals) else {
+            return Ok(());
+        };
+        #[cfg(feature = "metadata")]
+        {
+            // The SEI timecode parse and its frame-rate field both come from
+            // the SPS, which may sit in an earlier access unit than the SEI.
+            if let Some(ctx) = info.pic_timing {
+                self.pic_timing = ctx;
             }
-            let new_caps = Caps::CompressedVideo {
-                codec: C::CODEC,
-                width: Dim::Fixed(info.width),
-                height: Dim::Fixed(info.height),
-                framerate: info.framerate.map_or(Rate::Any, Rate::Fixed),
-                colorimetry: info.colorimetry,
-            };
-            if self.last_emitted_caps.as_ref() != Some(&new_caps) {
-                out.push(PipelinePacket::CapsChanged(new_caps.clone()))
-                    .await?;
-                self.last_emitted_caps = Some(new_caps);
-                self.sps_emitted += 1;
-            }
+            self.sps_framerate = info.framerate;
         }
-        Ok(())
+        let new_caps = Caps::CompressedVideo {
+            codec: C::CODEC,
+            width: Dim::Fixed(info.width),
+            height: Dim::Fixed(info.height),
+            framerate: info.framerate.map_or(Rate::Any, Rate::Fixed),
+            colorimetry: info.colorimetry,
+        };
+        self.caps.refine(new_caps, out).await
     }
 
-    /// Re-framing path for one input `DataFrame`: normalize to Annex-B,
-    /// accumulate, and emit every access unit whose end is known. An upstream
-    /// that hands over one access unit per buffer (proved by
-    /// [`au_aligned_runs`](Self::au_aligned_runs)) has its trailing access unit
-    /// emitted with the buffer it arrived in; otherwise the trailing,
-    /// possibly-incomplete AU stays buffered until its successor's start code
-    /// arrives, or `Eos`. Non-`System` domains pass through unchanged (the byte
-    /// re-framer only applies to host memory).
+    /// Re-framing path for one input `DataFrame`: normalize to Annex-B, then
+    /// emit every access unit the framer completes. Non-`System` domains pass
+    /// through unchanged (the byte re-framer only applies to host memory).
     async fn reframe_frame(
         &mut self,
         frame: Frame,
@@ -348,76 +292,15 @@ impl<C: NalCodec> NalParse<C> {
         let is_annexb = *self
             .input_is_annexb
             .get_or_insert_with(|| crate::annexb::is_annex_b(bytes));
-        if self.accum.is_empty() {
-            self.au_timing = frame.timing;
-        }
-        let boundary = self.accum.len();
-        if is_annexb {
-            self.accum.extend_from_slice(bytes);
+        let access_units = if is_annexb {
+            self.framer.push(bytes, frame.timing, C::unit_role)
         } else {
-            self.accum
-                .extend_from_slice(&crate::annexb::avcc_to_annexb(bytes));
-        }
-
-        // Guard against unbounded growth on non-conforming input: flush what we
-        // have as one AU rather than buffering forever.
-        if self.accum.len() > MAX_REFRAME_BYTES {
-            let au = core::mem::take(&mut self.accum);
-            let timing = self.au_timing;
-            self.emit_au(au, timing, out).await?;
-            return Ok(());
-        }
-
-        // Access-unit start offsets in the accumulator.
-        let starts = C::au_starts(&self.accum);
-        if starts.is_empty() {
-            return Ok(());
-        }
-        // Whether this buffer began a new access unit. `au_starts` calls the first
-        // start code of a buffer an AU start unconditionally, so the question only
-        // has an answer with the preceding bytes in front of it, which is why it is
-        // asked here and not on the buffer alone.
-        if boundary > 0 {
-            if starts.contains(&boundary) {
-                self.au_aligned_runs = self.au_aligned_runs.saturating_add(1);
-            } else {
-                self.au_aligned_runs = 0;
-            }
-        }
-
-        // With the upstream's alignment established, everything buffered is
-        // complete. Otherwise the last AU is still open: hold it back.
-        let emit_through = if self.au_aligned_runs >= AU_ALIGNED_CONFIRMATIONS {
-            self.accum.len()
-        } else if starts.len() >= 2 {
-            starts[starts.len() - 1]
-        } else {
-            return Ok(()); // at most one (still-open) AU buffered so far
+            let annexb = crate::annexb::avcc_to_annexb(bytes);
+            self.framer.push(&annexb, frame.timing, C::unit_role)
         };
-
-        let frame_timing = frame.timing;
-        // Split off what is complete, leaving any still-open tail behind.
-        let done = self.accum[..emit_through].to_vec();
-        self.accum.drain(..emit_through);
-        let mut bounds: Vec<usize> = starts
-            .iter()
-            .copied()
-            .filter(|&s| s < emit_through)
-            .collect();
-        bounds.push(emit_through);
-        for w in bounds.windows(2) {
-            let (lo, hi) = (w[0], w[1]);
-            // The head AU carries the timing captured when it began; AUs that both
-            // begin and end inside this buffer take this buffer's timing.
-            let timing = if lo == 0 {
-                self.au_timing
-            } else {
-                frame_timing
-            };
-            self.emit_au(done[lo..hi].to_vec(), timing, out).await?;
+        for (au, timing) in access_units {
+            self.emit_au(au, timing, out).await?;
         }
-        // A retained tail began within this buffer (its predecessor ended here).
-        self.au_timing = frame_timing;
         Ok(())
     }
 
@@ -433,8 +316,12 @@ impl<C: NalCodec> NalParse<C> {
         if au.is_empty() {
             return Ok(());
         }
-        self.refine_caps(&au, out).await?;
-        timing.keyframe = C::au_is_keyframe(&au);
+        let nals: Vec<&[u8]> = nal_units(&au).collect();
+        self.refine_caps(&nals, out).await?;
+        timing.keyframe = crate::annexb::nal_units_contain_keyframe(C::CODEC, nals.iter().copied());
+        #[cfg(feature = "metadata")]
+        let sei = crate::sei::parse_nals(nals.iter().copied(), C::CODEC, self.pic_timing);
+        drop(nals);
         // Re-insert cached parameter sets before this AU when config-interval calls
         // for it (no-op at interval 0 or when the AU already carries them).
         let au = self.apply_config_interval(au, timing.pts_ns, timing.keyframe);
@@ -445,7 +332,7 @@ impl<C: NalCodec> NalParse<C> {
             self.seq,
         );
         #[cfg(feature = "metadata")]
-        self.attach_stream_meta(&mut frame);
+        self.attach_stream_meta(&mut frame, sei);
         self.seq += 1;
         out.push(PipelinePacket::DataFrame(frame)).await?;
         Ok(())
@@ -460,11 +347,7 @@ impl<C: NalCodec> NalParse<C> {
     /// video sequence and is typically coded once per IRAP, so the last one seen
     /// is latched and re-attached to every frame.
     #[cfg(feature = "metadata")]
-    fn attach_stream_meta(&mut self, frame: &mut Frame) {
-        let Some(au) = frame.domain.as_system_slice() else {
-            return;
-        };
-        let info = crate::sei::parse_au(au, C::CODEC, self.pic_timing);
+    fn attach_stream_meta(&mut self, frame: &mut Frame, info: crate::sei::SeiInfo) {
         if let Some(hdr) = info.hdr {
             self.hdr = Some(hdr);
         }
@@ -540,10 +423,10 @@ impl<C: NalCodec> AsyncElement for NalParse<C> {
         match name {
             "config-interval" => {
                 let secs = value.as_int().ok_or(PropError::Type)?;
-                if !(-1..=3600).contains(&secs) {
+                if !(-1..=MAX_CONFIG_INTERVAL_SECONDS).contains(&secs) {
                     return Err(PropError::Value);
                 }
-                self.config_interval = secs as i32;
+                self.config_interval.seconds = secs as i32;
                 Ok(())
             }
             _ => Err(PropError::Unknown),
@@ -552,7 +435,7 @@ impl<C: NalCodec> AsyncElement for NalParse<C> {
 
     fn get_property(&self, name: &str) -> Option<PropValue> {
         match name {
-            "config-interval" => Some(PropValue::Int(self.config_interval as i64)),
+            "config-interval" => Some(PropValue::Int(self.config_interval.seconds as i64)),
             _ => None,
         }
     }
@@ -572,13 +455,21 @@ impl<C: NalCodec> AsyncElement for NalParse<C> {
                         return self.reframe_frame(frame, out).await;
                     }
                     if let Some(slice) = frame.domain.as_system_slice() {
+                        let nals: Vec<&[u8]> = nal_units_any(slice).collect();
                         // Surface the keyframe flag for trick-mode / keyframe seek
                         // (the parser is the producer that can detect it).
-                        let is_keyframe = C::au_is_keyframe(slice);
-                        self.refine_caps(slice, out).await?;
+                        let is_keyframe = crate::annexb::nal_units_contain_keyframe(
+                            C::CODEC,
+                            nals.iter().copied(),
+                        );
+                        self.refine_caps(&nals, out).await?;
+                        #[cfg(feature = "metadata")]
+                        let sei =
+                            crate::sei::parse_nals(nals.iter().copied(), C::CODEC, self.pic_timing);
+                        drop(nals);
                         frame.timing.keyframe = is_keyframe;
                         #[cfg(feature = "metadata")]
-                        self.attach_stream_meta(&mut frame);
+                        self.attach_stream_meta(&mut frame, sei);
                     }
                     out.push(PipelinePacket::DataFrame(frame)).await?;
                 }
@@ -589,8 +480,8 @@ impl<C: NalCodec> AsyncElement for NalParse<C> {
                     // A seek discontinuity: drop the partial AU rather than splice
                     // pre-seek bytes onto the post-seek stream. Reset SPS tracking
                     // so caps re-emit after the seek.
-                    self.accum.clear();
-                    self.last_emitted_caps = None;
+                    self.framer.clear();
+                    self.caps.forget();
                     out.push(PipelinePacket::Flush).await?;
                 }
                 // Segment is control: forward unchanged.
@@ -600,9 +491,7 @@ impl<C: NalCodec> AsyncElement for NalParse<C> {
                 PipelinePacket::Eos => {
                     // Flush the final buffered access unit at end of stream, else
                     // the last coded picture would never reach the decoder.
-                    if self.reframe && !self.accum.is_empty() {
-                        let au = core::mem::take(&mut self.accum);
-                        let timing = self.au_timing;
+                    if let Some((au, timing)) = self.framer.finish() {
                         self.emit_au(au, timing, out).await?;
                     }
                 }

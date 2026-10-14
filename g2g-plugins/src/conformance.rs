@@ -982,7 +982,7 @@ pub fn h265_parse() -> MaturityRecord {
 /// and clear on the rest.
 fn reframes_into<C: crate::nalparse::NalCodec>(aus: &[&[u8]]) -> bool {
     let stream: Vec<u8> = aus.concat();
-    let starts = C::au_starts(&stream);
+    let starts = crate::access_unit::access_unit_starts(&stream, true, C::unit_role);
     if starts.len() != aus.len() {
         return false;
     }
@@ -993,7 +993,8 @@ fn reframes_into<C: crate::nalparse::NalCodec>(aus: &[&[u8]]) -> bool {
         }
         at += au.len();
     }
-    at == stream.len() && C::au_is_keyframe(aus[0]) && !C::au_is_keyframe(aus[aus.len() - 1])
+    let keyframe = |au| crate::annexb::au_is_keyframe(C::CODEC, au);
+    at == stream.len() && keyframe(aus[0]) && !keyframe(aus[aus.len() - 1])
 }
 
 /// Conformance of the AV1 temporal-unit parser (`av1parse`): the OBU walk that

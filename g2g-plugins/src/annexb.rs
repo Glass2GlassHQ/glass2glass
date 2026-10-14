@@ -10,19 +10,29 @@ use g2g_core::{G2gError, VideoCodec};
 /// `from`. Returns `(start_index, payload_index)`: the offset of the start code
 /// and the offset of the NAL byte just past it.
 pub(crate) fn next_start_code(data: &[u8], from: usize) -> Option<(usize, usize)> {
-    let mut i = from;
-    while i + 3 <= data.len() {
-        if data[i] == 0 && data[i + 1] == 0 {
-            if data[i + 2] == 1 {
-                return Some((i, i + 3));
-            }
-            if i + 4 <= data.len() && data[i + 2] == 0 && data[i + 3] == 1 {
-                return Some((i, i + 4));
-            }
-        }
-        i += 1;
+    let prefix = find_start_code_prefix(data, from)?;
+    let payload = prefix + START_CODE_PREFIX.len();
+    if prefix > from && data[prefix - 1] == 0 {
+        return Some((prefix - 1, payload));
     }
-    None
+    Some((prefix, payload))
+}
+
+pub(crate) const START_CODE_PREFIX: [u8; 3] = [0, 0, 1];
+
+pub(crate) const ANNEX_B_START_CODE: [u8; 4] = [0, 0, 0, 1];
+
+pub(crate) fn find_start_code_prefix(data: &[u8], from: usize) -> Option<usize> {
+    let last_byte_offset = START_CODE_PREFIX.len() - 1;
+    let mut one_from = from.checked_add(last_byte_offset)?;
+    loop {
+        let one = one_from + memchr::memchr(1, data.get(one_from..)?)?;
+        let prefix = one - last_byte_offset;
+        if data[prefix..one] == START_CODE_PREFIX[..last_byte_offset] {
+            return Some(prefix);
+        }
+        one_from = one + 1;
+    }
 }
 
 /// Iterator over the NAL units of an Annex-B buffer, start codes stripped.
@@ -152,7 +162,16 @@ pub(crate) fn au_is_keyframe(codec: VideoCodec, au: &[u8]) -> bool {
     if codec == VideoCodec::Av1 {
         return crate::av1parse::av1_keyframe(au);
     }
-    nal_units_any(au).any(|n| match (codec, n.first()) {
+    nal_units_contain_keyframe(codec, nal_units_any(au))
+}
+
+/// [`au_is_keyframe`] over an access unit already split into its units (start
+/// codes stripped), for any codec but AV1.
+pub(crate) fn nal_units_contain_keyframe<'a>(
+    codec: VideoCodec,
+    mut units: impl Iterator<Item = &'a [u8]>,
+) -> bool {
+    units.any(|n| match (codec, n.first()) {
         (VideoCodec::H265, Some(b)) => (16..=23).contains(&((b >> 1) & 0x3F)),
         (VideoCodec::Mpeg4Part2, Some(&0xB6)) => n.get(1).is_some_and(|c| c >> 6 == 0),
         (VideoCodec::Mpeg4Part2, _) => false,

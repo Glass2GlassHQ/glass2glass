@@ -17,10 +17,11 @@ use alloc::vec::Vec;
 
 use g2g_core::{PropertySpec, VideoCodec};
 
+use crate::access_unit::StartCodeRole;
 use crate::annexb::BitReader;
 use crate::startcodeparse::{
     first_start_code_offset, sample_aspect, start_code_units, StartCodeCodec, StartCodeParse,
-    StartCodeRole, VideoGeometry, CONFIG_INTERVAL_PROPERTY, PIXEL_ASPECT_PROPERTY,
+    VideoGeometry, CONFIG_INTERVAL_PROPERTY, PIXEL_ASPECT_PROPERTY,
 };
 
 /// `visual_object_sequence_start_code`.
@@ -383,7 +384,11 @@ mod tests {
         let second = stream.len();
         stream.extend_from_slice(&[0, 0, 1, GROUP_OF_VOP_START_CODE, 0x00, 0x00, 0x0C]);
         stream.extend_from_slice(&vop(1, 0xBB));
-        let starts = crate::startcodeparse::au_starts_by(&stream, Mpeg4VideoCodec::start_code_role);
+        let starts = crate::access_unit::access_unit_starts(
+            &stream,
+            false,
+            crate::startcodeparse::unit_role::<Mpeg4VideoCodec>,
+        );
         assert_eq!(starts, vec![0, second]);
     }
 

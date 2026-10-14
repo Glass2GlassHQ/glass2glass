@@ -24,10 +24,11 @@
 
 use g2g_core::{PropertySpec, VideoCodec};
 
+use crate::access_unit::StartCodeRole;
 use crate::annexb::{strip_emulation_prevention, BitReader};
 use crate::startcodeparse::{
-    reduce_ratio, sample_aspect, start_code_units, StartCodeCodec, StartCodeParse, StartCodeRole,
-    VideoGeometry, PIXEL_ASPECT_PROPERTY,
+    reduce_ratio, sample_aspect, start_code_units, StartCodeCodec, StartCodeParse, VideoGeometry,
+    PIXEL_ASPECT_PROPERTY,
 };
 
 /// Sequence header BDU type.
@@ -423,7 +424,11 @@ mod tests {
         stream.extend_from_slice(&slice(0xCC));
         let second = stream.len();
         stream.extend_from_slice(&frame(0xBB));
-        let starts = crate::startcodeparse::au_starts_by(&stream, Vc1Codec::start_code_role);
+        let starts = crate::access_unit::access_unit_starts(
+            &stream,
+            false,
+            crate::startcodeparse::unit_role::<Vc1Codec>,
+        );
         assert_eq!(starts, vec![0, second]);
     }
 

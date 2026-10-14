@@ -15,11 +15,10 @@
 //! (`time_scale / (2 * num_units_in_tick)`, emitted as a Q16 `Rate::Fixed`);
 //! caps carry `Rate::Any` when the VUI omits it.
 
-use alloc::vec::Vec;
-
 use g2g_core::{Colorimetry, PropKind, PropertySpec, VideoCodec};
 
-use crate::annexb::{h264_nal_type, next_start_code, strip_emulation_prevention, BitReader};
+use crate::access_unit::StartCodeRole;
+use crate::annexb::{h264_nal_type, strip_emulation_prevention, BitReader};
 use crate::nalparse::{NalCodec, NalParse, SpsGeometry};
 
 /// H.264 access-unit parser: `CompressedVideo{H264}` in and out, refining caps
@@ -52,63 +51,38 @@ impl NalCodec for H264Codec {
         h264_nal_type(nal)
     }
 
-    fn au_starts(data: &[u8]) -> Vec<usize> {
-        h264_au_starts(data)
-    }
-
-    fn au_is_keyframe(au: &[u8]) -> bool {
-        crate::annexb::au_is_keyframe(Self::CODEC, au)
-    }
-
-    fn extract_sps_info(au: &[u8]) -> Option<SpsGeometry> {
-        extract_sps_info(au)
-    }
-}
-
-/// Start-code offsets in an Annex-B buffer at which a new H.264 access unit
-/// begins, per the ISO/IEC 14496-10 access-unit boundary rules. The first NAL
-/// always opens the first AU. Once a VCL NAL (types 1..=5) has been seen in the
-/// current AU, the next AU begins at: an access-unit delimiter (9), the parameter
-/// sets / SEI / prefix NALs that lead a picture (6, 7, 8, 14, 15, 18), or the
-/// first VCL NAL of a new coded picture (`first_mb_in_slice == 0`, i.e. the first
-/// RBSP bit is 1). Slices 2..N of one picture carry `first_mb_in_slice > 0` and
-/// stay in the same AU. This is the framing GStreamer's `h264parse` applies; a
-/// decoder needs it because it parses one packet as one coded picture.
-fn h264_au_starts(data: &[u8]) -> Vec<usize> {
-    let mut starts = Vec::new();
-    let mut seen_vcl = false;
-    let mut i = 0;
-    while let Some((sc, begin)) = next_start_code(data, i) {
-        let nal_type = data.get(begin).map(|b| b & 0x1F).unwrap_or(0);
-        let is_vcl = (1..=5).contains(&nal_type);
-        let starts_au = if !seen_vcl {
-            // Leading NALs of the first AU: only the very first opens an AU; the
-            // rest (more parameter sets, the first VCL) join it.
-            starts.is_empty()
-        } else if is_vcl {
-            // A new picture's first slice has first_mb_in_slice == 0, encoded as a
-            // leading 1 bit in the slice RBSP (ue(v) of 0).
-            data.get(begin + 1).map(|b| b & 0x80 != 0).unwrap_or(false)
+    /// A new picture's first slice has `first_mb_in_slice == 0`, coded as a
+    /// lone leading 1 bit of the slice RBSP. Slices 2..N of one picture carry a
+    /// larger value and stay in its access unit. Ahead of a picture, an
+    /// access-unit delimiter (9) and the parameter sets / SEI / prefix NALs that
+    /// lead a picture (6, 7, 8, 14, 15, 18) open the next access unit
+    /// (ISO/IEC 14496-10 7.4.1.2.3, the framing GStreamer's `h264parse` applies).
+    fn unit_role(unit: &[u8]) -> Option<StartCodeRole> {
+        let nal_type = h264_nal_type(unit)?;
+        if (1..=5).contains(&nal_type) {
+            let first_slice_of_picture = unit.get(1)? & 0x80 != 0;
+            return Some(if first_slice_of_picture {
+                StartCodeRole::Picture
+            } else {
+                StartCodeRole::PictureContinuation
+            });
+        }
+        Some(if matches!(nal_type, 6 | 7 | 8 | 9 | 14 | 15 | 18) {
+            StartCodeRole::Leads
         } else {
-            // A non-VCL that can only lead the next access unit.
-            matches!(nal_type, 6 | 7 | 8 | 9 | 14 | 15 | 18)
-        };
-        if starts_au {
-            starts.push(sc);
-            seen_vcl = false;
-        }
-        if is_vcl {
-            seen_vcl = true;
-        }
-        i = begin;
+            StartCodeRole::Continues
+        })
     }
-    starts
+
+    fn sps_info(nals: &[&[u8]]) -> Option<SpsGeometry> {
+        sps_info(nals.iter().copied())
+    }
 }
 
-/// Walk the NALs of `au` (Annex-B or AVCC, auto-detected), returning the info
-/// from the first SPS NAL (nal_unit_type == 7) we can fully parse.
-fn extract_sps_info(au: &[u8]) -> Option<SpsGeometry> {
-    for nal in crate::annexb::nal_units_any(au) {
+/// The info from the first SPS NAL (nal_unit_type == 7) among `nals` we can
+/// fully parse.
+fn sps_info<'a>(nals: impl IntoIterator<Item = &'a [u8]>) -> Option<SpsGeometry> {
+    for nal in nals {
         if nal.is_empty() {
             continue;
         }
@@ -486,14 +460,16 @@ fn max_dpb_mbs(level_idc: u8) -> u32 {
 /// under `--cfg fuzzing` (cargo-fuzz) so the normal public API is unchanged.
 #[cfg(fuzzing)]
 pub fn fuzz_parse(data: &[u8]) {
-    let _ = extract_sps_info(data);
+    let _ = H264Codec::extract_sps_info(data);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::access_unit::access_unit_starts;
     use crate::annexb::{nal_units, BitWriter};
     use alloc::vec;
+    use alloc::vec::Vec;
 
     use g2g_core::{
         AsyncElement, Caps, CapsConstraint, Dim, G2gError, OutputSink, PipelinePacket, Rate,
@@ -682,7 +658,7 @@ mod tests {
         // Must not panic; the dimension *16 saturates to u32::MAX and the even
         // larger crop then saturating-subtracts it back to 0 (vs an overflow
         // panic in debug or a wrapped bogus value in release).
-        let info = extract_sps_info(&au).expect("parses without overflow");
+        let info = H264Codec::extract_sps_info(&au).expect("parses without overflow");
         assert_eq!((info.width, info.height), (0, 0));
     }
 
@@ -779,14 +755,14 @@ mod tests {
     fn recovers_bt709_colorimetry_from_vui() {
         // CICP 1/1/1 + limited range is exactly the bt709 preset.
         let stream = build_annexb_sps_with_color(1, 1, 1, false);
-        let info = extract_sps_info(&stream).expect("SPS with colour must parse");
+        let info = H264Codec::extract_sps_info(&stream).expect("SPS with colour must parse");
         assert_eq!(info.colorimetry, Colorimetry::BT709);
     }
 
     #[test]
     fn absent_vui_colorimetry_stays_unknown() {
         let stream = build_test_annexb_sps(1280, 720);
-        let info = extract_sps_info(&stream).expect("SPS must parse");
+        let info = H264Codec::extract_sps_info(&stream).expect("SPS must parse");
         assert_eq!(info.colorimetry, Colorimetry::UNKNOWN);
     }
 
@@ -796,7 +772,7 @@ mod tests {
         // guess into caps: each field falls back to Unknown. The coded
         // full-range flag is real, so the range stays concrete.
         let stream = build_annexb_sps_with_color(200, 250, 77, true);
-        let info = extract_sps_info(&stream).expect("SPS must parse");
+        let info = H264Codec::extract_sps_info(&stream).expect("SPS must parse");
         assert_eq!(
             info.colorimetry,
             Colorimetry {
@@ -834,7 +810,7 @@ mod tests {
     #[test]
     fn round_trips_a_1280x720_sps() {
         let stream = build_test_annexb_sps(1280, 720);
-        let info = extract_sps_info(&stream).expect("SPS must parse");
+        let info = H264Codec::extract_sps_info(&stream).expect("SPS must parse");
         assert_eq!((info.width, info.height), (1280, 720));
         assert_eq!(
             info.framerate, None,
@@ -847,7 +823,7 @@ mod tests {
         let stream = build_test_annexb_sps(1920, 1088);
         // height 1088 because 1080 is not a multiple of 16; the test
         // builder asserts on alignment. Real 1080p streams use cropping.
-        let info = extract_sps_info(&stream).expect("SPS must parse");
+        let info = H264Codec::extract_sps_info(&stream).expect("SPS must parse");
         assert_eq!((info.width, info.height), (1920, 1088));
     }
 
@@ -859,7 +835,7 @@ mod tests {
         let nal = &annexb[4..]; // drop the 00 00 00 01 start code
         let mut avcc = (nal.len() as u32).to_be_bytes().to_vec();
         avcc.extend_from_slice(nal);
-        let info = extract_sps_info(&avcc).expect("AVCC SPS must parse");
+        let info = H264Codec::extract_sps_info(&avcc).expect("AVCC SPS must parse");
         assert_eq!((info.width, info.height), (1280, 720));
     }
 
@@ -867,7 +843,7 @@ mod tests {
     fn recovers_framerate_from_vui_timing() {
         // num_units_in_tick = 1, time_scale = 60 -> 30 fps.
         let stream = build_annexb_sps_with_timing(1280, 720, 1, 60);
-        let info = extract_sps_info(&stream).expect("SPS with VUI must parse");
+        let info = H264Codec::extract_sps_info(&stream).expect("SPS with VUI must parse");
         assert_eq!((info.width, info.height), (1280, 720));
         assert_eq!(info.framerate, Some(30 << 16), "30 fps in Q16");
     }
@@ -876,12 +852,12 @@ mod tests {
     fn ignores_non_sps_nals() {
         // A stream containing only a slice NAL (type 5 = IDR) returns None.
         let stream = [0u8, 0, 0, 1, 0x65, 0xAA, 0xBB, 0xCC];
-        assert!(extract_sps_info(&stream).is_none());
+        assert!(H264Codec::extract_sps_info(&stream).is_none());
     }
 
     #[test]
     fn returns_none_on_empty_input() {
-        assert!(extract_sps_info(&[]).is_none());
+        assert!(H264Codec::extract_sps_info(&[]).is_none());
     }
 
     #[test]
@@ -1197,7 +1173,7 @@ mod tests {
         stream.extend_from_slice(&annexb_vcl(false, 2)); // same picture (continuation)
         let b_off = stream.len();
         stream.extend_from_slice(&annexb_vcl(true, 3)); // new picture
-        let starts = h264_au_starts(&stream);
+        let starts = access_unit_starts(&stream, true, H264Codec::unit_role);
         assert_eq!(
             starts,
             vec![0, b_off],
