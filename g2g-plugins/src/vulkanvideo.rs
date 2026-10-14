@@ -970,91 +970,18 @@ pub fn parse_h265_sps(rbsp: &[u8]) -> Option<H265Sps> {
     let pic_height_in_luma_samples = head.pic_height_in_luma_samples;
     let conformance_window_flag = u32::from(head.conformance_window_flag);
     let [conf_l, conf_r, conf_t, conf_b] = head.conformance_window;
-    let bit_depth_luma_minus8 = br.read_ue()? as u8;
-    let bit_depth_chroma_minus8 = br.read_ue()? as u8;
-    let log2_max_pic_order_cnt_lsb_minus4 = br.read_ue()? as u8;
-
-    let sps_sub_layer_ordering_info_present_flag = br.read_bit()?;
-    let mut max_dec_pic_buffering_minus1 = [0u8; 7];
-    let mut max_num_reorder_pics = [0u8; 7];
-    let mut max_latency_increase_plus1 = [0u32; 7];
-    let start = if sps_sub_layer_ordering_info_present_flag == 1 {
-        0
-    } else {
-        sps_max_sub_layers_minus1 as usize
-    };
-    for i in start..=sps_max_sub_layers_minus1 as usize {
-        if i >= 7 {
-            return None;
-        }
-        max_dec_pic_buffering_minus1[i] = br.read_ue()? as u8;
-        max_num_reorder_pics[i] = br.read_ue()? as u8;
-        max_latency_increase_plus1[i] = br.read_ue()?;
-    }
-
-    let log2_min_luma_coding_block_size_minus3 = br.read_ue()? as u8;
-    let log2_diff_max_min_luma_coding_block_size = br.read_ue()? as u8;
-    let log2_min_luma_transform_block_size_minus2 = br.read_ue()? as u8;
-    let log2_diff_max_min_luma_transform_block_size = br.read_ue()? as u8;
-    let max_transform_hierarchy_depth_inter = br.read_ue()? as u8;
-    let max_transform_hierarchy_depth_intra = br.read_ue()? as u8;
-
-    let scaling_list_enabled_flag = br.read_bit()?;
-    if scaling_list_enabled_flag == 1 {
-        // sps_scaling_list_data_present_flag: explicit lists are not carried into
-        // the Std SPS, so reject rather than mis-decode.
-        if br.read_bit()? == 1 {
-            return None;
-        }
-    }
-    let amp_enabled_flag = br.read_bit()?;
-    let sample_adaptive_offset_enabled_flag = br.read_bit()?;
-    let pcm_enabled_flag = br.read_bit()?;
-    let mut pcm_sample_bit_depth_luma_minus1 = 0u8;
-    let mut pcm_sample_bit_depth_chroma_minus1 = 0u8;
-    let mut log2_min_pcm_luma_coding_block_size_minus3 = 0u8;
-    let mut log2_diff_max_min_pcm_luma_coding_block_size = 0u8;
-    let mut pcm_loop_filter_disabled_flag = 0u32;
-    if pcm_enabled_flag == 1 {
-        pcm_sample_bit_depth_luma_minus1 = br.read_bits(4)? as u8;
-        pcm_sample_bit_depth_chroma_minus1 = br.read_bits(4)? as u8;
-        log2_min_pcm_luma_coding_block_size_minus3 = br.read_ue()? as u8;
-        log2_diff_max_min_pcm_luma_coding_block_size = br.read_ue()? as u8;
-        pcm_loop_filter_disabled_flag = br.read_bit()?;
-    }
-
-    let num_short_term_ref_pic_sets = br.read_ue()?;
-    if num_short_term_ref_pic_sets > 64 {
+    let mut middle = crate::h265parse::H265SpsMiddle::default();
+    crate::h265parse::read_h265_sps_middle(
+        &mut br,
+        u32::from(sps_max_sub_layers_minus1),
+        &mut middle,
+    )?;
+    // explicit lists are not carried into the Std SPS, so reject rather than mis-decode
+    if middle.sps_scaling_list_data_present_flag {
         return None;
     }
-    let mut short_term_rps = alloc::vec::Vec::with_capacity(num_short_term_ref_pic_sets as usize);
-    for idx in 0..num_short_term_ref_pic_sets as usize {
-        let (rps, _) = parse_h265_short_term_rps(
-            &mut br,
-            idx,
-            num_short_term_ref_pic_sets as usize,
-            &short_term_rps,
-        )?;
-        short_term_rps.push(rps);
-    }
-
-    let long_term_ref_pics_present_flag = br.read_bit()?;
-    let mut num_long_term_ref_pics_sps = 0u32;
-    let mut lt_ref_pic_poc_lsb_sps = [0u32; 32];
-    let mut used_by_curr_pic_lt_sps_flag = [false; 32];
-    if long_term_ref_pics_present_flag == 1 {
-        num_long_term_ref_pics_sps = br.read_ue()?;
-        if num_long_term_ref_pics_sps > 32 {
-            return None;
-        }
-        for i in 0..num_long_term_ref_pics_sps as usize {
-            lt_ref_pic_poc_lsb_sps[i] =
-                br.read_bits(log2_max_pic_order_cnt_lsb_minus4 as u32 + 4)?;
-            used_by_curr_pic_lt_sps_flag[i] = br.read_bit()? == 1;
-        }
-    }
-    let sps_temporal_mvp_enabled_flag = br.read_bit()?;
-    let strong_intra_smoothing_enabled_flag = br.read_bit()?;
+    let log2_max_pic_order_cnt_lsb_minus4 = middle.log2_max_pic_order_cnt_lsb_minus4?;
+    let ordering = middle.sub_layer_ordering?;
     // The Std mapping needs nothing past here, but the VUI colour description
     // (same layout as H.264's) drives the YUV -> RGB conversion. Best-effort: a
     // truncated / absent VUI leaves the colour unspecified.
@@ -1086,36 +1013,44 @@ pub fn parse_h265_sps(rbsp: &[u8]) -> Option<H265Sps> {
         conf_win_right_offset: conf_r,
         conf_win_top_offset: conf_t,
         conf_win_bottom_offset: conf_b,
-        bit_depth_luma_minus8,
-        bit_depth_chroma_minus8,
-        log2_max_pic_order_cnt_lsb_minus4,
-        sps_sub_layer_ordering_info_present_flag: sps_sub_layer_ordering_info_present_flag as u8,
-        max_dec_pic_buffering_minus1,
-        max_num_reorder_pics,
-        max_latency_increase_plus1,
-        log2_min_luma_coding_block_size_minus3,
-        log2_diff_max_min_luma_coding_block_size,
-        log2_min_luma_transform_block_size_minus2,
-        log2_diff_max_min_luma_transform_block_size,
-        max_transform_hierarchy_depth_inter,
-        max_transform_hierarchy_depth_intra,
-        scaling_list_enabled_flag: scaling_list_enabled_flag as u8,
-        amp_enabled_flag: amp_enabled_flag as u8,
-        sample_adaptive_offset_enabled_flag: sample_adaptive_offset_enabled_flag as u8,
-        pcm_enabled_flag: pcm_enabled_flag as u8,
-        pcm_sample_bit_depth_luma_minus1,
-        pcm_sample_bit_depth_chroma_minus1,
-        log2_min_pcm_luma_coding_block_size_minus3,
-        log2_diff_max_min_pcm_luma_coding_block_size,
-        pcm_loop_filter_disabled_flag: pcm_loop_filter_disabled_flag as u8,
-        num_short_term_ref_pic_sets: num_short_term_ref_pic_sets as u8,
-        short_term_rps,
-        long_term_ref_pics_present_flag: long_term_ref_pics_present_flag as u8,
-        num_long_term_ref_pics_sps: num_long_term_ref_pics_sps as u8,
-        lt_ref_pic_poc_lsb_sps,
-        used_by_curr_pic_lt_sps_flag,
-        sps_temporal_mvp_enabled_flag: sps_temporal_mvp_enabled_flag as u8,
-        strong_intra_smoothing_enabled_flag: strong_intra_smoothing_enabled_flag as u8,
+        bit_depth_luma_minus8: middle.bit_depth_luma_minus8 as u8,
+        bit_depth_chroma_minus8: middle.bit_depth_chroma_minus8 as u8,
+        log2_max_pic_order_cnt_lsb_minus4: log2_max_pic_order_cnt_lsb_minus4 as u8,
+        sps_sub_layer_ordering_info_present_flag: u8::from(ordering.info_present_flag),
+        max_dec_pic_buffering_minus1: ordering.max_dec_pic_buffering_minus1.map(|v| v as u8),
+        max_num_reorder_pics: ordering.max_num_reorder_pics.map(|v| v as u8),
+        max_latency_increase_plus1: ordering.max_latency_increase_plus1,
+        log2_min_luma_coding_block_size_minus3: middle.log2_min_luma_coding_block_size_minus3 as u8,
+        log2_diff_max_min_luma_coding_block_size: middle.log2_diff_max_min_luma_coding_block_size
+            as u8,
+        log2_min_luma_transform_block_size_minus2: middle.log2_min_luma_transform_block_size_minus2
+            as u8,
+        log2_diff_max_min_luma_transform_block_size: middle
+            .log2_diff_max_min_luma_transform_block_size
+            as u8,
+        max_transform_hierarchy_depth_inter: middle.max_transform_hierarchy_depth_inter as u8,
+        max_transform_hierarchy_depth_intra: middle.max_transform_hierarchy_depth_intra as u8,
+        scaling_list_enabled_flag: u8::from(middle.scaling_list_enabled_flag),
+        amp_enabled_flag: u8::from(middle.amp_enabled_flag),
+        sample_adaptive_offset_enabled_flag: u8::from(middle.sample_adaptive_offset_enabled_flag),
+        pcm_enabled_flag: u8::from(middle.pcm_enabled_flag),
+        pcm_sample_bit_depth_luma_minus1: middle.pcm_sample_bit_depth_luma_minus1 as u8,
+        pcm_sample_bit_depth_chroma_minus1: middle.pcm_sample_bit_depth_chroma_minus1 as u8,
+        log2_min_pcm_luma_coding_block_size_minus3: middle
+            .log2_min_pcm_luma_coding_block_size_minus3
+            as u8,
+        log2_diff_max_min_pcm_luma_coding_block_size: middle
+            .log2_diff_max_min_pcm_luma_coding_block_size
+            as u8,
+        pcm_loop_filter_disabled_flag: u8::from(middle.pcm_loop_filter_disabled_flag),
+        num_short_term_ref_pic_sets: middle.short_term_rps.len() as u8,
+        short_term_rps: middle.short_term_rps,
+        long_term_ref_pics_present_flag: u8::from(middle.long_term_ref_pics_present_flag),
+        num_long_term_ref_pics_sps: middle.num_long_term_ref_pics_sps as u8,
+        lt_ref_pic_poc_lsb_sps: middle.lt_ref_pic_poc_lsb_sps,
+        used_by_curr_pic_lt_sps_flag: middle.used_by_curr_pic_lt_sps_flag,
+        sps_temporal_mvp_enabled_flag: u8::from(middle.sps_temporal_mvp_enabled_flag),
+        strong_intra_smoothing_enabled_flag: u8::from(middle.strong_intra_smoothing_enabled_flag),
         color_primaries,
         transfer_characteristics,
         matrix_coefficients,

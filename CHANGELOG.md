@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1422: h265parse and the Vulkan decoder share one walk of the H.265 SPS between the conformance window and the VUI.
 - M1421: `st2110audiortp` takes sample width from `AudioFormat::bytes_per_sample`.
 - M1420: 61 integration test files use the shared collecting sink.
 - M1419: source unit tests in seven elements use the shared collecting sink.

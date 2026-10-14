@@ -298,71 +298,16 @@ fn parse_vui_framerate(
     sps_max_sub_layers_minus1: u32,
     tail: &mut SpsTail,
 ) -> Option<u32> {
-    br.read_ue()?; // bit_depth_luma_minus8
-    br.read_ue()?; // bit_depth_chroma_minus8
-    let log2_max_pic_order_cnt_lsb_minus4 = br.read_ue()?;
-    if log2_max_pic_order_cnt_lsb_minus4 > crate::poc::MAX_LOG2_MINUS4 {
-        return None;
-    }
-    tail.log2_max_pic_order_cnt_lsb = Some(log2_max_pic_order_cnt_lsb_minus4 + 4);
-    // sps_sub_layer_ordering_info_present_flag selects one triple or one per
-    // sub-layer. The last iteration is the highest sub-layer, the one the
-    // reorder bound is read from.
-    let start = if br.read_bit()? == 1 {
-        0
-    } else {
-        sps_max_sub_layers_minus1
-    };
-    for _ in start..=sps_max_sub_layers_minus1 {
-        br.read_ue()?; // sps_max_dec_pic_buffering_minus1
-        tail.max_num_reorder_pics = Some(br.read_ue()?);
-        br.read_ue()?; // sps_max_latency_increase_plus1
-    }
-    br.read_ue()?; // log2_min_luma_coding_block_size_minus3
-    br.read_ue()?; // log2_diff_max_min_luma_coding_block_size
-    br.read_ue()?; // log2_min_luma_transform_block_size_minus2
-    br.read_ue()?; // log2_diff_max_min_luma_transform_block_size
-    br.read_ue()?; // max_transform_hierarchy_depth_inter
-    br.read_ue()?; // max_transform_hierarchy_depth_intra
-    if br.read_bit()? == 1 {
-        // scaling_list_enabled_flag -> sps_scaling_list_data_present_flag
-        if br.read_bit()? == 1 {
-            skip_scaling_list_data(br)?;
-        }
-    }
-    br.read_bit()?; // amp_enabled_flag
-    br.read_bit()?; // sample_adaptive_offset_enabled_flag
-    if br.read_bit()? == 1 {
-        // pcm_enabled_flag
-        br.read_bits(4)?; // pcm_sample_bit_depth_luma_minus1
-        br.read_bits(4)?; // pcm_sample_bit_depth_chroma_minus1
-        br.read_ue()?; // log2_min_pcm_luma_coding_block_size_minus3
-        br.read_ue()?; // log2_diff_max_min_pcm_luma_coding_block_size
-        br.read_bit()?; // pcm_loop_filter_disabled_flag
-    }
-    let num_short_term_ref_pic_sets = br.read_ue()?;
-    if num_short_term_ref_pic_sets > 64 {
-        return None;
-    }
-    let mut sets = Vec::with_capacity(num_short_term_ref_pic_sets as usize);
-    for idx in 0..num_short_term_ref_pic_sets as usize {
-        let (set, _) =
-            parse_h265_short_term_rps(br, idx, num_short_term_ref_pic_sets as usize, &sets)?;
-        sets.push(set);
-    }
-    if br.read_bit()? == 1 {
-        // long_term_ref_pics_present_flag
-        let num_long_term_ref_pics_sps = br.read_ue()?;
-        if num_long_term_ref_pics_sps > 32 {
-            return None;
-        }
-        for _ in 0..num_long_term_ref_pics_sps {
-            br.skip_bits(log2_max_pic_order_cnt_lsb_minus4 as usize + 4)?; // lt_ref_pic_poc_lsb_sps
-            br.read_bit()?; // used_by_curr_pic_lt_sps_flag
-        }
-    }
-    br.read_bit()?; // sps_temporal_mvp_enabled_flag
-    br.read_bit()?; // strong_intra_smoothing_enabled_flag
+    let mut middle = H265SpsMiddle::default();
+    let walked = read_h265_sps_middle(br, sps_max_sub_layers_minus1, &mut middle);
+    tail.log2_max_pic_order_cnt_lsb = middle
+        .log2_max_pic_order_cnt_lsb_minus4
+        .map(|log2_minus4| log2_minus4 + 4);
+    // the highest sub-layer's bound is the one the output process uses
+    tail.max_num_reorder_pics = middle
+        .sub_layer_ordering
+        .map(|ordering| ordering.max_num_reorder_pics[sps_max_sub_layers_minus1 as usize]);
+    walked?;
     if br.read_bit()? != 1 {
         return None; // vui_parameters_present_flag
     }
@@ -393,6 +338,148 @@ fn parse_vui_framerate(
     let num_units_in_tick = br.read_bits(32)?;
     let time_scale = br.read_bits(32)?;
     framerate_q16_from_fraction(time_scale, num_units_in_tick)
+}
+
+// sps_max_sub_layers_minus1 is at most 6
+pub(crate) const H265_MAX_SUB_LAYERS: usize = 7;
+const H265_MAX_SHORT_TERM_REF_PIC_SETS: u32 = 64;
+pub(crate) const H265_MAX_LONG_TERM_REF_PICS_SPS: usize = 32;
+
+/// `sps_max_dec_pic_buffering_minus1`, `sps_max_num_reorder_pics` and
+/// `sps_max_latency_increase_plus1` per sub-layer. Without
+/// `sps_sub_layer_ordering_info_present_flag` only the highest is coded.
+#[cfg_attr(not(feature = "vulkan-video"), allow(dead_code))]
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct H265SubLayerOrdering {
+    pub info_present_flag: bool,
+    pub max_dec_pic_buffering_minus1: [u32; H265_MAX_SUB_LAYERS],
+    pub max_num_reorder_pics: [u32; H265_MAX_SUB_LAYERS],
+    pub max_latency_increase_plus1: [u32; H265_MAX_SUB_LAYERS],
+}
+
+/// The H.265 SPS fields between the conformance window and the VUI (7.3.2.2).
+/// The `Option` fields stay `None` until the walk gets past them, so a caller
+/// keeps what was read before a truncated or out-of-range field.
+// only the Vulkan decoder reads every field
+#[cfg_attr(not(feature = "vulkan-video"), allow(dead_code))]
+#[derive(Debug, Default)]
+pub(crate) struct H265SpsMiddle {
+    pub bit_depth_luma_minus8: u32,
+    pub bit_depth_chroma_minus8: u32,
+    pub log2_max_pic_order_cnt_lsb_minus4: Option<u32>,
+    pub sub_layer_ordering: Option<H265SubLayerOrdering>,
+    pub log2_min_luma_coding_block_size_minus3: u32,
+    pub log2_diff_max_min_luma_coding_block_size: u32,
+    pub log2_min_luma_transform_block_size_minus2: u32,
+    pub log2_diff_max_min_luma_transform_block_size: u32,
+    pub max_transform_hierarchy_depth_inter: u32,
+    pub max_transform_hierarchy_depth_intra: u32,
+    pub scaling_list_enabled_flag: bool,
+    pub sps_scaling_list_data_present_flag: bool,
+    pub amp_enabled_flag: bool,
+    pub sample_adaptive_offset_enabled_flag: bool,
+    pub pcm_enabled_flag: bool,
+    pub pcm_sample_bit_depth_luma_minus1: u32,
+    pub pcm_sample_bit_depth_chroma_minus1: u32,
+    pub log2_min_pcm_luma_coding_block_size_minus3: u32,
+    pub log2_diff_max_min_pcm_luma_coding_block_size: u32,
+    pub pcm_loop_filter_disabled_flag: bool,
+    pub short_term_rps: Vec<H265ShortTermRps>,
+    pub long_term_ref_pics_present_flag: bool,
+    pub num_long_term_ref_pics_sps: u32,
+    pub lt_ref_pic_poc_lsb_sps: [u32; H265_MAX_LONG_TERM_REF_PICS_SPS],
+    pub used_by_curr_pic_lt_sps_flag: [bool; H265_MAX_LONG_TERM_REF_PICS_SPS],
+    pub sps_temporal_mvp_enabled_flag: bool,
+    pub strong_intra_smoothing_enabled_flag: bool,
+}
+
+/// Walk the SPS from `bit_depth_luma_minus8` through
+/// `strong_intra_smoothing_enabled_flag`, filling `middle` as it goes. `None`
+/// on truncation or an out-of-range count, with `middle` holding what was read.
+pub(crate) fn read_h265_sps_middle(
+    br: &mut BitReader,
+    sps_max_sub_layers_minus1: u32,
+    middle: &mut H265SpsMiddle,
+) -> Option<()> {
+    middle.bit_depth_luma_minus8 = br.read_ue()?;
+    middle.bit_depth_chroma_minus8 = br.read_ue()?;
+    let log2_max_pic_order_cnt_lsb_minus4 = br.read_ue()?;
+    if log2_max_pic_order_cnt_lsb_minus4 > crate::poc::MAX_LOG2_MINUS4 {
+        return None;
+    }
+    middle.log2_max_pic_order_cnt_lsb_minus4 = Some(log2_max_pic_order_cnt_lsb_minus4);
+
+    let highest_sub_layer = sps_max_sub_layers_minus1 as usize;
+    if highest_sub_layer >= H265_MAX_SUB_LAYERS {
+        return None;
+    }
+    let mut ordering = H265SubLayerOrdering {
+        info_present_flag: br.read_bit()? == 1,
+        ..H265SubLayerOrdering::default()
+    };
+    let first_coded = if ordering.info_present_flag {
+        0
+    } else {
+        highest_sub_layer
+    };
+    for sub_layer in first_coded..=highest_sub_layer {
+        ordering.max_dec_pic_buffering_minus1[sub_layer] = br.read_ue()?;
+        ordering.max_num_reorder_pics[sub_layer] = br.read_ue()?;
+        ordering.max_latency_increase_plus1[sub_layer] = br.read_ue()?;
+    }
+    middle.sub_layer_ordering = Some(ordering);
+
+    middle.log2_min_luma_coding_block_size_minus3 = br.read_ue()?;
+    middle.log2_diff_max_min_luma_coding_block_size = br.read_ue()?;
+    middle.log2_min_luma_transform_block_size_minus2 = br.read_ue()?;
+    middle.log2_diff_max_min_luma_transform_block_size = br.read_ue()?;
+    middle.max_transform_hierarchy_depth_inter = br.read_ue()?;
+    middle.max_transform_hierarchy_depth_intra = br.read_ue()?;
+    middle.scaling_list_enabled_flag = br.read_bit()? == 1;
+    if middle.scaling_list_enabled_flag {
+        middle.sps_scaling_list_data_present_flag = br.read_bit()? == 1;
+        if middle.sps_scaling_list_data_present_flag {
+            skip_scaling_list_data(br)?;
+        }
+    }
+    middle.amp_enabled_flag = br.read_bit()? == 1;
+    middle.sample_adaptive_offset_enabled_flag = br.read_bit()? == 1;
+    middle.pcm_enabled_flag = br.read_bit()? == 1;
+    if middle.pcm_enabled_flag {
+        middle.pcm_sample_bit_depth_luma_minus1 = br.read_bits(4)?;
+        middle.pcm_sample_bit_depth_chroma_minus1 = br.read_bits(4)?;
+        middle.log2_min_pcm_luma_coding_block_size_minus3 = br.read_ue()?;
+        middle.log2_diff_max_min_pcm_luma_coding_block_size = br.read_ue()?;
+        middle.pcm_loop_filter_disabled_flag = br.read_bit()? == 1;
+    }
+
+    let num_short_term_ref_pic_sets = br.read_ue()?;
+    if num_short_term_ref_pic_sets > H265_MAX_SHORT_TERM_REF_PIC_SETS {
+        return None;
+    }
+    let num_sets = num_short_term_ref_pic_sets as usize;
+    middle.short_term_rps = Vec::with_capacity(num_sets);
+    for idx in 0..num_sets {
+        let (set, _) = parse_h265_short_term_rps(br, idx, num_sets, &middle.short_term_rps)?;
+        middle.short_term_rps.push(set);
+    }
+
+    middle.long_term_ref_pics_present_flag = br.read_bit()? == 1;
+    if middle.long_term_ref_pics_present_flag {
+        let num_long_term_ref_pics_sps = br.read_ue()?;
+        if num_long_term_ref_pics_sps as usize > H265_MAX_LONG_TERM_REF_PICS_SPS {
+            return None;
+        }
+        middle.num_long_term_ref_pics_sps = num_long_term_ref_pics_sps;
+        for lt in 0..num_long_term_ref_pics_sps as usize {
+            middle.lt_ref_pic_poc_lsb_sps[lt] =
+                br.read_bits(log2_max_pic_order_cnt_lsb_minus4 + 4)?;
+            middle.used_by_curr_pic_lt_sps_flag[lt] = br.read_bit()? == 1;
+        }
+    }
+    middle.sps_temporal_mvp_enabled_flag = br.read_bit()? == 1;
+    middle.strong_intra_smoothing_enabled_flag = br.read_bit()? == 1;
+    Some(())
 }
 
 /// Skip `scaling_list_data()` (H.265 7.3.4): 4 size classes x 6 matrices (2 for
