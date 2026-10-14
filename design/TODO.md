@@ -32,8 +32,6 @@ Bugs:
 
 - `XorFecBuffer` evicts the smallest raw `u16` seq, so ULPFEC, FlexFEC and
   ST 2022-1 stop recovering after the sequence wraps. Key by extended seq.
-- `audioconvert` decodes S16/S24 by 2^(n-1) and encodes by 2^(n-1)-1, so every
-  decode and encode pass shifts samples above half scale one LSB toward zero.
 - `videoconvert::raw_format_to_str` panics on `Rgb8` and `raw_format_from_str`
   accepts 5 of 15 formats. Use one GStreamer format-name table from core.
 - `SrtpReceiverSet::receiver_for` keeps a receiver for an SSRC before the

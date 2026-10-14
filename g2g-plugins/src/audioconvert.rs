@@ -1063,15 +1063,22 @@ fn round_to_integer(v: f32) -> f32 {
     round_away(v) as i64 as f32
 }
 
+// decode and encode share these, so every integer code survives a round trip.
+const U8_FULL_SCALE: f32 = 128.0;
+const S16_FULL_SCALE: f32 = 32_768.0;
+const S24_FULL_SCALE: f32 = 8_388_608.0;
+const S32_FULL_SCALE: f32 = 2_147_483_648.0;
+const U8_MIDPOINT: i32 = 128;
+
 /// Full-scale integer magnitude of a PCM format: the multiplier from the
-/// `[-1, 1]` float intermediate, and the format's largest positive code.
+/// `[-1, 1]` float intermediate, one past the format's largest positive code.
 /// `None` for float output, which has no quantizer.
 fn full_scale(format: AudioFormat) -> Option<f32> {
     match format {
-        AudioFormat::PcmU8 => Some(127.0),
-        AudioFormat::PcmS16Le => Some(32_767.0),
-        AudioFormat::PcmS24Le => Some(8_388_607.0),
-        AudioFormat::PcmS32Le => Some(2_147_483_647.0),
+        AudioFormat::PcmU8 => Some(U8_FULL_SCALE),
+        AudioFormat::PcmS16Le => Some(S16_FULL_SCALE),
+        AudioFormat::PcmS24Le => Some(S24_FULL_SCALE),
+        AudioFormat::PcmS32Le => Some(S32_FULL_SCALE),
         _ => None,
     }
 }
@@ -1096,10 +1103,10 @@ fn emit_quantized(dst: &mut Vec<u8>, quantized: f32, format: AudioFormat) {
         return;
     };
     // the negative side has one more code than the positive one.
-    let q = quantized.clamp(-(scale + 1.0), scale);
+    let q = quantized.clamp(-scale, scale - 1.0);
     match format {
         // u8 PCM is offset-binary: silence sits at 0x80.
-        AudioFormat::PcmU8 => dst.push((q as i32 + 128) as u8),
+        AudioFormat::PcmU8 => dst.push((q as i32 + U8_MIDPOINT) as u8),
         AudioFormat::PcmS16Le => dst.extend_from_slice(&(q as i16).to_le_bytes()),
         // 3-byte packed, little-endian.
         AudioFormat::PcmS24Le => dst.extend_from_slice(&(q as i32).to_le_bytes()[..3]),
@@ -1113,19 +1120,19 @@ fn emit_quantized(dst: &mut Vec<u8>, quantized: f32, format: AudioFormat) {
 /// Decode one sample to f32 in [-1, 1). The slice starts at the sample.
 pub(crate) fn read_sample(at: &[u8], format: AudioFormat) -> f32 {
     match format {
-        AudioFormat::PcmU8 => (at[0] as f32 - 128.0) / 128.0,
+        AudioFormat::PcmU8 => (i32::from(at[0]) - U8_MIDPOINT) as f32 / U8_FULL_SCALE,
         AudioFormat::PcmS16Le => {
             let s = i16::from_le_bytes([at[0], at[1]]);
-            s as f32 / 32768.0
+            s as f32 / S16_FULL_SCALE
         }
         AudioFormat::PcmS24Le => {
             // 3-byte packed, little-endian: sign-extend from the top byte.
             let s = at[0] as i32 | (at[1] as i32) << 8 | (at[2] as i8 as i32) << 16;
-            s as f32 / 8_388_608.0
+            s as f32 / S24_FULL_SCALE
         }
         AudioFormat::PcmS32Le => {
             let s = i32::from_le_bytes([at[0], at[1], at[2], at[3]]);
-            s as f32 / 2_147_483_648.0
+            s as f32 / S32_FULL_SCALE
         }
         AudioFormat::PcmF32Le => f32::from_le_bytes([at[0], at[1], at[2], at[3]]),
         _ => 0.0,
@@ -1557,6 +1564,145 @@ mod tests {
                     values[i]
                 );
             }
+        }
+    }
+
+    fn s24_bytes(code: i32) -> [u8; 3] {
+        let bytes = code.to_le_bytes();
+        [bytes[0], bytes[1], bytes[2]]
+    }
+
+    #[test]
+    fn every_integer_code_survives_decode_then_encode() {
+        const S24_STRIDE: usize = 4_099;
+        let s24_max = (1i32 << 23) - 1;
+        let s24_codes = (-s24_max - 1..=s24_max).step_by(S24_STRIDE).chain([
+            -s24_max - 1,
+            -1,
+            0,
+            1,
+            s24_max - 1,
+            s24_max,
+        ]);
+        // past 2^24 an S32 code only survives when f32 holds it exactly.
+        let f32_mantissa_limit = 1i32 << 24;
+        let s32_codes = [
+            i32::MIN,
+            i32::MIN + 128,
+            -f32_mantissa_limit,
+            -1,
+            0,
+            1,
+            f32_mantissa_limit,
+            i32::MAX - 127,
+            i32::MAX,
+        ];
+        let cases: [(AudioFormat, Vec<u8>); 4] = [
+            (AudioFormat::PcmU8, (0..=u8::MAX).collect()),
+            (
+                AudioFormat::PcmS16Le,
+                (i16::MIN..=i16::MAX).flat_map(i16::to_le_bytes).collect(),
+            ),
+            (
+                AudioFormat::PcmS24Le,
+                s24_codes.flat_map(s24_bytes).collect(),
+            ),
+            (
+                AudioFormat::PcmS32Le,
+                s32_codes.into_iter().flat_map(i32::to_le_bytes).collect(),
+            ),
+        ];
+        for (format, codes) in cases {
+            let decoded = crate::audiofx::decode(&codes, format);
+            assert_eq!(
+                &crate::audiofx::encode(&decoded, format)[..],
+                &codes[..],
+                "{format:?} through decode / encode"
+            );
+            let as_float = convert(&codes, format, 1, AudioFormat::PcmF32Le, 1).unwrap();
+            assert_eq!(
+                &convert(&as_float, AudioFormat::PcmF32Le, 1, format, 1).unwrap()[..],
+                &codes[..],
+                "{format:?} through an f32 conversion and back"
+            );
+        }
+    }
+
+    #[test]
+    fn positive_full_scale_float_encodes_to_the_top_code() {
+        let src: Vec<u8> = [1.0f32, -1.0]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        let s16 = convert(&src, AudioFormat::PcmF32Le, 1, AudioFormat::PcmS16Le, 1).unwrap();
+        assert_eq!(s16_samples(&s16), [i16::MAX, i16::MIN]);
+        let u8s = convert(&src, AudioFormat::PcmF32Le, 1, AudioFormat::PcmU8, 1).unwrap();
+        assert_eq!(&u8s[..], [u8::MAX, u8::MIN]);
+    }
+
+    #[derive(Default)]
+    struct RecordingSink {
+        bytes: Vec<u8>,
+    }
+
+    impl OutputSink for RecordingSink {
+        fn poll_push(
+            &mut self,
+            _cx: &mut core::task::Context<'_>,
+            packet: &mut Option<PipelinePacket>,
+        ) -> core::task::Poll<Result<g2g_core::PushOutcome, G2gError>> {
+            if let Some(PipelinePacket::DataFrame(frame)) = packet.take() {
+                let slice = frame.domain.require_system_slice("test").unwrap();
+                self.bytes.extend_from_slice(slice);
+            }
+            core::task::Poll::Ready(Ok(g2g_core::PushOutcome::Accepted))
+        }
+    }
+
+    async fn run_element_same_format(src: &[u8], format: AudioFormat) -> Vec<u8> {
+        const CHANNELS: u8 = 2;
+        let mut element = AudioConvert::new(format, CHANNELS);
+        element
+            .configure_pipeline(&audio(format, CHANNELS, DEFAULT_PCM_RATE))
+            .unwrap();
+        let mut out = RecordingSink::default();
+        let frame = Frame::new(
+            MemoryDomain::System(SystemSlice::from_boxed(Box::from(src))),
+            Default::default(),
+            0,
+        );
+        element
+            .process(PipelinePacket::DataFrame(frame), &mut out)
+            .await
+            .unwrap();
+        out.bytes
+    }
+
+    #[tokio::test]
+    async fn equal_depth_conversions_through_the_element_stay_byte_identical() {
+        let floats: Vec<u8> = [0.0f32, 0.25, -0.75, 1.0, -1.0, 1.5, -2.0, f32::MIN_POSITIVE]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        let s24: Vec<u8> = (-(1i32 << 23)..1 << 23)
+            .step_by(65_537)
+            .flat_map(s24_bytes)
+            .collect();
+        let cases: [(AudioFormat, Vec<u8>); 4] = [
+            (AudioFormat::PcmU8, (0..=u8::MAX).collect()),
+            (
+                AudioFormat::PcmS16Le,
+                (i16::MIN..=i16::MAX).flat_map(i16::to_le_bytes).collect(),
+            ),
+            (AudioFormat::PcmS24Le, s24),
+            (AudioFormat::PcmF32Le, floats),
+        ];
+        for (format, src) in cases {
+            assert_eq!(
+                run_element_same_format(&src, format).await,
+                src,
+                "{format:?} into the same format"
+            );
         }
     }
 

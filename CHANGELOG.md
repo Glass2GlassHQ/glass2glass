@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1275: PCM decode and encode share one 2^(n-1) full scale, so every integer sample code survives a float round trip.
 - M1265: every hand-rolled no-op waker is `Waker::noop()`, and the runtime state waker is a safe `Wake` impl.
 - M1264: g2g-core has shared helpers for clock-tick and Q16 framerate conversion, PCM sample width, GStreamer format names and RTP sequence and timestamp unwrapping.
 - M1263: g2g opens wgpu devices only on a fully WebGPU-compliant adapter and never starts the GL backend, so a software GL renderer gets a clean error instead of a vello panic.
