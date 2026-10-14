@@ -20,6 +20,8 @@ use crate::annexb::BitReader;
 use crate::annexb::{
     h264_nal_type, h265_nal_type, nal_units_any, read_ff_extended, strip_emulation_prevention,
 };
+#[cfg(feature = "metadata")]
+use crate::bereader::{be_u16, be_u32};
 
 /// `pic_timing`, which carries the H.264 SMPTE 12M clock timestamps.
 pub const PAYLOAD_PIC_TIMING: usize = 1;
@@ -83,21 +85,6 @@ fn for_each_message_in_nals<'a>(
     }
 }
 
-/// Read a big-endian `u16` at `off`, or `None` past the end. Only the HDR
-/// payload parsers read fixed-width fields.
-#[cfg(feature = "metadata")]
-fn be16(p: &[u8], off: usize) -> Option<u16> {
-    let b = p.get(off..off.checked_add(2)?)?;
-    Some(u16::from_be_bytes([b[0], b[1]]))
-}
-
-/// Read a big-endian `u32` at `off`, or `None` past the end.
-#[cfg(feature = "metadata")]
-fn be32(p: &[u8], off: usize) -> Option<u32> {
-    let b = p.get(off..off.checked_add(4)?)?;
-    Some(u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
-}
-
 /// Parse a `mastering_display_colour_volume` payload (24 bytes, ST 2086).
 /// Chromaticities are coded in increments of 0.00002, the peak luminance in
 /// 0.0001 cd/m^2 and the black level likewise. The SEI orders the primaries
@@ -110,8 +97,8 @@ pub fn parse_mastering_display(p: &[u8]) -> Option<g2g_core::meta::MasteringDisp
     }
     let chroma = |i: usize| -> Option<Chromaticity> {
         Some(Chromaticity {
-            x: be16(p, i * 4)? as f32 / 50_000.0,
-            y: be16(p, i * 4 + 2)? as f32 / 50_000.0,
+            x: be_u16(p, i * 4)? as f32 / 50_000.0,
+            y: be_u16(p, i * 4 + 2)? as f32 / 50_000.0,
         })
     };
     let (g, b, r) = (chroma(0)?, chroma(1)?, chroma(2)?);
@@ -119,8 +106,8 @@ pub fn parse_mastering_display(p: &[u8]) -> Option<g2g_core::meta::MasteringDisp
         display_primaries: [r, g, b],
         white_point: chroma(3)?,
         // Both luminance fields are u32 in units of 0.0001 cd/m^2.
-        max_luminance: be32(p, 16)? as f32 / 10_000.0,
-        min_luminance: be32(p, 20)? as f32 / 10_000.0,
+        max_luminance: be_u32(p, 16)? as f32 / 10_000.0,
+        min_luminance: be_u32(p, 20)? as f32 / 10_000.0,
     })
 }
 
@@ -131,7 +118,7 @@ pub fn parse_content_light_level(p: &[u8]) -> Option<(u16, u16)> {
     if p.len() < 4 {
         return None;
     }
-    Some((be16(p, 0)?, be16(p, 2)?))
+    Some((be_u16(p, 0)?, be_u16(p, 2)?))
 }
 
 /// What an H.264 `pic_timing` SEI needs from the SPS VUI to be parseable at all:

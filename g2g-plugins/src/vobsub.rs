@@ -24,6 +24,8 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
+use crate::bereader::be_u16;
+
 /// Largest display-rectangle edge accepted. The coordinates are 12-bit fields so
 /// they cannot exceed this anyway; the constant makes the bound explicit.
 pub const MAX_CUE_DIM: u32 = 4096;
@@ -358,9 +360,7 @@ fn date_to_ns(date: u16) -> u64 {
 }
 
 fn be16(buf: &[u8], at: usize) -> Option<usize> {
-    let hi = *buf.get(at)?;
-    let lo = *buf.get(at.checked_add(1)?)?;
-    Some(u16::from_be_bytes([hi, lo]) as usize)
+    be_u16(buf, at).map(usize::from)
 }
 
 /// What a subpicture unit's control sequences declare: everything about the cue

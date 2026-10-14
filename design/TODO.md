@@ -79,16 +79,18 @@ Network:
 - ST 2110-20 at 1080p60 cannot meet its pacing schedule: one loopback `send` costs
   about 5.5 us. Send each pacing slot with UDP GSO or `sendmmsg`.
 
-Shared helpers:
+Shared helpers, sites skipped while another change owned the file:
 
-- Move the plugins' ns to clock-rate tick and Q16 framerate math (about 30 sites)
-  onto the `time` and `caps` helpers, and the 7 `fixed_or_zero` copies onto `Dim::fixed`.
-- `testutil::CollectSink` in src tests, a shared sink for integration tests.
-- An `mfcommon` module for the Media Foundation helpers, one CUDA driver FFI module.
-- One Android binder threadpool test helper.
-- `sei.rs` and `rtcp.rs` use the shared big-endian reader in `bereader.rs`.
-- `vtdecode`/`vtencode` `cm_time` helpers, `alertrecorder` uses `xmlutil::civil`,
-  and aacparse, dvbsub, st2110anc use `annexb::BitReader`.
+- Q16 framerate math: \`rtspsrc\`, \`avi\` gcd, \`ivfdemux\`, \`h264parse\`/\`h265parse\`,
+  \`ffmpegdec\`, \`ffmpegenc\`/\`nvenc\` \`>>16\`, \`st2110*\`, \`wgpucompositor\`, \`sdp\`, \`deinterlace\`.
+- ns to tick math: \`tsmux\`, \`tsmuxn\`, \`tsdemux\`, \`rtcp\`, \`dashsrc\`, \`avf\`, \`st2110audiortp\`.
+- \`cuda.rs\` and \`nvenc.rs\` declare CUDA driver calls outside \`cuda_driver_ffi\`.
+- \`aacparse\` and \`st2110anc\` keep their own MSB-first bit readers.
+- \`rtcp\`, \`moqtsink\`, \`mp4box\` keep big-endian reader copies.
+- Collecting test sinks: \`aacparse\`, \`h264parse\`, \`h265parse\`, \`tensorconvert\`,
+  \`ivfdemux\`, \`sampleaesdecrypt\`, \`subpictureoverlay\` in src, about 60 integration
+  test files, and g2g-core/tests.
+- \`mfencode\` has three redundant \`interlace: _, ..\` patterns clippy flags on Windows.
 
 ## Architecture guarantees (validation-first)
 
