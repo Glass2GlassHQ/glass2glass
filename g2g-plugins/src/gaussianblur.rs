@@ -55,8 +55,9 @@ pub struct GaussianBlur {
     sigma: f64,
     /// The normalised taps and their running sums, rebuilt when `sigma` moves.
     kernel: Option<Kernel>,
-    /// The horizontally filtered frame, reused across frames.
-    scratch: Vec<f64>,
+    /// The horizontally filtered frame and one output row's sums, reused
+    /// across frames.
+    scratch: BlurScratch,
     state: FilterState,
 }
 
@@ -72,7 +73,7 @@ impl GaussianBlur {
         Self {
             sigma: DEFAULT_SIGMA,
             kernel: None,
-            scratch: Vec::new(),
+            scratch: BlurScratch::default(),
             state: FilterState::new(),
         }
     }
@@ -92,12 +93,31 @@ impl GaussianBlur {
     }
 }
 
-/// One separable filter: `taps` are normalised to sum to one, `running` holds
-/// their prefix sums so an edge window's gain is one subtraction away.
+/// Fractional bits of a fixed-point tap.
+const TAP_BITS: u32 = 16;
+/// The gain of a window that uses every tap.
+const FULL_GAIN: i64 = 1 << TAP_BITS;
+/// Fractional bits the horizontal pass keeps for the vertical one.
+const INTERMEDIATE_BITS: u32 = 8;
+
+/// One separable filter: `taps` are normalised to sum to one, `fixed_taps`
+/// are the same taps in `TAP_BITS` fixed point summing to exactly
+/// [`FULL_GAIN`], and `running` holds their prefix sums so an edge window's
+/// gain is one subtraction away.
 #[derive(Debug)]
 struct Kernel {
     taps: Vec<f64>,
-    running: Vec<f64>,
+    fixed_taps: Vec<i64>,
+    running: Vec<i64>,
+}
+
+/// Working buffers of [`blur`].
+#[derive(Debug, Default)]
+struct BlurScratch {
+    /// The horizontally filtered frame, `INTERMEDIATE_BITS` fixed point.
+    horizontal: Vec<i64>,
+    /// One output row's vertical sums.
+    row: Vec<i64>,
 }
 
 impl Kernel {
@@ -110,10 +130,7 @@ impl Kernel {
         let mut taps = vec![0.0f64; width];
         if radius == 0 {
             taps[0] = 1.0;
-            return Self {
-                running: vec![1.0],
-                taps,
-            };
+            return Self::from_taps(taps);
         }
 
         // The gaussian's own scale factor; it cancels in the normalisation, but
@@ -135,14 +152,30 @@ impl Kernel {
         for tap in taps.iter_mut() {
             *tap /= sum;
         }
+        Self::from_taps(taps)
+    }
 
-        let mut running = Vec::with_capacity(width);
-        let mut accumulated = 0.0;
-        for &tap in taps.iter() {
-            accumulated += tap;
-            running.push(accumulated);
+    /// The fixed-point copies of normalised `taps` and their prefix sums.
+    fn from_taps(taps: Vec<f64>) -> Self {
+        let mut fixed_taps: Vec<i64> = taps
+            .iter()
+            .map(|&tap| crate::mathf::round_to_i64(tap * FULL_GAIN as f64))
+            .collect();
+        // rounding each tap leaves the sum a few units off one
+        let centre = fixed_taps.len() / 2;
+        fixed_taps[centre] += FULL_GAIN - fixed_taps.iter().sum::<i64>();
+        let running = fixed_taps
+            .iter()
+            .scan(0, |accumulated, &tap| {
+                *accumulated += tap;
+                Some(*accumulated)
+            })
+            .collect();
+        Self {
+            taps,
+            fixed_taps,
+            running,
         }
-        Self { taps, running }
     }
 
     fn width(&self) -> usize {
@@ -153,13 +186,14 @@ impl Kernel {
         self.taps.len() / 2
     }
 
-    /// Gain of taps `first..last`, the normalisation an edge window needs.
-    fn gain(&self, first: usize, last: usize) -> f64 {
+    /// Fixed-point gain of taps `first..last`, the normalisation an edge
+    /// window needs.
+    fn gain(&self, first: usize, last: usize) -> i64 {
         self.running[last - 1]
             - if first > 0 {
                 self.running[first - 1]
             } else {
-                0.0
+                0
             }
     }
 
@@ -183,40 +217,64 @@ fn ceil_to_usize(v: f64) -> usize {
     }
 }
 
-/// Convolve `pixels` with `kernel` along both axes in place. Runs horizontally
-/// into a float scratch buffer, then vertically back to bytes.
-fn blur(kernel: &Kernel, pixels: &mut [u8], w: usize, h: usize, scratch: &mut Vec<f64>) {
-    scratch.clear();
-    scratch.resize(w * h * CHANNELS, 0.0);
-    for row in 0..h {
-        for column in 0..w {
+/// `sum / gain` rounded, where `sum` carries `sum_bits` more fractional bits
+/// than the result. An interior window's gain is exactly [`FULL_GAIN`], so its
+/// division is a shift.
+fn normalise(sum: i64, gain: i64, sum_bits: u32) -> i64 {
+    if gain == FULL_GAIN {
+        let shift = TAP_BITS + sum_bits;
+        return (sum + (1 << (shift - 1))) >> shift;
+    }
+    let divisor = gain << sum_bits;
+    (sum + divisor / 2).div_euclid(divisor)
+}
+
+/// Convolve `pixels` with `kernel` along both axes in place, in fixed point.
+/// Runs horizontally into a scratch frame, then vertically back to bytes one
+/// output row at a time, each source row added in whole.
+fn blur(kernel: &Kernel, pixels: &mut [u8], w: usize, h: usize, scratch: &mut BlurScratch) {
+    let row_len = w * CHANNELS;
+    let horizontal = &mut scratch.horizontal;
+    horizontal.clear();
+    horizontal.resize(row_len * h, 0);
+    for (source_row, filtered_row) in pixels
+        .chunks_exact(row_len)
+        .zip(horizontal.chunks_exact_mut(row_len))
+    {
+        let source_pixels = source_row.as_chunks::<CHANNELS>().0;
+        let filtered_pixels = filtered_row.as_chunks_mut::<CHANNELS>().0;
+        for (column, filtered) in filtered_pixels.iter_mut().enumerate() {
             let (first_tap, last_tap, first_sample) = kernel.window(column, w);
             let gain = kernel.gain(first_tap, last_tap);
-            for channel in 0..CHANNELS {
-                let mut dot = 0.0;
-                for tap in first_tap..last_tap {
-                    let sample =
-                        pixels[(row * w + first_sample + tap - first_tap) * CHANNELS + channel];
-                    dot += sample as f64 * kernel.taps[tap];
+            let mut dot = [0i64; CHANNELS];
+            let window = &source_pixels[first_sample..first_sample + last_tap - first_tap];
+            for (&tap, sample) in kernel.fixed_taps[first_tap..last_tap].iter().zip(window) {
+                for (sum, &value) in dot.iter_mut().zip(sample) {
+                    *sum += value as i64 * tap;
                 }
-                scratch[(row * w + column) * CHANNELS + channel] = dot / gain;
+            }
+            for (out, sum) in filtered.iter_mut().zip(dot) {
+                // keep `INTERMEDIATE_BITS` of fraction for the vertical pass
+                *out = normalise(sum << INTERMEDIATE_BITS, gain, 0);
             }
         }
     }
-    for row in 0..h {
+
+    let sums = &mut scratch.row;
+    for (row, out_row) in pixels.chunks_exact_mut(row_len).enumerate() {
         let (first_tap, last_tap, first_sample) = kernel.window(row, h);
         let gain = kernel.gain(first_tap, last_tap);
-        for column in 0..w {
-            for channel in 0..CHANNELS {
-                let mut dot = 0.0;
-                for tap in first_tap..last_tap {
-                    let source_row = first_sample + tap - first_tap;
-                    dot +=
-                        scratch[(source_row * w + column) * CHANNELS + channel] * kernel.taps[tap];
-                }
-                pixels[(row * w + column) * CHANNELS + channel] =
-                    (dot / gain + 0.5).clamp(0.0, u8::MAX as f64) as u8;
+        sums.clear();
+        sums.resize(row_len, 0);
+        for (offset, &tap) in kernel.fixed_taps[first_tap..last_tap].iter().enumerate() {
+            let source_row = first_sample + offset;
+            let source = &horizontal[source_row * row_len..(source_row + 1) * row_len];
+            for (sum, &value) in sums.iter_mut().zip(source) {
+                *sum += value * tap;
             }
+        }
+        for (out, &sum) in out_row.iter_mut().zip(sums.iter()) {
+            *out = normalise(sum, gain, INTERMEDIATE_BITS).clamp(0, u8::MAX as i64) as u8;
         }
     }
 }
@@ -356,15 +414,32 @@ mod tests {
     }
 
     #[test]
+    fn a_flat_frame_stays_flat_to_the_border() {
+        const LEVEL: u8 = 173;
+        const SIDE: usize = 9;
+        for sigma in [DEFAULT_SIGMA, SIGMA_LIMIT, -DEFAULT_SIGMA] {
+            let mut pixels = vec![LEVEL; SIDE * SIDE * CHANNELS];
+            blur(
+                &Kernel::new(sigma),
+                &mut pixels,
+                SIDE,
+                SIDE,
+                &mut BlurScratch::default(),
+            );
+            assert!(pixels.iter().all(|&v| v == LEVEL), "sigma {sigma}");
+        }
+    }
+
+    #[test]
     fn edge_window_clips_and_renormalises() {
         let kernel = Kernel::new(DEFAULT_SIGMA);
         // Centred well inside a wide line, every tap is used and the gain is one.
         let (first, last, start) = kernel.window(kernel.radius(), 100);
         assert_eq!((first, last, start), (0, kernel.width(), 0));
-        assert!((kernel.gain(first, last) - 1.0).abs() < 1e-12);
+        assert_eq!(kernel.gain(first, last), FULL_GAIN);
         // At the very first sample, the taps left of centre are dropped.
         let (first, last, start) = kernel.window(0, 100);
         assert_eq!((first, last, start), (kernel.radius(), kernel.width(), 0));
-        assert!(kernel.gain(first, last) < 1.0);
+        assert!(kernel.gain(first, last) < FULL_GAIN);
     }
 }
