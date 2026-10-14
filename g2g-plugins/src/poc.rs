@@ -259,8 +259,7 @@ pub fn parse_h264_slice_poc(
     if nal_unit_type != 1 && nal_unit_type != 5 {
         return None;
     }
-    let rbsp = strip_emulation_prevention(&nal[1..]);
-    let mut br = BitReader::new(&rbsp);
+    let mut br = BitReader::skipping_emulation_prevention(&nal[1..]);
     parse_h264_slice_poc_bits(&mut br, nal_ref_idc, nal_unit_type == 5, sps, pps)
 }
 
@@ -285,8 +284,7 @@ pub fn parse_h264_slice_marking(
     if nal_unit_type != 1 && nal_unit_type != 5 {
         return None;
     }
-    let rbsp = strip_emulation_prevention(&nal[1..]);
-    let mut br = BitReader::new(&rbsp);
+    let mut br = BitReader::skipping_emulation_prevention(&nal[1..]);
     let mut slice = parse_h264_slice_poc_bits(&mut br, nal_ref_idc, nal_unit_type == 5, sps, pps)?;
     skip_to_ref_pic_marking(&mut br, &slice, marking)?;
     slice.ref_pic_marking = Some(read_dec_ref_pic_marking(&mut br, &slice)?);
@@ -434,7 +432,7 @@ fn read_dec_ref_pic_marking(
     None
 }
 
-/// The bit-level half of [`parse_h264_slice_poc`], over an already de-emulated
+/// The bit-level half of [`parse_h264_slice_poc`], over a reader of the
 /// slice RBSP. Leaves `br` positioned where `ref_pic_list_modification` begins,
 /// for a caller that keeps reading.
 pub(crate) fn parse_h264_slice_poc_bits(
@@ -735,12 +733,11 @@ pub fn parse_h265_slice_poc(
     if nal_unit_type > 31 {
         return None; // not a VCL NAL
     }
-    let rbsp = strip_emulation_prevention(&nal[2..]);
-    let mut br = BitReader::new(&rbsp);
+    let mut br = BitReader::skipping_emulation_prevention(&nal[2..]);
     parse_h265_slice_poc_bits(&mut br, nal_unit_type, sps, pps)
 }
 
-/// The bit-level half of [`parse_h265_slice_poc`], over an already de-emulated
+/// The bit-level half of [`parse_h265_slice_poc`], over a reader of the
 /// slice RBSP. Leaves `br` positioned where the reference-picture set begins,
 /// for a caller that keeps reading. A non-first slice segment returns with only
 /// its flag set (the fields after it belong to the picture's first segment).

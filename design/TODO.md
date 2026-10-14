@@ -84,7 +84,6 @@ Codecs and parsers:
 
 - Vulkan decode creates a bitstream buffer per picture and copies each AU 2 to 3
   extra times, and `ensure_decoder` parses SPS/PPS before the fingerprint check.
-- Slice-header parsers de-emulate the whole slice.
 - `NalParse` and `StartCodeParse` rescan the accumulator from byte 0 and scan
   each AU four or five times. Share one accumulator.
 - NVENC registers its input surface every frame.

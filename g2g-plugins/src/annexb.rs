@@ -594,23 +594,62 @@ pub(crate) fn vcl_start(au: &[u8], codec: VideoCodec) -> Option<usize> {
 /// instead of aborting the pipeline.
 pub(crate) struct BitReader<'a> {
     buf: &'a [u8],
+    next_byte: usize,
+    current_byte: u8,
+    bits_left_in_current_byte: u32,
     bit_pos: usize,
+    skips_emulation_prevention: bool,
+    zero_run: usize,
 }
+
+const EMULATION_PREVENTION_BYTE: u8 = 0x03;
 
 impl<'a> BitReader<'a> {
     pub(crate) fn new(buf: &'a [u8]) -> Self {
-        Self { buf, bit_pos: 0 }
+        Self {
+            buf,
+            next_byte: 0,
+            current_byte: 0,
+            bits_left_in_current_byte: 0,
+            bit_pos: 0,
+            skips_emulation_prevention: false,
+            zero_run: 0,
+        }
+    }
+
+    // reads the RBSP that strip_emulation_prevention would return, bit_pos counts RBSP bits
+    pub(crate) fn skipping_emulation_prevention(ebsp: &'a [u8]) -> Self {
+        Self {
+            skips_emulation_prevention: true,
+            ..Self::new(ebsp)
+        }
+    }
+
+    fn load_next_byte(&mut self) -> Option<()> {
+        let mut byte = *self.buf.get(self.next_byte)?;
+        self.next_byte += 1;
+        if self.skips_emulation_prevention {
+            if self.zero_run >= 2 && byte == EMULATION_PREVENTION_BYTE {
+                self.zero_run = 0;
+                byte = *self.buf.get(self.next_byte)?;
+                self.next_byte += 1;
+            }
+            self.zero_run = if byte == 0 { self.zero_run + 1 } else { 0 };
+        }
+        self.current_byte = byte;
+        self.bits_left_in_current_byte = 8;
+        Some(())
     }
 
     pub(crate) fn read_bit(&mut self) -> Option<u32> {
-        let byte_idx = self.bit_pos / 8;
-        let bit_off = 7 - (self.bit_pos % 8);
-        if byte_idx >= self.buf.len() {
-            return None;
+        if self.bits_left_in_current_byte == 0 {
+            self.load_next_byte()?;
         }
-        let bit = u32::from((self.buf[byte_idx] >> bit_off) & 1);
+        self.bits_left_in_current_byte -= 1;
         self.bit_pos += 1;
-        Some(bit)
+        Some(u32::from(
+            (self.current_byte >> self.bits_left_in_current_byte) & 1,
+        ))
     }
 
     /// Read `n` (<= 32) bits MSB-first into a `u32`.
@@ -633,11 +672,9 @@ impl<'a> BitReader<'a> {
     /// Advance past `n` bits without decoding them (e.g. H.265's fixed-size
     /// `profile_tier_level`). `None` if that would run past the end.
     pub(crate) fn skip_bits(&mut self, n: usize) -> Option<()> {
-        let new_pos = self.bit_pos.checked_add(n)?;
-        if new_pos > self.buf.len() * 8 {
-            return None;
+        for _ in 0..n {
+            self.read_bit()?;
         }
-        self.bit_pos = new_pos;
         Some(())
     }
 
@@ -672,20 +709,14 @@ impl<'a> BitReader<'a> {
     // every build (other parsers may adopt it) but do not warn when unused.
     #[cfg_attr(not(feature = "vulkan-video"), allow(dead_code))]
     pub(crate) fn more_rbsp_data(&self) -> bool {
-        let total_bits = self.buf.len() * 8;
-        if self.bit_pos >= total_bits {
-            return false;
-        }
+        // runs ahead of bit_pos past a skipped emulation-prevention byte
+        let buffer_bit_pos = self.next_byte * 8 - self.bits_left_in_current_byte as usize;
         // Locate the rbsp_stop_one_bit: the last set bit in the whole buffer.
-        for byte_idx in (0..self.buf.len()).rev() {
-            let b = self.buf[byte_idx];
-            if b != 0 {
-                let bit_in_byte = 7 - b.trailing_zeros() as usize;
-                let stop_bit_pos = byte_idx * 8 + bit_in_byte;
-                return self.bit_pos < stop_bit_pos;
-            }
-        }
-        false
+        let Some(stop_byte_idx) = self.buf.iter().rposition(|&b| b != 0) else {
+            return false;
+        };
+        let bit_in_byte = 7 - self.buf[stop_byte_idx].trailing_zeros() as usize;
+        buffer_bit_pos < stop_byte_idx * 8 + bit_in_byte
     }
 
     /// Signed exp-Golomb, mapping ue to se per H.264 SS9.1.1.
@@ -808,6 +839,47 @@ mod tests {
         assert_eq!(nals, vec![sps, idr], "the same NALs, now start-code framed");
         // Every NAL is preceded by a 4-byte start code.
         assert_eq!(&annexb[..4], &[0, 0, 0, 1]);
+    }
+
+    #[test]
+    fn escaped_reader_reads_the_same_bits_as_the_stripped_buffer() {
+        // zeros and 0x03 dominate so escape sequences occur at every alignment
+        const ALPHABET: [u8; 6] = [0, 0, 0, 3, 1, 0x80];
+        const BUFFERS: u32 = 200;
+        const BUFFER_LEN: usize = 48;
+        let mut state = 0x2545_F491_u32;
+        let mut next_random = move || {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state
+        };
+        for _ in 0..BUFFERS {
+            let ebsp: Vec<u8> = (0..BUFFER_LEN)
+                .map(|_| ALPHABET[next_random() as usize % ALPHABET.len()])
+                .collect();
+            let rbsp = strip_emulation_prevention(&ebsp);
+            let mut stripped = BitReader::new(&rbsp);
+            let mut escaped = BitReader::skipping_emulation_prevention(&ebsp);
+            loop {
+                let width = next_random() % 12;
+                let reads = [
+                    (stripped.read_ue(), escaped.read_ue()),
+                    (stripped.read_bits(width), escaped.read_bits(width)),
+                    (
+                        stripped.skip_bits(width as usize).map(|_| 0),
+                        escaped.skip_bits(width as usize).map(|_| 0),
+                    ),
+                ];
+                for (from_stripped, from_escaped) in reads {
+                    assert_eq!(from_stripped, from_escaped);
+                }
+                assert_eq!(stripped.bit_pos(), escaped.bit_pos());
+                if reads.iter().any(|(read, _)| read.is_none()) {
+                    break;
+                }
+            }
+        }
     }
 
     #[test]

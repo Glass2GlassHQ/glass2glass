@@ -5224,8 +5224,7 @@ pub fn parse_h265_slice_header(
     if nal_unit_type > 31 {
         return None; // not a VCL NAL
     }
-    let rbsp = strip_emulation_prevention(&nal[2..]);
-    let mut br = BitReader::new(&rbsp);
+    let mut br = BitReader::skipping_emulation_prevention(&nal[2..]);
     let pps_poc = [h265_pps_poc(pps)];
     let prefix = crate::poc::parse_h265_slice_poc_bits(
         &mut br,
