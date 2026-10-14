@@ -466,6 +466,7 @@ pub(crate) fn map_for_read(
 
 /// [`map_for_read`] that yields to the executor until the GPU is done, rather
 /// than blocking the calling thread in `PollType::Wait`.
+#[cfg(feature = "wgpu-sink")]
 pub(crate) async fn map_for_read_async(
     device: &wgpu::Device,
     buffer: &wgpu::Buffer,

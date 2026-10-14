@@ -1,8 +1,8 @@
 //! M559: GPU -> DMABUF export round trip. `WgpuToDmaBuf` exports a GPU-resident
 //! wgpu buffer as a dma-buf fd; `DmaBufToWgpu` re-imports it on a *separate*
 //! wgpu device; the bytes are read back and must match, proving the export
-//! element works AND that the exported fd is an independent reference (the element
-//! frees its own Vulkan handles right after export). Covers packed RGBA and 8-bit
+//! element works AND that the frame's fd, a dup of one of the element's four
+//! recycled export buffers, imports on another device. Covers packed RGBA and 8-bit
 //! NV12 (plane-aware size). Needs a GPU with Vulkan dma-buf export+import;
 //! CI-excluded.
 //!   cargo test -p g2g-plugins --features dmabuf-wgpu --test m559_wgpu_dmabuf_export -- --nocapture

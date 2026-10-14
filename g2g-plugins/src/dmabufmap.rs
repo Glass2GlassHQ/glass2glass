@@ -142,6 +142,7 @@ pub fn frame_bytes<'a>(
 }
 
 // the domain check of `frame_bytes` without the mapping, for a sink that reads on another thread
+#[cfg(any(feature = "alsa-sink", feature = "pulse-sink"))]
 pub(crate) fn require_readable_domain(
     frame: &g2g_core::frame::Frame,
     element: &'static str,
