@@ -456,14 +456,11 @@ fn apply_idx1(data: &[u8], idx1: &[u8], movi_form_offset: usize, chunks_out: &mu
     let base = |entry: usize| -> Option<usize> {
         let offset = read_u32(idx1, entry * IDX1_ENTRY_LEN + IDX1_ENTRY_OFFSET)? as usize;
         let relative = body_of(movi_form_offset.checked_add(offset)?)?;
-        if chunks_out.iter().any(|c| c.body.start == relative) {
+        if chunk_starting_at(chunks_out, relative).is_some() {
             return Some(movi_form_offset);
         }
         let absolute = body_of(offset)?;
-        chunks_out
-            .iter()
-            .any(|c| c.body.start == absolute)
-            .then_some(0)
+        chunk_starting_at(chunks_out, absolute).map(|_| 0)
     };
     let Some(base) = (0..entries).find_map(base) else {
         return;
@@ -486,10 +483,18 @@ fn apply_idx1(data: &[u8], idx1: &[u8], movi_form_offset: usize, chunks_out: &mu
         else {
             continue;
         };
-        if let Some(chunk) = chunks_out.iter_mut().find(|c| c.body.start == body) {
-            chunk.keyframe = true;
+        if let Some(index) = chunk_starting_at(chunks_out, body) {
+            chunks_out[index].keyframe = true;
         }
     }
+}
+
+/// The chunk whose body starts at `start`. `collect_movi` emits chunks in file
+/// order, so the bodies are sorted by offset.
+fn chunk_starting_at(chunks_out: &[AviChunk], start: usize) -> Option<usize> {
+    chunks_out
+        .binary_search_by_key(&start, |chunk| chunk.body.start)
+        .ok()
 }
 
 /// Parse a whole AVI file. Fails with [`G2gError::CapsMismatch`] on anything
@@ -1101,6 +1106,32 @@ mod tests {
         }
         let file = parse(&bytes).expect("a bogus index must not fail the parse");
         assert_eq!(file.chunks.iter().filter(|c| c.stream == 0).count(), 4);
+    }
+
+    #[test]
+    fn a_large_index_flags_the_right_chunks() {
+        const CHUNKS: usize = 50_000;
+        const KEYFRAME_INTERVAL: usize = 7;
+        let mut writer = AviWriter::new(vec![AviWriteStream::Video {
+            codec: VideoCodec::H264,
+            width: 16,
+            height: 16,
+        }]);
+        for i in 0..CHUNKS {
+            writer
+                .push(
+                    0,
+                    vec![1; 1 + i % 3],
+                    i as u64 * DEFAULT_FRAME_PERIOD_NS,
+                    i % KEYFRAME_INTERVAL == 0,
+                )
+                .expect("video chunk");
+        }
+        let file = parse(&writer.finish().expect("serializes")).expect("parses");
+        assert_eq!(file.chunks.len(), CHUNKS);
+        for (i, chunk) in file.chunks.iter().enumerate() {
+            assert_eq!(chunk.keyframe, i % KEYFRAME_INTERVAL == 0, "chunk {i}");
+        }
     }
 
     /// Offset of the body of the first chunk with `id`, by scanning: the tests

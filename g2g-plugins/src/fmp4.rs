@@ -1115,18 +1115,20 @@ fn parse_progressive_track(
     // contiguous, so offset advances by the running sample size.
     let mut sample_offsets: Vec<u64> = Vec::with_capacity(sample_count);
     let mut si = 0usize;
+    // Chunks ascend, so the stsc cursor only moves forward.
+    let mut next_entry = 0usize;
+    let mut spc = 0u32;
     'chunks: for (ci, &chunk_off) in chunk_offsets.iter().enumerate() {
         // The samples-per-chunk for this chunk is the last stsc entry whose
         // (1-based) first_chunk does not exceed it.
         let chunk_1based = (ci + 1) as u32;
-        let mut spc = 0u32;
-        for e in 0..stsc_n {
-            let (first_chunk, samples_per_chunk) = stsc_entry(e)?;
-            if first_chunk <= chunk_1based {
-                spc = samples_per_chunk;
-            } else {
+        while next_entry < stsc_n {
+            let (first_chunk, samples_per_chunk) = stsc_entry(next_entry)?;
+            if first_chunk > chunk_1based {
                 break;
             }
+            spc = samples_per_chunk;
+            next_entry += 1;
         }
         let mut at = chunk_off;
         for _ in 0..spc {
@@ -1928,6 +1930,65 @@ mod tests {
         assert!(!samples[1].keyframe, "sample 2 is not in stss");
         assert_eq!(samples[0].pts_ns, 0);
         assert_eq!(samples[1].pts_ns, 1_000_000_000); // 1000 / timescale 1000 s
+    }
+
+    #[test]
+    fn parse_progressive_walks_a_large_stsc() {
+        use crate::mp4box::{full_box, mp4_box};
+        const CHUNKS: u32 = 20_000;
+        const SAMPLE_LEN: u32 = 5;
+        // One stsc entry per chunk, alternating one and two samples per chunk.
+        let samples_in = |chunk: u32| 1 + chunk % 2;
+        let sample_count: u32 = (0..CHUNKS).map(samples_in).sum();
+        let mut mdat_body = Vec::new();
+        for sample in 0..sample_count {
+            mdat_body.extend_from_slice(&1u32.to_be_bytes());
+            mdat_body.push(sample as u8);
+        }
+        let stsz = {
+            let mut b = 0u32.to_be_bytes().to_vec();
+            b.extend_from_slice(&sample_count.to_be_bytes());
+            for _ in 0..sample_count {
+                b.extend_from_slice(&SAMPLE_LEN.to_be_bytes());
+            }
+            full_box(b"stsz", 0, 0, &b)
+        };
+        let stts = {
+            let mut b = 1u32.to_be_bytes().to_vec();
+            b.extend_from_slice(&sample_count.to_be_bytes());
+            b.extend_from_slice(&1u32.to_be_bytes());
+            full_box(b"stts", 0, 0, &b)
+        };
+        let stsc = {
+            let mut b = CHUNKS.to_be_bytes().to_vec();
+            for chunk in 0..CHUNKS {
+                b.extend_from_slice(&(chunk + 1).to_be_bytes());
+                b.extend_from_slice(&samples_in(chunk).to_be_bytes());
+                b.extend_from_slice(&1u32.to_be_bytes());
+            }
+            full_box(b"stsc", 0, 0, &b)
+        };
+        let build = |mdat_start: u32| {
+            let mut stco_body = CHUNKS.to_be_bytes().to_vec();
+            let mut at = mdat_start;
+            for chunk in 0..CHUNKS {
+                stco_body.extend_from_slice(&at.to_be_bytes());
+                at += samples_in(chunk) * SAMPLE_LEN;
+            }
+            let stco = full_box(b"stco", 0, 0, &stco_body);
+            let stbl = mp4_box(b"stbl", &[&stsz[..], &stts, &stsc, &stco].concat());
+            let trak = mp4_box(b"trak", &mp4_box(b"mdia", &mp4_box(b"minf", &stbl)));
+            mp4_box(b"moov", &trak)
+        };
+        let mdat_start = (build(0).len() + 8) as u32;
+        let mut file = build(mdat_start);
+        file.extend_from_slice(&mp4_box(b"mdat", &mdat_body));
+
+        let samples = parse_progressive(&file, 1).expect("progressive parse");
+        assert_eq!(samples.len(), sample_count as usize);
+        for (index, sample) in samples.iter().enumerate() {
+            assert_eq!(sample.annexb, alloc::vec![0, 0, 0, 1, index as u8]);
+        }
     }
 
     /// An `mp4v` visual sample entry whose esds objectTypeIndication is 0x20

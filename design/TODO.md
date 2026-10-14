@@ -34,6 +34,8 @@ Bugs:
   accepts 5 of 15 formats. Use one GStreamer format-name table from core.
 - `gamma`, `videobalance` and `alpha` swallow incoming `CapsChanged`. Move them
   onto `PixelFilter`.
+- `run_source_transform_sink` fails a startup `ReFixate` with `FixationFailed`
+  instead of retrying (it runs through `run_graph` since M1320).
 - Run `cargo semver-checks` on g2g-core for M1284 (`Gate`/`Router` `ProcessFuture`
   types) and M1285 (new `DynAsyncElement` provided methods).
 - `VideoTestSrc::with_shared_memory` keeps every emitted frame.
@@ -44,7 +46,6 @@ Core, bindings, ML:
 
 Containers:
 
-- `avi.rs` `apply_idx1` and `fmp4.rs` `stsc` lookups are quadratic.
 - The AVI writer copies the file 4 to 5 times, `mp4muxn` progressive 2 times.
 - Progressive MP4 and AVI demuxers de-frame every track to emit one.
 - PS, Ogg, IVF, Matroska and fMP4 demuxers drain the buffer front per unit.
