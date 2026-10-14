@@ -1351,8 +1351,8 @@ async fn route_packet(
 /// [`run_fanin_session`](crate::runtime::run_fanin_session). A WHEP session
 /// receiving A/V over one PeerConnection emits each track on its own pad. Each
 /// output's caps configure the matching sink; the session pushes via a
-/// [`MultiSenderSink`] and emits a per-output `Eos` when it ends, which the sink
-/// arms observe to finish. Per-branch mid-stream re-solve is not wired here yet
+/// [`MultiSenderSink`](crate::MultiSenderSink) and emits a per-output `Eos`
+/// when it ends, which the sink arms observe to finish. Per-branch mid-stream re-solve is not wired here yet
 /// (a follow-up, as for the egress session runner).
 #[cfg(feature = "std")]
 pub async fn run_fanout_session<Sess, Clk>(

@@ -6,6 +6,7 @@ semver-covered surface, the plugin/binding crates are provisional or experimenta
 
 ## Unreleased
 
+- M1396: the `MultiSenderSink` doc link resolves, so the rustdoc CI step passes.
 - M1390: `sei` and `vobsub` read big-endian fields through `bereader`.
 - M1389: the fuzz `block_on` pins with `pin!`.
 - M1388: plugin ns to clock-tick conversions use the core time helpers and round to nearest.
