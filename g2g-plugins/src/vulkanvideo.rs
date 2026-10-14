@@ -7933,40 +7933,9 @@ impl VulkanVideoDevice {
 
         let size_align = self.caps.min_bitstream_buffer_size_alignment.max(1);
         let buf_size = round_up(slice.len() as u64, size_align);
-        let mut buf_profile_list =
-            vk::VideoProfileListInfoKHR::default().profiles(core::slice::from_ref(&prof.profile));
-        let buf_ci = vk::BufferCreateInfo::default()
-            .size(buf_size)
-            .usage(vk::BufferUsageFlags::VIDEO_DECODE_SRC_KHR)
-            .sharing_mode(vk::SharingMode::EXCLUSIVE)
-            .push_next(&mut buf_profile_list);
-        // SAFETY: valid create info; chained profile list outlives the call.
-        let bitstream =
-            unsafe { dev.create_buffer(&buf_ci, None) }.map_err(VulkanVideoError::QueryFailed)?;
-        // SAFETY: fresh buffer; allocate host-visible memory, bind, map, fill.
-        let bitstream_mem = unsafe {
-            let breq = dev.get_buffer_memory_requirements(bitstream);
-            let bt = find_memory_type(
-                &self.mem_props,
-                breq.memory_type_bits,
-                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-            )
-            .ok_or(VulkanVideoError::ExtensionUnsupported)?;
-            let bai = vk::MemoryAllocateInfo::default()
-                .allocation_size(breq.size)
-                .memory_type_index(bt);
-            let m = dev
-                .allocate_memory(&bai, None)
-                .map_err(VulkanVideoError::QueryFailed)?;
-            dev.bind_buffer_memory(bitstream, m, 0)
-                .map_err(VulkanVideoError::QueryFailed)?;
-            let ptr = dev
-                .map_memory(m, 0, breq.size, vk::MemoryMapFlags::empty())
-                .map_err(VulkanVideoError::QueryFailed)? as *mut u8;
-            fill_bitstream(ptr, slice, buf_size);
-            dev.unmap_memory(m);
-            m
-        };
+        let bitstream = create_bitstream_buffer(dev, &self.mem_props, buf_size, &prof.profile)?;
+        // SAFETY: the mapping covers `buf_size` bytes and no submission reads the fresh buffer.
+        unsafe { fill_bitstream(bitstream.mapped.0, slice, buf_size) };
 
         let pool_ci =
             vk::CommandPoolCreateInfo::default().queue_family_index(self.decode_queue_family);
@@ -8034,7 +8003,7 @@ impl VulkanVideoDevice {
             vk::VideoCodingControlInfoKHR::default().flags(vk::VideoCodingControlFlagsKHR::RESET);
         let end_info = vk::VideoEndCodingInfoKHR::default();
         let decode_info = vk::VideoDecodeInfoKHR::default()
-            .src_buffer(bitstream)
+            .src_buffer(bitstream.buffer)
             .src_buffer_offset(0)
             .src_buffer_range(buf_size)
             .dst_picture_resource(picres_output)
@@ -8095,8 +8064,8 @@ impl VulkanVideoDevice {
         // SAFETY: transient decode inputs, freed once, after the wait.
         unsafe {
             dev.destroy_command_pool(pool, None);
-            dev.destroy_buffer(bitstream, None);
-            dev.free_memory(bitstream_mem, None);
+            dev.destroy_buffer(bitstream.buffer, None);
+            dev.free_memory(bitstream.memory, None);
         }
         r.map_err(VulkanVideoError::QueryFailed)
     }
@@ -9584,65 +9553,6 @@ impl DpbCore {
         }
     }
 
-    /// Create a host-visible bitstream buffer of `size` bytes chained to the codec
-    /// `profile`, mapped for its whole lifetime.
-    fn create_bitstream_buffer(
-        &self,
-        size: u64,
-        profile: &vk::VideoProfileInfoKHR,
-    ) -> Result<BitstreamBuffer, VulkanVideoError> {
-        let dev = &self.raw_device;
-        let mut buf_profile_list =
-            vk::VideoProfileListInfoKHR::default().profiles(core::slice::from_ref(profile));
-        let buf_ci = vk::BufferCreateInfo::default()
-            .size(size)
-            .usage(vk::BufferUsageFlags::VIDEO_DECODE_SRC_KHR)
-            .sharing_mode(vk::SharingMode::EXCLUSIVE)
-            .push_next(&mut buf_profile_list);
-        // SAFETY: valid create info; chained profile list outlives the call.
-        let buffer =
-            unsafe { dev.create_buffer(&buf_ci, None) }.map_err(VulkanVideoError::QueryFailed)?;
-        // SAFETY: fresh buffer; allocate host-visible memory, bind and map it, and
-        // destroy what was made on any failure.
-        unsafe {
-            let requirements = dev.get_buffer_memory_requirements(buffer);
-            let Some(memory_type) = find_memory_type(
-                &self.mem_props,
-                requirements.memory_type_bits,
-                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-            ) else {
-                dev.destroy_buffer(buffer, None);
-                return Err(VulkanVideoError::ExtensionUnsupported);
-            };
-            let allocate_info = vk::MemoryAllocateInfo::default()
-                .allocation_size(requirements.size)
-                .memory_type_index(memory_type);
-            let memory = match dev.allocate_memory(&allocate_info, None) {
-                Ok(memory) => memory,
-                Err(error) => {
-                    dev.destroy_buffer(buffer, None);
-                    return Err(VulkanVideoError::QueryFailed(error));
-                }
-            };
-            let mapped = dev.bind_buffer_memory(buffer, memory, 0).and_then(|()| {
-                dev.map_memory(memory, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty())
-            });
-            match mapped {
-                Ok(mapped) => Ok(BitstreamBuffer {
-                    buffer,
-                    memory,
-                    mapped: MappedPointer(mapped.cast()),
-                    size,
-                }),
-                Err(error) => {
-                    dev.destroy_buffer(buffer, None);
-                    dev.free_memory(memory, None);
-                    Err(VulkanVideoError::QueryFailed(error))
-                }
-            }
-        }
-    }
-
     /// Write one picture's `units`, each led by `start_code`, into the bitstream
     /// buffer the next decode on this path reads (the claimed ring slot's on the
     /// system path, the texture path's own otherwise), replacing it with a larger
@@ -9685,7 +9595,7 @@ impl DpbCore {
                     }
                 }
                 let size = round_up(range.next_power_of_two(), self.size_align);
-                self.create_bitstream_buffer(size, profile)?
+                create_bitstream_buffer(&self.raw_device, &self.mem_props, size, profile)?
             }
         };
         // SAFETY: the mapping covers `bitstream.size >= range` bytes and no
@@ -13338,6 +13248,65 @@ fn reorder_to_display_order<T>(
 
 fn round_up(x: u64, align: u64) -> u64 {
     x.div_ceil(align).saturating_mul(align)
+}
+
+/// Create a host-visible bitstream buffer of `size` bytes chained to the codec
+/// `profile`, mapped for its whole lifetime.
+fn create_bitstream_buffer(
+    dev: &ash::Device,
+    mem_props: &vk::PhysicalDeviceMemoryProperties,
+    size: u64,
+    profile: &vk::VideoProfileInfoKHR,
+) -> Result<BitstreamBuffer, VulkanVideoError> {
+    let mut buf_profile_list =
+        vk::VideoProfileListInfoKHR::default().profiles(core::slice::from_ref(profile));
+    let buf_ci = vk::BufferCreateInfo::default()
+        .size(size)
+        .usage(vk::BufferUsageFlags::VIDEO_DECODE_SRC_KHR)
+        .sharing_mode(vk::SharingMode::EXCLUSIVE)
+        .push_next(&mut buf_profile_list);
+    // SAFETY: valid create info; chained profile list outlives the call.
+    let buffer =
+        unsafe { dev.create_buffer(&buf_ci, None) }.map_err(VulkanVideoError::QueryFailed)?;
+    // SAFETY: fresh buffer; allocate host-visible memory, bind and map it, and
+    // destroy what was made on any failure.
+    unsafe {
+        let requirements = dev.get_buffer_memory_requirements(buffer);
+        let Some(memory_type) = find_memory_type(
+            mem_props,
+            requirements.memory_type_bits,
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+        ) else {
+            dev.destroy_buffer(buffer, None);
+            return Err(VulkanVideoError::ExtensionUnsupported);
+        };
+        let allocate_info = vk::MemoryAllocateInfo::default()
+            .allocation_size(requirements.size)
+            .memory_type_index(memory_type);
+        let memory = match dev.allocate_memory(&allocate_info, None) {
+            Ok(memory) => memory,
+            Err(error) => {
+                dev.destroy_buffer(buffer, None);
+                return Err(VulkanVideoError::QueryFailed(error));
+            }
+        };
+        let mapped = dev
+            .bind_buffer_memory(buffer, memory, 0)
+            .and_then(|()| dev.map_memory(memory, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty()));
+        match mapped {
+            Ok(mapped) => Ok(BitstreamBuffer {
+                buffer,
+                memory,
+                mapped: MappedPointer(mapped.cast()),
+                size,
+            }),
+            Err(error) => {
+                dev.destroy_buffer(buffer, None);
+                dev.free_memory(memory, None);
+                Err(VulkanVideoError::QueryFailed(error))
+            }
+        }
+    }
 }
 
 /// Write `data` into a mapped bitstream buffer of `buf_size` bytes, zeroing the
